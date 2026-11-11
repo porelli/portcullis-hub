@@ -180,11 +180,11 @@ func (s *Server) registerPeopleTools() {
 			}},
 		// G1: the link only — the card there fresh-auths, then shows the
 		// password once; never one here, never created here.
-		{Name: "my_file_share_password", Description: "Where to create or regenerate your file-share password: the My apps page, after a fresh passkey sign-in. The password is shown only there, never to the AI.",
+		{Name: "my_file_share_password", Description: "Where to create or regenerate your file-share password: the My apps page, after a fresh sign-in. The password is shown only there, never to the AI.",
 			Class: ClassRead, Scope: ScopePeople, Twin: "POST /api/me/apps/{instance}/credentials/{key}", In: noArgs{},
 			Run: func(context.Context, *directory.Caller, json.RawMessage) (any, error) {
 				return map[string]string{"link": s.peopleHome() + "#myapps",
-					"note": "open it and use the app's file-sharing card: it asks for a fresh passkey sign-in, then shows the password once; it is never passed through the AI"}, nil
+					"note": "open it and use the app's file-sharing card: it asks you to sign in again, then shows the password once; it is never passed through the AI"}, nil
 			}},
 		// ── Delegates (G38: only on people.<d>/mcp) ──
 		peopleTool(s, "update_person", "Change a person's email or display name (needs the edit_details permission; ordinary people only).",

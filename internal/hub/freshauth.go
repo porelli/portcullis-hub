@@ -10,6 +10,7 @@ import (
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/signin"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // The Hub's two browser listeners (contract §5.1, §8): each has its own
@@ -20,8 +21,9 @@ const (
 )
 
 // FreshAuth verifies fresh-auth proofs (contract §8, freshauth.Verifier):
-// a sign-in with a hardware key made just now, before a person creates or
-// regenerates a file-share password. Verify makes network calls (the code
+// a sign-in made just now, before a person creates or regenerates a
+// file-share password or approves a confirmation; the Hub then checks its
+// method against the action's governing template (checkFreshAuthOn). Verify makes network calls (the code
 // exchange, the realm's keys): never call it holding mu.
 type FreshAuth interface {
 	Verify(ctx context.Context, p freshauth.Proof, user string) (*freshauth.Result, error)
@@ -91,10 +93,10 @@ func (h *Hub) FreshAuthInfoFor(listener string) *freshauth.AuthorizeInfo {
 	return &info
 }
 
-// freshAuthAccepted are the fresh-auth methods switched on right now, in
-// order: passkey_synced, passkey_device, security_key, yubikey_cert (each
-// while its method is on; D19 and the controller ruling: the proof's
-// pc_fresh must be one of them; amr is never used). Takes mu (read).
+// freshAuthAccepted are the methods pc_fresh may name switched on right
+// now, in order (freshauth.FreshMethods: the six method ids; browser_cert
+// is always off). Whether one approves an action is the governing
+// template's check (checkFreshAuthOn). Takes mu (read).
 func (h *Hub) freshAuthAccepted() []string {
 	h.mu.RLock()
 	on := h.st.SignIn.MethodsOn()
@@ -112,8 +114,57 @@ func (h *Hub) freshAuthAccepted() []string {
 // freshauth.Config.Accepted (cmd/hub wires it).
 func (h *Hub) FreshAuthAccepted() []string { return h.freshAuthAccepted() }
 
+// freshGov names the governing template of a fresh-auth check (contract
+// §8 "Governing template"): an instance's template (its own pick, else
+// the default) or a core page's (state.CoreSignInKeys; "" = the default).
+// Exactly one is set; the zero value refuses (fail closed).
+type freshGov struct {
+	instance string
+	core     string
+}
+
+func govInstance(id string) freshGov { return freshGov{instance: id} }
+func govCore(key string) freshGov    { return freshGov{core: key} }
+
+// governingLocked resolves g: the template id and its compiled rule (D2),
+// with the switches as they are now; false (with a reason for the audit)
+// when the instance is gone, the core key unknown, or the template
+// unknown, disabled or unmeetable. Caller holds mu (read).
+func (h *Hub) governingLocked(g freshGov) (id string, rule signin.Node, why string) {
+	switch {
+	case g.instance != "" && g.core == "":
+		t := h.findLocked(g.instance)
+		if t == nil {
+			return "", signin.Node{}, "no governing template: the instance is gone"
+		}
+		id = h.templateForInstanceLocked(t)
+	case g.core != "" && g.instance == "":
+		if !slices.Contains(state.CoreSignInKeys, g.core) {
+			return "", signin.Node{}, "no governing template: unknown core page"
+		}
+		id = h.st.SignIn.Core[g.core]
+		if id == "" {
+			id = h.st.SignIn.Default
+		}
+	default:
+		return "", signin.Node{}, "no governing template"
+	}
+	c, ok := h.compiledLocked(id)
+	if !ok {
+		return id, signin.Node{}, "governing template " + id + " is disabled, gone or can't be met"
+	}
+	return id, c, ""
+}
+
+// freshProof is an accepted fresh-auth proof and the template it was
+// checked against (named in the audit, never the token).
+type freshProof struct {
+	*freshauth.Result
+	Template string
+}
+
 // errFreshAuth is the one answer to every fresh-auth failure (contract
-// §5.1: 403 "a fresh passkey sign-in is required").
+// §5.1: 403 "a fresh sign-in is required").
 var errFreshAuth = &StatusError{Status: 403, Err: errors.New(freshauth.Message)}
 
 // errFreshAuthUnavailable is the answer when fresh sign-in can't be
@@ -121,19 +172,25 @@ var errFreshAuth = &StatusError{Status: 403, Err: errors.New(freshauth.Message)}
 // place, the token endpoint unreachable: C-M7): 503, generic text.
 var errFreshAuthUnavailable = &StatusError{Status: 503, Err: errors.New("fresh sign-in can't be checked right now: try again later")}
 
-// checkFreshAuth verifies p for user (the people listener) outside mu. Every failure — no
-// verifier, the Keycloak client not (yet) in place (freshAuthReady), a
-// refused proof, anything unexpected — is errFreshAuth; reason
-// is for the audit only (a fixed string of the verifier, never the code,
-// verifier, nonce or a token). A refusal is a 4xx: callers on the people
-// listener count it toward the caller's refusal limit (entryLimit, F45).
-func (h *Hub) checkFreshAuth(ctx context.Context, p freshauth.Proof, user string) (res *freshauth.Result, reason string, err error) {
-	return h.checkFreshAuthOn(ctx, ListenerPeople, p, user)
+// checkFreshAuth verifies p for user (the people listener) outside mu,
+// governed by g. Every failure — no verifier, the Keycloak client not
+// (yet) in place (freshAuthReady), no governing template, a refused
+// proof, a method the template doesn't accept, anything unexpected — is
+// errFreshAuth; reason is for the audit only (a fixed string of the
+// verifier or this file plus the template id, never the code, verifier,
+// nonce or a token). A refusal is a 4xx: callers on the people listener
+// count it toward the caller's refusal limit (entryLimit, F45).
+func (h *Hub) checkFreshAuth(ctx context.Context, g freshGov, p freshauth.Proof, user string) (res *freshProof, reason string, err error) {
+	return h.checkFreshAuthOn(ctx, ListenerPeople, g, p, user)
 }
 
 // checkFreshAuthOn is checkFreshAuth with listener's verifier (a proof
 // is exchanged with the redirect URI of the page that started it).
-func (h *Hub) checkFreshAuthOn(ctx context.Context, listener string, p freshauth.Proof, user string) (res *freshauth.Result, reason string, err error) {
+// Contract §8 "Governing template": pc_fresh must be a leaf of g's
+// compiled rule (families expanded to their switched-on members) and
+// switched on — both read again after the exchange, so a template or
+// switch change during it never lets a method through.
+func (h *Hub) checkFreshAuthOn(ctx context.Context, listener string, g freshGov, p freshauth.Proof, user string) (res *freshProof, reason string, err error) {
 	f := h.freshAuthVerifier(listener)
 	if f == nil {
 		return nil, "fresh auth is not configured", errFreshAuth
@@ -143,25 +200,47 @@ func (h *Hub) checkFreshAuthOn(ctx context.Context, listener string, p freshauth
 		// counted by the people listener's limit).
 		return nil, "fresh-auth client not in place", errFreshAuthUnavailable
 	}
-	res, err = f.Verify(ctx, p, strings.ToLower(user))
-	if err == nil && res != nil {
-		// The verifier's method rule, checked again on its result against
-		// the switches as they are now (a method switched off during
-		// the exchange never counts).
-		if !slices.Contains(h.freshAuthAccepted(), res.Method) {
-			return nil, "pc_fresh names a method that is switched off", errFreshAuth
-		}
-		return res, "", nil
+	// No governing template: refused before the code is exchanged.
+	h.mu.RLock()
+	tmpl, _, why := h.governingLocked(g)
+	h.mu.RUnlock()
+	if why != "" {
+		return nil, why, errFreshAuth
+	}
+	r, err := f.Verify(ctx, p, strings.ToLower(user))
+	if err == nil && r != nil {
+		return h.freshMethodAccepted(g, r)
 	}
 	var fe *freshauth.Error
 	if errors.As(err, &fe) && fe.Reason == freshauth.ReasonUnreachable {
 		return nil, fe.Reason, errFreshAuthUnavailable
 	}
 	if errors.As(err, &fe) && fe.Reason != "" {
-		return nil, fe.Reason, errFreshAuth
+		return nil, fe.Reason + " (template " + tmpl + ")", errFreshAuth
 	}
 	// Not the verifier's own refusal: its text may say anything.
-	return nil, "fresh auth failed", errFreshAuth
+	return nil, "fresh auth failed (template " + tmpl + ")", errFreshAuth
+}
+
+// freshMethodAccepted checks a verified proof's method against g as it is
+// now: switched on, and a leaf of the governing template's compiled rule.
+func (h *Hub) freshMethodAccepted(g freshGov, r *freshauth.Result) (*freshProof, string, error) {
+	h.mu.RLock()
+	tmpl, rule, why := h.governingLocked(g)
+	on := h.st.SignIn.MethodsOn()
+	h.mu.RUnlock()
+	if why != "" {
+		return nil, why, errFreshAuth
+	}
+	m := signin.Method(r.Method)
+	if !slices.Contains(freshauth.FreshMethods, r.Method) || !on[m] {
+		return nil, "pc_fresh names a method that is switched off (template " + tmpl + ")", errFreshAuth
+	}
+	leaves, err := signin.Leaves(rule)
+	if err != nil || !leaves[m] {
+		return nil, "pc_fresh names a method template " + tmpl + " doesn't accept", errFreshAuth
+	}
+	return &freshProof{Result: r, Template: tmpl}, "", nil
 }
 
 // isRefusal reports whether err is a 4xx answer (what the people

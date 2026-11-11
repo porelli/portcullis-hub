@@ -328,7 +328,8 @@ func main() {
 			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
 			// The token endpoint never redirects; a redirect is refused.
 			HTTP: faHTTP,
-			// pc_fresh must be a fresh method switched on now (§8.1).
+			// pc_fresh must be a method switched on now (§8.1); the
+			// governing template is the Hub's check (§8).
 			Accepted: h.FreshAuthAccepted,
 		}))
 	}

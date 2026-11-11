@@ -240,12 +240,15 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 		h.auditCreateRefused(instance, key, user, refusedSecrets)
 		return nil, err
 	}
-	// 4. The fresh-auth proof (outside mu: network calls). Audited with
-	// the verifier's reason only.
-	if _, reason, err := h.checkFreshAuth(ctx, p, user); err != nil {
+	// 4. The fresh-auth proof (outside mu: network calls), governed by
+	// the instance's template (its pick, else the default; contract §8
+	// "Governing template"). Audited with the reason only.
+	fresh, reason, err := h.checkFreshAuth(ctx, govInstance(instance), p, user)
+	if err != nil {
 		h.auditOp(directory.Human(user), "credential.create", target, credentialDetail(instance, key, user, user, reason), err)
 		return nil, err
 	}
+	freshDetail := " template=" + fresh.Template
 	// 5. The password and its hash; under mu the metadata, the hash file
 	// and the epoch (writeHashLocked saves state.yaml with them).
 	pw, err := credentials.Generate(o.Length)
@@ -310,7 +313,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 		}
 		h.mu.Unlock()
 		credentials.Zero(pw)
-		h.auditOp(directory.Human(user), "credential.create", target, credentialDetail(instance, key, user, user, ""), werr)
+		h.auditOp(directory.Human(user), "credential.create", target, credentialDetail(instance, key, user, user, "")+freshDetail, werr)
 		if voided {
 			// The old password may still be live in the app.
 			h.applyRevocation(ctx, instance)
@@ -323,7 +326,7 @@ func (h *Hub) createCredential(ctx context.Context, instance, key, user string, 
 	if regen {
 		action = "credential.regenerate"
 	}
-	h.auditOp(directory.Human(user), action, target, credentialDetail(instance, key, user, user, ""), nil)
+	h.auditOp(directory.Human(user), action, target, credentialDetail(instance, key, user, user, "")+freshDetail, nil)
 	if regen {
 		// D-I4: the old hash's removal is applied like a revocation (hook
 		// ≤ 8 s, else the kill): the old password never stays live while

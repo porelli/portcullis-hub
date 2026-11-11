@@ -282,6 +282,29 @@ func ValidateCompiled(n Node) error {
 	return nil
 }
 
+// Leaves is the set of methods a compiled rule names (its leaves; families
+// are already expanded to their switched-on members, D2): what a fresh
+// sign-in may use under that template (contract §8 "Governing template").
+// Anything that isn't a compiled rule (ValidateCompiled) is an error.
+func Leaves(compiled Node) (map[Method]bool, error) {
+	if err := ValidateCompiled(compiled); err != nil {
+		return nil, err
+	}
+	out := map[Method]bool{}
+	var walk func(n Node)
+	walk = func(n Node) {
+		if n.isLeaf() {
+			out[Method(n.Leaf)] = true
+			return
+		}
+		for _, it := range n.Items {
+			walk(it)
+		}
+	}
+	walk(compiled)
+	return out, nil
+}
+
 // ErrUnmeetable is the error for a rule no one can meet with the methods
 // that are switched on.
 var ErrUnmeetable = errors.New("the rule can't be met with the sign-in methods that are switched on")

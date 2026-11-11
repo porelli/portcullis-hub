@@ -394,7 +394,7 @@ func TestConfirmTypedIsLabel(t *testing.T) {
 // proof (auth_time now − 10 s, pc_fresh security_key) → approved, audited ai.confirm
 // approved with the digest, never the arguments; auth_time 301 s ago,
 // a pc_fresh method that is switched off or not a passkey, a refused proof or a sign-in from more than 60 s before the
-// request → 403 "a fresh passkey sign-in is required" (audited
+// request → 403 "a fresh sign-in is required" (audited
 // refused); a decline needs no passkey; a decided one → 409 {state};
 // expiry audited expired by the sweeper.
 func TestConfirmApprove(t *testing.T) {
@@ -466,7 +466,7 @@ func TestConfirmApprove(t *testing.T) {
 	au := e.confirmAudit(t)
 	last := au[len(au)-1]
 	if last.Result != "ok" || last.Actor != "alice" || last.Via != "" || last.Target != aiappResource ||
-		last.Detail != "approved tool delete_repo args_sha256 "+sha(args)+" confirmation "+id {
+		last.Detail != "approved tool delete_repo args_sha256 "+sha(args)+" confirmation "+id+": template standard" {
 		t.Errorf("approve audit = %+v", last)
 	}
 	for _, a := range au {
@@ -752,5 +752,94 @@ func TestConfirmPageShowsInvisibleCharacters(t *testing.T) {
 		if code, b := e.post(t, "/internal/confirmations", createBody("alice", "delete_repo", p, "confirm")); code != 400 {
 			t.Errorf("preview %s = %d %s, want 400", p, code, b)
 		}
+	}
+}
+
+// TestConfirmFollowsGoverningTemplate (contract §8 "Governing template",
+// §15.6): a companion confirmation's fresh sign-in is governed by the
+// companion's instance's template (aiapp: the default, Standard), an
+// admin tool's on the Hub listener by the hub core template (Strong), a
+// Portcullis people tool's by the people core template.
+func TestConfirmFollowsGoverningTemplate(t *testing.T) {
+	e := newConfirmEnv(t)
+	root := directory.Human("root")
+	approve := func(srv *httptest.Server, user, id, typed string) (int, string) {
+		r, b := doAs(t, srv, user, "POST", "/api/me/confirmations/"+id, decision("approve", typed, "good-code"))
+		return r.StatusCode, strings.TrimSpace(b)
+	}
+	args := `{"name":"repo"}`
+
+	// Companion: the instance's template (the default, Standard) — not
+	// the people core template (Strong): a synced passkey approves.
+	id := e.create(t, "alice", "delete_repo", args)
+	e.people.set(time.Time{}, "passkey_synced", nil)
+	if code, b := approve(e.ppl, "alice", id, "AI App"); code != 200 {
+		t.Fatalf("companion under standard + passkey_synced = %d %s", code, b)
+	}
+	// The default moved to Strong: the companion follows it.
+	if _, err := e.s.Hub.SetDefaultTemplate(context.Background(), "strong", root); err != nil {
+		t.Fatal(err)
+	}
+	id = e.create(t, "alice", "delete_tag", args)
+	if code, b := approve(e.ppl, "alice", id, "AI App"); code != 403 || b != freshauth.Message {
+		t.Errorf("companion under strong + passkey_synced = %d %s", code, b)
+	}
+	if a := e.confirmAudit(t); !strings.Contains(a[len(a)-1].Detail, "pc_fresh names a method template strong doesn't accept") {
+		t.Errorf("refusal audit = %+v", a[len(a)-1])
+	}
+	e.people.set(time.Time{}, "security_key", nil)
+	if code, b := approve(e.ppl, "alice", id, "AI App"); code != 200 {
+		t.Errorf("companion under strong + security_key = %d %s", code, b)
+	}
+	if _, err := e.s.Hub.SetDefaultTemplate(context.Background(), "standard", root); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hub listener: the hub core template (Strong), whatever the default.
+	hubConfirm := func(tool string) string {
+		hc, err := e.s.Hub.CreateConfirmation(directory.Actor{User: "root", Via: directory.ViaAI, Client: "portcullis-ai-claude"}, confirm.Request{
+			User: "root", Client: "portcullis-ai-claude", Resource: "https://hub.example.org/mcp", Tool: tool, ArgsSHA256: sha(args),
+			ArgsPreview: args, Listener: confirm.ListenerHub, Typed: "grafana", Label: "instance grafana"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hc.ID
+	}
+	hid := hubConfirm("delete_instance")
+	e.hubFA.set(time.Time{}, "passkey_synced", nil)
+	if code, b := approve(e.hub, "root", hid, "grafana"); code != 403 || b != freshauth.Message {
+		t.Errorf("hub listener under strong + passkey_synced = %d %s", code, b)
+	}
+	e.hubFA.set(time.Time{}, "security_key", nil)
+	if code, b := approve(e.hub, "root", hid, "grafana"); code != 200 {
+		t.Errorf("hub listener under strong + security_key = %d %s", code, b)
+	}
+	if a := e.confirmAudit(t); a[len(a)-1].Detail != "approved tool delete_instance args_sha256 "+sha(args)+" confirmation "+hid+": template strong" {
+		t.Errorf("hub approve audit = %+v", a[len(a)-1])
+	}
+	// The hub core page on Standard: a synced passkey approves there.
+	if _, err := e.s.Hub.SetCoreTemplate(context.Background(), "hub", "standard", root); err != nil {
+		t.Fatal(err)
+	}
+	hid = hubConfirm("restore_instance")
+	e.hubFA.set(time.Time{}, "passkey_synced", nil)
+	if code, b := approve(e.hub, "root", hid, "grafana"); code != 200 {
+		t.Errorf("hub listener under standard + passkey_synced = %d %s", code, b)
+	}
+
+	// A Portcullis people tool: the people core template (Strong).
+	pc, err := e.s.Hub.CreateConfirmation(directory.Actor{User: "alice", Via: directory.ViaAI, Client: "portcullis-ai-claude"}, confirm.Request{
+		User: "alice", Client: "portcullis-ai-claude", Resource: "https://people.example.org/mcp", Tool: "revoke_my_credential", ArgsSHA256: sha(args),
+		ArgsPreview: args, Listener: confirm.ListenerPeople, Typed: "revoke_my_credential", Label: "revoke"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.people.set(time.Time{}, "passkey_synced", nil)
+	if code, b := approve(e.ppl, "alice", pc.ID, "revoke_my_credential"); code != 403 {
+		t.Errorf("people tool under strong + passkey_synced = %d %s", code, b)
+	}
+	e.people.set(time.Time{}, "yubikey_cert", nil)
+	if code, b := approve(e.ppl, "alice", pc.ID, "revoke_my_credential"); code != 200 {
+		t.Errorf("people tool under strong + yubikey_cert = %d %s", code, b)
 	}
 }

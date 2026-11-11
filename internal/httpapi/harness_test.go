@@ -1099,7 +1099,7 @@ func (f *harnessFreshAuth) authorizePage(w http.ResponseWriter, r *http.Request)
 %s</head>
 <body style="font-family:sans-serif;background:#0f172a;color:#e2e8f0;padding:2rem">
 <h1>Fake Keycloak (harness)</h1><p>prompt=login · max_age=0 · PKCE S256 · signing in as <b>%s</b></p>
-<p><a id="approve" style="color:#60a5fa" href="%s">Touch your passkey (fake)</a> · <a id="deny" style="color:#94a3b8" href="%s">Cancel</a></p>
+<p><a id="approve" style="color:#60a5fa" href="%s">Sign in again (fake)</a> · <a id="deny" style="color:#94a3b8" href="%s">Cancel</a></p>
 <p>Continuing by itself in 2 seconds (unless the harness_hold cookie is 1).</p></body></html>`,
 		refresh, html.EscapeString(user), html.EscapeString(back), html.EscapeString(cancel))
 }

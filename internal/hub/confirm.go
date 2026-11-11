@@ -27,7 +27,7 @@ import (
 // Confirmations (contract §15.6, §15.7, §5.1; plan 4 Task 14; G11, G26,
 // G27, G75). The store (internal/confirm) is in memory; this file is the
 // Hub's two creation paths, the page's view, the decision with a fresh
-// passkey touch, the consume and the sweeper.
+// sign-in (governed by confirmGov), the consume and the sweeper.
 //
 //   - Companions: the gate creates and consumes through the internal API
 //     (CreateCompanionConfirmation / ConsumeCompanionConfirmation), only
@@ -309,7 +309,7 @@ func (h *Hub) CreateCompanionConfirmation(ctx context.Context, q CompanionConfir
 	}
 	return h.CreateConfirmation(directory.Actor{User: q.User, Via: directory.ViaAI, Client: q.Client}, confirm.Request{
 		User: q.User, Client: q.Client, Resource: q.Resource, Tool: q.Tool, ArgsSHA256: q.ArgsSHA256, ArgsPreview: q.ArgsPreview,
-		Listener: ListenerPeople,
+		Listener: ListenerPeople, Instance: r.Instance,
 		// Every shown string made visible where the request is built
 		// (and again on display).
 		Typed: VisibleText(typed),
@@ -471,6 +471,7 @@ func (h *Hub) decideConfirmation(ctx context.Context, listener, id, user string,
 		return "", &StatusError{Status: http.StatusConflict, Err: &ConfirmationStateError{State: c.State}}
 	}
 	actor := directory.Human(user)
+	tmpl := ""
 	refuse := func(why string, err error) (string, error) {
 		h.auditConfirm(actor, "refused", c.Resource, c.Tool, c.ArgsSHA256, c.ID, why)
 		return "", err
@@ -479,18 +480,22 @@ func (h *Hub) decideConfirmation(ctx context.Context, listener, id, user string,
 		if strings.TrimSpace(d.Typed) != c.Typed || c.Typed == "" {
 			return refuse("typed check didn't match", statusErr(http.StatusConflict, "type %s to confirm", VisibleText(c.Typed)))
 		}
-		res, reason, err := h.checkFreshAuthOn(ctx, listener, d.Proof, user)
+		res, reason, err := h.checkFreshAuthOn(ctx, listener, h.confirmGov(c), d.Proof, user)
 		if err != nil {
 			return refuse(reason, err)
 		}
+		if res == nil {
+			return refuse("username mismatch", errFreshAuth)
+		}
+		tmpl = "template " + res.Template
 		now := time.Now()
 		switch {
-		case res == nil || res.User != user:
-			return refuse("username mismatch", errFreshAuth)
+		case res.User != user:
+			return refuse("username mismatch ("+tmpl+")", errFreshAuth)
 		case res.AuthTime.Before(now.Add(-freshauth.MaxAge)):
-			return refuse("sign-in too old", errFreshAuth)
+			return refuse("sign-in too old ("+tmpl+")", errFreshAuth)
 		case res.AuthTime.Before(c.Created.Add(-confirmAuthSlack)):
-			return refuse("sign-in from before the request", errFreshAuth)
+			return refuse("sign-in from before the request ("+tmpl+")", errFreshAuth)
 		}
 	}
 	if err := s.Decide(c.ID, user, d.Approve); err != nil {
@@ -505,8 +510,26 @@ func (h *Hub) decideConfirmation(ctx context.Context, listener, id, user string,
 	if d.Approve {
 		what = confirm.Approved
 	}
-	h.auditConfirm(actor, what, c.Resource, c.Tool, c.ArgsSHA256, c.ID, "")
+	h.auditConfirm(actor, what, c.Resource, c.Tool, c.ArgsSHA256, c.ID, tmpl)
 	return what, nil
+}
+
+// confirmGov is the governing template of c's approval (contract §8
+// "Governing template", §15.6): the hub core template on the Hub listener
+// (admin tools); on the people listener the companion's instance's
+// template for a companion confirmation, the people core template for a
+// Portcullis people tool; anything else the hub core template (fail
+// closed: the strictest core pick).
+func (h *Hub) confirmGov(c *confirm.Confirmation) freshGov {
+	switch {
+	case c.Listener == ListenerHub:
+		return govCore("hub")
+	case c.Listener == ListenerPeople && c.Instance != "":
+		return govInstance(c.Instance)
+	case c.Listener == ListenerPeople && c.Resource == aigate.PeopleURL(NormalizeHost(h.Domain())):
+		return govCore("people")
+	}
+	return govCore("hub")
 }
 
 // SweepConfirmations records every confirmation past its TTL as expired,

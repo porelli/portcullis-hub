@@ -1,6 +1,5 @@
-// Package freshauth verifies a proof that a person signed in with a
-// passkey or a YubiKey certificate just now (contract §8 "Fresh-auth
-// client", §5.1, §8.1 "Session methods"): the
+// Package freshauth verifies a proof that a person signed in just now
+// (contract §8 "Fresh-auth client", §5.1, §8.1 "Session methods"): the
 // browser runs an OIDC authorization-code flow with PKCE on the Hub-owned
 // public Keycloak client ClientID in a popup and posts the code, its PKCE
 // verifier and the nonce; the Hub exchanges the code itself (Keycloak's
@@ -42,21 +41,22 @@ const MaxAge = 5 * time.Minute
 const clockSkew = 60 * time.Second
 
 // Message is the one text every refusal answers (403).
-const Message = "a fresh passkey sign-in is required"
+const Message = "a fresh sign-in is required"
 
-// FreshMethods are the only sign-in methods (contract §8.1) whose
-// pc_fresh proves a fresh sign-in: any passkey kind or a YubiKey
-// certificate — each only while Config.Accepted lists it (switched on).
-// Never a password, a browser certificate or a setup link (none of them
-// sets pc_fresh; any of them named there is refused whatever Accepted
-// returns).
+// FreshMethods are the values pc_fresh may carry: the six sign-in method
+// ids (contract §8.1 "Methods"), each only while Config.Accepted lists it
+// (switched on). Anything else (a setup link's inv, an amr value, a
+// family) is refused whatever Accepted returns. Which of them approves an
+// action is not decided here: the Hub checks the method against the
+// action's governing template (contract §8 "Governing template").
 //
 // The claim pc_fresh is set by the Keycloak extension's portcullis-fresh
 // mapper on the fresh-auth client, from this authentication's notes only:
-// the authenticator that actually ran in this sign-in. amr is never read —
-// Keycloak accumulates it over the SSO session (10 h), so a fresh password
-// sign-in could still carry an older hwk.
-var FreshMethods = []string{"passkey_synced", "passkey_device", "security_key", "yubikey_cert"}
+// the authenticator that actually ran in this sign-in (a passkey kind,
+// yubikey_cert or password; never an SSO session reused or a setup link).
+// amr is never read — Keycloak accumulates it over the SSO session (10 h),
+// so a fresh password sign-in could still carry an older hwk.
+var FreshMethods = []string{"password", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert"}
 
 // ClaimFresh is the ID token claim naming this authentication's method.
 const ClaimFresh = "pc_fresh"
@@ -95,7 +95,8 @@ type Proof struct{ Code, CodeVerifier, Nonce string }
 type Result struct {
 	User     string // lowercase
 	AuthTime time.Time
-	// Method is pc_fresh: one of FreshMethods, switched on at Verify.
+	// Method is pc_fresh: one of FreshMethods, switched on at Verify (the
+	// governing template is the Hub's check).
 	Method string
 }
 
@@ -270,7 +271,7 @@ func (v *Verifier) freshMethod(raw json.RawMessage) (string, string) {
 		return "", "missing " + ClaimFresh
 	}
 	if !slices.Contains(FreshMethods, m) {
-		return "", ClaimFresh + " is not a passkey or a YubiKey certificate"
+		return "", ClaimFresh + " is not a sign-in method"
 	}
 	if v.cfg.Accepted == nil || !slices.Contains(v.cfg.Accepted(), m) {
 		return "", ClaimFresh + " names a method that is switched off"

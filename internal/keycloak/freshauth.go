@@ -32,7 +32,8 @@ const FreshAuthUsernameMapper = "portcullis-fresh-auth-username"
 // claim pc_fresh in the ID token only — the method id of the
 // authenticator that ran in this authentication (never a user-session
 // note). It is the only input of the Hub's fresh-auth method check
-// (freshauth.FreshMethods); amr is never used. Name and provider id are
+// (freshauth.FreshMethods, then the governing template's leaves); amr is
+// never used. Name and provider id are
 // the same.
 const FreshAuthMethodMapper = "portcullis-fresh"
 

@@ -189,8 +189,10 @@ instance, a policy or sign-in change are not leaving.
 
 ## Confirmations
 
-Destructive actions need the person, in their browser, with a fresh passkey
-touch:
+Destructive actions need the person, in their browser, signing in again with
+a method the governing template accepts (the `hub` core page's template for
+admin tools, the `people` one for people tools, the app's for a companion;
+[Fresh sign-in](auth-policies.md#fresh-sign-in-for-sensitive-actions)):
 
 ![A confirmation page](../assets/ai/confirmation-page.png)
 

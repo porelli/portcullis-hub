@@ -88,7 +88,7 @@
     flow = { popup, timer: 0, ctx, h };
     const mine = flow;
     h.busy(true);
-    h.status('Touch your passkey in the sign-in window to continue…', false, true);
+    h.status('Sign in again in the sign-in window to continue…', false, true);
     let challenge;
     try {
       challenge = await s256(verifier);

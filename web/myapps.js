@@ -8,7 +8,7 @@
 // Save and Clear (PUT / DELETE /api/me/apps/{app}/values/{key}) and a
 // status line. A person_secret option gets a credential card (plan 3
 // Task 14, contract §5.1 / §13.16): create / regenerate the person's
-// file-share password after a fresh passkey sign-in in a popup
+// file-share password after a fresh sign-in in a popup
 // (freshauth.js: PKCE, state and nonce kept in session storage until the popup
 // answers; the
 // password itself is never stored: it lives in one dialog, shown once,

@@ -19,10 +19,12 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/web"
 )
 
@@ -408,6 +410,9 @@ func elicitation(t *testing.T, res map[string]any, key string) map[string]any {
 
 func (e *mcpTestEnv) decide(t *testing.T, id, typed string, approve bool) {
 	t.Helper()
+	// The fresh sign-in is governed by the hub core template (contract §8
+	// "Governing template"): sign in with a method it accepts now.
+	e.hubFA.set(time.Time{}, hubFreshMethod(t, e.s.Hub), nil)
 	d := hub.Decision{Approve: approve, Typed: typed, Proof: freshauth.Proof{Code: "good-code", CodeVerifier: strings.Repeat("v", 43), Nonce: "n0nce"}}
 	if _, err := e.s.Hub.DecideConfirmation(context.Background(), hub.ListenerHub, id, "root", d); err != nil {
 		t.Fatalf("decide %s: %v", id, err)
@@ -1115,3 +1120,39 @@ func TestMCPToolErrors(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
+// hubFreshMethod is the strongest switched-on method of the hub core
+// template's compiled rule (its pick, else the default): what a fresh
+// sign-in that approves an admin confirmation may use.
+func hubFreshMethod(t *testing.T, h *hub.Hub) string {
+	t.Helper()
+	v := h.SignInState()
+	id := v.Core["hub"]
+	if id == "" {
+		id = v.Default
+	}
+	on := map[signin.Method]bool{}
+	for _, m := range v.Methods {
+		on[m.ID] = m.On
+	}
+	for _, tv := range v.Templates {
+		if tv.ID != id {
+			continue
+		}
+		c, err := signin.Compile(tv.Rule, on)
+		if err != nil {
+			t.Fatalf("hub template %s: %v", id, err)
+		}
+		leaves, err := signin.Leaves(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := len(signin.Methods) - 1; i >= 0; i-- {
+			if leaves[signin.Methods[i]] {
+				return string(signin.Methods[i])
+			}
+		}
+	}
+	t.Fatalf("no hub template %q", id)
+	return ""
+}

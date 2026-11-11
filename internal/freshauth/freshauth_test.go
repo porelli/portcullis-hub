@@ -103,8 +103,8 @@ func (p *idp) serveToken(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
-// allFresh are the four fresh methods, all switched on.
-var allFresh = []string{"passkey_synced", "passkey_device", "security_key", "yubikey_cert"}
+// allFresh are the six method ids, all switched on.
+var allFresh = []string{"password", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert"}
 
 func (p *idp) verifier() *freshauth.Verifier {
 	return p.verifierWith(func() []string { return allFresh })
@@ -257,19 +257,23 @@ func TestFreshAuthRefusesSwitchedOffSecurityKey(t *testing.T) {
 		{name: "empty pc_fresh", edit: func(c map[string]any) { c["pc_fresh"] = "" }, accepted: allFreshF, reason: "missing pc_fresh"},
 		{name: "pc_fresh a list", edit: func(c map[string]any) { c["pc_fresh"] = []string{"security_key"} }, accepted: allFreshF, reason: "missing pc_fresh"},
 		{name: "pc_fresh a number", edit: func(c map[string]any) { c["pc_fresh"] = 3 }, accepted: allFreshF, reason: "missing pc_fresh"},
-		{name: "pc_fresh password", edit: func(c map[string]any) { c["pc_fresh"] = "password" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
-		{name: "pc_fresh browser_cert", edit: func(c map[string]any) { c["pc_fresh"] = "browser_cert" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
-		{name: "pc_fresh inv", edit: func(c map[string]any) { c["pc_fresh"] = "inv" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
-		{name: "pc_fresh unknown", edit: func(c map[string]any) { c["pc_fresh"] = "retina" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
-		{name: "pc_fresh an amr value", edit: func(c map[string]any) { c["pc_fresh"] = "hwk" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
-		{name: "pc_fresh case variant", edit: func(c map[string]any) { c["pc_fresh"] = "Security_Key" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
-		// The session's amr carries an older hwk; this sign-in was a password.
-		{name: "amr hwk, pc_fresh password", edit: func(c map[string]any) { c["amr"] = []string{"hwk", "pwd"}; c["pc_fresh"] = "password" }, accepted: allFreshF, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		// A password is a fresh method now (the governing template is the
+		// Hub's check); browser_cert only while on (never, in part 1).
+		{name: "pc_fresh password on", edit: func(c map[string]any) { c["pc_fresh"] = "password" }, accepted: allFreshF, ok: true},
+		{name: "pc_fresh password off", edit: func(c map[string]any) { c["pc_fresh"] = "password" }, accepted: without("password"), reason: "pc_fresh names a method that is switched off"},
+		{name: "pc_fresh browser_cert off", edit: func(c map[string]any) { c["pc_fresh"] = "browser_cert" }, accepted: without("browser_cert"), reason: "pc_fresh names a method that is switched off"},
+		{name: "pc_fresh inv", edit: func(c map[string]any) { c["pc_fresh"] = "inv" }, accepted: allFreshF, reason: "pc_fresh is not a sign-in method"},
+		{name: "pc_fresh unknown", edit: func(c map[string]any) { c["pc_fresh"] = "retina" }, accepted: allFreshF, reason: "pc_fresh is not a sign-in method"},
+		{name: "pc_fresh an amr value", edit: func(c map[string]any) { c["pc_fresh"] = "hwk" }, accepted: allFreshF, reason: "pc_fresh is not a sign-in method"},
+		{name: "pc_fresh case variant", edit: func(c map[string]any) { c["pc_fresh"] = "Security_Key" }, accepted: allFreshF, reason: "pc_fresh is not a sign-in method"},
+		// The session's amr carries an older hwk; this sign-in was a
+		// password: pc_fresh says password (amr is never read).
+		{name: "amr hwk, pc_fresh password", edit: func(c map[string]any) { c["amr"] = []string{"hwk", "pwd"}; c["pc_fresh"] = "password" }, accepted: allFreshF, ok: true},
 		{name: "amr mtls, pc_fresh missing", edit: func(c map[string]any) { c["amr"] = []string{"mtls"}; delete(c, "pc_fresh") }, accepted: allFreshF, reason: "missing pc_fresh"},
-		// Whatever Accepted returns: never a password, a browser
-		// certificate or a setup link.
-		{name: "password accepted by mistake", edit: func(c map[string]any) { c["pc_fresh"] = "password" }, accepted: func() []string { return []string{"password", "browser_cert", "inv"} }, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
-		{name: "browser_cert accepted by mistake", edit: func(c map[string]any) { c["pc_fresh"] = "browser_cert" }, accepted: func() []string { return []string{"browser_cert"} }, reason: "pc_fresh is not a passkey or a YubiKey certificate"},
+		// Whatever Accepted returns: never a setup link, an amr value or
+		// a family.
+		{name: "inv accepted by mistake", edit: func(c map[string]any) { c["pc_fresh"] = "inv" }, accepted: func() []string { return []string{"password", "browser_cert", "inv"} }, reason: "pc_fresh is not a sign-in method"},
+		{name: "family accepted by mistake", edit: func(c map[string]any) { c["pc_fresh"] = "family:passkey" }, accepted: func() []string { return []string{"family:passkey"} }, reason: "pc_fresh is not a sign-in method"},
 		{name: "nothing on", accepted: func() []string { return nil }, reason: "pc_fresh names a method that is switched off"},
 		{name: "no Accepted", accepted: nil, reason: "pc_fresh names a method that is switched off"},
 	} {
@@ -438,7 +442,7 @@ func TestFreshAuthRefusals(t *testing.T) {
 			if !errors.As(err, &fe) || res != nil {
 				t.Fatalf("Verify = %+v, %v; want *freshauth.Error", res, err)
 			}
-			if err.Error() != freshauth.Message || freshauth.Message != "a fresh passkey sign-in is required" || fe.Status() != http.StatusForbidden {
+			if err.Error() != freshauth.Message || freshauth.Message != "a fresh sign-in is required" || fe.Status() != http.StatusForbidden {
 				t.Errorf("answer %d %q, want 403 with the generic text", fe.Status(), err.Error())
 			}
 			if fe.Reason != wantReason[tc.name] {
@@ -500,7 +504,7 @@ func TestFreshAuthInfo(t *testing.T) {
 	if string(b) != want {
 		t.Errorf("Info = %s", b)
 	}
-	if freshauth.MaxAge != 5*time.Minute || strings.Join(freshauth.FreshMethods, ",") != "passkey_synced,passkey_device,security_key,yubikey_cert" {
+	if freshauth.MaxAge != 5*time.Minute || strings.Join(freshauth.FreshMethods, ",") != "password,passkey_synced,browser_cert,passkey_device,security_key,yubikey_cert" {
 		t.Errorf("MaxAge %v FreshMethods %v", freshauth.MaxAge, freshauth.FreshMethods)
 	}
 }

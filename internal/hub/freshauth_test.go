@@ -11,6 +11,8 @@ import (
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/signin"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // fakeFreshAuth answers every proof with err (nil: alice, now).
@@ -38,7 +40,7 @@ var testProof = freshauth.Proof{Code: "the-code", CodeVerifier: "the-verifier", 
 func TestCheckFreshAuth(t *testing.T) {
 	f := newFixture(t)
 	// Not configured: refused (fail closed), never a pass.
-	if _, reason, err := f.h.checkFreshAuth(context.Background(), testProof, "alice"); statusOf(err) != 403 || err.Error() != freshauth.Message || reason == "" {
+	if _, reason, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice"); statusOf(err) != 403 || err.Error() != freshauth.Message || reason == "" {
 		t.Errorf("unconfigured: %v (%q)", err, reason)
 	}
 	if f.h.FreshAuthInfo() != nil {
@@ -50,13 +52,13 @@ func TestCheckFreshAuth(t *testing.T) {
 	if info := f.h.FreshAuthInfo(); info == nil || info.ClientID != freshauth.ClientID {
 		t.Errorf("FreshAuthInfo = %+v", info)
 	}
-	res, _, err := f.h.checkFreshAuth(context.Background(), testProof, "Alice")
+	res, _, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "Alice")
 	if err != nil || res.User != "alice" {
 		t.Fatalf("accepted proof: %+v, %v", res, err)
 	}
 	for _, e := range []error{&freshauth.Error{Reason: "nonce mismatch"}, errors.New("unexpected: the-code the-verifier the-nonce")} {
 		fa.err = e
-		_, reason, err := f.h.checkFreshAuth(context.Background(), testProof, "alice")
+		_, reason, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice")
 		if statusOf(err) != 403 || err.Error() != freshauth.Message {
 			t.Errorf("%v: answered %d %q", e, statusOf(err), err)
 		}
@@ -81,47 +83,146 @@ func (f *methodFreshAuth) Verify(_ context.Context, p freshauth.Proof, user stri
 	return &freshauth.Result{User: user, AuthTime: time.Now(), Method: f.method}, nil
 }
 
-// TestFreshAuthFollowsMethodSwitches (D19, controller ruling):
-// freshAuthAccepted lists the switched-on fresh methods in order, and the
-// Hub checks a verifier's pc_fresh against them again — a switched-off
-// method, a password, a browser certificate or an empty method refuses.
-func TestFreshAuthFollowsMethodSwitches(t *testing.T) {
+// switchFreshAuth accepts every proof with pc_fresh method and runs
+// during (if set) inside Verify: a switch or template change during the
+// code exchange.
+type switchFreshAuth struct {
+	fakeFreshAuth
+	method string
+	during func()
+}
+
+func (f *switchFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string) (*freshauth.Result, error) {
+	if f.during != nil {
+		f.during()
+	}
+	return &freshauth.Result{User: user, AuthTime: time.Now(), Method: f.method}, nil
+}
+
+// passwordOnly is a password-only template (contract §8 "Governing
+// template": confirmed by typing the password again).
+var passwordOnly = signin.Node{Op: signin.OpAny, Items: []signin.Node{{Leaf: "password"}}}
+
+// setSignIn edits the fixture's sign-in section under mu.
+func setSignIn(f *fixture, edit func(si *state.SignIn)) {
+	f.h.mu.Lock()
+	edit(&f.h.st.SignIn)
+	f.h.mu.Unlock()
+}
+
+// TestFreshAuthFollowsGoverningTemplate (contract §8 "Governing
+// template", the controller ruling): pc_fresh must be a switched-on leaf
+// of the governing template's compiled rule — Strong only security_key /
+// yubikey_cert, Standard any passkey kind or yubikey_cert, a
+// password-only template the password; anything else, a switched-off
+// method, and a missing, disabled or unmeetable template refuse with the
+// one 403, the template named in the reason only.
+func TestFreshAuthFollowsGoverningTemplate(t *testing.T) {
 	f := newFixture(t)
 	f.h.freshAuthReady.Store(true)
-	setOn := func(m string, on bool) {
-		f.h.mu.Lock()
-		f.h.st.SignIn.Methods[m] = on
-		f.h.mu.Unlock()
-	}
-	if got := strings.Join(f.h.freshAuthAccepted(), ","); got != "passkey_synced,passkey_device,security_key,yubikey_cert" {
-		t.Errorf("starting state: freshAuthAccepted = %s", got)
-	}
-	setOn("password", true) // never a fresh method
-	setOn("security_key", false)
-	if got := strings.Join(f.h.FreshAuthAccepted(), ","); got != "passkey_synced,passkey_device,yubikey_cert" {
-		t.Errorf("security_key off: freshAuthAccepted = %s", got)
+	setSignIn(f, func(si *state.SignIn) {
+		si.Methods["password"] = true
+		si.Templates["pw-only"] = state.SignInTemplate{Name: "Password only", Rule: passwordOnly, Enabled: true}
+		si.Core["hub"], si.Core["people"], si.Core["portal"] = "strong", "standard", "pw-only"
+	})
+	if got := strings.Join(f.h.freshAuthAccepted(), ","); got != "password,passkey_synced,passkey_device,security_key,yubikey_cert" {
+		t.Errorf("freshAuthAccepted = %s", got)
 	}
 	for _, c := range []struct {
-		method string
-		ok     bool
+		core, method string
+		ok           bool
 	}{
-		{"security_key", false}, {"passkey_synced", true}, {"passkey_device", true}, {"yubikey_cert", true},
-		{"password", false}, {"browser_cert", false}, {"inv", false}, {"", false},
+		{"hub", "passkey_synced", false}, {"hub", "passkey_device", false}, {"hub", "password", false},
+		{"hub", "security_key", true}, {"hub", "yubikey_cert", true},
+		{"people", "passkey_synced", true}, {"people", "passkey_device", true}, {"people", "security_key", true}, {"people", "yubikey_cert", true},
+		{"people", "password", false}, {"people", "browser_cert", false}, {"people", "inv", false}, {"people", "", false},
+		{"portal", "password", true}, {"portal", "security_key", false}, {"portal", "passkey_synced", false},
 	} {
-		f.h.SetFreshAuth(ListenerPeople, &methodFreshAuth{method: c.method})
-		res, reason, err := f.h.checkFreshAuth(context.Background(), testProof, "alice")
+		f.h.SetFreshAuth(ListenerPeople, &switchFreshAuth{method: c.method})
+		res, reason, err := f.h.checkFreshAuth(context.Background(), govCore(c.core), testProof, "alice")
 		if c.ok != (err == nil) {
-			t.Errorf("pc_fresh %q: %+v, %q, %v; want ok %v", c.method, res, reason, err, c.ok)
+			t.Errorf("%s + pc_fresh %q: %+v, %q, %v; want ok %v", c.core, c.method, res, reason, err, c.ok)
+			continue
 		}
-		if !c.ok && (statusOf(err) != 403 || err.Error() != freshauth.Message || reason != "pc_fresh names a method that is switched off") {
-			t.Errorf("pc_fresh %q: %d %v (%q)", c.method, statusOf(err), err, reason)
+		if c.ok {
+			want := map[string]string{"hub": "strong", "people": "standard", "portal": "pw-only"}[c.core]
+			if res.Template != want || res.Method != c.method || reason != "" {
+				t.Errorf("%s + %s: template %q method %q reason %q", c.core, c.method, res.Template, res.Method, reason)
+			}
+			continue
+		}
+		if statusOf(err) != 403 || err.Error() != freshauth.Message || !strings.Contains(reason, "template ") {
+			t.Errorf("%s + pc_fresh %q: %d %v (%q)", c.core, c.method, statusOf(err), err, reason)
 		}
 	}
-	for _, m := range []string{"passkey_synced", "passkey_device", "yubikey_cert"} {
-		setOn(m, false)
+}
+
+// A leaf switched off refuses: dropped from the compiled rule before the
+// proof, or switched off (or the template changed) during the exchange.
+func TestFreshAuthSwitchedOffLeafRefused(t *testing.T) {
+	f := newFixture(t)
+	f.h.freshAuthReady.Store(true)
+	setSignIn(f, func(si *state.SignIn) { si.Core["people"] = "standard"; si.Methods["passkey_synced"] = false })
+	f.h.SetFreshAuth(ListenerPeople, &switchFreshAuth{method: "passkey_synced"})
+	if _, reason, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice"); statusOf(err) != 403 ||
+		reason != "pc_fresh names a method that is switched off (template standard)" {
+		t.Errorf("switched off: %v (%q)", err, reason)
 	}
-	if got := f.h.freshAuthAccepted(); len(got) != 0 {
-		t.Errorf("all off: freshAuthAccepted = %v", got)
+	setSignIn(f, func(si *state.SignIn) { si.Methods["passkey_synced"] = true })
+	f.h.SetFreshAuth(ListenerPeople, &switchFreshAuth{method: "passkey_synced", during: func() {
+		setSignIn(f, func(si *state.SignIn) { si.Methods["passkey_synced"] = false })
+	}})
+	if _, reason, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice"); statusOf(err) != 403 || !strings.Contains(reason, "switched off") {
+		t.Errorf("switched off during the exchange: %v (%q)", err, reason)
+	}
+	setSignIn(f, func(si *state.SignIn) { si.Methods["passkey_synced"] = true })
+	f.h.SetFreshAuth(ListenerPeople, &switchFreshAuth{method: "passkey_synced", during: func() {
+		setSignIn(f, func(si *state.SignIn) { si.Core["people"] = "strong" })
+	}})
+	if _, reason, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice"); statusOf(err) != 403 ||
+		reason != "pc_fresh names a method template strong doesn't accept" {
+		t.Errorf("template changed during the exchange: %v (%q)", err, reason)
+	}
+}
+
+// A missing, disabled or unmeetable governing template, an unknown core
+// key, a gone instance and the zero freshGov all refuse — before the code
+// is exchanged (the verifier is never called).
+func TestFreshAuthMissingTemplateRefused(t *testing.T) {
+	f := newFixture(t)
+	f.h.freshAuthReady.Store(true)
+	fa := &fakeFreshAuth{}
+	f.h.SetFreshAuth(ListenerPeople, fa)
+	setSignIn(f, func(si *state.SignIn) {
+		si.Templates["key-and-pw"] = state.SignInTemplate{Name: "Key and password", Enabled: true,
+			Rule: signin.Node{Op: signin.OpAll, Items: []signin.Node{{Leaf: "security_key"}, {Leaf: "password"}}}} // password off: unmeetable
+		si.Templates["off"] = state.SignInTemplate{Name: "Off", Rule: passwordOnly}
+	})
+	for _, c := range []struct {
+		name string
+		edit func(si *state.SignIn)
+		gov  freshGov
+	}{
+		{"gone", func(si *state.SignIn) { si.Core["people"] = "nope" }, govCore("people")},
+		{"disabled", func(si *state.SignIn) { si.Core["people"] = "off" }, govCore("people")},
+		{"unmeetable", func(si *state.SignIn) { si.Core["people"] = "key-and-pw" }, govCore("people")},
+		{"default gone", func(si *state.SignIn) { si.Core["people"], si.Default = "", "nope" }, govCore("people")},
+		{"unknown core key", nil, govCore("auth")},
+		{"instance gone", nil, govInstance("nope")},
+		{"zero", nil, freshGov{}},
+		{"both", nil, freshGov{instance: "x", core: "hub"}},
+	} {
+		if c.edit != nil {
+			setSignIn(f, c.edit)
+		}
+		before := fa.calls.Load()
+		_, reason, err := f.h.checkFreshAuth(context.Background(), c.gov, testProof, "alice")
+		if statusOf(err) != 403 || err.Error() != freshauth.Message || !strings.Contains(reason, "governing template") {
+			t.Errorf("%s: %d %v (%q)", c.name, statusOf(err), err, reason)
+		}
+		if fa.calls.Load() != before {
+			t.Errorf("%s: the code was exchanged", c.name)
+		}
 	}
 }
 
@@ -138,7 +239,7 @@ func TestFreshAuthRefusalsCountTowardLimit(t *testing.T) {
 		if !f.h.entryLimit.reserve("alice", f.h.entryClock()) {
 			t.Fatalf("limited after %d refusals", i)
 		}
-		_, _, err := f.h.checkFreshAuth(context.Background(), testProof, "alice")
+		_, _, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice")
 		f.h.entryLimit.release("alice", f.h.entryClock(), isRefusal(err))
 	}
 	if _, err := setEntry(f, entryID, "ext_id", "alice", aliceExt, "alice"); statusOf(err) != 429 {
@@ -189,11 +290,11 @@ func TestFreshAuthRefusedUntilClientInPlace(t *testing.T) {
 	f.h.SetFreshAuthClient(func(context.Context) error { ensures.Add(1); return ensureErr.Load().(errBox).err })
 	check := func(label string, wantOK bool) {
 		t.Helper()
-		_, reason, err := f.h.checkFreshAuth(context.Background(), testProof, "alice")
+		_, reason, err := f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice")
 		// The flag is stored right after the ensure returns: wait for it.
 		for i := 0; i < 500 && (err == nil) != wantOK; i++ {
 			time.Sleep(10 * time.Millisecond)
-			_, reason, err = f.h.checkFreshAuth(context.Background(), testProof, "alice")
+			_, reason, err = f.h.checkFreshAuth(context.Background(), govCore("people"), testProof, "alice")
 		}
 		if wantOK && err != nil {
 			t.Errorf("%s: refused: %v (%s)", label, err, reason)

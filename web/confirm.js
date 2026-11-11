@@ -3,11 +3,11 @@
 // The page is the Hub's rendering of the stored request (confirm.html,
 // escaped by html/template). This script reads only #confirm's data-*
 // attributes and writes only textContent (never markup). Approve asks
-// for the typed check, then a fresh passkey sign-in in a popup through
+// for the typed check, then a fresh sign-in (a method the governing template accepts) in a popup through
 // portcullis-fresh-auth: freshauth.js (PortcullisFreshAuth) runs the
 // flow and its checks, the popup landing on this listener's "/" (whose
 // freshauth-callback.js hands the code back); the proof is posted with
-// the decision. Decline needs no passkey.
+// the decision. Decline needs no fresh sign-in.
 (function () {
   'use strict';
   const root = document.getElementById('confirm');

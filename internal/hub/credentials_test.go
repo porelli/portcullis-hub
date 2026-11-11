@@ -1297,3 +1297,59 @@ func TestTruncatedHashPrefixBlanked(t *testing.T) {
 		t.Errorf("exec lost its text: %q", ex.Output)
 	}
 }
+
+// The file-share password's fresh sign-in is governed by the instance's
+// template (contract §8 "Governing template"): Samba takes no pick, so
+// the default. Standard refuses a password; a password-only default
+// accepts it (typing the password again) and refuses a passkey; the
+// audit names the template, never the proof.
+func TestCreateCredentialFollowsInstanceTemplate(t *testing.T) {
+	c := credSvcFixture(t)
+	setSignIn(c.f, func(si *state.SignIn) {
+		si.Methods["password"] = true
+		si.Templates["pw-only"] = state.SignInTemplate{Name: "Password only", Rule: passwordOnly, Enabled: true}
+	})
+	try := func(method string) error {
+		c.f.h.SetFreshAuth(ListenerPeople, &switchFreshAuth{method: method})
+		_, err := c.f.h.CreateCredential(context.Background(), smbID, smbKey, "alice", testProof)
+		settle(c.f)
+		return err
+	}
+	if err := try("password"); statusOf(err) != 403 || err.Error() != freshauth.Message {
+		t.Fatalf("standard + password: %v", err)
+	}
+	if got := credAudits(c.audit, "credential.create"); len(got) != 1 || !strings.Contains(got[0], "pc_fresh names a method template standard doesn't accept") {
+		t.Errorf("refusal audit = %q", got)
+	}
+	if err := try("passkey_synced"); err != nil {
+		t.Fatalf("standard + passkey_synced: %v", err)
+	}
+	setSignIn(c.f, func(si *state.SignIn) { si.Default = "pw-only" })
+	if err := try("security_key"); statusOf(err) != 403 {
+		t.Fatalf("password-only + security_key: %v", err)
+	}
+	if err := try("password"); err != nil {
+		t.Fatalf("password-only + password: %v", err)
+	}
+	got := credAudits(c.audit, "credential.regenerate")
+	if len(got) != 1 || !strings.Contains(got[0], "template=pw-only") || strings.Contains(got[0], testProof.Code) {
+		t.Errorf("regenerate audit = %q", got)
+	}
+	// The instance's own pick wins over the default, and a pick that
+	// can't be published refuses (fail closed).
+	c.f.h.mu.Lock()
+	e := c.f.h.st.Instances[smbID]
+	e.SignInTemplate = "strong"
+	c.f.h.st.Instances[smbID] = e
+	c.f.h.mu.Unlock()
+	if err := try("password"); statusOf(err) != 403 {
+		t.Errorf("pick strong + password: %v", err)
+	}
+	if err := try("security_key"); err != nil {
+		t.Errorf("pick strong + security_key: %v", err)
+	}
+	setSignIn(c.f, func(si *state.SignIn) { t := si.Templates["strong"]; t.Enabled = false; si.Templates["strong"] = t })
+	if err := try("security_key"); statusOf(err) != 403 {
+		t.Errorf("pick disabled: %v", err)
+	}
+}

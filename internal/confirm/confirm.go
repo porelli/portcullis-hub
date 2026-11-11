@@ -1,5 +1,5 @@
 // Package confirm is the Hub's confirmation store (contract §15.6): a
-// person approves, in their browser and with a fresh passkey touch, one
+// person approves, in their browser and with a fresh sign-in, one
 // call of a destructive or `confirm` tool before the AI may make it.
 //
 // A confirmation is bound to (person, resource, tool, args_sha256), lives
@@ -32,6 +32,10 @@ type Request struct {
 	Typed                                                           string
 	Consequences                                                    []string
 	Label                                                           string
+	// Instance is a companion confirmation's instance (its template
+	// governs the approval's fresh sign-in, contract §8 "Governing
+	// template"); "" for a Portcullis tool's.
+	Instance string
 }
 
 // Confirmation is one stored confirmation (a copy: the store's own is

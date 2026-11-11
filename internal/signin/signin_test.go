@@ -585,3 +585,43 @@ func TestAlternativesMinimal(t *testing.T) {
 		t.Error("Satisfied accepted a family leaf")
 	}
 }
+
+// Leaves: the methods a compiled rule names (contract §8 "Governing
+// template"): the built-ins compiled at the starting switches, a
+// password-only rule, and refusals of anything that isn't compiled.
+func TestLeaves(t *testing.T) {
+	names := func(m map[Method]bool) string {
+		var out []string
+		for _, x := range Methods {
+			if m[x] {
+				out = append(out, string(x))
+			}
+		}
+		return strings.Join(out, ",")
+	}
+	for _, c := range []struct {
+		id, want string
+		on       map[Method]bool
+	}{
+		{"strong", "security_key,yubikey_cert", defaultOn()},
+		{"standard", "passkey_synced,passkey_device,security_key,yubikey_cert", defaultOn()},
+		{"basic", "passkey_synced,passkey_device,security_key,yubikey_cert", defaultOn()},
+		{"basic", "password,passkey_synced,passkey_device,security_key,yubikey_cert", onSet(Password, PasskeySynced, PasskeyDevice, SecurityKey, YubiKeyCert)},
+		{"standard", "passkey_synced,security_key", onSet(PasskeySynced, SecurityKey)},
+		{"yubikey-and-certificate", "security_key,yubikey_cert", defaultOn()},
+	} {
+		got, err := Leaves(mustCompile(t, builtin(t, c.id), c.on))
+		if err != nil || names(got) != c.want {
+			t.Errorf("%s: Leaves = %s, %v; want %s", c.id, names(got), err, c.want)
+		}
+	}
+	got, err := Leaves(mustCompile(t, anyOf(leaf("password")), onSet(Password, PasskeySynced)))
+	if err != nil || names(got) != "password" {
+		t.Errorf("password only: %s, %v", names(got), err)
+	}
+	for _, bad := range []Node{leaf("password"), anyOf(leaf("family:passkey")), anyOf(leaf("inv")), {Op: OpAny}} {
+		if _, err := Leaves(bad); err == nil {
+			t.Errorf("Leaves(%s): no error", js(bad))
+		}
+	}
+}

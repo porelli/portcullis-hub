@@ -1,11 +1,11 @@
 # File Sharing
 
-Portcullis provides SMB3 file sharing through the Samba and Time Machine templates. Each person creates their own file-share password after a fresh passkey sign-in, sees it once, and can regenerate or revoke it at any time.
+Portcullis provides SMB3 file sharing through the Samba and Time Machine templates. Each person creates their own file-share password after a fresh sign-in, sees it once, and can regenerate or revoke it at any time.
 
 ## How It Works
 
 - **Per-person passwords:** Each person has their own password for file sharing, separate from their Portcullis sign-in. Admins list and revoke credentials but never create them (an admin who created one would have seen it).
-- **Self-service:** People create and regenerate their passwords on [My apps](hub.md#my-apps) (`https://people.<domain>`). A fresh sign-in (any passkey kind or a YubiKey certificate, each only while its method is on) is required for each create or regenerate.
+- **Self-service:** People create and regenerate their passwords on [My apps](hub.md#my-apps) (`https://people.<domain>`). A fresh sign-in with a method the app's template accepts (its own pick, else the default; a password too when the template takes one) is required for each create or regenerate.
 - **No web page:** File-sharing apps serve only SMB3 (no HTTP), so they appear without hostnames in the app catalog.
 - **Hub-allocated ids:** Each person gets a stable Unix uid (20000–59999), allocated once and never reused. Files land as `<person's uid>:<folder's gid>`.
 
@@ -84,7 +84,7 @@ Ports on `0.0.0.0` or `::` bypass host firewalls like ufw, so rebind to a LAN ad
 Once the app is enabled, people visit [My apps](hub.md#my-apps) (`https://people.<domain>`) and:
 
 1. Click [Create password] on the instance page's File sharing tab.
-2. A popup asks them to touch their passkey (a **fresh** sign-in, even if they signed in seconds ago).
+2. A popup asks them to sign in again (a **fresh** sign-in, even if they signed in seconds ago) with a method the app's template accepts.
 3. The password is shown **once** as 6 groups of 4 characters joined by `-` (29 characters total, e.g. `a2bC-d3eF-g4hJ-…`). The dashes are part of the password.
 4. After "I've saved it", the password disappears from the DOM. It is never shown again and never logged.
 
