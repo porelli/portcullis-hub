@@ -53,9 +53,13 @@ type Client struct {
 	HTTP       *http.Client
 }
 
-// New returns a client with a 20s timeout.
+// New returns a client with a 20s timeout that never follows a redirect
+// (a 3xx is an answer: an *APIError or an error).
 func New(apiURL, secretFile string) *Client {
-	return &Client{APIURL: apiURL, SecretFile: secretFile, HTTP: &http.Client{Timeout: 20 * time.Second}}
+	return &Client{APIURL: apiURL, SecretFile: secretFile, HTTP: &http.Client{
+		Timeout:       20 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 }
 
 func (c *Client) secret() (string, error) {
@@ -98,7 +102,7 @@ func (c *Client) Create(ctx context.Context, username string) (*Invite, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+sec)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.noRedirect().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("invite API: %w", err)
 	}
@@ -191,7 +195,7 @@ func (c *Client) Certificates(ctx context.Context) ([]CertRecord, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+sec)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.noRedirect().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("certificates API: %w", err)
 	}

@@ -56,19 +56,18 @@ type BrowserCert struct {
 	NotAfter time.Time
 }
 
-// String names the certificate without its secrets.
-func (b *BrowserCert) String() string {
-	if b == nil {
-		return "<nil>"
-	}
+// String names the certificate without its secrets. String, GoString
+// and Format have value receivers, so a BrowserCert value and a pointer
+// to one print the same (fmt prints a nil pointer as <nil>).
+func (b BrowserCert) String() string {
 	return fmt.Sprintf("browser certificate %s (%s, until %s)", b.Serial, b.Filename, b.NotAfter.UTC().Format(time.RFC3339))
 }
 
 // GoString is String (%#v never prints the secrets either).
-func (b *BrowserCert) GoString() string { return b.String() }
+func (b BrowserCert) GoString() string { return b.String() }
 
 // Format prints String for every verb.
-func (b *BrowserCert) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, b.String()) }
+func (b BrowserCert) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, b.String()) }
 
 // Clear zeroes the .p12 and drops it and the password.
 func (b *BrowserCert) Clear() {
@@ -141,7 +140,7 @@ func (c *Client) post(ctx context.Context, path string, body any, want int) ([]b
 	}
 	req.Header.Set("Authorization", "Bearer "+sec)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.noRedirect().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("certificates API: %w", redactURLError(err))
 	}
@@ -170,6 +169,30 @@ func (c *Client) post(ctx context.Context, path string, body any, want int) ([]b
 		return nil, e
 	}
 	return data, nil
+}
+
+// noRedirect is c.HTTP that never follows a redirect: a 3xx is answered
+// as it is (an *APIError), so the bearer and request body never go
+// anywhere but the configured URL.
+func (c *Client) noRedirect() *http.Client {
+	hc := *c.HTTP
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &hc
+}
+
+// decodeOne decodes exactly one JSON value from data into v, strictly
+// (no unknown fields), with nothing after it: a second Decode must
+// return io.EOF.
+func decodeOne(data []byte, v any) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if dec.Decode(v) != nil {
+		return false
+	}
+	var extra json.RawMessage
+	err := dec.Decode(&extra)
+	clear(extra)
+	return err == io.EOF
 }
 
 // redactURLError drops the URL from a transport error (it holds no
@@ -220,9 +243,7 @@ func (c *Client) CreateBrowserCertificate(ctx context.Context, r BrowserCertRequ
 		Filename string    `json:"filename"`
 	}
 	bad := errors.New("certificates API: unexpected browser certificate answer")
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&doc); err != nil || dec.More() {
+	if !decodeOne(data, &doc) {
 		clear(doc.P12)
 		return nil, bad
 	}
@@ -283,9 +304,7 @@ func (c *Client) issued(ctx context.Context, path string, body any) (*IssuedCert
 		NotAfter    time.Time `json:"not_after"`
 	}
 	bad := errors.New("certificates API: unexpected certificate answer")
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&doc); err != nil || dec.More() {
+	if !decodeOne(data, &doc) {
 		return nil, bad
 	}
 	if doc.Serial == "" || doc.NotAfter.IsZero() {

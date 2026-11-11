@@ -98,10 +98,15 @@ func TestCreateBrowserCertificateShape(t *testing.T) {
 	}
 	if string(bc.P12) != string(p12) || bc.Password != "ABCDE-FGHJK-MNPQR-STVWX" || bc.Serial != "1a:2b" ||
 		bc.Filename != "alice-browser-certificate-20261111.p12" || !bc.NotAfter.Equal(time.Date(2026, 12, 11, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("answer = %+v", *bc)
+		t.Errorf("answer: serial %s, filename %s, not_after %s, p12 %d bytes", bc.Serial, bc.Filename, bc.NotAfter, len(bc.P12))
 	}
 	// String and every fmt verb never print the secrets.
-	for _, s := range []string{bc.String(), fmt.Sprint(bc), fmt.Sprintf("%v %+v %#v %s %q %x", bc, bc, bc, bc, bc, bc)} {
+	val := *bc
+	type wrap struct{ C BrowserCert }
+	for _, s := range []string{bc.String(), val.String(), val.GoString(), fmt.Sprint(bc), fmt.Sprint(val),
+		fmt.Sprintf("%v %+v %#v %s %q %x %d", bc, bc, bc, bc, bc, bc, bc),
+		fmt.Sprintf("%v %+v %#v %s %q %x %d", val, val, val, val, val, val, val),
+		fmt.Sprintf("%v %+v %#v", []BrowserCert{val}, wrap{val}, &wrap{val})} {
 		if strings.Contains(s, "ABCDE") || strings.Contains(s, "not-really") || strings.Contains(s, base64.StdEncoding.EncodeToString(p12)) {
 			t.Errorf("secret printed: %s", s)
 		}
@@ -310,5 +315,75 @@ func TestBrowserCertNoSecretInErrors(t *testing.T) {
 	_, err := c.CreateBrowserCertificate(context.Background(), BrowserCertRequest{User: "alice", Days: 30, MaxDays: 30, MaxActive: 3})
 	if err == nil || strings.Contains(err.Error(), pw) || strings.Contains(err.Error(), p12) {
 		t.Errorf("500 = %v", err)
+	}
+}
+
+// TestCertificateAnswersStrict: a 201 with anything after its one JSON
+// value is refused.
+func TestCertificateAnswersStrict(t *testing.T) {
+	f, c := newFakeEnroll(t)
+	ctx := context.Background()
+	good := fmt.Sprintf(`{"p12":%q,"password":"ABCDE-FGHJK-MNPQR-STVWX","serial":"1a","not_after":"2026-12-11T00:00:00Z","filename":"alice-browser-certificate-20261111.p12"}`, base64.StdEncoding.EncodeToString([]byte("p12")))
+	f.answer(201, good+"\n")
+	if _, err := c.CreateBrowserCertificate(ctx, BrowserCertRequest{User: "alice", Days: 1, MaxDays: 30, MaxActive: 3}); err != nil {
+		t.Fatalf("good answer: %v", err)
+	}
+	for _, tail := range []string{"}", "]", "{}", " 1", `"x"`, ","} {
+		f.answer(201, good+tail)
+		if _, err := c.CreateBrowserCertificate(ctx, BrowserCertRequest{User: "alice", Days: 1, MaxDays: 30, MaxActive: 3}); err == nil {
+			t.Errorf("browser: accepted trailing %q", tail)
+		}
+	}
+	crt := testCertPEM(t)
+	issued := fmt.Sprintf(`{"certificate":%q,"serial":"0a","not_after":"2027-11-11T00:00:00Z"}`, crt)
+	f.answer(201, issued)
+	if _, err := c.IssueYubiKeyCertificate(ctx, "alice", "CSR"); err != nil {
+		t.Fatalf("good issued: %v", err)
+	}
+	for _, tail := range []string{"}", "]", "{}", " null"} {
+		f.answer(201, issued+tail)
+		if _, err := c.IssueYubiKeyCertificate(ctx, "alice", "CSR"); err == nil {
+			t.Errorf("issue: accepted trailing %q", tail)
+		}
+	}
+}
+
+// TestCertificateNoRedirect: a 3xx is never followed: the actions get an
+// *APIError with that status, and the redirect target sees nothing.
+func TestCertificateNoRedirect(t *testing.T) {
+	hits := 0
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(201)
+	}))
+	defer elsewhere.Close()
+	_, c := newFakeEnroll(t) // for its secret file
+	ctx := context.Background()
+	for _, st := range []int{301, 302, 303, 307, 308} {
+		redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, elsewhere.URL+r.URL.Path, st)
+		}))
+		rc := New(redir.URL+"/internal/invites", c.SecretFile)
+		if err := rc.RevokeCertificate(ctx, "alice", "01"); !isStatus(err, st) {
+			t.Errorf("%d revoke = %v", st, err)
+		}
+		if _, err := rc.CreateBrowserCertificate(ctx, BrowserCertRequest{User: "alice", Days: 1, MaxDays: 30, MaxActive: 3}); !isStatus(err, st) {
+			t.Errorf("%d browser = %v", st, err)
+		}
+		if _, err := rc.IssueYubiKeyCertificate(ctx, "alice", "CSR"); !isStatus(err, st) {
+			t.Errorf("%d issue = %v", st, err)
+		}
+		if _, err := rc.Certificates(ctx); !isStatus(err, st) {
+			t.Errorf("%d list = %v", st, err)
+		}
+		// A client built by hand (no CheckRedirect) doesn't follow either.
+		hand := &Client{APIURL: rc.APIURL, SecretFile: rc.SecretFile, HTTP: &http.Client{Timeout: 5 * time.Second}}
+		if err := hand.RevokeCertificate(ctx, "alice", "01"); !isStatus(err, st) {
+			t.Errorf("%d hand-built revoke = %v", st, err)
+		}
+		redir.Close()
+	}
+	if hits != 0 {
+		t.Errorf("redirect followed %d times", hits)
 	}
 }
