@@ -1,102 +1,162 @@
-# Authentication Policies
+# Sign-in Methods and Templates
 
-Portcullis lets you require either or both of two hardware-backed factors (a passkey, a client certificate) for each app, with AND or OR semantics, plus a global default. Each app enforces only what its auth method can (see [What each app can enforce](#what-each-app-can-enforce)). This page explains the model and how to use it.
+Portcullis decides how people sign in with two things, both set in the Hub
+under **Settings → Sign-in**:
 
-## Factors
+- **Sign-in methods**: six ways to sign in, each switched on or off for the
+  whole server.
+- **Templates**: named rules over those methods ("a security key, or a
+  YubiKey certificate"). One template is the default; each app and each core
+  page can pick another.
 
-| Factor | How the user proves it | Keycloak executor | `amr` value | LoA |
-|--------|------------------------|-------------------|-------------|-----|
-| **WebAuthn** | Taps a hardware security key (YubiKey, platform authenticator) | `webauthn-authenticator-passwordless` | `hwk` | 2 |
-| **mTLS** | Presents a client certificate over TLS (PIV / YubiKey cert) | `auth-x509-client-username-form` | `mtls` | 3 |
+Every place that checks a sign-in (group-gate, Keycloak, apps that sign in
+with OIDC themselves, AI access, fresh sign-ins for sensitive actions) accepts
+exactly the methods a template names, and only while they are switched on.
+The exact formats are in
+[Integration Contracts §8.1](../guides/integration-contracts.md#81-sign-in-methods-new-sign-in).
 
-LoA = Level of Authentication, a number Keycloak uses for step-up. Every
-sign-in is a passkey or a client cert and reaches LoA 2 in one touch
-(oauth2-proxy asks for `hwk` by default); LoA 3 needs the cert. First passkeys
-come from one-time setup links (`./portcullis invite`, the Hub's Users & Groups).
+## Methods
 
-!!! note "There is no password factor"
-    The realm's browser flow has no password: its LoA 1 (`pwd`) subflow is a
-    client cert or a passkey, the same as LoA 2. The Hub never offers or
-    writes `password`, and its API refuses it (`400`). A stored policy that
-    still names it is normalised when the Hub loads `state.yaml`, never into
-    something weaker: in an `all` policy it is redundant and dropped; as an
-    alternative (`any`, or alone) it accepted every session, so it becomes
-    `any of [mtls, webauthn]`. The app's settings (or the Settings tab) show
-    a note until the policy is saved. group-gate still parses `password`
-    (met by every `hwk`/`mtls` session) but the Hub no longer publishes it.
+| Method | Strength | Where it comes from | Starts |
+|--------|----------|---------------------|--------|
+| **Password** | 1.0 | The person's LLDAP password | off |
+| **Passkey (phone / laptop, synced)** | 2.5 | A passkey synced by iCloud, Google, 1Password and the like, or any passkey whose model Portcullis can't verify | on |
+| **Browser certificate** | 2.5 | A certificate file installed in a browser. Not available yet: listed, always off | off |
+| **Device-bound passkey** | 3.0 | Windows Hello, a TPM: the key can't leave the computer or phone | on |
+| **Security key passkey** | 3.5 | A touch on a certified hardware key, e.g. a YubiKey | on |
+| **YubiKey certificate** | 4.0 | The client certificate stored on a YubiKey ([TLS & mTLS](../setup/certificates.md)) | on |
 
-## Policy model
+Settings → Sign-in shows each method with its strength and how many people
+have it set up. A method that is off is never offered and never accepted, and
+people can't set it up. You can't switch off a method an enabled template
+needs, i.e. one without which the template would have no way in left: the
+dialog lists the templates and what uses them (the default, apps, core
+pages). Change those first.
 
-A policy has two parts:
+Some template entries name a **family** of methods: *Passkey (any kind)*,
+*YubiKey (touch or certificate)* and *Certificate (YubiKey or browser)*. A
+family accepts any of its methods that is switched on. No family contains the
+password: a password satisfies only templates that name it.
 
-1. **Factors** — zero or more of `mtls`, `webauthn`.
-2. **Op** — `any` (any selected factor satisfies the policy) or `all` (every selected factor must have fired in the current session).
+### Passkey kinds
 
-Special cases:
+Keycloak decides a new passkey's kind when it is registered, from the
+attestation the authenticator sends, checked against the FIDO Alliance's
+signed list of certified authenticators (the Hub fetches and verifies it
+daily):
 
-- Zero factors → **public** (no authentication required).
-- One factor → the single factor is required; `op` is ignored.
+- **Security key**: a FIDO-certified roaming authenticator whose key is in a
+  secure element, with an attestation that verifies.
+- **Device-bound**: a certified platform authenticator (Windows Hello, a TPM)
+  whose key can't leave the device.
+- **Synced**: everything else, including passkeys without attestation
+  (iCloud, Google, 1Password) and models the list doesn't know yet.
 
-Examples:
+Keycloak keeps each passkey's attestation. Passkey kinds are reclassified
+**upward** when a newer FIDO list verifies the stored attestation, and
+**downward** only when the list marks that model revoked or compromised. A
+model that simply drops off the list keeps its kind. If the Hub can't get a
+current list for more than 30 days past its due date, new passkeys register as
+synced (stored ones keep their kind) and Settings → Sign-in shows a warning.
 
-| Policy | Meaning |
-|--------|---------|
-| `{factors: [], op: ""}` | Public |
-| `{factors: ["webauthn"]}` | A passkey |
-| `{factors: ["mtls", "webauthn"], op: "any"}` | Either mTLS **or** WebAuthn |
-| `{factors: ["mtls", "webauthn"], op: "all"}` | mTLS **and** WebAuthn (both must fire) |
+### Password
 
-## Configuring policies
+The sign-in password **is** the person's LLDAP password: one password for
+Portcullis sign-in, LLDAP's own UI and apps that bind to LDAP. Keycloak checks
+it against LLDAP. Passwords set in the Hub must be 12–128 characters, not the
+username, and not a common password. Only passwords set through the Hub count
+in the method counts, the warnings and the lockout guard.
 
-### In the Hub UI
+- You can set a password while the method is off (LDAP-binding apps use it),
+  but onboarding a new person with a password is refused while it is off.
+- **Password sign-in is never available for `admin` and `portcullis-hub`**,
+  whatever the switch says. Keycloak answers "Password sign-in isn't
+  available for this account" without checking the password, and the attempt
+  doesn't count towards Keycloak's brute-force lockout (so nobody can lock
+  these accounts out by trying passwords).
 
-**Per-app** — open an app in the catalog and use the *Access policy* block above the settings form:
+## Templates
 
-- Every app starts with *Inherit global default* ticked. While it inherits, the factor boxes are disabled and show the app's **effective** policy: the global default intersected with what the app can enforce, with a note when the two differ (e.g. "The global default allows mTLS or WebAuthn; this app can't enforce WebAuthn, so it enforces mTLS").
-- Untick *Inherit* to set an override. Only factors the app can enforce are selectable; the others are greyed out ("this app can't enforce it"), and the Hub refuses them with a `400` too.
-- If two or more are ticked, pick *Require all checked* (AND) or *Any of checked* (OR).
-- Apps that handle their own sign-in (`custom`, `public`, or an app switched to its own login only) show the block disabled: "This app handles its own sign-in".
+A template is a rule: a tree of groups, each **all of** or **any of**,
+holding methods, families and other groups, nested up to 3 levels. For
+example, *((password and a security key) or (a YubiKey and a passkey)) and a
+certificate*. The editor shows the rule as nested boxes and as one sentence,
+both updated as you type.
 
-**Global default** — the *Settings* tab exposes the default policy that every app without an override uses. Changing it affects all apps whose per-app policy is unset.
+Four templates are built in. You can edit them and switch them on and off, but
+not delete them, and you can add your own (**+ New template**):
 
-!!! note "Fresh installs require a YubiKey"
-    Until an admin saves a global default, the Hub uses
-    **`any of [mtls, webauthn]`** (`{"factors": ["mtls", "webauthn"], "op": "any"}`).
-    Every app without its own policy then requires the YubiKey, by either
-    method: its client certificate (`mtls`, LoA 3) or a passkey (`webauthn`,
-    LoA 2).
+| Template | Rule | Score | Starts |
+|----------|------|-------|--------|
+| **Basic** | any passkey, any certificate, or a password | 1.0 / 5 (2.5 while password is off) | disabled |
+| **Standard** | any passkey or any certificate | 2.5 / 5 | enabled, the default |
+| **Strong** | a security key or a YubiKey certificate | 3.5 / 5 | enabled; the Hub and people pages |
+| **YubiKey + certificate** | a YubiKey certificate and a security key | 4.4 / 5 | disabled |
 
-    - Routers get `authaware@file`: the certificate is optional at the
-      handshake.
-    - Keycloak steps up to at least LoA 2 (`hwk`).
-    - group-gate accepts `mtls` or `hwk` in `amr`, so a certificate sign-in
-      passes too (including `enroll.<domain>/self` renewal).
-    - A password-only session gets the step-up page.
+Only enabled templates appear in the drop-downs. A template in use (by the
+default, an app or a core page) can't be switched off or deleted.
 
-    A WebAuthn-only default would send certificate users to the step-up page
-    on every app. An explicitly saved public default is stored and honoured.
-    It is not the same as "never set".
+A part of a template that names a method that is off (or a family with none
+on) can't be met. In an **any of** group that part is simply dropped: Basic
+with the password off works like Standard, and the editor greys the dropped
+part out. In an **all of** group it makes the whole group impossible. A
+template left with no way in at all can't be enabled.
 
-The **safety score** next to each policy is a cosmetic sum: 0 for public, LoA for a single factor, LoA + 0.5 per extra required factor for AND policies.
+### Score
 
-## What each app can enforce
+Each template shows a score out of 5, such as `2.9 / 5`, with a one-line
+reason. It is computed over the tree, leaving out the parts the switches
+drop:
 
-| Auth method | Factors | Where |
-|-------------|---------|-------|
-| `forward-auth`, `header-auth`, `custom` behind Portcullis sign-in | `mtls`, `webauthn` | group-gate, on every request; a certificate is bound to the user ([mTLS binding](#mtls-binding)) |
-| `native-oidc` | `mtls`, `webauthn` | Keycloak, when the user signs in to the app (`acr` of its client). mTLS is checked per connection only when the policy selects the `protected@file` tier (mTLS alone, or `all` including it) |
-| `mtls` | `mtls` | The TLS handshake (`protected@file`), always: the certificate stays required even under a public or WebAuthn-only default, and an override can only be `[mtls]` |
-| `custom`, `public`, own login only | none | The app handles its own sign-in; no policy, tier `public@file` |
+- a method scores its strength;
+- a family scores its weakest method that is on;
+- an **any of** group scores its **weakest** part (anyone can pick it);
+- an **all of** group scores its strongest part + 0.4 per extra part, at
+  most 5.
 
-The **effective policy** is the configured one (override or global default)
-with the unsupported factors left out. For `any` that removes an alternative;
-for `all` it removes a requirement the app can't check, which the app's
-settings say. If nothing of the configured policy is enforceable (a
-WebAuthn-only default on an mTLS-only app), the app's own floor applies (the
-certificate) and the settings say so. The TLS tier and the Keycloak `acr`
-come from the effective policy. The policy file is unchanged: overrides are
-published as stored (they only name supported factors), inheriting apps
-publish nothing.
+Example, with the browser certificate off:
+`all of [any of [all of [password, security key], all of [YubiKey, passkey]], certificate]`
+scores **4.4 / 5**. The two inner *all of* groups score 3.5 + 0.4 = 3.9 each,
+their *any of* 3.9; *certificate* (only the YubiKey certificate is on) 4.0;
+the top *all of* 4.0 + 0.4. With the password off, its *password and security
+key* alternative is dropped and the rest still scores 4.4.
+
+## Default, per app and core pages
+
+- **Default.** Settings → Sign-in → *Default template*. Every app and core
+  page without its own pick uses it. It starts as Standard.
+- **Per app.** An instance's Settings tab has one drop-down: *Default
+  (Standard · 2.5 / 5)* or any enabled template (see
+  [Hub → Settings](hub.md#settings)). Saving another template restarts the app
+  only when its client-certificate request changes ([below](#traefik-tls-tier)).
+- **Core pages.** Settings → Sign-in → *Core pages* gives the portal, the Hub,
+  people.&lt;domain&gt;, directory, enroll, metrics and the Traefik dashboard
+  each the default or a template. The Hub and people.&lt;domain&gt; start on
+  **Strong**: they control everything else. `auth.<domain>` (Keycloak itself)
+  and `mcp.<domain>` take no template of their own: the Keycloak admin
+  console's router (`auth.<domain>/admin`, which also runs group-gate) follows
+  the Hub's template (the console is as powerful as the Hub; without one it is
+  denied), and `mcp.<domain>` never reaches group-gate (mcp-gate
+  checks it). The portal checks its own template (its router has no group
+  check). A core page the policy file doesn't list is denied.
+
+### What each app can enforce
+
+| Auth method | Where the template is checked |
+|-------------|-------------------------------|
+| `forward-auth`, `header-auth`, `custom` behind Portcullis sign-in | group-gate, on every request. A YubiKey certificate counts only while the request presents it ([mTLS binding](#mtls-binding)) |
+| `native-oidc` | Keycloak, at every sign-in to the app: the app's Keycloak clients are listed with their exact template, and Keycloak shows the needs-stronger page when the session doesn't meet it. Never weaker than the template |
+| `mtls` | The TLS handshake: the client certificate is the app's authentication. It takes no template and always requires the certificate |
+| `custom`, `public`, own login only | None: the app handles its own sign-in. No template, no client-certificate request |
+
+### AI support
+
+AI clients sign in with the template of the app they reach (the Hub's and
+people pages' templates for the Portcullis MCP and "all my apps"), but they
+never present a client certificate, so certificate methods never count for
+them. An app whose template needs a certificate in every alternative can't
+get AI support, and a sign-in change that would make it so switches its AI
+support off first, after asking. See [AI support](ai.md).
 
 ## Apps with their own login
 
@@ -107,11 +167,12 @@ settings then have a **Sign-in** choice:
 - **Portcullis sign-in, then the app's own login** (default). The Hub's
   override puts `portcullis-auth@docker,portcullis-groups@docker` in front of
   every router's own middlewares; group-gate requires the template's
-  `access_group` and the policy applies per request, as for `forward-auth`.
+  `access_group` and the app's sign-in template applies per request, as for
+  `forward-auth`.
 - **App's own login only (no Portcullis)**, only if the template sets
   `allow_without_gateway: true`. The routers keep the template's middlewares
-  without the gateway pair, the tier is `public@file` and no group is
-  published: anyone on the internet reaches the app's login page. The UI
+  without the gateway pair, no client certificate is requested and no group
+  is published: anyone on the internet reaches the app's login page. The UI
   shows a red warning, the switch is audited (`app.sign_in`) and the Hub logs
   it.
 
@@ -119,35 +180,138 @@ The template is never edited; both modes are compose-override labels, which
 the drift check compares with the running containers. If a template stops
 allowing the own-login-only mode, the Hub falls back to Portcullis sign-in.
 
-## What happens when a user hits an app
+## Warnings
 
-### Same-LoA SSO (no step-up)
+- **For admins.** Wherever a template is applied (an app's Settings, the
+  template editor, Settings → Sign-in), the Hub lists the members of the
+  app's users and admins groups who have no method set up that meets it, for
+  example "2 people can't sign in to Nextcloud · family with it: bob (password
+  only), dave (no method yet)". The Hub learns each person's methods from
+  Keycloak (passkeys), its own password records and enroll (YubiKey
+  certificates). A source it can't read counts as nothing set up.
+- **For people.** Opening an app whose template the session doesn't meet
+  shows a page instead of a failed sign-in ([below](#what-happens-when-someone-opens-an-app)).
 
-User signs in to Grafana with a passkey (policy: `any of [mtls, webauthn]`, session `acr=hwk`). Opens Immich (policy: `webauthn`). The Keycloak session already satisfies the required LoA, so Immich gets a token with no further prompt. Same for any other apps with policies their session already satisfies.
+## Adding a stronger method
 
-### Step-up on a stricter app
+Settings → Sign-in → *Add a stronger method from a weaker sign-in* is **off**
+at the start. While it is off, a person can add only methods as strong as the
+one they signed in with: a password-only session can't register any passkey,
+and someone who signed in with a synced passkey can add
+another synced passkey, but registering a security key needs help from an admin
+(a setup link). The needs-stronger page then
+says "ask your admin" instead of "Set up …". A passkey added this way can't be
+reclassified above that cap later. A setup link is the exception: the passkey
+registered there may be of any kind. Passkey registration offers the security
+key first to administrators.
 
-User signed in with a passkey (`amr=[hwk]`, LoA 2). Opens Jellyfin with policy `mtls-required`. Keycloak sees the session's current LoA is 2, but Jellyfin's client requested `acr_values=mtls` (LoA 3). The `Condition - Level of Authentication` executor in the universal flow fires only the mTLS subflow — the certificate is asked for, nothing else. On success the session's LoA is upgraded to 3 and `amr` becomes `[hwk, mtls]`. No full re-login.
+## Locked out of the Hub
 
-### Step-up on forward-auth apps
+The Hub refuses (`409`, saying why) a save that changes methods, templates,
+the default or the Hub's template when it would leave **no** administrator
+(an unexpired `lldap_admin` member) able to meet the Hub's template. If none
+can already, the save goes through with the warning "No administrator can meet
+the Hub's template". Only a save that can lower the number of administrators
+able to meet it reads Keycloak, enroll and LLDAP; when Keycloak or LLDAP
+can't be reached, such a save answers `503`.
 
-oauth2-proxy ≥ 7.10 accepts per-request `acr_values` via the `loginURLParameters` alpha-config setting, which is what Portcullis runs (allowed values `pwd`, `hwk`, `mtls`; default `hwk`; `kc_idp_hint=portcullis-invite` and `prompt=login` exist only for setup links). When `group-gate` detects a session that doesn't satisfy the app's policy, it returns a 403 "Additional authentication required" page with the URL in an `X-Stepup-URL` header: `https://auth.<domain>/oauth2/start?acr_values=<needed>&rd=https://<app>/`. The step-up always goes through `auth.<domain>`; there is no `/oauth2/` router on app hosts. There is no sign-out and no `prompt=login`: Keycloak's cookie authenticator runs the flow when the requested LoA is above the session's and asks only for the missing level. The new token reflects the step-up. When the missing factor is a hardware one (passkey / cert) the page does not auto-redirect: a **Continue** button, and links to register a passkey in the account console or enrol a certificate at `enroll.<domain>`. Other step-ups redirect after 2 seconds.
+If you are locked out anyway, recover on the server:
 
-### Public policy
+```bash
+./portcullis signin reset-core
+```
 
-A policy with no factors means group-gate requires **no particular factor**, and the Hub sets the router's tier to `public@file`. The Hub only changes `tls.options`. The template's middlewares stay as they are, so a forward-auth app still requires a Keycloak login and its group. An app is only reachable without logging in if its routers have no forward-auth middleware (`auth.method: public`, a `custom` app, or one switched to [its own login only](#apps-with-their-own-login)). An `mtls` app never becomes public: it keeps requiring the certificate.
+It stops the Hub, puts the Hub and people.&lt;domain&gt; back on Standard,
+restores and enables the built-in Standard rule, switches its methods back on
+(audited `signin.reset_core`, actor `cli`) and starts the Hub. See the
+[CLI reference](cli.md#signin-reset-core).
+
+## What happens when someone opens an app
+
+### Single sign-on
+
+A person who signed in with a security key opens an app on Standard. The
+Keycloak session already holds a method Standard accepts, so the app opens
+with no prompt. Keycloak remembers every method used in the session (for 10
+hours), so templates with *all of* can be met step by step.
+
+### Not in the app's groups
+
+group-gate checks the app's groups (and its admin paths' groups) before its
+template. Someone who isn't in them gets a plain "not authorized" page, never
+a step-up or needs-stronger page that would name the app's rule.
+
+### Step-up for one method
+
+When the session is missing exactly one method the person can complete (one
+they have set up, or one the Hub doesn't know about), group-gate shows
+"&lt;App&gt; needs &lt;method&gt;" with a **Continue** button. It leads to Keycloak with
+`pc_method=<method>`, and Keycloak asks for that method only: a security-key
+step-up offers only security keys, a certificate step-up only the
+certificate. The page never redirects on its own. When the Hub doesn't know
+which passkeys the person has and several passkey kinds would do, it asks for
+any passkey. Apps that sign in with OIDC themselves do the same inside
+Keycloak: an *all of* template is met step by step.
+
+### Present your YubiKey certificate
+
+When the session already holds the YubiKey certificate but the browser didn't
+present it on this request (the key isn't inserted, or the browser offered no
+certificate), signing in again can't help: group-gate shows "&lt;App&gt; needs
+your YubiKey certificate — insert your YubiKey and reload this page", with no
+Continue button. A revoked certificate or another person's doesn't count.
+
+### Needs a stronger sign-in
+
+Otherwise the page reads "&lt;App&gt; needs a stronger sign-in — You signed in with
+a password. &lt;App&gt; accepts any one of: a passkey (you don't have one yet) · a
+YubiKey certificate …", with **Set up a passkey** / **Set up a security key**
+links to Keycloak's account page and a **Sign-in methods** link. When adding a
+stronger method from this sign-in isn't allowed, or the missing method is a
+certificate or a password, it says "ask your admin". Apps that sign in with
+OIDC themselves get the same page from Keycloak. These pages come from
+group-gate and Keycloak, not from the app or the Hub, so they are always
+reachable.
+
+### After a setup link
+
+A setup link signs the person in with a session that meets **no** template.
+Right after it they touch their new passkey once more to open apps. The
+step-up asks for any passkey when the app's template accepts several passkey
+kinds, else for the first method the template can complete: the list of who has which method may not show the new passkey yet, so
+it isn't consulted for a setup-link session (no "needs a stronger sign-in"
+page just because it is behind).
+
+### Fresh sign-in for sensitive actions
+
+Creating a file-share password and approving an AI confirmation need a fresh
+sign-in in a popup. It accepts any passkey kind or a YubiKey certificate,
+each only while its method is on; never a password, a browser certificate or
+a setup link. What counts is the method that actually ran in that popup sign-in
+(Keycloak records it in the token's `pc_fresh` claim), never the methods the
+session used earlier.
 
 ## Traefik TLS tier
 
-The effective policy also drives the TLS tier on each router via a Hub-generated compose override:
+Whether browsers are asked for a client certificate follows the method
+switches and the app's template. Core's `traefik/dynamic/tls.yml` is static
+and defines three options; the Hub picks one per app and writes it as a
+`tls.options` label on every router of the app, in
+`${HUB_DATA_DIR}/overrides/<app>.override.yml`:
 
-| Policy | Tier | Behaviour |
-|--------|------|-----------|
-| Public, or the app handles its own sign-in | `public@file` | No client cert |
-| mTLS-only, or `all of [..., mtls]` | `protected@file` | Requires client cert at TLS handshake |
-| Everything else | `authaware@file` | Client cert tolerated but not required |
+| The app's template | Tier | Behaviour |
+|--------------------|------|-----------|
+| Every alternative needs a certificate method that is on (e.g. YubiKey + certificate) | `protected@file` | Client certificate required at the TLS handshake |
+| Some alternative has one (e.g. Standard, Strong) | `authaware@file` | Client certificate asked for, optional |
+| None has one, or the app has no Portcullis sign-in | `public@file` | No client certificate requested |
+| An `mtls` app | `protected@file` | Always |
 
-The tier change is emitted as a per-router `traefik.http.routers.<name>.tls.options` label in `${HUB_DATA_DIR}/overrides/<app>.override.yml`, for every router of the app. Base `compose.yml` files in templates are untouched. Changing the global default restarts only the inheriting apps whose tier actually changed.
+Core pages (Keycloak, the Hub, people.&lt;domain&gt;, the portal, the
+consoles) always use `authaware@file`: they always offer an optional
+certificate (a browser without one shows nothing). Switching a certificate
+method on or off, or a template change that moves an app to another tier,
+restarts only the apps whose tier changed. Base `compose.yml` files in
+templates are untouched.
 
 **One tier per host.** Traefik selects TLS options per SNI host, before it
 knows the path, so every router of a host must share one tier. If two routers
@@ -165,7 +329,7 @@ on, the Hub adds a router `portcullis-public-<app>` for those paths only:
 - higher priority than every router of the app, so it wins for its paths;
 - middlewares `portcullis-public-strip-<app>@docker,rate-limit@file,security-headers@file`
   only: **no forward-auth, no group-gate**, so no login, no group, no
-  hardware key, no step-up and no access policy apply on these paths;
+  hardware key, no step-up and no sign-in template apply on these paths;
 - the strip middleware deletes client-supplied identity headers (core's
   `X-Forwarded-User`, `X-Forwarded-Email`, `X-Forwarded-*`, `X-Auth-Request-*`,
   `Remote-*`, plus the template's `identity_headers`, each also in its
@@ -175,73 +339,127 @@ on, the Hub adds a router `portcullis-public-<app>` for those paths only:
   answers 403 to requests carrying `Authorization`, `Proxy-Authorization` or
   the template's credential headers, cookies or query parameters (names
   normalised the way PHP does), so a stolen password, API key or session
-  can't get past the hardware key there;
+  can't get past the sign-in there;
 - supporting paths serve static files only (by extension), plus single
   `exact` routes the template justifies;
 - in mode `listed`, only the share tokens an admin listed are routed; any
   other token on the same prefix still goes through forward-auth.
 
-**Exceptions vs mTLS.** A policy of `mtls` alone, or `all` including `mtls`,
-normally gives the host `protected@file`: no client cert, no TLS handshake.
-Anonymous visitors can't present one, so while the public router exists the
-Hub uses `authaware@file` for **all** of the app's routers instead
-(`policy.HostTier`). What still enforces mTLS:
+**Exceptions vs a required certificate.** A template that needs a
+certificate in every alternative normally gives the host `protected@file`.
+Anonymous visitors can't present a certificate, so while the public router
+exists the Hub uses `authaware@file` for **all** of the app's routers instead
+(`policy.HostTier`). What still enforces the certificate:
 
 | App type | Gated paths after the downgrade |
 |----------|---------------------------------|
-| `forward-auth` / `header-auth` | group-gate's [mTLS binding](#mtls-binding) requires a valid, unrevoked client certificate matching the user on **every** request, so mTLS stays enforced per request |
-| `native-oidc` (no group-gate on the host-wide router) | mTLS is only enforced **at login**, through the Keycloak `acr` (`mtls`). An existing app session works from a browser without the key |
+| `forward-auth` / `header-auth` | group-gate's [mTLS binding](#mtls-binding) requires a valid, unrevoked client certificate matching the user on **every** request, so the certificate stays enforced per request |
+| `native-oidc` (no group-gate on the host-wide router) | The certificate is only enforced **at sign-in**, by Keycloak's template check. An existing app session works from a browser without the key |
 | any router without group-gate | loses the handshake check; the Hub lists such routers in the warning |
 
 In mode `listed` with no listed share there is no public router and no
-downgrade. Policies that already give `authaware@file` or `public@file` are
+downgrade. Templates that already give `authaware@file` or `public@file` are
 unchanged.
 
-## Where policies are published
+## Where templates are published
 
-The Hub writes per-app policies into `group-gate-policy.json` (version 5) **keyed by every full hostname the instance routes** (never by template or instance ID); apps that inherit the default publish nothing and group-gate uses the file's `default`. A policy with an unknown factor or op makes group-gate deny the request (fail closed). Format: [Integration Contracts §4](../guides/integration-contracts.md#4-policy-file-hub-group-gate).
+The Hub compiles each enabled template against the methods that are on and
+publishes it three times, rewritten after every change:
 
-For native-OIDC apps the policy also sets the Keycloak client's `default.acr.values`, so Keycloak prompts for the right level at login.
+- **group-gate**: `group-gate-policy.json` (version 6), with the methods,
+  the templates, the default, each app's own pick keyed by every full
+  hostname it routes, and each core page's template, plus each person's
+  set-up methods and the add-stronger switch (these two only word
+  group-gate's pages, they never decide access). A missing file, one
+  group-gate can't read, another version, an unknown key, an unknown method
+  or rule shape, a method in a rule that isn't on, or a template a host names
+  but the file lacks makes it deny (fail closed). Format: [Integration Contracts §4](../guides/integration-contracts.md#4-policy-file-hub-group-gate).
+- **Keycloak**: `signin-keycloak.json`, with the methods, the templates, the
+  native-OIDC clients and their templates, and the FIDO list's verdicts. If
+  it is missing or invalid every method counts as off and nobody signs in
+  until the Hub writes a good one.
+- **mcp-gate**: `mcp-gate.json` (version 2), each AI resource with its rule
+  ([AI support](ai.md)).
+
+## Sign-in flows in Keycloak
+
+Keycloak runs Portcullis's own image, `ghcr.io/porelli/portcullis-keycloak`
+(`KEYCLOAK_IMAGE`, see [Upgrading](upgrading.md)): the official Keycloak plus
+the sign-in extension that enforces the methods and templates. It reads the
+Hub's `signin-keycloak.json` from the `hub_data` volume, mounted read-only at
+`/hub-data`. The realm's flows (`keycloak/realm-export.json`, rebuilt by
+[`./portcullis keycloak configure`](cli.md#keycloak-configure) whenever they
+change) have no Level-of-Authentication steps any more:
+
+- **Browser flow `portcullis-universal`**: the SSO cookie, the hidden setup-link
+  identity provider, or one sign-in method, then the **template check**
+  (`portcullis-template`) for the app that asked. The methods, tried in this
+  order:
+    - the **YubiKey certificate** (automatic when the browser presents one;
+      amr `mtls`),
+    - a **passkey**: Keycloak offers only the kinds that are on, and the kind
+      that signed in gives the amr (`hwk` security key, `dpk` device-bound,
+      `spk` synced),
+    - a **password** (amr `pwd`), only while the method is on, never for
+      `admin` and `portcullis-hub`.
+
+    Each method stays in the session's amr for 10 hours. A step-up
+    (`pc_method=<method>`) makes the other methods step aside, and the SSO
+    cookie hands a session that lacks the method back to the sign-in.
+- **Setup links** (`portcullis-invite-session`, the setup-link identity
+  provider's post-login flow): only for `portcullis-forward-auth`, then the
+  session gets amr `inv` (not a method, it meets no template) and the
+  template check.
+- **Brute-force protection** is on for the realm: after 10 failed sign-ins an
+  account waits 60 s more per further failure, at most 15 minutes, and is
+  never locked for good. Refused passwords of `admin` / `portcullis-hub` don't
+  count.
+- **Passkey registration** asks the authenticator for a direct attestation
+  (the extension decides the kind from it; a passkey without one registers as
+  synced), allows any authenticator attachment and requires a resident key and
+  user verification. The browser is given hints in the extension's order: the
+  security key first for `lldap_admin` members, the device first for everyone
+  else. Keycloak's stock two-factor WebAuthn registration is disabled.
+- `portcullis-forward-auth` has no default acr: group-gate asks for a method
+  with `pc_method`, never with `acr_values`.
 
 ## Identity
 
-Policies decide *how* a user signed in; *who* the user is always comes from the immutable LLDAP username (`preferred_username`, `X-Forwarded-User`), never from the email. LLDAP users can edit their own email, so Keycloak does not trust it (`trustEmail=false`) and nothing in Portcullis authorises or links accounts by it. See [Security & Hardening](hardening.md#header-spoofing-protections).
+Templates decide *how* a person signed in; *who* they are always comes from
+the immutable LLDAP username (`preferred_username`, `X-Forwarded-User`), never
+from the email. LLDAP users can edit their own email, so Keycloak does not
+trust it (`trustEmail=false`) and nothing in Portcullis authorises or links
+accounts by it. See [Security & Hardening](hardening.md#header-spoofing-protections).
 
 ## mTLS binding
 
-`amr=mtls` in a token only proves a certificate was used at login. When a policy is satisfied **only** through `mtls` (`mtls` alone, `all` including `mtls`, or `any` where `mtls` is the only factor in the token), group-gate additionally requires the current request to present an unrevoked client certificate whose CN equals the token's `preferred_username`. Otherwise the user gets the step-up page. A session opened with a since-revoked certificate, or replayed from a browser without the key, stops working at once. See [TLS & mTLS](../setup/certificates.md#mtls-binding-group-gate).
-
-## Enforcement map
-
-| Layer | Public | WebAuthn | mTLS | AND combinations | OR combinations |
-|-------|--------|----------|------|------------------|-----------------|
-| Traefik | `public` | `authaware` | `protected` | `protected` if `mtls` in set | `authaware` unless mTLS-only |
-| Keycloak | none | LoA 2 flow | LoA 3 flow | highest LoA + step-up | lowest LoA (any satisfies) |
-| group-gate | no factor check | require `hwk ∈ amr` | require `mtls ∈ amr` + mTLS binding | require all factors in `amr` (+ binding if `mtls`) | require `amr ∩ factors ≠ ∅` (+ binding if only `mtls` matched) |
-
-The table is per factor of the **effective** policy; which layers apply
-depends on the auth method ([above](#what-each-app-can-enforce)).
-
-## LLDAP passwords
-
-The browser flow never asks for an LLDAP password. LLDAP passwords remain for LLDAP's own web UI and for apps that bind to LDAP themselves. They are no policy factor.
-
-## Caveats
-
-- **`acr_values` is advisory at Keycloak.** The OIDC spec treats it as a hint; Keycloak only hard-rejects when a client requests via the `claims` parameter with `essential: true`. Portcullis uses the LoA conditional executors instead, which hard-fail when the user can't satisfy the level (e.g. asking for `mtls` without a certificate). `group-gate` *also* verifies `acr`/`amr` from the issued token as a belt-and-braces check — trust doesn't depend on Keycloak honoring the request.
-- **Session LoA accumulates.** Once a user steps up to LoA 3 via mTLS, every subsequent app within the same session sees `acr=mtls` and `amr ⊇ [mtls, ...]`. Stricter apps pass without additional prompts. Loosening policies mid-session doesn't downgrade the session.
-- **`max_age` in the LoA conditions** is 10 hours (matching the session lifespan). Lower this in `realm-export.json` if you want the re-prompt window to be shorter.
+A YubiKey certificate in the session (`amr=mtls`) only proves a certificate
+was used at sign-in. group-gate counts the **YubiKey certificate** method
+only while the current request presents an unrevoked client certificate whose
+CN equals the session's `preferred_username` (and the token's
+`preferred_username` is the same user). Without it the method is missing: a
+template the certificate would meet shows the present-certificate page
+([above](#present-your-yubikey-certificate)), any other the step-up or
+needs-stronger page. A session opened with a since-revoked certificate, or replayed from a
+browser without the key, stops meeting such a template at once. See
+[TLS & mTLS](../setup/certificates.md#mtls-binding-group-gate).
 
 ## Troubleshooting
 
-**"Step up required" page from group-gate**
-Your session is missing the factor(s) the app requires. Click the link in the page body to re-authenticate at the right level.
+**"&lt;App&gt; needs …" page from group-gate**
+Your session is missing a method the app's template needs. Press
+**Continue**, or set the method up from the page's links.
 
-**Client cert prompt loops indefinitely**
-Your browser may not be sending the client certificate. Check that the cert is imported into your OS/keychain and that the origin matches the Traefik wildcard (`*.<your-domain>`).
+**Client certificate prompt loops indefinitely**
+Your browser may not be sending the client certificate. Check that the
+certificate is imported into your OS/keychain and that the origin matches the
+Traefik wildcard (`*.<your-domain>`).
 
-**Keycloak login form appears when you expected SSO**
-The session cookie expired (8 hours idle / 12 hours max by default). Re-authenticate.
+**Keycloak sign-in page appears when you expected single sign-on**
+The session cookie expired (8 hours idle / 12 hours max by default), or the
+app's template needs a method your session doesn't have yet.
 
-**AND policy keeps failing even after a WebAuthn step-up**
-Check that the `acr` client scope is attached to the app's Keycloak client and that the `acr loa level` protocol mapper has `Add to access token = true`. `./portcullis keycloak configure` does this for `portcullis-forward-auth`, and the Hub attaches the `acr` and `groups` scopes to every client it registers; a manually-created client may be missing them.
+**Nobody can sign in at all**
+Keycloak couldn't read `signin-keycloak.json`: every method counts as off.
+Check the Hub is running (it writes the file at start); if the Hub itself is
+unreachable because of its template, run `./portcullis signin reset-core`.

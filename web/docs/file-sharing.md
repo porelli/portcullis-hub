@@ -5,7 +5,7 @@ Portcullis provides SMB3 file sharing through the Samba and Time Machine templat
 ## How It Works
 
 - **Per-person passwords:** Each person has their own password for file sharing, separate from their Portcullis sign-in. Admins list and revoke credentials but never create them (an admin who created one would have seen it).
-- **Self-service:** People create and regenerate their passwords on [My apps](hub.md#my-apps) (`https://people.<domain>`). A fresh hardware sign-in (passkey touch) is required for each create or regenerate.
+- **Self-service:** People create and regenerate their passwords on [My apps](hub.md#my-apps) (`https://people.<domain>`). A fresh sign-in (any passkey kind or a YubiKey certificate, each only while its method is on) is required for each create or regenerate.
 - **No web page:** File-sharing apps serve only SMB3 (no HTTP), so they appear without hostnames in the app catalog.
 - **Hub-allocated ids:** Each person gets a stable Unix uid (20000–59999), allocated once and never reused. Files land as `<person's uid>:<folder's gid>`.
 

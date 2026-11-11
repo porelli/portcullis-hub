@@ -1,7 +1,7 @@
 # Hub Management
 
 The Hub is Portcullis's web dashboard for app templates. It lists the catalog,
-enables and disables apps, edits their settings and access policies, and shows
+enables and disables apps, edits their settings and sign-in templates, and shows
 status and logs. It is published as `ghcr.io/porelli/portcullis-hub` and run by
 the core `docker-compose.yml` (`HUB_IMAGE`). There is nothing to build.
 
@@ -114,7 +114,7 @@ Before anything starts, the Hub refuses to enable an instance if:
   0.0.0.0:3300/tcp already claimed by enabled app …"), or
 - one of its hostnames is already used by another instance, enabled or not, or
   is still routed by one (HTTP 409). Every hostname has exactly one owner,
-  because group-gate keys groups and policies by full hostname (policy v5).
+  because group-gate keys groups and templates by full hostname (policy v6).
 - a bound group (one chosen at setup as "Existing groups") that was a valid users group at creation is now built-in, administrator, or a permission group (HTTP 409, "can't start")
 
 When groups mode is "new", it creates the instance's **missing access and admin groups** in LLDAP, as you
@@ -130,7 +130,7 @@ directory to `<core>/templates/<app-id>/` (shared by all instances), registers t
 clients (a client ID owned by another template or by nobody provable aborts
 the enable with HTTP 409, see [Keycloak clients](#keycloak-clients)) and runs
 `docker compose up`. The instance is recorded as enabled only after
-`compose up` succeeds. Then the Hub publishes its group, admin paths and policy
+`compose up` succeeds. Then the Hub publishes its group, admin paths and template
 to group-gate.
 
 The Hub can't test host ports outside Docker from inside its container (a
@@ -335,22 +335,18 @@ Every instance, including the default instance, gets the same page structure. De
   warning and adds an `app.sign_in` entry (actor, `gateway -> native`) to the
   audit log, refusals included. See
   [Apps with their own login](auth-policies.md#apps-with-their-own-login).
-- The **access policy** block, capability-aware (see
-  [What each app can enforce](auth-policies.md#what-each-app-can-enforce)):
-    - *Inherit global default* is ticked for every app without an override.
-      While it is, the boxes are disabled and show the **effective** policy
-      (global default ∩ what the app can enforce), with the TLS tier and notes:
-      how the app enforces it (per request, at login, at the TLS handshake),
-      and what differs from the global default, including a default the app
-      can't enforce at all.
-    - Unticked, only the factors the app supports can be checked (mTLS and
-      WebAuthn; mTLS only for `mtls` apps), with any-of or all-of. The Hub
-      refuses other factors with a `400` naming them.
-    - Apps that handle their own sign-in (`custom` without Portcullis
-      sign-in, `public`) show the block disabled: "This app handles its own
-      sign-in".
-    - There is no password factor. A stored policy that names `password` is
-      normalised (never weaker) and the block says so until it is saved.
+- The **Sign-in template** drop-down (see
+  [Sign-in methods and templates](auth-policies.md#default-per-app-and-core-pages)):
+  *Default (Standard · 2.5 / 5)* or any enabled template, each with its
+  score. Below it: the sentence of the chosen rule, how the app enforces it
+  (per request, at sign-in, at the TLS handshake), whether browsers are asked
+  for a client certificate, and the members of the app's users and admins
+  groups who have no method set up that meets it. Apps without a Portcullis
+  sign-in (`custom` without it, `public`, own login only) and `mtls` apps show
+  no drop-down: "This app handles its own sign-in" / "The client certificate
+  is this app's sign-in". A disabled template can't be picked (`409`), and a
+  pick that would switch AI support off asks first. Saved as
+  `sign_in_template` (audited `settings.change`, scope `sign_in_template`).
 - The app's **options**, declared by the template under `settings:`: one
   value for the instance, values per group that the Hub resolves per person,
   secrets, per-group records and values each person enters. See
@@ -363,8 +359,9 @@ Every instance, including the default instance, gets the same page structure. De
 
 One **Save** sends everything you changed in the tab. The save bar says what
 saving does (for example "Saving restarts Immich" or "Takes effect at each
-person's next sign-in; no restart"). A sign-in, access-policy or
-public-exception change restarts the app.
+person's next sign-in; no restart"). A sign-in mode or public-exception
+change restarts the app; a sign-in template change restarts it only when its
+client-certificate request changes.
 
 Input validation:
 
@@ -456,7 +453,7 @@ docker compose -p portcullis-<id> \
    the template in its source (see [Template sources](#template-sources)).
 2. **Hub override** (read-only). Generated from Settings and regenerated
    before every `compose up`: bind mounts, host ports, each router's
-   `tls.options` derived from the access policy, router middlewares for instances
+   `tls.options` derived from the sign-in template, router middlewares for instances
    with their own login, and the public-exception router with its strip
    middleware when on. Never hand-edited.
 3. **Custom override** (editable). Your own additions, stored by the Hub per
@@ -525,7 +522,7 @@ env values). The file is mode 0600.
 
 The Hub refuses anything that would bypass Portcullis' routing or isolation.
 group-gate keys every policy and group by the full hostnames of the
-instance's Traefik routers (policy v5), and the Hub's override sets each router's TLS
+instance's Traefik routers (policy v6), and the Hub's override sets each router's TLS
 options and middlewares, so the custom override may not change them:
 
 - **Top level:** only `services`, `volumes`, `networks`. Must be a mapping;
@@ -609,14 +606,14 @@ block (bordered in amber):
   headers, cookies or query parameters (an app user signed in with
   "remember me" opens shares in a private window), and the Hub strips
   identity headers;
-- if the app's policy requires a client certificate at the TLS handshake
+- if the app's template requires a client certificate at the TLS handshake
   (`protected@file`), an amber warning that **all** of the app's routers use
   `authaware@file` while a public path is open. For native-OIDC apps it adds
-  that mTLS is then only enforced at login (Keycloak acr); for forward-auth /
+  that the certificate is then only enforced at sign-in (Keycloak's template check); for forward-auth /
   header-auth apps that group-gate still checks the client certificate on
   every gated request; and it lists routers without group-gate, which lose
   the handshake check. See
-  [Auth policies → Public exceptions](auth-policies.md#public-exceptions).
+  [Sign-in methods → Public exceptions](auth-policies.md#public-exceptions).
 
 Controls:
 
@@ -681,7 +678,7 @@ From top to bottom:
    shows its label, when a change takes effect ("applies: at the next
    sign-in", "applies: after a restart", …), its description and any
    warnings.
-3. Host ports, the sign-in block, the access policy and public exceptions
+3. Host ports, the sign-in block, the sign-in template and public exceptions
    (see [Settings](#settings)).
 4. The **save bar**.
 
@@ -935,7 +932,7 @@ A template can run as multiple fully independent **instances**. Each instance ha
 - settings, environment variables and generated secrets
 - Keycloak clients (one per manifest `keycloak_clients` entry)
 - access and admin groups (`users_<id>`, `admin_<id>`, or bound existing groups)
-- auth policy, public exceptions and sign-in mode
+- sign-in template pick, public exceptions and sign-in mode
 - drift tracking and last-operation record
 
 Templates declare `instances: multi` or `instances: single` in their manifest.
@@ -1007,7 +1004,7 @@ When you save, the Hub:
 3. Regenerates the instance's `.env` and compose override with the new hostnames
 4. Saves the instance state (**commit point** — if this succeeds, the old
    hostnames are gone)
-5. Publishes the new policy to group-gate and updates the portal
+5. Publishes the new hostnames to group-gate and updates the portal
 6. Restarts the instance if it is enabled
 
 The change is audited as `instance.update` with the acting administrator. If
@@ -1095,8 +1092,8 @@ instance on an enrolled domain:
 2. `forward-auth-ext` redirects to Keycloak with a relative callback
    `/oauth2/callback` (resolved to `https://<enrolled host>/oauth2/callback`)
 3. The user's existing Keycloak session at `auth.<main domain>` satisfies the
-   sign-in **silently** (no prompt) unless the instance's policy needs a stronger
-   factor than the session has (then it prompts for step-up, as on the main
+   sign-in **silently** (no prompt) unless the instance's template needs a
+   method the session lacks (then it prompts for step-up, as on the main
    domain)
 4. Keycloak redirects back to `https://<enrolled host>/oauth2/callback`
    (the Hub maintains these URIs in the `portcullis-forward-auth` client's
@@ -1136,7 +1133,7 @@ delete. Backups, restores and deletes run in the background: the API answers
 
 - the instance's **Docker volumes** (using helper containers, never starting
   them, with the owner uid/gid preserved)
-- its state, settings, `.env`, custom override and published policy
+- its state, settings, `.env`, custom override and sign-in template pick
 
 Backups are stored in `<data>/backups/<instance-id>/<YYYYMMDDTHHMMSSZ>.tar`
 (sha256-checksummed). Core's `./portcullis backup` includes the `backups/`
@@ -1219,7 +1216,7 @@ The Hub:
   settings first, and add members to its new, empty groups); a restore the Hub didn't finish (it stopped half-way) is removed at the
   next Hub start (its groups may remain, logged)
 - creates new volumes (labelled with the new project) and fills them from the
-  archive; restores the archive's settings, policy, public exceptions and share
+  archive; restores the archive's settings, sign-in template pick, public exceptions and share
   tokens, sign-in mode, custom override and env, with the instance variables
   rewritten for the new id
 - regenerates each Keycloak client's secret (`secret_env`)
@@ -1278,21 +1275,31 @@ Deleting the default instance deletes the template's deployment, just like
 disabling it did before instances existed.
 ## Settings tab (global)
 
-- **Default access policy.** Applies to every app without its own policy.
-  **Until an admin saves one, the default is a YubiKey by either method**,
-  `any of [mtls, webauthn]`: a client certificate or a passkey. Apps without
-  their own policy get `authaware@file`, and Keycloak steps up to at least
-  LoA 2 (`hwk`). A certificate sign-in (`mtls`) satisfies it too.
-  You can still choose a public default explicitly. That choice is stored and
-  honoured, and differs from "never set". The default may name both factors;
-  each app enforces what it can of it (an `mtls` app always requires the
-  certificate, apps with their own sign-in get none). `password` is refused.
-  Changing it re-applies it to every enabled app that inherits it, and
-  restarts only the apps whose Traefik TLS tier actually changed. Saving an
-  unchanged default does nothing.
+- **Sign-in** ([Sign-in methods and templates](auth-policies.md)):
+    - **Methods**: the six sign-in methods, each with its strength, how many
+      people have it set up, and an on / off switch. Password and browser
+      certificate start off; the browser certificate can't be switched on yet.
+      Switching off a method an enabled template needs is refused and lists the
+      templates and their uses.
+    - **Templates**: the built-in Basic, Standard, Strong and YubiKey +
+      certificate, and your own (**+ New template**), each with its score
+      (`2.9 / 5` and a one-line reason), its enabled switch and what uses it.
+      The editor shows the rule as nested boxes and one sentence, the score
+      and who it would leave out, all live; built-ins can be edited and
+      disabled, never deleted.
+    - **Default template** (Standard at the start) and **Core pages** (the
+      portal, the Hub, people.&lt;domain&gt;, directory, enroll, metrics,
+      Traefik; the Hub and people start on Strong).
+    - **Add a stronger method from a weaker sign-in** (off at the start).
+    - A warning when the FIDO metadata list is out of date, and "No
+      administrator can meet the Hub's template" when that is the case.
 
-Saving a default that would switch AI support off somewhere (a policy that
-needs mTLS) first asks, listing the instances (`POST /api/settings/preview`).
+    A save that would leave no administrator able to meet the Hub's template
+    is refused (recovery: [`./portcullis signin reset-core`](cli.md#signin-reset-core)).
+    A change that would switch AI support off somewhere (a template that
+    needs a certificate in every alternative) first asks, listing the
+    instances. Changing a certificate method or a template restarts only the
+    apps whose client-certificate request changes.
 
 The tab also has **AI support** (the master switch, AI clients, the
 Portcullis MCP, connection length, rate limits, allowed origins and the model
@@ -1724,7 +1731,7 @@ Delegates cannot target themselves, administrators, the protected accounts (`adm
 
 The **People** table shows every LLDAP user, with the custom field columns, groups (⚡ = matches the rule, ✱ = added by hand, ⏳ = the membership ends), Keycloak status (passkey count, required actions; admins only) and a search box. Clicking a row opens the person's page.
 
-**Invite** (admins and delegates with the `invite` permission): creates a new user. Username (lowercase letters, digits, `.`, `_`, `-`; at least 2 characters), email, display name and groups (admins only). The user gets a **one-time invite link** (shown once, expires in 72 h): they register their passkey and are signed in, no password. Administrators get no invite links; the Hub shows `./portcullis invite <user>` (server only). Under **Advanced**, admins can use a password fallback instead (generated or typed; 12 to 256 characters).
+**Invite** (admins and delegates with the `invite` permission): creates a new user. Username (lowercase letters, digits, `.`, `_`, `-`; at least 2 characters), email, display name and groups (admins only). The user gets a **one-time invite link** (shown once, expires in 72 h): they register their passkey and are signed in, no password. Administrators get no invite links; the Hub shows `./portcullis invite <user>` (server only). Under **Advanced**, admins can use a password fallback instead (generated or typed; 12 to 128 characters, not the username, not a common password; refused while the [password method](auth-policies.md#password) is off).
 
 The groups pick lists rule-based groups too. A ticked rule-based group shows its rule and either "they match the rule: nothing else needed" or, when the new person won't match it, a required **Reason**: they join it as [added by hand](groups.md#added-by-hand-and-kept-out). After the invite the new person's page opens; if the groups couldn't be applied yet (LLDAP down), it says "saved, not applied yet: …". A delegate's new account has no groups; filling in fields can make it match rule-based groups.
 
@@ -1880,7 +1887,8 @@ something personal for them, sorted by id, each with its link:
   password per app instance. The card shows the address to connect to
   (for example `smb://nas.home.arpa/Home`) and the username.
     - **Create password** (when there is none): a popup asks the person to
-      sign in again with their hardware key. This is a **fresh** sign-in,
+      sign in again with a passkey or YubiKey certificate (a method that is
+      switched on). This is a **fresh** sign-in,
       even if they signed in a minute ago, and the Hub accepts it only if
       it is at most 5 minutes old. The Hub then generates a 24-character
       random password and shows it **once**, as 6 groups of 4 joined by
@@ -2059,7 +2067,7 @@ If Docker is unreachable, the report carries `error` and the UI shows
 
 Drift must never open access. That is why `state.yaml` keeps a **snapshot**
 (`published`) of each enabled app's last published config: hostnames, access
-group, admin paths, policy override, whether it ran with its own login only
+group, admin paths, sign-in template pick, whether it ran with its own login only
 (then no group is published: its routers have no group-gate) and the public
 paths it opened (with `{token}`). The containers keep the public router they were started with, so
 the snapshot keeps showing it in the policy file's `public_paths`.
@@ -2093,8 +2101,8 @@ Templates must load cleanly, or the Hub skips them and logs why:
 - `auth.method` must be one of the schema's methods; `auth.native_login`
   only with `method: custom`, `sso: false` and `supported: true`.
 
-**Strict Traefik rule parsing.** group-gate keys every policy, group and path
-rule by full hostname (policy v5). A host the Hub doesn't see would get no
+**Strict Traefik rule parsing.** group-gate keys every template, group and path
+rule by full hostname (policy v6). A host the Hub doesn't see would get no
 policy and no group, which fails open. So the Hub parses each
 `traefik.http.routers.<name>.rule` label in `compose.yml` (template contract
 v2, [contracts §3.1](../guides/integration-contracts.md#31-template-contract-v2-instances-and-hostname-variables-new-contract-v2)) and rejects the template if:
@@ -2129,9 +2137,8 @@ clients in the `portcullis` realm. Each client gets:
 
 - the secret from the app's generated env
 - the manifest's redirect URIs, with `{{DOMAIN}}` replaced
-- `default.acr.values` set from the app's policy
 - the default client scopes `openid`, `profile`, `email`, plus **`acr`** (puts
-  `acr`/`amr` in tokens for step-up) and **`groups`** (claim `groups` with
+  `acr`/`amr` in tokens; `amr` names the sign-in methods used) and **`groups`** (claim `groups` with
   plain group names, so apps can map `users_<app>` / `admin_<app>`)
 - with `email_verified_claim: false` in the manifest, **`email-unverified`**
   instead of `email` (claim `email`, no `email_verified`; created by
@@ -2142,7 +2149,7 @@ clients in the `portcullis` realm. Each client gets:
 
 **Ownership.** Each client the Hub creates is tagged with the attribute
 `portcullis.hub.template=<template-id>`. When the client already exists, the
-Hub updates its secret, redirect URIs, ACR and scopes only if:
+Hub updates its secret, redirect URIs and scopes only if:
 
 - **the client is tagged** and the tag names this template, or
 - **the client is untagged** and the Hub can prove it belongs to the template.
@@ -2245,8 +2252,8 @@ sources you trust.
   (0640, group 10001) for the gate, and keeps `<data>/ai/` (provider secrets,
   the `app_oauth` records, minted-but-unstored ids, who could use AI; 0600).
   At start it sets every other file of its data directory with a group or
-  other bit to 0600 (the policy, portal and attribute files stay 0644
-  without write bits). A hostname change moves the companion scopes' audience
+  other bit to 0600 (the policy, portal, attribute and `signin-keycloak.json`
+  files stay 0644 without write bits). A hostname change moves the companion scopes' audience
   with the Keycloak redirect URIs and holds the AI scope pass until it
   commits. Instance backups carry `config/ai.json` (switches, modes and the
   provider selection, never a credential or an internal flag).
@@ -2290,14 +2297,19 @@ sources you trust.
   The Hub reads only domain status (records OK, certificate expiry) from the
   service's API. See [Domains service](#domains-service) below.
 - **Timeouts.** compose up 15 min, compose down 5 min, shell 15 min, git 5 min.
-- **Policy file.** The Hub writes `group-gate-policy.json` (version 5)
+- **Policy file.** The Hub writes `group-gate-policy.json` (version 6)
   atomically to `hub_data`. It is keyed **by full hostname**:
-    - `policies` for instances with an override (instances that inherit publish
-      nothing; group-gate uses `default`)
+    - `methods`, `templates` (every enabled template, compiled) and `default`
+    - `hosts` for instances with their own template pick (instances on the
+      default publish nothing; group-gate uses `default`)
+    - `core` for every gated core page's template
     - `groups` for enabled instances with `group_access: true`
     - `path_groups` from `auth.admin_paths`
     - `extra_domains` lists enrolled domains
-    - core hosts are never published (they come from `group-gate-map.conf`)
+    - core hosts' groups are never published (they come from `group-gate-map.conf`)
+
+    Next to it the Hub writes `signin-keycloak.json` (0644), which Keycloak's
+    sign-in extension reads (methods, templates, native-OIDC clients, FIDO list).
 
     The format is defined in [Integration Contracts §4](../guides/integration-contracts.md#4-policy-file-hub-group-gate).
 

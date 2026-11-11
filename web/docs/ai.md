@@ -53,9 +53,10 @@ has an **AI support** section.
   the internet. Settings → AI says so. Claude Code and other local clients
   connect from the person's machine, so a LAN-only install works for them.
 - **No client certificate.** No MCP client can present the person's YubiKey
-  certificate, so an app whose effective policy needs mTLS (LoA 3) can't get
-  AI support (the switch is refused with "needs a client certificate on every
-  request; AI clients can't present one"). Saving a policy that reaches LoA 3
+  certificate, so certificate methods never count for AI, and an app whose
+  [sign-in template](auth-policies.md) needs a certificate in every
+  alternative can't get AI support (the switch is refused with "needs a client
+  certificate on every sign-in"). A sign-in change that would make it so
   switches AI support off on that app first, and the preview lists it.
 - **Rate limits are per person**, not per IP: every hosted Claude user comes
   from Anthropic's range. Core's `rate-limit@file` (per source IP) still
@@ -114,7 +115,7 @@ Each instance page has an **AI** tab (deep link
   (its router labels change); the tab says so before you save. On a disabled
   app the switch only saves the state.
 - **Status**: *on*, *off*, *failed* (with the last error), *unavailable*
-  (switched on but refused now: master off, LoA 3), *revoking* (off, a
+  (switched on but refused now: master off, a template that needs a certificate), *revoking* (off, a
   `revoke_all` is owed — at the next start, or after a template update, see
   the Doctor) and *revoke pending* (on, but kept off until the app's next
   start revokes its earlier credentials).

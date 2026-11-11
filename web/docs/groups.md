@@ -254,7 +254,7 @@ and both are re-read on every request:
     `PORTCULLIS_DOMAIN`). Edits take effect on the next request; no restart is
     needed.
 
-2. **The Hub's `group-gate-policy.json`** (version 5, on the `hub_data` volume)
+2. **The Hub's `group-gate-policy.json`** (version 6, on the `hub_data` volume)
    has a `groups` map keyed by **full lowercase hostname**. The Hub rewrites it
    whenever an instance is enabled, disabled or reconfigured. For every
    **enabled** instance with `auth.group_access: true`, each hostname it
@@ -293,16 +293,18 @@ order and stops at the first failure:
 3. **Revocation.** If the request carries a client certificate (via
    `client-headers@file`, which must come before `portcullis-groups@docker`),
    its serial must not be revoked. See [TLS & mTLS](../setup/certificates.md#revocation).
-4. **Auth policy.** If the app has a policy (or there is a global default),
-   the session's `acr`/`amr` must satisfy it. Otherwise group-gate returns the
-   step-up page. Policies satisfied only through `mtls` also need the current
-   request's certificate to match the user (mTLS binding). See
-   [Authentication Policies](auth-policies.md).
-5. **Group.** It looks up the hostname's required group (`users_grafana`) and
+4. **Group.** It looks up the hostname's required group (`users_grafana`) and
    compares it with `X-Auth-Request-Groups` (set by oauth2-proxy). The header
    is split on commas only, and the match must be exact.
-6. **Path rules.** If the hostname has `path_groups`, the group of the matching
+5. **Path rules.** If the hostname has `path_groups`, the group of the matching
    path rule is required **in addition** (see below).
+6. **Sign-in template.** Only after the group and path checks (someone outside
+   the app's groups gets the plain 403, never a page naming the app's rule):
+   the session's sign-in methods must meet the template the app (or core page)
+   uses. Otherwise group-gate returns the step-up or needs-stronger page. A
+   YubiKey certificate counts only when the current request presents a
+   certificate whose CN is the user (mTLS binding). See
+   [Sign-in methods](auth-policies.md).
 7. **Allow.** It returns `200 OK` and sets `X-Forwarded-User` /
    `X-Auth-Request-User` (the LLDAP username), `X-Forwarded-Email` /
    `X-Auth-Request-Email` and `X-Auth-Request-Groups` for the backend.
@@ -314,8 +316,8 @@ order and stops at the first failure:
 "public":
 
 - a policy file that exists but can't be parsed
-- a `version` other than 5 (older files are denied too)
-- an unknown factor, op or rule shape
+- a `version` other than 6 (older files are denied too)
+- an unknown method, template or rule shape
 
 If a hostname has no mapping at all, group-gate allows any authenticated user
 and logs `ALLOW-UNMAPPED`. This is the passthrough for apps without group-based
