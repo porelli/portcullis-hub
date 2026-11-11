@@ -83,7 +83,11 @@ func (s *Server) registerSignInHelpTools() {
 				}
 				return map[string]string{"status": "revoked", "user": strings.ToLower(in.Username), "serial": in.Serial}, nil
 			}), usernameOf, revokeConsequences)
-		t.Precheck = s.helpPrecheck
+		// The route's own target check (review m3): 403, the protected
+		// names' and administrators' 409s, 404 — before any confirmation.
+		t.Precheck = func(ctx context.Context, c *directory.Caller, args json.RawMessage) error {
+			return s.Hub.CheckCertTarget(ctx, c, usernameOf(args))
+		}
 		if scope == ScopePeople {
 			t.Scope, t.Perm = ScopePeople, directory.PermSignInHelp
 		}
@@ -98,7 +102,7 @@ func (s *Server) registerSignInHelpTools() {
 				return nil, err
 			}
 			out := s.safeResult(in.Username, "removed", res)
-			out["setup_link"] = s.personSignInPage(strings.ToLower(in.Username))
+			out["page"] = s.personSignInPage(strings.ToLower(in.Username))
 			return out, nil
 		}), usernameOf, func(_ context.Context, args json.RawMessage) []string {
 		return []string{"Removes every passkey of " + argField(args, "username") + " and signs them out everywhere."}

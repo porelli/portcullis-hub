@@ -237,6 +237,9 @@ type Service struct {
 	previewMu sync.Mutex
 	previewSn *snapshot
 	previewAt time.Time
+	// afterGate (tests only, SetAfterGateForTest) runs in run between
+	// gate and the action.
+	afterGate func()
 }
 
 // Error carries an HTTP status for the API layer.
@@ -1021,6 +1024,9 @@ func (s *Service) runAs(ctx context.Context, c *Caller, perm string, action *str
 	if err != nil {
 		err = &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 	} else if err = s.gate(ctx, c, perm, target); err == nil {
+		if s.afterGate != nil {
+			s.afterGate() // tests: a change between gate and the action
+		}
 		err = fn()
 		done = err == nil
 	}
@@ -1879,6 +1885,11 @@ func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confi
 		id, sn, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
+		}
+		// A holder's target is checked again on the snapshot this action
+		// uses (review m1: promoted since gate's).
+		if !c.Admin && s.isAdministrator(sn, id) {
+			return forbidden("not allowed: %s is an administrator (admins only)", id)
 		}
 		// Always confirmed; flagged in the audit entry for another admin.
 		if err := s.checkAdminTakeover(sn, c.User, id, confirm, &detail); err != nil {

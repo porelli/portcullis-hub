@@ -135,6 +135,8 @@ func TestHelpScope(t *testing.T) {
 		{"bob", "DELETE", "/api/directory/users/ann/certificates/0c:01", ``},
 		{"bob", "POST", "/api/directory/users/dana/remove-passkeys", `{"confirm":"dana"}`},
 		{"bob", "GET", "/api/directory/users/dana/signin", ``},
+		{"bob", "GET", "/api/directory/users/ann/signin", ``},
+		{"bob", "GET", "/api/directory/users/root/signin", ``},
 		{"carol", "POST", "/api/directory/users/alice/remove-passkeys", `{"confirm":"alice"}`},
 		{"carol", "DELETE", "/api/directory/users/alice/certificates/0a:01", ``},
 		{"carol", "GET", "/api/directory/users/alice/signin", ``},
@@ -327,6 +329,20 @@ func TestHelpToolClasses(t *testing.T) {
 	// A target hal may not help (root, an administrator): 403 at once.
 	if txt, isErr := e.people(t, "hal", "revoke_person_certificate", map[string]any{"username": "root", "serial": "01"}); !isErr || !strings.HasPrefix(txt, "403: ") || strings.Contains(txt, "/confirm/") {
 		t.Errorf("hal → root = %s", txt)
+	}
+	for _, tool := range []string{"remove_passkeys", "person_sign_in"} {
+		if txt, isErr := e.people(t, "hal", tool, map[string]any{"username": "root"}); !isErr || !strings.HasPrefix(txt, "403: ") || strings.Contains(txt, "/confirm/") {
+			t.Errorf("hal %s root = %s", tool, txt)
+		}
+	}
+	// The admin's revoke: the protected names' and administrators' 409s
+	// before any confirmation (review m3).
+	e.ll.AddUser("ann", "ann@example.org", "Ann", "", "lldap_admin")
+	for _, u := range []string{"ann", "admin", "portcullis-hooks"} {
+		txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "revoke_person_certificate", map[string]any{"username": u, "serial": "01"}, nil))
+		if !isErr || !strings.HasPrefix(txt, "409: ") || strings.Contains(txt, "/confirm/") {
+			t.Errorf("root revoke %s = %s", u, txt)
+		}
 	}
 	if txt, isErr := e.people(t, "alice", "revoke_person_certificate", map[string]any{"username": "bob", "serial": "01"}); !isErr || !strings.HasPrefix(txt, "403: not allowed: needs sign_in_help") {
 		t.Errorf("alice → bob = %s", txt)

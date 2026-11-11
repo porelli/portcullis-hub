@@ -155,3 +155,79 @@ func TestAdminTakeoverUnchanged(t *testing.T) {
 		t.Errorf("holder password = %v", err)
 	}
 }
+
+// TestDelegatesNeverReserved (review I1): no delegate, whatever the
+// permission, acts on a reserved portcullis-* account (403), even one
+// that is no administrator.
+func TestDelegatesNeverReserved(t *testing.T) {
+	e := helpEnv(t)
+	e.ll.AddUser("portcullis-breakglass", "bg@example.org", "Break glass", "")
+	e.kc.Import("portcullis-breakglass", kctest.Credential{ID: "b", Type: "webauthn-passwordless"})
+	cfg, _ := e.svc.Store.Load()
+	cfg.CreatedBy["portcullis-breakglass"] = "ivy"
+	e.svc.Store.Save(cfg)
+	const u = "portcullis-breakglass"
+	r := func(_ *directory.Result, err error) error { return err }
+	for name, err := range map[string]error{
+		"edit_details UpdateUser":       e.svc.UpdateUser(ctx, callerFor(t, e, "eddie"), u, strptr("x@example.org"), nil),
+		"invite SendInvite":             r(e.svc.SendInvite(ctx, callerFor(t, e, "ivy"), u)),
+		"remove DeleteUser":             r(e.svc.DeleteUser(ctx, callerFor(t, e, "rex"), u, u)),
+		"sign_in_help CheckHelp":        e.svc.CheckHelp(ctx, callerFor(t, e, "helga"), u),
+		"sign_in_help SendInvite":       r(e.svc.SendInvite(ctx, callerFor(t, e, "helga"), u)),
+		"sign_in_help RemovePasskeys":   r(e.svc.RemovePasskeys(ctx, callerFor(t, e, "helga"), u, u, false)),
+		"sign_in_help CheckDelegate":    e.svc.CheckDelegate(ctx, callerFor(t, e, "helga"), directory.PermSignInHelp, u),
+		"remove CheckDelegate (MCP)":    e.svc.CheckDelegate(ctx, callerFor(t, e, "rex"), directory.PermRemove, u),
+		"edit_details CheckDelegate":    e.svc.CheckDelegate(ctx, callerFor(t, e, "eddie"), directory.PermEditDetails, u),
+		"sign_in_help remove, PORTCULL": r(e.svc.RemovePasskeys(ctx, callerFor(t, e, "helga"), "Portcullis-Breakglass", "Portcullis-Breakglass", false)),
+	} {
+		if status(err) != 403 || !strings.Contains(err.Error(), "reserved account") {
+			t.Errorf("%s = %v", name, err)
+		}
+	}
+	if !e.ll.HasUser(u) || len(e.kc.Get(u).Credentials) != 1 {
+		t.Error("the reserved account was changed")
+	}
+	// Admins keep today's rules: an admin removes its passkeys.
+	if _, err := e.svc.RemovePasskeys(ctx, asRoot, u, u, false); err != nil {
+		t.Errorf("admin = %v", err)
+	}
+}
+
+// TestHelpNeverAdministrators (review m5): a holder against an
+// administrator from lldap_password_manager or from a core-subdomain
+// group (group-gate-map.conf) is refused.
+func TestHelpNeverAdministrators(t *testing.T) {
+	e := helpEnv(t)
+	e.ll.AddGroup("lldap_password_manager")
+	e.ll.AddGroup("ops_admins")
+	e.ll.AddUser("pm", "pm@example.org", "", "", "lldap_password_manager")
+	e.ll.AddUser("otto", "otto@example.org", "", "", "ops_admins")
+	helga := callerFor(t, e, "helga")
+	for _, u := range []string{"pm", "otto"} {
+		e.kc.Import(u, kctest.Credential{ID: "k-" + u, Type: "webauthn-passwordless"})
+		if err := e.svc.CheckHelp(ctx, helga, u); status(err) != 403 || !strings.Contains(err.Error(), "is an administrator") {
+			t.Errorf("CheckHelp(%s) = %v", u, err)
+		}
+		if _, err := e.svc.SendInvite(ctx, helga, u); status(err) != 403 {
+			t.Errorf("invite %s = %v", u, err)
+		}
+		if _, err := e.svc.RemovePasskeys(ctx, helga, u, u, false); status(err) != 403 {
+			t.Errorf("remove passkeys %s = %v", u, err)
+		}
+	}
+}
+
+// TestHelpRemovePasskeysPromotionRace (review m1): alice promoted to
+// administrator between gate and the action — the action's own snapshot
+// refuses the holder; nothing is removed.
+func TestHelpRemovePasskeysPromotionRace(t *testing.T) {
+	e := helpEnv(t)
+	helga := callerFor(t, e, "helga")
+	directory.SetAfterGateForTest(e.svc, func() { e.ll.AddMember("lldap_admin", "alice") })
+	if _, err := e.svc.RemovePasskeys(ctx, helga, "alice", "alice", false); status(err) != 403 || !strings.Contains(err.Error(), "is an administrator") {
+		t.Errorf("promoted meanwhile = %v", err)
+	}
+	if n := len(e.kc.Get("alice").Credentials); n != 1 {
+		t.Errorf("alice's passkeys = %d, want 1", n)
+	}
+}

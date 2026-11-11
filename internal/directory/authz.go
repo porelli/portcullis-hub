@@ -314,7 +314,12 @@ func (s *Service) checkDelegateTarget(c *Caller, target string, sn *snapshot, cf
 		return forbidden("not allowed: you can't do this to your own account; ask an administrator")
 	case s.checkTarget(target) != nil:
 		return forbidden("not allowed: %s is a protected account (admins only)", target)
-	case s.isAdmin(sn, target) || memberOf(sn.groups[lldap.AdminGroup], target) || memberOf(sn.groups["lldap_password_manager"], target):
+	case s.reservedName(target):
+		// Every reserved portcullis-* account (review I1): the Hub's and
+		// the apps' internal accounts are admins only, for every
+		// delegated permission.
+		return forbidden("not allowed: %s is a reserved account (admins only)", target)
+	case s.isAdministrator(sn, target):
 		return forbidden("not allowed: %s is an administrator (admins only)", target)
 	}
 	for _, g := range cfg.Permissions {
@@ -323,6 +328,12 @@ func (s *Service) checkDelegateTarget(c *Caller, target string, sn *snapshot, cf
 		}
 	}
 	return nil
+}
+
+// isAdministrator: target is in an administrator group on sn (the
+// delegate rule's set: adminGroups, lldap_admin, lldap_password_manager).
+func (s *Service) isAdministrator(sn *snapshot, target string) bool {
+	return s.isAdmin(sn, target) || memberOf(sn.groups[lldap.AdminGroup], target) || memberOf(sn.groups["lldap_password_manager"], target)
 }
 
 // checkKeyless: a delegate may invite only someone with no Keycloak

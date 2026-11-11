@@ -36,6 +36,9 @@ func (p adminPeople) Membership(ctx context.Context, now time.Time) (*directory.
 type fakeHelp struct {
 	admins map[string]bool
 	err    error
+	// stale: a holder passes on any target (a decision made before a
+	// promotion).
+	stale bool
 }
 
 func (f *fakeHelp) CheckHelp(_ context.Context, c *directory.Caller, target string) error {
@@ -46,7 +49,9 @@ func (f *fakeHelp) CheckHelp(_ context.Context, c *directory.Caller, target stri
 		return nil
 	case !c.Perms[directory.PermSignInHelp]:
 		return &directory.Error{Status: 403, Msg: "not allowed: needs sign_in_help"}
-	case strings.EqualFold(c.User, target) || f.admins[target]:
+	case f.stale:
+		return nil
+	case strings.EqualFold(c.User, target) || f.admins[target] || invite.ProtectedName(target):
 		return &directory.Error{Status: 403, Msg: "not allowed: " + target + " is an administrator (admins only)"}
 	}
 	return nil
@@ -61,7 +66,7 @@ var (
 func newHelpFixture(t *testing.T, certs ...invite.CertRecord) *certFixture {
 	t.Helper()
 	c := newCertFixture(t, certs...)
-	p := newFakePeople("alice", "bob", "carol", "portcullis-breakglass")
+	p := newFakePeople("alice", "bob", "carol", "portcullis-breakglass", "portcullis-hooks")
 	p.addGroup(lldap.AdminGroup, "root", "ann")
 	c.f.h.SetPeople(adminPeople{p})
 	c.f.h.SetSignInHelp(&fakeHelp{admins: map[string]bool{"root": true, "ann": true, "admin": true}})
@@ -233,5 +238,72 @@ func TestIssueYubiKeyFresh(t *testing.T) {
 	setSignIn(c.f, func(si *state.SignIn) { si.Methods["yubikey_cert"] = false })
 	if _, err := h.IssueYubiKeyCertificate(c.ctx, helpAdmin, "alice", "CSR", testProof); statusOf(err) != 409 {
 		t.Errorf("yubikey_cert off: %v", err)
+	}
+}
+
+// TestPersonSignInCan (review I2): can matches the routes for an admin
+// and a holder on a non-admin, an administrator, admin, portcullis-hub
+// and portcullis-hooks, and with yubikey_cert off.
+func TestPersonSignInCan(t *testing.T) {
+	c := newHelpFixture(t)
+	h := c.f.h
+	all := HelpCan{SetupLink: true, RemovePasskeys: true, Revoke: true, Issue: true, Password: true}
+	for _, x := range []struct {
+		caller *directory.Caller
+		user   string
+		ykOff  bool
+		want   HelpCan
+		status int
+	}{
+		{helpAdmin, "alice", false, all, 0},
+		{helpAdmin, "alice", true, HelpCan{SetupLink: true, RemovePasskeys: true, Revoke: true, Password: true}, 0},
+		{helpAdmin, "ann", false, HelpCan{RemovePasskeys: true, Password: true}, 0},
+		{helpAdmin, "admin", false, HelpCan{}, 0},
+		{helpAdmin, "portcullis-hub", false, HelpCan{}, 404}, // the service account is no person
+		{helpAdmin, "portcullis-hooks", false, HelpCan{RemovePasskeys: true}, 0},
+		{helpHolder, "alice", false, HelpCan{SetupLink: true, RemovePasskeys: true, Revoke: true}, 0},
+		{helpHolder, "alice", true, HelpCan{SetupLink: true, RemovePasskeys: true, Revoke: true}, 0},
+		{helpHolder, "ann", false, HelpCan{}, 403},
+		{helpHolder, "admin", false, HelpCan{}, 403},
+		{helpHolder, "portcullis-hub", false, HelpCan{}, 403},
+		{helpHolder, "portcullis-hooks", false, HelpCan{}, 403},
+	} {
+		setSignIn(c.f, func(si *state.SignIn) { si.Methods["yubikey_cert"] = !x.ykOff })
+		v, err := h.PersonSignInView(c.ctx, x.caller, x.user)
+		if x.status != 0 {
+			if statusOf(err) != x.status {
+				t.Errorf("%s on %s: %v, want %d", x.caller.User, x.user, err, x.status)
+			}
+			continue
+		}
+		if err != nil || v.Can != x.want {
+			t.Errorf("%s on %s (yubikey off %v): %+v %v, want %+v", x.caller.User, x.user, x.ykOff, v, err, x.want)
+		}
+	}
+}
+
+// TestCertTargetPromotionRace (review m1): a holder's help decided
+// before alice became an administrator — the certificate routes' own
+// snapshot refuses her (409), enroll isn't called; a non-holder's
+// refusal carries no "as sign_in_help" (m2).
+func TestCertTargetPromotionRace(t *testing.T) {
+	later := time.Now().Add(60 * 24 * time.Hour)
+	c := newHelpFixture(t, invite.CertRecord{User: "ann", Serial: "0c:01", Kind: invite.KindBrowser, NotAfter: later})
+	h := c.f.h
+	h.SetSignInHelp(&fakeHelp{stale: true})
+	if err := h.RevokePersonCertificate(c.ctx, helpHolder, "ann", "0c:01"); statusOf(err) != 409 {
+		t.Errorf("stale holder on ann = %v", err)
+	}
+	if err := h.CheckCertTarget(c.ctx, helpHolder, "ann"); statusOf(err) != 409 {
+		t.Errorf("CheckCertTarget = %v", err)
+	}
+	if _, _, n := c.ca.counts(); n != 0 {
+		t.Error("enroll was called")
+	}
+	if err := h.RevokePersonCertificate(c.ctx, helpNobody, "alice", "0c:01"); statusOf(err) != 403 {
+		t.Errorf("non-holder = %v", err)
+	}
+	if e := c.audit.last(); e.Result != "refused" || strings.Contains(e.Detail, "sign_in_help") {
+		t.Errorf("non-holder audit = %+v", e)
 	}
 }

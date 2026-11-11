@@ -138,20 +138,36 @@ func (h *Hub) PersonSignInView(ctx context.Context, c *directory.Caller, user st
 	if err != nil {
 		return nil, err
 	}
+	return &PersonSignIn{MySignIn: *v, Can: h.helpCan(c, m, u)}, nil
+}
+
+// helpCan is what c may do on u, exactly as the routes answer (review
+// I2): a holder sets up, removes passkeys and revokes, never sets a
+// password or issues; an administrator does everything, except on an
+// administrator target (no setup link, issue or revoke: core refuses
+// invites, the certificate routes refuse them), on a protected name
+// (admin, portcullis-hub, portcullis-*: no setup link, revoke, issue
+// or password — SetPassword and enroll refuse them; admin and
+// portcullis-hub not even passkeys, checkTarget) and issue while
+// yubikey_cert is off.
+func (h *Hub) helpCan(c *directory.Caller, m *directory.Membership, u string) HelpCan {
 	can := HelpCan{SetupLink: true, RemovePasskeys: true, Revoke: true}
 	if c.Admin {
-		can.Issue, can.Password = true, true
-		if m.Administrators[u] {
-			can.SetupLink, can.Issue, can.Revoke = false, false, false
-		}
-		if invite.ProtectedName(u) {
-			can.Issue, can.Revoke = false, false
-		}
-		if noPasswordAccounts[u] {
-			can = HelpCan{}
-		}
+		h.mu.RLock()
+		ykOn := h.st.SignIn.MethodsOn()[signin.YubiKeyCert]
+		h.mu.RUnlock()
+		can.Issue, can.Password = ykOn, true
 	}
-	return &PersonSignIn{MySignIn: *v, Can: can}, nil
+	if m.Administrators[u] {
+		can.SetupLink, can.Issue, can.Revoke = false, false, false
+	}
+	if invite.ProtectedName(u) {
+		can.SetupLink, can.Revoke, can.Issue, can.Password = false, false, false, false
+	}
+	if noPasswordAccounts[u] {
+		can = HelpCan{}
+	}
+	return can
 }
 
 // PersonSignInHistory is user's sign-in history for c, under
@@ -162,6 +178,15 @@ func (h *Hub) PersonSignInHistory(ctx context.Context, c *directory.Caller, user
 		return nil, err
 	}
 	return h.SignInHistory(ctx, u, cursor, limit)
+}
+
+// CheckCertTarget is certTarget's decision, read only: the Portcullis
+// MCP's revoke_person_certificate asks it before a confirmation (review
+// m3), so a refused target (403, the protected names' and
+// administrators' 409s, 404) never gets one.
+func (h *Hub) CheckCertTarget(ctx context.Context, c *directory.Caller, user string) error {
+	_, err := h.certTarget(ctx, c, user)
+	return err
 }
 
 // certTarget is the certificate routes' target check (D32, review I3):
@@ -195,7 +220,7 @@ func (h *Hub) certTarget(ctx context.Context, c *directory.Caller, user string) 
 // helpDetail is an audit detail, with D32's "as sign_in_help" for a
 // caller who isn't an administrator.
 func helpDetail(c *directory.Caller, d string) string {
-	if c == nil || c.Admin {
+	if c == nil || c.Admin || !c.Perms[directory.PermSignInHelp] {
 		return d
 	}
 	return d + "; as " + directory.PermSignInHelp
