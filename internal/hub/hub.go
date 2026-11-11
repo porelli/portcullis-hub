@@ -92,6 +92,12 @@ type Config struct {
 	// read-only at /mcp-gate-data): the gate's access.jsonl (§15.8) is
 	// read there ("" = no access log: MyAI / AccessLog answer 503).
 	MCPGateDataDir string
+	// GroupGateDataDir is HUB_GROUP_GATE_DATA_DIR (core mounts
+	// group_gate_data read-write at /group-gate-data): group-gate's opened
+	// log is <dir>/opened, read for the sign-in history and pruned to
+	// history_days (contract §8.2; "" = no opened log: that source is
+	// unknown).
+	GroupGateDataDir string
 	// FIDOMDSURL is HUB_FIDO_MDS_URL, the FIDO Alliance MDS BLOB (contract
 	// §8.1; "" = no fetching: no authenticators, passkeys register as
 	// synced). Cached at <DataDir>/signin/mds.jwt.
@@ -492,7 +498,9 @@ type Hub struct {
 	eventsEnsure func(ctx context.Context, days int) error
 	// eventsMu serialises ensureEvents (never held with mu across the
 	// Keycloak call; mu is taken inside it only to read history_days).
-	eventsMu     sync.Mutex
+	eventsMu sync.Mutex
+	// history is the sign-in history's wiring (signin_history.go).
+	history      historyState
 	lastExpiring []policy.Expiring
 	dirKick      chan struct{}
 	// invKick asks runInventorySync for a sign-in inventory refresh.

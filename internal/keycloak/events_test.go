@@ -2,8 +2,10 @@ package keycloak_test
 
 import (
 	"context"
+	"net/url"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/keycloak/kctest"
@@ -70,5 +72,67 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
 	if err := c.EnsureEventsConfig(ctx, 30); err == nil {
 		t.Error("a failed GET was not reported")
+	}
+}
+
+// TestLoginEventsQuery (contract §8.2): LoginEvents asks for the user's
+// LOGIN and LOGIN_ERROR events of the days from..to, at most max, and
+// decodes the details.
+func TestLoginEventsQuery(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	alice := kc.Import("alice")
+	at := time.Date(2026, 11, 10, 8, 14, 2, 0, time.UTC)
+	kc.With(func() {
+		kc.Events = []map[string]any{
+			{"time": at.UnixMilli(), "type": "LOGIN", "clientId": "portcullis-forward-auth", "userId": alice.ID, "ipAddress": "203.0.113.7",
+				"details": map[string]any{"pc_kind": "sign_in", "pc_methods": "security_key", "pc_session": "security_key", "pc_ua": "Firefox"}},
+			{"time": at.Add(-time.Hour).UnixMilli(), "type": "LOGIN_ERROR", "clientId": "portcullis-forward-auth", "userId": alice.ID,
+				"error": "invalid_user_credentials", "details": map[string]any{"pc_method": "password"}},
+			{"time": at.UnixMilli(), "type": "LOGIN", "userId": "someone-else"},
+		}
+	})
+	from, to := at.AddDate(0, 0, -30), at
+	evs, err := c.LoginEvents(ctx, alice.ID, from, to, 51)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Get("user") != alice.ID || !reflect.DeepEqual(q["type"], []string{"LOGIN", "LOGIN_ERROR"}) ||
+		q.Get("dateFrom") != "2026-10-11" || q.Get("dateTo") != "2026-11-10" || q.Get("max") != "51" || q.Has("first") {
+		t.Errorf("query = %v", q)
+	}
+	if n := kc.CountCalls("GET /admin/realms/portcullis/events"); n != 1 {
+		t.Errorf("%d event reads", n)
+	}
+	want := []keycloak.Event{
+		{Time: at, Type: "LOGIN", ClientID: "portcullis-forward-auth", UserID: alice.ID, IP: "203.0.113.7",
+			Details: map[string]string{"pc_kind": "sign_in", "pc_methods": "security_key", "pc_session": "security_key", "pc_ua": "Firefox"}},
+		{Time: at.Add(-time.Hour), Type: "LOGIN_ERROR", ClientID: "portcullis-forward-auth", UserID: alice.ID,
+			Error: "invalid_user_credentials", Details: map[string]string{"pc_method": "password"}},
+	}
+	if !reflect.DeepEqual(evs, want) {
+		t.Errorf("events = %+v\nwant %+v", evs, want)
+	}
+	// By username, paged; an unknown user has none.
+	evs, err = c.UserLoginEventsPage(ctx, "alice", from, to, 1, 5)
+	if err != nil || len(evs) != 1 || evs[0].Type != "LOGIN_ERROR" {
+		t.Errorf("page 2 = %+v, %v", evs, err)
+	}
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Get("first") != "1" || q.Get("max") != "5" {
+		t.Errorf("paged query = %v", q)
+	}
+	if evs, err := c.UserLoginEventsPage(ctx, "nobody", from, to, 0, 5); err != nil || len(evs) != 0 {
+		t.Errorf("unknown user: %+v, %v", evs, err)
+	}
+	if _, err := c.LoginEvents(ctx, "not-an-id", from, to, 5); err == nil {
+		t.Error("a bad user id was queried")
+	}
+	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
+	if _, err := c.LoginEvents(ctx, alice.ID, from, to, 5); err == nil {
+		t.Error("a failed read was not reported")
 	}
 }

@@ -395,6 +395,8 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 	for id, top := range map[string]string{
 		"vol-core-key":     "volumes:\n  postgres_data:\n    name: portcullis_postgres_data\n",
 		"vol-core-unnamed": "volumes:\n  hub_data: {}\n",
+		// group-gate's opened log (sign-in part 2, contract §8.2).
+		"vol-core-gg":      "volumes:\n  group_gate_data: {}\n",
 		"vol-core-case":    "volumes:\n  Vault_Data: {}\n",
 		"vol-ext-name":     "volumes:\n  db:\n    external: true\n    name: portcullis_postgres_data\n",
 		"vol-ext-key":      "volumes:\n  portcullis_lldap_data:\n    external: true\n",

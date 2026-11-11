@@ -126,7 +126,7 @@ func limitsDetail(old, next state.SignInLimits) string {
 // 400, browser_cert_days above the ceiling included), audited
 // signin.limits with an old -> new detail per changed field, then
 // re-asserts Keycloak's events config (a failure is logged: the sync
-// loop retries). Nothing changed: no save, no audit.
+// loop retries); a changed history_days also prunes the opened log. Nothing changed: no save, no audit.
 func (h *Hub) SetSignInLimits(ctx context.Context, in state.SignInLimits, actor directory.Actor) (v *LimitsView, err error) {
 	attempt := fmt.Sprintf("browser_cert_days %d; browser_cert_max_active %d; history_days %d", in.BrowserCertDays, in.BrowserCertMaxActive, in.HistoryDays)
 	detail := ""
@@ -162,6 +162,10 @@ func (h *Hub) SetSignInLimits(ctx context.Context, in state.SignInLimits, actor 
 	view := h.limitsViewLocked()
 	h.mu.Unlock()
 	detail = d
+	// A new history_days prunes the opened log now (contract §8.2).
+	if prev.HistoryDays != in.HistoryDays {
+		h.pruneSignInHistory()
+	}
 	ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventsEnsureTimeout)
 	defer cancel()
 	if err := h.ensureEvents(ectx); err != nil {

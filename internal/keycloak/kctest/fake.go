@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -180,6 +182,11 @@ type Server struct {
 	// EventsConfig is the realm's events config as Keycloak returns it
 	// (GET / PUT …/events/config); a PUT replaces it with the body.
 	EventsConfig map[string]any
+	// Events are the realm's user events (EventRepresentation maps), newest
+	// first; GET …/events answers those whose userId is the query's user,
+	// from first, at most max. EventsQuery is the last such query.
+	Events      []map[string]any
+	EventsQuery url.Values
 }
 
 const (
@@ -529,6 +536,23 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.serveAI(w, r) {
+		return
+	}
+	if r.URL.Path == realm+"/events" && r.Method == http.MethodGet {
+		q := r.URL.Query()
+		s.EventsQuery = q
+		out := []map[string]any{}
+		for _, e := range s.Events {
+			if e["userId"] == q.Get("user") {
+				out = append(out, e)
+			}
+		}
+		first, _ := strconv.Atoi(q.Get("first"))
+		out = out[min(first, len(out)):]
+		if m, err := strconv.Atoi(q.Get("max")); err == nil && m < len(out) {
+			out = out[:m]
+		}
+		json.NewEncoder(w).Encode(out)
 		return
 	}
 	if r.URL.Path == realm+"/events/config" {

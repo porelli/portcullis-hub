@@ -51,6 +51,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/mattn/go-shellwords v1.0.12 // indirect
+	github.com/mileusna/useragent v1.3.5 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect

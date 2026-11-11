@@ -234,6 +234,9 @@ func main() {
 		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
 		MCPListener:          mcp.on,
 		MCPGateDataDir:       env("HUB_MCP_GATE_DATA_DIR", "/mcp-gate-data"),
+		// group-gate's opened log (contract §8.2): <dir>/opened, read for
+		// the sign-in history and pruned to history_days.
+		GroupGateDataDir: env("HUB_GROUP_GATE_DATA_DIR", "/group-gate-data"),
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
@@ -394,6 +397,9 @@ func main() {
 	// source, kept history_days; re-asserted in the directory sync loop
 	// and on every limits change.
 	h.SetEventsConfig(kc.EnsureEventsConfig)
+	// The sign-in history's sources (contract §8.2): Keycloak's login
+	// events and the audit; the opened log is GroupGateDataDir's.
+	h.SetHistorySources(hub.HistorySources{Events: kc.UserLoginEventsPage, Audit: dir.RecentMatching})
 	h.Init()
 
 	srv := &httpapi.Server{
@@ -432,6 +438,9 @@ func main() {
 	// The FIDO metadata (contract §8.1): the cached BLOB, then a daily
 	// refresh (and at its nextUpdate) into signin-keycloak.json.
 	go h.RunMDS(ctx, 24*time.Hour)
+	// The opened log's day files older than history_days: daily (and on
+	// every history_days change).
+	go h.RunHistoryPrune(ctx, 24*time.Hour)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak
