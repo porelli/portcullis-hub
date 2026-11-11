@@ -92,20 +92,20 @@ Decisions (made here; the spec leaves them to the builder):
   Exports:
   - `certs/yubikey-ca.crt` (`pki_int`'s certificate) and `certs/browser-ca.crt`;
   - `certs/ca-chain.crt` = root + `pki_int` + `pki_file` (Traefik's `protected-any` and `authaware` options: both kinds);
-  - `certs/ca-chain-yubikey.crt` = root + `pki_int` only (Traefik's `protected` option: a browser certificate can never pass that handshake);
+  - `certs/ca-chain-yubikey.crt` = the `pki_int` certificate ONLY, no root (Traefik's `protected` option: a browser certificate can never pass that handshake). **Task 12 review C1 (binding):** Go's TLS server treats every `caFiles` certificate as a trust anchor and builds paths through the intermediates the client sends; a browser `.p12` bundles `pki_file` + the root and browsers send that chain, so with the root in this file a browser leaf would pass `protected`. `protected-any` / `authaware` keep root + both intermediates;
   - the truststore gets `portcullis-ca-chain.pem` plus `portcullis-yubikey-ca.pem` and `portcullis-browser-ca.pem`.
 
   Rules:
   - `pki setup` refuses (exit 1) when the two intermediates' CNs are equal: every reader tells the kinds apart by issuer.
   - It creates `pki_file` when it is missing, even while `pki_int` exists (a missing piece, as today).
-  - Whenever `pki_file` is created, or either chain on disk differs from what it should be (`ca-chain.crt` = root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` = root + `pki_int`), it rewrites both chain files and the truststore and sets `PKI_TRUSTSTORE_CHANGED=true`. That flag is what makes `stack.sh` restart Traefik and Keycloak.
+  - Whenever `pki_file` is created, or either chain on disk differs from what it should be (`ca-chain.crt` = root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` = `pki_int` alone), it rewrites both chain files and the truststore and sets `PKI_TRUSTSTORE_CHANGED=true` (a rewritten `yubikey-ca.crt` / `browser-ca.crt` too). Restarts follow a persistent stamp (Task 12 review I1): `up` / `upgrade` restart Traefik, Keycloak and group-gate whenever the chain / CA / truststore files differ from `certs/.pki-files.loaded`, written only after a successful restart.
   - `--force` destroys both CAs.
 
   **TLS options (controller ruling, Task 1 fix round 1).** Core's static `traefik/dynamic/tls.yml` has exactly four options (each `minVersion: VersionTLS12`, `sniStrict: false`; Traefik already mounts `./certs:/certs:ro`):
 
   | Option | Client auth | `caFiles` | Used for |
   |---|---|---|---|
-  | `protected@file` | `RequireAndVerifyClientCert` | `/certs/ca-chain-yubikey.crt` | `auth.method: mtls` apps; templates where **every** alternative has `yubikey_cert` |
+  | `protected@file` | `RequireAndVerifyClientCert` | `/certs/ca-chain-yubikey.crt` (`pki_int` alone, no root) | `auth.method: mtls` apps; templates where **every** alternative has `yubikey_cert` |
   | `protected-any@file` (new) | `RequireAndVerifyClientCert` | `/certs/ca-chain.crt` | templates where every alternative has a certificate method and at least one accepts `browser_cert` |
   | `authaware@file` | `VerifyClientCertIfGiven` | `/certs/ca-chain.crt` | templates where some alternative has a certificate; every core router |
   | `public@file` | none | — | everything else |
@@ -865,7 +865,7 @@ The page follows mockup sections 1 and 3:
 
 - [ ] **Step 1: Write the failing tests** (with a stubbed `vault`, as the existing pki tests do)
   - `test_shell_libs.sh`:
-    - `pki_setup on a fresh Vault enables pki, pki_int, pki_file; ca-chain.crt has 3 certificates in order root, pki_int, pki_file; ca-chain-yubikey.crt has exactly root, pki_int`
+    - `pki_setup on a fresh Vault enables pki, pki_int, pki_file; ca-chain.crt has 3 certificates in order root, pki_int, pki_file; ca-chain-yubikey.crt has exactly pki_int (no root)`
     - `pki_setup with pki_int present but no pki_file creates pki_file only, keeps pki_int, rewrites ca-chain.crt to 3 certificates, ca-chain-yubikey.crt and the truststore, and sets PKI_TRUSTSTORE_CHANGED=true`
     - `pki_setup with all three present and the chain current but ca-chain-yubikey.crt missing (or holding pki_file) rewrites it and sets PKI_TRUSTSTORE_CHANGED=true`
     - `pki_setup with all three present and both chains current leaves PKI_TRUSTSTORE_CHANGED unset`
@@ -1023,7 +1023,7 @@ The page follows mockup sections 1 and 3:
   - `group-gate/group-gate-map.conf`: no `enroll=`;
   - `scripts/lib/common.sh`: `CT_UID_GROUP_GATE=10003`, `volume_own group_gate_data "$CT_UID_GROUP_GATE:$CT_UID_HUB"`;
   - `scripts/lib/backup.sh`: `group_gate_data:$CT_UID_GROUP_GATE:$CT_UID_HUB` in `BACKUP_FILE_VOLUMES`;
-  - `.github/workflows/ci.yml`: drop the `portcullis-self` assertions (lines 217, 245, 368) and `"enroll."` from the core policy keys (1275, 2617); add a compose check pinning `group_gate_data` to exactly group-gate (rw) and hub (rw), like the `mcp_gate_data` check (352–353); the static TLS check expects exactly the four D21 options (`protected` → `caFiles: [/certs/ca-chain-yubikey.crt]`, `protected-any` and `authaware` → `[/certs/ca-chain.crt]`, `public` none); `build-and-test` checks both chain files (`ca-chain.crt` root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` root + `pki_int`, no `pki_file`).
+  - `.github/workflows/ci.yml`: drop the `portcullis-self` assertions (lines 217, 245, 368) and `"enroll."` from the core policy keys (1275, 2617); add a compose check pinning `group_gate_data` to exactly group-gate (rw) and hub (rw), like the `mcp_gate_data` check (352–353); the static TLS check expects exactly the four D21 options (`protected` → `caFiles: [/certs/ca-chain-yubikey.crt]`, `protected-any` and `authaware` → `[/certs/ca-chain.crt]`, `public` none); `build-and-test` checks both chain files (`ca-chain.crt` root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` = `pki_int` alone: no root, no `pki_file`).
   - `traefik/dynamic/tls.yml`: the four options of D21 (`protected` on `/certs/ca-chain-yubikey.crt`, new `protected-any`); the header comment says which uses which. Traefik's existing `./certs:/certs:ro` mount carries both chain files.
   - `docker-compose.yml` hub: `HUB_CERT_EXPIRY_WARN_DAYS: ${CERT_EXPIRY_WARN_DAYS:-7}` (a plain pass-through; the Hub applies core's `^[0-9]+$` grammar, else 7).
 - Modify, leftover texts (D31 / D34): `.env.example`, `monitoring/prometheus/alerts.yml`, `scripts/lib/status.sh`, `keycloak/themes/portcullis/login/messages/messages_en.properties`, core `docs/*.md`, `README.md`, `CLAUDE.md`.
@@ -1083,8 +1083,8 @@ The page follows mockup sections 1 and 3:
     - gets 409 from the admin issue / revoke routes on root (as an admin).
   - `history_entries`: alice's `/api/me/signin/history` has a `sign_in` with methods `[browser_cert]` and a non-empty browser, a `step_up`, `opened` for the app's host, `help` by carol, and `certificate` entries. bob's history has a `failed` entry (his wrong password).
   - `browser_cert_cannot_renew` (review I1): alice's browser certificate presented on `POST /api/me/signin/yubikey-certificate/renew` with a CSR for its key → 403 "present your current YubiKey certificate", nothing issued.
-  - `tls_protected_yubikey_ca_only`: `echo-cert` (`e2e-cert` = any[`yubikey_cert`] → `protected@file`, the option `mtls` apps get): `openssl s_client`'s "Acceptable client certificate CA names" lists only the root and the YubiKey CA.
-  - `tls_mtls_refuses_browser_cert`: a handshake to that host with alice's browser certificate fails; with root's YubiKey certificate it succeeds.
+  - `tls_protected_yubikey_ca_only`: `echo-cert` (`e2e-cert` = any[`yubikey_cert`] → `protected@file`, the option `mtls` apps get): `openssl s_client`'s "Acceptable client certificate CA names" lists only the YubiKey CA (no root, no browser CA; Task 12 review C1).
+  - `tls_mtls_refuses_browser_cert`: a handshake to that host with alice's browser certificate fails while it presents the `.p12`'s FULL chain — leaf + `pki_file` + root, as a browser does (`openssl s_client -cert <leaf> -cert_chain <pki_file + root>`, or the `.p12` itself); with root's YubiKey certificate it succeeds (Task 12 review C1: a leaf-only handshake would not catch a root in `ca-chain-yubikey.crt`).
   - `tls_protected_any`: an instance `echo-anycert` on `e2e-anycert` = any[`yubikey_cert`, `browser_cert`] is on `protected-any@file`; its CA names list the root and both CAs; a handshake with alice's browser certificate succeeds and one without a certificate fails.
   - `enroll_site_gone`: `https://enroll.<d>/` and `/self` answer 404, while `/invite/<bad token>` shows the invite page's "no longer usable".
 - [ ] **Step 2: Run to see it fail.** Push and let CI run e2e-signin. Expected: the new cases FAIL before the CI wiring.
