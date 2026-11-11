@@ -321,5 +321,5 @@ a.pd-link { text-decoration: none; }
 .msi-unknown { font-size: 0.8125rem; margin-bottom: 0.5rem; }
 .msi-status:empty { display: none; }
 .msi-status { margin-bottom: 0.5rem; font-size: 0.875rem; }
-.msi-dl-row .pd-btn { text-decoration: none; }
+.msi-dl-row .pd-btn, .msi-acts a.pd-btn { text-decoration: none; }
 .msi-person-acts { margin-top: 0.75rem; }

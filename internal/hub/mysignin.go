@@ -28,6 +28,15 @@ type MySignIn struct {
 	ActiveBrowserCerts int                      `json:"active_browser_certs"`
 	AddStronger        bool                     `json:"add_stronger"`
 	FreshAuth          *freshauth.AuthorizeInfo `json:"fresh_auth"`
+	// AccountURL is the account console's signing-in page (Config.AccountURL):
+	// where passkeys and security keys are added; "" = no link.
+	AccountURL string `json:"account_url"`
+	// CertFresh are the methods a fresh sign-in may use to create a
+	// certificate (D26: the people template's fresh methods minus password
+	// and browser_cert), and CertFreshRefusal the 409 text when none of
+	// them fits: the page says it before opening the popup.
+	CertFresh        []signin.Method `json:"cert_fresh"`
+	CertFreshRefusal string          `json:"cert_fresh_refusal"`
 }
 
 // The method states of a MethodRow.
@@ -109,7 +118,13 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 	si := h.st.SignIn
 	on := si.MethodsOn()
 	v := &MySignIn{User: u, Methods: []MethodRow{}, Certificates: []CertRow{}, Apps: []AppNeed{}, Limits: h.limitsViewLocked(),
-		AddStronger: si.AddStronger, FreshAuth: info}
+		AddStronger: si.AddStronger, FreshAuth: info, AccountURL: h.cfg.AccountURL, CertFresh: []signin.Method{},
+		CertFreshRefusal: h.errCertNeedsKey().Error()}
+	if _, rule, why := h.governingLocked(govCore("people")); why == "" {
+		if cf := certFreshAllowed(rule, on); cf != nil {
+			v.CertFresh = cf
+		}
+	}
 
 	var pm PersonMethods
 	known := false

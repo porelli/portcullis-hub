@@ -93,13 +93,28 @@
   }
 
   // accountURL: the account console's signing-in page (where passkeys
-  // and security keys are added), from the fresh-auth authorize URL
-  // (https://auth.<d>/realms/<realm>/protocol/openid-connect/auth).
-  function accountURL(fa) {
-    const m = /^(https?:\/\/[^/?#]+\/realms\/[^/?#]+)\/protocol\/openid-connect\/auth$/.exec((fa && fa.authorize_url) || '');
-    if (!m) return '';
-    if (!/^https:/i.test(m[1]) && !(typeof location !== 'undefined' && location.protocol === 'http:')) return '';
-    return m[1] + '/account/account-security/signing-in';
+  // and security keys are added), the view's account_url (the Hub builds
+  // it from Keycloak's public URL); https only, except on a plain-http
+  // page (the local harness).
+  function accountURL(view) {
+    const u = String((view && view.account_url) || '');
+    if (/^https:\/\//i.test(u)) return u;
+    if (/^http:\/\//i.test(u) && typeof location !== 'undefined' && location.protocol === 'http:') return u;
+    return '';
+  }
+
+  // certFreshProblem: D26 before the popup opens. A certificate is made
+  // only after a fresh sign-in with one of view.cert_fresh (the people
+  // template's fresh methods but password and browser_cert); on one's own
+  // page the person must have one of them set up. '' = go ahead, else
+  // the Hub's 409 text.
+  function certFreshProblem(view, self) {
+    const ok = view.cert_fresh || [];
+    const refusal = view.cert_fresh_refusal || 'creating a certificate needs a passkey or YubiKey sign-in';
+    if (!ok.length) return refusal;
+    if (!self) return '';
+    const mine = (view.methods || []).filter(m => m.state === 'set').map(m => m.id);
+    return ok.some(m => mine.includes(m)) ? '' : refusal;
   }
 
   function pill(cls, text) { return '<span class="pd-pill' + (cls ? ' ' + cls : '') + '">' + esc(text) + '</span>'; }
@@ -191,7 +206,7 @@
         sub = keys.map(k => (k.label || 'unnamed') + (fmtDay(k.created_at) ? ' · added ' + fmtDay(k.created_at) : '')).join(' · ');
         tag = pill('ok', String(keys.length));
       } else { sub = 'none yet'; tag = pill('', 'none'); }
-      const acct = self ? accountURL(view.fresh_auth) : '';
+      const acct = self ? accountURL(view) : '';
       if (acct) acts = '<a class="pd-btn secondary sm" href="' + esc(acct) + '" target="_blank" rel="noopener noreferrer">+ Add</a>';
     } else if (m.id === 'browser_cert') {
       const max = ((view.limits || {}).effective || {}).browser_cert_max_active || 0;
@@ -373,6 +388,12 @@
     };
     const me = { close: () => { if (dlg.open) dlg.close(); clear(); } };
     done.addEventListener('click', () => me.close());
+    // Escape (the dialog's cancel) never closes it silently: the password
+    // can't be shown again.
+    dlg.addEventListener('cancel', e => {
+      e.preventDefault();
+      if (confirm('The password won\'t be shown again — close?')) me.close();
+    });
     dlg.addEventListener('close', clear);
     shown = me;
     document.body.appendChild(dlg);
@@ -464,18 +485,28 @@
       (hi.next ? '<div class="pd-actions">' + button('secondary', ' data-msi-act="hist-more"', 'Show older') + '</div>' : '');
   }
 
-  async function loadHistory(st, more) {
+  // loadHistory reads the first page, or (more) the page before the
+  // cursor: one request at a time, so a cursor is never fetched twice
+  // (Show older is disabled while it runs).
+  async function loadHistory(st, more, btn) {
+    if (st.histBusy) return;
+    if (more && !st.hist.next) return;
     const seq = st.seq;
+    st.histBusy = true;
+    if (btn) btn.disabled = true;
     let page;
     try {
       page = await call('GET', historyURL(st, more ? st.hist.next : ''));
     } catch (err) {
+      st.histBusy = false;
+      if (btn) btn.disabled = false;
       if (seq !== st.seq) return;
       if (more) { setStatus(st, 'Couldn\'t load older entries: ' + err.message, true); return; }
       st.hist = { entries: [], next: '', unknown: [], error: err.message };
       drawHistory(st);
       return;
     }
+    st.histBusy = false;
     if (seq !== st.seq) return;
     const unknown = new Set(more ? st.hist.unknown : []);
     for (const u of page.unknown || []) unknown.add(u);
@@ -500,6 +531,7 @@
     } catch (err) {
       if (seq !== st.seq) return;
       st.view = null;
+      if (st.opts.onError) st.opts.onError(err);
       st.el.innerHTML = st.opts.mode === 'person' && err.status === 403
         ? '<p class="pd-muted">You can\'t help with ' + esc(st.opts.user) + '\'s sign-in.</p>'
         : '<p class="pd-warn">Couldn\'t load the sign-in methods: ' + esc(err.message) + '</p>';
@@ -583,6 +615,8 @@
     const s = p.querySelector('[data-msi-days]').value.trim();
     const days = /^\d+$/.test(s) ? Number(s) : NaN;
     if (!(days >= 1 && days <= max)) { panelStatus(p, 'Pick 1 to ' + max + ' days.', true); return; }
+    const bad = certFreshProblem(st.view, true);
+    if (bad) { panelStatus(p, bad, true); return; }
     fresh(st, p, 'browser_cert', async pr => {
       panelStatus(p, 'Creating your certificate…', false, true);
       let ans;
@@ -651,6 +685,8 @@
     const p = panel(st, 'yubikey_cert');
     const csr = p.querySelector('[data-msi-csr]').value.trim();
     if (!/-----BEGIN (NEW )?CERTIFICATE REQUEST-----/.test(csr)) { panelStatus(p, 'Paste the whole request, BEGIN and END lines included.', true); return; }
+    const bad = certFreshProblem(st.view, false);
+    if (bad) { panelStatus(p, bad, true); return; }
     fresh(st, p, 'yubikey_cert', async pr => {
       panelStatus(p, 'Issuing…', false, true);
       let res;
@@ -693,8 +729,8 @@
         if (st.flow && window.PortcullisFreshAuth) window.PortcullisFreshAuth.cancel();
         if (p) p.innerHTML = '';
         return;
-      case 'hist-more': return loadHistory(st, true);
-      case 'hist-reload': return loadHistory(st, false);
+      case 'hist-more': return loadHistory(st, true, b);
+      case 'hist-reload': return loadHistory(st, false, b);
     }
   }
 
@@ -720,5 +756,7 @@
   // flow itself).
   window.addEventListener('pagehide', closeShown);
 
-  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText };
+  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText, certFreshProblem,
+    // For the node tests: one mount's history paging over a stub fetch.
+    _test: { loadHistory, state: (el, opts) => ({ el, opts, view: {}, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null }) } };
 })();

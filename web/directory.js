@@ -984,7 +984,7 @@
         h += '<div>' + keyStatus(u) + '</div>';
         if (u.server_invite && !u.protected) h += '<div class="pd-muted" title="Administrators are invited and recovered from the server">recover on the server: <code>' + esc(u.server_invite) + '</code></div>';
       }
-      if (tabbed) h += '<div class="pd-pp-signin" data-msi-person="' + esc(u.username) + '"><p class="pd-muted">Loading…</p></div>';
+      if (tabbed) h += '<div class="pd-pp-signin" data-msi-person="' + esc(u.username) + '"><p class="pd-muted">Loading…</p></div><div class="pd-actions" data-pp-sign-fallback hidden></div>';
       if (acts.length) {
         h += '<div class="pd-actions">' + acts.map(([a, label, cls]) =>
           '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(u.username) + '">' + esc(label) + '</button>').join('') + '</div>';
@@ -1034,7 +1034,21 @@
     box.innerHTML = personPage ? personPageHtml(personPage) : '';
     if (personPage) renderExtras();
     const sb = box.querySelector('[data-msi-person]');
-    if (sb && window.PortcullisMySignIn) window.PortcullisMySignIn.mount(sb, { mode: 'person', user: sb.dataset.msiPerson });
+    if (sb && window.PortcullisMySignIn) {
+      const who = sb.dataset.msiPerson, fb = box.querySelector('[data-pp-sign-fallback]');
+      window.PortcullisMySignIn.mount(sb, {
+        mode: 'person', user: who,
+        // The tab can't be read (403, 503): the page's own setup-link,
+        // passkey and password buttons, as before the tab.
+        onError: () => {
+          const u = userByName(who);
+          const acts = u ? personKeyActions(u).filter(([a]) => SIGNIN_TAB_ACTS.includes(a)) : [];
+          if (!fb) return;
+          fb.innerHTML = acts.map(([a, label, cls]) => '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(who) + '">' + esc(label) + '</button>').join('');
+          fb.hidden = !acts.length;
+        },
+      });
+    }
   }
 
   // Apps (via which group, until when) and Values (app · label · value ·

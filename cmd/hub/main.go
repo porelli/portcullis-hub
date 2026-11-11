@@ -150,7 +150,10 @@ func clientCertTTLFromEnv(getenv func(string) string) (time.Duration, error) {
 // https://hub.<domain>/ (admin confirmations, G11): one verifier each.
 type freshAuthSetup struct {
 	Issuer, TokenURL, JWKSURL, AuthorizeURL, RedirectURI, WebOrigin string
-	HubRedirectURI, HubWebOrigin                                    string
+	// AccountURL: the account console's signing-in page (the Sign-in
+	// page's "+ Add" for passkeys and security keys).
+	AccountURL                   string
+	HubRedirectURI, HubWebOrigin string
 }
 
 func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (freshAuthSetup, error) {
@@ -169,6 +172,7 @@ func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (f
 		TokenURL:       internal + "/token",
 		JWKSURL:        internal + "/certs",
 		AuthorizeURL:   public + "/protocol/openid-connect/auth",
+		AccountURL:     public + "/account/account-security/signing-in",
 		RedirectURI:    "https://people." + domain + "/signin",
 		WebOrigin:      "https://people." + domain,
 		HubRedirectURI: "https://hub." + domain + "/",
@@ -311,6 +315,7 @@ func main() {
 		log.Fatalf("refusing to start: the data directory is in use (another Hub, or signin reset-core running?): %v", err)
 	}
 	defer releaseLock()
+	cfg.AccountURL = fa.AccountURL
 	h, err := hub.New(cfg, cli, engine, kc)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)

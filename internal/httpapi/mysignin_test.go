@@ -237,3 +237,29 @@ func TestMySignInRoutesCallerOnly(t *testing.T) {
 		t.Errorf("page = %d %s", r.StatusCode, b)
 	}
 }
+
+// TestMySignInAccountURLAndCertFresh (Task 8 fix round 1): the view
+// carries the account console's signing-in page (Config.AccountURL), the
+// methods a fresh sign-in may use to create a certificate (D26) and the
+// 409 text the page shows when none fits.
+func TestMySignInAccountURLAndCertFresh(t *testing.T) {
+	e, _ := signInEnv(t)
+	r, b := doAs(t, e.ppl, "alice", "GET", "/api/me/signin", "")
+	var v struct {
+		AccountURL       string   `json:"account_url"`
+		CertFresh        []string `json:"cert_fresh"`
+		CertFreshRefusal string   `json:"cert_fresh_refusal"`
+	}
+	if r.StatusCode != 200 || json.Unmarshal([]byte(b), &v) != nil {
+		t.Fatalf("view = %d %s", r.StatusCode, b)
+	}
+	if v.CertFresh == nil || slices.Contains(v.CertFresh, "password") || slices.Contains(v.CertFresh, "browser_cert") || !slices.Contains(v.CertFresh, "security_key") {
+		t.Errorf("cert_fresh = %v", v.CertFresh)
+	}
+	if v.CertFreshRefusal != "creating a certificate needs a passkey or YubiKey sign-in that people.example.org accepts" {
+		t.Errorf("cert_fresh_refusal = %q", v.CertFreshRefusal)
+	}
+	if v.AccountURL != "" {
+		t.Errorf("account_url = %q without Config.AccountURL", v.AccountURL)
+	}
+}

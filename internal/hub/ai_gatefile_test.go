@@ -385,7 +385,10 @@ func TestSignInChangeSwitchesAIOff(t *testing.T) {
 	if !certOnly {
 		t.Error("aiapp isn't certificate-only after the change")
 	}
-	// Switching it on again is refused (409).
+	// Switching it on again is refused (409), once the switch-off's
+	// background work (the companion's restart) has ended: before that the
+	// instance is busy.
+	a.h.Wait()
 	if err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root); statusOf(err) != 409 {
 		t.Errorf("AI on under a certificate-only default = %v, want 409", err)
 	}

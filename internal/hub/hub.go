@@ -120,6 +120,11 @@ type Config struct {
 	// with fewer days left is "expiring" (contract §5.1). main always
 	// sets it; 0 means nothing is ever expiring.
 	CertExpiryWarnDays int
+	// AccountURL is Keycloak's account console signing-in page
+	// (https://<Keycloak's public host>/realms/portcullis/account/account-security/signing-in,
+	// main: from HUB_KEYCLOAK_PUBLIC_URL), where people add passkeys and
+	// security keys: the Sign-in page's "+ Add" ("" = no link).
+	AccountURL string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.

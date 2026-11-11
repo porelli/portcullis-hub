@@ -82,7 +82,8 @@ func mySignInView(label string) string {
 {"kind":"instance","id":"nc","name":"Nextcloud <i>family</i>","template":"family","template_name":"Family","score":{"tenths":25},"ok":false},
 {"kind":"core","id":"people","name":"People","template":"strong","template_name":"Strong","score":{"tenths":35},"ok":null}],
 "limits":{"limits":{"browser_cert_days":30,"browser_cert_max_active":3,"history_days":365},"ceiling_days":30,"effective":{"browser_cert_days":30,"browser_cert_max_active":3,"history_days":365}},
-"active_browser_certs":1,"add_stronger":false,
+"active_browser_certs":1,"add_stronger":false,"account_url":"https://auth.example.org/realms/portcullis/account/account-security/signing-in",
+"cert_fresh":["passkey_device","security_key","yubikey_cert"],"cert_fresh_refusal":"creating a certificate needs a passkey or YubiKey sign-in that people.example.org accepts",
 "fresh_auth":{"authorize_url":"https://auth.example.org/realms/portcullis/protocol/openid-connect/auth","client_id":"portcullis-fresh-auth","redirect_uri":"https://people.example.org/signin"}}`
 }
 
@@ -296,7 +297,7 @@ func TestPersonSignInTabActions(t *testing.T) {
 	}
 	// directory.js mounts the tab for administrators and holders only.
 	js := webAsset(t, "directory.js")
-	for _, w := range []string{"PortcullisMySignIn.mount(sb, { mode: 'person', user: sb.dataset.msiPerson })", "perms().includes('sign_in_help') && !u.self && !u.admin && !u.protected"} {
+	for _, w := range []string{"window.PortcullisMySignIn.mount(sb, {\n        mode: 'person', user: who,", "perms().includes('sign_in_help') && !u.self && !u.admin && !u.protected"} {
 		if !strings.Contains(js, w) {
 			t.Errorf("directory.js lacks %q", w)
 		}
@@ -385,5 +386,74 @@ func TestNoEnrollWording(t *testing.T) {
 	}
 	if !strings.Contains(hubPage, "Website certificate (HTTPS) valid until") {
 		t.Error("Settings → Domains doesn't name the website certificate")
+	}
+}
+
+// TestMySignInFixRound1: "+ Add" only from the view's https account_url;
+// D26 is checked before the popup (cert_fresh against the person's set-up
+// methods); Show older fetches each cursor once (disabled while it runs);
+// Escape asks before closing the shown-once dialog; directory.js shows
+// its own buttons when the person's tab can't be read.
+func TestMySignInFixRound1(t *testing.T) {
+	v := mySignInView("YubiKey 5C")
+	out := mySignInJS(t, `(async () => {
+  const v = `+v+`;
+  const noURL = Object.assign({}, v, {account_url: 'javascript:alert(1)'});
+  const res = {
+    add: S.methodsHtml(v, {mode: 'self'}).includes('href="https://auth.example.org/realms/portcullis/account/account-security/signing-in"'),
+    noAdd: S.methodsHtml(noURL, {mode: 'self'}).includes('+ Add'),
+    okSelf: S.certFreshProblem(v, true),
+    // alice has only a synced passkey: none of the allowed methods.
+    noneSelf: S.certFreshProblem(Object.assign({}, v, {methods: v.methods.map(m => m.id === 'security_key' || m.id === 'yubikey_cert' ? Object.assign({}, m, {state: 'none'}) : m)}), true),
+    emptyTemplate: S.certFreshProblem(Object.assign({}, v, {cert_fresh: []}), false),
+    okPerson: S.certFreshProblem(v, false),
+  };
+  // Show older: two clicks while the first request runs fetch once.
+  const calls = [];
+  let release;
+  global.fetch = url => { calls.push(url); return new Promise(r => { release = () => r({ ok: true, text: async () => JSON.stringify({entries: [], next: '', unknown: []}) }); }); };
+  const box = new El('div');
+  const el = new El('div');
+  el.querySelector = sel => sel === '[data-msi-hist]' ? box : null;
+  const st = S._test.state(el, {mode: 'self'});
+  st.hist = {entries: [], next: '2026-11-01T00:00:00.123456789Z', unknown: []};
+  const btn = new El('button');
+  const p1 = S._test.loadHistory(st, true, btn);
+  res.disabledWhileLoading = btn.disabled === true;
+  await S._test.loadHistory(st, true, btn);
+  release();
+  await p1;
+  res.calls = calls;
+  // The dialog's cancel (Escape): asked first; "no" keeps it open.
+  let asked = '';
+  global.confirm = q => { asked = q; return false; };
+  S.openDownload({p12: btoa('x'), password: 'ABCDE-FGHJK-MNPQR-STVWX', filename: 'a.p12'});
+  const dlg = document.body.querySelector('dialog');
+  let prevented = false;
+  for (const f of dlg.ls.cancel || []) f({ preventDefault() { prevented = true; } });
+  res.cancelAsked = asked; res.cancelPrevented = prevented; res.stillOpen = dlg.open && dlg.querySelector('[data-msi-pw]').textContent === 'ABCDE-FGHJK-MNPQR-STVWX';
+  global.confirm = () => true;
+  for (const f of dlg.ls.cancel || []) f({ preventDefault() {} });
+  res.closedAfterYes = !dlg.open && document.body.children.length === 0;
+  return res;
+})()`).(map[string]any)
+	refusal := "creating a certificate needs a passkey or YubiKey sign-in that people.example.org accepts"
+	if out["add"] != true || out["noAdd"] != false {
+		t.Errorf("+ Add: %v / %v", out["add"], out["noAdd"])
+	}
+	if out["okSelf"] != "" || out["noneSelf"] != refusal || out["emptyTemplate"] != refusal || out["okPerson"] != "" {
+		t.Errorf("D26 precheck = %v", out)
+	}
+	if calls, _ := out["calls"].([]any); len(calls) != 1 || calls[0] != "/api/me/signin/history?limit=20&before=2026-11-01T00%3A00%3A00.123456789Z" || out["disabledWhileLoading"] != true {
+		t.Errorf("Show older fetched %v (disabled %v)", out["calls"], out["disabledWhileLoading"])
+	}
+	if out["cancelAsked"] != "The password won't be shown again — close?" || out["cancelPrevented"] != true || out["stillOpen"] != true || out["closedAfterYes"] != true {
+		t.Errorf("Escape: %v", out)
+	}
+	if js := webAsset(t, "mysignin.js"); !strings.Contains(js, "const bad = certFreshProblem(st.view, true);\n    if (bad) { panelStatus(p, bad, true); return; }\n    fresh(st, p, 'browser_cert'") {
+		t.Error("mysignin.js: the D26 check isn't before the popup")
+	}
+	if d := webAsset(t, "directory.js"); !strings.Contains(d, "onError: () => {") || !strings.Contains(d, "personKeyActions(u).filter(([a]) => SIGNIN_TAB_ACTS.includes(a))") {
+		t.Error("directory.js doesn't fall back to its own buttons when the tab can't be read")
 	}
 }

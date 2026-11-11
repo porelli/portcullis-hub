@@ -140,6 +140,7 @@ func TestFreshAuthFromEnv(t *testing.T) {
 		TokenURL:     "http://keycloak:8080/realms/portcullis/protocol/openid-connect/token",
 		JWKSURL:      "http://keycloak:8080/realms/portcullis/protocol/openid-connect/certs",
 		AuthorizeURL: "https://auth.example.org/realms/portcullis/protocol/openid-connect/auth",
+		AccountURL:   "https://auth.example.org/realms/portcullis/account/account-security/signing-in",
 		RedirectURI:  "https://people.example.org/signin",
 		WebOrigin:    "https://people.example.org",
 		// The Hub listener's confirmation page (G11): its own verifier.

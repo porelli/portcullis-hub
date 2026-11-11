@@ -87,7 +87,7 @@ import (
 //     by a restore, bob's is active; its sync hook reports folders
 //     (alice, a former member's 182 GiB, one of unknown size). Fresh
 //     auth is harnessFreshAuth: the authorize URL is the people
-//     listener's /harness/authorize (a fake sign-in page that sends a
+//     listener's /realms/portcullis/protocol/openid-connect/auth (a fake sign-in page that sends a
 //     code back to the redirect URI, people.html), and Verify checks the
 //     code, its PKCE S256 challenge and nonce. GET /harness/evil?state=…
 //     on the Hub listener (another origin) posts a forged callback
@@ -209,6 +209,9 @@ func TestHarness(t *testing.T) {
 			c.MCPGateDataDir = aiGateData
 			c.MCPListener = true
 			c.FIDOMDSURL = harnessMDSURL
+			// The Sign-in page's "+ Add": the people listener's fake
+			// account console.
+			c.AccountURL = "http://" + paddr + harnessAccountPath
 		},
 		seed: func(st *state.AppState) {
 			seedAIState(st)
@@ -288,7 +291,7 @@ func TestHarness(t *testing.T) {
 	})
 	mux.HandleFunc("GET /harness/evil", harnessEvilPage)
 	seedProgress(t, e, mux)
-	mux.HandleFunc("GET /harness/authorize", hfa.authorizePage)
+	mux.HandleFunc("GET "+harnessAuthorizePath, hfa.authorizePage)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set(ProxySecretHeader, testSecret)
 		// A harness_user=admin cookie signs the Hub page in as the
@@ -312,8 +315,13 @@ func TestHarness(t *testing.T) {
 	}
 	people := flaky.wrap(e.ppl.Config.Handler)
 	psrv := &http.Server{Addr: paddr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/harness/authorize" {
+		if r.URL.Path == harnessAuthorizePath {
 			fa.authorizePage(w, r)
+			return
+		}
+		if r.URL.Path == harnessAccountPath {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Fake account console</title></head><body style="font-family:sans-serif;background:#0f172a;color:#e2e8f0;padding:2rem"><h1>Fake Keycloak account console (harness)</h1><p>Signing in: add a passkey or a security key here.</p></body></html>`)
 			return
 		}
 		u := r.Header.Get("X-Harness-User")
@@ -951,7 +959,7 @@ func seedFileSharing(t *testing.T, h *hub.Hub, paddr string) *harnessFreshAuth {
 }
 
 // seedConfirmations (plan 4 Task 14) wires the Hub listener's fake fresh
-// auth (its own /harness/authorize, signing in root) and seeds four
+// auth (its own fake authorize path, signing in root) and seeds four
 // pending confirmations: two companion-style ones for the people user
 // (an argument carrying markup; typed check "AI App") and two admin ones
 // for root on the Hub listener (typed check "grafana-team-a"). Their
@@ -999,6 +1007,14 @@ func seedConfirmations(t *testing.T, h *hub.Hub, addr, paddr string) *harnessFre
 // harnessCode is one code the fake sign-in page handed out.
 type harnessCode struct{ challenge, nonce, user string }
 
+// The fake Keycloak's paths, shaped like the real ones: the authorize
+// endpoint (both listeners) and the account console's signing-in page
+// (the people listener).
+const (
+	harnessAuthorizePath = "/realms/portcullis/protocol/openid-connect/auth"
+	harnessAccountPath   = "/realms/portcullis/account/account-security/signing-in"
+)
+
 // harnessFreshAuth is the fresh-auth verifier for the browser check: its
 // authorize URL is the people listener's fake sign-in page, and Verify
 // accepts a code that page issued, once, when the posted verifier's S256
@@ -1025,7 +1041,7 @@ func (f *harnessFreshAuth) Info() freshauth.AuthorizeInfo {
 	if f.as == "" {
 		redirect = f.base + "/signin"
 	}
-	return freshauth.AuthorizeInfo{AuthorizeURL: f.base + "/harness/authorize", ClientID: freshauth.ClientID, RedirectURI: redirect}
+	return freshauth.AuthorizeInfo{AuthorizeURL: f.base + harnessAuthorizePath, ClientID: freshauth.ClientID, RedirectURI: redirect}
 }
 
 func (f *harnessFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string) (*freshauth.Result, error) {

@@ -3352,7 +3352,7 @@
       if (extra) {
         const rest = host === extra.name ? '' : host.slice(0, -extra.name.length - 1);
         if (rest && !HOST_LABEL_RE.test(rest)) return router + ': ' + host + ' — only ' + extra.name + ' or <label>.' + extra.name + ' (the domain\'s website certificate covers one label)';
-        if (!extra.assignable && !keep) return router + ': ' + host + ' — domain ' + extra.name + ' is not ready yet (' + (extra.state || 'not ready') + '): its records or certificate are not OK';
+        if (!extra.assignable && !keep) return router + ': ' + host + ' — domain ' + extra.name + ' is not ready yet (' + (extra.state || 'not ready') + '): its records or website certificate (HTTPS) are not OK';
         return '';
       }
       if (main && host.endsWith('.' + main.name)) {

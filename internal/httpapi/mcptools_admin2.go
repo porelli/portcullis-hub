@@ -316,7 +316,7 @@ func (s *Server) registerAdminTools2() {
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/domains/{name}", Audit: "domain.delete", In: domainArgs{},
 			Typed: func(args json.RawMessage) string { return hub.NormalizeHost(nameOf(args)) },
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
-				return []string{"Removes the domain " + q(hub.NormalizeHost(nameOf(args))) + ": its DNS records and certificate are removed and no new hostname can go on it."}
+				return []string{"Removes the domain " + q(hub.NormalizeHost(nameOf(args))) + ": its DNS records and website certificate (HTTPS) are removed and no new hostname can go on it."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				warning, err := s.deleteDomain(ctx, toolActor(ctx, c), nameOf(args))
