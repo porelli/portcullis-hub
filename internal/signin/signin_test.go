@@ -586,10 +586,12 @@ func TestAlternativesMinimal(t *testing.T) {
 	}
 }
 
-// Leaves: the methods a compiled rule names (contract §8 "Governing
-// template"): the built-ins compiled at the starting switches, a
-// password-only rule, and refusals of anything that isn't compiled.
-func TestLeaves(t *testing.T) {
+// FreshAccepted (contract §8 "Governing template", the controller
+// ruling): the strongest switched-on method of each alternative of a
+// compiled rule — the built-ins at the starting switches, a password-only
+// rule, all[security_key, password] (the key only), a tie, and refusals of
+// anything that isn't compiled.
+func TestFreshAccepted(t *testing.T) {
 	names := func(m map[Method]bool) string {
 		var out []string
 		for _, x := range Methods {
@@ -599,29 +601,39 @@ func TestLeaves(t *testing.T) {
 		}
 		return strings.Join(out, ",")
 	}
+	withPw := onSet(Password, PasskeySynced, PasskeyDevice, SecurityKey, YubiKeyCert)
 	for _, c := range []struct {
-		id, want string
-		on       map[Method]bool
+		name, want string
+		rule       Node
+		on         map[Method]bool
 	}{
-		{"strong", "security_key,yubikey_cert", defaultOn()},
-		{"standard", "passkey_synced,passkey_device,security_key,yubikey_cert", defaultOn()},
-		{"basic", "passkey_synced,passkey_device,security_key,yubikey_cert", defaultOn()},
-		{"basic", "password,passkey_synced,passkey_device,security_key,yubikey_cert", onSet(Password, PasskeySynced, PasskeyDevice, SecurityKey, YubiKeyCert)},
-		{"standard", "passkey_synced,security_key", onSet(PasskeySynced, SecurityKey)},
-		{"yubikey-and-certificate", "security_key,yubikey_cert", defaultOn()},
+		{"strong", "security_key,yubikey_cert", builtin(t, "strong"), defaultOn()},
+		{"standard", "passkey_synced,passkey_device,security_key,yubikey_cert", builtin(t, "standard"), defaultOn()},
+		{"basic, password on", "password,passkey_synced,passkey_device,security_key,yubikey_cert", builtin(t, "basic"), withPw},
+		{"standard, two on", "passkey_synced,security_key", builtin(t, "standard"), onSet(PasskeySynced, SecurityKey)},
+		{"yubikey + certificate", "yubikey_cert", builtin(t, "yubikey-and-certificate"), defaultOn()},
+		{"password only", "password", anyOf(leaf("password")), withPw},
+		{"all[security_key, password]", "security_key", all(leaves("security_key", "password")...), withPw},
+		{"any[all[key, pw], passkey_synced]", "passkey_synced,security_key", anyOf(all(leaves("security_key", "password")...), leaf("passkey_synced")), withPw},
 	} {
-		got, err := Leaves(mustCompile(t, builtin(t, c.id), c.on))
+		got, err := FreshAccepted(mustCompile(t, c.rule, c.on), c.on)
 		if err != nil || names(got) != c.want {
-			t.Errorf("%s: Leaves = %s, %v; want %s", c.id, names(got), err, c.want)
+			t.Errorf("%s: FreshAccepted = %s, %v; want %s", c.name, names(got), err, c.want)
 		}
 	}
-	got, err := Leaves(mustCompile(t, anyOf(leaf("password")), onSet(Password, PasskeySynced)))
-	if err != nil || names(got) != "password" {
-		t.Errorf("password only: %s, %v", names(got), err)
+	// A tie (passkey_synced and browser_cert are both 2.5): both qualify.
+	// Compile never switches browser_cert on, so the compiled rule is built
+	// here; FreshAccepted reads the switches it is given.
+	tie := Node{Op: OpAny, Items: []Node{all(leaves("passkey_synced", "browser_cert")...)}}
+	if got, err := FreshAccepted(tie, onSet(PasskeySynced, BrowserCert)); err != nil || names(got) != "passkey_synced,browser_cert" {
+		t.Errorf("tie: %s, %v", names(got), err)
+	}
+	if got, err := FreshAccepted(tie, onSet(PasskeySynced)); err != nil || names(got) != "passkey_synced" {
+		t.Errorf("tie, browser_cert off: %s, %v", names(got), err)
 	}
 	for _, bad := range []Node{leaf("password"), anyOf(leaf("family:passkey")), anyOf(leaf("inv")), {Op: OpAny}} {
-		if _, err := Leaves(bad); err == nil {
-			t.Errorf("Leaves(%s): no error", js(bad))
+		if _, err := FreshAccepted(bad, withPw); err == nil {
+			t.Errorf("FreshAccepted(%s): no error", js(bad))
 		}
 	}
 }

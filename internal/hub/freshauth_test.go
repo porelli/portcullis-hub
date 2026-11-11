@@ -111,10 +111,11 @@ func setSignIn(f *fixture, edit func(si *state.SignIn)) {
 }
 
 // TestFreshAuthFollowsGoverningTemplate (contract §8 "Governing
-// template", the controller ruling): pc_fresh must be a switched-on leaf
-// of the governing template's compiled rule — Strong only security_key /
-// yubikey_cert, Standard any passkey kind or yubikey_cert, a
-// password-only template the password; anything else, a switched-off
+// template", the controller rulings): pc_fresh must be the strongest
+// switched-on method of an alternative of the governing template's
+// compiled rule — Strong only security_key / yubikey_cert, Standard any
+// passkey kind or yubikey_cert, a password-only template the password,
+// all[security_key, password] the key only; anything else, a switched-off
 // method, and a missing, disabled or unmeetable template refuse with the
 // one 403, the template named in the reason only.
 func TestFreshAuthFollowsGoverningTemplate(t *testing.T) {
@@ -123,7 +124,9 @@ func TestFreshAuthFollowsGoverningTemplate(t *testing.T) {
 	setSignIn(f, func(si *state.SignIn) {
 		si.Methods["password"] = true
 		si.Templates["pw-only"] = state.SignInTemplate{Name: "Password only", Rule: passwordOnly, Enabled: true}
-		si.Core["hub"], si.Core["people"], si.Core["portal"] = "strong", "standard", "pw-only"
+		si.Templates["key-and-pw"] = state.SignInTemplate{Name: "Key and password", Enabled: true,
+			Rule: signin.Node{Op: signin.OpAll, Items: []signin.Node{{Leaf: "security_key"}, {Leaf: "password"}}}}
+		si.Core["hub"], si.Core["people"], si.Core["portal"], si.Core["directory"] = "strong", "standard", "pw-only", "key-and-pw"
 	})
 	if got := strings.Join(f.h.freshAuthAccepted(), ","); got != "password,passkey_synced,passkey_device,security_key,yubikey_cert" {
 		t.Errorf("freshAuthAccepted = %s", got)
@@ -137,6 +140,9 @@ func TestFreshAuthFollowsGoverningTemplate(t *testing.T) {
 		{"people", "passkey_synced", true}, {"people", "passkey_device", true}, {"people", "security_key", true}, {"people", "yubikey_cert", true},
 		{"people", "password", false}, {"people", "browser_cert", false}, {"people", "inv", false}, {"people", "", false},
 		{"portal", "password", true}, {"portal", "security_key", false}, {"portal", "passkey_synced", false},
+		// all[security_key, password]: the strongest of its one
+		// alternative — the key; a typed password alone never approves.
+		{"directory", "password", false}, {"directory", "security_key", true}, {"directory", "passkey_synced", false},
 	} {
 		f.h.SetFreshAuth(ListenerPeople, &switchFreshAuth{method: c.method})
 		res, reason, err := f.h.checkFreshAuth(context.Background(), govCore(c.core), testProof, "alice")
@@ -145,7 +151,7 @@ func TestFreshAuthFollowsGoverningTemplate(t *testing.T) {
 			continue
 		}
 		if c.ok {
-			want := map[string]string{"hub": "strong", "people": "standard", "portal": "pw-only"}[c.core]
+			want := map[string]string{"hub": "strong", "people": "standard", "portal": "pw-only", "directory": "key-and-pw"}[c.core]
 			if res.Template != want || res.Method != c.method || reason != "" {
 				t.Errorf("%s + %s: template %q method %q reason %q", c.core, c.method, res.Template, res.Method, reason)
 			}

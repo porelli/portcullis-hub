@@ -282,26 +282,35 @@ func ValidateCompiled(n Node) error {
 	return nil
 }
 
-// Leaves is the set of methods a compiled rule names (its leaves; families
-// are already expanded to their switched-on members, D2): what a fresh
-// sign-in may use under that template (contract §8 "Governing template").
-// Anything that isn't a compiled rule (ValidateCompiled) is an error.
-func Leaves(compiled Node) (map[Method]bool, error) {
+// FreshAccepted is the set of methods a fresh sign-in may use under a
+// compiled rule (contract §8 "Governing template"): the strongest method
+// (D1 strength) of each of its alternatives (Alternatives), counting only
+// the methods on; methods tied for strongest in an alternative all
+// qualify. So all[security_key, password] accepts security_key only — a
+// typed password alone never approves what the template guards with a
+// key. Anything that isn't a compiled rule (ValidateCompiled) is an error.
+func FreshAccepted(compiled Node, on map[Method]bool) (map[Method]bool, error) {
 	if err := ValidateCompiled(compiled); err != nil {
 		return nil, err
 	}
+	alts, err := Alternatives(compiled)
+	if err != nil {
+		return nil, err
+	}
 	out := map[Method]bool{}
-	var walk func(n Node)
-	walk = func(n Node) {
-		if n.isLeaf() {
-			out[Method(n.Leaf)] = true
-			return
+	for _, alt := range alts {
+		best := -1
+		for _, m := range alt {
+			if i, ok := InfoOf(m); ok && on[m] && i.Tenths > best {
+				best = i.Tenths
+			}
 		}
-		for _, it := range n.Items {
-			walk(it)
+		for _, m := range alt {
+			if i, ok := InfoOf(m); ok && on[m] && i.Tenths == best {
+				out[m] = true
+			}
 		}
 	}
-	walk(compiled)
 	return out, nil
 }
 

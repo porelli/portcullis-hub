@@ -1121,8 +1121,8 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
 
-// hubFreshMethod is the strongest switched-on method of the hub core
-// template's compiled rule (its pick, else the default): what a fresh
+// hubFreshMethod is the strongest method the hub core template's
+// compiled rule accepts for a fresh sign-in (signin.FreshAccepted) (its pick, else the default): what a fresh
 // sign-in that approves an admin confirmation may use.
 func hubFreshMethod(t *testing.T, h *hub.Hub) string {
 	t.Helper()
@@ -1143,12 +1143,12 @@ func hubFreshMethod(t *testing.T, h *hub.Hub) string {
 		if err != nil {
 			t.Fatalf("hub template %s: %v", id, err)
 		}
-		leaves, err := signin.Leaves(c)
+		accepted, err := signin.FreshAccepted(c, on)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for i := len(signin.Methods) - 1; i >= 0; i-- {
-			if leaves[signin.Methods[i]] {
+			if accepted[signin.Methods[i]] {
 				return string(signin.Methods[i])
 			}
 		}

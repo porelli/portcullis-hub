@@ -285,9 +285,10 @@ page just because it is behind).
 ### Fresh sign-in for sensitive actions
 
 Creating a file-share password and approving an AI confirmation need a fresh
-sign-in in a popup, with a method the governing template accepts (a method
-its rule names, families counted as their switched-on members, switched on
-now; a password too). What counts is the method that actually ran in that
+sign-in in a popup, with a method the governing template accepts: the
+strongest method of at least one of the template's ways in (its
+alternatives, counting only the methods switched on now; a tie lets either
+through; a password too). What counts is the method that actually ran in that
 popup sign-in (Keycloak records it in the token's `pc_fresh` claim), never
 the methods the session used earlier; an SSO session reused or a setup link
 never counts.
@@ -298,11 +299,14 @@ never counts.
 | Approving a companion's confirmation (people.&lt;domain&gt;) | the companion's app's template |
 | Approving a Portcullis people tool's confirmation (people.&lt;domain&gt;) | the `people` core page's template |
 | Approving an admin tool's confirmation (hub.&lt;domain&gt;) | the `hub` core page's template |
+| Anything else that asks for a fresh sign-in | the `hub` core page's template (fail closed) |
 
 So with the core pages on Strong an admin confirmation needs the security key
 or the YubiKey certificate, a synced passkey isn't enough; under Standard any
 passkey or the YubiKey certificate approves; an app on a password-only
-template is confirmed by typing the password again. A template that is
+template is confirmed by typing the password again; a template that needs a
+security key and a password (`all[security_key, password]`) is confirmed with
+the security key — the password alone never is. A template that is
 disabled, gone or can't be met refuses.
 
 ## Traefik TLS tier

@@ -186,9 +186,9 @@ func (h *Hub) checkFreshAuth(ctx context.Context, g freshGov, p freshauth.Proof,
 
 // checkFreshAuthOn is checkFreshAuth with listener's verifier (a proof
 // is exchanged with the redirect URI of the page that started it).
-// Contract §8 "Governing template": pc_fresh must be a leaf of g's
-// compiled rule (families expanded to their switched-on members) and
-// switched on — both read again after the exchange, so a template or
+// Contract §8 "Governing template": pc_fresh must be the strongest
+// switched-on method of an alternative of g's compiled rule and switched
+// on — both read again after the exchange, so a template or
 // switch change during it never lets a method through.
 func (h *Hub) checkFreshAuthOn(ctx context.Context, listener string, g freshGov, p freshauth.Proof, user string) (res *freshProof, reason string, err error) {
 	f := h.freshAuthVerifier(listener)
@@ -223,7 +223,10 @@ func (h *Hub) checkFreshAuthOn(ctx context.Context, listener string, g freshGov,
 }
 
 // freshMethodAccepted checks a verified proof's method against g as it is
-// now: switched on, and a leaf of the governing template's compiled rule.
+// now: switched on, and the strongest switched-on method of at least one
+// alternative of the governing template's compiled rule
+// (signin.FreshAccepted: all[security_key, password] takes the key, never
+// the password alone).
 func (h *Hub) freshMethodAccepted(g freshGov, r *freshauth.Result) (*freshProof, string, error) {
 	h.mu.RLock()
 	tmpl, rule, why := h.governingLocked(g)
@@ -236,8 +239,8 @@ func (h *Hub) freshMethodAccepted(g freshGov, r *freshauth.Result) (*freshProof,
 	if !slices.Contains(freshauth.FreshMethods, r.Method) || !on[m] {
 		return nil, "pc_fresh names a method that is switched off (template " + tmpl + ")", errFreshAuth
 	}
-	leaves, err := signin.Leaves(rule)
-	if err != nil || !leaves[m] {
+	accepted, err := signin.FreshAccepted(rule, on)
+	if err != nil || !accepted[m] {
 		return nil, "pc_fresh names a method template " + tmpl + " doesn't accept", errFreshAuth
 	}
 	return &freshProof{Result: r, Template: tmpl}, "", nil
