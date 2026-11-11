@@ -58,8 +58,8 @@ type KeycloakClientTemplate struct {
 
 func (h *Hub) signInKeycloakPath() string { return filepath.Join(h.cfg.DataDir, SignInKeycloakFile) }
 
-// methodsOnLocked are the switched-on methods in canonical order (never
-// browser_cert in part 1: MethodsOn). Caller holds mu.
+// methodsOnLocked are the switched-on methods in canonical order
+// (MethodsOn). Caller holds mu.
 func (h *Hub) methodsOnLocked() []signin.Method {
 	on := h.st.SignIn.MethodsOn()
 	var out []signin.Method

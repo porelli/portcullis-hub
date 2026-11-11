@@ -111,3 +111,33 @@ func TestSignInResetCore(t *testing.T) {
 		t.Errorf("state mode = %v, %v", fi, err)
 	}
 }
+
+// The reset never switches browser_cert on (sign-in part 2): a fresh
+// state's stays off. One an admin switched on is left as it is, so an
+// enabled template that needs it still loads.
+func TestResetCoreBrowserCert(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "state.yaml")
+		st := state.New()
+		st.SignIn.Core["hub"] = "strong"
+		if on {
+			st.SignIn.Methods[string(signin.BrowserCert)] = true
+			st.SignIn.Templates["files"] = state.SignInTemplate{Name: "Files", Rule: signin.Node{Op: signin.OpAny, Items: []signin.Node{{Leaf: "browser_cert"}}}, Enabled: true}
+		}
+		if err := st.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if code := Main([]string{"reset-core"}, dir, &out); code != 0 {
+			t.Fatalf("on=%v: Main = %d: %s", on, code, out.String())
+		}
+		got, err := state.Load(path)
+		if err != nil {
+			t.Fatalf("on=%v: %v", on, err)
+		}
+		if got.SignIn.Methods[string(signin.BrowserCert)] != on || strings.Contains(out.String(), "browser_cert") {
+			t.Errorf("on=%v: browser_cert = %v; output %s", on, got.SignIn.Methods[string(signin.BrowserCert)], out.String())
+		}
+	}
+}

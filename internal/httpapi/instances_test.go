@@ -456,7 +456,7 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 	if engine != nil {
 		he = engine(eng)
 	}
-	cfg := hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org"}
+	cfg := hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}
 	if o.cfg != nil {
 		o.cfg(&cfg)
 	}

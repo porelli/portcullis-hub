@@ -64,20 +64,18 @@ func TestSignInRoutesAdminOnly(t *testing.T) {
 	}
 }
 
-// TestSignInRoutesStatuses: PUT methods/browser_cert {on:true} 409; unknown 404; preview 200 no write.
+// TestSignInRoutesStatuses: PUT methods/browser_cert {on:true} 200 (it can
+// be switched on since sign-in part 2); unknown 404; preview 200 no write.
 func TestSignInRoutesStatuses(t *testing.T) {
 	e := newToolEnv(t, nil, nil)
 
-	// browser_cert on → 409
+	// browser_cert on → 200, switched on
 	req := httptest.NewRequest("PUT", "/api/signin/methods/browser_cert", bytes.NewReader([]byte(`{"on":true}`)))
 	req.Header.Set("X-Forwarded-User", "admin")
 	rec := httptest.NewRecorder()
 	e.s.hubMux().ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Errorf("PUT methods/browser_cert on=true: got %d, want 409", rec.Code)
-	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("browser certificates aren't available yet")) {
-		t.Errorf("browser_cert on: got %q, want 'browser certificates aren't available yet'", rec.Body.String())
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`{"id":"browser_cert","label":"Browser certificate","tenths":25,"on":true`)) {
+		t.Errorf("PUT methods/browser_cert on=true: got %d %s, want 200 and on", rec.Code, rec.Body.String())
 	}
 
 	// unknown method → 404
@@ -318,6 +316,71 @@ func TestSignInToolClasses(t *testing.T) {
 	check("add_stronger off", class("set_add_stronger", map[string]any{"on": false}), ClassWrite)
 }
 
+// TestSignInLimitsToolClass (§15.10): set_sign_in_limits is D when
+// browser_cert_days or browser_cert_max_active go up or history_days goes
+// down (against the stored 30 / 3 / 365), else W; bad arguments D.
+func TestSignInLimitsToolClass(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	ctx := context.Background()
+	tools := map[string]Tool{}
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		tools[tl.Name] = tl
+	}
+	tl := tools["set_sign_in_limits"]
+	if tl.Class != ClassDestructive || tl.ClassFor == nil || tl.Precheck == nil || tl.Twin != "PUT /api/signin/limits" || tl.Audit != "signin.limits" {
+		t.Fatalf("tool = %+v", tl)
+	}
+	for args, want := range map[string]ToolClass{
+		`{"browser_cert_days":30,"browser_cert_max_active":3,"history_days":365}`: ClassWrite,
+		`{"browser_cert_days":10,"browser_cert_max_active":3,"history_days":365}`: ClassWrite,
+		`{"browser_cert_days":30,"browser_cert_max_active":2,"history_days":365}`: ClassWrite,
+		`{"browser_cert_days":30,"browser_cert_max_active":3,"history_days":730}`: ClassWrite,
+		`{"browser_cert_days":31,"browser_cert_max_active":3,"history_days":365}`: ClassDestructive,
+		`{"browser_cert_days":30,"browser_cert_max_active":4,"history_days":365}`: ClassDestructive,
+		`{"browser_cert_days":30,"browser_cert_max_active":3,"history_days":364}`: ClassDestructive,
+		`{"browser_cert_days":"x"}`: ClassDestructive,
+	} {
+		if got := tl.ClassFor(ctx, json.RawMessage(args)); got != want {
+			t.Errorf("%s: class %s, want %s", args, got, want)
+		}
+	}
+	cons := strings.Join(tl.Consequences(ctx, json.RawMessage(`{"browser_cert_days":30,"browser_cert_max_active":3,"history_days":90}`)), "\n")
+	if !strings.Contains(cons, "365 -> 90") || strings.Contains(cons, "lifetime") {
+		t.Errorf("consequences = %q", cons)
+	}
+}
+
+// TestSignInLimitsRoute: PUT /api/signin/limits needs all three fields,
+// refuses bounds with 400, answers the limits view, is audited and shows
+// in GET /api/signin.
+func TestSignInLimitsRoute(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	put := func(body string) (int, string) {
+		req := httptest.NewRequest("PUT", "/api/signin/limits", bytes.NewReader([]byte(body)))
+		req.Header.Set("X-Forwarded-User", "admin")
+		rec := httptest.NewRecorder()
+		e.s.hubMux().ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	for _, body := range []string{`{}`, `{"browser_cert_days":10,"history_days":90}`, `{"browser_cert_days":0,"browser_cert_max_active":3,"history_days":90}`,
+		`{"browser_cert_days":31,"browser_cert_max_active":3,"history_days":90}`, `{"browser_cert_days":10,"browser_cert_max_active":3,"history_days":90,"x":1}`} {
+		if code, b := put(body); code != http.StatusBadRequest {
+			t.Errorf("%s: %d %s, want 400", body, code, b)
+		}
+	}
+	code, b := put(`{"browser_cert_days":10,"browser_cert_max_active":5,"history_days":90}`)
+	if code != http.StatusOK || !strings.Contains(b, `"limits":{"browser_cert_days":10,"browser_cert_max_active":5,"history_days":90},"ceiling_days":30`) || strings.Contains(b, "warning") {
+		t.Errorf("PUT: %d %s", code, b)
+	}
+	req := httptest.NewRequest("GET", "/api/signin", nil)
+	req.Header.Set("X-Forwarded-User", "admin")
+	rec := httptest.NewRecorder()
+	e.s.hubMux().ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"ceiling_days":30,"effective":{"browser_cert_days":10,"browser_cert_max_active":5,"history_days":90}`) {
+		t.Errorf("GET /api/signin: %s", rec.Body.String())
+	}
+}
+
 // TestSignInPrecheck (§15.10 "Names before a confirmation"): unknown
 // template ids, core keys, methods, instances and invalid rules are
 // refused with the twin route's status before any confirmation.
@@ -333,7 +396,9 @@ func TestSignInPrecheck(t *testing.T) {
 		status     int
 	}{
 		{"set_sign_in_method", `{"method":"nope","on":true}`, 404},
-		{"set_sign_in_method", `{"method":"browser_cert","on":true}`, 409},
+		{"set_sign_in_limits", `{"browser_cert_days":31,"browser_cert_max_active":3,"history_days":365}`, 400},
+		{"set_sign_in_limits", `{"browser_cert_days":30,"browser_cert_max_active":21,"history_days":365}`, 400},
+		{"set_sign_in_limits", `{"browser_cert_days":30,"browser_cert_max_active":3,"history_days":29}`, 400},
 		{"set_default_template", `{"template":"nope"}`, 404},
 		{"set_default_template", `{"template":"basic"}`, 409},
 		{"set_core_template", `{"key":"nope","template":""}`, 400},
@@ -353,6 +418,8 @@ func TestSignInPrecheck(t *testing.T) {
 	}
 	for _, c := range []struct{ tool, args string }{
 		{"set_sign_in_method", `{"method":"password","on":false}`},
+		{"set_sign_in_method", `{"method":"browser_cert","on":true}`},
+		{"set_sign_in_limits", `{"browser_cert_days":10,"browser_cert_max_active":20,"history_days":3650}`},
 		{"set_default_template", `{"template":"strong"}`},
 		{"set_core_template", `{"key":"hub","template":""}`},
 		{"save_sign_in_template", `{"id":"standard","name":"Standard","rule":{"op":"any","items":["security_key"]}}`},
@@ -430,7 +497,6 @@ func TestSignInImpactRoute(t *testing.T) {
 	for body, want := range map[string]int{
 		`{}`:                                   http.StatusBadRequest,
 		`{"method":"nope","on":false}`:         http.StatusNotFound,
-		`{"method":"browser_cert","on":true}`:  http.StatusConflict,
 		`{"default":"nope"}`:                   http.StatusNotFound,
 		`{"core_page":"nope","core":"strong"}`: http.StatusBadRequest,
 		`{"instance":"nope","pick":"strong"}`:  http.StatusNotFound,

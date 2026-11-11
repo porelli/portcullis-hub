@@ -616,6 +616,12 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		// add_stronger on: D.
 		{tool: "set_add_stronger", args: map[string]any{"on": true},
 			method: "PUT", path: "/api/signin/add-stronger", body: `{"on":true}`},
+		// Limits: a shorter lifetime W; a longer history W; a longer
+		// lifetime D (sign-in part 2).
+		{tool: "set_sign_in_limits", args: map[string]any{"browser_cert_days": 10, "browser_cert_max_active": 3, "history_days": 400},
+			method: "PUT", path: "/api/signin/limits", body: `{"browser_cert_days":10,"browser_cert_max_active":3,"history_days":400}`},
+		{tool: "set_sign_in_limits", args: map[string]any{"browser_cert_days": 20, "browser_cert_max_active": 3, "history_days": 400},
+			method: "PUT", path: "/api/signin/limits", body: `{"browser_cert_days":20,"browser_cert_max_active":3,"history_days":400}`},
 	}
 	covered := map[string]bool{}
 	for _, c := range cases {

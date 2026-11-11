@@ -681,6 +681,7 @@ var adminToolFixtures = []struct {
 	{"set_default_template", map[string]any{"template": "standard"}},
 	{"set_core_template", map[string]any{"key": "hub", "template": "standard"}},
 	{"set_add_stronger", map[string]any{"on": false}},
+	{"set_sign_in_limits", map[string]any{"browser_cert_days": 10, "browser_cert_max_active": 3, "history_days": 365}},
 	{"get_instance_sign_in", map[string]any{"id": "secretapp"}},
 	{"set_sign_in_template", map[string]any{"id": "secretapp", "template": "strong"}},
 }

@@ -177,6 +177,9 @@ type Server struct {
 	// names none (ai.go).
 	RealmDefaultScopes  []string
 	RealmOptionalScopes []string
+	// EventsConfig is the realm's events config as Keycloak returns it
+	// (GET / PUT …/events/config); a PUT replaces it with the body.
+	EventsConfig map[string]any
 }
 
 const (
@@ -190,7 +193,9 @@ func New(t *testing.T) *Server {
 	s := &Server{Users: map[string]*User{}, nextID: 1, Components: map[string]*Component{},
 		Scopes: map[string]*ClientScope{}, Clients: map[string]*Client{},
 		Flows: map[string]*Flow{}, AuthConfigs: map[string]*AuthConfig{}, Groups: map[string]*Group{}, Roles: map[string]map[string]string{}, roleDesc: map[string]string{},
-		RealmRoles: map[string]string{"default-roles-portcullis": "role-default"}, Composites: map[string][]string{}}
+		RealmRoles: map[string]string{"default-roles-portcullis": "role-default"}, Composites: map[string][]string{},
+		EventsConfig: map[string]any{"eventsEnabled": false, "eventsListeners": []any{"jboss-logging"}, "enabledEventTypes": []any{},
+			"adminEventsEnabled": false, "adminEventsDetailsEnabled": false}}
 	s.HTTP = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.HTTP.Close)
 	return s
@@ -524,6 +529,23 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.serveAI(w, r) {
+		return
+	}
+	if r.URL.Path == realm+"/events/config" {
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(s.EventsConfig)
+		case http.MethodPut:
+			cfg := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+				w.WriteHeader(400)
+				return
+			}
+			s.EventsConfig = cfg
+			w.WriteHeader(204)
+		default:
+			w.WriteHeader(405)
+		}
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, realm+"/components") {

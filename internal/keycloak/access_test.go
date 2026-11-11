@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -606,6 +607,53 @@ func TestClientAccessTemplateLast(t *testing.T) {
 	}
 
 	// Stable: the next ensure keeps it.
+	before := mutations(kc)
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	if n := mutations(kc) - before; n != 0 {
+		t.Errorf("second ensure: %d mutating calls", n)
+	}
+}
+
+// TestAccessFlowCopiesBothX509Executions (contract §8.1, D29): core's
+// portcullis-signin holds two portcullis-x509 executions, the YubiKey one
+// (x509-config) and the browser one (x509-browser-config); an access flow
+// copies both, in order, each with its own config.
+func TestAccessFlowCopiesBothX509Executions(t *testing.T) {
+	ctx := context.Background()
+	kc, c := accessRealm(t)
+	yubikey := map[string]string{"portcullis.method": "yubikey_cert", "default.reference.value": "mtls",
+		"portcullis.ca":                    "/opt/keycloak/conf/truststores/portcullis/portcullis-yubikey-ca.pem",
+		"x509-cert-auth.crl-relative-path": "pki_int/crl##pki_int/crl/delta"}
+	browser := map[string]string{"portcullis.method": "browser_cert", "default.reference.value": "file",
+		"portcullis.ca":                    "/opt/keycloak/conf/truststores/portcullis/portcullis-browser-ca.pem",
+		"x509-cert-auth.crl-relative-path": "pki_file/crl##pki_file/crl/delta"}
+	kc.AddFlow("core-universal", "core's sign-in browser flow",
+		kctest.Node{Requirement: "REQUIRED", Alias: "portcullis-authenticate", Children: []kctest.Node{
+			{Requirement: "ALTERNATIVE", Provider: "auth-cookie"},
+			{Requirement: "ALTERNATIVE", Alias: "portcullis-signin", Children: []kctest.Node{
+				{Requirement: "ALTERNATIVE", Provider: "portcullis-x509", Config: yubikey},
+				{Requirement: "ALTERNATIVE", Provider: "portcullis-x509", Config: browser},
+				{Requirement: "ALTERNATIVE", Provider: "portcullis-passkey"},
+			}},
+		}},
+		kctest.Node{Requirement: "REQUIRED", Provider: keycloak.TemplateProvider},
+	)
+	kc.SetRealmBrowserFlow("core-universal")
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	fid := kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"]
+	got := kc.ExecConfigs(fid, "portcullis-x509")
+	if len(got) != 2 || !maps.Equal(got[0], yubikey) || !maps.Equal(got[1], browser) {
+		t.Errorf("copied x509 configs = %v", got)
+	}
+	provs := strings.Join(kc.FlowProviders(fid), "\n")
+	if n := strings.Count(provs, ":ALTERNATIVE:portcullis-x509"); n != 2 {
+		t.Errorf("%d x509 executions:\n%s", n, provs)
+	}
+	// Stable: the next ensure keeps the copy.
 	before := mutations(kc)
 	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
 		t.Fatal(err)

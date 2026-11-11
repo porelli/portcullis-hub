@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -168,7 +169,7 @@ func TestEnsureSignInDefaults(t *testing.T) {
 
 	// A stored state keeps its choices; the rule survives a round trip in
 	// its JSON shape; a missing built-in comes back; a method without an
-	// entry is off; browser_cert is forced off.
+	// entry is off; a switched-on browser_cert stays on.
 	s.SignIn.Default = "strong"
 	s.SignIn.Methods["password"] = true
 	s.SignIn.Methods["browser_cert"] = true
@@ -188,7 +189,7 @@ func TestEnsureSignInDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.SignIn.Default != "strong" || !l.SignIn.Methods["password"] || l.SignIn.Methods["browser_cert"] || l.SignIn.Methods["passkey_device"] {
+	if l.SignIn.Default != "strong" || !l.SignIn.Methods["password"] || !l.SignIn.Methods["browser_cert"] || l.SignIn.Methods["passkey_device"] {
 		t.Errorf("loaded = %+v", l.SignIn)
 	}
 	if _, ok := l.SignIn.Templates["basic"]; !ok {
@@ -220,11 +221,54 @@ func TestEnsureSignInDefaults(t *testing.T) {
 		"no methods":         {"sign_in: {default: standard}\n", "template standard is enabled but"},
 		"hidden name":        {"sign_in: {" + on + "templates: {x: {name: \"a\\u200bb\", rule: {op: any, items: [password]}}}}\n", "template x: the name must be one line of visible text"},
 		"padded name":        {"sign_in: {" + on + "templates: {x: {name: \" X\", rule: {op: any, items: [password]}}}}\n", "template x: the name may not start or end"},
+		"enroll core page":   {"sign_in: {" + on + "core: {enroll: \"\"}}\n", `unknown core page "enroll"`},
+		"cert days":          {"sign_in: {" + on + "limits: {browser_cert_days: -1}}\n", "limits: browser_cert_days -1"},
+		"max active":         {"sign_in: {" + on + "limits: {browser_cert_max_active: 21}}\n", "limits: browser_cert_max_active 21"},
+		"history short":      {"sign_in: {" + on + "limits: {history_days: 29}}\n", "limits: history_days 29"},
+		"history long":       {"sign_in: {" + on + "limits: {history_days: 3651}}\n", "limits: history_days 3651"},
 	} {
 		os.WriteFile(p, []byte(c[0]), 0600)
 		if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "corrupt") || !strings.Contains(err.Error(), c[1]) {
 			t.Errorf("%s: err = %v, want %q", name, err, c[1])
 		}
+	}
+}
+
+// The limits' D27 defaults (30 days, 3 certificates, 365 days) fill a
+// fresh state and every missing limit of a stored one; the core pages no
+// longer include enroll (sign-in part 2, D31).
+func TestEnsureSignInLimitsDefaults(t *testing.T) {
+	want := SignInLimits{BrowserCertDays: 30, BrowserCertMaxActive: 3, HistoryDays: 365}
+	if got := New().SignIn.Limits; got != want {
+		t.Errorf("fresh limits = %+v, want %+v", got, want)
+	}
+	if slices.Contains(CoreSignInKeys, "enroll") {
+		t.Errorf("CoreSignInKeys = %v", CoreSignInKeys)
+	}
+	if _, ok := New().SignIn.Core["enroll"]; ok {
+		t.Error("a fresh state has an enroll core pick")
+	}
+	p := filepath.Join(t.TempDir(), "state.yaml")
+	const on = "methods: {password: false, passkey_synced: true, browser_cert: true, passkey_device: true, security_key: true, yubikey_cert: true}"
+	os.WriteFile(p, []byte("sign_in: {"+on+", limits: {browser_cert_days: 10}}\n"), 0600)
+	l, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.SignIn.Limits; got != (SignInLimits{BrowserCertDays: 10, BrowserCertMaxActive: 3, HistoryDays: 365}) {
+		t.Errorf("stored limits = %+v", got)
+	}
+	if !l.SignIn.Methods["browser_cert"] || !l.SignIn.MethodsOn()[signin.BrowserCert] {
+		t.Errorf("browser_cert stored on: %v", l.SignIn.Methods)
+	}
+	// Stored values survive a round trip; one above any ceiling loads
+	// (the Hub applies it as the ceiling).
+	l.SignIn.Limits = SignInLimits{BrowserCertDays: 400, BrowserCertMaxActive: 20, HistoryDays: 30}
+	if err := l.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if l2, err := Load(p); err != nil || l2.SignIn.Limits != l.SignIn.Limits {
+		t.Errorf("reloaded: %v %+v", err, l2)
 	}
 }
 

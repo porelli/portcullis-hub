@@ -90,6 +90,9 @@ type SignInView struct {
 	// or unavailable (mdsWarning).
 	MDS        fidomds.Status `json:"mds"`
 	MDSWarning string         `json:"mds_warning,omitempty"`
+	// The limits view's keys (limits, ceiling_days, effective, warning;
+	// contract §8.1 "Limits").
+	LimitsView
 }
 
 // TemplateInput is a template save or preview: its name and source rule.
@@ -163,7 +166,7 @@ type AffectedApp struct {
 // coreSignInLabels name the core pages (state.CoreSignInKeys).
 var coreSignInLabels = map[string]string{
 	"portal": "Portal", "hub": "Hub", "people": "People", "directory": "Directory",
-	"enroll": "Enroll", "metrics": "Metrics", "traefik": "Traefik",
+	"metrics": "Metrics", "traefik": "Traefik",
 }
 
 // ── reads ────────────────────────────────────────────────
@@ -211,7 +214,7 @@ func (h *Hub) signInViewLocked() *SignInView {
 	si := h.st.SignIn
 	on := si.MethodsOn()
 	people, total := h.methodPeopleLocked()
-	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger, MDS: h.mdsStatus(), PeopleTotal: total}
+	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger, MDS: h.mdsStatus(), PeopleTotal: total, LimitsView: h.limitsViewLocked()}
 	v.MDSWarning = h.mdsWarning(v.MDS)
 	for _, m := range signin.Methods {
 		info, _ := signin.InfoOf(m)
@@ -423,7 +426,7 @@ func onOff(b bool) string {
 }
 
 // SetMethod switches method m on or off for the whole server: 404 for an
-// unknown method, 409 for browser_cert (not available yet) and while an
+// unknown method and 409 while an
 // enabled template needs m (D3; the refusal lists them and their uses).
 func (h *Hub) SetMethod(ctx context.Context, m signin.Method, on bool, actor directory.Actor) (*SignInChange, error) {
 	// A refusal is audited as the switch it would have made; an unknown
@@ -436,9 +439,6 @@ func (h *Hub) SetMethod(ctx context.Context, m signin.Method, on bool, actor dir
 		info, ok := signin.InfoOf(m)
 		if !ok {
 			return signInPlan{}, statusErr(http.StatusNotFound, "unknown sign-in method %q", clip(string(m), 64))
-		}
-		if !info.Available && on {
-			return signInPlan{}, statusErr(http.StatusConflict, "browser certificates aren't available yet")
 		}
 		cur := h.st.SignIn
 		if cur.Methods[string(m)] == on {

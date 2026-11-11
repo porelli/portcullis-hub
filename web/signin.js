@@ -61,7 +61,7 @@
   ];
   const LEAF_LABEL = Object.fromEntries(METHODS.concat(FAMILIES));
   const CORE_PAGES = [['portal', 'Portal'], ['hub', 'Hub'], ['people', 'People'], ['directory', 'Directory'],
-    ['enroll', 'Enroll'], ['metrics', 'Metrics'], ['traefik', 'Traefik']];
+    ['metrics', 'Metrics'], ['traefik', 'Traefik']];
 
   function leafLabel(leaf) { return LEAF_LABEL[leaf] || leaf; }
 

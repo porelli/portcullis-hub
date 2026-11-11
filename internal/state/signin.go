@@ -19,7 +19,7 @@ import (
 // SignIn is Settings → Sign-in as state.yaml keeps it (contract §8.1, D12).
 type SignIn struct {
 	// Methods: method id → switched on. Every method of signin.Methods
-	// has an entry; browser_cert is always false (not available yet).
+	// has an entry.
 	Methods map[string]bool `json:"methods" yaml:"methods"`
 	// Templates: template id → its definition (the source rule).
 	Templates map[string]SignInTemplate `json:"templates" yaml:"templates"`
@@ -32,6 +32,45 @@ type SignIn struct {
 	// Passwords: lowercase user → the Hub-set password record (D13; never
 	// the password).
 	Passwords map[string]PasswordRecord `json:"passwords" yaml:"passwords"`
+	// Limits are the browser-certificate and history limits (D27,
+	// contract §8.1 "Limits").
+	Limits SignInLimits `json:"limits" yaml:"limits"`
+}
+
+// SignInLimits are Settings → Sign-in's limits (contract §8.1 "Limits"):
+// a browser certificate's longest lifetime in days (1 to the ceiling,
+// HUB_CLIENT_CERT_TTL in whole days; a stored value above it applies as
+// the ceiling), the most active browser certificates per person and how
+// many days the sign-in history is kept.
+type SignInLimits struct {
+	BrowserCertDays      int `json:"browser_cert_days" yaml:"browser_cert_days"`
+	BrowserCertMaxActive int `json:"browser_cert_max_active" yaml:"browser_cert_max_active"`
+	HistoryDays          int `json:"history_days" yaml:"history_days"`
+}
+
+// The limits' defaults and bounds (D27). BrowserCertDays' upper bound is
+// the ceiling, which only the Hub's configuration knows.
+const (
+	DefaultBrowserCertDays      = 30
+	DefaultBrowserCertMaxActive = 3
+	DefaultHistoryDays          = 365
+	MaxBrowserCertMaxActive     = 20
+	MinHistoryDays              = 30
+	MaxHistoryDays              = 3650
+)
+
+// CheckLimits is the limits' bounds without the ceiling (Load and the
+// API): "" = fine.
+func (l SignInLimits) CheckLimits() string {
+	switch {
+	case l.BrowserCertDays < 1:
+		return fmt.Sprintf("browser_cert_days %d: at least 1", l.BrowserCertDays)
+	case l.BrowserCertMaxActive < 1 || l.BrowserCertMaxActive > MaxBrowserCertMaxActive:
+		return fmt.Sprintf("browser_cert_max_active %d: 1 to %d", l.BrowserCertMaxActive, MaxBrowserCertMaxActive)
+	case l.HistoryDays < MinHistoryDays || l.HistoryDays > MaxHistoryDays:
+		return fmt.Sprintf("history_days %d: %d to %d", l.HistoryDays, MinHistoryDays, MaxHistoryDays)
+	}
+	return ""
 }
 
 // SignInTemplate is one template: its name, its source rule (families
@@ -54,7 +93,7 @@ type PasswordRecord struct {
 
 // CoreSignInKeys are the core pages that take a template (D11), in
 // display order: portal is the main domain.
-var CoreSignInKeys = []string{"portal", "hub", "people", "directory", "enroll", "metrics", "traefik"}
+var CoreSignInKeys = []string{"portal", "hub", "people", "directory", "metrics", "traefik"}
 
 // LockFile is the advisory lock the running Hub holds in its data
 // directory (fsutil.TryLock): `hub signin reset-core` refuses to touch
@@ -89,10 +128,10 @@ func defaultCore(key string) string {
 // the D1 switches, the four built-ins, Default "standard" and the D11
 // core picks. On a stored state it only completes: a method without an
 // entry is off (fail closed: a stored section without methods has every
-// method off), browser_cert is forced
-// off, a missing built-in comes back as it ships (built-ins are never
-// deleted), only the built-in ids are BuiltIn, an empty default is
-// "standard" and a missing core key gets its D11 pick.
+// method off), a missing built-in comes back as it ships (built-ins are
+// never deleted), only the built-in ids are BuiltIn, an empty default is
+// "standard", a missing core key gets its D11 pick and a missing (zero)
+// limit its D27 default.
 func (s *AppState) EnsureSignIn() {
 	si := &s.SignIn
 	fresh := len(si.Methods) == 0 && len(si.Templates) == 0 && si.Default == "" && len(si.Core) == 0
@@ -104,7 +143,6 @@ func (s *AppState) EnsureSignIn() {
 			si.Methods[string(m)] = fresh && defaultMethodOn(m)
 		}
 	}
-	si.Methods[string(signin.BrowserCert)] = false
 	if si.Templates == nil {
 		si.Templates = make(map[string]SignInTemplate)
 	}
@@ -135,14 +173,22 @@ func (s *AppState) EnsureSignIn() {
 	if si.Passwords == nil {
 		si.Passwords = make(map[string]PasswordRecord)
 	}
+	if si.Limits.BrowserCertDays == 0 {
+		si.Limits.BrowserCertDays = DefaultBrowserCertDays
+	}
+	if si.Limits.BrowserCertMaxActive == 0 {
+		si.Limits.BrowserCertMaxActive = DefaultBrowserCertMaxActive
+	}
+	if si.Limits.HistoryDays == 0 {
+		si.Limits.HistoryDays = DefaultHistoryDays
+	}
 }
 
-// MethodsOn is the switched-on methods as signin's map (browser_cert
-// never: it isn't available).
+// MethodsOn is the switched-on methods as signin's map.
 func (si SignIn) MethodsOn() map[signin.Method]bool {
 	on := make(map[signin.Method]bool, len(signin.Methods))
 	for _, m := range signin.Methods {
-		if si.Methods[string(m)] && m != signin.BrowserCert {
+		if si.Methods[string(m)] {
 			on[m] = true
 		}
 	}
@@ -200,7 +246,7 @@ func CheckSignInName(name string) string {
 // together (after EnsureSignIn): unknown methods or core keys, a template
 // with a bad id, name or rule, an enabled template that can't be met with
 // the stored switches, a default, core or instance pick naming no
-// template or a disabled one. A corrupt section never loads (fail
+// template or a disabled one, a limit out of its bounds. A corrupt section never loads (fail
 // closed): the Hub's writers never leave one.
 func (s *AppState) checkSignIn() error {
 	si := s.SignIn
@@ -219,6 +265,9 @@ func (s *AppState) checkSignIn() error {
 		if !slices.Contains(signin.Methods, signin.Method(m)) {
 			return fmt.Errorf("unknown method %q", m)
 		}
+	}
+	if why := si.Limits.CheckLimits(); why != "" {
+		return fmt.Errorf("limits: %s", why)
 	}
 	for _, id := range slices.Sorted(maps.Keys(si.Templates)) {
 		t := si.Templates[id]

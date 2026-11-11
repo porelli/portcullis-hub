@@ -98,6 +98,8 @@ var accessWidening = map[string]string{
 	"set_core_template":     "D unless the new template Implies the current one (both switch states) and nobody is newly blocked or unknown",
 	"set_sign_in_template":  "D unless the app's new template Implies its current one (both switch states) and nobody is newly blocked or unknown",
 	"set_add_stronger":      "D when on, W when off",
+	// Sign-in part 2 (Task 3).
+	"set_sign_in_limits": "D when browser_cert_days or browser_cert_max_active go up or history_days goes down, else W",
 	// Task 18 (G37 ruling 2; the directory's Membership.Guarding).
 	"create_instance":   "D when one of its groups already exists with members, or the template / directory can't be read (T18 fix round 1)",
 	"remove_member":     "D from an administrator, permission or guarding group (T18 fix round 1 ruling)",
@@ -238,7 +240,7 @@ func TestToolParity(t *testing.T) {
 		// Task 7 security review.
 		"stop_op",
 		// Sign-in methods (Task 6).
-		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger"} {
+		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger", "set_sign_in_limits"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -295,7 +297,7 @@ func TestToolParity(t *testing.T) {
 var adminSignIn = []string{
 	"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "set_sign_in_method", "save_sign_in_template",
 	"set_sign_in_template_enabled", "delete_sign_in_template", "set_default_template", "set_core_template",
-	"set_sign_in_template", "set_add_stronger", "sign_in_impact",
+	"set_sign_in_template", "set_add_stronger", "sign_in_impact", "set_sign_in_limits",
 }
 
 // admin20 are the doctor and shared-folder tools of T20.

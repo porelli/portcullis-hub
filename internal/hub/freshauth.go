@@ -94,8 +94,7 @@ func (h *Hub) FreshAuthInfoFor(listener string) *freshauth.AuthorizeInfo {
 }
 
 // freshAuthAccepted are the methods pc_fresh may name switched on right
-// now, in order (freshauth.FreshMethods: the six method ids; browser_cert
-// is always off). Whether one approves an action is the governing
+// now, in order (freshauth.FreshMethods: the six method ids). Whether one approves an action is the governing
 // template's check (checkFreshAuthOn). Takes mu (read).
 func (h *Hub) freshAuthAccepted() []string {
 	h.mu.RLock()

@@ -55,7 +55,7 @@ type SignInImpact struct {
 
 // PrecheckSignIn refuses a draft its twin route would refuse for its
 // names and rule, with the route's status and text: an unknown method
-// (404), browser certificates on (409), a bad template id, name or rule
+// (404), a bad template id, name or rule
 // (400), an existing id on create (409), an unknown one on update (404),
 // an enabled template left unmeetable (409), an unknown core key (400),
 // an unknown or disabled template pick (404 / 409), an unknown instance
@@ -66,12 +66,8 @@ func (h *Hub) PrecheckSignIn(d SignInDraft) error {
 	si := h.st.SignIn
 	switch {
 	case d.Method != "":
-		info, ok := signin.InfoOf(d.Method)
-		if !ok {
+		if _, ok := signin.InfoOf(d.Method); !ok {
 			return statusErr(http.StatusNotFound, "unknown sign-in method %q", clip(string(d.Method), 64))
-		}
-		if !info.Available && d.On {
-			return statusErr(http.StatusConflict, "browser certificates aren't available yet")
 		}
 	case d.Template != "" || d.Name != "" || d.Rule != nil || d.Create:
 		if err := checkTemplateID(d.Template); err != nil {
@@ -292,7 +288,7 @@ func sameMethods(a, b map[signin.Method]bool) bool {
 }
 
 // namesCert reports whether compiled rule n has an alternative with a
-// YubiKey certificate (an unreadable rule counts: fail closed).
+// certificate method (an unreadable rule counts: fail closed).
 func namesCert(n signin.Node) bool {
 	if n.Op == "" && n.Leaf == "" {
 		return false
@@ -302,7 +298,7 @@ func namesCert(n signin.Node) bool {
 		return true
 	}
 	for _, alt := range alts {
-		if slices.Contains(alt, signin.YubiKeyCert) {
+		if slices.Contains(alt, signin.YubiKeyCert) || slices.Contains(alt, signin.BrowserCert) {
 			return true
 		}
 	}

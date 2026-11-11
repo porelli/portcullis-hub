@@ -185,7 +185,7 @@ func newInstanceFixtureCfg(t *testing.T, seed func(*state.AppState), idp IdP, ex
 	if idp == nil {
 		idp = f.idp
 	}
-	c := Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}
+	c := Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}
 	if cfg != nil {
 		cfg(root, &c)
 	}

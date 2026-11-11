@@ -89,8 +89,9 @@ func TestScoreSpecExamples(t *testing.T) {
 		{"yubikey-and-certificate", builtin(t, "yubikey-and-certificate"), defaultOn(), "4.4 / 5"},
 		{"family example", anyOf(all(leaves("password", "family:passkey")...), leaf("security_key")), withPassword, "2.9 / 5"},
 		{"nested", nestedRule(), defaultOn(), "4.4 / 5"},
-		// browser_cert isn't available yet: switched on, it still counts as off.
-		{"nested, browser cert on but not available", nestedRule(), withCert, "4.4 / 5"},
+		// A switched-on browser certificate counts: the certificate family
+		// then scores its weakest member (2.5 instead of 4.0).
+		{"nested, browser cert on", nestedRule(), withCert, "4.3 / 5"},
 		{"family scores its weakest member", all(leaves("security_key", "family:passkey")...), defaultOn(), "3.9 / 5"},
 		{"basic, password off: its alternative doesn't count", builtin(t, "basic"), defaultOn(), "2.5 / 5"},
 		{"no way in", all(leaf("password")), defaultOn(), "0.0 / 5"},
@@ -137,18 +138,45 @@ func TestScoreSpecExamples(t *testing.T) {
 	}
 }
 
-func TestBrowserCertUnavailable(t *testing.T) {
+// A switched-on browser certificate counts like any other method (sign-in
+// part 2, D27): it compiles, the certificate family offers it, and a
+// switched-off one still doesn't.
+func TestBrowserCertCompiles(t *testing.T) {
 	on := defaultOn()
 	on[BrowserCert] = true
-	if _, err := Compile(anyOf(leaf("browser_cert")), on); !errors.Is(err, ErrUnmeetable) {
-		t.Errorf("browser_cert switched on but unavailable compiled: %v", err)
+	if c := mustCompile(t, anyOf(leaf("browser_cert")), on); js(c) != `{"op":"any","items":["browser_cert"]}` {
+		t.Errorf("browser_cert switched on: %s", js(c))
 	}
 	c := mustCompile(t, anyOf(leaf("family:certificate")), on)
-	if js(c) != `{"op":"any","items":[{"op":"any","items":["yubikey_cert"]}]}` {
-		t.Errorf("certificate family with browser_cert unavailable: %s", js(c))
+	if js(c) != `{"op":"any","items":[{"op":"any","items":["yubikey_cert","browser_cert"]}]}` {
+		t.Errorf("certificate family with browser_cert on: %s", js(c))
 	}
-	if got := Needs(builtin(t, "standard"), on); len(got) != 0 {
-		t.Errorf("Needs(standard) = %v", got)
+	if _, err := Compile(anyOf(leaf("browser_cert")), defaultOn()); !errors.Is(err, ErrUnmeetable) {
+		t.Errorf("browser_cert switched off compiled: %v", err)
+	}
+}
+
+func TestScoreOfSet(t *testing.T) {
+	cases := []struct {
+		ms   []Method
+		want string
+	}{
+		{[]Method{SecurityKey}, "3.5 / 5"},
+		{[]Method{BrowserCert, SecurityKey}, "3.9 / 5"},
+		{[]Method{SecurityKey, BrowserCert, SecurityKey}, "3.9 / 5"},
+		{[]Method{YubiKeyCert, SecurityKey, PasskeyDevice}, "4.8 / 5"},
+		{[]Method{Password, PasskeySynced, BrowserCert, PasskeyDevice, SecurityKey, YubiKeyCert}, "5.0 / 5"},
+	}
+	for _, c := range cases {
+		s := ScoreOfSet(c.ms)
+		if s == nil || s.String() != c.want {
+			t.Errorf("ScoreOfSet(%v) = %v, want %s", c.ms, s, c.want)
+		}
+	}
+	for _, ms := range [][]Method{nil, {}, {"webauthn"}} {
+		if s := ScoreOfSet(ms); s != nil {
+			t.Errorf("ScoreOfSet(%v) = %v, want nil", ms, s)
+		}
 	}
 }
 
@@ -523,7 +551,7 @@ func TestMethodTable(t *testing.T) {
 		if got, ok := MethodForAMR(info.AMR); !ok || got != m {
 			t.Errorf("MethodForAMR(%s) = %s, %v", info.AMR, got, ok)
 		}
-		if info.Available != (m != BrowserCert) {
+		if !info.Available {
 			t.Errorf("%s available %v", m, info.Available)
 		}
 	}

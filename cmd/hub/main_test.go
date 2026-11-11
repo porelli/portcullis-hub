@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fidomds"
@@ -205,5 +206,33 @@ func TestMCPListenerFromEnv(t *testing.T) {
 	l, err = mcpListenerFromEnv(envOf(map[string]string{"HUB_MCP_GATE_SECRET_FILE": good, "HUB_MCP_ADDR": ":9999"}))
 	if err != nil || !l.on || l.secret != strings.Repeat("q", 48) || l.addr != ":9999" {
 		t.Errorf("good = %v %v %q", l.on, err, l.addr)
+	}
+}
+
+// TestHubRefusesBadClientCertTTL (contract §8.1 "Limits"): the ceiling of
+// browser certificate lifetimes is HUB_CLIENT_CERT_TTL in whole days, in
+// core's grammar (a bare number is seconds); unset, unparsable or under a
+// day refuses the start.
+func TestHubRefusesBadClientCertTTL(t *testing.T) {
+	for _, v := range []string{"", "abc", "3600", "23h", "1439m", "0d", "1.5d", "-1d", "30 d", "720H", "99999999999999999999d"} {
+		if _, err := clientCertTTLFromEnv(func(k string) string {
+			if k == "HUB_CLIENT_CERT_TTL" {
+				return v
+			}
+			return ""
+		}); err == nil {
+			t.Errorf("HUB_CLIENT_CERT_TTL %q accepted", v)
+		}
+	}
+	for v, days := range map[string]int{"2592000": 30, "720h": 30, "30d": 30, "86400s": 1, "1d": 1, "2160h": 90, "43201m": 30} {
+		d, err := clientCertTTLFromEnv(func(k string) string {
+			if k == "HUB_CLIENT_CERT_TTL" {
+				return v
+			}
+			return ""
+		})
+		if err != nil || int(d/(24*time.Hour)) != days {
+			t.Errorf("HUB_CLIENT_CERT_TTL %q = %v, %v; want %d days", v, d, err, days)
+		}
 	}
 }

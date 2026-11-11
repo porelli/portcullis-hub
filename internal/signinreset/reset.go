@@ -4,7 +4,10 @@
 // directory while the Hub is stopped (core's `./portcullis signin
 // reset-core` stops it first and starts it after): `hub` and `people` go
 // back to the built-in Standard template, Standard's rule is restored and
-// enabled, and its methods are switched back on (browser_cert stays off).
+// enabled, and its methods are switched back on — browser_cert is never
+// switched on by the reset (it stays as it was: off unless an admin
+// switched it on; forcing it off could leave an enabled template that
+// needs it unmeetable, and such a state.yaml never loads).
 // Audited `signin.reset_core`, actor `cli`.
 package signinreset
 
@@ -32,8 +35,9 @@ func standard() signin.Template {
 	panic("signinreset: no built-in standard template")
 }
 
-// standardMethods are the methods Standard needs on: its families'
-// members that can be switched on (browser_cert can't).
+// standardMethods are the methods the reset switches on: Standard's
+// families' members except browser_cert (a copied certificate file is
+// never what a lockout recovery opens).
 var standardMethods = []signin.Method{signin.PasskeySynced, signin.PasskeyDevice, signin.SecurityKey, signin.YubiKeyCert}
 
 const usage = "usage: hub signin reset-core"
@@ -108,7 +112,6 @@ func ResetCore(dataDir string) ([]string, error) {
 			si.Methods[string(m)] = true
 		}
 	}
-	si.Methods[string(signin.BrowserCert)] = false
 	audit := &directory.AuditLog{Path: filepath.Join(dataDir, "audit.jsonl")}
 	detail := "nothing to change"
 	if len(changes) > 0 {

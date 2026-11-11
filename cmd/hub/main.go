@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -90,6 +92,53 @@ func signInMDSFromEnv(getenv func(string) string) (mdsURL, extra string, err err
 		return "", "", fmt.Errorf("HUB_SIGNIN_EXTRA_AUTHENTICATORS is for development only: set HUB_DEV=1 or unset it")
 	}
 	return mdsURL, extra, nil
+}
+
+// vaultDurationRe is core's duration grammar for CLIENT_CERT_TTL (a bare
+// number means seconds).
+var vaultDurationRe = regexp.MustCompile(`^[0-9]+[smhd]?$`)
+
+// parseVaultDuration parses core's CLIENT_CERT_TTL grammar
+// `^[0-9]+[smhd]?$` (a bare number is seconds).
+func parseVaultDuration(s string) (time.Duration, error) {
+	if !vaultDurationRe.MatchString(s) {
+		return 0, fmt.Errorf("%q is not a number with an optional s, m, h or d", s)
+	}
+	unit := time.Second
+	switch s[len(s)-1] {
+	case 's':
+		s = s[:len(s)-1]
+	case 'm':
+		unit, s = time.Minute, s[:len(s)-1]
+	case 'h':
+		unit, s = time.Hour, s[:len(s)-1]
+	case 'd':
+		unit, s = 24*time.Hour, s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n > int64(1<<62)/int64(unit) {
+		return 0, fmt.Errorf("%q is too large", s)
+	}
+	return time.Duration(n) * unit, nil
+}
+
+// clientCertTTLFromEnv is HUB_CLIENT_CERT_TTL (core: ${CLIENT_CERT_TTL:-720h},
+// the browser-cert role's max_ttl), the ceiling of browser certificate
+// lifetimes in whole days (contract §8.1 "Limits"): unset, unparsable or
+// under one day refuses the start.
+func clientCertTTLFromEnv(getenv func(string) string) (time.Duration, error) {
+	v := getenv("HUB_CLIENT_CERT_TTL")
+	if v == "" {
+		return 0, errors.New("HUB_CLIENT_CERT_TTL is not set (core sets it from CLIENT_CERT_TTL)")
+	}
+	d, err := parseVaultDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("HUB_CLIENT_CERT_TTL: %v", err)
+	}
+	if d < 24*time.Hour {
+		return 0, fmt.Errorf("HUB_CLIENT_CERT_TTL is %s: browser certificates need at least one day", v)
+	}
+	return d, nil
 }
 
 // freshAuthSetup is the fresh-auth wiring (contract §8): the issuer and
@@ -194,6 +243,9 @@ func main() {
 	cfg.Dev = os.Getenv("HUB_DEV") == "1"
 	cfg.FIDOMDSURL, cfg.ExtraAuthenticators, err = signInMDSFromEnv(os.Getenv)
 	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	if cfg.ClientCertTTL, err = clientCertTTLFromEnv(os.Getenv); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
@@ -338,6 +390,10 @@ func main() {
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, []string{fa.RedirectURI, fa.HubRedirectURI}, []string{fa.WebOrigin, fa.HubWebOrigin})
 	})
+	// Keycloak's events config (contract §8): the sign-in history's
+	// source, kept history_days; re-asserted in the directory sync loop
+	// and on every limits change.
+	h.SetEventsConfig(kc.EnsureEventsConfig)
 	h.Init()
 
 	srv := &httpapi.Server{

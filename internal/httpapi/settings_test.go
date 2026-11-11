@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
@@ -101,7 +102,7 @@ func newSetEnvWith(t *testing.T, extra map[string][2]string) *setEnv {
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: src}}
 	st.Save(filepath.Join(data, "state.yaml"))
-	h, err := hub.New(hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org"}, nopRunner{}, newFakeEngine(), nil)
+	h, err := hub.New(hub.Config{ProjectDir: filepath.Join(root, "project"), ProjectHostDir: "/host/project", DataDir: data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}, nopRunner{}, newFakeEngine(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -104,6 +104,11 @@ type Config struct {
 	// Dev is HUB_DEV=1: the extra authenticators are used only with it
 	// (defence in depth: main refuses the file without it).
 	Dev bool
+	// ClientCertTTL is HUB_CLIENT_CERT_TTL (core's CLIENT_CERT_TTL, the
+	// browser-cert role's max_ttl): its whole days are browser_cert_days'
+	// ceiling (contract §8.1 "Limits"). main refuses to start under one
+	// day; 0 here (tests) is a ceiling of 0: no lifetime is allowed.
+	ClientCertTTL time.Duration
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -481,8 +486,12 @@ type Hub struct {
 	// freshAuthEnsure re-asserts the fresh-auth Keycloak client in the
 	// directory sync loop (freshauth.go); under policyWriteMu like attrSync.
 	freshAuthEnsure func(ctx context.Context) error
-	lastExpiring    []policy.Expiring
-	dirKick         chan struct{}
+	// eventsEnsure re-asserts Keycloak's events config with history_days
+	// (signin_limits.go: the sync loop and every limits change); under
+	// policyWriteMu like attrSync.
+	eventsEnsure func(ctx context.Context, days int) error
+	lastExpiring []policy.Expiring
+	dirKick      chan struct{}
 	// invKick asks runInventorySync for a sign-in inventory refresh.
 	invKick chan struct{}
 

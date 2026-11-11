@@ -322,6 +322,36 @@ func (s *Server) ExecConfig(id, provider string) map[string]string {
 	return nil
 }
 
+// ExecConfigs returns the configs of every execution of provider in the
+// flow tree id, depth-first ({} for one without a config).
+func (s *Server) ExecConfigs(id, provider string) []map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []map[string]string
+	var walk func(f *Flow)
+	walk = func(f *Flow) {
+		for _, e := range f.Execs {
+			if e.FlowID != "" {
+				if sub := s.Flows[e.FlowID]; sub != nil {
+					walk(sub)
+				}
+				continue
+			}
+			if e.Provider == provider {
+				c := map[string]string{}
+				if cfg := s.AuthConfigs[e.ConfigID]; cfg != nil {
+					c = cfg.Config
+				}
+				out = append(out, c)
+			}
+		}
+	}
+	if f := s.Flows[id]; f != nil {
+		walk(f)
+	}
+	return out
+}
+
 // SetRealmBrowserFlow sets the realm's browser flow alias.
 func (s *Server) SetRealmBrowserFlow(alias string) {
 	s.mu.Lock()
