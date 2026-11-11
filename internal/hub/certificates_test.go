@@ -161,6 +161,13 @@ func TestCreateBrowserCertFreshRules(t *testing.T) {
 	if e := c.audit.last(); e.Action != "cert.create" || e.Result != "refused" || !strings.Contains(e.Detail, "pc_fresh names browser_cert") {
 		t.Errorf("browser_cert audit = %+v", e)
 	}
+	// any[password, security_key] with pc_fresh=password: 403 (fix round 1, m4).
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["password"] = true })
+	setPeopleRule(c.f, siLeaves("any", "password", "security_key"))
+	c.fa.method = "password"
+	if _, err := h.CreateBrowserCertificate(c.ctx, "alice", 30, testProof); statusOf(err) != 403 || err.Error() != freshauth.Message {
+		t.Errorf("any[password, security_key] + password: %v", err)
+	}
 	// any[password]: no method may approve it — 409 before the proof.
 	setPeopleRule(c.f, siLeaves("any", "password"))
 	calls := c.fa.calls.Load()
@@ -352,6 +359,15 @@ func TestRenewUsesPresentedCert(t *testing.T) {
 		}
 	}
 	c := newCertFixture(t, invite.CertRecord{User: "alice", Serial: serial, Kind: invite.KindYubiKey, NotAfter: later})
+	// yubikey_cert switched off: 409, enroll not called (fix round 1, m1).
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["yubikey_cert"] = false })
+	if _, err := c.f.h.RenewYubiKeyCertificate(c.ctx, "alice", hdr, "CSR"); statusOf(err) != 409 || err.Error() != "YubiKey certificates are off on this server" {
+		t.Errorf("off: %v", err)
+	}
+	if _, n, _ := c.ca.counts(); n != 0 {
+		t.Error("enroll called while yubikey_cert is off")
+	}
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["yubikey_cert"] = true })
 	for _, h := range []string{"", "garbage"} {
 		if _, err := c.f.h.RenewYubiKeyCertificate(c.ctx, "alice", h, "CSR"); statusOf(err) != 403 {
 			t.Errorf("header %q: %v", h, err)

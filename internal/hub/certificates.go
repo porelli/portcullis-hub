@@ -168,6 +168,7 @@ var (
 	// name (D32, review I3), before enroll's own 409 "protected account".
 	errOwnCertsProtected = &StatusError{Status: http.StatusConflict, Err: errors.New("this account's certificates are managed from the server: ./portcullis cert revoke <serial>")}
 	errBrowserCertOff    = &StatusError{Status: http.StatusConflict, Err: errors.New("browser certificates are off on this server")}
+	errYubiKeyCertOff    = &StatusError{Status: http.StatusConflict, Err: errors.New("YubiKey certificates are off on this server")}
 	errPresentYubiKey    = &StatusError{Status: http.StatusForbidden, Err: errors.New("present your current YubiKey certificate")}
 	errNoSuchOwnCert     = &StatusError{Status: http.StatusNotFound, Err: errors.New("you have no browser certificate with that serial")}
 	errCertsUnavailable  = &StatusError{Status: http.StatusServiceUnavailable, Err: errors.New("certificates can't be managed right now: try again later")}
@@ -470,7 +471,8 @@ func presentedCertPEM(headerValue string) (string, error) {
 const maxCSR = 8 << 10
 
 // RenewYubiKeyCertificate renews user's (the caller's) YubiKey
-// certificate with csrPEM (contract §5.1, D25). headerValue is the
+// certificate with csrPEM (contract §5.1, D25); 409 while yubikey_cert
+// is switched off. headerValue is the
 // people router's X-Forwarded-Tls-Client-Cert: its leaf must be one of
 // the caller's unexpired, unrevoked YubiKey (pki_int) certificates in
 // enroll's list — a missing or unparsable header, a browser certificate
@@ -493,6 +495,13 @@ func (h *Hub) RenewYubiKeyCertificate(ctx context.Context, user, headerValue, cs
 	}()
 	if invite.ProtectedName(u) {
 		return nil, errOwnCertsProtected
+	}
+	// A switched-off method is never accepted as proof (fix round 1).
+	h.mu.RLock()
+	ykOn := h.st.SignIn.MethodsOn()[signin.YubiKeyCert]
+	h.mu.RUnlock()
+	if !ykOn {
+		return nil, errYubiKeyCertOff
 	}
 	if strings.TrimSpace(csrPEM) == "" || len(csrPEM) > maxCSR {
 		return nil, statusErr(http.StatusBadRequest, "csr must be a PEM certificate request")

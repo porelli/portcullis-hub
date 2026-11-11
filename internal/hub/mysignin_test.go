@@ -210,7 +210,7 @@ func TestOwnPasswordRules(t *testing.T) {
 			t.Errorf("%q: %v", bad, err)
 		}
 	}
-	for _, u := range []string{"admin", "portcullis-hub"} {
+	for _, u := range []string{"admin", "portcullis-hub", "portcullis-x"} {
 		if err := h.SetOwnPassword(c.ctx, u, good, testProof); statusOf(err) != 409 || err.Error() != "Password sign-in isn't available for this account" {
 			t.Errorf("%s set: %v", u, err)
 		}
@@ -221,9 +221,6 @@ func TestOwnPasswordRules(t *testing.T) {
 	if c.fa.calls.Load() != 0 || len(op.calls) != 0 {
 		t.Fatal("a refused change reached the proof or the directory")
 	}
-	// The plain FreshAccepted: a password proof counts under any[password].
-	setPeopleRule(c.f, siLeaves("any", "password"))
-	c.fa.method = "password"
 	if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); err != nil {
 		t.Fatal(err)
 	}
@@ -249,5 +246,54 @@ func TestOwnPasswordRules(t *testing.T) {
 	}
 	if strings.Join(op.calls, ",") != "set alice,remove alice" {
 		t.Errorf("directory calls %v", op.calls)
+	}
+}
+
+// TestOwnPasswordFreshMethod (security review, fix round 1): a stolen
+// browser certificate never sets a password; a password sign-in never
+// adds the first one; it may change an existing one; a security key
+// sets it. People's template accepts all three here.
+func TestOwnPasswordFreshMethod(t *testing.T) {
+	c := newCertFixture(t)
+	h := c.f.h
+	h.SetOwnPasswords(&fakeOwnPasswords{h: h})
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["password"] = true })
+	setPeopleRule(c.f, siLeaves("any", "browser_cert", "password", "security_key"))
+	const good = "correct horse battery staple 42"
+	c.fa.method = "browser_cert"
+	if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); statusOf(err) != 403 || err.Error() != "a fresh sign-in is required" {
+		t.Errorf("browser_cert: %v", err)
+	}
+	if e := c.audit.last(); e.Action != "signin.password" || e.Result != "refused" || !strings.Contains(e.Detail, "browser_cert") {
+		t.Errorf("audit = %+v", e)
+	}
+	c.fa.method = "password"
+	if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); statusOf(err) != 403 {
+		t.Errorf("no password yet + password: %v", err)
+	}
+	c.fa.method = "security_key"
+	if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); err != nil {
+		t.Fatalf("security_key: %v", err)
+	}
+	c.fa.method = "password"
+	if err := h.SetOwnPassword(c.ctx, "alice", good+"!", testProof); err != nil {
+		t.Errorf("existing password + password: %v", err)
+	}
+	// A record of an older account under the name counts as none.
+	setSignIn(c.f, func(si *state.SignIn) {
+		r := si.Passwords["alice"]
+		r.UUID = "uuid-old"
+		si.Passwords["alice"] = r
+	})
+	if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); statusOf(err) != 403 {
+		t.Errorf("stale record + password: %v", err)
+	}
+	// portcullis-* is refused with D13's text before any proof.
+	calls := c.fa.calls.Load()
+	if err := h.SetOwnPassword(c.ctx, "portcullis-x", good, testProof); statusOf(err) != 409 || err.Error() != "Password sign-in isn't available for this account" {
+		t.Errorf("portcullis-x: %v", err)
+	}
+	if c.fa.calls.Load() != calls {
+		t.Error("a proof was spent for portcullis-x")
 	}
 }

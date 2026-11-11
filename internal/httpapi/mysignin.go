@@ -241,7 +241,13 @@ func (s *Server) handleRenewYubiKeyCert(w http.ResponseWriter, r *http.Request) 
 	if !readMySignInBody(w, r, &b, `{"csr": "<PEM>"}`) {
 		return
 	}
-	ic, err := s.Hub.RenewYubiKeyCertificate(r.Context(), user, r.Header.Get(presentedCertHeader), b.CSR)
+	// Exactly one header (fix round 1): none or several is no presented
+	// certificate (the Hub's 403).
+	presented := ""
+	if vs := r.Header.Values(presentedCertHeader); len(vs) == 1 {
+		presented = vs[0]
+	}
+	ic, err := s.Hub.RenewYubiKeyCertificate(r.Context(), user, presented, b.CSR)
 	if err != nil {
 		mySignInErr(w, "renewing the YubiKey certificate of "+user, err)
 		return

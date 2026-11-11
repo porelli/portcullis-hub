@@ -274,7 +274,9 @@ func (h *Hub) ownPasswordsOrNil() OwnPasswords {
 // §5.1, D25, D26): refused for admin and portcullis-hub (409, D13's
 // text), while the password method is off (409), with CheckPassword's
 // text (400), then a fresh-auth proof under the plain
-// FreshAccepted(people template) (403). The directory sets it, signs
+// FreshAccepted(people template) (403) — never browser_cert, and
+// password only to change an existing password (fix round 1). The
+// portcullis-* names are refused like admin, before any proof. The directory sets it, signs
 // the person out of Keycloak and audits signin.password "self set"; the
 // Hub records it with set_by = the caller. Counts toward the refusal
 // limit.
@@ -296,7 +298,7 @@ func (h *Hub) SetOwnPassword(ctx context.Context, user, password string, p fresh
 		h.auditSignIn(actor, "signin.password", u, d, err)
 		return err
 	}
-	if noPasswordAccounts[u] {
+	if ownPasswordRefused(u) {
 		return refuse(errNoOwnPassword, "")
 	}
 	h.mu.RLock()
@@ -312,8 +314,19 @@ func (h *Hub) SetOwnPassword(ctx context.Context, user, password string, p fresh
 	if op == nil {
 		return refuse(errOwnPasswordsNA, "")
 	}
-	if _, reason, err := h.checkFreshAuth(ctx, govCore("people"), p, u); err != nil {
+	fresh, reason, err := h.checkFreshAuth(ctx, govCore("people"), p, u)
+	if err != nil {
 		return refuse(err, reason)
+	}
+	// A copied certificate file never sets a password, and a password
+	// never adds one where there was none (security review, fix round 1;
+	// as certFreshAllowed): only changing an existing password may use a
+	// fresh password sign-in.
+	switch m := signin.Method(fresh.Method); {
+	case m == signin.BrowserCert:
+		return refuse(errFreshAuth, "pc_fresh names browser_cert, which can't set a password (template "+fresh.Template+")")
+	case m == signin.Password && !h.hasOwnPassword(ctx, u):
+		return refuse(errFreshAuth, "pc_fresh names password, but there is no password yet: adding one needs a passkey or YubiKey sign-in (template "+fresh.Template+")")
 	}
 	res, err := op.SetOwnPassword(ctx, actor, password)
 	logWarnings(u, res)
@@ -339,7 +352,7 @@ func (h *Hub) RemoveOwnPassword(ctx context.Context, user string) (err error) {
 	}
 	defer func() { h.entryLimit.release(u, h.entryClock(), isRefusal(err)) }()
 	actor := directory.Human(u)
-	if noPasswordAccounts[u] {
+	if ownPasswordRefused(u) {
 		h.auditSignIn(actor, "signin.password", u, "self removed", errNoOwnPassword)
 		return errNoOwnPassword
 	}
@@ -359,6 +372,27 @@ func (h *Hub) RemoveOwnPassword(ctx context.Context, user string) (err error) {
 		return &StatusError{Status: http.StatusInternalServerError, Err: errors.New("the password was removed, but the Hub's record of it couldn't be dropped: try again")}
 	}
 	return nil
+}
+
+// ownPasswordRefused: the accounts whose own password the Sign-in page
+// never changes (D13: admin, portcullis-hub; and every portcullis-* name,
+// which the directory reserves), refused before any proof is spent.
+func ownPasswordRefused(u string) bool {
+	return noPasswordAccounts[u] || strings.HasPrefix(u, directory.ReservedUserPrefix)
+}
+
+// hasOwnPassword reports whether u has a Hub-set password for their
+// current LLDAP account (the record's uuid is the account's); the
+// directory unreadable counts as none (fail closed).
+func (h *Hub) hasOwnPassword(ctx context.Context, u string) bool {
+	h.mu.RLock()
+	rec, ok := h.st.SignIn.Passwords[u]
+	h.mu.RUnlock()
+	if !ok || rec.UUID == "" {
+		return false
+	}
+	m, err := h.membership(ctx)
+	return err == nil && m.UUIDs[u] == rec.UUID
 }
 
 func logWarnings(u string, res *directory.Result) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -31,8 +33,11 @@ func (f *signInCertActions) CreateBrowserCertificate(_ context.Context, r invite
 }
 
 func (f *signInCertActions) RenewYubiKeyCertificate(context.Context, string, string, string) (*invite.IssuedCert, error) {
-	return nil, &invite.APIError{Status: 403, Message: "no"}
+	return &invite.IssuedCert{PEM: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n", Serial: "77:88", NotAfter: time.Now().Add(365 * 24 * time.Hour)}, nil
 }
+
+// fixtureLeafSerial is the serial of ../hub/testdata/traefik-client-cert.txt's leaf.
+const fixtureLeafSerial = "3f:8a:1b:2c:4d:5e:6f:70:81:92:a3:b4:c5:d6:e7:f8:01:23:45:67"
 
 func (f *signInCertActions) RevokeCertificate(_ context.Context, user, serial string) error {
 	f.mu.Lock()
@@ -61,6 +66,7 @@ func signInEnv(t *testing.T) (*toolEnv, *signInCertActions) {
 			return []invite.CertRecord{
 				{User: "alice", Serial: "0a:02", Kind: invite.KindBrowser, NotBefore: time.Now().Add(-time.Hour), NotAfter: later},
 				{User: "alice", Serial: "0a:01", Kind: invite.KindYubiKey, NotBefore: time.Now().Add(-time.Hour), NotAfter: later},
+				{User: "alice", Serial: fixtureLeafSerial, Kind: invite.KindYubiKey, NotBefore: time.Now().Add(-time.Hour), NotAfter: later},
 				{User: "bob", Serial: "0b:01", Kind: invite.KindBrowser, NotAfter: later},
 			}, nil
 		},
@@ -184,6 +190,34 @@ func TestMySignInRoutesCallerOnly(t *testing.T) {
 	// Renewal without a presented certificate: 403.
 	if r, b := doAs(t, e.ppl, "alice", "POST", "/api/me/signin/yubikey-certificate/renew", `{"csr":"x"}`); r.StatusCode != 403 || !strings.Contains(b, "present your current YubiKey certificate") {
 		t.Errorf("renew = %d %s", r.StatusCode, b)
+	}
+	// The presented certificate: one header renews; two are 403 (fix
+	// round 1, m3).
+	raw, err := os.ReadFile("../hub/testdata/traefik-client-cert.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := strings.TrimSpace(string(raw))
+	renew := func(values ...string) int {
+		req, _ := http.NewRequest("POST", e.ppl.URL+"/api/me/signin/yubikey-certificate/renew", strings.NewReader(`{"csr":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(ProxySecretHeader, testSecret)
+		req.Header.Set("X-Forwarded-User", "alice")
+		for _, v := range values {
+			req.Header.Add(presentedCertHeader, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := renew(hdr); c != 200 {
+		t.Errorf("one header = %d", c)
+	}
+	if c := renew(hdr, hdr); c != 403 {
+		t.Errorf("two headers = %d", c)
 	}
 	// The page.
 	if r, b := doAs(t, e.ppl, "alice", "GET", "/signin", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/html") ||
