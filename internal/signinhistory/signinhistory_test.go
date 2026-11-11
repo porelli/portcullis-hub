@@ -89,6 +89,21 @@ func TestSetupLinkSignIn(t *testing.T) {
 	}
 }
 
+// TestSetupLinkBrokeredLogin (part 2 Task 13 e2e): the post-broker LOGIN of a
+// setup link carries Keycloak's identity_provider detail and none of the
+// extension's: still "Setup link used", never "methods weren't recorded".
+func TestSetupLinkBrokeredLogin(t *testing.T) {
+	e, ok := FromEvent(login(ForwardAuthClient, map[string]string{"identity_provider": InviteIdP, "identity_provider_identity": "alice"}), nil)
+	if !ok || e.Kind != KindSignIn || e.Detail != SetupLinkDetail || len(e.Methods) != 0 || e.Score != nil {
+		t.Errorf("brokered setup link = %+v", e)
+	}
+	// Another identity provider without pc_kind is not a setup link.
+	e, ok = FromEvent(login(ForwardAuthClient, map[string]string{"identity_provider": "other"}), nil)
+	if !ok || e.Detail == SetupLinkDetail {
+		t.Errorf("other idp = %+v", e)
+	}
+}
+
 func TestUntrustedTextClipped(t *testing.T) {
 	ev := login(ForwardAuthClient, map[string]string{"pc_kind": "sign_in", "pc_methods": "password"})
 	for raw, want := range map[string]string{

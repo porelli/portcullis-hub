@@ -21,7 +21,15 @@ const (
 	detailSession = "pc_session"
 	detailUA      = "pc_ua"
 	detailMethod  = "pc_method"
+	// detailIdP is Keycloak's own detail on a brokered LOGIN: a setup link
+	// signs in through the hidden identity provider InviteIdP (core's
+	// enroll), whose post-broker LOGIN carries none of the extension's
+	// details.
+	detailIdP = "identity_provider"
 )
+
+// InviteIdP is the setup links' identity provider (contract §9.4).
+const InviteIdP = "portcullis-invite"
 
 // failureText maps Keycloak's error to the history's text (§8.2).
 var failureText = map[string]string{
@@ -52,6 +60,8 @@ func FailureText(kcErr string) string {
 //   - LOGIN with client portcullis-fresh-auth → confirmed;
 //   - pc_kind sign_in → sign_in (no method: a setup link, detail
 //     SetupLinkDetail); step_up → step_up;
+//   - a brokered LOGIN through InviteIdP (no pc_kind: Keycloak writes the
+//     post-broker LOGIN itself) → sign_in, SetupLinkDetail;
 //   - pc_kind sso → opened <client name> for a listed client, else
 //     dropped (group-gate's log covers the gateway's apps);
 //   - LOGIN_ERROR → failed, methods [pc_method], the error's text.
@@ -87,6 +97,9 @@ func FromEvent(ev keycloak.Event, clientNames map[string]string) (Entry, bool) {
 				e.App = Clean(ev.ClientID, maxApp)
 			}
 			e.Methods = splitMethods(d[detailSession])
+		case d[detailIdP] == InviteIdP:
+			// A setup link's brokered LOGIN: no method (inv meets nothing).
+			e.Kind, e.Methods, e.Detail = KindSignIn, nil, SetupLinkDetail
 		default:
 			e.Kind, e.Detail = KindSignIn, "the sign-in's methods weren't recorded"
 		}
