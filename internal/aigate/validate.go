@@ -310,7 +310,7 @@ func (r *Resource) validateCompanion(f *File) error {
 	if signin.NeedsCertificate(r.Rule) {
 		// §15.2: no MCP client presents a certificate; such an instance
 		// can't get AI support (the Hub never lists it).
-		return fmt.Errorf("rule: needs a client certificate on every alternative")
+		return fmt.Errorf("rule: needs a YubiKey or browser certificate on every alternative")
 	}
 	id := r.Identity
 	if !headerTok.MatchString(id.Header) || forbiddenHeader(id.Header) {

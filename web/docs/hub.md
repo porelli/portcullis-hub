@@ -360,8 +360,8 @@ Every instance, including the default instance, gets the same page structure. De
 One **Save** sends everything you changed in the tab. The save bar says what
 saving does (for example "Saving restarts Immich" or "Takes effect at each
 person's next sign-in; no restart"). A sign-in mode or public-exception
-change restarts the app; a sign-in template change restarts it only when its
-client-certificate request changes.
+change restarts the app; a sign-in template change restarts it only when
+whether it asks for a certificate at sign-in changes.
 
 Input validation:
 
