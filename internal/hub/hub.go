@@ -1213,15 +1213,15 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	hosts, suppress := h.publishedHostHeadersLocked()
 	h.mu.RUnlock()
 	// The Keycloak extension's file first (contract §8.1): a sign-in
-	// change reaches the native-OIDC logins before group-gate's file.
-	if err := writeKeycloakSignIn(h.signInKeycloakPath(), kcSignIn); err != nil {
-		return false, err
-	}
+	// change reaches the native-OIDC logins before group-gate's file. A
+	// failed write never skips group-gate's file: both are attempted and
+	// their errors joined (each reader keeps failing closed on its own).
+	kcErr := writeKeycloakSignIn(h.signInKeycloakPath(), kcSignIn)
 	if err := policy.Write(h.policyPath(), doc); err != nil {
-		return false, err
+		return false, errors.Join(kcErr, err)
 	}
 	h.lastExpiring = expiring
-	var errs []error
+	errs := []error{kcErr}
 	switch {
 	case keepAttrs:
 		// The directory's fields and users stay as published; the hosts

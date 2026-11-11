@@ -488,20 +488,38 @@ func TestMDSPublishedSerialFloor(t *testing.T) {
 	}
 }
 
-// TestPublishableTrustDropsBadRoots: an entry whose roots aren't each one
-// DER X.509 certificate is left out of signin-keycloak.json (the extension
-// would refuse the whole file); the others are kept.
+// TestPublishableTrustDropsBadRoots: a certified entry whose roots aren't
+// each one DER X.509 certificate, or that has none, is left out of
+// signin-keycloak.json (the extension would refuse the whole file); a
+// revoked entry is always published, with only its usable roots (`[]` when
+// none is), so the revocation still reaches the extension.
 func TestPublishableTrustDropsBadRoots(t *testing.T) {
 	good := testRootDER(t, "good")
+	bad := append(append([]byte{}, good...), 0)
 	in := map[string]fidomds.AuthenticatorTrust{
 		"00000000-0000-0000-0000-000000000001": {Kind: "security_key", Status: "certified", Roots: [][]byte{good}},
 		"00000000-0000-0000-0000-000000000002": {Kind: "security_key", Status: "certified", Roots: [][]byte{good, []byte("not a certificate")}},
-		"00000000-0000-0000-0000-000000000003": {Kind: "passkey_device", Status: "revoked", Roots: [][]byte{append(append([]byte{}, good...), 0)}},
+		"00000000-0000-0000-0000-000000000003": {Kind: "passkey_device", Status: "revoked", Roots: [][]byte{bad}},
 		"00000000-0000-0000-0000-000000000004": {Kind: "passkey_device", Status: "certified", Roots: nil},
+		"00000000-0000-0000-0000-000000000005": {Kind: "security_key", Status: "revoked", Roots: nil},
+		"00000000-0000-0000-0000-000000000006": {Kind: "security_key", Status: "revoked", Roots: [][]byte{[]byte("junk"), good}},
+		"00000000-0000-0000-0000-000000000007": {Kind: "passkey_device", Status: "certified", Roots: [][]byte{}},
 	}
 	kept, dropped := publishableTrust(in)
-	if len(kept) != 1 || !reflect.DeepEqual(kept["00000000-0000-0000-0000-000000000001"], in["00000000-0000-0000-0000-000000000001"]) {
-		t.Errorf("kept = %v", kept)
+	want := map[string]fidomds.AuthenticatorTrust{
+		"00000000-0000-0000-0000-000000000001": in["00000000-0000-0000-0000-000000000001"],
+		"00000000-0000-0000-0000-000000000003": {Kind: "passkey_device", Status: "revoked", Roots: [][]byte{}},
+		"00000000-0000-0000-0000-000000000005": {Kind: "security_key", Status: "revoked", Roots: [][]byte{}},
+		"00000000-0000-0000-0000-000000000006": {Kind: "security_key", Status: "revoked", Roots: [][]byte{good}},
+	}
+	if !reflect.DeepEqual(kept, want) {
+		t.Errorf("kept = %v\nwant %v", kept, want)
+	}
+	// The published shape: a revoked entry's roots are `[]`, never null
+	// (the extension refuses a null root list).
+	b, err := json.Marshal(kept["00000000-0000-0000-0000-000000000005"])
+	if err != nil || string(b) != `{"kind":"security_key","status":"revoked","roots":[]}` {
+		t.Errorf("revoked without roots = %s, %v", b, err)
 	}
 	var ids []string
 	for _, d := range dropped {
@@ -509,12 +527,15 @@ func TestPublishableTrustDropsBadRoots(t *testing.T) {
 		if d.why == "" {
 			t.Errorf("%s dropped without a reason", d.aaguid)
 		}
+		if rev := in[d.aaguid].Status == "revoked"; d.revoked != rev {
+			t.Errorf("%s: revoked = %t, want %t", d.aaguid, d.revoked, rev)
+		}
 	}
-	want := []string{"00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"}
-	if !reflect.DeepEqual(ids, want) {
-		t.Errorf("dropped = %v, want %v", ids, want)
+	wantIDs := []string{"00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004", "00000000-0000-0000-0000-000000000006", "00000000-0000-0000-0000-000000000007"}
+	if !reflect.DeepEqual(ids, wantIDs) {
+		t.Errorf("dropped = %v, want %v", ids, wantIDs)
 	}
-	if !strings.Contains(dropped[0].why, "root 2") {
-		t.Errorf("why = %q", dropped[0].why)
+	if !strings.Contains(dropped[0].why, "root 2") || !strings.Contains(dropped[3].why, "root 1") {
+		t.Errorf("why = %q / %q", dropped[0].why, dropped[3].why)
 	}
 }

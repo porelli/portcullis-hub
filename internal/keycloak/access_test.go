@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -216,7 +217,7 @@ func TestClientAccessIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := kc.FlowByID(kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"])
-	if f == nil || f.ID == half || f.ID == v1 || !strings.HasSuffix(f.Description, "[complete v2]") || kc.FlowByID(half) != nil || kc.FlowByID(v1) != nil {
+	if f == nil || f.ID == half || f.ID == v1 || !strings.HasSuffix(f.Description, "[complete v3]") || kc.FlowByID(half) != nil || kc.FlowByID(v1) != nil {
 		t.Errorf("rebuilt flow = %+v (half-built left: %v, v1 left: %v)", f, kc.FlowByID(half) != nil, kc.FlowByID(v1) != nil)
 	}
 	if kc.FlowCount() != flows || kc.ConfigCount() != configs {
@@ -518,5 +519,98 @@ func TestBackchannelLogoutURL(t *testing.T) {
 	}
 	if got := kc.ClientByClientID("nextcloud").Attributes["backchannel.logout.url"]; got != "https://files.example.org/index.php/apps/user_oidc/backchannel-logout/Portcullis" {
 		t.Errorf("after a host change: %s", got)
+	}
+}
+
+// TestClientAccessTemplateLast (contract §8 "Access role", §8.1): over
+// core's sign-in flow the copy leaves out portcullis-template, which the
+// access flow runs last, after the member / deny check — a non-member is
+// denied before the template step could show a page naming the app. An
+// access flow of an older shape (the template inside the copy) is
+// rebuilt and rebound.
+func TestClientAccessTemplateLast(t *testing.T) {
+	ctx := context.Background()
+	kc, c := accessRealm(t)
+	kc.AddFlow("core-universal", "core's sign-in browser flow",
+		kctest.Node{Requirement: "REQUIRED", Alias: "portcullis-authenticate", Children: []kctest.Node{
+			{Requirement: "ALTERNATIVE", Provider: "auth-cookie"},
+			{Requirement: "ALTERNATIVE", Provider: "identity-provider-redirector"},
+			{Requirement: "ALTERNATIVE", Alias: "portcullis-signin", Children: []kctest.Node{
+				{Requirement: "ALTERNATIVE", Provider: "portcullis-x509", Config: map[string]string{"default.reference.value": "mtls"}},
+				{Requirement: "ALTERNATIVE", Provider: "portcullis-passkey"},
+			}},
+		}},
+		kctest.Node{Requirement: "REQUIRED", Provider: keycloak.TemplateProvider},
+	)
+	kc.SetRealmBrowserFlow("core-universal")
+
+	// An older Hub's copy, bound: the template inside the sign-in copy.
+	oldAlias := keycloak.AccessFlowPrefix + "-netbird-0000000000"
+	oldID := kc.AddFlow(oldAlias, "an older copy, current marker (only its shape differs) [complete v3]",
+		kctest.Node{Requirement: "REQUIRED", Alias: oldAlias + ".sign-in", Children: []kctest.Node{
+			{Requirement: "REQUIRED", Alias: oldAlias + ".portcullis-authenticate", Children: []kctest.Node{
+				{Requirement: "ALTERNATIVE", Provider: "auth-cookie"},
+			}},
+			{Requirement: "REQUIRED", Provider: keycloak.TemplateProvider},
+		}},
+	)
+	kc.With(func() {
+		for _, cl := range kc.Clients {
+			if cl.ClientID == "netbird" {
+				cl.AuthenticationFlowBindingOverrides = map[string]string{"browser": oldID}
+			}
+		}
+	})
+
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	fid := kc.ClientByClientID("netbird").AuthenticationFlowBindingOverrides["browser"]
+	if fid == oldID {
+		t.Fatal("the older-shape access flow was kept")
+	}
+	a := kc.FlowByID(fid).Alias
+	got := kc.FlowProviders(fid)
+	if n := strings.Count(strings.Join(got, "\n"), keycloak.TemplateProvider); n != 1 {
+		t.Errorf("portcullis-template %d times:\n%s", n, strings.Join(got, "\n"))
+	}
+	if last := got[len(got)-1]; last != "0:REQUIRED:"+keycloak.TemplateProvider {
+		t.Errorf("last step = %q, want the top-level REQUIRED template:\n%s", last, strings.Join(got, "\n"))
+	}
+	deny := -1
+	for i, l := range got {
+		if l == "0:CONDITIONAL:["+a+".deny]" {
+			deny = i
+		}
+	}
+	if deny < 0 || deny > len(got)-2 {
+		t.Errorf("the deny isn't before the template:\n%s", strings.Join(got, "\n"))
+	}
+
+	// bob (not a member) is denied without the template step running;
+	// alice reaches it, after the member check.
+	for _, sso := range []bool{false, true} {
+		if err := kc.Login("netbird", "bob", sso); !errors.Is(err, kctest.ErrDenied) {
+			t.Errorf("bob (sso %v): %v, want denied", sso, err)
+		}
+		if ran := kc.LastRun(); slices.Contains(ran, keycloak.TemplateProvider) {
+			t.Errorf("bob (sso %v) reached the template step: %v", sso, ran)
+		}
+		if err := kc.Login("netbird", "alice", sso); err != nil {
+			t.Errorf("alice (sso %v): %v", sso, err)
+		}
+		ran := kc.LastRun()
+		if len(ran) < 2 || ran[len(ran)-1] != keycloak.TemplateProvider || ran[len(ran)-2] != "allow-access-authenticator" {
+			t.Errorf("alice (sso %v) ran %v, want … allow-access-authenticator, portcullis-template", sso, ran)
+		}
+	}
+
+	// Stable: the next ensure keeps it.
+	before := mutations(kc)
+	if err := c.EnsureClientAccess(ctx, netbirdAccess); err != nil {
+		t.Fatal(err)
+	}
+	if n := mutations(kc) - before; n != 0 {
+		t.Errorf("second ensure: %d mutating calls", n)
 	}
 }

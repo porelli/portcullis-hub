@@ -66,7 +66,7 @@ const AccessFlowPrefix = "portcullis-client-access"
 // accessFlowVersion is part of the completion marker: bump it when the
 // shape the Hub builds changes, so existing copies are rebuilt (the shape
 // check would catch most changes anyway).
-const accessFlowVersion = "2"
+const accessFlowVersion = "3"
 
 // completeMarker ends the description of a fully built access flow; a flow
 // without it is a leftover of an interrupted build (never bound).
@@ -550,10 +550,21 @@ func (c *Client) readFlowTree(ctx context.Context, tok, alias string) ([]*flowNo
 	return roots, nil
 }
 
+// TemplateProvider is the portcullis-keycloak extension's template check
+// (contract §8.1): the last REQUIRED step of every access flow.
+const TemplateProvider = "portcullis-template"
+
 // skipInCopy: the identity provider redirector (core's invite IdP, only
-// with kc_idp_hint) has no place in an app client's sign-in.
+// with kc_idp_hint) has no place in an app client's sign-in; the source's
+// portcullis-template check is left out of the copy, because the access
+// flow runs it last, after the member / deny check (contract §8 "Access
+// role": a non-member never sees a needs-stronger page naming the app).
 func skipInCopy(n *flowNode) bool {
-	return n.flow == nil && str(n.exec.ProviderID) == "identity-provider-redirector"
+	if n.flow != nil {
+		return false
+	}
+	p := str(n.exec.ProviderID)
+	return p == "identity-provider-redirector" || p == TemplateProvider
 }
 
 // shapeNode is one execution of an access flow as the Hub builds it and
@@ -610,7 +621,10 @@ func readShape(nodes []*flowNode) []shapeNode {
 }
 
 // accessShape is the access flow top for clientID over the realm's
-// browser flow tree src.
+// browser flow tree src: the sign-in copy, the member check, the deny,
+// then REQUIRED portcullis-template last (only members reach it). A flow
+// of any other shape — an older Hub's copy with the template inside the
+// sign-in — fails sameShape and is rebuilt by ensureAccessFlow.
 func accessShape(top, clientID, srcAlias string, src []*flowNode) []shapeNode {
 	member := top + ".member"
 	return []shapeNode{
@@ -623,6 +637,7 @@ func accessShape(top, clientID, srcAlias string, src []*flowNode) []shapeNode {
 			{Req: "REQUIRED", Provider: "conditional-sub-flow-executed", Config: map[string]string{"flow_to_check": member, "check_result": "not-executed"}},
 			{Req: "REQUIRED", Provider: "deny-access-authenticator", Config: map[string]string{"denyErrorMessage": AccessDeniedMessage}},
 		}},
+		{Req: "REQUIRED", Provider: TemplateProvider},
 	}
 }
 

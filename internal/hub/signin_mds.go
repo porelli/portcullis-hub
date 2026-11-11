@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,8 +57,9 @@ type mdsState struct {
 	extraGen   int
 	// staleLogged: the stale BLOB has been logged once.
 	staleLogged bool
-	// badRootsLogged: AAGUIDs whose entry was left out for a root that
-	// isn't DER X.509, each logged once (publishableTrust).
+	// badRootsLogged: AAGUIDs whose entry was left out (or, revoked,
+	// published without some roots) for a root that isn't DER X.509 or no
+	// roots, each logged once (publishableTrust).
 	badRootsLogged map[string]bool
 	// The development serial (extra file on, signInDevSerial): the last
 	// published serial (read once from signin-keycloak.json), and the
@@ -162,7 +164,8 @@ func (h *Hub) mdsStatus() fidomds.Status {
 // both checked here too) the extra-authenticators file's entries merged
 // over it (a file that doesn't read or decode adds nothing, logged) and
 // the development serial (signInDevSerial). Reads files: never under mu.
-// Every entry with a root that isn't one DER X.509 certificate is left out
+// Every certified entry with a root that isn't one DER X.509 certificate
+// is left out; a revoked one is published without such roots
 // (publishableTrust). Caller holds policyWriteMu.
 func (h *Hub) signInTrust() (map[string]fidomds.AuthenticatorTrust, KeycloakMDS) {
 	trust, doc := h.signInTrustAll()
@@ -174,38 +177,70 @@ func (h *Hub) signInTrust() (map[string]fidomds.AuthenticatorTrust, KeycloakMDS)
 	for _, d := range dropped {
 		if !h.mds.badRootsLogged[d.aaguid] {
 			h.mds.badRootsLogged[d.aaguid] = true
-			log.Printf("signin: authenticator %s left out of signin-keycloak.json: %s (its passkeys register as synced)", d.aaguid, d.why)
+			if d.revoked {
+				log.Printf("signin: revoked authenticator %s published in signin-keycloak.json without its unusable roots: %s", d.aaguid, d.why)
+			} else {
+				log.Printf("signin: authenticator %s left out of signin-keycloak.json: %s (its passkeys register as synced)", d.aaguid, d.why)
+			}
 		}
 	}
 	h.mds.mu.Unlock()
 	return kept, doc
 }
 
-// droppedTrust is an entry publishableTrust left out, and why.
-type droppedTrust struct{ aaguid, why string }
+// droppedTrust is an entry publishableTrust left out (revoked false), or
+// a revoked entry it published without some roots (revoked true), and why.
+type droppedTrust struct {
+	aaguid, why string
+	revoked     bool
+}
 
-// publishableTrust keeps the entries the Keycloak extension can read: at
-// least one root, each exactly one DER X.509 certificate. The extension
-// refuses the whole file for a root it can't parse (every sign-in denied),
-// so one bad entry is dropped instead — its model then counts as the
-// weaker, synced kind (contract §8.1 "FIDO metadata (Hub)"). dropped is
-// sorted by AAGUID.
+// publishableTrust keeps the entries the Keycloak extension can read
+// (contract §8.1 "FIDO metadata (Hub)"). A certified entry needs at least
+// one root, each exactly one DER X.509 certificate: the extension refuses
+// the whole file for a certified entry without roots (every sign-in
+// denied), so a bad one is dropped instead — its model then counts as the
+// weaker, synced kind. A revoked entry is always published, with only its
+// usable roots (`roots: []` when none is: the extension accepts empty
+// roots only for revoked), so the revocation still downgrades that model.
+// dropped is sorted by AAGUID.
 func publishableTrust(trust map[string]fidomds.AuthenticatorTrust) (map[string]fidomds.AuthenticatorTrust, []droppedTrust) {
 	kept := make(map[string]fidomds.AuthenticatorTrust, len(trust))
 	var dropped []droppedTrust
+	der := func(r []byte) bool {
+		c, err := x509.ParseCertificate(r)
+		return err == nil && bytes.Equal(c.Raw, r)
+	}
 	for id, t := range trust {
+		if t.Status == fidomds.StatusRevoked {
+			roots := make([][]byte, 0, len(t.Roots))
+			var bad []string
+			for i, r := range t.Roots {
+				if der(r) {
+					roots = append(roots, r)
+				} else {
+					bad = append(bad, strconv.Itoa(i+1))
+				}
+			}
+			if len(bad) > 0 {
+				dropped = append(dropped, droppedTrust{id, fmt.Sprintf("root %s isn't a DER X.509 certificate", strings.Join(bad, ", ")), true})
+			}
+			t.Roots = roots
+			kept[id] = t
+			continue
+		}
 		why := ""
 		if len(t.Roots) == 0 {
 			why = "no attestation roots"
 		}
 		for i, r := range t.Roots {
-			if c, err := x509.ParseCertificate(r); err != nil || !bytes.Equal(c.Raw, r) {
+			if !der(r) {
 				why = fmt.Sprintf("root %d isn't a DER X.509 certificate", i+1)
 				break
 			}
 		}
 		if why != "" {
-			dropped = append(dropped, droppedTrust{id, why})
+			dropped = append(dropped, droppedTrust{id, why, false})
 			continue
 		}
 		kept[id] = t

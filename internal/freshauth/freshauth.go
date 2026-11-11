@@ -170,7 +170,6 @@ type claims struct {
 	AuthTime *int64          `json:"auth_time"`
 	IssuedAt *int64          `json:"iat"`
 	Fresh    json.RawMessage `json:"pc_fresh"`
-	ACR      json.RawMessage `json:"acr"`
 	Username *string         `json:"preferred_username"`
 }
 
@@ -251,9 +250,6 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	if reason != "" {
 		return nil, refuse(reason)
 	}
-	if slices.ContainsFunc(acrValues(c.ACR), isFile) {
-		return nil, refuse("acr contains file")
-	}
 	if idt.Subject == "" {
 		return nil, refuse("missing sub")
 	}
@@ -280,37 +276,6 @@ func (v *Verifier) freshMethod(raw json.RawMessage) (string, string) {
 		return "", ClaimFresh + " names a method that is switched off"
 	}
 	return m, ""
-}
-
-func isFile(s string) bool { return strings.EqualFold(s, "file") }
-
-// stringList decodes a JSON array of strings (anything else: false).
-func stringList(raw json.RawMessage) ([]string, bool) {
-	if len(raw) == 0 {
-		return nil, false
-	}
-	var out []string
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, false
-	}
-	return out, true
-}
-
-// acrValues reads acr as a string (space-separated values) or a list
-// (absent or null: none). An unreadable acr reads as "file", so that it is
-// refused (fail closed).
-func acrValues(raw json.RawMessage) []string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return strings.Fields(s)
-	}
-	if l, ok := stringList(raw); ok {
-		return l
-	}
-	return []string{"file"}
 }
 
 // oidcReason maps a go-oidc error to a fixed reason (its texts may quote

@@ -142,6 +142,8 @@ type Server struct {
 	Users  map[string]*User // by username
 	nextID int
 	Calls  []string
+	// lastRun: the authenticators the last Login ran (LastRun).
+	lastRun []string
 	// Components besides the LDAP provider (LDAP mappers), by id.
 	Components map[string]*Component
 	Scopes     map[string]*ClientScope // by id

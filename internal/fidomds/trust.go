@@ -71,7 +71,10 @@ func isCertification(s metadata.AuthenticatorStatus) bool {
 //     dates when both reports have one, else document order, ties to the
 //     later — the library's current-report rule) is FIDO_CERTIFIED*;
 //     anything else is left out;
-//   - entries without an AAGUID or without attestation roots are left out.
+//   - entries without an AAGUID are left out, and so are certified ones
+//     without attestation roots; a revoked entry is kept without them
+//     (Roots empty, never nil: a revocation needs no roots, and it still
+//     downgrades that model's passkeys).
 //
 // A nil m, or one more than StaleAfter past its nextUpdate (stale true),
 // is an empty list: never a stale or missing list's entries.
@@ -89,7 +92,7 @@ func Trust(m *metadata.Metadata, now time.Time) (trust map[string]AuthenticatorT
 		}
 		kind := kindOf(e.MetadataStatement)
 		status := statusOf(metadata.EffectiveStatusReports(e.StatusReports, now))
-		if kind == "" || status == "" || len(e.MetadataStatement.AttestationRootCertificates) == 0 {
+		if kind == "" || status == "" || (status != StatusRevoked && len(e.MetadataStatement.AttestationRootCertificates) == 0) {
 			continue
 		}
 		roots := make([][]byte, 0, len(e.MetadataStatement.AttestationRootCertificates))

@@ -2,7 +2,7 @@
 
 Web management UI for [Portcullis](https://github.com/porelli/portcullis) — the self-hosted YubiKey authentication gateway.
 
-**Documentation: <https://porelli.github.io/portcullis-docs/>** — the Hub is covered in [Hub Management](https://porelli.github.io/portcullis-docs/operations/hub/), [Groups & Access Control](https://porelli.github.io/portcullis-docs/operations/groups/) and [Authentication Policies](https://porelli.github.io/portcullis-docs/operations/auth-policies/); the interfaces with core and templates in [Integration Contracts](https://porelli.github.io/portcullis-docs/guides/integration-contracts/).
+**Documentation: <https://porelli.github.io/portcullis-docs/>** — the Hub is covered in [Hub Management](https://porelli.github.io/portcullis-docs/operations/hub/), [Groups & Access Control](https://porelli.github.io/portcullis-docs/operations/groups/) and [Sign-in Methods](https://porelli.github.io/portcullis-docs/operations/auth-policies/); the interfaces with core and templates in [Integration Contracts](https://porelli.github.io/portcullis-docs/guides/integration-contracts/).
 
 ## Features
 
@@ -62,9 +62,9 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 | `HUB_GATE_MAP_FILE` | group-gate's map; the groups of its core subdomains (consoles) are administrator groups | `$PROJECT_DIR/group-gate/group-gate-map.conf` |
 | `INVITE_PROTECTED_GROUPS` | Extra administrator groups (space/comma separated), same value as core's enroll | _(none)_ |
 
-### Default access policy
+### Default sign-in template
 
-Until an admin saves a global default under **Settings**, every app that has no policy of its own requires a **YubiKey by either method**: a client certificate (mTLS) **or** a passkey (WebAuthn), i.e. `{factors: [mtls, webauthn], op: any}`. Its routers get `authaware@file` (certificate optional at the handshake), and Keycloak steps up to at least LoA 2 (`hwk`); a certificate sign-in (`mtls`, LoA 3) satisfies it too. You can still choose a public default explicitly. That choice is stored and honoured; it is not the same as "never set".
+Every app that doesn't pick its own sign-in template uses the default, the built-in **Standard** template at the start: any passkey kind or a YubiKey certificate. Its routers get `authaware@file` (certificate optional at the handshake). The Hub and people pages start on **Strong** (a security key passkey or a YubiKey certificate). Admins change methods, templates and the default under **Settings → Sign-in**; see [Sign-in methods](https://porelli.github.io/portcullis-docs/operations/auth-policies/).
 
 ### Runtime user and permissions
 

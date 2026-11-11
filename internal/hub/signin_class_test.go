@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/invite"
@@ -66,6 +67,20 @@ func TestNewlyBlocked(t *testing.T) {
 	imp = f.h.NewlyBlocked(ctx, SignInDraft{Template: "standard", Name: "Standard", Rule: &rule})
 	if imp.Unknown != "" || !slices.Equal(names(imp), []string{"core:portal:gus", "instance:grafana:gus"}) {
 		t.Errorf("standard → security key = %+v", imp)
+	}
+	// An enabled instance without a view (its template is missing): who
+	// it blocks can't be judged — unknown, never "nobody blocked".
+	f.h.mu.Lock()
+	f.h.st.Enabled = append(f.h.st.Enabled, "ghost")
+	f.h.mu.Unlock()
+	if imp := f.h.NewlyBlocked(ctx, SignInDraft{Default: &strong}); !strings.Contains(imp.Unknown, "ghost") {
+		t.Errorf("view-less enabled instance = %+v, want unknown", imp)
+	}
+	f.h.mu.Lock()
+	f.h.st.Enabled = slices.DeleteFunc(f.h.st.Enabled, func(id string) bool { return id == "ghost" })
+	f.h.mu.Unlock()
+	if imp := f.h.NewlyBlocked(ctx, SignInDraft{Default: &strong}); imp.Unknown != "" {
+		t.Errorf("after the ghost: %+v", imp)
 	}
 	// Someone the inventory doesn't have (gus not in Keycloak's list):
 	// unknown, fail closed.

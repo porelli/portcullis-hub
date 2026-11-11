@@ -439,6 +439,7 @@ func (s *Server) Login(clientID, username string, sso bool) error {
 		return fmt.Errorf("no browser flow")
 	}
 	lc := &loginCtx{user: u, sso: sso, top: flow, done: map[string]bool{}}
+	defer func() { s.lastRun = lc.ran }()
 	if !s.runFlow(flow, lc, false) {
 		if lc.denied {
 			return ErrDenied
@@ -454,6 +455,15 @@ type loginCtx struct {
 	denied bool
 	top    *Flow
 	done   map[string]bool // execution id → sub-flow finished with SUCCESS
+	ran    []string        // the authenticators run, in order
+}
+
+// LastRun lists the authenticators (not conditions or sub-flows) the last
+// Login ran, in order.
+func (s *Server) LastRun() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.lastRun...)
 }
 
 func isCondition(p string) bool { return strings.HasPrefix(p, "conditional-") }
@@ -505,6 +515,7 @@ func (s *Server) runExec(e *Execution, lc *loginCtx) bool {
 		lc.done[e.ID] = ok
 		return ok
 	}
+	lc.ran = append(lc.ran, e.Provider)
 	switch e.Provider {
 	case "auth-cookie":
 		return lc.sso

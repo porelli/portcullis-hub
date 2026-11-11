@@ -36,6 +36,7 @@ const (
 	aaguidRetOld  = "ffffffff-0000-4111-8222-333333333333"
 	aaguidSunRev  = "01010101-0202-4303-8404-050505050505"
 	aaguidSunCert = "02020202-0303-4404-8505-060606060606"
+	aaguidRevNoRt = "03030303-0404-4505-8606-070707070707"
 	aaguidNoDate  = "dddddddd-eeee-4fff-8000-111111111111"
 )
 
@@ -298,6 +299,8 @@ func TestTrustKinds(t *testing.T) {
 		E(aaguidLateNC, ext, se, r, rep("FIDO_CERTIFIED_L1", "NOT_FIDO_CERTIFIED", "UPDATE_AVAILABLE")),
 		E(aaguidHWOnly, ext, []string{"hardware"}, r, rep("FIDO_CERTIFIED")),
 		E(aaguidNoRoot, ext, se, "", rep("FIDO_CERTIFIED")),
+		// A revoked entry is kept without roots (a revocation needs none).
+		E(aaguidRevNoRt, ext, se, "", rep("FIDO_CERTIFIED", "REVOKED")),
 		E("", ext, se, r, rep("FIDO_CERTIFIED")),
 		// Out of order: the later date wins, not the later position.
 		E(aaguidOOO, ext, se, r, []fidomdstest.Report{fidomdstest.R("FIDO_CERTIFIED_L1", "2025-03-01"), fidomdstest.R("NOT_FIDO_CERTIFIED", "2025-01-01")}),
@@ -330,14 +333,20 @@ func TestTrustKinds(t *testing.T) {
 		aaguidFuture: {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
 		aaguidSunRev: {Kind: KindSecurityKey, Status: StatusCertified, Roots: roots},
 	}
-	if len(got) != len(want) {
-		t.Errorf("trust has %d entries, want %d: %v", len(got), len(want), keys(got))
+	if len(got) != len(want)+1 {
+		t.Errorf("trust has %d entries, want %d: %v", len(got), len(want)+1, keys(got))
 	}
 	for k, w := range want {
 		g, ok := got[k]
 		if !ok || g.Kind != w.Kind || g.Status != w.Status || len(g.Roots) != 1 || !bytes.Equal(g.Roots[0], w.Roots[0]) {
 			t.Errorf("%s = %+v (%t), want %+v", k, g, ok, w)
 		}
+	}
+	if g, ok := got[aaguidRevNoRt]; !ok || g.Kind != KindSecurityKey || g.Status != StatusRevoked || g.Roots == nil || len(g.Roots) != 0 {
+		t.Errorf("revoked without roots = %+v (%t), want kept with empty (non-nil) roots", g, ok)
+	}
+	if b, _ := json.Marshal(got[aaguidRevNoRt]); string(b) != `{"kind":"security_key","status":"revoked","roots":[]}` {
+		t.Errorf("revoked without roots json = %s", b)
 	}
 	// The future REVOKED takes effect once its date has come.
 	later := parsed(t, time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC),

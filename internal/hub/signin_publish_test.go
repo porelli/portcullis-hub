@@ -213,3 +213,46 @@ func TestTierFollowsCertificateSwitch(t *testing.T) {
 		t.Errorf("something was written under %s/traefik: %v", f.project, err)
 	}
 }
+
+// A signin-keycloak.json that can't be written never skips group-gate's
+// policy file: both are attempted, the error is reported (B1).
+func TestSignInKeycloakWriteFailureStillWritesPolicy(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	simulateCompose(f, 0)
+	if err := f.h.Enable("chat"); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	kc := filepath.Join(f.data, SignInKeycloakFile)
+	pol := filepath.Join(f.data, "group-gate-policy.json")
+	// A non-empty directory in its place: the rename onto it fails.
+	if err := os.Remove(kc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(kc, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(pol); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.WritePolicy(); err == nil {
+		t.Error("WritePolicy reported no error for a signin-keycloak.json it couldn't write")
+	}
+	b, err := os.ReadFile(pol)
+	if err != nil {
+		t.Fatalf("policy file not written after the signin-keycloak.json failure: %v", err)
+	}
+	var doc struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil || doc.Version != 6 {
+		t.Errorf("policy file = %s (%v)", b, err)
+	}
+	if err := os.RemoveAll(kc); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.WritePolicy(); err != nil {
+		t.Errorf("WritePolicy after the fix: %v", err)
+	}
+	readKeycloakSignIn(t, f)
+}

@@ -127,7 +127,9 @@ func (h *Hub) PrecheckSignIn(d SignInDraft) error {
 // refresh). A use whose compiled rule and switches don't change is
 // skipped. A person the inventory doesn't have — or whose certificates
 // are unknown while either rule names a YubiKey certificate — makes the
-// impact Unknown (fail closed: nothing about them is known).
+// impact Unknown (fail closed: nothing about them is known), and so does
+// an enabled instance without a view (its template is missing: its
+// people and rule can't be judged, never "nobody blocked").
 func (h *Hub) NewlyBlocked(ctx context.Context, d SignInDraft) *SignInImpact {
 	m, inv, why := h.signInPeople(ctx)
 	if why != "" {
@@ -212,11 +214,13 @@ func (h *Hub) NewlyBlocked(ctx context.Context, d SignInDraft) *SignInImpact {
 		}
 		judge(UseCore, k, coreSignInLabels[k], coreSignInUsers(k, m), compiledPtr(cur, pb), compiledPtr(next, pa))
 	}
+	viewed := map[string]bool{}
 	for i := range h.instances {
 		t := &h.instances[i]
 		if !t.Enabled {
 			continue
 		}
+		viewed[t.ID] = true
 		pick, mode := h.st.Instances[t.ID].SignInTemplate, h.st.SignInMode[t.ID]
 		pickA := pick
 		if d.Pick != nil && t.ID == d.Instance {
@@ -228,9 +232,21 @@ func (h *Hub) NewlyBlocked(ctx context.Context, d SignInDraft) *SignInImpact {
 		}
 		judge(UseInstance, t.ID, instanceName(t), instanceSignInUsers(t, m), accB.Rule, accA.Rule)
 	}
-	if len(unknown) > 0 {
-		imp.Unknown = fmt.Sprintf("the sign-in methods of %s aren't known", strings.Join(clipList(unknown, 10), ", "))
+	var missing []string
+	for _, id := range h.st.Enabled {
+		if !viewed[id] && !slices.Contains(missing, id) {
+			missing = append(missing, id)
+		}
 	}
+	slices.Sort(missing)
+	var whys []string
+	if len(unknown) > 0 {
+		whys = append(whys, fmt.Sprintf("the sign-in methods of %s aren't known", strings.Join(clipList(unknown, 10), ", ")))
+	}
+	if len(missing) > 0 {
+		whys = append(whys, fmt.Sprintf("the template of enabled app %s is missing", strings.Join(clipList(missing, 10), ", ")))
+	}
+	imp.Unknown = strings.Join(whys, "; ")
 	return imp
 }
 

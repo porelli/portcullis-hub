@@ -17,8 +17,9 @@ import (
 // FreshAuthScopes are exactly the default client scopes of the fresh-auth
 // client (contract §8): basic (sub, auth_time) and acr (acr, and core's
 // amr mapper). No groups, no attributes scope, never
-// portcullis-invite-client (its invite flow emits amr=hwk without a
-// passkey); no optional scopes.
+// portcullis-invite-client (its invite flow emits amr `inv` and ends with
+// portcullis-template, contract §8 "Invite links"; a setup link never sets
+// pc_fresh); no optional scopes.
 var FreshAuthScopes = []string{"basic", "acr"}
 
 // FreshAuthUsernameMapper is the fresh-auth client's username mapper:

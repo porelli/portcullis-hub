@@ -26,9 +26,12 @@ import (
 )
 
 // Opt-in test of the access role against a real Keycloak (the version core
-// pins), e.g.
+// pins) with the portcullis-keycloak extension — every access flow ends
+// with its portcullis-template step, which stock Keycloak doesn't have —
+// and a valid /hub-data/signin-keycloak.json that lists none of the test's
+// clients (an unlisted client passes the step; a missing file denies), e.g.
 //
-//	bin/kc.sh start-dev --http-port=18080   # or the core image
+//	bin/kc.sh start-dev --http-port=18080   # in the portcullis-keycloak image
 //	PORTCULLIS_KEYCLOAK_LIVE_URL=http://127.0.0.1:18080 go test ./internal/keycloak -run Live
 //
 // Admin credentials: PORTCULLIS_KEYCLOAK_LIVE_ADMIN / _PASSWORD (default
@@ -527,14 +530,15 @@ func TestLiveAIObjects(t *testing.T) {
 }
 
 // realmSettings: core's realm values the AI clients depend on (offline
-// bounds, rotation off, the LoA map) and core's amr mapper on acr.
+// bounds, rotation off, no LoA map: `acr.loa.map` `{}`, contract §8.1
+// "Flows") and core's amr mapper on acr.
 func realmSettings(t *testing.T, e *liveEnv) {
 	t.Helper()
 	ctx := context.Background()
 	err := e.g.UpdateRealm(ctx, e.tok, gocloak.RealmRepresentation{Realm: gocloak.StringP(keycloak.Realm),
 		OfflineSessionIdleTimeout: gocloak.IntP(30 * 86400), OfflineSessionMaxLifespanEnabled: gocloak.BoolP(true),
 		OfflineSessionMaxLifespan: gocloak.IntP(90 * 86400), RevokeRefreshToken: gocloak.BoolP(false),
-		Attributes: map[string]string{"acr.loa.map": `{"public":0,"pwd":1,"hwk":2,"mtls":3}`}})
+		Attributes: map[string]string{"acr.loa.map": `{}`}})
 	if err != nil {
 		t.Fatal(err)
 	}
