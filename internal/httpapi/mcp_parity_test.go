@@ -42,6 +42,16 @@ var confirmationRoutes = map[string]string{
 // tool (or a noToolRoutes reason) in the change that adds it.
 var pendingToolRoutes = map[string]string{}
 
+// signInNoToolRoutes are the Sign-in page's people-listener routes with
+// no people tool (contract §15.10, D33; TestPeopleToolParity reads them
+// through peopleNoToolRoutes).
+var signInNoToolRoutes = map[string]string{
+	"GET /signin": "the Sign-in page itself: a browser UI",
+	"POST /api/me/signin/yubikey-certificate/renew": "the YubiKey renewal needs the certificate the browser presents (TLS), which an AI client never has",
+	"GET /api/me/signin/history":                    "the history pages: my_sign_in carries the last 20 entries",
+	"DELETE /api/me/signin/password":                "removing your password: on the Sign-in page, where my_password hands off (D33 lists no tool for it)",
+}
+
 // destructiveTwins are the routes whose handler deletes, restores over,
 // revokes or runs code, or has a typed confirmation today (spec call 25,
 // §15.10): a class-D tool's twin must be one of them — unless the tool is

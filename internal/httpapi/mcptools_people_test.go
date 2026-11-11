@@ -25,7 +25,8 @@ import (
 // (contract §5.1, §15.9, §15.10; G1, G38, G39).
 
 // peopleSelfTools are the people tools every signed-in person sees.
-var peopleSelfTools = []string{"directory", "disconnect_ai", "my_ai_connections", "my_apps", "my_file_share_password", "my_profile"}
+var peopleSelfTools = []string{"directory", "disconnect_ai", "my_ai_connections", "my_apps", "my_browser_certificate", "my_file_share_password", "my_password", "my_profile",
+	"my_sign_in", "revoke_my_certificate"}
 
 // peopleConnKC is the AI Keycloak with per-person connections (MyAI,
 // DisconnectAI): revokes are recorded as user/client and drop the
@@ -527,6 +528,7 @@ func TestPeopleToolParity(t *testing.T) {
 		"my_apps": ClassRead, "my_profile": ClassRead, "directory": ClassRead, "my_ai_connections": ClassRead,
 		"my_file_share_password": ClassRead, "disconnect_ai": ClassWrite,
 		"update_person": ClassWrite, "invite_person": ClassSecret, "delete_person": ClassDestructive,
+		"my_sign_in": ClassRead, "my_browser_certificate": ClassRead, "my_password": ClassRead, "revoke_my_certificate": ClassWrite,
 	}
 	if len(tools) != len(want) {
 		t.Errorf("%d people tools, want %d", len(tools), len(want))
@@ -656,6 +658,9 @@ var peopleNoToolRoutes = func() map[string]string {
 		"PUT /api/directory/permissions/{perm}", "POST /api/directory/import/review", "POST /api/directory/import/apply",
 	} {
 		m[r] = delegate
+	}
+	for r, why := range signInNoToolRoutes {
+		m[r] = why
 	}
 	return m
 }()

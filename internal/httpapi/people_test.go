@@ -94,9 +94,9 @@ func (e *peopleEnv) setup(t *testing.T) {
 }
 
 // peopleAppRoutes are the only app routes of the people listener
-// (contract §5.1, G12): exactly nine, all caller-only — the five My apps
-// and credential routes, the two confirmation routes (Task 14) and Task
-// 21's two AI routes.
+// (contract §5.1, G12): exactly seventeen, all caller-only — the five My
+// apps and credential routes, the two confirmation routes (Task 14), Task
+// 21's two AI routes and the Sign-in page's eight (sign-in part 2, D25).
 var peopleAppRoutes = []string{
 	"GET /api/me/apps",
 	"PUT /api/me/apps/{instance}/values/{key}",
@@ -107,6 +107,14 @@ var peopleAppRoutes = []string{
 	"POST /api/me/confirmations/{id}",
 	"GET /api/me/ai",
 	"DELETE /api/me/ai/connections/{client}",
+	"GET /signin",
+	"GET /api/me/signin",
+	"GET /api/me/signin/history",
+	"POST /api/me/signin/browser-certificates",
+	"DELETE /api/me/signin/certificates/{serial}",
+	"POST /api/me/signin/yubikey-certificate/renew",
+	"PUT /api/me/signin/password",
+	"DELETE /api/me/signin/password",
 }
 
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the

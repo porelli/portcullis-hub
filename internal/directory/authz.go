@@ -22,6 +22,10 @@ const (
 	// permAdmin marks an operation as admins only; it is never granted
 	// through Config.Permissions.
 	permAdmin = "admin"
+	// permSelf marks an operation a person runs on their own account
+	// only (SetOwnPassword, RemoveOwnPassword): the target must be the
+	// caller. Never granted through Config.Permissions.
+	permSelf = "self"
 )
 
 // delegatedPerms are the only permissions Config.Permissions can grant.
@@ -172,6 +176,12 @@ func (s *Service) CallerAs(ctx context.Context, a Actor) (*Caller, error) {
 // lock, so admin membership and delegated permissions are re-checked
 // against a fresh snapshot (a just-demoted admin is refused).
 func (s *Service) gate(ctx context.Context, c *Caller, perm, target string) error {
+	if perm == permSelf {
+		if strings.TrimSpace(target) == "" || !strings.EqualFold(target, c.User) {
+			return forbidden("not allowed: only on your own account")
+		}
+		return nil
+	}
 	if c.Admin {
 		sn, err := s.load(ctx)
 		if err != nil {

@@ -102,6 +102,11 @@ type invBase struct {
 	disabled   map[string]bool            // users disabled in Keycloak: no method at all
 	certs      map[string][]signin.Method // users → yubikey_cert / browser_cert for their unexpired, unrevoked certificates
 	certsKnown bool
+	// keys: user → their passkeys as Keycloak listed them (the Sign-in
+	// page's rows); records: enroll's certificate records as listed
+	// (revoked and expired included), nil while certificates are unknown.
+	keys    map[string][]keycloak.PasskeyCredential
+	records []invite.CertRecord
 	// uuids: lowercase user → LLDAP account uuid at the refresh (nil: the
 	// directory couldn't be read — no password counts).
 	uuids map[string]string
@@ -223,7 +228,8 @@ func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-	b := &invBase{at: now.UTC(), passkeys: map[string][]signin.Method{}, disabled: map[string]bool{}, certs: map[string][]signin.Method{}}
+	b := &invBase{at: now.UTC(), passkeys: map[string][]signin.Method{}, disabled: map[string]bool{}, certs: map[string][]signin.Method{},
+		keys: map[string][]keycloak.PasskeyCredential{}}
 	for u, list := range keys {
 		if list == nil {
 			b.disabled[strings.ToLower(u)] = true
@@ -237,6 +243,7 @@ func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Tim
 			}
 		}
 		b.passkeys[strings.ToLower(u)] = ms
+		b.keys[strings.ToLower(u)] = slices.Clone(list)
 	}
 	// Password records count only for the account they were set for.
 	if m, merr := h.membership(ctx); merr != nil {
@@ -249,6 +256,7 @@ func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Tim
 		switch {
 		case cerr == nil:
 			b.certsKnown = true
+			b.records = slices.Clone(certs)
 			for _, r := range certs {
 				m, ok := certMethod(r, now)
 				if !ok {

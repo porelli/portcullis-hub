@@ -7,6 +7,7 @@ package directory
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -1161,6 +1162,11 @@ func (s *Service) newInvite(ctx context.Context, username string) (*invite.Invit
 
 func newResult() *Result { return &Result{Warnings: []string{}} }
 
+// CheckHubPassword is checkHubPassword for the Hub (the Sign-in page
+// checks a password before the fresh-auth proof is spent): nil or a 400
+// *Error that never quotes it.
+func CheckHubPassword(user, pw string) error { return checkHubPassword(user, pw) }
+
 // checkHubPassword is the rule for a password the Hub sets (contract §8.1
 // "Passwords": LLDAP's characters, then 12–128 characters, not the
 // username, not a common password). The error never quotes it.
@@ -1742,6 +1748,73 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 		}
 		if generate {
 			res.Password = password
+		}
+		return nil
+	})
+	if err == nil && setFor != "" {
+		s.recordPassword(res, setFor, setUUID, c.User)
+	}
+	return res, err
+}
+
+// SetOwnPassword sets the caller a's own LLDAP password (contract §5.1
+// "Sign-in page", D25: the Hub checked the method switch and the
+// fresh-auth proof) and ends their Keycloak sessions; audited
+// signin.password "self set". The protected and reserved accounts are
+// refused. PasswordSet records it with set_by = the caller.
+func (s *Service) SetOwnPassword(ctx context.Context, a Actor, password string) (*Result, error) {
+	return s.ownPassword(ctx, a, password, "self set")
+}
+
+// RemoveOwnPassword replaces the caller's own LLDAP password with a
+// random 32-byte one nobody sees (LLDAP can't clear a password) and ends
+// their Keycloak sessions; audited signin.password "self removed". Not
+// recorded: the Hub drops its record.
+func (s *Service) RemoveOwnPassword(ctx context.Context, a Actor) (*Result, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, &Error{Status: http.StatusInternalServerError, Msg: "generating a password failed"}
+	}
+	pw := base64.RawURLEncoding.EncodeToString(b[:])
+	return s.ownPassword(ctx, a, pw, "self removed")
+}
+
+func (s *Service) ownPassword(ctx context.Context, a Actor, password, detail string) (*Result, error) {
+	res := newResult()
+	c := &Caller{User: strings.ToLower(strings.TrimSpace(a.User)), Via: a.Via, Client: a.Client, Confirmation: a.Confirmation}
+	set := detail == "self set"
+	setFor, setUUID := "", ""
+	err := s.run(ctx, c, permSelf, "signin.password", c.User, &detail, func() error {
+		if err := s.checkTarget(c.User); err != nil {
+			return err
+		}
+		if s.reservedName(c.User) {
+			return refuse("%s", reservedMsg(c.User))
+		}
+		if err := checkHubPassword(c.User, password); set && err != nil {
+			return err
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(c.User)
+		if err != nil {
+			return err
+		}
+		if !lldap.ValidUsername(u.ID) {
+			return refuse("username %q can't be used in an LDAP DN; change this password in the LLDAP UI", u.ID)
+		}
+		if err := s.LLDAP.SetPassword(ctx, u.ID, password); err != nil {
+			return err
+		}
+		if set {
+			setFor, setUUID = u.ID, u.UUID
+		}
+		if s.KC != nil {
+			if err := s.KC.LogoutUser(ctx, u.ID); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("signing the user out of Keycloak failed: %v", err))
+			}
 		}
 		return nil
 	})

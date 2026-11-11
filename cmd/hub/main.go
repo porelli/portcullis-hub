@@ -251,6 +251,9 @@ func main() {
 	if cfg.ClientCertTTL, err = clientCertTTLFromEnv(os.Getenv); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
+	// HUB_CERT_EXPIRY_WARN_DAYS (core: ${CERT_EXPIRY_WARN_DAYS:-7}): core's
+	// grammar, anything else 7; never a reason to refuse the start.
+	cfg.CertExpiryWarnDays = hub.ParseCertExpiryWarnDays(os.Getenv("HUB_CERT_EXPIRY_WARN_DAYS"))
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 5*time.Second {
@@ -356,6 +359,10 @@ func main() {
 	// Who has which sign-in method: Keycloak's passkeys, enroll's
 	// YubiKey certificates (§8.1 "Inventory", §9.4).
 	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates})
+	// The Sign-in page's own certificates (enroll, §9.4) and own
+	// password (the directory, §5.1).
+	h.SetCertActions(invites)
+	h.SetOwnPasswords(dir)
 	dir.UserDeleted = h.PersonDeleted
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak

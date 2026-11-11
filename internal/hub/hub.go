@@ -115,6 +115,11 @@ type Config struct {
 	// ceiling (contract §8.1 "Limits"). main refuses to start under one
 	// day; 0 here (tests) is a ceiling of 0: no lifetime is allowed.
 	ClientCertTTL time.Duration
+	// CertExpiryWarnDays is HUB_CERT_EXPIRY_WARN_DAYS read with core's
+	// grammar (ParseCertExpiryWarnDays: ^[0-9]+$, else 7): a certificate
+	// with fewer days left is "expiring" (contract §5.1). main always
+	// sets it; 0 means nothing is ever expiring.
+	CertExpiryWarnDays int
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -438,6 +443,17 @@ type Hub struct {
 	// signInInv: who has which sign-in method (signin_people.go; its own
 	// leaf locks, never held across mu).
 	signInInv inventoryCache
+	// certActions issues, renews and revokes certificates through enroll
+	// (SetCertActions; nil: those actions are 503). Guarded by mu.
+	certActions CertActions
+	// ownPasswords sets and removes a person's own password
+	// (SetOwnPasswords; nil: 503). Guarded by mu.
+	ownPasswords OwnPasswords
+	// certCreate: per user, the *sync.Mutex a browser certificate create
+	// holds (one create at a time per person).
+	certCreate sync.Map
+	// certNow is the certificate status clock (nil: time.Now; tests).
+	certNow func() time.Time
 
 	driftMu sync.Mutex
 	drift   DriftReport
