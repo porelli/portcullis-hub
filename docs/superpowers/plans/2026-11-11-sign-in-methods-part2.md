@@ -91,13 +91,25 @@ Decisions (made here; the spec leaves them to the builder):
 
   Exports:
   - `certs/yubikey-ca.crt` (`pki_int`'s certificate) and `certs/browser-ca.crt`;
-  - `certs/ca-chain.crt` = root + `pki_int` + `pki_file`, so Traefik's `protected` / `authaware` options accept both kinds;
+  - `certs/ca-chain.crt` = root + `pki_int` + `pki_file` (Traefik's `protected-any` and `authaware` options: both kinds);
+  - `certs/ca-chain-yubikey.crt` = root + `pki_int` only (Traefik's `protected` option: a browser certificate can never pass that handshake);
   - the truststore gets `portcullis-ca-chain.pem` plus `portcullis-yubikey-ca.pem` and `portcullis-browser-ca.pem`.
 
   Rules:
   - `pki setup` refuses (exit 1) when the two intermediates' CNs are equal: every reader tells the kinds apart by issuer.
   - It creates `pki_file` when it is missing, even while `pki_int` exists (a missing piece, as today).
-  - Whenever `pki_file` is created, or the chain on disk differs from root + `pki_int` + `pki_file`, it rewrites `ca-chain.crt` and the truststore and sets `PKI_TRUSTSTORE_CHANGED=true`. That flag is what makes `stack.sh` restart Traefik and Keycloak.
+  - Whenever `pki_file` is created, or either chain on disk differs from what it should be (`ca-chain.crt` = root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` = root + `pki_int`), it rewrites both chain files and the truststore and sets `PKI_TRUSTSTORE_CHANGED=true`. That flag is what makes `stack.sh` restart Traefik and Keycloak.
+
+  **TLS options (controller ruling, Task 1 fix round 1).** Core's static `traefik/dynamic/tls.yml` has exactly four options (each `minVersion: VersionTLS12`, `sniStrict: false`; Traefik already mounts `./certs:/certs:ro`):
+
+  | Option | Client auth | `caFiles` | Used for |
+  |---|---|---|---|
+  | `protected@file` | `RequireAndVerifyClientCert` | `/certs/ca-chain-yubikey.crt` | `auth.method: mtls` apps; templates where **every** alternative has `yubikey_cert` |
+  | `protected-any@file` (new) | `RequireAndVerifyClientCert` | `/certs/ca-chain.crt` | templates where every alternative has a certificate method and at least one accepts `browser_cert` |
+  | `authaware@file` | `VerifyClientCertIfGiven` | `/certs/ca-chain.crt` | templates where some alternative has a certificate; every core router |
+  | `public@file` | none | — | everything else |
+
+  Public exceptions keep turning `protected*` into `authaware` (`policy.HostTier`, today's rule).
   - `--force` destroys both CAs.
 
   enroll's policy (`vault/policies/enroll.hcl`) adds:
@@ -120,7 +132,8 @@ Decisions (made here; the spec leaves them to the builder):
   - **Wiring:** the operations need Vault (`*Config`), while `apiHandler` lives on `*inviteService`. `main` injects them as function fields on `inviteService`, like `listCertificates`.
   - `POST /internal/browser-certificates` `{"user","days","max_days","max_active"}` → 201 `{"p12": "<std base64>", "password", "serial", "not_after", "filename"}`.
   - `POST /internal/yubikey-certificates` `{"user","csr"}` → 201 `{"certificate": "<PEM>", "serial", "not_after"}`. It runs `validateCSR` first (400 with its text). This is the admin CSR path that replaces `/api/sign`.
-  - `POST /internal/yubikey-certificates/renew` `{"user","presented","csr"}` → 201 (same shape). `presented` is a real PEM `CERTIFICATE` block (the Hub converts it, D25). It runs `checkRenewal` first (403 with its text) and replaces `/api/self/renew`.
+  - `POST /internal/yubikey-certificates/renew` `{"user","presented","csr"}` → 201 (same shape). `presented` is a real PEM `CERTIFICATE` block (the Hub converts it, D25). **Only a `pki_int` leaf renews (review I1):** enroll first checks that `presented` was issued by `pki_int` (issuer DN equal to `pki_int`'s CA subject and its signature verifying against that CA's key; else 403), then runs `checkRenewal` (403 with its text); `lookupIssued` stays on `pki_int` only. It replaces `/api/self/renew`.
+  - **Protected names (review I3):** every certificate action refuses `user` = `admin`, `portcullis-hub` or any `portcullis-*` name (lowercased) with 409 `{"error": "protected account"}`, before Vault is called.
   - `POST /internal/certificates/revoke` `{"user","serial"}` → 204.
     - enroll looks the serial up in `pki_int`, then in `pki_file`. Not found, or a CN other than `user`: 404. Already revoked: 204.
     - Otherwise it revokes, then rotates that mount's CRL. A failed rotate still answers 204 and is logged: the delta CRL catches up within 2 min.
@@ -146,7 +159,7 @@ Decisions (made here; the spec leaves them to the builder):
   - `DELETE /api/me/signin/certificates/{serial}` → 204. Own browser certificates only; a YubiKey certificate or someone else's serial is 404. No fresh auth: it only removes access.
   - `POST /api/me/signin/yubikey-certificate/renew` `{csr}` → 200 `{certificate, serial, not_after}`.
     - The people router passes the presented certificate (`client-cert-pem@file`) in `X-Forwarded-Tls-Client-Cert`: base64 DER without BEGIN/END lines, possibly URL-escaped, comma-separated, leaf first.
-    - The Hub (`presentedCertPEM`) takes the first entry, decodes it to DER, checks that it parses as X.509, and sends real PEM to enroll. A missing or unparsable header is 403 "present your current YubiKey certificate".
+    - The Hub (`presentedCertPEM`) takes the first entry, decodes it to DER, checks that it parses as X.509, and sends real PEM to enroll. **Only a YubiKey leaf renews (review I1):** the Hub also checks that the leaf's serial is one of the caller's unexpired, unrevoked `kind: yubikey` records in enroll's `GET /internal/certificates`, and enroll checks the issuer again (D23). A missing or unparsable header, or any other leaf (a browser certificate included), is 403 "present your current YubiKey certificate".
     - No fresh auth: the TLS session and the CSR's signature both prove possession of the key.
   - `PUT /api/me/signin/password` `{password, code, code_verifier, nonce}` → 204, refused (409) while the password method is off.
   - `DELETE /api/me/signin/password` → 204. LLDAP can't clear a password, so this sets a random 32-byte one nobody sees and drops the Hub's record.
@@ -222,7 +235,7 @@ Decisions (made here; the spec leaves them to the builder):
     - **The CA file** is loaded lazily, only when a leaf is presented and the method is on. A missing, unreadable or non-CA file steps aside and is logged at ERROR. A flow with no certificate never logs it.
     - On success the execution writes its own method to `portcullis.x509.method`.
     - `Offer` and `TemplateAuthenticator`'s `completable` step use each execution's `portcullis.method`.
-    - `FreshMapper` accepts `browser_cert` as a `pc_fresh` value; the Hub refuses it for certificates (D26).
+    - `FreshMapper` accepts `browser_cert` as a `pc_fresh` value; the Hub refuses it for certificates (D26). When one authentication ran several methods, the strongest wins in the order `yubikey_cert > security_key > passkey_device > browser_cert > passkey_synced > password` (review I2: the certificate wins the 2.5 tie).
     - `keycloak configure` pushes each config by alias.
   - **group-gate:**
     - The leaf's issuer CN in `X-Forwarded-Tls-Client-Cert-Info` is compared with the subject CNs of `GATE_YUBIKEY_CA_FILE` and `GATE_BROWSER_CA_FILE` (read with `cryptography`, cached by mtime). Equal CNs, or a missing or unreadable file, means no certificate counts.
@@ -264,6 +277,8 @@ Decisions (made here; the spec leaves them to the builder):
   - **Admins:** they keep every action.
     - On another administrator, the setup-link, passkey and password routes keep today's rules: core refuses invites for administrators, and `checkAdminTakeover` asks for the typed confirmation for passkeys and password.
     - The new certificate routes (issue, revoke) refuse administrator targets for everyone (409 "administrators' certificates are managed from the server: ./portcullis cert revoke <serial>"). The CLI recovers.
+    - They also refuse `admin`, `portcullis-hub` and every `portcullis-*` name for everyone (409 "this account's certificates are managed from the server: ./portcullis cert revoke <serial>"), as enroll does (D23; review I3). On the Sign-in page those accounts can't create, renew or revoke their own certificates either; every other administrator creates and revokes their own browser certificates there like anyone else.
+    - `PersonSignIn.can.setup_link` is false for an administrator target (core refuses the invite).
   - **Audit:** actions keep their names (`user.invite`, `user.remove_passkeys`, `cert.revoke`), with detail `as sign_in_help` for a delegate. These are the `help` entries in the person's history (D28).
   - **Person routes** (directory route set, both listeners):
     - `GET /api/directory/users/{u}/signin` → `PersonSignIn` (admins and `sign_in_help` holders who may target u; anyone else 403);
@@ -364,7 +379,7 @@ Decisions (made here; the spec leaves them to the builder):
   - `Methods.java`: `UNAVAILABLE` empty;
   - `TemplateAuthenticator.java`: history details; `certificateUser` uses the execution matching the leaf's CA; the `completable` case `browser_cert`; the needs-stronger links;
   - `Offer.java`: filters by each execution's `portcullis.method`;
-  - `FreshMapper.java`: `isFreshMethod` includes `browser_cert`, and `getHelpText` says so;
+  - `FreshMapper.java`: `isFreshMethod` includes `browser_cert`, and `getHelpText` says so; the strongest-method order of several methods is `yubikey_cert > security_key > passkey_device > browser_cert > passkey_synced > password` (review I2; `FreshMapperTest.browserCertBeatsSyncedPasskey`);
   - `CookieAuthenticator.java`: auth note `portcullis.sso`;
   - `PasswordForm.java`, `PasskeyAuthenticator.java`: failure details;
   - `src/main/resources/theme-resources/templates/portcullis-needs-stronger.ftl` and `messages_en.properties`: D34 names.
@@ -449,7 +464,8 @@ Decisions (made here; the spec leaves them to the builder):
   - `cmd/hub/main.go`: `HUB_CLIENT_CERT_TTL`;
   - `internal/httpapi/signin.go` + `mcptools_signin.go`: `PUT /api/signin/limits`, `set_sign_in_limits`;
   - `mcp_parity_test.go`;
-  - `internal/signinreset`: `browser_cert` still off on reset.
+  - `internal/signinreset`: `browser_cert` still off on reset;
+  - `internal/policy/policy.go`: `Tier` per D21's four TLS options, in this order — an `mtls` app → `protected@file`; every alternative of the compiled rule contains `yubikey_cert` → `protected@file`; every alternative has a switched-on certificate method → `TierProtectedAny = "protected-any@file"`; some alternative has one → `authaware@file`; else `public@file`. `HostTier` turns both `protected*` into `authaware@file` while the public router exists. `internal/hub` (exposure drift, the instance settings preview text) and `web/index.html`'s public warning name both options.
 - Test: `internal/state/state_test.go`, `internal/signin/signin_test.go`, `internal/hub/signin_limits_test.go` (new), `internal/keycloak/events_test.go` (new), `internal/keycloak/access_test.go`, `internal/httpapi/signin_test.go`, `cmd/hub/main_test.go`.
 
 **Interfaces:**
@@ -487,6 +503,7 @@ Decisions (made here; the spec leaves them to the builder):
   func TestEnsureEventsConfigKeepsListeners(t *testing.T) // GET listeners [jboss-logging,x] → PUT same listeners, types [LOGIN LOGIN_ERROR], expiration 90*86400
   func TestHubRefusesBadClientCertTTL(t *testing.T) // unset / "abc" / "3600" (1 h → ceiling 0) → start refused; "2592000" and "720h" → 30 days
   func TestSignInLimitsToolClass(t *testing.T)      // days up → D; history down → D; max down → W
+  func TestTierFourOptions(t *testing.T)            // internal/policy: any[yubikey_cert] and all[yubikey_cert, security_key] → protected; any[browser_cert], any[yubikey_cert, browser_cert] → protected-any; Standard → authaware; any[family:passkey] → public; mtls app → protected; public exceptions on → authaware for both protected options
   func TestAccessFlowCopiesBothX509Executions(t *testing.T) // internal/keycloak/access_test.go: both portcullis-x509 executions copied with their configs
   ```
 - [ ] **Step 2: Run them to see them fail.** Run `go test ./internal/state/ ./internal/signin/ ./internal/hub/ ./internal/keycloak/ ./internal/httpapi/ ./cmd/hub/ -run 'Limits|BrowserCert|SharedVectors|ScoreOfSet|Events|ClientCertTTL|BothX509'`. Expected: FAIL.
@@ -676,7 +693,9 @@ Decisions (made here; the spec leaves them to the builder):
   The rules each piece follows:
   - **Methods:** all six methods are listed in canonical order. A switched-off one has `State: "off"`, which the page shows as "off on this server".
   - **Apps:** every enabled instance whose population includes the user, plus the core pages `people` (everyone) and `hub` (admins). `OK` is nil while the inventory doesn't know the person.
-  - **Certificate status:** `expiring` when fewer than 7 days are left.
+  - **Certificate status:** `expiring` when fewer than `CERT_EXPIRY_WARN_DAYS` days are left (the Hub reads `HUB_CERT_EXPIRY_WARN_DAYS`, core sets `${CERT_EXPIRY_WARN_DAYS:-7}`; unset → 7; not a positive integer → the Hub refuses to start).
+  - **Own certificates:** administrators create, renew and revoke their own certificates on the Sign-in page like anyone else; `admin`, `portcullis-hub` and `portcullis-*` get 409 (D32, review I3).
+  - **Routes under `/api/me/signin/`:** the people listener registers only the D25 routes there; any later route there that adds a method needs D26's proof (group-gate lets any switched-on method reach these paths, D24).
   - **One create at a time:** `CreateBrowserCertificate` takes a per-user lock and passes `Days`, `MaxDays` (= the effective `browser_cert_days`) and `MaxActive` to enroll.
 
 - [ ] **Step 1: Write the failing tests**
@@ -693,7 +712,10 @@ Decisions (made here; the spec leaves them to the builder):
   func TestCertAuditHasNoSecrets(t *testing.T)         // cert.create detail "browser <serial> until <date>", no password / base64
   func TestRevokeOwnOnlyBrowser(t *testing.T)          // own yubikey serial → 404; another's serial → 404; own browser → enroll revoke, audit cert.revoke
   func TestPresentedCertPEM(t *testing.T)              // Traefik fixture (URL-escaped, two entries) → PEM of the first; garbage → error
-  func TestRenewUsesPresentedCert(t *testing.T)        // no header → 403 "present your current YubiKey certificate"; enroll gets real PEM
+  func TestRenewUsesPresentedCert(t *testing.T)        // no header → 403 "present your current YubiKey certificate"; enroll gets real PEM;
+  //  the caller's browser leaf, or another person's YubiKey leaf → 403, enroll not called (review I1)
+  func TestOwnCertificatesProtectedNames(t *testing.T) // admin / portcullis-hub / portcullis-x create, renew or revoke → 409; an lldap_admin member creates a browser cert → 200
+  func TestExpiringFollowsWarnDays(t *testing.T)       // HUB_CERT_EXPIRY_WARN_DAYS 10 → 9 days left is "expiring"; unset → 7
   func TestOwnPasswordRules(t *testing.T)              // method off → 409; CheckPassword failures → 400; admin → 409; record set_by self; sign-out called
   // httpapi
   func TestCreateBrowserCertAnswerNoStore(t *testing.T) // 200 headers Cache-Control no-store, Pragma no-cache; body has p12, password, filename
@@ -747,9 +769,10 @@ Decisions (made here; the spec leaves them to the builder):
   //  bob → a member of another permission group 403; bob removed from hr → next call 403 (fresh snapshot);
   //  carol holding only invite → remove passkeys 403
   func TestSignInHelpIsGrantable(t *testing.T)   // PUT /api/directory/permissions/sign_in_help {group: "hr"} OK; hr members are permission-group members
-  func TestAdminCertificateTargets(t *testing.T) // admin revoke / issue on another administrator → 409 with D32's text; on alice OK
+  func TestAdminCertificateTargets(t *testing.T) // admin revoke / issue on another administrator → 409 with D32's text; on admin, portcullis-hub,
+  //  portcullis-breakglass → 409 "this account's certificates are managed from the server: …" (review I3); on alice OK
   func TestAdminTakeoverUnchanged(t *testing.T)  // admin removes another admin's passkeys / sets their password: typed confirmation still required, then OK
-  func TestPersonSignInView(t *testing.T)        // admin: Can all true for alice, Issue/Revoke false for an administrator;
+  func TestPersonSignInView(t *testing.T)        // admin: Can all true for alice, SetupLink/Issue/Revoke false for an administrator;
   //  holder: Password false, Issue false; anyone else 403; history route the same rule
   func TestIssueYubiKeyFresh(t *testing.T)       // D26 rules as for browser certificates; enroll 400 CSR text passed through
   func TestHelpToolClasses(t *testing.T)         // revoke_person_certificate D, remove_passkeys D; set_permission accepts sign_in_help
@@ -772,6 +795,8 @@ Decisions (made here; the spec leaves them to the builder):
   - `web/people.html` / `web/directory.js`: top nav "Sign-in" → `/signin`; the person page tab "Sign-in"; the Permissions table lists `sign_in_help` "Help with sign-in (setup link, remove passkeys, revoke certificates)";
   - `web/signin.js`: Settings → Sign-in gains browser certificate and history limits; the "available" note goes;
   - `web/index.html`: Add domain and D34 copy, including `:894`'s comment;
+  - the Hub's domain error texts lose "enroll" (contract §12, Task 1 fix round 1, choice 10): `internal/hub/domains.go` "is already enrolled" → "is already added", "re-enroll it" → "add it again" (also the `missing` `last_error` and its log line), `internal/hub/hosts.go` "re-enroll it before giving it new hostnames" → "add it again before giving it new hostnames", "can't be enrolled" → "can't be added", "under / above the enrolled domain … (enrolled domains never nest)" → "added domain … (added domains never nest)";
+  - the AI certificate texts (contract §15.11): `internal/hub/ai_instance.go` `certRefusal` = "needs a YubiKey or browser certificate on every sign-in; AI clients can't present one", `aiCertOffDetail` = "sign-in needs a YubiKey or browser certificate", and the matching `internal/doctor/ai.go` texts;
   - `web/freshauth.js` / `web/freshauth-callback.js`: the people redirect `…/signin`; the callback header says so;
   - `cmd/hub/main.go`: the people `RedirectURI` `https://people.<d>/signin`;
   - `internal/keycloak/freshauth.go`: `checkFreshAuthURIs` (people path `/signin`, hub path `/`);
@@ -839,9 +864,10 @@ The page follows mockup sections 1 and 3:
 
 - [ ] **Step 1: Write the failing tests** (with a stubbed `vault`, as the existing pki tests do)
   - `test_shell_libs.sh`:
-    - `pki_setup on a fresh Vault enables pki, pki_int, pki_file; ca-chain.crt has 3 certificates in order root, pki_int, pki_file`
-    - `pki_setup with pki_int present but no pki_file creates pki_file only, keeps pki_int, rewrites ca-chain.crt to 3 certificates and the truststore, and sets PKI_TRUSTSTORE_CHANGED=true`
-    - `pki_setup with all three present and the chain current leaves PKI_TRUSTSTORE_CHANGED unset`
+    - `pki_setup on a fresh Vault enables pki, pki_int, pki_file; ca-chain.crt has 3 certificates in order root, pki_int, pki_file; ca-chain-yubikey.crt has exactly root, pki_int`
+    - `pki_setup with pki_int present but no pki_file creates pki_file only, keeps pki_int, rewrites ca-chain.crt to 3 certificates, ca-chain-yubikey.crt and the truststore, and sets PKI_TRUSTSTORE_CHANGED=true`
+    - `pki_setup with all three present and the chain current but ca-chain-yubikey.crt missing (or holding pki_file) rewrites it and sets PKI_TRUSTSTORE_CHANGED=true`
+    - `pki_setup with all three present and both chains current leaves PKI_TRUSTSTORE_CHANGED unset`
     - `pki_setup refuses when the two intermediates' CNs are equal`
     - `browser-cert role written with client_flag=true server_flag=false use_csr_common_name=false max_ttl=$CLIENT_CERT_TTL`
     - `pki_file CRL configured auto_rebuild=true enable_delta=true delta_rebuild_interval=1m`
@@ -899,6 +925,8 @@ The page follows mockup sections 1 and 3:
   func TestCertAPINeedsBearer(t *testing.T)        // every D23 route 401 without / with a wrong bearer
   func TestCertAPIStrictBodies(t *testing.T)       // unknown field, trailing data, > 64 KiB → 400 / 413
   func TestCertAPIUnwired503(t *testing.T)         // a nil operation field → 503
+  func TestCertAPIProtectedNames(t *testing.T)     // every D23 action with user admin, portcullis-hub, Portcullis-X → 409 "protected account", Vault not called (review I3)
+  func TestRenewRefusesBrowserLeaf(t *testing.T)   // presented = a pki_file leaf with CN = user (or a leaf whose issuer DN matches pki_int but signed by another key) → 403, nothing signed (review I1)
   func TestYubiKeyIssueValidatesCSR(t *testing.T)  // CSR CN ≠ user → 400; good CSR → signed on pki_int/sign/client-cert with common_name user
   func TestRenewChecksPresented(t *testing.T)      // checkRenewal cases moved from self_test; "presented" must be a PEM CERTIFICATE (else 400)
   func TestRevokeFindsMountAndOwner(t *testing.T)  // pki_file serial of alice by user alice → revoke + pki_file/crl/rotate;
@@ -994,7 +1022,9 @@ The page follows mockup sections 1 and 3:
   - `group-gate/group-gate-map.conf`: no `enroll=`;
   - `scripts/lib/common.sh`: `CT_UID_GROUP_GATE=10003`, `volume_own group_gate_data "$CT_UID_GROUP_GATE:$CT_UID_HUB"`;
   - `scripts/lib/backup.sh`: `group_gate_data:$CT_UID_GROUP_GATE:$CT_UID_HUB` in `BACKUP_FILE_VOLUMES`;
-  - `.github/workflows/ci.yml`: drop the `portcullis-self` assertions (lines 217, 245, 368) and `"enroll."` from the core policy keys (1275, 2617); add a compose check pinning `group_gate_data` to exactly group-gate (rw) and hub (rw), like the `mcp_gate_data` check (352–353).
+  - `.github/workflows/ci.yml`: drop the `portcullis-self` assertions (lines 217, 245, 368) and `"enroll."` from the core policy keys (1275, 2617); add a compose check pinning `group_gate_data` to exactly group-gate (rw) and hub (rw), like the `mcp_gate_data` check (352–353); the static TLS check expects exactly the four D21 options (`protected` → `caFiles: [/certs/ca-chain-yubikey.crt]`, `protected-any` and `authaware` → `[/certs/ca-chain.crt]`, `public` none); `build-and-test` checks both chain files (`ca-chain.crt` root + `pki_int` + `pki_file`, `ca-chain-yubikey.crt` root + `pki_int`, no `pki_file`).
+  - `traefik/dynamic/tls.yml`: the four options of D21 (`protected` on `/certs/ca-chain-yubikey.crt`, new `protected-any`); the header comment says which uses which. Traefik's existing `./certs:/certs:ro` mount carries both chain files.
+  - `docker-compose.yml` hub: `HUB_CERT_EXPIRY_WARN_DAYS: ${CERT_EXPIRY_WARN_DAYS:-7}`.
 - Modify, leftover texts (D31 / D34): `.env.example`, `monitoring/prometheus/alerts.yml`, `scripts/lib/status.sh`, `keycloak/themes/portcullis/login/messages/messages_en.properties`, core `docs/*.md`, `README.md`, `CLAUDE.md`.
 - Test: `tests/test_cli.sh`, `tests/test_shell_libs.sh`.
 
@@ -1051,6 +1081,10 @@ The page follows mockup sections 1 and 3:
     - gets 403 for setting alice's password, for acting on root, and for acting on herself;
     - gets 409 from the admin issue / revoke routes on root (as an admin).
   - `history_entries`: alice's `/api/me/signin/history` has a `sign_in` with methods `[browser_cert]` and a non-empty browser, a `step_up`, `opened` for the app's host, `help` by carol, and `certificate` entries. bob's history has a `failed` entry (his wrong password).
+  - `browser_cert_cannot_renew` (review I1): alice's browser certificate presented on `POST /api/me/signin/yubikey-certificate/renew` with a CSR for its key → 403 "present your current YubiKey certificate", nothing issued.
+  - `tls_protected_yubikey_ca_only`: `echo-cert` (`e2e-cert` = any[`yubikey_cert`] → `protected@file`, the option `mtls` apps get): `openssl s_client`'s "Acceptable client certificate CA names" lists only the root and the YubiKey CA.
+  - `tls_mtls_refuses_browser_cert`: a handshake to that host with alice's browser certificate fails; with root's YubiKey certificate it succeeds.
+  - `tls_protected_any`: an instance `echo-anycert` on `e2e-anycert` = any[`yubikey_cert`, `browser_cert`] is on `protected-any@file`; its CA names list the root and both CAs; a handshake with alice's browser certificate succeeds and one without a certificate fails.
   - `enroll_site_gone`: `https://enroll.<d>/` and `/self` answer 404, while `/invite/<bad token>` shows the invite page's "no longer usable".
 - [ ] **Step 2: Run to see it fail.** Push and let CI run e2e-signin. Expected: the new cases FAIL before the CI wiring.
 - [ ] **Step 3: Implement** the CI wiring and the moved cases in `e2e_login.py` / `e2e_filesharing.py`.
