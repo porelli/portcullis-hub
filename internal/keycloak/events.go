@@ -49,12 +49,18 @@ func (c *Client) EnsureEventsConfig(ctx context.Context, historyDays int) error 
 	// A field of another type just counts as different.
 	_ = json.Unmarshal(resp.Body(), &cur)
 	want := int64(historyDays) * 86400
-	if cur.Enabled && slices.Equal(cur.Types, EventTypes) && cur.Expiration == want {
+	// Keycloak keeps the types as a set: any order is the same config.
+	types := slices.Clone(cur.Types)
+	slices.Sort(types)
+	types = slices.Compact(types)
+	wantTypes := slices.Clone(EventTypes)
+	slices.Sort(wantTypes)
+	if cur.Enabled && slices.Equal(types, wantTypes) && cur.Expiration == want {
 		return nil
 	}
 	cfg["eventsEnabled"] = json.RawMessage("true")
-	types, _ := json.Marshal(EventTypes)
-	cfg["enabledEventTypes"] = types
+	typesJSON, _ := json.Marshal(EventTypes)
+	cfg["enabledEventTypes"] = typesJSON
 	cfg["eventsExpiration"] = json.RawMessage(fmt.Sprint(want))
 	resp, err = c.api().GetRequestWithBearerAuth(ctx, tok).SetBody(cfg).Put(c.eventsConfigPath())
 	if err != nil {

@@ -42,6 +42,15 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	if n := kc.CountCalls("PUT /admin/realms/portcullis/events/config"); n != 1 {
 		t.Errorf("an equal config was written again (%d PUTs)", n)
 	}
+	// Keycloak answers the types in another order (it keeps a set): still
+	// the same config, not written.
+	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"LOGIN_ERROR", "LOGIN"} })
+	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
+		t.Fatal(err)
+	}
+	if n := kc.CountCalls("PUT /admin/realms/portcullis/events/config"); n != 1 {
+		t.Errorf("the same types in another order were written again (%d PUTs)", n)
+	}
 	// A new history length is written.
 	if err := c.EnsureEventsConfig(ctx, 365); err != nil {
 		t.Fatal(err)

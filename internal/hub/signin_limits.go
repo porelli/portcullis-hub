@@ -66,7 +66,9 @@ func (h *Hub) SetEventsConfig(ensure func(ctx context.Context, days int) error) 
 }
 
 // ensureEvents re-asserts the events config with the stored
-// history_days (nil when none is wired).
+// history_days (nil when none is wired). eventsMu serialises the read of
+// history_days with the write to Keycloak, so the sync loop and a limits
+// change never land a stale retention after a newer one.
 func (h *Hub) ensureEvents(ctx context.Context) error {
 	h.policyWriteMu.Lock()
 	ensure := h.eventsEnsure
@@ -74,6 +76,8 @@ func (h *Hub) ensureEvents(ctx context.Context) error {
 	if ensure == nil {
 		return nil
 	}
+	h.eventsMu.Lock()
+	defer h.eventsMu.Unlock()
 	h.mu.RLock()
 	days := h.st.SignIn.Limits.HistoryDays
 	h.mu.RUnlock()

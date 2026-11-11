@@ -490,6 +490,9 @@ type Hub struct {
 	// (signin_limits.go: the sync loop and every limits change); under
 	// policyWriteMu like attrSync.
 	eventsEnsure func(ctx context.Context, days int) error
+	// eventsMu serialises ensureEvents (never held with mu across the
+	// Keycloak call; mu is taken inside it only to read history_days).
+	eventsMu     sync.Mutex
 	lastExpiring []policy.Expiring
 	dirKick      chan struct{}
 	// invKick asks runInventorySync for a sign-in inventory refresh.

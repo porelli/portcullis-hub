@@ -93,8 +93,10 @@ func (h *Hub) accessWith(t *templates.Template, si state.SignIn, pick, mode stri
 // tierLocked is the TLS option of every router of t (contract §5 "TLS
 // tier per host", D18): an mtls app protected@file (the certificate is
 // its authentication); an app without Portcullis sign-in public@file; a
-// template that can't be published protected@file (fail closed); else
-// policy.Tier of its compiled rule, with publicActive's downgrade. Caller
+// template that can't be published protected@file (fail closed; with
+// open public exceptions authaware@file, policy.HostTier, while every
+// gated request is still denied); else policy.Tier of its compiled rule,
+// with publicActive's downgrade. Caller
 // holds mu.
 func (h *Hub) tierLocked(t *templates.Template, publicActive bool) string {
 	return h.accessLocked(t).tier(h.st.SignIn.MethodsOn(), publicActive)
@@ -107,7 +109,9 @@ func (a access) tier(on map[signin.Method]bool, publicActive bool) string {
 	case !a.Capability.Templates:
 		return policy.TierPublic
 	case a.Unusable:
-		return policy.TierProtected
+		// No rule: group-gate denies every gated request; the open public
+		// router still needs the handshake without a certificate (§5).
+		return policy.HostTier(policy.TierProtected, publicActive)
 	}
 	return policy.Tier(a.Rule, on, publicActive)
 }

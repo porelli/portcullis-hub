@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -205,5 +206,94 @@ func TestTierProtectedAnyOverride(t *testing.T) {
 	notes := strings.Join(view(t, f, "grafana").SignInNotes, "\n")
 	if !strings.Contains(notes, "protected-any@file") {
 		t.Errorf("notes = %s", notes)
+	}
+}
+
+// Review fix 3 (contract §5): an app whose template can't be published
+// is protected@file, but while its public router is open every router of
+// the host shares authaware@file (policy.HostTier) — and every gated
+// request is still denied (no published rule for the host).
+func TestUnusableTemplateWithPublicRouter(t *testing.T) {
+	a := access{Capability: policy.Capability{Templates: true, Enforcement: policy.EnforcePerRequest}, Unusable: true}
+	if got := a.tier(nil, false); got != policy.TierProtected {
+		t.Errorf("unusable, no public router: %s", got)
+	}
+	if got := a.tier(nil, true); got != policy.TierAuthAware {
+		t.Errorf("unusable, public router open: %s", got)
+	}
+
+	f := newCloudFixture(t)
+	if err := f.h.Enable("cloud"); err != nil {
+		t.Fatal(err)
+	}
+	enableTemplate(t, f, certOnlyTemplate)
+	save(t, f, SettingsUpdate{SignInTemplate: pickTemplate(certOnlyTemplate), PublicTokens: listp("AbC123")})
+	// The picked template stops being publishable (disabled under it, as
+	// a corrupt edit would leave it): the override follows.
+	f.h.mu.Lock()
+	tm := f.h.st.SignIn.Templates[certOnlyTemplate]
+	tm.Enabled = false
+	f.h.st.SignIn.Templates[certOnlyTemplate] = tm
+	err := f.h.generateOverrideLocked(f.h.findLocked("cloud"), f.h.st.Settings["cloud"])
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	ov := readOverride(t, f, "cloud")
+	if !strings.Contains(ov, "portcullis-public-cloud") || strings.Contains(ov, "protected") || !strings.Contains(ov, "tls.options: authaware@file") {
+		t.Errorf("override:\n%s", ov)
+	}
+	doc := readPolicy(t, f)
+	if _, ok := doc.Templates[certOnlyTemplate]; ok {
+		t.Errorf("the unusable template was published: %v", doc.Templates)
+	}
+	if id, ok := doc.Hosts["cloud.example.org"]; ok && id != certOnlyTemplate {
+		t.Errorf("host published onto another template: %q", id)
+	}
+	if _, ok := doc.Hosts["cloud.example.org"]; !ok && doc.Groups["cloud.example.org"] != policy.DenyGroup {
+		t.Errorf("gated requests not denied: hosts %v groups %v", doc.Hosts, doc.Groups)
+	}
+}
+
+// Review fix 2: ensureEvents runs one at a time, and the last write
+// always carries the history_days stored last.
+func TestEnsureEventsSerialised(t *testing.T) {
+	f, _ := signInFixture(t)
+	ctx := context.Background()
+	var mu sync.Mutex
+	inFlight, maxInFlight, last := 0, 0, 0
+	f.h.SetEventsConfig(func(_ context.Context, days int) error {
+		mu.Lock()
+		inFlight++
+		maxInFlight = max(maxInFlight, inFlight)
+		mu.Unlock()
+		time.Sleep(2 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		last = days
+		mu.Unlock()
+		return nil
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = f.h.ensureEvents(ctx) }()
+		go func(d int) {
+			defer wg.Done()
+			_, _ = f.h.SetSignInLimits(ctx, state.SignInLimits{BrowserCertDays: 30, BrowserCertMaxActive: 3, HistoryDays: d}, siAdmin)
+		}(100 + i)
+	}
+	wg.Wait()
+	_ = f.h.ensureEvents(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	if maxInFlight != 1 {
+		t.Errorf("%d events writes in flight at once", maxInFlight)
+	}
+	if want := f.h.SignInLimits().Limits.HistoryDays; last != want {
+		t.Errorf("last write %d, stored %d", last, want)
 	}
 }
