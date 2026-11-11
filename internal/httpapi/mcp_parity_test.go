@@ -268,7 +268,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// U tools (Task 17b): domain tokens and provider secrets.
-	for _, n := range []string{"set_secret_setting", "enroll_domain", "replace_domain_token", "set_model_provider_secret", "set_password",
+	for _, n := range []string{"set_secret_setting", "add_domain", "replace_domain_token", "set_model_provider_secret", "set_password",
 		"create_person", "send_invite"} {
 		if byName[n].Class != ClassSecret {
 			t.Errorf("tool %s: class %q, want U", n, byName[n].Class)
@@ -345,7 +345,7 @@ var admin18 = []string{
 var admin17b = []string{
 	"list_templates", "get_template", "list_sources", "sync_sources", "add_source", "remove_source",
 	"list_backups", "list_backups_all", "backup_instance", "restore_instance", "restore_as",
-	"list_domains", "enroll_domain", "replace_domain_token", "delete_domain",
+	"list_domains", "add_domain", "replace_domain_token", "delete_domain",
 	"ai_status", "set_ai_support", "set_ai_mode", "set_ai_providers", "revoke_ai_access", "dismiss_ai_revoke_problem", "ai_activity",
 	"list_model_providers", "add_model_provider", "save_model_provider", "set_model_provider_secret", "delete_model_provider",
 	"get_hub_settings", "save_hub_settings",

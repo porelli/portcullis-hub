@@ -192,7 +192,7 @@ func TestDomainRoutesAdminOnly(t *testing.T) {
 			actions = append(actions, a.Action+":"+a.Result+":"+a.Actor)
 		}
 	}
-	if strings.Join(actions, ",") != "domain.enroll:ok:root,domain.token:ok:root,domain.delete:ok:root" {
+	if strings.Join(actions, ",") != "domain.add:ok:root,domain.token:ok:root,domain.delete:ok:root" {
 		t.Fatalf("audit %v", actions)
 	}
 }

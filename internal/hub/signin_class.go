@@ -107,7 +107,7 @@ func (h *Hub) PrecheckSignIn(d SignInDraft) error {
 		}
 		native := h.st.SignInMode[d.Instance] == state.SignInNative
 		if *d.Pick != "" && !configCapability(t, native).Templates {
-			return statusErr(http.StatusBadRequest, "sign-in template: this app takes none (auth method %s: Portcullis doesn't sign people in to it, or its client certificate is its sign-in)", configCapability(t, native).Enforcement)
+			return statusErr(http.StatusBadRequest, "sign-in template: this app takes none (auth method %s: Portcullis doesn't sign people in to it, or its YubiKey certificate is its sign-in)", configCapability(t, native).Enforcement)
 		}
 		return pickableLocked(si, d.Pick)
 	default:

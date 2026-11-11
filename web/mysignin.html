@@ -1,17 +1,62 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- The fresh-auth popup callback (contract §5.1): first in <head>,
+     before anything else loads. This page is the people listener's
+     fresh-auth redirect URI (https://people.<domain>/signin), for My apps
+     and this page alike. -->
+<script src="/static/freshauth-callback.js"></script>
 <meta name="referrer" content="no-referrer">
 <meta charset="utf-8">
-<!-- The fresh-auth popup callback (contract §5.1): first, before anything
-     else loads. -->
-<script src="/static/freshauth-callback.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign-in</title>
+<link rel="stylesheet" href="/static/directory.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #1e293b; }
+  h1 { font-size: 1.5rem; color: #f1f5f9; }
+  h1 span { color: #3b82f6; }
+  .user-badge { background: #1e293b; padding: 0.5rem 1rem; border-radius: 0.5rem; font-size: 0.875rem; }
+  .user-badge strong { color: #3b82f6; }
+</style>
 </head>
 <body>
-<!-- Placeholder: the Sign-in page's UI (web/mysignin.js) comes with the
-     Hub UI task. It calls only the /api/me/signin* routes. -->
-<main id="signin-root"><h1>Sign-in</h1><p>Your sign-in methods.</p></main>
+<!-- The Sign-in page (sign-in part 2, D24): the caller's own sign-in
+     methods, the apps and what they need, and the sign-in history. It
+     calls only the /api/me/signin* routes (web/mysignin.js). -->
+<div class="container">
+  <div class="pn-bar" id="site-nav"></div>
+  <header>
+    <h1><span>&#9906;</span> Sign-in methods</h1>
+    <div class="user-badge" id="who" hidden>Signed in as <strong id="who-name"></strong></div>
+  </header>
+  <main id="signin-root" class="pd-card msi-page"><noscript>This page needs JavaScript.</noscript></main>
+</div>
+<script src="/static/directory.js"></script>
+<script src="/static/freshauth.js"></script>
+<script src="/static/mysignin.js"></script>
+<script>
+  if (window.portcullisFreshAuthCallback) {
+    // The popup handed its result to the opener; close() may be refused.
+    document.getElementById('signin-root').textContent = 'Signed in. You can close this window.';
+  } else {
+    // The configured main domain (injected); HubURL / PeopleURL override
+    // the Hub's and the people page's URLs (the harness only).
+    const navOpts = { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: {{.PeopleURL}}, current: 'signin', admin: false };
+    PortcullisNav.render(document.getElementById('site-nav'), navOpts);
+    PortcullisMySignIn.mount(document.getElementById('signin-root'), {
+      mode: 'self',
+      onView: function (v) {
+        document.getElementById('who-name').textContent = v.user || '';
+        document.getElementById('who').hidden = !v.user;
+        // The Hub link for administrators only (the Hub is in their apps).
+        navOpts.admin = (v.apps || []).some(function (a) { return a.kind === 'core' && a.id === 'hub'; });
+        PortcullisNav.render(document.getElementById('site-nav'), navOpts);
+      },
+    });
+  }
+</script>
 </body>
 </html>

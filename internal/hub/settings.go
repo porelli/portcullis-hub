@@ -631,7 +631,7 @@ func configCheck(t *templates.Template, kinds *settings.Registry, folders Folder
 	if u.SignInTemplate != nil && *u.SignInTemplate != "" {
 		switch {
 		case !configCapability(t, native).Templates:
-			out = append(out, statusErr(400, "sign-in template: this app takes none (auth method %s: Portcullis doesn't sign people in to it, or its client certificate is its sign-in)", configCapability(t, native).Enforcement))
+			out = append(out, statusErr(400, "sign-in template: this app takes none (auth method %s: Portcullis doesn't sign people in to it, or its YubiKey certificate is its sign-in)", configCapability(t, native).Enforcement))
 		case !state.SignInTemplateIDRe.MatchString(*u.SignInTemplate):
 			out = append(out, statusErr(400, "sign-in template %q: not a template id", clip(*u.SignInTemplate, 64)))
 		}
@@ -883,7 +883,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 	}
 	// A sign-in template needing a client certificate on every sign-in
 	// switches AI support off first (G43, contract §8.1 / §15.11; audited
-	// ai.disable "sign-in needs a client certificate").
+	// ai.disable "sign-in needs a YubiKey or browser certificate").
 	aiWarnings := []string{}
 	h.mu.RLock()
 	aiOff := h.aiOffForSaveLocked(t, u)

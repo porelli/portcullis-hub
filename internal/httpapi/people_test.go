@@ -595,6 +595,13 @@ func TestDirectoryAssetsServed(t *testing.T) {
 			}
 		}
 	}
+	// The Sign-in page's script (sign-in part 2): the people listener only.
+	if r, b := doAs(t, e.people, "bob", "GET", "/static/mysignin.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisMySignIn") {
+		t.Errorf("people /static/mysignin.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
+	}
+	if _, b := doAs(t, e.people, "bob", "GET", "/", ""); !strings.Contains(b, `src="/static/mysignin.js"`) {
+		t.Error("the people page doesn't load mysignin.js (the person's Sign-in tab)")
+	}
 	for _, c := range []struct {
 		srv  *httptest.Server
 		page string
@@ -658,7 +665,8 @@ func TestDirectoryAssetsServed(t *testing.T) {
 // TestSettingsAssetHubOnly: the settings panel's script is served on the
 // Hub listener only; the people listener serves just its own assets
 // (directory.js, directory.css, myapps.js, myai.js — the Connect your AI
-// card —, and confirm.js for the confirmation page).
+// card —, mysignin.js for the Sign-in page and confirm.js for the
+// confirmation page).
 func TestSettingsAssetHubOnly(t *testing.T) {
 	e := newPeopleEnv(t)
 	var allow []string
@@ -668,8 +676,8 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myai.js,myapps.js" {
-		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myai.js, myapps.js", allow)
+	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myai.js,myapps.js,mysignin.js" {
+		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myai.js, myapps.js, mysignin.js", allow)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))

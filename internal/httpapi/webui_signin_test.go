@@ -66,7 +66,7 @@ const hostile = `<img src=x onerror=alert(1)>`
 func signInView(name string) string {
 	n, _ := json.Marshal(name)
 	return `{"methods":[{"id":"password","label":"Password","tenths":10,"on":true,"available":true,"people":2},
-{"id":"browser_cert","label":"Browser certificate","tenths":25,"on":false,"available":false,"people":-1},
+{"id":"browser_cert","label":"Browser certificate","tenths":25,"on":false,"available":true,"people":-1},
 {"id":"security_key","label":"Security key passkey (YubiKey touch)","tenths":35,"on":true,"available":true,"people":5}],
 "people_total":12,"default":"standard","core":{"hub":"strong"},"add_stronger":false,"mds_warning":"FIDO <b>stale</b>",
 "templates":[{"id":"standard","name":"Standard","rule":{"op":"any","items":["family:passkey"]},"sentence":"a passkey","score":{"tenths":25,"reason":"r"},"enabled":true,"built_in":true,"used_by":[{"kind":"default","id":"default","name":"the default"}]},
@@ -99,8 +99,10 @@ func TestSignInRenderEscapes(t *testing.T) {
 	if !strings.Contains(out["table"].(string), "FIDO &lt;b&gt;stale&lt;/b&gt;") || !strings.Contains(out["table"].(string), "5 of 12") {
 		t.Errorf("the MDS warning or the people counts are missing:\n%s", out["table"])
 	}
-	if !strings.Contains(out["table"].(string), "not available yet") {
-		t.Error("browser_cert isn't shown as not available yet")
+	// Part 2 (D27): every method can be switched on; nothing says "not
+	// available yet".
+	if strings.Contains(out["table"].(string), "not available yet") {
+		t.Error("a method is still shown as not available yet")
 	}
 }
 
@@ -171,10 +173,10 @@ func TestSignInGreyedOut(t *testing.T) {
 			t.Errorf("the editor lacks %q", s)
 		}
 	}
-	// A switched-off method and the browser certificate say why.
+	// A switched-off method says why (the browser certificate too).
 	marks := signInJS(t, `S.marksFor({op: "any", items: ["password", "browser_cert", "family:certificate", "security_key"]}, {unusable: [[0], [1], [2]], groups: []})`)
 	b, _ := json.Marshal(marks)
-	if string(b) != `[{},{"why":"off on this server"},{"why":"not available yet"},{"why":"none of its methods is on"},{}]` {
+	if string(b) != `[{},{"why":"off on this server"},{"why":"off on this server"},{"why":"none of its methods is on"},{}]` {
 		t.Errorf("marks = %s", b)
 	}
 }
@@ -199,7 +201,7 @@ func TestSignInNoInlineHandlers(t *testing.T) {
 
 // TestInstanceSignInBody: the drop-down's first entry is "Default
 // (Standard · 2.5 / 5)" with value "": picking it sends sign_in_template
-// ""; the saved pick sends nothing; an mtls app shows "client certificate
+// ""; the saved pick sends nothing; an mtls app shows "YubiKey certificate
 // required" and no drop-down.
 func TestInstanceSignInBody(t *testing.T) {
 	isv := `{instance: "gitea", name: "Gitea", takes_template: true, template: "strong", inherits: false, default: "standard",
@@ -221,7 +223,7 @@ func TestInstanceSignInBody(t *testing.T) {
 	if string(b) != `[{"sign_in_template":""},{},{"sign_in_template":"strong"}]` {
 		t.Errorf("bodies = %s", b)
 	}
-	if m := out["mtls"].(string); !strings.Contains(m, "Client certificate required") || strings.Contains(m, "<select") {
+	if m := out["mtls"].(string); !strings.Contains(m, "YubiKey certificate required") || strings.Contains(m, "<select") {
 		t.Errorf("mtls block:\n%s", m)
 	}
 	// settings.js sends the pick through pickBody, under sign_in_template.

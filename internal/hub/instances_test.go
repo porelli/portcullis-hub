@@ -477,8 +477,8 @@ func TestInstanceIDRules(t *testing.T) {
 		"grafana-b.example.org": "already used by instance grafana-b",
 		"grafana.example.org":   "already used by instance grafana",
 		"auth.example.org":      "core hostname",
-		"grafana.other.org":     "neither <label>.example.org nor on an enrolled domain",
-		"a.b.example.org":       "deeper names need an enrolled domain",
+		"grafana.other.org":     "neither <label>.example.org nor on an added domain",
+		"a.b.example.org":       "deeper names need an added domain",
 	} {
 		err := f.h.CreateInstance("grafana", "grafana-d", map[string]string{"grafana": hosts})
 		if err == nil || !strings.Contains(err.Error(), why) {

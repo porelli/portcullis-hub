@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"regexp"
@@ -90,18 +89,24 @@ func readMySignInBody(w http.ResponseWriter, r *http.Request, v any, usage strin
 	return true
 }
 
-// handleMySignInPage serves the Sign-in page (web/mysignin.html).
+// handleMySignInPage serves the Sign-in page (web/mysignin.html) with the
+// main domain injected (the shared navigation) and the harness's HubURL /
+// PeopleURL overrides.
 func (s *Server) handleMySignInPage(w http.ResponseWriter, r *http.Request) {
-	page, err := fs.ReadFile(s.Web, "mysignin.html")
-	if err != nil {
-		log.Printf("people: sign-in page: %v", err)
-		http.Error(w, directory.GenericUnavailable, http.StatusServiceUnavailable)
+	if s.mySignIn == nil {
+		http.NotFound(w, r)
 		return
+	}
+	domain := ""
+	if s.Hub != nil {
+		domain = s.Hub.Domain()
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Write(page)
+	if err := s.mySignIn.Execute(w, map[string]any{"Domain": domain, "HubURL": s.HubURL, "PeopleURL": s.PeopleURL}); err != nil {
+		log.Printf("people: sign-in page: %v", err)
+	}
 }
 
 // handleMySignIn → 200 hub.MySignIn, no-store.

@@ -169,11 +169,31 @@ func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (f
 		TokenURL:       internal + "/token",
 		JWKSURL:        internal + "/certs",
 		AuthorizeURL:   public + "/protocol/openid-connect/auth",
-		RedirectURI:    "https://people." + domain + "/",
+		RedirectURI:    "https://people." + domain + "/signin",
 		WebOrigin:      "https://people." + domain,
 		HubRedirectURI: "https://hub." + domain + "/",
 		HubWebOrigin:   "https://hub." + domain,
 	}, nil
+}
+
+// verifierConfigs is each listener's fresh-auth verifier config: the
+// people listener's redirect URI is https://people.<d>/signin (the Sign-in
+// page, whose head runs the popup callback), the Hub listener's
+// https://hub.<d>/ (contract §8).
+func (fa freshAuthSetup) verifierConfigs(httpc *http.Client, accepted func() []string) map[string]freshauth.Config {
+	out := map[string]freshauth.Config{}
+	for listener, redirect := range map[string]string{hub.ListenerPeople: fa.RedirectURI, hub.ListenerHub: fa.HubRedirectURI} {
+		out[listener] = freshauth.Config{
+			Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
+			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
+			// The token endpoint never redirects; a redirect is refused.
+			HTTP: httpc,
+			// pc_fresh must be a method switched on now (§8.1); the
+			// governing template is the Hub's check (§8).
+			Accepted: accepted,
+		}
+	}
+	return out
 }
 
 func main() {
@@ -385,16 +405,8 @@ func main() {
 	// confirmations on hub.<d>), and their one Keycloak client, ensured in
 	// the directory sync loop.
 	faHTTP := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	for listener, redirect := range map[string]string{hub.ListenerPeople: fa.RedirectURI, hub.ListenerHub: fa.HubRedirectURI} {
-		h.SetFreshAuth(listener, freshauth.New(freshauth.Config{
-			Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
-			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
-			// The token endpoint never redirects; a redirect is refused.
-			HTTP: faHTTP,
-			// pc_fresh must be a method switched on now (§8.1); the
-			// governing template is the Hub's check (§8).
-			Accepted: h.FreshAuthAccepted,
-		}))
+	for listener, cfg := range fa.verifierConfigs(faHTTP, h.FreshAuthAccepted) {
+		h.SetFreshAuth(listener, freshauth.New(cfg))
 	}
 	// Per-instance AI support (contract §8): the mcp:* scopes.
 	h.SetAIKeycloak(kc)

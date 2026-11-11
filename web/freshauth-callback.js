@@ -1,10 +1,12 @@
 // freshauth-callback.js — the fresh-auth popup callback (contract §5.1
 // "Fresh auth", F20, G11): the one source for both listeners' landing
 // pages, loaded synchronously in <head> before anything else runs
-// (people.html on people.<d>, index.html on hub.<d>).
+// (mysignin.html on people.<d>/signin — the people listener's redirect
+// URI —, and people.html; index.html on hub.<d>).
 //
 // The opener (freshauth.js) sends Keycloak's authorize request with this
-// listener's "/" as redirect URI; Keycloak sends the popup back here with
+// listener's redirect URI (https://people.<d>/signin, https://hub.<d>/);
+// Keycloak sends the popup back here with
 // ?code=…&state=… (or ?error=…). The code and state are dropped from the
 // URL and history at once. Only a same-origin opener (a guarded read of
 // opener.location.origin: a cross-origin opener throws) gets them,

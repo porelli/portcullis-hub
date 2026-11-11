@@ -345,7 +345,7 @@ func TestGateRulePerResource(t *testing.T) {
 // TestSignInChangeSwitchesAIOff (G43, §8.1 "AI support"): a sign-in
 // change that makes an inheriting instance's rule certificate-only — the
 // default set to YubiKey + certificate — switches its companion off
-// first, audited ai.disable "sign-in needs a client certificate"; the
+// first, audited ai.disable "sign-in needs a YubiKey or browser certificate"; the
 // gate file then no longer lists it.
 func TestSignInChangeSwitchesAIOff(t *testing.T) {
 	a := newInstAIFixture(t, nil)
@@ -376,7 +376,7 @@ func TestSignInChangeSwitchesAIOff(t *testing.T) {
 	if !slices.ContainsFunc(ch.Warnings, func(w string) bool { return strings.Contains(w, "aiapp") }) {
 		t.Errorf("warnings = %v", ch.Warnings)
 	}
-	if e := a.audits("ai.disable"); len(e) != 1 || e[0].Detail != aiCertOffDetail || aiCertOffDetail != "sign-in needs a client certificate" {
+	if e := a.audits("ai.disable"); len(e) != 1 || e[0].Detail != aiCertOffDetail || aiCertOffDetail != "sign-in needs a YubiKey or browser certificate" {
 		t.Errorf("audit = %+v", e)
 	}
 	a.h.mu.RLock()

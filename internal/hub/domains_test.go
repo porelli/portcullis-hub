@@ -172,7 +172,7 @@ func TestEnrollDomain(t *testing.T) {
 	if err != nil || d.Name != "team-b.example.net" || d.State != "pending" {
 		t.Fatalf("enroll = %+v, %v", d, err)
 	}
-	if e := audit.last(); e.Action != "domain.enroll" || e.Target != "team-b.example.net" || e.Result != "ok" || e.Detail != "provider cloudflare" || e.Actor != "alice" {
+	if e := audit.last(); e.Action != "domain.add" || e.Target != "team-b.example.net" || e.Result != "ok" || e.Detail != "provider cloudflare" || e.Actor != "alice" {
 		t.Fatalf("audit %+v", e)
 	}
 	// Known list in state.yaml (no credentials), extra_domains published.
@@ -192,9 +192,9 @@ func TestEnrollDomain(t *testing.T) {
 		"org":                      {400, "not a valid hostname"},
 		"auth.example.org":         {409, "core host"},
 		"x.hub.example.org":        {409, "core host"},
-		"team-b.example.net":       {409, "already enrolled"},
-		"a.team-b.example.net":     {409, "under the enrolled domain"},
-		"example.net":              {409, "above the enrolled domain"},
+		"team-b.example.net":       {409, "already added"},
+		"a.team-b.example.net":     {409, "under the added domain"},
+		"example.net":              {409, "above the added domain"},
 		"grafana.example.org":      {409, "take over the hostname grafana.example.org"},   // a template's default host
 		"grafana-x.example.org":    {409, "take over the hostname grafana-x.example.org"}, // an instance's host
 		"chat.example.org":         {409, "take over the hostname chat.example.org"},
@@ -209,7 +209,7 @@ func TestEnrollDomain(t *testing.T) {
 	if len(api.enrolled) != 1 {
 		t.Fatalf("refused enrollments reached the service: %v", api.enrolled)
 	}
-	if e := audit.last(); e.Result != "refused" || e.Action != "domain.enroll" {
+	if e := audit.last(); e.Result != "refused" || e.Action != "domain.add" {
 		t.Fatalf("refusal audit %+v", e)
 	}
 	// Allowed: other names under the main domain, deeper ones too.

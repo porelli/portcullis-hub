@@ -1019,7 +1019,13 @@ func s256B64(v string) string {
 }
 
 func (f *harnessFreshAuth) Info() freshauth.AuthorizeInfo {
-	return freshauth.AuthorizeInfo{AuthorizeURL: f.base + "/harness/authorize", ClientID: freshauth.ClientID, RedirectURI: f.base + "/"}
+	// The people listener's redirect URI is its Sign-in page (D24); the
+	// Hub listener's its "/".
+	redirect := f.base + "/"
+	if f.as == "" {
+		redirect = f.base + "/signin"
+	}
+	return freshauth.AuthorizeInfo{AuthorizeURL: f.base + "/harness/authorize", ClientID: freshauth.ClientID, RedirectURI: redirect}
 }
 
 func (f *harnessFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string) (*freshauth.Result, error) {

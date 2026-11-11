@@ -116,14 +116,14 @@ func (h *Hub) aiTryLock(id string, d time.Duration) (unlock func(), ok bool) {
 }
 
 // certRefusal is the switch-on refusal of an instance whose sign-in
-// template needs a client certificate on every sign-in
+// template needs a YubiKey or browser certificate on every sign-in
 // (signin.NeedsCertificate, contract §8.1 / §15.11).
-const certRefusal = "needs a client certificate on every sign-in; AI clients can't present one"
+const certRefusal = "needs a YubiKey or browser certificate on every sign-in; AI clients can't present one"
 
 // aiCertOffDetail is the ai.disable detail of the Hub's switch-off for a
-// sign-in that needs a client certificate (a settings save, a sign-in
+// sign-in that needs a YubiKey or browser certificate (a settings save, a sign-in
 // change, the reconcile).
-const aiCertOffDetail = "sign-in needs a client certificate"
+const aiCertOffDetail = "sign-in needs a YubiKey or browser certificate"
 
 // aiProxyNetwork is the network the companion aliases live on.
 const aiProxyNetwork = "portcullis-proxy"
@@ -1702,7 +1702,7 @@ func (h *Hub) signInAIOffLocked(next state.SignIn) map[string][]string {
 }
 
 // aiOffWarning is the preview / save warning for companions switched off
-// by a sign-in that needs a client certificate.
+// by a sign-in that needs a YubiKey or browser certificate.
 func aiOffWarning(id string, companions []string) string {
 	return fmt.Sprintf("%s: AI support for %s is switched off first: the sign-in template %s", id, strings.Join(companions, ", "), certRefusal)
 }

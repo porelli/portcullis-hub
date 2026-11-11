@@ -25,10 +25,10 @@ storage. `./portcullis backup verify` proves that a backup can be restored, and
 
 | Piece | How | Why this way |
 |-------|-----|--------------|
-| Vault (CA keys, issued-cert records, CRL, AppRole) | Raft snapshot (`sys/storage/raft/snapshot`, root token) → `vault.snap` | Consistent point-in-time copy without stopping Vault |
+| Vault (the internal certificate authority's keys, issued YubiKey and browser certificate records, CRLs, AppRole) | Raft snapshot (`sys/storage/raft/snapshot`, root token) → `vault.snap` | Consistent point-in-time copy without stopping Vault |
 | Keycloak database | `pg_dump -Fc` → `postgres.dump` | A raw copy of a running Postgres data directory is not consistent |
 | LLDAP (`lldap_data`) | Files, with every SQLite database copied through SQLite's online backup API → `lldap_data.tar.gz` | Consistent while LLDAP runs. Keeps `private_key` (password hashing) |
-| Hub state (`hub_data`), ACME account and certs (`traefik_acme`), the AI access log (`mcp_gate_data`) | Same → `hub_data.tar.gz`, `traefik_acme.tar.gz`, `mcp_gate_data.tar.gz` | `hub_data` includes the AI model provider keys in clear (`ai/provider-secrets.json`) and the AI app credentials encrypted to the gate's key, which is in `secrets/mcp-gate/` (lose that key and every AI resource answers `503` until the app credentials are dropped: [AI support residuals](ai.md#residuals)) |
+| Hub state (`hub_data`), ACME account and certs (`traefik_acme`), the AI access log (`mcp_gate_data`), group-gate's opened log (`group_gate_data`, part of everyone's [sign-in history](auth-policies.md#sign-in-history), kept a year by default) | Same → `hub_data.tar.gz`, `traefik_acme.tar.gz`, `mcp_gate_data.tar.gz`, `group_gate_data.tar.gz` (restored owned `10003:10001`) | `hub_data` includes the AI model provider keys in clear (`ai/provider-secrets.json`) and the AI app credentials encrypted to the gate's key, which is in `secrets/mcp-gate/` (lose that key and every AI resource answers `503` until the app credentials are dropped: [AI support residuals](ai.md#residuals)) |
 | `.env`, `certs/`, `secrets/`, `config/`, `keycloak/realm-export.json`, `headscale/config.yaml`, `docker-compose.override.yml` | Copied | |
 | **File-share credentials (`hub_secrets`)** | **Never backed up** | Hashes are voided by every restore ([File Sharing](file-sharing.md#restores)) |
 | `MANIFEST.json` | Format, time, core version, Hub and Keycloak images, sha256 of every file | `verify` and `restore` refuse a backup whose files changed |

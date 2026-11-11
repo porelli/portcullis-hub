@@ -177,7 +177,7 @@ func placeHost(router, host, main string, enrolled []Domain, keep bool) error {
 			return errDomainsUnreachable(host, router, d.Name)
 		}
 		if d.State == DomainMissing && !keep {
-			return statusErr(409, "hostname %s (host router %s): domain %s is no longer listed by the domains service (state %q): re-enroll it before giving it new hostnames", host, router, d.Name, d.State)
+			return statusErr(409, "hostname %s (host router %s): domain %s is no longer listed by the domains service (state %q): add it again before giving it new hostnames", host, router, d.Name, d.State)
 		}
 		if d.State != DomainReady && !keep {
 			return statusErr(409, "hostname %s (host router %s): domain %s is not assignable yet (state %q: its records or certificate are not ready)", host, router, d.Name, d.State)
@@ -186,10 +186,10 @@ func placeHost(router, host, main string, enrolled []Domain, keep bool) error {
 	}
 	label, ok := strings.CutSuffix(host, "."+main)
 	if !ok {
-		return statusErr(400, "hostname %s (host router %s) is neither <label>.%s nor on an enrolled domain", host, router, main)
+		return statusErr(400, "hostname %s (host router %s) is neither <label>.%s nor on an added domain", host, router, main)
 	}
 	if !templates.ValidLabel(label) {
-		return statusErr(400, "hostname %s (host router %s): only <label>.%s — deeper names need an enrolled domain", host, router, main)
+		return statusErr(400, "hostname %s (host router %s): only <label>.%s — deeper names need an added domain", host, router, main)
 	}
 	return nil
 }

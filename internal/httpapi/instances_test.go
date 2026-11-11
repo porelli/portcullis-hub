@@ -635,7 +635,7 @@ func TestCreateInstanceRoute(t *testing.T) {
 	}{
 		{`{"template":"grafana","id":"Bad_ID"}`, 400, "must match"},
 		{`{"template":"grafana","id":"grafana-lab","label":"L"}`, 409, "instance grafana-lab already exists\n"},
-		{`{"template":"grafana","id":"grafana-x","label":"X","hosts":{"grafana":"a.b.example.org"}}`, 400, "deeper names need an enrolled domain"},
+		{`{"template":"grafana","id":"grafana-x","label":"X","hosts":{"grafana":"a.b.example.org"}}`, 400, "deeper names need an added domain"},
 		{`{"template":"grafana","id":"grafana-x","label":"X","hosts":{"grafana":"a.b.team-b.example.net"}}`, 400, "covers one label"},
 		{`{"template":"grafana","id":"grafana-x","label":"X","hosts":{"grafana":"g.pending.example.net"}}`, 409, "not assignable"},
 		{`{"template":"grafana","id":"grafana-x","extra":1}`, 400, "body must be"},

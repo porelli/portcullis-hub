@@ -201,6 +201,10 @@ func TestSharedNav(t *testing.T) {
 		!strings.Contains(got[0], `data-site="people" href="https://people.example.org/" aria-current="page"`) {
 		t.Errorf("non-admin nav = %s", got[0])
 	}
+	// The Sign-in page (sign-in part 2, D24): on every bar.
+	if !strings.Contains(got[0], `data-site="signin" href="https://people.example.org/signin">Sign-in</a>`) || !strings.Contains(got[2], `href="http://127.0.0.1:18889/signin"`) {
+		t.Errorf("no Sign-in link: %s / %s", got[0], got[2])
+	}
 	if !strings.Contains(got[1], `data-site="hub" href="https://hub.example.org/">Hub</a>`) {
 		t.Errorf("admin nav = %s", got[1])
 	}

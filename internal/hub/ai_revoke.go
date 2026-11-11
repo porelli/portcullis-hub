@@ -37,7 +37,7 @@ import (
 //
 //  1. an instance whose sign-in template is now certificate-only (a
 //     restore, a template update) gets AI support switched off
-//     (ai.disable, "sign-in needs a client certificate");
+//     (ai.disable, "sign-in needs a YubiKey or browser certificate");
 //  2. companions a template update switched off (Pruned) get their owed
 //     revoke_all, with the hook they were switched on with;
 //  3. app_token entries of people no longer in their companion's
@@ -446,7 +446,7 @@ func (h *Hub) aiOffForCertOnly(ctx context.Context) {
 	h.mu.RUnlock()
 	for _, id := range slices.Sorted(maps.Keys(off)) {
 		if err := h.switchAIOff(ctx, id, off[id], aiHubActor, aiCertOffDetail); err != nil {
-			log.Printf("ai: %s: switching AI support off (its sign-in needs a client certificate) failed (retried at the next reconcile): %v", id, err)
+			log.Printf("ai: %s: switching AI support off (its sign-in needs a YubiKey or browser certificate) failed (retried at the next reconcile): %v", id, err)
 		}
 	}
 }

@@ -294,3 +294,32 @@ a.pd-link { text-decoration: none; }
 .pn-link:hover { color: #e2e8f0; background: #1e293b; }
 .pn-link:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
 .pn-link.pn-current { color: #f1f5f9; background: #3b82f622; border-color: #3b82f655; font-weight: 600; }
+
+/* The Sign-in page and a person's Sign-in tab (mysignin.js). */
+.msi-page { padding: 1rem 1.25rem; }
+.msi-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0; border-top: 1px solid #1e293b; flex-wrap: wrap; }
+.msi-methods > .msi-row:first-child { border-top: 0; }
+.msi-nm { flex: 1 1 16rem; min-width: 0; }
+.msi-sub { font-size: 0.8125rem; overflow-wrap: anywhere; }
+.msi-acts { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.msi-certs { list-style: none; margin: 0 0 0.5rem 1rem; font-size: 0.8125rem; }
+.msi-certs li { padding: 0.15rem 0; }
+.msi-serial { font-size: 0.75rem; }
+.msi-panel:empty { display: none; }
+.msi-panel { margin: 0 0 0.75rem 1rem; }
+.msi-form { display: flex; flex-direction: column; gap: 0.4rem; max-width: 40rem; background: #111827; border: 1px solid #1e293b; border-radius: 0.5rem; padding: 0.75rem 1rem; }
+.msi-days { max-width: 8rem; }
+.msi-pem { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; width: 100%; }
+.msi-cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; padding: 0.5rem 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msi-apps { margin: 0.75rem 0; font-size: 0.875rem; }
+.msi-app { white-space: nowrap; }
+.msi-ok { color: #86efac; } .msi-no { color: #fca5a5; } .msi-unk { color: #fcd77f; }
+.msi-hist-head { margin-top: 1rem; }
+.msi-hist td { font-size: 0.8125rem; vertical-align: top; }
+.msi-hist .msi-h-failed td:nth-child(2) { color: #fca5a5; }
+.msi-hist .msi-h-help td:nth-child(2), .msi-hist .msi-h-impersonation td:nth-child(2) { color: #fcd77f; }
+.msi-unknown { font-size: 0.8125rem; margin-bottom: 0.5rem; }
+.msi-status:empty { display: none; }
+.msi-status { margin-bottom: 0.5rem; font-size: 0.875rem; }
+.msi-dl-row .pd-btn { text-decoration: none; }
+.msi-person-acts { margin-top: 0.75rem; }

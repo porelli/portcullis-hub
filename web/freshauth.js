@@ -1,6 +1,7 @@
 // freshauth.js — the opener side of the fresh-auth popup (contract §5.1
-// "Fresh auth", §8; F20, G11), shared by myapps.js (file-share passwords)
-// and confirm.js (confirmations) on both listeners.
+// "Fresh auth", §8; F20, G11), shared by myapps.js (file-share passwords),
+// mysignin.js (the Sign-in page and a person's Sign-in tab) and
+// confirm.js (confirmations) on both listeners.
 //
 // window.PortcullisFreshAuth.start(fa, h) opens Keycloak's authorize URL
 // (fa = {authorize_url, client_id, redirect_uri}: the listener's
@@ -11,8 +12,9 @@
 // itself: the popup is opened before any await, so pop-up blockers allow
 // it. {state, nonce, verifier, ctx} wait in sessionStorage only while the
 // flow runs (dropped at load, on pagehide, at the end of every flow and
-// after FLOW_DEADLINE_MS). The popup lands on the listener's "/", whose
-// callback (freshauth-callback.js) posts {type, code, state, error} to
+// after FLOW_DEADLINE_MS). The popup lands on the listener's redirect URI
+// (https://people.<d>/signin on the people listener, https://hub.<d>/ on
+// the Hub's), whose callback (freshauth-callback.js) posts {type, code, state, error} to
 // this same-origin opener. A message is accepted only from this origin,
 // from the popup this page opened, of type portcullis-fresh-auth, with the
 // stored state and the flow's own ctx; the entry is deleted, then

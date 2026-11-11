@@ -58,7 +58,7 @@ func TestAIDoctorChecks(t *testing.T) {
 		a := aiOn()
 		a.CertOnly, a.Template = true, "a YubiKey certificate and a YubiKey touch"
 		got := of(t, KindAIPolicyNeedsMTLS, &Inputs{AI: []AIIn{a}})
-		if len(got) != 1 || got[0].Severity != Problem || !strings.Contains(got[0].Why, "client certificate") {
+		if len(got) != 1 || got[0].Severity != Problem || !strings.Contains(got[0].Why, "YubiKey or browser certificate") {
 			t.Fatalf("certificate-only = %+v", got)
 		}
 		aiLinkOK(t, got[0])

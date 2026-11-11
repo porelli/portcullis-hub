@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fidomds"
+	"github.com/portcullis/hub/internal/hub"
 )
 
 // The spec: a corrupt directory.yaml refuses to start; a missing one is
@@ -138,7 +140,7 @@ func TestFreshAuthFromEnv(t *testing.T) {
 		TokenURL:     "http://keycloak:8080/realms/portcullis/protocol/openid-connect/token",
 		JWKSURL:      "http://keycloak:8080/realms/portcullis/protocol/openid-connect/certs",
 		AuthorizeURL: "https://auth.example.org/realms/portcullis/protocol/openid-connect/auth",
-		RedirectURI:  "https://people.example.org/",
+		RedirectURI:  "https://people.example.org/signin",
 		WebOrigin:    "https://people.example.org",
 		// The Hub listener's confirmation page (G11): its own verifier.
 		HubRedirectURI: "https://hub.example.org/",
@@ -155,6 +157,23 @@ func TestFreshAuthFromEnv(t *testing.T) {
 		if _, err := freshAuthFromEnv(get(map[string]string{"HUB_KEYCLOAK_PUBLIC_URL": bad}), "example.org", "http://keycloak:8080"); err == nil {
 			t.Errorf("HUB_KEYCLOAK_PUBLIC_URL=%q accepted", bad)
 		}
+	}
+}
+
+// TestPeopleVerifierRedirect (sign-in part 2, D24): the people
+// listener's verifier redirects to the Sign-in page, the Hub listener's
+// to the Hub's "/"; EnsureFreshAuthClient gets the same two.
+func TestPeopleVerifierRedirect(t *testing.T) {
+	fa, err := freshAuthFromEnv(func(string) string { return "" }, "example.org", "http://keycloak:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgs := fa.verifierConfigs(http.DefaultClient, func() []string { return nil })
+	if len(cfgs) != 2 || cfgs[hub.ListenerPeople].RedirectURI != "https://people.example.org/signin" || cfgs[hub.ListenerHub].RedirectURI != "https://hub.example.org/" {
+		t.Errorf("verifier configs = %+v", cfgs)
+	}
+	if fa.RedirectURI != "https://people.example.org/signin" || fa.HubRedirectURI != "https://hub.example.org/" {
+		t.Errorf("client redirect URIs = %q, %q", fa.RedirectURI, fa.HubRedirectURI)
 	}
 }
 

@@ -133,14 +133,39 @@ For each rule-based group (skipping administrator and built-in groups):
 
 Rules of **protected groups** may only reference **admin-only fields**:
 
-- **Administrator groups**: `lldap_admin`, `lldap_password_manager`, core-subdomain groups (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`, `mcp`), `INVITE_PROTECTED_GROUPS`
-- **Permission groups**: the groups holding a delegated permission (`edit_details`, `invite`, `remove`)
+- **Administrator groups**: `lldap_admin`, `lldap_password_manager`, core-subdomain groups (`auth`, `traefik`, `hub`, `directory`, `people`, `metrics`, `mcp`), `INVITE_PROTECTED_GROUPS`
+- **Permission groups**: the groups holding a delegated permission (`edit_details`, `invite`, `remove`, `sign_in_help`)
 - **App admin groups**: any group used as an app's `admin_group` or in `path_groups`
 - **Privileged setting groups**: any group with a row in an app's [privileged option](hub.md#per-group-values) (a role or admin flag, e.g. Grafana's or Immich's role). The Hub works these out from the apps' current settings; the reason shown is "a privileged value of app <id>"
 
 This prevents delegates (who can edit non-admin-only fields) from granting themselves admin rights, delegated permissions or a privileged app value by editing data. The settings panel enforces the same rule from the other side: a privileged option takes rows only from manual groups and rule-based groups over admin-only fields, and a row whose group later stops qualifying grants only the option's lowest value and is removed at the next check. A field used by such a rule cannot lose its admin-only flag (409 until the rule is changed or the group stops being protected).
 
 **Built-in groups** (`lldap_admin`, `lldap_password_manager`, core-subdomain groups) and permission groups cannot be rule-based (409). `INVITE_PROTECTED_GROUPS` can be rule-based, but only over admin-only fields.
+
+### Delegated permissions
+
+Four permissions can each be granted to one group (Hub → People → Setup →
+Permissions; `PUT /api/directory/permissions/<permission>`): **edit details**
+(`edit_details`), **invite** (`invite`), **remove** (`remove`) and **help
+with sign-in** (`sign_in_help`: send a setup link, remove passkeys, revoke
+certificates). Their members are delegates for that permission, everywhere
+(delegation isn't scoped to groups). Delegates never act on themselves,
+`admin`, `portcullis-hub`, administrators or members of any permission
+group, and every check uses the memberships as they are at that moment.
+
+`sign_in_help` holders help people who lost a passkey or a certificate
+([Help to reset](auth-policies.md#help-to-reset)). They never set a password
+or issue a certificate. Holding it makes the group a permission group, so
+its rule may use only admin-only fields and other delegates can't act on its
+members.
+
+!!! warning "Grant `sign_in_help` only to people you'd trust with those accounts"
+    A setup link hands the account to whoever holds it. Anyone in the
+    `sign_in_help` group can send one to anyone they may help (any
+    non-administrator outside the permission groups), so grant it
+    only to people you would trust with those accounts.
+
+Details: [Hub → Delegated permissions](hub.md#delegated-permissions).
 
 ### Membership Flow for Rule-Based Groups
 
@@ -274,7 +299,9 @@ the Hub refuses a hostname another instance uses, and rejects templates whose
 **Core subdomains** (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`, `mcp`, on the main domain) always
 come from the map file. The Hub never publishes them, and group-gate ignores
 them in the policy file. If they are missing from the map file they default to
-`lldap_admin`.
+`lldap_admin`. `enroll` stays reserved (no app can take the name) but has no
+map entry and isn't gated: `enroll.<domain>` serves only setup links
+(`/invite/…`), without forward-auth.
 
 ### What group-gate checks
 
@@ -284,15 +311,16 @@ order and stops at the first failure:
 1. **Host.** It takes the host from `X-Forwarded-Host`, lowercases it, and
    strips any port and trailing dot, and looks it up exactly (no
    parent-domain fallback). The host must be a core host,
-   `<label>.<PORTCULLIS_DOMAIN>`, or an enrolled domain `<d>` / `<label>.<d>`
+   `<label>.<PORTCULLIS_DOMAIN>`, or an added domain `<d>` / `<label>.<d>`
    that the policy file lists in `extra_domains`; anything else gets a 403.
    Traefik matches hosts case-insensitively, so without normalisation
    `HUB.<domain>` would miss the `hub.<domain>` entry.
 2. **Reserved group.** A user whose groups include `__portcullis_deny__` is
    denied.
-3. **Revocation.** If the request carries a client certificate (via
-   `client-headers@file`, which must come before `portcullis-groups@docker`),
-   its serial must not be revoked. See [TLS & mTLS](../setup/certificates.md#revocation).
+3. **Revocation.** If the request carries a YubiKey or browser certificate
+   (via `client-headers@file` or `client-cert-pem@file`, which must come
+   before `portcullis-groups@docker`), its serial must not be revoked by
+   either certificate authority. See [Certificates](../setup/certificates.md#revocation).
 4. **Group.** It looks up the hostname's required group (`users_grafana`) and
    compares it with `X-Auth-Request-Groups` (set by oauth2-proxy). The header
    is split on commas only, and the match must be exact.
@@ -302,8 +330,11 @@ order and stops at the first failure:
    the app's groups gets the plain 403, never a page naming the app's rule):
    the session's sign-in methods must meet the template the app (or core page)
    uses. Otherwise group-gate returns the step-up or needs-stronger page. A
-   YubiKey certificate counts only when the current request presents a
-   certificate whose CN is the user (mTLS binding). See
+   YubiKey or browser certificate counts only when the current request
+   presents a certificate of that kind whose CN is the user
+   ([certificate binding](auth-policies.md#certificate-binding)). On
+   people.&lt;domain&gt;, the Sign-in page (`/signin`, `/api/me/signin…`,
+   `/static/…`) accepts any switched-on method instead of the template. See
    [Sign-in methods](auth-policies.md).
 7. **Allow.** It returns `200 OK` and sets `X-Forwarded-User` /
    `X-Auth-Request-User` (the LLDAP username), `X-Forwarded-Email` /
@@ -382,14 +413,6 @@ Matching:
     `PathPrefix` router with forward-auth (`validate.py` in the templates repo
     checks that such a router exists).
 
-### `/authenticated`: any signed-in user
-
-group-gate also serves `/authenticated`, used by the core middleware
-`portcullis-self@docker`. It runs every check except the hostname group check
-(step 5): host, revocation, policy, path rules, and a signed-in user. Core uses
-it for `enroll.<domain>/self`, where every user may renew **their own**
-certificate without being in `lldap_admin`.
-
 ## Per-App Enforcement
 
 How group access is enforced depends on the auth method:
@@ -400,7 +423,7 @@ The Traefik middleware chain handles everything:
 
 ```
 client-headers@file --> portcullis-auth@docker --> portcullis-groups@docker --> App
-(client cert info)      (oauth2-proxy)             (group-gate)
+(certificate info)      (oauth2-proxy)             (group-gate)
 ```
 
 Both oauth2-proxy and group-gate run as Traefik forward-auth middleware. The app itself is unaware of groups (header-auth apps receive them in `X-Auth-Request-Groups`).

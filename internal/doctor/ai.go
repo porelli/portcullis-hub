@@ -23,7 +23,7 @@ type AIIn struct {
 	// not read: not judged).
 	Status string
 	// Template is the instance's sign-in template in words (its
-	// sentence); CertOnly: every way in needs a client certificate
+	// sentence); CertOnly: every way in needs a YubiKey or browser certificate
 	// (signin.NeedsCertificate, §8.1 / §15.11).
 	Template string
 	CertOnly bool
@@ -162,10 +162,10 @@ func (aiMTLSCheck) Run(in *Inputs) []Finding {
 		}
 		out = append(out, Finding{
 			FP: AIFP(KindAIPolicyNeedsMTLS, a.Instance, a.Companion), Kind: KindAIPolicyNeedsMTLS, Severity: Problem,
-			Title: fmt.Sprintf("%s has AI support on, but its sign-in template needs a client certificate.", a.app()),
-			Why: fmt.Sprintf("%s's sign-in template (%s) needs a client certificate on every sign-in, which AI clients can't present. A sign-in change switches AI support off first, so this should never happen: AI support on %s must be switched off.",
+			Title: fmt.Sprintf("%s has AI support on, but its sign-in template needs a YubiKey or browser certificate.", a.app()),
+			Why: fmt.Sprintf("%s's sign-in template (%s) needs a YubiKey or browser certificate on every sign-in, which AI clients can't present. A sign-in change switches AI support off first, so this should never happen: AI support on %s must be switched off.",
 				a.app(), tmpl, a.companion()),
-			Fix:   "Open the app's AI tab and switch the companion off, or choose a sign-in template with a way in without a client certificate.",
+			Fix:   "Open the app's AI tab and switch the companion off, or choose a sign-in template with a way in without a YubiKey or browser certificate.",
 			Class: FixLink, Link: aiLink(a),
 			Instances: []string{a.Instance},
 			Inputs:    Digest([]any{a.Instance, a.Companion, a.CertOnly}),
