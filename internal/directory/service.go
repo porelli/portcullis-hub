@@ -1871,8 +1871,11 @@ func (s *Service) ClearActions(ctx context.Context, c *Caller, username string) 
 // action for the next (password) login. confirm must repeat the username.
 func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confirm string, withInvite bool) (*Result, error) {
 	res := newResult()
-	detail := fmt.Sprintf("new_invite=%v", withInvite)
-	err := s.run(ctx, c, permAdmin, "user.remove_passkeys", username, &detail, func() error {
+	// Admins, and sign_in_help holders on the people they may help
+	// (D32: gate's delegate checks on a fresh snapshot).
+	perm := helpPerm(c, permAdmin)
+	detail := asHelp(perm, fmt.Sprintf("new_invite=%v", withInvite))
+	err := s.run(ctx, c, perm, "user.remove_passkeys", username, &detail, func() error {
 		id, sn, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
@@ -1920,9 +1923,16 @@ func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confi
 // SendInvite creates a new one-time invite link (earlier unredeemed ones
 // stop working, core side). Administrators are refused: core won't invite
 // them, they're recovered from the server.
+//
+// A sign_in_help holder (D32) sends a setup link to anyone they may help
+// — the point of a reset — so checkKeyless and created_by don't apply
+// to them; core's invite API still refuses protected targets. Audited
+// with detail "as sign_in_help".
 func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*Result, error) {
 	res := newResult()
-	err := s.run(ctx, c, PermInvite, "user.invite", username, nil, func() error {
+	perm := helpPerm(c, PermInvite)
+	detail := asHelp(perm, "")
+	err := s.run(ctx, c, perm, "user.invite", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -1940,7 +1950,7 @@ func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*
 		if err := s.clearCreatedBy(c, u.ID); err != nil {
 			return err
 		}
-		if !c.Admin {
+		if !c.Admin && perm != PermSignInHelp {
 			// Delegates re-invite only accounts a delegate created that
 			// have no credential yet (see checkKeyless).
 			cfg := &Config{}

@@ -80,6 +80,7 @@ type methodFreshAuth struct {
 }
 
 func (f *methodFreshAuth) Verify(_ context.Context, p freshauth.Proof, user string) (*freshauth.Result, error) {
+	f.calls.Add(1)
 	return &freshauth.Result{User: user, AuthTime: time.Now(), Method: f.method}, nil
 }
 

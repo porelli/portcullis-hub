@@ -529,6 +529,8 @@ func TestPeopleToolParity(t *testing.T) {
 		"my_file_share_password": ClassRead, "disconnect_ai": ClassWrite,
 		"update_person": ClassWrite, "invite_person": ClassSecret, "delete_person": ClassDestructive,
 		"my_sign_in": ClassRead, "my_browser_certificate": ClassRead, "my_password": ClassRead, "revoke_my_certificate": ClassWrite,
+		// Help to reset (sign-in part 2 Task 7): sign_in_help.
+		"person_sign_in": ClassRead, "revoke_person_certificate": ClassDestructive, "remove_passkeys": ClassDestructive,
 	}
 	if len(tools) != len(want) {
 		t.Errorf("%d people tools, want %d", len(tools), len(want))
@@ -538,7 +540,8 @@ func TestPeopleToolParity(t *testing.T) {
 			t.Errorf("people tool %s: class %q, want %q", n, tl.Class, c)
 		}
 	}
-	for n, p := range map[string]string{"update_person": directory.PermEditDetails, "invite_person": directory.PermInvite, "delete_person": directory.PermRemove} {
+	for n, p := range map[string]string{"update_person": directory.PermEditDetails, "invite_person": directory.PermInvite, "delete_person": directory.PermRemove,
+		"person_sign_in": directory.PermSignInHelp, "revoke_person_certificate": directory.PermSignInHelp, "remove_passkeys": directory.PermSignInHelp} {
 		if byName[n].Perm != p {
 			t.Errorf("%s: perm %q, want %q", n, byName[n].Perm, p)
 		}
@@ -563,7 +566,7 @@ func TestPeopleDelegateToolsOffAggregate(t *testing.T) {
 	if !slices.Equal(sorted(perm), sorted(peopleDelegateTools)) {
 		t.Errorf("delegate tools %v, the gate filters %v", perm, peopleDelegateTools)
 	}
-	if !slices.Equal(sorted(peopleDelegateTools), []string{"delete_person", "invite_person", "update_person"}) {
+	if !slices.Equal(sorted(peopleDelegateTools), []string{"delete_person", "invite_person", "person_sign_in", "remove_passkeys", "revoke_person_certificate", "update_person"}) {
 		t.Errorf("peopleDelegateTools = %v (G38)", peopleDelegateTools)
 	}
 }
@@ -637,17 +640,21 @@ var peopleNoToolRoutes = func() map[string]string {
 		"/static/":                        "the page's static assets",
 		"GET /confirm/{id}":               "a confirmation page: only the person, in the browser, never the AI",
 		"POST /api/me/confirmations/{id}": "a confirmation decision: only the person, in the browser, with a fresh passkey",
-		"PUT /api/me/apps/{instance}/values/{key}":         "a person-entered value: the person enters it on the page",
-		"DELETE /api/me/apps/{instance}/values/{key}":      "a person-entered value: cleared on the page",
-		"DELETE /api/me/apps/{instance}/credentials/{key}": "a credential revoke: the person does it on the page (credentials never go through the AI)",
-		"GET /api/directory/audit":                         "the delegate audit view: on the page only",
-		"GET /api/directory/users/{username}/apps":         "an admin-only read (403 here for everyone else): the admin MCP has get_person_apps",
-		"GET /api/directory/groups/{group}/uses":           "an admin-only read (403 here for everyone else): the admin MCP has get_group_uses",
+		"PUT /api/me/apps/{instance}/values/{key}":          "a person-entered value: the person enters it on the page",
+		"DELETE /api/me/apps/{instance}/values/{key}":       "a person-entered value: cleared on the page",
+		"DELETE /api/me/apps/{instance}/credentials/{key}":  "a credential revoke: the person does it on the page (credentials never go through the AI)",
+		"GET /api/directory/audit":                          "the delegate audit view: on the page only",
+		"GET /api/directory/users/{username}/apps":          "an admin-only read (403 here for everyone else): the admin MCP has get_person_apps",
+		"GET /api/directory/groups/{group}/uses":            "an admin-only read (403 here for everyone else): the admin MCP has get_group_uses",
+		"POST /api/directory/users/{username}/certificates": "issuing a YubiKey certificate: administrators only, on the person's Sign-in tab (the admin MCP's issue_yubikey_certificate hands off)",
+	}
+	for r, why := range helpNoToolRoutes {
+		m[r] = why
 	}
 	for _, r := range []string{
 		"POST /api/directory/users/{username}/password", "POST /api/directory/users/{username}/invite",
 		"POST /api/directory/users/{username}/require-passkey", "POST /api/directory/users/{username}/clear-actions",
-		"POST /api/directory/users/{username}/remove-passkeys", "DELETE /api/directory/keycloak-stale/{username}",
+		"DELETE /api/directory/keycloak-stale/{username}",
 		"POST /api/directory/groups", "DELETE /api/directory/groups/{group}",
 		"POST /api/directory/groups/{group}/members", "DELETE /api/directory/groups/{group}/members/{username}",
 		"POST /api/directory/fields", "PUT /api/directory/fields/{name}", "DELETE /api/directory/fields/{name}",

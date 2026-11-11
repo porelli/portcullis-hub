@@ -21,8 +21,10 @@ import (
 
 // signInCertActions is enroll's certificate actions for the routes.
 type signInCertActions struct {
-	mu      sync.Mutex
-	revokes []string
+	mu       sync.Mutex
+	revokes  []string
+	issues   []string
+	issueErr error
 }
 
 const routeP12Password = "ABCDE-FGHJK-MNPQR-STVWX"
@@ -34,6 +36,16 @@ func (f *signInCertActions) CreateBrowserCertificate(_ context.Context, r invite
 
 func (f *signInCertActions) RenewYubiKeyCertificate(context.Context, string, string, string) (*invite.IssuedCert, error) {
 	return &invite.IssuedCert{PEM: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n", Serial: "77:88", NotAfter: time.Now().Add(365 * 24 * time.Hour)}, nil
+}
+
+func (f *signInCertActions) IssueYubiKeyCertificate(_ context.Context, user, csr string) (*invite.IssuedCert, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.issueErr != nil {
+		return nil, f.issueErr
+	}
+	f.issues = append(f.issues, user)
+	return &invite.IssuedCert{PEM: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n", Serial: "99:aa", NotAfter: time.Now().Add(365 * 24 * time.Hour)}, nil
 }
 
 // fixtureLeafSerial is the serial of ../hub/testdata/traefik-client-cert.txt's leaf.

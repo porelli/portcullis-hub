@@ -243,7 +243,7 @@ func (s *Server) handleMyApps(w http.ResponseWriter, r *http.Request) {
 
 func perms(c *directory.Caller) []string {
 	if c.Admin {
-		return []string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove}
+		return []string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove, directory.PermSignInHelp}
 	}
 	out := []string{}
 	for p, ok := range c.Perms {

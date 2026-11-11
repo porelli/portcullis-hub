@@ -622,6 +622,10 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "PUT", path: "/api/signin/limits", body: `{"browser_cert_days":10,"browser_cert_max_active":3,"history_days":400}`},
 		{tool: "set_sign_in_limits", args: map[string]any{"browser_cert_days": 20, "browser_cert_max_active": 3, "history_days": 400},
 			method: "PUT", path: "/api/signin/limits", body: `{"browser_cert_days":20,"browser_cert_max_active":3,"history_days":400}`},
+		// A person's certificate (sign-in part 2 Task 7): D, the same
+		// refusal both ways (no such serial).
+		{tool: "revoke_person_certificate", args: map[string]any{"username": "erin", "serial": "0e:01"},
+			method: "DELETE", path: "/api/directory/users/erin/certificates/0e:01", body: ``},
 	}
 	covered := map[string]bool{}
 	for _, c := range cases {

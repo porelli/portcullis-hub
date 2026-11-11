@@ -25,6 +25,7 @@ type fakeCertActions struct {
 	mu      sync.Mutex
 	creates []invite.BrowserCertRequest
 	renews  []string // user|presented|csr
+	issues  []string // user|csr
 	revokes []string // user/serial
 	err     error
 }
@@ -50,6 +51,16 @@ func (f *fakeCertActions) RenewYubiKeyCertificate(_ context.Context, user, prese
 		return nil, f.err
 	}
 	return &invite.IssuedCert{PEM: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n", Serial: "77:88", NotAfter: time.Date(2027, 11, 11, 0, 0, 0, 0, time.UTC)}, nil
+}
+
+func (f *fakeCertActions) IssueYubiKeyCertificate(_ context.Context, user, csr string) (*invite.IssuedCert, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issues = append(f.issues, user+"|"+csr)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &invite.IssuedCert{PEM: "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n", Serial: "99:aa", NotAfter: time.Date(2027, 11, 11, 0, 0, 0, 0, time.UTC)}, nil
 }
 
 func (f *fakeCertActions) RevokeCertificate(_ context.Context, user, serial string) error {

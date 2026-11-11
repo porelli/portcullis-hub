@@ -219,7 +219,7 @@ func checkTool(t Tool, existing []*mcpTool) (*mcpTool, error) {
 		return nil, fmt.Errorf("tool %s: a tool with ClassFor registers class D (the strongest it can be)", t.Name)
 	}
 	if t.Perm != "" && (t.Scope != ScopePeople ||
-		!slices.Contains([]string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove}, t.Perm)) {
+		!slices.Contains([]string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove, directory.PermSignInHelp}, t.Perm)) {
 		return nil, fmt.Errorf("tool %s: perm %q (people tools only, a delegated permission)", t.Name, t.Perm)
 	}
 	in := reflect.TypeOf(t.In)
@@ -352,6 +352,7 @@ func (s *Server) registerMCPTools() {
 	s.registerSignInTools()
 	s.registerPeopleTools()
 	s.registerMySignInTools()
+	s.registerSignInHelpTools()
 }
 
 // mcpScopeOf names the scope's resource URL, listener, page base and

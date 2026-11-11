@@ -210,7 +210,7 @@ func TestPeopleListenerReadForEveryone(t *testing.T) {
 		t.Errorf("me = %s", b)
 	}
 	b = mustDo(t, e.people, "root", "GET", "/api/directory/me", "", 200)
-	if !strings.Contains(b, `"admin":true`) || !strings.Contains(b, `"perms":["edit_details","invite","remove"]`) {
+	if !strings.Contains(b, `"admin":true`) || !strings.Contains(b, `"perms":["edit_details","invite","remove","sign_in_help"]`) {
 		t.Errorf("root me = %s", b)
 	}
 

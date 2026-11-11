@@ -36,6 +36,7 @@ import (
 // §9.4): never called holding mu.
 type CertActions interface {
 	CreateBrowserCertificate(ctx context.Context, r invite.BrowserCertRequest) (*invite.BrowserCert, error)
+	IssueYubiKeyCertificate(ctx context.Context, user, csrPEM string) (*invite.IssuedCert, error)
 	RenewYubiKeyCertificate(ctx context.Context, user, presentedPEM, csrPEM string) (*invite.IssuedCert, error)
 	RevokeCertificate(ctx context.Context, user, serial string) error
 }

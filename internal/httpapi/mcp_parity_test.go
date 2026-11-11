@@ -42,6 +42,13 @@ var confirmationRoutes = map[string]string{
 // tool (or a noToolRoutes reason) in the change that adds it.
 var pendingToolRoutes = map[string]string{}
 
+// helpNoToolRoutes are the person's Sign-in routes (both listeners) with
+// no tool (contract §15.10, D33): person_sign_in carries the last 20
+// history entries.
+var helpNoToolRoutes = map[string]string{
+	"GET /api/directory/users/{username}/signin/history": "a person's history pages: person_sign_in carries the last 20 entries",
+}
+
 // signInNoToolRoutes are the Sign-in page's people-listener routes with
 // no people tool (contract §15.10, D33; TestPeopleToolParity reads them
 // through peopleNoToolRoutes).
@@ -75,11 +82,12 @@ var destructiveTwins = map[string]string{
 	"POST /api/keycloak/user-sweep/resume":            "typed confirmation (resume): Keycloak then removes records LLDAP lacks",
 	"DELETE /api/directory/keycloak-stale/{username}": "deletes a Keycloak record (typed username)",
 	// Task 18 (§15.10's D list).
-	"DELETE /api/directory/users/{username}":               "deletes a person (typed username)",
-	"POST /api/directory/users/{username}/remove-passkeys": "removes a person's passkeys (typed username)",
-	"POST /api/directory/users/{username}/require-passkey": "forces a passkey registration: on another administrator it hands over their sign-in (§15.10 lists require_passkey as D)",
-	"DELETE /api/directory/groups/{group}":                 "deletes a group (typed name)",
-	"DELETE /api/directory/fields/{name}":                  "deletes a field and every value of it (typed name)",
+	"DELETE /api/directory/users/{username}":                       "deletes a person (typed username)",
+	"POST /api/directory/users/{username}/remove-passkeys":         "removes a person's passkeys (typed username)",
+	"DELETE /api/directory/users/{username}/certificates/{serial}": "revokes a person's certificate (sign-in part 2, D32)",
+	"POST /api/directory/users/{username}/require-passkey":         "forces a passkey registration: on another administrator it hands over their sign-in (§15.10 lists require_passkey as D)",
+	"DELETE /api/directory/groups/{group}":                         "deletes a group (typed name)",
+	"DELETE /api/directory/fields/{name}":                          "deletes a field and every value of it (typed name)",
 	// Task 20 (§15.10's D list, G45).
 	"DELETE /api/folders/{id}":             "deletes a shared folder's definition",
 	"POST /api/folders/{id}/undo/apply":    "restores a permissions snapshot over the folder's files",
@@ -161,6 +169,8 @@ func TestToolParity(t *testing.T) {
 	for _, r := range routes {
 		_, none := noToolRoutes[r]
 		_, conf := confirmationRoutes[r]
+		_, help := helpNoToolRoutes[r]
+		conf = conf || help
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -191,7 +201,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -243,6 +253,8 @@ func TestToolParity(t *testing.T) {
 		"set_ai_providers",
 		// Task 18 (§15.10, G37).
 		"delete_person", "delete_group", "delete_field", "require_passkey", "remove_passkeys", "set_permission",
+		// Sign-in part 2 (Task 7).
+		"revoke_person_certificate",
 		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
 		"remove_exception", "set_details", "import_apply",
 		// Task 20 (§15.10, G15, G45).
@@ -290,7 +302,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// R (sign-in Task 6).
-	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact"} {
+	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact", "person_sign_in", "issue_yubikey_certificate"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}
@@ -308,6 +320,8 @@ var adminSignIn = []string{
 	"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "set_sign_in_method", "save_sign_in_template",
 	"set_sign_in_template_enabled", "delete_sign_in_template", "set_default_template", "set_core_template",
 	"set_sign_in_template", "set_add_stronger", "sign_in_impact", "set_sign_in_limits",
+	// Sign-in part 2 (Task 7).
+	"person_sign_in", "revoke_person_certificate", "issue_yubikey_certificate",
 }
 
 // admin20 are the doctor and shared-folder tools of T20.

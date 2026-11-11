@@ -449,6 +449,9 @@ type Hub struct {
 	// ownPasswords sets and removes a person's own password
 	// (SetOwnPasswords; nil: 503). Guarded by mu.
 	ownPasswords OwnPasswords
+	// signInHelp decides who may act on another person's sign-in
+	// (SetSignInHelp; nil: those routes are 503). Guarded by mu.
+	signInHelp SignInHelp
 	// certCreate: per user, the *sync.Mutex a browser certificate create
 	// holds (one create at a time per person).
 	certCreate sync.Map

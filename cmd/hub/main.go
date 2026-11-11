@@ -363,6 +363,7 @@ func main() {
 	// password (the directory, §5.1).
 	h.SetCertActions(invites)
 	h.SetOwnPasswords(dir)
+	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak

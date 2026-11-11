@@ -612,7 +612,7 @@ type (
 		Name string `json:"name" jsonschema:"the field's name"`
 	}
 	permissionArgs struct {
-		Perm  string `json:"perm" jsonschema:"edit_details, invite or remove"`
+		Perm  string `json:"perm" jsonschema:"edit_details, invite, remove or sign_in_help"`
 		Group string `json:"group" jsonschema:"the group holding it (\"\" = nobody)"`
 	}
 	importReviewArgs struct {
@@ -1037,7 +1037,7 @@ func (s *Server) registerDirectoryTools() {
 			}), s.ruleClass, argReader("group"), func(ctx context.Context, args json.RawMessage) []string {
 			return s.groupConsequences(ctx, args, "Removes "+argField(args, "username")+"'s exception from "+argField(args, "group")+" (kept out: they join if the rule matches).", "")
 		}),
-		dirD(dirTool(s, "set_permission", "Grant a delegated permission (edit_details, invite, remove) to a group, or to nobody (group \"\"). Always needs your confirmation in the browser.",
+		dirD(dirTool(s, "set_permission", "Grant a delegated permission (edit_details, invite, remove, sign_in_help: help people reset their sign-in — setup link, remove passkeys, revoke certificates) to a group, or to nobody (group \"\"). Always needs your confirmation in the browser.",
 			ClassWrite, "PUT /api/directory/permissions/{perm}", "permission.set", func(ctx context.Context, c *directory.Caller, in permissionArgs) (any, error) {
 				if err := s.setPermission(ctx, c, in.Perm, in.Group); err != nil {
 					return nil, err

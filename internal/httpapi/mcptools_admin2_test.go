@@ -636,6 +636,10 @@ var adminToolFixtures = []struct {
 	{"clear_actions", map[string]any{"username": "erin"}},
 	{"require_passkey", map[string]any{"username": "erin"}},
 	{"remove_passkeys", map[string]any{"username": "erin"}},
+	// Sign-in part 2 (Task 7): the person's Sign-in tab.
+	{"person_sign_in", map[string]any{"username": "erin"}},
+	{"revoke_person_certificate", map[string]any{"username": "erin", "serial": "0e:01"}},
+	{"issue_yubikey_certificate", map[string]any{"username": "erin"}},
 	{"set_password", map[string]any{"username": "dana"}},
 	{"import_review", map[string]any{"header": []string{"username", "display_name"}, "rows": [][]string{{"erin", "Erin X"}, {"hana", "Hana"}}}},
 	{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "erin", "display_name": "Erin Z"}}}},
