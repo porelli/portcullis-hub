@@ -2,6 +2,7 @@ package keycloak_test
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"reflect"
 	"testing"
@@ -93,7 +94,7 @@ func TestLoginEventsQuery(t *testing.T) {
 			{"time": at.UnixMilli(), "type": "LOGIN", "userId": "someone-else"},
 		}
 	})
-	from, to := at.AddDate(0, 0, -30), at
+	from, to := at.AddDate(0, 0, -30), at.Add(time.Second)
 	evs, err := c.LoginEvents(ctx, alice.ID, from, to, 51)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +102,7 @@ func TestLoginEventsQuery(t *testing.T) {
 	var q url.Values
 	kc.With(func() { q = kc.EventsQuery })
 	if q.Get("user") != alice.ID || !reflect.DeepEqual(q["type"], []string{"LOGIN", "LOGIN_ERROR"}) ||
-		q.Get("dateFrom") != "2026-10-11" || q.Get("dateTo") != "2026-11-10" || q.Get("max") != "51" || q.Has("first") {
+		q.Get("dateFrom") != fmt.Sprint(from.UnixMilli()) || q.Get("dateTo") != fmt.Sprint(to.UnixMilli()-1) || q.Get("max") != "51" || q.Has("first") {
 		t.Errorf("query = %v", q)
 	}
 	if n := kc.CountCalls("GET /admin/realms/portcullis/events"); n != 1 {

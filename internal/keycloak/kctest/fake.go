@@ -182,9 +182,10 @@ type Server struct {
 	// EventsConfig is the realm's events config as Keycloak returns it
 	// (GET / PUT …/events/config); a PUT replaces it with the body.
 	EventsConfig map[string]any
-	// Events are the realm's user events (EventRepresentation maps), newest
-	// first; GET …/events answers those whose userId is the query's user,
-	// from first, at most max. EventsQuery is the last such query.
+	// Events are the realm's user events (EventRepresentation maps, time
+	// an int64 of epoch ms), newest first; GET …/events answers those whose
+	// userId is the query's user and whose time is within dateFrom..dateTo
+	// (epoch ms, inclusive), from first, at most max. EventsQuery is the last such query.
 	Events      []map[string]any
 	EventsQuery url.Values
 }
@@ -542,10 +543,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		s.EventsQuery = q
 		out := []map[string]any{}
+		from, ferr := strconv.ParseInt(q.Get("dateFrom"), 10, 64)
+		to, terr := strconv.ParseInt(q.Get("dateTo"), 10, 64)
 		for _, e := range s.Events {
-			if e["userId"] == q.Get("user") {
-				out = append(out, e)
+			ms, _ := e["time"].(int64)
+			if e["userId"] != q.Get("user") || (ferr == nil && ms < from) || (terr == nil && ms > to) {
+				continue
 			}
+			out = append(out, e)
 		}
 		first, _ := strconv.Atoi(q.Get("first"))
 		out = out[min(first, len(out)):]

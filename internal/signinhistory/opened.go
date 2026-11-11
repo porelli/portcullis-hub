@@ -24,15 +24,22 @@ const OpenedDirName = "opened"
 // 8 MiB (§8.2).
 const OpenedScan = 8 << 20
 
+// OpenedTotalScan bounds the bytes one read takes over all day files: past
+// it the read stops at a day boundary with *Partial (the history goes on
+// from that day on its next page).
+const OpenedTotalScan = 64 << 20
+
 // dayFileRe is a day file's name, <YYYY-MM-DD>.jsonl (UTC day).
 var dayFileRe = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2})\.jsonl$`)
 
 // OpenedLog is group-gate's opened log (§4 "Opened log"): Dir is the
 // mount of group_gate_data (the log is <Dir>/opened); Now is the clock
-// (nil: time.Now).
+// (nil: time.Now); MaxScan the bytes one read takes over all day files
+// (0: OpenedTotalScan).
 type OpenedLog struct {
-	Dir string
-	Now func() time.Time
+	Dir     string
+	Now     func() time.Time
+	MaxScan int64
 }
 
 // openedLine is one line of a day file.
@@ -55,6 +62,13 @@ func (l OpenedLog) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (l OpenedLog) maxScan() int64 {
+	if l.MaxScan > 0 {
+		return l.MaxScan
+	}
+	return OpenedTotalScan
+}
+
 func (l OpenedLog) dir() string { return filepath.Join(l.Dir, OpenedDirName) }
 
 // usable: the mount must be there (a missing mount is an unknown source);
@@ -68,10 +82,16 @@ func (l OpenedLog) usable() (bool, error) {
 	} else if !st.IsDir() {
 		return false, fmt.Errorf("opened log: %s is not a directory", l.Dir)
 	}
-	if _, err := os.Stat(l.dir()); errors.Is(err, fs.ErrNotExist) {
+	st, err := os.Lstat(l.dir())
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	} else if err != nil {
 		return false, fmt.Errorf("opened log: %w", err)
+	}
+	// Never followed: a symlink (or anything but a directory) is refused,
+	// for reads and for Prune alike.
+	if !st.IsDir() {
+		return false, fmt.Errorf("opened log: %s is not a directory (%s)", OpenedDirName, st.Mode().Type())
 	}
 	return true, nil
 }
@@ -80,7 +100,8 @@ func (l OpenedLog) usable() (bool, error) {
 // first, at most limit: the day files from before's day back to since's,
 // each read (its newest OpenedScan bytes) and deduped on (session, host)
 // keeping the day's first line. Torn and unparsable lines are skipped; a
-// missing day file is an empty day.
+// missing day file is an empty day. Past OpenedTotalScan bytes the read
+// stops before the next day with *Partial{Through: the end of that day}.
 func (l OpenedLog) Entries(ctx context.Context, user string, since, before time.Time, limit int) ([]Entry, error) {
 	out := []Entry{}
 	ok, err := l.usable()
@@ -92,11 +113,17 @@ func (l OpenedLog) Entries(ctx context.Context, user string, since, before time.
 		return out, nil
 	}
 	first := since.UTC().Truncate(24 * time.Hour)
+	var total int64
 	for day := before.UTC().Truncate(24 * time.Hour); !day.Before(first) && len(out) < limit; day = day.AddDate(0, 0, -1) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		lines, err := l.readDay(day)
+		if total >= l.maxScan() {
+			// Every day after this one was read whole.
+			return out, &Partial{Through: day.Add(24*time.Hour - time.Nanosecond), Why: "the opened log's read budget ran out"}
+		}
+		lines, n, err := l.readDay(day, user)
+		total += n
 		if err != nil {
 			return nil, err
 		}
@@ -113,13 +140,13 @@ func (l OpenedLog) Entries(ctx context.Context, user string, since, before time.
 	return out, nil
 }
 
-// dedupe keeps user's lines, the first (earliest) per (session, host).
+// dedupe keeps user's lines (exactly: the log's names are lowercase), the first (earliest) per (session, host).
 func dedupe(lines []openedLine, user string) []openedLine {
 	slices.SortStableFunc(lines, func(a, b openedLine) int { return a.Time.Compare(b.Time) })
 	seen := map[[2]string]bool{}
 	var out []openedLine
 	for _, ln := range lines {
-		if strings.ToLower(ln.User) != user || ln.Time.IsZero() {
+		if ln.User != user || ln.Time.IsZero() {
 			continue
 		}
 		k := [2]string{ln.Session, strings.ToLower(ln.Host)}
@@ -140,55 +167,56 @@ func openedEntry(ln openedLine) Entry {
 	ms := make([]string, len(ln.Methods))
 	copy(ms, ln.Methods)
 	return withScore(Entry{Time: ln.Time.UTC(), Kind: KindOpened, Methods: Methods(ms), App: app,
-		IP: Clean(ln.IP, maxIP), Browser: Browser(ln.UA)})
+		IP: IP(ln.IP), Browser: Browser(ln.UA)})
 }
 
-// readDay reads day's file: its newest OpenedScan bytes, the first line
-// dropped when the scan starts inside it, unparsable lines skipped. A
-// missing file is no lines; a file that isn't a regular file (a symlink
-// included: never followed) is an error.
-func (l OpenedLog) readDay(day time.Time) ([]openedLine, error) {
+// readDay reads day's file: its newest OpenedScan bytes (n, the bytes
+// read), the first line dropped when the scan starts inside it, lines
+// that don't hold user skipped before they are decoded, unparsable ones
+// after. A missing file is no lines; a file that isn't a regular file (a
+// symlink included: never followed) is an error.
+func (l OpenedLog) readDay(day time.Time, user string) (lines []openedLine, n int64, err error) {
 	p := filepath.Join(l.dir(), day.Format("2006-01-02")+".jsonl")
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("opened log %s: %w", filepath.Base(p), err)
+		return nil, 0, fmt.Errorf("opened log %s: %w", filepath.Base(p), err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("opened log %s: %w", filepath.Base(p), err)
+		return nil, 0, fmt.Errorf("opened log %s: %w", filepath.Base(p), err)
 	}
 	if !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("opened log %s: not a regular file", filepath.Base(p))
+		return nil, 0, fmt.Errorf("opened log %s: not a regular file", filepath.Base(p))
 	}
 	off := max(st.Size()-OpenedScan, 0)
 	buf := make([]byte, st.Size()-off)
-	n, err := f.ReadAt(buf, off)
+	got, err := f.ReadAt(buf, off)
 	if err != nil && err != io.EOF {
-		return nil, fmt.Errorf("opened log %s: %w", filepath.Base(p), err)
+		return nil, int64(got), fmt.Errorf("opened log %s: %w", filepath.Base(p), err)
 	}
-	buf = buf[:n]
+	buf = buf[:got]
 	if off > 0 {
 		nl := bytes.IndexByte(buf, '\n')
 		if nl < 0 {
-			return nil, nil
+			return nil, int64(got), nil
 		}
 		buf = buf[nl+1:]
 	}
-	var out []openedLine
+	needle := []byte(user)
 	for _, raw := range bytes.Split(buf, []byte("\n")) {
-		if len(bytes.TrimSpace(raw)) == 0 {
+		if !bytes.Contains(raw, needle) {
 			continue
 		}
 		var ln openedLine
 		if json.Unmarshal(raw, &ln) == nil {
-			out = append(out, ln)
+			lines = append(lines, ln)
 		}
 	}
-	return out, nil
+	return lines, int64(got), nil
 }
 
 // Prune deletes the day files older than days (their day before today −

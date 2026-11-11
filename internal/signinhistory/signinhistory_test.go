@@ -91,12 +91,21 @@ func TestSetupLinkSignIn(t *testing.T) {
 
 func TestUntrustedTextClipped(t *testing.T) {
 	ev := login(ForwardAuthClient, map[string]string{"pc_kind": "sign_in", "pc_methods": "password"})
-	ev.IP = strings.Repeat("9", 200) + "\x1b[31m"
-	e, _ := FromEvent(ev, nil)
-	if len(e.IP) != maxIP || strings.ContainsRune(e.IP, 0x1b) {
-		t.Errorf("ip = %q", e.IP)
+	for raw, want := range map[string]string{
+		"203.0.113.7":               "203.0.113.7",
+		" 2001:DB8::1 ":             "2001:db8::1",
+		"fe80::1%eth0":              "fe80::1",
+		strings.Repeat("9", 200):    "",
+		"203.0.113.7\x1b[31m":       "",
+		"<script>":                  "",
+		"203.0.113.7, 198.51.100.1": "",
+	} {
+		ev.IP = raw
+		if e, _ := FromEvent(ev, nil); e.IP != want {
+			t.Errorf("ip %q = %q, want %q", raw, e.IP, want)
+		}
 	}
-	if got := Clean("a‮b\x00c\nd", 10); got != "abcd" {
+	if got := Clean("a\u202eb\x00c\nd", 10); got != "abcd" {
 		t.Errorf("clean = %q", got)
 	}
 }
@@ -166,9 +175,10 @@ func TestAuditSource(t *testing.T) {
 	if err != nil || len(got) != 2 || got[0].Kind != KindCertificate || got[1].Kind != KindHelp {
 		t.Errorf("audit entries = %+v, %v", got, err)
 	}
-	got, _ = AuditSource{Read: log.RecentMatching}.Entries(context.Background(), "alice", t0.Add(-24*time.Hour), t0, 0)
+	// The limit is the caller's (the history passes limit+1 itself).
+	got, _ = AuditSource{Read: log.RecentMatching}.Entries(context.Background(), "alice", t0.Add(-24*time.Hour), t0, 1)
 	if len(got) != 1 {
-		t.Errorf("limit 0 read %d (limit+1 = 1)", len(got))
+		t.Errorf("limit 1 read %d", len(got))
 	}
 }
 
@@ -328,36 +338,100 @@ func TestMergeOrderAndLimit(t *testing.T) {
 }
 
 func TestKeycloakSourcePages(t *testing.T) {
-	// 3 events after before, then 3 in the window, one before since.
+	since, before := t0.AddDate(0, 0, -30), t0
+	// Keycloak answers its window (from <= time < to), newest first.
 	var evs []keycloak.Event
-	for i := range 3 {
-		evs = append(evs, keycloak.Event{Time: t0.Add(time.Duration(3-i) * time.Minute), Type: "LOGIN", Details: map[string]string{"pc_kind": "sign_in", "pc_methods": "password"}})
-	}
 	for i := range 3 {
 		evs = append(evs, keycloak.Event{Time: t0.Add(-time.Duration(i+1) * time.Minute), Type: "LOGIN_ERROR"})
 	}
-	evs = append(evs, keycloak.Event{Time: t0.AddDate(0, 0, -40), Type: "LOGIN_ERROR"})
-	calls := 0
 	src := KeycloakSource{Events: func(_ context.Context, user string, from, to time.Time, first, max int) ([]keycloak.Event, error) {
-		calls++
-		if user != "alice" || !from.Before(t0.AddDate(0, 0, -30)) || !to.After(t0) {
+		if user != "alice" || !from.Equal(since) || !to.Equal(before) {
 			t.Errorf("query %s %v %v", user, from, to)
 		}
 		return evs[min(first, len(evs)):min(first+max, len(evs))], nil
 	}}
-	got, err := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), t0, 1)
+	// The limit is the caller's: no +1 here.
+	got, err := src.Entries(context.Background(), "alice", since, before, 2)
 	if err != nil || len(got) != 2 || got[0].Kind != KindFailed {
 		t.Errorf("entries = %+v, %v", got, err)
 	}
-	got, _ = src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), t0, 50)
-	if len(got) != 3 {
+	if got, _ := src.Entries(context.Background(), "alice", since, before, 50); len(got) != 3 {
 		t.Errorf("all = %+v", got)
 	}
-	calls = 0
 	src.Events = func(context.Context, string, time.Time, time.Time, int, int) ([]keycloak.Event, error) {
 		return nil, errors.New("500")
 	}
-	if _, err := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), t0, 50); err == nil {
+	if _, err := src.Entries(context.Background(), "alice", since, before, 50); err == nil {
 		t.Error("a failure was hidden")
+	}
+}
+
+// TestKeycloakSourceBudget (fix round 1, I2): past the page budget the
+// source answers *Partial with the oldest event read, and only entries
+// newer than it.
+func TestKeycloakSourceBudget(t *testing.T) {
+	var evs []keycloak.Event
+	evs = append(evs, login(ForwardAuthClient, map[string]string{"pc_kind": "sign_in", "pc_methods": "password"}))
+	for i := range keycloakPages * 3 {
+		evs = append(evs, keycloak.Event{Time: t0.Add(-time.Duration(i+1) * time.Second), Type: "LOGIN", ClientID: ForwardAuthClient,
+			Details: map[string]string{"pc_kind": "sso"}})
+	}
+	evs = append(evs, keycloak.Event{Time: t0.Add(-time.Hour), Type: "LOGIN_ERROR"})
+	src := KeycloakSource{Events: func(_ context.Context, _ string, _, _ time.Time, first, max int) ([]keycloak.Event, error) {
+		return evs[min(first, len(evs)):min(first+max, len(evs))], nil
+	}}
+	got, err := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), t0.Add(time.Second), 3)
+	var p *Partial
+	if !errors.As(err, &p) || len(got) != 1 || got[0].Kind != KindSignIn {
+		t.Fatalf("budget = %+v, %v", got, err)
+	}
+	if want := evs[keycloakPages*3-1].Time; !p.Through.Equal(want) {
+		t.Errorf("through %v, want %v (the oldest read)", p.Through, want)
+	}
+}
+
+func TestOpenedLogSymlinkDirRefused(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(t.TempDir(), "real")
+	writeDay(t, real, t0.Truncate(24*time.Hour).AddDate(0, 0, -40), line(t0, "alice", "s", "h"))
+	if err := os.Symlink(filepath.Join(real, OpenedDirName), filepath.Join(dir, OpenedDirName)); err != nil {
+		t.Fatal(err)
+	}
+	l := OpenedLog{Dir: dir, Now: func() time.Time { return t0 }}
+	if _, err := l.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), t0, 50); err == nil {
+		t.Error("a symlinked opened/ was read")
+	}
+	if _, err := l.Prune(30); err == nil {
+		t.Error("a symlinked opened/ was pruned")
+	}
+	if ents, _ := os.ReadDir(filepath.Join(real, OpenedDirName)); len(ents) != 1 {
+		t.Error("the symlink's target was pruned")
+	}
+}
+
+// TestOpenedLogExactUserAndBudget (fix round 1, m2): a line merely
+// mentioning the user (another user's, or the name in another case) is
+// never returned; past the read budget the read stops at a day boundary
+// with *Partial, and the days after it are complete.
+func TestOpenedLogExactUserAndBudget(t *testing.T) {
+	dir := t.TempDir()
+	today := t0.Truncate(24 * time.Hour)
+	writeDay(t, dir, today, line(t0.Add(-time.Hour), "bob", "s", "alice.example.com"), line(t0.Add(-time.Hour), "Alice", "s", "x"),
+		line(t0.Add(-2*time.Hour), "alice", "s", "a.example.com"))
+	writeDay(t, dir, today.AddDate(0, 0, -1), line(t0.Add(-24*time.Hour), "alice", "s", "b.example.com"))
+	writeDay(t, dir, today.AddDate(0, 0, -2), line(t0.Add(-48*time.Hour), "alice", "s", "c.example.com"))
+	l := OpenedLog{Dir: dir}
+	got, err := l.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), t0, 50)
+	if err != nil || len(got) != 3 || !got[0].Time.Equal(t0.Add(-2*time.Hour)) {
+		t.Fatalf("entries = %+v, %v", got, err)
+	}
+	l.MaxScan = 1
+	got, err = l.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), t0, 50)
+	var p *Partial
+	if !errors.As(err, &p) || len(got) != 1 || !got[0].Time.Equal(t0.Add(-2*time.Hour)) {
+		t.Fatalf("budget = %+v, %v", got, err)
+	}
+	if want := today.Add(-time.Nanosecond); !p.Through.Equal(want) {
+		t.Errorf("through %v, want %v", p.Through, want)
 	}
 }

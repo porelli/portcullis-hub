@@ -9,6 +9,7 @@ package signinhistory
 
 import (
 	"context"
+	"net/netip"
 	"strings"
 	"time"
 	"unicode"
@@ -50,10 +51,27 @@ type Entry struct {
 }
 
 // Source is one source of entries: user's entries with since <= time <
-// before, newest first, at most limit. A failure is the whole source's:
-// the history names it unknown and shows the others.
+// before, newest first (equal times in a stable order: a larger limit
+// answers a longer prefix of the same list), at most limit — the history
+// passes limit+1 itself, a source adds nothing. An error is the whole
+// source's: the history names it unknown and shows the others — except
+// *Partial.
 type Source interface {
 	Entries(ctx context.Context, user string, since, before time.Time, limit int) ([]Entry, error)
+}
+
+// Partial is the error of a source that read only the newer part of its
+// window (a read budget ran out): the entries it returns with it are
+// every entry with Through < time < before, and none older was read. The
+// history then ends its page after Through and continues from there,
+// never losing what wasn't read.
+type Partial struct {
+	Through time.Time
+	Why     string
+}
+
+func (p *Partial) Error() string {
+	return "read down to " + p.Through.UTC().Format(time.RFC3339Nano) + " only: " + p.Why
 }
 
 // SetupLinkDetail is the detail of a sign-in through a setup link (a
@@ -87,6 +105,16 @@ func Clean(s string, n int) string {
 		runes++
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// IP is s as an IP address (normalised, without a zone), "" when it
+// isn't one.
+func IP(s string) string {
+	a, err := netip.ParseAddr(strings.TrimSpace(Clean(s, maxIP)))
+	if err != nil {
+		return ""
+	}
+	return a.WithZone("").String()
 }
 
 // Browser is the User-Agent's browser and OS ("Firefox · macOS"; the

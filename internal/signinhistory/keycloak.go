@@ -63,7 +63,7 @@ func FromEvent(ev keycloak.Event, clientNames map[string]string) (Entry, bool) {
 	if d == nil {
 		d = map[string]string{}
 	}
-	e := Entry{Time: ev.Time.UTC(), IP: Clean(ev.IP, maxIP), Browser: Browser(d[detailUA])}
+	e := Entry{Time: ev.Time.UTC(), IP: IP(ev.IP), Browser: Browser(d[detailUA])}
 	switch ev.Type {
 	case "LOGIN":
 		e.Methods = splitMethods(d[detailMethods])
@@ -100,12 +100,13 @@ func FromEvent(ev keycloak.Event, clientNames map[string]string) (Entry, bool) {
 	return withScore(e), true
 }
 
-// KeycloakEvents reads a user's login events by username (main:
-// keycloak.Client.UserLoginEventsPage), newest first, from the first-th.
+// KeycloakEvents reads a user's login events by username with from <=
+// time < to (main: keycloak.Client.UserLoginEventsPage), newest first,
+// from the first-th.
 type KeycloakEvents func(ctx context.Context, user string, from, to time.Time, first, max int) ([]keycloak.Event, error)
 
-// keycloakPages bounds how many pages of limit+1 events one read takes
-// (events newer than before, and dropped ones, are paged past).
+// keycloakPages bounds how many pages of limit events one read takes
+// (dropped events — SSO through the gateway — are paged past).
 const keycloakPages = 20
 
 // KeycloakSource is the Keycloak events source. ClientNames is read once
@@ -115,38 +116,49 @@ type KeycloakSource struct {
 	ClientNames func() map[string]string
 }
 
-// Entries pages through the user's events (Keycloak's dateFrom / dateTo
-// are whole days, widened by one each way for its zone, so the window is
-// filtered here) until it has limit+1 entries in [since, before), the
-// events run out or reach past since.
+// Entries pages through the user's events in [since, before) until it has
+// limit entries or the events run out. When the page budget runs out
+// first, it answers what it has with *Partial{Through: the oldest event
+// read}: the history continues from there.
 func (s KeycloakSource) Entries(ctx context.Context, user string, since, before time.Time, limit int) ([]Entry, error) {
 	var names map[string]string
 	if s.ClientNames != nil {
 		names = s.ClientNames()
 	}
-	want := limit + 1
 	out := []Entry{}
-	from, to := since.AddDate(0, 0, -1), before.AddDate(0, 0, 1)
-	for page, first := 0, 0; page < keycloakPages && len(out) < want; page++ {
-		evs, err := s.Events(ctx, user, from, to, first, want)
+	if limit < 1 || !since.Before(before) {
+		return out, nil
+	}
+	var oldest time.Time
+	first := 0
+	for page := 0; len(out) < limit; page++ {
+		if page == keycloakPages {
+			// Keep only what is complete: newer than the oldest read.
+			kept := out[:0]
+			for _, e := range out {
+				if e.Time.After(oldest) {
+					kept = append(kept, e)
+				}
+			}
+			return kept, &Partial{Through: oldest, Why: "Keycloak's page budget ran out"}
+		}
+		evs, err := s.Events(ctx, user, since, before, first, limit)
 		if err != nil {
 			return nil, err
 		}
 		first += len(evs)
-		done := len(evs) < want
 		for _, ev := range evs {
-			if ev.Time.Before(since) {
-				done = true // newest first: the rest is older still
-				break
+			if oldest.IsZero() || ev.Time.Before(oldest) {
+				oldest = ev.Time
 			}
-			if !ev.Time.Before(before) {
+			if ev.Time.Before(since) || !ev.Time.Before(before) {
 				continue
 			}
-			if e, ok := FromEvent(ev, names); ok && len(out) < want {
+			if e, ok := FromEvent(ev, names); ok && len(out) < limit {
 				out = append(out, e)
 			}
 		}
-		if done {
+		if len(evs) < limit {
 			break
 		}
 	}

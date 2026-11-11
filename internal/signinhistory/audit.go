@@ -84,7 +84,10 @@ func (s AuditSource) Entries(ctx context.Context, user string, since, before tim
 		_, ok := FromAudit(e, user)
 		return ok
 	}
-	got, err := s.Read(limit+1, directory.AuditScan, keep)
+	if limit < 1 {
+		return []Entry{}, nil
+	}
+	got, err := s.Read(limit, directory.AuditScan, keep)
 	if err != nil {
 		return nil, err
 	}

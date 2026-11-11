@@ -99,14 +99,12 @@ type eventRep struct {
 	Details   map[string]string `json:"details"`
 }
 
-// eventsDay is the date format of the events query's dateFrom / dateTo.
-const eventsDay = "2006-01-02"
-
-// LoginEvents reads userID's LOGIN and LOGIN_ERROR events from the day of
-// from to the day of to (contract §8.2: GET …/events?user=&type=LOGIN&
-// type=LOGIN_ERROR&dateFrom=&dateTo=&max=), newest first as Keycloak
-// answers them, at most max. The days are whole UTC days and Keycloak may
-// read them in its own zone: callers filter by time.
+// LoginEvents reads userID's LOGIN and LOGIN_ERROR events with from <=
+// time < to (contract §8.2: GET …/events?user=&type=LOGIN&type=LOGIN_ERROR&
+// dateFrom=&dateTo=&max=), newest first as Keycloak answers them, at most
+// max. dateFrom and dateTo are epoch milliseconds (Keycloak 26 reads a
+// number as a time, both inclusive): from rounded up, to − 1 ns rounded
+// down, so the window is exact and needs no time zone.
 func (c *Client) LoginEvents(ctx context.Context, userID string, from, to time.Time, max int) ([]Event, error) {
 	return c.LoginEventsPage(ctx, userID, from, to, 0, max)
 }
@@ -129,8 +127,8 @@ func (c *Client) LoginEventsPage(ctx context.Context, userID string, from, to ti
 	for _, t := range EventTypes {
 		q.Add("type", t)
 	}
-	q.Set("dateFrom", from.UTC().Format(eventsDay))
-	q.Set("dateTo", to.UTC().Format(eventsDay))
+	q.Set("dateFrom", strconv.FormatInt(ceilMilli(from), 10))
+	q.Set("dateTo", strconv.FormatInt(to.Add(-time.Nanosecond).UnixMilli(), 10))
 	if first > 0 {
 		q.Set("first", strconv.Itoa(first))
 	}
@@ -157,6 +155,15 @@ func (c *Client) LoginEventsPage(ctx context.Context, userID string, from, to ti
 		out = out[:max]
 	}
 	return out, nil
+}
+
+// ceilMilli is t in epoch milliseconds, rounded up.
+func ceilMilli(t time.Time) int64 {
+	ms := t.UnixMilli()
+	if time.UnixMilli(ms).Before(t) {
+		ms++
+	}
+	return ms
 }
 
 // UserLoginEventsPage is LoginEventsPage for a username: a user Keycloak
