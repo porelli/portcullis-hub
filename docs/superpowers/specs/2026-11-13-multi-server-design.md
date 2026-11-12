@@ -1,6 +1,6 @@
 # Multiple servers management (design)
 
-Status: written by the assistant for the roadmap item "multiple servers management" (the user's words). No interruptions were wanted, so the assistant made every decision. Each one is the **assistant's call** unless it says otherwise. Open questions are in §14, each with a default. This design builds on `2026-11-13-vpn-only-access-design.md` (userspace WireGuard, `vpnsecure`), `2026-11-13-rootless-podman-design.md` (runtime selection, socket proxies on the engine socket) and `2026-11-13-dns-hardening-design.md` (the DNS plan). There is no Kubernetes spec yet; §12 says how one would fit.
+Status: written by the assistant for the roadmap item "multiple servers management" (the user's words). No interruptions were wanted, so the assistant made every decision. Each one is the **assistant's call** unless it says otherwise. Open questions are in §14, each with a default. This design builds on `2026-11-13-vpn-only-access-design.md` (the core `wg` service, whose **link** role is this spec's tunnel, and `vpnsecure`), `2026-11-13-rootless-podman-design.md` (runtime selection, socket proxies on the engine socket) and `2026-11-13-dns-hardening-design.md` (the DNS plan). There is no Kubernetes spec yet; §12 says how one would fit.
 
 ## 1. Where things stand (2026-11-12)
 
@@ -65,13 +65,13 @@ browser ─TLS─▶ primary Traefik ─(forward-auth, group-gate, tier)─▶ r
                                                                 Hub ─▶ link ══(mTLS inside WG)══▶ agent ─▶ socket-proxy-agent ─▶ engine
 ```
 
-- **`link` (core, Go, profile `workers`, off by default).** A userspace WireGuard endpoint: wireguard-go + gVisor netstack, sharing a small `wgnet` package with the VPN spec's `vpn` service. It has no capabilities, runs read-only as uid 10007 with `no-new-privileges`, and needs no TUN.
+- **`link` = the link role of core's `wg` service (user ruling, VPN spec §3.1: one WireGuard implementation for server tunnels and the built-in people VPN).** Switched on by `link init` (profile `wg`, off by default). wireguard-go + gVisor netstack, no capabilities, read-only as uid 10006 with `no-new-privileges`, no TUN. Its WireGuard device, key, port, subnet, peers and config are separate from the people role's, with no forwarding code between them (VPN spec §3.1).
   - Publishes `${PORTCULLIS_LINK_PORT:-51821}/udp` (the endpoint is the apex `<d>`, already in the DNS plan).
   - Tunnel subnet `${PORTCULLIS_LINK_SUBNET:-10.214.0.0/24}`: link `.1`, workers `.10`–`.250`, MTU 1380. Each peer's AllowedIPs is its /32. Keepalive 25 s, set on the worker side so NAT works.
   - **The netstack has zero listeners.** link only *dials* into the tunnel, for two internal clients:
     - the Hub, on internal network `portcullis-link` (members: hub, link). It sends HTTP `CONNECT <worker-ip>:7443` (control) and nothing else;
     - relays, on internal network `portcullis-link-data` (members: link and relays only). They send `CONNECT <worker-ip>:7000` with a per-instance bearer, and link checks bearer → worker.
-  - Config: `hub_data/link.json` v1, written by the Hub (public keys, IPs, states, relay token hashes), reloaded through UAPI on change, so a removed peer is dropped at once. Server key `secrets/link/server.key` (`./portcullis link init`).
+  - Config: `hub_data/link.json` v1, written by the Hub (public keys, IPs, states, relay token hashes), reloaded through UAPI on change, so a removed peer is dropped at once. Server key `secrets/wg/link.key` (`./portcullis link init`).
   - `/metrics` on `monitoring`: per-peer handshake age and rx/tx, plus each agent's metrics scraped over the tunnel and re-labelled `server=`.
 - **Relays (primary, per placed instance).** When an instance runs on a worker, its compose project **on the primary** (`portcullis-<id>`) contains only relay services, one per routed template service. Each relay has the same service name and **the same Traefik labels the Hub renders today**. So the TLS tier, public, `portcullis-oauth2-*`, extra-domain, VPN entrypoints and exposure-drift code all apply unchanged. The relay (`portcullis-relay` image, a few MB, Go `httputil.ReverseProxy` with upgrade/WebSocket support) listens on each `loadbalancer.server.port` and forwards over link to the agent. It also filters cookies (assistant's call):
   - **request:** it deletes the Portcullis cookies (`_oauth2_proxy*`, `__Host-portcullis_ext*`, and the CSRF cookies);
@@ -153,14 +153,14 @@ Not offered, ever: arbitrary container create, `build`, `commit`, system/df/prun
 - **No new DNS records** (with the DNS spec). Worker hosts are ordinary instance hosts under the wildcard or an enrolled domain. The link endpoint is the apex. The DNS plan's CAA/DNSSEC are unaffected, and workers never get DNS credentials (anti-goal).
   - A foreign `A` record someone points at a worker (`nas.<d>`) is already reported by the DNS plan as *shadowing the wildcard*. The Servers page links it.
   - Workers reach `auth.<d>` (native-OIDC back channel) over the public internet, like any client.
-- **VPN-only (VPN spec)** works unchanged: the relays carry the rendered `vpnsecure` entrypoints and `vpn-only@file`. The `link` subnet must not overlap the VPN subnet or Local networks; `link init` refuses an overlap. link and vpn are separate services, ports and keys (separate blast radius), but they share `wgnet`.
+- **VPN-only (VPN spec)** works unchanged: the relays carry the rendered `vpnsecure` entrypoints and the Hub-rendered `portcullis-vpnallow-<id>` allowlist. The `link` subnet must not overlap the built-in VPN subnet, wired marketplace VPN ranges or Local networks; `link init` refuses an overlap. link and people are roles of the one `wg` service with separate keys, ports, peers and subnets: a worker is never a people device and a link peer has no route to `vpnsecure` (VPN spec §3.1). Marketplace VPN provider instances are primary-only (their gateway joins `portcullis-vpn`, VPN spec §5).
 - **`lan_only` ports and Local networks** are per server: a worker's LAN is not the primary's. The doctor's `lan_only_exposed` reads the agent's port binds.
 
 ## 9. Backups, disaster recovery, failure handling
 
 - **Instance backups** of worker instances stream through the agent's helper archive into the primary's `hub_data/backups/<id>/`, so core `backup` and restic offsite cover them like primary instances (one backup story; free-space checks as §11.5). New per-server *Scheduled backups* setting: off / daily / weekly at a chosen hour, default off. It stops each instance briefly, the existing consistency rule. It keeps the last 3 scheduled archives per instance; manual ones are never pruned. The schedule applies to the primary too.
 - **Worker state isn't backed up.** Its identity is re-created by re-joining, and its bundles are rendered again by the Hub. A dead worker = restore its instances onto another server from their last backups (`orphaned` flow).
-- **Primary DR.** Restoring the primary onto a new host restores `link.json`, `secrets/link`, `pki_node` (Vault raft) and state. Workers reconnect by themselves once `<d>` points at the new host: their peer key and certificates are still valid.
+- **Primary DR.** Restoring the primary onto a new host restores `link.json`, `secrets/wg`, `pki_node` (Vault raft) and state. Workers reconnect by themselves once `<d>` points at the new host: their peer key and certificates are still valid.
 - **Server offline** (3 missed 30 s polls or no handshake for 3 min): instances show `unreachable`. Their relays serve the 503 page, and lifecycle operations answer `409` "server offline". Drift and doctor reconcile on return.
 - **Worker break-glass** (host operator, who is root on that host anyway): `./portcullis worker stop|start <instance>` and `worker leave`. They never change what the primary routes.
 
@@ -202,18 +202,18 @@ Not offered, ever: arbitrary container create, `build`, `commit`, system/df/prun
   - an `echo` instance placed on the worker answers through the primary after sign-in and is refused without it, with the same tier and factors as on the primary;
   - the echo shows **no Portcullis cookie** in the request, and a `Set-Cookie; Domain=.<d>` is stripped;
   - backup / move worker → primary → worker keeps the data;
-  - `docker stop link` → the worker app is unreachable (fail closed) and the containers are still running;
+  - `docker stop wg` → the worker app is unreachable (fail closed) and the containers are still running;
   - **rogue worker:** from the worker's netns, every port on `10.214.0.1` is closed; the agent cert of server B is refused for server A; a forged data preamble for an unplaced instance is refused; an oversized `/info` is cut off;
   - revoke → handshake gone within the reload, client secrets rotated;
   - the socket rule on both stacks.
 
   When the rootless job lands, a matrix leg runs the worker on rootless Podman instead of dind.
 - **Docs:** new `operations/servers.md` (model, join, placement, move, revoke, DR, break-glass, what works when the primary is down); `hardening.md` (agent, socket-proxy-agent, link, relays, `pki_node`, the threat model of §3); `backups.md`; `monitoring.md`; `cli.md` (`link`, `worker …`); `hub.md`; contract; core `CLAUDE.md` (socket rule incl. the worker).
-- **Kubernetes:** if that design lands, a cluster becomes one more `Engine` implementation behind the same agent API (the agent runs in the cluster, with namespaced RBAC instead of a socket proxy). Nothing here assumes Docker beyond the agent.
+- **Kubernetes:** if that design lands, a cluster becomes one more `Engine` implementation behind the same agent API (the agent runs in the cluster, with namespaced RBAC instead of a socket proxy). A cluster on another machine joins exactly like a worker, over the `wg` link role (user ruling, VPN spec §3.1). Nothing here assumes Docker beyond the agent.
 
 ## 13. Task outline (for the plan)
 
-1. Core: `wgnet` package (shared with vpn), `link` service + profile `workers`, networks, `link init`, `link.json` reader, CONNECT rules, metrics; `pki_node` mount/roles in `pki setup`, enroll `/internal/nodes/sign` + policy; status block, alerts; CLI tests.
+1. Core: the link role of the `wg` service (VPN spec §3.1; same binary as the people role), networks, `link init`, `link.json` reader, CONNECT rules, metrics; `pki_node` mount/roles in `pki setup`, enroll `/internal/nodes/sign` + policy; status block, alerts; CLI tests.
 2. Hub: the `Engine` interface (local + agent client), `engineFor`, compose-over-agent.
 3. Hub repo: `cmd/portcullis-agent` (netstack, mTLS, §5 API and scope table, bundle store, data listener) + `cmd/portcullis-relay`; images, pins, release flow.
 4. Core: `docker-compose.worker.yml`, `worker join|status|upgrade|leave|stop|start`, `PORTCULLIS_ROLE`.
@@ -228,6 +228,6 @@ Not offered, ever: arbitrary container create, `build`, `commit`, system/df/prun
 ## 14. Open questions (each has a default; work proceeds on the default)
 
 1. **Data path without TLS inside WireGuard.** *Default:* WireGuard alone protects data (peer-authenticated, encrypted, and the agent accepts data only from `10.214.0.1`). Control uses mTLS on top. Revisit if a threat review asks for mTLS on data too.
-2. **Bandwidth through the primary.** *Default:* accept it. If test-server throughput through relay + userspace WireGuard is under 200 Mbit/s, try a kernel-WireGuard opt-in for `link` (NET_ADMIN, doctor Info) before direct ingress.
+2. **Bandwidth through the primary.** *Default:* accept it. If test-server throughput through relay + userspace WireGuard is under 200 Mbit/s, try a kernel-WireGuard opt-in for the link role (NET_ADMIN, doctor Info) before direct ingress.
 3. **Undo-move window of 7 days.** *Default:* 7 days. It's a setting if disk pressure on workers makes it a problem.
 4. **Cookie filter breaking an app** that relies on a parent-domain cookie. *Default:* filter always, and mark the template primary-only if one turns up.
