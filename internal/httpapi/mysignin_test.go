@@ -331,6 +331,41 @@ func TestRenameOwnPasskeyRoute(t *testing.T) {
 	if len(ca.labels) != before {
 		t.Error("an impersonated rename reached Keycloak")
 	}
+	// Impersonated by the token alone (an act claim, no header): 403 too.
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice","act":{"sub":"root"}}`))
+	treq, _ := http.NewRequest("PUT", e.ppl.URL+path, strings.NewReader(`{"label":"Hijacked"}`))
+	treq.Header.Set("Content-Type", "application/json")
+	treq.Header.Set(ProxySecretHeader, testSecret)
+	treq.Header.Set("X-Forwarded-User", "alice")
+	treq.Header.Set("X-Forwarded-Access-Token", "eyJhbGciOiJub25lIn0."+payload+".sig")
+	tresp, err := http.DefaultClient.Do(treq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb, _ := io.ReadAll(tresp.Body)
+	tresp.Body.Close()
+	if tresp.StatusCode != 403 || strings.TrimSpace(string(tb)) != "not while you are signed in as someone else: Stop first" {
+		t.Errorf("act-claim token = %d %s", tresp.StatusCode, tb)
+	}
+	// Cross-origin (another site's page posting the browser's cookies):
+	// refused before the handler.
+	creq, _ := http.NewRequest("PUT", e.ppl.URL+path, strings.NewReader(`{"label":"Hijacked"}`))
+	creq.Header.Set("Content-Type", "application/json")
+	creq.Header.Set(ProxySecretHeader, testSecret)
+	creq.Header.Set("X-Forwarded-User", "alice")
+	creq.Header.Set("Sec-Fetch-Site", "cross-site")
+	creq.Header.Set("Origin", "https://evil.example")
+	cresp, err := http.DefaultClient.Do(creq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cresp.Body.Close()
+	if cresp.StatusCode != 403 {
+		t.Errorf("cross-origin = %d, want 403", cresp.StatusCode)
+	}
+	if len(ca.labels) != before {
+		t.Error("an impersonated or cross-origin rename reached Keycloak")
+	}
 	for _, a := range readAudit(t, e.audit) {
 		if a.Action == "signin.passkey.label" && a.Result == "ok" && strings.Contains(a.Detail, "Hijacked") {
 			t.Errorf("an impersonated rename was audited ok: %+v", a)

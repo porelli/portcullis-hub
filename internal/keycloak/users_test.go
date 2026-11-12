@@ -366,4 +366,17 @@ func TestSetPasskeyLabelRecase(t *testing.T) {
 	if got := credLabel(f, "alice", "K1"); got != "yubikey" {
 		t.Errorf("stored label = %q", got)
 	}
+	// Saving an unchanged name never 409s, even when another credential
+	// (here the password) shares it: nothing is sent.
+	f.Update("alice", func(u *kctest.User) {
+		for i := range u.Credentials {
+			if u.Credentials[i].ID == "P1" {
+				u.Credentials[i].UserLabel = "YUBIKEY"
+			}
+		}
+		u.LabelStatus = 500 // a PUT would fail
+	})
+	if old, err := c.SetPasskeyLabel(context.Background(), "alice", "K1", "yubikey"); err != nil || old != "yubikey" {
+		t.Errorf("unchanged label = %q, %v", old, err)
+	}
 }

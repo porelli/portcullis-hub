@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/keycloak"
@@ -464,15 +466,24 @@ func (h *Hub) RenameOwnPasskey(ctx context.Context, user, credentialID, label st
 	}
 	defer func() { h.entryLimit.release(u, h.entryClock(), isRefusal(err)) }()
 	actor := directory.Human(u)
+	// A credential id is a UUID (8-4-4-4-12 hex, canonical form only):
+	// anything else is 404 without a Keycloak call, audited as invalid
+	// (never the raw path value).
+	_, perr := uuid.Parse(credentialID)
+	validID := perr == nil && len(credentialID) == 36
 	refuse := func(err error) error {
-		h.auditSignIn(actor, "signin.passkey.label", u, "credential "+clipRunes(credentialID, 64), err)
+		d := "credential (invalid)"
+		if validID {
+			d = "credential " + credentialID
+		}
+		h.auditSignIn(actor, "signin.passkey.label", u, d, err)
 		return err
 	}
 	l, err := passkeyLabel(label)
 	if err != nil {
 		return refuse(err)
 	}
-	if !keycloak.ValidUserID(credentialID) {
+	if !validID {
 		return refuse(errNoSuchPasskey)
 	}
 	c := &h.signInInv

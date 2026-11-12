@@ -1188,7 +1188,8 @@ var ErrPasskeyLabelTaken = errors.New("another sign-in method has that name")
 // ErrPasskeyNotFound; a label another of their credentials has
 // (strings.EqualFold; the passkey's own name recased is not a duplicate)
 // or Keycloak's 409 is ErrPasskeyLabelTaken. old is the label before; an
-// unchanged label returns at once. An unknown user is ErrUserNotFound.
+// unchanged label returns at once (before the duplicate check: saving an
+// unchanged name never 409s, even if another credential shares it). An unknown user is ErrUserNotFound.
 func (c *Client) SetPasskeyLabel(ctx context.Context, username, credentialID, label string) (old string, err error) {
 	tok, err := c.token(ctx)
 	if err != nil {
@@ -1215,13 +1216,13 @@ func (c *Client) SetPasskeyLabel(ctx context.Context, username, credentialID, la
 	if !found {
 		return "", ErrPasskeyNotFound
 	}
+	if old == label {
+		return old, nil // unchanged: never a duplicate, nothing to send
+	}
 	for _, cr := range creds {
 		if cr.ID != credentialID && strings.EqualFold(cr.Label, label) {
 			return old, ErrPasskeyLabelTaken
 		}
-	}
-	if old == label {
-		return old, nil
 	}
 	if err := c.api().UpdateCredentialUserLabel(ctx, tok, Realm, url.PathEscape(id), url.PathEscape(credentialID), label); err != nil {
 		switch statusCode(err) {

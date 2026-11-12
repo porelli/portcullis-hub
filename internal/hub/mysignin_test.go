@@ -435,10 +435,18 @@ func TestRenameOwnPasskey(t *testing.T) {
 	if pl.n() != 1 {
 		t.Errorf("a refused label reached the source: %v", pl.calls)
 	}
-	if err := h.RenameOwnPasskey(c.ctx, "alice", strings.Repeat("é", 64), strings.Repeat("é", 64)); statusOf(err) != 404 || err.Error() != "no such passkey" {
-		t.Errorf("non-UUID id: %v", err)
+	// Not a canonical UUID: 404 without a call, audited as invalid (own
+	// fixture: these refusals would trip the limit).
+	c3, pl3 := renameFixture(t)
+	for _, id := range []string{strings.Repeat("é", 64), "deadbeef", "abc-def", "6f1c2a9e3b4d4e5f8a7b1c2d3e4f5a6b", "{" + renameKeyID + "}", "urn:uuid:" + renameKeyID, "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6g"} {
+		if err := c3.f.h.RenameOwnPasskey(c3.ctx, "alice", id, "Fine"); statusOf(err) != 404 || err.Error() != "no such passkey" {
+			t.Errorf("non-UUID id %q: %v", id, err)
+		}
+		if e := c3.audit.last(); e.Result != "refused" || e.Detail != "credential (invalid)" {
+			t.Errorf("non-UUID id %q audit = %+v", id, e)
+		}
 	}
-	if pl.n() != 1 {
+	if pl3.n() != 0 {
 		t.Error("a non-UUID id reached the source")
 	}
 	for _, se := range []struct {
