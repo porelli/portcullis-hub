@@ -235,9 +235,15 @@ func (s *Server) handleStopOwnImpersonation(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, map[string]string{"sign_out": signOut})
 }
 
+// impStopCSP: the Stop page loads only its own scripts (/static/) and
+// stylesheet, fetches only its own origin, can never be framed (a
+// clickjacked Stop) and has no base to redirect: confirmCSP's rules, with
+// form-action limited to its own origin (Task 6 review M1).
+const impStopCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
 // handleImpersonationStopPage: GET /impersonation/stop, the Stop page
-// (web/impersonation-stop.html; its script asks GET
-// /api/me/impersonation and does the POST above).
+// (web/impersonation-stop.html; its script, web/impersonation.js, asks
+// GET /api/me/impersonation and does the POST above).
 func (s *Server) handleImpersonationStopPage(w http.ResponseWriter, r *http.Request) {
 	if s.impStop == nil {
 		http.NotFound(w, r)
@@ -250,6 +256,8 @@ func (s *Server) handleImpersonationStopPage(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", impStopCSP)
 	if err := s.impStop.Execute(w, map[string]any{"Domain": domain, "HubURL": s.HubURL, "PeopleURL": s.PeopleURL}); err != nil {
 		log.Printf("people: impersonation stop page: %v", err)
 	}

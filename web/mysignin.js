@@ -12,6 +12,12 @@
 //       The setup link, Remove all passkeys and Reset password buttons
 //       are directory.js's own actions (data-act + data-user, its
 //       delegated listener); Revoke and Issue are this file's.
+//       For an administrator (sign-in part 3, contract §9.7 "Signing in
+//       as someone else") the tab also has "Sign in as <person>…" (the
+//       reason, a fresh YubiKey touch, then the top window opens the
+//       start URL), the refusal text when it can't be offered, and the
+//       running line "root is signed in as alice since 14:02 UTC · …
+//       · Stop" — this file's own data-msi-act buttons.
 //
 // The pure parts the node tests run: methodsHtml(view, ctx),
 // appsHtml(view), historyHtml(entries), unknownHtml(unknown),
@@ -83,6 +89,29 @@
     return Math.max(0, Math.ceil((d.getTime() - Date.now()) / 86400000));
   }
   function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  // hhmmUTC: "14:02 UTC" (the Hub's impersonation times are UTC).
+  function hhmmUTC(s) {
+    const d = new Date(s);
+    if (!s || isNaN(d)) return '';
+    return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ' UTC';
+  }
+  // minLeft: ceil(remaining / 60 s), at least 1 while it runs (D43).
+  function minLeft(until) {
+    const t = new Date(until).getTime();
+    if (isNaN(t)) return 0;
+    const rem = t - Date.now();
+    return rem <= 0 ? 0 : Math.max(1, Math.ceil(rem / 60000));
+  }
+  // reasonProblem: the start's rule 4 before anything is sent: trimmed,
+  // 3–200 characters (code points), one line, no control or bidi
+  // characters. '' = fine.
+  const REASON_BAD = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+  function reasonProblem(r) {
+    const t = String(r || '').trim();
+    const n = Array.from(t).length;
+    if (n < 3 || n > 200 || REASON_BAD.test(t)) return 'Type a reason (3–200 characters, one line).';
+    return '';
+  }
 
   // protectedName: accounts whose certificates (and password) are managed
   // from the server (admin, portcullis-hub, every portcullis-* name): the
@@ -299,6 +328,37 @@
     return '<p class="pd-warn msi-unknown" role="note">Some of the history couldn\'t be read right now (' + esc(u.join(', ')) + '): what\'s shown may be incomplete.</p>';
   }
 
+  // impersonationHtml: on a person's tab, for an administrator (a
+  // sign_in_help holder's view has can.impersonate false, refusal "" and
+  // impersonation null: nothing), the running line with Stop, else
+  // "Sign in as <person>…" (mockup section 3) or why it can't be
+  // offered. notice: 'burned' when this tab's own start link didn't
+  // open the session (already used, or refused): "start again".
+  function impersonationHtml(view, ctx, notice) {
+    if (ctx.mode !== 'person') return '';
+    const can = ctx.can || {};
+    const run = view.impersonation;
+    let h = '';
+    if (notice === 'burned' && run) {
+      h += '<div class="pd-warn msi-imp-notice" data-msi-imp-notice role="alert">That start link was already used or didn\'t work, so you weren\'t signed in as ' + esc(ctx.user) + '. ' +
+        button('secondary', ' data-msi-act="imp-again"', 'Start again') + '</div>';
+    }
+    if (run) {
+      const line = run.admin + ' is signed in as ' + run.person + ' since ' + hhmmUTC(run.started) + ' · reason “' + run.reason + '” · ' +
+        minLeft(run.until) + ' min left (until ' + hhmmUTC(run.until) + ')';
+      return h + '<div class="msi-imp running" data-msi-imp-running><span data-msi-imp-line>' + esc(line) + '</span>' +
+        button('danger', ' data-msi-act="imp-stop"', 'Stop') + '</div>';
+    }
+    if (can.impersonate) {
+      return h + '<div class="msi-imp" data-msi-imp>' + button('danger', ' data-msi-act="imp-open"', 'Sign in as ' + ctx.user + '…') +
+        '<span class="pd-muted pd-small">asks for your YubiKey now and a reason · ends after at most 30 min · your own session ends · ' + esc(ctx.user) + ' sees it in their history and at their next sign-in</span></div>';
+    }
+    if (view.impersonate_refusal) {
+      return h + '<p class="pd-muted pd-small msi-imp-refusal" data-msi-imp-refusal>Signing in as ' + esc(ctx.user) + ' isn\'t possible: ' + esc(view.impersonate_refusal) + '</p>';
+    }
+    return h;
+  }
+
   // ── the shown-once download dialog ─────────────────────────────────
 
   let shown = null; // {close()}
@@ -471,6 +531,7 @@
     let h = '<div class="msi-status" data-msi-status role="status"></div>';
     if (v.limits && v.limits.warning && !self) h += '<p class="pd-warn">' + esc(v.limits.warning) + '</p>';
     h += methodsHtml(v, ctxOf(st));
+    h += impersonationHtml(v, ctxOf(st), st.impNotice);
     h += appsHtml(v);
     h += '<div class="pd-head msi-hist-head"><h3 class="pd-h3">Sign-in history</h3>' + button('ghost xs', ' data-msi-act="hist-reload"', 'Refresh') + '</div>' +
       '<div data-msi-hist><p class="pd-muted">Loading…</p></div>';
@@ -539,6 +600,7 @@
     }
     if (seq !== st.seq) return;
     st.view = v;
+    st.impNotice = impNoticeOf(st, v);
     draw(st);
     if (st.opts.onView) st.opts.onView(v);
     loadHistory(st, false);
@@ -709,6 +771,143 @@
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
   }
 
+  // ── signing in as someone else (sign-in part 3) ────────────────────
+
+  // The start this tab sent the top window to ({user, id}, session
+  // storage: no secret, the id is not a bearer, D38). Coming back to the
+  // tab while that impersonation is still listed as running means the
+  // start link didn't open the session (opened twice, after 120 s, or
+  // refused): the tab says so and offers Start again (Task 2 review M5).
+  const IMP_KEY = 'portcullis-imp-start';
+  function impStored() {
+    try { const j = JSON.parse(sessionStorage.getItem(IMP_KEY) || 'null'); return j && typeof j === 'object' ? j : null; } catch (_) { return null; }
+  }
+  function impForget() { try { sessionStorage.removeItem(IMP_KEY); } catch (_) { /* nothing kept */ } }
+  function impNoticeOf(st, v) {
+    if (st.opts.mode !== 'person') return '';
+    const s = impStored();
+    if (!s || s.user !== st.opts.user) return '';
+    if (v.impersonation && v.impersonation.id === s.id) return 'burned';
+    impForget();
+    return '';
+  }
+
+  // nextURL: the start URL the Hub answered (https only, http only on a
+  // plain-http page: the harness).
+  function nextURL(u) {
+    u = String(u || '');
+    if (/^https:\/\//i.test(u)) return u;
+    if (/^http:\/\//i.test(u) && typeof location !== 'undefined' && location.protocol === 'http:') return u;
+    return '';
+  }
+
+  let impDialog = null; // {close()}
+  // openImpersonate: the dialog (the reason, then Continue: the fresh
+  // YubiKey touch in the popup, the start, location.assign(next)).
+  function openImpersonate(st) {
+    if (impDialog) impDialog.close();
+    const user = st.opts.user;
+    const title = 'Sign in as ' + user;
+    const input = el('input', { type: 'text', class: 'pd-input msi-imp-reason', id: 'msi-imp-reason', maxlength: '200', autocomplete: 'off', spellcheck: 'false', 'data-msi-imp-reason': '' });
+    const go = el('button', { type: 'button', class: 'pd-btn danger sm', 'data-msi-imp': 'go' }, ['Continue with your YubiKey']);
+    const cancel = el('button', { type: 'button', class: 'pd-btn secondary sm', 'data-msi-imp': 'cancel' }, ['Cancel']);
+    const status = el('div', { class: 'ma-status pd-muted', 'data-msi-imp-status': '', role: 'status' });
+    const dlg = el('dialog', { class: 'pd-dialog msi-imp-dialog', 'aria-label': title }, [
+      el('div', { class: 'pd-dialog-headbar' }, [el('h3', { class: 'pd-dialog-title' }, [title])]),
+      el('div', { class: 'pd-dialog-body' }, [
+        el('p', { class: 'pd-small' }, ['You open ' + user + '\'s apps as them for at most 30 minutes. Your own session in this browser ends; after Stop you sign in again as yourself. ' +
+          user + ' reads your reason in their history and at their next sign-in.']),
+        el('label', { class: 'pd-small', for: 'msi-imp-reason' }, ['Reason (3–200 characters, one line)']),
+        input,
+        el('p', { class: 'pd-muted pd-small' }, ['Then sign in again in a small window with a YubiKey touch (a security key or a YubiKey certificate).']),
+        el('div', { class: 'pd-actions' }, [go, cancel]),
+        status
+      ])
+    ]);
+    go.disabled = true;
+    let busy = false, flow = false;
+    const setStatus = (t, warn) => { status.textContent = t || ''; status.classList && status.classList.toggle('pd-warn', !!warn); };
+    const check = () => { go.disabled = busy || !!reasonProblem(input.value); };
+    const close = () => {
+      if (flow && !st.impStarted && window.PortcullisFreshAuth) window.PortcullisFreshAuth.cancel();
+      flow = false;
+      if (dlg.open) dlg.close();
+      dlg.remove();
+      if (impDialog === me) impDialog = null;
+    };
+    const me = { close, dlg };
+    const start = () => {
+      const reason = input.value.trim();
+      const bad = reasonProblem(reason);
+      if (bad) { setStatus(bad, true); return; }
+      if (!window.PortcullisFreshAuth) { setStatus('A fresh sign-in isn\'t available on this page.', true); return; }
+      flow = true;
+      // The popup opens from this click, before any await.
+      window.PortcullisFreshAuth.start(st.view.fresh_auth, {
+        ctx: { signin: 'impersonate', user },
+        status: (t, warn) => setStatus(t, warn),
+        busy: on => { busy = on; input.disabled = on; check(); },
+        end: () => { flow = false; },
+        proof: async pr => {
+          setStatus('Starting…');
+          let ans;
+          try {
+            ans = await call('POST', base(st) + '/impersonation', { reason, code: pr.code, code_verifier: pr.code_verifier, nonce: pr.nonce });
+          } catch (err) {
+            busy = false; input.disabled = false; check();
+            setStatus(err.message, true);
+            return;
+          }
+          const next = nextURL(ans && ans.next);
+          if (!next) { setStatus('The Hub answered no start link: try again.', true); return; }
+          try { sessionStorage.setItem(IMP_KEY, JSON.stringify({ user, id: String(ans.id || '') })); } catch (_) { /* no notice then */ }
+          st.impStarted = true;
+          setStatus('Opening ' + user + '\'s portal…');
+          location.assign(next);
+        }
+      });
+    };
+    dlg.addEventListener('input', e => { if (e.target === input) { setStatus(''); check(); } });
+    dlg.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.target === input) { e.preventDefault(); if (!go.disabled) start(); }
+    });
+    dlg.addEventListener('click', e => {
+      const b = e.target && e.target.closest ? e.target.closest('[data-msi-imp]') : null;
+      if (!b || b.disabled) return;
+      if (b.getAttribute('data-msi-imp') === 'go') start();
+      else if (b.getAttribute('data-msi-imp') === 'cancel') close();
+    });
+    // Escape (the dialog's cancel) closes it like Cancel: the popup goes too.
+    dlg.addEventListener('close', close);
+    impDialog = me;
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    if (input.focus) input.focus();
+    return me;
+  }
+
+  // stopImpersonation: an administrator's Stop of the person's running
+  // impersonation (theirs or another administrator's).
+  async function stopImpersonation(st, again) {
+    const run = st.view && st.view.impersonation;
+    if (!run) return;
+    if (!again && !confirm('Stop ' + run.admin + ' signing in as ' + run.person + '? Their session as ' + run.person + ' ends at once.')) return;
+    try {
+      await call('POST', base(st) + '/impersonation/stop', {});
+    } catch (err) {
+      if (err.status !== 404) { setStatus(st, err.message, true); return; }
+    }
+    impForget();
+    st.impNotice = '';
+    await load(st);
+    if (again) {
+      if (st.view && st.view.can && st.view.can.impersonate) openImpersonate(st);
+      else setStatus(st, st.view && st.view.impersonate_refusal ? 'Signing in as ' + st.opts.user + ' isn\'t possible: ' + st.view.impersonate_refusal : '', true);
+    } else {
+      setStatus(st, 'Stopped.');
+    }
+  }
+
   function onClick(st, e) {
     const b = e.target.closest('[data-msi-act]');
     if (!b || !st.el.contains(b) || b.disabled || !st.view) return;
@@ -731,6 +930,9 @@
         return;
       case 'hist-more': return loadHistory(st, true, b);
       case 'hist-reload': return loadHistory(st, false, b);
+      case 'imp-open': return openImpersonate(st);
+      case 'imp-stop': return stopImpersonation(st, false);
+      case 'imp-again': return stopImpersonation(st, true);
     }
   }
 
@@ -738,8 +940,9 @@
   function mount(el, opts) {
     let st = states.get(el);
     if (!st) {
-      st = { el, opts: opts || { mode: 'self' }, view: null, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null };
+      st = { el, opts: opts || { mode: 'self' }, view: null, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null, impNotice: '', impStarted: false };
       states.set(el, st);
+      mounted.add(st);
       el.addEventListener('click', e => onClick(st, e));
       el.addEventListener('keydown', e => {
         if (e.key !== 'Enter' || !e.target.matches) return;
@@ -755,8 +958,16 @@
   // Leaving the page drops the shown-once dialog (freshauth.js ends its
   // flow itself).
   window.addEventListener('pagehide', closeShown);
+  // Back from the start link (the page restored as it was left): read
+  // the tab again, so a start link that didn't open the session says so.
+  const mounted = new Set();
+  window.addEventListener('pageshow', e => {
+    if (!e || !e.persisted) return;
+    if (impDialog) impDialog.close();
+    for (const st of mounted) if (st.impStarted) { st.impStarted = false; load(st); }
+  });
 
-  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText, certFreshProblem,
+  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText, certFreshProblem, impersonationHtml, reasonProblem,
     // For the node tests: one mount's history paging over a stub fetch.
     _test: { loadHistory, state: (el, opts) => ({ el, opts, view: {}, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null }) } };
 })();

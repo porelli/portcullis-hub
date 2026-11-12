@@ -11,11 +11,12 @@ import "embed"
 // mysignin.html (the Sign-in page, GET /signin on the people listener) and
 // mysignin.js (its script, also the person's Sign-in tab on people.html),
 // impersonation-stop.html (the Stop page, GET /impersonation/stop on the
-// people listener),
+// people listener) and impersonation.js (the impersonation banner and the
+// Stop page's script; people.html, mysignin.html and the Stop page),
 // and the fresh-auth popup: freshauth.js (the opener, myapps.js and confirm.js)
 // and freshauth-callback.js (the callback, people.html and index.html).
 //
-//go:embed index.html people.html directory.js directory.css settings.js signin.js myapps.js myai.js folders.js doctor.js confirm.html confirm.js mysignin.html mysignin.js impersonation-stop.html freshauth.js freshauth-callback.js
+//go:embed index.html people.html directory.js directory.css settings.js signin.js myapps.js myai.js folders.js doctor.js confirm.html confirm.js mysignin.html mysignin.js impersonation-stop.html impersonation.js freshauth.js freshauth-callback.js
 var FS embed.FS
 
 // Docs holds the docs pages the Hub ships as read-only MCP resources

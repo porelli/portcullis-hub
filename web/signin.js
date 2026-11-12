@@ -25,6 +25,9 @@
 // PUT  /api/signin/core/{key}              {template}
 // PUT  /api/signin/add-stronger            {on}
 // PUT  /api/signin/limits                  {browser_cert_days, browser_cert_max_active, history_days}
+// GET  /api/impersonations                 the "Signing in as someone else" switch and the running ones (part 3)
+// PUT  /api/signin/impersonation           {allowed}: switching off asks first, naming the running ones
+// POST /api/directory/users/{u}/impersonation/stop   Stop one
 // GET  /api/instances/{id}/signin          the instance's choices and who can't meet its template
 //
 // Rules: every value goes through escapeHtml (index.html); actions are
@@ -207,14 +210,61 @@
     return h + '</tbody></table></section>';
   }
 
+  // hhmmUTC: "14:02 UTC" (the Hub's impersonation times are UTC).
+  function hhmmUTC(s) {
+    const d = new Date(s);
+    if (!s || isNaN(d)) return '';
+    return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ' UTC';
+  }
+  function minLeft(until) {
+    const t = new Date(until).getTime();
+    if (isNaN(t)) return 0;
+    const rem = t - Date.now();
+    return rem <= 0 ? 0 : Math.max(1, Math.ceil(rem / 60000));
+  }
+  // runningText: "root is signed in as alice since 14:02 UTC · reason
+  // “checking quota” · 26 min left (until 14:32 UTC)".
+  function runningText(r) {
+    return r.admin + ' is signed in as ' + r.person + ' since ' + hhmmUTC(r.started) + ' · reason “' + r.reason + '” · ' +
+      minLeft(r.until) + ' min left (until ' + hhmmUTC(r.until) + ')';
+  }
+
+  // impersonationHtml is the "Signing in as someone else" block (sign-in
+  // part 3, contract §8.1 "Impersonation"): the switch and the running
+  // list, each with Stop. iv is GET /api/impersonations, or {error}.
+  function impersonationHtml(iv) {
+    let h = '<section class="policy-section si-block" data-signin-imp><div class="policy-title">Signing in as someone else</div>';
+    if (!iv) return h + '<p class="si-sub">Loading…</p></section>';
+    if (iv.error) return h + '<p class="si-warn-text">Couldn\'t load it: ' + esc(iv.error) + '</p>' + errSlot('impersonation') + '</section>';
+    const max = iv.max_minutes | 0 || 30;
+    h += '<div class="si-row">' + switchHtml('impersonation', '', !!iv.allowed, false, 'Signing in as someone else') +
+      '<span>Let administrators sign in as another person</span></div>' +
+      '<p class="si-sub">For at most ' + esc(plural(max, 'minute', 'minutes')) + ', after a typed reason and a fresh YubiKey touch; never as an administrator. The person is told at their next sign-in. Off: nobody can start, and every running one ends.</p>' +
+      errSlot('impersonation');
+    const run = iv.running || [];
+    if (!run.length) h += '<p class="si-sub" data-signin-imp-none>Nobody is signed in as someone else right now.</p>';
+    else {
+      h += '<ul class="si-imp-list">';
+      for (const r of run) {
+        h += '<li data-signin-imp-row="' + esc(r.id) + '"><span>' + esc(runningText(r)) + '</span> ' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-signin-action="imp-stop" data-user="' + esc(r.person) + '" data-admin="' + esc(r.admin) + '">Stop</button></li>';
+      }
+      h += '</ul>';
+    }
+    return h + '</section>';
+  }
+
   // render is Settings → Sign-in for view (GET /api/signin); notes are
-  // the last change's warnings and restarts.
-  function render(view, notes) {
+  // the last change's warnings and restarts; imp the impersonation
+  // block's view (GET /api/impersonations, {error}, or undefined while
+  // it loads).
+  function render(view, notes, imp) {
     let h = '<div data-signin-notes>' + (notes || []).map(n => '<div class="public-warn si-note">' + esc(n) + '</div>').join('') + '</div>';
     if (view.mds_warning) h += '<div class="public-warn si-note" data-signin-mds>⚠ ' + esc(view.mds_warning) + '</div>';
     h += methodsHtml(view) + limitsHtml(view) + templatesHtml(view);
     h += '<div data-signin-editor></div>';
     h += coreHtml(view);
+    h += impersonationHtml(imp);
     return h;
   }
 
@@ -454,18 +504,67 @@
   function mount(el) {
     let st = states.get(el);
     if (!st) {
-      st = { el, view: null, notes: [], seq: 0, timer: 0, pending: {} };
+      st = { el, view: null, notes: [], seq: 0, timer: 0, pending: {}, imp: undefined };
       states.set(el, st);
       bind(st);
     }
     const ed = st.el.querySelector('[data-signin-ed]');
     if (!st.view) el.innerHTML = '<p class="settings-empty">Loading…</p>';
+    const imp = loadImpersonations(st);
     return window.apiGet('/api/signin').then(view => {
       st.view = view;
       draw(st, ed);
+      return imp;
     }).catch(err => {
       el.innerHTML = '<p class="settings-empty">Failed to load the sign-in settings: ' + esc(err.message) + '</p>';
     });
+  }
+
+  // loadImpersonations reads the impersonation block (on its own: a
+  // failure shows in the block only) and draws it.
+  function loadImpersonations(st) {
+    return window.apiGet('/api/impersonations').then(iv => { st.imp = iv; }, err => { st.imp = { error: err.message || String(err) }; })
+      .then(() => drawImpersonations(st));
+  }
+  function drawImpersonations(st) {
+    const sec = st.el.querySelector('[data-signin-imp]');
+    if (sec) sec.outerHTML = impersonationHtml(st.imp);
+  }
+
+  // toggleImpersonation: the switch. Off asks first (naming the running
+  // ones, which it ends); a refusal puts the switch back.
+  async function toggleImpersonation(st, t, want) {
+    setErr(st, 'impersonation', '');
+    if (!want) {
+      const run = (st.imp && st.imp.running) || [];
+      const names = run.map(r => r.admin + ' as ' + r.person).join(', ');
+      const q = 'Switch off signing in as someone else? Nobody can start one then.' +
+        (run.length ? ' This ends ' + (run.length === 1 ? 'the one running now: ' : 'the ' + run.length + ' running now: ') + names + '.' : '');
+      if (!confirm(q)) { t.checked = true; return; }
+    }
+    t.disabled = true;
+    try {
+      st.imp = await window.apiPut('/api/signin/impersonation', { allowed: want });
+      drawImpersonations(st);
+    } catch (err) {
+      t.checked = !want;
+      t.disabled = false;
+      setErr(st, 'impersonation', refusal(err));
+    }
+  }
+  // stopImpersonation: Stop of one running impersonation (another
+  // administrator's included).
+  async function stopImpersonation(st, t) {
+    const user = t.dataset.user, admin = t.dataset.admin;
+    if (!confirm('Stop ' + admin + ' signing in as ' + user + '? Their session as ' + user + ' ends at once.')) return;
+    setErr(st, 'impersonation', '');
+    t.disabled = true;
+    try {
+      await window.apiCall('/api/directory/users/' + encodeURIComponent(user) + '/impersonation/stop', 'POST', {});
+    } catch (err) {
+      if (err.status !== 404) { t.disabled = false; setErr(st, 'impersonation', refusal(err)); return; }
+    }
+    await loadImpersonations(st);
   }
 
   // draw renders the tables again; an open editor (ed) is kept as it is.
@@ -473,7 +572,7 @@
     // A change waiting for Apply / Cancel is dropped: its control is
     // drawn again as the Hub holds it.
     st.pending = {};
-    st.el.innerHTML = render(st.view, st.notes);
+    st.el.innerHTML = render(st.view, st.notes, st.imp);
     if (ed) st.el.querySelector('[data-signin-editor]').replaceWith(wrapEditor(ed));
   }
   function wrapEditor(ed) {
@@ -714,6 +813,7 @@
       const ed = t.closest('[data-signin-ed]');
       if (a === 'impact-apply' || a === 'impact-cancel') { resolvePending(st, t.dataset.key, a === 'impact-apply'); return; }
       if (a === 'limits-save') { saveLimits(st, t); return; }
+      if (a === 'imp-stop') { stopImpersonation(st, t); return; }
       if (a === 'new') { openEditor(st, { isNew: true, name: '', id: '', rule: { op: 'any', items: ['family:passkey'] } }); return; }
       if (a === 'edit') {
         const tpl = templateById(st.view, t.dataset.id);
@@ -753,6 +853,8 @@
       } else if (a === 'core') {
         const key = t.dataset.key, was = (v.core || {})[key] || '', want = t.value;
         guarded(st, t, 'core:' + key, { core_page: key, core: want }, () => window.apiPut('/api/signin/core/' + encodeURIComponent(key), { template: want }), () => { t.value = was; });
+      } else if (a === 'impersonation') {
+        toggleImpersonation(st, t, t.checked);
       } else if (a === 'add-stronger') {
         const want = t.checked;
         act(st, t, 'add-stronger', async () => { await window.apiCall('/api/signin/add-stronger', 'PUT', { on: want }); return null; }, () => { t.checked = !want; });
@@ -883,8 +985,8 @@
   }
 
   window.PortcullisSignIn = {
-    mount, render, editorHtml, ruleFromEditor, blockedHtml, instanceHtml, pickChanged, pickBody, marksFor, editRule, impactHtml, PICK_REFUSAL, limitsHtml, limitsProblem,
+    mount, render, impersonationHtml, editorHtml, ruleFromEditor, blockedHtml, instanceHtml, pickChanged, pickBody, marksFor, editRule, impactHtml, PICK_REFUSAL, limitsHtml, limitsProblem,
     // For the node tests: the confirm step over a stub container.
-    _test: { guarded, resolvePending, state: (el, view) => ({ el, view, notes: [], seq: 0, timer: 0, pending: {} }) }
+    _test: { guarded, resolvePending, toggleImpersonation, stopImpersonation, state: (el, view) => ({ el, view, notes: [], seq: 0, timer: 0, pending: {} }) }
   };
 })();

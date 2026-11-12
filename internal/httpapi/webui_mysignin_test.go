@@ -188,7 +188,9 @@ func TestMySignInDownloadDialog(t *testing.T) {
 	if out["closed"] != true || out["pwAfter"] != "" || out["hrefAfter"] != nil || out["allRevoked"] != true {
 		t.Errorf("closing left something: %v", out)
 	}
-	js := webAsset(t, "mysignin.js")
+	// Session storage holds only the impersonation start's {user, id}
+	// (sign-in part 3: not a secret, the id isn't a bearer, D38).
+	js := strings.Replace(webAsset(t, "mysignin.js"), "sessionStorage.setItem(IMP_KEY, JSON.stringify({ user, id: String(ans.id || '') }))", "", 1)
 	for _, bad := range []string{"localStorage", "sessionStorage.setItem", "location.hash =", "history.pushState"} {
 		if strings.Contains(js, bad) {
 			t.Errorf("mysignin.js uses %s", bad)
