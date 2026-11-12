@@ -967,3 +967,47 @@ func otherImpID(id string) string {
 	}
 	return "0" + id[1:]
 }
+
+// TestNoticeGivenUpWhenPersonGone (security review): a notice owed to a
+// person deleted from the directory, or unknown to Keycloak, is never
+// retried forever: the record is no longer owed after one tick and is
+// pruned on schedule; a transient error keeps it owed.
+func TestNoticeGivenUpWhenPersonGone(t *testing.T) {
+	x := newImpFixture(t)
+	x.kc.mu.Lock()
+	x.kc.noticeErr = errors.New("keycloak down")
+	x.kc.mu.Unlock()
+	a := x.mustStart(t, "root", "alice")
+	b := x.mustStart(t, "sam", "bob")
+	for _, u := range []string{"alice", "bob"} {
+		if err := x.h.StopImpersonation(x.ctx, u, directory.Human("root")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x.h.impersonationTick(x.ctx)
+	if !x.rec(a.ID).NoticeOwed || !x.rec(b.ID).NoticeOwed {
+		t.Fatal("a transient error dropped the notice")
+	}
+	// alice is deleted from the directory; bob is unknown to Keycloak.
+	x.h.mu.RLock()
+	p := x.h.people.(adminPeople).fakePeople
+	x.h.mu.RUnlock()
+	p.set(func(p *fakePeople) { delete(p.users, "alice") })
+	x.kc.mu.Lock()
+	x.kc.noticeErr = keycloak.ErrUserNotFound
+	x.kc.mu.Unlock()
+	x.h.impersonationTick(x.ctx)
+	for _, id := range []string{a.ID, b.ID} {
+		if r := x.rec(id); r.NoticeOwed || !r.Finished {
+			t.Errorf("still owed after one tick: %+v", r)
+		}
+	}
+	if st := x.saved(t); st.Impersonations[0].NoticeOwed || st.Impersonations[1].NoticeOwed {
+		t.Error("not saved")
+	}
+	x.advance(366 * 24 * time.Hour)
+	x.h.impersonationTick(x.ctx)
+	if x.rec(a.ID).ID != "" || x.rec(b.ID).ID != "" {
+		t.Error("not pruned on schedule")
+	}
+}

@@ -760,10 +760,26 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 	}
 	kc := h.impKC()
 	var err error
-	if kc == nil {
+	switch {
+	case h.impPersonGone(ctx, rec.Target):
+		// Deleted from the directory: never owed again (normal retention).
+		err = keycloak.ErrUserNotFound
+	case kc == nil:
 		err = errors.New("no Keycloak wired")
-	} else {
+	default:
 		err = kc.RequireImpersonationNotice(ctx, rec.Target)
+	}
+	if errors.Is(err, keycloak.ErrUserNotFound) {
+		// The person is gone: nobody to tell. Logged once, the id only.
+		log.Printf("impersonation: %s: the person no longer exists: no notice owed", id)
+		delete(h.imp.noticeLogged, id)
+		h.mu.Lock()
+		if r := h.impRecordLocked(id); r != nil {
+			r.NoticeOwed = false
+			h.saveImpLocked()
+		}
+		h.mu.Unlock()
+		return
 	}
 	if err != nil {
 		if !h.imp.noticeLogged[id] {
@@ -782,6 +798,17 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 		h.saveImpLocked()
 	}
 	h.mu.Unlock()
+}
+
+// impPersonGone: a directory snapshot (read now) doesn't know user. An
+// unreadable directory is not "gone" (the notice keeps being owed).
+func (h *Hub) impPersonGone(ctx context.Context, user string) bool {
+	m, err := h.membership(ctx)
+	if err != nil {
+		return false
+	}
+	_, known := m.UUIDs[user]
+	return !known
 }
 
 // impRecord is a copy of record id.
