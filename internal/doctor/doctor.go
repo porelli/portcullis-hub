@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -70,8 +71,10 @@ type Finding struct {
 	Instances []string `json:"instances,omitempty"`
 	Folders   []string `json:"folders,omitempty"`
 	Paths     []string `json:"paths,omitempty"`
-	Class     FixClass `json:"fix_class,omitempty"`
-	FixKind   string   `json:"fix_kind,omitempty"`
+	// Domains: the domain names a DNS finding concerns (DNS hardening).
+	Domains []string `json:"domains,omitempty"`
+	Class   FixClass `json:"fix_class,omitempty"`
+	FixKind string   `json:"fix_kind,omitempty"`
 	// MoreFixes: other one-click fixes the finding offers besides FixKind
 	// (folder_owner: undo_folder while the folder has a last apply); the
 	// Hub's PreviewFix / ApplyFix pick one with the param "fix".
@@ -232,6 +235,12 @@ type Inputs struct {
 	AI []AIIn
 	// SignInMDS: the FIDO list is unavailable (signin.go; nil = fine).
 	SignInMDS *SignInMDSIn
+	// DNS: the cached DNS plans of every added domain (dns.go); nil =
+	// they couldn't be read (the domains service unreachable or
+	// disabled): no DNS findings and Report.DNSUnavailable. DNSMain: the
+	// main domain's read-only plan.
+	DNS     []domains.Plan
+	DNSMain *domains.Plan
 }
 
 // UnverifiableIn is one active credential the holder check can't verify
@@ -310,6 +319,9 @@ type Report struct {
 	Counts   map[Severity]int `json:"counts"`   // unmuted only
 	Muted    int              `json:"muted"`
 	Scans    []ScanSummary    `json:"scans"`
+	// DNSUnavailable: the DNS inputs couldn't be read, so the DNS checks
+	// didn't run (a field, not a finding: a clean report never hides it).
+	DNSUnavailable bool `json:"dns_unavailable,omitempty"`
 }
 
 // ScanSummary is one cached disk scan.
@@ -353,7 +365,8 @@ func Run(in *Inputs, mutes map[string]Mute) Report {
 			byFP[fp] = f
 		}
 	}
-	r := Report{Findings: make([]Finding, 0, len(byFP)), Counts: map[Severity]int{Problem: 0, Warning: 0, Info: 0}, Scans: []ScanSummary{}}
+	r := Report{Findings: make([]Finding, 0, len(byFP)), Counts: map[Severity]int{Problem: 0, Warning: 0, Info: 0}, Scans: []ScanSummary{},
+		DNSUnavailable: in.DNS == nil}
 	for _, f := range byFP {
 		f.Token = f.Inputs
 		if m, ok := mutes[f.FP]; ok && m.Inputs == f.Inputs {

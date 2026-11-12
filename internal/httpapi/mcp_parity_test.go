@@ -330,7 +330,7 @@ func TestToolParity(t *testing.T) {
 	// R (sign-in Task 6).
 	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact", "person_sign_in", "issue_yubikey_certificate",
 		// DNS hardening (F1).
-		"get_domain_dns", "get_main_dns"} {
+		"get_domain_dns", "get_main_dns", "domain_op"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}

@@ -30,6 +30,17 @@ func (s *Server) registerDomains(mux routeMux) {
 	mux.HandleFunc("POST /api/domains/{name}/dns/apply", s.handleDomainDNSApply)
 	mux.HandleFunc("POST /api/domains/{name}/dnssec", s.handleDomainDNSSEC)
 	mux.HandleFunc("GET /api/dns/main", s.handleMainDNS)
+	// The op record of the domain's last doctor DNS fix (F2).
+	mux.HandleFunc("GET /api/domains/{name}/op", s.handleDomainOp)
+}
+
+func (s *Server) handleDomainOp(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	name := hub.NormalizeHost(r.PathValue("name"))
+	s.rec("LastOp", hub.OpKeyDomain(name))
+	s.writeOpRecord(w, hub.OpKeyDomain(name), "domain "+name)
 }
 
 // adminOnly resolves the caller and refuses non-admins (403). Without the

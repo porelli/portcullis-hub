@@ -352,6 +352,12 @@ func (s *Server) registerAdminTools2() {
 			ClassWrite, "POST /api/domains/{name}/dns/apply", "domain.dns_apply", func(ctx context.Context, a directory.Actor, in applyDNSArgs) (any, error) {
 				return s.applyDomainDNS(ctx, a, in.Name, in.Sets)
 			}),
+		admin("domain_op", "The op record of an added domain's last doctor DNS fix (dns_apply, dnssec_sign: running, then ok / error with its result), like folder_op.",
+			ClassRead, "GET /api/domains/{name}/op", "", func(_ context.Context, _ directory.Actor, in domainArgs) (any, error) {
+				name := hub.NormalizeHost(in.Name)
+				s.rec("LastOp", hub.OpKeyDomain(name))
+				return s.opRecordOf(hub.OpKeyDomain(name), "domain "+name)
+			}),
 		{Name: "enable_domain_dnssec", Description: "Turn on DNSSEC signing for an added domain's zone at its DNS provider (only providers that sign through their API). Zone-wide, and it can't be undone from Portcullis: no tool turns signing off. Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/domains/{name}/dnssec", Audit: "domain.dnssec_enable", In: domainArgs{},
 			Typed: func(args json.RawMessage) string { return hub.NormalizeHost(nameOf(args)) },

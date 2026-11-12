@@ -462,6 +462,8 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/domains/team-b.example.net/dns/apply", body: `{"sets":["caa"]}`},
 		{tool: "enable_domain_dnssec", args: map[string]any{"name": "team-b.example.net"},
 			method: "POST", path: "/api/domains/team-b.example.net/dnssec", body: `{"enable":true}`},
+		{tool: "domain_op", args: map[string]any{"name": "team-b.example.net"},
+			method: "GET", path: "/api/domains/team-b.example.net/op", body: ``},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"},
 			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_only"}}}`, instance: "aiapp"},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_write"},

@@ -615,6 +615,7 @@ var adminToolFixtures = []struct {
 	{"get_main_dns", nil},
 	{"apply_domain_dns", map[string]any{"name": "team-c.example.net", "sets": []string{"caa", "nomail"}}},
 	{"enable_domain_dnssec", map[string]any{"name": "team-c.example.net"}},
+	{"domain_op", map[string]any{"name": "team-c.example.net"}},
 	{"delete_domain", map[string]any{"name": "team-c.example.net"}},
 	{"disable_instance", map[string]any{"id": "secretapp"}},
 	// Task 18: users and groups (marker invite links and a marker password are set up).

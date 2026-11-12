@@ -25,6 +25,8 @@ var fixerTouchesData = map[string]bool{
 	doctor.FixRebindPort:      false, // a <KEY>_BIND setting and a restart: no data, ownership or credential
 	doctor.FixRevokeLeaver:    true,  // revokes a file-share credential
 	doctor.FixPersonTreeOwner: true,  // chown + chmod of a person's folder
+	doctor.FixDNSApply:        false, // DNS records at the provider: no data on disk, no access (F9)
+	doctor.FixDNSSECSign:      false, // zone signing at the provider: no data on disk, no access (but AlwaysConfirm)
 }
 
 func TestFixersDeclareTouchesData(t *testing.T) {

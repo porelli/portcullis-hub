@@ -29,6 +29,9 @@ type fakeDomainsService struct {
 	// <body>"); cantSign makes POST …/dnssec answer 409.
 	dnsCalls []string
 	cantSign bool
+	// plans: a plan to answer per name ("" the main domain), instead of
+	// the default one (the harness).
+	plans map[string]map[string]any
 }
 
 func newFakeDomainsService(t *testing.T, secret string) (*fakeDomainsService, *httptest.Server) {
@@ -97,6 +100,16 @@ func newFakeDomainsService(t *testing.T, secret string) (*fakeDomainsService, *h
 		f.mu.Unlock()
 	}
 	plan := func(name string, write bool) map[string]any {
+		f.mu.Lock()
+		key := name
+		if !write {
+			key = ""
+		}
+		p, ok := f.plans[key]
+		f.mu.Unlock()
+		if ok {
+			return p
+		}
 		return map[string]any{"name": name, "checked_at": "2026-11-13T09:12:44Z", "can_write": write,
 			"items": []map[string]any{{"set": "caa", "name": name, "type": "CAA", "want": []string{`0 issue "letsencrypt.org; validationmethods=dns-01"`},
 				"live": []string{}, "status": "missing", "severity": "warning", "fix": map[bool]string{true: "auto", false: "manual"}[write], "steps": []string{}}},
@@ -365,6 +378,7 @@ func TestDomainDNSRoutesAdminOnly(t *testing.T) {
 		{"POST", "/api/domains/team-b.example.net/dns/apply", `{"sets":["caa"]}`},
 		{"POST", "/api/domains/team-b.example.net/dnssec", `{"enable":true}`},
 		{"GET", "/api/dns/main", ""},
+		{"GET", "/api/domains/team-b.example.net/op", ""},
 	}
 	for _, user := range []string{"bob", "dana", ""} {
 		for _, r := range routes {
