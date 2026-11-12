@@ -338,6 +338,7 @@ a.pd-link { text-decoration: none; }
 body.pc-imp-stop-page { margin: 0; background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 0.9375rem; line-height: 1.6; }
 .pc-imp-stop { max-width: 40rem; margin: 3rem auto; padding: 1.5rem 2rem; }
 .pc-imp-stop h1 { font-size: 1.25rem; color: #f1f5f9; margin: 0 0 1rem; }
+.brand-mark { vertical-align: -4px; margin-right: .35rem; }
 .pc-imp-stop p { margin: 0 0 1rem; }
 .pc-imp-stop a { color: #60a5fa; }
 .pc-imp-stop .pd-btn.danger { background: #b91c1c; color: #fff; }

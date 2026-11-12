@@ -402,9 +402,10 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 }
 
 // peopleStatic are the assets people.html and the confirmation page
-// load: the people listener serves these only (never the Hub's
-// index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "impersonation.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true}
+// load, plus the logo and favicon set: the people listener serves these
+// only (never the Hub's index.html or settings.js).
+var peopleStatic = map[string]bool{"directory.js": true, "impersonation.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true,
+	"favicon.svg": true, "favicon.ico": true, "apple-touch-icon.png": true, "icon-192.png": true, "icon-512.png": true, "maskable-512.png": true, "site.webmanifest": true, "mark.svg": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.
 func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {
@@ -427,6 +428,14 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	case strings.HasSuffix(path, ".js"):
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	case strings.HasSuffix(path, ".svg"):
+		w.Header().Set("Content-Type", "image/svg+xml")
+	case strings.HasSuffix(path, ".png"):
+		w.Header().Set("Content-Type", "image/png")
+	case strings.HasSuffix(path, ".ico"):
+		w.Header().Set("Content-Type", "image/x-icon")
+	case strings.HasSuffix(path, ".webmanifest"):
+		w.Header().Set("Content-Type", "application/manifest+json")
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache")

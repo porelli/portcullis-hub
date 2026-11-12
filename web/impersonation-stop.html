@@ -5,6 +5,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stop signing in as someone else</title>
+<link rel="icon" href="/static/favicon.ico" sizes="48x48">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/static/site.webmanifest">
 <link rel="stylesheet" href="/static/directory.css">
 </head>
 <body class="pc-imp-stop-page">
@@ -17,7 +21,7 @@
      /api/me/impersonation/stop and then goes to the answer's sign_out, or
      "Nothing to stop" (web/impersonation.js). -->
 <main id="imp-stop" class="pd-card pc-imp-stop" data-domain="{{.Domain}}">
-  <h1>Stop signing in as someone else</h1>
+  <h1><img class="brand-mark" src="/static/mark.svg" alt="" width="28" height="28"> Stop signing in as someone else</h1>
   <div data-imp-stop-body><p class="pd-muted">Checking…</p></div>
   <noscript>This page needs JavaScript.</noscript>
 </main>

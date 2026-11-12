@@ -683,8 +683,8 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,impersonation.js,myai.js,myapps.js,mysignin.js" {
-		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, impersonation.js, myai.js, myapps.js, mysignin.js", allow)
+	if strings.Join(allow, ",") != "apple-touch-icon.png,confirm.js,directory.css,directory.js,favicon.ico,favicon.svg,freshauth-callback.js,freshauth.js,icon-192.png,icon-512.png,impersonation.js,mark.svg,maskable-512.png,myai.js,myapps.js,mysignin.js,site.webmanifest" {
+		t.Errorf("peopleStatic = %v, want exactly the people pages' scripts and styles plus the eight logo and favicon files", allow)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
