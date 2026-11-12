@@ -1777,7 +1777,8 @@ people (admins see all of it; others the parts their permissions allow).
   Hub.
 - **Sign-in** (admins, and holders of `sign_in_help` for the people they may
   help): the person's [Sign-in page](auth-policies.md#the-sign-in-page) as
-  they see it — each method with its state, their passkeys, their YubiKey and
+  they see it — each method with its state, their passkeys (name and model,
+  read-only: only the person renames them), their YubiKey and
   browser certificates (valid, expiring, expired or revoked), the apps and
   what they need, and their [sign-in history](auth-policies.md#sign-in-history)
   — with only the actions the caller may take: **Send setup link**, **Remove

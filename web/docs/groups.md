@@ -200,6 +200,7 @@ and a manual group's end dates), without reasons, Used by or History.
   Notes say where LLDAP hasn't caught up yet: "not in the group yet", "joins
   at the next sync", "still in until the next sync". Locked members (the
   Hub's account, `admin`, yourself in `lldap_admin`) have no actions.
+
 - **Add people**: pick one or more people, an optional end and, on a
   rule-based group, a reason. Each save waits for the evaluator's run (about
   a second), so the rows show the result when it finishes. If the run fails
