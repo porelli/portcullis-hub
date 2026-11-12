@@ -334,6 +334,12 @@
   // "Sign in as <person>…" (mockup section 3) or why it can't be
   // offered. notice: 'burned' when this tab's own start link didn't
   // open the session (already used, or refused): "start again".
+  // maxMinutes: the view's max_minutes (HUB_IMPERSONATION_MAX_MINUTES,
+  // 1–30), else 30.
+  function maxMinutes(view) {
+    const n = (view && view.max_minutes) | 0;
+    return n >= 1 && n <= 30 ? n : 30;
+  }
   function impersonationHtml(view, ctx, notice) {
     if (ctx.mode !== 'person') return '';
     const can = ctx.can || {};
@@ -351,7 +357,7 @@
     }
     if (can.impersonate) {
       return h + '<div class="msi-imp" data-msi-imp>' + button('danger', ' data-msi-act="imp-open"', 'Sign in as ' + ctx.user + '…') +
-        '<span class="pd-muted pd-small">asks for your YubiKey now and a reason · ends after at most 30 min · your own session ends · ' + esc(ctx.user) + ' sees it in their history and at their next sign-in</span></div>';
+        '<span class="pd-muted pd-small">asks for your YubiKey now and a reason · ends after at most ' + maxMinutes(view) + ' min · your own session ends · ' + esc(ctx.user) + ' sees it in their history and at their next sign-in</span></div>';
     }
     if (view.impersonate_refusal) {
       return h + '<p class="pd-muted pd-small msi-imp-refusal" data-msi-imp-refusal>Signing in as ' + esc(ctx.user) + ' isn\'t possible: ' + esc(view.impersonate_refusal) + '</p>';
@@ -815,7 +821,7 @@
     const dlg = el('dialog', { class: 'pd-dialog msi-imp-dialog', 'aria-label': title }, [
       el('div', { class: 'pd-dialog-headbar' }, [el('h3', { class: 'pd-dialog-title' }, [title])]),
       el('div', { class: 'pd-dialog-body' }, [
-        el('p', { class: 'pd-small' }, ['You open ' + user + '\'s apps as them for at most 30 minutes. Your own session in this browser ends; after Stop you sign in again as yourself. ' +
+        el('p', { class: 'pd-small' }, ['You open ' + user + '\'s apps as them for at most ' + maxMinutes(st.view) + ' minutes. Your own session in this browser ends; after Stop you sign in again as yourself. ' +
           user + ' reads your reason in their history and at their next sign-in.']),
         el('label', { class: 'pd-small', for: 'msi-imp-reason' }, ['Reason (3–200 characters, one line)']),
         input,

@@ -25,6 +25,8 @@ type impEventsKC struct {
 	imps       []keycloak.Event
 	loginErr   error
 	impErr     error
+	cfgOff     bool  // the events config doesn't store IMPERSONATE
+	cfgErr     error // the events config can't be read
 	impCalls   int
 	loginReads int
 	afterCall  func(n int) // after the n-th impersonate read
@@ -64,6 +66,12 @@ func (k *impEventsKC) UserImpersonateEvents(_ context.Context, user string, from
 		return nil, err
 	}
 	return out, nil
+}
+
+func (k *impEventsKC) ImpersonateEventsStored(context.Context) (bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return !k.cfgOff, k.cfgErr
 }
 
 func writeSignInClients(t *testing.T, h *Hub, clients map[string]string) {
@@ -160,6 +168,17 @@ func TestImpersonationApps(t *testing.T) {
 	if apps, used := a.run(context.Background(), quiet); used || len(apps) != 0 {
 		t.Errorf("another id's IMPERSONATE counted: %+v, %v", apps, used)
 	}
+	// The events config drifted (IMPERSONATE not stored) or can't be
+	// read: no event proves nothing, so used (final review M2).
+	kc.cfgOff = true
+	if _, used := a.run(context.Background(), quiet); !used {
+		t.Error("IMPERSONATE not stored, read as not used")
+	}
+	kc.cfgOff, kc.cfgErr = false, errors.New("keycloak down")
+	if _, used := a.run(context.Background(), quiet); !used {
+		t.Error("an unreadable events config read as not used")
+	}
+	kc.cfgErr = nil
 	// Events unreadable: used; logins unreadable: no native apps, still
 	// the gateway's.
 	kc.impErr, kc.loginErr = errors.New("keycloak down"), errors.New("keycloak down")

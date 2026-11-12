@@ -129,6 +129,11 @@ func (x *impFixture) advance(d time.Duration) {
 func newImpFixture(t *testing.T) *impFixture {
 	t.Helper()
 	f, audit := signInFixture(t)
+	x := &impFixture{f: f, h: f.h, audit: audit, ctx: context.Background(), now: impT0}
+	// The clock first: every file write (setSignIn's too) on the fake
+	// clock, never the real one (CI 43261328739: a real-clock written
+	// after impT0 kept the file from being due).
+	f.h.imp.now = x.clock
 	p := newFakePeople("alice", "bob", "carol", "portcullis-x")
 	p.addGroup(lldap.AdminGroup, "root", "sam", "ann")
 	f.h.SetPeople(adminPeople{p})
@@ -138,14 +143,12 @@ func newImpFixture(t *testing.T) *impFixture {
 		}
 		si.Methods[string(signin.BrowserCert)] = true
 	})
-	x := &impFixture{f: f, h: f.h, audit: audit, ctx: context.Background(), now: impT0,
-		kc: &impKC{disabled: map[string]bool{}, actions: map[string][]string{}, path: filepath.Join(f.data, ImpersonationFileName)},
-		fa: &touchFA{method: "security_key"}}
+	x.kc = &impKC{disabled: map[string]bool{}, actions: map[string][]string{}, path: filepath.Join(f.data, ImpersonationFileName)}
+	x.fa = &touchFA{method: "security_key"}
 	f.h.SetImpersonationKeycloak(x.kc)
 	f.h.SetFreshAuth(ListenerPeople, x.fa)
 	f.h.SetFreshAuth(ListenerHub, x.fa)
 	f.h.freshAuthReady.Store(true)
-	f.h.imp.now = x.clock
 	return x
 }
 
@@ -1015,5 +1018,103 @@ func TestNoticeGivenUpWhenPersonGone(t *testing.T) {
 	x.h.impersonationTick(x.ctx)
 	if x.rec(a.ID).ID != "" || x.rec(b.ID).ID != "" {
 		t.Error("not pruned on schedule")
+	}
+}
+
+// TestNoticeAfterFailedFileWrite (final review M1): when the file can't
+// be written at the end, the notice action waits: a sign-in before the
+// next good write would find no notice in the last good file. The loop
+// writes it again, then adds the action (the file holding the notice).
+func TestNoticeAfterFailedFileWrite(t *testing.T) {
+	x := newImpFixture(t)
+	x.h.SetImpersonationApps(func(context.Context, state.Impersonation) ([]signinhistory.OpenedApp, bool) { return nil, true })
+	s := x.mustStart(t, "root", "alice")
+	p := filepath.Join(x.f.data, ImpersonationFileName)
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(p, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.h.StopImpersonation(x.ctx, "alice", directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if n := x.kc.noticed(); len(n) != 0 {
+		t.Fatalf("notice added after a failed write: %v", n)
+	}
+	if r := x.rec(s.ID); !r.Finished || !r.NoticeOwed {
+		t.Fatalf("record = %+v", r)
+	}
+	x.h.impersonationTick(x.ctx)
+	if n := x.kc.noticed(); len(n) != 0 {
+		t.Fatalf("notice added while the file still fails: %v", n)
+	}
+	if err := os.RemoveAll(p); err != nil {
+		t.Fatal(err)
+	}
+	x.h.impersonationTick(x.ctx)
+	if n := x.kc.noticed(); !slices.Equal(n, []string{"alice"}) {
+		t.Fatalf("notices = %v", n)
+	}
+	x.kc.mu.Lock()
+	at := x.kc.fileAtAdd[0]
+	x.kc.mu.Unlock()
+	if doc := checkImpFileStrict(t, []byte(at), x.clock()); len(doc.Notices["alice"]) != 1 || doc.Notices["alice"][0].ID != s.ID {
+		t.Errorf("the file when the notice was added: %+v", doc)
+	}
+	if r := x.rec(s.ID); r.NoticeOwed {
+		t.Errorf("still owed: %+v", r)
+	}
+}
+
+// TestRefusalMatchesStart (final review M3): the person tab's refusal
+// and the start answer the same rule with the same text (one helper).
+func TestRefusalMatchesStart(t *testing.T) {
+	x := newImpFixture(t)
+	x.kc.disabled["carol"] = true
+	x.kc.actions["bob"] = []string{"CONFIGURE_TOTP"}
+	var limMu sync.Mutex
+	lim := impT0
+	x.h.entryNow = func() time.Time {
+		limMu.Lock()
+		defer limMu.Unlock()
+		lim = lim.Add(2 * time.Minute)
+		return lim
+	}
+	same := func(target string) {
+		t.Helper()
+		m, err := x.h.membership(x.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := x.h.impersonateRefusal(x.ctx, m, "root", target)
+		_, err = x.start("root", target, "checking quota")
+		if ref == nil || err == nil || ref.Error() != err.Error() {
+			t.Errorf("%s: refusal %v, start %v", target, ref, err)
+		}
+	}
+	for _, u := range []string{"nobody", "root", "portcullis-x", "sam", "carol", "bob"} {
+		same(u)
+	}
+	x.mustStart(t, "root", "alice")
+	same("alice")
+	setSignIn(x.f, func(si *state.SignIn) { si.ImpersonationOff = true })
+	same("alice")
+}
+
+// TestFileRewrittenAfterClockBack: a written time ahead of the clock (the
+// clock set back, or a write before the clock was injected) makes the
+// file due at once, so it never waits for the clock to catch up while
+// the readers see an odd written.
+func TestFileRewrittenAfterClockBack(t *testing.T) {
+	x := newImpFixture(t)
+	x.h.impersonationTick(x.ctx)
+	x.h.imp.fileMu.Lock()
+	x.h.imp.written = x.clock().Add(time.Hour)
+	x.h.imp.fileMu.Unlock()
+	x.advance(time.Second)
+	x.h.impersonationTick(x.ctx)
+	if doc := x.file(t); doc.Written != "2026-11-12T14:02:59Z" {
+		t.Errorf("written = %q after the clock went back", doc.Written)
 	}
 }

@@ -24,7 +24,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
-	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
@@ -427,72 +426,27 @@ func (h *Hub) startImpersonation(ctx context.Context, in StartImpersonation, adm
 	if !lldap.ValidUsername(target) {
 		return nil, refuse(statusErr(http.StatusBadRequest, "not a valid username"))
 	}
-	// 1. The switch.
-	h.mu.RLock()
-	off := h.st.SignIn.ImpersonationOff
-	h.mu.RUnlock()
-	if off {
-		return nil, refuse(errImpOff)
-	}
-	// 2. The caller, on a fresh snapshot.
-	m, err := h.membership(ctx)
+	// 1–7, the rules shared with the person tab's refusal (M3).
+	why, err := h.impStartRules(ctx, admin, target, func() (*directory.Membership, error) {
+		// 2. The caller, on a fresh snapshot.
+		m, err := h.membership(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !isLLDAPAdmin(m, admin) {
+			return nil, errImpAdminsOnly
+		}
+		isAdmin = true
+		return m, nil
+	}, func() error {
+		// 4. The reason.
+		if !validImpReason(reason) {
+			return errImpReason
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, refuse(err)
-	}
-	if !isLLDAPAdmin(m, admin) {
-		return nil, refuse(errImpAdminsOnly)
-	}
-	isAdmin = true
-	// 3. The target (a protected name first: the service account isn't
-	// in the snapshot, and it is never a target either way).
-	switch _, known := m.UUIDs[target]; {
-	case invite.ProtectedName(target):
-		return nil, refuse(errImpProtected)
-	case !known:
-		return nil, refuse(statusErr(http.StatusNotFound, "no such person: %s", target))
-	case target == admin:
-		return nil, refuse(errImpSelf)
-	case m.Administrators[target] || isLLDAPAdmin(m, target):
-		return nil, refuse(errImpAdminTarget)
-	}
-	kc := h.impKC()
-	if kc == nil {
-		why = "Keycloak isn't wired"
-		return nil, refuse(errImpKCNA)
-	}
-	enabled, err := kc.UserEnabled(ctx, target)
-	if errors.Is(err, keycloak.ErrUserNotFound) {
-		return nil, refuse(statusErr(http.StatusNotFound, "no such person: %s", target))
-	}
-	if err != nil {
-		why = "reading the person in Keycloak failed"
-		log.Printf("impersonation: %s: reading %s in Keycloak: %v", admin, target, err)
-		return nil, refuse(errImpKCNA)
-	}
-	if !enabled {
-		return nil, refuse(errImpDisabled)
-	}
-	// 4. The reason.
-	if !validImpReason(reason) {
-		return nil, refuse(errImpReason)
-	}
-	// 5. One at a time.
-	if err := h.impOneAtATime(admin, target); err != nil {
-		return nil, refuse(err)
-	}
-	// 6. Unfinished steps.
-	acts, err := kc.RequiredActions(ctx, target)
-	if err != nil {
-		why = "reading the person's required actions failed"
-		log.Printf("impersonation: %s: reading %s's required actions: %v", admin, target, err)
-		return nil, refuse(errImpKCNA)
-	}
-	if slices.ContainsFunc(acts, func(a string) bool { return a != keycloak.ImpersonationNoticeAction }) {
-		return nil, refuse(errImpUnfinished(target))
-	}
-	// 7. A touch method on (before the proof is spent).
-	if !h.touchMethodOn() {
-		return nil, refuse(errImpNoTouch)
 	}
 	// 8. The administrator's session.
 	if !impSessionIDRe.MatchString(in.AdminSID) {
@@ -705,8 +659,10 @@ func (h *Hub) finishEndsKnown(ctx context.Context, ids []string, actor directory
 //     not_used; saved, the file written again (with the notice); the
 //     audit impersonation.end; then Finished, and NoticeOwed when used;
 //  2. NoticeOwed: the notice action, after the file holds the notice
-//     (the Task 4 review: a sign-in right after it already finds it);
-//     owed until Keycloak accepts it (adding it is idempotent).
+//     (the Task 4 review: a sign-in right after it already finds it) —
+//     never after a failed write (final review M1: written again first,
+//     else left for the loop); owed until Keycloak accepts it (adding it
+//     is idempotent).
 //
 // Caller holds imp.endMu, never mu.
 func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, known *impAnswer) {
@@ -756,6 +712,19 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 		h.mu.Unlock()
 	}
 	if !rec.NoticeOwed {
+		return
+	}
+	// The action only once the file holds the notice (final review M1):
+	// after a failed write, a sign-in would find the last good file
+	// without it and complete the action silently. Written again here;
+	// still failing, it waits for the loop's next tick.
+	h.mu.Lock()
+	var werr error
+	if h.impFileFailed() {
+		werr = h.writeImpersonationFileLocked()
+	}
+	h.mu.Unlock()
+	if werr != nil {
 		return
 	}
 	kc := h.impKC()

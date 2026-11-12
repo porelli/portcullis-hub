@@ -481,6 +481,35 @@ routes['POST /api/directory/users/alice/impersonation'] = { status: 200, body: {
 	}
 }
 
+// TestSignInAsMaxMinutes (final review M4): the row and the dialog say
+// the view's max_minutes (HUB_IMPERSONATION_MAX_MINUTES), never a fixed
+// 30; a view without it says 30.
+func TestSignInAsMaxMinutes(t *testing.T) {
+	view := strings.TrimSuffix(personView(true, "", "null"), "}") + `,"max_minutes":10}`
+	out := impJS(t, personSetup+personMount(view), []string{"mysignin.js"}, `(async () => {
+  const S = window.PortcullisMySignIn;
+  const root = document.createElement('div');
+  await S.mount(root, { mode: 'person', user: 'alice' });
+  await tick();
+  const r = { html: root.innerHTML };
+  const btn = { dataset: { msiAct: 'imp-open' }, disabled: false };
+  btn.closest = () => btn;
+  root.ls.click[0]({ target: btn });
+  r.dialog = document.body.querySelector('dialog').textContent;
+  r.plain = S.impersonationHtml(`+personView(true, "", "null")+`, {mode: 'person', user: 'alice', can: {impersonate: true}});
+  return r;
+})()`).(map[string]any)
+	if h := out["html"].(string); !strings.Contains(h, "ends after at most 10 min ·") || strings.Contains(h, "30 min") {
+		t.Errorf("row:\n%s", h)
+	}
+	if d := out["dialog"].(string); !strings.Contains(d, "as them for at most 10 minutes.") || strings.Contains(d, "30 minutes") {
+		t.Errorf("dialog: %s", d)
+	}
+	if p := out["plain"].(string); !strings.Contains(p, "ends after at most 30 min ·") {
+		t.Errorf("no max_minutes:\n%s", p)
+	}
+}
+
 // TestSignInAsRunningAndStartAgain: the running line (UTC times, the
 // reason, the minutes left, Stop → POST …/impersonation/stop), and the
 // tab's own start that is still listed as running when the admin comes

@@ -251,10 +251,19 @@ func (h *Hub) writeImpersonationFileLocked() error {
 	return nil
 }
 
-// impersonationFileDue: the file failed or is a minute old. Takes the
-// file lock.
+// impFileFailed: the last write failed. Takes the file lock.
+func (h *Hub) impFileFailed() bool {
+	h.imp.fileMu.Lock()
+	defer h.imp.fileMu.Unlock()
+	return h.imp.fileFailed
+}
+
+// impersonationFileDue: the file failed, is a minute old or was written
+// "later" than now (the clock went back). Takes the file lock.
 func (h *Hub) impersonationFileDue(now time.Time) bool {
 	h.imp.fileMu.Lock()
 	defer h.imp.fileMu.Unlock()
-	return h.imp.fileFailed || now.Sub(h.imp.written) >= impRewriteEvery
+	// A written ahead of now (the clock set back) is due too: never wait
+	// for the clock to catch up.
+	return h.imp.fileFailed || now.Sub(h.imp.written) >= impRewriteEvery || now.Before(h.imp.written)
 }

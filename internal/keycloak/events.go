@@ -80,6 +80,32 @@ func (c *Client) EnsureEventsConfig(ctx context.Context, historyDays int) error 
 	return nil
 }
 
+// ImpersonateEventsStored reports whether the realm stores IMPERSONATE
+// events (eventsEnabled and the type among enabledEventTypes): when it
+// doesn't (the config changed by hand since EnsureEventsConfig), no event
+// proves nothing (final review M2).
+func (c *Client) ImpersonateEventsStored(ctx context.Context) (bool, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.api().GetRequestWithBearerAuth(ctx, tok).Get(c.eventsConfigPath())
+	if err != nil {
+		return false, fmt.Errorf("read the events config: %w", err)
+	}
+	if resp.IsError() {
+		return false, &HTTPError{Op: "read the events config", Status: resp.StatusCode()}
+	}
+	var cur struct {
+		Enabled bool     `json:"eventsEnabled"`
+		Types   []string `json:"enabledEventTypes"`
+	}
+	if err := json.Unmarshal(resp.Body(), &cur); err != nil {
+		return false, fmt.Errorf("read the events config: %w", err)
+	}
+	return cur.Enabled && slices.Contains(cur.Types, "IMPERSONATE"), nil
+}
+
 // Event is one of the realm's user events as the history reads it
 // (contract §8.2): LOGIN and LOGIN_ERROR, with the extension's pc_*
 // details (§8.1 "History details").

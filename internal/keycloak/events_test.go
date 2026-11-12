@@ -268,3 +268,30 @@ func TestClientLoginEventsQuery(t *testing.T) {
 		t.Error("no client accepted")
 	}
 }
+
+// TestImpersonateEventsStored (final review M2): true only when the
+// realm stores events and IMPERSONATE is among the types; a failed read
+// is an error.
+func TestImpersonateEventsStored(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	for _, tc := range []struct {
+		cfg  map[string]any
+		want bool
+	}{
+		{map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "IMPERSONATE"}}, true},
+		{map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR"}}, false},
+		{map[string]any{"eventsEnabled": false, "enabledEventTypes": []any{"IMPERSONATE"}}, false},
+		{map[string]any{"eventsEnabled": true}, false},
+	} {
+		kc.With(func() { kc.EventsConfig = tc.cfg })
+		if got, err := c.ImpersonateEventsStored(ctx); err != nil || got != tc.want {
+			t.Errorf("%v: %v, %v; want %v", tc.cfg, got, err, tc.want)
+		}
+	}
+	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
+	if _, err := c.ImpersonateEventsStored(ctx); err == nil {
+		t.Error("a failed GET was not reported")
+	}
+}

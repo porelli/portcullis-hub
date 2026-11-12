@@ -28,6 +28,7 @@ const HistoryImpersonation = "impersonation"
 type ImpersonationEvents interface {
 	UserClientLoginEvents(ctx context.Context, username, clientID string, from, to time.Time, first, max int) ([]keycloak.Event, error)
 	UserImpersonateEvents(ctx context.Context, username string, from, to time.Time) ([]keycloak.Event, error)
+	ImpersonateEventsStored(ctx context.Context) (bool, error)
 }
 
 // impEventSettle is how long after the last moment Keycloak's resource
@@ -209,7 +210,8 @@ func (a *impApps) nativeApps(ctx context.Context, rec state.Impersonation, from,
 
 // used reports whether rec was used (D44): an IMPERSONATE event of the
 // person with pc_imp = the id. Unsure is used: no Keycloak, an
-// unreadable answer, or no event while the start could still have been
+// unreadable answer, an events config that doesn't store IMPERSONATE
+// (or can't be read), or no event while the start could still have been
 // used moments ago and the event may not be readable yet (then asked
 // once more after impEventSettle).
 func (a *impApps) used(ctx context.Context, rec state.Impersonation, now, to time.Time) bool {
@@ -247,6 +249,18 @@ func (a *impApps) used(ctx context.Context, rec state.Impersonation, now, to tim
 		if found, ok := ask(); !ok || found {
 			return true
 		}
+	}
+	// No event proves nothing when the realm doesn't store them (its
+	// events config changed by hand) or that can't be told (final
+	// review M2).
+	stored, err := a.kc.ImpersonateEventsStored(ctx)
+	if err != nil {
+		log.Printf("impersonation: %s: Keycloak's events config can't be read: %v (counted as used)", rec.ID, err)
+		return true
+	}
+	if !stored {
+		log.Printf("impersonation: %s: Keycloak's events config doesn't store IMPERSONATE (counted as used)", rec.ID)
+		return true
 	}
 	return false
 }
