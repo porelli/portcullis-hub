@@ -113,6 +113,16 @@
     return '';
   }
 
+  // labelProblem: why raw isn't a passkey name ('' when it is): the
+  // Hub's rule (contract §5.1) — trimmed, 1–64 characters, one line, no
+  // control or bidi character.
+  function labelProblem(raw) {
+    const t = String(raw || '').trim();
+    const n = Array.from(t).length;
+    if (n < 1 || n > 64 || REASON_BAD.test(t)) return 'A passkey name is 1–64 characters on one line.';
+    return '';
+  }
+
   // protectedName: accounts whose certificates (and password) are managed
   // from the server (admin, portcullis-hub, every portcullis-* name): the
   // Hub refuses them, so the page doesn't offer it.
@@ -178,6 +188,7 @@
     return {
       password: on('password') && !prot,
       addPasskey: true,
+      rename: true,
       createBrowser: on('browser_cert') && !prot,
       revokeOwnBrowser: !prot,
       renew: on('yubikey_cert') && !prot,
@@ -204,11 +215,14 @@
   // keyList: one line per passkey, "<name> · <model> · added <date>"
   // (the name is Keycloak's userLabel, the model the FIDO list's name for
   // its AAGUID, display only).
-  function keyList(keys) {
+  // On one's own page each key has Rename (o.rename; its form opens in
+  // the method's panel).
+  function keyList(m, keys, o) {
     let h = '<ul class="msi-keys">';
     for (const k of keys) {
       const text = (k.label || 'unnamed') + ' · ' + (k.model || 'unknown model') + (fmtDay(k.created_at) ? ' · added ' + fmtDay(k.created_at) : '');
-      h += '<li data-msi-key="' + esc(k.id) + '"><span class="msi-key">' + esc(text) + '</span></li>';
+      h += '<li data-msi-key="' + esc(k.id) + '"><span class="msi-key">' + esc(text) + '</span>' +
+        (o.rename && k.id ? ' ' + button('ghost xs', ' data-msi-act="pk-rename" data-cred="' + esc(k.id) + '" data-method="' + esc(m.id) + '"', 'Rename') : '') + '</li>';
     }
     return h + '</ul>';
   }
@@ -245,7 +259,7 @@
       if (m.state === 'unknown') { sub = 'couldn\'t be read right now'; tag = pill('warn', 'unknown'); }
       else if (keys.length) {
         tag = pill('ok', String(keys.length));
-        more = keyList(keys);
+        more = keyList(m, keys, o);
       } else { sub = 'none yet'; tag = pill('', 'none'); }
       const acct = self ? accountURL(view) : '';
       if (acct) acts = '<a class="pd-btn secondary sm" href="' + esc(acct) + '" target="_blank" rel="noopener noreferrer">+ Add</a>';
@@ -680,6 +694,37 @@
     setStatus(st, 'Your password is removed.');
   }
 
+  // The passkey rename form (one's own page): in the method's panel,
+  // prefilled with the key's name.
+  function openRenameForm(st, method, id) {
+    const p = panel(st, method);
+    if (!p) return;
+    const m = (st.view.methods || []).find(x => x.id === method) || {};
+    const k = (m.passkeys || []).find(x => x.id === id) || {};
+    p.innerHTML = '<div class="msi-form"><label class="pd-small" for="msi-pklabel">Name (1–64 characters)</label>' +
+      '<input class="pd-input" type="text" id="msi-pklabel" maxlength="64" autocomplete="off" value="' + esc(k.label || '') + '" data-msi-pklabel data-cred="' + esc(id) + '">' +
+      '<div class="pd-actions">' + button('primary', ' data-msi-act="pk-rename-go" data-cred="' + esc(id) + '"', 'Save') + button('secondary', ' data-msi-act="panel-close"', 'Cancel') + '</div>' + STATUS_SLOT + '</div>';
+    p.querySelector('[data-msi-pklabel]').focus();
+  }
+  async function renameGo(st, p, id) {
+    const input = p && p.querySelector('[data-msi-pklabel]');
+    if (!input) return;
+    const problem = labelProblem(input.value);
+    if (problem) { panelStatus(p, problem, true); return; }
+    const label = String(input.value).trim();
+    panelBusy(p, true);
+    panelStatus(p, 'Saving…', false, true);
+    try {
+      await call('PUT', '/api/me/signin/passkeys/' + enc(id) + '/label', { label });
+    } catch (err) {
+      panelBusy(p, false);
+      panelStatus(p, err.message, true);
+      return;
+    }
+    await load(st);
+    setStatus(st, 'Renamed to “' + label + '”.');
+  }
+
   function openCreateForm(st) {
     const p = panel(st, 'browser_cert');
     const max = ((st.view.limits || {}).effective || {}).browser_cert_days || 1;
@@ -938,6 +983,8 @@
       case 'pw-change': return openPasswordForm(st);
       case 'pw-go': return passwordGo(st);
       case 'pw-remove': return removePassword(st);
+      case 'pk-rename': return openRenameForm(st, b.dataset.method, b.dataset.cred);
+      case 'pk-rename-go': return renameGo(st, p, b.dataset.cred);
       case 'bc-create': return openCreateForm(st);
       case 'bc-go': return createGo(st);
       case 'revoke': return revoke(st, b.dataset.serial, b.dataset.kind);
@@ -970,6 +1017,7 @@
         if (e.key !== 'Enter' || !e.target.matches) return;
         if (e.target.matches('[data-msi-pw1], [data-msi-pw2]')) { e.preventDefault(); passwordGo(st); }
         else if (e.target.matches('[data-msi-days]')) { e.preventDefault(); createGo(st); }
+        else if (e.target.matches('[data-msi-pklabel]')) { e.preventDefault(); renameGo(st, e.target.closest('[data-msi-panel]'), e.target.dataset.cred); }
       });
     } else {
       st.opts = opts || st.opts;
@@ -989,7 +1037,8 @@
     for (const st of mounted) if (st.impStarted) { st.impStarted = false; load(st); }
   });
 
-  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText, certFreshProblem, impersonationHtml, reasonProblem,
-    // For the node tests: one mount's history paging over a stub fetch.
-    _test: { loadHistory, state: (el, opts) => ({ el, opts, view: {}, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null }) } };
+  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText, certFreshProblem, impersonationHtml, reasonProblem, labelProblem,
+    // For the node tests: one mount's history paging and a passkey rename
+    // over a stub fetch.
+    _test: { loadHistory, renameGo, state: (el, opts) => ({ el, opts, view: {}, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null }) } };
 })();

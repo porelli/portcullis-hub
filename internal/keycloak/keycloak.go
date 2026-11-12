@@ -1173,6 +1173,68 @@ func (c *Client) RemovePasskeys(ctx context.Context, username string, requireNew
 	return n, c.logout(ctx, tok, id)
 }
 
+// ErrPasskeyNotFound: the credential id isn't one of the user's passkeys
+// (unknown, another person's, or not a passkey type).
+var ErrPasskeyNotFound = errors.New("no such passkey")
+
+// ErrPasskeyLabelTaken: another of the user's credentials already has
+// that label (case-insensitively; Keycloak refuses duplicates too).
+var ErrPasskeyLabelTaken = errors.New("another sign-in method has that name")
+
+// SetPasskeyLabel renames one of username's passkeys (contract §5.1,
+// polish 1): Keycloak's own credential userLabel, through PUT
+// /users/{id}/credentials/{credentialID}/userLabel (text/plain). The id
+// must be one of the user's credentials and a passkey type, else
+// ErrPasskeyNotFound; a label another of their credentials has
+// (strings.EqualFold; the passkey's own name recased is not a duplicate)
+// or Keycloak's 409 is ErrPasskeyLabelTaken. old is the label before; an
+// unchanged label returns at once. An unknown user is ErrUserNotFound.
+func (c *Client) SetPasskeyLabel(ctx context.Context, username, credentialID, label string) (old string, err error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return "", err
+	}
+	u, err := c.importUser(ctx, tok, username)
+	if err != nil {
+		return "", err
+	}
+	id := str(u.ID)
+	creds, err := c.credentials(ctx, tok, id)
+	if err != nil {
+		return "", err
+	}
+	found := false
+	for _, cr := range creds {
+		if cr.ID == credentialID {
+			if !passkeyTypes[cr.Type] {
+				return "", ErrPasskeyNotFound
+			}
+			found, old = true, cr.Label
+		}
+	}
+	if !found {
+		return "", ErrPasskeyNotFound
+	}
+	for _, cr := range creds {
+		if cr.ID != credentialID && strings.EqualFold(cr.Label, label) {
+			return old, ErrPasskeyLabelTaken
+		}
+	}
+	if old == label {
+		return old, nil
+	}
+	if err := c.api().UpdateCredentialUserLabel(ctx, tok, Realm, url.PathEscape(id), url.PathEscape(credentialID), label); err != nil {
+		switch statusCode(err) {
+		case http.StatusConflict:
+			return old, ErrPasskeyLabelTaken
+		case http.StatusNotFound:
+			return old, ErrPasskeyNotFound
+		}
+		return old, opErr("set credential label", err)
+	}
+	return old, nil
+}
+
 func (c *Client) logout(ctx context.Context, tok, id string) error {
 	if err := c.api().LogoutAllSessions(ctx, tok, Realm, url.PathEscape(id)); err != nil {
 		return opErr("sign out user", err)

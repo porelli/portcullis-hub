@@ -52,10 +52,13 @@ type Inventory struct {
 // Keycloak's passkeys (keycloak.Client.SignInCredentials) and enroll's
 // certificates (invite.Client.Certificates). nil Passkeys: not known at
 // all (the lockout guard answers 503); nil Certificates: certificates
-// unknown.
+// unknown. PasskeyLabel renames one of a person's passkeys
+// (keycloak.Client.SetPasskeyLabel: Keycloak's own userLabel, the old
+// label back); nil: renaming is unavailable (503).
 type SignInSources struct {
 	Passkeys     func(ctx context.Context) (map[string][]keycloak.PasskeyCredential, error)
 	Certificates func(ctx context.Context) ([]invite.CertRecord, error)
+	PasskeyLabel func(ctx context.Context, username, credentialID, label string) (string, error)
 }
 
 // SetSignInSources wires the inventory's sources (main: Keycloak and

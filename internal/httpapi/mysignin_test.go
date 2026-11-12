@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"slices"
@@ -25,7 +26,12 @@ type signInCertActions struct {
 	revokes  []string
 	issues   []string
 	issueErr error
+	// labels: the passkey renames signInEnv's PasskeyLabel source got.
+	labels []string
 }
+
+// alicePasskeyID is alice's security key in signInEnv.
+const alicePasskeyID = "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d"
 
 const routeP12Password = "ABCDE-FGHJK-MNPQR-STVWX"
 
@@ -69,10 +75,20 @@ func signInEnv(t *testing.T) (*toolEnv, *signInCertActions) {
 	h := e.s.Hub
 	h.SetPeople(e.s.Directory)
 	later := time.Now().Add(60 * 24 * time.Hour)
+	ca := &signInCertActions{}
 	h.SetSignInSources(hub.SignInSources{
 		Passkeys: func(context.Context) (map[string][]keycloak.PasskeyCredential, error) {
-			return map[string][]keycloak.PasskeyCredential{"alice": {{ID: "k", Type: string(signin.SecurityKey), Label: "YubiKey 5C"}},
+			return map[string][]keycloak.PasskeyCredential{"alice": {{ID: alicePasskeyID, Type: string(signin.SecurityKey), Label: "YubiKey 5C"}},
 				"root": {{ID: "r", Type: string(signin.SecurityKey)}}}, nil
+		},
+		PasskeyLabel: func(_ context.Context, user, id, label string) (string, error) {
+			ca.mu.Lock()
+			defer ca.mu.Unlock()
+			ca.labels = append(ca.labels, user+" "+id+" "+label)
+			if user != "alice" || id != alicePasskeyID {
+				return "", keycloak.ErrPasskeyNotFound
+			}
+			return "YubiKey 5C", nil
 		},
 		Certificates: func(context.Context) ([]invite.CertRecord, error) {
 			return []invite.CertRecord{
@@ -88,7 +104,6 @@ func signInEnv(t *testing.T) (*toolEnv, *signInCertActions) {
 	}
 	h.SetFreshAuth(hub.ListenerPeople, &fakeFreshAuth{})
 	h.SetFreshAuthReadyForTest(true)
-	ca := &signInCertActions{}
 	h.SetCertActions(ca)
 	return e, ca
 }
@@ -145,7 +160,7 @@ func TestMySignInRoutesCallerOnly(t *testing.T) {
 		{"GET", "/api/me/signin", ""}, {"GET", "/api/me/signin/history", ""},
 		{"POST", "/api/me/signin/browser-certificates", `{}`}, {"DELETE", "/api/me/signin/certificates/0a:02", ""},
 		{"POST", "/api/me/signin/yubikey-certificate/renew", `{"csr":"x"}`}, {"PUT", "/api/me/signin/password", `{}`},
-		{"DELETE", "/api/me/signin/password", ""},
+		{"DELETE", "/api/me/signin/password", ""}, {"PUT", "/api/me/signin/passkeys/" + alicePasskeyID + "/label", `{"label":"x"}`},
 	}
 	for _, rt := range routes {
 		if r, _ := doAs(t, e.ppl, "", rt[0], rt[1], rt[2]); r.StatusCode != 401 {
@@ -167,8 +182,8 @@ func TestMySignInRoutesCallerOnly(t *testing.T) {
 			t.Errorf("route %s isn't a D25 route", p)
 		}
 	}
-	if n != 7 {
-		t.Errorf("%d routes under /api/me/signin, want the 7 of D25", n)
+	if n != 8 {
+		t.Errorf("%d routes under /api/me/signin, want the 8 of D25 (with polish 1's passkey rename)", n)
 	}
 	r, b := doAs(t, e.ppl, "ALICE", "GET", "/api/me/signin", "")
 	if r.StatusCode != 200 || r.Header.Get("Cache-Control") != "no-store" || !strings.Contains(b, `"user":"alice"`) || strings.Contains(b, "0b:01") ||
@@ -261,5 +276,64 @@ func TestMySignInAccountURLAndCertFresh(t *testing.T) {
 	}
 	if v.AccountURL != "" {
 		t.Errorf("account_url = %q without Config.AccountURL", v.AccountURL)
+	}
+}
+
+// TestRenameOwnPasskeyRoute: PUT /api/me/signin/passkeys/{id}/label on
+// the people listener only (204; strict body; 8 KiB), refused while
+// impersonated (403, Keycloak not called, nothing audited ok).
+func TestRenameOwnPasskeyRoute(t *testing.T) {
+	e, ca := signInEnv(t)
+	path := "/api/me/signin/passkeys/" + alicePasskeyID + "/label"
+	if r, b := doAs(t, e.ppl, "Alice", "PUT", path, `{"label":"Office key"}`); r.StatusCode != 204 {
+		t.Fatalf("rename = %d %s", r.StatusCode, b)
+	}
+	if strings.Join(ca.labels, ",") != "alice "+alicePasskeyID+" Office key" {
+		t.Errorf("source calls = %v", ca.labels)
+	}
+	var ok []directory.AuditEntry
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "signin.passkey.label" && a.Result == "ok" {
+			ok = append(ok, a)
+		}
+	}
+	if len(ok) != 1 || ok[0].Detail != "YubiKey 5C → Office key" || ok[0].Actor != "alice" {
+		t.Errorf("audit = %+v", ok)
+	}
+	if r, _ := doAs(t, e.ppl, "alice", "PUT", path, `{"label":"x","extra":1}`); r.StatusCode != 400 {
+		t.Errorf("unknown field = %d", r.StatusCode)
+	}
+	if r, _ := doAs(t, e.ppl, "alice", "PUT", path, `{"label":"`+strings.Repeat("x", 9<<10)+`"}`); r.StatusCode != 413 {
+		t.Errorf("9 KiB body = %d", r.StatusCode)
+	}
+	if r, b := doAs(t, e.ppl, "alice", "PUT", "/api/me/signin/passkeys/"+"6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"+"/label", `{"label":"Mine now"}`); r.StatusCode != 404 || strings.TrimSpace(b) != "no such passkey" {
+		t.Errorf("foreign id = %d %s", r.StatusCode, b)
+	}
+	if r, _ := doAs(t, e.hub, "alice", "PUT", path, `{"label":"Office key"}`); r.StatusCode != 404 {
+		t.Errorf("hub listener = %d, want 404", r.StatusCode)
+	}
+	// Impersonated: 403 with the read-only text, Keycloak not called.
+	before := len(ca.labels)
+	req, _ := http.NewRequest("PUT", e.ppl.URL+path, strings.NewReader(`{"label":"Hijacked"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(ProxySecretHeader, testSecret)
+	req.Header.Set("X-Forwarded-User", "alice")
+	req.Header.Set(ImpersonationHeader, "imp-1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 403 || strings.TrimSpace(string(b)) != "not while you are signed in as someone else: Stop first" {
+		t.Errorf("impersonated = %d %s", resp.StatusCode, b)
+	}
+	if len(ca.labels) != before {
+		t.Error("an impersonated rename reached Keycloak")
+	}
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "signin.passkey.label" && a.Result == "ok" && strings.Contains(a.Detail, "Hijacked") {
+			t.Errorf("an impersonated rename was audited ok: %+v", a)
+		}
 	}
 }

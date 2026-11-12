@@ -12,9 +12,11 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/signin"
 )
 
@@ -422,4 +424,75 @@ func logWarnings(u string, res *directory.Result) {
 	for _, w := range res.Warnings {
 		log.Printf("signin: %s's own password: %s", u, w)
 	}
+}
+
+// MaxPasskeyLabelRunes is the longest passkey name (contract §5.1).
+const MaxPasskeyLabelRunes = 64
+
+var (
+	errPasskeyLabel    = &StatusError{Status: http.StatusBadRequest, Err: errors.New("a passkey name is 1–64 characters on one line")}
+	errNoSuchPasskey   = &StatusError{Status: http.StatusNotFound, Err: errors.New("no such passkey")}
+	errPasskeyLabelsNA = &StatusError{Status: http.StatusServiceUnavailable, Err: errors.New("passkey names can't be changed right now: try again later")}
+)
+
+// passkeyLabel is raw trimmed, when it is a passkey name: 1–64 runes of
+// valid UTF-8 with no control or bidi character (one line); else the 400.
+func passkeyLabel(raw string) (string, error) {
+	l := strings.TrimSpace(raw)
+	if n := utf8.RuneCountInString(l); !utf8.ValidString(l) || n < 1 || n > MaxPasskeyLabelRunes || strings.IndexFunc(l, controlOrBidi) >= 0 {
+		return "", errPasskeyLabel
+	}
+	return l, nil
+}
+
+// RenameOwnPasskey renames one of user's (the caller's) own passkeys
+// (contract §5.1, polish 1): Keycloak's credential userLabel, by
+// credential id (not a UUID, another person's, or not a passkey: 404
+// "no such passkey"); the label must be unique among the caller's other
+// credentials, case-insensitively (409). No fresh auth: it only changes a
+// name. The inventory is marked stale, so the next view shows the new
+// name. Audited signin.passkey.label "<old> → <new>" ("credential <id>"
+// when refused); counts toward the refusal limit. Keycloak unreachable
+// (or no source) is 503.
+func (h *Hub) RenameOwnPasskey(ctx context.Context, user, credentialID, label string) (err error) {
+	u, err := myUser(user)
+	if err != nil {
+		return err
+	}
+	if !h.entryLimit.reserve(u, h.entryClock()) {
+		return errEntryLimited
+	}
+	defer func() { h.entryLimit.release(u, h.entryClock(), isRefusal(err)) }()
+	actor := directory.Human(u)
+	refuse := func(err error) error {
+		h.auditSignIn(actor, "signin.passkey.label", u, "credential "+clipRunes(credentialID, 64), err)
+		return err
+	}
+	l, err := passkeyLabel(label)
+	if err != nil {
+		return refuse(err)
+	}
+	if !keycloak.ValidUserID(credentialID) {
+		return refuse(errNoSuchPasskey)
+	}
+	c := &h.signInInv
+	c.mu.Lock()
+	src := c.src.PasskeyLabel
+	c.mu.Unlock()
+	if src == nil {
+		return refuse(errPasskeyLabelsNA)
+	}
+	old, err := src(ctx, u, credentialID, l)
+	switch {
+	case errors.Is(err, keycloak.ErrPasskeyNotFound), errors.Is(err, keycloak.ErrUserNotFound):
+		return refuse(errNoSuchPasskey)
+	case errors.Is(err, keycloak.ErrPasskeyLabelTaken):
+		return refuse(&StatusError{Status: http.StatusConflict, Err: errors.New("you already have a sign-in method named “" + l + "”")})
+	case err != nil:
+		log.Printf("signin: renaming %s's passkey %s: %v", u, credentialID, err)
+		return refuse(errPasskeyLabelsNA)
+	}
+	h.MarkInventoryStale()
+	h.auditSignIn(actor, "signin.passkey.label", u, old+" → "+l, nil)
+	return nil
 }

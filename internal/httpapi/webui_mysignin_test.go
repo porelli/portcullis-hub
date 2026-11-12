@@ -464,3 +464,68 @@ func TestMySignInFixRound1(t *testing.T) {
 		t.Error("directory.js doesn't fall back to its own buttons when the tab can't be read")
 	}
 }
+
+// TestMySignInRename (polish 1): each key has Rename on one's own page
+// (none on a person's tab); labelProblem is the Hub's rule; Rename → Save
+// sends PUT …/passkeys/<id>/label {label} and reloads the view.
+func TestMySignInRename(t *testing.T) {
+	v := mySignInView("YubiKey 5C")
+	out := mySignInJS(t, `(async () => {
+  const v = `+v+`;
+  const res = {self: S.methodsHtml(v, {mode: 'self'}), person: S.methodsHtml(v, {mode: 'person', user: 'alice', can: {revoke: true}}),
+    ok: S.labelProblem('Office key'), padded: S.labelProblem('  Office key  '), empty: S.labelProblem(''), blank: S.labelProblem('   '),
+    long: S.labelProblem('x'.repeat(65)), max: S.labelProblem('é'.repeat(64)), nl: S.labelProblem('a\nb'), bidi: S.labelProblem('a\u202eb')};
+  const calls = [];
+  global.fetch = (url, opts) => { calls.push({url, method: (opts && opts.method) || 'GET', body: (opts && opts.body) || ''});
+    return Promise.resolve({ ok: true, text: async () => url.startsWith('/api/me/signin/passkeys/') ? '' : (url.includes('/history') ? JSON.stringify({entries: [], next: '', unknown: []}) : JSON.stringify(v)) }); };
+  const input = new El('input');
+  const p = new El('div');
+  p.querySelector = sel => sel === '[data-msi-pklabel]' ? input : null;
+  p.querySelectorAll = () => [];
+  const el = new El('div');
+  el.querySelector = sel => null;
+  const st = S._test.state(el, {mode: 'self'});
+  st.view = v;
+  input.value = '  ';
+  await S._test.renameGo(st, p, 'a/b id');
+  res.badCalls = calls.length;
+  input.value = '  Office key ';
+  await S._test.renameGo(st, p, 'a/b id');
+  res.calls = calls;
+  return res;
+})()`).(map[string]any)
+	self, person := out["self"].(string), out["person"].(string)
+	for _, id := range []string{"6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b", "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d", "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"} {
+		li := self[strings.Index(self, `<li data-msi-key="`+id+`">`):]
+		li = li[:strings.Index(li, "</li>")]
+		if !strings.Contains(li, `data-msi-act="pk-rename" data-cred="`+id+`"`) {
+			t.Errorf("key %s has no Rename:\n%s", id, li)
+		}
+	}
+	if strings.Contains(person, "pk-rename") {
+		t.Errorf("a person's tab offers Rename:\n%s", person)
+	}
+	const problem = "A passkey name is 1–64 characters on one line."
+	if out["ok"] != "" || out["padded"] != "" || out["max"] != "" {
+		t.Errorf("good labels refused: %v", out)
+	}
+	for _, k := range []string{"empty", "blank", "long", "nl", "bidi"} {
+		if out[k] != problem {
+			t.Errorf("%s = %v, want %q", k, out[k], problem)
+		}
+	}
+	if out["badCalls"] != float64(0) {
+		t.Errorf("a bad label was sent: %v", out["badCalls"])
+	}
+	calls, _ := out["calls"].([]any)
+	if len(calls) < 2 {
+		t.Fatalf("calls = %v", calls)
+	}
+	put := calls[0].(map[string]any)
+	if put["url"] != "/api/me/signin/passkeys/a%2Fb%20id/label" || put["method"] != "PUT" || put["body"] != `{"label":"Office key"}` {
+		t.Errorf("PUT = %v", put)
+	}
+	if get := calls[1].(map[string]any); get["url"] != "/api/me/signin" || get["method"] != "GET" {
+		t.Errorf("no reload after the rename: %v", calls)
+	}
+}
