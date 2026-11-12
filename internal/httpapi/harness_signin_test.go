@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
@@ -222,4 +223,48 @@ func harnessLoginEvents(_ context.Context, user string, from, to time.Time, firs
 		return nil, nil
 	}
 	return out[first:min(len(out), first+max)], nil
+}
+
+// harnessImpKC is the harness's Keycloak for signing in as someone else
+// (sign-in part 3 Task 8 fix round 1): every person enabled, no
+// required action, the notice a no-op.
+type harnessImpKC struct{}
+
+func (harnessImpKC) UserEnabled(context.Context, string) (bool, error)         { return true, nil }
+func (harnessImpKC) RequiredActions(context.Context, string) ([]string, error) { return nil, nil }
+func (harnessImpKC) RequireImpersonationNotice(context.Context, string) error  { return nil }
+
+// harnessImpPerson is the person the harness's running impersonation
+// is of; harnessImpAdmin the second administrator who runs it (sam
+// signed in as erin), so root may still start one (one at a time).
+const (
+	harnessImpPerson = "erin"
+	harnessImpAdmin  = "sam"
+)
+
+// seedImpersonation wires harnessImpKC (so root's view of alice offers
+// "Sign in as alice…"), adds the administrator sam and starts sam's
+// impersonation of erin through
+// the real start (a fake fresh-auth code: a security key touch), so
+// erin's person page shows the running line and Settings → Sign-in
+// lists it. A people-listener request with the cookie harness_imp=1 gets
+// X-Forwarded-Impersonation = its id (as group-gate sets it): signed in
+// as erin (harness_user=erin) the pages show the banner and are
+// read-only. No expiry loop runs: it stays running until its until.
+func seedImpersonation(t *testing.T, e *instEnv, fa *harnessFreshAuth) string {
+	t.Helper()
+	h := e.s.Hub
+	h.SetImpersonationKeycloak(harnessImpKC{})
+	e.ll.AddUser(harnessImpAdmin, harnessImpAdmin+"@example.org", "Sam", "", "lldap_admin")
+	const verifier = "imp-verifier-0123456789012345678901234567890123"
+	fa.mu.Lock()
+	fa.codes["imp-seed"] = harnessCode{challenge: s256B64(verifier), nonce: "imp-nonce", user: harnessImpAdmin}
+	fa.mu.Unlock()
+	st, err := h.StartImpersonation(context.Background(), hub.StartImpersonation{Target: harnessImpPerson, Reason: "checking the <b>harness</b> banner",
+		AdminSID: "harness-sid", Listener: hub.ListenerPeople, Proof: freshauth.Proof{Code: "imp-seed", CodeVerifier: verifier, Nonce: "imp-nonce"}}, directory.Human(harnessImpAdmin))
+	if err != nil {
+		t.Logf("harness: no running impersonation: %v", err)
+		return ""
+	}
+	return st.ID
 }

@@ -52,6 +52,19 @@ func TestRecentMatching(t *testing.T) {
 	if len(limited) != 10 {
 		t.Errorf("limited = %d entries, want 10", len(limited))
 	}
+	// RecentMatchingScan: whole only when the scan reached the file's start.
+	if _, whole, err := l.RecentMatchingScan(total+10, AuditScan, nil); err != nil || !whole {
+		t.Errorf("full scan whole = %v, %v", whole, err)
+	}
+	if _, whole, _ := l.RecentMatchingScan(total, 10*line+line/2, nil); whole {
+		t.Error("a scan cut by maxScan read as whole")
+	}
+	if _, whole, _ := l.RecentMatchingScan(5, AuditScan, nil); whole {
+		t.Error("a scan cut by n read as whole")
+	}
+	if _, whole, _ := (&AuditLog{Path: filepath.Join(t.TempDir(), "none")}).RecentMatchingScan(5, AuditScan, nil); !whole {
+		t.Error("a missing file read as cut")
+	}
 	recent, _ := l.Recent(total)
 	if want := int(auditTail / line); len(recent) < want-10 || len(recent) > want {
 		t.Errorf("Recent = %d entries, want about %d", len(recent), want)

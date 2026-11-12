@@ -125,6 +125,10 @@ type Config struct {
 	// main: from HUB_KEYCLOAK_PUBLIC_URL), where people add passkeys and
 	// security keys: the Sign-in page's "+ Add" ("" = no link).
 	AccountURL string
+	// ImpersonationMaxMinutes is HUB_IMPERSONATION_MAX_MINUTES (contract
+	// §8.1 "Impersonation": 1–30, main refuses anything else; 0 here, in
+	// tests, is the default 30).
+	ImpersonationMaxMinutes int
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -462,6 +466,12 @@ type Hub struct {
 	certCreate sync.Map
 	// certNow is the certificate status clock (nil: time.Now; tests).
 	certNow func() time.Time
+	// imp: the administrators' impersonations (impersonation.go).
+	imp impState
+	// signInBetweenPlans (tests only, nil in production) runs in
+	// changeSignIn between its two plans, outside mu: a writer that comes
+	// in between.
+	signInBetweenPlans func()
 
 	driftMu sync.Mutex
 	drift   DriftReport
@@ -1255,6 +1265,9 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// The header deliveries (§4.1 hosts): enabled instances with a view,
 	// on the hosts their routers gate now.
 	hosts, suppress := h.publishedHostHeadersLocked()
+	// impersonation.json follows every instance or client change (D37,
+	// F30): written here, under mu, from the same clients.
+	impErr := h.writeImpersonationFileLocked()
 	h.mu.RUnlock()
 	// The Keycloak extension's file first (contract §8.1): a sign-in
 	// change reaches the native-OIDC logins before group-gate's file. A
@@ -1265,7 +1278,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		return false, errors.Join(kcErr, err)
 	}
 	h.lastExpiring = expiring
-	errs := []error{kcErr}
+	errs := []error{kcErr, impErr}
 	switch {
 	case keepAttrs:
 		// The directory's fields and users stay as published; the hosts

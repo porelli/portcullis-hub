@@ -220,6 +220,26 @@ func TestFreshAuthAccepts(t *testing.T) {
 	}
 }
 
+// TestFreshAuthSID (Task 5 review M6): the ID token's sid is in the
+// result when it is a string, else "" (never a refusal).
+func TestFreshAuthSID(t *testing.T) {
+	for _, tc := range []struct {
+		sid  any
+		want string
+	}{{"s-1", "s-1"}, {nil, ""}, {42, ""}, {map[string]any{"x": 1}, ""}} {
+		p := newIDP(t)
+		c := claims()
+		if tc.sid != nil {
+			c["sid"] = tc.sid
+		}
+		p.token = p.rs256(c)
+		res, err := p.verifier().Verify(context.Background(), proof(), "alice")
+		if err != nil || res.SID != tc.want {
+			t.Errorf("sid %v: %+v, %v", tc.sid, res, err)
+		}
+	}
+}
+
 // TestFreshAuthRefusesSwitchedOffSecurityKey (D19, controller ruling):
 // fresh auth reads only pc_fresh — the method of the authenticator that
 // ran in this authentication — and only while that method is on; amr

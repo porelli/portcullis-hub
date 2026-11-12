@@ -70,13 +70,18 @@ type Server struct {
 	// mySignIn: mysignin.html (the Sign-in page, GET /signin on the
 	// people listener), parsed by PeopleHandler like people.html.
 	mySignIn *template.Template
+	// impStop: impersonation-stop.html (the Stop page, GET
+	// /impersonation/stop on the people listener), parsed by
+	// PeopleHandler.
+	impStop *template.Template
 	// confirmPage: confirm.html, parsed on first use (confirm.go).
 	confirmOnce sync.Once
 	confirmPage *template.Template
 	confirmErr  error
 }
 
-// Handler returns the full handler chain: proxy secret → CSRF → routes.
+// Handler returns the full handler chain: proxy secret → read-only while
+// impersonated → CSRF → routes.
 func (s *Server) Handler() (http.Handler, error) {
 	idx, err := template.ParseFS(s.Web, "index.html")
 	if err != nil {
@@ -85,7 +90,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	s.index = idx
 	// No-referrer on every answer (G11): the confirmation page's popup
 	// lands on https://hub.<d>/?code=…&state=… too.
-	return noReferrer(ProxySecret(s.Secret, CSRF(s.hubMux().ServeMux))), nil
+	return noReferrer(ProxySecret(s.Secret, RefuseWhileImpersonated(CSRF(s.hubMux().ServeMux)))), nil
 }
 
 // hubMux is the Hub listener's routes, recorded
@@ -123,6 +128,8 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerDoctor(mux)
 	s.registerAI(mux)
 	s.registerSignIn(mux)
+	// Signing in as someone else: the list and the switch (§8.1).
+	s.registerImpersonationAdmin(mux)
 	// Confirmations of admin tools (contract §15.6, G12): the same two
 	// routes as the people listener's, for this listener's confirmations.
 	s.registerConfirm(mux)
@@ -144,8 +151,13 @@ func (s *Server) PeopleHandler() (http.Handler, error) {
 		return nil, err
 	}
 	s.mySignIn = ms
+	is, err := template.ParseFS(s.Web, "impersonation-stop.html")
+	if err != nil {
+		return nil, err
+	}
+	s.impStop = is
 	mux := s.peopleMux()
-	return noReferrer(ProxySecret(s.Secret, CSRF(markPeople(mux.ServeMux)))), nil
+	return noReferrer(ProxySecret(s.Secret, RefuseWhileImpersonated(CSRF(markPeople(mux.ServeMux))))), nil
 }
 
 // noReferrer sets Referrer-Policy: no-referrer on every answer of the
@@ -392,7 +404,7 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 // peopleStatic are the assets people.html and the confirmation page
 // load: the people listener serves these only (never the Hub's
 // index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true}
+var peopleStatic = map[string]bool{"directory.js": true, "impersonation.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.
 func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {

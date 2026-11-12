@@ -323,3 +323,29 @@ a.pd-link { text-decoration: none; }
 .msi-status { margin-bottom: 0.5rem; font-size: 0.875rem; }
 .msi-dl-row .pd-btn, .msi-acts a.pd-btn { text-decoration: none; }
 .msi-person-acts { margin-top: 0.75rem; }
+
+/* Signing in as someone else (sign-in part 3, D43): the banner every
+   people-listener page shows while an administrator is signed in as
+   someone else (web/impersonation.js), above everything, and the Stop
+   page (impersonation-stop.html). */
+#pc-imp-banner.pc-imp-banner { position: sticky; top: 0; z-index: 2147483000; display: flex; align-items: center; flex-wrap: wrap; gap: 0.625rem; padding: 0.5rem 1rem; background: #7c2d12; color: #fed7aa; border-bottom: 2px solid #f97316; font: 500 0.8125rem/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+#pc-imp-banner .pc-imp-text { overflow-wrap: anywhere; }
+#pc-imp-banner .pc-imp-msg:empty { display: none; }
+#pc-imp-banner .pc-imp-stopbtn { margin-left: auto; padding: 0.25rem 0.875rem; border: 1px solid #fed7aa; border-radius: 0.375rem; background: #fed7aa; color: #7c2d12; font: inherit; font-weight: 600; cursor: pointer; }
+#pc-imp-banner .pc-imp-stopbtn:hover { background: #fff7ed; }
+#pc-imp-banner .pc-imp-stopbtn:disabled { opacity: 0.6; cursor: default; }
+#pc-imp-banner .pc-imp-stopbtn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+body.pc-imp-stop-page { margin: 0; background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 0.9375rem; line-height: 1.6; }
+.pc-imp-stop { max-width: 40rem; margin: 3rem auto; padding: 1.5rem 2rem; }
+.pc-imp-stop h1 { font-size: 1.25rem; color: #f1f5f9; margin: 0 0 1rem; }
+.pc-imp-stop p { margin: 0 0 1rem; }
+.pc-imp-stop a { color: #60a5fa; }
+.pc-imp-stop .pd-btn.danger { background: #b91c1c; color: #fff; }
+.pc-imp-stop .pd-btn.danger:hover { background: #dc2626; }
+.pc-imp-stop .pd-btn:disabled { opacity: 0.6; cursor: default; }
+/* The person's Sign-in tab: Sign in as… and the running line. */
+.msi-imp { margin: 1rem 0; padding: 0.75rem 1rem; border: 1px solid #334155; border-radius: 0.5rem; display: flex; align-items: center; flex-wrap: wrap; gap: 0.625rem; }
+.msi-imp.running { border-color: #f97316; background: #7c2d1222; }
+.msi-imp-dialog .msi-imp-reason { width: 100%; margin: 0.25rem 0 0.5rem; }
+#pc-imp-unknown.pc-imp-unknown { padding: 0.25rem 1rem; background: #1e293b; color: #fbbf24; border-bottom: 1px solid #f59e0b55; font: 0.75rem/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+#pc-imp-unknown a { color: #fde68a; }

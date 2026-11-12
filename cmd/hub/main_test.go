@@ -256,3 +256,24 @@ func TestHubRefusesBadClientCertTTL(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxMinutes (D36): unset is 30, "2" is 2; "0", "31", "x", "-1",
+// " 5" and "05x" refuse the start.
+func TestMaxMinutes(t *testing.T) {
+	for v, want := range map[string]int{"": 30, "2": 2, "30": 30, "1": 1} {
+		got, err := impersonationMaxMinutesFromEnv(func(k string) string {
+			if k == "HUB_IMPERSONATION_MAX_MINUTES" {
+				return v
+			}
+			return ""
+		})
+		if err != nil || got != want {
+			t.Errorf("%q = %d, %v; want %d", v, got, err, want)
+		}
+	}
+	for _, v := range []string{"0", "31", "x", "-1", " 5", "05x", "999999999999999999999"} {
+		if _, err := impersonationMaxMinutesFromEnv(func(string) string { return v }); err == nil {
+			t.Errorf("%q accepted", v)
+		}
+	}
+}

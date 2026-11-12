@@ -220,6 +220,11 @@ type AppState struct {
 	AI AISettings `json:"ai" yaml:"ai"`
 	// AIInstances: instance id → its AI state (§15.11 ai_instances).
 	AIInstances map[string]AIInstance `json:"ai_instances,omitempty" yaml:"ai_instances,omitempty"`
+	// Impersonations are the administrators' impersonations (contract
+	// §8.1 "Impersonation", top level, outside sign_in: F3): the running
+	// ones, those ended less than an hour ago, and the used ones that
+	// ended within history_days (with the apps opened, F1).
+	Impersonations []Impersonation `json:"impersonations,omitempty" yaml:"impersonations,omitempty"`
 
 	// signInMissing: the file Load read has no sign_in section (or there
 	// was no file): the defaults EnsureSignIn filled are in memory only

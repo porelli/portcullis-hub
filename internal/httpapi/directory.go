@@ -34,6 +34,8 @@ func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("POST /api/directory/users/{username}/remove-passkeys", s.handleRemovePasskeys)
 	// The person's Sign-in routes (§9.7, D32).
 	s.registerSignInHelp(mux)
+	// Signing in as someone else: start and Stop (§9.7, part 3).
+	s.registerImpersonation(mux)
 	mux.HandleFunc("DELETE /api/directory/keycloak-stale/{username}", s.handleRemoveStale)
 	mux.HandleFunc("POST /api/directory/groups", s.handleCreateGroup)
 	mux.HandleFunc("DELETE /api/directory/groups/{group}", s.handleDeleteGroup)

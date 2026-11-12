@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta name="referrer" content="no-referrer">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stop signing in as someone else</title>
+<link rel="stylesheet" href="/static/directory.css">
+</head>
+<body class="pc-imp-stop-page">
+<!-- The banner and this page's script (sign-in part 3, D43): first in
+     <body>. Served with X-Frame-Options DENY and a CSP without inline
+     scripts (confirmCSP's rules, form-action 'self'). -->
+<script src="/static/impersonation.js"></script>
+<!-- The Stop page (contract §5.1, GET /impersonation/stop on the people
+     listener): "Stop signing in as <person>", which POSTs
+     /api/me/impersonation/stop and then goes to the answer's sign_out, or
+     "Nothing to stop" (web/impersonation.js). -->
+<main id="imp-stop" class="pd-card pc-imp-stop" data-domain="{{.Domain}}">
+  <h1>Stop signing in as someone else</h1>
+  <div data-imp-stop-body><p class="pd-muted">Checking…</p></div>
+  <noscript>This page needs JavaScript.</noscript>
+</main>
+</body>
+</html>

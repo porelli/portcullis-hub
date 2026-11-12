@@ -21,6 +21,9 @@ const (
 	detailSession = "pc_session"
 	detailUA      = "pc_ua"
 	detailMethod  = "pc_method"
+	// detailAct is the administrator of an impersonated session's LOGIN
+	// (part 3, D40).
+	detailAct = "pc_act"
 	// detailIdP is Keycloak's own detail on a brokered LOGIN: a setup link
 	// signs in through the hidden identity provider InviteIdP (core's
 	// enroll), whose post-broker LOGIN carries none of the extension's
@@ -62,8 +65,9 @@ func FailureText(kcErr string) string {
 //     SetupLinkDetail); step_up → step_up;
 //   - a brokered LOGIN through InviteIdP (no pc_kind: Keycloak writes the
 //     post-broker LOGIN itself) → sign_in, SetupLinkDetail;
-//   - pc_kind sso → opened <client name> for a listed client, else
-//     dropped (group-gate's log covers the gateway's apps);
+//   - pc_kind sso → opened <client name> for a listed client (By the
+//     pc_act administrator, part 3), else dropped (group-gate's log
+//     covers the gateway's apps);
 //   - LOGIN_ERROR → failed, methods [pc_method], the error's text.
 //
 // A LOGIN without the extension's pc_kind is kept as a sign-in whose
@@ -97,6 +101,8 @@ func FromEvent(ev keycloak.Event, clientNames map[string]string) (Entry, bool) {
 				e.App = Clean(ev.ClientID, maxApp)
 			}
 			e.Methods = splitMethods(d[detailSession])
+			// Opened while an administrator was signed in as the person.
+			e.By = Clean(d[detailAct], maxBy)
 		case d[detailIdP] == InviteIdP:
 			// A setup link's brokered LOGIN: no method (inv meets nothing).
 			e.Kind, e.Methods, e.Detail = KindSignIn, nil, SetupLinkDetail

@@ -1019,6 +1019,7 @@ func TestDataDirGroupReadable(t *testing.T) {
 		"portal-apps.json":         {0o644, 0o644},
 		"user-attributes.json":     {0o644, 0o644},
 		"signin-keycloak.json":     {0o644, 0o644},
+		"impersonation.json":       {0o644, 0o644},
 		"mcp-gate.json":            {0o644, 0o640},
 		"mcp-credentials.json":     {0o600, 0o640},
 		"overrides/mcp-gate.json":  {0o644, 0o600}, // a gate file's name elsewhere

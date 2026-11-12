@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -305,5 +306,30 @@ func TestCertTargetPromotionRace(t *testing.T) {
 	}
 	if e := c.audit.last(); e.Result != "refused" || strings.Contains(e.Detail, "sign_in_help") {
 		t.Errorf("non-holder audit = %+v", e)
+	}
+}
+
+// TestPersonViewMaxMinutes (final review M4): an administrator's view
+// carries the configured length (the tab's "at most N min"); a holder's
+// is 0.
+func TestPersonViewMaxMinutes(t *testing.T) {
+	c := newHelpFixture(t)
+	h := c.f.h
+	for cfg, want := range map[int]int{0: 30, 10: 10, 30: 30} {
+		h.cfg.ImpersonationMaxMinutes = cfg
+		v, err := h.PersonSignInView(c.ctx, helpAdmin, "alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.MaxMinutes != want {
+			t.Errorf("config %d: max_minutes %d, want %d", cfg, v.MaxMinutes, want)
+		}
+	}
+	if v, err := h.PersonSignInView(c.ctx, helpHolder, "alice"); err != nil || v.MaxMinutes != 0 {
+		t.Errorf("holder: %+v %v", v, err)
+	}
+	b, _ := json.Marshal(&PersonSignIn{MaxMinutes: 10})
+	if !strings.Contains(string(b), `"max_minutes":10`) {
+		t.Errorf("json = %s", b)
 	}
 }

@@ -166,8 +166,58 @@ func openedEntry(ln openedLine) Entry {
 	}
 	ms := make([]string, len(ln.Methods))
 	copy(ms, ln.Methods)
+	// act: an administrator signed in as the person opened it (D44).
 	return withScore(Entry{Time: ln.Time.UTC(), Kind: KindOpened, Methods: Methods(ms), App: app,
-		IP: IP(ln.IP), Browser: Browser(ln.UA)})
+		IP: IP(ln.IP), Browser: Browser(ln.UA), By: Clean(ln.Act, maxBy)})
+}
+
+// ActApps are the apps user opened with act (an administrator signed in
+// as them, D44) between from and to, both included: the app names of
+// the matching lines (the host when a line has none), once each, in time
+// order. The day files of from's day to to's day are read (each its
+// newest OpenedScan bytes); a missing mount is an error, a missing log
+// no apps. A day file longer than OpenedScan (its older lines unread)
+// answers the apps read with *Partial: the list may be missing some.
+func (l OpenedLog) ActApps(user, act string, from, to time.Time) ([]string, error) {
+	out := []string{}
+	ok, err := l.usable()
+	if err != nil || !ok {
+		return out, err
+	}
+	user = strings.ToLower(strings.TrimSpace(user))
+	act = strings.ToLower(strings.TrimSpace(act))
+	if user == "" || act == "" || to.Before(from) {
+		return out, nil
+	}
+	var lines []openedLine
+	var partial *Partial
+	for day := from.UTC().Truncate(24 * time.Hour); !day.After(to.UTC()); day = day.AddDate(0, 0, 1) {
+		got, n, err := l.readDay(day, user)
+		if err != nil {
+			return nil, err
+		}
+		if n >= OpenedScan {
+			partial = &Partial{Through: day, Why: "a day file of the opened log is longer than its read limit"}
+		}
+		lines = append(lines, got...)
+	}
+	slices.SortStableFunc(lines, func(a, b openedLine) int { return a.Time.Compare(b.Time) })
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		if ln.User != user || ln.Act != act || ln.Time.Before(from) || ln.Time.After(to) {
+			continue
+		}
+		app := openedEntry(ln).App
+		if app == "" || seen[app] {
+			continue
+		}
+		seen[app] = true
+		out = append(out, app)
+	}
+	if partial != nil {
+		return out, partial
+	}
+	return out, nil
 }
 
 // readDay reads day's file: its newest OpenedScan bytes (n, the bytes

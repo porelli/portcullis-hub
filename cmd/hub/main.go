@@ -94,6 +94,11 @@ func signInMDSFromEnv(getenv func(string) string) (mdsURL, extra string, err err
 	return mdsURL, extra, nil
 }
 
+// impersonationMaxMinutesFromEnv is HUB_IMPERSONATION_MAX_MINUTES (D36).
+func impersonationMaxMinutesFromEnv(getenv func(string) string) (int, error) {
+	return hub.ParseImpersonationMaxMinutes(getenv("HUB_IMPERSONATION_MAX_MINUTES"))
+}
+
 // vaultDurationRe is core's duration grammar for CLIENT_CERT_TTL (a bare
 // number means seconds).
 var vaultDurationRe = regexp.MustCompile(`^[0-9]+[smhd]?$`)
@@ -278,6 +283,11 @@ func main() {
 	// HUB_CERT_EXPIRY_WARN_DAYS (core: ${CERT_EXPIRY_WARN_DAYS:-7}): core's
 	// grammar, anything else 7; never a reason to refuse the start.
 	cfg.CertExpiryWarnDays = hub.ParseCertExpiryWarnDays(os.Getenv("HUB_CERT_EXPIRY_WARN_DAYS"))
+	// HUB_IMPERSONATION_MAX_MINUTES (core: ${IMPERSONATION_MAX_MINUTES:-30}):
+	// an integer 1–30, unset 30, anything else refuses the start.
+	if cfg.ImpersonationMaxMinutes, err = impersonationMaxMinutesFromEnv(os.Getenv); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 5*time.Second {
@@ -415,6 +425,7 @@ func main() {
 	}
 	// Per-instance AI support (contract §8): the mcp:* scopes.
 	h.SetAIKeycloak(kc)
+	h.SetImpersonationKeycloak(kc)
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, []string{fa.RedirectURI, fa.HubRedirectURI}, []string{fa.WebOrigin, fa.HubWebOrigin})
 	})
@@ -425,6 +436,12 @@ func main() {
 	// The sign-in history's sources (contract §8.2): Keycloak's login
 	// events and the audit; the opened log is GroupGateDataDir's.
 	h.SetHistorySources(hub.HistorySources{Events: kc.UserLoginEventsPage, Audit: dir.RecentMatching})
+	// Impersonation (contract §8.2 Source 4, D44): the apps opened, run
+	// once at the end (the opened log's act lines, Keycloak's LOGIN with
+	// pc_act and IMPERSONATE with pc_imp); the history's entries from the
+	// audit and the kept records (F22: never the live function).
+	h.SetImpersonationApps(h.ImpersonationAppsFunc(kc))
+	h.AddHistorySource(hub.HistoryImpersonation, h.ImpersonationHistorySource(dir.RecentMatchingScan))
 	h.Init()
 
 	srv := &httpapi.Server{
@@ -466,6 +483,8 @@ func main() {
 	// The opened log's day files older than history_days: daily (and on
 	// every history_days change).
 	go h.RunHistoryPrune(ctx, 24*time.Hour)
+	// Impersonations: expiry, not used, the file every minute (D41, D37).
+	go h.RunImpersonationExpiry(ctx, 5*time.Second)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak

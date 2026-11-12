@@ -317,6 +317,94 @@ history.
     only to people you would trust with those accounts. Administrators are
     never in reach.
 
+## Signing in as someone else
+
+An administrator can sign in as another person to see what they see and act
+in their apps, for example to check a problem the person reports. There is
+no approval step, so every impersonation is limited, visible and recorded.
+
+**Who.** Only members of `lldap_admin`, and never on another administrator,
+on yourself, on `admin`, on `portcullis-hub` or on any `portcullis-*`
+account. One at a time: you can't run two, and nobody can be impersonated
+by two administrators at once. Settings → Sign-in → **Signing in as someone
+else** switches the feature off for everyone (it is on at the start), and
+switching it off ends every impersonation that is running.
+
+**Starting.** On the person's page on people.&lt;domain&gt;, open the
+**Sign-in** tab and choose **Sign in as &lt;person&gt;…**:
+
+1. Type a reason (3–200 characters, one line). The person will read it.
+2. Do a fresh sign-in with a **YubiKey touch**: a security key passkey or a
+   YubiKey certificate. A synced passkey, a device-bound passkey, a
+   password or a browser certificate is refused. At least one of the two
+   YubiKey methods must be switched on.
+3. Your browser opens the person's portal, signed in as them.
+
+**Your own session ends when you start.** Keycloak signs you out of your
+own account in that browser. After Stop you sign in again as yourself.
+
+**30 minutes at most.** An impersonation ends after 30 minutes (core's
+`IMPERSONATION_MAX_MINUTES` in `.env` can only make it shorter), when you
+press **Stop**, when another administrator stops it, or when the switch
+goes off. Every Portcullis page (the portal, My apps, People, the Sign-in
+page and the sign-in pages) shows:
+
+> You are signed in as alice (by root) · reason “checking quota” · 26 min left · **Stop**
+
+Apps can't show this line. Stop is also at
+`https://people.<domain>/impersonation/stop`. When it ends, the next
+request shows "Your session as alice has ended." with a link to sign out.
+
+**What it can do.** You open the apps the person may open, as them. Your
+own sign-in counts, not theirs: an app opens only when **your** session's
+methods (the fresh touch included) meet its template — in practice the
+YubiKey touch alone, because the fresh sign-in replaces your session's
+other methods; an app that needs more than the touch (a certificate as
+well, for example) shows the needs page — and a certificate
+method counts only with **your** YubiKey or browser certificate. A session
+as someone else can never add a method, so there is no step-up: when your
+sign-in doesn't meet an app's template, the page says so; press Stop, sign
+in with the methods it needs and start again.
+
+**What is refused.** Everything on Portcullis's own pages that changes
+something is refused while you are signed in as someone else ("not while
+you are signed in as someone else: Stop first"): app values, file-share
+passwords, AI connections, passwords, certificates, passkeys, confirmations
+and anything you may do in the directory. Reading works. AI tools refuse a
+session as someone else, Keycloak's account console and fresh sign-ins are
+refused, and so is any app sign-in that would need a method. A person with
+an unfinished sign-in step (an unused setup link, for example) can't be
+signed in as until it is finished or cancelled.
+
+**Apps that keep their own sessions.** A gateway app loses access at once
+when the impersonation ends. An app that signs in through Keycloak itself
+and keeps its own session (Nextcloud, for example) may stay signed in as the
+person after the end, unless it supports Keycloak's backchannel logout.
+When that matters, sign the person out inside that app. The person's
+history and notice say which apps may have stayed signed in.
+
+**The record.** The audit log has `impersonation.start` (who, whom, the
+method of the touch and the reason; refused starts too) and
+`impersonation.end` (how it ended, how long it ran and the apps opened).
+The person's [sign-in history](#sign-in-history) has an entry with who,
+when, the reason and the apps opened. At their next sign-in the person
+sees, once:
+
+> root signed in as you on 12 Nov 2026 14:02 UTC for 26 min: checking
+> quota. Apps opened: Gitea, Nextcloud. Nextcloud keeps its own session and
+> may have stayed signed in longer.
+
+An impersonation that was started but never opened (the browser didn't
+follow through within 2 minutes) ends as "not used", and the person gets no
+notice.
+
+AI tools can list impersonations, stop one and switch the feature off,
+never start one or switch it on ([AI support](ai.md)).
+
+Keycloak's own **Impersonate** button is gone on purpose: core switches the
+stock feature off, because it has no fresh touch, no reason, no time limit
+and no record ([Hardening](hardening.md#keycloak-impersonation)).
+
 ## Sign-in history
 
 The Sign-in page (and, for admins and helpers, the person's Sign-in tab)
@@ -328,9 +416,10 @@ shows the person's sign-in history, newest first, with **Show older**:
 | Stepped up | an existing session that added a method |
 | Failed | a sign-in that failed, with the method tried and why ("wrong password", "certificate refused", …) |
 | Confirmed | a fresh sign-in for a sensitive action |
-| Opened | the first time a session opened an app (per app) |
+| Opened | the first time a session opened an app (per app); "by root" when an administrator opened it while signed in as the person |
 | Help | an action someone else took on the account (by whom) |
 | Certificate | a certificate the person created, renewed or revoked |
+| Signed in as you | an administrator signed in as the person ([above](#signing-in-as-someone-else)): who, the reason, how long, how it ended and the apps opened |
 
 Each entry shows the IP address and the browser ("Firefox · macOS"). The
 history is put together when it is shown, from Keycloak's sign-in events,

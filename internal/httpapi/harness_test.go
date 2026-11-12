@@ -119,6 +119,12 @@ import (
 //
 // Settings → Sign-in (sign-in Task 9): harness_signin_test.go.
 //
+// Signing in as someone else (sign-in part 3 Task 8): the second
+// administrator sam runs an impersonation of erin (seedImpersonation),
+// so root's view of alice offers "Sign in as alice…"; the cookie harness_imp=1
+// on the people listener adds its X-Forwarded-Impersonation (with
+// harness_user=erin: the banner, read-only pages).
+//
 // The progress panel (operation progress Task 8): gitea, gitea-warn,
 // grafana-scratch and nativeapp's interrupted enable, with POST
 // /harness/op/break-undo and /harness/op/fix-undo
@@ -270,6 +276,7 @@ func TestHarness(t *testing.T) {
 	flaky := seedGroupPages(t, e)
 	seedApps(t, e, eng)
 	seedSignIn(t, e)
+	impID := seedImpersonation(t, e, fa)
 
 	d, err := time.ParseDuration(os.Getenv("HUB_HARNESS_FOR"))
 	if err != nil {
@@ -333,6 +340,10 @@ func TestHarness(t *testing.T) {
 		}
 		r.Header.Set(ProxySecretHeader, testSecret)
 		r.Header.Set("X-Forwarded-User", u)
+		r.Header.Del(ImpersonationHeader)
+		if c, err := r.Cookie("harness_imp"); err == nil && c.Value == "1" && impID != "" {
+			r.Header.Set(ImpersonationHeader, impID)
+		}
 		people.ServeHTTP(w, r)
 	})}
 	go func() {

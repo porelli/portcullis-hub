@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -548,6 +549,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		for _, e := range s.Events {
 			ms, _ := e["time"].(int64)
 			if e["userId"] != q.Get("user") || (ferr == nil && ms < from) || (terr == nil && ms > to) {
+				continue
+			}
+			if typ, ok := e["type"].(string); ok && q.Has("type") && !slices.Contains(q["type"], typ) {
+				continue
+			}
+			if q.Has("client") && e["clientId"] != q.Get("client") {
 				continue
 			}
 			out = append(out, e)

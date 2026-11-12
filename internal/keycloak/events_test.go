@@ -30,7 +30,7 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	var got map[string]any
 	kc.With(func() { got = kc.EventsConfig })
 	want := map[string]any{"eventsEnabled": true, "eventsListeners": []any{"jboss-logging", "x"},
-		"enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR"}, "eventsExpiration": float64(90 * 86400),
+		"enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}, "eventsExpiration": float64(90 * 86400),
 		"adminEventsEnabled": true, "adminEventsDetailsEnabled": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("events config = %v\nwant %v", got, want)
@@ -47,7 +47,7 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	}
 	// Keycloak answers the types in another order (it keeps a set): still
 	// the same config, not written.
-	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"LOGIN_ERROR", "LOGIN"} })
+	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"IMPERSONATE", "LOGIN_ERROR", "LOGIN"} })
 	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +73,62 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
 	if err := c.EnsureEventsConfig(ctx, 30); err == nil {
 		t.Error("a failed GET was not reported")
+	}
+}
+
+// TestEventsConfigHasImpersonate (D44, F4): EnsureEventsConfig stores
+// ConfigEventTypes = {LOGIN, LOGIN_ERROR, IMPERSONATE}, compared as a set:
+// the part-2 config (no IMPERSONATE) is written again.
+func TestEventsConfigHasImpersonate(t *testing.T) {
+	ctx := context.Background()
+	if want := []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}; !reflect.DeepEqual(keycloak.ConfigEventTypes, want) {
+		t.Fatalf("ConfigEventTypes = %v, want %v", keycloak.ConfigEventTypes, want)
+	}
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	kc.With(func() {
+		kc.EventsConfig = map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR"},
+			"eventsExpiration": float64(90 * 86400)}
+	})
+	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
+		t.Fatal(err)
+	}
+	var got any
+	kc.With(func() { got = kc.EventsConfig["enabledEventTypes"] })
+	if !reflect.DeepEqual(got, []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}) {
+		t.Errorf("enabledEventTypes = %v", got)
+	}
+	if n := kc.CountCalls("PUT /admin/realms/portcullis/events/config"); n != 1 {
+		t.Errorf("%d PUTs, want 1 (the part-2 config lacks IMPERSONATE)", n)
+	}
+	// A set: duplicates and order don't matter.
+	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"LOGIN_ERROR", "IMPERSONATE", "LOGIN", "LOGIN"} })
+	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
+		t.Fatal(err)
+	}
+	if n := kc.CountCalls("PUT /admin/realms/portcullis/events/config"); n != 1 {
+		t.Errorf("the same set was written again (%d PUTs)", n)
+	}
+}
+
+// TestHistoryQueryUnchanged (F4): the history query still asks for
+// type=LOGIN&type=LOGIN_ERROR only (HistoryEventTypes), never IMPERSONATE.
+func TestHistoryQueryUnchanged(t *testing.T) {
+	if want := []string{"LOGIN", "LOGIN_ERROR"}; !reflect.DeepEqual(keycloak.HistoryEventTypes, want) {
+		t.Fatalf("HistoryEventTypes = %v, want %v", keycloak.HistoryEventTypes, want)
+	}
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	alice := kc.Import("alice")
+	now := time.Now().UTC()
+	if _, err := c.LoginEventsPage(ctx, alice.ID, now.Add(-time.Hour), now, 0, 5); err != nil {
+		t.Fatal(err)
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if !reflect.DeepEqual(q["type"], []string{"LOGIN", "LOGIN_ERROR"}) {
+		t.Errorf("types = %v", q["type"])
 	}
 }
 
@@ -135,5 +191,107 @@ func TestLoginEventsQuery(t *testing.T) {
 	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
 	if _, err := c.LoginEvents(ctx, alice.ID, from, to, 5); err == nil {
 		t.Error("a failed read was not reported")
+	}
+}
+
+// TestImpersonateEventsQuery (F4): ImpersonateEvents asks for
+// type=IMPERSONATE only, for the person, in the window, and pages.
+func TestImpersonateEventsQuery(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	alice := kc.Import("alice")
+	at := time.Date(2026, 11, 12, 14, 3, 0, 0, time.UTC)
+	kc.With(func() {
+		kc.Events = []map[string]any{
+			{"time": at.UnixMilli(), "type": "IMPERSONATE", "clientId": "portcullis-forward-auth", "userId": alice.ID,
+				"details": map[string]any{"pc_imp": "0f3c0f3c0f3c0f3c0f3c0f3c0f3c0f3c", "pc_act": "root"}},
+			{"time": at.UnixMilli(), "type": "LOGIN", "userId": alice.ID},
+		}
+		for i := range 150 {
+			kc.Events = append(kc.Events, map[string]any{"time": at.Add(-time.Duration(i+1) * time.Second).UnixMilli(), "type": "IMPERSONATE", "userId": alice.ID})
+		}
+	})
+	from, to := at.Add(-time.Hour), at.Add(time.Second)
+	evs, err := c.ImpersonateEvents(ctx, alice.ID, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Get("user") != alice.ID || !reflect.DeepEqual(q["type"], []string{"IMPERSONATE"}) ||
+		q.Get("dateFrom") != fmt.Sprint(from.UnixMilli()) || q.Get("dateTo") != fmt.Sprint(to.UnixMilli()-1) || q.Get("first") != "100" {
+		t.Errorf("query = %v", q)
+	}
+	if len(evs) != 151 || evs[0].Type != "IMPERSONATE" || evs[0].Details["pc_imp"] != "0f3c0f3c0f3c0f3c0f3c0f3c0f3c0f3c" || evs[0].Details["pc_act"] != "root" {
+		t.Errorf("events = %d, first %+v", len(evs), evs[0])
+	}
+	if n := kc.CountCalls("GET /admin/realms/portcullis/events"); n != 2 {
+		t.Errorf("%d event reads", n)
+	}
+	if evs, err := c.UserImpersonateEvents(ctx, "nobody", from, to); err != nil || len(evs) != 0 {
+		t.Errorf("unknown user = %v, %v", evs, err)
+	}
+	if evs, err := c.UserImpersonateEvents(ctx, "alice", from, to); err != nil || len(evs) != 151 {
+		t.Errorf("alice by name = %d, %v", len(evs), err)
+	}
+}
+
+// TestClientLoginEventsQuery: the native-apps read is narrowed server
+// side to type=LOGIN and the one client.
+func TestClientLoginEventsQuery(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	alice := kc.Import("alice")
+	at := time.Date(2026, 11, 12, 14, 3, 0, 0, time.UTC)
+	kc.With(func() {
+		kc.Events = []map[string]any{
+			{"time": at.UnixMilli(), "type": "LOGIN", "clientId": "nextcloud", "userId": alice.ID, "details": map[string]any{"pc_act": "root"}},
+			{"time": at.UnixMilli(), "type": "LOGIN", "clientId": "portcullis-forward-auth", "userId": alice.ID},
+			{"time": at.UnixMilli(), "type": "LOGIN_ERROR", "clientId": "nextcloud", "userId": alice.ID},
+		}
+	})
+	evs, err := c.UserClientLoginEvents(ctx, "alice", "nextcloud", at.Add(-time.Hour), at.Add(time.Second), 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Get("client") != "nextcloud" || !reflect.DeepEqual(q["type"], []string{"LOGIN"}) || q.Get("user") != alice.ID || q.Get("max") != "100" {
+		t.Errorf("query = %v", q)
+	}
+	if len(evs) != 1 || evs[0].ClientID != "nextcloud" || evs[0].Details["pc_act"] != "root" {
+		t.Errorf("events = %+v", evs)
+	}
+	if _, err := c.UserClientLoginEvents(ctx, "alice", "", at, at, 0, 1); err == nil {
+		t.Error("no client accepted")
+	}
+}
+
+// TestImpersonateEventsStored (final review M2): true only when the
+// realm stores events and IMPERSONATE is among the types; a failed read
+// is an error.
+func TestImpersonateEventsStored(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	for _, tc := range []struct {
+		cfg  map[string]any
+		want bool
+	}{
+		{map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "IMPERSONATE"}}, true},
+		{map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR"}}, false},
+		{map[string]any{"eventsEnabled": false, "enabledEventTypes": []any{"IMPERSONATE"}}, false},
+		{map[string]any{"eventsEnabled": true}, false},
+	} {
+		kc.With(func() { kc.EventsConfig = tc.cfg })
+		if got, err := c.ImpersonateEventsStored(ctx); err != nil || got != tc.want {
+			t.Errorf("%v: %v, %v; want %v", tc.cfg, got, err, tc.want)
+		}
+	}
+	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
+	if _, err := c.ImpersonateEventsStored(ctx); err == nil {
+		t.Error("a failed GET was not reported")
 	}
 }

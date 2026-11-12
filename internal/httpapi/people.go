@@ -84,6 +84,9 @@ func (s *Server) registerPeopleApps(mux routeMux) {
 	// The Sign-in page and the caller's own sign-in routes (sign-in
 	// part 2, D24/D25): people listener only.
 	s.registerMySignIn(mux)
+	// The impersonating browser's banner read, Stop and Stop page
+	// (sign-in part 3, §5.1): people listener only.
+	s.registerMyImpersonation(mux)
 }
 
 // handleMyAI answers the caller's (X-Forwarded-User, lowercased) AI

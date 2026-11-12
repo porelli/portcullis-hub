@@ -51,12 +51,15 @@ func publicEntry(m *templates.Manifest, published []string) *policy.PublicEntry 
 // router: it has no forward-auth, so nothing else removes client-supplied
 // copies. They are core's forward-auth authResponseHeaders and Remote-*;
 // the template's auth.identity_headers are added (required for
-// header-auth), and credentialHeaders.
+// header-auth), and credentialHeaders. X-Forwarded-Impersonator and
+// X-Forwarded-Impersonation (sign-in part 3, contract §5) are group-gate's
+// impersonation headers: the Hub's read-only rule and apps trust them.
 var coreIdentityHeaders = []string{
 	"Remote-Email", "Remote-Groups", "Remote-Name", "Remote-User",
 	"X-Auth-Request-Access-Token", "X-Auth-Request-Email", "X-Auth-Request-Groups",
 	"X-Auth-Request-Preferred-Username", "X-Auth-Request-User",
 	"X-Forwarded-Access-Token", "X-Forwarded-Email", "X-Forwarded-Groups",
+	"X-Forwarded-Impersonation", "X-Forwarded-Impersonator",
 	"X-Forwarded-Preferred-Username", "X-Forwarded-User",
 }
 

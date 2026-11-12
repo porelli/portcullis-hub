@@ -842,6 +842,14 @@ func (s *Service) RecentMatching(n int, maxScan int64, keep func(AuditEntry) boo
 	return s.Audit.RecentMatching(n, maxScan, keep)
 }
 
+// RecentMatchingScan is AuditLog.RecentMatchingScan (no log: none, whole).
+func (s *Service) RecentMatchingScan(n int, maxScan int64, keep func(AuditEntry) bool) ([]AuditEntry, bool, error) {
+	if s.Audit == nil {
+		return []AuditEntry{}, true, nil
+	}
+	return s.Audit.RecentMatchingScan(n, maxScan, keep)
+}
+
 // ── mutation plumbing ─────────────────────────────────────
 
 // snapshot is the directory state guardrails are checked against.

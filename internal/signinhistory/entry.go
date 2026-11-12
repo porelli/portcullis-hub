@@ -1,7 +1,8 @@
 // Package signinhistory is a person's sign-in history (contract §8.2,
-// plan D28), merged at read time from three sources: Keycloak's LOGIN /
-// LOGIN_ERROR events (FromEvent), group-gate's opened log (OpenedLog) and
-// the Hub's audit (FromAudit). Nothing is stored here. Every text that
+// plan D28), merged at read time from four sources: Keycloak's LOGIN /
+// LOGIN_ERROR events (FromEvent), group-gate's opened log (OpenedLog),
+// the Hub's audit (FromAudit) and, part 3, the impersonations
+// (ImpersonationSource). Nothing is stored here. Every text that
 // came from outside (the User-Agent, an IP, an app name, an audit detail)
 // is clipped and has its control and bidi characters removed; the pages
 // that show it escape it.
@@ -23,7 +24,7 @@ import (
 // Kind is an entry's kind.
 type Kind string
 
-// The kinds (contract §8.2). Impersonation is reserved for part 3.
+// The kinds (contract §8.2); impersonation is Source 4 (part 3).
 const (
 	KindSignIn        Kind = "sign_in"
 	KindStepUp        Kind = "step_up"
@@ -73,6 +74,15 @@ type Partial struct {
 func (p *Partial) Error() string {
 	return "read down to " + p.Through.UTC().Format(time.RFC3339Nano) + " only: " + p.Why
 }
+
+// Incomplete is the error of a source that shows what it could tell but
+// may be missing entries anywhere in its window (the impersonation
+// source when the audit scan didn't reach the oldest start its kept
+// records don't cover): the history shows its entries and names it in
+// Unknown.
+type Incomplete struct{ Why string }
+
+func (e *Incomplete) Error() string { return "possibly incomplete: " + e.Why }
 
 // SetupLinkDetail is the detail of a sign-in through a setup link (a
 // LOGIN with pc_kind sign_in and no method: the link signed the person

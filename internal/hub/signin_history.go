@@ -128,21 +128,28 @@ func (h *Hub) openedLog() signinhistory.OpenedLog {
 // (client id → name): an unreadable file names none (their SSO events
 // are then dropped, as for any unlisted client).
 func (h *Hub) historyClientNames() map[string]string {
+	out, _ := h.historyClientNamesErr()
+	return out
+}
+
+// historyClientNamesErr is historyClientNames with the read's or the
+// parse's error (the map then empty, never nil).
+func (h *Hub) historyClientNamesErr() (map[string]string, error) {
 	out := map[string]string{}
 	b, err := os.ReadFile(h.signInKeycloakPath())
 	if err != nil {
-		return out
+		return out, err
 	}
 	var doc struct {
 		Clients map[string]KeycloakClientTemplate `json:"clients"`
 	}
-	if json.Unmarshal(b, &doc) != nil {
-		return out
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return out, fmt.Errorf("%s: %w", SignInKeycloakFile, err)
 	}
 	for id, c := range doc.Clients {
 		out[id] = c.Name
 	}
-	return out
+	return out, nil
 }
 
 // historySources is every source by name, in merge order (nil src: not
@@ -245,7 +252,9 @@ type taggedEntry struct {
 //   - a page cut inside a run of equal times gives a cursor that skips,
 //     per source, the entries of that time already shown;
 //   - a source that fails (or a Partial that can't move the page on) is
-//     named in Unknown, and the others are still shown.
+//     named in Unknown, and the others are still shown;
+//   - a source that answers *Incomplete has its entries shown and is
+//     named in Unknown too (it may be missing some).
 func (h *Hub) SignInHistory(ctx context.Context, user, cursor string, limit int) (*HistoryPage, error) {
 	user = strings.ToLower(strings.TrimSpace(user))
 	if user == "" {
@@ -294,9 +303,15 @@ func (h *Hub) SignInHistory(ctx context.Context, user, cursor string, limit int)
 			defer cancel()
 			es, err := readSource(rctx, ns.src, user, since, before, limit+1+skip)
 			var p *signinhistory.Partial
+			var inc *signinhistory.Incomplete
 			switch {
 			case errors.As(err, &p) && p.Through.Before(before) && !p.Through.Before(since):
 				partial[i] = p
+			case errors.As(err, &inc):
+				// Shown, and named unknown: it may be missing some.
+				log.Printf("history: %s: %s: %v", user, ns.name, err)
+				failed[i] = true
+				p = nil
 			case err != nil:
 				log.Printf("history: %s: %s unreadable: %v", user, ns.name, err)
 				failed[i] = true

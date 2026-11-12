@@ -626,6 +626,13 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		// refusal both ways (no such serial).
 		{tool: "revoke_person_certificate", args: map[string]any{"username": "erin", "serial": "0e:01"},
 			method: "DELETE", path: "/api/directory/users/erin/certificates/0e:01", body: ``},
+		// Signing in as someone else (sign-in part 3 Task 6, D46): Stop of
+		// a person nobody is signed in as (404 both ways), then the switch
+		// off (W; on is Settings only).
+		{tool: "stop_impersonation", args: map[string]any{"user": "erin"},
+			method: "POST", path: "/api/directory/users/erin/impersonation/stop", body: ``},
+		{tool: "turn_off_impersonation", args: map[string]any{},
+			method: "PUT", path: "/api/signin/impersonation", body: `{"allowed":false}`},
 	}
 	covered := map[string]bool{}
 	for _, c := range cases {

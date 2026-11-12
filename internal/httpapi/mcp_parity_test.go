@@ -49,6 +49,25 @@ var helpNoToolRoutes = map[string]string{
 	"GET /api/directory/users/{username}/signin/history": "a person's history pages: person_sign_in carries the last 20 entries",
 }
 
+// impersonationNoToolRoutes are the routes of signing in as someone
+// else with no tool (contract §15.10, D46), each with D46's reason: the
+// start (both listeners), the impersonating browser's routes and the
+// Stop page (people listener; TestPeopleToolParity reads them through
+// peopleNoToolRoutes).
+var impersonationNoToolRoutes = map[string]string{
+	"POST /api/directory/users/{username}/impersonation": "needs the admin's fresh YubiKey touch and a typed reason; never by an AI",
+	"GET /api/me/impersonation":                          "the impersonating browser only",
+	"POST /api/me/impersonation/stop":                    "the impersonating browser only",
+	"GET /impersonation/stop":                            "the impersonating browser only (the Stop page)",
+}
+
+// impersonationPartialTwins are the routes a tool mirrors for some
+// bodies only, listed once with the reason for the rest (F27):
+// turn_off_impersonation covers {"allowed": false}.
+var impersonationPartialTwins = map[string]string{
+	"PUT /api/signin/impersonation": "switched on in Hub Settings only",
+}
+
 // signInNoToolRoutes are the Sign-in page's people-listener routes with
 // no people tool (contract §15.10, D33; TestPeopleToolParity reads them
 // through peopleNoToolRoutes).
@@ -170,7 +189,8 @@ func TestToolParity(t *testing.T) {
 		_, none := noToolRoutes[r]
 		_, conf := confirmationRoutes[r]
 		_, help := helpNoToolRoutes[r]
-		conf = conf || help
+		_, imp := impersonationNoToolRoutes[r]
+		conf = conf || help || imp
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -201,7 +221,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -363,4 +383,63 @@ var admin17a = []string{
 	"list_drift", "resolve_drift",
 	"set_person_value", "clear_person_value", "retry_deliveries", "missing_groups", "create_missing_groups",
 	"list_credentials", "admin_revoke_credential", "get_local_networks", "set_local_networks",
+}
+
+// TestParityImpersonation (D46, F27): the routes of signing in as
+// someone else without a tool carry D46's reasons; PUT
+// /api/signin/impersonation is listed once, with its reason, and
+// turn_off_impersonation covers {"allowed": false}; the start has no
+// tool on either listener.
+func TestParityImpersonation(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	const start = "POST /api/directory/users/{username}/impersonation"
+	want := map[string]string{
+		start:                             "needs the admin's fresh YubiKey touch and a typed reason; never by an AI",
+		"GET /api/me/impersonation":       "the impersonating browser only",
+		"POST /api/me/impersonation/stop": "the impersonating browser only",
+	}
+	for r, why := range want {
+		if impersonationNoToolRoutes[r] != why {
+			t.Errorf("%s: reason %q, want %q", r, impersonationNoToolRoutes[r], why)
+		}
+		if peopleNoToolRoutes[r] != why {
+			t.Errorf("people %s: reason %q, want %q", r, peopleNoToolRoutes[r], why)
+		}
+	}
+	if !strings.HasPrefix(impersonationNoToolRoutes["GET /impersonation/stop"], "the impersonating browser only") {
+		t.Errorf("the Stop page's reason = %q", impersonationNoToolRoutes["GET /impersonation/stop"])
+	}
+	const put = "PUT /api/signin/impersonation"
+	if len(impersonationPartialTwins) != 1 || impersonationPartialTwins[put] != "switched on in Hub Settings only" {
+		t.Errorf("impersonationPartialTwins = %v", impersonationPartialTwins)
+	}
+	if _, dup := impersonationNoToolRoutes[put]; dup || noToolRoutes[put] != "" {
+		t.Errorf("%s listed more than once", put)
+	}
+	var putTwins []string
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		if tl.Twin == put || slices.Contains(tl.AlsoTwins, put) {
+			putTwins = append(putTwins, tl.Name)
+		}
+		if tl.Twin == start || slices.Contains(tl.AlsoTwins, start) {
+			t.Errorf("tool %s mirrors the start", tl.Name)
+		}
+	}
+	if !slices.Equal(putTwins, []string{"turn_off_impersonation"}) {
+		t.Errorf("%s twins = %v, want [turn_off_impersonation]", put, putTwins)
+	}
+	hub := map[string]bool{}
+	for _, p := range e.s.hubMux().patterns {
+		hub[p] = true
+	}
+	for _, r := range []string{start, put, "GET /api/impersonations", "POST /api/directory/users/{username}/impersonation/stop"} {
+		if !hub[r] {
+			t.Errorf("the Hub listener lacks %s", r)
+		}
+	}
+	for _, r := range []string{"GET /api/me/impersonation", "POST /api/me/impersonation/stop", "GET /impersonation/stop"} {
+		if hub[r] {
+			t.Errorf("the Hub listener registers %s (people only)", r)
+		}
+	}
 }

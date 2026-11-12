@@ -94,9 +94,10 @@ func (e *peopleEnv) setup(t *testing.T) {
 }
 
 // peopleAppRoutes are the only app routes of the people listener
-// (contract §5.1, G12): exactly seventeen, all caller-only — the five My
+// (contract §5.1, G12): exactly twenty, all caller-only — the five My
 // apps and credential routes, the two confirmation routes (Task 14), Task
-// 21's two AI routes and the Sign-in page's eight (sign-in part 2, D25).
+// 21's two AI routes, the Sign-in page's eight (sign-in part 2, D25) and
+// the impersonating browser's three (sign-in part 3, D43).
 var peopleAppRoutes = []string{
 	"GET /api/me/apps",
 	"PUT /api/me/apps/{instance}/values/{key}",
@@ -115,12 +116,18 @@ var peopleAppRoutes = []string{
 	"POST /api/me/signin/yubikey-certificate/renew",
 	"PUT /api/me/signin/password",
 	"DELETE /api/me/signin/password",
+	"GET /api/me/impersonation",
+	"POST /api/me/impersonation/stop",
+	"GET /impersonation/stop",
 }
 
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
 // directory API, peopleAppRoutes, /healthz, the page and its assets —
 // compared as sets of the patterns PeopleHandler registers.
 func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
+	if len(peopleAppRoutes) != 20 {
+		t.Errorf("peopleAppRoutes has %d routes, the contract (§5.1) twenty", len(peopleAppRoutes))
+	}
 	e := newPeopleEnv(t)
 	dir := &recordingMux{ServeMux: http.NewServeMux()}
 	e.s.registerDirectory(dir)
@@ -676,8 +683,8 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myai.js,myapps.js,mysignin.js" {
-		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myai.js, myapps.js, mysignin.js", allow)
+	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,impersonation.js,myai.js,myapps.js,mysignin.js" {
+		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, impersonation.js, myai.js, myapps.js, mysignin.js", allow)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
