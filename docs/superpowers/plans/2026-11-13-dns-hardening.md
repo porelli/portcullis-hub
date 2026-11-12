@@ -43,6 +43,39 @@
   - `nomail`: TTL 3600. Null MX `0 .`, `v=spf1 -all`, and `_dmarc.<d>` `v=DMARC1; p=reject;`.
 - **`.env`:** `DNS_CAA=true`, `DNS_CAA_ISSUER=` (non-LE CAs only), `DNS_CAA_IODEF=`, `DNS_NOMAIL=false`. Let's Encrypt production and staging both map to the issuer `letsencrypt.org`.
 - **Resolvers:** `1.1.1.1:53` and `8.8.8.8:53` (`DOMAINS_RESOLVERS` overrides them in CI only). The plan refresh is throttled to one per 30 s per name.
+- **polish1 overlap:**
+  - Hub `web/web.go` `//go:embed` line: a certain conflict (polish1 adds 8 logo files, Task 11 adds `dns.js`). Take both.
+  - DNS op names (`OpDNSApply`, `OpDNSSECSign`, `opKeyDomain`) live in `internal/hub/doctor_dns.go`, never `async.go` (polish1 T6 edits it).
+  - Docs edits must pass polish1's `python3 scripts/check-lists.py` (a blank line before every list that follows a paragraph) and `scripts/check-branding.sh`. Write them that way now.
+  - After any docs change (Task 1, Task 13, Task 14 catch-up), resync the Hub copies: `PORTCULLIS_DOCS_DIR=/Volumes/workspace/portcullis/wt-dns1/portcullis-docs web/docs/sync.sh` in the Hub worktree, then commit `web/docs`. Never merge the copies by hand.
+- **Before or after polish1 merges:**
+  - May run before: Tasks 2–6, 8, 9, and the core e2e part of Task 11 (Step 5).
+  - Must run after: Task 13.
+  - The rest (1, 7, 10, 11 Hub, 12) may run before; their later merge is trivial (Task 14 Step 1).
+
+## Pre-flight rulings (2026-11-13)
+
+All accepted as written (`.superpowers/sdd/2026-11-13-dns-hardening/preflight.md` §4). The tasks below already include them.
+
+- **F1:** 4 admin MCP twins `get_domain_dns` (R), `get_main_dns` (R), `apply_domain_dns` (W), `enable_domain_dnssec` (D). Contract §15.10 (Task 1), mcptools + `TestAdminToolsSameAsHTTP` (Task 10).
+- **F2:** DNS fixes run under op key `_domain.<name>`. `opAcceptedBody` gains a `_domain.` case, poll `GET /api/domains/{name}/op` (+ tool twin `domain_op`). `GET /api/instances/ops` excludes `_domain.*` (Tasks 1, 12).
+- **F3:** `_dns_tool_input` derives `ca_server` from `ACME_STAGING` (as `config_apply` does) when `ACME_CA_SERVER` is empty (Task 8).
+- **F4:** `dns_plan` / `dns_setup` / `dns_check` set `DNS_ACCOUNT_URI` from `dns_traefik_account_uri` (empty = CA-only). Shell test "dns setup keeps Traefik's pin" (Tasks 8–9).
+- **F5:** The status lost-account Problem fires on `main.caa.would_issue == false` or `main-domain.env` URI ≠ `dns_traefik_account_uri`. Never compare `caa.account_uri` with Traefik's URI (Task 9).
+- **F6:** `work()` runs the records step whenever `caaDueLocked`, `DueSets` or `SignRequested`, even for a ready domain with a valid cert. `caa` applies even under `keepRecords` (only `address` is skipped). `caaDueLocked` also counts a stored account CAServer/Email ≠ cfg. `account()` is called whenever a cert or CAA is due (Task 5).
+- **F7:** `toolInput` carries full snake_case JSON tags (Task 7).
+- **F8:** `dns_tighten_main` polls only when `DNS_CAA=true` and the provider is automated; otherwise one read, writing `main-domain.env` whenever a URI is found. `init_run` calls `dns_tighten_main` at its end (Task 9).
+- **F9:** Task 12 adds `doctor.FixDNSApply: false, doctor.FixDNSSECSign: false` to `fixerTouchesData` (`doctorfix_touches_test.go`).
+- **F10:** `DNS_CAA_ISSUER: pebble.test` also goes in the `e2e-instances` domains override (about ci.yml:3327) (Tasks 7, 11).
+- **F11:** Task 7 adds `dns-tool` to `CORE_SERVICE_NAMES` (`scripts/lib/network.sh:179`).
+- **F12:** Resync Hub `web/docs` via `sync.sh` after Tasks 1 and 13 and at Task 14 catch-up.
+- **F13:** Docs follow polish1's list rule. Task 14 Step 1 runs `python3 scripts/check-lists.py` in docs after merging main.
+- **F14:** Task 1 adds the audit actions `domain.dns_apply` (detail `sets=…`) and `domain.dnssec_enable` to §9.5 and §12.3.
+- **F15:** (a) One helper converts `RecordRef`↔`dnsplan.Ref` (Task 5). (b) The tool builds `&Domain{Provider, Credentials}` for `buildDNSSEC` (Task 7). (c) Task 7 drops the FIFO `docker inspect`; the unit-tests jq check is the proof. (d) The tool takes `mail_from`, so the CLI plan applies the `ALERT_SMTP_FROM` rule.
+- **F16:** Task 3 adds `TestBuildLookupFailureUnknown`.
+- **F17:** No `dns setup --check` alias (user rule: no back-compat; overrides spec §7). The usage error points to `dns check`. Update dns.sh's hint (about :175), docs dns.md:123 and quickstart.md:175 (Tasks 8, 13).
+- **F18:** Traefik provider: `${ACME_DNS_PROVIDER:-${DNS_PROVIDER:-cloudflare}}`. The `hetznerv1` probe and its fallback stay (Task 9).
+- **F19:** Still ten kinds. When DNS inputs are unavailable, the doctor `Report` gains `dns_unavailable: true` (a field, not a finding) (Task 12).
 
 ## Review Focus
 
@@ -90,10 +123,11 @@
 
 ---
 
-### Task 1: Contract §12 / §14.5 / §14.6 (docs, first)
+### Task 1: Contract §12 / §14.5 / §14.6 / §15.10 / §9.5 (docs, first)
 
 **Files:**
-- Modify: `docs/guides/integration-contracts.md` (§12 intro and §12.1–12.4 at about lines 2178–2300, §14.5 at about 3318 and §14.6 at about 3361)
+- Modify: `docs/guides/integration-contracts.md` (§12 intro and §12.1–12.4 at about lines 2178–2300, §14.5 at about 3318 and §14.6 at about 3361, plus §15.10 and §9.5). polish1 shifts these lines by about +60, and the §14.5 block will meet a trivial conflict at catch-up.
+- Modify (Hub): `web/docs/*` via `sync.sh` (Step 8)
 
 **Interfaces:**
 - Produces: the binding wire shapes every later task uses (copy them exactly):
@@ -101,7 +135,10 @@
   - The domain object gains `caa_ok` (bool) and `dnssec` (state string).
   - Endpoints: `GET /domains/{name}/dns[?refresh=1]` → 200 plan. `POST /domains/{name}/dns/apply` `{"sets": [...]}` → 202 domain object (400 for an unknown set). `POST /domains/{name}/dnssec` `{"enable": true}` → 202, or 409 "provider can't sign". `GET /main/dns[?refresh=1]` → 200 plan (`can_write: false`). `GET /acme/account` → `{ca_server, account_uri, caa_issuer}`.
   - `hetzner-cloud` credentials: `api_token`.
-  - The doctor finding gains `domains` (the domain names it concerns). Ten kinds and two fix kinds, as spec §8 lists them.
+  - The doctor finding gains `domains` (the domain names it concerns). Ten kinds and two fix kinds, as spec §8 lists them. The doctor report gains `dns_unavailable` (F19).
+  - §15.10 tools (F1): `get_domain_dns` (R), `get_main_dns` (R), `apply_domain_dns` (W), `enable_domain_dnssec` (D: zone-wide, not undoable from Portcullis), `domain_op` (R, F2).
+  - Op key (F2): DNS fixes run under `_domain.<name>`; 202 body `poll` = `/api/domains/{name}/op`; `GET /api/instances/ops` excludes `_domain.*`.
+  - Audit actions (F14): `domain.dns_apply` (detail `sets=<a,b>`) and `domain.dnssec_enable`, in §9.5 and §12.3.
 
 - [ ] **Step 1:** In the docs worktree, edit the §12 intro to cover three points: the main domain still uses Traefik's resolver; `dns setup` runs the domains image's one-shot `dns` tool; the service builds a read-only main-domain plan.
 - [ ] **Step 2: §12.1.** Add the `dns-tool` service: profile `tools`, image `portcullis-domains`, only `domains-egress`, read-only, no volumes, no env, credentials as JSON on stdin. Also add `secrets/domains/main-domain.env` (`DOMAINS_MAIN_ACME_ACCOUNT_URI`, mode 0600, written by `up` / `upgrade`), and `DNS_CAA`, `DNS_CAA_ISSUER`, `DNS_CAA_IODEF` passed to the service.
@@ -111,9 +148,11 @@
   - §12.4: add the record-sets table (Global Constraints values), the CAA content and merge rule (spec §4 verbatim, plus the removal signature for the main domain from Task 3), the account-switch order, "DELETE also removes the CAA entries it wrote", and "signing is never turned off".
 - [ ] **Step 5: §14.5 / §14.6.**
   - §14.5: add a "DNS (NEW)" kinds block, copying spec §8's ten kinds with severity and fix class, and add `domains` to the finding field list.
-  - §14.6: add `dns_apply` (param `sets`, preview = the plan's diff lines, plan hash over the live values, `touches_data: false`) and `dnssec_sign` (preview "turns on signing for the whole zone <zone>", `touches_data: false`).
-- [ ] **Step 6: Verify:** `zensical build --strict --clean && rm -rf site` must exit 0. Use a venv with `requirements.txt`, as CLAUDE.md says.
-- [ ] **Step 7: Commit:** `git add docs/guides/integration-contracts.md && git commit -m "contract §12/§14.5–14.6: dns plan, caa, dnssec, dns-tool, hetzner-cloud"`, then `git push -u origin dns1`.
+  - §14.6: add `dns_apply` (param `sets`, preview = the plan's diff lines, plan hash over the live values, `touches_data: false`) and `dnssec_sign` (preview "turns on signing for the whole zone <zone>", `touches_data: false`). Add the `_domain.<name>` op key and its poll route (F2) and the report's `dns_unavailable` (F19).
+- [ ] **Step 5b: §15.10 and §9.5.** Add the five tools above to §15.10 (F1, F2) and the two audit actions to §9.5 (F14). Every new list gets a blank line before it (F13).
+- [ ] **Step 6: Verify:** `zensical build --strict --clean && rm -rf site` must exit 0. Use a venv with `requirements.txt`, as CLAUDE.md says. Once polish1's scripts are on main, also run `python3 scripts/check-lists.py` and `scripts/check-branding.sh`.
+- [ ] **Step 7: Commit:** `git add docs/guides/integration-contracts.md && git commit -m "contract §12/§14.5–14.6/§15.10/§9.5: dns plan, caa, dnssec, dns-tool, hetzner-cloud"`, then `git push -u origin dns1`.
+- [ ] **Step 8: Hub resync (F12):** in the Hub worktree, run `PORTCULLIS_DOCS_DIR=/Volumes/workspace/portcullis/wt-dns1/portcullis-docs web/docs/sync.sh`, then `git add web/docs && git commit -m "web/docs: resync contract (dns1)"` and push.
 
 ---
 
@@ -235,6 +274,8 @@
   - `TestApplyNeverTouchesOtherNames` (records at `other.<zone>` and the apex NS unchanged).
   - `TestUnknownCASkipsCAA` (no `caa` items; one Info step "CAA skipped: unknown CA").
   - `TestNoMailRecommended`.
+  - `TestBuildLookupFailureUnknown` (F16): a dead resolver (`127.0.0.1:1`) gives every item `unknown`, `would_issue: false` and `dnssec.state: unknown`.
+  - Foreign records also cover ALIAS where the provider returns it (spec §3).
 - [ ] **Step 3: Run** `cd domains && go test ./internal/dnsplan/ -v`. Expect FAIL.
 - [ ] **Step 4: Implement** `caa.go` and `plan.go` with the interfaces and rules above.
 - [ ] **Step 5: Run** the same command, then `go test -race ./...`. Expect PASS.
@@ -299,13 +340,14 @@
   - `func (s *Service) applySets(ctx context.Context, p dnsProvider, d *Domain, sets []string, accountURI string) ([]RecordRef, []RecordRef /*removed*/, string /*zone*/, error)`.
   - `func (s *Service) waitCAA(ctx context.Context, name, accountURI string) error`: polls with `RecordsPoll` until `WouldIssue` is true for `<d>` and `*.<d>` at **every** resolver (each one queried on its own), bounded by `RecordsWait`.
   - `func (s *Service) obtain(name string, p dnsProvider, u *acmeUser) (...)`: the account is passed in, never registered inside.
-  - `func (s *Service) caaDueLocked(d *Domain, uri string) bool`: CAA on, issuer known and `d.CAAAccountURI != uri`. When CAA is off but `Records` hold CAA refs, removal is due.
+  - `func (s *Service) caaDueLocked(d *Domain, uri string) bool`: CAA on, issuer known, and either `d.CAAAccountURI != uri` or the stored account's `CAServer`/`Email` differ from `cfg` (an account switch before re-registration, F6). When CAA is off but `Records` hold CAA refs, removal is due.
+  - `func refsToPlan([]RecordRef) []dnsplan.Ref` and `func refsFromPlan([]dnsplan.Ref) []RecordRef`: the single conversion point (F15a).
 
 **Order in `work` (spec §4 "Domains service"):**
-1. If CAA is on and the issuer known: `u, err := s.account()`, so registration happens first.
-2. Records step (under `j.lock()`): `applySets` for `address`, `caa` (with `u.reg.URI`) and `d.Sets`/`DueSets`. Record refs, including the CAA entries, with `updateRecords`. Removed refs leave `d.Records`.
+1. Whenever a cert **or** CAA is due (CAA on or off): `u, err := s.account()`, so registration happens first and `obtain`'s `u` is always defined (F6).
+2. Records step (under `j.lock()`). It runs whenever a cert is due, or `caaDueLocked`, `len(DueSets) > 0` or `SignRequested` holds, **including a ready domain with a valid cert** (F6). `applySets` for `address`, `caa` (with `u.reg.URI`) and `d.Sets`/`DueSets`. When `keepRecords` is set (IPv4 unknown), only `address` is skipped; `caa` and the other sets still apply. Record refs, including the CAA entries, with `updateRecords`. Removed refs leave `d.Records`.
 3. `waitCAA(name, u.reg.URI)`, then set `CAAAccountURI`.
-4. Only then `obtain`.
+4. Only then `obtain` (skipped when no cert is due).
 
 `dueLocked` for a ready domain also returns true for `caaDueLocked`, `len(DueSets) > 0` and `SignRequested`. `SignRequested` calls `Signer.EnableDNSSEC` in the records step, then clears the flag. A failure goes to `last_error` with backoff, like any failure. DELETE's existing `deleteRecords` removes CAA refs, deleting only the exact data, so other CAs' entries stay.
 
@@ -317,6 +359,7 @@
   - `TestCAAOffRemovesOwned`: restart with `CAA=false`. Our entries are removed and `caa_ok` is false.
   - `TestUnknownCASkipsCAAWrite` (`CAAIssuer == ""`: no CAA records written, certificate still issued).
   - `TestViewHasCAAAndDNSSEC` (`caa_ok` true, `dnssec` `"unsigned"` after ready).
+  - `TestReadyDomainAppliesDueCAA` (F6): a ready domain with a valid cert and no CAA gets it written on the next kick, with no new order; the same holds with `keepRecords` set (address untouched).
 - [ ] **Step 2: Run** `cd domains && go test -race -run 'CAA|AccountSwitch|DeleteRemovesCAA|ViewHas' -v .`. Expect FAIL.
 - [ ] **Step 3: Implement** per the interfaces and order above. `main.go` `run()` reads `DNS_CAA` (default true; `_bool` semantics: `true`/`false` only, else refuse to start), `DNS_CAA_ISSUER`, `DNS_CAA_IODEF`, `DOMAINS_MAIN_ACME_ACCOUNT_URI` and `ALERT_SMTP_FROM`. When CAA is on, it resolves the issuer with `dnsplan.IssuerFor(cfg.CAServer, DNS_CAA_ISSUER)`; with no issuer it logs "CAA skipped: unknown CA <url> (set DNS_CAA_ISSUER)".
 - [ ] **Step 4: Run** the full domains test command. Expect PASS, with every existing test green (`TestRecordsCreatedAAndAAAA` and friends now go through `applySets`).
@@ -361,12 +404,34 @@
 
 **Files:**
 - Create: `domains/tool.go`, `domains/tool_test.go`
-- Modify: `domains/main.go` (subcommand switch and usage line), `docker-compose.yml`, `.github/workflows/ci.yml` (unit-tests wiring check at about lines 371–403; build-and-test "Test the domains service" at about 1370; CI override at about 755)
+- Modify: `domains/main.go` (subcommand switch and usage line), `docker-compose.yml`, `scripts/lib/network.sh` (`CORE_SERVICE_NAMES` at about :179 gains `dns-tool`, F11), `.github/workflows/ci.yml` (unit-tests wiring check at about lines 371–403; build-and-test "Test the domains service" at about 1370; CI override at about 755; `e2e-instances` domains override at about 3327, F10). polish1 shifts the ci.yml lines by about +4.
 
 **Interfaces:**
 - Consumes: `dnsplan.Build`/`Apply`/`IssuerFor`, `validateCredentials`, `buildProvider`, `buildDNSSEC`, `redact`.
 - Produces:
-  - `domains dns plan|apply [--wait <dur>]|check|dnssec-enable` reads one JSON object from stdin (at most 64 KiB, `DisallowUnknownFields`): `type toolInput struct{ Name string \`json:"name"\`; Provider string \`json:"provider"\`; Credentials map[string]string \`json:"credentials"\`; IPv4, IPv6 string; CAServer string \`json:"ca_server"\`; CAA struct{ Enabled bool; Issuer, AccountURI, IODEF string } \`json:"caa"\`; NoMail bool \`json:"nomail"\`; Sets []string \`json:"sets"\` }`. The JSON keys are snake_case as in Task 1.
+  - `domains dns plan|apply [--wait <dur>]|check|dnssec-enable` reads one JSON object from stdin (at most 64 KiB, `DisallowUnknownFields`). Every field carries an explicit tag (F7):
+
+    ```go
+    type toolInput struct {
+        Name        string            `json:"name"`
+        Provider    string            `json:"provider"`
+        Credentials map[string]string `json:"credentials"`
+        IPv4        string            `json:"ipv4"`
+        IPv6        string            `json:"ipv6"`
+        CAServer    string            `json:"ca_server"`
+        CAA         struct {
+            Enabled    bool   `json:"enabled"`
+            Issuer     string `json:"issuer"`
+            AccountURI string `json:"account_uri"`
+            IODEF      string `json:"iodef"`
+        } `json:"caa"`
+        NoMail   bool     `json:"nomail"`
+        Sets     []string `json:"sets"`
+        MailFrom string   `json:"mail_from"` // ALERT_SMTP_FROM: drops the nomail recommendation as the service does (F15d)
+    }
+    ```
+
+    - For `buildDNSSEC`, the tool builds a throwaway `&Domain{Provider: in.Provider, Credentials: in.Credentials}` (F15b).
     - `check` refuses non-empty credentials, with exit 2: "check takes no credentials".
     - An empty `provider` means read-only for `plan` (manual steps).
     - `apply` without a provider exits 2.
@@ -400,6 +465,7 @@
   - `TestToolApplyWait`.
   - `TestToolCheckExit1OnProblem` (CAA with another `accounturi`).
   - `TestToolStdinOnly` (unknown field → exit 2; more than 64 KiB → exit 2).
+  - `TestToolInputKeys` (F7): a stdin object with every snake_case key (`caa.account_uri`, `ipv4`, `ipv6`, `mail_from`, …) decodes with no error and lands in the right fields; `AccountURI` as a key is an unknown field (exit 2).
   - `TestToolErrorsRedacted`.
   - `TestTraefikAccountURI` (fixture `{"letsencrypt":{"Account":{"Email":"a@b","Registration":{"body":{},"uri":"https://acme-staging-v02.api.letsencrypt.org/acme/acct/123"},"PrivateKey":"SECRETKEY"}}}`: the output is exactly the URI line and never contains `SECRETKEY`; a file without an account gives exit 3 and empty stdout).
   - `TestReportShape` (against `httptest` of `APIHandler`).
@@ -421,10 +487,11 @@
     - `dapi http://domains:8080/domains/$D/dns | jq -e` that the `caa` items are `ok`, `.caa.would_issue == true` and `.caa.account_uri == (acme/account).account_uri`.
     - The tool: `jq -n '{name:"tool.ci-domains.test",provider:"fake",credentials:{api_token:"ci-fake-token-0123456789"},ipv4:"203.0.113.10",ca_server:"https://pebble:14000/dir",caa:{enabled:true,issuer:"pebble.test"},sets:["address","caa"]}' | docker compose run --rm -T dns-tool apply --wait 60s | jq -e` that every item is `ok`.
     - `check` with no credentials, exit 0.
-    - `docker inspect` of a running `dns-tool` container (start one with `plan` piped from a FIFO, or check the compose config) shows no `Mounts`.
-    - Add `DNS_CAA_ISSUER: pebble.test` to the CI override's `domains.environment`.
+    - No `docker inspect` step: the unit-tests jq check (no volumes, env or env_file) is the proof (F15c).
+    - Add `DNS_CAA_ISSUER: pebble.test` to the CI override's `domains.environment`, in build-and-test (about :755) **and** in `e2e-instances`' domains override (about :3327) (F10).
+  - In `scripts/lib/network.sh`, add `dns-tool` to `CORE_SERVICE_NAMES` (about :179). ci.yml:536 diffs it against `--profile '*'` services (F11).
 - [ ] **Step 6: Run locally:** `docker compose -f docker-compose.yml --profile '*' config -q`, then `actionlint`.
-- [ ] **Step 7: Commit:** `git add domains docker-compose.yml .github/workflows/ci.yml && git commit -m "domains: one-shot dns tool (stdin credentials), traefik-account-uri, report; compose dns-tool (tools profile, egress only); ci wiring"`.
+- [ ] **Step 7: Commit:** `git add domains docker-compose.yml scripts/lib/network.sh .github/workflows/ci.yml && git commit -m "domains: one-shot dns tool (stdin credentials), traefik-account-uri, report; compose dns-tool (tools profile, egress only); ci wiring"`.
 - [ ] **Step 8: CI:** `gh workflow run ci.yml --ref dns1 -f jobs=unit-tests,build-and-test`. Wait for it and fix failures before Task 8.
 
 ---
@@ -444,18 +511,20 @@
     - `mode` is `write` (with credentials) or `read` (no provider, no credentials).
     - Credentials go in through jq `env[$k]` lookups over the mapped names, so values never reach argv.
     - A required variable that is empty fails with `fail "<VAR> is not set in .env (needed for DNS_PROVIDER=<p>)"`.
-    - It reads `DNS_ACCOUNT_URI` (set by callers), `DNS_SETS` (space-separated), `ACME_CA_SERVER`, `DNS_CAA`, `DNS_CAA_ISSUER`, `DNS_CAA_IODEF`, `DNS_NOMAIL`, and the IPs. `PORTCULLIS_PUBLIC_IPV4` / `_IPV6` or `public_ip_detect`, as today.
+    - It reads `DNS_ACCOUNT_URI` (set by callers), `DNS_SETS` (space-separated), `ACME_CA_SERVER`, `DNS_CAA`, `DNS_CAA_ISSUER`, `DNS_CAA_IODEF`, `DNS_NOMAIL`, `ALERT_SMTP_FROM` (→ `mail_from`, F15d), and the IPs. `PORTCULLIS_PUBLIC_IPV4` / `_IPV6` or `public_ip_detect`, as today.
+    - When `ACME_CA_SERVER` is empty (a fresh init runs before `config_apply`), `ca_server` comes from `ACME_STAGING` with the same mapping `config_apply` uses (F3).
   - `_dns_tool <subcommand> [args]`: `domains_image_ensure`, then `_dns_tool_input … | dc run --rm --no-deps -T dns-tool "$@"`.
-  - `dns_plan <json>`, `dns_setup <yes> <dnssec> <only>`, `dns_check <json>`.
+  - `dns_traefik_account_uri` (moved here from Task 9 so F4 can use it; definition as in Task 9).
+  - `dns_plan <json>`, `dns_setup <yes> <dnssec> <only>`, `dns_check <json>`. Each sets `DNS_ACCOUNT_URI="$(dns_traefik_account_uri)"` unless the caller set it; empty means CA-only (F4).
   - The table is rendered with jq: `set name type want live status`, one row per item, then the CAA line (`issuer`, `account_uri` or "CA-only", `would_issue`) and the DNSSEC line (state, DS values, steps).
-  - `cmd_dns` takes the subcommands `plan [--json]`, `setup [--yes] [--dnssec] [--only address|caa|nomail] [--check]` and `check [--json]`. `--check` is an alias of `check`; `--only` is validated (otherwise `usage_error`).
+  - `cmd_dns` takes the subcommands `plan [--json]`, `setup [--yes] [--dnssec] [--only address|caa|nomail]` and `check [--json]`. There is **no** `setup --check` alias (F17): it is a `usage_error` "unknown argument --check (use: ./portcullis dns check)". Update the old hint in dns.sh (about :175). `--only` is validated (otherwise `usage_error`).
   - `help_dns`, `help_dns_plan`, `help_dns_setup` and `help_dns_check` restate the flags.
 - Behaviour:
   - `setup` prints the plan. It then asks "Apply these changes? [y/N]" when stdin is a TTY and `--yes` is absent; non-interactive without `--yes` fails "non-interactive: pass --yes".
   - It then runs `_dns_tool apply --wait 5m`, the plan applies its sets, and `check` runs.
   - A non-automated provider prints the manual steps and returns 0.
   - `--dnssec` runs `_dns_tool dnssec-enable` after apply. Only `cloudflare` can; others print the plan's DNSSEC steps.
-  - `init_run` calls `dns_setup true false ""` (CA-only CAA, since Traefik has no account yet).
+  - `init_run` calls `dns_setup true false ""` (CA-only CAA, since Traefik has no account yet; the issuer comes from `ACME_STAGING`, F3). Update the `dns_setup` stub's arity in test_cli.sh (about :631).
 
 - [ ] **Step 1: Write the failing tests.** In `tests/test_shell_libs.sh`, stub `docker` to log argv to a file and stdin to another.
   - "dns tool: credentials only on stdin": with `CLOUDFLARE_API_TOKEN=tok-SECRET-123`, the argv log never contains `tok-SECRET-123` and the stdin log's `.credentials.api_token` equals it.
@@ -467,7 +536,9 @@
   - "dns setup --yes: plan then apply then check, in that order" (argv log order).
   - "dns setup: manual provider prints steps, exit 0".
   - "dns setup --only bogus: usage error".
-- [ ] **Step 2: Write the failing tests** in `tests/test_cli.sh`: the usage-error table gains `dns plan --bogus|unknown argument`, `dns check --bogus|unknown argument` and `dns setup --only x|--only`. The help loop already covers `dns`; add `dns plan --help`, `dns check --help` and `dns setup --help`.
+  - "dns setup keeps Traefik's pin" (F4): with `dns_traefik_account_uri` stubbed to a URI, the apply stdin's `.caa.account_uri` equals it; stubbed empty → `""`.
+  - "dns tool: ca_server from ACME_STAGING when ACME_CA_SERVER is empty" (F3): `true` → the LE staging URL, `false` → production.
+- [ ] **Step 2: Write the failing tests** in `tests/test_cli.sh`: the usage-error table gains `dns plan --bogus|unknown argument`, `dns check --bogus|unknown argument`, `dns setup --only x|--only` and `dns setup --check|dns check` (F17). The help loop already covers `dns`; add `dns plan --help`, `dns check --help` and `dns setup --help`.
 - [ ] **Step 3: Run** `bash tests/test_shell_libs.sh; bash tests/test_cli.sh`. Expect the new cases to FAIL.
 - [ ] **Step 4: Implement** the rewrite. Remove `require_cmd curl` from the DNS path and every `aws` reference.
 - [ ] **Step 5: Run** the shell tests and `shellcheck -S warning portcullis scripts/lib/*.sh tests/*.sh`. Expect PASS.
@@ -484,22 +555,22 @@
 **Interfaces:**
 - Consumes: `_dns_tool`, `_dns_automated`, `domains traefik-account-uri`, `domains report` (Tasks 7–8).
 - Produces:
-  - `dns_traefik_account_uri`: `docker run --rm --network none --read-only --user 0:0 --cap-drop ALL --security-opt no-new-privileges:true -v portcullis_traefik_acme:/acme:ro "$DOMAINS_IMAGE_NAME" traefik-account-uri /acme/acme.json`. It prints the URI, or nothing.
+  - `dns_traefik_account_uri` (written in Task 8): `docker run --rm --network none --read-only --user 0:0 --cap-drop ALL --security-opt no-new-privileges:true -v portcullis_traefik_acme:/acme:ro "$DOMAINS_IMAGE_NAME" traefik-account-uri /acme/acme.json`. It prints the URI, or nothing.
   - `dns_main_env_write <uri>`: writes `secrets/domains/main-domain.env` (`umask 077`, `DOMAINS_MAIN_ACME_ACCOUNT_URI=<uri>`). When the content changed, it runs `dc up -d domains`.
-  - `dns_tighten_main`: polls `dns_traefik_account_uri` up to 180 s, then calls `dns_main_env_write`. When `DNS_CAA` is true, the provider is automated and the live pin (`_dns_tool check` with `DNS_SETS=caa`) differs, it runs `DNS_ACCOUNT_URI=<uri> DNS_SETS=caa _dns_tool apply --wait 5m`. Every failure only `warn`s; it always returns 0.
+  - `dns_tighten_main`: polls `dns_traefik_account_uri` up to 180 s **only when `DNS_CAA=true` and `_dns_automated`**; otherwise it reads once (F8). Whenever a URI is found it calls `dns_main_env_write`. When `DNS_CAA` is true, the provider is automated and the live pin (`_dns_tool check` with `DNS_SETS=caa`) differs, it runs `DNS_ACCOUNT_URI=<uri> DNS_SETS=caa _dns_tool apply --wait 5m`. Every failure only `warn`s; it always returns 0.
   - `dns_relax_main`: `DNS_ACCOUNT_URI= DNS_SETS=caa _dns_tool apply`. On failure it warns "issuance will fail on CAA until ./portcullis dns setup" and returns 0.
   - `dns_status_json`: `dc exec -T domains domains report --main --json`, or empty.
 - Wiring:
-  - `stack_up` and `upgrade_run` call `dns_tighten_main` after `wait_healthy … keycloak` (Traefik is up by then).
+  - `stack_up` and `upgrade_run` call `dns_tighten_main` after `wait_healthy … keycloak` (Traefik is up by then). `init_run` also calls it at its end (F8).
   - `config_apply` calls `dns_relax_main` **before** `rm -f /acme/acme.json`, inside the flip branch, only when the provider is automated and `DNS_CAA` is true.
   - `status_run`:
-    - Adds a "DNS" section: address, CAA pin vs Traefik's account (from `main.caa.account_uri` vs `dns_traefik_account_uri`; a mismatch is a Problem "CAA allows another ACME account than Traefik's — fix: ./portcullis dns setup"), DNSSEC state, and foreign-records count.
+    - Adds a "DNS" section: address, CAA pin, DNSSEC state, and foreign-records count. The Problem "CAA allows another ACME account than Traefik's — fix: ./portcullis dns setup" fires when `main.caa.would_issue == false`, or when `main-domain.env`'s URI ≠ `dns_traefik_account_uri` (stale). Never compare `main.caa.account_uri` with Traefik's URI: it is the wanted URI, so they are always equal (F5).
     - With no report, it prints the one line "DNS checks unavailable" (not a problem).
     - `--json` gains `dns: {main: <summary>, domains: {<name>: <summary>}}`. The jq summary is `{address_ok, caa_ok, would_issue, dnssec, foreign, problems}`.
     - Any `problem`-severity item or `dnssec` `bogus`/`ds_mismatch` sets `problems=1`.
   - `status_textfile` adds `portcullis_dns_check{name,check}` (check ∈ `address`, `caa`, `dnssec`, `foreign`; 1 = no Warning or Problem) and `portcullis_dnssec_state{name,state}` (1 for the current state).
   - Traefik env:
-    - `TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_DNSCHALLENGE_PROVIDER: ${ACME_DNS_PROVIDER:-cloudflare}`.
+    - `TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_DNSCHALLENGE_PROVIDER: ${ACME_DNS_PROVIDER:-${DNS_PROVIDER:-cloudflare}}` (nested default, so a hand `compose up` before `config apply` keeps the right provider, F18).
     - Add `HETZNER_API_TOKEN: ${HETZNER_API_TOKEN:-}`.
     - `config_apply` writes `ACME_DNS_PROVIDER` (= `DNS_PROVIDER`, except `hetzner-cloud` → `hetzner`) next to `ACME_CA_SERVER`.
     - It fails closed when `DNS_PROVIDER=hetzner` and `HETZNER_API_TOKEN` is set, or `hetzner-cloud` and `HETZNER_API_KEY` is set, because lego prefers the token.
@@ -518,7 +589,10 @@
   - "config apply flip: relax failure warns and goes on".
   - "status: DNS checks unavailable without the report".
   - "status --json: dns.main summary from a fixture report".
-  - "status: CAA account mismatch is a problem".
+  - "status: CAA would_issue false is a problem" and "status: stale main-domain.env URI is a problem" (F5); a fixture whose `main.caa.account_uri` equals Traefik's but `would_issue` is false still reports the Problem.
+  - "tighten: manual provider or DNS_CAA=false reads once, no poll" (F8; the stub is called once).
+  - "init: tighten runs at the end" (F8).
+  - "compose: Traefik provider falls back to DNS_PROVIDER" (F18: `docker compose config` with `DNS_PROVIDER=porkbun` and no `ACME_DNS_PROVIDER` gives `porkbun`).
   - "textfile: portcullis_dns_check and portcullis_dnssec_state lines".
   - "config apply: hetzner with HETZNER_API_TOKEN refused".
 - [ ] **Step 2: Run** `bash tests/test_shell_libs.sh`. Expect the new cases to FAIL.
@@ -532,7 +606,7 @@
 ### Task 10: Hub: domains client, Hub methods, API routes, `hetzner-cloud`
 
 **Files:**
-- Modify: `internal/domains/domains.go`, `internal/domains/domains_test.go`, `internal/hub/domains.go` (`DomainsAPI`, `knownProviders`), `internal/hub/domains_test.go` (`fakeDomainsAPI`), `internal/httpapi/domains.go` (`registerDomains`), `internal/httpapi/domains_test.go` (`newFakeDomainsService`), `internal/httpapi/mcptools_admin2.go` (provider text at about line 64), `web/index.html` (`DOMAIN_PROVIDERS` at about line 1719)
+- Modify: `internal/domains/domains.go`, `internal/domains/domains_test.go`, `internal/hub/domains.go` (`DomainsAPI`, `knownProviders`), `internal/hub/domains_test.go` (`fakeDomainsAPI`), `internal/httpapi/domains.go` (`registerDomains`), `internal/httpapi/domains_test.go` (`newFakeDomainsService`), `internal/httpapi/mcptools_admin2.go` (provider text at about line 64; the four DNS tools, F1), the admin tools' parity test (`TestAdminToolsSameAsHTTP`), `web/index.html` (`DOMAIN_PROVIDERS` at about line 1719)
 
 **Interfaces:**
 - Consumes: the Task 1 wire shapes.
@@ -549,13 +623,14 @@
     - `func (h *Hub) ApplyDomainDNS(ctx context.Context, actor directory.Actor, name string, sets []string) (domains.Domain, error)`: audited `domain.dns_apply` with detail `sets=<a,b>`.
     - `func (h *Hub) EnableDomainDNSSEC(ctx context.Context, actor directory.Actor, name string) (domains.Domain, error)`: audited `domain.dnssec_enable`; the service's 409 passes through.
   - Routes (admins only, `adminOnly`, `noStore`): `GET /api/domains/{name}/dns` (`?refresh=1` passed through), `POST /api/domains/{name}/dns/apply` `{"sets": [...]}` (strict decode, 400 fixed message), `POST /api/domains/{name}/dnssec` `{"enable": true}`, `GET /api/dns/main`.
+  - MCP tools (F1, contract §15.10), each an admin twin of its route: `get_domain_dns` (ClassRead, `GET /api/domains/{name}/dns`), `get_main_dns` (ClassRead, `GET /api/dns/main`), `apply_domain_dns` (ClassWrite, `POST /api/domains/{name}/dns/apply`, audit `domain.dns_apply`), `enable_domain_dnssec` (ClassDestructive: zone-wide and not undoable from Portcullis; `POST /api/domains/{name}/dnssec`, audit `domain.dnssec_enable`). `TestToolParity` then passes with no `noToolRoutes` entry.
   - `knownProviders` gains `"hetzner-cloud": true`. `DOMAIN_PROVIDERS` gains `'hetzner-cloud': [['api_token', 'Hetzner Cloud API token (Read & Write)', true]]`, and the `hetzner` label becomes `'DNS API token (legacy dns.hetzner.com)'`. The MCP arg text lists `hetzner-cloud`.
 
 - [ ] **Step 1: Write the failing tests:**
   - `internal/domains/domains_test.go`: `TestPlanDecodes` (a fixture of the Task 1 plan JSON round-trips every field), `TestApplySetsBody`, `TestEnableDNSSEC409IsAPIError`.
   - `internal/hub/domains_test.go`: `TestApplyDomainDNSAudited`, `TestDomainPlanUnknown404`, `TestHetznerCloudAccepted`.
-  - `internal/httpapi/domains_test.go`: extend `newFakeDomainsService` with the four endpoints. `TestDomainDNSRoutesAdminOnly` (delegate 403), `TestDomainDNSApplyStrictBody`, `TestMainDNSRoute`, `TestDNSSECConflictPassesThrough` (409 with the message).
-- [ ] **Step 2: Run** `go test -race ./internal/domains/ ./internal/hub/ ./internal/httpapi/ -run 'Plan|ApplySets|EnableDNSSEC|ApplyDomainDNS|DomainPlan|HetznerCloud|DomainDNS|MainDNS|DNSSECConflict' -v`. Expect FAIL.
+  - `internal/httpapi/domains_test.go`: extend `newFakeDomainsService` with the four endpoints. `TestDomainDNSRoutesAdminOnly` (delegate 403), `TestDomainDNSApplyStrictBody`, `TestMainDNSRoute`, `TestDNSSECConflictPassesThrough` (409 with the message). The four tools join `TestAdminToolsSameAsHTTP`; `TestToolParity` must stay green (F1).
+- [ ] **Step 2: Run** `go test -race ./internal/domains/ ./internal/hub/ ./internal/httpapi/ -run 'Plan|ApplySets|EnableDNSSEC|ApplyDomainDNS|DomainPlan|HetznerCloud|DomainDNS|MainDNS|DNSSECConflict|ToolParity|AdminToolsSameAsHTTP' -v`. Expect FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `go vet ./... && go test -race ./... && gofmt -l .`. Expect PASS and empty gofmt output.
 - [ ] **Step 5: Commit:** `git add internal web && git commit -m "hub: domains dns plan / apply / dnssec client and routes, main-domain plan, hetzner-cloud provider"`, then `git push -u origin dns1`.
@@ -567,6 +642,8 @@
 **Files:**
 - Create: `web/dns.js`, `internal/httpapi/webui_dns_test.go`
 - Modify: `web/web.go` (embed list), `web/index.html` (script tag next to `folders.js`; `loadDomains` gains a "DNS" button per row, a hidden `data-dns-row` panel row, and the main-domain block above the table); core `tests/e2e/e2e_instances.py`
+
+**polish1:** Step 5 (core e2e) may run before polish1 merges. The Hub part may too, but its `web/web.go` `//go:embed` line will conflict with polish1's 8 logo files at catch-up: take both. `dns.js` is served only on the Hub listener; never add it to `peopleStatic`. Step 7 needs `DNS_CAA_ISSUER: pebble.test` in the `e2e-instances` override (Task 7, F10).
 
 **Interfaces:**
 - Consumes: the routes from Task 10.
@@ -598,7 +675,8 @@
 
 **Files:**
 - Create: `internal/doctor/dns.go`, `internal/doctor/dns_test.go`, `internal/hub/doctor_dns.go`, `internal/hub/doctor_dns_test.go`
-- Modify: `internal/doctor/doctor.go` (`Finding.Domains`, `Inputs.DNS`, `Inputs.DNSMain`), `internal/hub/doctor.go` (`doctorInputs`), `internal/hub/async.go` (op names)
+- Modify: `internal/doctor/doctor.go` (`Finding.Domains`, `Inputs.DNS`, `Inputs.DNSMain`, `Report.DNSUnavailable`), `internal/hub/doctor.go` (`doctorInputs`), `internal/hub/doctorfix_touches_test.go` (`fixerTouchesData`, F9), `internal/httpapi/folders.go` (`opAcceptedBody` `_domain.` case, F2), `internal/httpapi/domains.go` (`GET /api/domains/{name}/op`), `internal/httpapi/mcptools_doctor.go` or `mcptools_admin2.go` (`domain_op` tool), the `GET /api/instances/ops` handler (exclude `_domain.*`)
+- **Not** `internal/hub/async.go`: the op names live in `doctor_dns.go` (polish1 T6 edits async.go), as `OpRebind` lives in doctorfix.go.
 
 **Interfaces:**
 - Consumes: `domains.Plan` (Task 10); `RegisterFixer`, `FixPlan`, `startAsync`, `statusErr` (existing).
@@ -621,13 +699,15 @@
   - Fixers in `internal/hub/doctor_dns.go`:
     - `dnsApplyFixer{}`: `TouchesData() false`. Preview re-fetches `DomainPlan(refresh=true)`; its lines are `"<set> <name> <type>: <live or —> → <want>"` per differing item; `Hash = doctor.Digest(live values of those items)`. Apply recomputes and returns 409 `"the DNS records changed since the preview: preview it again"` on a mismatch, else `startAsync(opKeyDomain(name), OpDNSApply, …)` calling `ApplyDomainDNS`.
     - `dnssecSignFixer{}`: `TouchesData() false`. Its preview line is `"turns on signing for the whole zone <zone>"` and its hash is the digest of `{zone, state}`. Apply calls `EnableDomainDNSSEC` under `startAsync(opKeyDomain(name), OpDNSSECSign, …)`.
-    - `func opKeyDomain(name string) string { return "_domain." + name }`, plus `OpDNSApply = "dns_apply"` and `OpDNSSECSign = "dnssec_sign"`.
-  - `doctorInputs` calls `h.dnsDoctorInputs(ctx)` before `mu`. It uses the cached plans (no refresh, a 10 s bound). When the service is unavailable it logs and returns nil (no DNS findings).
+    - `func opKeyDomain(name string) string { return "_domain." + name }`, plus `OpDNSApply = "dns_apply"` and `OpDNSSECSign = "dnssec_sign"`, all in `doctor_dns.go`.
+  - The op route (F2): `opAcceptedBody` gains `case strings.CutPrefix(op.Instance, "_domain.")` → `body["domain"] = name`, `body["poll"] = "/api/domains/" + name + "/op"`. `GET /api/domains/{name}/op` (admin, `noStore`) answers `writeOpRecord(w, opKeyDomain(name), "domain "+name)`. Its twin tool `domain_op` (ClassRead) returns `s.opRecordOf(opKeyDomain(name), …)`, like `folder_op`. `GET /api/instances/ops` skips `_domain.*` keys.
+  - `doctorInputs` calls `h.dnsDoctorInputs(ctx)` before `mu`. It uses the cached plans (no refresh, a 10 s bound). When the service is unavailable it logs and leaves `Inputs.DNS` nil: no DNS findings, and `Run` sets `Report.DNSUnavailable` (`json:"dns_unavailable,omitempty"`), so a clean report never hides that DNS checks didn't run (F19). Still exactly ten kinds.
 
 - [ ] **Step 1: Write the failing tests:**
-  - `internal/doctor/dns_test.go`: one table test per kind (`TestDNSKinds`), asserting severity, class, fix kind, params and `Domains`. Also `TestDNSMainExplainOnly`, `TestDNSFingerprintStable` (the same plan with items reordered gives the same fps; a changed live value changes `Inputs` but not `FP`), `TestDNSUnavailableNoFindings` and `TestDNSKindsRegistered` (`Kinds()` contains all ten).
-  - `internal/hub/doctor_dns_test.go`: `TestDNSApplyPreviewHash`, `TestDNSApplyHashMismatch409`, `TestDNSSECSignPreviewLine`, `TestDNSFixersTouchNoData` (and the existing `TestFixersDeclareTouchesData` still passes).
-- [ ] **Step 2: Run** `go test -race ./internal/doctor/ ./internal/hub/ -run 'DNS' -v`. Expect FAIL.
+  - `internal/doctor/dns_test.go`: one table test per kind (`TestDNSKinds`), asserting severity, class, fix kind, params and `Domains`. Also `TestDNSMainExplainOnly`, `TestDNSFingerprintStable` (the same plan with items reordered gives the same fps; a changed live value changes `Inputs` but not `FP`), `TestDNSUnavailableNoFindings` (no findings **and** `Report.DNSUnavailable == true`, F19) and `TestDNSKindsRegistered` (`Kinds()` contains all ten).
+  - `internal/hub/doctor_dns_test.go`: `TestDNSApplyPreviewHash`, `TestDNSApplyHashMismatch409`, `TestDNSSECSignPreviewLine`, `TestDNSFixersTouchNoData`. Add `doctor.FixDNSApply: false, doctor.FixDNSSECSign: false` to `fixerTouchesData` so the existing `TestFixersDeclareTouchesData` passes (F9).
+  - `internal/httpapi`: `TestDomainOpAcceptedPoll` (a DNS fix's 202 body has `poll == "/api/domains/<n>/op"` and that route answers the record), `TestInstanceOpsExcludeDomain`; `TestToolParity` stays green with `domain_op` (F2).
+- [ ] **Step 2: Run** `go test -race ./internal/doctor/ ./internal/hub/ ./internal/httpapi/ -run 'DNS|FixersDeclareTouchesData|DomainOp|InstanceOpsExclude|ToolParity' -v`. Expect FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the Hub test command. Expect PASS. The MCP doctor tools need no change: verify that the `doctor_apply_fix` tests still pass and that the `portcullis://doctor/checks` resource lists the new kinds.
 - [ ] **Step 5: Commit:** `git add internal && git commit -m "hub doctor: dns kinds (records, caa, dnssec, dangling, shadowed, nomail) and dns_apply / dnssec_sign fixes"`, then push.
@@ -635,6 +715,8 @@
 ---
 
 ### Task 13: Docs pages and CLAUDE.md files
+
+**polish1:** run this task **after** polish1 merges. First merge `origin/main` into the docs, core and Hub `dns1` worktrees: hardening/hub/testing.md and both CLAUDE.md files overlap polish1, and its `check-lists.py` / `check-branding.sh` must then pass.
 
 **Files:**
 - Modify (docs worktree): `docs/setup/dns.md`, `docs/setup/certificates.md` ("Switching"), `docs/setup/quickstart.md` (the CAA lines at about 39 and 179), `docs/operations/cli.md`, `docs/operations/hardening.md`, `docs/operations/hub.md`, `docs/operations/monitoring.md`, `docs/operations/testing.md`, `includes/abbreviations.md`
@@ -651,7 +733,7 @@
   Keep the headings that core pointers link to ("Adding extra domains", "One domain per installation").
 - [ ] **Step 2: Other pages.**
   - `certificates.md` "Switching": relax before the flip, tighten after `up`, the lost-account Problem.
-  - `quickstart.md`: CAA is now handled by `dns setup`.
+  - `quickstart.md`: CAA is now handled by `dns setup`. Replace `dns setup --check` with `dns check` (about :175; F17). Do the same in `dns.md` (about :123).
   - `cli.md`: restate the real `./portcullis dns --help`, `dns plan --help`, `dns setup --help` and `dns check --help` output (run them in the core worktree).
   - `hardening.md`: a `dns-tool` row (egress only, no mounts, stdin credentials) and the `traefik-account-uri` helper (network none, read-only, prints only the URI).
   - `hub.md`: the DNS panel and the doctor kinds.
@@ -662,7 +744,10 @@
   - `zensical build --strict --clean && rm -rf site` exits 0.
   - The CLAUDE.md legacy grep is empty: `grep -rnE 'bootstrap\.sh|apply-config|configure-keycloak|register-oidc|setup-vault-pki|vault-init\.sh|enroll-yubikey|renew-yubikey|revoke-cert|status\.sh|upgrade\.sh|restore\.sh|setup-dns|init-config|scripts/group-gate' docs`.
   - `grep -rn 'aws CLI\|aws route53' docs` is empty.
+  - `grep -rn 'setup --check' docs` is empty (F17).
+  - `python3 scripts/check-lists.py` and `scripts/check-branding.sh` exit 0 (F13).
 - [ ] **Step 4: Commit:** docs: `git add docs includes && git commit -m "docs: dns plan / setup / check, caa, dnssec, dns-tool, hub dns panel and doctor kinds"`, then push. Commit and push core CLAUDE.md and Hub CLAUDE.md in their worktrees.
+- [ ] **Step 5: Hub resync (F12):** in the Hub worktree, `PORTCULLIS_DOCS_DIR=/Volumes/workspace/portcullis/wt-dns1/portcullis-docs web/docs/sync.sh`, then `git add web/docs && git commit -m "web/docs: resync (dns1 docs)"` and push.
 
 ---
 
@@ -671,6 +756,8 @@
 **Files:** none new. Operations only.
 
 - [ ] **Step 1: Catch up.** Wait until `polish1` is merged to core and Hub `main` (`git log origin/main --oneline | head`). In each `dns1` worktree: `git fetch && git merge origin/main`, then resolve and re-run that repo's local test command.
+  - Hub `web/web.go` embed line: keep both file lists. Hub `web/docs/*`: never resolve by hand. Take either side, then re-run `sync.sh` against the docs `dns1` worktree (which by then includes docs main) and commit (F12).
+  - Docs: run `python3 scripts/check-lists.py` and `scripts/check-branding.sh` after the merge (F13).
 - [ ] **Step 2: Full CI.**
   - Core: `gh workflow run ci.yml --ref dns1`; it must be all green.
   - Hub: the branch's `build.yml` push run must be green (it clones core `dns1`).
