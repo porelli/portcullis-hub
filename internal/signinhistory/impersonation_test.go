@@ -272,3 +272,25 @@ func TestOpenedActApps(t *testing.T) {
 		t.Error("a missing mount read as no apps")
 	}
 }
+
+// TestOpenedActAppsPartial: a day file longer than the read limit (older
+// lines unread) answers *Partial with what it read.
+func TestOpenedActAppsPartial(t *testing.T) {
+	dir := t.TempDir()
+	day := t0.Truncate(24 * time.Hour)
+	pad := `{"time":"` + t0.Add(-2*time.Hour).Format(time.RFC3339) + `","user":"bob","session":"x","host":"h","app":"` + strings.Repeat("p", 1000) + `","act":""}`
+	lines := make([]string, 0, OpenedScan/len(pad)+2)
+	for range OpenedScan/len(pad) + 1 {
+		lines = append(lines, pad)
+	}
+	lines = append(lines, `{"time":"`+t0.Add(-time.Minute).Format(time.RFC3339)+`","user":"alice","session":"s","host":"g","app":"Gitea","act":"root"}`)
+	writeDay(t, dir, day, lines...)
+	got, err := OpenedLog{Dir: dir}.ActApps("alice", "root", t0.Add(-time.Hour), t0)
+	var p *Partial
+	if !errors.As(err, &p) || !reflect.DeepEqual(got, []string{"Gitea"}) {
+		t.Errorf("long day file = %q, %v", got, err)
+	}
+	if got := ImpersonationDetail(5, "stopped", "root", []OpenedApp{{Name: "Gitea"}, {Name: MoreApps}}, true); got != "5 min · stopped by root · apps opened: Gitea, possibly other apps" {
+		t.Errorf("marker detail = %q", got)
+	}
+}

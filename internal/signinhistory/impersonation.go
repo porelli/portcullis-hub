@@ -20,6 +20,12 @@ type OpenedApp struct {
 	OwnSession bool   `json:"own_session"`
 }
 
+// MoreApps is the last "app" of a list that may be missing some (the
+// events or the opened log couldn't all be read): it is stored, written
+// to the file's notices and the end detail like an app, so the notice
+// and the history read "apps opened: Gitea, possibly other apps".
+const MoreApps = "possibly other apps"
+
 // OpenedAppOf converts a stored record's app (state never imports this
 // package, F1).
 func OpenedAppOf(a state.ImpersonationApp) OpenedApp {

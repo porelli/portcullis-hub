@@ -9,6 +9,8 @@ package hub
 import (
 	"context"
 	"log"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,7 +26,7 @@ const HistoryImpersonation = "impersonation"
 // ImpersonationEvents are the Keycloak reads the apps function needs
 // (keycloak.Client), by username.
 type ImpersonationEvents interface {
-	UserLoginEventsPage(ctx context.Context, username string, from, to time.Time, first, max int) ([]keycloak.Event, error)
+	UserClientLoginEvents(ctx context.Context, username, clientID string, from, to time.Time, first, max int) ([]keycloak.Event, error)
 	UserImpersonateEvents(ctx context.Context, username string, from, to time.Time) ([]keycloak.Event, error)
 }
 
@@ -34,8 +36,9 @@ type ImpersonationEvents interface {
 // asked again once it has passed.
 const impEventSettle = 3 * time.Second
 
-// impLoginPage / impLoginPages bound the native LOGIN read (a window of
-// at most 30 minutes).
+// impLoginPage / impLoginPages bound the native LOGIN read per client
+// (type=LOGIN&client=<id>, a window of at most 30 minutes): a budget
+// spent without a match leaves the list marked incomplete.
 const (
 	impLoginPage  = 100
 	impLoginPages = 10
@@ -77,9 +80,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // apps, own_session false), then Keycloak LOGIN events with pc_act = the
 // administrator for the clients signin-keycloak.json lists other than
 // portcullis-forward-auth (native apps, own_session true), deduped by
-// name, gateway apps first. used: an IMPERSONATE event with pc_imp = the
-// id; whenever that can't be told (events unreadable, the event maybe
-// not readable yet), used (fail toward telling).
+// name, gateway apps first. When either read may have missed apps (an
+// error, a read budget spent: review of Task 7), the list ends with
+// signinhistory.MoreApps, so the notice and the history say so. used: an
+// IMPERSONATE event with pc_imp = the id; whenever that can't be told
+// (events unreadable, the event maybe not readable yet), used (fail
+// toward telling).
 func (a *impApps) run(ctx context.Context, rec state.Impersonation) ([]signinhistory.OpenedApp, bool) {
 	now := a.h.impNow()
 	from, to := rec.Started, rec.Ended
@@ -96,59 +102,86 @@ func (a *impApps) run(ctx context.Context, rec state.Impersonation) ([]signinhis
 		seen[name] = true
 		apps = append(apps, signinhistory.OpenedApp{Name: name, OwnSession: own})
 	}
+	incomplete := false
 	if a.h.cfg.GroupGateDataDir != "" {
 		names, err := a.h.openedLog().ActApps(rec.Target, rec.Admin, from, to)
 		if err != nil {
-			log.Printf("impersonation: %s: the opened log can't be read: %v (gateway apps not listed)", rec.ID, err)
+			incomplete = true
+			log.Printf("impersonation: %s: the opened log couldn't all be read: %v (apps marked incomplete)", rec.ID, err)
 		}
 		for _, n := range names {
 			add(n, false)
 		}
+	} else {
+		incomplete = true
+		log.Printf("impersonation: %s: no opened log (apps marked incomplete)", rec.ID)
 	}
 	if a.kc != nil {
-		for _, n := range a.nativeApps(ctx, rec, from, to) {
+		names, complete := a.nativeApps(ctx, rec, from, to)
+		for _, n := range names {
 			add(n, true)
 		}
+		incomplete = incomplete || !complete
+	} else {
+		incomplete = true
+	}
+	if incomplete {
+		apps = append(apps, signinhistory.OpenedApp{Name: signinhistory.MoreApps})
 	}
 	return apps, a.used(ctx, rec, now, to)
 }
 
 // nativeApps are the listed native clients' names with a LOGIN of the
-// person carrying pc_act = the administrator, in time order (unreadable
-// events: none, logged).
-func (a *impApps) nativeApps(ctx context.Context, rec state.Impersonation, from, to time.Time) []string {
-	names := a.h.historyClientNames()
-	delete(names, signinhistory.ForwardAuthClient)
-	delete(names, signinhistory.FreshAuthClient)
-	var evs []keycloak.Event
-	for page := 0; page < impLoginPages; page++ {
-		got, err := a.kc.UserLoginEventsPage(ctx, rec.Target, from.Add(-impSlack), to.Add(impSlack), len(evs), impLoginPage)
-		if err != nil {
-			log.Printf("impersonation: %s: Keycloak's login events can't be read: %v (native apps not listed)", rec.ID, err)
-			break
-		}
-		evs = append(evs, got...)
-		if len(got) < impLoginPage {
-			break
+// person carrying pc_act = the administrator, ordered by that LOGIN's
+// time; each client is read on its own (type=LOGIN&client=<id>) until
+// a match. complete is false when a read failed or a client's page
+// budget ran out without a match (logged with the id only).
+func (a *impApps) nativeApps(ctx context.Context, rec state.Impersonation, from, to time.Time) (names []string, complete bool) {
+	clients := a.h.historyClientNames()
+	delete(clients, signinhistory.ForwardAuthClient)
+	delete(clients, signinhistory.FreshAuthClient)
+	type hit struct {
+		name string
+		at   time.Time
+	}
+	var hits []hit
+	complete = true
+	for _, id := range slices.Sorted(maps.Keys(clients)) {
+		found, read := false, 0
+		for page := 0; !found; page++ {
+			if page == impLoginPages {
+				complete = false
+				log.Printf("impersonation: %s: a native client's login events exceed the read budget (apps marked incomplete)", rec.ID)
+				break
+			}
+			got, err := a.kc.UserClientLoginEvents(ctx, rec.Target, id, from.Add(-impSlack), to.Add(impSlack), read, impLoginPage)
+			if err != nil {
+				complete = false
+				log.Printf("impersonation: %s: Keycloak's login events can't be read: %v (apps marked incomplete)", rec.ID, err)
+				break
+			}
+			read += len(got)
+			for _, ev := range got {
+				if ev.Type == "LOGIN" && ev.ClientID == id && ev.Details["pc_act"] == rec.Admin {
+					name := clients[id]
+					if strings.TrimSpace(name) == "" {
+						name = id
+					}
+					hits = append(hits, hit{name, ev.Time})
+					found = true
+					break
+				}
+			}
+			if len(got) < impLoginPage {
+				break
+			}
 		}
 	}
-	var out []string
-	// Keycloak answers newest first: oldest first here.
-	for i := len(evs) - 1; i >= 0; i-- {
-		ev := evs[i]
-		if ev.Type != "LOGIN" || ev.Details["pc_act"] != rec.Admin {
-			continue
-		}
-		name, ok := names[ev.ClientID]
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(name) == "" {
-			name = ev.ClientID
-		}
-		out = append(out, name)
+	slices.SortStableFunc(hits, func(x, y hit) int { return x.at.Compare(y.at) })
+	for _, h := range hits {
+		names = append(names, h.name)
 	}
-	return out
+	return names, complete
 }
 
 // used reports whether rec was used (D44): an IMPERSONATE event of the

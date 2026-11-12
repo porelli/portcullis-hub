@@ -554,6 +554,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			if typ, ok := e["type"].(string); ok && q.Has("type") && !slices.Contains(q["type"], typ) {
 				continue
 			}
+			if q.Has("client") && e["clientId"] != q.Get("client") {
+				continue
+			}
 			out = append(out, e)
 		}
 		first, _ := strconv.Atoi(q.Get("first"))

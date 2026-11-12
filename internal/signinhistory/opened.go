@@ -176,7 +176,8 @@ func openedEntry(ln openedLine) Entry {
 // the matching lines (the host when a line has none), once each, in time
 // order. The day files of from's day to to's day are read (each its
 // newest OpenedScan bytes); a missing mount is an error, a missing log
-// no apps.
+// no apps. A day file longer than OpenedScan (its older lines unread)
+// answers the apps read with *Partial: the list may be missing some.
 func (l OpenedLog) ActApps(user, act string, from, to time.Time) ([]string, error) {
 	out := []string{}
 	ok, err := l.usable()
@@ -189,10 +190,14 @@ func (l OpenedLog) ActApps(user, act string, from, to time.Time) ([]string, erro
 		return out, nil
 	}
 	var lines []openedLine
+	var partial *Partial
 	for day := from.UTC().Truncate(24 * time.Hour); !day.After(to.UTC()); day = day.AddDate(0, 0, 1) {
-		got, _, err := l.readDay(day, user)
+		got, n, err := l.readDay(day, user)
 		if err != nil {
 			return nil, err
+		}
+		if n >= OpenedScan {
+			partial = &Partial{Through: day, Why: "a day file of the opened log is longer than its read limit"}
 		}
 		lines = append(lines, got...)
 	}
@@ -208,6 +213,9 @@ func (l OpenedLog) ActApps(user, act string, from, to time.Time) ([]string, erro
 		}
 		seen[app] = true
 		out = append(out, app)
+	}
+	if partial != nil {
+		return out, partial
 	}
 	return out, nil
 }

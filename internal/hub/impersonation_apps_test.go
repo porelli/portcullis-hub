@@ -20,24 +20,26 @@ import (
 
 // impEventsKC is a fake of the Keycloak reads the apps function makes.
 type impEventsKC struct {
-	mu        sync.Mutex
-	logins    []keycloak.Event // newest first
-	imps      []keycloak.Event
-	loginErr  error
-	impErr    error
-	impCalls  int
-	afterCall func(n int) // after the n-th impersonate read
+	mu         sync.Mutex
+	logins     []keycloak.Event // newest first
+	imps       []keycloak.Event
+	loginErr   error
+	impErr     error
+	impCalls   int
+	loginReads int
+	afterCall  func(n int) // after the n-th impersonate read
 }
 
-func (k *impEventsKC) UserLoginEventsPage(_ context.Context, user string, from, to time.Time, first, max int) ([]keycloak.Event, error) {
+func (k *impEventsKC) UserClientLoginEvents(_ context.Context, user, client string, from, to time.Time, first, max int) ([]keycloak.Event, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.loginReads++
 	if k.loginErr != nil {
 		return nil, k.loginErr
 	}
 	var in []keycloak.Event
 	for _, e := range k.logins {
-		if e.UserID == user && !e.Time.Before(from) && e.Time.Before(to) {
+		if e.UserID == user && e.ClientID == client && e.Type == "LOGIN" && !e.Time.Before(from) && e.Time.Before(to) {
 			in = append(in, e)
 		}
 	}
@@ -154,7 +156,7 @@ func TestImpersonationApps(t *testing.T) {
 	// the gateway's.
 	kc.impErr, kc.loginErr = errors.New("keycloak down"), errors.New("keycloak down")
 	apps, used = a.run(context.Background(), other)
-	if !used || !reflect.DeepEqual(apps, want[:2]) {
+	if !used || !reflect.DeepEqual(apps, append(want[:2:2], signinhistory.OpenedApp{Name: signinhistory.MoreApps})) {
 		t.Errorf("unreadable: apps %+v, used %v", apps, used)
 	}
 	kc.impErr, kc.loginErr = nil, nil
@@ -166,6 +168,35 @@ func TestImpersonationApps(t *testing.T) {
 	other.Used = false
 	if _, used := (&impApps{h: h, sleep: a.sleep}).run(context.Background(), other); !used {
 		t.Error("no Keycloak read as not used")
+	}
+
+	// A native client's page budget spent without a match: what was read,
+	// then the marker (security review: never silently incomplete).
+	var flood []keycloak.Event
+	for i := range impLoginPages * impLoginPage {
+		flood = append(flood, login(ended.Add(-time.Duration(i)*time.Millisecond), "office", "bob"))
+	}
+	kc.mu.Lock()
+	saved := kc.logins
+	kc.logins = append(flood, saved...)
+	kc.loginReads = 0
+	kc.mu.Unlock()
+	apps, _ = a.run(context.Background(), rec)
+	if !reflect.DeepEqual(apps, append(want[:3:3], signinhistory.OpenedApp{Name: signinhistory.MoreApps})) {
+		t.Errorf("budget spent: apps %+v", apps)
+	}
+	kc.mu.Lock()
+	if kc.loginReads != impLoginPages+1 { // office's 10 pages, nextcloud's 1
+		t.Errorf("%d login reads", kc.loginReads)
+	}
+	kc.logins = saved
+	kc.mu.Unlock()
+	// The opened log unreadable (its mount gone): the marker too.
+	os.Rename(hf.dir, hf.dir+".away")
+	apps, _ = a.run(context.Background(), rec)
+	os.Rename(hf.dir+".away", hf.dir)
+	if !reflect.DeepEqual(apps, []signinhistory.OpenedApp{{Name: "Nextcloud", OwnSession: true}, {Name: signinhistory.MoreApps}}) {
+		t.Errorf("opened log gone: apps %+v", apps)
 	}
 
 	// Just stopped (the event may not be readable yet): asked again

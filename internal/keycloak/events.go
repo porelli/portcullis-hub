@@ -117,7 +117,30 @@ func (c *Client) LoginEvents(ctx context.Context, userID string, from, to time.T
 // LoginEventsPage is LoginEvents from the first-th event on (Keycloak's
 // first): the history pages through the events newer than its window.
 func (c *Client) LoginEventsPage(ctx context.Context, userID string, from, to time.Time, first, max int) ([]Event, error) {
-	return c.eventsPage(ctx, "login events", HistoryEventTypes, userID, from, to, first, max)
+	return c.eventsPage(ctx, "login events", HistoryEventTypes, userID, "", from, to, first, max)
+}
+
+// UserClientLoginEvents reads username's LOGIN events of one client
+// (type=LOGIN&client=<id>, server-side filtered) with from <= time < to,
+// newest first, from the first-th, at most max: the native apps opened
+// during an impersonation (§8.2 "Apps opened"). A user Keycloak doesn't
+// know has no events.
+func (c *Client) UserClientLoginEvents(ctx context.Context, username, clientID string, from, to time.Time, first, max int) ([]Event, error) {
+	if clientID == "" {
+		return nil, fmt.Errorf("client login events: no client")
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	u, err := c.findUser(ctx, tok, username)
+	if err != nil {
+		return nil, err
+	}
+	if u == nil {
+		return []Event{}, nil
+	}
+	return c.eventsPage(ctx, "client login events", []string{"LOGIN"}, str(u.ID), clientID, from, to, first, max)
 }
 
 // impersonateEventsPage and impersonateEventsPages bound ImpersonateEvents'
@@ -136,7 +159,7 @@ const (
 func (c *Client) ImpersonateEvents(ctx context.Context, userID string, from, to time.Time) ([]Event, error) {
 	out := []Event{}
 	for page := 0; page < impersonateEventsPages; page++ {
-		evs, err := c.eventsPage(ctx, "impersonate events", []string{"IMPERSONATE"}, userID, from, to, len(out), impersonateEventsPage)
+		evs, err := c.eventsPage(ctx, "impersonate events", []string{"IMPERSONATE"}, userID, "", from, to, len(out), impersonateEventsPage)
 		if err != nil {
 			return nil, err
 		}
@@ -165,9 +188,10 @@ func (c *Client) UserImpersonateEvents(ctx context.Context, username string, fro
 	return c.ImpersonateEvents(ctx, str(u.ID), from, to)
 }
 
-// eventsPage reads userID's events of types with from <= time < to, from
-// the first-th on, at most max (what names the read in errors).
-func (c *Client) eventsPage(ctx context.Context, what string, types []string, userID string, from, to time.Time, first, max int) ([]Event, error) {
+// eventsPage reads userID's events of types (and of clientID when it
+// isn't "") with from <= time < to, from the first-th on, at most max
+// (what names the read in errors).
+func (c *Client) eventsPage(ctx context.Context, what string, types []string, userID, clientID string, from, to time.Time, first, max int) ([]Event, error) {
 	if !ValidUserID(userID) {
 		return nil, fmt.Errorf("%s: not a Keycloak user id", what)
 	}
@@ -182,6 +206,9 @@ func (c *Client) eventsPage(ctx context.Context, what string, types []string, us
 	q.Set("user", userID)
 	for _, t := range types {
 		q.Add("type", t)
+	}
+	if clientID != "" {
+		q.Set("client", clientID)
 	}
 	q.Set("dateFrom", strconv.FormatInt(ceilMilli(from), 10))
 	q.Set("dateTo", strconv.FormatInt(to.Add(-time.Nanosecond).UnixMilli(), 10))

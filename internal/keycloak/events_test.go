@@ -236,3 +236,35 @@ func TestImpersonateEventsQuery(t *testing.T) {
 		t.Errorf("alice by name = %d, %v", len(evs), err)
 	}
 }
+
+// TestClientLoginEventsQuery: the native-apps read is narrowed server
+// side to type=LOGIN and the one client.
+func TestClientLoginEventsQuery(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	alice := kc.Import("alice")
+	at := time.Date(2026, 11, 12, 14, 3, 0, 0, time.UTC)
+	kc.With(func() {
+		kc.Events = []map[string]any{
+			{"time": at.UnixMilli(), "type": "LOGIN", "clientId": "nextcloud", "userId": alice.ID, "details": map[string]any{"pc_act": "root"}},
+			{"time": at.UnixMilli(), "type": "LOGIN", "clientId": "portcullis-forward-auth", "userId": alice.ID},
+			{"time": at.UnixMilli(), "type": "LOGIN_ERROR", "clientId": "nextcloud", "userId": alice.ID},
+		}
+	})
+	evs, err := c.UserClientLoginEvents(ctx, "alice", "nextcloud", at.Add(-time.Hour), at.Add(time.Second), 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Get("client") != "nextcloud" || !reflect.DeepEqual(q["type"], []string{"LOGIN"}) || q.Get("user") != alice.ID || q.Get("max") != "100" {
+		t.Errorf("query = %v", q)
+	}
+	if len(evs) != 1 || evs[0].ClientID != "nextcloud" || evs[0].Details["pc_act"] != "root" {
+		t.Errorf("events = %+v", evs)
+	}
+	if _, err := c.UserClientLoginEvents(ctx, "alice", "", at, at, 0, 1); err == nil {
+		t.Error("no client accepted")
+	}
+}
