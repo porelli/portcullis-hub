@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -71,6 +72,9 @@ type impState struct {
 	fileFailed bool
 	// saveFailed: an end couldn't be saved; the loop saves again.
 	saveFailed bool
+	// noticeLogged: the ids whose failed notice action was logged once
+	// (guarded by endMu).
+	noticeLogged map[string]bool
 }
 
 func (h *Hub) impNow() time.Time {
@@ -272,20 +276,37 @@ func (h *Hub) SetImpersonationAllowed(ctx context.Context, allowed bool, actor d
 		return &v, nil
 	}
 	h.st.SignIn.ImpersonationOff = !allowed
-	if err := h.saveStateLocked(); err != nil {
-		h.st.SignIn.ImpersonationOff = allowed
+	saveErr := h.saveStateLocked()
+	if saveErr != nil && allowed {
+		// Only switching on is taken back.
+		h.st.SignIn.ImpersonationOff = true
 		h.mu.Unlock()
-		h.auditSignIn(actor, "signin.impersonation", "impersonation", onOff(allowed), err)
-		return nil, err
+		h.auditSignIn(actor, "signin.impersonation", "impersonation", onOff(allowed), saveErr)
+		return nil, saveErr
 	}
 	var ended []string
 	if !allowed {
+		// Off is never taken back (review I1): off in memory, every
+		// running one ended and the file written, whether or not the
+		// save worked; a failed save is retried by the loop and reported.
 		ended = h.endRunningLocked(func(state.Impersonation) bool { return true }, ImpSwitchedOff, impSystem)
+		if saveErr != nil && h.saveStateLocked() == nil {
+			saveErr = nil
+		}
+		if saveErr != nil {
+			h.imp.saveFailed = true
+		}
 	}
 	_ = h.writeImpersonationFileLocked()
 	h.mu.Unlock()
-	h.auditSignIn(actor, "signin.impersonation", "impersonation", onOff(allowed), nil)
+	if saveErr != nil {
+		saveErr = statusErr(http.StatusInternalServerError, "signing in as someone else is switched off and every impersonation ended, but saving the Hub's state failed: it is saved again within seconds")
+	}
+	h.auditSignIn(actor, "signin.impersonation", "impersonation", onOff(allowed), saveErr)
 	h.finishEnds(ctx, ended, directory.Human(impSystem))
+	if saveErr != nil {
+		return nil, saveErr
+	}
 	h.mu.RLock()
 	v := h.impersonationsViewLocked()
 	h.mu.RUnlock()
@@ -486,6 +507,12 @@ func (h *Hub) startImpersonation(ctx context.Context, in StartImpersonation, adm
 		}
 		return nil, refuse(err)
 	}
+	// The proof's sign-in ran in the administrator's session (review M6):
+	// a sid in its ID token must be the one the start binds to.
+	if res.SID != "" && res.SID != in.AdminSID {
+		why = "the proof's sign-in ran in another session"
+		return nil, refuse(errFreshAuth)
+	}
 	id, err := newImpID()
 	if err != nil {
 		why = "no random id"
@@ -611,9 +638,10 @@ func (h *Hub) verifyTouch(ctx context.Context, listener string, proof freshauth.
 
 // endRunningLocked ends every running record match accepts (how, by),
 // saves and answers their ids; the caller writes the file and then runs
-// finishEnds outside mu. A failed save keeps the end in memory (never
-// taken back: the file says ended) and the loop saves again. Caller
-// holds mu (write).
+// finishEnds outside mu. The save comes before the file (review M4) and
+// is tried again at once when it fails; still failing, the end stays in
+// memory and is published anyway (never taken back: readers must see it
+// ended), and the loop saves again. Caller holds mu (write).
 func (h *Hub) endRunningLocked(match func(state.Impersonation) bool, how, by string) []string {
 	now := h.impNow()
 	var ids []string
@@ -628,72 +656,169 @@ func (h *Hub) endRunningLocked(match func(state.Impersonation) bool, how, by str
 			ids = append(ids, r.ID)
 		}
 	}
-	if len(ids) > 0 && h.saveStateLocked() != nil {
-		h.imp.saveFailed = true
+	if len(ids) > 0 {
+		h.saveImpLocked()
 	}
 	return ids
 }
 
+// saveImpLocked saves state, once more at once when that fails; still
+// failing, the loop saves again (imp.saveFailed). Caller holds mu (write).
+func (h *Hub) saveImpLocked() {
+	if h.saveStateLocked() == nil || h.saveStateLocked() == nil {
+		h.imp.saveFailed = false
+		return
+	}
+	h.imp.saveFailed = true
+}
+
+// impAnswer is an apps function's answer already asked for a record.
+type impAnswer struct {
+	apps []signinhistory.OpenedApp
+	used bool
+}
+
 // finishEnds completes the ends of ids (already ended in state and the
-// file): the apps opened and whether it was used, stored on the record
-// (F1) — not used makes how not_used; the file written again; then the
-// audit impersonation.end and, when used, the notice action. The file
-// goes before the action (the Task 4 review): a sign-in right after the
-// action is added already finds the notice.
+// file). known, when set, is the apps function's answer for those ids
+// already asked (the not-used check: never asked twice, review M3).
 func (h *Hub) finishEnds(ctx context.Context, ids []string, actor directory.Actor) {
+	h.finishEndsKnown(ctx, ids, actor, nil)
+}
+
+func (h *Hub) finishEndsKnown(ctx context.Context, ids []string, actor directory.Actor, known map[string]impAnswer) {
 	h.imp.endMu.Lock()
 	defer h.imp.endMu.Unlock()
 	for _, id := range ids {
-		h.finishEnd(ctx, id, actor)
+		var k *impAnswer
+		if a, ok := known[id]; ok {
+			k = &a
+		}
+		h.finishEnd(ctx, id, actor, k)
 	}
 }
 
-func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor) {
-	h.mu.RLock()
-	i := slices.IndexFunc(h.st.Impersonations, func(r state.Impersonation) bool { return r.ID == id })
-	var rec state.Impersonation
-	if i >= 0 {
-		rec = h.st.Impersonations[i].Clone()
-	}
-	h.mu.RUnlock()
-	if i < 0 || rec.Running() {
+// finishEnd is an end's second half, persisted step by step so that the
+// loop picks it up again after a crash or a failure (review I2):
+//
+//  1. not Finished: the apps opened and whether it was used, stored on
+//     the record (F1) — not used makes how not_used, used never leaves it
+//     not_used; saved, the file written again (with the notice); the
+//     audit impersonation.end; then Finished, and NoticeOwed when used;
+//  2. NoticeOwed: the notice action, after the file holds the notice
+//     (the Task 4 review: a sign-in right after it already finds it);
+//     owed until Keycloak accepts it (adding it is idempotent).
+//
+// Caller holds imp.endMu, never mu.
+func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, known *impAnswer) {
+	rec, ok := h.impRecord(id)
+	if !ok || rec.Running() {
 		return
 	}
-	apps, used := h.impersonationApps(ctx, rec)
-	used = used || rec.Used
-	h.mu.Lock()
-	i = slices.IndexFunc(h.st.Impersonations, func(r state.Impersonation) bool { return r.ID == id })
-	if i < 0 {
+	if !rec.Finished {
+		var ans impAnswer
+		if known != nil {
+			ans = *known
+		} else {
+			ans.apps, ans.used = h.impersonationApps(ctx, rec)
+		}
+		used := ans.used || rec.Used
+		h.mu.Lock()
+		r := h.impRecordLocked(id)
+		if r == nil || r.Finished {
+			h.mu.Unlock()
+			return
+		}
+		r.Used = used
+		r.Apps = nil
+		for _, a := range ans.apps {
+			r.Apps = append(r.Apps, state.ImpersonationApp{Name: a.Name, OwnSession: a.OwnSession})
+		}
+		switch {
+		case !used:
+			r.How = ImpNotUsed
+		case r.How == ImpNotUsed:
+			// Used after all: it ran until the loop ended it.
+			r.How = ImpExpired
+		}
+		h.saveImpLocked()
+		_ = h.writeImpersonationFileLocked()
+		rec = r.Clone()
 		h.mu.Unlock()
+		// Audited before Finished is saved: a crash in between audits it
+		// twice, never not at all.
+		h.auditSignIn(actor, "impersonation.end", rec.Target, impEndDetail(rec), nil)
+		h.mu.Lock()
+		if r := h.impRecordLocked(id); r != nil {
+			r.Finished, r.NoticeOwed = true, used
+			rec = r.Clone()
+			h.saveImpLocked()
+		}
+		h.mu.Unlock()
+	}
+	if !rec.NoticeOwed {
 		return
 	}
-	r := &h.st.Impersonations[i]
-	r.Used = used
-	r.Apps = nil
-	for _, a := range apps {
-		r.Apps = append(r.Apps, state.ImpersonationApp{Name: a.Name, OwnSession: a.OwnSession})
-	}
-	if !used {
-		r.How = ImpNotUsed
-	}
-	rec = r.Clone()
-	if h.saveStateLocked() != nil {
-		h.imp.saveFailed = true
-	}
-	_ = h.writeImpersonationFileLocked()
-	kc := h.imp.kc
-	h.mu.Unlock()
-	h.auditSignIn(actor, "impersonation.end", rec.Target, impEndDetail(rec), nil)
-	if !used {
-		return
-	}
+	kc := h.impKC()
+	var err error
 	if kc == nil {
-		log.Printf("impersonation: %s: no Keycloak wired: %s gets no notice at their next sign-in", rec.ID, rec.Target)
+		err = errors.New("no Keycloak wired")
+	} else {
+		err = kc.RequireImpersonationNotice(ctx, rec.Target)
+	}
+	if err != nil {
+		if !h.imp.noticeLogged[id] {
+			log.Printf("impersonation: %s: adding the notice action for %s: %v (tried again every few seconds)", id, rec.Target, err)
+			if h.imp.noticeLogged == nil {
+				h.imp.noticeLogged = map[string]bool{}
+			}
+			h.imp.noticeLogged[id] = true
+		}
 		return
 	}
-	if err := kc.RequireImpersonationNotice(ctx, rec.Target); err != nil {
-		log.Printf("impersonation: %s: adding the notice action for %s: %v (the history still shows it)", rec.ID, rec.Target, err)
+	delete(h.imp.noticeLogged, id)
+	h.mu.Lock()
+	if r := h.impRecordLocked(id); r != nil {
+		r.NoticeOwed = false
+		h.saveImpLocked()
 	}
+	h.mu.Unlock()
+}
+
+// impRecord is a copy of record id.
+func (h *Hub) impRecord(id string) (state.Impersonation, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if r := h.impRecordLocked(id); r != nil {
+		return r.Clone(), true
+	}
+	return state.Impersonation{}, false
+}
+
+// impRecordLocked is record id in state (nil: none). Caller holds mu.
+func (h *Hub) impRecordLocked(id string) *state.Impersonation {
+	for i := range h.st.Impersonations {
+		if h.st.Impersonations[i].ID == id {
+			return &h.st.Impersonations[i]
+		}
+	}
+	return nil
+}
+
+// unfinishedEndsLocked are the ended records whose second half is owed
+// (not finished, or the notice not accepted yet), with the actor the
+// audit names (who stopped it, else portcullis). Caller holds mu.
+func (h *Hub) unfinishedEndsLocked() map[string]string {
+	out := map[string]string{}
+	for _, r := range h.st.Impersonations {
+		if !r.Running() && (!r.Finished || r.NoticeOwed) {
+			by := r.EndedBy
+			if by == "" {
+				by = impSystem
+			}
+			out[r.ID] = by
+		}
+	}
+	return out
 }
 
 // impMinutes is the minutes from started to ended, rounded up, at least
@@ -766,25 +891,14 @@ func (h *Hub) StopOwnImpersonation(ctx context.Context, id, person string) (stri
 	}
 	h.mu.Lock()
 	admin := ""
-	ids := h.endRunningLocked(func(r state.Impersonation) bool {
-		if r.ID == id && r.Target == person {
-			admin = r.Admin
-			return true
-		}
-		return false
-	}, ImpStopped, "")
-	if len(ids) == 0 {
+	if r := h.impRecordLocked(id); r != nil && r.Target == person && r.Running() {
+		admin = r.Admin
+	}
+	if admin == "" {
 		h.mu.Unlock()
 		return "", errNoImpersonation
 	}
-	for i := range h.st.Impersonations {
-		if h.st.Impersonations[i].ID == id {
-			h.st.Impersonations[i].EndedBy = admin
-		}
-	}
-	if h.saveStateLocked() != nil {
-		h.imp.saveFailed = true
-	}
+	ids := h.endRunningLocked(func(r state.Impersonation) bool { return r.ID == id }, ImpStopped, admin)
 	_ = h.writeImpersonationFileLocked()
 	h.mu.Unlock()
 	h.finishEnds(ctx, ids, directory.Human(admin))
@@ -818,10 +932,24 @@ func (h *Hub) RunImpersonationExpiry(ctx context.Context, every time.Duration) {
 func (h *Hub) impersonationTick(ctx context.Context) {
 	now := h.impNow()
 	h.mu.Lock()
+	// Ends owed from before (a crash, a failed notice): retried below.
+	owed := h.unfinishedEndsLocked()
 	ended := h.endRunningLocked(func(r state.Impersonation) bool {
 		return h.st.SignIn.ImpersonationOff
 	}, ImpSwitchedOff, impSystem)
-	ended = append(ended, h.endRunningLocked(func(r state.Impersonation) bool { return !now.Before(r.Until) }, ImpExpired, impSystem)...)
+	// A record the file's writer must leave out is not live for the
+	// readers: ended here too, so the Hub agrees (review M5).
+	ids := map[string]int{}
+	for _, r := range h.st.Impersonations {
+		ids[r.ID]++
+	}
+	ended = append(ended, h.endRunningLocked(func(r state.Impersonation) bool {
+		bad := !validImpRecord(r) || ids[r.ID] > 1 || (now.Sub(r.Started) < impPendingFor && !validImpPending(r))
+		if bad {
+			log.Printf("impersonation: a running record (id %q) breaks the file's rules: ended (expired)", clip(r.ID, 40))
+		}
+		return bad || !now.Before(r.Until)
+	}, ImpExpired, impSystem)...)
 	// Not yet known to be used, at created + 120 s: ask.
 	var check []state.Impersonation
 	for _, r := range h.st.Impersonations {
@@ -830,19 +958,22 @@ func (h *Hub) impersonationTick(ctx context.Context) {
 		}
 	}
 	pruned := h.pruneImpersonationsLocked(now)
-	if (pruned || h.imp.saveFailed) && h.saveStateLocked() == nil {
-		h.imp.saveFailed = false
+	if pruned || h.imp.saveFailed {
+		h.saveImpLocked()
 	}
 	if len(ended) > 0 || pruned || h.impersonationFileDue(now) {
 		_ = h.writeImpersonationFileLocked()
 	}
 	h.mu.Unlock()
 	h.finishEnds(ctx, ended, directory.Human(impSystem))
+	for _, id := range slices.Sorted(maps.Keys(owed)) {
+		h.finishEnds(ctx, []string{id}, directory.Human(owed[id]))
+	}
 	for _, rec := range check {
-		_, used := h.impersonationApps(ctx, rec)
+		apps, used := h.impersonationApps(ctx, rec)
 		h.mu.Lock()
-		i := slices.IndexFunc(h.st.Impersonations, func(r state.Impersonation) bool { return r.ID == rec.ID })
-		if i < 0 || !h.st.Impersonations[i].Running() {
+		r := h.impRecordLocked(rec.ID)
+		if r == nil || !r.Running() {
 			h.mu.Unlock()
 			continue
 		}
@@ -850,16 +981,15 @@ func (h *Hub) impersonationTick(ctx context.Context) {
 		if used {
 			// Known used (or unreadable: counted as used): it runs until
 			// until and is never asked again.
-			h.st.Impersonations[i].Used = true
-			if h.saveStateLocked() != nil {
-				h.imp.saveFailed = true
-			}
+			r.Used = true
+			h.saveImpLocked()
 		} else {
 			ids = h.endRunningLocked(func(r state.Impersonation) bool { return r.ID == rec.ID }, ImpNotUsed, impSystem)
 			_ = h.writeImpersonationFileLocked()
 		}
 		h.mu.Unlock()
-		h.finishEnds(ctx, ids, directory.Human(impSystem))
+		// The answer just given is the end's (never asked twice, M3).
+		h.finishEndsKnown(ctx, ids, directory.Human(impSystem), map[string]impAnswer{rec.ID: {apps: apps, used: used}})
 	}
 }
 
@@ -870,7 +1000,8 @@ func (h *Hub) pruneImpersonationsLocked(now time.Time) bool {
 	keepUsed := now.AddDate(0, 0, -h.historyDaysLocked())
 	n := len(h.st.Impersonations)
 	h.st.Impersonations = slices.DeleteFunc(slices.Clone(h.st.Impersonations), func(r state.Impersonation) bool {
-		if r.Running() {
+		if r.Running() || !r.Finished {
+			// An end still owed is kept until it is finished.
 			return false
 		}
 		if r.Used {

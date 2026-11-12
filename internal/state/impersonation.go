@@ -38,6 +38,11 @@ type Impersonation struct {
 	Used bool `json:"used,omitempty" yaml:"used,omitempty"`
 	// Apps are the apps opened, filled at the end (F1).
 	Apps []ImpersonationApp `json:"apps,omitempty" yaml:"apps,omitempty"`
+	// Finished: the end's second half is done (apps and used stored,
+	// impersonation.end audited); NoticeOwed: a used end whose notice
+	// action Keycloak hasn't accepted yet. The Hub's loop retries both.
+	Finished   bool `json:"finished,omitempty" yaml:"finished,omitempty"`
+	NoticeOwed bool `json:"notice_owed,omitempty" yaml:"notice_owed,omitempty"`
 }
 
 // ImpersonationApp is an app opened during an impersonation: its name

@@ -98,6 +98,9 @@ type Result struct {
 	// Method is pc_fresh: one of FreshMethods, switched on at Verify (the
 	// governing template is the Hub's check).
 	Method string
+	// SID is the ID token's sid, the Keycloak session the sign-in ran in
+	// ("" when the token has none, or it isn't a string).
+	SID string
 }
 
 // ReasonUnreachable: the token endpoint or the realm's keys (JWKS)
@@ -172,6 +175,8 @@ type claims struct {
 	IssuedAt *int64          `json:"iat"`
 	Fresh    json.RawMessage `json:"pc_fresh"`
 	Username *string         `json:"preferred_username"`
+	// SID is read loosely: a sid that isn't a string is no sid.
+	SID json.RawMessage `json:"sid"`
 }
 
 // Verify exchanges p.Code (with the PKCE verifier) and checks the ID token
@@ -260,7 +265,16 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	if strings.ToLower(*c.Username) != user {
 		return nil, refuse("signed in as another person")
 	}
-	return &Result{User: user, AuthTime: authTime, Method: method}, nil
+	return &Result{User: user, AuthTime: authTime, Method: method, SID: sidOf(c.SID)}, nil
+}
+
+// sidOf is the sid claim when it is a string, else "".
+func sidOf(raw json.RawMessage) string {
+	var s string
+	if len(raw) == 0 || json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
 }
 
 // freshMethod checks pc_fresh (raw): a JSON string, one of FreshMethods

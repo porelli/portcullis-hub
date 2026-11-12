@@ -33,6 +33,7 @@ type impKC struct {
 	err       error
 	fileAtAdd []string
 	path      string
+	noticeErr error
 }
 
 func (k *impKC) UserEnabled(_ context.Context, u string) (bool, error) {
@@ -56,6 +57,9 @@ func (k *impKC) RequiredActions(_ context.Context, u string) ([]string, error) {
 func (k *impKC) RequireImpersonationNotice(_ context.Context, u string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.noticeErr != nil {
+		return k.noticeErr
+	}
 	k.notices = append(k.notices, u)
 	b, _ := os.ReadFile(k.path)
 	k.fileAtAdd = append(k.fileAtAdd, string(b))
@@ -74,6 +78,7 @@ type touchFA struct {
 	mu     sync.Mutex
 	method string
 	as     string
+	sid    string
 }
 
 func (f *touchFA) Verify(_ context.Context, p freshauth.Proof, user string) (*freshauth.Result, error) {
@@ -87,7 +92,7 @@ func (f *touchFA) Verify(_ context.Context, p freshauth.Proof, user string) (*fr
 	if f.as != "" {
 		u = f.as
 	}
-	return &freshauth.Result{User: u, AuthTime: impT0.Add(-7 * time.Second), Method: f.method}, nil
+	return &freshauth.Result{User: u, AuthTime: impT0.Add(-7 * time.Second), Method: f.method, SID: f.sid}, nil
 }
 
 func (f *touchFA) set(method, as string, err error) {
@@ -395,7 +400,7 @@ func TestStartImpersonationRecord(t *testing.T) {
 	if v := x.h.ImpersonationOf("alice", s.ID); v == nil || v.Admin != "root" || v.Ended != nil {
 		t.Errorf("ImpersonationOf = %+v", v)
 	}
-	if x.h.ImpersonationOf("bob", s.ID) != nil || x.h.ImpersonationOf("alice", "0"+s.ID[1:]) != nil {
+	if x.h.ImpersonationOf("bob", s.ID) != nil || x.h.ImpersonationOf("alice", otherImpID(s.ID)) != nil {
 		t.Error("ImpersonationOf matched another person or id")
 	}
 	if v := x.h.Impersonations(); len(v.Running) != 1 || v.Running[0].ID != s.ID {
@@ -565,7 +570,7 @@ func TestStopEnds(t *testing.T) {
 	}
 	// Stop from the impersonating browser.
 	s = x.mustStart(t, "root", "alice")
-	for _, c := range [][2]string{{"0" + s.ID[1:], "alice"}, {s.ID, "bob"}, {"", "alice"}} {
+	for _, c := range [][2]string{{otherImpID(s.ID), "alice"}, {s.ID, "bob"}, {"", "alice"}} {
 		if _, err := x.h.StopOwnImpersonation(x.ctx, c[0], c[1]); statusOf(err) != 404 {
 			t.Errorf("%v: %v", c, err)
 		}
@@ -713,4 +718,252 @@ func TestFileRewrittenEveryMinute(t *testing.T) {
 	if w := x.file(t).Written; w != "2026-11-12T14:04:58Z" {
 		t.Errorf("the loop didn't rewrite it: %q", w)
 	}
+}
+
+const impSID = "f7c1e2d4-1b2a-4c3d-9e8f-001122334455"
+
+// breakState makes state.yaml unsaveable (a non-empty directory in its
+// place); the returned func puts it back.
+func (x *impFixture) breakState(t *testing.T) func() {
+	t.Helper()
+	p := filepath.Join(x.f.data, "state.yaml")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(p, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := os.RemoveAll(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func (x *impFixture) saved(t *testing.T) *state.AppState {
+	t.Helper()
+	st, err := state.Load(filepath.Join(x.f.data, "state.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// TestSwitchOffNeverRolledBack (review I1): a failed save never keeps
+// impersonations running: off in memory, every running one ended and
+// the file written, the error reported; the loop saves it.
+func TestSwitchOffNeverRolledBack(t *testing.T) {
+	x := newImpFixture(t)
+	a := x.mustStart(t, "root", "alice")
+	b := x.mustStart(t, "sam", "bob")
+	fix := x.breakState(t)
+	if _, err := x.h.SetImpersonationAllowed(x.ctx, false, siAdmin); statusOf(err) != 500 {
+		t.Fatalf("off with a failed save: %v", err)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		if r := x.rec(id); r.Running() || r.How != ImpSwitchedOff {
+			t.Errorf("record = %+v", r)
+		}
+	}
+	doc := x.file(t)
+	if doc.Allowed {
+		t.Error("the file still allows it")
+	}
+	for _, s := range doc.Sessions {
+		if s.Ended == nil {
+			t.Errorf("session %s not ended in the file", s.ID)
+		}
+	}
+	if x.h.Impersonations().Allowed {
+		t.Error("the switch was rolled back")
+	}
+	if e := x.audit.lastOf("signin.impersonation"); e.Result != "error" || e.Detail != "off" {
+		t.Errorf("audit = %+v", e)
+	}
+	fix()
+	x.h.impersonationTick(x.ctx)
+	if st := x.saved(t); !st.SignIn.ImpersonationOff || len(st.Impersonations) != 2 || st.Impersonations[0].Running() {
+		t.Errorf("saved: off %v, %+v", st.SignIn.ImpersonationOff, st.Impersonations)
+	}
+	// Switching on with a failed save is taken back.
+	fix = x.breakState(t)
+	if _, err := x.h.SetImpersonationAllowed(x.ctx, true, siAdmin); statusOf(err) != 500 {
+		t.Errorf("on with a failed save: %v", err)
+	}
+	if x.h.Impersonations().Allowed {
+		t.Error("switched on although the save failed")
+	}
+	fix()
+}
+
+// TestEndSavedBeforeRestart (review M4): an end whose save fails is in
+// the file at once, and the loop saves it, so a restart can't bring it
+// back.
+func TestEndSavedBeforeRestart(t *testing.T) {
+	x := newImpFixture(t)
+	s := x.mustStart(t, "root", "alice")
+	fix := x.breakState(t)
+	if err := x.h.StopImpersonation(x.ctx, "alice", directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if doc := x.file(t); len(doc.Sessions) != 1 || doc.Sessions[0].Ended == nil {
+		t.Errorf("file = %+v", doc)
+	}
+	fix()
+	x.h.impersonationTick(x.ctx)
+	st := x.saved(t)
+	if len(st.Impersonations) != 1 || st.Impersonations[0].ID != s.ID || st.Impersonations[0].Running() || !st.Impersonations[0].Finished {
+		t.Errorf("saved = %+v", st.Impersonations)
+	}
+}
+
+// TestEndFinishedAfterCrash (review I2): an end whose second half never
+// ran (a crash) or whose notice Keycloak refused is finished by the
+// loop: apps, audit, notice — the notice retried until accepted.
+func TestEndFinishedAfterCrash(t *testing.T) {
+	x := newImpFixture(t)
+	x.h.SetImpersonationApps(func(context.Context, state.Impersonation) ([]signinhistory.OpenedApp, bool) {
+		return []signinhistory.OpenedApp{{Name: "Gitea"}}, true
+	})
+	s := x.mustStart(t, "root", "alice")
+	// The end's first half only, as if the Hub stopped right after it.
+	x.h.mu.Lock()
+	x.h.endRunningLocked(func(state.Impersonation) bool { return true }, ImpStopped, "sam")
+	x.h.mu.Unlock()
+	if r := x.rec(s.ID); r.Finished || len(r.Apps) != 0 {
+		t.Fatalf("record = %+v", r)
+	}
+	x.kc.mu.Lock()
+	x.kc.noticeErr = errors.New("keycloak down")
+	x.kc.mu.Unlock()
+	x.h.impersonationTick(x.ctx)
+	r := x.rec(s.ID)
+	if !r.Finished || !r.NoticeOwed || !r.Used || len(r.Apps) != 1 {
+		t.Fatalf("after the tick: %+v", r)
+	}
+	if e := x.audit.lastOf("impersonation.end"); e.Actor != "sam" || e.Detail != s.ID+" · stopped · 1 min · apps opened: Gitea" {
+		t.Errorf("audit = %+v", e)
+	}
+	if st := x.saved(t); !st.Impersonations[0].NoticeOwed {
+		t.Error("the owed notice isn't saved")
+	}
+	ends := 0
+	x.h.impersonationTick(x.ctx)
+	x.kc.mu.Lock()
+	x.kc.noticeErr = nil
+	x.kc.mu.Unlock()
+	x.h.impersonationTick(x.ctx)
+	if r := x.rec(s.ID); r.NoticeOwed {
+		t.Errorf("still owed: %+v", r)
+	}
+	if n := x.kc.noticed(); !slices.Equal(n, []string{"alice"}) {
+		t.Errorf("notices = %v", n)
+	}
+	x.audit.mu.Lock()
+	for _, e := range x.audit.entries {
+		if e.Action == "impersonation.end" {
+			ends++
+		}
+	}
+	x.audit.mu.Unlock()
+	if ends != 1 {
+		t.Errorf("%d end audits, want 1", ends)
+	}
+	x.h.impersonationTick(x.ctx)
+	if n := x.kc.noticed(); len(n) != 1 {
+		t.Errorf("notice added again: %v", n)
+	}
+}
+
+// TestUsedNeverNotUsed (review M3): the not-used check's answer is the
+// end's (asked once); a used end is never how not_used.
+func TestUsedNeverNotUsed(t *testing.T) {
+	x := newImpFixture(t)
+	var mu sync.Mutex
+	calls := 0
+	x.h.SetImpersonationApps(func(context.Context, state.Impersonation) ([]signinhistory.OpenedApp, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return nil, calls > 1 // not used at first, "used" if asked again
+	})
+	s := x.mustStart(t, "root", "alice")
+	x.advance(impPendingFor)
+	x.h.impersonationTick(x.ctx)
+	if r := x.rec(s.ID); r.How != ImpNotUsed || r.Used || !r.Finished {
+		t.Errorf("record = %+v", r)
+	}
+	if calls != 1 {
+		t.Errorf("asked %d times", calls)
+	}
+	if n := x.kc.noticed(); len(n) != 0 {
+		t.Errorf("notice for a not-used end: %v", n)
+	}
+	// A used answer on a not_used record: never left not_used.
+	x2 := newImpFixture(t)
+	s = x2.mustStart(t, "root", "alice")
+	x2.h.mu.Lock()
+	x2.h.endRunningLocked(func(state.Impersonation) bool { return true }, ImpNotUsed, impSystem)
+	x2.h.mu.Unlock()
+	x2.h.imp.endMu.Lock()
+	x2.h.finishEnd(x2.ctx, s.ID, directory.Human(impSystem), &impAnswer{used: true})
+	x2.h.imp.endMu.Unlock()
+	if r := x2.rec(s.ID); r.How == ImpNotUsed || !r.Used {
+		t.Errorf("used but %+v", r)
+	}
+}
+
+// TestDroppedRecordEnded (review M5): a running record the file's writer
+// must leave out is ended in state (expired) and audited.
+func TestDroppedRecordEnded(t *testing.T) {
+	x := newImpFixture(t)
+	bad := state.Impersonation{ID: strings.Repeat("ab", 16), Admin: "root", Target: "alice", AdminSID: impSID, Reason: "x\x07y",
+		Fresh: "security_key", FreshAt: impT0, Started: impT0, Until: impT0.Add(30 * time.Minute)}
+	x.h.mu.Lock()
+	x.h.st.Impersonations = []state.Impersonation{bad}
+	x.h.mu.Unlock()
+	if x.h.ImpersonationOf("alice", bad.ID) == nil {
+		t.Fatal("setup: not running")
+	}
+	x.h.impersonationTick(x.ctx)
+	if r := x.rec(bad.ID); r.Running() || r.How != ImpExpired {
+		t.Errorf("record = %+v", r)
+	}
+	if x.h.ImpersonationOf("alice", bad.ID) != nil {
+		t.Error("still running in the Hub's view")
+	}
+	if e := x.audit.lastOf("impersonation.end"); e.Target != "alice" || !strings.HasPrefix(e.Detail, bad.ID) {
+		t.Errorf("audit = %+v", e)
+	}
+}
+
+// TestStartBindsProofSID (review M6): a sid in the proof's ID token must
+// be the caller's session (AdminSID).
+func TestStartBindsProofSID(t *testing.T) {
+	x := newImpFixture(t)
+	x.fa.mu.Lock()
+	x.fa.sid = "another-session"
+	x.fa.mu.Unlock()
+	if _, err := x.start("root", "alice", "checking quota"); statusOf(err) != 403 || err.Error() != freshauth.Message {
+		t.Errorf("another session: %v", err)
+	}
+	if e := x.audit.lastOf("impersonation.start"); e.Result != "refused" || !strings.Contains(e.Detail, "another session") {
+		t.Errorf("audit = %+v", e)
+	}
+	x.fa.mu.Lock()
+	x.fa.sid = impSID
+	x.fa.mu.Unlock()
+	x.mustStart(t, "root", "alice")
+	x.fa.mu.Lock()
+	x.fa.sid = ""
+	x.fa.mu.Unlock()
+	x.mustStart(t, "sam", "bob")
+}
+
+// otherImpID is a valid id that differs from id (its first digit changed).
+func otherImpID(id string) string {
+	if id[0] == '0' {
+		return "1" + id[1:]
+	}
+	return "0" + id[1:]
 }
