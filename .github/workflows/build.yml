@@ -11,7 +11,15 @@ on:
   # Dependabot auto-merge job dispatches it after a merge (a GITHUB_TOKEN
   # merge starts no push run). Dispatching on main needs write access, the
   # same trust as pushing to main.
+  # compare_ref: compare against this templates/core branch instead (it
+  # must exist): a cross-repo merge publishes the Hub's edge from main
+  # before core's branch lands (`-f compare_ref=<branch>`).
   workflow_dispatch:
+    inputs:
+      compare_ref:
+        description: templates/core branch to compare against (empty = same-named, else main)
+        required: false
+        default: ""
 
 permissions: {}
 
@@ -95,11 +103,19 @@ jobs:
       - name: Check out the templates and core (same branch, else main)
         env:
           REF: ${{ github.head_ref || github.ref_name }}
+          COMPARE_REF: ${{ inputs.compare_ref }}
         run: |
+          if [ -n "$COMPARE_REF" ] && ! [[ "$COMPARE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::compare_ref: not a branch name"; exit 1
+          fi
           for repo in portcullis-templates portcullis; do
             url="https://github.com/porelli/$repo"
             ref=main
-            if [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] && [ "$REF" != main ] && git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then ref="$REF"; fi
+            if [ -n "$COMPARE_REF" ]; then
+              # The templates have no such branch on a core-only feature: main.
+              if git ls-remote --exit-code --heads "$url" "$COMPARE_REF" >/dev/null; then ref="$COMPARE_REF"
+              elif [ "$repo" = portcullis ]; then echo "::error::core has no branch $COMPARE_REF"; exit 1; fi
+            elif [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] && [ "$REF" != main ] && git ls-remote --exit-code --heads "$url" "$REF" >/dev/null; then ref="$REF"; fi
             echo "$repo: $ref" | tee -a "$GITHUB_STEP_SUMMARY"
             git clone --quiet --depth=1 --branch "$ref" "$url" "$RUNNER_TEMP/$repo"
           done

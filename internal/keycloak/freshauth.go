@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/Nerzal/gocloak/v14"
 
@@ -78,9 +79,11 @@ func freshAuthMapper() gocloak.ProtocolMapperRepresentation {
 	}
 }
 
-// checkFreshAuthURIs: redirectURIs[i] is https://<host>/ exactly and
-// webOrigins[i] https://<the same host>; at least one pair, the same
-// number of each, no host twice (contract §8: the people and hub hosts).
+// checkFreshAuthURIs: redirectURIs[i] is https://people.<d>/signin on the
+// people host (the Sign-in page, sign-in part 2 D24) and https://<host>/
+// exactly on any other (the hub host), and webOrigins[i] https://<the
+// same host>; at least one pair, the same number of each, no host twice
+// (contract §8: the people and hub hosts).
 func checkFreshAuthURIs(redirectURIs, webOrigins []string) error {
 	if len(redirectURIs) == 0 || len(redirectURIs) != len(webOrigins) {
 		return fmt.Errorf("fresh-auth client: want one web origin per redirect URI, got %d and %d", len(redirectURIs), len(webOrigins))
@@ -88,8 +91,15 @@ func checkFreshAuthURIs(redirectURIs, webOrigins []string) error {
 	seen := map[string]bool{}
 	for i, redirectURI := range redirectURIs {
 		u, err := url.Parse(redirectURI)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "/" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
-			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://<host>/", redirectURI)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.ForceQuery {
+			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://people.<domain>/signin or https://hub.<domain>/", redirectURI)
+		}
+		want := "/"
+		if strings.HasPrefix(strings.ToLower(u.Host), "people.") {
+			want = "/signin"
+		}
+		if u.Path != want || u.RawPath != "" {
+			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://%s%s", redirectURI, u.Host, want)
 		}
 		if webOrigins[i] != "https://"+u.Host {
 			return fmt.Errorf("fresh-auth client: web origin %q must be https://%s", webOrigins[i], u.Host)

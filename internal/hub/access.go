@@ -93,8 +93,10 @@ func (h *Hub) accessWith(t *templates.Template, si state.SignIn, pick, mode stri
 // tierLocked is the TLS option of every router of t (contract §5 "TLS
 // tier per host", D18): an mtls app protected@file (the certificate is
 // its authentication); an app without Portcullis sign-in public@file; a
-// template that can't be published protected@file (fail closed); else
-// policy.Tier of its compiled rule, with publicActive's downgrade. Caller
+// template that can't be published protected@file (fail closed; with
+// open public exceptions authaware@file, policy.HostTier, while every
+// gated request is still denied); else policy.Tier of its compiled rule,
+// with publicActive's downgrade. Caller
 // holds mu.
 func (h *Hub) tierLocked(t *templates.Template, publicActive bool) string {
 	return h.accessLocked(t).tier(h.st.SignIn.MethodsOn(), publicActive)
@@ -107,7 +109,9 @@ func (a access) tier(on map[signin.Method]bool, publicActive bool) string {
 	case !a.Capability.Templates:
 		return policy.TierPublic
 	case a.Unusable:
-		return policy.TierProtected
+		// No rule: group-gate denies every gated request; the open public
+		// router still needs the handshake without a certificate (§5).
+		return policy.HostTier(policy.TierProtected, publicActive)
 	}
 	return policy.Tier(a.Rule, on, publicActive)
 }
@@ -164,7 +168,7 @@ func (h *Hub) signInNotes(a access) []string {
 	case policy.EnforceNone:
 		return []string{"This app handles its own sign-in: Portcullis doesn't sign users in for it, so no sign-in template applies."}
 	case policy.EnforceTLS:
-		return []string{"mTLS-only app: the client certificate is required at the TLS handshake (protected TLS tier); it takes no sign-in template."}
+		return []string{"YubiKey-certificate app: a YubiKey certificate is required at the TLS handshake (protected@file, which accepts YubiKey certificates only); it takes no sign-in template."}
 	}
 	var notes []string
 	src := "this app's own pick"
@@ -187,7 +191,13 @@ func (h *Hub) signInNotes(a access) []string {
 	case policy.EnforceAtLogin:
 		notes = append(notes, "Native OIDC: Keycloak checks the template when someone signs in to the app, not on every request.")
 	case policy.EnforcePerRequest:
-		notes = append(notes, "group-gate checks the template on every request; a YubiKey certificate counts only when the request presents it.")
+		notes = append(notes, "group-gate checks the template on every request; a YubiKey or browser certificate counts only when the request presents it.")
+	}
+	switch policy.Tier(a.Rule, h.st.SignIn.MethodsOn(), false) {
+	case policy.TierProtected:
+		notes = append(notes, "Every way in needs a YubiKey certificate: it is asked for at the TLS handshake (protected@file, YubiKey certificates only).")
+	case policy.TierProtectedAny:
+		notes = append(notes, "Every way in needs a certificate: a YubiKey or browser certificate is asked for at the TLS handshake (protected-any@file).")
 	}
 	return notes
 }

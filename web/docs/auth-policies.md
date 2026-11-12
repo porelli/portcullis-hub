@@ -21,17 +21,18 @@ The exact formats are in
 |--------|----------|---------------------|--------|
 | **Password** | 1.0 | The person's LLDAP password | off |
 | **Passkey (phone / laptop, synced)** | 2.5 | A passkey synced by iCloud, Google, 1Password and the like, or any passkey whose model Portcullis can't verify | on |
-| **Browser certificate** | 2.5 | A certificate file installed in a browser. Not available yet: listed, always off | off |
+| **Browser certificate** | 2.5 | A certificate file (`.p12`) the person creates on the [Sign-in page](#the-sign-in-page) and installs in a browser ([below](#browser-certificates)) | off |
 | **Device-bound passkey** | 3.0 | Windows Hello, a TPM: the key can't leave the computer or phone | on |
 | **Security key passkey** | 3.5 | A touch on a certified hardware key, e.g. a YubiKey | on |
-| **YubiKey certificate** | 4.0 | The client certificate stored on a YubiKey ([TLS & mTLS](../setup/certificates.md)) | on |
+| **YubiKey certificate** | 4.0 | The certificate stored on a YubiKey ([Certificates](../setup/certificates.md)) | on |
 
 Settings → Sign-in shows each method with its strength and how many people
 have it set up. A method that is off is never offered and never accepted, and
 people can't set it up. You can't switch off a method an enabled template
 needs, i.e. one without which the template would have no way in left: the
 dialog lists the templates and what uses them (the default, apps, core
-pages). Change those first.
+pages). Change those first. The browser certificate starts off; switch it on
+when you want people to be able to create one.
 
 Some template entries name a **family** of methods: *Passkey (any kind)*,
 *YubiKey (touch or certificate)* and *Certificate (YubiKey or browser)*. A
@@ -128,10 +129,11 @@ key* alternative is dropped and the rest still scores 4.4.
 - **Per app.** An instance's Settings tab has one drop-down: *Default
   (Standard · 2.5 / 5)* or any enabled template (see
   [Hub → Settings](hub.md#settings)). Saving another template restarts the app
-  only when its client-certificate request changes ([below](#traefik-tls-tier)).
+  only when its certificate request changes ([below](#traefik-tls-tier)).
 - **Core pages.** Settings → Sign-in → *Core pages* gives the portal, the Hub,
-  people.&lt;domain&gt;, directory, enroll, metrics and the Traefik dashboard
-  each the default or a template. The Hub and people.&lt;domain&gt; start on
+  people.&lt;domain&gt;, directory, metrics and the Traefik dashboard
+  each the default or a template. `enroll.<domain>` only serves setup links
+  and takes no template. The Hub and people.&lt;domain&gt; start on
   **Strong**: they control everything else. `auth.<domain>` (Keycloak itself)
   and `mcp.<domain>` take no template of their own: the Keycloak admin
   console's router (`auth.<domain>/admin`, which also runs group-gate) follows
@@ -144,17 +146,17 @@ key* alternative is dropped and the rest still scores 4.4.
 
 | Auth method | Where the template is checked |
 |-------------|-------------------------------|
-| `forward-auth`, `header-auth`, `custom` behind Portcullis sign-in | group-gate, on every request. A YubiKey certificate counts only while the request presents it ([mTLS binding](#mtls-binding)) |
+| `forward-auth`, `header-auth`, `custom` behind Portcullis sign-in | group-gate, on every request. A YubiKey or browser certificate counts only while the request presents it ([certificate binding](#certificate-binding)) |
 | `native-oidc` | Keycloak, at every sign-in to the app: the app's Keycloak clients are listed with their exact template, and Keycloak shows the needs-stronger page when the session doesn't meet it. Never weaker than the template |
-| `mtls` | The TLS handshake: the client certificate is the app's authentication. It takes no template and always requires the certificate |
-| `custom`, `public`, own login only | None: the app handles its own sign-in. No template, no client-certificate request |
+| `mtls` | The TLS handshake: the certificate is the app's authentication. It takes no template and always requires one |
+| `custom`, `public`, own login only | None: the app handles its own sign-in. No template, no certificate request |
 
 ### AI support
 
 AI clients sign in with the template of the app they reach (the Hub's and
 people pages' templates for the Portcullis MCP and "all my apps"), but they
-never present a client certificate, so certificate methods never count for
-them. An app whose template needs a certificate in every alternative can't
+never present a YubiKey or browser certificate, so certificate methods never
+count for them. An app whose template needs a certificate in every alternative can't
 get AI support, and a sign-in change that would make it so switches its AI
 support off first, after asking. See [AI support](ai.md).
 
@@ -171,7 +173,7 @@ settings then have a **Sign-in** choice:
   `forward-auth`.
 - **App's own login only (no Portcullis)**, only if the template sets
   `allow_without_gateway: true`. The routers keep the template's middlewares
-  without the gateway pair, no client certificate is requested and no group
+  without the gateway pair, no certificate is requested and no group
   is published: anyone on the internet reaches the app's login page. The UI
   shows a red warning, the switch is audited (`app.sign_in`) and the Hub logs
   it.
@@ -187,8 +189,8 @@ allowing the own-login-only mode, the Hub falls back to Portcullis sign-in.
   app's users and admins groups who have no method set up that meets it, for
   example "2 people can't sign in to Nextcloud · family with it: bob (password
   only), dave (no method yet)". The Hub learns each person's methods from
-  Keycloak (passkeys), its own password records and enroll (YubiKey
-  certificates). A source it can't read counts as nothing set up.
+  Keycloak (passkeys), its own password records and enroll (YubiKey and
+  browser certificates). A source it can't read counts as nothing set up.
 - **For people.** Opening an app whose template the session doesn't meet
   shows a page instead of a failed sign-in ([below](#what-happens-when-someone-opens-an-app)).
 
@@ -204,6 +206,154 @@ says "ask your admin" instead of "Set up …". A passkey added this way can't be
 reclassified above that cap later. A setup link is the exception: the passkey
 registered there may be of any kind. Passkey registration offers the security
 key first to administrators.
+
+## The Sign-in page
+
+Every person has one place for their sign-in methods: the **Sign-in page**,
+`https://people.<domain>/signin` (the **Sign-in** link in the people page's
+top bar, **Sign-in methods** on the portal, and every "Set up …" and
+"Sign-in methods" link on the needs-stronger pages). It shows:
+
+- **Each sign-in method**, in strength order, with its state (set up, not set
+  up, unknown) and what the person can do with it. A method switched off on
+  the server shows "off on this server".
+    - **Password:** set, change or remove your own password. Setting one needs
+      a fresh sign-in; it is refused while the password method is off, and for
+      `admin` and `portcullis-hub`. Changing or removing it signs you out of
+      Keycloak.
+    - **Passkeys and security keys:** the list with each one's kind and date;
+      **+ Add** opens Keycloak's account page to register one.
+    - **YubiKey certificate:** its validity and **Renew**: the page shows the
+      `ykman` commands that make a new request (CSR) for the key already on
+      the YubiKey; you paste it, and the browser must present your current
+      YubiKey certificate on that request (only a YubiKey certificate
+      renews; a browser certificate is refused). No fresh sign-in is needed:
+      the certificate and the request both prove you hold the key.
+    - **Browser certificate:** the list and **Create**
+      ([below](#browser-certificates)); each one can be revoked.
+- **Apps and what they need:** every app you can use, plus the people page
+  (and the Hub for administrators), with its template and whether one of
+  your methods meets it (✓ / ✗, or ? while Portcullis doesn't know your
+  methods).
+- **Sign-in history** ([below](#sign-in-history)).
+
+The page works with **any** switched-on method, even one the people page's
+own template wouldn't accept: group-gate lets a session with any method in
+to exactly `/signin`, its `/api/me/signin…` routes and the page's static
+files on people.&lt;domain&gt;, and nothing else. Everything there that adds a
+method needs a fresh sign-in the people page's template accepts (or, for a
+renewal, the YubiKey certificate itself); the rest only shows or removes your
+own data. See
+[Integration Contracts §5.1](../guides/integration-contracts.md#51-people-subdomain-new).
+
+## Browser certificates
+
+A **browser certificate** is a certificate file (`.p12`) that a person
+creates on the Sign-in page and installs in a browser or the OS. It is a
+sign-in method of its own (strength 2.5, like a synced passkey: it is a
+file, and a file can be copied). It is issued by its own certificate
+authority, `pki_file` (the **Internal certificate authority** of
+[Certificates](../setup/certificates.md)), so it never counts as a YubiKey
+certificate, and signing in with it gives amr `file`, never `mtls`.
+
+1. An admin switches **Browser certificate** on in Settings → Sign-in (it
+   starts off).
+2. On the Sign-in page the person picks **Create**, chooses a lifetime (from
+   1 day up to the limit, 30 days by default; the default is the limit) and
+   confirms with a fresh sign-in in a popup. That sign-in must be a passkey
+   or YubiKey method the people page's template accepts: a password or
+   another browser certificate never creates a certificate. If the template
+   accepts nothing else, the page says "creating a certificate needs a
+   passkey or YubiKey sign-in that people.&lt;domain&gt; accepts".
+3. The page offers the download (`<user>-browser-certificate-<YYYYMMDD>.p12`)
+   and, next to it, its password. **The password is shown once: Portcullis
+   doesn't keep it and can't show it again**, and the private key is never
+   kept either, so the file can't be downloaded again. A lost file or
+   password means creating a new certificate (and revoking the old one).
+4. The person imports the file:
+    - **Firefox:** Settings → Privacy & Security → Certificates → View
+      Certificates → Your Certificates → Import.
+    - **Chrome / Edge on Windows 10 or newer:** open the `.p12` (Windows
+      certificate import wizard, Current User).
+    - **macOS:** open it in **Keychain Access** (macOS 14 or newer: the file
+      is encrypted with AES-256, which older versions can't open); Safari and
+      Chrome use the login keychain.
+
+Administrators create and revoke their own browser certificates here like
+anyone else; only `admin`, `portcullis-hub` and `portcullis-*` accounts
+can't (their certificates are managed from the server).
+
+A person can have at most 3 active browser certificates (the limit), and
+each one lasts at most the lifetime limit. A certificate **revoked** on the
+Sign-in page (or by an admin or helper, or with
+`./portcullis cert revoke`) **normally stops working within a minute** everywhere,
+and shows as revoked on the Sign-in page, the person's Sign-in tab and
+`./portcullis cert list --all`.
+
+## Help to reset
+
+Someone who lost their passkeys or certificates can get help from an
+administrator or from a **sign-in helper**: a member of the group that holds
+the delegated permission `sign_in_help` ([People & groups](groups.md#delegated-permissions)).
+Both open the person's **Sign-in** tab on their page on people.&lt;domain&gt;:
+
+| Action | Administrators | Holders of `sign_in_help` |
+|--------|----------------|---------------------------|
+| Send a setup link | yes (not to another administrator: `./portcullis invite <user>`) | yes, also for accounts they didn't create |
+| Remove passkeys | yes (another administrator's needs their username typed again) | yes |
+| Revoke a certificate | yes, except an administrator's, `admin`'s, `portcullis-hub`'s or any `portcullis-*` account's (`./portcullis cert revoke <serial>`) | yes |
+| Reset the password | yes (another administrator's needs their username typed again) | **no** |
+| Issue a YubiKey certificate (from a CSR) | yes, after a fresh sign-in; not for an administrator, `admin`, `portcullis-hub` or any `portcullis-*` account (`./portcullis cert enroll`) | **no** |
+
+A helper can never act on themselves, on `admin` or `portcullis-hub`, on an
+administrator, or on a member of any delegated-permission group; the check
+uses the current group memberships on every request. Every action is in the
+audit log (as `as sign_in_help` for a helper) and in the person's sign-in
+history.
+
+!!! warning "Grant `sign_in_help` only to people you'd trust with those accounts"
+    A setup link hands the account to whoever holds it. A `sign_in_help`
+    holder can send one to anyone in their reach, so grant the permission
+    only to people you would trust with those accounts. Administrators are
+    never in reach.
+
+## Sign-in history
+
+The Sign-in page (and, for admins and helpers, the person's Sign-in tab)
+shows the person's sign-in history, newest first, with **Show older**:
+
+| Entry | What it is |
+|-------|------------|
+| Signed in | a new sign-in, with its methods and their score |
+| Stepped up | an existing session that added a method |
+| Failed | a sign-in that failed, with the method tried and why ("wrong password", "certificate refused", …) |
+| Confirmed | a fresh sign-in for a sensitive action |
+| Opened | the first time a session opened an app (per app) |
+| Help | an action someone else took on the account (by whom) |
+| Certificate | a certificate the person created, renewed or revoked |
+
+Each entry shows the IP address and the browser ("Firefox · macOS"). The
+history is put together when it is shown, from Keycloak's sign-in events,
+group-gate's log of opened apps (the `group_gate_data` volume, in
+[backups](backups.md)) and the Hub's audit log. When one of them can't be
+read, the page says which, and shows the rest. Entries older than the
+history limit (1 year by default) are never shown and are deleted.
+
+## Limits
+
+Settings → Sign-in → **Limits** (admins):
+
+| Limit | Default | Range |
+|-------|---------|-------|
+| Browser certificate lifetime | 30 days | 1 day to the server's ceiling |
+| Active browser certificates per person | 3 | 1–20 |
+| Sign-in history kept | 365 days | 30–3650 days |
+
+The ceiling is core's `CLIENT_CERT_TTL` (default `720h`, 30 days) in whole
+days: no certificate lives longer. If you lower `CLIENT_CERT_TTL` below the
+stored lifetime, the ceiling applies and Settings shows a warning. Changing
+the history limit also changes how long Keycloak keeps sign-in events. The
+change is audited (`signin.limits`).
 
 ## Locked out of the Hub
 
@@ -253,20 +403,24 @@ which passkeys the person has and several passkey kinds would do, it asks for
 any passkey. Apps that sign in with OIDC themselves do the same inside
 Keycloak: an *all of* template is met step by step.
 
-### Present your YubiKey certificate
+### Present your certificate
 
-When the session already holds the YubiKey certificate but the browser didn't
-present it on this request (the key isn't inserted, or the browser offered no
-certificate), signing in again can't help: group-gate shows "&lt;App&gt; needs
-your YubiKey certificate — insert your YubiKey and reload this page", with no
-Continue button. A revoked certificate or another person's doesn't count.
+When the session already holds a YubiKey or browser certificate but the
+browser didn't present it on this request (the key isn't inserted, the
+certificate is installed in another browser, or the browser offered none),
+signing in again can't help: group-gate shows "&lt;App&gt; needs your YubiKey
+certificate — insert your YubiKey and reload this page" (or "&lt;App&gt; needs
+your browser certificate — use the browser it is installed in and reload
+this page"), with no Continue button. A revoked certificate or another
+person's doesn't count, and neither does a certificate of the other kind.
 
 ### Needs a stronger sign-in
 
 Otherwise the page reads "&lt;App&gt; needs a stronger sign-in — You signed in with
 a password. &lt;App&gt; accepts any one of: a passkey (you don't have one yet) · a
 YubiKey certificate …", with **Set up a passkey** / **Set up a security key**
-links to Keycloak's account page and a **Sign-in methods** link. When adding a
+links and a **Sign-in methods** link, all to the person's
+[Sign-in page](#the-sign-in-page) (`https://people.<domain>/signin`). When adding a
 stronger method from this sign-in isn't allowed, or the missing method is a
 certificate or a password, it says "ask your admin". Apps that sign in with
 OIDC themselves get the same page from Keycloak. These pages come from
@@ -284,8 +438,9 @@ page just because it is behind).
 
 ### Fresh sign-in for sensitive actions
 
-Creating a file-share password and approving an AI confirmation need a fresh
-sign-in in a popup, with a method the governing template accepts: the
+Creating a file-share password, approving an AI confirmation, creating a
+browser certificate, issuing a YubiKey certificate and setting your own
+password need a fresh sign-in in a popup, with a method the governing template accepts: the
 strongest method of at least one of the template's ways in (its
 alternatives, counting only the methods switched on now; a tie lets either
 through; a password too). What counts is the method that actually ran in that
@@ -299,6 +454,8 @@ never counts.
 | Approving a companion's confirmation (people.&lt;domain&gt;) | the companion's app's template |
 | Approving a Portcullis people tool's confirmation (people.&lt;domain&gt;) | the `people` core page's template |
 | Approving an admin tool's confirmation (hub.&lt;domain&gt;) | the `hub` core page's template |
+| Creating a browser certificate, issuing a YubiKey certificate | the `people` core page's template, but never with a password or a browser certificate ([below](#browser-certificates)) |
+| Setting your own password on the Sign-in page | the `people` core page's template |
 | Anything else that asks for a fresh sign-in | the `hub` core page's template (fail closed) |
 
 So with the core pages on Strong an admin confirmation needs the security key
@@ -311,22 +468,27 @@ disabled, gone or can't be met refuses.
 
 ## Traefik TLS tier
 
-Whether browsers are asked for a client certificate follows the method
-switches and the app's template. Core's `traefik/dynamic/tls.yml` is static
-and defines three options; the Hub picks one per app and writes it as a
+Whether browsers are asked for a certificate (YubiKey or browser) follows the
+method switches and the app's template. Core's `traefik/dynamic/tls.yml` is static
+and defines four options; the Hub picks one per app and writes it as a
 `tls.options` label on every router of the app, in
 `${HUB_DATA_DIR}/overrides/<app>.override.yml`:
 
 | The app's template | Tier | Behaviour |
 |--------------------|------|-----------|
-| Every alternative needs a certificate method that is on (e.g. YubiKey + certificate) | `protected@file` | Client certificate required at the TLS handshake |
-| Some alternative has one (e.g. Standard, Strong) | `authaware@file` | Client certificate asked for, optional |
-| None has one, or the app has no Portcullis sign-in | `public@file` | No client certificate requested |
-| An `mtls` app | `protected@file` | Always |
+| An `mtls` app | `protected@file` | Always: a **YubiKey** certificate required at the TLS handshake |
+| Every alternative needs the YubiKey certificate (e.g. YubiKey + certificate) | `protected@file` | A **YubiKey** certificate required at the TLS handshake; a browser certificate never passes it |
+| Every alternative needs a certificate method that is on, and at least one accepts the browser certificate | `protected-any@file` | A YubiKey or browser certificate required at the TLS handshake |
+| Some alternative has one (e.g. Standard, Strong) | `authaware@file` | A certificate asked for, optional |
+| None has one, or the app has no Portcullis sign-in | `public@file` | No certificate requested |
 
-Core pages (Keycloak, the Hub, people.&lt;domain&gt;, the portal, the
-consoles) always use `authaware@file`: they always offer an optional
-certificate (a browser without one shows nothing). Switching a certificate
+`protected` trusts only the YubiKey certificate authority
+(`certs/ca-chain-yubikey.crt`); `protected-any` and `authaware` trust both
+(`certs/ca-chain.crt`). Core pages (Keycloak, the Hub, people.&lt;domain&gt;,
+the portal, the consoles) always use `authaware@file`: they always offer an
+optional certificate (a browser without one shows nothing). Which method a
+certificate counts as is decided by its issuer
+([certificate binding](#certificate-binding)). Switching a certificate
 method on or off, or a template change that moves an app to another tier,
 restarts only the apps whose tier changed. Base `compose.yml` files in
 templates are untouched.
@@ -364,14 +526,15 @@ on, the Hub adds a router `portcullis-public-<app>` for those paths only:
   other token on the same prefix still goes through forward-auth.
 
 **Exceptions vs a required certificate.** A template that needs a
-certificate in every alternative normally gives the host `protected@file`.
+certificate in every alternative normally gives the host `protected@file` or
+`protected-any@file`.
 Anonymous visitors can't present a certificate, so while the public router
 exists the Hub uses `authaware@file` for **all** of the app's routers instead
 (`policy.HostTier`). What still enforces the certificate:
 
 | App type | Gated paths after the downgrade |
 |----------|---------------------------------|
-| `forward-auth` / `header-auth` | group-gate's [mTLS binding](#mtls-binding) requires a valid, unrevoked client certificate matching the user on **every** request, so the certificate stays enforced per request |
+| `forward-auth` / `header-auth` | group-gate's [certificate binding](#certificate-binding) requires a valid, unrevoked certificate of the right kind matching the user on **every** request, so the certificate stays enforced per request |
 | `native-oidc` (no group-gate on the host-wide router) | The certificate is only enforced **at sign-in**, by Keycloak's template check. An existing app session works from a browser without the key |
 | any router without group-gate | loses the handshake check; the Hub lists such routers in the warning |
 
@@ -413,8 +576,14 @@ change) have no Level-of-Authentication steps any more:
   identity provider, or one sign-in method, then the **template check**
   (`portcullis-template`) for the app that asked. The methods, tried in this
   order:
-    - the **YubiKey certificate** (automatic when the browser presents one;
-      amr `mtls`),
+    - the **YubiKey certificate** (automatic when the browser presents one
+      issued by the YubiKey certificate authority, `pki_int`; amr `mtls`),
+    - the **browser certificate** (automatic when the browser presents one
+      issued by the browser certificate authority, `pki_file`, while the
+      method is on; amr `file`). Each of the two certificate steps checks the
+      certificate's issuer and signature against its own authority and its
+      own revocation lists, so a browser certificate never counts as a
+      YubiKey certificate,
     - a **passkey**: Keycloak offers only the kinds that are on, and the kind
       that signed in gives the amr (`hwk` security key, `dpk` device-bound,
       `spk` synced),
@@ -449,18 +618,23 @@ from the email. LLDAP users can edit their own email, so Keycloak does not
 trust it (`trustEmail=false`) and nothing in Portcullis authorises or links
 accounts by it. See [Security & Hardening](hardening.md#header-spoofing-protections).
 
-## mTLS binding
+## Certificate binding
 
-A YubiKey certificate in the session (`amr=mtls`) only proves a certificate
-was used at sign-in. group-gate counts the **YubiKey certificate** method
-only while the current request presents an unrevoked client certificate whose
-CN equals the session's `preferred_username` (and the token's
-`preferred_username` is the same user). Without it the method is missing: a
-template the certificate would meet shows the present-certificate page
-([above](#present-your-yubikey-certificate)), any other the step-up or
-needs-stronger page. A session opened with a since-revoked certificate, or replayed from a
-browser without the key, stops meeting such a template at once. See
-[TLS & mTLS](../setup/certificates.md#mtls-binding-group-gate).
+A certificate in the session (`amr=mtls` for a YubiKey certificate, `file`
+for a browser certificate) only proves a certificate was used at sign-in.
+group-gate counts a certificate method only while the current request
+presents an unrevoked certificate **of that kind** whose CN equals the
+session's `preferred_username` (and the token's `preferred_username` is the
+same user). It tells the kinds apart by the certificate's issuer: the YubiKey
+certificate authority (`pki_int`) or the browser certificate authority
+(`pki_file`). If the two authorities' names were equal, or group-gate can't
+read either file, no certificate counts at all. Without a bound certificate
+the method is missing: a template the certificate would meet shows the
+present-certificate page ([above](#present-your-certificate)), any other the
+step-up or needs-stronger page. A session opened with a since-revoked
+certificate, or replayed from a browser without it, stops meeting such a
+template at once. See
+[Certificates](../setup/certificates.md#certificate-binding-group-gate).
 
 ## Troubleshooting
 
@@ -468,10 +642,16 @@ browser without the key, stops meeting such a template at once. See
 Your session is missing a method the app's template needs. Press
 **Continue**, or set the method up from the page's links.
 
-**Client certificate prompt loops indefinitely**
-Your browser may not be sending the client certificate. Check that the
-certificate is imported into your OS/keychain and that the origin matches the
-Traefik wildcard (`*.<your-domain>`).
+**Certificate prompt loops indefinitely**
+Your browser may not be sending the YubiKey or browser certificate. Check
+that the certificate is imported into your OS/keychain (or the browser's own
+store, for Firefox) and that the origin matches the Traefik wildcard
+(`*.<your-domain>`).
+
+**"&lt;App&gt; needs your browser certificate" although it is installed**
+The certificate may be revoked or expired: open the
+[Sign-in page](#the-sign-in-page) and check its status. A revoked
+certificate normally stops working within a minute.
 
 **Keycloak sign-in page appears when you expected single sign-on**
 The session cookie expired (8 hours idle / 12 hours max by default), or the

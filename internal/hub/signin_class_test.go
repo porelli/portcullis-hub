@@ -108,7 +108,7 @@ func TestPrecheckSignIn(t *testing.T) {
 		want int
 	}{
 		{SignInDraft{Method: "nope", On: true}, 404},
-		{SignInDraft{Method: signin.BrowserCert, On: true}, 409},
+		{SignInDraft{Method: signin.BrowserCert, On: true}, 0},
 		{SignInDraft{Method: signin.Password}, 0},
 		{SignInDraft{Template: "Bad ID", Name: "X", Rule: &ok}, 400},
 		{SignInDraft{Template: "standard", Name: "Standard", Rule: &bad}, 400},
@@ -120,6 +120,7 @@ func TestPrecheckSignIn(t *testing.T) {
 		{SignInDraft{Default: s("basic")}, 409},
 		{SignInDraft{Default: s("strong")}, 0},
 		{SignInDraft{CoreKey: "nope", Core: s("")}, 400},
+		{SignInDraft{CoreKey: "enroll", Core: s("")}, 400},
 		{SignInDraft{CoreKey: "hub", Core: s("nope")}, 404},
 		{SignInDraft{CoreKey: "hub", Core: s("")}, 0},
 		{SignInDraft{Instance: "nope", Pick: s("")}, 404},

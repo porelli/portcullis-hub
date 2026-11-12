@@ -59,12 +59,12 @@ type (
 		Hosts   map[string]string `json:"hosts,omitempty" jsonschema:"host router → hostname (default: the new id's hostnames)"`
 		Label   string            `json:"label,omitempty" jsonschema:"the new instance's label (default: the archive's)"`
 	}
-	enrollArgs struct {
-		Name     string `json:"name" jsonschema:"the domain or subdomain to enroll"`
+	addDomainArgs struct {
+		Name     string `json:"name" jsonschema:"the domain or subdomain to add"`
 		Provider string `json:"provider,omitempty" jsonschema:"the DNS provider to pre-select on the form (cloudflare, porkbun, route53, digitalocean, hetzner)"`
 	}
 	domainArgs struct {
-		Name string `json:"name" jsonschema:"the enrolled domain"`
+		Name string `json:"name" jsonschema:"the added domain"`
 	}
 	aiSupportArgs struct {
 		ID        string `json:"id" jsonschema:"the instance id"`
@@ -289,22 +289,22 @@ func (s *Server) registerAdminTools2() {
 				return acceptedBody(op), nil
 			}},
 		// ── Domains ──
-		admin("list_domains", "The enrolled domains: provider, records OK, certificate validity, state and last error (the last known list, with the reason, while the domains service can't be reached).",
+		admin("list_domains", "The added domains: provider, records OK, website certificate (HTTPS) validity, state and last error (the last known list, with the reason, while the domains service can't be reached).",
 			ClassRead, "GET /api/domains", "", func(ctx context.Context, _ directory.Actor, _ noArgs) (any, error) {
 				return s.domainsView(ctx), nil
 			}),
-		{Name: "enroll_domain", Description: "Enroll a domain for app hostnames: the DNS provider's API token is entered on the Hub's Domains page, never in the chat. After you submitted the form, this reports whether the domain is enrolled.",
-			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/domains", In: enrollArgs{},
+		{Name: "add_domain", Description: "Add a domain for app hostnames: the DNS provider's API token is entered on the Hub's Domains page, never in the chat. After you submitted the form, this reports whether the domain is added.",
+			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/domains", In: addDomainArgs{},
 			SecretForm: func(args json.RawMessage) string {
-				a, _ := decode[enrollArgs](args)
-				return s.domainForm(url.Values{"enroll": {hub.NormalizeHost(a.Name)}, "provider": {a.Provider}})
+				a, _ := decode[addDomainArgs](args)
+				return s.domainForm(url.Values{"add": {hub.NormalizeHost(a.Name)}, "provider": {a.Provider}})
 			},
 			Run: func(ctx context.Context, _ *directory.Caller, args json.RawMessage) (any, error) {
 				// The accept is the client's word: what the Hub knows now.
-				a, _ := decode[enrollArgs](args)
+				a, _ := decode[addDomainArgs](args)
 				return s.domainCheck(ctx, hub.NormalizeHost(a.Name), "")
 			}},
-		{Name: "replace_domain_token", Description: "Replace an enrolled domain's DNS provider token: the new token is entered on the Hub's Domains page, never in the chat. After you submitted it, this reports the domain's state and the last recorded replacement.",
+		{Name: "replace_domain_token", Description: "Replace an added domain's DNS provider token: the new token is entered on the Hub's Domains page, never in the chat. After you submitted it, this reports the domain's state and the last recorded replacement.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/domains/{name}/token", In: domainArgs{},
 			SecretForm: func(args json.RawMessage) string {
 				return s.domainForm(url.Values{"token": {hub.NormalizeHost(nameOf(args))}})
@@ -312,11 +312,11 @@ func (s *Server) registerAdminTools2() {
 			Run: func(ctx context.Context, _ *directory.Caller, args json.RawMessage) (any, error) {
 				return s.domainCheck(ctx, hub.NormalizeHost(nameOf(args)), "domain.token")
 			}},
-		{Name: "delete_domain", Description: "Remove an enrolled domain (its records and certificate go; refused while any instance has a hostname on it). Needs your confirmation in the browser.",
+		{Name: "delete_domain", Description: "Remove an added domain (its records and website certificate go; refused while any instance has a hostname on it). Needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "DELETE /api/domains/{name}", Audit: "domain.delete", In: domainArgs{},
 			Typed: func(args json.RawMessage) string { return hub.NormalizeHost(nameOf(args)) },
 			Consequences: func(_ context.Context, args json.RawMessage) []string {
-				return []string{"Removes the domain " + q(hub.NormalizeHost(nameOf(args))) + ": its DNS records and certificate are removed and no new hostname can go on it."}
+				return []string{"Removes the domain " + q(hub.NormalizeHost(nameOf(args))) + ": its DNS records and website certificate (HTTPS) are removed and no new hostname can go on it."}
 			},
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				warning, err := s.deleteDomain(ctx, toolActor(ctx, c), nameOf(args))
@@ -566,7 +566,7 @@ func sourceDisplay(raw string) string {
 }
 
 // domainForm is the Domains section's deep link with q
-// (#settings/domains?enroll=<name>[&provider=<p>] or ?token=<name>).
+// (#settings/domains?add=<name>[&provider=<p>] or ?token=<name>).
 func (s *Server) domainForm(q url.Values) string {
 	for k, v := range q {
 		if len(v) == 0 || v[0] == "" {
@@ -576,7 +576,7 @@ func (s *Server) domainForm(q url.Values) string {
 	return s.mcpScope(ScopeAdmin).home + "#settings/domains?" + q.Encode()
 }
 
-// domainCheck is the U domain tools' report: whether name is enrolled
+// domainCheck is the U domain tools' report: whether name is added
 // now (the service's list when it answers, else the last known one) and,
 // for action, the last such audit entry the Hub recorded for it — what
 // the Hub knows, never the client's accept.
@@ -590,7 +590,7 @@ func (s *Server) domainCheck(ctx context.Context, name, action string) (any, err
 			}
 		}
 	}
-	out := map[string]any{"name": name, "enrolled": found != nil, "domain": found,
+	out := map[string]any{"name": name, "added": found != nil, "domain": found,
 		"note": "what the Hub knows now; it doesn't show who submitted the form"}
 	if e, ok := v["error"]; ok {
 		out["error"] = e

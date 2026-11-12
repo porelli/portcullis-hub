@@ -85,7 +85,7 @@ func TestBuildV6(t *testing.T) {
 	}
 	wantCore := map[string]string{
 		domain: "standard", "hub." + domain: "strong", "people." + domain: "strong", "directory." + domain: "standard",
-		"enroll." + domain: "standard", "metrics." + domain: "standard", "traefik." + domain: "standard",
+		"metrics." + domain: "standard", "traefik." + domain: "standard",
 	}
 	if !reflect.DeepEqual(doc.Core, wantCore) {
 		t.Errorf("core = %v\nwant %v", doc.Core, wantCore)
@@ -392,7 +392,7 @@ func TestBuildContractExample(t *testing.T) {
 			{ID: "vaultwarden", Enabled: true, Hosts: host("passwords." + main), GroupAccess: true, AccessGroup: "users_vaultwarden",
 				AdminGroup: "admin_vaultwarden", AdminPaths: []string{"/admin"}},
 		},
-		Default: "standard", Core: map[string]string{"portal": "", "hub": "strong", "people": "strong", "directory": "", "enroll": "", "metrics": "", "traefik": ""},
+		Default: "standard", Core: map[string]string{"portal": "", "hub": "strong", "people": "strong", "directory": "", "metrics": "", "traefik": ""},
 		Templates: compiledBuiltins(t, on), Methods: onList(on),
 		People:     map[string][]signin.Method{"alice": {signin.PasskeySynced, signin.SecurityKey}, "bob": {signin.PasskeySynced}},
 		MainDomain: main, ExtraDomains: []string{"team-b.example.org"},
@@ -421,7 +421,6 @@ func TestBuildContractExample(t *testing.T) {
   "hosts": {"grafana.team-b.example.org": "strong"},
   "core": {
     "directory.portcullis.example.com": "standard",
-    "enroll.portcullis.example.com": "standard",
     "hub.portcullis.example.com": "strong",
     "metrics.portcullis.example.com": "standard",
     "people.portcullis.example.com": "strong",

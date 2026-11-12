@@ -7,6 +7,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/signin"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // Sign-in methods management (contract §8.1): Hub listener only (never
@@ -26,6 +27,7 @@ func (s *Server) registerSignIn(mux routeMux) {
 	mux.HandleFunc("PUT /api/signin/default", s.handleSetDefault)
 	mux.HandleFunc("PUT /api/signin/core/{key}", s.handleSetCore)
 	mux.HandleFunc("PUT /api/signin/add-stronger", s.handleSetAddStronger)
+	mux.HandleFunc("PUT /api/signin/limits", s.handleSetSignInLimits)
 	mux.HandleFunc("GET /api/instances/{id}/signin", s.handleInstanceSignIn)
 }
 
@@ -267,6 +269,34 @@ func (s *Server) handleSetAddStronger(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleSetSignInLimits: PUT /api/signin/limits {browser_cert_days,
+// browser_cert_max_active, history_days} (all three required) → the
+// limits view (contract §8.1 "Limits").
+func (s *Server) handleSetSignInLimits(w http.ResponseWriter, r *http.Request) {
+	if !s.signInAdmin(w, r) {
+		return
+	}
+	var b struct {
+		Days      *int `json:"browser_cert_days"`
+		MaxActive *int `json:"browser_cert_max_active"`
+		History   *int `json:"history_days"`
+	}
+	if !decodeStrict(w, r, &b, signInUsage) {
+		return
+	}
+	if b.Days == nil || b.MaxActive == nil || b.History == nil {
+		writeJSONError(w, http.StatusBadRequest, "browser_cert_days, browser_cert_max_active and history_days are all required")
+		return
+	}
+	view, err := s.setSignInLimits(r.Context(), requestActor(r), state.SignInLimits{BrowserCertDays: *b.Days, BrowserCertMaxActive: *b.MaxActive, HistoryDays: *b.History})
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	noStore(w)
+	writeJSON(w, view)
+}
+
 // handleInstanceSignIn: GET /api/instances/{id}/signin → InstanceSignInView.
 func (s *Server) handleInstanceSignIn(w http.ResponseWriter, r *http.Request) {
 	if !s.signInAdmin(w, r) {
@@ -346,6 +376,12 @@ func (s *Server) setCoreTemplate(ctx context.Context, a directory.Actor, key, id
 func (s *Server) setAddStronger(ctx context.Context, a directory.Actor, on bool) error {
 	s.rec("SetAddStronger", on)
 	return s.Hub.SetAddStronger(on, a)
+}
+
+// setSignInLimits saves the limits (route and set_sign_in_limits).
+func (s *Server) setSignInLimits(ctx context.Context, a directory.Actor, in state.SignInLimits) (*hub.LimitsView, error) {
+	s.rec("SetSignInLimits", in)
+	return s.Hub.SetSignInLimits(ctx, in, a)
 }
 
 // instanceSignIn is the instance sign-in view (route and get_instance_sign_in).

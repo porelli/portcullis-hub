@@ -224,6 +224,7 @@ func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
 	e.ll.AddGroup("users_aiapp", "alice")
 	e.ll.AddGroup("admin_aiapp")
 	e.s.Hub.SetPeople(e.s.Directory)
+	e.s.Hub.SetSignInHelp(e.s.Directory)
 	for _, p := range prep {
 		p(eng)
 	}

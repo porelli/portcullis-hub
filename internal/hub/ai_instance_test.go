@@ -616,7 +616,7 @@ func TestAIRefusals(t *testing.T) {
 		setPickLocked(a.h, "aiapp", p)
 		a.h.mu.Unlock()
 		err := on("aiapp", "tok")
-		if status(err) != 409 || !strings.Contains(err.Error(), "needs a client certificate on every sign-in; AI clients can't present one") {
+		if status(err) != 409 || !strings.Contains(err.Error(), "needs a YubiKey or browser certificate on every sign-in; AI clients can't present one") {
 			t.Errorf("%v: %v", p, err)
 		}
 	}
@@ -682,7 +682,7 @@ func TestAIRefusedCertificateOnly(t *testing.T) {
 	}
 	a.h.Wait()
 	err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root)
-	if statusOf(err) != 409 || !strings.Contains(err.Error(), "needs a client certificate on every sign-in") {
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "needs a YubiKey or browser certificate on every sign-in") {
 		t.Errorf("SetAISupport = %v", err)
 	}
 	if c := a.companion("aiapp", "tok"); c.Enabled {

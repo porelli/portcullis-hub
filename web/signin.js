@@ -24,6 +24,7 @@
 // PUT  /api/signin/default                 {template}
 // PUT  /api/signin/core/{key}              {template}
 // PUT  /api/signin/add-stronger            {on}
+// PUT  /api/signin/limits                  {browser_cert_days, browser_cert_max_active, history_days}
 // GET  /api/instances/{id}/signin          the instance's choices and who can't meet its template
 //
 // Rules: every value goes through escapeHtml (index.html); actions are
@@ -61,7 +62,7 @@
   ];
   const LEAF_LABEL = Object.fromEntries(METHODS.concat(FAMILIES));
   const CORE_PAGES = [['portal', 'Portal'], ['hub', 'Hub'], ['people', 'People'], ['directory', 'Directory'],
-    ['enroll', 'Enroll'], ['metrics', 'Metrics'], ['traefik', 'Traefik']];
+    ['metrics', 'Metrics'], ['traefik', 'Traefik']];
 
   function leafLabel(leaf) { return LEAF_LABEL[leaf] || leaf; }
 
@@ -111,17 +112,51 @@
       '<table class="si-t"><thead><tr><th>Method</th><th>Strength</th><th>On</th><th>People who have it</th></tr></thead><tbody>';
     for (const m of view.methods || []) {
       let people;
-      if (!m.available) people = 'not available yet';
-      else if (!m.on) people = '— off: not offered, not accepted';
+      if (!m.on) people = '— off: not offered, not accepted';
       else if (m.people < 0 || total < 0) people = 'not known yet';
       else people = m.people + ' of ' + total;
       h += '<tr data-signin-method-row="' + esc(m.id) + '"><td>' + esc(m.label) + '</td>' +
         '<td><span class="si-score">' + esc(num(m.tenths)) + '</span>' + barHtml(m.tenths) + '</td>' +
-        '<td>' + switchHtml('method', ' data-method="' + esc(m.id) + '"', m.on && m.available, !m.available, m.label) + '</td>' +
+        '<td>' + switchHtml('method', ' data-method="' + esc(m.id) + '"', m.on, false, m.label) + '</td>' +
         '<td class="si-sub">' + esc(people) + errSlot('method:' + m.id) + '</td></tr>';
     }
     h += '</tbody></table><p class="si-sub">Switching off a method an enabled template needs, or one the last administrators sign in with, is refused: the Hub says which templates, apps and people first.</p></section>';
     return h;
+  }
+
+  // The limits' bounds (contract §8.1 "Limits"): browser_cert_days 1 to
+  // the ceiling (HUB_CLIENT_CERT_TTL in days), max active 1–20, history
+  // 30–3650 days.
+  const LIMIT_FIELDS = [
+    ['browser_cert_days', 'Browser certificate lifetime', 'days: the most a person can pick when creating one', v => [1, Math.max(1, v.ceiling_days | 0)]],
+    ['browser_cert_max_active', 'Browser certificates per person', 'at most this many valid at once', () => [1, 20]],
+    ['history_days', 'Sign-in history kept', 'days (also how long Keycloak keeps its sign-in events)', () => [30, 3650]]
+  ];
+
+  // limitsProblem: why vals ({field: string}) can't be saved with the
+  // view's bounds ('' = fine), as the Hub would refuse it.
+  function limitsProblem(vals, view) {
+    for (const [key, label, , bounds] of LIMIT_FIELDS) {
+      const [lo, hi] = bounds(view);
+      const s = String(vals[key] == null ? '' : vals[key]).trim();
+      if (!/^\d+$/.test(s) || Number(s) < lo || Number(s) > hi) return label + ' must be a whole number from ' + lo + ' to ' + hi + '.';
+    }
+    return '';
+  }
+
+  function limitsHtml(view) {
+    const l = view.limits || {};
+    let h = '<section class="policy-section si-block" data-signin-limits><div class="policy-title">Limits</div>' +
+      '<p class="si-sub">Browser certificates and the sign-in history. The lifetime can\'t be longer than this server\'s ceiling: ' +
+      esc(plural(view.ceiling_days | 0, 'day', 'days')) + ' (the core\'s CLIENT_CERT_TTL).</p>';
+    if (view.warning) h += '<div class="public-warn si-note" data-signin-limits-warning>⚠ ' + esc(view.warning) + '</div>';
+    h += '<div class="si-limits">';
+    for (const [key, label, what, bounds] of LIMIT_FIELDS) {
+      const [lo, hi] = bounds(view);
+      h += '<label class="si-limit"><span>' + esc(label) + '</span><input type="number" step="1" inputmode="numeric" min="' + esc(lo) + '" max="' + esc(hi) + '" value="' + esc(l[key] == null ? '' : l[key]) +
+        '" data-signin-limit="' + esc(key) + '" aria-describedby="si-lim-' + esc(key) + '"><small class="si-sub" id="si-lim-' + esc(key) + '">' + esc(what) + ' (' + esc(lo) + '–' + esc(hi) + ')</small></label>';
+    }
+    return h + '</div><div class="si-row"><button type="button" class="btn btn-primary btn-sm" data-signin-action="limits-save">Save limits</button></div>' + errSlot('limits') + '</section>';
   }
 
   function usedByText(t) {
@@ -177,7 +212,7 @@
   function render(view, notes) {
     let h = '<div data-signin-notes>' + (notes || []).map(n => '<div class="public-warn si-note">' + esc(n) + '</div>').join('') + '</div>';
     if (view.mds_warning) h += '<div class="public-warn si-note" data-signin-mds>⚠ ' + esc(view.mds_warning) + '</div>';
-    h += methodsHtml(view) + templatesHtml(view);
+    h += methodsHtml(view) + limitsHtml(view) + templatesHtml(view);
     h += '<div data-signin-editor></div>';
     h += coreHtml(view);
     return h;
@@ -202,7 +237,7 @@
   function whyUnusable(node) {
     if (node.leaf !== undefined) {
       if (node.leaf.startsWith('family:')) return 'none of its methods is on';
-      return node.leaf === 'browser_cert' ? 'not available yet' : 'off on this server';
+      return 'off on this server';
     }
     return node.op === 'all' ? 'a part of it can\'t be met' : 'none of its parts can be met';
   }
@@ -648,6 +683,26 @@
     const k = el.dataset.path || '';
     return k === '' ? [] : k.split('.').map(Number);
   }
+  // saveLimits checks the three limits with the view's bounds, then PUTs
+  // them; the answer (the limits view) is drawn at once.
+  async function saveLimits(st, t) {
+    const vals = {};
+    st.el.querySelectorAll('[data-signin-limit]').forEach(i => { vals[i.dataset.signinLimit] = i.value; });
+    const bad = limitsProblem(vals, st.view);
+    setErr(st, 'limits', bad);
+    if (bad) return;
+    t.disabled = true;
+    try {
+      const lv = await window.apiPut('/api/signin/limits', { browser_cert_days: Number(vals.browser_cert_days), browser_cert_max_active: Number(vals.browser_cert_max_active), history_days: Number(vals.history_days) });
+      st.view = Object.assign({}, st.view, { limits: lv.limits, ceiling_days: lv.ceiling_days, effective: lv.effective, warning: lv.warning || '' });
+      st.notes = ['Limits saved.'];
+      draw(st, st.el.querySelector('[data-signin-ed]'));
+    } catch (err) {
+      t.disabled = false;
+      setErr(st, 'limits', refusal(err));
+    }
+  }
+
   function nodeSel(path) { return '[data-signin-node][data-path="' + pathKey(path) + '"]'; }
 
   function bind(st) {
@@ -658,6 +713,7 @@
       const a = t.dataset.signinAction;
       const ed = t.closest('[data-signin-ed]');
       if (a === 'impact-apply' || a === 'impact-cancel') { resolvePending(st, t.dataset.key, a === 'impact-apply'); return; }
+      if (a === 'limits-save') { saveLimits(st, t); return; }
       if (a === 'new') { openEditor(st, { isNew: true, name: '', id: '', rule: { op: 'any', items: ['family:passkey'] } }); return; }
       if (a === 'edit') {
         const tpl = templateById(st.view, t.dataset.id);
@@ -734,7 +790,7 @@
   function instanceHtml(panel, isv) {
     let h = '<div class="policy-section si-pick" data-signin-pick-section><div class="policy-title">Sign-in</div>';
     if (panel.method === 'mtls') {
-      return h + '<div class="policy-own">Client certificate required</div>' +
+      return h + '<div class="policy-own">YubiKey certificate required</div>' +
         '<small>This app checks a YubiKey certificate at the TLS handshake, on every request: it takes no sign-in template.</small></div>';
     }
     if (!isv || isv.error) {
@@ -827,7 +883,7 @@
   }
 
   window.PortcullisSignIn = {
-    mount, render, editorHtml, ruleFromEditor, blockedHtml, instanceHtml, pickChanged, pickBody, marksFor, editRule, impactHtml, PICK_REFUSAL,
+    mount, render, editorHtml, ruleFromEditor, blockedHtml, instanceHtml, pickChanged, pickBody, marksFor, editRule, impactHtml, PICK_REFUSAL, limitsHtml, limitsProblem,
     // For the node tests: the confirm step over a stub container.
     _test: { guarded, resolvePending, state: (el, view) => ({ el, view, notes: [], seq: 0, timer: 0, pending: {} }) }
   };

@@ -185,7 +185,7 @@ type (
 	defaultsArgs struct {
 		Template string `json:"template" jsonschema:"the template id"`
 		ID       string `json:"id,omitempty" jsonschema:"the instance id the hostnames are for"`
-		Domain   string `json:"domain,omitempty" jsonschema:"an enrolled domain (default: the main domain)"`
+		Domain   string `json:"domain,omitempty" jsonschema:"an added domain (default: the main domain)"`
 	}
 	waitArgs struct {
 		ID   string `json:"id" jsonschema:"the instance id"`

@@ -7,6 +7,7 @@ package directory
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -236,6 +237,9 @@ type Service struct {
 	previewMu sync.Mutex
 	previewSn *snapshot
 	previewAt time.Time
+	// afterGate (tests only, SetAfterGateForTest) runs in run between
+	// gate and the action.
+	afterGate func()
 }
 
 // Error carries an HTTP status for the API layer.
@@ -1020,6 +1024,9 @@ func (s *Service) runAs(ctx context.Context, c *Caller, perm string, action *str
 	if err != nil {
 		err = &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 	} else if err = s.gate(ctx, c, perm, target); err == nil {
+		if s.afterGate != nil {
+			s.afterGate() // tests: a change between gate and the action
+		}
 		err = fn()
 		done = err == nil
 	}
@@ -1160,6 +1167,11 @@ func (s *Service) newInvite(ctx context.Context, username string) (*invite.Invit
 }
 
 func newResult() *Result { return &Result{Warnings: []string{}} }
+
+// CheckHubPassword is checkHubPassword for the Hub (the Sign-in page
+// checks a password before the fresh-auth proof is spent): nil or a 400
+// *Error that never quotes it.
+func CheckHubPassword(user, pw string) error { return checkHubPassword(user, pw) }
 
 // checkHubPassword is the rule for a password the Hub sets (contract §8.1
 // "Passwords": LLDAP's characters, then 12–128 characters, not the
@@ -1751,6 +1763,73 @@ func (s *Service) SetPassword(ctx context.Context, c *Caller, username, password
 	return res, err
 }
 
+// SetOwnPassword sets the caller a's own LLDAP password (contract §5.1
+// "Sign-in page", D25: the Hub checked the method switch and the
+// fresh-auth proof) and ends their Keycloak sessions; audited
+// signin.password "self set". The protected and reserved accounts are
+// refused. PasswordSet records it with set_by = the caller.
+func (s *Service) SetOwnPassword(ctx context.Context, a Actor, password string) (*Result, error) {
+	return s.ownPassword(ctx, a, password, "self set")
+}
+
+// RemoveOwnPassword replaces the caller's own LLDAP password with a
+// random 32-byte one nobody sees (LLDAP can't clear a password) and ends
+// their Keycloak sessions; audited signin.password "self removed". Not
+// recorded: the Hub drops its record.
+func (s *Service) RemoveOwnPassword(ctx context.Context, a Actor) (*Result, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, &Error{Status: http.StatusInternalServerError, Msg: "generating a password failed"}
+	}
+	pw := base64.RawURLEncoding.EncodeToString(b[:])
+	return s.ownPassword(ctx, a, pw, "self removed")
+}
+
+func (s *Service) ownPassword(ctx context.Context, a Actor, password, detail string) (*Result, error) {
+	res := newResult()
+	c := &Caller{User: strings.ToLower(strings.TrimSpace(a.User)), Via: a.Via, Client: a.Client, Confirmation: a.Confirmation}
+	set := detail == "self set"
+	setFor, setUUID := "", ""
+	err := s.run(ctx, c, permSelf, "signin.password", c.User, &detail, func() error {
+		if err := s.checkTarget(c.User); err != nil {
+			return err
+		}
+		if s.reservedName(c.User) {
+			return refuse("%s", reservedMsg(c.User))
+		}
+		if err := checkHubPassword(c.User, password); set && err != nil {
+			return err
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		u, err := sn.user(c.User)
+		if err != nil {
+			return err
+		}
+		if !lldap.ValidUsername(u.ID) {
+			return refuse("username %q can't be used in an LDAP DN; change this password in the LLDAP UI", u.ID)
+		}
+		if err := s.LLDAP.SetPassword(ctx, u.ID, password); err != nil {
+			return err
+		}
+		if set {
+			setFor, setUUID = u.ID, u.UUID
+		}
+		if s.KC != nil {
+			if err := s.KC.LogoutUser(ctx, u.ID); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("signing the user out of Keycloak failed: %v", err))
+			}
+		}
+		return nil
+	})
+	if err == nil && setFor != "" {
+		s.recordPassword(res, setFor, setUUID, c.User)
+	}
+	return res, err
+}
+
 func (s *Service) kcTarget(ctx context.Context, username string) (string, *snapshot, error) {
 	if err := s.checkTarget(username); err != nil {
 		return "", nil, err
@@ -1798,11 +1877,19 @@ func (s *Service) ClearActions(ctx context.Context, c *Caller, username string) 
 // action for the next (password) login. confirm must repeat the username.
 func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confirm string, withInvite bool) (*Result, error) {
 	res := newResult()
-	detail := fmt.Sprintf("new_invite=%v", withInvite)
-	err := s.run(ctx, c, permAdmin, "user.remove_passkeys", username, &detail, func() error {
+	// Admins, and sign_in_help holders on the people they may help
+	// (D32: gate's delegate checks on a fresh snapshot).
+	perm := helpPerm(c, permAdmin)
+	detail := asHelp(perm, fmt.Sprintf("new_invite=%v", withInvite))
+	err := s.run(ctx, c, perm, "user.remove_passkeys", username, &detail, func() error {
 		id, sn, err := s.kcTarget(ctx, username)
 		if err != nil {
 			return err
+		}
+		// A holder's target is checked again on the snapshot this action
+		// uses (review m1: promoted since gate's).
+		if !c.Admin && s.isAdministrator(sn, id) {
+			return forbidden("not allowed: %s is an administrator (admins only)", id)
 		}
 		// Always confirmed; flagged in the audit entry for another admin.
 		if err := s.checkAdminTakeover(sn, c.User, id, confirm, &detail); err != nil {
@@ -1847,9 +1934,16 @@ func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confi
 // SendInvite creates a new one-time invite link (earlier unredeemed ones
 // stop working, core side). Administrators are refused: core won't invite
 // them, they're recovered from the server.
+//
+// A sign_in_help holder (D32) sends a setup link to anyone they may help
+// — the point of a reset — so checkKeyless and created_by don't apply
+// to them; core's invite API still refuses protected targets. Audited
+// with detail "as sign_in_help".
 func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*Result, error) {
 	res := newResult()
-	err := s.run(ctx, c, PermInvite, "user.invite", username, nil, func() error {
+	perm := helpPerm(c, PermInvite)
+	detail := asHelp(perm, "")
+	err := s.run(ctx, c, perm, "user.invite", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -1867,7 +1961,7 @@ func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*
 		if err := s.clearCreatedBy(c, u.ID); err != nil {
 			return err
 		}
-		if !c.Admin {
+		if !c.Admin && perm != PermSignInHelp {
 			// Delegates re-invite only accounts a delegate created that
 			// have no credential yet (see checkKeyless).
 			cfg := &Config{}

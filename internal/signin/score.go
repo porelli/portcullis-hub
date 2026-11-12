@@ -77,6 +77,30 @@ func ScoreOf(n Node, on map[Method]bool) Score {
 	return Score{Tenths: t, Reason: reason}
 }
 
+// ScoreOfSet scores a set of methods used together, such as one sign-in's
+// methods (contract §8.2): an "all" of them (D4), each counted as switched
+// on. Unknown ids are ignored and duplicates count once; nil when no known
+// method is left.
+func ScoreOfSet(ms []Method) *Score {
+	on := map[Method]bool{}
+	for _, m := range ms {
+		if _, ok := methodInfo[m]; ok {
+			on[m] = true
+		}
+	}
+	var items []Node
+	for _, m := range Methods {
+		if on[m] {
+			items = append(items, Node{Leaf: string(m)})
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	s := ScoreOf(Node{Op: OpAll, Items: items}, on)
+	return &s
+}
+
 func scoreTenths(n Node, on map[Method]bool) int {
 	if n.isLeaf() {
 		if f, ok := families[n.Leaf]; ok {

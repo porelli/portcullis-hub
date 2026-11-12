@@ -19,13 +19,22 @@ const (
 	PermEditDetails = "edit_details" // UpdateUser (email, display name)
 	PermInvite      = "invite"       // CreateUser (invite, no groups), SendInvite
 	PermRemove      = "remove"       // DeleteUser
+	// PermSignInHelp: help to reset (contract §9.6, D32) — SendInvite
+	// (without checkKeyless / created_by), RemovePasskeys, and the Hub's
+	// revocation of a person's certificate (CheckHelp). Never a password,
+	// never a new certificate.
+	PermSignInHelp = "sign_in_help"
 	// permAdmin marks an operation as admins only; it is never granted
 	// through Config.Permissions.
 	permAdmin = "admin"
+	// permSelf marks an operation a person runs on their own account
+	// only (SetOwnPassword, RemoveOwnPassword): the target must be the
+	// caller. Never granted through Config.Permissions.
+	permSelf = "self"
 )
 
 // delegatedPerms are the only permissions Config.Permissions can grant.
-var delegatedPerms = []string{PermEditDetails, PermInvite, PermRemove}
+var delegatedPerms = []string{PermEditDetails, PermInvite, PermRemove, PermSignInHelp}
 
 // Caller is who is making a request, resolved once per request by
 // CallerFor. Admin: member of lldap_admin. Perms: the delegated
@@ -172,6 +181,12 @@ func (s *Service) CallerAs(ctx context.Context, a Actor) (*Caller, error) {
 // lock, so admin membership and delegated permissions are re-checked
 // against a fresh snapshot (a just-demoted admin is refused).
 func (s *Service) gate(ctx context.Context, c *Caller, perm, target string) error {
+	if perm == permSelf {
+		if strings.TrimSpace(target) == "" || !strings.EqualFold(target, c.User) {
+			return forbidden("not allowed: only on your own account")
+		}
+		return nil
+	}
 	if c.Admin {
 		sn, err := s.load(ctx)
 		if err != nil {
@@ -225,6 +240,49 @@ func (s *Service) CheckDelegate(ctx context.Context, c *Caller, perm, target str
 	return s.checkTarget(target)
 }
 
+// CheckHelp decides whether c may help target with their sign-in
+// (contract §9.7 "Person's Sign-in routes", D32): nil for an
+// administrator (re-checked against a fresh snapshot) or for a
+// sign_in_help holder for whom checkDelegateTarget passes on a fresh
+// snapshot (gate, exactly as every delegated permission); else 403 with
+// gate's texts, 503 while the directory is unavailable. Read only: no
+// lock, no audit, nothing changed. The protected accounts are not
+// refused here for administrators: the caller's own route gives its
+// own answer for them (the certificate routes' 409).
+func (s *Service) CheckHelp(ctx context.Context, c *Caller, target string) error {
+	if c == nil || strings.TrimSpace(c.User) == "" {
+		return errNoActor()
+	}
+	if err := s.LLDAP.Available(); err != nil {
+		return &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
+	}
+	if c.Admin {
+		return s.gate(ctx, c, permAdmin, target)
+	}
+	return s.gate(ctx, c, PermSignInHelp, target)
+}
+
+// helpPerm is the permission a sign-in reset by c runs under: an
+// administrator's own (gate's admin path), sign_in_help for a holder,
+// else other (the operation's permission for everyone else).
+func helpPerm(c *Caller, other string) string {
+	if c != nil && !c.Admin && c.Perms[PermSignInHelp] {
+		return PermSignInHelp
+	}
+	return other
+}
+
+// asHelp appends D32's audit detail "as sign_in_help" when perm is it.
+func asHelp(perm, detail string) string {
+	switch {
+	case perm != PermSignInHelp:
+		return detail
+	case detail == "":
+		return "as " + PermSignInHelp
+	}
+	return detail + "; as " + PermSignInHelp
+}
+
 // authorize decides whether c may run an operation needing perm on the
 // user target. perm "admin" means admins only. A delegate never targets
 // themselves, the protected accounts, administrators or members of any
@@ -256,7 +314,12 @@ func (s *Service) checkDelegateTarget(c *Caller, target string, sn *snapshot, cf
 		return forbidden("not allowed: you can't do this to your own account; ask an administrator")
 	case s.checkTarget(target) != nil:
 		return forbidden("not allowed: %s is a protected account (admins only)", target)
-	case s.isAdmin(sn, target) || memberOf(sn.groups[lldap.AdminGroup], target) || memberOf(sn.groups["lldap_password_manager"], target):
+	case s.reservedName(target):
+		// Every reserved portcullis-* account (review I1): the Hub's and
+		// the apps' internal accounts are admins only, for every
+		// delegated permission.
+		return forbidden("not allowed: %s is a reserved account (admins only)", target)
+	case s.isAdministrator(sn, target):
 		return forbidden("not allowed: %s is an administrator (admins only)", target)
 	}
 	for _, g := range cfg.Permissions {
@@ -265,6 +328,12 @@ func (s *Service) checkDelegateTarget(c *Caller, target string, sn *snapshot, cf
 		}
 	}
 	return nil
+}
+
+// isAdministrator: target is in an administrator group on sn (the
+// delegate rule's set: adminGroups, lldap_admin, lldap_password_manager).
+func (s *Service) isAdministrator(sn *snapshot, target string) bool {
+	return s.isAdmin(sn, target) || memberOf(sn.groups[lldap.AdminGroup], target) || memberOf(sn.groups["lldap_password_manager"], target)
 }
 
 // checkKeyless: a delegate may invite only someone with no Keycloak

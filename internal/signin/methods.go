@@ -23,7 +23,8 @@ var Methods = []Method{Password, PasskeySynced, BrowserCert, PasskeyDevice, Secu
 // Info describes a method. Label is the Settings name, Short the name used
 // in "<Short> + <Short> only" warnings, Phrase the rule sentence's words,
 // AMR the value Keycloak records, Tenths the strength in tenths.
-// Available is false for a method that can't be switched on yet.
+// Available is false for a method that can't be switched on yet (since
+// sign-in part 2 every method can be).
 type Info struct {
 	ID        Method
 	Label     string
@@ -37,7 +38,7 @@ type Info struct {
 var methodInfo = map[Method]Info{
 	Password:      {Password, "Password", "password", "a password", "pwd", 10, true},
 	PasskeySynced: {PasskeySynced, "Passkey (phone / laptop, synced)", "synced passkey", "a synced passkey", "spk", 25, true},
-	BrowserCert:   {BrowserCert, "Browser certificate", "browser certificate", "a browser certificate", "file", 25, false},
+	BrowserCert:   {BrowserCert, "Browser certificate", "browser certificate", "a browser certificate", "file", 25, true},
 	PasskeyDevice: {PasskeyDevice, "Device-bound passkey", "device-bound passkey", "a device-bound passkey", "dpk", 30, true},
 	SecurityKey:   {SecurityKey, "Security key passkey (YubiKey touch)", "security key", "a YubiKey touch", "hwk", 35, true},
 	YubiKeyCert:   {YubiKeyCert, "YubiKey certificate", "YubiKey certificate", "a YubiKey certificate", "mtls", 40, true},

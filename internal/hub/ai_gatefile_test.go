@@ -345,7 +345,7 @@ func TestGateRulePerResource(t *testing.T) {
 // TestSignInChangeSwitchesAIOff (G43, §8.1 "AI support"): a sign-in
 // change that makes an inheriting instance's rule certificate-only — the
 // default set to YubiKey + certificate — switches its companion off
-// first, audited ai.disable "sign-in needs a client certificate"; the
+// first, audited ai.disable "sign-in needs a YubiKey or browser certificate"; the
 // gate file then no longer lists it.
 func TestSignInChangeSwitchesAIOff(t *testing.T) {
 	a := newInstAIFixture(t, nil)
@@ -376,7 +376,7 @@ func TestSignInChangeSwitchesAIOff(t *testing.T) {
 	if !slices.ContainsFunc(ch.Warnings, func(w string) bool { return strings.Contains(w, "aiapp") }) {
 		t.Errorf("warnings = %v", ch.Warnings)
 	}
-	if e := a.audits("ai.disable"); len(e) != 1 || e[0].Detail != aiCertOffDetail || aiCertOffDetail != "sign-in needs a client certificate" {
+	if e := a.audits("ai.disable"); len(e) != 1 || e[0].Detail != aiCertOffDetail || aiCertOffDetail != "sign-in needs a YubiKey or browser certificate" {
 		t.Errorf("audit = %+v", e)
 	}
 	a.h.mu.RLock()
@@ -385,7 +385,10 @@ func TestSignInChangeSwitchesAIOff(t *testing.T) {
 	if !certOnly {
 		t.Error("aiapp isn't certificate-only after the change")
 	}
-	// Switching it on again is refused (409).
+	// Switching it on again is refused (409), once the switch-off's
+	// background work (the companion's restart) has ended: before that the
+	// instance is busy.
+	a.h.Wait()
 	if err := a.h.SetAISupport(ctx, "aiapp", "tok", true, root); statusOf(err) != 409 {
 		t.Errorf("AI on under a certificate-only default = %v, want 409", err)
 	}

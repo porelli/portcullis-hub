@@ -486,7 +486,14 @@ var nonUserOps = map[string]bool{"Overview": true, "Membership": true, "Privileg
 	"CheckBindGroups": true,
 	// Read only: gate's decision for a delegate before a Portcullis MCP
 	// confirmation (checked in TestProtectedAccountsParity); it changes nothing.
-	"CheckDelegate": true}
+	"CheckDelegate": true,
+	// Read only: the person's Sign-in routes' decision (help_test.go); it
+	// changes nothing, and the operations it guards check their targets.
+	"CheckHelp": true,
+	// The caller's own password (Sign-in page): no target but the caller
+	// (permSelf); the protected and reserved accounts are refused there
+	// (TestOwnPassword).
+	"SetOwnPassword": true, "RemoveOwnPassword": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)

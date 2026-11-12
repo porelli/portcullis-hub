@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCreate(t *testing.T) {
@@ -61,7 +62,7 @@ func TestCreate(t *testing.T) {
 
 func TestCertificates(t *testing.T) {
 	secret := strings.Repeat("k", 40)
-	status, reply := 200, `{"certificates":[{"user":"Alice","serial":"0a","not_after":"2027-01-01T00:00:00Z","revoked":false},{"user":"bob","serial":"0b","not_after":"2025-01-01T00:00:00Z","revoked":true},{"user":"","serial":"0c","not_after":"2027-01-01T00:00:00Z"}]}`
+	status, reply := 200, `{"certificates":[{"user":"Alice","serial":"0a","kind":"yubikey","not_before":"2026-01-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z","revoked":false},{"user":"bob","serial":"0b","kind":"browser","not_after":"2025-01-01T00:00:00Z","revoked":true},{"user":"","serial":"0c","kind":"yubikey","not_after":"2027-01-01T00:00:00Z"}]}`
 	path := ""
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path = r.URL.Path
@@ -99,5 +100,42 @@ func TestCertificates(t *testing.T) {
 	}
 	if _, err := New(srv.URL, filepath.Join(t.TempDir(), "x")).Certificates(ctx); !errors.Is(err, ErrNotConfigured) {
 		t.Errorf("no secret = %v", err)
+	}
+}
+
+// TestCertificatesKinds (sign-in part 2): yubikey and browser records are
+// kept with their kind and not_before; any other kind, or none, is
+// dropped (it never counts).
+func TestCertificatesKinds(t *testing.T) {
+	secret := strings.Repeat("k", 40)
+	reply := `{"certificates":[` +
+		`{"user":"ann","serial":"01","kind":"yubikey","not_before":"2026-11-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z","revoked":false},` +
+		`{"user":"ann","serial":"02","kind":"browser","not_before":"2026-11-02T00:00:00Z","not_after":"2026-12-01T00:00:00Z","revoked":true},` +
+		`{"user":"bob","serial":"03","kind":"other","not_after":"2027-01-01T00:00:00Z"},` +
+		`{"user":"bob","serial":"04","not_after":"2027-01-01T00:00:00Z"},` +
+		`{"user":"bob","serial":"05","kind":"Browser","not_after":"2027-01-01T00:00:00Z"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+secret {
+			w.WriteHeader(401)
+			return
+		}
+		w.Write([]byte(reply))
+	}))
+	defer srv.Close()
+	file := filepath.Join(t.TempDir(), "secret")
+	os.WriteFile(file, []byte(secret), 0600)
+	certs, err := New(srv.URL+"/internal/invites", file).Certificates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(certs) != 2 {
+		t.Fatalf("certs = %+v", certs)
+	}
+	a, b := certs[0], certs[1]
+	if a.Kind != KindYubiKey || a.Serial != "01" || !a.NotBefore.Equal(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)) || a.Revoked {
+		t.Errorf("yubikey = %+v", a)
+	}
+	if b.Kind != KindBrowser || b.Serial != "02" || b.NotBefore.Day() != 2 || !b.Revoked {
+		t.Errorf("browser = %+v", b)
 	}
 }

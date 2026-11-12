@@ -32,3 +32,7 @@ func SetSettleTimeoutForTest(d time.Duration) func() {
 func SetSettleEvalForTest(s *Service, f func(ctx context.Context, now time.Time, eval func(context.Context, time.Time) (*EvalReport, error)) (*EvalReport, error)) {
 	s.settleEval = func(ctx context.Context, now time.Time) (*EvalReport, error) { return f(ctx, now, s.Evaluate) }
 }
+
+// SetAfterGateForTest makes s's mutations call f between gate and the
+// action (a change made meanwhile, e.g. a promotion).
+func SetAfterGateForTest(s *Service, f func()) { s.afterGate = f }

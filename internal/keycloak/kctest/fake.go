@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +179,15 @@ type Server struct {
 	// names none (ai.go).
 	RealmDefaultScopes  []string
 	RealmOptionalScopes []string
+	// EventsConfig is the realm's events config as Keycloak returns it
+	// (GET / PUT …/events/config); a PUT replaces it with the body.
+	EventsConfig map[string]any
+	// Events are the realm's user events (EventRepresentation maps, time
+	// an int64 of epoch ms), newest first; GET …/events answers those whose
+	// userId is the query's user and whose time is within dateFrom..dateTo
+	// (epoch ms, inclusive), from first, at most max. EventsQuery is the last such query.
+	Events      []map[string]any
+	EventsQuery url.Values
 }
 
 const (
@@ -190,7 +201,9 @@ func New(t *testing.T) *Server {
 	s := &Server{Users: map[string]*User{}, nextID: 1, Components: map[string]*Component{},
 		Scopes: map[string]*ClientScope{}, Clients: map[string]*Client{},
 		Flows: map[string]*Flow{}, AuthConfigs: map[string]*AuthConfig{}, Groups: map[string]*Group{}, Roles: map[string]map[string]string{}, roleDesc: map[string]string{},
-		RealmRoles: map[string]string{"default-roles-portcullis": "role-default"}, Composites: map[string][]string{}}
+		RealmRoles: map[string]string{"default-roles-portcullis": "role-default"}, Composites: map[string][]string{},
+		EventsConfig: map[string]any{"eventsEnabled": false, "eventsListeners": []any{"jboss-logging"}, "enabledEventTypes": []any{},
+			"adminEventsEnabled": false, "adminEventsDetailsEnabled": false}}
 	s.HTTP = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.HTTP.Close)
 	return s
@@ -524,6 +537,44 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.serveAI(w, r) {
+		return
+	}
+	if r.URL.Path == realm+"/events" && r.Method == http.MethodGet {
+		q := r.URL.Query()
+		s.EventsQuery = q
+		out := []map[string]any{}
+		from, ferr := strconv.ParseInt(q.Get("dateFrom"), 10, 64)
+		to, terr := strconv.ParseInt(q.Get("dateTo"), 10, 64)
+		for _, e := range s.Events {
+			ms, _ := e["time"].(int64)
+			if e["userId"] != q.Get("user") || (ferr == nil && ms < from) || (terr == nil && ms > to) {
+				continue
+			}
+			out = append(out, e)
+		}
+		first, _ := strconv.Atoi(q.Get("first"))
+		out = out[min(first, len(out)):]
+		if m, err := strconv.Atoi(q.Get("max")); err == nil && m < len(out) {
+			out = out[:m]
+		}
+		json.NewEncoder(w).Encode(out)
+		return
+	}
+	if r.URL.Path == realm+"/events/config" {
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(s.EventsConfig)
+		case http.MethodPut:
+			cfg := map[string]any{}
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+				w.WriteHeader(400)
+				return
+			}
+			s.EventsConfig = cfg
+			w.WriteHeader(204)
+		default:
+			w.WriteHeader(405)
+		}
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, realm+"/components") {

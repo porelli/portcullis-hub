@@ -92,6 +92,12 @@ type Config struct {
 	// read-only at /mcp-gate-data): the gate's access.jsonl (§15.8) is
 	// read there ("" = no access log: MyAI / AccessLog answer 503).
 	MCPGateDataDir string
+	// GroupGateDataDir is HUB_GROUP_GATE_DATA_DIR (core mounts
+	// group_gate_data read-write at /group-gate-data): group-gate's opened
+	// log is <dir>/opened, read for the sign-in history and pruned to
+	// history_days (contract §8.2; "" = no opened log: that source is
+	// unknown).
+	GroupGateDataDir string
 	// FIDOMDSURL is HUB_FIDO_MDS_URL, the FIDO Alliance MDS BLOB (contract
 	// §8.1; "" = no fetching: no authenticators, passkeys register as
 	// synced). Cached at <DataDir>/signin/mds.jwt.
@@ -104,6 +110,21 @@ type Config struct {
 	// Dev is HUB_DEV=1: the extra authenticators are used only with it
 	// (defence in depth: main refuses the file without it).
 	Dev bool
+	// ClientCertTTL is HUB_CLIENT_CERT_TTL (core's CLIENT_CERT_TTL, the
+	// browser-cert role's max_ttl): its whole days are browser_cert_days'
+	// ceiling (contract §8.1 "Limits"). main refuses to start under one
+	// day; 0 here (tests) is a ceiling of 0: no lifetime is allowed.
+	ClientCertTTL time.Duration
+	// CertExpiryWarnDays is HUB_CERT_EXPIRY_WARN_DAYS read with core's
+	// grammar (ParseCertExpiryWarnDays: ^[0-9]+$, else 7): a certificate
+	// with fewer days left is "expiring" (contract §5.1). main always
+	// sets it; 0 means nothing is ever expiring.
+	CertExpiryWarnDays int
+	// AccountURL is Keycloak's account console signing-in page
+	// (https://<Keycloak's public host>/realms/portcullis/account/account-security/signing-in,
+	// main: from HUB_KEYCLOAK_PUBLIC_URL), where people add passkeys and
+	// security keys: the Sign-in page's "+ Add" ("" = no link).
+	AccountURL string
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -427,6 +448,20 @@ type Hub struct {
 	// signInInv: who has which sign-in method (signin_people.go; its own
 	// leaf locks, never held across mu).
 	signInInv inventoryCache
+	// certActions issues, renews and revokes certificates through enroll
+	// (SetCertActions; nil: those actions are 503). Guarded by mu.
+	certActions CertActions
+	// ownPasswords sets and removes a person's own password
+	// (SetOwnPasswords; nil: 503). Guarded by mu.
+	ownPasswords OwnPasswords
+	// signInHelp decides who may act on another person's sign-in
+	// (SetSignInHelp; nil: those routes are 503). Guarded by mu.
+	signInHelp SignInHelp
+	// certCreate: per user, the *sync.Mutex a browser certificate create
+	// holds (one create at a time per person).
+	certCreate sync.Map
+	// certNow is the certificate status clock (nil: time.Now; tests).
+	certNow func() time.Time
 
 	driftMu sync.Mutex
 	drift   DriftReport
@@ -481,8 +516,17 @@ type Hub struct {
 	// freshAuthEnsure re-asserts the fresh-auth Keycloak client in the
 	// directory sync loop (freshauth.go); under policyWriteMu like attrSync.
 	freshAuthEnsure func(ctx context.Context) error
-	lastExpiring    []policy.Expiring
-	dirKick         chan struct{}
+	// eventsEnsure re-asserts Keycloak's events config with history_days
+	// (signin_limits.go: the sync loop and every limits change); under
+	// policyWriteMu like attrSync.
+	eventsEnsure func(ctx context.Context, days int) error
+	// eventsMu serialises ensureEvents (never held with mu across the
+	// Keycloak call; mu is taken inside it only to read history_days).
+	eventsMu sync.Mutex
+	// history is the sign-in history's wiring (signin_history.go).
+	history      historyState
+	lastExpiring []policy.Expiring
+	dirKick      chan struct{}
 	// invKick asks runInventorySync for a sign-in inventory refresh.
 	invKick chan struct{}
 

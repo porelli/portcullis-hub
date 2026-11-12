@@ -94,9 +94,9 @@ func (e *peopleEnv) setup(t *testing.T) {
 }
 
 // peopleAppRoutes are the only app routes of the people listener
-// (contract §5.1, G12): exactly nine, all caller-only — the five My apps
-// and credential routes, the two confirmation routes (Task 14) and Task
-// 21's two AI routes.
+// (contract §5.1, G12): exactly seventeen, all caller-only — the five My
+// apps and credential routes, the two confirmation routes (Task 14), Task
+// 21's two AI routes and the Sign-in page's eight (sign-in part 2, D25).
 var peopleAppRoutes = []string{
 	"GET /api/me/apps",
 	"PUT /api/me/apps/{instance}/values/{key}",
@@ -107,6 +107,14 @@ var peopleAppRoutes = []string{
 	"POST /api/me/confirmations/{id}",
 	"GET /api/me/ai",
 	"DELETE /api/me/ai/connections/{client}",
+	"GET /signin",
+	"GET /api/me/signin",
+	"GET /api/me/signin/history",
+	"POST /api/me/signin/browser-certificates",
+	"DELETE /api/me/signin/certificates/{serial}",
+	"POST /api/me/signin/yubikey-certificate/renew",
+	"PUT /api/me/signin/password",
+	"DELETE /api/me/signin/password",
 }
 
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
@@ -202,7 +210,7 @@ func TestPeopleListenerReadForEveryone(t *testing.T) {
 		t.Errorf("me = %s", b)
 	}
 	b = mustDo(t, e.people, "root", "GET", "/api/directory/me", "", 200)
-	if !strings.Contains(b, `"admin":true`) || !strings.Contains(b, `"perms":["edit_details","invite","remove"]`) {
+	if !strings.Contains(b, `"admin":true`) || !strings.Contains(b, `"perms":["edit_details","invite","remove","sign_in_help"]`) {
 		t.Errorf("root me = %s", b)
 	}
 
@@ -587,6 +595,13 @@ func TestDirectoryAssetsServed(t *testing.T) {
 			}
 		}
 	}
+	// The Sign-in page's script (sign-in part 2): the people listener only.
+	if r, b := doAs(t, e.people, "bob", "GET", "/static/mysignin.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisMySignIn") {
+		t.Errorf("people /static/mysignin.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))
+	}
+	if _, b := doAs(t, e.people, "bob", "GET", "/", ""); !strings.Contains(b, `src="/static/mysignin.js"`) {
+		t.Error("the people page doesn't load mysignin.js (the person's Sign-in tab)")
+	}
 	for _, c := range []struct {
 		srv  *httptest.Server
 		page string
@@ -650,7 +665,8 @@ func TestDirectoryAssetsServed(t *testing.T) {
 // TestSettingsAssetHubOnly: the settings panel's script is served on the
 // Hub listener only; the people listener serves just its own assets
 // (directory.js, directory.css, myapps.js, myai.js — the Connect your AI
-// card —, and confirm.js for the confirmation page).
+// card —, mysignin.js for the Sign-in page and confirm.js for the
+// confirmation page).
 func TestSettingsAssetHubOnly(t *testing.T) {
 	e := newPeopleEnv(t)
 	var allow []string
@@ -660,8 +676,8 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myai.js,myapps.js" {
-		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myai.js, myapps.js", allow)
+	if strings.Join(allow, ",") != "confirm.js,directory.css,directory.js,freshauth-callback.js,freshauth.js,myai.js,myapps.js,mysignin.js" {
+		t.Errorf("peopleStatic = %v, want exactly confirm.js, directory.css, directory.js, freshauth-callback.js, freshauth.js, myai.js, myapps.js, mysignin.js", allow)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))

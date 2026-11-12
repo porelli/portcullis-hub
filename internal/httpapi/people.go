@@ -81,6 +81,9 @@ func (s *Server) registerPeopleApps(mux routeMux) {
 	// The caller's own confirmations (plan 4 Task 14, §15.6): also on the
 	// Hub listener, each answering only for its own.
 	s.registerConfirm(mux)
+	// The Sign-in page and the caller's own sign-in routes (sign-in
+	// part 2, D24/D25): people listener only.
+	s.registerMySignIn(mux)
 }
 
 // handleMyAI answers the caller's (X-Forwarded-User, lowercased) AI
@@ -240,7 +243,7 @@ func (s *Server) handleMyApps(w http.ResponseWriter, r *http.Request) {
 
 func perms(c *directory.Caller) []string {
 	if c.Admin {
-		return []string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove}
+		return []string{directory.PermEditDetails, directory.PermInvite, directory.PermRemove, directory.PermSignInHelp}
 	}
 	out := []string{}
 	for p, ok := range c.Perms {

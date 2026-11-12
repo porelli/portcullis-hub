@@ -300,10 +300,10 @@ func (h *Hub) keepMissingLocked(known []state.KnownDomain) []state.KnownDomain {
 			continue
 		}
 		if d.State != DomainMissing {
-			log.Printf("domains: WARNING: %s is no longer listed by the domains service, but instance(s) %s still have hostnames on it: kept as %q — not assignable, its hostnames stay routed (records and certificate are no longer maintained); re-enroll it or move those hostnames", d.Name, strings.Join(users, ", "), DomainMissing)
+			log.Printf("domains: WARNING: %s is no longer listed by the domains service, but instance(s) %s still have hostnames on it: kept as %q — not assignable, its hostnames stay routed (records and certificate are no longer maintained); add it again or move those hostnames", d.Name, strings.Join(users, ", "), DomainMissing)
 		}
 		d.State, d.RecordsOK = DomainMissing, false
-		d.LastError = "no longer listed by the domains service; still used by instance(s) " + strings.Join(users, ", ") + ": re-enroll it or move their hostnames"
+		d.LastError = "no longer listed by the domains service; still used by instance(s) " + strings.Join(users, ", ") + ": add it again or move their hostnames"
 		missing = append(missing, d)
 	}
 	if len(missing) == 0 {
@@ -415,7 +415,7 @@ type hostUse struct {
 func (h *Hub) checkEnrollLocked(name string, runtime map[string][]string, self bool) error {
 	main := strings.ToLower(h.cfg.Domain)
 	if name == main || strings.HasSuffix(main, "."+name) {
-		return statusErr(400, "%s is the main domain or a parent of it: it can't be enrolled", name)
+		return statusErr(400, "%s is the main domain or a parent of it: it can't be added", name)
 	}
 	for sub := range policy.CoreSubdomains() {
 		c := sub + "." + main
@@ -436,11 +436,11 @@ func (h *Hub) checkEnrollLocked(name string, runtime map[string][]string, self b
 		}
 		switch {
 		case d.Name == name:
-			return statusErr(409, "%s is already enrolled", name)
+			return statusErr(409, "%s is already added", name)
 		case strings.HasSuffix(name, "."+d.Name):
-			return statusErr(409, "%s is under the enrolled domain %s (enrolled domains never nest)", name, d.Name)
+			return statusErr(409, "%s is under the added domain %s (added domains never nest)", name, d.Name)
 		case strings.HasSuffix(d.Name, "."+name):
-			return statusErr(409, "%s is above the enrolled domain %s (enrolled domains never nest)", name, d.Name)
+			return statusErr(409, "%s is above the added domain %s (added domains never nest)", name, d.Name)
 		}
 	}
 	known := h.knownHostsLocked(runtime)
@@ -494,10 +494,10 @@ func (h *Hub) knownLocked(name string) bool {
 
 // EnrollDomain enrolls name (contract §12.3): validated against the known
 // domains and hosts, forwarded once with the credentials, recorded without
-// them. Audited as domain.enroll (provider only).
+// them. Audited as domain.add (provider only).
 func (h *Hub) EnrollDomain(ctx context.Context, actor directory.Actor, name, provider string, creds map[string]string) (d domains.Domain, err error) {
 	name = NormalizeHost(name)
-	defer func() { h.auditOp(actor, "domain.enroll", name, providerDetail(provider), err) }()
+	defer func() { h.auditOp(actor, "domain.add", name, providerDetail(provider), err) }()
 	if strings.TrimSpace(actor.User) == "" {
 		return d, statusErr(400, "no signed-in user to audit the change as")
 	}
@@ -546,7 +546,7 @@ func (h *Hub) EnrollDomain(ctx context.Context, actor directory.Actor, name, pro
 	if perr := h.WritePolicy(); perr != nil {
 		log.Printf("domains: policy write after enrolling %s failed: %v", name, perr)
 	}
-	log.Printf("domains: %s enrolled (provider %s)", name, provider)
+	log.Printf("domains: %s added (provider %s)", name, provider)
 	return d, nil
 }
 
@@ -570,7 +570,7 @@ func (h *Hub) ReplaceDomainToken(ctx context.Context, actor directory.Actor, nam
 	known, api := h.knownLocked(name), h.domainsAPI
 	h.mu.RUnlock()
 	if !known {
-		return d, statusErr(404, "%s is not enrolled", name)
+		return d, statusErr(404, "%s is not an added domain", name)
 	}
 	d, err = api.SetToken(context.WithoutCancel(ctx), name, provider, creds)
 	if err != nil {
@@ -650,7 +650,7 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor directory.Actor, name stri
 	}
 	h.mu.Unlock()
 	if !known {
-		return "", statusErr(404, "%s is not enrolled", name)
+		return "", statusErr(404, "%s is not an added domain", name)
 	}
 	if len(users) > 0 {
 		return "", statusErr(409, "%s is used by instance(s) %s: move their hostnames or delete them first", name, strings.Join(users, ", "))

@@ -48,6 +48,7 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 | `HUB_DATA_DIR` | Writable data directory | `$PROJECT_DIR/.hub` |
 | `HUB_LISTEN_ADDR` | Listen address (hub.<domain>, admins) | `:8888` |
 | `HUB_PEOPLE_ADDR` | People listener (people.<domain>, any signed-in user: directory UI and API only) | `:8889` |
+| `HUB_CLIENT_CERT_TTL` | **Required.** The longest browser certificate lifetime (core's `CLIENT_CERT_TTL`, grammar `^[0-9]+[smhd]?$`, a bare number = seconds); its whole days cap Settings → Sign-in's lifetime limit. Unset, unparsable or under a day: the Hub refuses to start | — (core sets `720h`) |
 | `HUB_RECONCILE_INTERVAL` | Periodic drift check (Go duration, ≥ 5s); Docker events also trigger it | `1m` |
 | `PORTCULLIS_DOMAIN` | Domain for all services | `portcullis.local` |
 | `PORTAL_DISPLAY_NAME` | Name shown in the header | `Portcullis` |
@@ -87,7 +88,7 @@ The image runs as **uid/gid 10001** (non-root). It doesn't need the Docker socke
 ```bash
 go vet ./... && go test -race ./...
 go build -o hub ./cmd/hub
-HUB_PROXY_SECRET=$(openssl rand -hex 24) HUB_DATA_DIR=/tmp/hub PROJECT_DIR=/tmp/core ./hub
+HUB_PROXY_SECRET=$(openssl rand -hex 24) HUB_CLIENT_CERT_TTL=720h HUB_DATA_DIR=/tmp/hub PROJECT_DIR=/tmp/core ./hub
 ```
 
 Dependencies are limited to the Go standard library and `gopkg.in/yaml.v3`. See `CLAUDE.md` for the package layout.

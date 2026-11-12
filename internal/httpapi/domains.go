@@ -11,9 +11,9 @@ import (
 	"github.com/portcullis/hub/internal/hub"
 )
 
-// Enrolled domains (contract §11.7, §12.3): Hub listener only, admins only
+// Added domains (contract §11.7, §12.3): Hub listener only, admins only
 // (lldap_admin; delegates 403), proxy-secret + CSRF like every route,
-// audited in the Hub (domain.enroll|token|delete). Credentials are
+// audited in the Hub (domain.add|token|delete). Credentials are
 // write-only: they are read from the body, forwarded once and never
 // echoed — not in answers, not in errors (a malformed body gets a fixed
 // message, never the decoder's).

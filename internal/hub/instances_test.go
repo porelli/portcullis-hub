@@ -185,7 +185,7 @@ func newInstanceFixtureCfg(t *testing.T, seed func(*state.AppState), idp IdP, ex
 	if idp == nil {
 		idp = f.idp
 	}
-	c := Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}
+	c := Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}
 	if cfg != nil {
 		cfg(root, &c)
 	}
@@ -477,8 +477,8 @@ func TestInstanceIDRules(t *testing.T) {
 		"grafana-b.example.org": "already used by instance grafana-b",
 		"grafana.example.org":   "already used by instance grafana",
 		"auth.example.org":      "core hostname",
-		"grafana.other.org":     "neither <label>.example.org nor on an enrolled domain",
-		"a.b.example.org":       "deeper names need an enrolled domain",
+		"grafana.other.org":     "neither <label>.example.org nor on an added domain",
+		"a.b.example.org":       "deeper names need an added domain",
 	} {
 		err := f.h.CreateInstance("grafana", "grafana-d", map[string]string{"grafana": hosts})
 		if err == nil || !strings.Contains(err.Error(), why) {

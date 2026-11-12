@@ -75,8 +75,8 @@ The form has these sections:
 
 ### Address
 
-- **Domain picker**: choose the main domain or an enrolled extra domain (domains not yet `ready` are disabled)
-- **Subdomain per host router**: shown as `[subdomain].<domain>`. An empty subdomain means the enrolled domain itself. Pre-filled from defaults; edits are kept.
+- **Domain picker**: choose the main domain or an added extra domain (domains not yet `ready` are disabled)
+- **Subdomain per host router**: shown as `[subdomain].<domain>`. An empty subdomain means the added domain itself. Pre-filled from defaults; edits are kept.
 - Templates with no web page show "No web page".
 
 ### Who can use it
@@ -340,11 +340,11 @@ Every instance, including the default instance, gets the same page structure. De
   *Default (Standard · 2.5 / 5)* or any enabled template, each with its
   score. Below it: the sentence of the chosen rule, how the app enforces it
   (per request, at sign-in, at the TLS handshake), whether browsers are asked
-  for a client certificate, and the members of the app's users and admins
+  for a YubiKey or browser certificate, and the members of the app's users and admins
   groups who have no method set up that meets it. Apps without a Portcullis
   sign-in (`custom` without it, `public`, own login only) and `mtls` apps show
-  no drop-down: "This app handles its own sign-in" / "The client certificate
-  is this app's sign-in". A disabled template can't be picked (`409`), and a
+  no drop-down: "This app handles its own sign-in" / "The certificate is
+  this app's sign-in". A disabled template can't be picked (`409`), and a
   pick that would switch AI support off asks first. Saved as
   `sign_in_template` (audited `settings.change`, scope `sign_in_template`).
 - The app's **options**, declared by the template under `settings:`: one
@@ -360,8 +360,8 @@ Every instance, including the default instance, gets the same page structure. De
 One **Save** sends everything you changed in the tab. The save bar says what
 saving does (for example "Saving restarts Immich" or "Takes effect at each
 person's next sign-in; no restart"). A sign-in mode or public-exception
-change restarts the app; a sign-in template change restarts it only when its
-client-certificate request changes.
+change restarts the app; a sign-in template change restarts it only when
+whether it asks for a certificate at sign-in changes.
 
 Input validation:
 
@@ -606,11 +606,11 @@ block (bordered in amber):
   headers, cookies or query parameters (an app user signed in with
   "remember me" opens shares in a private window), and the Hub strips
   identity headers;
-- if the app's template requires a client certificate at the TLS handshake
-  (`protected@file`), an amber warning that **all** of the app's routers use
+- if the app's template requires a YubiKey or browser certificate at the TLS handshake
+  (`protected@file` or `protected-any@file`), an amber warning that **all** of the app's routers use
   `authaware@file` while a public path is open. For native-OIDC apps it adds
   that the certificate is then only enforced at sign-in (Keycloak's template check); for forward-auth /
-  header-auth apps that group-gate still checks the client certificate on
+  header-auth apps that group-gate still checks the certificate on
   every gated request; and it lists routers without group-gate, which lose
   the handshake check. See
   [Sign-in methods → Public exceptions](auth-policies.md#public-exceptions).
@@ -986,9 +986,9 @@ An instance's hostnames can be changed at any time (enabled or not) on the
 
 - valid hostnames (at most 253 characters, `<label>.<domain>` where each label
   is `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`)
-- either `<label>.<main domain>` or `<d>` / `<label>.<d>` for an enrolled domain
+- either `<label>.<main domain>` or `<d>` / `<label>.<d>` for an added domain
   `<d>` that is in state `ready` (records OK, valid certificate)
-- not already used by another instance, a core subdomain, or the enrolled domain
+- not already used by another instance, a core subdomain, or the added domain
   names themselves
 
 Some templates mark host routers as **immutable** (`hosts.immutable` in the
@@ -998,7 +998,7 @@ domain).
 
 When you save, the Hub:
 
-1. Validates the new hostnames (collision checks, enrolled-domain state)
+1. Validates the new hostnames (collision checks, added-domain state)
 2. Updates the instance's Keycloak clients' redirect URIs and web origins, and
    the extra-domain sign-in callback URIs (see [Cross-domain sign-in](#cross-domain-sign-in))
 3. Regenerates the instance's `.env` and compose override with the new hostnames
@@ -1019,7 +1019,7 @@ default instance's hostnames to the new domain, which **breaks apps that store
 their own URL** (e.g. GitLab). Default instances of templates with
 `hosts.immutable` (Matrix) are the exception: their hostnames are pinned on
 their first enable and never moved; such an instance is listed as error (and
-stays denied) until you enroll the old domain as an extra domain or fix its
+stays denied) until you add the old domain as an extra domain or fix its
 hostnames. See [DNS Configuration](../setup/dns.md).
 
 Hostnames are also refused while another instance's running project still
@@ -1028,12 +1028,12 @@ can't serve is a 400 at once: one router mixing main-domain and extra-domain
 hostnames, or an extra-domain router that reaches `portcullis-auth` through the
 template's own chain middleware.
 
-### Enrolling extra domains
+### Adding extra domains
 
-The **Settings → Domains** section (Hub admins only) lists enrolled domains and
-their status. To enroll a domain:
+The **Settings → Domains** section (Hub admins only) lists added domains and
+their status. To add a domain:
 
-1. Click **+ Enroll domain**
+1. Click **+ Add domain** (the toasts say "Adding …" while it runs)
 2. Enter the domain name (e.g. `team-a.example.org` or `team-a.<main domain>`)
 3. Select the DNS provider (Cloudflare, Porkbun, Route 53, DigitalOcean, Hetzner)
 4. Paste the provider's API token or credentials
@@ -1057,8 +1057,8 @@ The domain is listed with:
   days left), or `error` (retried with backoff), or `missing`: the domains
   service no longer lists a domain that instances still use. The Hub keeps it
   (its hostnames stay extra-domain hosts and keep their policy and sign-in),
-  refuses new hostnames on it (409, "re-enroll it") and logs it; re-enroll the
-  same name to bring it back. It is dropped once no instance uses it
+  refuses new hostnames on it (409) and logs it; add the same name again to
+  bring it back. It is dropped once no instance uses it
 
 A domain is **assignable** (usable for instance hostnames) only while `records_ok`
 is true, the certificate is valid and the domains service is reachable. Existing
@@ -1083,19 +1083,19 @@ be protected like Vault's). See [Domains service](#domains-service) and
 
 ### Cross-domain sign-in
 
-Portcullis supports single sign-on across the main domain and enrolled domains
+Portcullis supports single sign-on across the main domain and added domains
 with **no extra key touch** (like Amazon Midway). When a signed-in user opens an
-instance on an enrolled domain:
+instance on an added domain:
 
 1. The instance's Traefik router uses `portcullis-auth-ext@docker`, a second
    oauth2-proxy service (`forward-auth-ext`) that runs alongside `forward-auth`
 2. `forward-auth-ext` redirects to Keycloak with a relative callback
-   `/oauth2/callback` (resolved to `https://<enrolled host>/oauth2/callback`)
+   `/oauth2/callback` (resolved to `https://<added host>/oauth2/callback`)
 3. The user's existing Keycloak session at `auth.<main domain>` satisfies the
    sign-in **silently** (no prompt) unless the instance's template needs a
    method the session lacks (then it prompts for step-up, as on the main
    domain)
-4. Keycloak redirects back to `https://<enrolled host>/oauth2/callback`
+4. Keycloak redirects back to `https://<added host>/oauth2/callback`
    (the Hub maintains these URIs in the `portcullis-forward-auth` client's
    redirect URIs)
 5. `forward-auth-ext` sets a **host-only** session cookie `__Host-portcullis_ext`
@@ -1105,12 +1105,12 @@ instance on an enrolled domain:
 
 **Key points**:
 
-- The main-domain cookie (`.<main domain>`) and host-only enrolled-domain cookies
+- The main-domain cookie (`.<main domain>`) and host-only added-domain cookies
   (`__Host-portcullis_ext`) coexist without interfering
 - The Hub adds a sign-in router `portcullis-oauth2-<id>_<router>` per
   extra-domain host: `Host(<host>) && PathPrefix(/oauth2/)` → `forward-auth-ext`
 - Core never routes to extra domains: the portal, Hub, people, auth, directory,
-  enroll, traefik and metrics pages exist only on the main domain
+  enroll (setup links), traefik and metrics pages exist only on the main domain
 - Both oauth2-proxy services use PKCE (S256) as required by the Keycloak client
 - The callback URIs follow the instance: added on enable (a failed enable
   removes them again), changed with its hostnames and with its sign-in mode
@@ -1278,7 +1278,7 @@ disabling it did before instances existed.
 - **Sign-in** ([Sign-in methods and templates](auth-policies.md)):
     - **Methods**: the six sign-in methods, each with its strength, how many
       people have it set up, and an on / off switch. Password and browser
-      certificate start off; the browser certificate can't be switched on yet.
+      certificate start off.
       Switching off a method an enabled template needs is refused and lists the
       templates and their uses.
     - **Templates**: the built-in Basic, Standard, Strong and YubiKey +
@@ -1288,9 +1288,18 @@ disabling it did before instances existed.
       and who it would leave out, all live; built-ins can be edited and
       disabled, never deleted.
     - **Default template** (Standard at the start) and **Core pages** (the
-      portal, the Hub, people.&lt;domain&gt;, directory, enroll, metrics,
+      portal, the Hub, people.&lt;domain&gt;, directory, metrics,
       Traefik; the Hub and people start on Strong).
     - **Add a stronger method from a weaker sign-in** (off at the start).
+    - **Limits** ([Sign-in methods → Limits](auth-policies.md#limits)): the
+      browser certificate lifetime (30 days at the start; 1 day up to the
+      ceiling, core's `CLIENT_CERT_TTL` in whole days, which the form shows),
+      the active browser certificates per person (3; 1–20) and how long
+      sign-in history is kept (365 days; 30–3650). A stored lifetime above the
+      ceiling applies as the ceiling, with a warning. Saved with
+      `PUT /api/signin/limits`, audited `signin.limits`; raising a
+      certificate limit or shortening the history asks for confirmation from
+      AI tools (`set_sign_in_limits`).
     - A warning when the FIDO metadata list is out of date, and "No
       administrator can meet the Hub's template" when that is the case.
 
@@ -1299,12 +1308,12 @@ disabling it did before instances existed.
     A change that would switch AI support off somewhere (a template that
     needs a certificate in every alternative) first asks, listing the
     instances. Changing a certificate method or a template restarts only the
-    apps whose client-certificate request changes.
+    apps whose certificate request changes.
 
 The tab also has **AI support** (the master switch, AI clients, the
 Portcullis MCP, connection length, rate limits, allowed origins and the model
 providers: [AI support → Settings → AI](ai.md#settings-ai)),
-**Domains** ([Enrolling extra domains](#enrolling-extra-domains)),
+**Domains** ([Adding extra domains](#adding-extra-domains)),
 **Shared folders** ([below](#shared-folders)) and **Local networks**
 ([below](#local-networks)).
 
@@ -1759,7 +1768,17 @@ people (admins see all of it; others the parts their permissions allow).
   where it comes from ("from office_milan", a combined value's groups,
   "default", "fail-closed", "own entry"), each linking to the setting on the
   Hub.
-- **Sign-in**: passkeys and invite status, and the actions below.
+- **Sign-in** (admins, and holders of `sign_in_help` for the people they may
+  help): the person's [Sign-in page](auth-policies.md#the-sign-in-page) as
+  they see it — each method with its state, their passkeys, their YubiKey and
+  browser certificates (valid, expiring, expired or revoked), the apps and
+  what they need, and their [sign-in history](auth-policies.md#sign-in-history)
+  — with only the actions the caller may take: **Send setup link**, **Remove
+  passkeys**, **Revoke** per certificate, and for admins **Password…** and
+  **Issue YubiKey certificate** (paste a CSR made with `ykman`, then a fresh
+  sign-in). Administrators' certificates show no Revoke or Issue: they are
+  managed from the server (`./portcullis cert revoke <serial>`,
+  `./portcullis cert enroll`).
 - **History** (admins): the audit entries for this person, newest first, in
   words ("office_milan: kept carol out — "on leave"", "created the account").
 
@@ -1768,10 +1787,12 @@ people (admins see all of it; others the parts their permissions allow).
 | Action | Who | What it does |
 |--------|-----|--------------|
 | Edit details | Admins, delegates with `edit_details` | Change email, display name and custom field values (admin-only fields need an admin) |
-| Send new invite | Admins, delegates with `invite` (own keyless accounts only) | New one-time link; earlier unused links stop working. Not offered for administrators |
+| Send new invite | Admins, delegates with `invite` (own keyless accounts only), holders of `sign_in_help` (any account they may help) | New one-time link; earlier unused links stop working. Not offered for administrators |
 | Require passkey | Admins | Adds the passkey registration action for the next sign-in |
 | Clear pending | Admins | Removes pending required actions |
-| Reset passkeys | Admins | Deletes all passkeys, signs the user out, then creates a new invite (or shows `./portcullis invite <user>` for an administrator). Type the username to confirm |
+| Reset passkeys | Admins, holders of `sign_in_help` | Deletes all passkeys, signs the user out, then creates a new invite (or shows `./portcullis invite <user>` for an administrator). Type the username to confirm |
+| Revoke certificate | Admins, holders of `sign_in_help` (Sign-in tab) | Revokes one YubiKey or browser certificate; it normally stops working within a minute. Refused (409) for an administrator's, and for `admin`, `portcullis-hub` and any `portcullis-*` account: `./portcullis cert revoke <serial>` |
+| Issue YubiKey certificate | Admins (Sign-in tab) | Signs a CSR made on the person's YubiKey, after a fresh sign-in the people page's template accepts (not a password or a browser certificate). Refused (409) for an administrator, `admin`, `portcullis-hub` and any `portcullis-*` account |
 | Password… | Admins | Fallback: set or generate a password; signs the user out |
 | Delete | Admins, delegates with `remove` | Deletes the user from LLDAP and Keycloak. Type the username to confirm |
 
@@ -1788,7 +1809,7 @@ For each LLDAP user except `portcullis-hub`:
 
 The Hub reads each user's status separately, at most 8 calls at a time, 15 seconds total. A per-user failure marks only that user. If Keycloak itself is unreachable (sign-in, user list or federation list fails), a banner says "Keycloak status unavailable" and users/groups still load. Past 15 seconds, a banner says some statuses are missing.
 
-Client certificates aren't shown; see `enroll.<domain>`.
+YubiKey and browser certificates are on the person's **Sign-in** tab ([below](#a-persons-page)).
 
 #### Stale Keycloak records (admins only)
 
@@ -1968,15 +1989,21 @@ Fields are stored in LLDAP as custom user attributes (non-user-editable, so user
 
 #### Delegated permissions
 
-Three permissions, each granted to a group (manual or rule-based; that group may itself use rules over non-admin-only fields):
+Four permissions, each granted to a group (manual or rule-based; that group may itself use rules over non-admin-only fields):
 
 | Permission | What it grants |
 |------------|----------------|
 | **edit details** | Update email, display name and custom field values (single edits and CSV import). Admin-only fields need an admin |
 | **invite** | Create new accounts via invite link (no groups, no Keycloak credentials). Filling in fields can make them match rule-based groups. A delegate-created account shows "via rule, account created by X" for its rule memberships |
 | **remove** | Delete accounts |
+| **sign in help** (`sign_in_help`) | Help with sign-in (setup link, remove passkeys, revoke certificates): send a setup link to any account they may help (not only ones they created, and also when it has passkeys), remove passkeys and revoke YubiKey and browser certificates, on the person's Sign-in tab. Never set a password or issue a certificate. See [Help to reset](auth-policies.md#help-to-reset) |
 
-Delegates never target themselves, administrators (`lldap_admin` etc.), the protected accounts (`admin`, `portcullis-hub`) or members of any permission group. They can't create a tombstoned name or one still in exceptions/expiries. A delegate's **Send new invite** works only for accounts the delegate created that still have zero Keycloak credentials (Keycloak missing or unavailable → refused); admins should re-invite such accounts themselves if they gave them only a client certificate. An admin's password / invite / passkey action clears the account's `created_by`, so delegates can't re-invite it.
+!!! warning "A setup link hands the account over"
+    A `sign_in_help` setup link hands the account to whoever holds it, so
+    grant the permission only to people you'd trust with those accounts.
+    Holders can never reach an administrator.
+
+Delegates never target themselves, administrators (`lldap_admin` etc.), the protected accounts (`admin`, `portcullis-hub`) or members of any permission group. They can't create a tombstoned name or one still in exceptions/expiries. A delegate's **Send new invite** works only for accounts the delegate created that still have zero Keycloak credentials (Keycloak missing or unavailable → refused); admins should re-invite such accounts themselves if they gave them only a YubiKey certificate. An admin's password / invite / passkey action clears the account's `created_by`, so delegates can't re-invite it.
 
 Permission changes (including refusals) are audited (`directory.permission`). Built-in, admin and rule groups using non-admin-only fields are refused (409). Set a permission to **(none)** to revoke it.
 
@@ -2007,7 +2034,7 @@ The Hub writes shared fields (those with share-with-apps on) into `user-attribut
 Members of these groups are **administrators**:
 
 - `lldap_admin` and `lldap_password_manager`
-- the groups of the core subdomains (`auth`, `traefik`, `hub`, `directory`, `enroll`, `people`, `metrics`, `mcp`) in `group-gate/group-gate-map.conf` (Hub: `HUB_GATE_MAP_FILE`)
+- the groups of the core subdomains (`auth`, `traefik`, `hub`, `directory`, `people`, `metrics`, `mcp`) in `group-gate/group-gate-map.conf` (Hub: `HUB_GATE_MAP_FILE`)
 - any group listed in `INVITE_PROTECTED_GROUPS`
 
 This is the same set core's invite API uses. An invite hands the account to whoever holds the link, so core refuses invites for administrators, and the Hub doesn't offer them. Invite or recover an administrator on the server with `./portcullis invite <user>`. If core refuses an invite for a group the Hub doesn't know about, the Hub shows "administrators are recovered from the server: `./portcullis invite <user>`".
@@ -2113,7 +2140,7 @@ v2, [contracts §3.1](../guides/integration-contracts.md#31-template-contract-v2
   alone) upper-cased with `-` and `.` turned into `_`, and `<sub>` a single DNS
   label (the default subdomain). That rules out literal domains, bare
   domains, and other variables. The Hub sets the variable to the instance's
-  full hostname, on the main domain or an enrolled domain. During the
+  full hostname, on the main domain or an added domain. During the
   conversion period an `instances: single` template may still use
   `` `<sub>.${PORTCULLIS_DOMAIN:-portcullis.local}` `` for all its routers
   (no mixing); it runs only as its default instance on fixed hostnames
@@ -2290,7 +2317,7 @@ sources you trust.
   the Hub can grant `lldap_admin`. That adds nothing to what it can already
   do: through its socket proxy it is host-root-equivalent. Every change is
   attributed to the signed-in admin and audited.
-- **Domains service.** The Hub enrolls extra domains through core's `domains`
+- **Domains service.** The Hub adds extra domains through core's `domains`
   service (a separate Go service). Credentials are sent to the service once over
   an internal API (bearer secret) and never appear in the Hub's state, logs,
   audit or errors. The service stores them encrypted at rest with an age key.
@@ -2305,7 +2332,7 @@ sources you trust.
     - `core` for every gated core page's template
     - `groups` for enabled instances with `group_access: true`
     - `path_groups` from `auth.admin_paths`
-    - `extra_domains` lists enrolled domains
+    - `extra_domains` lists added domains
     - core hosts' groups are never published (they come from `group-gate-map.conf`)
 
     Next to it the Hub writes `signin-keycloak.json` (0644), which Keycloak's
@@ -2339,22 +2366,22 @@ cosign verify ghcr.io/porelli/portcullis-hub:<tag> \
 ## Common tasks
 ## Domains service
 
-The Hub enrolls extra domains (beyond the main domain) through core's **domains**
-service. See [Enrolling extra domains](#enrolling-extra-domains) above for the
+The Hub adds extra domains (beyond the main domain) through core's **domains**
+service. See [Adding extra domains](#adding-extra-domains) above for the
 operator workflow.
 
 ### How it works
 
 The domains service is a separate Go service that:
 
-- **Receives enrollment requests** over an internal HTTP API (bearer secret at
+- **Receives requests to add domains** over an internal HTTP API (bearer secret at
   `HUB_DOMAINS_SECRET_FILE`, shared with the Hub)
 - **Stores DNS credentials encrypted** at rest with an age key
   (`secrets/domains/age.key`). The encrypted store (`domains_data/store.age`)
   is in core backups, so protect it like Vault's raft snapshot.
 - **Creates DNS records** (`<d>` and `*.<d>`: A, and AAAA if the server has IPv6)
   via provider APIs (Cloudflare, Porkbun, Route 53, DigitalOcean, Hetzner)
-- **Obtains wildcard certificates** for each enrolled domain via ACME DNS-01
+- **Obtains wildcard certificates** (website certificates, HTTPS) for each added domain via ACME DNS-01
 - **Serves certificates to Traefik** via its HTTP provider (inline PEM, polled
   every 10 s), with mutual TLS authentication
 
@@ -2388,13 +2415,13 @@ Traefik never routes the domains service.
 Traefik fetches certificates from `https://domains:8443/traefik/dynamic` via its
 HTTP provider. The endpoint:
 
-- **Requires and verifies** a client certificate (TLS `RequireAndVerifyClientCert`
+- **Requires and verifies** Traefik's own certificate (TLS `RequireAndVerifyClientCert`
   against a private CA generated by `./portcullis init`)
 - **Returns only** `tls.certificates` with inline PEM (cert chain + key), never
   routers, services, middlewares or other Traefik config
 - **Checks every certificate's SANs** before serving: they must be exactly `<d>`
-  and `*.<d>` for an enrolled domain `<d>`, never the main domain or any host at
-  or under it (except enrolled subdomains of the main domain themselves)
+  and `*.<d>` for an added domain `<d>`, never the main domain or any host at
+  or under it (except added subdomains of the main domain themselves)
 
 Certificates and keys are never on a shared volume.
 

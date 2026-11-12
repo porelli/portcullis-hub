@@ -59,15 +59,15 @@ func (e *toolEnv) toolSchema(t *testing.T, name string) map[string]any {
 	return nil
 }
 
-// TestEnrollDomainNoToken (§15.10, U): enroll_domain's schema has no
+// TestAddDomainNoToken (§15.10, U): add_domain's schema has no
 // credential field (nor replace_domain_token's); its call answers the
 // Domains form's URL (URL elicitation, or the link as text); a token
 // argument is refused and never forwarded; after the person's accept it
 // reports what the Hub knows — never the client's word, never the token.
-func TestEnrollDomainNoToken(t *testing.T) {
+func TestAddDomainNoToken(t *testing.T) {
 	e := newToolEnv(t, nil, nil)
 	fake := withDomains(t, e)
-	for _, n := range []string{"enroll_domain", "replace_domain_token"} {
+	for _, n := range []string{"add_domain", "replace_domain_token"} {
 		props, _ := e.toolSchema(t, n)["properties"].(map[string]any)
 		for k := range props {
 			if secretArgRe.MatchString(k) || strings.Contains(k, "cred") {
@@ -79,16 +79,16 @@ func TestEnrollDomainNoToken(t *testing.T) {
 		}
 	}
 	args := map[string]any{"name": "Team-C.example.net"}
-	el := elicitation(t, e.call(t, "/mcp/admin", "root", "2026-07-28", "enroll_domain", args, urlElicit), secretFormInputKey)
-	if el["url"] != "https://hub.example.org/#settings/domains?enroll=team-c.example.net" {
+	el := elicitation(t, e.call(t, "/mcp/admin", "root", "2026-07-28", "add_domain", args, urlElicit), secretFormInputKey)
+	if el["url"] != "https://hub.example.org/#settings/domains?add=team-c.example.net" {
 		t.Errorf("form url %v", el["url"])
 	}
-	el = elicitation(t, e.call(t, "/mcp/admin", "root", "2026-07-28", "enroll_domain", map[string]any{"name": "team-c.example.net", "provider": "hetzner"}, urlElicit), secretFormInputKey)
-	if el["url"] != "https://hub.example.org/#settings/domains?enroll=team-c.example.net&provider=hetzner" {
+	el = elicitation(t, e.call(t, "/mcp/admin", "root", "2026-07-28", "add_domain", map[string]any{"name": "team-c.example.net", "provider": "hetzner"}, urlElicit), secretFormInputKey)
+	if el["url"] != "https://hub.example.org/#settings/domains?add=team-c.example.net&provider=hetzner" {
 		t.Errorf("form url %v", el["url"])
 	}
 	// The text form on 2025-11-25.
-	if txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "enroll_domain", args, nil)); !strings.Contains(txt, "https://hub.example.org/#settings/domains?enroll=team-c.example.net") {
+	if txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "add_domain", args, nil)); !strings.Contains(txt, "https://hub.example.org/#settings/domains?add=team-c.example.net") {
 		t.Errorf("text form = %q", txt)
 	}
 	// A token in the arguments: refused, pointing at the form; never forwarded.
@@ -96,22 +96,22 @@ func TestEnrollDomainNoToken(t *testing.T) {
 		{"name": "team-c.example.net", "api_token": dnsToken},
 		{"name": "team-c.example.net", "credentials": map[string]string{"api_token": dnsToken}},
 	} {
-		txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2026-07-28", "enroll_domain", bad, urlElicit))
-		if !isErr || !strings.HasPrefix(txt, textSecretArgs+"https://hub.example.org/#settings/domains?enroll=team-c.example.net") || strings.Contains(txt, dnsToken) {
+		txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2026-07-28", "add_domain", bad, urlElicit))
+		if !isErr || !strings.HasPrefix(txt, textSecretArgs+"https://hub.example.org/#settings/domains?add=team-c.example.net") || strings.Contains(txt, dnsToken) {
 			t.Errorf("token argument = %q %v", txt, isErr)
 		}
 	}
 	if len(fake.bodies) != 0 {
 		t.Fatalf("the tool reached the domains service: %v", fake.bodies)
 	}
-	// Accept before anything was submitted: not enrolled (the Hub's state).
-	if txt, isErr := e.accept(t, "enroll_domain", args); isErr || !strings.Contains(txt, `"enrolled":false`) {
+	// Accept before anything was submitted: not added (the Hub's state).
+	if txt, isErr := e.accept(t, "add_domain", args); isErr || !strings.Contains(txt, `"added":false`) {
 		t.Errorf("accept before = %q %v", txt, isErr)
 	}
 	// The form posts (the Hub page); then the same accept reports it.
 	mustDo(t, e.hub, "root", "POST", "/api/domains", enrollBody("team-c.example.net", dnsToken), 202)
-	txt, isErr := e.accept(t, "enroll_domain", args)
-	if isErr || !strings.Contains(txt, `"enrolled":true`) || !strings.Contains(txt, `"provider":"cloudflare"`) || strings.Contains(txt, dnsToken) {
+	txt, isErr := e.accept(t, "add_domain", args)
+	if isErr || !strings.Contains(txt, `"added":true`) || !strings.Contains(txt, `"provider":"cloudflare"`) || strings.Contains(txt, dnsToken) {
 		t.Errorf("accept after = %q %v", txt, isErr)
 	}
 	// replace_domain_token: its form, then the last recorded replacement.
@@ -245,7 +245,7 @@ func TestToolClassPerCall17b(t *testing.T) {
 	ts, _ := res["tools"].([]any)
 	want := map[string]bool{"set_ai_support": true, "set_ai_mode": true, "save_model_provider": true, "save_hub_settings": true,
 		"add_source": true, "add_model_provider": true, "restore_as": true, "revoke_ai_access": true, "set_ai_providers": true,
-		"backup_instance": false, "sync_sources": false, "enroll_domain": false}
+		"backup_instance": false, "sync_sources": false, "add_domain": false}
 	for _, x := range ts {
 		tl := x.(map[string]any)
 		d, ok := want[tl["name"].(string)]
@@ -590,7 +590,7 @@ var adminToolFixtures = []struct {
 	{"restore_as", map[string]any{"archive": archivePH, "id": "secretapp-b"}},
 	{"delete_instance", map[string]any{"id": "secretapp-b"}},
 	{"list_domains", nil},
-	{"enroll_domain", map[string]any{"name": "team-c.example.net"}},
+	{"add_domain", map[string]any{"name": "team-c.example.net"}},
 	{"replace_domain_token", map[string]any{"name": "team-c.example.net"}},
 	{"ai_status", map[string]any{"id": "aiapp"}},
 	{"set_ai_mode", map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"}},
@@ -636,6 +636,10 @@ var adminToolFixtures = []struct {
 	{"clear_actions", map[string]any{"username": "erin"}},
 	{"require_passkey", map[string]any{"username": "erin"}},
 	{"remove_passkeys", map[string]any{"username": "erin"}},
+	// Sign-in part 2 (Task 7): the person's Sign-in tab.
+	{"person_sign_in", map[string]any{"username": "erin"}},
+	{"revoke_person_certificate", map[string]any{"username": "erin", "serial": "0e:01"}},
+	{"issue_yubikey_certificate", map[string]any{"username": "erin"}},
 	{"set_password", map[string]any{"username": "dana"}},
 	{"import_review", map[string]any{"header": []string{"username", "display_name"}, "rows": [][]string{{"erin", "Erin X"}, {"hana", "Hana"}}}},
 	{"import_apply", map[string]any{"rows": []any{map[string]any{"user": "erin", "display_name": "Erin Z"}}}},
@@ -681,6 +685,7 @@ var adminToolFixtures = []struct {
 	{"set_default_template", map[string]any{"template": "standard"}},
 	{"set_core_template", map[string]any{"key": "hub", "template": "standard"}},
 	{"set_add_stronger", map[string]any{"on": false}},
+	{"set_sign_in_limits", map[string]any{"browser_cert_days": 10, "browser_cert_max_active": 3, "history_days": 365}},
 	{"get_instance_sign_in", map[string]any{"id": "secretapp"}},
 	{"set_sign_in_template", map[string]any{"id": "secretapp", "template": "strong"}},
 }
@@ -833,7 +838,7 @@ func testToolsNotEchoed(t *testing.T) {
 	}
 	// The success paths ran (fix round 1: real targets).
 	for _, n := range []string{"create_instance", "set_hosts", "set_instance_label", "backup_instance", "restore_instance", "restore_as", "delete_instance",
-		"list_credentials", "admin_revoke_credential", "delete_domain", "enroll_domain", "replace_domain_token", "get_env", "get_instance",
+		"list_credentials", "admin_revoke_credential", "delete_domain", "add_domain", "replace_domain_token", "get_env", "get_instance",
 		"set_model_provider_secret", "delete_model_provider", "get_op", "wait_for_op", "get_logs", "disable_instance",
 		// Task 18: the invite paths ran.
 		"create_person", "send_invite", "remove_passkeys", "import_apply", "directory_overview", "set_password", "audit_recent",

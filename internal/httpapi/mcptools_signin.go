@@ -9,6 +9,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/signin"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // The Portcullis MCP's sign-in management tools (contract §8.1, §15.10):
@@ -252,6 +253,34 @@ func (s *Server) registerSignInTools() {
 				return nil, s.setAddStronger(ctx, toolActor(ctx, c), in.On)
 			},
 		},
+
+		{
+			Name: "set_sign_in_limits",
+			Description: "Set the sign-in limits: the longest browser certificate lifetime in days (1 to the server's ceiling), the most active browser certificates per person (1–20) and how many days the sign-in history is kept (30–3650). " +
+				"All three are required; a longer lifetime, more certificates or a shorter history needs your confirmation in the browser.",
+			Class:    ClassDestructive,
+			Scope:    ScopeAdmin,
+			Twin:     "PUT /api/signin/limits",
+			Audit:    "signin.limits",
+			In:       &signInLimitsArgs{},
+			ClassFor: s.setSignInLimitsClass,
+			Precheck: func(_ context.Context, _ *directory.Caller, args json.RawMessage) error {
+				in, err := decode[signInLimitsArgs](args)
+				if err != nil {
+					return badArg("invalid arguments")
+				}
+				return s.Hub.CheckSignInLimits(in.limits())
+			},
+			Typed:        func(json.RawMessage) string { return "limits" },
+			Consequences: s.setSignInLimitsConsequences,
+			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
+				in, err := decode[signInLimitsArgs](args)
+				if err != nil {
+					return nil, badArg("invalid arguments")
+				}
+				return s.setSignInLimits(ctx, toolActor(ctx, c), in.limits())
+			},
+		},
 	} {
 		s.registerTool(t)
 	}
@@ -289,7 +318,7 @@ type (
 		Rule     json.RawMessage `json:"rule,omitempty" jsonschema:"a template save: its rule"`
 		Create   bool            `json:"create,omitempty" jsonschema:"a template save: true for a new template"`
 		Default  *string         `json:"default,omitempty" jsonschema:"the default: the template id"`
-		CoreKey  string          `json:"core_page,omitempty" jsonschema:"a core page's pick: the page (portal, hub, people, directory, enroll, metrics, traefik; with core)"`
+		CoreKey  string          `json:"core_page,omitempty" jsonschema:"a core page's pick: the page (portal, hub, people, directory, metrics, traefik; with core)"`
 		Core     *string         `json:"core,omitempty" jsonschema:"a core page's pick: the template id, empty = the default"`
 		Instance string          `json:"instance,omitempty" jsonschema:"an app's pick: the instance id (with pick)"`
 		Pick     *string         `json:"pick,omitempty" jsonschema:"an app's pick: the template id, empty = the default"`
@@ -298,12 +327,17 @@ type (
 		Template string `json:"template" jsonschema:"the template id to set as default"`
 	}
 	signInCoreArgs struct {
-		Key      string `json:"key" jsonschema:"the core page key (portal, hub, people, directory, enroll, metrics, traefik)"`
+		Key      string `json:"key" jsonschema:"the core page key (portal, hub, people, directory, metrics, traefik)"`
 		Template string `json:"template" jsonschema:"the template id (empty string = the default)"`
 	}
 	signInPickArgs struct {
 		ID       string `json:"id" jsonschema:"the instance id"`
 		Template string `json:"template" jsonschema:"the template id (empty string = the default)"`
+	}
+	signInLimitsArgs struct {
+		BrowserCertDays      int `json:"browser_cert_days" jsonschema:"the longest browser certificate lifetime in days (1 to ceiling_days of get_sign_in)"`
+		BrowserCertMaxActive int `json:"browser_cert_max_active" jsonschema:"the most active browser certificates per person (1-20)"`
+		HistoryDays          int `json:"history_days" jsonschema:"how many days the sign-in history is kept (30-3650)"`
 	}
 	signInAddStrongerArgs struct {
 		On bool `json:"on" jsonschema:"true allows adding any method, false only methods as strong as the session's"`
@@ -550,6 +584,48 @@ func (s *Server) setAddStrongerClass(_ context.Context, args json.RawMessage) To
 		return ClassDestructive
 	}
 	return ClassWrite
+}
+
+func (a signInLimitsArgs) limits() state.SignInLimits {
+	return state.SignInLimits{BrowserCertDays: a.BrowserCertDays, BrowserCertMaxActive: a.BrowserCertMaxActive, HistoryDays: a.HistoryDays}
+}
+
+// setSignInLimitsClass (contract §15.10): D when browser_cert_days or
+// browser_cert_max_active go up or history_days goes down (a longer-lived
+// or extra copied certificate file, less history to look back on), else
+// W; arguments that don't decode are D.
+func (s *Server) setSignInLimitsClass(_ context.Context, args json.RawMessage) ToolClass {
+	a, err := decode[signInLimitsArgs](args)
+	if err != nil {
+		return ClassDestructive
+	}
+	cur := s.Hub.SignInLimits().Limits
+	if a.BrowserCertDays > cur.BrowserCertDays || a.BrowserCertMaxActive > cur.BrowserCertMaxActive || a.HistoryDays < cur.HistoryDays {
+		return ClassDestructive
+	}
+	return ClassWrite
+}
+
+// setSignInLimitsConsequences names each limit the call changes.
+func (s *Server) setSignInLimitsConsequences(_ context.Context, args json.RawMessage) []string {
+	a, err := decode[signInLimitsArgs](args)
+	if err != nil {
+		return nil
+	}
+	cur := s.Hub.SignInLimits().Limits
+	var out []string
+	add := func(what string, from, to int) {
+		if from != to {
+			out = append(out, fmt.Sprintf("%s: %d -> %d", what, from, to))
+		}
+	}
+	add("Longest browser certificate lifetime (days)", cur.BrowserCertDays, a.BrowserCertDays)
+	add("Most active browser certificates per person", cur.BrowserCertMaxActive, a.BrowserCertMaxActive)
+	add("Days the sign-in history is kept", cur.HistoryDays, a.HistoryDays)
+	if len(out) == 0 {
+		out = []string{"Nothing changes"}
+	}
+	return out
 }
 
 // ── Consequences ──

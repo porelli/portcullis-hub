@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -92,6 +94,53 @@ func signInMDSFromEnv(getenv func(string) string) (mdsURL, extra string, err err
 	return mdsURL, extra, nil
 }
 
+// vaultDurationRe is core's duration grammar for CLIENT_CERT_TTL (a bare
+// number means seconds).
+var vaultDurationRe = regexp.MustCompile(`^[0-9]+[smhd]?$`)
+
+// parseVaultDuration parses core's CLIENT_CERT_TTL grammar
+// `^[0-9]+[smhd]?$` (a bare number is seconds).
+func parseVaultDuration(s string) (time.Duration, error) {
+	if !vaultDurationRe.MatchString(s) {
+		return 0, fmt.Errorf("%q is not a number with an optional s, m, h or d", s)
+	}
+	unit := time.Second
+	switch s[len(s)-1] {
+	case 's':
+		s = s[:len(s)-1]
+	case 'm':
+		unit, s = time.Minute, s[:len(s)-1]
+	case 'h':
+		unit, s = time.Hour, s[:len(s)-1]
+	case 'd':
+		unit, s = 24*time.Hour, s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n > int64(1<<62)/int64(unit) {
+		return 0, fmt.Errorf("%q is too large", s)
+	}
+	return time.Duration(n) * unit, nil
+}
+
+// clientCertTTLFromEnv is HUB_CLIENT_CERT_TTL (core: ${CLIENT_CERT_TTL:-720h},
+// the browser-cert role's max_ttl), the ceiling of browser certificate
+// lifetimes in whole days (contract §8.1 "Limits"): unset, unparsable or
+// under one day refuses the start.
+func clientCertTTLFromEnv(getenv func(string) string) (time.Duration, error) {
+	v := getenv("HUB_CLIENT_CERT_TTL")
+	if v == "" {
+		return 0, errors.New("HUB_CLIENT_CERT_TTL is not set (core sets it from CLIENT_CERT_TTL)")
+	}
+	d, err := parseVaultDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("HUB_CLIENT_CERT_TTL: %v", err)
+	}
+	if d < 24*time.Hour {
+		return 0, fmt.Errorf("HUB_CLIENT_CERT_TTL is %s: browser certificates need at least one day", v)
+	}
+	return d, nil
+}
+
 // freshAuthSetup is the fresh-auth wiring (contract §8): the issuer and
 // authorize endpoint are public (HUB_KEYCLOAK_PUBLIC_URL, default
 // https://auth.<domain>: Keycloak runs with that --hostname, so it is the
@@ -101,7 +150,10 @@ func signInMDSFromEnv(getenv func(string) string) (mdsURL, extra string, err err
 // https://hub.<domain>/ (admin confirmations, G11): one verifier each.
 type freshAuthSetup struct {
 	Issuer, TokenURL, JWKSURL, AuthorizeURL, RedirectURI, WebOrigin string
-	HubRedirectURI, HubWebOrigin                                    string
+	// AccountURL: the account console's signing-in page (the Sign-in
+	// page's "+ Add" for passkeys and security keys).
+	AccountURL                   string
+	HubRedirectURI, HubWebOrigin string
 }
 
 func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (freshAuthSetup, error) {
@@ -120,11 +172,32 @@ func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (f
 		TokenURL:       internal + "/token",
 		JWKSURL:        internal + "/certs",
 		AuthorizeURL:   public + "/protocol/openid-connect/auth",
-		RedirectURI:    "https://people." + domain + "/",
+		AccountURL:     public + "/account/account-security/signing-in",
+		RedirectURI:    "https://people." + domain + "/signin",
 		WebOrigin:      "https://people." + domain,
 		HubRedirectURI: "https://hub." + domain + "/",
 		HubWebOrigin:   "https://hub." + domain,
 	}, nil
+}
+
+// verifierConfigs is each listener's fresh-auth verifier config: the
+// people listener's redirect URI is https://people.<d>/signin (the Sign-in
+// page, whose head runs the popup callback), the Hub listener's
+// https://hub.<d>/ (contract §8).
+func (fa freshAuthSetup) verifierConfigs(httpc *http.Client, accepted func() []string) map[string]freshauth.Config {
+	out := map[string]freshauth.Config{}
+	for listener, redirect := range map[string]string{hub.ListenerPeople: fa.RedirectURI, hub.ListenerHub: fa.HubRedirectURI} {
+		out[listener] = freshauth.Config{
+			Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
+			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
+			// The token endpoint never redirects; a redirect is refused.
+			HTTP: httpc,
+			// pc_fresh must be a method switched on now (§8.1); the
+			// governing template is the Hub's check (§8).
+			Accepted: accepted,
+		}
+	}
+	return out
 }
 
 func main() {
@@ -185,6 +258,9 @@ func main() {
 		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
 		MCPListener:          mcp.on,
 		MCPGateDataDir:       env("HUB_MCP_GATE_DATA_DIR", "/mcp-gate-data"),
+		// group-gate's opened log (contract §8.2): <dir>/opened, read for
+		// the sign-in history and pruned to history_days.
+		GroupGateDataDir: env("HUB_GROUP_GATE_DATA_DIR", "/group-gate-data"),
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
@@ -196,6 +272,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
+	if cfg.ClientCertTTL, err = clientCertTTLFromEnv(os.Getenv); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	// HUB_CERT_EXPIRY_WARN_DAYS (core: ${CERT_EXPIRY_WARN_DAYS:-7}): core's
+	// grammar, anything else 7; never a reason to refuse the start.
+	cfg.CertExpiryWarnDays = hub.ParseCertExpiryWarnDays(os.Getenv("HUB_CERT_EXPIRY_WARN_DAYS"))
 	if v := os.Getenv("HUB_RECONCILE_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < 5*time.Second {
@@ -233,6 +315,7 @@ func main() {
 		log.Fatalf("refusing to start: the data directory is in use (another Hub, or signin reset-core running?): %v", err)
 	}
 	defer releaseLock()
+	cfg.AccountURL = fa.AccountURL
 	h, err := hub.New(cfg, cli, engine, kc)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -301,6 +384,11 @@ func main() {
 	// Who has which sign-in method: Keycloak's passkeys, enroll's
 	// YubiKey certificates (§8.1 "Inventory", §9.4).
 	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates})
+	// The Sign-in page's own certificates (enroll, §9.4) and own
+	// password (the directory, §5.1).
+	h.SetCertActions(invites)
+	h.SetOwnPasswords(dir)
+	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak
@@ -322,22 +410,21 @@ func main() {
 	// confirmations on hub.<d>), and their one Keycloak client, ensured in
 	// the directory sync loop.
 	faHTTP := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	for listener, redirect := range map[string]string{hub.ListenerPeople: fa.RedirectURI, hub.ListenerHub: fa.HubRedirectURI} {
-		h.SetFreshAuth(listener, freshauth.New(freshauth.Config{
-			Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
-			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
-			// The token endpoint never redirects; a redirect is refused.
-			HTTP: faHTTP,
-			// pc_fresh must be a method switched on now (§8.1); the
-			// governing template is the Hub's check (§8).
-			Accepted: h.FreshAuthAccepted,
-		}))
+	for listener, cfg := range fa.verifierConfigs(faHTTP, h.FreshAuthAccepted) {
+		h.SetFreshAuth(listener, freshauth.New(cfg))
 	}
 	// Per-instance AI support (contract §8): the mcp:* scopes.
 	h.SetAIKeycloak(kc)
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, []string{fa.RedirectURI, fa.HubRedirectURI}, []string{fa.WebOrigin, fa.HubWebOrigin})
 	})
+	// Keycloak's events config (contract §8): the sign-in history's
+	// source, kept history_days; re-asserted in the directory sync loop
+	// and on every limits change.
+	h.SetEventsConfig(kc.EnsureEventsConfig)
+	// The sign-in history's sources (contract §8.2): Keycloak's login
+	// events and the audit; the opened log is GroupGateDataDir's.
+	h.SetHistorySources(hub.HistorySources{Events: kc.UserLoginEventsPage, Audit: dir.RecentMatching})
 	h.Init()
 
 	srv := &httpapi.Server{
@@ -376,6 +463,9 @@ func main() {
 	// The FIDO metadata (contract §8.1): the cached BLOB, then a daily
 	// refresh (and at its nextUpdate) into signin-keycloak.json.
 	go h.RunMDS(ctx, 24*time.Hour)
+	// The opened log's day files older than history_days: daily (and on
+	// every history_days change).
+	go h.RunHistoryPrune(ctx, 24*time.Hour)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak

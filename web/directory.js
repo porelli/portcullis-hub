@@ -26,6 +26,7 @@
     ['edit_details', 'Edit details', 'change people\'s details, one by one or by CSV import'],
     ['invite', 'Invite people', 'create accounts (no groups) and re-invite the ones they created'],
     ['remove', 'Remove people', 'delete accounts'],
+    ['sign_in_help', 'Help with sign-in', 'setup link, remove passkeys, revoke certificates'],
   ];
 
   // api answers the parsed JSON body, or throws an Error with .status and,
@@ -433,9 +434,10 @@
   })();
 
   // ── shared top navigation (window.PortcullisNav) ────────
-  // One bar on the Hub page and on people.<domain>: Portal
-  // (https://<domain>/), Hub (https://hub.<domain>/, administrators only)
-  // and People (https://people.<domain>/), the current site marked. Every
+  // One bar on the Hub page, on people.<domain> and on its Sign-in page:
+  // Portal (https://<domain>/), Hub (https://hub.<domain>/, administrators
+  // only), People (https://people.<domain>/) and Sign-in
+  // (https://people.<domain>/signin), the current one marked. Every
   // URL comes from the configured main domain, never the browser's host;
   // hubURL / peopleURL override the Hub's and People's (the harness's
   // listeners only).
@@ -446,15 +448,17 @@
         portal: 'https://' + d + '/',
         hub: (o && o.hubURL) || 'https://hub.' + d + '/',
         people: (o && o.peopleURL) || 'https://people.' + d + '/',
+        signin: ((o && o.peopleURL) || 'https://people.' + d + '/') + 'signin',
       };
     }
-    // html: the bar (opts: domain, hubURL, peopleURL, current hub|people,
-    // admin — the Hub link only for administrators).
+    // html: the bar (opts: domain, hubURL, peopleURL, current
+    // hub|people|signin, admin — the Hub link only for administrators).
     function html(o) {
       const u = urls(o);
       const links = [['portal', 'Portal', u.portal]];
       if (o && o.admin) links.push(['hub', 'Hub', u.hub]);
       links.push(['people', 'People', u.people]);
+      links.push(['signin', 'Sign-in', u.signin]);
       return '<nav class="pn-nav" aria-label="Portcullis sites">' + links.map(([k, label, href]) => {
         const cur = o && o.current === k;
         return '<a class="pn-link' + (cur ? ' pn-current' : '') + '" data-site="' + esc(k) + '" href="' + esc(href) + '"' + (cur ? ' aria-current="page"' : '') + '>' + esc(label) + '</a>';
@@ -888,6 +892,16 @@
     if (canRemove(u)) out.push(['delete-user', 'Delete', 'danger']);
     return out;
   }
+  // signInTab: does the person page show u's Sign-in tab (an
+  // administrator, or a sign_in_help holder who may target u — a hint:
+  // the API checks it again on a fresh snapshot)?
+  function signInTab(u) {
+    if (!u || u.protected === 'service' || !window.PortcullisMySignIn) return false;
+    if (isAdmin()) return true;
+    return perms().includes('sign_in_help') && !u.self && !u.admin && !u.protected && !permissionMembers().has(u.username);
+  }
+  // The actions the Sign-in tab offers itself (from PersonSignIn.can).
+  const SIGNIN_TAB_ACTS = ['invite', 'reset-passkeys', 'password'];
   // The groups u has a row in, with the group page's row (state, tags).
   function personGroupRows(u) {
     const admin = isAdmin(), k = lc(u.username), out = [];
@@ -958,17 +972,24 @@
         '<h3 class="pd-h3 pd-pp-h-next" id="pd-pp-values-h">Values</h3><div class="pd-pp-values"><p class="pd-muted">Loading…</p></div></section>';
     }
     h += '</div>';
-    // Sign-in
-    const acts = personKeyActions(u);
-    if (admin || acts.length) {
-      h += '<section class="pd-card pd-pp-card" aria-labelledby="pd-pp-sign-h"><h3 class="pd-h3" id="pd-pp-sign-h">Sign-in</h3>';
+    // Sign-in: the person's Sign-in tab (mysignin.js, PersonSignIn) for
+    // administrators and sign_in_help holders who may help this person —
+    // its setup link, Remove all passkeys and Reset password are offered
+    // only as its `can` says —, then the other account actions.
+    const tabbed = signInTab(u);
+    const acts = personKeyActions(u).filter(([a]) => !tabbed || !SIGNIN_TAB_ACTS.includes(a));
+    if (admin || tabbed || acts.length) {
+      h += '<section class="pd-card pd-pp-card pd-pp-sign" aria-labelledby="pd-pp-sign-h"><h3 class="pd-h3" id="pd-pp-sign-h">Sign-in</h3>';
       if (admin) {
         h += '<div>' + keyStatus(u) + '</div>';
         if (u.server_invite && !u.protected) h += '<div class="pd-muted" title="Administrators are invited and recovered from the server">recover on the server: <code>' + esc(u.server_invite) + '</code></div>';
       }
-      h += '<div class="pd-actions">' + acts.map(([a, label, cls]) =>
-        '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(u.username) + '">' + esc(label) + '</button>').join('') + '</div>';
-      if (acts.some(([a]) => a === 'password')) h += '<p class="pd-muted pd-small" data-pw-hint>' + esc(passwordCopy()) + '</p>';
+      if (tabbed) h += '<div class="pd-pp-signin" data-msi-person="' + esc(u.username) + '"><p class="pd-muted">Loading…</p></div><div class="pd-actions" data-pp-sign-fallback hidden></div>';
+      if (acts.length) {
+        h += '<div class="pd-actions">' + acts.map(([a, label, cls]) =>
+          '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(u.username) + '">' + esc(label) + '</button>').join('') + '</div>';
+      }
+      if (admin && !u.protected) h += '<p class="pd-muted pd-small" data-pw-hint>' + esc(passwordCopy()) + '</p>';
       h += '</section>';
     }
     // History (admins)
@@ -1012,6 +1033,22 @@
     box.hidden = !personPage;
     box.innerHTML = personPage ? personPageHtml(personPage) : '';
     if (personPage) renderExtras();
+    const sb = box.querySelector('[data-msi-person]');
+    if (sb && window.PortcullisMySignIn) {
+      const who = sb.dataset.msiPerson, fb = box.querySelector('[data-pp-sign-fallback]');
+      window.PortcullisMySignIn.mount(sb, {
+        mode: 'person', user: who,
+        // The tab can't be read (403, 503): the page's own setup-link,
+        // passkey and password buttons, as before the tab.
+        onError: () => {
+          const u = userByName(who);
+          const acts = u ? personKeyActions(u).filter(([a]) => SIGNIN_TAB_ACTS.includes(a)) : [];
+          if (!fb) return;
+          fb.innerHTML = acts.map(([a, label, cls]) => '<button type="button" class="pd-btn ' + cls + ' sm" data-act="' + a + '" data-user="' + esc(who) + '">' + esc(label) + '</button>').join('');
+          fb.hidden = !acts.length;
+        },
+      });
+    }
   }
 
   // Apps (via which group, until when) and Values (app · label · value ·

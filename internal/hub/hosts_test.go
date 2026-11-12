@@ -139,8 +139,8 @@ func TestHostCollisions(t *testing.T) {
 		"hub.example.org":                {409, "core hostname"},
 		"AUTH.example.org.":              {409, "core hostname"},
 		"example.org":                    {409, "core hostname"},
-		"grafana.not-enrolled.org":       {400, "nor on an enrolled domain"},
-		"x.y.example.org":                {400, "deeper names need an enrolled domain"},
+		"grafana.not-enrolled.org":       {400, "nor on an added domain"},
+		"x.y.example.org":                {400, "deeper names need an added domain"},
 		"grafana.team-b.example.org":     {409, "not assignable"},
 		"a.b.team-c.example.net":         {400, "certificate covers one label"},
 		"grafana-c2.example.org:443":     {400, "not a valid hostname"},
@@ -524,7 +524,7 @@ func TestHostRulesWhateverTheClassification(t *testing.T) {
 		// so hosts under them are plain too-deep main-domain names (400).
 		want := 409
 		if host == "x.auth.example.org" || host == "x.hub.example.org" || host == "a.x.hub.example.org" {
-			want, why = 400, "deeper names need an enrolled domain"
+			want, why = 400, "deeper names need an added domain"
 		}
 		err := f.h.SetHosts("grafana-c", map[string]string{"grafana": host}, directory.Human("alice"))
 		if statusOf(err) != want || !strings.Contains(err.Error(), why) {

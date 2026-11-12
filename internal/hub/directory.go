@@ -188,7 +188,8 @@ const (
 // RunDirectorySync writes the policy once at start and after each
 // TriggerDirectorySync (debounced), until ctx is done; each write queues
 // the membership deliveries (TriggerMembershipDelivery) and is
-// followed by an attribute-mapper sync in a separate loop, so a slow
+// followed by an attribute-mapper sync (and the fresh-auth client, the
+// events config and the access roles) in a separate loop, so a slow
 // Keycloak never delays a policy write. A failed mapper sync is logged
 // and retried after a minute.
 func (h *Hub) RunDirectorySync(ctx context.Context) {
@@ -248,6 +249,7 @@ func (h *Hub) RunDirectorySync(ctx context.Context) {
 func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 	var retry <-chan time.Time
 	lastFreshErr := "" // logged once per distinct error
+	lastEventsErr := ""
 	tick := time.NewTicker(accessSyncInterval)
 	defer tick.Stop()
 	for {
@@ -286,6 +288,17 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 				lastFreshErr = ""
 			}
 		}
+		// Keycloak's events config (contract §8, the sign-in history's
+		// source): re-asserted with history_days on every sync.
+		eerr := h.ensureEvents(sctx)
+		if eerr != nil && ctx.Err() == nil {
+			if msg := eerr.Error(); msg != lastEventsErr {
+				log.Printf("keycloak: events config not in place (retrying every %s): %v", directorySyncRetry, eerr)
+				lastEventsErr = msg
+			}
+		} else if eerr == nil {
+			lastEventsErr = ""
+		}
 		// The AI clients (contract §8), like the fresh-auth client: while
 		// the master switch is on each offered one is re-asserted, its
 		// health recorded and the gate file rewritten when it changed
@@ -296,7 +309,7 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 		if aerr != nil && ctx.Err() == nil {
 			log.Printf("keycloak: access role sync incomplete (retrying in %s): %v", directorySyncRetry, aerr)
 		}
-		if (err != nil || aerr != nil || ferr != nil || cerr != nil) && ctx.Err() == nil {
+		if (err != nil || aerr != nil || ferr != nil || cerr != nil || eerr != nil) && ctx.Err() == nil {
 			retry = time.After(directorySyncRetry)
 		}
 	}

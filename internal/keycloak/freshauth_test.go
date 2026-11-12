@@ -14,7 +14,7 @@ import (
 
 // The fresh-auth client's two hosts (contract §8, G11): people and hub.
 var (
-	faRedirects = []string{"https://people.example.org/", "https://hub.example.org/"}
+	faRedirects = []string{"https://people.example.org/signin", "https://hub.example.org/"}
 	faOrigins   = []string{"https://people.example.org", "https://hub.example.org"}
 	faRedirect  = faRedirects[0]
 	faOrigin    = faOrigins[0]
@@ -156,9 +156,13 @@ func TestEnsureFreshAuthClient(t *testing.T) {
 
 	// Bad arguments never reach Keycloak.
 	for _, bad := range [][2]string{
-		{"http://people.example.org/", faOrigin},
+		{"http://people.example.org/signin", faOrigin},
 		{"https://people.example.org/*", faOrigin},
 		{"https://people.example.org/x", faOrigin},
+		{"https://people.example.org/", faOrigin},
+		{"https://people.example.org/signin/", faOrigin},
+		{"https://people.example.org/signin?x=1", faOrigin},
+		{"https://people.example.org/%73ignin", faOrigin},
 		{faRedirect, "https://people.example.org/"},
 		{faRedirect, "https://other.example.org"},
 		{faRedirect, "*"},
@@ -248,6 +252,8 @@ func TestEnsureFreshAuthClientTwoHosts(t *testing.T) {
 		{faRedirects, []string{faOrigins[1], faOrigins[0]}},
 		{[]string{faRedirect, faRedirect}, []string{faOrigin, faOrigin}},
 		{[]string{faRedirect, "https://hub.example.org/x"}, faOrigins},
+		{[]string{faRedirect, "https://hub.example.org/signin"}, faOrigins},
+		{[]string{"https://people.example.org/", "https://hub.example.org/"}, faOrigins},
 	} {
 		if err := c.EnsureFreshAuthClient(ctx, bad[0], bad[1]); err == nil {
 			t.Errorf("EnsureFreshAuthClient(%q, %q) accepted", bad[0], bad[1])
@@ -255,5 +261,23 @@ func TestEnsureFreshAuthClientTwoHosts(t *testing.T) {
 	}
 	if kc.CountCalls("PUT") != puts {
 		t.Error("a refused call reached Keycloak")
+	}
+}
+
+// TestFreshAuthClientRedirects (sign-in part 2, D24): the client's
+// redirect URIs are exactly [https://people.<d>/signin, https://hub.<d>/];
+// the people host's "/" is refused.
+func TestFreshAuthClientRedirects(t *testing.T) {
+	ctx := context.Background()
+	kc := freshRealm(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	if err := c.EnsureFreshAuthClient(ctx, faRedirects, faOrigins); err != nil {
+		t.Fatal(err)
+	}
+	if got := kc.ClientByClientID(freshauth.ClientID).RedirectURIs; strings.Join(got, " ") != "https://people.example.org/signin https://hub.example.org/" {
+		t.Errorf("redirect URIs = %v", got)
+	}
+	if err := c.EnsureFreshAuthClient(ctx, []string{"https://people.example.org/", "https://hub.example.org/"}, faOrigins); err == nil {
+		t.Error("the people host's / accepted")
 	}
 }

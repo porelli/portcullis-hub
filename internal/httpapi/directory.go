@@ -32,6 +32,8 @@ func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("POST /api/directory/users/{username}/require-passkey", s.handleRequirePasskey)
 	mux.HandleFunc("POST /api/directory/users/{username}/clear-actions", s.handleClearActions)
 	mux.HandleFunc("POST /api/directory/users/{username}/remove-passkeys", s.handleRemovePasskeys)
+	// The person's Sign-in routes (§9.7, D32).
+	s.registerSignInHelp(mux)
 	mux.HandleFunc("DELETE /api/directory/keycloak-stale/{username}", s.handleRemoveStale)
 	mux.HandleFunc("POST /api/directory/groups", s.handleCreateGroup)
 	mux.HandleFunc("DELETE /api/directory/groups/{group}", s.handleDeleteGroup)

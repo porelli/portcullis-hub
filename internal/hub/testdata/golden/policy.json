@@ -38,7 +38,6 @@
   "hosts": {},
   "core": {
     "directory.example.org": "standard",
-    "enroll.example.org": "standard",
     "example.org": "standard",
     "hub.example.org": "strong",
     "metrics.example.org": "standard",

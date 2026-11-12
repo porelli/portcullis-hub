@@ -67,6 +67,9 @@ type Server struct {
 	// people: people.html, parsed by PeopleHandler (the main domain
 	// injected: its links into the Hub).
 	people *template.Template
+	// mySignIn: mysignin.html (the Sign-in page, GET /signin on the
+	// people listener), parsed by PeopleHandler like people.html.
+	mySignIn *template.Template
 	// confirmPage: confirm.html, parsed on first use (confirm.go).
 	confirmOnce sync.Once
 	confirmPage *template.Template
@@ -136,6 +139,11 @@ func (s *Server) PeopleHandler() (http.Handler, error) {
 		return nil, err
 	}
 	s.people = pp
+	ms, err := template.ParseFS(s.Web, "mysignin.html")
+	if err != nil {
+		return nil, err
+	}
+	s.mySignIn = ms
 	mux := s.peopleMux()
 	return noReferrer(ProxySecret(s.Secret, CSRF(markPeople(mux.ServeMux)))), nil
 }
@@ -384,7 +392,7 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 // peopleStatic are the assets people.html and the confirmation page
 // load: the people listener serves these only (never the Hub's
 // index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true}
+var peopleStatic = map[string]bool{"directory.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.
 func (s *Server) handlePeopleStatic(w http.ResponseWriter, r *http.Request) {

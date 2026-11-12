@@ -21,8 +21,9 @@ const FileVersion = 6
 
 // CorePages are the core page keys group-gate gates, each published under
 // its full hostname in core (§8.1 "Core pages"): portal is the main
-// domain, the others <key>.<main domain>. auth and mcp take no template.
-var CorePages = []string{"portal", "hub", "people", "directory", "enroll", "metrics", "traefik"}
+// domain, the others <key>.<main domain>. auth and mcp take no template;
+// enroll isn't gated (it serves only setup links, sign-in part 2).
+var CorePages = []string{"portal", "hub", "people", "directory", "metrics", "traefik"}
 
 // CorePageHost is core page key's hostname.
 func CorePageHost(key, mainDomain string) string {

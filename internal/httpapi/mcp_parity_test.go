@@ -42,6 +42,23 @@ var confirmationRoutes = map[string]string{
 // tool (or a noToolRoutes reason) in the change that adds it.
 var pendingToolRoutes = map[string]string{}
 
+// helpNoToolRoutes are the person's Sign-in routes (both listeners) with
+// no tool (contract §15.10, D33): person_sign_in carries the last 20
+// history entries.
+var helpNoToolRoutes = map[string]string{
+	"GET /api/directory/users/{username}/signin/history": "a person's history pages: person_sign_in carries the last 20 entries",
+}
+
+// signInNoToolRoutes are the Sign-in page's people-listener routes with
+// no people tool (contract §15.10, D33; TestPeopleToolParity reads them
+// through peopleNoToolRoutes).
+var signInNoToolRoutes = map[string]string{
+	"GET /signin": "the Sign-in page itself: a browser UI",
+	"POST /api/me/signin/yubikey-certificate/renew": "the YubiKey renewal needs the certificate the browser presents (TLS), which an AI client never has",
+	"GET /api/me/signin/history":                    "the history pages: my_sign_in carries the last 20 entries",
+	"DELETE /api/me/signin/password":                "removing your password: on the Sign-in page, where my_password hands off (D33 lists no tool for it)",
+}
+
 // destructiveTwins are the routes whose handler deletes, restores over,
 // revokes or runs code, or has a typed confirmation today (spec call 25,
 // §15.10): a class-D tool's twin must be one of them — unless the tool is
@@ -65,11 +82,12 @@ var destructiveTwins = map[string]string{
 	"POST /api/keycloak/user-sweep/resume":            "typed confirmation (resume): Keycloak then removes records LLDAP lacks",
 	"DELETE /api/directory/keycloak-stale/{username}": "deletes a Keycloak record (typed username)",
 	// Task 18 (§15.10's D list).
-	"DELETE /api/directory/users/{username}":               "deletes a person (typed username)",
-	"POST /api/directory/users/{username}/remove-passkeys": "removes a person's passkeys (typed username)",
-	"POST /api/directory/users/{username}/require-passkey": "forces a passkey registration: on another administrator it hands over their sign-in (§15.10 lists require_passkey as D)",
-	"DELETE /api/directory/groups/{group}":                 "deletes a group (typed name)",
-	"DELETE /api/directory/fields/{name}":                  "deletes a field and every value of it (typed name)",
+	"DELETE /api/directory/users/{username}":                       "deletes a person (typed username)",
+	"POST /api/directory/users/{username}/remove-passkeys":         "removes a person's passkeys (typed username)",
+	"DELETE /api/directory/users/{username}/certificates/{serial}": "revokes a person's certificate (sign-in part 2, D32)",
+	"POST /api/directory/users/{username}/require-passkey":         "forces a passkey registration: on another administrator it hands over their sign-in (§15.10 lists require_passkey as D)",
+	"DELETE /api/directory/groups/{group}":                         "deletes a group (typed name)",
+	"DELETE /api/directory/fields/{name}":                          "deletes a field and every value of it (typed name)",
 	// Task 20 (§15.10's D list, G45).
 	"DELETE /api/folders/{id}":             "deletes a shared folder's definition",
 	"POST /api/folders/{id}/undo/apply":    "restores a permissions snapshot over the folder's files",
@@ -98,6 +116,8 @@ var accessWidening = map[string]string{
 	"set_core_template":     "D unless the new template Implies the current one (both switch states) and nobody is newly blocked or unknown",
 	"set_sign_in_template":  "D unless the app's new template Implies its current one (both switch states) and nobody is newly blocked or unknown",
 	"set_add_stronger":      "D when on, W when off",
+	// Sign-in part 2 (Task 3).
+	"set_sign_in_limits": "D when browser_cert_days or browser_cert_max_active go up or history_days goes down, else W",
 	// Task 18 (G37 ruling 2; the directory's Membership.Guarding).
 	"create_instance":   "D when one of its groups already exists with members, or the template / directory can't be read (T18 fix round 1)",
 	"remove_member":     "D from an administrator, permission or guarding group (T18 fix round 1 ruling)",
@@ -149,6 +169,8 @@ func TestToolParity(t *testing.T) {
 	for _, r := range routes {
 		_, none := noToolRoutes[r]
 		_, conf := confirmationRoutes[r]
+		_, help := helpNoToolRoutes[r]
+		conf = conf || help
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -179,7 +201,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -231,6 +253,8 @@ func TestToolParity(t *testing.T) {
 		"set_ai_providers",
 		// Task 18 (§15.10, G37).
 		"delete_person", "delete_group", "delete_field", "require_passkey", "remove_passkeys", "set_permission",
+		// Sign-in part 2 (Task 7).
+		"revoke_person_certificate",
 		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
 		"remove_exception", "set_details", "import_apply",
 		// Task 20 (§15.10, G15, G45).
@@ -238,13 +262,13 @@ func TestToolParity(t *testing.T) {
 		// Task 7 security review.
 		"stop_op",
 		// Sign-in methods (Task 6).
-		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger"} {
+		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger", "set_sign_in_limits"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
 	}
 	// U tools (Task 17b): domain tokens and provider secrets.
-	for _, n := range []string{"set_secret_setting", "enroll_domain", "replace_domain_token", "set_model_provider_secret", "set_password",
+	for _, n := range []string{"set_secret_setting", "add_domain", "replace_domain_token", "set_model_provider_secret", "set_password",
 		"create_person", "send_invite"} {
 		if byName[n].Class != ClassSecret {
 			t.Errorf("tool %s: class %q, want U", n, byName[n].Class)
@@ -278,7 +302,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// R (sign-in Task 6).
-	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact"} {
+	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact", "person_sign_in", "issue_yubikey_certificate"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}
@@ -295,7 +319,9 @@ func TestToolParity(t *testing.T) {
 var adminSignIn = []string{
 	"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "set_sign_in_method", "save_sign_in_template",
 	"set_sign_in_template_enabled", "delete_sign_in_template", "set_default_template", "set_core_template",
-	"set_sign_in_template", "set_add_stronger", "sign_in_impact",
+	"set_sign_in_template", "set_add_stronger", "sign_in_impact", "set_sign_in_limits",
+	// Sign-in part 2 (Task 7).
+	"person_sign_in", "revoke_person_certificate", "issue_yubikey_certificate",
 }
 
 // admin20 are the doctor and shared-folder tools of T20.
@@ -319,7 +345,7 @@ var admin18 = []string{
 var admin17b = []string{
 	"list_templates", "get_template", "list_sources", "sync_sources", "add_source", "remove_source",
 	"list_backups", "list_backups_all", "backup_instance", "restore_instance", "restore_as",
-	"list_domains", "enroll_domain", "replace_domain_token", "delete_domain",
+	"list_domains", "add_domain", "replace_domain_token", "delete_domain",
 	"ai_status", "set_ai_support", "set_ai_mode", "set_ai_providers", "revoke_ai_access", "dismiss_ai_revoke_problem", "ai_activity",
 	"list_model_providers", "add_model_provider", "save_model_provider", "set_model_provider_secret", "delete_model_provider",
 	"get_hub_settings", "save_hub_settings",

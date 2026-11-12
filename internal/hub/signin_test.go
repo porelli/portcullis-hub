@@ -37,12 +37,6 @@ var siAdmin = directory.Human("root")
 func TestSetMethodRefusals(t *testing.T) {
 	f, audit := signInFixture(t)
 	ctx := context.Background()
-	if _, err := f.h.SetMethod(ctx, signin.BrowserCert, true, siAdmin); statusOf(err) != 409 || !strings.Contains(err.Error(), "browser certificates aren't available yet") {
-		t.Errorf("browser_cert on: %v", err)
-	}
-	if e := audit.last(); e.Action != "signin.method" || e.Result != "refused" || e.Target != "browser_cert" {
-		t.Errorf("audit = %+v", e)
-	}
 	if _, err := f.h.SetMethod(ctx, "sms", true, siAdmin); statusOf(err) != 404 {
 		t.Errorf("unknown: %v", err)
 	}

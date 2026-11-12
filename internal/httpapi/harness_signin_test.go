@@ -5,7 +5,11 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,6 +57,7 @@ func seedSignIn(t *testing.T, e *instEnv) {
 	h := e.s.Hub
 	ctx := context.Background()
 	root := directory.Human("root")
+	certs := newHarnessCerts()
 	// As cmd/hub wires them.
 	e.s.Directory.PasswordSet = h.RecordPassword
 	e.s.Directory.PasswordMethodOn = h.PasswordMethodOn
@@ -72,8 +77,15 @@ func seedSignIn(t *testing.T, e *instEnv) {
 			}
 			return out, nil
 		},
-		Certificates: func(context.Context) ([]invite.CertRecord, error) { return []invite.CertRecord{}, nil },
+		Certificates: certs.list,
 	})
+	// The Sign-in page (sign-in part 2 Task 8): enroll's certificate
+	// actions in memory, Keycloak's login events for alice, the real audit;
+	// the opened log isn't mounted (the page names it as unknown).
+	h.SetCertActions(certs)
+	h.SetSignInHelp(e.s.Directory)
+	h.SetOwnPasswords(e.s.Directory)
+	h.SetHistorySources(hub.HistorySources{Events: harnessLoginEvents, Audit: e.s.Directory.RecentMatching})
 	for _, u := range []string{"bob", "carol"} {
 		if err := h.RecordPassword(u, e.ll.UUIDOf(u), "root"); err != nil {
 			t.Fatalf("recording %s's password: %v", u, err)
@@ -107,6 +119,107 @@ func seedSignIn(t *testing.T, e *instEnv) {
 	if _, err := h.SaveSettings("gitea-ops", hub.SettingsUpdate{SignInTemplate: &pick}, root); err != nil {
 		t.Fatalf("gitea-ops picks family: %v", err)
 	}
+	// Browser and YubiKey certificates are on (the Sign-in page's rows).
+	for _, m := range []signin.Method{signin.BrowserCert, signin.YubiKeyCert} {
+		if _, err := h.SetMethod(ctx, m, true, root); err != nil {
+			t.Fatalf("switching %s on: %v", m, err)
+		}
+	}
 	// The FIDO list: every fetch fails (Settings → Sign-in's warning).
 	go h.RunMDS(ctx, time.Hour)
+}
+
+// harnessCerts is enroll's certificates in memory: alice holds a YubiKey
+// certificate expiring in 5 days, a valid browser certificate and a
+// revoked one; bob a browser certificate. Creating one answers a fake
+// .p12 and a fixed-format password; revoking marks the record.
+type harnessCerts struct {
+	mu   sync.Mutex
+	recs []invite.CertRecord
+	n    int
+}
+
+func newHarnessCerts() *harnessCerts {
+	now := time.Now().UTC().Truncate(time.Second)
+	return &harnessCerts{recs: []invite.CertRecord{
+		{User: "alice", Serial: "4f:2a:9c:01", Kind: invite.KindYubiKey, NotBefore: now.Add(-353 * 24 * time.Hour), NotAfter: now.Add(5 * 24 * time.Hour)},
+		{User: "alice", Serial: "1a:2b:3c:04", Kind: invite.KindBrowser, NotBefore: now.Add(-3 * 24 * time.Hour), NotAfter: now.Add(27 * 24 * time.Hour)},
+		{User: "alice", Serial: "0b:0b:0b:05", Kind: invite.KindBrowser, NotBefore: now.Add(-40 * 24 * time.Hour), NotAfter: now.Add(-10 * 24 * time.Hour), Revoked: true},
+		{User: "bob", Serial: "0c:0c:0c:06", Kind: invite.KindBrowser, NotBefore: now.Add(-24 * time.Hour), NotAfter: now.Add(29 * 24 * time.Hour)},
+	}}
+}
+
+func (c *harnessCerts) list(context.Context) ([]invite.CertRecord, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.recs), nil
+}
+
+func (c *harnessCerts) add(user string, kind invite.CertKind, d time.Duration) invite.CertRecord {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+	now := time.Now().UTC().Truncate(time.Second)
+	r := invite.CertRecord{User: user, Serial: fmt.Sprintf("7e:%02x:%02x:%02x", c.n, c.n*7%256, c.n*13%256), Kind: kind, NotBefore: now, NotAfter: now.Add(d)}
+	c.recs = append(c.recs, r)
+	return r
+}
+
+func (c *harnessCerts) CreateBrowserCertificate(_ context.Context, r invite.BrowserCertRequest) (*invite.BrowserCert, error) {
+	rec := c.add(r.User, invite.KindBrowser, time.Duration(r.Days)*24*time.Hour)
+	return &invite.BrowserCert{P12: []byte("harness: not a real PKCS#12 file\n"), Password: "H4RN5-ESS7Q-ABCDE-FGHJK", Serial: rec.Serial,
+		Filename: r.User + "-browser-certificate-" + rec.NotBefore.Format("20060102") + ".p12", NotAfter: rec.NotAfter}, nil
+}
+
+const harnessPEM = "-----BEGIN CERTIFICATE-----\nMIIBharness\n-----END CERTIFICATE-----\n"
+
+func (c *harnessCerts) IssueYubiKeyCertificate(_ context.Context, user, _ string) (*invite.IssuedCert, error) {
+	rec := c.add(user, invite.KindYubiKey, 365*24*time.Hour)
+	return &invite.IssuedCert{PEM: harnessPEM, Serial: rec.Serial, NotAfter: rec.NotAfter}, nil
+}
+
+func (c *harnessCerts) RenewYubiKeyCertificate(_ context.Context, user, _, _ string) (*invite.IssuedCert, error) {
+	rec := c.add(user, invite.KindYubiKey, 365*24*time.Hour)
+	return &invite.IssuedCert{PEM: harnessPEM, Serial: rec.Serial, NotAfter: rec.NotAfter}, nil
+}
+
+func (c *harnessCerts) RevokeCertificate(_ context.Context, user, serial string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.recs {
+		if c.recs[i].User == user && c.recs[i].Serial == serial {
+			c.recs[i].Revoked = true
+			return nil
+		}
+	}
+	return &hub.StatusError{Status: 404, Err: errors.New("no such certificate")}
+}
+
+// harnessLoginEvents is Keycloak's login events: alice's sign-ins, a
+// failed password, a setup-link sign-in and a fresh sign-in; one
+// User-Agent carries markup.
+func harnessLoginEvents(_ context.Context, user string, from, to time.Time, first, max int) ([]keycloak.Event, error) {
+	if user != "alice" {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	ff := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:132.0) Gecko/20100101 Firefox/132.0"
+	sa := "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+	all := []keycloak.Event{
+		{Time: now.Add(-20 * time.Minute), Type: "LOGIN", ClientID: "portcullis-fresh-auth", IP: "203.0.113.7", Details: map[string]string{"pc_kind": "sign_in", "pc_methods": "security_key", "pc_ua": ff}},
+		{Time: now.Add(-2 * time.Hour), Type: "LOGIN", ClientID: "oauth2-proxy", IP: "203.0.113.7", Details: map[string]string{"pc_kind": "sign_in", "pc_methods": "security_key", "pc_ua": ff}},
+		{Time: now.Add(-26 * time.Hour), Type: "LOGIN_ERROR", ClientID: "oauth2-proxy", IP: "198.51.100.4", Error: "invalid_user_credentials", Details: map[string]string{"pc_method": "password", "pc_ua": sa}},
+		{Time: now.Add(-27 * time.Hour), Type: "LOGIN", ClientID: "oauth2-proxy", IP: "198.51.100.4", Details: map[string]string{"pc_kind": "step_up", "pc_methods": "passkey_synced", "pc_ua": sa + " <img src=x onerror=alert(1)>"}},
+		{Time: now.Add(-9 * 24 * time.Hour), Type: "LOGIN", ClientID: "portcullis-invite-client", IP: "198.51.100.4", Details: map[string]string{"pc_kind": "sign_in", "pc_ua": sa}},
+	}
+	var out []keycloak.Event
+	for _, e := range all {
+		if !e.Time.Before(from) && e.Time.Before(to) {
+			out = append(out, e)
+		}
+	}
+	if first >= len(out) {
+		return nil, nil
+	}
+	return out[first:min(len(out), first+max)], nil
 }

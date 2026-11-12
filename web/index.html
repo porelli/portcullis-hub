@@ -155,6 +155,9 @@
     .si-impact .si-row { margin-top: 0.375rem; }
     .si-note { font-size: 0.8125rem; }
     .si-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .si-limits { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .si-limit { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8125rem; max-width: 16rem; }
+    .si-limit input { padding: 0.25rem 0.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; width: 8rem; }
     .si-row select, .si-t select, .si-ed select, .si-pick select { padding: 0.25rem 0.5rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; font-family: inherit; }
     .si-switch-wrap { position: relative; display: inline-block; width: 30px; height: 16px; vertical-align: middle; }
     .si-switch { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
@@ -797,8 +800,8 @@
       <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
         Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
         Portcullis points <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">&lt;domain&gt;</code> and
-        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">*.&lt;domain&gt;</code> at this server and obtains a wildcard
-        certificate with the DNS provider's API token. A domain receives hostnames once its records are OK and its certificate is valid.
+        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">*.&lt;domain&gt;</code> at this server and obtains a wildcard website
+        certificate (HTTPS) with the DNS provider's API token. A domain receives hostnames once its records are OK and its website certificate is valid.
         Tokens are write-only: they go to core's domains service (encrypted at rest) and are never shown again.
       </p>
       <div id="domains-root"></div>
@@ -890,8 +893,8 @@
     // set_secret_setting form, the people page's Used by) and
     // #app/<id>/ai are replaced by those; #sources is the Marketplace's
     // template sources; #audit the Audit log tab;
-    // #settings/domains?enroll=<name>[&provider=<p>] and ?token=<name>
-    // open the Domains forms (enroll_domain, replace_domain_token);
+    // #settings/domains?add=<name>[&provider=<p>] and ?token=<name>
+    // open the Domains forms (add_domain, replace_domain_token);
     // #settings/ai?provider=<name>&field=<field> a provider secret's form
     // (set_model_provider_secret). Secrets are typed here, never passed
     // in. Routed at load and on a hash change.
@@ -1575,13 +1578,13 @@
     }
 
     // The Settings tab's forms the Portcullis MCP's U tools link to:
-    // domains enroll / token, a model provider's secret.
+    // domains add / token, a model provider's secret.
     async function openSettingsForm(kind, q) {
       document.querySelector('.tab[data-tab="settings"]').click();
-      if (kind === 'domains' && q.get('enroll')) {
-        const form = await waitFor('#domain-enroll-form');
+      if (kind === 'domains' && q.get('add')) {
+        const form = await waitFor('#domain-add-form');
         if (!form) return;
-        document.getElementById('domain-name').value = q.get('enroll');
+        document.getElementById('domain-name').value = q.get('add');
         const sel = form.querySelector('.domain-provider');
         const p = q.get('provider');
         if (p && sel && [...sel.options].some(o => o.value === p)) {
@@ -1594,7 +1597,7 @@
       }
       if (kind === 'domains' && q.get('token')) {
         const btn = await waitFor('[data-domain-token="' + CSS.escape(q.get('token')) + '"]');
-        if (!btn) { showToast('No enrolled domain ' + q.get('token') + '.', 'error'); return; }
+        if (!btn) { showToast('No added domain ' + q.get('token') + '.', 'error'); return; }
         btn.click();
         const row = document.querySelector('[data-token-row="' + CSS.escape(q.get('token')) + '"]');
         if (row) { flash(row); row.querySelector('[data-cred]')?.focus(); }
@@ -1648,11 +1651,12 @@
       }
       html += '</ul>';
       if (pa.policy_tier !== pa.tier_when_active) {
-        html += '<div class="public-warn">This app\'s policy requires a client certificate at the TLS handshake (' + escapeHtml(pa.policy_tier) + '). While a public path is open, ALL of its routers use ' + escapeHtml(pa.tier_when_active) + ' instead (Traefik picks TLS options per host).';
+        const certKind = pa.policy_tier === 'protected-any@file' ? 'a YubiKey or browser certificate' : 'a YubiKey certificate';
+        html += '<div class="public-warn">This app\'s policy requires ' + certKind + ' at the TLS handshake (' + escapeHtml(pa.policy_tier) + '). While a public path is open, ALL of its routers use ' + escapeHtml(pa.tier_when_active) + ' instead (Traefik picks TLS options per host; this applies to protected@file and protected-any@file alike).';
         if (pa.method === 'native-oidc') {
-          html += ' This is a native-OIDC app: mTLS is then only enforced at login (Keycloak acr), not on each request.';
+          html += ' This is a native-OIDC app: the certificate is then only checked at login (Keycloak), not on each request.';
         } else {
-          html += ' group-gate still requires a valid, unrevoked client certificate matching the user on every gated request.';
+          html += ' group-gate still requires a valid, unrevoked certificate of the right kind matching the user on every gated request.';
         }
         if (pa.ungated_routers && pa.ungated_routers.length) {
           html += ' Routers without group-gate lose the handshake check: ' + pa.ungated_routers.map(escapeHtml).join(', ') + '.';
@@ -1766,7 +1770,7 @@
       }
       if (list.length) {
         html += '<table style="width:100%;border-collapse:collapse;font-size:0.8125rem;margin-bottom:1rem"><thead><tr style="text-align:left;color:#94a3b8">' +
-          '<th>Domain</th><th>Provider</th><th>Records OK</th><th>Certificate valid until</th><th>State</th><th>Last error</th><th></th></tr></thead><tbody>';
+          '<th>Domain</th><th>Provider</th><th>Records OK</th><th>Website certificate (HTTPS) valid until</th><th>State</th><th>Last error</th><th></th></tr></thead><tbody>';
         for (const d of list) {
           html += '<tr style="border-top:1px solid #334155"><td><code>' + escapeHtml(d.name) + '</code></td><td>' + escapeHtml(d.provider) + '</td>' + domainStatus(d) +
             '<td style="white-space:nowrap">' + (disabled ? '' :
@@ -1776,18 +1780,18 @@
         }
         html += '</tbody></table>';
       } else if (!problem) {
-        html += '<p class="settings-empty">No enrolled domains.</p>';
+        html += '<p class="settings-empty">No added domains.</p>';
       }
       if (!disabled) {
-        html += '<form class="settings-form" id="domain-enroll-form" style="max-width:32rem">' +
+        html += '<form class="settings-form" id="domain-add-form" style="max-width:32rem">' +
           '<div class="form-group"><label>Domain or subdomain</label><small>e.g. team-b.example.org or team-a.' + escapeHtml(MAIN_DOMAIN) + '</small>' +
           '<input type="text" id="domain-name" required spellcheck="false" autocomplete="off" placeholder="team-b.example.org"></div>' +
           '<div class="form-group"><label>DNS provider</label>' + providerSelect('domain-provider') + '</div>' +
           '<div id="domain-creds">' + credFields('cloudflare') + '</div>' +
-          '<button type="submit" class="btn btn-primary btn-sm">Enroll domain</button></form>';
+          '<button type="submit" class="btn btn-primary btn-sm">Add domain</button></form>';
       }
       root.innerHTML = html;
-      const form = document.getElementById('domain-enroll-form');
+      const form = document.getElementById('domain-add-form');
       if (form) {
         form.querySelector('.domain-provider').addEventListener('change', e => {
           document.getElementById('domain-creds').innerHTML = credFields(e.target.value);
@@ -1799,9 +1803,9 @@
           const credentials = takeCreds(form);
           try {
             await apiCall('/api/domains', 'POST', { name, provider, credentials });
-            showToast('Enrolling ' + name + ': records and certificate are being set up.', 'success');
+            showToast('Adding ' + name + ': its records and website certificate (HTTPS) are being set up.', 'success');
             loadDomains();
-          } catch (err) { showToast(err.message || 'Enrollment failed', 'error'); }
+          } catch (err) { showToast(err.message || 'Adding the domain failed', 'error'); }
         });
       }
     }
@@ -1835,7 +1839,7 @@
       const del = e.target.closest('[data-domain-delete]');
       if (del) {
         const name = del.dataset.domainDelete;
-        if (!confirm('Remove ' + name + '? Its records and certificate are removed. Refused while an instance uses it.')) return;
+        if (!confirm('Remove ' + name + '? Its records and website certificate (HTTPS) are removed. Refused while an instance uses it.')) return;
         try {
           const res = await apiCall('/api/domains/' + encodeURIComponent(name), 'DELETE');
           const body = res.status === 200 ? await res.json() : {};
@@ -3338,7 +3342,7 @@
     }
 
     // A hostname the Hub would refuse, said before sending (the Hub
-    // checks again): one label under a domain, enrolled domains only
+    // checks again): one label under a domain, added domains only
     // when ready (kept hosts excepted).
     function hostProblem(router, host, domains, keep) {
       host = normHost(host);
@@ -3347,16 +3351,16 @@
       const extra = domains.find(d => !d.main && (host === d.name || host.endsWith('.' + d.name)));
       if (extra) {
         const rest = host === extra.name ? '' : host.slice(0, -extra.name.length - 1);
-        if (rest && !HOST_LABEL_RE.test(rest)) return router + ': ' + host + ' — only ' + extra.name + ' or <label>.' + extra.name + ' (the domain\'s certificate covers one label)';
-        if (!extra.assignable && !keep) return router + ': ' + host + ' — domain ' + extra.name + ' is not ready yet (' + (extra.state || 'not ready') + '): its records or certificate are not OK';
+        if (rest && !HOST_LABEL_RE.test(rest)) return router + ': ' + host + ' — only ' + extra.name + ' or <label>.' + extra.name + ' (the domain\'s website certificate covers one label)';
+        if (!extra.assignable && !keep) return router + ': ' + host + ' — domain ' + extra.name + ' is not ready yet (' + (extra.state || 'not ready') + '): its records or website certificate (HTTPS) are not OK';
         return '';
       }
       if (main && host.endsWith('.' + main.name)) {
         const label = host.slice(0, -main.name.length - 1);
-        if (!HOST_LABEL_RE.test(label)) return router + ': ' + host + ' — only <label>.' + main.name + '; deeper names need an enrolled domain';
+        if (!HOST_LABEL_RE.test(label)) return router + ': ' + host + ' — only <label>.' + main.name + '; deeper names need an added domain';
         return '';
       }
-      return router + ': ' + host + ' is neither <label>.' + (main ? main.name : 'main domain') + ' nor on an enrolled domain';
+      return router + ': ' + host + ' is neither <label>.' + (main ? main.name : 'main domain') + ' nor on an added domain';
     }
 
     async function instanceDefaults(tid, id, domain) {
@@ -3909,7 +3913,7 @@
     // The form asks for the label, the instance id (derived from the label
     // by CheckIDShape's rules, editable until it is created; the first
     // instance keeps the template id), the address (a subdomain per host
-    // router on one domain: the main domain or an enrolled one that is
+    // router on one domain: the main domain or an added one that is
     // ready), who can use it (new groups from the id, or existing groups:
     // never a built-in, administrator or permission group as the users
     // group — the Hub refuses them too) and the template's setup options
@@ -3974,7 +3978,7 @@
     }
 
     // setupHost: the hostname of a subdomain on domain ("" = the domain
-    // itself, enrolled domains only).
+    // itself, added domains only).
     function setupHost(sub, domain) {
       sub = normHost(sub);
       return sub ? sub + '.' + domain : normHost(domain);
@@ -4072,7 +4076,7 @@
         const main = ctx.domains.find(x => x.main) || ctx.domains[0];
         box.innerHTML = '<div class="host-row"><label for="setup-domain">domain</label>' +
           '<select id="setup-domain" data-setup-domain>' + domainOptions(ctx.domains, main && main.name) + '</select>' +
-          '<small>The main domain or an enrolled domain that is ready (Settings → Domains).</small></div>' +
+          '<small>The main domain or an added domain that is ready (Settings → Domains).</small></div>' +
           ctx.routers.map(r => '<div class="host-row"><label for="setup-sub-' + escapeHtml(r.router) + '">' + escapeHtml(r.router) + (r.immutable ? ' 🔒' : '') + '</label>' +
             '<span class="setup-addr"><input type="text" id="setup-sub-' + escapeHtml(r.router) + '" data-setup-sub="' + escapeHtml(r.router) + '" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(r.subdomain) + '">' +
             '<span class="setup-domain-name" data-setup-domain-name></span></span>' +
