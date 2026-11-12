@@ -994,10 +994,20 @@ func (h *Hub) resumeStop(id string, rec OpRecord, actor directory.Actor, undo fu
 	h.bg.Add(1)
 	go func() {
 		defer h.bg.Done()
-		defer unlock()
 		err := undo(id, p)
 		if err == nil {
 			err = ErrStopped
+		}
+		// The lock goes first, as startOp's fn releases it before
+		// finishAsync: a record that reads ended means its instance lock
+		// is free (a client that saw "stopped" may start the next
+		// operation at once). An operation accepted in the gap keeps its
+		// running record: p.finish never overwrites another operation's
+		// (recordOpUnlessOther), and finishAsync's held hook failure is
+		// this operation's only.
+		unlock()
+		if h.testHookResumeUnlocked != nil {
+			h.testHookResumeUnlocked(id)
 		}
 		h.finishAsync(id, rec.Op, p, nil, nil, err)
 		h.unregisterOp(id, run)

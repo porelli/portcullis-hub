@@ -518,6 +518,10 @@ type Hub struct {
 	// testHookResume, if set, runs in resumeStop before it takes the
 	// instance's lock (tests interleave a second request there).
 	testHookResume func(id string)
+	// testHookResumeUnlocked, if set, runs in a resumed Stop's goroutine
+	// after it released the lock and before it ends its record (tests
+	// start another operation in that gap).
+	testHookResumeUnlocked func(id string)
 
 	// Directory publishing (SetDirectory). lastExpiring is the expiring
 	// list last written (guarded by policyWriteMu; nil: not yet known).
