@@ -74,20 +74,28 @@ func (l *AuditLog) Recent(n int) ([]AuditEntry, error) {
 // the file — backwards, a chunk at a time, so it stops as soon as it has
 // n. A line cut by the scan limit, or one that doesn't parse, is skipped.
 func (l *AuditLog) RecentMatching(n int, maxScan int64, keep func(AuditEntry) bool) ([]AuditEntry, error) {
+	out, _, err := l.RecentMatchingScan(n, maxScan, keep)
+	return out, err
+}
+
+// RecentMatchingScan is RecentMatching that also reports whether the
+// whole file was read (whole false: the scan stopped at maxScan bytes
+// or at n entries, so older matching entries may exist).
+func (l *AuditLog) RecentMatchingScan(n int, maxScan int64, keep func(AuditEntry) bool) (out []AuditEntry, whole bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := []AuditEntry{}
+	out = []AuditEntry{}
 	f, err := os.Open(l.Path)
 	if os.IsNotExist(err) {
-		return out, nil
+		return out, true, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	start := max(st.Size()-maxScan, 0)
 	end := st.Size()
@@ -96,7 +104,7 @@ func (l *AuditLog) RecentMatching(n int, maxScan int64, keep func(AuditEntry) bo
 		off := max(end-auditChunk, start)
 		buf := make([]byte, end-off, end-off+int64(len(carry)))
 		if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-			return nil, err
+			return nil, false, err
 		}
 		data := append(buf, carry...)
 		carry = nil
@@ -115,7 +123,7 @@ func (l *AuditLog) RecentMatching(n int, maxScan int64, keep func(AuditEntry) bo
 		out = appendEntries(out, data, n, keep)
 		end = off
 	}
-	return out, nil
+	return out, end <= 0, nil
 }
 
 // appendEntries appends data's lines, last first, to out while it holds

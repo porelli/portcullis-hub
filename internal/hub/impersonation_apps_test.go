@@ -146,11 +146,19 @@ func TestImpersonationApps(t *testing.T) {
 		t.Errorf("slept %d times long after the end", slept)
 	}
 
-	// Another id's event: not used (long after the end: no second ask).
+	// Apps opened without any IMPERSONATE event of this id (a lost event
+	// write): used all the same (review I1).
 	other := rec
 	other.ID = otherImpID(appsImpID)
-	if _, used := a.run(context.Background(), other); used {
-		t.Error("another id's IMPERSONATE counted")
+	if apps, used := a.run(context.Background(), other); !used || !reflect.DeepEqual(apps, want) {
+		t.Errorf("apps without the event: %+v, used %v", apps, used)
+	}
+	// Another id's event, no app in the window: not used (long after the
+	// end: no second ask).
+	quiet := other
+	quiet.Started, quiet.Ended = started.Add(-10*time.Hour), started.Add(-10*time.Hour+12*time.Minute)
+	if apps, used := a.run(context.Background(), quiet); used || len(apps) != 0 {
+		t.Errorf("another id's IMPERSONATE counted: %+v, %v", apps, used)
 	}
 	// Events unreadable: used; logins unreadable: no native apps, still
 	// the gateway's.
@@ -166,9 +174,16 @@ func TestImpersonationApps(t *testing.T) {
 		t.Error("a record known used read as not used")
 	}
 	other.Used = false
-	if _, used := (&impApps{h: h, sleep: a.sleep}).run(context.Background(), other); !used {
+	if _, used := (&impApps{h: h, sleep: a.sleep}).run(context.Background(), quiet); !used {
 		t.Error("no Keycloak read as not used")
 	}
+	// signin-keycloak.json unreadable: which clients are native isn't
+	// known → the marker (review I4).
+	os.WriteFile(h.signInKeycloakPath(), []byte("{not json"), 0o644)
+	if apps, _ := a.run(context.Background(), rec); !reflect.DeepEqual(apps, append(want[:2:2], signinhistory.OpenedApp{Name: signinhistory.MoreApps})) {
+		t.Errorf("clients unreadable: apps %+v", apps)
+	}
+	writeSignInClients(t, h, map[string]string{signinhistory.ForwardAuthClient: "Gateway", "nextcloud": "Nextcloud", "office": "Office"})
 
 	// A native client's page budget spent without a match: what was read,
 	// then the marker (security review: never silently incomplete).
@@ -243,6 +258,30 @@ func TestImpersonationApps(t *testing.T) {
 	}
 }
 
+// TestImpersonationAppsSameNameAndSecond: a name from both sources keeps
+// its own session (review I2); a line in the start's own second counts
+// (group-gate writes whole seconds, review I3).
+func TestImpersonationAppsSameNameAndSecond(t *testing.T) {
+	hf := newHistoryFixture(t)
+	h := hf.f.h
+	started := histNow.Add(-40*time.Minute + 700*time.Millisecond)
+	now := histNow
+	h.imp.now = func() time.Time { return now }
+	writeSignInClients(t, h, map[string]string{"nextcloud": "Nextcloud"})
+	hf.openedAct(t, started.Truncate(time.Second), "alice", "files.example.org", "Files", "root") // same second, written truncated
+	hf.openedAct(t, started.Add(time.Minute), "alice", "cloud.example.org", "Nextcloud", "root")
+	kc := &impEventsKC{logins: []keycloak.Event{{Time: started.Add(2 * time.Minute), Type: "LOGIN", ClientID: "nextcloud", UserID: "alice",
+		Details: map[string]string{"pc_kind": "sso", "pc_act": "root"}}}}
+	a := &impApps{h: h, kc: kc, sleep: func(context.Context, time.Duration) bool { return true }}
+	rec := state.Impersonation{ID: appsImpID, Admin: "root", Target: "alice", Started: started, Until: started.Add(30 * time.Minute),
+		Ended: started.Add(5 * time.Minute), How: ImpStopped}
+	apps, used := a.run(context.Background(), rec)
+	want := []signinhistory.OpenedApp{{Name: "Files"}, {Name: "Nextcloud", OwnSession: true}}
+	if !reflect.DeepEqual(apps, want) || !used {
+		t.Errorf("apps = %+v, used %v; want %+v", apps, used, want)
+	}
+}
+
 // stampAudit is a fake audit that stamps each entry with the clock and
 // reads newest first (directory.Service.RecentMatching).
 type stampAudit struct {
@@ -250,6 +289,7 @@ type stampAudit struct {
 	now     func() time.Time
 	entries []directory.AuditEntry
 	fail    error
+	scan    int
 }
 
 func (a *stampAudit) Append(e directory.AuditEntry) error {
@@ -260,19 +300,26 @@ func (a *stampAudit) Append(e directory.AuditEntry) error {
 	return nil
 }
 
-func (a *stampAudit) RecentMatching(n int, _ int64, keep func(directory.AuditEntry) bool) ([]directory.AuditEntry, error) {
+// RecentMatchingScan reads newest first; scan bounds how many entries
+// it decodes (0: all), the rest is then unread (whole false).
+func (a *stampAudit) RecentMatchingScan(n int, _ int64, keep func(directory.AuditEntry) bool) ([]directory.AuditEntry, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.fail != nil {
-		return nil, a.fail
+		return nil, false, a.fail
 	}
 	out := []directory.AuditEntry{}
+	decoded := 0
 	for i := len(a.entries) - 1; i >= 0 && len(out) < n; i-- {
+		if a.scan > 0 && decoded == a.scan {
+			return out, false, nil
+		}
+		decoded++
 		if keep == nil || keep(a.entries[i]) {
 			out = append(out, a.entries[i])
 		}
 	}
-	return out, nil
+	return out, true, nil
 }
 
 // TestImpersonationHistoryFromHub (F22): the source main adds reads the
@@ -293,7 +340,7 @@ func TestImpersonationHistoryFromHub(t *testing.T) {
 		mu.Unlock()
 		return []signinhistory.OpenedApp{{Name: "Gitea"}, {Name: "Nextcloud", OwnSession: true}}, true
 	})
-	x.h.AddHistorySource(HistoryImpersonation, x.h.ImpersonationHistorySource(au.RecentMatching))
+	x.h.AddHistorySource(HistoryImpersonation, x.h.ImpersonationHistorySource(au.RecentMatchingScan))
 	s := x.mustStart(t, "root", "alice")
 	x.advance(time.Second)
 
@@ -325,6 +372,23 @@ func TestImpersonationHistoryFromHub(t *testing.T) {
 	if strings.Contains(strings.Join(page.Unknown, ","), HistoryImpersonation) {
 		t.Errorf("unknown = %v", page.Unknown)
 	}
+	// An audit flood (the scan no longer reaches the start): the kept
+	// record still gives the entry, and the source is named unknown (a
+	// start whose record is gone might be missing; review I5).
+	for range 50 {
+		x.advance(time.Second)
+		au.Append(directory.AuditEntry{Actor: "root", Action: "group.rule", Target: "x", Result: "ok"})
+	}
+	au.mu.Lock()
+	au.scan = 20
+	au.mu.Unlock()
+	page, _ = x.h.SignInHistory(x.ctx, "alice", "", 50)
+	if len(page.Entries) != 1 || page.Entries[0].Detail != want || !strings.Contains(strings.Join(page.Unknown, ","), HistoryImpersonation) {
+		t.Errorf("flooded = %+v", page)
+	}
+	au.mu.Lock()
+	au.scan = 0
+	au.mu.Unlock()
 	// The record gone: the end detail's names, own_session false.
 	x.h.mu.Lock()
 	x.h.st.Impersonations = nil

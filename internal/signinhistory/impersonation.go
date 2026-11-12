@@ -2,6 +2,7 @@ package signinhistory
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"slices"
 	"strconv"
@@ -48,24 +49,38 @@ var impIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 // impMinRe is an end detail's "<n> min" field.
 var impMinRe = regexp.MustCompile(`^([0-9]{1,6}) min$`)
 
+// ImpersonationRecord is a kept impersonation record (state's, F1) as
+// the history reads it.
+type ImpersonationRecord struct {
+	ID, Admin, Reason     string
+	Started, Until, Ended time.Time // Ended zero: running
+	How, EndedBy          string    // the raw how; who stopped it
+	Used, Finished        bool      // Finished: apps, used and the end audit done
+	Apps                  []OpenedApp
+}
+
 // ImpersonationSource is the history's impersonation source (contract
-// §8.2 Source 4, D44, F22): one entry per impersonation of the person,
-// from the audit's impersonation.start (result ok) joined with its
-// impersonation.end.
+// §8.2 Source 4, D44, F22): one entry per impersonation of the person.
+//   - Records are the person's kept records (state, F1): an entry per
+//     record started in the window, whatever the audit holds (an audit
+//     flood can't hide them, Task 7 review I5); nil: none.
 //   - Audit reads the person's impersonation.* entries from since to now
-//     (newest first), so an end after the page's before still joins.
-//   - Stored is the kept record's apps (F1); false (or nil): the end
-//     detail's names, own_session false. The live apps function is never
-//     run here.
-//   - Until is a running record's until (false: not running); nil: none
-//     known running.
+//     (newest first), so an end after the page's before still joins. A
+//     start (result ok) whose record is gone gives an entry from the
+//     audit alone: apps from the end detail's names, own_session false.
+//     *Partial{Through} with entries: the audit was read only down to
+//     Through, so a start older than that whose record is gone may be
+//     missing. The kept records are still shown (a flood can't hide
+//     them); the source answers *Incomplete when its answer may lack
+//     such a start (fewer than limit entries newer than Through).
 //   - Now is the clock (nil: time.Now): a running record past its
 //     until (the loop ends it within seconds) reads as ending now.
+//
+// The live apps function is never run here.
 type ImpersonationSource struct {
-	Audit  func(ctx context.Context, user string, since time.Time) ([]directory.AuditEntry, error)
-	Stored func(id string) ([]OpenedApp, bool)
-	Until  func(id string) (time.Time, bool)
-	Now    func() time.Time
+	Records func(user string) []ImpersonationRecord
+	Audit   func(ctx context.Context, user string, since time.Time) ([]directory.AuditEntry, error)
+	Now     func() time.Time
 }
 
 // impEnd is an end detail's fields.
@@ -121,8 +136,43 @@ func (s ImpersonationSource) Entries(ctx context.Context, user string, since, be
 		return out, nil
 	}
 	got, err := s.Audit(ctx, user, since)
-	if err != nil {
+	var partial *Partial
+	if err != nil && !errors.As(err, &partial) {
 		return nil, err
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now().UTC()
+	}
+	type item struct {
+		at time.Time
+		id string
+		e  Entry
+	}
+	var items []item
+	inWindow := func(t time.Time) bool { return !t.Before(since) && t.Before(before) }
+	kept := map[string]bool{}
+	if s.Records != nil {
+		for _, r := range s.Records(user) {
+			if !impIDRe.MatchString(r.ID) {
+				continue
+			}
+			kept[r.ID] = true
+			if !inWindow(r.Started) {
+				continue
+			}
+			en := Entry{Time: r.Started.UTC(), Kind: KindImpersonation, By: Clean(r.Admin, maxBy), Reason: Clean(r.Reason, maxDetail)}
+			switch {
+			case r.Ended.IsZero():
+				en.Detail = runningDetail(r.Until, now)
+			case !r.Finished:
+				// Being finished (apps, used, the end audit): shortly known.
+				en.Detail = "ended"
+			default:
+				en.Detail = ImpersonationDetail(impMinutes(r.Started, r.Ended), r.How, r.EndedBy, r.Apps, r.Used)
+			}
+			items = append(items, item{r.Started, r.ID, en})
+		}
 	}
 	ends := map[string]impEnd{}
 	type start struct {
@@ -143,53 +193,72 @@ func (s ImpersonationSource) Entries(ctx context.Context, user string, since, be
 				ends[id] = end
 			}
 		case ImpersonationStartAction:
-			if e.Time.Before(since) || !e.Time.Before(before) {
+			if !inWindow(e.Time) {
 				continue
 			}
-			if id, reason, ok := parseImpStart(e.Detail); ok {
+			if id, reason, ok := parseImpStart(e.Detail); ok && !kept[id] {
+				kept[id] = true // one entry per id
 				starts = append(starts, start{e, id, reason})
 			}
 		}
 	}
-	slices.SortStableFunc(starts, func(a, b start) int { return b.e.Time.Compare(a.e.Time) })
-	for _, st := range starts[:min(len(starts), limit)] {
+	for _, st := range starts {
 		en := Entry{Time: st.e.Time.UTC(), Kind: KindImpersonation, By: Clean(st.e.Actor, maxBy), Reason: Clean(st.reason, maxDetail)}
-		end, ended := ends[st.id]
-		switch {
-		case ended:
+		if end, ended := ends[st.id]; ended {
 			var apps []OpenedApp
-			stored := false
-			if s.Stored != nil && end.how != "not_used" {
-				apps, stored = s.Stored(st.id)
-			}
-			if !stored {
-				apps = nil
-				for _, n := range end.names {
-					apps = append(apps, OpenedApp{Name: n})
-				}
+			for _, n := range end.names {
+				apps = append(apps, OpenedApp{Name: n})
 			}
 			en.Detail = ImpersonationDetail(end.minutes, end.how, end.by, apps, end.how != "not_used")
-		case s.Until != nil:
-			if until, ok := s.Until(st.id); ok {
-				now := time.Now().UTC()
-				if s.Now != nil {
-					now = s.Now().UTC()
-				}
-				until = until.UTC()
-				if until.Before(now) {
-					until = now
-				}
-				en.Detail = "running · ends " + until.Format("15:04") + " UTC"
-				break
-			}
-			en.Detail = "ended"
-		default:
+		} else {
+			// No record and no end: being finished, or its end audit lost.
 			en.Detail = "ended"
 		}
-		en.Detail = Clean(en.Detail, maxDetail)
-		out = append(out, withScore(en))
+		items = append(items, item{st.e.Time, st.id, en})
+	}
+	// Newest first; equal times by id (stable: a larger limit answers a
+	// longer prefix of the same list).
+	slices.SortFunc(items, func(a, b item) int {
+		if c := b.at.Compare(a.at); c != 0 {
+			return c
+		}
+		return strings.Compare(a.id, b.id)
+	})
+	for _, it := range items[:min(len(items), limit)] {
+		it.e.Detail = Clean(it.e.Detail, maxDetail)
+		out = append(out, withScore(it.e))
+	}
+	if partial != nil && partial.Through.After(since) {
+		// A start older than Through (record gone) may be missing; the
+		// answer can't hold it when limit entries are newer than Through.
+		newer := 0
+		for _, e := range out {
+			if e.Time.After(partial.Through) {
+				newer++
+			}
+		}
+		if newer < limit {
+			return out, &Incomplete{Why: partial.Error()}
+		}
 	}
 	return out, nil
+}
+
+// runningDetail is "running · ends hh:mm UTC" (past until: now's time,
+// the loop ends it within seconds).
+func runningDetail(until, now time.Time) string {
+	until = until.UTC()
+	if until.Before(now) {
+		until = now
+	}
+	return "running · ends " + until.Format("15:04") + " UTC"
+}
+
+// impMinutes is the minutes from started to ended, rounded up, at least
+// 1 (the end detail's and the notice's rule).
+func impMinutes(started, ended time.Time) int {
+	d := ended.Sub(started)
+	return max(int((d+time.Minute-1)/time.Minute), 1)
 }
 
 // ImpersonationDetail is an ended impersonation's history detail (D44,

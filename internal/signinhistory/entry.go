@@ -75,6 +75,15 @@ func (p *Partial) Error() string {
 	return "read down to " + p.Through.UTC().Format(time.RFC3339Nano) + " only: " + p.Why
 }
 
+// Incomplete is the error of a source that shows what it could tell but
+// may be missing entries anywhere in its window (the impersonation
+// source when the audit scan didn't reach the oldest start its kept
+// records don't cover): the history shows its entries and names it in
+// Unknown.
+type Incomplete struct{ Why string }
+
+func (e *Incomplete) Error() string { return "possibly incomplete: " + e.Why }
+
 // SetupLinkDetail is the detail of a sign-in through a setup link (a
 // LOGIN with pc_kind sign_in and no method: the link signed the person
 // in, no method did). Such an entry is never shown as a methodless

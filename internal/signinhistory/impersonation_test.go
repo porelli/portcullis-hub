@@ -41,7 +41,9 @@ func newestFirst(es ...directory.AuditEntry) []directory.AuditEntry {
 func TestImpersonationHistoryEntry(t *testing.T) {
 	start := t0
 	now := t0.Add(2 * time.Hour)
-	stored := map[string][]OpenedApp{impA: {{Name: "Gitea"}, {Name: "Nextcloud", OwnSession: true}}}
+	records := []ImpersonationRecord{{ID: impA, Admin: "root", Reason: "checking quota · and the calendar", Started: start,
+		Until: start.Add(30 * time.Minute), Ended: start.Add(11*time.Minute + 30*time.Second), How: "stopped", EndedBy: "root",
+		Used: true, Finished: true, Apps: []OpenedApp{{Name: "Gitea"}, {Name: "Nextcloud", OwnSession: true}}}}
 	audit := newestFirst(
 		auditImpStart(start, "root", "alice", impA, "checking quota · and the calendar", "ok"),
 		auditImpStart(start.Add(time.Minute), "root", "alice", impB, "refused one", "refused"),
@@ -51,8 +53,8 @@ func TestImpersonationHistoryEntry(t *testing.T) {
 		Audit: func(ctx context.Context, user string, since time.Time) ([]directory.AuditEntry, error) {
 			return audit, nil
 		},
-		Stored: func(id string) ([]OpenedApp, bool) { a, ok := stored[id]; return a, ok },
-		Now:    func() time.Time { return now },
+		Records: func(user string) []ImpersonationRecord { return records },
+		Now:     func() time.Time { return now },
 	}
 	got, err := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), now, 50)
 	if err != nil {
@@ -64,13 +66,31 @@ func TestImpersonationHistoryEntry(t *testing.T) {
 	if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("entries = %+v\nwant %+v", got, want)
 	}
+	// The audit gone (a flood pushed it out, review I5): the record alone
+	// gives the same entry.
+	src.Audit = func(context.Context, string, time.Time) ([]directory.AuditEntry, error) { return nil, nil }
+	if got, _ := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), now, 50); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+		t.Errorf("record only = %+v", got)
+	}
+	// Not finished yet: "ended".
+	records[0].Finished = false
+	if got, _ := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), now, 50); len(got) != 1 || got[0].Detail != "ended" {
+		t.Errorf("unfinished = %+v", got)
+	}
+	// A not-used record: "not used".
+	records[0].Finished, records[0].Used, records[0].How, records[0].Apps = true, false, "not_used", nil
+	if got, _ := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), now, 50); len(got) != 1 || got[0].Detail != "not used" {
+		t.Errorf("not used record = %+v", got)
+	}
 
 	// Running: "running · ends hh:mm UTC".
 	until := time.Date(2026, 11, 10, 14, 32, 58, 0, time.UTC)
 	src.Audit = func(context.Context, string, time.Time) ([]directory.AuditEntry, error) {
 		return []directory.AuditEntry{auditImpStart(start, "root", "alice", impC, "looking", "ok")}, nil
 	}
-	src.Until = func(id string) (time.Time, bool) { return until, id == impC }
+	src.Records = func(string) []ImpersonationRecord {
+		return []ImpersonationRecord{{ID: impC, Admin: "root", Reason: "looking", Started: start, Until: until}}
+	}
 	got, _ = src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), now, 50)
 	if len(got) != 1 || got[0].Detail != "running · ends 14:32 UTC" || got[0].Reason != "looking" {
 		t.Errorf("running = %+v", got)
@@ -78,7 +98,7 @@ func TestImpersonationHistoryEntry(t *testing.T) {
 
 	// Not used; expired; switched off; the record gone: the end detail's
 	// names, own_session false; apps none.
-	src.Until = nil
+	src.Records = nil
 	cases := []struct {
 		end, actor, want string
 	}{
@@ -95,6 +115,14 @@ func TestImpersonationHistoryEntry(t *testing.T) {
 		if len(got) != 1 || got[0].Detail != c.want {
 			t.Errorf("%q: entries = %+v, want detail %q", c.end, got, c.want)
 		}
+	}
+
+	// A start with neither a record nor an end: "ended".
+	src.Audit = func(context.Context, string, time.Time) ([]directory.AuditEntry, error) {
+		return []directory.AuditEntry{auditImpStart(start, "root", "alice", impD, "r1x", "ok")}, nil
+	}
+	if got, _ := src.Entries(context.Background(), "alice", t0.AddDate(0, 0, -30), now, 50); len(got) != 1 || got[0].Detail != "ended" {
+		t.Errorf("no record, no end = %+v", got)
 	}
 
 	// Another person's entries (by target) are not alice's; a malformed id
@@ -133,7 +161,6 @@ func TestImpersonationDetail(t *testing.T) {
 func TestImpersonationSourceWindowAndLimit(t *testing.T) {
 	since, before, now := t0.Add(-time.Hour), t0, t0.Add(3*time.Hour)
 	var askedSince time.Time
-	storedCalls := 0
 	audit := newestFirst(
 		auditImpStart(since.Add(-time.Minute), "root", "alice", impA, "before since", "ok"),
 		auditImpStart(since.Add(10*time.Minute), "root", "alice", impB, "equal one", "ok"),
@@ -147,8 +174,7 @@ func TestImpersonationSourceWindowAndLimit(t *testing.T) {
 			askedSince = s
 			return audit, nil
 		},
-		Stored: func(string) ([]OpenedApp, bool) { storedCalls++; return nil, false },
-		Now:    func() time.Time { return now },
+		Now: func() time.Time { return now },
 	}
 	got, err := src.Entries(context.Background(), "alice", since, before, 50)
 	if err != nil {
@@ -161,17 +187,14 @@ func TestImpersonationSourceWindowAndLimit(t *testing.T) {
 	for _, e := range got {
 		reasons = append(reasons, e.Reason)
 	}
-	// Equal times keep the audit's (newest first) order.
-	if want := []string{"inside, ends after before", "equal two", "equal one"}; !reflect.DeepEqual(reasons, want) {
+	// Equal times by id (impB before impC).
+	if want := []string{"inside, ends after before", "equal one", "equal two"}; !reflect.DeepEqual(reasons, want) {
 		t.Fatalf("reasons = %q, want %q", reasons, want)
 	}
 	if got[0].Detail != "21 min · stopped by root · apps opened: Gitea" {
 		t.Errorf("joined end = %q", got[0].Detail)
 	}
-	if storedCalls == 0 {
-		t.Error("Stored never asked")
-	}
-	if got, _ := src.Entries(context.Background(), "alice", since, before, 2); len(got) != 2 || got[1].Reason != "equal two" {
+	if got, _ := src.Entries(context.Background(), "alice", since, before, 2); len(got) != 2 || got[1].Reason != "equal one" {
 		t.Errorf("limit 2 = %+v", got)
 	}
 	if got, _ := src.Entries(context.Background(), "alice", since, before, 0); len(got) != 0 {
@@ -183,11 +206,25 @@ func TestImpersonationSourceWindowAndLimit(t *testing.T) {
 	if _, err := src.Entries(context.Background(), "alice", since, before, 50); err == nil {
 		t.Error("a failed audit read answered entries")
 	}
-	// No Stored wired: the end's names.
-	src.Audit = func(context.Context, string, time.Time) ([]directory.AuditEntry, error) { return audit, nil }
-	src.Stored = nil
-	if got, _ := src.Entries(context.Background(), "alice", since, before, 1); len(got) != 1 || !strings.Contains(got[0].Detail, "Gitea") {
-		t.Errorf("no Stored = %+v", got)
+	// A truncated audit read (*Partial at Through): what was read is
+	// shown, with *Incomplete — unless limit entries are newer than
+	// Through (nothing missing can be in the answer).
+	src.Audit = func(context.Context, string, time.Time) ([]directory.AuditEntry, error) {
+		return audit, &Partial{Through: since.Add(10 * time.Minute), Why: "cut"}
+	}
+	got, err = src.Entries(context.Background(), "alice", since, before, 50)
+	var inc *Incomplete
+	if !errors.As(err, &inc) || len(got) != 3 {
+		t.Errorf("truncated = %+v, %v", got, err)
+	}
+	if got, err := src.Entries(context.Background(), "alice", since, before, 1); err != nil || len(got) != 1 || !strings.Contains(got[0].Detail, "Gitea") {
+		t.Errorf("truncated, limit 1 = %+v, %v", got, err)
+	}
+	src.Audit = func(context.Context, string, time.Time) ([]directory.AuditEntry, error) {
+		return audit, &Partial{Through: since.Add(-time.Minute), Why: "cut before since"}
+	}
+	if _, err := src.Entries(context.Background(), "alice", since, before, 50); err != nil {
+		t.Errorf("a cut older than since: %v", err)
 	}
 }
 

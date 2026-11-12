@@ -86,6 +86,11 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // IMPERSONATE event with pc_imp = the id; whenever that can't be told
 // (events unreadable, the event maybe not readable yet), used (fail
 // toward telling).
+//
+// It runs with imp.endMu held (finishEnd), never mu: the settle wait (up
+// to impEventSettle) and up to impLoginPages Keycloak reads per native
+// client make another end (another administrator's Stop) wait behind
+// it, while starts, the file and every read go on. Accepted (review).
 func (a *impApps) run(ctx context.Context, rec state.Impersonation) ([]signinhistory.OpenedApp, bool) {
 	now := a.h.impNow()
 	from, to := rec.Started, rec.Ended
@@ -93,18 +98,27 @@ func (a *impApps) run(ctx context.Context, rec state.Impersonation) ([]signinhis
 		to = now
 	}
 	apps := []signinhistory.OpenedApp{}
-	seen := map[string]bool{}
+	at := map[string]int{}
 	add := func(name string, own bool) {
 		name = signinhistory.Clean(name, 200)
-		if name == "" || seen[name] {
+		if name == "" {
 			return
 		}
-		seen[name] = true
+		if i, ok := at[name]; ok {
+			// The same name from both sources (an app behind forward-auth
+			// that also signs in with OIDC): it keeps its own session
+			// (review I2).
+			apps[i].OwnSession = apps[i].OwnSession || own
+			return
+		}
+		at[name] = len(apps)
 		apps = append(apps, signinhistory.OpenedApp{Name: name, OwnSession: own})
 	}
 	incomplete := false
 	if a.h.cfg.GroupGateDataDir != "" {
-		names, err := a.h.openedLog().ActApps(rec.Target, rec.Admin, from, to)
+		// group-gate writes whole seconds: the start's own second counts
+		// (review I3; over-reporting is the safe side).
+		names, err := a.h.openedLog().ActApps(rec.Target, rec.Admin, from.Truncate(time.Second), to)
 		if err != nil {
 			incomplete = true
 			log.Printf("impersonation: %s: the opened log couldn't all be read: %v (apps marked incomplete)", rec.ID, err)
@@ -125,10 +139,14 @@ func (a *impApps) run(ctx context.Context, rec state.Impersonation) ([]signinhis
 	} else {
 		incomplete = true
 	}
+	// An app opened is a use, whatever the IMPERSONATE events say (a lost
+	// event write, a drifted events config: review I1); then Keycloak
+	// isn't asked.
+	used := len(apps) > 0 || a.used(ctx, rec, now, to)
 	if incomplete {
 		apps = append(apps, signinhistory.OpenedApp{Name: signinhistory.MoreApps})
 	}
-	return apps, a.used(ctx, rec, now, to)
+	return apps, used
 }
 
 // nativeApps are the listed native clients' names with a LOGIN of the
@@ -137,7 +155,12 @@ func (a *impApps) run(ctx context.Context, rec state.Impersonation) ([]signinhis
 // a match. complete is false when a read failed or a client's page
 // budget ran out without a match (logged with the id only).
 func (a *impApps) nativeApps(ctx context.Context, rec state.Impersonation, from, to time.Time) (names []string, complete bool) {
-	clients := a.h.historyClientNames()
+	clients, err := a.h.historyClientNamesErr()
+	if err != nil {
+		// Which clients are native isn't known (review I4).
+		log.Printf("impersonation: %s: signin-keycloak.json can't be read: %v (apps marked incomplete)", rec.ID, err)
+		return nil, false
+	}
 	delete(clients, signinhistory.ForwardAuthClient)
 	delete(clients, signinhistory.FreshAuthClient)
 	type hit struct {
@@ -233,45 +256,54 @@ func (a *impApps) used(ctx context.Context, rec state.Impersonation, now, to tim
 const impHistoryAuditMax = 10000
 
 // ImpersonationHistorySource is the history's impersonation source (main
-// adds it with AddHistorySource): the person's impersonation.* entries
-// (by target) from read (directory.Service.RecentMatching), the kept
-// records' apps (F1) and the running records' until. It never runs the
-// apps function (F22).
-func (h *Hub) ImpersonationHistorySource(read signinhistory.AuditReader) signinhistory.ImpersonationSource {
+// adds it with AddHistorySource): the person's kept records (state, F1;
+// an audit flood can't hide them, review I5) joined by id with their
+// impersonation.* audit entries (by target) from read
+// (directory.Service.RecentMatchingScan). A read that didn't reach the
+// audit's start answers *Partial at the oldest entry it scanned (the
+// source then shows its records and answers *Incomplete when it may lack
+// a start). It never runs the apps function (F22).
+func (h *Hub) ImpersonationHistorySource(read func(n int, maxScan int64, keep func(directory.AuditEntry) bool) ([]directory.AuditEntry, bool, error)) signinhistory.ImpersonationSource {
 	return signinhistory.ImpersonationSource{
+		Records: func(user string) []signinhistory.ImpersonationRecord {
+			h.mu.RLock()
+			defer h.mu.RUnlock()
+			var out []signinhistory.ImpersonationRecord
+			for _, r := range h.st.Impersonations {
+				if r.Target != user {
+					continue
+				}
+				rec := signinhistory.ImpersonationRecord{ID: r.ID, Admin: r.Admin, Reason: r.Reason, Started: r.Started, Until: r.Until,
+					Ended: r.Ended, How: r.How, EndedBy: r.EndedBy, Used: r.Used, Finished: r.Finished}
+				for _, a := range r.Apps {
+					rec.Apps = append(rec.Apps, signinhistory.OpenedAppOf(a))
+				}
+				out = append(out, rec)
+			}
+			return out
+		},
 		Audit: func(ctx context.Context, user string, since time.Time) ([]directory.AuditEntry, error) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			user = strings.ToLower(strings.TrimSpace(user))
-			return read(impHistoryAuditMax, directory.AuditScan, func(e directory.AuditEntry) bool {
+			// oldest: the oldest entry the scan decoded (keep sees each).
+			var oldest time.Time
+			got, whole, err := read(impHistoryAuditMax, directory.AuditScan, func(e directory.AuditEntry) bool {
+				if oldest.IsZero() || e.Time.Before(oldest) {
+					oldest = e.Time
+				}
 				return strings.HasPrefix(e.Action, "impersonation.") && strings.ToLower(strings.TrimSpace(e.Target)) == user &&
 					!e.Time.Before(since)
 			})
-		},
-		Stored: func(id string) ([]signinhistory.OpenedApp, bool) {
-			h.mu.RLock()
-			defer h.mu.RUnlock()
-			for _, r := range h.st.Impersonations {
-				if r.ID == id && !r.Running() && r.Finished {
-					out := make([]signinhistory.OpenedApp, 0, len(r.Apps))
-					for _, a := range r.Apps {
-						out = append(out, signinhistory.OpenedAppOf(a))
-					}
-					return out, true
-				}
+			if err != nil {
+				return nil, err
 			}
-			return nil, false
-		},
-		Until: func(id string) (time.Time, bool) {
-			h.mu.RLock()
-			defer h.mu.RUnlock()
-			for _, r := range h.st.Impersonations {
-				if r.ID == id && r.Running() {
-					return r.Until, true
-				}
+			if !whole && oldest.After(since) {
+				return got, &signinhistory.Partial{Through: oldest, Why: "the audit was read only down to its last " +
+					"scan limit (older impersonation starts may be missing)"}
 			}
-			return time.Time{}, false
+			return got, nil
 		},
 		Now: h.impNow,
 	}

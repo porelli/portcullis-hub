@@ -441,7 +441,7 @@ func main() {
 	// pc_act and IMPERSONATE with pc_imp); the history's entries from the
 	// audit and the kept records (F22: never the live function).
 	h.SetImpersonationApps(h.ImpersonationAppsFunc(kc))
-	h.AddHistorySource(hub.HistoryImpersonation, h.ImpersonationHistorySource(dir.RecentMatching))
+	h.AddHistorySource(hub.HistoryImpersonation, h.ImpersonationHistorySource(dir.RecentMatchingScan))
 	h.Init()
 
 	srv := &httpapi.Server{
