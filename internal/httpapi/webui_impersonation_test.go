@@ -245,14 +245,100 @@ routes['POST /api/me/impersonation/stop'] = { status: 200, body: {"sign_out": "h
 	if r, js := doAs(t, e.people, "alice", "GET", "/static/impersonation.js", ""); r.StatusCode != 200 || !strings.Contains(js, "pc-imp-banner") {
 		t.Errorf("people /static/impersonation.js = %d", r.StatusCode)
 	}
+	// The confirmation page is on both listeners: the Hub's serves the
+	// script too (its GET /api/me/impersonation is 404: no banner).
+	if r, _ := doAs(t, e.hub, "root", "GET", "/static/impersonation.js", ""); r.StatusCode != 200 {
+		t.Errorf("hub /static/impersonation.js = %d", r.StatusCode)
+	}
+	if r, _ := doAs(t, e.hub, "root", "GET", "/api/me/impersonation", ""); r.StatusCode != 404 {
+		t.Errorf("hub GET /api/me/impersonation = %d, want 404", r.StatusCode)
+	}
 	// First in <body> of people.html and mysignin.html.
-	for _, p := range []string{"people.html", "mysignin.html", "impersonation-stop.html"} {
+	for _, p := range []string{"people.html", "mysignin.html", "impersonation-stop.html", "confirm.html"} {
 		h := webAsset(t, p)
 		i := strings.Index(h, "<body")
 		j := strings.Index(h, `<script src="/static/impersonation.js"></script>`)
 		if i < 0 || j < i || strings.Contains(h[i:j], "<script") || strings.Contains(h[i:j], "<div") || strings.Contains(h[i:j], "<main") {
 			t.Errorf("%s: impersonation.js isn't first in <body>", p)
 		}
+	}
+}
+
+// TestBannerEndingNoReloadLoop (review I1): an until already past when
+// the page loads (a browser clock ahead of the server's) or empty shows
+// "ending…" and never reloads while the Hub still answers it: it asks
+// again every 20 s; when the Hub answers none, the page reloads once; a
+// future until from the Hub resumes the countdown.
+func TestBannerEndingNoReloadLoop(t *testing.T) {
+	for _, until := range []string{"2026-11-12T14:00:00Z", ""} {
+		out := impJS(t, `routes['GET /api/me/impersonation'] = { status: 200, body: {"active": {"person": "alice", "admin": "root", "reason": "checking quota", "until": `+jsonString(until)+`}} };`,
+			[]string{"impersonation.js"}, `(async () => {
+  const r = await `+bannerOut+`;
+  r.reloadsAtLoad = reloads;
+  // 20 s later the Hub still answers it: still no reload.
+  timers.shift().f(); await tick();
+  r.reloadsStillActive = reloads;
+  r.timersAfterRecheck = timers.map(x => x.ms);
+  // The Hub answers a future until: the countdown resumes.
+  routes['GET /api/me/impersonation'] = { status: 200, body: `+activeJSON("checking quota")+` };
+  timers.shift().f(); await tick();
+  r.resumed = document.getElementById('pc-imp-banner').querySelector('[data-imp-text]').textContent;
+  r.timersResumed = timers.map(x => x.ms);
+  // A clock that jumps past until: the armed timer reloads once.
+  NOW = Date.parse('2026-11-12T14:33:00Z');
+  timers.shift().f();
+  r.reloadsAtEnd = reloads;
+  return r;
+})()`).(map[string]any)
+		if out["text"] != "You are signed in as alice (by root) · reason “checking quota” · ending…" {
+			t.Errorf("until %q: text = %q", until, out["text"])
+		}
+		if out["reloadsAtLoad"] != float64(0) || out["reloadsStillActive"] != float64(0) {
+			t.Errorf("until %q: reloaded (at load %v, still active %v)", until, out["reloadsAtLoad"], out["reloadsStillActive"])
+		}
+		if ts, _ := json.Marshal(out["timers"]); string(ts) != "[20000]" {
+			t.Errorf("until %q: timers %s, want a 20 s re-check", until, ts)
+		}
+		if ts, _ := json.Marshal(out["timersAfterRecheck"]); string(ts) != "[20000]" {
+			t.Errorf("until %q: after a re-check %s", until, ts)
+		}
+		if out["resumed"] != "You are signed in as alice (by root) · reason “checking quota” · 26 min left" {
+			t.Errorf("until %q: resumed %q", until, out["resumed"])
+		}
+		if ts, _ := json.Marshal(out["timersResumed"]); string(ts) != "[30000]" || out["reloadsAtEnd"] != float64(1) {
+			t.Errorf("until %q: resumed timers %s, reloads at the end %v", until, ts, out["reloadsAtEnd"])
+		}
+	}
+	// The Hub answers none at the re-check: one reload.
+	out := impJS(t, `routes['GET /api/me/impersonation'] = { status: 200, body: {"active": {"person": "alice", "admin": "root", "reason": "r", "until": "2026-11-12T14:00:00Z"}} };`,
+		[]string{"impersonation.js"}, `(async () => {
+  await tick();
+  routes['GET /api/me/impersonation'] = { status: 200, body: {"active": null} };
+  timers.shift().f(); await tick();
+  return { reloads, timers: timers.length };
+})()`).(map[string]any)
+	if out["reloads"] != float64(1) || out["timers"] != float64(0) {
+		t.Errorf("ended at the re-check: %v", out)
+	}
+}
+
+// TestBannerUnknown (review minor 4): a failed check shows a small line
+// linking the Stop page (not on the Stop page itself, which says so);
+// a 404 (a page without the route: the Hub listener) shows nothing.
+func TestBannerUnknown(t *testing.T) {
+	q := `(async () => { await tick(); const u = document.getElementById('pc-imp-unknown');
+  return { line: u ? u.textContent : '', href: u ? u.querySelector('a').getAttribute('href') : '', banner: !!document.getElementById('pc-imp-banner'), first: u ? document.body.firstChild === u : false }; })()`
+	out := impJS(t, `routes['GET /api/me/impersonation'] = { status: 503, body: {"error": "x"} };`, []string{"impersonation.js"}, q).(map[string]any)
+	if out["line"] != "Couldn't check whether you're signed in as someone else — Stop" || out["href"] != "/impersonation/stop" || out["banner"] != false || out["first"] != true {
+		t.Errorf("failed check: %v", out)
+	}
+	if out := impJS(t, ``, []string{"impersonation.js"}, q).(map[string]any); out["line"] != "" || out["banner"] != false {
+		t.Errorf("404: %v", out)
+	}
+	stop := impJS(t, `const main = document.createElement('main'); main.setAttribute('id', 'imp-stop'); document.body.appendChild(main);
+routes['GET /api/me/impersonation'] = { status: 503, body: {"error": "x"} };`, []string{"impersonation.js"}, q).(map[string]any)
+	if stop["line"] != "" {
+		t.Errorf("the Stop page also got the line: %v", stop)
 	}
 }
 
@@ -364,6 +450,34 @@ routes['POST /api/directory/users/alice/impersonation'] = { status: 403, body: {
 })()`).(map[string]any)
 	if bad["status"] != "your sign-in can't be read: sign in again" || len(bad["assigned"].([]any)) != 0 || bad["stored"] != "" || bad["goDisabled"] != false {
 		t.Errorf("refused start: %v", bad)
+	}
+
+	// An answer without an https start link (review minor 2): nothing
+	// opened, Continue and the reason usable again.
+	nolink := impJS(t, personSetup+personMount(personView(true, "", "null"))+`
+routes['POST /api/directory/users/alice/impersonation'] = { status: 200, body: {"id": "0123456789abcdef0123456789abcdef", "next": "javascript:alert(1)", "until": "2026-11-12T14:36:30Z"} };`,
+		[]string{"mysignin.js"}, `(async () => {
+  const S = window.PortcullisMySignIn;
+  const root = document.createElement('div');
+  await S.mount(root, { mode: 'person', user: 'alice' });
+  const btn = { dataset: { msiAct: 'imp-open' }, disabled: false };
+  btn.closest = () => btn;
+  root.ls.click[0]({ target: btn });
+  const dlg = document.body.querySelector('dialog');
+  const input = dlg.querySelector('[data-msi-imp-reason]'), go = dlg.querySelector('[data-msi-imp="go"]');
+  input.value = 'checking quota'; dispatch(input, 'input');
+  dispatch(go, 'click');
+  const busyDuring = go.disabled;
+  await started.h.proof({ code: 'C', code_verifier: 'V', nonce: 'N' });
+  return { busyDuring, goDisabled: go.disabled, inputDisabled: input.disabled, assigned, stored: store['portcullis-imp-start'] || '', status: dlg.querySelector('[data-msi-imp-status]').textContent, cls: go.getAttribute('class') };
+})()`).(map[string]any)
+	if nolink["busyDuring"] != true || nolink["goDisabled"] != false || nolink["inputDisabled"] != false || len(nolink["assigned"].([]any)) != 0 || nolink["stored"] != "" ||
+		nolink["status"] != "The Hub answered no start link: try again." {
+		t.Errorf("no start link: %v", nolink)
+	}
+	// The dialog's main action has the solid style (review minor 1).
+	if nolink["cls"] != "pd-btn primary sm" {
+		t.Errorf("Continue's class = %v", nolink["cls"])
 	}
 }
 

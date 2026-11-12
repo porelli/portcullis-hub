@@ -34,9 +34,11 @@
   }
 
   // bannerText is the fixed line (D43), without the Stop button.
+  // At or past until (or an unreadable until): "ending…".
   function bannerText(a, now) {
+    const n = minutesLeft(a.until, now);
     return 'You are signed in as ' + a.person + ' (by ' + a.admin + ') · reason “' + a.reason + '” · ' +
-      minutesLeft(a.until, now) + ' min left';
+      (n > 0 ? n + ' min left' : 'ending…');
   }
 
   // safeURL: an https URL (http only on a plain-http page, the harness).
@@ -56,6 +58,9 @@
 
   async function readActive() {
     const res = await fetch('/api/me/impersonation', { credentials: 'same-origin', cache: 'no-store' });
+    // 404: a page without the route (the Hub listener's confirmation
+    // page): never impersonating there.
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const j = await res.json();
     const a = j && j.active;
@@ -118,16 +123,46 @@
       }
     });
     document.body.insertBefore(div, document.body.firstChild);
-    // Once a minute, on the minute of what's left; reload at 0.
-    const tick = () => {
-      const rem = new Date(a.until).getTime() - Date.now();
-      if (!(rem > 0)) { location.reload(); return; }
-      text.textContent = bannerText(a, Date.now());
-      setTimeout(tick, (rem % MINUTE) || MINUTE);
-    };
-    const rem = new Date(a.until).getTime() - Date.now();
-    if (!(rem > 0)) { location.reload(); return; }
-    setTimeout(tick, (rem % MINUTE) || MINUTE);
+    countdown(a, text);
+  }
+
+  // countdown: once a minute, on the minute of what's left. The page
+  // reloads only from a timer armed while time was left (so it reloads
+  // once, when the time runs out). Already at or past until when shown
+  // (a browser clock ahead of the server's, an unreadable until): the
+  // banner says "ending…" and asks the Hub again every 20 s, never
+  // reloading while the Hub still answers this impersonation; when it
+  // answers none, the page reloads once.
+  const RECHECK = 20 * 1000;
+  function remaining(a) { return new Date(a.until).getTime() - Date.now(); }
+  function countdown(a, text) {
+    const rem = remaining(a);
+    text.textContent = bannerText(a, Date.now());
+    if (rem > 0) {
+      setTimeout(() => {
+        if (!(remaining(a) > 0)) { location.reload(); return; }
+        countdown(a, text);
+      }, (rem % MINUTE) || MINUTE);
+      return;
+    }
+    setTimeout(() => {
+      readActive().then(b => {
+        if (!b) { location.reload(); return; }
+        a.until = b.until;
+        countdown(a, text);
+      }, () => countdown(a, text));
+    }, RECHECK);
+  }
+
+  // showUnknown: GET /api/me/impersonation failed, so whether this
+  // browser is signed in as someone else isn't known: a small line keeps
+  // a way to Stop (the Stop page).
+  function showUnknown() {
+    if (document.getElementById('pc-imp-banner') || document.getElementById('pc-imp-unknown')) return;
+    const div = el('div', { id: 'pc-imp-unknown', class: 'pc-imp-unknown', role: 'status' }, [
+      'Couldn\'t check whether you\'re signed in as someone else — ',
+      el('a', { href: '/impersonation/stop' }, ['Stop'])]);
+    document.body.insertBefore(div, document.body.firstChild);
   }
 
   // ── the Stop page ───────────────────────────────────────────────────
@@ -174,7 +209,8 @@
   function init() {
     const main = document.getElementById('imp-stop');
     const page = main ? initStopPage(main, active) : Promise.resolve();
-    const banner = active.then(a => { if (a) showBanner(a); }, () => { /* no banner: nothing to show */ });
+    // The Stop page says so itself when the check fails.
+    const banner = active.then(a => { if (a) showBanner(a); }, () => { if (!main) showUnknown(); });
     return Promise.all([page, banner]);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

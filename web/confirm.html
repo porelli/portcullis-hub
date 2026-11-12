@@ -34,6 +34,9 @@
 </style>
 </head>
 <body>
+<!-- The impersonation banner (sign-in part 3, D43): first in <body>. On the
+     Hub listener GET /api/me/impersonation is 404: no banner. -->
+<script src="/static/impersonation.js"></script>
 <!-- The confirmation page (contract §15.6). Everything below is the Hub's
      rendering of the stored request, escaped by html/template; confirm.js
      reads only the data-* attributes and writes only textContent. -->

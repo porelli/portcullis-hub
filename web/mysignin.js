@@ -809,7 +809,7 @@
     const user = st.opts.user;
     const title = 'Sign in as ' + user;
     const input = el('input', { type: 'text', class: 'pd-input msi-imp-reason', id: 'msi-imp-reason', maxlength: '200', autocomplete: 'off', spellcheck: 'false', 'data-msi-imp-reason': '' });
-    const go = el('button', { type: 'button', class: 'pd-btn danger sm', 'data-msi-imp': 'go' }, ['Continue with your YubiKey']);
+    const go = el('button', { type: 'button', class: 'pd-btn primary sm', 'data-msi-imp': 'go' }, ['Continue with your YubiKey']);
     const cancel = el('button', { type: 'button', class: 'pd-btn secondary sm', 'data-msi-imp': 'cancel' }, ['Cancel']);
     const status = el('div', { class: 'ma-status pd-muted', 'data-msi-imp-status': '', role: 'status' });
     const dlg = el('dialog', { class: 'pd-dialog msi-imp-dialog', 'aria-label': title }, [
@@ -859,7 +859,11 @@
             return;
           }
           const next = nextURL(ans && ans.next);
-          if (!next) { setStatus('The Hub answered no start link: try again.', true); return; }
+          if (!next) {
+            busy = false; input.disabled = false; check();
+            setStatus('The Hub answered no start link: try again.', true);
+            return;
+          }
           try { sessionStorage.setItem(IMP_KEY, JSON.stringify({ user, id: String(ans.id || '') })); } catch (_) { /* no notice then */ }
           st.impStarted = true;
           setStatus('Opening ' + user + '\'s portal…');
