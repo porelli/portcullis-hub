@@ -1300,6 +1300,13 @@ disabling it did before instances existed.
       `PUT /api/signin/limits`, audited `signin.limits`; raising a
       certificate limit or shortening the history asks for confirmation from
       AI tools (`set_sign_in_limits`).
+    - **Signing in as someone else** ([Sign-in methods → Signing in as
+      someone else](auth-policies.md#signing-in-as-someone-else)): the
+      switch (on at the start; `PUT /api/signin/impersonation`, audited
+      `signin.impersonation`) and the running list, each line with who,
+      whom, the reason, the time left and **Stop**. Switching it off asks
+      for confirmation naming the running ones, and ends them all. AI tools
+      may switch it off (`turn_off_impersonation`), never on.
     - A warning when the FIDO metadata list is out of date, and "No
       administrator can meet the Hub's template" when that is the case.
 
@@ -1779,6 +1786,14 @@ people (admins see all of it; others the parts their permissions allow).
   sign-in). Administrators' certificates show no Revoke or Issue: they are
   managed from the server (`./portcullis cert revoke <serial>`,
   `./portcullis cert enroll`).
+  For admins the tab also has **Sign in as &lt;person&gt;…**: type a reason,
+  do a fresh sign-in with a YubiKey touch, and the browser opens the
+  person's portal signed in as them ([Signing in as someone
+  else](auth-policies.md#signing-in-as-someone-else)). When it can't be
+  offered the tab says why (an administrator, the switch off, an
+  unfinished setup link, …). While someone is signed in as the person the
+  tab shows "root is signed in as alice since 14:02 UTC · reason · 26 min
+  left · **Stop**".
 - **History** (admins): the audit entries for this person, newest first, in
   words ("office_milan: kept carol out — "on leave"", "created the account").
 
@@ -1794,6 +1809,7 @@ people (admins see all of it; others the parts their permissions allow).
 | Revoke certificate | Admins, holders of `sign_in_help` (Sign-in tab) | Revokes one YubiKey or browser certificate; it normally stops working within a minute. Refused (409) for an administrator's, and for `admin`, `portcullis-hub` and any `portcullis-*` account: `./portcullis cert revoke <serial>` |
 | Issue YubiKey certificate | Admins (Sign-in tab) | Signs a CSR made on the person's YubiKey, after a fresh sign-in the people page's template accepts (not a password or a browser certificate). Refused (409) for an administrator, `admin`, `portcullis-hub` and any `portcullis-*` account |
 | Password… | Admins | Fallback: set or generate a password; signs the user out |
+| Sign in as… | Admins (Sign-in tab) | Signs in as the person for at most 30 minutes, after a typed reason and a fresh YubiKey touch; your own session ends. Not for administrators, `admin`, `portcullis-hub` or any `portcullis-*` account. Audited, and shown to the person at their next sign-in |
 | Delete | Admins, delegates with `remove` | Deletes the user from LLDAP and Keycloak. Type the username to confirm |
 
 **Delete** deletes the user from LLDAP first (saved as a tombstone to prevent re-creation of names still in entries or end dates), then deletes the Keycloak copy. The audit entry records what happened to the copy: `keycloak_copy=removed`, `none` (never imported) or `FAILED`. Delegates can delete only non-protected, non-administrator accounts not in any permission group. If the Keycloak removal fails, the copy is listed under **Stale Keycloak records** (admins only), where it can be removed by id. (Keycloak sometimes answers HTTP 500 after it has removed a federated user's copy; the Hub then looks the user up again and treats "not found" as removed.) The result also warns when other people's person fields (e.g. `manager`) or a rule's `reports to` still name the deleted user — update those. Afterwards the page goes back to the People list.
