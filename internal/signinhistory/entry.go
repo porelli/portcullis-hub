@@ -1,7 +1,8 @@
 // Package signinhistory is a person's sign-in history (contract §8.2,
-// plan D28), merged at read time from three sources: Keycloak's LOGIN /
-// LOGIN_ERROR events (FromEvent), group-gate's opened log (OpenedLog) and
-// the Hub's audit (FromAudit). Nothing is stored here. Every text that
+// plan D28), merged at read time from four sources: Keycloak's LOGIN /
+// LOGIN_ERROR events (FromEvent), group-gate's opened log (OpenedLog),
+// the Hub's audit (FromAudit) and, part 3, the impersonations
+// (ImpersonationSource). Nothing is stored here. Every text that
 // came from outside (the User-Agent, an IP, an app name, an audit detail)
 // is clipped and has its control and bidi characters removed; the pages
 // that show it escape it.
@@ -23,7 +24,7 @@ import (
 // Kind is an entry's kind.
 type Kind string
 
-// The kinds (contract §8.2). Impersonation is reserved for part 3.
+// The kinds (contract §8.2); impersonation is Source 4 (part 3).
 const (
 	KindSignIn        Kind = "sign_in"
 	KindStepUp        Kind = "step_up"

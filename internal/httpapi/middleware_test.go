@@ -193,3 +193,34 @@ func TestRefuseWhileImpersonated(t *testing.T) {
 		}
 	}
 }
+
+// TestRefuseImpersonatedToken (Task 6 review M2): a token with an act or
+// pc_imp claim is impersonated even without X-Forwarded-Impersonation.
+func TestRefuseImpersonatedToken(t *testing.T) {
+	h := RefuseWhileImpersonated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(299) }))
+	for _, c := range []struct {
+		name, method, path string
+		tokens             []string
+		code               int
+	}{
+		{"token without header → refused", "POST", "/x", []string{testJWT(`{"sub":"alice","act":{"sub":"root"},"pc_imp":{"id":"ab","until":1}}`)}, 403},
+		{"act only", "PUT", "/x", []string{testJWT(`{"sub":"alice","act":{"sub":"root"}}`)}, 403},
+		{"pc_imp only", "DELETE", "/x", []string{testJWT(`{"sub":"alice","pc_imp":null}`)}, 403},
+		{"a second header", "POST", "/x", []string{testJWT(`{"sub":"alice"}`), testJWT(`{"act":{"sub":"root"}}`)}, 403},
+		{"reads work", "GET", "/x", []string{testJWT(`{"act":{"sub":"root"}}`)}, 299},
+		{"own Stop passes", "POST", "/api/me/impersonation/stop", []string{testJWT(`{"act":{"sub":"root"}}`)}, 299},
+		{"a normal token", "POST", "/x", []string{testJWT(`{"sub":"alice","sid":"s","amr":["hwk"],"pc_x":1}`)}, 299},
+		{"an unreadable token", "POST", "/x", []string{"not-a-token"}, 299},
+		{"a claim named in a value only", "POST", "/x", []string{testJWT(`{"sub":"act","name":"pc_imp"}`)}, 299},
+	} {
+		r := httptest.NewRequest(c.method, c.path, nil)
+		for _, tok := range c.tokens {
+			r.Header.Add("X-Forwarded-Access-Token", tok)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != c.code {
+			t.Errorf("%s: %d, want %d", c.name, rec.Code, c.code)
+		}
+	}
+}

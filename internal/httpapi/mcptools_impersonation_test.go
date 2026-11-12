@@ -95,6 +95,12 @@ func TestImpersonationTools(t *testing.T) {
 	if txt, isErr, _ := e.tool(t, "stop_impersonation", map[string]any{"user": "alice"}); !isErr || !strings.HasPrefix(txt, "404") {
 		t.Errorf("second stop = %s %v", txt, isErr)
 	}
+	// Not a username: 400 before anything else (Task 6 review M3).
+	for _, u := range []string{"", "../x", "al ice", strings.Repeat("a", 65)} {
+		if txt, isErr, _ := e.tool(t, "stop_impersonation", map[string]any{"user": u}); !isErr || !strings.HasPrefix(txt, "400") {
+			t.Errorf("stop_impersonation %q = %s %v", u, txt, isErr)
+		}
+	}
 	if txt, isErr, conf := e.tool(t, "turn_off_impersonation", map[string]any{}); isErr || conf != "" || !strings.Contains(txt, `"allowed":false`) {
 		t.Errorf("turn_off_impersonation = %s %v %q", txt, isErr, conf)
 	}

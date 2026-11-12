@@ -161,6 +161,9 @@ func TestImpersonationRoutesAdminsOnly(t *testing.T) {
 	}
 	mustDo(t, e.hub, "root", "PUT", "/api/signin/impersonation", `{"allowed":true}`, 200)
 	mustDo(t, e.people, "root", "POST", "/api/directory/users/alice/impersonation/stop", ``, 404)
+	// Not a username: 400 (Task 6 review M3), on both listeners.
+	mustDo(t, e.people, "root", "POST", "/api/directory/users/al%20ice/impersonation/stop", ``, 400)
+	mustDo(t, e.hub, "root", "POST", "/api/directory/users/"+strings.Repeat("a", 65)+"/impersonation/stop", ``, 400)
 }
 
 // TestStartRouteShape: ≤ 8 KiB (413), unknown fields 400, the sid read

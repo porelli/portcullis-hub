@@ -193,3 +193,46 @@ func TestLoginEventsQuery(t *testing.T) {
 		t.Error("a failed read was not reported")
 	}
 }
+
+// TestImpersonateEventsQuery (F4): ImpersonateEvents asks for
+// type=IMPERSONATE only, for the person, in the window, and pages.
+func TestImpersonateEventsQuery(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	alice := kc.Import("alice")
+	at := time.Date(2026, 11, 12, 14, 3, 0, 0, time.UTC)
+	kc.With(func() {
+		kc.Events = []map[string]any{
+			{"time": at.UnixMilli(), "type": "IMPERSONATE", "clientId": "portcullis-forward-auth", "userId": alice.ID,
+				"details": map[string]any{"pc_imp": "0f3c0f3c0f3c0f3c0f3c0f3c0f3c0f3c", "pc_act": "root"}},
+			{"time": at.UnixMilli(), "type": "LOGIN", "userId": alice.ID},
+		}
+		for i := range 150 {
+			kc.Events = append(kc.Events, map[string]any{"time": at.Add(-time.Duration(i+1) * time.Second).UnixMilli(), "type": "IMPERSONATE", "userId": alice.ID})
+		}
+	})
+	from, to := at.Add(-time.Hour), at.Add(time.Second)
+	evs, err := c.ImpersonateEvents(ctx, alice.ID, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Get("user") != alice.ID || !reflect.DeepEqual(q["type"], []string{"IMPERSONATE"}) ||
+		q.Get("dateFrom") != fmt.Sprint(from.UnixMilli()) || q.Get("dateTo") != fmt.Sprint(to.UnixMilli()-1) || q.Get("first") != "100" {
+		t.Errorf("query = %v", q)
+	}
+	if len(evs) != 151 || evs[0].Type != "IMPERSONATE" || evs[0].Details["pc_imp"] != "0f3c0f3c0f3c0f3c0f3c0f3c0f3c0f3c" || evs[0].Details["pc_act"] != "root" {
+		t.Errorf("events = %d, first %+v", len(evs), evs[0])
+	}
+	if n := kc.CountCalls("GET /admin/realms/portcullis/events"); n != 2 {
+		t.Errorf("%d event reads", n)
+	}
+	if evs, err := c.UserImpersonateEvents(ctx, "nobody", from, to); err != nil || len(evs) != 0 {
+		t.Errorf("unknown user = %v, %v", evs, err)
+	}
+	if evs, err := c.UserImpersonateEvents(ctx, "alice", from, to); err != nil || len(evs) != 151 {
+		t.Errorf("alice by name = %d, %v", len(evs), err)
+	}
+}

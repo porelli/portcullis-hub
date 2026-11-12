@@ -436,6 +436,12 @@ func main() {
 	// The sign-in history's sources (contract §8.2): Keycloak's login
 	// events and the audit; the opened log is GroupGateDataDir's.
 	h.SetHistorySources(hub.HistorySources{Events: kc.UserLoginEventsPage, Audit: dir.RecentMatching})
+	// Impersonation (contract §8.2 Source 4, D44): the apps opened, run
+	// once at the end (the opened log's act lines, Keycloak's LOGIN with
+	// pc_act and IMPERSONATE with pc_imp); the history's entries from the
+	// audit and the kept records (F22: never the live function).
+	h.SetImpersonationApps(h.ImpersonationAppsFunc(kc))
+	h.AddHistorySource(hub.HistoryImpersonation, h.ImpersonationHistorySource(dir.RecentMatching))
 	h.Init()
 
 	srv := &httpapi.Server{

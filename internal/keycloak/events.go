@@ -117,11 +117,62 @@ func (c *Client) LoginEvents(ctx context.Context, userID string, from, to time.T
 // LoginEventsPage is LoginEvents from the first-th event on (Keycloak's
 // first): the history pages through the events newer than its window.
 func (c *Client) LoginEventsPage(ctx context.Context, userID string, from, to time.Time, first, max int) ([]Event, error) {
+	return c.eventsPage(ctx, "login events", HistoryEventTypes, userID, from, to, first, max)
+}
+
+// impersonateEventsPage and impersonateEventsPages bound ImpersonateEvents'
+// read: pages of 100, at most 10 (an impersonation window is 30 minutes).
+const (
+	impersonateEventsPage  = 100
+	impersonateEventsPages = 10
+)
+
+// ImpersonateEvents reads userID's IMPERSONATE events (the person's: the
+// extension's start sends it with user = the person and the details
+// pc_imp = the id, pc_act = the administrator; contract §8.1) with from
+// <= time < to, newest first: type=IMPERSONATE only (F4: the history
+// query stays LOGIN and LOGIN_ERROR). More than the read's bound is an
+// error (the caller then counts the impersonation as used).
+func (c *Client) ImpersonateEvents(ctx context.Context, userID string, from, to time.Time) ([]Event, error) {
+	out := []Event{}
+	for page := 0; page < impersonateEventsPages; page++ {
+		evs, err := c.eventsPage(ctx, "impersonate events", []string{"IMPERSONATE"}, userID, from, to, len(out), impersonateEventsPage)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, evs...)
+		if len(evs) < impersonateEventsPage {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("impersonate events: more than %d", impersonateEventsPage*impersonateEventsPages)
+}
+
+// UserImpersonateEvents is ImpersonateEvents for a username: a user
+// Keycloak doesn't know has no events.
+func (c *Client) UserImpersonateEvents(ctx context.Context, username string, from, to time.Time) ([]Event, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	u, err := c.findUser(ctx, tok, username)
+	if err != nil {
+		return nil, err
+	}
+	if u == nil {
+		return []Event{}, nil
+	}
+	return c.ImpersonateEvents(ctx, str(u.ID), from, to)
+}
+
+// eventsPage reads userID's events of types with from <= time < to, from
+// the first-th on, at most max (what names the read in errors).
+func (c *Client) eventsPage(ctx context.Context, what string, types []string, userID string, from, to time.Time, first, max int) ([]Event, error) {
 	if !ValidUserID(userID) {
-		return nil, fmt.Errorf("login events: not a Keycloak user id")
+		return nil, fmt.Errorf("%s: not a Keycloak user id", what)
 	}
 	if max < 1 || first < 0 {
-		return nil, fmt.Errorf("login events: first %d, max %d", first, max)
+		return nil, fmt.Errorf("%s: first %d, max %d", what, first, max)
 	}
 	tok, err := c.token(ctx)
 	if err != nil {
@@ -129,7 +180,7 @@ func (c *Client) LoginEventsPage(ctx context.Context, userID string, from, to ti
 	}
 	q := url.Values{}
 	q.Set("user", userID)
-	for _, t := range HistoryEventTypes {
+	for _, t := range types {
 		q.Add("type", t)
 	}
 	q.Set("dateFrom", strconv.FormatInt(ceilMilli(from), 10))
@@ -142,10 +193,10 @@ func (c *Client) LoginEventsPage(ctx context.Context, userID string, from, to ti
 	resp, err := c.api().GetRequestWithBearerAuth(ctx, tok).SetResult(&reps).
 		Get(c.BaseURL + "/admin/realms/" + Realm + "/events?" + q.Encode())
 	if err != nil {
-		return nil, fmt.Errorf("read the login events: %w", err)
+		return nil, fmt.Errorf("read the %s: %w", what, err)
 	}
 	if resp.IsError() {
-		return nil, &HTTPError{Op: "read the login events", Status: resp.StatusCode()}
+		return nil, &HTTPError{Op: "read the " + what, Status: resp.StatusCode()}
 	}
 	out := make([]Event, 0, len(reps))
 	for _, r := range reps {

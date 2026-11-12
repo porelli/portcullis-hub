@@ -558,6 +558,12 @@ func TestStopEnds(t *testing.T) {
 	if err := x.h.StopImpersonation(x.ctx, "bob", directory.Human("sam")); statusOf(err) != 404 {
 		t.Errorf("none running: %v", err)
 	}
+	// Not a username: 400 first, even for a non-admin (Task 6 review M3).
+	for _, u := range []string{"", "al/ice", "-x", strings.Repeat("a", 65)} {
+		if err := x.h.StopImpersonation(x.ctx, u, directory.Human("alice")); statusOf(err) != 400 {
+			t.Errorf("stop %q: %v", u, err)
+		}
+	}
 	x.advance(90 * time.Second)
 	if err := x.h.StopImpersonation(x.ctx, "alice", directory.Human("sam")); err != nil {
 		t.Fatal(err)

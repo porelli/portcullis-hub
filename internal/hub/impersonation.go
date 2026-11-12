@@ -880,9 +880,13 @@ func impEndDetail(r state.Impersonation) string {
 }
 
 // StopImpersonation ends target's running impersonation (how stopped,
-// by actor): administrators only, on a fresh snapshot (403); 404 when
-// none runs.
+// by actor): a target that isn't a username is 400 before anything else
+// (Task 6 review M3); administrators only, on a fresh snapshot (403);
+// 404 when none runs.
 func (h *Hub) StopImpersonation(ctx context.Context, target string, actor directory.Actor) error {
+	if t := strings.ToLower(strings.TrimSpace(target)); !lldap.ValidUsername(t) {
+		return statusErr(http.StatusBadRequest, "not a username: %q", clip(target, 70))
+	}
 	by := strings.ToLower(strings.TrimSpace(actor.User))
 	if by == "" {
 		return errImpNoCaller
