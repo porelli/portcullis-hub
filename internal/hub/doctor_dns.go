@@ -85,9 +85,13 @@ func (h *Hub) dnsDoctorInputs(ctx context.Context) ([]domains.Plan, *domains.Pla
 			log.Printf("doctor: DNS checks skipped: the plan of %s: %v", n, err)
 			return nil, nil
 		}
-		if p.Name == "" {
-			p.Name = n
+		// The plan is the Hub's own name's: a service answer naming
+		// another name is dropped (it would reach op keys and fixes).
+		if p.Name != "" && NormalizeHost(p.Name) != n {
+			log.Printf("doctor: the domains service answered the plan of %s for %q: dropped", n, clip(p.Name, 64))
+			continue
 		}
+		p.Name = n
 		plans = append(plans, p)
 	}
 	return plans, &main
@@ -112,6 +116,12 @@ func (h *Hub) findingDomain(f doctor.Finding) (string, error) {
 	name := NormalizeHost(f.Domains[0])
 	if strings.EqualFold(name, h.cfg.Domain) {
 		return "", statusErr(http.StatusConflict, "the main domain's records are set on the server: run ./portcullis dns setup there")
+	}
+	h.mu.RLock()
+	known := h.knownLocked(name)
+	h.mu.RUnlock()
+	if !templates.ValidHostname(name) || !known {
+		return "", statusErr(http.StatusConflict, "this finding's domain %q is not an added domain", clip(name, 64))
 	}
 	return name, nil
 }

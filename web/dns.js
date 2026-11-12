@@ -21,6 +21,8 @@
   const esc = s => window.escapeHtml(s);
   const SEV_COLOR = { ok: '#4ade80', info: '#94a3b8', warning: '#fbbf24', problem: '#f87171' };
   const MAIN_FIX = 'Run <code>./portcullis dns setup</code> on the server';
+  // Table cells: room between the columns.
+  const CELL = '<style>.dns-panel th, .dns-panel td { padding: 0.25rem 0.75rem 0.25rem 0; }</style>';
 
   function planURL(opts, refresh) {
     const name = opts.name;
@@ -87,7 +89,7 @@
 
   function render(el, opts, plan) {
     const items = plan.items || [];
-    let html = '<div class="dns-panel" style="padding:0.75rem 0">' +
+    let html = CELL + '<div class="dns-panel" style="padding:0.75rem 0">' +
       '<p style="color:#94a3b8;font-size:0.8125rem">DNS plan of <code>' + esc(plan.name || opts.name || '') + '</code>' +
       (plan.checked_at ? ', checked ' + esc(new Date(plan.checked_at).toLocaleString()) : '') +
       ' <button class="btn btn-sm" data-dns-refresh>Refresh</button></p>';

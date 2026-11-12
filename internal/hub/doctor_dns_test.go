@@ -2,6 +2,8 @@ package hub
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -196,5 +198,56 @@ func TestDNSFixersTouchNoData(t *testing.T) {
 	}
 	if !validOpKey(OpKeyDomain("Team-B.example.net")) || validOpKey("_domain.") || validOpKey("_domain.bad_name") {
 		t.Error("validOpKey for _domain.")
+	}
+}
+
+// TestDNSNamesNeverReachOpPaths (security review): a plan the service
+// answers under another name ("../x", "a/b", a name not added) is
+// dropped; a finding naming such a domain has no fix; validOpKey refuses
+// path separators and dot-dot, and startAsync / recordOp refuse any key
+// it refuses (no file outside the ops directory).
+func TestDNSNamesNeverReachOpPaths(t *testing.T) {
+	f, api, _ := dnsDoctorFixture(t)
+	ctx := context.Background()
+	for _, bad := range []string{"../x", "a/b", "other.example.net"} {
+		api.mu.Lock()
+		p := api.plans[dnsD]
+		p.Name = bad
+		api.plans[dnsD] = p
+		api.mu.Unlock()
+		r, err := f.h.Doctor(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, x := range r.Findings {
+			if len(x.Domains) > 0 && x.Domains[0] != "example.org" {
+				t.Errorf("plan named %q: finding %+v", bad, x)
+			}
+		}
+		fd := doctor.Finding{Kind: doctor.KindDNSCAAMissing, Domains: []string{bad}, Class: doctor.FixOneClick, FixKind: doctor.FixDNSApply}
+		if _, err := (dnsApplyFixer{}).Apply(f.h, fd, nil, "x", directory.Human("alice")); statusOf(err) != 409 {
+			t.Errorf("apply for %q: %v", bad, err)
+		}
+		if _, err := (dnssecSignFixer{}).Preview(ctx, f.h, fd, nil); statusOf(err) != 409 {
+			t.Errorf("sign preview for %q: %v", bad, err)
+		}
+	}
+	for _, k := range []string{"_domain.../x", "_domain.a/b", "../x", "a/b", "_folder.../x", "_domain.", "_domain..."} {
+		if validOpKey(k) {
+			t.Errorf("validOpKey(%q) = true", k)
+		}
+		if _, err := f.h.startAsync(k, OpDNSApply, directory.Human("alice"), nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
+			ready()
+			return nil, nil, nil
+		}); err == nil {
+			t.Errorf("startAsync(%q) accepted", k)
+		}
+		f.h.recordOp(k, OpRecord{Op: OpDNSApply})
+		if f.h.LastOp(k) != nil {
+			t.Errorf("recordOp(%q) recorded", k)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(f.h.opsDir(), "..", "x.json")); err == nil {
+		t.Error("a record was written outside the ops directory")
 	}
 }
