@@ -1721,7 +1721,8 @@
       porkbun: [['api_key', 'API key', true], ['secret_api_key', 'Secret API key', true]],
       route53: [['access_key_id', 'Access key ID', true], ['secret_access_key', 'Secret access key', true], ['hosted_zone_id', 'Hosted zone ID (optional)', false]],
       digitalocean: [['auth_token', 'API token', true]],
-      hetzner: [['api_token', 'DNS API token', true]],
+      hetzner: [['api_token', 'DNS API token (legacy dns.hetzner.com)', true]],
+      'hetzner-cloud': [['api_token', 'Hetzner Cloud API token (Read & Write)', true]],
     };
 
     function credFields(provider, prefix) {

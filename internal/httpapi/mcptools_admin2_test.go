@@ -610,6 +610,11 @@ var adminToolFixtures = []struct {
 	{"resume_user_sweep", nil},
 	{"remove_stale_keycloak_user", map[string]any{"username": "ghost"}},
 	{"admin_revoke_credential", map[string]any{"id": "smbfixture", "key": "share_password", "user": "alice"}},
+	// DNS hardening (F1).
+	{"get_domain_dns", map[string]any{"name": "team-c.example.net", "refresh": true}},
+	{"get_main_dns", nil},
+	{"apply_domain_dns", map[string]any{"name": "team-c.example.net", "sets": []string{"caa", "nomail"}}},
+	{"enable_domain_dnssec", map[string]any{"name": "team-c.example.net"}},
 	{"delete_domain", map[string]any{"name": "team-c.example.net"}},
 	{"disable_instance", map[string]any{"id": "secretapp"}},
 	// Task 18: users and groups (marker invite links and a marker password are set up).
@@ -850,7 +855,9 @@ func testToolsNotEchoed(t *testing.T) {
 		"get_person_apps", "get_group_uses",
 		// Task 20.
 		"doctor_findings", "doctor_scan", "doctor_preview_fix", "list_folders", "check_folder_path", "create_folder", "update_folder",
-		"folder_preview", "folder_recheck_preview", "delete_folder"} {
+		"folder_preview", "folder_recheck_preview", "delete_folder",
+		// DNS hardening.
+		"get_domain_dns", "get_main_dns", "apply_domain_dns", "enable_domain_dnssec"} {
 		if !ok[n] {
 			t.Errorf("%s didn't succeed: the fixture misses its success path", n)
 		}

@@ -47,6 +47,12 @@ type DomainsAPI interface {
 	Enroll(ctx context.Context, name, provider string, creds map[string]string) (domains.Domain, error)
 	SetToken(ctx context.Context, name, provider string, creds map[string]string) (domains.Domain, error)
 	Delete(ctx context.Context, name string) (warning string, err error)
+	// DNS hardening (§12.2): the plan of an added domain and of the main
+	// domain, applying record sets, turning DNSSEC signing on.
+	Plan(ctx context.Context, name string, refresh bool) (domains.Plan, error)
+	MainPlan(ctx context.Context, refresh bool) (domains.Plan, error)
+	ApplySets(ctx context.Context, name string, sets []string) (domains.Domain, error)
+	EnableDNSSEC(ctx context.Context, name string) (domains.Domain, error)
 }
 
 // SetDomainsAPI connects the domains service; the known list in state.yaml
@@ -94,7 +100,7 @@ func toKnown(list []domains.Domain) []state.KnownDomain {
 	out := make([]state.KnownDomain, 0, len(list))
 	for _, d := range list {
 		out = append(out, state.KnownDomain{Name: NormalizeHost(d.Name), Provider: d.Provider, RecordsOK: d.RecordsOK,
-			CertNotAfter: d.CertNotAfter, LastError: d.LastError, State: d.State})
+			CertNotAfter: d.CertNotAfter, LastError: d.LastError, State: d.State, CAAOK: d.CAAOK, DNSSEC: d.DNSSEC})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -145,7 +151,12 @@ func domainNameProblem(name, main string) string {
 
 // providers the domains service supports (§12.2); anything else is a 400
 // before it is forwarded, logged or audited.
-var knownProviders = map[string]bool{"cloudflare": true, "porkbun": true, "route53": true, "digitalocean": true, "hetzner": true}
+var knownProviders = map[string]bool{"cloudflare": true, "porkbun": true, "route53": true, "digitalocean": true, "hetzner": true, "hetzner-cloud": true}
+
+// errUnknownProvider is the 400 for a provider outside knownProviders.
+func errUnknownProvider() error {
+	return statusErr(400, "unknown provider (one of cloudflare, porkbun, route53, digitalocean, hetzner, hetzner-cloud)")
+}
 
 func providerDetail(p string) string {
 	if knownProviders[p] {
@@ -158,7 +169,7 @@ func fromKnown(list []state.KnownDomain) []domains.Domain {
 	out := make([]domains.Domain, 0, len(list))
 	for _, d := range list {
 		out = append(out, domains.Domain{Name: d.Name, Provider: d.Provider, RecordsOK: d.RecordsOK,
-			CertNotAfter: d.CertNotAfter, LastError: d.LastError, State: d.State})
+			CertNotAfter: d.CertNotAfter, LastError: d.LastError, State: d.State, CAAOK: d.CAAOK, DNSSEC: d.DNSSEC})
 	}
 	return out
 }
@@ -505,7 +516,7 @@ func (h *Hub) EnrollDomain(ctx context.Context, actor directory.Actor, name, pro
 		return d, statusErr(400, "%q is not a valid hostname (lowercase labels, no scheme, port or wildcard)", name)
 	}
 	if !knownProviders[provider] {
-		return d, statusErr(400, "unknown provider (one of cloudflare, porkbun, route53, digitalocean, hetzner)")
+		return d, errUnknownProvider()
 	}
 	h.domainOpMu.Lock()
 	defer h.domainOpMu.Unlock()
@@ -559,7 +570,7 @@ func (h *Hub) ReplaceDomainToken(ctx context.Context, actor directory.Actor, nam
 		return d, statusErr(400, "no signed-in user to audit the change as")
 	}
 	if !knownProviders[provider] {
-		return d, statusErr(400, "unknown provider (one of cloudflare, porkbun, route53, digitalocean, hetzner)")
+		return d, errUnknownProvider()
 	}
 	h.domainOpMu.Lock()
 	defer h.domainOpMu.Unlock()

@@ -452,6 +452,16 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/instances/restore", body: `{"archive":"secretapp/20990101T000000Z.tar","id":"notes-b"}`},
 		{tool: "delete_domain", args: map[string]any{"name": "team-b.example.net"},
 			method: "DELETE", path: "/api/domains/team-b.example.net", body: ``},
+		// DNS hardening (F1): the four DNS twins (no domains service here:
+		// 503 alike).
+		{tool: "get_domain_dns", args: map[string]any{"name": "team-b.example.net", "refresh": true},
+			method: "GET", path: "/api/domains/team-b.example.net/dns?refresh=1", body: ``},
+		{tool: "get_main_dns", args: map[string]any{},
+			method: "GET", path: "/api/dns/main", body: ``},
+		{tool: "apply_domain_dns", args: map[string]any{"name": "team-b.example.net", "sets": []string{"caa"}},
+			method: "POST", path: "/api/domains/team-b.example.net/dns/apply", body: `{"sets":["caa"]}`},
+		{tool: "enable_domain_dnssec", args: map[string]any{"name": "team-b.example.net"},
+			method: "POST", path: "/api/domains/team-b.example.net/dnssec", body: `{"enable":true}`},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"},
 			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_only"}}}`, instance: "aiapp"},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_write"},

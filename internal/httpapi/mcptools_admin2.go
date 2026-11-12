@@ -61,10 +61,21 @@ type (
 	}
 	addDomainArgs struct {
 		Name     string `json:"name" jsonschema:"the domain or subdomain to add"`
-		Provider string `json:"provider,omitempty" jsonschema:"the DNS provider to pre-select on the form (cloudflare, porkbun, route53, digitalocean, hetzner)"`
+		Provider string `json:"provider,omitempty" jsonschema:"the DNS provider to pre-select on the form (cloudflare, porkbun, route53, digitalocean, hetzner, hetzner-cloud)"`
 	}
 	domainArgs struct {
 		Name string `json:"name" jsonschema:"the added domain"`
+	}
+	domainDNSArgs struct {
+		Name    string `json:"name" jsonschema:"the added domain"`
+		Refresh bool   `json:"refresh,omitempty" jsonschema:"build the plan again from live lookups (at most once per 30 s per name; default: the cached plan)"`
+	}
+	mainDNSArgs struct {
+		Refresh bool `json:"refresh,omitempty" jsonschema:"build the plan again from live lookups (default: the cached plan)"`
+	}
+	applyDNSArgs struct {
+		Name string   `json:"name" jsonschema:"the added domain"`
+		Sets []string `json:"sets" jsonschema:"the record sets to write: address, caa, nomail (nomail also opts the domain in to it)"`
 	}
 	aiSupportArgs struct {
 		ID        string `json:"id" jsonschema:"the instance id"`
@@ -328,6 +339,33 @@ func (s *Server) registerAdminTools2() {
 					out["warning"] = warning
 				}
 				return out, nil
+			}},
+		admin("get_domain_dns", "An added domain's DNS plan: every record Portcullis wants (address, caa, nomail) with its live value, status, severity and fix (auto, manual, none), the CAA judgement (would the CA issue to Portcullis' account) and the DNSSEC state of the zone with the DS values and steps.",
+			ClassRead, "GET /api/domains/{name}/dns", "", func(ctx context.Context, _ directory.Actor, in domainDNSArgs) (any, error) {
+				return s.domainDNS(ctx, in.Name, in.Refresh)
+			}),
+		admin("get_main_dns", "The main domain's DNS plan, read-only (public lookups only, can_write false): every fix is run ./portcullis dns setup on the server.",
+			ClassRead, "GET /api/dns/main", "", func(ctx context.Context, _ directory.Actor, in mainDNSArgs) (any, error) {
+				return s.mainDNS(ctx, in.Refresh)
+			}),
+		admin("apply_domain_dns", "Write record sets of an added domain (address, caa, nomail): the domains service applies them in the background (state records; see get_domain_dns with refresh). Never touches records outside those sets.",
+			ClassWrite, "POST /api/domains/{name}/dns/apply", "domain.dns_apply", func(ctx context.Context, a directory.Actor, in applyDNSArgs) (any, error) {
+				return s.applyDomainDNS(ctx, a, in.Name, in.Sets)
+			}),
+		{Name: "enable_domain_dnssec", Description: "Turn on DNSSEC signing for an added domain's zone at its DNS provider (only providers that sign through their API). Zone-wide, and it can't be undone from Portcullis: no tool turns signing off. Needs your confirmation in the browser.",
+			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "POST /api/domains/{name}/dnssec", Audit: "domain.dnssec_enable", In: domainArgs{},
+			Typed: func(args json.RawMessage) string { return hub.NormalizeHost(nameOf(args)) },
+			Consequences: func(ctx context.Context, args json.RawMessage) []string {
+				name := hub.NormalizeHost(nameOf(args))
+				zone := "the zone of " + q(name)
+				if p, err := s.Hub.DomainPlan(ctx, name, false); err == nil && p.DNSSEC.Zone != "" {
+					zone = "the whole zone " + q(p.DNSSEC.Zone)
+				}
+				return []string{"Turns on DNSSEC signing for " + zone + " at its DNS provider: every name in that zone is signed, not only " + q(name) + ".",
+					"It can't be undone from Portcullis (signing is never turned off here). Then add the DS it shows at your registrar."}
+			},
+			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
+				return s.enableDomainDNSSEC(ctx, toolActor(ctx, c), nameOf(args))
 			}},
 		// ── AI ──
 		admin("ai_status", "An instance's AI support: whether it is supported or refused (and why), the master switch, and each companion (mode, status, population, credentials, last error).",

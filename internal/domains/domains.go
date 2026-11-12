@@ -54,6 +54,68 @@ type Domain struct {
 	CertNotAfter *time.Time `json:"cert_not_after"`
 	LastError    string     `json:"last_error"`
 	State        string     `json:"state"`
+	// CAAOK: the last plan found caa.would_issue (NEW, DNS hardening);
+	// DNSSEC: the last plan's dnssec.state ("" before the first plan).
+	CAAOK  bool   `json:"caa_ok"`
+	DNSSEC string `json:"dnssec"`
+}
+
+// Record sets (contract §12.4).
+const (
+	SetAddress = "address"
+	SetCAA     = "caa"
+	SetNoMail  = "nomail"
+)
+
+// Sets is every record set, in apply order.
+var Sets = []string{SetAddress, SetCAA, SetNoMail}
+
+// PlanItem is one row of a DNS plan (contract §12.2).
+type PlanItem struct {
+	Set      string   `json:"set"`
+	Name     string   `json:"name"`
+	Type     string   `json:"type"`
+	Want     []string `json:"want"`
+	Live     []string `json:"live"`
+	Status   string   `json:"status"`   // ok, missing, wrong, foreign, unknown
+	Severity string   `json:"severity"` // ok, info, warning, problem
+	Fix      string   `json:"fix"`      // auto, manual, none
+	Steps    []string `json:"steps"`
+}
+
+// DS is one DS record value for the registrar.
+type DS struct {
+	KeyTag     int    `json:"key_tag"`
+	Algorithm  int    `json:"algorithm"`
+	DigestType int    `json:"digest_type"`
+	Digest     string `json:"digest"`
+}
+
+// PlanCAA is a plan's CAA judgement.
+type PlanCAA struct {
+	Issuer     string `json:"issuer"`
+	AccountURI string `json:"account_uri"`
+	WouldIssue bool   `json:"would_issue"`
+}
+
+// PlanDNSSEC is a plan's DNSSEC state of the zone.
+type PlanDNSSEC struct {
+	State           string   `json:"state"` // secure, unsigned, ds_missing, ds_mismatch, bogus, unknown
+	Zone            string   `json:"zone"`
+	ProviderCanSign bool     `json:"provider_can_sign"`
+	DS              []DS     `json:"ds"`
+	Steps           []string `json:"steps"`
+}
+
+// Plan is a name's DNS plan (contract §12.2): the same shape for an added
+// domain and the main domain (CanWrite false).
+type Plan struct {
+	Name      string     `json:"name"`
+	CheckedAt time.Time  `json:"checked_at"`
+	CanWrite  bool       `json:"can_write"`
+	Items     []PlanItem `json:"items"`
+	CAA       PlanCAA    `json:"caa"`
+	DNSSEC    PlanDNSSEC `json:"dnssec"`
 }
 
 // Assignable: records OK and a certificate valid at now (§12.3).
@@ -214,4 +276,48 @@ func (c *Client) Delete(ctx context.Context, name string) (warning string, err e
 		return "", err
 	}
 	return w.Warning, nil
+}
+
+func refreshQuery(refresh bool) string {
+	if refresh {
+		return "?refresh=1"
+	}
+	return ""
+}
+
+// Plan is name's DNS plan: the cached one, or (refresh) built again (the
+// service builds at most one per 30 s per name).
+func (c *Client) Plan(ctx context.Context, name string, refresh bool) (Plan, error) {
+	var p Plan
+	_, err := c.do(ctx, http.MethodGet, path(name)+"/dns"+refreshQuery(refresh), nil, nil, &p)
+	return p, err
+}
+
+// MainPlan is the main domain's read-only plan (no credentials, public
+// lookups only, can_write false).
+func (c *Client) MainPlan(ctx context.Context, refresh bool) (Plan, error) {
+	var p Plan
+	_, err := c.do(ctx, http.MethodGet, "/main/dns"+refreshQuery(refresh), nil, nil, &p)
+	return p, err
+}
+
+// ApplySets makes sets due on name: the records step runs in the
+// background (state records).
+func (c *Client) ApplySets(ctx context.Context, name string, sets []string) (Domain, error) {
+	var d Domain
+	_, err := c.do(ctx, http.MethodPost, path(name)+"/dns/apply", struct {
+		Sets []string `json:"sets"`
+	}{sets}, nil, &d)
+	return d, err
+}
+
+// EnableDNSSEC asks the service to turn signing on for name's zone (a 409
+// when the provider can't sign through its API). There is no way to turn
+// it off.
+func (c *Client) EnableDNSSEC(ctx context.Context, name string) (Domain, error) {
+	var d Domain
+	_, err := c.do(ctx, http.MethodPost, path(name)+"/dnssec", struct {
+		Enable bool `json:"enable"`
+	}{true}, nil, &d)
+	return d, err
 }
