@@ -3,13 +3,19 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/metadata"
+
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fidomds"
+	"github.com/portcullis/hub/internal/fidomds/fidomdstest"
 	"github.com/portcullis/hub/internal/invite"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
@@ -295,5 +301,206 @@ func TestOwnPasswordFreshMethod(t *testing.T) {
 	}
 	if c.fa.calls.Load() != calls {
 		t.Error("a proof was spent for portcullis-x")
+	}
+}
+
+// TestMySignInPasskeyModel: a passkey's model is the FIDO list's
+// description for its AAGUID ("" when the AAGUID is unknown), its id the
+// credential id; the method labels are the plain names (one table).
+func TestMySignInPasskeyModel(t *testing.T) {
+	c := newCertFixture(t)
+	const keyID = "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"
+	c.src.set(func(s *fakeSignInSrc) {
+		s.keys["alice"] = []signin.Method{signin.SecurityKey, signin.PasskeySynced}
+		s.creds = map[string][]keycloak.PasskeyCredential{"alice": {
+			{ID: keyID, Type: string(signin.SecurityKey), Label: "YubiKey", AAGUID: mdsKeyAAGUID},
+			{ID: "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d", Type: string(signin.PasskeySynced), Label: "iPhone"},
+		}}
+	})
+	next := time.Now().AddDate(0, 1, 0)
+	b, _ := json.Marshal(fidomdstest.Payload(3, next, fidomdstest.Entry(mdsKeyAAGUID, []string{"external"}, []string{"secure_element"}, "", fidomdstest.Reports("FIDO_CERTIFIED"))))
+	var p metadata.PayloadJSON
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := metadata.NewDecoder()
+	m, err := d.Parse(&p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.f.h.setMDS(m, &fidomds.Status{Serial: 3, NextUpdate: next})
+	c.f.h.MarkInventoryStale()
+	v, err := c.f.h.MySignInView(c.ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := mineRow(v, signin.SecurityKey); len(r.Passkeys) != 1 || r.Passkeys[0].Model != "test "+mdsKeyAAGUID || r.Passkeys[0].ID != keyID || r.Passkeys[0].Label != "YubiKey" {
+		t.Errorf("security key = %+v", r.Passkeys)
+	}
+	if r := mineRow(v, signin.PasskeySynced); len(r.Passkeys) != 1 || r.Passkeys[0].Model != "" {
+		t.Errorf("synced = %+v", r.Passkeys)
+	}
+	labels := map[signin.Method]string{signin.Password: "Password", signin.PasskeySynced: "Synced passkey", signin.BrowserCert: "Browser certificate",
+		signin.PasskeyDevice: "Device-bound passkey", signin.SecurityKey: "Security key", signin.YubiKeyCert: "YubiKey certificate"}
+	for _, r := range v.Methods {
+		if r.Label != labels[r.ID] {
+			t.Errorf("%s label = %q, want %q", r.ID, r.Label, labels[r.ID])
+		}
+	}
+	js, _ := json.Marshal(mineRow(v, signin.SecurityKey).Passkeys[0])
+	for _, k := range []string{`"id":`, `"model":`} {
+		if !strings.Contains(string(js), k) {
+			t.Errorf("no %s in %s", k, js)
+		}
+	}
+}
+
+// fakePasskeyLabels is SignInSources.PasskeyLabel: it records its calls,
+// answers err, and on success renames the key in src's alice list.
+type fakePasskeyLabels struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+	src   *fakeSignInSrc
+}
+
+func (f *fakePasskeyLabels) set(_ context.Context, user, id, label string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, user+" "+id+" "+label)
+	if f.err != nil {
+		return "", f.err
+	}
+	old := ""
+	f.src.set(func(s *fakeSignInSrc) {
+		for i, c := range s.creds[user] {
+			if c.ID == id {
+				old = c.Label
+				s.creds[user][i].Label = label
+			}
+		}
+	})
+	return old, nil
+}
+
+func (f *fakePasskeyLabels) n() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+const renameKeyID = "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"
+
+// renameFixture: alice has security key renameKeyID "YubiKey" and a
+// synced "iPhone"; the rename source is wired.
+func renameFixture(t *testing.T) (*certFixture, *fakePasskeyLabels) {
+	t.Helper()
+	c := newCertFixture(t)
+	c.src.set(func(s *fakeSignInSrc) {
+		s.keys["alice"] = []signin.Method{signin.SecurityKey, signin.PasskeySynced}
+		s.creds = map[string][]keycloak.PasskeyCredential{"alice": {
+			{ID: renameKeyID, Type: string(signin.SecurityKey), Label: "YubiKey"},
+			{ID: "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d", Type: string(signin.PasskeySynced), Label: "iPhone"},
+		}}
+	})
+	pl := &fakePasskeyLabels{src: c.src}
+	c.f.h.SetSignInSources(SignInSources{Passkeys: c.src.passkeys, Certificates: c.src.certificates, PasskeyLabel: pl.set})
+	return c, pl
+}
+
+// TestRenameOwnPasskey: the label trimmed, checked (400, no call), the
+// source's answers mapped (404 / 409 / 503), audited signin.passkey.label
+// "<old> → <new>", refusals limited.
+func TestRenameOwnPasskey(t *testing.T) {
+	c, pl := renameFixture(t)
+	h := c.f.h
+	if err := h.RenameOwnPasskey(c.ctx, "alice", renameKeyID, "  Office key  "); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(pl.calls, ",") != "alice "+renameKeyID+" Office key" {
+		t.Errorf("calls = %v", pl.calls)
+	}
+	if e := c.audit.last(); e.Action != "signin.passkey.label" || e.Target != "alice" || e.Detail != "YubiKey → Office key" || e.Result != "ok" || e.Actor != "alice" {
+		t.Errorf("audit = %+v", e)
+	}
+	for _, bad := range []string{"", "   ", strings.Repeat("é", 65), "a\nb", "a\u202eb"} {
+		err := h.RenameOwnPasskey(c.ctx, "alice", renameKeyID, bad)
+		if statusOf(err) != 400 || err.Error() != "a passkey name is 1–64 characters on one line" {
+			t.Errorf("%q: %v", bad, err)
+		}
+		if e := c.audit.last(); e.Action != "signin.passkey.label" || e.Result != "refused" || e.Detail != "credential "+renameKeyID {
+			t.Errorf("%q audit = %+v", bad, e)
+		}
+	}
+	if pl.n() != 1 {
+		t.Errorf("a refused label reached the source: %v", pl.calls)
+	}
+	// Not a canonical UUID: 404 without a call, audited as invalid (own
+	// fixture: these refusals would trip the limit).
+	c3, pl3 := renameFixture(t)
+	for _, id := range []string{strings.Repeat("é", 64), "deadbeef", "abc-def", "6f1c2a9e3b4d4e5f8a7b1c2d3e4f5a6b", "{" + renameKeyID + "}", "urn:uuid:" + renameKeyID, "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6g"} {
+		if err := c3.f.h.RenameOwnPasskey(c3.ctx, "alice", id, "Fine"); statusOf(err) != 404 || err.Error() != "no such passkey" {
+			t.Errorf("non-UUID id %q: %v", id, err)
+		}
+		if e := c3.audit.last(); e.Result != "refused" || e.Detail != "credential (invalid)" {
+			t.Errorf("non-UUID id %q audit = %+v", id, e)
+		}
+	}
+	if pl3.n() != 0 {
+		t.Error("a non-UUID id reached the source")
+	}
+	for _, se := range []struct {
+		err    error
+		status int
+		text   string
+	}{
+		{keycloak.ErrPasskeyNotFound, 404, "no such passkey"},
+		{keycloak.ErrUserNotFound, 404, "no such passkey"},
+		{keycloak.ErrPasskeyLabelTaken, 409, "you already have a sign-in method named “iPhone”"},
+		{errors.New("keycloak: connection refused"), 503, ""},
+	} {
+		pl.err = se.err
+		err := h.RenameOwnPasskey(c.ctx, "alice", renameKeyID, "iPhone")
+		if statusOf(err) != se.status || (se.text != "" && err.Error() != se.text) || strings.Contains(err.Error(), "connection refused") {
+			t.Errorf("%v: %v", se.err, err)
+		}
+	}
+	pl.err = nil
+	// No source: 503.
+	h.SetSignInSources(SignInSources{Passkeys: c.src.passkeys, Certificates: c.src.certificates})
+	if err := h.RenameOwnPasskey(c.ctx, "alice", renameKeyID, "X"); statusOf(err) != 503 {
+		t.Errorf("no source: %v", err)
+	}
+	// Ten refusals in a minute, then 429.
+	c2, _ := renameFixture(t)
+	for i := 0; i < 10; i++ {
+		if err := c2.f.h.RenameOwnPasskey(c2.ctx, "alice", renameKeyID, ""); statusOf(err) != 400 {
+			t.Fatalf("refusal %d: %v", i, err)
+		}
+	}
+	if err := c2.f.h.RenameOwnPasskey(c2.ctx, "alice", renameKeyID, "Fine"); !errors.Is(err, errEntryLimited) {
+		t.Errorf("11th: %v, want errEntryLimited", err)
+	}
+}
+
+// TestRenameOwnPasskeyFreshView: the view right after a rename shows the
+// new name (MarkInventoryStale: the 30 s cache doesn't serve the old).
+func TestRenameOwnPasskeyFreshView(t *testing.T) {
+	c, _ := renameFixture(t)
+	h := c.f.h
+	h.MarkInventoryStale()
+	v, err := h.MySignInView(c.ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := mineRow(v, signin.SecurityKey); len(r.Passkeys) != 1 || r.Passkeys[0].Label != "YubiKey" {
+		t.Fatalf("before = %+v", r.Passkeys)
+	}
+	if err := h.RenameOwnPasskey(c.ctx, "alice", renameKeyID, "Office key"); err != nil {
+		t.Fatal(err)
+	}
+	v, _ = h.MySignInView(c.ctx, "alice")
+	if r := mineRow(v, signin.SecurityKey); len(r.Passkeys) != 1 || r.Passkeys[0].Label != "Office key" {
+		t.Errorf("after = %+v", r.Passkeys)
 	}
 }

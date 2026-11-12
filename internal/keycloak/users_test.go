@@ -260,3 +260,123 @@ func TestRemovePasskeysRemovesEveryKind(t *testing.T) {
 		t.Errorf("alice after = %+v", a.Credentials)
 	}
 }
+
+// TestSignInCredentialsAAGUID: each passkey's AAGUID comes from its
+// credentialData, lowercase and hyphenated; a zero AAGUID or unreadable
+// data is "" (unknown model), never an error.
+func TestSignInCredentialsAAGUID(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("alice",
+		kctest.Credential{ID: "k1", Type: "portcullis-security-key", CredentialData: `{"aaguid":"CB69481E-8FF7-4039-93EC-0A2729A154A8","credentialId":"x"}`},
+		kctest.Credential{ID: "k2", Type: "webauthn-passwordless", CredentialData: `{"aaguid":"00000000-0000-0000-0000-000000000000"}`},
+		kctest.Credential{ID: "k3", Type: "portcullis-device-passkey", CredentialData: "not json"})
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	got, err := c.SignInCredentials(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"k1": "cb69481e-8ff7-4039-93ec-0a2729a154a8", "k2": "", "k3": ""}
+	if len(got["alice"]) != 3 {
+		t.Fatalf("alice = %+v", got["alice"])
+	}
+	for _, pk := range got["alice"] {
+		if pk.AAGUID != want[pk.ID] {
+			t.Errorf("%s: AAGUID %q, want %q", pk.ID, pk.AAGUID, want[pk.ID])
+		}
+	}
+}
+
+// passkeyLabelFixture: alice has security key K1 "YubiKey", synced
+// passkey K2 "iPhone" and a password labelled "Laptop"; bob has B1.
+func passkeyLabelFixture(t *testing.T) (*kctest.Server, *keycloak.Client) {
+	t.Helper()
+	f := kctest.New(t)
+	f.Import("alice",
+		kctest.Credential{ID: "K1", Type: "portcullis-security-key", UserLabel: "YubiKey"},
+		kctest.Credential{ID: "K2", Type: "webauthn-passwordless", UserLabel: "iPhone"},
+		kctest.Credential{ID: "P1", Type: "password", UserLabel: "Laptop"})
+	f.Import("bob", kctest.Credential{ID: "B1", Type: "portcullis-security-key", UserLabel: "Bob's key"})
+	return f, keycloak.New(f.HTTP.URL, "admin", "admin")
+}
+
+func credLabel(f *kctest.Server, user, id string) string {
+	var got string
+	f.Update(user, func(u *kctest.User) {
+		for _, c := range u.Credentials {
+			if c.ID == id {
+				got = c.UserLabel
+			}
+		}
+	})
+	return got
+}
+
+// TestSetPasskeyLabel: the caller's own passkey only (404 otherwise),
+// unique among their other credentials case-insensitively (409), sent
+// text/plain; Keycloak's own 409 is ErrPasskeyLabelTaken too.
+func TestSetPasskeyLabel(t *testing.T) {
+	f, c := passkeyLabelFixture(t)
+	ctx := context.Background()
+	old, err := c.SetPasskeyLabel(ctx, "alice", "K1", "Office key")
+	if err != nil || old != "YubiKey" {
+		t.Fatalf("SetPasskeyLabel = %q, %v", old, err)
+	}
+	if got := credLabel(f, "alice", "K1"); got != "Office key" {
+		t.Errorf("stored label = %q", got)
+	}
+	var ct string
+	f.Update("alice", func(u *kctest.User) { ct = u.LabelContentType })
+	if !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	for _, id := range []string{"K9", "P1", "B1"} {
+		if _, err := c.SetPasskeyLabel(ctx, "alice", id, "New"); !errors.Is(err, keycloak.ErrPasskeyNotFound) {
+			t.Errorf("%s: err = %v, want ErrPasskeyNotFound", id, err)
+		}
+	}
+	for _, l := range []string{"iphone", "laptop"} {
+		if _, err := c.SetPasskeyLabel(ctx, "alice", "K1", l); !errors.Is(err, keycloak.ErrPasskeyLabelTaken) {
+			t.Errorf("%q: err = %v, want ErrPasskeyLabelTaken", l, err)
+		}
+	}
+	if got := credLabel(f, "alice", "K1"); got != "Office key" {
+		t.Errorf("a refused rename changed the label to %q", got)
+	}
+	if _, err := c.SetPasskeyLabel(ctx, "nobody", "K1", "X"); !errors.Is(err, keycloak.ErrUserNotFound) {
+		t.Errorf("unknown user: err = %v", err)
+	}
+	f.Update("alice", func(u *kctest.User) { u.LabelStatus = 409 })
+	if _, err := c.SetPasskeyLabel(ctx, "alice", "K1", "Fresh name"); !errors.Is(err, keycloak.ErrPasskeyLabelTaken) {
+		t.Errorf("Keycloak 409: err = %v", err)
+	}
+	f.Update("alice", func(u *kctest.User) { u.LabelStatus = 500 })
+	if _, err := c.SetPasskeyLabel(ctx, "alice", "K1", "Fresh name"); err == nil || errors.Is(err, keycloak.ErrPasskeyLabelTaken) || errors.Is(err, keycloak.ErrPasskeyNotFound) {
+		t.Errorf("Keycloak 500: err = %v", err)
+	}
+}
+
+// TestSetPasskeyLabelRecase: recasing a passkey's own name isn't a
+// duplicate of itself.
+func TestSetPasskeyLabelRecase(t *testing.T) {
+	f, c := passkeyLabelFixture(t)
+	old, err := c.SetPasskeyLabel(context.Background(), "alice", "K1", "yubikey")
+	if err != nil || old != "YubiKey" {
+		t.Fatalf("SetPasskeyLabel = %q, %v", old, err)
+	}
+	if got := credLabel(f, "alice", "K1"); got != "yubikey" {
+		t.Errorf("stored label = %q", got)
+	}
+	// Saving an unchanged name never 409s, even when another credential
+	// (here the password) shares it: nothing is sent.
+	f.Update("alice", func(u *kctest.User) {
+		for i := range u.Credentials {
+			if u.Credentials[i].ID == "P1" {
+				u.Credentials[i].UserLabel = "YUBIKEY"
+			}
+		}
+		u.LabelStatus = 500 // a PUT would fail
+	})
+	if old, err := c.SetPasskeyLabel(context.Background(), "alice", "K1", "yubikey"); err != nil || old != "yubikey" {
+		t.Errorf("unchanged label = %q, %v", old, err)
+	}
+}

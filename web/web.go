@@ -14,9 +14,13 @@ import "embed"
 // people listener) and impersonation.js (the impersonation banner and the
 // Stop page's script; people.html, mysignin.html, confirm.html and the Stop page),
 // and the fresh-auth popup: freshauth.js (the opener, myapps.js and confirm.js)
-// and freshauth-callback.js (the callback, people.html and index.html).
+// and freshauth-callback.js (the callback, people.html and index.html),
+// and the Raised-gate logo set (copies of the branding source, pinned by
+// sha256 in web_test.go; on both listeners): favicon.svg, favicon.ico,
+// apple-touch-icon.png, icon-192.png, icon-512.png, maskable-512.png,
+// site.webmanifest and mark.svg (the dark mark in each page's <h1>).
 //
-//go:embed index.html people.html directory.js directory.css settings.js signin.js myapps.js myai.js folders.js doctor.js dns.js confirm.html confirm.js mysignin.html mysignin.js impersonation-stop.html impersonation.js freshauth.js freshauth-callback.js
+//go:embed index.html people.html directory.js directory.css settings.js signin.js myapps.js myai.js folders.js doctor.js dns.js confirm.html confirm.js mysignin.html mysignin.js impersonation-stop.html impersonation.js freshauth.js freshauth-callback.js favicon.svg favicon.ico apple-touch-icon.png icon-192.png icon-512.png maskable-512.png site.webmanifest mark.svg
 var FS embed.FS
 
 // Docs holds the docs pages the Hub ships as read-only MCP resources

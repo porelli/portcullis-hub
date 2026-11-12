@@ -65,7 +65,7 @@ func decodeLarge(w http.ResponseWriter, r *http.Request, limit int64, v interfac
 // registerPeopleApps registers the caller-only app routes of the people
 // listener (never the Hub listener): the caller is X-Forwarded-User,
 // lowercased; nothing about anyone else is answered. Contract §5.1 /
-// G12: exactly these nine routes.
+// G12: exactly twenty-one routes (peopleAppRoutes in people_test.go).
 func (s *Server) registerPeopleApps(mux routeMux) {
 	mux.HandleFunc("GET /api/me/apps", s.handleMyApps)
 	// The caller's own person-entered values (Task 15A, spec call 32).
@@ -82,7 +82,8 @@ func (s *Server) registerPeopleApps(mux routeMux) {
 	// Hub listener, each answering only for its own.
 	s.registerConfirm(mux)
 	// The Sign-in page and the caller's own sign-in routes (sign-in
-	// part 2, D24/D25): people listener only.
+	// part 2, D24/D25; the passkey rename, polish 1): people listener
+	// only.
 	s.registerMySignIn(mux)
 	// The impersonating browser's banner read, Stop and Stop page
 	// (sign-in part 3, §5.1): people listener only.

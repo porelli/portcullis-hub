@@ -10,6 +10,7 @@ package kctest
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -27,6 +28,9 @@ type Credential struct {
 	Type        string `json:"type"`
 	UserLabel   string `json:"userLabel,omitempty"`
 	CreatedDate int64  `json:"createdDate,omitempty"`
+	// CredentialData is Keycloak's credentialData string (WebAuthn: a
+	// JSON object with the aaguid, among others).
+	CredentialData string `json:"credentialData,omitempty"`
 }
 
 // User is a fake Keycloak user.
@@ -47,6 +51,11 @@ type User struct {
 	// /users/{id}/credentials answers (Keycloak gives 404 or 500 for a
 	// federated user whose LDAP entry is gone).
 	CredentialsStatus int
+	// LabelStatus, if non-zero, is what PUT
+	// /users/{id}/credentials/{cid}/userLabel answers (nothing stored);
+	// LabelContentType is the Content-Type that request last carried.
+	LabelStatus      int
+	LabelContentType string
 	// Groups are the realm groups (by name) the user is a member of;
 	// ClientRoles the client roles mapped to the user directly (client
 	// uuid → role names).
@@ -688,6 +697,35 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			u.Credentials = kept
+			w.WriteHeader(204)
+		case len(parts) == 4 && parts[1] == "credentials" && parts[3] == "userLabel" && r.Method == "PUT":
+			// Keycloak's credential rename: text/plain body; an unknown id
+			// is 404, a label another credential of the user has
+			// (case-insensitively) 409.
+			u.LabelContentType = r.Header.Get("Content-Type")
+			if u.LabelStatus != 0 {
+				w.WriteHeader(u.LabelStatus)
+				return
+			}
+			b, _ := io.ReadAll(r.Body)
+			label := string(b)
+			idx := -1
+			for i, c := range u.Credentials {
+				if c.ID == parts[2] {
+					idx = i
+				}
+			}
+			if idx < 0 {
+				http.NotFound(w, r)
+				return
+			}
+			for i, c := range u.Credentials {
+				if i != idx && strings.EqualFold(c.UserLabel, label) {
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
+			}
+			u.Credentials[idx].UserLabel = label
 			w.WriteHeader(204)
 		case len(parts) == 2 && parts[1] == "logout" && r.Method == "POST":
 			u.Sessions = 0

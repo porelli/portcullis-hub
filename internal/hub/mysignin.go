@@ -12,9 +12,13 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/signin"
 )
 
@@ -59,10 +63,14 @@ type MethodRow struct {
 	PasswordSetAt *time.Time    `json:"password_set_at,omitempty"`
 }
 
-// PasskeyRow is one of the caller's passkeys.
+// PasskeyRow is one of the caller's passkeys: ID its Keycloak credential
+// id, Label its name (Keycloak's userLabel), Model the FIDO list's name
+// for its AAGUID (display only; "" = unknown model).
 type PasskeyRow struct {
+	ID        string        `json:"id"`
 	Label     string        `json:"label"`
 	Kind      signin.Method `json:"kind"`
+	Model     string        `json:"model"`
 	CreatedAt time.Time     `json:"created_at"`
 }
 
@@ -113,6 +121,7 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 	base, _ := h.inventoryBase(ctx, true)
 	info := h.FreshAuthInfo()
 	now := h.certClock()
+	models := h.mdsModels() // its own leaf lock: before mu
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	si := h.st.SignIn
@@ -183,7 +192,7 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 				row.State = MethodSet
 				for _, pk := range base.keys[u] {
 					if signin.Method(pk.Type) == meth {
-						row.Passkeys = append(row.Passkeys, PasskeyRow{Label: clipRunes(pk.Label, 128), Kind: meth, CreatedAt: pk.Created.UTC()})
+						row.Passkeys = append(row.Passkeys, PasskeyRow{ID: pk.ID, Label: clipRunes(pk.Label, 128), Kind: meth, Model: models[pk.AAGUID], CreatedAt: pk.Created.UTC()})
 					}
 				}
 			default:
@@ -417,4 +426,84 @@ func logWarnings(u string, res *directory.Result) {
 	for _, w := range res.Warnings {
 		log.Printf("signin: %s's own password: %s", u, w)
 	}
+}
+
+// MaxPasskeyLabelRunes is the longest passkey name (contract §5.1).
+const MaxPasskeyLabelRunes = 64
+
+var (
+	errPasskeyLabel    = &StatusError{Status: http.StatusBadRequest, Err: errors.New("a passkey name is 1–64 characters on one line")}
+	errNoSuchPasskey   = &StatusError{Status: http.StatusNotFound, Err: errors.New("no such passkey")}
+	errPasskeyLabelsNA = &StatusError{Status: http.StatusServiceUnavailable, Err: errors.New("passkey names can't be changed right now: try again later")}
+)
+
+// passkeyLabel is raw trimmed, when it is a passkey name: 1–64 runes of
+// valid UTF-8 with no control or bidi character (one line); else the 400.
+func passkeyLabel(raw string) (string, error) {
+	l := strings.TrimSpace(raw)
+	if n := utf8.RuneCountInString(l); !utf8.ValidString(l) || n < 1 || n > MaxPasskeyLabelRunes || strings.IndexFunc(l, controlOrBidi) >= 0 {
+		return "", errPasskeyLabel
+	}
+	return l, nil
+}
+
+// RenameOwnPasskey renames one of user's (the caller's) own passkeys
+// (contract §5.1, polish 1): Keycloak's credential userLabel, by
+// credential id (not a UUID, another person's, or not a passkey: 404
+// "no such passkey"); the label must be unique among the caller's other
+// credentials, case-insensitively (409). No fresh auth: it only changes a
+// name. The inventory is marked stale, so the next view shows the new
+// name. Audited signin.passkey.label "<old> → <new>" ("credential <id>"
+// when refused); counts toward the refusal limit. Keycloak unreachable
+// (or no source) is 503.
+func (h *Hub) RenameOwnPasskey(ctx context.Context, user, credentialID, label string) (err error) {
+	u, err := myUser(user)
+	if err != nil {
+		return err
+	}
+	if !h.entryLimit.reserve(u, h.entryClock()) {
+		return errEntryLimited
+	}
+	defer func() { h.entryLimit.release(u, h.entryClock(), isRefusal(err)) }()
+	actor := directory.Human(u)
+	// A credential id is a UUID (8-4-4-4-12 hex, canonical form only):
+	// anything else is 404 without a Keycloak call, audited as invalid
+	// (never the raw path value).
+	_, perr := uuid.Parse(credentialID)
+	validID := perr == nil && len(credentialID) == 36
+	refuse := func(err error) error {
+		d := "credential (invalid)"
+		if validID {
+			d = "credential " + credentialID
+		}
+		h.auditSignIn(actor, "signin.passkey.label", u, d, err)
+		return err
+	}
+	l, err := passkeyLabel(label)
+	if err != nil {
+		return refuse(err)
+	}
+	if !validID {
+		return refuse(errNoSuchPasskey)
+	}
+	c := &h.signInInv
+	c.mu.Lock()
+	src := c.src.PasskeyLabel
+	c.mu.Unlock()
+	if src == nil {
+		return refuse(errPasskeyLabelsNA)
+	}
+	old, err := src(ctx, u, credentialID, l)
+	switch {
+	case errors.Is(err, keycloak.ErrPasskeyNotFound), errors.Is(err, keycloak.ErrUserNotFound):
+		return refuse(errNoSuchPasskey)
+	case errors.Is(err, keycloak.ErrPasskeyLabelTaken):
+		return refuse(&StatusError{Status: http.StatusConflict, Err: errors.New("you already have a sign-in method named “" + l + "”")})
+	case err != nil:
+		log.Printf("signin: renaming %s's passkey %s: %v", u, credentialID, err)
+		return refuse(errPasskeyLabelsNA)
+	}
+	h.MarkInventoryStale()
+	h.auditSignIn(actor, "signin.passkey.label", u, old+" → "+l, nil)
+	return nil
 }

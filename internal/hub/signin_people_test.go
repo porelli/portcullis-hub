@@ -26,6 +26,9 @@ type fakeSignInSrc struct {
 	certErr error
 	down    bool
 	calls   int
+	// creds, when set for a user, is their passkey list as is (instead
+	// of keys' generated one).
+	creds map[string][]keycloak.PasskeyCredential
 }
 
 func (s *fakeSignInSrc) passkeys(ctx context.Context) (map[string][]keycloak.PasskeyCredential, error) {
@@ -37,6 +40,10 @@ func (s *fakeSignInSrc) passkeys(ctx context.Context) (map[string][]keycloak.Pas
 	}
 	out := map[string][]keycloak.PasskeyCredential{}
 	for u, ms := range s.keys {
+		if cr, ok := s.creds[u]; ok {
+			out[u] = append([]keycloak.PasskeyCredential{}, cr...)
+			continue
+		}
 		if ms == nil {
 			out[u] = nil // disabled in Keycloak
 			continue

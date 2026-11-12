@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-webauthn/webauthn/metadata"
 	"github.com/google/uuid"
@@ -143,4 +145,53 @@ func statusOf(effective []metadata.StatusReport) string {
 		return StatusCertified
 	}
 	return ""
+}
+
+// MaxModelRunes is the longest model name Models keeps.
+const MaxModelRunes = 128
+
+// Models is the model name of every entry of BLOB m that has an AAGUID
+// (lowercase, hyphenated → the metadata statement's description), for
+// display only: whatever the entry's status, kind or roots, and for a
+// stale BLOB too (a name grants nothing). Control and bidi characters and
+// invalid UTF-8 are dropped, the rest trimmed and clipped to
+// MaxModelRunes; an entry left with no name is left out. A nil m is an
+// empty map.
+func Models(m *metadata.Metadata) map[string]string {
+	out := map[string]string{}
+	if m == nil {
+		return out
+	}
+	for _, e := range m.Parsed.Entries {
+		if e.AaGUID == uuid.Nil {
+			continue
+		}
+		if d := modelName(e.MetadataStatement.Description); d != "" {
+			out[e.AaGUID.String()] = d
+		}
+	}
+	return out
+}
+
+// modelName is s with control and bidi characters and invalid UTF-8
+// dropped, trimmed, clipped to MaxModelRunes.
+func modelName(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || controlOrBidi(r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(s, ""))
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) > MaxModelRunes {
+		s = strings.TrimSpace(string([]rune(s)[:MaxModelRunes]))
+	}
+	return s
+}
+
+// controlOrBidi: a control character, a line or paragraph separator, or a
+// bidi control (the Hub's own predicate, duplicated: no hub import).
+func controlOrBidi(r rune) bool {
+	return unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || r == 0x061c || r == 0x200e || r == 0x200f ||
+		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }

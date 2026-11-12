@@ -8,6 +8,10 @@
   <script src="/static/freshauth-callback.js"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Portcullis Hub</title>
+  <link rel="icon" href="/static/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/site.webmanifest">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
@@ -16,7 +20,7 @@
     /* Header */
     header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid #1e293b; }
     h1 { font-size: 1.5rem; color: #f1f5f9; }
-    h1 span { color: #3b82f6; }
+    .brand-mark { vertical-align: -4px; margin-right: .35rem; }
     .user-badge { background: #1e293b; padding: 0.5rem 1rem; border-radius: 0.5rem; font-size: 0.875rem; }
     .user-badge strong { color: #3b82f6; }
 
@@ -585,7 +589,7 @@
          people.<domain>): Portal · Hub · People. -->
     <div class="pn-bar" id="site-nav"></div>
     <header>
-      <h1><span>&#9906;</span> {{.PortalName}} Hub</h1>
+      <h1><img class="brand-mark" src="/static/mark.svg" alt="" width="28" height="28"> {{.PortalName}} Hub</h1>
       {{if .User}}
       <div class="user-badge">Authenticated as <strong>{{.User}}</strong></div>
       {{else}}
