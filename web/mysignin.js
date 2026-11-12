@@ -183,6 +183,9 @@
       const c = ctx.can || {};
       return { setupLink: !!c.setup_link, removePasskeys: !!c.remove_passkeys, revoke: !!c.revoke, issue: !!c.issue, resetPassword: !!c.password };
     }
+    // Signed in as you by an administrator (ctx.readOnly, polish 1): the
+    // Hub refuses every change (RefuseWhileImpersonated), so none is offered.
+    if (ctx.readOnly) return { password: false, addPasskey: false, rename: false, createBrowser: false, revokeOwnBrowser: false, renew: false, managed: false };
     const prot = protectedName(view.user);
     const on = id => (view.methods || []).some(m => m.id === id && m.on && m.state !== 'off');
     return {
@@ -261,7 +264,7 @@
         tag = pill('ok', String(keys.length));
         more = keyList(m, keys, o);
       } else { sub = 'none yet'; tag = pill('', 'none'); }
-      const acct = self ? accountURL(view) : '';
+      const acct = self && o.addPasskey ? accountURL(view) : '';
       if (acct) acts = '<a class="pd-btn secondary sm" href="' + esc(acct) + '" target="_blank" rel="noopener noreferrer">+ Add</a>';
     } else if (m.id === 'browser_cert') {
       const max = ((view.limits || {}).effective || {}).browser_cert_max_active || 0;
@@ -291,7 +294,9 @@
   // person's tab, the setup link and Remove all passkeys.
   function methodsHtml(view, ctx) {
     const o = offers(view, ctx);
-    let h = '<div class="msi-methods">' + (view.methods || []).map(m => methodRow(view, ctx, o, m)).join('') + '</div>';
+    let h = ctx.mode !== 'person' && ctx.readOnly
+      ? '<p class="pd-warn msi-readonly" data-msi-readonly role="note">Changes are off while ' + esc(ctx.readOnly) + ' is signed in as you.</p>' : '';
+    h += '<div class="msi-methods">' + (view.methods || []).map(m => methodRow(view, ctx, o, m)).join('') + '</div>';
     if (ctx.mode === 'person') {
       let acts = '';
       if (o.setupLink) acts += button('primary', ' data-act="invite" data-user="' + esc(ctx.user) + '"', 'Send setup link');
@@ -538,7 +543,7 @@
   function ctxOf(st) {
     return st.opts.mode === 'person'
       ? { mode: 'person', user: st.opts.user, can: (st.view && st.view.can) || {}, passwordHint: st.opts.passwordHint || '' }
-      : { mode: 'self', user: st.view && st.view.user };
+      : { mode: 'self', user: st.view && st.view.user, readOnly: st.readOnlyBy || '' };
   }
 
   function setStatus(st, text, warn) {
@@ -620,7 +625,15 @@
     if (!st.view) st.el.innerHTML = '<p class="pd-muted">Loading…</p>';
     let v;
     try {
-      v = await call('GET', viewURL(st));
+      // One's own page also asks whether an administrator is signed in as
+      // you (contract §5.1: then it offers no action). A failed read keeps
+      // the actions: the Hub refuses them anyway.
+      const reads = [call('GET', viewURL(st)), st.opts.mode === 'person' ? Promise.resolve(null) : call('GET', '/api/me/impersonation')];
+      const [view, who] = await Promise.allSettled(reads);
+      if (view.status === 'rejected') throw view.reason;
+      v = view.value;
+      const active = who.status === 'fulfilled' && who.value && who.value.active;
+      st.readOnlyBy = active && typeof active.admin === 'string' ? active.admin : '';
     } catch (err) {
       if (seq !== st.seq) return;
       st.view = null;

@@ -529,3 +529,53 @@ func TestMySignInRename(t *testing.T) {
 		t.Errorf("no reload after the rename: %v", calls)
 	}
 }
+
+// TestMySignInReadOnlyWhileImpersonated (polish 1): while an
+// administrator is signed in as you, your own page offers no action and
+// says who; a failed impersonation read keeps the actions (the Hub
+// refuses them anyway).
+func TestMySignInReadOnlyWhileImpersonated(t *testing.T) {
+	v := mySignInView("YubiKey 5C")
+	out := mySignInJS(t, `(async () => {
+  const v = `+v+`;
+  const res = {ro: S.methodsHtml(v, {mode: 'self', readOnly: 'root'}), esc: S.methodsHtml(v, {mode: 'self', readOnly: '<b>x</b>'}),
+    rw: S.methodsHtml(v, {mode: 'self'})};
+  const mountWith = async imp => {
+    global.fetch = url => {
+      if (url === '/api/me/impersonation') return imp();
+      const body = url.includes('/history') ? {entries: [], next: '', unknown: []} : v;
+      return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+    };
+    const el = new El('div');
+    await S.mount(el, {mode: 'self'});
+    return el.innerHTML;
+  };
+  res.mounted = await mountWith(() => Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({active: {person: 'alice', admin: 'root', reason: 'help', until: '2099-01-01T00:00:00Z', stop_url: '/impersonation/stop'}}) }));
+  res.notActive = await mountWith(() => Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({active: null}) }));
+  res.failed = await mountWith(() => Promise.reject(new Error('network')));
+  res.status500 = await mountWith(() => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }));
+  return res;
+})()`).(map[string]any)
+	const line = `<p class="pd-warn msi-readonly" data-msi-readonly role="note">Changes are off while root is signed in as you.</p>`
+	ro := out["ro"].(string)
+	if !strings.HasPrefix(ro, `<div class="msi-methods">`+line) && !strings.HasPrefix(ro, line) {
+		t.Errorf("the read-only line isn't first:\n%s", ro)
+	}
+	if strings.Contains(ro, "data-msi-act=") || strings.Contains(ro, "+ Add") || strings.Contains(ro, "data-act=") {
+		t.Errorf("read-only page offers actions:\n%s", ro)
+	}
+	if e := out["esc"].(string); strings.Contains(e, "<b>x</b>") || !strings.Contains(e, "Changes are off while &lt;b&gt;x&lt;/b&gt; is signed in as you.") {
+		t.Errorf("the admin's name isn't escaped:\n%s", e)
+	}
+	if rw := out["rw"].(string); strings.Contains(rw, "msi-readonly") || !strings.Contains(rw, `data-msi-act="pk-rename"`) || !strings.Contains(rw, "+ Add") || !strings.Contains(rw, `data-msi-act="bc-create"`) {
+		t.Errorf("the normal page lost its actions:\n%s", rw)
+	}
+	if m := out["mounted"].(string); !strings.Contains(m, line) || strings.Contains(m, `data-msi-act="pk-rename"`) || strings.Contains(m, `data-msi-act="bc-create"`) {
+		t.Errorf("mounted while impersonated:\n%s", m)
+	}
+	for _, k := range []string{"notActive", "failed", "status500"} {
+		if m := out[k].(string); strings.Contains(m, "msi-readonly") || !strings.Contains(m, `data-msi-act="bc-create"`) {
+			t.Errorf("%s: actions missing or read-only line shown:\n%s", k, m)
+		}
+	}
+}
