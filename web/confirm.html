@@ -5,12 +5,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Confirm an AI action</title>
+<link rel="icon" href="/static/favicon.ico" sizes="48x48">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/static/site.webmanifest">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
   .container { max-width: 760px; margin: 0 auto; padding: 2rem; }
   h1 { font-size: 1.5rem; color: #f1f5f9; margin-bottom: 0.25rem; }
-  h1 span { color: #3b82f6; }
+  .brand-mark { vertical-align: -4px; margin-right: .35rem; }
   .lead { color: #94a3b8; margin-bottom: 1.5rem; }
   .card { background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; padding: 1.25rem 1.5rem; margin-bottom: 1rem; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; }
@@ -43,7 +47,7 @@
 <div class="container" id="confirm"
      data-id="{{.ID}}" data-state="{{.State}}" data-typed="{{.Typed}}"
      data-authorize-url="{{.FA.AuthorizeURL}}" data-client-id="{{.FA.ClientID}}" data-redirect-uri="{{.FA.RedirectURI}}">
-  <h1><span>&#9906;</span> Confirm an AI action</h1>
+  <h1><img class="brand-mark" src="/static/mark.svg" alt="" width="28" height="28"> Confirm an AI action</h1>
   <p class="lead">An AI client asked to do this as you. Nothing happens unless you approve it here.</p>
 
   <div class="card">

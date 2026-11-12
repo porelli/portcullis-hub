@@ -22,6 +22,7 @@ import (
 
 	"github.com/Nerzal/gocloak/v14"
 	"github.com/go-resty/resty/v2"
+	"github.com/google/uuid"
 
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/signin"
@@ -711,13 +712,16 @@ func PasskeyKind(t string) (signin.Method, bool) {
 }
 
 // PasskeyCredential is one passkey of a person: its Keycloak credential
-// id, its kind (Type: the sign-in method id, PasskeyKind), its label and
-// when it was registered (zero: unknown).
+// id, its kind (Type: the sign-in method id, PasskeyKind), its label
+// (Keycloak's userLabel), when it was registered (zero: unknown) and its
+// authenticator's AAGUID from the credentialData (lowercase, hyphenated;
+// "": zero, missing or unreadable — an unknown model).
 type PasskeyCredential struct {
 	ID      string    `json:"id"`
 	Type    string    `json:"type"`
 	Label   string    `json:"label"`
 	Created time.Time `json:"created"`
+	AAGUID  string    `json:"aaguid"`
 }
 
 // SignInCredentials lists every Keycloak user's passkeys (contract §8.1
@@ -769,7 +773,7 @@ func (c *Client) SignInCredentials(ctx context.Context) (map[string][]PasskeyCre
 			keys := []PasskeyCredential{}
 			for _, cr := range creds {
 				if kind, ok := passkeyKinds[cr.Type]; ok {
-					pk := PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label}
+					pk := PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label, AAGUID: cr.AAGUID}
 					if cr.Created > 0 {
 						pk.Created = time.UnixMilli(cr.Created).UTC()
 					}
@@ -809,7 +813,26 @@ type credential struct {
 	ID      string
 	Type    string
 	Label   string
-	Created int64 // ms since the epoch; 0 = unknown
+	Created int64  // ms since the epoch; 0 = unknown
+	AAGUID  string // from credentialData; "" = zero, missing or unreadable
+}
+
+// credentialAAGUID is the aaguid of a credentialData string (WebAuthn
+// credentials carry one), lowercase and hyphenated; "" when the data
+// isn't JSON, has none, or it isn't a UUID or is the zero UUID. Fails
+// closed (an unknown model) and never logs the data.
+func credentialAAGUID(data string) string {
+	var d struct {
+		AAGUID string `json:"aaguid"`
+	}
+	if data == "" || json.Unmarshal([]byte(data), &d) != nil {
+		return ""
+	}
+	id, err := uuid.Parse(strings.ToLower(d.AAGUID))
+	if err != nil || id == uuid.Nil {
+		return ""
+	}
+	return id.String()
 }
 
 func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credential, error) {
@@ -820,7 +843,7 @@ func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credent
 	out := make([]credential, 0, len(creds))
 	for _, cr := range creds {
 		if cr != nil {
-			cd := credential{ID: str(cr.ID), Type: str(cr.Type), Label: str(cr.UserLabel)}
+			cd := credential{ID: str(cr.ID), Type: str(cr.Type), Label: str(cr.UserLabel), AAGUID: credentialAAGUID(str(cr.CredentialData))}
 			if cr.CreatedDate != nil {
 				cd.Created = *cr.CreatedDate
 			}
@@ -1148,6 +1171,69 @@ func (c *Client) RemovePasskeys(ctx context.Context, username string, requireNew
 		}
 	}
 	return n, c.logout(ctx, tok, id)
+}
+
+// ErrPasskeyNotFound: the credential id isn't one of the user's passkeys
+// (unknown, another person's, or not a passkey type).
+var ErrPasskeyNotFound = errors.New("no such passkey")
+
+// ErrPasskeyLabelTaken: another of the user's credentials already has
+// that label (case-insensitively; Keycloak refuses duplicates too).
+var ErrPasskeyLabelTaken = errors.New("another sign-in method has that name")
+
+// SetPasskeyLabel renames one of username's passkeys (contract §5.1,
+// polish 1): Keycloak's own credential userLabel, through PUT
+// /users/{id}/credentials/{credentialID}/userLabel (text/plain). The id
+// must be one of the user's credentials and a passkey type, else
+// ErrPasskeyNotFound; a label another of their credentials has
+// (strings.EqualFold; the passkey's own name recased is not a duplicate)
+// or Keycloak's 409 is ErrPasskeyLabelTaken. old is the label before; an
+// unchanged label returns at once (before the duplicate check: saving an
+// unchanged name never 409s, even if another credential shares it). An unknown user is ErrUserNotFound.
+func (c *Client) SetPasskeyLabel(ctx context.Context, username, credentialID, label string) (old string, err error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return "", err
+	}
+	u, err := c.importUser(ctx, tok, username)
+	if err != nil {
+		return "", err
+	}
+	id := str(u.ID)
+	creds, err := c.credentials(ctx, tok, id)
+	if err != nil {
+		return "", err
+	}
+	found := false
+	for _, cr := range creds {
+		if cr.ID == credentialID {
+			if !passkeyTypes[cr.Type] {
+				return "", ErrPasskeyNotFound
+			}
+			found, old = true, cr.Label
+		}
+	}
+	if !found {
+		return "", ErrPasskeyNotFound
+	}
+	if old == label {
+		return old, nil // unchanged: never a duplicate, nothing to send
+	}
+	for _, cr := range creds {
+		if cr.ID != credentialID && strings.EqualFold(cr.Label, label) {
+			return old, ErrPasskeyLabelTaken
+		}
+	}
+	if err := c.api().UpdateCredentialUserLabel(ctx, tok, Realm, url.PathEscape(id), url.PathEscape(credentialID), label); err != nil {
+		switch statusCode(err) {
+		case http.StatusConflict:
+			return old, ErrPasskeyLabelTaken
+		case http.StatusNotFound:
+			return old, ErrPasskeyNotFound
+		}
+		return old, opErr("set credential label", err)
+	}
+	return old, nil
 }
 
 func (c *Client) logout(ctx context.Context, tok, id string) error {

@@ -239,7 +239,7 @@ func (s *Server) handleStopOwnImpersonation(w http.ResponseWriter, r *http.Reque
 // stylesheet, fetches only its own origin, can never be framed (a
 // clickjacked Stop) and has no base to redirect: confirmCSP's rules, with
 // form-action limited to its own origin (Task 6 review M1).
-const impStopCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+const impStopCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
 // handleImpersonationStopPage: GET /impersonation/stop, the Stop page
 // (web/impersonation-stop.html; its script, web/impersonation.js, asks

@@ -66,14 +66,18 @@ Promise.resolve((async () => (`+expr+`))()).then(v => process.stdout.write(JSON.
 // mySignInView is a MySignIn (JSON names) for alice: password off,
 // a synced passkey, browser_cert on with one valid certificate, no
 // device-bound passkey, two security keys (one label hostile), an
-// expiring YubiKey certificate; three apps (met, not met, unknown).
-func mySignInView(label string) string {
+// expiring YubiKey certificate; three apps (met, not met, unknown). The
+// first security key's model is "YubiKey 5 Series" (mySignInViewModel
+// sets another), the others have none.
+func mySignInView(label string) string { return mySignInViewModel(label, "YubiKey 5 Series") }
+
+func mySignInViewModel(label, model string) string {
 	return `{"user":"alice","methods":[
 {"id":"password","label":"Password","on":false,"state":"off"},
-{"id":"passkey_synced","label":"Passkey (phone / laptop, synced)","on":true,"state":"set","passkeys":[{"label":"iPhone","kind":"passkey_synced","created_at":"2026-11-02T09:12:00Z"}]},
+{"id":"passkey_synced","label":"Synced passkey","on":true,"state":"set","passkeys":[{"id":"6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b","label":"iPhone","kind":"passkey_synced","model":"","created_at":"2026-11-02T09:12:00Z"}]},
 {"id":"browser_cert","label":"Browser certificate","on":true,"state":"set"},
 {"id":"passkey_device","label":"Device-bound passkey","on":true,"state":"none"},
-{"id":"security_key","label":"Security key passkey (YubiKey touch)","on":true,"state":"set","passkeys":[{"label":` + jsonString(label) + `,"kind":"security_key","created_at":"2026-10-20T14:03:00Z"},{"label":"YubiKey 5 Nano","kind":"security_key","created_at":"2026-10-21T14:03:00Z"}]},
+{"id":"security_key","label":"Security key","on":true,"state":"set","passkeys":[{"id":"0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d","label":` + jsonString(label) + `,"kind":"security_key","model":` + jsonString(model) + `,"created_at":"2026-10-20T14:03:00Z"},{"id":"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f","label":"YubiKey 5 Nano","kind":"security_key","model":"","created_at":"2026-10-21T14:03:00Z"}]},
 {"id":"yubikey_cert","label":"YubiKey certificate","on":true,"state":"set"}],
 "certificates":[{"serial":"1a:2b:3c","kind":"browser","status":"valid","not_before":"2026-11-10T08:00:00Z","not_after":"2026-12-10T08:00:00Z"},
 {"serial":"4f:2a","kind":"yubikey","status":"expiring","not_before":"2025-12-01T08:00:00Z","not_after":"` + "2099-12-01T08:00:00Z" + `"},
@@ -108,9 +112,10 @@ func TestMySignInPageRendersMockupRows(t *testing.T) {
 		t.Errorf("the switched-off password row:\n%s", pw)
 	}
 	for id, want := range map[string][]string{
-		"passkey_synced": {"iPhone · added", "+ Add", `href="https://auth.example.org/realms/portcullis/account/account-security/signing-in"`},
+		"passkey_synced": {"iPhone · unknown model · added", `<li data-msi-key="6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b">`, "+ Add", `href="https://auth.example.org/realms/portcullis/account/account-security/signing-in"`},
 		"browser_cert":   {"a file you install in this browser / computer", "1 of 3 allowed", `data-msi-act="bc-create"`, `data-msi-act="revoke" data-serial="1a:2b:3c"`},
-		"security_key":   {"YubiKey 5 Nano · added", `<span class="pd-pill ok">2</span>`},
+		"security_key": {"YubiKey 5 Nano · unknown model · added", "YubiKey 5C · YubiKey 5 Series · added", `<span class="pd-pill ok">2</span>`,
+			`<li data-msi-key="0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d">`, `<li data-msi-key="1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f">`},
 		"yubikey_cert":   {"valid until", "expires in", `data-msi-act="yk-renew"`},
 		"passkey_device": {"none yet"},
 	} {
@@ -205,8 +210,8 @@ func TestMySignInDownloadDialog(t *testing.T) {
 // and every history field are text, never markup; the history's detail
 // ("Setup link used") and the unknown sources are shown.
 func TestMySignInEscapes(t *testing.T) {
-	out := mySignInJS(t, `{rows: S.methodsHtml(`+mySignInView(hostile)+`, {mode: 'self'}),
-  person: S.methodsHtml(`+mySignInView(hostile)+`, {mode: 'person', user: '<b>x</b>', can: {revoke: true, setup_link: true}}),
+	out := mySignInJS(t, `{rows: S.methodsHtml(`+mySignInViewModel(hostile, hostile)+`, {mode: 'self'}),
+  person: S.methodsHtml(`+mySignInViewModel(hostile, hostile)+`, {mode: 'person', user: '<b>x</b>', can: {revoke: true, setup_link: true}}),
   hist: S.historyHtml([
     {time: '2026-11-10T08:14:02Z', kind: 'sign_in', methods: ['security_key'], app: '', ip: '203.0.113.7', browser: `+jsonString(hostile)+`, by: '', reason: '', detail: ''},
     {time: '2026-11-10T08:10:00Z', kind: 'sign_in', methods: [], app: '', ip: '', browser: '', by: '', reason: '', detail: 'Setup link used'},
@@ -220,8 +225,8 @@ func TestMySignInEscapes(t *testing.T) {
 			t.Errorf("%s renders markup:\n%s", k, s)
 		}
 	}
-	if !strings.Contains(out["rows"].(string), "&lt;img src=x onerror=alert(1)&gt; · added") {
-		t.Errorf("the passkey label isn't shown as text:\n%s", out["rows"])
+	if !strings.Contains(out["rows"].(string), "&lt;img src=x onerror=alert(1)&gt; · &lt;img src=x onerror=alert(1)&gt; · added") {
+		t.Errorf("the passkey label and model aren't shown as text:\n%s", out["rows"])
 	}
 	hist := out["hist"].(string)
 	for _, w := range []string{"Signed in · security key", "&lt;img src=x onerror=alert(1)&gt; · 203.0.113.7", "Signed in · Setup link used", "Sign-in failed · password: &lt;img",
@@ -457,5 +462,120 @@ func TestMySignInFixRound1(t *testing.T) {
 	}
 	if d := webAsset(t, "directory.js"); !strings.Contains(d, "onError: () => {") || !strings.Contains(d, "personKeyActions(u).filter(([a]) => SIGNIN_TAB_ACTS.includes(a))") {
 		t.Error("directory.js doesn't fall back to its own buttons when the tab can't be read")
+	}
+}
+
+// TestMySignInRename (polish 1): each key has Rename on one's own page
+// (none on a person's tab); labelProblem is the Hub's rule; Rename → Save
+// sends PUT …/passkeys/<id>/label {label} and reloads the view.
+func TestMySignInRename(t *testing.T) {
+	v := mySignInView("YubiKey 5C")
+	out := mySignInJS(t, `(async () => {
+  const v = `+v+`;
+  const res = {self: S.methodsHtml(v, {mode: 'self'}), person: S.methodsHtml(v, {mode: 'person', user: 'alice', can: {revoke: true}}),
+    ok: S.labelProblem('Office key'), padded: S.labelProblem('  Office key  '), empty: S.labelProblem(''), blank: S.labelProblem('   '),
+    long: S.labelProblem('x'.repeat(65)), max: S.labelProblem('é'.repeat(64)), nl: S.labelProblem('a\nb'), bidi: S.labelProblem('a\u202eb')};
+  const calls = [];
+  global.fetch = (url, opts) => { calls.push({url, method: (opts && opts.method) || 'GET', body: (opts && opts.body) || ''});
+    return Promise.resolve({ ok: true, text: async () => url.startsWith('/api/me/signin/passkeys/') ? '' : (url.includes('/history') ? JSON.stringify({entries: [], next: '', unknown: []}) : JSON.stringify(v)) }); };
+  const input = new El('input');
+  const p = new El('div');
+  p.querySelector = sel => sel === '[data-msi-pklabel]' ? input : null;
+  p.querySelectorAll = () => [];
+  const el = new El('div');
+  el.querySelector = sel => null;
+  const st = S._test.state(el, {mode: 'self'});
+  st.view = v;
+  input.value = '  ';
+  await S._test.renameGo(st, p, 'a/b id');
+  res.badCalls = calls.length;
+  input.value = '  Office key ';
+  await S._test.renameGo(st, p, 'a/b id');
+  res.calls = calls;
+  return res;
+})()`).(map[string]any)
+	self, person := out["self"].(string), out["person"].(string)
+	for _, id := range []string{"6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b", "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d", "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"} {
+		li := self[strings.Index(self, `<li data-msi-key="`+id+`">`):]
+		li = li[:strings.Index(li, "</li>")]
+		if !strings.Contains(li, `data-msi-act="pk-rename" data-cred="`+id+`"`) {
+			t.Errorf("key %s has no Rename:\n%s", id, li)
+		}
+	}
+	if strings.Contains(person, "pk-rename") {
+		t.Errorf("a person's tab offers Rename:\n%s", person)
+	}
+	const problem = "A passkey name is 1–64 characters on one line."
+	if out["ok"] != "" || out["padded"] != "" || out["max"] != "" {
+		t.Errorf("good labels refused: %v", out)
+	}
+	for _, k := range []string{"empty", "blank", "long", "nl", "bidi"} {
+		if out[k] != problem {
+			t.Errorf("%s = %v, want %q", k, out[k], problem)
+		}
+	}
+	if out["badCalls"] != float64(0) {
+		t.Errorf("a bad label was sent: %v", out["badCalls"])
+	}
+	calls, _ := out["calls"].([]any)
+	if len(calls) < 2 {
+		t.Fatalf("calls = %v", calls)
+	}
+	put := calls[0].(map[string]any)
+	if put["url"] != "/api/me/signin/passkeys/a%2Fb%20id/label" || put["method"] != "PUT" || put["body"] != `{"label":"Office key"}` {
+		t.Errorf("PUT = %v", put)
+	}
+	if get := calls[1].(map[string]any); get["url"] != "/api/me/signin" || get["method"] != "GET" {
+		t.Errorf("no reload after the rename: %v", calls)
+	}
+}
+
+// TestMySignInReadOnlyWhileImpersonated (polish 1): while an
+// administrator is signed in as you, your own page offers no action and
+// says who; a failed impersonation read keeps the actions (the Hub
+// refuses them anyway).
+func TestMySignInReadOnlyWhileImpersonated(t *testing.T) {
+	v := mySignInView("YubiKey 5C")
+	out := mySignInJS(t, `(async () => {
+  const v = `+v+`;
+  const res = {ro: S.methodsHtml(v, {mode: 'self', readOnly: 'root'}), esc: S.methodsHtml(v, {mode: 'self', readOnly: '<b>x</b>'}),
+    rw: S.methodsHtml(v, {mode: 'self'})};
+  const mountWith = async imp => {
+    global.fetch = url => {
+      if (url === '/api/me/impersonation') return imp();
+      const body = url.includes('/history') ? {entries: [], next: '', unknown: []} : v;
+      return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+    };
+    const el = new El('div');
+    await S.mount(el, {mode: 'self'});
+    return el.innerHTML;
+  };
+  res.mounted = await mountWith(() => Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({active: {person: 'alice', admin: 'root', reason: 'help', until: '2099-01-01T00:00:00Z', stop_url: '/impersonation/stop'}}) }));
+  res.notActive = await mountWith(() => Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({active: null}) }));
+  res.failed = await mountWith(() => Promise.reject(new Error('network')));
+  res.status500 = await mountWith(() => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }));
+  return res;
+})()`).(map[string]any)
+	const line = `<p class="pd-warn msi-readonly" data-msi-readonly role="note">Changes are off while root is signed in as you.</p>`
+	ro := out["ro"].(string)
+	if !strings.HasPrefix(ro, `<div class="msi-methods">`+line) && !strings.HasPrefix(ro, line) {
+		t.Errorf("the read-only line isn't first:\n%s", ro)
+	}
+	if strings.Contains(ro, "data-msi-act=") || strings.Contains(ro, "+ Add") || strings.Contains(ro, "data-act=") {
+		t.Errorf("read-only page offers actions:\n%s", ro)
+	}
+	if e := out["esc"].(string); strings.Contains(e, "<b>x</b>") || !strings.Contains(e, "Changes are off while &lt;b&gt;x&lt;/b&gt; is signed in as you.") {
+		t.Errorf("the admin's name isn't escaped:\n%s", e)
+	}
+	if rw := out["rw"].(string); strings.Contains(rw, "msi-readonly") || !strings.Contains(rw, `data-msi-act="pk-rename"`) || !strings.Contains(rw, "+ Add") || !strings.Contains(rw, `data-msi-act="bc-create"`) {
+		t.Errorf("the normal page lost its actions:\n%s", rw)
+	}
+	if m := out["mounted"].(string); !strings.Contains(m, line) || strings.Contains(m, `data-msi-act="pk-rename"`) || strings.Contains(m, `data-msi-act="bc-create"`) {
+		t.Errorf("mounted while impersonated:\n%s", m)
+	}
+	for _, k := range []string{"notActive", "failed", "status500"} {
+		if m := out[k].(string); strings.Contains(m, "msi-readonly") || !strings.Contains(m, `data-msi-act="bc-create"`) {
+			t.Errorf("%s: actions missing or read-only line shown:\n%s", k, m)
+		}
 	}
 }

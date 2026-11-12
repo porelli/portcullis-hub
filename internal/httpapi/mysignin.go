@@ -33,7 +33,8 @@ const mySignInBodyMax = 8 << 10
 // passes the certificate the browser presented (D25).
 const presentedCertHeader = "X-Forwarded-Tls-Client-Cert"
 
-// registerMySignIn registers the page and the D25 routes.
+// registerMySignIn registers the page and the D25 routes (nine with the
+// page: the passkey rename is polish 1's).
 func (s *Server) registerMySignIn(mux routeMux) {
 	mux.HandleFunc("GET /signin", s.handleMySignInPage)
 	mux.HandleFunc("GET /api/me/signin", s.handleMySignIn)
@@ -43,6 +44,30 @@ func (s *Server) registerMySignIn(mux routeMux) {
 	mux.HandleFunc("POST /api/me/signin/yubikey-certificate/renew", s.handleRenewYubiKeyCert)
 	mux.HandleFunc("PUT /api/me/signin/password", s.handleSetOwnPassword)
 	mux.HandleFunc("DELETE /api/me/signin/password", s.handleRemoveOwnPassword)
+	mux.HandleFunc("PUT /api/me/signin/passkeys/{credentialId}/label", s.handleRenameOwnPasskey)
+}
+
+// handleRenameOwnPasskey renames one of the caller's own passkeys
+// (polish 1: Keycloak's credential userLabel; 404 another's or not a
+// passkey, 409 a duplicate name, 400 a bad name) → 204. No fresh auth: it
+// only changes a name. RefuseWhileImpersonated refuses it while signed in
+// as someone else.
+func (s *Server) handleRenameOwnPasskey(w http.ResponseWriter, r *http.Request) {
+	user, ok := mySignInUser(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Label string `json:"label"`
+	}
+	if !readMySignInBody(w, r, &b, `{"label": "..."}`) {
+		return
+	}
+	if err := s.Hub.RenameOwnPasskey(r.Context(), user, r.PathValue("credentialId"), b.Label); err != nil {
+		mySignInErr(w, "renaming a passkey of "+user, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // mySignInUser is the caller, or a 401.

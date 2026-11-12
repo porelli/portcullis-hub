@@ -39,7 +39,7 @@ func listenerOf(r *http.Request) string {
 // confirmCSP: the page loads only its own scripts (/static/), its inline
 // <style>, and fetches only its own origin; it can never be framed
 // (clickjacking an approval) and has no form or base to redirect.
-const confirmCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const confirmCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // confirmPageData is confirm.html's data (html/template escapes all of
 // it; confirm.js reads the data-* attributes with dataset and writes

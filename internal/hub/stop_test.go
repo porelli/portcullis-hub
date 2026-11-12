@@ -1,8 +1,11 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -879,5 +882,80 @@ func TestStopFailedEnableGate(t *testing.T) {
 				t.Fatalf("stop after the failed enable: %+v %v", rec, err)
 			}
 		})
+	}
+}
+
+// TestStopEndedRecordMeansUnlocked: an op record that reads ended means
+// its instance lock is free — for a resumed Stop too (its goroutine once
+// wrote the ended record before releasing the lock, so a client that
+// saw "stopped" could get "another operation is in progress").
+func TestStopEndedRecordMeansUnlocked(t *testing.T) {
+	f := stopFixture(t)
+	r := f.undoFailed(t)
+	if _, err := f.h.StopOp("other", directory.Human("dave")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if cur := f.h.LastOp("other"); cur != nil && cur.OpID == r.OpID && !cur.Running {
+			if f.h.appBusy("other") {
+				t.Fatalf("the record reads ended (%+v) while the lock is still held", cur)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the resumed Stop did not end: %+v", f.h.LastOp("other"))
+		}
+		runtime.Gosched()
+	}
+	f.h.Wait()
+}
+
+// TestStopResumeGapKeepsNewRecord: an enable accepted after a resumed
+// Stop released the lock and before it ended its record keeps its own
+// record (the Stop's outcome is only kept in the history).
+func TestStopResumeGapKeepsNewRecord(t *testing.T) {
+	f := stopFixture(t)
+	r := f.undoFailed(t)
+	reached, release := f.blockAt("images")
+	started := make(chan *AsyncOp, 1)
+	f.h.testHookResumeUnlocked = func(id string) {
+		a, err := f.h.StartEnable(id, directory.Human("alice"))
+		if err != nil {
+			t.Errorf("enable in the gap: %v", err)
+			started <- nil
+			return
+		}
+		<-reached
+		started <- a
+	}
+	if _, err := f.h.StopOp("other", directory.Human("dave")); err != nil {
+		t.Fatal(err)
+	}
+	a := <-started
+	if a == nil {
+		t.FailNow()
+	}
+	// The resumed Stop has ended (its finishAsync ran after the hook):
+	// its outcome, stopped by dave, is kept in the op history.
+	kept := filepath.Join(f.h.opHistoryDir("other"), r.OpID+".json")
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var h OpRecord
+		if b, err := os.ReadFile(kept); err == nil && json.Unmarshal(b, &h) == nil && h.StoppedBy == "dave" && !h.Running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the resumed Stop's outcome was never kept")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if cur := f.h.LastOp("other"); cur == nil || cur.OpID != a.OpID || !cur.Running {
+		t.Fatalf("the new enable's running record was overwritten: %+v", cur)
+	}
+	f.h.testHookResumeUnlocked = nil
+	close(release)
+	if end := waitOp(t, f.h, "other", a.OpID); !end.OK {
+		t.Fatalf("the new enable: %+v", end)
 	}
 }

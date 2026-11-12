@@ -104,7 +104,7 @@ func consumeBody(user, tool, args string) string {
 }
 
 // wantConfirmCSP is the page's Content-Security-Policy (fix round 1).
-const wantConfirmCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const wantConfirmCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // framingHeaders: the page can't be framed and runs only its own scripts.
 func framingHeaders(t *testing.T, where string, h interface{ Get(string) string }) {

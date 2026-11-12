@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="32" height="32">
+  <title>Portcullis</title>
+  <!-- Concept 1, redrawn on a 16 px grid so tab icons stay crisp at 1x and 2x.
+       Light tabs: iron arch, brass gate. Dark tabs: mist arch, lantern gate. -->
+  <style>
+    .arch { fill: #1c2738; }
+    .gate { fill: #c48a2c; }
+    @media (prefers-color-scheme: dark) {
+      .arch { fill: #e8edf5; }
+      .gate { fill: #e3ac52; }
+    }
+  </style>
+  <path class="gate" d="M3 6h10v1H3z M3 9h10v1H3z M5 3h1v8H5z M7 2h2v9H7z M10 3h1v8h-1z"/>
+  <path class="arch" d="M1 15V8a7 7 0 0 1 14 0v7h-2V8a5 5 0 0 0-10 0v7z"/>
+</svg>

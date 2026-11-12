@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -457,5 +458,50 @@ func TestHighWaterErrorIs(t *testing.T) {
 	fx.serve(t, 1)
 	if _, err := fx.f.Refresh(context.Background()); !errors.Is(err, ErrHighWater) {
 		t.Errorf("Refresh = %v, want ErrHighWater", err)
+	}
+}
+
+// TestModels: every entry with an AAGUID maps to its description (display
+// only: whatever its status, kind or roots, and for a stale BLOB too),
+// cleaned of control and bidi characters and clipped to 128 runes.
+func TestModels(t *testing.T) {
+	root := fidomdstest.NewCert(t, "attestation root", nil, true)
+	r := fidomdstest.B64(root.Cert)
+	now := time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)
+	E := fidomdstest.Entry
+	desc := func(e map[string]any, d string) map[string]any {
+		e["metadataStatement"].(map[string]any)["description"] = d
+		return e
+	}
+	long := strings.Repeat("é", 200)
+	// Stale: nextUpdate long past (Trust would be empty; Models isn't).
+	m := parsed(t, now.AddDate(-1, 0, 0),
+		E(aaguidKey, []string{"external", "wired"}, []string{"hardware", "secure_element"}, r, rep("FIDO_CERTIFIED")),
+		E(aaguidSoft, ext, []string{"software"}, r, rep("FIDO_CERTIFIED")),
+		E(aaguidRevKey, ext, se, "", rep("FIDO_CERTIFIED", "REVOKED")),
+		E(aaguidNotCrt, ext, se, r, rep("NOT_FIDO_CERTIFIED")),
+		desc(E(aaguidDevice, []string{"internal"}, []string{"tee"}, r, rep("FIDO_CERTIFIED_L1")), "Line\none \u202eevil\u202c"),
+		desc(E(aaguidUpd, ext, se, r, rep("FIDO_CERTIFIED")), long),
+		E("", ext, se, r, rep("FIDO_CERTIFIED")),
+	)
+	got := Models(m)
+	want := map[string]string{
+		aaguidKey:    "test " + aaguidKey,
+		aaguidSoft:   "test " + aaguidSoft,
+		aaguidRevKey: "test " + aaguidRevKey,
+		aaguidNotCrt: "test " + aaguidNotCrt,
+		aaguidDevice: "Lineone evil",
+		aaguidUpd:    strings.Repeat("é", 128),
+	}
+	if len(got) != len(want) {
+		t.Errorf("Models = %v, want %d entries", got, len(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("Models[%s] = %q, want %q", k, got[k], v)
+		}
+	}
+	if n := Models(nil); n == nil || len(n) != 0 {
+		t.Errorf("Models(nil) = %v, want empty", n)
 	}
 }

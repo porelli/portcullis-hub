@@ -73,9 +73,10 @@ var impersonationPartialTwins = map[string]string{
 // through peopleNoToolRoutes).
 var signInNoToolRoutes = map[string]string{
 	"GET /signin": "the Sign-in page itself: a browser UI",
-	"POST /api/me/signin/yubikey-certificate/renew": "the YubiKey renewal needs the certificate the browser presents (TLS), which an AI client never has",
-	"GET /api/me/signin/history":                    "the history pages: my_sign_in carries the last 20 entries",
-	"DELETE /api/me/signin/password":                "removing your password: on the Sign-in page, where my_password hands off (D33 lists no tool for it)",
+	"POST /api/me/signin/yubikey-certificate/renew":    "the YubiKey renewal needs the certificate the browser presents (TLS), which an AI client never has",
+	"GET /api/me/signin/history":                       "the history pages: my_sign_in carries the last 20 entries",
+	"DELETE /api/me/signin/password":                   "removing your password: on the Sign-in page, where my_password hands off (D33 lists no tool for it)",
+	"PUT /api/me/signin/passkeys/{credentialId}/label": "naming your passkeys: on the Sign-in page, where you can see which key is which (my_sign_in lists names and models)",
 }
 
 // destructiveTwins are the routes whose handler deletes, restores over,
