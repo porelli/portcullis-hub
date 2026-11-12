@@ -20,10 +20,10 @@ The exact formats are in
 | Method | Strength | Where it comes from | Starts |
 |--------|----------|---------------------|--------|
 | **Password** | 1.0 | The person's LLDAP password | off |
-| **Passkey (phone / laptop, synced)** | 2.5 | A passkey synced by iCloud, Google, 1Password and the like, or any passkey whose model Portcullis can't verify | on |
+| **Synced passkey** | 2.5 | A passkey synced by iCloud, Google, 1Password and the like, or any passkey whose model Portcullis can't verify | on |
 | **Browser certificate** | 2.5 | A certificate file (`.p12`) the person creates on the [Sign-in page](#the-sign-in-page) and installs in a browser ([below](#browser-certificates)) | off |
 | **Device-bound passkey** | 3.0 | Windows Hello, a TPM: the key can't leave the computer or phone | on |
-| **Security key passkey** | 3.5 | A touch on a certified hardware key, e.g. a YubiKey | on |
+| **Security key** | 3.5 | A touch on a certified hardware key, e.g. a YubiKey | on |
 | **YubiKey certificate** | 4.0 | The certificate stored on a YubiKey ([Certificates](../setup/certificates.md)) | on |
 
 Settings → Sign-in shows each method with its strength and how many people
@@ -221,8 +221,15 @@ top bar, **Sign-in methods** on the portal, and every "Set up …" and
       a fresh sign-in; it is refused while the password method is off, and for
       `admin` and `portcullis-hub`. Changing or removing it signs you out of
       Keycloak.
-    - **Passkeys and security keys:** the list with each one's kind and date;
-      **+ Add** opens Keycloak's account page to register one.
+    - **Passkeys and security keys:** the list with each one's name, model
+      and date added; **+ Add** opens Keycloak's account page to register
+      one. The name is the one Keycloak keeps for the passkey (new ones are
+      called "Security key &lt;date time&gt;"); **Rename** changes it (1–64
+      characters on one line, and no two of your sign-in methods may share a
+      name, whatever the case). The model comes from the FIDO Alliance's list
+      of certified authenticators and is only shown, never stored; a passkey
+      the list doesn't know (most synced passkeys, older registrations) shows
+      "unknown model".
     - **YubiKey certificate:** its validity and **Renew**: the page shows the
       `ykman` commands that make a new request (CSR) for the key already on
       the YubiKey; you paste it, and the browser must present your current
@@ -236,6 +243,11 @@ top bar, **Sign-in methods** on the portal, and every "Set up …" and
   your methods meets it (✓ / ✗, or ? while Portcullis doesn't know your
   methods).
 - **Sign-in history** ([below](#sign-in-history)).
+
+While an administrator is [signed in as you](#signing-in-as-someone-else),
+the page shows everything but offers no action, and says "Changes are off
+while &lt;admin&gt; is signed in as you." (The Hub refuses every change in
+that session anyway.)
 
 The page works with **any** switched-on method, even one the people page's
 own template wouldn't accept: group-gate lets a session with any method in
@@ -492,6 +504,11 @@ which passkeys the person has and several passkey kinds would do, it asks for
 any passkey. Apps that sign in with OIDC themselves do the same inside
 Keycloak: an *all of* template is met step by step.
 
+After the step-up you land back on the page you asked for (its path and
+query), on the same host. Only a plain page load (`GET`) returns there; a
+path that is too long (over 2048 bytes) or that a browser could read as
+another host lands on the app's front page instead.
+
 ### Present your certificate
 
 When the session already holds a YubiKey or browser certificate but the
@@ -682,6 +699,7 @@ change) have no Level-of-Authentication steps any more:
     Each method stays in the session's amr for 10 hours. A step-up
     (`pc_method=<method>`) makes the other methods step aside, and the SSO
     cookie hands a session that lacks the method back to the sign-in.
+
 - **Setup links** (`portcullis-invite-session`, the setup-link identity
   provider's post-login flow): only for `portcullis-forward-auth`, then the
   session gets amr `inv` (not a method, it meets no template) and the
