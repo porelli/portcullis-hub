@@ -305,6 +305,8 @@ a.pd-link { text-decoration: none; }
 .msi-certs { list-style: none; margin: 0 0 0.5rem 1rem; font-size: 0.8125rem; }
 .msi-certs li { padding: 0.15rem 0; }
 .msi-serial { font-size: 0.75rem; }
+.msi-keys { list-style: none; margin: 0 0 0.5rem 1rem; font-size: 0.8125rem; }
+.msi-keys li { padding: 0.15rem 0; }
 .msi-panel:empty { display: none; }
 .msi-panel { margin: 0 0 0.75rem 1rem; }
 .msi-form { display: flex; flex-direction: column; gap: 0.4rem; max-width: 40rem; background: #111827; border: 1px solid #1e293b; border-radius: 0.5rem; padding: 0.75rem 1rem; }

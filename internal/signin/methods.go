@@ -37,10 +37,10 @@ type Info struct {
 
 var methodInfo = map[Method]Info{
 	Password:      {Password, "Password", "password", "a password", "pwd", 10, true},
-	PasskeySynced: {PasskeySynced, "Passkey (phone / laptop, synced)", "synced passkey", "a synced passkey", "spk", 25, true},
+	PasskeySynced: {PasskeySynced, "Synced passkey", "synced passkey", "a synced passkey", "spk", 25, true},
 	BrowserCert:   {BrowserCert, "Browser certificate", "browser certificate", "a browser certificate", "file", 25, true},
 	PasskeyDevice: {PasskeyDevice, "Device-bound passkey", "device-bound passkey", "a device-bound passkey", "dpk", 30, true},
-	SecurityKey:   {SecurityKey, "Security key passkey (YubiKey touch)", "security key", "a YubiKey touch", "hwk", 35, true},
+	SecurityKey:   {SecurityKey, "Security key", "security key", "a YubiKey touch", "hwk", 35, true},
 	YubiKeyCert:   {YubiKeyCert, "YubiKey certificate", "YubiKey certificate", "a YubiKey certificate", "mtls", 40, true},
 }
 

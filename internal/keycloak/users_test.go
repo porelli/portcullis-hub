@@ -260,3 +260,28 @@ func TestRemovePasskeysRemovesEveryKind(t *testing.T) {
 		t.Errorf("alice after = %+v", a.Credentials)
 	}
 }
+
+// TestSignInCredentialsAAGUID: each passkey's AAGUID comes from its
+// credentialData, lowercase and hyphenated; a zero AAGUID or unreadable
+// data is "" (unknown model), never an error.
+func TestSignInCredentialsAAGUID(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("alice",
+		kctest.Credential{ID: "k1", Type: "portcullis-security-key", CredentialData: `{"aaguid":"CB69481E-8FF7-4039-93EC-0A2729A154A8","credentialId":"x"}`},
+		kctest.Credential{ID: "k2", Type: "webauthn-passwordless", CredentialData: `{"aaguid":"00000000-0000-0000-0000-000000000000"}`},
+		kctest.Credential{ID: "k3", Type: "portcullis-device-passkey", CredentialData: "not json"})
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	got, err := c.SignInCredentials(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"k1": "cb69481e-8ff7-4039-93ec-0a2729a154a8", "k2": "", "k3": ""}
+	if len(got["alice"]) != 3 {
+		t.Fatalf("alice = %+v", got["alice"])
+	}
+	for _, pk := range got["alice"] {
+		if pk.AAGUID != want[pk.ID] {
+			t.Errorf("%s: AAGUID %q, want %q", pk.ID, pk.AAGUID, want[pk.ID])
+		}
+	}
+}

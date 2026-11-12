@@ -201,6 +201,18 @@
     return h + '</ul>';
   }
 
+  // keyList: one line per passkey, "<name> · <model> · added <date>"
+  // (the name is Keycloak's userLabel, the model the FIDO list's name for
+  // its AAGUID, display only).
+  function keyList(keys) {
+    let h = '<ul class="msi-keys">';
+    for (const k of keys) {
+      const text = (k.label || 'unnamed') + ' · ' + (k.model || 'unknown model') + (fmtDay(k.created_at) ? ' · added ' + fmtDay(k.created_at) : '');
+      h += '<li data-msi-key="' + esc(k.id) + '"><span class="msi-key">' + esc(text) + '</span></li>';
+    }
+    return h + '</ul>';
+  }
+
   // methodRow is one method: name and its line, a tag, the actions, the
   // certificates (certificate methods), and a panel for its forms.
   function methodRow(view, ctx, o, m) {
@@ -232,8 +244,8 @@
       const keys = m.passkeys || [];
       if (m.state === 'unknown') { sub = 'couldn\'t be read right now'; tag = pill('warn', 'unknown'); }
       else if (keys.length) {
-        sub = keys.map(k => (k.label || 'unnamed') + (fmtDay(k.created_at) ? ' · added ' + fmtDay(k.created_at) : '')).join(' · ');
         tag = pill('ok', String(keys.length));
+        more = keyList(keys);
       } else { sub = 'none yet'; tag = pill('', 'none'); }
       const acct = self ? accountURL(view) : '';
       if (acct) acts = '<a class="pd-btn secondary sm" href="' + esc(acct) + '" target="_blank" rel="noopener noreferrer">+ Add</a>';

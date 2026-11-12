@@ -22,6 +22,7 @@ import (
 
 	"github.com/Nerzal/gocloak/v14"
 	"github.com/go-resty/resty/v2"
+	"github.com/google/uuid"
 
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/signin"
@@ -711,13 +712,16 @@ func PasskeyKind(t string) (signin.Method, bool) {
 }
 
 // PasskeyCredential is one passkey of a person: its Keycloak credential
-// id, its kind (Type: the sign-in method id, PasskeyKind), its label and
-// when it was registered (zero: unknown).
+// id, its kind (Type: the sign-in method id, PasskeyKind), its label
+// (Keycloak's userLabel), when it was registered (zero: unknown) and its
+// authenticator's AAGUID from the credentialData (lowercase, hyphenated;
+// "": zero, missing or unreadable — an unknown model).
 type PasskeyCredential struct {
 	ID      string    `json:"id"`
 	Type    string    `json:"type"`
 	Label   string    `json:"label"`
 	Created time.Time `json:"created"`
+	AAGUID  string    `json:"aaguid"`
 }
 
 // SignInCredentials lists every Keycloak user's passkeys (contract §8.1
@@ -769,7 +773,7 @@ func (c *Client) SignInCredentials(ctx context.Context) (map[string][]PasskeyCre
 			keys := []PasskeyCredential{}
 			for _, cr := range creds {
 				if kind, ok := passkeyKinds[cr.Type]; ok {
-					pk := PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label}
+					pk := PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label, AAGUID: cr.AAGUID}
 					if cr.Created > 0 {
 						pk.Created = time.UnixMilli(cr.Created).UTC()
 					}
@@ -809,7 +813,26 @@ type credential struct {
 	ID      string
 	Type    string
 	Label   string
-	Created int64 // ms since the epoch; 0 = unknown
+	Created int64  // ms since the epoch; 0 = unknown
+	AAGUID  string // from credentialData; "" = zero, missing or unreadable
+}
+
+// credentialAAGUID is the aaguid of a credentialData string (WebAuthn
+// credentials carry one), lowercase and hyphenated; "" when the data
+// isn't JSON, has none, or it isn't a UUID or is the zero UUID. Fails
+// closed (an unknown model) and never logs the data.
+func credentialAAGUID(data string) string {
+	var d struct {
+		AAGUID string `json:"aaguid"`
+	}
+	if data == "" || json.Unmarshal([]byte(data), &d) != nil {
+		return ""
+	}
+	id, err := uuid.Parse(strings.ToLower(d.AAGUID))
+	if err != nil || id == uuid.Nil {
+		return ""
+	}
+	return id.String()
 }
 
 func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credential, error) {
@@ -820,7 +843,7 @@ func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credent
 	out := make([]credential, 0, len(creds))
 	for _, cr := range creds {
 		if cr != nil {
-			cd := credential{ID: str(cr.ID), Type: str(cr.Type), Label: str(cr.UserLabel)}
+			cd := credential{ID: str(cr.ID), Type: str(cr.Type), Label: str(cr.UserLabel), AAGUID: credentialAAGUID(str(cr.CredentialData))}
 			if cr.CreatedDate != nil {
 				cd.Created = *cr.CreatedDate
 			}

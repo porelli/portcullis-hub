@@ -66,14 +66,18 @@ Promise.resolve((async () => (`+expr+`))()).then(v => process.stdout.write(JSON.
 // mySignInView is a MySignIn (JSON names) for alice: password off,
 // a synced passkey, browser_cert on with one valid certificate, no
 // device-bound passkey, two security keys (one label hostile), an
-// expiring YubiKey certificate; three apps (met, not met, unknown).
-func mySignInView(label string) string {
+// expiring YubiKey certificate; three apps (met, not met, unknown). The
+// first security key's model is "YubiKey 5 Series" (mySignInViewModel
+// sets another), the others have none.
+func mySignInView(label string) string { return mySignInViewModel(label, "YubiKey 5 Series") }
+
+func mySignInViewModel(label, model string) string {
 	return `{"user":"alice","methods":[
 {"id":"password","label":"Password","on":false,"state":"off"},
-{"id":"passkey_synced","label":"Passkey (phone / laptop, synced)","on":true,"state":"set","passkeys":[{"label":"iPhone","kind":"passkey_synced","created_at":"2026-11-02T09:12:00Z"}]},
+{"id":"passkey_synced","label":"Synced passkey","on":true,"state":"set","passkeys":[{"id":"6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b","label":"iPhone","kind":"passkey_synced","model":"","created_at":"2026-11-02T09:12:00Z"}]},
 {"id":"browser_cert","label":"Browser certificate","on":true,"state":"set"},
 {"id":"passkey_device","label":"Device-bound passkey","on":true,"state":"none"},
-{"id":"security_key","label":"Security key passkey (YubiKey touch)","on":true,"state":"set","passkeys":[{"label":` + jsonString(label) + `,"kind":"security_key","created_at":"2026-10-20T14:03:00Z"},{"label":"YubiKey 5 Nano","kind":"security_key","created_at":"2026-10-21T14:03:00Z"}]},
+{"id":"security_key","label":"Security key","on":true,"state":"set","passkeys":[{"id":"0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d","label":` + jsonString(label) + `,"kind":"security_key","model":` + jsonString(model) + `,"created_at":"2026-10-20T14:03:00Z"},{"id":"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f","label":"YubiKey 5 Nano","kind":"security_key","model":"","created_at":"2026-10-21T14:03:00Z"}]},
 {"id":"yubikey_cert","label":"YubiKey certificate","on":true,"state":"set"}],
 "certificates":[{"serial":"1a:2b:3c","kind":"browser","status":"valid","not_before":"2026-11-10T08:00:00Z","not_after":"2026-12-10T08:00:00Z"},
 {"serial":"4f:2a","kind":"yubikey","status":"expiring","not_before":"2025-12-01T08:00:00Z","not_after":"` + "2099-12-01T08:00:00Z" + `"},
@@ -108,9 +112,10 @@ func TestMySignInPageRendersMockupRows(t *testing.T) {
 		t.Errorf("the switched-off password row:\n%s", pw)
 	}
 	for id, want := range map[string][]string{
-		"passkey_synced": {"iPhone · added", "+ Add", `href="https://auth.example.org/realms/portcullis/account/account-security/signing-in"`},
+		"passkey_synced": {"iPhone · unknown model · added", `<li data-msi-key="6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b">`, "+ Add", `href="https://auth.example.org/realms/portcullis/account/account-security/signing-in"`},
 		"browser_cert":   {"a file you install in this browser / computer", "1 of 3 allowed", `data-msi-act="bc-create"`, `data-msi-act="revoke" data-serial="1a:2b:3c"`},
-		"security_key":   {"YubiKey 5 Nano · added", `<span class="pd-pill ok">2</span>`},
+		"security_key": {"YubiKey 5 Nano · unknown model · added", "YubiKey 5C · YubiKey 5 Series · added", `<span class="pd-pill ok">2</span>`,
+			`<li data-msi-key="0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d">`, `<li data-msi-key="1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f">`},
 		"yubikey_cert":   {"valid until", "expires in", `data-msi-act="yk-renew"`},
 		"passkey_device": {"none yet"},
 	} {
@@ -205,8 +210,8 @@ func TestMySignInDownloadDialog(t *testing.T) {
 // and every history field are text, never markup; the history's detail
 // ("Setup link used") and the unknown sources are shown.
 func TestMySignInEscapes(t *testing.T) {
-	out := mySignInJS(t, `{rows: S.methodsHtml(`+mySignInView(hostile)+`, {mode: 'self'}),
-  person: S.methodsHtml(`+mySignInView(hostile)+`, {mode: 'person', user: '<b>x</b>', can: {revoke: true, setup_link: true}}),
+	out := mySignInJS(t, `{rows: S.methodsHtml(`+mySignInViewModel(hostile, hostile)+`, {mode: 'self'}),
+  person: S.methodsHtml(`+mySignInViewModel(hostile, hostile)+`, {mode: 'person', user: '<b>x</b>', can: {revoke: true, setup_link: true}}),
   hist: S.historyHtml([
     {time: '2026-11-10T08:14:02Z', kind: 'sign_in', methods: ['security_key'], app: '', ip: '203.0.113.7', browser: `+jsonString(hostile)+`, by: '', reason: '', detail: ''},
     {time: '2026-11-10T08:10:00Z', kind: 'sign_in', methods: [], app: '', ip: '', browser: '', by: '', reason: '', detail: 'Setup link used'},
@@ -220,8 +225,8 @@ func TestMySignInEscapes(t *testing.T) {
 			t.Errorf("%s renders markup:\n%s", k, s)
 		}
 	}
-	if !strings.Contains(out["rows"].(string), "&lt;img src=x onerror=alert(1)&gt; · added") {
-		t.Errorf("the passkey label isn't shown as text:\n%s", out["rows"])
+	if !strings.Contains(out["rows"].(string), "&lt;img src=x onerror=alert(1)&gt; · &lt;img src=x onerror=alert(1)&gt; · added") {
+		t.Errorf("the passkey label and model aren't shown as text:\n%s", out["rows"])
 	}
 	hist := out["hist"].(string)
 	for _, w := range []string{"Signed in · security key", "&lt;img src=x onerror=alert(1)&gt; · 203.0.113.7", "Signed in · Setup link used", "Sign-in failed · password: &lt;img",

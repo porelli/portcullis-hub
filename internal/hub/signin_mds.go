@@ -48,7 +48,10 @@ type mdsState struct {
 	mu      sync.Mutex
 	fetcher *fidomds.Fetcher   // nil = no fetching (no HUB_FIDO_MDS_URL)
 	meta    *metadata.Metadata // the last good BLOB (nil = none yet)
-	status  fidomds.Status
+	// models: AAGUID → model name of meta (fidomds.Models; display only),
+	// read-only, replaced as a whole by setMDS.
+	models map[string]string
+	status fidomds.Status
 	// extraMtime / extraGen: the extra-authenticators file's last mtime
 	// seen and how many distinct ones (HUB_DEV: added to mds.serial so
 	// touching the file makes the extension reclassify). Under
@@ -91,12 +94,21 @@ func newMDSFetcher(cfg Config) *fidomds.Fetcher {
 	return &fidomds.Fetcher{URL: cfg.FIDOMDSURL, CacheFile: filepath.Join(cfg.DataDir, filepath.FromSlash(MDSCacheFile))}
 }
 
+// mdsModels is the last good BLOB's AAGUID → model name map (nil: none
+// yet). Read-only: setMDS replaces it whole, never edits it.
+func (h *Hub) mdsModels() map[string]string {
+	h.mds.mu.Lock()
+	defer h.mds.mu.Unlock()
+	return h.mds.models
+}
+
 // setMDS records a good BLOB m and its status.
 func (h *Hub) setMDS(m *metadata.Metadata, st *fidomds.Status) {
 	h.mds.mu.Lock()
 	defer h.mds.mu.Unlock()
 	if m != nil {
 		h.mds.meta = m
+		h.mds.models = fidomds.Models(m)
 		h.mds.hwFile = ""
 	}
 	if st != nil {

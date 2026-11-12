@@ -59,10 +59,14 @@ type MethodRow struct {
 	PasswordSetAt *time.Time    `json:"password_set_at,omitempty"`
 }
 
-// PasskeyRow is one of the caller's passkeys.
+// PasskeyRow is one of the caller's passkeys: ID its Keycloak credential
+// id, Label its name (Keycloak's userLabel), Model the FIDO list's name
+// for its AAGUID (display only; "" = unknown model).
 type PasskeyRow struct {
+	ID        string        `json:"id"`
 	Label     string        `json:"label"`
 	Kind      signin.Method `json:"kind"`
+	Model     string        `json:"model"`
 	CreatedAt time.Time     `json:"created_at"`
 }
 
@@ -113,6 +117,7 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 	base, _ := h.inventoryBase(ctx, true)
 	info := h.FreshAuthInfo()
 	now := h.certClock()
+	models := h.mdsModels() // its own leaf lock: before mu
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	si := h.st.SignIn
@@ -183,7 +188,7 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 				row.State = MethodSet
 				for _, pk := range base.keys[u] {
 					if signin.Method(pk.Type) == meth {
-						row.Passkeys = append(row.Passkeys, PasskeyRow{Label: clipRunes(pk.Label, 128), Kind: meth, CreatedAt: pk.Created.UTC()})
+						row.Passkeys = append(row.Passkeys, PasskeyRow{ID: pk.ID, Label: clipRunes(pk.Label, 128), Kind: meth, Model: models[pk.AAGUID], CreatedAt: pk.Created.UTC()})
 					}
 				}
 			default:

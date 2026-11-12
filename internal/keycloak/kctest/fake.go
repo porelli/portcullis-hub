@@ -27,6 +27,9 @@ type Credential struct {
 	Type        string `json:"type"`
 	UserLabel   string `json:"userLabel,omitempty"`
 	CreatedDate int64  `json:"createdDate,omitempty"`
+	// CredentialData is Keycloak's credentialData string (WebAuthn: a
+	// JSON object with the aaguid, among others).
+	CredentialData string `json:"credentialData,omitempty"`
 }
 
 // User is a fake Keycloak user.

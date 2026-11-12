@@ -8,8 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-webauthn/webauthn/metadata"
+
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fidomds"
+	"github.com/portcullis/hub/internal/fidomds/fidomdstest"
 	"github.com/portcullis/hub/internal/invite"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
@@ -295,5 +300,56 @@ func TestOwnPasswordFreshMethod(t *testing.T) {
 	}
 	if c.fa.calls.Load() != calls {
 		t.Error("a proof was spent for portcullis-x")
+	}
+}
+
+// TestMySignInPasskeyModel: a passkey's model is the FIDO list's
+// description for its AAGUID ("" when the AAGUID is unknown), its id the
+// credential id; the method labels are the plain names (one table).
+func TestMySignInPasskeyModel(t *testing.T) {
+	c := newCertFixture(t)
+	const keyID = "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"
+	c.src.set(func(s *fakeSignInSrc) {
+		s.keys["alice"] = []signin.Method{signin.SecurityKey, signin.PasskeySynced}
+		s.creds = map[string][]keycloak.PasskeyCredential{"alice": {
+			{ID: keyID, Type: string(signin.SecurityKey), Label: "YubiKey", AAGUID: mdsKeyAAGUID},
+			{ID: "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d", Type: string(signin.PasskeySynced), Label: "iPhone"},
+		}}
+	})
+	next := time.Now().AddDate(0, 1, 0)
+	b, _ := json.Marshal(fidomdstest.Payload(3, next, fidomdstest.Entry(mdsKeyAAGUID, []string{"external"}, []string{"secure_element"}, "", fidomdstest.Reports("FIDO_CERTIFIED"))))
+	var p metadata.PayloadJSON
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := metadata.NewDecoder()
+	m, err := d.Parse(&p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.f.h.setMDS(m, &fidomds.Status{Serial: 3, NextUpdate: next})
+	c.f.h.MarkInventoryStale()
+	v, err := c.f.h.MySignInView(c.ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := mineRow(v, signin.SecurityKey); len(r.Passkeys) != 1 || r.Passkeys[0].Model != "test "+mdsKeyAAGUID || r.Passkeys[0].ID != keyID || r.Passkeys[0].Label != "YubiKey" {
+		t.Errorf("security key = %+v", r.Passkeys)
+	}
+	if r := mineRow(v, signin.PasskeySynced); len(r.Passkeys) != 1 || r.Passkeys[0].Model != "" {
+		t.Errorf("synced = %+v", r.Passkeys)
+	}
+	labels := map[signin.Method]string{signin.Password: "Password", signin.PasskeySynced: "Synced passkey", signin.BrowserCert: "Browser certificate",
+		signin.PasskeyDevice: "Device-bound passkey", signin.SecurityKey: "Security key", signin.YubiKeyCert: "YubiKey certificate"}
+	for _, r := range v.Methods {
+		if r.Label != labels[r.ID] {
+			t.Errorf("%s label = %q, want %q", r.ID, r.Label, labels[r.ID])
+		}
+	}
+	js, _ := json.Marshal(mineRow(v, signin.SecurityKey).Passkeys[0])
+	for _, k := range []string{`"id":`, `"model":`} {
+		if !strings.Contains(string(js), k) {
+			t.Errorf("no %s in %s", k, js)
+		}
 	}
 }
