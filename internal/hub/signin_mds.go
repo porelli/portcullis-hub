@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/go-webauthn/webauthn/metadata"
@@ -100,6 +101,18 @@ func (h *Hub) mdsModels() map[string]string {
 	h.mds.mu.Lock()
 	defer h.mds.mu.Unlock()
 	return h.mds.models
+}
+
+// SetMDSModelsForTest sets the AAGUID → model names the Sign-in page
+// shows (tests and the harness only: no FIDO list there). Panics outside
+// tests.
+func (h *Hub) SetMDSModelsForTest(models map[string]string) {
+	if !testing.Testing() {
+		panic("SetMDSModelsForTest: refuses to work outside tests")
+	}
+	h.mds.mu.Lock()
+	defer h.mds.mu.Unlock()
+	h.mds.models = models
 }
 
 // setMDS records a good BLOB m and its status.

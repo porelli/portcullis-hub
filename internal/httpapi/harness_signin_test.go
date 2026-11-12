@@ -62,10 +62,25 @@ func seedSignIn(t *testing.T, e *instEnv) {
 	// As cmd/hub wires them.
 	e.s.Directory.PasswordSet = h.RecordPassword
 	e.s.Directory.PasswordMethodOn = h.PasswordMethodOn
+	// alice's passkeys have names, ids and models (polish 1: the model
+	// from the FIDO list for the YubiKey, unknown for the iPhone) and can
+	// be renamed (in memory, Keycloak's unique-label rule).
+	var keysMu sync.Mutex
+	aliceKeys := []keycloak.PasskeyCredential{
+		{ID: "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b", Type: string(signin.PasskeySynced), Label: "iPhone", Created: time.Date(2026, 11, 2, 9, 12, 0, 0, time.UTC)},
+		{ID: "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d", Type: string(signin.SecurityKey), Label: "Security key 2026-10-20 14:03", Created: time.Date(2026, 10, 20, 14, 3, 0, 0, time.UTC), AAGUID: "cb69481e-8ff7-4039-93ec-0a2729a154a8"},
+	}
+	h.SetMDSModelsForTest(map[string]string{"cb69481e-8ff7-4039-93ec-0a2729a154a8": "YubiKey 5 Series with NFC"})
 	h.SetSignInSources(hub.SignInSources{
 		Passkeys: func(context.Context) (map[string][]keycloak.PasskeyCredential, error) {
 			out := map[string][]keycloak.PasskeyCredential{}
 			for _, u := range e.ll.UserIDs() {
+				if u == "alice" {
+					keysMu.Lock()
+					out[u] = slices.Clone(aliceKeys)
+					keysMu.Unlock()
+					continue
+				}
 				ms, ok := harnessSignInMethods[u]
 				if !ok && strings.HasPrefix(u, "user") {
 					ms = []signin.Method{signin.PasskeySynced}
@@ -79,6 +94,25 @@ func seedSignIn(t *testing.T, e *instEnv) {
 			return out, nil
 		},
 		Certificates: certs.list,
+		PasskeyLabel: func(_ context.Context, user, id, label string) (string, error) {
+			keysMu.Lock()
+			defer keysMu.Unlock()
+			if user != "alice" {
+				return "", keycloak.ErrPasskeyNotFound
+			}
+			idx := slices.IndexFunc(aliceKeys, func(k keycloak.PasskeyCredential) bool { return k.ID == id })
+			if idx < 0 {
+				return "", keycloak.ErrPasskeyNotFound
+			}
+			for i, k := range aliceKeys {
+				if i != idx && strings.EqualFold(k.Label, label) {
+					return "", keycloak.ErrPasskeyLabelTaken
+				}
+			}
+			old := aliceKeys[idx].Label
+			aliceKeys[idx].Label = label
+			return old, nil
+		},
 	})
 	// The Sign-in page (sign-in part 2 Task 8): enroll's certificate
 	// actions in memory, Keycloak's login events for alice, the real audit;
