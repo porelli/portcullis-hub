@@ -357,7 +357,10 @@ request shows "Your session as alice has ended." with a link to sign out.
 
 **What it can do.** You open the apps the person may open, as them. Your
 own sign-in counts, not theirs: an app opens only when **your** session's
-methods (the fresh touch included) meet its template, and a certificate
+methods (the fresh touch included) meet its template — in practice the
+YubiKey touch alone, because the fresh sign-in replaces your session's
+other methods; an app that needs more than the touch (a certificate as
+well, for example) shows the needs page — and a certificate
 method counts only with **your** YubiKey or browser certificate. A session
 as someone else can never add a method, so there is no step-up: when your
 sign-in doesn't meet an app's template, the page says so; press Stop, sign
