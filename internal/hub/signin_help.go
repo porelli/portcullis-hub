@@ -23,6 +23,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/invite"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
 )
@@ -56,6 +57,10 @@ type HelpCan struct {
 	Revoke         bool `json:"revoke"`
 	Issue          bool `json:"issue"`
 	Password       bool `json:"password"`
+	// Impersonate: the caller may start signing in as the person (an
+	// administrator, and none of the rules that need no proof refuses;
+	// contract §9.7 "Signing in as someone else").
+	Impersonate bool `json:"impersonate"`
 }
 
 // PersonSignIn is GET /api/directory/users/{u}/signin's answer: the
@@ -64,6 +69,13 @@ type HelpCan struct {
 type PersonSignIn struct {
 	MySignIn
 	Can HelpCan `json:"can"`
+	// Impersonation is the person's running impersonation (null when
+	// none runs, and always for a caller who isn't an administrator).
+	Impersonation *ImpersonationView `json:"impersonation"`
+	// ImpersonateRefusal is the first refusal of the start's rules that
+	// need no proof, when an administrator's can.impersonate is false
+	// ("" otherwise, and always for anyone else).
+	ImpersonateRefusal string `json:"impersonate_refusal"`
 }
 
 var (
@@ -138,7 +150,80 @@ func (h *Hub) PersonSignInView(ctx context.Context, c *directory.Caller, user st
 	if err != nil {
 		return nil, err
 	}
-	return &PersonSignIn{MySignIn: *v, Can: h.helpCan(c, m, u)}, nil
+	out := &PersonSignIn{MySignIn: *v, Can: h.helpCan(c, m, u)}
+	if c.Admin && isLLDAPAdmin(m, c.User) {
+		out.Impersonation = h.runningImpersonationOf(u)
+		if err := h.impersonateRefusal(ctx, m, strings.ToLower(strings.TrimSpace(c.User)), u); err != nil {
+			out.ImpersonateRefusal = err.Error()
+		} else {
+			out.Can.Impersonate = true
+		}
+	}
+	return out, nil
+}
+
+// runningImpersonationOf is u's running impersonation (nil: none).
+func (h *Hub) runningImpersonationOf(u string) *ImpersonationView {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if i := h.runningOfLocked(u, false); i >= 0 {
+		v := impView(h.st.Impersonations[i])
+		return &v
+	}
+	return nil
+}
+
+// impersonateRefusal is the first of the start's rules (D36) that need
+// no proof and no typed reason refusing admin's impersonation of u (1
+// the switch, 3 the target, 5 one at a time, 6 unfinished steps, 7 a
+// touch method; 2, the caller, is the view's own check), with the
+// start's texts; nil when none refuses. Keycloak unreadable: the
+// start's 503 text (can.impersonate false, fail closed).
+func (h *Hub) impersonateRefusal(ctx context.Context, m *directory.Membership, admin, u string) error {
+	h.mu.RLock()
+	off := h.st.SignIn.ImpersonationOff
+	h.mu.RUnlock()
+	if off {
+		return errImpOff
+	}
+	switch _, known := m.UUIDs[u]; {
+	case invite.ProtectedName(u):
+		return errImpProtected
+	case !known:
+		return statusErr(http.StatusNotFound, "no such person: %s", u)
+	case u == admin:
+		return errImpSelf
+	case m.Administrators[u] || isLLDAPAdmin(m, u):
+		return errImpAdminTarget
+	}
+	kc := h.impKC()
+	if kc == nil {
+		return errImpKCNA
+	}
+	enabled, err := kc.UserEnabled(ctx, u)
+	if errors.Is(err, keycloak.ErrUserNotFound) {
+		return statusErr(http.StatusNotFound, "no such person: %s", u)
+	}
+	if err != nil {
+		return errImpKCNA
+	}
+	if !enabled {
+		return errImpDisabled
+	}
+	if err := h.impOneAtATime(admin, u); err != nil {
+		return err
+	}
+	acts, err := kc.RequiredActions(ctx, u)
+	if err != nil {
+		return errImpKCNA
+	}
+	if slices.ContainsFunc(acts, func(a string) bool { return a != keycloak.ImpersonationNoticeAction }) {
+		return errImpUnfinished(u)
+	}
+	if !h.touchMethodOn() {
+		return errImpNoTouch
+	}
+	return nil
 }
 
 // helpCan is what c may do on u, exactly as the routes answer (review

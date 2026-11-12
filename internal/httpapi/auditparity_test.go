@@ -145,6 +145,9 @@ func TestUnauditedMutationsNowAudited(t *testing.T) {
 		{"source remove unknown", ai, "POST", "/api/sources/remove", `{"name":"extra"}`, 400, "source.remove", "extra", ""},
 		{"sign-in template", ai, "PUT", "/api/instances/grafana/settings", `{"sign_in_template":"strong"}`, 200, "settings.change", "grafana/sign_in_template", "scope=sign_in_template: default -> strong"},
 		{"sign-in template refused", ai, "PUT", "/api/instances/grafana/settings", `{"sign_in_template":"basic"}`, 409, "settings.change", "grafana/sign_in_template", ""},
+		// Signing in as someone else (sign-in part 3, D44): the switch.
+		{"impersonation off", ai, "PUT", "/api/signin/impersonation", `{"allowed":false}`, 200, "signin.impersonation", "impersonation", "off"},
+		{"impersonation on", directory.Human("root"), "PUT", "/api/signin/impersonation", `{"allowed":true}`, 200, "signin.impersonation", "impersonation", "on"},
 	}
 	for _, s := range steps {
 		before := len(readAudit(t, e.audit))

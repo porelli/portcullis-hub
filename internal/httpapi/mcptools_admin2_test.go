@@ -688,6 +688,10 @@ var adminToolFixtures = []struct {
 	{"set_sign_in_limits", map[string]any{"browser_cert_days": 10, "browser_cert_max_active": 3, "history_days": 365}},
 	{"get_instance_sign_in", map[string]any{"id": "secretapp"}},
 	{"set_sign_in_template", map[string]any{"id": "secretapp", "template": "strong"}},
+	// Sign-in part 3 (Task 6, D46): signing in as someone else.
+	{"impersonations", nil},
+	{"stop_impersonation", map[string]any{"user": "erin"}},
+	{"turn_off_impersonation", nil},
 }
 
 // redactedAllowed are the admin tools whose results may show

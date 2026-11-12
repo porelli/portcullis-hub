@@ -87,3 +87,40 @@ func CSRF(next http.Handler) http.Handler {
 	})
 	return cop.Handler(inner)
 }
+
+// ImpersonationHeader is group-gate's impersonation id header (contract
+// §5): set only on a request it allows for a live impersonation, from
+// the validated file record; Traefik deletes client copies (every
+// forward-auth middleware's authResponseHeaders, every public router's
+// strip list).
+const ImpersonationHeader = "X-Forwarded-Impersonation"
+
+// stopOwnImpersonationPath is the one change an impersonated browser may
+// make: Stop (contract §5.1).
+const stopOwnImpersonationPath = "/api/me/impersonation/stop"
+
+// errWhileImpersonated is the read-only rule's answer (D42).
+const errWhileImpersonated = "not while you are signed in as someone else: Stop first"
+
+// RefuseWhileImpersonated makes both listeners read-only while an
+// administrator is signed in as someone else (D42, contract §5.1):
+// while X-Forwarded-Impersonation is present (any value, empty
+// included: fail closed), every request that isn't GET or HEAD is 403,
+// except POST /api/me/impersonation/stop (exactly that path: the mux
+// never sees an uncleaned form of it). My apps values, credentials, AI
+// connections, passwords, certificates, confirmations and every
+// directory action are refused; reads work.
+func RefuseWhileImpersonated(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.Header.Values(ImpersonationHeader)) > 0 {
+			switch {
+			case r.Method == http.MethodGet || r.Method == http.MethodHead:
+			case r.Method == http.MethodPost && r.URL.Path == stopOwnImpersonationPath && r.URL.RawPath == "":
+			default:
+				http.Error(w, errWhileImpersonated, http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}

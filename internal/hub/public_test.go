@@ -118,6 +118,11 @@ func TestPublicListedTokens(t *testing.T) {
 		"portcullis-public-cloud.service: \"cloud\"",
 		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X-Forwarded-User: \"\"",
 		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X-Auth-Request-Email: \"\"",
+		// Sign-in part 3 (F15): group-gate's impersonation headers.
+		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X-Forwarded-Impersonator: \"\"",
+		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X-Forwarded-Impersonation: \"\"",
+		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X_Forwarded_Impersonator: \"\"",
+		"traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.X_Forwarded_Impersonation: \"\"",
 	} {
 		if !strings.Contains(ov, want) {
 			t.Errorf("override lacks %s:\n%s", want, ov)
@@ -360,6 +365,29 @@ func TestPublicStripHeaders(t *testing.T) {
 	m.Auth.PublicAccess = &templates.PublicAccess{CredentialHeaders: []string{"x-api-key"}}
 	if got := strings.Join(publicStripHeaders(m), ","); !strings.Contains(got, "X-Api-Key") || !strings.Contains(got, "X_Api_Key") {
 		t.Errorf("declared credential header not stripped: %s", got)
+	}
+}
+
+// TestPublicRouterStripsImpersonationHeaders (sign-in part 3, F15,
+// contract §5): every public router deletes group-gate's impersonation
+// headers and their underscore forms, so a client-sent copy never
+// reaches the app (or the Hub's read-only rule) as if group-gate had
+// sent it.
+func TestPublicRouterStripsImpersonationHeaders(t *testing.T) {
+	got := "," + strings.Join(publicStripHeaders(&templates.Manifest{}), ",") + ","
+	for _, want := range []string{"X-Forwarded-Impersonator", "X_Forwarded_Impersonator", "X-Forwarded-Impersonation", "X_Forwarded_Impersonation"} {
+		if !strings.Contains(got, ","+want+",") {
+			t.Errorf("strip list lacks %s: %s", want, got)
+		}
+	}
+	// The contract's list, exactly (§5 "Public router"): core's identity
+	// headers, the two impersonation headers.
+	want := []string{"Remote-Email", "Remote-Groups", "Remote-Name", "Remote-User",
+		"X-Auth-Request-Access-Token", "X-Auth-Request-Email", "X-Auth-Request-Groups", "X-Auth-Request-Preferred-Username", "X-Auth-Request-User",
+		"X-Forwarded-Access-Token", "X-Forwarded-Email", "X-Forwarded-Groups", "X-Forwarded-Impersonation", "X-Forwarded-Impersonator",
+		"X-Forwarded-Preferred-Username", "X-Forwarded-User"}
+	if strings.Join(coreIdentityHeaders, ",") != strings.Join(want, ",") {
+		t.Errorf("coreIdentityHeaders = %v, want %v", coreIdentityHeaders, want)
 	}
 }
 

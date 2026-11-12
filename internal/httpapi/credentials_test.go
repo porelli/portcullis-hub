@@ -471,10 +471,10 @@ func TestCredentialRoutesOnCorrectListener(t *testing.T) {
 		}
 	}
 
-	// The allowlist is exactly seventeen routes (contract §5.1, G12), all
-	// registered.
-	if len(peopleAppRoutes) != 17 {
-		t.Errorf("peopleAppRoutes has %d entries, want exactly 17 per contract §5.1", len(peopleAppRoutes))
+	// The allowlist is exactly twenty routes (contract §5.1, G12; sign-in
+	// part 3 added the impersonating browser's three), all registered.
+	if len(peopleAppRoutes) != 20 {
+		t.Errorf("peopleAppRoutes has %d entries, want exactly 20 per contract §5.1", len(peopleAppRoutes))
 	}
 	registered := map[string]bool{}
 	for _, p := range e.s.peopleMux().patterns {
@@ -488,8 +488,8 @@ func TestCredentialRoutesOnCorrectListener(t *testing.T) {
 			t.Errorf("people listener lacks app route %q", p)
 		}
 	}
-	if n != 17 {
-		t.Errorf("%d of the 17 app routes registered, want all seventeen", n)
+	if n != 20 {
+		t.Errorf("%d of the 20 app routes registered, want all twenty", n)
 	}
 
 	// Verify the credential routes are in the list

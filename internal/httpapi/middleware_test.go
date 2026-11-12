@@ -102,3 +102,94 @@ func TestCSRF(t *testing.T) {
 		}
 	}
 }
+
+// TestRefuseWhileImpersonated (D42, contract §5.1, Review Focus 4):
+// with X-Forwarded-Impersonation every request but GET / HEAD is 403
+// with the fixed text on both listeners, the own Stop excepted; reads
+// work; without the header nothing changes.
+func TestRefuseWhileImpersonated(t *testing.T) {
+	e := newImpEnv(t)
+	const want = "not while you are signed in as someone else: Stop first"
+	id := strings.Repeat("ab", 16)
+	imp := map[string]string{ImpersonationHeader: id}
+	writes := []struct {
+		srv          *httptest.Server
+		method, path string
+		body         string
+	}{
+		{e.people, "PUT", "/api/me/signin/password", `{"password":"x","code":"c","code_verifier":"v","nonce":"n"}`},
+		{e.people, "POST", "/api/me/signin/browser-certificates", `{}`},
+		{e.people, "DELETE", "/api/me/signin/certificates/0a:02", ``},
+		{e.people, "DELETE", "/api/me/ai/connections/x", ``},
+		{e.people, "PUT", "/api/me/apps/i/values/k", `{"value":"v"}`},
+		{e.people, "POST", "/api/me/apps/i/credentials/k", `{}`},
+		{e.people, "POST", "/api/me/confirmations/ABC", `{"approve":true}`},
+		{e.people, "POST", "/api/directory/users/bob/invite", `{}`},
+		{e.people, "POST", "/api/directory/users/alice/impersonation", startBody},
+		{e.people, "POST", "/api/directory/users/alice/impersonation/stop", ``},
+		{e.people, "OPTIONS", "/api/me/apps", ``},
+		// Not the exact Stop path: refused too.
+		{e.people, "POST", "/api/me/impersonation/stop/", `{}`},
+		{e.people, "POST", "/api/me/impersonation%2Fstop", `{}`},
+		{e.people, "PUT", "/api/me/impersonation/stop", `{}`},
+		{e.hub, "PUT", "/api/signin/impersonation", `{"allowed":false}`},
+		{e.hub, "POST", "/api/directory/users/bob/invite", `{}`},
+		{e.hub, "POST", "/api/templates/enable", `{"id":"demo"}`},
+	}
+	for _, w := range writes {
+		for _, hv := range []string{id, ""} {
+			r, b := doH(t, w.srv, "alice", w.method, w.path, w.body, map[string]string{ImpersonationHeader: hv})
+			if r.StatusCode != 403 || strings.TrimSpace(b) != want {
+				t.Errorf("impersonated (%q) %s %s = %d %q", hv, w.method, w.path, r.StatusCode, b)
+			}
+		}
+		// Without the header the route answers as always (never this text).
+		if r, b := doAs(t, w.srv, "alice", w.method, w.path, w.body); strings.TrimSpace(b) == want {
+			t.Errorf("not impersonated %s %s = %d %q", w.method, w.path, r.StatusCode, b)
+		}
+	}
+	// Reads work.
+	for _, rd := range []struct {
+		srv          *httptest.Server
+		method, path string
+	}{{e.people, "GET", "/api/me/apps"}, {e.people, "GET", "/api/me/signin"}, {e.people, "HEAD", "/api/me/apps"}, {e.hub, "GET", "/api/impersonations"}} {
+		user := "alice"
+		if rd.srv == e.hub {
+			user = "root"
+		}
+		if r, b := doH(t, rd.srv, user, rd.method, rd.path, "", imp); r.StatusCode != 200 {
+			t.Errorf("impersonated %s %s = %d %s", rd.method, rd.path, r.StatusCode, b)
+		}
+	}
+	// The own Stop passes (404 here: nothing runs under that id).
+	if r, b := doH(t, e.people, "alice", "POST", "/api/me/impersonation/stop", `{}`, imp); r.StatusCode != 404 || strings.TrimSpace(b) == want {
+		t.Errorf("own stop = %d %q", r.StatusCode, b)
+	}
+	// The proxy secret still comes first.
+	req, _ := http.NewRequest("POST", e.people.URL+"/api/me/impersonation/stop", strings.NewReader(`{}`))
+	req.Header.Set(ImpersonationHeader, id)
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != 401 {
+		t.Errorf("no proxy secret = %v %v", resp, err)
+	}
+	// The middleware alone.
+	h := RefuseWhileImpersonated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(299) }))
+	for _, c := range []struct {
+		method, path string
+		set          bool
+		code         int
+	}{
+		{"POST", "/x", false, 299}, {"DELETE", "/x", false, 299}, {"GET", "/x", true, 299}, {"HEAD", "/x", true, 299},
+		{"POST", "/x", true, 403}, {"PATCH", "/x", true, 403}, {"OPTIONS", "/x", true, 403},
+		{"POST", "/api/me/impersonation/stop", true, 299}, {"DELETE", "/api/me/impersonation/stop", true, 403},
+	} {
+		r := httptest.NewRequest(c.method, c.path, nil)
+		if c.set {
+			r.Header.Set(ImpersonationHeader, id)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != c.code {
+			t.Errorf("%s %s set=%v = %d, want %d", c.method, c.path, c.set, rec.Code, c.code)
+		}
+	}
+}
