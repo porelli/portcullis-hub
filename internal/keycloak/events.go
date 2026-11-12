@@ -10,19 +10,24 @@ import (
 	"time"
 )
 
-// EventTypes are the user events the Hub has Keycloak store (contract §8
-// "Keycloak's events config"): the sign-in history's source (§8.2).
-var EventTypes = []string{"LOGIN", "LOGIN_ERROR"}
+// ConfigEventTypes are the user events the Hub has Keycloak store
+// (contract §8 "Keycloak's events config", compared as a set): the sign-in
+// history's source (§8.2) and the impersonation start (§8.1).
+var ConfigEventTypes = []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}
+
+// HistoryEventTypes are the types the sign-in history reads
+// (LoginEventsPage, §8.2: the query is unchanged by part 3).
+var HistoryEventTypes = []string{"LOGIN", "LOGIN_ERROR"}
 
 // eventsConfigPath is the realm's events config.
 func (c *Client) eventsConfigPath() string {
 	return c.BaseURL + "/admin/realms/" + Realm + "/events/config"
 }
 
-// EnsureEventsConfig makes the realm store LOGIN and LOGIN_ERROR events
+// EnsureEventsConfig makes the realm store LOGIN, LOGIN_ERROR and IMPERSONATE events
 // for historyDays days (contract §8 "Keycloak's events config"): it reads
 // the config and, when it differs, writes it back with eventsEnabled true,
-// enabledEventTypes [LOGIN, LOGIN_ERROR] and eventsExpiration
+// enabledEventTypes ConfigEventTypes and eventsExpiration
 // historyDays × 86400 seconds. Every other field — eventsListeners and
 // the admin-events switches included — is written back as it was read.
 func (c *Client) EnsureEventsConfig(ctx context.Context, historyDays int) error {
@@ -56,13 +61,13 @@ func (c *Client) EnsureEventsConfig(ctx context.Context, historyDays int) error 
 	types := slices.Clone(cur.Types)
 	slices.Sort(types)
 	types = slices.Compact(types)
-	wantTypes := slices.Clone(EventTypes)
+	wantTypes := slices.Clone(ConfigEventTypes)
 	slices.Sort(wantTypes)
 	if cur.Enabled && slices.Equal(types, wantTypes) && cur.Expiration == want {
 		return nil
 	}
 	cfg["eventsEnabled"] = json.RawMessage("true")
-	typesJSON, _ := json.Marshal(EventTypes)
+	typesJSON, _ := json.Marshal(ConfigEventTypes)
 	cfg["enabledEventTypes"] = typesJSON
 	cfg["eventsExpiration"] = json.RawMessage(fmt.Sprint(want))
 	resp, err = c.api().GetRequestWithBearerAuth(ctx, tok).SetBody(cfg).Put(c.eventsConfigPath())
@@ -124,7 +129,7 @@ func (c *Client) LoginEventsPage(ctx context.Context, userID string, from, to ti
 	}
 	q := url.Values{}
 	q.Set("user", userID)
-	for _, t := range EventTypes {
+	for _, t := range HistoryEventTypes {
 		q.Add("type", t)
 	}
 	q.Set("dateFrom", strconv.FormatInt(ceilMilli(from), 10))

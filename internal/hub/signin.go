@@ -364,19 +364,26 @@ func (h *Hub) changeSignIn(actor directory.Actor, action, target, attempt string
 		}
 		warnings = append(warnings, aiOffWarning(id, aiOff[id]))
 	}
+	if h.signInBetweenPlans != nil {
+		h.signInBetweenPlans()
+	}
 	h.mu.Lock()
 	again, err := plan()
 	if err != nil {
 		h.mu.Unlock()
 		return nil, err
 	}
-	// Password records change outside signInMu (RecordPassword): the
-	// commit keeps the current ones, whatever the plan copied.
+	// Password records change outside signInMu (RecordPassword), and so
+	// does the impersonation switch: the commit keeps the current ones,
+	// whatever the plan copied.
 	p.next.Passwords = maps.Clone(h.st.SignIn.Passwords)
 	if p.next.Passwords == nil {
 		p.next.Passwords = map[string]state.PasswordRecord{}
 	}
 	again.next.Passwords = p.next.Passwords
+	// The impersonation switch too (SetImpersonationAllowed, F3).
+	p.next.ImpersonationOff = h.st.SignIn.ImpersonationOff
+	again.next.ImpersonationOff = p.next.ImpersonationOff
 	if !reflect.DeepEqual(again, p) {
 		h.mu.Unlock()
 		return nil, statusErr(http.StatusConflict, "the sign-in settings changed meanwhile: try again")

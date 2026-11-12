@@ -35,6 +35,11 @@ type SignIn struct {
 	// Limits are the browser-certificate and history limits (D27,
 	// contract §8.1 "Limits").
 	Limits SignInLimits `json:"limits" yaml:"limits"`
+	// ImpersonationOff is the "Signing in as someone else" switch
+	// (contract §8.1 "Impersonation", D36): the zero value, false, means
+	// on. SetImpersonationAllowed writes it outside the sign-in writers'
+	// lock, so their commit re-copies it like Passwords (F3).
+	ImpersonationOff bool `json:"impersonation_off" yaml:"impersonation_off"`
 }
 
 // SignInLimits are Settings → Sign-in's limits (contract §8.1 "Limits"):

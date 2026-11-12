@@ -718,13 +718,15 @@ func envValueBytes(path, key string) []byte {
 
 // dataDirReadable are the only files in HUB_DATA_DIR another container
 // may read: group-gate (world-readable, uid 10003) the first three,
-// Keycloak (world-readable) signin-keycloak.json, the gate (group 10001)
-// the last two. The gate files are 0640.
+// Keycloak (world-readable) signin-keycloak.json, Keycloak and
+// group-gate impersonation.json, the gate (group 10001) the last two.
+// The gate files are 0640.
 var dataDirReadable = map[string]os.FileMode{
 	"group-gate-policy.json":  0,
 	"portal-apps.json":        0,
 	policy.UserAttributesFile: 0,
 	SignInKeycloakFile:        0,
+	ImpersonationFileName:     0,
 	aigate.GateFileName:       aigate.FileMode,
 	aigate.CredsFileName:      aigate.FileMode,
 }

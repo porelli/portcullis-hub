@@ -30,7 +30,7 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	var got map[string]any
 	kc.With(func() { got = kc.EventsConfig })
 	want := map[string]any{"eventsEnabled": true, "eventsListeners": []any{"jboss-logging", "x"},
-		"enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR"}, "eventsExpiration": float64(90 * 86400),
+		"enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}, "eventsExpiration": float64(90 * 86400),
 		"adminEventsEnabled": true, "adminEventsDetailsEnabled": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("events config = %v\nwant %v", got, want)
@@ -47,7 +47,7 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	}
 	// Keycloak answers the types in another order (it keeps a set): still
 	// the same config, not written.
-	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"LOGIN_ERROR", "LOGIN"} })
+	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"IMPERSONATE", "LOGIN_ERROR", "LOGIN"} })
 	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +73,62 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
 	if err := c.EnsureEventsConfig(ctx, 30); err == nil {
 		t.Error("a failed GET was not reported")
+	}
+}
+
+// TestEventsConfigHasImpersonate (D44, F4): EnsureEventsConfig stores
+// ConfigEventTypes = {LOGIN, LOGIN_ERROR, IMPERSONATE}, compared as a set:
+// the part-2 config (no IMPERSONATE) is written again.
+func TestEventsConfigHasImpersonate(t *testing.T) {
+	ctx := context.Background()
+	if want := []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}; !reflect.DeepEqual(keycloak.ConfigEventTypes, want) {
+		t.Fatalf("ConfigEventTypes = %v, want %v", keycloak.ConfigEventTypes, want)
+	}
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	kc.With(func() {
+		kc.EventsConfig = map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR"},
+			"eventsExpiration": float64(90 * 86400)}
+	})
+	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
+		t.Fatal(err)
+	}
+	var got any
+	kc.With(func() { got = kc.EventsConfig["enabledEventTypes"] })
+	if !reflect.DeepEqual(got, []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}) {
+		t.Errorf("enabledEventTypes = %v", got)
+	}
+	if n := kc.CountCalls("PUT /admin/realms/portcullis/events/config"); n != 1 {
+		t.Errorf("%d PUTs, want 1 (the part-2 config lacks IMPERSONATE)", n)
+	}
+	// A set: duplicates and order don't matter.
+	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"LOGIN_ERROR", "IMPERSONATE", "LOGIN", "LOGIN"} })
+	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
+		t.Fatal(err)
+	}
+	if n := kc.CountCalls("PUT /admin/realms/portcullis/events/config"); n != 1 {
+		t.Errorf("the same set was written again (%d PUTs)", n)
+	}
+}
+
+// TestHistoryQueryUnchanged (F4): the history query still asks for
+// type=LOGIN&type=LOGIN_ERROR only (HistoryEventTypes), never IMPERSONATE.
+func TestHistoryQueryUnchanged(t *testing.T) {
+	if want := []string{"LOGIN", "LOGIN_ERROR"}; !reflect.DeepEqual(keycloak.HistoryEventTypes, want) {
+		t.Fatalf("HistoryEventTypes = %v, want %v", keycloak.HistoryEventTypes, want)
+	}
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	alice := kc.Import("alice")
+	now := time.Now().UTC()
+	if _, err := c.LoginEventsPage(ctx, alice.ID, now.Add(-time.Hour), now, 0, 5); err != nil {
+		t.Fatal(err)
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if !reflect.DeepEqual(q["type"], []string{"LOGIN", "LOGIN_ERROR"}) {
+		t.Errorf("types = %v", q["type"])
 	}
 }
 

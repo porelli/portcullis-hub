@@ -3,9 +3,11 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/signin"
 )
@@ -305,5 +307,40 @@ func TestEnsureSignInStoredWithoutMethods(t *testing.T) {
 	}
 	if l2, err := Load(p); err != nil || l2.SignInMissing() {
 		t.Errorf("reloaded: %v, missing %v", err, l2 != nil && l2.SignInMissing())
+	}
+}
+
+// TestImpersonationsRoundTrip (F1, F3): the records are top level
+// (impersonations, outside sign_in) and keep their apps; the switch is
+// sign_in.impersonation_off, whose zero value means on.
+func TestImpersonationsRoundTrip(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.yaml")
+	s := New()
+	if s.SignIn.ImpersonationOff {
+		t.Fatal("a new state has impersonation off")
+	}
+	at := time.Date(2026, 11, 12, 14, 2, 58, 0, time.UTC)
+	rec := Impersonation{ID: "0f3c0f3c0f3c0f3c0f3c0f3c0f3c0f3c", Admin: "root", Target: "alice", AdminSID: "s1", Reason: "checking quota",
+		Fresh: "security_key", FreshAt: at.Add(-7 * time.Second), Started: at, Until: at.Add(30 * time.Minute),
+		Ended: at.Add(12 * time.Minute), How: "stopped", EndedBy: "sam", Used: true,
+		Apps: []ImpersonationApp{{Name: "Gitea"}, {Name: "Nextcloud", OwnSession: true}}}
+	s.Impersonations = []Impersonation{rec}
+	s.SignIn.ImpersonationOff = true
+	if err := s.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(p)
+	if !strings.Contains(string(raw), "\nimpersonations:\n") || !strings.Contains(string(raw), "    impersonation_off: true\n") {
+		t.Errorf("state.yaml:\n%s", raw)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.SignIn.ImpersonationOff || len(got.Impersonations) != 1 || !reflect.DeepEqual(got.Impersonations[0], rec) {
+		t.Errorf("round trip: off %v, %+v", got.SignIn.ImpersonationOff, got.Impersonations)
+	}
+	if c := rec.Clone(); &c.Apps[0] == &rec.Apps[0] {
+		t.Error("Clone shares Apps")
 	}
 }
