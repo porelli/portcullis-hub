@@ -6,7 +6,7 @@
 
 **Architecture:** Core gains the `wg` service (Go, wireguard-go + gVisor netstack, no capabilities, no TUN). It has two roles in this plan, `edge` and `people`. **edge** is the only PROXY-v2 client of Traefik's new `vpnsecure` entrypoint. It checks every claimed client address against the provider's ranges and its fresh device map. **people** is the built-in WireGuard provider, with its own resolver. The Hub validates `vpn:` blocks and wires providers. It runs their identity and DNS hooks, keeps built-in devices and publishes `hub_data/vpn.json` v2. It renders entrypoints, the `portcullis-vpnallow-<id>` allowlist, the friendly `/vpn-required` router and the gateway network attachment, and writes the policy file v7 `vpn` section. group-gate enforces the device ↔ person binding. The `link` role (server tunnels) reuses the same `wg/internal/tunnel` package and lands with the multi-server plan. The Kubernetes mapping waits for the Kubernetes plan.
 
-**Tech Stack:** Go 1.27 (`wg`, `vpn-forwarder`: `golang.zx2c4.com/wireguard` + `tun/netstack`, `github.com/pires/go-proxyproto`, `github.com/miekg/dns`, `github.com/prometheus/client_golang`, `github.com/mdp/qrterminal/v3`), Python 3 (group-gate, stdlib `ipaddress`), bash 3.2 + jq (core CLI), Go + vanilla JS (Hub; vendored `@noble/curves` x25519 and `qrcode-generator`), Python 3 (templates validator; the headscale glue uses only the official Python image's stdlib), GitHub Actions, Zensical.
+**Tech Stack:** Go 1.27 (`wg`, `portcullis-forwarder`: `golang.zx2c4.com/wireguard` + `tun/netstack`, `github.com/pires/go-proxyproto`, `github.com/miekg/dns`, `github.com/prometheus/client_golang`, `github.com/mdp/qrterminal/v3`), Python 3 (group-gate, stdlib `ipaddress`), bash 3.2 + jq (core CLI), Go + vanilla JS (Hub; WebCrypto X25519 and vendored `qrcode-generator`), Python 3 (templates validator; the headscale glue uses only the official Python image's stdlib), GitHub Actions, Zensical.
 
 **Spec:** `/Volumes/workspace/portcullis/portcullis-hub/docs/superpowers/specs/2026-11-13-vpn-only-access-design.md` (revision 2, binding). §16 open questions take their defaults: Q1 keep `10.213.0.0/22` with overlap refusal, Q2 `public_enrol` on, Q3 no binding for internet apps, Q4 userspace only, Q5 verified in Task 10 Step 1 (fallback as the spec says), Q6 60 s, admin-tunable, Q7 A records only. Related: rootless Podman plan `2026-11-13-rootless-podman.md` (runtime abstraction, compat lints, contract §6), multi-server spec (the `link` role).
 
@@ -49,7 +49,7 @@
   - The Hub's new engine calls (hook exec, gateway inspect for `vpn_gateway_privileged`) all go through the guarded client (rootless plan Task 2).
   - `wg` never touches the engine socket. The Hub reads `wg` state from `wg_data/status.json`, never through the engine.
 - **TDD everywhere.** Write the failing test, see it fail, implement, see it pass, commit. Gates:
-  - Core: `bash tests/test_shell_libs.sh && bash tests/test_cli.sh && shellcheck -S warning portcullis scripts/lib/*.sh tests/*.sh && actionlint && python3 -m pytest -q tests/test_group_gate.py`, plus `cd wg && gofmt -l . && go vet ./... && go test -race ./...` and the same in `vpn-forwarder`.
+  - Core: `bash tests/test_shell_libs.sh && bash tests/test_cli.sh && shellcheck -S warning portcullis scripts/lib/*.sh tests/*.sh && actionlint && python3 -m pytest -q tests/test_group_gate.py`, plus `cd wg && gofmt -l . && go vet ./... && go test -race ./...` and the same in `forwarder`.
   - Hub: `go vet ./... && go test -race ./... && gofmt -l .` (gofmt prints nothing).
   - Templates: `python3 tests/validate.py && python3 tests/test_validate.py`.
   - Docs: `python3 scripts/check-lists.py && bash scripts/check-branding.sh && zensical build --strict --clean`.
@@ -61,7 +61,7 @@
   - Merge each repo through a detached worktree: `git worktree add --detach /tmp/merge-<repo> origin/main` → `git merge --no-ff origin/vpn1 -m "merge vpn1: …"` → push → `git worktree remove`.
   - After the Hub merge, run `gh workflow run build.yml --ref main -f compare_ref=vpn1` and wait for `edge`.
   - Then merge templates `vpn1`, then core **at once**. In the window between Hub and core, `edge` writes policy v7 and core main's group-gate serves v6, so every app is denied: dispatch no core CI on main and upgrade no server in that window.
-  - After core main publishes `ghcr.io/porelli/portcullis-vpn-forwarder:edge`, do Task 19 (templates `vpn2`).
+  - After core main publishes `ghcr.io/porelli/portcullis-forwarder:edge`, do Task 19 (templates `vpn2`).
   - Finally delete every `vpn1`/`vpn2` branch (local and remote), every worktree and `/tmp/merge-*` (memory: branches mainlined).
 - **Test server (Task 20):** connect with the SSH command and install directory given in `2026-11-13-rootless-podman.md` Global Constraints, then `git pull --ff-only && ./portcullis upgrade`. `ACME_STAGING=true` stays (memory). Never touch the LLDAP `admin` user. Opening UDP 51820 in the server's cloud firewall is the user's action; the plan never edits cloud settings.
 - **Values from the spec (verbatim):**
@@ -96,7 +96,7 @@
     - `/vpn-required`: "This app is only reachable over a Portcullis VPN. Connect your device and reload."
     - Reason pages: "this device isn't yours; sign in on your own device", "your VPN's device list is out of date; try again in a minute".
 - **Values this plan adds (assistant's calls, binding for every task):**
-  - `.env` `PORTCULLIS_VPN_BUILTIN=on|off` (written by `vpn init`, default `on`).
+  - `.env` `PORTCULLIS_VPN_BUILTIN=on|off` (written by `vpn init`; its default flag is `on`; the compose default when unset is `off`; an empty key file also means off).
   - `.env` `PORTCULLIS_VPN_MODE=apps|admin|server` (default `apps`) and `PORTCULLIS_VPN_PUBLIC_ENROL=true|false` (default `true`).
   - `PORTCULLIS_VPN_WG_IP` (default `172.31.254.3`).
   - The Hub's core.env gets `PORTCULLIS_VPN_MODE`, `PORTCULLIS_VPN_PUBLIC_ENROL`, `PORTCULLIS_VPN_NET`, `PORTCULLIS_VPN_BUILTIN`. None is a template variable: contract §2 lists them as reserved, and the validator refuses `${PORTCULLIS_VPN_*}` (`$$PORTCULLIS_VPN_EDGE` shell references are allowed).
@@ -110,6 +110,35 @@
 3. **The Hub restarts.** It must not republish a marketplace map with a fresh `stale_after` before a good hook run (that would extend stale data). Marketplace providers are published `stale: true` until their first good run. Pinned by `TestStartPublishesMarketplaceProvidersStale` (Task 4).
 4. **A device's `expires` passes while the Hub is stopped.** `wg` must drop the peer and group-gate must deny it by their own clocks, without a new `vpn.json`. Pinned by `TestExpiredPeerDroppedByClock` (Task 12) and `test_expired_device_denied_by_clock` (Task 16).
 5. **A Portcullis name that is a CNAME** (`app.<d>` CNAME `<d>`, and `docs.<d>` CNAME to a foreign host). The resolver rewrites the final A that points at this server, strips the RRSIGs and leaves foreign chains untouched. Pinned by `TestRewriteCNAMEChain` (Task 12).
+
+## Pre-flight rulings (V1–V26)
+
+1. **V1**: Forwarder image renamed `ghcr.io/porelli/portcullis-forwarder` (reserved prefix kept absolute; forwarder exception in validators) — Tasks 1, 2, 9, 13, 19
+2. **V2**: `wg`/`wg_data` added to reserved core names — Tasks 1, 2, 9
+3. **V3**: Core lint updates (46 binds, Dockerfile lists, hub_data consumers, Go cache, dependabot, fully qualified inline images) — Tasks 14, 17
+4. **V4**: `vpn init` genkey fix (ct_run, user 0:0, truncate+write, secrets_fix_perms, stub tests) — Task 15
+5. **V5**: `wg_data` ownership (volume_own 10006:10001, directory 2750, wg chgrps files) — Task 14
+6. **V6**: vpndoc vectors path `../../../tests/vpn_json_vectors.json` — Task 11
+7. **V7**: Task 4 adds no-op `vpnRangesChanged()` hook; Task 5 implements override re-render — Tasks 4, 5
+8. **V8**: Fresh-auth per-host model (people → `{/signin, /vpn/}`, hub → `{/}`; deduplicated origins) — Tasks 1, 6
+9. **V9**: MCP parity gaps (`assign_vpn_address` AlsoTwins DELETE; settings/DNS-ack noToolRoutes reasons) — Task 7
+10. **V10**: VPN hook exclusions beside ai hooks (reload.hook, delivery.hook, with vectors) — Tasks 2, 9
+11. **V11**: Forwarder also gets `PORTCULLIS_VPN_EDGE` env (set on `network_mode: service:<ingress>` services) — Tasks 1, 5, 19
+12. **V12**: Forwarder `cap_add: [NET_BIND_SERVICE]` (Podman `:443` bind), test both runtimes — Task 19
+13. **V13**: Prometheus `wg` via `file_sd` (written by `vpn init`/`builtin`, empty when profile off), promtool test — Task 15
+14. **V14**: Headscale cleanup (backup lines 10, 328, 860–862; remove apps file services/volume, README line) — Task 15
+15. **V15**: Glue script allowed per spec §4 amendment (distroless confirmed, stdlib-only in official interpreter image), doctor note API key expiry — Task 10
+16. **V16**: Headscale gateway bootstrap (entrypoint wrapper, `TS_SERVE_CONFIG` generated, `--proxy-protocol` proved) — Task 10
+17. **V17**: Group-gate gaps (`/portal` backend vpn_check class `core`, public guard steps 1–2 only) — Task 16
+18. **V18**: `vpnAssets` serves fresh-auth scripts under `/vpn/assets/` (reachable in server mode) — Tasks 1, 6
+19. **V19**: Merge-window outage confirmed real (order forced docs → Hub → templates → core) — noted
+20. **V20**: `PORTCULLIS_VPN_IP_RANGE` variable, validated in network.sh; Hub derives gateways from VPNNet — Task 14
+21. **V21**: WebCrypto X25519 instead of noble (generateKey, export raw public + last 32 bytes of PKCS#8 private) — Task 6
+22. **V22**: Build risk spike (Step 0: build + TestTunnelRoundTrip in golang:1.27.3, allow newer gVisor if needed) — Task 11
+23. **V23**: Metrics bind to `portcullis` interface address (not `:9100` on all interfaces) — Task 12
+24. **V24**: Builtin default wording clarified (`vpn init --builtin` default `on`; compose default `off`; empty key = off) — Global Constraints
+25. **V25**: Rootless CI coverage (small step in e2e-podman: vpn init, wg healthy, built-in handshake+GET) — Task 17
+26. **V26**: Textual fixes (Task 4 lastDNSErr field, Task 6 start RunVPNExpiry, Task 19 netbird routers netbird-mgmt/netbird-signal, contract §16 multi-server spec reference, Task 15 keep netbird Keycloak client, Task 18 DNSSEC cross-link) — Tasks 1, 4, 6, 15, 18, 19
 
 ---
 
@@ -138,7 +167,7 @@
 | File | Responsibility |
 |---|---|
 | `wg/` (new Go module: `main.go`, `internal/{vpndoc,tunnel,edge,people,resolver,status}`, `Dockerfile`) | the `wg` service and its subcommands |
-| `vpn-forwarder/` (new Go module + `Dockerfile`), `.github/workflows/forwarder.yml` (new) | `portcullis-vpn-forwarder` image, published to GHCR |
+| `forwarder/` (new Go module + `Dockerfile`), `.github/workflows/forwarder.yml` (new) | `portcullis-forwarder` image, published to GHCR |
 | `docker-compose.yml`, `docker-compose.podman.yml`, `docker-compose.podman-selinux.yml` | `wg`, networks, `vpnsecure`, entrypoint variables, `people-vpn-enrol`, `vpn-required` middleware, Hub mounts |
 | `group-gate/group-gate.py`, `tests/test_group_gate.py`, `tests/vpn_json_vectors.json` (byte copy) | policy v7, `vpn.json` reader, binding, core-host classes, `/vpn-required` |
 | `scripts/lib/vpn.sh` (new), `network.sh`, `common.sh`, `status.sh`, `stack.sh`, `backup.sh`, `keycloak.sh`, `portcullis` | `vpn …` commands, network validation, core.env, status, cleanup |
@@ -166,8 +195,9 @@
 **Interfaces — Produces (binding for Tasks 2–19):**
 - §3:
   - Templates set only `entrypoints: websecure`.
-  - No key or value may contain `portcullis-vpn`.
+  - No key or value may contain `portcullis-vpn`, except the forwarder image `ghcr.io/porelli/portcullis-forwarder` (V1).
   - No `${PORTCULLIS_VPN_*}` compose interpolation; the container-shell `$$PORTCULLIS_VPN_EDGE` is allowed.
+  - Reserved core names: `wg` service, `wg_data` volume (V2).
 - §3.3: the `vpn:` block exactly as spec §4, with these refusal texts (shared by the Hub and validate.py, Task 2 vectors):
   - `vpn.label: a single line of 1–64 characters`
   - `vpn.ranges: 1–8 IPv4 prefixes`
@@ -209,10 +239,10 @@
   - Control routers keep `websecure,vpnsecure`.
   - `portcullis-vpnonly-<id>`: rule `Host(a) || Host(b) …`, priority 1, `websecure`, the instance's TLS tier, middlewares `vpn-required-path@docker`, service `group-gate@docker`.
   - Drift compares entrypoints, the allowlist ranges and its position.
-  - The gateway attachment: the ingress service's networks = the template's (or `default`) + `portcullis-vpn: {ipv4_address: <gw>}`, and env `PORTCULLIS_VPN_EDGE=<wg ip>:<9001+slot>`.
+  - The gateway attachment: the ingress service's networks = the template's (or `default`) + `portcullis-vpn: {ipv4_address: <gw>}`, and env `PORTCULLIS_VPN_EDGE=<wg ip>:<9001+slot>` on that service **and** every service with `network_mode: service:<ingress>` (V11).
 - §5.1, the people routes:
-  - `GET /vpn/` (page), `GET /vpn/assets/<file>`, `GET|POST /vpn/api/devices`, `PUT|DELETE /vpn/api/devices/{id}`, `POST /vpn/api/devices/{id}/renew`.
-  - The fresh-auth redirect URI `https://people.<d>/vpn/` (a third entry of the Hub-owned fresh-auth client).
+  - `GET /vpn/` (page), `GET /vpn/assets/<file>` (V18: `vpnAssets` serves its own copies of the fresh-auth scripts, so they stay reachable in server mode), `GET|POST /vpn/api/devices`, `PUT|DELETE /vpn/api/devices/{id}`, `POST /vpn/api/devices/{id}/renew`.
+  - The fresh-auth redirect URI `https://people.<d>/vpn/` (V8: the model is per-host: people → `{/signin, /vpn/}`, hub → `{/}`; deduplicated web origins).
   - People → person: `GET|DELETE /api/people/{user}/vpn-devices[/{id}]` (admins and `manage_signin`).
 - §11:
   - `state.yaml` `reach` and `vpn`.
@@ -242,8 +272,8 @@
     `people` is null when the role is off. The Hub treats a file older than 30 s as "wg down".
   - The CLI: `vpn init|mode|builtin|add-device|devices|revoke`.
   - The host control socket: the Hub listens on `/tmp/hub-host.sock` (0600, its tmpfs). `hub vpn add-device|devices|revoke|host-info` inside the Hub container are its only clients; it has no HTTP route on any listener.
-  - The forwarder image `ghcr.io/porelli/portcullis-vpn-forwarder` (listens `:443`, forwards to `$PORTCULLIS_VPN_EDGE` with PROXY v2).
-  - Multi-server §17 points here for the link role.
+  - The forwarder image `ghcr.io/porelli/portcullis-forwarder` (listens `:443`, forwards to `$PORTCULLIS_VPN_EDGE` with PROXY v2).
+  - The multi-server spec references the `link` role (V26).
 
 - [ ] **Step 1:** Write the sections in the contract's existing style ("NEW (VPN)" markers).
 - [ ] **Step 2:** Run the docs gate. Expected: exit 0.
@@ -258,8 +288,8 @@
 - Create: `internal/templates/vpn.go`, `internal/templates/vpn_test.go`, `internal/templates/testdata/vpn_vectors.json`
 - Modify:
   - `internal/templates/manifest.go` (`Manifest.VPN`)
-  - `internal/templates/settings.go` (`HookVPN`, `HookTriggers`, `(*Hook) IsVPN`, `sortedHooks` exclusion in `internal/hub/deliver_hooks.go:126`)
-  - `internal/templates/coreref.go:37` (`reservedRefs` += `"portcullis-vpn"`)
+  - `internal/templates/settings.go` (`HookVPN`, `HookTriggers`, `(*Hook) IsVPN`, `sortedHooks` exclusion in `internal/hub/deliver_hooks.go:126`, plus V10: `reload.hook` and option `delivery.hook` exclusions, with vectors)
+  - `internal/templates/coreref.go:37` (`reservedRefs` += `"portcullis-vpn"`, forwarder image exception V1; `coreServices` += `wg`, `coreVolumes` += `wg_data` V2)
   - `internal/templates/reservedvars.go` (`PORTCULLIS_VPN_*`)
   - `internal/templates/discover.go` (call `ValidateVPN` after `ValidateAI`)
   - `internal/hub/realtemplates_test.go`, `CLAUDE.md`
@@ -268,7 +298,7 @@
 - `templates.VPN{Label string; Ranges []string; Ingress VPNIngress; Identity VPNIdentity; DNS VPNDNS; ControlRouters []string}` (yaml/json snake_case, strict `UnmarshalYAML` like `AI`).
 - `VPNIngress{Service, ProxyProtocol string}`, `VPNIdentity{Source, Hook, Owner string; Refresh Duration}`, `VPNDNS{Hook string; Manual bool}`.
 - `const HookVPN = "vpn"`, `(*Hook) IsVPN() bool`, `const VPNReservedPrefix = "portcullis-vpn"`.
-- `ValidateVPN(t *Template, compose []byte, routes *Routes) error` (the §3.3 texts).
+- `ValidateVPN(t *Template, compose []byte, routes *Routes) error` (the §3.3 texts). V1: accept `ghcr.io/porelli/portcullis-forwarder` in `image:` values.
 - `ResolveVPNRanges(m *Manifest, values map[string]any) ([]netip.Prefix, error)` (literals, or the `{{setting:KEY}}` cidr value).
 - `(VPNIdentity) EffectiveRefresh() time.Duration` (0 → 60 s).
 
@@ -285,7 +315,7 @@
   - `TestVPNVectors` iterates the vectors.
   - `TestTemplateMentioningPortcullisVPNRefused` (a label value `portcullis-vpnallow-x@docker` → `checkCoreRefs` error).
   - `TestReservedVPNVarRefused` (`${PORTCULLIS_VPN_EDGE}` refused, `$$PORTCULLIS_VPN_EDGE` accepted).
-  - `TestVPNHooksNeverDelivered`: `sortedHooks` drops `vpn` hooks, as it drops `ai` hooks.
+  - `TestVPNHooksNeverDelivered`: `sortedHooks` drops `vpn` hooks, as it drops `ai` hooks. V10: also refuse vpn as `reload.hook` and option `delivery.hook`, with vectors.
   - `TestRealTemplatesVPN` (skips without `PORTCULLIS_TEMPLATES_DIR`): every real template still loads.
 - [ ] **Step 2:** Run `go test ./internal/templates/ ./internal/hub/ -run 'VPN|ReservedVPN'`. Expected: FAIL (undefined `VPN`).
 - [ ] **Step 3: Implement** in `vpn.go` with `net/netip` (`ParsePrefix`, `Overlaps`, `Masked` equality), reusing `routes.HostRouters`, `kindOf` (companion), `Manifest.Jobs` and `ServiceNetworks(compose)` for the ingress checks. In Hub `CLAUDE.md`, add one sentence to the `internal/templates` row.
@@ -404,7 +434,7 @@
   - Hooks run through `ExecStdinSplit` (guarded), with the hook's `timeout` and a `vpn:<name>` unit.
   - The map lives in memory (`h.vpnMaps`, own mutex). Never hold `Hub.mu` across exec.
   - `publishVPNLocked` builds the `vpn.Doc`: built-in peers come from `state.VPN.Devices` (minus expired); `server_public_key`, `subnet` from `wgStatus()`; `domains` = the main domain plus the enrolled ones. It then calls `vpn.Write(<data>/vpn.json)`.
-  - Every change of providers, devices, statics or the directory also re-renders the overrides of VPN-only instances whose accepted ranges changed (Task 5's `vpnAllowRanges`).
+  - V7: every change of providers, devices, statics or the directory also calls `h.vpnRangesChanged()` (a no-op hook here; Task 5 implements the override re-render).
 - [ ] **Step 4:** Run the Hub gates. Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: VPN providers (wiring, slots, overlap guards), identity/DNS hook runners, static assignments, vpn.json v2 publishing`).
 
@@ -438,7 +468,7 @@
     - `portcullis-vpnonly-<id>` on `websecure`, priority `1`, rule `Host(...)` over every host, the instance tier, `vpn-required-path@docker`, service `group-gate@docker`.
   - `TestControlRoutersStayPublic`: a provider instance set to `vpn` keeps `headscale` on `websecure,vpnsecure` with no allowlist, while `headplane` goes VPN-only.
   - `TestAllowlistRangesFollowProviders`: wiring a second provider re-renders `sourcerange` for `via: ["*"]` instances only.
-  - `TestGatewayOverrideKeepsTemplateNetworks` (Review Focus 1): ingress services declaring nothing, `[default, portcullis-proxy]`, or a map with aliases each render their original networks plus `portcullis-vpn: {ipv4_address: 172.31.254.16}` and `PORTCULLIS_VPN_EDGE: "172.31.254.3:9001"`, and the override's top-level `networks.portcullis-vpn.external: true`.
+  - `TestGatewayOverrideKeepsTemplateNetworks` (Review Focus 1): ingress services declaring nothing, `[default, portcullis-proxy]`, or a map with aliases each render their original networks plus `portcullis-vpn: {ipv4_address: 172.31.254.16}` and `PORTCULLIS_VPN_EDGE: "172.31.254.3:9001"`, and the override's top-level `networks.portcullis-vpn.external: true`. V11: also set the env on every service with `network_mode: service:<ingress>`.
   - `TestReachRefusedWithoutProvider` (409 "wire a VPN first"), `TestReachAudited`.
   - `TestDriftComparesEntrypointsAndAllowlist`: a running container with `websecure` on a VPN-only router, or the allowlist moved second, is drift.
   - `TestPolicyV7VPNSection`: version 7; `vpn.hosts` lists every host of VPN-only instances with their `via`; `server_mode` / `admin_only` / `public_enrol` from core.env (`PORTCULLIS_VPN_MODE`, `PORTCULLIS_VPN_PUBLIC_ENROL`); `devices_file` is `"vpn.json"`.
@@ -447,6 +477,7 @@
 - [ ] **Step 3: Implement.**
   - Set the entrypoints label on every router the Hub knows (template host routers included).
   - An empty accepted set renders `0.0.0.0/32`: Traefik refuses an empty source range, and that range matches no client.
+  - V7: implement `vpnRangesChanged()` to re-render VPN-only instance overrides whose accepted ranges changed (called by Task 4's map changes).
   - Update the existing goldens: every internet router now carries `entrypoints: websecure,vpnsecure`. Check the diff contains only that line per router.
 - [ ] **Step 4:** Run the Hub gates. Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: VPN-only rendering (vpnsecure, portcullis-vpnallow, friendly router, control routers, gateway attachment), reach, drift, policy v7`).
@@ -458,13 +489,13 @@
 **Files:**
 - Create:
   - `internal/hub/vpn_devices.go`, `internal/httpapi/vpn_people.go`, `internal/httpapi/hostctl.go`, `cmd/hub/vpn.go`
-  - `web/vpn.html`, `web/vpn.js`, `web/vendor/noble-x25519.js` (the `@noble/curves` x25519 build, pinned version + sha256 in a header comment), `web/vendor/qrcode.js` (`qrcode-generator`, likewise)
+  - `web/vpn.html`, `web/vpn.js`, `web/vendor/qrcode.js` (`qrcode-generator`, pinned version + sha256 in a header comment)
   - tests `vpn_devices_test.go`, `vpn_people_test.go`, `hostctl_test.go`, `webui_vpn_test.go`
 - Modify:
-  - `internal/httpapi/server.go` (people mux, `peopleStatic` unchanged: `/vpn/assets/` has its own allowlist `vpnAssets`)
+  - `internal/httpapi/server.go` (people mux, `peopleStatic` unchanged: V18 `/vpn/assets/` has its own allowlist `vpnAssets` serving fresh-auth scripts)
   - `web/web.go` (`//go:embed`)
-  - `cmd/hub/main.go` (fresh-auth: a `hub.ListenerPeopleVPN` verifier with redirect `https://people.<d>/vpn/`; `hub vpn` dispatched before env like `folderfix`; control socket listener)
-  - `internal/keycloak/freshauth.go` (`checkFreshAuthURIs` accepts `/vpn/` on the people host)
+  - `cmd/hub/main.go` (fresh-auth: a `hub.ListenerPeopleVPN` verifier with redirect `https://people.<d>/vpn/`; `hub vpn` dispatched before env like `folderfix`; control socket listener; V26 `go h.RunVPNExpiry(ctx, 10*time.Second)`)
+  - `internal/keycloak/freshauth.go` (V8: `checkFreshAuthURIs` per-host model: people → `{/signin, /vpn/}`, hub → `{/}`; deduplicated web origins)
   - `web/mysignin.js` (the "VPN devices" card: all-providers list, a link to `/vpn/`)
   - `web/directory.js` (People → person → VPN devices, remove only)
 
@@ -501,7 +532,7 @@
     - `HostAddVPNDevice` creates a device for any enabled person in the VPN users group;
     - the audit actor is `host`.
   - `TestHubVPNSubcommand` (cmd/hub: stdin key → POST over a test socket → stdout JSON; a missing socket → exit 1 with "the Hub isn't running").
-  - `TestFreshAuthVPNRedirect` (`checkFreshAuthURIs` accepts `https://people.<d>/vpn/`, still refuses any other path).
+  - `TestFreshAuthVPNRedirect` (V8: `checkFreshAuthURIs` per-host model: people accepts `/signin` and `/vpn/`, hub accepts `/`, test covers host-twice rule and path set).
   - `TestVPNPageNeverPostsPrivateKey` (static, `webui_vpn_test.go`):
     - `vpn.js` posts a body built only from `name`, `public_key`, `proof`;
     - it contains no `localStorage` / `sessionStorage` / `indexedDB`;
@@ -509,7 +540,7 @@
   - `TestVPNAssetsAllowlist` (only the page's own files under `/vpn/assets/`).
 - [ ] **Step 2:** Run `go test ./internal/hub/ ./internal/httpapi/ ./internal/keycloak/ ./cmd/hub/ -run 'Device|Recreated|GroupLeave|Disable|Expiry|Renew|PeopleVPN|HostSocket|HubVPN|FreshAuthVPN|VPNPage|VPNAssets'`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
-  - The page: name → fresh sign-in (`freshauth.js` with the `/vpn/` verifier) → `x25519.utils.randomPrivateKey()` → POST the public key → assemble `[Interface]`/`[Peer]` text and the QR in memory → show once → overwrite the key variable on close.
+  - The page: name → fresh sign-in (`freshauth.js` with the `/vpn/` verifier) → V21 WebCrypto `generateKey({name:"X25519"})`, export raw public key and last 32 bytes of PKCS#8 private key → POST the public key → assemble `[Interface]`/`[Peer]` text and the QR in memory → show once → overwrite the key variable on close.
   - Expiry choices: 30 d, 90 d, 1 y, never (Settings bounds).
   - The Sign-in card and People → person reuse `GET /vpn/api/devices` and `/api/people/{user}/vpn-devices`.
   - Escape everything (`escapeHtml` / `esc`) and use delegated listeners.
@@ -538,7 +569,7 @@
   - `ProviderView{ID, Label, Source string; Wired, Stale bool; Ranges []string; Devices, Online int; RefreshedAt *time.Time; LastError string; Compat *templates.Compat}` (`Compat` = the rootless status under Podman).
   - `VPNSettingsView{UsersGroup string; DevicesPerPerson int; Expiry string}` and `VPNSettingsUpdate` (the same fields as pointers; only the set ones change).
   - `(*Hub) SetVPNSettings(ctx, actor, VPNSettingsUpdate) error` (audited `vpn.settings`; `devices_per_person` 1–100, `expiry` `30d|90d|1y|never` or a duration ≥ 30 d).
-  - MCP (all `admin(...)`, twins as Task 1 §15.10): `get_vpn` R, `list_vpn_devices` R, `remove_vpn_device` D, `set_vpn_provider` D, `assign_vpn_address` D, `set_instance_reach` D.
+  - MCP (all `admin(...)`, twins as Task 1 §15.10): `get_vpn` R, `list_vpn_devices` R, `remove_vpn_device` D, `set_vpn_provider` D, `assign_vpn_address` D (V9: takes DELETE via `AlsoTwins` for unassign), `set_instance_reach` D. V9: `PUT /api/vpn/settings`, `DELETE /api/instances/{id}/vpn-static/{ip}`, `POST /api/instances/{id}/vpn-dns/ack` get `noToolRoutes` reasons ("admin UI only").
 
 - [ ] **Step 1: Write the failing tests.**
   - `TestVPNRoutesAdminOnly` (the people listener 404s each one).
@@ -593,7 +624,7 @@
 **Files:**
 - Modify:
   - `schema/manifest.schema.json` (`vpn` def, `hooks[].when` gains `vpn`)
-  - `tests/validate.py`: new `check_vpn(t, services, routers, r)` called beside `check_ai`; `RESERVED_REFS` += `"portcullis-vpn"`; the reserved `PORTCULLIS_VPN_*` interpolation refusal in `check_reserved_var_refs`
+  - `tests/validate.py`: new `check_vpn(t, services, routers, r)` called beside `check_ai`; `RESERVED_REFS` += `"portcullis-vpn"` (V1: forwarder image exception); V2: `CORE_SERVICES` += `wg`, `CORE_VOLUMES` += `wg_data`; the reserved `PORTCULLIS_VPN_*` interpolation refusal in `check_reserved_var_refs`; V10: vpn hook exclusions in reload/delivery like ai hooks
   - `tests/test_validate.py` (`VPNTests`), `tests/e2e/app_signin.py` (`policy_doc`), `.github/workflows/lint.yml`, `CLAUDE.md`, `CONTRIBUTING.md`
 - Create: `tests/vpn_vectors.json` (byte copy of the Hub's `internal/templates/testdata/vpn_vectors.json`)
 
@@ -631,14 +662,14 @@
     - `vpn-devices` and `vpn-dns`: service `vpn-glue`, `when: [vpn]`, command `["python3", "/vpn/glue.py"]`.
     - `gateway-key`: service `vpn-glue`, `when: [start]`, command `["python3", "/vpn/glue.py", "gateway-key"]`.
   - Services:
-    - `gateway`: `docker.io/tailscale/tailscale:<pinned tag@sha256>`, `TS_USERSPACE=true`, `TS_AUTHKEY=file:/run/gateway/authkey`, `TS_EXTRA_ARGS=--login-server=https://${PORTCULLIS_HOST_HEADSCALE} --advertise-tags=tag:portcullis-gateway`, state in volume `gateway-state`, no caps.
-    - `vpn-glue`: `docker.io/library/python:<pinned>-alpine@sha256`, read-only, `cap_drop: ALL`, idle `sleep infinity`, env `HEADSCALE_API_KEY: ${HEADSCALE_API_KEY:-}`, `OIDC_ISSUER`; mounts `./templates/headscale/vpn:/vpn:ro`, `headscale-dns:/dns`, `gateway-auth:/run/gateway`.
+    - `gateway`: `docker.io/tailscale/tailscale:<pinned tag@sha256>`, V16: entrypoint wrapper waits for `/run/gateway/authkey`, then runs containerboot with a generated `TS_SERVE_CONFIG` substituting `$PORTCULLIS_VPN_EDGE`; `TS_USERSPACE=true`, `TS_EXTRA_ARGS=--login-server=https://${PORTCULLIS_HOST_HEADSCALE} --advertise-tags=tag:portcullis-gateway`, state in volume `gateway-state`, no caps.
+    - `vpn-glue`: `docker.io/library/python:<pinned>-alpine@sha256`, read-only, `cap_drop: ALL`, idle `sleep infinity`, env `HEADSCALE_API_KEY: ${HEADSCALE_API_KEY:-}`, `OIDC_ISSUER`; mounts `./templates/headscale/vpn:/vpn:ro` (V15: stdlib-only glue per spec §4 amendment), `headscale-dns:/dns`, `gateway-auth:/run/gateway`.
   - `config.yaml`: `dns.extra_records_path: /var/lib/headscale-dns/extra-records.json` (the `headscale-dns` volume read-only in `headscale`).
 
 - [ ] **Step 1 (verification, Q5 and the glue's premise; record the outcome in the commit message):**
-  - In a scratch dir, run the pinned `headscale` image and check it has no `/bin/sh` (distroless). That is why the hooks run in `vpn-glue` against Headscale's REST API with the template's existing `api_key` setting instead of `headscale nodes list | jq` (assistant's call).
-  - Register a userspace `tailscale/tailscale` against it and run `tailscale serve --tcp 443 tcp://<edge> --proxy-protocol 2` against a netcat that prints the PROXY header. Expected: the v2 header's source is the client node's 100.64 address.
-  - If it isn't, stop and switch to the spec's Q5 fallback: a TUN-mode tailscaled + `portcullis-vpn-forwarder` in Task 19's netbird pattern (rootless `degraded`). Report the switch before going on.
+  - V15: confirm the pinned `headscale` image has no `/bin/sh` (distroless). That's why the hooks run in `vpn-glue` against Headscale's REST API with the template's existing `api_key` setting instead of `headscale nodes list | jq`.
+  - V16: register a userspace `tailscale/tailscale` against it and run `tailscale serve --tcp 443 tcp://<edge> --proxy-protocol 2` (or `TS_SERVE_CONFIG` generated) against a netcat that prints the PROXY header. Expected: the v2 header's source is the client node's 100.64 address.
+  - If it isn't, stop and switch to the spec's Q5 fallback: a TUN-mode tailscaled + `portcullis-forwarder` in Task 19's netbird pattern (rootless `degraded`). Report the switch before going on.
 - [ ] **Step 2: Write the failing checks** in `tests/apps/headscale.sh`:
   - `validate.py` accepts the template;
   - the gateway has no `cap_add` / `devices`;
@@ -650,7 +681,7 @@
   - `dns`: write `/dns/extra-records.json` as `[{"name","type":"A","value"}]`.
   - `gateway-key`: create the user `portcullis-gateway` if absent, then a non-reusable 1 h pre-auth key tagged `tag:portcullis-gateway`, written to `/run/gateway/authkey` 0600, only when the gateway isn't registered yet.
   - Errors go to stderr, without tokens.
-  - In `manifest.yaml` notes: what goes public in server mode (only the `headscale` router), the API key requirement, and the refresh delay.
+  - In `manifest.yaml` notes: what goes public in server mode (only the `headscale` router), the API key requirement, and the refresh delay. V15: note that identity depends on the Headscale API key's expiry (365 d default).
 - [ ] **Step 4:** Run the templates gates and `bash tests/apps/headscale.sh` against a local core checkout. Expected: PASS. Push `vpn1`, run lint.yml and Test Apps `apps=headscale`. Expected: green.
 - [ ] **Step 5:** Commit (`headscale: Portcullis VPN provider (userspace gateway with PROXY v2, identity and DNS hooks through the REST API)`).
 
@@ -675,8 +706,9 @@
 - `(*Stack) Handshakes() (map[string]time.Time, error)` (`IpcGet` `last_handshake_time_sec`), `(*Stack) PublicKey() string`, `Close()`.
 - `tunnel.PeerConfig{PublicKey [32]byte; IP netip.Addr}`.
 
+- [ ] **Step 0 (V22 spike):** Build + `TestTunnelRoundTrip` inside `golang:1.27.3-alpine3.24@sha256:fa48…`, allowing a newer gVisor `require` if needed. Stop and report if it fails.
 - [ ] **Step 1: Write the failing tests.**
-  - `TestVectors` (reads `../../tests/vpn_json_vectors.json`).
+  - `TestVectors` (V6: reads `../../../tests/vpn_json_vectors.json`).
   - `TestSyncPeersDiff`: removing one of two peers keeps the other's handshake.
   - `TestTwoStacksIsolated` (the role-separation proof for the future link role): two stacks in one process with disjoint subnets; dialling stack B's address from stack A fails; a stack with no listener accepts nothing.
   - `TestTunnelRoundTrip`: a client stack peered to a server stack reaches the server's TCP listener.
@@ -698,7 +730,7 @@
   - Env:
     - `WG_VPN_FILE=/hub-data/vpn.json`, `WG_STATUS_FILE=/data/status.json`, `WG_PEOPLE_KEY=/run/portcullis/wg/people.key`
     - `WG_PEOPLE=on|off`, `WG_PORT`, `WG_SUBNET`, `WG_VPN_ADDR` (its `portcullis-vpn` IP), `WG_TRAEFIK=<ip>:8443`
-    - `WG_DNS_UPSTREAM`, `WG_DOMAIN`, `WG_MODE`, `WG_METRICS=:9100`
+    - `WG_DNS_UPSTREAM`, `WG_DOMAIN`, `WG_MODE`, `WG_METRICS=:9100` (V23: bind to the `portcullis` interface's address found at start, not all interfaces)
   - Subcommands:
     - `wg run`
     - `wg genkey <path>` (writes a key 0640; the private key is never printed)
@@ -738,10 +770,10 @@
 
 ---
 
-### Task 13: Core `portcullis-vpn-forwarder` image and its publishing
+### Task 13: Core `portcullis-forwarder` image and its publishing
 
 **Files:**
-- Create: `vpn-forwarder/{go.mod,go.sum,main.go,main_test.go,Dockerfile}`, `.github/workflows/forwarder.yml`
+- Create: `forwarder/{go.mod,go.sum,main.go,main_test.go,Dockerfile}`, `.github/workflows/forwarder.yml`
 - Modify: `.github/workflows/release.yml` (also tag the forwarder `vX.Y.Z`), `CLAUDE.md` (Key Files)
 
 **Interfaces — Produces:**
@@ -749,13 +781,13 @@
   - listens on `${FORWARDER_LISTEN:-:443}` and forwards each connection to `$PORTCULLIS_VPN_EDGE` with a PROXY v2 header (source = the peer address it sees);
   - refuses to start without `PORTCULLIS_VPN_EDGE` (exit 2);
   - uid 65534, `ENTRYPOINT ["/forwarder"]`.
-- `forwarder.yml`: on push to main touching `vpn-forwarder/**` and on dispatch, builds `linux/amd64,linux/arm64` and pushes `ghcr.io/porelli/portcullis-vpn-forwarder:edge`. `permissions: packages: write` only on that job. Actions are pinned by SHA.
+- `forwarder.yml`: on push to main touching `forwarder/**` and on dispatch, builds `linux/amd64,linux/arm64` and pushes `ghcr.io/porelli/portcullis-forwarder:edge`. `permissions: packages: write` only on that job. Actions are pinned by SHA.
 
 - [ ] **Step 1: Write the failing tests:** `TestForwardsWithHeader`, `TestRefusesWithoutEdge`, `TestHalfCloseSplice`.
-- [ ] **Step 2:** Run `cd vpn-forwarder && go test ./...`. Expected: FAIL.
+- [ ] **Step 2:** Run `cd forwarder && go test ./...`. Expected: FAIL.
 - [ ] **Step 3:** Implement on go-proxyproto and `io.Copy` with half-close. Use the same builder and alpine digests as Task 12. Run `actionlint`.
 - [ ] **Step 4:** Run the forwarder gate and `actionlint`. Expected: PASS.
-- [ ] **Step 5:** Commit (`vpn-forwarder: PROXY v2 forwarder image for VPN apps with a real tunnel interface, published to GHCR from main`).
+- [ ] **Step 5:** Commit (`forwarder: PROXY v2 forwarder image for VPN apps with a real tunnel interface, published to GHCR from main`).
 
 ---
 
@@ -764,7 +796,7 @@
 **Files:**
 - Modify:
   - `docker-compose.yml`:
-    - networks `portcullis-vpn` (internal, `name: portcullis-vpn`, IPAM `${PORTCULLIS_VPN_NET:-172.31.254.0/26}`, `ip_range: 172.31.254.8/29` so no dynamic address can take a pinned one) and `wg-egress`;
+    - networks `portcullis-vpn` (internal, `name: portcullis-vpn`, IPAM `${PORTCULLIS_VPN_NET:-172.31.254.0/26}`, V20 `ip_range: ${PORTCULLIS_VPN_IP_RANGE:-172.31.254.8/29}` so no dynamic address can take a pinned one) and `wg-egress`;
     - the `wg` service (profile `wg`);
     - Traefik's `vpnsecure` env and its `portcullis-vpn` address;
     - every core router's `entrypoints` → one of the three variables;
@@ -805,10 +837,13 @@
     - `docker-compose.podman.yml` names `wg`.
   - The existing jq checks (hardening baseline, NET_ADMIN / SYS_ADMIN, image pins, `lint_healthchecks.sh`, `lint_images.sh`, `CORE_SERVICE_NAMES` diff) now see `wg`.
   - The "Shared vpn.json vectors match the Hub" step: a copy of the sign-in vectors step comparing `tests/vpn_json_vectors.json` with the Hub's `internal/vpn/testdata/vpn_json_vectors.json`.
-  - "one golang builder digest" gains `wg` and `vpn-forwarder`.
+  - V3(a): `[ "$NBINDS" = 46 ]` (was 45).
+  - V3(b): "UNPINNED base" and "one golang builder" loops add `wg/Dockerfile` and `forwarder/Dockerfile`.
+  - V3(d): `hub_data` consumer check runs over `$CFG_ALL` and includes `wg`.
+  - V3(e): Go cache key and dependabot add `/wg`, `/forwarder`, `/tests/e2e/vpn-client`.
   - Shell tests: "validate_vpn_network_config: wg ip outside the subnet → fail", "… traefik ip inside the ip_range → fail", "… overlap with the proxy subnet → fail".
 - [ ] **Step 2:** Run `PORTCULLIS_ROOT=/tmp/pv-x ./portcullis init --env-only --runtime docker --non-interactive --domain ci.example.org --dns-provider none`, then the jq checks and the shell tests. Expected: FAIL.
-- [ ] **Step 3:** Implement the compose changes. `stack_prepare` creates an empty `secrets/wg/people.key` placeholder (0640, `ct_group_read 10006`) so the bind never makes a directory and the SELinux overlay's missing-source rule holds. `wg` treats an empty key file as "people off".
+- [ ] **Step 3:** Implement the compose changes. `stack_prepare` creates an empty `secrets/wg/people.key` placeholder (0640, `ct_group_read 10006`) so the bind never makes a directory and the SELinux overlay's missing-source rule holds. `wg` treats an empty key file as "people off". V5: `volume_own wg_data 10006:10001` (directory 2750); `wg` chgrps files to 10001 (allowed as a member). V20: `validate_vpn_network_config` validates `PORTCULLIS_VPN_IP_RANGE`; the Hub derives gateway addresses from `Config.VPNNet` (/26 minimum). Add `secrets/wg` to `secrets_fix_perms`.
 - [ ] **Step 4:** Run `docker compose -f docker-compose.yml config -q` (also with `--profile '*'` and the overlays), the jq checks and the core gates. Expected: PASS.
 - [ ] **Step 5:** Commit (`compose: wg service (profile wg, no caps), portcullis-vpn network, Traefik vpnsecure (PROXY from wg only), core entrypoint classes, people-vpn-enrol, overlays; CI static checks`).
 - [ ] **Step 6 (controller):** Run `gh workflow run ci.yml --ref vpn1 -f jobs=unit-tests,build-and-test`. Expected: green (VPN off: nothing else changes).
@@ -823,10 +858,10 @@
   - `portcullis` (source `vpn.sh`, `help_main`)
   - `scripts/lib/common.sh` (`HUB_ENV_VARS` += the four core.env keys)
   - `scripts/lib/status.sh` (`status_run` VPN block, `--json` `vpn{}`, `status_textfile` `portcullis_vpn_mode_restricted`)
-  - `scripts/lib/backup.sh` (drop the `headscale-config.yaml` lines 10, 319, 830–832; `secrets/wg` is already under `secrets/`)
-  - `scripts/lib/keycloak.sh:855-858,936` (remove the optional headscale/headplane clients and their help text)
-  - Delete `headscale/config.yaml`
-  - `monitoring/prometheus/prometheus.yml` (job `wg` → `wg:9100`), `alerts.yml` (`PortcullisVPNDown`, `PortcullisVPNProviderStale`), `tests/alerts_test.yml`
+  - `scripts/lib/backup.sh` (V14: drop `headscale-config.yaml` lines 10, 328, 860–862; `secrets/wg` is already under `secrets/`)
+  - `scripts/lib/keycloak.sh:854-859,936` (V14: remove optional headscale/headplane clients and their help text; V26 keep netbird client in the same block)
+  - V14: Delete `headscale/config.yaml`, remove headscale + headplane services and volume from `docker-compose.apps.yml` (lines 64–84, 199), remove README line
+  - `monitoring/prometheus/prometheus.yml` (V13: `file_sd` for `wg` written by `vpn init`/`builtin`, empty when profile off), `alerts.yml` (`PortcullisVPNDown`, `PortcullisVPNProviderStale`), `tests/alerts_test.yml`
   - `tests/test_shell_libs.sh`, `tests/test_cli.sh`, `.env.example`, `CLAUDE.md` (the lib list; the Admin CLI VPN bullet)
 
 **Interfaces — Produces (bash):**
@@ -837,7 +872,7 @@
 - `vpn init [--builtin on|off] [--port N] [--subnet CIDR]`:
   - `need_env`, Hub healthy.
   - Overlap refusal against Docker networks (`docker network inspect` of all), `portcullis-vpn`, the reserved link default `10.214.0.0/24`, and the Hub's `hub vpn host-info` (Local networks, provider ranges). It suggests the next free /22 in `10.213.0.0/16`.
-  - `--builtin on` → `secrets/wg/people.key` from `docker run --rm --network none -v <secrets/wg>:/out portcullis-wg genkey /out/people.key`, then `ct_group_read 10006`.
+  - V4: `--builtin on` → `env_set COMPOSE_PROFILES` → `runtime_build_service wg` → `ct_run --rm --network none --user 0:0 --cap-drop ALL … genkey` writing the key in place (truncate + write, no rename) → `ct_group_read 10006`. `vpn builtin on|off` recreates `wg`. Add `secrets/wg` to `secrets_fix_perms`. Stub tests assert `ct_run`.
   - Writes `PORTCULLIS_VPN_BUILTIN`, `_PORT`, `_SUBNET`, adds `wg` to `COMPOSE_PROFILES` (`env_set`), `hub_env_write`, `stack_compose_up wg traefik hub`.
 - `vpn mode apps|admin|server [--force] [--public-enrol true|false]`:
   - The lock-out guard for admin/server: `hub vpn host-info` `.admin_device_seen` must be true, else exit 1 naming `--force`. `apps` never checks and works with `wg` and the Hub down.
@@ -863,7 +898,7 @@
   - "status --json has vpn{}", "status textfile has portcullis_vpn_mode_restricted".
   - "keycloak.sh registers no headscale client", "backup has no headscale-config.yaml".
   - In `tests/test_cli.sh`: every `vpn` subcommand's `--help` works without `.env` or Docker; argument errors exit 2.
-  - Promtool: alert tests for both alerts (firing and not), each with `exp_annotations`.
+  - Promtool: alert tests for both alerts (firing and not), each with `exp_annotations`. V13: test "profile off → no TargetDown".
 - [ ] **Step 2:** Run `bash tests/test_shell_libs.sh; bash tests/test_cli.sh`. Expected: the new cases FAIL.
 - [ ] **Step 3:** Implement. Alerts:
   - `PortcullisVPNDown`: `portcullis_vpn_mode_restricted == 1 and on() (absent(up{job="wg"}) or up{job="wg"} == 0)` for 2m;
@@ -898,7 +933,8 @@
   - `test_internet_app_via_vpn_needs_no_binding` (Q3).
   - Core classes:
     - `admin_only`: `hub.<d>` from a non-VPN address → denied; with a bound device → allowed.
-    - `server_mode`: `people.<d>/vpn/` from the internet with `public_enrol` → allowed; `people.<d>/signin` → denied; the portal → denied.
+    - `server_mode`: `people.<d>/vpn/` from the internet with `public_enrol` → allowed; `people.<d>/signin` → denied; V17 the portal `/portal` also denied (backend call to `vpn_check` class `core`).
+  - V17: `test_public_guard_vpn_steps_1_2` (public hosts enforce steps 1–2 but not 3).
   - `test_vpn_required_page` (403, the exact text, no `Set-Cookie`).
   - `test_reason_pages_hide_owner` (the page never contains the device owner's name).
   - `test_opened_log_via_fields`.
@@ -930,7 +966,7 @@
   - Create alice and bob (setup links, as in e2e).
   - `./portcullis vpn init`; create `echo-vpn` (echo) and a headscale instance; set its API key through `PUT /api/instances/{id}/settings` after `headscale apikeys create` via `docker exec`.
   - Wire headscale through the Hub API.
-  - Build `tests/e2e/vpn-client` and a userspace `tailscaled` (pinned `tailscale/tailscale` image, no caps, on the runner's default network).
+  - Build `tests/e2e/vpn-client` and a userspace `tailscaled` (V3: fully qualified `docker.io/tailscale/tailscale:tag@sha256`, no caps, on the runner's default network).
   - Register a node through Keycloak OIDC with Playwright as alice, and a second node from a pre-auth key of a non-OIDC Headscale user.
   - Built-in device for alice through the `/vpn/` API with a fresh-auth proof (the e2e-signin helper), and one for bob.
 - [ ] **Step 3: Assertions**, each failing with `FAIL: <what>`, for the built-in and for headscale:
@@ -952,6 +988,7 @@
     - `vpn mode apps` with `wg` stopped restores them.
   - DNS: the built-in resolver answers `echo-vpn.<d>` A `10.213.0.1` and AAAA NODATA; the tailnet resolves it to the gateway address (MagicDNS through `tailscale status` / `nslookup` inside the tailscaled container).
   - Failure artifacts: logs only (never `.env`, `secrets/`, configs or keys).
+  - V25: Add a small step to `e2e-podman`: `vpn init`, `wg` healthy as 10006 with `CapAdd` null, one built-in `vpn-client` handshake + GET through the tunnel. The SELinux overlay check is already static.
 - [ ] **Step 4:** Run `actionlint` and `bash tests/test_cli.sh`. Expected: PASS. Add `e2e-vpn` to the description list, then commit (`ci: Test the VPN service step, e2e-vpn (built-in + headscale end to end)`).
 - [ ] **Step 5 (controller):** Run `gh workflow run ci.yml --ref vpn1 -f jobs=build-and-test,e2e-vpn`. Expected: green. If the Q5 premise failed in Task 10, the headscale half follows the fallback chosen there.
 
@@ -965,7 +1002,7 @@
   - `docs/operations/.nav.yml` (`- VPN: vpn.md` after Rootless Podman)
   - `hardening.md`: the `wg` row (no caps, roles, PROXY trust only from `wg`, the gateway trust note of spec §5, the runtime matrix)
   - `auth-policies.md` ("a VPN never replaces sign-in"; the binding)
-  - `hub.md`: Access → Reachable from, VPN tab, Settings → VPN, the doctor kinds, and the person-facing "VPN devices" (`/vpn/`, client apps per OS, DNSSEC-validating clients, browser DoH)
+  - `hub.md`: Access → Reachable from, VPN tab, Settings → VPN, the doctor kinds, and the person-facing "VPN devices" (`/vpn/`, client apps per OS, V26 DNSSEC-validating clients cross-link `docs/setup/dns.md`, browser DoH)
   - `cli.md` (`vpn …`, restating `--help`), `backups.md` (`secrets/wg`; `wg_data` is status only), `monitoring.md` (job `wg`, both alerts), `testing.md` (`e2e-vpn`, the step, the static checks)
   - `docs/guides/manifest-reference.md` (`vpn:`, the `vpn` trigger), `rootless-podman.md` (TUN gateways `degraded`, `modprobe tun`), `includes/abbreviations.md` (VPN provider, edge, device binding, VPN-only)
 - Regenerate the app catalog: `python3 scripts/generate-app-docs.py --source /Volumes/workspace/portcullis/wt-vpn1/portcullis-templates`.
@@ -992,18 +1029,18 @@
 - Create: `wireguard/{manifest.yaml,compose.yml}`, `tests/apps/wireguard.sh`, `.github/dependabot.yml` entry
 
 **Interfaces:**
-- Consumes: `ghcr.io/porelli/portcullis-vpn-forwarder:edge` digest, published by core main (get it with `docker buildx imagetools inspect`).
+- Consumes: `ghcr.io/porelli/portcullis-forwarder:edge` digest, published by core main (get it with `docker buildx imagetools inspect`).
 - Produces:
   - **netbird**:
     - service `gateway`: the pinned `netbirdio/netbird` client, `cap_add: [NET_ADMIN]`, `devices: [/dev/net/tun]`, setup key from a `secret` setting;
-    - service `forwarder`: `network_mode: service:gateway`, the forwarder image pinned by digest.
-    - `vpn: {label: NetBird, ranges: ["{{setting:netbird_range}}"], ingress: {service: gateway, proxy_protocol: v2}, identity: {source: hook, hook: vpn-devices, owner: oidc_sub, refresh: 60s}, dns: {manual: true}, control_routers: [<management>, <signal>, <relay>]}`.
+    - service `forwarder`: V11 `network_mode: service:gateway`, V12 `cap_add: [NET_BIND_SERVICE]`, the forwarder image pinned by digest.
+    - V26: `vpn: {label: NetBird, ranges: ["{{setting:netbird_range}}"], ingress: {service: gateway, proxy_protocol: v2}, identity: {source: hook, hook: vpn-devices, owner: oidc_sub, refresh: 60s}, dns: {manual: true}, control_routers: [netbird-mgmt, netbird-signal]}` (+ netbird-api if needed; there is no relay router).
     - `vpn-devices` runs in a `vpn-glue` python service: `/api/peers` + `/api/users`, with a service-user token `secret` setting.
     - Rootless: `degraded` with rule 6's reason.
   - **wireguard**:
     - `wg-easy` pinned, its UI behind `portcullis-auth`/`portcullis-groups`;
     - `identity: {source: static}`, `dns: {manual: true}`;
-    - the forwarder in its netns;
+    - V11 V12: the forwarder in its netns with `cap_add: [NET_BIND_SERVICE]`;
     - NET_ADMIN + `/dev/net/tun`; `degraded` under rootless.
 
 - [ ] **Step 1:** Create `vpn2` from templates main after Task 20 Step 3. Write the failing checks:
@@ -1014,7 +1051,7 @@
 - [ ] **Step 2:** Run the templates gates. Expected: FAIL.
 - [ ] **Step 3:** Implement. Regenerate `tests/rootless.txt` with `python3 tests/validate.py --rootless > tests/rootless.txt`. Review its diff: only these two lines change.
 - [ ] **Step 4:** Run the templates gates, then lint.yml and Test Apps `apps=netbird,wireguard` on `vpn2`. Expected: green.
-- [ ] **Step 5:** Commit (`netbird, wireguard: Portcullis VPN providers through portcullis-vpn-forwarder`), merge `vpn2` through a detached worktree, and regenerate the docs catalog on docs main (`docs: app catalog (VPN providers)`).
+- [ ] **Step 5:** Commit (`netbird, wireguard: Portcullis VPN providers through portcullis-forwarder`), merge `vpn2` through a detached worktree, and regenerate the docs catalog on docs main (`docs: app catalog (VPN providers)`).
 
 ---
 
