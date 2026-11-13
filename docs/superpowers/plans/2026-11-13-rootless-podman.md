@@ -12,17 +12,18 @@
 
 ## Global Constraints
 
-- **Branch `podman1`** in core, Hub, templates and docs. Worktrees: `/Volumes/workspace/portcullis/wt-podman1/{portcullis,portcullis-hub,portcullis-templates,portcullis-docs}`, each made with `git -C <main checkout> worktree add -b podman1 <path> origin/main` (bases: core d4d40ac, Hub f21a90e, templates 311827d, docs e451041). Main checkouts may hold others' uncommitted work: never edit, stash or commit there; read `origin/main` with `git show origin/main:<path>`.
+- **Branch `podman1`** in core, Hub, templates and docs. Worktrees: `/Volumes/workspace/portcullis/wt-podman1/{portcullis,portcullis-hub,portcullis-templates,portcullis-docs}`, each made with `git -C <main checkout> worktree add -b podman1 <path> origin/main` (bases: core d4d40ac, Hub origin/main at worktree creation (f21a90e + this plan's commits), templates 311827d, docs e451041). Main checkouts may hold others' uncommitted work: never edit, stash or commit there; read `origin/main` with `git show origin/main:<path>`.
 - **Contract first.** Task 1 (docs `podman1`) lands before any code task. After Task 1 and again after Task 11, resync the Hub copies: `PORTCULLIS_DOCS_DIR=/Volumes/workspace/portcullis/wt-podman1/portcullis-docs web/docs/sync.sh` in the Hub worktree, then commit `web/docs`.
-- **No back-compat or migration code** (user rule). An absent `CONTAINER_RUNTIME` means `docker`, the documented default like every other `.env` default (ruling R1). Nothing rewrites an existing `.env`, and `upgrade` never writes the key.
+- **No back-compat or migration code** (user rule). An absent or empty `CONTAINER_RUNTIME` is **refused** by every CLI command that needs the runtime, with a message naming the variable (pre-flight P0; the plan's former R1 is overruled). It has no compose default either (`${CONTAINER_RUNTIME:?…}`). `init` always writes it. `up`, `upgrade` and `restore` never add it to an `.env` that lacks it (restore only keeps the host's value, P6). The Docker test server's `.env` gets `CONTAINER_RUNTIME=docker` by hand at deploy (Task 12, P16).
 - **Secrets never on argv** (the `tests/test_cli.sh` grep stays green). No new secret is introduced.
 - **Fail closed:**
+  - A missing or unknown `CONTAINER_RUNTIME` (CLI, compose) or `HUB_CONTAINER_RUNTIME` (Hub) refuses.
   - An engine that contradicts `CONTAINER_RUNTIME` stops the CLI and makes the Hub answer 503.
   - A failed † host check refuses `init`, `up`, `upgrade` and `restore`.
   - An unreadable `uid_map` refuses.
   - An unknown or missing `PORTCULLIS_UNPRIVILEGED_PORT_START` is treated as 1024.
   - An unmapped owner refuses the fixer for that folder.
-- **Unchanged:** the socket rule (contract §6, now "the engine socket") and the hardening baseline: `no-new-privileges`, `cap_drop: ALL`, mem/pids limits, read-only roots, pinned digests, the proxies' allowlists. `label=disable` only on the two proxies, only through `docker-compose.podman-selinux.yml`. Never relabel user data (`/srv`, `/mnt`, `/media`, homes) or the engine socket.
+- **Unchanged:** the socket rule (contract §6, now "the engine socket") and the hardening baseline: `no-new-privileges`, `cap_drop: ALL`, mem/pids limits, read-only roots, pinned digests, the proxies' allowlists. `label=disable` only on the two proxies, and `bind.selinux: z` only on project binds. Both appear only through `docker-compose.podman-selinux.yml`, added only under podman with SELinux enforcing (P10). Never relabel user data (`/srv`, `/mnt`, `/media`, homes) or the engine socket.
 - **Prefer mature libraries** (memory): the moby client, `golang.org/x/sys/unix` (xattrs), PyYAML. No hand-rolled protocol code.
 - **TDD everywhere:** write the failing test, see it fail, implement, see it pass, commit. Gates:
   - Core: `bash tests/test_shell_libs.sh && bash tests/test_cli.sh && shellcheck -S warning portcullis scripts/lib/*.sh tests/*.sh && actionlint`.
@@ -41,6 +42,7 @@
 - **Deploy (Docker test server only):**
   - The server keeps running Docker. There is no runtime switch on it: `CONTAINER_RUNTIME` is chosen by init and never switched.
   - Connect with `ssh -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i /Volumes/Michele/Michele/Keys/AWS/PDX/PDX-lightsail.pem admin@44.244.208.227`, then run `git pull --ff-only && ./portcullis upgrade` in `~/portcullis`. `ACME_STAGING=true` stays.
+  - Before the upgrade, add `CONTAINER_RUNTIME=docker` to the server's `.env` by hand. First confirm that `./portcullis status` refuses without it (P16).
   - Then check that nothing changed for a Docker install (Task 12).
   - Never touch the LLDAP `admin` user. The Podman path is proven in CI only (spec §11 item 8 is replaced by this user instruction, ruling R10).
 - **Values from the spec (verbatim):**
@@ -48,23 +50,123 @@
   - `net.ipv4.ip_unprivileged_port_start=80`.
   - Podman ≥ 5.4.
   - `.env` keys `CONTAINER_RUNTIME=docker|podman` and `PORTCULLIS_ENGINE_SOCKET` (default `/var/run/docker.sock`).
-  - Hub env `HUB_CONTAINER_RUNTIME`; core.env `PORTCULLIS_UNPRIVILEGED_PORT_START`.
+  - Hub env `HUB_CONTAINER_RUNTIME` (compose: `${CONTAINER_RUNTIME:?CONTAINER_RUNTIME must be set in .env (./portcullis init writes it)}`, P0); core.env `PORTCULLIS_UNPRIVILEGED_PORT_START`.
   - Proxy mount `${PORTCULLIS_ENGINE_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro`.
   - Version component name `Podman Engine`.
 
+## Pre-flight rulings (2026-11-13)
+
+These rulings come from the pre-flight scan against origin/main (core d4d40ac with DNS hardening, Hub bf64787, templates 311827d, docs e451041). The scan table is in `.superpowers/sdd/2026-11-13-rootless-podman/preflight.md`. These rulings are binding and **override any task text that disagrees**. P0–P2 are controller rulings. The rest are the scan's own rulings, accepted, and the stricter option wherever security was at stake.
+
+- **P0 (controller; overrules R1): a missing `CONTAINER_RUNTIME` is refused.**
+  - `runtime_name` prints `docker|podman`. An unset or empty value fails with `CONTAINER_RUNTIME is not set in .env (docker or podman): ./portcullis init writes it; an install from before rootless support adds CONTAINER_RUNTIME=docker by hand`. Any other value fails and names it. There is no default anywhere.
+  - Every command that needs the runtime reaches `runtime_name`: `need_env` → `runtime_check`, plus the paths in P7. `--help` never does.
+  - Compose: `HUB_CONTAINER_RUNTIME: ${CONTAINER_RUNTIME:?CONTAINER_RUNTIME must be set in .env (./portcullis init writes it)}`. Task 9's unit-tests step asserts that `CONTAINER_RUNTIME= docker compose config -q` fails, like the existing empty-`HUB_PROXY_SECRET` check.
+  - `init` writes it on a new `.env`. On an existing `.env` where it is absent or empty (a copied `.env.example`), `init` fills it from `runtime_detect`, the way it fills missing generated values (`env_generate_missing`), with an info line. `up`, `upgrade` and `restore` never add it.
+  - `.env.example` documents it commented out (`#CONTAINER_RUNTIME=docker`).
+  - The test server gets it by hand (P16).
+  - `init --env-only` with no `--runtime`, no `CONTAINER_RUNTIME` in the environment and no engine answering is **refused** (`no container engine answers: pass --runtime docker|podman`). It never writes a guessed `docker`. This replaces Task 7 Step 3's "writes `docker` with an info line".
+  - Core `CLAUDE.md`'s "Local verification without Docker" line and Task 9 Step 2's command gain `--runtime docker`.
+  - New shell tests: "need_env: no CONTAINER_RUNTIME → refused naming the variable", "init --env-only: no engine and no --runtime → refused", "init: an existing .env without CONTAINER_RUNTIME gets the detected value".
+- **P1 (controller; confirms R4): device slots.** A `devices:` source that resolves to `/dev/null` (the empty-slot default) is `degraded`. A set device is `refused`.
+  - `/dev/net/tun` stays `degraded` (VPN cross-reference: rootless Podman can pass the world-rw TUN node).
+  - Scrutiny stays `refused` through `SYS_RAWIO` even with every disk slot unset, because all eight `SCRUTINY_DISK_n` slots default to `/dev/null`. Add the vector "scrutiny with no disks still refused (SYS_RAWIO)".
+  - A reason names a resolved device source only when it matches `^/dev/[A-Za-z0-9._/-]+$`. Otherwise it says `a non-device source`, so a resolved instance env value never reaches the UI or MCP output beyond device paths, port numbers and ids.
+- **P2 (controller; confirms R3): the Hub container-id fix.** Under podman only, `selfContainerID` matches `(?:^|/)overlay-containers/([0-9a-f]{64})/userdata/(hostname|hosts|resolv\.conf)$`. Under docker it keeps `selfMountRe` (fixer.go:530).
+  - `TestSelfContainerIDPodman` covers the graphroot form (`…/.local/share/containers/storage/overlay-containers/<id>/userdata/hostname`) and the runroot form on the `/run/user/<uid>` tmpfs (root field `/containers/overlay-containers/<id>/userdata/hostname`).
+- **P3: the twin files for `get_runtime` / `GET /api/runtime`.** Adding the route without these breaks TestToolParity and TestTokenNotEchoed.
+  - `internal/httpapi/mcp_parity_test.go`: add `get_runtime` to TestToolParity's class-R list (next to the DNS hardening entries around line 331) and to an "all registered" slice (line 340).
+  - `internal/httpapi/mcptools_admin_test.go:287`: add a `TestAdminToolsSameAsHTTP` case `{tool: "get_runtime", method: "GET", path: "/api/runtime"}`. The test lives here, not in mcp_parity_test.go.
+  - `internal/httpapi/mcptools_admin2_test.go`: add `{"get_runtime", nil}` to `adminToolFixtures` (line 541; line 846 fails a tool without a fixture).
+  - The route goes on the Hub listener only, with no people-listener twin.
+- **P4: the guard's allow-list and the compose plugin version.**
+  - The guarded transport passes `HEAD` and `GET` on `/_ping`, and `GET` on `/version` and `/v*/version`. moby client v0.6.2 pings with `HEAD /_ping` first (ping.go:112).
+  - `Components` is `ServerVersionResult.Components` (client v0.6.2 version.go). Upstream calls it "informational": `TestRuntimeOf` pins the names.
+  - `compose.(*CLI).Version` (the plugin's own version, which never reaches the engine) is exempt. `main.go:311-316` calls it before the Hub starts, so a guarded `Version` would stop every start. `TestComposeRefusesUnverified` asserts that `Version` passes and `Up` refuses.
+- **P5: nil guards and start-time engine work.**
+  - `docker.New` and `compose.NewCLI` refuse a nil guard (`New` returns an error, `NewCLI` panics). The existing callers `internal/compose/compose_test.go:33`, `internal/hub/compose_docker_test.go:52` and `internal/hub/fixer_docker_test.go:46` pass a guard that is verified against their engine.
+  - `hub.Config.Guard == nil` (unit tests with nil or fake engines) gives `RuntimeView.verified = false` and nil doctor engine inputs. Gates compare `== docker.RuntimePodman` only. `main` is the only production constructor, and it always sets both from `runtimeFromEnv`.
+  - `Guard` gains `Verified() <-chan struct{}`. Task 2 lists every engine call the Hub makes at start (helper leftovers, reconcile, the hub_secrets check) and makes each one wait on it or retry. An `ErrEngineRefused` never makes the Hub exit.
+- **P6 (amends R6): restore and the runtime keys.**
+  - `need_env` has already refused a missing key. `backup_restore` reads `CONTAINER_RUNTIME` and `PORTCULLIS_ENGINE_SOCKET` from the current `.env` before the copy (backup.sh:776-780) and always writes `CONTAINER_RUNTIME` back. Under podman it writes the socket back. Under docker it deletes any `PORTCULLIS_ENGINE_SOCKET` the backup carried.
+  - Without a current `.env` (a fresh host, or `restore --from-offsite` on a new host, where `cmd_restore` only calls `env_load` when the file exists): the runtime comes from `runtime_detect`, which honours `CONTAINER_RUNTIME` in the environment. `runtime_export`, `runtime_check` and `runtime_require_host` run before the first docker call (`_restore_stop_secret_apps`, `_restic_restore_to`), and the detected keys are written into the restored `.env`.
+  - Tests: "restore keeps the host's runtime keys", "restore onto docker drops a podman backup's PORTCULLIS_ENGINE_SOCKET", and "restore without .env detects the runtime before any docker call".
+- **P7: `env_load` paths outside `need_env`** (grep: backup.sh:1070, backup.sh:1111, status.sh:468, stack.sh:156).
+  - `version`: with an `.env` it calls `runtime_name` (a missing key refuses) and `runtime_export`. The engine version is best-effort (`runtime docker (engine not reachable)`), and a contradiction fails like `runtime_check`. Without an `.env` it prints no runtime.
+  - `backup schedule --systemd`: the units depend on the runtime (R7), so it needs an `.env` with `CONTAINER_RUNTIME` and is refused without one.
+  - `restore --from-offsite`: see P6.
+- **P8: local-image builds outside `up`** (DNS hardening added a caller).
+  - These sites run `dc build <svc>`, which under podman would reach the compat `/build`:
+    - `domains_image_ensure` (domains.sh:120), used by the dns tool (`_dns_tool`, dns.sh:89), by `dns_traefik_account_uri` and by keygen
+    - `mcpgate.sh:30`
+    - `_py_image` (backup.sh:161)
+  - They switch to a new `runtime_build_service <svc>`: docker → `dc build --quiet <svc>` (unchanged), podman → `runtime_build_local <svc>`.
+  - `runtime_build_local [svc…]` takes service names (none = every service with `build`). Each image is tagged `.image // "<project>-<service>"`, because `enroll` has no `image:`. Build args come from the merged config, so the CI override's domains `GO_TAGS=testprovider` survives.
+  - `dns-tool` (`image: portcullis-domains`, `pull_policy: never`, no build) is covered by building `domains`.
+  - Under podman, every `dc up` outside `stack_compose_up` gets `--no-build` through `$(runtime_no_build)` (prints `--no-build` under podman, nothing under docker). That covers backup.sh:302, :595, :816, :862, dns.sh:268, stack.sh:214, :495 and vault.sh:126. A missing image then fails instead of reaching `/build`.
+  - Test: "domains_image_ensure on podman runs podman build, never dc build".
+- **P9: sourcing.** `common.sh` sources `runtime.sh` at its end, and the `portcullis` source list stays unchanged. CI (ci.yml:553, 632, 1854, 1880, 2880, 2886) and both shell test files source `common.sh` alone and then reach `need_env`, `ct_own` or `dc`. They keep working without per-site edits.
+- **P10 (replaces R11): SELinux relabels live in the overlay only.**
+  - The base `docker-compose.yml` keeps its short-syntax binds. Docker installs, including a Docker SELinux host, see no change and nothing is relabeled.
+  - `docker-compose.podman-selinux.yml` re-declares every project bind in long syntax with `bind: {selinux: z}` and the same `read_only`: the 45 binds are the 44 `./…` entries plus `.:/project`. Compose merges service volumes by target. The overlay also sets `label=disable` on the two proxies.
+  - `runtime_export` adds the overlay only when `CONTAINER_RUNTIME=podman` **and** SELinux is enforcing. The Review Focus 1 override rule still applies.
+  - CI checks:
+    - With the overlay merged, every project bind has `selinux: z`, with the same targets and `read_only` as the base, and the engine-socket bind has none.
+    - Without the overlay, no bind has `.bind.selinux`.
+    - The overlay names no service that is missing from the base.
+  - The overlay entries leave `create_host_path` unset. `stack_prepare` must create every file source (Task 9 Step 3).
+  - The Hub's renderer (Task 5) relabels only when `Runtime == podman` and SecurityOptions has `name=selinux`.
+  - Task 12's config diff is then only `hub.environment.HUB_CONTAINER_RUNTIME`.
+- **P11 (replaces R9): the Docker → Podman round trip runs inside `e2e-podman`.** No artifact carries `.env`, `secrets/` or a backup: the repos are public, and the plan's own rule says logs only.
+  - **Phase 1, on Docker** (before Docker is stopped):
+    - `ACME_STAGING=true ./portcullis init --runtime docker …` with the CI override.
+    - Create one LLDAP person the way the `e2e` job does (the admin token and GraphQL `createUser`).
+    - Run `./portcullis backup` and copy `backups/<newest>` to `$RUNNER_TEMP/rt-backup` (0700).
+    - Record `sha256 certs/ca-chain.crt`.
+    - Run `./portcullis down`, then remove the project volumes, `.env`, `secrets/` and `certs/`.
+  - **Phase 2** is the plan's Podman setup and assertions. The round trip restores `$RUNNER_TEMP/rt-backup`.
+  - The job has `needs: jobs-input` only and the standard name-match `if` (no `always()`), with `timeout-minutes: 90`.
+  - The `e2e` job is unchanged (Task 10 Step 1 is dropped).
+- **P12: the folderfix gates.** The gate for apply and restore is `mayChange` (apply.go:92, called at apply.go:127 and restore.go:74), and childfix's is childfix.go:192. `checkHeader` is unchanged. `idMapsIdentity` lives at fs_linux.go:282 and fs_other.go:98.
+- **P13: the create and enable gates.**
+  - The create gate sits in `createEntry` (instances.go:311), the path shared by `CreateInstance` (instances.go:275), the API's `createInstance` (create.go:186) and restore-as-new (restore.go:1165). It does not sit in `CreateInstance`.
+  - The enable/restart gate sits in `prepareUp` (lifecycle.go:95, called from lifecycle.go:78 and :1058 and stop.go:610).
+  - Add `TestRestoreAsRefusedUnderPodman`.
+- **P14: the doctor cache.** The new `RuntimeIn` fields (`Memory`, `PidsLimit`, `WantMemory`, `WantPids`) are `omitempty` in `runtimeEntry` (doctorscan.go:123). An entry without them counts as "not checked" (no finding), and `scanCacheVersion` is not bumped.
+- **P15: `PORTCULLIS_UNPRIVILEGED_PORT_START` is core.env-only.** Contract §2 lists it as "not available to templates", and `validate.py` refuses references to it (`check_reserved_var_refs`, Task 6, with a test). Under docker, a set `PORTCULLIS_ENGINE_SOCKET` must be `-S`. `DOCKER_HOST` stays as the operator set it, and `runtime_check` verifies it.
+- **P16: the test server deploy (Task 12).**
+  - Record the "before" state.
+  - `git pull --ff-only`.
+  - `./portcullis status` must exit non-zero and name `CONTAINER_RUNTIME`.
+  - Check with `grep -c '^CONTAINER_RUNTIME=' .env` that the key isn't there yet, then append it with `printf 'CONTAINER_RUNTIME=docker\n' >> .env`.
+  - Run `./portcullis upgrade`.
+  - Check after:
+    - `.env` has exactly one `CONTAINER_RUNTIME=docker` line and no `PORTCULLIS_ENGINE_SOCKET`.
+    - The inspect diff ignores the IP addresses of recreated containers on networks where they aren't pinned. Pinned addresses must be equal.
+- **P17: the cross-repo window.** The Hub's `edge` requires `HUB_CONTAINER_RUNTIME`. Core main's compose sets it only after the core merge, so an `edge` Hub refuses to start on core main in the meantime (core CI "Test the Hub", any `upgrade`). Merge core right after templates. Don't dispatch core CI on main and don't upgrade any server in that window. There is no compat default.
+- **P18: test fixtures.**
+  - The existing docker stubs in `tests/test_shell_libs.sh` and `tests/test_cli.sh` answer `version --format {{json .Server.Components}}` with `[{"Name":"Engine","Version":"29.0.0"}]`.
+  - Every fixture `.env` gets `CONTAINER_RUNTIME=docker`.
+  - The Task 8 grep test is `grep -rnF 'ct_own "$(id -u)' scripts/lib portcullis`.
+  - Task 8 has six call sites: common.sh:337, domains.sh:237, :239 and :242, and mcpgate.sh:81 and :82. The file-structure row's "five" counts domains and mcpgate only.
+- **Verified against the base:**
+  - Q1: `ubuntu-latest` is `ubuntu-26.04`. e2e-instances in run 43348966911 ran on image ubuntu-26.04 version 20261111.82.6.
+  - `jobs-input` reads the job names with `yq`, so a new job needs no validator edit, only the description list.
+  - The other Hub line references (fixer.go:282/313/530, run.go:305/358, client.go:52, compose.go:171, override.go:73, doctor.go:197/210, dns.go `init()`) match.
+
 ## Plan rulings (assistant's calls beyond the spec)
 
-- **R1:** an absent `CONTAINER_RUNTIME` means `docker` (`runtime_name`). `init` always writes it.
+- **R1 (OVERRULED by P0):** ~~an absent `CONTAINER_RUNTIME` means `docker`~~. A missing value is refused. `init` always writes it.
 - **R2:** `runtime_check` runs in `need_env`, and in `init_run` after the `--env-only` return. It is cached per process. `--help` paths never reach it.
 - **R3 (spec gap):** under Podman, the Hub's `selfContainerID` must accept Podman's mountinfo roots `…/overlay-containers/<64 hex>/userdata/{hostname,hosts,resolv.conf}`. Without that the fixer can't find its own image.
 - **R4 (devices):** a `devices:` entry whose source resolves to `/dev/null` (the empty-slot default of esphome, motioneye, zigbee2mqtt) makes the template `degraded` ("device slots can't pass host devices"). Any other source is `refused`. `/dev/net/tun` and `cap_add: NET_ADMIN` are `degraded` (VPN spec §3.2 cross-reference).
 - **R5:** `RootlessCompat(compose, m, env, portStart)` gains `env` (the instance's effective values; nil = defaults), so an instance check sees its own ports, devices and caps.
-- **R6:** `restore` keeps the host's runtime keys. `CONTAINER_RUNTIME` and `PORTCULLIS_ENGINE_SOCKET` come from the `.env` being replaced (else `runtime_detect`), never from the backup.
+- **R6 (amended by P6):** `restore` keeps the host's runtime keys. `CONTAINER_RUNTIME` and `PORTCULLIS_ENGINE_SOCKET` come from the `.env` being replaced (else `runtime_detect`, run before any docker call), never from the backup.
 - **R7:** under podman, `backup schedule --systemd` writes **user** units (`~/.config/systemd/user`, `After=/Requires=podman.socket`, `WantedBy=default.target`, no `User=`).
 - **R8 (CI):** the runner user is the operator. The reboot check restarts `user@<uid>.service` (all containers die with the user manager), and `podman-restart.service` must bring them back.
-- **R9 (CI):** the `e2e` job uploads one backup as artifact `e2e-docker-backup` (`retention-days: 1`; the ephemeral CI stack's secrets only). `e2e-podman` `needs` it and fails, never skips, when it is missing.
+- **R9 (REPLACED by P11):** ~~the `e2e` job uploads a backup artifact~~. The round trip runs inside `e2e-podman` (a Docker phase, then the Podman phase), with no artifact carrying secrets.
 - **R10:** there is no Podman test server. Time Machine discovery is documented as "unverified under rootless Podman; connect by address if it isn't found" (the Q5 fallback wording).
-- **R11:** every core bind whose source is inside the checkout gets long syntax with `bind: {selinux: z}`. The engine socket bind never does. CI checks both directions.
+- **R11 (REPLACED by P10):** every core bind whose source is inside the checkout is re-declared in long syntax with `bind: {selinux: z}` **in `docker-compose.podman-selinux.yml` only**. The base file is unchanged. The engine socket bind never gets it. CI checks both directions.
 - **R12:** RootlessCompat reasons are exact strings, shared byte-for-byte through `rootless_vectors.json` (Hub ↔ templates), like the sign-in vectors.
 
 ## Review Focus
@@ -83,15 +185,15 @@
 
 | File | Responsibility |
 |---|---|
-| `scripts/lib/runtime.sh` (new; sourced right after `common`) | `runtime_name`, `runtime_detect`, `runtime_podman_socket`, `runtime_export`, `runtime_check`, `runtime_id_maps`, `runtime_port_start`, `runtime_host_checks`, `runtime_require_host`, `runtime_build_local`, `runtime_status_json`, `_ver_ge` |
+| `scripts/lib/runtime.sh` (new; sourced at the end of `common.sh`, P9) | `runtime_name`, `runtime_detect`, `runtime_podman_socket`, `runtime_export`, `runtime_check`, `runtime_id_maps`, `runtime_port_start`, `runtime_host_checks`, `runtime_require_host`, `runtime_build_local`, `runtime_build_service`, `runtime_no_build` (P8), `runtime_status_json`, `_ver_ge` |
 | `scripts/lib/common.sh` | `ct_operator_id`, `ct_host_id`, `_owner_of_ct`; `ct_own` podman path; `ct_group_read`; `need_env` → `runtime_check`; `hub_env_write` port start; podman hints |
 | `scripts/lib/stack.sh` | `init --runtime`, the `.env` keys, `stack_compose_up`, host checks in init/up/upgrade |
-| `scripts/lib/domains.sh`, `scripts/lib/mcpgate.sh` | The five `ct_own "$(id -u):…"` sites → `ct_operator_id` |
+| `scripts/lib/domains.sh`, `scripts/lib/mcpgate.sh` | The five `ct_own "$(id -u):…"` sites in these files (six with `ct_group_read`) → `ct_operator_id`; `dc build` → `runtime_build_service` (P8) |
 | `scripts/lib/backup.sh` | restic `--user`, restore keeps runtime keys, host checks in restore, MANIFEST runtime, podman user units |
 | `scripts/lib/status.sh` | `runtime:` line, `runtime{}` in `--json`, `version` runtime |
-| `docker-compose.yml`, `docker-compose.podman-selinux.yml` (new) | Socket variable, `selinux: z` binds, `HUB_CONTAINER_RUNTIME`; proxies' `label=disable` |
-| `portcullis`, `.env.example`, `CLAUDE.md`, `tests/test_shell_libs.sh`, `tests/test_cli.sh` | Sourcing, docs of keys, rules, tests |
-| `.github/workflows/ci.yml`, `tests/e2e/e2e_podman.py` (new) | Static checks, libpod denials, `e2e-podman`, the `e2e` backup artifact |
+| `docker-compose.yml`, `docker-compose.podman-selinux.yml` (new) | Base: socket variable, `HUB_CONTAINER_RUNTIME` (`:?`, P0). Overlay only: `selinux: z` re-declared binds and the proxies' `label=disable` (P10) |
+| `.env.example`, `CLAUDE.md`, `tests/test_shell_libs.sh`, `tests/test_cli.sh` | Docs of keys, rules, tests (the `portcullis` source list is unchanged, P9) |
+| `.github/workflows/ci.yml`, `tests/e2e/e2e_podman.py` (new) | Static checks, libpod denials, `e2e-podman` (its own Docker phase for the round trip, P11) |
 
 **Hub (`wt-podman1/portcullis-hub`)**
 
@@ -105,7 +207,7 @@
 | `internal/folderfix/{walk,apply,childfix,scan,fs_linux,fs_other}.go` | `idMapsAllowed`, `IDMap` / host ids / `Unmapped` / `SELinux` in reports |
 | `internal/templates/rootless.go` (new), `testdata/rootless_vectors.json` (new) | `RootlessCompat` and its vectors |
 | `internal/doctor/engine.go` (new), `internal/hub/doctor_engine.go` (new) | Five kinds and their inputs |
-| `internal/httpapi/{server,instances,mcptools_admin}.go`, `web/index.html` | `GET /api/runtime`, `get_runtime`, 503 mapping, badges |
+| `internal/httpapi/{server,instances,mcptools_admin}.go`, `web/index.html`; tests `mcp_parity_test.go`, `mcptools_admin_test.go`, `mcptools_admin2_test.go` (P3) | `GET /api/runtime`, `get_runtime`, 503 mapping, badges |
 | `CLAUDE.md` | Runtime guard and gate rules |
 
 **Templates (`wt-podman1/portcullis-templates`):** `tests/validate.py` (`rootless_compat`, `--rootless`), `tests/rootless_vectors.json` (byte copy), `tests/rootless.txt` (committed classification), `tests/test_validate.py`, `.github/workflows/lint.yml`, `CLAUDE.md`.
@@ -157,7 +259,7 @@
 
 **Files:**
 - Create: `internal/idmap/idmap.go`, `internal/idmap/idmap_test.go`, `internal/docker/runtime.go`, `internal/docker/runtime_test.go`, `internal/hub/runtime_engine.go`, `internal/hub/runtime_engine_test.go`
-- Modify: `internal/docker/client.go` (`New`), `internal/compose/*.go` (`NewCLI`), `cmd/hub/main.go` (around 299–315), `cmd/hub/main_test.go`, `internal/hub/fixer.go:529-560` (`selfMountRe`, `selfContainerID`), `internal/httpapi/server.go` (`errStatus`, hub mux), `internal/httpapi/mcptools_admin.go`, `internal/httpapi/mcp_parity_test.go` (tool list near line 389), `internal/hub/reconcile_test.go`, `CLAUDE.md`
+- Modify: `internal/docker/client.go` (`New`), `internal/compose/*.go` (`NewCLI`), `cmd/hub/main.go` (around 299–315), `cmd/hub/main_test.go`, `internal/hub/fixer.go:529-560` (`selfMountRe`, `selfContainerID`), `internal/httpapi/server.go` (`errStatus`, hub mux), `internal/httpapi/mcptools_admin.go`, `internal/httpapi/mcp_parity_test.go` (TestToolParity class-R list about line 331 and the registered list line 340), `internal/httpapi/mcptools_admin_test.go` (`TestAdminToolsSameAsHTTP`, line 287), `internal/httpapi/mcptools_admin2_test.go` (`adminToolFixtures`, line 541) (P3), `internal/compose/compose_test.go`, `internal/hub/compose_docker_test.go`, `internal/hub/fixer_docker_test.go` (guard argument, P5), `internal/hub/reconcile_test.go`, `CLAUDE.md`
 
 **Interfaces:**
 - Produces:
@@ -177,8 +279,9 @@
     - `(*Guard) Info() EngineInfo`
   - `docker.EngineInfo{Runtime Runtime; Verified bool; Engine, Version, Mismatch string}`.
   - `docker.VersionReader` (has `Components(ctx) ([]Component, error)`), `docker.Component{Name, Version string}`, and `docker.RuntimeOf([]Component) Runtime` ("" for neither).
-  - `docker.New(host string, g *Guard) (*Client, error)`. Its transport passes `GET /_ping`, `/version` and `/v*/version` always; every other request returns `g.Err()` while it is non-nil.
-  - `compose.NewCLI(host string, g *docker.Guard)`: every command returns `g.Err()` first.
+  - `docker.New(host string, g *Guard) (*Client, error)`. Its transport always passes `HEAD`/`GET /_ping` and `GET /version`, `/v*/version` (P4). Every other request returns `g.Err()` while it is non-nil. A nil `g` is an error (P5).
+  - `compose.NewCLI(host string, g *docker.Guard)`: every command except `Version` (the plugin's own version, P4) returns `g.Err()` first. A nil `g` panics.
+  - `(*Guard) Verified() <-chan struct{}` (closed once verified; start-time engine work waits on it, P5).
   - `hub.RuntimeView` (the contract §11 JSON) and `(*Hub) Runtime(ctx) RuntimeView`. `hub.Config` gains `Runtime docker.Runtime` and `Guard *docker.Guard`.
   - `selfContainerID(mountinfo []byte, rt docker.Runtime) (string, error)`.
 
@@ -195,17 +298,17 @@
   - `TestGuardRetriesUntilVerified`: a fake reader fails twice, then answers docker for a docker guard. `Err()` wraps `ErrEngineRefused` until then, then nil.
   - `TestGuardMismatchIsPermanent`: a podman answer to a docker guard gives `Err()` containing `HUB_CONTAINER_RUNTIME=docker but the engine is Podman Engine`, and a later docker answer does not clear it.
   - `TestGuardedTransport`: `/v1.47/containers/json` is refused before verification; `/_ping` and `/v1.47/version` reach an `httptest` server.
-  - `TestComposeRefusesUnverified`.
-  - `TestSelfContainerIDPodman`: `/home/p/.local/share/containers/storage/overlay-containers/<64 hex>/userdata/hostname` mounted at `/etc/hostname` → the id under podman, and an error under docker. Docker lines are unchanged.
+  - `TestComposeRefusesUnverified` (`Up` refuses, `Version` passes, P4).
+  - `TestSelfContainerIDPodman`: `/home/p/.local/share/containers/storage/overlay-containers/<64 hex>/userdata/hostname` (graphroot) and `/containers/overlay-containers/<64 hex>/userdata/hostname` (runroot on `/run/user/<uid>`, P2) mounted at `/etc/hostname` → the id under podman, and an error under docker. Docker lines are unchanged.
   - `TestRuntimeFromEnv` (cmd/hub): "" or "rkt" → refuse to start, docker and podman are accepted.
   - `TestRuntimeView`: under docker the maps and port are null. Under podman with a fake `/proc/self/uid_map` (seam `readIDMaps`) and core env `PORTCULLIS_UNPRIVILEGED_PORT_START=80` the maps are filled and the port is 80. `abc` gives 1024.
   - `TestRuntimeRoute`: `GET /api/runtime` is 200 with that JSON, and a guard refusal on another route is 503 (`errStatus`).
-  - `TestAdminToolsSameAsHTTP` gains `get_runtime`.
+  - `TestAdminToolsSameAsHTTP` (mcptools_admin_test.go) gains `get_runtime`; TestToolParity lists it as class R; `adminToolFixtures` gains `{"get_runtime", nil}` (P3).
   - `TestWatchEventsIgnoresPodmanActions` (`init`, `cleanup`, `health_status` trigger nothing).
 - [ ] **Step 2:** Run `go test ./internal/idmap/ ./internal/docker/ ./internal/compose/ ./internal/hub/ ./internal/httpapi/ ./cmd/hub/`. Expected: FAIL (undefined `idmap`, `NewGuard`, …).
 - [ ] **Step 3: Implement.**
   - `Components` uses the moby client's `ServerVersion` (`res.Components`).
-  - In `main`: `runtimeFromEnv(os.Getenv)` → `docker.NewGuard`, then `docker.New(dockerHost, guard)` and `compose.NewCLI(dockerHost, guard)`. Then `go guard.Run(ctx, engine, 10*time.Second)`, which logs once per state change and stops after verification or a mismatch.
+  - In `main`: `runtimeFromEnv(os.Getenv)` → `docker.NewGuard`, then `docker.New(dockerHost, guard)` and `compose.NewCLI(dockerHost, guard)`. Then `go guard.Run(ctx, engine, 10*time.Second)`, which logs once per state change and stops after verification or a mismatch. Start-time engine work waits on `guard.Verified()` or retries; nothing exits on `ErrEngineRefused` (P5).
   - `errStatus`: `errors.Is(err, docker.ErrEngineRefused)` → 503.
   - Register `GET /api/runtime` on the Hub listener only.
   - `get_runtime` is `admin(..., ClassRead, Twin: "GET /api/runtime")`, following `list_ops`.
@@ -221,7 +324,7 @@
 - Modify:
   - `internal/folderfix/fs_linux.go:280-292`, `fs_other.go:98` (replace `idMapsIdentity`)
   - `walk.go:137-141` (`identityMap` → `idmap`), walk tally and `finish` (about 367–390)
-  - `apply.go:92-104` (`mayChange`), `childfix.go:185-198`, `restore.go` (`checkHeader`)
+  - `apply.go:92-104` (`mayChange`, which also gates restore at restore.go:74), `childfix.go:185-198` (`checkHeader` unchanged, P12)
   - `scan.go` (`Report`, `OwnerCount`, `ChildOwner`)
   - `internal/hub/fixer.go:270-335` (`execFixer` gate, the unmapped message)
 - Test: `internal/folderfix/plan_test.go`, `internal/folderfix/scan_test.go`, `internal/hub/fixer_test.go`
@@ -262,7 +365,7 @@
 **Files:**
 - Create: `internal/templates/rootless.go`, `internal/templates/rootless_test.go`, `internal/templates/testdata/rootless_vectors.json`
 - Modify:
-  - `internal/hub/instances.go:275` (`CreateInstance`), `internal/hub/lifecycle.go:95` (`prepareUp`)
+  - `internal/hub/instances.go:311` (`createEntry`, shared by `CreateInstance`, the API's `createInstance` and restore-as-new, P13), `internal/hub/lifecycle.go:95` (`prepareUp`)
   - The template/instance views (`internal/templates/manifest.go` `Template`: `Rootless *Compat` with `json:"rootless,omitempty"`)
   - `internal/hub/realtemplates_test.go`, `web/index.html`, `internal/httpapi/webui_apps_test.go`, `CLAUDE.md`
 
@@ -273,7 +376,7 @@
   - `templates.RootlessCompat(compose []byte, m Manifest, env map[string]string, portStart int) Compat` (ruling R5).
   - `(*Hub) instanceCompat(t *templates.Template, s state.InstanceSettings) templates.Compat` (podman only).
 - Rules (reasons are the exact strings, in the order the rules are listed). Any refused reason makes the result `refused` with every refused reason. Otherwise any degraded reason makes it `degraded`. Otherwise `ok`. `${VAR:-d}` is resolved from `env`, then the default.
-  1. A device whose source isn't `/dev/null` and isn't `/dev/net/tun` → refused `service <s> passes the host device <src>: device access needs host root`.
+  1. A device whose source isn't `/dev/null` and isn't `/dev/net/tun` → refused `service <s> passes the host device <src>: device access needs host root` (`<src>` only when it matches `^/dev/[A-Za-z0-9._/-]+$`, else `a non-device source`, P1).
   2. `cap_add` `SYS_RAWIO` or `SYS_ADMIN` → refused `service <s> needs <CAP> (raw device access needs host root)`.
   3. Any `user:` / `group_add` / folder `runs_as` id > 65535 → refused `service <s> runs as id <n>, outside the rootless id range (0–65535)`.
   4. A host port (tcp/udp, incl. a `range` start and `network_mode_host` ports) below `portStart` → refused `host port <p>/<proto> is below net.ipv4.ip_unprivileged_port_start (<portStart>): lower it to <p> on the host to allow it (any local user can then bind ports from <p>)`.
@@ -287,7 +390,7 @@
     - "plain web app ok"
     - "dns 53 refused at 80", and the same at 53 → degraded (udp)
     - "samba 445 ok"
-    - "scrutiny SYS_RAWIO refused" (its real compose with `${SCRUTINY_NVME_CAPABILITY:-SYS_RAWIO}`)
+    - "scrutiny SYS_RAWIO refused" (its real compose with `${SCRUTINY_NVME_CAPABILITY:-SYS_RAWIO}`), and "scrutiny with no disks still refused (SYS_RAWIO)" (P1)
     - "device slot unset → degraded", and "device slot set → refused" (env `ESPHOME_SERIAL_DEVICE=/dev/ttyUSB0`)
     - "tun degraded"
     - "uid 70000 refused"
@@ -295,6 +398,7 @@
   - `TestRootlessVectors` iterates over the vectors.
   - `TestCreateRefusedUnderPodman`: a fake runtime podman, port start 80, pihole-like template → 409 with the contract text. Under docker → created.
   - `TestEnableRefusedUnderPodman` (prepareUp, instance env sets a device).
+  - `TestRestoreAsRefusedUnderPodman` (restore-as-new goes through `createEntry`, P13).
   - `TestTemplateViewRootless`: field present under podman, absent under docker.
   - `TestRealTemplatesRootlessClassification`: needs `PORTCULLIS_TEMPLATES_DIR`, else skips like its siblings. It compares `<id>\t<status>\t<reasons joined "; ">` over every template, sorted, with `$PORTCULLIS_TEMPLATES_DIR/tests/rootless.txt` (made in Task 6) at port start 80.
   - `TestHubAppsPageRootless` (static): `web/index.html` has `function rootlessBadge(` and `data-rootless=`, and the create button is disabled for `refused`.
@@ -336,7 +440,8 @@
   - Register the checks in `init()` as `dns.go` does.
   - `doctor_engine.go` fills `Inputs.Engine` from `h.cfg.Guard.Info()` and SecurityOptions (`name=selinux`), cached with the scans.
   - `WantMemory` / `WantPids` come from the instance's rendered compose (`mem_limit` / `pids_limit` set).
-  - The renderer emits the relabel entries only when SELinux is reported.
+  - The renderer emits the relabel entries only when `h.cfg.Runtime == docker.RuntimePodman` and SELinux is reported (P10). Docker on SELinux is unchanged.
+  - The new `RuntimeIn` fields are `omitempty` in `runtimeEntry`. A cached entry without them counts as not checked (P14).
 - [ ] **Step 4:** Run the Hub gates. Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: SELinux relabel of the Hub's own binds, doctor kinds for rootless Podman`). Push `podman1` and dispatch `gh workflow run build.yml --ref podman1`. Expected: green except `TestRealTemplatesRootlessClassification` until Task 6 is pushed. Re-run after Task 6: green.
 
@@ -355,6 +460,7 @@
 - [ ] **Step 1: Write the failing tests.**
   - `RootlessTests.test_vectors`: each vector through `rootless_compat` equals `want`.
   - `test_committed_classification`: `validate.py --rootless` output == `tests/rootless.txt`.
+  - `test_reserved_port_start`: a template referencing `${PORTCULLIS_UNPRIVILEGED_PORT_START}` is refused (P15).
   - `test_expected_refusals`: pihole and adguard are `refused` with the `53/tcp` reason; scrutiny is `refused` naming `SYS_RAWIO`; esphome, motioneye and zigbee2mqtt are `degraded`; samba and timemachine are `ok`.
 - [ ] **Step 2:** Run `python3 tests/test_validate.py`. Expected: FAIL (no `rootless_compat`).
 - [ ] **Step 3: Implement** a rule-for-rule port of `RootlessCompat` (the same order and strings). Then generate `tests/rootless.txt` with `python3 tests/validate.py --rootless > tests/rootless.txt` and review it: no other template is `refused`.
@@ -368,7 +474,7 @@
 **Files:**
 - Create: `scripts/lib/runtime.sh`
 - Modify:
-  - `portcullis` (the source list: `common runtime network …`)
+  - `scripts/lib/common.sh` (sources `runtime.sh` at its end; the `portcullis` list is unchanged, P9)
   - `scripts/lib/common.sh:140-145` (`need_env` → `runtime_check`), `common.sh` `hub_env_write`
   - `scripts/lib/stack.sh`: `init_write_env`, `init_run` (about 124–200), `stack_up` (416), `upgrade_run` (444), `help_init`, `cmd_init`; new `stack_compose_up`
   - `scripts/lib/backup.sh`: `backup_restore` (714 onwards: runtime keys and host checks), `_backup_manifest` (176: `runtime`)
@@ -378,7 +484,7 @@
 
 **Interfaces:**
 - Produces (bash):
-  - `runtime_name` → `docker|podman` (`${CONTAINER_RUNTIME:-docker}`).
+  - `runtime_name` → `docker|podman` from `CONTAINER_RUNTIME`. Unset, empty or anything else → `fail` naming the variable (P0, no default).
   - `runtime_podman_socket` → `${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock`.
   - `runtime_detect [flag]` → prints docker|podman. Order: the flag or `CONTAINER_RUNTIME`; then `/var/run/docker.sock` or `DOCKER_HOST` without `Podman Engine`; then podman installed, not root, and the user socket's `_ping`. Otherwise exit 1 with the §4 hints. As root with podman, exit 1 "rootless only".
   - `runtime_export`:
@@ -405,6 +511,8 @@
   - `runtime_require_host`: under podman, fails on any `fail` line, listing them all. Under docker it is a no-op.
   - `runtime_build_local`: for each service with a `build` section in `dc config --format json`, runs `podman build -t <image> -f <dockerfile> [--build-arg K=V…] <context>`.
   - `stack_compose_up [svc…]`: docker → `dc up -d --build "$@"`; podman → `runtime_build_local && dc up -d --no-build "$@"`.
+  - `runtime_build_local [svc…]` (tag `.image // "<project>-<service>"`), `runtime_build_service <svc>` (replaces `dc build` in domains.sh:120, mcpgate.sh:30, backup.sh:161) and `runtime_no_build` (`--no-build` under podman, for every other `dc up`) (P8).
+  - `version`, `backup schedule` and `restore` without `.env` reach the runtime as P6/P7 say.
   - `runtime_status_json` → `{name, version, rootless, uid, subuid_start, subuid_count, subgid_start, subgid_count, port_start, checks: [{status, text}]}`.
   - `init --runtime docker|podman`: an existing `.env` with a different `CONTAINER_RUNTIME` → exit 1 `CONTAINER_RUNTIME is docker in .env and is never switched (backup → fresh init → restore)`.
 
@@ -426,15 +534,20 @@
   - "init --env-only writes CONTAINER_RUNTIME=podman and the rootless PORTCULLIS_ENGINE_SOCKET with --runtime podman"
   - "hub_env_write: PORTCULLIS_UNPRIVILEGED_PORT_START only under podman"
   - "restore keeps the host's runtime keys" (Review Focus 2: the backup's `.env` without the keys over a podman `.env`)
+  - "restore onto docker drops a podman backup's PORTCULLIS_ENGINE_SOCKET", "restore without .env detects the runtime before any docker call" (P6)
+  - "need_env: no CONTAINER_RUNTIME → refused naming the variable", "init --env-only: no engine and no --runtime → refused", "init: an existing .env without CONTAINER_RUNTIME gets the detected value" (P0)
+  - "domains_image_ensure on podman runs podman build, never dc build" (P8)
+  - "version with .env but no CONTAINER_RUNTIME → refused" (P7)
+  - Existing stubs answer the version call and every fixture `.env` gets `CONTAINER_RUNTIME=docker` (P18).
   - "MANIFEST.json records runtime {name, version}"
   - "status --json has runtime{}"
 
   In `tests/test_cli.sh`: the stub answers the version call, and add "init --help documents --runtime" and "every --help works with no engine" (the stub exits 99 on any call, and `STUB_CALLS` stays empty).
 - [ ] **Step 2:** Run `bash tests/test_shell_libs.sh; bash tests/test_cli.sh`. Expected: the new cases FAIL.
 - [ ] **Step 3: Implement.**
-  - `init_write_env` writes `CONTAINER_RUNTIME=<detected>`, plus `PORTCULLIS_ENGINE_SOCKET=<socket>` under podman, with a comment block saying "chosen by init, never switched". `--env-only` without a flag and no engine writes `docker` with an info line (later runs verify it).
+  - `init_write_env` writes `CONTAINER_RUNTIME=<detected>`, plus `PORTCULLIS_ENGINE_SOCKET=<socket>` under podman, with a comment block saying "chosen by init, never switched". `--env-only` without a flag, without `CONTAINER_RUNTIME` in the environment and with no engine answering is refused (P0). An existing `.env` without the key gets the detected value (P0).
   - `init_run`, `stack_up` and `upgrade_run` call `runtime_check` and `runtime_require_host` before `network_check`, and replace each `dc up -d --build` with `stack_compose_up`.
-  - `backup_restore` saves the two keys from the current `.env` (`env_get`) before the copy, then writes them back with `env_set`, or deletes them when they were absent and `runtime_detect` says docker. It calls `runtime_require_host` before stopping anything.
+  - `backup_restore` follows P6. It saves the two keys from the current `.env` (`env_get`) before the copy and always writes `CONTAINER_RUNTIME` back. Under podman it writes the socket back, and under docker it deletes a `PORTCULLIS_ENGINE_SOCKET` that came with the backup. Without a current `.env` it uses `runtime_detect` + `runtime_export` + `runtime_check` before the first docker call. It calls `runtime_require_host` before stopping anything.
   - `hub_env_write` appends `PORTCULLIS_UNPRIVILEGED_PORT_START=$(runtime_port_start)` under podman only.
   - Status prints `runtime: podman <ver> rootless, uid <u>, subuid <s>+<n>, ports ≥ <p>` or `runtime: docker <ver>`, and every `fail` line counts as a problem. `version` and `--json` add `runtime` and `runtime_version`. `.env.example` documents both keys.
 - [ ] **Step 4:** Run the core gates. Expected: PASS, shellcheck clean.
@@ -467,7 +580,7 @@
   - "ct_group_read on podman passes 0:<gid>"
   - "_restic on podman runs --user 0:0 --cap-drop ALL"
   - "backup schedule --systemd on podman writes user units (Requires=podman.socket, no User=, WantedBy=default.target)"
-  - The grep test in `tests/test_cli.sh`: `grep -rn 'ct_own "$(id -u)' scripts/lib portcullis` prints nothing.
+  - The grep test in `tests/test_cli.sh`: `grep -rnF 'ct_own "$(id -u)' scripts/lib portcullis` prints nothing (P18).
 - [ ] **Step 2:** Run `bash tests/test_shell_libs.sh; bash tests/test_cli.sh`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - On docker, `ct_own` keeps its current behaviour.
@@ -483,28 +596,28 @@
 ### Task 9: Core compose, overlay and static CI checks
 
 **Files:**
-- Modify: `docker-compose.yml` (proxies lines 101 and 148, every `./…` bind (45 entries), the Hub `environment` about line 869)
+- Modify: `docker-compose.yml` (proxies lines 101 and 148, the Hub `environment` about line 869; the binds stay short syntax, P10)
 - Create: `docker-compose.podman-selinux.yml`
 - Modify: `.github/workflows/ci.yml` (unit-tests "compose files are valid…" step about 200–300, build-and-test "Test the socket proxies" about 1795), `tests/test_cli.sh`, `CLAUDE.md` (the socket-rule sentence in Deployment, Key Files)
 
 **Interfaces:**
 - Produces:
-  - Compose `HUB_CONTAINER_RUNTIME: ${CONTAINER_RUNTIME:-docker}`.
+  - Compose `HUB_CONTAINER_RUNTIME: ${CONTAINER_RUNTIME:?CONTAINER_RUNTIME must be set in .env (./portcullis init writes it)}` (P0).
   - Both proxies mount `- ${PORTCULLIS_ENGINE_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro`.
-  - Each project bind becomes `{type: bind, source: ./…, target: …, read_only: <as before>, bind: {selinux: z}}` (R11).
+  - The overlay re-declares each of the 45 project binds (44 `./…` + `.:/project`) as `{type: bind, source: ./…, target: …, read_only: <as before>, bind: {selinux: z}}`. Compose merges by target. The base file is unchanged (P10).
   - The overlay sets `security_opt: ["no-new-privileges:true", "label=disable"]` on `socket-proxy-traefik` and `socket-proxy-hub` only.
 
 - [ ] **Step 1: Write the failing checks** (they fail on the current compose).
   - In the unit-tests step, run the existing socket jq both on the default config and on `CONTAINER_RUNTIME=podman PORTCULLIS_ENGINE_SOCKET=/run/user/1001/podman/podman.sock docker compose -f docker-compose.yml config --format json`. The source compared is `env.PORTCULLIS_ENGINE_SOCKET // "/var/run/docker.sock"`.
-  - `.services.hub.environment.HUB_CONTAINER_RUNTIME` equals the runtime given.
-  - Every bind with a source under the project dir has `.bind.selinux == "z"`, and the engine-socket bind has none.
+  - `.services.hub.environment.HUB_CONTAINER_RUNTIME` equals the runtime given, and `CONTAINER_RUNTIME= docker compose -f docker-compose.yml config -q` fails (P0).
+  - With the overlay merged, every bind with a source under the project dir has `.bind.selinux == "z"` with the base's targets and `read_only`, and the engine-socket bind has none. Without the overlay, no bind has `.bind.selinux`. The overlay names no service missing from the base (P10).
   - With `-f docker-compose.podman-selinux.yml` merged, `label=disable` appears exactly on the two proxies, and each keeps `no-new-privileges:true`.
   - No core service has `cap_add` `NET_ADMIN` or `SYS_ADMIN` (VPN cross-reference: core stays userspace).
   - The hardening baseline jq also runs on the overlay-merged config.
   - In "Test the socket proxies", add 403 checks on both proxies for `/libpod/info`, `/libpod/play/kube`, `/v5.0.0/libpod/containers/json` and `/build`. Use `tp` for Traefik's proxy and the Hub-side helper the step already uses.
   - In `tests/test_cli.sh`, check that the literal mount string appears exactly twice and `/var/run/docker.sock:/var/run/docker.sock` nowhere else.
-- [ ] **Step 2:** Run the step's commands locally: `PORTCULLIS_ROOT=/tmp/pp-x ./portcullis init --env-only --non-interactive --domain ci.example.org --dns-provider none`, then the jq checks. Expected: FAIL.
-- [ ] **Step 3: Implement** the compose changes. Then `stack_prepare` must still make every bind source before `up`, because long syntax keeps compose's `create_host_path` but a missing file would become a directory. Check that every file-bind source already exists after `stack_prepare`.
+- [ ] **Step 2:** Run the step's commands locally: `PORTCULLIS_ROOT=/tmp/pp-x ./portcullis init --env-only --runtime docker --non-interactive --domain ci.example.org --dns-provider none`, then the jq checks. Expected: FAIL.
+- [ ] **Step 3: Implement** the compose changes. The overlay's long-syntax entries leave `create_host_path` unset, so a missing source fails under the overlay instead of being created. `stack_prepare` must make every bind source before `up`: check that every file-bind source already exists after `stack_prepare`.
 - [ ] **Step 4:** Run `docker compose -f docker-compose.yml config -q`, the same with `--profile '*'` and with the overlay, then the jq checks and the core gates. Expected: PASS.
 - [ ] **Step 5:** Commit (`compose: engine socket variable, SELinux z on project binds, podman SELinux overlay for the proxies, HUB_CONTAINER_RUNTIME; CI static checks and libpod denials`).
 - [ ] **Step 6 (controller):** run `gh workflow run ci.yml --ref podman1 -f jobs=unit-tests,build-and-test`. Expected: green (Docker path unchanged).
@@ -519,9 +632,9 @@
 
 **Interfaces:**
 - Consumes: everything above; the CI templates `tests/e2e/apps/echo` and `tests/e2e/apps/folder-writer`; the templates repo's `scrutiny` (same-named templates branch, else main).
-- Produces: job `e2e-podman`: `runs-on: ubuntu-26.04`, `timeout-minutes: 60`, `needs: [jobs-input, e2e]`. Its `if` is `always() && needs.jobs-input.result == 'success'` plus the usual name match for `e2e-podman`.
+- Produces: job `e2e-podman`: `runs-on: ubuntu-26.04`, `timeout-minutes: 90`, `needs: jobs-input`, with the usual name-match `if` for `e2e-podman` (no `always()`, no `e2e` dependency, P11).
 
-- [ ] **Step 1: Make the `e2e` job publish its backup.** After the job's tests it runs `./portcullis backup` and uploads `backups/<newest>` as `e2e-docker-backup` with `retention-days: 1` (R9).
+- [ ] **Step 1 (P11, replaces the `e2e` artifact): the Docker phase.** Docker is still running, so run `ACME_STAGING=true ./portcullis init --runtime docker --non-interactive --domain portcullis.local --email ci@portcullis.local --dns-provider none --no-config-repo` with the CI override. Then create one LLDAP person as the `e2e` job does (the admin token, GraphQL `createUser`), run `./portcullis backup`, copy `backups/<newest>` to `$RUNNER_TEMP/rt-backup` (umask 077), record `sha256sum certs/ca-chain.crt`, run `./portcullis down`, and remove the project volumes, `.env`, `secrets/` and `certs/`. The `e2e` job is unchanged. No artifact carries a backup.
 - [ ] **Step 2: Build the job's setup steps.**
   - **Images.** Build the local images and the Hub/Keycloak images with the existing actions (`hub-image`, `keycloak-image`, build-push for enroll, group-gate, domains (`GO_TAGS=testprovider`) and mcp-gate) while Docker still runs. Then `docker save … | podman load`.
   - **Stop Docker.** `sudo systemctl disable --now docker.service docker.socket`, and assert that `/var/run/docker.sock` doesn't answer.
@@ -545,15 +658,15 @@
     - the fixer on `/srv/e2e-pod`: the operator-owned folder applies ok, and the root-owned child's apply answers 409 with `is owned by a host account outside Portcullis' id range` and its path
     - creating scrutiny answers 409 naming `SYS_RAWIO`
   - **Reboot simulation (R8).** `sudo systemctl restart user@$(id -u).service`, then wait ≤ 180 s for `status` to have no problems.
-  - **Docker → Podman round trip.** Fail when `needs.e2e.result != 'success'` with `FAIL: run with jobs=e2e,e2e-podman`. Download `e2e-docker-backup`, wipe (`./portcullis down`, `docker volume rm` of the project's volumes, remove `.env`, `secrets/` and `certs/`), `init --runtime podman`, `./portcullis restore --yes <dir>`. Then assert:
+  - **Docker → Podman round trip (P11).** Wipe (`./portcullis down`, `docker volume rm` of the project's volumes, remove `.env`, `secrets/` and `certs/`), `init --runtime podman`, `./portcullis restore --yes $RUNNER_TEMP/rt-backup`. Then assert:
     - `.env` keeps `CONTAINER_RUNTIME=podman` and the rootless socket
     - status is clean
-    - the sha256 of `certs/ca-chain.crt` equals the backup's
-    - the e2e job's LLDAP users exist
+    - the sha256 of `certs/ca-chain.crt` equals the one recorded in the Docker phase
+    - the Docker phase's LLDAP person exists
     - secrets are operator-owned on the host
   - **Failure artifacts.** Upload the logs on failure (`docker compose logs`), never `.env` or `secrets/`.
 - [ ] **Step 4:** Run `actionlint` and `bash tests/test_cli.sh`. Expected: PASS. Add `e2e-podman` to the `jobs` description list. Write the `CLAUDE.md` Testing bullet for `e2e-podman` and `e2e_podman.py`. Commit (`ci: e2e-podman (rootless Podman end to end, Docker → Podman restore)`).
-- [ ] **Step 5 (controller):** run `gh workflow run ci.yml --ref podman1 -f jobs=e2e,e2e-podman`. Expected: green. If `host-gateway` fails on Podman, stop and report: Q3's fallback is a contract change that needs its own review.
+- [ ] **Step 5 (controller):** run `gh workflow run ci.yml --ref podman1 -f jobs=e2e-podman`. Expected: green. If `host-gateway` fails on Podman, stop and report: Q3's fallback is a contract change that needs its own review.
 
 ---
 
@@ -561,7 +674,7 @@
 
 **Files:**
 - Create: `docs/operations/rootless-podman.md`
-- Modify: `docs/operations/.nav.yml` (`- Rootless Podman: rootless-podman.md` after Upgrading), `hardening.md` ("Docker socket proxies" table about line 185: a "socket source" row; a new "Rootless Podman" section after "Shared folders and the fixer helper"), `cli.md` (`init --runtime`, the status `runtime:` line, the restore runtime keys, the backup schedule user units), `testing.md` (`e2e-podman`, the static checks), `hub.md` (badges, `/api/runtime`, doctor kinds), `backups.md` ("moving between runtimes"), `docs/setup/quickstart.md` (one line pointing to the page)
+- Modify: `docs/operations/.nav.yml` (`- Rootless Podman: rootless-podman.md` after Upgrading), `hardening.md` ("Docker socket proxies" table about line 185: a "socket source" row; a new "Rootless Podman" section after "Shared folders and the fixer helper"), `cli.md` (`init --runtime`, `CONTAINER_RUNTIME` required (P0), the status `runtime:` line, the restore runtime keys, the backup schedule user units), `upgrading.md` (one-time step for installs from before rootless support: add `CONTAINER_RUNTIME=docker` to `.env` before `./portcullis upgrade`; every command refuses until it's there, P0), `testing.md` (`e2e-podman`, the static checks), `hub.md` (badges, `/api/runtime`, doctor kinds), `backups.md` ("moving between runtimes"), `docs/setup/quickstart.md` (one line pointing to the page)
 
 - [ ] **Step 1:** Write `rootless-podman.md`. Sections: why; host preparation as copy-paste blocks for Debian/Ubuntu and for Fedora/RHEL (useradd without sudo, subuid/subgid, linger, user units, sysctl.d `80`, passt + Docker CLI + compose plugin, SELinux `semanage` for shared folders); `init --runtime podman`; migration (backup → init → restore, R6); the §9 table with each template's status taken from `tests/rootless.txt`; Time Machine discovery per R10; the limits (no devices, UDP sources, ports below the sysctl).
 - [ ] **Step 2:** In `hardening.md` say:
@@ -578,15 +691,15 @@
 **Files:** none new (merges and the test server).
 
 - [ ] **Step 1 (controller):** Run a full core CI `gh workflow run ci.yml --ref podman1`, and on the same branch Hub `build.yml` and templates lint plus Test Apps. Expected: all green.
-- [ ] **Step 2: Merge docs**, then the Hub through detached worktrees (Global Constraints). Run `gh workflow run build.yml --ref main -f compare_ref=podman1` in the Hub and wait for `edge` to be published. Then merge templates, then core.
+- [ ] **Step 2: Merge docs**, then the Hub through detached worktrees (Global Constraints). Run `gh workflow run build.yml --ref main -f compare_ref=podman1` in the Hub and wait for `edge` to be published. Then merge templates, then core, without a pause. Until core is merged, an `edge` Hub refuses to start on core main: dispatch no core CI on main and upgrade no server in that window (P17).
 - [ ] **Step 3:** Re-run templates "Test Apps" on main. Expected: green.
 - [ ] **Step 4: Deploy the Docker test server and check that nothing changed.**
   1. **Before**, on the server: `docker compose config --format json > /tmp/cfg-before.json`, and for each core container record `docker inspect` `{Config.User, HostConfig.CapAdd, HostConfig.Memory, HostConfig.PidsLimit, HostConfig.SecurityOpt, [.Mounts[] | {Source, Destination, RW}], NetworkSettings.Networks[].IPAddress}` into `/tmp/inspect-before.json`.
-  2. Run `git pull --ff-only && ./portcullis upgrade`.
+  2. Run `git pull --ff-only`. Then `./portcullis status` must exit non-zero and name `CONTAINER_RUNTIME` (P0). Check `grep -c '^CONTAINER_RUNTIME=' .env` = 0, run `printf 'CONTAINER_RUNTIME=docker\n' >> .env` (by hand, P16), then `./portcullis upgrade`.
   3. **After**, compare:
-     - The config diff is only `hub.environment.HUB_CONTAINER_RUNTIME = "docker"` and the binds' long syntax with `selinux: z`.
-     - The inspect diff is empty.
-     - `grep -cE '^(CONTAINER_RUNTIME|PORTCULLIS_ENGINE_SOCKET)=' .env` = 0.
+     - The config diff is only `hub.environment.HUB_CONTAINER_RUNTIME = "docker"` (the base binds are unchanged, P10).
+     - The inspect diff is empty, except the IP addresses of recreated containers on networks where they aren't pinned. Pinned addresses are equal (P16).
+     - `grep -c '^CONTAINER_RUNTIME=docker$' .env` = 1 and `grep -c '^PORTCULLIS_ENGINE_SOCKET=' .env` = 0.
      - `secrets/hub/core.env` has no `PORTCULLIS_UNPRIVILEGED_PORT_START`.
      - `./portcullis status` has no problems and prints `runtime: docker <ver>`.
      - The Hub's `GET /api/runtime` says `docker`, `verified: true`.
