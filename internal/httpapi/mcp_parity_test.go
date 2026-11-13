@@ -331,7 +331,9 @@ func TestToolParity(t *testing.T) {
 	// R (sign-in Task 6).
 	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact", "person_sign_in", "issue_yubikey_certificate",
 		// DNS hardening (F1).
-		"get_domain_dns", "get_main_dns", "domain_op"} {
+		"get_domain_dns", "get_main_dns", "domain_op",
+		// Rootless Podman (P3).
+		"get_runtime"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}
@@ -392,6 +394,7 @@ var admin17a = []string{
 	"list_drift", "resolve_drift",
 	"set_person_value", "clear_person_value", "retry_deliveries", "missing_groups", "create_missing_groups",
 	"list_credentials", "admin_revoke_credential", "get_local_networks", "set_local_networks",
+	"get_runtime",
 }
 
 // TestParityImpersonation (D46, F27): the routes of signing in as

@@ -89,6 +89,10 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	}
 	coreEnv := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
 	for ref := range templates.EnvRefs(string(t.ReadCompose())) {
+		// Core-only: not a template variable (contract §2).
+		if ref == VarUnprivilegedPortStart {
+			continue
+		}
 		if _, exists := vars[ref]; !exists {
 			if v, ok := coreEnv[ref]; ok {
 				vars[ref] = v

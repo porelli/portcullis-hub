@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
+
+	"github.com/portcullis/hub/internal/docker"
 )
 
 // OutputTail is how much of a failed invocation's combined stdout/stderr
@@ -165,11 +167,20 @@ type CLI struct {
 	DownTimeout time.Duration
 	Stdout      io.Writer
 	Stderr      io.Writer
+	// Guard is the engine runtime guard (contract §6): every command but
+	// Version (the plugin's own version, which never reaches the engine)
+	// returns its refusal first.
+	Guard *docker.Guard
 }
 
-// NewCLI returns a CLI with the Hub's default timeouts.
-func NewCLI(dockerHost string) *CLI {
+// NewCLI returns a CLI with the Hub's default timeouts, held by g. A nil g
+// panics: there is no unguarded compose.
+func NewCLI(dockerHost string, g *docker.Guard) *CLI {
+	if g == nil {
+		panic("compose.NewCLI: no runtime guard")
+	}
 	return &CLI{
+		Guard:       g,
 		Binary:      "docker",
 		DockerHost:  dockerHost,
 		UpTimeout:   15 * time.Minute, // includes image pulls
@@ -195,6 +206,12 @@ func Args(p Project, sub ...string) []string {
 }
 
 func (c *CLI) run(ctx context.Context, timeout time.Duration, sub string, args []string) error {
+	if c.Guard == nil {
+		return fmt.Errorf("docker compose %s: no runtime guard", sub)
+	}
+	if err := c.Guard.Err(); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	bin := c.Binary

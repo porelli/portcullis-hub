@@ -464,6 +464,9 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/domains/team-b.example.net/dnssec", body: `{"enable":true}`},
 		{tool: "domain_op", args: map[string]any{"name": "team-b.example.net"},
 			method: "GET", path: "/api/domains/team-b.example.net/op", body: ``},
+		// Rootless Podman (P3): the runtime view.
+		{tool: "get_runtime", args: map[string]any{},
+			method: "GET", path: "/api/runtime", body: ``},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_only"},
 			method: "PUT", path: "/api/instances/aiapp/ai", body: `{"companions":{"tok":{"mode":"read_only"}}}`, instance: "aiapp"},
 		{tool: "set_ai_mode", args: map[string]any{"id": "aiapp", "companion": "tok", "mode": "read_write"},
@@ -1103,6 +1106,7 @@ func TestReadToolsAnswer(t *testing.T) {
 		{"list_drift", nil, `"items"`},
 		{"missing_groups", nil, `{`},
 		{"get_local_networks", nil, `"networks"`},
+		{"get_runtime", nil, `"runtime"`},
 	} {
 		txt, isErr, _ := e.tool(t, c.tool, c.args)
 		if isErr || !strings.Contains(txt, c.want) {

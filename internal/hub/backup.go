@@ -1349,16 +1349,14 @@ func dirSize(dir string) int64 {
 // .partial archives. Init calls it before anything can start one.
 func (h *Hub) SweepBackupLeftovers() {
 	if h.engine != nil {
-		cs, err := h.engine.ListContainers(context.Background(), docker.Filters{"label": {docker.LabelHelper}})
-		if err != nil {
-			log.Printf("backups: cannot list leftover helper containers: %v", err)
-		}
-		for _, c := range cs {
-			if err := h.engine.RemoveContainer(context.Background(), c.ID); err != nil {
-				log.Printf("backups: removing leftover helper container %s: %v", c.Name(), err)
-			} else {
-				log.Printf("backups: removed leftover helper container %s", c.Name())
-			}
+		if h.engineVerifiedNow() {
+			h.sweepHelperContainers(0)
+		} else {
+			// The engine isn't verified yet (contract §6): the helpers
+			// are swept once it is — only those created before this
+			// start, never a helper a backup started since then made.
+			before := time.Now().Unix()
+			h.afterEngineVerified("backups: leftover helper sweep", func() { h.sweepHelperContainers(before) })
 		}
 	}
 	os.RemoveAll(filepath.Join(h.backupsDir(), ".staging"))
@@ -1375,6 +1373,25 @@ func (h *Hub) SweepBackupLeftovers() {
 					log.Printf("backups: removed leftover %s", p)
 				}
 			}
+		}
+	}
+}
+
+// sweepHelperContainers removes the helper containers (LabelHelper);
+// before > 0: only those created before it (Unix seconds).
+func (h *Hub) sweepHelperContainers(before int64) {
+	cs, err := h.engine.ListContainers(context.Background(), docker.Filters{"label": {docker.LabelHelper}})
+	if err != nil {
+		log.Printf("backups: cannot list leftover helper containers: %v", err)
+	}
+	for _, c := range cs {
+		if before > 0 && c.Created >= before {
+			continue
+		}
+		if err := h.engine.RemoveContainer(context.Background(), c.ID); err != nil {
+			log.Printf("backups: removing leftover helper container %s: %v", c.Name(), err)
+		} else {
+			log.Printf("backups: removed leftover helper container %s", c.Name())
 		}
 	}
 }

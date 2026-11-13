@@ -418,11 +418,43 @@ func TestFixerImageResolution(t *testing.T) {
 // The native layout (/var/lib/docker on the root filesystem) parses too.
 func TestSelfContainerID(t *testing.T) {
 	native := "1 0 8:1 /var/lib/docker/containers/" + testSelfID + "/resolv.conf /etc/resolv.conf rw - ext4 /dev/sda1 rw\n"
-	if id, err := selfContainerID([]byte(native)); err != nil || id != testSelfID {
+	if id, err := selfContainerID([]byte(native), docker.RuntimeDocker); err != nil || id != testSelfID {
 		t.Errorf("native: %q, %v", id, err)
 	}
-	if _, err := selfContainerID([]byte("1 0 8:1 /var/lib/podman/containers/" + testSelfID + "/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n")); err == nil {
+	if _, err := selfContainerID([]byte("1 0 8:1 /var/lib/podman/containers/"+testSelfID+"/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n"), docker.RuntimeDocker); err == nil {
 		t.Error("a non-docker path accepted")
+	}
+}
+
+// P2: under podman the root is …/overlay-containers/<id>/userdata/<file>,
+// from the graph root or the run root on the /run/user/<uid> tmpfs; under
+// docker neither is accepted, and docker's form isn't accepted under podman.
+func TestSelfContainerIDPodman(t *testing.T) {
+	graph := "100 90 0:44 /home/p/.local/share/containers/storage/overlay-containers/" + testSelfID + "/userdata/hostname /etc/hostname rw,nosuid - ext4 /dev/sda1 rw\n"
+	run := "101 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hostname /etc/hostname rw,nosuid - tmpfs tmpfs rw,size=100k,uid=1001\n" +
+		"102 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/resolv.conf /etc/resolv.conf rw - tmpfs tmpfs rw\n" +
+		"103 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hosts /etc/hosts rw - tmpfs tmpfs rw\n"
+	for name, mi := range map[string]string{"graphroot": graph, "runroot": run} {
+		if id, err := selfContainerID([]byte(mi), docker.RuntimePodman); err != nil || id != testSelfID {
+			t.Errorf("%s under podman: %q, %v", name, id, err)
+		}
+		if id, err := selfContainerID([]byte(mi), docker.RuntimeDocker); err == nil {
+			t.Errorf("%s under docker: accepted %q", name, id)
+		}
+	}
+	// Mounted at the wrong file, or two ids: refused.
+	wrong := "1 0 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hosts /etc/hostname rw - tmpfs tmpfs rw\n"
+	if _, err := selfContainerID([]byte(wrong), docker.RuntimePodman); err == nil {
+		t.Error("hosts mounted at /etc/hostname accepted")
+	}
+	other := strings.Repeat("b", 64)
+	two := graph + "2 0 0:45 /containers/overlay-containers/" + other + "/userdata/hosts /etc/hosts rw - tmpfs tmpfs rw\n"
+	if _, err := selfContainerID([]byte(two), docker.RuntimePodman); err == nil {
+		t.Error("two ids accepted")
+	}
+	docker := "1 0 8:1 /var/lib/docker/containers/" + testSelfID + "/resolv.conf /etc/resolv.conf rw - ext4 /dev/sda1 rw\n"
+	if _, err := selfContainerID([]byte(docker), "podman"); err == nil {
+		t.Error("docker's form accepted under podman")
 	}
 }
 

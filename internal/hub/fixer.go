@@ -529,11 +529,21 @@ const (
 // …/docker/containers/<64 hex>/<file>.
 var selfMountRe = regexp.MustCompile(`(?:^|/)docker/containers/([0-9a-f]{64})/(hostname|hosts|resolv\.conf)$`)
 
+// selfMountPodmanRe is the same under rootless Podman (contract §6, P2):
+// …/overlay-containers/<64 hex>/userdata/<file>, from the graph root
+// (~/.local/share/containers/storage/…) or the run root on the
+// /run/user/<uid> tmpfs (root field /containers/overlay-containers/…).
+var selfMountPodmanRe = regexp.MustCompile(`(?:^|/)overlay-containers/([0-9a-f]{64})/userdata/(hostname|hosts|resolv\.conf)$`)
+
 // selfContainerID is the Hub's own container ID from /proc/self/mountinfo
 // (R53): the root of the /etc/hostname, /etc/hosts or /etc/resolv.conf mount.
 // Every such mount must name the same 64-hex ID; none, or two IDs, is an
 // error. Never a name or prefix lookup another container could shadow.
-func selfContainerID(mountinfo []byte) (string, error) {
+func selfContainerID(mountinfo []byte, rt docker.Runtime) (string, error) {
+	re, want := selfMountRe, "docker/containers/<id>/"
+	if rt == docker.RuntimePodman {
+		re, want = selfMountPodmanRe, "overlay-containers/<id>/userdata/"
+	}
 	id := ""
 	for _, line := range strings.Split(string(mountinfo), "\n") {
 		f := strings.Fields(line)
@@ -544,7 +554,7 @@ func selfContainerID(mountinfo []byte) (string, error) {
 		if point != "/etc/hostname" && point != "/etc/hosts" && point != "/etc/resolv.conf" {
 			continue
 		}
-		m := selfMountRe.FindStringSubmatch(root)
+		m := re.FindStringSubmatch(root)
 		if m == nil || "/etc/"+m[2] != point {
 			continue
 		}
@@ -554,7 +564,7 @@ func selfContainerID(mountinfo []byte) (string, error) {
 		id = m[1]
 	}
 	if id == "" {
-		return "", errors.New("no docker/containers/<id>/ mount in /proc/self/mountinfo")
+		return "", fmt.Errorf("no %s mount in /proc/self/mountinfo", want)
 	}
 	return id, nil
 }
@@ -586,7 +596,7 @@ func (h *Hub) selfImage(ctx context.Context) (string, error) {
 	if err != nil {
 		return fail("reading mountinfo: %v", err)
 	}
-	id, err := selfContainerID(mi)
+	id, err := selfContainerID(mi, h.cfg.Runtime)
 	if err != nil {
 		return fail("%v", err)
 	}

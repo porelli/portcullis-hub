@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fidomds"
 	"github.com/portcullis/hub/internal/hub"
 )
@@ -274,6 +275,22 @@ func TestMaxMinutes(t *testing.T) {
 	for _, v := range []string{"0", "31", "x", "-1", " 5", "05x", "999999999999999999999"} {
 		if _, err := impersonationMaxMinutesFromEnv(func(string) string { return v }); err == nil {
 			t.Errorf("%q accepted", v)
+		}
+	}
+}
+
+// TestRuntimeFromEnv: HUB_CONTAINER_RUNTIME is required, docker or podman
+// (contract §6, P0: no default).
+func TestRuntimeFromEnv(t *testing.T) {
+	for v, want := range map[string]docker.Runtime{"docker": docker.RuntimeDocker, "podman": docker.RuntimePodman} {
+		got, err := runtimeFromEnv(func(k string) string { return map[string]string{"HUB_CONTAINER_RUNTIME": v}[k] })
+		if err != nil || got != want {
+			t.Errorf("%q: %q, %v", v, got, err)
+		}
+	}
+	for _, v := range []string{"", "rkt", "Docker", "podman "} {
+		if _, err := runtimeFromEnv(func(k string) string { return map[string]string{"HUB_CONTAINER_RUNTIME": v}[k] }); err == nil || !strings.Contains(err.Error(), "HUB_CONTAINER_RUNTIME") {
+			t.Errorf("%q accepted or unnamed: %v", v, err)
 		}
 	}
 }
