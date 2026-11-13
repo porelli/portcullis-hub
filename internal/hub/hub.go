@@ -1326,6 +1326,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		MainDomain: mainDomain, ExtraDomains: extraDomains,
 	})
 	doc.Expiring = expiring
+	doc.VPN = h.vpnPolicyLocked()
 	kcSignIn := h.keycloakSignInLocked()
 	kcSignIn.Authenticators, kcSignIn.MDS = trust, mdsDoc
 	portal := h.portalLocked()

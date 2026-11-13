@@ -5,4 +5,6 @@ services:
       - "0.0.0.0:3301:3000/tcp"
     labels:
       traefik.http.routers.grafana.tls.options: authaware@file
+      traefik.http.routers.grafana.entrypoints: websecure,vpnsecure
       traefik.http.routers.grafana-api.tls.options: authaware@file
+      traefik.http.routers.grafana-api.entrypoints: websecure,vpnsecure

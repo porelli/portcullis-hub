@@ -130,11 +130,21 @@ func (k *fakeVPNKC) UsernamesByID(ctx context.Context) (map[string]string, error
 
 func newVPNFixture(t *testing.T, seed func(*state.AppState)) *vpnFixture {
 	t.Helper()
+	return newVPNFixtureExtra(t, seed, nil, VPNModeApps)
+}
+
+// newVPNFixtureExtra is newVPNFixture with more templates (replacing the
+// VPN ones of the same id) and the core env's PORTCULLIS_VPN_MODE.
+func newVPNFixtureExtra(t *testing.T, seed func(*state.AppState), more map[string][2]string, mode string) *vpnFixture {
+	t.Helper()
 	v := &vpnFixture{audit: &fakeAudit{}, kc: &fakeVPNKC{byID: map[string]string{"sub-alice": "alice", "sub-bob": "bob", "sub-ghost": "ghost"}}, now: vpnT0, stdins: map[string][]string{}}
 	extra := map[string][2]string{
 		"mesh":    meshTemplate("mesh", "100.64.0.0/10", "oidc_sub"),
 		"mesh2":   meshTemplate("meshtwo", "100.128.0.0/16", "username"),
 		"wgplain": {vpnStaticManifest, vpnStaticCompose},
+	}
+	for id, files := range more {
+		extra[id] = files
 	}
 	v.fixture = newInstanceFixtureCfg(t, seed, nil, extra, func(root string, c *Config) {
 		v.status = filepath.Join(root, "wg-status.json")
@@ -142,7 +152,7 @@ func newVPNFixture(t *testing.T, seed func(*state.AppState)) *vpnFixture {
 		c.VPNDocDir = filepath.Join(root, "vpn-doc")
 		c.VPNDocGID = os.Getgid()
 		os.MkdirAll(c.VPNDocDir, 0o750)
-		writeFile(t, filepath.Join(c.ProjectDir, ".env"), "CORE_VAR=core-value\nPORTCULLIS_VPN_BUILTIN=on\nPORTCULLIS_VPN_NET=172.31.254.0/26\n")
+		writeFile(t, filepath.Join(c.ProjectDir, ".env"), "CORE_VAR=core-value\nPORTCULLIS_VPN_BUILTIN=on\nPORTCULLIS_VPN_NET=172.31.254.0/26\nPORTCULLIS_VPN_MODE="+mode+"\nPORTCULLIS_VPN_PUBLIC_ENROL=false\n")
 	})
 	for _, id := range []string{"mesh", "mesh2", "wgplain"} {
 		if v.h.Template(id) == nil {
@@ -155,7 +165,7 @@ func newVPNFixture(t *testing.T, seed func(*state.AppState)) *vpnFixture {
 	v.people = newFakePeople("alice", "bob", "carol")
 	v.people.addGroup("lldap_admin", "root")
 	v.h.SetPeople(v.people)
-	v.h.SetGroups(&fakeGroups{people: v.people, existing: map[string]bool{"users_mesh": true, "users_wgplain": true}})
+	v.h.SetGroups(&fakeGroups{people: v.people, existing: map[string]bool{"users_mesh": true, "users_wgplain": true, "users_cloud": true}})
 	v.h.SetVPNKeycloak(v.kc)
 	v.engine.mu.Lock()
 	for _, p := range []string{"portcullis-mesh", "portcullis-mesh2"} {

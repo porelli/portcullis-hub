@@ -162,7 +162,7 @@ func (h *Hub) publicLocked(t *templates.Template, plan *templates.PublicPlan) pu
 
 // publicLabels renders the public router and its strip middleware as
 // override label lines (4-space indented under the service's labels).
-func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, routed []string, tier string) ([]string, error) {
+func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, routed []string, tier, entrypoints, allow string) ([]string, error) {
 	rule := plan.Rule(routed, m.Auth.PublicAccess)
 	// Self-check: the router must stay inside the hosts the Hub knows.
 	if _, err := templates.ParseRule(rule); err != nil {
@@ -180,11 +180,11 @@ func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, 
 	// it is never read as interpolation (prefixes can't contain "$").
 	lines := []string{
 		r + ".rule: " + q(strings.ReplaceAll(rule, "$`)", "$$`)")),
-		r + ".entrypoints: websecure",
+		r + ".entrypoints: " + entrypoints,
 		r + `.tls: "true"`,
 		r + ".tls.options: " + tier,
 		r + fmt.Sprintf(`.priority: "%d"`, plan.Priority),
-		r + ".middlewares: " + PublicGuardMiddleware + "," + mw + "@docker,rate-limit@file,security-headers@file",
+		r + ".middlewares: " + vpnFirst(allow, PublicGuardMiddleware+","+mw+"@docker,rate-limit@file,security-headers@file"),
 	}
 	if plan.TraefikService != "" {
 		lines = append(lines, r+".service: "+q(plan.TraefikService))
@@ -193,6 +193,15 @@ func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, 
 		lines = append(lines, "traefik.http.middlewares."+mw+".headers.customrequestheaders."+hdr+`: ""`)
 	}
 	return lines, nil
+}
+
+// vpnFirst prepends a VPN-only instance's allowlist (allow, "" = none) to
+// chain.
+func vpnFirst(allow, chain string) string {
+	if allow == "" {
+		return chain
+	}
+	return allow + "," + chain
 }
 
 // PublicAccessView is the settings payload for auth.public_access.

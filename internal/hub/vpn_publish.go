@@ -210,7 +210,3 @@ func (h *Hub) vpnDomainsLocked() []string {
 }
 
 func expired(t *time.Time, now time.Time) bool { return t != nil && !now.Before(*t) }
-
-// vpnRangesChanged re-renders the overrides of the VPN-only instances
-// whose accepted ranges changed (V7: a no-op until the rendering lands).
-func (h *Hub) vpnRangesChanged() {}

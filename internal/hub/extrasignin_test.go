@@ -30,7 +30,7 @@ func TestExtraDomainSignInRendered(t *testing.T) {
 		`"traefik.http.routers.grafana-b_grafana.middlewares": "portcullis-auth-ext@docker,portcullis-groups@docker,grafana-b_grafana-headers@docker,security-headers@file"`,
 		"\"traefik.http.routers.portcullis-oauth2-grafana-b_grafana.rule\": \"Host(`grafana.team-b.example.org`) && PathPrefix(`/oauth2/`)\"",
 		`"traefik.http.routers.portcullis-oauth2-grafana-b_grafana.service": "forward-auth-ext@docker"`,
-		`"traefik.http.routers.portcullis-oauth2-grafana-b_grafana.entrypoints": "websecure"`,
+		`"traefik.http.routers.portcullis-oauth2-grafana-b_grafana.entrypoints": "websecure,vpnsecure"`,
 		`"traefik.http.routers.portcullis-oauth2-grafana-b_grafana.tls.options": "`,
 		`"traefik.http.routers.portcullis-oauth2-grafana-b_grafana.priority": "`,
 	} {

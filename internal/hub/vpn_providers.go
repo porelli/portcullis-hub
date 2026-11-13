@@ -106,6 +106,10 @@ type vpnRuntime struct {
 	// used while status.json is momentarily stale.
 	people *vpn.PeopleState
 
+	// rendered: instance → its VPN render key at the last re-render
+	// check (vpnRangesChanged).
+	rendered map[string]string
+
 	pubMu       sync.Mutex // serialises publishes
 	pubPending  atomic.Bool
 	lastWritten []byte
@@ -115,7 +119,7 @@ type vpnRuntime struct {
 }
 
 func newVPNRuntime() *vpnRuntime {
-	return &vpnRuntime{maps: map[string]*providerMap{}, now: time.Now}
+	return &vpnRuntime{maps: map[string]*providerMap{}, rendered: map[string]string{}, now: time.Now}
 }
 
 // SetVPNKeycloak wires the oidc_sub resolver (nil: oidc_sub owners never

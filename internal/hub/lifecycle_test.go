@@ -554,7 +554,7 @@ func TestRoutingValidation(t *testing.T) {
 func TestInitialDefaultTemplate(t *testing.T) {
 	f := newFixture(t)
 	doc := readPolicy(t, f)
-	if doc.Version != 6 || doc.Default != "standard" || doc.Core["hub.example.org"] != "strong" || doc.Core["example.org"] != "standard" {
+	if doc.Version != 7 || doc.Default != "standard" || doc.Core["hub.example.org"] != "strong" || doc.Core["example.org"] != "standard" {
 		t.Errorf("fresh file = version %d default %q core %v", doc.Version, doc.Default, doc.Core)
 	}
 	if err := f.h.Enable("other"); err != nil {
@@ -610,7 +610,7 @@ func TestSignInChangeRewritesPolicy(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc["default"] != "strong" || doc["version"] != float64(6) || doc["add_stronger"] != false {
+	if doc["default"] != "strong" || doc["version"] != float64(7) || doc["add_stronger"] != false {
 		t.Errorf("policy file: default %v version %v add_stronger %v", doc["default"], doc["version"], doc["add_stronger"])
 	}
 	kc, err := os.ReadFile(filepath.Join(f.data, SignInKeycloakFile))

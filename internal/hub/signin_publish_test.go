@@ -245,7 +245,7 @@ func TestSignInKeycloakWriteFailureStillWritesPolicy(t *testing.T) {
 	var doc struct {
 		Version int `json:"version"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Version != 6 {
+	if err := json.Unmarshal(b, &doc); err != nil || doc.Version != 7 {
 		t.Errorf("policy file = %s (%v)", b, err)
 	}
 	if err := os.RemoveAll(kc); err != nil {

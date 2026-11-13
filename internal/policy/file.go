@@ -14,10 +14,30 @@ import (
 )
 
 // FileVersion is the policy-file format version (contract §4). Version 6
-// replaces v5's factor policies with sign-in templates (§8.1): methods,
-// templates, default, hosts, core, people and add_stronger. group-gate
-// serves only version 6: the Hub and core must be upgraded together.
-const FileVersion = 6
+// replaced v5's factor policies with sign-in templates (§8.1); version 7
+// adds the required vpn section (VPN-only hosts, server mode, admin only,
+// public enrolment, the devices file). group-gate serves only version 7:
+// the Hub and core must be upgraded together.
+const FileVersion = 7
+
+// VPNDevicesFile is the only devices_file group-gate accepts.
+const VPNDevicesFile = "vpn.json"
+
+// VPNPolicy is the policy file's vpn section (contract §4 v7).
+type VPNPolicy struct {
+	// Hosts: every hostname of an enabled VPN-only instance → the
+	// providers it accepts.
+	Hosts       map[string]VPNHost `json:"hosts"`
+	ServerMode  bool               `json:"server_mode"`
+	AdminOnly   bool               `json:"admin_only"`
+	PublicEnrol bool               `json:"public_enrol"`
+	DevicesFile string             `json:"devices_file"`
+}
+
+// VPNHost is a VPN-only host's accepted providers: ["*"] or ids.
+type VPNHost struct {
+	Via []string `json:"via"`
+}
 
 // CorePages are the core page keys group-gate gates, each published under
 // its full hostname in core (§8.1 "Core pages"): portal is the main
@@ -102,6 +122,8 @@ type Document struct {
 	// Expiring lists pending membership expiries for group-gate to enforce
 	// strictly, even when the Hub is down.
 	Expiring []Expiring `json:"expiring"`
+	// VPN is the vpn section (required in v7).
+	VPN VPNPolicy `json:"vpn"`
 }
 
 // PublicPath is one pattern core's public guard allows: Match is "prefix"
@@ -198,6 +220,7 @@ func Build(in BuildInput) Document {
 		PathGroups:   map[string][]PathGroup{},
 		PublicPaths:  map[string]PublicEntry{},
 		Expiring:     []Expiring{},
+		VPN:          VPNPolicy{Hosts: map[string]VPNHost{}, PublicEnrol: true, DevicesFile: VPNDevicesFile},
 	}
 	sort.Strings(doc.ExtraDomains)
 	for _, m := range in.Methods {
