@@ -231,7 +231,7 @@ func TestHubAppsPageStatic(t *testing.T) {
 	}
 	for _, want := range []string{`id="tab-apps"`, `id="tab-instance"`, `id="tab-marketplace"`, `id="mkt-sources"`, `data-src-remove="`, `data-src-sync`,
 		`data-mkt-use="`, "'in use · ' + n + (n === 1 ? ' instance' : ' instances')", `data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>`,
-		`data-install="' + escapeHtml(tid) + '">Install…</button>`, "Manage on People &#8599;", "existing group", "'+ Add your own variable'",
+		`data-install="' + escapeHtml(tid) + '"' + off + '>Install…</button>`, "Manage on People &#8599;", "existing group", "'+ Add your own variable'",
 		`const page = /^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/.exec(t);`, "function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }",
 		`<div class="drift" id="drift"></div>`, `<div class="drift" id="missing-groups"></div>`, `<script src="/static/settings.js"></script>`} {
 		if !strings.Contains(b, strings.Trim(want, "'")) {
@@ -261,5 +261,43 @@ func TestHubAppsPageStatic(t *testing.T) {
 		if inline.MatchString(hubFunc(t, b, fn)) {
 			t.Errorf("%s generates inline event handlers", fn)
 		}
+	}
+}
+
+// TestHubAppsPageRootless (contract §11.10): the Marketplace cards carry
+// each template's verdict (data-rootless), rootlessBadge shows it only
+// under podman, and a refused template's Install… / + Add instance are
+// disabled.
+func TestHubAppsPageRootless(t *testing.T) {
+	page := hubIndex(t)
+	for _, want := range []string{`data-rootless="`, `data-rootless-reasons="`, "function rootlessBadge(", "apiGet('/api/runtime')"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the hub index lacks %q", want)
+		}
+	}
+	fill := hubFunc(t, page, "fillMarketplace")
+	if !strings.Contains(fill, "rl.status === 'refused' ? ' disabled") || strings.Count(fill, "+ off +") != 2 {
+		t.Errorf("fillMarketplace doesn't disable a refused template's create buttons:\n%s", fill)
+	}
+	fn := hubFunc(t, page, "rootlessBadge")
+	script := "function escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\"/g, '&quot;'); }\n" +
+		"const ROOTLESS_TEXT = { ok: ['ok', 'Rootless: works'], degraded: ['warn', 'Rootless: limited'], refused: ['bad', 'Rootless: not available'] };\n" +
+		"let runtimeInfo = {runtime: 'docker'};\n" + fn +
+		"const out = [rootlessBadge({status: 'refused', reasons: ['a']})];\n" +
+		"runtimeInfo = {runtime: 'podman'};\n" +
+		"out.push(rootlessBadge({status: 'refused', reasons: ['service x needs SYS_RAWIO', 'b<c']}), rootlessBadge({status: 'ok', reasons: []}), rootlessBadge(null), rootlessBadge({status: 'weird'}));\n" +
+		"process.stdout.write(JSON.stringify(out));\n"
+	var got []string
+	if err := json.Unmarshal([]byte(runNode(t, script)), &got); err != nil || len(got) != 5 {
+		t.Fatalf("rootlessBadge = %v (%v)", got, err)
+	}
+	if got[0] != "" || got[3] != "" || got[4] != "" {
+		t.Errorf("badge under docker / without a verdict: %q", got)
+	}
+	if want := `<span class="pill bad" data-rootless-badge="refused" title="service x needs SYS_RAWIO; b&lt;c">Rootless: not available</span>`; got[1] != want {
+		t.Errorf("refused badge = %q", got[1])
+	}
+	if !strings.Contains(got[2], "Rootless: works") || strings.Contains(got[2], "title=") {
+		t.Errorf("ok badge = %q", got[2])
 	}
 }

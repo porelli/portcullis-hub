@@ -348,6 +348,10 @@ func (s *Server) registerAdminTools() {
 			ClassRead, "GET /api/instances/ops", "", func(context.Context, directory.Actor, noArgs) (any, error) {
 				return s.Hub.OpSummaries(), nil
 			}),
+		admin("get_runtime", "The container engine: {runtime (docker|podman), verified, engine, engine_version, mismatch, rootless, uid_map, gid_map, unprivileged_port_start, selinux}; the maps and the port start are null under Docker.",
+			ClassRead, "GET /api/runtime", "", func(ctx context.Context, _ directory.Actor, _ noArgs) (any, error) {
+				return s.runtime(ctx), nil
+			}),
 		admin("wait_for_op", "Wait (polling every 2 s, at most 60 s) until an instance's operation is done — with op_id that operation, whatever ran after it; answers {done, record} (the record with its steps and what it created).",
 			ClassRead, "GET /api/instances/{id}/op", "", func(ctx context.Context, _ directory.Actor, in waitArgs) (any, error) {
 				return s.waitForOp(ctx, in.ID, in.OpID)

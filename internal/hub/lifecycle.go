@@ -94,6 +94,14 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 // view the up uses. Failures are *StatusError.
 func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	members := h.groupSnapshot(t.ID)
+	// The engine's SELinux flag before the override is rendered (an
+	// engine call: never under mu; podman only, P10).
+	if h.rootlessOn() {
+		// Unreadable: refused, never rendered unlabelled (M5).
+		if _, err := h.readEngineSELinux(context.Background()); err != nil {
+			return nil, statusErr(503, "can't read the container engine's security options (SELinux): %v", err)
+		}
+	}
 	h.mu.Lock()
 	live := t
 	if l := h.findLocked(t.ID); l != nil {
@@ -124,6 +132,16 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 			return nil, err // a refusal (a folder-range gid: 409)
 		}
 		return nil, statusErr(500, "override generation failed: %v", err)
+	}
+	// Rootless Podman (contract §11.10): an instance that can't run here
+	// (its own ports, devices and env, as just written) never starts.
+	if h.rootlessOn() {
+		h.mu.RLock()
+		s := h.st.Settings[t.ID]
+		h.mu.RUnlock()
+		if err := rootlessRefusal(t.ID, h.instanceCompat(live, s)); err != nil {
+			return nil, err
+		}
 	}
 	if err := h.checkUserOverride(live); err != nil {
 		return nil, err

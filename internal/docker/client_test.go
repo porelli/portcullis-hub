@@ -67,7 +67,7 @@ func newTestClient(t *testing.T, h http.Handler) *Client {
 	t.Helper()
 	srv := httptest.NewServer(unversioned(h))
 	t.Cleanup(srv.Close)
-	c, err := New("tcp://" + srv.Listener.Addr().String())
+	c, err := New("tcp://"+srv.Listener.Addr().String(), verifiedGuard(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,12 +76,12 @@ func newTestClient(t *testing.T, h http.Handler) *Client {
 
 func TestNew(t *testing.T) {
 	for _, h := range []string{"", "unix:///var/run/docker.sock", "tcp://socket-proxy-hub:2375", "http://1.2.3.4:2375"} {
-		if _, err := New(h); err != nil {
+		if _, err := New(h, NewGuard(RuntimeDocker)); err != nil {
 			t.Errorf("New(%q): %v", h, err)
 		}
 	}
 	for _, h := range []string{"unix://", "tcp://", "https://x:2376", "ssh://host", "::bad"} {
-		if _, err := New(h); err == nil {
+		if _, err := New(h, NewGuard(RuntimeDocker)); err == nil {
 			t.Errorf("New(%q) accepted", h)
 		}
 	}
@@ -346,7 +346,7 @@ func TestUnixSocket(t *testing.T) {
 	})}
 	go srv.Serve(l)
 	defer srv.Close()
-	c, err := New("unix://" + sock)
+	c, err := New("unix://"+sock, verifiedGuard(t))
 	if err != nil {
 		t.Fatal(err)
 	}

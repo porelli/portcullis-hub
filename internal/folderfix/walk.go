@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/portcullis/hub/internal/idmap"
 )
 
 // fileStat is the part of struct stat the walk uses.
@@ -134,10 +136,68 @@ func mountRootOf(ms []mountEntry, point string) (string, bool) {
 	return root, ok
 }
 
-// identityMap: a uid_map / gid_map that maps every id to itself.
-func identityMap(s string) bool {
-	f := strings.Fields(s)
-	return len(f) == 3 && f[0] == "0" && f[1] == "0" && f[2] == "4294967295"
+// IDMaps are the fixer's own id maps (contract §14.2 "Reports under
+// translated ids"): reported only under a non-identity map.
+type IDMaps struct {
+	UID idmap.Map `json:"uid"`
+	GID idmap.Map `json:"gid"`
+}
+
+// Seams (tests): the fixer's id maps, the root's SELinux label, and an
+// entry's owner as the walk reads it.
+var (
+	readIDMaps      = procIDMaps
+	readSELinux     = selinuxLabel
+	testHookOwnerOf func(rel string, uid, gid uint32) (uint32, uint32)
+)
+
+// UnmappedMsg is the refusal for an entry owned by an id the namespace
+// doesn't map (it reads as idmap.Overflow): apply, restore and childfix
+// stop at the first one (the Hub appends the sudo chown step).
+const UnmappedMsg = "%s is owned by a host account outside Portcullis' id range"
+
+// idMapsAllowed: the maps a run may change owners under — the identity, or
+// (rootless Podman, contract §6) both maps of the consistent shape.
+// Anything else (userns-remap, rootless Docker, a mixed pair) is refused.
+func idMapsAllowed(uid, gid idmap.Map) error {
+	if (uid.Identity() && gid.Identity()) || (uid.Consistent() && gid.Consistent()) {
+		return nil
+	}
+	return refuse("the fixer runs in a user namespace with translated ids (userns-remap or rootless Docker): owners and ACLs would be wrong")
+}
+
+// unmappedID: under a non-identity map, an id the namespace doesn't map
+// reads as idmap.Overflow (container id 65534 reads the same: both count).
+func unmappedID(m *IDMaps, uid, gid uint32) bool {
+	return m != nil && (uid == idmap.Overflow || gid == idmap.Overflow)
+}
+
+// hostIDs translates a container uid / gid through m (nil, nil under the
+// identity or when unmapped).
+func hostIDs(m *IDMaps, uid, gid int) (*uint32, *uint32) {
+	if m == nil || uid < 0 || gid < 0 {
+		return nil, nil
+	}
+	var hu, hg *uint32
+	if h, ok := m.UID.ToHost(uint32(uid)); ok {
+		hu = &h
+	}
+	if h, ok := m.GID.ToHost(uint32(gid)); ok {
+		hg = &h
+	}
+	return hu, hg
+}
+
+// loadIDMaps reads the maps once for a run: nil under the identity.
+func loadIDMaps() (*IDMaps, idmap.Map, idmap.Map, error) {
+	uid, gid, err := readIDMaps()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if uid.Identity() && gid.Identity() {
+		return nil, uid, gid, nil
+	}
+	return &IDMaps{UID: uid, GID: gid}, uid, gid, nil
 }
 
 // validRel checks a relative path below the root as the walk would build
@@ -229,6 +289,10 @@ type walker struct {
 	// planned: the entries the planning walk would change (entryKey), each
 	// changed at most once by the change walk (R52). nil = not recorded.
 	planned map[[16]byte]struct{}
+	// idm: the fixer's id maps (nil = identity); uidMap / gidMap the maps
+	// as read (idMapsAllowed).
+	idm            *IDMaps
+	uidMap, gidMap idmap.Map
 }
 
 type level struct {
@@ -274,6 +338,12 @@ func openWalker(o Options, mode string) (*walker, error) {
 	}
 	w.root = st
 	w.r.Dev, w.r.Ino = st.Dev, st.Ino
+	// The id maps, read once per run (fail closed: unreadable = refused).
+	if w.idm, w.uidMap, w.gidMap, err = loadIDMaps(); err != nil {
+		return w, refuse("read the id maps: %v", err)
+	}
+	w.r.IDMap = w.idm
+	w.r.SELinux = readSELinux(fd)
 	ms, err := readMountinfo()
 	if err != nil {
 		return w, fmt.Errorf("mountinfo: %w", err)
@@ -346,7 +416,8 @@ func (w *walker) report() *Report { r := w.r; r.Elapsed = time.Since(w.start); r
 func (w *walker) reset() {
 	keep := w.r
 	w.r = Report{Version: 1, Mode: keep.Mode, Root: keep.Root, Dev: keep.Dev, Ino: keep.Ino, MountRoot: keep.MountRoot,
-		FSType: keep.FSType, ACL: keep.ACL, Xattr: keep.Xattr, FreeBytes: keep.FreeBytes, TotalBytes: keep.TotalBytes}
+		FSType: keep.FSType, ACL: keep.ACL, Xattr: keep.Xattr, FreeBytes: keep.FreeBytes, TotalBytes: keep.TotalBytes,
+		IDMap: keep.IDMap, SELinux: keep.SELinux}
 	if w.hasT {
 		w.r.Expected = &Conformance{}
 		w.r.Plan = &PlanCounts{KeepGroup: map[int]int64{}, KeepUser: map[int]int64{}}
@@ -386,6 +457,9 @@ func (w *walker) finish() *Report {
 	if len(w.r.Owners) > maxOwners {
 		w.r.Owners = w.r.Owners[:maxOwners]
 	}
+	for i := range w.r.Owners {
+		w.r.Owners[i].HostUID, w.r.Owners[i].HostGID = hostIDs(w.idm, w.r.Owners[i].UID, w.r.Owners[i].GID)
+	}
 	if w.children != nil {
 		names := make([]string, 0, len(w.children))
 		for n := range w.children {
@@ -398,7 +472,9 @@ func (w *walker) finish() *Report {
 		}
 		w.r.Children = []ChildOwner{}
 		for _, n := range names {
-			w.r.Children = append(w.r.Children, *w.children[n])
+			c := *w.children[n]
+			c.HostUID, c.HostGID = hostIDs(w.idm, c.UID, c.GID)
+			w.r.Children = append(w.r.Children, c)
 		}
 	}
 	w.r.Principals = nil
@@ -434,6 +510,9 @@ func (w *walker) otherMount(st fileStat, rel string) bool {
 
 // readState reads the entry's ownership through its fd.
 func (w *walker) readState(n *node) error {
+	if testHookOwnerOf != nil {
+		n.st.UID, n.st.GID = testHookOwnerOf(n.rel, n.st.UID, n.st.GID)
+	}
 	n.cur = state{Dir: n.st.isDir(), UID: n.st.UID, GID: n.st.GID, Mode: n.st.Mode & modePerm}
 	var err error
 	if !n.cur.Dir {
@@ -521,6 +600,9 @@ func (w *walker) handle(n *node, anc []bool) bool {
 		}
 	}
 	w.owners[[2]uint32{n.st.UID, n.st.GID}]++
+	if unmappedID(w.idm, n.st.UID, n.st.GID) {
+		w.r.Unmapped.add(n.rel)
+	}
 	if w.children != nil && n.child != "" {
 		c := w.children[n.child]
 		if c == nil {

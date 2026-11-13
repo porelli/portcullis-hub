@@ -357,7 +357,9 @@ func TestInspectContainerAndSecurity(t *testing.T) {
 		switch r.URL.Path {
 		case "/_ping":
 		case "/containers/abc123/json":
-			w.Write([]byte(`{"Id":"abc123full","Image":"sha256:` + strings.Repeat("b", 64) + `","Config":{"Image":"ghcr.io/x:edge","Labels":{"a":"b"}}}`))
+			w.Write([]byte(`{"Id":"abc123full","Image":"sha256:` + strings.Repeat("b", 64) + `","Config":{"Image":"ghcr.io/x:edge","Labels":{"a":"b"}},"HostConfig":{"Memory":536870912,"PidsLimit":256}}`))
+		case "/containers/nolimits/json":
+			w.Write([]byte(`{"Id":"nolimits","Image":"sha256:x","HostConfig":{"Memory":0,"PidsLimit":-1}}`))
 		case "/info":
 			w.Write([]byte(`{"SecurityOptions":["name=seccomp,profile=builtin","name=userns"],"DockerRootDir":"/mnt/ssd/docker"}`))
 		default:
@@ -367,6 +369,12 @@ func TestInspectContainerAndSecurity(t *testing.T) {
 	ci, err := c.InspectContainer(context.Background(), "abc123")
 	if err != nil || ci.ID != "abc123full" || ci.Image != "sha256:"+strings.Repeat("b", 64) || ci.Labels["a"] != "b" {
 		t.Errorf("inspect = %+v, %v", ci, err)
+	}
+	if ci.Memory != 512<<20 || ci.PidsLimit != 256 {
+		t.Errorf("limits = %d, %d", ci.Memory, ci.PidsLimit)
+	}
+	if ci, err := c.InspectContainer(context.Background(), "nolimits"); err != nil || ci.Memory != 0 || ci.PidsLimit != 0 {
+		t.Errorf("no limits = %+v, %v", ci, err)
 	}
 	if _, err := c.InspectContainer(context.Background(), "nope"); !IsNotFound(err) {
 		t.Errorf("missing: %v", err)

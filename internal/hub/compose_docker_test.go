@@ -24,7 +24,7 @@ import (
 )
 
 func TestDockerComposeProfiles(t *testing.T) {
-	dockerOrSkip(t)
+	_, guard := dockerGuardOrSkip(t)
 	if out, err := exec.Command("docker", "compose", "version", "--short").Output(); err != nil {
 		if os.Getenv("PORTCULLIS_DOCKER_TEST") == "require" {
 			t.Fatalf("no docker compose: %v", err)
@@ -49,7 +49,7 @@ func TestDockerComposeProfiles(t *testing.T) {
 	b := make([]byte, 4)
 	rand.Read(b)
 	p := compose.Project{Name: "portcullis-ptest" + hex.EncodeToString(b), Files: []string{file}, ProjectDir: dir, EnvFile: env}
-	cli := compose.NewCLI(os.Getenv("DOCKER_HOST"))
+	cli := compose.NewCLI(os.Getenv("DOCKER_HOST"), guard)
 	t.Cleanup(func() { cli.DownByName(context.Background(), p.Name) })
 	running := func() []string {
 		t.Helper()

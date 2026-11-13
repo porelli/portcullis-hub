@@ -34,6 +34,14 @@ import (
 
 func dockerOrSkip(t *testing.T) *docker.Client {
 	t.Helper()
+	c, _ := dockerGuardOrSkip(t)
+	return c
+}
+
+// dockerGuardOrSkip is the daemon's client and its guard, verified
+// against it (P5: CI's daemon is Docker).
+func dockerGuardOrSkip(t *testing.T) (*docker.Client, *docker.Guard) {
+	t.Helper()
 	skip := func(format string, args ...any) {
 		if os.Getenv("PORTCULLIS_DOCKER_TEST") == "require" {
 			t.Fatalf(format, args...)
@@ -43,7 +51,8 @@ func dockerOrSkip(t *testing.T) *docker.Client {
 	if _, err := exec.LookPath("docker"); err != nil {
 		skip("no docker CLI: %v", err)
 	}
-	c, err := docker.New(os.Getenv("DOCKER_HOST"))
+	g := docker.NewGuard(docker.RuntimeDocker)
+	c, err := docker.New(os.Getenv("DOCKER_HOST"), g)
 	if err != nil {
 		skip("docker: %v", err)
 	}
@@ -52,7 +61,10 @@ func dockerOrSkip(t *testing.T) *docker.Client {
 	if err := c.Ping(ctx); err != nil {
 		skip("no Docker daemon: %v", err)
 	}
-	return c
+	if err := g.Verify(ctx, c); err != nil {
+		t.Fatalf("the test daemon isn't Docker: %v", err)
+	}
+	return c, g
 }
 
 func dockerCLI(t *testing.T, args ...string) string {
@@ -401,7 +413,7 @@ func TestDockerSelfContainerID(t *testing.T) {
 		"--label", "com.docker.compose.service=hub", HelperImage, "sleep", "60")
 	t.Cleanup(func() { exec.Command("docker", "rm", "-f", id).Run() })
 	mi := dockerCLI(t, "exec", id, "cat", "/proc/self/mountinfo")
-	got, err := selfContainerID([]byte(mi))
+	got, err := selfContainerID([]byte(mi), docker.RuntimeDocker)
 	if err != nil || got != id {
 		t.Fatalf("selfContainerID = %q, %v; want %q\n%s", got, err, id, mi)
 	}

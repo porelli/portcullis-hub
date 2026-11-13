@@ -127,6 +127,11 @@ func (c *Client) execTo(ctx context.Context, id string, opts client.ExecCreateOp
 	if created.ID == "" {
 		return nil, fmt.Errorf("exec create: bad response: no exec id")
 	}
+	// The attach (a hijacked connection) runs the request hooks too (moby
+	// hijack.go); the guard is asked here as well, a second check.
+	if err := c.guard.Err(); err != nil {
+		return nil, fmt.Errorf("exec start: %w", err)
+	}
 	att, err := c.api.ExecAttach(ctx, created.ID, client.ExecAttachOptions{})
 	if err != nil {
 		if ctx.Err() != nil {

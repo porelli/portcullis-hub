@@ -329,6 +329,10 @@ type Template struct {
 	// variable it references nowhere but in environment: values may be
 	// env-overridden (§11.9).
 	ComposeVars *ComposeVarUse `json:"-"`
+	// Rootless is the rootless Podman verdict (contract §11.10): set by
+	// the Hub on the views it answers, under podman only (nil = absent
+	// under Docker).
+	Rootless *Compat `json:"rootless,omitempty"`
 	// raw is the manifest as written ({{HOST_*}} unexpanded); nil = Manifest.
 	raw *Manifest
 }

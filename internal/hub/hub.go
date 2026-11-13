@@ -28,6 +28,7 @@ import (
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/idmap"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
@@ -129,6 +130,13 @@ type Config struct {
 	// §8.1 "Impersonation": 1–30, main refuses anything else; 0 here, in
 	// tests, is the default 30).
 	ImpersonationMaxMinutes int
+	// Runtime is HUB_CONTAINER_RUNTIME (contract §6: docker or podman;
+	// main refuses anything else) and Guard the engine guard verifying it
+	// (main sets both). A nil Guard (unit tests) is never verified:
+	// RuntimeView says verified false and the doctor gets no engine
+	// inputs. Gates compare Runtime == docker.RuntimePodman only.
+	Runtime docker.Runtime
+	Guard   *docker.Guard
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -296,6 +304,14 @@ type Hub struct {
 	fixerMu    sync.Mutex
 	fixerImage string
 	mountinfo  func() ([]byte, error)
+	// readIDMaps reads the Hub's own uid_map / gid_map (runtime_engine.go;
+	// nil = /proc/self, test-settable).
+	readIDMaps func() (uid, gid idmap.Map, err error)
+	// selinuxMu guards the engine's cached SELinux flag
+	// (doctor_engine.go engineSELinux; a leaf lock).
+	selinuxMu    sync.Mutex
+	selinuxKnown bool
+	selinuxOn    bool
 	// The doctor's disk scans (doctorscan.go): scanMu = one scan at a
 	// time (try-lock, 409); scanCacheMu (a leaf lock, never held with a
 	// fixer or docker call) guards scanData, the <data>/doctor/scans.json
@@ -806,7 +822,11 @@ func (h *Hub) Init() {
 	// containers kept running with the old env, so a restart is owed;
 	// its start runs the owed revoke_all / on_change (final review I2).
 	h.oweAIPendingRestarts()
-	h.requeueOwed()
+	if h.engineVerifiedNow() {
+		h.requeueOwed()
+	} else {
+		h.afterEngineVerified("settings: owed reloads and restarts", h.requeueOwed)
+	}
 }
 
 // oweAIPendingRestarts owes a restart to every enabled instance with a
@@ -901,9 +921,28 @@ type StatusError struct {
 func (e *StatusError) Error() string { return e.Err.Error() }
 func (e *StatusError) Unwrap() error { return e.Err }
 
+// statusErr is a StatusError of code with the formatted message. An
+// argument that is the engine guard's refusal (docker.ErrEngineRefused,
+// contract §6) makes it a 503 that still unwraps to the refusal, whatever
+// code the call site chose for an engine failure.
 func statusErr(code int, format string, args ...interface{}) error {
-	return &StatusError{Status: code, Err: fmt.Errorf(format, args...)}
+	err := fmt.Errorf(format, args...)
+	for _, a := range args {
+		if e, ok := a.(error); ok && errors.Is(e, docker.ErrEngineRefused) {
+			return &StatusError{Status: http.StatusServiceUnavailable, Err: &wrappedErr{msg: err.Error(), err: e}}
+		}
+	}
+	return &StatusError{Status: code, Err: err}
 }
+
+// wrappedErr is msg, unwrapping to err.
+type wrappedErr struct {
+	msg string
+	err error
+}
+
+func (e *wrappedErr) Error() string { return e.msg }
+func (e *wrappedErr) Unwrap() error { return e.err }
 
 // ErrNotFound is returned for unknown template IDs.
 var ErrNotFound = &StatusError{Status: http.StatusNotFound, Err: errors.New("not found")}
@@ -1109,8 +1148,10 @@ func (h *Hub) Template(id string) *templates.Template {
 // Templates returns a copy of the catalog.
 func (h *Hub) Templates() []templates.Template {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return append([]templates.Template(nil), h.templates...)
+	ts := append([]templates.Template(nil), h.templates...)
+	h.mu.RUnlock()
+	// Under podman, each with its rootless verdict (contract §11.10).
+	return h.withRootless(ts)
 }
 
 // Sources returns a copy of the configured sources.

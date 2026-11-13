@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -119,6 +120,8 @@ func (s *Server) hubMux() *recordingMux {
 	mux.HandleFunc("/api/drift", s.handleDrift)
 	mux.HandleFunc("/api/drift/resolve", s.handleDriftResolve)
 	mux.HandleFunc("GET /api/portal/apps", s.handlePortalApps)
+	// The container engine (contract §11; Hub listener only).
+	mux.HandleFunc("GET /api/runtime", s.handleRuntime)
 	s.registerDirectory(mux)
 	// Hub listener only (never people, contract §11.7).
 	s.registerDomains(mux)
@@ -237,6 +240,13 @@ func writeErr(w http.ResponseWriter, err error, def int) {
 		})
 		return
 	}
+	// The engine guard's refusal: its own message, without the client's
+	// request decoration ("error during connect: Get …").
+	var refused *docker.RefusedError
+	if errors.As(err, &refused) {
+		http.Error(w, clipMessage(refused.Message(), 2000), code)
+		return
+	}
 	// Errors that went through an op record were redacted, then clipped
 	// (finishOp); anything else is clipped here for display (nothing in it
 	// is redacted, so clipping can't let a redaction slip).
@@ -277,11 +287,14 @@ func writeRecordErr(w http.ResponseWriter, code int, rec *hub.OpRecord) {
 }
 
 // errStatus is the HTTP status writeErr answers for err: a StatusError's,
-// 409 for ErrBusy, else def.
+// 409 for ErrBusy, 503 for the engine guard's refusal (contract §6), else
+// def.
 func errStatus(err error, def int) int {
 	var se *hub.StatusError
 	var busy hub.ErrBusy
 	switch {
+	case errors.Is(err, docker.ErrEngineRefused):
+		return http.StatusServiceUnavailable
 	case errors.As(err, &se):
 		return se.Status
 	case errors.As(err, &busy):

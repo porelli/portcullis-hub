@@ -70,6 +70,23 @@ func fixerImageFromEnv(getenv func(string) string) (string, error) {
 	return v, nil
 }
 
+// runtimeFromEnv is HUB_CONTAINER_RUNTIME (contract §6; core's compose sets
+// it from CONTAINER_RUNTIME): docker or podman, required — unset, empty or
+// anything else refuses the start. There is no default.
+func runtimeFromEnv(getenv func(string) string) (docker.Runtime, error) {
+	rt, err := docker.ParseRuntime(getenv("HUB_CONTAINER_RUNTIME"))
+	if err != nil {
+		return "", fmt.Errorf("HUB_CONTAINER_RUNTIME: %v (core's compose sets it from CONTAINER_RUNTIME in .env)", err)
+	}
+	return rt, nil
+}
+
+// engineStartWait bounds how long the start waits for the runtime guard
+// before Init (the socket proxy is healthy before the Hub starts, so the
+// first check normally answers): past it Init goes on and the engine's
+// start-time work waits on the guard (Hub.Init).
+const engineStartWait = 30 * time.Second
+
 // signInMDSFromEnv is HUB_FIDO_MDS_URL (default the FIDO Alliance MDS3
 // endpoint; an http(s) URL, or "off" = no fetching, contract §8.1) and
 // HUB_SIGNIN_EXTRA_AUTHENTICATORS, a file of extra passkey trust-list
@@ -296,8 +313,18 @@ func main() {
 		cfg.ReconcileInterval = d
 	}
 
+	// The engine runtime guard (contract §6): nothing reaches the engine
+	// (but its version checks) and no compose command runs until the
+	// engine's /version agrees with HUB_CONTAINER_RUNTIME; a contradiction
+	// is permanent (503 until a restart).
+	runtime, err := runtimeFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	guard := docker.NewGuard(runtime)
+	cfg.Runtime, cfg.Guard = runtime, guard
 	dockerHost := env("DOCKER_HOST", docker.DefaultHost)
-	engine, err := docker.New(dockerHost)
+	engine, err := docker.New(dockerHost, guard)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
@@ -308,7 +335,7 @@ func main() {
 		log.Fatalf("refusing to start: %v", err)
 	}
 
-	cli := compose.NewCLI(dockerHost)
+	cli := compose.NewCLI(dockerHost, guard)
 	if v, err := cli.Version(context.Background()); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	} else if err := compose.CheckVersion(v); err != nil {
@@ -325,6 +352,17 @@ func main() {
 		log.Fatalf("refusing to start: the data directory is in use (another Hub, or signin reset-core running?): %v", err)
 	}
 	defer releaseLock()
+	// Verify the engine before Init (bounded), then keep retrying in the
+	// background; an unverified or contradicting engine never stops the
+	// start.
+	guardCtx, stopGuard := context.WithCancel(context.Background())
+	defer stopGuard()
+	go guard.Run(guardCtx, engine, 10*time.Second)
+	select {
+	case <-guard.Settled():
+	case <-time.After(engineStartWait):
+		log.Printf("engine: not verified after %s: starting anyway, engine operations answer 503 until it is", engineStartWait)
+	}
 	cfg.AccountURL = fa.AccountURL
 	h, err := hub.New(cfg, cli, engine, kc)
 	if err != nil {
@@ -471,6 +509,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go h.RunReconciler(ctx)
+	// A guard verified after the start: reconcile at once (the first
+	// Reconcile ran against a refused engine).
+	go func() {
+		select {
+		case <-guard.Verified():
+			h.TriggerReconcile()
+		case <-ctx.Done():
+		}
+	}()
 	go h.RunDirectorySync(ctx)
 	go h.RunSettingsDelivery(ctx)
 	go h.RunDomainSync(ctx, 30*time.Second)

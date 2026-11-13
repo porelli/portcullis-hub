@@ -605,6 +605,14 @@ func (h *Hub) RecoverRestores() {
 	sort.Strings(ids)
 	for _, id := range ids {
 		h.goBackground(func() {
+			// Rolling back needs the engine (contract §6): wait for the
+			// guard first, never holding the instance lock (its
+			// operations answer 503 meanwhile, not busy); the state is
+			// read again under the lock below.
+			if !h.waitEngine() {
+				log.Printf("instance %s: unfinished restore not rolled back now (%v): the next start does it", id, h.cfg.Guard.Err())
+				return
+			}
 			unlock, err := h.lockApp(id)
 			if err != nil {
 				log.Printf("instance %s: unfinished restore not rolled back now (%v): the next restore does it", id, err)

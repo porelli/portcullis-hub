@@ -14,6 +14,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -45,11 +46,18 @@ var requestTimeout = 30 * time.Second
 
 // Client talks to one Docker daemon.
 type Client struct {
-	api *client.Client
+	api   *client.Client
+	guard *Guard
 }
 
-// New parses a DOCKER_HOST value. "" means DefaultHost.
-func New(host string) (*Client, error) {
+// New parses a DOCKER_HOST value ("" means DefaultHost). Every request but
+// the version checks (HEAD/GET /_ping, GET /version) waits for g: while
+// g.Err() is set it fails with that refusal (contract §6). A nil g is
+// refused: there is no unguarded client.
+func New(host string, g *Guard) (*Client, error) {
+	if g == nil {
+		return nil, errors.New("docker.New: no runtime guard")
+	}
 	if host == "" {
 		host = DefaultHost
 	}
@@ -91,11 +99,12 @@ func New(host string) (*Client, error) {
 	api, err := client.New(
 		client.WithHost(sdkHost),
 		client.WithHTTPClient(&http.Client{Transport: tr, CheckRedirect: client.CheckRedirect}),
+		client.WithHTTPRequestHook(guardHook(g)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("DOCKER_HOST %q: %w", host, err)
 	}
-	return &Client{api: api}, nil
+	return &Client{api: api, guard: g}, nil
 }
 
 // IsNotFound reports whether err is a 404 from the daemon.
@@ -128,6 +137,8 @@ type Container struct {
 	State  string            `json:"State"`  // running, exited, restarting, …
 	Status string            `json:"Status"` // "Up 3 minutes (healthy)"
 	Labels map[string]string `json:"Labels"`
+	// Created is the creation time (Unix seconds).
+	Created int64 `json:"Created"`
 	// Networks: each network the container is attached to → the names
 	// it answers to there (its aliases and DNS names, deduplicated).
 	Networks map[string][]string `json:"-"`
@@ -160,7 +171,7 @@ func (c *Client) ListContainers(ctx context.Context, f Filters) ([]Container, er
 	}
 	out := make([]Container, 0, len(res.Items))
 	for _, s := range res.Items {
-		out = append(out, Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels, Networks: networkNames(s.NetworkSettings)})
+		out = append(out, Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels, Created: s.Created, Networks: networkNames(s.NetworkSettings)})
 	}
 	return out, nil
 }

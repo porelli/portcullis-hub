@@ -2056,7 +2056,14 @@ func (h *Hub) RecoverFolderApplies() {
 		if !ok || !settings.FolderIDRe.MatchString(id) {
 			continue
 		}
-		h.goBackground(func() { h.recoverFolderApply(id) })
+		h.goBackground(func() {
+			// Starting the stopped apps needs the engine (contract §6).
+			if !h.waitEngine() {
+				log.Printf("shared folders: %s: the interrupted apply isn't recovered now (%v): the next start does it", id, h.cfg.Guard.Err())
+				return
+			}
+			h.recoverFolderApply(id)
+		})
 	}
 }
 

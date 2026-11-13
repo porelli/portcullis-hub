@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
+	"github.com/portcullis/hub/internal/idmap"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -418,11 +420,43 @@ func TestFixerImageResolution(t *testing.T) {
 // The native layout (/var/lib/docker on the root filesystem) parses too.
 func TestSelfContainerID(t *testing.T) {
 	native := "1 0 8:1 /var/lib/docker/containers/" + testSelfID + "/resolv.conf /etc/resolv.conf rw - ext4 /dev/sda1 rw\n"
-	if id, err := selfContainerID([]byte(native)); err != nil || id != testSelfID {
+	if id, err := selfContainerID([]byte(native), docker.RuntimeDocker); err != nil || id != testSelfID {
 		t.Errorf("native: %q, %v", id, err)
 	}
-	if _, err := selfContainerID([]byte("1 0 8:1 /var/lib/podman/containers/" + testSelfID + "/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n")); err == nil {
+	if _, err := selfContainerID([]byte("1 0 8:1 /var/lib/podman/containers/"+testSelfID+"/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n"), docker.RuntimeDocker); err == nil {
 		t.Error("a non-docker path accepted")
+	}
+}
+
+// P2: under podman the root is …/overlay-containers/<id>/userdata/<file>,
+// from the graph root or the run root on the /run/user/<uid> tmpfs; under
+// docker neither is accepted, and docker's form isn't accepted under podman.
+func TestSelfContainerIDPodman(t *testing.T) {
+	graph := "100 90 0:44 /home/p/.local/share/containers/storage/overlay-containers/" + testSelfID + "/userdata/hostname /etc/hostname rw,nosuid - ext4 /dev/sda1 rw\n"
+	run := "101 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hostname /etc/hostname rw,nosuid - tmpfs tmpfs rw,size=100k,uid=1001\n" +
+		"102 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/resolv.conf /etc/resolv.conf rw - tmpfs tmpfs rw\n" +
+		"103 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hosts /etc/hosts rw - tmpfs tmpfs rw\n"
+	for name, mi := range map[string]string{"graphroot": graph, "runroot": run} {
+		if id, err := selfContainerID([]byte(mi), docker.RuntimePodman); err != nil || id != testSelfID {
+			t.Errorf("%s under podman: %q, %v", name, id, err)
+		}
+		if id, err := selfContainerID([]byte(mi), docker.RuntimeDocker); err == nil {
+			t.Errorf("%s under docker: accepted %q", name, id)
+		}
+	}
+	// Mounted at the wrong file, or two ids: refused.
+	wrong := "1 0 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hosts /etc/hostname rw - tmpfs tmpfs rw\n"
+	if _, err := selfContainerID([]byte(wrong), docker.RuntimePodman); err == nil {
+		t.Error("hosts mounted at /etc/hostname accepted")
+	}
+	other := strings.Repeat("b", 64)
+	two := graph + "2 0 0:45 /containers/overlay-containers/" + other + "/userdata/hosts /etc/hosts rw - tmpfs tmpfs rw\n"
+	if _, err := selfContainerID([]byte(two), docker.RuntimePodman); err == nil {
+		t.Error("two ids accepted")
+	}
+	docker := "1 0 8:1 /var/lib/docker/containers/" + testSelfID + "/resolv.conf /etc/resolv.conf rw - ext4 /dev/sda1 rw\n"
+	if _, err := selfContainerID([]byte(docker), "podman"); err == nil {
+		t.Error("docker's form accepted under podman")
 	}
 }
 
@@ -625,5 +659,140 @@ func TestSweepRemovesFixers(t *testing.T) {
 	f.h.SweepBackupLeftovers()
 	if v := f.engine.vol(); !slices.Contains(v.removed, "fixer1") || slices.Contains(v.removed, "app1") {
 		t.Errorf("removed = %v", v.removed)
+	}
+}
+
+func podmanMountinfoFor(id string) string {
+	return "340 300 0:50 / / ro,relatime - overlay overlay rw\n" +
+		"349 340 0:45 /containers/overlay-containers/" + id + "/userdata/hostname /etc/hostname rw - tmpfs tmpfs rw\n"
+}
+
+// Rootless Podman (contract §6): name=rootless is allowed only under
+// HUB_CONTAINER_RUNTIME=podman; userns is always refused.
+func TestRunFixerRootlessPodman(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rt   docker.Runtime
+		opts []string
+		ok   bool
+	}{
+		{"rootless podman", docker.RuntimePodman, []string{"name=seccomp,profile=default", "name=rootless"}, true},
+		{"rootless docker", docker.RuntimeDocker, []string{"name=rootless"}, false},
+		{"userns under podman", docker.RuntimePodman, []string{"name=userns"}, false},
+		{"plain podman", docker.RuntimePodman, []string{"name=seccomp"}, true},
+	} {
+		f := newFixerFixture(t)
+		f.h.cfg.Runtime = c.rt
+		if c.rt == docker.RuntimePodman {
+			f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
+		}
+		f.engine.fx().secOpts = c.opts
+		_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/x"})
+		n := len(f.engine.fx().Specs())
+		if c.ok {
+			if err != nil || n != 1 {
+				t.Errorf("%s: err %v, %d runs", c.name, err, n)
+			}
+			continue
+		}
+		if statusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "user and group ids inside the fixer are translated") || n != 0 {
+			t.Errorf("%s: err %v, %d runs", c.name, err, n)
+		}
+	}
+	if err := fixerIDsAllowed(docker.RuntimeDocker, []string{"name=rootless"}); err == nil || !strings.Contains(err.Error(), "Docker runs with rootless") {
+		t.Errorf("message = %v", err)
+	}
+}
+
+// The unmapped-owner refusal gets the host step: the operator uid (the
+// report's id_map uid container 0) and the host path (folder + rel).
+func TestFixerUnmappedMessage(t *testing.T) {
+	f := newFixerFixture(t)
+	f.h.cfg.Runtime = docker.RuntimePodman
+	f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
+	f.engine.fx().secOpts = []string{"name=rootless"}
+	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
+	rep := reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: um},
+		Unmapped: folderfix.Count{N: 1, Sample: []string{"x"}}, Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, "x")}})
+	f.engine.fx().run = func(docker.RunSpec, func(io.Reader) error) (*docker.RunResult, error) {
+		return &docker.RunResult{ExitCode: 2, Stdout: []byte(rep + "\n")}, nil
+	}
+	_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	want := "x is owned by a host account outside Portcullis' id range; run sudo chown -R '1001:1001' '/srv/media/x' once, then re-check"
+	if statusOf(err) != http.StatusConflict || err.Error() != want {
+		t.Errorf("err = %v (%d), want %q", err, statusOf(err), want)
+	}
+	// The root itself.
+	rep = reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: um},
+		Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, ".")}})
+	_, err = f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	if want := ". is owned by a host account outside Portcullis' id range; run sudo chown -R '1001:1001' '/srv/media' once, then re-check"; err == nil || err.Error() != want {
+		t.Errorf("root: %v", err)
+	}
+	// Without an id map (never under podman): no step.
+	rep = reportLine(t, folderfix.Report{Version: 1, Mode: "scan", Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, "x")}})
+	_, err = f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	if err == nil || strings.Contains(err.Error(), "sudo") {
+		t.Errorf("no map: %v", err)
+	}
+}
+
+// The host step is pasted into a root shell: the path is one POSIX
+// single-quoted word, and a name that can't be (a control character) or
+// that folderfix clipped gets no step at all.
+func TestUnmappedHintQuoting(t *testing.T) {
+	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
+	gm, _ := idmap.Parse("0 1002 1\n1 200000 65536")
+	rep := &folderfix.Report{IDMap: &folderfix.IDMaps{UID: um, GID: gm}}
+	msg := func(rel string) string { return fmt.Sprintf(folderfix.UnmappedMsg, rel) }
+	step := func(q string) string { return "; run sudo chown -R '1001:1002' " + q + " once, then re-check" }
+	for _, c := range []struct {
+		name, rel, want string
+	}{
+		{"plain", "photos/a.jpg", step("'/srv/media/photos/a.jpg'")},
+		{"spaces", "my photos/a b.jpg", step("'/srv/media/my photos/a b.jpg'")},
+		{"single quote", "it's", step(`'/srv/media/it'\''s'`)},
+		{"command substitution", "$(id)", step("'/srv/media/$(id)'")},
+		{"backticks", "`id`", step("'/srv/media/`id`'")},
+		{"semicolon", "x; rm -rf ~", step("'/srv/media/x; rm -rf ~'")},
+		{"newline", "x\nrm -rf ~", ""},
+		{"carriage return", "x\rrm", ""},
+		{"tab", "x\ty", ""},
+		{"line separator", "x\u2028y", ""},
+		{"invalid UTF-8", "x\xffy", ""},
+		{"clipped name", "very/long/name…", ""},
+		{"root", ".", step("'/srv/media'")},
+	} {
+		if got := unmappedHint(msg(c.rel), rep, "/srv/media"); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+	// Not the unmapped refusal, or no map: no step.
+	if got := unmappedHint("something else", rep, "/srv/media"); got != "" {
+		t.Errorf("other refusal: %q", got)
+	}
+	if got := unmappedHint(msg("x"), &folderfix.Report{}, "/srv/media"); got != "" {
+		t.Errorf("no map: %q", got)
+	}
+}
+
+// I2: a folder refused only for an unmapped group gets the uid:gid step
+// (a uid-only chown would leave the group, and the re-check refuse again).
+func TestFixerUnmappedGroupOnly(t *testing.T) {
+	f := newFixerFixture(t)
+	f.h.cfg.Runtime = docker.RuntimePodman
+	f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
+	f.engine.fx().secOpts = []string{"name=rootless"}
+	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
+	gm, _ := idmap.Parse("0 1001 1\n1 200000 65536")
+	rep := reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: gm},
+		Owners:   []folderfix.OwnerCount{{UID: 0, GID: idmap.Overflow, N: 1}},
+		Unmapped: folderfix.Count{N: 1, Sample: []string{"shared"}}, Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, "shared")}})
+	f.engine.fx().run = func(docker.RunSpec, func(io.Reader) error) (*docker.RunResult, error) {
+		return &docker.RunResult{ExitCode: 2, Stdout: []byte(rep + "\n")}, nil
+	}
+	_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	if want := "; run sudo chown -R '1001:1001' '/srv/media/shared' once, then re-check"; err == nil || !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("err = %v, want the uid:gid step %q", err, want)
 	}
 }

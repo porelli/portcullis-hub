@@ -13,7 +13,6 @@ import (
 	"log"
 	"maps"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -810,22 +809,11 @@ func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string, count fun
 		}
 		defer f.Close()
 		hash := sha256.New()
-		tee := io.TeeReader(&ctxReader{ctx: ctx, r: rc, count: count}, io.MultiWriter(f, hash))
-		tr := tar.NewReader(tee)
-		for {
-			hdr, err := tr.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return fmt.Errorf("reading the volume archive: %w", err)
-			}
-			if err := checkVolumeEntry(hdr); err != nil {
-				return err
-			}
-		}
-		if _, err := io.Copy(io.Discard, tee); err != nil {
-			return err
+		// The engine's archive in the Hub's one form ("data/…", whatever
+		// the engine named the entries: archive.go), every entry checked.
+		in := &ctxReader{ctx: ctx, r: rc, count: count}
+		if err := normalizeArchive(in, io.MultiWriter(f, hash), helperMount, checkVolumeType); err != nil {
+			return fmt.Errorf("the volume archive: %w", err)
 		}
 		if err := f.Sync(); err != nil {
 			return err
@@ -857,27 +845,35 @@ func (c *ctxReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// checkVolumeEntry accepts the entries of a volume archive: under "data"
-// (the helper's mount, base name of the archived path), no "..", regular
-// files, directories, symlinks, hard links within the volume and FIFOs.
-func checkVolumeEntry(hdr *tar.Header) error {
-	inVolume := func(n string) bool {
-		c := path.Clean("/" + strings.TrimPrefix(n, "./"))
-		return (c == helperMount || strings.HasPrefix(c, helperMount+"/")) && !strings.Contains(n, "..")
-	}
-	if !inVolume(hdr.Name) {
-		return fmt.Errorf("volume archive entry %q is outside the volume", hdr.Name)
-	}
+// checkVolumeType accepts the entry types of a volume archive: regular
+// files, directories, symlinks, hard links (their targets inside the
+// volume: archiveNames.link) and FIFOs. Names are archiveNames' (inside
+// the volume, no "..").
+func checkVolumeType(hdr *tar.Header, _ string) error {
 	switch hdr.Typeflag {
-	case tar.TypeReg, tar.TypeDir, tar.TypeSymlink, tar.TypeFifo:
-	case tar.TypeLink:
-		if !inVolume(hdr.Linkname) {
-			return fmt.Errorf("volume archive entry %q links outside the volume", hdr.Name)
-		}
-	default:
-		return fmt.Errorf("volume archive entry %q has unsupported type %q", hdr.Name, hdr.Typeflag)
+	case tar.TypeReg, tar.TypeDir, tar.TypeSymlink, tar.TypeFifo, tar.TypeLink:
+		return nil
 	}
-	return nil
+	return fmt.Errorf("volume archive entry %q has unsupported type %q", clipRunes(hdr.Name, 80), hdr.Typeflag)
+}
+
+// checkVolumeEntry checks one entry of a stored volume archive, which is
+// in the Hub's form ("data/", "data/…": normalizeArchive): its name, its
+// hard link target and its type.
+func checkVolumeEntry(an *archiveNames, hdr *tar.Header) error {
+	rel, err := an.rel(hdr)
+	if err != nil {
+		return fmt.Errorf("volume archive: %w", err)
+	}
+	if an.form != formBase {
+		return fmt.Errorf("volume archive entry %q is not in the Hub's form (%s/…)", clipRunes(hdr.Name, 80), an.base)
+	}
+	if hdr.Typeflag == tar.TypeLink {
+		if _, err := an.link(hdr.Linkname); err != nil {
+			return fmt.Errorf("volume archive entry %q: %w", clipRunes(hdr.Name, 80), err)
+		}
+	}
+	return checkVolumeType(hdr, rel)
 }
 
 // templateCommit is the git commit of the template's checkout ("" if
@@ -1211,15 +1207,19 @@ func checkVolumeArchive(p string) error {
 	}
 	defer f.Close()
 	tr := tar.NewReader(f)
+	an := newArchiveNames(helperMount)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
+			if !an.root {
+				return fmt.Errorf("the volume archive has no root directory entry")
+			}
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if err := checkVolumeEntry(hdr); err != nil {
+		if err := checkVolumeEntry(an, hdr); err != nil {
 			return err
 		}
 	}
@@ -1281,7 +1281,21 @@ func (h *Hub) fillVolumeWith(ctx context.Context, id string, v docker.Volume, ex
 			return err
 		}
 		defer f.Close()
-		if err := h.engine.CopyToContainer(ctx, hid, "/", &ctxReader{ctx: ctx, r: f, count: o.count}); err != nil {
+		in := &ctxReader{ctx: ctx, r: f, count: o.count}
+		if h.cfg.Runtime == docker.RuntimePodman {
+			// Podman resolves an extract target to a volume only inside
+			// its mount: at "/" it would write the helper's own root
+			// filesystem. So under podman the entries go relative to
+			// the mount, extracted at it (archive.go relativeArchive).
+			pr, pw := io.Pipe()
+			defer pr.Close()
+			go func() { pw.CloseWithError(relativeArchive(in, pw, helperMount)) }()
+			if err := h.engine.CopyToContainer(ctx, hid, helperMount, pr); err != nil {
+				return fmt.Errorf("restoring volume %s: %w", v.Name, err)
+			}
+			return nil
+		}
+		if err := h.engine.CopyToContainer(ctx, hid, "/", in); err != nil {
 			return fmt.Errorf("restoring volume %s: %w", v.Name, err)
 		}
 		return nil
@@ -1349,16 +1363,14 @@ func dirSize(dir string) int64 {
 // .partial archives. Init calls it before anything can start one.
 func (h *Hub) SweepBackupLeftovers() {
 	if h.engine != nil {
-		cs, err := h.engine.ListContainers(context.Background(), docker.Filters{"label": {docker.LabelHelper}})
-		if err != nil {
-			log.Printf("backups: cannot list leftover helper containers: %v", err)
-		}
-		for _, c := range cs {
-			if err := h.engine.RemoveContainer(context.Background(), c.ID); err != nil {
-				log.Printf("backups: removing leftover helper container %s: %v", c.Name(), err)
-			} else {
-				log.Printf("backups: removed leftover helper container %s", c.Name())
-			}
+		if h.engineVerifiedNow() {
+			h.sweepHelperContainers(0)
+		} else {
+			// The engine isn't verified yet (contract §6): the helpers
+			// are swept once it is — only those created before this
+			// start, never a helper a backup started since then made.
+			before := time.Now().Unix()
+			h.afterEngineVerified("backups: leftover helper sweep", func() { h.sweepHelperContainers(before) })
 		}
 	}
 	os.RemoveAll(filepath.Join(h.backupsDir(), ".staging"))
@@ -1375,6 +1387,25 @@ func (h *Hub) SweepBackupLeftovers() {
 					log.Printf("backups: removed leftover %s", p)
 				}
 			}
+		}
+	}
+}
+
+// sweepHelperContainers removes the helper containers (LabelHelper);
+// before > 0: only those created before it (Unix seconds).
+func (h *Hub) sweepHelperContainers(before int64) {
+	cs, err := h.engine.ListContainers(context.Background(), docker.Filters{"label": {docker.LabelHelper}})
+	if err != nil {
+		log.Printf("backups: cannot list leftover helper containers: %v", err)
+	}
+	for _, c := range cs {
+		if before > 0 && c.Created >= before {
+			continue
+		}
+		if err := h.engine.RemoveContainer(context.Background(), c.ID); err != nil {
+			log.Printf("backups: removing leftover helper container %s: %v", c.Name(), err)
+		} else {
+			log.Printf("backups: removed leftover helper container %s", c.Name())
 		}
 	}
 }

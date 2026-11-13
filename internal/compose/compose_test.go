@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/portcullis/hub/internal/docker"
 )
 
 func TestArgs(t *testing.T) {
@@ -18,6 +20,53 @@ func TestArgs(t *testing.T) {
 	if got != want {
 		t.Errorf("Args = %q", got)
 	}
+}
+
+type fakeEngine []docker.Component
+
+func (f fakeEngine) Components(context.Context) ([]docker.Component, error) { return f, nil }
+
+// verifiedGuard is a docker guard verified against a fake engine.
+func verifiedGuard(t *testing.T) *docker.Guard {
+	t.Helper()
+	g := docker.NewGuard(docker.RuntimeDocker)
+	if err := g.Verify(context.Background(), fakeEngine{{Name: "Engine", Version: "29.0.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// P4: compose commands wait for the guard; the plugin's own version
+// (checked before the Hub starts) never reaches the engine and passes.
+func TestComposeRefusesUnverified(t *testing.T) {
+	c, log := stub(t, "echo 2.30.0\nexit 0\n")
+	c.Guard = docker.NewGuard(docker.RuntimePodman)
+	p := Project{Name: "portcullis-app", Files: []string{"/c.yml"}}
+	for name, f := range map[string]func() error{
+		"Create":     func() error { return c.Create(context.Background(), p) },
+		"Up":         func() error { return c.Up(context.Background(), p) },
+		"Down":       func() error { return c.Down(context.Background(), p) },
+		"DownByName": func() error { return c.DownByName(context.Background(), "portcullis-app") },
+	} {
+		if err := f(); !errors.Is(err, docker.ErrEngineRefused) {
+			t.Errorf("%s = %v, want the guard's refusal", name, err)
+		}
+	}
+	if b, _ := os.ReadFile(log); len(b) != 0 {
+		t.Errorf("a refused command ran docker:\n%s", b)
+	}
+	if _, err := c.Version(context.Background()); err != nil {
+		t.Errorf("Version refused: %v", err)
+	}
+	if b, _ := os.ReadFile(log); !strings.Contains(string(b), "compose version --short") {
+		t.Errorf("Version didn't run: %q", b)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("NewCLI with a nil guard didn't panic")
+		}
+	}()
+	NewCLI("tcp://x:2375", nil)
 }
 
 // stub writes a fake `docker` that records its args and env.
@@ -30,7 +79,7 @@ func stub(t *testing.T, script string) (*CLI, string) {
 	if err := os.WriteFile(bin, []byte(body), 0755); err != nil {
 		t.Fatal(err)
 	}
-	c := NewCLI("tcp://socket-proxy-hub:2375")
+	c := NewCLI("tcp://socket-proxy-hub:2375", verifiedGuard(t))
 	c.Binary = bin
 	c.Stdout, c.Stderr = io.Discard, io.Discard
 	return c, log

@@ -309,6 +309,10 @@ type ContainerInfo struct {
 	// PidMode is HostConfig.PidMode ("host": the container sees the
 	// host's processes; the doctor's gid check never reads it).
 	PidMode string
+	// Memory / PidsLimit: HostConfig's memory limit (bytes) and pids
+	// limit (0 = none; -1 or unset read as 0): limits_not_enforced.
+	Memory    int64
+	PidsLimit int64
 }
 
 // InspectContainer inspects one container (IsNotFound when missing).
@@ -325,6 +329,10 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo
 	}
 	if res.Container.HostConfig != nil {
 		ci.PidMode = string(res.Container.HostConfig.PidMode)
+		ci.Memory = res.Container.HostConfig.Memory
+		if p := res.Container.HostConfig.PidsLimit; p != nil && *p > 0 {
+			ci.PidsLimit = *p
+		}
 	}
 	return ci, nil
 }

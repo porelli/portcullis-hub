@@ -113,6 +113,14 @@ type runtimeEntry struct {
 	Total int `json:"pids_total,omitempty"`
 	// At: when they were read (H11 M6).
 	At time.Time `json:"at,omitempty"`
+	// Memory / PidsLimit: the inspected limits; WantMemory / WantPids:
+	// the instance's compose sets them (limits_not_enforced, rootless
+	// Podman). omitempty: an entry cached without them is not checked
+	// (P14, scanCacheVersion unchanged).
+	Memory     int64 `json:"memory,omitempty"`
+	PidsLimit  int64 `json:"pids_limit,omitempty"`
+	WantMemory bool  `json:"want_memory,omitempty"`
+	WantPids   bool  `json:"want_pids,omitempty"`
 }
 
 // scanFile is <data>/doctor/scans.json.
@@ -680,12 +688,21 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 			continue
 		}
 		sort.Slice(cs, func(i, j int) bool { return cs[i].ID < cs[j].ID })
+		// The limits its compose asks for (limits_not_enforced).
+		var want map[string][2]bool
+		if t := h.Template(id); t != nil {
+			want = serviceLimits(t.ReadCompose())
+		}
 		for _, c := range cs {
 			if c.State != "running" || c.Project() != projectName(id) || len(out) >= maxRuntimeContainers {
 				continue
 			}
 			e := runtimeEntry{Instance: id, Service: c.Service(), Container: c.Name(), At: time.Now().UTC()}
 			ci, err := h.engine.InspectContainer(ctx, c.ID)
+			if err == nil {
+				w := want[c.Service()]
+				e.Memory, e.PidsLimit, e.WantMemory, e.WantPids = ci.Memory, ci.PidsLimit, w[0], w[1]
+			}
 			switch {
 			case err != nil:
 				e.Err = clipRunes("inspecting the container failed: "+err.Error(), 300)
@@ -1010,7 +1027,8 @@ func (h *Hub) scanRuntime() []doctor.RuntimeIn {
 	var out []doctor.RuntimeIn
 	for _, r := range h.scanFileLocked().Runtime {
 		out = append(out, doctor.RuntimeIn{Instance: r.Instance, Service: r.Service, Container: r.Container, GIDs: slices.Clone(r.GIDs), Err: r.Err,
-			PIDsRead: r.Read, PIDsTotal: r.Total, At: r.At})
+			PIDsRead: r.Read, PIDsTotal: r.Total, At: r.At,
+			Memory: r.Memory, PidsLimit: r.PidsLimit, WantMemory: r.WantMemory, WantPids: r.WantPids})
 	}
 	return out
 }

@@ -905,6 +905,10 @@ type volumeEngine struct {
 	copyFromErr  func(volume string) error
 	removeVolErr func(name string) error
 	imageErr     error
+	// podman: the archive endpoints as rootless Podman serves them (a
+	// volume's root as "/", children "/x"; an extract resolves to a
+	// volume only at its mount, at "/" it would write the rootfs).
+	podman bool
 }
 
 func (e *fakeEngine) vol() *volumeEngine {
@@ -1121,9 +1125,15 @@ func (e *fakeEngine) CopyFromContainer(ctx context.Context, id, path string) (io
 		if n != "" {
 			name = base + "/" + n
 		}
+		if v.podman {
+			name = "/" + n
+		}
 		hdr := &tar.Header{Name: name, Mode: f.Mode, Uid: f.UID, Gid: f.GID, ModTime: time.Unix(1700000000, 0)}
 		if f.Dir {
-			hdr.Typeflag, hdr.Name = tar.TypeDir, name+"/"
+			hdr.Typeflag = tar.TypeDir
+			if name != "/" {
+				hdr.Name = name + "/"
+			}
 		} else {
 			hdr.Typeflag, hdr.Size = tar.TypeReg, int64(len(f.Body))
 		}
@@ -1146,7 +1156,15 @@ func (e *fakeEngine) CopyToContainer(ctx context.Context, id, path string, conte
 	if !ok {
 		return errors.New("no such container")
 	}
-	if path != "/" {
+	// Podman: only an extract at a volume's mount reaches the volume,
+	// names relative to it.
+	mount := ""
+	if v.podman {
+		if path == "/" {
+			return errors.New("fake podman: an extract at / writes the helper's root filesystem, not its volumes")
+		}
+		mount = path
+	} else if path != "/" {
 		return fmt.Errorf("fake: extract at %s", path)
 	}
 	if h.ReadOnly {
@@ -1162,6 +1180,10 @@ func (e *fakeEngine) CopyToContainer(ctx context.Context, id, path string, conte
 			return err
 		}
 		name := strings.Trim(hdr.Name, "/")
+		if mount != "" {
+			rel := strings.TrimPrefix(strings.TrimPrefix(hdr.Name, "./"), ".")
+			name = strings.Trim(strings.TrimPrefix(mount, "/")+"/"+strings.Trim(rel, "/"), "/")
+		}
 		top, rest, _ := strings.Cut(name, "/")
 		var fv *fakeVolume
 		for vn, tg := range h.Volumes {

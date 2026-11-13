@@ -186,15 +186,23 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 	if r.MountRoot != o.ExpectMountRoot {
 		return r, refuse("%s is mounted from %q, want %q: preview it again", crel, r.MountRoot, o.ExpectMountRoot)
 	}
-	if int(fst.UID) != c.Owner {
-		return r, refuse("%s is owned by uid %d now, not %d: a former account's folder is moved by hand: nothing changed", crel, fst.UID, c.Owner)
-	}
-	ok, err := idMapsIdentity()
+	idm, uidMap, gidMap, err := loadIDMaps()
 	if err != nil {
 		return r, refuse("read the id maps: %v", err)
 	}
-	if !ok {
+	if idMapsAllowed(uidMap, gidMap) != nil {
 		return r, refuse("the fixer runs in a user namespace with translated ids (userns-remap or rootless Docker): the owner would be wrong")
+	}
+	r.IDMap = idm
+	if testHookOwnerOf != nil {
+		fst.UID, fst.GID = testHookOwnerOf(crel, fst.UID, fst.GID)
+	}
+	if unmappedID(idm, fst.UID, fst.GID) {
+		r.Unmapped.add(crel)
+		return r, refuse(UnmappedMsg, crel)
+	}
+	if int(fst.UID) != c.Owner {
+		return r, refuse("%s is owned by uid %d now, not %d: a former account's folder is moved by hand: nothing changed", crel, fst.UID, c.Owner)
 	}
 	if r.FSType, r.FreeBytes, r.TotalBytes, err = fsInfo(fd); err != nil {
 		return r, err
@@ -218,7 +226,9 @@ func FixChild(o Options, rel string, c ChildFix) (*Report, error) {
 		return r, err
 	}
 	r.Entries, r.Dirs = 1, 1
-	r.Children = []ChildOwner{childOwnerOf(c.Name, after)}
+	co := childOwnerOf(c.Name, after)
+	co.HostUID, co.HostGID = hostIDs(idm, co.UID, co.GID)
+	r.Children = []ChildOwner{co}
 	return r, nil
 }
 

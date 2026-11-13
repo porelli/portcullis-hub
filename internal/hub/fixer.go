@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/settings"
 )
@@ -325,8 +326,8 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "shared folders: can't read the Docker daemon's security options: %v", err)
 	}
-	if m := docker.RemappedIDs(opts); m != "" {
-		return statusErr(http.StatusServiceUnavailable, "shared folders can't be fixed: Docker runs with %s, so user and group ids inside the fixer are translated and owners and ACLs would be written for the wrong ids; nothing was changed", m)
+	if err := fixerIDsAllowed(h.cfg.Runtime, opts); err != nil {
+		return err
 	}
 	s := r.spec(image)
 	if r.In != nil {
@@ -375,6 +376,9 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 		if msg == "" {
 			msg = "refused, nothing changed"
 		}
+		if fr, ok := rep.(*folderfix.Report); ok {
+			msg += unmappedHint(msg, fr, r.Source)
+		}
 		return statusErr(http.StatusConflict, "%s", msg)
 	case (res.ExitCode == 1 || res.ExitCode == 2) && decErr == nil && first() != "":
 		return statusErr(http.StatusInternalServerError, "shared folder fixer (%s) failed: %s", r.Mode, first())
@@ -391,6 +395,49 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 		return statusErr(http.StatusInternalServerError, "shared folder fixer (%s) was killed (exit 137: out of memory?) %s", r.Mode, why)
 	}
 	return statusErr(http.StatusInternalServerError, "shared folder fixer (%s) exited %d: %s", r.Mode, res.ExitCode, why)
+}
+
+// fixerIDsAllowed: the daemon's SecurityOptions under which the fixer may
+// run (contract §6). userns-remap never; rootless only under
+// HUB_CONTAINER_RUNTIME=podman, where every container shares the
+// operator's default namespace (the fixer itself then refuses any map but
+// the consistent shape). Refusals are 503, explain-only.
+func fixerIDsAllowed(rt docker.Runtime, opts []string) error {
+	m := docker.RemappedIDs(opts)
+	if m == "" || (m == "rootless" && rt == docker.RuntimePodman && !securityOption(opts, "userns")) {
+		return nil
+	}
+	if securityOption(opts, "userns") {
+		m = "userns"
+	}
+	return statusErr(http.StatusServiceUnavailable, "shared folders can't be fixed: Docker runs with %s, so user and group ids inside the fixer are translated and owners and ACLs would be written for the wrong ids; nothing was changed", m)
+}
+
+// unmappedHint is the host step appended to the fixer's unmapped-owner
+// refusal (contract §14.2): the operator's uid:gid (the report's maps,
+// container 0; an entry is unmapped by its uid or its gid) and the host
+// path (source joined with the entry), the
+// path POSIX single-quoted (doctor.ShellQuote) — the entry's name comes
+// from the folder's files and the operator pastes the step into a root
+// shell. "" when msg isn't that refusal, the report has no map, the name
+// was clipped (folderfix clips a sample to 200 runes, ending it with
+// "…": the path would be another one) or the path holds a control
+// character or invalid UTF-8.
+func unmappedHint(msg string, rep *folderfix.Report, source string) string {
+	suffix := strings.TrimPrefix(folderfix.UnmappedMsg, "%s")
+	rel, ok := strings.CutSuffix(msg, suffix)
+	if !ok || rel == "" || rep.IDMap == nil || strings.HasSuffix(rel, "…") {
+		return ""
+	}
+	host := source
+	if rel != "." {
+		host = path.Join(source, rel)
+	}
+	cmd, ok := doctor.ChownStep(rep.IDMap, host)
+	if !ok {
+		return ""
+	}
+	return "; run " + cmd + " once, then re-check"
 }
 
 func zero(v any) {
@@ -468,7 +515,9 @@ func writeInTar(w io.Writer, in io.Reader, size int64) error {
 // (ruling 31).
 func readSnapshotTar(t io.Reader, out func(io.Reader) error) error {
 	tr := tar.NewReader(t)
-	want := strings.TrimPrefix(fixerOut, "/") + "/" + folderfix.SnapshotName
+	// Entry names per engine form (archive.go): Docker's "out/…",
+	// Podman's "/" and "/…".
+	an := newArchiveNames(fixerOut)
 	seen := false
 	for {
 		hdr, err := tr.Next()
@@ -478,11 +527,14 @@ func readSnapshotTar(t io.Reader, out func(io.Reader) error) error {
 		if err != nil {
 			return fmt.Errorf("snapshot transfer: %w", err)
 		}
-		name := hdr.Name
+		rel, err := an.rel(hdr)
+		if err != nil {
+			return fmt.Errorf("snapshot transfer: %w", err)
+		}
 		switch {
-		case hdr.Typeflag == tar.TypeDir && strings.TrimSuffix(name, "/") == strings.TrimPrefix(fixerOut, "/"):
+		case hdr.Typeflag == tar.TypeDir && rel == ".":
 			continue
-		case hdr.Typeflag == tar.TypeReg && name == want && !seen:
+		case hdr.Typeflag == tar.TypeReg && rel == folderfix.SnapshotName && !seen:
 			if hdr.Size > maxSnapshotBytes {
 				return fmt.Errorf("snapshot transfer: the snapshot is too large (%d bytes, at most %d)", hdr.Size, maxSnapshotBytes)
 			}
@@ -494,7 +546,7 @@ func readSnapshotTar(t io.Reader, out func(io.Reader) error) error {
 				return fmt.Errorf("snapshot transfer: %w", err)
 			}
 		default:
-			return fmt.Errorf("snapshot transfer: unexpected entry %q (type %c)", clipRunes(name, 80), hdr.Typeflag)
+			return fmt.Errorf("snapshot transfer: unexpected entry %q (type %c)", clipRunes(hdr.Name, 80), hdr.Typeflag)
 		}
 	}
 	if !seen {
@@ -529,11 +581,21 @@ const (
 // …/docker/containers/<64 hex>/<file>.
 var selfMountRe = regexp.MustCompile(`(?:^|/)docker/containers/([0-9a-f]{64})/(hostname|hosts|resolv\.conf)$`)
 
+// selfMountPodmanRe is the same under rootless Podman (contract §6, P2):
+// …/overlay-containers/<64 hex>/userdata/<file>, from the graph root
+// (~/.local/share/containers/storage/…) or the run root on the
+// /run/user/<uid> tmpfs (root field /containers/overlay-containers/…).
+var selfMountPodmanRe = regexp.MustCompile(`(?:^|/)overlay-containers/([0-9a-f]{64})/userdata/(hostname|hosts|resolv\.conf)$`)
+
 // selfContainerID is the Hub's own container ID from /proc/self/mountinfo
 // (R53): the root of the /etc/hostname, /etc/hosts or /etc/resolv.conf mount.
 // Every such mount must name the same 64-hex ID; none, or two IDs, is an
 // error. Never a name or prefix lookup another container could shadow.
-func selfContainerID(mountinfo []byte) (string, error) {
+func selfContainerID(mountinfo []byte, rt docker.Runtime) (string, error) {
+	re, want := selfMountRe, "docker/containers/<id>/"
+	if rt == docker.RuntimePodman {
+		re, want = selfMountPodmanRe, "overlay-containers/<id>/userdata/"
+	}
 	id := ""
 	for _, line := range strings.Split(string(mountinfo), "\n") {
 		f := strings.Fields(line)
@@ -544,7 +606,7 @@ func selfContainerID(mountinfo []byte) (string, error) {
 		if point != "/etc/hostname" && point != "/etc/hosts" && point != "/etc/resolv.conf" {
 			continue
 		}
-		m := selfMountRe.FindStringSubmatch(root)
+		m := re.FindStringSubmatch(root)
 		if m == nil || "/etc/"+m[2] != point {
 			continue
 		}
@@ -554,7 +616,7 @@ func selfContainerID(mountinfo []byte) (string, error) {
 		id = m[1]
 	}
 	if id == "" {
-		return "", errors.New("no docker/containers/<id>/ mount in /proc/self/mountinfo")
+		return "", fmt.Errorf("no %s mount in /proc/self/mountinfo", want)
 	}
 	return id, nil
 }
@@ -586,7 +648,7 @@ func (h *Hub) selfImage(ctx context.Context) (string, error) {
 	if err != nil {
 		return fail("reading mountinfo: %v", err)
 	}
-	id, err := selfContainerID(mi)
+	id, err := selfContainerID(mi, h.cfg.Runtime)
 	if err != nil {
 		return fail("%v", err)
 	}

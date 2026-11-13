@@ -93,6 +93,8 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	mdsIn := h.mdsProblem()
 	// The DNS plans (DNS hardening): the domains service, never under mu.
 	dnsPlans, dnsMain := h.dnsDoctorInputs(ctx)
+	// The container engine (rootless Podman kinds): never under mu.
+	engIn := h.doctorEngineIn(ctx)
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -103,7 +105,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
 		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn,
-		DNS: dnsPlans, DNSMain: dnsMain}
+		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}
