@@ -127,7 +127,10 @@ func TestVPNRenderFailClosed(t *testing.T) {
 }
 
 func TestVPNNarrows(t *testing.T) {
-	k := func(r, gw, edge, pl string) string { return "r=" + r + "|gw=" + gw + "|edge=" + edge + "|pl=" + pl }
+	k := func(r, gw, edge, pl string) string {
+		return "r=" + r + "|via=|gw=" + gw + "|edge=" + edge + "|pl=" + pl
+	}
+	kv := func(via string) string { return "r=10.0.0.0/8|via=" + via + "|gw=|edge=|pl=0" }
 	for _, c := range []struct {
 		name, prev, next string
 		want             bool
@@ -146,6 +149,10 @@ func TestVPNNarrows(t *testing.T) {
 		{"an unknown field changes", k("", "", "", "0") + "|x=1", k("", "", "", "0") + "|x=2", true},
 		{"an unknown field appears", k("", "", "", "0"), k("", "", "", "0") + "|x=1", true},
 		{"equal", k("10.0.0.0/8", "a", "b", "1"), k("10.0.0.0/8", "a", "b", "1"), false},
+		{"via * → [builtin]", kv("*"), kv("builtin"), true},
+		{"via [builtin] → *", kv("builtin"), kv("*"), false},
+		{"via [a,b] → [a]", kv("a,b"), kv("a"), true},
+		{"via [a] → [a,b]", kv("a"), kv("a,b"), false},
 	} {
 		if got := vpnNarrows(c.prev, c.next); got != c.want {
 			t.Errorf("%s: %v", c.name, got)

@@ -405,3 +405,43 @@ func TestUnwireLastViaMakesInstanceUnreachable(t *testing.T) {
 }
 
 var _ = docker.Network{}
+
+// set_instance_reach's class (security review): W only when the change
+// keeps or narrows the instance's access as it is now.
+func TestReachChangeNarrows(t *testing.T) {
+	v := newReachFixture(t, VPNModeApps)
+	ctx := context.Background()
+	v.wire(t, "mesh")
+	v.devicesOut = devicesDoc("100.64.0.1")
+	v.h.runVPNProvider(ctx, "mesh")
+	vpnAny := state.Reach{Mode: state.ReachVPN, Via: []string{"*"}}
+	vpnMesh := state.Reach{Mode: state.ReachVPN, Via: []string{"mesh"}}
+	internet := state.Reach{Mode: state.ReachInternet}
+	check := func(name string, next state.Reach, want bool) {
+		t.Helper()
+		if got := v.h.ReachChangeNarrows("cloud", next); got != want {
+			t.Errorf("%s: %v, want %v", name, got, want)
+		}
+	}
+	check("internet → internet", internet, true)
+	check("internet → vpn *", vpnAny, true)
+	check("internet → vpn [mesh]", vpnMesh, true)
+	check("internet → public links", state.Reach{Mode: state.ReachInternet, PublicLinks: true}, false)
+	setReach(t, v, "cloud", vpnMesh)
+	check("vpn [mesh] → vpn *", vpnAny, false)
+	check("vpn [mesh] → vpn [mesh, builtin]", state.Reach{Mode: state.ReachVPN, Via: []string{"mesh", "builtin"}}, false)
+	check("vpn [mesh] → vpn [mesh]", vpnMesh, true)
+	check("vpn [mesh] → vpn [builtin]", state.Reach{Mode: state.ReachVPN, Via: []string{"builtin"}}, false)
+	check("vpn [mesh] → internet", internet, false)
+	check("vpn [mesh] → vpn [mesh] with public links", state.Reach{Mode: state.ReachVPN, Via: []string{"mesh"}, PublicLinks: true}, false)
+	setReach(t, v, "cloud", vpnAny)
+	check("vpn * → vpn [mesh]", vpnMesh, true)
+	check("vpn * → vpn *", vpnAny, true)
+	check("vpn * → internet", internet, false)
+	if v.h.ReachChangeNarrows("nope", vpnAny) {
+		t.Error("an unknown instance")
+	}
+	if v.h.ReachChangeNarrows("cloud", state.Reach{Mode: "lan"}) {
+		t.Error("an unknown mode")
+	}
+}

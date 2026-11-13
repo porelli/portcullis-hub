@@ -730,6 +730,12 @@ func checkServiceLabels(svc string, pairs map[string]string, hostVars map[string
 		if err := checkCoreReferences(svc, k, v, own); err != nil {
 			return err
 		}
+		// A router's entrypoints are exactly websecure: the Hub's override
+		// adds vpnsecure per reach (contract §3); a template router on
+		// vpnsecure would skip the VPN-only rendering.
+		if m := routerLabelRe.FindStringSubmatch(lk); m != nil && m[3] == "entrypoints" && strings.TrimSpace(v) != "websecure" {
+			return fmt.Errorf("service %s: router %s: entrypoints must be 'websecure' (the Hub adds vpnsecure per reach)", svc, m[2])
+		}
 		// Traefik label keys as ParseRoutes matches them (Traefik itself is
 		// case-insensitive, so `Traefik.http…`, ` traefik.http…` or a
 		// `…Rule` would route unparsed): no surrounding whitespace, the

@@ -425,24 +425,67 @@ func (h *Hub) vpnAttachLocked(t *templates.Template) vpnAttach {
 	return a
 }
 
-// vpnRenderKeyLocked is what of t's override follows the VPN state, as
-// fields "name=value" joined by "|": r (the allowlist ranges, "" =
-// internet), gw and edge (the gateway attachment), pl (public links on
-// the internet in server mode). vpnNarrows compares them field by field.
+// vpnRenderKeyLocked is what of t's override and access follow the VPN
+// state, as fields "name=value" joined by "|": r (the allowlist ranges,
+// "" = internet), via (the accepted providers, sorted; "*" = all), gw
+// and edge (the gateway attachment), pl (the public-links opt-in).
+// vpnNarrows compares them field by field.
 func (h *Hub) vpnRenderKeyLocked(t *templates.Template) string {
-	ranges := ""
-	if vpnOnly, via := h.effectiveReachLocked(t); vpnOnly {
-		ranges = strings.Join(h.vpnAllowRangesLocked(via), ",")
+	r, ok := h.st.Reach[t.ID]
+	return h.vpnAccessKeyLocked(t, r, ok)
+}
+
+// vpnAccessKeyLocked is the render key t would have with reach r (set:
+// t has a reach entry).
+func (h *Hub) vpnAccessKeyLocked(t *templates.Template, r state.Reach, set bool) string {
+	ranges, via := "", ""
+	vpnOnly, accepted := false, []string(nil)
+	switch {
+	case set && r.Mode == state.ReachVPN:
+		vpnOnly, accepted = true, slices.Clone(r.Via)
+		if len(accepted) == 0 {
+			accepted = []string{state.ReachAny}
+		}
+	case h.vpnCoreEnv().Mode == VPNModeServer:
+		vpnOnly, accepted = true, []string{state.ReachAny}
+	}
+	if vpnOnly {
+		ranges = strings.Join(h.vpnAllowRangesLocked(accepted), ",")
+		slices.Sort(accepted)
+		via = strings.Join(slices.Compact(accepted), ",")
 	}
 	gw, edge := "", ""
 	if a, e, ok := h.vpnGatewayLocked(t); ok {
 		gw, edge = a.String(), e
 	}
 	pl := "0"
-	if h.publicLinksLocked(t) {
+	if set && r.PublicLinks {
 		pl = "1"
 	}
-	return "r=" + ranges + "|gw=" + gw + "|edge=" + edge + "|pl=" + pl
+	return "r=" + ranges + "|via=" + via + "|gw=" + gw + "|edge=" + edge + "|pl=" + pl
+}
+
+// ReachChangeNarrows reports whether setting instance id's reach to next
+// keeps or narrows its access (every field of the access key: no new
+// range, no new provider, no gateway change, no public links added):
+// the change set_instance_reach may make without a confirmation. An
+// unknown instance is false (fail closed).
+func (h *Hub) ReachChangeNarrows(id string, next state.Reach) bool {
+	if next.Mode != state.ReachInternet && next.Mode != state.ReachVPN {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	t := h.findLocked(id)
+	if t == nil {
+		return false
+	}
+	cur, set := h.st.Reach[id]
+	prev := h.vpnAccessKeyLocked(t, cur, set)
+	nk := h.vpnAccessKeyLocked(t, next, next.Mode == state.ReachVPN || next.PublicLinks)
+	// next narrows or keeps prev iff going back from next to prev takes
+	// nothing away: next allows nothing prev didn't.
+	return !vpnNarrows(nk, prev)
 }
 
 // vpnKeyFields parses a render key ("" = none: every field empty).
@@ -486,6 +529,7 @@ func vpnRangesOf(key string) []string {
 // known counts as narrowing whenever it changes):
 //   - r: internet → VPN-only, or an accepted range no longer accepted
 //     (the no-client sentinel accepts nothing);
+//   - via: an accepted provider no longer accepted ("*" holds all);
 //   - gw / edge: the gateway attachment lost or moved;
 //   - pl: public links leave the internet.
 func vpnNarrows(prev, next string) bool {
@@ -513,6 +557,27 @@ func vpnNarrows(prev, next string) bool {
 			nr := strings.Split(nv, ",")
 			for _, r := range strings.Split(pv, ",") {
 				if r != vpnNoClient && !slices.Contains(nr, r) {
+					return true
+				}
+			}
+		case "via":
+			// The accepted providers: "*" holds every one; "" (internet)
+			// is covered by r.
+			if pv == "" || nv == "" {
+				continue
+			}
+			if pv == state.ReachAny {
+				if nv != state.ReachAny {
+					return true
+				}
+				continue
+			}
+			if nv == state.ReachAny {
+				continue // wider
+			}
+			nl := strings.Split(nv, ",")
+			for _, x := range strings.Split(pv, ",") {
+				if !slices.Contains(nl, x) {
 					return true
 				}
 			}
@@ -586,7 +651,7 @@ func (h *Hub) vpnRerender(force map[string]bool) {
 			// Fail closed: a narrowing change that can't be applied
 			// (an instance never rendered by this run counts as one when
 			// it renders VPN-only).
-			if !fail.closed && (known && vpnNarrows(prev, key) || !known && vpnNarrows("r=|gw=|edge=|pl=1", key)) {
+			if !fail.closed && (known && vpnNarrows(prev, key) || !known && vpnNarrows("r=|via=|gw=|edge=|pl=1", key)) {
 				fail.closed = true
 				closeIDs = append(closeIDs, t.ID)
 				closeWhy[t.ID] = err

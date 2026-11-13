@@ -116,9 +116,11 @@ func (s *Server) registerVPNTools() {
 		{Name: "set_instance_reach", Description: "Set where an instance is reachable from: internet, or vpn (only through Portcullis VPNs, via all providers [\"*\"] or the ones named), and whether its public links stay on the internet in server mode. Widening needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/reach", Audit: "instance.reach", In: vpnReachArgs{},
 			ClassFor: func(_ context.Context, args json.RawMessage) ToolClass {
-				// Only internet → vpn via all, without public links, is a
-				// pure narrowing; anything else may widen (fail closed: D).
-				if a, err := decode[vpnReachArgs](args); err == nil && a.Mode == state.ReachVPN && !a.PublicLinks && (len(a.Via) == 0 || len(a.Via) == 1 && a.Via[0] == state.ReachAny) {
+				// W only when the change keeps or narrows the instance's
+				// access as it is now (the Hub's access key, the same
+				// predicate as the re-render's); anything else, an unknown
+				// instance included, is D.
+				if a, err := decode[vpnReachArgs](args); err == nil && s.Hub.ReachChangeNarrows(a.ID, state.Reach{Mode: a.Mode, Via: a.Via, PublicLinks: a.PublicLinks}) {
 					return ClassWrite
 				}
 				return ClassDestructive

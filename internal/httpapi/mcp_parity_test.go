@@ -172,7 +172,7 @@ var accessWidening = map[string]string{
 	// VPN (§15.10).
 	"set_vpn_provider":   "D when it wires a provider (its devices become a way into VPN-only apps), W when it unwires",
 	"assign_vpn_address": "D when it assigns an address to a person, W when it removes the assignment",
-	"set_instance_reach": "D unless it narrows an instance to VPN-only through every provider without public links",
+	"set_instance_reach": "D unless it keeps or narrows the instance's access as it is now (no new provider, range or public link; vpn → internet is D)",
 	"stop_op":            "D when the undo turns something back on: a disable's (enable_instance's class), a delete's of an enabled instance, a same-instance restore's of an enabled instance or once its rollback is armed, an AI switch-off's (set_ai_support on)",
 }
 

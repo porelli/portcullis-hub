@@ -187,3 +187,21 @@ func TestVPNHookExclusive(t *testing.T) {
 		t.Fatal("vpn trigger")
 	}
 }
+
+// Templates set only entrypoints: websecure (contract §3): the Hub's
+// override adds vpnsecure per reach.
+func TestTemplateEntrypointsWebsecureOnly(t *testing.T) {
+	for _, ep := range []string{"vpnsecure", "websecure,vpnsecure", "web", "${EP:-websecure}"} {
+		c := "services:\n  a:\n    image: x\n    labels:\n      traefik.http.routers.a.entrypoints: \"" + ep + "\"\n"
+		if err := checkCoreRefs([]byte(c), nil); err == nil || !strings.Contains(err.Error(), "entrypoints must be 'websecure'") {
+			t.Errorf("%s: %v", ep, err)
+		}
+	}
+	c := "services:\n  a:\n    image: x\n    labels:\n      traefik.tcp.routers.a.entrypoints: vpnsecure\n"
+	if err := checkCoreRefs([]byte(c), nil); err == nil {
+		t.Error("a TCP router on vpnsecure")
+	}
+	if err := checkCoreRefs([]byte("services:\n  a:\n    image: x\n    labels:\n      traefik.http.routers.a.entrypoints: websecure\n"), nil); err != nil {
+		t.Error(err)
+	}
+}
