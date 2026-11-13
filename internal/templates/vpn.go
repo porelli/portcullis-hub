@@ -56,12 +56,25 @@ type VPNIdentity struct {
 	Hook    string   `yaml:"hook" json:"hook,omitempty"`
 	Owner   string   `yaml:"owner" json:"owner,omitempty"`
 	Refresh Duration `yaml:"refresh" json:"refresh,omitempty"`
+
+	// present: the keys the block wrote (an explicit refresh: 0s or an
+	// empty hook is refused, not taken for absent).
+	present map[string]bool
 }
 
-// UnmarshalYAML decodes strictly.
+// UnmarshalYAML decodes strictly and records the keys written.
 func (i *VPNIdentity) UnmarshalYAML(n *yaml.Node) error {
 	type plain VPNIdentity
-	return strictDecode(n, (*plain)(i))
+	if err := strictDecode(n, (*plain)(i)); err != nil {
+		return err
+	}
+	i.present = map[string]bool{}
+	if n.Kind == yaml.MappingNode {
+		for k := 0; k+1 < len(n.Content); k += 2 {
+			i.present[n.Content[k].Value] = true
+		}
+	}
+	return nil
 }
 
 // VPNDNS is how the provider's clients learn Portcullis names: a vpn
@@ -195,13 +208,13 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 				return fmt.Errorf("vpn.identity.owner: oidc_sub or username")
 			}
 		case VPNSourceStatic:
-			if id.Hook != "" || id.Owner != "" {
+			if id.Hook != "" || id.Owner != "" || id.present["hook"] || id.present["owner"] {
 				return fmt.Errorf("vpn.identity: source static takes no hook or owner")
 			}
 		default:
 			return fmt.Errorf("vpn.identity.source: hook or static")
 		}
-		if id.Refresh != 0 && (time.Duration(id.Refresh) < VPNRefreshMin || time.Duration(id.Refresh) > VPNRefreshMax) {
+		if (id.Refresh != 0 || id.present["refresh"]) && (time.Duration(id.Refresh) < VPNRefreshMin || time.Duration(id.Refresh) > VPNRefreshMax) {
 			return fmt.Errorf("vpn.identity.refresh: between 15s and 10m")
 		}
 		if (v.DNS.Hook != "") == v.DNS.Manual {
