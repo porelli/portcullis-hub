@@ -15,7 +15,10 @@ import (
 // core's two readers (wg and group-gate): a document (a JSON string is
 // the file's raw text), the reader's clock, "ok" or a substring of the
 // Go reader's error (other readers treat any non-"ok" as "must refuse
-// the whole file"), and addresses that must be denied.
+// the whole file"), and (provider, ip) pairs that must be denied: the
+// provider is the ingress the connection arrived through (never a header
+// a gateway can set), so a reader must deny an address presented through
+// any provider other than the one whose device holds it.
 type docVector struct {
 	Name string          `json:"name"`
 	Doc  json.RawMessage `json:"doc"`
@@ -67,7 +70,7 @@ func TestParseVectors(t *testing.T) {
 			continue // a refused file denies everything
 		}
 		for _, dn := range v.Deny {
-			if dv, ok := d.Lookup(netip.MustParseAddr(dn.IP), v.Now); ok {
+			if dv, ok := d.Lookup(dn.Provider, netip.MustParseAddr(dn.IP), v.Now); ok {
 				t.Errorf("%s: %s allowed (%+v)", v.Name, dn.IP, dv)
 			}
 		}
@@ -83,15 +86,28 @@ func TestLookupAllows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for ip, user := range map[string]string{"10.213.0.2": "alice", "100.64.0.7": "alice"} {
-		dv, ok := d.Lookup(netip.MustParseAddr(ip), v.Now)
-		if !ok || dv.User != user {
-			t.Errorf("%s: %+v %v", ip, dv, ok)
+	for _, c := range []struct{ prov, ip, user string }{{"builtin", "10.213.0.2", "alice"}, {"headscale", "100.64.0.7", "alice"}} {
+		dv, ok := d.Lookup(c.prov, netip.MustParseAddr(c.ip), v.Now)
+		if !ok || dv.User != c.user || dv.Provider != c.prov {
+			t.Errorf("%s via %s: %+v %v", c.ip, c.prov, dv, ok)
 		}
+		if got := d.ProviderOf(netip.MustParseAddr(c.ip)); got != c.prov {
+			t.Errorf("ProviderOf(%s) = %q", c.ip, got)
+		}
+	}
+	// Through another provider's ingress the same addresses are denied:
+	// a gateway can't claim another provider's address.
+	for _, c := range []struct{ prov, ip string }{{"headscale", "10.213.0.2"}, {"builtin", "100.64.0.7"}, {"", "100.64.0.7"}, {"netbird", "100.64.0.7"}} {
+		if dv, ok := d.Lookup(c.prov, netip.MustParseAddr(c.ip), v.Now); ok {
+			t.Errorf("%s via %q allowed: %+v", c.ip, c.prov, dv)
+		}
+	}
+	if d.ProviderOf(netip.MustParseAddr("192.168.1.1")) != "" {
+		t.Error("ProviderOf outside every range")
 	}
 	// A builtin device whose peer is gone is denied.
 	d.Builtin.Peers = d.Builtin.Peers[1:]
-	if _, ok := d.Lookup(netip.MustParseAddr("10.213.0.2"), v.Now); ok {
+	if _, ok := d.Lookup("builtin", netip.MustParseAddr("10.213.0.2"), v.Now); ok {
 		t.Error("device without its peer allowed")
 	}
 }

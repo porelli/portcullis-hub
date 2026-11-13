@@ -254,22 +254,32 @@ func Parse(b []byte) (*Doc, error) {
 	return &d, nil
 }
 
-// Lookup is the reader's decision for a client address at now: the
-// device it belongs to, or false (deny). The address must lie in a
-// provider's ranges, that provider must not be stale (its flag, or
-// stale_after passed by the reader's own clock), and a device of that
-// provider must hold the address and not be expired (a built-in device
-// also needs its peer, unexpired).
-func (d *Doc) Lookup(ip netip.Addr, now time.Time) (Device, bool) {
+// Lookup is the reader's decision for a client address that arrived
+// through provider's ingress, at now: the device it belongs to, or false
+// (deny). The provider is never taken from anything the client or a
+// gateway sends: it is the ingress the connection came in on (the edge's
+// per-provider port 9001+slot, accepted only from that provider's
+// gateway_ip; the people stack for builtin). The address must lie in
+// THAT provider's ranges, the provider must not be stale (its flag, or
+// stale_after passed by the reader's own clock), and a device of THAT
+// provider must hold the address, unexpired (a built-in device also
+// needs its unexpired peer).
+func (d *Doc) Lookup(provider string, ip netip.Addr, now time.Time) (Device, bool) {
 	var prov *Provider
 	for i := range d.Providers {
-		ps, err := ParseRanges(d.Providers[i].Ranges)
-		if err == nil && containsAddr(ps, ip) {
+		if d.Providers[i].ID == provider {
 			prov = &d.Providers[i]
 			break
 		}
 	}
-	if prov == nil || prov.Stale || prov.StaleAfter != nil && !now.Before(*prov.StaleAfter) {
+	if prov == nil {
+		return Device{}, false
+	}
+	ps, err := ParseRanges(prov.Ranges)
+	if err != nil || !containsAddr(ps, ip) {
+		return Device{}, false
+	}
+	if prov.Stale || prov.StaleAfter != nil && !now.Before(*prov.StaleAfter) {
 		return Device{}, false
 	}
 	for _, dv := range d.Devices {
@@ -296,6 +306,20 @@ func (d *Doc) Lookup(ip netip.Addr, now time.Time) (Device, bool) {
 		return dv, true
 	}
 	return Device{}, false
+}
+
+// ProviderOf is the one provider whose ranges hold ip ("" = none). Parse
+// guarantees ranges are pairwise disjoint across providers, and the edge
+// re-originates only addresses inside the ranges of the provider whose
+// ingress they came through, so behind the edge (Traefik vpnsecure,
+// group-gate) the address names that provider.
+func (d *Doc) ProviderOf(ip netip.Addr) string {
+	for _, p := range d.Providers {
+		if ps, err := ParseRanges(p.Ranges); err == nil && containsAddr(ps, ip) {
+			return p.ID
+		}
+	}
+	return ""
 }
 
 func expired(t *time.Time, now time.Time) bool { return t != nil && !now.Before(*t) }

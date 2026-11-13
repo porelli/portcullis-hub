@@ -2,7 +2,10 @@ package templates
 
 import (
 	"fmt"
+	"maps"
 	"net/netip"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -227,30 +230,66 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 	return nil
 }
 
-// checkVPNIngress: the ingress service exists, can join a network, isn't
-// a job or an AI companion and has no Traefik router; proxy_protocol v2.
+// forwarderImageRe is core's forwarder image, pinned by digest (V1):
+// the only service besides the ingress allowed in its network namespace.
+var forwarderImageRe = regexp.MustCompile(`^ghcr\.io/porelli/portcullis-forwarder(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$`)
+
+// checkVPNIngress: the ingress service exists and can join a network; no
+// service of a VPN template uses host networking or the host's pid
+// namespace; every service in the ingress's network namespace (the
+// ingress and the services joining it, chains followed) is no job, no AI
+// companion, has no Traefik router or label and publishes no ports, and
+// besides the ingress only the pinned forwarder may join it;
+// proxy_protocol v2.
 func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 	s := m.VPN.Ingress.Service
-	nets := ServiceNetworks(compose)
-	sn, ok := nets[s]
+	infos := composeServiceInfos(compose)
+	info, ok := infos[s]
 	if !ok {
 		return fmt.Errorf("vpn.ingress.service: %s is not a service of compose.yml", s)
 	}
-	if sn.NetworkMode {
+	if info.networkMode {
 		return fmt.Errorf("vpn.ingress.service: %s has network_mode", s)
 	}
-	if JobServices(m, compose)[s] {
-		return fmt.Errorf("vpn.ingress.service: %s is a job", s)
-	}
-	if m.AI != nil {
-		for _, c := range m.AI.MCP {
-			if c.Service == s && kindOf(m, c.Name) == CompanionKind {
-				return fmt.Errorf("vpn.ingress.service: %s is an AI companion", s)
-			}
+	names := slices.Sorted(maps.Keys(infos))
+	for _, n := range names {
+		if infos[n].netModeOf == "host" {
+			return fmt.Errorf("vpn: service %s uses network_mode: host", n)
+		}
+		if infos[n].pidOf == "host" {
+			return fmt.Errorf("vpn: service %s uses pid: host", n)
 		}
 	}
-	if len(routes.Routers[s]) > 0 || routes.TraefikLabelled[s] {
-		return fmt.Errorf("vpn.ingress.service: %s has a Traefik router", s)
+	members := []string{s}
+	for _, n := range names {
+		if n == s {
+			continue
+		}
+		if ns, ok := routes.NetNS(n); ok && ns == s {
+			members = append(members, n)
+		}
+	}
+	jobs := JobServices(m, compose)
+	for _, n := range members {
+		if n != s && !forwarderImageRe.MatchString(infos[n].image) {
+			return fmt.Errorf("vpn.ingress.service: %s shares %s's network namespace: only the pinned ghcr.io/porelli/portcullis-forwarder image may", n, s)
+		}
+		if jobs[n] {
+			return fmt.Errorf("vpn.ingress.service: %s is a job", n)
+		}
+		if m.AI != nil {
+			for _, c := range m.AI.MCP {
+				if c.Service == n && kindOf(m, c.Name) == CompanionKind {
+					return fmt.Errorf("vpn.ingress.service: %s is an AI companion", n)
+				}
+			}
+		}
+		if len(routes.Routers[n]) > 0 || routes.TraefikLabelled[n] {
+			return fmt.Errorf("vpn.ingress.service: %s has a Traefik router", n)
+		}
+		if infos[n].ports {
+			return fmt.Errorf("vpn.ingress.service: %s publishes ports", n)
+		}
 	}
 	if m.VPN.Ingress.ProxyProtocol != VPNProxyV2 {
 		return fmt.Errorf("vpn.ingress.proxy_protocol: only v2")
