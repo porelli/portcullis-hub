@@ -224,6 +224,12 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	for svc := range companionSvcs {
 		services[svc] = true
 	}
+	// Rootless Podman (contract §11.10): podman-restart.service starts
+	// only `always` containers at boot.
+	restartAlways := h.podmanRestartAlways(t)
+	for svc := range restartAlways {
+		services[svc] = true
+	}
 	names := make([]string, 0, len(services))
 	for svc := range services {
 		names = append(names, svc)
@@ -261,6 +267,9 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 			for _, p := range ports {
 				fmt.Fprintf(&b, "      - %s\n", p)
 			}
+		}
+		if restartAlways[svc] {
+			b.WriteString("    restart: always\n")
 		}
 		if cs, ok := companionSvcs[svc]; ok {
 			if cs.scale != nil {

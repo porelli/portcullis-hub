@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -63,4 +65,35 @@ func (h *Hub) withRootless(ts []templates.Template) []templates.Template {
 		ts[i].Rootless = &c
 	}
 	return ts
+}
+
+// podmanRestartAlways are the services whose restart policy the override
+// sets to `always` under podman (contract §11.10): rootless Podman has
+// no daemon, and its podman-restart.service starts only containers with
+// policy `always` at boot, so an `unless-stopped` app would never come
+// back after a reboot. Only a literal `unless-stopped` is changed, never
+// a one-off job (t.Jobs: manifest jobs and depends_on
+// service_completed_successfully targets, all `restart: "no"`) nor
+// `no`, `on-failure` (a job that fails would loop as `always`) or no
+// policy. A stopped instance has no containers (Disable is compose
+// down), so `always` never brings back what an admin stopped. nil under
+// Docker.
+func (h *Hub) podmanRestartAlways(t *templates.Template) map[string]bool {
+	if !h.rootlessOn() {
+		return nil
+	}
+	services, err := orderedServiceNodes(t.ReadCompose())
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for name, s := range services {
+		if t.Jobs[name] {
+			continue
+		}
+		if r := mapField(s, "restart"); r != nil && r.Kind == yaml.ScalarNode && strings.TrimSpace(r.Value) == "unless-stopped" {
+			out[name] = true
+		}
+	}
+	return out
 }

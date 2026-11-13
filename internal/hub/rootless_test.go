@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/settings"
@@ -217,5 +219,48 @@ func TestRealTemplatesRootlessClassification(t *testing.T) {
 	got := strings.Join(lines, "\n") + "\n"
 	if got != string(want) {
 		t.Errorf("classification differs from %s/tests/rootless.txt:\n--- hub\n%s--- templates\n%s", dir, got, want)
+	}
+}
+
+const restartCompose = "services:\n  web:\n    image: x\n    restart: unless-stopped\n    depends_on:\n      init:\n        condition: service_completed_successfully\n      job2:\n        condition: service_completed_successfully\n  job2:\n    image: x\n    restart: unless-stopped\n  init:\n    image: x\n    restart: \"no\"\n  worker:\n    image: y\n  retry:\n    image: z\n    restart: on-failure\n  already:\n    image: w\n    restart: always\n"
+
+// Under podman the override sets `restart: always` on the services the
+// template runs `unless-stopped` (podman-restart.service starts only
+// `always` containers at boot); one-shot jobs, no policy, on-failure and
+// always stay as written. Docker: unchanged.
+func TestOverridePodmanRestartAlways(t *testing.T) {
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"rs": {gateManifest, restartCompose}})
+	if f.h.Template("rs") == nil {
+		t.Fatal("rs fixture not loaded (see the log)")
+	}
+	render := func(rt docker.Runtime) map[string]map[string]any {
+		f.h.cfg.Runtime = rt
+		f.h.mu.Lock()
+		out, err := f.h.renderOverrideLocked(f.h.findLocked("rs"), state.InstanceSettings{})
+		f.h.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Services map[string]map[string]any `yaml:"services"`
+		}
+		if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return doc.Services
+	}
+	for svc, s := range render(docker.RuntimeDocker) {
+		if _, ok := s["restart"]; ok {
+			t.Errorf("docker: %s gets restart %v", svc, s["restart"])
+		}
+	}
+	got := render(docker.RuntimePodman)
+	if got["web"]["restart"] != "always" {
+		t.Errorf("podman: web restart = %v", got["web"]["restart"])
+	}
+	for _, svc := range []string{"init", "job2", "worker", "retry", "already"} {
+		if r, ok := got[svc]["restart"]; ok {
+			t.Errorf("podman: %s gets restart %v", svc, r)
+		}
 	}
 }
