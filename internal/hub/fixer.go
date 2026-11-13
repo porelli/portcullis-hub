@@ -515,7 +515,9 @@ func writeInTar(w io.Writer, in io.Reader, size int64) error {
 // (ruling 31).
 func readSnapshotTar(t io.Reader, out func(io.Reader) error) error {
 	tr := tar.NewReader(t)
-	want := strings.TrimPrefix(fixerOut, "/") + "/" + folderfix.SnapshotName
+	// Entry names per engine form (archive.go): Docker's "out/…",
+	// Podman's "/" and "/…".
+	an := newArchiveNames(fixerOut)
 	seen := false
 	for {
 		hdr, err := tr.Next()
@@ -525,11 +527,14 @@ func readSnapshotTar(t io.Reader, out func(io.Reader) error) error {
 		if err != nil {
 			return fmt.Errorf("snapshot transfer: %w", err)
 		}
-		name := hdr.Name
+		rel, err := an.rel(hdr)
+		if err != nil {
+			return fmt.Errorf("snapshot transfer: %w", err)
+		}
 		switch {
-		case hdr.Typeflag == tar.TypeDir && strings.TrimSuffix(name, "/") == strings.TrimPrefix(fixerOut, "/"):
+		case hdr.Typeflag == tar.TypeDir && rel == ".":
 			continue
-		case hdr.Typeflag == tar.TypeReg && name == want && !seen:
+		case hdr.Typeflag == tar.TypeReg && rel == folderfix.SnapshotName && !seen:
 			if hdr.Size > maxSnapshotBytes {
 				return fmt.Errorf("snapshot transfer: the snapshot is too large (%d bytes, at most %d)", hdr.Size, maxSnapshotBytes)
 			}
@@ -541,7 +546,7 @@ func readSnapshotTar(t io.Reader, out func(io.Reader) error) error {
 				return fmt.Errorf("snapshot transfer: %w", err)
 			}
 		default:
-			return fmt.Errorf("snapshot transfer: unexpected entry %q (type %c)", clipRunes(name, 80), hdr.Typeflag)
+			return fmt.Errorf("snapshot transfer: unexpected entry %q (type %c)", clipRunes(hdr.Name, 80), hdr.Typeflag)
 		}
 	}
 	if !seen {
