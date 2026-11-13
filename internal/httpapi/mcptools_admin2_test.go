@@ -559,6 +559,13 @@ var adminToolFixtures = []struct {
 	{"set_secret_setting", map[string]any{"id": "secretapp", "option": "api_key"}},
 	{"set_sign_in_mode", map[string]any{"id": "nativeapp", "mode": "gateway"}},
 	{"set_public_access", map[string]any{"id": "cloud", "access": "off"}},
+	// VPN (§15.10): no VPN here: refusals, the same both ways.
+	{"get_vpn", nil},
+	{"list_vpn_devices", nil},
+	{"remove_vpn_device", map[string]any{"id": "nope"}},
+	{"set_vpn_provider", map[string]any{"id": "cloud", "wired": false}},
+	{"assign_vpn_address", map[string]any{"id": "cloud", "ip": "10.8.0.5"}},
+	{"set_instance_reach", map[string]any{"id": "cloud", "mode": "internet"}},
 	{"get_status", map[string]any{"id": "smbfixture"}},
 	{"exec", map[string]any{"id": "smbfixture", "service": "smb", "command": "env"}},
 	{"get_compose", map[string]any{"id": "talk-a"}},

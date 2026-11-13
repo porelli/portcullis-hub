@@ -13,7 +13,7 @@ services:
       traefik.http.routers.portcullis-public-cloud.tls: "true"
       traefik.http.routers.portcullis-public-cloud.tls.options: authaware@file
       traefik.http.routers.portcullis-public-cloud.priority: "310"
-      traefik.http.routers.portcullis-public-cloud.middlewares: portcullis-vpnallow-cloud@docker,portcullis-public-guard@docker,portcullis-public-strip-cloud@docker,rate-limit@file,security-headers@file
+      traefik.http.routers.portcullis-public-cloud.middlewares: portcullis-vpnallow-cloud@docker,portcullis-public-guard-vpn@docker,portcullis-public-strip-cloud@docker,rate-limit@file,security-headers@file
       traefik.http.routers.portcullis-public-cloud.service: "cloud"
       traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.Authorization: ""
       traefik.http.middlewares.portcullis-public-strip-cloud.headers.customrequestheaders.Proxy-Authorization: ""

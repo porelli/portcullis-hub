@@ -354,6 +354,7 @@ func (s *Server) registerMCPTools() {
 	s.registerMySignInTools()
 	s.registerSignInHelpTools()
 	s.registerImpersonationTools()
+	s.registerVPNTools()
 }
 
 // mcpScopeOf names the scope's resource URL, listener, page base and

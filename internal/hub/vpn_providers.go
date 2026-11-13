@@ -46,6 +46,9 @@ const (
 	VarVPNNet         = "PORTCULLIS_VPN_NET"
 	VarVPNBuiltin     = "PORTCULLIS_VPN_BUILTIN"
 	VarVPNWGIP        = "PORTCULLIS_VPN_WG_IP"
+	// VarVPNReserved: core's reserved ranges (a comma or space separated
+	// CIDR list): no provider range may overlap one.
+	VarVPNReserved = "PORTCULLIS_VPN_RESERVED_RANGES"
 
 	VPNModeApps   = "apps"
 	VPNModeAdmin  = "admin"
@@ -139,6 +142,10 @@ type vpnCore struct {
 	Net         netip.Prefix
 	WGIP        netip.Addr
 	Builtin     bool
+	// Reserved are core's reserved ranges; ReservedBad: the list didn't
+	// parse (fail closed: no provider can be wired or published).
+	Reserved    []netip.Prefix
+	ReservedBad bool
 }
 
 // vpnCoreEnv reads the VPN keys of the core env (<ProjectDir>/.env).
@@ -169,6 +176,15 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 		} else {
 			log.Printf("vpn: the core env's %s %s is not an IPv4 /26 or wider: the default is used", VarVPNNet, clipQuoted(raw))
 		}
+	}
+	for _, f := range strings.FieldsFunc(core[VarVPNReserved], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		p, err := netip.ParsePrefix(f)
+		if err != nil {
+			log.Printf("vpn: the core env's %s holds %s, not a CIDR: no VPN provider is wired or published", VarVPNReserved, clipQuoted(f))
+			c.ReservedBad = true
+			continue
+		}
+		c.Reserved = append(c.Reserved, p.Masked())
 	}
 	c.WGIP = c.Net.Addr().Next().Next().Next() // .3
 	if raw := core[VarVPNWGIP]; raw != "" {
@@ -350,6 +366,12 @@ func (h *Hub) vpnOverlapLocked(id string, ranges []netip.Prefix, st *vpn.Status,
 	if a, b, ok := vpn.FirstOverlap(ranges, []netip.Prefix{core.Net}); ok {
 		return refuse(a, b, "the portcullis-vpn network")
 	}
+	if core.ReservedBad {
+		return statusErr(http.StatusConflict, "the core env's %s doesn't parse: no VPN provider can be wired", VarVPNReserved)
+	}
+	if a, b, ok := vpn.FirstOverlap(ranges, core.Reserved); ok {
+		return refuse(a, b, "a range core reserves: Docker allocates networks (app instances' too) from these ranges")
+	}
 	for _, other := range slices.Sorted(maps.Keys(h.st.VPN.Providers)) {
 		if other == id {
 			continue
@@ -449,6 +471,12 @@ func (h *Hub) AssignVPNAddress(ctx context.Context, actor directory.Actor, id, i
 	}
 	if !validDeviceName(name) {
 		return statusErr(http.StatusBadRequest, "the device name must be one line of 1–64 characters")
+	}
+	h.mu.RLock()
+	_, terr := h.vpnTemplateLocked(id)
+	h.mu.RUnlock()
+	if terr != nil {
+		return terr
 	}
 	m, merr := h.vpnMembership(ctx)
 	if merr != nil {
@@ -726,9 +754,12 @@ func (h *Hub) runVPNProvider(ctx context.Context, id string) {
 	}
 	fail := func(msg string) {
 		h.vpnrt.mu.Lock()
-		if pm := h.vpnrt.maps[id]; pm != nil {
-			pm.lastErr = clipRunes(msg, unitErrorMax)
+		pm := h.vpnrt.maps[id]
+		if pm == nil {
+			pm = &providerMap{}
+			h.vpnrt.maps[id] = pm
 		}
+		pm.lastErr = clipRunes(msg, unitErrorMax)
 		h.vpnrt.mu.Unlock()
 	}
 	if rerr != nil {

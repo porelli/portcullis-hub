@@ -145,7 +145,7 @@ func TestIndexFileSharingTab(t *testing.T) {
 	_, b := doAs(t, e.hub, "root", "GET", "/", "")
 	// The page's tabs: File sharing only for a person_secret template
 	// (the catalog's settings options, as the tab's own loader reads).
-	if !strings.Contains(b, `return PAGE_TABS.filter(([k]) => k !== 'filesharing' || templateHasPersonSecret(inst.template));`) ||
+	if !strings.Contains(b, `return PAGE_TABS.filter(([k]) => (k !== 'filesharing' || templateHasPersonSecret(inst.template)) && (k !== 'vpn' || templateHasVPN(inst.template)));`) ||
 		!strings.Contains(b, `['filesharing', 'File sharing']`) || !strings.Contains(b, `return opts.some(o => o.type === 'person_secret');`) ||
 		!strings.Contains(b, `case 'filesharing': loadFileSharing(id, pane); break;`) {
 		t.Error("the instance page has no File sharing tab for person_secret templates")

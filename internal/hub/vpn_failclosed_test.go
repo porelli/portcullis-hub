@@ -127,20 +127,71 @@ func TestVPNRenderFailClosed(t *testing.T) {
 }
 
 func TestVPNNarrows(t *testing.T) {
+	k := func(r, gw, edge, pl string) string { return "r=" + r + "|gw=" + gw + "|edge=" + edge + "|pl=" + pl }
 	for _, c := range []struct {
-		prev, next string
-		want       bool
+		name, prev, next string
+		want             bool
 	}{
-		{"|", "10.0.0.0/8|", true},
-		{"10.0.0.0/8|", "|", false},
-		{"10.0.0.0/8,100.64.0.0/10|", "10.0.0.0/8|", true},
-		{"10.0.0.0/8|", "10.0.0.0/8,100.64.0.0/10|", false},
-		{"10.0.0.0/8|", "0.0.0.0/32|", true},
-		{"0.0.0.0/32|", "10.0.0.0/8|", false},
-		{"10.0.0.0/8|1|2", "10.0.0.0/8|", false},
+		{"internet → vpn", k("", "", "", "0"), k("10.0.0.0/8", "", "", "0"), true},
+		{"vpn → internet", k("10.0.0.0/8", "", "", "0"), k("", "", "", "0"), false},
+		{"a range dropped", k("10.0.0.0/8,100.64.0.0/10", "", "", "0"), k("10.0.0.0/8", "", "", "0"), true},
+		{"a range added", k("10.0.0.0/8", "", "", "0"), k("10.0.0.0/8,100.64.0.0/10", "", "", "0"), false},
+		{"to no client", k("10.0.0.0/8", "", "", "0"), k("0.0.0.0/32", "", "", "0"), true},
+		{"from no client", k("0.0.0.0/32", "", "", "0"), k("10.0.0.0/8", "", "", "0"), false},
+		{"gateway lost", k("", "172.31.254.16", "172.31.254.3:9001", "0"), k("", "", "", "0"), true},
+		{"gateway moved", k("", "172.31.254.16", "172.31.254.3:9001", "0"), k("", "172.31.254.17", "172.31.254.3:9002", "0"), true},
+		{"gateway added", k("", "", "", "0"), k("", "172.31.254.16", "172.31.254.3:9001", "0"), false},
+		{"public links off", k("", "", "", "1"), k("", "", "", "0"), true},
+		{"public links on", k("", "", "", "0"), k("", "", "", "1"), false},
+		{"an unknown field changes", k("", "", "", "0") + "|x=1", k("", "", "", "0") + "|x=2", true},
+		{"an unknown field appears", k("", "", "", "0"), k("", "", "", "0") + "|x=1", true},
+		{"equal", k("10.0.0.0/8", "a", "b", "1"), k("10.0.0.0/8", "a", "b", "1"), false},
 	} {
 		if got := vpnNarrows(c.prev, c.next); got != c.want {
-			t.Errorf("%q → %q: %v", c.prev, c.next, got)
+			t.Errorf("%s: %v", c.name, got)
 		}
+	}
+}
+
+// A narrowing change while an earlier failure is in backoff fails
+// closed at once (compared against the committed key).
+func TestVPNNarrowingDuringBackoff(t *testing.T) {
+	v := newReachFixture(t, VPNModeApps)
+	ctx := context.Background()
+	v.wire(t, "mesh")
+	v.devicesOut = devicesDoc("100.64.0.1")
+	v.h.runVPNProvider(ctx, "mesh")
+	if err := v.h.Enable("wgplain"); err != nil {
+		t.Fatal(err)
+	}
+	v.h.Wait()
+	v.wire(t, "wgplain")
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN, Via: []string{"*"}})
+	var failing atomic.Bool
+	v.h.mu.Lock()
+	v.h.testOverrideWriteErr = func(path string) error {
+		if failing.Load() && strings.HasSuffix(path, "cloud.override.yml") {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	v.h.mu.Unlock()
+	failing.Store(true)
+	// A widening failure first (nothing to widen here: force a re-render
+	// with the same ranges by marking it failed): backoff, not closed.
+	v.h.vpnrt.mu.Lock()
+	v.h.vpnrt.renderFail["cloud"] = &vpnRenderRetry{next: v.clock().Add(time.Minute), delay: time.Minute}
+	v.h.vpnrt.mu.Unlock()
+	v.h.vpnRangesChanged()
+	if len(v.h.vpnFailedClosed()) != 0 {
+		t.Fatal("closed without a narrowing change")
+	}
+	// Now a narrowing change inside the backoff window: closed at once.
+	if err := v.h.SetVPNProvider(ctx, root, "wgplain", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	v.h.Wait()
+	if !slices.Equal(v.h.vpnFailedClosed(), []string{"cloud"}) {
+		t.Fatalf("a narrowing change in backoff didn't fail closed: %v", v.h.vpnFailedClosed())
 	}
 }

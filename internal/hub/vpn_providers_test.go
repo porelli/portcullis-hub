@@ -828,3 +828,33 @@ func TestPublishDoc(t *testing.T) {
 }
 
 var _ = directory.Human
+
+// Core's reserved ranges (PORTCULLIS_VPN_RESERVED_RANGES): no provider
+// overlapping one is wired or published; an unparsable list refuses all.
+func TestVPNReservedRanges(t *testing.T) {
+	v := newVPNFixture(t, nil)
+	ctx := context.Background()
+	env := filepath.Join(v.project, ".env")
+	base := "CORE_VAR=core-value\nPORTCULLIS_VPN_BUILTIN=on\nPORTCULLIS_VPN_NET=172.31.254.0/26\n"
+	writeFile(t, env, base+"PORTCULLIS_VPN_RESERVED_RANGES=100.100.0.0/16,10.250.0.0/16\n")
+	err := v.h.SetVPNProvider(ctx, root, "mesh", true, 0)
+	if statusCode(err) != 409 || !strings.Contains(err.Error(), "100.100.0.0/16") || !strings.Contains(err.Error(), "reserves") {
+		t.Fatalf("reserved overlap: %v", err)
+	}
+	v.wire(t, "wgplain")
+	writeFile(t, env, base+"PORTCULLIS_VPN_RESERVED_RANGES=10.8.0.0/16\n")
+	v.h.TriggerVPNPublish()
+	for _, p := range v.doc(t).Providers {
+		if p.ID == "wgplain" {
+			t.Fatal("a provider in a reserved range was published")
+		}
+	}
+	writeFile(t, env, base+"PORTCULLIS_VPN_RESERVED_RANGES=nope\n")
+	if err := v.h.SetVPNProvider(ctx, root, "mesh2", true, 0); statusCode(err) != 409 {
+		t.Fatalf("unparsable list: %v", err)
+	}
+	v.h.TriggerVPNPublish()
+	if d := v.doc(t); len(d.Providers) != 1 || d.Providers[0].ID != "builtin" {
+		t.Fatalf("unparsable list published %+v", d.Providers)
+	}
+}

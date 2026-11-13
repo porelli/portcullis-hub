@@ -313,6 +313,11 @@ type ContainerInfo struct {
 	// limit (0 = none; -1 or unset read as 0): limits_not_enforced.
 	Memory    int64
 	PidsLimit int64
+	// Privileged, CapAdd and Devices: HostConfig's (the doctor's
+	// vpn_gateway_privileged).
+	Privileged bool
+	CapAdd     []string
+	Devices    []string
 }
 
 // InspectContainer inspects one container (IsNotFound when missing).
@@ -332,6 +337,11 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo
 		ci.Memory = res.Container.HostConfig.Memory
 		if p := res.Container.HostConfig.PidsLimit; p != nil && *p > 0 {
 			ci.PidsLimit = *p
+		}
+		ci.Privileged = res.Container.HostConfig.Privileged
+		ci.CapAdd = append([]string(nil), res.Container.HostConfig.CapAdd...)
+		for _, d := range res.Container.HostConfig.Devices {
+			ci.Devices = append(ci.Devices, d.PathOnHost)
 		}
 	}
 	return ci, nil

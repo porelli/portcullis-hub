@@ -47,6 +47,9 @@ const (
 	// on vpnsecure): it replaces portcullis-groups@docker in a VPN-only
 	// router's chain. Core names it; change it here only.
 	VPNGroupsMiddleware = "portcullis-groups-vpn@docker"
+	// PublicGuardVPNMiddleware is core's VPN public guard (group-gate
+	// /public-guard/vpn): a VPN-only instance's public router uses it.
+	PublicGuardVPNMiddleware = "portcullis-public-guard-vpn@docker"
 	// VarVPNEdge is the gateway's edge address in its environment.
 	VarVPNEdge = "PORTCULLIS_VPN_EDGE"
 )
@@ -422,21 +425,37 @@ func (h *Hub) vpnAttachLocked(t *templates.Template) vpnAttach {
 	return a
 }
 
-// vpnRenderKeyLocked is what of t's override follows the VPN maps: its
-// allowlist ranges and its gateway attachment.
+// vpnRenderKeyLocked is what of t's override follows the VPN state, as
+// fields "name=value" joined by "|": r (the allowlist ranges, "" =
+// internet), gw and edge (the gateway attachment), pl (public links on
+// the internet in server mode). vpnNarrows compares them field by field.
 func (h *Hub) vpnRenderKeyLocked(t *templates.Template) string {
-	var b strings.Builder
+	ranges := ""
 	if vpnOnly, via := h.effectiveReachLocked(t); vpnOnly {
-		b.WriteString(strings.Join(h.vpnAllowRangesLocked(via), ","))
+		ranges = strings.Join(h.vpnAllowRangesLocked(via), ",")
 	}
-	b.WriteString("|")
-	if gw, edge, ok := h.vpnGatewayLocked(t); ok {
-		b.WriteString(gw.String() + "|" + edge)
+	gw, edge := "", ""
+	if a, e, ok := h.vpnGatewayLocked(t); ok {
+		gw, edge = a.String(), e
 	}
+	pl := "0"
 	if h.publicLinksLocked(t) {
-		b.WriteString("|public-links")
+		pl = "1"
 	}
-	return b.String()
+	return "r=" + ranges + "|gw=" + gw + "|edge=" + edge + "|pl=" + pl
+}
+
+// vpnKeyFields parses a render key ("" = none: every field empty).
+func vpnKeyFields(key string) map[string]string {
+	out := map[string]string{}
+	if key == "" {
+		return out
+	}
+	for _, f := range strings.Split(key, "|") {
+		k, v, _ := strings.Cut(f, "=")
+		out[k] = v
+	}
+	return out
 }
 
 // vpnRenderRetry is a VPN re-render that failed: retried with backoff;
@@ -453,28 +472,59 @@ const (
 	vpnRetryMax = 5 * time.Minute
 )
 
-// vpnRangesOf is a render key's allowlist ranges.
+// vpnRangesOf is a render key's allowlist ranges (nil = internet).
 func vpnRangesOf(key string) []string {
-	r, _, _ := strings.Cut(key, "|")
+	r := vpnKeyFields(key)["r"]
 	if r == "" {
 		return nil
 	}
 	return strings.Split(r, ",")
 }
 
-// vpnNarrows: going from render key prev to next takes access away — an
-// accepted range is no longer accepted (the no-client sentinel accepts
-// nothing), or the instance became VPN-only.
+// vpnNarrows: going from render key prev to next takes away something
+// prev allowed, field by field (fail closed: a field whose effect isn't
+// known counts as narrowing whenever it changes):
+//   - r: internet → VPN-only, or an accepted range no longer accepted
+//     (the no-client sentinel accepts nothing);
+//   - gw / edge: the gateway attachment lost or moved;
+//   - pl: public links leave the internet.
 func vpnNarrows(prev, next string) bool {
-	p, n := vpnRangesOf(prev), vpnRangesOf(next)
-	if len(n) == 0 {
-		return false // internet: wider, never narrower
+	p, n := vpnKeyFields(prev), vpnKeyFields(next)
+	keys := map[string]bool{}
+	for k := range p {
+		keys[k] = true
 	}
-	if len(p) == 0 {
-		return true // internet → VPN-only
+	for k := range n {
+		keys[k] = true
 	}
-	for _, r := range p {
-		if r != vpnNoClient && !slices.Contains(n, r) {
+	for k := range keys {
+		pv, nv := p[k], n[k]
+		if pv == nv {
+			continue
+		}
+		switch k {
+		case "r":
+			if nv == "" {
+				continue // internet: wider
+			}
+			if pv == "" {
+				return true // internet → VPN-only
+			}
+			nr := strings.Split(nv, ",")
+			for _, r := range strings.Split(pv, ",") {
+				if r != vpnNoClient && !slices.Contains(nr, r) {
+					return true
+				}
+			}
+		case "gw", "edge":
+			if pv != "" {
+				return true // the attachment lost or moved
+			}
+		case "pl":
+			if pv == "1" {
+				return true
+			}
+		default:
 			return true
 		}
 	}
@@ -512,6 +562,15 @@ func (h *Hub) vpnRerender(force map[string]bool) {
 			continue
 		}
 		if !force[t.ID] && fail != nil && now.Before(fail.next) {
+			// In backoff: a narrowing change (against the committed
+			// key) still fails closed at once.
+			if !fail.closed && vpnNarrows(prev, key) {
+				h.vpnrt.mu.Lock()
+				fail.closed = true
+				h.vpnrt.mu.Unlock()
+				closeIDs = append(closeIDs, t.ID)
+				closeWhy[t.ID] = errors.New("an earlier VPN render failed and is retried")
+			}
 			continue
 		}
 		if err := h.generateOverrideLocked(t, h.st.Settings[t.ID]); err != nil {
@@ -527,7 +586,7 @@ func (h *Hub) vpnRerender(force map[string]bool) {
 			// Fail closed: a narrowing change that can't be applied
 			// (an instance never rendered by this run counts as one when
 			// it renders VPN-only).
-			if !fail.closed && (known && vpnNarrows(prev, key) || !known && len(vpnRangesOf(key)) > 0) {
+			if !fail.closed && (known && vpnNarrows(prev, key) || !known && vpnNarrows("r=|gw=|edge=|pl=1", key)) {
 				fail.closed = true
 				closeIDs = append(closeIDs, t.ID)
 				closeWhy[t.ID] = err

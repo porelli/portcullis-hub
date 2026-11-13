@@ -176,6 +176,11 @@ func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, 
 		return strings.TrimSpace(b.String())
 	}
 	r, mw := "traefik.http.routers."+PublicRouterName(id), PublicStripMiddleware(id)
+	// A VPN-only instance's public router: core's VPN public guard.
+	guard := PublicGuardMiddleware
+	if allow != "" {
+		guard = PublicGuardVPNMiddleware
+	}
 	// The static-file regexps end in "$": write compose's escaped "$$" so
 	// it is never read as interpolation (prefixes can't contain "$").
 	lines := []string{
@@ -184,7 +189,7 @@ func publicLabels(id string, m *templates.Manifest, plan *templates.PublicPlan, 
 		r + `.tls: "true"`,
 		r + ".tls.options: " + tier,
 		r + fmt.Sprintf(`.priority: "%d"`, plan.Priority),
-		r + ".middlewares: " + vpnFirst(allow, PublicGuardMiddleware+","+mw+"@docker,rate-limit@file,security-headers@file"),
+		r + ".middlewares: " + vpnFirst(allow, guard+","+mw+"@docker,rate-limit@file,security-headers@file"),
 	}
 	if plan.TraefikService != "" {
 		lines = append(lines, r+".service: "+q(plan.TraefikService))

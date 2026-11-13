@@ -1,7 +1,7 @@
 // qrcode-generator 2.0.4 (https://github.com/kazuhikoarase/qrcode-generator, MIT),
 // vendored unmodified below this header: npm qrcode-generator@2.0.4 dist/qrcode.js,
 // sha256 79ec86f82856005b1c887905cfccfcfbec3821ca61c7fd5a952faa5f778f791c,
-// npm integrity sha512-mZSiP6RnbHl4xL2Ap5HfkjLnmxfKcPWpWe/c+5XxCuetEenqmNFf1FH/ftXPCtFG5/TDobjsjz6sSNL0Sr8Z9g==.
+// npm integrity sha512-mZSiP6RnbHl4xL2Ap5HfkjLnmxfKcPWpWe/c+5XxCuetEenqmNFf1FH/ftXPCtFG5/TDobjsjz6sSNL0Sr8Z9g== (tarball checked), license MIT (qrcode.LICENSE).
 // Used by vpn.js only (the device configuration QR, built in the page).
 //---------------------------------------------------------------------
 //
