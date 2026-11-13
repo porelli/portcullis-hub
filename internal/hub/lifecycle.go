@@ -94,6 +94,11 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 // view the up uses. Failures are *StatusError.
 func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	members := h.groupSnapshot(t.ID)
+	// The engine's SELinux flag before the override is rendered (an
+	// engine call: never under mu; podman only, P10).
+	if h.rootlessOn() {
+		h.engineSELinux(context.Background())
+	}
 	h.mu.Lock()
 	live := t
 	if l := h.findLocked(t.ID); l != nil {

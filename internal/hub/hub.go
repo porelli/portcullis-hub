@@ -307,6 +307,11 @@ type Hub struct {
 	// readIDMaps reads the Hub's own uid_map / gid_map (runtime_engine.go;
 	// nil = /proc/self, test-settable).
 	readIDMaps func() (uid, gid idmap.Map, err error)
+	// selinuxMu guards the engine's cached SELinux flag
+	// (doctor_engine.go engineSELinux; a leaf lock).
+	selinuxMu    sync.Mutex
+	selinuxKnown bool
+	selinuxOn    bool
 	// The doctor's disk scans (doctorscan.go): scanMu = one scan at a
 	// time (try-lock, 409); scanCacheMu (a leaf lock, never held with a
 	// fixer or docker call) guards scanData, the <data>/doctor/scans.json

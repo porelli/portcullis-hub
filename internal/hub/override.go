@@ -115,6 +115,14 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	for svc, mounts := range h.dataFileMounts(t) {
 		serviceMounts[svc] = append(serviceMounts[svc], mounts...)
 	}
+	// Rootless Podman on SELinux (P10): the template's own files are
+	// re-declared with bind.selinux z (data files above already are);
+	// shared folders and other host paths never are.
+	if h.relabelBinds() {
+		for svc, mounts := range selinuxRelabels(t.ReadCompose()) {
+			serviceMounts[svc] = append(serviceMounts[svc], mounts...)
+		}
+	}
 	// An AI page's selected provider variables, on ai.chat.env.service
 	// only (G31: the values are in its .env; compose interpolates them).
 	serviceEnv := h.providerOverrideEnvLocked(t)

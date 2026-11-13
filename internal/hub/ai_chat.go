@@ -531,6 +531,9 @@ func (h *Hub) providersFileMount(t *templates.Template) (service, entry string) 
 		return "", ""
 	}
 	host := path.Join(filepath.ToSlash(h.cfg.AppFilesHostDir), t.ID, templates.AIProvidersFile)
+	if h.relabelBinds() {
+		return ch.File.Service, relabelBindEntry(host, ch.File.Mount, true)
+	}
 	b, _ := json.Marshal(composeLiteral(host) + ":" + composeLiteral(ch.File.Mount) + ":ro")
 	return ch.File.Service, string(b)
 }

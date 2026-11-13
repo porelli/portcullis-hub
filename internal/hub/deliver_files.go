@@ -103,6 +103,10 @@ func (h *Hub) dataFileMounts(t *templates.Template) map[string][]string {
 			continue
 		}
 		host := path.Join(filepath.ToSlash(h.cfg.AppFilesHostDir), t.ID, f.Name)
+		if h.relabelBinds() {
+			out[f.Service] = append(out[f.Service], relabelBindEntry(host, f.Mount, true))
+			continue
+		}
 		vol := composeLiteral(host) + ":" + composeLiteral(f.Mount) + ":ro"
 		b, _ := json.Marshal(vol)
 		out[f.Service] = append(out[f.Service], string(b))

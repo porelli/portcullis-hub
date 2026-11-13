@@ -204,6 +204,12 @@ type RuntimeIn struct {
 	// At: when the gids were read (the Hub drops entries of instances
 	// started since).
 	At time.Time
+	// Memory / PidsLimit: the container's inspected limits (0 = none);
+	// WantMemory / WantPids: its compose sets mem_limit / pids_limit
+	// (limits_not_enforced, rootless Podman). An entry without them
+	// (cached before) is not checked.
+	Memory, PidsLimit    int64
+	WantMemory, WantPids bool
 }
 
 // Inputs is everything the checks judge (enabled instances only).
@@ -241,6 +247,9 @@ type Inputs struct {
 	// main domain's read-only plan.
 	DNS     []domains.Plan
 	DNSMain *domains.Plan
+	// Engine: the container engine (engine.go, rootless Podman; nil = no
+	// guard: the engine kinds never fire).
+	Engine *EngineIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify
