@@ -1124,7 +1124,7 @@ main domain's credentials). It has no Fix or signing buttons; every fix reads
 The same plans feed the [doctor's DNS checks](#dns-checks). Through the
 Portcullis MCP the panel's twins are `get_domain_dns`, `get_main_dns`,
 `apply_domain_dns` and `enable_domain_dnssec` (a confirmation, like the
-button).
+button), plus `domain_op` for the op record of a doctor DNS fix.
 
 ### Cross-domain sign-in
 
@@ -1640,12 +1640,12 @@ LAN-only ports reachable from outside.
 
 The doctor also judges the [DNS plans](#the-dns-panel) of every added domain
 and of the main domain (the cached plans; when the domains service can't be
-read there are no DNS findings and the report says the DNS checks didn't
-run):
+read, or a lookup failed, there are no DNS findings and the Doctor tab says
+"DNS checks didn't run" (the report's `dns_unavailable`)):
 
 | Kind | Severity | Finds | Fix |
 |------|----------|-------|-----|
-| `dns_records_wrong` | Problem | An A/AAAA record missing or wrong | One click: apply the `address` set |
+| `dns_records_wrong` | Problem | An A/AAAA record missing or wrong, or a CNAME at the name or its wildcard | One click: apply the `address` set; explain-only (remove the CNAME) while a CNAME is there |
 | `dns_caa_missing` | Warning | No CAA where Portcullis wants one | One click: apply the `caa` set |
 | `dns_caa_wrong_account` | Problem | The CA wouldn't issue: the live pin names another ACME account | One click: apply the `caa` set |
 | `dns_caa_other_issuers` | Info | Other CAs may also issue for the name | — |
@@ -1661,7 +1661,9 @@ The one-click DNS fixes preview the records they change (`<set> <name>
 <zone>") and refuse with "the DNS records changed since the preview" when
 the live records moved. They run in the background and are audited like the
 DNS panel's buttons. For the **main domain** every DNS finding is
-explain-only: "Run `./portcullis dns setup` on the server".
+explain-only: "Run `./portcullis dns setup` on the server" (for
+`dnssec_unsigned`: "Run `./portcullis dns setup --dnssec` on the server
+(Cloudflare only)").
 
 ## Local networks
 
