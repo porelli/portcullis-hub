@@ -298,6 +298,17 @@ func TestVPNGroupsChain(t *testing.T) {
 		"portcullis-groups@file":     "portcullis-groups@file",
 		"portcullis-groups-x@docker": "portcullis-groups-x@docker",
 		"rate-limit@file":            "rate-limit@file",
+		// M4: Portcullis sign-in in front without portcullis-groups (a
+		// native_login app's default): the VPN groups check goes right
+		// after it, so the device ↔ person binding applies.
+		"portcullis-auth@docker,security-headers@file": "portcullis-auth@docker," + VPNGroupsMiddleware + ",security-headers@file",
+		"rate-limit@file,portcullis-auth":              "rate-limit@file,portcullis-auth," + VPNGroupsMiddleware,
+		"portcullis-auth@file":                         "portcullis-auth@file",
+		"portcullis-auth-ext@docker":                   "portcullis-auth-ext@docker," + VPNGroupsMiddleware,
+		// Its own login only (no Portcullis session): the allowlist is
+		// all there is, nothing added.
+		"security-headers@file": "security-headers@file",
+		"":                      "",
 	} {
 		if got := vpnGroupsChain(in); got != want {
 			t.Errorf("%q: %q, want %q", in, got, want)
@@ -552,7 +563,7 @@ func TestDeleteLastViaProviderNeverWidens(t *testing.T) {
 	if !a.VPNOnly || len(a.Via) != 0 || a.Ranges[0] != vpnNoClient || !strings.Contains(a.key(), "|via=-|") {
 		t.Fatalf("empty via: %+v %s", a, a.key())
 	}
-	if b, _ := json.Marshal(pol.Hosts["cloud.example.org"]); string(b) != `{"via":[]}` {
+	if b, _ := json.Marshal(pol.Hosts["cloud.example.org"]); string(b) != `{"via":[],"public_links":false}` {
 		t.Fatalf("empty via policy %s", b)
 	}
 	v.h.vpnRangesChanged()
@@ -593,8 +604,39 @@ func TestPublicLinksPolicy(t *testing.T) {
 	if err := json.Unmarshal(b, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := doc.VPN.Hosts["cloud.example.org"]; !ok {
+	pl := func(raw json.RawMessage) *bool {
+		var h struct {
+			PublicLinks *bool `json:"public_links"`
+		}
+		json.Unmarshal(raw, &h)
+		return h.PublicLinks
+	}
+	if h, ok := doc.VPN.Hosts["cloud.example.org"]; !ok || pl(h) == nil || !*pl(h) {
 		t.Fatalf("vpn.hosts %v", doc.VPN.Hosts)
+	}
+	// M3: without the opt-in every VPN-only host says false.
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachInternet})
+	b, _ = os.ReadFile(filepath.Join(v.data, "group-gate-policy.json"))
+	doc.VPN.Hosts = nil
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if h := doc.VPN.Hosts["cloud.example.org"]; pl(h) == nil || *pl(h) {
+		t.Fatalf("vpn.hosts without public links %s", h)
+	}
+	// core's group-gate requires public_links on every entry (fail
+	// closed): none may lack it.
+	if len(doc.VPN.Hosts) == 0 {
+		t.Fatal("server mode: no vpn.hosts")
+	}
+	for host, raw := range doc.VPN.Hosts {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		if v, ok := m["public_links"]; !ok || (string(v) != "true" && string(v) != "false") {
+			t.Errorf("vpn.hosts[%s] lacks public_links: %s", host, raw)
+		}
 	}
 	if _, ok := doc.PublicPaths["cloud.example.org"]; !ok {
 		t.Fatalf("public_paths %v", doc.PublicPaths)

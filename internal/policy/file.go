@@ -37,6 +37,9 @@ type VPNPolicy struct {
 // VPNHost is a VPN-only host's accepted providers: ["*"] or ids.
 type VPNHost struct {
 	Via []string `json:"via"`
+	// PublicLinks: the host's public paths stay on the internet (server
+	// mode's opt-in): group-gate admits them on websecure only when true.
+	PublicLinks bool `json:"public_links"`
 }
 
 // CorePages are the core page keys group-gate gates, each published under

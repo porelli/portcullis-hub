@@ -430,10 +430,11 @@ func (h *Hub) vpnPolicyLocked() policy.VPNPolicy {
 		if !t.Enabled {
 			continue
 		}
-		vpnOnly, via := h.effectiveReachLocked(t)
-		if !vpnOnly {
+		acc := h.vpnAccessLocked(t)
+		if !acc.VPNOnly {
 			continue
 		}
+		via, pl := acc.Via, acc.PublicLinks
 		// A host stays out only when every router on it is a provider
 		// control router (those stay public); a router whose host can't
 		// be told keeps every host in (fail closed).
@@ -443,7 +444,7 @@ func (h *Hub) vpnPolicyLocked() policy.VPNPolicy {
 			if hst == "" || coreHosts[hst] || onlyCtrl[hst] {
 				continue
 			}
-			out.Hosts[hst] = policy.VPNHost{Via: append([]string{}, via...)}
+			out.Hosts[hst] = policy.VPNHost{Via: append([]string{}, via...), PublicLinks: pl}
 		}
 	}
 	return out
@@ -863,12 +864,31 @@ func (h *Hub) vpnControlOnlyHostsLocked(t *templates.Template) map[string]bool {
 // VPN-only router's chain (contract §4: the binding is enforced only on
 // requests that came in on vpnsecure).
 func vpnGroupsChain(chain string) string {
+	if chain == "" {
+		return ""
+	}
 	parts := strings.Split(chain, ",")
+	groups, auth := false, -1
 	for i, m := range parts {
 		base, prov, _ := strings.Cut(strings.TrimSpace(m), "@")
-		if strings.EqualFold(base, "portcullis-groups") && (prov == "" || prov == "docker") {
-			parts[i] = VPNGroupsMiddleware
+		if prov != "" && prov != "docker" {
+			continue
 		}
+		switch {
+		case strings.EqualFold(base, "portcullis-groups"):
+			parts[i], groups = VPNGroupsMiddleware, true
+		case (strings.EqualFold(base, authMiddlewareName) || strings.EqualFold(base+"@docker", ExtAuthMiddleware)) && auth < 0:
+			auth = i
+		}
+	}
+	// M4: Portcullis sign-in in front (portcullis-auth, a native_login
+	// app's default, or an extra domain's portcullis-auth-ext) without
+	// portcullis-groups: the VPN groups check goes
+	// right after it, so the device ↔ person binding applies. An app with
+	// its own login only (no Portcullis session) has the allowlist alone:
+	// any valid VPN device reaches its login page (contract §5).
+	if !groups && auth >= 0 {
+		parts = slices.Insert(parts, auth+1, VPNGroupsMiddleware)
 	}
 	return strings.Join(parts, ",")
 }
