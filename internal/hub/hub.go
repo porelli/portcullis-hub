@@ -12,6 +12,7 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -137,6 +138,18 @@ type Config struct {
 	// inputs. Gates compare Runtime == docker.RuntimePodman only.
 	Runtime docker.Runtime
 	Guard   *docker.Guard
+	// VPNStatusFile is HUB_VPN_STATUS_FILE, wg's status.json (contract
+	// §16; main's default /wg-data/status.json; "" = wg is never up).
+	VPNStatusFile string
+	// VPNDocDir is HUB_VPN_DOC_DIR, the vpn_doc volume vpn.json is
+	// written to (contract §4, §16; main's default /vpn-doc; "" = no
+	// vpn.json: unit tests). VPNDocGID is HUB_VPN_DOC_GID, the file's
+	// group (shared only with wg and group-gate).
+	VPNDocDir string
+	VPNDocGID int
+	// VPNNet overrides portcullis-vpn's subnet (tests; zero = the core
+	// env's PORTCULLIS_VPN_NET, default 172.31.254.0/26).
+	VPNNet netip.Prefix
 }
 
 // Engine is the part of the Docker Engine API the Hub uses.
@@ -182,6 +195,9 @@ type Engine interface {
 	// APIVersion is the daemon's highest Engine API version (volume
 	// subpath mounts need 1.45, contract §6).
 	APIVersion(ctx context.Context) (string, error)
+	// ListNetworks lists the engine's networks with their subnets (the
+	// VPN wiring's overlap guard, contract §3.3).
+	ListNetworks(ctx context.Context) ([]docker.Network, error)
 }
 
 // IdP manages the OIDC clients templates declare.
@@ -622,6 +638,8 @@ type Hub struct {
 	aiHeld  sync.Map
 	aiErrMu sync.Mutex
 	aiErrs  map[string]string
+	// vpnrt is the VPN providers' memory (vpn_providers.go; own mutex).
+	vpnrt *vpnRuntime
 	// aiReapply: per instance, the companions whose last change failed
 	// after its state save (under aiErrMu); aiApplying: instances an
 	// UpdateInstanceAI is applying (startUp leaves the owed hooks to it).
@@ -713,6 +731,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		return nil, fmt.Errorf("HUB_SECRETS_VOLUME %q is not a volume name", cfg.SecretsVolume)
 	}
 	h := &Hub{
+		vpnrt:                newVPNRuntime(),
 		kinds:                settings.NewRegistry(),
 		bindRoots:            roots,
 		cfg:                  cfg,
@@ -814,6 +833,9 @@ func (h *Hub) Init() {
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}
+	// vpn.json: wired marketplace providers are stale until their first
+	// run (contract §16).
+	h.TriggerVPNPublish()
 	// Reloads and restarts committed changes still owe (the previous run
 	// stopped before applying them): queued again.
 	h.initStage("requeue")

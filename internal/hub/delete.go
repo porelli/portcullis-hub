@@ -583,10 +583,18 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	// too (contract §14.1).
 	dropWriteConfirmed(h.st.Folders, id)
 	delete(h.st.FolderChanged, id)
+	// Its VPN wiring, statics and reach (narrowing others' via only).
+	vpnDropped := h.dropVPNInstanceLocked(id)
 	h.rebuildLocked()
 	h.refreshPublishedLocked()
 	saveErr := h.st.Save(h.statePath())
 	h.mu.Unlock()
+	if vpnDropped {
+		h.vpnrt.mu.Lock()
+		delete(h.vpnrt.maps, id)
+		h.vpnrt.mu.Unlock()
+		h.vpnChanged()
+	}
 	if saveErr != nil {
 		return fmt.Errorf("saving state.yaml: %w", saveErr)
 	}

@@ -78,6 +78,8 @@ func (e *fakeEngine) InspectContainer(_ context.Context, id string) (docker.Cont
 func (e *fakeEngine) DockerRootDir(context.Context) (string, error) { return "/var/lib/docker", nil }
 func (e *fakeEngine) APIVersion(context.Context) (string, error)    { return "1.47", nil }
 
+func (e *fakeEngine) ListNetworks(context.Context) ([]docker.Network, error) { return nil, nil }
+
 func (e *fakeEngine) SecurityOptions(context.Context) ([]string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

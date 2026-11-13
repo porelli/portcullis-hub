@@ -283,6 +283,14 @@ func main() {
 		// group-gate's opened log (contract §8.2): <dir>/opened, read for
 		// the sign-in history and pruned to history_days.
 		GroupGateDataDir: env("HUB_GROUP_GATE_DATA_DIR", "/group-gate-data"),
+		// wg's status.json (contract §16; core mounts wg_data read-only).
+		VPNStatusFile: env("HUB_VPN_STATUS_FILE", hub.DefaultVPNStatusFile),
+		// vpn.json goes to the vpn_doc volume (never hub_data), group
+		// shared only with wg and group-gate (contract §4, §16).
+		VPNDocDir: env("HUB_VPN_DOC_DIR", hub.DefaultVPNDocDir),
+	}
+	if cfg.VPNDocGID, err = vpnDocGIDFromEnv(os.Getenv); err != nil {
+		log.Fatalf("refusing to start: %v", err)
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
@@ -464,6 +472,8 @@ func main() {
 	// Per-instance AI support (contract §8): the mcp:* scopes.
 	h.SetAIKeycloak(kc)
 	h.SetImpersonationKeycloak(kc)
+	// VPN providers' oidc_sub owners (contract §3.3).
+	h.SetVPNKeycloak(kc)
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, []string{fa.RedirectURI, fa.HubRedirectURI}, []string{fa.WebOrigin, fa.HubWebOrigin})
 	})
@@ -532,6 +542,8 @@ func main() {
 	go h.RunHistoryPrune(ctx, 24*time.Hour)
 	// Impersonations: expiry, not used, the file every minute (D41, D37).
 	go h.RunImpersonationExpiry(ctx, 5*time.Second)
+	// VPN providers: identity and dns hooks when due, vpn.json (§16).
+	go h.RunVPNMaps(ctx, 5*time.Second)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak
@@ -699,6 +711,7 @@ type directoryHub interface {
 	TriggerDirectorySync()
 	TriggerCredentialCheck()
 	MarkInventoryStale()
+	TriggerVPNPublish()
 }
 
 // wireDirectoryHooks sets dir's OnChange and OnEvaluated (both
@@ -716,6 +729,25 @@ func wireDirectoryHooks(dir *directory.Service, h directoryHub) {
 		h.MarkInventoryStale()
 		h.TriggerDirectorySync()
 		h.TriggerCredentialCheck()
+		// A person left, was disabled or re-created: their devices drop
+		// out of vpn.json (contract §16).
+		h.TriggerVPNPublish()
 	}
 	dir.OnEvaluated = h.TriggerCredentialCheck
+}
+
+// vpnDocGIDFromEnv is HUB_VPN_DOC_GID (default hub.DefaultVPNDocGID):
+// vpn.json's group, an integer 1–65535 other than the Hub's own group
+// 10001 (wg must never get the Hub's group); anything else refuses the
+// start.
+func vpnDocGIDFromEnv(getenv func(string) string) (int, error) {
+	raw := getenv("HUB_VPN_DOC_GID")
+	if raw == "" {
+		return hub.DefaultVPNDocGID, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 65535 || n == 10001 || strconv.Itoa(n) != raw {
+		return 0, fmt.Errorf("HUB_VPN_DOC_GID must be a group id 1–65535 other than 10001 (the Hub's own group)")
+	}
+	return n, nil
 }

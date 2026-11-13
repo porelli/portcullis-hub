@@ -179,7 +179,9 @@ func TestPeopleVerifierRedirect(t *testing.T) {
 	}
 }
 
-type fakeDirHub struct{ syncs, checks, stale int }
+type fakeDirHub struct{ syncs, checks, stale, vpn int }
+
+func (f *fakeDirHub) TriggerVPNPublish() { f.vpn++ }
 
 func (f *fakeDirHub) TriggerDirectorySync()   { f.syncs++ }
 func (f *fakeDirHub) TriggerCredentialCheck() { f.checks++ }
@@ -195,8 +197,8 @@ func TestWireDirectoryHooks(t *testing.T) {
 		t.Fatal("hooks not set")
 	}
 	dir.OnChange()
-	if h.syncs != 1 || h.checks != 1 || h.stale != 1 {
-		t.Errorf("OnChange: syncs %d checks %d stale %d", h.syncs, h.checks, h.stale)
+	if h.syncs != 1 || h.checks != 1 || h.stale != 1 || h.vpn != 1 {
+		t.Errorf("OnChange: syncs %d checks %d stale %d vpn %d", h.syncs, h.checks, h.stale, h.vpn)
 	}
 	dir.OnEvaluated()
 	if h.syncs != 1 || h.checks != 2 || h.stale != 1 {
@@ -291,6 +293,22 @@ func TestRuntimeFromEnv(t *testing.T) {
 	for _, v := range []string{"", "rkt", "Docker", "podman "} {
 		if _, err := runtimeFromEnv(func(k string) string { return map[string]string{"HUB_CONTAINER_RUNTIME": v}[k] }); err == nil || !strings.Contains(err.Error(), "HUB_CONTAINER_RUNTIME") {
 			t.Errorf("%q accepted or unnamed: %v", v, err)
+		}
+	}
+}
+
+// HUB_VPN_DOC_GID: default 10007; never the Hub's own 10001, never junk.
+func TestVPNDocGIDFromEnv(t *testing.T) {
+	envOf := func(v string) func(string) string { return func(string) string { return v } }
+	if g, err := vpnDocGIDFromEnv(envOf("")); err != nil || g != 10007 {
+		t.Fatalf("default %d %v", g, err)
+	}
+	if g, err := vpnDocGIDFromEnv(envOf("10020")); err != nil || g != 10020 {
+		t.Fatalf("10020: %d %v", g, err)
+	}
+	for _, bad := range []string{"10001", "0", "-1", "65536", "x", "010007", " 10007"} {
+		if _, err := vpnDocGIDFromEnv(envOf(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }

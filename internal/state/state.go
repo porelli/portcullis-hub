@@ -228,6 +228,12 @@ type AppState struct {
 	// ones, those ended less than an hour ago, and the used ones that
 	// ended within history_days (with the apps opened, F1).
 	Impersonations []Impersonation `json:"impersonations,omitempty" yaml:"impersonations,omitempty"`
+	// Reach: instance id → Reachable from (contract §11; no entry =
+	// internet).
+	Reach map[string]Reach `json:"reach,omitempty" yaml:"reach,omitempty"`
+	// VPN is Settings → VPN, the wired providers, the built-in devices and
+	// static assignments (contract §11).
+	VPN VPNState `json:"vpn" yaml:"vpn"`
 
 	// signInMissing: the file Load read has no sign_in section (or there
 	// was no file): the defaults EnsureSignIn filled are in memory only
@@ -638,6 +644,18 @@ func (s *AppState) init() {
 	}
 	if s.Credentials == nil {
 		s.Credentials = make(map[string]map[string]map[string]Credential)
+	}
+	if s.Reach == nil {
+		s.Reach = make(map[string]Reach)
+	}
+	if s.VPN.Providers == nil {
+		s.VPN.Providers = make(map[string]VPNProvider)
+	}
+	if s.VPN.Quarantine == nil {
+		s.VPN.Quarantine = make(map[string]time.Time)
+	}
+	if s.VPN.Static == nil {
+		s.VPN.Static = make(map[string][]VPNStatic)
 	}
 	if s.AI.AllowedOrigins == nil {
 		s.AI.AllowedOrigins = []string{}
