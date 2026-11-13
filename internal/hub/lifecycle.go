@@ -97,7 +97,10 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	// The engine's SELinux flag before the override is rendered (an
 	// engine call: never under mu; podman only, P10).
 	if h.rootlessOn() {
-		h.engineSELinux(context.Background())
+		// Unreadable: refused, never rendered unlabelled (M5).
+		if _, err := h.readEngineSELinux(context.Background()); err != nil {
+			return nil, statusErr(503, "can't read the container engine's security options (SELinux): %v", err)
+		}
 	}
 	h.mu.Lock()
 	live := t

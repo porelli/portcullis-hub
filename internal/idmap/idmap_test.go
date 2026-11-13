@@ -20,6 +20,7 @@ func TestParseShapes(t *testing.T) {
 		{name: "single remap", in: "0 100000 65536"},
 		{name: "range too small", in: "0 1001 1\n1 100000 65535"},
 		{name: "operator is root", in: "0 0 1\n1 100000 65536"},
+		{name: "subordinate range at host root", in: "0 1001 1\n1 0 65536"},
 		{name: "three ranges", in: "0 1001 1\n1 100000 65536\n65537 300000 10"},
 		{name: "second range not at 1", in: "0 1001 1\n2 100000 65536"},
 		{name: "first size not 1", in: "0 1001 2\n2 100000 65536"},

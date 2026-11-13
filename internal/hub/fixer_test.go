@@ -718,7 +718,7 @@ func TestFixerUnmappedMessage(t *testing.T) {
 		return &docker.RunResult{ExitCode: 2, Stdout: []byte(rep + "\n")}, nil
 	}
 	_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
-	want := "x is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 '/srv/media/x' once, then re-check"
+	want := "x is owned by a host account outside Portcullis' id range; run sudo chown -R '1001:1001' '/srv/media/x' once, then re-check"
 	if statusOf(err) != http.StatusConflict || err.Error() != want {
 		t.Errorf("err = %v (%d), want %q", err, statusOf(err), want)
 	}
@@ -726,7 +726,7 @@ func TestFixerUnmappedMessage(t *testing.T) {
 	rep = reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: um},
 		Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, ".")}})
 	_, err = f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
-	if want := ". is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 '/srv/media' once, then re-check"; err == nil || err.Error() != want {
+	if want := ". is owned by a host account outside Portcullis' id range; run sudo chown -R '1001:1001' '/srv/media' once, then re-check"; err == nil || err.Error() != want {
 		t.Errorf("root: %v", err)
 	}
 	// Without an id map (never under podman): no step.
@@ -742,9 +742,10 @@ func TestFixerUnmappedMessage(t *testing.T) {
 // that folderfix clipped gets no step at all.
 func TestUnmappedHintQuoting(t *testing.T) {
 	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
-	rep := &folderfix.Report{IDMap: &folderfix.IDMaps{UID: um, GID: um}}
+	gm, _ := idmap.Parse("0 1002 1\n1 200000 65536")
+	rep := &folderfix.Report{IDMap: &folderfix.IDMaps{UID: um, GID: gm}}
 	msg := func(rel string) string { return fmt.Sprintf(folderfix.UnmappedMsg, rel) }
-	step := func(q string) string { return "; run sudo chown -R 1001 " + q + " once, then re-check" }
+	step := func(q string) string { return "; run sudo chown -R '1001:1002' " + q + " once, then re-check" }
 	for _, c := range []struct {
 		name, rel, want string
 	}{
@@ -772,5 +773,26 @@ func TestUnmappedHintQuoting(t *testing.T) {
 	}
 	if got := unmappedHint(msg("x"), &folderfix.Report{}, "/srv/media"); got != "" {
 		t.Errorf("no map: %q", got)
+	}
+}
+
+// I2: a folder refused only for an unmapped group gets the uid:gid step
+// (a uid-only chown would leave the group, and the re-check refuse again).
+func TestFixerUnmappedGroupOnly(t *testing.T) {
+	f := newFixerFixture(t)
+	f.h.cfg.Runtime = docker.RuntimePodman
+	f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
+	f.engine.fx().secOpts = []string{"name=rootless"}
+	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
+	gm, _ := idmap.Parse("0 1001 1\n1 200000 65536")
+	rep := reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: gm},
+		Owners:   []folderfix.OwnerCount{{UID: 0, GID: idmap.Overflow, N: 1}},
+		Unmapped: folderfix.Count{N: 1, Sample: []string{"shared"}}, Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, "shared")}})
+	f.engine.fx().run = func(docker.RunSpec, func(io.Reader) error) (*docker.RunResult, error) {
+		return &docker.RunResult{ExitCode: 2, Stdout: []byte(rep + "\n")}, nil
+	}
+	_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	if want := "; run sudo chown -R '1001:1001' '/srv/media/shared' once, then re-check"; err == nil || !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("err = %v, want the uid:gid step %q", err, want)
 	}
 }

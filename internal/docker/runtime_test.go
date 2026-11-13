@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -253,5 +255,50 @@ func TestUnguarded(t *testing.T) {
 func TestNewRefusesNilGuard(t *testing.T) {
 	if _, err := New("tcp://x:2375", nil); err == nil {
 		t.Fatal("New with a nil guard accepted")
+	}
+}
+
+// I1: under a unix DOCKER_HOST whose socket is missing, the failed
+// /version read ("dial unix …") never reaches a refusal's text: the SDK
+// would replace such a transport error with its own unwrapped one. Every
+// guarded request still wraps ErrEngineRefused, and Message is the
+// guard's own refusal.
+func TestGuardRefusalSurvivesMissingSocket(t *testing.T) {
+	g := NewGuard(RuntimeDocker)
+	dir, err := os.MkdirTemp("/tmp", "pp-sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	c, err := New("unix://"+filepath.Join(dir, "missing.sock"), g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Verify(context.Background(), c); !errors.Is(err, ErrEngineRefused) {
+		t.Fatalf("Verify = %v", err)
+	}
+	if le := g.LastError(); le == nil || !strings.Contains(le.Error(), "dial unix") {
+		t.Fatalf("LastError = %v, want the dial error", le)
+	}
+	if strings.Contains(g.Err().Error(), "dial unix") || strings.Contains(g.Err().Error(), "connection refused") {
+		t.Errorf("the refusal carries the engine error: %v", g.Err())
+	}
+	for name, f := range map[string]func() error{
+		"ListContainers": func() error { _, err := c.ListContainers(context.Background(), nil); return err },
+		"Logs":           func() error { _, err := c.Logs(context.Background(), "x", 10, false); return err },
+		"SecurityOptions": func() error {
+			_, err := c.SecurityOptions(context.Background())
+			return err
+		},
+	} {
+		err := f()
+		if !errors.Is(err, ErrEngineRefused) {
+			t.Errorf("%s = %v, want ErrEngineRefused", name, err)
+			continue
+		}
+		var re *RefusedError
+		if !errors.As(err, &re) || re.Message() != g.Err().Error() {
+			t.Errorf("%s: message %q, want the guard's %q", name, re.Message(), g.Err())
+		}
 	}
 }

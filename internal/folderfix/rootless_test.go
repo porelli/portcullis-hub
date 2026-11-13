@@ -230,3 +230,18 @@ func TestRestoreRefusesUnmapped(t *testing.T) {
 		t.Error("a refused restore changed something")
 	}
 }
+
+// I2: an entry whose group alone is a host group outside the subgid range
+// (users, nogroup, another user's group) reads gid 65534: unmapped too.
+func TestScanCountsUnmappedGroupOnly(t *testing.T) {
+	withIDMaps(t, podmanUIDMap, podmanGIDMap)
+	root := simpleTree(t)
+	withOwner(t, map[string][2]uint32{"g": {0, idmap.Overflow}})
+	r, err := Scan(Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Unmapped.N != 1 || r.Unmapped.Sample[0] != "g" {
+		t.Errorf("unmapped = %+v", r.Unmapped)
+	}
+}

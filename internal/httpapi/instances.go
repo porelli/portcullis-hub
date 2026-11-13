@@ -637,8 +637,6 @@ func (s *Server) handleInstanceOp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rec)
 }
 
-// handleInstanceOps is every instance's current record in short (the
-// UI's card states in one request; contract §11.7).
 // handleRuntime is GET /api/runtime (contract §11): the container engine,
 // its verification and, under podman, the id maps and port start.
 func (s *Server) handleRuntime(w http.ResponseWriter, r *http.Request) {
@@ -655,6 +653,8 @@ func (s *Server) runtime(ctx context.Context) hub.RuntimeView {
 	return s.Hub.Runtime(ctx)
 }
 
+// handleInstanceOps is every instance's current record in short (the
+// UI's card states in one request; contract §11.7).
 func (s *Server) handleInstanceOps(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return

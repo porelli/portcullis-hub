@@ -84,11 +84,12 @@ func (m Map) Identity() bool {
 
 // Consistent reports the rootless Podman default namespace: exactly
 // container 0 → the operator (a non-root host id), then container ids
-// from 1 → one subordinate range of at least MinSubordinate ids.
+// from 1 → one subordinate range of at least MinSubordinate ids that
+// doesn't start at host root (container uid 1 would be host uid 0).
 func (m Map) Consistent() bool {
 	return len(m) == 2 &&
 		m[0].Container == 0 && m[0].Size == 1 && m[0].Host != 0 &&
-		m[1].Container == 1 && m[1].Size >= MinSubordinate
+		m[1].Container == 1 && m[1].Size >= MinSubordinate && m[1].Host != 0
 }
 
 // ToHost translates container id c to its host id; false when the map

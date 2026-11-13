@@ -75,6 +75,8 @@ func TestRootlessCompatRules(t *testing.T) {
 			Compat{CompatRefused, []string{"service a runs as id 70000, outside the rootless id range (0–65535)"}}},
 		{"refused hides degraded", "services:\n  a:\n    image: x\n    network_mode: host\n    cap_add: [SYS_RAWIO]\n", Manifest{}, nil,
 			Compat{CompatRefused, []string{"service a needs SYS_RAWIO (raw device access needs host root)"}}},
+		{"network_mode from a variable", "services:\n  a:\n    image: x\n    network_mode: ${NM:-host}\n", Manifest{}, nil,
+			Compat{CompatDegraded, []string{"host networking: published ports must stay at or above 80"}}},
 		{"unreadable compose", "services: [", Manifest{}, nil, Compat{CompatRefused, nil}},
 	} {
 		got := RootlessCompat([]byte(c.compose), c.m, c.env, 80)

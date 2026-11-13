@@ -21,22 +21,29 @@ import (
 // (the engine doesn't change under a running Hub). false while unknown.
 // Never call it holding mu (an engine call).
 func (h *Hub) engineSELinux(ctx context.Context) bool {
+	on, _ := h.readEngineSELinux(ctx)
+	return on
+}
+
+// readEngineSELinux is engineSELinux with the read's error (nil when
+// cached, or nothing to read yet).
+func (h *Hub) readEngineSELinux(ctx context.Context) (bool, error) {
 	h.selinuxMu.Lock()
 	known, on := h.selinuxKnown, h.selinuxOn
 	h.selinuxMu.Unlock()
 	if known || h.engine == nil || !h.engineVerifiedNow() || h.cfg.Guard == nil {
-		return on
+		return on, nil
 	}
 	opts, err := h.engine.SecurityOptions(ctx)
 	if err != nil {
 		log.Printf("engine: can't read the security options: %v", err)
-		return false
+		return false, err
 	}
 	on = securityOption(opts, "selinux")
 	h.selinuxMu.Lock()
 	h.selinuxKnown, h.selinuxOn = true, on
 	h.selinuxMu.Unlock()
-	return on
+	return on, nil
 }
 
 // selinuxCached is engineSELinux's cached answer (false while unknown);
@@ -138,8 +145,20 @@ func relabelBindEntry(source, target string, readOnly bool) string {
 // core's checkout, the project directory).
 const templateBindPrefix = "./templates/"
 
+// docsBind: core's documentation tree (the docs template's ./docs bind):
+// read-only, public, never secrets — labelled like the template's own
+// files, since core's SELinux overlay covers only core's services.
+const docsBind = "./docs"
+
+// relabelSource: a bind source the Hub labels (P10, ruling I4): the
+// template's own files and core's docs tree.
+func relabelSource(src string) bool {
+	return strings.HasPrefix(src, templateBindPrefix) || src == docsBind || strings.HasPrefix(src, docsBind+"/")
+}
+
 // selinuxRelabels are, per service of compose, its binds of the
-// template's own files (sources under ./templates/, literal) re-declared
+// template's own files (literal sources under ./templates/) and of core's
+// docs tree (./docs) re-declared
 // with bind.selinux z (compose merges a service's volumes by target).
 // Binds that already set a label (z / Z, bind.selinux) and anything else
 // — shared folders, named volumes, other host paths — are left alone:
@@ -196,8 +215,15 @@ func templateBind(v *yaml.Node) (src, dst string, ro, ok bool) {
 		if t := mapField(v, "type"); t == nil || t.Value != "bind" {
 			return "", "", false, false
 		}
-		if b := mapField(v, "bind"); b != nil && mapField(b, "selinux") != nil {
-			return "", "", false, false
+		// Only type / source / target / read_only are re-declared: a
+		// bind with anything else (bind.*, consistency, volume.*) is left
+		// as the template wrote it.
+		for i := 0; i+1 < len(v.Content); i += 2 {
+			switch v.Content[i].Value {
+			case "type", "source", "target", "read_only":
+			default:
+				return "", "", false, false
+			}
 		}
 		s, d := mapField(v, "source"), mapField(v, "target")
 		if s == nil || d == nil {
@@ -210,7 +236,7 @@ func templateBind(v *yaml.Node) (src, dst string, ro, ok bool) {
 	default:
 		return "", "", false, false
 	}
-	if !strings.HasPrefix(src, templateBindPrefix) || strings.Contains(src, "$") || strings.Contains(dst, "$") ||
+	if !relabelSource(src) || strings.Contains(src, "$") || strings.Contains(dst, "$") ||
 		strings.Contains(src, "..") || dst == "" {
 		return "", "", false, false
 	}

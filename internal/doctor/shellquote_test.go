@@ -16,7 +16,7 @@ func TestShellQuote(t *testing.T) {
 			t.Errorf("%q: %q %v, want %q", in, got, ok, want)
 		}
 	}
-	for _, bad := range []string{"", "/srv/a\nb", "/srv/a\rb", "/srv/\x00", "/srv/\x7f", "/srv/ ", "/srv/\xff", "/srv/\u0085"} {
+	for _, bad := range []string{"", "/srv/a\nb", "/srv/a\rb", "/srv/\x00", "/srv/\x7f", "/srv/ ", "/srv/\xff", "/srv/\u0085", "/srv/a\u202eb", "/srv/a\u200bb", "/srv/\u2066x"} {
 		if got, ok := ShellQuote(bad); ok || got != "" {
 			t.Errorf("%q accepted: %q", bad, got)
 		}

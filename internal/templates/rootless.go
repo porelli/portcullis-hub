@@ -266,7 +266,7 @@ func (c *compatReasons) service(name string, s *yaml.Node, env map[string]string
 	for _, g := range groups {
 		c.id(name, resolve(g, env))
 	}
-	if nm := field(s, "network_mode"); nm != nil && nm.Kind == yaml.ScalarNode && nm.Value == "host" {
+	if nm := field(s, "network_mode"); nm != nil && nm.Kind == yaml.ScalarNode && resolve(nm.Value, env) == "host" {
 		c.degrade("host networking: published ports must stay at or above %d", portStart)
 	}
 }

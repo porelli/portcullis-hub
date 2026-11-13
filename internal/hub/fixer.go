@@ -414,8 +414,9 @@ func fixerIDsAllowed(rt docker.Runtime, opts []string) error {
 }
 
 // unmappedHint is the host step appended to the fixer's unmapped-owner
-// refusal (contract §14.2): the operator uid (the report's uid map,
-// container 0) and the host path (source joined with the entry), the
+// refusal (contract §14.2): the operator's uid:gid (the report's maps,
+// container 0; an entry is unmapped by its uid or its gid) and the host
+// path (source joined with the entry), the
 // path POSIX single-quoted (doctor.ShellQuote) — the entry's name comes
 // from the folder's files and the operator pastes the step into a root
 // shell. "" when msg isn't that refusal, the report has no map, the name
@@ -428,19 +429,15 @@ func unmappedHint(msg string, rep *folderfix.Report, source string) string {
 	if !ok || rel == "" || rep.IDMap == nil || strings.HasSuffix(rel, "…") {
 		return ""
 	}
-	op, ok := rep.IDMap.UID.ToHost(0)
-	if !ok {
-		return ""
-	}
 	host := source
 	if rel != "." {
 		host = path.Join(source, rel)
 	}
-	q, ok := doctor.ShellQuote(host)
+	cmd, ok := doctor.ChownStep(rep.IDMap, host)
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("; run sudo chown -R %d %s once, then re-check", op, q)
+	return "; run " + cmd + " once, then re-check"
 }
 
 func zero(v any) {

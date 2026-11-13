@@ -5,6 +5,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/portcullis/hub/internal/folderfix"
 )
 
 // Rootless Podman (contract §14.5): five kinds that run only under
@@ -151,24 +153,20 @@ func unmappedOwners(in *Inputs) []Finding {
 		}
 		u := s.Report.Unmapped
 		steps := []string{}
-		if s.Report.IDMap != nil {
-			if op, ok := s.Report.IDMap.UID.ToHost(0); ok {
-				for _, rel := range u.Sample {
-					if strings.HasSuffix(rel, "…") {
-						continue // clipped: not the entry's real name
-					}
-					host := p
-					if rel != "." {
-						host = path.Join(p, rel)
-					}
-					if q, ok := ShellQuote(host); ok {
-						steps = append(steps, fmt.Sprintf("On the host, as root: `sudo chown -R %d %s` (once).", op, q))
-					}
-				}
+		for _, rel := range u.Sample {
+			if strings.HasSuffix(rel, "…") {
+				continue // clipped: not the entry's real name
+			}
+			host := p
+			if rel != "." {
+				host = path.Join(p, rel)
+			}
+			if cmd, ok := ChownStep(s.Report.IDMap, host); ok {
+				steps = append(steps, "On the host, as root: `"+cmd+"` (once).")
 			}
 		}
 		if len(steps) == 0 {
-			steps = append(steps, "On the host, as root, give the entries listed to the operator (sudo chown -R <operator> <path>), once.")
+			steps = append(steps, "On the host, as root, give the entries listed to the operator (sudo chown -R <operator uid>:<operator gid> <path>), once.")
 		}
 		steps = append(steps, "Run the disk check again (Doctor → Check disks).")
 		f := Finding{
@@ -218,7 +216,7 @@ func selinuxLabelMissing(in *Inputs) []Finding {
 			why = "Its scan failed with permission denied: with SELinux enforcing, rootless containers can't read a folder that isn't labelled " + selinuxContainerType + "."
 		}
 		steps := []string{"Portcullis never relabels shared folders itself: on the host, as root, run once:"}
-		qr, ok1 := ShellQuote(p + "(/.*)?")
+		qr, ok1 := ShellQuote(regexQuote(p) + "(/.*)?")
 		qp, ok2 := ShellQuote(p)
 		if ok1 && ok2 {
 			steps = append(steps, "semanage fcontext -a -t "+selinuxContainerType+" "+qr, "restorecon -R "+qp)
@@ -266,4 +264,40 @@ func udpSourceRewritten(in *Inputs) []Finding {
 		})
 	}
 	return out
+}
+
+// ChownStep is the operator command that gives host path p back to the
+// operator (contract §14.2): `sudo chown -R '<uid>:<gid>' '<path>'`, the
+// uid and gid the maps' container 0 (an entry counts as unmapped when its
+// uid or its gid is). ok false: no maps, or p can't be one shell word.
+func ChownStep(m *folderfix.IDMaps, p string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	uid, ok1 := m.UID.ToHost(0)
+	gid, ok2 := m.GID.ToHost(0)
+	if !ok1 || !ok2 {
+		return "", false
+	}
+	owner, _ := ShellQuote(fmt.Sprintf("%d:%d", uid, gid))
+	qp, ok := ShellQuote(p)
+	if !ok {
+		return "", false
+	}
+	return "sudo chown -R " + owner + " " + qp, true
+}
+
+// regexQuote escapes p for semanage fcontext, which takes a regular
+// expression (POSIX extended, PCRE-compatible here): a folder path's
+// metacharacters must match only themselves, or the rule would also
+// label other paths (/srv/media.old matching /srv/mediaXold).
+func regexQuote(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		if strings.ContainsRune(`\.^$|?*+()[]{}`, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

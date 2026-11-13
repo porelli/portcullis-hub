@@ -244,7 +244,7 @@ func writeErr(w http.ResponseWriter, err error, def int) {
 	// request decoration ("error during connect: Get …").
 	var refused *docker.RefusedError
 	if errors.As(err, &refused) {
-		http.Error(w, clipMessage(refused.Error(), 2000), code)
+		http.Error(w, clipMessage(refused.Message(), 2000), code)
 		return
 	}
 	// Errors that went through an op record were redacted, then clipped

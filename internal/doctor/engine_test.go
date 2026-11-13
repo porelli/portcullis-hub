@@ -78,7 +78,7 @@ func TestUnmappedOwnerWarning(t *testing.T) {
 		t.Fatalf("%+v", f)
 	}
 	steps := strings.Join(f[0].Steps, "\n")
-	for _, want := range []string{"sudo chown -R 1001 '/srv/media/a'", "sudo chown -R 1001 '/srv/media/b c'"} {
+	for _, want := range []string{"sudo chown -R '1001:1001' '/srv/media/a'", "sudo chown -R '1001:1001' '/srv/media/b c'"} {
 		if !strings.Contains(steps, want) {
 			t.Errorf("steps lack %q:\n%s", want, steps)
 		}
@@ -129,5 +129,31 @@ func TestUDPSourceRewritten(t *testing.T) {
 	f := engineFindings(engineInputs(t, podmanEngine()), KindUDPSourceRewritten)
 	if len(f) != 1 || f[0].Severity != Info || f[0].Instances[0] != "dns" || !strings.Contains(f[0].Why, "53/udp") {
 		t.Fatalf("%+v", f)
+	}
+}
+
+// I3: semanage fcontext takes a regex: the path is escaped, then
+// shell-quoted; restorecon gets the plain quoted path.
+func TestSELinuxStepRegexEscaped(t *testing.T) {
+	for p, want := range map[string]string{
+		"/srv/media.old":   `'/srv/media\.old(/.*)?'`,
+		"/srv/a+b":         `'/srv/a\+b(/.*)?'`,
+		"/srv/[x]":         `'/srv/\[x\](/.*)?'`,
+		"/srv/data(1)":     `'/srv/data\(1\)(/.*)?'`,
+		"/srv/my photos":   `'/srv/my photos(/.*)?'`,
+		"/srv/it's":        `'/srv/it'\''s(/.*)?'`,
+		"/srv/a^b$c|d?e*f": `'/srv/a\^b\$c\|d\?e\*f(/.*)?'`,
+	} {
+		in := &Inputs{Engine: &EngineIn{Runtime: "podman", SELinux: true},
+			Scans: map[string]ScanIn{p: {Folder: "f", Report: &folderfix.Report{SELinux: "u:object_r:user_home_t:s0"}}}}
+		f := engineFindings(in, KindSELinuxLabelMissing)
+		if len(f) != 1 {
+			t.Fatalf("%s: %+v", p, f)
+		}
+		steps := strings.Join(f[0].Steps, "\n")
+		qp, _ := ShellQuote(p)
+		if !strings.Contains(steps, "semanage fcontext -a -t container_file_t "+want) || !strings.Contains(steps, "restorecon -R "+qp) {
+			t.Errorf("%s: steps\n%s\nwant %s", p, steps, want)
+		}
 	}
 }

@@ -48,9 +48,38 @@ const (
 var ErrEngineRefused = errors.New("the container engine is not verified")
 
 // RefusedError is the guard's refusal; errors.Is(err, ErrEngineRefused).
-type RefusedError struct{ Why string }
+// guard (set on the request hook's refusals) names the guard whose
+// current refusal Message reports.
+type RefusedError struct {
+	Why   string
+	guard *Guard
+}
 
 func (e *RefusedError) Error() string { return ErrEngineRefused.Error() + ": " + e.Why }
+
+// Message is the refusal to show: the guard's current one when e came
+// from a request (its fixed text never carries the guard's reasons, see
+// guardHook), else e's own.
+func (e *RefusedError) Message() string {
+	if e.guard != nil {
+		if err := e.guard.Err(); err != nil {
+			return err.Error()
+		}
+	}
+	return e.Error()
+}
+
+// hookWhy is the fixed text of a request the guard refused. It never
+// carries an engine error or engine names: the SDK replaces a transport
+// error whose text holds "connection refused" or "dial unix" with its own
+// unwrapped error (moby client request.go), which would lose
+// ErrEngineRefused and with it the 503.
+const hookWhy = "engine operations wait until the start-time check passes (GET /api/runtime shows why)"
+
+// whyUnanswered is the guard's refusal while the engine's /version can't
+// be read (the read error itself is logged and kept in LastError, never
+// put into the refusal).
+const whyUnanswered = "the engine's /version doesn't answer yet"
 
 // Is makes errors.Is(err, ErrEngineRefused) hold.
 func (e *RefusedError) Is(target error) bool { return target == ErrEngineRefused }
@@ -116,6 +145,7 @@ type Guard struct {
 	info     EngineInfo
 	verified chan struct{}
 	settled  chan struct{}
+	lastErr  error // the last failed /version read (logged by Run)
 }
 
 // NewGuard returns an unverified guard for want.
@@ -146,6 +176,13 @@ func (g *Guard) Info() EngineInfo {
 	return g.info
 }
 
+// LastError is the last failed /version read (nil: none).
+func (g *Guard) LastError() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.lastErr
+}
+
 // Verified is closed once the engine is verified.
 func (g *Guard) Verified() <-chan struct{} { return g.verified }
 
@@ -170,7 +207,8 @@ func (g *Guard) Verify(ctx context.Context, r VersionReader) error {
 		return g.err
 	}
 	if err != nil {
-		g.err = &RefusedError{Why: "can't read the engine's version: " + err.Error()}
+		g.lastErr = err
+		g.err = &RefusedError{Why: whyUnanswered}
 		return g.err
 	}
 	rt := RuntimeOf(cs)
@@ -223,13 +261,16 @@ func (g *Guard) Run(ctx context.Context, r VersionReader, every time.Duration) {
 		msg := "ok"
 		if err != nil {
 			msg = err.Error()
+			if le := g.LastError(); le != nil && g.Info().Mismatch == "" {
+				msg += " (" + le.Error() + ")"
+			}
 		}
 		if msg != last {
 			if err == nil {
 				i := g.Info()
 				log.Printf("engine: verified: %s %s (HUB_CONTAINER_RUNTIME=%s)", i.Engine, i.Version, i.Runtime)
 			} else {
-				log.Printf("engine: %v — engine operations answer 503", err)
+				log.Printf("engine: %s — engine operations answer 503", msg)
 			}
 			last = msg
 		}
@@ -267,10 +308,10 @@ func unguarded(r *http.Request) bool {
 // requests returns the guard's error while it has one.
 func guardHook(g *Guard) client.RequestHook {
 	return func(r *http.Request) error {
-		if unguarded(r) {
+		if unguarded(r) || g.Err() == nil {
 			return nil
 		}
-		return g.Err()
+		return &RefusedError{Why: hookWhy, guard: g}
 	}
 }
 
