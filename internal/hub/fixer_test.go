@@ -718,7 +718,7 @@ func TestFixerUnmappedMessage(t *testing.T) {
 		return &docker.RunResult{ExitCode: 2, Stdout: []byte(rep + "\n")}, nil
 	}
 	_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
-	want := "x is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 /srv/media/x once, then re-check"
+	want := "x is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 '/srv/media/x' once, then re-check"
 	if statusOf(err) != http.StatusConflict || err.Error() != want {
 		t.Errorf("err = %v (%d), want %q", err, statusOf(err), want)
 	}
@@ -726,7 +726,7 @@ func TestFixerUnmappedMessage(t *testing.T) {
 	rep = reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: um},
 		Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, ".")}})
 	_, err = f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
-	if want := ". is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 /srv/media once, then re-check"; err == nil || err.Error() != want {
+	if want := ". is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 '/srv/media' once, then re-check"; err == nil || err.Error() != want {
 		t.Errorf("root: %v", err)
 	}
 	// Without an id map (never under podman): no step.
@@ -734,5 +734,43 @@ func TestFixerUnmappedMessage(t *testing.T) {
 	_, err = f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
 	if err == nil || strings.Contains(err.Error(), "sudo") {
 		t.Errorf("no map: %v", err)
+	}
+}
+
+// The host step is pasted into a root shell: the path is one POSIX
+// single-quoted word, and a name that can't be (a control character) or
+// that folderfix clipped gets no step at all.
+func TestUnmappedHintQuoting(t *testing.T) {
+	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
+	rep := &folderfix.Report{IDMap: &folderfix.IDMaps{UID: um, GID: um}}
+	msg := func(rel string) string { return fmt.Sprintf(folderfix.UnmappedMsg, rel) }
+	step := func(q string) string { return "; run sudo chown -R 1001 " + q + " once, then re-check" }
+	for _, c := range []struct {
+		name, rel, want string
+	}{
+		{"plain", "photos/a.jpg", step("'/srv/media/photos/a.jpg'")},
+		{"spaces", "my photos/a b.jpg", step("'/srv/media/my photos/a b.jpg'")},
+		{"single quote", "it's", step(`'/srv/media/it'\''s'`)},
+		{"command substitution", "$(id)", step("'/srv/media/$(id)'")},
+		{"backticks", "`id`", step("'/srv/media/`id`'")},
+		{"semicolon", "x; rm -rf ~", step("'/srv/media/x; rm -rf ~'")},
+		{"newline", "x\nrm -rf ~", ""},
+		{"carriage return", "x\rrm", ""},
+		{"tab", "x\ty", ""},
+		{"line separator", "x\u2028y", ""},
+		{"invalid UTF-8", "x\xffy", ""},
+		{"clipped name", "very/long/name…", ""},
+		{"root", ".", step("'/srv/media'")},
+	} {
+		if got := unmappedHint(msg(c.rel), rep, "/srv/media"); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+	// Not the unmapped refusal, or no map: no step.
+	if got := unmappedHint("something else", rep, "/srv/media"); got != "" {
+		t.Errorf("other refusal: %q", got)
+	}
+	if got := unmappedHint(msg("x"), &folderfix.Report{}, "/srv/media"); got != "" {
+		t.Errorf("no map: %q", got)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/settings"
 )
@@ -414,12 +415,17 @@ func fixerIDsAllowed(rt docker.Runtime, opts []string) error {
 
 // unmappedHint is the host step appended to the fixer's unmapped-owner
 // refusal (contract §14.2): the operator uid (the report's uid map,
-// container 0) and the host path (source joined with the entry). "" when
-// msg isn't that refusal or the report has no map.
+// container 0) and the host path (source joined with the entry), the
+// path POSIX single-quoted (doctor.ShellQuote) — the entry's name comes
+// from the folder's files and the operator pastes the step into a root
+// shell. "" when msg isn't that refusal, the report has no map, the name
+// was clipped (folderfix clips a sample to 200 runes, ending it with
+// "…": the path would be another one) or the path holds a control
+// character or invalid UTF-8.
 func unmappedHint(msg string, rep *folderfix.Report, source string) string {
 	suffix := strings.TrimPrefix(folderfix.UnmappedMsg, "%s")
 	rel, ok := strings.CutSuffix(msg, suffix)
-	if !ok || rel == "" || rep.IDMap == nil {
+	if !ok || rel == "" || rep.IDMap == nil || strings.HasSuffix(rel, "…") {
 		return ""
 	}
 	op, ok := rep.IDMap.UID.ToHost(0)
@@ -430,7 +436,11 @@ func unmappedHint(msg string, rep *folderfix.Report, source string) string {
 	if rel != "." {
 		host = path.Join(source, rel)
 	}
-	return fmt.Sprintf("; run sudo chown -R %d %s once, then re-check", op, host)
+	q, ok := doctor.ShellQuote(host)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("; run sudo chown -R %d %s once, then re-check", op, q)
 }
 
 func zero(v any) {
