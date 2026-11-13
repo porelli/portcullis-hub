@@ -235,8 +235,8 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 var forwarderImageRe = regexp.MustCompile(`^ghcr\.io/porelli/portcullis-forwarder(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$`)
 
 // checkVPNIngress: the ingress service exists and can join a network; no
-// service of a VPN template uses host networking or the host's pid
-// namespace; every service in the ingress's network namespace (the
+// service of a VPN template uses the host's pid namespace, and none with
+// a Traefik router or label uses host networking; every service in the ingress's network namespace (the
 // ingress and the services joining it, chains followed) is no job, no AI
 // companion, has no Traefik router or label and publishes no ports, and
 // besides the ingress only the pinned forwarder may join it;
@@ -252,8 +252,11 @@ func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 		return fmt.Errorf("vpn.ingress.service: %s has network_mode", s)
 	}
 	names := slices.Sorted(maps.Keys(infos))
+	// Host networking only off the VPN path (a relay may keep it): never
+	// on a service with a Traefik router or label; the host's pid
+	// namespace on none.
 	for _, n := range names {
-		if infos[n].netModeOf == "host" {
+		if infos[n].netModeOf == "host" && (len(routes.Routers[n]) > 0 || routes.TraefikLabelled[n]) {
 			return fmt.Errorf("vpn: service %s uses network_mode: host", n)
 		}
 		if infos[n].pidOf == "host" {

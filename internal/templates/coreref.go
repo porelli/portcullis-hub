@@ -50,7 +50,10 @@ var (
 		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
-		"group_gate_data", "wg_data")
+		"group_gate_data", "wg_data", "vpn_doc")
+	// coreAliases are core's network aliases that aren't service names
+	// (wg's metrics address on portcullis): reserved DNS names too.
+	coreAliases = set("wg-metrics")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
@@ -64,7 +67,7 @@ func reservedDNSName(name string) bool {
 	n := strings.TrimSuffix(FoldKey(strings.TrimSpace(name)), ".")
 	first, _, _ := strings.Cut(n, ".")
 	for _, c := range []string{n, first} {
-		if coreServices[c] {
+		if coreServices[c] || coreAliases[c] {
 			return true
 		}
 		if m := coreContainerRe.FindStringSubmatch(c); m != nil && coreServices[m[1]] {
@@ -822,8 +825,8 @@ var (
 	// both, or merges them).
 	coreTraefikNames = map[string]map[string]bool{
 		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
-			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp"),
-		"middlewares": set("directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
+			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp", "people-vpn-enrol"),
+		"middlewares": set("vpn-required-path", "directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
 		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate"),
 	}

@@ -44,6 +44,13 @@ const (
 	BuiltinMTU   = 1280
 	StatusMaxAge = 30 * time.Second
 
+	// Provider sources (vpn.json providers[].source).
+	SourceBuiltin = "builtin"
+	SourceHook    = "hook"
+	SourceStatic  = "static"
+	// MaxStaleWindow bounds stale_after − refreshed_at of a hook map.
+	MaxStaleWindow = 30 * time.Minute
+
 	// BuiltinID is the built-in people provider's id.
 	BuiltinID = "builtin"
 	// FileName is vpn.json's name in the Hub's data directory (policy
@@ -51,8 +58,8 @@ const (
 	FileName = "vpn.json"
 )
 
-// FileGID is the group vpn.json is chowned to (10001: the Hub's own
-// group, which group-gate and wg are members of). A variable for tests.
+// FileGID is Write's group (the Hub passes its configured group to
+// WriteGroup; a variable for tests).
 var FileGID = 10001
 
 // Doc is vpn.json v2.
@@ -81,11 +88,15 @@ type Peer struct {
 
 // Provider is one provider: the built-in one or a wired instance.
 type Provider struct {
-	ID          string     `json:"id"`
-	Label       string     `json:"label,omitempty"`
-	Ranges      []string   `json:"ranges"`
-	EdgePort    int        `json:"edge_port"`
-	GatewayIP   string     `json:"gateway_ip"`
+	ID        string   `json:"id"`
+	Label     string   `json:"label,omitempty"`
+	Ranges    []string `json:"ranges"`
+	EdgePort  int      `json:"edge_port"`
+	GatewayIP string   `json:"gateway_ip"`
+	// Source is builtin, hook or static (required): a hook map needs
+	// refreshed_at and stale_after (at most 30 min apart), builtin and
+	// static ones have neither.
+	Source      string     `json:"source"`
 	RefreshedAt *time.Time `json:"refreshed_at,omitempty"`
 	StaleAfter  *time.Time `json:"stale_after,omitempty"`
 	Stale       bool       `json:"stale"`
@@ -102,7 +113,11 @@ type Device struct {
 }
 
 // Write writes d to path atomically, mode 0640, group FileGID.
-func Write(path string, d Doc) error {
+func Write(path string, d Doc) error { return WriteGroup(path, d, FileGID) }
+
+// WriteGroup is Write with the file's group: the one group shared only
+// with vpn.json's readers (wg and group-gate).
+func WriteGroup(path string, d Doc, gid int) error {
 	if d.Providers == nil {
 		d.Providers = []Provider{}
 	}
@@ -119,7 +134,7 @@ func Write(path string, d Doc) error {
 	if err := fsutil.WriteFileAtomic(path, append(b, '\n'), 0o640); err != nil {
 		return err
 	}
-	return os.Chown(path, -1, FileGID)
+	return os.Chown(path, -1, gid)
 }
 
 // strictJSON decodes b into v, refusing unknown keys and trailing data.
@@ -154,6 +169,7 @@ func Parse(b []byte) (*Doc, error) {
 		return nil, fmt.Errorf("version %d: only version %d is understood", d.Version, DocVersion)
 	}
 	ranges := map[string][]netip.Prefix{}
+	ports := map[int]string{}
 	var all []netip.Prefix
 	var allOwner []string
 	for _, p := range d.Providers {
@@ -185,8 +201,11 @@ func Parse(b []byte) (*Doc, error) {
 			if d.Builtin == nil {
 				return nil, fmt.Errorf("missing builtin with a builtin provider")
 			}
-			if p.EdgePort != 0 || p.GatewayIP != "" {
-				return nil, fmt.Errorf("provider builtin has an edge port or a gateway")
+			if p.Source != SourceBuiltin {
+				return nil, fmt.Errorf("provider builtin: source %q must be builtin", p.Source)
+			}
+			if p.EdgePort != 0 || p.GatewayIP != "" || p.RefreshedAt != nil || p.StaleAfter != nil {
+				return nil, fmt.Errorf("provider builtin has an edge port, a gateway, refreshed_at or stale_after")
 			}
 		} else {
 			if p.EdgePort < EdgePortBase || p.EdgePort > EdgePortBase+GatewayLast-GatewayFirst {
@@ -194,6 +213,31 @@ func Parse(b []byte) (*Doc, error) {
 			}
 			if a, err := netip.ParseAddr(p.GatewayIP); err != nil || !a.Is4() {
 				return nil, fmt.Errorf("provider %s: gateway_ip %q is not an IPv4 address", p.ID, p.GatewayIP)
+			}
+			if ports[p.EdgePort] != "" {
+				return nil, fmt.Errorf("providers %s and %s share edge_port %d", ports[p.EdgePort], p.ID, p.EdgePort)
+			}
+			ports[p.EdgePort] = p.ID
+			switch p.Source {
+			case SourceHook:
+				// A hook map carries its own expiry: a file without one
+				// could never go stale (a stopped Hub must end in deny).
+				if p.RefreshedAt == nil || p.StaleAfter == nil {
+					return nil, fmt.Errorf("provider %s (hook) has no refreshed_at or no stale_after", p.ID)
+				}
+				if !p.StaleAfter.After(*p.RefreshedAt) {
+					return nil, fmt.Errorf("provider %s: stale_after is not after refreshed_at", p.ID)
+				}
+				if p.StaleAfter.Sub(*p.RefreshedAt) > MaxStaleWindow {
+					return nil, fmt.Errorf("provider %s: stale_after is more than 30 min after refreshed_at", p.ID)
+				}
+			case SourceStatic:
+				// An admin's assignments never go stale.
+				if p.RefreshedAt != nil || p.StaleAfter != nil {
+					return nil, fmt.Errorf("provider %s (static) has refreshed_at or stale_after", p.ID)
+				}
+			default:
+				return nil, fmt.Errorf("provider %s: source %q must be hook or static", p.ID, p.Source)
 			}
 		}
 	}
