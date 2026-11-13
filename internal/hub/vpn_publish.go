@@ -127,6 +127,13 @@ func (h *Hub) vpnDocLocked(st *vpn.Status) (vpn.Doc, time.Duration) {
 		if err != nil {
 			continue // unpublished: its addresses are denied
 		}
+		// Never a range core reserves (core refuses such a file).
+		if core.ReservedBad {
+			continue
+		}
+		if _, _, clash := vpn.FirstOverlap(ranges, core.Reserved); clash {
+			continue
+		}
 		if doc.Builtin != nil {
 			if sub, err := netip.ParsePrefix(doc.Builtin.Subnet); err == nil {
 				if _, _, clash := vpn.FirstOverlap(ranges, []netip.Prefix{sub}); clash {
