@@ -3,9 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -30,9 +33,11 @@ type (
 	vpnAssignArgs struct {
 		ID string `json:"id"`
 		IP string `json:"ip"`
-		// User and Name assign; both empty unassigns.
-		User string `json:"user,omitempty"`
-		Name string `json:"name,omitempty"`
+		// User and Name assign; Remove (with neither) unassigns (the
+		// contract's two shapes, anything else is refused).
+		User   string `json:"user,omitempty"`
+		Name   string `json:"name,omitempty"`
+		Remove bool   `json:"remove,omitempty"`
 	}
 	vpnReachArgs struct {
 		ID          string   `json:"id"`
@@ -84,10 +89,10 @@ func (s *Server) registerVPNTools() {
 				}
 				return s.setVPNProvider(ctx, toolActor(ctx, c), in.ID, vpnProviderArgs{Wired: in.Wired, Refresh: in.Refresh})
 			}},
-		{Name: "assign_vpn_address", Description: "Assign an address of a static VPN provider (a plain WireGuard app) to a person and device name, or remove the assignment (no user and name). Assigning needs your confirmation in the browser.",
+		{Name: "assign_vpn_address", Description: "Assign an address of a static VPN provider (a plain WireGuard app) to a person and device name, or remove the assignment (remove: true, no user or name). Assigning needs your confirmation in the browser.",
 			Class: ClassDestructive, Scope: ScopeAdmin, Twin: "PUT /api/instances/{id}/vpn-static/{ip}", AlsoTwins: []string{"DELETE /api/instances/{id}/vpn-static/{ip}"}, Audit: "vpn.static_assigned", In: vpnAssignArgs{},
 			ClassFor: func(_ context.Context, args json.RawMessage) ToolClass {
-				if a, err := decode[vpnAssignArgs](args); err == nil && a.User == "" && a.Name == "" {
+				if a, err := decode[vpnAssignArgs](args); err == nil && a.Remove && a.User == "" && a.Name == "" {
 					return ClassWrite
 				}
 				return ClassDestructive
@@ -102,7 +107,10 @@ func (s *Server) registerVPNTools() {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err
 				}
-				if in.User == "" && in.Name == "" {
+				if in.Remove == (in.User != "" || in.Name != "") || !in.Remove && (in.User == "" || in.Name == "") {
+					return nil, &hub.StatusError{Status: http.StatusBadRequest, Err: errors.New("give user and name, or remove: true")}
+				}
+				if in.Remove {
 					if err := s.unassignVPN(ctx, toolActor(ctx, c), in.ID, in.IP); err != nil {
 						return nil, err
 					}

@@ -416,7 +416,7 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "PUT", path: "/api/instances/cloud/vpn-provider", body: `{"wired":false}`},
 		{tool: "assign_vpn_address", args: map[string]any{"id": "cloud", "ip": "10.8.0.5", "user": "erin", "name": "desk"},
 			method: "PUT", path: "/api/instances/cloud/vpn-static/10.8.0.5", body: `{"user":"erin","name":"desk"}`},
-		{tool: "assign_vpn_address", args: map[string]any{"id": "cloud", "ip": "10.8.0.5"},
+		{tool: "assign_vpn_address", args: map[string]any{"id": "cloud", "ip": "10.8.0.5", "remove": true},
 			method: "DELETE", path: "/api/instances/cloud/vpn-static/10.8.0.5", body: ``},
 		{tool: "set_instance_reach", args: map[string]any{"id": "cloud", "mode": "vpn", "via": []string{"*"}},
 			method: "PUT", path: "/api/instances/cloud/reach", body: `{"mode":"vpn","via":["*"]}`},

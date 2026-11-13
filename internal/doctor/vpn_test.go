@@ -47,7 +47,7 @@ func TestVPNKindsSilentWithoutVPN(t *testing.T) {
 
 func TestVPNDown(t *testing.T) {
 	f := vpnCase(t, KindVPNDown, Problem, &VPNIn{Mode: "apps", VPNOnly: []string{"cloud"}, WGError: "status stale"}, &VPNIn{Mode: "apps", VPNOnly: []string{"cloud"}, WGUp: true})
-	if !strings.Contains(strings.Join(f[0].Steps, " "), "./portcullis up") || !strings.Contains(strings.Join(f[0].Steps, " "), "./portcullis logs wg") {
+	if !strings.Contains(strings.Join(f[0].Steps, " "), "./portcullis up") || !strings.Contains(strings.Join(f[0].Steps, " "), "./portcullis status") || strings.Contains(strings.Join(f[0].Steps, " "), "logs") {
 		t.Fatal(f[0].Steps)
 	}
 	vpnCase(t, KindVPNDown, Problem, &VPNIn{Mode: "server"}, &VPNIn{Mode: "apps"})

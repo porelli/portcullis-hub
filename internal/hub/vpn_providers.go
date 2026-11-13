@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,7 +125,7 @@ type vpnRuntime struct {
 	pubDelay  time.Duration
 	pubNext   time.Time
 	validAt   time.Time
-	testWrite func(path string, d vpn.Doc, gid int) error
+	testWrite func(path string, d vpn.Doc, gid int, now time.Time) error
 	// overlapBad: wired provider → why its ranges overlap now (left out
 	// of vpn.json); overlapAt: the last check.
 	overlapBad map[string]string
@@ -171,6 +172,17 @@ type vpnCore struct {
 // Fail closed: an unknown mode is server (everything VPN-only), a public
 // enrolment that isn't exactly "true" (or unset) is off, a builtin that
 // isn't "on" is off; an unparsable network keeps the default.
+// vpnWGIPOK: a is a host address of net and not a gateway slot.
+func vpnWGIPOK(net netip.Prefix, a netip.Addr) bool {
+	if !a.Is4() || !net.Contains(a) || a == net.Addr() {
+		return false
+	}
+	u := func(x netip.Addr) uint32 { b := x.As4(); return binary.BigEndian.Uint32(b[:]) }
+	off := u(a) - u(net.Addr())
+	last := uint32(1)<<(32-net.Bits()) - 1
+	return off != last && (off < vpn.GatewayFirst || off > vpn.GatewayLast)
+}
+
 func (h *Hub) vpnCoreEnv() vpnCore {
 	core := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
 	c := vpnCore{Mode: VPNModeApps, PublicEnrol: true}
@@ -216,10 +228,16 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 			c.Reserved = append(c.Reserved, p)
 		}
 	}
+	// wg's address on portcullis-vpn, where every gateway dials the edge
+	// (PORTCULLIS_VPN_EDGE): core.env's PORTCULLIS_VPN_WG_IP, else core's
+	// default .3. A value outside the network, its network or broadcast
+	// address, or a gateway slot (.16–.62) keeps the default, logged.
 	c.WGIP = c.Net.Addr().Next().Next().Next() // .3
 	if raw := core[VarVPNWGIP]; raw != "" {
-		if a, err := netip.ParseAddr(raw); err == nil && c.Net.Contains(a) {
+		if a, err := netip.ParseAddr(raw); err == nil && vpnWGIPOK(c.Net, a) {
 			c.WGIP = a
+		} else {
+			log.Printf("vpn: the core env's %s %s isn't a free address of %s: wg is assumed at %s", VarVPNWGIP, clipQuoted(raw), c.Net, c.WGIP)
 		}
 	}
 	return c

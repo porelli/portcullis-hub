@@ -141,7 +141,7 @@ func (c vpnCheck) Run(in *Inputs) []Finding {
 				why += " (" + v.WGError + ")"
 			}
 			out = append(out, vpnFinding(c.kind, Problem, "The VPN service is down: every VPN request is refused.", why+".",
-				[]string{"Run `./portcullis up` on the server.", "Check `./portcullis logs wg`."}, v.WGError))
+				[]string{"Run `./portcullis up` on the server.", "Then run `./portcullis status`."}, v.WGError))
 		}
 	case KindVPNProviderStale:
 		for _, p := range v.Providers {

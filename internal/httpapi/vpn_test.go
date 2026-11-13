@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"context"
+	"encoding/json"
 	"io/fs"
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/web"
 )
 
@@ -135,5 +138,39 @@ func TestHubVPNUI(t *testing.T) {
 	i, j := strings.Index(h, "const dead = vpnOnlyThrough("), strings.Index(h, "'Stop using ' + id")
 	if i < 0 || j < 0 || i > j {
 		t.Error("the unwire confirmation doesn't list the instances it cuts off first")
+	}
+}
+
+// M1 (final review): assign_vpn_address takes the contract's two shapes,
+// {id, ip, user, name} (D) or {id, ip, remove: true} (W), and refuses
+// anything else (400) before the Hub is called.
+func TestAssignVPNAddressShapes(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	var tl Tool
+	for _, x := range e.s.tools(ScopeAdmin) {
+		if x.Name == "assign_vpn_address" {
+			tl = x
+		}
+	}
+	for args, want := range map[string]ToolClass{
+		`{"id":"grafana","ip":"10.8.0.5","remove":true}`:               ClassWrite,
+		`{"id":"grafana","ip":"10.8.0.5","user":"root","name":"x"}`:    ClassDestructive,
+		`{"id":"grafana","ip":"10.8.0.5"}`:                             ClassDestructive,
+		`{"id":"grafana","ip":"10.8.0.5","remove":true,"user":"root"}`: ClassDestructive,
+	} {
+		if got := tl.ClassFor(context.Background(), json.RawMessage(args)); got != want {
+			t.Errorf("%s: class %s, want %s", args, got, want)
+		}
+	}
+	root := &directory.Caller{User: "root", Admin: true}
+	for _, args := range []string{
+		`{"id":"grafana","ip":"10.8.0.5"}`,
+		`{"id":"grafana","ip":"10.8.0.5","user":"root"}`,
+		`{"id":"grafana","ip":"10.8.0.5","remove":true,"user":"root","name":"x"}`,
+	} {
+		_, err := tl.Run(context.Background(), root, json.RawMessage(args))
+		if err == nil || errStatus(err, 0) != 400 || !strings.Contains(err.Error(), "user and name, or remove: true") {
+			t.Errorf("%s: %v", args, err)
+		}
 	}
 }

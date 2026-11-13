@@ -317,9 +317,9 @@ Each instance has its own page (`#apps/<id>`, or `#apps/<id>/<tab>` for a specif
 - **Header**: **`<App> · <label>`** (or just **`<App>`** when the label equals the app name), status pill, **Enable** / **Disable** button
 - **Operation banner** (when an operation is running or failed): shows progress or error, with a **Details** link to the progress panel
 - **Doctor line** (when the [doctor](#doctor) has findings): "Doctor: …" with a link to the Doctor tab
-- **Tabs**: Overview · Settings · Groups · (File sharing) · Logs · Backups · AI · Expert · Delete
+- **Tabs**: Overview · Settings · Groups · (File sharing) · Logs · Backups · AI · (VPN) · Expert · Delete
 
-The File sharing tab appears only for templates with `person_secret` credentials (Samba, Time Machine).
+The File sharing tab appears only for templates with `person_secret` credentials (Samba, Time Machine), the VPN tab only for templates with a [`vpn:` block](../guides/manifest-reference.md#vpn) (Headscale).
 
 Every instance, including the default instance, gets the same page structure. Deep links from the old `#app/<id>/<tab>` format redirect to `#apps/<id>/<tab>`.
 
@@ -385,6 +385,16 @@ The **Overview** tab shows:
 
 - **Auth notes** (how the app enforces auth, from the template)
 - **Addresses**: each hostname as a link, editable (see [Changing hostnames](#changing-hostnames) below)
+- **Access** ([VPN-only access](vpn.md#several-vpns-and-through)):
+  **Reachable from** *the internet (default)* or *only Portcullis VPNs*;
+  **Through** *every VPN provider* or the live providers you tick (the
+  built-in one is *Portcullis VPN (built-in)*); in server mode, for an
+  instance with public exceptions, *Public links stay on the internet
+  (server mode)*. **Save access** asks first ("Make &lt;id&gt; reachable
+  only through … ? It restarts.") and restarts the app. With no VPN wired it
+  says "No VPN is wired yet: wire a VPN first". Saved with
+  `PUT /api/instances/{id}/reach`, audited `instance.reach`; the AI tool is
+  `set_instance_reach` (widening needs a confirmation)
 - **Containers**: one row per service with its name, state, and status. One-off jobs show as "setup job done" (green), "setup job failed" (red), "setup job running" (amber), or "setup job pending" (gray). Services with no container show "(none) · \<svc\> · no container" in red.
 - **Instance**: label (editable inline), instance id, template, compose project name
 - **Last operation**: most recent operation (enable, restart, backup, etc.) with its status and timestamp
@@ -435,6 +445,30 @@ The **AI** tab (deep link `#apps/<id>/ai`) shows:
 - Recent AI activity (last N AI actions)
 
 For AI pages (`ai-chat`), the tab also shows the configured model providers. Templates without AI support show the reason and, when the template names one, an alternative "not vetted by Portcullis". See [AI support](ai.md#switching-an-app-on).
+
+### VPN
+
+The **VPN** tab (deep link `#apps/<id>/vpn`; templates with a `vpn:` block
+only) makes the instance a [VPN provider](vpn.md#wiring-a-marketplace-vpn):
+
+- **Use for Portcullis access** and, for a provider with a device hook, the
+  **refresh** (`15s`–`10m`, default `60s`); **Save** asks first. Unwiring
+  lists the apps that accept only this provider, which become unreachable.
+  Wiring is refused while the VPN service isn't running, or when a range
+  overlaps the built-in subnet, a reserved range, a Docker network or
+  another provider (`PUT /api/instances/{id}/vpn-provider`, audited
+  `vpn.provider_wired` / `vpn.provider_unwired`; AI tool `set_vpn_provider`).
+- **Ranges, devices** (and how many are online), **Map** fresh or stale with
+  the last refresh, the hook's **last error** (redacted), and a table of the
+  devices **left out** with the reason.
+- **Static assignments** (providers with `identity.source: static`): an
+  address, a person and a device name; **Assign** asks first ("Traffic from
+  &lt;ip&gt; counts as &lt;person&gt;'s device &lt;name&gt;"), **Remove** per row
+  (audited `vpn.static_assigned` / `vpn.static_unassigned`; AI tool
+  `assign_vpn_address`).
+- **DNS**: the A records for the Portcullis hostnames, the DNS hook's error
+  if it failed, and for `dns: manual` **I configured them**
+  (`POST /api/instances/{id}/vpn-dns/ack`, audited `vpn.dns_acknowledged`).
 
 ### Expert
 
@@ -1363,6 +1397,16 @@ disabling it did before instances existed.
     instances. Changing a certificate method or a template restarts only the
     apps whose certificate request changes.
 
+**VPN** ([VPN-only access](vpn.md#settings-vpn)): the mode and public
+enrolment (read-only, set on the host with `./portcullis vpn mode`), the VPN
+service up or down, the built-in VPN's subnet, port and devices (or off),
+instances stopped because a narrowing failed, the **VPN users group**
+(empty: every person), **Devices per person** (10; 1–100) and **Device
+expiry** (`30d`, `90d`, `1y`, `never`), and every provider with its source,
+whether it is wired, its ranges, devices and map state, each linking to its
+VPN tab. Saved with `PUT /api/vpn/settings`, audited `vpn.settings` (no AI
+tool).
+
 The tab also has **AI support** (the master switch, AI clients, the
 Portcullis MCP, connection length, rate limits, allowed origins and the model
 providers: [AI support → Settings → AI](ai.md#settings-ai)),
@@ -1681,6 +1725,33 @@ never fire under Docker, and none has a one-click fix:
 | `unmapped_owner` | Warning | A shared folder has entries owned by a host account outside the operator's id range (they read as 65534); the fixer refuses that folder | Explain: `sudo chown -R '<uid>:<gid>' '<path>'` once, then re-check |
 | `selinux_label_missing` | Warning | On an SELinux host, a shared folder without the `container_file_t` label (or a scan that got `permission denied`) | Explain: the path regex-escaped in `semanage fcontext -a -t container_file_t '<path>(/.*)?'` and `restorecon -R '<path>'`, as root |
 | `udp_source_rewritten` | Info | An app publishes a UDP port: its clients appear with a rewritten source address | — |
+
+### VPN checks
+
+With the [VPN](vpn.md) the doctor adds eighteen checks. All are explain-only,
+and none fires without the VPN service, a provider or a mode other than
+`apps`:
+
+| Kind | Severity | Finds |
+|------|----------|-------|
+| `vpn_down` | Problem | VPN-only apps, or a mode other than `apps`, while `wg` is down (its `status.json` missing or stale). Fix on the server: `./portcullis up`, then `./portcullis status` |
+| `vpn_provider_stale` | Problem | A wired provider's device list is stale, or its gateway is down; shows the hook's last error |
+| `vpn_provider_invalid` | Problem for duplicate addresses, else Info | Devices left out as duplicates, outside the ranges, or with owners that aren't Portcullis people |
+| `vpn_range_overlap` | Warning (Local networks), Problem (a Docker network) | A provider range overlaps them |
+| `vpn_via_dead` | Problem | A VPN-only instance's *Through* names only unwired or stale providers |
+| `vpn_no_providers` | Warning | A VPN-only instance with no provider at all: it is unreachable |
+| `vpn_dns_failed` | Problem | A provider's DNS hook failed: the names resolve publicly |
+| `vpn_dns_manual` | Info | A `dns: manual` provider, until you acknowledge its records |
+| `vpn_gateway_privileged` | Info | A wired gateway, or a service in its network namespace, has `NET_ADMIN`, `privileged` or host devices |
+| `vpn_static_mapping` | Info | A `source: static` provider is wired: its devices are assigned by an admin, not proven |
+| `vpn_single_provider` | Warning | Mode `admin` or `server` with one provider; add the built-in VPN as a second path |
+| `vpn_public_links` | Warning | An instance's public links stay on the internet |
+| `vpn_no_admin_device` | Problem | Mode `admin` or `server`, and no administrator's device seen in 30 days on a provider that isn't static |
+| `vpn_device_stale` | Info | A built-in device with no handshake in 90 days (links to the person's *VPN devices*) |
+| `vpn_expiring` | Info | A built-in device expiring within 14 days, shown to its owner |
+| `vpn_publish_failed` | Problem | The Hub couldn't write `vpn.json`: every VPN request is denied once its `valid_until` passes |
+| `vpn_reserved_defaults` | Warning | `core.env` lacks `PORTCULLIS_VPN_RESERVED_RANGES`, so the Hub uses the default reserved ranges |
+| `vpn_reach_failed_closed` | Problem | A narrowing render failed, so the Hub stopped the instance; clears after the next successful render |
 
 ## Rootless Podman
 
@@ -2095,6 +2166,34 @@ attempts: try again in a minute", `429`) until the minute is over.
 With nothing to show, the tab says "No apps with personal settings." The
 tab only reads the person's own data: the people listener has no other app
 routes ([contracts §5.1](../guides/integration-contracts.md#51-people-subdomain-new)).
+
+### VPN devices
+
+Every person in the VPN users group has a **VPN page**,
+`https://people.<domain>/vpn/` (linked from the Sign-in page's **VPN
+devices** card): their devices on every Portcullis VPN, and for built-in
+devices **Add device**, **Renew**, **Rename** and **Remove**. Adding and
+renewing need a fresh sign-in, the key pair is made in the browser, and the
+configuration and QR code are shown once and never stored
+([VPN-only access → Devices](vpn.md#devices-on-the-built-in-vpn)). The page
+uses only its own files under `/vpn/`, so in server mode with public
+enrolment it works from the internet (still behind sign-in) while the rest
+of people.&lt;domain&gt; is VPN-only.
+
+- **Client apps:** the official WireGuard app on Windows, macOS, iOS and
+  Android (scan the QR code or import the file), `wg-quick` or
+  NetworkManager on Linux.
+- **DNS:** the configuration sends DNS to the tunnel's resolver. A device
+  that validates DNSSEC itself fails on Portcullis names when the zone is
+  signed ([DNSSEC](../setup/dns.md#dnssec)), and a browser with its own
+  DNS-over-HTTPS bypasses the tunnel and shows `/vpn-required`: see
+  [DNS caveats](vpn.md#dns-caveats).
+
+Administrators and holders of `sign_in_help` see a person's devices on
+People → person → **Sign-in** → *VPN devices* and can remove built-in ones
+(a marketplace device answers "managed in &lt;provider&gt;"). Nobody can create
+a configuration for someone else in the Hub; the host operator can
+(`./portcullis vpn add-device`).
 
 ### Setup (admins only)
 

@@ -124,7 +124,7 @@ func (h *Hub) publishVPNLocked(st *vpn.Status) error {
 	if h.vpnrt.testWrite != nil {
 		write = h.vpnrt.testWrite
 	}
-	if err := write(h.vpnJSONPath(), doc, h.cfg.VPNDocGID); err != nil {
+	if err := write(h.vpnJSONPath(), doc, h.cfg.VPNDocGID, now); err != nil {
 		return err
 	}
 	h.vpnrt.lastWritten, h.vpnrt.lastWriteAt = b, now

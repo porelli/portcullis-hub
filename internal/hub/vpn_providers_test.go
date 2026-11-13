@@ -239,7 +239,7 @@ func (v *vpnFixture) doc(t *testing.T) *vpn.Doc {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := vpn.Parse(b)
+	d, err := vpn.Parse(b, v.h.vpnrt.now())
 	if err != nil {
 		t.Fatalf("vpn.json: %v\n%s", err, b)
 	}
@@ -907,7 +907,7 @@ func TestVPNPublishFailureAndRefilter(t *testing.T) {
 	}
 	var calls atomic.Int32
 	v.h.vpnrt.mu.Lock()
-	v.h.vpnrt.testWrite = func(string, vpn.Doc, int) error { calls.Add(1); return errors.New("disk full") }
+	v.h.vpnrt.testWrite = func(string, vpn.Doc, int, time.Time) error { calls.Add(1); return errors.New("disk full") }
 	v.h.vpnrt.mu.Unlock()
 	// The range narrows (a cidr setting): the device is left out.
 	v.h.mu.Lock()
@@ -951,5 +951,52 @@ func TestVPNPublishFailureAndRefilter(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no outside_ranges drop: %+v", pm.problems)
+	}
+}
+
+// M2 (final review): wg's address comes from core.env's
+// PORTCULLIS_VPN_WG_IP; a value outside the VPN network, on a gateway
+// slot or unparsable keeps core's default .3 (logged).
+func TestVPNWGIPFromCoreEnv(t *testing.T) {
+	v := newVPNFixture(t, nil)
+	env := filepath.Join(v.project, ".env")
+	base := "CORE_VAR=core-value\nPORTCULLIS_VPN_BUILTIN=on\nPORTCULLIS_VPN_NET=172.31.254.0/26\n"
+	for raw, want := range map[string]string{
+		"":               "172.31.254.3",
+		"172.31.254.5":   "172.31.254.5",
+		"172.31.254.20":  "172.31.254.3", // a gateway slot
+		"172.31.254.0":   "172.31.254.3", // the network address
+		"172.31.254.63":  "172.31.254.3", // broadcast
+		"10.1.2.3":       "172.31.254.3",
+		"172.31.255.20":  "172.31.254.3", // outside the /26
+		"not-an-address": "172.31.254.3",
+	} {
+		line := ""
+		if raw != "" {
+			line = "PORTCULLIS_VPN_WG_IP=" + raw + "\n"
+		}
+		writeFile(t, env, base+line)
+		if got := v.h.vpnCoreEnv().WGIP.String(); got != want {
+			t.Errorf("%q: wg at %s, want %s", raw, got, want)
+		}
+	}
+	writeFile(t, env, base+"PORTCULLIS_VPN_WG_IP=172.31.254.5\n")
+	if err := v.h.Enable("mesh"); err != nil {
+		t.Fatal(err)
+	}
+	v.h.Wait()
+	v.wire(t, "mesh")
+	v.h.Wait()
+	if ov := overrideOf(t, v, "mesh"); !strings.Contains(ov, `PORTCULLIS_VPN_EDGE: "172.31.254.5:9001"`) {
+		t.Fatalf("the gateway's edge doesn't follow the core env:\n%s", ov)
+	}
+}
+
+func TestVPNWGIPOKWideNet(t *testing.T) {
+	n := netip.MustParsePrefix("10.50.0.0/16")
+	for a, want := range map[string]bool{"10.50.0.3": true, "10.50.0.20": false, "10.50.1.20": true, "10.50.255.255": false, "10.50.0.0": false, "10.51.0.3": false} {
+		if got := vpnWGIPOK(n, netip.MustParseAddr(a)); got != want {
+			t.Errorf("%s: %v, want %v", a, got, want)
+		}
 	}
 }

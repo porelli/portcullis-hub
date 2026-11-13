@@ -52,6 +52,12 @@ const (
 	SourceStatic  = "static"
 	// MaxStaleWindow bounds stale_after − refreshed_at of a hook map.
 	MaxStaleWindow = 30 * time.Minute
+	// MaxValidAhead bounds valid_until − the reader's clock (the Hub
+	// writes now + 1 h); MaxRefreshedAhead bounds a hook map's
+	// refreshed_at − the reader's clock (clock skew). Past either the
+	// whole file is refused.
+	MaxValidAhead     = 65 * time.Minute
+	MaxRefreshedAhead = 2 * time.Minute
 
 	// BuiltinID is the built-in people provider's id.
 	BuiltinID = "builtin"
@@ -128,12 +134,13 @@ type Device struct {
 	Expires  *time.Time `json:"expires"`
 }
 
-// Write writes d to path atomically, mode 0640, group FileGID.
-func Write(path string, d Doc) error { return WriteGroup(path, d, FileGID) }
+// Write writes d to path atomically, mode 0640, group FileGID, checked
+// as a reader at now would.
+func Write(path string, d Doc, now time.Time) error { return WriteGroup(path, d, FileGID, now) }
 
 // WriteGroup is Write with the file's group: the one group shared only
 // with vpn.json's readers (wg and group-gate).
-func WriteGroup(path string, d Doc, gid int) error {
+func WriteGroup(path string, d Doc, gid int, now time.Time) error {
 	if d.Providers == nil {
 		d.Providers = []Provider{}
 	}
@@ -144,7 +151,7 @@ func WriteGroup(path string, d Doc, gid int) error {
 	if err != nil {
 		return err
 	}
-	if _, err := Parse(b); err != nil {
+	if _, err := Parse(b, now); err != nil {
 		return fmt.Errorf("vpn.json: refusing to write an invalid document: %w", err)
 	}
 	if err := fsutil.WriteFileAtomic(path, append(b, '\n'), 0o640); err != nil {
@@ -175,8 +182,10 @@ func ValidPublicKey(k string) bool {
 // Parse is the reference reader: strict (unknown keys refused), version
 // 2 only, provider ids unique, ranges valid and pairwise disjoint,
 // device and peer addresses valid, unique and inside their provider's
-// ranges. Any error means every VPN request is denied.
-func Parse(b []byte) (*Doc, error) {
+// ranges, valid_until at most MaxValidAhead and refreshed_at at most
+// MaxRefreshedAhead past now (the reader's clock). Any error means every
+// VPN request is denied.
+func Parse(b []byte, now time.Time) (*Doc, error) {
 	var d Doc
 	if err := nullCheck(b, reflect.TypeOf(d), "$"); err != nil {
 		return nil, err
@@ -192,6 +201,9 @@ func Parse(b []byte) (*Doc, error) {
 	}
 	if d.ValidUntil == nil {
 		return nil, fmt.Errorf("no valid_until")
+	}
+	if d.ValidUntil.After(now.Add(MaxValidAhead)) {
+		return nil, fmt.Errorf("valid_until is more than 1 h 5 min ahead")
 	}
 	ranges := map[string][]netip.Prefix{}
 	ports := map[int]string{}
@@ -256,6 +268,9 @@ func Parse(b []byte) (*Doc, error) {
 				// could never go stale (a stopped Hub must end in deny).
 				if p.RefreshedAt == nil || p.StaleAfter == nil {
 					return nil, fmt.Errorf("provider %s (hook) has no refreshed_at or no stale_after", p.ID)
+				}
+				if p.RefreshedAt.After(now.Add(MaxRefreshedAhead)) {
+					return nil, fmt.Errorf("provider %s: refreshed_at is more than 2 min ahead", p.ID)
 				}
 				if !p.StaleAfter.After(*p.RefreshedAt) {
 					return nil, fmt.Errorf("provider %s: stale_after is not after refreshed_at", p.ID)

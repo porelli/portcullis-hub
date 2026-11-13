@@ -57,7 +57,7 @@ func TestParseVectors(t *testing.T) {
 		"duplicate device ip": true, "provider past stale_after denies its own": true, "peer past expires dropped": true, "missing builtin with a builtin provider": true}
 	for _, v := range vs {
 		delete(need, v.Name)
-		d, err := Parse(vectorBytes(v))
+		d, err := Parse(vectorBytes(v), v.Now)
 		if v.Want == "ok" {
 			if err != nil {
 				t.Errorf("%s: %v", v.Name, err)
@@ -82,7 +82,7 @@ func TestParseVectors(t *testing.T) {
 
 func TestLookupAllows(t *testing.T) {
 	v := loadDocVectors(t)[0]
-	d, err := Parse(vectorBytes(v))
+	d, err := Parse(vectorBytes(v), v.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,16 +117,16 @@ func TestWriteRoundTrip(t *testing.T) {
 	FileGID = os.Getgid()
 	defer func() { FileGID = old }()
 	v := loadDocVectors(t)[0]
-	d, err := Parse(vectorBytes(v))
+	d, err := Parse(vectorBytes(v), v.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := filepath.Join(t.TempDir(), FileName)
-	if err := Write(p, *d); err != nil {
+	if err := Write(p, *d, v.Now); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
-	if _, err := Parse(b); err != nil {
+	if _, err := Parse(b, v.Now); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(p)
@@ -135,12 +135,12 @@ func TestWriteRoundTrip(t *testing.T) {
 	}
 	// Write refuses an invalid document.
 	d.Version = 1
-	if err := Write(p, *d); err == nil {
+	if err := Write(p, *d, v.Now); err == nil {
 		t.Error("invalid doc written")
 	}
 	// An empty doc writes [] lists.
 	vu := time.Now().Add(time.Hour)
-	if err := Write(p, Doc{Version: DocVersion, ValidUntil: &vu}); err != nil {
+	if err := Write(p, Doc{Version: DocVersion, ValidUntil: &vu}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	b, _ = os.ReadFile(p)
@@ -155,7 +155,7 @@ func TestWriteMode0640Group(t *testing.T) {
 	}
 	p := filepath.Join(t.TempDir(), FileName)
 	vu := time.Now().Add(time.Hour)
-	if err := Write(p, Doc{Version: DocVersion, ValidUntil: &vu}); err != nil {
+	if err := Write(p, Doc{Version: DocVersion, ValidUntil: &vu}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(p)
@@ -180,7 +180,52 @@ func TestValidPublicKey(t *testing.T) {
 // case is refused too.
 func TestParseNullAnyCase(t *testing.T) {
 	b := []byte(`{"version":2,"valid_until":"2026-11-13T13:00:00Z","Providers":null,"devices":[]}`)
-	if _, err := Parse(b); err == nil || !strings.Contains(err.Error(), "null") {
+	if _, err := Parse(b, time.Now()); err == nil || !strings.Contains(err.Error(), "null") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// I4 (final review): a reader refuses a valid_until more than 65 min
+// ahead of its clock and a hook map's refreshed_at more than 2 min ahead,
+// so neither a Hub bug nor a hand-written file removes the bound.
+func TestParseFutureBounds(t *testing.T) {
+	v := loadDocVectors(t)[0]
+	var raw map[string]any
+	if err := json.Unmarshal(vectorBytes(v), &raw); err != nil {
+		t.Fatal(err)
+	}
+	now := v.Now
+	at := func(vu, refreshed time.Time) []byte {
+		raw["valid_until"] = vu.Format(time.RFC3339)
+		for _, p := range raw["providers"].([]any) {
+			p := p.(map[string]any)
+			if p["source"] == SourceHook {
+				p["refreshed_at"] = refreshed.Format(time.RFC3339)
+				p["stale_after"] = refreshed.Add(3 * time.Minute).Format(time.RFC3339)
+			}
+		}
+		b, _ := json.Marshal(raw)
+		return b
+	}
+	for _, c := range []struct {
+		name          string
+		vu, refreshed time.Time
+		want          string
+	}{
+		{"valid_until at now + 65 min", now.Add(MaxValidAhead), now, ""},
+		{"valid_until past now + 65 min", now.Add(MaxValidAhead + time.Second), now, "valid_until"},
+		{"refreshed_at at now + 2 min", now.Add(time.Hour), now.Add(MaxRefreshedAhead), ""},
+		{"refreshed_at past now + 2 min", now.Add(time.Hour), now.Add(MaxRefreshedAhead + time.Second), "refreshed_at"},
+	} {
+		_, err := Parse(at(c.vu, c.refreshed), now)
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%s: err %v, want %q", c.name, err, c.want)
+		}
+	}
+	// Write checks against the writer's clock too.
+	p := filepath.Join(t.TempDir(), FileName)
+	far := now.Add(2 * time.Hour)
+	if err := WriteGroup(p, Doc{Version: DocVersion, ValidUntil: &far}, os.Getgid(), now); err == nil {
+		t.Error("a far-future valid_until was written")
 	}
 }

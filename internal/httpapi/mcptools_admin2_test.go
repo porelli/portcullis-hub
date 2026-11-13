@@ -564,7 +564,7 @@ var adminToolFixtures = []struct {
 	{"list_vpn_devices", nil},
 	{"remove_vpn_device", map[string]any{"id": "nope"}},
 	{"set_vpn_provider", map[string]any{"id": "cloud", "wired": false}},
-	{"assign_vpn_address", map[string]any{"id": "cloud", "ip": "10.8.0.5"}},
+	{"assign_vpn_address", map[string]any{"id": "cloud", "ip": "10.8.0.5", "remove": true}},
 	{"set_instance_reach", map[string]any{"id": "cloud", "mode": "internet"}},
 	{"get_status", map[string]any{"id": "smbfixture"}},
 	{"exec", map[string]any{"id": "smbfixture", "service": "smb", "command": "env"}},
