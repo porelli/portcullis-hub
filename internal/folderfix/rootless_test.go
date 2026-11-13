@@ -145,8 +145,7 @@ func TestApplyRefusesUnmapped(t *testing.T) {
 	root := simpleTree(t)
 	withOwner(t, map[string][2]uint32{"d/f": {0, idmap.Overflow}})
 	dev, ino := rootIDs(t, root)
-	ms, _ := readMountinfo()
-	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: effectiveMountRoot(ms, root), Target: Target{GID: 60001, Files: "rw"}}
+	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, Target: Target{GID: 60001, Files: "rw"}}
 	r, err := Scan(o)
 	if err != nil {
 		t.Fatal(err)
@@ -216,8 +215,7 @@ func TestRestoreRefusesUnmapped(t *testing.T) {
 	withIDMaps(t, podmanUIDMap, podmanGIDMap)
 	root := simpleTree(t)
 	dev, ino := rootIDs(t, root)
-	ms, _ := readMountinfo()
-	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, ExpectMountRoot: effectiveMountRoot(ms, root), Target: Target{GID: 60001, Files: "rw"}}
+	o := Options{Root: root, ExpectDev: dev, ExpectIno: ino, Target: Target{GID: 60001, Files: "rw"}}
 	var snap bytes.Buffer
 	if _, err := WriteSnapshot(o, &snap); err != nil {
 		t.Fatal(err)
