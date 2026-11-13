@@ -67,12 +67,9 @@ func (h *Hub) doctorVPNIn(ctx context.Context, m *directory.Membership) *doctor.
 		if !t.Enabled {
 			continue
 		}
-		if vpnOnly, via := h.effectiveReachLocked(t); vpnOnly {
+		if a := h.vpnAccessLocked(t); a.VPNOnly {
 			in.VPNOnly = append(in.VPNOnly, t.ID)
-			r := h.st.Reach[t.ID]
-			in.Instances = append(in.Instances, doctor.VPNInstanceIn{ID: t.ID, Via: slices.Clone(via), PublicLinks: r.PublicLinks})
-		} else if r, ok := h.st.Reach[t.ID]; ok && r.PublicLinks && h.publicLinksLocked(t) {
-			in.Instances = append(in.Instances, doctor.VPNInstanceIn{ID: t.ID, PublicLinks: true})
+			in.Instances = append(in.Instances, doctor.VPNInstanceIn{ID: t.ID, Via: slices.Clone(a.Via), PublicLinks: a.PublicLinks})
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(h.st.VPN.Providers)) {

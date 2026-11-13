@@ -276,7 +276,7 @@ func TestReachRefusedWithoutProvider(t *testing.T) {
 }
 
 func TestReachAudited(t *testing.T) {
-	v := newReachFixture(t, VPNModeApps)
+	v := newReachFixture(t, VPNModeServer)
 	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN})
 	setReach(t, v, "cloud", state.Reach{Mode: state.ReachInternet, PublicLinks: true})
 	var got []string
@@ -443,5 +443,78 @@ func TestReachChangeNarrows(t *testing.T) {
 	}
 	if v.h.ReachChangeNarrows("cloud", state.Reach{Mode: "lan"}) {
 		t.Error("an unknown mode")
+	}
+}
+
+// Modes × reach × public links: what SetInstanceReach accepts, the
+// render key, the class of a change and the rendered labels all come
+// from the one effective access (vpnAccess), so they agree.
+func TestReachEffectiveAccessTable(t *testing.T) {
+	for _, mode := range []string{VPNModeApps, VPNModeServer} {
+		for _, rm := range []string{state.ReachInternet, state.ReachVPN} {
+			for _, pl := range []bool{false, true} {
+				name := mode + "_" + rm
+				if pl {
+					name += "_public-links"
+				}
+				t.Run(name, func(t *testing.T) {
+					v := newReachFixture(t, mode)
+					r := state.Reach{Mode: rm, PublicLinks: pl}
+					if rm == state.ReachVPN {
+						r.Via = []string{"*"}
+					}
+					err := v.h.SetInstanceReach(context.Background(), root, "cloud", r)
+					wantRefused := pl && (rm == state.ReachVPN || mode != VPNModeServer)
+					if wantRefused {
+						if statusCode(err) != 400 {
+							t.Fatalf("a contradictory reach was accepted: %v", err)
+						}
+						v.h.mu.RLock()
+						_, stored := v.h.st.Reach["cloud"]
+						v.h.mu.RUnlock()
+						if stored {
+							t.Fatal("a refused reach was stored")
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					v.h.Wait()
+					vpnOnly := rm == state.ReachVPN || mode == VPNModeServer
+					effPL := pl && rm == state.ReachInternet && mode == VPNModeServer
+					v.h.mu.RLock()
+					key := v.h.vpnRenderKeyLocked(v.h.findLocked("cloud"))
+					v.h.mu.RUnlock()
+					f := vpnKeyFields(key)
+					if (f["r"] != "") != vpnOnly || (f["pl"] == "1") != effPL {
+						t.Fatalf("key %q: vpnOnly %v public links %v", key, vpnOnly, effPL)
+					}
+					ov := overrideOf(t, v, "cloud")
+					appEP, pubEP := EntrypointsBoth, EntrypointsBoth
+					if vpnOnly {
+						appEP = EntrypointsVPN
+						if !effPL {
+							pubEP = EntrypointsVPN
+						}
+					}
+					if !strings.Contains(ov, "traefik.http.routers.cloud.entrypoints: "+appEP+"\n") || !strings.Contains(ov, "traefik.http.routers.portcullis-public-cloud.entrypoints: "+pubEP+"\n") {
+						t.Fatalf("labels disagree with the key %q:\n%s", key, ov)
+					}
+					// The class of going back to plain internet: W only if
+					// that keeps or narrows what is served now.
+					back := v.h.ReachChangeNarrows("cloud", state.Reach{Mode: state.ReachInternet})
+					// Server mode: "internet" is VPN-only through every provider
+					// anyway, the same access as vpn via *.
+					wantBack := !vpnOnly || mode == VPNModeServer
+					if effPL {
+						wantBack = true // dropping public links narrows
+					}
+					if back != wantBack {
+						t.Fatalf("back to internet: W %v, want %v (key %q)", back, wantBack, key)
+					}
+				})
+			}
+		}
 	}
 }

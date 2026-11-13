@@ -60,27 +60,79 @@ func VPNAllowMiddleware(id string) string { return VPNAllowPrefix + id }
 // VPNOnlyRouter is instance id's friendly router.
 func VPNOnlyRouter(id string) string { return VPNOnlyPrefix + id }
 
-// effectiveReachLocked: whether t renders VPN-only, and the providers it
-// accepts. Server mode makes every instance VPN-only through every
-// provider (an instance's own narrower via stays). Caller holds mu.
-func (h *Hub) effectiveReachLocked(t *templates.Template) (vpnOnly bool, via []string) {
-	r, ok := h.st.Reach[t.ID]
-	if ok && r.Mode == state.ReachVPN {
-		return true, slices.Clone(r.Via)
-	}
-	if h.vpnCoreEnv().Mode == VPNModeServer {
-		return true, []string{state.ReachAny}
-	}
-	return false, nil
+// vpnAccess is the access an instance actually gets, after every input
+// (its reach, the core env's mode, the providers, its gateway
+// attachment): the one source of the renderer, the render key, the
+// narrowing check, the tools' class and the doctor. Nothing decides
+// access from the raw reach fields.
+type vpnAccess struct {
+	// VPNOnly: every router (but provider control routers) on vpnsecure
+	// only; Via the accepted providers (sorted, "*" = all) and Ranges
+	// their allowlist (nil when not VPN-only).
+	VPNOnly bool
+	Via     []string
+	Ranges  []string
+	// PublicLinks: the public router stays on the internet (server
+	// mode's per-instance opt-in, an instance not set to vpn itself).
+	PublicLinks bool
+	// GW / Edge: a wired provider's gateway attachment ("" = none).
+	GW, Edge string
 }
 
-// publicLinksLocked: t's public router stays on the internet in server
-// mode (the per-instance opt-in; never for an instance set to vpn
-// itself). Caller holds mu.
-func (h *Hub) publicLinksLocked(t *templates.Template) bool {
-	r, ok := h.st.Reach[t.ID]
-	return ok && r.Mode != state.ReachVPN && r.PublicLinks && h.vpnCoreEnv().Mode == VPNModeServer
+// key is the access as the render key: fields "name=value" joined by
+// "|" (vpnNarrows compares them field by field).
+func (a vpnAccess) key() string {
+	pl := "0"
+	if a.PublicLinks {
+		pl = "1"
+	}
+	return "r=" + strings.Join(a.Ranges, ",") + "|via=" + strings.Join(a.Via, ",") + "|gw=" + a.GW + "|edge=" + a.Edge + "|pl=" + pl
 }
+
+// vpnAccessForLocked is the access t gets with reach r (set: t has a
+// reach entry). Server mode makes every instance VPN-only through every
+// provider (its own narrower via stays); public links count only in
+// server mode, for an instance not set to vpn itself. Caller holds mu.
+func (h *Hub) vpnAccessForLocked(t *templates.Template, r state.Reach, set bool) vpnAccess {
+	var a vpnAccess
+	server := h.vpnCoreEnv().Mode == VPNModeServer
+	switch {
+	case set && r.Mode == state.ReachVPN:
+		a.VPNOnly, a.Via = true, slices.Clone(r.Via)
+		if len(a.Via) == 0 {
+			a.Via = []string{state.ReachAny}
+		}
+	case server:
+		a.VPNOnly, a.Via = true, []string{state.ReachAny}
+		a.PublicLinks = set && r.PublicLinks
+	}
+	if a.VPNOnly {
+		slices.Sort(a.Via)
+		a.Via = slices.Compact(a.Via)
+		a.Ranges = h.vpnAllowRangesLocked(a.Via)
+	}
+	if gw, edge, ok := h.vpnGatewayLocked(t); ok {
+		a.GW, a.Edge = gw.String(), edge
+	}
+	return a
+}
+
+// vpnAccessLocked is the access t gets now. Caller holds mu.
+func (h *Hub) vpnAccessLocked(t *templates.Template) vpnAccess {
+	r, ok := h.st.Reach[t.ID]
+	return h.vpnAccessForLocked(t, r, ok)
+}
+
+// effectiveReachLocked: whether t renders VPN-only, and the providers it
+// accepts (vpnAccessLocked). Caller holds mu.
+func (h *Hub) effectiveReachLocked(t *templates.Template) (vpnOnly bool, via []string) {
+	a := h.vpnAccessLocked(t)
+	return a.VPNOnly, a.Via
+}
+
+// publicLinksLocked: t's public router stays on the internet
+// (vpnAccessLocked). Caller holds mu.
+func (h *Hub) publicLinksLocked(t *templates.Template) bool { return h.vpnAccessLocked(t).PublicLinks }
 
 // controlRoutersOf are t's provider control routers (they keep
 // websecure, contract §3.3).
@@ -157,7 +209,8 @@ func (h *Hub) vpnGatewayLocked(t *templates.Template) (gw netip.Addr, edge strin
 // VPN-only chain and renders the allowlist and friendly router (on the
 // first traefik.enable service). Caller holds mu.
 func (h *Hub) vpnRoutesLocked(t *templates.Template, rl *routeLabels) error {
-	vpnOnly, via := h.effectiveReachLocked(t)
+	acc := h.vpnAccessLocked(t)
+	vpnOnly := acc.VPNOnly
 	ctrl := controlRoutersOf(t)
 	rl.entrypoints = map[string]string{}
 	allow := VPNAllowMiddleware(t.ID) + "@docker"
@@ -183,7 +236,7 @@ func (h *Hub) vpnRoutesLocked(t *templates.Template, rl *routeLabels) error {
 		rl.middlewares[name] = prepend(chain)
 	}
 	rl.vpnOnly = vpnOnly
-	rl.publicVPN = vpnOnly && !h.publicLinksLocked(t)
+	rl.publicVPN = vpnOnly && !acc.PublicLinks
 	if !vpnOnly {
 		return nil
 	}
@@ -223,7 +276,7 @@ func (h *Hub) vpnRoutesLocked(t *templates.Template, rl *routeLabels) error {
 	}
 	rl.vpnService, rl.vpnLabels = svc, map[string]string{}
 	m := "traefik.http.middlewares." + VPNAllowMiddleware(t.ID) + ".ipallowlist."
-	rl.vpnLabels[m+"sourcerange"] = strings.Join(h.vpnAllowRangesLocked(via), ",")
+	rl.vpnLabels[m+"sourcerange"] = strings.Join(acc.Ranges, ",")
 	rl.vpnLabels[m+"rejectstatuscode"] = "403"
 	if len(hosts) > 0 {
 		var match []string
@@ -254,8 +307,6 @@ func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id st
 	h.mu.RUnlock()
 	from := reachDetail(cur, had)
 	switch r.Mode {
-	case state.ReachInternet:
-		r.Via = nil
 	case state.ReachVPN:
 		if len(r.Via) == 0 {
 			r.Via = []string{state.ReachAny}
@@ -308,9 +359,9 @@ func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id st
 			return ErrNoLiveProvider
 		}
 	}
-	if r.PublicLinks && t.Public == nil {
+	if why := reachContradiction(r, h.vpnCoreEnv().Mode, t.Public != nil); why != "" {
 		h.mu.Unlock()
-		return statusErr(http.StatusBadRequest, "%s has no public exceptions: there are no public links to keep on the internet", id)
+		return statusErr(http.StatusBadRequest, "%s", why)
 	}
 	prev, hadPrev := h.st.Reach[id]
 	if r.Mode == state.ReachInternet && !r.PublicLinks {
@@ -425,44 +476,29 @@ func (h *Hub) vpnAttachLocked(t *templates.Template) vpnAttach {
 	return a
 }
 
-// vpnRenderKeyLocked is what of t's override and access follow the VPN
-// state, as fields "name=value" joined by "|": r (the allowlist ranges,
-// "" = internet), via (the accepted providers, sorted; "*" = all), gw
-// and edge (the gateway attachment), pl (the public-links opt-in).
-// vpnNarrows compares them field by field.
-func (h *Hub) vpnRenderKeyLocked(t *templates.Template) string {
-	r, ok := h.st.Reach[t.ID]
-	return h.vpnAccessKeyLocked(t, r, ok)
-}
+// vpnRenderKeyLocked is t's access as the render key
+// (vpnAccess.key): what of its override and access follow the VPN state.
+func (h *Hub) vpnRenderKeyLocked(t *templates.Template) string { return h.vpnAccessLocked(t).key() }
 
-// vpnAccessKeyLocked is the render key t would have with reach r (set:
-// t has a reach entry).
-func (h *Hub) vpnAccessKeyLocked(t *templates.Template, r state.Reach, set bool) string {
-	ranges, via := "", ""
-	vpnOnly, accepted := false, []string(nil)
-	switch {
-	case set && r.Mode == state.ReachVPN:
-		vpnOnly, accepted = true, slices.Clone(r.Via)
-		if len(accepted) == 0 {
-			accepted = []string{state.ReachAny}
+// reachContradiction is why reach r can't apply as asked ("" = it can):
+// via only with mode vpn; public links only for an instance with public
+// exceptions, reachable from the internet, in server mode (they would
+// change nothing anywhere else).
+func reachContradiction(r state.Reach, coreMode string, hasPublic bool) string {
+	if r.Mode == state.ReachInternet && len(r.Via) > 0 {
+		return "via applies only to mode vpn"
+	}
+	if r.PublicLinks {
+		switch {
+		case !hasPublic:
+			return "public_links: this app has no public exceptions"
+		case r.Mode == state.ReachVPN:
+			return "public_links applies only to an app reachable from the internet (mode internet): a VPN-only app keeps its public links on the VPN too"
+		case coreMode != VPNModeServer:
+			return "public_links applies only in server mode (./portcullis vpn mode server): in the " + coreMode + " mode the app's public links are on the internet already"
 		}
-	case h.vpnCoreEnv().Mode == VPNModeServer:
-		vpnOnly, accepted = true, []string{state.ReachAny}
 	}
-	if vpnOnly {
-		ranges = strings.Join(h.vpnAllowRangesLocked(accepted), ",")
-		slices.Sort(accepted)
-		via = strings.Join(slices.Compact(accepted), ",")
-	}
-	gw, edge := "", ""
-	if a, e, ok := h.vpnGatewayLocked(t); ok {
-		gw, edge = a.String(), e
-	}
-	pl := "0"
-	if set && r.PublicLinks {
-		pl = "1"
-	}
-	return "r=" + ranges + "|via=" + via + "|gw=" + gw + "|edge=" + edge + "|pl=" + pl
+	return ""
 }
 
 // ReachChangeNarrows reports whether setting instance id's reach to next
@@ -480,9 +516,11 @@ func (h *Hub) ReachChangeNarrows(id string, next state.Reach) bool {
 	if t == nil {
 		return false
 	}
-	cur, set := h.st.Reach[id]
-	prev := h.vpnAccessKeyLocked(t, cur, set)
-	nk := h.vpnAccessKeyLocked(t, next, next.Mode == state.ReachVPN || next.PublicLinks)
+	if reachContradiction(next, h.vpnCoreEnv().Mode, t.Public != nil) != "" {
+		return false
+	}
+	prev := h.vpnAccessLocked(t).key()
+	nk := h.vpnAccessForLocked(t, next, next.Mode == state.ReachVPN || next.PublicLinks).key()
 	// next narrows or keeps prev iff going back from next to prev takes
 	// nothing away: next allows nothing prev didn't.
 	return !vpnNarrows(nk, prev)
