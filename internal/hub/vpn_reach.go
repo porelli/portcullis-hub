@@ -104,9 +104,8 @@ func (h *Hub) vpnAccessForLocked(t *templates.Template, r state.Reach, set bool)
 	server := h.vpnCoreEnv().Mode == VPNModeServer
 	switch {
 	case set && r.Mode == state.ReachVPN:
-		// A stored empty via accepts no provider (its last one went):
-		// only an explicit "*" means every one (the API defaults an
-		// empty request to "*").
+		// An empty via accepts no provider (deny-all): only an
+		// explicit "*" means every one.
 		a.VPNOnly, a.Via = true, append([]string{}, r.Via...)
 	case server:
 		a.VPNOnly, a.Via = true, []string{state.ReachAny}
@@ -302,23 +301,20 @@ func (h *Hub) vpnRoutesLocked(t *templates.Template, rl *routeLabels) error {
 
 // SetInstanceReach sets instance id's Reachable from / Through and the
 // public-links opt-in (contract §11 PUT /api/instances/{id}/reach): vpn
-// needs a live provider in via (ErrNoLiveProvider), via is ["*"] or
-// wired provider ids (400), public_links only for an instance with
-// public exceptions. Audited instance.reach ("internet -> vpn via=*")
+// needs a live provider in via (ErrNoLiveProvider) unless via is []
+// (no provider, deny-all), via is ["*"], wired provider ids or [] (400),
+// public_links only for an instance with public exceptions. An AI
+// actor without a consumed confirmation may only keep or narrow the
+// access (409), decided under the lock on the value stored. Audited instance.reach ("internet -> vpn via=*")
 // and vpn.public_links ("off -> on"); the override is rendered again and
 // a restart owed.
 func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id string, r state.Reach) (err error) {
-	h.mu.RLock()
-	cur, had := h.st.Reach[id]
-	h.mu.RUnlock()
-	from := reachDetail(cur, had)
-	switch r.Mode {
-	case state.ReachVPN:
-		if len(r.Via) == 0 {
-			r.Via = []string{state.ReachAny}
-		}
+	// r is stored as given: an empty via stays [] (no provider,
+	// deny-all); only an explicit ["*"] is every provider.
+	if r.Mode == state.ReachVPN && r.Via == nil {
+		r.Via = []string{}
 	}
-	to := reachDetail(r, true)
+	from, to := "", reachDetail(r, true)
 	defer func() {
 		if err != nil {
 			h.auditOp(actor, "instance.reach", id, from+" -> "+clip(to, 200), err)
@@ -329,6 +325,8 @@ func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id st
 	}
 	live := h.liveProviders()
 	h.mu.Lock()
+	cur, had := h.st.Reach[id]
+	from = reachDetail(cur, had)
 	t := h.findLocked(id)
 	if t == nil {
 		h.mu.Unlock()
@@ -354,7 +352,8 @@ func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id st
 			}
 			seen[v] = true
 		}
-		ok := false
+		// An empty via (no provider) needs no live one: it admits nobody.
+		ok := len(r.Via) == 0
 		for _, l := range live {
 			if slices.Contains(r.Via, state.ReachAny) || slices.Contains(r.Via, l) {
 				ok = true
@@ -368,6 +367,14 @@ func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id st
 	if why := reachContradiction(r, h.vpnCoreEnv().Mode, t.Public != nil); why != "" {
 		h.mu.Unlock()
 		return statusErr(http.StatusBadRequest, "%s", why)
+	}
+	// The confirmation decision is made here, under the lock, on the
+	// exact value stored: an AI change that doesn't keep or narrow the
+	// access as it is now needs a consumed confirmation (no gap between
+	// the tool's classing and this store).
+	if !h.reachNarrowsLocked(t, r) && actor.Via == directory.ViaAI && actor.Confirmation == "" {
+		h.mu.Unlock()
+		return statusErr(http.StatusConflict, "the instance's access changed meanwhile: ask again (this change now needs a confirmation)")
 	}
 	prev, hadPrev := h.st.Reach[id]
 	if r.Mode == state.ReachInternet && !r.PublicLinks {
@@ -520,6 +527,15 @@ func (h *Hub) ReachChangeNarrows(id string, next state.Reach) bool {
 	defer h.mu.RUnlock()
 	t := h.findLocked(id)
 	if t == nil {
+		return false
+	}
+	return h.reachNarrowsLocked(t, next)
+}
+
+// reachNarrowsLocked is ReachChangeNarrows for t, the one predicate
+// SetInstanceReach decides on. Caller holds mu.
+func (h *Hub) reachNarrowsLocked(t *templates.Template, next state.Reach) bool {
+	if next.Mode != state.ReachInternet && next.Mode != state.ReachVPN {
 		return false
 	}
 	if reachContradiction(next, h.vpnCoreEnv().Mode, t.Public != nil) != "" {

@@ -277,7 +277,7 @@ func TestReachRefusedWithoutProvider(t *testing.T) {
 
 func TestReachAudited(t *testing.T) {
 	v := newReachFixture(t, VPNModeServer)
-	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN})
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN, Via: []string{"*"}})
 	setReach(t, v, "cloud", state.Reach{Mode: state.ReachInternet, PublicLinks: true})
 	var got []string
 	for _, e := range v.audit.entries {
@@ -307,7 +307,7 @@ func TestVPNGroupsChain(t *testing.T) {
 
 func TestDriftComparesEntrypointsAndAllowlist(t *testing.T) {
 	v := newReachFixture(t, VPNModeApps)
-	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN})
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN, Via: []string{"*"}})
 	v.h.mu.RLock()
 	want, err := v.h.desiredRouteLabelsLocked(v.h.findLocked("cloud"))
 	v.h.mu.RUnlock()

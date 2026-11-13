@@ -40,7 +40,7 @@ func TestVPNKindsSilentWithoutVPN(t *testing.T) {
 			t.Errorf("%s without inputs: %+v", k, f)
 		}
 	}
-	if len(VPNKinds) != 17 {
+	if len(VPNKinds) != 18 {
 		t.Fatalf("%d kinds", len(VPNKinds))
 	}
 }
@@ -167,9 +167,26 @@ func TestVPNReachFailedClosed(t *testing.T) {
 	}
 }
 
-func TestVPNViaNone(t *testing.T) {
-	vpnCase(t, KindVPNViaDead, Warning, &VPNIn{WGUp: true, Instances: []VPNInstanceIn{{ID: "cloud", Via: []string{}}}},
+// vpn_no_providers: via [] or none of its providers wired (contract);
+// an empty via is never vpn_via_dead's.
+func TestVPNNoProviders(t *testing.T) {
+	none := &VPNIn{WGUp: true, Instances: []VPNInstanceIn{{ID: "cloud", Via: []string{}}}}
+	f := vpnCase(t, KindVPNNoProviders, Warning, none,
 		&VPNIn{WGUp: true, Instances: []VPNInstanceIn{{ID: "cloud", Via: []string{"*"}}}})
+	if len(f[0].Instances) != 1 || f[0].Instances[0] != "cloud" {
+		t.Errorf("not naming the instance: %+v", f[0])
+	}
+	if f := vpnRun(KindVPNViaDead, none); len(f) != 0 {
+		t.Errorf("empty via is vpn_via_dead's: %+v", f)
+	}
+	inst := []VPNInstanceIn{{ID: "cloud", Via: []string{"mesh", "builtin"}}}
+	stale := hookP("mesh")
+	stale.Stale = true
+	// None wired: fires; one wired (even stale, that's vpn_via_dead's): silent.
+	vpnCase(t, KindVPNNoProviders, Warning, &VPNIn{WGUp: true, Instances: inst},
+		&VPNIn{WGUp: true, Instances: inst, Providers: []VPNProviderIn{stale}})
+	vpnCase(t, KindVPNNoProviders, Warning, &VPNIn{WGUp: true, Instances: inst},
+		&VPNIn{WGUp: true, Builtin: true, Instances: inst})
 }
 
 func TestVPNReservedDefaults(t *testing.T) {

@@ -30,6 +30,7 @@ const (
 	KindVPNReachFailedClosed = "vpn_reach_failed_closed"
 	KindVPNReservedDefault   = "vpn_reserved_defaults"
 	KindVPNPublishFailed     = "vpn_publish_failed"
+	KindVPNNoProviders       = "vpn_no_providers"
 	vpnNoAdminDeviceWindow   = 30 * 24 * time.Hour
 	vpnDeviceStaleWindow     = 90 * 24 * time.Hour
 	vpnExpiringWindow        = 14 * 24 * time.Hour
@@ -44,7 +45,8 @@ const VPNUDPNote = "Portcullis can't test UDP reachability from outside."
 // VPNKinds are the VPN kinds.
 var VPNKinds = []string{KindVPNDown, KindVPNProviderStale, KindVPNProviderInvalid, KindVPNRangeOverlap, KindVPNViaDead, KindVPNDNSFailed,
 	KindVPNDNSManual, KindVPNGatewayPrivileged, KindVPNStaticMapping, KindVPNSingleProvider, KindVPNPublicLinks, KindVPNNoAdminDevice,
-	KindVPNDeviceStale, KindVPNExpiring, KindVPNReachFailedClosed, KindVPNReservedDefault, KindVPNPublishFailed}
+	KindVPNDeviceStale, KindVPNExpiring, KindVPNReachFailedClosed, KindVPNReservedDefault, KindVPNPublishFailed,
+	KindVPNNoProviders}
 
 // VPNIn is what the VPN kinds judge.
 type VPNIn struct {
@@ -195,19 +197,37 @@ func (c vpnCheck) Run(in *Inputs) []Finding {
 			}
 		}
 		for _, i := range v.Instances {
-			if len(i.Via) == 0 {
-				out = append(out, withInstance(vpnFinding(c.kind, Warning, i.ID+" is VPN-only through no provider: nobody can reach it.",
-					"Its Through lists no VPN provider (its last one was removed), so every request is refused.",
-					[]string{"Set " + i.ID + "'s Through again (its Access section), or make it reachable from the internet."}, "none", i.ID, "none"), i.ID))
-				continue
-			}
-			if slices.Contains(i.Via, "*") {
+			if len(i.Via) == 0 || slices.Contains(i.Via, "*") {
 				continue
 			}
 			if !slices.ContainsFunc(i.Via, func(id string) bool { return live[id] }) {
 				out = append(out, withInstance(vpnFinding(c.kind, Problem, i.ID+" is unreachable: none of the VPNs it accepts works.",
 					"Its Through names only "+strings.Join(i.Via, ", ")+", none of them wired and fresh.",
 					[]string{"Wire one of them again, or widen " + i.ID + "'s Through (its Access section)."}, strings.Join(i.Via, ","), i.ID), i.ID))
+			}
+		}
+	case KindVPNNoProviders:
+		wired := map[string]bool{}
+		if v.Builtin {
+			wired[vpnBuiltin] = true
+		}
+		for _, p := range v.Providers {
+			wired[p.ID] = true
+		}
+		for _, i := range v.Instances {
+			if slices.Contains(i.Via, "*") {
+				continue
+			}
+			if len(i.Via) == 0 {
+				out = append(out, withInstance(vpnFinding(c.kind, Warning, i.ID+" is VPN-only through no provider: nobody can reach it.",
+					"Its Through lists no VPN provider (its last one was removed), so every request is refused.",
+					[]string{"Set " + i.ID + "'s Through again (its Access section), or make it reachable from the internet."}, "none", i.ID, "none"), i.ID))
+				continue
+			}
+			if !slices.ContainsFunc(i.Via, func(id string) bool { return wired[id] }) {
+				out = append(out, withInstance(vpnFinding(c.kind, Warning, i.ID+" is VPN-only through no wired provider: nobody can reach it.",
+					"Its Through names only "+strings.Join(i.Via, ", ")+", none of them wired, so every request is refused.",
+					[]string{"Wire one of them again, or set " + i.ID + "'s Through (its Access section)."}, strings.Join(i.Via, ","), i.ID), i.ID))
 			}
 		}
 	case KindVPNDNSFailed:

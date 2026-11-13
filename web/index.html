@@ -4796,10 +4796,10 @@
       const f = btn.closest('[data-reach]');
       const mode = f.querySelector('[data-reach-mode]').value;
       let via = Array.from(f.querySelectorAll('[data-reach-via]:checked')).map(c => c.dataset.reachVia);
-      if (via.includes('*') || !via.length) via = ['*'];
+      if (via.includes('*')) via = ['*'];
       const pl = f.querySelector('[data-reach-public-links]');
       const body = { mode, via: mode === 'vpn' ? via : [], public_links: !!(pl && pl.checked) };
-      const what = mode === 'vpn' ? 'only through ' + (via[0] === '*' ? 'every VPN provider' : via.join(', ')) : 'from the internet';
+      const what = mode === 'vpn' ? 'only through ' + (via[0] === '*' ? 'every VPN provider' : via.length ? via.join(', ') : 'no provider (nobody can reach it)') : 'from the internet';
       if (!confirm('Make ' + id + ' reachable ' + what + '? It restarts.')) return;
       const out = f.querySelector('[data-reach-result]');
       try {
