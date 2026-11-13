@@ -109,6 +109,8 @@ type vpnRuntime struct {
 	// rendered: instance → its VPN render key at the last re-render
 	// check (vpnRangesChanged).
 	rendered map[string]string
+	// renderFail: instance → its failed VPN re-render (retry, closed).
+	renderFail map[string]*vpnRenderRetry
 
 	pubMu       sync.Mutex // serialises publishes
 	pubPending  atomic.Bool
@@ -119,7 +121,7 @@ type vpnRuntime struct {
 }
 
 func newVPNRuntime() *vpnRuntime {
-	return &vpnRuntime{maps: map[string]*providerMap{}, rendered: map[string]string{}, now: time.Now}
+	return &vpnRuntime{maps: map[string]*providerMap{}, rendered: map[string]string{}, renderFail: map[string]*vpnRenderRetry{}, now: time.Now}
 }
 
 // SetVPNKeycloak wires the oidc_sub resolver (nil: oidc_sub owners never
@@ -635,6 +637,9 @@ func (h *Hub) vpnTick(ctx context.Context) {
 		} else {
 			h.runVPNDNS(ctx, r.id)
 		}
+	}
+	if h.vpnRenderRetryDue() {
+		h.vpnRangesChanged()
 	}
 	h.TriggerVPNPublish()
 }

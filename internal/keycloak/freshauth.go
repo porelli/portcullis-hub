@@ -79,35 +79,54 @@ func freshAuthMapper() gocloak.ProtocolMapperRepresentation {
 	}
 }
 
-// checkFreshAuthURIs: redirectURIs[i] is https://people.<d>/signin on the
-// people host (the Sign-in page, sign-in part 2 D24) and https://<host>/
-// exactly on any other (the hub host), and webOrigins[i] https://<the
-// same host>; at least one pair, the same number of each, no host twice
-// (contract §8: the people and hub hosts).
+// freshAuthPaths are, per host, the redirect paths the fresh-auth client
+// may carry (contract §8, V8: a per-host model): people.<d> → /signin
+// (the Sign-in page) and /vpn/ (the VPN page); any other host (the hub
+// host) → /.
+func freshAuthPaths(host string) map[string]bool {
+	if strings.HasPrefix(strings.ToLower(host), "people.") {
+		return map[string]bool{"/signin": true, "/vpn/": true}
+	}
+	return map[string]bool{"/": true}
+}
+
+// checkFreshAuthURIs: every redirect URI is https://<host><path> with a
+// path of its host's set (freshAuthPaths), no (host, path) twice; the web
+// origins are exactly https://<host> of each host, each once (contract
+// §8: the people and hub hosts).
 func checkFreshAuthURIs(redirectURIs, webOrigins []string) error {
-	if len(redirectURIs) == 0 || len(redirectURIs) != len(webOrigins) {
-		return fmt.Errorf("fresh-auth client: want one web origin per redirect URI, got %d and %d", len(redirectURIs), len(webOrigins))
+	if len(redirectURIs) == 0 {
+		return fmt.Errorf("fresh-auth client: no redirect URI")
 	}
 	seen := map[string]bool{}
-	for i, redirectURI := range redirectURIs {
+	hosts := map[string]bool{}
+	for _, redirectURI := range redirectURIs {
 		u, err := url.Parse(redirectURI)
 		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.ForceQuery {
-			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://people.<domain>/signin or https://hub.<domain>/", redirectURI)
+			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://people.<domain>/signin, https://people.<domain>/vpn/ or https://hub.<domain>/", redirectURI)
 		}
-		want := "/"
-		if strings.HasPrefix(strings.ToLower(u.Host), "people.") {
-			want = "/signin"
+		if !freshAuthPaths(u.Host)[u.Path] || u.RawPath != "" {
+			return fmt.Errorf("fresh-auth client: redirect URI %q: path %q isn't allowed on %s", redirectURI, u.Path, u.Host)
 		}
-		if u.Path != want || u.RawPath != "" {
-			return fmt.Errorf("fresh-auth client: redirect URI %q must be https://%s%s", redirectURI, u.Host, want)
+		if seen[u.Host+u.Path] {
+			return fmt.Errorf("fresh-auth client: redirect URI %s listed twice", redirectURI)
 		}
-		if webOrigins[i] != "https://"+u.Host {
-			return fmt.Errorf("fresh-auth client: web origin %q must be https://%s", webOrigins[i], u.Host)
+		seen[u.Host+u.Path] = true
+		hosts[u.Host] = true
+	}
+	if len(webOrigins) != len(hosts) {
+		return fmt.Errorf("fresh-auth client: want one web origin per host (%d), got %d", len(hosts), len(webOrigins))
+	}
+	origins := map[string]bool{}
+	for _, o := range webOrigins {
+		h, ok := strings.CutPrefix(o, "https://")
+		if !ok || !hosts[h] {
+			return fmt.Errorf("fresh-auth client: web origin %q must be https://<a redirect URI's host>", o)
 		}
-		if seen[u.Host] {
-			return fmt.Errorf("fresh-auth client: host %s listed twice", u.Host)
+		if origins[h] {
+			return fmt.Errorf("fresh-auth client: host %s listed twice", h)
 		}
-		seen[u.Host] = true
+		origins[h] = true
 	}
 	return nil
 }

@@ -32,14 +32,29 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, s state.InstanceSett
 		return err
 	}
 	key := h.vpnRenderKeyLocked(t)
+	if content == "" {
+		if err := os.Remove(h.overridePath(t.ID)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if err := h.writeOverride(h.overridePath(t.ID), []byte(content)); err != nil {
+		return err
+	}
+	// Commit after success only: a failed write is retried
+	// (vpnRangesChanged).
 	h.vpnrt.mu.Lock()
 	h.vpnrt.rendered[t.ID] = key
 	h.vpnrt.mu.Unlock()
-	if content == "" {
-		os.Remove(h.overridePath(t.ID))
-		return nil
+	return nil
+}
+
+// writeOverride writes an override file (a variable seam for tests).
+func (h *Hub) writeOverride(path string, b []byte) error {
+	if h.testOverrideWriteErr != nil {
+		if err := h.testOverrideWriteErr(path); err != nil {
+			return err
+		}
 	}
-	return fsutil.WriteFileAtomic(h.overridePath(t.ID), []byte(content), 0600)
+	return fsutil.WriteFileAtomic(path, b, 0600)
 }
 
 // mountSourceLocked is a path option value's host directory: a shared

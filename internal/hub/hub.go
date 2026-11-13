@@ -638,6 +638,9 @@ type Hub struct {
 	aiHeld  sync.Map
 	aiErrMu sync.Mutex
 	aiErrs  map[string]string
+	// testOverrideWriteErr, if set, fails override writes (tests: the
+	// VPN fail-closed path).
+	testOverrideWriteErr func(path string) error
 	// vpnrt is the VPN providers' memory (vpn_providers.go; own mutex).
 	vpnrt *vpnRuntime
 	// aiReapply: per instance, the companions whose last change failed

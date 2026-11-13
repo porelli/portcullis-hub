@@ -183,6 +183,9 @@ func (s *Server) peopleMux() *recordingMux {
 	mux.HandleFunc("/static/", s.handlePeopleStatic)
 	s.registerDirectory(mux)
 	s.registerPeopleApps(mux)
+	// The VPN page and People → person's VPN devices (contract §5.1,
+	// §9.7): people listener only.
+	s.registerVPNPeople(mux)
 	return mux
 }
 

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- The fresh-auth popup callback (contract §5.1): first in <head>. This
+     page is the VPN page's fresh-auth redirect URI
+     (https://people.<domain>/vpn/). Its scripts come from /vpn/assets/
+     only, so it works while /static/ is VPN-only (server mode). -->
+<script src="/vpn/assets/freshauth-callback.js"></script>
+<meta name="referrer" content="no-referrer">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPN devices</title>
+<link rel="icon" href="/vpn/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/vpn/assets/directory.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; line-height: 1.6; }
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem; }
+  h1 { font-size: 1.5rem; color: #f1f5f9; margin-bottom: 1rem; }
+  .vpn-card { background: #1e293b; border-radius: .5rem; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+  .vpn-row { display: flex; gap: .75rem; align-items: center; padding: .4rem 0; border-bottom: 1px solid #334155; }
+  .vpn-row:last-child { border-bottom: 0; }
+  .vpn-grow { flex: 1; }
+  .vpn-conf { white-space: pre; font-family: ui-monospace, Menlo, monospace; background: #0f172a; padding: .75rem; border-radius: .4rem; overflow-x: auto; user-select: all; }
+  .vpn-qr { background: #fff; padding: .75rem; display: inline-block; border-radius: .4rem; margin: .75rem 0; }
+  .vpn-muted { color: #94a3b8; font-size: .875rem; }
+  .vpn-warn { color: #fca5a5; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>VPN devices</h1>
+  <p class="vpn-muted" id="vpn-intro">Connect your own devices to the Portcullis VPN. A new device needs a fresh sign-in; its private key is made in this browser and never leaves it.</p>
+  <div class="vpn-card" id="vpn-add"></div>
+  <div class="vpn-card" id="vpn-config" hidden></div>
+  <div class="vpn-card" id="vpn-list"></div>
+  <p id="vpn-status" class="vpn-muted" role="status"></p>
+</div>
+<script src="/vpn/assets/freshauth.js"></script>
+<script src="/vpn/assets/qrcode.js"></script>
+<script src="/vpn/assets/vpn.js"></script>
+</body>
+</html>

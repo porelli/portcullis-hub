@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/policy"
@@ -322,10 +324,6 @@ func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id st
 		h.mu.Unlock()
 		return err
 	}
-	enabled := h.st.IsEnabled(id)
-	if oerr := h.generateOverrideLocked(t, h.st.Settings[id]); oerr != nil {
-		log.Printf("vpn: %s: override: %v", id, oerr)
-	}
 	h.mu.Unlock()
 	if from != to {
 		h.auditOp(actor, "instance.reach", id, from+" -> "+to, nil)
@@ -336,9 +334,9 @@ func (h *Hub) SetInstanceReach(ctx context.Context, actor directory.Actor, id st
 	if werr := h.WritePolicy(); werr != nil {
 		log.Printf("vpn: %s: policy file: %v", id, werr)
 	}
-	if enabled {
-		h.queueDelivery(id, TriggerSave, settings.EffectRestart, 0)
-	}
+	// The override follows (a failed narrowing write fails closed, a
+	// disabled instance is rendered at its next enable).
+	h.vpnRerender(map[string]bool{id: true})
 	return nil
 }
 
@@ -431,18 +429,75 @@ func (h *Hub) vpnRenderKeyLocked(t *templates.Template) string {
 	if vpnOnly, via := h.effectiveReachLocked(t); vpnOnly {
 		b.WriteString(strings.Join(h.vpnAllowRangesLocked(via), ","))
 	}
+	b.WriteString("|")
 	if gw, edge, ok := h.vpnGatewayLocked(t); ok {
-		b.WriteString("|" + gw.String() + "|" + edge)
+		b.WriteString(gw.String() + "|" + edge)
+	}
+	if h.publicLinksLocked(t) {
+		b.WriteString("|public-links")
 	}
 	return b.String()
 }
 
+// vpnRenderRetry is a VPN re-render that failed: retried with backoff;
+// closed: a narrowing change couldn't be applied, so the instance was
+// stopped (fail closed) until a render succeeds.
+type vpnRenderRetry struct {
+	next   time.Time
+	delay  time.Duration
+	closed bool
+}
+
+const (
+	vpnRetryMin = 5 * time.Second
+	vpnRetryMax = 5 * time.Minute
+)
+
+// vpnRangesOf is a render key's allowlist ranges.
+func vpnRangesOf(key string) []string {
+	r, _, _ := strings.Cut(key, "|")
+	if r == "" {
+		return nil
+	}
+	return strings.Split(r, ",")
+}
+
+// vpnNarrows: going from render key prev to next takes access away — an
+// accepted range is no longer accepted (the no-client sentinel accepts
+// nothing), or the instance became VPN-only.
+func vpnNarrows(prev, next string) bool {
+	p, n := vpnRangesOf(prev), vpnRangesOf(next)
+	if len(n) == 0 {
+		return false // internet: wider, never narrower
+	}
+	if len(p) == 0 {
+		return true // internet → VPN-only
+	}
+	for _, r := range p {
+		if r != vpnNoClient && !slices.Contains(n, r) {
+			return true
+		}
+	}
+	return false
+}
+
 // vpnRangesChanged re-renders the override of every enabled instance
 // whose VPN rendering moved (allowlist ranges, gateway attachment) and
-// owes it a restart (V7; rare: wiring, unwiring, a provider's ranges).
-func (h *Hub) vpnRangesChanged() {
+// owes it a restart (V7). The render key is committed only after the
+// write succeeded. A failed write is retried with backoff; if the change
+// narrowed access, the instance is stopped (fail closed, audited
+// vpn.reach_failed_closed, a doctor Problem) until a render succeeds,
+// then started again.
+func (h *Hub) vpnRangesChanged() { h.vpnRerender(nil) }
+
+// vpnRerender is vpnRangesChanged, forcing the instances in force (a
+// reach change): rendered again and restarted even when their key looks
+// unchanged.
+func (h *Hub) vpnRerender(force map[string]bool) {
+	now := h.vpnrt.now()
 	h.mu.Lock()
-	var restart []string
+	var restart, closeIDs []string
+	closeWhy := map[string]error{}
 	for i := range h.instances {
 		t := &h.instances[i]
 		if !t.Enabled {
@@ -451,25 +506,94 @@ func (h *Hub) vpnRangesChanged() {
 		key := h.vpnRenderKeyLocked(t)
 		h.vpnrt.mu.Lock()
 		prev, known := h.vpnrt.rendered[t.ID]
-		h.vpnrt.rendered[t.ID] = key
+		fail := h.vpnrt.renderFail[t.ID]
 		h.vpnrt.mu.Unlock()
-		if known && prev == key {
+		if !force[t.ID] && known && prev == key && fail == nil {
+			continue
+		}
+		if !force[t.ID] && fail != nil && now.Before(fail.next) {
 			continue
 		}
 		if err := h.generateOverrideLocked(t, h.st.Settings[t.ID]); err != nil {
-			log.Printf("vpn: %s: override: %v", t.ID, err)
+			log.Printf("vpn: %s: override: %v (retried)", t.ID, err)
+			h.vpnrt.mu.Lock()
+			if fail == nil {
+				fail = &vpnRenderRetry{delay: vpnRetryMin}
+				h.vpnrt.renderFail[t.ID] = fail
+			} else {
+				fail.delay = min(2*fail.delay, vpnRetryMax)
+			}
+			fail.next = now.Add(fail.delay)
+			// Fail closed: a narrowing change that can't be applied
+			// (an instance never rendered by this run counts as one when
+			// it renders VPN-only).
+			if !fail.closed && (known && vpnNarrows(prev, key) || !known && len(vpnRangesOf(key)) > 0) {
+				fail.closed = true
+				closeIDs = append(closeIDs, t.ID)
+				closeWhy[t.ID] = err
+			}
+			h.vpnrt.mu.Unlock()
 			continue
 		}
+		h.vpnrt.mu.Lock()
+		delete(h.vpnrt.renderFail, t.ID)
+		h.vpnrt.mu.Unlock()
 		// Never rendered by this run: the file is current again, the
-		// exposure drift covers its labels.
-		if known {
+		// exposure drift covers its labels; a fail-closed instance starts
+		// again.
+		if known || force[t.ID] || fail != nil && fail.closed {
 			restart = append(restart, t.ID)
 		}
 	}
 	h.mu.Unlock()
+	for _, id := range closeIDs {
+		h.vpnFailClosed(id, clipRunes(h.RedactErr(id, closeWhy[id]), 600))
+	}
 	for _, id := range restart {
 		h.queueDelivery(id, TriggerSave, settings.EffectRestart, 0)
 	}
+}
+
+// vpnFailClosed stops instance id (compose down, volumes kept; its
+// enabled flag unchanged) because a narrowing VPN change couldn't be
+// rendered, records the op and audits vpn.reach_failed_closed.
+func (h *Hub) vpnFailClosed(id, why string) {
+	err := h.compose.DownByName(context.Background(), projectName(id))
+	msg := "the VPN allowlist couldn't be narrowed (" + why + "): the instance was stopped until it can"
+	if err != nil {
+		msg += "; stopping it failed: " + clipRunes(h.RedactErr(id, err), 300)
+		log.Printf("ERROR: vpn: %s: failing closed: stop: %v", id, err)
+	}
+	h.recordOp(id, OpRecord{Op: OpStop, At: h.vpnrt.now().UTC(), OK: false, Error: msg})
+	h.auditOp(directory.Human("hub"), "vpn.reach_failed_closed", id, "", errors.New(msg))
+}
+
+// vpnFailedClosed are the instances stopped by vpnFailClosed (the
+// doctor's Problem), sorted.
+func (h *Hub) vpnFailedClosed() []string {
+	h.vpnrt.mu.Lock()
+	defer h.vpnrt.mu.Unlock()
+	var out []string
+	for id, f := range h.vpnrt.renderFail {
+		if f.closed {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// vpnRenderRetryDue: a failed VPN re-render is due again.
+func (h *Hub) vpnRenderRetryDue() bool {
+	now := h.vpnrt.now()
+	h.vpnrt.mu.Lock()
+	defer h.vpnrt.mu.Unlock()
+	for _, f := range h.vpnrt.renderFail {
+		if !now.Before(f.next) {
+			return true
+		}
+	}
+	return false
 }
 
 // vpnControlOnlyHostsLocked are t's hosts served by provider control

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -147,6 +149,8 @@ func TestFreshAuthFromEnv(t *testing.T) {
 		// The Hub listener's confirmation page (G11): its own verifier.
 		HubRedirectURI: "https://hub.example.org/",
 		HubWebOrigin:   "https://hub.example.org",
+		// The VPN page (contract §8 per-host model, V8).
+		VPNRedirectURI: "https://people.example.org/vpn/",
 	}
 	if fa != want {
 		t.Errorf("default = %+v\nwant %+v", fa, want)
@@ -171,8 +175,14 @@ func TestPeopleVerifierRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgs := fa.verifierConfigs(http.DefaultClient, func() []string { return nil })
-	if len(cfgs) != 2 || cfgs[hub.ListenerPeople].RedirectURI != "https://people.example.org/signin" || cfgs[hub.ListenerHub].RedirectURI != "https://hub.example.org/" {
+	if len(cfgs) != 3 || cfgs[hub.ListenerPeople].RedirectURI != "https://people.example.org/signin" || cfgs[hub.ListenerHub].RedirectURI != "https://hub.example.org/" ||
+		cfgs[hub.ListenerPeopleVPN].RedirectURI != "https://people.example.org/vpn/" {
 		t.Errorf("verifier configs = %+v", cfgs)
+	}
+	// The client: three redirect URIs, one web origin per host.
+	if r, o := fa.redirectURIs(), fa.webOrigins(); strings.Join(r, " ") != "https://people.example.org/signin https://people.example.org/vpn/ https://hub.example.org/" ||
+		strings.Join(o, " ") != "https://people.example.org https://hub.example.org" {
+		t.Errorf("client URIs %v origins %v", r, o)
 	}
 	if fa.RedirectURI != "https://people.example.org/signin" || fa.HubRedirectURI != "https://hub.example.org/" {
 		t.Errorf("client redirect URIs = %q, %q", fa.RedirectURI, fa.HubRedirectURI)
@@ -309,6 +319,66 @@ func TestVPNDocGIDFromEnv(t *testing.T) {
 	for _, bad := range []string{"10001", "0", "-1", "65536", "x", "010007", " 10007"} {
 		if _, err := vpnDocGIDFromEnv(envOf(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// TestHubVPNSubcommand (contract §16): the public key comes on stdin and
+// goes in the POST body (never argv), the config JSON goes to stdout; a
+// missing socket exits 1 with "the Hub isn't running".
+func TestHubVPNSubcommand(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	var stdout, stderr bytes.Buffer
+	if code := vpnMain([]string{"host-info"}, strings.NewReader(""), &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "the Hub isn't running") {
+		t.Fatalf("no socket: %d %q", code, stderr.String())
+	}
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	var body string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.RequestURI())
+		body = string(b)
+		switch {
+		case r.Method == "POST":
+			w.WriteHeader(201)
+			io.WriteString(w, `{"address":"10.213.0.2"}`)
+		case strings.HasPrefix(r.URL.Path, "/host/vpn/devices/nope"):
+			http.Error(w, "no such device", 404)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+	stdout.Reset()
+	key := "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+	if code := vpnMain([]string{"add-device", "--user", "alice", "--name", "laptop"}, strings.NewReader(key+"\n"), &stdout, &stderr, sock); code != 0 || stdout.String() != `{"address":"10.213.0.2"}` {
+		t.Fatalf("add-device: %d %q %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(body, `"public_key":"`+key+`"`) || !strings.Contains(body, `"user":"alice"`) {
+		t.Fatalf("body %s", body)
+	}
+	stderr.Reset()
+	if code := vpnMain([]string{"revoke", "nope"}, nil, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "no such device") {
+		t.Fatalf("revoke: %d %q", code, stderr.String())
+	}
+	vpnMain([]string{"devices", "--user", "bob"}, nil, &stdout, &stderr, sock)
+	vpnMain([]string{"host-info"}, nil, &stdout, &stderr, sock)
+	if strings.Join(got, "|") != "POST /host/vpn/devices|DELETE /host/vpn/devices/nope|GET /host/vpn/devices?user=bob|GET /host/vpn/info" {
+		t.Fatalf("requests %v", got)
+	}
+	for _, bad := range [][]string{{}, {"add-device", "--user", "a"}, {"revoke"}, {"frob"}} {
+		if code := vpnMain(bad, nil, &stdout, &stderr, sock); code != 2 {
+			t.Errorf("%v: exit %d", bad, code)
 		}
 	}
 }
