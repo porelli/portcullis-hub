@@ -113,7 +113,7 @@
 
 ## Pre-flight rulings (V1–V26)
 
-1. **V1**: Forwarder image renamed `ghcr.io/porelli/portcullis-forwarder` (reserved prefix kept absolute; forwarder exception in validators) — Tasks 1, 2, 9, 13, 19
+1. **V1**: Forwarder image renamed `ghcr.io/porelli/portcullis-forwarder` (reserved prefix kept absolute: no exception — the new name doesn't contain `portcullis-vpn`) — Tasks 1, 2, 9, 13, 19
 2. **V2**: `wg`/`wg_data` added to reserved core names — Tasks 1, 2, 9
 3. **V3**: Core lint updates (46 binds, Dockerfile lists, hub_data consumers, Go cache, dependabot, fully qualified inline images) — Tasks 14, 17
 4. **V4**: `vpn init` genkey fix (ct_run, user 0:0, truncate+write, secrets_fix_perms, stub tests) — Task 15
@@ -289,7 +289,7 @@
 - Modify:
   - `internal/templates/manifest.go` (`Manifest.VPN`)
   - `internal/templates/settings.go` (`HookVPN`, `HookTriggers`, `(*Hook) IsVPN`, `sortedHooks` exclusion in `internal/hub/deliver_hooks.go:126`, plus V10: `reload.hook` and option `delivery.hook` exclusions, with vectors)
-  - `internal/templates/coreref.go:37` (`reservedRefs` += `"portcullis-vpn"`, forwarder image exception V1; `coreServices` += `wg`, `coreVolumes` += `wg_data` V2)
+  - `internal/templates/coreref.go:37` (`reservedRefs` += `"portcullis-vpn"`, no exception for the forwarder image, whose name `portcullis-forwarder` doesn't match `portcullis-vpn` (V1); `coreServices` += `wg`, `coreVolumes` += `wg_data` V2)
   - `internal/templates/reservedvars.go` (`PORTCULLIS_VPN_*`)
   - `internal/templates/discover.go` (call `ValidateVPN` after `ValidateAI`)
   - `internal/hub/realtemplates_test.go`, `CLAUDE.md`
@@ -624,7 +624,7 @@
 **Files:**
 - Modify:
   - `schema/manifest.schema.json` (`vpn` def, `hooks[].when` gains `vpn`)
-  - `tests/validate.py`: new `check_vpn(t, services, routers, r)` called beside `check_ai`; `RESERVED_REFS` += `"portcullis-vpn"` (V1: forwarder image exception); V2: `CORE_SERVICES` += `wg`, `CORE_VOLUMES` += `wg_data`; the reserved `PORTCULLIS_VPN_*` interpolation refusal in `check_reserved_var_refs`; V10: vpn hook exclusions in reload/delivery like ai hooks
+  - `tests/validate.py`: new `check_vpn(t, services, routers, r)` called beside `check_ai`; `RESERVED_REFS` += `"portcullis-vpn"` (V1: no exception; the forwarder image `ghcr.io/porelli/portcullis-forwarder` doesn't match); V2: `CORE_SERVICES` += `wg`, `CORE_VOLUMES` += `wg_data`; the reserved `PORTCULLIS_VPN_*` interpolation refusal in `check_reserved_var_refs`; V10: vpn hook exclusions in reload/delivery like ai hooks
   - `tests/test_validate.py` (`VPNTests`), `tests/e2e/app_signin.py` (`policy_doc`), `.github/workflows/lint.yml`, `CLAUDE.md`, `CONTRIBUTING.md`
 - Create: `tests/vpn_vectors.json` (byte copy of the Hub's `internal/templates/testdata/vpn_vectors.json`)
 
