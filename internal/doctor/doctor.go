@@ -319,8 +319,9 @@ type Report struct {
 	Counts   map[Severity]int `json:"counts"`   // unmuted only
 	Muted    int              `json:"muted"`
 	Scans    []ScanSummary    `json:"scans"`
-	// DNSUnavailable: the DNS inputs couldn't be read, so the DNS checks
-	// didn't run (a field, not a finding: a clean report never hides it).
+	// DNSUnavailable: the DNS inputs couldn't be read, or some plan's
+	// lookups failed (dnsPartial), so the DNS checks didn't (fully) run (a
+	// field, not a finding: a clean report never hides it).
 	DNSUnavailable bool `json:"dns_unavailable,omitempty"`
 }
 
@@ -366,7 +367,7 @@ func Run(in *Inputs, mutes map[string]Mute) Report {
 		}
 	}
 	r := Report{Findings: make([]Finding, 0, len(byFP)), Counts: map[Severity]int{Problem: 0, Warning: 0, Info: 0}, Scans: []ScanSummary{},
-		DNSUnavailable: in.DNS == nil}
+		DNSUnavailable: in.DNS == nil || dnsPartial(in)}
 	for _, f := range byFP {
 		f.Token = f.Inputs
 		if m, ok := mutes[f.FP]; ok && m.Inputs == f.Inputs {

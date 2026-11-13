@@ -779,3 +779,42 @@ func TestHetznerCloudAccepted(t *testing.T) {
 		t.Fatalf("enrolled %v", api.enrolled)
 	}
 }
+
+// TestDeleteDomainDropsOpRecord (final review M2): a successful delete
+// drops the domain's _domain.<name> op record (memory and file), so a
+// re-added domain doesn't show its predecessor's last fix; a refused
+// delete keeps it.
+func TestDeleteDomainDropsOpRecord(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	ctx := context.Background()
+	const d = "team-b.example.net"
+	f.h.EnrollDomain(ctx, directory.Human("alice"), d, "cloudflare", creds())
+	api.set(d, true, time.Now().Add(60*24*time.Hour))
+	f.h.RefreshDomains(ctx)
+	key := opKeyDomain(d)
+	f.h.recordOp(key, OpRecord{Op: "dns_apply", At: time.Now(), OK: true})
+	if f.h.LastOp(key) == nil {
+		t.Fatal("op record not recorded")
+	}
+	if err := f.h.CreateInstance("grafana", "grafana-b", map[string]string{"grafana": d}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.DeleteDomain(ctx, directory.Human("alice"), d); statusOf(err) != 409 {
+		t.Fatalf("delete while assigned: %v", err)
+	}
+	if f.h.LastOp(key) == nil {
+		t.Fatal("a refused delete dropped the op record")
+	}
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, directory.Human("alice")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.DeleteDomain(ctx, directory.Human("alice"), d); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.h.LastOp(key); r != nil {
+		t.Fatalf("op record after delete: %+v", r)
+	}
+	if _, err := os.Stat(f.h.opPath(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("op file after delete: %v", err)
+	}
+}

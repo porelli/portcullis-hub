@@ -159,12 +159,71 @@ func TestDNSMainExplainOnly(t *testing.T) {
 		t.Fatalf("main findings %+v", fs)
 	}
 	for _, f := range fs {
-		if f.Class != FixExplain || f.FixKind != "" || len(f.Steps) == 0 || f.Steps[len(f.Steps)-1] != DNSMainStep || !slices.Equal(f.Domains, []string{"example.org"}) {
+		last := DNSMainStep
+		if f.Kind == KindDNSSECUnsigned {
+			last = DNSMainDNSSECStep // docs M9: signing needs --dnssec
+		}
+		if f.Class != FixExplain || f.FixKind != "" || len(f.Steps) == 0 || f.Steps[len(f.Steps)-1] != last || !slices.Equal(f.Domains, []string{"example.org"}) {
 			t.Errorf("main %s: %+v", f.Kind, f)
 		}
 	}
 	if !strings.Contains(DNSMainStep, "./portcullis dns setup") {
 		t.Fatal(DNSMainStep)
+	}
+	if !strings.Contains(DNSMainDNSSECStep, "./portcullis dns setup --dnssec") || !strings.Contains(DNSMainDNSSECStep, "Cloudflare only") {
+		t.Fatal(DNSMainDNSSECStep)
+	}
+}
+
+// TestDNSAddressBlockedByCNAME (final review I2): a CNAME at <d> or *.<d>
+// (an address item foreign / problem / manual) is dns_records_wrong,
+// explain-only with the plan's steps (the service refuses address next to
+// a CNAME), also when other address items could be fixed.
+func TestDNSAddressBlockedByCNAME(t *testing.T) {
+	cname := domains.PlanItem{Set: "address", Name: "*." + testD, Type: "CNAME", Want: []string{}, Live: []string{"elsewhere.example.net."},
+		Status: "foreign", Severity: "problem", Fix: "manual", Steps: []string{"remove the CNAME at *." + testD + " first"}}
+	p := okPlan()
+	p.Items = append(p.Items, cname)
+	f := onlyKind(t, dnsRun([]domains.Plan{p}, nil), KindDNSRecordsWrong)
+	if f.Severity != Problem || f.Class != FixExplain || f.FixKind != "" || !slices.Equal(f.Steps, cname.Steps) || f.FP != Fingerprint(KindDNSRecordsWrong, testD) {
+		t.Fatalf("cname: %+v", f)
+	}
+	q := okPlan()
+	q.Items[0].Status, q.Items[0].Severity, q.Items[0].Fix, q.Items[0].Steps = "wrong", "problem", "auto", []string{"set A"}
+	q.Items = append(q.Items, cname)
+	g := onlyKind(t, dnsRun([]domains.Plan{q}, nil), KindDNSRecordsWrong)
+	if g.Class != FixExplain || g.FixKind != "" || !slices.Equal(g.Steps, []string{"set A", cname.Steps[0]}) {
+		t.Fatalf("wrong + cname: %+v", g)
+	}
+}
+
+// TestDNSUnavailableOnUnknown (final review I1): a plan whose lookups
+// failed (an unknown item above info, or DNSSEC state unknown) — of an
+// added domain or the main one — sets dns_unavailable; the unknown-CA item
+// (caa / unknown / info) doesn't.
+func TestDNSUnavailableOnUnknown(t *testing.T) {
+	unknownItem := func(p *domains.Plan) {
+		p.Items[0].Status, p.Items[0].Severity, p.Items[0].Live = "unknown", "warning", nil
+	}
+	unknownSEC := func(p *domains.Plan) { p.DNSSEC.State = "unknown" }
+	unknownCA := func(p *domains.Plan) {
+		p.CAA = domains.PlanCAA{}
+		p.Items[1] = domains.PlanItem{Set: "caa", Name: testD, Type: "CAA", Status: "unknown", Severity: "info", Fix: "none"}
+	}
+	for _, c := range []struct {
+		name string
+		edit func(*domains.Plan)
+		want bool
+	}{{"item", unknownItem, true}, {"dnssec", unknownSEC, true}, {"unknown CA", unknownCA, false}, {"clean", func(*domains.Plan) {}, false}} {
+		p := okPlan()
+		c.edit(&p)
+		if r := Run(&Inputs{DNS: []domains.Plan{okPlan(), p}}, nil); r.DNSUnavailable != c.want {
+			t.Errorf("%s (added): dns_unavailable %v", c.name, r.DNSUnavailable)
+		}
+		ok := okPlan()
+		if r := Run(&Inputs{DNS: []domains.Plan{ok}, DNSMain: &p}, nil); r.DNSUnavailable != c.want {
+			t.Errorf("%s (main): dns_unavailable %v", c.name, r.DNSUnavailable)
+		}
 	}
 }
 

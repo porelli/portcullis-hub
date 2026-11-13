@@ -699,6 +699,7 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor directory.Actor, name stri
 	}
 	h.saveLocked()
 	h.mu.Unlock()
+	h.dropDomainOp(name)
 	if perr := h.WritePolicy(); perr != nil {
 		log.Printf("domains: policy write after removing %s failed: %v", name, perr)
 	}

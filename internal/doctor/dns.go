@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -14,7 +15,10 @@ import (
 // Domains [<d>]; its fingerprint is the kind and <d> (plus the record's
 // name for dns_dangling and dns_shadowed), its inputs digest the items'
 // live values. The main domain's findings are all explain-only, with the
-// step "Run `./portcullis dns setup` on the server".
+// step "Run `./portcullis dns setup` on the server" (dnssec_unsigned:
+// DNSMainDNSSECStep). A plan whose lookups failed (an unknown item above
+// info, or DNSSEC state unknown) sets Report.DNSUnavailable too
+// (dnsPartial).
 const (
 	KindDNSRecordsWrong      = "dns_records_wrong"
 	KindDNSCAAMissing        = "dns_caa_missing"
@@ -37,6 +41,10 @@ const (
 // DNSMainStep is the main domain's only fix: its records are set on the
 // server, never by the Hub.
 const DNSMainStep = "Run `./portcullis dns setup` on the server"
+
+// DNSMainDNSSECStep is the main domain's dnssec_unsigned step: signing
+// is opt-in (--dnssec) and only Cloudflare can sign through its API.
+const DNSMainDNSSECStep = "Run `./portcullis dns setup --dnssec` on the server (Cloudflare only)"
 
 // DNSKinds are the ten DNS kinds.
 var DNSKinds = []string{KindDNSRecordsWrong, KindDNSCAAMissing, KindDNSCAAWrongAccount, KindDNSCAAOtherIssuers,
@@ -92,6 +100,27 @@ func dnsFindings(in *Inputs) []Finding {
 	return out
 }
 
+// dnsPartial: some plan's lookups failed, so its checks didn't really
+// run — an unknown item above info (the unknown-CA item is info: CAA is
+// skipped on purpose), or DNSSEC state unknown.
+func dnsPartial(in *Inputs) bool {
+	plans := slices.Clone(in.DNS)
+	if in.DNSMain != nil {
+		plans = append(plans, *in.DNSMain)
+	}
+	for _, p := range plans {
+		if p.DNSSEC.State == "unknown" {
+			return true
+		}
+		for _, it := range p.Items {
+			if it.Status == "unknown" && it.Severity != "info" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // liveOf is the items' live values (the mute's inputs), in a stable
 // order (the plan's item order doesn't matter).
 func liveOf(items []domains.PlanItem) [][]string {
@@ -136,7 +165,11 @@ func planFindings(p *domains.Plan, main bool) []Finding {
 			FP: Fingerprint(kind, append([]string{d}, subjects...)...), Inputs: Digest(inputs)}
 		switch {
 		case main:
-			f.Class, f.Steps = FixExplain, append(append([]string(nil), steps...), DNSMainStep)
+			last := DNSMainStep
+			if kind == KindDNSSECUnsigned {
+				last = DNSMainDNSSECStep
+			}
+			f.Class, f.Steps = FixExplain, append(append([]string(nil), steps...), last)
 		case fix != "":
 			f.Class, f.FixKind, f.Steps = FixOneClick, fix, steps
 		default:
@@ -148,10 +181,13 @@ func planFindings(p *domains.Plan, main bool) []Finding {
 		out = append(out, f)
 	}
 	var addr, caaMissing, nomail []domains.PlanItem
+	blocked := false // a CNAME at <d> / *.<d>: the service refuses address
 	for _, it := range p.Items {
 		switch {
 		case it.Set == domains.SetAddress && (it.Status == "missing" || it.Status == "wrong"):
 			addr = append(addr, it)
+		case it.Set == domains.SetAddress && it.Status == "foreign" && it.Severity == "problem":
+			addr, blocked = append(addr, it), true
 		case it.Set == domains.SetCAA && it.Status == "missing":
 			caaMissing = append(caaMissing, it)
 		case it.Set == domains.SetNoMail && it.Status == "missing":
@@ -159,9 +195,13 @@ func planFindings(p *domains.Plan, main bool) []Finding {
 		}
 	}
 	if len(addr) > 0 {
+		fix := FixDNSApply
+		if blocked {
+			fix = ""
+		}
 		mk(KindDNSRecordsWrong, Problem, "The address records of "+d+" don't point at this server",
 			"Apps on "+d+" are unreachable, or reach another server, until its A / AAAA records name this server's addresses.",
-			FixDNSApply, stepsOf(addr), liveOf(addr))
+			fix, stepsOf(addr), liveOf(addr))
 	}
 	if len(caaMissing) > 0 {
 		mk(KindDNSCAAMissing, Warning, d+" has no CAA record for Portcullis",

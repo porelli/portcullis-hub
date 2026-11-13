@@ -115,3 +115,17 @@ func TestDoctorApplyFixDNSClass(t *testing.T) {
 		t.Fatalf("domain_op = %s", txt)
 	}
 }
+
+// TestDoctorDNSUnavailableBanner (final review I3): the Doctor tab says
+// when the DNS checks didn't run (the report's dns_unavailable), so a
+// clean report never hides it.
+func TestDoctorDNSUnavailableBanner(t *testing.T) {
+	js := webAsset(t, "doctor.js")
+	want := `if (r.dns_unavailable) h += '<div class="public-warn" data-dr-dns-unavailable>DNS checks didn\'t run: the domains service couldn\'t be read (or a lookup failed)</div>';`
+	if !strings.Contains(js, want) {
+		t.Errorf("doctor.js lacks %q", want)
+	}
+	if i, j := strings.Index(js, "data-dr-dns-unavailable"), strings.Index(js, "The doctor found nothing."); i < 0 || j < 0 || i > j {
+		t.Error("the dns_unavailable banner must come before the clean-report line")
+	}
+}

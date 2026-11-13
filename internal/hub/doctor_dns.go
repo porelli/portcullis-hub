@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -43,6 +44,25 @@ func OpKeyDomain(name string) string { return opKeyDomain(NormalizeHost(name)) }
 func validDomainOpKey(k string) bool {
 	n, ok := strings.CutPrefix(k, "_domain.")
 	return ok && templates.ValidHostname(n)
+}
+
+// dropDomainOp forgets a removed domain's op record (memory and file),
+// so a re-added domain doesn't show its predecessor's last fix. A running
+// record stays (its op finishes and rewrites it).
+func (h *Hub) dropDomainOp(name string) {
+	key := opKeyDomain(name)
+	if !validDomainOpKey(key) {
+		return
+	}
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
+	if r, ok := h.ops[key]; ok && r.Running {
+		return
+	}
+	delete(h.ops, key)
+	if err := os.Remove(h.opPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("ops: cannot remove the op record of domain %s: %v", name, err)
+	}
 }
 
 func init() {
