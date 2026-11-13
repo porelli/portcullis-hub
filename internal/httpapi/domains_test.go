@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,13 @@ type fakeDomainsService struct {
 	mu     sync.Mutex
 	list   map[string]map[string]any
 	bodies []string
+	// DNS hardening: every plan / apply / dnssec request ("<method> <uri>
+	// <body>"); cantSign makes POST …/dnssec answer 409.
+	dnsCalls []string
+	cantSign bool
+	// plans: a plan to answer per name ("" the main domain), instead of
+	// the default one (the harness).
+	plans map[string]map[string]any
 }
 
 func newFakeDomainsService(t *testing.T, secret string) (*fakeDomainsService, *httptest.Server) {
@@ -84,6 +92,73 @@ func newFakeDomainsService(t *testing.T, secret string) (*fakeDomainsService, *h
 		delete(f.list, r.PathValue("name"))
 		f.mu.Unlock()
 		w.WriteHeader(204)
+	})
+	dnsCall := func(r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.dnsCalls = append(f.dnsCalls, strings.TrimSpace(r.Method+" "+r.URL.RequestURI()+" "+string(b)))
+		f.mu.Unlock()
+	}
+	plan := func(name string, write bool) map[string]any {
+		f.mu.Lock()
+		key := name
+		if !write {
+			key = ""
+		}
+		p, ok := f.plans[key]
+		f.mu.Unlock()
+		if ok {
+			return p
+		}
+		return map[string]any{"name": name, "checked_at": "2026-11-13T09:12:44Z", "can_write": write,
+			"items": []map[string]any{{"set": "caa", "name": name, "type": "CAA", "want": []string{`0 issue "letsencrypt.org; validationmethods=dns-01"`},
+				"live": []string{}, "status": "missing", "severity": "warning", "fix": map[bool]string{true: "auto", false: "manual"}[write], "steps": []string{}}},
+			"caa":    map[string]any{"issuer": "letsencrypt.org", "account_uri": "", "would_issue": false},
+			"dnssec": map[string]any{"state": "unsigned", "zone": "example.net", "provider_can_sign": write, "ds": []any{}, "steps": []string{}}}
+	}
+	known := func(w http.ResponseWriter, name string) (map[string]any, bool) {
+		f.mu.Lock()
+		d, ok := f.list[name]
+		f.mu.Unlock()
+		if !ok {
+			w.WriteHeader(404)
+			json.NewEncoder(w).Encode(map[string]string{"error": name + " is not enrolled"})
+		}
+		return d, ok
+	}
+	mux.HandleFunc("GET /domains/{name}/dns", func(w http.ResponseWriter, r *http.Request) {
+		dnsCall(r)
+		if _, ok := known(w, r.PathValue("name")); ok {
+			json.NewEncoder(w).Encode(plan(r.PathValue("name"), true))
+		}
+	})
+	mux.HandleFunc("GET /main/dns", func(w http.ResponseWriter, r *http.Request) {
+		dnsCall(r)
+		json.NewEncoder(w).Encode(plan("example.org", false))
+	})
+	mux.HandleFunc("POST /domains/{name}/dns/apply", func(w http.ResponseWriter, r *http.Request) {
+		dnsCall(r)
+		if d, ok := known(w, r.PathValue("name")); ok {
+			w.WriteHeader(202)
+			json.NewEncoder(w).Encode(d)
+		}
+	})
+	mux.HandleFunc("POST /domains/{name}/dnssec", func(w http.ResponseWriter, r *http.Request) {
+		dnsCall(r)
+		d, ok := known(w, r.PathValue("name"))
+		if !ok {
+			return
+		}
+		f.mu.Lock()
+		cant := f.cantSign
+		f.mu.Unlock()
+		if cant {
+			w.WriteHeader(409)
+			json.NewEncoder(w).Encode(map[string]string{"error": "porkbun can't sign the zone through its API"})
+			return
+		}
+		w.WriteHeader(202)
+		json.NewEncoder(w).Encode(d)
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+secret {
@@ -275,4 +350,131 @@ func readAudit(t *testing.T, path string) []directory.AuditEntry {
 		}
 	}
 	return out
+}
+
+// enrolled adds team-b.example.net through the API (the service lists it).
+func (e *domainsEnv) enrolled(t *testing.T) {
+	t.Helper()
+	if code, b := e.do(t, e.hub, "root", "POST", "/api/domains", enrollBody("team-b.example.net", dnsToken)); code != 202 {
+		t.Fatalf("enroll = %d %s", code, b)
+	}
+}
+
+func (e *domainsEnv) takeDNSCalls() []string {
+	e.fake.mu.Lock()
+	defer e.fake.mu.Unlock()
+	out := e.fake.dnsCalls
+	e.fake.dnsCalls = nil
+	return out
+}
+
+// TestDomainDNSRoutesAdminOnly (§12.3): the DNS routes are admins only
+// (delegates and people 403, never on the people listener), no-store.
+func TestDomainDNSRoutesAdminOnly(t *testing.T) {
+	e := newDomainsEnv(t)
+	e.enrolled(t)
+	routes := []struct{ method, path, body string }{
+		{"GET", "/api/domains/team-b.example.net/dns", ""},
+		{"POST", "/api/domains/team-b.example.net/dns/apply", `{"sets":["caa"]}`},
+		{"POST", "/api/domains/team-b.example.net/dnssec", `{"enable":true}`},
+		{"GET", "/api/dns/main", ""},
+		{"GET", "/api/domains/team-b.example.net/op", ""},
+	}
+	for _, user := range []string{"bob", "dana", ""} {
+		for _, r := range routes {
+			if code, b := e.do(t, e.hub, user, r.method, r.path, r.body); code != 403 {
+				t.Errorf("%q %s %s = %d %s, want 403", user, r.method, r.path, code, b)
+			}
+		}
+	}
+	for _, r := range routes {
+		if code, _ := e.do(t, e.ppl, "root", r.method, r.path, r.body); code != 404 && code != 405 {
+			t.Errorf("people %s %s = %d, want 404", r.method, r.path, code)
+		}
+	}
+	if c := e.takeDNSCalls(); len(c) != 0 {
+		t.Fatalf("refused requests reached the service: %v", c)
+	}
+	resp, b := doAs(t, e.hub, "root", "GET", "/api/domains/team-b.example.net/dns?refresh=1", "")
+	if resp.StatusCode != 200 || !strings.Contains(b, `"set":"caa"`) || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("plan = %d %s %v", resp.StatusCode, b, resp.Header)
+	}
+	if code, b := e.do(t, e.hub, "root", "GET", "/api/domains/nope.example.net/dns", ""); code != 404 {
+		t.Fatalf("unknown = %d %s", code, b)
+	}
+	if code, b := e.do(t, e.hub, "root", "POST", "/api/domains/team-b.example.net/dns/apply", `{"sets":["caa","nomail"]}`); code != 202 || !strings.Contains(b, `"name":"team-b.example.net"`) {
+		t.Fatalf("apply = %d %s", code, b)
+	}
+	if code, b := e.do(t, e.hub, "root", "POST", "/api/domains/team-b.example.net/dnssec", `{"enable":true}`); code != 202 {
+		t.Fatalf("dnssec = %d %s", code, b)
+	}
+	want := []string{"GET /domains/team-b.example.net/dns?refresh=1", `POST /domains/team-b.example.net/dns/apply {"sets":["caa","nomail"]}`, `POST /domains/team-b.example.net/dnssec {"enable":true}`}
+	if c := e.takeDNSCalls(); strings.Join(c, "|") != strings.Join(want, "|") {
+		t.Fatalf("service calls %q", c)
+	}
+	var actions []string
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "domain.dns_apply" || a.Action == "domain.dnssec_enable" {
+			actions = append(actions, a.Action+":"+a.Result+":"+a.Target+":"+a.Detail)
+		}
+	}
+	if strings.Join(actions, ",") != "domain.dns_apply:ok:team-b.example.net:sets=caa,nomail,domain.dnssec_enable:ok:team-b.example.net:" {
+		t.Fatalf("audit %v", actions)
+	}
+}
+
+// TestDomainDNSApplyStrictBody: {"sets": [...]} only (unknown fields,
+// trailing data, other types: a fixed 400 that never quotes the body);
+// signing takes exactly {"enable": true}.
+func TestDomainDNSApplyStrictBody(t *testing.T) {
+	e := newDomainsEnv(t)
+	e.enrolled(t)
+	for _, body := range []string{``, `{}`, `{"sets":[]}`, `{"sets":"caa"}`, `{"sets":["caa"],"x":1}`, `{"sets":["caa"]} {}`, `{"sets":["mx"]}`, `[]`, `{"sets":["caa"],"x":"secret-x"}`} {
+		code, b := e.do(t, e.hub, "root", "POST", "/api/domains/team-b.example.net/dns/apply", body)
+		if code != 400 || strings.Contains(b, "secret-x") {
+			t.Errorf("apply %s = %d %s, want 400", body, code, b)
+		}
+	}
+	for _, body := range []string{``, `{}`, `{"enable":false}`, `{"enable":"true"}`, `{"enable":true,"zone":"x"}`, `{"disable":true}`} {
+		if code, b := e.do(t, e.hub, "root", "POST", "/api/domains/team-b.example.net/dnssec", body); code != 400 {
+			t.Errorf("dnssec %s = %d %s, want 400", body, code, b)
+		}
+	}
+	if c := e.takeDNSCalls(); len(c) != 0 {
+		t.Fatalf("bad bodies reached the service: %v", c)
+	}
+}
+
+// TestMainDNSRoute: GET /api/dns/main is the service's GET /main/dns
+// (refresh passed through), can_write false.
+func TestMainDNSRoute(t *testing.T) {
+	e := newDomainsEnv(t)
+	code, b := e.do(t, e.hub, "root", "GET", "/api/dns/main?refresh=1", "")
+	if code != 200 || !strings.Contains(b, `"can_write":false`) || !strings.Contains(b, `"name":"example.org"`) {
+		t.Fatalf("main = %d %s", code, b)
+	}
+	if code, _ := e.do(t, e.hub, "root", "GET", "/api/dns/main", ""); code != 200 {
+		t.Fatal(code)
+	}
+	if c := e.takeDNSCalls(); strings.Join(c, "|") != "GET /main/dns?refresh=1|GET /main/dns" {
+		t.Fatalf("service calls %q", c)
+	}
+}
+
+// TestDNSSECConflictPassesThrough: the service's 409 "can't sign" is the
+// route's 409 with that message (audited refused).
+func TestDNSSECConflictPassesThrough(t *testing.T) {
+	e := newDomainsEnv(t)
+	e.enrolled(t)
+	e.fake.mu.Lock()
+	e.fake.cantSign = true
+	e.fake.mu.Unlock()
+	code, b := e.do(t, e.hub, "root", "POST", "/api/domains/team-b.example.net/dnssec", `{"enable":true}`)
+	if code != 409 || !strings.Contains(b, "porkbun can't sign the zone through its API") {
+		t.Fatalf("dnssec = %d %s", code, b)
+	}
+	a := readAudit(t, e.audit)
+	if l := a[len(a)-1]; l.Action != "domain.dnssec_enable" || l.Result != "refused" {
+		t.Fatalf("audit %+v", l)
+	}
 }

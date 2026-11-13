@@ -227,6 +227,12 @@ func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string,
 			return nil, err
 		}
 	}
+	// A zone-wide DNSSEC signing (dnssec_sign) likewise.
+	if fixerAlwaysConfirms(fx) {
+		if err := aiUnconfirmed(actor, "fix "+fx.Kind()+" turns on signing for a whole DNS zone"); err != nil {
+			return nil, err
+		}
+	}
 	op, err = fx.Apply(h, f, params, planHash, actor)
 	if op != nil {
 		detail += " op=" + op.OpID
@@ -262,6 +268,21 @@ func (h *Hub) FixTouchesData(ctx context.Context, r *doctor.Report, fp string, p
 		return true, errSetupChanged()
 	}
 	return p.TouchesData, nil
+}
+
+// FixNeedsConfirmation is whether the Portcullis MCP's doctor_apply_fix
+// is class D for finding fp's fix: it touches data (FixTouchesData), or
+// its fixer always confirms (dnssec_sign: zone-wide, DNS hardening
+// security ruling). Any error is returned with true (fail closed).
+func (h *Hub) FixNeedsConfirmation(ctx context.Context, r *doctor.Report, fp string, params map[string]string, planHash string) (bool, error) {
+	_, fx, err := h.findingFixIn(ctx, r, fp, params)
+	if err != nil {
+		return true, err
+	}
+	if fixerAlwaysConfirms(fx) {
+		return true, nil
+	}
+	return h.FixTouchesData(ctx, r, fp, params, planHash)
 }
 
 // fixHash is sha256 of v's JSON.

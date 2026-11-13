@@ -80,6 +80,9 @@ type KnownDomain struct {
 	CertNotAfter *time.Time `json:"cert_not_after,omitempty" yaml:"cert_not_after,omitempty"`
 	LastError    string     `json:"last_error,omitempty" yaml:"last_error,omitempty"`
 	State        string     `json:"state" yaml:"state"`
+	// CAAOK / DNSSEC: the service's caa_ok and dnssec (DNS hardening).
+	CAAOK  bool   `json:"caa_ok,omitempty" yaml:"caa_ok,omitempty"`
+	DNSSEC string `json:"dnssec,omitempty" yaml:"dnssec,omitempty"`
 }
 
 // Instance is an app instance (contract §11): its template and hostnames

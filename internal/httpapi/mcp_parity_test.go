@@ -92,10 +92,12 @@ var destructiveTwins = map[string]string{
 	"/api/drift/resolve":                                  "stops, adopts or recreates a project",
 	"DELETE /api/instances/{id}/credentials/{key}/{user}": "revokes a person's credential",
 	// Task 17b.
-	"/api/sources/remove":                             "removes a source; its enabled apps are disabled",
-	"POST /api/instances/{id}/restore":                "restores over the instance",
-	"POST /api/instances/restore":                     "restores an archive into a new instance (data and access settings from the archive)",
-	"DELETE /api/domains/{name}":                      "deletes a domain (records, certificate)",
+	"/api/sources/remove":              "removes a source; its enabled apps are disabled",
+	"POST /api/instances/{id}/restore": "restores over the instance",
+	"POST /api/instances/restore":      "restores an archive into a new instance (data and access settings from the archive)",
+	"DELETE /api/domains/{name}":       "deletes a domain (records, certificate)",
+	// DNS hardening (§15.10, F1).
+	"POST /api/domains/{name}/dnssec":                 "turns on DNSSEC signing for the whole zone; not undoable from Portcullis",
 	"POST /api/instances/{id}/ai/revoke":              "revokes AI credentials in the app",
 	"POST /api/instances/{id}/ai/dismiss":             "hides a leaver whose app tokens the Hub couldn't revoke (T27)",
 	"DELETE /api/ai/providers/{name}":                 "deletes a model provider and its secrets",
@@ -283,7 +285,9 @@ func TestToolParity(t *testing.T) {
 		// Task 7 security review.
 		"stop_op",
 		// Sign-in methods (Task 6).
-		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger", "set_sign_in_limits"} {
+		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger", "set_sign_in_limits",
+		// DNS hardening (F1).
+		"enable_domain_dnssec"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -304,7 +308,9 @@ func TestToolParity(t *testing.T) {
 		// running operation did; the long operations' tools stay W / per call.
 		"disable_instance", "restart_instance",
 		// Sign-in methods (Task 6).
-		"set_sign_in_template_enabled", "delete_sign_in_template"} {
+		"set_sign_in_template_enabled", "delete_sign_in_template",
+		// DNS hardening (F1).
+		"apply_domain_dns"} {
 		if byName[n].Class != ClassWrite {
 			t.Errorf("tool %s: class %q, want W", n, byName[n].Class)
 		}
@@ -323,7 +329,9 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// R (sign-in Task 6).
-	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact", "person_sign_in", "issue_yubikey_certificate"} {
+	for _, n := range []string{"get_sign_in", "get_instance_sign_in", "preview_sign_in_template", "sign_in_impact", "person_sign_in", "issue_yubikey_certificate",
+		// DNS hardening (F1).
+		"get_domain_dns", "get_main_dns", "domain_op"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}

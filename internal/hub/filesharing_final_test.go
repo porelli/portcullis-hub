@@ -212,6 +212,7 @@ func TestRegenerateAppliedLikeRevocation(t *testing.T) {
 	credentials.Zero(first.Password)
 	failHooks(c.f)
 	downs := countCalls(c.f, "down:"+smbProject)
+	unlock := holdRestarts(t, c)
 	cc, err := c.f.h.CreateCredential(context.Background(), smbID, smbKey, "alice", testProof)
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +220,7 @@ func TestRegenerateAppliedLikeRevocation(t *testing.T) {
 	credentials.Zero(cc.Password)
 	assertKilled(t, c, downs)
 	assertCredentialsOp(t, c)
+	unlock()
 	c.f.engine.setExec(nil)
 	settle(c.f)
 }

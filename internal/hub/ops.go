@@ -328,7 +328,7 @@ func validOpKey(k string) bool {
 	if fid, ok := strings.CutPrefix(k, "_folder."); ok {
 		return settings.FolderIDRe.MatchString(fid)
 	}
-	return k == opKeyDoctor || templates.ValidID(k)
+	return k == opKeyDoctor || validDomainOpKey(k) || templates.ValidID(k)
 }
 
 // LastOp returns an app's last recorded operation (nil: none).

@@ -973,6 +973,9 @@ func TestMCPResourcesAndPrompts(t *testing.T) {
 	if _, a := read("/mcp/admin", "portcullis://templates/nope"); a["error"] == nil {
 		t.Errorf("unknown template: %v", a)
 	}
+	if txt, _ := read("/mcp/admin", "portcullis://doctor/checks"); !strings.Contains(txt, `"dns_caa_missing"`) || !strings.Contains(txt, `"dnssec_unsigned"`) {
+		t.Errorf("doctor/checks lacks the DNS kinds: %s", txt)
+	}
 	if txt, _ := read("/mcp/admin", "portcullis://doctor/checks"); !strings.Contains(txt, `"shared_path"`) {
 		t.Errorf("doctor catalogue %q", txt)
 	}

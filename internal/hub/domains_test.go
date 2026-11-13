@@ -33,9 +33,88 @@ type fakeDomainsAPI struct {
 	listHook   func()
 	enrollHook func(ctx context.Context) error
 	deleteHook func() error
+	// DNS plans (DNS hardening): plans by name, main the main domain's;
+	// applied every ApplySets call ("<name> <a,b>"), signed every
+	// EnableDNSSEC name; refreshes every Plan call with refresh;
+	// signErr / planErr answer those calls instead.
+	plans     map[string]domains.Plan
+	main      domains.Plan
+	applied   []string
+	signed    []string
+	refreshes int
+	signErr   error
+	planErr   error
 }
 
-func newFakeDomainsAPI() *fakeDomainsAPI { return &fakeDomainsAPI{list: map[string]domains.Domain{}} }
+func newFakeDomainsAPI() *fakeDomainsAPI {
+	return &fakeDomainsAPI{list: map[string]domains.Domain{}, plans: map[string]domains.Plan{}}
+}
+
+func (f *fakeDomainsAPI) Plan(_ context.Context, name string, refresh bool) (domains.Plan, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.down {
+		return domains.Plan{}, domains.ErrUnreachable
+	}
+	if f.planErr != nil {
+		return domains.Plan{}, f.planErr
+	}
+	if _, ok := f.list[name]; !ok {
+		return domains.Plan{}, &domains.APIError{Status: 404, Message: name + " is not enrolled"}
+	}
+	if refresh {
+		f.refreshes++
+	}
+	p, ok := f.plans[name]
+	if !ok {
+		p = domains.Plan{Name: name, CanWrite: true, Items: []domains.PlanItem{}}
+	}
+	return p, nil
+}
+
+func (f *fakeDomainsAPI) MainPlan(_ context.Context, refresh bool) (domains.Plan, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.down {
+		return domains.Plan{}, domains.ErrUnreachable
+	}
+	if f.planErr != nil {
+		return domains.Plan{}, f.planErr
+	}
+	if refresh {
+		f.refreshes++
+	}
+	return f.main, nil
+}
+
+func (f *fakeDomainsAPI) ApplySets(_ context.Context, name string, sets []string) (domains.Domain, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.list[name]
+	if !ok {
+		return domains.Domain{}, &domains.APIError{Status: 404, Message: name + " is not enrolled"}
+	}
+	f.applied = append(f.applied, name+" "+strings.Join(sets, ","))
+	d.State = "records"
+	f.list[name] = d
+	return d, nil
+}
+
+func (f *fakeDomainsAPI) EnableDNSSEC(_ context.Context, name string) (domains.Domain, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.list[name]
+	if !ok {
+		return domains.Domain{}, &domains.APIError{Status: 404, Message: name + " is not enrolled"}
+	}
+	if f.signErr != nil {
+		return domains.Domain{}, f.signErr
+	}
+	f.signed = append(f.signed, name)
+	d.State = "records"
+	f.list[name] = d
+	return d, nil
+}
 
 func (f *fakeDomainsAPI) Available() error { return nil }
 
@@ -588,5 +667,154 @@ func TestStaleListKeepsDeletingMark(t *testing.T) {
 	}
 	if err := f.h.CreateInstance("grafana", "grafana-s", map[string]string{"grafana": "grafana.team-b.example.net"}); statusOf(err) != 409 {
 		t.Fatalf("assignable mid-delete: %v", err)
+	}
+}
+
+// TestApplyDomainDNSAudited (contract §12.3): apply forwards the sets and
+// is audited domain.dns_apply with detail sets=<a,b>; an unknown or empty
+// set list is 400 before anything is forwarded (refused); signing is
+// audited domain.dnssec_enable and the service's 409 passes through.
+func TestApplyDomainDNSAudited(t *testing.T) {
+	f, api, audit := newDomainsFixture(t)
+	ctx := context.Background()
+	readyDomain(t, f, api, "team-b.example.net")
+	d, err := f.h.ApplyDomainDNS(ctx, directory.Human("alice"), "Team-B.example.net", []string{"caa", "nomail"})
+	if err != nil || d.State != "records" {
+		t.Fatalf("apply = %+v, %v", d, err)
+	}
+	if strings.Join(api.applied, ";") != "team-b.example.net caa,nomail" {
+		t.Fatalf("applied %v", api.applied)
+	}
+	if e := audit.last(); e.Action != "domain.dns_apply" || e.Target != "team-b.example.net" || e.Detail != "sets=caa,nomail" || e.Result != "ok" || e.Actor != "alice" {
+		t.Fatalf("audit %+v", e)
+	}
+	for _, sets := range [][]string{nil, {}, {"mx"}, {"caa", "caa\n"}} {
+		if _, err := f.h.ApplyDomainDNS(ctx, directory.Human("alice"), "team-b.example.net", sets); statusOf(err) != 400 {
+			t.Errorf("sets %q: %v, want 400", sets, err)
+		}
+		if e := audit.last(); e.Action != "domain.dns_apply" || e.Result != "refused" {
+			t.Errorf("sets %q: audit %+v", sets, e)
+		}
+	}
+	if len(api.applied) != 1 {
+		t.Fatalf("refused sets reached the service: %v", api.applied)
+	}
+	if _, err := f.h.ApplyDomainDNS(ctx, directory.Human("alice"), "other.example.net", []string{"caa"}); statusOf(err) != 404 {
+		t.Fatalf("unknown domain: %v", err)
+	}
+	// DNSSEC.
+	if _, err := f.h.EnableDomainDNSSEC(ctx, directory.Human("alice"), "team-b.example.net"); err != nil {
+		t.Fatal(err)
+	}
+	if e := audit.last(); e.Action != "domain.dnssec_enable" || e.Target != "team-b.example.net" || e.Result != "ok" {
+		t.Fatalf("audit %+v", e)
+	}
+	api.signErr = &domains.APIError{Status: 409, Message: "porkbun can't sign the zone through its API"}
+	_, err = f.h.EnableDomainDNSSEC(ctx, directory.Human("alice"), "team-b.example.net")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "porkbun can't sign the zone through its API") {
+		t.Fatalf("can't sign: %v", err)
+	}
+	if e := audit.last(); e.Action != "domain.dnssec_enable" || e.Result != "refused" {
+		t.Fatalf("audit %+v", e)
+	}
+	// Through the AI without a confirmation: refused (defence in depth;
+	// enable_domain_dnssec is D).
+	ai := directory.Actor{User: "alice", Via: directory.ViaAI, Client: "portcullis-ai-claude"}
+	api.signErr = nil
+	if _, err := f.h.EnableDomainDNSSEC(ctx, ai, "team-b.example.net"); statusOf(err) != 409 || !strings.Contains(err.Error(), "confirmation") {
+		t.Fatalf("AI without confirmation: %v", err)
+	}
+	if len(api.signed) != 1 {
+		t.Fatalf("signed %v", api.signed)
+	}
+	if _, err := f.h.ApplyDomainDNS(ctx, directory.Human(""), "team-b.example.net", []string{"caa"}); statusOf(err) != 400 {
+		t.Fatalf("no actor: %v", err)
+	}
+}
+
+// TestDomainPlanUnknown404: only a known domain's plan is fetched (404
+// otherwise, never forwarded); refresh is passed through; the main
+// domain's plan has its own call; unreachable is 503.
+func TestDomainPlanUnknown404(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	ctx := context.Background()
+	if _, err := f.h.DomainPlan(ctx, "nope.example.net", false); statusOf(err) != 404 {
+		t.Fatalf("unknown: %v", err)
+	}
+	readyDomain(t, f, api, "team-b.example.net")
+	api.plans["team-b.example.net"] = domains.Plan{Name: "team-b.example.net", CanWrite: true}
+	p, err := f.h.DomainPlan(ctx, "team-b.example.net", true)
+	if err != nil || p.Name != "team-b.example.net" || api.refreshes != 1 {
+		t.Fatalf("plan = %+v, %v (refreshes %d)", p, err, api.refreshes)
+	}
+	api.main = domains.Plan{Name: "example.org"}
+	if p, err := f.h.MainDNSPlan(ctx, false); err != nil || p.Name != "example.org" || p.CanWrite {
+		t.Fatalf("main = %+v, %v", p, err)
+	}
+	api.setDown(true)
+	if _, err := f.h.MainDNSPlan(ctx, false); statusOf(err) != 503 {
+		t.Fatalf("down: %v", err)
+	}
+}
+
+// TestHetznerCloudAccepted: hetzner-cloud is a known provider (enroll and
+// token), named in the refusal's list.
+func TestHetznerCloudAccepted(t *testing.T) {
+	f, api, audit := newDomainsFixture(t)
+	ctx := context.Background()
+	if _, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "team-b.example.net", "hetzner-cloud", creds()); err != nil {
+		t.Fatal(err)
+	}
+	if e := audit.last(); e.Detail != "provider hetzner-cloud" {
+		t.Fatalf("audit %+v", e)
+	}
+	if _, err := f.h.ReplaceDomainToken(ctx, directory.Human("alice"), "team-b.example.net", "hetzner-cloud", creds()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.h.EnrollDomain(ctx, directory.Human("alice"), "team-c.example.net", "hetzner-dns", creds())
+	if statusOf(err) != 400 || !strings.Contains(err.Error(), "hetzner-cloud") {
+		t.Fatalf("unknown provider: %v", err)
+	}
+	if len(api.enrolled) != 1 {
+		t.Fatalf("enrolled %v", api.enrolled)
+	}
+}
+
+// TestDeleteDomainDropsOpRecord (final review M2): a successful delete
+// drops the domain's _domain.<name> op record (memory and file), so a
+// re-added domain doesn't show its predecessor's last fix; a refused
+// delete keeps it.
+func TestDeleteDomainDropsOpRecord(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	ctx := context.Background()
+	const d = "team-b.example.net"
+	f.h.EnrollDomain(ctx, directory.Human("alice"), d, "cloudflare", creds())
+	api.set(d, true, time.Now().Add(60*24*time.Hour))
+	f.h.RefreshDomains(ctx)
+	key := opKeyDomain(d)
+	f.h.recordOp(key, OpRecord{Op: "dns_apply", At: time.Now(), OK: true})
+	if f.h.LastOp(key) == nil {
+		t.Fatal("op record not recorded")
+	}
+	if err := f.h.CreateInstance("grafana", "grafana-b", map[string]string{"grafana": d}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.DeleteDomain(ctx, directory.Human("alice"), d); statusOf(err) != 409 {
+		t.Fatalf("delete while assigned: %v", err)
+	}
+	if f.h.LastOp(key) == nil {
+		t.Fatal("a refused delete dropped the op record")
+	}
+	if err := f.h.SetHosts("grafana-b", map[string]string{"grafana": "grafana-b.example.org"}, directory.Human("alice")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.h.DeleteDomain(ctx, directory.Human("alice"), d); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.h.LastOp(key); r != nil {
+		t.Fatalf("op record after delete: %+v", r)
+	}
+	if _, err := os.Stat(f.h.opPath(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("op file after delete: %v", err)
 	}
 }

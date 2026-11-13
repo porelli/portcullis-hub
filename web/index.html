@@ -859,6 +859,7 @@
     PortcullisNav.render(document.getElementById('site-nav'), { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: PortcullisPeople.base, current: 'hub', admin: true });
   </script>
   <script src="/static/folders.js"></script>
+  <script src="/static/dns.js"></script>
   <script src="/static/doctor.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
@@ -1725,7 +1726,8 @@
       porkbun: [['api_key', 'API key', true], ['secret_api_key', 'Secret API key', true]],
       route53: [['access_key_id', 'Access key ID', true], ['secret_access_key', 'Secret access key', true], ['hosted_zone_id', 'Hosted zone ID (optional)', false]],
       digitalocean: [['auth_token', 'API token', true]],
-      hetzner: [['api_token', 'DNS API token', true]],
+      hetzner: [['api_token', 'DNS API token (legacy dns.hetzner.com)', true]],
+      'hetzner-cloud': [['api_token', 'Hetzner Cloud API token (Read & Write)', true]],
     };
 
     function credFields(provider, prefix) {
@@ -1768,7 +1770,10 @@
         if (res.ok) list = body;
         else { problem = body.error || ('HTTP ' + res.status); list = body.domains || []; disabled = !!body.disabled || res.status === 403; }
       } catch (err) { problem = err.message; }
-      let html = '';
+      // The main domain's read-only DNS panel (DNS hardening), above the
+      // table: its records are set on the server (./portcullis dns setup).
+      let html = disabled ? '' : '<div style="margin-bottom:1rem"><p style="margin:0 0 0.25rem"><code>' + escapeHtml(MAIN_DOMAIN) + '</code> (main domain) ' +
+        '<button class="btn btn-sm" data-domain-dns-main>DNS</button></p><div id="dns-main-root" style="display:none"></div></div>';
       if (problem) {
         html += '<div class="public-warn">' + escapeHtml(problem) +
           (disabled ? '' : ' — showing the last known status; new hostnames on these domains are refused until the service answers.') + '</div>';
@@ -1779,9 +1784,11 @@
         for (const d of list) {
           html += '<tr style="border-top:1px solid #334155"><td><code>' + escapeHtml(d.name) + '</code></td><td>' + escapeHtml(d.provider) + '</td>' + domainStatus(d) +
             '<td style="white-space:nowrap">' + (disabled ? '' :
+              '<button class="btn btn-sm" data-domain-dns="' + escapeHtml(d.name) + '">DNS</button> ' +
               '<button class="btn btn-sm" data-domain-token="' + escapeHtml(d.name) + '">Replace token</button> ' +
               '<button class="btn btn-sm btn-danger" data-domain-delete="' + escapeHtml(d.name) + '">Remove</button>') + '</td></tr>' +
-            '<tr class="domain-token-row" data-token-row="' + escapeHtml(d.name) + '" style="display:none"><td colspan="7"></td></tr>';
+            '<tr class="domain-token-row" data-token-row="' + escapeHtml(d.name) + '" style="display:none"><td colspan="7"></td></tr>' +
+            '<tr class="domain-dns-row" data-dns-row="' + escapeHtml(d.name) + '" style="display:none"><td colspan="7"></td></tr>';
         }
         html += '</tbody></table>';
       } else if (!problem) {
@@ -1816,6 +1823,24 @@
     }
 
     document.addEventListener('click', async e => {
+      // The DNS panel (web/dns.js): toggled per domain, mounted on open.
+      const dns = e.target.closest('[data-domain-dns]');
+      if (dns) {
+        const row = document.querySelector('[data-dns-row="' + CSS.escape(dns.dataset.domainDns) + '"]');
+        if (!row) return;
+        if (row.style.display !== 'none') { row.style.display = 'none'; row.firstElementChild.innerHTML = ''; return; }
+        row.style.display = '';
+        PortcullisDNS.mount(row.firstElementChild, { name: dns.dataset.domainDns, main: false });
+        return;
+      }
+      if (e.target.closest('[data-domain-dns-main]')) {
+        const box = document.getElementById('dns-main-root');
+        if (!box) return;
+        if (box.style.display !== 'none') { box.style.display = 'none'; box.innerHTML = ''; return; }
+        box.style.display = '';
+        PortcullisDNS.mount(box, { name: MAIN_DOMAIN, main: true });
+        return;
+      }
       const tok = e.target.closest('[data-domain-token]');
       if (tok) {
         const name = tok.dataset.domainToken;

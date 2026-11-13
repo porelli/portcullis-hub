@@ -124,6 +124,11 @@ func opAcceptedBody(op *hub.AsyncOp) map[string]string {
 	case isFolder:
 		body["folder"] = fid
 		body["poll"] = "/api/folders/" + fid + "/op"
+	case strings.HasPrefix(op.Instance, "_domain."):
+		// A doctor DNS fix (DNS hardening, F2).
+		name := strings.TrimPrefix(op.Instance, "_domain.")
+		body["domain"] = name
+		body["poll"] = "/api/domains/" + name + "/op"
 	case op.Instance == "_doctor":
 		body["poll"] = "/api/doctor/op"
 	default:

@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,6 +71,13 @@ func (h *Hub) startAsync(id, op string, actor directory.Actor, steps []Step, fn 
 // startOp is startAsync; finished is closed once the accepted operation's
 // final record is written.
 func (h *Hub) startOp(id, op string, actor directory.Actor, steps []Step, fn func(ctx context.Context, ready func()) (map[string]string, []string, error)) (a *AsyncOp, finished <-chan struct{}, err error) {
+	// Fail closed on reserved keys (instance ids never start with "_",
+	// and an invalid instance id is fn's own synchronous 400) and on any
+	// key that could leave the ops directory; recordOpLocked refuses to
+	// write any invalid key either way.
+	if (strings.HasPrefix(id, "_") && !validOpKey(id)) || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
+		return nil, nil, statusErr(400, "refusing an operation under the invalid key %q", clip(id, 64))
+	}
 	a = &AsyncOp{OpID: newOpID(), Op: op, Instance: id}
 	p := h.newProgress(id, op, steps)
 	ctx, cancel := context.WithCancel(withProgress(context.Background(), p))
@@ -207,6 +215,12 @@ func (h *Hub) recordOp(id string, r OpRecord) {
 
 // recordOpLocked is recordOp; the caller holds opsMu.
 func (h *Hub) recordOpLocked(id string, r OpRecord) {
+	// Fail closed: only a valid op key becomes a file name under opsDir
+	// (never a path separator or dot-dot).
+	if !validOpKey(id) {
+		log.Printf("ops: refusing to record %s under the invalid key %q", r.Op, id)
+		return
+	}
 	if data, err := json.MarshalIndent(r, "", "  "); err == nil {
 		os.MkdirAll(filepath.Dir(h.opPath(id)), 0700)
 		if err := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); err != nil {

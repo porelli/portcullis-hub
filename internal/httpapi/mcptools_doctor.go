@@ -19,8 +19,9 @@ import (
 // and audit, attributed via ai and the AI client with the consumed
 // confirmation of a D call) — never an HTTP loopback.
 //
-// Classes: doctor_apply_fix is D exactly when its plan touches data
-// (Hub.FixTouchesData: re-derived like ApplyFix, fail closed);
+// Classes: doctor_apply_fix is D when its plan touches data
+// (Hub.FixTouchesData: re-derived like ApplyFix, fail closed) and for a
+// zone-wide DNSSEC signing (dnssec_sign; Hub.FixNeedsConfirmation);
 // folder_apply is D when its plan widens access (AssignPlan.WidensAccess:
 // adds a use or changes the disk), judged on the plan whose hash the call
 // carries; folder_recheck_apply is D when it accepts another directory;
@@ -167,7 +168,7 @@ func (s *Server) registerDoctorTools() {
 				p, err := s.Hub.PreviewFix(ctx, in.FP, in.params())
 				return p, apiErr(err)
 			}),
-		perCallCtx(admin("doctor_apply_fix", "Apply a finding's one-click fix previewed with doctor_preview_fix (the same arguments and its plan_hash; a change since is refused). Runs in the background: answers {op_id, op, instance, poll}. A fix that changes data on disk or revokes access (touches_data) needs your confirmation in the browser.",
+		perCallCtx(admin("doctor_apply_fix", "Apply a finding's one-click fix previewed with doctor_preview_fix (the same arguments and its plan_hash; a change since is refused). Runs in the background: answers {op_id, op, instance, poll}. A fix that changes data on disk or revokes access (touches_data), or turns on DNSSEC signing for a whole zone (dnssec_sign), needs your confirmation in the browser.",
 			ClassWrite, "POST /api/doctor/findings/{fp}/apply", "doctor.fix", func(ctx context.Context, a directory.Actor, in applyFixArgs) (any, error) {
 				if err := fpOK(in.FP); err != nil {
 					return nil, err
@@ -352,7 +353,7 @@ func (s *Server) fixClass(ctx context.Context, args json.RawMessage) ToolClass {
 	if err != nil {
 		return ClassDestructive
 	}
-	touches, err := s.Hub.FixTouchesData(ctx, rep, in.FP, in.params(), in.PlanHash)
+	touches, err := s.Hub.FixNeedsConfirmation(ctx, rep, in.FP, in.params(), in.PlanHash)
 	if err != nil || touches {
 		return ClassDestructive
 	}

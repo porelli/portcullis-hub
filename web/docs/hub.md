@@ -1035,7 +1035,9 @@ their status. To add a domain:
 
 1. Click **+ Add domain** (the toasts say "Adding …" while it runs)
 2. Enter the domain name (e.g. `team-a.example.org` or `team-a.<main domain>`)
-3. Select the DNS provider (Cloudflare, Porkbun, Route 53, DigitalOcean, Hetzner)
+3. Select the DNS provider (Cloudflare, Porkbun, Route 53, DigitalOcean,
+   Hetzner (legacy DNS, dns.hetzner.com) or Hetzner Cloud (a Cloud API token
+   with Read & Write))
 4. Paste the provider's API token or credentials
 
 The Hub sends the credentials **once** to the domains service (see
@@ -1044,6 +1046,9 @@ logs, audit or errors. The domains service:
 
 - stores them encrypted at rest with an age key
 - creates `<d>` and `*.<d>` DNS records (A, and AAAA if the server has IPv6)
+- writes a CAA at `<d>` pinned to its own ACME account, DNS-01 only, and
+  waits until both public resolvers see it before ordering
+  ([CAA](../setup/dns.md#caa))
 - obtains a Let's Encrypt wildcard certificate for `*.<d>` and `<d>` via DNS-01
 - renews the certificate 30 days before expiry
 - publishes the certificate to Traefik via its HTTP provider
@@ -1065,6 +1070,9 @@ is true, the certificate is valid and the domains service is reachable. Existing
 hostnames on a domain that stops being assignable are kept, but new assignments
 and hostname changes to it get HTTP 503.
 
+CAA and DNSSEC never make a domain unassignable: only the records check and
+the certificate's validity do.
+
 **Replacing the token**: click **Replace token** on the domain, paste the new
 credentials and save. The domains service re-runs the records step and, if
 needed, issuance.
@@ -1080,6 +1088,43 @@ domains service stores them in one age-encrypted file with its ACME account and
 certificates (the age key is in core's `secrets/`, so the encrypted backup must
 be protected like Vault's). See [Domains service](#domains-service) and
 [Security & Hardening](hardening.md#domains-service).
+
+### The DNS panel
+
+Each domain in **Settings → Domains** has a **DNS** button that opens its
+DNS panel, built from the domain's [DNS plan](../setup/dns.md#record-sets)
+(**Refresh** builds it again, at most once per 30 s per domain):
+
+- **One row per record**: set (`address`, `caa`, `nomail`), name, type, the
+  wanted and live values, and the status (`ok`, `missing`, `wrong`,
+  `foreign` for a record under the domain that isn't Portcullis', or
+  `unknown` when a lookup failed) coloured by severity, with the steps left
+  under it.
+- **Fix** on each row Portcullis can write: it applies that row's record set
+  in the background (the domain goes to `records`, then back), audited
+  `domain.dns_apply`. Rows that need a hand change (a CNAME in the way, a
+  record of another service) list the steps instead.
+- **CAA**: the issuer, the account the pin names (or CA-only) and "would
+  issue: yes / no", the CA's own judgement of the live records.
+- **DNSSEC**: the zone, its state (`secure`, `unsigned`, `ds_missing`,
+  `ds_mismatch`, `bogus`, `insecure`, `unknown`), the steps left and the DS values to
+  publish at your registrar, each with a **Copy** button.
+- **Turn on DNSSEC signing**, only while the zone is `unsigned` and the
+  provider can sign through its API (Cloudflare), behind the confirmation
+  "Turns on signing for the whole zone <zone>. Continue?": signing is
+  zone-wide and can't be undone from Portcullis. Audited
+  `domain.dnssec_enable`. There is never a button to turn signing off
+  ([why](../setup/dns.md#dnssec)).
+
+The **main domain** has a read-only panel above the table: the same rows,
+CAA and DNSSEC state, built from public lookups only (the Hub never holds the
+main domain's credentials). It has no Fix or signing buttons; every fix reads
+"Run `./portcullis dns setup` on the server".
+
+The same plans feed the [doctor's DNS checks](#dns-checks). Through the
+Portcullis MCP the panel's twins are `get_domain_dns`, `get_main_dns`,
+`apply_domain_dns` and `enable_domain_dnssec` (a confirmation, like the
+button), plus `domain_op` for the op record of a doctor DNS fix.
 
 ### Cross-domain sign-in
 
@@ -1590,6 +1635,38 @@ container that holds a shared folder's gid without being assigned it,
 missing ACL support, too little free space or the wrong filesystem for an
 app's declared checks, per-person settings with no group values, and
 LAN-only ports reachable from outside.
+
+### DNS checks
+
+The doctor also judges the [DNS plans](#the-dns-panel) of every added domain
+and of the main domain (the cached plans). When the domains service can't be read there are no DNS
+findings; when a lookup failed the findings it could judge still show. Either
+way the Doctor tab says "DNS checks didn't run" (the report's
+`dns_unavailable`). A plan that is only missing the server's addresses (no
+domain added yet, no `PORTCULLIS_PUBLIC_IPV4`) or a DNSSEC state `insecure`
+doesn't count: nothing failed.
+
+| Kind | Severity | Finds | Fix |
+|------|----------|-------|-----|
+| `dns_records_wrong` | Problem | An A/AAAA record missing or wrong, or a CNAME at the name or its wildcard | One click: apply the `address` set; explain-only (remove the CNAME) while a CNAME is there |
+| `dns_caa_missing` | Warning | No CAA where Portcullis wants one | One click: apply the `caa` set |
+| `dns_caa_wrong_account` | Problem | The CA wouldn't issue: the live pin names another ACME account | One click: apply the `caa` set |
+| `dns_caa_other_issuers` | Info | Other CAs may also issue for the name | — |
+| `dnssec_bogus` | Problem | DNSSEC `bogus` or `ds_mismatch`: validating resolvers can't reach the name | Explain: fix or remove the DS at the registrar |
+| `dnssec_ds_missing` | Warning | Signed, but no DS at the parent | Explain, with the DS values |
+| `dnssec_unsigned` | Info | The zone isn't signed | One click: turn on signing (Cloudflare; the preview names the whole zone), else explain |
+| `dns_dangling` | Warning | A CNAME under the name to a name that doesn't exist | Explain: remove it |
+| `dns_shadowed` | Info | An address under the name that isn't the server's: that name doesn't reach Portcullis | — |
+| `dns_nomail_recommended` | Info | The name sends no mail but has no null MX / SPF / DMARC | One click: apply the `nomail` set |
+
+The one-click DNS fixes preview the records they change (`<set> <name>
+<type>: <live> → <want>`, or "turns on signing for the whole zone
+<zone>") and refuse with "the DNS records changed since the preview" when
+the live records moved. They run in the background and are audited like the
+DNS panel's buttons. For the **main domain** every DNS finding is
+explain-only: "Run `./portcullis dns setup` on the server" (for
+`dnssec_unsigned`: "Run `./portcullis dns setup --dnssec` on the server
+(Cloudflare only)").
 
 ## Local networks
 
@@ -2397,7 +2474,8 @@ The domains service is a separate Go service that:
   (`secrets/domains/age.key`). The encrypted store (`domains_data/store.age`)
   is in core backups, so protect it like Vault's raft snapshot.
 - **Creates DNS records** (`<d>` and `*.<d>`: A, and AAAA if the server has IPv6)
-  via provider APIs (Cloudflare, Porkbun, Route 53, DigitalOcean, Hetzner)
+  and their CAA via provider APIs (Cloudflare, Porkbun, Route 53, DigitalOcean,
+  Hetzner, Hetzner Cloud)
 - **Obtains wildcard certificates** (website certificates, HTTPS) for each added domain via ACME DNS-01
 - **Serves certificates to Traefik** via its HTTP provider (inline PEM, polled
   every 10 s), with mutual TLS authentication
@@ -2410,6 +2488,11 @@ before logging or returning them. The Hub reads only domain status from the serv
 - `cert_not_after` (RFC 3339)
 - `last_error`
 - `state` (pending, records, issuing, ready, renewing, error)
+- `caa_ok` (the CA would issue to the service's account) and `dnssec` (the
+  zone's DNSSEC state)
+
+and, for the [DNS panel](#the-dns-panel), each domain's DNS plan and the
+main domain's read-only plan.
 
 The Hub stores this status in `state.yaml` (no credentials).
 
@@ -2420,7 +2503,7 @@ The service sits on three isolated networks:
 - **`portcullis-domains`**: domains + Hub (internal, fixed subnet
   `172.31.252.0/28`). The API accepts connections only addressed to this subnet
   or loopback.
-- **`domains-egress`**: domains only. It reaches ACME and DNS providers over
+- **`domains-egress`**: domains and the one-shot `dns-tool` of `./portcullis dns`. They reach ACME and DNS providers over
   this, isolated from other services.
 - **`portcullis-certs`**: domains + Traefik (internal). The certificate endpoint
   (`:8443`) uses mutual TLS with a private CA.
