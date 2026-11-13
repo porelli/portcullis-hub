@@ -178,3 +178,31 @@ func checkComposeConfig(t *testing.T, h *Hub, v *templates.Template) {
 		}
 	}
 }
+
+// TestRealTemplatesVPN: with the vpn: block validation in place every
+// real template still loads, and each vpn: block resolves its ranges.
+func TestRealTemplatesVPN(t *testing.T) {
+	dir := os.Getenv("PORTCULLIS_TEMPLATES_DIR")
+	if dir == "" {
+		t.Skip("PORTCULLIS_TEMPLATES_DIR not set")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if _, err := os.Stat(filepath.Join(dir, e.Name(), "manifest.yaml")); err != nil {
+			continue
+		}
+		tp, err := templates.Load(dir, e.Name(), "portcullis", "example.org", settings.NewRegistry())
+		if err != nil {
+			t.Errorf("%s: %v", e.Name(), err)
+			continue
+		}
+		if v := tp.Manifest.VPN; v != nil {
+			if _, err := templates.ResolveVPNRanges(&tp.Manifest, nil); err != nil && !strings.Contains(err.Error(), "has no value") {
+				t.Errorf("%s: vpn.ranges: %v", e.Name(), err)
+			}
+		}
+	}
+}

@@ -20,6 +20,11 @@ import (
 //     (<KEY> a path option with a folder block); every other
 //     PORTCULLIS_FOLDER_* reference is refused.
 
+// varVPNPrefix starts the reserved VPN variables (contract §2, §3.3):
+// no compose interpolation may read one ($$PORTCULLIS_VPN_EDGE, the
+// container shell's, is allowed).
+const varVPNPrefix = "PORTCULLIS_VPN_"
+
 // varRef is one compose interpolation: the variable and whether it is
 // exactly ${NAME}.
 type varRef struct {
@@ -106,6 +111,8 @@ func (v *specCheck) reservedVarRefs() error {
 				if !r.exact {
 					return fmt.Errorf("compose.yml: %s may appear only as exactly ${%s} (no default or alternate form, no bare $%s)", VarLocalNetworks, VarLocalNetworks, VarLocalNetworks)
 				}
+			case strings.HasPrefix(r.name, varVPNPrefix):
+				return fmt.Errorf("compose.yml: ${%s} is reserved: PORTCULLIS_VPN_* are core's and the Hub's (the Hub sets PORTCULLIS_VPN_EDGE in the ingress container's environment: read it in a container shell as $$PORTCULLIS_VPN_EDGE)", r.name)
 			case strings.HasPrefix(r.name, varFolderPrefix):
 				whole := s == "${"+r.name+"}" || strings.HasSuffix(s, "=${"+r.name+"}") && EnvKeyRe.MatchString(strings.TrimSuffix(s, "=${"+r.name+"}"))
 				if !r.exact || !whole || len(allowed[r.name]) == 0 {

@@ -34,7 +34,11 @@ const proxyNetwork = "portcullis-proxy"
 // file: the Hub renders portcullis-auth-ext and the
 // portcullis-oauth2-<id>_<router> sign-in routers to forward-auth-ext on
 // extra-domain hosts itself.
-var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix}
+// portcullis-vpn* (the VPN network, the portcullis-vpnallow-<id>
+// middlewares and portcullis-vpnonly-<id> routers, contract §3.3) is the
+// Hub's too, with no exception (core's forwarder image is
+// ghcr.io/porelli/portcullis-forwarder, which doesn't match).
+var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix, VPNReservedPrefix}
 
 // coreServices are the services of core's docker-compose.yml (all
 // profiles), coreVolumes its volume keys (Docker names
@@ -43,10 +47,10 @@ var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcull
 var (
 	coreServices = set("socket-proxy-traefik", "socket-proxy-hub", "traefik", "postgres", "vault", "lldap", "keycloak",
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "dns-tool", "prometheus", "alertmanager", "blackbox",
-		"textfile-exporter", "grafana", "mcp-gate", "sessions")
+		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
-		"group_gate_data")
+		"group_gate_data", "wg_data")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
@@ -248,6 +252,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		low, bare := FoldKey(s), FoldKey(withoutInterp(s))
 		for _, r := range reservedRefs {
 			if strings.Contains(low, r) || strings.Contains(bare, r) {
+				if r == VPNReservedPrefix {
+					return fmt.Errorf("compose.yml references %q: names starting %s (the VPN network, middlewares and routers) are rendered by the Hub only (contract §3.3)", VPNReservedPrefix, VPNReservedPrefix)
+				}
 				if r == MCPNamePrefix {
 					return fmt.Errorf("compose.yml references %q: names starting %s (routers, services, middlewares, aliases, container names, hostnames) are the Hub's AI companion routes and aliases (contract §3.2)", MCPNamePrefix, MCPNamePrefix)
 				}
