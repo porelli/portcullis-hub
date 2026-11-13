@@ -51,10 +51,10 @@ import (
 // per-file online-backup step exists or is needed while the app is down.
 
 // HelperImage is the volume I/O helper's image: core's
-// PORTCULLIS_HELPER_IMAGE (scripts/lib/common.sh; TestHelperImageMatchesCore
+// PORTCULLIS_HELPER_IMAGE (scripts/lib/common.sh; TestHelperImagePinned
 // keeps them equal), pinned by digest. It is only ever created, never
 // started, so its content never runs.
-const HelperImage = "alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+const HelperImage = "docker.io/library/alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
 
 // Backup reasons (MANIFEST.json "reason").
 const (
