@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -58,6 +59,16 @@ const (
 	// devices_file must be exactly this).
 	FileName = "vpn.json"
 )
+
+// DefaultReserved are the ranges no provider may claim in every reader
+// (core's wg and group-gate, and this one): Docker's default address
+// pools 172.16.0.0/12 and 192.168.0.0/16 (Docker allocates networks, app
+// instances' included, from them) and the multi-server link subnet
+// 10.214.0.0/24. Core's readers add their own subnets (and Podman's
+// pools under podman); the Hub refuses those first from core.env's
+// PORTCULLIS_VPN_RESERVED_RANGES. A file with a provider range that
+// overlaps one is refused whole.
+var DefaultReserved = []netip.Prefix{netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("10.214.0.0/24")}
 
 // FileGID is Write's group (the Hub passes its configured group to
 // WriteGroup; a variable for tests).
@@ -167,6 +178,9 @@ func ValidPublicKey(k string) bool {
 // ranges. Any error means every VPN request is denied.
 func Parse(b []byte) (*Doc, error) {
 	var d Doc
+	if err := nullCheck(b, reflect.TypeOf(d), "$"); err != nil {
+		return nil, err
+	}
 	if err := strictJSON(b, &d); err != nil {
 		if strings.Contains(err.Error(), "parsing time") {
 			return nil, fmt.Errorf("a time (valid_until, refreshed_at, stale_after or expires) isn't RFC 3339: %v", err)
@@ -196,6 +210,13 @@ func Parse(b []byte) (*Doc, error) {
 		}
 		if len(ps) == 0 {
 			return nil, fmt.Errorf("provider %s has no ranges", p.ID)
+		}
+		for _, q := range ps {
+			for _, rp := range DefaultReserved {
+				if rp.Overlaps(q) {
+					return nil, fmt.Errorf("provider %s: range %s overlaps a Docker or core network (%s)", p.ID, q, rp)
+				}
+			}
 		}
 		for i, a := range all {
 			for _, q := range ps {
@@ -390,4 +411,59 @@ func containsAddr(ps []netip.Prefix, a netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+// nullCheck refuses a JSON null anywhere but where the contract allows
+// one, as core's readers do: the optional times (expires, refreshed_at,
+// stale_after; a null valid_until is then refused as missing) and
+// builtin. A null string, list, number or bool never decodes to a zero
+// value. Shapes that don't decode are left to strictJSON.
+func nullCheck(raw []byte, t reflect.Type, path string) error {
+	raw = bytes.TrimSpace(raw)
+	if bytes.Equal(raw, []byte("null")) {
+		if path == "$" || t.Kind() != reflect.Pointer {
+			return fmt.Errorf("%s: null", path)
+		}
+		return nil
+	}
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch {
+	case t == timeType:
+		return nil
+	case t.Kind() == reflect.Struct:
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil {
+			return nil
+		}
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if name == "" || name == "-" {
+				continue
+			}
+			// encoding/json matches keys case-insensitively: so does this.
+			for k, v := range m {
+				if strings.EqualFold(k, name) {
+					if err := nullCheck(v, f.Type, path+"."+name); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	case t.Kind() == reflect.Slice:
+		var l []json.RawMessage
+		if json.Unmarshal(raw, &l) != nil {
+			return nil
+		}
+		for i, v := range l {
+			if err := nullCheck(v, t.Elem(), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

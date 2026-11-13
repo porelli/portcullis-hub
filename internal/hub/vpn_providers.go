@@ -49,9 +49,6 @@ const (
 	// VarVPNReserved: core's reserved ranges (a comma or space separated
 	// CIDR list): no provider range may overlap one.
 	VarVPNReserved = "PORTCULLIS_VPN_RESERVED_RANGES"
-	// DefaultVPNReservedRanges are the readers' (wg, group-gate) defaults
-	// when core passes no list.
-	DefaultVPNReservedRanges = "172.16.0.0/12 192.168.0.0/16 10.214.0.0/24"
 
 	VPNModeApps   = "apps"
 	VPNModeAdmin  = "admin"
@@ -199,11 +196,14 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 			log.Printf("vpn: the core env's %s %s is not an IPv4 /26 or wider: the default is used", VarVPNNet, clipQuoted(raw))
 		}
 	}
-	reserved, set := core[VarVPNReserved]
-	if !set || strings.TrimSpace(reserved) == "" {
-		// Unset (an older core, a hand-edited core.env): the readers'
-		// own defaults, never nothing (I8); the doctor warns.
-		reserved, c.ReservedDefault = DefaultVPNReservedRanges, true
+	// The readers' own defaults (vpn.DefaultReserved) always apply;
+	// core's list (its subnets, the link subnet, Podman's pools under
+	// podman) adds to them. Unset (an older core, a hand-edited
+	// core.env): the defaults only, never nothing (I8); the doctor warns.
+	c.Reserved = append(c.Reserved, vpn.DefaultReserved...)
+	reserved := core[VarVPNReserved]
+	if strings.TrimSpace(reserved) == "" {
+		c.ReservedDefault = true
 	}
 	for _, f := range strings.FieldsFunc(reserved, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
 		p, err := netip.ParsePrefix(f)
@@ -212,7 +212,9 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 			c.ReservedBad = true
 			continue
 		}
-		c.Reserved = append(c.Reserved, p.Masked())
+		if p = p.Masked(); !slices.Contains(c.Reserved, p) {
+			c.Reserved = append(c.Reserved, p)
+		}
 	}
 	c.WGIP = c.Net.Addr().Next().Next().Next() // .3
 	if raw := core[VarVPNWGIP]; raw != "" {

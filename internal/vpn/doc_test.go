@@ -175,3 +175,12 @@ func TestValidPublicKey(t *testing.T) {
 		}
 	}
 }
+
+// encoding/json matches keys case-insensitively: a null under another
+// case is refused too.
+func TestParseNullAnyCase(t *testing.T) {
+	b := []byte(`{"version":2,"valid_until":"2026-11-13T13:00:00Z","Providers":null,"devices":[]}`)
+	if _, err := Parse(b); err == nil || !strings.Contains(err.Error(), "null") {
+		t.Fatalf("err = %v", err)
+	}
+}

@@ -862,6 +862,21 @@ func TestVPNReservedRanges(t *testing.T) {
 	if err := v.h.SetVPNProvider(ctx, root, "mesh2", true, 0); statusCode(err) != 409 || !strings.Contains(err.Error(), "192.168.0.0/16") {
 		t.Fatalf("unset list: %v", err)
 	}
+	// A list from core (Podman's pools under podman) adds to the
+	// readers' defaults, never replaces them.
+	writeFile(t, env, base+"PORTCULLIS_VPN_RESERVED_RANGES=10.88.0.0/16 10.89.0.0/16\n")
+	if err := v.h.SetVPNProvider(ctx, root, "mesh2", true, 0); statusCode(err) != 409 || !strings.Contains(err.Error(), "192.168.0.0/16") {
+		t.Fatalf("defaults dropped by a set list: %v", err)
+	}
+	v.h.mu.Lock()
+	tm.Manifest.VPN.Ranges = []string{"10.89.4.0/24"}
+	v.h.mu.Unlock()
+	if err := v.h.SetVPNProvider(ctx, root, "mesh2", true, 0); statusCode(err) != 409 || !strings.Contains(err.Error(), "10.89.0.0/16") {
+		t.Fatalf("podman pool: %v", err)
+	}
+	if c := v.h.vpnCoreEnv(); c.ReservedDefault || len(c.Reserved) != 5 {
+		t.Fatalf("reserved %v (default %v)", c.Reserved, c.ReservedDefault)
+	}
 	v.h.mu.Lock()
 	tm.Manifest.VPN.Ranges = []string{"100.128.0.0/16"}
 	v.h.mu.Unlock()

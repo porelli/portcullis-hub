@@ -1007,7 +1007,7 @@ func checkComposeKeys(doc map[string]interface{}) error {
 // @file objects under traefik/dynamic/local.
 var (
 	appMiddlewares  = set("portcullis-auth", "portcullis-groups")
-	fileMiddlewares = set("client-headers", "client-cert-pem", "rate-limit", "rate-limit-auth", "security-headers")
+	fileMiddlewares = set("client-headers", "client-cert-pem", "rate-limit", "rate-limit-auth", "security-headers", "strip-client-forwarded")
 )
 
 // chainLabelRe: a chain middleware's member list (folded key).
