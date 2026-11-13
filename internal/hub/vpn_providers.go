@@ -49,6 +49,9 @@ const (
 	// VarVPNReserved: core's reserved ranges (a comma or space separated
 	// CIDR list): no provider range may overlap one.
 	VarVPNReserved = "PORTCULLIS_VPN_RESERVED_RANGES"
+	// DefaultVPNReservedRanges are the readers' (wg, group-gate) defaults
+	// when core passes no list.
+	DefaultVPNReservedRanges = "172.16.0.0/12 192.168.0.0/16 10.214.0.0/24"
 
 	VPNModeApps   = "apps"
 	VPNModeAdmin  = "admin"
@@ -79,13 +82,18 @@ type providerMap struct {
 	devices     []vpn.Device
 	meta        map[string]deviceMeta // by IP: online / last seen
 	problems    []vpn.Dropped
-	lastErr     string
-	lastRun     time.Time
-	running     bool
+	// rangeDrops: devices the last publish left out because the current
+	// ranges no longer hold them.
+	rangeDrops []vpn.Dropped
+	lastErr    string
+	lastRun    time.Time
+	running    bool
 
 	// The dns hook: the records last applied (with their gateway), the
 	// last failure and attempt.
 	dnsApplied string
+	dnsRunning bool
+	dnsTried   string
 	lastDNSErr string
 	lastDNSRun time.Time
 }
@@ -112,6 +120,18 @@ type vpnRuntime struct {
 	// rendered: instance → its VPN render key at the last re-render
 	// check (vpnRangesChanged).
 	rendered map[string]string
+	// pubErr / pubDelay / pubNext: the last failed vpn.json write and its
+	// retry backoff; validAt anchors valid_until; testWrite replaces
+	// vpn.WriteGroup (tests).
+	pubErr    string
+	pubDelay  time.Duration
+	pubNext   time.Time
+	validAt   time.Time
+	testWrite func(path string, d vpn.Doc, gid int) error
+	// overlapBad: wired provider → why its ranges overlap now (left out
+	// of vpn.json); overlapAt: the last check.
+	overlapBad map[string]string
+	overlapAt  time.Time
 	// renderFail: instance → its failed VPN re-render (retry, closed).
 	renderFail map[string]*vpnRenderRetry
 
@@ -146,6 +166,8 @@ type vpnCore struct {
 	// parse (fail closed: no provider can be wired or published).
 	Reserved    []netip.Prefix
 	ReservedBad bool
+	// ReservedDefault: the key is unset, DefaultVPNReservedRanges apply.
+	ReservedDefault bool
 }
 
 // vpnCoreEnv reads the VPN keys of the core env (<ProjectDir>/.env).
@@ -177,7 +199,13 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 			log.Printf("vpn: the core env's %s %s is not an IPv4 /26 or wider: the default is used", VarVPNNet, clipQuoted(raw))
 		}
 	}
-	for _, f := range strings.FieldsFunc(core[VarVPNReserved], func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+	reserved, set := core[VarVPNReserved]
+	if !set || strings.TrimSpace(reserved) == "" {
+		// Unset (an older core, a hand-edited core.env): the readers'
+		// own defaults, never nothing (I8); the doctor warns.
+		reserved, c.ReservedDefault = DefaultVPNReservedRanges, true
+	}
+	for _, f := range strings.FieldsFunc(reserved, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
 		p, err := netip.ParsePrefix(f)
 		if err != nil {
 			log.Printf("vpn: the core env's %s holds %s, not a CIDR: no VPN provider is wired or published", VarVPNReserved, clipQuoted(f))
@@ -272,7 +300,7 @@ func (h *Hub) SetVPNProvider(ctx context.Context, actor directory.Actor, id stri
 	var nets []docker.Network
 	var st *vpn.Status
 	if wired {
-		if st, err = h.wgStatus(); err != nil {
+		if st, err = h.wgStatus(); err != nil || !st.Edge.OK {
 			return ErrVPNNotRunning
 		}
 		if h.engine == nil {
@@ -663,13 +691,85 @@ func (h *Hub) vpnTick(ctx context.Context) {
 				h.TriggerVPNPublish()
 			})
 		} else {
-			h.runVPNDNS(ctx, r.id)
+			id := r.id
+			h.goBackground(func() { h.runVPNDNS(ctx, id) })
 		}
 	}
-	if h.vpnRenderRetryDue() {
+	// I7: anything the access depends on may have moved without a Hub
+	// call (the built-in subnet in status.json, a provider's cidr
+	// setting, the core env's mode): re-render when an enabled
+	// instance's access key differs from the committed one.
+	h.wgStatus() // the built-in subnet as wg reports it now
+	h.vpnCheckProviderOverlaps(ctx, now)
+	if h.vpnRenderRetryDue() || h.vpnKeysMoved() {
 		h.vpnRangesChanged()
 	}
 	h.TriggerVPNPublish()
+}
+
+// vpnKeysMoved: an enabled instance's access key differs from the
+// committed one (known instances only: the start check covers the rest).
+func (h *Hub) vpnKeysMoved() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for i := range h.instances {
+		t := &h.instances[i]
+		if !t.Enabled {
+			continue
+		}
+		key := h.vpnRenderKeyLocked(t)
+		h.vpnrt.mu.Lock()
+		prev, known := h.vpnrt.rendered[t.ID]
+		h.vpnrt.mu.Unlock()
+		if known && prev != key {
+			return true
+		}
+	}
+	return false
+}
+
+// vpnOverlapCheckEvery throttles the wired providers' overlap re-checks.
+const vpnOverlapCheckEvery = 30 * time.Second
+
+// vpnCheckProviderOverlaps re-runs wiring's overlap checks on every wired
+// provider (its ranges may follow a cidr setting, I7): one that overlaps
+// now is left out of vpn.json until it doesn't (vpnrt.overlapBad, shown as
+// its last error).
+func (h *Hub) vpnCheckProviderOverlaps(ctx context.Context, now time.Time) {
+	h.vpnrt.mu.Lock()
+	due := now.Sub(h.vpnrt.overlapAt) >= vpnOverlapCheckEvery
+	if due {
+		h.vpnrt.overlapAt = now
+	}
+	h.vpnrt.mu.Unlock()
+	if !due || h.engine == nil {
+		return
+	}
+	nets, err := h.engine.ListNetworks(ctx)
+	if err != nil {
+		return // kept as they were: the next check retries
+	}
+	st, _ := h.wgStatus()
+	bad := map[string]string{}
+	h.mu.RLock()
+	for _, id := range slices.Sorted(maps.Keys(h.st.VPN.Providers)) {
+		t := h.findLocked(id)
+		if t == nil || t.Manifest.VPN == nil {
+			continue
+		}
+		rs, err := h.providerRangesLocked(t)
+		if err != nil {
+			bad[id] = err.Error()
+			continue
+		}
+		if err := h.vpnOverlapLocked(id, rs, st, nets); err != nil {
+			bad[id] = err.Error()
+		}
+	}
+	h.mu.RUnlock()
+	h.vpnrt.mu.Lock()
+	h.vpnrt.overlapBad = bad
+	h.vpnrt.mu.Unlock()
 }
 
 // vpnHookOf is t's vpn hook name (nil when it isn't one).
@@ -826,10 +926,16 @@ func (h *Hub) runVPNProvider(ctx context.Context, id string) {
 		pm.meta[d.Address.String()] = deviceMeta{Online: d.Online, LastSeen: d.LastSeen}
 	}
 	sort.Slice(pm.devices, func(i, j int) bool { return ipLess(pm.devices[i].IP, pm.devices[j].IP) })
+	// Unwired while the hook ran: its map is gone for good (M4).
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if _, still := h.st.VPN.Providers[id]; !still {
+		return
+	}
 	h.vpnrt.mu.Lock()
 	if old := h.vpnrt.maps[id]; old != nil {
 		pm.lastRun, pm.running = old.lastRun, old.running
-		pm.dnsApplied, pm.lastDNSErr, pm.lastDNSRun = old.dnsApplied, old.lastDNSErr, old.lastDNSRun
+		pm.dnsApplied, pm.lastDNSErr, pm.lastDNSRun, pm.dnsRunning = old.dnsApplied, old.lastDNSErr, old.lastDNSRun, old.dnsRunning
 	}
 	h.vpnrt.maps[id] = &pm
 	h.vpnrt.mu.Unlock()
@@ -872,6 +978,21 @@ func (h *Hub) vpnDNSRecordsLocked(gateway netip.Addr) []vpn.Record {
 func (h *Hub) runVPNDNS(ctx context.Context, id string) {
 	h.vpnrt.mu.Lock()
 	pm := h.vpnrt.maps[id]
+	if pm == nil || pm.dnsRunning {
+		h.vpnrt.mu.Unlock()
+		return // one dns run at a time per provider (M2)
+	}
+	pm.dnsRunning = true
+	h.vpnrt.mu.Unlock()
+	defer func() {
+		h.vpnrt.mu.Lock()
+		if pm := h.vpnrt.maps[id]; pm != nil {
+			pm.dnsRunning = false
+		}
+		h.vpnrt.mu.Unlock()
+	}()
+	h.vpnrt.mu.Lock()
+	pm = h.vpnrt.maps[id]
 	var gw netip.Addr
 	var applied string
 	var lastRun time.Time
@@ -903,8 +1024,12 @@ func (h *Hub) runVPNDNS(ctx context.Context, id string) {
 	if refresh == 0 {
 		refresh = tc.Manifest.VPN.Identity.EffectiveRefresh()
 	}
-	// Applied already, or failed less than a refresh ago (retried then).
-	if key == applied || failed && now.Before(lastRun.Add(refresh)) {
+	// Applied already, or this same set failed less than a refresh ago
+	// (retried then); a new set runs at once.
+	h.vpnrt.mu.Lock()
+	tried := pm != nil && pm.dnsTried == key
+	h.vpnrt.mu.Unlock()
+	if key == applied || failed && tried && now.Before(lastRun.Add(refresh)) {
 		return
 	}
 	out, err := h.execVPNHook(ctx, &tc, tc.Manifest.VPN.DNS.Hook, stdin)
@@ -915,28 +1040,12 @@ func (h *Hub) runVPNDNS(ctx context.Context, id string) {
 	if pm == nil {
 		return
 	}
-	pm.lastDNSRun = now
+	pm.lastDNSRun, pm.dnsTried = now, key
 	if err != nil {
 		pm.lastDNSErr = err.Error()
 		return
 	}
 	pm.lastDNSErr, pm.dnsApplied = "", key
-}
-
-// TriggerVPNHostsChanged re-runs the dns hooks with the current
-// Portcullis hostnames (instance hosts, enables, enrolled domains).
-func (h *Hub) TriggerVPNHostsChanged(ctx context.Context) {
-	h.mu.RLock()
-	ids := slices.Sorted(maps.Keys(h.st.VPN.Providers))
-	h.mu.RUnlock()
-	for _, id := range ids {
-		h.vpnrt.mu.Lock()
-		if pm := h.vpnrt.maps[id]; pm != nil {
-			pm.lastDNSErr = "" // a change is retried at once
-		}
-		h.vpnrt.mu.Unlock()
-		h.runVPNDNS(ctx, id)
-	}
 }
 
 // liveProviders are the providers a VPN-only instance can be reached
@@ -984,13 +1093,13 @@ func (h *Hub) vpnProviderMap(id string) *providerMap {
 	}
 	c := *pm
 	c.devices = slices.Clone(pm.devices)
-	c.problems = slices.Clone(pm.problems)
+	c.problems = append(slices.Clone(pm.problems), pm.rangeDrops...)
 	c.meta = maps.Clone(pm.meta)
 	return &c
 }
 
 // dropVPNInstanceLocked forgets instance id's VPN state (its delete):
-// wiring, statics and reach. Caller holds mu (write) and saves.
+// wiring, statics and its own reach. Caller holds mu (write) and saves.
 func (h *Hub) dropVPNInstanceLocked(id string) bool {
 	_, wired := h.st.VPN.Providers[id]
 	_, static := h.st.VPN.Static[id]
@@ -998,13 +1107,8 @@ func (h *Hub) dropVPNInstanceLocked(id string) bool {
 	delete(h.st.VPN.Providers, id)
 	delete(h.st.VPN.Static, id)
 	delete(h.st.Reach, id)
-	for other, r := range h.st.Reach {
-		if i := slices.Index(r.Via, id); i >= 0 {
-			// Narrowing only: the instance keeps VPN-only with the
-			// remaining providers (none left: unreachable, never internet).
-			r.Via = slices.Delete(slices.Clone(r.Via), i, i+1)
-			h.st.Reach[other] = r
-		}
-	}
+	// Other instances' via keep naming it (C1): a provider that is gone
+	// accepts nothing (deny-all allowlist, group-gate finds no such
+	// provider), as after an unwire — never "every provider".
 	return wired || static || reach
 }

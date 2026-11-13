@@ -367,9 +367,22 @@ func (h *Hub) RenewVPNDevice(ctx context.Context, user, id, publicKey string, p 
 	h.mu.RLock()
 	i := h.vpnDeviceIndexLocked(id)
 	mine := i >= 0 && h.st.VPN.Devices[i].User == user
+	var uuid string
+	if mine {
+		uuid = h.st.VPN.Devices[i].UUID
+	}
+	group := h.st.VPN.UsersGroup
 	h.mu.RUnlock()
 	if !mine {
 		return nil, statusErr(http.StatusNotFound, "no such device")
+	}
+	// Still a VPN user, under the account the device was made for (M5).
+	members, merr := h.vpnMembership(ctx)
+	if merr != nil {
+		return nil, statusErr(http.StatusServiceUnavailable, "the directory is unavailable: try again later")
+	}
+	if !vpnUserOK(members, group, user) || members.UUIDs[user] != uuid {
+		return nil, statusErr(http.StatusForbidden, "you are not allowed to use the VPN")
 	}
 	if err := h.vpnFreshAuth(ctx, p, user); err != nil {
 		return nil, err
@@ -532,6 +545,19 @@ func (h *Hub) vpnExpireOnce(ctx context.Context) {
 	if err := h.removeVPNDevices(sys, "vpn.device_expired", "", func(d state.VPNDevice) bool { return expired(d.Expires, now) }, false); err != nil {
 		log.Printf("vpn: expiring devices: %v", err)
 	}
+	// Quarantined addresses older than the quarantine are free again (M6).
+	h.mu.Lock()
+	pruned := false
+	for ip, at := range h.st.VPN.Quarantine {
+		if now.Sub(at) >= vpn.Quarantine {
+			delete(h.st.VPN.Quarantine, ip)
+			pruned = true
+		}
+	}
+	if pruned {
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 	members, err := h.vpnMembership(ctx)
 	if err != nil || members == nil {
 		return // revocations wait for the directory (vpn.json still filters)

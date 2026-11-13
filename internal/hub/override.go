@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
@@ -42,7 +43,14 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, s state.InstanceSett
 	// Commit after success only: a failed write is retried
 	// (vpnRangesChanged).
 	h.vpnrt.mu.Lock()
-	h.vpnrt.rendered[t.ID] = key
+	if prev, ok := h.vpnrt.rendered[t.ID]; !ok || prev != key {
+		h.vpnrt.rendered[t.ID] = key
+		h.saveVPNRenderedLocked()
+	}
+	// A render that succeeded ends a fail-closed state (M17).
+	if f := h.vpnrt.renderFail[t.ID]; f != nil && f.closing {
+		f.next = time.Time{}
+	}
 	h.vpnrt.mu.Unlock()
 	return nil
 }

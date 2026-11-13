@@ -12,12 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/vpn"
 )
@@ -161,6 +163,7 @@ func newVPNFixtureExtra(t *testing.T, seed func(*state.AppState), more map[strin
 	}
 	v.h.Wait() // the start's publish ran with the real clock
 	v.h.vpnrt.now = v.clock
+	v.h.vpnrt.validAt, v.h.vpnrt.lastWritten = time.Time{}, nil
 	v.h.SetAudit(v.audit)
 	v.people = newFakePeople("alice", "bob", "carol")
 	v.people.addGroup("lldap_admin", "root")
@@ -338,7 +341,7 @@ func TestWireRefusesOverlap(t *testing.T) {
 		st.Settings = map[string]state.InstanceSettings{}
 	})
 	v.engine.mu.Lock()
-	v.engine.networks = []docker.Network{{Name: "portcullis_default", Subnets: []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")}}}
+	v.engine.networks = []docker.Network{{Name: "portcullis_default", Subnets: []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")}}}
 	v.engine.mu.Unlock()
 	v.h.mu.Lock()
 	tm := v.h.findLocked("mesh2")
@@ -353,9 +356,9 @@ func TestWireRefusesOverlap(t *testing.T) {
 	refused(v, "mesh2", "100.100.0.0/16", "100.64.0.0/10", "mesh")
 	// A container network.
 	v.h.mu.Lock()
-	tm.Manifest.VPN.Ranges = []string{"172.18.5.0/24"}
+	tm.Manifest.VPN.Ranges = []string{"10.99.5.0/24"}
 	v.h.mu.Unlock()
-	refused(v, "mesh2", "172.18.5.0/24", "172.18.0.0/16", "portcullis_default")
+	refused(v, "mesh2", "10.99.5.0/24", "10.99.0.0/16", "portcullis_default")
 	// portcullis-vpn.
 	v.h.mu.Lock()
 	tm.Manifest.VPN.Ranges = []string{"172.31.254.0/24"}
@@ -363,8 +366,8 @@ func TestWireRefusesOverlap(t *testing.T) {
 	refused(v, "mesh2", "172.31.254.0/24", "172.31.254.0/26", "portcullis-vpn")
 	// Local networks may overlap (the doctor warns).
 	v.h.mu.Lock()
-	tm.Manifest.VPN.Ranges = []string{"192.168.0.0/16"}
-	nets := []string{"192.168.1.0/24"}
+	tm.Manifest.VPN.Ranges = []string{"10.77.0.0/16"}
+	nets := []string{"10.77.1.0/24"}
 	v.h.st.LocalNetworks = &nets
 	v.h.mu.Unlock()
 	v.wire(t, "mesh2")
@@ -509,7 +512,7 @@ func TestHookOutputNeverStored(t *testing.T) {
 	}
 }
 
-func TestStartPublishesMarketplaceProvidersStale(t *testing.T) {
+func TestStartLeavesHookProvidersOutUntilFirstRun(t *testing.T) {
 	// Ruling: until its first good run since the start a hook provider is
 	// left out of vpn.json (its addresses denied); the builtin and the
 	// static providers are published.
@@ -650,7 +653,7 @@ func TestDNSHookRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.h.Wait()
-	v.h.TriggerVPNHostsChanged(ctx)
+	v.h.runVPNDNS(ctx, "mesh") // the tick's run: a new record set runs at once
 	in = v.stdinsOf("portcullis-mesh-glue /dns")
 	if last := in[len(in)-1]; !strings.Contains(last, "wgui.example.org") || !strings.Contains(last, "100.64.0.2") {
 		t.Fatalf("last dns stdin %q", last)
@@ -681,6 +684,7 @@ func TestPublishDoc(t *testing.T) {
 	got, _ := os.ReadFile(v.h.vpnJSONPath())
 	want := `{
   "version": 2,
+  "valid_until": "2026-11-13T13:00:00Z",
   "builtin": {
     "subnet": "10.213.0.0/22",
     "server_public_key": "` + vpnServerKey + `",
@@ -849,6 +853,18 @@ func TestVPNReservedRanges(t *testing.T) {
 			t.Fatal("a provider in a reserved range was published")
 		}
 	}
+	// Unset: the readers' defaults (172.16/12, 192.168/16, 10.214/24).
+	writeFile(t, env, base)
+	v.h.mu.Lock()
+	tm := v.h.findLocked("mesh2")
+	tm.Manifest.VPN.Ranges = []string{"192.168.50.0/24"}
+	v.h.mu.Unlock()
+	if err := v.h.SetVPNProvider(ctx, root, "mesh2", true, 0); statusCode(err) != 409 || !strings.Contains(err.Error(), "192.168.0.0/16") {
+		t.Fatalf("unset list: %v", err)
+	}
+	v.h.mu.Lock()
+	tm.Manifest.VPN.Ranges = []string{"100.128.0.0/16"}
+	v.h.mu.Unlock()
 	writeFile(t, env, base+"PORTCULLIS_VPN_RESERVED_RANGES=nope\n")
 	if err := v.h.SetVPNProvider(ctx, root, "mesh2", true, 0); statusCode(err) != 409 {
 		t.Fatalf("unparsable list: %v", err)
@@ -856,5 +872,69 @@ func TestVPNReservedRanges(t *testing.T) {
 	v.h.TriggerVPNPublish()
 	if d := v.doc(t); len(d.Providers) != 1 || d.Providers[0].ID != "builtin" {
 		t.Fatalf("unparsable list published %+v", d.Providers)
+	}
+}
+
+// I3: a failed vpn.json write is retried with backoff and is the doctor's
+// vpn_publish_failed until a write succeeds; hook devices outside the
+// provider's current ranges are left out with a reason; the file carries
+// valid_until an hour ahead.
+func TestVPNPublishFailureAndRefilter(t *testing.T) {
+	v := newVPNFixture(t, nil)
+	ctx := context.Background()
+	v.wire(t, "mesh")
+	v.devicesOut = devicesDoc("100.64.0.1", hookDev("1", "100.64.0.7", "sub-alice"))
+	v.h.runVPNProvider(ctx, "mesh")
+	v.h.TriggerVPNPublish()
+	d := v.doc(t)
+	if d.ValidUntil == nil || !d.ValidUntil.Equal(v.clock().Add(time.Hour)) {
+		t.Fatalf("valid_until %v", d.ValidUntil)
+	}
+	var calls atomic.Int32
+	v.h.vpnrt.mu.Lock()
+	v.h.vpnrt.testWrite = func(string, vpn.Doc, int) error { calls.Add(1); return errors.New("disk full") }
+	v.h.vpnrt.mu.Unlock()
+	// The range narrows (a cidr setting): the device is left out.
+	v.h.mu.Lock()
+	v.h.findLocked("mesh").Manifest.VPN.Ranges = []string{"100.100.0.0/16"}
+	v.h.mu.Unlock()
+	v.h.TriggerVPNPublish()
+	v.h.Wait()
+	if v.h.vpnPublishError() == "" || calls.Load() != 1 {
+		t.Fatalf("error %q, %d writes", v.h.vpnPublishError(), calls.Load())
+	}
+	v.h.TriggerVPNPublish()
+	v.h.Wait()
+	if calls.Load() != 1 {
+		t.Fatal("retried before the backoff")
+	}
+	f := vpnFindings(t, v, doctor.KindVPNPublishFailed)
+	if len(f) != 1 || f[0].Severity != doctor.Problem {
+		t.Fatalf("doctor %+v", f)
+	}
+	v.h.vpnrt.mu.Lock()
+	v.h.vpnrt.testWrite = nil
+	v.h.vpnrt.mu.Unlock()
+	v.advance(6 * time.Second)
+	v.writeStatus(t, true)
+	v.h.TriggerVPNPublish()
+	d = v.doc(t)
+	if v.h.vpnPublishError() != "" {
+		t.Fatal(v.h.vpnPublishError())
+	}
+	for _, dv := range d.Devices {
+		if dv.Provider == "mesh" {
+			t.Fatalf("an out-of-range device published: %+v", dv)
+		}
+	}
+	pm := v.h.vpnProviderMap("mesh")
+	found := false
+	for _, p := range pm.problems {
+		if p.ID == "1" && p.Reason == vpn.DropOutside {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no outside_ranges drop: %+v", pm.problems)
 	}
 }

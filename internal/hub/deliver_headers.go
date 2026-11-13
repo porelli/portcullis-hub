@@ -111,7 +111,9 @@ func (h *Hub) groupsHostsLocked(t *templates.Template) ([]string, error) {
 		}
 		gated := false
 		for _, m := range mws {
-			if strings.TrimSpace(m) == "portcullis-groups@docker" {
+			// The VPN variant (a VPN-only router's chain, I6) delivers the
+			// same headers on group-gate's /auth/vpn.
+			if m = strings.TrimSpace(m); m == "portcullis-groups@docker" || m == VPNGroupsMiddleware {
 				gated = true
 			}
 		}

@@ -138,6 +138,11 @@ func (h *Hub) VPNOverview(ctx context.Context) VPNView {
 			refresh = v.Identity.EffectiveRefresh()
 		}
 		pv.Refresh = refresh.String()
+		h.vpnrt.mu.Lock()
+		if why := h.vpnrt.overlapBad[t.ID]; why != "" {
+			pv.LastError = why
+		}
+		h.vpnrt.mu.Unlock()
 		if rs, err := h.providerRangesLocked(t); err == nil {
 			pv.Ranges = vpn.Strings(rs)
 		} else {
@@ -207,7 +212,11 @@ func (h *Hub) SetVPNSettings(ctx context.Context, actor directory.Actor, u VPNSe
 	prev := h.st.VPN
 	if u.UsersGroup != nil && *u.UsersGroup != prev.UsersGroup {
 		h.st.VPN.UsersGroup = *u.UsersGroup
-		parts = append(parts, fmt.Sprintf("users_group=%s", clip(*u.UsersGroup, 64)))
+		g := clip(*u.UsersGroup, 64)
+		if g == "" {
+			g = "(everyone)" // a widening: every person may use the VPN (M18)
+		}
+		parts = append(parts, "users_group="+g)
 	}
 	if u.DevicesPerPerson != nil && *u.DevicesPerPerson != prev.DevicesPerPerson {
 		h.st.VPN.DevicesPerPerson = *u.DevicesPerPerson

@@ -49,10 +49,51 @@ func (h *Hub) TriggerVPNPublish() {
 				log.Printf("vpn: the directory is unavailable (%v): the last snapshot is used", err)
 			}
 		}
-		if err := h.publishVPN(); err != nil {
-			log.Printf("vpn: writing %s: %v", vpn.FileName, err)
-		}
+		h.publishVPNRetrying()
 	})
+}
+
+// Publish retries (I3): a failed write is tried again with backoff (each
+// tick re-triggers a publish); the error is the doctor's
+// vpn_publish_failed until a write succeeds. The file's valid_until ends
+// it for every reader if the writes keep failing.
+const (
+	vpnPublishRetryMin = 5 * time.Second
+	vpnPublishRetryMax = 5 * time.Minute
+	// vpnValidFor is how long a written vpn.json stays valid, and
+	// vpnValidRenew how often valid_until moves on.
+	vpnValidFor   = time.Hour
+	vpnValidRenew = 10 * time.Minute
+)
+
+// publishVPNRetrying is publishVPN within the retry backoff (caller holds
+// pubMu).
+func (h *Hub) publishVPNRetrying() {
+	now := h.vpnrt.now()
+	h.vpnrt.mu.Lock()
+	wait := h.vpnrt.pubErr != "" && now.Before(h.vpnrt.pubNext)
+	h.vpnrt.mu.Unlock()
+	if wait {
+		return
+	}
+	err := h.publishVPN()
+	h.vpnrt.mu.Lock()
+	defer h.vpnrt.mu.Unlock()
+	if err == nil {
+		h.vpnrt.pubErr, h.vpnrt.pubDelay = "", 0
+		return
+	}
+	log.Printf("vpn: writing %s: %v (retried)", vpn.FileName, err)
+	h.vpnrt.pubErr = clipRunes(err.Error(), 600)
+	h.vpnrt.pubDelay = min(max(2*h.vpnrt.pubDelay, vpnPublishRetryMin), vpnPublishRetryMax)
+	h.vpnrt.pubNext = now.Add(h.vpnrt.pubDelay)
+}
+
+// vpnPublishError is the last failed vpn.json write ("" = fine).
+func (h *Hub) vpnPublishError() string {
+	h.vpnrt.mu.Lock()
+	defer h.vpnrt.mu.Unlock()
+	return h.vpnrt.pubErr
 }
 
 // publishVPN writes vpn.json (caller holds pubMu, not mu).
@@ -73,10 +114,17 @@ func (h *Hub) publishVPNLocked(st *vpn.Status) error {
 		return err
 	}
 	now := h.vpnrt.now()
-	if bytes.Equal(b, h.vpnrt.lastWritten) && (minRefresh == 0 || now.Sub(h.vpnrt.lastWriteAt) < minRefresh) {
+	if minRefresh == 0 || minRefresh > vpnValidRenew {
+		minRefresh = vpnValidRenew
+	}
+	if bytes.Equal(b, h.vpnrt.lastWritten) && now.Sub(h.vpnrt.lastWriteAt) < minRefresh {
 		return nil
 	}
-	if err := vpn.WriteGroup(h.vpnJSONPath(), doc, h.cfg.VPNDocGID); err != nil {
+	write := vpn.WriteGroup
+	if h.vpnrt.testWrite != nil {
+		write = h.vpnrt.testWrite
+	}
+	if err := write(h.vpnJSONPath(), doc, h.cfg.VPNDocGID); err != nil {
 		return err
 	}
 	h.vpnrt.lastWritten, h.vpnrt.lastWriteAt = b, now
@@ -95,7 +143,15 @@ func (h *Hub) vpnDocLocked(st *vpn.Status) (vpn.Doc, time.Duration) {
 	// revocations remove them; before the first directory read, state is
 	// taken as it is).
 	ownerOK := func(user string) bool { return members == nil || vpnUserOK(members, group, user) }
-	doc := vpn.Doc{Version: vpn.DocVersion, Providers: []vpn.Provider{}, Devices: []vpn.Device{}}
+	// valid_until: an hour ahead, moved on every vpnValidRenew (stable
+	// bytes in between).
+	h.vpnrt.mu.Lock()
+	if h.vpnrt.validAt.IsZero() || !now.Before(h.vpnrt.validAt.Add(vpnValidRenew)) {
+		h.vpnrt.validAt = now.UTC()
+	}
+	vu := h.vpnrt.validAt.Add(vpnValidFor)
+	h.vpnrt.mu.Unlock()
+	doc := vpn.Doc{Version: vpn.DocVersion, ValidUntil: &vu, Providers: []vpn.Provider{}, Devices: []vpn.Device{}}
 	if ps, ok := h.builtinOnLocked(st); ok {
 		if sub, err := netip.ParsePrefix(ps.Subnet); err == nil && vpn.ValidPublicKey(ps.PublicKey) {
 			b := &vpn.Builtin{Subnet: sub.String(), ServerPublicKey: ps.PublicKey, Domains: h.vpnDomainsLocked(), Peers: []vpn.Peer{}}
@@ -127,8 +183,15 @@ func (h *Hub) vpnDocLocked(st *vpn.Status) (vpn.Doc, time.Duration) {
 		if err != nil {
 			continue // unpublished: its addresses are denied
 		}
-		// Never a range core reserves (core refuses such a file).
+		// Never a range core reserves (core refuses such a file), nor
+		// one that overlaps since it was wired (I7).
 		if core.ReservedBad {
+			continue
+		}
+		h.vpnrt.mu.Lock()
+		_, overlap := h.vpnrt.overlapBad[id]
+		h.vpnrt.mu.Unlock()
+		if overlap {
 			continue
 		}
 		if _, _, clash := vpn.FirstOverlap(ranges, core.Reserved); clash {
@@ -181,7 +244,17 @@ func (h *Hub) vpnDocLocked(st *vpn.Status) (vpn.Doc, time.Duration) {
 				pv.RefreshedAt, pv.StaleAfter = &ra, &sa
 				pv.Stale = !now.Before(sa)
 				if !pv.Stale {
-					devs = slices.Clone(pm.devices)
+					// Re-checked against the ranges as they are now (a
+					// cidr setting may have moved since the run, I3).
+					pm.rangeDrops = nil
+					for _, d := range pm.devices {
+						a, err := netip.ParseAddr(d.IP)
+						if err != nil || !slices.ContainsFunc(ranges, func(r netip.Prefix) bool { return r.Contains(a) }) {
+							pm.rangeDrops = append(pm.rangeDrops, vpn.Dropped{ID: strings.TrimPrefix(d.DeviceID, id+":"), Reason: vpn.DropOutside})
+							continue
+						}
+						devs = append(devs, d)
+					}
 					if minRefresh == 0 || refresh < minRefresh {
 						minRefresh = refresh
 					}

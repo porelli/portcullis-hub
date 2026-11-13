@@ -40,7 +40,8 @@ func (h *Hub) doctorVPNIn(ctx context.Context, m *directory.Membership) *doctor.
 		}
 	}
 	now := h.vpnrt.now()
-	in := &doctor.VPNIn{Mode: core.Mode, WGUp: serr == nil && st.Edge.OK, FailedClosed: h.vpnFailedClosed(), DockerNets: dockerNets}
+	in := &doctor.VPNIn{Mode: core.Mode, WGUp: serr == nil && st.Edge.OK, FailedClosed: h.vpnFailedClosed(), DockerNets: dockerNets,
+		ReservedDefault: core.ReservedDefault, PublishError: h.vpnPublishError()}
 	switch {
 	case serr != nil:
 		in.WGError = serr.Error()

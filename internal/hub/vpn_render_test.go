@@ -518,3 +518,85 @@ func TestReachEffectiveAccessTable(t *testing.T) {
 		}
 	}
 }
+
+// C1: deleting the only provider an instance's via names never widens it:
+// no provider at all (deny-all allowlist, policy via []), never "*".
+func TestDeleteLastViaProviderNeverWidens(t *testing.T) {
+	v := newReachFixture(t, VPNModeApps)
+	ctx := context.Background()
+	v.wire(t, "mesh")
+	v.devicesOut = devicesDoc("100.64.0.1")
+	v.h.runVPNProvider(ctx, "mesh")
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN, Via: []string{"mesh"}})
+	v.h.mu.Lock()
+	v.h.dropVPNInstanceLocked("mesh")
+	a := v.h.vpnAccessLocked(v.h.findLocked("cloud"))
+	pol := v.h.vpnPolicyLocked()
+	v.h.mu.Unlock()
+	if !a.VPNOnly || len(a.Via) != 1 || a.Via[0] != "mesh" || len(a.Ranges) != 1 || a.Ranges[0] != vpnNoClient {
+		t.Fatalf("access after the last provider went: %+v", a)
+	}
+	if h := pol.Hosts["cloud.example.org"]; len(h.Via) != 1 || h.Via[0] != "mesh" {
+		t.Fatalf("policy %+v", pol.Hosts)
+	}
+	// A stored empty via (state edited by hand) accepts no provider
+	// either: never "*".
+	v.h.mu.Lock()
+	r := v.h.st.Reach["cloud"]
+	r.Via = nil
+	v.h.st.Reach["cloud"] = r
+	a = v.h.vpnAccessLocked(v.h.findLocked("cloud"))
+	pol = v.h.vpnPolicyLocked()
+	v.h.st.Reach["cloud"] = state.Reach{Mode: state.ReachVPN, Via: []string{"mesh"}}
+	v.h.mu.Unlock()
+	if !a.VPNOnly || len(a.Via) != 0 || a.Ranges[0] != vpnNoClient || !strings.Contains(a.key(), "|via=-|") {
+		t.Fatalf("empty via: %+v %s", a, a.key())
+	}
+	if b, _ := json.Marshal(pol.Hosts["cloud.example.org"]); string(b) != `{"via":[]}` {
+		t.Fatalf("empty via policy %s", b)
+	}
+	v.h.vpnRangesChanged()
+	v.h.Wait()
+	if ov := overrideOf(t, v, "cloud"); !strings.Contains(ov, `ipallowlist.sourcerange": "0.0.0.0/32"`) {
+		t.Fatalf("override:\n%s", ov)
+	}
+}
+
+// I6: a VPN-only instance's hosts keep their header delivery (its chain
+// has portcullis-groups-vpn@docker instead of portcullis-groups@docker).
+func TestVPNOnlyKeepsHeaderHosts(t *testing.T) {
+	v := newReachFixture(t, VPNModeServer)
+	v.h.mu.RLock()
+	hosts, err := v.h.groupsHostsLocked(v.h.findLocked("cloud"))
+	v.h.mu.RUnlock()
+	if err != nil || len(hosts) != 1 || hosts[0] != "cloud.example.org" {
+		t.Fatalf("%v %v", hosts, err)
+	}
+}
+
+// I5: a server-mode public-links instance keeps its hosts in vpn.hosts
+// and its public paths in the policy, where core's public guard reads
+// them.
+func TestPublicLinksPolicy(t *testing.T) {
+	v := newReachFixture(t, VPNModeServer)
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachInternet, PublicLinks: true})
+	b, err := os.ReadFile(filepath.Join(v.data, "group-gate-policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		PublicPaths map[string]json.RawMessage `json:"public_paths"`
+		VPN         struct {
+			Hosts map[string]json.RawMessage `json:"hosts"`
+		} `json:"vpn"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc.VPN.Hosts["cloud.example.org"]; !ok {
+		t.Fatalf("vpn.hosts %v", doc.VPN.Hosts)
+	}
+	if _, ok := doc.PublicPaths["cloud.example.org"]; !ok {
+		t.Fatalf("public_paths %v", doc.PublicPaths)
+	}
+}

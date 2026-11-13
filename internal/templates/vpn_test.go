@@ -193,7 +193,7 @@ func TestVPNHookExclusive(t *testing.T) {
 func TestTemplateEntrypointsWebsecureOnly(t *testing.T) {
 	for _, ep := range []string{"vpnsecure", "websecure,vpnsecure", "web", "${EP:-websecure}"} {
 		c := "services:\n  a:\n    image: x\n    labels:\n      traefik.http.routers.a.entrypoints: \"" + ep + "\"\n"
-		if err := checkCoreRefs([]byte(c), nil); err == nil || !strings.Contains(err.Error(), "entrypoints must be 'websecure'") {
+		if err := checkCoreRefs([]byte(c), nil); err == nil || err.Error() != "router a: entrypoints must be 'websecure'" {
 			t.Errorf("%s: %v", ep, err)
 		}
 	}

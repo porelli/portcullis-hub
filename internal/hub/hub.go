@@ -781,6 +781,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 	}
 	h.loadOps()
 	h.loadSyncHashes()
+	h.loadVPNRendered()
 	return h, nil
 }
 
@@ -833,6 +834,9 @@ func (h *Hub) Init() {
 	h.seedHostHeaders()
 	// G74: only the files other containers read may be group-readable.
 	h.checkDataDirModes()
+	// The built-in VPN subnet as wg reports it, before anything renders
+	// an allowlist (I7).
+	h.wgStatus()
 	if err := h.WritePolicy(); err != nil {
 		log.Printf("auth-policy: initial group-gate policy write failed: %v", err)
 	}
@@ -851,6 +855,15 @@ func (h *Hub) Init() {
 		h.requeueOwed()
 	} else {
 		h.afterEngineVerified("settings: owed reloads and restarts", h.requeueOwed)
+	}
+	// VPN (I2): running labels the rendering narrowed (or that can't be
+	// read) restart the instance.
+	eng := h.engine
+	vpnCheck := func() { h.vpnStartCheck(context.Background(), eng) }
+	if h.engineVerifiedNow() {
+		h.goBackground(vpnCheck)
+	} else {
+		h.afterEngineVerified("vpn: running labels against the rendering", vpnCheck)
 	}
 }
 

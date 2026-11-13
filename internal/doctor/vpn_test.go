@@ -40,7 +40,7 @@ func TestVPNKindsSilentWithoutVPN(t *testing.T) {
 			t.Errorf("%s without inputs: %+v", k, f)
 		}
 	}
-	if len(VPNKinds) != 15 {
+	if len(VPNKinds) != 17 {
 		t.Fatalf("%d kinds", len(VPNKinds))
 	}
 }
@@ -165,4 +165,17 @@ func TestVPNReachFailedClosed(t *testing.T) {
 	if f[0].Instances[0] != "cloud" {
 		t.Fatal(f[0])
 	}
+}
+
+func TestVPNViaNone(t *testing.T) {
+	vpnCase(t, KindVPNViaDead, Warning, &VPNIn{WGUp: true, Instances: []VPNInstanceIn{{ID: "cloud", Via: []string{}}}},
+		&VPNIn{WGUp: true, Instances: []VPNInstanceIn{{ID: "cloud", Via: []string{"*"}}}})
+}
+
+func TestVPNReservedDefaults(t *testing.T) {
+	vpnCase(t, KindVPNReservedDefault, Warning, &VPNIn{ReservedDefault: true, Builtin: true}, &VPNIn{Builtin: true})
+}
+
+func TestVPNPublishFailed(t *testing.T) {
+	vpnCase(t, KindVPNPublishFailed, Problem, &VPNIn{PublishError: "disk full"}, &VPNIn{})
 }

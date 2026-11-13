@@ -28,6 +28,8 @@ const (
 	KindVPNDeviceStale       = "vpn_device_stale"
 	KindVPNExpiring          = "vpn_expiring"
 	KindVPNReachFailedClosed = "vpn_reach_failed_closed"
+	KindVPNReservedDefault   = "vpn_reserved_defaults"
+	KindVPNPublishFailed     = "vpn_publish_failed"
 	vpnNoAdminDeviceWindow   = 30 * 24 * time.Hour
 	vpnDeviceStaleWindow     = 90 * 24 * time.Hour
 	vpnExpiringWindow        = 14 * 24 * time.Hour
@@ -42,7 +44,7 @@ const VPNUDPNote = "Portcullis can't test UDP reachability from outside."
 // VPNKinds are the VPN kinds.
 var VPNKinds = []string{KindVPNDown, KindVPNProviderStale, KindVPNProviderInvalid, KindVPNRangeOverlap, KindVPNViaDead, KindVPNDNSFailed,
 	KindVPNDNSManual, KindVPNGatewayPrivileged, KindVPNStaticMapping, KindVPNSingleProvider, KindVPNPublicLinks, KindVPNNoAdminDevice,
-	KindVPNDeviceStale, KindVPNExpiring, KindVPNReachFailedClosed}
+	KindVPNDeviceStale, KindVPNExpiring, KindVPNReachFailedClosed, KindVPNReservedDefault, KindVPNPublishFailed}
 
 // VPNIn is what the VPN kinds judge.
 type VPNIn struct {
@@ -64,6 +66,11 @@ type VPNIn struct {
 	// FailedClosed: instances stopped because a narrowing VPN change
 	// couldn't be applied.
 	FailedClosed []string
+	// ReservedDefault: core.env passes no PORTCULLIS_VPN_RESERVED_RANGES
+	// (the readers' defaults apply). PublishError: the last vpn.json
+	// write failed ("" = fine).
+	ReservedDefault bool
+	PublishError    string
 }
 
 // VPNProviderIn is one wired provider.
@@ -188,7 +195,13 @@ func (c vpnCheck) Run(in *Inputs) []Finding {
 			}
 		}
 		for _, i := range v.Instances {
-			if len(i.Via) == 0 || slices.Contains(i.Via, "*") {
+			if len(i.Via) == 0 {
+				out = append(out, withInstance(vpnFinding(c.kind, Warning, i.ID+" is VPN-only through no provider: nobody can reach it.",
+					"Its Through lists no VPN provider (its last one was removed), so every request is refused.",
+					[]string{"Set " + i.ID + "'s Through again (its Access section), or make it reachable from the internet."}, "none", i.ID, "none"), i.ID))
+				continue
+			}
+			if slices.Contains(i.Via, "*") {
 				continue
 			}
 			if !slices.ContainsFunc(i.Via, func(id string) bool { return live[id] }) {
@@ -275,6 +288,18 @@ func (c vpnCheck) Run(in *Inputs) []Finding {
 				f.Persons = []string{d.User}
 				out = append(out, f)
 			}
+		}
+	case KindVPNReservedDefault:
+		if v.ReservedDefault && (len(v.Providers) > 0 || v.Builtin || len(v.VPNOnly) > 0) {
+			out = append(out, vpnFinding(c.kind, Warning, "core passes no reserved VPN ranges: the defaults apply.",
+				"Without PORTCULLIS_VPN_RESERVED_RANGES in core.env the Hub and the readers reserve only 172.16.0.0/12, 192.168.0.0/16 and 10.214.0.0/24, not core's own subnets.",
+				[]string{"Upgrade core and run `./portcullis up`: it writes the list into core.env."}, "default"))
+		}
+	case KindVPNPublishFailed:
+		if v.PublishError != "" {
+			out = append(out, vpnFinding(c.kind, Problem, "vpn.json couldn't be written: the VPN may serve an old device list.",
+				"The Hub retries with backoff. "+v.PublishError,
+				[]string{"Check the vpn_doc volume (free space, ownership 10001:10007, mode 2750) and the Hub's log."}, v.PublishError))
 		}
 	case KindVPNReachFailedClosed:
 		for _, id := range v.FailedClosed {

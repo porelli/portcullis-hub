@@ -40,6 +40,8 @@ const (
 	// accepted provider: Traefik refuses an empty range, and this one
 	// matches no client.
 	vpnNoClient = "0.0.0.0/32"
+	// vpnNoProvider is a VPN-only access key's via accepting no provider.
+	vpnNoProvider = "-"
 	// vpnNetwork is core's portcullis-vpn network (external to apps).
 	vpnNetwork = "portcullis-vpn"
 	// VPNGroupsMiddleware is core's VPN forwardAuth to group-gate (the
@@ -86,7 +88,11 @@ func (a vpnAccess) key() string {
 	if a.PublicLinks {
 		pl = "1"
 	}
-	return "r=" + strings.Join(a.Ranges, ",") + "|via=" + strings.Join(a.Via, ",") + "|gw=" + a.GW + "|edge=" + a.Edge + "|pl=" + pl
+	via := strings.Join(a.Via, ",")
+	if a.VPNOnly && via == "" {
+		via = vpnNoProvider
+	}
+	return "r=" + strings.Join(a.Ranges, ",") + "|via=" + via + "|gw=" + a.GW + "|edge=" + a.Edge + "|pl=" + pl
 }
 
 // vpnAccessForLocked is the access t gets with reach r (set: t has a
@@ -98,10 +104,10 @@ func (h *Hub) vpnAccessForLocked(t *templates.Template, r state.Reach, set bool)
 	server := h.vpnCoreEnv().Mode == VPNModeServer
 	switch {
 	case set && r.Mode == state.ReachVPN:
-		a.VPNOnly, a.Via = true, slices.Clone(r.Via)
-		if len(a.Via) == 0 {
-			a.Via = []string{state.ReachAny}
-		}
+		// A stored empty via accepts no provider (its last one went):
+		// only an explicit "*" means every one (the API defaults an
+		// empty request to "*").
+		a.VPNOnly, a.Via = true, append([]string{}, r.Via...)
 	case server:
 		a.VPNOnly, a.Via = true, []string{state.ReachAny}
 		a.PublicLinks = set && r.PublicLinks
@@ -430,7 +436,7 @@ func (h *Hub) vpnPolicyLocked() policy.VPNPolicy {
 			if hst == "" || coreHosts[hst] || onlyCtrl[hst] {
 				continue
 			}
-			out.Hosts[hst] = policy.VPNHost{Via: slices.Clone(via)}
+			out.Hosts[hst] = policy.VPNHost{Via: append([]string{}, via...)}
 		}
 	}
 	return out
@@ -543,9 +549,13 @@ func vpnKeyFields(key string) map[string]string {
 // closed: a narrowing change couldn't be applied, so the instance was
 // stopped (fail closed) until a render succeeds.
 type vpnRenderRetry struct {
-	next   time.Time
-	delay  time.Duration
-	closed bool
+	next  time.Time
+	delay time.Duration
+	// closing: a narrowing change couldn't be applied, so a stop is owed
+	// (retried until it succeeds); closed: the stop succeeded.
+	closing bool
+	closed  bool
+	lastMsg string
 }
 
 const (
@@ -601,8 +611,11 @@ func vpnNarrows(prev, next string) bool {
 		case "via":
 			// The accepted providers: "*" holds every one; "" (internet)
 			// is covered by r.
-			if pv == "" || nv == "" {
-				continue
+			if pv == "" || nv == "" || pv == vpnNoProvider {
+				continue // internet (r covers it), or prev accepted none
+			}
+			if nv == vpnNoProvider {
+				return true
 			}
 			if pv == state.ReachAny {
 				if nv != state.ReachAny {
@@ -667,13 +680,15 @@ func (h *Hub) vpnRerender(force map[string]bool) {
 		if !force[t.ID] && fail != nil && now.Before(fail.next) {
 			// In backoff: a narrowing change (against the committed
 			// key) still fails closed at once.
-			if !fail.closed && vpnNarrows(prev, key) {
-				h.vpnrt.mu.Lock()
-				fail.closed = true
-				h.vpnrt.mu.Unlock()
-				closeIDs = append(closeIDs, t.ID)
+			h.vpnrt.mu.Lock()
+			if !fail.closing && vpnNarrows(prev, key) {
+				fail.closing = true
 				closeWhy[t.ID] = errors.New("an earlier VPN render failed and is retried")
 			}
+			if fail.closing && !fail.closed {
+				closeIDs = append(closeIDs, t.ID)
+			}
+			h.vpnrt.mu.Unlock()
 			continue
 		}
 		if err := h.generateOverrideLocked(t, h.st.Settings[t.ID]); err != nil {
@@ -689,10 +704,12 @@ func (h *Hub) vpnRerender(force map[string]bool) {
 			// Fail closed: a narrowing change that can't be applied
 			// (an instance never rendered by this run counts as one when
 			// it renders VPN-only).
-			if !fail.closed && (known && vpnNarrows(prev, key) || !known && vpnNarrows("r=|via=|gw=|edge=|pl=1", key)) {
-				fail.closed = true
-				closeIDs = append(closeIDs, t.ID)
+			if !fail.closing && (known && vpnNarrows(prev, key) || !known && vpnNarrows("r=|via=|gw=|edge=|pl=1", key)) {
+				fail.closing = true
 				closeWhy[t.ID] = err
+			}
+			if fail.closing && !fail.closed {
+				closeIDs = append(closeIDs, t.ID)
 			}
 			h.vpnrt.mu.Unlock()
 			continue
@@ -703,13 +720,17 @@ func (h *Hub) vpnRerender(force map[string]bool) {
 		// Never rendered by this run: the file is current again, the
 		// exposure drift covers its labels; a fail-closed instance starts
 		// again.
-		if known || force[t.ID] || fail != nil && fail.closed {
+		if known || force[t.ID] || fail != nil && fail.closing {
 			restart = append(restart, t.ID)
 		}
 	}
 	h.mu.Unlock()
 	for _, id := range closeIDs {
-		h.vpnFailClosed(id, clipRunes(h.RedactErr(id, closeWhy[id]), 600))
+		why := "a narrowing VPN change couldn't be written"
+		if e := closeWhy[id]; e != nil {
+			why = clipRunes(h.RedactErr(id, e), 600)
+		}
+		h.vpnFailClosed(id, why)
 	}
 	for _, id := range restart {
 		h.queueDelivery(id, TriggerSave, settings.EffectRestart, 0)
@@ -720,11 +741,36 @@ func (h *Hub) vpnRerender(force map[string]bool) {
 // enabled flag unchanged) because a narrowing VPN change couldn't be
 // rendered, records the op and audits vpn.reach_failed_closed.
 func (h *Hub) vpnFailClosed(id, why string) {
-	err := h.compose.DownByName(context.Background(), projectName(id))
+	// Under the instance's lifecycle lock (no start or restart in
+	// between); busy: retried at the next pass.
+	unlock, err := h.lockApp(id)
+	if err == nil {
+		err = h.compose.DownByName(context.Background(), projectName(id))
+		unlock()
+	}
 	msg := "the VPN allowlist couldn't be narrowed (" + why + "): the instance was stopped until it can"
 	if err != nil {
-		msg += "; stopping it failed: " + clipRunes(h.RedactErr(id, err), 300)
+		msg = "the VPN allowlist couldn't be narrowed (" + why + ") and stopping the instance failed (retried): " + clipRunes(h.RedactErr(id, err), 300)
 		log.Printf("ERROR: vpn: %s: failing closed: stop: %v", id, err)
+	} else {
+		// Closed only once the stop succeeded (I4).
+		h.vpnrt.mu.Lock()
+		if f := h.vpnrt.renderFail[id]; f != nil {
+			f.closed = true
+		}
+		h.vpnrt.mu.Unlock()
+	}
+	// Recorded and audited once per outcome (a failing stop is retried
+	// every pass).
+	h.vpnrt.mu.Lock()
+	f := h.vpnrt.renderFail[id]
+	repeat := f != nil && f.lastMsg == msg
+	if f != nil {
+		f.lastMsg = msg
+	}
+	h.vpnrt.mu.Unlock()
+	if repeat {
+		return
 	}
 	h.recordOp(id, OpRecord{Op: OpStop, At: h.vpnrt.now().UTC(), OK: false, Error: msg})
 	h.auditOp(directory.Human("hub"), "vpn.reach_failed_closed", id, "", errors.New(msg))
@@ -737,7 +783,7 @@ func (h *Hub) vpnFailedClosed() []string {
 	defer h.vpnrt.mu.Unlock()
 	var out []string
 	for id, f := range h.vpnrt.renderFail {
-		if f.closed {
+		if f.closing {
 			out = append(out, id)
 		}
 	}
@@ -751,7 +797,7 @@ func (h *Hub) vpnRenderRetryDue() bool {
 	h.vpnrt.mu.Lock()
 	defer h.vpnrt.mu.Unlock()
 	for _, f := range h.vpnrt.renderFail {
-		if !now.Before(f.next) {
+		if !now.Before(f.next) || f.closing && !f.closed {
 			return true
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
@@ -64,10 +65,14 @@ var FileGID = 10001
 
 // Doc is vpn.json v2.
 type Doc struct {
-	Version   int        `json:"version"`
-	Builtin   *Builtin   `json:"builtin,omitempty"`
-	Providers []Provider `json:"providers"`
-	Devices   []Device   `json:"devices"`
+	Version int `json:"version"`
+	// ValidUntil: the whole file is invalid from then on, by the
+	// reader's own clock (the Hub republishes it well before: a stopped
+	// Hub or a write that keeps failing ends in deny). Required.
+	ValidUntil *time.Time `json:"valid_until"`
+	Builtin    *Builtin   `json:"builtin,omitempty"`
+	Providers  []Provider `json:"providers"`
+	Devices    []Device   `json:"devices"`
 }
 
 // Builtin is the built-in people role's configuration (wg reads it).
@@ -163,10 +168,16 @@ func ValidPublicKey(k string) bool {
 func Parse(b []byte) (*Doc, error) {
 	var d Doc
 	if err := strictJSON(b, &d); err != nil {
+		if strings.Contains(err.Error(), "parsing time") {
+			return nil, fmt.Errorf("a time (valid_until, refreshed_at, stale_after or expires) isn't RFC 3339: %v", err)
+		}
 		return nil, err
 	}
 	if d.Version != DocVersion {
 		return nil, fmt.Errorf("version %d: only version %d is understood", d.Version, DocVersion)
+	}
+	if d.ValidUntil == nil {
+		return nil, fmt.Errorf("no valid_until")
 	}
 	ranges := map[string][]netip.Prefix{}
 	ports := map[int]string{}
@@ -298,7 +309,8 @@ func Parse(b []byte) (*Doc, error) {
 	return &d, nil
 }
 
-// Lookup is the reader's decision for a client address that arrived
+// Lookup is the reader's decision (deny once the file's valid_until has
+// passed) for a client address that arrived
 // through provider's ingress, at now: the device it belongs to, or false
 // (deny). The provider is never taken from anything the client or a
 // gateway sends: it is the ingress the connection came in on (the edge's
@@ -309,6 +321,9 @@ func Parse(b []byte) (*Doc, error) {
 // provider must hold the address, unexpired (a built-in device also
 // needs its unexpired peer).
 func (d *Doc) Lookup(provider string, ip netip.Addr, now time.Time) (Device, bool) {
+	if d.ValidUntil == nil || !now.Before(*d.ValidUntil) {
+		return Device{}, false // the whole file is out of date
+	}
 	var prov *Provider
 	for i := range d.Providers {
 		if d.Providers[i].ID == provider {

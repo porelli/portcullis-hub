@@ -139,7 +139,8 @@ func TestWriteRoundTrip(t *testing.T) {
 		t.Error("invalid doc written")
 	}
 	// An empty doc writes [] lists.
-	if err := Write(p, Doc{Version: DocVersion}); err != nil {
+	vu := time.Now().Add(time.Hour)
+	if err := Write(p, Doc{Version: DocVersion, ValidUntil: &vu}); err != nil {
 		t.Fatal(err)
 	}
 	b, _ = os.ReadFile(p)
@@ -153,7 +154,8 @@ func TestWriteMode0640Group(t *testing.T) {
 		t.Skip("needs root to chown to group 10001")
 	}
 	p := filepath.Join(t.TempDir(), FileName)
-	if err := Write(p, Doc{Version: DocVersion}); err != nil {
+	vu := time.Now().Add(time.Hour)
+	if err := Write(p, Doc{Version: DocVersion, ValidUntil: &vu}); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(p)

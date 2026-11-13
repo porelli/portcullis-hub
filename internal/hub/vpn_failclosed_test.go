@@ -3,12 +3,15 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/netip"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -200,5 +203,161 @@ func TestVPNNarrowingDuringBackoff(t *testing.T) {
 	v.h.Wait()
 	if !slices.Equal(v.h.vpnFailedClosed(), []string{"cloud"}) {
 		t.Fatalf("a narrowing change in backoff didn't fail closed: %v", v.h.vpnFailedClosed())
+	}
+}
+
+// I4: a failed stop while failing closed isn't taken for closed: it is
+// retried (under the instance's lifecycle lock) until it succeeds.
+func TestVPNFailClosedStopRetried(t *testing.T) {
+	v := newReachFixture(t, VPNModeApps)
+	ctx := context.Background()
+	v.wire(t, "mesh")
+	v.devicesOut = devicesDoc("100.64.0.1")
+	v.h.runVPNProvider(ctx, "mesh")
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN, Via: []string{"*"}})
+	v.h.mu.Lock()
+	v.h.testOverrideWriteErr = func(path string) error {
+		if strings.HasSuffix(path, "cloud.override.yml") {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	v.h.mu.Unlock()
+	v.runner.mu.Lock()
+	v.runner.byNameErr = errors.New("engine unverified")
+	v.runner.mu.Unlock()
+	if err := v.h.SetVPNProvider(ctx, root, "mesh", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	v.h.Wait()
+	v.h.vpnrt.mu.Lock()
+	f := v.h.vpnrt.renderFail["cloud"]
+	closing, closed := f != nil && f.closing, f != nil && f.closed
+	v.h.vpnrt.mu.Unlock()
+	if !closing || closed {
+		t.Fatalf("closing %v closed %v after a failed stop", closing, closed)
+	}
+	if !v.h.vpnRenderRetryDue() {
+		t.Fatal("a failed stop isn't retried")
+	}
+	v.runner.mu.Lock()
+	v.runner.byNameErr = nil
+	v.runner.mu.Unlock()
+	v.h.vpnRangesChanged()
+	v.h.vpnrt.mu.Lock()
+	closed = f.closed
+	v.h.vpnrt.mu.Unlock()
+	if !closed {
+		t.Fatal("the retried stop didn't close it")
+	}
+	n := 0
+	for _, e := range v.audit.entries {
+		if e.Action == "vpn.reach_failed_closed" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("%d audits, want the failure and the stop", n)
+	}
+}
+
+// I2: the committed render keys survive a restart, and at start running
+// labels the rendering narrowed restart the instance.
+func TestVPNRenderKeysPersistAndStartCheck(t *testing.T) {
+	v := newReachFixture(t, VPNModeApps)
+	ctx := context.Background()
+	v.wire(t, "mesh")
+	v.devicesOut = devicesDoc("100.64.0.1")
+	v.h.runVPNProvider(ctx, "mesh")
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN, Via: []string{"*"}})
+	v.h.vpnrt.mu.Lock()
+	want := v.h.vpnrt.rendered["cloud"]
+	clear(v.h.vpnrt.rendered) // a restart forgets memory
+	v.h.vpnrt.mu.Unlock()
+	v.h.loadVPNRendered()
+	v.h.vpnrt.mu.Lock()
+	got := v.h.vpnrt.rendered["cloud"]
+	v.h.vpnrt.mu.Unlock()
+	if got == "" || got != want {
+		t.Fatalf("persisted key %q, want %q", got, want)
+	}
+	ups := func() int {
+		n := 0
+		for _, c := range v.runner.Calls() {
+			if strings.HasPrefix(c, "up:portcullis-cloud") {
+				n++
+			}
+		}
+		return n
+	}
+	// A narrowing after the "restart" restarts the instance.
+	n := ups()
+	if err := v.h.SetVPNProvider(ctx, root, "mesh", false, 0); err != nil {
+		t.Fatal(err)
+	}
+	v.h.Wait()
+	if ups() == n {
+		t.Fatal("a narrowing after a restart wasn't applied")
+	}
+	// Start check: a running container still on the old, wider labels.
+	v.engine.mu.Lock()
+	c := container("cloud-old", "portcullis-cloud", "cloud", "running")
+	c.Labels["traefik.http.routers.cloud.entrypoints"] = "websecure,vpnsecure"
+	v.engine.containers = append(v.engine.containers, c)
+	v.engine.mu.Unlock()
+	n = ups()
+	v.h.vpnStartCheck(ctx, v.h.engine)
+	v.h.Wait()
+	if ups() == n {
+		t.Fatal("the start check didn't restart an instance with wider running labels")
+	}
+}
+
+// I7: the access follows inputs that move without a Hub call: the
+// built-in subnet (status.json), a provider's ranges (a cidr setting:
+// also re-checked for overlaps) and the core env's mode.
+func TestVPNTickFollowsMovedInputs(t *testing.T) {
+	v := newReachFixture(t, VPNModeApps)
+	ctx := context.Background()
+	v.wire(t, "mesh")
+	v.devicesOut = devicesDoc("100.64.0.1")
+	v.h.runVPNProvider(ctx, "mesh")
+	setReach(t, v, "cloud", state.Reach{Mode: state.ReachVPN, Via: []string{"*"}})
+	// The built-in subnet moves.
+	st := `{"version":1,"written":"` + v.clock().Format(time.RFC3339) + `","mode":"apps","edge":{"ok":true,"error":""},"people":{"ok":true,"error":"","public_key":"` + vpnServerKey + `","port":51820,"subnet":"10.215.0.0/22","mtu":1280,"peers":[]}}`
+	writeFile(t, v.status, st)
+	v.h.vpnTick(ctx)
+	v.h.Wait()
+	if ov := overrideOf(t, v, "cloud"); !strings.Contains(ov, "10.215.0.0/22") || strings.Contains(ov, "10.213.0.0/22") {
+		t.Fatalf("built-in subnet not followed:\n%s", ov)
+	}
+	// The provider's range moves onto a container network: re-rendered,
+	// and left out of vpn.json.
+	v.engine.mu.Lock()
+	v.engine.networks = []docker.Network{{Name: "app_default", Subnets: []netip.Prefix{netip.MustParsePrefix("100.100.0.0/16")}}}
+	v.engine.mu.Unlock()
+	v.h.mu.Lock()
+	v.h.findLocked("mesh").Manifest.VPN.Ranges = []string{"100.100.0.0/16"}
+	v.h.mu.Unlock()
+	v.advance(31 * time.Second) // the overlap re-check is throttled
+	writeFile(t, v.status, strings.Replace(st, vpnT0.Format(time.RFC3339), v.clock().Format(time.RFC3339), 1))
+	v.h.vpnTick(ctx)
+	v.h.Wait()
+	if ov := overrideOf(t, v, "cloud"); !strings.Contains(ov, "100.100.0.0/16") {
+		t.Fatalf("provider range not followed:\n%s", ov)
+	}
+	for _, p := range v.doc(t).Providers {
+		if p.ID == "mesh" {
+			t.Fatal("an overlapping provider published")
+		}
+	}
+	// The core env's mode moves to server: grafana-like internet apps go
+	// VPN-only (mesh's own non-control routers).
+	writeFile(t, filepath.Join(v.project, ".env"), "CORE_VAR=core-value\nPORTCULLIS_VPN_BUILTIN=on\nPORTCULLIS_VPN_NET=172.31.254.0/26\nPORTCULLIS_VPN_MODE=server\n")
+	v.writeStatus(t, true)
+	v.h.vpnTick(ctx)
+	v.h.Wait()
+	if ov := overrideOf(t, v, "mesh"); !strings.Contains(ov, "portcullis-vpnonly-mesh") {
+		t.Fatalf("mode change not followed:\n%s", ov)
 	}
 }

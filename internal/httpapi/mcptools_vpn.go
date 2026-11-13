@@ -3,9 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -142,7 +145,15 @@ func (s *Server) registerVPNTools() {
 				if err := instanceIDOK(in.ID); err != nil {
 					return nil, err
 				}
-				if err := s.setInstanceReach(ctx, toolActor(ctx, c), in.ID, state.Reach{Mode: in.Mode, Via: in.Via, PublicLinks: in.PublicLinks}); err != nil {
+				r := state.Reach{Mode: in.Mode, Via: in.Via, PublicLinks: in.PublicLinks}
+				a := toolActor(ctx, c)
+				// Classed W without a confirmation: still only if it keeps
+				// or narrows the access now (a wiring in between could
+				// have made it a widening, M16).
+				if a.Confirmation == "" && !s.Hub.ReachChangeNarrows(in.ID, r) {
+					return nil, &hub.StatusError{Status: http.StatusConflict, Err: errors.New("the instance's access changed meanwhile: ask again (this change now needs a confirmation)")}
+				}
+				if err := s.setInstanceReach(ctx, a, in.ID, r); err != nil {
 					return nil, err
 				}
 				return map[string]any{"instance": in.ID, "mode": in.Mode, "via": in.Via, "public_links": in.PublicLinks}, nil
