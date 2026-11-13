@@ -89,7 +89,7 @@ A permissions snapshot only undoes a permissions fix on the same folder: it
 records inodes, so it doesn't apply to files restored from another backup.
 
 !!! note "First backup on a fresh host"
-    On a host without the `group-gate` image (a fresh install before the first `portcullis up`, or after `docker image rm`), `./portcullis backup` builds it first (needs network access to Docker Hub and PyPI for the pinned, hashed Python dependencies: cryptography, PyJWT).
+    On a host without the `group-gate` image (a fresh install before the first `portcullis up`, or after `docker image rm`), `./portcullis backup` builds it first (needs network access to Docker Hub and PyPI for the pinned, hashed Python dependencies: cryptography, PyJWT). Its snapshot and LLDAP-count helpers mount each volume at `/vol`, a path the group-gate image doesn't have, so an empty named volume is never given the helper image's mountpoint owner.
 
 ```bash
 ./portcullis backup            # local backup
@@ -127,9 +127,9 @@ BACKUP_KEEP_MONTHLY=6
 
 How the upload runs:
 
-- **Container.** restic runs in its pinned image (`BACKUP_RESTIC_IMAGE` in
-  the core repo's `scripts/lib/backup.sh`) as your user, with a read-only
-  root filesystem and no capabilities.
+- **Container.** restic runs in its fully qualified, pinned image
+  (`BACKUP_RESTIC_IMAGE` in the core repo's `scripts/lib/backup.sh`) as your
+  user, with a read-only root filesystem and no capabilities.
 - **Secrets.** The repository password and the provider credentials are passed
   to the container by variable name, never on a command line.
 - **Snapshots.** The first upload initialises the repository. Every snapshot
@@ -228,7 +228,7 @@ says so). It saves the current `.env`, `secrets/` and `certs/` to
    database has users, the restore **stops here**: Postgres and Vault are up,
    nothing else is started. Restore a backup that includes LLDAP, or, if the
    users really are gone, re-run with `--allow-empty-lldap`.
-7. Runs `vault init`, which refreshes the enroll AppRole secret and the metrics token. Then it starts everything and waits for Vault, Postgres, LLDAP and Keycloak.
+7. Builds the local images on both runtimes (Docker and rootless Podman), then runs `vault init`, which refreshes the enroll AppRole secret and the metrics token. Everything is started and the restore waits for Vault, Postgres, LLDAP and Keycloak.
 
 Use `--yes` to skip the confirmation.
 
