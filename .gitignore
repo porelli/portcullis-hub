@@ -1,2 +1,3 @@
 /hub
 *.exe
+/cmd/hub/hub

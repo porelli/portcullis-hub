@@ -284,7 +284,7 @@ func TestHookAITrigger(t *testing.T) {
 	}
 	all := "start, settings_change, membership_change, credential_change, ai"
 	runAIRows(t, []aiRow{
-		{"unknown trigger names all five", "companion", []string{"when: [start, settings_change]", "when: [boot]"}, nil, "start, settings_change, membership_change, credential_change or ai"},
+		{"unknown trigger names all six", "companion", []string{"when: [start, settings_change]", "when: [boot]"}, nil, "start, settings_change, membership_change, credential_change, ai or vpn"},
 		{"empty when names all five", "companion", []string{"when: [start, settings_change]", "when: []"}, nil, all},
 		{"option delivers to an ai hook", "companion", []string{"delivery: [{hook: apply}]", "delivery: [{hook: mcp-mint}]"}, nil, "ai hook"},
 		{"reload names an ai hook", "companion", []string{"settings:\n", "reload: {hook: mcp-mint}\nsettings:\n"}, nil, "ai hook"},

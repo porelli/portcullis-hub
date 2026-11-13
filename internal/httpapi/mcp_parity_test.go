@@ -61,6 +61,16 @@ var impersonationNoToolRoutes = map[string]string{
 	"GET /impersonation/stop":                            "the impersonating browser only (the Stop page)",
 }
 
+// vpnNoToolRoutes are the VPN admin routes no tool mirrors (V9): Settings
+// → VPN and the manual DNS acknowledgement are the admin UI's only.
+var vpnNoToolRoutes = map[string]string{
+	"PUT /api/vpn/settings":                "admin UI only (Settings → VPN)",
+	"POST /api/instances/{id}/vpn-dns/ack": "admin UI only (the instance's VPN tab, after configuring the records by hand)",
+}
+
+// adminVPN are the VPN tools (§15.10).
+var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach"}
+
 // impersonationPartialTwins are the routes a tool mirrors for some
 // bodies only, listed once with the reason for the rest (F27):
 // turn_off_impersonation covers {"allowed": false}.
@@ -114,6 +124,8 @@ var destructiveTwins = map[string]string{
 	"DELETE /api/folders/{id}":             "deletes a shared folder's definition",
 	"POST /api/folders/{id}/undo/apply":    "restores a permissions snapshot over the folder's files",
 	"POST /api/doctor/findings/{fp}/apply": "a one-click fix: D when its plan touches data (a folder apply or undo, an ownership change, a revocation; G45)",
+	// VPN (§15.10).
+	"DELETE /api/vpn/devices/{id}": "revokes a person's VPN device",
 }
 
 // accessWidening are the tools that are D only for some arguments (G37,
@@ -157,7 +169,11 @@ var accessWidening = map[string]string{
 	"folder_recheck_apply": "D when it accepts a different directory (confirm_different_directory)",
 	"doctor_mute":          "D for a Problem, an ai_credentials_revoking finding or one the report doesn't have (fix round 1 ruling)",
 	// Operation progress (Task 7 security review).
-	"stop_op": "D when the undo turns something back on: a disable's (enable_instance's class), a delete's of an enabled instance, a same-instance restore's of an enabled instance or once its rollback is armed, an AI switch-off's (set_ai_support on)",
+	// VPN (§15.10).
+	"set_vpn_provider":   "D when it wires a provider (its devices become a way into VPN-only apps), W when it unwires",
+	"assign_vpn_address": "D when it assigns an address to a person, W when it removes the assignment",
+	"set_instance_reach": "D unless it keeps or narrows the instance's access as it is now (no new provider, range or public link; vpn → internet is D)",
+	"stop_op":            "D when the undo turns something back on: a disable's (enable_instance's class), a delete's of an enabled instance, a same-instance restore's of an enabled instance or once its rollback is armed, an AI switch-off's (set_ai_support on)",
 }
 
 // widensAlways are the D tools whose every call widens access (G37
@@ -193,7 +209,8 @@ func TestToolParity(t *testing.T) {
 		_, conf := confirmationRoutes[r]
 		_, help := helpNoToolRoutes[r]
 		_, imp := impersonationNoToolRoutes[r]
-		conf = conf || help || imp
+		_, vpnNo := vpnNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -224,7 +241,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -287,7 +304,9 @@ func TestToolParity(t *testing.T) {
 		// Sign-in methods (Task 6).
 		"set_sign_in_method", "save_sign_in_template", "set_default_template", "set_core_template", "set_sign_in_template", "set_add_stronger", "set_sign_in_limits",
 		// DNS hardening (F1).
-		"enable_domain_dnssec"} {
+		"enable_domain_dnssec",
+		// VPN (§15.10).
+		"remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach"} {
 		if byName[n].Class != ClassDestructive {
 			t.Errorf("tool %s: class %q, want D", n, byName[n].Class)
 		}
@@ -333,13 +352,15 @@ func TestToolParity(t *testing.T) {
 		// DNS hardening (F1).
 		"get_domain_dns", "get_main_dns", "domain_op",
 		// Rootless Podman (P3).
-		"get_runtime"} {
+		"get_runtime",
+		// VPN (§15.10).
+		"get_vpn", "list_vpn_devices"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}
 	}
 	// The tools of every part are all there.
-	for _, n := range append(append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...), adminSignIn...) {
+	for _, n := range append(append(append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...), adminSignIn...), adminVPN...) {
 		if _, ok := byName[n]; !ok {
 			t.Errorf("tool %s is not registered", n)
 		}

@@ -435,6 +435,9 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
+// MarshalYAML writes the duration string (UnmarshalYAML reads it back).
+func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
+
 // MarshalJSON writes the duration string.
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(time.Duration(d).String()) }
 
@@ -538,14 +541,23 @@ const (
 	// on_change; §13.8, §15.5), never by the settings delivery engine.
 	// Never combined with another trigger.
 	HookAI = "ai"
+	// HookVPN: run only by the VPN machinery (a provider's identity and
+	// dns hooks, contract §3.3, §13.8), never by the settings delivery
+	// engine. Never combined with another trigger.
+	HookVPN = "vpn"
 )
 
 // HookTriggers are the accepted hooks[].when values.
-var HookTriggers = map[string]bool{HookStart: true, HookSettingsChange: true, HookMembershipChange: true, HookCredentialChange: true, HookAI: true}
+var HookTriggers = map[string]bool{HookStart: true, HookSettingsChange: true, HookMembershipChange: true, HookCredentialChange: true, HookAI: true, HookVPN: true}
 
 // IsAI reports whether h is an ai hook (when: [ai]): the settings
 // delivery engine never builds its input nor runs it.
 func (h *Hook) IsAI() bool { return contains(h.When, HookAI) }
+
+// IsVPN reports whether h is a vpn hook (when: [vpn]): only the VPN
+// provider machinery runs it; the settings delivery engine never builds
+// its input nor runs it.
+func (h *Hook) IsVPN() bool { return contains(h.When, HookVPN) }
 
 // Claim JSON types.
 var claimJSONTypes = map[string]bool{"int": true, "string": true, "bool": true, "json": true}
@@ -988,15 +1000,18 @@ func (v *specCheck) hooks() error {
 			return fmt.Errorf("%s: user contains control characters", w)
 		}
 		if len(h.When) == 0 {
-			return fmt.Errorf("%s: when must list at least one trigger (start, settings_change, membership_change, credential_change, ai)", w)
+			return fmt.Errorf("%s: when must list at least one trigger (start, settings_change, membership_change, credential_change, ai, vpn)", w)
 		}
 		for _, tr := range h.When {
 			if !HookTriggers[tr] {
-				return fmt.Errorf("%s: when %q must be start, settings_change, membership_change, credential_change or ai", w, tr)
+				return fmt.Errorf("%s: when %q must be start, settings_change, membership_change, credential_change, ai or vpn", w, tr)
 			}
 		}
 		if h.IsAI() && len(h.When) != 1 {
 			return fmt.Errorf("%s: when: ai can't be combined with another trigger (an ai hook is run only by the AI machinery): write exactly when: [ai]", w)
+		}
+		if h.IsVPN() && len(h.When) != 1 {
+			return fmt.Errorf("%s: vpn can't be combined with other triggers", w)
 		}
 		if h.Timeout < 0 || time.Duration(h.Timeout) > HookMaxTimeout {
 			return fmt.Errorf("%s: timeout %s must be between 0 (default %s) and %s", w, time.Duration(h.Timeout), HookDefaultTimeout, HookMaxTimeout)
@@ -1020,6 +1035,9 @@ func (v *specCheck) reload() error {
 		}
 		if v.hooks_[r.Hook].IsAI() {
 			return fmt.Errorf("reload: hook %s is an ai hook (when: [ai]): the settings engine never runs it", r.Hook)
+		}
+		if v.hooks_[r.Hook].IsVPN() {
+			return fmt.Errorf("reload: hook %s is a vpn hook (when: [vpn]): the settings engine never runs it", r.Hook)
 		}
 	default:
 		if !v.services[r.Service] {
@@ -1672,6 +1690,9 @@ func (v *specCheck) deliveries(o *Option) error {
 			}
 			if v.hooks_[d.Hook].IsAI() {
 				return fmt.Errorf("hook %s is an ai hook (when: [ai]): no option delivers to it", d.Hook)
+			}
+			if v.hooks_[d.Hook].IsVPN() {
+				return fmt.Errorf("hook %s is a vpn hook (when: [vpn]): no option delivers to it", d.Hook)
 			}
 		}
 	}

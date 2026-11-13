@@ -417,7 +417,7 @@ func TestSetAISupportOn(t *testing.T) {
 	for _, want := range []string{
 		"  tok-mcp:\n    scale: 1\n    networks:\n      default: {}\n      portcullis-proxy:\n        aliases:\n          - \"portcullis-mcp-aiapp--tok\"\n",
 		`"` + tokOverrideMCP + "rule\": \"Host(`aiapp.example.com`) && (Path(`/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp`))\"",
-		`"` + tokOverrideMCP + `entrypoints": "websecure"`,
+		`"` + tokOverrideMCP + `entrypoints": "websecure,vpnsecure"`,
 		`"` + tokOverrideMCP + `tls.options": "authaware@file"`,
 		`"` + tokOverrideMCP + `service": "mcp-gate@docker"`,
 		`"` + tokOverrideMCP + `middlewares": "rate-limit@file,security-headers@file"`,

@@ -67,7 +67,7 @@ func TestBuildV6(t *testing.T) {
 	in := input(t, apps)
 	in.People = map[string][]signin.Method{"Alice": {signin.SecurityKey, signin.PasskeySynced, signin.Password}, "bob": {}}
 	doc := Build(in)
-	if doc.Version != 6 || doc.Default != "standard" || doc.AddStronger {
+	if doc.Version != 7 || doc.Default != "standard" || doc.AddStronger {
 		t.Errorf("version %d default %q add_stronger %v", doc.Version, doc.Default, doc.AddStronger)
 	}
 	if want := []string{"passkey_device", "passkey_synced", "security_key", "yubikey_cert"}; !reflect.DeepEqual(doc.Methods, want) {
@@ -229,8 +229,8 @@ func TestWrite(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if raw["version"] != float64(6) {
-		t.Errorf("version = %v, want 6", raw["version"])
+	if raw["version"] != float64(7) {
+		t.Errorf("version = %v, want 7", raw["version"])
 	}
 	for _, k := range []string{"templates", "hosts", "core", "people", "groups", "path_groups", "public_paths"} {
 		if _, ok := raw[k].(map[string]interface{}); !ok {
@@ -301,14 +301,14 @@ func TestBuildPublicPaths(t *testing.T) {
 			PublicHosts: map[string]string{"wide-admin." + domain: "wide-admin." + domain}, Public: cloud},
 	}
 	doc := Build(input(t, apps))
-	if doc.Version != 6 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths[cloudHost], *cloud) {
+	if doc.Version != 7 || len(doc.PublicPaths) != 1 || !reflect.DeepEqual(doc.PublicPaths[cloudHost], *cloud) {
 		t.Errorf("public_paths = %+v (version %d)", doc.PublicPaths, doc.Version)
 	}
 	if doc.Groups[goneHost] != DenyGroup {
 		t.Errorf("deny app lost its deny group: %v", doc.Groups)
 	}
 	raw, _ := json.Marshal(doc)
-	for _, want := range []string{`"version":6`, `"paths":[{"path":"/s/{token}","match":"prefix"},{"path":"/dist","match":"static"}]`,
+	for _, want := range []string{`"version":7`, `"paths":[{"path":"/s/{token}","match":"prefix"},{"path":"/dist","match":"static"}]`,
 		`"credential_cookies":["nc_token"]`, `"credential_query":[]`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("policy file lacks %s: %s", want, raw)
@@ -351,8 +351,8 @@ func TestPolicyFileExpiring(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if parsed["version"] != float64(6) {
-		t.Errorf("version = %v, want 6", parsed["version"])
+	if parsed["version"] != float64(7) {
+		t.Errorf("version = %v, want 7", parsed["version"])
 	}
 
 	expiring, ok := parsed["expiring"].([]interface{})
@@ -408,7 +408,7 @@ func TestBuildContractExample(t *testing.T) {
 	json.Unmarshal(raw, &got)
 	want := map[string]any{}
 	if err := json.Unmarshal([]byte(`{
-  "version": 6,
+  "version": 7,
   "methods": ["passkey_device", "passkey_synced", "security_key", "yubikey_cert"],
   "templates": {
     "standard": {"op": "any", "items": [
@@ -437,7 +437,8 @@ func TestBuildContractExample(t *testing.T) {
   },
   "path_groups": {"passwords.portcullis.example.com": [{"prefix": "/admin", "group": "admin_vaultwarden"}]},
   "public_paths": {},
-  "expiring": []
+  "expiring": [],
+  "vpn": {"hosts": {}, "server_mode": false, "admin_only": false, "public_enrol": true, "devices_file": "vpn.json"}
 }`), &want); err != nil {
 		t.Fatal(err)
 	}

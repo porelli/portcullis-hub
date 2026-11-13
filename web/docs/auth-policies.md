@@ -243,6 +243,11 @@ top bar, **Sign-in methods** on the portal, and every "Set up …" and
   your methods meets it (✓ / ✗, or ? while Portcullis doesn't know your
   methods).
 - **Sign-in history** ([below](#sign-in-history)).
+- **VPN devices**: your devices on every Portcullis VPN (name, VPN, address,
+  online), read-only, with a link to `https://people.<domain>/vpn/` where you
+  add, renew, rename and remove built-in ones ([VPN-only access](vpn.md#devices-on-the-built-in-vpn)).
+  On People → person → **Sign-in**, administrators and holders of
+  `sign_in_help` see the same card with **Remove** on built-in devices.
 
 While an administrator is [signed in as you](#signing-in-as-someone-else),
 the page shows everything but offers no action, and says "Changes are off
@@ -742,6 +747,50 @@ step-up or needs-stronger page. A session opened with a since-revoked
 certificate, or replayed from a browser without it, stops meeting such a
 template at once. See
 [Certificates](../setup/certificates.md#certificate-binding-group-gate).
+
+## VPN-only apps
+
+A [VPN-only](vpn.md) app or core page needs everything above **and** a
+Portcullis VPN. The VPN is an extra condition, never a sign-in method or a
+factor: it never counts as any method, never meets a template, never skips or
+silences a step-up, and a VPN app's own sign-in (Headscale's OIDC) never
+stands in for the Portcullis sign-in. Fresh sign-ins (adding a VPN device
+included) work as anywhere else.
+
+**The binding.** group-gate checks the VPN after the identity checks and
+**before** the group checks, only on its VPN paths (routers on Traefik's
+`vpnsecure`):
+
+1. **The provider.** The client address (the last `X-Forwarded-For`
+   entry, which Traefik sets from the connection's PROXY v2 source; IPv4
+   only) lies in exactly one provider's ranges, the app's *Through* accepts
+   that provider, and its device list is fresh.
+2. **A device of that provider** with that address, unexpired (for the
+   built-in VPN, with its unexpired peer). A device of another provider never
+   counts.
+3. **The owner.** The device's owner is the signed-in person (the LLDAP
+   username, lowercased).
+
+| Fails at | Page (`403`) |
+|----------|--------------|
+| no VPN address, a provider *Through* doesn't accept, no such device, no valid device list | "This app is only reachable over a Portcullis VPN. Connect your device and reload." |
+| a stale device list | "your VPN's device list is out of date; try again in a minute" |
+| someone else's device | "this device isn't yours; sign in on your own device" (the owner is never named) |
+
+Then come the group checks (a non-member gets the plain group `403`) and the
+template. A request through a VPN to an app that is reachable from the
+internet needs no binding. group-gate's reasons (metric labels and log values)
+are `vpn_not_vpn`, `vpn_stale`, `vpn_via`, `vpn_unknown_device`,
+`vpn_expired`, `vpn_other_owner` and `vpn_no_doc`; for a request that passed the
+binding, group-gate's opened log (the source of the
+[sign-in history](#sign-in-history)) adds `via: "vpn"`, the provider and the
+device id. A VPN-only app's public links (no
+signed-in person) check steps 1 and 2 only; in server mode, the public links
+of an instance with *Public links stay on the internet* skip the VPN.
+
+The MCP endpoints never go through group-gate: in the `admin` and `server`
+modes they answer only over a VPN but aren't bound to the device's owner, and
+the MCP OAuth token is still required.
 
 ## Troubleshooting
 

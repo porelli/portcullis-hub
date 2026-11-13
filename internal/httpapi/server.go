@@ -136,6 +136,8 @@ func (s *Server) hubMux() *recordingMux {
 	// Confirmations of admin tools (contract §15.6, G12): the same two
 	// routes as the people listener's, for this listener's confirmations.
 	s.registerConfirm(mux)
+	// VPN admin (contract §11; Hub listener only).
+	s.registerVPN(mux)
 	return mux
 }
 
@@ -183,6 +185,9 @@ func (s *Server) peopleMux() *recordingMux {
 	mux.HandleFunc("/static/", s.handlePeopleStatic)
 	s.registerDirectory(mux)
 	s.registerPeopleApps(mux)
+	// The VPN page and People → person's VPN devices (contract §5.1,
+	// §9.7): people listener only.
+	s.registerVPNPeople(mux)
 	return mux
 }
 

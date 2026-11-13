@@ -176,6 +176,9 @@ type freshAuthSetup struct {
 	// page's "+ Add" for passkeys and security keys).
 	AccountURL                   string
 	HubRedirectURI, HubWebOrigin string
+	// VPNRedirectURI: the VPN page's (https://people.<d>/vpn/, contract
+	// §8 per-host model: people → {/signin, /vpn/}, hub → {/}).
+	VPNRedirectURI string
 }
 
 func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (freshAuthSetup, error) {
@@ -199,8 +202,17 @@ func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (f
 		WebOrigin:      "https://people." + domain,
 		HubRedirectURI: "https://hub." + domain + "/",
 		HubWebOrigin:   "https://hub." + domain,
+		VPNRedirectURI: "https://people." + domain + "/vpn/",
 	}, nil
 }
+
+// redirectURIs are the fresh-auth client's redirect URIs and webOrigins
+// its web origins, one per host (contract §8 per-host model).
+func (fa freshAuthSetup) redirectURIs() []string {
+	return []string{fa.RedirectURI, fa.VPNRedirectURI, fa.HubRedirectURI}
+}
+
+func (fa freshAuthSetup) webOrigins() []string { return []string{fa.WebOrigin, fa.HubWebOrigin} }
 
 // verifierConfigs is each listener's fresh-auth verifier config: the
 // people listener's redirect URI is https://people.<d>/signin (the Sign-in
@@ -208,7 +220,7 @@ func freshAuthFromEnv(getenv func(string) string, domain, keycloakURL string) (f
 // https://hub.<d>/ (contract §8).
 func (fa freshAuthSetup) verifierConfigs(httpc *http.Client, accepted func() []string) map[string]freshauth.Config {
 	out := map[string]freshauth.Config{}
-	for listener, redirect := range map[string]string{hub.ListenerPeople: fa.RedirectURI, hub.ListenerHub: fa.HubRedirectURI} {
+	for listener, redirect := range map[string]string{hub.ListenerPeople: fa.RedirectURI, hub.ListenerHub: fa.HubRedirectURI, hub.ListenerPeopleVPN: fa.VPNRedirectURI} {
 		out[listener] = freshauth.Config{
 			Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
 			AuthorizeURL: fa.AuthorizeURL, RedirectURI: redirect,
@@ -227,6 +239,12 @@ func main() {
 	// container (contract §6). First, before any Hub configuration is read.
 	if len(os.Args) > 1 && os.Args[1] == "folderfix" {
 		os.Exit(folderfix.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	// `hub vpn …`: the host control socket's clients (contract §16), run
+	// inside the Hub container by `./portcullis vpn …`. Before any Hub
+	// configuration is read.
+	if len(os.Args) > 1 && os.Args[1] == "vpn" {
+		os.Exit(vpnMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
 	// `hub signin reset-core`: the CLI's lockout recovery (contract §8.1),
 	// run against the data directory while the Hub is stopped. Before the
@@ -283,6 +301,14 @@ func main() {
 		// group-gate's opened log (contract §8.2): <dir>/opened, read for
 		// the sign-in history and pruned to history_days.
 		GroupGateDataDir: env("HUB_GROUP_GATE_DATA_DIR", "/group-gate-data"),
+		// wg's status.json (contract §16; core mounts wg_data read-only).
+		VPNStatusFile: env("HUB_VPN_STATUS_FILE", hub.DefaultVPNStatusFile),
+		// vpn.json goes to the vpn_doc volume (never hub_data), group
+		// shared only with wg and group-gate (contract §4, §16).
+		VPNDocDir: env("HUB_VPN_DOC_DIR", hub.DefaultVPNDocDir),
+	}
+	if cfg.VPNDocGID, err = vpnDocGIDFromEnv(os.Getenv); err != nil {
+		log.Fatalf("refusing to start: %v", err)
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
@@ -464,8 +490,10 @@ func main() {
 	// Per-instance AI support (contract §8): the mcp:* scopes.
 	h.SetAIKeycloak(kc)
 	h.SetImpersonationKeycloak(kc)
+	// VPN providers' oidc_sub owners (contract §3.3).
+	h.SetVPNKeycloak(kc)
 	h.SetFreshAuthClient(func(ctx context.Context) error {
-		return kc.EnsureFreshAuthClient(ctx, []string{fa.RedirectURI, fa.HubRedirectURI}, []string{fa.WebOrigin, fa.HubWebOrigin})
+		return kc.EnsureFreshAuthClient(ctx, fa.redirectURIs(), fa.webOrigins())
 	})
 	// Keycloak's events config (contract §8): the sign-in history's
 	// source, kept history_days; re-asserted in the directory sync loop
@@ -532,6 +560,10 @@ func main() {
 	go h.RunHistoryPrune(ctx, 24*time.Hour)
 	// Impersonations: expiry, not used, the file every minute (D41, D37).
 	go h.RunImpersonationExpiry(ctx, 5*time.Second)
+	// VPN providers: identity and dns hooks when due, vpn.json (§16).
+	go h.RunVPNMaps(ctx, 5*time.Second)
+	// Built-in VPN devices: expiry and revocation (V26).
+	go h.RunVPNExpiry(ctx, 10*time.Second)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak
@@ -573,6 +605,14 @@ func main() {
 		log.Printf("MCP listener on %s (mcp-gate only)", mcp.addr)
 	} else {
 		log.Printf("MCP listener not started: %s is missing — AI support is off", mcp.file)
+	}
+	// The host control socket (contract §16): Unix socket only, 0600.
+	if hl, err := httpapi.ListenHost(hostSocket); err != nil {
+		log.Printf("host control socket not started: %v (./portcullis vpn add-device and friends won't work)", err)
+	} else {
+		hs := &http.Server{Handler: httpapi.HostHandler(h), ReadHeaderTimeout: 10 * time.Second}
+		go hs.Serve(hl)
+		go func() { <-ctx.Done(); hs.Close() }()
 	}
 	go func() {
 		<-ctx.Done()
@@ -699,6 +739,7 @@ type directoryHub interface {
 	TriggerDirectorySync()
 	TriggerCredentialCheck()
 	MarkInventoryStale()
+	TriggerVPNPublish()
 }
 
 // wireDirectoryHooks sets dir's OnChange and OnEvaluated (both
@@ -716,6 +757,25 @@ func wireDirectoryHooks(dir *directory.Service, h directoryHub) {
 		h.MarkInventoryStale()
 		h.TriggerDirectorySync()
 		h.TriggerCredentialCheck()
+		// A person left, was disabled or re-created: their devices drop
+		// out of vpn.json (contract §16).
+		h.TriggerVPNPublish()
 	}
 	dir.OnEvaluated = h.TriggerCredentialCheck
+}
+
+// vpnDocGIDFromEnv is HUB_VPN_DOC_GID (default hub.DefaultVPNDocGID):
+// vpn.json's group, an integer 1–65535 other than the Hub's own group
+// 10001 (wg must never get the Hub's group); anything else refuses the
+// start.
+func vpnDocGIDFromEnv(getenv func(string) string) (int, error) {
+	raw := getenv("HUB_VPN_DOC_GID")
+	if raw == "" {
+		return hub.DefaultVPNDocGID, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 65535 || n == 10001 || strconv.Itoa(n) != raw {
+		return 0, fmt.Errorf("HUB_VPN_DOC_GID must be a group id 1–65535 other than 10001 (the Hub's own group)")
+	}
+	return n, nil
 }

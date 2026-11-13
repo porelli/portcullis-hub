@@ -34,7 +34,11 @@ const proxyNetwork = "portcullis-proxy"
 // file: the Hub renders portcullis-auth-ext and the
 // portcullis-oauth2-<id>_<router> sign-in routers to forward-auth-ext on
 // extra-domain hosts itself.
-var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix}
+// portcullis-vpn* (the VPN network, the portcullis-vpnallow-<id>
+// middlewares and portcullis-vpnonly-<id> routers, contract §3.3) is the
+// Hub's too, with no exception (core's forwarder image is
+// ghcr.io/porelli/portcullis-forwarder, which doesn't match).
+var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix, VPNReservedPrefix}
 
 // coreServices are the services of core's docker-compose.yml (all
 // profiles), coreVolumes its volume keys (Docker names
@@ -43,10 +47,13 @@ var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcull
 var (
 	coreServices = set("socket-proxy-traefik", "socket-proxy-hub", "traefik", "postgres", "vault", "lldap", "keycloak",
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "dns-tool", "prometheus", "alertmanager", "blackbox",
-		"textfile-exporter", "grafana", "mcp-gate", "sessions")
+		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
-		"group_gate_data")
+		"group_gate_data", "wg_data", "vpn_doc")
+	// coreAliases are core's network aliases that aren't service names
+	// (wg's metrics address on portcullis): reserved DNS names too.
+	coreAliases = set("wg-metrics")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
@@ -60,7 +67,7 @@ func reservedDNSName(name string) bool {
 	n := strings.TrimSuffix(FoldKey(strings.TrimSpace(name)), ".")
 	first, _, _ := strings.Cut(n, ".")
 	for _, c := range []string{n, first} {
-		if coreServices[c] {
+		if coreServices[c] || coreAliases[c] {
 			return true
 		}
 		if m := coreContainerRe.FindStringSubmatch(c); m != nil && coreServices[m[1]] {
@@ -248,6 +255,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 		low, bare := FoldKey(s), FoldKey(withoutInterp(s))
 		for _, r := range reservedRefs {
 			if strings.Contains(low, r) || strings.Contains(bare, r) {
+				if r == VPNReservedPrefix {
+					return fmt.Errorf("compose.yml references %q: names starting %s (the VPN network, middlewares and routers) are rendered by the Hub only (contract §3.3)", VPNReservedPrefix, VPNReservedPrefix)
+				}
 				if r == MCPNamePrefix {
 					return fmt.Errorf("compose.yml references %q: names starting %s (routers, services, middlewares, aliases, container names, hostnames) are the Hub's AI companion routes and aliases (contract §3.2)", MCPNamePrefix, MCPNamePrefix)
 				}
@@ -720,6 +730,13 @@ func checkServiceLabels(svc string, pairs map[string]string, hostVars map[string
 		if err := checkCoreReferences(svc, k, v, own); err != nil {
 			return err
 		}
+		// A router's entrypoints are exactly websecure: the Hub's override
+		// adds vpnsecure per reach (contract §3); a template router on
+		// vpnsecure would skip the VPN-only rendering.
+		if m := routerLabelRe.FindStringSubmatch(lk); m != nil && m[3] == "entrypoints" && strings.TrimSpace(v) != "websecure" {
+			// The templates validator's text exactly (shared vectors).
+			return fmt.Errorf("router %s: entrypoints must be 'websecure'", m[2])
+		}
 		// Traefik label keys as ParseRoutes matches them (Traefik itself is
 		// case-insensitive, so `Traefik.http…`, ` traefik.http…` or a
 		// `…Rule` would route unparsed): no surrounding whitespace, the
@@ -815,8 +832,10 @@ var (
 	// both, or merges them).
 	coreTraefikNames = map[string]map[string]bool{
 		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
-			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp"),
-		"middlewares": set("directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
+			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp", "people-vpn-enrol",
+			"core-vpn-required", "dashboard-vpn", "grafana-metrics-vpn", "hub-vpn", "keycloak-admin-vpn", "keycloak-admin-vpn-required",
+			"people-vpn", "people-vpn-enrol-vpn", "portal-vpn"),
+		"middlewares": set("vpn-required-path", "portcullis-groups-vpn", "portcullis-public-guard-vpn", "portal-vpn-path", "directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
 		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate"),
 	}
@@ -988,7 +1007,7 @@ func checkComposeKeys(doc map[string]interface{}) error {
 // @file objects under traefik/dynamic/local.
 var (
 	appMiddlewares  = set("portcullis-auth", "portcullis-groups")
-	fileMiddlewares = set("client-headers", "client-cert-pem", "rate-limit", "rate-limit-auth", "security-headers")
+	fileMiddlewares = set("client-headers", "client-cert-pem", "rate-limit", "rate-limit-auth", "security-headers", "strip-client-forwarded")
 )
 
 // chainLabelRe: a chain middleware's member list (folded key).

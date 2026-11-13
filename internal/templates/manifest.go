@@ -208,6 +208,9 @@ type Manifest struct {
 	// AI is the ai: block (contract §3.2), required: AI support through
 	// companions (ai.mcp) or why there is none (ai.unsupported).
 	AI *AI `yaml:"ai" json:"ai,omitempty"`
+	// VPN is the optional vpn: block (contract §3.3): the template can be
+	// wired as a VPN provider.
+	VPN *VPN `yaml:"vpn" json:"vpn,omitempty"`
 	// Jobs are compose services that run once and exit (contract §3
 	// "One-off jobs"); JobServices adds the service_completed_successfully
 	// dependencies.

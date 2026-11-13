@@ -35,7 +35,7 @@ type FreshAuth interface {
 // that listener is refused). One readiness gate (freshAuthReady) covers
 // both: they share the one Keycloak client.
 func (h *Hub) SetFreshAuth(listener string, f FreshAuth) {
-	if listener != ListenerHub && listener != ListenerPeople {
+	if listener != ListenerHub && listener != ListenerPeople && listener != ListenerPeopleVPN {
 		panic("SetFreshAuth: unknown listener " + listener)
 	}
 	h.mu.Lock()

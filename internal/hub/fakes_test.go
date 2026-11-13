@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -166,14 +167,17 @@ func (f *fakeRunner) Overlaps() []string {
 
 // fakeEngine serves canned containers/logs/exec results.
 type fakeEngine struct {
-	mu         sync.Mutex
-	containers []docker.Container
-	listErr    error
-	logs       map[string]string
-	execCmd    []string
-	execID     string
-	execRes    *docker.ExecResult
-	ve         *volumeEngine
+	mu sync.Mutex
+	// networks / networksErr: ListNetworks' answer.
+	networks    []docker.Network
+	networksErr error
+	containers  []docker.Container
+	listErr     error
+	logs        map[string]string
+	execCmd     []string
+	execID      string
+	execRes     *docker.ExecResult
+	ve          *volumeEngine
 	// kills: "<container>:<signal>" per ContainerKill; killHook runs in
 	// it; states overrides a container's ContainerState (default: its
 	// listed state, no healthcheck).
@@ -1591,6 +1595,15 @@ func (e *fakeEngine) InspectContainer(ctx context.Context, id string) (docker.Co
 		return docker.ContainerInfo{}, errNoSuchContainer
 	}
 	return ci, nil
+}
+
+func (e *fakeEngine) ListNetworks(ctx context.Context) ([]docker.Network, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.networksErr != nil {
+		return nil, e.networksErr
+	}
+	return slices.Clone(e.networks), nil
 }
 
 func (e *fakeEngine) SecurityOptions(ctx context.Context) ([]string, error) {

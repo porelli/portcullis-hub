@@ -73,6 +73,8 @@ type Finding struct {
 	Paths     []string `json:"paths,omitempty"`
 	// Domains: the domain names a DNS finding concerns (DNS hardening).
 	Domains []string `json:"domains,omitempty"`
+	// Persons: the people a finding is for (VPN: vpn_expiring's owner).
+	Persons []string `json:"persons,omitempty"`
 	Class   FixClass `json:"fix_class,omitempty"`
 	FixKind string   `json:"fix_kind,omitempty"`
 	// MoreFixes: other one-click fixes the finding offers besides FixKind
@@ -250,6 +252,8 @@ type Inputs struct {
 	// Engine: the container engine (engine.go, rootless Podman; nil = no
 	// guard: the engine kinds never fire).
 	Engine *EngineIn
+	// VPN: the VPN kinds' inputs (vpn.go; nil = none fire).
+	VPN *VPNIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify

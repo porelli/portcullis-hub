@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
@@ -31,11 +32,37 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, s state.InstanceSett
 	if err != nil {
 		return err
 	}
+	key := h.vpnRenderKeyLocked(t)
 	if content == "" {
-		os.Remove(h.overridePath(t.ID))
-		return nil
+		if err := os.Remove(h.overridePath(t.ID)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if err := h.writeOverride(h.overridePath(t.ID), []byte(content)); err != nil {
+		return err
 	}
-	return fsutil.WriteFileAtomic(h.overridePath(t.ID), []byte(content), 0600)
+	// Commit after success only: a failed write is retried
+	// (vpnRangesChanged).
+	h.vpnrt.mu.Lock()
+	if prev, ok := h.vpnrt.rendered[t.ID]; !ok || prev != key {
+		h.vpnrt.rendered[t.ID] = key
+		h.saveVPNRenderedLocked()
+	}
+	// A render that succeeded ends a fail-closed state (M17).
+	if f := h.vpnrt.renderFail[t.ID]; f != nil && f.closing {
+		f.next = time.Time{}
+	}
+	h.vpnrt.mu.Unlock()
+	return nil
+}
+
+// writeOverride writes an override file (a variable seam for tests).
+func (h *Hub) writeOverride(path string, b []byte) error {
+	if h.testOverrideWriteErr != nil {
+		if err := h.testOverrideWriteErr(path); err != nil {
+			return err
+		}
+	}
+	return fsutil.WriteFileAtomic(path, b, 0600)
 }
 
 // mountSourceLocked is a path option value's host directory: a shared
@@ -219,6 +246,23 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	if len(rl.mcpLabels) > 0 {
 		services[rl.mcpService] = true
 	}
+	if len(rl.vpnLabels) > 0 {
+		services[rl.vpnService] = true
+	}
+	// A wired VPN provider's gateway attachment (contract §3.3): the
+	// ingress joins portcullis-vpn at its address; it and the services in
+	// its network namespace get PORTCULLIS_VPN_EDGE.
+	vpnGW := h.vpnAttachLocked(t)
+	if serviceEnv == nil && len(vpnGW.env) > 0 {
+		serviceEnv = map[string][]string{}
+	}
+	for svc, line := range vpnGW.env {
+		services[svc] = true
+		serviceEnv[svc] = append(serviceEnv[svc], line)
+	}
+	if vpnGW.ingress != "" {
+		services[vpnGW.ingress] = true
+	}
 	// Companion services: scale, the alias on portcullis-proxy (§3.2).
 	companionSvcs := h.companionServicesLocked(t)
 	for svc := range companionSvcs {
@@ -286,6 +330,13 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 				}
 			}
 		}
+		if svc == vpnGW.ingress {
+			b.WriteString("    networks:\n")
+			for _, n := range vpnGW.networks {
+				fmt.Fprintf(&b, "      %s: {}\n", yamlQuote(n))
+			}
+			fmt.Fprintf(&b, "      %s:\n        ipv4_address: %s\n", vpnNetwork, vpnGW.addr)
+		}
 		if replaced != nil {
 			if labels := replaced[svc]; len(labels) > 0 {
 				b.WriteString("    labels: !override\n")
@@ -304,10 +355,14 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 		public := plan != nil && svc == plan.Service && len(publicLines) > 0
 		signIn := svc == rl.signInService && len(rl.signInLabels) > 0
 		mcp := svc == rl.mcpService && len(rl.mcpLabels) > 0
-		if len(routers) > 0 || public || signIn || mcp {
+		vpnL := svc == rl.vpnService && len(rl.vpnLabels) > 0
+		if len(routers) > 0 || public || signIn || mcp || vpnL {
 			b.WriteString("    labels:\n")
 			for _, r := range routers {
 				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, tier)
+				if ep, ok := rl.entrypoints[r]; ok {
+					fmt.Fprintf(&b, "      traefik.http.routers.%s.entrypoints: %s\n", r, ep)
+				}
 				if mw, ok := rl.middlewares[r]; ok {
 					fmt.Fprintf(&b, "      traefik.http.routers.%s.middlewares: %s\n", r, mw)
 				}
@@ -332,12 +387,20 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 					fmt.Fprintf(&b, "      %s: %s\n", yamlQuote(k), yamlQuote(rl.mcpLabels[k]))
 				}
 			}
+			if vpnL {
+				for _, k := range slices.Sorted(maps.Keys(rl.vpnLabels)) {
+					fmt.Fprintf(&b, "      %s: %s\n", yamlQuote(k), yamlQuote(rl.vpnLabels[k]))
+				}
+			}
 		}
 	}
 	// Volume names (§11.2), multi templates only (they declare none): the
 	// default instance gets portcullis_<key>, others portcullis_<id>-<key>.
 	// A single template's volumes stay exactly as compose names them.
 	multiVols := t.Manifest.Multi() && len(t.Volumes) > 0
+	if vpnGW.ingress != "" {
+		fmt.Fprintf(&b, "networks:\n  %s:\n    external: true\n    name: %s\n", vpnNetwork, vpnNetwork)
+	}
 	if multiVols || len(secretOpts) > 0 {
 		b.WriteString("volumes:\n")
 	}
@@ -390,11 +453,22 @@ func hubLabels(rl *routeLabels) (map[string]map[string]string, error) {
 		m := map[string]string{}
 		for _, r := range routers {
 			m["traefik.http.routers."+r+".tls.options"] = rl.tier
+			if ep, ok := rl.entrypoints[r]; ok {
+				m["traefik.http.routers."+r+".entrypoints"] = ep
+			}
 			if mw, ok := rl.middlewares[r]; ok {
 				m["traefik.http.routers."+r+".middlewares"] = mw
 			}
 		}
 		out[svc] = m
+	}
+	if len(rl.vpnLabels) > 0 {
+		if out[rl.vpnService] == nil {
+			out[rl.vpnService] = map[string]string{}
+		}
+		for k, v := range rl.vpnLabels {
+			out[rl.vpnService][k] = v
+		}
 	}
 	if len(rl.signInLabels) > 0 {
 		if out[rl.signInService] == nil {
@@ -485,6 +559,17 @@ type routeLabels struct {
 	// the first compose service with traefik.enable=true (contract §5).
 	mcpService string
 	mcpLabels  map[string]string
+	// entrypoints: every HTTP router of the template → its entrypoints
+	// (contract §5: websecure,vpnsecure, or vpnsecure for a VPN-only
+	// instance's routers but its provider control routers). vpnLabels
+	// are the allowlist middleware and the friendly router (full keys) on
+	// vpnService. vpnOnly: the instance renders VPN-only; publicVPN: its
+	// public router too (not with the server-mode public-links opt-in).
+	entrypoints map[string]string
+	vpnService  string
+	vpnLabels   map[string]string
+	vpnOnly     bool
+	publicVPN   bool
 }
 
 // ExtAuthMiddleware is core's forwardAuth middleware for extra-domain
@@ -532,8 +617,15 @@ func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
 	if err := h.mcpRoutersLocked(t, rl); err != nil {
 		return nil, err
 	}
+	if err := h.vpnRoutesLocked(t, rl); err != nil {
+		return nil, err
+	}
 	if pub.Active() {
-		if rl.public, err = publicLabels(t.ID, &t.Manifest, plan, pub.Routed, rl.tier); err != nil {
+		ep, allow := EntrypointsBoth, ""
+		if rl.publicVPN {
+			ep, allow = EntrypointsVPN, VPNAllowMiddleware(t.ID)+"@docker"
+		}
+		if rl.public, err = publicLabels(t.ID, &t.Manifest, plan, pub.Routed, rl.tier, ep, allow); err != nil {
 			return nil, err
 		}
 	}
@@ -645,7 +737,7 @@ func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
 		}
 		k := "traefik.http.routers." + SignInRouterName(t.ID, r) + "."
 		rl.signInLabels[k+"rule"] = rule + " && PathPrefix(`/oauth2/`)"
-		rl.signInLabels[k+"entrypoints"] = "websecure"
+		rl.signInLabels[k+"entrypoints"] = EntrypointsBoth
 		rl.signInLabels[k+"tls.options"] = rl.tier
 		rl.signInLabels[k+"priority"] = prio
 		rl.signInLabels[k+"service"] = "forward-auth-ext@docker"
@@ -759,6 +851,9 @@ func exposureLabel(id, k string, mw bool) bool {
 	// Folded like Traefik's decoder, so an odd-cased key counts too.
 	k = templates.FoldKey(k)
 	return strings.HasPrefix(k, "traefik.http.routers."+PublicRouterName(id)+".") ||
+		strings.HasPrefix(k, "traefik.http.routers."+VPNOnlyPrefix) ||
+		strings.HasPrefix(k, "traefik.http.middlewares."+VPNAllowPrefix) ||
+		(strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".entrypoints")) ||
 		strings.HasPrefix(k, "traefik.http.routers."+templates.MCPNamePrefix) ||
 		strings.HasPrefix(k, "traefik.http.routers."+SignInRouterName(id, "")) ||
 		(mw && strings.HasPrefix(k, "traefik.http.routers.") && strings.HasSuffix(k, ".middlewares")) ||
@@ -812,7 +907,7 @@ func (h *Hub) mcpRoutersLocked(t *templates.Template, rl *routeLabels) error {
 		pp := c.EffectivePublicPath()
 		k := "traefik.http.routers." + templates.MCPAlias(t.ID, c.Name) + "."
 		rl.mcpLabels[k+"rule"] = "Host(`" + host + "`) && (Path(`" + pp + "`) || Path(`/.well-known/oauth-protected-resource" + pp + "`))"
-		rl.mcpLabels[k+"entrypoints"] = "websecure"
+		rl.mcpLabels[k+"entrypoints"] = EntrypointsBoth
 		rl.mcpLabels[k+"tls.options"] = rl.tier
 		rl.mcpLabels[k+"priority"] = prio
 		rl.mcpLabels[k+"service"] = "mcp-gate@docker"

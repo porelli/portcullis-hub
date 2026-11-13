@@ -629,7 +629,7 @@ func TestInstanceDriftRenamedLabels(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if strings.Join(keys, ",") != "traefik.http.routers.grafana-b_grafana-api.tls.options,traefik.http.routers.grafana-b_grafana.tls.options" {
+	if strings.Join(keys, ",") != "traefik.http.routers.grafana-b_grafana-api.entrypoints,traefik.http.routers.grafana-b_grafana-api.tls.options,traefik.http.routers.grafana-b_grafana.entrypoints,traefik.http.routers.grafana-b_grafana.tls.options" {
 		t.Errorf("desired keys = %v", keys)
 	}
 	// A running container carrying exactly those labels is not drift.

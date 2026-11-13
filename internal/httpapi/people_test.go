@@ -123,6 +123,20 @@ var peopleAppRoutes = []string{
 	"GET /impersonation/stop",
 }
 
+// peopleVPNRoutes are the VPN page's seven routes under /vpn/ and People
+// → person's two VPN device routes (contract §5.1, §9.7).
+var peopleVPNRoutes = []string{
+	"GET /vpn/{$}",
+	"GET /vpn/assets/{file}",
+	"GET /vpn/api/devices",
+	"POST /vpn/api/devices",
+	"PUT /vpn/api/devices/{id}",
+	"DELETE /vpn/api/devices/{id}",
+	"POST /vpn/api/devices/{id}/renew",
+	"GET /api/people/{user}/vpn-devices",
+	"DELETE /api/people/{user}/vpn-devices/{id}",
+}
+
 // TestPeopleListenerHasNoAppRoutes: the people mux registers exactly the
 // directory API, peopleAppRoutes, /healthz, the page and its assets —
 // compared as sets of the patterns PeopleHandler registers.
@@ -134,7 +148,7 @@ func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	dir := &recordingMux{ServeMux: http.NewServeMux()}
 	e.s.registerDirectory(dir)
 	want := map[string]bool{"/healthz": true, "/": true, "/static/": true}
-	for _, p := range append(append([]string{}, dir.patterns...), peopleAppRoutes...) {
+	for _, p := range append(append(append([]string{}, dir.patterns...), peopleAppRoutes...), peopleVPNRoutes...) {
 		want[p] = true
 	}
 	got := map[string]bool{}

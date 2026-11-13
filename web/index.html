@@ -825,6 +825,12 @@
       </p>
       <div id="localnets-root"></div>
 
+      <div class="category-title" style="margin: 2rem 0 1rem;">VPN</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        Who may use Portcullis VPNs, how many built-in devices each person may have and for how long, and the VPN providers.
+      </p>
+      <div id="vpn-settings-root"></div>
+
     </div>
   </div>
 
@@ -877,6 +883,7 @@
         PortcullisSignIn.mount(document.getElementById('signin-root')); loadDomains(); loadAISettings();
         PortcullisFolders.render(document.getElementById('folders-root'));
         PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
+        loadVPNSettings(document.getElementById('vpn-settings-root'));
       }
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
@@ -3631,9 +3638,9 @@
 
     // ── the instance page ────────────────────────────────
     const PAGE_TABS = [['overview', 'Overview'], ['settings', 'Settings'], ['groups', 'Groups'], ['filesharing', 'File sharing'], ['logs', 'Logs'],
-      ['backups', 'Backups'], ['ai', 'AI'], ['expert', 'Expert'], ['delete', 'Delete']];
+      ['backups', 'Backups'], ['ai', 'AI'], ['vpn', 'VPN'], ['expert', 'Expert'], ['delete', 'Delete']];
     function pageTabs(inst) {
-      return PAGE_TABS.filter(([k]) => k !== 'filesharing' || templateHasPersonSecret(inst.template));
+      return PAGE_TABS.filter(([k]) => (k !== 'filesharing' || templateHasPersonSecret(inst.template)) && (k !== 'vpn' || templateHasVPN(inst.template)));
     }
     async function openInstancePage(id, tab, opt) {
       if (pageCtx && pageCtx.id !== id && !leavePageOK()) { history.replaceState(null, '', pageHash()); return; }
@@ -3733,6 +3740,7 @@
         case 'logs': loadLogs(id, pane); break;
         case 'backups': loadBackups(pane, id); break;
         case 'ai': loadAITab(id, pane); break;
+        case 'vpn': renderVPNTab(id, pane); break;
         case 'expert':
           ctx.loading = k;
           await loadExpert(id, pane);
@@ -3808,11 +3816,13 @@
       h += '<div class="inst-section"><h4>Addresses</h4>' +
         (hosts.length ? '<p>' + hosts.map(r => '<a class="group-link" href="https://' + escapeHtml(inst.hosts[r]) + '/" target="_blank" rel="noopener noreferrer">' + escapeHtml(inst.hosts[r]) + ' &#8599;</a>').join(' · ') + '</p>' : '') +
         '<div id="inst-hosts-editor"><p class="settings-empty">Loading…</p></div></div>';
+      h += '<div class="inst-section" data-reach-section><h4>Access</h4><div data-reach-box><p class="settings-empty">Loading…</p></div></div>';
       h += '<div class="inst-section"><h4>Containers</h4><div data-pg-containers><p class="settings-empty">Loading…</p></div>' +
         '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-pg-containers-reload>Refresh</button></div></div>';
       h += '<div class="inst-section"><h4>Last operation</h4><div id="inst-lastop"><p class="settings-empty">Loading…</p></div></div>';
       pane.innerHTML = h;
       loadContainers(id, pane);
+      loadReach(id, pane);
       loadInstLastOp(pane.querySelector('#inst-lastop'), inst.id);
       const ed = pane.querySelector('#inst-hosts-editor');
       try {
@@ -4737,6 +4747,191 @@
       box.innerHTML = html;
     }
     loadSourceSync();
+
+
+    // ── VPN (contract §5, §11): an instance's Access (Reachable from /
+    // Through / public links), a provider instance's VPN tab and
+    // Settings → VPN. Every value escaped; delegated listeners. ──
+    function templateHasVPN(tid) {
+      const t = catalogCache && catalogCache[tid];
+      return !!(t && t.manifest && t.manifest.vpn);
+    }
+    async function vpnView() { return apiGet('/api/vpn'); }
+    function vpnLiveIds(v) {
+      const out = [];
+      if (v.builtin) out.push('builtin');
+      for (const p of v.providers || []) if (p.wired) out.push(p.id);
+      return out;
+    }
+    // renderReachSection: Reachable from (internet | vpn), Through (every
+    // provider or a subset; narrowing only) and, in server mode, public
+    // links stay on the internet (instances with public exceptions).
+    async function loadReach(id, pane) {
+      const box = pane.querySelector('[data-reach-box]');
+      if (!box) return;
+      let v;
+      try { v = await vpnView(); } catch (e) { box.innerHTML = '<p class="settings-empty">' + escapeHtml(e.message) + '</p>'; return; }
+      const r = (v.reach || {})[id] || { mode: 'internet', via: [] };
+      const via = r.via && r.via.length ? r.via : ['*'];
+      const ids = vpnLiveIds(v);
+      const label = pid => pid === 'builtin' ? 'Portcullis VPN (built-in)' : ((v.providers || []).find(p => p.id === pid) || {}).label || pid;
+      let h = '<div class="inst-form" data-reach="' + escapeHtml(id) + '">' +
+        '<label class="block" for="reach-mode">Reachable from</label>' +
+        '<select id="reach-mode" data-reach-mode><option value="internet"' + (r.mode !== 'vpn' ? ' selected' : '') + '>the internet (default)</option>' +
+        '<option value="vpn"' + (r.mode === 'vpn' ? ' selected' : '') + '>only Portcullis VPNs</option></select>' +
+        '<div data-reach-through><label class="block">Through</label>' +
+        '<label><input type="checkbox" data-reach-via="*"' + (via.includes('*') ? ' checked' : '') + '> every VPN provider</label>' +
+        ids.map(pid => '<label><input type="checkbox" data-reach-via="' + escapeHtml(pid) + '"' + (via.includes(pid) ? ' checked' : '') + '> ' + escapeHtml(label(pid)) + '</label>').join('') +
+        '</div>';
+      if (v.mode === 'server') {
+        h += '<label><input type="checkbox" data-reach-public-links' + (r.public_links ? ' checked' : '') + '> Public links stay on the internet (server mode)</label>';
+      }
+      if (!ids.length) h += '<p class="settings-empty">No VPN is wired yet: wire a VPN first (Settings → VPN, or a VPN app\'s VPN tab).</p>';
+      h += '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-reach-save="' + escapeHtml(id) + '">Save access</button></div>' +
+        '<small>VPN-only apps answer only on the VPN entrypoint, behind sign-in and the device ↔ person binding. Switching back to the internet widens access.</small>' +
+        '<div data-reach-result></div></div>';
+      box.innerHTML = h;
+    }
+    async function saveReach(id, btn) {
+      const f = btn.closest('[data-reach]');
+      const mode = f.querySelector('[data-reach-mode]').value;
+      let via = Array.from(f.querySelectorAll('[data-reach-via]:checked')).map(c => c.dataset.reachVia);
+      if (via.includes('*')) via = ['*'];
+      const pl = f.querySelector('[data-reach-public-links]');
+      const body = { mode, via: mode === 'vpn' ? via : [], public_links: !!(pl && pl.checked) };
+      const what = mode === 'vpn' ? 'only through ' + (via[0] === '*' ? 'every VPN provider' : via.length ? via.join(', ') : 'no provider (nobody can reach it)') : 'from the internet';
+      if (!confirm('Make ' + id + ' reachable ' + what + '? It restarts.')) return;
+      const out = f.querySelector('[data-reach-result]');
+      try {
+        await apiCall('/api/instances/' + encodeURIComponent(id) + '/reach', 'PUT', body);
+        out.innerHTML = '<div class="inst-ok">Saved: the app restarts with its new access.</div>';
+      } catch (e) { out.innerHTML = errorBox(e); }
+    }
+
+    // renderVPNTab: a VPN app's provider page — Use for Portcullis access,
+    // the refresh, the map (devices, freshness, what was left out and
+    // why), static assignments, the DNS records and their acknowledgement.
+    function renderVPNTab(id, pane) {
+      pane.innerHTML = '<p class="settings-empty">Loading…</p>';
+      vpnView().then(v => {
+        const p = (v.providers || []).find(x => x.id === id);
+        if (!p) { pane.innerHTML = '<p class="settings-empty">This app has no VPN.</p>'; return; }
+        let h = '<div class="inst-section" data-vpn-provider="' + escapeHtml(id) + '"><h4>' + escapeHtml(p.label) + '</h4>' +
+          '<label><input type="checkbox" data-vpn-wire' + (p.wired ? ' checked' : '') + '> Use for Portcullis access</label>' +
+          (p.source === 'hook' ? ' <label>refresh <input type="text" data-vpn-refresh value="' + escapeHtml(p.refresh || '60s') + '" size="6"></label>' : '') +
+          ' <button type="button" class="btn btn-primary btn-sm" data-vpn-act="wire">Save</button>' +
+          '<dl class="inst-facts"><dt>Ranges</dt><dd>' + escapeHtml((p.ranges || []).join(', ')) + '</dd>' +
+          '<dt>Devices</dt><dd>' + escapeHtml(String(p.devices || 0)) + ' (' + escapeHtml(String(p.online || 0)) + ' online)</dd>' +
+          '<dt>Map</dt><dd>' + (p.wired ? (p.stale ? '<span class="pill warn">stale</span>' : '<span class="pill ok">fresh</span>') : 'not wired') +
+          (p.refreshed_at ? ' · refreshed ' + escapeHtml(new Date(p.refreshed_at).toLocaleString()) : '') + '</dd>' +
+          (p.last_error ? '<dt>Last error</dt><dd>' + escapeHtml(p.last_error) + '</dd>' : '') + '</dl>';
+        if ((p.problems || []).length) {
+          h += '<table class="inst-table"><thead><tr><th>Device</th><th>Left out because</th></tr></thead><tbody>' +
+            p.problems.map(d => '<tr><td><code>' + escapeHtml(d.id) + '</code></td><td>' + escapeHtml(d.reason) + '</td></tr>').join('') + '</tbody></table>';
+        }
+        h += '</div>';
+        if (p.source === 'static') {
+          h += '<div class="inst-section" data-vpn-static><h4>Static assignments</h4><table class="inst-table"><thead><tr><th>Address</th><th>Person</th><th>Device</th><th></th></tr></thead><tbody>' +
+            (p.static || []).map(s => '<tr><td><code>' + escapeHtml(s.ip) + '</code></td><td>' + escapeHtml(s.user) + '</td><td>' + escapeHtml(s.name) + '</td>' +
+              '<td><button type="button" class="btn btn-secondary btn-sm" data-vpn-act="unassign" data-vpn-ip="' + escapeHtml(s.ip) + '">Remove</button></td></tr>').join('') +
+            '</tbody></table><div class="inst-row"><input data-vpn-s-ip placeholder="address"> <input data-vpn-s-user placeholder="person"> <input data-vpn-s-name placeholder="device name">' +
+            ' <button type="button" class="btn btn-primary btn-sm" data-vpn-act="assign">Assign</button></div></div>';
+        }
+        h += '<div class="inst-section" data-vpn-dns><h4>DNS</h4>';
+        if (p.dns_manual) {
+          h += '<p>Configure these records in the app by hand, then acknowledge.</p>';
+        } else if (p.dns_error) {
+          h += '<p class="public-warn">The DNS hook failed: ' + escapeHtml(p.dns_error) + '</p>';
+        }
+        h += '<table class="inst-table"><tbody>' + (p.dns_records || []).map(r => '<tr><td><code>' + escapeHtml(r.name) + '</code></td><td>A</td><td><code>' + escapeHtml(r.value) + '</code></td></tr>').join('') + '</tbody></table>';
+        if (p.dns_manual) h += p.dns_acked ? '<p class="settings-empty">Acknowledged.</p>' : '<button type="button" class="btn btn-secondary btn-sm" data-vpn-act="dns-ack">I configured them</button>';
+        h += '</div><div data-vpn-result></div>';
+        pane.innerHTML = h;
+        pane.dataset.vpnReach = JSON.stringify(v.reach || {});
+      }).catch(e => { pane.innerHTML = errorBox(e); });
+    }
+    // vpnOnlyThrough: instances whose Through names only provider id (the
+    // unwire confirmation lists them first: they become unreachable).
+    function vpnOnlyThrough(reach, id) {
+      return Object.keys(reach || {}).filter(k => reach[k].mode === 'vpn' && (reach[k].via || []).length === 1 && reach[k].via[0] === id).sort();
+    }
+    async function vpnTabAct(btn) {
+      const sec = btn.closest('[data-ipane]');
+      const id = pageCtx && pageCtx.id;
+      if (!sec || !id) return;
+      const out = sec.querySelector('[data-vpn-result]');
+      const act = btn.dataset.vpnAct;
+      try {
+        if (act === 'wire') {
+          const wired = sec.querySelector('[data-vpn-wire]').checked;
+          const ref = sec.querySelector('[data-vpn-refresh]');
+          if (!wired) {
+            const dead = vpnOnlyThrough(JSON.parse(sec.dataset.vpnReach || '{}'), id);
+            if (!confirm((dead.length ? 'These apps accept only ' + id + ' and become unreachable: ' + dead.join(', ') + '.\n\n' : '') + 'Stop using ' + id + ' for Portcullis access?')) return;
+          } else if (!confirm('Use ' + id + ' for Portcullis access? Its devices become a way into VPN-only apps (still behind sign-in and bound to their owners).')) return;
+          await apiPut('/api/instances/' + encodeURIComponent(id) + '/vpn-provider', { wired, refresh: ref ? ref.value : '' });
+        } else if (act === 'assign') {
+          const ip = sec.querySelector('[data-vpn-s-ip]').value.trim();
+          const user = sec.querySelector('[data-vpn-s-user]').value.trim();
+          const name = sec.querySelector('[data-vpn-s-name]').value.trim();
+          if (!confirm('Traffic from ' + ip + ' counts as ' + user + '\'s device ' + name + '. Assign it?')) return;
+          await apiCall('/api/instances/' + encodeURIComponent(id) + '/vpn-static/' + encodeURIComponent(ip), 'PUT', { user, name });
+        } else if (act === 'unassign') {
+          await apiCall('/api/instances/' + encodeURIComponent(id) + '/vpn-static/' + encodeURIComponent(btn.dataset.vpnIp), 'DELETE');
+        } else if (act === 'dns-ack') {
+          await apiCall('/api/instances/' + encodeURIComponent(id) + '/vpn-dns/ack', 'POST');
+        }
+        renderVPNTab(id, sec);
+      } catch (e) { if (out) out.innerHTML = errorBox(e); }
+    }
+
+    // loadVPNSettings: Settings → VPN — the users group, devices per
+    // person, the expiry, the providers overview, and the mode and public
+    // enrolment, read-only (set on the host).
+    async function loadVPNSettings(root) {
+      if (!root) return;
+      let v;
+      try { v = await vpnView(); } catch (e) { root.innerHTML = errorBox(e); return; }
+      const s = v.settings || {};
+      const exp = ['30d', '90d', '1y', 'never'];
+      let h = '<dl class="inst-facts"><dt>Mode</dt><dd><code>' + escapeHtml(v.mode) + '</code> · public enrolment ' + (v.public_enrol ? 'on' : 'off') +
+        ' <small>(set on the host: <code>./portcullis vpn mode apps|admin|server</code>)</small></dd>' +
+        '<dt>VPN service</dt><dd>' + (v.wg && v.wg.up ? '<span class="pill ok">up</span>' : '<span class="pill warn">down</span> ' + escapeHtml((v.wg && v.wg.error) || '') + ' <small>(<code>./portcullis vpn init</code>)</small>') + '</dd>' +
+        '<dt>Built-in VPN</dt><dd>' + (v.builtin ? escapeHtml(v.builtin.subnet) + ', port ' + escapeHtml(String(v.builtin.port)) + ', ' + escapeHtml(String(v.builtin.devices)) + ' devices' : 'off') + '</dd>' +
+        ((v.failed_closed || []).length ? '<dt>Stopped (fail closed)</dt><dd>' + escapeHtml(v.failed_closed.join(', ')) + '</dd>' : '') + '</dl>';
+      h += '<div class="inst-form" data-vpn-settings>' +
+        '<label class="block" for="vpn-users-group">VPN users group (empty: every person)</label><input id="vpn-users-group" data-vpn-users-group value="' + escapeHtml(s.users_group || '') + '">' +
+        '<label class="block" for="vpn-dpp">Devices per person</label><input id="vpn-dpp" type="number" min="1" max="100" data-vpn-dpp value="' + escapeHtml(String(s.devices_per_person || 10)) + '">' +
+        '<label class="block" for="vpn-expiry">Device expiry</label><select id="vpn-expiry" data-vpn-expiry>' +
+        exp.map(x => '<option value="' + x + '"' + (s.expiry === x ? ' selected' : '') + '>' + x + '</option>').join('') + '</select>' +
+        '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-vpn-settings-save>Save</button></div><div data-vpn-settings-result></div></div>';
+      h += '<table class="inst-table"><thead><tr><th>Provider</th><th>Source</th><th>Wired</th><th>Ranges</th><th>Devices</th><th>Map</th></tr></thead><tbody>' +
+        (v.providers || []).map(p => '<tr><td><a href="#apps/' + encodeURIComponent(p.id) + '/vpn">' + escapeHtml(p.label) + '</a> <code>' + escapeHtml(p.id) + '</code></td><td>' + escapeHtml(p.source) +
+          '</td><td>' + (p.wired ? 'yes' : 'no') + '</td><td>' + escapeHtml((p.ranges || []).join(', ')) + '</td><td>' + escapeHtml(String(p.devices || 0)) +
+          '</td><td>' + (p.wired ? (p.stale ? 'stale' : 'fresh') : '') + '</td></tr>').join('') + '</tbody></table>';
+      root.innerHTML = h;
+    }
+    async function saveVPNSettings(btn) {
+      const f = btn.closest('[data-vpn-settings]');
+      const out = f.querySelector('[data-vpn-settings-result]');
+      try {
+        await apiPut('/api/vpn/settings', {
+          users_group: f.querySelector('[data-vpn-users-group]').value.trim(),
+          devices_per_person: parseInt(f.querySelector('[data-vpn-dpp]').value, 10),
+          expiry: f.querySelector('[data-vpn-expiry]').value,
+        });
+        out.innerHTML = '<div class="inst-ok">Saved.</div>';
+      } catch (e) { out.innerHTML = errorBox(e); }
+    }
+    document.addEventListener('click', e => {
+      const t = e.target;
+      const rs = t.closest && t.closest('[data-reach-save]');
+      if (rs) { saveReach(rs.dataset.reachSave, rs); return; }
+      const va = t.closest && t.closest('[data-vpn-act]');
+      if (va) { vpnTabAct(va); return; }
+      const vs = t.closest && t.closest('[data-vpn-settings-save]');
+      if (vs) saveVPNSettings(vs);
+    });
 
     // The Doctor tab's badge: Problems + Warnings.
     PortcullisDoctor.badge(document.getElementById('doctor-tab'));

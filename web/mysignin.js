@@ -570,6 +570,7 @@
     h += methodsHtml(v, ctxOf(st));
     h += impersonationHtml(v, ctxOf(st), st.impNotice);
     h += appsHtml(v);
+    h += '<div class="pd-head"><h3 class="pd-h3">VPN devices</h3></div><div data-msi-vpn><p class="pd-muted">Loading…</p></div>';
     h += '<div class="pd-head msi-hist-head"><h3 class="pd-h3">Sign-in history</h3>' + button('ghost xs', ' data-msi-act="hist-reload"', 'Refresh') + '</div>' +
       '<div data-msi-hist><p class="pd-muted">Loading…</p></div>';
     st.el.innerHTML = h;
@@ -581,6 +582,47 @@
     if (hi.error) { box.innerHTML = '<p class="pd-warn">Couldn\'t load the history: ' + esc(hi.error) + '</p>'; return; }
     box.innerHTML = unknownHtml(hi.unknown) + historyHtml(hi.entries) +
       (hi.next ? '<div class="pd-actions">' + button('secondary', ' data-msi-act="hist-more"', 'Show older') + '</div>' : '');
+  }
+
+  // VPN devices (contract §5.1, §9.7): every provider's, read-only here;
+  // one's own built-in ones are managed on the VPN page (people.<d>/vpn/),
+  // a person's tab can remove built-in ones (administrators and
+  // sign_in_help holders). Marketplace devices are managed in their app.
+  function vpnURL(st) {
+    return st.opts.mode === 'person' ? '/api/people/' + enc(st.opts.user) + '/vpn-devices' : '/vpn/api/devices';
+  }
+  async function loadVPN(st) {
+    const box = st.el.querySelector('[data-msi-vpn]');
+    if (!box) return;
+    let devs;
+    try {
+      const r = await call('GET', vpnURL(st));
+      devs = Array.isArray(r) ? r : (r && r.devices) || [];
+    } catch (err) {
+      box.innerHTML = '<p class="pd-muted">VPN devices aren\'t available: ' + esc(err.message) + '</p>';
+      return;
+    }
+    const person = st.opts.mode === 'person';
+    let h = devs.length ? '' : '<p class="pd-muted">No VPN devices.</p>';
+    for (const d of devs) {
+      h += '<div class="pd-row"><span><strong>' + esc(d.name) + '</strong> <span class="pd-muted">' + esc(d.provider_label) + ' · ' + esc(d.address) +
+        (d.online ? ' · online' : '') + '</span></span> ';
+      if (!d.managed) h += '<span class="pd-muted">managed in ' + esc(d.provider_label) + '</span>';
+      else if (person) h += button('danger', ' data-msi-act="vpn-remove" data-vpn-id="' + esc(d.id) + '" data-vpn-name="' + esc(d.name) + '"', 'Remove');
+      h += '</div>';
+    }
+    if (!person) h += '<p class="pd-muted"><a href="/vpn/">Add or manage your VPN devices</a></p>';
+    box.innerHTML = h;
+  }
+  async function removeVPN(st, id, name) {
+    if (!window.confirm('Remove ' + name + '? It can\'t connect any more.')) return;
+    try {
+      await call('DELETE', vpnURL(st) + '/' + enc(id));
+    } catch (err) {
+      setStatus(st, err.message, true);
+      return;
+    }
+    loadVPN(st);
   }
 
   // loadHistory reads the first page, or (more) the page before the
@@ -648,6 +690,7 @@
     st.impNotice = impNoticeOf(st, v);
     draw(st);
     if (st.opts.onView) st.opts.onView(v);
+    loadVPN(st);
     loadHistory(st, false);
   }
 
@@ -1012,6 +1055,7 @@
         return;
       case 'hist-more': return loadHistory(st, true, b);
       case 'hist-reload': return loadHistory(st, false, b);
+      case 'vpn-remove': return removeVPN(st, b.dataset.vpnId, b.dataset.vpnName);
       case 'imp-open': return openImpersonate(st);
       case 'imp-stop': return stopImpersonation(st, false);
       case 'imp-again': return stopImpersonation(st, true);

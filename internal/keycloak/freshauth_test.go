@@ -249,7 +249,8 @@ func TestEnsureFreshAuthClientTwoHosts(t *testing.T) {
 	for _, bad := range [][2][]string{
 		{nil, nil},
 		{faRedirects, faOrigins[:1]},
-		{faRedirects, []string{faOrigins[1], faOrigins[0]}},
+		// (V8: the origins are one per host, in any order.)
+		{faRedirects, []string{faOrigins[0], "https://evil.example.org"}},
 		{[]string{faRedirect, faRedirect}, []string{faOrigin, faOrigin}},
 		{[]string{faRedirect, "https://hub.example.org/x"}, faOrigins},
 		{[]string{faRedirect, "https://hub.example.org/signin"}, faOrigins},

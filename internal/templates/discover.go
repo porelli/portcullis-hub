@@ -140,6 +140,9 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := ValidateAI(&t, compose, routes); err != nil {
 		return Template{}, err
 	}
+	if err := ValidateVPN(&t, compose, routes); err != nil {
+		return Template{}, err
+	}
 	if t.GIDRefs, err = GIDRefs(&t.Manifest, compose); err != nil {
 		return Template{}, err
 	}
