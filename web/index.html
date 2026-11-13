@@ -703,7 +703,7 @@
             <div class="app-tags">
               {{range .Manifest.Tags}}<span class="tag">{{.}}</span>{{end}}
             </div>
-            <div class="app-footer" data-mkt-use="{{.ID}}" data-mkt-multi="{{if eq .Manifest.Instances "multi"}}1{{end}}"></div>
+            <div class="app-footer" data-mkt-use="{{.ID}}" data-mkt-multi="{{if eq .Manifest.Instances "multi"}}1{{end}}" data-rootless="{{if .Rootless}}{{.Rootless.Status}}{{end}}" data-rootless-reasons="{{if .Rootless}}{{range $i, $r := .Rootless.Reasons}}{{if $i}}; {{end}}{{$r}}{{end}}{{end}}"></div>
           </div>
           {{end}}
         </div>
@@ -3434,6 +3434,26 @@
     let appsFilter = '';   // Marketplace "Show in Apps": one template's instances (the chip's × clears it)
     let pageCtx = null;    // the instance page shown: { id, inst, tab, loaded }
     let pageFlash = null;  // { id, notice, warnings, error }: said once on that instance's page
+    // GET /api/runtime, read once at page load (contract §11.10): under
+    // rootless Podman the Marketplace cards and the instance page show
+    // each template's verdict; under Docker nothing is shown.
+    let runtimeInfo = null;
+    function loadRuntime() {
+      return apiGet('/api/runtime').then(r => {
+        runtimeInfo = r;
+        if (document.getElementById('tab-marketplace').classList.contains('active')) fillMarketplace();
+      }).catch(() => { runtimeInfo = null; });
+    }
+    window.addEventListener('load', loadRuntime);
+    // rootlessBadge: a verdict {status, reasons}'s badge, "" under Docker
+    // or without one; the reasons are its title.
+    const ROOTLESS_TEXT = { ok: ['ok', 'Rootless: works'], degraded: ['warn', 'Rootless: limited'], refused: ['bad', 'Rootless: not available'] };
+    function rootlessBadge(c) {
+      if (!c || !runtimeInfo || runtimeInfo.runtime !== 'podman' || !ROOTLESS_TEXT[c.status]) return '';
+      const [cls, text] = ROOTLESS_TEXT[c.status];
+      const why = (c.reasons || []).join('; ');
+      return '<span class="pill ' + cls + '" data-rootless-badge="' + escapeHtml(c.status) + '"' + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' + escapeHtml(text) + '</span>';
+    }
     // GET /api/directory (admins: every group with its members and rule,
     // every person's display name), re-read at most every 30 s: the
     // users groups' counts and the Groups tab.
@@ -3581,11 +3601,16 @@
       document.querySelectorAll('[data-mkt-use]').forEach(el => {
         const tid = el.dataset.mktUse;
         const n = instancesCache.filter(i => i.template === tid).length;
-        const add = el.dataset.mktMulti === '1' ? '<button type="button" class="btn btn-secondary btn-sm" data-add-instance="' + escapeHtml(tid) + '">+ Add instance</button>' : '';
-        el.innerHTML = n
+        // Rootless Podman: a refused template can't be created (the Hub
+        // refuses it too: 409).
+        const rl = el.dataset.rootless ? { status: el.dataset.rootless, reasons: el.dataset.rootlessReasons ? el.dataset.rootlessReasons.split('; ') : [] } : null;
+        const badge = rootlessBadge(rl);
+        const off = badge && rl.status === 'refused' ? ' disabled title="' + escapeHtml("Can't run under rootless Podman: " + rl.reasons.join('; ')) + '"' : '';
+        const add = el.dataset.mktMulti === '1' ? '<button type="button" class="btn btn-secondary btn-sm" data-add-instance="' + escapeHtml(tid) + '"' + off + '>+ Add instance</button>' : '';
+        el.innerHTML = badge + (n
           ? '<span class="pill ok">in use · ' + n + (n === 1 ? ' instance' : ' instances') + '</span>' +
             '<button type="button" class="btn btn-secondary btn-sm" data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>' + add
-          : '<button type="button" class="btn btn-primary btn-sm" data-install="' + escapeHtml(tid) + '">Install…</button>';
+          : '<button type="button" class="btn btn-primary btn-sm" data-install="' + escapeHtml(tid) + '"' + off + '>Install…</button>');
       });
     }
 
@@ -3755,6 +3780,14 @@
       if (inst.state === 'deleting') h += '<div class="public-warn">A delete stopped part-way: <button type="button" class="opp-link" data-page-tab-go="delete">open Delete</button> to finish it (the first backup is kept).</div>';
       if (inst.state === 'restoring') h += '<div class="public-warn">A restore didn\'t finish: restore it again from <button type="button" class="opp-link" data-page-tab-go="backups">Backups</button> (its pre-restore backup is put back first).</div>';
       if (notes) h += '<div class="auth-notes">' + escapeHtml(notes) + '</div>';
+      // Rootless Podman (contract §11.10): the instance's own verdict.
+      const rlBadge = rootlessBadge(inst.rootless);
+      if (rlBadge) {
+        h += '<div class="inst-section" data-rootless-reasons><h4>Rootless Podman ' + rlBadge + '</h4>' +
+          ((inst.rootless.reasons || []).length ? '<ul>' + inst.rootless.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>'
+            : '<p class="settings-empty">Everything this app uses works under rootless Podman.</p>') +
+          (inst.rootless.status === 'refused' ? '<p class="public-warn">It can\'t be started here until the reasons above are resolved.</p>' : '') + '</div>';
+      }
       const setupOpts = ((t && t.manifest.settings && t.manifest.settings.options) || []).some(o => o.setup);
       h += '<div class="inst-section"><h4>Instance</h4>' +
         '<div class="inst-form"><label class="block" for="pg-label">Label</label>' +

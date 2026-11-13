@@ -1143,8 +1143,10 @@ func (h *Hub) Template(id string) *templates.Template {
 // Templates returns a copy of the catalog.
 func (h *Hub) Templates() []templates.Template {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return append([]templates.Template(nil), h.templates...)
+	ts := append([]templates.Template(nil), h.templates...)
+	h.mu.RUnlock()
+	// Under podman, each with its rootless verdict (contract §11.10).
+	return h.withRootless(ts)
 }
 
 // Sources returns a copy of the configured sources.

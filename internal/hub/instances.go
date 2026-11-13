@@ -55,6 +55,9 @@ type InstanceView struct {
 	// Error says why an instance can't be resolved (state "error"): its
 	// template is missing or no longer fits its hostnames.
 	Error string `json:"error,omitempty"`
+	// Rootless is the instance's rootless Podman verdict with its own
+	// values (contract §11.10; podman only, absent under Docker).
+	Rootless *templates.Compat `json:"rootless,omitempty"`
 }
 
 // rebuildLocked recomputes the instance views from the catalog and state
@@ -255,9 +258,14 @@ func (h *Hub) Instances() []InstanceView {
 func (h *Hub) instanceViewLocked(t *templates.Template) InstanceView {
 	n := t.NamesFor(t.ID)
 	users, admins := h.instanceGroupsLocked(t)
-	return InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), Hosts: copyMap(t.Hosts),
+	v := InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), Hosts: copyMap(t.Hosts),
 		AccessGroup: users, AdminGroup: admins, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project,
 		Label: instanceLabel(t), Name: instanceName(t), GroupsMode: groupsMode(h.st.Instances[t.ID]), Setup: h.setupViewLocked(t.ID)}
+	if h.rootlessOn() {
+		c := h.instanceCompat(t, h.st.Settings[t.ID])
+		v.Rootless = &c
+	}
+	return v
 }
 
 func copyMap(m map[string]string) map[string]string {
@@ -331,6 +339,23 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	h.mu.RUnlock()
 	if exists {
 		return nil, statusErr(409, "instance %s already exists", id)
+	}
+	// Rootless Podman (contract §11.10): a template that can't run here
+	// is never created (the API's create and restore into a new id come
+	// through here too).
+	if h.rootlessOn() {
+		h.mu.RLock()
+		var tc *templates.Template
+		if t := h.catalogLocked(templateID); t != nil {
+			c := *t
+			tc = &c
+		}
+		h.mu.RUnlock()
+		if tc != nil {
+			if err := rootlessRefusal(id, h.templateCompat(tc)); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// A leftover project of that name (e.g. a deleted instance whose
 	// containers survived) is someone else's: refuse. Docker first, never
