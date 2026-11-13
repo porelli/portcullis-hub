@@ -93,12 +93,8 @@ func (w *walker) mayChange() error {
 	if w.o.ExpectDev == 0 || w.o.ExpectIno == 0 {
 		return refuse("a run that changes the folder needs its device and inode")
 	}
-	ok, err := idMapsIdentity()
-	if err != nil {
-		return refuse("read the id maps: %v", err)
-	}
-	if !ok {
-		return refuse("the fixer runs in a user namespace with translated ids (userns-remap or rootless Docker): owners and ACLs would be wrong")
+	if err := idMapsAllowed(w.uidMap, w.gidMap); err != nil {
+		return err
 	}
 	if !writableFS[w.r.FSType] {
 		return refuse("the folder is on %s: the Hub changes ownership only on ext4, xfs, btrfs and zfs", w.r.FSType)
@@ -134,6 +130,8 @@ func Apply(o Options, expect int64) (*Report, error) {
 		return w.finish(), refuse("the plan is incomplete (%s): nothing changed", w.r.PartialReason)
 	case w.r.Failed.N > 0:
 		return w.finish(), refuse("%d entries couldn't be read: nothing changed", w.r.Failed.N)
+	case w.r.Unmapped.N > 0:
+		return w.finish(), refuse(UnmappedMsg, w.r.Unmapped.Sample[0])
 	case w.r.Plan.LoseAccess.N > 0:
 		return w.finish(), refuse("%d entries would change a previous group's or owner's access on a filesystem without ACLs: nothing changed", w.r.Plan.LoseAccess.N)
 	}

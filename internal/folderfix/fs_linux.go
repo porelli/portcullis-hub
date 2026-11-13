@@ -6,9 +6,12 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/portcullis/hub/internal/idmap"
 )
 
 // Linux syscalls of the walk. Every call is relative to an fd the walk
@@ -277,19 +280,32 @@ func readMountinfo() ([]mountEntry, error) {
 	return parseMountinfo(f)
 }
 
-// idMapsIdentity: the fixer refuses to change owners under a user
-// namespace whose ids aren't the host's (userns-remap, rootless).
-func idMapsIdentity() (bool, error) {
-	for _, p := range []string{"/proc/self/uid_map", "/proc/self/gid_map"} {
+// procIDMaps reads the fixer's own /proc/self/uid_map and gid_map.
+func procIDMaps() (uid, gid idmap.Map, err error) {
+	read := func(p string) (idmap.Map, error) {
 		b, err := os.ReadFile(p)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if !identityMap(string(b)) {
-			return false, nil
-		}
+		return idmap.Parse(string(b))
 	}
-	return true, nil
+	if uid, err = read("/proc/self/uid_map"); err != nil {
+		return nil, nil, err
+	}
+	if gid, err = read("/proc/self/gid_map"); err != nil {
+		return nil, nil, err
+	}
+	return uid, gid, nil
+}
+
+// selinuxLabel is fd's security.selinux xattr without its trailing NUL
+// ("" when there is none or the filesystem has no xattrs).
+func selinuxLabel(fd int) string {
+	b, err := getXattr(fd, "security.selinux")
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	return strings.TrimRight(string(b), "\x00")
 }
 
 const syscallNoFollow = unix.O_NOFOLLOW

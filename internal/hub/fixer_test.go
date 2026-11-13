@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
+	"github.com/portcullis/hub/internal/idmap"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -657,5 +659,80 @@ func TestSweepRemovesFixers(t *testing.T) {
 	f.h.SweepBackupLeftovers()
 	if v := f.engine.vol(); !slices.Contains(v.removed, "fixer1") || slices.Contains(v.removed, "app1") {
 		t.Errorf("removed = %v", v.removed)
+	}
+}
+
+func podmanMountinfoFor(id string) string {
+	return "340 300 0:50 / / ro,relatime - overlay overlay rw\n" +
+		"349 340 0:45 /containers/overlay-containers/" + id + "/userdata/hostname /etc/hostname rw - tmpfs tmpfs rw\n"
+}
+
+// Rootless Podman (contract §6): name=rootless is allowed only under
+// HUB_CONTAINER_RUNTIME=podman; userns is always refused.
+func TestRunFixerRootlessPodman(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rt   docker.Runtime
+		opts []string
+		ok   bool
+	}{
+		{"rootless podman", docker.RuntimePodman, []string{"name=seccomp,profile=default", "name=rootless"}, true},
+		{"rootless docker", docker.RuntimeDocker, []string{"name=rootless"}, false},
+		{"userns under podman", docker.RuntimePodman, []string{"name=userns"}, false},
+		{"plain podman", docker.RuntimePodman, []string{"name=seccomp"}, true},
+	} {
+		f := newFixerFixture(t)
+		f.h.cfg.Runtime = c.rt
+		if c.rt == docker.RuntimePodman {
+			f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
+		}
+		f.engine.fx().secOpts = c.opts
+		_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/x"})
+		n := len(f.engine.fx().Specs())
+		if c.ok {
+			if err != nil || n != 1 {
+				t.Errorf("%s: err %v, %d runs", c.name, err, n)
+			}
+			continue
+		}
+		if statusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "user and group ids inside the fixer are translated") || n != 0 {
+			t.Errorf("%s: err %v, %d runs", c.name, err, n)
+		}
+	}
+	if err := fixerIDsAllowed(docker.RuntimeDocker, []string{"name=rootless"}); err == nil || !strings.Contains(err.Error(), "Docker runs with rootless") {
+		t.Errorf("message = %v", err)
+	}
+}
+
+// The unmapped-owner refusal gets the host step: the operator uid (the
+// report's id_map uid container 0) and the host path (folder + rel).
+func TestFixerUnmappedMessage(t *testing.T) {
+	f := newFixerFixture(t)
+	f.h.cfg.Runtime = docker.RuntimePodman
+	f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
+	f.engine.fx().secOpts = []string{"name=rootless"}
+	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
+	rep := reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: um},
+		Unmapped: folderfix.Count{N: 1, Sample: []string{"x"}}, Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, "x")}})
+	f.engine.fx().run = func(docker.RunSpec, func(io.Reader) error) (*docker.RunResult, error) {
+		return &docker.RunResult{ExitCode: 2, Stdout: []byte(rep + "\n")}, nil
+	}
+	_, err := f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	want := "x is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 /srv/media/x once, then re-check"
+	if statusOf(err) != http.StatusConflict || err.Error() != want {
+		t.Errorf("err = %v (%d), want %q", err, statusOf(err), want)
+	}
+	// The root itself.
+	rep = reportLine(t, folderfix.Report{Version: 1, Mode: "scan", IDMap: &folderfix.IDMaps{UID: um, GID: um},
+		Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, ".")}})
+	_, err = f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	if want := ". is owned by a host account outside Portcullis' id range; run sudo chown -R 1001 /srv/media once, then re-check"; err == nil || err.Error() != want {
+		t.Errorf("root: %v", err)
+	}
+	// Without an id map (never under podman): no step.
+	rep = reportLine(t, folderfix.Report{Version: 1, Mode: "scan", Errors: []string{fmt.Sprintf(folderfix.UnmappedMsg, "x")}})
+	_, err = f.h.runFixer(context.Background(), fixerRun{Mode: "scan", Source: "/srv/media"})
+	if err == nil || strings.Contains(err.Error(), "sudo") {
+		t.Errorf("no map: %v", err)
 	}
 }

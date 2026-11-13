@@ -6,6 +6,8 @@ import (
 	"errors"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/portcullis/hub/internal/idmap"
 )
 
 // Other unix systems (developer machines): the same fd-relative walk, but no
@@ -95,7 +97,11 @@ func setXattr(int, string, []byte) error   { return errNoXattr }
 func removeXattr(int, string) error        { return errNoXattr }
 func support(int) (acl, xattr bool)        { return false, false }
 func readMountinfo() ([]mountEntry, error) { return nil, nil }
-func idMapsIdentity() (bool, error)        { return true, nil }
+func procIDMaps() (uid, gid idmap.Map, err error) {
+	id := idmap.Map{{Container: 0, Host: 0, Size: 4294967295}}
+	return id, id, nil
+}
+func selinuxLabel(int) string { return "" }
 
 func fchown(fd int, uid, gid uint32) error {
 	return ignoringEINTR(func() error { return unix.Fchown(fd, int(uid), int(gid)) })

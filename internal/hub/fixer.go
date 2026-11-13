@@ -325,8 +325,8 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "shared folders: can't read the Docker daemon's security options: %v", err)
 	}
-	if m := docker.RemappedIDs(opts); m != "" {
-		return statusErr(http.StatusServiceUnavailable, "shared folders can't be fixed: Docker runs with %s, so user and group ids inside the fixer are translated and owners and ACLs would be written for the wrong ids; nothing was changed", m)
+	if err := fixerIDsAllowed(h.cfg.Runtime, opts); err != nil {
+		return err
 	}
 	s := r.spec(image)
 	if r.In != nil {
@@ -375,6 +375,9 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 		if msg == "" {
 			msg = "refused, nothing changed"
 		}
+		if fr, ok := rep.(*folderfix.Report); ok {
+			msg += unmappedHint(msg, fr, r.Source)
+		}
 		return statusErr(http.StatusConflict, "%s", msg)
 	case (res.ExitCode == 1 || res.ExitCode == 2) && decErr == nil && first() != "":
 		return statusErr(http.StatusInternalServerError, "shared folder fixer (%s) failed: %s", r.Mode, first())
@@ -391,6 +394,43 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 		return statusErr(http.StatusInternalServerError, "shared folder fixer (%s) was killed (exit 137: out of memory?) %s", r.Mode, why)
 	}
 	return statusErr(http.StatusInternalServerError, "shared folder fixer (%s) exited %d: %s", r.Mode, res.ExitCode, why)
+}
+
+// fixerIDsAllowed: the daemon's SecurityOptions under which the fixer may
+// run (contract §6). userns-remap never; rootless only under
+// HUB_CONTAINER_RUNTIME=podman, where every container shares the
+// operator's default namespace (the fixer itself then refuses any map but
+// the consistent shape). Refusals are 503, explain-only.
+func fixerIDsAllowed(rt docker.Runtime, opts []string) error {
+	m := docker.RemappedIDs(opts)
+	if m == "" || (m == "rootless" && rt == docker.RuntimePodman && !securityOption(opts, "userns")) {
+		return nil
+	}
+	if securityOption(opts, "userns") {
+		m = "userns"
+	}
+	return statusErr(http.StatusServiceUnavailable, "shared folders can't be fixed: Docker runs with %s, so user and group ids inside the fixer are translated and owners and ACLs would be written for the wrong ids; nothing was changed", m)
+}
+
+// unmappedHint is the host step appended to the fixer's unmapped-owner
+// refusal (contract §14.2): the operator uid (the report's uid map,
+// container 0) and the host path (source joined with the entry). "" when
+// msg isn't that refusal or the report has no map.
+func unmappedHint(msg string, rep *folderfix.Report, source string) string {
+	suffix := strings.TrimPrefix(folderfix.UnmappedMsg, "%s")
+	rel, ok := strings.CutSuffix(msg, suffix)
+	if !ok || rel == "" || rep.IDMap == nil {
+		return ""
+	}
+	op, ok := rep.IDMap.UID.ToHost(0)
+	if !ok {
+		return ""
+	}
+	host := source
+	if rel != "." {
+		host = path.Join(source, rel)
+	}
+	return fmt.Sprintf("; run sudo chown -R %d %s once, then re-check", op, host)
 }
 
 func zero(v any) {

@@ -75,8 +75,17 @@ func Restore(o Options, snapshot io.Reader) (*Report, error) {
 		return w.report(), err
 	}
 	if s, ok := snapshot.(io.Seeker); ok {
-		if err := readSnapshot(snapshot, w.checkHeader, func(snapLine, state, string) error { return nil }); err != nil {
+		// The whole snapshot first; under a non-identity map also every
+		// entry's current owner (an unmapped one refuses the restore
+		// before anything changes).
+		if err := readSnapshot(snapshot, w.checkHeader, func(l snapLine, s state, p string) error {
+			w.checkUnmapped(l, s, p)
+			return nil
+		}); err != nil {
 			return w.report(), err
+		}
+		if w.r.Unmapped.N > 0 {
+			return w.report(), refuse(UnmappedMsg, w.r.Unmapped.Sample[0])
 		}
 		if _, err := s.Seek(0, io.SeekStart); err != nil {
 			return w.report(), err
@@ -200,6 +209,12 @@ func (w *walker) restoreLine(l snapLine, rec state, p string, emit func(*node) e
 		}
 		return false
 	}
+	if emit == nil && unmappedID(w.idm, n.st.UID, n.st.GID) {
+		// A snapshot read once (no seeking): left alone, counted.
+		w.r.Unmapped.add(p)
+		w.r.ChangedSince.add(p)
+		return false
+	}
 	o, err := planEntry(rec, w.t)
 	// A file that has file capabilities now is left alone too (R54): the
 	// restore's chown would drop them.
@@ -231,6 +246,25 @@ func (w *walker) restoreLine(l snapLine, rec state, p string, emit func(*node) e
 	}
 	w.r.Changed++
 	return true
+}
+
+// checkUnmapped counts the snapshot entry p when it still resolves to the
+// recorded inode and its owner is unmapped (the validation pass).
+func (w *walker) checkUnmapped(l snapLine, rec state, p string) {
+	if w.idm == nil {
+		return
+	}
+	fd, st, ok := w.resolve(p, rec.Dir, l.Ino)
+	if !ok {
+		return
+	}
+	closeFD(fd)
+	if testHookOwnerOf != nil {
+		st.UID, st.GID = testHookOwnerOf(p, st.UID, st.GID)
+	}
+	if unmappedID(w.idm, st.UID, st.GID) {
+		w.r.Unmapped.add(p)
+	}
 }
 
 // resolve walks to p from the root fd, one openat(O_NOFOLLOW) per

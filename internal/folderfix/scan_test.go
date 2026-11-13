@@ -849,19 +849,6 @@ func TestParseMountinfo(t *testing.T) {
 	}
 }
 
-func TestIdentityMap(t *testing.T) {
-	for s, want := range map[string]bool{
-		"         0          0 4294967295\n": true,
-		"0 100000 65536\n":                   false,
-		"0 0 65536\n":                        false,
-		"0 0 4294967295\n1 1 1\n":            false,
-	} {
-		if identityMap(s) != want {
-			t.Errorf("%q: want %v", s, want)
-		}
-	}
-}
-
 func TestValidPaths(t *testing.T) {
 	for _, p := range []string{".", "a", "a/b", "a b/c"} {
 		if err := validRel(p); err != nil {

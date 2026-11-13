@@ -67,6 +67,11 @@ type OwnerCount struct {
 	UID int   `json:"uid"`
 	GID int   `json:"gid"`
 	N   int64 `json:"n"`
+	// HostUID / HostGID: the container ids' host ids through the
+	// fixer's maps (rootless Podman; omitted under the identity or when
+	// the map doesn't map them).
+	HostUID *uint32 `json:"host_uid,omitempty"`
+	HostGID *uint32 `json:"host_gid,omitempty"`
 }
 
 // PrincipalAccess is what one principal can't reach.
@@ -116,6 +121,9 @@ type ChildOwner struct {
 	Dir     bool   `json:"dir"`
 	Entries int64  `json:"entries"`
 	Foreign int64  `json:"foreign"`
+	// HostUID / HostGID as in OwnerCount.
+	HostUID *uint32 `json:"host_uid,omitempty"`
+	HostGID *uint32 `json:"host_gid,omitempty"`
 }
 
 // Skipped counts entries the fix leaves alone because a snapshot couldn't
@@ -144,6 +152,16 @@ type Report struct {
 	Files         int64  `json:"files"`
 	Partial       bool   `json:"partial"`
 	PartialReason string `json:"partial_reason,omitempty"` // "entries" | "time" | "depth"
+
+	// IDMap: the fixer's own id maps, omitted under the identity
+	// (rootless Podman, contract §14.2).
+	IDMap *IDMaps `json:"id_map,omitempty"`
+	// Unmapped: entries whose uid or gid reads idmap.Overflow under a
+	// non-identity map (a host account outside the mapping, or container
+	// id 65534: both count). apply, restore and childfix refuse them.
+	Unmapped Count `json:"unmapped"`
+	// SELinux: the root's security.selinux label ("" = none).
+	SELinux string `json:"selinux_label,omitempty"`
 
 	Owners       []OwnerCount      `json:"owners"` // top 10 by N
 	HardLinks    Count             `json:"hard_links"`
