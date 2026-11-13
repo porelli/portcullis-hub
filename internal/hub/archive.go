@@ -32,6 +32,20 @@ type archiveNames struct {
 	base string // the archived directory's base name ("data", "out")
 	form int    // 0 = not yet known
 	root bool   // the root entry was seen
+	// links are the symlink entries seen (relative paths): a later
+	// entry or hard link target under one is refused, so containment
+	// never rests on the engine's extract alone (final review M12).
+	links map[string]bool
+}
+
+// underLink reports whether rel lies below a symlink entry seen before.
+func (a *archiveNames) underLink(rel string) bool {
+	for d := path.Dir(rel); d != "." && d != "/"; d = path.Dir(d) {
+		if a.links[d] {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -55,6 +69,16 @@ func (a *archiveNames) rel(hdr *tar.Header) (string, error) {
 			return "", fmt.Errorf("archive entry %q is a second root", clipRunes(hdr.Name, 80))
 		}
 		a.root = true
+		return r, nil
+	}
+	if a.underLink(r) {
+		return "", fmt.Errorf("archive entry %q lies under a symlink", clipRunes(hdr.Name, 80))
+	}
+	if hdr.Typeflag == tar.TypeSymlink {
+		if a.links == nil {
+			a.links = map[string]bool{}
+		}
+		a.links[r] = true
 	}
 	return r, nil
 }
@@ -65,6 +89,9 @@ func (a *archiveNames) link(name string) (string, error) {
 	r, err := a.relName(name, false)
 	if err != nil || r == "." {
 		return "", fmt.Errorf("archive link target %q is outside the directory", clipRunes(name, 80))
+	}
+	if a.links[r] || a.underLink(r) {
+		return "", fmt.Errorf("archive link target %q is or lies under a symlink", clipRunes(name, 80))
 	}
 	return r, nil
 }

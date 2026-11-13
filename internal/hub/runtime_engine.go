@@ -87,15 +87,16 @@ func (h *Hub) Runtime(ctx context.Context) RuntimeView {
 }
 
 // unprivilegedPortStart is core's PORTCULLIS_UNPRIVILEGED_PORT_START (the
-// core env subset at <ProjectDir>/.env): an integer 1–65535, anything else
-// (missing included) DefaultUnprivilegedPortStart.
+// core env subset at <ProjectDir>/.env): an integer 0–65535 (0: every
+// port is unprivileged), anything else (missing included)
+// DefaultUnprivilegedPortStart.
 func (h *Hub) unprivilegedPortStart() int {
 	raw := strings.TrimSpace(readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))[VarUnprivilegedPortStart])
 	if raw == "" || raw[0] < '0' || raw[0] > '9' {
 		return DefaultUnprivilegedPortStart
 	}
 	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 || n > 65535 {
+	if err != nil || n < 0 || n > 65535 {
 		return DefaultUnprivilegedPortStart
 	}
 	return n

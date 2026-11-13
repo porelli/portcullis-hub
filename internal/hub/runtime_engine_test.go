@@ -12,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/idmap"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 type fakeVersions []docker.Component
@@ -57,11 +58,19 @@ func TestRuntimeView(t *testing.T) {
 		t.Errorf("podman view:\n got %s\nwant %s", b, want)
 	}
 	// Unreadable or out-of-range port start = 1024.
-	for _, raw := range []string{"abc", "", "0", "65536", "-1", "+80", "8 0"} {
+	for _, raw := range []string{"abc", "", "65536", "-1", "+80", "8 0"} {
 		writeFile(t, filepath.Join(f.project, ".env"), "PORTCULLIS_UNPRIVILEGED_PORT_START="+raw+"\n")
 		if p := f.h.Runtime(context.Background()).UnprivilegedPortStart; p == nil || *p != 1024 {
 			t.Errorf("%q: port start %v", raw, p)
 		}
+	}
+	// 0 is a deliberate host setting: every port is unprivileged.
+	writeFile(t, filepath.Join(f.project, ".env"), "PORTCULLIS_UNPRIVILEGED_PORT_START=0\n")
+	if p := f.h.Runtime(context.Background()).UnprivilegedPortStart; p == nil || *p != 0 {
+		t.Errorf("0: port start %v", p)
+	}
+	if c := f.h.templateCompat(&templates.Template{Manifest: templates.Manifest{Ports: []templates.Port{{Key: "DNS", Default: 53, Protocol: "tcp"}}}}); c.Status != templates.CompatOK {
+		t.Errorf("port 53 at port start 0 = %+v", c)
 	}
 	os.Remove(filepath.Join(f.project, ".env"))
 	if p := f.h.Runtime(context.Background()).UnprivilegedPortStart; p == nil || *p != 1024 {

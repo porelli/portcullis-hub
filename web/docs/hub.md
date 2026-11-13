@@ -1678,8 +1678,8 @@ never fire under Docker, and none has a one-click fix:
 |------|----------|-------|-----|
 | `runtime_mismatch` | Problem | The engine isn't the runtime core said (`HUB_CONTAINER_RUNTIME`): every engine operation answers `503` | Explain: fix `.env` or `DOCKER_HOST`, then restart the Hub (`./portcullis up`) |
 | `limits_not_enforced` | Warning | An app container runs without the memory or process limit its compose sets | Explain: delegate the `memory` and `pids` cgroup controllers to the operator's user manager |
-| `unmapped_owner` | Warning | A shared folder has entries owned by a host account outside the operator's id range (they read as 65534); the fixer refuses that folder | Explain: `sudo chown -R <operator> <path>` once, then re-check |
-| `selinux_label_missing` | Warning | On an SELinux host, a shared folder without the `container_file_t` label (or a scan that got `permission denied`) | Explain: `semanage fcontext -a -t container_file_t '<path>(/.*)?'` and `restorecon -R <path>`, as root |
+| `unmapped_owner` | Warning | A shared folder has entries owned by a host account outside the operator's id range (they read as 65534); the fixer refuses that folder | Explain: `sudo chown -R '<uid>:<gid>' '<path>'` once, then re-check |
+| `selinux_label_missing` | Warning | On an SELinux host, a shared folder without the `container_file_t` label (or a scan that got `permission denied`) | Explain: the path regex-escaped in `semanage fcontext -a -t container_file_t '<path>(/.*)?'` and `restorecon -R '<path>'`, as root |
 | `udp_source_rewritten` | Info | An app publishes a UDP port: its clients appear with a rewritten source address | — |
 
 ## Rootless Podman

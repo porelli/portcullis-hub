@@ -250,9 +250,10 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...   # the provider credenti
 `.env` comes from the backup. Then point DNS at the new host. The ACME
 certificate is restored too, so Traefik doesn't have to re-issue it.
 
-Without an `.env` the restore detects the runtime as `init` does, before its
-first engine call, and writes it into the restored `.env`. On a Podman host
-where a Docker engine also answers, export `CONTAINER_RUNTIME=podman` first.
+`restore --from-offsite` without an `.env` detects the runtime as `init`
+does, before its first engine call, and writes it into the restored `.env`.
+On a Podman host where a Docker engine also answers, export
+`CONTAINER_RUNTIME=podman` first. A directory restore needs `init` first.
 
 ### Moving between runtimes
 
