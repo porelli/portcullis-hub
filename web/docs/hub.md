@@ -1107,7 +1107,7 @@ DNS panel, built from the domain's [DNS plan](../setup/dns.md#record-sets)
 - **CAA**: the issuer, the account the pin names (or CA-only) and "would
   issue: yes / no", the CA's own judgement of the live records.
 - **DNSSEC**: the zone, its state (`secure`, `unsigned`, `ds_missing`,
-  `ds_mismatch`, `bogus`, `unknown`), the steps left and the DS values to
+  `ds_mismatch`, `bogus`, `insecure`, `unknown`), the steps left and the DS values to
   publish at your registrar, each with a **Copy** button.
 - **Turn on DNSSEC signing**, only while the zone is `unsigned` and the
   provider can sign through its API (Cloudflare), behind the confirmation
@@ -1639,9 +1639,12 @@ LAN-only ports reachable from outside.
 ### DNS checks
 
 The doctor also judges the [DNS plans](#the-dns-panel) of every added domain
-and of the main domain (the cached plans; when the domains service can't be
-read, or a lookup failed, there are no DNS findings and the Doctor tab says
-"DNS checks didn't run" (the report's `dns_unavailable`)):
+and of the main domain (the cached plans). When the domains service can't be read there are no DNS
+findings; when a lookup failed the findings it could judge still show. Either
+way the Doctor tab says "DNS checks didn't run" (the report's
+`dns_unavailable`). A plan that is only missing the server's addresses (no
+domain added yet, no `PORTCULLIS_PUBLIC_IPV4`) or a DNSSEC state `insecure`
+doesn't count: nothing failed.
 
 | Kind | Severity | Finds | Fix |
 |------|----------|-------|-----|
