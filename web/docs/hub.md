@@ -54,6 +54,7 @@ The **Marketplace** page shows every template from every [template source](#temp
 | **Group Admin** | The app maps the `admin_<app>` group to its admin role (`auth.group_admin`) |
 | **Method** | `forward-auth`, `native-oidc`, `header-auth`, `mtls`, `custom` or `public` |
 | **No web page** | The template has no host routers (e.g., a background service) |
+| **Rootless: works / limited / not available** | Only under [rootless Podman](#rootless-podman): whether the app runs there, with the reasons in its tooltip |
 
 - tags (e.g., `productivity`, `media`)
 - footer showing:
@@ -1668,6 +1669,48 @@ explain-only: "Run `./portcullis dns setup` on the server" (for
 `dnssec_unsigned`: "Run `./portcullis dns setup --dnssec` on the server
 (Cloudflare only)").
 
+### Rootless Podman checks
+
+Under [rootless Podman](rootless-podman.md) the doctor adds five checks. They
+never fire under Docker, and none has a one-click fix:
+
+| Kind | Severity | Finds | Fix |
+|------|----------|-------|-----|
+| `runtime_mismatch` | Problem | The engine isn't the runtime core said (`HUB_CONTAINER_RUNTIME`): every engine operation answers `503` | Explain: fix `.env` or `DOCKER_HOST`, then restart the Hub (`./portcullis up`) |
+| `limits_not_enforced` | Warning | An app container runs without the memory or process limit its compose sets | Explain: delegate the `memory` and `pids` cgroup controllers to the operator's user manager |
+| `unmapped_owner` | Warning | A shared folder has entries owned by a host account outside the operator's id range (they read as 65534); the fixer refuses that folder | Explain: `sudo chown -R <operator> <path>` once, then re-check |
+| `selinux_label_missing` | Warning | On an SELinux host, a shared folder without the `container_file_t` label (or a scan that got `permission denied`) | Explain: `semanage fcontext -a -t container_file_t '<path>(/.*)?'` and `restorecon -R <path>`, as root |
+| `udp_source_rewritten` | Info | An app publishes a UDP port: its clients appear with a rewritten source address | — |
+
+## Rootless Podman
+
+When core runs on [rootless Podman](rootless-podman.md) the Hub knows it from
+`HUB_CONTAINER_RUNTIME` (set by core's compose) and checks it at start
+against the engine's version answer. Until the engine has answered, and for
+good if it names the other runtime, every engine operation answers `503`
+"the container engine is not verified". Restart the Hub against the right
+engine to clear a mismatch.
+
+- **Badges.** The Marketplace card shows **Rootless: works**, **limited** or
+  **not available**, with the reasons in its tooltip; the instance page lists
+  the reasons. An instance's badge uses its own ports, devices and env.
+  Under Docker nothing is shown.
+- **Refusals.** Creating, restoring into a new id, enabling or restarting an
+  app that is not available is refused before anything starts:
+  `<id> can't run under rootless Podman: <reasons>`. Limited apps run.
+- **Shared folders.** The fixer runs under Podman's mapping, and its
+  reports show host ids next to container ids. A folder with entries owned
+  by a host account outside the operator's id range is refused for that
+  folder, with the `sudo chown -R` step ([Doctor](#rootless-podman-checks)).
+- **SELinux.** On an SELinux host the Hub labels the template files it
+  mounts into apps (`z`). It never relabels shared folders.
+- **`GET /api/runtime`** (admins, Hub listener; the admin MCP tool
+  `get_runtime`) answers the runtime, whether it is verified, the engine's
+  name and version, a mismatch's text, whether the engine is rootless and
+  has SELinux, the Hub's own id maps and the host's
+  `ip_unprivileged_port_start` (the maps and the port are `null` under
+  Docker). See [contract §11.10](../guides/integration-contracts.md#1110-rootless-compatibility-new-rootless).
+
 ## Local networks
 
 **Settings → Local networks** lists the networks that count as local: one
@@ -2393,7 +2436,8 @@ sources you trust.
   containers that copy volumes for instance backups and restores:
   `ALLOW_ARCHIVE`). The socket proxy denies swarm, plugins, builds, secrets, configs and
   system prune. The Hub can still start containers with any configuration, so
-  treat it as host-root-equivalent.
+  treat it as host-root-equivalent (under [rootless Podman](#rootless-podman):
+  equivalent to the operator account).
 - **Runtime user.** The image runs as **uid/gid 10001** with a read-only root
   filesystem. It writes only `/data` (the `hub_data` volume), `/project/templates`
   and `/project/appfiles` (both chowned to 10001 by `./portcullis up`; the
