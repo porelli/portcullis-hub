@@ -586,11 +586,9 @@ func TestTranslatePodDNS(t *testing.T) {
 		}
 	}
 	for c, why := range map[string]string{
-		"services:\n  my_db:\n    image: docker.io/library/postgres:17\n":                                                              "service my_db: its name isn't a DNS label without \"--\" (not on Kubernetes)",
-		"services:\n  Web:\n    image: docker.io/library/nginx:1.29\n":                                                                 "service Web: its name isn't a DNS label without \"--\" (not on Kubernetes)",
-		"services:\n  a--b:\n    image: docker.io/library/nginx:1.29\n":                                                                "service a--b: its name isn't a DNS label without \"--\" (not on Kubernetes)",
-		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    container_name: www\n":                                        "service web sets container_name (not on Kubernetes)",
-		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    networks:\n      default:\n        aliases: [web-internal]\n": "service web answers to alias web-internal (not on Kubernetes)",
+		"services:\n  my_db:\n    image: docker.io/library/postgres:17\n": "service my_db: its name isn't a DNS label without \"--\" (not on Kubernetes)",
+		"services:\n  Web:\n    image: docker.io/library/nginx:1.29\n":    "service Web: its name isn't a DNS label without \"--\" (not on Kubernetes)",
+		"services:\n  a--b:\n    image: docker.io/library/nginx:1.29\n":   "service a--b: its name isn't a DNS label without \"--\" (not on Kubernetes)",
 	} {
 		if _, err := Translate(inputOf(t, c, "dn")); refusedErr(err) != why {
 			t.Errorf("%q: %v", c, err)
@@ -644,6 +642,48 @@ func TestTranslateOneShotRootMounts(t *testing.T) {
 			if g, ok, _ := unstructured.NestedInt64(o.Object, "spec", "template", "spec", "securityContext", "fsGroup"); ok && g == 0 {
 				t.Errorf("%s: fsGroup 0", u)
 			}
+		}
+	}
+}
+
+// TestTranslateAliases: a network alias or container_name gets a
+// ClusterIP Service <instance>--<alias> on the aliased pod's ports, in
+// the first step (before any pod), and Plan.Aliases names it; refused:
+// an alias that isn't a DNS label, is a compose name, names two
+// services, or whose pod declares no port.
+func TestTranslateAliases(t *testing.T) {
+	compose := "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    expose: [\"8080\"]\n    container_name: www\n    networks:\n      default:\n        aliases: [web-internal]\n" +
+		"  side:\n    image: docker.io/library/nginx:1.29\n    network_mode: service:web\n"
+	p, err := Translate(inputOf(t, compose, "al"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(p.Aliases) != "map[web-internal:al--web-internal www:al--www]" {
+		t.Errorf("aliases %v", p.Aliases)
+	}
+	found := 0
+	for _, o := range p.Steps[0].Objects {
+		if o.GetKind() == "Service" && (o.GetName() == "al--web-internal" || o.GetName() == "al--www") {
+			found++
+			sel, _, _ := unstructured.NestedStringMap(o.Object, "spec", "selector")
+			ports, _, _ := unstructured.NestedSlice(o.Object, "spec", "ports")
+			if sel[LabelService] != "web" || len(ports) != 1 || ports[0].(map[string]any)["port"] != int64(8080) {
+				t.Errorf("%s: %v", o.GetName(), o.Object["spec"])
+			}
+		}
+	}
+	if found != 2 {
+		t.Errorf("%d alias Services in the first step", found)
+	}
+	img := "    image: docker.io/library/nginx:1.29\n"
+	for c, why := range map[string]string{
+		"services:\n  web:\n" + img + "    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [Web_1]\n":                                                                                                         "service web answers to alias Web_1, not a DNS label without \"--\" (not on Kubernetes)",
+		"services:\n  web:\n" + img + "    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [db]\n  db:\n" + img:                                                                                               "service web answers to alias db, also a compose service name",
+		"services:\n  a:\n" + img + "    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [x-internal]\n  b:\n" + img + "    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [x-internal]\n": "alias x-internal names two services (a, b)",
+		"services:\n  web:\n" + img + "    networks:\n      default:\n        aliases: [web-internal]\n":                                                                                                                        "service web answers to alias web-internal but serves no declared port (expose it)",
+	} {
+		if _, err := Translate(inputOf(t, c, "al")); refusedErr(err) != why {
+			t.Errorf("%q: %v", c, err)
 		}
 	}
 }

@@ -561,3 +561,59 @@ func TestRoutesInEdgeNamespace(t *testing.T) {
 		// covered by TestDownKeepsPVCs' a--core
 	}
 }
+
+// TestUpHostAliases: an aliased service's ClusterIP Service is applied
+// in the first step, and every pod gets hostAliases with its allocated
+// clusterIP; a Service without one fails the deploy before any pod.
+func TestUpHostAliases(t *testing.T) {
+	compose := "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    expose: [\"8080\"]\n    networks:\n      default:\n        aliases: [web-internal]\n" +
+		"  gate:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n"
+	for _, alloc := range []string{"10.43.7.9", "", "192.0.2.1", "10.43.0.21", "10.43.0.0", "fd00::1"} {
+		c := newCluster(t)
+		c.dyn.PrependReactor("get", "services", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+			o, err := c.dyn.Tracker().Get(a.GetResource(), ns, a.(k8stesting.GetAction).GetName())
+			if err != nil {
+				return true, nil, err
+			}
+			u := o.(*unstructured.Unstructured).DeepCopy()
+			if alloc != "" {
+				unstructured.SetNestedField(u.Object, alloc, "spec", "clusterIP")
+			}
+			return true, u, nil
+		})
+		c.typed.PrependReactor("get", "deployments", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+			o, err := c.typed.Tracker().Get(a.GetResource(), ns, a.(k8stesting.GetAction).GetName())
+			if err != nil {
+				return true, nil, err
+			}
+			d := o.(*appsv1.Deployment).DeepCopy()
+			d.Status.ReadyReplicas = 1
+			return true, d, nil
+		})
+		b := c.backend(t)
+		err := b.Up(context.Background(), project(t, compose, "al"), nil)
+		got := c.Applied()
+		if alloc != "10.43.7.9" {
+			if err == nil || slices.ContainsFunc(got, func(s string) bool { return strings.HasPrefix(s, "Deployment/") }) {
+				t.Errorf("clusterIP %q: err %v, applied %v", alloc, err, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i, j := slices.Index(got, "Service/al--web-internal"), slices.Index(got, "Deployment/al--gate"); i < 0 || j < 0 || i > j {
+			t.Fatalf("applied %v", got)
+		}
+		for _, d := range []string{"al--web", "al--gate"} {
+			o, err := c.dyn.Resource(kinds["Deployment"]).Namespace(ns).Get(context.Background(), d, metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ha, _, _ := unstructured.NestedSlice(o.Object, "spec", "template", "spec", "hostAliases")
+			if fmt.Sprint(ha) != "[map[hostnames:[web-internal] ip:10.43.7.9]]" {
+				t.Errorf("%s hostAliases %v", d, ha)
+			}
+		}
+	}
+}

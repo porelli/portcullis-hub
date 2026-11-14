@@ -87,6 +87,7 @@ func kubeCompat(compose []byte, m Manifest, env map[string]string) Compat {
 	for _, s := range services {
 		c.kubeService(s.name, s.node, env, roots, k)
 	}
+	c.kubeAliases(services, k, env)
 	first := ""
 	if len(services) > 0 {
 		first = services[0].name
@@ -294,16 +295,76 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 	if eh := field(s, "extra_hosts"); eh != nil && eh.Tag != "!!null" && len(eh.Content) > 0 || eh != nil && eh.Kind == yaml.ScalarNode && eh.Tag != "!!null" && eh.Value != "" {
 		c.refuse("service %s sets extra_hosts (not on Kubernetes)", name)
 	}
-	if scalarValue(field(s, "container_name"), env) != "" {
-		c.refuse("service %s sets container_name (not on Kubernetes)", name)
-	}
-	for _, a := range networkAliases(s) {
-		shown := a
-		if !podDNSName.MatchString(a) {
-			shown = "a name"
+}
+
+// kubeAliases judges the network aliases and container_names (the
+// translator's alias Services + hostAliases): a DNS label without "--",
+// not a compose service name, one service each, on a pod that serves a
+// declared port; at most kubeMaxAliases.
+func (c *compatReasons) kubeAliases(services []namedService, k kubeCtx, env map[string]string) {
+	names := map[string]bool{}
+	podOf := map[string]string{}
+	for _, s := range services {
+		names[s.name] = true
+		podOf[s.name] = s.name
+		if v, ok := strings.CutPrefix(scalarValue(field(s.node, "network_mode"), env), "service:"); ok {
+			podOf[s.name] = v
 		}
-		c.refuse("service %s answers to alias %s (not on Kubernetes)", name, shown)
 	}
+	served := map[string]bool{}
+	for _, s := range services {
+		if servesPort(s.node, k.labels[s.name], env) {
+			served[podOf[s.name]] = true
+		}
+	}
+	owner := map[string]string{}
+	for _, s := range services {
+		var as []string
+		if cn := scalarValue(field(s.node, "container_name"), env); cn != "" {
+			as = append(as, cn)
+		}
+		as = append(as, networkAliases(s.node)...)
+		for _, a := range as {
+			shown := a
+			if !shownUserRe.MatchString(a) {
+				shown = "a name"
+			}
+			switch prev, dup := owner[a]; {
+			case !podDNSName.MatchString(a) || strings.Contains(a, "--"):
+				c.refuse("service %s answers to alias %s, not a DNS label without \"--\" (not on Kubernetes)", s.name, shown)
+			case names[a]:
+				c.refuse("service %s answers to alias %s, also a compose service name", s.name, a)
+			case dup && prev != s.name:
+				c.refuse("alias %s names two services (%s, %s)", a, min(prev, s.name), max(prev, s.name))
+			case !served[podOf[s.name]]:
+				c.refuse("service %s answers to alias %s but serves no declared port (expose it)", s.name, a)
+			default:
+				owner[a] = s.name
+			}
+		}
+	}
+	if len(owner) > kubeMaxAliases {
+		c.refuse("more than %d network aliases (not on Kubernetes)", kubeMaxAliases)
+	}
+}
+
+// kubeMaxAliases is the translator's MaxAliases.
+const kubeMaxAliases = 16
+
+// servesPort: s declares a port the translator's Services carry — a
+// Traefik loadbalancer port, expose, or a published port.
+func servesPort(s *yaml.Node, labels map[string]string, env map[string]string) bool {
+	for k := range labels {
+		if fk := FoldKey(k); strings.HasPrefix(fk, "traefik.http.services.") && strings.HasSuffix(fk, ".loadbalancer.server.port") {
+			return true
+		}
+	}
+	for _, key := range []string{"expose", "ports"} {
+		if n := field(s, key); n != nil && n.Kind == yaml.SequenceNode && len(n.Content) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func numeric(s string) bool { return s != "" && strings.Trim(s, "0123456789") == "" }

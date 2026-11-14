@@ -979,34 +979,6 @@
   }
  },
  {
-  "name": "kubernetes: container_name refused",
-  "runtime": "kubernetes",
-  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    container_name: www\n",
-  "ports": [],
-  "env": {},
-  "port_start": 80,
-  "want": {
-   "status": "refused",
-   "reasons": [
-    "service web sets container_name (not on Kubernetes)"
-   ]
-  }
- },
- {
-  "name": "kubernetes: a network alias refused",
-  "runtime": "kubernetes",
-  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    networks:\n      default:\n        aliases: [web-internal]\n",
-  "ports": [],
-  "env": {},
-  "port_start": 80,
-  "want": {
-   "status": "refused",
-   "reasons": [
-    "service web answers to alias web-internal (not on Kubernetes)"
-   ]
-  }
- },
- {
   "name": "kubernetes: a root job on the app's own volume ok",
   "runtime": "kubernetes",
   "compose": "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n    volumes: [\"data:/var/lib/app\"]\n    depends_on:\n      perms:\n        condition: service_completed_successfully\n  perms:\n    image: docker.io/library/alpine:3.24.3\n    user: \"0:1000\"\n    restart: \"no\"\n    cap_drop: [ALL]\n    cap_add: [CHOWN]\n    volumes: [\"data:/data\"]\nvolumes:\n  data: {}\n",
@@ -1139,6 +1111,86 @@
    "status": "refused",
    "reasons": [
     "service perms runs as root with template files mounted"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a network alias on a served port ok",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    expose: [\"8080\"]\n    networks:\n      default:\n        aliases: [web-internal]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "ok",
+   "reasons": []
+  }
+ },
+ {
+  "name": "kubernetes: container_name as an alias ok",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    container_name: www\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.web.rule: Host(`a.example.org`)\n      traefik.http.services.web.loadbalancer.server.port: \"8080\"\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "ok",
+   "reasons": []
+  }
+ },
+ {
+  "name": "kubernetes: an alias that isn't a DNS label refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [Web_1]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web answers to alias Web_1, not a DNS label without \"--\" (not on Kubernetes)"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: an alias that is a compose name refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [db]\n  db:\n    image: docker.io/library/nginx:1.29\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web answers to alias db, also a compose service name"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: an alias on two services refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  a:\n    image: docker.io/library/nginx:1.29\n    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [x-internal]\n  b:\n    image: docker.io/library/nginx:1.29\n    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [x-internal]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "alias x-internal names two services (a, b)"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: an alias without a declared port refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    networks:\n      default:\n        aliases: [web-internal]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web answers to alias web-internal but serves no declared port (expose it)"
    ]
   }
  }

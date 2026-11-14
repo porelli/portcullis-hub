@@ -5757,5 +5757,380 @@
   "as": "hub",
   "want": "deny",
   "reason_contains": "a Job's one-shot pods (portcullis.io/one-shot)"
+ },
+ {
+  "name": "a pod with hostAliases for the instance's aliases",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ok-ha",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "10.43.7.9",
+      "hostnames": [
+       "web-internal"
+      ]
+     },
+     {
+      "ip": "10.43.7.10",
+      "hostnames": [
+       "www"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "hostAliases to an IP outside the service network",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ha-9102",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "192.0.2.1",
+      "hostnames": [
+       "web-internal"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostAliases"
+ },
+ {
+  "name": "hostAliases to a pod-network IP",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ha-4591",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "10.42.0.5",
+      "hostnames": [
+       "web-internal"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostAliases"
+ },
+ {
+  "name": "hostAliases with a dotted hostname",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ha-900",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "10.43.7.9",
+      "hostnames": [
+       "auth.portcullis.local"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostAliases"
+ },
+ {
+  "name": "hostAliases with two hostnames in one entry",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ha-6644",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "10.43.7.9",
+      "hostnames": [
+       "a",
+       "b"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "hostAliases with 17 entries",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ha-970",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "10.43.7.0",
+      "hostnames": [
+       "a0"
+      ]
+     },
+     {
+      "ip": "10.43.7.1",
+      "hostnames": [
+       "a1"
+      ]
+     },
+     {
+      "ip": "10.43.7.2",
+      "hostnames": [
+       "a2"
+      ]
+     },
+     {
+      "ip": "10.43.7.3",
+      "hostnames": [
+       "a3"
+      ]
+     },
+     {
+      "ip": "10.43.7.4",
+      "hostnames": [
+       "a4"
+      ]
+     },
+     {
+      "ip": "10.43.7.5",
+      "hostnames": [
+       "a5"
+      ]
+     },
+     {
+      "ip": "10.43.7.6",
+      "hostnames": [
+       "a6"
+      ]
+     },
+     {
+      "ip": "10.43.7.7",
+      "hostnames": [
+       "a7"
+      ]
+     },
+     {
+      "ip": "10.43.7.8",
+      "hostnames": [
+       "a8"
+      ]
+     },
+     {
+      "ip": "10.43.7.9",
+      "hostnames": [
+       "a9"
+      ]
+     },
+     {
+      "ip": "10.43.7.10",
+      "hostnames": [
+       "a10"
+      ]
+     },
+     {
+      "ip": "10.43.7.11",
+      "hostnames": [
+       "a11"
+      ]
+     },
+     {
+      "ip": "10.43.7.12",
+      "hostnames": [
+       "a12"
+      ]
+     },
+     {
+      "ip": "10.43.7.13",
+      "hostnames": [
+       "a13"
+      ]
+     },
+     {
+      "ip": "10.43.7.14",
+      "hostnames": [
+       "a14"
+      ]
+     },
+     {
+      "ip": "10.43.7.15",
+      "hostnames": [
+       "a15"
+      ]
+     },
+     {
+      "ip": "10.43.7.16",
+      "hostnames": [
+       "a16"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostAliases"
+ },
+ {
+  "name": "hostAliases to an IPv6 address",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ha-1651",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "fd00::1",
+      "hostnames": [
+       "web-internal"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostAliases"
+ },
+ {
+  "name": "hostAliases to a core fixed IP (the service network's static band)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ha-static",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostAliases": [
+     {
+      "ip": "10.43.0.21",
+      "hostnames": [
+       "web-internal"
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostAliases"
  }
 ]

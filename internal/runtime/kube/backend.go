@@ -356,7 +356,12 @@ func (b *Backend) Create(ctx context.Context, p runtime.Project) error {
 	if err != nil {
 		return err
 	}
-	for _, s := range pl.Steps {
+	for i, s := range pl.Steps {
+		if i > 0 {
+			if s.Objects, err = b.withHostAliases(ctx, p.Instance, pl, s.Objects); err != nil {
+				return err
+			}
+		}
 		for _, o := range s.Objects {
 			switch o.GetKind() {
 			case "Job":
@@ -388,7 +393,12 @@ func (b *Backend) Up(ctx context.Context, p runtime.Project, onPull func(svc str
 	}
 	ctx, cancel := context.WithTimeout(ctx, b.cfg.UpTimeout)
 	defer cancel()
-	for _, s := range pl.Steps {
+	for i, s := range pl.Steps {
+		if i > 0 {
+			if s.Objects, err = b.withHostAliases(ctx, p.Instance, pl, s.Objects); err != nil {
+				return err
+			}
+		}
 		for _, o := range s.Objects {
 			if o.GetKind() == "Job" {
 				// A Job's template is immutable: a finished one is
@@ -415,6 +425,57 @@ func (b *Backend) Up(ctx context.Context, p runtime.Project, onPull func(svc str
 	}
 	b.mu.Unlock()
 	return nil
+}
+
+// withHostAliases: objs with every workload's pod given hostAliases for
+// the plan's aliases, each at its Service's allocated clusterIP (read
+// after the first step applied them). A Service without a clusterIP, or
+// one outside the service network, fails the deploy: nothing resolves
+// an alias elsewhere.
+func (b *Backend) withHostAliases(ctx context.Context, instance string, pl Plan, objs []*unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
+	if len(pl.Aliases) == 0 {
+		return objs, nil
+	}
+	svcNet, err := netip.ParsePrefix(b.cfg.Settings.ServiceCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("aliases: the service network %q: %v", b.cfg.Settings.ServiceCIDR, err)
+	}
+	var entries []any
+	for _, a := range slices.Sorted(mapKeys(pl.Aliases)) {
+		svc, err := b.cfg.Dynamic.Resource(kinds["Service"]).Namespace(b.cfg.Namespace).Get(ctx, pl.Aliases[a], metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("alias %s: reading Service %s: %w", a, pl.Aliases[a], err)
+		}
+		cip, _, _ := unstructured.NestedString(svc.Object, "spec", "clusterIP")
+		ip, err := netip.ParseAddr(cip)
+		if err != nil || !ip.Is4() || !svcNet.Contains(ip) || ip == svcNet.Masked().Addr() || staticBand(svcNet).Contains(ip) || svc.GetLabels()[LabelInstance] != instance {
+			return nil, fmt.Errorf("alias %s: Service %s has no clusterIP in the service network (%q) or isn't the instance's", a, pl.Aliases[a], cip)
+		}
+		entries = append(entries, map[string]any{"ip": ip.String(), "hostnames": []any{a}})
+	}
+	out := make([]*unstructured.Unstructured, len(objs))
+	for i, o := range objs {
+		out[i] = o
+		if k := o.GetKind(); k != "Deployment" && k != "Job" {
+			continue
+		}
+		c := o.DeepCopy()
+		if err := unstructured.SetNestedSlice(c.Object, entries, "spec", "template", "spec", "hostAliases"); err != nil {
+			return nil, err
+		}
+		out[i] = c
+	}
+	return out, nil
+}
+
+// staticBand is the service network's static band (core's admission:
+// the first min(max(16, size/16), 256) addresses, where core's fixed
+// clusterIPs live): an alias never resolves there.
+func staticBand(svcNet netip.Prefix) netip.Prefix {
+	bits := 32 - svcNet.Bits()
+	band := min(max(bits-4, 4), 8)
+	p, _ := svcNet.Masked().Addr().Prefix(32 - band)
+	return p
 }
 
 func (b *Backend) replaceJob(ctx context.Context, instance string, o *unstructured.Unstructured) error {

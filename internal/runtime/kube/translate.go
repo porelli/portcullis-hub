@@ -141,7 +141,14 @@ type Plan struct {
 	// Services: compose service → its workload object name (the pod's
 	// owner), the containers it runs (the service first).
 	Services map[string]string
+	// Aliases: network alias (or container_name) → its ClusterIP
+	// Service, in the first step; every workload gets hostAliases with
+	// their allocated clusterIPs (HostAliases).
+	Aliases map[string]string
 }
+
+// MaxAliases bounds an instance's aliases (hostAliases entries per pod).
+const MaxAliases = 16
 
 // Objects are every object of p, in order.
 func (p Plan) Objects() []*unstructured.Unstructured {
@@ -323,6 +330,25 @@ func (t *translator) run() (Plan, error) {
 			services = append(services, svc)
 		}
 	}
+	// Network aliases (and container_name): a ClusterIP Service
+	// <instance>--<alias> on the aliased pod's ports, created before
+	// the pods; the backend gives every pod a hostAliases entry with its
+	// allocated clusterIP.
+	aliasOf, _ := t.aliases()
+	aliasSvc := map[string]string{}
+	for _, a := range slices.Sorted(mapKeys(aliasOf)) {
+		n := aliasOf[a]
+		name := ObjectName(t.in.Instance, a)
+		svc, err := t.podService(name, "alias "+a, podOf[n], names, podOf, routed)
+		if err != nil {
+			return Plan{}, err
+		}
+		if svc == nil {
+			return Plan{}, refused("service %s answers to alias %s but serves no declared port (expose it)", n, a)
+		}
+		services = append(services, svc)
+		aliasSvc[a] = name
+	}
 	edge := t.in.EdgeNamespace
 	if edge == "" {
 		edge = EdgeNamespace
@@ -347,7 +373,7 @@ func (t *translator) run() (Plan, error) {
 			return Plan{}, refused("service %s runs as root and mounts a volume no non-root service mounts (its owner on Kubernetes)", t.rootPVCs[name])
 		}
 	}
-	plan := Plan{Services: map[string]string{}}
+	plan := Plan{Services: map[string]string{}, Aliases: aliasSvc}
 	for _, n := range names {
 		plan.Services[n] = ObjectName(t.in.Instance, podOf[n])
 	}
@@ -365,6 +391,9 @@ func (t *translator) run() (Plan, error) {
 // compat runs templates' Kubernetes rules on the model's services.
 func (t *translator) compat() error {
 	m := t.in.Model
+	if _, err := t.aliases(); err != nil {
+		return err
+	}
 	for _, n := range slices.Sorted(mapKeys(m.Services)) {
 		s := m.Services[n]
 		switch {
@@ -402,18 +431,6 @@ func (t *translator) compat() error {
 		if !podDNSLabel(n) {
 			return refused("service %s: its name isn't a DNS label without \"--\" (not on Kubernetes)", n)
 		}
-		if s.ContainerName != "" {
-			return refused("service %s sets container_name (not on Kubernetes)", n)
-		}
-		for _, net := range slices.Sorted(mapKeys(s.Networks)) {
-			if nc := s.Networks[net]; nc != nil {
-				for _, a := range nc.Aliases {
-					if !t.companionAlias(n, a) {
-						return refused("service %s answers to alias %s (not on Kubernetes)", n, a)
-					}
-				}
-			}
-		}
 		if s.User != "" {
 			uid, _, err := numericUser(s.User)
 			if err != nil {
@@ -441,6 +458,52 @@ func (t *translator) compat() error {
 		}
 	}
 	return nil
+}
+
+// aliases are the instance's network aliases and container_names (alias
+// → its compose service), the Hub's own companion aliases left out
+// (their Services are companionServices). Refused: one that isn't a DNS
+// label without "--", is a compose service name, or names two services.
+func (t *translator) aliases() (map[string]string, error) {
+	m := t.in.Model
+	out := map[string]string{}
+	add := func(n, a string) error {
+		if t.companionAlias(n, a) {
+			return nil
+		}
+		if !podDNSLabel(a) {
+			return refused("service %s answers to alias %s, not a DNS label without \"--\" (not on Kubernetes)", n, a)
+		}
+		if _, ok := m.Services[a]; ok {
+			return refused("service %s answers to alias %s, also a compose service name", n, a)
+		}
+		if prev, ok := out[a]; ok && prev != n {
+			return refused("alias %s names two services (%s, %s)", a, min(prev, n), max(prev, n))
+		}
+		out[a] = n
+		return nil
+	}
+	for _, n := range slices.Sorted(mapKeys(m.Services)) {
+		s := m.Services[n]
+		if s.ContainerName != "" {
+			if err := add(n, s.ContainerName); err != nil {
+				return nil, err
+			}
+		}
+		for _, net := range slices.Sorted(mapKeys(s.Networks)) {
+			if nc := s.Networks[net]; nc != nil {
+				for _, a := range nc.Aliases {
+					if err := add(n, a); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+	}
+	if len(out) > MaxAliases {
+		return nil, refused("more than %d network aliases (not on Kubernetes)", MaxAliases)
+	}
+	return out, nil
 }
 
 // podDNSLabelRe: a compose service name that can be a pod's hostname.
@@ -1479,6 +1542,12 @@ func (t *translator) companionServices(podOf map[string]string) ([]*unstructured
 // expose and the published ports' targets. No port, no Service; the
 // clusterIP is always allocated (never set).
 func (t *translator) clusterService(pod string, names []string, podOf map[string]string, routed map[string][]int) (*unstructured.Unstructured, error) {
+	return t.podService(ObjectName(t.in.Instance, pod), "the Service of "+pod, pod, names, podOf, routed)
+}
+
+// podService is a ClusterIP Service name selecting pod on every port its
+// members serve (nil: no port).
+func (t *translator) podService(name, from, pod string, names []string, podOf map[string]string, routed map[string][]int) (*unstructured.Unstructured, error) {
 	type key struct {
 		port  int
 		proto corev1.Protocol
@@ -1531,8 +1600,7 @@ func (t *translator) clusterService(pod string, names []string, podOf map[string
 		}
 		return strings.Compare(string(a.proto), string(b.proto))
 	})
-	name := ObjectName(t.in.Instance, pod)
-	if err := t.claim("service", name, "the Service of "+pod); err != nil {
+	if err := t.claim("service", name, from); err != nil {
 		return nil, err
 	}
 	svc := &corev1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: meta(name, t.in.Namespace, t.labels(pod)),
