@@ -3,8 +3,15 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"maps"
 	"slices"
 	"strings"
+	"time"
+
+	"k8s.io/apimachinery/pkg/watch"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +32,7 @@ func (b *Backend) LiveExposure(ctx context.Context, instance string) (Exposure, 
 	}
 	out := Exposure{}
 	for _, k := range []string{"IngressRoute", "Middleware"} {
-		l, err := b.cfg.Dynamic.Resource(kinds[k]).Namespace(b.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: LabelInstance + "=" + instance})
+		l, err := b.cfg.Dynamic.Resource(kinds[k]).Namespace(b.cfg.EdgeNamespace).List(ctx, metav1.ListOptions{LabelSelector: LabelInstance + "=" + instance + "," + LabelOwner + "=" + OwnerHub})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
@@ -48,7 +55,7 @@ func (b *Backend) LiveExposure(ctx context.Context, instance string) (Exposure, 
 // renders now from labels ("" = equal): a missing, extra or changed
 // IngressRoute or Middleware, named.
 func (b *Backend) ExposureDrift(ctx context.Context, instance string, labels map[string]map[string]string) (string, error) {
-	want, err := IngressObjects(instance, b.cfg.Namespace, labels)
+	want, err := IngressObjects(instance, b.cfg.EdgeNamespace, b.cfg.Namespace, labels)
 	if err != nil {
 		return "", err
 	}
@@ -83,11 +90,36 @@ func (e Exposure) Diff(want []*unstructured.Unstructured) string {
 	return strings.Join(out, ", ")
 }
 
-// GatewayIPs are the wired providers' gateway pods (label
-// portcullis.io/vpn-slot) seen Running and Ready with an IPv4 address:
-// instance → pod IP (K5). A pod being replaced is left out until its
-// successor is Ready.
-func (b *Backend) GatewayIPs(ctx context.Context) (map[string]string, error) {
+// GatewayPod is a wired provider's gateway pod as published: its IP and
+// its UID (a pod reusing the IP is another pod).
+type GatewayPod struct{ IP, UID string }
+
+// gatewayPublished is what may be published from pods (K5, fail
+// closed): per instance the one pod labelled portcullis.io/vpn-slot that
+// is Running and Ready with an IPv4 address and not terminating; two
+// such pods for one instance → neither.
+func gatewayPublished(pods map[string]*corev1.Pod) map[string]GatewayPod {
+	out := map[string]GatewayPod{}
+	seen := map[string]int{}
+	for _, p := range pods {
+		inst := p.Labels[LabelInstance]
+		if inst == "" || p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" || strings.Contains(p.Status.PodIP, ":") || !podReady(*p) {
+			continue
+		}
+		seen[inst]++
+		out[inst] = GatewayPod{IP: p.Status.PodIP, UID: string(p.UID)}
+	}
+	for inst, n := range seen {
+		if n > 1 {
+			delete(out, inst)
+		}
+	}
+	return out
+}
+
+// GatewayIPs is a one-shot read of the published gateways (tests,
+// status).
+func (b *Backend) GatewayIPs(ctx context.Context) (map[string]GatewayPod, error) {
 	if err := b.gate(); err != nil {
 		return nil, err
 	}
@@ -95,22 +127,86 @@ func (b *Backend) GatewayIPs(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]string{}
-	seen := map[string]int{}
-	for _, p := range l.Items {
-		inst := p.Labels[LabelInstance]
-		if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" || strings.Contains(p.Status.PodIP, ":") || !podReady(p) {
-			continue
-		}
-		seen[inst]++
-		out[inst] = p.Status.PodIP
+	pods := map[string]*corev1.Pod{}
+	for i := range l.Items {
+		pods[string(l.Items[i].UID)] = &l.Items[i]
 	}
-	for inst, n := range seen {
-		if n > 1 {
-			delete(out, inst) // two gateways: which one is it? neither
+	return gatewayPublished(pods), nil
+}
+
+// WatchGateways keeps fn told of the published gateways (K5): a list,
+// then a watch from its resourceVersion; every event recomputes and fn
+// hears every change at once (a delete, not-Ready, a terminating pod, a
+// new UID or IP unpublishes before anything else). When the watch can't
+// be started or ends, fn gets an empty map (nothing is trusted while it
+// can't be confirmed) and the list+watch starts again after a pause.
+// Returns when ctx ends.
+func (b *Backend) WatchGateways(ctx context.Context, fn func(map[string]GatewayPod)) {
+	var last map[string]GatewayPod
+	emit := func(m map[string]GatewayPod) {
+		if last == nil || !maps.EqualFunc(last, m, func(a, b GatewayPod) bool { return a == b }) {
+			last = m
+			fn(m)
 		}
 	}
-	return out, nil
+	pause := time.Second
+	for ctx.Err() == nil {
+		if err := b.watchGatewaysOnce(ctx, emit); err != nil && ctx.Err() == nil {
+			log.Printf("kube: the VPN gateway watch broke (%v): no gateway is published until it is back", err)
+		}
+		emit(map[string]GatewayPod{}) // fail closed
+		if b.cfg.Sleep(ctx, pause) != nil {
+			return
+		}
+		if pause < 30*time.Second {
+			pause *= 2
+		}
+	}
+}
+
+func (b *Backend) watchGatewaysOnce(ctx context.Context, emit func(map[string]GatewayPod)) error {
+	if err := b.gate(); err != nil {
+		return err
+	}
+	sel := LabelVPNSlot + "," + LabelInstance
+	podsAPI := b.cfg.Client.CoreV1().Pods(b.cfg.Namespace)
+	l, err := podsAPI.List(ctx, metav1.ListOptions{LabelSelector: sel})
+	if err != nil {
+		return err
+	}
+	pods := map[string]*corev1.Pod{}
+	for i := range l.Items {
+		pods[string(l.Items[i].UID)] = &l.Items[i]
+	}
+	w, err := podsAPI.Watch(ctx, metav1.ListOptions{LabelSelector: sel, ResourceVersion: l.ResourceVersion})
+	if err != nil {
+		return err
+	}
+	defer w.Stop()
+	emit(gatewayPublished(pods))
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case ev, ok := <-w.ResultChan():
+			if !ok {
+				return errors.New("the watch ended")
+			}
+			switch ev.Type {
+			case watch.Error:
+				return fmt.Errorf("watch error: %v", apierrors.FromObject(ev.Object))
+			case watch.Deleted:
+				if p, ok := ev.Object.(*corev1.Pod); ok {
+					delete(pods, string(p.UID))
+				}
+			case watch.Added, watch.Modified:
+				if p, ok := ev.Object.(*corev1.Pod); ok {
+					pods[string(p.UID)] = p.DeepCopy()
+				}
+			}
+			emit(gatewayPublished(pods))
+		}
+	}
 }
 
 func podReady(p corev1.Pod) bool {

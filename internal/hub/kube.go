@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"maps"
 	"net/netip"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -251,29 +253,36 @@ func (h *Hub) kubeCoreValue(key string) string {
 	return strings.TrimSpace(readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))[key])
 }
 
-// gatewayWatcher is the kube backend's view of the wired providers'
-// gateway pods: instance → pod IP of a Running+Ready pod labelled
-// portcullis.io/vpn-slot.
+// gatewayWatcher is the kube backend's watch of the wired providers'
+// gateway pods (K5).
 type gatewayWatcher interface {
-	GatewayIPs(ctx context.Context) (map[string]string, error)
+	WatchGateways(ctx context.Context, fn func(map[string]kube.GatewayPod))
 }
 
-// kubeGatewayIP is wired provider id's observed gateway pod IP.
+// kubeGatewayIP is wired provider id's confirmed gateway pod IP.
 func (h *Hub) kubeGatewayIP(id string) (netip.Addr, error) {
 	h.vpnrt.mu.Lock()
-	raw := h.vpnrt.gatewayIPs[id]
+	gp := h.vpnrt.gatewayIPs[id]
 	h.vpnrt.mu.Unlock()
-	a, err := netip.ParseAddr(raw)
-	if err != nil || !a.Is4() {
-		return netip.Addr{}, fmt.Errorf("the gateway pod of %s has no observed IP", id)
+	a, err := netip.ParseAddr(gp.IP)
+	if err != nil || !a.Is4() || gp.UID == "" {
+		return netip.Addr{}, fmt.Errorf("the gateway pod of %s isn't confirmed", id)
 	}
 	return a, nil
 }
 
-// kubeGatewayTick reads the gateway pods (Kubernetes) and republishes
-// vpn.json when a provider's IP changed: a rescheduled pod's provider
-// is unpublished until its new pod is seen (its old IP never stays).
-func (h *Hub) kubeGatewayTick(ctx context.Context) {
+// KubeGateways is the confirmed gateway pods (provider → IP and UID;
+// the doctor, status).
+func (h *Hub) KubeGateways() map[string]kube.GatewayPod {
+	h.vpnrt.mu.Lock()
+	defer h.vpnrt.mu.Unlock()
+	return maps.Clone(h.vpnrt.gatewayIPs)
+}
+
+// RunKubeGateways follows the gateway pods (Kubernetes) until ctx ends:
+// every change — a delete, not Ready, terminating, another UID or IP, a
+// broken watch (nothing confirmed) — re-renders vpn.json at once.
+func (h *Hub) RunKubeGateways(ctx context.Context) {
 	if !h.kubeOn() || h.rt == nil {
 		return
 	}
@@ -281,16 +290,25 @@ func (h *Hub) kubeGatewayTick(ctx context.Context) {
 	if !ok {
 		return
 	}
-	ips, err := gw.GatewayIPs(ctx)
-	if err != nil {
-		ips = map[string]string{} // unknown: nothing published (fail closed)
-	}
+	gw.WatchGateways(ctx, h.setKubeGateways)
+}
+
+// setKubeGateways records the confirmed gateways and, on a change,
+// publishes vpn.json before returning (the edge reloads it).
+func (h *Hub) setKubeGateways(m map[string]kube.GatewayPod) {
 	h.vpnrt.mu.Lock()
-	changed := !maps.Equal(ips, h.vpnrt.gatewayIPs)
-	h.vpnrt.gatewayIPs = ips
+	changed := !maps.Equal(m, h.vpnrt.gatewayIPs)
+	h.vpnrt.gatewayIPs = maps.Clone(m)
 	h.vpnrt.mu.Unlock()
-	if changed {
-		h.TriggerVPNPublish()
+	if !changed {
+		return
+	}
+	h.vpnrt.pubMu.Lock()
+	err := h.publishVPN()
+	h.vpnrt.pubMu.Unlock()
+	if err != nil {
+		log.Printf("vpn: publishing after a gateway change: %v", err)
+		h.TriggerVPNPublish() // retried
 	}
 }
 

@@ -107,19 +107,20 @@ spec:
         || variables.spec.securityContext.sysctls.all(s, s.name in variables.safeSysctls)
       message: "sysctls outside the baseline's safe set"
     - expression: >-
-        !has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath)
-          || (!v.hostPath.path.contains('..') && variables.bindRoots.exists(r, r != '' && (v.hostPath.path == r || v.hostPath.path.startsWith(r + '/')))))
-      message: "a hostPath outside the bind roots"
+        !has(variables.spec.volumes) || variables.spec.volumes.all(v, has(v.emptyDir)
+          || (has(v.configMap) && (v.configMap.name.startsWith(variables.instance + '--') || v.configMap.name.startsWith('tpl-')))
+          || (has(v.secret) && (v.secret.secretName.startsWith(variables.instance + '--') || v.secret.secretName.startsWith('tpl-')))
+          || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName.startsWith(variables.instance + '--'))
+          || (has(v.hostPath) && !v.hostPath.path.contains('..') && variables.bindRoots.exists(r, r != '' && (v.hostPath.path == r || v.hostPath.path.startsWith(r + '/'))))
+          || (has(v.projected) && has(v.projected.sources) && v.projected.sources.all(s, has(s.downwardAPI)
+            || (has(s.secret) && (s.secret.name.startsWith(variables.instance + '--') || s.secret.name.startsWith('tpl-'))) || (has(s.configMap) && (s.configMap.name.startsWith(variables.instance + '--') || s.configMap.name.startsWith('tpl-'))))))
+      message: "a volume outside the allowlist (emptyDir; the instance's own ConfigMap, Secret, PVC; hostPath under the bind roots; projected secret/configMap/downwardAPI)"
     - expression: >-
         (!has(variables.spec.serviceAccountName) || variables.spec.serviceAccountName == '' || variables.spec.serviceAccountName == 'default')
         && has(variables.spec.automountServiceAccountToken) && !variables.spec.automountServiceAccountToken
       message: "pods run as the default ServiceAccount without a token"
     - expression: >-
-        (!has(variables.spec.volumes) || variables.spec.volumes.all(v,
-          (!has(v.secret) || (v.secret.secretName.startsWith(variables.instance + '--') || v.secret.secretName.startsWith('tpl-'))) && (!has(v.configMap) || (v.configMap.name.startsWith(variables.instance + '--') || v.configMap.name.startsWith('tpl-')))
-          && (!has(v.persistentVolumeClaim) || (v.persistentVolumeClaim.claimName.startsWith(variables.instance + '--') || v.persistentVolumeClaim.claimName.startsWith('tpl-')))
-          && (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s, (!has(s.secret) || (s.secret.name.startsWith(variables.instance + '--') || s.secret.name.startsWith('tpl-'))) && (!has(s.configMap) || (s.configMap.name.startsWith(variables.instance + '--') || s.configMap.name.startsWith('tpl-')))))))
-        && variables.containers.all(c, (!has(c.envFrom) || c.envFrom.all(e, (!has(e.secretRef) || (e.secretRef.name.startsWith(variables.instance + '--') || e.secretRef.name.startsWith('tpl-'))) && (!has(e.configMapRef) || (e.configMapRef.name.startsWith(variables.instance + '--') || e.configMapRef.name.startsWith('tpl-')))))
+        variables.containers.all(c, (!has(c.envFrom) || c.envFrom.all(e, (!has(e.secretRef) || (e.secretRef.name.startsWith(variables.instance + '--') || e.secretRef.name.startsWith('tpl-'))) && (!has(e.configMapRef) || (e.configMapRef.name.startsWith(variables.instance + '--') || e.configMapRef.name.startsWith('tpl-')))))
           && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || ((!has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.secretKeyRef.name.startsWith('tpl-'))) && (!has(e.valueFrom.configMapKeyRef) || (e.valueFrom.configMapKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.configMapKeyRef.name.startsWith('tpl-')))))))
       message: "a Secret, ConfigMap or PVC outside the pod's instance"
     - expression: >-
@@ -258,19 +259,20 @@ spec:
         || variables.spec.securityContext.sysctls.all(s, s.name in variables.safeSysctls)
       message: "sysctls outside the baseline's safe set"
     - expression: >-
-        variables.isSecret || !has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath)
-          || (!v.hostPath.path.contains('..') && variables.bindRoots.exists(r, r != '' && (v.hostPath.path == r || v.hostPath.path.startsWith(r + '/')))))
-      message: "a hostPath outside the bind roots"
+        variables.isSecret || !has(variables.spec.volumes) || variables.spec.volumes.all(v, has(v.emptyDir)
+          || (has(v.configMap) && (v.configMap.name.startsWith(variables.instance + '--') || v.configMap.name.startsWith('tpl-')))
+          || (has(v.secret) && (v.secret.secretName.startsWith(variables.instance + '--') || v.secret.secretName.startsWith('tpl-')))
+          || (has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName.startsWith(variables.instance + '--'))
+          || (has(v.hostPath) && !v.hostPath.path.contains('..') && variables.bindRoots.exists(r, r != '' && (v.hostPath.path == r || v.hostPath.path.startsWith(r + '/'))))
+          || (has(v.projected) && has(v.projected.sources) && v.projected.sources.all(s, has(s.downwardAPI)
+            || (has(s.secret) && (s.secret.name.startsWith(variables.instance + '--') || s.secret.name.startsWith('tpl-'))) || (has(s.configMap) && (s.configMap.name.startsWith(variables.instance + '--') || s.configMap.name.startsWith('tpl-'))))))
+      message: "a volume outside the allowlist (emptyDir; the instance's own ConfigMap, Secret, PVC; hostPath under the bind roots; projected secret/configMap/downwardAPI)"
     - expression: >-
         variables.isSecret || ((!has(variables.spec.serviceAccountName) || variables.spec.serviceAccountName == '' || variables.spec.serviceAccountName == 'default')
         && has(variables.spec.automountServiceAccountToken) && !variables.spec.automountServiceAccountToken)
       message: "pods run as the default ServiceAccount without a token"
     - expression: >-
-        variables.isSecret || ((!has(variables.spec.volumes) || variables.spec.volumes.all(v,
-          (!has(v.secret) || (v.secret.secretName.startsWith(variables.instance + '--') || v.secret.secretName.startsWith('tpl-'))) && (!has(v.configMap) || (v.configMap.name.startsWith(variables.instance + '--') || v.configMap.name.startsWith('tpl-')))
-          && (!has(v.persistentVolumeClaim) || (v.persistentVolumeClaim.claimName.startsWith(variables.instance + '--') || v.persistentVolumeClaim.claimName.startsWith('tpl-')))
-          && (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s, (!has(s.secret) || (s.secret.name.startsWith(variables.instance + '--') || s.secret.name.startsWith('tpl-'))) && (!has(s.configMap) || (s.configMap.name.startsWith(variables.instance + '--') || s.configMap.name.startsWith('tpl-')))))))
-        && variables.containers.all(c, (!has(c.envFrom) || c.envFrom.all(e, (!has(e.secretRef) || (e.secretRef.name.startsWith(variables.instance + '--') || e.secretRef.name.startsWith('tpl-'))) && (!has(e.configMapRef) || (e.configMapRef.name.startsWith(variables.instance + '--') || e.configMapRef.name.startsWith('tpl-')))))
+        variables.isSecret || (variables.containers.all(c, (!has(c.envFrom) || c.envFrom.all(e, (!has(e.secretRef) || (e.secretRef.name.startsWith(variables.instance + '--') || e.secretRef.name.startsWith('tpl-'))) && (!has(e.configMapRef) || (e.configMapRef.name.startsWith(variables.instance + '--') || e.configMapRef.name.startsWith('tpl-')))))
           && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || ((!has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.secretKeyRef.name.startsWith('tpl-'))) && (!has(e.valueFrom.configMapKeyRef) || (e.valueFrom.configMapKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.configMapKeyRef.name.startsWith('tpl-'))))))))
       message: "a Secret, ConfigMap or PVC outside the pod's instance"
     - expression: >-
@@ -331,9 +333,18 @@ spec:
     resourceRules:
       - apiGroups: ["traefik.io"]
         apiVersions: ["*"]
-        operations: ["CREATE", "UPDATE"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
         resources: ["ingressroutes", "middlewares", "ingressroutetcps", "ingressrouteudps", "traefikservices", "serverstransports", "tlsoptions", "tlsstores"]
+  # Bound to the edge namespace (the only one Traefik watches). Only the
+  # Hub's requests are judged: core's own routes (owner core) are the
+  # chart's.
   variables:
+    - name: hub
+      expression: "request.userInfo.username == params.data.hubServiceAccount"
+    - name: obj
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    - name: labels
+      expression: "has(variables.obj.metadata.labels) ? variables.obj.metadata.labels : {}"
     - name: file
       expression: "params.data.fileMiddlewares.split(',')"
     - name: fileServices
@@ -341,48 +352,86 @@ spec:
     - name: tiers
       expression: "['authaware@file', 'public@file', 'protected@file', 'protected-any@file']"
     - name: ns
-      expression: "object.metadata.namespace"
+      expression: "variables.obj.metadata.namespace"
     - name: mwOK
       expression: >-
-        has(object.spec) && has(object.spec.routes) ? object.spec.routes.all(r, !has(r.middlewares) || r.middlewares.all(m,
+        has(variables.obj.spec) && has(variables.obj.spec.routes) ? variables.obj.spec.routes.all(r, !has(r.middlewares) || r.middlewares.all(m,
           (!has(m.namespace) || m.namespace == variables.ns) && (!m.name.contains('@') || m.name in variables.file))) : true
     - name: svcOK
       expression: >-
-        has(object.spec) && has(object.spec.routes) ? object.spec.routes.all(r, !has(r.services) || r.services.all(s,
+        has(variables.obj.spec) && has(variables.obj.spec.routes) ? variables.obj.spec.routes.all(r, !has(r.services) || r.services.all(s,
           has(s.kind) && s.kind == 'TraefikService' ? s.name in variables.fileServices
-          : !s.name.contains('@') && (!has(s.namespace) || s.namespace == variables.ns))) : true
+          : !s.name.contains('@') && has(s.namespace) && s.namespace == params.data.appsNamespace)) : true
     - name: headers
       expression: >-
-        object.kind == 'Middleware' && has(object.spec.headers)
-        ? (has(object.spec.headers.customRequestHeaders) ? object.spec.headers.customRequestHeaders : {})
+        variables.obj.kind == 'Middleware' && has(variables.obj.spec.headers)
+        ? (has(variables.obj.spec.headers.customRequestHeaders) ? variables.obj.spec.headers.customRequestHeaders : {})
         : {}
     - name: respHeaders
       expression: >-
-        object.kind == 'Middleware' && has(object.spec.headers) && has(object.spec.headers.customResponseHeaders)
-        ? object.spec.headers.customResponseHeaders : {}
+        variables.obj.kind == 'Middleware' && has(variables.obj.spec.headers) && has(variables.obj.spec.headers.customResponseHeaders)
+        ? variables.obj.spec.headers.customResponseHeaders : {}
+    - name: routes
+      expression: "variables.obj.kind == 'IngressRoute' && has(variables.obj.spec.routes) ? variables.obj.spec.routes : []"
+    - name: reserved
+      expression: "params.data.reservedHosts.split(',')"
   validations:
-    - expression: "object.kind in ['IngressRoute', 'Middleware']"
-      messageExpression: "object.kind + ' is not allowed for apps'"
-    - expression: "object.kind != 'IngressRoute' || variables.mwOK"
-      message: "a middleware outside the namespace or the @file list"
-    - expression: "object.kind != 'IngressRoute' || variables.svcOK"
-      message: "a service outside the namespace (or an @internal / unlisted TraefikService)"
     - expression: >-
-        object.kind != 'IngressRoute' || !has(object.spec.tls) || ((!has(object.spec.tls.options) || object.spec.tls.options.name in variables.tiers)
-          && !has(object.spec.tls.secretName) && !has(object.spec.tls.store))
+        !variables.hub || ('portcullis.io/owner' in variables.labels && variables.labels['portcullis.io/owner'] == 'hub'
+          && 'portcullis.io/instance' in variables.labels && variables.labels['portcullis.io/instance'] != '')
+      message: "the Hub's routes carry portcullis.io/owner: hub and an instance (owner core objects are never the Hub's)"
+    - expression: "!variables.hub || request.operation == 'DELETE' || variables.obj.kind in ['IngressRoute', 'Middleware']"
+      messageExpression: "variables.obj.kind + ' is not allowed for apps'"
+    - expression: "!variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'IngressRoute' || variables.mwOK"
+      message: "a middleware outside the namespace or the @file list"
+    - expression: "!variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'IngressRoute' || variables.svcOK"
+      message: "a service outside the apps namespace (or an @internal / unlisted TraefikService)"
+    - expression: >-
+        !variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'IngressRoute' || !has(variables.obj.spec.tls)
+        || ((!has(variables.obj.spec.tls.options) || variables.obj.spec.tls.options.name in variables.tiers)
+          && !has(variables.obj.spec.tls.secretName) && !has(variables.obj.spec.tls.store))
       message: "TLS options outside the tiers, or a Secret reference"
-    - expression: "object.kind != 'Middleware' || !has(object.spec.forwardAuth)"
+    # The shape the Hub renders on Docker: Host(`h`) [|| Host(`h`)…], with
+    # an optional && Path / PathPrefix [|| …]; nothing else (no
+    # HostRegexp, HostSNI, ClientIP, headers, methods, no catch-all).
+    - expression: >-
+        !variables.hub || request.operation == 'DELETE' || variables.routes.all(r, has(r.match)
+          && r.match.matches('^\\(?Host\\(`[a-z0-9.-]+`\\)( \\|\\| Host\\(`[a-z0-9.-]+`\\))*\\)?( && \\(?(PathPrefix|Path)\\(`[^`()]*`\\)( \\|\\| (PathPrefix|Path)\\(`[^`()]*`\\))*\\)?)?$'))
+      message: "a route match other than Host(...) with an optional && Path / PathPrefix"
+    - expression: >-
+        !variables.hub || request.operation == 'DELETE' || variables.routes.all(r, !has(r.match)
+          || r.match.findAll('Host\\(`[a-z0-9.-]+`\\)').all(h, !(h.substring(6, size(h) - 2) in variables.reserved)))
+      message: "a route on a reserved core hostname"
+    - expression: >-
+        !variables.hub || request.operation == 'DELETE' || variables.routes.all(r, !has(r.priority) || r.priority <= int(params.data.maxRoutePriority))
+      message: "a route priority above the cap"
+    - expression: >-
+        !variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'IngressRoute'
+        || (has(variables.obj.spec.entryPoints) && size(variables.obj.spec.entryPoints) > 0
+          && variables.obj.spec.entryPoints.all(e, e in params.data.entryPoints.split(',')))
+      message: "entryPoints outside the allowlist"
+    - expression: "!variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'IngressRoute' || has(variables.obj.spec.tls)"
+      message: "a route without TLS"
+    # Not enforced here (cross-object or per-tier): one host claimed by
+    # two instances, and which gate chain a route must carry. Both stay in
+    # the Hub, exactly as on Docker (the rendering and the host collision
+    # checks): routes without the gate there are the public link router
+    # (portcullis-public-guard instead), the extra-domain sign-in router
+    # (service forward-auth-ext), MCP routers (service mcp-gate) and apps
+    # on their own login (custom / native-OIDC tiers).
+    - expression: "!variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'Middleware' || !has(variables.obj.spec.forwardAuth)"
       message: "a forwardAuth Middleware is not allowed"
     - expression: >-
-        object.kind != 'Middleware' || (!has(object.spec.basicAuth) && !has(object.spec.digestAuth))
+        !variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'Middleware' || (!has(variables.obj.spec.basicAuth) && !has(variables.obj.spec.digestAuth))
       message: "a Middleware referencing a Secret is not allowed"
     - expression: >-
-        !variables.headers.exists(k, k.lowerAscii().replace('_', '-').startsWith('x-portcullis-'))
-        && !variables.respHeaders.exists(k, k.lowerAscii().replace('_', '-').startsWith('x-portcullis-'))
+        !variables.hub || request.operation == 'DELETE'
+        || (!variables.headers.exists(k, k.lowerAscii().replace('_', '-').startsWith('x-portcullis-'))
+          && !variables.respHeaders.exists(k, k.lowerAscii().replace('_', '-').startsWith('x-portcullis-')))
       message: "a Middleware may not set X-Portcullis-* headers"
     - expression: >-
-        object.kind != 'Middleware' || !has(object.spec.chain) || !has(object.spec.chain.middlewares)
-        || object.spec.chain.middlewares.all(m, (!has(m.namespace) || m.namespace == variables.ns) && (!m.name.contains('@') || m.name in variables.file))
+        !variables.hub || request.operation == 'DELETE' || variables.obj.kind != 'Middleware' || !has(variables.obj.spec.chain) || !has(variables.obj.spec.chain.middlewares)
+        || variables.obj.spec.chain.middlewares.all(m, (!has(m.namespace) || m.namespace == variables.ns) && (!m.name.contains('@') || m.name in variables.file))
       message: "a chain middleware outside the namespace or the @file list"
 ---
 apiVersion: admissionregistration.k8s.io/v1

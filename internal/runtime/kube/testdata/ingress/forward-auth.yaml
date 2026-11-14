@@ -4,8 +4,9 @@ kind: IngressRoute
 metadata:
   labels:
     portcullis.io/instance: app
+    portcullis.io/owner: hub
   name: app--r-app
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   entryPoints:
   - websecure
@@ -20,6 +21,7 @@ spec:
     services:
     - kind: Service
       name: app--web
+      namespace: portcullis-apps
       port: 8080
   tls:
     options:

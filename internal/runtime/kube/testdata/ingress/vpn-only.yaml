@@ -4,8 +4,9 @@ kind: Middleware
 metadata:
   labels:
     portcullis.io/instance: app
+    portcullis.io/owner: hub
   name: app--m-portcullis-vpnallow-app
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   ipAllowList:
     rejectStatusCode: 404
@@ -18,8 +19,9 @@ kind: IngressRoute
 metadata:
   labels:
     portcullis.io/instance: app
+    portcullis.io/owner: hub
   name: app--r-app
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   entryPoints:
   - vpnsecure
@@ -28,13 +30,14 @@ spec:
     match: Host(`app.example.org`)
     middlewares:
     - name: app--m-portcullis-vpnallow-app
-      namespace: portcullis-apps
+      namespace: portcullis-edge
     - name: client-headers@file
     - name: portcullis-auth@file
     - name: portcullis-groups-vpn@file
     services:
     - kind: Service
       name: app--web
+      namespace: portcullis-apps
       port: 80
   tls:
     options:
@@ -45,8 +48,9 @@ kind: IngressRoute
 metadata:
   labels:
     portcullis.io/instance: app
+    portcullis.io/owner: hub
   name: app--r-app-vpnreq
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   entryPoints:
   - websecure

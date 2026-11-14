@@ -80,6 +80,8 @@ type Config struct {
 	Context      string
 	RuntimeRoots []string
 	BindRoots    []string
+	// EdgeNamespace holds the instance's routes ("" = portcullis-edge).
+	EdgeNamespace string
 }
 
 // Backend serves runtime.Instances on Kubernetes.
@@ -103,6 +105,9 @@ func New(cfg Config) (*Backend, error) {
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
+	}
+	if cfg.EdgeNamespace == "" {
+		cfg.EdgeNamespace = EdgeNamespace
 	}
 	if cfg.Poll <= 0 {
 		cfg.Poll = 250 * time.Millisecond
@@ -232,11 +237,15 @@ func (b *Backend) apply(ctx context.Context, instance string, o *unstructured.Un
 	if o.GetLabels()[LabelInstance] != instance {
 		return fmt.Errorf("kube: %s %s doesn't carry %s=%s: not applied", o.GetKind(), o.GetName(), LabelInstance, instance)
 	}
-	res := b.cfg.Dynamic.Resource(r).Namespace(b.cfg.Namespace)
+	ns, edge := b.objectNamespace(o)
+	if edge && o.GetLabels()[LabelOwner] != OwnerHub {
+		return fmt.Errorf("kube: %s %s isn't labelled %s=%s: not applied", o.GetKind(), o.GetName(), LabelOwner, OwnerHub)
+	}
+	res := b.cfg.Dynamic.Resource(r).Namespace(ns)
 	cur, err := res.Get(ctx, o.GetName(), metav1.GetOptions{})
 	switch {
 	case err == nil:
-		if cur.GetLabels()[LabelInstance] != instance {
+		if cur.GetLabels()[LabelInstance] != instance || edge && cur.GetLabels()[LabelOwner] != OwnerHub {
 			return fmt.Errorf("%s %s exists and isn't instance %s's (label %s=%q): not touching it", strings.ToLower(o.GetKind()), o.GetName(), instance, LabelInstance, cur.GetLabels()[LabelInstance])
 		}
 	case apierrors.IsNotFound(err):
@@ -254,13 +263,25 @@ func (b *Backend) apply(ctx context.Context, instance string, o *unstructured.Un
 	return nil
 }
 
+// edgeKinds live in the edge namespace.
+var edgeKinds = map[string]bool{"IngressRoute": true, "Middleware": true}
+
+// objectNamespace is where o goes: the edge namespace for routes (true),
+// else the apps namespace.
+func (b *Backend) objectNamespace(o *unstructured.Unstructured) (string, bool) {
+	if edgeKinds[o.GetKind()] {
+		return b.cfg.EdgeNamespace, true
+	}
+	return b.cfg.Namespace, false
+}
+
 // input is p's translation input with the digests resolved (cached
 // ones first; the new ones returned apart, committed after success).
 func (b *Backend) input(ctx context.Context, p runtime.Project) (Input, map[string]string, error) {
 	if p.Model == nil {
 		return Input{}, nil, fmt.Errorf("%s: the project's model isn't loaded", p.Instance)
 	}
-	in := Input{Instance: p.Instance, Namespace: b.cfg.Namespace, Model: p.Model, HubImage: b.cfg.HubImage, BindRoots: b.cfg.BindRoots, Settings: b.cfg.Settings, Digests: map[string]string{}}
+	in := Input{Instance: p.Instance, Namespace: b.cfg.Namespace, EdgeNamespace: b.cfg.EdgeNamespace, Model: p.Model, HubImage: b.cfg.HubImage, BindRoots: b.cfg.BindRoots, Settings: b.cfg.Settings, Digests: map[string]string{}}
 	if x := p.Inputs; x != nil {
 		in.Template, in.TemplateFiles, in.PersonSecrets, in.LanOnly, in.Jobs = x.Template, x.TemplateFiles, x.PersonSecrets, x.LanOnly, x.Jobs
 		in.VPNSlot, in.IngressService = x.VPNSlot, x.IngressService
@@ -517,8 +538,15 @@ func (b *Backend) down(ctx context.Context, instance string) error {
 	bg := metav1.DeletePropagationBackground
 	var errs []error
 	for _, k := range downKinds {
-		res := b.cfg.Dynamic.Resource(kinds[k]).Namespace(b.cfg.Namespace)
-		l, err := res.List(ctx, sel)
+		ns, sl := b.cfg.Namespace, sel
+		if edgeKinds[k] {
+			// The edge namespace: only the Hub's own objects of the
+			// instance (owner=core is never touched).
+			ns = b.cfg.EdgeNamespace
+			sl = metav1.ListOptions{LabelSelector: LabelInstance + "=" + instance + "," + LabelOwner + "=" + OwnerHub}
+		}
+		res := b.cfg.Dynamic.Resource(kinds[k]).Namespace(ns)
+		l, err := res.List(ctx, sl)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				continue // the CRD isn't installed
@@ -527,7 +555,7 @@ func (b *Backend) down(ctx context.Context, instance string) error {
 			continue
 		}
 		for _, o := range l.Items {
-			if o.GetLabels()[LabelInstance] != instance {
+			if o.GetLabels()[LabelInstance] != instance || edgeKinds[k] && o.GetLabels()[LabelOwner] != OwnerHub {
 				continue
 			}
 			if err := res.Delete(ctx, o.GetName(), metav1.DeleteOptions{PropagationPolicy: &bg}); err != nil && !apierrors.IsNotFound(err) {

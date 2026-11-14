@@ -7,7 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	ktypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	k8stesting "k8s.io/client-go/testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -78,7 +84,7 @@ var ingressCases = map[string]map[string]map[string]string{
 
 func TestIngressGoldens(t *testing.T) {
 	for name, labels := range ingressCases {
-		objs, err := IngressObjects("app", ns, labels)
+		objs, err := IngressObjects("app", EdgeNamespace, ns, labels)
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
 			continue
@@ -96,12 +102,12 @@ func TestIngressGoldens(t *testing.T) {
 	}
 	// vpnsecure: the allowlist is the chain's first middleware, in the
 	// instance's own namespace.
-	objs, _ := IngressObjects("app", ns, ingressCases["vpn-only"])
+	objs, _ := IngressObjects("app", EdgeNamespace, ns, ingressCases["vpn-only"])
 	for _, o := range objs {
 		if o.GetKind() == "IngressRoute" && o.GetName() == "app--r-app" {
 			r := o.Object["spec"].(map[string]any)["routes"].([]any)[0].(map[string]any)
 			m := r["middlewares"].([]any)[0].(map[string]any)
-			if m["name"] != "app--m-portcullis-vpnallow-app" || m["namespace"] != ns {
+			if m["name"] != "app--m-portcullis-vpnallow-app" || m["namespace"] != EdgeNamespace {
 				t.Errorf("first middleware %v", m)
 			}
 		}
@@ -118,7 +124,7 @@ func refusedErr(err error) string {
 
 func TestCrossNamespaceMiddlewareRefused(t *testing.T) {
 	for _, mw := range []string{"hub-proxy-secret@docker", "portcullis-auth-console@docker", "other-app-mw@docker", "strip-forwarded@file", "api@internal", "x@kubernetescrd"} {
-		_, err := IngressObjects("app", ns, map[string]map[string]string{"web": {
+		_, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {
 			"traefik.http.routers.app.rule": "Host(`a.example.org`)", "traefik.http.routers.app.middlewares": mw,
 			"traefik.http.services.app.loadbalancer.server.port": "80"}})
 		if refusedErr(err) == "" {
@@ -135,7 +141,7 @@ func TestForwardAuthMiddlewareRefused(t *testing.T) {
 	} {
 		f["traefik.http.routers.app.rule"] = "Host(`a.example.org`)"
 		f["traefik.http.services.app.loadbalancer.server.port"] = "80"
-		if _, err := IngressObjects("app", ns, map[string]map[string]string{"web": f}); refusedErr(err) == "" {
+		if _, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": f}); refusedErr(err) == "" {
 			t.Errorf("%v: %v", f, err)
 		}
 	}
@@ -143,7 +149,7 @@ func TestForwardAuthMiddlewareRefused(t *testing.T) {
 
 func TestCoreServiceRefsAreFile(t *testing.T) {
 	for svc, want := range map[string]string{"forward-auth-ext@docker": "forward-auth-ext@file", "mcp-gate@docker": "mcp-gate@file", "group-gate@docker": "group-gate@file"} {
-		objs, err := IngressObjects("app", ns, map[string]map[string]string{"web": {"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.routers.r.service": svc}})
+		objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.routers.r.service": svc}})
 		if err != nil {
 			t.Fatalf("%s: %v", svc, err)
 		}
@@ -154,7 +160,7 @@ func TestCoreServiceRefsAreFile(t *testing.T) {
 		}
 	}
 	for _, svc := range []string{"hub@docker", "api@internal", "keycloak@docker", "noop@internal"} {
-		_, err := IngressObjects("app", ns, map[string]map[string]string{"web": {"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.routers.r.service": svc}})
+		_, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.routers.r.service": svc}})
 		if refusedErr(err) == "" {
 			t.Errorf("%s accepted: %v", svc, err)
 		}
@@ -259,41 +265,108 @@ func TestPolicyEgressExcludesClusterAndNode(t *testing.T) {
 	}
 }
 
-func readyPod(name, inst, ip string, ready bool) *corev1.Pod {
+func readyPod(name, uid, inst, ip string, ready bool) *corev1.Pod {
 	st := corev1.ConditionFalse
 	if ready {
 		st = corev1.ConditionTrue
 	}
-	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: map[string]string{LabelInstance: inst, LabelVPNSlot: "3"}},
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, UID: ktypes.UID(uid), Namespace: ns, Labels: map[string]string{LabelInstance: inst, LabelVPNSlot: "3"}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: st}}}}
 }
 
-// TestGatewayIPFollowsPod (backend part): only a Running+Ready pod's IP
-// is reported; a pod being replaced is left out until its successor is
-// Ready; the old IP is never reported again.
+// gwRecorder collects WatchGateways' callbacks.
+type gwRecorder struct {
+	mu   sync.Mutex
+	last map[string]GatewayPod
+	n    int
+}
+
+func (r *gwRecorder) fn(m map[string]GatewayPod) {
+	r.mu.Lock()
+	r.last, r.n = m, r.n+1
+	r.mu.Unlock()
+}
+
+func (r *gwRecorder) waitFor(t *testing.T, what string, ok func(map[string]GatewayPod) bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		m, n := r.last, r.n
+		r.mu.Unlock()
+		if n > 0 && ok(m) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: last %v", what, m)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestGatewayIPFollowsPod (backend): the watch publishes a gateway only
+// while that exact pod (UID) is Running, Ready and not terminating; a
+// delete unpublishes at once (no refresh tick); a new pod with the same
+// IP but another UID isn't trusted until it's Ready; a lost watch
+// publishes nothing.
 func TestGatewayIPFollowsPod(t *testing.T) {
 	c := newCluster(t)
 	b := c.backend(t)
-	ctx := context.Background()
+	b.cfg.Sleep = func(ctx context.Context, d time.Duration) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+			return nil
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	pods := c.typed.CoreV1().Pods(ns)
-	pods.Create(ctx, readyPod("mesh--gw-a", "mesh", "10.42.0.5", true), metav1.CreateOptions{})
-	if got, _ := b.GatewayIPs(ctx); got["mesh"] != "10.42.0.5" {
-		t.Fatalf("A: %v", got)
-	}
-	// Rescheduled: A goes, B not ready yet.
+	pods.Create(ctx, readyPod("mesh--gw-a", "uid-a", "mesh", "10.42.0.5", true), metav1.CreateOptions{})
+	r := &gwRecorder{}
+	go b.WatchGateways(ctx, r.fn)
+	r.waitFor(t, "A", func(m map[string]GatewayPod) bool { return m["mesh"] == GatewayPod{IP: "10.42.0.5", UID: "uid-a"} })
+	// Deleted: gone at once.
 	pods.Delete(ctx, "mesh--gw-a", metav1.DeleteOptions{})
-	pods.Create(ctx, readyPod("mesh--gw-b", "mesh", "10.42.1.9", false), metav1.CreateOptions{})
-	if got, _ := b.GatewayIPs(ctx); len(got) != 0 {
-		t.Fatalf("between: %v", got)
+	r.waitFor(t, "deleted", func(m map[string]GatewayPod) bool { return len(m) == 0 })
+	// The same IP on another pod, not Ready: not trusted.
+	pods.Create(ctx, readyPod("mesh--gw-b", "uid-b", "mesh", "10.42.0.5", false), metav1.CreateOptions{})
+	time.Sleep(50 * time.Millisecond)
+	r.mu.Lock()
+	if len(r.last) != 0 {
+		t.Errorf("a not-Ready pod reusing the IP was published: %v", r.last)
 	}
-	pods.Update(ctx, readyPod("mesh--gw-b", "mesh", "10.42.1.9", true), metav1.UpdateOptions{})
-	if got, _ := b.GatewayIPs(ctx); got["mesh"] != "10.42.1.9" {
-		t.Fatalf("B: %v", got)
+	r.mu.Unlock()
+	pods.Update(ctx, readyPod("mesh--gw-b", "uid-b", "mesh", "10.42.0.5", true), metav1.UpdateOptions{})
+	r.waitFor(t, "B ready", func(m map[string]GatewayPod) bool { return m["mesh"] == GatewayPod{IP: "10.42.0.5", UID: "uid-b"} })
+	// Terminating: unpublished.
+	term := readyPod("mesh--gw-b", "uid-b", "mesh", "10.42.0.5", true)
+	now := metav1.Now()
+	term.DeletionTimestamp = &now
+	pods.Update(ctx, term, metav1.UpdateOptions{})
+	r.waitFor(t, "terminating", func(m map[string]GatewayPod) bool { return len(m) == 0 })
+}
+
+// A watch that can't be started publishes nothing.
+func TestGatewayWatchLostPublishesNothing(t *testing.T) {
+	c := newCluster(t)
+	b := c.backend(t)
+	c.typed.CoreV1().Pods(ns).Create(context.Background(), readyPod("mesh--gw-a", "uid-a", "mesh", "10.42.0.5", true), metav1.CreateOptions{})
+	c.typed.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+		return true, nil, errors.New("connection refused")
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &gwRecorder{}
+	b.cfg.Sleep = func(context.Context, time.Duration) error { cancel(); return context.Canceled }
+	b.WatchGateways(ctx, r.fn)
+	if r.n == 0 || len(r.last) != 0 {
+		t.Errorf("a lost watch published %v (%d calls)", r.last, r.n)
 	}
 }
 
 func TestExposureDiff(t *testing.T) {
-	want, _ := IngressObjects("app", ns, ingressCases["forward-auth"])
+	want, _ := IngressObjects("app", EdgeNamespace, ns, ingressCases["forward-auth"])
 	live := Exposure{}
 	if d := live.Diff(want); !strings.Contains(d, "missing ingressroute/app--r-app") {
 		t.Errorf("diff %q", d)

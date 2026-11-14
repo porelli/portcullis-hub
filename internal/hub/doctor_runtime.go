@@ -33,5 +33,9 @@ func (h *Hub) doctorKubeIn(ctx context.Context) *doctor.KubeIn {
 		return true
 	})
 	slices.Sort(in.ReloadDegraded)
+	for id, g := range h.KubeGateways() {
+		in.Gateways = append(in.Gateways, id+" "+g.IP+" "+g.UID)
+	}
+	slices.Sort(in.Gateways)
 	return in
 }

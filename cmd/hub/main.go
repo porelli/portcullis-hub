@@ -589,6 +589,9 @@ func main() {
 	go h.RunImpersonationExpiry(ctx, 5*time.Second)
 	// VPN providers: identity and dns hooks when due, vpn.json (§16).
 	go h.RunVPNMaps(ctx, 5*time.Second)
+	// Kubernetes: the VPN gateway pods, watched (K5: vpn.json follows them
+	// at once; nothing published while the watch isn't confirmed).
+	go h.RunKubeGateways(ctx)
 	// Built-in VPN devices: expiry and revocation (V26).
 	go h.RunVPNExpiry(ctx, 10*time.Second)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when

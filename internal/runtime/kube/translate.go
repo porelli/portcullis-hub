@@ -97,6 +97,9 @@ type Input struct {
 	// (§3.2); CoreNamespace is PORTCULLIS_NAMESPACE ("" = portcullis).
 	CompanionPorts map[string][]int
 	CoreNamespace  string
+	// EdgeNamespace is where the instance's IngressRoutes and Middlewares
+	// go ("" = portcullis-edge).
+	EdgeNamespace string
 }
 
 // WaitKind is what Up waits for after a step.
@@ -277,7 +280,11 @@ func (t *translator) run() (Plan, error) {
 			egress = append(egress, n)
 		}
 	}
-	routes, err := IngressObjects(t.in.Instance, t.in.Namespace, labels)
+	edge := t.in.EdgeNamespace
+	if edge == "" {
+		edge = EdgeNamespace
+	}
+	routes, err := IngressObjects(t.in.Instance, edge, t.in.Namespace, labels)
 	if err != nil {
 		return Plan{}, err
 	}

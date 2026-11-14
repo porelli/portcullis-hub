@@ -17,7 +17,14 @@ const (
 	LabelVolume    = "portcullis.io/volume"
 	LabelVPNSlot   = "portcullis.io/vpn-slot"
 	LabelComponent = "portcullis.io/component"
-	LabelProbe     = "portcullis.io/probe"
+	// LabelOwner marks the edge namespace's objects: hub (the Hub's
+	// routes) or core (the chart's, never touched by the Hub).
+	LabelOwner = "portcullis.io/owner"
+	OwnerHub   = "hub"
+	// EdgeNamespace is the default edge namespace (Traefik watches only
+	// it: IngressRoutes and Middlewares).
+	EdgeNamespace = "portcullis-edge"
+	LabelProbe    = "portcullis.io/probe"
 	// ProbeInstance is the probe pods' instance label value (no
 	// instance id starts with portcullis, §11.1).
 	ProbeInstance = "portcullis-probe"

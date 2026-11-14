@@ -4,8 +4,9 @@ kind: IngressRoute
 metadata:
   labels:
     portcullis.io/instance: app
+    portcullis.io/owner: hub
   name: app--r-app-mcp
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   entryPoints:
   - websecure

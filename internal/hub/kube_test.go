@@ -2,13 +2,11 @@ package hub
 
 import (
 	"context"
-	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -86,25 +84,6 @@ func TestKubeSelfImage(t *testing.T) {
 	}
 }
 
-// gwRuntime is a runtime that reports gateway pod IPs (Kubernetes K5).
-type gwRuntime struct {
-	runtime.Instances
-	mu  sync.Mutex
-	ips map[string]string
-}
-
-func (g *gwRuntime) GatewayIPs(context.Context) (map[string]string, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return maps.Clone(g.ips), nil
-}
-
-func (g *gwRuntime) set(ips map[string]string) {
-	g.mu.Lock()
-	g.ips = ips
-	g.mu.Unlock()
-}
-
 func publishedGateways(t *testing.T, v *vpnFixture) map[string]string {
 	t.Helper()
 	b, err := os.ReadFile(v.h.vpnJSONPath())
@@ -125,35 +104,36 @@ func publishedGateways(t *testing.T, v *vpnFixture) map[string]string {
 }
 
 // TestGatewayIPFollowsPod (hub part): under Kubernetes a wired provider
-// is published with its gateway pod's observed IP; while its pod is
-// being replaced it is left out (the document still parses: never an
-// empty gateway_ip), then published with the new IP; the old one never
-// comes back.
+// is published with its confirmed gateway pod's IP; each watch change
+// re-renders vpn.json before setKubeGateways returns (no tick): deleted
+// → left out (the document still parses: never an empty gateway_ip),
+// another pod (UID) → its IP; the UID is kept with the IP.
 func TestGatewayIPFollowsPod(t *testing.T) {
 	v := newVPNFixture(t, nil)
 	v.wire(t, "mesh")
 	v.devicesOut = devicesDoc("100.64.0.1", hookDev("12", "100.64.0.7", "sub-alice"))
 	v.h.runVPNProvider(context.Background(), "mesh")
 	v.h.cfg.Runtime = runtime.KindKubernetes
-	gw := &gwRuntime{Instances: v.h.rt}
-	v.h.rt = gw
-	tick := func(ips map[string]string) map[string]string {
-		gw.set(ips)
-		v.h.kubeGatewayTick(context.Background())
-		v.h.TriggerVPNPublish()
-		v.h.Wait()
-		return publishedGateways(t, v)
-	}
-	if got := tick(map[string]string{"mesh": "10.42.0.5"}); got["mesh"] != "10.42.0.5" {
+	v.h.setKubeGateways(map[string]kube.GatewayPod{"mesh": {IP: "10.42.0.5", UID: "uid-a"}})
+	if got := publishedGateways(t, v); got["mesh"] != "10.42.0.5" {
 		t.Fatalf("A: %v", got)
 	}
-	if got := tick(map[string]string{}); len(got) != 0 {
-		t.Fatalf("rescheduling: %v", got)
+	if g := v.h.KubeGateways()["mesh"]; g.UID != "uid-a" {
+		t.Errorf("uid %+v", g)
 	}
-	if got := tick(map[string]string{"mesh": "10.42.1.9"}); got["mesh"] != "10.42.1.9" {
+	v.h.setKubeGateways(map[string]kube.GatewayPod{})
+	if got := publishedGateways(t, v); len(got) != 0 {
+		t.Fatalf("deleted: %v", got)
+	}
+	v.h.setKubeGateways(map[string]kube.GatewayPod{"mesh": {IP: "10.42.1.9", UID: "uid-b"}})
+	if got := publishedGateways(t, v); got["mesh"] != "10.42.1.9" {
 		t.Fatalf("B: %v", got)
 	}
-	// The edge is wg-edge's ClusterIP port.
+	// An IP without a UID is never trusted.
+	v.h.setKubeGateways(map[string]kube.GatewayPod{"mesh": {IP: "10.42.1.9"}})
+	if got := publishedGateways(t, v); len(got) != 0 {
+		t.Fatalf("no uid: %v", got)
+	}
 	v.h.mu.RLock()
 	_, edge, ok := v.h.vpnGatewayLocked(v.h.findLocked("mesh"))
 	v.h.mu.RUnlock()

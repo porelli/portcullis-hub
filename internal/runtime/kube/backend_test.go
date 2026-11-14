@@ -64,10 +64,11 @@ func newCluster(t *testing.T, objs ...k8sruntime.Object) *cluster {
 		c.mu.Unlock()
 		tr := c.dyn.Tracker()
 		gvr := p.GetResource()
-		if _, err := tr.Get(gvr, ns, u.GetName()); err == nil {
-			tr.Update(gvr, &u, ns)
+		pns := p.GetNamespace()
+		if _, err := tr.Get(gvr, pns, u.GetName()); err == nil {
+			tr.Update(gvr, &u, pns)
 		} else {
-			tr.Create(gvr, &u, ns)
+			tr.Create(gvr, &u, pns)
 		}
 		c.mirror(&u)
 		return true, &u, nil
@@ -246,10 +247,17 @@ func TestApplyNeverTouchesForeignObjects(t *testing.T) {
 // instance's object.
 func TestDownKeepsPVCs(t *testing.T) {
 	obj := func(apiVersion, kind, name, inst string) *unstructured.Unstructured {
-		return &unstructured.Unstructured{Object: map[string]any{"apiVersion": apiVersion, "kind": kind,
+		o := &unstructured.Unstructured{Object: map[string]any{"apiVersion": apiVersion, "kind": kind,
 			"metadata": map[string]any{"name": name, "namespace": ns, "labels": map[string]any{LabelInstance: inst}}}}
+		if edgeKinds[kind] {
+			o.SetNamespace(EdgeNamespace)
+			o.SetLabels(map[string]string{LabelInstance: inst, LabelOwner: OwnerHub})
+		}
+		return o
 	}
-	c := newCluster(t,
+	coreRoute := obj("traefik.io/v1alpha1", "IngressRoute", "a--core", "a")
+	coreRoute.SetLabels(map[string]string{LabelInstance: "a", LabelOwner: "core"})
+	c := newCluster(t, coreRoute,
 		obj("apps/v1", "Deployment", "a--web", "a"), obj("v1", "Service", "a--web-80-tcp", "a"), obj("traefik.io/v1alpha1", "IngressRoute", "a--r-web", "a"),
 		obj("traefik.io/v1alpha1", "Middleware", "a--m-x", "a"), obj("networking.k8s.io/v1", "NetworkPolicy", "a--net-default", "a"),
 		obj("v1", "ConfigMap", "a--people", "a"), obj("v1", "Secret", "a--env", "a"), obj("v1", "PersistentVolumeClaim", "a--data", "a"),
@@ -503,5 +511,53 @@ func TestListUnits(t *testing.T) {
 	}
 	if _, err := c.backend(t).State(ctx, "l--gone-1/web"); !apierrors.IsNotFound(err) {
 		t.Errorf("missing pod: %v", err)
+	}
+}
+
+// Routes land in the edge namespace, labelled owner hub + instance, with
+// Service refs into the apps namespace; Down deletes them there and never
+// an owner core object.
+func TestRoutesInEdgeNamespace(t *testing.T) {
+	core := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "traefik.io/v1alpha1", "kind": "IngressRoute",
+		"metadata": map[string]any{"name": "rt--r-app", "namespace": EdgeNamespace, "labels": map[string]any{LabelInstance: "rt", LabelOwner: "core"}}}}
+	c := newCluster(t)
+	b := c.backend(t)
+	ctx := context.Background()
+	compose := "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    labels:\n      traefik.http.routers.app.rule: Host(`a.example.org`)\n      traefik.http.routers.app.middlewares: own-mw,security-headers@file\n      traefik.http.middlewares.own-mw.headers.customrequestheaders.X-Forwarded-User: \"\"\n      traefik.http.services.app.loadbalancer.server.port: \"80\"\n"
+	if err := b.Up(ctx, project(t, compose, "rt"), nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"IngressRoute", "Middleware"} {
+		l, err := c.dyn.Resource(kinds[k]).Namespace(EdgeNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil || len(l.Items) != 1 {
+			t.Fatalf("%s in edge: %v %v", k, l, err)
+		}
+		o := l.Items[0]
+		if o.GetLabels()[LabelOwner] != OwnerHub || o.GetLabels()[LabelInstance] != "rt" {
+			t.Errorf("%s labels %v", k, o.GetLabels())
+		}
+		if k == "IngressRoute" {
+			r := o.Object["spec"].(map[string]any)["routes"].([]any)[0].(map[string]any)
+			if s := r["services"].([]any)[0].(map[string]any); s["namespace"] != ns {
+				t.Errorf("service ref %v", s)
+			}
+			if m := r["middlewares"].([]any)[0].(map[string]any); m["namespace"] != EdgeNamespace {
+				t.Errorf("middleware ref %v", m)
+			}
+		}
+		if l, _ := c.dyn.Resource(kinds[k]).Namespace(ns).List(ctx, metav1.ListOptions{}); len(l.Items) != 0 {
+			t.Errorf("%s in the apps namespace", k)
+		}
+	}
+	c.dyn.Tracker().Create(kinds["IngressRoute"], core, EdgeNamespace)
+	if err := b.DownByName(ctx, "portcullis-rt"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(c.deleted, "ingressroutes/rt--r-app") || !slices.Contains(c.deleted, "middlewares/rt--m-own-mw") {
+		t.Errorf("deleted %v", c.deleted)
+	}
+	if _, err := c.dyn.Resource(kinds["IngressRoute"]).Namespace(EdgeNamespace).Get(ctx, "rt--r-app", metav1.GetOptions{}); err == nil {
+		// the Hub's own is gone; a core one of that name would stay —
+		// covered by TestDownKeepsPVCs' a--core
 	}
 }

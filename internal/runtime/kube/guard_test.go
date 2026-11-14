@@ -40,6 +40,7 @@ type guardRig struct {
 	c        *cluster
 	dir      string
 	apps     authv1.SubjectRulesReviewStatus
+	edge     authv1.SubjectRulesReviewStatus
 	core     authv1.SubjectRulesReviewStatus
 	selfTest func(kind string) error
 	probe    error
@@ -50,13 +51,22 @@ func newGuardRig(t *testing.T) (*guardRig, *Guard) {
 	r := &guardRig{c: newCluster(t), dir: t.TempDir()}
 	r.apps = authv1.SubjectRulesReviewStatus{ResourceRules: roleRules(t), NonResourceRules: defaultRules.nonResources}
 	r.core = authv1.SubjectRulesReviewStatus{ResourceRules: defaultRules.resources, NonResourceRules: defaultRules.nonResources}
+	er, _ := EdgeRole()
+	var edgeRules []authv1.ResourceRule
+	for _, p := range er.Rules {
+		edgeRules = append(edgeRules, authv1.ResourceRule{Verbs: p.Verbs, APIGroups: p.APIGroups, Resources: p.Resources})
+	}
+	r.edge = authv1.SubjectRulesReviewStatus{ResourceRules: append(edgeRules, defaultRules.resources...), NonResourceRules: defaultRules.nonResources}
 	byKind := map[string]string{"Pod": "pods", "Deployment": "workloads", "Service": "services", "Middleware": "traefik", "NetworkPolicy": "netpol"}
 	r.selfTest = func(kind string) error { return vapDenied(byKind[kind], "nope") }
 	r.c.typed.PrependReactor("create", "selfsubjectrulesreviews", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		rv := a.(k8stesting.CreateAction).GetObject().(*authv1.SelfSubjectRulesReview).DeepCopy()
-		if rv.Spec.Namespace == ns {
+		switch rv.Spec.Namespace {
+		case ns:
 			rv.Status = r.apps
-		} else {
+		case EdgeNamespace:
+			rv.Status = r.edge
+		default:
 			rv.Status = r.core
 		}
 		return true, rv, nil
@@ -198,6 +208,17 @@ func TestRoleExact(t *testing.T) {
 	}
 	if r.Namespace != "portcullis-apps" || r.Kind != "Role" {
 		t.Errorf("role %s/%s", r.Kind, r.Namespace)
+	}
+	for _, p := range r.Rules {
+		for _, g := range p.APIGroups {
+			if g == "traefik.io" {
+				t.Error("routes are the edge Role's")
+			}
+		}
+	}
+	e, err := EdgeRole()
+	if err != nil || e.Namespace != "portcullis-edge" || len(e.Rules) != 1 || e.Rules[0].APIGroups[0] != "traefik.io" || strings.Join(e.Rules[0].Resources, ",") != "ingressroutes,middlewares" {
+		t.Errorf("edge role %+v %v", e, err)
 	}
 }
 

@@ -50,6 +50,10 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	if apps == "" {
 		apps = "portcullis-apps"
 	}
+	edge := strings.TrimSpace(getenv("HUB_EDGE_NAMESPACE"))
+	if edge == "" {
+		edge = kube.EdgeNamespace
+	}
 	core := "portcullis"
 	if b, err := os.ReadFile(saNamespaceFile); err == nil && strings.TrimSpace(string(b)) != "" {
 		core = strings.TrimSpace(string(b))
@@ -74,10 +78,10 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 		Domain: cfg.Domain, CorePorts: templates.KubeCorePorts(coreEnv), NodeAddresses: strings.Fields(strings.ReplaceAll(coreEnv["PORTCULLIS_KUBE_NODE_ADDRESSES"], ",", " ")),
 	}
 	ex := kube.RemoteExec{Client: client, Config: restCfg}
-	guard := kube.NewGuard(kube.GuardConfig{Client: client, Dynamic: dyn, AppsNamespace: apps, CoreNamespace: core, InCluster: icErr, HubImage: self, Exec: ex})
+	guard := kube.NewGuard(kube.GuardConfig{Client: client, Dynamic: dyn, AppsNamespace: apps, CoreNamespace: core, EdgeNamespace: edge, InCluster: icErr, HubImage: self, Exec: ex})
 	roots, _ := hub.ParseBindRoots(cfg.OverrideBindRoots, cfg.ProjectHostDir)
 	b, err := kube.New(kube.Config{Client: client, Dynamic: dyn, Namespace: apps, Settings: settings, HubImage: self, Resolver: kube.RegistryResolver{}, Exec: ex,
-		Guard: guard, Context: coreEnv["PORTCULLIS_KUBE_CONTEXT"], RuntimeRoots: strings.Fields(coreEnv["PORTCULLIS_RUNTIME_ROOTS"]), BindRoots: roots})
+		Guard: guard, Context: coreEnv["PORTCULLIS_KUBE_CONTEXT"], RuntimeRoots: strings.Fields(coreEnv["PORTCULLIS_RUNTIME_ROOTS"]), BindRoots: roots, EdgeNamespace: edge})
 	if err != nil {
 		return nil, err
 	}

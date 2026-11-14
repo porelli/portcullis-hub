@@ -76,6 +76,18 @@ metadata:
   labels: {pod-security.kubernetes.io/enforce: privileged, pod-security.kubernetes.io/warn: baseline, pod-security.kubernetes.io/audit: baseline}
 ---
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: portcullis-edge
+  labels: {pod-security.kubernetes.io/enforce: restricted}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: portcullis-hub, namespace: portcullis-edge}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: portcullis-hub}
+subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata: {name: portcullis-hub, namespace: portcullis}
 ---
@@ -159,6 +171,7 @@ func startEnv(t *testing.T) *env {
 	applyYAML(t, admin, []byte(traefikCRDs))
 	applyYAML(t, admin, []byte(setupObjects))
 	applyYAML(t, admin, file(t, "testdata/role.yaml"))
+	applyYAML(t, admin, file(t, "testdata/role-edge.yaml"))
 	applyYAML(t, admin, file(t, "testdata/admission/params.yaml"))
 	applyYAML(t, admin, file(t, "testdata/admission/policies.yaml"))
 	applyYAML(t, admin, file(t, "testdata/admission/bindings.yaml"))
@@ -168,7 +181,7 @@ func startEnv(t *testing.T) *env {
 	// The policies take effect asynchronously: wait for the self-test's
 	// Pod to be denied by its binding.
 	deadline := time.Now().Add(60 * time.Second)
-	pod := SelfTestObjects(ns)["pods"]
+	pod := SelfTestObjects(ns, EdgeNamespace)["pods"]
 	for {
 		_, err := e.hub.Resource(podsGVR).Namespace(ns).Create(context.Background(), pod, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 		if SelfTestRejected(err, "pods") {
@@ -215,7 +228,7 @@ func TestAdmissionVectors(t *testing.T) {
 	}
 	for _, v := range vs {
 		o := &unstructured.Unstructured{Object: v.Object}
-		_, err := e.hub.Resource(gvrOf(o)).Namespace(ns).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+		_, err := e.hub.Resource(gvrOf(o)).Namespace(o.GetNamespace()).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 		switch v.Want {
 		case "allow":
 			if err != nil {
@@ -243,7 +256,7 @@ func TestTranslatedObjectsAdmitted(t *testing.T) {
 			t.Fatalf("%s: %v", c, err)
 		}
 		for _, o := range p.Objects() {
-			_, err := e.hub.Resource(gvrOf(o)).Namespace(ns).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+			_, err := e.hub.Resource(gvrOf(o)).Namespace(o.GetNamespace()).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 			if err != nil {
 				t.Errorf("%s: %s %s denied: %v", c, o.GetKind(), o.GetName(), err)
 			}
@@ -338,7 +351,7 @@ func TestRoleIsEnough(t *testing.T) {
 		t.Errorf("nodes: %v", err)
 	}
 	// The rules review equals the Role.
-	g := NewGuard(GuardConfig{Client: e.hubK, Dynamic: e.hub, AppsNamespace: ns, CoreNamespace: "portcullis"})
+	g := NewGuard(GuardConfig{Client: e.hubK, Dynamic: e.hub, AppsNamespace: ns, CoreNamespace: "portcullis", EdgeNamespace: EdgeNamespace})
 	if err := g.rulesReview(ctx); err != nil {
 		t.Errorf("rules review: %v", err)
 	}

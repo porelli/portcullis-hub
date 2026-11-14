@@ -42,7 +42,12 @@ type router struct {
 // and Middlewares in its namespace. Core names map @docker → @file (the
 // K15 list); the instance's own middlewares and services stay in its
 // namespace; anything else refuses the instance.
-func IngressObjects(instance, namespace string, labels map[string]map[string]string) ([]*unstructured.Unstructured, error) {
+//
+// The objects live in the edge namespace (the only one Traefik watches:
+// it never reads the apps namespace's Secrets), labelled with the
+// instance and portcullis.io/owner: hub; Service refs name the apps
+// namespace.
+func IngressObjects(instance, namespace, appsNamespace string, labels map[string]map[string]string) ([]*unstructured.Unstructured, error) {
 	routers := map[string]*router{}
 	ports := map[string]int64{}     // own service → port
 	svcOwner := map[string]string{} // own service → compose service
@@ -145,7 +150,7 @@ func IngressObjects(instance, namespace string, labels map[string]map[string]str
 		if len(refs) > 0 {
 			route["middlewares"] = refs
 		}
-		svc, err := serviceRef(instance, name, r.svc, ports, svcOwner)
+		svc, err := serviceRef(instance, appsNamespace, name, r.svc, ports, svcOwner)
 		if err != nil {
 			return nil, err
 		}
@@ -195,7 +200,7 @@ func splitList(s string) []string {
 func crd(kind, name, ns, instance string, spec map[string]any) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": traefikAPI, "kind": kind,
-		"metadata": map[string]any{"name": name, "namespace": ns, "labels": map[string]any{LabelInstance: instance}},
+		"metadata": map[string]any{"name": name, "namespace": ns, "labels": map[string]any{LabelInstance: instance, LabelOwner: OwnerHub}},
 		"spec":     spec,
 	}}
 }
@@ -219,7 +224,7 @@ func middlewareRef(instance, ns, m string, own map[string]map[string]string) (ma
 }
 
 // serviceRef maps a router's service.
-func serviceRef(instance, router, svc string, ports map[string]int64, owner map[string]string) (map[string]any, error) {
+func serviceRef(instance, appsNamespace, router, svc string, ports map[string]int64, owner map[string]string) (map[string]any, error) {
 	name, provider, hasProvider := strings.Cut(svc, "@")
 	if svc == "" {
 		// Traefik's default: the router's container's only service.
@@ -234,7 +239,7 @@ func serviceRef(instance, router, svc string, ports map[string]int64, owner map[
 	switch {
 	case (!hasProvider || provider == "docker") && ports[strings.ToLower(name)] != 0:
 		n := strings.ToLower(name)
-		return map[string]any{"name": ObjectName(instance, owner[n]), "port": ports[n], "kind": "Service"}, nil
+		return map[string]any{"name": ObjectName(instance, owner[n]), "namespace": appsNamespace, "port": ports[n], "kind": "Service"}, nil
 	case hasProvider && (provider == "docker" || provider == "file") && slices.Contains(FileServices, name):
 		return map[string]any{"name": name + "@file", "kind": "TraefikService"}, nil
 	}

@@ -34,14 +34,25 @@ import (
 //go:embed testdata/role.yaml
 var roleYAML []byte
 
-// Role is the Hub's Role (parsed from the embedded copy).
-func Role() (*rbacv1.Role, error) {
+// The Hub's Role in the edge namespace (routes only).
+//
+//go:embed testdata/role-edge.yaml
+var roleEdgeYAML []byte
+
+func parseRole(b []byte) (*rbacv1.Role, error) {
 	var r rbacv1.Role
-	if err := yaml.UnmarshalStrict(roleYAML, &r); err != nil {
+	if err := yaml.UnmarshalStrict(b, &r); err != nil {
 		return nil, err
 	}
 	return &r, nil
 }
+
+// Role is the Hub's Role in the apps namespace (parsed from the embedded
+// copy).
+func Role() (*rbacv1.Role, error) { return parseRole(roleYAML) }
+
+// EdgeRole is the Hub's Role in the edge namespace.
+func EdgeRole() (*rbacv1.Role, error) { return parseRole(roleEdgeYAML) }
 
 // podsGVR is pods (the self-test dry-runs a Pod).
 var podsGVR = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
@@ -69,8 +80,9 @@ const clusterCheckMaxAge = 24 * time.Hour
 type GuardConfig struct {
 	Client  kubernetes.Interface
 	Dynamic dynamic.Interface
-	// AppsNamespace / CoreNamespace: HUB_APPS_NAMESPACE / the Hub's own.
-	AppsNamespace, CoreNamespace string
+	// AppsNamespace / CoreNamespace / EdgeNamespace: HUB_APPS_NAMESPACE,
+	// the Hub's own, HUB_EDGE_NAMESPACE ("" = portcullis-edge).
+	AppsNamespace, CoreNamespace, EdgeNamespace string
 	// InCluster is the in-cluster configuration's error (nil: loaded).
 	InCluster error
 	// ClusterCheckDir (default ClusterCheckDir): checked_at, ok, why.
@@ -111,6 +123,9 @@ func (g *Guard) Version() string {
 func NewGuard(cfg GuardConfig) *Guard {
 	if cfg.ClusterCheckDir == "" {
 		cfg.ClusterCheckDir = ClusterCheckDir
+	}
+	if cfg.EdgeNamespace == "" {
+		cfg.EdgeNamespace = EdgeNamespace
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
@@ -356,17 +371,21 @@ func RulesExact(st authv1.SubjectRulesReviewStatus, want []rbacv1.PolicyRule) er
 	return nil
 }
 
-// rulesReview: the apps namespace holds exactly the Role, the core
-// namespace only the defaults.
+// rulesReview: the apps namespace holds exactly the Role, the edge
+// namespace exactly the edge Role, the core namespace only the defaults.
 func (g *Guard) rulesReview(ctx context.Context) error {
 	role, err := Role()
+	if err != nil {
+		return err
+	}
+	edge, err := EdgeRole()
 	if err != nil {
 		return err
 	}
 	for _, c := range []struct {
 		ns   string
 		want []rbacv1.PolicyRule
-	}{{g.cfg.AppsNamespace, role.Rules}, {g.cfg.CoreNamespace, nil}} {
+	}{{g.cfg.AppsNamespace, role.Rules}, {g.cfg.EdgeNamespace, edge.Rules}, {g.cfg.CoreNamespace, nil}} {
 		if c.ns == "" {
 			continue
 		}
@@ -382,8 +401,9 @@ func (g *Guard) rulesReview(ctx context.Context) error {
 }
 
 // SelfTestObjects are the five forbidden objects of the self-test, one
-// per binding (each would pass every other policy).
-func SelfTestObjects(ns string) map[string]*unstructured.Unstructured {
+// per binding (each would pass every other policy): four in the apps
+// namespace ns, the Middleware in the edge namespace edgeNS.
+func SelfTestObjects(ns, edgeNS string) map[string]*unstructured.Unstructured {
 	f, t := false, true
 	podSpec := corev1.PodSpec{AutomountServiceAccountToken: &f, Containers: []corev1.Container{{Name: "c", Image: "registry.invalid/selftest@sha256:" + strings.Repeat("0", 64),
 		SecurityContext: &corev1.SecurityContext{Privileged: &t}}}}
@@ -405,7 +425,7 @@ func SelfTestObjects(ns string) map[string]*unstructured.Unstructured {
 		out[k] = u
 	}
 	out["traefik"] = &unstructured.Unstructured{Object: map[string]any{"apiVersion": traefikAPI, "kind": "Middleware",
-		"metadata": map[string]any{"name": "portcullis-selftest", "namespace": ns, "labels": map[string]any{LabelInstance: "portcullis-selftest"}},
+		"metadata": map[string]any{"name": "portcullis-selftest", "namespace": edgeNS, "labels": map[string]any{LabelInstance: "portcullis-selftest", LabelOwner: OwnerHub}},
 		"spec":     map[string]any{"headers": map[string]any{"customRequestHeaders": map[string]any{"X-Portcullis-User": "root"}}}}}
 	return out
 }
@@ -428,14 +448,14 @@ func SelfTestRejected(err error, policy string) bool {
 // selfTest dry-runs the five forbidden objects; each must be rejected by
 // its own binding.
 func (g *Guard) selfTest(ctx context.Context) error {
-	objs := SelfTestObjects(g.cfg.AppsNamespace)
+	objs := SelfTestObjects(g.cfg.AppsNamespace, g.cfg.EdgeNamespace)
 	for _, p := range Policies {
 		o := objs[p]
 		r, _ := gvr(o.GetKind())
 		if o.GetKind() == "Pod" {
 			r = podsGVR
 		}
-		_, err := g.cfg.Dynamic.Resource(r).Namespace(g.cfg.AppsNamespace).Create(ctx, o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+		_, err := g.cfg.Dynamic.Resource(r).Namespace(o.GetNamespace()).Create(ctx, o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 		if !SelfTestRejected(err, p) {
 			why := "accepted"
 			if err != nil {

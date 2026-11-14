@@ -1,6 +1,8 @@
 # One binding per policy (a binding binds exactly one policy, Task 0 Q4):
 # portcullis-apps-guard-<policy>, each to the apps namespace with the
-# params ConfigMap; a missing params object denies (fail closed).
+# params ConfigMap; a missing params object denies (fail closed). The
+# traefik binding is to the edge namespace (portcullis-edge), every other
+# one to the apps namespace.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
@@ -63,7 +65,7 @@ spec:
   matchResources:
     namespaceSelector:
       matchLabels:
-        kubernetes.io/metadata.name: portcullis-apps
+        kubernetes.io/metadata.name: portcullis-edge
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

@@ -9,8 +9,16 @@ data:
   hubImage: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
   hubServiceAccount: system:serviceaccount:portcullis:portcullis-hub
   coreNamespace: portcullis
+  appsNamespace: portcullis-apps
+  edgeNamespace: portcullis-edge
   bindRoots: /srv,/mnt,/media
   corePorts: "80,443,51820,8000,8081,8443,8444"
+  # Core's hostnames no app route may claim (mcp.<domain> is shared: the
+  # companions' MCP routes are Host + Path there), the route priority cap
+  # (below core's routers), the entrypoints apps may use.
+  reservedHosts: example.org,auth.example.org,directory.example.org,enroll.example.org,hub.example.org,metrics.example.org,people.example.org,traefik.example.org
+  maxRoutePriority: "1000"
+  entryPoints: websecure,vpnsecure
   podCIDR: 10.42.0.0/16
   serviceCIDR: 10.43.0.0/16
   nodeAddresses: 192.0.2.10/32

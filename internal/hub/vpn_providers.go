@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/kube"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -108,10 +109,10 @@ type deviceMeta struct {
 // Hub.mu → vpnRuntime.mu, never the reverse; never held across an exec).
 type vpnRuntime struct {
 	mu sync.Mutex
-	// gatewayIPs (Kubernetes, K5): wired provider → its gateway pod's IP
-	// as last observed Running+Ready (absent: not seen, the provider
-	// isn't published). Guarded by mu.
-	gatewayIPs map[string]string
+	// gatewayIPs (Kubernetes, K5): wired provider → its gateway pod (IP
+	// and UID) while the watch confirms it Running, Ready and not
+	// terminating (absent: not published). Guarded by mu.
+	gatewayIPs map[string]kube.GatewayPod
 	maps       map[string]*providerMap
 	kc         VPNKeycloak
 	// members is the last directory snapshot the publisher read (nil:
@@ -682,7 +683,6 @@ func (h *Hub) RunVPNMaps(ctx context.Context, tick time.Duration) {
 // vpnTick starts each due hook run (one at a time per provider, in the
 // background) and publishes.
 func (h *Hub) vpnTick(ctx context.Context) {
-	h.kubeGatewayTick(ctx)
 	now := h.vpnrt.now()
 	h.mu.RLock()
 	type due struct {

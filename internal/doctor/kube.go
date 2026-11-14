@@ -30,6 +30,9 @@ type KubeIn struct {
 	Netpol         string
 	ReloadDegraded []string
 	APIPublic      string
+	// Gateways are the confirmed VPN gateway pods, "<provider> <ip>
+	// <pod uid>" (K5).
+	Gateways []string
 }
 
 func init() {

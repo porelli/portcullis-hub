@@ -195,8 +195,9 @@ kind: Middleware
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--m-echo-headers
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   headers:
     customRequestHeaders:
@@ -208,8 +209,9 @@ kind: IngressRoute
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--r-echo
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   entryPoints:
   - websecure
@@ -221,11 +223,12 @@ spec:
     - name: portcullis-auth@file
     - name: portcullis-groups@file
     - name: basic--m-echo-headers
-      namespace: portcullis-apps
+      namespace: portcullis-edge
     - name: security-headers@file
     services:
     - kind: Service
       name: basic--web
+      namespace: portcullis-apps
       port: 8080
   tls:
     options:

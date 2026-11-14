@@ -4,8 +4,9 @@ kind: Middleware
 metadata:
   labels:
     portcullis.io/instance: app
+    portcullis.io/owner: hub
   name: app--m-portcullis-public-strip-app
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   headers:
     customRequestHeaders:
@@ -17,8 +18,9 @@ kind: IngressRoute
 metadata:
   labels:
     portcullis.io/instance: app
+    portcullis.io/owner: hub
   name: app--r-app-pub
-  namespace: portcullis-apps
+  namespace: portcullis-edge
 spec:
   entryPoints:
   - websecure
@@ -28,11 +30,12 @@ spec:
     middlewares:
     - name: portcullis-public-guard@file
     - name: app--m-portcullis-public-strip-app
-      namespace: portcullis-apps
+      namespace: portcullis-edge
     - name: security-headers@file
     services:
     - kind: Service
       name: app--web
+      namespace: portcullis-apps
       port: 8080
   tls:
     options:
