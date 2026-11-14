@@ -420,7 +420,7 @@ func TestInstanceIDRules(t *testing.T) {
 		{"portcullisx", 400, "reserved"},
 		{"a-portcullis-b", 400, "portcullis may not be a segment"},
 		{"team-portcullis", 400, "portcullis may not be a segment"},
-		{"team--b", 400, "single -"},
+		{"team--b", 400, `may not contain "--"`},
 		{"team-", 400, "single -"},
 		{"portcullisx-b", 400, "reserved"},
 		{"chat", 409, "template id"},

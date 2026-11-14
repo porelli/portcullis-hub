@@ -381,7 +381,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 		h.mu.RLock()
 		var want map[string]string
 		if t := h.catalogLocked(templateID); t != nil {
-			want = t.NamesFor(id).Volumes
+			want = h.volumeNamesFor(t, id)
 		}
 		h.mu.RUnlock()
 		vs, err := h.rt.ListVolumes(context.Background(), runtime.Filter{})

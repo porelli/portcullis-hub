@@ -36,6 +36,9 @@ func CheckIDShape(id string) error {
 			return fmt.Errorf("id %q: portcullis may not be a segment of an id (Traefik's automatic names <service>-portcullis-<id> of two instances could collide)", id)
 		}
 	}
+	if strings.Contains(id, "--") {
+		return fmt.Errorf("id %q may not contain \"--\": it separates an instance from its objects' names (<instance>--<object> on Kubernetes), so another instance's names could equal this one's", id)
+	}
 	if !idNormalRe.MatchString(id) {
 		return fmt.Errorf("id %q: write it as letters and digits joined by single - (Traefik turns _, -- and a trailing - into the same automatic name as another id)", id)
 	}

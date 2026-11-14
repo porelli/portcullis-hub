@@ -712,7 +712,7 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 	if err != nil {
 		return nil, statusErr(503, "cannot list the volumes of %s: %v", id, err)
 	}
-	derived := view.NamesFor(id).Volumes
+	derived := h.volumeNamesFor(view, id)
 	keys := make([]string, 0, len(sb.volumes))
 	for k := range sb.volumes {
 		keys = append(keys, k)
@@ -733,9 +733,6 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 			continue
 		}
 		name, ok := derived[k]
-		if ok && h.kubeOn() {
-			name = kube.PVCName(id, k) // §11.2: <instance>--<key>
-		}
 		if !ok {
 			return nil, statusErr(409, "the archive has volume %s, which template %s no longer defines", k, view.TemplateID)
 		}
@@ -747,6 +744,20 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 		out = append(out, volumePlan{key: k, vol: composeVolume(id, k, name), tar: sb.volumes[k]})
 	}
 	return out, nil
+}
+
+// volumeNamesFor are instance id's volume names by key: Docker's
+// (NamesFor) or, under Kubernetes, its PVCs <instance>--<key> (§11.2).
+func (h *Hub) volumeNamesFor(t *templates.Template, id string) map[string]string {
+	n := t.NamesFor(id).Volumes
+	if !h.kubeOn() {
+		return n
+	}
+	out := make(map[string]string, len(n))
+	for k := range n {
+		out[k] = kube.PVCName(id, k)
+	}
+	return out
 }
 
 // composeVolume is a volume as compose would create it for id's project.
@@ -1118,6 +1129,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 		return err
 	}
 	names := tmpl.NamesFor(newID)
+	names.Volumes = h.volumeNamesFor(&tmpl, newID)
 	for k := range sb.volumes {
 		if _, ok := names.Volumes[k]; !ok {
 			return statusErr(409, "the archive has volume %s, which template %s no longer defines", k, tmpl.ID)

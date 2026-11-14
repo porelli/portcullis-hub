@@ -233,3 +233,72 @@ func TestKubeInputsCompanions(t *testing.T) {
 		t.Errorf("companions %+v, want %+v", in.Companions, want)
 	}
 }
+
+// Under Kubernetes a restore and a restore-as fill the instance's PVCs,
+// <instance>--<volume> (§11.2), never the Docker names.
+func TestKubeRestoreTargetsPVCNames(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The template, as it must be for Kubernetes: a numeric user.
+	cp := filepath.Join(f.src, "grafana", "compose.yml")
+	b, _ := os.ReadFile(cp)
+	writeFile(t, cp, strings.Replace(string(b), "    image: grafana\n", "    image: grafana\n    user: \"472:472\"\n", 1))
+	f.h.Discover()
+	f.setRuntime(runtime.KindKubernetes)
+	f.h.rt = ownerRT{f.h.rt}
+	if _, err := f.h.RestoreInstanceAs(entry.Archive, "grafana-c", directory.Human("root")); err != nil {
+		t.Fatalf("restore-as: %v", err)
+	}
+	names := f.engine.volumeNames()
+	pvc, dock := slices.Contains(names, "grafana-c--grafana-data"), slices.Contains(names, "portcullis_grafana-c-grafana-data")
+	if !pvc || dock {
+		t.Errorf("restore-as volumes: PVC %v, Docker name %v", pvc, dock)
+	}
+	// A restore into it again (the PVC exists now) and into a fresh one
+	// whose PVC the restore creates.
+	own, err := f.h.BackupInstance("grafana-c", directory.Human("root"))
+	if err != nil {
+		t.Fatalf("backup on kubernetes: %v", err)
+	}
+	if _, err := f.h.RestoreInstance("grafana-c", own.Archive, directory.Human("root")); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	f.engine.RemoveVolume(context.Background(), "grafana-c--grafana-data")
+	if _, err := f.h.RestoreInstance("grafana-c", own.Archive, directory.Human("root")); err != nil {
+		t.Fatalf("restore with no PVC: %v", err)
+	}
+	for _, n := range f.engine.volumeNames() {
+		if strings.HasPrefix(n, "portcullis_grafana-c") {
+			t.Errorf("a Docker-named volume %s", n)
+		}
+	}
+	if !slices.Contains(f.engine.volumeNames(), "grafana-c--grafana-data") {
+		t.Errorf("volumes %v", f.engine.volumeNames())
+	}
+}
+
+// ownerRT adds the kube backend's VolumeOwner to a test runtime and,
+// like it, reports volumes without options (a PVC's owner lives in its
+// annotations).
+type ownerRT struct{ runtime.Instances }
+
+func (o ownerRT) ListVolumes(ctx context.Context, f runtime.Filter) ([]runtime.Volume, error) {
+	vs, err := o.Instances.ListVolumes(ctx, f)
+	for i := range vs {
+		vs[i].Options = nil
+	}
+	return vs, err
+}
+
+func (o ownerRT) InspectVolume(ctx context.Context, name string) (runtime.Volume, error) {
+	v, err := o.Instances.InspectVolume(ctx, name)
+	v.Options = nil
+	return v, err
+}
+
+func (ownerRT) VolumeOwner(_ context.Context, p runtime.Project, key string) (map[string]string, error) {
+	return map[string]string{"portcullis.io/uid": "472", "portcullis.io/gid": "472", "portcullis.io/mode": "0750"}, nil
+}
