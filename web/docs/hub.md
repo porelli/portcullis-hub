@@ -2092,8 +2092,11 @@ On `people.<domain>`, every signed-in person also has a **My apps** tab
 (after Org chart). While AI support is on and they can use an app (or their
 Portcullis account) with AI, it starts with the **Connect your AI** card:
 the addresses, the steps per AI client, their connections with Disconnect and
-their recent AI activity ([Connect your AI](../guides/connect-your-ai.md)). It lists the enabled apps they can reach that have
-something personal for them, sorted by id, each with its link:
+their recent AI activity ([Connect your AI](../guides/connect-your-ai.md)). It lists every enabled app the portal lets them
+open (the same check: the app's access group, or anyone signed in when it has
+none; an ended membership doesn't count), sorted by id, each with its link.
+An app without anything personal for them just has no settings section. Apps
+with something personal also show:
 
 - their **per-person values** with where each comes from: "from
   office_milan" (only the person's own groups, never anyone else's rows),
@@ -2163,7 +2166,7 @@ works, also after you lost access or while the app is disabled. After 10
 refused saves in a minute, every save is refused ("too many refused
 attempts: try again in a minute", `429`) until the minute is over.
 
-With nothing to show, the tab says "No apps with personal settings." The
+With nothing to show, the tab says "No apps are available to you yet." The
 tab only reads the person's own data: the people listener has no other app
 routes ([contracts §5.1](../guides/integration-contracts.md#51-people-subdomain-new)).
 
