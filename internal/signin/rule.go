@@ -203,10 +203,13 @@ var allOn = func() map[Method]bool {
 // no later switch can open the way), has an alternative made of totp alone,
 // and the group that offends, found top-down: at an "any", the first item
 // with a {totp} alternative; at an "all" (every item then has one), the
-// first item that is a group; it stops before a leaf. A leaf rule is never
-// code-only here (Validate refuses it as a leaf).
+// first item that is a group; it stops before a leaf. A rule that fails
+// Validate's shape check counts as code-only at the top (fail closed).
 func CodeOnly(n Node) (Path, bool) {
-	if n.isLeaf() || !hasCodeOnly(n) {
+	if validateShape(n) != nil {
+		return Path{}, true
+	}
+	if !hasCodeOnly(n) {
 		return nil, false
 	}
 	at := Path{}
@@ -434,6 +437,13 @@ func Usable(n Node, on map[Method]bool) (Node, error) {
 	if err := Validate(n); err != nil {
 		return Node{}, err
 	}
+	return usableShaped(n, on)
+}
+
+// usableShaped is Usable for a rule whose shape is already checked: it
+// never applies the code-only rule (scoring a part of a rule, or one
+// sign-in's methods, is not a save decision).
+func usableShaped(n Node, on map[Method]bool) (Node, error) {
 	u, ok := usable(n, on)
 	if !ok {
 		return Node{}, ErrUnmeetable

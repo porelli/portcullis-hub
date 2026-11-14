@@ -27,7 +27,9 @@ const (
 // the rule as compiled (Usable: parts the switches make unmeetable don't
 // count): a method scores its strength, a family its weakest switched-on
 // member, an "any" group its weakest item, an "all" group its strongest item
-// + 0.4 per extra item, capped at 5. A rule with no way in scores 0. When
+// + 0.4 per extra item, capped at 5. A rule with no way in scores 0, and
+// so does one that fails the shape check; the code-only rule is not
+// applied (a part of a valid rule may be a code alone). When
 // totp is the strongest method of a way in, the reason says codes can be
 // phished (T3).
 //
@@ -35,7 +37,7 @@ const (
 // that overlaps another through a family (all[family:passkey,
 // passkey_synced]) still adds 0.4. Validate refuses only exact duplicates.
 func ScoreOf(n Node, on map[Method]bool) Score {
-	n, err := Usable(n, on)
+	n, err := shapedUsable(n, on)
 	if errors.Is(err, ErrUnmeetable) {
 		return Score{Reason: "it can't be met with the sign-in methods that are switched on"}
 	}
@@ -47,6 +49,16 @@ func ScoreOf(n Node, on map[Method]bool) Score {
 		s.Reason += codeWeakness
 	}
 	return s
+}
+
+// shapedUsable is Usable with only the shape check: a score describes any
+// group (a part of a rule, one sign-in's methods), so the code-only rule,
+// a save decision (Validate), never applies here (review M1).
+func shapedUsable(n Node, on map[Method]bool) (Node, error) {
+	if err := validateShape(n); err != nil {
+		return Node{}, err
+	}
+	return usableShaped(n, on)
 }
 
 // codeWeakness ends the reason of a rule with a way in whose strongest

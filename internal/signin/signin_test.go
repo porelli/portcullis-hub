@@ -851,3 +851,35 @@ func TestSentenceTOTP(t *testing.T) {
 		t.Errorf("sentence %q", s)
 	}
 }
+
+// Review M1: scoring never applies the code-only rule (it is a save and
+// preview decision): an inner group or a history set of a code alone
+// scores its strength.
+func TestScoreIgnoresCodeOnly(t *testing.T) {
+	allOn := onSet(Methods...)
+	const suffix = "; codes can be typed into a fake site"
+	if s := ScoreOf(anyOf(leaves("totp", "security_key")...), allOn); s.Tenths != 15 || !strings.HasSuffix(s.Reason, suffix) {
+		t.Errorf("any[totp, security_key] = %+v", s)
+	}
+	if s := ScoreOfSet([]Method{TOTP}); s == nil || s.Tenths != 15 || !strings.HasSuffix(s.Reason, suffix) {
+		t.Errorf("ScoreOfSet(totp) = %+v", s)
+	}
+	// Validate, Usable and Compile still refuse it.
+	var co *CodeOnlyError
+	if _, err := Usable(anyOf(leaves("totp", "security_key")...), allOn); !errors.As(err, &co) {
+		t.Errorf("Usable = %v", err)
+	}
+	// An invalid shape still scores 0.
+	if s := ScoreOf(anyOf(leaf("bogus")), allOn); s.Tenths != 0 {
+		t.Errorf("bogus = %+v", s)
+	}
+}
+
+// Review L1: CodeOnly fails closed on a rule that isn't a valid shape.
+func TestCodeOnlyFailsClosedOnBadShape(t *testing.T) {
+	for _, n := range []Node{anyOf(leaf("bogus"), leaf("totp")), leaf("totp"), {Op: OpAny}} {
+		if at, bad := CodeOnly(n); !bad || at == nil || len(at) != 0 {
+			t.Errorf("%s: CodeOnly = %v, %v", js(n), at, bad)
+		}
+	}
+}

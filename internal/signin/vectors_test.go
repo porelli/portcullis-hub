@@ -152,8 +152,10 @@ func TestSharedVectors(t *testing.T) {
 	if codeOnly < 1 {
 		t.Error(`no case with "error": "code_only"`)
 	}
-	if !names["reject: a code-only alternative"] {
-		t.Error("no reject case for a code-only alternative")
+	for _, n := range []string{"reject: a code-only alternative", "reject: a code-only alternative at depth 2", "reject: a code-only alternative at depth 3"} {
+		if !names[n] {
+			t.Errorf("no case %q", n)
+		}
 	}
 	if !sawInv {
 		t.Error(`no case with "have": ["inv"]`)
