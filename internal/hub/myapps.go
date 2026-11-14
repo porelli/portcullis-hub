@@ -97,6 +97,9 @@ type MyApp struct {
 	// AI: the caller's switched-on companions of this app (Task 21,
 	// contract §5.1); nil = none, or the ai key is off (myAITopLocked).
 	AI *MyAppAI `json:"ai,omitempty"`
+	// open: the portal lets the caller open it (portalOpensLocked), so
+	// it is listed even without any of the above.
+	open bool
 }
 
 // MyAppsView is GET /api/me/apps' answer (F21): the apps, and the
@@ -117,8 +120,9 @@ type MyAppsView struct {
 // credential cards (one per person_secret option, listed for population
 // members even without values or entries: F21), and those whose
 // person-entered options' population holds them, with their own entries
-// (Task 15A), and its AI part (Task 21: switched-on companions, G13); an
-// app with none of them is left out. The directory snapshot is taken
+// (Task 15A), and its AI part (Task 21: switched-on companions, G13);
+// and every other enabled app the portal lets them open
+// (portalOpensLocked), with no settings. The directory snapshot is taken
 // before mu; an unavailable directory is the membership error.
 func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 	user = strings.ToLower(user)
@@ -157,8 +161,11 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 				app.Entries = append(app.Entries, h.myEntryLocked(t, o, user, m.UUIDs[user]))
 			}
 		}
+		// Every app the portal would let them open is listed, settings
+		// or not (an app without any just has no settings section).
+		app.open = h.portalOpensLocked(t, m, user)
 		if groups == nil {
-			if len(app.Entries) > 0 {
+			if len(app.Entries) > 0 || app.open {
 				out = append(out, app)
 			}
 			continue
@@ -185,7 +192,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 			app.AI = h.myAppAILocked(t)
 			companion = companion || app.AI != nil
 		}
-		if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 || app.AI != nil {
+		if app.open || len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 || app.AI != nil {
 			secretApps = secretApps || len(app.Credentials) > 0
 			out = append(out, app)
 		}
@@ -200,7 +207,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		kept := out[:0]
 		for _, app := range out {
 			app.AI = nil
-			if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 {
+			if app.open || len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 {
 				kept = append(kept, app)
 			}
 		}

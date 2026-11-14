@@ -7,7 +7,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -60,17 +62,15 @@ func (h *Hub) portalLocked() PortalDocument {
 		m := t.Manifest
 		a := PortalApp{ID: t.ID, Template: t.TemplateID, Name: instanceName(t), Description: m.Description, Icon: m.Icon, Category: m.Category,
 			AuthMethod: m.Auth.Method}
-		users, admins := h.instanceGroupsLocked(t)
+		_, admins := h.instanceGroupsLocked(t)
 		a.AdminGroup = admins
+		a.AccessGroup = h.portalAccessGroupLocked(t)
 		// Router-less instances (contract §3, §10): URLs empty, note present.
 		if m.Routerless() {
 			a.URLs = []templates.AppURL{}
 			a.Note = portalNote(m.Auth.Notes)
 		} else {
 			a.URLs = append([]templates.AppURL{}, m.URLs...)
-		}
-		if h.accessLocked(t).groupAccess(t) {
-			a.AccessGroup = users
 		}
 		doc.Apps = append(doc.Apps, a)
 		// Track which enrolled domains have hosts in use (contract §10).
@@ -86,6 +86,40 @@ func (h *Hub) portalLocked() PortalDocument {
 	}
 	sort.Strings(doc.Domains)
 	return doc
+}
+
+// portalAccessGroupLocked is the access_group t's portal entry carries:
+// the LLDAP group group-gate requires ("" = any signed-in person). My
+// apps (MyApps) lists an app by the same check (portalOpensLocked).
+// Caller holds h.mu (read).
+func (h *Hub) portalAccessGroupLocked(t *templates.Template) string {
+	if !h.accessLocked(t).groupAccess(t) {
+		return ""
+	}
+	users, _ := h.instanceGroupsLocked(t)
+	return users
+}
+
+// portalOpensLocked reports whether the portal lists enabled instance t
+// for user in m (group-gate's render_portal check, contract §10): t's
+// portal access group is "" or a group user is in — and here, failing
+// closed, a membership that expired (group-gate denies it) or a person
+// m doesn't know never opens it, nor does the deny group. Caller holds
+// h.mu (read).
+func (h *Hub) portalOpensLocked(t *templates.Template, m *directory.Membership, user string) bool {
+	groups, known := m.Users[user]
+	if !known || !t.Enabled {
+		return false
+	}
+	need := h.portalAccessGroupLocked(t)
+	switch {
+	case need == "":
+		return true
+	case need == policy.DenyGroup:
+		return false
+	}
+	_, member := groups[need]
+	return member && !m.Expired[user][need]
 }
 
 // Portal returns the current portal document.

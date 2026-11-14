@@ -372,6 +372,9 @@
     if (!(app.credentials || []).length && !(app.entries || []).length && !(app.values || []).length && app.ai) {
       h += '<p class="pd-muted ma-applies">No personal settings. You can use it from your AI assistant: see Connect your AI above.</p>';
     }
+    // An app without personal settings has no settings section: just
+    // its name and link (people can open it).
+    if (!(app.credentials || []).length && !(app.entries || []).length && !(app.values || []).length) return h + '</article>';
     h += '<dl class="ma-values">';
     for (const c of app.credentials || []) h += credHtml(app, c);
     for (const e of app.entries || []) h += entryHtml(app.id, e);
@@ -425,7 +428,7 @@
     for (const app of apps) for (const e of app.entries || []) el.maEntries.set(app.id + '\u0000' + e.key, e);
     box.innerHTML = apps.length
       ? apps.map(card).join('')
-      : '<p class="pd-muted ma-empty">No apps with personal settings.</p>';
+      : '<p class="pd-muted ma-empty">No apps are available to you yet.</p>';
   }
 
   // entryAction saves or clears the entry of row; the row is redrawn
@@ -481,7 +484,7 @@
       el.dataset.maBound = '1';
       el.innerHTML = '<div class="pd-head"><h2 class="pd-h3">My apps</h2>' +
         '<button type="button" class="pd-btn secondary sm" data-ma-act="reload">Refresh</button></div>' +
-        '<p class="pd-muted ma-intro">Your own settings in the apps you can use, and where each comes from. Administrators set most of them; values with an input are yours to enter.</p>' +
+        '<p class="pd-muted ma-intro">The apps you can open, with your own settings in each and where each comes from. Administrators set most of them; values with an input are yours to enter.</p>' +
         '<div data-mai-box></div><div data-ma-list></div>';
       el.addEventListener('click', e => {
         const b = e.target.closest('[data-ma-act]');
