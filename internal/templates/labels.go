@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"maps"
+	"slices"
 )
 
 // ServiceLabels returns each compose service's labels (map or list
@@ -156,4 +158,61 @@ func FirstEnabledService(compose []byte) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// BindSource is a service's absolute bind source, as Compose would
+// resolve it (the default of a whole ${VAR:-…} / ${VAR-…} source
+// included; an unset variable without a default isn't resolvable here).
+type BindSource struct {
+	Service, Source string
+}
+
+// AbsoluteBindSources lists every service's absolute bind sources (short
+// src:dst[:opts] and long {type: bind, source}), sorted by service.
+func AbsoluteBindSources(compose []byte) []BindSource {
+	infos := composeServiceInfos(compose)
+	var out []BindSource
+	for _, n := range slices.Sorted(maps.Keys(infos)) {
+		l, _ := infos[n].volumes.([]interface{})
+		for _, x := range l {
+			var src string
+			switch e := x.(type) {
+			case string:
+				parts := splitOutsideVars(strings.TrimSpace(e))
+				if len(parts) < 2 {
+					continue
+				}
+				src = parts[0]
+			case map[string]interface{}:
+				if typ, _ := e["type"].(string); typ != "bind" {
+					continue
+				}
+				src, _ = e["source"].(string)
+			}
+			src = varDefault(strings.TrimSpace(src))
+			if strings.HasPrefix(src, "/") {
+				out = append(out, BindSource{n, src})
+			}
+		}
+	}
+	return out
+}
+
+// varDefault resolves a leading ${VAR:-def} / ${VAR-def} to def (the rest
+// of the source kept); anything else is returned as is.
+func varDefault(s string) string {
+	if !strings.HasPrefix(s, "${") {
+		return s
+	}
+	end := strings.Index(s, "}")
+	if end < 0 {
+		return s
+	}
+	inner := s[2:end]
+	for _, sep := range []string{":-", "-"} {
+		if i := strings.Index(inner, sep); i >= 0 {
+			return inner[i+len(sep):] + s[end+1:]
+		}
+	}
+	return s
 }

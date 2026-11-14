@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -987,6 +988,24 @@ var ErrNotFound = &StatusError{Status: http.StatusNotFound, Err: errors.New("not
 
 // ── catalog ──────────────────────────────────────────────
 
+// coreCheckoutBindLocked: t binds (any mode) an absolute host path at,
+// inside or above the core checkout's host path (ProjectHostDir, the
+// --project-directory every compose run uses): the template could read
+// or rewrite core's files. Folded paths count too (pathsNear).
+func (h *Hub) coreCheckoutBindLocked(t *templates.Template) (templates.BindSource, bool) {
+	core := h.cfg.ProjectHostDir
+	if core == "" || !strings.HasPrefix(core, "/") {
+		return templates.BindSource{}, false
+	}
+	core = path.Clean(core)
+	for _, b := range templates.AbsoluteBindSources(t.ReadCompose()) {
+		if pathsNear(path.Clean(b.Source), core) {
+			return b, true
+		}
+	}
+	return templates.BindSource{}, false
+}
+
 // Discover rebuilds the template catalog from the configured sources.
 func (h *Hub) Discover() {
 	h.mu.Lock()
@@ -1013,6 +1032,10 @@ func (h *Hub) Discover() {
 		}
 		if sub := coreSubdomain(t.Subdomains); sub != "" {
 			log.Printf("Skipping template %s: it routes core subdomain %q", t.ID, sub)
+			continue
+		}
+		if b, ok := h.coreCheckoutBindLocked(&t); ok {
+			log.Printf("Skipping template %s: service %s binds %s, at, inside or above the core checkout (%s)", t.ID, b.Service, b.Source, h.cfg.ProjectHostDir)
 			continue
 		}
 		if e, ok := h.st.Instances[t.ID]; ok && e.Template != t.ID {
