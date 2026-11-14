@@ -255,7 +255,7 @@ var coreNames = []string{"hub", "keycloak", "hub-proxy-secret", "portcullis-auth
 // a name core documents or the template defines (own).
 func shownRef(ref string, own map[string]map[string]string) bool {
 	name, provider, has := strings.Cut(ref, "@")
-	if has && !slices.Contains([]string{"docker", "file", "internal"}, provider) {
+	if has && !slices.Contains([]string{"docker", "file", "internal"}, provider) || name != strings.ToLower(name) {
 		return false
 	}
 	if _, ok := own[name]; ok {
@@ -298,8 +298,16 @@ func serviceRef(instance, appsNamespace, router, svc string, ports map[string]in
 	case hasProvider && (provider == "docker" || provider == "file") && slices.Contains(FileServices, name):
 		return map[string]any{"name": name + "@file", "kind": "TraefikService"}, nil
 	}
-	if shownRef(svc, nil) || ports[strings.ToLower(strings.SplitN(svc, "@", 2)[0])] != 0 {
-		return nil, refused("router %s: service %s is not on Kubernetes", router, svc)
+	// Quote only a known name and a known provider (either part may be
+	// an instance value otherwise).
+	qn, qp, qHas := strings.Cut(svc, "@")
+	qn = strings.ToLower(qn)
+	known := ports[qn] != 0 || slices.Contains(FileServices, qn) || slices.Contains(coreNames, qn)
+	switch {
+	case known && !qHas:
+		return nil, refused("router %s: service %s is not on Kubernetes", router, qn)
+	case known && slices.Contains([]string{"docker", "file", "internal"}, qp):
+		return nil, refused("router %s: service %s@%s is not on Kubernetes", router, qn, qp)
 	}
 	return nil, refused("router %s: its service isn't on Kubernetes", router)
 }

@@ -195,6 +195,11 @@ func TestRefusalsQuoteOnlyKnownNames(t *testing.T) {
 		{"traefik.http.routers.r.service", secret, "router r: its service isn't on Kubernetes"},
 		{"traefik.http.routers.r.middlewares", secret, "a middleware is not on Kubernetes (not the instance's own, not a core name apps may use)"},
 		{"traefik.http.routers.r.service", "hub@docker", "router r: service hub@docker is not on Kubernetes"},
+		{"traefik.http.routers.r.service", "web@" + secret, "router r: its service isn't on Kubernetes"},
+		{"traefik.http.routers.r.service", "Web@" + secret, "router r: its service isn't on Kubernetes"},
+		{"traefik.http.routers.r.service", "web@kubernetescrd", "router r: its service isn't on Kubernetes"},
+		{"traefik.http.routers.r.service", "Web@file", "router r: service web@file is not on Kubernetes"},
+		{"traefik.http.routers.r.middlewares", "mw@" + secret, "a middleware is not on Kubernetes (not the instance's own, not a core name apps may use)"},
 		{"traefik.http.routers.r.middlewares", "mw@file", "middleware mw@file is not on Kubernetes (not the instance's own, not a core name apps may use)"},
 		{"traefik.http.routers.r.middlewares", "hub-proxy-secret@docker", "middleware hub-proxy-secret@docker is not on Kubernetes (not the instance's own, not a core name apps may use)"},
 	} {
