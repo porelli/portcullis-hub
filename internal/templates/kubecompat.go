@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"net/netip"
 	"path"
 	"regexp"
 	"slices"
@@ -178,6 +179,9 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 		}
 		c.refuse("service %s binds %s, outside the shared-folder roots (not on Kubernetes)", name, shown)
 	}
+	for _, hp := range publishedHostIPs(field(s, "ports"), env) {
+		c.refuse("service %s publishes %s on %s (not on Kubernetes)", name, hp[1], hp[0])
+	}
 	if replicasAboveOne(s, env) {
 		c.refuse("service %s sets replicas above 1 (not on Kubernetes)", name)
 	}
@@ -246,4 +250,49 @@ func replicasAboveOne(s *yaml.Node, env map[string]string) bool {
 		return err != nil || k > 1
 	}
 	return above(field(s, "scale"))
+}
+
+// publishedHostIPs are a service's published ports bound to a specific
+// address other than the wildcard (0.0.0.0, ::, empty) or loopback
+// (127.0.0.0/8, ::1: not published at all on Kubernetes): [ip, port]
+// pairs. A LoadBalancer can't keep such a binding; widening it silently
+// is never done.
+func publishedHostIPs(ports *yaml.Node, env map[string]string) [][2]string {
+	if ports == nil || ports.Kind != yaml.SequenceNode {
+		return nil
+	}
+	var out [][2]string
+	for _, p := range ports.Content {
+		ip, port := "", ""
+		switch p.Kind {
+		case yaml.ScalarNode:
+			v := strings.TrimSpace(resolve(p.Value, env))
+			// [ip:]host:container[/proto]; an IPv6 ip is bracketed.
+			if strings.HasPrefix(v, "[") {
+				if i := strings.Index(v, "]:"); i > 0 {
+					ip, v = v[1:i], v[i+2:]
+				}
+			} else if parts := strings.Split(v, ":"); len(parts) == 3 {
+				ip, v = parts[0], parts[1]+":"+parts[2]
+			}
+			port, _, _ = strings.Cut(v, ":")
+		case yaml.MappingNode:
+			ip, port = scalarValue(field(p, "host_ip"), env), scalarValue(field(p, "published"), env)
+		}
+		if ip == "" || ip == "0.0.0.0" || ip == "::" {
+			continue
+		}
+		if a, err := netip.ParseAddr(ip); err == nil && a.IsLoopback() {
+			continue
+		}
+		shown := ip
+		if _, err := netip.ParseAddr(ip); err != nil {
+			shown = "a host address"
+		}
+		if port == "" {
+			port = "a port"
+		}
+		out = append(out, [2]string{shown, port})
+	}
+	return out
 }

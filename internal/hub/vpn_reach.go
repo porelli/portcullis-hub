@@ -203,6 +203,12 @@ func (h *Hub) vpnGatewayLocked(t *templates.Template) (gw netip.Addr, edge strin
 		return netip.Addr{}, "", false
 	}
 	core := h.vpnCoreEnv()
+	if h.kubeOn() {
+		// K5/K-P8: the edge is the wg-edge ClusterIP's port; the gateway
+		// is its pod's IP once observed (unset: zero).
+		gw, _ := h.kubeGatewayIP(t.ID)
+		return gw, fmt.Sprintf("%s:%d", h.kubeCoreValue(VarWGEdgeServiceIP), vpn.EdgePort(p.Slot)), true
+	}
 	gw, err := vpn.GatewayAddr(core.Net, p.Slot)
 	if err != nil {
 		return netip.Addr{}, "", false

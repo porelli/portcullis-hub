@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/netip"
 	"path"
 	"slices"
 	"sort"
@@ -248,6 +249,46 @@ func (t *translator) run() (Plan, error) {
 			return Plan{}, err
 		}
 	}
+	// Exposure: IngressRoutes and Middlewares from the rendered Traefik
+	// labels, the instance's NetworkPolicies.
+	labels := map[string]map[string]string{}
+	routed := map[string][]int{}
+	nets := map[string][]string{}
+	var egress []string
+	for _, n := range names {
+		sv := m.Services[n]
+		labels[n] = map[string]string(sv.Labels)
+		for k, v := range sv.Labels {
+			fk := templates.FoldKey(k)
+			if strings.HasPrefix(fk, "traefik.http.services.") && strings.HasSuffix(fk, ".loadbalancer.server.port") {
+				if port, err := strconv.Atoi(v); err == nil {
+					routed[n] = append(routed[n], port)
+				}
+			}
+		}
+		for net := range sv.Networks {
+			nets[net] = append(nets[net], n)
+			if nc, ok := m.Networks[net]; ok && !bool(nc.External) && !nc.Internal {
+				egress = append(egress, n)
+			}
+		}
+		if len(sv.Networks) == 0 && sv.NetworkMode == "" {
+			nets["default"] = append(nets["default"], n)
+			egress = append(egress, n)
+		}
+	}
+	routes, err := IngressObjects(t.in.Instance, t.in.Namespace, labels)
+	if err != nil {
+		return Plan{}, err
+	}
+	pols, err := InstancePolicies(PolicyInput{Instance: t.in.Instance, Namespace: t.in.Namespace, CoreNamespace: t.in.CoreNamespace,
+		RoutedPorts: routed, CompanionPorts: t.in.CompanionPorts, Networks: nets, Egress: egress, Pods: podOf, Settings: t.in.Settings,
+		VPNService: t.in.IngressService, VPNSlot: t.in.VPNSlot})
+	if err != nil {
+		return Plan{}, err
+	}
+	services = append(services, pols...)
+	services = append(services, routes...)
 	plan := Plan{Services: map[string]string{}}
 	for _, n := range names {
 		plan.Services[n] = ObjectName(t.in.Instance, podOf[n])
@@ -1158,6 +1199,16 @@ func (t *translator) servicePorts(pod string, members []string) ([]*unstructured
 			if err != nil || pub <= 0 {
 				continue
 			}
+			// The binding is kept, never widened: the wildcard is a
+			// LoadBalancer, loopback no Service at all, any other
+			// address refused (compat's reason).
+			switch hip := strings.Trim(sp.HostIP, "[]"); {
+			case hip == "" || hip == "0.0.0.0" || hip == "::":
+			case isLoopback(hip):
+				continue
+			default:
+				return nil, refused("service %s publishes %d on %s (not on Kubernetes)", n, pub, hip)
+			}
 			proto := corev1.ProtocolTCP
 			if strings.EqualFold(sp.Protocol, "udp") {
 				proto = corev1.ProtocolUDP
@@ -1183,7 +1234,7 @@ func (t *translator) servicePorts(pod string, members []string) ([]*unstructured
 					}
 				}
 				if len(ranges) == 0 {
-					continue // no Local networks: not reachable at all
+					return nil, refused("service %s publishes port %d for the local networks only, and no (IPv4) Local networks are set", n, pub)
 				}
 				svc.Spec.LoadBalancerSourceRanges = ranges
 			}
@@ -1210,4 +1261,9 @@ func sanitizeLabel(s string) string {
 		s = s[:maxName]
 	}
 	return strings.Trim(s, "-_.")
+}
+
+func isLoopback(ip string) bool {
+	a, err := netip.ParseAddr(ip)
+	return err == nil && a.IsLoopback()
 }

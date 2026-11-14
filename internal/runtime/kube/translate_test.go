@@ -325,3 +325,32 @@ func TestTranslatorRefusesWhatCompatRefuses(t *testing.T) {
 		t.Fatalf("%d kubernetes vectors", n)
 	}
 }
+
+// A published port keeps its binding: the wildcard is a LoadBalancer,
+// loopback no Service, a specific address refused; a lan_only port with
+// no Local networks is refused.
+func TestTranslatePortBindings(t *testing.T) {
+	in := inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    ports:\n      - \"127.0.0.1:9081:80\"\n      - \"9083:80\"\n", "pb")
+	var svcs []string
+	for _, o := range objectsOf(t, in) {
+		if o.GetKind() == "Service" {
+			svcs = append(svcs, o.GetName())
+		}
+	}
+	if len(svcs) != 1 || svcs[0] != "pb--app-9083-tcp" {
+		t.Errorf("services %v", svcs)
+	}
+	in = inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    ports:\n      - \"192.168.1.5:9080:80\"\n", "pb")
+	if _, err := Translate(in); refusedErr(err) != "service app publishes 9080 on 192.168.1.5 (not on Kubernetes)" {
+		t.Errorf("specific address: %v", err)
+	}
+	in = inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    ports:\n      - \"445:445\"\n", "pb")
+	in.LanOnly = map[int]bool{445: true}
+	if _, err := Translate(in); !strings.Contains(refusedErr(err), "for the local networks only") {
+		t.Errorf("lan_only without networks: %v", err)
+	}
+	in.Settings.LocalNetworks = []string{"fd00::/8"}
+	if _, err := Translate(in); !strings.Contains(refusedErr(err), "for the local networks only") {
+		t.Errorf("lan_only with IPv6 networks only: %v", err)
+	}
+}

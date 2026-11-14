@@ -1,0 +1,60 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  labels:
+    portcullis.io/instance: app
+  name: app--m-portcullis-vpnallow-app
+  namespace: portcullis-apps
+spec:
+  ipAllowList:
+    rejectStatusCode: 404
+    sourceRange:
+    - 100.64.0.0/10
+    - 10.213.0.0/22
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: app
+  name: app--r-app
+  namespace: portcullis-apps
+spec:
+  entryPoints:
+  - vpnsecure
+  routes:
+  - kind: Rule
+    match: Host(`app.example.org`)
+    middlewares:
+    - name: app--m-portcullis-vpnallow-app
+      namespace: portcullis-apps
+    - name: client-headers@file
+    - name: portcullis-auth@file
+    - name: portcullis-groups-vpn@file
+    services:
+    - kind: Service
+      name: app--web
+      port: 80
+  tls:
+    options:
+      name: authaware@file
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: app
+  name: app--r-app-vpnreq
+  namespace: portcullis-apps
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`app.example.org`)
+    middlewares:
+    - name: vpn-required-path@file
+    services:
+    - kind: TraefikService
+      name: group-gate@file

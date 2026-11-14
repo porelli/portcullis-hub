@@ -1,0 +1,20 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: app
+  name: app--r-app-mcp
+  namespace: portcullis-apps
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`mcp.example.org`) && PathPrefix(`/app/`)
+    services:
+    - kind: TraefikService
+      name: mcp-gate@file
+  tls:
+    options:
+      name: protected-any@file

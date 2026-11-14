@@ -107,9 +107,13 @@ type deviceMeta struct {
 // vpnRuntime is the Hub's VPN memory (under its own mutex; lock order
 // Hub.mu → vpnRuntime.mu, never the reverse; never held across an exec).
 type vpnRuntime struct {
-	mu   sync.Mutex
-	maps map[string]*providerMap
-	kc   VPNKeycloak
+	mu sync.Mutex
+	// gatewayIPs (Kubernetes, K5): wired provider → its gateway pod's IP
+	// as last observed Running+Ready (absent: not seen, the provider
+	// isn't published). Guarded by mu.
+	gatewayIPs map[string]string
+	maps       map[string]*providerMap
+	kc         VPNKeycloak
 	// members is the last directory snapshot the publisher read (nil:
 	// none yet).
 	members *directory.Membership
@@ -215,6 +219,15 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 	// podman) adds to them. Unset (an older core, a hand-edited
 	// core.env): the defaults only, never nothing (I8); the doctor warns.
 	c.Reserved = append(c.Reserved, vpn.DefaultReserved...)
+	// Kubernetes (K-P11): the pod and service CIDRs are reserved too (a
+	// provider range inside them could claim pod addresses).
+	if h.kubeOn() {
+		for _, k := range []string{VarPodCIDR, VarServiceCIDR} {
+			if p, err := netip.ParsePrefix(strings.TrimSpace(core[k])); err == nil && !slices.Contains(c.Reserved, p.Masked()) {
+				c.Reserved = append(c.Reserved, p.Masked())
+			}
+		}
+	}
 	reserved := core[VarVPNReserved]
 	if strings.TrimSpace(reserved) == "" {
 		c.ReservedDefault = true
@@ -669,6 +682,7 @@ func (h *Hub) RunVPNMaps(ctx context.Context, tick time.Duration) {
 // vpnTick starts each due hook run (one at a time per provider, in the
 // background) and publishes.
 func (h *Hub) vpnTick(ctx context.Context) {
+	h.kubeGatewayTick(ctx)
 	now := h.vpnrt.now()
 	h.mu.RLock()
 	type due struct {

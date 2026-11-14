@@ -47,6 +47,190 @@ spec:
       storage: 1Gi
   storageClassName: portcullis-apps
 ---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: basic--net-default
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: basic
+          portcullis.io/net-default: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: basic
+          portcullis.io/net-default: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: basic
+      portcullis.io/net-default: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: basic--net-portcullis-proxy
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: basic
+          portcullis.io/net-portcullis-proxy: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: basic
+          portcullis.io/net-portcullis-proxy: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: basic
+      portcullis.io/net-portcullis-proxy: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: basic--routed-web
+  namespace: portcullis-apps
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: portcullis
+      podSelector:
+        matchLabels:
+          portcullis.io/component: traefik
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: basic
+      portcullis.io/service: web
+  policyTypes:
+  - Ingress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: basic--egress
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.42.0.0/16
+        - 10.43.0.0/16
+        - 169.254.0.0/16
+        - 192.0.2.10/32
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.0.2.10/32
+  podSelector:
+    matchLabels:
+      portcullis.io/egress: "true"
+      portcullis.io/instance: basic
+  policyTypes:
+  - Egress
+---
+# step 0 wait none
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: basic--m-echo-headers
+  namespace: portcullis-apps
+spec:
+  headers:
+    customRequestHeaders:
+      X_Forwarded_User: ""
+---
+# step 0 wait none
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: basic--r-echo
+  namespace: portcullis-apps
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`echo.example.org`)
+    middlewares:
+    - name: client-headers@file
+    - name: portcullis-auth@file
+    - name: portcullis-groups@file
+    - name: basic--m-echo-headers
+      namespace: portcullis-apps
+    - name: security-headers@file
+    services:
+    - kind: Service
+      name: basic--web
+      port: 8080
+  tls:
+    options:
+      name: authaware@file
+---
 # step 1 wait none
 apiVersion: apps/v1
 kind: Deployment

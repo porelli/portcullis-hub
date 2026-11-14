@@ -215,6 +215,12 @@ func (h *Hub) vpnDocLocked(st *vpn.Status) (vpn.Doc, time.Duration) {
 			continue
 		}
 		gw, err := vpn.GatewayAddr(core.Net, p.Slot)
+		if h.kubeOn() {
+			// K5: the gateway pod's observed IP; not seen Running+Ready
+			// with one = not published (never an empty gateway_ip, which
+			// voids the whole document for every reader).
+			gw, err = h.kubeGatewayIP(id)
+		}
 		if err != nil {
 			continue
 		}

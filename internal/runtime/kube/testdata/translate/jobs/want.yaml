@@ -32,6 +32,121 @@ spec:
       storage: 1Gi
   storageClassName: portcullis-apps
 ---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+  name: jobs--net-backend
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: jobs
+          portcullis.io/net-backend: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: jobs
+          portcullis.io/net-backend: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: jobs
+      portcullis.io/net-backend: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+  name: jobs--net-default
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: jobs
+          portcullis.io/net-default: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: jobs
+          portcullis.io/net-default: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: jobs
+      portcullis.io/net-default: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+  name: jobs--egress
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.42.0.0/16
+        - 10.43.0.0/16
+        - 169.254.0.0/16
+        - 192.0.2.10/32
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.0.2.10/32
+  podSelector:
+    matchLabels:
+      portcullis.io/egress: "true"
+      portcullis.io/instance: jobs
+  policyTypes:
+  - Egress
+---
 # step 1 wait ready
 apiVersion: apps/v1
 kind: Deployment

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -233,4 +234,86 @@ func (h *Hub) kubeVolumeOwner(ctx context.Context, id, key string) (map[string]s
 		return nil, err
 	}
 	return vo.VolumeOwner(ctx, p, key)
+}
+
+// core.env keys the Hub reads under Kubernetes (contract §2).
+const (
+	VarPodCIDR          = "PORTCULLIS_POD_CIDR"
+	VarServiceCIDR      = "PORTCULLIS_SERVICE_CIDR"
+	VarWGEdgeServiceIP  = "PORTCULLIS_WG_EDGE_SERVICE_IP"
+	VarNodeAddresses    = "PORTCULLIS_KUBE_NODE_ADDRESSES"
+	VarRuntimeRoots     = "PORTCULLIS_RUNTIME_ROOTS"
+	VarTraefikServiceIP = "PORTCULLIS_TRAEFIK_SERVICE_IP"
+)
+
+// kubeCoreValue is core.env's key (trimmed; "" when unset).
+func (h *Hub) kubeCoreValue(key string) string {
+	return strings.TrimSpace(readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))[key])
+}
+
+// gatewayWatcher is the kube backend's view of the wired providers'
+// gateway pods: instance → pod IP of a Running+Ready pod labelled
+// portcullis.io/vpn-slot.
+type gatewayWatcher interface {
+	GatewayIPs(ctx context.Context) (map[string]string, error)
+}
+
+// kubeGatewayIP is wired provider id's observed gateway pod IP.
+func (h *Hub) kubeGatewayIP(id string) (netip.Addr, error) {
+	h.vpnrt.mu.Lock()
+	raw := h.vpnrt.gatewayIPs[id]
+	h.vpnrt.mu.Unlock()
+	a, err := netip.ParseAddr(raw)
+	if err != nil || !a.Is4() {
+		return netip.Addr{}, fmt.Errorf("the gateway pod of %s has no observed IP", id)
+	}
+	return a, nil
+}
+
+// kubeGatewayTick reads the gateway pods (Kubernetes) and republishes
+// vpn.json when a provider's IP changed: a rescheduled pod's provider
+// is unpublished until its new pod is seen (its old IP never stays).
+func (h *Hub) kubeGatewayTick(ctx context.Context) {
+	if !h.kubeOn() || h.rt == nil {
+		return
+	}
+	gw, ok := h.rt.(gatewayWatcher)
+	if !ok {
+		return
+	}
+	ips, err := gw.GatewayIPs(ctx)
+	if err != nil {
+		ips = map[string]string{} // unknown: nothing published (fail closed)
+	}
+	h.vpnrt.mu.Lock()
+	changed := !maps.Equal(ips, h.vpnrt.gatewayIPs)
+	h.vpnrt.gatewayIPs = ips
+	h.vpnrt.mu.Unlock()
+	if changed {
+		h.TriggerVPNPublish()
+	}
+}
+
+// exposureDrifter is the kube backend's exposure comparison.
+type exposureDrifter interface {
+	ExposureDrift(ctx context.Context, instance string, labels map[string]map[string]string) (string, error)
+}
+
+// kubeExposureDrift compares instance id's live routes with the ones its
+// project gives now (the template's labels with the Hub's override, as
+// the deploy translated them).
+func (h *Hub) kubeExposureDrift(ctx context.Context, ed exposureDrifter, id string) (string, error) {
+	t := h.Template(id)
+	if t == nil {
+		return "", fmt.Errorf("no template view")
+	}
+	m, err := h.loadRuntime(ctx, t)
+	if err != nil {
+		return "", err
+	}
+	labels := map[string]map[string]string{}
+	for n, s := range m.Services {
+		labels[n] = map[string]string(s.Labels)
+	}
+	return ed.ExposureDrift(ctx, id, labels)
 }

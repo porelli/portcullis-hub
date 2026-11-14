@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -454,7 +455,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		// A portcullis-mcp- alias the Hub doesn't render makes a container
 		// reachable as a companion (§5), and a rendered one missing on a
 		// running companion breaks the gate's path: both exposure drift.
-		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" {
+		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" && !h.kubeOn() {
 			var extra, missing []string
 			have := map[string]bool{}
 			for _, a := range c.mcpAliases {
@@ -481,6 +482,22 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		if keys, ok := expectedKeys[c.id]; ok && exposureDiff[c.id] == "" {
 			if extra := extraTraefikKeys(keys[c.service], c.labels); len(extra) > 0 {
 				exposureDiff[c.id] = c.service + ": Traefik labels from the image, not from compose: " + strings.Join(extra, ", ")
+			}
+		}
+	}
+	// Kubernetes: the live IngressRoutes and Middlewares against the ones
+	// the Hub renders now (§5 "Exposure drift").
+	if ed, ok := h.rt.(exposureDrifter); ok && h.kubeOn() {
+		for _, id := range slices.Sorted(maps.Keys(desired)) {
+			if exposureDiff[id] != "" || !enabled[id] {
+				continue
+			}
+			d, err := h.kubeExposureDrift(ctx, ed, id)
+			switch {
+			case err != nil:
+				exposureDiff[id] = "routes: can't be compared: " + clip(err.Error(), 200)
+			case d != "":
+				exposureDiff[id] = "routes: " + d
 			}
 		}
 	}

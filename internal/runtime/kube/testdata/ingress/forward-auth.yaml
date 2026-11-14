@@ -1,0 +1,26 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: app
+  name: app--r-app
+  namespace: portcullis-apps
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`app.example.org`)
+    middlewares:
+    - name: client-headers@file
+    - name: portcullis-auth@file
+    - name: portcullis-groups@file
+    - name: security-headers@file
+    services:
+    - kind: Service
+      name: app--web
+      port: 8080
+  tls:
+    options:
+      name: authaware@file
