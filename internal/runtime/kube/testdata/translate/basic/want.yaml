@@ -1,0 +1,227 @@
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  web.PORT: ODA4MA==
+  web.SECRET_KEY: czNjcjN0LWdvbGRlbg==
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: basic--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  f000-echo.conf: |
+    listen 8080;
+  f001-extra.txt: |
+    x
+kind: ConfigMap
+metadata:
+  labels:
+    portcullis.io/instance: basic
+  name: tpl-echo-0060493bf0
+  namespace: portcullis-apps
+---
+# step 0 wait none
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    portcullis.io/gid: "10001"
+    portcullis.io/mode: "0750"
+    portcullis.io/uid: "10001"
+  labels:
+    portcullis.io/instance: basic
+    portcullis.io/volume: echo-data
+  name: basic--echo-data
+  namespace: portcullis-apps
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: portcullis-apps
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: basic
+    portcullis.io/service: web
+  name: basic--web
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: basic
+      portcullis.io/service: web
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/compose-labels: '{"web":{"traefik.enable":"true","traefik.http.routers.echo.rule":"Host(`echo.example.org`)"}}'
+        portcullis.io/services: '{"web":"web"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: basic
+        portcullis.io/net-default: "true"
+        portcullis.io/net-portcullis-proxy: "true"
+        portcullis.io/service: web
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: PORT
+          valueFrom:
+            secretKeyRef:
+              key: web.PORT
+              name: basic--env
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              key: web.SECRET_KEY
+              name: basic--env
+        image: docker.io/ealen/echo-server:0.9.2@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - kill
+              - -s
+              - QUIT
+              - "1"
+        livenessProbe:
+          exec:
+            command:
+            - wget
+            - -qO-
+            - http://localhost:8080/health
+          failureThreshold: 8
+          periodSeconds: 15
+          timeoutSeconds: 3
+        name: web
+        readinessProbe:
+          exec:
+            command:
+            - wget
+            - -qO-
+            - http://localhost:8080/health
+          failureThreshold: 4
+          periodSeconds: 15
+          timeoutSeconds: 3
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_BIND_SERVICE
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 10001
+          runAsUser: 10001
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmpfs-web-0
+        - mountPath: /dev/shm
+          name: shm-web
+        - mountPath: /data
+          name: vol-echo-data
+        - mountPath: /etc/echo
+          name: tpl-4ab11cad
+          readOnly: true
+        - mountPath: /media
+          name: host-833a3e33
+          readOnly: true
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+      enableServiceLinks: false
+      initContainers:
+      - command:
+        - /usr/local/bin/hub
+        - seed
+        - /usr/local/bin
+        - /portcullis-bin
+        image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        imagePullPolicy: IfNotPresent
+        name: portcullis-bin
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 10001
+          runAsUser: 10001
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+      - command:
+        - /portcullis-bin/hub
+        - seed
+        - /data
+        - /portcullis-seed
+        image: docker.io/ealen/echo-server:0.9.2@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: portcullis-seed-1
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 10001
+          runAsUser: 10001
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+        - mountPath: /portcullis-seed
+          name: vol-echo-data
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 20
+      volumes:
+      - hostPath:
+          path: /srv/shared/media
+          type: Directory
+        name: host-833a3e33
+      - emptyDir: {}
+        name: portcullis-bin
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
+        name: shm-web
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 16Mi
+        name: tmpfs-web-0
+      - configMap:
+          items:
+          - key: f000-echo.conf
+            path: echo.conf
+          - key: f001-extra.txt
+            path: extra.txt
+          name: tpl-echo-0060493bf0
+        name: tpl-4ab11cad
+      - name: vol-echo-data
+        persistentVolumeClaim:
+          claimName: basic--echo-data

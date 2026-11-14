@@ -1,0 +1,15 @@
+services:
+  samba:
+    image: ghcr.io/porelli/portcullis-samba:4.22
+    user: "0:0"
+    volumes:
+      - type: volume
+        source: portcullis-hub-secrets
+        target: /portcullis/hashes
+        read_only: true
+        volume:
+          subpath: person-secret/smb_password
+volumes:
+  portcullis-hub-secrets:
+    external: true
+    name: portcullis_hub_secrets

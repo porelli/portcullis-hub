@@ -1,0 +1,126 @@
+---
+# step 0 wait none
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: datafile
+  name: datafile--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+binaryData:
+  people.json: eyJhIjoxfQ==
+data:
+  .rev: ""
+kind: ConfigMap
+metadata:
+  labels:
+    portcullis.io/instance: datafile
+  name: datafile--people
+  namespace: portcullis-apps
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  people.secrets.json: eyJzIjoyfQ==
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: datafile
+  name: datafile--people-secrets
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: datafile
+    portcullis.io/service: app
+  name: datafile--app
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: datafile
+      portcullis.io/service: app
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"app":"app"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: datafile
+        portcullis.io/net-default: "true"
+        portcullis.io/service: app
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: app
+        resources: {}
+        securityContext:
+          runAsGroup: 101
+          runAsUser: 101
+        volumeMounts:
+        - mountPath: /portcullis/people
+          name: data-c9022680
+          readOnly: true
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+      enableServiceLinks: false
+      initContainers:
+      - command:
+        - /usr/local/bin/hub
+        - seed
+        - /usr/local/bin
+        - /portcullis-bin
+        image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        imagePullPolicy: IfNotPresent
+        name: portcullis-bin
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 101
+          runAsUser: 101
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+      securityContext:
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: data-c9022680
+        projected:
+          sources:
+          - configMap:
+              items:
+              - key: people.json
+                mode: 288
+                path: people.json
+              - key: .rev
+                mode: 288
+                path: .rev
+              name: datafile--people
+          - secret:
+              items:
+              - key: people.secrets.json
+                mode: 288
+                path: people.secrets.json
+              name: datafile--people-secrets
+      - emptyDir: {}
+        name: portcullis-bin

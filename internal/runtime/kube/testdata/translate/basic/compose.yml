@@ -1,0 +1,35 @@
+services:
+  web:
+    image: docker.io/ealen/echo-server:0.9.2
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    shm_size: 64m
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    stop_signal: SIGQUIT
+    stop_grace_period: 20s
+    environment:
+      PORT: "8080"
+      SECRET_KEY: ${ECHO_SECRET:-unset}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+    volumes:
+      - echo-data:/data
+      - ./templates/echo/conf:/etc/echo:ro
+      - /srv/shared/media:/media:ro
+    networks: [default, portcullis-proxy]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.echo.rule: Host(`echo.example.org`)
+volumes:
+  echo-data: {}
+networks:
+  portcullis-proxy:
+    external: true

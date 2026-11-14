@@ -1,0 +1,100 @@
+---
+# step 0 wait none
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: person-secret
+  name: person-secret--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  alice.nt: MDEyMw==
+  bob.nt: NDU2Nw==
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: person-secret
+  name: person-secret--smb-password-pw
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: person-secret
+    portcullis.io/service: samba
+  name: person-secret--samba
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: person-secret
+      portcullis.io/service: samba
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"samba":"samba"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: person-secret
+        portcullis.io/net-default: "true"
+        portcullis.io/service: samba
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - image: ghcr.io/porelli/portcullis-samba:4.22@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: samba
+        resources: {}
+        securityContext:
+          runAsGroup: 0
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /portcullis/hashes
+          name: pw-smb-password
+          readOnly: true
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+      enableServiceLinks: false
+      initContainers:
+      - command:
+        - /usr/local/bin/hub
+        - seed
+        - /usr/local/bin
+        - /portcullis-bin
+        image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        imagePullPolicy: IfNotPresent
+        name: portcullis-bin
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 0
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+      securityContext:
+        fsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - emptyDir: {}
+        name: portcullis-bin
+      - name: pw-smb-password
+        secret:
+          defaultMode: 288
+          secretName: person-secret--smb-password-pw

@@ -1,0 +1,65 @@
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  vpn.TS_USERSPACE: dHJ1ZQ==
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: sidecar
+  name: sidecar--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: sidecar
+    portcullis.io/service: vpn
+  name: sidecar--vpn
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: sidecar
+      portcullis.io/service: vpn
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"app":"app","vpn":"vpn"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: sidecar
+        portcullis.io/net-default: "true"
+        portcullis.io/service: vpn
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: TS_USERSPACE
+          valueFrom:
+            secretKeyRef:
+              key: vpn.TS_USERSPACE
+              name: sidecar--env
+        image: docker.io/tailscale/tailscale:v1.90.0@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: vpn
+        resources: {}
+        securityContext:
+          runAsGroup: 1000
+          runAsUser: 1000
+      - image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: app
+        resources: {}
+        securityContext: {}
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault

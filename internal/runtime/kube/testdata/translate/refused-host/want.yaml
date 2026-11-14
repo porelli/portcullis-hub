@@ -1,0 +1,1 @@
+refused: service app binds /var/run/docker.sock, outside the shared-folder roots (not on Kubernetes)

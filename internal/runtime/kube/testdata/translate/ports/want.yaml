@@ -1,0 +1,125 @@
+---
+# step 0 wait none
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: ports
+  name: ports--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ports
+    portcullis.io/service: dns
+  name: ports--dns-53-udp
+  namespace: portcullis-apps
+spec:
+  allocateLoadBalancerNodePorts: false
+  externalTrafficPolicy: Local
+  ports:
+  - name: udp-53
+    port: 53
+    protocol: UDP
+    targetPort: 53
+  selector:
+    portcullis.io/instance: ports
+    portcullis.io/service: dns
+  type: LoadBalancer
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ports
+    portcullis.io/service: dns
+  name: ports--dns-5353-tcp
+  namespace: portcullis-apps
+spec:
+  allocateLoadBalancerNodePorts: false
+  externalTrafficPolicy: Local
+  loadBalancerSourceRanges:
+  - 192.168.1.0/24
+  ports:
+  - name: tcp-5353
+    port: 5353
+    protocol: TCP
+    targetPort: 53
+  selector:
+    portcullis.io/instance: ports
+    portcullis.io/service: dns
+  type: LoadBalancer
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ports
+    portcullis.io/service: dns
+  name: ports--dns-445-tcp
+  namespace: portcullis-apps
+spec:
+  allocateLoadBalancerNodePorts: false
+  externalTrafficPolicy: Local
+  loadBalancerSourceRanges:
+  - 192.168.1.0/24
+  ports:
+  - name: tcp-445
+    port: 445
+    protocol: TCP
+    targetPort: 445
+  selector:
+    portcullis.io/instance: ports
+    portcullis.io/service: dns
+  type: LoadBalancer
+status:
+  loadBalancer: {}
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: ports
+    portcullis.io/service: dns
+  name: ports--dns
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: ports
+      portcullis.io/service: dns
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"dns":"dns"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: ports
+        portcullis.io/net-default: "true"
+        portcullis.io/service: dns
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - image: docker.io/pihole/pihole:2025.08.0@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: dns
+        resources: {}
+        securityContext: {}
+      enableServiceLinks: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault

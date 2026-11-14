@@ -1,0 +1,33 @@
+services:
+  migrate:
+    image: docker.io/library/alpine:3.24.3
+    user: "10001"
+    restart: "no"
+    command: ["sh", "-c", "echo migrate"]
+  db:
+    image: docker.io/library/postgres:17.6
+    user: "70:70"
+    environment:
+      POSTGRES_PASSWORD: pw-golden
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks: [backend]
+  app:
+    image: docker.io/library/nginx:1.29
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend, default]
+volumes:
+  db-data: {}
+networks:
+  backend:
+    internal: true

@@ -1,0 +1,79 @@
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  derp.PORTCULLIS_VPN_EDGE: MTAuNDMuMC4yMjo5MDA0
+  headscale.HS_LOG: aW5mbw==
+  headscale.PORTCULLIS_VPN_EDGE: MTAuNDMuMC4yMjo5MDA0
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+  name: vpn-gateway--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+    portcullis.io/service: headscale
+  name: vpn-gateway--headscale
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: vpn-gateway
+      portcullis.io/service: headscale
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"derp":"derp","headscale":"headscale"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: vpn-gateway
+        portcullis.io/net-default: "true"
+        portcullis.io/service: headscale
+        portcullis.io/vpn-slot: "3"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: HS_LOG
+          valueFrom:
+            secretKeyRef:
+              key: headscale.HS_LOG
+              name: vpn-gateway--env
+        - name: PORTCULLIS_VPN_EDGE
+          valueFrom:
+            secretKeyRef:
+              key: headscale.PORTCULLIS_VPN_EDGE
+              name: vpn-gateway--env
+        image: docker.io/headscale/headscale:0.27.0@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: headscale
+        resources: {}
+        securityContext:
+          runAsGroup: 10001
+          runAsUser: 10001
+      - env:
+        - name: PORTCULLIS_VPN_EDGE
+          valueFrom:
+            secretKeyRef:
+              key: derp.PORTCULLIS_VPN_EDGE
+              name: vpn-gateway--env
+        image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: derp
+        resources: {}
+        securityContext: {}
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault

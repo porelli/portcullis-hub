@@ -1,0 +1,9 @@
+services:
+  vpn:
+    image: docker.io/tailscale/tailscale:v1.90.0
+    user: "1000:1000"
+    environment:
+      TS_USERSPACE: "true"
+  app:
+    image: docker.io/library/nginx:1.29
+    network_mode: service:vpn

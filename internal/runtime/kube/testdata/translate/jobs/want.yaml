@@ -1,0 +1,243 @@
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  db.POSTGRES_PASSWORD: cHctZ29sZGVu
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+  name: jobs--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    portcullis.io/gid: "70"
+    portcullis.io/mode: "0750"
+    portcullis.io/uid: "70"
+  labels:
+    portcullis.io/instance: jobs
+    portcullis.io/volume: db-data
+  name: jobs--db-data
+  namespace: portcullis-apps
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: portcullis-apps
+---
+# step 1 wait ready
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+    portcullis.io/service: db
+  name: jobs--db
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: jobs
+      portcullis.io/service: db
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"db":"db"}'
+      labels:
+        portcullis.io/instance: jobs
+        portcullis.io/net-backend: "true"
+        portcullis.io/service: db
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: db.POSTGRES_PASSWORD
+              name: jobs--env
+        image: docker.io/library/postgres:17.6@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -U postgres
+          failureThreshold: 6
+          periodSeconds: 10
+          timeoutSeconds: 5
+        name: db
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -U postgres
+          failureThreshold: 3
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources: {}
+        securityContext:
+          runAsGroup: 70
+          runAsUser: 70
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - pg_isready -U postgres
+          failureThreshold: 33
+          periodSeconds: 10
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: vol-db-data
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+      enableServiceLinks: false
+      initContainers:
+      - command:
+        - /usr/local/bin/hub
+        - seed
+        - /usr/local/bin
+        - /portcullis-bin
+        image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        imagePullPolicy: IfNotPresent
+        name: portcullis-bin
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 70
+          runAsUser: 70
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+      - command:
+        - /portcullis-bin/hub
+        - seed
+        - /var/lib/postgresql/data
+        - /portcullis-seed
+        image: docker.io/library/postgres:17.6@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: portcullis-seed-1
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 70
+          runAsUser: 70
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+        - mountPath: /portcullis-seed
+          name: vol-db-data
+      securityContext:
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - emptyDir: {}
+        name: portcullis-bin
+      - name: vol-db-data
+        persistentVolumeClaim:
+          claimName: jobs--db-data
+---
+# step 2 wait complete
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+    portcullis.io/service: migrate
+  name: jobs--migrate
+  namespace: portcullis-apps
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"migrate":"migrate"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: jobs
+        portcullis.io/net-default: "true"
+        portcullis.io/service: migrate
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - args:
+        - sh
+        - -c
+        - echo migrate
+        image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: migrate
+        resources: {}
+        securityContext:
+          runAsUser: 10001
+      enableServiceLinks: false
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+---
+# step 3 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+    portcullis.io/service: app
+  name: jobs--app
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: jobs
+      portcullis.io/service: app
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"app":"app"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: jobs
+        portcullis.io/net-backend: "true"
+        portcullis.io/net-default: "true"
+        portcullis.io/service: app
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: app
+        resources: {}
+        securityContext: {}
+      enableServiceLinks: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault

@@ -1,0 +1,7 @@
+services:
+  dns:
+    image: docker.io/pihole/pihole:2025.08.0
+    ports:
+      - "53:53/udp"
+      - "5353:53/tcp"
+      - "445:445"
