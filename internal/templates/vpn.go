@@ -303,6 +303,12 @@ func topLevelVolumes(compose []byte) map[string]vpnVolume {
 	return out
 }
 
+// vpnDriveRe is a Windows drive-letter source (X:\ or X:/).
+var vpnDriveRe = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+
+// vpnLetterText refuses a one-letter volume name (it reads as a drive).
+const vpnLetterText = "a VPN template's volume names are longer than one letter"
+
 // vpnVolumeNameRe is a named volume reference Compose accepts.
 var vpnVolumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
@@ -355,10 +361,21 @@ func vpnMounts(raw interface{}) (out []vpnMount, bad string) {
 		if strings.Contains(entry, "$") {
 			return out, entry
 		}
+		if vpnDriveRe.MatchString(entry) {
+			// X:\… or X:/…: a Windows host path, read before splitting on
+			// ':' (a bind, refused by the bind rules).
+			rest := strings.Split(entry[2:], ":")
+			ro := len(rest) > 2 && slices.Contains(strings.Split(rest[2], ","), "ro")
+			out = append(out, vpnMount{bind: true, src: entry[:2] + rest[0], entry: entry, ro: ro})
+			continue
+		}
 		parts := strings.Split(entry, ":")
 		if len(parts) == 1 {
 			continue // an anonymous volume
 		}
+		// ./… and /… are binds (the bind rules refuse all but ./…), a
+		// volume name a named volume (declared: checked by the caller);
+		// anything else (~, a bare relative path) is unresolvable.
 		src := parts[0]
 		bind := strings.HasPrefix(src, ".") || strings.HasPrefix(src, "/")
 		if len(parts) > 3 || src == "" || parts[1] == "" || !bind && !vpnVolumeNameRe.MatchString(src) {
@@ -555,6 +572,9 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 				}
 				continue
 			}
+			if len(mm.src) == 1 {
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: %s", mem, mm.entry, vpnLetterText)
+			}
 			if d, ok := vols[mm.src]; !ok || !d.plain {
 				return fmt.Errorf("vpn.ingress.service: %s mounts volume %s: a VPN gateway's volumes are the template's own (declared, with no external, name, driver or driver_opts)", mem, mm.src)
 			}
@@ -596,14 +616,20 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 		if bad != "" {
 			return fmt.Errorf("vpn.ingress.service: %s mounts %s: unresolvable (a VPN template's mounts are literal)", n, bad)
 		}
-		// The template's files (./templates/<id>/, what is inside, and its
-		// ancestors . and ./templates) are read-only for every service: a
-		// read-write bind could rewrite a script the gateway runs.
 		for _, om := range ms {
-			if om.bind && vpnBindOutside(om.src) {
+			_, declared := vols[om.src]
+			switch {
+			case !om.bind && len(om.src) == 1:
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: %s", n, om.entry, vpnLetterText)
+			case !om.bind && om.entry != om.src && !declared:
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's short-syntax sources are ./ binds or declared volumes", n, om.entry)
+			case om.bind && vpnBindOutside(om.src):
 				return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds start with ./ and have no .. segment", n, om.entry)
 			}
 		}
+		// The template's files (./templates/<id>/, what is inside, and its
+		// ancestors . and ./templates) are read-only for every service: a
+		// read-write bind could rewrite a script the gateway runs.
 		for _, om := range ms {
 			if om.bind && !om.ro {
 				norm, ltid := strings.ToLower(path.Clean(om.src)), strings.ToLower(tid)
@@ -630,8 +656,11 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 	for _, n := range names {
 		// The service's own names answer on every network it joins.
 		joined := infos[n].networks
-		if len(joined) == 0 && !infos[n].networkMode {
+		if len(joined) == 0 {
 			joined = []string{"default"}
+		}
+		if infos[n].networkMode {
+			joined = nil // no DNS name of its own
 		}
 		for _, own := range []string{n, infos[n].hostname, infos[n].containerName} {
 			if !strings.HasSuffix(strings.TrimRight(FoldKey(strings.TrimSpace(own)), "."), "-internal") {
@@ -695,6 +724,9 @@ func vpnPlainVolumeIdentity(compose []byte) error {
 		return nil
 	}
 	for _, k := range slices.Sorted(maps.Keys(doc.Volumes)) {
+		if len(k) == 1 {
+			return fmt.Errorf("vpn: volume %s: %s", k, vpnLetterText)
+		}
 		mm, _ := doc.Volumes[k].(map[string]interface{})
 		for _, key := range []string{"name", "external", "driver", "driver_opts"} {
 			if _, ok := mm[key]; ok {
