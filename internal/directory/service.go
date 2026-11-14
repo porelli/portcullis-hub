@@ -419,6 +419,10 @@ type Overview struct {
 	// (PasswordMethodOn; unset = on), so password onboarding is offered
 	// (admins only).
 	PasswordOn bool `json:"password_on"`
+	// AuthenticatorOn: the totp method is switched on
+	// (AuthenticatorMethodOn; unset = off), so the setup-link dialog offers
+	// "Also set up an authenticator app".
+	AuthenticatorOn bool `json:"authenticator_on"`
 	// Admin and Perms describe the caller (Me): admins hold every
 	// delegated permission.
 	Admin bool     `json:"admin"`
@@ -527,6 +531,7 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	}
 	if full {
 		ov.PasswordOn = s.PasswordMethodOn == nil || s.PasswordMethodOn()
+		ov.AuthenticatorOn = s.AuthenticatorMethodOn != nil && s.AuthenticatorMethodOn()
 	}
 
 	// Load fields from Store if available
