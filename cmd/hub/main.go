@@ -457,7 +457,7 @@ func main() {
 	dir.PasswordMethodOn = h.PasswordMethodOn
 	// Who has which sign-in method: Keycloak's passkeys, enroll's
 	// YubiKey certificates (§8.1 "Inventory", §9.4).
-	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates, PasskeyLabel: kc.SetPasskeyLabel})
+	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates, PasskeyLabel: kc.SetPasskeyLabel, AuthenticatorLabel: kc.SetAuthenticatorLabel})
 	// The Sign-in page's own certificates (enroll, §9.4) and own
 	// password (the directory, §5.1).
 	h.SetCertActions(invites)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -556,5 +557,259 @@ func TestPasswordFreshAllowlist(t *testing.T) {
 		if got := passwordFreshAllowed(c.m, func() bool { return c.has }); got != c.out {
 			t.Errorf("%q (has password %v) = %v", c.m, c.has, got)
 		}
+	}
+}
+
+const (
+	otpID1 = "11111111-1111-4111-8111-111111111111"
+	otpID2 = "22222222-2222-4222-8222-222222222222"
+)
+
+// totpFixture: totp on; alice has a security key and two authenticator
+// apps (listed newest first by the source).
+func totpFixture(t *testing.T) *certFixture {
+	t.Helper()
+	c := newCertFixture(t)
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["totp"] = true })
+	early := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	c.src.set(func(s *fakeSignInSrc) {
+		s.keys["alice"] = []signin.Method{signin.SecurityKey, signin.TOTP}
+		s.creds = map[string][]keycloak.PasskeyCredential{"alice": {
+			{ID: renameKeyID, Type: string(signin.SecurityKey), Label: "YubiKey"},
+			{ID: otpID2, Type: string(signin.TOTP), Label: "Tablet", Created: early.AddDate(0, 1, 0)},
+			{ID: otpID1, Type: string(signin.TOTP), Label: "Phone", Created: early},
+		}}
+	})
+	c.f.h.MarkInventoryStale()
+	return c
+}
+
+// TestMySignInTOTPRow (T4, T18, P28): set with its rows sorted by
+// created_at and max_authenticators 3; off → off, no rows; admin → none
+// even with a credential.
+func TestMySignInTOTPRow(t *testing.T) {
+	c := totpFixture(t)
+	v, err := c.f.h.MySignInView(c.ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := mineRow(v, signin.TOTP)
+	if r.State != MethodSet || !r.On || r.Label != "Authenticator app" || len(r.Authenticators) != 2 ||
+		r.Authenticators[0].ID != otpID1 || r.Authenticators[0].Label != "Phone" || r.Authenticators[1].Label != "Tablet" || r.Authenticators[0].CreatedAt.IsZero() {
+		t.Errorf("totp row = %+v", r)
+	}
+	if len(r.Passkeys) != 0 || v.MaxAuthenticators != 3 || MaxAuthenticators != 3 {
+		t.Errorf("passkeys %v, max %d", r.Passkeys, v.MaxAuthenticators)
+	}
+	if k := mineRow(v, signin.SecurityKey); len(k.Passkeys) != 1 {
+		t.Errorf("security key row = %+v", k)
+	}
+	b, _ := json.Marshal(v)
+	for _, k := range []string{`"authenticators":[{"id":"` + otpID1 + `","label":"Phone","created_at":`, `"max_authenticators":3`} {
+		if !strings.Contains(string(b), k) {
+			t.Errorf("no %s in %s", k, b)
+		}
+	}
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["totp"] = false })
+	v, _ = c.f.h.MySignInView(c.ctx, "alice")
+	if r := mineRow(v, signin.TOTP); r.State != MethodOff || r.Authenticators != nil {
+		t.Errorf("off row = %+v", r)
+	}
+	// Unknown while Keycloak can't be read.
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["totp"] = true })
+	c.src.set(func(s *fakeSignInSrc) { s.down = true })
+	c.f.h.MarkInventoryStale()
+	v, _ = c.f.h.MySignInView(c.ctx, "alice")
+	if r := mineRow(v, signin.TOTP); r.State != MethodUnknown {
+		t.Errorf("down row = %+v", r)
+	}
+	// admin never has one.
+	c2 := totpFixture(t)
+	p := newFakePeople("alice", "admin")
+	c2.src.set(func(s *fakeSignInSrc) {
+		s.keys["admin"] = []signin.Method{signin.TOTP}
+		s.creds["admin"] = []keycloak.PasskeyCredential{{ID: otpID1, Type: string(signin.TOTP), Label: "Phone"}}
+	})
+	wireSignIn(c2.f.h, p, c2.src)
+	v, err = c2.f.h.MySignInView(c2.ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := mineRow(v, signin.TOTP); r.State != MethodNone || r.Authenticators != nil {
+		t.Errorf("admin row = %+v", r)
+	}
+}
+
+// TestRemoveImpactLastAuthenticator (T7): with one authenticator app, the
+// apps whose ✓ turns ✗ without it; with two, none.
+func TestRemoveImpactLastAuthenticator(t *testing.T) {
+	c := totpFixture(t)
+	h := c.f.h
+	if err := h.Enable("grafana"); err != nil {
+		t.Fatal(err)
+	}
+	h.Wait()
+	p := newFakePeople("alice", "bob")
+	p.addGroup("users_grafana", "alice")
+	setSignIn(c.f, func(si *state.SignIn) {
+		si.Methods["password"] = true
+		b := si.Templates["password-and-code"]
+		b.Enabled = true
+		si.Templates["password-and-code"] = b
+		si.Passwords["alice"] = state.PasswordRecord{UUID: "uuid-alice", SetAt: time.Now(), SetBy: "alice"}
+	})
+	h.mu.Lock()
+	in := h.st.Instances["grafana"]
+	in.SignInTemplate = "password-and-code"
+	h.st.Instances["grafana"] = in
+	h.mu.Unlock()
+	wireSignIn(h, p, c.src)
+	one := func() {
+		c.src.set(func(s *fakeSignInSrc) {
+			s.creds["alice"] = s.creds["alice"][:2] // the key and one app
+		})
+	}
+	v, err := h.MySignInView(c.ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g AppNeed
+	for _, a := range v.Apps {
+		if a.ID == "grafana" {
+			g = a
+		}
+	}
+	if g.Template != "password-and-code" || g.OK == nil || !*g.OK {
+		t.Fatalf("grafana = %+v (password row %+v)", g, mineRow(v, signin.Password))
+	}
+	if r := mineRow(v, signin.TOTP); len(r.RemoveImpact) != 0 {
+		t.Errorf("two apps: impact %v", r.RemoveImpact)
+	}
+	one()
+	h.MarkInventoryStale()
+	v, _ = h.MySignInView(c.ctx, "alice")
+	r := mineRow(v, signin.TOTP)
+	if len(r.Authenticators) != 1 || !slices.Equal(r.RemoveImpact, []string{g.Name}) {
+		t.Errorf("one app: %+v", r)
+	}
+}
+
+// TestInventoryTOTPReservedNeverCounted (T4): admin, portcullis-hub and
+// every portcullis-* name never count an authenticator app.
+func TestInventoryTOTPReservedNeverCounted(t *testing.T) {
+	c := totpFixture(t)
+	c.src.set(func(s *fakeSignInSrc) {
+		for _, u := range []string{"admin", "portcullis-hub", "portcullis-x"} {
+			s.keys[u] = []signin.Method{signin.TOTP, signin.SecurityKey}
+		}
+	})
+	c.f.h.MarkInventoryStale()
+	inv, err := c.f.h.SignInInventory(c.ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{"admin", "portcullis-hub", "portcullis-x"} {
+		if ms := inv.People[u].Methods; slices.Contains(ms, signin.TOTP) || !slices.Contains(ms, signin.SecurityKey) {
+			t.Errorf("%s: %v", u, ms)
+		}
+	}
+	if ms := inv.People["alice"].Methods; !slices.Contains(ms, signin.TOTP) {
+		t.Errorf("alice: %v", ms)
+	}
+}
+
+// fakeAuthLabels is SignInSources.AuthenticatorLabel.
+type fakeAuthLabels struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
+
+func (f *fakeAuthLabels) set(_ context.Context, user, id, label string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, user+" "+id+" "+label)
+	return "Phone", f.err
+}
+
+// TestRenameOwnAuthenticator (T6).
+func TestRenameOwnAuthenticator(t *testing.T) {
+	c := totpFixture(t)
+	h := c.f.h
+	al := &fakeAuthLabels{}
+	h.SetSignInSources(SignInSources{Passkeys: c.src.passkeys, Certificates: c.src.certificates, AuthenticatorLabel: al.set})
+	if err := h.RenameOwnAuthenticator(c.ctx, "alice", otpID1, "  Work phone "); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(al.calls, ",") != "alice "+otpID1+" Work phone" {
+		t.Errorf("calls = %v", al.calls)
+	}
+	if e := c.audit.last(); e.Action != "signin.authenticator.label" || e.Target != "alice" || e.Detail != "Phone → Work phone" || e.Result != "ok" {
+		t.Errorf("audit = %+v", e)
+	}
+	err := h.RenameOwnAuthenticator(c.ctx, "alice", otpID1, strings.Repeat("é", 65))
+	if statusOf(err) != 400 || err.Error() != "an authenticator name is 1–64 characters on one line" {
+		t.Errorf("65 runes: %v", err)
+	}
+	if e := c.audit.last(); e.Action != "signin.authenticator.label" || e.Result != "refused" {
+		t.Errorf("refused audit = %+v", e)
+	}
+	for _, se := range []struct {
+		err    error
+		status int
+		text   string
+	}{
+		{keycloak.ErrAuthenticatorNotFound, 404, "no such authenticator app"},
+		{keycloak.ErrUserNotFound, 404, "no such authenticator app"},
+		{keycloak.ErrPasskeyLabelTaken, 409, "you already have a sign-in method named “tablet”"},
+		{errors.New("keycloak: connection refused"), 503, "authenticator names can't be changed right now: try again later"},
+	} {
+		al.mu.Lock()
+		al.err = se.err
+		al.mu.Unlock()
+		err := h.RenameOwnAuthenticator(c.ctx, "alice", otpID1, "tablet")
+		if statusOf(err) != se.status || err.Error() != se.text {
+			t.Errorf("%v: %v", se.err, err)
+		}
+	}
+	if err := h.RenameOwnAuthenticator(c.ctx, "alice", "nope", "X"); statusOf(err) != 404 || err.Error() != "no such authenticator app" {
+		t.Errorf("non-UUID: %v", err)
+	}
+	h.SetSignInSources(SignInSources{Passkeys: c.src.passkeys})
+	if err := h.RenameOwnAuthenticator(c.ctx, "alice", otpID1, "X"); statusOf(err) != 503 {
+		t.Errorf("no source: %v", err)
+	}
+}
+
+// TestRefreshMySignInThrottle (T5): at most one MarkInventoryStale per
+// caller per 10 s.
+func TestRefreshMySignInThrottle(t *testing.T) {
+	c := newCertFixture(t)
+	h := c.f.h
+	now := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
+	h.entryNow = func() time.Time { return now }
+	gen := func() uint64 {
+		h.signInInv.mu.Lock()
+		defer h.signInInv.mu.Unlock()
+		return h.signInInv.gen
+	}
+	g0 := gen()
+	h.RefreshMySignIn("alice")
+	h.RefreshMySignIn("ALICE")
+	if gen() != g0+1 {
+		t.Errorf("two calls: %d marks", gen()-g0)
+	}
+	h.RefreshMySignIn("bob")
+	if gen() != g0+2 {
+		t.Errorf("another caller: %d marks", gen()-g0)
+	}
+	now = now.Add(10 * time.Second)
+	h.RefreshMySignIn("alice")
+	if gen() != g0+3 {
+		t.Errorf("after 10 s: %d marks", gen()-g0)
+	}
+	h.RefreshMySignIn("")
+	if gen() != g0+3 {
+		t.Error("an empty user marked")
 	}
 }

@@ -769,7 +769,19 @@ func (s *Server) serveAccess(w http.ResponseWriter, r *http.Request) bool {
 	p := r.URL.Path
 	switch {
 	case p == realm && r.Method == "GET":
-		json.NewEncoder(w).Encode(map[string]interface{}{"realm": "portcullis", "browserFlow": s.BrowserFlow})
+		rep := map[string]interface{}{"realm": "portcullis", "browserFlow": s.BrowserFlow}
+		for k, v := range s.RealmFields {
+			rep[k] = v
+		}
+		json.NewEncoder(w).Encode(rep)
+	case strings.HasPrefix(p, realm+"/authentication/required-actions/") && strings.HasSuffix(p, "/config") && r.Method == "GET":
+		alias := strings.TrimSuffix(strings.TrimPrefix(p, realm+"/authentication/required-actions/"), "/config")
+		cfg, ok := s.RequiredActionConfigs[alias]
+		if !ok {
+			http.NotFound(w, r)
+			return true
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"config": cfg})
 	case strings.HasPrefix(p, realm+"/authentication/"):
 		s.serveAuthentication(w, r, strings.Trim(strings.TrimPrefix(p, realm+"/authentication/"), "/"))
 	case p == realm+"/roles" && r.Method == "GET":

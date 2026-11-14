@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -41,7 +42,14 @@ type MySignIn struct {
 	// them fits: the page says it before opening the popup.
 	CertFresh        []signin.Method `json:"cert_fresh"`
 	CertFreshRefusal string          `json:"cert_fresh_refusal"`
+	// MaxAuthenticators is how many authenticator apps a person may have
+	// (the page hides "+ Add" at it; the extension enforces it).
+	MaxAuthenticators int `json:"max_authenticators"`
 }
+
+// MaxAuthenticators is the most authenticator apps per person (T18; the
+// extension's TotpRegister.MAX is the enforcement).
+const MaxAuthenticators = 3
 
 // The method states of a MethodRow.
 const (
@@ -61,6 +69,20 @@ type MethodRow struct {
 	State         string        `json:"state"`
 	Passkeys      []PasskeyRow  `json:"passkeys,omitempty"`
 	PasswordSetAt *time.Time    `json:"password_set_at,omitempty"`
+	// Authenticators are the caller's authenticator apps, oldest first
+	// (the totp row only).
+	Authenticators []AuthenticatorRow `json:"authenticators,omitempty"`
+	// RemoveImpact (T7, the totp row, exactly one app set up): the names
+	// of the caller's apps they could no longer open without it.
+	RemoveImpact []string `json:"remove_impact,omitempty"`
+}
+
+// AuthenticatorRow is one of the caller's authenticator apps: its
+// Keycloak credential id, its name and when it was set up (zero: unknown).
+type AuthenticatorRow struct {
+	ID        string    `json:"id"`
+	Label     string    `json:"label"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // PasskeyRow is one of the caller's passkeys: ID its Keycloak credential
@@ -128,7 +150,7 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 	on := si.MethodsOn()
 	v := &MySignIn{User: u, Methods: []MethodRow{}, Certificates: []CertRow{}, Apps: []AppNeed{}, Limits: h.limitsViewLocked(),
 		AddStronger: si.AddStronger, FreshAuth: info, AccountURL: h.cfg.AccountURL, CertFresh: []signin.Method{},
-		CertFreshRefusal: h.errCertNeedsKey().Error()}
+		CertFreshRefusal: h.errCertNeedsKey().Error(), MaxAuthenticators: MaxAuthenticators}
 	if _, rule, why := h.governingLocked(govCore("people")); why == "" {
 		if cf := certFreshAllowed(rule, on); cf != nil {
 			v.CertFresh = cf
@@ -184,6 +206,23 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 			default:
 				row.State = MethodNone
 			}
+		case meth == signin.TOTP:
+			switch {
+			case ownPasswordRefused(u):
+				row.State = MethodNone // P28: never for admin or portcullis-*
+			case !keysKnown:
+				row.State = MethodUnknown
+			case has[meth]:
+				row.State = MethodSet
+				for _, pk := range base.keys[u] {
+					if signin.Method(pk.Type) == meth {
+						row.Authenticators = append(row.Authenticators, AuthenticatorRow{ID: pk.ID, Label: clipRunes(pk.Label, 128), CreatedAt: pk.Created.UTC()})
+					}
+				}
+				slices.SortStableFunc(row.Authenticators, func(a, b AuthenticatorRow) int { return a.CreatedAt.Compare(b.CreatedAt) })
+			default:
+				row.State = MethodNone
+			}
 		default:
 			switch {
 			case !keysKnown:
@@ -202,7 +241,7 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 		v.Methods = append(v.Methods, row)
 	}
 
-	okFor := func(compiled *signin.Node) *bool {
+	okFor := func(pm PersonMethods, compiled *signin.Node) *bool {
 		if compiled == nil {
 			f := false
 			return &f
@@ -216,6 +255,15 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 		}
 		return &ok
 	}
+	// T7: with exactly one authenticator app, the apps it alone keeps open.
+	var withoutCode *PersonMethods
+	var impact []string
+	ti := slices.IndexFunc(v.Methods, func(r MethodRow) bool { return r.ID == signin.TOTP })
+	if ti >= 0 && v.Methods[ti].State == MethodSet && len(v.Methods[ti].Authenticators) == 1 {
+		wc := pm
+		wc.Methods = slices.DeleteFunc(slices.Clone(pm.Methods), func(m signin.Method) bool { return m == signin.TOTP })
+		withoutCode = &wc
+	}
 	need := func(kind, id, name, tmpl string) AppNeed {
 		a := AppNeed{Kind: kind, ID: id, Name: name, Template: tmpl}
 		t, ok := si.Templates[tmpl]
@@ -227,7 +275,12 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 		if rule, ok := compiledIn(si, tmpl); ok {
 			c = &rule
 		}
-		a.OK = okFor(c)
+		a.OK = okFor(pm, c)
+		if a.OK != nil && *a.OK && withoutCode != nil {
+			if lost := okFor(*withoutCode, c); lost != nil && !*lost {
+				impact = append(impact, name)
+			}
+		}
 		return a
 	}
 	var insts []AppNeed
@@ -253,6 +306,9 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 			pick = si.Default
 		}
 		v.Apps = append(v.Apps, need("core", k, coreSignInLabels[k], pick))
+	}
+	if ti >= 0 {
+		v.Methods[ti].RemoveImpact = impact
 	}
 	return v, nil
 }
@@ -470,7 +526,48 @@ func passkeyLabel(raw string) (string, error) {
 // name. Audited signin.passkey.label "<old> → <new>" ("credential <id>"
 // when refused); counts toward the refusal limit. Keycloak unreachable
 // (or no source) is 503.
-func (h *Hub) RenameOwnPasskey(ctx context.Context, user, credentialID, label string) (err error) {
+func (h *Hub) RenameOwnPasskey(ctx context.Context, user, credentialID, label string) error {
+	return h.renameOwnCredential(ctx, user, credentialID, label, passkeyRename)
+}
+
+// credentialRename is what differs between renaming a passkey and an
+// authenticator app.
+type credentialRename struct {
+	action             string // the audit action
+	badLabel, notFound error
+	unavailable        error
+	notFoundErr        error // the Keycloak client's "not one of theirs"
+	source             func(SignInSources) func(ctx context.Context, username, credentialID, label string) (string, error)
+}
+
+var (
+	passkeyRename = credentialRename{action: "signin.passkey.label", badLabel: errPasskeyLabel, notFound: errNoSuchPasskey, unavailable: errPasskeyLabelsNA,
+		notFoundErr: keycloak.ErrPasskeyNotFound, source: func(s SignInSources) func(context.Context, string, string, string) (string, error) {
+			return s.PasskeyLabel
+		}}
+	authenticatorRename = credentialRename{action: "signin.authenticator.label", badLabel: errAuthenticatorLabel, notFound: errNoSuchAuthenticator, unavailable: errAuthenticatorLabelsNA,
+		notFoundErr: keycloak.ErrAuthenticatorNotFound, source: func(s SignInSources) func(context.Context, string, string, string) (string, error) {
+			return s.AuthenticatorLabel
+		}}
+)
+
+var (
+	errAuthenticatorLabel    = &StatusError{Status: http.StatusBadRequest, Err: errors.New("an authenticator name is 1–64 characters on one line")}
+	errNoSuchAuthenticator   = &StatusError{Status: http.StatusNotFound, Err: errors.New("no such authenticator app")}
+	errAuthenticatorLabelsNA = &StatusError{Status: http.StatusServiceUnavailable, Err: errors.New("authenticator names can't be changed right now: try again later")}
+)
+
+// RenameOwnAuthenticator renames one of user's (the caller's) own
+// authenticator apps (T6), with RenameOwnPasskey's rules: 400 "an
+// authenticator name is 1–64 characters on one line", 404 "no such
+// authenticator app" (not a UUID, another person's, or not an otp), 409
+// a duplicate, 503 Keycloak unreachable; audited
+// signin.authenticator.label.
+func (h *Hub) RenameOwnAuthenticator(ctx context.Context, user, credentialID, label string) error {
+	return h.renameOwnCredential(ctx, user, credentialID, label, authenticatorRename)
+}
+
+func (h *Hub) renameOwnCredential(ctx context.Context, user, credentialID, label string, k credentialRename) (err error) {
 	u, err := myUser(user)
 	if err != nil {
 		return err
@@ -490,34 +587,72 @@ func (h *Hub) RenameOwnPasskey(ctx context.Context, user, credentialID, label st
 		if validID {
 			d = "credential " + credentialID
 		}
-		h.auditSignIn(actor, "signin.passkey.label", u, d, err)
+		h.auditSignIn(actor, k.action, u, d, err)
 		return err
 	}
 	l, err := passkeyLabel(label)
 	if err != nil {
-		return refuse(err)
+		return refuse(k.badLabel)
 	}
 	if !validID {
-		return refuse(errNoSuchPasskey)
+		return refuse(k.notFound)
 	}
 	c := &h.signInInv
 	c.mu.Lock()
-	src := c.src.PasskeyLabel
+	src := k.source(c.src)
 	c.mu.Unlock()
 	if src == nil {
-		return refuse(errPasskeyLabelsNA)
+		return refuse(k.unavailable)
 	}
 	old, err := src(ctx, u, credentialID, l)
 	switch {
-	case errors.Is(err, keycloak.ErrPasskeyNotFound), errors.Is(err, keycloak.ErrUserNotFound):
-		return refuse(errNoSuchPasskey)
+	case errors.Is(err, k.notFoundErr), errors.Is(err, keycloak.ErrUserNotFound):
+		return refuse(k.notFound)
 	case errors.Is(err, keycloak.ErrPasskeyLabelTaken):
 		return refuse(&StatusError{Status: http.StatusConflict, Err: errors.New("you already have a sign-in method named “" + l + "”")})
 	case err != nil:
-		log.Printf("signin: renaming %s's passkey %s: %v", u, credentialID, err)
-		return refuse(errPasskeyLabelsNA)
+		log.Printf("signin: renaming %s's credential %s: %v", u, credentialID, err)
+		return refuse(k.unavailable)
 	}
 	h.MarkInventoryStale()
-	h.auditSignIn(actor, "signin.passkey.label", u, old+" → "+l, nil)
+	h.auditSignIn(actor, k.action, u, old+" → "+l, nil)
 	return nil
+}
+
+// refreshMinGap: ?refresh=1 marks the inventory stale at most once per
+// caller per 10 s (T5).
+const refreshMinGap = 10 * time.Second
+
+// refreshThrottle is the last ?refresh=1 mark per caller.
+type refreshThrottle struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// RefreshMySignIn is GET /api/me/signin?refresh=1 (T5): it marks the
+// inventory stale, at most once per 10 s per caller; otherwise (or for no
+// user) it does nothing. Never an error.
+func (h *Hub) RefreshMySignIn(user string) {
+	u, err := myUser(user)
+	if err != nil {
+		return
+	}
+	now := h.entryClock()
+	r := &h.signInRefresh
+	r.mu.Lock()
+	if t, ok := r.last[u]; ok && now.Sub(t) < refreshMinGap {
+		r.mu.Unlock()
+		return
+	}
+	if r.last == nil {
+		r.last = map[string]time.Time{}
+	}
+	for k, t := range r.last { // keep the map small: drop the old marks
+		if now.Sub(t) >= refreshMinGap {
+			delete(r.last, k)
+		}
+	}
+	r.last[u] = now
+	r.mu.Unlock()
+	h.MarkInventoryStale()
 }

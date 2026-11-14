@@ -119,6 +119,7 @@ func TestRefuseWhileImpersonated(t *testing.T) {
 	}{
 		{e.people, "PUT", "/api/me/signin/password", `{"password":"x","code":"c","code_verifier":"v","nonce":"n"}`},
 		{e.people, "POST", "/api/me/signin/browser-certificates", `{}`},
+		{e.people, "PUT", "/api/me/signin/authenticators/3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f/label", `{"label":"x"}`},
 		{e.people, "DELETE", "/api/me/signin/certificates/0a:02", ``},
 		{e.people, "DELETE", "/api/me/ai/connections/x", ``},
 		{e.people, "PUT", "/api/me/apps/i/values/k", `{"value":"v"}`},

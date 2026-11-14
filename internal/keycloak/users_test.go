@@ -2,7 +2,10 @@ package keycloak_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log"
+	"os"
 	"strings"
 	"testing"
 
@@ -203,7 +206,7 @@ func TestSignInCredentialsTypes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"w1": "passkey_synced", "w2": "passkey_device", "w3": "security_key", "w4": "passkey_synced"}
+	want := map[string]string{"w1": "passkey_synced", "w2": "passkey_device", "w3": "security_key", "w4": "passkey_synced", "o1": "totp"}
 	if len(got["alice"]) != len(want) {
 		t.Fatalf("alice = %+v", got["alice"])
 	}
@@ -378,5 +381,155 @@ func TestSetPasskeyLabelRecase(t *testing.T) {
 	})
 	if old, err := c.SetPasskeyLabel(context.Background(), "alice", "K1", "yubikey"); err != nil || old != "yubikey" {
 		t.Errorf("unchanged label = %q, %v", old, err)
+	}
+}
+
+// TestSignInCredentialsOTP (T4): an otp credential is listed with the
+// passkeys as Type "totp", with its label and creation time and no AAGUID.
+func TestSignInCredentialsOTP(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("alice",
+		kctest.Credential{ID: "o1", Type: "otp", UserLabel: "Authenticator 2026-11-14 09:00:00", CreatedDate: 1794260205000},
+		kctest.Credential{ID: "k1", Type: "portcullis-security-key", UserLabel: "YubiKey"})
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	got, err := c.SignInCredentials(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var o *keycloak.PasskeyCredential
+	for i := range got["alice"] {
+		if got["alice"][i].ID == "o1" {
+			o = &got["alice"][i]
+		}
+	}
+	if o == nil || o.Type != "totp" || o.Label != "Authenticator 2026-11-14 09:00:00" || o.Created.UnixMilli() != 1794260205000 || o.AAGUID != "" {
+		t.Errorf("otp = %+v (all %+v)", o, got["alice"])
+	}
+	if len(got["alice"]) != 2 {
+		t.Errorf("alice = %+v", got["alice"])
+	}
+}
+
+// The otp credentialData (its policy, never the secret, which the admin
+// API never returns) is in no field and no log line.
+func TestSignInCredentialsNeverKeepsCredentialData(t *testing.T) {
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	const data = `{"subType":"totp","digits":6,"counter":0,"period":30,"algorithm":"HmacSHA1","aaguid":"cb69481e-8ff7-4039-93ec-0a2729a154a8"}`
+	f := kctest.New(t)
+	f.Import("alice", kctest.Credential{ID: "o1", Type: "otp", UserLabel: "Phone", CredentialData: data})
+	f.Import("bob", kctest.Credential{ID: "o2", Type: "otp", CredentialData: data})
+	f.Update("bob", func(u *kctest.User) { u.CredentialsStatus = 500 })
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	got, err := c.SignInCredentials(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(got)
+	for _, needle := range []string{"subType", "HmacSHA1", "cb69481e"} {
+		if strings.Contains(string(b), needle) || strings.Contains(logs.String(), needle) {
+			t.Errorf("%q leaked: %s / %s", needle, b, logs.String())
+		}
+	}
+	if len(got["alice"]) != 1 || got["alice"][0].AAGUID != "" {
+		t.Errorf("alice = %+v", got["alice"])
+	}
+}
+
+func otpLabelFixture(t *testing.T) (*kctest.Server, *keycloak.Client) {
+	t.Helper()
+	f := kctest.New(t)
+	f.Import("alice",
+		kctest.Credential{ID: "O1", Type: "otp", UserLabel: "Phone"},
+		kctest.Credential{ID: "O2", Type: "otp", UserLabel: "Tablet"},
+		kctest.Credential{ID: "K1", Type: "portcullis-security-key", UserLabel: "YubiKey"},
+		kctest.Credential{ID: "P1", Type: "password"})
+	f.Import("bob", kctest.Credential{ID: "B1", Type: "otp", UserLabel: "Bob's phone"})
+	return f, keycloak.New(f.HTTP.URL, "admin", "admin")
+}
+
+// T6: SetAuthenticatorLabel renames an own otp credential only.
+func TestSetAuthenticatorLabelRefusesPasskey(t *testing.T) {
+	f, c := otpLabelFixture(t)
+	ctx := context.Background()
+	old, err := c.SetAuthenticatorLabel(ctx, "alice", "O1", "Work phone")
+	if err != nil || old != "Phone" || credLabel(f, "alice", "O1") != "Work phone" {
+		t.Fatalf("rename = %q, %v (%q)", old, err, credLabel(f, "alice", "O1"))
+	}
+	for _, id := range []string{"K1", "P1", "B1", "nope"} {
+		if _, err := c.SetAuthenticatorLabel(ctx, "alice", id, "X"); !errors.Is(err, keycloak.ErrAuthenticatorNotFound) {
+			t.Errorf("%s: %v, want ErrAuthenticatorNotFound", id, err)
+		}
+	}
+	for _, l := range []string{"tablet", "YUBIKEY"} {
+		if _, err := c.SetAuthenticatorLabel(ctx, "alice", "O1", l); !errors.Is(err, keycloak.ErrPasskeyLabelTaken) {
+			t.Errorf("%q: %v, want a duplicate", l, err)
+		}
+	}
+	if credLabel(f, "alice", "K1") != "YubiKey" {
+		t.Error("a passkey was renamed")
+	}
+}
+
+func TestSetPasskeyLabelRefusesOTP(t *testing.T) {
+	f, c := otpLabelFixture(t)
+	if _, err := c.SetPasskeyLabel(context.Background(), "alice", "O1", "X"); !errors.Is(err, keycloak.ErrPasskeyNotFound) {
+		t.Errorf("otp via SetPasskeyLabel: %v", err)
+	}
+	if credLabel(f, "alice", "O1") != "Phone" {
+		t.Error("an authenticator was renamed")
+	}
+}
+
+// RemoveAuthenticators deletes the otp credentials only, then signs out.
+func TestRemoveAuthenticatorsOnlyOTP(t *testing.T) {
+	f, c := otpLabelFixture(t)
+	f.Update("alice", func(u *kctest.User) { u.Sessions = 2 })
+	n, err := c.RemoveAuthenticators(context.Background(), "alice")
+	if err != nil || n != 2 {
+		t.Fatalf("RemoveAuthenticators = %d, %v", n, err)
+	}
+	a := f.Get("alice")
+	var types []string
+	for _, cr := range a.Credentials {
+		types = append(types, cr.Type)
+	}
+	if strings.Join(types, ",") != "portcullis-security-key,password" || a.Sessions != 0 {
+		t.Errorf("after: %v, sessions %d", types, a.Sessions)
+	}
+	if b := f.Get("bob"); len(b.Credentials) != 1 {
+		t.Error("bob's authenticator went too")
+	}
+	// None left: 0, still signed out, no error.
+	if n, err := c.RemoveAuthenticators(context.Background(), "alice"); err != nil || n != 0 {
+		t.Errorf("again = %d, %v", n, err)
+	}
+}
+
+// T12: the realm's OTP policy and the two required actions' max_auth_age.
+func TestOTPPolicyReadsRealmAndActions(t *testing.T) {
+	f := kctest.New(t)
+	realm := func(reusable bool) map[string]any {
+		return map[string]any{"otpPolicyType": "totp", "otpPolicyAlgorithm": "HmacSHA1", "otpPolicyDigits": 6, "otpPolicyPeriod": 30,
+			"otpPolicyLookAheadWindow": 1, "otpPolicyInitialCounter": 0, "otpPolicyCodeReusable": reusable}
+	}
+	f.SetRealm(realm(false), map[string]map[string]string{"CONFIGURE_TOTP": {"max_auth_age": "300"}, "delete_credential": {"max_auth_age": "300"}})
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+	p, err := c.OTPPolicy(ctx)
+	want := keycloak.OTPPolicy{Type: "totp", Algorithm: "HmacSHA1", Digits: 6, Period: 30, LookAhead: 1, InitialCounter: 0, CodeReusable: false, ConfigureMaxAge: 300, DeleteMaxAge: 300}
+	if err != nil || p == nil || *p != want {
+		t.Fatalf("OTPPolicy = %+v, %v", p, err)
+	}
+	// A missing action config or an unreadable value reads as 0 (drift).
+	f.SetRealm(realm(true), map[string]map[string]string{"CONFIGURE_TOTP": {"max_auth_age": "five"}})
+	p, err = c.OTPPolicy(ctx)
+	if err != nil || p.ConfigureMaxAge != 0 || p.DeleteMaxAge != 0 || !p.CodeReusable {
+		t.Errorf("drift = %+v, %v", p, err)
+	}
+	f.SetDown(true)
+	if _, err := c.OTPPolicy(ctx); err == nil {
+		t.Error("Keycloak down: want an error")
 	}
 }

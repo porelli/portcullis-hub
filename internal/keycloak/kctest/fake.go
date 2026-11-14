@@ -172,7 +172,13 @@ type Server struct {
 	Flows       map[string]*Flow       // by id
 	AuthConfigs map[string]*AuthConfig // by id
 	BrowserFlow string                 // the realm's browser flow alias
-	Groups      map[string]*Group      // by id
+	// RealmFields are extra fields of the realm representation (GET
+	// /admin/realms/portcullis), such as the otpPolicy* values.
+	RealmFields map[string]any
+	// RequiredActionConfigs: required action alias → its config (GET
+	// /authentication/required-actions/{alias}/config); absent: 404.
+	RequiredActionConfigs map[string]map[string]string
+	Groups                map[string]*Group // by id
 	// Roles: client uuid → role name → role id.
 	Roles map[string]map[string]string
 	// LDAPGroups are LLDAP group names; the group mapper's sync imports
@@ -262,6 +268,13 @@ func (s *Server) Update(username string, fn func(*User)) {
 }
 
 // SetDown switches the outage simulation.
+// SetRealm sets RealmFields and RequiredActionConfigs under the lock.
+func (s *Server) SetRealm(fields map[string]any, actionConfigs map[string]map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.RealmFields, s.RequiredActionConfigs = fields, actionConfigs
+}
+
 func (s *Server) SetDown(down bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -59,6 +59,9 @@ type SignInSources struct {
 	Passkeys     func(ctx context.Context) (map[string][]keycloak.PasskeyCredential, error)
 	Certificates func(ctx context.Context) ([]invite.CertRecord, error)
 	PasskeyLabel func(ctx context.Context, username, credentialID, label string) (string, error)
+	// AuthenticatorLabel renames one of a person's authenticator apps
+	// (keycloak.Client.SetAuthenticatorLabel); nil: unavailable (503).
+	AuthenticatorLabel func(ctx context.Context, username, credentialID, label string) (string, error)
 }
 
 // SetSignInSources wires the inventory's sources (main: Keycloak and
@@ -237,6 +240,11 @@ func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Tim
 		if list == nil {
 			b.disabled[strings.ToLower(u)] = true
 			continue
+		}
+		if ownPasswordRefused(strings.ToLower(u)) {
+			// admin, portcullis-hub and every portcullis-* name never
+			// use an authenticator app (T4): never counted, never listed.
+			list = slices.DeleteFunc(slices.Clone(list), func(pk keycloak.PasskeyCredential) bool { return pk.Type == string(signin.TOTP) })
 		}
 		ms := []signin.Method{}
 		for _, pk := range list {
