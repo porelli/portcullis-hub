@@ -123,11 +123,8 @@ Related plans:
   - At the end, delete every `mail1` branch (local and remote), every worktree and `/tmp/merge-*` (memory: branches mainlined).
 - **Test server (Task 20).**
   - Connect with the SSH command and install directory in `2026-11-13-rootless-podman.md` Global Constraints, then `git pull --ff-only && ./portcullis upgrade`. It runs Docker; `ACME_STAGING=true` stays.
-  - **AWS Lightsail realities.** The controller must **ask the user**, and wait for the answers, before the live check. The plan never edits cloud settings itself. The questions:
-    1. Outbound port 25 is blocked by default on Lightsail. Ask the user to submit AWS's "Request to remove email sending limitations" for the instance's **static IP**, and to confirm when AWS has approved it. If the instance has no static IP, ask them to attach one first: reverse DNS needs one.
-    2. Reverse DNS (PTR) is set through that same AWS request (or AWS support). Ask the user to request PTR `mail.<test domain>` for the static IPv4, and to confirm. IPv6 reverse DNS is not offered on Lightsail, so `MAIL_IPV6` stays `off` there and outbound uses IPv4 only (automatic, M9).
-    3. Ask the user to open inbound TCP 25, 465, 587 and 993 (IPv4) in the Lightsail firewall.
-    4. Ask the user for two external test mailboxes (a Gmail and an Outlook.com address) to receive the live-check mail. They never go into a commit.
+  - **No outbound port 25, ever, in testing (user rule 2026-11-14).** Nothing in this plan — tests, CI, the deploy or the live check — opens a connection to port 25 of a host outside our own test networks, and nothing asks for the provider's port-25 unblock, a PTR change or external mailboxes. Outbound connections that look like spam probing are forbidden.
+  - **Test-server inbound ports:** the controller asks the user to open inbound TCP 465, 587 and 993 (IPv4) in the Lightsail firewall only if the live check needs them; inbound 25 stays closed on the test server.
 - **Values from the spec (verbatim):**
   - Profile **`mail`**; services `mail`, `mailctl`, `mail-resolver`.
   - Ports `25→10025` (STARTTLS), `465→10465` and `993→10993` (implicit TLS), `587→10587` (STARTTLS submission).
@@ -904,7 +901,7 @@ The spike pins the facts the spec and this plan assume about Stalwart but its do
 
 **Interfaces — Produces:**
 - `checks.Run(ctx, deps Deps) []Check` (`Deps` = resolvers, the local resolver, a dialer, a clock, the Stalwart client, the store). Each check:
-  - **`port25`:** dial port 25 of the first MX of `gmail.com`, `outlook.com` and `yahoo.com` (looked up through the local resolver) with a 10 s budget. All time out → Problem with the spec's text. Any connects → ok.
+  - **`port25`:** never dials anything (no probing of third-party mail servers). It reports from the queue only: when every outbound delivery to port 25 in the last 24 h failed with a connect timeout (Stalwart's delivery events) → Problem with the spec's text and the provider guidance; no delivery attempts yet → Info `mail_port25_unknown`; otherwise ok.
   - **`fcrdns_v4` / `fcrdns_v6`:**
     - PTR of each public address through the public resolvers; the name must resolve back to the address. Missing or mismatched → Problem.
     - The steps per provider: hetzner, DigitalOcean, AWS EC2 (the EIP form), **AWS Lightsail** ("submit the 'Request to remove email sending limitations' form for the static IP with the reverse DNS name"), OVH, and generic.
@@ -1401,7 +1398,7 @@ Content (each page in the site's existing voice):
   - templates lint;
   - the docs build.
 - [ ] **Step 2:** Merge docs → Hub → (wait for `edge` after `build.yml --ref main -f compare_ref=mail1`) → templates → core, through detached worktrees (Global Constraints). Then run core CI on main (all jobs). If kube1 merged meanwhile, apply the coexistence rules and fix `NBINDS` and the parity deltas in the merge commit.
-- [ ] **Step 3: Ask the user** the four Lightsail questions (Global Constraints, "Test server"), and wait for every answer. Without approval of port 25, stop after Step 4 and report "mail installed, outbound blocked by the provider" with the doctor's `mail_port25_blocked`.
+- [ ] **Step 3:** No provider requests are made (no port-25 unblock, no PTR request, no external mailboxes; user rule 2026-11-14). If the live check needs a real client, ask the user to open inbound 465/587/993 on the test server's firewall and wait.
 - [ ] **Step 4:** Upgrade the test server, then run:
   1. `./portcullis mail enable --yes` (staging certificate);
   2. `./portcullis mail schedule --systemd`;
@@ -1412,11 +1409,10 @@ Content (each page in the site's existing voice):
   - the Mail block is ok, apart from the checks still pending;
   - TLSA is published (the zone is DNSSEC `secure`);
   - DKIM is `active` within the TTL wait.
-- [ ] **Step 5: Live check:**
-  - add a person to `mail_users`, create a mail password from a real device (the user does the passkey touch), and configure a real client;
-  - send to the user's Gmail and Outlook test mailboxes and record `Authentication-Results`: `spf=pass`, `dkim=pass` for both algorithms (Review Focus 2), `dmarc=pass`;
-  - reply from both, and check delivery and the Junk placement of a GTUBE;
-  - check FCrDNS (`mail_ptr_*` gone), MTA-STS (`curl https://mta-sts.<d>/.well-known/mta-sts.txt`; staging certificate: the browser warns, fetchers that require a valid chain fail until production certificates — note it, never switch the test server to production) and DANE (`ldns-dane` from the resolver image against `mail.<d>:25`);
-  - after 48 h, the DMARC and TLS-RPT aggregates arrived (`GET /api/mail/checks`).
+- [ ] **Step 5: Live check (no outbound port 25):**
+  - add a test person (never the LLDAP `admin`) to `mail_users`, create a mail password, and check IMAP (993) and submission (587/465) log-in with it, and that a removed person's password is refused;
+  - submit a message to a local recipient on the same server: it lands with `dkim=pass` for both algorithms (Review Focus 2) as verified by Stalwart itself; a GTUBE lands in Junk;
+  - check the published DNS by lookup only: SPF, DKIM (the split TXT reassembles), DMARC, MTA-STS (`curl https://mta-sts.<d>/.well-known/mta-sts.txt`; staging certificate, note it, never switch to production), TLS-RPT, and TLSA when the zone is DNSSEC `secure`;
+  - the doctor's `port25` check shows Info (no delivery attempts). Delivery to the internet isn't tested on the test server.
 - [ ] **Step 6:** Delete every `mail1` branch (local and remote), every worktree, `/tmp/merge-*` and `/tmp/mail-spike` (memory: branches mainlined). Update memory with the outcome, the Lightsail state and the follow-ups:
   - parked: app sender accounts, inbound backup MX, JMAP / DAV for people, Sieve / vacation, ClamAV, webmail (M5 of the spec) and OAuth (M6 of the spec), mail on Kubernetes, a SQLite store for online backups.
