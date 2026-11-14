@@ -1,3 +1,5 @@
 /hub
 *.exe
 /cmd/hub/hub
+*.orig
+*.rej

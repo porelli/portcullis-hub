@@ -200,8 +200,10 @@ func TestEntryPopulationOnly(t *testing.T) {
 			t.Errorf("%+v: %v, want the one 404", c, err)
 		}
 	}
-	if a := myApp(myApps(t, f, "carol"), entryID); a != nil {
-		t.Errorf("carol sees %+v", a)
+	// entryapp has no group access: the portal lists it for carol too, so
+	// My apps does — without the entries of a population she isn't in.
+	if a := myApp(myApps(t, f, "carol"), entryID); a == nil || len(a.Entries)+len(a.Values)+len(a.Credentials) != 0 {
+		t.Errorf("carol sees %+v, want the app without entries", a)
 	}
 	// An app whose only per-person part is an entry is listed.
 	if a := myApp(myApps(t, f, "alice"), entryID); a == nil || len(a.Values) != 0 || len(a.Entries) != 2 {

@@ -190,7 +190,8 @@ func TestMyAppsAI(t *testing.T) {
 	setAI(func(s *state.AISettings) { s.PortcullisPeople = true })
 
 	// A companion pending its revoke_all, or switched off, is not shown;
-	// an app left with no AI part (and nothing else) is not listed.
+	// an app left with no AI part stays listed (alice can open it), without
+	// an ai key.
 	a.h.mu.Lock()
 	a.h.st.AIInstances["aiapp"].Companions["hdr"] = state.AICompanion{Enabled: true, Mode: "read_only", RevokePending: true}
 	a.h.st.AIInstances["oauthapp"].Companions["oauth"] = state.AICompanion{Enabled: false, Mode: "read_write"}
@@ -199,8 +200,8 @@ func TestMyAppsAI(t *testing.T) {
 	if ai := appOf(v, "aiapp"); ai == nil || ai.AI == nil || len(ai.AI.Companions) != 1 || ai.AI.Companions[0].Name != "tok" {
 		t.Errorf("hdr revoke pending: %s", raw)
 	}
-	if appOf(v, "oauthapp") != nil {
-		t.Errorf("oauthapp with AI off is still listed: %s", raw)
+	if o := appOf(v, "oauthapp"); o == nil || o.AI != nil {
+		t.Errorf("oauthapp with AI off: want listed without ai: %s", raw)
 	}
 
 	// The master switch off: no ai anywhere.
@@ -210,8 +211,8 @@ func TestMyAppsAI(t *testing.T) {
 			t.Errorf("master off: %s = %s", u, raw)
 		}
 	}
-	if v, _ := myAIApps(t, a, "alice"); len(v.Apps) != 1 || v.Apps[0].ID != "dash" {
-		t.Errorf("master off: alice's apps = %+v, want only dash (values)", v.Apps)
+	if v, _ := myAIApps(t, a, "alice"); len(v.Apps) != 3 || v.Apps[0].ID != "aiapp" || v.Apps[1].ID != "dash" || v.Apps[2].ID != "oauthapp" {
+		t.Errorf("master off: alice's apps = %+v, want aiapp, dash, oauthapp (the apps she can open)", v.Apps)
 	}
 	setAI(func(s *state.AISettings) { s.Enabled = true })
 
@@ -242,15 +243,14 @@ func TestMyAppsAIPopulation(t *testing.T) {
 
 // TestMyAppsAITopDecides (fix round 1): when the top-level ai can't be
 // built (here: the main domain isn't a hostname) there is no ai key
-// anywhere, and apps listed only for their AI part go; an app with values
-// stays.
+// anywhere; the apps alice can open stay listed (without it).
 func TestMyAppsAITopDecides(t *testing.T) {
 	a := newMyAIFixture(t, nil)
 	a.h.mu.Lock()
 	a.h.cfg.Domain = "not a hostname"
 	a.h.mu.Unlock()
 	v, raw := myAIApps(t, a, "alice")
-	if strings.Contains(raw, `"ai"`) || len(v.Apps) != 1 || v.Apps[0].ID != "dash" {
+	if strings.Contains(raw, `"ai"`) || len(v.Apps) != 3 || v.Apps[1].ID != "dash" {
 		t.Errorf("no top-level ai: %s", raw)
 	}
 }

@@ -49,6 +49,7 @@ func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("PUT /api/directory/users/{username}/details", s.handleSetDetails)
 	mux.HandleFunc("POST /api/directory/rules/preview", s.handleRulePreview)
 	mux.HandleFunc("PUT /api/directory/groups/{group}/rule", s.handleSetGroupRule)
+	mux.HandleFunc("PUT /api/directory/groups/{group}/allow-any-field", s.handleSetAllowAnyField)
 	mux.HandleFunc("POST /api/directory/groups/{group}/convert-preview", s.handleConvertPreview)
 	mux.HandleFunc("POST /api/directory/groups/{group}/convert", s.handleConvert)
 	mux.HandleFunc("POST /api/directory/groups/{group}/exceptions", s.handleAddException)
@@ -799,6 +800,17 @@ func (s *Server) setDetails(ctx context.Context, c *directory.Caller, username s
 func (s *Server) setGroupRule(ctx context.Context, c *directory.Caller, group string, rule *rules.Expr) (*settled, error) {
 	s.rec("SetGroupRule", group, rule)
 	if err := s.Directory.SetGroupRule(ctx, c, group, rule); err != nil {
+		return nil, err
+	}
+	return s.settle(ctx, c, group), nil
+}
+
+// setAllowAnyField is PUT /api/directory/groups/{group}/allow-any-field's
+// work: Service.SetAllowAnyField, then the group re-evaluated. Admin UI
+// only: no tool mirrors it (fieldGuardNoToolRoutes).
+func (s *Server) setAllowAnyField(ctx context.Context, c *directory.Caller, group string, allow bool) (*settled, error) {
+	s.rec("SetAllowAnyField", group, allow)
+	if err := s.Directory.SetAllowAnyField(ctx, c, group, allow); err != nil {
 		return nil, err
 	}
 	return s.settle(ctx, c, group), nil

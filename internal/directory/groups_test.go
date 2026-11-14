@@ -440,7 +440,10 @@ func TestManualAgainKeepsTemporaryAccess(t *testing.T) {
 	wantMembers(t, e, "milan", "bob")
 }
 
-func TestEvaluatorBlocksAddsToGuardingGroupOnEditableField(t *testing.T) {
+// A group that becomes guarding while its rule uses an editable field
+// fails closed like one whose "Allow any profile field…" is turned off:
+// the rule is suspended and the people it added leave.
+func TestEvaluatorSuspendsGuardingRuleOnEditableField(t *testing.T) {
 	e, _ := evalEnv(t)
 	if err := e.svc.ConvertApply(ctx, asRoot, "milan", mustRule(t, `city = "Milan"`), nil); err != nil {
 		t.Fatal(err)
@@ -452,13 +455,12 @@ func TestEvaluatorBlocksAddsToGuardingGroupOnEditableField(t *testing.T) {
 		return []directory.App{{ID: "late", Name: "Late", Enabled: true, AccessGroup: "users_late", AdminGroup: "milan"}}
 	}
 	setCity(t, e, "dave", "Milan") // would join
-	setCity(t, e, "carol", "Rome") // leaves: removals still apply
 	for i := 0; i < 2; i++ {
 		rep := evaluate(t, e, time.Now().UTC())
-		wantMembers(t, e, "milan", "bob")
+		wantMembers(t, e, "milan")
 		found := false
 		for _, msg := range rep.Errors {
-			found = found || (strings.Contains(msg, "milan") && strings.Contains(msg, "city") && strings.Contains(msg, "admin group of app late"))
+			found = found || (strings.Contains(msg, "milan") && strings.Contains(msg, "city") && strings.Contains(msg, "admin group of app late") && strings.Contains(msg, "suspended"))
 		}
 		if !found {
 			t.Errorf("run %d: errors = %v", i, rep.Errors)
@@ -469,7 +471,7 @@ func TestEvaluatorBlocksAddsToGuardingGroupOnEditableField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got["milan"], map[string]bool{"bob": true}) {
+	if !reflect.DeepEqual(got["milan"], map[string]bool{}) {
 		t.Errorf("desired = %v", got["milan"])
 	}
 }
