@@ -130,8 +130,8 @@ spec:
         name: samba
         resources: {}
         securityContext:
-          runAsGroup: 0
-          runAsUser: 0
+          runAsGroup: 10001
+          runAsUser: 10001
         volumeMounts:
         - mountPath: /portcullis/hashes
           name: pw-smb-password
@@ -156,13 +156,13 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
-          runAsGroup: 0
-          runAsUser: 0
+          runAsGroup: 10001
+          runAsUser: 10001
         volumeMounts:
         - mountPath: /portcullis-bin
           name: portcullis-bin
       securityContext:
-        fsGroup: 0
+        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
       volumes:

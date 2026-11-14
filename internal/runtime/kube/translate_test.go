@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -333,7 +334,7 @@ func TestTranslatePortBindings(t *testing.T) {
 	in := inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    ports:\n      - \"127.0.0.1:9081:80\"\n      - \"9083:80\"\n", "pb")
 	var svcs []string
 	for _, o := range objectsOf(t, in) {
-		if o.GetKind() == "Service" {
+		if typ, _, _ := unstructured.NestedString(o.Object, "spec", "type"); o.GetKind() == "Service" && typ == "LoadBalancer" {
 			svcs = append(svcs, o.GetName())
 		}
 	}
@@ -352,5 +353,112 @@ func TestTranslatePortBindings(t *testing.T) {
 	in.Settings.LocalNetworks = []string{"fd00::/8"}
 	if _, err := Translate(in); !strings.Contains(refusedErr(err), "for the local networks only") {
 		t.Errorf("lan_only with IPv6 networks only: %v", err)
+	}
+}
+
+// TestTranslateRootRefused: an app service running as uid 0 is refused
+// (core's admission lets only the Hub's helpers run as root); a gid 0
+// alone is not root.
+func TestTranslateRootRefused(t *testing.T) {
+	for _, u := range []string{"0:0", "0", "00:1000"} {
+		in := inputOf(t, "services:\n  samba:\n    image: docker.io/library/nginx:1.29\n    user: \""+u+"\"\n", "rr")
+		if _, err := Translate(in); refusedErr(err) != "service samba runs as root (user 0)" {
+			t.Errorf("%s: %v", u, err)
+		}
+	}
+	in := inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:0\"\n", "rr")
+	if _, err := Translate(in); err != nil {
+		t.Errorf("1000:0: %v", err)
+	}
+}
+
+// TestTranslateClusterIPServices: every pod with a port gets its
+// ClusterIP Service <instance>--<pod> (contract §11.2): Traefik's
+// loadbalancer ports, the AI companion ports, expose and the published
+// ports' targets; a route's Service ref names an existing Service port;
+// a pod without any port gets none.
+func TestTranslateClusterIPServices(t *testing.T) {
+	in := inputOf(t, "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    expose: [\"9000\"]\n    labels:\n"+
+		"      traefik.enable: \"true\"\n      traefik.http.routers.web.rule: Host(`a.example.org`)\n      traefik.http.services.web.loadbalancer.server.port: \"8080\"\n"+
+		"  db:\n    image: docker.io/library/postgres:17\n    expose: [\"5432\"]\n    ports: [\"127.0.0.1:15432:5432\"]\n"+
+		"  tools:\n    image: docker.io/library/nginx:1.29\n"+
+		"  job:\n    image: docker.io/library/alpine:3.24\n", "cs")
+	in.CompanionPorts = map[string][]int{"tools": {7000}}
+	got := map[string][]int64{}
+	var routeRef map[string]any
+	for _, o := range objectsOf(t, in) {
+		if o.GetKind() == "IngressRoute" {
+			routeRef = o.Object["spec"].(map[string]any)["routes"].([]any)[0].(map[string]any)["services"].([]any)[0].(map[string]any)
+		}
+		if o.GetKind() != "Service" {
+			continue
+		}
+		typ, _, _ := unstructured.NestedString(o.Object, "spec", "type")
+		if typ == "LoadBalancer" {
+			continue
+		}
+		if typ != "" && typ != "ClusterIP" {
+			t.Errorf("%s: type %s", o.GetName(), typ)
+		}
+		if ip, ok, _ := unstructured.NestedString(o.Object, "spec", "clusterIP"); ok && ip != "" {
+			t.Errorf("%s: clusterIP %s", o.GetName(), ip)
+		}
+		sel, _, _ := unstructured.NestedStringMap(o.Object, "spec", "selector")
+		if sel[LabelInstance] != "cs" {
+			t.Errorf("%s: selector %v", o.GetName(), sel)
+		}
+		ports, _, _ := unstructured.NestedSlice(o.Object, "spec", "ports")
+		for _, p := range ports {
+			got[o.GetName()] = append(got[o.GetName()], p.(map[string]any)["port"].(int64))
+		}
+	}
+	want := map[string][]int64{"cs--web": {8080, 9000}, "cs--db": {5432}, "cs--tools": {7000}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("services %v, want %v", got, want)
+	}
+	if routeRef["name"] != "cs--web" || routeRef["port"] != int64(8080) {
+		t.Errorf("route ref %v", routeRef)
+	}
+}
+
+// TestTranslateCompanionAliasService: a rendered AI companion gets a
+// ClusterIP Service named its gate alias portcullis-mcp-<id>--<c> (the
+// name mcp-gate's upstream must carry) on its port, selecting its pod;
+// mcp-gate is admitted on that port; a foreign alias or an unknown
+// service is refused.
+func TestTranslateCompanionAliasService(t *testing.T) {
+	compose := "services:\n  app:\n    image: docker.io/library/nginx:1.29\n  tools:\n    image: docker.io/library/nginx:1.29\n    network_mode: service:app\n"
+	in := inputOf(t, compose, "ca")
+	in.Companions = []Companion{{Service: "tools", Alias: "portcullis-mcp-ca--tools", Port: 7000}}
+	var alias *unstructured.Unstructured
+	mcpIngress := false
+	for _, o := range objectsOf(t, in) {
+		if o.GetKind() == "Service" && o.GetName() == "portcullis-mcp-ca--tools" {
+			alias = o
+		}
+		if o.GetKind() == "NetworkPolicy" && strings.Contains(fmt.Sprint(o.Object), "mcp-gate") && strings.Contains(fmt.Sprint(o.Object), "7000") {
+			mcpIngress = true
+		}
+	}
+	if alias == nil {
+		t.Fatal("no alias Service")
+	}
+	sel, _, _ := unstructured.NestedStringMap(alias.Object, "spec", "selector")
+	ports, _, _ := unstructured.NestedSlice(alias.Object, "spec", "ports")
+	if sel[LabelInstance] != "ca" || sel[LabelService] != "app" || len(ports) != 1 || ports[0].(map[string]any)["port"] != int64(7000) {
+		t.Errorf("alias Service %v", alias.Object["spec"])
+	}
+	if alias.GetLabels()[LabelInstance] != "ca" {
+		t.Errorf("labels %v", alias.GetLabels())
+	}
+	if !mcpIngress {
+		t.Error("no mcp-gate ingress on 7000")
+	}
+	for _, c := range []Companion{{Service: "tools", Alias: "portcullis-mcp-other--tools", Port: 7000}, {Service: "nope", Alias: "portcullis-mcp-ca--nope", Port: 7000},
+		{Service: "tools", Alias: "portcullis-mcp-ca--tools", Port: 0}, {Service: "tools", Alias: "portcullis-mcp-ca--Tools", Port: 7000}} {
+		in.Companions = []Companion{c}
+		if _, err := Translate(in); refusedErr(err) == "" {
+			t.Errorf("%+v: %v", c, err)
+		}
 	}
 }

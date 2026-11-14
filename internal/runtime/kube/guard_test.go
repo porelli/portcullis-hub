@@ -61,9 +61,9 @@ func newGuardRig(t *testing.T) (*guardRig, *Guard) {
 		"Middleware": "portcullis-apps-guard-traefik", "NetworkPolicy": "portcullis-apps-guard-netpol"}
 	r.selfTest = func(o *unstructured.Unstructured) error {
 		if o.GetNamespace() == EdgeNamespace {
-			return vapDenied("portcullis-edge-guard-routes", "nope")
+			return vapDenied("portcullis-edge-guard-routes-0123456789abcdef", "nope")
 		}
-		return vapDenied(byKind[o.GetKind()], "nope")
+		return vapDenied(byKind[o.GetKind()]+"-0123456789abcdef", "nope")
 	}
 	r.c.typed.PrependReactor("create", "selfsubjectrulesreviews", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		rv := a.(k8stesting.CreateAction).GetObject().(*authv1.SelfSubjectRulesReview).DeepCopy()
@@ -231,16 +231,22 @@ func TestRoleExact(t *testing.T) {
 // The self-test reads the Status message only: another binding's
 // denial, RBAC, a webhook or a warning-only answer is guard missing.
 func TestSelfTestRejectedOnlyByItsBinding(t *testing.T) {
-	if !SelfTestRejected(vapDenied("portcullis-apps-guard-pods", "x"), "portcullis-apps-guard-pods") {
-		t.Error("its own binding")
+	// Core applies each binding as <name>-<params generation> (5ec559f).
+	for _, gen := range []string{"0123456789abcdef", "a1"} {
+		if !SelfTestRejected(vapDenied("portcullis-apps-guard-pods-"+gen, "x"), "portcullis-apps-guard-pods") {
+			t.Errorf("its own binding, generation %s", gen)
+		}
 	}
 	for name, err := range map[string]error{
-		"another binding": vapDenied("portcullis-apps-guard-workloads", "x"),
-		"rbac":            apierrors.NewForbidden(podsGVR.GroupResource(), "x", errors.New("cannot create")),
-		"webhook":         &apierrors.StatusError{ErrStatus: metav1.Status{Reason: metav1.StatusReasonForbidden, Message: `admission webhook "deny.example" denied the request`}},
-		"accepted":        nil,
-		"plain":           errors.New("with binding 'portcullis-apps-guard-pods'"),
-		"conflict":        &apierrors.StatusError{ErrStatus: metav1.Status{Reason: metav1.StatusReasonAlreadyExists, Message: "with binding 'portcullis-apps-guard-pods'"}},
+		"another binding":  vapDenied("portcullis-apps-guard-workloads-0123456789abcdef", "x"),
+		"no generation":    vapDenied("portcullis-apps-guard-pods", "x"),
+		"empty generation": vapDenied("portcullis-apps-guard-pods-", "x"),
+		"bad generation":   vapDenied("portcullis-apps-guard-pods-x y", "x"),
+		"rbac":             apierrors.NewForbidden(podsGVR.GroupResource(), "x", errors.New("cannot create")),
+		"webhook":          &apierrors.StatusError{ErrStatus: metav1.Status{Reason: metav1.StatusReasonForbidden, Message: `admission webhook "deny.example" denied the request`}},
+		"accepted":         nil,
+		"plain":            errors.New("with binding 'portcullis-apps-guard-pods-0123456789abcdef'"),
+		"conflict":         &apierrors.StatusError{ErrStatus: metav1.Status{Reason: metav1.StatusReasonAlreadyExists, Message: "with binding 'portcullis-apps-guard-pods-0123456789abcdef'"}},
 	} {
 		if SelfTestRejected(err, "portcullis-apps-guard-pods") {
 			t.Errorf("%s counted as the guard", name)

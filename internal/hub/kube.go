@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/templates"
@@ -129,6 +130,15 @@ func (h *Hub) kubeInputs(t *templates.Template) (*runtime.ProjectInputs, error) 
 		in.VPNSlot, in.IngressService = &slot, t.Manifest.VPN.Ingress.Service
 	}
 	in.VPNOnly = h.vpnAccessLocked(t).VPNOnly
+	// The rendered AI companions: mcp-gate dials each at its gate alias
+	// (http://portcullis-mcp-<id>--<c>:<port>), a Service on Kubernetes.
+	if t.HasAIMCP() {
+		for i := range t.Manifest.AI.MCP {
+			if c := &t.Manifest.AI.MCP[i]; h.companionRenderedLocked(t, c) {
+				in.Companions = append(in.Companions, runtime.CompanionInput{Service: c.Service, Alias: aigate.Alias(t.ID, c.Name), Port: c.Port})
+			}
+		}
+	}
 	h.mu.RUnlock()
 	return in, nil
 }

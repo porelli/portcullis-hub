@@ -156,6 +156,9 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 				shown = "a non-numeric value"
 			}
 			c.refuse("service %s runs as user %s: Kubernetes needs a numeric uid", name, shown)
+		} else if n, err := strconv.ParseInt(uid, 10, 64); err == nil && n == 0 {
+			// Core's admission lets only the Hub's helper pods run as root.
+			c.refuse("service %s runs as root (user 0)", name)
 		}
 	}
 	if scalarValue(field(s, "network_mode"), env) == "host" {

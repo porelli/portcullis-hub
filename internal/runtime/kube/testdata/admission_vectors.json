@@ -4546,5 +4546,343 @@
   "as": "hub",
   "want": "deny",
   "reason_contains": "vpnsecure only"
+ },
+ {
+  "name": "routed port from Traefik with an endPort range",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "rt-range",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/service": "web"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "portcullis"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/component": "traefik"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 8080,
+        "protocol": "TCP",
+        "endPort": 65535
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "endPort"
+ },
+ {
+  "name": "the Hub's internet egress with an endPort range",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "eg-range",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/egress": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "0.0.0.0/0",
+         "except": [
+          "10.42.0.0/24",
+          "10.43.0.0/16",
+          "169.254.0.0/16",
+          "10.1.0.4/32"
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "10.1.0.4/32"
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 80,
+        "protocol": "TCP",
+        "endPort": 65535
+       },
+       {
+        "port": 443,
+        "protocol": "TCP",
+        "endPort": 65535
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "endPort"
+ },
+ {
+  "name": "a gateway to its edge port with an endPort range",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "gw-range",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/vpn-slot": "3"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "portcullis"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/component": "wg"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 9004,
+        "protocol": "TCP",
+        "endPort": 65535
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "endPort"
+ },
+ {
+  "name": "kube-dns on 53 with an endPort range",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "dns-range",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/net-default": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "kube-system"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "k8s-app": "kube-dns"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 53,
+        "protocol": "UDP",
+        "endPort": 65535
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "endPort"
+ },
+ {
+  "name": "a probe policy between probe pods with an endPort range",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "pp-range",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/probe": "allow"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/probe": "client"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 8080,
+        "protocol": "TCP",
+        "endPort": 65535
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "endPort"
+ },
+ {
+  "name": "a pod's ClusterIP Service",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "app--web",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "web"
+    }
+   },
+   "spec": {
+    "type": "ClusterIP",
+    "selector": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "web"
+    },
+    "ports": [
+     {
+      "name": "tcp-8080",
+      "port": 8080,
+      "targetPort": 8080,
+      "protocol": "TCP"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a companion's gate-alias Service",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "portcullis-mcp-app--tok",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "web"
+    }
+   },
+   "spec": {
+    "type": "ClusterIP",
+    "selector": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "web"
+    },
+    "ports": [
+     {
+      "name": "tcp-7000",
+      "port": 7000,
+      "targetPort": 7000,
+      "protocol": "TCP"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
  }
 ]

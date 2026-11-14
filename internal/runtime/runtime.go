@@ -48,6 +48,15 @@ type ProjectInputs struct {
 	IngressService string
 	// VPNOnly: the instance is VPN-only (its routes stay off websecure).
 	VPNOnly bool
+	// Companions: the rendered AI companions mcp-gate calls.
+	Companions []CompanionInput
+}
+
+// CompanionInput is a rendered AI companion: its compose service, gate
+// alias (portcullis-mcp-<instance>--<companion>) and port.
+type CompanionInput struct {
+	Service, Alias string
+	Port           int
 }
 
 // AppFileInput is a data file (§13.7): its name, content, its secrets

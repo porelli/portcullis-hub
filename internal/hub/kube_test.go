@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/kube"
+	"github.com/portcullis/hub/internal/templates"
 	"github.com/portcullis/hub/internal/vpn"
 )
 
@@ -198,5 +200,36 @@ func TestReloadDegraded(t *testing.T) {
 	f.h.cfg.Runtime = runtime.KindDocker
 	if f.h.doctorKubeIn(context.Background()) != nil {
 		t.Error("a docker Hub has Kubernetes doctor inputs")
+	}
+}
+
+// Under Kubernetes a switched-on companion reaches the translator as its
+// compose service, gate alias and port (mcp-gate's upstream host); off,
+// nothing.
+func TestKubeInputsCompanions(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	a.h.cfg.Runtime = runtime.KindKubernetes
+	tp := a.h.Template("aiapp")
+	in, err := a.h.kubeInputs(tp)
+	if err != nil || len(in.Companions) != 0 {
+		t.Fatalf("off: %+v %v", in, err)
+	}
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	in, err = a.h.kubeInputs(a.h.Template("aiapp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c *templates.Companion
+	for i := range tp.Manifest.AI.MCP {
+		if tp.Manifest.AI.MCP[i].Name == "tok" {
+			c = &tp.Manifest.AI.MCP[i]
+		}
+	}
+	want := []runtime.CompanionInput{{Service: c.Service, Alias: "portcullis-mcp-aiapp--tok", Port: c.Port}}
+	if !reflect.DeepEqual(in.Companions, want) {
+		t.Errorf("companions %+v, want %+v", in.Companions, want)
 	}
 }

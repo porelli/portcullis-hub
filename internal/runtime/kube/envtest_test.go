@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,15 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: portcullis-hub}
 subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 `
 
+// testGeneration is params.yaml's generation (core names the params
+// ConfigMap and every binding after it).
+const testGeneration = "0123456789abcdef"
+
+var (
+	paramsRef   = regexp.MustCompile(`(?m)^(\s+name: portcullis-admission-params)$`)
+	bindingName = regexp.MustCompile(`(?m)^(  name: portcullis-(?:apps|edge)-guard-[a-z-]+)$`)
+)
+
 type env struct {
 	cfg      *rest.Config
 	admin    dynamic.Interface
@@ -185,10 +195,14 @@ func startEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As core's kube_admission_params_apply does (5ec559f): the params
+	// ConfigMap portcullis-admission-params-<generation>, every binding
+	// <name>-<generation> on it.
 	params := strings.Replace(string(file(t, "testdata/admission/params.yaml")), "cliUsername: system:admin", "cliUsername: "+whoami.Status.UserInfo.Username, 1)
-	applyYAML(t, admin, []byte(params))
+	applyYAML(t, admin, []byte(paramsRef.ReplaceAllString(params, "${1}-"+testGeneration)))
 	applyYAML(t, admin, file(t, "testdata/admission/policies.yaml"))
-	applyYAML(t, admin, file(t, "testdata/admission/bindings.yaml"))
+	bindings := bindingName.ReplaceAllString(string(file(t, "testdata/admission/bindings.yaml")), "${1}-"+testGeneration)
+	applyYAML(t, admin, []byte(paramsRef.ReplaceAllString(bindings, "${1}-"+testGeneration)))
 	hc := rest.CopyConfig(cfg)
 	hc.Impersonate = rest.ImpersonationConfig{UserName: hubSA, Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis", "system:authenticated"}}
 	ic := rest.CopyConfig(cfg)
@@ -287,11 +301,9 @@ func TestAdmissionVectors(t *testing.T) {
 }
 
 // knownRefused are translations the policies refuse on purpose (core's
-// rulings), so a change on either side shows here: a service running as
-// root (user: "0:0", e.g. samba) is refused — only the Hub's helpers may.
-var knownRefused = map[string]string{
-	"person-secret/Deployment/person-secret--samba": "only the Hub's helper pods may run as root",
-}
+// rulings), so a change on either side shows here. None today: a root
+// service is refused by the translator itself.
+var knownRefused = map[string]string{}
 
 // TestTranslatedObjectsAdmitted: what the translator renders for the
 // golden cases passes the policies (the Hub never fights its guard).
@@ -331,11 +343,11 @@ func TestSelfTestRequiresPolicyRejection(t *testing.T) {
 		t.Fatalf("with the policies: %v", err)
 	}
 	bind := schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}
-	saved, err := e.admin.Resource(bind).Get(context.Background(), "portcullis-apps-guard-services", metav1.GetOptions{})
+	saved, err := e.admin.Resource(bind).Get(context.Background(), "portcullis-apps-guard-services-"+testGeneration, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.admin.Resource(bind).Delete(context.Background(), "portcullis-apps-guard-services", metav1.DeleteOptions{}); err != nil {
+	if err := e.admin.Resource(bind).Delete(context.Background(), "portcullis-apps-guard-services-"+testGeneration, metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {

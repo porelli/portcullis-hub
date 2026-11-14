@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/kube"
 
 	"gopkg.in/yaml.v3"
 
@@ -228,12 +229,33 @@ func TestRealTemplatesRuntimeClassification(t *testing.T) {
 		for _, rt := range []runtime.Kind{runtime.KindKubernetes, runtime.KindPodman} {
 			c := templates.RuntimeCompat(rt, tp.ReadCompose(), tp.Manifest, nil, 80)
 			lines = append(lines, e.Name()+"\t"+string(rt)+"\t"+c.Status+"\t"+strings.Join(c.Reasons, "; "))
+			if rt == runtime.KindKubernetes && c.Status != templates.CompatRefused {
+				kubePriorityWithinCap(t, e.Name(), &tp)
+			}
 		}
 	}
 	sort.Strings(lines)
 	got := strings.Join(lines, "\n") + "\n"
 	if got != string(want) {
 		t.Errorf("classification differs from %s/tests/%s:\n--- hub\n%s--- templates\n%s", dir, file, got, want)
+	}
+}
+
+// kubePriorityWithinCap: a template that isn't refused on Kubernetes
+// never gets a route above kube.MaxAppPriority — its own routers'
+// bounds, and the Hub's public (+1) and extra-domain sign-in (+2)
+// routers above them (no MCP routers on Kubernetes). IngressObjects
+// refuses anything higher, so a template over the cap must be classified
+// refused instead.
+func kubePriorityWithinCap(t *testing.T, id string, tp *templates.Template) {
+	t.Helper()
+	routes, err := templates.ParseRoutes(tp.ReadCompose())
+	if err != nil {
+		t.Errorf("%s: %v", id, err)
+		return
+	}
+	if top := routes.MaxPriorityBound() + 2; top > kube.MaxAppPriority {
+		t.Errorf("%s: classified usable on Kubernetes but its routes reach priority %d (> %d)", id, top, kube.MaxAppPriority)
 	}
 }
 

@@ -497,6 +497,12 @@ spec:
       message: "a NetworkPolicy selects one instance's pods (portcullis.io/instance plus a net-, egress, service or vpn-slot key)"
     - expression: "size(variables.nodes) > 0 && size(variables.apiAddrs) > 0"
       message: "the params carry no node or API addresses: every NetworkPolicy is refused (fail closed)"
+    # A port range would widen every port check below (53, 80 / 443, the
+    # wg edge port): the Hub never writes endPort.
+    - expression: >-
+        variables.ingress.all(r, !has(r.ports) || r.ports.all(x, !has(x.endPort)))
+        && variables.egress.all(r, !has(r.ports) || r.ports.all(x, !has(x.endPort)))
+      message: "a NetworkPolicy port range (endPort) is refused"
     - expression: "variables.ingress.all(r, has(r.from) && size(r.from) > 0) && variables.egress.all(r, has(r.to) && size(r.to) > 0)"
       message: "a rule without from / to (all peers) is refused"
     - expression: >-

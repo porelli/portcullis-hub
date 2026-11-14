@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/netip"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -99,6 +100,10 @@ type Input struct {
 	// (§3.2); CoreNamespace is PORTCULLIS_NAMESPACE ("" = portcullis).
 	CompanionPorts map[string][]int
 	CoreNamespace  string
+	// Companions are the rendered AI companions: each gets a ClusterIP
+	// Service named its gate alias (what mcp-gate's upstream names) and
+	// its port joins CompanionPorts.
+	Companions []Companion
 	// EdgeNamespace is where the instance's IngressRoutes and Middlewares
 	// go ("" = portcullis-edge).
 	EdgeNamespace string
@@ -106,6 +111,13 @@ type Input struct {
 	// portcullis.io/reach: vpn; the admission policy keeps them off
 	// websecure).
 	VPNOnly bool
+}
+
+// Companion is a rendered AI companion: its compose service, gate alias
+// (portcullis-mcp-<instance>--<companion>) and port.
+type Companion struct {
+	Service, Alias string
+	Port           int
 }
 
 // WaitKind is what Up waits for after a step.
@@ -284,6 +296,23 @@ func (t *translator) run() (Plan, error) {
 		if len(sv.Networks) == 0 && sv.NetworkMode == "" {
 			nets["default"] = append(nets["default"], n)
 			egress = append(egress, n)
+		}
+	}
+	aliases, err := t.companionServices(podOf)
+	if err != nil {
+		return Plan{}, err
+	}
+	services = append(services, aliases...)
+	for _, n := range names {
+		if podOf[n] != n {
+			continue
+		}
+		svc, err := t.clusterService(n, names, podOf, routed)
+		if err != nil {
+			return Plan{}, err
+		}
+		if svc != nil {
+			services = append(services, svc)
 		}
 	}
 	edge := t.in.EdgeNamespace
@@ -766,6 +795,9 @@ func (p *podSpec) container(n string, s types.ServiceConfig, main bool) error {
 		if err != nil {
 			return refused("service %s runs as user %s: Kubernetes needs a numeric uid", n, s.User)
 		}
+		if u == 0 {
+			return refused("service %s runs as root (user 0)", n)
+		}
 		uid, gid = u, g
 		sc.RunAsUser = &u
 		if g != nil {
@@ -1202,6 +1234,130 @@ func (p *podSpec) finish() corev1.PodSpec {
 	sort.SliceStable(p.volumes, func(i, j int) bool { return p.volumes[i].Name < p.volumes[j].Name })
 	spec.Volumes = p.volumes
 	return spec
+}
+
+// companionAliasRe: a companion's gate alias (templates.MCPAlias's
+// form, companion names as templates.companionNameRe allows).
+var companionAliasRe = regexp.MustCompile(`^portcullis-mcp-([a-z0-9-]+)--([a-z][a-z0-9]*(-[a-z0-9]+)*)$`)
+
+// companionServices: each companion's ClusterIP Service named its gate
+// alias, selecting the pod of its compose service, on its port (mcp-gate
+// dials http://<alias>:<port>; core resolves the apps namespace for it);
+// the ports join CompanionPorts (the mcp-gate ingress rule). Anything
+// that isn't this instance's alias of one of its services is refused.
+func (t *translator) companionServices(podOf map[string]string) ([]*unstructured.Unstructured, error) {
+	if len(t.in.Companions) == 0 {
+		return nil, nil
+	}
+	ports := map[string][]int{}
+	for k, v := range t.in.CompanionPorts {
+		ports[k] = append([]int{}, v...)
+	}
+	var out []*unstructured.Unstructured
+	for _, c := range t.in.Companions {
+		m := companionAliasRe.FindStringSubmatch(c.Alias)
+		if m == nil || m[1] != t.in.Instance || len(c.Alias) > maxName {
+			return nil, refused("companion alias %q isn't portcullis-mcp-%s--<companion>", c.Alias, t.in.Instance)
+		}
+		pod, ok := podOf[c.Service]
+		if !ok {
+			return nil, refused("companion %s: service %s is not a compose service", m[2], c.Service)
+		}
+		if c.Port <= 0 || c.Port > 65535 {
+			return nil, refused("companion %s: port %d", m[2], c.Port)
+		}
+		if err := t.claim("service", c.Alias, "companion "+m[2]); err != nil {
+			return nil, err
+		}
+		if !slices.Contains(ports[c.Service], c.Port) {
+			ports[c.Service] = append(ports[c.Service], c.Port)
+		}
+		svc := &corev1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: meta(c.Alias, t.in.Namespace, t.labels(pod)),
+			Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: t.labels(pod),
+				Ports: []corev1.ServicePort{{Name: "tcp-" + strconv.Itoa(c.Port), Port: int32(c.Port), TargetPort: intstr.FromInt32(int32(c.Port)), Protocol: corev1.ProtocolTCP}}}}
+		u, err := toUnstructured(svc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	t.in.CompanionPorts = ports
+	return out, nil
+}
+
+// clusterService is pod's ClusterIP Service <instance>--<pod> (contract
+// §11.2: what the IngressRoutes and mcp-gate address): every port its
+// members serve — Traefik's loadbalancer ports, the AI companion ports,
+// expose and the published ports' targets. No port, no Service; the
+// clusterIP is always allocated (never set).
+func (t *translator) clusterService(pod string, names []string, podOf map[string]string, routed map[string][]int) (*unstructured.Unstructured, error) {
+	type key struct {
+		port  int
+		proto corev1.Protocol
+	}
+	seen := map[key]bool{}
+	var ports []key
+	add := func(port int, proto corev1.Protocol) {
+		if k := (key{port, proto}); port > 0 && port <= 65535 && !seen[k] {
+			seen[k] = true
+			ports = append(ports, k)
+		}
+	}
+	for _, n := range names {
+		if podOf[n] != pod {
+			continue
+		}
+		sv := t.in.Model.Services[n]
+		for _, p := range routed[n] {
+			add(p, corev1.ProtocolTCP)
+		}
+		for _, p := range t.in.CompanionPorts[n] {
+			add(p, corev1.ProtocolTCP)
+		}
+		for _, e := range sv.Expose {
+			num, proto, _ := strings.Cut(e, "/")
+			port, err := strconv.Atoi(num)
+			if err != nil {
+				return nil, refused("service %s exposes %q: only single ports are on Kubernetes", n, e)
+			}
+			pr := corev1.ProtocolTCP
+			if strings.EqualFold(proto, "udp") {
+				pr = corev1.ProtocolUDP
+			}
+			add(port, pr)
+		}
+		for _, sp := range sv.Ports {
+			pr := corev1.ProtocolTCP
+			if strings.EqualFold(sp.Protocol, "udp") {
+				pr = corev1.ProtocolUDP
+			}
+			add(int(sp.Target), pr)
+		}
+	}
+	if len(ports) == 0 {
+		return nil, nil
+	}
+	slices.SortFunc(ports, func(a, b key) int {
+		if a.port != b.port {
+			return a.port - b.port
+		}
+		return strings.Compare(string(a.proto), string(b.proto))
+	})
+	name := ObjectName(t.in.Instance, pod)
+	if err := t.claim("service", name, "the Service of "+pod); err != nil {
+		return nil, err
+	}
+	svc := &corev1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: meta(name, t.in.Namespace, t.labels(pod)),
+		Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: t.labels(pod)}}
+	for _, k := range ports {
+		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{Name: strings.ToLower(string(k.proto)) + "-" + strconv.Itoa(k.port),
+			Port: int32(k.port), TargetPort: intstr.FromInt32(int32(k.port)), Protocol: k.proto})
+	}
+	u, err := toUnstructured(svc)
+	if err != nil {
+		return nil, err
+	}
+	return u, checkSize(u)
 }
 
 // servicePorts are the LoadBalancer Services of a pod's published ports

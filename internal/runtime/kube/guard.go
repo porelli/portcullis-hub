@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -439,9 +440,16 @@ func SelfTestObjects(ns, edgeNS string) map[string]*unstructured.Unstructured {
 	return out
 }
 
+// generationRe: the params generation core appends to every binding name
+// (`<name>-<generation>`, core 5ec559f: each params generation gets its
+// own bindings, create-before-delete).
+var generationRe = regexp.MustCompile(`^[a-z0-9]+$`)
+
 // SelfTestRejected: err is the API server's Invalid / Forbidden Status
-// whose message names binding (never a warning: warnings aren't errors;
-// a rejection by RBAC, a quota or another webhook isn't).
+// whose message names binding as `with binding '<binding>-<generation>'`
+// — any generation: while core re-binds, an older one still judges
+// (never a warning: warnings aren't errors; a rejection by RBAC, a quota
+// or another webhook isn't).
 func SelfTestRejected(err error, binding string) bool {
 	var st apierrors.APIStatus
 	if !errors.As(err, &st) {
@@ -451,7 +459,17 @@ func SelfTestRejected(err error, binding string) bool {
 	if s.Reason != metav1.StatusReasonInvalid && s.Reason != metav1.StatusReasonForbidden {
 		return false
 	}
-	return strings.Contains(s.Message, "with binding '"+binding+"'")
+	msg, prefix := s.Message, "with binding '"+binding+"-"
+	for {
+		i := strings.Index(msg, prefix)
+		if i < 0 {
+			return false
+		}
+		msg = msg[i+len(prefix):]
+		if gen, _, ok := strings.Cut(msg, "'"); ok && generationRe.MatchString(gen) {
+			return true
+		}
+	}
 }
 
 // selfTest dry-runs the six forbidden objects; each must be rejected by

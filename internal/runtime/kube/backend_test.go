@@ -356,7 +356,7 @@ func TestSignalFallsBackToRestart(t *testing.T) {
 func TestPersonSecretTooLargeRefuses(t *testing.T) {
 	c := newCluster(t)
 	b := c.backend(t)
-	p := project(t, "services:\n  samba:\n    image: ghcr.io/porelli/portcullis-samba:4.22\n    user: \"0:0\"\n    volumes:\n      - type: volume\n        source: portcullis-hub-secrets\n        target: /h\n        read_only: true\n        volume:\n          subpath: big/smb\nvolumes:\n  portcullis-hub-secrets:\n    external: true\n", "big")
+	p := project(t, "services:\n  samba:\n    image: ghcr.io/porelli/portcullis-samba:4.22\n    user: \"10001:10001\"\n    volumes:\n      - type: volume\n        source: portcullis-hub-secrets\n        target: /h\n        read_only: true\n        volume:\n          subpath: big/smb\nvolumes:\n  portcullis-hub-secrets:\n    external: true\n", "big")
 	p.Inputs.PersonSecrets = map[string]map[string][]byte{"smb": {"alice.nt": make([]byte, 1<<20+1)}}
 	err := b.Up(context.Background(), p, nil)
 	var r *ErrRefused

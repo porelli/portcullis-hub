@@ -1,7 +1,7 @@
 services:
   samba:
     image: ghcr.io/porelli/portcullis-samba:4.22
-    user: "0:0"
+    user: "10001:10001"
     volumes:
       - type: volume
         source: portcullis-hub-secrets
