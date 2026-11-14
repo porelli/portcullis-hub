@@ -137,7 +137,9 @@ func FromEvent(ev keycloak.Event, clientNames map[string]string) (Entry, bool) {
 		e.Reason = FailureTextFor(ev.Error, strings.TrimSpace(d[detailMethod]))
 	case "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL":
 		// Only an authenticator app's events (T11): every other
-		// credential type is dropped.
+		// credential type is dropped. The credential details are read
+		// here only: a LOGIN sent right after a required action can still
+		// carry them, and they never count there.
 		if d[detailCredType] != keycloak.OTPType {
 			return Entry{}, false
 		}

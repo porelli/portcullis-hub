@@ -2,6 +2,7 @@ package signinhistory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -524,5 +525,42 @@ func TestFromAuditRemoveAuthenticators(t *testing.T) {
 	a.Result = "refused"
 	if _, ok := FromAudit(a, "alice"); ok {
 		t.Error("a refused removal kept")
+	}
+}
+
+// TestLoginIgnoresCredentialDetails (keycloak smoke): Keycloak sends the
+// required action's UPDATE_CREDENTIAL after the override returns, so the
+// LOGIN right after it can still carry the credential details: they are
+// read only from UPDATE_CREDENTIAL / REMOVE_CREDENTIAL, never on LOGIN.
+func TestLoginIgnoresCredentialDetails(t *testing.T) {
+	cred := map[string]string{"credential_type": "otp", "credential_user_label": "Secret Phone Label", "credential_id": "c1", "pc_replaced": "Old Label"}
+	for _, extra := range []map[string]string{
+		{"pc_kind": "sign_in", "pc_methods": "password,totp"},
+		{"pc_kind": "step_up", "pc_methods": "totp"},
+		{"pc_kind": "sso", "pc_session": "password,totp"},
+		{},
+	} {
+		d := map[string]string{}
+		for k, v := range cred {
+			d[k] = v
+		}
+		for k, v := range extra {
+			d[k] = v
+		}
+		for _, client := range []string{ForwardAuthClient, FreshAuthClient, "nextcloud"} {
+			e, ok := FromEvent(login(client, d), map[string]string{"nextcloud": "Nextcloud"})
+			if !ok {
+				continue
+			}
+			b, _ := json.Marshal(e)
+			if e.Kind == KindMethod || strings.Contains(string(b), "Secret Phone Label") || strings.Contains(string(b), "Old Label") || strings.Contains(e.Detail, "authenticator app") {
+				t.Errorf("LOGIN %v on %s = %s", extra, client, b)
+			}
+		}
+	}
+	// LOGIN_ERROR with the same details: a failure, never a method entry.
+	e, _ := FromEvent(keycloak.Event{Time: t0, Type: "LOGIN_ERROR", Error: "invalid_user_credentials", Details: map[string]string{"pc_method": "totp", "credential_user_label": "Secret Phone Label"}}, nil)
+	if b, _ := json.Marshal(e); e.Kind != KindFailed || strings.Contains(string(b), "Secret Phone Label") {
+		t.Errorf("LOGIN_ERROR = %s", b)
 	}
 }
