@@ -296,8 +296,9 @@ var forwarderImageRe = regexp.MustCompile(`^ghcr\.io/porelli/portcullis-forwarde
 // a Traefik router or label uses host networking; every service in the ingress's network namespace (the
 // ingress and the services joining it, chains followed) is no job, no AI
 // companion, has no Traefik router or label and publishes no ports, and
-// besides the ingress only the pinned forwarder may join it;
-// proxy_protocol v2.
+// besides the ingress only the pinned forwarder may join it; no service
+// shares the pid or ipc namespace (service:<X>) of the ingress or a
+// member; proxy_protocol v2.
 func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 	s := m.VPN.Ingress.Service
 	infos := composeServiceInfos(compose)
@@ -352,6 +353,20 @@ func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 		}
 		if err := vpnNamespaceCaps(n, infos[n]); err != nil {
 			return err
+		}
+	}
+	// No service shares the pid or ipc namespace of the ingress or a
+	// member: it could reach the gateway's processes and, with
+	// capabilities, enter its network namespace.
+	inNS := map[string]bool{}
+	for _, n := range members {
+		inNS[n] = true
+	}
+	for _, n := range names {
+		for _, ns := range []struct{ key, val string }{{"pid", infos[n].pidOf}, {"ipc", infos[n].ipcOf}} {
+			if x, ok := strings.CutPrefix(strings.TrimSpace(ns.val), "service:"); ok && inNS[strings.TrimSpace(x)] {
+				return fmt.Errorf("vpn.ingress.service: %s shares the %s namespace of %s", n, ns.key, strings.TrimSpace(x))
+			}
 		}
 	}
 	if m.VPN.Ingress.ProxyProtocol != VPNProxyV2 {

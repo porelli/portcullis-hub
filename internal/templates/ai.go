@@ -577,6 +577,7 @@ type composeServiceInfo struct {
 	networkMode bool
 	netModeOf   string   // network_mode's value when a string
 	pidOf       string   // pid's value when a string
+	ipcOf       string   // ipc's value when a string
 	ports       bool     // ports: declared (published to the host)
 	named       []string // container_name / hostname present
 	image       string   // image: as written ("" = none or not a string)
@@ -613,6 +614,7 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 		_, info.networkMode = s["network_mode"]
 		info.netModeOf, _ = s["network_mode"].(string)
 		info.pidOf, _ = s["pid"].(string)
+		info.ipcOf, _ = s["ipc"].(string)
 		_, info.ports = s["ports"]
 		info.image, _ = s["image"].(string)
 		strs := func(v interface{}) []string {
