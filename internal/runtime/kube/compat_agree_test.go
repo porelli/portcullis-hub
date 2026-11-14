@@ -1,9 +1,11 @@
 package kube
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -179,5 +181,38 @@ func TestRefusalsNeverEchoInstanceValues(t *testing.T) {
 		if _, err := Translate(in); err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(secret)) {
 			t.Errorf("translator echoes the value: %v", err)
 		}
+	}
+}
+
+// TestRefusalsQuoteOnlyKnownNames: a router's service or middleware is
+// quoted only when it is core's documented name or the template's own;
+// any other value (it may come from the instance's settings) isn't.
+func TestRefusalsQuoteOnlyKnownNames(t *testing.T) {
+	const secret = "s3cr3t-pass.word@x"
+	base := map[string]string{"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.services.web.loadbalancer.server.port": "80",
+		"traefik.http.middlewares.mw.headers.customrequestheaders.A": "b"}
+	for _, c := range []struct{ key, value, want string }{
+		{"traefik.http.routers.r.service", secret, "router r: its service isn't on Kubernetes"},
+		{"traefik.http.routers.r.middlewares", secret, "a middleware is not on Kubernetes (not the instance's own, not a core name apps may use)"},
+		{"traefik.http.routers.r.service", "hub@docker", "router r: service hub@docker is not on Kubernetes"},
+		{"traefik.http.routers.r.middlewares", "mw@file", "middleware mw@file is not on Kubernetes (not the instance's own, not a core name apps may use)"},
+		{"traefik.http.routers.r.middlewares", "hub-proxy-secret@docker", "middleware hub-proxy-secret@docker is not on Kubernetes (not the instance's own, not a core name apps may use)"},
+	} {
+		l := maps.Clone(base)
+		l[c.key] = c.value
+		_, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": l})
+		if got := refusedErr(err); got != c.want {
+			t.Errorf("%s=%s: %q, want %q", c.key, c.value, got, c.want)
+		}
+		if strings.Contains(fmt.Sprint(err), secret) {
+			t.Errorf("echoed: %v", err)
+		}
+	}
+	// Through RuntimeCompat with the value in the instance env.
+	compose := "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    labels:\n      traefik.enable: \"true\"\n" +
+		"      traefik.http.routers.r.rule: Host(`a.example.org`)\n      traefik.http.routers.r.service: ${SVC:-web}\n      traefik.http.services.web.loadbalancer.server.port: \"80\"\n"
+	c := templates.RuntimeCompat("kubernetes", []byte(compose), templates.Manifest{}, map[string]string{"SVC": secret}, 80)
+	if strings.Contains(strings.Join(c.Reasons, " "), secret) {
+		t.Errorf("compat echoed: %v", c.Reasons)
 	}
 }

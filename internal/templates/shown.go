@@ -2,7 +2,6 @@ package templates
 
 import (
 	"net/netip"
-	"regexp"
 	"slices"
 	"strings"
 )
@@ -10,8 +9,10 @@ import (
 // Refusal texts reach the catalog, logs, the doctor and the API: they
 // name services, routers, label keys and numbers, never a value the
 // instance's settings or env could have put in (a secret, an admin's
-// path). The Shown* filters let a value through only in a shape that
-// can't carry one, else a placeholder.
+// path). The Shown* filters let a value through only from a fixed set
+// (capability names, volume types) or as an IP address, else a
+// placeholder; a free-form name is never quoted unless it is the
+// template's own (internal/runtime/kube shownRef).
 
 // linuxCaps are the capability names (without CAP_).
 var linuxCaps = []string{"AUDIT_CONTROL", "AUDIT_READ", "AUDIT_WRITE", "BLOCK_SUSPEND", "BPF", "CHECKPOINT_RESTORE", "CHOWN",
@@ -34,17 +35,6 @@ func ShownIP(ip string) string {
 		return a.String()
 	}
 	return "an address"
-}
-
-var shownNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.@-]{0,62}$`)
-
-// ShownName is a Traefik reference (service, middleware) when it has a
-// name's shape, else "a name".
-func ShownName(s string) string {
-	if shownNameRe.MatchString(s) {
-		return s
-	}
-	return "a name"
 }
 
 // ShownVolumeType is a compose volume type when it is one, else

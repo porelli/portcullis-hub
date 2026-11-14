@@ -812,8 +812,8 @@
   "want": {
    "status": "refused",
    "reasons": [
-    "service app publishes 9080 on 192.168.1.5 (not on Kubernetes)",
-    "service app publishes 9084 on 10.0.0.7 (not on Kubernetes)"
+    "service app publishes 9080 on a specific address (not on Kubernetes)",
+    "service app publishes 9084 on a specific address (not on Kubernetes)"
    ]
   }
  },

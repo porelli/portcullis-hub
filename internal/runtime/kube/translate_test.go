@@ -342,7 +342,7 @@ func TestTranslatePortBindings(t *testing.T) {
 		t.Errorf("services %v", svcs)
 	}
 	in = inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    ports:\n      - \"192.168.1.5:9080:80\"\n", "pb")
-	if _, err := Translate(in); refusedErr(err) != "service app publishes 9080 on 192.168.1.5 (not on Kubernetes)" {
+	if _, err := Translate(in); refusedErr(err) != "service app publishes 9080 on a specific address (not on Kubernetes)" {
 		t.Errorf("specific address: %v", err)
 	}
 	in = inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    ports:\n      - \"445:445\"\n", "pb")

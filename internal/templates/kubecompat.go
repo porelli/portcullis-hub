@@ -297,7 +297,7 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 		if !numeric(port) {
 			port = "a port"
 		}
-		c.refuse("service %s publishes %s on %s (not on Kubernetes)", name, port, ShownIP(hp[0]))
+		c.refuse("service %s publishes %s on a specific address (not on Kubernetes)", name, port)
 	}
 	if replicasAboveOne(s, env) {
 		c.refuse("service %s sets replicas above 1 (not on Kubernetes)", name)

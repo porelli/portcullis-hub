@@ -1643,7 +1643,7 @@ func (t *translator) servicePorts(pod string, members []string) ([]*unstructured
 			case isLoopback(hip):
 				continue
 			default:
-				return nil, refused("service %s publishes %d on %s (not on Kubernetes)", n, pub, templates.ShownIP(hip))
+				return nil, refused("service %s publishes %d on a specific address (not on Kubernetes)", n, pub)
 			}
 			proto := corev1.ProtocolTCP
 			if strings.EqualFold(sp.Protocol, "udp") {

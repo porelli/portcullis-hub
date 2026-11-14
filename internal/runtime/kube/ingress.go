@@ -244,6 +244,26 @@ func mwName(instance, name string) string { return joinName(instance, "m-"+name,
 // the instance's labels, bare or @docker) → its Middleware; a K15 core
 // name @docker (or bare) / an allowed @file name → <name>@file; anything
 // else refused.
+// coreNames are core's documented Traefik names (contract §5): shown in a
+// refusal when an app names one; with FileMiddlewares, FileServices and
+// the template's own names they're the only references a refusal quotes
+// (any other value may come from the instance's settings).
+var coreNames = []string{"hub", "keycloak", "hub-proxy-secret", "portcullis-auth-console", "strip-forwarded", "api", "noop",
+	"group-gate", "forward-auth-ext", "mcp-gate", "dashboard"}
+
+// shownRef: ref (<name>[@<provider>]) may be quoted: a known provider and
+// a name core documents or the template defines (own).
+func shownRef(ref string, own map[string]map[string]string) bool {
+	name, provider, has := strings.Cut(ref, "@")
+	if has && !slices.Contains([]string{"docker", "file", "internal"}, provider) {
+		return false
+	}
+	if _, ok := own[name]; ok {
+		return true
+	}
+	return slices.Contains(FileMiddlewares, name) || slices.Contains(FileServices, name) || slices.Contains(coreNames, name)
+}
+
 func middlewareRef(instance, ns, m string, own map[string]map[string]string) (map[string]any, error) {
 	name, provider, hasProvider := strings.Cut(m, "@")
 	switch {
@@ -252,7 +272,10 @@ func middlewareRef(instance, ns, m string, own map[string]map[string]string) (ma
 	case (!hasProvider || provider == "docker" || provider == "file") && slices.Contains(FileMiddlewares, name):
 		return map[string]any{"name": name + "@file"}, nil
 	}
-	return nil, refused("middleware %s is not on Kubernetes (not the instance's own, not a core name apps may use)", templates.ShownName(m))
+	if shownRef(m, own) {
+		return nil, refused("middleware %s is not on Kubernetes (not the instance's own, not a core name apps may use)", m)
+	}
+	return nil, refused("a middleware is not on Kubernetes (not the instance's own, not a core name apps may use)")
 }
 
 // serviceRef maps a router's service.
@@ -275,7 +298,10 @@ func serviceRef(instance, appsNamespace, router, svc string, ports map[string]in
 	case hasProvider && (provider == "docker" || provider == "file") && slices.Contains(FileServices, name):
 		return map[string]any{"name": name + "@file", "kind": "TraefikService"}, nil
 	}
-	return nil, refused("router %s: service %s is not on Kubernetes", router, templates.ShownName(svc))
+	if shownRef(svc, nil) || ports[strings.ToLower(strings.SplitN(svc, "@", 2)[0])] != 0 {
+		return nil, refused("router %s: service %s is not on Kubernetes", router, svc)
+	}
+	return nil, refused("router %s: its service isn't on Kubernetes", router)
 }
 
 // middlewareSpec builds a Middleware's spec from its label fields (the
