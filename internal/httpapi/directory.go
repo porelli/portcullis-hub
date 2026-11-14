@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"slices"
@@ -32,6 +34,7 @@ func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("POST /api/directory/users/{username}/require-passkey", s.handleRequirePasskey)
 	mux.HandleFunc("POST /api/directory/users/{username}/clear-actions", s.handleClearActions)
 	mux.HandleFunc("POST /api/directory/users/{username}/remove-passkeys", s.handleRemovePasskeys)
+	mux.HandleFunc("POST /api/directory/users/{username}/remove-authenticators", s.handleRemoveAuthenticators)
 	// The person's Sign-in routes (§9.7, D32).
 	s.registerSignInHelp(mux)
 	// Signing in as someone else: start and Stop (§9.7, part 3).
@@ -477,19 +480,24 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res)
 }
 
+// handleInvite sends a setup link. The body is {"authenticator": bool}
+// (T8; strict, an empty body or absent field = false): true also sets up
+// an authenticator app, refused with 409 while totp is off.
 func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return
 	}
-	var req struct{}
-	if !decodeJSON(w, r, &req) {
+	var req struct {
+		Authenticator bool `json:"authenticator"`
+	}
+	if !decodeOptionalStrict(w, r, &req, `{"authenticator": true|false}`) {
 		return
 	}
 	c, ok := s.caller(w, r)
 	if !ok {
 		return
 	}
-	res, err := s.sendInvite(r.Context(), c, r.PathValue("username"))
+	res, err := s.sendInvite(r.Context(), c, r.PathValue("username"), req.Authenticator)
 	if err != nil {
 		dirErr(w, err)
 		return
@@ -558,6 +566,46 @@ func (s *Server) handleRemovePasskeys(w http.ResponseWriter, r *http.Request) {
 	}
 	noStore(w)
 	writeJSON(w, res)
+}
+
+// handleRemoveAuthenticators removes every authenticator app of the
+// person (contract §9.7): {"confirm": "<u>"} → 200 Result (count).
+func (s *Server) handleRemoveAuthenticators(w http.ResponseWriter, r *http.Request) {
+	if !s.dirReady(w) {
+		return
+	}
+	var req struct {
+		Confirm string `json:"confirm"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.removeAuthenticators(r.Context(), c, r.PathValue("username"), req.Confirm)
+	if err != nil {
+		dirErr(w, err)
+		return
+	}
+	noStore(w)
+	writeJSON(w, res)
+}
+
+// decodeOptionalStrict is decodeStrict where an empty body means v's zero
+// value.
+func decodeOptionalStrict(w http.ResponseWriter, r *http.Request, v interface{}, usage string) bool {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		http.Error(w, "body must be "+usage, http.StatusBadRequest)
+		return false
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return true
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	return decodeStrict(w, r, v, usage)
 }
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
@@ -729,9 +777,9 @@ func (s *Server) deleteUser(ctx context.Context, c *directory.Caller, username, 
 	return s.Directory.DeleteUser(ctx, c, username, confirm)
 }
 
-func (s *Server) sendInvite(ctx context.Context, c *directory.Caller, username string) (*directory.Result, error) {
-	s.rec("SendInvite", username)
-	return s.Directory.SendInvite(ctx, c, username)
+func (s *Server) sendInvite(ctx context.Context, c *directory.Caller, username string, authenticator bool) (*directory.Result, error) {
+	s.rec("SendInvite", username, authenticator)
+	return s.Directory.SendInvite(ctx, c, username, authenticator)
 }
 
 func (s *Server) requirePasskey(ctx context.Context, c *directory.Caller, username string) error {
@@ -747,6 +795,11 @@ func (s *Server) clearActions(ctx context.Context, c *directory.Caller, username
 func (s *Server) removePasskeys(ctx context.Context, c *directory.Caller, username, confirm string, withInvite bool) (*directory.Result, error) {
 	s.rec("RemovePasskeys", username, confirm, withInvite)
 	return s.Directory.RemovePasskeys(ctx, c, username, confirm, withInvite)
+}
+
+func (s *Server) removeAuthenticators(ctx context.Context, c *directory.Caller, username, confirm string) (*directory.Result, error) {
+	s.rec("RemoveAuthenticators", username, confirm)
+	return s.Directory.RemoveAuthenticators(ctx, c, username, confirm)
 }
 
 func (s *Server) createGroup(ctx context.Context, c *directory.Caller, name string) (*directory.Result, error) {

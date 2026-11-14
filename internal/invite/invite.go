@@ -88,14 +88,23 @@ func (c *Client) Available() error {
 	return err
 }
 
+// Options are a setup link's choices (contract §9.4).
+type Options struct {
+	// Authenticator: the link also sets up an authenticator app (T8).
+	Authenticator bool
+}
+
 // Create requests a new invite for username. Core revokes the user's
-// earlier unredeemed invites.
-func (c *Client) Create(ctx context.Context, username string) (*Invite, error) {
+// earlier unredeemed invites. The body is {"username", "authenticator"}.
+func (c *Client) Create(ctx context.Context, username string, o Options) (*Invite, error) {
 	sec, err := c.secret()
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(map[string]string{"username": username})
+	body, _ := json.Marshal(struct {
+		Username      string `json:"username"`
+		Authenticator bool   `json:"authenticator"`
+	}{username, o.Authenticator})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.APIURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

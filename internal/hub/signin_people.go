@@ -729,6 +729,15 @@ func (h *Hub) runInventorySync(ctx context.Context) {
 	}
 }
 
+// AuthenticatorMethodOn reports whether the totp method is switched on
+// (directory.Service.AuthenticatorMethodOn: setup links with an
+// authenticator app).
+func (h *Hub) AuthenticatorMethodOn() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.st.SignIn.MethodsOn()[signin.TOTP]
+}
+
 // PasswordMethodOn reports whether the password sign-in method is switched
 // on (directory.Service.PasswordMethodOn: password onboarding is refused
 // while it is off).

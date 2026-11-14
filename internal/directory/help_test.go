@@ -57,7 +57,7 @@ func TestHelpScopeDirectory(t *testing.T) {
 	if err := e.svc.CheckHelp(ctx, helga, "alice"); err != nil {
 		t.Fatalf("CheckHelp(alice) = %v", err)
 	}
-	res, err := e.svc.SendInvite(ctx, helga, "alice")
+	res, err := e.svc.SendInvite(ctx, helga, "alice", false)
 	if err != nil || res.Invite == nil {
 		t.Fatalf("invite alice = %+v %v", res, err)
 	}
@@ -75,7 +75,7 @@ func TestHelpScopeDirectory(t *testing.T) {
 		t.Errorf("audit details = %v", got)
 	}
 	// An admin's invite keeps its empty detail.
-	if _, err := e.svc.SendInvite(ctx, asRoot, "bob"); err != nil {
+	if _, err := e.svc.SendInvite(ctx, asRoot, "bob", false); err != nil {
 		t.Fatal(err)
 	}
 	if en, _ := e.svc.Recent(1); en[0].Detail != "" {
@@ -85,7 +85,7 @@ func TestHelpScopeDirectory(t *testing.T) {
 		if err := e.svc.CheckHelp(ctx, helga, target); status(err) != 403 {
 			t.Errorf("CheckHelp(%s) = %v", target, err)
 		}
-		if _, err := e.svc.SendInvite(ctx, helga, target); status(err) != 403 {
+		if _, err := e.svc.SendInvite(ctx, helga, target, false); status(err) != 403 {
 			t.Errorf("invite %s = %v", target, err)
 		}
 		if _, err := e.svc.RemovePasskeys(ctx, helga, target, target, false); status(err) != 403 {
@@ -105,7 +105,7 @@ func TestHelpScopeDirectory(t *testing.T) {
 	if err := e.svc.CheckHelp(ctx, helga, "alice"); status(err) != 403 {
 		t.Errorf("removed holder CheckHelp = %v", err)
 	}
-	if _, err := e.svc.SendInvite(ctx, helga, "alice"); status(err) != 403 {
+	if _, err := e.svc.SendInvite(ctx, helga, "alice", false); status(err) != 403 {
 		t.Errorf("removed holder invite = %v", err)
 	}
 	// Admins may help anyone (the protected accounts are the routes' own
@@ -170,10 +170,10 @@ func TestDelegatesNeverReserved(t *testing.T) {
 	r := func(_ *directory.Result, err error) error { return err }
 	for name, err := range map[string]error{
 		"edit_details UpdateUser":       e.svc.UpdateUser(ctx, callerFor(t, e, "eddie"), u, strptr("x@example.org"), nil),
-		"invite SendInvite":             r(e.svc.SendInvite(ctx, callerFor(t, e, "ivy"), u)),
+		"invite SendInvite":             r(e.svc.SendInvite(ctx, callerFor(t, e, "ivy"), u, false)),
 		"remove DeleteUser":             r(e.svc.DeleteUser(ctx, callerFor(t, e, "rex"), u, u)),
 		"sign_in_help CheckHelp":        e.svc.CheckHelp(ctx, callerFor(t, e, "helga"), u),
-		"sign_in_help SendInvite":       r(e.svc.SendInvite(ctx, callerFor(t, e, "helga"), u)),
+		"sign_in_help SendInvite":       r(e.svc.SendInvite(ctx, callerFor(t, e, "helga"), u, false)),
 		"sign_in_help RemovePasskeys":   r(e.svc.RemovePasskeys(ctx, callerFor(t, e, "helga"), u, u, false)),
 		"sign_in_help CheckDelegate":    e.svc.CheckDelegate(ctx, callerFor(t, e, "helga"), directory.PermSignInHelp, u),
 		"remove CheckDelegate (MCP)":    e.svc.CheckDelegate(ctx, callerFor(t, e, "rex"), directory.PermRemove, u),
@@ -208,7 +208,7 @@ func TestHelpNeverAdministrators(t *testing.T) {
 		if err := e.svc.CheckHelp(ctx, helga, u); status(err) != 403 || !strings.Contains(err.Error(), "is an administrator") {
 			t.Errorf("CheckHelp(%s) = %v", u, err)
 		}
-		if _, err := e.svc.SendInvite(ctx, helga, u); status(err) != 403 {
+		if _, err := e.svc.SendInvite(ctx, helga, u, false); status(err) != 403 {
 			t.Errorf("invite %s = %v", u, err)
 		}
 		if _, err := e.svc.RemovePasskeys(ctx, helga, u, u, false); status(err) != 403 {
@@ -229,5 +229,85 @@ func TestHelpRemovePasskeysPromotionRace(t *testing.T) {
 	}
 	if n := len(e.kc.Get("alice").Credentials); n != 1 {
 		t.Errorf("alice's passkeys = %d, want 1", n)
+	}
+}
+
+// TestRemoveAuthenticatorsTargets (Task 8): remove-passkeys' targets and
+// rules: a holder on alice removes her otp credentials only (detail "2
+// removed; as sign_in_help"); a holder on an administrator 403; an admin
+// on another admin needs the typed name (400); portcullis-hub 409.
+func TestRemoveAuthenticatorsTargets(t *testing.T) {
+	e := helpEnv(t)
+	e.kc.Import("alice", kctest.Credential{ID: "w", Type: "webauthn-passwordless"}, kctest.Credential{ID: "o1", Type: "otp"}, kctest.Credential{ID: "o2", Type: "otp"})
+	e.kc.Import("root", kctest.Credential{ID: "r", Type: "webauthn-passwordless"}, kctest.Credential{ID: "ro", Type: "otp"})
+	e.ll.AddUser("bea", "bea@example.org", "Bea", "", "lldap_admin")
+	e.kc.Import("bea", kctest.Credential{ID: "bo", Type: "otp"})
+	helga := callerFor(t, e, "helga")
+	res, err := e.svc.RemoveAuthenticators(ctx, helga, "alice", "alice")
+	if err != nil || res.Count != 2 {
+		t.Fatalf("holder on alice = %+v %v", res, err)
+	}
+	if cr := e.kc.Get("alice").Credentials; len(cr) != 1 || cr[0].Type != "webauthn-passwordless" {
+		t.Errorf("alice after = %+v", cr)
+	}
+	entries, _ := e.svc.Recent(5)
+	if en := entries[0]; en.Action != "user.remove_authenticators" || en.Actor != "helga" || en.Result != "ok" || en.Detail != "2 removed; as sign_in_help" {
+		t.Errorf("audit = %+v", en)
+	}
+	if _, err := e.svc.RemoveAuthenticators(ctx, helga, "alice", ""); status(err) != 400 {
+		t.Errorf("no typed name = %v", err)
+	}
+	for _, target := range []string{"root", "helga", "eddie"} {
+		if _, err := e.svc.RemoveAuthenticators(ctx, helga, target, target); status(err) != 403 {
+			t.Errorf("holder on %s = %v", target, err)
+		}
+	}
+	if len(e.kc.Get("root").Credentials) != 2 {
+		t.Error("a refused call removed root's credentials")
+	}
+	// An admin on another admin: the typed name.
+	if _, err := e.svc.RemoveAuthenticators(ctx, asRoot, "bea", ""); status(err) != 400 || len(e.kc.Get("bea").Credentials) != 1 {
+		t.Errorf("admin on bea without the name = %v", err)
+	}
+	if res, err := e.svc.RemoveAuthenticators(ctx, asRoot, "bea", "bea"); err != nil || res.Count != 1 {
+		t.Errorf("admin on bea = %+v %v", res, err)
+	}
+	for _, target := range []string{"portcullis-hub", directory.CoreAdmin} {
+		if _, err := e.svc.RemoveAuthenticators(ctx, asRoot, target, target); status(err) != 409 {
+			t.Errorf("admin on %s = %v", target, err)
+		}
+	}
+	// An ordinary person (no permission): 403.
+	if _, err := e.svc.RemoveAuthenticators(ctx, callerFor(t, e, "ivy"), "alice", "alice"); status(err) != 403 {
+		t.Errorf("ivy = %v", err)
+	}
+}
+
+// TestInviteAuthenticator (T8, P12): SendInvite passes authenticator to
+// enroll; true is refused (409, enroll not asked) while totp is off.
+func TestInviteAuthenticator(t *testing.T) {
+	e := helpEnv(t)
+	on := false
+	e.svc.AuthenticatorMethodOn = func() bool { return on }
+	if _, err := e.svc.SendInvite(ctx, asRoot, "alice", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.SendInvite(ctx, asRoot, "alice", true); status(err) != 409 || err.Error() != "authenticator apps are off on this server" {
+		t.Errorf("totp off = %v", err)
+	}
+	on = true
+	if _, err := e.svc.SendInvite(ctx, asRoot, "alice", true); err != nil {
+		t.Fatal(err)
+	}
+	e.invites.mu.Lock()
+	bodies := append([]string(nil), e.invites.bodies...)
+	e.invites.mu.Unlock()
+	if len(bodies) != 2 || bodies[0] != `{"username":"alice","authenticator":false}` || bodies[1] != `{"username":"alice","authenticator":true}` {
+		t.Errorf("bodies = %q", bodies)
+	}
+	// Unset (no hook): off.
+	e.svc.AuthenticatorMethodOn = nil
+	if _, err := e.svc.SendInvite(ctx, asRoot, "alice", true); status(err) != 409 {
+		t.Errorf("no hook = %v", err)
 	}
 }

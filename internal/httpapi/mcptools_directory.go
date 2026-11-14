@@ -846,6 +846,15 @@ func (s *Server) registerDirectoryTools() {
 				}
 				return out, nil
 			}), usernameOf, s.personConsequences("Removes every passkey of %s and signs them out everywhere.")),
+		dirD(dirTool(s, "remove_authenticators", "Remove all of a person's authenticator apps (codes) and sign them out everywhere; their passkeys stay. Needs your confirmation in the browser.",
+			ClassWrite, "POST /api/directory/users/{username}/remove-authenticators", "user.remove_authenticators", func(ctx context.Context, c *directory.Caller, in personArgs) (any, error) {
+				// The typed check (the name) was the confirmation page's.
+				res, err := s.removeAuthenticators(ctx, c, in.Username, in.Username)
+				if err != nil {
+					return nil, err
+				}
+				return s.safeResult(in.Username, "removed", res), nil
+			}), usernameOf, s.personConsequences("Removes every authenticator app of %s and signs them out everywhere.")),
 		{Name: "set_password", Description: "Set a person's fallback password: it is typed (or generated and shown once) on the people page, never in the chat. After you did it there, this reports the last password change the audit log records.",
 			Class: ClassSecret, Scope: ScopeAdmin, Twin: "POST /api/directory/users/{username}/password", In: personArgs{},
 			SecretForm: func(args json.RawMessage) string {

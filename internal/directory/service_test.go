@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,6 +41,7 @@ type fakeInvites struct {
 	mu     sync.Mutex
 	srv    *httptest.Server
 	users  []string
+	bodies []string // the raw request bodies, in order
 	fail   bool
 	refuse map[string]bool // core answers 409 for these
 }
@@ -58,8 +60,10 @@ func newInvites(t *testing.T) *fakeInvites {
 			json.NewEncoder(w).Encode(map[string]string{"error": "boom"})
 			return
 		}
+		raw, _ := io.ReadAll(r.Body)
+		f.bodies = append(f.bodies, string(raw))
 		var req struct{ Username string }
-		json.NewDecoder(r.Body).Decode(&req)
+		json.Unmarshal(raw, &req)
 		if f.refuse[req.Username] {
 			w.WriteHeader(409)
 			json.NewEncoder(w).Encode(map[string]string{"error": "user is an administrator"})
@@ -275,7 +279,7 @@ func TestGuardrails(t *testing.T) {
 	check("delete builtin group", deleteErr(e.svc.DeleteGroup(ctx, asRoot, "lldap_admin", "lldap_admin")), 409)
 	check("create lldap_ group", deleteErr(e.svc.CreateGroup(ctx, asRoot, "lldap_x")), 400)
 	check("passkeys service", e.svc.RequirePasskey(ctx, asRoot, "portcullis-hub"), 409)
-	_, err = e.svc.SendInvite(ctx, asRoot, "portcullis-hub")
+	_, err = e.svc.SendInvite(ctx, asRoot, "portcullis-hub", false)
 	check("invite service", err, 409)
 
 	// Last human admin: admin + root are humans; another admin (solo)
@@ -343,12 +347,12 @@ func TestUserLifecycle(t *testing.T) {
 	if err := e.svc.RequirePasskey(ctx, asRoot, "ivy"); err != nil || e.kc.Get("ivy") == nil {
 		t.Errorf("require on unimported: %v", err)
 	}
-	inv, err := e.svc.SendInvite(ctx, asRoot, "ivy")
+	inv, err := e.svc.SendInvite(ctx, asRoot, "ivy", false)
 	if err != nil || inv.Invite == nil {
 		t.Errorf("invite: %+v %v", inv, err)
 	}
 	e.invites.fail = true
-	if _, err := e.svc.SendInvite(ctx, asRoot, "ivy"); err == nil || !strings.Contains(err.Error(), "boom") {
+	if _, err := e.svc.SendInvite(ctx, asRoot, "ivy", false); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("invite failure = %v", err)
 	}
 
@@ -404,7 +408,7 @@ func TestAudit(t *testing.T) {
 	}
 	e.svc.SetPassword(ctx, asRoot, "jack", "admin-provided-secret", false, "")
 	e.svc.DeleteUser(ctx, asRoot, "root", "root") // refused
-	inv, _ := e.svc.SendInvite(ctx, asRoot, "jack")
+	inv, _ := e.svc.SendInvite(ctx, asRoot, "jack", false)
 
 	raw, _ := os.ReadFile(e.audit)
 	for _, secret := range []string{res.Password, pw2.Password, "admin-provided-secret", svcPass, inviteSecret, inv.Invite.URL} {
@@ -448,10 +452,11 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 		"UpdateUser":              func() error { return s.UpdateUser(ctx, c, target, strptr("x@example.org"), nil) },
 		"DeleteUser":              func() error { return r(s.DeleteUser(ctx, c, target, target)) },
 		"SetPassword":             func() error { return r(s.SetPassword(ctx, c, target, "", true, target)) },
-		"SendInvite":              func() error { return r(s.SendInvite(ctx, c, target)) },
+		"SendInvite":              func() error { return r(s.SendInvite(ctx, c, target, false)) },
 		"RequirePasskey":          func() error { return s.RequirePasskey(ctx, c, target) },
 		"ClearActions":            func() error { return s.ClearActions(ctx, c, target) },
 		"RemovePasskeys":          func() error { return r(s.RemovePasskeys(ctx, c, target, target, true)) },
+		"RemoveAuthenticators":    func() error { return r(s.RemoveAuthenticators(ctx, c, target, target)) },
 		"AddMember":               func() error { return s.AddMember(ctx, c, "users_app", directory.MemberAdd{Username: target}) },
 		"RemoveMember":            func() error { return deleteErr(s.RemoveMember(ctx, c, "lldap_admin", target)) },
 		"RemoveStaleKeycloakUser": func() error { return s.RemoveStaleKeycloakUser(ctx, c, target, target) },
@@ -644,7 +649,7 @@ func TestAdministrators(t *testing.T) {
 
 	// No invites for administrators, yourself included; core isn't asked.
 	for _, who := range []string{"bea", "otto", "xena", "root"} {
-		_, err := e.svc.SendInvite(ctx, asRoot, who)
+		_, err := e.svc.SendInvite(ctx, asRoot, who, false)
 		if status(err) != 409 || !strings.Contains(err.Error(), "administrators are recovered from the server: ./portcullis invite "+who) {
 			t.Errorf("invite %s = %v", who, err)
 		}
@@ -682,7 +687,7 @@ func TestAdministrators(t *testing.T) {
 	e.invites.mu.Lock()
 	e.invites.refuse = map[string]bool{"alice": true, "zed": true}
 	e.invites.mu.Unlock()
-	if _, err := e.svc.SendInvite(ctx, asRoot, "alice"); status(err) != 409 || !strings.Contains(err.Error(), "./portcullis invite alice") || !strings.Contains(err.Error(), "user is an administrator") {
+	if _, err := e.svc.SendInvite(ctx, asRoot, "alice", false); status(err) != 409 || !strings.Contains(err.Error(), "./portcullis invite alice") || !strings.Contains(err.Error(), "user is an administrator") {
 		t.Errorf("core 409 = %v", err)
 	}
 	res, err = e.svc.CreateUser(ctx, asRoot, directory.CreateRequest{Username: "zed", Email: "zed@example.org"})
@@ -971,7 +976,7 @@ func TestReservedPortcullisNames(t *testing.T) {
 	e.invites.mu.Lock()
 	e.invites.users = nil
 	e.invites.mu.Unlock()
-	if _, err := e.svc.SendInvite(ctx, asRoot, "portcullis-hooks"); status(err) != 409 || !strings.Contains(err.Error(), "is reserved") {
+	if _, err := e.svc.SendInvite(ctx, asRoot, "portcullis-hooks", false); status(err) != 409 || !strings.Contains(err.Error(), "is reserved") {
 		t.Errorf("SendInvite = %v (status %d), want 409 reserved", err, status(err))
 	}
 	if _, err := e.svc.RemovePasskeys(ctx, asRoot, "portcullis-hooks", "portcullis-hooks", true); status(err) != 409 {

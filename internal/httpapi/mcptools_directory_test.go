@@ -32,7 +32,7 @@ type markerInviter struct {
 
 func (m *markerInviter) Available() error { return nil }
 
-func (m *markerInviter) Create(_ context.Context, username string) (*invite.Invite, error) {
+func (m *markerInviter) Create(_ context.Context, username string, _ invite.Options) (*invite.Invite, error) {
 	m.mu.Lock()
 	m.users = append(m.users, username)
 	m.mu.Unlock()

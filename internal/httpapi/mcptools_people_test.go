@@ -531,6 +531,7 @@ func TestPeopleToolParity(t *testing.T) {
 		"my_sign_in": ClassRead, "my_browser_certificate": ClassRead, "my_password": ClassRead, "revoke_my_certificate": ClassWrite,
 		// Help to reset (sign-in part 2 Task 7): sign_in_help.
 		"person_sign_in": ClassRead, "revoke_person_certificate": ClassDestructive, "remove_passkeys": ClassDestructive,
+		"remove_authenticators": ClassDestructive,
 	}
 	if len(tools) != len(want) {
 		t.Errorf("%d people tools, want %d", len(tools), len(want))
@@ -541,7 +542,8 @@ func TestPeopleToolParity(t *testing.T) {
 		}
 	}
 	for n, p := range map[string]string{"update_person": directory.PermEditDetails, "invite_person": directory.PermInvite, "delete_person": directory.PermRemove,
-		"person_sign_in": directory.PermSignInHelp, "revoke_person_certificate": directory.PermSignInHelp, "remove_passkeys": directory.PermSignInHelp} {
+		"person_sign_in": directory.PermSignInHelp, "revoke_person_certificate": directory.PermSignInHelp, "remove_passkeys": directory.PermSignInHelp,
+		"remove_authenticators": directory.PermSignInHelp} {
 		if byName[n].Perm != p {
 			t.Errorf("%s: perm %q, want %q", n, byName[n].Perm, p)
 		}
@@ -566,7 +568,7 @@ func TestPeopleDelegateToolsOffAggregate(t *testing.T) {
 	if !slices.Equal(sorted(perm), sorted(peopleDelegateTools)) {
 		t.Errorf("delegate tools %v, the gate filters %v", perm, peopleDelegateTools)
 	}
-	if !slices.Equal(sorted(peopleDelegateTools), []string{"delete_person", "invite_person", "person_sign_in", "remove_passkeys", "revoke_person_certificate", "update_person"}) {
+	if !slices.Equal(sorted(peopleDelegateTools), []string{"delete_person", "invite_person", "person_sign_in", "remove_authenticators", "remove_passkeys", "revoke_person_certificate", "update_person"}) {
 		t.Errorf("peopleDelegateTools = %v (G38)", peopleDelegateTools)
 	}
 }

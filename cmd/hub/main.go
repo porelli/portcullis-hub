@@ -455,6 +455,7 @@ func main() {
 	// §8.1); password onboarding follows the password method's switch.
 	dir.PasswordSet = h.RecordPassword
 	dir.PasswordMethodOn = h.PasswordMethodOn
+	dir.AuthenticatorMethodOn = h.AuthenticatorMethodOn
 	// Who has which sign-in method: Keycloak's passkeys, enroll's
 	// YubiKey certificates (§8.1 "Inventory", §9.4).
 	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates, PasskeyLabel: kc.SetPasskeyLabel, AuthenticatorLabel: kc.SetAuthenticatorLabel})

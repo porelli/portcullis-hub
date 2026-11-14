@@ -582,6 +582,8 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/directory/users/erin/require-passkey", body: `{}`},
 		{tool: "remove_passkeys", args: map[string]any{"username": "erin"},
 			method: "POST", path: "/api/directory/users/erin/remove-passkeys", body: `{"confirm":"erin"}`},
+		{tool: "remove_authenticators", args: map[string]any{"username": "erin"},
+			method: "POST", path: "/api/directory/users/erin/remove-authenticators", body: `{"confirm":"erin"}`},
 		{tool: "import_apply", args: map[string]any{"rows": []any{map[string]any{"user": "erin", "display_name": "Erin Two"}}},
 			method: "POST", path: "/api/directory/import/apply", body: `{"rows":[{"user":"erin","display_name":"Erin Two"}]}`},
 		{tool: "import_apply", args: map[string]any{"rows": []any{map[string]any{"user": "bob2", "remove": true}}},
