@@ -30,7 +30,7 @@ func mineRow(v *MySignIn, m signin.Method) MethodRow {
 	return MethodRow{}
 }
 
-// TestMySignInMethodStates: six rows in canonical order; password off →
+// TestMySignInMethodStates: seven rows in canonical order; password off →
 // off; browser_cert on and set with the certificate listed; passkeys
 // listed for their kind; certificates unknown → unknown.
 func TestMySignInMethodStates(t *testing.T) {
@@ -40,7 +40,7 @@ func TestMySignInMethodStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.User != "alice" || len(v.Methods) != 6 {
+	if v.User != "alice" || len(v.Methods) != 7 {
 		t.Fatalf("view = %+v", v)
 	}
 	for i, m := range signin.Methods {
@@ -340,7 +340,7 @@ func TestMySignInPasskeyModel(t *testing.T) {
 	if r := mineRow(v, signin.PasskeySynced); len(r.Passkeys) != 1 || r.Passkeys[0].Model != "" {
 		t.Errorf("synced = %+v", r.Passkeys)
 	}
-	labels := map[signin.Method]string{signin.Password: "Password", signin.PasskeySynced: "Synced passkey", signin.BrowserCert: "Browser certificate",
+	labels := map[signin.Method]string{signin.Password: "Password", signin.TOTP: "Authenticator app", signin.PasskeySynced: "Synced passkey", signin.BrowserCert: "Browser certificate",
 		signin.PasskeyDevice: "Device-bound passkey", signin.SecurityKey: "Security key", signin.YubiKeyCert: "YubiKey certificate"}
 	for _, r := range v.Methods {
 		if r.Label != labels[r.ID] {
@@ -502,5 +502,59 @@ func TestRenameOwnPasskeyFreshView(t *testing.T) {
 	v, _ = h.MySignInView(c.ctx, "alice")
 	if r := mineRow(v, signin.SecurityKey); len(r.Passkeys) != 1 || r.Passkeys[0].Label != "Office key" {
 		t.Errorf("after = %+v", r.Passkeys)
+	}
+}
+
+// TestOwnPasswordFreshTOTP (T10): a fresh code never adds a first password
+// (refused like a fresh password); it may change an existing one; a
+// passkey adds one; a method id the allowlists don't name is refused.
+func TestOwnPasswordFreshTOTP(t *testing.T) {
+	c := newCertFixture(t)
+	h := c.f.h
+	h.SetOwnPasswords(&fakeOwnPasswords{h: h})
+	setSignIn(c.f, func(si *state.SignIn) { si.Methods["password"] = true; si.Methods["totp"] = true })
+	setPeopleRule(c.f, signin.Node{Op: "any", Items: []signin.Node{siLeaves("all", "password", "totp"), {Leaf: "passkey_synced"}}})
+	const good = "correct horse battery staple 42"
+	for _, m := range []string{"totp", "password", "sms"} {
+		c.fa.method = m
+		if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); statusOf(err) != 403 || err.Error() != "a fresh sign-in is required" {
+			t.Errorf("no password yet + %s: %v", m, err)
+		}
+		if e := c.audit.last(); e.Action != "signin.password" || e.Result != "refused" || !strings.Contains(e.Detail, "pc_fresh names") {
+			t.Errorf("%s audit = %+v", m, e)
+		}
+	}
+	h.mu.RLock()
+	_, set := h.st.SignIn.Passwords["alice"]
+	h.mu.RUnlock()
+	if set {
+		t.Fatal("a refused proof set a password")
+	}
+	c.fa.method = "passkey_synced"
+	if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); err != nil {
+		t.Fatalf("passkey_synced: %v", err)
+	}
+	c.fa.method = "totp"
+	if err := h.SetOwnPassword(c.ctx, "alice", good+"!", testProof); err != nil {
+		t.Errorf("existing password + totp: %v", err)
+	}
+	c.fa.method = "sms"
+	if err := h.SetOwnPassword(c.ctx, "alice", good, testProof); statusOf(err) != 403 {
+		t.Errorf("existing password + sms: %v", err)
+	}
+}
+
+func TestPasswordFreshAllowlist(t *testing.T) {
+	for _, c := range []struct {
+		m        signin.Method
+		has, out bool
+	}{
+		{signin.SecurityKey, false, true}, {signin.PasskeySynced, false, true}, {signin.PasskeyDevice, false, true}, {signin.YubiKeyCert, false, true},
+		{signin.TOTP, false, false}, {signin.Password, false, false}, {signin.BrowserCert, false, false}, {"sms", false, false},
+		{signin.TOTP, true, true}, {signin.Password, true, true}, {signin.BrowserCert, true, false}, {"sms", true, false}, {"", true, false},
+	} {
+		if got := passwordFreshAllowed(c.m, func() bool { return c.has }); got != c.out {
+			t.Errorf("%q (has password %v) = %v", c.m, c.has, got)
+		}
 	}
 }

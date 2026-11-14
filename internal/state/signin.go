@@ -114,10 +114,14 @@ var SignInTemplateIDRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // SignInNameMaxRunes is the longest template name (D12).
 const SignInNameMaxRunes = 48
 
-// defaultMethodOn is a fresh state's switch of m (D1): password, totp and
-// browser_cert off, the other four on.
+// defaultOnMethods are the methods a fresh state switches on (D1). An
+// allowlist: password, totp, browser_cert and any method added later start
+// off.
+var defaultOnMethods = []signin.Method{signin.PasskeySynced, signin.PasskeyDevice, signin.SecurityKey, signin.YubiKeyCert}
+
+// defaultMethodOn is a fresh state's switch of m (D1).
 func defaultMethodOn(m signin.Method) bool {
-	return m != signin.Password && m != signin.TOTP && m != signin.BrowserCert
+	return slices.Contains(defaultOnMethods, m)
 }
 
 // defaultCore is a fresh state's pick for core page key (D11).

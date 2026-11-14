@@ -119,6 +119,7 @@ func setPeopleRule(f *fixture, rule signin.Node) {
 func TestCertFreshAllowed(t *testing.T) {
 	on := allOn()
 	on[signin.BrowserCert] = true
+	on[signin.TOTP] = true
 	for _, c := range []struct {
 		rule signin.Node
 		want []signin.Method
@@ -127,6 +128,10 @@ func TestCertFreshAllowed(t *testing.T) {
 		{siLeaves("any", "password"), nil},
 		{siLeaves("any", "browser_cert", "security_key"), []signin.Method{signin.SecurityKey}},
 		{siLeaves("any", "passkey_synced", "password"), []signin.Method{signin.PasskeySynced}},
+		// T10: a code never approves a certificate.
+		{siLeaves("all", "password", "totp"), nil},
+		{signin.Node{Op: "any", Items: []signin.Node{siLeaves("all", "password", "totp"), {Leaf: "security_key"}}}, []signin.Method{signin.SecurityKey}},
+		{siLeaves("any", "passkey_device"), []signin.Method{signin.PasskeyDevice}},
 	} {
 		compiled, err := signin.Compile(c.rule, on)
 		if err != nil {
@@ -142,6 +147,28 @@ func TestCertFreshAllowed(t *testing.T) {
 }
 
 func signinNodeZero() signin.Node { return signin.Node{} }
+
+// strongFresh is an allowlist: only the phishing-resistant methods may
+// approve a certificate or a first password; a code, a password, a copied
+// certificate file and any id it doesn't name (a method added later) never.
+func TestStrongFreshAllowlist(t *testing.T) {
+	for _, m := range []signin.Method{signin.PasskeySynced, signin.PasskeyDevice, signin.SecurityKey, signin.YubiKeyCert} {
+		if !strongFresh(m) {
+			t.Errorf("%s refused", m)
+		}
+	}
+	for _, m := range []signin.Method{signin.TOTP, signin.Password, signin.BrowserCert, "sms", "", "family:passkey", "inv", "SECURITY_KEY"} {
+		if strongFresh(m) {
+			t.Errorf("%q allowed", m)
+		}
+	}
+	for _, m := range signin.Methods {
+		info, _ := signin.InfoOf(m)
+		if strongFresh(m) && info.Tenths < 25 {
+			t.Errorf("%s (%d tenths) is in the strong allowlist", m, info.Tenths)
+		}
+	}
+}
 
 // TestCreateBrowserCertFreshRules (D26): people on strong — a
 // security_key proof creates, passkey_synced and password are refused

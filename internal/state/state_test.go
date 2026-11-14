@@ -364,4 +364,10 @@ func TestEnsureSignInTOTPOff(t *testing.T) {
 	if !st.SignIn.Methods["password"] || !st.SignIn.Methods["security_key"] {
 		t.Errorf("stored switches changed: %v", st.SignIn.Methods)
 	}
+	// An allowlist: a method it doesn't name starts off.
+	for _, m := range []signin.Method{signin.TOTP, signin.Password, signin.BrowserCert, "sms", ""} {
+		if defaultMethodOn(m) {
+			t.Errorf("defaultMethodOn(%q)", m)
+		}
+	}
 }

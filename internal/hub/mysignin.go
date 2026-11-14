@@ -51,7 +51,7 @@ const (
 	MethodOff     = "off"
 )
 
-// MethodRow is one of the six methods for the caller: State set, none,
+// MethodRow is one of the seven methods for the caller: State set, none,
 // unknown (its source couldn't be read) or off (switched off: "off on
 // this server").
 type MethodRow struct {
@@ -103,7 +103,7 @@ func (h *Hub) SetOwnPasswords(p OwnPasswords) {
 	h.ownPasswords = p
 }
 
-// MySignInView is user's (the caller's) Sign-in page: the six methods,
+// MySignInView is user's (the caller's) Sign-in page: the seven methods,
 // their certificates (revoked ones included), the apps and core pages
 // they sign in to with what each needs, the limits and the people
 // listener's fresh-auth parameters. The inventory is read fresh (at most
@@ -342,15 +342,15 @@ func (h *Hub) SetOwnPassword(ctx context.Context, user, password string, p fresh
 	if err != nil {
 		return refuse(err, reason)
 	}
-	// A copied certificate file never sets a password, and a password
-	// never adds one where there was none (security review, fix round 1;
-	// as certFreshAllowed): only changing an existing password may use a
-	// fresh password sign-in.
-	switch m := signin.Method(fresh.Method); {
-	case m == signin.BrowserCert:
-		return refuse(errFreshAuth, "pc_fresh names browser_cert, which can't set a password (template "+fresh.Template+")")
-	case m == signin.Password && !h.hasOwnPassword(ctx, u):
-		return refuse(errFreshAuth, "pc_fresh names password, but there is no password yet: adding one needs a passkey or YubiKey sign-in (template "+fresh.Template+")")
+	// Allowlists (security review, fix round 1; T10): a strong method
+	// sets a password; a password or a code only changes an existing one;
+	// anything else (a copied certificate file, a method added later)
+	// never sets one.
+	if m := signin.Method(fresh.Method); !passwordFreshAllowed(m, func() bool { return h.hasOwnPassword(ctx, u) }) {
+		if slices.Contains(passwordChangeFreshMethods, m) {
+			return refuse(errFreshAuth, "pc_fresh names "+fresh.Method+", but there is no password yet: adding one needs a passkey or YubiKey sign-in (template "+fresh.Template+")")
+		}
+		return refuse(errFreshAuth, "pc_fresh names "+fresh.Method+", which can't set a password (template "+fresh.Template+")")
 	}
 	res, err := op.SetOwnPassword(ctx, actor, password)
 	logWarnings(u, res)
@@ -408,6 +408,20 @@ func ownPasswordRefused(u string) bool {
 // hasOwnPassword reports whether u has a Hub-set password for their
 // current LLDAP account (the record's uuid is the account's); the
 // directory unreadable counts as none (fail closed).
+// passwordChangeFreshMethods may approve changing an existing own
+// password, never adding the first one (T10).
+var passwordChangeFreshMethods = []signin.Method{signin.Password, signin.TOTP}
+
+// passwordFreshAllowed reports whether a fresh sign-in with m may set an
+// own password: any strongFreshMethods; passwordChangeFreshMethods only
+// when hasPassword says one exists (asked only then). Everything else no.
+func passwordFreshAllowed(m signin.Method, hasPassword func() bool) bool {
+	if strongFresh(m) {
+		return true
+	}
+	return slices.Contains(passwordChangeFreshMethods, m) && hasPassword()
+}
+
 func (h *Hub) hasOwnPassword(ctx context.Context, u string) bool {
 	h.mu.RLock()
 	rec, ok := h.st.SignIn.Passwords[u]
