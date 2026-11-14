@@ -575,12 +575,16 @@ func rawVarRefs(s string) []rawRef {
 type composeServiceInfo struct {
 	networks    []string
 	networkMode bool
-	netModeOf   string   // network_mode's value when a string
-	pidOf       string   // pid's value when a string
-	ipcOf       string   // ipc's value when a string
-	ports       bool     // ports: declared (published to the host)
-	named       []string // container_name / hostname present
-	image       string   // image: as written ("" = none or not a string)
+	netModeOf   string // network_mode's value when a string
+	pidOf       string // pid's value when a string
+	ipcOf       string // ipc's value when a string
+	// hasPid, hasIpc, hasVolumesFrom: the key is set (any value);
+	// volumesFrom: its string entries.
+	hasPid, hasIpc, hasVolumesFrom bool
+	volumesFrom                    []string
+	ports                          bool     // ports: declared (published to the host)
+	named                          []string // container_name / hostname present
+	image                          string   // image: as written ("" = none or not a string)
 	// capDrop, capAdd: the lists as written; privileged: present and
 	// neither false nor "false"; deviceKey: devices or
 	// device_cgroup_rules, the first present ("" = neither).
@@ -615,6 +619,16 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 		info.netModeOf, _ = s["network_mode"].(string)
 		info.pidOf, _ = s["pid"].(string)
 		info.ipcOf, _ = s["ipc"].(string)
+		_, info.hasPid = s["pid"]
+		_, info.hasIpc = s["ipc"]
+		_, info.hasVolumesFrom = s["volumes_from"]
+		if l, ok := s["volumes_from"].([]interface{}); ok {
+			for _, x := range l {
+				if v, ok := x.(string); ok {
+					info.volumesFrom = append(info.volumesFrom, v)
+				}
+			}
+		}
 		_, info.ports = s["ports"]
 		info.image, _ = s["image"].(string)
 		strs := func(v interface{}) []string {

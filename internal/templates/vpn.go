@@ -296,9 +296,10 @@ var forwarderImageRe = regexp.MustCompile(`^ghcr\.io/porelli/portcullis-forwarde
 // a Traefik router or label uses host networking; every service in the ingress's network namespace (the
 // ingress and the services joining it, chains followed) is no job, no AI
 // companion, has no Traefik router or label and publishes no ports, and
-// besides the ingress only the pinned forwarder may join it; no service
-// shares the pid or ipc namespace (service:<X>) of the ingress or a
-// member; proxy_protocol v2.
+// besides the ingress only the pinned forwarder may join it; the ingress
+// and its members set no pid, ipc or volumes_from key, and no other
+// service shares the pid or ipc namespace of one (service:<X>) or mounts
+// its volumes (volumes_from); proxy_protocol v2.
 func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 	s := m.VPN.Ingress.Service
 	infos := composeServiceInfos(compose)
@@ -354,18 +355,44 @@ func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 		if err := vpnNamespaceCaps(n, infos[n]); err != nil {
 			return err
 		}
+		// No pid or ipc key at all (host, service:, container:,
+		// shareable…): a member keeps its own namespaces.
+		for _, k := range []struct {
+			key string
+			set bool
+		}{{"pid", infos[n].hasPid}, {"ipc", infos[n].hasIpc}} {
+			if k.set {
+				return fmt.Errorf("vpn.ingress.service: %s sets %s: a VPN gateway keeps its own pid and ipc namespaces", n, k.key)
+			}
+		}
+		if infos[n].hasVolumesFrom {
+			return fmt.Errorf("vpn.ingress.service: %s uses volumes_from: a VPN gateway mounts no other service's volumes", n)
+		}
 	}
-	// No service shares the pid or ipc namespace of the ingress or a
-	// member: it could reach the gateway's processes and, with
-	// capabilities, enter its network namespace.
+	// No other service shares the pid or ipc namespace of the ingress or
+	// a member (it could reach the gateway's processes and, with
+	// capabilities, enter its network namespace) or mounts its volumes;
+	// container: targets are refused for every template already
+	// (checkCoreRefs).
 	inNS := map[string]bool{}
 	for _, n := range members {
 		inNS[n] = true
 	}
 	for _, n := range names {
 		for _, ns := range []struct{ key, val string }{{"pid", infos[n].pidOf}, {"ipc", infos[n].ipcOf}} {
-			if x, ok := strings.CutPrefix(strings.TrimSpace(ns.val), "service:"); ok && inNS[strings.TrimSpace(x)] {
+			v := strings.TrimSpace(ns.val)
+			if x, ok := strings.CutPrefix(v, "service:"); ok && inNS[strings.TrimSpace(x)] {
 				return fmt.Errorf("vpn.ingress.service: %s shares the %s namespace of %s", n, ns.key, strings.TrimSpace(x))
+			}
+		}
+		// volumes_from naming a member (service:<m>[:ro|rw] or <m>[:ro|rw]).
+		for _, e := range infos[n].volumesFrom {
+			m := strings.TrimPrefix(strings.TrimSpace(e), "service:")
+			if i := strings.LastIndex(m, ":"); i >= 0 && (m[i+1:] == "ro" || m[i+1:] == "rw") {
+				m = m[:i]
+			}
+			if inNS[m] {
+				return fmt.Errorf("vpn.ingress.service: %s mounts the volumes of %s (volumes_from)", n, m)
 			}
 		}
 	}
