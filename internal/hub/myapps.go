@@ -97,9 +97,16 @@ type MyApp struct {
 	// AI: the caller's switched-on companions of this app (Task 21,
 	// contract §5.1); nil = none, or the ai key is off (myAITopLocked).
 	AI *MyAppAI `json:"ai,omitempty"`
-	// open: the portal lets the caller open it (portalOpensLocked), so
-	// it is listed even without any of the above.
+	// VPNOnly: some of its hosts is reachable only over the VPN (the
+	// policy's vpn.hosts): the card says so.
+	VPNOnly bool `json:"vpn_only,omitempty"`
+	// open: group-gate lets the caller open it (gateOpenLocked), so it is
+	// listed even without any of the above.
 	open bool
+	// NoAccess: listed for its entries alone (they can be saved after
+	// access is lost) while group-gate doesn't let the caller open it:
+	// no link (URL empty).
+	NoAccess bool `json:"no_access,omitempty"`
 }
 
 // MyAppsView is GET /api/me/apps' answer (F21): the apps, and the
@@ -121,8 +128,8 @@ type MyAppsView struct {
 // members even without values or entries: F21), and those whose
 // person-entered options' population holds them, with their own entries
 // (Task 15A), and its AI part (Task 21: switched-on companions, G13);
-// and every other enabled app the portal lets them open
-// (portalOpensLocked), with no settings. The directory snapshot is taken
+// and every other enabled app group-gate lets them open under the policy
+// last written (gateOpenLocked), with no settings. The directory snapshot is taken
 // before mu; an unavailable directory is the membership error.
 func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 	user = strings.ToLower(user)
@@ -132,6 +139,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 	}
 	info := h.FreshAuthInfo()
 	gate := h.gatePresent()
+	policyDoc := h.gatePolicy.Load()
 	healthy := h.aiClientHealth()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -163,7 +171,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		}
 		// Every app the portal would let them open is listed, settings
 		// or not (an app without any just has no settings section).
-		app.open = h.portalOpensLocked(t, m, user)
+		app.open, app.VPNOnly = h.gateOpenLocked(policyDoc, t, m, user)
 		if groups == nil {
 			if len(app.Entries) > 0 || app.open {
 				out = append(out, app)
@@ -212,6 +220,26 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 			}
 		}
 		out = kept
+	}
+	// Only what group-gate lets them open — except an app with their
+	// own entries, which they may still save after losing access: shown
+	// without its link and marked no_access (and without anything else).
+	kept := out[:0]
+	for _, app := range out {
+		switch {
+		case app.open:
+		case len(app.Entries) > 0:
+			app.URL, app.NoAccess, app.VPNOnly = "", true, false
+			app.Values, app.Credentials, app.AI = []MyValue{}, []MyCredential{}, nil
+		default:
+			continue
+		}
+		kept = append(kept, app)
+	}
+	out = kept
+	secretApps = false
+	for _, app := range out {
+		secretApps = secretApps || len(app.Credentials) > 0
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	v.Apps = out

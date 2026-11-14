@@ -366,7 +366,9 @@
     let h = '<article class="pd-card ma-app" data-ma-app="' + esc(app.id) + '"><div class="ma-head">';
     if (app.icon) h += '<span class="ma-icon" aria-hidden="true">' + esc(app.icon) + '</span>';
     h += '<h3 class="ma-name">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) + '</h3>';
-    if (!url) h += '<span class="pd-pill">No web page</span>';
+    if (app.no_access) h += '<span class="pd-pill warn" title="You can\'t open this app now; your own entries stay yours to change">No access</span>';
+    else if (!url) h += '<span class="pd-pill">No web page</span>';
+    if (app.vpn_only) h += '<span class="pd-pill info" title="Reachable only while you are connected to the VPN">VPN only</span>';
     if (app.ai && (app.ai.companions || []).length) h += '<span class="pd-pill info" title="Use it from your AI assistant: see Connect your AI">AI</span>';
     h += '</div>';
     if (!(app.credentials || []).length && !(app.entries || []).length && !(app.values || []).length && app.ai) {

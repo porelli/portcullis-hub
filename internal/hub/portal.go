@@ -2,7 +2,9 @@ package hub
 
 import (
 	"encoding/json"
+	"maps"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -48,9 +50,18 @@ type PortalDocument struct {
 	Domains []string `json:"domains"`
 }
 
-// portalLocked lists enabled instances whose template is present (an instance
-// with a missing template has no name/URL to show). Caller holds h.mu (read).
+// portalLocked is portalWithLocked under the policy document last
+// written (gatePolicy). Caller holds h.mu (read).
 func (h *Hub) portalLocked() PortalDocument {
+	return h.portalWithLocked(h.gatePolicy.Load())
+}
+
+// portalWithLocked lists enabled instances whose template is present (an
+// instance with a missing template has no name/URL to show). An instance
+// whose routed hosts group-gate denies under gate (gateDenies) carries
+// access_group DenyGroup, so the portal hides it (contract §10); gate nil
+// (no policy written yet): no such check. Caller holds h.mu (read).
+func (h *Hub) portalWithLocked(gate *policy.Document) PortalDocument {
 	doc := PortalDocument{Version: PortalVersion, Apps: []PortalApp{}, Domains: []string{}}
 	domainsUsed := map[string]bool{}
 	enrolled := h.enrolledLocked()
@@ -65,6 +76,9 @@ func (h *Hub) portalLocked() PortalDocument {
 		_, admins := h.instanceGroupsLocked(t)
 		a.AdminGroup = admins
 		a.AccessGroup = h.portalAccessGroupLocked(t)
+		if gate != nil && gateDenies(gate, h.routedHostsLocked(t)) {
+			a.AccessGroup = policy.DenyGroup
+		}
 		// Router-less instances (contract §3, §10): URLs empty, note present.
 		if m.Routerless() {
 			a.URLs = []templates.AppURL{}
@@ -100,26 +114,69 @@ func (h *Hub) portalAccessGroupLocked(t *templates.Template) string {
 	return users
 }
 
-// portalOpensLocked reports whether the portal lists enabled instance t
-// for user in m (group-gate's render_portal check, contract §10): t's
-// portal access group is "" or a group user is in — and here, failing
-// closed, a membership that expired (group-gate denies it) or a person
-// m doesn't know never opens it, nor does the deny group. Caller holds
-// h.mu (read).
-func (h *Hub) portalOpensLocked(t *templates.Template, m *directory.Membership, user string) bool {
+// routedHostsLocked is the hostnames t's routers serve that the policy
+// publishes (core hostnames and invalid names left out, as writePolicy
+// does). Caller holds h.mu (read).
+func (h *Hub) routedHostsLocked(t *templates.Template) []string {
+	return slices.Sorted(maps.Keys(hostSet(slices.Collect(maps.Values(t.Hosts)), policy.CoreHosts(h.cfg.Domain))))
+}
+
+// gateDenies reports whether group-gate denies every request to some of
+// hosts under the policy document gate: the host is published with
+// DenyGroup (no known config, an unpublished template or one that can't
+// be combined: policy.Build), or its template — its own pick, else the
+// default — isn't published.
+func gateDenies(gate *policy.Document, hosts []string) bool {
+	for _, host := range hosts {
+		if gate.Groups[host] == policy.DenyGroup {
+			return true
+		}
+		tid, ok := gate.Hosts[host]
+		if !ok {
+			tid = gate.Default
+		}
+		if _, published := gate.Templates[tid]; !published {
+			return true
+		}
+	}
+	return false
+}
+
+// gateOpen is My apps' decision (MyApps): whether group-gate, under the
+// policy document last written (gate), lets user (in m) open enabled
+// instance t, and whether that needs the VPN. Failing closed: no policy
+// written yet, a person m doesn't know, a denied host (gateDenies), a
+// required group they aren't in or whose membership ended (expired:
+// group-gate denies it) — for every routed host. A routed instance with
+// no published host opens nowhere. A router-less instance (no routes,
+// contract §3) opens by its portal access group alone. vpnOnly: some host
+// is VPN-only (the policy's vpn.hosts): listed, with a badge. Caller
+// holds h.mu (read).
+func (h *Hub) gateOpenLocked(gate *policy.Document, t *templates.Template, m *directory.Membership, user string) (open, vpnOnly bool) {
 	groups, known := m.Users[user]
-	if !known || !t.Enabled {
-		return false
+	if gate == nil || !known || !t.Enabled {
+		return false, false
 	}
-	need := h.portalAccessGroupLocked(t)
-	switch {
-	case need == "":
-		return true
-	case need == policy.DenyGroup:
-		return false
+	member := func(g string) bool {
+		_, in := groups[g]
+		return g == "" || (in && !m.Expired[user][g])
 	}
-	_, member := groups[need]
-	return member && !m.Expired[user][need]
+	if t.Manifest.Routerless() {
+		return member(h.portalAccessGroupLocked(t)), false
+	}
+	hosts := h.routedHostsLocked(t)
+	if len(hosts) == 0 || gateDenies(gate, hosts) {
+		return false, false
+	}
+	for _, host := range hosts {
+		if !member(gate.Groups[host]) {
+			return false, false
+		}
+		if _, ok := gate.VPN.Hosts[host]; ok {
+			vpnOnly = true
+		}
+	}
+	return true, vpnOnly
 }
 
 // Portal returns the current portal document.
