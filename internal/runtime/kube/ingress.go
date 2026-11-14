@@ -2,6 +2,7 @@ package kube
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,7 +22,24 @@ var FileMiddlewares = []string{
 
 // FileServices are the core services app routers may name: …@docker →
 // a TraefikService reference to …@file.
-var FileServices = []string{"group-gate", "forward-auth-ext", "mcp-gate"}
+var FileServices = []string{"group-gate", "forward-auth-ext"}
+
+// mcpGate is the companion MCP routers' service (on mcp.<domain>, shared
+// by path with core's reserved host): those routers aren't generated on
+// Kubernetes until the controller rules on that host.
+const mcpGate = "mcp-gate"
+
+// MaxAppPriority is the highest router priority an app route may carry
+// (core's admission params maxAppPriority; core's own routes rank above).
+const MaxAppPriority = 1000
+
+// hostLabel / routeMatch: the route shape core's edge policy admits —
+// Host(`…`) [|| Host(`…`)] with an optional && Path/PathPrefix [|| …],
+// hosts of lowercase labels, no empty label, no trailing dot.
+const hostLabel = "[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+
+var routeMatch = regexp.MustCompile("^\\(?Host\\(`" + hostLabel + "(\\." + hostLabel + ")+`\\)( \\|\\| Host\\(`" + hostLabel + "(\\." + hostLabel + ")+`\\))*\\)?" +
+	"( && \\(?(PathPrefix|Path)\\(`[^`()]*`\\)( \\|\\| (PathPrefix|Path)\\(`[^`()]*`\\))*\\)?)?$")
 
 // TLSOptions are the router TLS tiers (the only @file names tls.options
 // may hold).
@@ -128,14 +146,23 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 	}
 	for _, name := range slices.Sorted(mapKeys(routers)) {
 		r := routers[name]
+		if svcName, _, _ := strings.Cut(r.svc, "@"); svcName == mcpGate {
+			continue
+		}
 		if r.rule == "" {
 			return nil, refused("router %s has no rule", name)
+		}
+		if !routeMatch.MatchString(r.rule) {
+			return nil, refused("router %s: rule %s isn't Host(…) with an optional && Path/PathPrefix over lowercase hostnames (not on Kubernetes)", name, r.rule)
 		}
 		route := map[string]any{"match": r.rule, "kind": "Rule"}
 		if r.priority != "" {
 			p, err := strconv.ParseInt(r.priority, 10, 64)
 			if err != nil {
 				return nil, refused("router %s: bad priority %q", name, r.priority)
+			}
+			if p > MaxAppPriority {
+				return nil, refused("router %s: priority %d is above %d (not on Kubernetes)", name, p, MaxAppPriority)
 			}
 			route["priority"] = p
 		}
@@ -339,4 +366,18 @@ func middlewareSpec(instance, name string, f map[string]string, own map[string]m
 		return nil, refused("middleware %s must have exactly one type", name)
 	}
 	return spec, nil
+}
+
+// LabelReach marks a VPN-only instance's routes (reach: vpn).
+const LabelReach = "portcullis.io/reach"
+
+// markVPNOnly labels the IngressRoutes of a VPN-only instance.
+func markVPNOnly(objs []*unstructured.Unstructured) {
+	for _, o := range objs {
+		if o.GetKind() == "IngressRoute" {
+			l := o.GetLabels()
+			l[LabelReach] = "vpn"
+			o.SetLabels(l)
+		}
+	}
 }

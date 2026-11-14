@@ -47,7 +47,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "without portcullis.io/instance"
+  "reason_contains": "a pod needs the portcullis.io/instance label"
  },
  {
   "name": "a privileged pod",
@@ -279,7 +279,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "beyond the Kubernetes baseline"
+  "reason_contains": "a capability outside the Kubernetes baseline (he"
  },
  {
   "name": "baseline caps",
@@ -380,7 +380,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "sysctls"
+  "reason_contains": "a sysctl outside the baseline's safe set"
  },
  {
   "name": "hostPath /etc",
@@ -526,7 +526,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "default ServiceAccount without a token"
+  "reason_contains": "pods run as the namespace's default ServiceAccou"
  },
  {
   "name": "another ServiceAccount",
@@ -553,7 +553,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "default ServiceAccount without a token"
+  "reason_contains": "pods run as the namespace's default ServiceAccou"
  },
  {
   "name": "another instance's Secret",
@@ -624,7 +624,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "outside the pod's instance"
+  "reason_contains": "a Secret, ConfigMap or PVC that isn't this insta"
  },
  {
   "name": "its own Secret and a tpl- ConfigMap",
@@ -835,7 +835,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "helper pod must be the Hub's own"
+  "reason_contains": "a helper pod: portcullis.io/helper fixer or volu"
  },
  {
   "name": "the Hub's volume helper",
@@ -972,7 +972,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "beyond the Kubernetes baseline"
+  "reason_contains": "a capability outside the Kubernetes baseline (he"
  },
  {
   "name": "a helper with a network label",
@@ -1000,7 +1000,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "helper pod must be the Hub's own"
+  "reason_contains": "a helper pod: portcullis.io/helper fixer or volu"
  },
  {
   "name": "the Hub's probe pod",
@@ -1022,7 +1022,7 @@
       "name": "c",
       "image": "ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "command": [
-       "/usr/local/bin/hub",
+       "hub",
        "helper",
        "listen",
        ":8080"
@@ -1064,7 +1064,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "portcullis.io/probe only"
+  "reason_contains": "a probe pod: the Hub's image running hub helper "
  },
  {
   "name": "a NodePort",
@@ -1113,7 +1113,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "NodePort and ExternalName"
+  "reason_contains": "Service type ExternalName is refused (NodePort, "
  },
  {
   "name": "externalIPs",
@@ -1172,7 +1172,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "core port"
+  "reason_contains": "a LoadBalancer on a core port"
  },
  {
   "name": "a LoadBalancer on 8090",
@@ -1230,7 +1230,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "node ports"
+  "reason_contains": "a nodePort is refused"
  },
  {
   "name": "an IngressRoute with K15 @file names",
@@ -1324,7 +1324,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "middleware outside the namespace"
+  "reason_contains": "a route without TLS"
  },
  {
   "name": "an unlisted @file middleware",
@@ -1366,7 +1366,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "middleware outside"
+  "reason_contains": "a route without TLS"
  },
  {
   "name": "an @internal service",
@@ -1410,7 +1410,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "a service outside"
+  "reason_contains": "a route without TLS"
  },
  {
   "name": "a K15 file service",
@@ -1504,7 +1504,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "a service outside"
+  "reason_contains": "a route without TLS"
  },
  {
   "name": "TLS options outside the tiers",
@@ -1555,7 +1555,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "TLS options"
+  "reason_contains": "tls.options outside the four tiers, another reso"
  },
  {
   "name": "a TLS secret",
@@ -1604,7 +1604,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "TLS options"
+  "reason_contains": "tls.options outside the four tiers, another reso"
  },
  {
   "name": "a forwardAuth Middleware",
@@ -1725,7 +1725,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "Secret"
+  "reason_contains": "a Middleware must have exactly one type of the H"
  },
  {
   "name": "routed port from Traefik",
@@ -1853,7 +1853,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "without peers"
+  "reason_contains": "a rule without from / to (all peers) is refused"
  },
  {
   "name": "an empty namespaceSelector",
@@ -1935,7 +1935,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "select one instance"
+  "reason_contains": "a NetworkPolicy selects one instance's pods (por"
  },
  {
   "name": "another instance's pods as peers",
@@ -2046,10 +2046,10 @@
         "ipBlock": {
          "cidr": "0.0.0.0/0",
          "except": [
-          "10.42.0.0/16",
+          "10.42.0.0/24",
           "10.43.0.0/16",
           "169.254.0.0/16",
-          "192.0.2.10/32"
+          "10.1.0.4/32"
          ]
         }
        }
@@ -2059,7 +2059,7 @@
       "to": [
        {
         "ipBlock": {
-         "cidr": "192.0.2.10/32"
+         "cidr": "10.1.0.4/32"
         }
        }
       ],
@@ -2110,7 +2110,7 @@
         "ipBlock": {
          "cidr": "0.0.0.0/0",
          "except": [
-          "10.42.0.0/16",
+          "10.42.0.0/24",
           "10.43.0.0/16",
           "169.254.0.0/16"
          ]
@@ -2152,7 +2152,7 @@
       "to": [
        {
         "ipBlock": {
-         "cidr": "192.0.2.10/32"
+         "cidr": "10.1.0.4/32"
         }
        }
       ],
@@ -2486,7 +2486,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "service-account-token"
+  "reason_contains": "a ServiceAccount token Secret is refused"
  },
  {
   "name": "an Opaque Secret",
@@ -2542,7 +2542,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "portcullis.io/owner: hub"
+  "reason_contains": "an object here needs the labels portcullis.io/ow"
  },
  {
   "name": "a service ref without the apps namespace",
@@ -2577,7 +2577,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "a service outside the apps namespace"
+  "reason_contains": "a route without TLS"
  },
  {
   "name": "a HostRegexp match",
@@ -2904,7 +2904,7 @@
     ],
     "routes": [
      {
-      "match": "Host(`auth.example.org`)",
+      "match": "Host(`auth.portcullis.local`)",
       "kind": "Rule",
       "middlewares": [
        {
@@ -2955,7 +2955,7 @@
     ],
     "routes": [
      {
-      "match": "Host(`a.example.org`) || Host(`example.org`)",
+      "match": "Host(`a.example.org`) || Host(`portcullis.local`)",
       "kind": "Rule",
       "middlewares": [
        {
@@ -3037,7 +3037,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "priority above the cap"
+  "reason_contains": "a route priority above maxAppPriority"
  },
  {
   "name": "the web entrypoint",
@@ -3088,7 +3088,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "entryPoints outside"
+  "reason_contains": "entryPoints must be set"
  },
  {
   "name": "no entrypoints",
@@ -3136,7 +3136,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "entryPoints outside"
+  "reason_contains": "entryPoints must be set and only websecure or vp"
  },
  {
   "name": "vpnsecure",
@@ -3233,7 +3233,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "without TLS"
+  "reason_contains": "a route without TLS"
  },
  {
   "name": "a csi volume",
@@ -3650,5 +3650,901 @@
   "as": "hub",
   "want": "allow",
   "reason_contains": ""
+ },
+ {
+  "name": "an update relabelling an owner=core route to hub",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "core-route",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "hub",
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "services": [
+       {
+        "name": "app--web",
+        "namespace": "portcullis-apps",
+        "port": 80
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "existing": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "core-route",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "core",
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "services": [
+       {
+        "name": "app--web",
+        "namespace": "portcullis-apps",
+        "port": 80
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "op": "update",
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "only owner=hub objects may be changed"
+ },
+ {
+  "name": "a label change on an owner=hub route",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "hub-route",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "hub",
+     "portcullis.io/instance": "other"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "services": [
+       {
+        "name": "app--web",
+        "namespace": "portcullis-apps",
+        "port": 80
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "existing": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "hub-route",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "hub",
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "services": [
+       {
+        "name": "app--web",
+        "namespace": "portcullis-apps",
+        "port": 80
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "op": "update",
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "can't change on an update"
+ },
+ {
+  "name": "deleting an owner=core route",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "core-route",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "core",
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "services": [
+       {
+        "name": "app--web",
+        "namespace": "portcullis-apps",
+        "port": 80
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "existing": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "core-route",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "core",
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "services": [
+       {
+        "name": "app--web",
+        "namespace": "portcullis-apps",
+        "port": 80
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "op": "delete",
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "only owner=hub objects may be changed"
+ },
+ {
+  "name": "a chain naming hub-proxy-secret",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "Middleware",
+   "metadata": {
+    "name": "app--m-c",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "hub",
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "chain": {
+     "middlewares": [
+      {
+       "name": "hub-proxy-secret"
+      }
+     ]
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a chain may name only"
+ },
+ {
+  "name": "a chain naming another instance's middleware",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "Middleware",
+   "metadata": {
+    "name": "app--m-c2",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/owner": "hub",
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "chain": {
+     "middlewares": [
+      {
+       "name": "other--m-x"
+      }
+     ]
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a chain may name only"
+ },
+ {
+  "name": "a non-Hub ServiceAccount creating a route",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "intr",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "intruder",
+  "want": "deny",
+  "reason_contains": "only the Hub's ServiceAccount"
+ },
+ {
+  "name": "a VPN-only instance's route on websecure",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "vpnonly",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub",
+     "portcullis.io/reach": "vpn"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "vpnsecure only"
+ },
+ {
+  "name": "an uppercase host",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "an-uppercase-host",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`App.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a route match other than Host"
+ },
+ {
+  "name": "a reserved host with a trailing dot",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "a-reserved-host-with-a-trailing-dot",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`hub.portcullis.local.`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a route match other than Host"
+ },
+ {
+  "name": "a host with an empty label",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "a-host-with-an-empty-label",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a..example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a route match other than Host"
+ },
+ {
+  "name": "a host with a leading hyphen label",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "a-host-with-a-leading-hyphen-label",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`-a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a route match other than Host"
+ },
+ {
+  "name": "a subdomain of a reserved host",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "a-subdomain-of-a-reserved-host",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`x.hub.portcullis.local`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "reserved core hostname"
+ },
+ {
+  "name": "a subdomain of the apex is an app host",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "a-subdomain-of-the-apex-is-an-app-host",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`app.portcullis.local`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow"
+ },
+ {
+  "name": "another params generation",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "another-params-generation",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    },
+    "annotations": {
+     "portcullis.io/params-generation": "ffffffffffffffff"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "params-generation"
+ },
+ {
+  "name": "a VPN-only instance's VPN-required page on websecure group-gate",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "group-gate-109",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub",
+     "portcullis.io/reach": "vpn"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "vpn-required-path@file"
+       }
+      ],
+      "services": [
+       {
+        "name": "group-gate@file",
+        "kind": "TraefikService"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a VPN-only instance's public link on websecure",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "websecure-109",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub",
+     "portcullis.io/reach": "vpn"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-public-guard@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a VPN-only route with vpn-required-path not first",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "first-109",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub",
+     "portcullis.io/reach": "vpn"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "vpn-required-path@file"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "vpnsecure only"
  }
 ]

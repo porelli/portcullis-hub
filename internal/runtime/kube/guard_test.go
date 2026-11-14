@@ -17,9 +17,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 )
 
-func vapDenied(policy, reason string) error {
+func vapDenied(binding, reason string) error {
 	return &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: 422, Reason: metav1.StatusReasonInvalid,
-		Message: "ValidatingAdmissionPolicy 'portcullis-apps-" + policy + "' with binding 'portcullis-apps-guard-" + policy + "' denied request: " + reason}}
+		Message: "ValidatingAdmissionPolicy 'x' with binding '" + binding + "' denied request: " + reason}}
 }
 
 func roleRules(t *testing.T) []authv1.ResourceRule {
@@ -42,7 +42,7 @@ type guardRig struct {
 	apps     authv1.SubjectRulesReviewStatus
 	edge     authv1.SubjectRulesReviewStatus
 	core     authv1.SubjectRulesReviewStatus
-	selfTest func(kind string) error
+	selfTest func(o *unstructured.Unstructured) error
 	probe    error
 	probes   int
 }
@@ -57,8 +57,14 @@ func newGuardRig(t *testing.T) (*guardRig, *Guard) {
 		edgeRules = append(edgeRules, authv1.ResourceRule{Verbs: p.Verbs, APIGroups: p.APIGroups, Resources: p.Resources})
 	}
 	r.edge = authv1.SubjectRulesReviewStatus{ResourceRules: append(edgeRules, defaultRules.resources...), NonResourceRules: defaultRules.nonResources}
-	byKind := map[string]string{"Pod": "pods", "Deployment": "workloads", "Service": "services", "Middleware": "traefik", "NetworkPolicy": "netpol"}
-	r.selfTest = func(kind string) error { return vapDenied(byKind[kind], "nope") }
+	byKind := map[string]string{"Pod": "portcullis-apps-guard-pods", "Deployment": "portcullis-apps-guard-workloads", "Service": "portcullis-apps-guard-services",
+		"Middleware": "portcullis-apps-guard-traefik", "NetworkPolicy": "portcullis-apps-guard-netpol"}
+	r.selfTest = func(o *unstructured.Unstructured) error {
+		if o.GetNamespace() == EdgeNamespace {
+			return vapDenied("portcullis-edge-guard-routes", "nope")
+		}
+		return vapDenied(byKind[o.GetKind()], "nope")
+	}
 	r.c.typed.PrependReactor("create", "selfsubjectrulesreviews", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		rv := a.(k8stesting.CreateAction).GetObject().(*authv1.SelfSubjectRulesReview).DeepCopy()
 		switch rv.Spec.Namespace {
@@ -73,7 +79,7 @@ func newGuardRig(t *testing.T) (*guardRig, *Guard) {
 	})
 	r.c.dyn.PrependReactor("create", "*", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		o := a.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured)
-		if err := r.selfTest(o.GetKind()); err != nil {
+		if err := r.selfTest(o); err != nil {
 			return true, nil, err
 		}
 		return true, o, nil
@@ -139,7 +145,7 @@ func TestGuardFailsClosed(t *testing.T) {
 	mustUnverified(t, g3, "extra rule", "may do more than its Role: /nodes get")
 	// (3) the self-test.
 	r4, g4 := newGuardRig(t)
-	r4.selfTest = func(kind string) error { return nil }
+	r4.selfTest = func(*unstructured.Unstructured) error { return nil }
 	mustUnverified(t, g4, "accepted", "admission self-test: the guard is missing")
 	if a, _ := g4.State(); a != AdmissionMissing {
 		t.Errorf("admission %s", a)
@@ -157,7 +163,7 @@ func TestGuardFailsClosed(t *testing.T) {
 	if r.probes != 1 {
 		t.Errorf("probes %d", r.probes)
 	}
-	r.selfTest = func(string) error { return nil }
+	r.selfTest = func(*unstructured.Unstructured) error { return nil }
 	mustUnverified(t, g, "later self-test", "guard is missing")
 }
 
@@ -225,18 +231,18 @@ func TestRoleExact(t *testing.T) {
 // The self-test reads the Status message only: another binding's
 // denial, RBAC, a webhook or a warning-only answer is guard missing.
 func TestSelfTestRejectedOnlyByItsBinding(t *testing.T) {
-	if !SelfTestRejected(vapDenied("pods", "x"), "pods") {
+	if !SelfTestRejected(vapDenied("portcullis-apps-guard-pods", "x"), "portcullis-apps-guard-pods") {
 		t.Error("its own binding")
 	}
 	for name, err := range map[string]error{
-		"another binding": vapDenied("workloads", "x"),
+		"another binding": vapDenied("portcullis-apps-guard-workloads", "x"),
 		"rbac":            apierrors.NewForbidden(podsGVR.GroupResource(), "x", errors.New("cannot create")),
 		"webhook":         &apierrors.StatusError{ErrStatus: metav1.Status{Reason: metav1.StatusReasonForbidden, Message: `admission webhook "deny.example" denied the request`}},
 		"accepted":        nil,
 		"plain":           errors.New("with binding 'portcullis-apps-guard-pods'"),
 		"conflict":        &apierrors.StatusError{ErrStatus: metav1.Status{Reason: metav1.StatusReasonAlreadyExists, Message: "with binding 'portcullis-apps-guard-pods'"}},
 	} {
-		if SelfTestRejected(err, "pods") {
+		if SelfTestRejected(err, "portcullis-apps-guard-pods") {
 			t.Errorf("%s counted as the guard", name)
 		}
 	}
@@ -248,7 +254,7 @@ func TestDeployRunsTheGuard(t *testing.T) {
 	g.Check(context.Background())
 	b := r.c.backend(t)
 	b.cfg.Guard = g
-	r.selfTest = func(string) error { return nil } // the guard went missing
+	r.selfTest = func(*unstructured.Unstructured) error { return nil } // the guard went missing
 	err := b.Up(context.Background(), project(t, "services:\n  web:\n    image: docker.io/library/nginx:1.29\n", "dg"), nil)
 	if !errors.Is(err, ErrClusterUnverified) {
 		t.Fatalf("up: %v", err)

@@ -51,8 +51,10 @@ type Settings struct {
 	CorePorts            []int
 	LocalNetworks        []string
 	// NodeAddresses are the node IPs (PORTCULLIS_KUBE_NODE_ADDRESSES):
-	// egress excludes them but for 80/443.
+	// egress excludes them but for 80/443; APIAddresses the API server's
+	// (PORTCULLIS_KUBE_API_ENDPOINTS' addresses), excluded too.
 	NodeAddresses []string
+	APIAddresses  []string
 }
 
 // AppFile is a data file (§13.7) bound into the instance: its name, the
@@ -100,6 +102,10 @@ type Input struct {
 	// EdgeNamespace is where the instance's IngressRoutes and Middlewares
 	// go ("" = portcullis-edge).
 	EdgeNamespace string
+	// VPNOnly: the instance is VPN-only (its routes carry
+	// portcullis.io/reach: vpn; the admission policy keeps them off
+	// websecure).
+	VPNOnly bool
 }
 
 // WaitKind is what Up waits for after a step.
@@ -285,6 +291,9 @@ func (t *translator) run() (Plan, error) {
 		edge = EdgeNamespace
 	}
 	routes, err := IngressObjects(t.in.Instance, edge, t.in.Namespace, labels)
+	if err == nil && t.in.VPNOnly {
+		markVPNOnly(routes)
+	}
 	if err != nil {
 		return Plan{}, err
 	}

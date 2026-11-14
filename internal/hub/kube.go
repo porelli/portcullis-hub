@@ -128,6 +128,7 @@ func (h *Hub) kubeInputs(t *templates.Template) (*runtime.ProjectInputs, error) 
 		slot := p.Slot
 		in.VPNSlot, in.IngressService = &slot, t.Manifest.VPN.Ingress.Service
 	}
+	in.VPNOnly = h.vpnAccessLocked(t).VPNOnly
 	h.mu.RUnlock()
 	return in, nil
 }

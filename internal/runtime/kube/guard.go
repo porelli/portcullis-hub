@@ -57,9 +57,13 @@ func EdgeRole() (*rbacv1.Role, error) { return parseRole(roleEdgeYAML) }
 // podsGVR is pods (the self-test dry-runs a Pod).
 var podsGVR = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
-// Policies are the admission guard's five policies (bindings
-// portcullis-apps-guard-<policy>).
-var Policies = []string{"pods", "workloads", "services", "traefik", "netpol"}
+// Bindings are the admission guard's bindings the self-test targets
+// (each binds one policy). portcullis-apps-guard-traefik isn't among
+// them: it refuses Traefik objects in the apps namespace, where the Hub's
+// Role can't create any (RBAC answers first); the cluster check (the
+// CLI's) verifies all six exist.
+var Bindings = []string{"portcullis-apps-guard-pods", "portcullis-apps-guard-workloads", "portcullis-apps-guard-services",
+	"portcullis-apps-guard-netpol", "portcullis-edge-guard-routes"}
 
 // Admission and probe states (RuntimeView).
 const (
@@ -400,9 +404,9 @@ func (g *Guard) rulesReview(ctx context.Context) error {
 	return nil
 }
 
-// SelfTestObjects are the five forbidden objects of the self-test, one
-// per binding (each would pass every other policy): four in the apps
-// namespace ns, the Middleware in the edge namespace edgeNS.
+// SelfTestObjects are the self-test's forbidden objects, one per
+// binding (each would pass every other policy): the apps namespace's
+// in ns, the edge's in edgeNS.
 func SelfTestObjects(ns, edgeNS string) map[string]*unstructured.Unstructured {
 	f, t := false, true
 	podSpec := corev1.PodSpec{AutomountServiceAccountToken: &f, Containers: []corev1.Container{{Name: "c", Image: "registry.invalid/selftest@sha256:" + strings.Repeat("0", 64),
@@ -420,20 +424,25 @@ func SelfTestObjects(ns, edgeNS string) map[string]*unstructured.Unstructured {
 		Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{LabelInstance: "portcullis-selftest", LabelService: "x"}},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0"}}}, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}}}}}}
 	out := map[string]*unstructured.Unstructured{}
-	for k, o := range map[string]any{"pods": pod, "workloads": dep, "services": svc, "netpol": np} {
+	for k, o := range map[string]any{"portcullis-apps-guard-pods": pod, "portcullis-apps-guard-workloads": dep, "portcullis-apps-guard-services": svc, "portcullis-apps-guard-netpol": np} {
 		u, _ := toUnstructured(o)
 		out[k] = u
 	}
-	out["traefik"] = &unstructured.Unstructured{Object: map[string]any{"apiVersion": traefikAPI, "kind": "Middleware",
-		"metadata": map[string]any{"name": "portcullis-selftest", "namespace": edgeNS, "labels": map[string]any{LabelInstance: "portcullis-selftest", LabelOwner: OwnerHub}},
+	// A Traefik object in the apps namespace (they live in the edge).
+	out["portcullis-apps-guard-traefik"] = &unstructured.Unstructured{Object: map[string]any{"apiVersion": traefikAPI, "kind": "Middleware",
+		"metadata": map[string]any{"name": "portcullis-selftest", "namespace": ns, "labels": map[string]any{LabelInstance: "portcullis-selftest", LabelOwner: OwnerHub}},
+		"spec":     map[string]any{"addPrefix": map[string]any{"prefix": "/x"}}}}
+	// An X-Portcullis header in the edge namespace.
+	out["portcullis-edge-guard-routes"] = &unstructured.Unstructured{Object: map[string]any{"apiVersion": traefikAPI, "kind": "Middleware",
+		"metadata": map[string]any{"name": "portcullis-selftest--m-x", "namespace": edgeNS, "labels": map[string]any{LabelInstance: "portcullis-selftest", LabelOwner: OwnerHub}},
 		"spec":     map[string]any{"headers": map[string]any{"customRequestHeaders": map[string]any{"X-Portcullis-User": "root"}}}}}
 	return out
 }
 
 // SelfTestRejected: err is the API server's Invalid / Forbidden Status
-// whose message names policy's binding (never a warning: warnings aren't
-// errors; a rejection by RBAC, a quota or another webhook isn't).
-func SelfTestRejected(err error, policy string) bool {
+// whose message names binding (never a warning: warnings aren't errors;
+// a rejection by RBAC, a quota or another webhook isn't).
+func SelfTestRejected(err error, binding string) bool {
 	var st apierrors.APIStatus
 	if !errors.As(err, &st) {
 		return false
@@ -442,14 +451,14 @@ func SelfTestRejected(err error, policy string) bool {
 	if s.Reason != metav1.StatusReasonInvalid && s.Reason != metav1.StatusReasonForbidden {
 		return false
 	}
-	return strings.Contains(s.Message, "with binding 'portcullis-apps-guard-"+policy+"'")
+	return strings.Contains(s.Message, "with binding '"+binding+"'")
 }
 
-// selfTest dry-runs the five forbidden objects; each must be rejected by
+// selfTest dry-runs the six forbidden objects; each must be rejected by
 // its own binding.
 func (g *Guard) selfTest(ctx context.Context) error {
 	objs := SelfTestObjects(g.cfg.AppsNamespace, g.cfg.EdgeNamespace)
-	for _, p := range Policies {
+	for _, p := range Bindings {
 		o := objs[p]
 		r, _ := gvr(o.GetKind())
 		if o.GetKind() == "Pod" {
@@ -461,7 +470,7 @@ func (g *Guard) selfTest(ctx context.Context) error {
 			if err != nil {
 				why = clip(err.Error(), 200)
 			}
-			return fmt.Errorf("admission self-test: the guard is missing (a forbidden %s wasn't rejected by binding portcullis-apps-guard-%s: %s)", strings.ToLower(o.GetKind()), p, why)
+			return fmt.Errorf("admission self-test: the guard is missing (a forbidden %s wasn't rejected by binding %s: %s)", strings.ToLower(o.GetKind()), p, why)
 		}
 	}
 	return nil

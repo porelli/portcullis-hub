@@ -147,8 +147,25 @@ func TestForwardAuthMiddlewareRefused(t *testing.T) {
 	}
 }
 
+// TestMCPRoutersNotOnKubernetes: companion MCP routers (service
+// mcp-gate, on mcp.<domain>) aren't generated on Kubernetes until the
+// controller rules on the shared host; the instance's other routes are.
+func TestMCPRoutersNotOnKubernetes(t *testing.T) {
+	for _, svc := range []string{"mcp-gate@docker", "mcp-gate@file", "mcp-gate"} {
+		objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {
+			"traefik.http.routers.r.rule": "Host(`mcp.example.org`) && PathPrefix(`/app/`)", "traefik.http.routers.r.service": svc,
+			"traefik.http.routers.w.rule": "Host(`a.example.org`)", "traefik.http.routers.w.service": "group-gate@docker"}})
+		if err != nil {
+			t.Fatalf("%s: %v", svc, err)
+		}
+		if len(objs) != 1 || objs[0].GetName() != "app--r-w" {
+			t.Errorf("%s: %d objects, first %v", svc, len(objs), objs)
+		}
+	}
+}
+
 func TestCoreServiceRefsAreFile(t *testing.T) {
-	for svc, want := range map[string]string{"forward-auth-ext@docker": "forward-auth-ext@file", "mcp-gate@docker": "mcp-gate@file", "group-gate@docker": "group-gate@file"} {
+	for svc, want := range map[string]string{"forward-auth-ext@docker": "forward-auth-ext@file", "group-gate@docker": "group-gate@file"} {
 		objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.routers.r.service": svc}})
 		if err != nil {
 			t.Fatalf("%s: %v", svc, err)
@@ -381,5 +398,39 @@ func TestExposureDiff(t *testing.T) {
 	live["Middleware/app--m-x"] = "{}"
 	if d := live.Diff(want); d != "unexpected middleware/app--m-x" {
 		t.Errorf("extra: %q", d)
+	}
+}
+
+// TestRouteShapeForCore: the routes the Hub generates satisfy core's edge
+// policy up front (contract with core 39103a1): strict lowercase hosts,
+// priority at most MaxAppPriority, no params-generation annotation.
+func TestRouteShapeForCore(t *testing.T) {
+	gen := func(rule, prio string) ([]*unstructured.Unstructured, error) {
+		f := map[string]string{"traefik.http.routers.r.rule": rule, "traefik.http.routers.r.service": "group-gate@docker"}
+		if prio != "" {
+			f["traefik.http.routers.r.priority"] = prio
+		}
+		return IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": f})
+	}
+	for _, rule := range []string{"Host(`App.example.org`)", "Host(`a.example.org.`)", "Host(`a..example.org`)", "Host(`-a.example.org`)",
+		"Host(`localhost`)", "HostRegexp(`.*`)", "Host(`a.example.org`) || ClientIP(`10.0.0.0/8`)"} {
+		if _, err := gen(rule, ""); refusedErr(err) == "" {
+			t.Errorf("%s accepted: %v", rule, err)
+		}
+	}
+	if _, err := gen("Host(`a.example.org`)", "1001"); refusedErr(err) == "" {
+		t.Errorf("priority 1001 accepted: %v", err)
+	}
+	for _, rule := range []string{"Host(`a.example.org`)", "(Host(`a.example.org`) || Host(`b.example.org`)) && PathPrefix(`/x/`)",
+		"Host(`mcp.example.org`) && (Path(`/app`) || Path(`/.well-known/oauth-protected-resource/app`))"} {
+		objs, err := gen(rule, "1000")
+		if err != nil {
+			t.Fatalf("%s: %v", rule, err)
+		}
+		for _, o := range objs {
+			if _, ok := o.GetAnnotations()["portcullis.io/params-generation"]; ok || len(o.GetAnnotations()) > 0 {
+				t.Errorf("%s carries annotations %v", o.GetName(), o.GetAnnotations())
+			}
+		}
 	}
 }

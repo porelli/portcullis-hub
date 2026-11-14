@@ -132,6 +132,17 @@ func InstancePolicies(in PolicyInput) ([]*unstructured.Unstructured, error) {
 				except = append(except, c)
 			}
 		}
+		// The API server's addresses (PORTCULLIS_KUBE_API_ENDPOINTS): no
+		// app reaches them.
+		for _, a := range in.Settings.APIAddresses {
+			ip, err := netip.ParseAddr(strings.TrimSpace(a))
+			if err != nil || !ip.Is4() {
+				return nil, refused("API address %q is not an IPv4 address", a)
+			}
+			if c := ip.String() + "/32"; !slices.Contains(except, c) {
+				except = append(except, c)
+			}
+		}
 		if len(in.Settings.NodeAddresses) == 0 {
 			return nil, refused("%s needs internet egress, and core.env has no node addresses (PORTCULLIS_KUBE_NODE_ADDRESSES): not deployed", in.Instance)
 		}
@@ -141,7 +152,9 @@ func InstancePolicies(in PolicyInput) ([]*unstructured.Unstructured, error) {
 			if err != nil || !ip.Is4() {
 				return nil, refused("node address %q is not an IPv4 address", a)
 			}
-			except = append(except, ip.String()+"/32")
+			if c := ip.String() + "/32"; !slices.Contains(except, c) {
+				except = append(except, c)
+			}
 			nodes = append(nodes, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: ip.String() + "/32"}})
 		}
 		https, http := intstr.FromInt32(443), intstr.FromInt32(80)

@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	authnv1 "k8s.io/api/authentication/v1"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -85,7 +87,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: portcullis-hub, namespace: portcullis-edge}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: portcullis-hub}
-subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
+subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}, {kind: ServiceAccount, name: intruder, namespace: portcullis}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: intruder, namespace: portcullis}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -99,10 +105,11 @@ subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 `
 
 type env struct {
-	cfg   *rest.Config
-	admin dynamic.Interface
-	hub   dynamic.Interface
-	hubK  kubernetes.Interface
+	cfg      *rest.Config
+	admin    dynamic.Interface
+	hub      dynamic.Interface
+	hubK     kubernetes.Interface
+	intruder dynamic.Interface
 }
 
 var shared *env
@@ -172,19 +179,28 @@ func startEnv(t *testing.T) *env {
 	applyYAML(t, admin, []byte(setupObjects))
 	applyYAML(t, admin, file(t, "testdata/role.yaml"))
 	applyYAML(t, admin, file(t, "testdata/role-edge.yaml"))
-	applyYAML(t, admin, file(t, "testdata/admission/params.yaml"))
+	// The params as the CLI writes them, with this API server's admin as
+	// the CLI's identity (cliUsername).
+	whoami, err := kubernetes.NewForConfigOrDie(cfg).AuthenticationV1().SelfSubjectReviews().Create(context.Background(), &authnv1.SelfSubjectReview{}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := strings.Replace(string(file(t, "testdata/admission/params.yaml")), "cliUsername: system:admin", "cliUsername: "+whoami.Status.UserInfo.Username, 1)
+	applyYAML(t, admin, []byte(params))
 	applyYAML(t, admin, file(t, "testdata/admission/policies.yaml"))
 	applyYAML(t, admin, file(t, "testdata/admission/bindings.yaml"))
 	hc := rest.CopyConfig(cfg)
 	hc.Impersonate = rest.ImpersonationConfig{UserName: hubSA, Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis", "system:authenticated"}}
-	e := &env{cfg: cfg, admin: admin, hub: dynamic.NewForConfigOrDie(hc), hubK: kubernetes.NewForConfigOrDie(hc)}
+	ic := rest.CopyConfig(cfg)
+	ic.Impersonate = rest.ImpersonationConfig{UserName: "system:serviceaccount:portcullis:intruder", Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis", "system:authenticated"}}
+	e := &env{cfg: cfg, admin: admin, hub: dynamic.NewForConfigOrDie(hc), hubK: kubernetes.NewForConfigOrDie(hc), intruder: dynamic.NewForConfigOrDie(ic)}
 	// The policies take effect asynchronously: wait for the self-test's
 	// Pod to be denied by its binding.
 	deadline := time.Now().Add(60 * time.Second)
-	pod := SelfTestObjects(ns, EdgeNamespace)["pods"]
+	pod := SelfTestObjects(ns, EdgeNamespace)["portcullis-apps-guard-pods"]
 	for {
 		_, err := e.hub.Resource(podsGVR).Namespace(ns).Create(context.Background(), pod, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
-		if SelfTestRejected(err, "pods") {
+		if SelfTestRejected(err, "portcullis-apps-guard-pods") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -193,8 +209,8 @@ func startEnv(t *testing.T) *env {
 		time.Sleep(500 * time.Millisecond)
 	}
 	// The policies type-check clean.
-	for _, p := range Policies {
-		o, err := admin.Resource(schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}).Get(context.Background(), "portcullis-apps-"+p, metav1.GetOptions{})
+	for _, p := range []string{"portcullis-apps-pods", "portcullis-apps-workloads", "portcullis-apps-services", "portcullis-apps-traefik", "portcullis-apps-netpol", "portcullis-edge-routes"} {
+		o, err := admin.Resource(schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}).Get(context.Background(), p, metav1.GetOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,9 +226,13 @@ func startEnv(t *testing.T) *env {
 type vector struct {
 	Name           string         `json:"name"`
 	Object         map[string]any `json:"object"`
-	As             string         `json:"as"`
+	As             string         `json:"as"` // hub | intruder
 	Want           string         `json:"want"`
 	ReasonContains string         `json:"reason_contains"`
+	// Existing (optional) is created as the CLI first; Op update dry-runs
+	// Object as an update of it, delete its deletion.
+	Existing map[string]any `json:"existing,omitempty"`
+	Op       string         `json:"op,omitempty"`
 }
 
 // TestAdmissionVectors: every vector dry-run as the Hub's ServiceAccount;
@@ -226,9 +246,32 @@ func TestAdmissionVectors(t *testing.T) {
 	if len(vs) < 40 {
 		t.Fatalf("%d vectors", len(vs))
 	}
+	ctx := context.Background()
+	dry := []string{metav1.DryRunAll}
 	for _, v := range vs {
 		o := &unstructured.Unstructured{Object: v.Object}
-		_, err := e.hub.Resource(gvrOf(o)).Namespace(o.GetNamespace()).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+		client := e.hub
+		if v.As == "intruder" {
+			client = e.intruder
+		}
+		res := client.Resource(gvrOf(o)).Namespace(o.GetNamespace())
+		var err error
+		if v.Existing != nil {
+			ex := &unstructured.Unstructured{Object: v.Existing}
+			cur, cerr := e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Create(ctx, ex, metav1.CreateOptions{})
+			if cerr != nil {
+				t.Fatalf("%s: creating the existing object: %v", v.Name, cerr)
+			}
+			if v.Op == "delete" {
+				err = res.Delete(ctx, ex.GetName(), metav1.DeleteOptions{DryRun: dry})
+			} else {
+				o.SetResourceVersion(cur.GetResourceVersion())
+				_, err = res.Update(ctx, o, metav1.UpdateOptions{DryRun: dry})
+			}
+			e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Delete(ctx, ex.GetName(), metav1.DeleteOptions{})
+		} else {
+			_, err = res.Create(ctx, o, metav1.CreateOptions{DryRun: dry})
+		}
 		switch v.Want {
 		case "allow":
 			if err != nil {
@@ -236,11 +279,18 @@ func TestAdmissionVectors(t *testing.T) {
 			}
 		case "deny":
 			var st apierrors.APIStatus
-			if !errors.As(err, &st) || !strings.Contains(st.Status().Message, "with binding 'portcullis-apps-guard-") || !strings.Contains(st.Status().Message, v.ReasonContains) {
+			if !errors.As(err, &st) || !strings.Contains(st.Status().Message, "with binding 'portcullis-") || !strings.Contains(st.Status().Message, v.ReasonContains) {
 				t.Errorf("%s: want a denial with %q, got %v", v.Name, v.ReasonContains, err)
 			}
 		}
 	}
+}
+
+// knownRefused are translations the policies refuse on purpose (core's
+// rulings), so a change on either side shows here: a service running as
+// root (user: "0:0", e.g. samba) is refused — only the Hub's helpers may.
+var knownRefused = map[string]string{
+	"person-secret/Deployment/person-secret--samba": "only the Hub's helper pods may run as root",
 }
 
 // TestTranslatedObjectsAdmitted: what the translator renders for the
@@ -251,13 +301,20 @@ func TestTranslatedObjectsAdmitted(t *testing.T) {
 		in := baseInput(t, "testdata/translate/"+c, c)
 		in.HubImage = "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("1", 64)
 		in.Namespace = ns
+		// The params' cluster (params.yaml).
+		in.Settings.PodCIDR, in.Settings.ServiceCIDR = "10.42.0.0/24", "10.43.0.0/16"
+		in.Settings.NodeAddresses, in.Settings.APIAddresses = []string{"10.1.0.4"}, []string{"10.1.0.4"}
 		p, err := Translate(in)
 		if err != nil {
 			t.Fatalf("%s: %v", c, err)
 		}
 		for _, o := range p.Objects() {
 			_, err := e.hub.Resource(gvrOf(o)).Namespace(o.GetNamespace()).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
-			if err != nil {
+			want := knownRefused[c+"/"+o.GetKind()+"/"+o.GetName()]
+			switch {
+			case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
+				t.Errorf("%s: %s %s: want the known refusal %q, got %v", c, o.GetKind(), o.GetName(), want, err)
+			case want == "" && err != nil:
 				t.Errorf("%s: %s %s denied: %v", c, o.GetKind(), o.GetName(), err)
 			}
 		}
@@ -308,7 +365,7 @@ func TestRoleIsEnough(t *testing.T) {
 	ctx := context.Background()
 	b, err := New(Config{Client: e.hubK, Dynamic: e.hub, Namespace: ns, HubImage: "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("1", 64),
 		Resolver: &fakeResolver{}, Exec: RemoteExec{Client: e.hubK, Config: rest.CopyConfig(e.cfg)}, BindRoots: []string{"/srv"},
-		Settings: Settings{PodCIDR: "10.42.0.0/16", ServiceCIDR: "10.43.0.0/16", NodeAddresses: []string{"192.0.2.10"}}})
+		Settings: Settings{PodCIDR: "10.42.0.0/24", ServiceCIDR: "10.43.0.0/16", NodeAddresses: []string{"10.1.0.4"}, APIAddresses: []string{"10.1.0.4"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

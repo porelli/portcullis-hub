@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,7 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 		PodCIDR: coreEnv["PORTCULLIS_POD_CIDR"], ServiceCIDR: coreEnv["PORTCULLIS_SERVICE_CIDR"],
 		TraefikServiceIP: coreEnv["PORTCULLIS_TRAEFIK_SERVICE_IP"], WGEdgeServiceIP: coreEnv["PORTCULLIS_WG_EDGE_SERVICE_IP"],
 		Domain: cfg.Domain, CorePorts: templates.KubeCorePorts(coreEnv), NodeAddresses: strings.Fields(strings.ReplaceAll(coreEnv["PORTCULLIS_KUBE_NODE_ADDRESSES"], ",", " ")),
+		APIAddresses: apiAddresses(coreEnv["PORTCULLIS_KUBE_API_ENDPOINTS"]),
 	}
 	ex := kube.RemoteExec{Client: client, Config: restCfg}
 	guard := kube.NewGuard(kube.GuardConfig{Client: client, Dynamic: dyn, AppsNamespace: apps, CoreNamespace: core, EdgeNamespace: edge, InCluster: icErr, HubImage: self, Exec: ex})
@@ -124,4 +126,18 @@ func runtimeVerified(rt runtime.Instances, g *docker.Guard) <-chan struct{} {
 		return v.Verified()
 	}
 	return make(chan struct{})
+}
+
+// apiAddresses are the addresses of PORTCULLIS_KUBE_API_ENDPOINTS
+// (<ip>:<port>, comma or space separated).
+func apiAddresses(v string) []string {
+	var out []string
+	for _, e := range strings.Fields(strings.ReplaceAll(v, ",", " ")) {
+		if h, _, err := net.SplitHostPort(e); err == nil {
+			out = append(out, h)
+		} else {
+			out = append(out, e)
+		}
+	}
+	return out
 }

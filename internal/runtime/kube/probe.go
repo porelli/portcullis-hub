@@ -22,9 +22,11 @@ const probeReady = 2 * time.Minute
 func probePod(ns, image, role string, listen bool) *corev1.Pod {
 	f, t := false, true
 	uid := int64(10001)
-	cmd := []string{"/usr/local/bin/hub", "helper", "idle"}
+	// "hub" by PATH: the admission policy pins probe pods to exactly the
+	// Hub's image running hub helper listen|idle|dial.
+	cmd := []string{"hub", "helper", "idle"}
 	if listen {
-		cmd = []string{"/usr/local/bin/hub", "helper", "listen", ":8080"}
+		cmd = []string{"hub", "helper", "listen", ":8080"}
 	}
 	q := resource.MustParse("32Mi")
 	return &corev1.Pod{
@@ -137,7 +139,7 @@ func RunNetpolProbe(ctx context.Context, c kubernetes.Interface, ex Execer, ns, 
 		var out bytes.Buffer
 		dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		return ex.Exec(dctx, ns, client, "probe", []string{"/usr/local/bin/hub", "helper", "dial", ip[role] + ":8080"}, nil, &out, &out)
+		return ex.Exec(dctx, ns, client, "probe", []string{"hub", "helper", "dial", ip[role] + ":8080"}, nil, &out, &out)
 	}
 	// The policies may take a moment to apply: the allowed dial is
 	// retried, the denied one must fail every time it's tried.

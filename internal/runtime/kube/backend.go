@@ -284,7 +284,7 @@ func (b *Backend) input(ctx context.Context, p runtime.Project) (Input, map[stri
 	in := Input{Instance: p.Instance, Namespace: b.cfg.Namespace, EdgeNamespace: b.cfg.EdgeNamespace, Model: p.Model, HubImage: b.cfg.HubImage, BindRoots: b.cfg.BindRoots, Settings: b.cfg.Settings, Digests: map[string]string{}}
 	if x := p.Inputs; x != nil {
 		in.Template, in.TemplateFiles, in.PersonSecrets, in.LanOnly, in.Jobs = x.Template, x.TemplateFiles, x.PersonSecrets, x.LanOnly, x.Jobs
-		in.VPNSlot, in.IngressService = x.VPNSlot, x.IngressService
+		in.VPNSlot, in.IngressService, in.VPNOnly = x.VPNSlot, x.IngressService, x.VPNOnly
 		if x.LocalNetworks != nil {
 			in.Settings.LocalNetworks = x.LocalNetworks
 		}

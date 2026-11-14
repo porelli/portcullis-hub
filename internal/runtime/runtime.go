@@ -46,6 +46,8 @@ type ProjectInputs struct {
 	// service whose pod is its ingress (nil: not wired).
 	VPNSlot        *int
 	IngressService string
+	// VPNOnly: the instance is VPN-only (its routes stay off websecure).
+	VPNOnly bool
 }
 
 // AppFileInput is a data file (§13.7): its name, content, its secrets
