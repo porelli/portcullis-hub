@@ -155,6 +155,28 @@ func (h *Hub) governingLocked(g freshGov) (id string, rule signin.Node, why stri
 	return id, c, ""
 }
 
+// freshPcMethod is the fresh-auth popup's pc_method for a governing
+// compiled rule (T9): "totp" when signin.FreshAccepted is exactly {totp}
+// (with totp on), else "". Anything that isn't a compiled rule: "".
+func freshPcMethod(compiled signin.Node, on map[signin.Method]bool) string {
+	acc, err := signin.FreshAccepted(compiled, on)
+	if err != nil || len(acc) != 1 || !acc[signin.TOTP] || !on[signin.TOTP] {
+		return ""
+	}
+	return string(signin.TOTP)
+}
+
+// withPcMethod is a copy of info with PcMethod set (nil stays nil): the
+// shared info is never changed.
+func withPcMethod(info *freshauth.AuthorizeInfo, pc string) *freshauth.AuthorizeInfo {
+	if info == nil {
+		return nil
+	}
+	c := *info
+	c.PcMethod = pc
+	return &c
+}
+
 // freshProof is an accepted fresh-auth proof and the template it was
 // checked against (named in the audit, never the token).
 type freshProof struct {

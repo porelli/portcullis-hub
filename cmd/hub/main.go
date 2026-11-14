@@ -493,6 +493,7 @@ func main() {
 	h.SetImpersonationKeycloak(kc)
 	// VPN providers' oidc_sub owners (contract §3.3).
 	h.SetVPNKeycloak(kc)
+	h.SetTOTPKeycloak(kc)
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, fa.redirectURIs(), fa.webOrigins())
 	})

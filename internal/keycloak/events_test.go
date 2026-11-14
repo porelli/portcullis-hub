@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -300,5 +301,47 @@ func TestImpersonateEventsStored(t *testing.T) {
 	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
 	if _, err := c.ImpersonateEventsStored(ctx); err == nil {
 		t.Error("a failed GET was not reported")
+	}
+}
+
+// TestRealmLoginErrors (P16): one realm-wide read of the LOGIN_ERROR
+// events in [from, to): no user filter, paged, capped at 1,000 (more is
+// an error: the doctor then has no finding).
+func TestRealmLoginErrors(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	now := time.Now().UTC()
+	ms := now.Add(-time.Hour).UnixMilli()
+	kc.With(func() {
+		for i := range 150 {
+			kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN_ERROR", "userId": fmt.Sprintf("u-%d", i%3), "error": "invalid_user_credentials", "details": map[string]any{"pc_method": "totp"}})
+		}
+		kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN", "userId": "u-0"})
+		kc.Events = append(kc.Events, map[string]any{"time": now.Add(-48 * time.Hour).UnixMilli(), "type": "LOGIN_ERROR", "userId": "u-0"})
+	})
+	evs, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
+	if err != nil || len(evs) != 150 {
+		t.Fatalf("RealmLoginErrors = %d, %v", len(evs), err)
+	}
+	if evs[0].Type != "LOGIN_ERROR" || evs[0].Details["pc_method"] != "totp" || evs[0].UserID == "" {
+		t.Errorf("event = %+v", evs[0])
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Has("user") || !reflect.DeepEqual(q["type"], []string{"LOGIN_ERROR"}) {
+		t.Errorf("query = %v", q)
+	}
+	if n := kc.CountCalls("GET /admin/realms/portcullis/events"); n != 2 {
+		t.Errorf("%d pages, want 2 (100 + 50)", n)
+	}
+	// Over the cap: incomplete, an error.
+	kc.With(func() {
+		for range 1000 {
+			kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN_ERROR", "userId": "u-9"})
+		}
+	})
+	if _, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now); err == nil || !strings.Contains(err.Error(), "1000") {
+		t.Errorf("over the cap: %v", err)
 	}
 }

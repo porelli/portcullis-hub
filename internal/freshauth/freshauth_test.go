@@ -179,7 +179,10 @@ func TestFreshAuthAccepts(t *testing.T) {
 		{name: "passkey_synced", method: "passkey_synced", user: "alice"},
 		{name: "passkey_device", method: "passkey_device", user: "alice"},
 		{name: "yubikey_cert", method: "yubikey_cert", user: "alice"},
-		{name: "totp", method: "totp", user: "alice"},
+		// A code is never the only proof: the same sign-in's amr holds a
+		// primary method too (controller ruling).
+		{name: "totp", method: "totp", user: "alice", edit: func(c map[string]any) { c["amr"] = []string{"pwd", "otp"} }},
+		{name: "totp after a key", method: "totp", user: "alice", edit: func(c map[string]any) { c["amr"] = []string{"otp", "hwk"} }},
 		// amr is never read: whatever the session accumulated.
 		{name: "amr pwd only", method: "security_key", user: "alice", edit: func(c map[string]any) { c["amr"] = []string{"pwd"} }},
 		{name: "no amr", method: "passkey_synced", user: "alice", edit: func(c map[string]any) { delete(c, "amr") }},
@@ -337,6 +340,12 @@ func TestFreshAuthRefusals(t *testing.T) {
 	other, _ := rsa.GenerateKey(rand.Reader, 2048)
 	cases := []tcase{
 		{name: "stale auth_time", edit: func(c map[string]any) { c["auth_time"] = now.Add(-301 * time.Second).Unix() }},
+		// pc_fresh totp without a primary method in amr (controller
+		// ruling: a code is never the only proof).
+		{name: "totp with amr otp only", edit: func(c map[string]any) { c["pc_fresh"] = "totp"; c["amr"] = []string{"otp"} }},
+		{name: "totp without amr", edit: func(c map[string]any) { c["pc_fresh"] = "totp"; delete(c, "amr") }},
+		{name: "totp with a setup link only", edit: func(c map[string]any) { c["pc_fresh"] = "totp"; c["amr"] = []string{"inv", "otp", "sms"} }},
+		{name: "totp with an amr string", edit: func(c map[string]any) { c["pc_fresh"] = "totp"; c["amr"] = "pwd" }},
 		{name: "missing auth_time", edit: func(c map[string]any) { delete(c, "auth_time") }},
 		{name: "future auth_time", edit: func(c map[string]any) { c["auth_time"] = now.Add(2 * time.Minute).Unix() }},
 		{name: "wrong nonce", edit: func(c map[string]any) { c["nonce"] = "nonce-other" }},
@@ -394,6 +403,10 @@ func TestFreshAuthRefusals(t *testing.T) {
 	// wantReason: the audit reason of each case (fixed strings).
 	wantReason := map[string]string{
 		"stale auth_time":                "sign-in older than 5 minutes",
+		"totp with amr otp only":         "pc_fresh names totp without a primary method in amr",
+		"totp without amr":               "pc_fresh names totp without a primary method in amr",
+		"totp with a setup link only":    "pc_fresh names totp without a primary method in amr",
+		"totp with an amr string":        "pc_fresh names totp without a primary method in amr",
 		"missing auth_time":              "missing auth_time",
 		"future auth_time":               "auth_time in the future",
 		"wrong nonce":                    "nonce mismatch",

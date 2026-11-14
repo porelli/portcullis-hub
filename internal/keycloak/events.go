@@ -223,6 +223,38 @@ func (c *Client) eventsPage(ctx context.Context, what string, types []string, us
 	if !ValidUserID(userID) {
 		return nil, fmt.Errorf("%s: not a Keycloak user id", what)
 	}
+	return c.eventsQuery(ctx, what, types, userID, clientID, from, to, first, max)
+}
+
+// realmErrorsPage and realmErrorsPages bound RealmLoginErrors: pages of
+// 100, at most 10 (P16: capped at 1,000 events).
+const (
+	realmErrorsPage  = 100
+	realmErrorsPages = 10
+)
+
+// RealmLoginErrors reads the realm's LOGIN_ERROR events with from <= time
+// < to for every user at once (P16: the doctor's signin_totp_guessing; no
+// user filter), newest first, paged. More than 1,000 is an error: the read
+// is incomplete and the caller has no finding.
+func (c *Client) RealmLoginErrors(ctx context.Context, from, to time.Time) ([]Event, error) {
+	out := []Event{}
+	for page := 0; page < realmErrorsPages; page++ {
+		evs, err := c.eventsQuery(ctx, "realm login errors", []string{"LOGIN_ERROR"}, "", "", from, to, len(out), realmErrorsPage)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, evs...)
+		if len(evs) < realmErrorsPage {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("realm login errors: more than %d: the read is incomplete", realmErrorsPage*realmErrorsPages)
+}
+
+// eventsQuery reads one page of events of the given types; userID ""
+// means every user (RealmLoginErrors only), clientID "" every client.
+func (c *Client) eventsQuery(ctx context.Context, what string, types []string, userID, clientID string, from, to time.Time, first, max int) ([]Event, error) {
 	if max < 1 || first < 0 {
 		return nil, fmt.Errorf("%s: first %d, max %d", what, first, max)
 	}
@@ -231,7 +263,9 @@ func (c *Client) eventsPage(ctx context.Context, what string, types []string, us
 		return nil, err
 	}
 	q := url.Values{}
-	q.Set("user", userID)
+	if userID != "" {
+		q.Set("user", userID)
+	}
 	for _, t := range types {
 		q.Add("type", t)
 	}

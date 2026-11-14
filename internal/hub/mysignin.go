@@ -155,6 +155,8 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 		if cf := certFreshAllowed(rule, on); cf != nil {
 			v.CertFresh = cf
 		}
+		// The popup asks for the code when people accepts only that (T9).
+		v.FreshAuth = withPcMethod(info, freshPcMethod(rule, on))
 	}
 
 	var pm PersonMethods

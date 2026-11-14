@@ -29,6 +29,8 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+
+	"github.com/portcullis/hub/internal/signin"
 )
 
 // ClientID is the Hub-owned Keycloak client (also its owner tag).
@@ -54,8 +56,10 @@ const Message = "a fresh sign-in is required"
 // mapper on the fresh-auth client, from this authentication's notes only:
 // the authenticator that actually ran in this sign-in (a passkey kind,
 // yubikey_cert, totp or password; never an SSO session reused or a setup link).
-// amr is never read — Keycloak accumulates it over the SSO session (10 h),
-// so a fresh password sign-in could still carry an older hwk.
+// amr never decides the method — Keycloak accumulates it over the SSO
+// session (10 h), so a fresh password sign-in could still carry an older
+// hwk. It is read only to refuse a pc_fresh totp without any primary
+// method in it (a code is never the only proof).
 var FreshMethods = []string{"password", "totp", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert"}
 
 // ClaimFresh is the ID token claim naming this authentication's method.
@@ -159,6 +163,10 @@ type AuthorizeInfo struct {
 	AuthorizeURL string `json:"authorize_url"`
 	ClientID     string `json:"client_id"`
 	RedirectURI  string `json:"redirect_uri"`
+	// PcMethod is "totp" when the view's governing template accepts only
+	// a code as a fresh method (T9): the page then adds pc_method=totp to
+	// the authorize URL. Any other value is never set.
+	PcMethod string `json:"pc_method,omitempty"`
 }
 
 // Info returns the authorize endpoint, client id and redirect URI.
@@ -177,6 +185,9 @@ type claims struct {
 	Username *string         `json:"preferred_username"`
 	// SID is read loosely: a sid that isn't a string is no sid.
 	SID json.RawMessage `json:"sid"`
+	// AMR is read loosely (anything but an array of strings is none); it
+	// is read only for pc_fresh totp (primaryInAMR).
+	AMR json.RawMessage `json:"amr"`
 }
 
 // Verify exchanges p.Code (with the PKCE verifier) and checks the ID token
@@ -256,6 +267,12 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	if reason != "" {
 		return nil, refuse(reason)
 	}
+	// A code is never the only proof (controller ruling, defence in depth
+	// beside the extension's flow): pc_fresh totp needs a primary method
+	// (any other known method) in amr as well.
+	if method == string(signin.TOTP) && !primaryInAMR(c.AMR) {
+		return nil, refuse("pc_fresh names totp without a primary method in amr")
+	}
 	if idt.Subject == "" {
 		return nil, refuse("missing sub")
 	}
@@ -266,6 +283,22 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 		return nil, refuse("signed in as another person")
 	}
 	return &Result{User: user, AuthTime: authTime, Method: method, SID: sidOf(c.SID)}, nil
+}
+
+// primaryInAMR reports whether raw (the amr claim) is an array of strings
+// holding a known method other than totp (pwd, spk, dpk, hwk, mtls, file;
+// inv and unknown values never count).
+func primaryInAMR(raw json.RawMessage) bool {
+	var amr []string
+	if len(raw) == 0 || json.Unmarshal(raw, &amr) != nil {
+		return false
+	}
+	for _, a := range amr {
+		if m, ok := signin.MethodForAMR(a); ok && m != signin.TOTP {
+			return true
+		}
+	}
+	return false
 }
 
 // sidOf is the sid claim when it is a string, else "".

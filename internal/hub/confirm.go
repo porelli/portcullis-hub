@@ -398,9 +398,17 @@ func (h *Hub) ConfirmationPage(listener, id, user string) (*ConfirmationView, er
 	for i, l := range c.Consequences {
 		cons[i] = VisibleText(l)
 	}
+	// The popup asks for the code when the confirmation's governing
+	// template accepts only that (T9).
+	h.mu.RLock()
+	pc := ""
+	if _, rule, why := h.governingLocked(h.confirmGov(c)); why == "" {
+		pc = freshPcMethod(rule, h.st.SignIn.MethodsOn())
+	}
+	h.mu.RUnlock()
 	return &ConfirmationView{ID: c.ID, State: c.State, Tool: VisibleText(c.Tool), Target: VisibleText(c.Label), Resource: VisibleText(c.Resource), Client: VisibleText(c.Client),
 		Consequences: cons, Arguments: VisibleText(c.ArgsPreview), Typed: VisibleText(c.Typed), Created: c.Created, Expires: c.Expires,
-		FreshAuth: h.FreshAuthInfoFor(listener)}, nil
+		FreshAuth: withPcMethod(h.FreshAuthInfoFor(listener), pc)}, nil
 }
 
 // VisibleText is s with every character that could hide or reorder text

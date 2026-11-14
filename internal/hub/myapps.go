@@ -97,6 +97,10 @@ type MyApp struct {
 	// AI: the caller's switched-on companions of this app (Task 21,
 	// contract §5.1); nil = none, or the ai key is off (myAITopLocked).
 	AI *MyAppAI `json:"ai,omitempty"`
+	// FreshPcMethod is this app's fresh-auth popup pc_method (T9, P11):
+	// "totp" when its governing template accepts only a code, else "".
+	// Set only on an app with credential cards (the proofs it starts).
+	FreshPcMethod string `json:"fresh_pc_method,omitempty"`
 }
 
 // MyAppsView is GET /api/me/apps' answer (F21): the apps, and the
@@ -180,6 +184,11 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		}
 		for _, o := range personSecretOptions(t) {
 			app.Credentials = append(app.Credentials, h.myCredentialLocked(t, o, user))
+		}
+		if len(app.Credentials) > 0 {
+			if _, rule, why := h.governingLocked(govInstance(t.ID)); why == "" {
+				app.FreshPcMethod = freshPcMethod(rule, h.st.SignIn.MethodsOn())
+			}
 		}
 		if aiOn && gateUser(user) {
 			app.AI = h.myAppAILocked(t)

@@ -570,7 +570,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		to, terr := strconv.ParseInt(q.Get("dateTo"), 10, 64)
 		for _, e := range s.Events {
 			ms, _ := e["time"].(int64)
-			if e["userId"] != q.Get("user") || (ferr == nil && ms < from) || (terr == nil && ms > to) {
+			if (q.Has("user") && e["userId"] != q.Get("user")) || (ferr == nil && ms < from) || (terr == nil && ms > to) {
 				continue
 			}
 			if typ, ok := e["type"].(string); ok && q.Has("type") && !slices.Contains(q["type"], typ) {
