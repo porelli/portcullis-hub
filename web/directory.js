@@ -1999,8 +1999,26 @@
       '<button type="button" class="pd-btn ' + (on ? 'secondary' : 'ghost') + ' xs" data-act="any-field" data-group="' + esc(g.name) + '" data-allow="' + (on ? 'false' : 'true') + '">' + (on ? 'Turn off' : 'Turn on…') + '</button>' +
       '<p class="pd-muted pd-small">' + (on ? 'Its rule may use any profile field.' : 'Off: its rule may use only admin-only fields.') + ' ⚠ ' + esc(ANY_FIELD_WARN) + '</p></div>';
   }
+  // suspendRemovals (pure): who turning the option off would remove from
+  // g — the evaluation of a suspended rule (only active "added by hand"
+  // entries stay; protected accounts are never touched): its members
+  // without such an entry. isProtected(u) says whether u is protected.
+  function suspendRemovals(g, isProtected) {
+    const kept = new Set((g.exceptions || []).filter(e => e.include && !e.expired).map(e => lc(e.user)));
+    return (g.members || []).filter(u => !kept.has(lc(u)) && !isProtected(u));
+  }
+  // anyFieldOffText (pure): the question before turning the option off.
+  function anyFieldOffText(group, n) {
+    return 'Turn off “' + ANY_FIELD_LABEL + '” for ' + group + '?\n\nTurning this off removes ' + (n === 1 ? '1 person' : n + ' people') +
+      ' the rule added from ' + group + ' (people you added by hand stay).';
+  }
   async function setAnyField(group, allow) {
     if (allow && !confirm('Turn on “' + ANY_FIELD_LABEL + '” for ' + group + '?\n\n' + ANY_FIELD_WARN)) return null;
+    if (!allow) {
+      const g = groupByName(group);
+      const n = g && g.rule ? suspendRemovals(g, u => { const p = userByName(u) || users().find(x => lc(x.username) === lc(u)); return !!(p && p.protected); }).length : 0;
+      if (!confirm(anyFieldOffText(group, n))) return null;
+    }
     return groupAct(group, () => api('PUT', '/api/directory/groups/' + enc(group) + '/allow-any-field', { allow }),
       (allow ? 'Turned on' : 'Turned off') + ' “' + ANY_FIELD_LABEL + '” for ' + group);
   }

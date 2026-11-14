@@ -43,3 +43,31 @@ console.log(JSON.stringify({
 		t.Error("the Fields help doesn't name app admin groups")
 	}
 }
+
+// TestAnyFieldOffConfirmJS: turning the option off asks first, naming how
+// many people the rule added would be removed — every member without an
+// active "added by hand" entry, protected accounts left out (what the
+// suspended rule's evaluation removes).
+func TestAnyFieldOffConfirmJS(t *testing.T) {
+	js := webAsset(t, "directory.js")
+	script := "const lc = s => String(s == null ? '' : s).toLowerCase();\n" +
+		jsBlock(t, js, "  const ANY_FIELD_LABEL =", ";\n") +
+		jsBlock(t, js, "  function suspendRemovals(g, isProtected) {", "\n  }\n") + jsBlock(t, js, "  function anyFieldOffText(group, n) {", "\n  }\n") + `
+const g = { name: 'admin_app', rule: { text: 'x' }, members: ['bob', 'Carol', 'dave', 'admin', 'erin'],
+  exceptions: [{ user: 'dave', include: true }, { user: 'erin', include: true, expired: true }, { user: 'carol', include: false }] };
+const gone = suspendRemovals(g, u => u === 'admin');
+console.log(JSON.stringify({ gone, text: anyFieldOffText('admin_app', gone.length), one: anyFieldOffText('admin_app', 1), none: suspendRemovals({ members: [] }, () => false) }));
+`
+	var got struct {
+		Gone, None []string
+		Text, One  string
+	}
+	nodeJSON(t, script, &got)
+	if strings.Join(got.Gone, ",") != "bob,Carol,erin" || len(got.None) != 0 {
+		t.Errorf("removed = %v / %v", got.Gone, got.None)
+	}
+	if !strings.Contains(got.Text, "Turning this off removes 3 people the rule added from admin_app (people you added by hand stay)") ||
+		!strings.Contains(got.One, "removes 1 person the rule added") {
+		t.Errorf("texts: %q / %q", got.Text, got.One)
+	}
+}
