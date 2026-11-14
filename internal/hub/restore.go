@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime/kube"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
@@ -731,6 +733,9 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 			continue
 		}
 		name, ok := derived[k]
+		if ok && h.kubeOn() {
+			name = kube.PVCName(id, k) // §11.2: <instance>--<key>
+		}
 		if !ok {
 			return nil, statusErr(409, "the archive has volume %s, which template %s no longer defines", k, view.TemplateID)
 		}

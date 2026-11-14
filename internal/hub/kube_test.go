@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -60,5 +61,20 @@ func TestKubeUpProjectInputs(t *testing.T) {
 	}
 	if !in.LanOnly[445] || in.LanOnly[8085] {
 		t.Errorf("lan only %v", in.LanOnly)
+	}
+}
+
+// Under Kubernetes the fixer's image is HUB_SELF_IMAGE (pinned), never
+// a container lookup.
+func TestKubeSelfImage(t *testing.T) {
+	f := newFixture(t)
+	f.h.cfg.Runtime = runtime.KindKubernetes
+	if _, err := f.h.selfImage(context.Background()); err == nil {
+		t.Error("an unset HUB_SELF_IMAGE was used")
+	}
+	img := "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("a", 64)
+	f.h.cfg.SelfImage = img
+	if got, err := f.h.selfImage(context.Background()); err != nil || got != img {
+		t.Errorf("self image %q %v", got, err)
 	}
 }

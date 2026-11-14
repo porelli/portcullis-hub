@@ -240,6 +240,11 @@ func (fa freshAuthSetup) verifierConfigs(httpc *http.Client, accepted func() []s
 func main() {
 	// `hub folderfix …`: the shared-folder fixer, run by the Hub in a helper
 	// container (contract §6). First, before any Hub configuration is read.
+	// `hub helper|volcopy|seed|rev …` (Kubernetes helper pods and init
+	// containers, contract §6): before any env is read, like folderfix.
+	if isHelperCommand(os.Args) {
+		os.Exit(helperMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "folderfix" {
 		os.Exit(folderfix.Main(os.Args[2:], os.Stdout, os.Stderr))
 	}

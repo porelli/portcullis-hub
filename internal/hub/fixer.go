@@ -640,6 +640,15 @@ func (h *Hub) selfImage(ctx context.Context) (string, error) {
 	fail := func(format string, args ...any) (string, error) {
 		return "", statusErr(http.StatusServiceUnavailable, "the Hub can't find its own image: "+format, args...)
 	}
+	if h.kubeOn() {
+		// Kubernetes: HUB_SELF_IMAGE (the CLI resolves it from the
+		// running Hub pod; admission pins helpers to it).
+		if !strings.Contains(h.cfg.SelfImage, "@sha256:") || !docker.PinnedImage(h.cfg.SelfImage) {
+			return fail("HUB_SELF_IMAGE %q is not pinned by digest", h.cfg.SelfImage)
+		}
+		h.fixerImage = h.cfg.SelfImage
+		return h.fixerImage, nil
+	}
 	if ref := h.cfg.FixerImage; ref != "" {
 		if err := h.rt.EnsureImage(ctx, ref); err != nil {
 			return fail("%v", err)

@@ -1,0 +1,66 @@
+{
+  "volumes": [
+    {
+      "name": "vol",
+      "persistentVolumeClaim": {
+        "claimName": "app--data",
+        "readOnly": true
+      }
+    }
+  ],
+  "containers": [
+    {
+      "name": "helper",
+      "image": "ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "command": [
+        "/usr/local/bin/hub",
+        "helper",
+        "idle"
+      ],
+      "resources": {
+        "limits": {
+          "memory": "256Mi"
+        },
+        "requests": {
+          "memory": "256Mi"
+        }
+      },
+      "volumeMounts": [
+        {
+          "name": "vol",
+          "readOnly": true,
+          "mountPath": "/vol"
+        }
+      ],
+      "imagePullPolicy": "IfNotPresent",
+      "securityContext": {
+        "capabilities": {
+          "add": [
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "FOWNER"
+          ],
+          "drop": [
+            "ALL"
+          ]
+        },
+        "runAsUser": 0,
+        "runAsGroup": 0,
+        "runAsNonRoot": false,
+        "readOnlyRootFilesystem": true,
+        "allowPrivilegeEscalation": false,
+        "seccompProfile": {
+          "type": "RuntimeDefault"
+        }
+      }
+    }
+  ],
+  "restartPolicy": "Never",
+  "automountServiceAccountToken": false,
+  "securityContext": {
+    "seccompProfile": {
+      "type": "RuntimeDefault"
+    }
+  },
+  "enableServiceLinks": false
+}

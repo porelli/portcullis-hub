@@ -206,3 +206,31 @@ func (h *Hub) kubeDeliver(ctx context.Context, id string, f runtime.FileDelivery
 	}
 	return d.DeliverFile(ctx, id, f)
 }
+
+// volumeOwner is the kube backend's PVC owner of a volume key.
+type volumeOwner interface {
+	VolumeOwner(ctx context.Context, p runtime.Project, key string) (map[string]string, error)
+}
+
+// kubeVolumeOwner is instance id's PVC owner annotations for volume key.
+func (h *Hub) kubeVolumeOwner(ctx context.Context, id, key string) (map[string]string, error) {
+	vo, ok := h.rt.(volumeOwner)
+	if !ok {
+		return nil, errors.New("the runtime can't tell the volume's owner")
+	}
+	h.mu.RLock()
+	live := h.findLocked(id)
+	var t templates.Template
+	if live != nil {
+		t = *live
+	}
+	h.mu.RUnlock()
+	if live == nil {
+		return nil, fmt.Errorf("instance %s has no template view", id)
+	}
+	p, err := h.upProject(ctx, &t)
+	if err != nil {
+		return nil, err
+	}
+	return vo.VolumeOwner(ctx, p, key)
+}

@@ -138,6 +138,9 @@ type Config struct {
 	// inputs. Gates compare Runtime == runtime.KindPodman only.
 	Runtime runtime.Kind
 	Guard   *docker.Guard
+	// SelfImage is HUB_SELF_IMAGE (Kubernetes: the Hub's own image by
+	// digest, the helper pods' and init containers' image).
+	SelfImage string
 	// VPNStatusFile is HUB_VPN_STATUS_FILE, wg's status.json (contract
 	// §16; main's default /wg-data/status.json; "" = wg is never up).
 	VPNStatusFile string

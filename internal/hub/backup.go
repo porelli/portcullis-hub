@@ -1248,6 +1248,15 @@ func (h *Hub) fillVolumeWith(ctx context.Context, id string, v docker.Volume, ex
 			return false, fmt.Errorf("volume %s: %w", v.Name, err)
 		}
 	}
+	if h.kubeOn() {
+		// The PVC's owner is the translation's (the provisioner refuses
+		// a PVC without it).
+		owner, err := h.kubeVolumeOwner(ctx, id, v.Labels[docker.LabelVolume])
+		if err != nil {
+			return false, fmt.Errorf("volume %s: %w", v.Name, err)
+		}
+		v.Options = owner
+	}
 	if err := h.rt.CreateVolume(ctx, v); err != nil {
 		return false, fmt.Errorf("creating volume %s: %w", v.Name, err)
 	}
