@@ -17,7 +17,7 @@ func pendingBlocks(t *testing.T) string {
 	for _, start := range []string{
 		"  function pickCandidates(g) {", "  function addPeopleHtml(g) {", "  function pickAddLabel(n) {", "  function pendingNote(n) {",
 		"  function pickChips(g) {", "  function redrawPicks() {", "  function pendingPicks() {", "  function leaveOk(next) {",
-		"  function onBeforeUnload(e) {", "  function onHash() {", "  function userSelectTab(name, focus) {",
+		"  function onBeforeUnload(e) {", "  function stampHistory() {", "  function undoMove() {", "  function onHash() {", "  function userSelectTab(name, focus) {",
 	} {
 		b.WriteString(jsBlock(t, js, start, "\n  }\n"))
 	}
@@ -35,6 +35,8 @@ let groupPage = null, personPage = null, tab = 'groups', dir = {};
 let confirms = [], answer = true, hashes = [], routes = [], tabs = [];
 global.confirm = m => { confirms.push(m); return answer; };
 global.location = { hash: '' };
+let navSeq = 0, curSeq = 0, moves = [];
+global.history = { state: null, back() { moves.push('back'); }, forward() { moves.push('forward'); }, replaceState(st) { this.state = st; } };
 const setHash = (h, push) => hashes.push(h);
 const legacyUser = () => null;
 const parseRoute = h => { const m = /^#groups\/(.+)$/.exec(h || ''); return m ? { group: decodeURIComponent(m[1]) } : null; };
@@ -117,9 +119,13 @@ groupPage = 'users_photocraft'; pick.users = ['michele']; routes = []; hashes = 
 e = ev(); const rv = onBeforeUnload(e); out.unload = e.prevented && e.returnValue === '' && rv === '';
 // The same page's hash: no question.
 location.hash = '#groups/users_photocraft'; onHash(); out.sameAsks = confirms.length;
-// No: stay, hash restored, picks kept.
-answer = false; location.hash = '#groups/other'; onHash();
-out.noAsked = confirms.length; out.noMsg = confirms[confirms.length - 1]; out.noHash = hashes; out.noRoutes = routes.length; out.noPicks = pick.users.slice();
+// No on a new navigation (an entry without a number): back to the group.
+answer = false; history.state = null; location.hash = '#groups/other'; onHash();
+out.noAsked = confirms.length; out.noMsg = confirms[confirms.length - 1]; out.noMoves = moves.slice(); out.noRoutes = routes.length; out.noPicks = pick.users.slice();
+// No on Back (an older entry): forward again; on Forward (a newer one): back.
+moves = []; curSeq = 5; history.state = { pdSeq: 2 }; location.hash = '#people'; onHash();
+history.state = { pdSeq: 9 }; location.hash = '#people'; onHash();
+out.dirMoves = moves.slice(); out.dirHashes = hashes.slice();
 const tabsBefore = tabs.length; userSelectTab('people', false); out.tabNo = tabs.length - tabsBefore;
 // Yes: leave, picks dropped.
 answer = true; location.hash = '#groups/other'; onHash();
@@ -132,12 +138,12 @@ out.otherPage = e.prevented || confirms.length !== before;
 console.log(JSON.stringify(out));
 `
 	var got struct {
-		UnloadNone, Unload, UnloadAfter, OtherPage bool
-		ConfirmsNone, SameAsks, NoAsked, NoRoutes  int
-		TabNo                                      int
-		NoMsg                                      string
-		NoHash, NoPicks, YesPicks                  []string
-		YesRoutes                                  []map[string]string
+		UnloadNone, Unload, UnloadAfter, OtherPage      bool
+		ConfirmsNone, SameAsks, NoAsked, NoRoutes       int
+		TabNo                                           int
+		NoMsg                                           string
+		NoMoves, DirMoves, DirHashes, NoPicks, YesPicks []string
+		YesRoutes                                       []map[string]string
 	}
 	nodeJSON(t, script, &got)
 	if got.UnloadNone || got.ConfirmsNone != 0 {
@@ -150,8 +156,12 @@ console.log(JSON.stringify(out));
 		t.Errorf("the same group's hash asked (%d)", got.SameAsks)
 	}
 	if got.NoAsked != 1 || !strings.Contains(got.NoMsg, "michele is picked but not added to users_photocraft yet") ||
-		len(got.NoHash) != 1 || got.NoHash[0] != "#groups/users_photocraft" || got.NoRoutes != 0 || len(got.NoPicks) != 1 {
-		t.Errorf("No: asked %d %q, hashes %v, routes %d, picks %v", got.NoAsked, got.NoMsg, got.NoHash, got.NoRoutes, got.NoPicks)
+		strings.Join(got.NoMoves, ",") != "back" || got.NoRoutes != 0 || len(got.NoPicks) != 1 {
+		t.Errorf("No: asked %d %q, moves %v, routes %d, picks %v", got.NoAsked, got.NoMsg, got.NoMoves, got.NoRoutes, got.NoPicks)
+	}
+	// The entry moved to is never rewritten: the move is undone instead.
+	if strings.Join(got.DirMoves, ",") != "forward,back" || len(got.DirHashes) != 0 {
+		t.Errorf("No after Back / Forward: moves %v, rewritten hashes %v", got.DirMoves, got.DirHashes)
 	}
 	if got.TabNo != 0 {
 		t.Errorf("a tab switch answered No still switched (%d)", got.TabNo)

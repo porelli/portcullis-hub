@@ -1699,7 +1699,30 @@
   function setHash(h, push) {
     if (location.hash === h || (!h && !location.hash)) return;
     const url = h || location.pathname + location.search;
-    if (push) history.pushState(null, '', url); else history.replaceState(null, '', url);
+    if (push) { curSeq = ++navSeq; history.pushState({ pdSeq: curSeq }, '', url); } else history.replaceState({ pdSeq: curSeq }, '', url);
+  }
+  // History entries carry a sequence number (pdSeq), so a move the
+  // person cancels (leaveOk) can be undone in the right direction:
+  // curSeq is the shown entry's, navSeq the highest handed out.
+  let navSeq = 0, curSeq = 0;
+  function stampHistory() {
+    const st = history.state;
+    if (st && typeof st.pdSeq === 'number') {
+      curSeq = st.pdSeq;
+      navSeq = Math.max(navSeq, curSeq);
+      return;
+    }
+    curSeq = ++navSeq;
+    history.replaceState({ pdSeq: curSeq }, '');
+  }
+  // undoMove goes back to the entry the browser just left: forward after
+  // Back (an older entry), back after Forward or a new navigation (no
+  // number yet, or a newer one). The hashchange that follows lands on
+  // the group's own page: nothing asks, nothing reroutes.
+  function undoMove() {
+    const st = history.state;
+    if (st && typeof st.pdSeq === 'number' && st.pdSeq < curSeq) history.forward();
+    else history.back();
   }
   // applyRoute shows the list or a group's page (before the first load
   // only the state is set: load renders it).
@@ -1754,7 +1777,8 @@
     if (!root) return;
     // Leaving a group's page with people picked but not added: ask; on
     // No, stay (its hash back).
-    if (!leaveOk(location.hash)) { setHash(groupHash(groupPage), false); return; }
+    if (!leaveOk(location.hash)) { undoMove(); return; }
+    stampHistory();
     const old = legacyUser(location.hash);
     if (old) { setHash(personHash(old.name), false); openAt(old.name, old.action); return; }
     let r = parseRoute(location.hash);
@@ -1924,7 +1948,8 @@
     h += '<div class="pd-gp-head"><h2 class="pd-gp-name pd-mono">' + esc(g.name) + '</h2>' + kindPill(g) + (g.admin ? '<span class="pd-pill info">administrator group</span>' : '') + '</div>';
     h += '<p class="pd-gp-sub">Gives access to ' + givesAccess(g, admin) + '</p>';
     if (g.rule) {
-      h += '<div class="pd-gp-rule"><span class="pd-muted">Rule:</span> <code>' + esc(g.rule.text) + '</code>';
+      h += '<div class="pd-gp-rule"><span class="pd-muted">Rule:</span> <code>' + esc(g.rule.text) + '</code>' +
+        (g.rule_suspended ? ' <span class="pd-pill bad" title="Its rule uses a field that isn\'t admin-only: only people added by hand are in">suspended</span>' : '');
       if (admin) h += ' <button type="button" class="pd-btn secondary xs" data-act="rule-open" data-group="' + esc(g.name) + '">Edit rule…</button>' +
         '<button type="button" class="pd-btn ghost xs" data-act="make-manual" data-group="' + esc(g.name) + '">Make manual</button>';
       h += '</div>';
@@ -3206,6 +3231,7 @@
     }
     const old = legacyUser(location.hash);
     if (old) { setHash(personHash(old.name), false); pendingOpen = old; }
+    stampHistory();
     const r = parseRoute(location.hash);
     if (r && r.person) { tab = 'people'; personPage = r.person; }
     else if (r) { tab = 'groups'; groupPage = r.group; }
