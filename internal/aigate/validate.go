@@ -336,7 +336,7 @@ func (r *Resource) validateCompanion(f *File) error {
 	return nil
 }
 
-// knownMethod: one of the six sign-in method ids (§8.1; no family, no amr
+// knownMethod: one of the seven sign-in method ids (§8.1; no family, no amr
 // value).
 func knownMethod(s string) bool { return slices.Contains(signin.Methods, signin.Method(s)) }
 

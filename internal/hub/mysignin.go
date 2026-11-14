@@ -405,9 +405,6 @@ func ownPasswordRefused(u string) bool {
 	return noPasswordAccounts[u] || strings.HasPrefix(u, directory.ReservedUserPrefix)
 }
 
-// hasOwnPassword reports whether u has a Hub-set password for their
-// current LLDAP account (the record's uuid is the account's); the
-// directory unreadable counts as none (fail closed).
 // passwordChangeFreshMethods may approve changing an existing own
 // password, never adding the first one (T10).
 var passwordChangeFreshMethods = []signin.Method{signin.Password, signin.TOTP}
@@ -422,6 +419,9 @@ func passwordFreshAllowed(m signin.Method, hasPassword func() bool) bool {
 	return slices.Contains(passwordChangeFreshMethods, m) && hasPassword()
 }
 
+// hasOwnPassword reports whether u has a Hub-set password for their
+// current LLDAP account (the record's uuid is the account's); the
+// directory unreadable counts as none (fail closed).
 func (h *Hub) hasOwnPassword(ctx context.Context, u string) bool {
 	h.mu.RLock()
 	rec, ok := h.st.SignIn.Passwords[u]

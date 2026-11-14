@@ -290,7 +290,7 @@
       '<div class="msi-panel" data-msi-panel="' + esc(m.id) + '"></div>';
   }
 
-  // methodsHtml: the six rows in the view's (canonical) order and, on a
+  // methodsHtml: the seven rows in the view's (canonical) order and, on a
   // person's tab, the setup link and Remove all passkeys.
   function methodsHtml(view, ctx) {
     const o = offers(view, ctx);
