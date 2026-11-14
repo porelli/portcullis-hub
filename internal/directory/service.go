@@ -371,6 +371,10 @@ type GroupView struct {
 	// AddsBlocked: why the evaluator adds nobody to this guarding group
 	// ("" if it does), see addsBlocked.
 	AddsBlocked string `json:"adds_blocked,omitempty"`
+	// RuleSuspended: the rule counts for nothing (ruleSuspended: a guarding
+	// group's rule on a field that isn't admin-only, "Allow any profile
+	// field…" off); AddsBlocked says why and how to fix it.
+	RuleSuspended bool `json:"rule_suspended,omitempty"`
 	// Matches: who the rule matches right now (the evaluator's own
 	// matching, protected accounts left out), sorted; admins only, nil
 	// for manual groups and in every other view.
@@ -759,8 +763,12 @@ func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins
 		if gc.Rule != nil {
 			gv.Rule = &RuleView{Text: rules.Format(gc.Rule), Expr: gc.Rule}
 			gv.AddsBlocked = s.addsBlocked(cfg, guarding, gv.Name, gc)
+			gv.RuleSuspended = s.ruleSuspended(cfg, guarding, gv.Name, gc)
 			if s.ruleGroupAllowed(gv.Name, admins) {
 				evals[gv.Name] = s.evalGroup(gc, d, sn, now)
+				if gv.RuleSuspended {
+					evals[gv.Name].suspend()
+				}
 				if full {
 					gv.Matches = idsOf(sn, evals[gv.Name].matched)
 				}
@@ -2031,9 +2039,12 @@ func purgeGroup(cfg *Config, group string, fold bool) []string {
 			continue
 		}
 		switch {
-		case gc == nil || (gc.Rule == nil && len(gc.Exceptions) == 0 && len(gc.Expiry) == 0):
+		case gc == nil || (gc.Rule == nil && len(gc.Exceptions) == 0 && len(gc.Expiry) == 0 && !gc.AllowAnyField):
 			out = append(out, "empty entry of "+name)
 		default:
+			if gc.AllowAnyField {
+				out = append(out, "allow_any_field of "+name)
+			}
 			if gc.Rule != nil {
 				out = append(out, "rule of "+name)
 			}

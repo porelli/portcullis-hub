@@ -85,19 +85,43 @@ func TestAllowAnyFieldOnAppAdminGroup(t *testing.T) {
 		t.Errorf("PrivilegeProblem (option on) = %q, %v", p, err)
 	}
 
-	// Clearing: audited; adds stop (nobody new joins), the field rule
-	// stands as stored, privileged values are refused again.
+	// dave (Rome) is added by hand.
+	if err := e.svc.AddException(ctx, asRoot, "admin_app", directory.Exception{User: "dave", Reason: "on call", Include: true}); err != nil {
+		t.Fatal(err)
+	}
+	evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "admin_app", "bob", "carol", "dave")
+
+	// Clearing fails closed: audited; the rule is suspended, so the people
+	// it added leave at once (each audited group.remove_member on the
+	// group), the one added by hand stays, nobody new joins, privileged
+	// values are refused again.
 	if err := e.svc.SetAllowAnyField(ctx, asRoot, "admin_app", false); err != nil {
 		t.Fatal(err)
 	}
 	if a := newestAudit(t, e, "group.allow_any_field"); a.Detail != "allow=false" || a.Result != "ok" {
 		t.Errorf("audit = %+v", a)
 	}
-	setCity(t, e, "dave", "Milan")
 	evaluate(t, e, time.Now().UTC())
-	wantMembers(t, e, "admin_app", "bob", "carol")
-	if v := groupView(t, e, "admin_app"); !strings.Contains(v.AddsBlocked, "city") {
-		t.Errorf("adds blocked = %q, want the city reason", v.AddsBlocked)
+	wantMembers(t, e, "admin_app", "dave")
+	removed := map[string]bool{}
+	for _, a := range groupEntries(t, e, "admin_app") {
+		if a.Action == "group.remove_member" && a.Result == "ok" {
+			removed[a.Detail] = true
+		}
+	}
+	if !removed["bob (rule suspended: allow_any_field off)"] || !removed["carol (rule suspended: allow_any_field off)"] || len(removed) != 2 {
+		t.Errorf("removals audited = %v", removed)
+	}
+	setCity(t, e, "dave", "Milan")
+	e.ll.AddUser("erin", "erin@example.org", "Erin", "")
+	setCity(t, e, "erin", "Milan")
+	evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "admin_app", "dave")
+	v := groupView(t, e, "admin_app")
+	if !v.RuleSuspended || !strings.Contains(v.AddsBlocked, "suspended") || !strings.Contains(v.AddsBlocked, "make city admin-only") ||
+		!strings.Contains(v.AddsBlocked, "turn \"Allow any profile field in this group's rule\" back on") || len(v.Matches) != 0 {
+		t.Errorf("view = suspended %v, adds blocked %q, matches %v", v.RuleSuspended, v.AddsBlocked, v.Matches)
 	}
 	if p, _ := e.svc.PrivilegeProblem(ctx, "admin_app"); p == "" {
 		t.Error("PrivilegeProblem (option off) = \"\", want the field reason")
@@ -179,5 +203,69 @@ func TestAllowAnyFieldNeverOnPermissionOrAdminGroups(t *testing.T) {
 	// Clearing is always allowed.
 	if err := e.svc.SetAllowAnyField(ctx, asRoot, "admin_app", false); err != nil {
 		t.Errorf("clearing on a permission group: %v", err)
+	}
+}
+
+// TestAllowAnyFieldOnPrivilegedGroup: a group named in a privileged
+// setting row (App.PrivilegedGroups) takes the option like admin_<app>.
+func TestAllowAnyFieldOnPrivilegedGroup(t *testing.T) {
+	e := guardEnv(t)
+	e.svc.Apps = func() []directory.App {
+		return []directory.App{{ID: "immich", Name: "Immich", Enabled: true, AccessGroup: "users_immich", PrivilegedGroups: []string{"milan"}}}
+	}
+	cityRule := mustRule(t, `city = "Milan"`)
+	err := e.svc.ConvertApply(ctx, asRoot, "milan", cityRule, nil)
+	wantStatus(t, "privileged city (option off)", err, 409)
+	if err == nil || !strings.Contains(err.Error(), "a privileged value of app immich") || !strings.Contains(err.Error(), "Allow any profile field") {
+		t.Errorf("refusal = %v", err)
+	}
+	if v := groupView(t, e, "milan"); v.AllowAnyField == nil {
+		t.Error("the option isn't offered on a privileged group")
+	}
+	if err := e.svc.SetAllowAnyField(ctx, asRoot, "milan", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.ConvertApply(ctx, asRoot, "milan", cityRule, nil); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := e.svc.PrivilegeProblem(ctx, "milan"); p != "" {
+		t.Errorf("PrivilegeProblem = %q", p)
+	}
+	evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "milan", "bob", "carol")
+}
+
+// TestAllowAnyFieldStillSkipsDelegateCreated: with the option on, an
+// account a delegate created (created_by) is still not added.
+func TestAllowAnyFieldStillSkipsDelegateCreated(t *testing.T) {
+	e := guardEnv(t)
+	e.ll.AddGroup("admin_app")
+	cfg, _ := e.svc.Store.Load()
+	cfg.CreatedBy["carol"] = "ivy"
+	if err := e.svc.Store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.SetAllowAnyField(ctx, asRoot, "admin_app", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.ConvertApply(ctx, asRoot, "admin_app", mustRule(t, `city = "Milan"`), nil); err != nil {
+		t.Fatal(err)
+	}
+	evaluate(t, e, time.Now().UTC())
+	wantMembers(t, e, "admin_app", "bob")
+}
+
+// TestDeleteGroupReportsAllowAnyField: the purge report names the option.
+func TestDeleteGroupReportsAllowAnyField(t *testing.T) {
+	e := guardEnv(t)
+	e.ll.AddGroup("admin_app")
+	if err := e.svc.SetAllowAnyField(ctx, asRoot, "admin_app", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteErr(e.svc.DeleteGroup(ctx, asRoot, "admin_app", "admin_app")); err != nil {
+		t.Fatal(err)
+	}
+	if a := newestAudit(t, e, "group.delete"); !strings.Contains(a.Detail, "allow_any_field of admin_app") || strings.Contains(a.Detail, "empty entry") {
+		t.Errorf("group.delete detail = %q", a.Detail)
 	}
 }
