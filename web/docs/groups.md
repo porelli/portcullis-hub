@@ -151,7 +151,8 @@ An **app admin group** (`admin_<app>`) or a **privileged setting group** has an 
 !!! warning "A person who can edit these fields for others (a delegate with edit details) could then grant this group's rights"
     Turn it on only if you trust everyone with **edit details** with this group's rights, or if nobody holds that permission.
 
-- Turning it on or off is audited (`group.allow_any_field`) and shows in the group's History. Turning it off doesn't remove anyone; it stops new people being added while the rule uses a field that isn't admin-only.
+- Turning it on or off is audited (`group.allow_any_field`) and shows in the group's History.
+- **Turning it off fails closed.** While the rule uses a field that isn't admin-only, the rule is **suspended**: the people it added are removed at once (each audited `group.remove_member`, "rule suspended: allow_any_field off"), people **added by hand** stay, and nobody new joins. The group's page marks the rule *suspended* and names the two ways out: make the field admin-only, or turn the option back on. The same happens when a group becomes an app admin or privileged group while its rule already uses such a field.
 - It never applies to **permission groups** or **administrator groups**: their rules always use admin-only fields only. A group with the option on can't be given a delegated permission while its rule uses such a field.
 - The other guards stay: the rule must not match a person with no details (a new account), and accounts a delegate created aren't added until an administrator acts on them.
 
