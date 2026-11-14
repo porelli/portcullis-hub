@@ -297,6 +297,13 @@ var defaultRules = struct {
 	},
 }
 
+// optionalDefaults are default grants some Kubernetes versions give every
+// authenticated user and others don't (1.37: read ClusterTrustBundles,
+// system:basic-user): allowed, never required.
+var optionalDefaults = []authv1.ResourceRule{
+	{Verbs: []string{"get", "list", "watch"}, APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"clustertrustbundles"}},
+}
+
 // grant is one (group, resource, verb) triple.
 type grant struct{ group, resource, verb string }
 
@@ -339,9 +346,10 @@ func RulesExact(st authv1.SubjectRulesReviewStatus, want []rbacv1.PolicyRule) er
 	if err != nil {
 		return fmt.Errorf("the ServiceAccount has %v", err)
 	}
+	optional, _ := expand(optionalDefaults)
 	var extra, missing []string
 	for g := range have {
-		if !wantG[g] {
+		if !wantG[g] && !optional[g] {
 			extra = append(extra, g.group+"/"+g.resource+" "+g.verb)
 		}
 	}

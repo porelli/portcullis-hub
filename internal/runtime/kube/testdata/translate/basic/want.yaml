@@ -266,11 +266,27 @@ spec:
     services:
     - kind: Service
       name: basic--web
-      namespace: portcullis-apps
       port: 8080
   tls:
     options:
       name: authaware@file
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: basic
+    portcullis.io/owner: hub
+  name: basic--web
+  namespace: portcullis-edge
+spec:
+  externalName: basic--web.portcullis-apps.svc.cluster.local
+  ports:
+  - name: tcp-8080
+    port: 8080
+    protocol: TCP
+  type: ExternalName
 ---
 # step 1 wait none
 apiVersion: apps/v1

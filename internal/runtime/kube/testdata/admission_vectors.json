@@ -627,7 +627,7 @@
   "reason_contains": "a Secret, ConfigMap or PVC that isn't this insta"
  },
  {
-  "name": "its own Secret and a tpl- ConfigMap",
+  "name": "its own Secret and its template-files ConfigMap",
   "object": {
    "apiVersion": "v1",
    "kind": "Pod",
@@ -656,7 +656,7 @@
      {
       "name": "t",
       "configMap": {
-       "name": "tpl-echo-0123456789"
+       "name": "app--tpl-0123456789"
       }
      }
     ]
@@ -1266,8 +1266,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -1314,8 +1313,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -1356,8 +1354,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -1540,8 +1537,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -1591,8 +1587,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2532,7 +2527,6 @@
       "services": [
        {
         "name": "app--web",
-        "namespace": "portcullis-apps",
         "port": 80
        }
       ]
@@ -2613,8 +2607,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2664,8 +2657,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2715,8 +2707,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2766,8 +2757,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2817,8 +2807,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2868,8 +2857,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2919,8 +2907,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -2970,8 +2957,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -3021,8 +3007,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ],
       "priority": 100000
@@ -3073,8 +3058,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -3121,8 +3105,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -3172,8 +3155,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -3223,8 +3205,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -3675,7 +3656,6 @@
       "services": [
        {
         "name": "app--web",
-        "namespace": "portcullis-apps",
         "port": 80
        }
       ]
@@ -3752,7 +3732,6 @@
       "services": [
        {
         "name": "app--web",
-        "namespace": "portcullis-apps",
         "port": 80
        }
       ]
@@ -3829,7 +3808,6 @@
       "services": [
        {
         "name": "app--web",
-        "namespace": "portcullis-apps",
         "port": 80
        }
       ]
@@ -3970,8 +3948,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4022,8 +3999,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4073,8 +4049,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4124,8 +4099,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4175,8 +4149,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4226,8 +4199,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4277,8 +4249,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4328,8 +4299,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4381,8 +4351,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4479,8 +4448,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -4530,8 +4498,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -5539,8 +5506,7 @@
        {
         "name": "app--web",
         "port": 80,
-        "kind": "Service",
-        "namespace": "portcullis-apps"
+        "kind": "Service"
        }
       ]
      }
@@ -5687,7 +5653,7 @@
   "reason_contains": "a Job's one-shot pods (portcullis.io/one-shot)"
  },
  {
-  "name": "a one-shot root Job with template files",
+  "name": "a one-shot root Job with another template's tpl- ConfigMap",
   "object": {
    "apiVersion": "batch/v1",
    "kind": "Job",
@@ -5756,7 +5722,7 @@
   },
   "as": "hub",
   "want": "deny",
-  "reason_contains": "a Job's one-shot pods (portcullis.io/one-shot)"
+  "reason_contains": "a volume outside the allowlist"
  },
  {
   "name": "a pod with hostAliases for the instance's aliases",
@@ -6309,5 +6275,106 @@
   "as": "hub",
   "want": "deny",
   "reason_contains": "a volume outside the allowlist"
+ },
+ {
+  "name": "a route naming the apps namespace's Service across namespaces",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "xns",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "(Host(`a.example.org`) || Host(`b.example.org`)) && PathPrefix(`/oauth2/`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a service must be"
+ },
+ {
+  "name": "a route naming another instance's edge Service",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "other-svc",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "(Host(`a.example.org`) || Host(`b.example.org`)) && PathPrefix(`/oauth2/`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "other--web",
+        "port": 80,
+        "kind": "Service"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a service must be"
  }
 ]

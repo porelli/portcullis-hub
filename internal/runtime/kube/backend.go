@@ -269,7 +269,7 @@ var edgeKinds = map[string]bool{"IngressRoute": true, "Middleware": true}
 // objectNamespace is where o goes: the edge namespace for routes (true),
 // else the apps namespace.
 func (b *Backend) objectNamespace(o *unstructured.Unstructured) (string, bool) {
-	if edgeKinds[o.GetKind()] {
+	if edgeKinds[o.GetKind()] || o.GetNamespace() == b.cfg.EdgeNamespace {
 		return b.cfg.EdgeNamespace, true
 	}
 	return b.cfg.Namespace, false
@@ -601,9 +601,19 @@ func (b *Backend) down(ctx context.Context, instance string) error {
 	sel := metav1.ListOptions{LabelSelector: LabelInstance + "=" + instance}
 	bg := metav1.DeletePropagationBackground
 	var errs []error
+	type pass struct {
+		kind string
+		edge bool
+	}
+	var passes []pass
 	for _, k := range downKinds {
+		passes = append(passes, pass{k, edgeKinds[k]})
+	}
+	passes = append(passes, pass{"Service", true}) // the routes' ExternalName Services
+	for _, ps := range passes {
+		k := ps.kind
 		ns, sl := b.cfg.Namespace, sel
-		if edgeKinds[k] {
+		if ps.edge {
 			// The edge namespace: only the Hub's own objects of the
 			// instance (owner=core is never touched).
 			ns = b.cfg.EdgeNamespace
@@ -619,7 +629,7 @@ func (b *Backend) down(ctx context.Context, instance string) error {
 			continue
 		}
 		for _, o := range l.Items {
-			if o.GetLabels()[LabelInstance] != instance || edgeKinds[k] && o.GetLabels()[LabelOwner] != OwnerHub {
+			if o.GetLabels()[LabelInstance] != instance || ps.edge && o.GetLabels()[LabelOwner] != OwnerHub {
 				continue
 			}
 			if err := res.Delete(ctx, o.GetName(), metav1.DeleteOptions{PropagationPolicy: &bg}); err != nil && !apierrors.IsNotFound(err) {

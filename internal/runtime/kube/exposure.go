@@ -25,13 +25,34 @@ type Exposure map[string]string
 
 func exposureKey(o *unstructured.Unstructured) string { return o.GetKind() + "/" + o.GetName() }
 
+// exposureSpec is what drift compares: a route's spec as written, an
+// edge Service's type, externalName and ports (the API server fills in
+// the rest).
+func exposureSpec(o *unstructured.Unstructured) string {
+	spec := o.Object["spec"]
+	if o.GetKind() == "Service" {
+		typ, _, _ := unstructured.NestedString(o.Object, "spec", "type")
+		en, _, _ := unstructured.NestedString(o.Object, "spec", "externalName")
+		ps, _, _ := unstructured.NestedSlice(o.Object, "spec", "ports")
+		var ports []string
+		for _, p := range ps {
+			m, _ := p.(map[string]any)
+			ports = append(ports, fmt.Sprint(m["name"], "/", m["port"], "/", m["protocol"]))
+		}
+		slices.Sort(ports)
+		spec = map[string]any{"type": typ, "externalName": en, "ports": ports}
+	}
+	b, _ := json.Marshal(spec)
+	return string(b)
+}
+
 // LiveExposure reads the instance's IngressRoutes and Middlewares.
 func (b *Backend) LiveExposure(ctx context.Context, instance string) (Exposure, error) {
 	if err := b.gate(); err != nil {
 		return nil, err
 	}
 	out := Exposure{}
-	for _, k := range []string{"IngressRoute", "Middleware"} {
+	for _, k := range []string{"IngressRoute", "Middleware", "Service"} {
 		l, err := b.cfg.Dynamic.Resource(kinds[k]).Namespace(b.cfg.EdgeNamespace).List(ctx, metav1.ListOptions{LabelSelector: LabelInstance + "=" + instance + "," + LabelOwner + "=" + OwnerHub})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -44,8 +65,7 @@ func (b *Backend) LiveExposure(ctx context.Context, instance string) (Exposure, 
 			if o.GetKind() == "" {
 				o.SetKind(k)
 			}
-			spec, _ := json.Marshal(o.Object["spec"])
-			out[exposureKey(o)] = string(spec)
+			out[exposureKey(o)] = exposureSpec(o)
 		}
 	}
 	return out, nil
@@ -70,8 +90,7 @@ func (b *Backend) ExposureDrift(ctx context.Context, instance string, labels map
 func (e Exposure) Diff(want []*unstructured.Unstructured) string {
 	w := Exposure{}
 	for _, o := range want {
-		spec, _ := json.Marshal(o.Object["spec"])
-		w[exposureKey(o)] = string(spec)
+		w[exposureKey(o)] = exposureSpec(o)
 	}
 	var out []string
 	for _, k := range slices.Sorted(mapKeys(w)) {

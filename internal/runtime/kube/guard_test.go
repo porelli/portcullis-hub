@@ -178,7 +178,17 @@ func TestRoleExact(t *testing.T) {
 	if err := RulesExact(ok, r.Rules); err != nil {
 		t.Fatalf("exact: %v", err)
 	}
+	// Kubernetes 1.37 lets every authenticated user read
+	// ClusterTrustBundles: allowed, not required.
+	ctb := *ok.DeepCopy()
+	ctb.ResourceRules = append(ctb.ResourceRules, authv1.ResourceRule{Verbs: []string{"get", "list", "watch"}, APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"clustertrustbundles"}})
+	if err := RulesExact(ctb, r.Rules); err != nil {
+		t.Errorf("with the 1.37 default: %v", err)
+	}
 	for name, mod := range map[string]func(*authv1.SubjectRulesReviewStatus){
+		"create clustertrustbundles": func(s *authv1.SubjectRulesReviewStatus) {
+			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"create"}, APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"clustertrustbundles"}})
+		},
 		"get pods/exec": func(s *authv1.SubjectRulesReviewStatus) {
 			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"get"}, APIGroups: []string{""}, Resources: []string{"pods/exec"}})
 		},
@@ -223,7 +233,8 @@ func TestRoleExact(t *testing.T) {
 		}
 	}
 	e, err := EdgeRole()
-	if err != nil || e.Namespace != "portcullis-edge" || len(e.Rules) != 1 || e.Rules[0].APIGroups[0] != "traefik.io" || strings.Join(e.Rules[0].Resources, ",") != "ingressroutes,middlewares" {
+	if err != nil || e.Namespace != "portcullis-edge" || len(e.Rules) != 2 || e.Rules[0].APIGroups[0] != "traefik.io" || strings.Join(e.Rules[0].Resources, ",") != "ingressroutes,middlewares" ||
+		e.Rules[1].APIGroups[0] != "" || strings.Join(e.Rules[1].Resources, ",") != "services" {
 		t.Errorf("edge role %+v %v", e, err)
 	}
 }

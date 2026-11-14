@@ -538,7 +538,7 @@ func TestRoutesInEdgeNamespace(t *testing.T) {
 		}
 		if k == "IngressRoute" {
 			r := o.Object["spec"].(map[string]any)["routes"].([]any)[0].(map[string]any)
-			if s := r["services"].([]any)[0].(map[string]any); s["namespace"] != ns {
+			if s := r["services"].([]any)[0].(map[string]any); s["namespace"] != nil || s["name"] != "rt--web" {
 				t.Errorf("service ref %v", s)
 			}
 			if m := r["middlewares"].([]any)[0].(map[string]any); m["namespace"] != EdgeNamespace {
@@ -549,11 +549,24 @@ func TestRoutesInEdgeNamespace(t *testing.T) {
 			t.Errorf("%s in the apps namespace", k)
 		}
 	}
+	// The ExternalName Service the route names, in the edge namespace.
+	es, err := c.dyn.Resource(kinds["Service"]).Namespace(EdgeNamespace).Get(ctx, "rt--web", metav1.GetOptions{})
+	if err != nil || es.Object["spec"].(map[string]any)["type"] != "ExternalName" || es.GetLabels()[LabelOwner] != OwnerHub {
+		t.Fatalf("edge Service: %v %v", es, err)
+	}
+	if d, err := b.ExposureDrift(ctx, "rt", map[string]map[string]string{"web": modelOf(t, compose, "rt").Services["web"].Labels}); err != nil || d != "" {
+		t.Errorf("drift right after up: %q %v", d, err)
+	}
+	c.dyn.Tracker().Delete(kinds["Service"], EdgeNamespace, "rt--web")
+	if d, _ := b.ExposureDrift(ctx, "rt", map[string]map[string]string{"web": modelOf(t, compose, "rt").Services["web"].Labels}); !strings.Contains(d, "service/rt--web") {
+		t.Errorf("drift without the edge Service: %q", d)
+	}
+	c.dyn.Tracker().Create(kinds["Service"], es, EdgeNamespace)
 	c.dyn.Tracker().Create(kinds["IngressRoute"], core, EdgeNamespace)
 	if err := b.DownByName(ctx, "portcullis-rt"); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(c.deleted, "ingressroutes/rt--r-app") || !slices.Contains(c.deleted, "middlewares/rt--m-own-mw") {
+	if !slices.Contains(c.deleted, "services/rt--web") || !slices.Contains(c.deleted, "ingressroutes/rt--r-app") || !slices.Contains(c.deleted, "middlewares/rt--m-own-mw") {
 		t.Errorf("deleted %v", c.deleted)
 	}
 	if _, err := c.dyn.Resource(kinds["IngressRoute"]).Namespace(EdgeNamespace).Get(ctx, "rt--r-app", metav1.GetOptions{}); err == nil {

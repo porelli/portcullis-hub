@@ -456,7 +456,7 @@ func TestTranslateClusterIPServices(t *testing.T) {
 			continue
 		}
 		typ, _, _ := unstructured.NestedString(o.Object, "spec", "type")
-		if typ == "LoadBalancer" || o.GetName() == "cs--pods" {
+		if typ == "LoadBalancer" || o.GetName() == "cs--pods" || o.GetNamespace() == EdgeNamespace {
 			continue
 		}
 		if typ != "" && typ != "ClusterIP" {

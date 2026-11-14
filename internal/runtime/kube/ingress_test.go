@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -387,8 +389,7 @@ func TestExposureDiff(t *testing.T) {
 		t.Errorf("diff %q", d)
 	}
 	for _, o := range want {
-		b, _ := json.Marshal(o.Object["spec"])
-		live[exposureKey(o)] = string(b)
+		live[exposureKey(o)] = exposureSpec(o)
 	}
 	if d := live.Diff(want); d != "" {
 		t.Errorf("equal: %q", d)
@@ -430,5 +431,51 @@ func TestRouteShapeForCore(t *testing.T) {
 				t.Errorf("%s carries annotations %v", o.GetName(), o.GetAnnotations())
 			}
 		}
+	}
+}
+
+// TestEdgeExternalNameServices: Traefik watches only the edge namespace,
+// so every Service a route names gets an ExternalName Service there,
+// <instance>--<svc> → <instance>--<svc>.<apps>.svc.cluster.local, with
+// the routes' ports only, labelled owner=hub + the instance; the route
+// references it in its own namespace.
+func TestEdgeExternalNameServices(t *testing.T) {
+	objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{
+		"web": {"traefik.http.routers.a.rule": "Host(`a.example.org`)", "traefik.http.routers.a.service": "web",
+			"traefik.http.routers.b.rule": "Host(`b.example.org`)", "traefik.http.routers.b.service": "web",
+			"traefik.http.services.web.loadbalancer.server.port": "8080"},
+		"api": {"traefik.http.routers.c.rule": "Host(`c.example.org`)", "traefik.http.routers.c.service": "api", "traefik.http.services.api.loadbalancer.server.port": "9000"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svcs := map[string]*unstructured.Unstructured{}
+	for _, o := range objs {
+		switch o.GetKind() {
+		case "Service":
+			svcs[o.GetName()] = o
+		case "IngressRoute":
+			ref := o.Object["spec"].(map[string]any)["routes"].([]any)[0].(map[string]any)["services"].([]any)[0].(map[string]any)
+			if _, ok := ref["namespace"]; ok || !strings.HasPrefix(ref["name"].(string), "app--") || ref["kind"] != "Service" {
+				t.Errorf("%s ref %v", o.GetName(), ref)
+			}
+		}
+	}
+	for name, want := range map[string]string{"app--web": "8080", "app--api": "9000"} {
+		o := svcs[name]
+		if o == nil {
+			t.Fatalf("no edge Service %s (%v)", name, slices.Sorted(mapKeys(svcs)))
+		}
+		spec := o.Object["spec"].(map[string]any)
+		if o.GetNamespace() != EdgeNamespace || o.GetLabels()[LabelOwner] != OwnerHub || o.GetLabels()[LabelInstance] != "app" ||
+			spec["type"] != "ExternalName" || spec["externalName"] != name+"."+ns+".svc.cluster.local" || spec["selector"] != nil {
+			t.Errorf("%s: %v %v", name, o.GetLabels(), spec)
+		}
+		if p := fmt.Sprint(spec["ports"]); p != "[map[name:tcp-"+want+" port:"+want+" protocol:TCP]]" {
+			t.Errorf("%s ports %s", name, p)
+		}
+	}
+	if len(svcs) != 2 {
+		t.Errorf("edge Services %v", slices.Sorted(mapKeys(svcs)))
 	}
 }

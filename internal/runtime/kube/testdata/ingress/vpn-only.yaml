@@ -37,7 +37,6 @@ spec:
     services:
     - kind: Service
       name: app--web
-      namespace: portcullis-apps
       port: 80
   tls:
     options:
@@ -62,3 +61,19 @@ spec:
     services:
     - kind: TraefikService
       name: group-gate@file
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: app
+    portcullis.io/owner: hub
+  name: app--web
+  namespace: portcullis-edge
+spec:
+  externalName: app--web.portcullis-apps.svc.cluster.local
+  ports:
+  - name: tcp-80
+    port: 80
+    protocol: TCP
+  type: ExternalName

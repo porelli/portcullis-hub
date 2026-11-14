@@ -75,8 +75,9 @@ func init() {
 // namespace.
 func IngressObjects(instance, namespace, appsNamespace string, labels map[string]map[string]string) ([]*unstructured.Unstructured, error) {
 	routers := map[string]*router{}
-	ports := map[string]int64{}     // own service → port
-	svcOwner := map[string]string{} // own service → compose service
+	edgeSvc := map[string]map[int64]bool{} // edge ExternalName Service → ports
+	ports := map[string]int64{}            // own service → port
+	svcOwner := map[string]string{}        // own service → compose service
 	mws := map[string]map[string]string{}
 	for _, svc := range slices.Sorted(mapKeys(labels)) {
 		for k, v := range labels[svc] {
@@ -186,6 +187,16 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 		if err != nil {
 			return nil, err
 		}
+		if svc["kind"] == "Service" {
+			// Traefik watches only the edge namespace: the route names
+			// the instance's ExternalName Service there.
+			delete(svc, "namespace")
+			n := svc["name"].(string)
+			if edgeSvc[n] == nil {
+				edgeSvc[n] = map[int64]bool{}
+			}
+			edgeSvc[n][svc["port"].(int64)] = true
+		}
 		route["services"] = []any{svc}
 		spec := map[string]any{"routes": []any{route}}
 		eps := splitList(r.entrypoints)
@@ -208,7 +219,25 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 		}
 		out = append(out, crd("IngressRoute", joinName(instance, "r-"+name, ""), namespace, instance, spec))
 	}
+	for _, n := range slices.Sorted(mapKeys(edgeSvc)) {
+		out = append(out, edgeService(n, namespace, appsNamespace, instance, slices.Sorted(mapKeys(edgeSvc[n]))))
+	}
 	return out, nil
+}
+
+// edgeService is the edge namespace's ExternalName Service name, aliasing
+// the apps namespace's Service of that name on ports (the routes' only):
+// no selector, labelled owner=hub + the instance.
+func edgeService(name, edgeNS, appsNS, instance string, ports []int64) *unstructured.Unstructured {
+	var ps []any
+	for _, p := range ports {
+		ps = append(ps, map[string]any{"name": "tcp-" + strconv.FormatInt(p, 10), "port": p, "protocol": "TCP"})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{"name": name, "namespace": edgeNS, "labels": map[string]any{LabelInstance: instance, LabelOwner: OwnerHub}},
+		"spec":     map[string]any{"type": "ExternalName", "externalName": name + "." + appsNS + ".svc." + ClusterDomain, "ports": ps},
+	}}
 }
 
 func toAny(ss []string) []any {

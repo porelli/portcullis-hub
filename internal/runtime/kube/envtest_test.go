@@ -114,6 +114,24 @@ var (
 	bindingName = regexp.MustCompile(`(?m)^(  name: portcullis-(?:apps|edge)-guard-[a-z-]+)$`)
 )
 
+// pendingCore rewrites the copied policies for a ruling core hasn't
+// shipped yet, so the envtest judges what the Hub emits now (the copy
+// stays byte for byte core's). Pending: routes name the edge namespace's
+// ExternalName Service <instance>--<svc> (no namespace). Delete the
+// rewrite once core's file has it; a rewrite that matches nothing fails.
+func pendingCore(t *testing.T, b []byte) []byte {
+	s := string(b)
+	for _, r := range [][2]string{
+		{"has(s.namespace) && s.namespace == variables.apps)))", "!has(s.namespace) && s.name.startsWith(variables.inst + '--'))))"},
+	} {
+		if !strings.Contains(s, r[0]) {
+			t.Fatalf("pendingCore: the copied policies no longer hold %q: drop the rewrite", r[0])
+		}
+		s = strings.ReplaceAll(s, r[0], r[1])
+	}
+	return []byte(s)
+}
+
 type env struct {
 	cfg      *rest.Config
 	admin    dynamic.Interface
@@ -200,7 +218,7 @@ func startEnv(t *testing.T) *env {
 	// <name>-<generation> on it.
 	params := strings.Replace(string(file(t, "testdata/admission/params.yaml")), "cliUsername: system:admin", "cliUsername: "+whoami.Status.UserInfo.Username, 1)
 	applyYAML(t, admin, []byte(paramsRef.ReplaceAllString(params, "${1}-"+testGeneration)))
-	applyYAML(t, admin, file(t, "testdata/admission/policies.yaml"))
+	applyYAML(t, admin, pendingCore(t, file(t, "testdata/admission/policies.yaml")))
 	bindings := bindingName.ReplaceAllString(string(file(t, "testdata/admission/bindings.yaml")), "${1}-"+testGeneration)
 	applyYAML(t, admin, []byte(paramsRef.ReplaceAllString(bindings, "${1}-"+testGeneration)))
 	hc := rest.CopyConfig(cfg)
