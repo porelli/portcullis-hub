@@ -240,7 +240,7 @@ func TestPersonSignInRoutes(t *testing.T) {
 		Methods      []map[string]any `json:"methods"`
 	}
 	json.Unmarshal([]byte(mustDo(t, e.people, "root", "GET", "/api/directory/users/alice/signin", ``, 200)), &v)
-	if v.User != "alice" || len(v.Certificates) != 2 || len(v.Methods) != 6 || v.FreshAuth == nil ||
+	if v.User != "alice" || len(v.Certificates) != 2 || len(v.Methods) != 7 || v.FreshAuth == nil ||
 		!v.Can["setup_link"] || !v.Can["remove_passkeys"] || !v.Can["revoke"] || !v.Can["issue"] || !v.Can["password"] {
 		t.Errorf("admin view = %+v", v)
 	}

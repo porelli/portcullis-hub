@@ -292,7 +292,7 @@ func TestPreviewTemplateStoresNothing(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Error("state.yaml changed")
 	}
-	if v, _ := f.h.SignInView(ctx); len(v.Templates) != 4 {
+	if v, _ := f.h.SignInView(ctx); len(v.Templates) != 5 {
 		t.Errorf("templates = %d", len(v.Templates))
 	}
 }
