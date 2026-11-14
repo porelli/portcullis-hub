@@ -40,7 +40,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: datafile
-  name: datafile--pods
+  name: datafile
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -169,7 +169,7 @@ spec:
           readOnly: true
       dnsConfig:
         searches:
-        - datafile--pods.portcullis-apps.svc.cluster.local
+        - datafile.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: app
       initContainers:
@@ -197,7 +197,7 @@ spec:
         fsGroup: 101
         seccompProfile:
           type: RuntimeDefault
-      subdomain: datafile--pods
+      subdomain: datafile
       volumes:
       - name: data-c9022680
         projected:

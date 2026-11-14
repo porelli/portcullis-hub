@@ -71,9 +71,15 @@ func kubeCompat(compose []byte, m Manifest, env map[string]string) Compat {
 	if v, ok := env[EnvBindRoots]; ok {
 		roots = strings.Split(v, ":")
 	}
-	k := kubeCtx{jobs: JobServices(&m, compose), netnsOwners: map[string]bool{}}
+	k := kubeCtx{jobs: JobServices(&m, compose), netnsOwners: map[string]bool{}, volumeOwners: map[string]bool{}}
 	k.labels, _ = ServiceLabels(compose)
 	for _, s := range services {
+		uid, _, _ := strings.Cut(scalarValue(field(s.node, "user"), env), ":")
+		if n, err := strconv.ParseInt(uid, 10, 64); err != nil || n > 0 {
+			for _, v := range namedVolumes(field(s.node, "volumes"), env) {
+				k.volumeOwners[v] = true
+			}
+		}
 		if v, ok := strings.CutPrefix(scalarValue(field(s.node, "network_mode"), env), "service:"); ok {
 			k.netnsOwners[v] = true
 		}
@@ -128,9 +134,12 @@ func scalarValue(n *yaml.Node, env map[string]string) string {
 // one-shot jobs, each service's labels and the services others share a
 // network namespace with.
 type kubeCtx struct {
-	jobs        map[string]bool
-	labels      map[string]map[string]string
-	netnsOwners map[string]bool
+	// volumeOwners: named volume → whether a service not running as
+	// root mounts it (its owner on Kubernetes).
+	volumeOwners map[string]bool
+	jobs         map[string]bool
+	labels       map[string]map[string]string
+	netnsOwners  map[string]bool
 }
 
 // podDNSName: a compose service name that can be a pod's hostname, and
@@ -239,6 +248,19 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 				c.refuse("service %s runs as root (user 0)", name)
 			case !k.oneShotRoot(name, s, env):
 				c.refuse("service %s runs as root (user 0): only a one-shot job (restart no or on-failure) with cap_drop [ALL], cap_add within CHOWN, DAC_OVERRIDE, FOWNER, no ports and no routes may", name)
+			case !rootGroupOK(u, field(s, "group_add"), env):
+				c.refuse("service %s runs as root with group 0: set user \"0:<gid>\" with a gid other than 0", name)
+			default:
+				if why := rootBind(field(s, "volumes"), env); why != "" {
+					c.refuse("service %s runs as root with %s", name, why)
+				} else {
+					for _, v := range namedVolumes(field(s, "volumes"), env) {
+						if v != SecretsVolumeKey && !k.volumeOwners[v] {
+							c.refuse("service %s runs as root and mounts a volume no non-root service mounts (its owner on Kubernetes)", name)
+							break
+						}
+					}
+				}
 			}
 		}
 	}
@@ -326,6 +348,83 @@ func bindSources(vols *yaml.Node, env map[string]string) []string {
 			}
 			if src := scalarValue(field(v, "source"), env); src != "" {
 				out = append(out, src)
+			}
+		}
+	}
+	return out
+}
+
+// rootBind: why a one-shot root job's binds are refused ("" = fine):
+// none may be bound: a root pod's volumes are only emptyDir, the
+// instance's PVCs and Secrets (core's admission) — no host path,
+// read-only included, and no template files (a shared ConfigMap).
+func rootBind(vols *yaml.Node, env map[string]string) string {
+	if vols == nil || vols.Kind != yaml.SequenceNode {
+		return ""
+	}
+	for _, v := range vols.Content {
+		src := ""
+		switch v.Kind {
+		case yaml.ScalarNode:
+			parts := splitOutsideVars(v.Value)
+			if len(parts) < 2 {
+				continue
+			}
+			src = strings.TrimSpace(resolve(parts[0], env))
+			if !strings.HasPrefix(src, "/") && !strings.HasPrefix(src, ".") && !strings.HasPrefix(src, "~") {
+				continue
+			}
+		case yaml.MappingNode:
+			if scalarValue(field(v, "type"), env) != "bind" {
+				continue
+			}
+			src = scalarValue(field(v, "source"), env)
+		}
+		if strings.HasPrefix(path.Clean(src), "templates/") {
+			return "template files mounted"
+		}
+		return "a host bind"
+	}
+	return ""
+}
+
+// rootGroupOK: a root user's group is set and not 0, and group_add
+// holds no 0 (core's admission: no root group in a root pod).
+func rootGroupOK(user string, groupAdd *yaml.Node, env map[string]string) bool {
+	_, g, ok := strings.Cut(user, ":")
+	if n, err := strconv.ParseInt(g, 10, 64); !ok || err != nil || n == 0 {
+		return false
+	}
+	ga, _ := scalars(groupAdd)
+	for _, x := range ga {
+		if n, err := strconv.ParseInt(strings.TrimSpace(resolve(x, env)), 10, 64); err == nil && n == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// namedVolumes are the named volume sources of a service's volumes.
+func namedVolumes(vols *yaml.Node, env map[string]string) []string {
+	if vols == nil || vols.Kind != yaml.SequenceNode {
+		return nil
+	}
+	var out []string
+	for _, v := range vols.Content {
+		switch v.Kind {
+		case yaml.ScalarNode:
+			parts := splitOutsideVars(v.Value)
+			if len(parts) < 2 {
+				continue
+			}
+			if src := strings.TrimSpace(resolve(parts[0], env)); src != "" && !strings.HasPrefix(src, "/") && !strings.HasPrefix(src, ".") && !strings.HasPrefix(src, "~") {
+				out = append(out, src)
+			}
+		case yaml.MappingNode:
+			if scalarValue(field(v, "type"), env) == "volume" {
+				if src := scalarValue(field(v, "source"), env); src != "" {
+					out = append(out, src)
+				}
 			}
 		}
 	}

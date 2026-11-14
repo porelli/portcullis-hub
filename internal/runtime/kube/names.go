@@ -17,10 +17,13 @@ const (
 	// LabelOneShot marks a one-shot Job's pod template whose container
 	// runs as root in the ruled shape (core's admission allows uid 0 only
 	// there and for the Hub's helpers).
-	LabelOneShot   = "portcullis.io/one-shot"
-	LabelVolume    = "portcullis.io/volume"
-	LabelVPNSlot   = "portcullis.io/vpn-slot"
-	LabelComponent = "portcullis.io/component"
+	LabelOneShot = "portcullis.io/one-shot"
+	// LabelMCPCompanion marks a pod serving an AI companion (core's
+	// mcp-gate egress policy selects only these).
+	LabelMCPCompanion = "portcullis.io/mcp-companion"
+	LabelVolume       = "portcullis.io/volume"
+	LabelVPNSlot      = "portcullis.io/vpn-slot"
+	LabelComponent    = "portcullis.io/component"
 	// LabelOwner marks the edge namespace's objects: hub (the Hub's
 	// routes) or core (the chart's, never touched by the Hub).
 	LabelOwner = "portcullis.io/owner"

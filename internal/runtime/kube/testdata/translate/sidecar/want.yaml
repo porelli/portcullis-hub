@@ -17,7 +17,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: sidecar
-  name: sidecar--pods
+  name: sidecar
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -150,11 +150,11 @@ spec:
         securityContext: {}
       dnsConfig:
         searches:
-        - sidecar--pods.portcullis-apps.svc.cluster.local
+        - sidecar.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: vpn
       securityContext:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
-      subdomain: sidecar--pods
+      subdomain: sidecar

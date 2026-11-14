@@ -38,7 +38,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: jobs
-  name: jobs--pods
+  name: jobs
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -239,7 +239,7 @@ spec:
           readOnly: true
       dnsConfig:
         searches:
-        - jobs--pods.portcullis-apps.svc.cluster.local
+        - jobs.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: db
       initContainers:
@@ -290,7 +290,7 @@ spec:
         fsGroup: 70
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs--pods
+      subdomain: jobs
       volumes:
       - emptyDir: {}
         name: portcullis-bin
@@ -333,7 +333,7 @@ spec:
           runAsUser: 10001
       dnsConfig:
         searches:
-        - jobs--pods.portcullis-apps.svc.cluster.local
+        - jobs.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: migrate
       restartPolicy: Never
@@ -341,7 +341,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs--pods
+      subdomain: jobs
 ---
 # step 3 wait complete
 apiVersion: batch/v1
@@ -385,19 +385,19 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
-          runAsGroup: 0
+          runAsGroup: 10001
           runAsUser: 0
       dnsConfig:
         searches:
-        - jobs--pods.portcullis-apps.svc.cluster.local
+        - jobs.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: perms
       restartPolicy: Never
       securityContext:
-        fsGroup: 0
+        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs--pods
+      subdomain: jobs
 ---
 # step 4 wait none
 apiVersion: apps/v1
@@ -436,10 +436,10 @@ spec:
         securityContext: {}
       dnsConfig:
         searches:
-        - jobs--pods.portcullis-apps.svc.cluster.local
+        - jobs.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: app
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs--pods
+      subdomain: jobs

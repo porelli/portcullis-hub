@@ -28,7 +28,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: person-secret
-  name: person-secret--pods
+  name: person-secret
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -157,7 +157,7 @@ spec:
           readOnly: true
       dnsConfig:
         searches:
-        - person-secret--pods.portcullis-apps.svc.cluster.local
+        - person-secret.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: samba
       initContainers:
@@ -185,7 +185,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: person-secret--pods
+      subdomain: person-secret
       volumes:
       - emptyDir: {}
         name: portcullis-bin

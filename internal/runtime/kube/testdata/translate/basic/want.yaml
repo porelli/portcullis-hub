@@ -53,7 +53,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: basic
-  name: basic--pods
+  name: basic
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -376,7 +376,7 @@ spec:
           readOnly: true
       dnsConfig:
         searches:
-        - basic--pods.portcullis-apps.svc.cluster.local
+        - basic.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: web
       initContainers:
@@ -427,7 +427,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: basic--pods
+      subdomain: basic
       terminationGracePeriodSeconds: 20
       volumes:
       - hostPath:

@@ -91,7 +91,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: ports
-  name: ports--pods
+  name: ports
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -241,10 +241,10 @@ spec:
         securityContext: {}
       dnsConfig:
         searches:
-        - ports--pods.portcullis-apps.svc.cluster.local
+        - ports.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: dns
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-      subdomain: ports--pods
+      subdomain: ports

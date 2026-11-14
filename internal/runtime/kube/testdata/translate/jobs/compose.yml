@@ -6,7 +6,7 @@ services:
     command: ["sh", "-c", "echo migrate"]
   perms:
     image: docker.io/library/alpine:3.24.3
-    user: "0:0"
+    user: "0:10001"
     restart: "no"
     read_only: true
     cap_drop: [ALL]

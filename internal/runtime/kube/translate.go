@@ -166,6 +166,9 @@ type translator struct {
 	shared   []*unstructured.Unstructured
 	tplCM    string
 	tplItems map[string]string // template path → ConfigMap key
+	// rootPVCs: PVC → the root one-shot job mounting it (a root job
+	// never owns a volume: a non-root service must).
+	rootPVCs map[string]string
 }
 
 func (t *translator) claim(kind, name, from string) error {
@@ -339,6 +342,11 @@ func (t *translator) run() (Plan, error) {
 	}
 	services = append(services, pols...)
 	services = append(services, routes...)
+	for _, name := range slices.Sorted(mapKeys(t.rootPVCs)) {
+		if !t.done["pvc/"+name] {
+			return Plan{}, refused("service %s runs as root and mounts a volume no non-root service mounts (its owner on Kubernetes)", t.rootPVCs[name])
+		}
+	}
 	plan := Plan{Services: map[string]string{}}
 	for _, n := range names {
 		plan.Services[n] = ObjectName(t.in.Instance, podOf[n])
@@ -418,6 +426,12 @@ func (t *translator) compat() error {
 				if !t.oneShotRoot(n) {
 					return refused("service %s runs as root (user 0): only a one-shot job (restart no or on-failure) with cap_drop [ALL], cap_add within CHOWN, DAC_OVERRIDE, FOWNER, no ports and no routes may", n)
 				}
+				if _, g, _ := numericUser(s.User); g == nil || *g == 0 || slices.Contains(s.GroupAdd, "0") {
+					return refused("service %s runs as root with group 0: set user \"0:<gid>\" with a gid other than 0", n)
+				}
+				if why := t.rootBind(n); why != "" {
+					return refused("service %s runs as root with %s", n, why)
+				}
 			}
 		}
 		for _, p := range s.Ports {
@@ -447,6 +461,28 @@ func (t *translator) companionAlias(n, a string) bool {
 		}
 	}
 	return false
+}
+
+// rootBind: why a one-shot root job's mounts are refused ("" = fine):
+// a root pod's volumes are only emptyDir, the instance's own PVCs and its
+// own Secrets (core's admission): no host path (read-only included), no
+// template files (a ConfigMap shared by the template's instances), no
+// data file (a projected volume).
+func (t *translator) rootBind(n string) string {
+	tplPrefix := "templates/" + t.in.Template + "/"
+	for _, v := range t.in.Model.Services[n].Volumes {
+		if v.Type != types.VolumeTypeBind {
+			continue
+		}
+		if _, ok := t.in.AppFiles[v.Source]; ok {
+			return "a data file mounted"
+		}
+		if rel := strings.TrimPrefix(path.Clean(v.Source), "./"); strings.HasPrefix(rel, tplPrefix) || rel+"/" == tplPrefix {
+			return "template files mounted"
+		}
+		return "a host bind"
+	}
+	return ""
 }
 
 // oneShotCaps are the capabilities a one-shot root job may add.
@@ -741,6 +777,11 @@ func (t *translator) workload(n string, members []string) (*unstructured.Unstruc
 	if t.in.VPNSlot != nil && n == t.in.IngressService {
 		podLabels[LabelVPNSlot] = strconv.Itoa(*t.in.VPNSlot)
 	}
+	for _, c := range t.in.Companions {
+		if c.Service == n || slices.Contains(members, c.Service) {
+			podLabels[LabelMCPCompanion] = "true"
+		}
+	}
 	// Compose labels and the service of each container: annotations
 	// (per container), never labels.
 	labelsOf, svcOf := map[string]map[string]string{}, map[string]string{}
@@ -942,9 +983,10 @@ func (p *podSpec) container(n string, s types.ServiceConfig, main bool) error {
 		}
 		// fsGroup: the service's gid (its uid without one), so the 0440
 		// Secret and ConfigMap mounts are readable by that service only.
-		if gid != nil {
+		// Never fsGroup 0 (a root group on every volume).
+		if gid != nil && *gid != 0 {
 			p.sc.FSGroup = gid
-		} else if uid >= 0 {
+		} else if gid == nil && uid > 0 {
 			u := uid
 			p.sc.FSGroup = &u
 		}
@@ -1117,6 +1159,27 @@ func (p *podSpec) personSecret(n string, v types.ServiceVolumeConfig, c *corev1.
 
 func (p *podSpec) pvc(n string, v types.ServiceVolumeConfig, c *corev1.Container, uid int64, gid *int64) error {
 	t := p.t
+	if uid == 0 {
+		// A root one-shot job (compat): it mounts the PVC a non-root
+		// service owns (checked once every pod is translated), never
+		// seeds it.
+		name := PVCName(t.in.Instance, v.Source)
+		if t.rootPVCs == nil {
+			t.rootPVCs = map[string]string{}
+		}
+		t.rootPVCs[name] = n
+		vn := "vol-" + sanitize(v.Source)
+		if len(vn) > maxName {
+			vn = "vol-" + shortHash(v.Source)
+		}
+		p.addVolume(corev1.Volume{Name: vn, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: name}}})
+		m := corev1.VolumeMount{Name: vn, MountPath: v.Target, ReadOnly: v.ReadOnly}
+		if v.Volume != nil && v.Volume.Subpath != "" {
+			m.SubPath = v.Volume.Subpath
+		}
+		c.VolumeMounts = append(c.VolumeMounts, m)
+		return nil
+	}
 	if uid < 1 {
 		return refused("service %s mounts volume %s without a numeric user: the volume's owner on Kubernetes is the service's uid", n, v.Source)
 	}
@@ -1302,8 +1365,7 @@ func (p *podSpec) finish() corev1.PodSpec {
 	t := p.t
 	f := false
 	// Pod DNS: the compose service name resolves to this pod for the
-	// instance's own pods (<pod>.<instance>--pods.<ns>.svc, searched
-	// first).
+	// instance's own pods (<pod>.<instance>.<ns>.svc).
 	sub := PodsServiceName(t.in.Instance)
 	spec := corev1.PodSpec{
 		Hostname:                      p.pod,
@@ -1343,9 +1405,10 @@ func (p *podSpec) finish() corev1.PodSpec {
 // ClusterDomain is the cluster's DNS domain (k3s and kubeadm default).
 const ClusterDomain = "cluster.local"
 
-// PodsServiceName is the instance's headless Service: every pod's
-// subdomain, so <compose service>.<it>.<ns>.svc names the pod.
-func PodsServiceName(instance string) string { return joinName(instance, "pods", "") }
+// PodsServiceName is the instance's headless Service, named the
+// instance (core's admission: subdomain = the instance): every pod's
+// subdomain, so <compose service>.<instance>.<ns>.svc names the pod.
+func PodsServiceName(instance string) string { return instance }
 
 // podsService is the headless Service PodsServiceName selecting the
 // instance's pods, ready or not (a name resolves while its pod starts,
