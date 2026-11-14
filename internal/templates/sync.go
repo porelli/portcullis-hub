@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/portcullis/hub/internal/fsutil"
 )
@@ -20,8 +21,8 @@ import (
 //
 // The copy is staged next to the target and swapped in by rename, so a
 // running container never sees a half-written directory. Symlinks and
-// special files are skipped (never follow out of the template); .git is
-// skipped.
+// special files are skipped (never followed); a symlink that resolves
+// outside the template refuses the copy; .git is skipped.
 //
 // All instances of a template share this copy (contract §3): it lives
 // under the template id.
@@ -45,6 +46,7 @@ func SyncFiles(t *Template, root string) error {
 	if err := os.Chmod(stage, 0755); err != nil {
 		return err
 	}
+	base := realPath(t.Path)
 	err = filepath.WalkDir(t.Path, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -72,6 +74,14 @@ func SyncFiles(t *Template, root string) error {
 				return err
 			}
 			return os.Chmod(target, info.Mode().Perm())
+		case d.Type()&os.ModeSymlink != 0:
+			// Never copied or followed; one that resolves outside the
+			// template (a chain or a dangling target included) refuses the
+			// copy, so nothing outside can ever be published as its file.
+			if r := realPath(path); r != base && !strings.HasPrefix(r, base+string(filepath.Separator)) {
+				return fmt.Errorf("template %s: %s is a symlink that points outside the template", id, filepath.ToSlash(rel))
+			}
+			return nil
 		default:
 			return nil
 		}

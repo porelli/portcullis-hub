@@ -1,6 +1,8 @@
 package templates
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -117,5 +119,45 @@ func TestVPNControlRouterShapes(t *testing.T) {
 		if !c.ok && (err == nil || !strings.Contains(err.Error(), "vpn.control_routers: meshctl")) {
 			t.Errorf("%s: err %v", c.name, err)
 		}
+	}
+}
+
+// A bind under ./templates/<id>/ never resolves out of the template's
+// directory through a symlink (validate.py's vpn_bind_escapes).
+func TestVPNBindEscapes(t *testing.T) {
+	v := vpnVectorByName(t, "headscale-shaped ok")
+	gw := "    command: [\"sh\", \"-c\", \"exec fwd --to $$PORTCULLIS_VPN_EDGE\"]\n"
+	comp := strings.Replace(v.Compose, gw, gw+"    volumes:\n      - ./templates/mesh/vpn/gw.sh:/gw.sh:ro\n", 1)
+	outside := filepath.Join(t.TempDir(), "secret.sh")
+	os.WriteFile(outside, []byte("x"), 0o644)
+	for name, c := range map[string]struct {
+		setup func(vpnDir string)
+		want  string
+	}{
+		"a file": {func(d string) { os.WriteFile(filepath.Join(d, "gw.sh"), []byte("x"), 0o644) }, ""},
+		"a link inside": {func(d string) {
+			os.WriteFile(filepath.Join(d, "real.sh"), []byte("x"), 0o644)
+			os.Symlink("real.sh", filepath.Join(d, "gw.sh"))
+		}, ""},
+		"a link outside":     {func(d string) { os.Symlink(outside, filepath.Join(d, "gw.sh")) }, "vpn.ingress.service: gateway mounts ./templates/mesh/vpn/gw.sh:/gw.sh:ro: it resolves outside templates/mesh/ (a symlink)"},
+		"a dir link outside": {func(d string) { os.RemoveAll(d); os.Symlink(filepath.Dir(outside), d) }, "vpn.ingress.service: gateway mounts ./templates/mesh/vpn/gw.sh:/gw.sh:ro: it resolves outside templates/mesh/ (a symlink)"},
+		"missing":            {func(string) {}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "mesh")
+			os.MkdirAll(filepath.Join(dir, "vpn"), 0o755)
+			os.WriteFile(filepath.Join(dir, "manifest.yaml"), []byte(v.Manifest), 0o644)
+			os.WriteFile(filepath.Join(dir, "compose.yml"), []byte(comp), 0o644)
+			c.setup(filepath.Join(dir, "vpn"))
+			_, err := Load(root, "mesh", "src", "example.org", nil)
+			got := ""
+			if err != nil {
+				got = err.Error()
+			}
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
 	}
 }
