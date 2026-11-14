@@ -243,8 +243,14 @@ func (s *Service) PatchField(ctx context.Context, c *Caller, name string, p Fiel
 
 		// Check if turning off AdminOnly while field is guarded
 		if existing.AdminOnly && !f.AdminOnly {
-			guarded := s.guardedFields(cfg)
-			if groups, ok := guarded[f.Name]; ok {
+			// Groups with "Allow any profile field…" on don't hold it.
+			var groups []string
+			for _, g := range s.guardedFields(cfg)[f.Name] {
+				if !s.anyFieldAllowed(cfg, g) {
+					groups = append(groups, g)
+				}
+			}
+			if len(groups) > 0 {
 				return refuse("cannot turn off admin-only: field is used by %s (a protected/permission/app-admin group)", strings.Join(groups, ", "))
 			}
 		}

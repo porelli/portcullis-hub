@@ -376,10 +376,19 @@ type GroupView struct {
 	// AddsBlocked: why the evaluator adds nobody to this guarding group
 	// ("" if it does), see addsBlocked.
 	AddsBlocked string `json:"adds_blocked,omitempty"`
+	// RuleSuspended: the rule counts for nothing (ruleSuspended: a guarding
+	// group's rule on a field that isn't admin-only, "Allow any profile
+	// field…" off); AddsBlocked says why and how to fix it.
+	RuleSuspended bool `json:"rule_suspended,omitempty"`
 	// Matches: who the rule matches right now (the evaluator's own
 	// matching, protected accounts left out), sorted; admins only, nil
 	// for manual groups and in every other view.
 	Matches []string `json:"matches,omitzero"`
+	// AllowAnyField: the group's "Allow any profile field in this group's
+	// rule" (GroupConfig.AllowAnyField), present only where it can be
+	// on (anyFieldOffered: app admin and privileged-value groups).
+	// Administrators only; nil (absent) in every other view.
+	AllowAnyField *bool `json:"allow_any_field,omitempty"`
 	// Guarding: whether changing who is in the group can widen access
 	// (guardingGroups — administrator, permission, app admin and
 	// privileged-value groups: the Portcullis MCP's groupGuard).
@@ -694,6 +703,14 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 			gcfg = &Config{} // no store: no permissions to guard
 		}
 		markGuarding(ov.Groups, s.guardingGroups(gcfg))
+		if cfg != nil {
+			for i := range ov.Groups {
+				if g := ov.Groups[i].Name; s.anyFieldOffered(cfg, g) {
+					on := s.anyFieldAllowed(cfg, g)
+					ov.Groups[i].AllowAnyField = &on
+				}
+			}
+		}
 	}
 	// Suggest only groups of apps that are enabled: templates you don't use
 	// have no business in the directory.
@@ -759,8 +776,12 @@ func (s *Service) addGroupConfig(ov *Overview, cfg *Config, sn *snapshot, admins
 		if gc.Rule != nil {
 			gv.Rule = &RuleView{Text: rules.Format(gc.Rule), Expr: gc.Rule}
 			gv.AddsBlocked = s.addsBlocked(cfg, guarding, gv.Name, gc)
+			gv.RuleSuspended = s.ruleSuspended(cfg, guarding, gv.Name, gc)
 			if s.ruleGroupAllowed(gv.Name, admins) {
 				evals[gv.Name] = s.evalGroup(gc, d, sn, now)
+				if gv.RuleSuspended {
+					evals[gv.Name].suspend()
+				}
 				if full {
 					gv.Matches = idsOf(sn, evals[gv.Name].matched)
 				}
@@ -1449,7 +1470,12 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		for i, id := range groupIDs {
 			if err := s.LLDAP.AddUserToGroup(ctx, req.Username, id); err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("adding to %s failed: %v", groupNames[i], err))
-			} else if cfg != nil && cfg.clearGrace(groupNames[i], req.Username) {
+				continue
+			}
+			// The group's own entry, so its History shows the add
+			// (ForGroup matches the target only).
+			s.auditAlso(c, "group.add_member", groupNames[i], req.Username+" (account created)")
+			if cfg != nil && cfg.clearGrace(groupNames[i], req.Username) {
 				graceCleared = true // granted again
 			}
 		}
@@ -1648,6 +1674,13 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 			return err
 		}
 		deleted = u.ID
+		// Each group they were in gets its own entry, so its History
+		// shows the removal (ForGroup matches the target only).
+		for _, name := range slices.Sorted(maps.Keys(sn.groups)) {
+			if memberOf(sn.groups[name], u.ID) {
+				s.auditAlso(c, "group.remove_member", name, u.ID+" (account deleted)")
+			}
+		}
 		if kcID != "" {
 			if err := s.KC.DeleteUserByID(ctx, kcID); err != nil {
 				kcErr = "delete: " + err.Error()
@@ -2076,9 +2109,12 @@ func purgeGroup(cfg *Config, group string, fold bool) []string {
 			continue
 		}
 		switch {
-		case gc == nil || (gc.Rule == nil && len(gc.Exceptions) == 0 && len(gc.Expiry) == 0):
+		case gc == nil || (gc.Rule == nil && len(gc.Exceptions) == 0 && len(gc.Expiry) == 0 && !gc.AllowAnyField):
 			out = append(out, "empty entry of "+name)
 		default:
+			if gc.AllowAnyField {
+				out = append(out, "allow_any_field of "+name)
+			}
 			if gc.Rule != nil {
 				out = append(out, "rule of "+name)
 			}

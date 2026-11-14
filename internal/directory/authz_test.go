@@ -173,6 +173,7 @@ func TestDelegateCannotEscalate(t *testing.T) {
 		"RemoveException":         e.svc.RemoveException(ctx, hera, "hr_editors", "bob"),
 		"SetMemberExpiry":         e.svc.SetMemberExpiry(ctx, hera, "hr_editors", "eddie", nil),
 		"SetPermission":           e.svc.SetPermission(ctx, hera, directory.PermEditDetails, ""),
+		"SetAllowAnyField":        e.svc.SetAllowAnyField(ctx, hera, "hr_editors", true),
 		"SetDetails AdminOnly":    e.svc.SetDetails(ctx, hera, "bob", map[string][]string{"secret": {"value"}}),
 	}
 	for name, err := range adminOnly {

@@ -193,6 +193,8 @@ const legacyUser = () => null, setHash = () => {}, openAt = () => {}, clearRoute
 const parseRoute = h => { const m = /^#people\/(.+)$/.exec(h); return m ? { person: m[1] } : null; };
 const canonPerson = n => n.toLowerCase();
 const applyRoute = r => applied.push(r);
+const leaveOk = () => true; // no picks staged
+const stampHistory = () => {};
 ` + fn + `
 let err = null;
 try { onHash(); } catch (e) { err = String(e); }

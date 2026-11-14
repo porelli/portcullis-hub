@@ -1006,9 +1006,9 @@
     const u = userByName(name);
     if (!addToGroupCandidates(u).length) return;
     openDialog('Add ' + name + ' to a group',
-      '<p class="pd-note">Pick a group: its page opens with ' + esc(name) + ' already picked in Add people. Set the end there (and, on a rule-based group, the reason), then Add.</p>' +
+      '<p class="pd-note">Pick a group: its page opens with ' + esc(name) + ' picked in Add people, <b>not added yet</b>. Set the end there (and, on a rule-based group, the reason), then press Add.</p>' +
       '<div class="pd-inline"><label for="pa-group">Group</label><input type="text" id="pa-group" placeholder="group name" autocomplete="off" spellcheck="false" data-pick="group" data-user="' + esc(name) + '"></div>' +
-      '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="add-to-group-go" data-user="' + esc(name) + '">Open the group\'s page</button>' +
+      '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="add-to-group-go" data-user="' + esc(name) + '">Continue on the group\'s page</button>' +
       '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>');
     dialogBody().querySelector('#pa-group').focus();
   }
@@ -1718,7 +1718,30 @@
   function setHash(h, push) {
     if (location.hash === h || (!h && !location.hash)) return;
     const url = h || location.pathname + location.search;
-    if (push) history.pushState(null, '', url); else history.replaceState(null, '', url);
+    if (push) { curSeq = ++navSeq; history.pushState({ pdSeq: curSeq }, '', url); } else history.replaceState({ pdSeq: curSeq }, '', url);
+  }
+  // History entries carry a sequence number (pdSeq), so a move the
+  // person cancels (leaveOk) can be undone in the right direction:
+  // curSeq is the shown entry's, navSeq the highest handed out.
+  let navSeq = 0, curSeq = 0;
+  function stampHistory() {
+    const st = history.state;
+    if (st && typeof st.pdSeq === 'number') {
+      curSeq = st.pdSeq;
+      navSeq = Math.max(navSeq, curSeq);
+      return;
+    }
+    curSeq = ++navSeq;
+    history.replaceState({ pdSeq: curSeq }, '');
+  }
+  // undoMove goes back to the entry the browser just left: forward after
+  // Back (an older entry), back after Forward or a new navigation (no
+  // number yet, or a newer one). The hashchange that follows lands on
+  // the group's own page: nothing asks, nothing reroutes.
+  function undoMove() {
+    const st = history.state;
+    if (st && typeof st.pdSeq === 'number' && st.pdSeq < curSeq) history.forward();
+    else history.back();
   }
   // applyRoute shows the list or a group's page (before the first load
   // only the state is set: load renders it).
@@ -1771,6 +1794,10 @@
   }
   function onHash() {
     if (!root) return;
+    // Leaving a group's page with people picked but not added: ask; on
+    // No, stay (its hash back).
+    if (!leaveOk(location.hash)) { undoMove(); return; }
+    stampHistory();
     const old = legacyUser(location.hash);
     if (old) { setHash(personHash(old.name), false); openAt(old.name, old.action); return; }
     let r = parseRoute(location.hash);
@@ -1786,6 +1813,7 @@
   // userSelectTab: a tab picked by the user. Groups always opens the
   // list; leaving a group route pushes a history entry so Back returns.
   function userSelectTab(name, focus) {
+    if (!leaveOk(name === 'people' ? '' : '#' + name)) return;
     const fromGroups = !!parseRoute(location.hash);
     if (name === 'groups') {
       clearRoutes();
@@ -1939,13 +1967,15 @@
     h += '<div class="pd-gp-head"><h2 class="pd-gp-name pd-mono">' + esc(g.name) + '</h2>' + kindPill(g) + (g.admin ? '<span class="pd-pill info">administrator group</span>' : '') + '</div>';
     h += '<p class="pd-gp-sub">Gives access to ' + givesAccess(g, admin) + '</p>';
     if (g.rule) {
-      h += '<div class="pd-gp-rule"><span class="pd-muted">Rule:</span> <code>' + esc(g.rule.text) + '</code>';
+      h += '<div class="pd-gp-rule"><span class="pd-muted">Rule:</span> <code>' + esc(g.rule.text) + '</code>' +
+        (g.rule_suspended ? ' <span class="pd-pill bad" title="Its rule uses a field that isn\'t admin-only: only people added by hand are in">suspended</span>' : '');
       if (admin) h += ' <button type="button" class="pd-btn secondary xs" data-act="rule-open" data-group="' + esc(g.name) + '">Edit rule…</button>' +
         '<button type="button" class="pd-btn ghost xs" data-act="make-manual" data-group="' + esc(g.name) + '">Make manual</button>';
       h += '</div>';
     } else if (admin && g.rule_allowed) {
       h += '<div class="pd-gp-rule"><span class="pd-muted">Manual: people are added and removed here.</span> <button type="button" class="pd-btn secondary xs" data-act="convert-open" data-group="' + esc(g.name) + '">Make rule-based…</button></div>';
     }
+    if (admin) h += anyFieldHtml(g);
     if (g.adds_blocked) h += '<div class="pd-warn">' + esc(g.adds_blocked) + '</div>';
     if (pageNote && pageNote.group === g.name) h += '<div class="pd-warn" role="status">' + esc(pageNote.text) + '</div>';
 
@@ -1976,6 +2006,42 @@
     return h;
   }
 
+  // "Allow any profile field in this group's rule": on app admin and
+  // privileged-value groups (the server sends allow_any_field only
+  // there, to admins), their rule may use fields that aren't admin-only.
+  const ANY_FIELD_LABEL = 'Allow any profile field in this group\'s rule';
+  const ANY_FIELD_WARN = 'A person who can edit these fields for others (a delegate with edit details) could then grant this group\'s rights.';
+  function anyFieldHtml(g) {
+    if (typeof g.allow_any_field !== 'boolean') return '';
+    const on = g.allow_any_field;
+    return '<div class="pd-gp-anyfield"><span class="pd-pill' + (on ? ' warn' : '') + '">' + (on ? 'on' : 'off') + '</span> <b>' + esc(ANY_FIELD_LABEL) + '</b> ' +
+      '<button type="button" class="pd-btn ' + (on ? 'secondary' : 'ghost') + ' xs" data-act="any-field" data-group="' + esc(g.name) + '" data-allow="' + (on ? 'false' : 'true') + '">' + (on ? 'Turn off' : 'Turn on…') + '</button>' +
+      '<p class="pd-muted pd-small">' + (on ? 'Its rule may use any profile field.' : 'Off: its rule may use only admin-only fields.') + ' ⚠ ' + esc(ANY_FIELD_WARN) + '</p></div>';
+  }
+  // suspendRemovals (pure): who turning the option off would remove from
+  // g — the evaluation of a suspended rule (only active "added by hand"
+  // entries stay; protected accounts are never touched): its members
+  // without such an entry. isProtected(u) says whether u is protected.
+  function suspendRemovals(g, isProtected) {
+    const kept = new Set((g.exceptions || []).filter(e => e.include && !e.expired).map(e => lc(e.user)));
+    return (g.members || []).filter(u => !kept.has(lc(u)) && !isProtected(u));
+  }
+  // anyFieldOffText (pure): the question before turning the option off.
+  function anyFieldOffText(group, n) {
+    return 'Turn off “' + ANY_FIELD_LABEL + '” for ' + group + '?\n\nTurning this off removes ' + (n === 1 ? '1 person' : n + ' people') +
+      ' the rule added from ' + group + ' (people you added by hand stay).';
+  }
+  async function setAnyField(group, allow) {
+    if (allow && !confirm('Turn on “' + ANY_FIELD_LABEL + '” for ' + group + '?\n\n' + ANY_FIELD_WARN)) return null;
+    if (!allow) {
+      const g = groupByName(group);
+      const n = g && g.rule ? suspendRemovals(g, u => { const p = userByName(u) || users().find(x => lc(x.username) === lc(u)); return !!(p && p.protected); }).length : 0;
+      if (!confirm(anyFieldOffText(group, n))) return null;
+    }
+    return groupAct(group, () => api('PUT', '/api/directory/groups/' + enc(group) + '/allow-any-field', { allow }),
+      (allow ? 'Turned on' : 'Turned off') + ' “' + ANY_FIELD_LABEL + '” for ' + group);
+  }
+
   // Add people: a multi-pick (chips), an optional end, a reason on rule
   // groups. pick keeps the form across redraws.
   function pickCandidates(g) {
@@ -1989,17 +2055,26 @@
     pick.users = pick.users.filter(u => ok.has(u));
     let h = '<div class="pd-gp-add" role="group" aria-labelledby="pd-gp-add-h"><h4 class="pd-h4" id="pd-gp-add-h">Add people</h4>';
     h += '<div class="pd-gp-picks">' + pickChips(g) + '</div>';
+    h += '<div class="pd-gp-pending" role="status" aria-live="polite">' + pendingNote(pick.users.length) + '</div>';
     h += '<div class="pd-inline"><label for="pd-gp-pick" class="pd-sr">Person to add</label><input type="text" id="pd-gp-pick" placeholder="name, username or email" autocomplete="off" data-on="pick-input" data-pick="person">' +
       '<button type="button" class="pd-btn ghost xs" data-act="pick-add">+ person</button>';
     if (g.name !== 'lldap_admin') h += '<label for="pd-gp-until">until (optional, local time)</label><input type="datetime-local" id="pd-gp-until" data-on="pick-until" value="' + esc(pick.until) + '">';
     if (g.rule) h += '<label for="pd-gp-reason">reason (required)</label><input type="text" id="pd-gp-reason" maxlength="500" placeholder="why?" data-on="pick-reason" value="' + esc(pick.reason) + '">';
-    h += '<button type="button" class="pd-btn primary sm" data-act="pick-submit" data-group="' + esc(g.name) + '">Add</button></div>';
+    h += '<button type="button" class="pd-btn primary sm' + (pick.users.length ? ' pd-attn' : '') + '" data-act="pick-submit" data-group="' + esc(g.name) + '">' + esc(pickAddLabel(pick.users.length)) + '</button></div>';
     if (g.rule) h += '<p class="pd-muted pd-small">People added here stay in whether or not they match the rule, until the entry ends or is removed.</p>';
     return h + '</div>';
   }
+  // Picked people are only staged: nothing is sent until Add. Each chip
+  // says so, and the Add button counts them.
+  function pickAddLabel(n) {
+    return n ? 'Add ' + n + ' ' + (n === 1 ? 'person' : 'people') : 'Add';
+  }
+  function pendingNote(n) {
+    return n ? '<p class="pd-warn pd-small">' + esc(n === 1 ? '1 person is' : n + ' people are') + ' picked but not added yet: press <b>' + esc(pickAddLabel(n)) + '</b>.</p>' : '';
+  }
   function pickChips(g) {
     const matches = new Set((g.matches || []).map(lc));
-    return pick.users.map(u => '<span class="pd-pick"><span class="pd-mono">' + esc(u) + '</span>' +
+    return pick.users.map(u => '<span class="pd-pick pd-pick-pending"><span class="pd-mono">' + esc(u) + '</span> <span class="pd-pill warn">Pending — press Add</span>' +
       (g.rule ? (matches.has(lc(u)) ? ' <span class="pd-muted">already matches the rule</span>' : ' <span class="pd-muted">doesn\'t match the rule</span>') : '') +
       '<button type="button" class="pd-pick-x" data-act="pick-remove" data-user="' + esc(u) + '" aria-label="Don\'t add ' + esc(u) + '">✕</button></span>').join('');
   }
@@ -2008,6 +2083,34 @@
     const box = root.querySelector('.pd-gp-picks');
     if (!g || !box) return;
     box.innerHTML = pickChips(g);
+    const n = pick.users.length;
+    const note = root.querySelector('.pd-gp-pending');
+    if (note) note.innerHTML = pendingNote(n);
+    const btn = root.querySelector('[data-act="pick-submit"]');
+    if (btn) { btn.textContent = pickAddLabel(n); btn.classList.toggle('pd-attn', n > 0); }
+  }
+  // pendingPicks: the people picked on the shown group's page but not
+  // added yet ([] elsewhere).
+  function pendingPicks() {
+    return groupPage && pick.group === groupPage ? pick.users.slice() : [];
+  }
+  // leaveOk: leaving the group's page (for hash next) with people picked
+  // but not added asks first; leaving drops the picks. Staying on the
+  // same group's page never asks.
+  function leaveOk(next) {
+    const p = pendingPicks();
+    if (!p.length || next === groupHash(pick.group)) return true;
+    if (!confirm(p.join(', ') + (p.length === 1 ? ' is' : ' are') + ' picked but not added to ' + pick.group + ' yet. Leave without adding?')) return false;
+    pick.users = [];
+    return true;
+  }
+  // The browser's own warning when the page is closed or reloaded with
+  // people picked but not added.
+  function onBeforeUnload(e) {
+    if (!pendingPicks().length) return undefined;
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
   }
   function pickAdd() {
     const g = groupByName(pick.group);
@@ -2261,6 +2364,7 @@
       case 'group.expiry':
         if ((m = /^user=(\S+) until=(\S+)/.exec(d))) return m[2] === 'never' ? 'removed the end of ' + m[1] : 'set the end of ' + m[1] + ' to ' + fmtDate(m[2]);
         return 'changed an end';
+      case 'group.allow_any_field': return (/^allow=true/.test(d) ? 'turned on' : 'turned off') + ' “' + ANY_FIELD_LABEL + '”';
       case 'group.create': return 'created the group';
       case 'group.delete': return 'deleted the group';
       default: return e.action + (tu ? ' ' + tu : '');
@@ -2495,7 +2599,7 @@
     let h = dir.service_user ? '<p class="pd-note pd-service-account">Service account: <span class="pd-mono">' + esc(dir.service_user) +
       '</span> — used by the Hub to manage users and groups; it can\'t sign in.</p>' : '';
     h += '<section class="pd-sec" aria-labelledby="pd-fields-h"><h3 class="pd-h3" id="pd-fields-h">Fields</h3>' +
-      '<p class="pd-muted">Fields describe people. Everyone signed in can see them; <b>admin-only</b> fields can only be changed by admins (the rules of administrator and permission groups may only use those). <b>Share with apps</b> sends the value as an OIDC claim (<code>attr_&lt;field&gt;</code>) and as the <code>X-Forwarded-Attr-&lt;Field&gt;</code> header.</p>';
+      '<p class="pd-muted">Fields describe people. Everyone signed in can see them; <b>admin-only</b> fields can only be changed by admins (the rules of groups that grant extra rights — permission groups, app admin groups such as <code>admin_&lt;app&gt;</code> and groups that get a privileged app value — may only use those, unless an app admin or privileged group has “Allow any profile field in this group\'s rule” on). <b>Share with apps</b> sends the value as an OIDC claim (<code>attr_&lt;field&gt;</code>) and as the <code>X-Forwarded-Attr-&lt;Field&gt;</code> header.</p>';
     h += '<table class="pd-table pd-fields"><thead><tr><th scope="col">Name</th><th scope="col">Label</th><th scope="col">Kind</th><th scope="col">Values</th><th scope="col">Several values</th><th scope="col">Share with apps</th><th scope="col">Admin-only</th><th scope="col"><span class="pd-sr">Actions</span></th></tr></thead><tbody>';
     for (const f of fields()) {
       const p = 'pd-fd-' + f.name;
@@ -2996,6 +3100,7 @@
       case 'pick-add': return pickAdd();
       case 'pick-remove': pick.users = pick.users.filter(x => x !== user); redrawPicks(); { const el = root.querySelector('#pd-gp-pick'); if (el) el.focus(); } return;
       case 'pick-submit': return pickSubmit(group);
+      case 'any-field': return setAnyField(group, b.dataset.allow === 'true');
       case 'gp-hist-reload': return refreshExtras();
       case 'goto-setup': return userSelectTab('setup', true);
       case 'rule-open': return openRuleEditor(group);
@@ -3163,6 +3268,7 @@
     }
     const old = legacyUser(location.hash);
     if (old) { setHash(personHash(old.name), false); pendingOpen = old; }
+    stampHistory();
     const r = parseRoute(location.hash);
     if (r && r.person) { tab = 'people'; personPage = r.person; }
     else if (r) { tab = 'groups'; groupPage = r.group; }
@@ -3171,6 +3277,7 @@
       if (BUILTIN_TABS.includes(h) || extraTabs.some(t => t.id === h)) tab = h;
     }
     window.addEventListener('hashchange', onHash);
+    window.addEventListener('beforeunload', onBeforeUnload);
     el.addEventListener('click', onClick);
     el.addEventListener('input', onInput);
     el.addEventListener('change', onChange);

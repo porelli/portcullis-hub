@@ -117,8 +117,8 @@ password manager). Adding one follows the
 [add-stronger rule](#adding-a-stronger-method): a password-only sign-in can't
 add one while that switch is off (a stolen password must not become a stolen
 second factor); a password + code, passkey or certificate sign-in can, and so
-can a setup link that asks for one. `admin` and `portcullis-hub` can never use
-codes.
+can a setup link that asks for one. `admin`, `portcullis-hub` and every
+`portcullis-*` account can never use codes.
 
 **A lost phone.** The person signs in with another authenticator (the page
 recommends a second one after the first) or with any method at least as
@@ -793,8 +793,9 @@ change) have no Level-of-Authentication steps any more:
       `admin` and `portcullis-hub`,
     - an **authenticator code** (amr `otp`), only while the method is on,
       only once Keycloak already knows who is signing in (after the password,
-      on a step-up or a re-authentication), never for `admin` and
-      `portcullis-hub`. It never asks for a username.
+      on a step-up or a re-authentication), never for `admin`,
+      `portcullis-hub` or any `portcullis-*` account. It never asks for a
+      username.
 
     Each method stays in the session's amr for 10 hours. A step-up
     (`pc_method=<method>`) makes the other methods step aside, and the SSO

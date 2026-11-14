@@ -64,6 +64,8 @@ type PeopleGroup struct {
 	Exceptions  []ExceptionView      `json:"exceptions"`
 	Expiry      map[string]time.Time `json:"expiry"`
 	AddsBlocked string               `json:"adds_blocked,omitempty"`
+	// RuleSuspended: see GroupView.RuleSuspended.
+	RuleSuspended bool `json:"rule_suspended,omitempty"`
 }
 
 // PeopleField is a field definition.
@@ -118,7 +120,7 @@ func PeopleViewOf(ov *Overview) *PeopleOverview {
 	}
 	for _, g := range ov.Groups {
 		out.Groups = append(out.Groups, PeopleGroup{Name: g.Name, Created: g.Created, Members: g.Members, Builtin: g.Builtin, Admin: g.Admin,
-			UsedBy: g.UsedBy, RuleAllowed: g.RuleAllowed, Rule: g.Rule, Exceptions: g.Exceptions, Expiry: g.Expiry, AddsBlocked: g.AddsBlocked})
+			UsedBy: g.UsedBy, RuleAllowed: g.RuleAllowed, Rule: g.Rule, Exceptions: g.Exceptions, Expiry: g.Expiry, AddsBlocked: g.AddsBlocked, RuleSuspended: g.RuleSuspended})
 	}
 	for _, f := range ov.Fields {
 		out.Fields = append(out.Fields, PeopleField{Name: f.Name, Label: f.Label, Kind: f.Kind, Values: f.Values, Multi: f.Multi,

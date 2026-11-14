@@ -683,6 +683,9 @@ var peopleNoToolRoutes = func() map[string]string {
 	for r, why := range impersonationNoToolRoutes {
 		m[r] = why
 	}
+	for r, why := range fieldGuardNoToolRoutes {
+		m[r] = why
+	}
 	m["POST /api/directory/users/{username}/impersonation/stop"] = "administrators only (403 here for everyone else): the admin MCP has stop_impersonation"
 	return m
 }()

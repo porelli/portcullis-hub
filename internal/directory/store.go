@@ -48,6 +48,11 @@ type GroupConfig struct {
 	Rule       *rules.Expr          `yaml:"-"`                    // nil = manual group
 	Exceptions []Exception          `yaml:"exceptions,omitempty"` // rule groups only
 	Expiry     map[string]time.Time `yaml:"expiry,omitempty"`     // manual groups: username -> until
+	// AllowAnyField: "Allow any profile field in this group's rule" — an
+	// app admin or privileged-value group's rule may use fields that
+	// aren't admin-only (anyFieldAllowed; never a permission or
+	// administrator group). Admins only (SetAllowAnyField); absent = false.
+	AllowAnyField bool `yaml:"allow_any_field,omitempty"`
 }
 
 // Config represents the directory configuration.
@@ -139,9 +144,10 @@ func (s *Store) Load() (*Config, error) {
 
 	// Decode into raw intermediate structs with KnownFields(true)
 	type rawGroupConfig struct {
-		RuleText   string               `yaml:"rule,omitempty"`
-		Exceptions []Exception          `yaml:"exceptions,omitempty"`
-		Expiry     map[string]time.Time `yaml:"expiry,omitempty"`
+		RuleText      string               `yaml:"rule,omitempty"`
+		Exceptions    []Exception          `yaml:"exceptions,omitempty"`
+		Expiry        map[string]time.Time `yaml:"expiry,omitempty"`
+		AllowAnyField bool                 `yaml:"allow_any_field,omitempty"`
 	}
 	type rawConfig struct {
 		Version     int                        `yaml:"version"`
@@ -190,8 +196,9 @@ func (s *Store) Load() (*Config, error) {
 	// Parse rules and normalize times
 	for groupName, rawGC := range raw.Groups {
 		gc := &GroupConfig{
-			Exceptions: rawGC.Exceptions,
-			Expiry:     rawGC.Expiry,
+			Exceptions:    rawGC.Exceptions,
+			Expiry:        rawGC.Expiry,
+			AllowAnyField: rawGC.AllowAnyField,
 		}
 
 		// Parse rule if present
@@ -232,9 +239,10 @@ func (s *Store) Load() (*Config, error) {
 func (s *Store) Save(cfg *Config) error {
 	// Convert to raw config with normalized times and rule text
 	type rawGroupConfig struct {
-		RuleText   string               `yaml:"rule,omitempty"`
-		Exceptions []Exception          `yaml:"exceptions,omitempty"`
-		Expiry     map[string]time.Time `yaml:"expiry,omitempty"`
+		RuleText      string               `yaml:"rule,omitempty"`
+		Exceptions    []Exception          `yaml:"exceptions,omitempty"`
+		Expiry        map[string]time.Time `yaml:"expiry,omitempty"`
+		AllowAnyField bool                 `yaml:"allow_any_field,omitempty"`
 	}
 	type rawConfig struct {
 		Version     int                        `yaml:"version"`
@@ -262,8 +270,9 @@ func (s *Store) Save(cfg *Config) error {
 			continue
 		}
 		rawGC := &rawGroupConfig{
-			Exceptions: make([]Exception, len(gc.Exceptions)),
-			Expiry:     make(map[string]time.Time),
+			Exceptions:    make([]Exception, len(gc.Exceptions)),
+			Expiry:        make(map[string]time.Time),
+			AllowAnyField: gc.AllowAnyField,
 		}
 
 		// Format rule if present
