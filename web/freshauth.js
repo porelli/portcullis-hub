@@ -21,10 +21,26 @@
 // h.proof({code, code_verifier, nonce}) runs. h = {ctx (JSON-serialisable:
 // what the flow is for), status(text, warn, spin), busy(on), proof(p),
 // end()}. Writes no markup.
+//
+// Authenticator codes (contract §5.1):
+//   - pc_method: fa.pc_method (or h.pcMethod, an app's fresh_pc_method)
+//     "totp" adds pc_method=totp, only on a proof flow; any other value is
+//     never sent. Keycloak then asks for the person's password (or key)
+//     and then a code from their authenticator app.
+//   - fa.refusal (or h.refusal): the person can't pass the view's rule
+//     (final review M1): a proof flow opens nothing and shows it.
+//   - h.kcAction opens one of Keycloak's application-initiated actions
+//     instead (KC_ACTION: + Add, Replace, Remove an authenticator app);
+//     anything else opens nothing. Its answer is the callback's
+//     kc_action_status: h.action(status) runs, never h.proof (no proof is
+//     made or sent). Its callback may carry only kc_action_status (no
+//     state): it is accepted only from the popup this flow opened.
 (function () {
   'use strict';
   const FA_KEY = 'portcullis-fresh-auth';
   const FLOW_DEADLINE_MS = 10 * 60 * 1000;
+  // The only kc_action values ever sent (contract §5.1).
+  const KC_ACTION = /^(CONFIGURE_TOTP(:[0-9a-f-]{36})?|delete_credential:[0-9a-f-]{36})$/;
   let flow = null; // {popup, timer, ctx (JSON text), h}
 
   function b64url(bytes) {
@@ -76,6 +92,22 @@
       h.status('A fresh sign-in isn\'t available right now. Try again later.', true);
       return;
     }
+    const kcAction = h.kcAction === undefined ? '' : String(h.kcAction);
+    if (h.kcAction !== undefined && !KC_ACTION.test(kcAction)) {
+      h.status('That action isn\'t available here.', true);
+      return;
+    }
+    // A proof flow the person can't pass (fa.refusal, or h.refusal: an
+    // app's fresh_refusal) opens nothing: the page says why (final review
+    // M1). Actions never take it: they ask Keycloak's own re-auth.
+    const refusal = h.refusal !== undefined ? h.refusal : fa.refusal;
+    if (!kcAction && refusal) {
+      h.status(String(refusal), true);
+      return;
+    }
+    // A code is asked for only on a proof flow, never with an action.
+    const pc = h.pcMethod !== undefined ? h.pcMethod : fa.pc_method;
+    const codeFlow = !kcAction && pc === 'totp';
     cancel();
     const popup = window.open('', 'portcullis-fresh-auth', 'popup,width=520,height=720');
     if (!popup) {
@@ -87,10 +119,12 @@
     const nonce = randomB64(32);
     const ctx = JSON.stringify(h.ctx === undefined ? null : h.ctx);
     sessionStorage.setItem(FA_KEY, JSON.stringify({ state, nonce, verifier, ctx }));
-    flow = { popup, timer: 0, ctx, h };
+    flow = { popup, timer: 0, ctx, h, kcAction };
     const mine = flow;
     h.busy(true);
-    h.status('Sign in again in the sign-in window to continue…', false, true);
+    h.status(codeFlow
+      ? 'Sign in again in the sign-in window: your password (or key), then a code from your authenticator app…'
+      : 'Sign in again in the sign-in window to continue…', false, true);
     let challenge;
     try {
       challenge = await s256(verifier);
@@ -113,6 +147,8 @@
       ['code_challenge', challenge],
       ['code_challenge_method', 'S256'],
     ]) u.searchParams.set(k, v);
+    if (kcAction) u.searchParams.set('kc_action', kcAction);
+    else if (codeFlow) u.searchParams.set('pc_method', 'totp');
     popup.location.href = u.toString();
     // A popup closed without an answer cancels the flow (after a grace:
     // the callback posts, then closes).
@@ -138,13 +174,23 @@
     if (!d || typeof d !== 'object' || d.type !== 'portcullis-fresh-auth' || typeof d.state !== 'string') return;
     let pending = null;
     try { pending = JSON.parse(sessionStorage.getItem(FA_KEY) || 'null'); } catch (_) { pending = null; }
-    if (!pending || !pending.state || d.state !== pending.state) return;
-    if (!flow || ev.source !== flow.popup || flow.ctx !== pending.ctx) return;
+    if (!pending || !pending.state || !flow || ev.source !== flow.popup || flow.ctx !== pending.ctx) return;
+    // An action's callback may carry only kc_action_status (no state):
+    // accepted from this flow's own popup, and never with a code.
+    const stateless = flow.kcAction && d.state === '' && !d.code;
+    if (d.state !== pending.state && !stateless) return;
     const f = flow;
     sessionStorage.removeItem(FA_KEY);
     clearInterval(f.timer);
     flow = null;
     if (f.h.end) f.h.end();
+    if (f.kcAction) {
+      // No proof for an action: the code (if any) is never used.
+      f.h.busy(false);
+      const status = typeof d.kc_action_status === 'string' ? d.kc_action_status : '';
+      if (f.h.action) f.h.action(d.error && !status ? 'error' : status);
+      return;
+    }
     if (d.error || !d.code) {
       f.h.busy(false);
       f.h.status('The sign-in didn\'t complete' + (d.error ? ' (' + String(d.error).slice(0, 100) + ')' : '') + ': nothing changed.', true);

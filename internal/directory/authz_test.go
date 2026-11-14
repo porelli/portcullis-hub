@@ -121,15 +121,15 @@ func TestDelegateCannotEscalate(t *testing.T) {
 	check("editor SetDetails self", e.svc.SetDetails(ctx, eddie, "eddie", map[string][]string{}))
 	check("editor SetDetails admin", e.svc.SetDetails(ctx, eddie, "root", map[string][]string{}))
 	check("editor SetDetails permission-group member", e.svc.SetDetails(ctx, eddie, "ivy", map[string][]string{}))
-	check("inviter re-invites an admin", r(e.svc.SendInvite(ctx, ivy, "root")))
-	check("inviter re-invites self", r(e.svc.SendInvite(ctx, ivy, "ivy")))
-	check("inviter re-invites a remover", r(e.svc.SendInvite(ctx, ivy, "rex")))
+	check("inviter re-invites an admin", r(e.svc.SendInvite(ctx, ivy, "root", false)))
+	check("inviter re-invites self", r(e.svc.SendInvite(ctx, ivy, "ivy", false)))
+	check("inviter re-invites a remover", r(e.svc.SendInvite(ctx, ivy, "rex", false)))
 	check("remover removes an admin", r(e.svc.DeleteUser(ctx, rex, "root", "root")))
 	check("remover removes self", r(e.svc.DeleteUser(ctx, rex, "rex", "rex")))
 	check("remover removes an editor", r(e.svc.DeleteUser(ctx, rex, "eddie", "eddie")))
 
 	// Wrong permission.
-	check("editor invites", r(e.svc.SendInvite(ctx, eddie, "bob")))
+	check("editor invites", r(e.svc.SendInvite(ctx, eddie, "bob", false)))
 	check("editor removes", r(e.svc.DeleteUser(ctx, eddie, "bob", "bob")))
 	check("inviter edits", e.svc.UpdateUser(ctx, ivy, "bob", nil, strptr("X")))
 	check("nobody creates", r(e.svc.CreateUser(ctx, bob, directory.CreateRequest{Username: "zed", Email: "zed@example.org"})))
@@ -173,6 +173,7 @@ func TestDelegateCannotEscalate(t *testing.T) {
 		"RemoveException":         e.svc.RemoveException(ctx, hera, "hr_editors", "bob"),
 		"SetMemberExpiry":         e.svc.SetMemberExpiry(ctx, hera, "hr_editors", "eddie", nil),
 		"SetPermission":           e.svc.SetPermission(ctx, hera, directory.PermEditDetails, ""),
+		"SetAllowAnyField":        e.svc.SetAllowAnyField(ctx, hera, "hr_editors", true),
 		"SetDetails AdminOnly":    e.svc.SetDetails(ctx, hera, "bob", map[string][]string{"secret": {"value"}}),
 	}
 	for name, err := range adminOnly {
@@ -227,7 +228,7 @@ func TestDelegateAllowed(t *testing.T) {
 			}
 		}
 	}
-	if res, err := e.svc.SendInvite(ctx, ivy, "nina"); err != nil || res.Invite == nil {
+	if res, err := e.svc.SendInvite(ctx, ivy, "nina", false); err != nil || res.Invite == nil {
 		t.Errorf("inviter re-invites nina (delegate-created, no credentials): %v", err)
 	}
 	if _, err := e.svc.DeleteUser(ctx, rex, "nina", "nina"); err != nil {
@@ -280,10 +281,10 @@ func TestDelegateInviteKeyless(t *testing.T) {
 		}
 	}
 
-	refused("passkey", r(e.svc.SendInvite(ctx, ivy, "bob")))
-	refused("password credential", r(e.svc.SendInvite(ctx, ivy, "carl")))
-	refused("otp credential", r(e.svc.SendInvite(ctx, ivy, "olga")))
-	err := r(e.svc.SendInvite(ctx, ivy, "nora"))
+	refused("passkey", r(e.svc.SendInvite(ctx, ivy, "bob", false)))
+	refused("password credential", r(e.svc.SendInvite(ctx, ivy, "carl", false)))
+	refused("otp credential", r(e.svc.SendInvite(ctx, ivy, "olga", false)))
+	err := r(e.svc.SendInvite(ctx, ivy, "nora", false))
 	refused("admin-created, no credentials", err)
 	if err == nil || !strings.Contains(err.Error(), "only an admin can re-invite nora") {
 		t.Errorf("message = %v", err)
@@ -292,24 +293,24 @@ func TestDelegateInviteKeyless(t *testing.T) {
 	if e.ll.HasUser("stale") {
 		t.Error("stale created")
 	}
-	if err := r(e.svc.SendInvite(ctx, ivy, "dina")); err != nil {
+	if err := r(e.svc.SendInvite(ctx, ivy, "dina", false)); err != nil {
 		t.Errorf("delegate-created, no credentials = %v", err)
 	}
-	if err := r(e.svc.SendInvite(ctx, asRoot, "bob")); err != nil {
+	if err := r(e.svc.SendInvite(ctx, asRoot, "bob", false)); err != nil {
 		t.Errorf("admin re-invites bob = %v", err)
 	}
-	if err := r(e.svc.SendInvite(ctx, asRoot, "nora")); err != nil {
+	if err := r(e.svc.SendInvite(ctx, asRoot, "nora", false)); err != nil {
 		t.Errorf("admin re-invites nora = %v", err)
 	}
 	e.kc.SetDown(true)
-	refused("Keycloak down", r(e.svc.SendInvite(ctx, ivy, "dina")))
+	refused("Keycloak down", r(e.svc.SendInvite(ctx, ivy, "dina", false)))
 	refused("Keycloak down, create", r(e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "erin", Email: "erin@example.org"})))
 	if e.ll.HasUser("erin") {
 		t.Error("erin created")
 	}
 	e.kc.SetDown(false)
 	e.svc.KC = nil
-	refused("no Keycloak", r(e.svc.SendInvite(ctx, ivy, "dina")))
+	refused("no Keycloak", r(e.svc.SendInvite(ctx, ivy, "dina", false)))
 	entries, _ := e.svc.Recent(100)
 	n := 0
 	for _, en := range entries {
@@ -521,10 +522,11 @@ func TestAdminCredentialActionClearsCreatedBy(t *testing.T) {
 	ivy := callerFor(t, e, "ivy")
 	r := func(_ *directory.Result, err error) error { return err }
 	actions := map[string]func(user string) error{
-		"SetPassword":    func(u string) error { return r(e.svc.SetPassword(ctx, asRoot, u, "", true, "")) },
-		"SendInvite":     func(u string) error { return r(e.svc.SendInvite(ctx, asRoot, u)) },
-		"RemovePasskeys": func(u string) error { return r(e.svc.RemovePasskeys(ctx, asRoot, u, u, false)) },
-		"RequirePasskey": func(u string) error { return e.svc.RequirePasskey(ctx, asRoot, u) },
+		"SetPassword":          func(u string) error { return r(e.svc.SetPassword(ctx, asRoot, u, "", true, "")) },
+		"SendInvite":           func(u string) error { return r(e.svc.SendInvite(ctx, asRoot, u, false)) },
+		"RemovePasskeys":       func(u string) error { return r(e.svc.RemovePasskeys(ctx, asRoot, u, u, false)) },
+		"RemoveAuthenticators": func(u string) error { return r(e.svc.RemoveAuthenticators(ctx, asRoot, u, u)) },
+		"RequirePasskey":       func(u string) error { return e.svc.RequirePasskey(ctx, asRoot, u) },
 	}
 	for name, act := range actions {
 		user := "n-" + strings.ToLower(name)
@@ -541,7 +543,7 @@ func TestAdminCredentialActionClearsCreatedBy(t *testing.T) {
 			t.Errorf("%s kept created_by", name)
 		}
 		e.kc.Update(user, func(u *kctest.User) { u.Credentials = nil }) // no Keycloak credential left either
-		if err := r(e.svc.SendInvite(ctx, ivy, user)); status(err) != 403 {
+		if err := r(e.svc.SendInvite(ctx, ivy, user, false)); status(err) != 403 {
 			t.Errorf("after %s, delegate re-invite = %v", name, err)
 		}
 	}
@@ -549,7 +551,7 @@ func TestAdminCredentialActionClearsCreatedBy(t *testing.T) {
 	if _, err := e.svc.CreateUser(ctx, ivy, directory.CreateRequest{Username: "kept", Email: "kept@example.org"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r(e.svc.SendInvite(ctx, ivy, "kept")); err != nil {
+	if err := r(e.svc.SendInvite(ctx, ivy, "kept", false)); err != nil {
 		t.Fatal(err)
 	}
 	if cfg, _ := e.svc.Store.Load(); cfg.CreatedBy["kept"] != "ivy" {

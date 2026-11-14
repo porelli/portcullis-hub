@@ -189,7 +189,11 @@
         line = 'No password yet';
         btns = '<button type="button" class="pd-btn primary sm" data-ma-act="cred-create">Create password</button>';
     }
-    let h = '<div class="ma-value ma-cred" data-ma-cred data-ma-app="' + esc(app.id) + '" data-ma-key="' + esc(c.key) + '" data-ma-name="' + esc(name) + '" data-ma-status-kind="' + esc(c.status) + '">' +
+    // The app's own fresh method (fresh_pc_method, P11): "totp" asks the
+    // popup for the code; nothing else is ever passed on.
+    const pc = app.fresh_pc_method === 'totp' ? 'totp' : '';
+    const refusal = app.fresh_refusal || '';
+    let h = '<div class="ma-value ma-cred" data-ma-cred data-ma-app="' + esc(app.id) + '" data-ma-key="' + esc(c.key) + '" data-ma-name="' + esc(name) + '" data-ma-status-kind="' + esc(c.status) + '" data-ma-pc="' + pc + '" data-ma-refusal="' + esc(refusal) + '">' +
       '<dt>' + esc(c.label || c.key) + '</dt><dd>' +
       '<div class="ma-entry-row"><span class="ma-cred-line' + (c.status === 'unavailable' || c.status === 'voided' ? ' ma-cred-warn' : '') + '">' + (typeof line === 'object' ? line.html : esc(line)) + '</span>' + btns + '</div>' +
       '<div data-ma-cred-panel></div>' +
@@ -225,6 +229,8 @@
     flow = f;
     PortcullisFreshAuth.start(el.maFreshAuth, {
       ctx: { instance: f.instance, key: f.key },
+      pcMethod: row.dataset.maPc === 'totp' ? 'totp' : '',
+      refusal: row.dataset.maRefusal || '',
       status: (text, warn, spin) => credStatus(row, text, warn, spin),
       busy: on => credBusy(row, on),
       end: () => { if (flow === f) flow = null; },
@@ -366,12 +372,17 @@
     let h = '<article class="pd-card ma-app" data-ma-app="' + esc(app.id) + '"><div class="ma-head">';
     if (app.icon) h += '<span class="ma-icon" aria-hidden="true">' + esc(app.icon) + '</span>';
     h += '<h3 class="ma-name">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) + '</h3>';
-    if (!url) h += '<span class="pd-pill">No web page</span>';
+    if (app.no_access) h += '<span class="pd-pill warn" title="You can\'t open this app now; your own entries stay yours to change">No access</span>';
+    else if (!url) h += '<span class="pd-pill">No web page</span>';
+    if (app.vpn_only) h += '<span class="pd-pill info" title="Reachable only while you are connected to the VPN">VPN only</span>';
     if (app.ai && (app.ai.companions || []).length) h += '<span class="pd-pill info" title="Use it from your AI assistant: see Connect your AI">AI</span>';
     h += '</div>';
     if (!(app.credentials || []).length && !(app.entries || []).length && !(app.values || []).length && app.ai) {
       h += '<p class="pd-muted ma-applies">No personal settings. You can use it from your AI assistant: see Connect your AI above.</p>';
     }
+    // An app without personal settings has no settings section: just
+    // its name and link (people can open it).
+    if (!(app.credentials || []).length && !(app.entries || []).length && !(app.values || []).length) return h + '</article>';
     h += '<dl class="ma-values">';
     for (const c of app.credentials || []) h += credHtml(app, c);
     for (const e of app.entries || []) h += entryHtml(app.id, e);
@@ -425,7 +436,7 @@
     for (const app of apps) for (const e of app.entries || []) el.maEntries.set(app.id + '\u0000' + e.key, e);
     box.innerHTML = apps.length
       ? apps.map(card).join('')
-      : '<p class="pd-muted ma-empty">No apps with personal settings.</p>';
+      : '<p class="pd-muted ma-empty">No apps are available to you yet.</p>';
   }
 
   // entryAction saves or clears the entry of row; the row is redrawn
@@ -481,7 +492,7 @@
       el.dataset.maBound = '1';
       el.innerHTML = '<div class="pd-head"><h2 class="pd-h3">My apps</h2>' +
         '<button type="button" class="pd-btn secondary sm" data-ma-act="reload">Refresh</button></div>' +
-        '<p class="pd-muted ma-intro">Your own settings in the apps you can use, and where each comes from. Administrators set most of them; values with an input are yours to enter.</p>' +
+        '<p class="pd-muted ma-intro">The apps you can open, with your own settings in each and where each comes from. Administrators set most of them; values with an input are yours to enter.</p>' +
         '<div data-mai-box></div><div data-ma-list></div>';
       el.addEventListener('click', e => {
         const b = e.target.closest('[data-ma-act]');

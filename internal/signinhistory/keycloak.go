@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/signin"
 )
 
 // The Keycloak clients the mapping names.
@@ -31,6 +32,14 @@ const (
 	detailIdP = "identity_provider"
 )
 
+// Keycloak's credential event details, and the override's pc_replaced
+// (the replaced authenticator's label, T11).
+const (
+	detailCredType  = "credential_type"
+	detailCredLabel = "credential_user_label"
+	detailReplaced  = "pc_replaced"
+)
+
 // InviteIdP is the setup links' identity provider (contract §9.4).
 const InviteIdP = "portcullis-invite"
 
@@ -43,6 +52,15 @@ var failureText = map[string]string{
 	"invalid_user_certificate":     "certificate refused",
 	"different_user_authenticated": "another person's certificate",
 	"access_denied":                "access denied",
+}
+
+// FailureTextFor is FailureText by error and method: a wrong credential
+// under the totp method is "wrong authenticator code" (§8.2).
+func FailureTextFor(kcErr, method string) string {
+	if kcErr == "invalid_user_credentials" && method == string(signin.TOTP) {
+		return "wrong authenticator code"
+	}
+	return FailureText(kcErr)
 }
 
 // FailureText is Keycloak error's plain text ("sign-in failed" when it
@@ -68,7 +86,11 @@ func FailureText(kcErr string) string {
 //   - pc_kind sso → opened <client name> for a listed client (By the
 //     pc_act administrator, part 3), else dropped (group-gate's log
 //     covers the gateway's apps);
-//   - LOGIN_ERROR → failed, methods [pc_method], the error's text.
+//   - LOGIN_ERROR → failed, methods [pc_method], the error's text
+//     (FailureTextFor);
+//   - UPDATE_CREDENTIAL / REMOVE_CREDENTIAL of credential_type otp →
+//     method, methods [totp], "authenticator app added|replaced|removed:
+//     <label>" (replaced: pc_replaced's label); any other type dropped.
 //
 // A LOGIN without the extension's pc_kind is kept as a sign-in whose
 // methods weren't recorded, never hidden.
@@ -112,7 +134,26 @@ func FromEvent(ev keycloak.Event, clientNames map[string]string) (Entry, bool) {
 	case "LOGIN_ERROR":
 		e.Kind = KindFailed
 		e.Methods = splitMethods(d[detailMethod])
-		e.Reason = FailureText(ev.Error)
+		e.Reason = FailureTextFor(ev.Error, strings.TrimSpace(d[detailMethod]))
+	case "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL":
+		// Only an authenticator app's events (T11): every other
+		// credential type is dropped. The credential details are read
+		// here only: a LOGIN sent right after a required action can still
+		// carry them, and they never count there.
+		if d[detailCredType] != keycloak.OTPType {
+			return Entry{}, false
+		}
+		label := Clean(d[detailCredLabel], maxDetail)
+		e.Kind, e.Methods = KindMethod, []signin.Method{signin.TOTP}
+		switch {
+		case ev.Type == "REMOVE_CREDENTIAL":
+			e.Detail = "authenticator app removed: " + label
+		case d[detailReplaced] != "":
+			e.Detail = "authenticator app replaced: " + Clean(d[detailReplaced], maxDetail)
+		default:
+			e.Detail = "authenticator app added: " + label
+		}
+		e.Detail = Clean(e.Detail, maxDetail)
 	default:
 		return Entry{}, false
 	}

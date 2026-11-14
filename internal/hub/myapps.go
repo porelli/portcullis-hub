@@ -97,6 +97,23 @@ type MyApp struct {
 	// AI: the caller's switched-on companions of this app (Task 21,
 	// contract §5.1); nil = none, or the ai key is off (myAITopLocked).
 	AI *MyAppAI `json:"ai,omitempty"`
+	// FreshPcMethod is this app's fresh-auth popup pc_method (T9, P11):
+	// "totp" when its governing template accepts only a code, else "".
+	// Set only on an app with credential cards (the proofs it starts).
+	FreshPcMethod string `json:"fresh_pc_method,omitempty"`
+	// FreshRefusal (final review M1): none of the caller's set-up methods
+	// passes this app's template: the card shows it instead of the popup.
+	FreshRefusal string `json:"fresh_refusal,omitempty"`
+	// VPNOnly: some of its hosts is reachable only over the VPN (the
+	// policy's vpn.hosts): the card says so.
+	VPNOnly bool `json:"vpn_only,omitempty"`
+	// open: group-gate lets the caller open it (gateOpenLocked), so it is
+	// listed even without any of the above.
+	open bool
+	// NoAccess: listed for its entries alone (they can be saved after
+	// access is lost) while group-gate doesn't let the caller open it:
+	// no link (URL empty).
+	NoAccess bool `json:"no_access,omitempty"`
 }
 
 // MyAppsView is GET /api/me/apps' answer (F21): the apps, and the
@@ -117,8 +134,9 @@ type MyAppsView struct {
 // credential cards (one per person_secret option, listed for population
 // members even without values or entries: F21), and those whose
 // person-entered options' population holds them, with their own entries
-// (Task 15A), and its AI part (Task 21: switched-on companions, G13); an
-// app with none of them is left out. The directory snapshot is taken
+// (Task 15A), and its AI part (Task 21: switched-on companions, G13);
+// and every other enabled app group-gate lets them open under the policy
+// last written (gateOpenLocked), with no settings. The directory snapshot is taken
 // before mu; an unavailable directory is the membership error.
 func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 	user = strings.ToLower(user)
@@ -127,7 +145,9 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		return nil, err
 	}
 	info := h.FreshAuthInfo()
+	has, known := h.personMethods(ctx, user)
 	gate := h.gatePresent()
+	policyDoc := h.gatePolicy.Load()
 	healthy := h.aiClientHealth()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -157,8 +177,11 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 				app.Entries = append(app.Entries, h.myEntryLocked(t, o, user, m.UUIDs[user]))
 			}
 		}
+		// Every app the portal would let them open is listed, settings
+		// or not (an app without any just has no settings section).
+		app.open, app.VPNOnly = h.gateOpenLocked(policyDoc, t, m, user)
 		if groups == nil {
-			if len(app.Entries) > 0 {
+			if len(app.Entries) > 0 || app.open {
 				out = append(out, app)
 			}
 			continue
@@ -181,11 +204,16 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		for _, o := range personSecretOptions(t) {
 			app.Credentials = append(app.Credentials, h.myCredentialLocked(t, o, user))
 		}
+		if len(app.Credentials) > 0 {
+			if _, rule, why := h.governingLocked(govInstance(t.ID)); why == "" {
+				app.FreshPcMethod, app.FreshRefusal = freshPcFor(rule, h.st.SignIn.MethodsOn(), has, known)
+			}
+		}
 		if aiOn && gateUser(user) {
 			app.AI = h.myAppAILocked(t)
 			companion = companion || app.AI != nil
 		}
-		if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 || app.AI != nil {
+		if app.open || len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 || app.AI != nil {
 			secretApps = secretApps || len(app.Credentials) > 0
 			out = append(out, app)
 		}
@@ -200,11 +228,34 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		kept := out[:0]
 		for _, app := range out {
 			app.AI = nil
-			if len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 {
+			if app.open || len(app.Values) > 0 || len(app.Entries) > 0 || len(app.Credentials) > 0 {
 				kept = append(kept, app)
 			}
 		}
 		out = kept
+	}
+	// Only what group-gate lets them open — except an app with their
+	// own entries, which they may still save after losing access: shown
+	// without its link and marked no_access (and without anything else).
+	kept := out[:0]
+	for _, app := range out {
+		switch {
+		case app.open:
+		case len(app.Entries) > 0:
+			app.URL, app.NoAccess, app.VPNOnly = "", true, false
+			app.Values, app.Credentials, app.AI = []MyValue{}, []MyCredential{}, nil
+			// No credential card, so no proof: no fresh method either
+			// (final review L13).
+			app.FreshPcMethod, app.FreshRefusal = "", ""
+		default:
+			continue
+		}
+		kept = append(kept, app)
+	}
+	out = kept
+	secretApps = false
+	for _, app := range out {
+		secretApps = secretApps || len(app.Credentials) > 0
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	v.Apps = out

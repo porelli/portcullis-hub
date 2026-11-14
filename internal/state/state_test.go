@@ -130,7 +130,7 @@ func TestLocalNetworksLoad(t *testing.T) {
 func TestEnsureSignInDefaults(t *testing.T) {
 	s := New()
 	si := s.SignIn
-	want := map[string]bool{"password": false, "passkey_synced": true, "browser_cert": false, "passkey_device": true, "security_key": true, "yubikey_cert": true}
+	want := map[string]bool{"password": false, "totp": false, "passkey_synced": true, "browser_cert": false, "passkey_device": true, "security_key": true, "yubikey_cert": true}
 	if len(si.Methods) != len(want) {
 		t.Errorf("methods = %v", si.Methods)
 	}
@@ -139,7 +139,7 @@ func TestEnsureSignInDefaults(t *testing.T) {
 			t.Errorf("method %s = %v (set %v), want %v", m, v, ok, on)
 		}
 	}
-	if len(si.Templates) != 4 {
+	if len(si.Templates) != 5 {
 		t.Fatalf("templates = %v", si.Templates)
 	}
 	for _, b := range signin.Builtins() {
@@ -148,7 +148,7 @@ func TestEnsureSignInDefaults(t *testing.T) {
 			t.Errorf("built-in %s = %+v", b.ID, got)
 		}
 	}
-	for id, on := range map[string]bool{"basic": false, "standard": true, "strong": true, "yubikey-and-certificate": false} {
+	for id, on := range map[string]bool{"basic": false, "standard": true, "strong": true, "yubikey-and-certificate": false, "password-and-code": false} {
 		if si.Templates[id].Enabled != on {
 			t.Errorf("%s enabled = %v, want %v", id, si.Templates[id].Enabled, on)
 		}
@@ -286,7 +286,7 @@ func TestEnsureSignInStoredWithoutMethods(t *testing.T) {
 			t.Errorf("%s on in a stored section without methods", m)
 		}
 	}
-	if s.SignIn.Default != "strong" || len(s.SignIn.Templates) != 4 {
+	if s.SignIn.Default != "strong" || len(s.SignIn.Templates) != 5 {
 		t.Errorf("section = %+v", s.SignIn)
 	}
 
@@ -342,5 +342,32 @@ func TestImpersonationsRoundTrip(t *testing.T) {
 	}
 	if c := rec.Clone(); &c.Apps[0] == &rec.Apps[0] {
 		t.Error("Clone shares Apps")
+	}
+}
+
+// Authenticator apps start off: on a fresh state and on a stored one that
+// predates the method.
+func TestEnsureSignInTOTPOff(t *testing.T) {
+	s := New()
+	if v, ok := s.SignIn.Methods["totp"]; !ok || v {
+		t.Errorf("fresh: totp = %v (set %v)", v, ok)
+	}
+	if s.SignIn.MethodsOn()[signin.TOTP] {
+		t.Error("fresh: MethodsOn has totp")
+	}
+	st := &AppState{SignIn: SignIn{Methods: map[string]bool{"password": true, "passkey_synced": true, "security_key": true}, Default: "standard"}}
+	st.init()
+	st.EnsureSignIn()
+	if v, ok := st.SignIn.Methods["totp"]; !ok || v {
+		t.Errorf("stored: totp = %v (set %v)", v, ok)
+	}
+	if !st.SignIn.Methods["password"] || !st.SignIn.Methods["security_key"] {
+		t.Errorf("stored switches changed: %v", st.SignIn.Methods)
+	}
+	// An allowlist: a method it doesn't name starts off.
+	for _, m := range []signin.Method{signin.TOTP, signin.Password, signin.BrowserCert, "sms", ""} {
+		if defaultMethodOn(m) {
+			t.Errorf("defaultMethodOn(%q)", m)
+		}
 	}
 }

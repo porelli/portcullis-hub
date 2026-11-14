@@ -35,7 +35,7 @@ func (s *Server) signInHandoff(what string) map[string]string {
 // registerMySignInTools registers the Sign-in page's people tools.
 func (s *Server) registerMySignInTools() {
 	for _, t := range []Tool{
-		{Name: "my_sign_in", Description: "Your sign-in methods: which of the six are set up, off or unknown, your passkeys, your YubiKey and browser certificates (with status), the apps you sign in to and whether your methods meet each, the limits, and your last 20 sign-in history entries. Only your data.",
+		{Name: "my_sign_in", Description: "Your sign-in methods: which of the seven are set up, off or unknown, your passkeys, your YubiKey and browser certificates (with status), the apps you sign in to and whether your methods meet each, the limits, and your last 20 sign-in history entries. Only your data.",
 			Class: ClassRead, Scope: ScopePeople, Twin: "GET /api/me/signin", In: noArgs{},
 			Run: func(ctx context.Context, c *directory.Caller, _ json.RawMessage) (any, error) {
 				u := strings.ToLower(c.User)

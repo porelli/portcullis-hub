@@ -3,7 +3,7 @@
 Portcullis decides how people sign in with two things, both set in the Hub
 under **Settings → Sign-in**:
 
-- **Sign-in methods**: six ways to sign in, each switched on or off for the
+- **Sign-in methods**: seven ways to sign in, each switched on or off for the
   whole server.
 - **Templates**: named rules over those methods ("a security key, or a
   YubiKey certificate"). One template is the default; each app and each core
@@ -20,6 +20,7 @@ The exact formats are in
 | Method | Strength | Where it comes from | Starts |
 |--------|----------|---------------------|--------|
 | **Password** | 1.0 | The person's LLDAP password | off |
+| **Authenticator app** | 1.5 | A 6-digit code from an app on the person's phone or password manager ([below](#authenticator-app)); never on its own | off |
 | **Synced passkey** | 2.5 | A passkey synced by iCloud, Google, 1Password and the like, or any passkey whose model Portcullis can't verify | on |
 | **Browser certificate** | 2.5 | A certificate file (`.p12`) the person creates on the [Sign-in page](#the-sign-in-page) and installs in a browser ([below](#browser-certificates)) | off |
 | **Device-bound passkey** | 3.0 | Windows Hello, a TPM: the key can't leave the computer or phone | on |
@@ -31,13 +32,15 @@ have it set up. A method that is off is never offered and never accepted, and
 people can't set it up. You can't switch off a method an enabled template
 needs, i.e. one without which the template would have no way in left: the
 dialog lists the templates and what uses them (the default, apps, core
-pages). Change those first. The browser certificate starts off; switch it on
-when you want people to be able to create one.
+pages). Change those first. Only the passkey kinds, the security key and
+the YubiKey certificate start on; every other method (the password, the
+browser certificate, the authenticator app, and any method added later)
+starts off: switch it on when you want people to be able to set it up.
 
 Some template entries name a **family** of methods: *Passkey (any kind)*,
 *YubiKey (touch or certificate)* and *Certificate (YubiKey or browser)*. A
 family accepts any of its methods that is switched on. No family contains the
-password: a password satisfies only templates that name it.
+password or the authenticator app: they satisfy only templates that name them.
 
 ### Passkey kinds
 
@@ -76,6 +79,63 @@ in the method counts, the warnings and the lockout guard.
   doesn't count towards Keycloak's brute-force lockout (so nobody can lock
   these accounts out by trying passwords).
 
+### Authenticator app
+
+An **authenticator app** shows a new 6-digit code every 30 seconds (a
+time-based one-time password, TOTP). It is a second factor, never a way in on
+its own: a template may name it only next to another method in an **all of**
+group, such as the built-in *Password + authenticator code*.
+
+**What codes are good for.** A person who has a phone but no passkey they
+trust, or who shares a computer where a synced passkey isn't wanted, gets
+much more than a password alone: someone who learns the password still needs
+the phone. *Password + authenticator code* scores 1.9 / 5, against 1.0 for a
+password alone.
+
+**What they are bad for.** A code can be phished: a fake sign-in page can ask
+for it and relay it within its 30 seconds. The secret behind the codes is
+shared between Keycloak and the app, and some apps sync or export it. That is
+why the authenticator app scores 1.5, well below any passkey, and why the
+score's reason says "codes can be typed into a fake site". For anything that
+matters, prefer passkeys and security keys. A code never approves a new
+certificate, never adds a first password and never starts signing in as
+someone else.
+
+**Apps that work.** Every common app: Google Authenticator, Microsoft
+Authenticator, Authy, 1Password, Bitwarden, FreeOTP and Aegis. Portcullis
+uses the settings they all support (HMAC-SHA1, 6 digits, 30 seconds); a code
+from just before or after the current one is accepted too (±30 s of clock
+drift), and an accepted code can't be used twice. The server's clock matters:
+`./portcullis status` warns when it isn't synchronised.
+
+**Setting one up.** On the [Sign-in page](#the-sign-in-page), **+ Add
+authenticator app** opens Keycloak's own page with a QR code (and the key to
+type in by hand) in a sign-in popup; the person scans it and types the first
+code. The secret is made and kept by Keycloak only: the Hub never sees it. A
+person can have at most 3 authenticator apps (a phone, a spare phone, a
+password manager). Adding one follows the
+[add-stronger rule](#adding-a-stronger-method): a password-only sign-in can't
+add one while that switch is off (a stolen password must not become a stolen
+second factor); a password + code, passkey or certificate sign-in can, and so
+can a setup link that asks for one. `admin`, `portcullis-hub` and every
+`portcullis-*` account can never use codes.
+
+**A lost phone.** The person signs in with another authenticator (the page
+recommends a second one after the first) or with any method at least as
+strong, then removes the lost one on the Sign-in page. Without one, an
+administrator or a [sign-in helper](#help-to-reset) uses **Remove authenticator
+apps** on the person's Sign-in tab and sends a setup link with **Also set up
+an authenticator app**.
+
+**Guessing.** A wrong code counts in the same brute-force counter as a wrong
+password: wrong codes and wrong passwords share one counter. Someone guessing
+codes must already have the password; each wrong code shows in the person's
+history as "wrong authenticator code", and 20 in a day raise the doctor's
+`signin_totp_guessing` warning: change that person's password.
+
+**Switched off**, existing authenticator apps are kept: they stop being asked
+for and counted, and work again when the method is switched back on.
+
 ## Templates
 
 A template is a rule: a tree of groups, each **all of** or **any of**,
@@ -84,7 +144,7 @@ example, *((password and a security key) or (a YubiKey and a passkey)) and a
 certificate*. The editor shows the rule as nested boxes and as one sentence,
 both updated as you type.
 
-Four templates are built in. You can edit them and switch them on and off, but
+Five templates are built in. You can edit them and switch them on and off, but
 not delete them, and you can add your own (**+ New template**):
 
 | Template | Rule | Score | Starts |
@@ -93,6 +153,7 @@ not delete them, and you can add your own (**+ New template**):
 | **Standard** | any passkey or any certificate | 2.5 / 5 | enabled, the default |
 | **Strong** | a security key or a YubiKey certificate | 3.5 / 5 | enabled; the Hub and people pages |
 | **YubiKey + certificate** | a YubiKey certificate and a security key | 4.4 / 5 | disabled |
+| **Password + authenticator code** | a password and a code from an authenticator app | 1.9 / 5 | disabled; needs both methods on |
 
 Only enabled templates appear in the drop-downs. A template in use (by the
 default, an app or a core page) can't be switched off or deleted.
@@ -102,6 +163,17 @@ on) can't be met. In an **any of** group that part is simply dropped: Basic
 with the password off works like Standard, and the editor greys the dropped
 part out. In an **all of** group it makes the whole group impossible. A
 template left with no way in at all can't be enabled.
+
+A template where an authenticator code alone would be a way in, such as
+*any of [authenticator app, security key]*, is refused: "an authenticator code
+can't be the only way in: combine it with another method (all of)". The editor
+marks the offending group as you type, and the check counts every method as
+on, so switching a method off later can't create such a way in.
+
+**Warning for the Hub and people pages.** When the Hub's or the people page's
+template has a way in made only of a password and a code, Settings → Sign-in
+shows "The Hub can be opened with a password and a code: both can be phished"
+next to the pick. It is a warning, not a refusal.
 
 ### Score
 
@@ -205,7 +277,9 @@ another synced passkey, but registering a security key needs help from an admin
 says "ask your admin" instead of "Set up …". A passkey added this way can't be
 reclassified above that cap later. A setup link is the exception: the passkey
 registered there may be of any kind. Passkey registration offers the security
-key first to administrators.
+key first to administrators. The same rule applies to an
+[authenticator app](#authenticator-app) (strength 1.5): a password-only
+session can't add one while the switch is off.
 
 ## The Sign-in page
 
@@ -230,6 +304,16 @@ top bar, **Sign-in methods** on the portal, and every "Set up …" and
       of certified authenticators and is only shown, never stored; a passkey
       the list doesn't know (most synced passkeys, older registrations) shows
       "unknown model".
+    - **Authenticator app:** the list with each one's name and date added,
+      with **Rename**, **Replace** and **Remove**, and **+ Add authenticator
+      app** below (hidden once you have 3; "ask your admin for a setup link"
+      when your sign-in is too weak to add one). Add and Replace open
+      Keycloak's QR-code page in a sign-in popup; Replace keeps the old app
+      working until the new one's first code is accepted. Remove opens
+      Keycloak's own confirmation, and before that the page lists the apps
+      that would then need a stronger sign-in. New ones are called
+      "Authenticator &lt;date time&gt;". The account console's
+      "Authenticator application" section runs through the same checks.
     - **YubiKey certificate:** its validity and **Renew**: the page shows the
       `ykman` commands that make a new request (CSR) for the key already on
       the YubiKey; you paste it, and the browser must present your current
@@ -278,8 +362,9 @@ certificate, and signing in with it gives amr `file`, never `mtls`.
 2. On the Sign-in page the person picks **Create**, chooses a lifetime (from
    1 day up to the limit, 30 days by default; the default is the limit) and
    confirms with a fresh sign-in in a popup. That sign-in must be a passkey
-   or YubiKey method the people page's template accepts: a password or
-   another browser certificate never creates a certificate. If the template
+   or YubiKey method the people page's template accepts: only those
+   methods can create a certificate, never a password, an authenticator
+   code or another browser certificate. If the template
    accepts nothing else, the page says "creating a certificate needs a
    passkey or YubiKey sign-in that people.&lt;domain&gt; accepts".
 3. The page offers the download (`<user>-browser-certificate-<YYYYMMDD>.p12`)
@@ -316,8 +401,9 @@ Both open the person's **Sign-in** tab on their page on people.&lt;domain&gt;:
 
 | Action | Administrators | Holders of `sign_in_help` |
 |--------|----------------|---------------------------|
-| Send a setup link | yes (not to another administrator: `./portcullis invite <user>`) | yes, also for accounts they didn't create |
+| Send a setup link (optionally **Also set up an authenticator app**, while the method is on) | yes (not to another administrator: `./portcullis invite <user>`) | yes, also for accounts they didn't create |
 | Remove passkeys | yes (another administrator's needs their username typed again) | yes |
+| Remove authenticator apps (while the method is on) | yes (another administrator's needs their username typed again) | yes |
 | Revoke a certificate | yes, except an administrator's, `admin`'s, `portcullis-hub`'s or any `portcullis-*` account's (`./portcullis cert revoke <serial>`) | yes |
 | Reset the password | yes (another administrator's needs their username typed again) | **no** |
 | Issue a YubiKey certificate (from a CSR) | yes, after a fresh sign-in; not for an administrator, `admin`, `portcullis-hub` or any `portcullis-*` account (`./portcullis cert enroll`) | **no** |
@@ -431,11 +517,12 @@ shows the person's sign-in history, newest first, with **Show older**:
 |-------|------------|
 | Signed in | a new sign-in, with its methods and their score |
 | Stepped up | an existing session that added a method |
-| Failed | a sign-in that failed, with the method tried and why ("wrong password", "certificate refused", …) |
+| Failed | a sign-in that failed, with the method tried and why ("wrong password", "wrong authenticator code", "certificate refused", …) |
 | Confirmed | a fresh sign-in for a sensitive action |
 | Opened | the first time a session opened an app (per app); "by root" when an administrator opened it while signed in as the person |
 | Help | an action someone else took on the account (by whom) |
 | Certificate | a certificate the person created, renewed or revoked |
+| Authenticator app | an authenticator app the person added, replaced or removed ("authenticator app added: &lt;name&gt;") |
 | Signed in as you | an administrator signed in as the person ([above](#signing-in-as-someone-else)): who, the reason, how long, how it ended and the apps opened |
 
 Each entry shows the IP address and the browser ("Firefox · macOS"). The
@@ -530,7 +617,8 @@ person's doesn't count, and neither does a certificate of the other kind.
 Otherwise the page reads "&lt;App&gt; needs a stronger sign-in — You signed in with
 a password. &lt;App&gt; accepts any one of: a passkey (you don't have one yet) · a
 YubiKey certificate …", with **Set up a passkey** / **Set up a security key**
-links and a **Sign-in methods** link, all to the person's
+links (and **Set up an authenticator app** when the missing method is a code
+the person hasn't set up) and a **Sign-in methods** link, all to the person's
 [Sign-in page](#the-sign-in-page) (`https://people.<domain>/signin`). When adding a
 stronger method from this sign-in isn't allowed, or the missing method is a
 certificate or a password, it says "ask your admin". Apps that sign in with
@@ -565,8 +653,8 @@ never counts.
 | Approving a companion's confirmation (people.&lt;domain&gt;) | the companion's app's template |
 | Approving a Portcullis people tool's confirmation (people.&lt;domain&gt;) | the `people` core page's template |
 | Approving an admin tool's confirmation (hub.&lt;domain&gt;) | the `hub` core page's template |
-| Creating a browser certificate, issuing a YubiKey certificate | the `people` core page's template, but never with a password or a browser certificate ([below](#browser-certificates)) |
-| Setting your own password on the Sign-in page | the `people` core page's template |
+| Creating a browser certificate, issuing a YubiKey certificate | the `people` core page's template, and only with a passkey (any kind), a security key or a YubiKey certificate: a password, a browser certificate, an authenticator code or any method added later never approves it ([below](#browser-certificates)) |
+| Setting your own password on the Sign-in page | the `people` core page's template; a passkey, security key or YubiKey certificate sets one, a password or an authenticator code only changes an existing one, anything else never |
 | Anything else that asks for a fresh sign-in | the `hub` core page's template (fail closed) |
 
 So with the core pages on Strong an admin confirmation needs the security key
@@ -574,7 +662,14 @@ or the YubiKey certificate, a synced passkey isn't enough; under Standard any
 passkey or the YubiKey certificate approves; an app on a password-only
 template is confirmed by typing the password again; a template that needs a
 security key and a password (`all[security_key, password]`) is confirmed with
-the security key — the password alone never is. A template that is
+the security key — the password alone never is. Under *Password +
+authenticator code* the confirmation is your password (or key), then a code:
+the popup asks for your primary method first, then the code, because a code
+is never the only proof. A password alone is refused. The popup asks for the code
+only when you have no other method the template accepts on its own; when
+none of your methods can pass it, the page says "This needs a stronger
+sign-in: you don't have a method it accepts yet." instead of opening the
+popup. A template that is
 disabled, gone or can't be met refuses.
 
 ## Traefik TLS tier
@@ -699,7 +794,12 @@ change) have no Level-of-Authentication steps any more:
       that signed in gives the amr (`hwk` security key, `dpk` device-bound,
       `spk` synced),
     - a **password** (amr `pwd`), only while the method is on, never for
-      `admin` and `portcullis-hub`.
+      `admin` and `portcullis-hub`,
+    - an **authenticator code** (amr `otp`), only while the method is on,
+      only once Keycloak already knows who is signing in (after the password,
+      on a step-up or a re-authentication), never for `admin`,
+      `portcullis-hub` or any `portcullis-*` account. It never asks for a
+      username.
 
     Each method stays in the session's amr for 10 hours. A step-up
     (`pc_method=<method>`) makes the other methods step aside, and the SSO
@@ -712,7 +812,7 @@ change) have no Level-of-Authentication steps any more:
 - **Brute-force protection** is on for the realm: after 10 failed sign-ins an
   account waits 60 s more per further failure, at most 15 minutes, and is
   never locked for good. Refused passwords of `admin` / `portcullis-hub` don't
-  count.
+  count. Wrong authenticator codes count in the same counter.
 - **Passkey registration** asks the authenticator for a direct attestation
   (the extension decides the kind from it; a passkey without one registers as
   synced), allows any authenticator attachment and requires a resident key and

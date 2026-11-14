@@ -25,6 +25,10 @@ const (
 	CauseExceptionExpired = "exception expired"
 	CauseMembershipExpire = "membership expired"
 	CauseOutsideChange    = "reverted: outside change"
+	// CauseRuleSuspended: a guarding group's rule uses a field that isn't
+	// admin-only while "Allow any profile field…" is off (ruleSuspended):
+	// the people it added leave, audited group.remove_member.
+	CauseRuleSuspended = "rule suspended: allow_any_field off"
 )
 
 // Change is one membership change made by Evaluate.
@@ -130,13 +134,43 @@ func (s *Service) addsBlocked(cfg *Config, guarding map[string]string, name stri
 	if !ok || gc == nil || gc.Rule == nil {
 		return ""
 	}
-	if bad := nonAdminOnly(cfg, gc.Rule); len(bad) > 0 {
-		return fmt.Sprintf("%s is %s but its rule uses fields that aren't admin-only (%s): nobody is added until the rule uses only admin-only fields", name, why, strings.Join(bad, ", "))
+	if s.ruleSuspended(cfg, guarding, name, gc) {
+		bad := strings.Join(nonAdminOnly(cfg, gc.Rule), ", ")
+		fix := "make " + bad + " admin-only (Fields)"
+		if s.anyFieldOffered(cfg, name) {
+			fix += ", or turn \"" + AllowAnyFieldLabel + "\" back on"
+		}
+		return fmt.Sprintf("%s is %s but its rule uses fields that aren't admin-only (%s): the rule is suspended — the people it added are removed and only people added by hand stay. To use it again, %s", name, why, bad, fix)
 	}
 	if matchesEmpty(cfg, gc.Rule) {
 		return fmt.Sprintf("%s is %s but its rule matches a person with no details at all (e.g. a new account): nobody is added until the rule no longer does", name, why)
 	}
 	return ""
+}
+
+// ruleSuspended: guarding group name's rule uses a field that isn't
+// admin-only and its "Allow any profile field…" doesn't apply
+// (anyFieldAllowed) — turned off, never on, or the group became guarding
+// later. Failing closed, the rule then counts for nothing: the group's
+// desired members are only its active "added by hand" entries
+// (suspend), so the people the rule added leave at the next evaluation.
+func (s *Service) ruleSuspended(cfg *Config, guarding map[string]string, name string, gc *GroupConfig) bool {
+	if _, ok := guarding[name]; !ok || gc == nil || gc.Rule == nil {
+		return false
+	}
+	return len(nonAdminOnly(cfg, gc.Rule)) > 0 && !s.anyFieldAllowed(cfg, name)
+}
+
+// suspend makes ge a suspended rule's (ruleSuspended): desired and
+// matched are only the active "added by hand" entries.
+func (ge *groupEval) suspend() {
+	desired := map[string]bool{}
+	for u := range ge.desired {
+		if ge.include[u] {
+			desired[u] = true
+		}
+	}
+	ge.desired, ge.matched = desired, map[string]bool{}
 }
 
 // groupEval is the computed state of one rule group.
@@ -195,8 +229,13 @@ func (s *Service) Desired(cfg *Config, sn *snapshot, now time.Time) map[string]m
 		if gc == nil || gc.Rule == nil || !s.ruleGroupAllowed(name, admin) {
 			continue
 		}
-		desired := s.evalGroup(gc, d, sn, now).desired
-		if s.addsBlocked(cfg, guarding, name, gc) != "" {
+		ge := s.evalGroup(gc, d, sn, now)
+		suspended := s.ruleSuspended(cfg, guarding, name, gc)
+		if suspended {
+			ge.suspend()
+		}
+		desired := ge.desired
+		if !suspended && s.addsBlocked(cfg, guarding, name, gc) != "" {
 			// Removals only: keep just the current members.
 			for u := range desired {
 				if !memberOf(sn.groups[name], u) {
@@ -376,6 +415,10 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 			sign = "-"
 		}
 		e := AuditEntry{Actor: RulesActor, Action: "group.sync", Target: clip(group + ":" + id), Detail: sign + cause, Result: "ok"}
+		if cause == CauseRuleSuspended {
+			// The group's own removal entry (its History, the person's).
+			e.Action, e.Target, e.Detail = "group.remove_member", clip(group), id+" ("+cause+")"
+		}
 		if err != nil {
 			e.Result, e.Error = "error", clip(err.Error())
 			rep.addErr(group, fmt.Sprintf("%s %s %s: %v", group, sign, id, err))
@@ -452,6 +495,10 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		}
 
 		ge := s.evalGroup(gc, d, sn, now)
+		suspended := s.ruleSuspended(cfg, guarding, name, gc)
+		if suspended {
+			ge.suspend()
+		}
 		last := s.ruleState[name]
 		current := map[string]string{} // lowercase -> LLDAP id
 		for _, m := range g.Members() {
@@ -471,7 +518,9 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 		}
 		if why := s.addsBlocked(cfg, guarding, name, gc); why != "" {
 			rep.addErr(name, why)
-			adds = nil
+			if !suspended {
+				adds = nil // suspended: only "added by hand" people are desired
+			}
 		}
 		if why, ok := guarding[name]; ok {
 			adds = dropDelegateCreated(rep, cfg, sn, name, why, adds)
@@ -509,6 +558,9 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 				cause = CauseExceptionExpired
 			case last != nil && !last[u]:
 				cause = CauseOutsideChange
+			}
+			if suspended && !ge.include[u] {
+				cause = CauseRuleSuspended
 			}
 			if apply(name, g.ID, current[u], false, cause) {
 				delete(state, u)

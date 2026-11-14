@@ -2,6 +2,7 @@ package signinhistory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -448,5 +449,118 @@ func TestOpenedLogExactUserAndBudget(t *testing.T) {
 	}
 	if want := today.Add(-time.Nanosecond); !p.Through.Equal(want) {
 		t.Errorf("through %v, want %v", p.Through, want)
+	}
+}
+
+// TestFromEventWrongCode (§8.2): a wrong code under pc_method totp reads
+// "wrong authenticator code"; a password keeps "wrong password".
+func TestFromEventWrongCode(t *testing.T) {
+	fail := keycloak.Event{Time: t0, Type: "LOGIN_ERROR", ClientID: ForwardAuthClient, Error: "invalid_user_credentials", Details: map[string]string{"pc_method": "totp"}}
+	e, ok := FromEvent(fail, nil)
+	if !ok || e.Kind != KindFailed || e.Reason != "wrong authenticator code" || !reflect.DeepEqual(e.Methods, []signin.Method{signin.TOTP}) {
+		t.Errorf("totp = %+v", e)
+	}
+	fail.Details["pc_method"] = "password"
+	if e, _ := FromEvent(fail, nil); e.Reason != "wrong password" {
+		t.Errorf("password = %+v", e)
+	}
+	for _, c := range [][3]string{
+		{"invalid_user_credentials", "totp", "wrong authenticator code"},
+		{"invalid_user_credentials", "", "wrong password"},
+		{"user_temporarily_disabled", "totp", "too many attempts: wait"},
+		{"certificate_expired", "totp", "certificate refused"},
+		{"nope", "totp", "sign-in failed"},
+	} {
+		if got := FailureTextFor(c[0], c[1]); got != c[2] {
+			t.Errorf("FailureTextFor(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}
+
+// TestFromEventCredentialEvents (T11, P3): otp credential events by the
+// person → method entries; any other credential type is dropped.
+func TestFromEventCredentialEvents(t *testing.T) {
+	ev := func(typ string, d map[string]string) keycloak.Event {
+		return keycloak.Event{Time: t0, Type: typ, ClientID: "account-console", IP: "203.0.113.7", Details: d}
+	}
+	for _, c := range []struct {
+		ev     keycloak.Event
+		detail string
+	}{
+		{ev("UPDATE_CREDENTIAL", map[string]string{"credential_type": "otp", "credential_user_label": "Phone", "credential_id": "c1", "pc_ua": firefoxMac}), "authenticator app added: Phone"},
+		{ev("UPDATE_CREDENTIAL", map[string]string{"credential_type": "otp", "credential_user_label": "New phone", "pc_replaced": "Old phone"}), "authenticator app replaced: Old phone"},
+		{ev("REMOVE_CREDENTIAL", map[string]string{"credential_type": "otp", "credential_user_label": "Tablet"}), "authenticator app removed: Tablet"},
+		{ev("UPDATE_CREDENTIAL", map[string]string{"credential_type": "otp", "credential_user_label": "a‮b\nc"}), "authenticator app added: abc"},
+	} {
+		e, ok := FromEvent(c.ev, nil)
+		if !ok || e.Kind != KindMethod || e.Detail != c.detail || !reflect.DeepEqual(e.Methods, []signin.Method{signin.TOTP}) || e.IP != "203.0.113.7" {
+			t.Errorf("%s %v = %+v (%v)", c.ev.Type, c.ev.Details, e, ok)
+		}
+	}
+	for _, d := range []map[string]string{
+		{"credential_type": "password"},
+		{"credential_type": "webauthn-passwordless", "credential_user_label": "x"},
+		{},
+		nil,
+	} {
+		for _, typ := range []string{"UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"} {
+			if e, ok := FromEvent(ev(typ, d), nil); ok {
+				t.Errorf("%s %v kept: %+v", typ, d, e)
+			}
+		}
+	}
+	if KindMethod != "method" {
+		t.Errorf("KindMethod = %q", KindMethod)
+	}
+}
+
+// TestFromAuditRemoveAuthenticators: removed by carol through the help
+// route → a help entry.
+func TestFromAuditRemoveAuthenticators(t *testing.T) {
+	a := directory.AuditEntry{Time: t0, Actor: "carol", Action: "user.remove_authenticators", Target: "alice", Detail: "2 removed; as sign_in_help", Result: "ok"}
+	e, ok := FromAudit(a, "alice")
+	if !ok || e.Kind != KindHelp || e.By != "carol" || e.Detail != "authenticator apps removed: 2 removed; as sign_in_help" {
+		t.Errorf("entry = %+v (%v)", e, ok)
+	}
+	a.Result = "refused"
+	if _, ok := FromAudit(a, "alice"); ok {
+		t.Error("a refused removal kept")
+	}
+}
+
+// TestLoginIgnoresCredentialDetails (keycloak smoke): Keycloak sends the
+// required action's UPDATE_CREDENTIAL after the override returns, so the
+// LOGIN right after it can still carry the credential details: they are
+// read only from UPDATE_CREDENTIAL / REMOVE_CREDENTIAL, never on LOGIN.
+func TestLoginIgnoresCredentialDetails(t *testing.T) {
+	cred := map[string]string{"credential_type": "otp", "credential_user_label": "Secret Phone Label", "credential_id": "c1", "pc_replaced": "Old Label"}
+	for _, extra := range []map[string]string{
+		{"pc_kind": "sign_in", "pc_methods": "password,totp"},
+		{"pc_kind": "step_up", "pc_methods": "totp"},
+		{"pc_kind": "sso", "pc_session": "password,totp"},
+		{},
+	} {
+		d := map[string]string{}
+		for k, v := range cred {
+			d[k] = v
+		}
+		for k, v := range extra {
+			d[k] = v
+		}
+		for _, client := range []string{ForwardAuthClient, FreshAuthClient, "nextcloud"} {
+			e, ok := FromEvent(login(client, d), map[string]string{"nextcloud": "Nextcloud"})
+			if !ok {
+				continue
+			}
+			b, _ := json.Marshal(e)
+			if e.Kind == KindMethod || strings.Contains(string(b), "Secret Phone Label") || strings.Contains(string(b), "Old Label") || strings.Contains(e.Detail, "authenticator app") {
+				t.Errorf("LOGIN %v on %s = %s", extra, client, b)
+			}
+		}
+	}
+	// LOGIN_ERROR with the same details: a failure, never a method entry.
+	e, _ := FromEvent(keycloak.Event{Time: t0, Type: "LOGIN_ERROR", Error: "invalid_user_credentials", Details: map[string]string{"pc_method": "totp", "credential_user_label": "Secret Phone Label"}}, nil)
+	if b, _ := json.Marshal(e); e.Kind != KindFailed || strings.Contains(string(b), "Secret Phone Label") {
+		t.Errorf("LOGIN_ERROR = %s", b)
 	}
 }

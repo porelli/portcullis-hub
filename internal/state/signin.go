@@ -114,10 +114,14 @@ var SignInTemplateIDRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // SignInNameMaxRunes is the longest template name (D12).
 const SignInNameMaxRunes = 48
 
-// defaultMethodOn is a fresh state's switch of m (D1): password and
-// browser_cert off, the other four on.
+// defaultOnMethods are the methods a fresh state switches on (D1). An
+// allowlist: password, totp, browser_cert and any method added later start
+// off.
+var defaultOnMethods = []signin.Method{signin.PasskeySynced, signin.PasskeyDevice, signin.SecurityKey, signin.YubiKeyCert}
+
+// defaultMethodOn is a fresh state's switch of m (D1).
 func defaultMethodOn(m signin.Method) bool {
-	return m != signin.Password && m != signin.BrowserCert
+	return slices.Contains(defaultOnMethods, m)
 }
 
 // defaultCore is a fresh state's pick for core page key (D11).
@@ -130,7 +134,7 @@ func defaultCore(key string) string {
 
 // EnsureSignIn fills the sign-in defaults (D1, D11, D12) a state lacks: a
 // fresh state (no methods, templates, default or core picks at all) gets
-// the D1 switches, the four built-ins, Default "standard" and the D11
+// the D1 switches, the five built-ins, Default "standard" and the D11
 // core picks. On a stored state it only completes: a method without an
 // entry is off (fail closed: a stored section without methods has every
 // method off), a missing built-in comes back as it ships (built-ins are

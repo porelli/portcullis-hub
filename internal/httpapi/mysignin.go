@@ -33,8 +33,8 @@ const mySignInBodyMax = 8 << 10
 // passes the certificate the browser presented (D25).
 const presentedCertHeader = "X-Forwarded-Tls-Client-Cert"
 
-// registerMySignIn registers the page and the D25 routes (nine with the
-// page: the passkey rename is polish 1's).
+// registerMySignIn registers the page and the D25 routes (ten with the
+// page: the passkey rename is polish 1's, the authenticator rename T6's).
 func (s *Server) registerMySignIn(mux routeMux) {
 	mux.HandleFunc("GET /signin", s.handleMySignInPage)
 	mux.HandleFunc("GET /api/me/signin", s.handleMySignIn)
@@ -45,6 +45,29 @@ func (s *Server) registerMySignIn(mux routeMux) {
 	mux.HandleFunc("PUT /api/me/signin/password", s.handleSetOwnPassword)
 	mux.HandleFunc("DELETE /api/me/signin/password", s.handleRemoveOwnPassword)
 	mux.HandleFunc("PUT /api/me/signin/passkeys/{credentialId}/label", s.handleRenameOwnPasskey)
+	mux.HandleFunc("PUT /api/me/signin/authenticators/{credentialId}/label", s.handleRenameOwnAuthenticator)
+}
+
+// handleRenameOwnAuthenticator renames one of the caller's own
+// authenticator apps (T6; as handleRenameOwnPasskey: 404 another's or not
+// an otp, 409 a duplicate, 400 a bad name) → 204. RefuseWhileImpersonated
+// refuses it while signed in as someone else.
+func (s *Server) handleRenameOwnAuthenticator(w http.ResponseWriter, r *http.Request) {
+	user, ok := mySignInUser(w, r)
+	if !ok {
+		return
+	}
+	var b struct {
+		Label string `json:"label"`
+	}
+	if !readMySignInBody(w, r, &b, `{"label": "..."}`) {
+		return
+	}
+	if err := s.Hub.RenameOwnAuthenticator(r.Context(), user, r.PathValue("credentialId"), b.Label); err != nil {
+		mySignInErr(w, "renaming an authenticator app of "+user, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleRenameOwnPasskey renames one of the caller's own passkeys
@@ -139,6 +162,11 @@ func (s *Server) handleMySignIn(w http.ResponseWriter, r *http.Request) {
 	user, ok := mySignInUser(w, r)
 	if !ok {
 		return
+	}
+	if r.URL.Query().Get("refresh") == "1" {
+		// T5: after the account console, re-read the inventory (at most
+		// once per 10 s per caller; otherwise ignored, never an error).
+		s.Hub.RefreshMySignIn(user)
 	}
 	v, err := s.Hub.MySignInView(r.Context(), user)
 	if err != nil {

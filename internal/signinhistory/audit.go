@@ -20,6 +20,8 @@ func historyAction(action string) (string, bool) {
 		return "setup link sent", true
 	case "user.remove_passkeys":
 		return "passkeys removed", true
+	case "user.remove_authenticators":
+		return "authenticator apps removed", true
 	}
 	switch {
 	case action == "cert.create":
@@ -35,8 +37,8 @@ func historyAction(action string) (string, bool) {
 }
 
 // FromAudit maps one of user's audit entries (§8.2, D28): only the
-// actions cert.*, signin.password, user.password, user.invite and
-// user.remove_passkeys, and only those that happened (result ok). An
+// actions cert.*, signin.password, user.password, user.invite,
+// user.remove_passkeys and user.remove_authenticators, and only those that happened (result ok). An
 // entry whose actor isn't user is help (By the actor); one by user is
 // certificate for cert.*, and dropped for anything else. Detail is what
 // was done, then the audit entry's detail (which never holds a secret).

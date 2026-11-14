@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -157,8 +158,9 @@ func TestDirectoryAPI(t *testing.T) {
 		{"root", "DELETE", "/api/directory/users/kim", `{"confirm":"kim"}`, 200},
 		{"root", "DELETE", "/api/directory/groups/users_demo", `{"confirm":"users_demo"}`, 200},
 		{"root", "GET", "/api/directory/audit", "", 200},
-		{"root", "POST", "/api/directory/users/admin/invite", `{"confirm":"admin"}`, 409},
-		{"root", "POST", "/api/directory/users/ops/invite", `{}`, 409}, // administrators: server-side only
+		{"root", "POST", "/api/directory/users/admin/invite", `{}`, 409},
+		{"root", "POST", "/api/directory/users/admin/invite", `{"confirm":"admin"}`, 400}, // strict body
+		{"root", "POST", "/api/directory/users/ops/invite", `{}`, 409},                    // administrators: server-side only
 		{"root", "POST", "/api/directory/users/ops/remove-passkeys", `{"confirm":"ops","invite":true}`, 409},
 		{"root", "POST", "/api/directory/users/ops/password", `{"generate":true}`, 400},
 		{"root", "POST", "/api/directory/users/ops/password", `{"generate":true,"confirm":"ops"}`, 200},
@@ -349,5 +351,66 @@ func TestUserSweepRoutes(t *testing.T) {
 	}
 	if r, _ := doAs(t, srv, "root", "POST", "/api/keycloak/user-sweep/resume", `{"confirm":"resume","x":1}`); r.StatusCode != 400 {
 		t.Errorf("unknown field = %d", r.StatusCode)
+	}
+}
+
+// TestHubInviteAuthenticatorOff409 (T8, P12): the invite body is
+// {"authenticator": bool} (strict; empty = false); true is refused with
+// 409 while totp is off, before enroll is asked.
+func TestHubInviteAuthenticatorOff409(t *testing.T) {
+	var on atomic.Bool
+	srv, ll, _ := newDirServerWith(t, func(d *directory.Service) { d.AuthenticatorMethodOn = on.Load })
+	ll.AddUser("kim", "kim@example.org", "Kim", "")
+	for _, c := range []struct {
+		body string
+		want int
+		text string
+	}{
+		{``, 200, ""},
+		{`{}`, 200, ""},
+		{`{"authenticator":false}`, 200, ""},
+		{`{"authenticator":true}`, 409, "authenticator apps are off on this server"},
+		{`{"authenticator":"yes"}`, 400, ""},
+		{`{"authenticator":true,"x":1}`, 400, ""},
+		{`{} {}`, 400, ""},
+	} {
+		r, b := doAs(t, srv, "root", "POST", "/api/directory/users/kim/invite", c.body)
+		if r.StatusCode != c.want || (c.text != "" && !strings.Contains(b, c.text)) {
+			t.Errorf("%q = %d %s, want %d", c.body, r.StatusCode, b, c.want)
+		}
+	}
+	on.Store(true)
+	if r, b := doAs(t, srv, "root", "POST", "/api/directory/users/kim/invite", `{"authenticator":true}`); r.StatusCode != 200 {
+		t.Errorf("totp on = %d %s", r.StatusCode, b)
+	}
+}
+
+// TestRemoveAuthenticatorsRoute (Task 8): POST …/remove-authenticators
+// {"confirm"} → 200 with count; passkeys kept; typed name; protected 409.
+func TestRemoveAuthenticatorsRoute(t *testing.T) {
+	srv, ll, kc := newDirServer(t)
+	ll.AddUser("kim", "kim@example.org", "Kim", "")
+	kc.Import("kim", kctest.Credential{ID: "w", Type: "webauthn-passwordless"}, kctest.Credential{ID: "o", Type: "otp"})
+	r, b := doAs(t, srv, "root", "POST", "/api/directory/users/kim/remove-authenticators", `{"confirm":"kim"}`)
+	if r.StatusCode != 200 || !strings.Contains(b, `"count":1`) {
+		t.Fatalf("remove = %d %s", r.StatusCode, b)
+	}
+	if cr := kc.Get("kim").Credentials; len(cr) != 1 || cr[0].Type != "webauthn-passwordless" {
+		t.Errorf("kim after = %+v", cr)
+	}
+	for _, c := range []struct {
+		path, body string
+		want       int
+	}{
+		{"/api/directory/users/kim/remove-authenticators", `{"confirm":"nope"}`, 400},
+		{"/api/directory/users/portcullis-hub/remove-authenticators", `{"confirm":"portcullis-hub"}`, 409},
+		{"/api/directory/users/admin/remove-authenticators", `{"confirm":"admin"}`, 409},
+	} {
+		if r, b := doAs(t, srv, "root", "POST", c.path, c.body); r.StatusCode != c.want {
+			t.Errorf("%s %s = %d %s, want %d", c.path, c.body, r.StatusCode, b, c.want)
+		}
+	}
+	if r, _ := doAs(t, srv, "", "POST", "/api/directory/users/kim/remove-authenticators", `{"confirm":"kim"}`); r.StatusCode != 403 {
+		t.Errorf("no caller = %d", r.StatusCode)
 	}
 }

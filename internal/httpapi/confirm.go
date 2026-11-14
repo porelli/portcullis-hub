@@ -60,7 +60,7 @@ func (s *Server) handleConfirmPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no signed-in user (X-Forwarded-User)", http.StatusUnauthorized)
 		return
 	}
-	v, err := s.Hub.ConfirmationPage(listenerOf(r), r.PathValue("id"), user)
+	v, err := s.Hub.ConfirmationPage(r.Context(), listenerOf(r), r.PathValue("id"), user)
 	if err != nil {
 		http.NotFound(w, r)
 		return

@@ -143,7 +143,7 @@ func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Member
 		}
 		sort.Strings(mg.Members)
 		m.Groups[name] = mg
-		if p := privilegeProblem(cfg, name); p != "" {
+		if p := privilegeProblem(cfg, name, s.anyFieldAllowed(cfg, name)); p != "" {
 			m.Privilege[name] = p
 		}
 	}
@@ -257,16 +257,17 @@ func (s *Service) PrivilegeProblem(ctx context.Context, group string) (string, e
 	if _, err := sn.group(group); err != nil {
 		return "", err
 	}
-	return privilegeProblem(cfg, group), nil
+	return privilegeProblem(cfg, group, s.anyFieldAllowed(cfg, group)), nil
 }
 
-// privilegeProblem is PrivilegeProblem on cfg.
-func privilegeProblem(cfg *Config, group string) string {
+// privilegeProblem is PrivilegeProblem on cfg; anyField: the group's
+// AllowAnyField applies (anyFieldAllowed), so editable fields are fine.
+func privilegeProblem(cfg *Config, group string, anyField bool) string {
 	gc := cfg.Groups[group]
 	if gc == nil || gc.Rule == nil {
 		return ""
 	}
-	if bad := nonAdminOnly(cfg, gc.Rule); len(bad) > 0 {
+	if bad := nonAdminOnly(cfg, gc.Rule); len(bad) > 0 && !anyField {
 		return "its rule uses fields delegates can edit: " + strings.Join(bad, ", ")
 	}
 	if matchesEmpty(cfg, gc.Rule) {

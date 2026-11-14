@@ -48,6 +48,7 @@
   // The methods in words (history lines, "Signed in · security key").
   const SHORT = {
     password: 'password',
+    totp: 'authenticator code',
     passkey_synced: 'synced passkey',
     browser_cert: 'browser certificate',
     passkey_device: 'device-bound passkey',
@@ -55,9 +56,13 @@
     yubikey_cert: 'YubiKey certificate'
   };
   const PASSKEY_KINDS = ['passkey_synced', 'passkey_device', 'security_key'];
+  // Each method's strength in tenths (contract §8.1), for "+ Add
+  // authenticator app" under the add-stronger cap.
+  const TENTHS = { password: 10, totp: 15, passkey_synced: 25, browser_cert: 25, passkey_device: 30, security_key: 35, yubikey_cert: 40 };
   // What a switched-off method is, under "off on this server".
   const ABOUT = {
     password: 'the weakest method: some apps may not accept it',
+    totp: 'a code from an authenticator app on your phone, after your password (or key)',
     passkey_synced: 'a passkey on your phone or laptop, synced by its maker',
     browser_cert: 'a file you install in this browser / computer',
     passkey_device: 'a passkey that never leaves its device',
@@ -113,14 +118,25 @@
     return '';
   }
 
-  // labelProblem: why raw isn't a passkey name ('' when it is): the
-  // Hub's rule (contract §5.1) — trimmed, 1–64 characters, one line, no
-  // control or bidi character.
-  function labelProblem(raw) {
+  // labelProblem: why raw isn't a passkey (or, kind 'authenticator', an
+  // authenticator app) name ('' when it is): the Hub's rule (contract
+  // §5.1) — trimmed, 1–64 characters, one line, no control or bidi
+  // character.
+  function labelProblem(raw, kind) {
     const t = String(raw || '').trim();
     const n = Array.from(t).length;
-    if (n < 1 || n > 64 || REASON_BAD.test(t)) return 'A passkey name is 1–64 characters on one line.';
+    if (n < 1 || n > 64 || REASON_BAD.test(t)) {
+      return kind === 'authenticator' ? 'An authenticator name is 1–64 characters on one line.' : 'A passkey name is 1–64 characters on one line.';
+    }
     return '';
+  }
+
+  // mayAddCode: "+ Add authenticator app" is offered unless the
+  // add-stronger cap refuses it (add_stronger off and no set-up method of
+  // at least 1.5: then "ask your admin for a setup link", as for passkeys).
+  function mayAddCode(view) {
+    if (view.add_stronger) return true;
+    return (view.methods || []).some(m => m.state === 'set' && (TENTHS[m.id] || 0) >= TENTHS.totp);
   }
 
   // protectedName: accounts whose certificates (and password) are managed
@@ -181,17 +197,20 @@
   function offers(view, ctx) {
     if (ctx.mode === 'person') {
       const c = ctx.can || {};
-      return { setupLink: !!c.setup_link, removePasskeys: !!c.remove_passkeys, revoke: !!c.revoke, issue: !!c.issue, resetPassword: !!c.password };
+      return { setupLink: !!c.setup_link, removePasskeys: !!c.remove_passkeys, removeAuthenticators: !!c.remove_authenticators, revoke: !!c.revoke, issue: !!c.issue, resetPassword: !!c.password };
     }
     // Signed in as you by an administrator (ctx.readOnly, polish 1): the
     // Hub refuses every change (RefuseWhileImpersonated), so none is offered.
-    if (ctx.readOnly) return { password: false, addPasskey: false, rename: false, createBrowser: false, revokeOwnBrowser: false, renew: false, managed: false };
+    if (ctx.readOnly) return { password: false, addPasskey: false, rename: false, authenticators: false, createBrowser: false, revokeOwnBrowser: false, renew: false, managed: false };
     const prot = protectedName(view.user);
     const on = id => (view.methods || []).some(m => m.id === id && m.on && m.state !== 'off');
     return {
       password: on('password') && !prot,
       addPasskey: true,
       rename: true,
+      // Add, Replace, Remove and Rename an authenticator app (never for a
+      // server-managed account: the override refuses it).
+      authenticators: on('totp') && !prot,
       createBrowser: on('browser_cert') && !prot,
       revokeOwnBrowser: !prot,
       renew: on('yubikey_cert') && !prot,
@@ -226,6 +245,22 @@
       const text = (k.label || 'unnamed') + ' · ' + (k.model || 'unknown model') + (fmtDay(k.created_at) ? ' · added ' + fmtDay(k.created_at) : '');
       h += '<li data-msi-key="' + esc(k.id) + '"><span class="msi-key">' + esc(text) + '</span>' +
         (o.rename && k.id ? ' ' + button('ghost xs', ' data-msi-act="pk-rename" data-cred="' + esc(k.id) + '" data-method="' + esc(m.id) + '"', 'Rename') : '') + '</li>';
+    }
+    return h + '</ul>';
+  }
+
+  // authList: one line per authenticator app, "<name> · added <date>",
+  // oldest first; on one's own page Rename, Replace and Remove.
+  function authList(apps, o) {
+    let h = '<ul class="msi-keys msi-auths">';
+    for (const a of apps) {
+      const text = (a.label || 'unnamed') + (fmtDay(a.created_at) ? ' · added ' + fmtDay(a.created_at) : '');
+      h += '<li data-msi-auth="' + esc(a.id) + '"><span class="msi-key">' + esc(text) + '</span>' +
+        (o.authenticators && a.id
+          ? ' ' + button('ghost xs', ' data-msi-act="totp-rename" data-cred="' + esc(a.id) + '"', 'Rename') +
+            button('ghost xs', ' data-msi-act="totp-replace" data-cred="' + esc(a.id) + '"', 'Replace') +
+            button('danger xs', ' data-msi-act="totp-remove" data-cred="' + esc(a.id) + '"', 'Remove')
+          : '') + '</li>';
     }
     return h + '</ul>';
   }
@@ -266,6 +301,20 @@
       } else { sub = 'none yet'; tag = pill('', 'none'); }
       const acct = self && o.addPasskey ? accountURL(view) : '';
       if (acct) acts = '<a class="pd-btn secondary sm" href="' + esc(acct) + '" target="_blank" rel="noopener noreferrer">+ Add</a>';
+    } else if (m.id === 'totp') {
+      const apps = m.authenticators || [];
+      const max = view.max_authenticators || 3;
+      if (m.state === 'unknown') { sub = 'couldn\'t be read right now'; tag = pill('warn', 'unknown'); }
+      else if (apps.length) {
+        sub = 'after your password (or key)' + (apps.length >= max ? ' · ' + max + ' set up: the most allowed' : '');
+        tag = pill('ok', String(apps.length));
+        more = authList(apps, self ? o : {});
+      } else { sub = 'none yet · ' + ABOUT.totp; tag = pill('', 'none'); }
+      if (self && o.authenticators && m.state !== 'unknown' && apps.length < max) {
+        acts = mayAddCode(view)
+          ? button('secondary', ' data-msi-act="totp-add"', '+ Add authenticator app')
+          : '<span class="pd-muted pd-small" data-msi-askadmin>ask your admin for a setup link</span>';
+      }
     } else if (m.id === 'browser_cert') {
       const max = ((view.limits || {}).effective || {}).browser_cert_max_active || 0;
       const active = view.active_browser_certs || 0;
@@ -290,7 +339,7 @@
       '<div class="msi-panel" data-msi-panel="' + esc(m.id) + '"></div>';
   }
 
-  // methodsHtml: the six rows in the view's (canonical) order and, on a
+  // methodsHtml: the seven rows in the view's (canonical) order and, on a
   // person's tab, the setup link and Remove all passkeys.
   function methodsHtml(view, ctx) {
     const o = offers(view, ctx);
@@ -301,6 +350,7 @@
       let acts = '';
       if (o.setupLink) acts += button('primary', ' data-act="invite" data-user="' + esc(ctx.user) + '"', 'Send setup link');
       if (o.removePasskeys) acts += button('danger', ' data-act="reset-passkeys" data-user="' + esc(ctx.user) + '"', 'Remove all passkeys');
+      if (o.removeAuthenticators) acts += button('danger', ' data-act="reset-authenticators" data-user="' + esc(ctx.user) + '"', 'Remove authenticator apps');
       if (acts) h += '<div class="pd-actions msi-person-acts">' + acts + '</div>';
       if (o.resetPassword && ctx.passwordHint) h += '<p class="pd-muted pd-small" data-pw-hint>' + esc(ctx.passwordHint) + '</p>';
     } else if (o.managed) {
@@ -333,6 +383,7 @@
       case 'confirmed': t = 'Confirmed it was you' + with_; break;
       case 'opened': t = 'Opened ' + (e.app || 'an app') + with_; break;
       case 'help': t = 'Help from ' + (e.by || 'an administrator'); break;
+      case 'method': t = 'Sign-in method'; break;
       case 'certificate': t = 'Certificate'; break;
       case 'impersonation': t = (e.by || 'Someone') + ' signed in as you' + (e.reason ? ' · “' + e.reason + '”' : ''); break;
       default: t = String(e.kind || 'entry');
@@ -534,6 +585,13 @@
     return st.opts.mode === 'person' ? '/api/directory/users/' + enc(st.opts.user) : '/api/me/signin';
   }
   function viewURL(st) { return st.opts.mode === 'person' ? base(st) + '/signin' : base(st); }
+  // readURL is the view's read: after a popup, once with ?refresh=1 (T5:
+  // the Hub re-reads the inventory, at most once per 10 s).
+  function readURL(st) {
+    if (!st.refresh || st.opts.mode === 'person') return viewURL(st);
+    st.refresh = false;
+    return viewURL(st) + '?refresh=1';
+  }
   function historyURL(st, before) {
     return viewURL(st) + '/history?limit=' + HISTORY_PAGE + (before ? '&before=' + enc(before) : '');
   }
@@ -670,7 +728,7 @@
       // One's own page also asks whether an administrator is signed in as
       // you (contract §5.1: then it offers no action). A failed read keeps
       // the actions: the Hub refuses them anyway.
-      const reads = [call('GET', viewURL(st)), st.opts.mode === 'person' ? Promise.resolve(null) : call('GET', '/api/me/impersonation')];
+      const reads = [call('GET', readURL(st)), st.opts.mode === 'person' ? Promise.resolve(null) : call('GET', '/api/me/impersonation')];
       const [view, who] = await Promise.allSettled(reads);
       if (view.status === 'rejected') throw view.reason;
       v = view.value;
@@ -704,9 +762,84 @@
       ctx: { signin: what, user: st.opts.mode === 'person' ? st.opts.user : '' },
       status: (t, warn, spin) => panelStatus(p, t, warn, spin),
       busy: on => panelBusy(p, on),
-      end: () => { if (st.flow === f) st.flow = null; },
+      end: () => { if (st.flow === f) st.flow = null; st.refresh = true; },
       proof: pr => proof(pr),
     });
+  }
+
+  // ── authenticator apps (contract §5.1): Keycloak's own actions in the
+  // fresh-auth popup; the Hub only renames ──
+  const AUTH_DONE = { add: 'Authenticator app added.', replace: 'Authenticator app replaced.', remove: 'Authenticator app removed.' };
+
+  // kcAction opens action (CONFIGURE_TOTP[:<id>] or delete_credential:<id>)
+  // in the popup (from the click itself), then re-reads the page with
+  // ?refresh=1 and says how it went.
+  function kcAction(st, what, action) {
+    const p = panel(st, 'totp');
+    if (!window.PortcullisFreshAuth) { setStatus(st, 'A fresh sign-in isn\'t available on this page.', true); return; }
+    const before = ((st.view.methods || []).find(m => m.id === 'totp') || {}).authenticators || [];
+    const f = {};
+    st.flow = f;
+    window.PortcullisFreshAuth.start(st.view.fresh_auth, {
+      ctx: { signin: 'totp-' + what },
+      kcAction: action,
+      status: (t, warn, spin) => (p ? panelStatus(p, t, warn, spin) : setStatus(st, t, warn)),
+      busy: on => { if (p) panelBusy(p, on); },
+      end: () => { if (st.flow === f) st.flow = null; },
+      action: async status => {
+        st.refresh = true;
+        await load(st);
+        if (status === 'success') {
+          const now = ((st.view && st.view.methods) || []).find(m => m.id === 'totp') || {};
+          const n = (now.authenticators || []).length;
+          setStatus(st, AUTH_DONE[what] + (what === 'add' && before.length === 0 && n === 1
+            ? ' Add a second one (another phone, or a password manager) so you can still sign in if you lose this one.' : ''));
+        } else if (status === 'cancelled') setStatus(st, 'Nothing changed.');
+        else setStatus(st, 'That didn\'t work: nothing changed.', true);
+      },
+    });
+  }
+
+  // removeAuthenticator: say first what the last app alone keeps open
+  // (remove_impact), then Keycloak's own removal.
+  function removeAuthenticator(st, id) {
+    const m = (st.view.methods || []).find(x => x.id === 'totp') || {};
+    const a = (m.authenticators || []).find(x => x.id === id) || {};
+    const impact = m.remove_impact || [];
+    const q = 'Remove the authenticator app “' + (a.label || 'unnamed') + '”?' +
+      (impact.length ? ' It is your last one: you could no longer open ' + impact.join(', ') + '.' : '');
+    if (!confirm(q)) return;
+    kcAction(st, 'remove', 'delete_credential:' + id);
+  }
+
+  // The authenticator rename form (one's own page), as the passkey one.
+  function openAuthRenameForm(st, id) {
+    const p = panel(st, 'totp');
+    if (!p) return;
+    const m = (st.view.methods || []).find(x => x.id === 'totp') || {};
+    const a = (m.authenticators || []).find(x => x.id === id) || {};
+    p.innerHTML = '<div class="msi-form"><label class="pd-small" for="msi-authlabel">Name (1–64 characters)</label>' +
+      '<input class="pd-input" type="text" id="msi-authlabel" maxlength="64" autocomplete="off" value="' + esc(a.label || '') + '" data-msi-authlabel data-cred="' + esc(id) + '">' +
+      '<div class="pd-actions">' + button('primary', ' data-msi-act="totp-rename-go" data-cred="' + esc(id) + '"', 'Save') + button('secondary', ' data-msi-act="panel-close"', 'Cancel') + '</div>' + STATUS_SLOT + '</div>';
+    p.querySelector('[data-msi-authlabel]').focus();
+  }
+  async function authRenameGo(st, p, id) {
+    const input = p && p.querySelector('[data-msi-authlabel]');
+    if (!input) return;
+    const problem = labelProblem(input.value, 'authenticator');
+    if (problem) { panelStatus(p, problem, true); return; }
+    const label = String(input.value).trim();
+    panelBusy(p, true);
+    panelStatus(p, 'Saving…', false, true);
+    try {
+      await call('PUT', '/api/me/signin/authenticators/' + enc(id) + '/label', { label });
+    } catch (err) {
+      panelBusy(p, false);
+      panelStatus(p, err.message, true);
+      return;
+    }
+    await load(st);
+    setStatus(st, 'Renamed to “' + label + '”.');
   }
 
   function openPasswordForm(st) {
@@ -1041,6 +1174,11 @@
       case 'pw-remove': return removePassword(st);
       case 'pk-rename': return openRenameForm(st, b.dataset.method, b.dataset.cred);
       case 'pk-rename-go': return renameGo(st, p, b.dataset.cred);
+      case 'totp-add': return kcAction(st, 'add', 'CONFIGURE_TOTP');
+      case 'totp-replace': return kcAction(st, 'replace', 'CONFIGURE_TOTP:' + b.dataset.cred);
+      case 'totp-remove': return removeAuthenticator(st, b.dataset.cred);
+      case 'totp-rename': return openAuthRenameForm(st, b.dataset.cred);
+      case 'totp-rename-go': return authRenameGo(st, p, b.dataset.cred);
       case 'bc-create': return openCreateForm(st);
       case 'bc-go': return createGo(st);
       case 'revoke': return revoke(st, b.dataset.serial, b.dataset.kind);
@@ -1075,6 +1213,7 @@
         if (e.target.matches('[data-msi-pw1], [data-msi-pw2]')) { e.preventDefault(); passwordGo(st); }
         else if (e.target.matches('[data-msi-days]')) { e.preventDefault(); createGo(st); }
         else if (e.target.matches('[data-msi-pklabel]')) { e.preventDefault(); renameGo(st, e.target.closest('[data-msi-panel]'), e.target.dataset.cred); }
+        else if (e.target.matches('[data-msi-authlabel]')) { e.preventDefault(); authRenameGo(st, e.target.closest('[data-msi-panel]'), e.target.dataset.cred); }
       });
     } else {
       st.opts = opts || st.opts;
@@ -1097,5 +1236,6 @@
   window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText, certFreshProblem, impersonationHtml, reasonProblem, labelProblem,
     // For the node tests: one mount's history paging and a passkey rename
     // over a stub fetch.
-    _test: { loadHistory, renameGo, state: (el, opts) => ({ el, opts, view: {}, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null }) } };
+    _test: { loadHistory, renameGo, authRenameGo, kcAction, removeAuthenticator, readURL, mayAddCode,
+      state: (el, opts) => ({ el, opts, view: {}, seq: 0, hist: { entries: [], next: '', unknown: [] }, flow: null }) } };
 })();

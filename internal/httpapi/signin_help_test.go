@@ -240,7 +240,7 @@ func TestPersonSignInRoutes(t *testing.T) {
 		Methods      []map[string]any `json:"methods"`
 	}
 	json.Unmarshal([]byte(mustDo(t, e.people, "root", "GET", "/api/directory/users/alice/signin", ``, 200)), &v)
-	if v.User != "alice" || len(v.Certificates) != 2 || len(v.Methods) != 6 || v.FreshAuth == nil ||
+	if v.User != "alice" || len(v.Certificates) != 2 || len(v.Methods) != 7 || v.FreshAuth == nil ||
 		!v.Can["setup_link"] || !v.Can["remove_passkeys"] || !v.Can["revoke"] || !v.Can["issue"] || !v.Can["password"] {
 		t.Errorf("admin view = %+v", v)
 	}
@@ -350,5 +350,45 @@ func TestHelpToolClasses(t *testing.T) {
 	// The handoff names the person's page, never a certificate.
 	if txt, isErr, _ := e.tool(t, "issue_yubikey_certificate", map[string]any{"username": "alice"}); isErr || !strings.Contains(txt, "https://people.example.org/#people/alice") || strings.Contains(txt, "BEGIN") {
 		t.Errorf("issue handoff = %s", txt)
+	}
+}
+
+// TestRemoveAuthenticatorsMCPTwin (Task 8, P14): both scopes, class D,
+// the twin route, sign_in_help on the people resource, the consequence
+// text; a target the holder may not help is refused before any
+// confirmation.
+func TestRemoveAuthenticatorsMCPTwin(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	for _, sc := range []string{ScopeAdmin, ScopePeople} {
+		var tl Tool
+		for _, x := range e.s.tools(sc) {
+			if x.Name == "remove_authenticators" {
+				tl = x
+			}
+		}
+		wantPerm := ""
+		if sc == ScopePeople {
+			wantPerm = directory.PermSignInHelp
+		}
+		if tl.Class != ClassDestructive || tl.Twin != "POST /api/directory/users/{username}/remove-authenticators" || tl.Perm != wantPerm || tl.Consequences == nil {
+			t.Fatalf("%s tool = %+v", sc, tl)
+		}
+		if got := tl.Consequences(context.Background(), json.RawMessage(`{"username":"alice"}`)); len(got) != 1 || got[0] != "Removes every authenticator app of alice and signs them out everywhere." {
+			t.Errorf("%s consequences = %q", sc, got)
+		}
+		if destructiveTwins[tl.Twin] == "" {
+			t.Errorf("%s twin not in destructiveTwins", sc)
+		}
+	}
+	e.ll.AddGroup("hr")
+	e.ll.AddUser("hal", "hal@example.org", "Hal", "", "hr")
+	if txt, isErr, _ := e.tool(t, "set_permission", map[string]any{"perm": "sign_in_help", "group": "hr"}); isErr {
+		t.Fatalf("set_permission = %s", txt)
+	}
+	if got := e.list(t, "/mcp/people", "hal", "2025-11-25"); !slices.Contains(got, "remove_authenticators") {
+		t.Errorf("hal's people tools = %v", got)
+	}
+	if txt, isErr := e.people(t, "hal", "remove_authenticators", map[string]any{"username": "root"}); !isErr || !strings.HasPrefix(txt, "403: ") || strings.Contains(txt, "/confirm/") {
+		t.Errorf("hal → root = %s", txt)
 	}
 }

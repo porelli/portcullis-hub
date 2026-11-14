@@ -300,7 +300,7 @@ func TestSourceToolsHideCredentials(t *testing.T) {
 	args := map[string]any{"name": "more", "url": "https://bot:" + tok + "@example.org/more.git"}
 	res := e.call(t, "/mcp/admin", "root", "2026-07-28", "add_source", args, urlElicit)
 	m := confirmURLRe.FindStringSubmatch(elicitation(t, res, confirmInputKey)["url"].(string))
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestSourceToolsHideCredentials(t *testing.T) {
 	}
 	res = e.call(t, "/mcp/admin", "root", "2026-07-28", "add_source", map[string]any{"name": "scp", "url": "deploy@git.example.org:team/t.git"}, urlElicit)
 	m = confirmURLRe.FindStringSubmatch(elicitation(t, res, confirmInputKey)["url"].(string))
-	if v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root"); err != nil || !strings.Contains(v.Consequences[0], `("git.example.org:team/t.git")`) || strings.Contains(v.Consequences[0], "deploy@") {
+	if v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root"); err != nil || !strings.Contains(v.Consequences[0], `("git.example.org:team/t.git")`) || strings.Contains(v.Consequences[0], "deploy@") {
 		t.Errorf("scp consequences %v %v", v, err)
 	}
 	txt, isErr, _ = e.tool(t, "list_sources", nil)
@@ -649,6 +649,7 @@ var adminToolFixtures = []struct {
 	{"clear_actions", map[string]any{"username": "erin"}},
 	{"require_passkey", map[string]any{"username": "erin"}},
 	{"remove_passkeys", map[string]any{"username": "erin"}},
+	{"remove_authenticators", map[string]any{"username": "erin"}},
 	// Sign-in part 2 (Task 7): the person's Sign-in tab.
 	{"person_sign_in", map[string]any{"username": "erin"}},
 	{"revoke_person_certificate", map[string]any{"username": "erin", "serial": "0e:01"}},

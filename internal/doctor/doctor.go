@@ -256,6 +256,9 @@ type Inputs struct {
 	Kube *KubeIn
 	// VPN: the VPN kinds' inputs (vpn.go; nil = none fire).
 	VPN *VPNIn
+	// SignInTOTP: the authenticator-app kinds' inputs (signin_totp.go;
+	// nil = they couldn't be gathered: none fire).
+	SignInTOTP *SignInTOTPIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify

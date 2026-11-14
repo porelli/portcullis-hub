@@ -200,11 +200,20 @@ func enrollErr(what string, err error) error {
 	return errCertsUnavailable
 }
 
+// strongFreshMethods are the phishing-resistant methods: the only ones a
+// fresh sign-in may use to add a certificate or a first password. An
+// allowlist, so a method added later stays out until it is named here:
+// a password, an authenticator code (T10) and a copied certificate file
+// never qualify.
+var strongFreshMethods = []signin.Method{signin.PasskeySynced, signin.PasskeyDevice, signin.SecurityKey, signin.YubiKeyCert}
+
+// strongFresh reports whether m is in strongFreshMethods.
+func strongFresh(m signin.Method) bool { return slices.Contains(strongFreshMethods, m) }
+
 // certFreshAllowed are the methods a fresh sign-in may use to add a
 // certificate (D26): signin.FreshAccepted of the people core template's
-// compiled rule minus password and browser_cert (a password or a copied
-// certificate file never mints a new certificate), in canonical order.
-// Not a compiled rule: none.
+// compiled rule kept to strongFreshMethods, in canonical order. Not a
+// compiled rule: none.
 func certFreshAllowed(peopleRule signin.Node, on map[signin.Method]bool) []signin.Method {
 	acc, err := signin.FreshAccepted(peopleRule, on)
 	if err != nil {
@@ -212,7 +221,7 @@ func certFreshAllowed(peopleRule signin.Node, on map[signin.Method]bool) []signi
 	}
 	var out []signin.Method
 	for _, m := range signin.Methods {
-		if acc[m] && m != signin.Password && m != signin.BrowserCert {
+		if acc[m] && strongFresh(m) {
 			out = append(out, m)
 		}
 	}

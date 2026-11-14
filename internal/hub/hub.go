@@ -436,6 +436,10 @@ type Hub struct {
 	bg sync.WaitGroup
 
 	policyWriteMu sync.Mutex
+	// gatePolicy: the group-gate policy document last written (nil: none
+	// yet). My apps and the portal decide from it what group-gate lets
+	// a person open (gateOpenLocked, gateDenies).
+	gatePolicy atomic.Pointer[policy.Document]
 	// mds: the FIDO list signin-keycloak.json's authenticators come from
 	// (signin_mds.go; its own leaf lock).
 	mds mdsState
@@ -445,6 +449,10 @@ type Hub struct {
 	// signInInv: who has which sign-in method (signin_people.go; its own
 	// leaf locks, never held across mu).
 	signInInv inventoryCache
+	// signInRefresh throttles GET /api/me/signin?refresh=1 (T5).
+	signInRefresh refreshThrottle
+	// totpDoc wires the authenticator-app doctor kinds (doctor_totp.go).
+	totpDoc totpDoctor
 	// certActions issues, renews and revokes certificates through enroll
 	// (SetCertActions; nil: those actions are 503). Guarded by mu.
 	certActions CertActions
@@ -1328,7 +1336,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	doc.VPN = h.vpnPolicyLocked()
 	kcSignIn := h.keycloakSignInLocked()
 	kcSignIn.Authenticators, kcSignIn.MDS = trust, mdsDoc
-	portal := h.portalLocked()
+	portal := h.portalWithLocked(&doc)
 	// The header deliveries (§4.1 hosts): enabled instances with a view,
 	// on the hosts their routers gate now.
 	hosts, suppress := h.publishedHostHeadersLocked()
@@ -1344,6 +1352,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	if err := policy.Write(h.policyPath(), doc); err != nil {
 		return false, errors.Join(kcErr, err)
 	}
+	h.gatePolicy.Store(&doc)
 	h.lastExpiring = expiring
 	errs := []error{kcErr, impErr}
 	switch {

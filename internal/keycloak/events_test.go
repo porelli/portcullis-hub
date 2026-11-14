@@ -30,7 +30,7 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	var got map[string]any
 	kc.With(func() { got = kc.EventsConfig })
 	want := map[string]any{"eventsEnabled": true, "eventsListeners": []any{"jboss-logging", "x"},
-		"enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}, "eventsExpiration": float64(90 * 86400),
+		"enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}, "eventsExpiration": float64(90 * 86400),
 		"adminEventsEnabled": true, "adminEventsDetailsEnabled": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("events config = %v\nwant %v", got, want)
@@ -47,7 +47,9 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	}
 	// Keycloak answers the types in another order (it keeps a set): still
 	// the same config, not written.
-	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"IMPERSONATE", "LOGIN_ERROR", "LOGIN"} })
+	kc.With(func() {
+		kc.EventsConfig["enabledEventTypes"] = []any{"REMOVE_CREDENTIAL", "IMPERSONATE", "LOGIN_ERROR", "UPDATE_CREDENTIAL", "LOGIN"}
+	})
 	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
 		t.Fatal(err)
 	}
@@ -76,18 +78,19 @@ func TestEnsureEventsConfigKeepsListeners(t *testing.T) {
 	}
 }
 
-// TestEventsConfigHasImpersonate (D44, F4): EnsureEventsConfig stores
-// ConfigEventTypes = {LOGIN, LOGIN_ERROR, IMPERSONATE}, compared as a set:
-// the part-2 config (no IMPERSONATE) is written again.
-func TestEventsConfigHasImpersonate(t *testing.T) {
+// TestConfigEventTypesHasCredentialEvents (D44, F4, T11, P33):
+// EnsureEventsConfig stores ConfigEventTypes = {LOGIN, LOGIN_ERROR,
+// IMPERSONATE, UPDATE_CREDENTIAL, REMOVE_CREDENTIAL}, compared as a set:
+// the part-3 config (no credential events) is written again.
+func TestConfigEventTypesHasCredentialEvents(t *testing.T) {
 	ctx := context.Background()
-	if want := []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}; !reflect.DeepEqual(keycloak.ConfigEventTypes, want) {
+	if want := []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}; !reflect.DeepEqual(keycloak.ConfigEventTypes, want) {
 		t.Fatalf("ConfigEventTypes = %v, want %v", keycloak.ConfigEventTypes, want)
 	}
 	kc := kctest.New(t)
 	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
 	kc.With(func() {
-		kc.EventsConfig = map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR"},
+		kc.EventsConfig = map[string]any{"eventsEnabled": true, "enabledEventTypes": []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"},
 			"eventsExpiration": float64(90 * 86400)}
 	})
 	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
@@ -95,14 +98,16 @@ func TestEventsConfigHasImpersonate(t *testing.T) {
 	}
 	var got any
 	kc.With(func() { got = kc.EventsConfig["enabledEventTypes"] })
-	if !reflect.DeepEqual(got, []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}) {
+	if !reflect.DeepEqual(got, []any{"LOGIN", "LOGIN_ERROR", "IMPERSONATE", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}) {
 		t.Errorf("enabledEventTypes = %v", got)
 	}
 	if n := kc.CountCalls("PUT /admin/realms/portcullis/events/config"); n != 1 {
-		t.Errorf("%d PUTs, want 1 (the part-2 config lacks IMPERSONATE)", n)
+		t.Errorf("%d PUTs, want 1 (the part-3 config lacks the credential events)", n)
 	}
 	// A set: duplicates and order don't matter.
-	kc.With(func() { kc.EventsConfig["enabledEventTypes"] = []any{"LOGIN_ERROR", "IMPERSONATE", "LOGIN", "LOGIN"} })
+	kc.With(func() {
+		kc.EventsConfig["enabledEventTypes"] = []any{"LOGIN_ERROR", "REMOVE_CREDENTIAL", "IMPERSONATE", "LOGIN", "UPDATE_CREDENTIAL", "LOGIN"}
+	})
 	if err := c.EnsureEventsConfig(ctx, 90); err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +116,12 @@ func TestEventsConfigHasImpersonate(t *testing.T) {
 	}
 }
 
-// TestHistoryQueryUnchanged (F4): the history query still asks for
-// type=LOGIN&type=LOGIN_ERROR only (HistoryEventTypes), never IMPERSONATE.
-func TestHistoryQueryUnchanged(t *testing.T) {
-	if want := []string{"LOGIN", "LOGIN_ERROR"}; !reflect.DeepEqual(keycloak.HistoryEventTypes, want) {
+// TestHistoryQueryTypes (F4, T11): the history query asks for LOGIN,
+// LOGIN_ERROR and the two credential events (HistoryEventTypes), never
+// IMPERSONATE.
+func TestHistoryQueryTypes(t *testing.T) {
+	want := []string{"LOGIN", "LOGIN_ERROR", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}
+	if !reflect.DeepEqual(keycloak.HistoryEventTypes, want) {
 		t.Fatalf("HistoryEventTypes = %v, want %v", keycloak.HistoryEventTypes, want)
 	}
 	ctx := context.Background()
@@ -127,7 +134,7 @@ func TestHistoryQueryUnchanged(t *testing.T) {
 	}
 	var q url.Values
 	kc.With(func() { q = kc.EventsQuery })
-	if !reflect.DeepEqual(q["type"], []string{"LOGIN", "LOGIN_ERROR"}) {
+	if !reflect.DeepEqual(q["type"], want) {
 		t.Errorf("types = %v", q["type"])
 	}
 }
@@ -157,7 +164,7 @@ func TestLoginEventsQuery(t *testing.T) {
 	}
 	var q url.Values
 	kc.With(func() { q = kc.EventsQuery })
-	if q.Get("user") != alice.ID || !reflect.DeepEqual(q["type"], []string{"LOGIN", "LOGIN_ERROR"}) ||
+	if q.Get("user") != alice.ID || !reflect.DeepEqual(q["type"], keycloak.HistoryEventTypes) ||
 		q.Get("dateFrom") != fmt.Sprint(from.UnixMilli()) || q.Get("dateTo") != fmt.Sprint(to.UnixMilli()-1) || q.Get("max") != "51" || q.Has("first") {
 		t.Errorf("query = %v", q)
 	}
@@ -293,5 +300,63 @@ func TestImpersonateEventsStored(t *testing.T) {
 	kc.SetFailPrefix("GET /admin/realms/portcullis/events")
 	if _, err := c.ImpersonateEventsStored(ctx); err == nil {
 		t.Error("a failed GET was not reported")
+	}
+}
+
+// TestRealmLoginErrors (P16, review M1): one realm-wide read of the
+// LOGIN_ERROR events in [from, to): no user filter, paged, capped at
+// 1,000 — over the cap it answers the newest 1,000 and incomplete.
+func TestRealmLoginErrors(t *testing.T) {
+	ctx := context.Background()
+	kc := kctest.New(t)
+	c := keycloak.New(kc.HTTP.URL, "admin", "admin")
+	now := time.Now().UTC()
+	ms := now.Add(-time.Hour).UnixMilli()
+	kc.With(func() {
+		for i := range 150 {
+			kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN_ERROR", "userId": fmt.Sprintf("u-%d", i%3), "error": "invalid_user_credentials", "details": map[string]any{"pc_method": "totp"}})
+		}
+		kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN", "userId": "u-0"})
+		kc.Events = append(kc.Events, map[string]any{"time": now.Add(-48 * time.Hour).UnixMilli(), "type": "LOGIN_ERROR", "userId": "u-0"})
+	})
+	evs, incomplete, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
+	if err != nil || incomplete || len(evs) != 150 {
+		t.Fatalf("RealmLoginErrors = %d, %v, %v", len(evs), incomplete, err)
+	}
+	if evs[0].Type != "LOGIN_ERROR" || evs[0].Details["pc_method"] != "totp" || evs[0].UserID == "" {
+		t.Errorf("event = %+v", evs[0])
+	}
+	var q url.Values
+	kc.With(func() { q = kc.EventsQuery })
+	if q.Has("user") || !reflect.DeepEqual(q["type"], []string{"LOGIN_ERROR"}) {
+		t.Errorf("query = %v", q)
+	}
+	if n := kc.CountCalls("GET /admin/realms/portcullis/events"); n != 2 {
+		t.Errorf("%d pages, want 2 (100 + 50)", n)
+	}
+	// Over the cap: the first 1,000 and incomplete, never an error (the
+	// doctor counts them as lower bounds).
+	kc.With(func() {
+		for range 1000 {
+			kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN_ERROR", "userId": "u-9"})
+		}
+	})
+	evs, incomplete, err = c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
+	if err != nil || !incomplete || len(evs) != 1000 {
+		t.Errorf("over the cap: %d, %v, %v", len(evs), incomplete, err)
+	}
+	// Exactly 1,000: complete (the probe past the cap finds nothing).
+	kc.With(func() {
+		kc.Events = nil
+		for range 1000 {
+			kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN_ERROR", "userId": "u-8"})
+		}
+	})
+	if evs, incomplete, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now); err != nil || incomplete || len(evs) != 1000 {
+		t.Errorf("exactly 1,000: %d, %v, %v", len(evs), incomplete, err)
+	}
+	kc.SetDown(true)
+	if _, _, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now); err == nil {
+		t.Error("Keycloak down: want an error")
 	}
 }

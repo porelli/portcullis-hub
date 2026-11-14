@@ -1,6 +1,6 @@
 # Build on the native builder platform and cross-compile (no emulation for Go).
 # golang:1.27-alpine
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /hub ./cmd/hub
 
 # alpine:3.24
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 # git: template sources. docker-cli + compose plugin: `compose up/down`
 # (everything else goes through the Engine API). Both talk to DOCKER_HOST,
 # i.e. the Hub's socket proxy over TCP, so no socket file and no root needed.

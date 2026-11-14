@@ -440,7 +440,7 @@ func TestMCPDestructiveNeedsConfirmation(t *testing.T) {
 	if e.runCount("delete_thing") != 0 {
 		t.Fatal("Run called before the confirmation")
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, id, "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, id, "root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +448,7 @@ func TestMCPDestructiveNeedsConfirmation(t *testing.T) {
 		v.Client != mcpClient || !slices.Equal(v.Consequences, []string{"Permanently removes thing x."}) {
 		t.Errorf("confirmation %+v", v)
 	}
-	if _, err := e.s.Hub.ConfirmationPage(hub.ListenerPeople, id, "root"); err == nil {
+	if _, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerPeople, id, "root"); err == nil {
 		t.Error("an admin tool's confirmation is on the people listener")
 	}
 	// Retries while pending: every version waits.

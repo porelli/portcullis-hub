@@ -68,6 +68,13 @@ var vpnNoToolRoutes = map[string]string{
 	"POST /api/instances/{id}/vpn-dns/ack": "admin UI only (the instance's VPN tab, after configuring the records by hand)",
 }
 
+// fieldGuardNoToolRoutes: a guarding group's "Allow any profile field in
+// this group's rule" lets field edits grant its rights; an administrator
+// turns it on in the browser only, never through the AI.
+var fieldGuardNoToolRoutes = map[string]string{
+	"PUT /api/directory/groups/{group}/allow-any-field": "relaxes a guarding group's admin-only field rule: admin UI only, never by an AI",
+}
+
 // adminVPN are the VPN tools (§15.10).
 var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach"}
 
@@ -83,10 +90,11 @@ var impersonationPartialTwins = map[string]string{
 // through peopleNoToolRoutes).
 var signInNoToolRoutes = map[string]string{
 	"GET /signin": "the Sign-in page itself: a browser UI",
-	"POST /api/me/signin/yubikey-certificate/renew":    "the YubiKey renewal needs the certificate the browser presents (TLS), which an AI client never has",
-	"GET /api/me/signin/history":                       "the history pages: my_sign_in carries the last 20 entries",
-	"DELETE /api/me/signin/password":                   "removing your password: on the Sign-in page, where my_password hands off (D33 lists no tool for it)",
-	"PUT /api/me/signin/passkeys/{credentialId}/label": "naming your passkeys: on the Sign-in page, where you can see which key is which (my_sign_in lists names and models)",
+	"POST /api/me/signin/yubikey-certificate/renew":          "the YubiKey renewal needs the certificate the browser presents (TLS), which an AI client never has",
+	"GET /api/me/signin/history":                             "the history pages: my_sign_in carries the last 20 entries",
+	"DELETE /api/me/signin/password":                         "removing your password: on the Sign-in page, where my_password hands off (D33 lists no tool for it)",
+	"PUT /api/me/signin/passkeys/{credentialId}/label":       "naming your passkeys: on the Sign-in page, where you can see which key is which (my_sign_in lists names and models)",
+	"PUT /api/me/signin/authenticators/{credentialId}/label": "naming your authenticator apps: on the Sign-in page, next to each app",
 }
 
 // destructiveTwins are the routes whose handler deletes, restores over,
@@ -116,6 +124,7 @@ var destructiveTwins = map[string]string{
 	// Task 18 (§15.10's D list).
 	"DELETE /api/directory/users/{username}":                       "deletes a person (typed username)",
 	"POST /api/directory/users/{username}/remove-passkeys":         "removes a person's passkeys (typed username)",
+	"POST /api/directory/users/{username}/remove-authenticators":   "removes a person's authenticator apps (typed username)",
 	"DELETE /api/directory/users/{username}/certificates/{serial}": "revokes a person's certificate (sign-in part 2, D32)",
 	"POST /api/directory/users/{username}/require-passkey":         "forces a passkey registration: on another administrator it hands over their sign-in (§15.10 lists require_passkey as D)",
 	"DELETE /api/directory/groups/{group}":                         "deletes a group (typed name)",
@@ -210,7 +219,8 @@ func TestToolParity(t *testing.T) {
 		_, help := helpNoToolRoutes[r]
 		_, imp := impersonationNoToolRoutes[r]
 		_, vpnNo := vpnNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo
+		_, guardNo := fieldGuardNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -241,7 +251,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -295,6 +305,8 @@ func TestToolParity(t *testing.T) {
 		"delete_person", "delete_group", "delete_field", "require_passkey", "remove_passkeys", "set_permission",
 		// Sign-in part 2 (Task 7).
 		"revoke_person_certificate",
+		// Authenticator codes.
+		"remove_authenticators",
 		"create_instance", "remove_member", "update_field", "add_member", "set_member_expiry", "set_group_rule", "convert_group", "add_exception",
 		"remove_exception", "set_details", "import_apply",
 		// Task 20 (§15.10, G15, G45).
@@ -386,7 +398,7 @@ var admin20 = []string{
 // admin18 are the users and groups tools of T18.
 var admin18 = []string{
 	"directory_overview", "get_person", "preview_rule", "convert_group_preview", "import_review", "audit_recent", "get_person_apps", "get_group_uses",
-	"create_person", "update_person", "set_details", "require_passkey", "remove_passkeys", "set_password", "send_invite",
+	"create_person", "update_person", "set_details", "require_passkey", "remove_passkeys", "remove_authenticators", "set_password", "send_invite",
 	"clear_actions", "delete_person", "create_group", "delete_group", "add_member", "remove_member", "set_member_expiry",
 	"set_group_rule", "convert_group", "add_exception", "remove_exception", "set_permission",
 	"create_field", "update_field", "delete_field", "import_apply",

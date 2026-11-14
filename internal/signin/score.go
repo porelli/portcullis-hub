@@ -3,6 +3,7 @@ package signin
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // Score is a rule's strength out of 5, in tenths, with a one-line reason.
@@ -26,19 +27,64 @@ const (
 // the rule as compiled (Usable: parts the switches make unmeetable don't
 // count): a method scores its strength, a family its weakest switched-on
 // member, an "any" group its weakest item, an "all" group its strongest item
-// + 0.4 per extra item, capped at 5. A rule with no way in scores 0.
+// + 0.4 per extra item, capped at 5. A rule with no way in scores 0, and
+// so does one that fails the shape check; the code-only rule is not
+// applied (a part of a valid rule may be a code alone). When
+// totp is the strongest method of a way in, the reason says codes can be
+// phished (T3).
 //
 // Known limit: the formula counts parts, not distinct methods, so a part
 // that overlaps another through a family (all[family:passkey,
 // passkey_synced]) still adds 0.4. Validate refuses only exact duplicates.
 func ScoreOf(n Node, on map[Method]bool) Score {
-	n, err := Usable(n, on)
+	n, err := shapedUsable(n, on)
 	if errors.Is(err, ErrUnmeetable) {
 		return Score{Reason: "it can't be met with the sign-in methods that are switched on"}
 	}
 	if err != nil {
 		return Score{Reason: "the rule isn't valid: " + err.Error()}
 	}
+	s := scoreOf(n, on)
+	if codeIsBest(expand(n, on)) {
+		s.Reason += codeWeakness
+	}
+	return s
+}
+
+// shapedUsable is Usable with only the shape check: a score describes any
+// group (a part of a rule, one sign-in's methods), so the code-only rule,
+// a save decision (Validate), never applies here (review M1).
+func shapedUsable(n Node, on map[Method]bool) (Node, error) {
+	if err := validateShape(n); err != nil {
+		return Node{}, err
+	}
+	return usableShaped(n, on)
+}
+
+// codeWeakness ends the reason of a rule with a way in whose strongest
+// method is totp (T3).
+const codeWeakness = "; codes can be typed into a fake site"
+
+// codeIsBest reports whether totp is the strongest method of at least one
+// alternative of compiled rule c (every leaf of c is switched on).
+func codeIsBest(c Node) bool {
+	sets, err := alternatives(c)
+	if err != nil {
+		return false
+	}
+	for _, s := range sets {
+		if s&codeOnlySet == 0 {
+			continue
+		}
+		if !slices.ContainsFunc(s.methods(), func(m Method) bool { return methodInfo[m].Tenths > methodInfo[TOTP].Tenths }) {
+			return true
+		}
+	}
+	return false
+}
+
+// scoreOf is ScoreOf over usable rule n, without the code reason.
+func scoreOf(n Node, on map[Method]bool) Score {
 	t := scoreTenths(n, on)
 	// A group of one item scores, and is explained, as that item.
 	for !n.isLeaf() && len(n.Items) == 1 {

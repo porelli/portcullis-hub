@@ -737,7 +737,7 @@ func TestConfirmPageShowsInvisibleCharacters(t *testing.T) {
 	if !strings.Contains(b, `echo ok #\u202Emr- fr- mr in grafana\u2066.`) || !strings.Contains(b, `graf\u200Dana`) {
 		t.Errorf("hub page doesn't show the escapes: %s", b)
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, hc.ID, "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, hc.ID, "root")
 	if err != nil {
 		t.Fatal(err)
 	}

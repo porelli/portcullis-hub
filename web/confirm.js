@@ -18,6 +18,10 @@
     authorize_url: root.dataset.authorizeUrl || '',
     client_id: root.dataset.clientId || '',
     redirect_uri: root.dataset.redirectUri || '',
+    // The popup's method for this person, or why they can't (T9, final
+    // review M1).
+    pc_method: root.dataset.pcMethod === 'totp' ? 'totp' : '',
+    refusal: root.dataset.refusal || '',
   };
   const typed = document.getElementById('cf-typed');
   const approve = document.getElementById('cf-approve');

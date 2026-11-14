@@ -109,6 +109,21 @@ func (s *Server) registerSignInHelpTools() {
 	})
 	removePasskeys.Precheck = s.helpPrecheck
 	removePasskeys.Scope, removePasskeys.Perm = ScopePeople, directory.PermSignInHelp
+	removeAuthenticators := dirD(dirTool(s, "remove_authenticators", "Remove all of a person's authenticator apps (codes) and sign them out everywhere; their passkeys stay (needs sign_in_help; ordinary people only). Needs your confirmation in the browser.",
+		ClassWrite, "POST /api/directory/users/{username}/remove-authenticators", "user.remove_authenticators", func(ctx context.Context, c *directory.Caller, in personArgs) (any, error) {
+			// The typed check (the name) was the confirmation page's.
+			res, err := s.removeAuthenticators(ctx, c, in.Username, in.Username)
+			if err != nil {
+				return nil, err
+			}
+			out := s.safeResult(in.Username, "removed", res)
+			out["page"] = s.personSignInPage(strings.ToLower(in.Username))
+			return out, nil
+		}), usernameOf, func(_ context.Context, args json.RawMessage) []string {
+		return []string{"Removes every authenticator app of " + argField(args, "username") + " and signs them out everywhere."}
+	})
+	removeAuthenticators.Precheck = s.helpPrecheck
+	removeAuthenticators.Scope, removeAuthenticators.Perm = ScopePeople, directory.PermSignInHelp
 
 	for _, t := range []Tool{
 		personView(ScopeAdmin), revoke(ScopeAdmin),
@@ -118,7 +133,7 @@ func (s *Server) registerSignInHelpTools() {
 				return map[string]string{"link": link,
 					"note": "open " + link + " and use the Sign-in tab: it asks you to sign in again, then takes the CSR made on the YubiKey; it never goes through the AI"}, nil
 			}),
-		personView(ScopePeople), revoke(ScopePeople), removePasskeys,
+		personView(ScopePeople), revoke(ScopePeople), removePasskeys, removeAuthenticators,
 	} {
 		s.registerTool(t)
 	}

@@ -44,7 +44,9 @@ import (
 // the gate keeps exactly these names out of the aggregate (G38).
 var peopleDelegateTools = []string{"invite_person", "update_person", "delete_person",
 	// Help to reset (sign_in_help, D32/D33): they act on another person.
-	"person_sign_in", "revoke_person_certificate", "remove_passkeys"}
+	"person_sign_in", "revoke_person_certificate", "remove_passkeys",
+	// Authenticator codes: also on another person.
+	"remove_authenticators"}
 
 // peopleHome is the People page (https://people.<d>/).
 func (s *Server) peopleHome() string { return s.mcpScope(ScopePeople).home }

@@ -174,14 +174,106 @@ func (s *Service) checkRuleFor(cfg *Config, group string, rule *rules.Expr) erro
 		return err
 	}
 	if why, ok := s.guardingGroups(cfg)[group]; ok {
-		if bad := nonAdminOnly(cfg, rule); len(bad) > 0 {
-			return refuse("%s is %s: its rule may use only admin-only fields, not %s", group, why, strings.Join(bad, ", "))
+		if bad := nonAdminOnly(cfg, rule); len(bad) > 0 && !s.anyFieldAllowed(cfg, group) {
+			list := strings.Join(bad, ", ")
+			fix := "make " + list + " admin-only (Fields)"
+			if s.anyFieldOffered(cfg, group) {
+				fix += ", or turn on \"" + AllowAnyFieldLabel + "\" on the group's page"
+			}
+			return refuse("%s is %s: its rule may use only admin-only fields, not %s. To use it, %s", group, why, list, fix)
 		}
 		if matchesEmpty(cfg, rule) {
 			return refuse("%s is %s: its rule must not match a person with no details at all (e.g. a new account), but %s does", group, why, rules.Format(rule))
 		}
 	}
 	return nil
+}
+
+// AllowAnyFieldLabel is the option's name in the UI and in refusals.
+const AllowAnyFieldLabel = "Allow any profile field in this group's rule"
+
+// permissionGroup reports whether group holds a delegated permission.
+func permissionGroup(cfg *Config, group string) bool {
+	for _, g := range cfg.Permissions {
+		if g == group {
+			return true
+		}
+	}
+	return false
+}
+
+// anyFieldRefused is why group can't have AllowAnyField on ("" = it can):
+// built-in and administrator groups (never rule-based) and permission
+// groups (a delegate could hand out delegate powers) always keep the
+// admin-only rule.
+func (s *Service) anyFieldRefused(cfg *Config, group string) string {
+	switch {
+	case builtinGroups[group] || s.adminGroups()[group]:
+		return group + " is a built-in or administrator group"
+	case permissionGroup(cfg, group):
+		return group + " is a permission group: its rule may always use only admin-only fields"
+	}
+	return ""
+}
+
+// anyFieldOffered: group guards and could have AllowAnyField on — an app
+// admin or privileged-value group (the UI shows the option).
+func (s *Service) anyFieldOffered(cfg *Config, group string) bool {
+	_, guarding := s.guardingGroups(cfg)[group]
+	return guarding && s.anyFieldRefused(cfg, group) == ""
+}
+
+// anyFieldAllowed: group's AllowAnyField is on and applies (anyFieldRefused
+// says nothing), so its rule may use fields that aren't admin-only — at
+// validation (checkRuleFor), at re-evaluation (addsBlocked), for
+// privileged values (privilegeProblem) and for a field losing admin-only.
+func (s *Service) anyFieldAllowed(cfg *Config, group string) bool {
+	gc := cfg.Groups[group]
+	return gc != nil && gc.AllowAnyField && s.anyFieldRefused(cfg, group) == ""
+}
+
+// SetAllowAnyField turns group's "Allow any profile field in this group's
+// rule" on or off (audited group.allow_any_field, allow=<bool>). Admins
+// only; turning it on is refused for built-in, administrator and
+// permission groups (anyFieldRefused); turning it off always works. The
+// caller re-evaluates (Settle): with it off, a guarding rule on such
+// fields stops adding people.
+func (s *Service) SetAllowAnyField(ctx context.Context, c *Caller, group string, allow bool) error {
+	detail := fmt.Sprintf("allow=%v", allow)
+	return s.run(ctx, c, permAdmin, "group.allow_any_field", group, &detail, func() error {
+		cfg, err := s.loadConfig()
+		if err != nil {
+			return err
+		}
+		sn, err := s.load(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := sn.group(group); err != nil {
+			return err
+		}
+		if allow {
+			if why := s.anyFieldRefused(cfg, group); why != "" {
+				return refuse("%s: %s", why, "\""+AllowAnyFieldLabel+"\" can't be turned on")
+			}
+		}
+		gc := cfg.Groups[group]
+		if gc == nil {
+			if !allow {
+				detail += " (unchanged)"
+				return nil
+			}
+			gc = &GroupConfig{}
+			cfg.Groups[group] = gc
+		}
+		if gc.AllowAnyField == allow {
+			detail += " (unchanged)"
+			return nil
+		}
+		gc.AllowAnyField = allow
+		tidy(cfg, group)
+		return s.saveConfig(cfg)
+	})
 }
 
 // matchesEmpty reports whether rule matches a person with no field values
@@ -204,9 +296,9 @@ func ruleBased(cfg *Config, group string) bool {
 	return gc != nil && gc.Rule != nil
 }
 
-// tidy drops an empty group entry.
+// tidy drops an empty group entry (the option AllowAnyField counts).
 func tidy(cfg *Config, group string) {
-	if gc := cfg.Groups[group]; gc != nil && gc.Rule == nil && len(gc.Exceptions) == 0 && len(gc.Expiry) == 0 {
+	if gc := cfg.Groups[group]; gc != nil && gc.Rule == nil && len(gc.Exceptions) == 0 && len(gc.Expiry) == 0 && !gc.AllowAnyField {
 		delete(cfg.Groups, group)
 	}
 }
@@ -380,7 +472,7 @@ func (s *Service) ConvertApplyReviewed(ctx context.Context, c *Caller, group str
 			cfg.clearGrace(group, id) // granted again
 		}
 		sort.Strings(kept)
-		cfg.Groups[group] = &GroupConfig{Rule: rule, Exceptions: exs}
+		cfg.Groups[group] = &GroupConfig{Rule: rule, Exceptions: exs, AllowAnyField: gc.AllowAnyField}
 		detail += " keep=" + strings.Join(kept, ",")
 		if len(p.ExpiryDropped) > 0 {
 			detail += " dropped_expiry=" + strings.Join(p.ExpiryDropped, ",")
