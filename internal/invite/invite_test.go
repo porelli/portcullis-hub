@@ -3,6 +3,7 @@ package invite
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,7 +32,7 @@ func TestCreate(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "secret")
 	os.WriteFile(file, []byte(secret+"\n"), 0600)
 	c := New(srv.URL, file)
-	inv, err := c.Create(context.Background(), "alice")
+	inv, err := c.Create(context.Background(), "alice", Options{})
 	if err != nil || inv.URL != "https://enroll.example.org/invite/abc" || inv.ExpiresAt.IsZero() {
 		t.Fatalf("Create = %+v, %v", inv, err)
 	}
@@ -42,13 +43,13 @@ func TestCreate(t *testing.T) {
 		`{"error":"user is protected"}`,
 	} {
 		reply = bad
-		if _, err := c.Create(context.Background(), "alice"); err == nil {
+		if _, err := c.Create(context.Background(), "alice", Options{}); err == nil {
 			t.Errorf("accepted %s", bad)
 		} else if strings.Contains(err.Error(), secret) {
 			t.Error("secret in error")
 		}
 	}
-	if !strings.Contains(func() string { _, err := c.Create(context.Background(), "a"); return err.Error() }(), "user is protected") {
+	if !strings.Contains(func() string { _, err := c.Create(context.Background(), "a", Options{}); return err.Error() }(), "user is protected") {
 		t.Error("core's error message not surfaced")
 	}
 	os.WriteFile(file, []byte("short"), 0600)
@@ -137,5 +138,30 @@ func TestCertificatesKinds(t *testing.T) {
 	}
 	if b.Kind != KindBrowser || b.Serial != "02" || b.NotBefore.Day() != 2 || !b.Revoked {
 		t.Errorf("browser = %+v", b)
+	}
+}
+
+// TestInviteBodyAuthenticator (T8): the body is {"username","authenticator"}.
+func TestInviteBodyAuthenticator(t *testing.T) {
+	secret := strings.Repeat("k", 40)
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.WriteHeader(201)
+		w.Write([]byte(`{"url":"https://enroll.example.org/invite/abc","expires_at":"2026-11-03T10:00:00Z"}`))
+	}))
+	defer srv.Close()
+	file := filepath.Join(t.TempDir(), "secret")
+	os.WriteFile(file, []byte(secret+"\n"), 0600)
+	c := New(srv.URL, file)
+	if _, err := c.Create(context.Background(), "alice", Options{Authenticator: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Create(context.Background(), "bob", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 2 || bodies[0] != `{"username":"alice","authenticator":true}` || bodies[1] != `{"username":"bob","authenticator":false}` {
+		t.Errorf("bodies = %q", bodies)
 	}
 }

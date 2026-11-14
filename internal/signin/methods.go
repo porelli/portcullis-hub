@@ -7,9 +7,11 @@ package signin
 // Method is a sign-in method id.
 type Method string
 
-// The six methods (D1).
+// The seven methods (D1). TOTP is a code from an authenticator app: never a
+// way in on its own (CodeOnly).
 const (
 	Password      Method = "password"
+	TOTP          Method = "totp"
 	PasskeySynced Method = "passkey_synced"
 	BrowserCert   Method = "browser_cert"
 	PasskeyDevice Method = "passkey_device"
@@ -18,7 +20,7 @@ const (
 )
 
 // Methods lists every method in canonical order (weakest first).
-var Methods = []Method{Password, PasskeySynced, BrowserCert, PasskeyDevice, SecurityKey, YubiKeyCert}
+var Methods = []Method{Password, TOTP, PasskeySynced, BrowserCert, PasskeyDevice, SecurityKey, YubiKeyCert}
 
 // Info describes a method. Label is the Settings name, Short the name used
 // in "<Short> + <Short> only" warnings, Phrase the rule sentence's words,
@@ -37,6 +39,7 @@ type Info struct {
 
 var methodInfo = map[Method]Info{
 	Password:      {Password, "Password", "password", "a password", "pwd", 10, true},
+	TOTP:          {TOTP, "Authenticator app", "authenticator app", "a code from an authenticator app", "otp", 15, true},
 	PasskeySynced: {PasskeySynced, "Synced passkey", "synced passkey", "a synced passkey", "spk", 25, true},
 	BrowserCert:   {BrowserCert, "Browser certificate", "browser certificate", "a browser certificate", "file", 25, true},
 	PasskeyDevice: {PasskeyDevice, "Device-bound passkey", "device-bound passkey", "a device-bound passkey", "dpk", 30, true},
@@ -72,7 +75,7 @@ func rank(m Method) int {
 }
 
 // family is a leaf naming several methods at once. No family contains
-// password.
+// password or totp.
 type family struct {
 	members []Method
 	phrase  string

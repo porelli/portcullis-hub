@@ -32,7 +32,7 @@ type markerInviter struct {
 
 func (m *markerInviter) Available() error { return nil }
 
-func (m *markerInviter) Create(_ context.Context, username string) (*invite.Invite, error) {
+func (m *markerInviter) Create(_ context.Context, username string, _ invite.Options) (*invite.Invite, error) {
 	m.mu.Lock()
 	m.users = append(m.users, username)
 	m.mu.Unlock()
@@ -258,7 +258,7 @@ func TestOtherAdminNeedsTypedName(t *testing.T) {
 		if !isErr || m == nil {
 			t.Fatalf("%s ops = %q", tool, txt)
 		}
-		v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+		v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -495,7 +495,7 @@ func TestPrestagedGroupsNeedConfirmation(t *testing.T) {
 	if !isErr || m == nil {
 		t.Fatalf("create_instance over a pre-staged admin group = %q, want a confirmation", txt)
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +563,7 @@ func TestDirectoryConsequencesNamePeople(t *testing.T) {
 		if m == nil {
 			t.Fatalf("%s = %q, want a confirmation", tool, txt)
 		}
-		v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+		v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -647,7 +647,7 @@ func TestPrestagedRuleAndExceptionsNeedConfirmation(t *testing.T) {
 		if !isErr || m == nil {
 			t.Fatalf("create_instance %s over a staged admin group = %q, want a confirmation", id, txt)
 		}
-		v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+		v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -827,7 +827,7 @@ func TestConfirmationNestedNamesAndFreeText(t *testing.T) {
 	if m == nil {
 		t.Fatalf("set_group_rule = %q, want a confirmation", txt)
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatal(err)
 	}

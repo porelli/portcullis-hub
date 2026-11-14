@@ -98,7 +98,7 @@ func (e *toolEnv) approve(t *testing.T, txt string) string {
 	if m == nil {
 		t.Fatalf("no confirmation in %q", txt)
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestDoctorMuteClass(t *testing.T) {
 		t.Fatalf("muting a problem = %s %v", txt, isErr)
 	}
 	m := confirmTextRe.FindStringSubmatch(txt)
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil || !strings.Contains(strings.Join(v.Consequences, " "), "problem folder_changed") {
 		t.Errorf("confirmation page = %+v %v", v, err)
 	}
@@ -433,7 +433,7 @@ func TestFolderPlanTextQuoted(t *testing.T) {
 		if !isErr || m == nil {
 			t.Fatalf("folder_apply = %s, want a confirmation", pending)
 		}
-		v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+		v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -69,6 +69,9 @@ func seedSignIn(t *testing.T, e *instEnv) {
 	aliceKeys := []keycloak.PasskeyCredential{
 		{ID: "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b", Type: string(signin.PasskeySynced), Label: "iPhone", Created: time.Date(2026, 11, 2, 9, 12, 0, 0, time.UTC)},
 		{ID: "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d", Type: string(signin.SecurityKey), Label: "Security key 2026-10-20 14:03", Created: time.Date(2026, 10, 20, 14, 3, 0, 0, time.UTC), AAGUID: "cb69481e-8ff7-4039-93ec-0a2729a154a8"},
+		// Authenticator codes: two authenticator apps (renamable).
+		{ID: "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f", Type: string(signin.TOTP), Label: "Authenticator 2026-10-28 18:40:11", Created: time.Date(2026, 10, 28, 18, 40, 11, 0, time.UTC)},
+		{ID: "4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f7a", Type: string(signin.TOTP), Label: "Work phone", Created: time.Date(2026, 11, 6, 8, 2, 30, 0, time.UTC)},
 	}
 	h.SetMDSModelsForTest(map[string]string{"cb69481e-8ff7-4039-93ec-0a2729a154a8": "YubiKey 5 Series with NFC"})
 	h.SetSignInSources(hub.SignInSources{
@@ -113,7 +116,24 @@ func seedSignIn(t *testing.T, e *instEnv) {
 			aliceKeys[idx].Label = label
 			return old, nil
 		},
+		AuthenticatorLabel: func(_ context.Context, user, id, label string) (string, error) {
+			keysMu.Lock()
+			defer keysMu.Unlock()
+			idx := slices.IndexFunc(aliceKeys, func(k keycloak.PasskeyCredential) bool { return k.ID == id && k.Type == string(signin.TOTP) })
+			if user != "alice" || idx < 0 {
+				return "", keycloak.ErrAuthenticatorNotFound
+			}
+			for i, k := range aliceKeys {
+				if i != idx && strings.EqualFold(k.Label, label) {
+					return "", keycloak.ErrPasskeyLabelTaken
+				}
+			}
+			old := aliceKeys[idx].Label
+			aliceKeys[idx].Label = label
+			return old, nil
+		},
 	})
+	e.s.Directory.AuthenticatorMethodOn = h.AuthenticatorMethodOn
 	// The Sign-in page (sign-in part 2 Task 8): enroll's certificate
 	// actions in memory, Keycloak's login events for alice, the real audit;
 	// the opened log isn't mounted (the page names it as unknown).
@@ -159,6 +179,21 @@ func seedSignIn(t *testing.T, e *instEnv) {
 		if _, err := h.SetMethod(ctx, m, true, root); err != nil {
 			t.Fatalf("switching %s on: %v", m, err)
 		}
+	}
+	// Authenticator codes: totp on, password-and-code enabled, and a
+	// "Key, or password + code" pick for the Hub (root meets it by the
+	// key; Settings warns that a password and a code open it).
+	if _, err := h.SetMethod(ctx, signin.TOTP, true, root); err != nil {
+		t.Fatalf("switching totp on: %v", err)
+	}
+	if _, err := h.SetTemplateEnabled(ctx, "password-and-code", true, root); err != nil {
+		t.Fatalf("enabling password-and-code: %v", err)
+	}
+	if _, err := h.SaveTemplate(ctx, "key-or-code", hub.TemplateInput{Name: "Key, or password + code", Rule: rule(`{"op":"any","items":["security_key",{"op":"all","items":["password","totp"]}]}`)}, true, root); err != nil {
+		t.Fatalf("creating key-or-code: %v", err)
+	}
+	if _, err := h.SetCoreTemplate(ctx, "hub", "key-or-code", root); err != nil {
+		t.Fatalf("hub on key-or-code: %v", err)
 	}
 	// The FIDO list: every fetch fails (Settings → Sign-in's warning).
 	go h.RunMDS(ctx, time.Hour)

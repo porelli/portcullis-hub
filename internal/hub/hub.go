@@ -489,6 +489,10 @@ type Hub struct {
 	// signInInv: who has which sign-in method (signin_people.go; its own
 	// leaf locks, never held across mu).
 	signInInv inventoryCache
+	// signInRefresh throttles GET /api/me/signin?refresh=1 (T5).
+	signInRefresh refreshThrottle
+	// totpDoc wires the authenticator-app doctor kinds (doctor_totp.go).
+	totpDoc totpDoctor
 	// certActions issues, renews and revokes certificates through enroll
 	// (SetCertActions; nil: those actions are 503). Guarded by mu.
 	certActions CertActions

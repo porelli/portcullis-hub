@@ -1,14 +1,16 @@
 package signin
 
 import (
+	"errors"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
 // randomRule is a random source rule: nested all/any groups (up to 3
 // levels) over methods and families.
 func randomRule(r *rand.Rand, depth int) Node {
-	leaves := []string{"password", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert", "family:passkey", "family:yubikey", "family:certificate"}
+	leaves := []string{"password", "totp", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert", "family:passkey", "family:yubikey", "family:certificate"}
 	op := OpAny
 	if r.IntN(2) == 0 {
 		op = OpAll
@@ -79,5 +81,48 @@ func TestImpliesProperty(t *testing.T) {
 	}
 	if implied < checked/20 {
 		t.Errorf("only %d of %d pairs implied: the generator explores too little", implied, checked)
+	}
+}
+
+// TestCompileNeverCodeOnlyProperty (T2): a valid source rule compiled under
+// any switches never has a {totp} alternative. An alternative under fewer
+// switches is a (pre-minimal) alternative under all switches, which
+// Validate's code-only check has already refused.
+func TestCompileNeverCodeOnlyProperty(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 2026))
+	codeOnly := methodSet(1 << rank(TOTP))
+	compiled, refused := 0, 0
+	for range 4000 {
+		src := randomRule(r, 1)
+		err := Validate(src)
+		var co *CodeOnlyError
+		if errors.As(err, &co) {
+			refused++
+		}
+		if err != nil {
+			continue
+		}
+		on := map[Method]bool{}
+		for _, m := range Methods {
+			on[m] = r.IntN(3) != 0
+		}
+		c, err := Compile(src, on)
+		if err != nil {
+			continue
+		}
+		compiled++
+		sets, err := alternatives(c)
+		if err != nil {
+			t.Fatalf("%s: %v", js(c), err)
+		}
+		if slices.Contains(sets, codeOnly) {
+			t.Fatalf("Compile(%s) = %s has a code-only alternative", js(src), js(c))
+		}
+		if err := ValidateCompiled(c); err != nil {
+			t.Fatalf("Compile(%s) = %s: %v", js(src), js(c), err)
+		}
+	}
+	if compiled < 1000 || refused < 100 {
+		t.Errorf("compiled %d, refused %d: the generator explores too little", compiled, refused)
 	}
 }

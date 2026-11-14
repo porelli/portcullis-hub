@@ -34,6 +34,9 @@ const (
 	KindHelp          Kind = "help"
 	KindCertificate   Kind = "certificate"
 	KindImpersonation Kind = "impersonation"
+	// KindMethod: the person added, replaced or removed an authenticator
+	// app in Keycloak (T11).
+	KindMethod Kind = "method"
 )
 
 // Entry is one line of a person's history. Methods is never nil (JSON

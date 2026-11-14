@@ -869,6 +869,7 @@
   // passwordOn: the Password sign-in method is on (the overview's
   // password_on; admins only).
   function passwordOn() { return !!(dir && dir.password_on); }
+  function authenticatorOn() { return !!(dir && dir.authenticator_on); }
   // passwordCopy says what a password set here is (contract §8.1
   // "Passwords": one password, LLDAP's).
   function passwordCopy() {
@@ -901,7 +902,7 @@
     return perms().includes('sign_in_help') && !u.self && !u.admin && !u.protected && !permissionMembers().has(u.username);
   }
   // The actions the Sign-in tab offers itself (from PersonSignIn.can).
-  const SIGNIN_TAB_ACTS = ['invite', 'reset-passkeys', 'password'];
+  const SIGNIN_TAB_ACTS = ['invite', 'reset-passkeys', 'reset-authenticators', 'password'];
   // The groups u has a row in, with the group page's row (state, tags).
   function personGroupRows(u) {
     const admin = isAdmin(), k = lc(u.username), out = [];
@@ -1278,9 +1279,27 @@
     const otherAdmin = !!u && !u.self && !!u.admin;
     switch (a) {
       case 'invite': {
-        if (!confirm('Create a new one-time invite link for ' + user + '? Whoever opens it can register a key and sign in as ' + user + '. Earlier unused invites stop working.')) return;
-        const res = await act(() => api('POST', path + '/invite', {}), null);
+        // A small dialog (P12): what the link does and, while totp is on,
+        // "Also set up an authenticator app".
+        openDialog('Send a setup link to ' + user,
+          '<p>Create a new one-time setup link for <b>' + esc(user) + '</b>? Whoever opens it can register a key and sign in as ' + esc(user) + '. Earlier unused links stop working.</p>' +
+          (authenticatorOn() ? '<div class="pd-checks"><label><input type="checkbox" data-pp-invite-auth> Also set up an authenticator app (after the passkey)</label></div>' : '') +
+          '<div class="pd-actions"><button type="button" class="pd-btn primary sm" data-act="invite-go" data-user="' + esc(user) + '">Create link</button>' +
+          '<button type="button" class="pd-btn secondary sm" data-act="dialog-close">Cancel</button></div>');
+        return;
+      }
+      case 'invite-go': {
+        const box = dialogBody().querySelector('[data-pp-invite-auth]');
+        const body = box && box.checked ? { authenticator: true } : {};
+        const res = await act(() => api('POST', path + '/invite', body), null);
         if (res) { closeDialog(); showSecret(res, user); }
+        return;
+      }
+      case 'reset-authenticators': {
+        if (!typed('Remove ALL authenticator apps of ' + user + ' and sign them out everywhere. Their passkeys stay; they can set up a new app on their Sign-in page.', user)) return;
+        const res = await act(() => api('POST', path + '/remove-authenticators', { confirm: user }), null);
+        if (!res) return;
+        toast((res.count || 0) + ' authenticator app(s) removed', 'success');
         return;
       }
       case 'require-passkey': {
@@ -3048,7 +3067,7 @@
       case 'save-user': return saveUser(user);
       case 'invite-open': return openInvite(null);
       case 'invite-create': return createUser();
-      case 'invite': case 'require-passkey': case 'clear-actions': case 'reset-passkeys': case 'password': case 'delete-user':
+      case 'invite': case 'invite-go': case 'require-passkey': case 'clear-actions': case 'reset-passkeys': case 'reset-authenticators': case 'password': case 'delete-user':
         return userAction(a, user);
       case 'remove-stale':
         if (!typed('Remove the stale Keycloak copy of ' + user + ' (LLDAP no longer has this user). This only deletes it from Keycloak.', user)) return;

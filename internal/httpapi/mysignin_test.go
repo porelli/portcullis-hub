@@ -26,9 +26,16 @@ type signInCertActions struct {
 	revokes  []string
 	issues   []string
 	issueErr error
-	// labels: the passkey renames signInEnv's PasskeyLabel source got.
-	labels []string
+	// labels: the passkey renames signInEnv's PasskeyLabel source got;
+	// authLabels the authenticator renames.
+	labels     []string
+	authLabels []string
+	// reads counts the inventory's Passkeys reads (review T7-L3).
+	reads int
 }
+
+// aliceOTPID is alice's authenticator app in signInEnv.
+const aliceOTPID = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f"
 
 // alicePasskeyID is alice's security key in signInEnv.
 const alicePasskeyID = "0b9d8c7a-6e5f-4a3b-9c2d-1e0f9a8b7c6d"
@@ -78,8 +85,20 @@ func signInEnv(t *testing.T) (*toolEnv, *signInCertActions) {
 	ca := &signInCertActions{}
 	h.SetSignInSources(hub.SignInSources{
 		Passkeys: func(context.Context) (map[string][]keycloak.PasskeyCredential, error) {
+			ca.mu.Lock()
+			ca.reads++
+			ca.mu.Unlock()
 			return map[string][]keycloak.PasskeyCredential{"alice": {{ID: alicePasskeyID, Type: string(signin.SecurityKey), Label: "YubiKey 5C"}},
 				"root": {{ID: "r", Type: string(signin.SecurityKey)}}}, nil
+		},
+		AuthenticatorLabel: func(_ context.Context, user, id, label string) (string, error) {
+			ca.mu.Lock()
+			defer ca.mu.Unlock()
+			ca.authLabels = append(ca.authLabels, user+" "+id+" "+label)
+			if user != "alice" || id != aliceOTPID {
+				return "", keycloak.ErrAuthenticatorNotFound
+			}
+			return "Phone", nil
 		},
 		PasskeyLabel: func(_ context.Context, user, id, label string) (string, error) {
 			ca.mu.Lock()
@@ -161,6 +180,7 @@ func TestMySignInRoutesCallerOnly(t *testing.T) {
 		{"POST", "/api/me/signin/browser-certificates", `{}`}, {"DELETE", "/api/me/signin/certificates/0a:02", ""},
 		{"POST", "/api/me/signin/yubikey-certificate/renew", `{"csr":"x"}`}, {"PUT", "/api/me/signin/password", `{}`},
 		{"DELETE", "/api/me/signin/password", ""}, {"PUT", "/api/me/signin/passkeys/" + alicePasskeyID + "/label", `{"label":"x"}`},
+		{"PUT", "/api/me/signin/authenticators/" + aliceOTPID + "/label", `{"label":"x"}`},
 	}
 	for _, rt := range routes {
 		if r, _ := doAs(t, e.ppl, "", rt[0], rt[1], rt[2]); r.StatusCode != 401 {
@@ -182,8 +202,8 @@ func TestMySignInRoutesCallerOnly(t *testing.T) {
 			t.Errorf("route %s isn't a D25 route", p)
 		}
 	}
-	if n != 8 {
-		t.Errorf("%d routes under /api/me/signin, want the 8 of D25 (with polish 1's passkey rename)", n)
+	if n != 9 {
+		t.Errorf("%d routes under /api/me/signin, want the 8 of D25 (with polish 1's passkey rename) and the authenticator rename", n)
 	}
 	r, b := doAs(t, e.ppl, "ALICE", "GET", "/api/me/signin", "")
 	if r.StatusCode != 200 || r.Header.Get("Cache-Control") != "no-store" || !strings.Contains(b, `"user":"alice"`) || strings.Contains(b, "0b:01") ||
@@ -370,5 +390,74 @@ func TestRenameOwnPasskeyRoute(t *testing.T) {
 		if a.Action == "signin.passkey.label" && a.Result == "ok" && strings.Contains(a.Detail, "Hijacked") {
 			t.Errorf("an impersonated rename was audited ok: %+v", a)
 		}
+	}
+}
+
+// TestRenameOwnAuthenticatorRoute (T6): PUT
+// /api/me/signin/authenticators/{id}/label → 204, audited; 404 for
+// another's or a passkey's id; strict body; the hub listener 404.
+func TestRenameOwnAuthenticatorRoute(t *testing.T) {
+	e, ca := signInEnv(t)
+	path := "/api/me/signin/authenticators/" + aliceOTPID + "/label"
+	if r, b := doAs(t, e.ppl, "Alice", "PUT", path, `{"label":"Work phone"}`); r.StatusCode != 204 {
+		t.Fatalf("rename = %d %s", r.StatusCode, b)
+	}
+	if strings.Join(ca.authLabels, ",") != "alice "+aliceOTPID+" Work phone" || len(ca.labels) != 0 {
+		t.Errorf("calls = %v / %v", ca.authLabels, ca.labels)
+	}
+	var ok []directory.AuditEntry
+	for _, a := range readAudit(t, e.audit) {
+		if a.Action == "signin.authenticator.label" && a.Result == "ok" {
+			ok = append(ok, a)
+		}
+	}
+	if len(ok) != 1 || ok[0].Detail != "Phone → Work phone" {
+		t.Errorf("audit = %+v", ok)
+	}
+	if r, b := doAs(t, e.ppl, "alice", "PUT", "/api/me/signin/authenticators/"+alicePasskeyID+"/label", `{"label":"X"}`); r.StatusCode != 404 || strings.TrimSpace(b) != "no such authenticator app" {
+		t.Errorf("a passkey's id = %d %s", r.StatusCode, b)
+	}
+	if r, _ := doAs(t, e.ppl, "alice", "PUT", path, `{"label":"x","extra":1}`); r.StatusCode != 400 {
+		t.Errorf("unknown field = %d", r.StatusCode)
+	}
+	if r, _ := doAs(t, e.hub, "alice", "PUT", path, `{"label":"x"}`); r.StatusCode != 404 {
+		t.Errorf("hub listener = %d", r.StatusCode)
+	}
+}
+
+// TestMySignInRefresh (T5): ?refresh=1 is accepted (never an error) and
+// any other value is ignored.
+func TestMySignInRefresh(t *testing.T) {
+	e, ca := signInEnv(t)
+	now := time.Now()
+	var clockMu sync.Mutex
+	e.s.Hub.SetEntryClockForTest(func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now })
+	reads := func() int { ca.mu.Lock(); defer ca.mu.Unlock(); return ca.reads }
+	get := func(q string) {
+		t.Helper()
+		if r, b := doAs(t, e.ppl, "alice", "GET", "/api/me/signin"+q, ""); r.StatusCode != 200 || !strings.Contains(b, `"max_authenticators":3`) {
+			t.Errorf("%q = %d %s", q, r.StatusCode, b)
+		}
+	}
+	get("")
+	base := reads()
+	// review T7-L3: ?refresh=1 re-reads the inventory once; a second one
+	// within 10 s and any other value don't (the 30 s cache answers).
+	get("?refresh=1")
+	if n := reads(); n != base+1 {
+		t.Errorf("after refresh=1: %d reads, want %d", n, base+1)
+	}
+	get("?refresh=1")
+	get("?refresh=yes")
+	get("")
+	if n := reads(); n != base+1 {
+		t.Errorf("throttled / other values: %d reads, want %d", n, base+1)
+	}
+	clockMu.Lock()
+	now = now.Add(11 * time.Second)
+	clockMu.Unlock()
+	get("?refresh=1")
+	if n := reads(); n != base+2 {
+		t.Errorf("after 10 s: %d reads, want %d", n, base+2)
 	}
 }

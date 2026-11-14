@@ -158,8 +158,85 @@ func decodeNode(dec *json.Decoder, depth int) (Node, error) {
 // group; groups are "all" / "any" with 1–8 items, nested at most 3 levels,
 // no item listed twice in one group (the same leaf or an identical group);
 // at most 16 leaves, each a method id or a family. Overlap through a family
-// (all[family:passkey, passkey_synced]) is allowed.
+// (all[family:passkey, passkey_synced]) is allowed. Last, no alternative may
+// be an authenticator code alone (CodeOnly, a *CodeOnlyError), whatever the
+// switches say.
 func Validate(n Node) error {
+	if err := validateShape(n); err != nil {
+		return err
+	}
+	if at, bad := CodeOnly(n); bad {
+		return &CodeOnlyError{At: at}
+	}
+	return nil
+}
+
+// CodeOnlyError refuses a rule with an alternative made of totp alone (an
+// authenticator code is never the only way in). At is the group to mark.
+type CodeOnlyError struct{ At Path }
+
+func (e *CodeOnlyError) Error() string {
+	return "an authenticator code can't be the only way in: combine it with another method (all of)"
+}
+
+// codeOnlySet is the alternative {totp}.
+var codeOnlySet = methodSet(1) << rank(TOTP)
+
+// hasCodeOnly reports whether n, compiled with every method on, has the
+// alternative {totp}. Alternatives are non-empty, so {totp} is minimal
+// whenever it appears.
+func hasCodeOnly(n Node) bool {
+	sets, err := alternatives(expand(n, allOn))
+	return err == nil && slices.Contains(sets, codeOnlySet)
+}
+
+// allOn counts every method as switched on.
+var allOn = func() map[Method]bool {
+	on := make(map[Method]bool, len(Methods))
+	for _, m := range Methods {
+		on[m] = true
+	}
+	return on
+}()
+
+// CodeOnly reports whether source rule n, compiled with every method on (so
+// no later switch can open the way), has an alternative made of totp alone,
+// and the group that offends, found top-down: at an "any", the first item
+// with a {totp} alternative; at an "all" (every item then has one), the
+// first item that is a group; it stops before a leaf. A rule that fails
+// Validate's shape check counts as code-only at the top (fail closed).
+func CodeOnly(n Node) (Path, bool) {
+	if validateShape(n) != nil {
+		return Path{}, true
+	}
+	if !hasCodeOnly(n) {
+		return nil, false
+	}
+	at := Path{}
+	for {
+		next := -1
+		for i, it := range n.Items {
+			if it.isLeaf() {
+				if n.Op == OpAny && hasCodeOnly(it) {
+					break // the leaf totp itself: mark this group
+				}
+				continue
+			}
+			if n.Op == OpAll || hasCodeOnly(it) {
+				next = i
+				break
+			}
+		}
+		if next < 0 {
+			return at, true
+		}
+		at = append(at, next)
+		n = n.Items[next]
+	}
+}
+
+// validateShape is Validate's D2 check, without the code-only rule.
+func validateShape(n Node) error {
 	if n.isLeaf() {
 		return errors.New("a rule must be an all-of or any-of group")
 	}
@@ -238,8 +315,8 @@ const (
 
 // ValidateCompiled is the readers' check of a compiled rule: the top is a
 // group; every group is "all" / "any" with 1–8 items; groups nest at
-// most 4 levels; at most 48 leaves, each a method id (no families). It
-// doesn't look at the switches.
+// most 4 levels; at most 48 leaves, each a method id (no families); no
+// alternative is totp alone. It doesn't look at the switches.
 func ValidateCompiled(n Node) error {
 	if n.isLeaf() {
 		return errors.New("a compiled rule must be a group")
@@ -278,6 +355,13 @@ func ValidateCompiled(n Node) error {
 	}
 	if leaves > MaxCompiledLeaves {
 		return fmt.Errorf("compiled rule: more than %d methods", MaxCompiledLeaves)
+	}
+	sets, err := alternatives(n)
+	if err != nil {
+		return fmt.Errorf("compiled rule: %w", err)
+	}
+	if slices.Contains(sets, codeOnlySet) {
+		return errors.New("compiled rule: an authenticator code alone is a way in")
 	}
 	return nil
 }
@@ -353,6 +437,13 @@ func Usable(n Node, on map[Method]bool) (Node, error) {
 	if err := Validate(n); err != nil {
 		return Node{}, err
 	}
+	return usableShaped(n, on)
+}
+
+// usableShaped is Usable for a rule whose shape is already checked: it
+// never applies the code-only rule (scoring a part of a rule, or one
+// sign-in's methods, is not a save decision).
+func usableShaped(n Node, on map[Method]bool) (Node, error) {
 	u, ok := usable(n, on)
 	if !ok {
 		return Node{}, ErrUnmeetable

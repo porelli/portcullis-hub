@@ -15,11 +15,16 @@
 // callback the page shows only "Signed in. You can close this window."
 // (close() may be refused). Both listeners answer with
 // Referrer-Policy: no-referrer, and the pages carry the same meta tag.
+// An application-initiated action (authenticator apps: kc_action) comes
+// back with Keycloak's kc_action_status, forwarded as msg.kc_action_status
+// ("" when absent); a callback carrying only kc_action_status is handled
+// too (contract §5.1).
 window.portcullisFreshAuthCallback = (function () {
   'use strict';
   var q = new URLSearchParams(location.search);
-  if (!q.has('code') && !q.has('state') && !q.has('error')) return false;
-  var msg = { type: 'portcullis-fresh-auth', code: q.get('code') || '', state: q.get('state') || '', error: q.get('error') || '' };
+  if (!q.has('code') && !q.has('state') && !q.has('error') && !q.has('kc_action_status')) return false;
+  var msg = { type: 'portcullis-fresh-auth', code: q.get('code') || '', state: q.get('state') || '', error: q.get('error') || '',
+    kc_action_status: q.get('kc_action_status') || '' };
   history.replaceState(null, '', location.pathname + location.hash);
   var op = null;
   try {

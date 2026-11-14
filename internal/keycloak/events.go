@@ -12,19 +12,21 @@ import (
 
 // ConfigEventTypes are the user events the Hub has Keycloak store
 // (contract §8 "Keycloak's events config", compared as a set): the sign-in
-// history's source (§8.2) and the impersonation start (§8.1).
-var ConfigEventTypes = []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}
+// history's source (§8.2), the impersonation start (§8.1) and the
+// credential events behind the authenticator-app entries (T11). Core's
+// realm-export.json lists the same five (P33).
+var ConfigEventTypes = []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}
 
 // HistoryEventTypes are the types the sign-in history reads
-// (LoginEventsPage, §8.2: the query is unchanged by part 3).
-var HistoryEventTypes = []string{"LOGIN", "LOGIN_ERROR"}
+// (LoginEventsPage, §8.2): never IMPERSONATE.
+var HistoryEventTypes = []string{"LOGIN", "LOGIN_ERROR", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}
 
 // eventsConfigPath is the realm's events config.
 func (c *Client) eventsConfigPath() string {
 	return c.BaseURL + "/admin/realms/" + Realm + "/events/config"
 }
 
-// EnsureEventsConfig makes the realm store LOGIN, LOGIN_ERROR and IMPERSONATE events
+// EnsureEventsConfig makes the realm store the ConfigEventTypes events
 // for historyDays days (contract §8 "Keycloak's events config"): it reads
 // the config and, when it differs, writes it back with eventsEnabled true,
 // enabledEventTypes ConfigEventTypes and eventsExpiration
@@ -107,7 +109,7 @@ func (c *Client) ImpersonateEventsStored(ctx context.Context) (bool, error) {
 }
 
 // Event is one of the realm's user events as the history reads it
-// (contract §8.2): LOGIN and LOGIN_ERROR, with the extension's pc_*
+// (contract §8.2): LOGIN, LOGIN_ERROR and the credential events, with the extension's pc_*
 // details (§8.1 "History details").
 type Event struct {
 	Time     time.Time
@@ -221,6 +223,45 @@ func (c *Client) eventsPage(ctx context.Context, what string, types []string, us
 	if !ValidUserID(userID) {
 		return nil, fmt.Errorf("%s: not a Keycloak user id", what)
 	}
+	return c.eventsQuery(ctx, what, types, userID, clientID, from, to, first, max)
+}
+
+// realmErrorsPage and realmErrorsPages bound RealmLoginErrors: pages of
+// 100, at most 10 (P16: capped at 1,000 events).
+const (
+	realmErrorsPage  = 100
+	realmErrorsPages = 10
+)
+
+// RealmLoginErrors reads the realm's LOGIN_ERROR events with from <= time
+// < to for every user at once (P16: the doctor's signin_totp_guessing; no
+// user filter), newest first, paged. It reads at most 1,000; incomplete
+// says there were more (review M1: the caller still counts the 1,000 it
+// has — each count a lower bound — never skips them). An error means
+// nothing could be read.
+func (c *Client) RealmLoginErrors(ctx context.Context, from, to time.Time) (evs []Event, incomplete bool, err error) {
+	out := []Event{}
+	for page := 0; page < realmErrorsPages; page++ {
+		evs, err := c.eventsQuery(ctx, "realm login errors", []string{"LOGIN_ERROR"}, "", "", from, to, len(out), realmErrorsPage)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, evs...)
+		if len(evs) < realmErrorsPage {
+			return out, false, nil
+		}
+	}
+	// The cap reached: one more event past it says whether there is more.
+	more, err := c.eventsQuery(ctx, "realm login errors", []string{"LOGIN_ERROR"}, "", "", from, to, len(out), 1)
+	if err != nil {
+		return out, true, nil // unknown beyond the cap: treat as more
+	}
+	return out, len(more) > 0, nil
+}
+
+// eventsQuery reads one page of events of the given types; userID ""
+// means every user (RealmLoginErrors only), clientID "" every client.
+func (c *Client) eventsQuery(ctx context.Context, what string, types []string, userID, clientID string, from, to time.Time, first, max int) ([]Event, error) {
 	if max < 1 || first < 0 {
 		return nil, fmt.Errorf("%s: first %d, max %d", what, first, max)
 	}
@@ -229,7 +270,9 @@ func (c *Client) eventsPage(ctx context.Context, what string, types []string, us
 		return nil, err
 	}
 	q := url.Values{}
-	q.Set("user", userID)
+	if userID != "" {
+		q.Set("user", userID)
+	}
 	for _, t := range types {
 		q.Add("type", t)
 	}

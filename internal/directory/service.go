@@ -89,6 +89,7 @@ type Keycloak interface {
 	RequirePasskey(ctx context.Context, username string) error
 	SetUserRequiredActions(ctx context.Context, username string, actions []string) error
 	RemovePasskeys(ctx context.Context, username string, requireNew bool) (int, error)
+	RemoveAuthenticators(ctx context.Context, username string) (int, error)
 	CredentialCount(ctx context.Context, username string) (int, error)
 	LogoutUser(ctx context.Context, username string) error
 	DeleteUserByID(ctx context.Context, id string) error
@@ -97,7 +98,7 @@ type Keycloak interface {
 // Inviter creates one-time onboarding links (implemented by *invite.Client).
 type Inviter interface {
 	Available() error
-	Create(ctx context.Context, username string) (*invite.Invite, error)
+	Create(ctx context.Context, username string, o invite.Options) (*invite.Invite, error)
 }
 
 // App is what the service needs to know about a template.
@@ -213,6 +214,10 @@ type Service struct {
 	// it is off. Setting a password is allowed either way (LDAP-binding
 	// apps use it).
 	PasswordMethodOn func() bool
+	// AuthenticatorMethodOn reports whether the totp sign-in method is
+	// switched on (P12): a setup link that also sets up an authenticator
+	// app is refused (409) while it is off, and while it is unset.
+	AuthenticatorMethodOn func() bool
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -423,6 +428,11 @@ type Overview struct {
 	// (PasswordMethodOn; unset = on), so password onboarding is offered
 	// (admins only).
 	PasswordOn bool `json:"password_on"`
+	// AuthenticatorOn: the totp method is switched on
+	// (AuthenticatorMethodOn; unset = off), so the setup-link dialog offers
+	// "Also set up an authenticator app" (every caller: holders and
+	// delegates send links too).
+	AuthenticatorOn bool `json:"authenticator_on"`
 	// Admin and Perms describe the caller (Me): admins hold every
 	// delegated permission.
 	Admin bool     `json:"admin"`
@@ -532,6 +542,9 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	if full {
 		ov.PasswordOn = s.PasswordMethodOn == nil || s.PasswordMethodOn()
 	}
+	// A server switch, not sensitive: every caller who may send a setup
+	// link sees the dialog's option (review L6).
+	ov.AuthenticatorOn = s.AuthenticatorMethodOn != nil && s.AuthenticatorMethodOn()
 
 	// Load fields from Store if available
 	var cfg *Config
@@ -1184,14 +1197,14 @@ func (s *Service) invitesAvailable() error {
 }
 
 // newInvite asks core for a link; caller holds s.mu.
-func (s *Service) newInvite(ctx context.Context, username string) (*invite.Invite, error) {
+func (s *Service) newInvite(ctx context.Context, username string, o invite.Options) (*invite.Invite, error) {
 	if s.reservedName(username) {
 		return nil, refuse("%s", reservedMsg(username))
 	}
 	if err := s.invitesAvailable(); err != nil {
 		return nil, &Error{Status: http.StatusServiceUnavailable, Msg: err.Error()}
 	}
-	inv, err := s.Invites.Create(ctx, username)
+	inv, err := s.Invites.Create(ctx, username, o)
 	return inv, inviteErr(username, err)
 }
 
@@ -1492,7 +1505,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 			res.ServerInvite = "./portcullis invite " + req.Username
 			res.Warnings = append(res.Warnings, req.Username+" is an administrator: "+recoverMsg(req.Username))
 		case req.Onboarding == OnboardInvite:
-			inv, err := s.newInvite(ctx, req.Username)
+			inv, err := s.newInvite(ctx, req.Username, invite.Options{})
 			if err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("the user was created but the invite failed (use \"Send new invite\"): %v", err))
 				var de *Error
@@ -1961,13 +1974,57 @@ func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confi
 			return err
 		}
 		if withInvite {
-			inv, err := s.newInvite(ctx, id)
+			inv, err := s.newInvite(ctx, id, invite.Options{})
 			if err != nil {
 				return fmt.Errorf("passkeys removed (%d), but creating the invite failed (use \"Send new invite\"): %w", n, err)
 			}
 			res.Invite = inv
 		}
 		return nil
+	})
+	return res, err
+}
+
+// RemoveAuthenticators deletes every authenticator app (otp credential)
+// of username and signs them out (contract §9.7), with RemovePasskeys'
+// targets and rules: admins, and sign_in_help holders on the people they
+// may help (never an administrator); an admin on another admin needs the
+// typed name (checkAdminTakeover); confirm must be the username;
+// admin and portcullis-hub refused (checkTarget, 409). Audited
+// user.remove_authenticators "<n> removed" (+ "; as sign_in_help").
+func (s *Service) RemoveAuthenticators(ctx context.Context, c *Caller, username, confirm string) (*Result, error) {
+	res := newResult()
+	perm := helpPerm(c, permAdmin)
+	detail := asHelp(perm, "")
+	err := s.run(ctx, c, perm, "user.remove_authenticators", username, &detail, func() error {
+		id, sn, err := s.kcTarget(ctx, username)
+		if err != nil {
+			return err
+		}
+		// A holder's target is checked again on this snapshot (as
+		// RemovePasskeys).
+		if !c.Admin && s.isAdministrator(sn, id) {
+			return forbidden("not allowed: %s is an administrator (admins only)", id)
+		}
+		// Another administrator: flagged in the audit, typed name needed.
+		takeover := ""
+		terr := s.checkAdminTakeover(sn, c.User, id, confirm, &takeover)
+		detail = strings.TrimSpace(detail + " " + takeover)
+		if terr != nil {
+			return terr
+		}
+		if confirm != username {
+			return invalid("type the username to confirm")
+		}
+		// An admin's credential action ends a delegate's claim on the
+		// account (as RemovePasskeys: no re-invite by the creator).
+		if err := s.clearCreatedBy(c, id); err != nil {
+			return err
+		}
+		n, err := s.KC.RemoveAuthenticators(ctx, id)
+		res.Count = n
+		detail = strings.TrimSpace(asHelp(perm, fmt.Sprintf("%d removed", n)) + " " + takeover)
+		return err
 	})
 	return res, err
 }
@@ -1980,11 +2037,24 @@ func (s *Service) RemovePasskeys(ctx context.Context, c *Caller, username, confi
 // — the point of a reset — so checkKeyless and created_by don't apply
 // to them; core's invite API still refuses protected targets. Audited
 // with detail "as sign_in_help".
-func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*Result, error) {
+//
+// authenticator asks for a link that also sets up an authenticator app
+// (T8): refused with 409 while totp is off (AuthenticatorMethodOn),
+// before enroll is asked.
+func (s *Service) SendInvite(ctx context.Context, c *Caller, username string, authenticator bool) (*Result, error) {
 	res := newResult()
 	perm := helpPerm(c, PermInvite)
-	detail := asHelp(perm, "")
+	// The audit records the link's option (review L1), as RemovePasskeys
+	// records new_invite.
+	opt := ""
+	if authenticator {
+		opt = "authenticator=true"
+	}
+	detail := asHelp(perm, opt)
 	err := s.run(ctx, c, perm, "user.invite", username, &detail, func() error {
+		if authenticator && (s.AuthenticatorMethodOn == nil || !s.AuthenticatorMethodOn()) {
+			return refuse("authenticator apps are off on this server")
+		}
 		if err := s.checkTarget(username); err != nil {
 			return err
 		}
@@ -2018,7 +2088,7 @@ func (s *Service) SendInvite(ctx context.Context, c *Caller, username string) (*
 				return err
 			}
 		}
-		inv, err := s.newInvite(ctx, u.ID)
+		inv, err := s.newInvite(ctx, u.ID, invite.Options{Authenticator: authenticator})
 		res.Invite = inv
 		return err
 	})

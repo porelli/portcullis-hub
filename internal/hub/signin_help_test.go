@@ -333,3 +333,29 @@ func TestPersonViewMaxMinutes(t *testing.T) {
 		t.Errorf("json = %s", b)
 	}
 }
+
+// TestHelpCanRemoveAuthenticatorsOnlyWhenOn (Task 8): remove_authenticators
+// is offered exactly where remove_passkeys is, and only while totp is on.
+func TestHelpCanRemoveAuthenticatorsOnlyWhenOn(t *testing.T) {
+	c := newHelpFixture(t)
+	h := c.f.h
+	for _, on := range []bool{false, true} {
+		setSignIn(c.f, func(si *state.SignIn) { si.Methods["totp"] = on })
+		for _, x := range []struct {
+			caller *directory.Caller
+			user   string
+		}{{helpAdmin, "alice"}, {helpAdmin, "ann"}, {helpAdmin, "admin"}, {helpAdmin, "portcullis-hooks"}, {helpHolder, "alice"}} {
+			v, err := h.PersonSignInView(c.ctx, x.caller, x.user)
+			if err != nil {
+				t.Fatalf("%s on %s: %v", x.caller.User, x.user, err)
+			}
+			if v.Can.RemoveAuthenticators != (on && v.Can.RemovePasskeys) {
+				t.Errorf("totp %v, %s on %s: %+v", on, x.caller.User, x.user, v.Can)
+			}
+		}
+	}
+	b, _ := json.Marshal(HelpCan{RemoveAuthenticators: true})
+	if !strings.Contains(string(b), `"remove_authenticators":true`) {
+		t.Errorf("json %s", b)
+	}
+}

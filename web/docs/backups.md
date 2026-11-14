@@ -10,7 +10,8 @@ storage. `./portcullis backup verify` proves that a backup can be restored, and
     A backup contains `secrets/`, which holds the Vault **root token and unseal
     key**, plus `.env` with every password. Whoever has a backup can decrypt
     the CA and impersonate any user. For off-host copies, that also takes
-    `BACKUP_PASSWORD`.
+    `BACKUP_PASSWORD`. The Keycloak database in it also holds every
+    authenticator app's secret: whoever has it can generate codes.
 
     - Local backups are mode `0700`.
     - Off-host copies are only as safe as `BACKUP_PASSWORD`.
@@ -26,7 +27,7 @@ storage. `./portcullis backup verify` proves that a backup can be restored, and
 | Piece | How | Why this way |
 |-------|-----|--------------|
 | Vault (the internal certificate authority's keys, issued YubiKey and browser certificate records, CRLs, AppRole) | Raft snapshot (`sys/storage/raft/snapshot`, root token) → `vault.snap` | Consistent point-in-time copy without stopping Vault |
-| Keycloak database | `pg_dump -Fc` → `postgres.dump` | A raw copy of a running Postgres data directory is not consistent |
+| Keycloak database | `pg_dump -Fc` → `postgres.dump` | A raw copy of a running Postgres data directory is not consistent. It also holds every [authenticator app](auth-policies.md#authenticator-app)'s secret: whoever has it can generate codes (Keycloak keeps the secrets in clear, because it must compute the codes; restic's off-host encryption is the protection) |
 | LLDAP (`lldap_data`) | Files, with every SQLite database copied through SQLite's online backup API → `lldap_data.tar.gz` | Consistent while LLDAP runs. Keeps `private_key` (password hashing) |
 | Hub state (`hub_data`), ACME account and certs (`traefik_acme`), the AI access log (`mcp_gate_data`), group-gate's opened log (`group_gate_data`, part of everyone's [sign-in history](auth-policies.md#sign-in-history), kept a year by default) | Same → `hub_data.tar.gz`, `traefik_acme.tar.gz`, `mcp_gate_data.tar.gz`, `group_gate_data.tar.gz` (restored owned `10003:10001`) | `hub_data` includes the AI model provider keys in clear (`ai/provider-secrets.json`) and the AI app credentials encrypted to the gate's key, which is in `secrets/mcp-gate/` (lose that key and every AI resource answers `503` until the app credentials are dropped: [AI support residuals](ai.md#residuals)) |
 | `.env`, `certs/`, `secrets/`, `config/`, `keycloak/realm-export.json`, `headscale/config.yaml`, `docker-compose.override.yml` | Copied | Except `secrets/domains/last-public-ipv4` / `-ipv6`, the host's last detected public addresses ([public IP detection](hardening.md#public-ip-detection)), and `secrets/domains/acme-relax.env`, a pending ACME flip's settle point ([Certificates → Switching](../setup/certificates.md#switching)): never archived; a restore deletes the addresses and keeps a live settle point |
@@ -232,6 +233,14 @@ says so). It saves the current `.env`, `secrets/` and `certs/` to
 7. Builds the local images on both runtimes (Docker and rootless Podman), then runs `vault init`, which refreshes the enroll AppRole secret and the metrics token. Everything is started and the restore waits for Vault, Postgres, LLDAP and Keycloak.
 
 Use `--yes` to skip the confirmation.
+
+!!! warning "Re-remove authenticator apps and passkeys reported lost"
+    Restoring an older backup brings back the authenticator apps and
+    passkeys removed since the backup was taken, so a lost phone or key
+    works again. The restore's last line says so. After a restore, remove
+    again every authenticator app and passkey reported lost after the
+    backup's date (People → person → Sign-in; the Hub's audit is restored to
+    the same point, so it can't tell you which).
 
 !!! warning "Restore LLDAP before Keycloak runs"
     Never start the stack with an empty or wrong LLDAP database over a Keycloak

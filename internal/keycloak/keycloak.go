@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -724,8 +725,12 @@ type PasskeyCredential struct {
 	AAGUID  string    `json:"aaguid"`
 }
 
-// SignInCredentials lists every Keycloak user's passkeys (contract §8.1
-// "Inventory"), keyed by lowercase username; a user disabled in Keycloak
+// OTPType is Keycloak's credential type of an authenticator app (TOTP).
+const OTPType = "otp"
+
+// SignInCredentials lists every Keycloak user's passkeys and authenticator
+// apps (contract §8.1 "Inventory"; an otp credential has Type "totp" and
+// no AAGUID), keyed by lowercase username; a user disabled in Keycloak
 // maps to nil (they can't sign in with any method, not even a password;
 // an enabled user without passkeys has an empty, non-nil list); a user whose credentials
 // can't be read is left out (their methods stay unknown, which never
@@ -772,13 +777,18 @@ func (c *Client) SignInCredentials(ctx context.Context) (map[string][]PasskeyCre
 			}
 			keys := []PasskeyCredential{}
 			for _, cr := range creds {
+				var pk PasskeyCredential
 				if kind, ok := passkeyKinds[cr.Type]; ok {
-					pk := PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label, AAGUID: cr.AAGUID}
-					if cr.Created > 0 {
-						pk.Created = time.UnixMilli(cr.Created).UTC()
-					}
-					keys = append(keys, pk)
+					pk = PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label, AAGUID: cr.AAGUID}
+				} else if cr.Type == OTPType {
+					pk = PasskeyCredential{ID: cr.ID, Type: string(signin.TOTP), Label: cr.Label}
+				} else {
+					continue
 				}
+				if cr.Created > 0 {
+					pk.Created = time.UnixMilli(cr.Created).UTC()
+				}
+				keys = append(keys, pk)
 			}
 			mu.Lock()
 			out[strings.ToLower(u.Username)] = keys
@@ -814,7 +824,7 @@ type credential struct {
 	Type    string
 	Label   string
 	Created int64  // ms since the epoch; 0 = unknown
-	AAGUID  string // from credentialData; "" = zero, missing or unreadable
+	AAGUID  string // from a passkey's credentialData; "" = zero, missing, unreadable or not a passkey
 }
 
 // credentialAAGUID is the aaguid of a credentialData string (WebAuthn
@@ -843,7 +853,12 @@ func (c *Client) credentials(ctx context.Context, tok, userID string) ([]credent
 	out := make([]credential, 0, len(creds))
 	for _, cr := range creds {
 		if cr != nil {
-			cd := credential{ID: str(cr.ID), Type: str(cr.Type), Label: str(cr.UserLabel), AAGUID: credentialAAGUID(str(cr.CredentialData))}
+			cd := credential{ID: str(cr.ID), Type: str(cr.Type), Label: str(cr.UserLabel)}
+			if passkeyTypes[cd.Type] {
+				// Only a WebAuthn credential's data is read (its AAGUID);
+				// any other type's (an otp's policy) is never looked at.
+				cd.AAGUID = credentialAAGUID(str(cr.CredentialData))
+			}
 			if cr.CreatedDate != nil {
 				cd.Created = *cr.CreatedDate
 			}
@@ -1173,6 +1188,127 @@ func (c *Client) RemovePasskeys(ctx context.Context, username string, requireNew
 	return n, c.logout(ctx, tok, id)
 }
 
+// RemoveAuthenticators deletes every authenticator app (otp credential) of
+// username and signs the user out; passkeys and the password stay. It
+// returns how many were deleted.
+func (c *Client) RemoveAuthenticators(ctx context.Context, username string) (int, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return 0, err
+	}
+	u, err := c.importUser(ctx, tok, username)
+	if err != nil {
+		return 0, err
+	}
+	id := str(u.ID)
+	creds, err := c.credentials(ctx, tok, id)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, cr := range creds {
+		if cr.Type != OTPType {
+			continue
+		}
+		err := c.api().DeleteCredentials(ctx, tok, Realm, url.PathEscape(id), url.PathEscape(cr.ID))
+		if err != nil && statusCode(err) != http.StatusNotFound {
+			return n, opErr("delete credential", err)
+		}
+		n++
+	}
+	return n, c.logout(ctx, tok, id)
+}
+
+// OTPPolicy is the realm's OTP policy and the max_auth_age (seconds) of the
+// CONFIGURE_TOTP and delete_credential required actions (T12, the doctor's
+// drift check). A missing or unreadable max_auth_age is 0.
+type OTPPolicy struct {
+	Type, Algorithm                           string
+	Digits, Period, LookAhead, InitialCounter int
+	CodeReusable                              bool
+	ConfigureMaxAge, DeleteMaxAge             int
+	// Unset names the realm's otpPolicy* fields that are absent (review
+	// T7-L1): their zero values above would read as the wanted ones, so
+	// the drift check reports these instead.
+	Unset []string
+}
+
+// OTPPolicy reads the realm's OTP policy and the two required actions'
+// max_auth_age. A required action without a config (404) reads as 0.
+func (c *Client) OTPPolicy(ctx context.Context) (*OTPPolicy, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	base := c.BaseURL + "/admin/realms/" + Realm
+	resp, err := c.api().GetRequestWithBearerAuth(ctx, tok).Get(base)
+	if err != nil {
+		return nil, fmt.Errorf("read the realm: %w", err)
+	}
+	if resp.IsError() {
+		return nil, &HTTPError{Op: "read the realm", Status: resp.StatusCode()}
+	}
+	var r struct {
+		Type           *string `json:"otpPolicyType"`
+		Algorithm      *string `json:"otpPolicyAlgorithm"`
+		Digits         *int    `json:"otpPolicyDigits"`
+		Period         *int    `json:"otpPolicyPeriod"`
+		LookAhead      *int    `json:"otpPolicyLookAheadWindow"`
+		InitialCounter *int    `json:"otpPolicyInitialCounter"`
+		CodeReusable   *bool   `json:"otpPolicyCodeReusable"`
+	}
+	if err := json.Unmarshal(resp.Body(), &r); err != nil {
+		return nil, fmt.Errorf("read the realm: %w", err)
+	}
+	p := &OTPPolicy{}
+	str := func(v *string, name string, dst *string) {
+		if v == nil {
+			p.Unset = append(p.Unset, name)
+			return
+		}
+		*dst = *v
+	}
+	num := func(v *int, name string, dst *int) {
+		if v == nil {
+			p.Unset = append(p.Unset, name)
+			return
+		}
+		*dst = *v
+	}
+	str(r.Type, "otpPolicyType", &p.Type)
+	str(r.Algorithm, "otpPolicyAlgorithm", &p.Algorithm)
+	num(r.Digits, "otpPolicyDigits", &p.Digits)
+	num(r.Period, "otpPolicyPeriod", &p.Period)
+	num(r.LookAhead, "otpPolicyLookAheadWindow", &p.LookAhead)
+	if r.CodeReusable == nil {
+		p.Unset = append(p.Unset, "otpPolicyCodeReusable")
+	} else {
+		p.CodeReusable = *r.CodeReusable
+	}
+	num(r.InitialCounter, "otpPolicyInitialCounter", &p.InitialCounter)
+	for alias, dst := range map[string]*int{"CONFIGURE_TOTP": &p.ConfigureMaxAge, "delete_credential": &p.DeleteMaxAge} {
+		resp, err := c.api().GetRequestWithBearerAuth(ctx, tok).Get(base + "/authentication/required-actions/" + url.PathEscape(alias) + "/config")
+		if err != nil {
+			return nil, fmt.Errorf("read the %s config: %w", alias, err)
+		}
+		if resp.StatusCode() == http.StatusNotFound {
+			continue
+		}
+		if resp.IsError() {
+			return nil, &HTTPError{Op: "read the " + alias + " config", Status: resp.StatusCode()}
+		}
+		var cfg struct {
+			Config map[string]string `json:"config"`
+		}
+		if json.Unmarshal(resp.Body(), &cfg) == nil {
+			if v, err := strconv.Atoi(cfg.Config["max_auth_age"]); err == nil && v > 0 {
+				*dst = v
+			}
+		}
+	}
+	return p, nil
+}
+
 // ErrPasskeyNotFound: the credential id isn't one of the user's passkeys
 // (unknown, another person's, or not a passkey type).
 var ErrPasskeyNotFound = errors.New("no such passkey")
@@ -1191,6 +1327,24 @@ var ErrPasskeyLabelTaken = errors.New("another sign-in method has that name")
 // unchanged label returns at once (before the duplicate check: saving an
 // unchanged name never 409s, even if another credential shares it). An unknown user is ErrUserNotFound.
 func (c *Client) SetPasskeyLabel(ctx context.Context, username, credentialID, label string) (old string, err error) {
+	return c.setCredentialLabel(ctx, username, credentialID, label, passkeyTypes, ErrPasskeyNotFound)
+}
+
+// ErrAuthenticatorNotFound: the credential id isn't one of the user's
+// authenticator apps (unknown, another person's, or not an otp).
+var ErrAuthenticatorNotFound = errors.New("no such authenticator app")
+
+// SetAuthenticatorLabel renames one of username's authenticator apps (T6),
+// as SetPasskeyLabel does a passkey: an id that isn't one of their otp
+// credentials is ErrAuthenticatorNotFound; a duplicate is
+// ErrPasskeyLabelTaken.
+func (c *Client) SetAuthenticatorLabel(ctx context.Context, username, credentialID, label string) (old string, err error) {
+	return c.setCredentialLabel(ctx, username, credentialID, label, map[string]bool{OTPType: true}, ErrAuthenticatorNotFound)
+}
+
+// setCredentialLabel renames one of username's credentials whose type is in
+// types (else notFound); see SetPasskeyLabel.
+func (c *Client) setCredentialLabel(ctx context.Context, username, credentialID, label string, types map[string]bool, notFound error) (old string, err error) {
 	tok, err := c.token(ctx)
 	if err != nil {
 		return "", err
@@ -1207,14 +1361,14 @@ func (c *Client) SetPasskeyLabel(ctx context.Context, username, credentialID, la
 	found := false
 	for _, cr := range creds {
 		if cr.ID == credentialID {
-			if !passkeyTypes[cr.Type] {
-				return "", ErrPasskeyNotFound
+			if !types[cr.Type] {
+				return "", notFound
 			}
 			found, old = true, cr.Label
 		}
 	}
 	if !found {
-		return "", ErrPasskeyNotFound
+		return "", notFound
 	}
 	if old == label {
 		return old, nil // unchanged: never a duplicate, nothing to send
@@ -1229,7 +1383,7 @@ func (c *Client) SetPasskeyLabel(ctx context.Context, username, credentialID, la
 		case http.StatusConflict:
 			return old, ErrPasskeyLabelTaken
 		case http.StatusNotFound:
-			return old, ErrPasskeyNotFound
+			return old, notFound
 		}
 		return old, opErr("set credential label", err)
 	}

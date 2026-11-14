@@ -55,9 +55,11 @@ func (h *Hub) signInHelpOrNil() SignInHelp {
 type HelpCan struct {
 	SetupLink      bool `json:"setup_link"`
 	RemovePasskeys bool `json:"remove_passkeys"`
-	Revoke         bool `json:"revoke"`
-	Issue          bool `json:"issue"`
-	Password       bool `json:"password"`
+	// RemoveAuthenticators: as RemovePasskeys, and only while totp is on.
+	RemoveAuthenticators bool `json:"remove_authenticators"`
+	Revoke               bool `json:"revoke"`
+	Issue                bool `json:"issue"`
+	Password             bool `json:"password"`
 	// Impersonate: the caller may start signing in as the person (an
 	// administrator, and none of the rules that need no proof refuses;
 	// contract §9.7 "Signing in as someone else").
@@ -290,6 +292,10 @@ func (h *Hub) helpCan(c *directory.Caller, m *directory.Membership, u string) He
 	if noPasswordAccounts[u] {
 		can = HelpCan{}
 	}
+	h.mu.RLock()
+	totpOn := h.st.SignIn.MethodsOn()[signin.TOTP]
+	h.mu.RUnlock()
+	can.RemoveAuthenticators = can.RemovePasskeys && totpOn
 	return can
 }
 

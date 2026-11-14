@@ -156,7 +156,7 @@ func (e *toolEnv) tool(t *testing.T, name string, args any) (string, bool, strin
 	if m == nil {
 		return txt, isErr, ""
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatalf("%s: confirmation page: %v", name, err)
 	}
@@ -582,6 +582,8 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/directory/users/erin/require-passkey", body: `{}`},
 		{tool: "remove_passkeys", args: map[string]any{"username": "erin"},
 			method: "POST", path: "/api/directory/users/erin/remove-passkeys", body: `{"confirm":"erin"}`},
+		{tool: "remove_authenticators", args: map[string]any{"username": "erin"},
+			method: "POST", path: "/api/directory/users/erin/remove-authenticators", body: `{"confirm":"erin"}`},
 		{tool: "import_apply", args: map[string]any{"rows": []any{map[string]any{"user": "erin", "display_name": "Erin Two"}}},
 			method: "POST", path: "/api/directory/import/apply", body: `{"rows":[{"user":"erin","display_name":"Erin Two"}]}`},
 		{tool: "import_apply", args: map[string]any{"rows": []any{map[string]any{"user": "bob2", "remove": true}}},
@@ -781,7 +783,7 @@ func TestDeleteInstanceTool(t *testing.T) {
 	if m == nil {
 		t.Fatalf("elicitation %v", el)
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -52,6 +52,7 @@
   // The editor's names for the methods and families (chips and "+ method").
   const METHODS = [
     ['password', 'Password'],
+    ['totp', 'Authenticator app'],
     ['passkey_synced', 'Synced passkey'],
     ['browser_cert', 'Browser certificate'],
     ['passkey_device', 'Device-bound passkey'],
@@ -205,7 +206,10 @@
         if (!usable(t) && t.id !== pick) continue;
         opts += '<option value="' + esc(t.id) + '"' + (t.id === pick ? ' selected' : '') + '>' + esc(t.name + ' · ' + scoreText(t.score)) + '</option>';
       }
-      h += '<tr><td>' + esc(label) + '</td><td><select data-signin-action="core" data-key="' + esc(key) + '" aria-label="' + esc(label + ' sign-in') + '">' + opts + '</select>' + errSlot('core:' + key) + '</td></tr>';
+      // core_warnings (T17): a pick a password and a code open, next to it.
+      const warn = (view.core_warnings || {})[key];
+      h += '<tr><td>' + esc(label) + '</td><td><select data-signin-action="core" data-key="' + esc(key) + '" aria-label="' + esc(label + ' sign-in') + '">' + opts + '</select>' +
+        (warn ? '<div class="si-warn" data-signin-corewarn="' + esc(key) + '" role="note">' + esc(warn) + '</div>' : '') + errSlot('core:' + key) + '</td></tr>';
     }
     return h + '</tbody></table></section>';
   }
@@ -295,6 +299,9 @@
     const nodes = nodeList(rule);
     if (!preview) return nodes.map(() => ({}));
     const bad = new Set((preview.unusable || []).map(pathKey));
+    // The group with a code-only way in (code_only, T2): marked with the
+    // preview's problem text (si-codeonly).
+    const codeOnly = new Set((preview.code_only || []).map(pathKey));
     const scores = new Map((preview.groups || []).map(g => [pathKey(g.path), g.tenths]));
     // A part inside a greyed-out one is greyed out with it (no reason of its own).
     const out = [];
@@ -303,6 +310,10 @@
       const m = {};
       if (bad.has(k)) m.why = whyUnusable(n);
       else if (n.path.some((_, i) => bad.has(pathKey(n.path.slice(0, i))))) m.inside = true;
+      if (codeOnly.has(k)) {
+        m.codeOnly = true;
+        if (!m.why) m.why = preview.problem || 'an authenticator code can\'t be the only way in';
+      }
       if (n.op !== undefined && scores.has(k)) m.tenths = scores.get(k);
       out.push(m);
     }
@@ -326,7 +337,7 @@
     const m = marks.shift() || {};
     const op = node.op === 'all' ? 'all' : 'any';
     path = path || [];
-    let h = '<div class="si-g si-' + op + (m.why || m.inside ? ' si-unusable' : '') + '" data-signin-node data-depth="' + level + '" data-path="' + esc(pathKey(path)) + '" data-op="' + op + '">' +
+    let h = '<div class="si-g si-' + op + (m.codeOnly ? ' si-codeonly' : m.why || m.inside ? ' si-unusable' : '') + '" data-signin-node data-depth="' + level + '" data-path="' + esc(pathKey(path)) + '" data-op="' + op + '">' +
       '<div class="si-hd">Require <select data-signin-action="op" aria-label="all of or any of">' +
       '<option value="all"' + (op === 'all' ? ' selected' : '') + '>all of</option><option value="any"' + (op === 'any' ? ' selected' : '') + '>any of</option></select>' +
       '<span class="si-why" data-signin-why>' + (m.why ? ' — ' + esc(m.why) : '') + '</span>' +
@@ -469,7 +480,8 @@
     const marks = marksFor(ruleFromEditor(tree), p);
     tree.querySelectorAll('[data-signin-node]').forEach((el, i) => {
       const m = marks[i] || {};
-      el.classList.toggle('si-unusable', !!(m.why || m.inside));
+      el.classList.toggle('si-codeonly', !!m.codeOnly);
+      el.classList.toggle('si-unusable', !m.codeOnly && !!(m.why || m.inside));
       const why = el.querySelector(':scope > [data-signin-why], :scope > .si-hd > [data-signin-why]');
       if (why) why.textContent = m.why ? ' — ' + m.why : '';
       const gs = el.querySelector(':scope > .si-hd > [data-signin-gscore]');

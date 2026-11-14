@@ -90,6 +90,10 @@ type SignInView struct {
 	// or unavailable (mdsWarning).
 	MDS        fidomds.Status `json:"mds"`
 	MDSWarning string         `json:"mds_warning,omitempty"`
+	// CoreWarnings (T17): core page key (hub / people) → a warning shown
+	// next to its pick; a key is set only when the pick has a way in made
+	// only of password and totp.
+	CoreWarnings map[string]string `json:"core_warnings"`
 	// The limits view's keys (limits, ceiling_days, effective, warning;
 	// contract §8.1 "Limits").
 	LimitsView
@@ -127,6 +131,9 @@ type TemplatePreview struct {
 	// scores; a group that can't be met scores 0).
 	Unusable []signin.Path `json:"unusable"`
 	Groups   []GroupScore  `json:"groups"`
+	// CodeOnly (T2, P5): the group the editor marks when the draft has a
+	// way in made of an authenticator code alone ([] = none).
+	CodeOnly []signin.Path `json:"code_only"`
 }
 
 // GroupScore is the score of the draft's group at Path (signin.Path:
@@ -216,6 +223,12 @@ func (h *Hub) signInViewLocked() *SignInView {
 	people, total := h.methodPeopleLocked()
 	v := &SignInView{Default: si.Default, Core: maps.Clone(si.Core), AddStronger: si.AddStronger, MDS: h.mdsStatus(), PeopleTotal: total, LimitsView: h.limitsViewLocked()}
 	v.MDSWarning = h.mdsWarning(v.MDS)
+	v.CoreWarnings = map[string]string{}
+	for _, k := range []string{"hub", "people"} {
+		if _, rule, why := h.governingLocked(govCore(k)); why == "" && phishableOnly(rule) {
+			v.CoreWarnings[k] = coreCodeWarning
+		}
+	}
 	for _, m := range signin.Methods {
 		info, _ := signin.InfoOf(m)
 		v.Methods = append(v.Methods, SignInMethodView{ID: m, Label: info.Label, Tenths: info.Tenths, On: on[m], Available: info.Available, People: people[m]})
@@ -227,6 +240,25 @@ func (h *Hub) signInViewLocked() *SignInView {
 			Enabled: t.Enabled, BuiltIn: t.BuiltIn, UsedBy: h.usesLocked(si, id)})
 	}
 	return v
+}
+
+// coreCodeWarning is CoreWarnings' text (contract §8.1).
+const coreCodeWarning = "The Hub can be opened with a password and a code: both can be phished"
+
+// phishableOnly reports whether compiled rule c has an alternative made
+// only of password and totp (and at least the code: a password alone is
+// the password warning's business).
+func phishableOnly(c signin.Node) bool {
+	alts, err := signin.Alternatives(c)
+	if err != nil {
+		return false
+	}
+	for _, a := range alts {
+		if slices.Contains(a, signin.TOTP) && !slices.ContainsFunc(a, func(m signin.Method) bool { return m != signin.TOTP && m != signin.Password }) {
+			return true
+		}
+	}
+	return false
 }
 
 // describeRule is a source rule's sentence and score with the switches
@@ -696,7 +728,13 @@ func (h *Hub) PreviewTemplate(ctx context.Context, id string, in TemplateInput) 
 			return nil, err
 		}
 	}
-	if err := signin.Validate(in.Rule); err != nil {
+	// A code-only draft previews (200) with its problem and the group to
+	// mark (T2); any other invalid rule is 400.
+	codeOnly := []signin.Path{}
+	var coe *signin.CodeOnlyError
+	if err := signin.Validate(in.Rule); errors.As(err, &coe) {
+		codeOnly = append(codeOnly, slices.Clone(coe.At))
+	} else if err != nil {
 		return nil, statusErr(http.StatusBadRequest, "rule: %v", err)
 	}
 	// Who it affects: the uses of template id (none for a new one),
@@ -716,7 +754,12 @@ func (h *Hub) PreviewTemplate(ctx context.Context, id string, in TemplateInput) 
 	if unusable == nil {
 		unusable = []signin.Path{}
 	}
-	p := &TemplatePreview{Sentence: sentence, Score: score, Affected: []AffectedApp{}, Problem: problem, Unusable: unusable, Groups: groupScores(in.Rule, on)}
+	p := &TemplatePreview{Sentence: sentence, Score: score, Affected: []AffectedApp{}, Problem: problem, Unusable: unusable, Groups: groupScores(in.Rule, on), CodeOnly: codeOnly}
+	if len(codeOnly) > 0 {
+		// Nobody is judged against a rule that can't be saved.
+		p.Problem = coe.Error()
+		return p, nil
+	}
 	if _, exists := si.Templates[id]; id == "" || !exists {
 		return p, nil
 	}

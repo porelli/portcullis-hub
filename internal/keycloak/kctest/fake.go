@@ -172,7 +172,13 @@ type Server struct {
 	Flows       map[string]*Flow       // by id
 	AuthConfigs map[string]*AuthConfig // by id
 	BrowserFlow string                 // the realm's browser flow alias
-	Groups      map[string]*Group      // by id
+	// RealmFields are extra fields of the realm representation (GET
+	// /admin/realms/portcullis), such as the otpPolicy* values.
+	RealmFields map[string]any
+	// RequiredActionConfigs: required action alias → its config (GET
+	// /authentication/required-actions/{alias}/config); absent: 404.
+	RequiredActionConfigs map[string]map[string]string
+	Groups                map[string]*Group // by id
 	// Roles: client uuid → role name → role id.
 	Roles map[string]map[string]string
 	// LDAPGroups are LLDAP group names; the group mapper's sync imports
@@ -259,6 +265,13 @@ func (s *Server) Update(username string, fn func(*User)) {
 	if u, ok := s.Users[username]; ok {
 		fn(u)
 	}
+}
+
+// SetRealm sets RealmFields and RequiredActionConfigs under the lock.
+func (s *Server) SetRealm(fields map[string]any, actionConfigs map[string]map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.RealmFields, s.RequiredActionConfigs = fields, actionConfigs
 }
 
 // SetDown switches the outage simulation.
@@ -557,7 +570,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		to, terr := strconv.ParseInt(q.Get("dateTo"), 10, 64)
 		for _, e := range s.Events {
 			ms, _ := e["time"].(int64)
-			if e["userId"] != q.Get("user") || (ferr == nil && ms < from) || (terr == nil && ms > to) {
+			if (q.Has("user") && e["userId"] != q.Get("user")) || (ferr == nil && ms < from) || (terr == nil && ms > to) {
 				continue
 			}
 			if typ, ok := e["type"].(string); ok && q.Has("type") && !slices.Contains(q["type"], typ) {

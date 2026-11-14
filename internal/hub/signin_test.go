@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -292,7 +293,7 @@ func TestPreviewTemplateStoresNothing(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Error("state.yaml changed")
 	}
-	if v, _ := f.h.SignInView(ctx); len(v.Templates) != 4 {
+	if v, _ := f.h.SignInView(ctx); len(v.Templates) != 5 {
 		t.Errorf("templates = %d", len(v.Templates))
 	}
 }
@@ -349,5 +350,22 @@ func TestInitPersistsSeededSignIn(t *testing.T) {
 	b, _ := os.ReadFile(path)
 	if !strings.Contains(string(b), "sign_in:") || !strings.Contains(string(b), "yubikey-and-certificate") {
 		t.Errorf("state.yaml after Init:\n%s", b)
+	}
+}
+
+// Review M1: a valid rule's inner group with a code-only alternative is
+// scored by its strength, never as invalid.
+func TestGroupScoresIgnoreCodeOnly(t *testing.T) {
+	on := map[signin.Method]bool{}
+	for _, m := range signin.Methods {
+		on[m] = true
+	}
+	rule := signin.Node{Op: "all", Items: []signin.Node{{Leaf: "password"}, siLeaves("any", "totp", "security_key")}}
+	if err := signin.Validate(rule); err != nil {
+		t.Fatal(err)
+	}
+	gs := groupScores(rule, on)
+	if len(gs) != 2 || !slices.Equal(gs[1].Path, signin.Path{1}) || gs[1].Tenths != 15 || gs[0].Tenths != 19 {
+		t.Errorf("group scores = %+v", gs)
 	}
 }
