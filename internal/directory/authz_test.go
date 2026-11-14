@@ -521,10 +521,11 @@ func TestAdminCredentialActionClearsCreatedBy(t *testing.T) {
 	ivy := callerFor(t, e, "ivy")
 	r := func(_ *directory.Result, err error) error { return err }
 	actions := map[string]func(user string) error{
-		"SetPassword":    func(u string) error { return r(e.svc.SetPassword(ctx, asRoot, u, "", true, "")) },
-		"SendInvite":     func(u string) error { return r(e.svc.SendInvite(ctx, asRoot, u, false)) },
-		"RemovePasskeys": func(u string) error { return r(e.svc.RemovePasskeys(ctx, asRoot, u, u, false)) },
-		"RequirePasskey": func(u string) error { return e.svc.RequirePasskey(ctx, asRoot, u) },
+		"SetPassword":          func(u string) error { return r(e.svc.SetPassword(ctx, asRoot, u, "", true, "")) },
+		"SendInvite":           func(u string) error { return r(e.svc.SendInvite(ctx, asRoot, u, false)) },
+		"RemovePasskeys":       func(u string) error { return r(e.svc.RemovePasskeys(ctx, asRoot, u, u, false)) },
+		"RemoveAuthenticators": func(u string) error { return r(e.svc.RemoveAuthenticators(ctx, asRoot, u, u)) },
+		"RequirePasskey":       func(u string) error { return e.svc.RequirePasskey(ctx, asRoot, u) },
 	}
 	for name, act := range actions {
 		user := "n-" + strings.ToLower(name)

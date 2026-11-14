@@ -1975,6 +1975,11 @@ func (s *Service) RemoveAuthenticators(ctx context.Context, c *Caller, username,
 		if confirm != username {
 			return invalid("type the username to confirm")
 		}
+		// An admin's credential action ends a delegate's claim on the
+		// account (as RemovePasskeys: no re-invite by the creator).
+		if err := s.clearCreatedBy(c, id); err != nil {
+			return err
+		}
 		n, err := s.KC.RemoveAuthenticators(ctx, id)
 		res.Count = n
 		detail = strings.TrimSpace(asHelp(perm, fmt.Sprintf("%d removed", n)) + " " + takeover)
