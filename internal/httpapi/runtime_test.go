@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/runtime"
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/hub"
 )
@@ -30,10 +33,10 @@ func (e refusingEngine) ListContainers(ctx context.Context, f docker.Filters) ([
 }
 
 func TestRuntimeRoute(t *testing.T) {
-	g := docker.NewGuard(docker.RuntimeDocker)
+	g := docker.NewGuard(runtime.KindDocker)
 	e := newInstEnvOpts(t, t.TempDir(), instEnvOpts{
-		cfg:    func(c *hub.Config) { c.Runtime, c.Guard = docker.RuntimeDocker, g },
-		engine: func(f *fakeEngine) hub.Engine { return refusingEngine{fakeEngine: f, g: g} },
+		cfg:    func(c *hub.Config) { c.Runtime, c.Guard = runtime.KindDocker, g },
+		engine: func(f *fakeEngine) dockerrt.Engine { return refusingEngine{fakeEngine: f, g: g} },
 	})
 	code, body := e.do(t, "root", "GET", "/api/runtime", "")
 	if code != 200 {

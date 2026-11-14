@@ -448,7 +448,7 @@ func TestReplaceDomainToken(t *testing.T) {
 func TestKnownDomainsSurviveRestart(t *testing.T) {
 	f, _, _ := newDomainsFixture(t)
 	f.h.EnrollDomain(context.Background(), directory.Human("alice"), "team-b.example.net", "cloudflare", creds())
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

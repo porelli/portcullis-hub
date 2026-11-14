@@ -432,7 +432,7 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	for _, r := range gone {
 		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor.User, r.reason), nil)
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		res.Warnings = append(res.Warnings, "Docker is not available: the volumes of "+projectName(id)+" were not removed")
 	} else {
 		vols, err := h.projectVolumes(ctx, id)
@@ -440,7 +440,7 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 			return fmt.Errorf("listing the volumes: %w", err)
 		}
 		for _, k := range sortedVolumeKeys(vols) {
-			if err := h.engine.RemoveVolume(ctx, vols[k].Name); err != nil && !docker.IsNotFound(err) {
+			if err := h.rt.RemoveVolume(ctx, vols[k].Name); err != nil && !docker.IsNotFound(err) {
 				return fmt.Errorf("removing volume %s: %w", vols[k].Name, err)
 			}
 		}

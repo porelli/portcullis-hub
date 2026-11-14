@@ -8,7 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/idmap"
 )
 
@@ -26,16 +27,16 @@ const DefaultUnprivilegedPortStart = 1024
 // container shares the operator's default namespace) and the host's
 // unprivileged port start. Maps and the port are null under Docker.
 type RuntimeView struct {
-	Runtime               docker.Runtime `json:"runtime"`
-	Verified              bool           `json:"verified"`
-	Engine                string         `json:"engine"`
-	EngineVersion         string         `json:"engine_version"`
-	Mismatch              string         `json:"mismatch"`
-	Rootless              bool           `json:"rootless"`
-	UIDMap                idmap.Map      `json:"uid_map"`
-	GIDMap                idmap.Map      `json:"gid_map"`
-	UnprivilegedPortStart *int           `json:"unprivileged_port_start"`
-	SELinux               bool           `json:"selinux"`
+	Runtime               runtime.Kind `json:"runtime"`
+	Verified              bool         `json:"verified"`
+	Engine                string       `json:"engine"`
+	EngineVersion         string       `json:"engine_version"`
+	Mismatch              string       `json:"mismatch"`
+	Rootless              bool         `json:"rootless"`
+	UIDMap                idmap.Map    `json:"uid_map"`
+	GIDMap                idmap.Map    `json:"gid_map"`
+	UnprivilegedPortStart *int         `json:"unprivileged_port_start"`
+	SELinux               bool         `json:"selinux"`
 }
 
 // readProcIDMaps reads the Hub's own /proc/self/uid_map and gid_map.
@@ -64,13 +65,14 @@ func (h *Hub) Runtime(ctx context.Context) RuntimeView {
 		i := g.Info()
 		v.Verified, v.Engine, v.EngineVersion, v.Mismatch = i.Verified, i.Engine, i.Version, i.Mismatch
 	}
-	if v.Verified && h.engine != nil {
-		if opts, err := h.engine.SecurityOptions(ctx); err == nil {
+	if v.Verified && !h.noEngine() {
+		if info, err := h.rt.Info(ctx); err == nil {
+			opts := info.SecurityOptions
 			v.Rootless = securityOption(opts, "rootless")
 			v.SELinux = securityOption(opts, "selinux")
 		}
 	}
-	if h.cfg.Runtime == docker.RuntimePodman {
+	if h.cfg.Runtime == runtime.KindPodman {
 		read := h.readIDMaps
 		if read == nil {
 			read = readProcIDMaps
@@ -143,4 +145,25 @@ func (h *Hub) afterEngineVerified(what string, fn func()) {
 		}
 		fn()
 	})
+}
+
+// runtimeNetworks are the runtime's networks with their subnets (Info;
+// the VPN wiring's overlap guard, contract §3.3).
+func (h *Hub) runtimeNetworks(ctx context.Context) ([]runtime.Network, error) {
+	info, err := h.rt.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.Networks, nil
+}
+
+// noEngine: there is no runtime to read or act on (nil: unit tests), or
+// its engine isn't there (the docker backend over a compose runner alone:
+// unit tests). Production always has both.
+func (h *Hub) noEngine() bool {
+	if h.rt == nil {
+		return true
+	}
+	a, ok := h.rt.(interface{ EngineAbsent() bool })
+	return ok && a.EngineAbsent()
 }

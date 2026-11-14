@@ -282,7 +282,7 @@ func (h *Hub) AllVPNDevices(ctx context.Context, user string) []HostDeviceView {
 // The inspects go through the guarded engine.
 func (h *Hub) vpnGatewayPrivileged(ctx context.Context) map[string][]string {
 	out := map[string][]string{}
-	if h.engine == nil {
+	if h.noEngine() {
 		return out
 	}
 	h.mu.RLock()
@@ -309,7 +309,7 @@ func (h *Hub) vpnGatewayPrivileged(ctx context.Context) map[string][]string {
 			if ns, ok := routes.NetNS(svc); !ok || ns != ing {
 				continue
 			}
-			info, err := h.engine.InspectContainer(ctx, c.ID)
+			info, err := h.rt.Inspect(ctx, c.ID)
 			if err != nil {
 				continue
 			}

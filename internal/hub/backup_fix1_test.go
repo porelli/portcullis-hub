@@ -131,7 +131,7 @@ func TestInterruptedRestoreRolledBack(t *testing.T) {
 
 	// The Hub restarts: the restore is rolled back.
 	f.h.Wait()
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

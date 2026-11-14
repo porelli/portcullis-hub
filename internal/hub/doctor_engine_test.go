@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"gopkg.in/yaml.v3"
 
 	"github.com/portcullis/hub/internal/docker"
@@ -61,7 +63,7 @@ func TestOverrideSELinuxRelabel(t *testing.T) {
 	if f.h.Template("gate") == nil {
 		t.Fatal("gate fixture not loaded (see the log)")
 	}
-	render := func(rt docker.Runtime, selinux bool) string {
+	render := func(rt runtime.Kind, selinux bool) string {
 		f.h.cfg.Runtime = rt
 		f.h.selinuxMu.Lock()
 		f.h.selinuxKnown, f.h.selinuxOn = true, selinux
@@ -74,14 +76,14 @@ func TestOverrideSELinuxRelabel(t *testing.T) {
 		}
 		return out
 	}
-	plain := render(docker.RuntimeDocker, false)
-	if got := render(docker.RuntimeDocker, true); got != plain {
+	plain := render(runtime.KindDocker, false)
+	if got := render(runtime.KindDocker, true); got != plain {
 		t.Errorf("docker on SELinux changed the override:\n%s", got)
 	}
-	if got := render(docker.RuntimePodman, false); got != plain {
+	if got := render(runtime.KindPodman, false); got != plain {
 		t.Errorf("podman without SELinux changed the override:\n%s", got)
 	}
-	got := render(docker.RuntimePodman, true)
+	got := render(runtime.KindPodman, true)
 	for _, want := range []string{`source: "./templates/x/gate.sh"`, `target: "/gate.sh"`, "selinux: z"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("relabelled override lacks %q:\n%s", want, got)
@@ -101,8 +103,8 @@ func TestOverrideSELinuxRelabel(t *testing.T) {
 // then cached; never before.
 func TestEngineSELinuxCached(t *testing.T) {
 	f := newFixture(t)
-	f.h.cfg.Runtime = docker.RuntimePodman
-	g := docker.NewGuard(docker.RuntimePodman)
+	f.h.cfg.Runtime = runtime.KindPodman
+	g := docker.NewGuard(runtime.KindPodman)
 	f.h.cfg.Guard = g
 	f.engine.fx().secOpts = []string{"name=rootless", "name=selinux"}
 	if f.h.engineSELinux(context.Background()) || f.h.selinuxCached() {
@@ -188,7 +190,7 @@ func TestCollectRuntimeLimits(t *testing.T) {
 // (503), never rendered without the relabels.
 func TestPrepareUpRefusesUnreadableSELinux(t *testing.T) {
 	f := newFixture(t)
-	f.h.cfg.Runtime, f.h.cfg.Guard = docker.RuntimePodman, verifiedGuard(t, docker.RuntimePodman)
+	f.h.cfg.Runtime, f.h.cfg.Guard = runtime.KindPodman, verifiedGuard(t, runtime.KindPodman)
 	f.engine.fx().secErr = errors.New("info denied")
 	if err := f.h.Enable("grafana"); statusOf(err) != 503 || !strings.Contains(err.Error(), "security options") {
 		t.Fatalf("enable = %v (%d)", err, statusOf(err))

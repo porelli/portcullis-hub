@@ -31,10 +31,11 @@ func (h *Hub) readEngineSELinux(ctx context.Context) (bool, error) {
 	h.selinuxMu.Lock()
 	known, on := h.selinuxKnown, h.selinuxOn
 	h.selinuxMu.Unlock()
-	if known || h.engine == nil || !h.engineVerifiedNow() || h.cfg.Guard == nil {
+	if known || h.noEngine() || !h.engineVerifiedNow() || h.cfg.Guard == nil {
 		return on, nil
 	}
-	opts, err := h.engine.SecurityOptions(ctx)
+	info, err := h.rt.Info(ctx)
+	opts := info.SecurityOptions
 	if err != nil {
 		log.Printf("engine: can't read the security options: %v", err)
 		return false, err

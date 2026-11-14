@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"golang.org/x/mod/semver"
 
 	"github.com/portcullis/hub/internal/docker"
@@ -99,13 +101,8 @@ func (t *tail) String() string {
 	return s
 }
 
-// Project identifies one compose project invocation.
-type Project struct {
-	Name       string   // -p
-	Files      []string // -f (in order)
-	ProjectDir string   // --project-directory (HOST path: the daemon resolves bind mounts there)
-	EnvFile    string   // --env-file
-}
+// Project identifies one compose project invocation (runtime.ComposeFiles).
+type Project = runtime.ComposeFiles
 
 // Runner brings compose projects up and down. It is an interface so the
 // Hub's lifecycle/locking logic can be tested without Docker.

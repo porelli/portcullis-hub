@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
@@ -115,7 +117,7 @@ type toolEnv struct {
 	*mcpTestEnv
 }
 
-func newToolEnv(t *testing.T, extra map[string][2]string, wrap func(hub.Engine) hub.Engine) *toolEnv {
+func newToolEnv(t *testing.T, extra map[string][2]string, wrap func(dockerrt.Engine) dockerrt.Engine) *toolEnv {
 	t.Helper()
 	return newToolEnvWith(t, mcpEnvOpts{extra: extra, wrap: wrap})
 }
@@ -825,7 +827,7 @@ func TestDeleteInstanceTool(t *testing.T) {
 
 // blockingEngine holds ListVolumes while armed (a backup mid-way).
 type blockingEngine struct {
-	hub.Engine
+	dockerrt.Engine
 	mu      sync.Mutex
 	gate    chan struct{}
 	reached chan struct{}
@@ -849,7 +851,7 @@ func (b *blockingEngine) ListVolumes(ctx context.Context, f docker.Filters) ([]d
 // is an isError result with the 409 reason, never a protocol error.
 func TestBusyIsToolError(t *testing.T) {
 	var be *blockingEngine
-	e := newToolEnv(t, nil, func(eng hub.Engine) hub.Engine { be = &blockingEngine{Engine: eng}; return be })
+	e := newToolEnv(t, nil, func(eng dockerrt.Engine) dockerrt.Engine { be = &blockingEngine{Engine: eng}; return be })
 	be.mu.Lock()
 	be.gate, be.reached = make(chan struct{}), make(chan struct{}, 1)
 	be.mu.Unlock()

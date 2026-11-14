@@ -189,7 +189,7 @@ func newInstanceFixtureCfg(t *testing.T, seed func(*state.AppState), idp IdP, ex
 	if cfg != nil {
 		cfg(root, &c)
 	}
-	h, err := New(c, f.runner, f.engine, idp)
+	h, err := newTestHub(c, f.runner, f.engine, idp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +718,7 @@ func TestSiblingsShareSupportFiles(t *testing.T) {
 	if rec := readFile(t, filepath.Join(f.data, "template-sync.json")); !strings.Contains(rec, `"grafana"`) {
 		t.Errorf("sync record = %s", rec)
 	}
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

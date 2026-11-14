@@ -48,7 +48,7 @@ func (h *Hub) loadRenderedWith(ctx context.Context, t *templates.Template, profi
 		cli.WithName(p.Name),
 		cli.WithWorkingDirectory(h.cfg.ProjectDir),
 		// compose's environment wins over the env file, as in the CLI.
-		cli.WithEnv(h.compose.Env()),
+		cli.WithEnv(h.rt.Env()),
 		cli.WithProfiles(profiles),
 		cli.WithConsistency(false),
 		cli.WithResolvedPaths(false),
@@ -256,10 +256,11 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	if len(mounters) == 0 {
 		return nil
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		return statusErr(http.StatusServiceUnavailable, "%s was not started: per-person passwords need the Docker Engine API", t.ID)
 	}
-	api, err := h.engine.APIVersion(ctx)
+	info, err := h.rt.Info(ctx)
+	api := info.APIVersion
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "%s was not started: can't read the Docker Engine API version: %v", t.ID, err)
 	}

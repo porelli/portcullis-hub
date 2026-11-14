@@ -393,11 +393,11 @@ func TestConcurrentLifecycle(t *testing.T) {
 func TestNewCorruptState(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "state.yaml"), "enabled: [oops\n")
-	if _, err := New(Config{ProjectDir: dir, DataDir: dir}, newFakeRunner(), nil, nil); err == nil {
+	if _, err := newTestHub(Config{ProjectDir: dir, DataDir: dir}, newFakeRunner(), nil, nil); err == nil {
 		t.Fatal("corrupt state accepted")
 	}
 	writeFile(t, filepath.Join(dir, "state.yaml"), "")
-	if _, err := New(Config{ProjectDir: dir, DataDir: dir}, newFakeRunner(), nil, nil); err == nil {
+	if _, err := newTestHub(Config{ProjectDir: dir, DataDir: dir}, newFakeRunner(), nil, nil); err == nil {
 		t.Fatal("empty state accepted")
 	}
 }

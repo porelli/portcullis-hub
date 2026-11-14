@@ -851,11 +851,11 @@ func TestAppFilesDirsTogether(t *testing.T) {
 	data := t.TempDir()
 	for _, c := range []Config{{AppFilesDir: "/x"}, {AppFilesHostDir: "/y"}} {
 		c.ProjectDir, c.DataDir = t.TempDir(), data
-		if _, err := New(c, newFakeRunner(), &fakeEngine{}, nil); err == nil || !strings.Contains(err.Error(), "HUB_APPFILES_HOST_DIR") {
+		if _, err := newTestHub(c, newFakeRunner(), &fakeEngine{}, nil); err == nil || !strings.Contains(err.Error(), "HUB_APPFILES_HOST_DIR") {
 			t.Errorf("%+v: err = %v", c, err)
 		}
 	}
-	h, err := New(Config{ProjectDir: "/p", ProjectHostDir: "/hp", DataDir: data}, newFakeRunner(), &fakeEngine{}, nil)
+	h, err := newTestHub(Config{ProjectDir: "/p", ProjectHostDir: "/hp", DataDir: data}, newFakeRunner(), &fakeEngine{}, nil)
 	if err != nil || h.cfg.AppFilesDir != "/p/appfiles" || h.cfg.AppFilesHostDir != "/hp/appfiles" {
 		t.Errorf("defaults = %q %q (%v)", h.cfg.AppFilesDir, h.cfg.AppFilesHostDir, err)
 	}

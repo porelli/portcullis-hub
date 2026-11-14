@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -778,25 +779,25 @@ func (h *Hub) folderTakeDown(ctx context.Context, live *templates.Template, p *f
 // project name, else SIGKILL to every container of the project (an
 // error then: a restart policy may bring them back).
 func (h *Hub) forceDown(ctx context.Context, live *templates.Template) error {
-	err := h.compose.Down(ctx, h.project(live))
+	err := h.rt.Down(ctx, h.runtimeProject(live))
 	if err == nil {
 		return nil
 	}
 	log.Printf("shared folders: %s: compose down failed (%v): down by project name", live.ID, err)
-	if err2 := h.compose.DownByName(ctx, projectName(live.ID)); err2 == nil {
+	if err2 := h.rt.DownByName(ctx, projectName(live.ID)); err2 == nil {
 		return nil
 	} else {
 		err = errors.Join(err, err2)
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		return err
 	}
-	cs, lerr := h.engine.ListContainers(ctx, docker.Filters{"label": {docker.LabelProject + "=" + projectName(live.ID)}})
+	cs, lerr := h.rt.List(ctx, runtime.Filter{Instance: live.ID})
 	if lerr != nil {
 		return errors.Join(err, lerr)
 	}
 	for _, c := range cs {
-		if kerr := h.engine.ContainerKill(ctx, c.ID, "KILL"); kerr != nil {
+		if kerr := h.rt.Signal(ctx, c.ID, "KILL"); kerr != nil {
 			err = errors.Join(err, kerr)
 		}
 	}

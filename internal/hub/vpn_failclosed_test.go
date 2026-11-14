@@ -306,7 +306,7 @@ func TestVPNRenderKeysPersistAndStartCheck(t *testing.T) {
 	v.engine.containers = append(v.engine.containers, c)
 	v.engine.mu.Unlock()
 	n = ups()
-	v.h.vpnStartCheck(ctx, v.h.engine)
+	v.h.vpnStartCheck(ctx, v.h.rt)
 	v.h.Wait()
 	if ups() == n {
 		t.Fatal("the start check didn't restart an instance with wider running labels")

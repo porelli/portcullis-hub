@@ -982,7 +982,7 @@ func readSnap(t *testing.T, f *fixture, rel string) []byte {
 // reopen starts a new Hub on f's data directory (a Hub restart).
 func reopen(t *testing.T, f *fixture) *Hub {
 	t.Helper()
-	h, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, f.idp)
+	h, err := newTestHub(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

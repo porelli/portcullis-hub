@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/idmap"
 	"github.com/portcullis/hub/internal/templates"
@@ -20,11 +23,11 @@ type fakeVersions []docker.Component
 func (f fakeVersions) Components(context.Context) ([]docker.Component, error) { return f, nil }
 
 // verifiedGuard is a guard for rt verified against a fake engine of rt.
-func verifiedGuard(t *testing.T, rt docker.Runtime) *docker.Guard {
+func verifiedGuard(t *testing.T, rt runtime.Kind) *docker.Guard {
 	t.Helper()
 	g := docker.NewGuard(rt)
 	name, ver := "Engine", "29.0.0"
-	if rt == docker.RuntimePodman {
+	if rt == runtime.KindPodman {
 		name, ver = "Podman Engine", "5.4.2"
 	}
 	if err := g.Verify(context.Background(), fakeVersions{{Name: name, Version: ver}}); err != nil {
@@ -36,7 +39,7 @@ func verifiedGuard(t *testing.T, rt docker.Runtime) *docker.Guard {
 func TestRuntimeView(t *testing.T) {
 	// Docker: maps and port null, security options read once verified.
 	f := newFixture(t)
-	f.h.cfg.Runtime, f.h.cfg.Guard = docker.RuntimeDocker, verifiedGuard(t, docker.RuntimeDocker)
+	f.h.cfg.Runtime, f.h.cfg.Guard = runtime.KindDocker, verifiedGuard(t, runtime.KindDocker)
 	f.engine.fx().secOpts = []string{"name=seccomp,profile=builtin", "name=selinux"}
 	f.h.readIDMaps = func() (idmap.Map, idmap.Map, error) { t.Fatal("id maps read under docker"); return nil, nil, nil }
 	v := f.h.Runtime(context.Background())
@@ -47,7 +50,7 @@ func TestRuntimeView(t *testing.T) {
 
 	// Podman: the Hub's maps and core's port start.
 	f = newFixture(t)
-	f.h.cfg.Runtime, f.h.cfg.Guard = docker.RuntimePodman, verifiedGuard(t, docker.RuntimePodman)
+	f.h.cfg.Runtime, f.h.cfg.Guard = runtime.KindPodman, verifiedGuard(t, runtime.KindPodman)
 	f.engine.fx().secOpts = []string{"name=rootless", "name=seccomp"}
 	writeFile(t, filepath.Join(f.project, ".env"), "PORTCULLIS_UNPRIVILEGED_PORT_START=80\n")
 	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
@@ -79,7 +82,7 @@ func TestRuntimeView(t *testing.T) {
 
 	// Unverified (or no guard): verified false, no Info call.
 	f = newFixture(t)
-	f.h.cfg.Runtime, f.h.cfg.Guard = docker.RuntimePodman, docker.NewGuard(docker.RuntimePodman)
+	f.h.cfg.Runtime, f.h.cfg.Guard = runtime.KindPodman, docker.NewGuard(runtime.KindPodman)
 	f.engine.fx().secErr = errors.New("must not be called")
 	f.h.readIDMaps = func() (idmap.Map, idmap.Map, error) { return nil, nil, errors.New("no proc") }
 	v = f.h.Runtime(context.Background())
@@ -143,7 +146,7 @@ func TestWatchEventsIgnoresPodmanActions(t *testing.T) {
 	}
 	run := func(evs ...docker.Event) bool {
 		drain()
-		f.h.engine = &eventEngine{fakeEngine: f.engine, events: evs}
+		f.h.rt = dockerrt.New(f.runner, &eventEngine{fakeEngine: f.engine, events: evs}, dockerrt.Options{HelperImage: HelperImage})
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		f.h.watchEvents(ctx)
@@ -167,7 +170,7 @@ func TestWatchEventsIgnoresPodmanActions(t *testing.T) {
 // on helpers created before the start.
 func TestInitWaitsForGuard(t *testing.T) {
 	f := newFixture(t)
-	g := docker.NewGuard(docker.RuntimeDocker)
+	g := docker.NewGuard(runtime.KindDocker)
 	f.h.cfg.Guard = g
 	old := docker.Container{ID: "old", Labels: map[string]string{docker.LabelHelper: "1"}, Created: time.Now().Add(-time.Hour).Unix()}
 	fresh := docker.Container{ID: "fresh", Labels: map[string]string{docker.LabelHelper: "1"}, Created: time.Now().Add(time.Hour).Unix()}

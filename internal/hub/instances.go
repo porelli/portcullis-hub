@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -360,13 +362,13 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	// A leftover project of that name (e.g. a deleted instance whose
 	// containers survived) is someone else's: refuse. Docker first, never
 	// under mu.
-	if h.engine != nil {
-		cs, err := h.engine.ListContainers(context.Background(), docker.ProjectFilter(projectName(id)))
+	if !h.noEngine() {
+		cs, err := h.rt.List(context.Background(), runtime.Filter{Instance: id})
 		if err != nil {
 			return nil, statusErr(503, "cannot check for an existing compose project %s: %v", projectName(id), err)
 		}
 		for _, c := range cs {
-			if c.Project() == projectName(id) {
+			if c.Project == projectName(id) {
 				return nil, statusErr(409, "compose project %s already exists (stop and remove it first)", projectName(id))
 			}
 		}
@@ -375,14 +377,14 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	// or anything else's (§11.1). The default instance's volume names are
 	// its own (it exists implicitly, §11.1: a disabled one keeps its
 	// data), so its first create doesn't check them.
-	if h.engine != nil && !def {
+	if !h.noEngine() && !def {
 		h.mu.RLock()
 		var want map[string]string
 		if t := h.catalogLocked(templateID); t != nil {
 			want = t.NamesFor(id).Volumes
 		}
 		h.mu.RUnlock()
-		vs, err := h.engine.ListVolumes(context.Background(), nil)
+		vs, err := h.rt.ListVolumes(context.Background(), runtime.Filter{})
 		if err != nil {
 			return nil, statusErr(503, "cannot check for existing volumes: %v", err)
 		}

@@ -7,6 +7,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/client"
 )
@@ -14,25 +16,11 @@ import (
 // maxExecOutput bounds captured exec output.
 const maxExecOutput = 4 << 20
 
-// ExecResult is the outcome of Exec.
-type ExecResult struct {
-	Output    []byte
-	ExitCode  int // -1 if unknown (timeout / still running)
-	TimedOut  bool
-	Truncated bool
-	// ExecID names the exec instance (ExecRunning: a timed-out process
-	// may still run — Docker can't kill it).
-	ExecID string
-}
+// ExecResult is runtime.ExecResult.
+type ExecResult = runtime.ExecResult
 
-// ExecInput is one ExecStdin run: argv (never through a shell), the user
-// to run as ("" = the container's), the stdin bytes and the timeout.
-type ExecInput struct {
-	Cmd     []string
-	User    string
-	Stdin   []byte
-	Timeout time.Duration
-}
+// ExecInput is runtime.ExecInput.
+type ExecInput = runtime.ExecInput
 
 // Exec runs cmd in container id (no TTY, no stdin) and returns combined
 // stdout+stderr. The call is bounded by timeout and ctx; on expiry the
@@ -55,17 +43,8 @@ func (c *Client) ExecStdin(ctx context.Context, id string, in ExecInput) (*ExecR
 	return c.exec(ctx, id, opts, stdin, in.Timeout)
 }
 
-// ExecSplitResult is the outcome of ExecStdinSplit: stdout and stderr
-// apart, each capped (MaxRunStdout / MaxRunStderr, the first bytes kept).
-type ExecSplitResult struct {
-	Stdout          []byte
-	Stderr          []byte
-	StdoutTruncated bool
-	StderrTruncated bool
-	ExitCode        int // -1 if unknown (timeout / still running)
-	TimedOut        bool
-	ExecID          string
-}
+// ExecSplitResult is runtime.ExecSplitResult.
+type ExecSplitResult = runtime.ExecSplitResult
 
 // ExecStdinSplit is ExecStdin with stdout and stderr demultiplexed into
 // two capped buffers (an AI hook, contract §6 / §15.5: stdout may carry a

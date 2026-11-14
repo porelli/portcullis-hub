@@ -241,7 +241,7 @@ func TestParseBindRoots(t *testing.T) {
 			t.Errorf("%q accepted", bad)
 		}
 	}
-	if _, err := New(Config{DataDir: t.TempDir(), OverrideBindRoots: "/"}, nil, nil, nil); err == nil {
+	if _, err := newTestHub(Config{DataDir: t.TempDir(), OverrideBindRoots: "/"}, nil, nil, nil); err == nil {
 		t.Error("New accepted / as a bind root")
 	}
 }

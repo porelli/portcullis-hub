@@ -822,7 +822,7 @@ func TestComposeEnvNotTheHubs(t *testing.T) {
 		t.Errorf("the override didn't apply: %v", env)
 	}
 	// The runner's environment is the allowlist and nothing else.
-	for _, kv := range f.h.compose.Env() {
+	for _, kv := range f.h.rt.Env() {
 		if name, _, _ := strings.Cut(kv, "="); !slices.Contains(compose.PassedEnv, name) && name != "COMPOSE_IGNORE_ORPHANS" && name != "DOCKER_HOST" {
 			t.Errorf("compose gets %s", name)
 		}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/client"
@@ -19,13 +21,8 @@ const (
 	LabelHelper = "io.portcullis.hub.helper"
 )
 
-// Volume is the subset of a Docker volume the Hub uses.
-type Volume struct {
-	Name    string
-	Driver  string
-	Labels  map[string]string
-	Options map[string]string
-}
+// Volume is runtime.Volume.
+type Volume = runtime.Volume
 
 // ListVolumes lists the volumes matching f (e.g. a label filter).
 func (c *Client) ListVolumes(ctx context.Context, f Filters) ([]Volume, error) {

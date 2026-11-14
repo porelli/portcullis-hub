@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/state"
@@ -51,7 +53,7 @@ func dockerGuardOrSkip(t *testing.T) (*docker.Client, *docker.Guard) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		skip("no docker CLI: %v", err)
 	}
-	g := docker.NewGuard(docker.RuntimeDocker)
+	g := docker.NewGuard(runtime.KindDocker)
 	c, err := docker.New(os.Getenv("DOCKER_HOST"), g)
 	if err != nil {
 		skip("docker: %v", err)
@@ -145,7 +147,7 @@ func dockerHub(t *testing.T, c *docker.Client) *Hub {
 	if err := state.New().Save(filepath.Join(data, "state.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	h, err := New(Config{ProjectDir: root, DataDir: data}, newFakeRunner(), c, nil)
+	h, err := newTestHub(Config{ProjectDir: root, DataDir: data}, newFakeRunner(), c, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +415,7 @@ func TestDockerSelfContainerID(t *testing.T) {
 		"--label", "com.docker.compose.service=hub", HelperImage, "sleep", "60")
 	t.Cleanup(func() { exec.Command("docker", "rm", "-f", id).Run() })
 	mi := dockerCLI(t, "exec", id, "cat", "/proc/self/mountinfo")
-	got, err := selfContainerID([]byte(mi), docker.RuntimeDocker)
+	got, err := selfContainerID([]byte(mi), runtime.KindDocker)
 	if err != nil || got != id {
 		t.Fatalf("selfContainerID = %q, %v; want %q\n%s", got, err, id, mi)
 	}

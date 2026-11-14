@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/credentials"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -561,7 +563,7 @@ func (h *Hub) applyRevocationKeys(ctx context.Context, id string, keys []string,
 		}
 		return
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		return // no Docker: nothing runs
 	}
 	services := map[string]bool{}
@@ -597,9 +599,9 @@ func (h *Hub) applyRevocationKeys(ctx context.Context, id string, keys []string,
 // liveContainer: a container of service may still serve its accounts —
 // running, paused or restarting (a revocation must not count those as
 // stopped: they go to the hook, which can't exec in them, then the kill).
-func liveContainer(cs []docker.Container, service string) bool {
+func liveContainer(cs []runtime.Unit, service string) bool {
 	for _, c := range cs {
-		if c.Service() == service && (c.State == "running" || c.State == "paused" || c.State == "restarting") {
+		if c.Service == service && (c.State == "running" || c.State == "paused" || c.State == "restarting") {
 			return true
 		}
 	}
@@ -691,7 +693,7 @@ func (h *Hub) previousHookDone(ctx context.Context, id string) bool {
 	if prev.execID == "" {
 		return true
 	}
-	running, err := h.engine.ExecRunning(ctx, prev.execID)
+	running, err := h.rt.ExecRunning(ctx, prev.execID)
 	if (err == nil && !running) || docker.IsNotFound(err) {
 		h.deliveryMu.Lock()
 		if h.hookExecs[id] == prev {
@@ -736,19 +738,19 @@ func (h *Hub) revocationKillByName(id string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	name := projectName(id)
-	var cs []docker.Container
-	if h.engine != nil {
+	var cs []runtime.Unit
+	if !h.noEngine() {
 		var lerr error
-		cs, lerr = h.engine.ListContainers(ctx, docker.Filters{"label": {docker.LabelProject + "=" + name}})
+		cs, lerr = h.rt.List(ctx, runtime.Filter{Instance: id})
 		if lerr == nil && len(cs) == 0 {
 			return false
 		}
 	}
 	log.Printf("credentials: %s: a revocation on an instance without a template: stopping project %s", id, name)
-	err := h.compose.DownByName(ctx, name)
-	if err != nil && h.engine != nil {
+	err := h.rt.DownByName(ctx, name)
+	if err != nil && !h.noEngine() {
 		for _, c := range cs {
-			if kerr := h.engine.ContainerKill(ctx, c.ID, "KILL"); kerr != nil {
+			if kerr := h.rt.Signal(ctx, c.ID, "KILL"); kerr != nil {
 				err = errors.Join(err, kerr)
 			}
 		}

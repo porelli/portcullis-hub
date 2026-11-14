@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/portcullis/hub/internal/runtime"
 )
 
 // fakeVersion answers Components from a list of answers, then the last.
@@ -48,7 +50,7 @@ var (
 // verifiedGuard is a docker guard verified against a fake engine.
 func verifiedGuard(t *testing.T) *Guard {
 	t.Helper()
-	g := NewGuard(RuntimeDocker)
+	g := NewGuard(runtime.KindDocker)
 	if err := g.Verify(context.Background(), &fakeVersion{answers: []func() ([]Component, error){answer(dockerEngine)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -71,11 +73,11 @@ func TestParseRuntime(t *testing.T) {
 func TestRuntimeOf(t *testing.T) {
 	for _, tc := range []struct {
 		cs   []Component
-		want Runtime
+		want runtime.Kind
 	}{
-		{[]Component{{Name: "Podman Engine"}}, RuntimePodman},
-		{[]Component{{Name: "Engine"}, {Name: "containerd"}}, RuntimeDocker},
-		{[]Component{{Name: "Engine"}, {Name: "Podman Engine"}}, RuntimePodman},
+		{[]Component{{Name: "Podman Engine"}}, runtime.KindPodman},
+		{[]Component{{Name: "Engine"}, {Name: "containerd"}}, runtime.KindDocker},
+		{[]Component{{Name: "Engine"}, {Name: "Podman Engine"}}, runtime.KindPodman},
 		{[]Component{}, ""},
 		{nil, ""},
 		{[]Component{{Name: "containerd"}}, ""},
@@ -87,7 +89,7 @@ func TestRuntimeOf(t *testing.T) {
 }
 
 func TestGuardRetriesUntilVerified(t *testing.T) {
-	g := NewGuard(RuntimeDocker)
+	g := NewGuard(runtime.KindDocker)
 	if err := g.Err(); !errors.Is(err, ErrEngineRefused) {
 		t.Fatalf("new guard Err = %v", err)
 	}
@@ -120,13 +122,13 @@ func TestGuardRetriesUntilVerified(t *testing.T) {
 	default:
 		t.Fatal("Verified not closed")
 	}
-	if i := g.Info(); !i.Verified || i.Engine != "Engine" || i.Version != "29.0.0" || i.Runtime != RuntimeDocker || i.Mismatch != "" {
+	if i := g.Info(); !i.Verified || i.Engine != "Engine" || i.Version != "29.0.0" || i.Runtime != runtime.KindDocker || i.Mismatch != "" {
 		t.Errorf("Info = %+v", i)
 	}
 }
 
 func TestGuardRunStopsWhenVerified(t *testing.T) {
-	g := NewGuard(RuntimePodman)
+	g := NewGuard(runtime.KindPodman)
 	f := &fakeVersion{answers: []func() ([]Component, error){fail("no proxy yet"), answer(podmanEngine)}}
 	done := make(chan struct{})
 	go func() { g.Run(context.Background(), f, time.Millisecond); close(done) }()
@@ -141,7 +143,7 @@ func TestGuardRunStopsWhenVerified(t *testing.T) {
 }
 
 func TestGuardMismatchIsPermanent(t *testing.T) {
-	g := NewGuard(RuntimeDocker)
+	g := NewGuard(runtime.KindDocker)
 	f := &fakeVersion{answers: []func() ([]Component, error){answer(podmanEngine), answer(dockerEngine)}}
 	err := g.Verify(context.Background(), f)
 	if !errors.Is(err, ErrEngineRefused) || !strings.Contains(err.Error(), "HUB_CONTAINER_RUNTIME=docker but the engine is Podman Engine") {
@@ -167,11 +169,11 @@ func TestGuardMismatchIsPermanent(t *testing.T) {
 		t.Errorf("Info = %+v", i)
 	}
 	// Neither runtime is a mismatch too.
-	g2 := NewGuard(RuntimePodman)
+	g2 := NewGuard(runtime.KindPodman)
 	if err := g2.Verify(context.Background(), &fakeVersion{answers: []func() ([]Component, error){answer(Component{Name: "containerd"})}}); err == nil || g2.Info().Mismatch == "" {
 		t.Errorf("no engine component: %v", err)
 	}
-	g3 := NewGuard(RuntimePodman)
+	g3 := NewGuard(runtime.KindPodman)
 	if err := g3.Verify(context.Background(), &fakeVersion{answers: []func() ([]Component, error){answer(dockerEngine)}}); err == nil || !strings.Contains(err.Error(), "HUB_CONTAINER_RUNTIME=podman but the engine is Docker Engine") {
 		t.Errorf("docker answer to podman = %v", err)
 	}
@@ -195,7 +197,7 @@ func TestGuardedTransport(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	g := NewGuard(RuntimeDocker)
+	g := NewGuard(runtime.KindDocker)
 	c, err := New("tcp://"+srv.Listener.Addr().String(), g)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +266,7 @@ func TestNewRefusesNilGuard(t *testing.T) {
 // guarded request still wraps ErrEngineRefused, and Message is the
 // guard's own refusal.
 func TestGuardRefusalSurvivesMissingSocket(t *testing.T) {
-	g := NewGuard(RuntimeDocker)
+	g := NewGuard(runtime.KindDocker)
 	dir, err := os.MkdirTemp("/tmp", "pp-sock")
 	if err != nil {
 		t.Fatal(err)

@@ -18,6 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -73,7 +76,7 @@ func fixerImageFromEnv(getenv func(string) string) (string, error) {
 // runtimeFromEnv is HUB_CONTAINER_RUNTIME (contract §6; core's compose sets
 // it from CONTAINER_RUNTIME): docker or podman, required — unset, empty or
 // anything else refuses the start. There is no default.
-func runtimeFromEnv(getenv func(string) string) (docker.Runtime, error) {
+func runtimeFromEnv(getenv func(string) string) (runtime.Kind, error) {
 	rt, err := docker.ParseRuntime(getenv("HUB_CONTAINER_RUNTIME"))
 	if err != nil {
 		return "", fmt.Errorf("HUB_CONTAINER_RUNTIME: %v (core's compose sets it from CONTAINER_RUNTIME in .env)", err)
@@ -390,7 +393,8 @@ func main() {
 		log.Printf("engine: not verified after %s: starting anyway, engine operations answer 503 until it is", engineStartWait)
 	}
 	cfg.AccountURL = fa.AccountURL
-	h, err := hub.New(cfg, cli, engine, kc)
+	rt := dockerrt.New(cli, engine, dockerrt.Options{Kind: runtime, Guard: guard, HelperImage: hub.HelperImage})
+	h, err := hub.New(cfg, rt, kc)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}

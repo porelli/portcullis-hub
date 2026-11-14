@@ -353,7 +353,7 @@ func (h *Hub) requeueHooks(id string, trig Trigger, effect string, r hookRun, st
 // clipped.
 func (h *Hub) runHook(ctx context.Context, t *templates.Template, hk templates.Hook, in settings.HookInput) UnitResult {
 	u := UnitResult{Unit: hookUnit(hk.Name), At: time.Now().UTC()}
-	if h.engine == nil {
+	if h.noEngine() {
 		u.Skipped = SkipNotRunning
 		return u
 	}
@@ -385,7 +385,7 @@ func (h *Hub) runHook(ctx context.Context, t *templates.Template, hk templates.H
 	if err != nil {
 		return fail(fmt.Errorf("hook %s: the input could not be encoded", hk.Name))
 	}
-	res, err := h.engine.ExecStdin(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(stdin, '\n'), Timeout: timeout})
+	res, err := h.rt.Exec(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(stdin, '\n'), Timeout: timeout})
 	if res != nil && res.TimedOut && res.ExecID != "" {
 		h.deliveryMu.Lock()
 		if h.hookExecs == nil {
@@ -450,7 +450,7 @@ func (h *Hub) waitPreviousHook(ctx context.Context, id string) bool {
 	}
 	polls := int(prev.timeout / hookPoll)
 	for i := 0; ; i++ {
-		running, err := h.engine.ExecRunning(ctx, prev.execID)
+		running, err := h.rt.ExecRunning(ctx, prev.execID)
 		if (err == nil && !running) || docker.IsNotFound(err) {
 			h.deliveryMu.Lock()
 			if h.hookExecs[id] == prev {

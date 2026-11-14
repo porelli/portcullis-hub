@@ -16,6 +16,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/folderfix"
@@ -315,14 +317,15 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 	if err := r.validate(); err != nil {
 		return statusErr(http.StatusInternalServerError, "shared folder fixer: %v", err)
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		return statusErr(http.StatusServiceUnavailable, "shared folders need the Docker Engine API")
 	}
 	image, err := h.selfImage(ctx)
 	if err != nil {
 		return err
 	}
-	opts, err := h.engine.SecurityOptions(ctx)
+	info, err := h.rt.Info(ctx)
+	opts := info.SecurityOptions
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "shared folders: can't read the Docker daemon's security options: %v", err)
 	}
@@ -341,7 +344,7 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 	if r.Out != nil {
 		out = func(t io.Reader) error { return readSnapshotTar(t, r.Out) }
 	}
-	res, err := h.engine.RunHelper(ctx, s, out)
+	res, err := h.rt.RunFixer(ctx, s, out)
 	if err != nil {
 		var se *StatusError
 		if errors.As(err, &se) {
@@ -402,9 +405,9 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 // HUB_CONTAINER_RUNTIME=podman, where every container shares the
 // operator's default namespace (the fixer itself then refuses any map but
 // the consistent shape). Refusals are 503, explain-only.
-func fixerIDsAllowed(rt docker.Runtime, opts []string) error {
+func fixerIDsAllowed(rt runtime.Kind, opts []string) error {
 	m := docker.RemappedIDs(opts)
-	if m == "" || (m == "rootless" && rt == docker.RuntimePodman && !securityOption(opts, "userns")) {
+	if m == "" || (m == "rootless" && rt == runtime.KindPodman && !securityOption(opts, "userns")) {
 		return nil
 	}
 	if securityOption(opts, "userns") {
@@ -527,7 +530,7 @@ func readSnapshotTar(t io.Reader, out func(io.Reader) error) error {
 		if err != nil {
 			return fmt.Errorf("snapshot transfer: %w", err)
 		}
-		rel, err := an.rel(hdr)
+		rel, err := an.Rel(hdr)
 		if err != nil {
 			return fmt.Errorf("snapshot transfer: %w", err)
 		}
@@ -591,9 +594,9 @@ var selfMountPodmanRe = regexp.MustCompile(`(?:^|/)overlay-containers/([0-9a-f]{
 // (R53): the root of the /etc/hostname, /etc/hosts or /etc/resolv.conf mount.
 // Every such mount must name the same 64-hex ID; none, or two IDs, is an
 // error. Never a name or prefix lookup another container could shadow.
-func selfContainerID(mountinfo []byte, rt docker.Runtime) (string, error) {
+func selfContainerID(mountinfo []byte, rt runtime.Kind) (string, error) {
 	re, want := selfMountRe, "docker/containers/<id>/"
-	if rt == docker.RuntimePodman {
+	if rt == runtime.KindPodman {
 		re, want = selfMountPodmanRe, "overlay-containers/<id>/userdata/"
 	}
 	id := ""
@@ -638,7 +641,7 @@ func (h *Hub) selfImage(ctx context.Context) (string, error) {
 		return "", statusErr(http.StatusServiceUnavailable, "the Hub can't find its own image: "+format, args...)
 	}
 	if ref := h.cfg.FixerImage; ref != "" {
-		if err := h.engine.EnsureImage(ctx, ref); err != nil {
+		if err := h.rt.EnsureImage(ctx, ref); err != nil {
 			return fail("%v", err)
 		}
 		h.fixerImage = ref
@@ -652,7 +655,7 @@ func (h *Hub) selfImage(ctx context.Context) (string, error) {
 	if err != nil {
 		return fail("%v", err)
 	}
-	ci, err := h.engine.InspectContainer(ctx, id)
+	ci, err := h.rt.Inspect(ctx, id)
 	if err != nil {
 		return fail("inspecting container %s: %v", id[:12], err)
 	}

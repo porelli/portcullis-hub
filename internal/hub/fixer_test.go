@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/idmap"
@@ -303,13 +305,13 @@ func TestFixerImageResolution(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "data"), 0755)
 	st.Save(filepath.Join(root, "data", "state.yaml"))
 	for _, img := range []string{"ghcr.io/porelli/portcullis-hub:edge", "sha256:" + strings.Repeat("a", 64), "x@sha256:abc"} {
-		if _, err := New(Config{ProjectDir: root, DataDir: filepath.Join(root, "data"), FixerImage: img}, newFakeRunner(), &fakeEngine{}, nil); err == nil {
+		if _, err := newTestHub(Config{ProjectDir: root, DataDir: filepath.Join(root, "data"), FixerImage: img}, newFakeRunner(), &fakeEngine{}, nil); err == nil {
 			t.Errorf("FixerImage %q accepted", img)
 		}
 	}
 	dev := "ghcr.io/porelli/portcullis-hub:dev@sha256:" + strings.Repeat("e", 64)
 	eng := &fakeEngine{}
-	h, err := New(Config{ProjectDir: root, DataDir: filepath.Join(root, "data"), FixerImage: dev}, newFakeRunner(), eng, nil)
+	h, err := newTestHub(Config{ProjectDir: root, DataDir: filepath.Join(root, "data"), FixerImage: dev}, newFakeRunner(), eng, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,10 +422,10 @@ func TestFixerImageResolution(t *testing.T) {
 // The native layout (/var/lib/docker on the root filesystem) parses too.
 func TestSelfContainerID(t *testing.T) {
 	native := "1 0 8:1 /var/lib/docker/containers/" + testSelfID + "/resolv.conf /etc/resolv.conf rw - ext4 /dev/sda1 rw\n"
-	if id, err := selfContainerID([]byte(native), docker.RuntimeDocker); err != nil || id != testSelfID {
+	if id, err := selfContainerID([]byte(native), runtime.KindDocker); err != nil || id != testSelfID {
 		t.Errorf("native: %q, %v", id, err)
 	}
-	if _, err := selfContainerID([]byte("1 0 8:1 /var/lib/podman/containers/"+testSelfID+"/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n"), docker.RuntimeDocker); err == nil {
+	if _, err := selfContainerID([]byte("1 0 8:1 /var/lib/podman/containers/"+testSelfID+"/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n"), runtime.KindDocker); err == nil {
 		t.Error("a non-docker path accepted")
 	}
 }
@@ -437,21 +439,21 @@ func TestSelfContainerIDPodman(t *testing.T) {
 		"102 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/resolv.conf /etc/resolv.conf rw - tmpfs tmpfs rw\n" +
 		"103 90 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hosts /etc/hosts rw - tmpfs tmpfs rw\n"
 	for name, mi := range map[string]string{"graphroot": graph, "runroot": run} {
-		if id, err := selfContainerID([]byte(mi), docker.RuntimePodman); err != nil || id != testSelfID {
+		if id, err := selfContainerID([]byte(mi), runtime.KindPodman); err != nil || id != testSelfID {
 			t.Errorf("%s under podman: %q, %v", name, id, err)
 		}
-		if id, err := selfContainerID([]byte(mi), docker.RuntimeDocker); err == nil {
+		if id, err := selfContainerID([]byte(mi), runtime.KindDocker); err == nil {
 			t.Errorf("%s under docker: accepted %q", name, id)
 		}
 	}
 	// Mounted at the wrong file, or two ids: refused.
 	wrong := "1 0 0:45 /containers/overlay-containers/" + testSelfID + "/userdata/hosts /etc/hostname rw - tmpfs tmpfs rw\n"
-	if _, err := selfContainerID([]byte(wrong), docker.RuntimePodman); err == nil {
+	if _, err := selfContainerID([]byte(wrong), runtime.KindPodman); err == nil {
 		t.Error("hosts mounted at /etc/hostname accepted")
 	}
 	other := strings.Repeat("b", 64)
 	two := graph + "2 0 0:45 /containers/overlay-containers/" + other + "/userdata/hosts /etc/hosts rw - tmpfs tmpfs rw\n"
-	if _, err := selfContainerID([]byte(two), docker.RuntimePodman); err == nil {
+	if _, err := selfContainerID([]byte(two), runtime.KindPodman); err == nil {
 		t.Error("two ids accepted")
 	}
 	docker := "1 0 8:1 /var/lib/docker/containers/" + testSelfID + "/resolv.conf /etc/resolv.conf rw - ext4 /dev/sda1 rw\n"
@@ -672,18 +674,18 @@ func podmanMountinfoFor(id string) string {
 func TestRunFixerRootlessPodman(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		rt   docker.Runtime
+		rt   runtime.Kind
 		opts []string
 		ok   bool
 	}{
-		{"rootless podman", docker.RuntimePodman, []string{"name=seccomp,profile=default", "name=rootless"}, true},
-		{"rootless docker", docker.RuntimeDocker, []string{"name=rootless"}, false},
-		{"userns under podman", docker.RuntimePodman, []string{"name=userns"}, false},
-		{"plain podman", docker.RuntimePodman, []string{"name=seccomp"}, true},
+		{"rootless podman", runtime.KindPodman, []string{"name=seccomp,profile=default", "name=rootless"}, true},
+		{"rootless docker", runtime.KindDocker, []string{"name=rootless"}, false},
+		{"userns under podman", runtime.KindPodman, []string{"name=userns"}, false},
+		{"plain podman", runtime.KindPodman, []string{"name=seccomp"}, true},
 	} {
 		f := newFixerFixture(t)
 		f.h.cfg.Runtime = c.rt
-		if c.rt == docker.RuntimePodman {
+		if c.rt == runtime.KindPodman {
 			f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
 		}
 		f.engine.fx().secOpts = c.opts
@@ -699,7 +701,7 @@ func TestRunFixerRootlessPodman(t *testing.T) {
 			t.Errorf("%s: err %v, %d runs", c.name, err, n)
 		}
 	}
-	if err := fixerIDsAllowed(docker.RuntimeDocker, []string{"name=rootless"}); err == nil || !strings.Contains(err.Error(), "Docker runs with rootless") {
+	if err := fixerIDsAllowed(runtime.KindDocker, []string{"name=rootless"}); err == nil || !strings.Contains(err.Error(), "Docker runs with rootless") {
 		t.Errorf("message = %v", err)
 	}
 }
@@ -708,7 +710,7 @@ func TestRunFixerRootlessPodman(t *testing.T) {
 // report's id_map uid container 0) and the host path (folder + rel).
 func TestFixerUnmappedMessage(t *testing.T) {
 	f := newFixerFixture(t)
-	f.h.cfg.Runtime = docker.RuntimePodman
+	f.h.cfg.Runtime = runtime.KindPodman
 	f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
 	f.engine.fx().secOpts = []string{"name=rootless"}
 	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")
@@ -780,7 +782,7 @@ func TestUnmappedHintQuoting(t *testing.T) {
 // (a uid-only chown would leave the group, and the re-check refuse again).
 func TestFixerUnmappedGroupOnly(t *testing.T) {
 	f := newFixerFixture(t)
-	f.h.cfg.Runtime = docker.RuntimePodman
+	f.h.cfg.Runtime = runtime.KindPodman
 	f.h.mountinfo = func() ([]byte, error) { return []byte(podmanMountinfoFor(testSelfID)), nil }
 	f.engine.fx().secOpts = []string{"name=rootless"}
 	um, _ := idmap.Parse("0 1001 1\n1 100000 65536")

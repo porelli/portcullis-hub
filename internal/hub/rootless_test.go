@@ -7,10 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"gopkg.in/yaml.v3"
 
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -62,7 +63,7 @@ const espCompose = "services:\n  esp:\n    image: x\n    devices:\n      - ${ESP
 
 func podmanAt(t *testing.T, f *fixture, portStart string) {
 	t.Helper()
-	f.h.cfg.Runtime = docker.RuntimePodman
+	f.h.cfg.Runtime = runtime.KindPodman
 	writeFile(t, filepath.Join(f.project, ".env"), "CORE_VAR=core-value\nPORTCULLIS_UNPRIVILEGED_PORT_START="+portStart+"\n")
 }
 
@@ -92,7 +93,7 @@ func TestCreateRefusedUnderPodman(t *testing.T) {
 	}
 	// Under Docker nothing is judged.
 	f2 := newInstanceFixtureExtra(t, nil, nil, extra)
-	f2.h.cfg.Runtime = docker.RuntimeDocker
+	f2.h.cfg.Runtime = runtime.KindDocker
 	if err := f2.h.CreateInstance("dns", "dns-b", nil); err != nil {
 		t.Fatalf("docker: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestOverridePodmanRestartAlways(t *testing.T) {
 	if f.h.Template("rs") == nil {
 		t.Fatal("rs fixture not loaded (see the log)")
 	}
-	render := func(rt docker.Runtime) map[string]map[string]any {
+	render := func(rt runtime.Kind) map[string]map[string]any {
 		f.h.cfg.Runtime = rt
 		f.h.mu.Lock()
 		out, err := f.h.renderOverrideLocked(f.h.findLocked("rs"), state.InstanceSettings{})
@@ -249,12 +250,12 @@ func TestOverridePodmanRestartAlways(t *testing.T) {
 		}
 		return doc.Services
 	}
-	for svc, s := range render(docker.RuntimeDocker) {
+	for svc, s := range render(runtime.KindDocker) {
 		if _, ok := s["restart"]; ok {
 			t.Errorf("docker: %s gets restart %v", svc, s["restart"])
 		}
 	}
-	got := render(docker.RuntimePodman)
+	got := render(runtime.KindPodman)
 	if got["web"]["restart"] != "always" {
 		t.Errorf("podman: web restart = %v", got["web"]["restart"])
 	}

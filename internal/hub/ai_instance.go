@@ -15,6 +15,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -966,23 +968,23 @@ func (h *Hub) planAILocked(t *templates.Template, u InstanceAIUpdate, retry map[
 // its service) answers ch's alias on portcullis-proxy (409). Docker
 // unreachable is a 503 (fail closed).
 func (h *Hub) checkAliasFree(ctx context.Context, t *templates.Template, ch aiChange) error {
-	if h.engine == nil {
+	if h.noEngine() {
 		return nil
 	}
-	cs, err := h.engine.ListContainers(ctx, nil)
+	cs, err := h.rt.List(ctx, runtime.Filter{})
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "can't check whether another container answers %s: %v", ch.alias, err)
 	}
 	for _, c := range cs {
-		if c.Project() == projectName(t.ID) && c.Service() == ch.c.Service {
+		if c.Project == projectName(t.ID) && c.Service == ch.c.Service {
 			continue
 		}
-		taken := strings.EqualFold(c.Name(), ch.alias)
+		taken := strings.EqualFold(c.Name, ch.alias)
 		for _, n := range c.Networks[aiProxyNetwork] {
 			taken = taken || strings.EqualFold(n, ch.alias)
 		}
 		if taken {
-			return statusErr(http.StatusConflict, "container %s on %s already answers to %s: AI support can't be switched on", c.Name(), aiProxyNetwork, ch.alias)
+			return statusErr(http.StatusConflict, "container %s on %s already answers to %s: AI support can't be switched on", c.Name, aiProxyNetwork, ch.alias)
 		}
 	}
 	return nil
@@ -1467,7 +1469,7 @@ func (h *Hub) execAIHook(ctx context.Context, t *templates.Template, name string
 		res.Error = fmt.Sprintf("hook %s: not an ai hook of the template", clip(name, 64))
 		return nil, exit, res, false
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		res.Error = fmt.Sprintf("hook %s: no Docker engine", name)
 		return nil, exit, res, false
 	}
@@ -1481,7 +1483,7 @@ func (h *Hub) execAIHook(ctx context.Context, t *templates.Template, name string
 		res.Error = fmt.Sprintf("hook %s: no running container of service %s", name, hk.Service)
 		return nil, exit, res, false
 	}
-	r, err := h.engine.ExecStdinSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(slices.Clone(stdin), '\n'), Timeout: hk.EffectiveTimeout()})
+	r, err := h.rt.ExecSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(slices.Clone(stdin), '\n'), Timeout: hk.EffectiveTimeout()})
 	var why string
 	switch {
 	case err != nil:

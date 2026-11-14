@@ -12,67 +12,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/client"
 )
 
-// BindMount is one host directory bound into a started helper (always the
-// long form, Type bind; never Docker's CreateMountpoint, which would
-// create a missing host path following host symlinks — ruling 23).
-type BindMount struct {
-	Source   string // host path, absolute and clean
-	Target   string // container path
-	ReadOnly bool
-}
+// BindMount is runtime.BindMount.
+type BindMount = runtime.BindMount
 
-// RunSpec is a started helper container: the shared-folder fixer (contract
-// §6). Every isolation field the daemon would otherwise take from the
-// image or its defaults is set here.
-type RunSpec struct {
-	// Image: an image ID (sha256:…) or a reference pinned by digest
-	// (…@sha256:…); never a tag alone.
-	Image string
-	// Cmd is the full argv, set as the Entrypoint (absolute path, no
-	// shell); the container's Cmd stays empty.
-	Cmd  []string
-	User string // "0:0"
-	// Env is added to the image's environment.
-	Env []string
-	// Binds are the only host paths the helper sees.
-	Binds []BindMount
-	// Scratch are anonymous volume targets ("/out", "/in"), removed with
-	// the container.
-	Scratch []string
-	// CapAdd is added after CapDrop ALL (helperCaps names the allowed ones).
-	CapAdd  []string
-	Label   string // LabelHelper value, e.g. "folder:photos"
-	Pids    int64
-	Memory  int64 // also the memory+swap limit: no swap
-	Timeout time.Duration
-	// InPath / In: a tar stream extracted at InPath before the start
-	// ("" = none). OutPath: copied out as a tar after a 0 exit ("" = none).
-	InPath  string
-	In      io.Reader
-	OutPath string
-}
+// RunSpec is runtime.FixerSpec.
+type RunSpec = runtime.FixerSpec
 
-// RunResult is a finished helper: its exit code and demultiplexed output,
-// stdout's last MaxRunStdout bytes and stderr's first MaxRunStderr.
-type RunResult struct {
-	ExitCode      int
-	Stdout        []byte
-	Stderr        []byte
-	StdoutClipped bool
-	StderrClipped bool
-}
+// RunResult is runtime.RunResult.
+type RunResult = runtime.RunResult
 
-// Output caps of a started helper (contract §6: the report is the last
-// stdout line, ≤ 256 KiB; stderr is for crashes only).
+// Output caps of a started helper (runtime.MaxRunStdout / MaxRunStderr).
 const (
-	MaxRunStdout = 256 << 10
-	MaxRunStderr = 16 << 10
+	MaxRunStdout = runtime.MaxRunStdout
+	MaxRunStderr = runtime.MaxRunStderr
 )
 
 // helperCaps are the only capabilities a started helper may be given: the
@@ -94,7 +54,7 @@ func cleanAbsPath(p string) bool {
 	return strings.HasPrefix(p, "/") && path.Clean(p) == p && !strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
-func (s RunSpec) check() error {
+func checkRunSpec(s RunSpec) error {
 	switch {
 	case !PinnedImage(s.Image):
 		return fmt.Errorf("helper image %q is not pinned (image ID or @sha256 digest)", s.Image)
@@ -135,7 +95,7 @@ func (s RunSpec) check() error {
 // cancellation. A non-zero exit is not an error here: the caller reads
 // ExitCode.
 func (c *Client) RunHelper(ctx context.Context, s RunSpec, out func(tar io.Reader) error) (*RunResult, error) {
-	if err := s.check(); err != nil {
+	if err := checkRunSpec(s); err != nil {
 		return nil, err
 	}
 	mounts := make([]mount.Mount, 0, len(s.Binds)+len(s.Scratch))
@@ -301,24 +261,8 @@ func shortID(id string) string {
 	return id
 }
 
-// ContainerInfo is the part of a container inspect the Hub uses.
-type ContainerInfo struct {
-	ID     string
-	Image  string // the image ID (sha256:…) the container runs
-	Labels map[string]string
-	// PidMode is HostConfig.PidMode ("host": the container sees the
-	// host's processes; the doctor's gid check never reads it).
-	PidMode string
-	// Memory / PidsLimit: HostConfig's memory limit (bytes) and pids
-	// limit (0 = none; -1 or unset read as 0): limits_not_enforced.
-	Memory    int64
-	PidsLimit int64
-	// Privileged, CapAdd and Devices: HostConfig's (the doctor's
-	// vpn_gateway_privileged).
-	Privileged bool
-	CapAdd     []string
-	Devices    []string
-}
+// ContainerInfo is runtime.UnitInfo.
+type ContainerInfo = runtime.UnitInfo
 
 // InspectContainer inspects one container (IsNotFound when missing).
 func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo, error) {

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
@@ -96,7 +98,7 @@ func newFolderEnv(t *testing.T, selfImage bool) *instEnv {
 	t.Helper()
 	e := newInstEnvOpts(t, t.TempDir(), instEnvOpts{
 		extra: map[string][2]string{"photos": {folderAppManifest, folderAppCompose}},
-		engine: func(f *fakeEngine) hub.Engine {
+		engine: func(f *fakeEngine) dockerrt.Engine {
 			if selfImage {
 				return f
 			}

@@ -762,7 +762,7 @@ func (h *Hub) vpnFailClosed(id, why string) {
 	// between); busy: retried at the next pass.
 	unlock, err := h.lockApp(id)
 	if err == nil {
-		err = h.compose.DownByName(context.Background(), projectName(id))
+		err = h.rt.DownByName(context.Background(), projectName(id))
 		unlock()
 	}
 	msg := "the VPN allowlist couldn't be narrowed (" + why + "): the instance was stopped until it can"

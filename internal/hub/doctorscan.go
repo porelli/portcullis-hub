@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/doctor"
@@ -368,7 +370,7 @@ func (h *Hub) startDoctorScan(actor directory.Actor) (*AsyncOp, error) {
 	if noPeople {
 		return nil, statusErr(http.StatusServiceUnavailable, "users & groups is not available")
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		return nil, statusErr(http.StatusServiceUnavailable, "the disk check needs the Docker Engine API")
 	}
 	return h.startAsync(opKeyDoctor, OpDoctorScan, actor, nil, func(_ context.Context, ready func()) (map[string]string, []string, error) {
@@ -416,7 +418,7 @@ func (h *Hub) RunDoctorScans(ctx context.Context, every time.Duration) {
 		case <-t.C:
 		}
 		switch {
-		case h.engine == nil:
+		case h.noEngine():
 		case !h.scanMu.TryLock():
 			log.Printf("doctor: a disk check is already running: the scheduled one is skipped")
 		default:
@@ -675,14 +677,14 @@ func (h *Hub) plannedPrincipals(id string, c *assignCalc) []folderfix.Principal 
 // left out (logged): no finding, never a guess.
 func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 	out := []runtimeEntry{}
-	if h.engine == nil {
+	if h.noEngine() {
 		return out
 	}
 	for _, id := range ids {
 		if ctx.Err() != nil || len(out) >= maxRuntimeContainers {
 			break
 		}
-		cs, err := h.engine.ListContainers(ctx, docker.ProjectFilter(projectName(id)))
+		cs, err := h.rt.List(ctx, runtime.Filter{Instance: id})
 		if err != nil {
 			log.Printf("doctor: %s: listing containers: %v", id, err)
 			continue
@@ -694,13 +696,13 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 			want = serviceLimits(t.ReadCompose())
 		}
 		for _, c := range cs {
-			if c.State != "running" || c.Project() != projectName(id) || len(out) >= maxRuntimeContainers {
+			if c.State != "running" || c.Project != projectName(id) || len(out) >= maxRuntimeContainers {
 				continue
 			}
-			e := runtimeEntry{Instance: id, Service: c.Service(), Container: c.Name(), At: time.Now().UTC()}
-			ci, err := h.engine.InspectContainer(ctx, c.ID)
+			e := runtimeEntry{Instance: id, Service: c.Service, Container: c.Name, At: time.Now().UTC()}
+			ci, err := h.rt.Inspect(ctx, c.ID)
 			if err == nil {
-				w := want[c.Service()]
+				w := want[c.Service]
 				e.Memory, e.PidsLimit, e.WantMemory, e.WantPids = ci.Memory, ci.PidsLimit, w[0], w[1]
 			}
 			switch {
@@ -720,7 +722,7 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 				}
 			}
 			if e.Err != "" {
-				log.Printf("doctor: %s: container %s: group check skipped: %s", id, c.Name(), e.Err)
+				log.Printf("doctor: %s: container %s: group check skipped: %s", id, c.Name, e.Err)
 			}
 			out = append(out, e)
 		}
@@ -746,7 +748,7 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) (gids []int, read, t
 	pending := slices.Clone(h.gidExecs[id])
 	h.scanCacheMu.Unlock()
 	for _, x := range pending {
-		if running, err := h.engine.ExecRunning(ctx, x); err == nil && running {
+		if running, err := h.rt.ExecRunning(ctx, x); err == nil && running {
 			return nil, 0, 0, errors.New("a previous group check (timed out) is still running in it")
 		}
 	}
@@ -754,7 +756,7 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) (gids []int, read, t
 	delete(h.gidExecs, id)
 	h.scanCacheMu.Unlock()
 	exec := func(cmd []string) (*docker.ExecResult, error) {
-		res, err := h.engine.Exec(ctx, id, cmd, gidExecTimeout)
+		res, err := h.rt.Exec(ctx, id, runtime.ExecInput{Cmd: cmd, Timeout: gidExecTimeout, NoStdin: true})
 		if err == nil && res.TimedOut && res.ExecID != "" {
 			h.scanCacheMu.Lock()
 			if h.gidExecs == nil {

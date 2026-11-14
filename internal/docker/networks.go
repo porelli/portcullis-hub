@@ -2,17 +2,14 @@ package docker
 
 import (
 	"context"
-	"net/netip"
+
+	"github.com/portcullis/hub/internal/runtime"
 
 	"github.com/moby/moby/client"
 )
 
-// Network is the subset of a Docker network the Hub uses: its name and
-// IPAM subnets (the VPN overlap guard, contract §3.3).
-type Network struct {
-	Name    string
-	Subnets []netip.Prefix
-}
+// Network is runtime.Network.
+type Network = runtime.Network
 
 // ListNetworks lists every network with its IPAM subnets.
 func (c *Client) ListNetworks(ctx context.Context) ([]Network, error) {

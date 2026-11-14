@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fidomds"
 	"github.com/portcullis/hub/internal/hub"
 )
@@ -294,7 +295,7 @@ func TestMaxMinutes(t *testing.T) {
 // TestRuntimeFromEnv: HUB_CONTAINER_RUNTIME is required, docker or podman
 // (contract §6, P0: no default).
 func TestRuntimeFromEnv(t *testing.T) {
-	for v, want := range map[string]docker.Runtime{"docker": docker.RuntimeDocker, "podman": docker.RuntimePodman} {
+	for v, want := range map[string]runtime.Kind{"docker": runtime.KindDocker, "podman": runtime.KindPodman} {
 		got, err := runtimeFromEnv(func(k string) string { return map[string]string{"HUB_CONTAINER_RUNTIME": v}[k] })
 		if err != nil || got != want {
 			t.Errorf("%q: %q, %v", v, got, err)

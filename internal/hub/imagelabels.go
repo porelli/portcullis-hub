@@ -7,9 +7,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"gopkg.in/yaml.v3"
 
-	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -132,7 +133,7 @@ func extraTraefikKeys(want map[string]bool, have map[string]string) []string {
 // given (an image LABEL). Docker unreachable is a problem too (fail
 // closed).
 func (h *Hub) imageLabelProblem(t *templates.Template) string {
-	if h.engine == nil {
+	if h.noEngine() {
 		return ""
 	}
 	h.mu.RLock()
@@ -141,13 +142,13 @@ func (h *Hub) imageLabelProblem(t *templates.Template) string {
 	if err != nil {
 		return "the expected labels can't be computed: " + err.Error()
 	}
-	cs, err := h.engine.ListContainers(context.Background(), docker.ProjectFilter(projectName(t.ID)))
+	cs, err := h.rt.List(context.Background(), runtime.Filter{Instance: t.ID})
 	if err != nil {
 		return "the containers' labels can't be checked: " + err.Error()
 	}
 	for _, c := range cs {
-		if extra := extraTraefikKeys(want[c.Service()], c.Labels); len(extra) > 0 {
-			return fmt.Sprintf("container %s (service %s) carries Traefik labels compose wasn't given — from its image's LABELs: %s", c.Name(), c.Service(), strings.Join(extra, ", "))
+		if extra := extraTraefikKeys(want[c.Service], c.Labels); len(extra) > 0 {
+			return fmt.Sprintf("container %s (service %s) carries Traefik labels compose wasn't given — from its image's LABELs: %s", c.Name, c.Service, strings.Join(extra, ", "))
 		}
 	}
 	return ""
@@ -156,7 +157,7 @@ func (h *Hub) imageLabelProblem(t *templates.Template) string {
 // refuseImageLabels takes the project down (volumes kept) and returns the
 // 409 for problem.
 func (h *Hub) refuseImageLabels(t *templates.Template, problem, when string) error {
-	if derr := h.compose.Down(context.Background(), h.project(t)); derr != nil {
+	if derr := h.rt.Down(context.Background(), h.runtimeProject(t)); derr != nil {
 		problem += fmt.Sprintf(" (taking the project down failed too: %v)", derr)
 	}
 	return statusErr(409, "instance %s %s: %s. Use an image without traefik.* labels (or one the template's labels fully override)", t.ID, when, problem)

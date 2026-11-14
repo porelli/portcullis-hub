@@ -4,9 +4,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"gopkg.in/yaml.v3"
 
-	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -17,7 +18,7 @@ import (
 // restarted. Under Docker nothing here applies.
 
 // rootlessOn: the runtime is podman (the only gate condition, P5).
-func (h *Hub) rootlessOn() bool { return h.cfg.Runtime == docker.RuntimePodman }
+func (h *Hub) rootlessOn() bool { return h.cfg.Runtime == runtime.KindPodman }
 
 // templateCompat is t's verdict at its defaults.
 func (h *Hub) templateCompat(t *templates.Template) templates.Compat {

@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -23,9 +22,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"golang.org/x/sync/singleflight"
 
-	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -38,7 +38,7 @@ import (
 )
 
 // ProjectPrefix prefixes every app's compose project name.
-const ProjectPrefix = "portcullis-"
+const ProjectPrefix = runtime.ProjectPrefix
 
 const (
 	execTimeout = 15 * time.Minute
@@ -135,8 +135,8 @@ type Config struct {
 	// main refuses anything else) and Guard the engine guard verifying it
 	// (main sets both). A nil Guard (unit tests) is never verified:
 	// RuntimeView says verified false and the doctor gets no engine
-	// inputs. Gates compare Runtime == docker.RuntimePodman only.
-	Runtime docker.Runtime
+	// inputs. Gates compare Runtime == runtime.KindPodman only.
+	Runtime runtime.Kind
 	Guard   *docker.Guard
 	// VPNStatusFile is HUB_VPN_STATUS_FILE, wg's status.json (contract
 	// §16; main's default /wg-data/status.json; "" = wg is never up).
@@ -150,54 +150,6 @@ type Config struct {
 	// VPNNet overrides portcullis-vpn's subnet (tests; zero = the core
 	// env's PORTCULLIS_VPN_NET, default 172.31.254.0/26).
 	VPNNet netip.Prefix
-}
-
-// Engine is the part of the Docker Engine API the Hub uses.
-type Engine interface {
-	ListContainers(ctx context.Context, f docker.Filters) ([]docker.Container, error)
-	Logs(ctx context.Context, id string, tail int, timestamps bool) ([]byte, error)
-	Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (*docker.ExecResult, error)
-	Events(ctx context.Context, f docker.Filters, fn func(docker.Event)) error
-	// Volumes and volume I/O (instance backups, guarded delete, the
-	// volume collision check; docker/volumes.go).
-	ListVolumes(ctx context.Context, f docker.Filters) ([]docker.Volume, error)
-	InspectVolume(ctx context.Context, name string) (docker.Volume, error)
-	CreateVolume(ctx context.Context, v docker.Volume) error
-	RemoveVolume(ctx context.Context, name string) error
-	EnsureImage(ctx context.Context, ref string) error
-	// PullWithProgress downloads ref unless present (docker/pull.go):
-	// startUp's images step, before compose create.
-	PullWithProgress(ctx context.Context, ref string, onBytes func(done, total int64, sized bool)) error
-	CreateHelper(ctx context.Context, s docker.HelperSpec) (string, error)
-	RemoveContainer(ctx context.Context, id string) error
-	CopyFromContainer(ctx context.Context, id, path string) (io.ReadCloser, error)
-	CopyToContainer(ctx context.Context, id, path string, content io.Reader) error
-	// ContainerKill signals a container (a settings reload, §13.8);
-	// ContainerState is its run state and health after the grace period.
-	ContainerKill(ctx context.Context, id, signal string) error
-	ContainerState(ctx context.Context, id string) (docker.State, error)
-	// ExecStdin runs a settings hook (§13.8): argv, stdin written then
-	// closed, no TTY; ExecRunning: a timed-out exec still runs (Docker
-	// can't kill it: the next hook run waits for it).
-	ExecStdin(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecResult, error)
-	// ExecStdinSplit runs an AI hook (§15.5, G6): stdout and stderr apart.
-	ExecStdinSplit(ctx context.Context, id string, in docker.ExecInput) (*docker.ExecSplitResult, error)
-	ExecRunning(ctx context.Context, execID string) (bool, error)
-	// RunHelper runs the shared-folder fixer, a STARTED helper (contract
-	// §6, fixer.go); InspectContainer finds the Hub's own image;
-	// SecurityOptions is the daemon's Info (userns / rootless refusal).
-	RunHelper(ctx context.Context, s docker.RunSpec, out func(tar io.Reader) error) (*docker.RunResult, error)
-	InspectContainer(ctx context.Context, id string) (docker.ContainerInfo, error)
-	SecurityOptions(ctx context.Context) ([]string, error)
-	// DockerRootDir is the daemon's data root (no shared folder at,
-	// above or under it).
-	DockerRootDir(ctx context.Context) (string, error)
-	// APIVersion is the daemon's highest Engine API version (volume
-	// subpath mounts need 1.45, contract §6).
-	APIVersion(ctx context.Context) (string, error)
-	// ListNetworks lists the engine's networks with their subnets (the
-	// VPN wiring's overlap guard, contract §3.3).
-	ListNetworks(ctx context.Context) ([]docker.Network, error)
 }
 
 // IdP manages the OIDC clients templates declare.
@@ -311,10 +263,10 @@ type Hub struct {
 	// right after the definition is created, before the assignment is
 	// validated (doctorfix.go).
 	testHookManageDefined func()
-	compose               compose.Runner
-	engine                Engine
-	idp                   IdP
-	attrs                 AttrStore // LLDAP user attributes (setting claims); nil: none
+	// rt is the runtime (nil: unit tests without one).
+	rt    runtime.Instances
+	idp   IdP
+	attrs AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex
@@ -698,7 +650,7 @@ type Hub struct {
 
 // New loads state from cfg.DataDir and prepares the data directories. It
 // fails on a corrupt state file rather than starting empty.
-func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error) {
+func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 	if cfg.ProjectHostDir == "" {
 		cfg.ProjectHostDir = cfg.ProjectDir
 	}
@@ -738,8 +690,7 @@ func New(cfg Config, runner compose.Runner, engine Engine, idp IdP) (*Hub, error
 		kinds:                settings.NewRegistry(),
 		bindRoots:            roots,
 		cfg:                  cfg,
-		compose:              runner,
-		engine:               engine,
+		rt:                   rt,
 		idp:                  idp,
 		lockPoll:             2 * time.Second,
 		restartWait:          20 * time.Minute,
@@ -858,7 +809,7 @@ func (h *Hub) Init() {
 	}
 	// VPN (I2): running labels the rendering narrowed (or that can't be
 	// read) restart the instance.
-	eng := h.engine
+	eng := h.rt
 	vpnCheck := func() { h.vpnStartCheck(context.Background(), eng) }
 	if h.engineVerifiedNow() {
 		h.goBackground(vpnCheck)
@@ -939,7 +890,7 @@ func (h *Hub) userOverridePath(id string) string {
 	return filepath.Join(h.cfg.DataDir, "overrides", id+".user.yml")
 }
 func (h *Hub) templatesRoot() string { return filepath.Join(h.cfg.ProjectDir, "templates") }
-func projectName(id string) string   { return ProjectPrefix + id }
+func projectName(id string) string   { return runtime.ProjectName(id) }
 
 // saveLocked persists state. Caller must hold mu (write).
 func (h *Hub) saveLocked() {

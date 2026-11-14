@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"filippo.io/age"
 	"filippo.io/age/armor"
 
@@ -159,7 +161,7 @@ type mcpEnvOpts struct {
 	seed  func(*state.AppState)
 	prep  []func(*aiHookEngine)
 	extra map[string][2]string
-	wrap  func(hub.Engine) hub.Engine
+	wrap  func(dockerrt.Engine) dockerrt.Engine
 	cfg   func(*hub.Config) // more configuration (after the MCP's)
 	// runner: the compose runner (nil: nopRunner).
 	runner compose.Runner
@@ -194,7 +196,7 @@ func newMCPEnvOpts(t *testing.T, o mcpEnvOpts) *mcpEnv {
 	e := newInstEnvOpts(t, root, instEnvOpts{
 		runner: o.runner,
 		extra:  extra,
-		engine: func(f *fakeEngine) hub.Engine {
+		engine: func(f *fakeEngine) dockerrt.Engine {
 			eng = &aiHookEngine{fakeEngine: f}
 			if o.wrap != nil {
 				return o.wrap(eng)

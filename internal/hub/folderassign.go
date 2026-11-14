@@ -704,7 +704,7 @@ func (h *Hub) computeAssignFor(ctx context.Context, id string, req AssignRequest
 // runningOf fills running for the enabled ones of ids (Docker, outside
 // mu).
 func (h *Hub) runningOf(ctx context.Context, ids []string, enabled, running map[string]bool) error {
-	if h.engine == nil {
+	if h.noEngine() {
 		return statusErr(http.StatusServiceUnavailable, "shared folders need the Docker Engine API")
 	}
 	for _, inst := range ids {
