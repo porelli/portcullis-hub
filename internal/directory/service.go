@@ -375,6 +375,11 @@ type GroupView struct {
 	// matching, protected accounts left out), sorted; admins only, nil
 	// for manual groups and in every other view.
 	Matches []string `json:"matches,omitzero"`
+	// AllowAnyField: the group's "Allow any profile field in this group's
+	// rule" (GroupConfig.AllowAnyField), present only where it can be
+	// on (anyFieldOffered: app admin and privileged-value groups).
+	// Administrators only; nil (absent) in every other view.
+	AllowAnyField *bool `json:"allow_any_field,omitempty"`
 	// Guarding: whether changing who is in the group can widen access
 	// (guardingGroups — administrator, permission, app admin and
 	// privileged-value groups: the Portcullis MCP's groupGuard).
@@ -681,6 +686,14 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 			gcfg = &Config{} // no store: no permissions to guard
 		}
 		markGuarding(ov.Groups, s.guardingGroups(gcfg))
+		if cfg != nil {
+			for i := range ov.Groups {
+				if g := ov.Groups[i].Name; s.anyFieldOffered(cfg, g) {
+					on := s.anyFieldAllowed(cfg, g)
+					ov.Groups[i].AllowAnyField = &on
+				}
+			}
+		}
 	}
 	// Suggest only groups of apps that are enabled: templates you don't use
 	// have no business in the directory.

@@ -130,8 +130,12 @@ func (s *Service) addsBlocked(cfg *Config, guarding map[string]string, name stri
 	if !ok || gc == nil || gc.Rule == nil {
 		return ""
 	}
-	if bad := nonAdminOnly(cfg, gc.Rule); len(bad) > 0 {
-		return fmt.Sprintf("%s is %s but its rule uses fields that aren't admin-only (%s): nobody is added until the rule uses only admin-only fields", name, why, strings.Join(bad, ", "))
+	if bad := nonAdminOnly(cfg, gc.Rule); len(bad) > 0 && !s.anyFieldAllowed(cfg, name) {
+		until := "the rule uses only admin-only fields"
+		if s.anyFieldOffered(cfg, name) {
+			until += " or \"" + AllowAnyFieldLabel + "\" is on"
+		}
+		return fmt.Sprintf("%s is %s but its rule uses fields that aren't admin-only (%s): nobody is added until %s", name, why, strings.Join(bad, ", "), until)
 	}
 	if matchesEmpty(cfg, gc.Rule) {
 		return fmt.Sprintf("%s is %s but its rule matches a person with no details at all (e.g. a new account): nobody is added until the rule no longer does", name, why)

@@ -515,6 +515,35 @@ func (s *Server) handleSetGroupRule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, st.with(out))
 }
 
+// handleSetAllowAnyField: {"allow": bool} turns the group's "Allow any
+// profile field in this group's rule" on or off (admins only, audited
+// group.allow_any_field; contract §9.6).
+func (s *Server) handleSetAllowAnyField(w http.ResponseWriter, r *http.Request) {
+	if !s.dirReady(w) {
+		return
+	}
+	var req struct {
+		Allow *bool `json:"allow"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Allow == nil {
+		http.Error(w, "allow (true or false) is required", http.StatusBadRequest)
+		return
+	}
+	c, ok := s.caller(w, r)
+	if !ok {
+		return
+	}
+	st, err := s.setAllowAnyField(r.Context(), c, r.PathValue("group"), *req.Allow)
+	if err != nil {
+		dirErr(w, err)
+		return
+	}
+	writeJSON(w, st.with(map[string]any{"status": "saved", "allow_any_field": *req.Allow}))
+}
+
 func (s *Server) handleConvertPreview(w http.ResponseWriter, r *http.Request) {
 	if !s.dirReady(w) {
 		return

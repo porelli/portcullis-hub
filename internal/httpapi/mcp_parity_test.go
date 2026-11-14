@@ -68,6 +68,13 @@ var vpnNoToolRoutes = map[string]string{
 	"POST /api/instances/{id}/vpn-dns/ack": "admin UI only (the instance's VPN tab, after configuring the records by hand)",
 }
 
+// fieldGuardNoToolRoutes: a guarding group's "Allow any profile field in
+// this group's rule" lets field edits grant its rights; an administrator
+// turns it on in the browser only, never through the AI.
+var fieldGuardNoToolRoutes = map[string]string{
+	"PUT /api/directory/groups/{group}/allow-any-field": "relaxes a guarding group's admin-only field rule: admin UI only, never by an AI",
+}
+
 // adminVPN are the VPN tools (§15.10).
 var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach"}
 
@@ -210,7 +217,8 @@ func TestToolParity(t *testing.T) {
 		_, help := helpNoToolRoutes[r]
 		_, imp := impersonationNoToolRoutes[r]
 		_, vpnNo := vpnNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo
+		_, guardNo := fieldGuardNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -241,7 +249,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
