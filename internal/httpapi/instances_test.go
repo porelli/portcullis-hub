@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
 	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -429,6 +430,8 @@ type instEnvOpts struct {
 	runner compose.Runner // nil: nopRunner
 	// data writes files into the data directory before the Hub loads it.
 	data func(dir string)
+	// rt, if set, is the Hub's runtime (engine and runner unused).
+	rt runtime.Instances
 }
 
 func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
@@ -469,6 +472,9 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 		runner = o.runner
 	}
 	h, err := newTestHub(cfg, runner, he, nil)
+	if o.rt != nil {
+		h, err = hub.New(cfg, o.rt, nil)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

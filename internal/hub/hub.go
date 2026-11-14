@@ -1139,8 +1139,9 @@ func (h *Hub) Templates() []templates.Template {
 	h.mu.RLock()
 	ts := append([]templates.Template(nil), h.templates...)
 	h.mu.RUnlock()
-	// Under podman, each with its rootless verdict (contract §11.10).
-	return h.withRootless(ts)
+	// Under podman and kubernetes, each with its runtime verdict
+	// (contract §11.10).
+	return h.withCompat(ts)
 }
 
 // Sources returns a copy of the configured sources.

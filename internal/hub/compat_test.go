@@ -136,7 +136,7 @@ func TestEnableRefusedUnderPodman(t *testing.T) {
 func hasRootless(vs []InstanceView, id, status string) bool {
 	for _, v := range vs {
 		if v.ID == id {
-			return v.Rootless != nil && v.Rootless.Status == status
+			return v.Compat != nil && v.Compat.Status == status && v.Compat.Runtime == runtime.KindPodman
 		}
 	}
 	return false
@@ -165,23 +165,24 @@ func TestRestoreAsRefusedUnderPodman(t *testing.T) {
 func TestTemplateViewRootless(t *testing.T) {
 	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"dns": {dnsManifest, dnsCompose}})
 	for _, tv := range f.h.Templates() {
-		if tv.Rootless != nil {
-			t.Fatalf("%s: rootless under docker", tv.ID)
+		if tv.Compat != nil {
+			t.Fatalf("%s: compat under docker", tv.ID)
 		}
 	}
 	for _, v := range f.h.Instances() {
-		if v.Rootless != nil {
-			t.Fatalf("%s: rootless under docker", v.ID)
+		if v.Compat != nil {
+			t.Fatalf("%s: compat under docker", v.ID)
 		}
 	}
 	podmanAt(t, f, "80")
 	seen := false
 	for _, tv := range f.h.Templates() {
-		if tv.Rootless == nil {
-			t.Errorf("%s: no rootless under podman", tv.ID)
+		if tv.Compat == nil || tv.Compat.Runtime != runtime.KindPodman {
+			t.Errorf("%s: no podman compat under podman", tv.ID)
+			continue
 		}
 		if tv.ID == "dns" {
-			seen = tv.Rootless.Status == templates.CompatRefused
+			seen = tv.Compat.Status == templates.CompatRefused
 		}
 	}
 	if !seen {
@@ -189,18 +190,24 @@ func TestTemplateViewRootless(t *testing.T) {
 	}
 }
 
-// TestRealTemplatesRootlessClassification: every real template's verdict
-// at port start 80 equals the templates repo's committed classification
-// (tests/rootless.txt: <id>\t<status>\t<reasons joined "; ">, sorted).
-func TestRealTemplatesRootlessClassification(t *testing.T) {
+// TestRealTemplatesRuntimeClassification: every real template's verdict
+// equals the templates repo's committed classification: tests/runtime.txt
+// (<id>\t<runtime>\t<status>\t<reasons joined "; ">, podman at port
+// start 80 and kubernetes, sorted) or, before the templates switch,
+// tests/rootless.txt (<id>\t<status>\t<reasons>, podman only).
+func TestRealTemplatesRuntimeClassification(t *testing.T) {
 	dir := os.Getenv("PORTCULLIS_TEMPLATES_DIR")
 	if dir == "" {
 		dir = filepath.Join("..", "..", "..", "portcullis-templates")
 	}
 	dir, _ = filepath.Abs(dir)
-	want, err := os.ReadFile(filepath.Join(dir, "tests", "rootless.txt"))
+	file, both := "runtime.txt", true
+	want, err := os.ReadFile(filepath.Join(dir, "tests", file))
 	if err != nil {
-		t.Skipf("no templates checkout with tests/rootless.txt at %s", dir)
+		file, both = "rootless.txt", false
+		if want, err = os.ReadFile(filepath.Join(dir, "tests", file)); err != nil {
+			t.Skipf("no templates checkout with tests/runtime.txt or rootless.txt at %s", dir)
+		}
 	}
 	entries, _ := os.ReadDir(dir)
 	var lines []string
@@ -213,13 +220,20 @@ func TestRealTemplatesRootlessClassification(t *testing.T) {
 			t.Errorf("%s: %v", e.Name(), err)
 			continue
 		}
-		c := templates.RootlessCompat(tp.ReadCompose(), tp.Manifest, nil, 80)
-		lines = append(lines, e.Name()+"\t"+c.Status+"\t"+strings.Join(c.Reasons, "; "))
+		if !both {
+			c := templates.RuntimeCompat(runtime.KindPodman, tp.ReadCompose(), tp.Manifest, nil, 80)
+			lines = append(lines, e.Name()+"\t"+c.Status+"\t"+strings.Join(c.Reasons, "; "))
+			continue
+		}
+		for _, rt := range []runtime.Kind{runtime.KindKubernetes, runtime.KindPodman} {
+			c := templates.RuntimeCompat(rt, tp.ReadCompose(), tp.Manifest, nil, 80)
+			lines = append(lines, e.Name()+"\t"+string(rt)+"\t"+c.Status+"\t"+strings.Join(c.Reasons, "; "))
+		}
 	}
 	sort.Strings(lines)
 	got := strings.Join(lines, "\n") + "\n"
 	if got != string(want) {
-		t.Errorf("classification differs from %s/tests/rootless.txt:\n--- hub\n%s--- templates\n%s", dir, got, want)
+		t.Errorf("classification differs from %s/tests/%s:\n--- hub\n%s--- templates\n%s", dir, file, got, want)
 	}
 }
 
@@ -263,5 +277,47 @@ func TestOverridePodmanRestartAlways(t *testing.T) {
 		if r, ok := got[svc]["restart"]; ok {
 			t.Errorf("podman: %s gets restart %v", svc, r)
 		}
+	}
+}
+
+// Under Kubernetes: a template with a refused feature is never created
+// (409 "on Kubernetes"), the views carry compat with runtime kubernetes,
+// and a dns-like app on port 53 is fine (no unprivileged port limit).
+func TestCreateRefusedOnKubernetes(t *testing.T) {
+	hostCompose := "services:\n  relay:\n    image: x\n    network_mode: host\n"
+	relayManifest := "name: Relay\ndescription: x\nversion: \"1.0\"\ncategory: x\nai: {unsupported: \"test fixture\"}\nauth:\n  method: custom\n"
+	extra := map[string][2]string{"dns": {dnsManifest, dnsCompose}, "esp": {espManifest, espCompose}, "relay": {relayManifest, hostCompose}}
+	f := newInstanceFixtureExtra(t, nil, nil, extra)
+	f.h.cfg.Runtime = runtime.KindKubernetes
+	_, err := f.h.CreateInstanceAs(CreateRequest{Template: "relay", ID: "relay-b", Label: "B"}, directory.Human("alice"))
+	if want := "relay-b can't run on Kubernetes: service relay uses network_mode: host (not on Kubernetes)"; statusOf(err) != 409 || err.Error() != want {
+		t.Fatalf("create = %v (%d), want %q", err, statusOf(err), want)
+	}
+	if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "dns", ID: "dns-b", Label: "B"}, directory.Human("alice")); err != nil {
+		t.Fatalf("dns on kubernetes: %v", err)
+	}
+	for _, tv := range f.h.Templates() {
+		if tv.Compat == nil || tv.Compat.Runtime != runtime.KindKubernetes {
+			t.Fatalf("%s: compat %+v under kubernetes", tv.ID, tv.Compat)
+		}
+		switch tv.ID {
+		case "esp":
+			if tv.Compat.Status != templates.CompatDegraded || tv.Compat.Reasons[0] != "service esp has device slots: host devices can't be passed on Kubernetes" {
+				t.Errorf("esp: %+v", tv.Compat)
+			}
+		case "relay":
+			if tv.Compat.Status != templates.CompatRefused {
+				t.Errorf("relay: %+v", tv.Compat)
+			}
+		}
+	}
+	// The instance's own value: a real device refuses it.
+	s := f.h.st.Settings["esp"]
+	if s.Values == nil {
+		s.Values = map[string]any{}
+	}
+	writeFile(t, f.h.envPath("esp"), "ESP_DEVICE=/dev/ttyUSB0\n")
+	if c := f.h.instanceCompat(f.h.Template("esp"), s); c.Status != templates.CompatRefused || c.Reasons[0] != "service esp passes host devices (not on Kubernetes)" {
+		t.Errorf("esp instance: %+v", c)
 	}
 }

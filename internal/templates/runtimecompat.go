@@ -6,14 +6,17 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"gopkg.in/yaml.v3"
 )
 
-// Rootless compatibility (contract §11.10, rootless Podman): how a
-// template or instance fares under rootless Podman, judged before
-// anything is created or started. The reason strings are shared byte for
-// byte with the templates validator (testdata/rootless_vectors.json, a
-// copy of portcullis-templates tests/rootless_vectors.json).
+// Runtime compatibility (contract §11.10): how a template or instance
+// fares on the runtime the Hub runs on (rootless Podman, Kubernetes),
+// judged before anything is created or started. The reason strings are
+// shared byte for byte with the templates validator
+// (testdata/runtime_vectors.json, a copy of portcullis-templates
+// tests/runtime_vectors.json, each vector naming its runtime).
 
 // Compat statuses.
 const (
@@ -22,11 +25,13 @@ const (
 	CompatRefused  = "refused"
 )
 
-// Compat is a rootless compatibility verdict: Status and the reasons in
-// rule order (only the refused ones when refused).
+// Compat is a runtime compatibility verdict: the runtime it is for,
+// Status and the reasons in rule order (only the refused ones when
+// refused).
 type Compat struct {
-	Status  string   `json:"status"`
-	Reasons []string `json:"reasons"`
+	Runtime runtime.Kind `json:"runtime"`
+	Status  string       `json:"status"`
+	Reasons []string     `json:"reasons"`
 }
 
 // MaxRootlessID is the highest container id the rootless namespace maps.
@@ -58,7 +63,25 @@ func (c *compatReasons) degrade(format string, args ...any) {
 	addOnce(&c.degraded, fmt.Sprintf(format, args...))
 }
 
-// RootlessCompat judges compose and manifest m with the instance's
+// RuntimeCompat judges compose and manifest m with the instance's
+// effective values env (nil = the defaults) for runtime rt: docker is
+// always ok, podman the rootless rules (rootlessCompat), kubernetes the
+// Kubernetes table (kubeCompat, contract §3.4).
+func RuntimeCompat(rt runtime.Kind, compose []byte, m Manifest, env map[string]string, portStart int) Compat {
+	var c Compat
+	switch rt {
+	case runtime.KindPodman:
+		c = rootlessCompat(compose, m, env, portStart)
+	case runtime.KindKubernetes:
+		c = kubeCompat(compose, m, env)
+	default:
+		c = Compat{Status: CompatOK, Reasons: []string{}}
+	}
+	c.Runtime = rt
+	return c
+}
+
+// rootlessCompat judges compose and manifest m with the instance's
 // effective values env (nil = the defaults; port keys carry the
 // instance's host ports) against the host's unprivileged port start.
 //
@@ -70,7 +93,7 @@ func (c *compatReasons) degrade(format string, args ...any) {
 // folder runs_as ids above 65535 refused. Any refused reason makes the
 // result refused with the refused reasons; else any degraded reason makes
 // it degraded; else ok. An unreadable compose file is refused.
-func RootlessCompat(compose []byte, m Manifest, env map[string]string, portStart int) Compat {
+func rootlessCompat(compose []byte, m Manifest, env map[string]string, portStart int) Compat {
 	var c compatReasons
 	services, err := orderedServices(compose)
 	if err != nil {

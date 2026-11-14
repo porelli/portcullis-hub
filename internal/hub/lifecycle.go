@@ -141,13 +141,13 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		}
 		return nil, statusErr(500, "override generation failed: %v", err)
 	}
-	// Rootless Podman (contract §11.10): an instance that can't run here
-	// (its own ports, devices and env, as just written) never starts.
-	if h.rootlessOn() {
+	// Runtime compatibility (contract §11.10): an instance that can't run
+	// here (its own ports, devices and env, as just written) never starts.
+	if h.compatOn() {
 		h.mu.RLock()
 		s := h.st.Settings[t.ID]
 		h.mu.RUnlock()
-		if err := rootlessRefusal(t.ID, h.instanceCompat(live, s)); err != nil {
+		if err := compatRefusal(t.ID, h.instanceCompat(live, s)); err != nil {
 			return nil, err
 		}
 	}

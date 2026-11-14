@@ -236,6 +236,11 @@ type Info struct {
 	SELinux         bool
 	IDMapped        bool
 	Remapped        string
+	// Kubernetes: the API server's gitVersion, the admission self-test
+	// (ok|missing|unknown) and the NetworkPolicy probe (proven|unproven).
+	EngineVersion string
+	Admission     string
+	Netpol        string
 	// Networks are the runtime's networks with their subnets (the VPN
 	// overlap guard, contract §3.3; on Kubernetes the pod and service
 	// CIDRs).

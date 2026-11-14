@@ -57,9 +57,9 @@ type InstanceView struct {
 	// Error says why an instance can't be resolved (state "error"): its
 	// template is missing or no longer fits its hostnames.
 	Error string `json:"error,omitempty"`
-	// Rootless is the instance's rootless Podman verdict with its own
-	// values (contract §11.10; podman only, absent under Docker).
-	Rootless *templates.Compat `json:"rootless,omitempty"`
+	// Compat is the instance's runtime verdict with its own
+	// values (contract §11.10; podman and kubernetes, absent under Docker).
+	Compat *templates.Compat `json:"compat,omitempty"`
 }
 
 // rebuildLocked recomputes the instance views from the catalog and state
@@ -263,9 +263,9 @@ func (h *Hub) instanceViewLocked(t *templates.Template) InstanceView {
 	v := InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), Hosts: copyMap(t.Hosts),
 		AccessGroup: users, AdminGroup: admins, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project,
 		Label: instanceLabel(t), Name: instanceName(t), GroupsMode: groupsMode(h.st.Instances[t.ID]), Setup: h.setupViewLocked(t.ID)}
-	if h.rootlessOn() {
+	if h.compatOn() {
 		c := h.instanceCompat(t, h.st.Settings[t.ID])
-		v.Rootless = &c
+		v.Compat = &c
 	}
 	return v
 }
@@ -342,10 +342,10 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	if exists {
 		return nil, statusErr(409, "instance %s already exists", id)
 	}
-	// Rootless Podman (contract §11.10): a template that can't run here
-	// is never created (the API's create and restore into a new id come
-	// through here too).
-	if h.rootlessOn() {
+	// Runtime compatibility (contract §11.10): a template that can't run
+	// here is never created (the API's create and restore into a new id
+	// come through here too).
+	if h.compatOn() {
 		h.mu.RLock()
 		var tc *templates.Template
 		if t := h.catalogLocked(templateID); t != nil {
@@ -354,7 +354,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 		}
 		h.mu.RUnlock()
 		if tc != nil {
-			if err := rootlessRefusal(id, h.templateCompat(tc)); err != nil {
+			if err := compatRefusal(id, h.templateCompat(tc)); err != nil {
 				return nil, err
 			}
 		}

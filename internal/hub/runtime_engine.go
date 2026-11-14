@@ -37,6 +37,44 @@ type RuntimeView struct {
 	GIDMap                idmap.Map    `json:"gid_map"`
 	UnprivilegedPortStart *int         `json:"unprivileged_port_start"`
 	SELinux               bool         `json:"selinux"`
+	// Kubernetes only (absent under Docker and Podman): the kube context
+	// core uses (core.env PORTCULLIS_KUBE_CONTEXT), the admission
+	// self-test (ok|missing|unknown) and the NetworkPolicy probe
+	// (proven|unproven).
+	Context   string `json:"context,omitempty"`
+	Admission string `json:"admission,omitempty"`
+	Netpol    string `json:"netpol,omitempty"`
+}
+
+// VarKubeContext is core.env's kube context (Kubernetes only).
+const VarKubeContext = "PORTCULLIS_KUBE_CONTEXT"
+
+// kubeRuntimeView is the view under Kubernetes: the cluster guard's
+// state through Info (fail closed: no runtime or no answer = not
+// verified, admission unknown, netpol unproven).
+func (h *Hub) kubeRuntimeView(ctx context.Context) RuntimeView {
+	v := RuntimeView{Runtime: runtime.KindKubernetes, Engine: "Kubernetes", Admission: "unknown", Netpol: "unproven",
+		Context: strings.TrimSpace(readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))[VarKubeContext])}
+	if h.rt == nil {
+		v.Mismatch = "no runtime"
+		return v
+	}
+	i, err := h.rt.Info(ctx)
+	if err != nil {
+		v.Mismatch = err.Error()
+		return v
+	}
+	v.Verified, v.EngineVersion = i.Verified, i.EngineVersion
+	if !i.Verified {
+		v.Mismatch = i.Why
+	}
+	if i.Admission != "" {
+		v.Admission = i.Admission
+	}
+	if i.Netpol != "" {
+		v.Netpol = i.Netpol
+	}
+	return v
 }
 
 // readProcIDMaps reads the Hub's own /proc/self/uid_map and gid_map.
@@ -60,6 +98,9 @@ func readProcIDMaps() (uid, gid idmap.Map, err error) {
 // Runtime is the runtime view. The engine's security options (rootless,
 // SELinux) are read only once the guard has verified it.
 func (h *Hub) Runtime(ctx context.Context) RuntimeView {
+	if h.cfg.Runtime == runtime.KindKubernetes {
+		return h.kubeRuntimeView(ctx)
+	}
 	v := RuntimeView{Runtime: h.cfg.Runtime}
 	if g := h.cfg.Guard; g != nil {
 		i := g.Info()

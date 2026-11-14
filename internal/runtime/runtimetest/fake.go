@@ -64,11 +64,20 @@ func (f *Fake) Kind() runtime.Kind {
 
 func (f *Fake) Env() []string { return f.Environ }
 
+// SetInfo changes Info's answer (safe while the fake is in use).
+func (f *Fake) SetInfo(i runtime.Info) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.InfoVal = i
+}
+
 func (f *Fake) Info(context.Context) (runtime.Info, error) {
 	if err := f.rec("info"); err != nil {
 		return runtime.Info{}, err
 	}
+	f.mu.Lock()
 	i := f.InfoVal
+	f.mu.Unlock()
 	i.Kind = f.Kind()
 	return i, f.InfoErr
 }

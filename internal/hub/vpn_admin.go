@@ -131,7 +131,7 @@ func (h *Hub) VPNOverview(ctx context.Context) VPNView {
 		}
 		v := t.Manifest.VPN
 		p, wired := h.st.VPN.Providers[t.ID]
-		pv := VPNProviderView{ID: t.ID, Label: v.Label, Source: v.Identity.Source, Wired: wired, Ranges: []string{}, Compat: t.Rootless,
+		pv := VPNProviderView{ID: t.ID, Label: v.Label, Source: v.Identity.Source, Wired: wired, Ranges: []string{}, Compat: t.Compat,
 			Problems: []vpn.Dropped{}, DNSManual: v.DNS.Manual, DNSAcked: p.DNSAcked, DNSRecords: []vpn.Record{}, Static: []state.VPNStatic{}}
 		refresh := time.Duration(p.Refresh)
 		if refresh == 0 {
