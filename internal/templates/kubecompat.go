@@ -91,11 +91,13 @@ func kubeCompat(compose []byte, m Manifest, env map[string]string) Compat {
 	c.kubeVolumeTypes(services, env)
 	c.kubeNetns(services, env)
 	if KubeLabelCheck != nil && k.labels != nil {
+		// The template's own labels, interpolated with their defaults
+		// only: no instance value reaches the check (or its refusal).
 		resolved := map[string]map[string]string{}
 		for svc, l := range k.labels {
 			resolved[svc] = map[string]string{}
 			for key, v := range l {
-				resolved[svc][key] = resolve(v, env)
+				resolved[svc][key] = resolve(v, nil)
 			}
 		}
 		if why := KubeLabelCheck(resolved); why != "" {
@@ -242,20 +244,13 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 		case v == "NET_ADMIN":
 			c.refuse("service %s uses TUN/NET_ADMIN (not on Kubernetes; prefer a userspace mode)", name)
 		case !slices.Contains(KubeBaselineCaps, v):
-			if strings.Trim(v, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_") != "" || len(v) > 32 {
-				v = "a capability"
-			}
-			c.refuse("service %s adds %s, outside the Kubernetes baseline", name, v)
+			c.refuse("service %s adds %s, outside the Kubernetes baseline", name, ShownCap(v))
 		}
 	}
 	if u := scalarValue(field(s, "user"), env); u != "" {
 		uid, gid, _ := strings.Cut(u, ":")
 		if !numeric(uid) || (gid != "" && !numeric(gid)) {
-			shown := u
-			if !shownUserRe.MatchString(u) {
-				shown = "a non-numeric value"
-			}
-			c.refuse("service %s runs as user %s: Kubernetes needs a numeric uid", name, shown)
+			c.refuse("service %s runs as a non-numeric user: Kubernetes needs a numeric uid", name)
 		} else if n, err := strconv.ParseInt(uid, 10, 64); err == nil && n == 0 {
 			// Core's admission lets only the Hub's helper pods and the
 			// one-shot shape run as root.
@@ -295,14 +290,14 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 		if !strings.HasPrefix(src, "/") || underRoots(src, roots) {
 			continue
 		}
-		shown := src
-		if !shownPathRe.MatchString(src) {
-			shown = "a host path"
-		}
-		c.refuse("service %s binds %s, outside the shared-folder roots (not on Kubernetes)", name, shown)
+		c.refuse("service %s binds a host path outside the shared-folder roots (not on Kubernetes)", name)
 	}
 	for _, hp := range publishedHostIPs(field(s, "ports"), env) {
-		c.refuse("service %s publishes %s on %s (not on Kubernetes)", name, hp[1], hp[0])
+		port := hp[1]
+		if !numeric(port) {
+			port = "a port"
+		}
+		c.refuse("service %s publishes %s on %s (not on Kubernetes)", name, port, ShownIP(hp[0]))
 	}
 	if replicasAboveOne(s, env) {
 		c.refuse("service %s sets replicas above 1 (not on Kubernetes)", name)
@@ -313,22 +308,14 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 	ga, _ := scalars(field(s, "group_add"))
 	for _, g := range ga {
 		if g = strings.TrimSpace(resolve(g, env)); !numeric(g) {
-			shown := g
-			if !shownUserRe.MatchString(g) {
-				shown = "a non-numeric value"
-			}
-			c.refuse("service %s adds group %s: Kubernetes needs a numeric gid", name, shown)
+			c.refuse("service %s adds a non-numeric group: Kubernetes needs a numeric gid", name)
 		}
 	}
 	ex, _ := scalars(field(s, "expose"))
 	for _, e := range ex {
 		e = strings.TrimSpace(resolve(e, env))
 		if num, _, _ := strings.Cut(e, "/"); !numeric(num) {
-			shown := e
-			if !shownUserRe.MatchString(e) {
-				shown = "a non-numeric value"
-			}
-			c.refuse("service %s exposes %q: only single ports are on Kubernetes", name, shown)
+			c.refuse("service %s exposes something other than a single port (not on Kubernetes)", name)
 		}
 	}
 	// A named volume's owner on Kubernetes is the service's uid (the
@@ -443,11 +430,7 @@ func (c *compatReasons) kubeVolumeTypes(services []namedService, env map[string]
 			switch typ := scalarValue(field(v, "type"), env); typ {
 			case "", "bind", "volume", "tmpfs":
 			default:
-				shown := typ
-				if !podDNSName.MatchString(typ) {
-					shown = "an unknown"
-				}
-				c.refuse("service %s mounts a %s volume (not on Kubernetes)", s.name, shown)
+				c.refuse("service %s mounts a %s volume (not on Kubernetes)", s.name, ShownVolumeType(typ))
 			}
 		}
 	}

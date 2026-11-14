@@ -425,7 +425,7 @@ func (t *translator) compat() error {
 				return refused("service %s uses TUN/NET_ADMIN (not on Kubernetes; prefer a userspace mode)", n)
 			}
 			if !slices.Contains(templates.KubeBaselineCaps, c) {
-				return refused("service %s adds %s, outside the Kubernetes baseline", n, c)
+				return refused("service %s adds %s, outside the Kubernetes baseline", n, templates.ShownCap(c))
 			}
 		}
 		if !podDNSLabel(n) {
@@ -437,7 +437,7 @@ func (t *translator) compat() error {
 		if s.User != "" {
 			uid, _, err := numericUser(s.User)
 			if err != nil {
-				return refused("service %s runs as user %s: Kubernetes needs a numeric uid", n, s.User)
+				return refused("service %s runs as a non-numeric user: Kubernetes needs a numeric uid", n)
 			}
 			if uid == 0 {
 				if !t.isJob(n) {
@@ -968,7 +968,7 @@ func (p *podSpec) container(n string, s types.ServiceConfig, main bool) error {
 	t := p.t
 	img, ok := t.in.Digests[s.Image]
 	if !ok || img == "" {
-		return refused("service %s: image %s is not resolved to a digest", n, s.Image)
+		return refused("service %s: its image is not resolved to a digest", n)
 	}
 	c := corev1.Container{Name: containerName(n), Image: img, ImagePullPolicy: corev1.PullIfNotPresent}
 	if len(s.Entrypoint) > 0 {
@@ -997,7 +997,7 @@ func (p *podSpec) container(n string, s types.ServiceConfig, main bool) error {
 	if s.User != "" {
 		u, g, err := numericUser(s.User)
 		if err != nil {
-			return refused("service %s runs as user %s: Kubernetes needs a numeric uid", n, s.User)
+			return refused("service %s runs as a non-numeric user: Kubernetes needs a numeric uid", n)
 		}
 		uid, gid = u, g
 		sc.RunAsUser = &u
@@ -1046,7 +1046,7 @@ func (p *podSpec) container(n string, s types.ServiceConfig, main bool) error {
 		for _, g := range s.GroupAdd {
 			v, err := strconv.ParseInt(g, 10, 64)
 			if err != nil {
-				return refused("service %s adds group %s: Kubernetes needs a numeric gid", n, g)
+				return refused("service %s adds a non-numeric group: Kubernetes needs a numeric gid", n)
 			}
 			p.sc.SupplementalGroups = append(p.sc.SupplementalGroups, v)
 		}
@@ -1178,7 +1178,7 @@ func (p *podSpec) mounts(n string, s types.ServiceConfig, c *corev1.Container, u
 				return err
 			}
 		default:
-			return refused("service %s mounts a %s volume (not on Kubernetes)", n, v.Type)
+			return refused("service %s mounts a %s volume (not on Kubernetes)", n, templates.ShownVolumeType(v.Type))
 		}
 	}
 	return nil
@@ -1331,11 +1331,7 @@ func (p *podSpec) bind(n string, v types.ServiceVolumeConfig, c *corev1.Containe
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: vn, MountPath: v.Target, ReadOnly: v.ReadOnly})
 		return nil
 	}
-	shown := src
-	if !path.IsAbs(src) || strings.ContainsAny(src, " \t\n") {
-		shown = "a host path"
-	}
-	return refused("service %s binds %s, outside the shared-folder roots (not on Kubernetes)", n, shown)
+	return refused("service %s binds a host path outside the shared-folder roots (not on Kubernetes)", n)
 }
 
 func underAny(p string, roots []string) bool {
@@ -1355,7 +1351,7 @@ func (p *podSpec) templateBind(n, rel string, v types.ServiceVolumeConfig, c *co
 	t := p.t
 	rel = strings.TrimSuffix(rel, "/")
 	if t.tplCM == "" {
-		return refused("service %s binds template file %s, which doesn't exist", n, rel)
+		return refused("service %s binds a template file that doesn't exist", n)
 	}
 	if k, ok := t.tplItems[rel]; ok {
 		vn := "tpl-" + shortHash(rel)
@@ -1375,7 +1371,7 @@ func (p *podSpec) templateBind(n, rel string, v types.ServiceVolumeConfig, c *co
 		}
 	}
 	if len(items) == 0 {
-		return refused("service %s binds template file %s, which doesn't exist", n, rel)
+		return refused("service %s binds a template file that doesn't exist", n)
 	}
 	vn := "tpl-" + shortHash(rel+"/")
 	p.addVolume(corev1.Volume{Name: vn, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -1587,7 +1583,7 @@ func (t *translator) podService(name, from, pod string, names []string, podOf ma
 			num, proto, _ := strings.Cut(e, "/")
 			port, err := strconv.Atoi(num)
 			if err != nil {
-				return nil, refused("service %s exposes %q: only single ports are on Kubernetes", n, e)
+				return nil, refused("service %s exposes something other than a single port (not on Kubernetes)", n)
 			}
 			pr := corev1.ProtocolTCP
 			if strings.EqualFold(proto, "udp") {
@@ -1647,7 +1643,7 @@ func (t *translator) servicePorts(pod string, members []string) ([]*unstructured
 			case isLoopback(hip):
 				continue
 			default:
-				return nil, refused("service %s publishes %d on %s (not on Kubernetes)", n, pub, hip)
+				return nil, refused("service %s publishes %d on %s (not on Kubernetes)", n, pub, templates.ShownIP(hip))
 			}
 			proto := corev1.ProtocolTCP
 			if strings.EqualFold(sp.Protocol, "udp") {

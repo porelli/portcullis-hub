@@ -661,7 +661,7 @@
   "want": {
    "status": "refused",
    "reasons": [
-    "service app runs as user app: Kubernetes needs a numeric uid"
+    "service app runs as a non-numeric user: Kubernetes needs a numeric uid"
    ]
   }
  },
@@ -691,8 +691,7 @@
   "want": {
    "status": "refused",
    "reasons": [
-    "service app binds /var/run/docker.sock, outside the shared-folder roots (not on Kubernetes)",
-    "service app binds /etc/localtime, outside the shared-folder roots (not on Kubernetes)"
+    "service app binds a host path outside the shared-folder roots (not on Kubernetes)"
    ]
   }
  },
@@ -1258,7 +1257,7 @@
   "want": {
    "status": "refused",
    "reasons": [
-    "service web adds group audio: Kubernetes needs a numeric gid"
+    "service web adds a non-numeric group: Kubernetes needs a numeric gid"
    ]
   }
  },
@@ -1272,7 +1271,7 @@
   "want": {
    "status": "refused",
    "reasons": [
-    "service web exposes \"8000-8010\": only single ports are on Kubernetes"
+    "service web exposes something other than a single port (not on Kubernetes)"
    ]
   }
  },

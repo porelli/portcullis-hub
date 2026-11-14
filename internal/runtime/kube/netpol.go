@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/portcullis/hub/internal/templates"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -137,7 +138,7 @@ func InstancePolicies(in PolicyInput) ([]*unstructured.Unstructured, error) {
 		for _, a := range in.Settings.APIAddresses {
 			ip, err := netip.ParseAddr(strings.TrimSpace(a))
 			if err != nil || !ip.Is4() {
-				return nil, refused("API address %q is not an IPv4 address", a)
+				return nil, refused("API address %s is not an IPv4 address", templates.ShownIP(a))
 			}
 			if c := ip.String() + "/32"; !slices.Contains(except, c) {
 				except = append(except, c)
@@ -150,7 +151,7 @@ func InstancePolicies(in PolicyInput) ([]*unstructured.Unstructured, error) {
 		for _, a := range in.Settings.NodeAddresses {
 			ip, err := netip.ParseAddr(strings.TrimSpace(a))
 			if err != nil || !ip.Is4() {
-				return nil, refused("node address %q is not an IPv4 address", a)
+				return nil, refused("node address %s is not an IPv4 address", templates.ShownIP(a))
 			}
 			if c := ip.String() + "/32"; !slices.Contains(except, c) {
 				except = append(except, c)

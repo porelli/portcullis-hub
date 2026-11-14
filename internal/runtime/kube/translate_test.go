@@ -26,6 +26,14 @@ const hubImage = "ghcr.io/porelli/portcullis-hub@sha256:111111111111111111111111
 // loadModel loads dir/compose.yml with dir/env (if any) as the hub does.
 func loadModel(t *testing.T, dir, instance string) *types.Project {
 	t.Helper()
+	p, err := loadModelErr(dir, instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func loadModelErr(dir, instance string) (*types.Project, error) {
 	opts := []cli.ProjectOptionsFn{cli.WithName("portcullis-" + instance), cli.WithWorkingDirectory(dir),
 		cli.WithEnv([]string{}), cli.WithProfiles([]string{"*"}), cli.WithConsistency(false), cli.WithResolvedPaths(false), cli.WithoutEnvironmentResolution}
 	if _, err := os.Stat(filepath.Join(dir, "env")); err == nil {
@@ -33,13 +41,9 @@ func loadModel(t *testing.T, dir, instance string) *types.Project {
 	}
 	po, err := cli.NewProjectOptions([]string{filepath.Join(dir, "compose.yml")}, opts...)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	p, err := po.LoadProject(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return p
+	return po.LoadProject(context.Background())
 }
 
 // digests resolves every image of m to a fake digest.

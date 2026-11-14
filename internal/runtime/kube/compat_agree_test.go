@@ -20,17 +20,17 @@ import (
 // refusal must be one kubeCompat gives too.
 var translatorOnly = map[string]string{
 	"%s needs internet egress, and core.env has no node addresses (PORTCULLIS_KUBE_NODE_ADDRESSES): not deployed": "core.env",
-	"API address %q is not an IPv4 address":                       "core.env",
-	"node address %q is not an IPv4 address":                      "core.env",
+	"API address %s is not an IPv4 address":                       "core.env",
+	"node address %s is not an IPv4 address":                      "core.env",
 	"VPN slot %d is outside 0–46":                                 "the Hub's VPN state",
 	"%s %s exceeds 1 MiB":                                         "file contents",
 	"data file %s exceeds 1 MiB":                                  "file contents",
 	"secret %s exceeds 1 MiB":                                     "file contents",
 	"template files for %s exceed 1 MiB":                          "file contents",
-	"service %s binds template file %s, which doesn't exist":      "files on disk",
+	"service %s binds a template file that doesn't exist":         "files on disk",
 	"%s and %s give the same object name %s":                      "names from the manifest and the Hub's inputs (data files, options)",
 	"%s: no compose model":                                        "internal",
-	"service %s: image %s is not resolved to a digest":            "registry",
+	"service %s: its image is not resolved to a digest":           "registry",
 	"companion %s: port %d":                                       "the Hub's companion inputs",
 	"companion %s: service %s is not a compose service":           "the Hub's companion inputs",
 	"companion alias %q isn't portcullis-mcp-%s--<companion>":     "the Hub's companion inputs",
@@ -132,6 +132,52 @@ func TestCompatJudgesLabelsLikeTheDeploy(t *testing.T) {
 		_, err := Translate(inputOf(t, compose, "lc"))
 		if refusedErr(err) != why {
 			t.Errorf("%q: translator %v", labels, err)
+		}
+	}
+}
+
+// TestRefusalsNeverEchoInstanceValues: values the instance's env puts
+// into a template (a secret, an admin's path) never appear in a refusal,
+// from RuntimeCompat or from the translator.
+func TestRefusalsNeverEchoInstanceValues(t *testing.T) {
+	const secret = "s3cr3t-Hunter2-value"
+	env := map[string]string{"APP_USER": secret, "APP_GROUP": secret, "APP_CAP": secret, "APP_PATH": "/" + secret, "APP_IP": secret,
+		"APP_EXPOSE": secret, "PORTCULLIS_HOST_WEB": secret + ".example.org", "APP_PRIO": secret, "APP_TIER": secret, "APP_SVC": secret}
+	composes := []string{
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: ${APP_USER}\n",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    group_add: [\"${APP_GROUP}\"]\n",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    cap_add: [\"${APP_CAP}\"]\n",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    volumes: [\"${APP_PATH}:/data\"]\n",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    ports: [\"${APP_IP}:8080:80\"]\n",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    expose: [\"${APP_EXPOSE}\"]\n",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    labels:\n      traefik.enable: \"true\"\n" +
+			"      traefik.http.routers.web.rule: Host(`${PORTCULLIS_HOST_WEB:-web.portcullis.local}`) && Headers(`X`, `${APP_SVC}`)\n      traefik.http.services.web.loadbalancer.server.port: \"80\"\n",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    labels:\n      traefik.enable: \"true\"\n" +
+			"      traefik.http.routers.web.rule: Host(`a.example.org`)\n      traefik.http.routers.web.priority: ${APP_PRIO}\n      traefik.http.routers.web.tls.options: ${APP_TIER}\n      traefik.http.routers.web.service: ${APP_SVC}\n",
+	}
+	for _, compose := range composes {
+		c := templates.RuntimeCompat("kubernetes", []byte(compose), templates.Manifest{}, env, 80)
+		if r := strings.Join(c.Reasons, "; "); strings.Contains(strings.ToLower(r), strings.ToLower(secret)) {
+			t.Errorf("compat echoes the value: %s", r)
+		}
+		dir := t.TempDir()
+		var lines []string
+		for k, v := range env {
+			lines = append(lines, k+"="+v)
+		}
+		os.WriteFile(filepath.Join(dir, "env"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+		os.WriteFile(filepath.Join(dir, "compose.yml"), []byte(compose), 0o644)
+		m, err := loadModelErr(dir, "sec")
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(secret)) {
+				t.Logf("compose itself names the value (not a Hub refusal): %v", err)
+			}
+			continue
+		}
+		in := Input{Instance: "sec", Template: "x", Namespace: ns, Model: m, Digests: digests(m), HubImage: hubImage, BindRoots: []string{"/srv"},
+			Settings: Settings{PodCIDR: "10.42.0.0/16", ServiceCIDR: "10.43.0.0/16", NodeAddresses: []string{"192.0.2.10"}}}
+		if _, err := Translate(in); err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(secret)) {
+			t.Errorf("translator echoes the value: %v", err)
 		}
 	}
 }

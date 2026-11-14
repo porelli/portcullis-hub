@@ -126,7 +126,7 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 				}
 				p, err := strconv.ParseInt(v, 10, 32)
 				if err != nil || p < 1 || p > 65535 {
-					return nil, refused("service %s: bad port %q", name, v)
+					return nil, refused("service %s: its port isn't a port number", name)
 				}
 				ports[name], svcOwner[name] = p, svc
 			case "middlewares":
@@ -158,13 +158,13 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 			return nil, refused("router %s has no rule", name)
 		}
 		if !routeMatch.MatchString(r.rule) {
-			return nil, refused("router %s: rule %s isn't Host(…) with an optional && Path/PathPrefix over lowercase hostnames (not on Kubernetes)", name, r.rule)
+			return nil, refused("router %s: its rule isn't Host(…) with an optional && Path/PathPrefix over lowercase hostnames (not on Kubernetes)", name)
 		}
 		route := map[string]any{"match": r.rule, "kind": "Rule"}
 		if r.priority != "" {
 			p, err := strconv.ParseInt(r.priority, 10, 64)
 			if err != nil {
-				return nil, refused("router %s: bad priority %q", name, r.priority)
+				return nil, refused("router %s: its priority isn't a number", name)
 			}
 			if p > MaxAppPriority {
 				return nil, refused("router %s: priority %d is above %d (not on Kubernetes)", name, p, MaxAppPriority)
@@ -197,7 +197,7 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 			tls := map[string]any{}
 			if r.tlsOptions != "" {
 				if !slices.Contains(TLSOptions, r.tlsOptions) {
-					return nil, refused("router %s: tls.options %s is not one of the tiers", name, r.tlsOptions)
+					return nil, refused("router %s: its tls.options isn't one of the tiers", name)
 				}
 				tls["options"] = map[string]any{"name": strings.TrimSuffix(r.tlsOptions, "@file") + "@file"}
 			}
@@ -252,7 +252,7 @@ func middlewareRef(instance, ns, m string, own map[string]map[string]string) (ma
 	case (!hasProvider || provider == "docker" || provider == "file") && slices.Contains(FileMiddlewares, name):
 		return map[string]any{"name": name + "@file"}, nil
 	}
-	return nil, refused("middleware %s is not on Kubernetes (not the instance's own, not a core name apps may use)", m)
+	return nil, refused("middleware %s is not on Kubernetes (not the instance's own, not a core name apps may use)", templates.ShownName(m))
 }
 
 // serviceRef maps a router's service.
@@ -275,7 +275,7 @@ func serviceRef(instance, appsNamespace, router, svc string, ports map[string]in
 	case hasProvider && (provider == "docker" || provider == "file") && slices.Contains(FileServices, name):
 		return map[string]any{"name": name + "@file", "kind": "TraefikService"}, nil
 	}
-	return nil, refused("router %s: service %s is not on Kubernetes", router, svc)
+	return nil, refused("router %s: service %s is not on Kubernetes", router, templates.ShownName(svc))
 }
 
 // middlewareSpec builds a Middleware's spec from its label fields (the
@@ -324,7 +324,7 @@ func middlewareSpec(instance, name string, f map[string]string, own map[string]m
 			case "rejectstatuscode":
 				n, err := strconv.ParseInt(v, 10, 32)
 				if err != nil {
-					return nil, refused("middleware %s: bad rejectstatuscode %q", name, v)
+					return nil, refused("middleware %s: its rejectstatuscode isn't a number", name)
 				}
 				set("ipAllowList", "rejectStatusCode", n)
 			default:

@@ -42,7 +42,9 @@ func (h *Hub) upProject(ctx context.Context, t *templates.Template) (runtime.Pro
 	}
 	m, err := h.loadRuntime(ctx, t)
 	if err != nil {
-		return p, statusErr(500, "%s: loading the project for Kubernetes: %v", t.ID, err)
+		// compose's error can quote an interpolated setting (a secret):
+		// never echoed.
+		return p, statusErr(500, "%s: compose can't load the project for Kubernetes with the instance's settings (a setting has a value compose refuses)", t.ID)
 	}
 	p.Model = m
 	in, err := h.kubeInputs(t)
