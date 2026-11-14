@@ -38,7 +38,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: jobs
-  name: jobs
+  name: jobs--pods
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -239,7 +239,7 @@ spec:
           readOnly: true
       dnsConfig:
         searches:
-        - jobs.portcullis-apps.svc.cluster.local
+        - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: db
       initContainers:
@@ -290,7 +290,7 @@ spec:
         fsGroup: 70
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs
+      subdomain: jobs--pods
       volumes:
       - emptyDir: {}
         name: portcullis-bin
@@ -333,7 +333,7 @@ spec:
           runAsUser: 10001
       dnsConfig:
         searches:
-        - jobs.portcullis-apps.svc.cluster.local
+        - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: migrate
       restartPolicy: Never
@@ -341,7 +341,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs
+      subdomain: jobs--pods
 ---
 # step 3 wait complete
 apiVersion: batch/v1
@@ -389,7 +389,7 @@ spec:
           runAsUser: 0
       dnsConfig:
         searches:
-        - jobs.portcullis-apps.svc.cluster.local
+        - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: perms
       restartPolicy: Never
@@ -397,7 +397,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs
+      subdomain: jobs--pods
 ---
 # step 4 wait none
 apiVersion: apps/v1
@@ -436,10 +436,10 @@ spec:
         securityContext: {}
       dnsConfig:
         searches:
-        - jobs.portcullis-apps.svc.cluster.local
+        - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: app
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-      subdomain: jobs
+      subdomain: jobs--pods

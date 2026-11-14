@@ -1101,17 +1101,15 @@
   }
  },
  {
-  "name": "kubernetes: a root job with template files refused",
+  "name": "kubernetes: a root job with template files ok",
   "runtime": "kubernetes",
   "compose": "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n    volumes: [\"data:/var/lib/app\"]\n    depends_on:\n      perms:\n        condition: service_completed_successfully\n  perms:\n    image: docker.io/library/alpine:3.24.3\n    user: \"0:1000\"\n    restart: \"no\"\n    cap_drop: [ALL]\n    cap_add: [CHOWN]\n    volumes: [\"./templates/echo/fetch.sh:/fetch.sh:ro\"]\nvolumes:\n  data: {}\n",
   "ports": [],
   "env": {},
   "port_start": 80,
   "want": {
-   "status": "refused",
-   "reasons": [
-    "service perms runs as root with template files mounted"
-   ]
+   "status": "ok",
+   "reasons": []
   }
  },
  {
@@ -1191,6 +1189,48 @@
    "status": "refused",
    "reasons": [
     "service web answers to alias web-internal but serves no declared port (expose it)"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a compose service named pods refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  pods:\n    image: docker.io/library/nginx:1.29\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service pods: the name is reserved on Kubernetes (the instance's pod DNS)"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: an alias pods refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    expose: [\"80\"]\n    networks:\n      default:\n        aliases: [pods]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web answers to alias pods, reserved on Kubernetes (the instance's pod DNS)"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a volume on a service with no numeric user refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    volumes: [\"site:/srv\"]\nvolumes:\n  site: {}\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web mounts a volume but has no numeric user"
    ]
   }
  }

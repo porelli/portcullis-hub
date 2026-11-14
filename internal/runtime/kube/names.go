@@ -96,12 +96,7 @@ func PersonSecretName(instance, key string) string { return joinName(instance, k
 func DataFileName(instance, name string) string    { return joinName(instance, name, "") }
 func DataSecretsName(instance, name string) string { return joinName(instance, name, "-secrets") }
 
-// TemplateFilesName is the ConfigMap of template's files with content
-// hash sum (hex).
-func TemplateFilesName(template, sum string) string {
-	n := "tpl-" + sanitize(template) + "-" + sum[:10]
-	if len(n) > maxName {
-		n = "tpl-" + sanitize(template)[:maxName-15] + "-" + sum[:10]
-	}
-	return n
-}
+// TemplateFilesName is the instance's ConfigMap of its template's files
+// with content hash sum (hex): <instance>--tpl-<sum[:10]>, owned by the
+// instance (never shared by two instances of one template).
+func TemplateFilesName(instance, sum string) string { return joinName(instance, "tpl-"+sum[:10], "") }

@@ -202,6 +202,8 @@ func networkAliases(s *yaml.Node) []string {
 func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]string, roots []string, k kubeCtx) {
 	if !podDNSName.MatchString(name) || strings.Contains(name, "--") {
 		c.refuse("service %s: its name isn't a DNS label without \"--\" (not on Kubernetes)", name)
+	} else if name == kubePodsName {
+		c.refuse("service %s: the name is reserved on Kubernetes (the instance's pod DNS)", name)
 	}
 	tun := "service " + name + " uses TUN/NET_ADMIN (not on Kubernetes; prefer a userspace mode)"
 	devs, ok := scalars(field(s, "devices"))
@@ -295,6 +297,16 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 	if eh := field(s, "extra_hosts"); eh != nil && eh.Tag != "!!null" && len(eh.Content) > 0 || eh != nil && eh.Kind == yaml.ScalarNode && eh.Tag != "!!null" && eh.Value != "" {
 		c.refuse("service %s sets extra_hosts (not on Kubernetes)", name)
 	}
+	// A named volume's owner on Kubernetes is the service's uid (the
+	// translator's PVC annotations): none, nothing to own it.
+	if scalarValue(field(s, "user"), env) == "" {
+		for _, v := range namedVolumes(field(s, "volumes"), env) {
+			if v != SecretsVolumeKey {
+				c.refuse("service %s mounts a volume but has no numeric user", name)
+				break
+			}
+		}
+	}
 }
 
 // kubeAliases judges the network aliases and container_names (the
@@ -334,6 +346,8 @@ func (c *compatReasons) kubeAliases(services []namedService, k kubeCtx, env map[
 				c.refuse("service %s answers to alias %s, not a DNS label without \"--\" (not on Kubernetes)", s.name, shown)
 			case names[a]:
 				c.refuse("service %s answers to alias %s, also a compose service name", s.name, a)
+			case a == kubePodsName:
+				c.refuse("service %s answers to alias %s, reserved on Kubernetes (the instance's pod DNS)", s.name, a)
 			case dup && prev != s.name:
 				c.refuse("alias %s names two services (%s, %s)", a, min(prev, s.name), max(prev, s.name))
 			case !served[podOf[s.name]]:
@@ -347,6 +361,9 @@ func (c *compatReasons) kubeAliases(services []namedService, k kubeCtx, env map[
 		c.refuse("more than %d network aliases (not on Kubernetes)", kubeMaxAliases)
 	}
 }
+
+// kubePodsName is the translator's PodsName (<instance>--pods).
+const kubePodsName = "pods"
 
 // kubeMaxAliases is the translator's MaxAliases.
 const kubeMaxAliases = 16
@@ -416,9 +433,10 @@ func bindSources(vols *yaml.Node, env map[string]string) []string {
 }
 
 // rootBind: why a one-shot root job's binds are refused ("" = fine):
-// none may be bound: a root pod's volumes are only emptyDir, the
-// instance's PVCs and Secrets (core's admission) — no host path,
-// read-only included, and no template files (a shared ConfigMap).
+// only the template's own files (./templates/…, the instance's
+// ConfigMap on Kubernetes) may be bound: a root pod's volumes are only
+// emptyDir and the instance's PVCs, ConfigMaps and Secrets (core's
+// admission) — no host path, read-only included.
 func rootBind(vols *yaml.Node, env map[string]string) string {
 	if vols == nil || vols.Kind != yaml.SequenceNode {
 		return ""
@@ -442,7 +460,7 @@ func rootBind(vols *yaml.Node, env map[string]string) string {
 			src = scalarValue(field(v, "source"), env)
 		}
 		if strings.HasPrefix(path.Clean(src), "templates/") {
-			return "template files mounted"
+			continue // the instance's own template-files ConfigMap
 		}
 		return "a host bind"
 	}

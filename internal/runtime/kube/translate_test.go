@@ -295,14 +295,6 @@ func TestTranslatorRefusesWhatCompatRefuses(t *testing.T) {
 			s.Ports = append(s.Ports, types.ServicePortConfig{Target: uint32(p.Port), Published: itoa(p.Port), Protocol: p.Protocol})
 			model.Services[svc] = s
 		}
-		// A volume's owner on Kubernetes is its service's numeric uid:
-		// compat doesn't judge a missing user yet (open question).
-		for name, s := range model.Services {
-			if s.User == "" {
-				s.User = "10001"
-				model.Services[name] = s
-			}
-		}
 		in := Input{Instance: "vec", Template: "echo", Namespace: "portcullis-apps", Model: model, Digests: digests(model), HubImage: hubImage, BindRoots: templates.DefaultKubeBindRoots,
 			TemplateFiles: map[string][]byte{"conf/x": []byte("x")}, Settings: Settings{PodCIDR: "10.42.0.0/16", ServiceCIDR: "10.43.0.0/16", NodeAddresses: []string{"192.0.2.10"}}}
 		_, terr := Translate(in)
@@ -460,7 +452,7 @@ func TestTranslateClusterIPServices(t *testing.T) {
 			continue
 		}
 		typ, _, _ := unstructured.NestedString(o.Object, "spec", "type")
-		if typ == "LoadBalancer" || o.GetName() == "cs" {
+		if typ == "LoadBalancer" || o.GetName() == "cs--pods" {
 			continue
 		}
 		if typ != "" && typ != "ClusterIP" {
@@ -545,7 +537,7 @@ func TestTranslateCompanionAliasService(t *testing.T) {
 }
 
 // TestTranslatePodDNS: compose service names resolve to the instance's
-// pods: a headless Service named the instance (publishNotReadyAddresses),
+// pods: a headless Service <instance>--pods (publishNotReadyAddresses),
 // each pod hostname = its compose service, subdomain = that Service, the
 // instance's search domain first; the vpn gateway's netns members share
 // their owner's pod (no name of their own, as on Docker). Names that
@@ -558,7 +550,7 @@ func TestTranslatePodDNS(t *testing.T) {
 	for _, o := range objectsOf(t, inputOf(t, compose, "dn")) {
 		switch o.GetKind() {
 		case "Service":
-			if o.GetName() == "dn" {
+			if o.GetName() == "dn--pods" {
 				headless = o
 			}
 		case "Deployment", "Job":
@@ -578,10 +570,10 @@ func TestTranslatePodDNS(t *testing.T) {
 	}
 	for name, svc := range map[string]string{"dn--web": "web", "dn--db": "db"} {
 		p := pods[name]
-		if p["hostname"] != svc || p["subdomain"] != "dn" {
+		if p["hostname"] != svc || p["subdomain"] != "dn--pods" {
 			t.Errorf("%s: hostname %v subdomain %v", name, p["hostname"], p["subdomain"])
 		}
-		if s := fmt.Sprint(p["dnsConfig"]); s != "map[searches:[dn.portcullis-apps.svc.cluster.local]]" {
+		if s := fmt.Sprint(p["dnsConfig"]); s != "map[searches:[dn--pods.portcullis-apps.svc.cluster.local]]" {
 			t.Errorf("%s: dnsConfig %s", name, s)
 		}
 	}
@@ -604,15 +596,14 @@ func TestTranslatePodDNS(t *testing.T) {
 
 // TestTranslateOneShotRootMounts: a root one-shot job mounts no host path
 // (on Kubernetes a host bind is a shared folder), writable or not; its
-// own PVC and emptyDir are fine, template files aren't; a root group
+// own PVC and emptyDir are fine; a root group
 // is refused; no fsGroup 0 is ever
 // emitted.
 func TestTranslateOneShotRootMounts(t *testing.T) {
 	ok := "    cap_drop: [ALL]\n    cap_add: [CHOWN]\n"
 	for vols, why := range map[string]string{
-		"    volumes: [\"/srv/share:/data\"]\n":            "service perms runs as root with a host bind",
-		"    volumes: [\"/srv/share:/data:ro\"]\n":         "service perms runs as root with a host bind",
-		"    volumes: [\"./templates/x/conf:/conf:ro\"]\n": "service perms runs as root with template files mounted",
+		"    volumes: [\"/srv/share:/data\"]\n":    "service perms runs as root with a host bind",
+		"    volumes: [\"/srv/share:/data:ro\"]\n": "service perms runs as root with a host bind",
 	} {
 		if _, err := Translate(inputOf(t, oneShotCompose(ok+vols), "os")); refusedErr(err) != why {
 			t.Errorf("%q: %v", vols, err)
@@ -685,5 +676,40 @@ func TestTranslateAliases(t *testing.T) {
 		if _, err := Translate(inputOf(t, c, "al")); refusedErr(err) != why {
 			t.Errorf("%q: %v", c, err)
 		}
+	}
+}
+
+// TestTemplateFilesInstanceOwned: the template-folder binds of any pod
+// come from one ConfigMap the instance owns, <instance>--tpl-<hash10>
+// (labelled with the instance), mounted read-only; two instances of one
+// template never share it; a root one-shot job may mount it.
+func TestTemplateFilesInstanceOwned(t *testing.T) {
+	compose := oneShotCompose("    cap_drop: [ALL]\n    cap_add: [CHOWN]\n    volumes: [\"./templates/x/fetch.sh:/fetch.sh:ro\"]\n")
+	names := map[string]bool{}
+	for _, inst := range []string{"a1", "a2"} {
+		in := inputOf(t, compose, inst)
+		in.TemplateFiles = map[string][]byte{"fetch.sh": []byte("echo")}
+		var cm string
+		for _, o := range objectsOf(t, in) {
+			if o.GetKind() == "ConfigMap" && strings.HasPrefix(o.GetName(), inst+"--tpl-") {
+				cm = o.GetName()
+				if o.GetLabels()[LabelInstance] != inst || len(cm) != len(inst)+len("--tpl-")+10 {
+					t.Errorf("%s labels %v", cm, o.GetLabels())
+				}
+			}
+			if o.GetKind() == "Job" {
+				vs, _, _ := unstructured.NestedSlice(o.Object, "spec", "template", "spec", "volumes")
+				if !strings.Contains(fmt.Sprint(vs), "name:"+inst+"--tpl-") {
+					t.Errorf("job volumes %v", vs)
+				}
+			}
+		}
+		if cm == "" {
+			t.Fatalf("%s: no instance-owned template ConfigMap", inst)
+		}
+		names[cm] = true
+	}
+	if len(names) != 2 {
+		t.Errorf("shared: %v", names)
 	}
 }

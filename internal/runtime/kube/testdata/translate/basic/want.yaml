@@ -23,7 +23,7 @@ kind: ConfigMap
 metadata:
   labels:
     portcullis.io/instance: basic
-  name: tpl-echo-0060493bf0
+  name: basic--tpl-0060493bf0
   namespace: portcullis-apps
 ---
 # step 0 wait none
@@ -53,7 +53,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: basic
-  name: basic
+  name: basic--pods
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -376,7 +376,7 @@ spec:
           readOnly: true
       dnsConfig:
         searches:
-        - basic.portcullis-apps.svc.cluster.local
+        - basic--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: web
       initContainers:
@@ -427,7 +427,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: basic
+      subdomain: basic--pods
       terminationGracePeriodSeconds: 20
       volumes:
       - hostPath:
@@ -450,7 +450,7 @@ spec:
             path: echo.conf
           - key: f001-extra.txt
             path: extra.txt
-          name: tpl-echo-0060493bf0
+          name: basic--tpl-0060493bf0
         name: tpl-4ab11cad
       - name: vol-echo-data
         persistentVolumeClaim:

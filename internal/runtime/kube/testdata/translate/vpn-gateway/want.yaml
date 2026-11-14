@@ -19,7 +19,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: vpn-gateway
-  name: vpn-gateway
+  name: vpn-gateway--pods
   namespace: portcullis-apps
 spec:
   clusterIP: None
@@ -191,11 +191,11 @@ spec:
         securityContext: {}
       dnsConfig:
         searches:
-        - vpn-gateway.portcullis-apps.svc.cluster.local
+        - vpn-gateway--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: headscale
       securityContext:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      subdomain: vpn-gateway
+      subdomain: vpn-gateway--pods

@@ -1072,7 +1072,7 @@
    "apiVersion": "v1",
    "kind": "Service",
    "metadata": {
-    "name": "np",
+    "name": "app--np",
     "namespace": "portcullis-apps",
     "labels": {
      "portcullis.io/instance": "app"
@@ -1100,7 +1100,7 @@
    "apiVersion": "v1",
    "kind": "Service",
    "metadata": {
-    "name": "en",
+    "name": "app--en",
     "namespace": "portcullis-apps",
     "labels": {
      "portcullis.io/instance": "app"
@@ -1121,7 +1121,7 @@
    "apiVersion": "v1",
    "kind": "Service",
    "metadata": {
-    "name": "eip",
+    "name": "app--eip",
     "namespace": "portcullis-apps",
     "labels": {
      "portcullis.io/instance": "app"
@@ -1151,7 +1151,7 @@
    "apiVersion": "v1",
    "kind": "Service",
    "metadata": {
-    "name": "lb443",
+    "name": "app--lb443",
     "namespace": "portcullis-apps",
     "labels": {
      "portcullis.io/instance": "app"
@@ -1180,7 +1180,7 @@
    "apiVersion": "v1",
    "kind": "Service",
    "metadata": {
-    "name": "lb8090",
+    "name": "app--lb8090",
     "namespace": "portcullis-apps",
     "labels": {
      "portcullis.io/instance": "app"
@@ -1210,7 +1210,7 @@
    "apiVersion": "v1",
    "kind": "Service",
    "metadata": {
-    "name": "lbnp",
+    "name": "app--lbnp",
     "namespace": "portcullis-apps",
     "labels": {
      "portcullis.io/instance": "app"
@@ -6132,5 +6132,182 @@
   "as": "hub",
   "want": "deny",
   "reason_contains": "hostAliases"
+ },
+ {
+  "name": "a Service not named after its instance",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "web",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "web"
+    }
+   },
+   "spec": {
+    "type": "ClusterIP",
+    "selector": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "web"
+    },
+    "ports": [
+     {
+      "name": "tcp-8080",
+      "port": 8080,
+      "targetPort": 8080,
+      "protocol": "TCP"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a Service is named <instance>--"
+ },
+ {
+  "name": "a one-shot root Job with its instance's template ConfigMap",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms13",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 1000,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        },
+        "volumeMounts": [
+         {
+          "name": "t",
+          "mountPath": "/t",
+          "readOnly": true
+         }
+        ]
+       }
+      ],
+      "volumes": [
+       {
+        "name": "t",
+        "configMap": {
+         "name": "app--tpl-0123456789"
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a one-shot root Job with another instance's ConfigMap",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms14",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 1000,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        },
+        "volumeMounts": [
+         {
+          "name": "t",
+          "mountPath": "/t",
+          "readOnly": true
+         }
+        ]
+       }
+      ],
+      "volumes": [
+       {
+        "name": "t",
+        "configMap": {
+         "name": "other--tpl-0123456789"
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a volume outside the allowlist"
  }
 ]

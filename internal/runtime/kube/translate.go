@@ -431,6 +431,9 @@ func (t *translator) compat() error {
 		if !podDNSLabel(n) {
 			return refused("service %s: its name isn't a DNS label without \"--\" (not on Kubernetes)", n)
 		}
+		if n == PodsName {
+			return refused("service %s: the name is reserved on Kubernetes (the instance's pod DNS)", n)
+		}
 		if s.User != "" {
 			uid, _, err := numericUser(s.User)
 			if err != nil {
@@ -476,6 +479,9 @@ func (t *translator) aliases() (map[string]string, error) {
 		}
 		if _, ok := m.Services[a]; ok {
 			return refused("service %s answers to alias %s, also a compose service name", n, a)
+		}
+		if a == PodsName {
+			return refused("service %s answers to alias %s, reserved on Kubernetes (the instance's pod DNS)", n, a)
 		}
 		if prev, ok := out[a]; ok && prev != n {
 			return refused("alias %s names two services (%s, %s)", a, min(prev, n), max(prev, n))
@@ -528,9 +534,9 @@ func (t *translator) companionAlias(n, a string) bool {
 
 // rootBind: why a one-shot root job's mounts are refused ("" = fine):
 // a root pod's volumes are only emptyDir, the instance's own PVCs and its
-// own Secrets (core's admission): no host path (read-only included), no
-// template files (a ConfigMap shared by the template's instances), no
-// data file (a projected volume).
+// own ConfigMaps/Secrets (core's admission): its template files (the
+// instance's ConfigMap, read-only) yes, no host path (read-only
+// included), no data file (a projected volume).
 func (t *translator) rootBind(n string) string {
 	tplPrefix := "templates/" + t.in.Template + "/"
 	for _, v := range t.in.Model.Services[n].Volumes {
@@ -541,7 +547,7 @@ func (t *translator) rootBind(n string) string {
 			return "a data file mounted"
 		}
 		if rel := strings.TrimPrefix(path.Clean(v.Source), "./"); strings.HasPrefix(rel, tplPrefix) || rel+"/" == tplPrefix {
-			return "template files mounted"
+			continue // the instance's own ConfigMap, read-only
 		}
 		return "a host bind"
 	}
@@ -712,7 +718,7 @@ func (t *translator) templateFiles() error {
 		return refused("template files for %s exceed 1 MiB", t.in.Template)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
-	t.tplCM = TemplateFilesName(t.in.Template, sum)
+	t.tplCM = TemplateFilesName(t.in.Instance, sum)
 	if err := t.claim("configmap", t.tplCM, "the template files"); err != nil {
 		return err
 	}
@@ -1244,7 +1250,8 @@ func (p *podSpec) pvc(n string, v types.ServiceVolumeConfig, c *corev1.Container
 		return nil
 	}
 	if uid < 1 {
-		return refused("service %s mounts volume %s without a numeric user: the volume's owner on Kubernetes is the service's uid", n, v.Source)
+		// The PVC's owner is the service's uid (K3).
+		return refused("service %s mounts a volume but has no numeric user", n)
 	}
 	g := uid
 	if gid != nil {
@@ -1428,7 +1435,7 @@ func (p *podSpec) finish() corev1.PodSpec {
 	t := p.t
 	f := false
 	// Pod DNS: the compose service name resolves to this pod for the
-	// instance's own pods (<pod>.<instance>.<ns>.svc).
+	// instance's own pods (<pod>.<instance>--pods.<ns>.svc).
 	sub := PodsServiceName(t.in.Instance)
 	spec := corev1.PodSpec{
 		Hostname:                      p.pod,
@@ -1468,10 +1475,15 @@ func (p *podSpec) finish() corev1.PodSpec {
 // ClusterDomain is the cluster's DNS domain (k3s and kubeadm default).
 const ClusterDomain = "cluster.local"
 
-// PodsServiceName is the instance's headless Service, named the
-// instance (core's admission: subdomain = the instance): every pod's
-// subdomain, so <compose service>.<instance>.<ns>.svc names the pod.
-func PodsServiceName(instance string) string { return instance }
+// PodsName is the compose name / alias the pod-DNS Service takes
+// (<instance>--pods): reserved on Kubernetes.
+const PodsName = "pods"
+
+// PodsServiceName is the instance's headless Service <instance>--pods:
+// every pod's subdomain, so <compose service>.<instance>--pods.<ns>.svc
+// names the pod. A bare <instance> name could answer another instance's
+// short-name lookup through the namespace search domain.
+func PodsServiceName(instance string) string { return joinName(instance, PodsName, "") }
 
 // podsService is the headless Service PodsServiceName selecting the
 // instance's pods, ready or not (a name resolves while its pod starts,
