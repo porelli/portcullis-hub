@@ -301,17 +301,17 @@ func TestDelegateDeleteNeedsConfirmation(t *testing.T) {
 	if !e.ll.HasUser("erin") {
 		t.Fatal("erin was deleted before the confirmation")
 	}
-	if _, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, id, "dana"); err == nil {
+	if _, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, id, "dana"); err == nil {
 		t.Error("the people tool's confirmation is on the Hub listener")
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerPeople, id, "dana")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerPeople, id, "dana")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if v.Typed != "erin" || !strings.Contains(strings.Join(v.Consequences, " "), "erin") {
 		t.Errorf("page typed %q, consequences %v", v.Typed, v.Consequences)
 	}
-	if _, err := e.s.Hub.ConfirmationPage(hub.ListenerPeople, id, "erin"); err == nil {
+	if _, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerPeople, id, "erin"); err == nil {
 		t.Error("someone else sees dana's confirmation")
 	}
 	decidePeople(t, e, id, "dana", "erin")

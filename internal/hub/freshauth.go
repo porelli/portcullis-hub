@@ -166,15 +166,78 @@ func freshPcMethod(compiled signin.Node, on map[signin.Method]bool) string {
 	return string(signin.TOTP)
 }
 
-// withPcMethod is a copy of info with PcMethod set (nil stays nil): the
-// shared info is never changed.
-func withPcMethod(info *freshauth.AuthorizeInfo, pc string) *freshauth.AuthorizeInfo {
+// freshNeedsStronger is the fresh-auth refusal for a person none of
+// whose set-up methods can pass the governing rule (final review M1).
+const freshNeedsStronger = "This needs a stronger sign-in: you don't have a method it accepts yet."
+
+// freshPcFor is the fresh-auth popup's pc_method for a person with the
+// set-up methods has (final review M1, ruling), under compiled rule:
+//   - a set-up method other than totp that the rule accepts as a fresh
+//     method on its own (signin.FreshAccepted): "" — the person signs in
+//     with it, as before;
+//   - otherwise, an alternative holding totp whose every method the person
+//     has (password + code): "totp" — Keycloak asks for the password, then
+//     the code;
+//   - otherwise: refusal = freshNeedsStronger (the page doesn't open the
+//     popup).
+//
+// known false (the inventory doesn't know the person): the rule alone
+// decides (freshPcMethod), never a refusal — the Hub's proof check still
+// decides.
+func freshPcFor(compiled signin.Node, on, has map[signin.Method]bool, known bool) (pc, refusal string) {
+	if !known {
+		return freshPcMethod(compiled, on), ""
+	}
+	acc, err := signin.FreshAccepted(compiled, on)
+	if err != nil {
+		return "", ""
+	}
+	for m := range acc {
+		if m != signin.TOTP && has[m] {
+			return "", ""
+		}
+	}
+	if acc[signin.TOTP] && on[signin.TOTP] && has[signin.TOTP] {
+		alts, err := signin.Alternatives(compiled)
+		if err == nil {
+			for _, a := range alts {
+				if slices.Contains(a, signin.TOTP) && !slices.ContainsFunc(a, func(m signin.Method) bool { return !has[m] || !on[m] }) {
+					return string(signin.TOTP), ""
+				}
+			}
+		}
+	}
+	return "", freshNeedsStronger
+}
+
+// withPcMethod is a copy of info with PcMethod and Refusal set (nil stays
+// nil): the shared info is never changed.
+func withPcMethod(info *freshauth.AuthorizeInfo, pc, refusal string) *freshauth.AuthorizeInfo {
 	if info == nil {
 		return nil
 	}
 	c := *info
-	c.PcMethod = pc
+	c.PcMethod, c.Refusal = pc, refusal
 	return &c
+}
+
+// personMethods is user's set-up methods from the sign-in inventory (read
+// fresh as the Sign-in page reads it: at most once per 30 s; never under
+// mu), and whether the inventory knows them.
+func (h *Hub) personMethods(ctx context.Context, user string) (map[signin.Method]bool, bool) {
+	inv, err := h.SignInInventory(ctx, true)
+	if err != nil || inv == nil {
+		return nil, false
+	}
+	pm, ok := inv.People[strings.ToLower(user)]
+	if !ok {
+		return nil, false
+	}
+	has := make(map[signin.Method]bool, len(pm.Methods))
+	for _, m := range pm.Methods {
+		has[m] = true
+	}
+	return has, true
 }
 
 // freshProof is an accepted fresh-auth proof and the template it was

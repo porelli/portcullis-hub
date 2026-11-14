@@ -27,6 +27,8 @@
 //     "totp" adds pc_method=totp, only on a proof flow; any other value is
 //     never sent. Keycloak then asks for the person's password (or key)
 //     and then a code from their authenticator app.
+//   - fa.refusal (or h.refusal): the person can't pass the view's rule
+//     (final review M1): a proof flow opens nothing and shows it.
 //   - h.kcAction opens one of Keycloak's application-initiated actions
 //     instead (KC_ACTION: + Add, Replace, Remove an authenticator app);
 //     anything else opens nothing. Its answer is the callback's
@@ -93,6 +95,14 @@
     const kcAction = h.kcAction === undefined ? '' : String(h.kcAction);
     if (h.kcAction !== undefined && !KC_ACTION.test(kcAction)) {
       h.status('That action isn\'t available here.', true);
+      return;
+    }
+    // A proof flow the person can't pass (fa.refusal, or h.refusal: an
+    // app's fresh_refusal) opens nothing: the page says why (final review
+    // M1). Actions never take it: they ask Keycloak's own re-auth.
+    const refusal = h.refusal !== undefined ? h.refusal : fa.refusal;
+    if (!kcAction && refusal) {
+      h.status(String(refusal), true);
       return;
     }
     // A code is asked for only on a proof flow, never with an action.

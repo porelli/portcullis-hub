@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -519,7 +520,7 @@ func TestOTPPolicyReadsRealmAndActions(t *testing.T) {
 	ctx := context.Background()
 	p, err := c.OTPPolicy(ctx)
 	want := keycloak.OTPPolicy{Type: "totp", Algorithm: "HmacSHA1", Digits: 6, Period: 30, LookAhead: 1, InitialCounter: 0, CodeReusable: false, ConfigureMaxAge: 300, DeleteMaxAge: 300}
-	if err != nil || p == nil || *p != want {
+	if err != nil || p == nil || !reflect.DeepEqual(*p, want) {
 		t.Fatalf("OTPPolicy = %+v, %v", p, err)
 	}
 	// A missing action config or an unreadable value reads as 0 (drift).
@@ -527,6 +528,20 @@ func TestOTPPolicyReadsRealmAndActions(t *testing.T) {
 	p, err = c.OTPPolicy(ctx)
 	if err != nil || p.ConfigureMaxAge != 0 || p.DeleteMaxAge != 0 || !p.CodeReusable {
 		t.Errorf("drift = %+v, %v", p, err)
+	}
+	// Absent policy fields (review T7-L1): named in Unset, never read as
+	// the wanted zero values.
+	fields := realm(false)
+	delete(fields, "otpPolicyCodeReusable")
+	delete(fields, "otpPolicyInitialCounter")
+	f.SetRealm(fields, map[string]map[string]string{"CONFIGURE_TOTP": {"max_auth_age": "300"}, "delete_credential": {"max_auth_age": "300"}})
+	p, err = c.OTPPolicy(ctx)
+	if err != nil || strings.Join(p.Unset, ",") != "otpPolicyCodeReusable,otpPolicyInitialCounter" {
+		t.Errorf("absent fields = %+v, %v", p, err)
+	}
+	f.SetRealm(realm(false), map[string]map[string]string{"CONFIGURE_TOTP": {"max_auth_age": "300"}, "delete_credential": {"max_auth_age": "300"}})
+	if p, _ = c.OTPPolicy(ctx); len(p.Unset) != 0 {
+		t.Errorf("all present: Unset %v", p.Unset)
 	}
 	f.SetDown(true)
 	if _, err := c.OTPPolicy(ctx); err == nil {

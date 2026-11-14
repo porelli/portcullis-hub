@@ -382,11 +382,12 @@ type ConfirmationView struct {
 
 // ConfirmationPage is user's confirmation id on listener: 404 for an
 // unknown id, another person's and the other listener's.
-func (h *Hub) ConfirmationPage(listener, id, user string) (*ConfirmationView, error) {
+func (h *Hub) ConfirmationPage(ctx context.Context, listener, id, user string) (*ConfirmationView, error) {
 	c, err := h.confirms().Get(id, strings.ToLower(user))
 	if err != nil || c.Listener != listener {
 		return nil, errNoConfirmation
 	}
+	has, known := h.personMethods(ctx, user)
 	// Every displayed field with its invisible characters made visible
 	// (final review I3): bidi controls, zero-width and other format
 	// characters, control characters and line separators never reorder or
@@ -401,14 +402,14 @@ func (h *Hub) ConfirmationPage(listener, id, user string) (*ConfirmationView, er
 	// The popup asks for the code when the confirmation's governing
 	// template accepts only that (T9).
 	h.mu.RLock()
-	pc := ""
+	pc, refusal := "", ""
 	if _, rule, why := h.governingLocked(h.confirmGov(c)); why == "" {
-		pc = freshPcMethod(rule, h.st.SignIn.MethodsOn())
+		pc, refusal = freshPcFor(rule, h.st.SignIn.MethodsOn(), has, known)
 	}
 	h.mu.RUnlock()
 	return &ConfirmationView{ID: c.ID, State: c.State, Tool: VisibleText(c.Tool), Target: VisibleText(c.Label), Resource: VisibleText(c.Resource), Client: VisibleText(c.Client),
 		Consequences: cons, Arguments: VisibleText(c.ArgsPreview), Typed: VisibleText(c.Typed), Created: c.Created, Expires: c.Expires,
-		FreshAuth: withPcMethod(h.FreshAuthInfoFor(listener), pc)}, nil
+		FreshAuth: withPcMethod(h.FreshAuthInfoFor(listener), pc, refusal)}, nil
 }
 
 // VisibleText is s with every character that could hide or reorder text

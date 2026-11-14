@@ -85,9 +85,16 @@ func TestCheckFreshAuthPasswordUnderPasswordAndCode(t *testing.T) {
 	if r, _, err := h.checkFreshAuth(c.ctx, govCore("people"), testProof, "alice"); err != nil || r.Method != "totp" {
 		t.Errorf("totp: %+v %v", r, err)
 	}
-	// MySignIn's popup asks for the code.
+	// MySignIn's popup: alice has only a key, which password-and-code
+	// doesn't take: refused with the needs-stronger text (final review M1).
 	v, err := h.MySignInView(c.ctx, "alice")
-	if err != nil || v.FreshAuth == nil || v.FreshAuth.PcMethod != "totp" {
+	if err != nil || v.FreshAuth == nil || v.FreshAuth.PcMethod != "" || v.FreshAuth.Refusal != freshNeedsStronger {
+		t.Errorf("key-only view fresh_auth = %+v %v", v.FreshAuth, err)
+	}
+	// With a password and a code: the popup asks for the code.
+	withPasswordAndCode(t, c, "alice")
+	v, err = h.MySignInView(c.ctx, "alice")
+	if err != nil || v.FreshAuth == nil || v.FreshAuth.PcMethod != "totp" || v.FreshAuth.Refusal != "" {
 		t.Errorf("view fresh_auth = %+v %v", v.FreshAuth, err)
 	}
 	// The shared info is never changed (other views keep no pc_method).
@@ -95,8 +102,8 @@ func TestCheckFreshAuthPasswordUnderPasswordAndCode(t *testing.T) {
 		t.Errorf("shared info = %+v", info)
 	}
 	setSignIn(c.f, func(si *state.SignIn) { si.Core["people"] = "strong" })
-	if v, _ := h.MySignInView(c.ctx, "alice"); v.FreshAuth == nil || v.FreshAuth.PcMethod != "" {
-		t.Errorf("strong fresh_auth = %+v", v.FreshAuth)
+	if v, _ := h.MySignInView(c.ctx, "alice"); v.FreshAuth == nil || v.FreshAuth.PcMethod != "" || v.FreshAuth.Refusal != freshNeedsStronger {
+		t.Errorf("strong fresh_auth (alice has no key now) = %+v", v.FreshAuth)
 	}
 	b, _ := json.Marshal(freshauth.AuthorizeInfo{PcMethod: "totp"})
 	if !strings.Contains(string(b), `"pc_method":"totp"`) {
@@ -276,13 +283,24 @@ func TestConfirmationPagePcMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := h.ConfirmationPage(ListenerHub, cf.ID, "root")
-	if err != nil || v.FreshAuth == nil || v.FreshAuth.PcMethod != "totp" {
-		t.Fatalf("page = %+v %v", v, err)
+	// root has only a key: refused (final review M1).
+	v, err := h.ConfirmationPage(context.Background(), ListenerHub, cf.ID, "root")
+	if err != nil || v.FreshAuth == nil || v.FreshAuth.PcMethod != "" || v.FreshAuth.Refusal != freshNeedsStronger {
+		t.Fatalf("key-only page = %+v %v", v.FreshAuth, err)
 	}
-	setSignIn(c.f, func(si *state.SignIn) { si.Core["hub"] = "strong" })
-	if v, _ = h.ConfirmationPage(ListenerHub, cf.ID, "root"); v.FreshAuth == nil || v.FreshAuth.PcMethod != "" {
-		t.Errorf("strong: %+v", v.FreshAuth)
+	withPasswordAndCode(t, c, "root")
+	if v, _ = h.ConfirmationPage(context.Background(), ListenerHub, cf.ID, "root"); v.FreshAuth == nil || v.FreshAuth.PcMethod != "totp" || v.FreshAuth.Refusal != "" {
+		t.Errorf("password + code: %+v", v.FreshAuth)
+	}
+	// A key-or-code rule with root's key back: the key, no pc_method.
+	c.src.set(func(s *fakeSignInSrc) { s.keys["root"] = []signin.Method{signin.SecurityKey, signin.TOTP} })
+	c.f.h.MarkInventoryStale()
+	setSignIn(c.f, func(si *state.SignIn) {
+		si.Templates["mixed"] = state.SignInTemplate{Name: "Mixed", Rule: signin.Node{Op: "any", Items: []signin.Node{{Leaf: "security_key"}, siLeaves("all", "password", "totp")}}, Enabled: true}
+		si.Core["hub"] = "mixed"
+	})
+	if v, _ = h.ConfirmationPage(context.Background(), ListenerHub, cf.ID, "root"); v.FreshAuth == nil || v.FreshAuth.PcMethod != "" || v.FreshAuth.Refusal != "" {
+		t.Errorf("mixed with a key: %+v", v.FreshAuth)
 	}
 }
 
@@ -316,4 +334,82 @@ func TestLockoutGuardCountsTOTP(t *testing.T) {
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "root") {
 		t.Errorf("without the app: %v, want the guard's 409", err)
 	}
+}
+
+// TestFreshPcForPerson (final review M1, ruling): pc_method per person —
+// a method that meets the fresh rule on its own: as today (none); else a
+// password + code way in the person has both of: "totp"; else the
+// needs-stronger refusal. Unknown to the inventory: the rule alone.
+func TestFreshPcForPerson(t *testing.T) {
+	on := allMethodsOn()
+	mixed := signin.Node{Op: "any", Items: []signin.Node{{Leaf: "security_key"}, siLeaves("all", "password", "totp")}}
+	pac := siLeaves("all", "password", "totp")
+	strong := siLeaves("any", "security_key", "yubikey_cert")
+	basic := siLeaves("any", "family:passkey", "password")
+	keyAndCode := siLeaves("all", "security_key", "totp")
+	set := func(ms ...signin.Method) map[signin.Method]bool {
+		out := map[signin.Method]bool{}
+		for _, m := range ms {
+			out[m] = true
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name    string
+		rule    signin.Node
+		has     map[signin.Method]bool
+		known   bool
+		pc      string
+		refused bool
+	}{
+		{"mixed, a key", mixed, set(signin.SecurityKey, signin.Password, signin.TOTP), true, "", false},
+		{"mixed, password + code", mixed, set(signin.Password, signin.TOTP), true, "totp", false},
+		{"mixed, password only", mixed, set(signin.Password), true, "", true},
+		{"mixed, code only", mixed, set(signin.TOTP), true, "", true},
+		{"mixed, nothing", mixed, set(), true, "", true},
+		{"password-and-code, both", pac, set(signin.Password, signin.TOTP), true, "totp", false},
+		{"password-and-code, a key only", pac, set(signin.SecurityKey), true, "", true},
+		{"strong, a key", strong, set(signin.SecurityKey), true, "", false},
+		{"strong, password + code", strong, set(signin.Password, signin.TOTP), true, "", true},
+		{"basic, a password", basic, set(signin.Password), true, "", false},
+		{"key and code, both", keyAndCode, set(signin.SecurityKey, signin.TOTP), true, "", false},
+		{"unknown person, password-and-code", pac, nil, false, "totp", false},
+		{"unknown person, mixed", mixed, nil, false, "", false},
+	} {
+		compiled, err := signin.Compile(c.rule, on)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pc, refusal := freshPcFor(compiled, on, c.has, c.known)
+		if pc != c.pc || (refusal != "") != c.refused {
+			t.Errorf("%s: pc %q, refusal %q", c.name, pc, refusal)
+		}
+		if c.refused && refusal != freshNeedsStronger {
+			t.Errorf("%s: refusal text %q", c.name, refusal)
+		}
+	}
+	// totp switched off: never "totp".
+	off := allMethodsOn()
+	off[signin.TOTP] = false
+	compiled, _ := signin.Compile(mixed, off)
+	if pc, _ := freshPcFor(compiled, off, set(signin.Password, signin.TOTP), true); pc != "" {
+		t.Errorf("totp off: %q", pc)
+	}
+}
+
+// withPasswordAndCode gives user (in c's fixture) a Hub-recorded password
+// and an authenticator app in place of their other methods.
+func withPasswordAndCode(t *testing.T, c *certFixture, user string) {
+	t.Helper()
+	p := newFakePeople("alice", "bob")
+	p.addGroup(lldap.AdminGroup, "root", "ann")
+	c.src.set(func(s *fakeSignInSrc) {
+		s.keys[user] = []signin.Method{signin.TOTP}
+		delete(s.creds, user)
+	})
+	wireSignIn(c.f.h, p, c.src)
+	if err := c.f.h.RecordPassword(user, p.uuidOf(user), "root"); err != nil {
+		t.Fatal(err)
+	}
+	c.f.h.MarkInventoryStale()
 }

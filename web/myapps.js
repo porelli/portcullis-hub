@@ -192,7 +192,8 @@
     // The app's own fresh method (fresh_pc_method, P11): "totp" asks the
     // popup for the code; nothing else is ever passed on.
     const pc = app.fresh_pc_method === 'totp' ? 'totp' : '';
-    let h = '<div class="ma-value ma-cred" data-ma-cred data-ma-app="' + esc(app.id) + '" data-ma-key="' + esc(c.key) + '" data-ma-name="' + esc(name) + '" data-ma-status-kind="' + esc(c.status) + '" data-ma-pc="' + pc + '">' +
+    const refusal = app.fresh_refusal || '';
+    let h = '<div class="ma-value ma-cred" data-ma-cred data-ma-app="' + esc(app.id) + '" data-ma-key="' + esc(c.key) + '" data-ma-name="' + esc(name) + '" data-ma-status-kind="' + esc(c.status) + '" data-ma-pc="' + pc + '" data-ma-refusal="' + esc(refusal) + '">' +
       '<dt>' + esc(c.label || c.key) + '</dt><dd>' +
       '<div class="ma-entry-row"><span class="ma-cred-line' + (c.status === 'unavailable' || c.status === 'voided' ? ' ma-cred-warn' : '') + '">' + (typeof line === 'object' ? line.html : esc(line)) + '</span>' + btns + '</div>' +
       '<div data-ma-cred-panel></div>' +
@@ -229,6 +230,7 @@
     PortcullisFreshAuth.start(el.maFreshAuth, {
       ctx: { instance: f.instance, key: f.key },
       pcMethod: row.dataset.maPc === 'totp' ? 'totp' : '',
+      refusal: row.dataset.maRefusal || '',
       status: (text, warn, spin) => credStatus(row, text, warn, spin),
       busy: on => credBusy(row, on),
       end: () => { if (flow === f) flow = null; },

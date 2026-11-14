@@ -421,3 +421,46 @@ func TestFreshAuthStatelessRefusals(t *testing.T) {
 		t.Errorf("the proof flow's own answer = %v", out["proofProof"])
 	}
 }
+
+// TestFreshAuthRefusal (final review M1): a proof flow the person can't
+// pass opens nothing and says why (fa.refusal, or an app's h.refusal);
+// an action still opens; the confirmation page and My apps pass the
+// person's pc_method and refusal on.
+func TestFreshAuthRefusal(t *testing.T) {
+	out := freshJS(t, `(async () => {
+  const fa = {authorize_url: 'https://auth.example.org/a', client_id: 'c', redirect_uri: 'https://people.example.org/signin', refusal: "This needs a stronger sign-in: you don't have a method it accepts yet."};
+  const res = {};
+  const h = name => ({ ctx: {x: name}, status: (t, w) => { res[name] = t; res[name + 'Warn'] = !!w; }, busy() {}, end() {}, proof() {}, action() {} });
+  let n = popups.length;
+  await F.start(fa, h('proof'));
+  res.proofOpened = popups.length !== n;
+  n = popups.length;
+  await F.start(fa, Object.assign(h('app'), {refusal: 'app says no'}));
+  res.appOpened = popups.length !== n;
+  n = popups.length;
+  await F.start(Object.assign({}, fa, {refusal: ''}), Object.assign(h('appOK'), {refusal: ''}));
+  res.appOKOpened = popups.length !== n;
+  n = popups.length;
+  await F.start(fa, Object.assign(h('action'), {kcAction: 'CONFIGURE_TOTP'}));
+  res.actionOpened = popups.length !== n;
+  return res;
+})()`).(map[string]any)
+	if out["proofOpened"] != false || out["proof"] != "This needs a stronger sign-in: you don't have a method it accepts yet." || out["proofWarn"] != true {
+		t.Errorf("refused proof flow: %v", out)
+	}
+	if out["appOpened"] != false || out["app"] != "app says no" || out["appOKOpened"] != true {
+		t.Errorf("an app's refusal: %v", out)
+	}
+	if out["actionOpened"] != true {
+		t.Errorf("an action was refused: %v", out)
+	}
+	if pg := webAsset(t, "confirm.html"); !strings.Contains(pg, `data-pc-method="{{.FA.PcMethod}}" data-refusal="{{.FA.Refusal}}"`) {
+		t.Error("confirm.html doesn't pass pc_method and refusal")
+	}
+	if js := webAsset(t, "confirm.js"); !strings.Contains(js, "pc_method: root.dataset.pcMethod === 'totp' ? 'totp' : '',") || !strings.Contains(js, "refusal: root.dataset.refusal || '',") {
+		t.Error("confirm.js doesn't read them")
+	}
+	if js := webAsset(t, "myapps.js"); !strings.Contains(js, "refusal: row.dataset.maRefusal || '',") || !strings.Contains(js, `data-ma-refusal="' + esc(refusal) + '"`) {
+		t.Error("myapps.js doesn't pass an app's refusal")
+	}
+}

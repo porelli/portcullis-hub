@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -45,7 +46,7 @@ var totpDoctorTimeout = 10 * time.Second
 func totpPolicyDrift(p *keycloak.OTPPolicy) []string {
 	var out []string
 	add := func(bad bool, name string) {
-		if bad {
+		if (bad || slices.Contains(p.Unset, name)) && !slices.Contains(out, name) {
 			out = append(out, name)
 		}
 	}

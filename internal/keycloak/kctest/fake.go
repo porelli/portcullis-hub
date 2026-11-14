@@ -267,7 +267,6 @@ func (s *Server) Update(username string, fn func(*User)) {
 	}
 }
 
-// SetDown switches the outage simulation.
 // SetRealm sets RealmFields and RequiredActionConfigs under the lock.
 func (s *Server) SetRealm(fields map[string]any, actionConfigs map[string]map[string]string) {
 	s.mu.Lock()
@@ -275,6 +274,7 @@ func (s *Server) SetRealm(fields map[string]any, actionConfigs map[string]map[st
 	s.RealmFields, s.RequiredActionConfigs = fields, actionConfigs
 }
 
+// SetDown switches the outage simulation.
 func (s *Server) SetDown(down bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

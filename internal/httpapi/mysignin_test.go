@@ -30,6 +30,8 @@ type signInCertActions struct {
 	// authLabels the authenticator renames.
 	labels     []string
 	authLabels []string
+	// reads counts the inventory's Passkeys reads (review T7-L3).
+	reads int
 }
 
 // aliceOTPID is alice's authenticator app in signInEnv.
@@ -83,6 +85,9 @@ func signInEnv(t *testing.T) (*toolEnv, *signInCertActions) {
 	ca := &signInCertActions{}
 	h.SetSignInSources(hub.SignInSources{
 		Passkeys: func(context.Context) (map[string][]keycloak.PasskeyCredential, error) {
+			ca.mu.Lock()
+			ca.reads++
+			ca.mu.Unlock()
 			return map[string][]keycloak.PasskeyCredential{"alice": {{ID: alicePasskeyID, Type: string(signin.SecurityKey), Label: "YubiKey 5C"}},
 				"root": {{ID: "r", Type: string(signin.SecurityKey)}}}, nil
 		},
@@ -423,10 +428,36 @@ func TestRenameOwnAuthenticatorRoute(t *testing.T) {
 // TestMySignInRefresh (T5): ?refresh=1 is accepted (never an error) and
 // any other value is ignored.
 func TestMySignInRefresh(t *testing.T) {
-	e, _ := signInEnv(t)
-	for _, q := range []string{"?refresh=1", "?refresh=1", "?refresh=yes", ""} {
+	e, ca := signInEnv(t)
+	now := time.Now()
+	var clockMu sync.Mutex
+	e.s.Hub.SetEntryClockForTest(func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now })
+	reads := func() int { ca.mu.Lock(); defer ca.mu.Unlock(); return ca.reads }
+	get := func(q string) {
+		t.Helper()
 		if r, b := doAs(t, e.ppl, "alice", "GET", "/api/me/signin"+q, ""); r.StatusCode != 200 || !strings.Contains(b, `"max_authenticators":3`) {
 			t.Errorf("%q = %d %s", q, r.StatusCode, b)
 		}
+	}
+	get("")
+	base := reads()
+	// review T7-L3: ?refresh=1 re-reads the inventory once; a second one
+	// within 10 s and any other value don't (the 30 s cache answers).
+	get("?refresh=1")
+	if n := reads(); n != base+1 {
+		t.Errorf("after refresh=1: %d reads, want %d", n, base+1)
+	}
+	get("?refresh=1")
+	get("?refresh=yes")
+	get("")
+	if n := reads(); n != base+1 {
+		t.Errorf("throttled / other values: %d reads, want %d", n, base+1)
+	}
+	clockMu.Lock()
+	now = now.Add(11 * time.Second)
+	clockMu.Unlock()
+	get("?refresh=1")
+	if n := reads(); n != base+2 {
+		t.Errorf("after 10 s: %d reads, want %d", n, base+2)
 	}
 }

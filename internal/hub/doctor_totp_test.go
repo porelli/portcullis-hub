@@ -57,6 +57,12 @@ func TestTOTPPolicyDrift(t *testing.T) {
 	if d := totpPolicyDrift(p); !slices.Equal(d, want) {
 		t.Errorf("drift = %v, want %v", d, want)
 	}
+	// An absent setting is drift (review T7-L1), named once.
+	q := pinnedPolicy()
+	q.Unset = []string{"otpPolicyCodeReusable", "otpPolicyInitialCounter"}
+	if d := totpPolicyDrift(q); !slices.Equal(d, []string{"otpPolicyCodeReusable", "otpPolicyInitialCounter"}) {
+		t.Errorf("unset drift = %v", d)
+	}
 }
 
 // TestDoctorTOTPInputs (T12, P16): the policy's drift; the realm's

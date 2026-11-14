@@ -1227,6 +1227,10 @@ type OTPPolicy struct {
 	Digits, Period, LookAhead, InitialCounter int
 	CodeReusable                              bool
 	ConfigureMaxAge, DeleteMaxAge             int
+	// Unset names the realm's otpPolicy* fields that are absent (review
+	// T7-L1): their zero values above would read as the wanted ones, so
+	// the drift check reports these instead.
+	Unset []string
 }
 
 // OTPPolicy reads the realm's OTP policy and the two required actions'
@@ -1245,18 +1249,43 @@ func (c *Client) OTPPolicy(ctx context.Context) (*OTPPolicy, error) {
 		return nil, &HTTPError{Op: "read the realm", Status: resp.StatusCode()}
 	}
 	var r struct {
-		Type           string `json:"otpPolicyType"`
-		Algorithm      string `json:"otpPolicyAlgorithm"`
-		Digits         int    `json:"otpPolicyDigits"`
-		Period         int    `json:"otpPolicyPeriod"`
-		LookAhead      int    `json:"otpPolicyLookAheadWindow"`
-		InitialCounter int    `json:"otpPolicyInitialCounter"`
-		CodeReusable   bool   `json:"otpPolicyCodeReusable"`
+		Type           *string `json:"otpPolicyType"`
+		Algorithm      *string `json:"otpPolicyAlgorithm"`
+		Digits         *int    `json:"otpPolicyDigits"`
+		Period         *int    `json:"otpPolicyPeriod"`
+		LookAhead      *int    `json:"otpPolicyLookAheadWindow"`
+		InitialCounter *int    `json:"otpPolicyInitialCounter"`
+		CodeReusable   *bool   `json:"otpPolicyCodeReusable"`
 	}
 	if err := json.Unmarshal(resp.Body(), &r); err != nil {
 		return nil, fmt.Errorf("read the realm: %w", err)
 	}
-	p := &OTPPolicy{Type: r.Type, Algorithm: r.Algorithm, Digits: r.Digits, Period: r.Period, LookAhead: r.LookAhead, InitialCounter: r.InitialCounter, CodeReusable: r.CodeReusable}
+	p := &OTPPolicy{}
+	str := func(v *string, name string, dst *string) {
+		if v == nil {
+			p.Unset = append(p.Unset, name)
+			return
+		}
+		*dst = *v
+	}
+	num := func(v *int, name string, dst *int) {
+		if v == nil {
+			p.Unset = append(p.Unset, name)
+			return
+		}
+		*dst = *v
+	}
+	str(r.Type, "otpPolicyType", &p.Type)
+	str(r.Algorithm, "otpPolicyAlgorithm", &p.Algorithm)
+	num(r.Digits, "otpPolicyDigits", &p.Digits)
+	num(r.Period, "otpPolicyPeriod", &p.Period)
+	num(r.LookAhead, "otpPolicyLookAheadWindow", &p.LookAhead)
+	if r.CodeReusable == nil {
+		p.Unset = append(p.Unset, "otpPolicyCodeReusable")
+	} else {
+		p.CodeReusable = *r.CodeReusable
+	}
+	num(r.InitialCounter, "otpPolicyInitialCounter", &p.InitialCounter)
 	for alias, dst := range map[string]*int{"CONFIGURE_TOTP": &p.ConfigureMaxAge, "delete_credential": &p.DeleteMaxAge} {
 		resp, err := c.api().GetRequestWithBearerAuth(ctx, tok).Get(base + "/authentication/required-actions/" + url.PathEscape(alias) + "/config")
 		if err != nil {

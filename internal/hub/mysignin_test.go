@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -811,5 +814,54 @@ func TestRefreshMySignInThrottle(t *testing.T) {
 	h.RefreshMySignIn("")
 	if gen() != g0+3 {
 		t.Error("an empty user marked")
+	}
+}
+
+// TestMySignInTOTPRowGuardAlone (review T7-L2): the row's own guard (P28)
+// shows admin "none" even when the inventory lists a code for them (the
+// loadInventory drop bypassed with a seeded cache); an ordinary person
+// without an app is "none" too.
+func TestMySignInTOTPRowGuardAlone(t *testing.T) {
+	c := totpFixture(t)
+	h := c.f.h
+	p := newFakePeople("alice", "admin", "bob")
+	wireSignIn(h, p, c.src)
+	at := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
+	h.signInInv.now = func() time.Time { return at }
+	h.signInInv.mu.Lock()
+	h.signInInv.base = &invBase{at: at,
+		passkeys: map[string][]signin.Method{"admin": {signin.TOTP}, "bob": {}},
+		keys:     map[string][]keycloak.PasskeyCredential{"admin": {{ID: otpID1, Type: string(signin.TOTP), Label: "Phone"}}, "bob": {}},
+		disabled: map[string]bool{}, certs: map[string][]signin.Method{}, uuids: map[string]string{}}
+	h.signInInv.tried, h.signInInv.err = at, nil
+	h.signInInv.mu.Unlock()
+	for _, u := range []string{"admin", "bob"} {
+		v, err := h.MySignInView(c.ctx, u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r := mineRow(v, signin.TOTP); r.State != MethodNone || r.Authenticators != nil {
+			t.Errorf("%s row = %+v", u, r)
+		}
+	}
+}
+
+// TestMaxAuthenticatorsMatchesContract (review T7-L5): the Hub's limit is
+// the contract's (§5.1 / §8.1: "`max_authenticators` is
+// `hub.MaxAuthenticators` (N)", "the limit of N"), which the extension's
+// TotpRegister.MAX enforces; the keycloak repo pins the same text.
+func TestMaxAuthenticatorsMatchesContract(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "web", "docs", "integration-contracts.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(b)
+	for _, want := range []string{
+		"`max_authenticators` is `hub.MaxAuthenticators` (" + strconv.Itoa(MaxAuthenticators) + ")",
+		"the limit of " + strconv.Itoa(MaxAuthenticators) + " ",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("the contract doesn't say %q", want)
+		}
 	}
 }

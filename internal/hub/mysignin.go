@@ -151,12 +151,14 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 	v := &MySignIn{User: u, Methods: []MethodRow{}, Certificates: []CertRow{}, Apps: []AppNeed{}, Limits: h.limitsViewLocked(),
 		AddStronger: si.AddStronger, FreshAuth: info, AccountURL: h.cfg.AccountURL, CertFresh: []signin.Method{},
 		CertFreshRefusal: h.errCertNeedsKey().Error(), MaxAuthenticators: MaxAuthenticators}
+	var peopleRule *signin.Node
 	if _, rule, why := h.governingLocked(govCore("people")); why == "" {
 		if cf := certFreshAllowed(rule, on); cf != nil {
 			v.CertFresh = cf
 		}
-		// The popup asks for the code when people accepts only that (T9).
-		v.FreshAuth = withPcMethod(info, freshPcMethod(rule, on))
+		// The popup's method for this person (T9, final review M1).
+		r := rule
+		peopleRule = &r
 	}
 
 	var pm PersonMethods
@@ -174,6 +176,10 @@ func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) 
 	has := map[signin.Method]bool{}
 	for _, x := range pm.Methods {
 		has[x] = true
+	}
+	if peopleRule != nil {
+		pc, refusal := freshPcFor(*peopleRule, on, has, known)
+		v.FreshAuth = withPcMethod(info, pc, refusal)
 	}
 	for _, meth := range signin.Methods {
 		mi, _ := signin.InfoOf(meth)

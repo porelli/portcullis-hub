@@ -102,7 +102,7 @@ certificate, never adds a first password and never starts signing in as
 someone else.
 
 **Apps that work.** Every common app: Google Authenticator, Microsoft
-Authenticator, Authy, 1Password, Bitwarden, FreeOTP, Aegis and Raivo. Portcullis
+Authenticator, Authy, 1Password, Bitwarden, FreeOTP and Aegis. Portcullis
 uses the settings they all support (HMAC-SHA1, 6 digits, 30 seconds); a code
 from just before or after the current one is accepted too (±30 s of clock
 drift), and an accepted code can't be used twice. The server's clock matters:

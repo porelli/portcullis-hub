@@ -101,6 +101,9 @@ type MyApp struct {
 	// "totp" when its governing template accepts only a code, else "".
 	// Set only on an app with credential cards (the proofs it starts).
 	FreshPcMethod string `json:"fresh_pc_method,omitempty"`
+	// FreshRefusal (final review M1): none of the caller's set-up methods
+	// passes this app's template: the card shows it instead of the popup.
+	FreshRefusal string `json:"fresh_refusal,omitempty"`
 	// VPNOnly: some of its hosts is reachable only over the VPN (the
 	// policy's vpn.hosts): the card says so.
 	VPNOnly bool `json:"vpn_only,omitempty"`
@@ -142,6 +145,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		return nil, err
 	}
 	info := h.FreshAuthInfo()
+	has, known := h.personMethods(ctx, user)
 	gate := h.gatePresent()
 	policyDoc := h.gatePolicy.Load()
 	healthy := h.aiClientHealth()
@@ -202,7 +206,7 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		}
 		if len(app.Credentials) > 0 {
 			if _, rule, why := h.governingLocked(govInstance(t.ID)); why == "" {
-				app.FreshPcMethod = freshPcMethod(rule, h.st.SignIn.MethodsOn())
+				app.FreshPcMethod, app.FreshRefusal = freshPcFor(rule, h.st.SignIn.MethodsOn(), has, known)
 			}
 		}
 		if aiOn && gateUser(user) {
@@ -240,6 +244,9 @@ func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
 		case len(app.Entries) > 0:
 			app.URL, app.NoAccess, app.VPNOnly = "", true, false
 			app.Values, app.Credentials, app.AI = []MyValue{}, []MyCredential{}, nil
+			// No credential card, so no proof: no fresh method either
+			// (final review L13).
+			app.FreshPcMethod, app.FreshRefusal = "", ""
 		default:
 			continue
 		}

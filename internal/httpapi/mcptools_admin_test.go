@@ -156,7 +156,7 @@ func (e *toolEnv) tool(t *testing.T, name string, args any) (string, bool, strin
 	if m == nil {
 		return txt, isErr, ""
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatalf("%s: confirmation page: %v", name, err)
 	}
@@ -783,7 +783,7 @@ func TestDeleteInstanceTool(t *testing.T) {
 	if m == nil {
 		t.Fatalf("elicitation %v", el)
 	}
-	v, err := e.s.Hub.ConfirmationPage(hub.ListenerHub, m[1], "root")
+	v, err := e.s.Hub.ConfirmationPage(context.Background(), hub.ListenerHub, m[1], "root")
 	if err != nil {
 		t.Fatal(err)
 	}

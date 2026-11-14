@@ -167,6 +167,10 @@ type AuthorizeInfo struct {
 	// a code as a fresh method (T9): the page then adds pc_method=totp to
 	// the authorize URL. Any other value is never set.
 	PcMethod string `json:"pc_method,omitempty"`
+	// Refusal (final review M1): set when none of the person's set-up
+	// methods can pass the view's governing rule; the page shows it
+	// instead of opening the popup.
+	Refusal string `json:"refusal,omitempty"`
 }
 
 // Info returns the authorize endpoint, client id and redirect URI.
