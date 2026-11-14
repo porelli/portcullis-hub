@@ -43,7 +43,7 @@ const clockSkew = 60 * time.Second
 // Message is the one text every refusal answers (403).
 const Message = "a fresh sign-in is required"
 
-// FreshMethods are the values pc_fresh may carry: the six sign-in method
+// FreshMethods are the values pc_fresh may carry: the seven sign-in method
 // ids (contract §8.1 "Methods"), each only while Config.Accepted lists it
 // (switched on). Anything else (a setup link's inv, an amr value, a
 // family) is refused whatever Accepted returns. Which of them approves an
@@ -53,10 +53,10 @@ const Message = "a fresh sign-in is required"
 // The claim pc_fresh is set by the Keycloak extension's portcullis-fresh
 // mapper on the fresh-auth client, from this authentication's notes only:
 // the authenticator that actually ran in this sign-in (a passkey kind,
-// yubikey_cert or password; never an SSO session reused or a setup link).
+// yubikey_cert, totp or password; never an SSO session reused or a setup link).
 // amr is never read — Keycloak accumulates it over the SSO session (10 h),
 // so a fresh password sign-in could still carry an older hwk.
-var FreshMethods = []string{"password", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert"}
+var FreshMethods = []string{"password", "totp", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert"}
 
 // ClaimFresh is the ID token claim naming this authentication's method.
 const ClaimFresh = "pc_fresh"

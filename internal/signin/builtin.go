@@ -9,9 +9,9 @@ type Template struct {
 	BuiltIn bool
 }
 
-// Builtins returns fresh copies of the four built-in templates (D12), in
-// order: Basic and YubiKey + certificate start disabled, Standard (the
-// default) and Strong enabled.
+// Builtins returns fresh copies of the five built-in templates (D12), in
+// order: Basic, YubiKey + certificate and Password + authenticator code
+// start disabled, Standard (the default) and Strong enabled.
 func Builtins() []Template {
 	g := func(op string, leaves ...string) Node {
 		n := Node{Op: op, Items: make([]Node, 0, len(leaves))}
@@ -25,5 +25,6 @@ func Builtins() []Template {
 		{ID: "standard", Name: "Standard", Rule: g(OpAny, "family:passkey", "family:certificate"), Enabled: true, BuiltIn: true},
 		{ID: "strong", Name: "Strong", Rule: g(OpAny, string(SecurityKey), string(YubiKeyCert)), Enabled: true, BuiltIn: true},
 		{ID: "yubikey-and-certificate", Name: "YubiKey + certificate", Rule: g(OpAll, string(YubiKeyCert), string(SecurityKey)), BuiltIn: true},
+		{ID: "password-and-code", Name: "Password + authenticator code", Rule: g(OpAll, string(Password), string(TOTP)), BuiltIn: true},
 	}
 }

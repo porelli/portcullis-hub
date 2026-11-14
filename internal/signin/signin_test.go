@@ -537,10 +537,10 @@ func TestMethodTable(t *testing.T) {
 		amr    string
 		tenths int
 	}{
-		Password: {"pwd", 10}, PasskeySynced: {"spk", 25}, BrowserCert: {"file", 25},
+		Password: {"pwd", 10}, TOTP: {"otp", 15}, PasskeySynced: {"spk", 25}, BrowserCert: {"file", 25},
 		PasskeyDevice: {"dpk", 30}, SecurityKey: {"hwk", 35}, YubiKeyCert: {"mtls", 40},
 	}
-	if len(Methods) != 6 {
+	if len(Methods) != 7 {
 		t.Fatalf("Methods %v", Methods)
 	}
 	for _, m := range Methods {
@@ -581,7 +581,7 @@ func TestBuiltins(t *testing.T) {
 			t.Errorf("%s enabled %v", tpl.ID, tpl.Enabled)
 		}
 	}
-	if !slices.Equal(ids, []string{"basic", "standard", "strong", "yubikey-and-certificate"}) {
+	if !slices.Equal(ids, []string{"basic", "standard", "strong", "yubikey-and-certificate", "password-and-code"}) {
 		t.Errorf("ids %v", ids)
 	}
 	// Basic with password off drops its password alternative.
@@ -663,5 +663,191 @@ func TestFreshAccepted(t *testing.T) {
 		if _, err := FreshAccepted(bad, withPw); err == nil {
 			t.Errorf("FreshAccepted(%s): no error", js(bad))
 		}
+	}
+}
+
+// TOTP (authenticator-app codes) is the second method: 1.5, amr otp.
+func TestTOTPRow(t *testing.T) {
+	info, ok := InfoOf(TOTP)
+	if !ok || info.Tenths != 15 || info.AMR != "otp" || !info.Available {
+		t.Errorf("InfoOf(TOTP) = %+v, %v", info, ok)
+	}
+	if info.Label != "Authenticator app" || info.Short != "authenticator app" || info.Phrase != "a code from an authenticator app" {
+		t.Errorf("TOTP words %+v", info)
+	}
+	if m, ok := MethodForAMR("otp"); !ok || m != TOTP {
+		t.Errorf("MethodForAMR(otp) = %s, %v", m, ok)
+	}
+	if rank(TOTP) != 1 {
+		t.Errorf("rank(TOTP) = %d", rank(TOTP))
+	}
+	for name, f := range families {
+		if slices.Contains(f.members, TOTP) {
+			t.Errorf("%s contains totp", name)
+		}
+	}
+}
+
+// T21: methodSet is a uint8, one bit per method.
+func TestMethodSetFits(t *testing.T) {
+	if len(Methods) > 8 {
+		t.Fatalf("%d methods don't fit methodSet (uint8): widen the type", len(Methods))
+	}
+}
+
+// T3: a rule whose strongest part is a code says why it is weak.
+func TestScoresWithTOTP(t *testing.T) {
+	allOn := onSet(Methods...)
+	const suffix = "; codes can be typed into a fake site"
+	for _, c := range []struct {
+		rule   Node
+		tenths int
+		weak   bool
+	}{
+		{all(leaves("password", "totp")...), 19, true},
+		{all(leaves("passkey_synced", "totp")...), 29, false},
+		{all(leaves("security_key", "totp")...), 39, false},
+		{anyOf(all(leaves("password", "totp")...), leaf("security_key")), 19, true},
+	} {
+		s := ScoreOf(c.rule, allOn)
+		if s.Tenths != c.tenths {
+			t.Errorf("%s: tenths %d, want %d (%s)", js(c.rule), s.Tenths, c.tenths, s.Reason)
+		}
+		if strings.HasSuffix(s.Reason, suffix) != c.weak {
+			t.Errorf("%s: reason %q, weak %v", js(c.rule), s.Reason, c.weak)
+		}
+		if strings.Count(s.Reason, suffix) > 1 {
+			t.Errorf("%s: reason %q repeats the suffix", js(c.rule), s.Reason)
+		}
+	}
+	if s := ScoreOfSet([]Method{Password, TOTP}); s == nil || s.Tenths != 19 || !strings.HasSuffix(s.Reason, suffix) {
+		t.Errorf("ScoreOfSet(password, totp) = %+v", s)
+	}
+	if s := ScoreOf(all(leaves("password", "totp")...), onSet(Password)); strings.Contains(s.Reason, suffix) {
+		t.Errorf("unmeetable reason %q", s.Reason)
+	}
+}
+
+// T2 + P5: a source rule with a code-only alternative is refused, and At
+// marks the offending group top-down.
+func TestValidateCodeOnlyNested(t *testing.T) {
+	for _, c := range []struct {
+		rule Node
+		at   Path
+	}{
+		{anyOf(leaves("totp", "security_key")...), Path{}},
+		{anyOf(leaf("totp"), all(leaves("totp", "password")...)), Path{}},
+		{all(leaf("totp"), anyOf(leaf("totp"))), Path{1}},
+		{all(anyOf(leaves("totp", "password")...), anyOf(leaves("totp", "security_key")...)), Path{0}},
+		{anyOf(all(leaf("totp")), all(leaf("password"), anyOf(leaves("totp", "security_key")...))), Path{0}},
+		{anyOf(leaf("security_key"), all(leaf("password"), anyOf(leaves("totp", "passkey_synced")...)), anyOf(leaf("totp"))), Path{2}},
+		{all(leaf("totp")), Path{}},
+	} {
+		err := Validate(c.rule)
+		var co *CodeOnlyError
+		if !errors.As(err, &co) {
+			t.Errorf("%s: Validate = %v, want *CodeOnlyError", js(c.rule), err)
+			continue
+		}
+		if !slices.Equal(co.At, c.at) || co.At == nil {
+			t.Errorf("%s: At %#v, want %#v", js(c.rule), co.At, c.at)
+		}
+		if err.Error() != "an authenticator code can't be the only way in: combine it with another method (all of)" {
+			t.Errorf("text %q", err.Error())
+		}
+		if at, bad := CodeOnly(c.rule); !bad || !slices.Equal(at, c.at) {
+			t.Errorf("%s: CodeOnly = %v, %v", js(c.rule), at, bad)
+		}
+		if _, err := Compile(c.rule, onSet(Methods...)); !errors.As(err, &co) {
+			t.Errorf("%s: Compile = %v", js(c.rule), err)
+		}
+	}
+	for _, ok := range []Node{
+		all(leaves("password", "totp")...),
+		anyOf(leaf("security_key"), all(leaves("password", "totp")...)),
+		all(anyOf(leaves("totp", "password")...), leaf("security_key")),
+		anyOf(leaf("family:passkey"), leaf("family:certificate")),
+	} {
+		if err := Validate(ok); err != nil {
+			t.Errorf("%s: %v", js(ok), err)
+		}
+		if _, bad := CodeOnly(ok); bad {
+			t.Errorf("%s: CodeOnly true", js(ok))
+		}
+	}
+}
+
+// The check counts every method as on: a switch can't make a rule safe.
+func TestCodeOnlyIgnoresSwitches(t *testing.T) {
+	r := anyOf(leaves("totp", "security_key")...)
+	var co *CodeOnlyError
+	if _, err := Compile(r, onSet(SecurityKey)); !errors.As(err, &co) {
+		t.Errorf("Compile with totp off = %v", err)
+	}
+	if _, err := Compile(r, onSet(Methods...)); !errors.As(err, &co) {
+		t.Errorf("Compile with all on = %v", err)
+	}
+	if _, err := Usable(r, onSet(SecurityKey)); !errors.As(err, &co) {
+		t.Errorf("Usable = %v", err)
+	}
+}
+
+func TestValidateCompiledRejectsCodeOnly(t *testing.T) {
+	for _, n := range []Node{
+		anyOf(leaves("totp", "security_key")...),
+		anyOf(leaf("totp")),
+		all(leaf("totp")),
+		anyOf(all(leaves("password", "totp")...), all(anyOf(leaf("totp")))),
+	} {
+		err := ValidateCompiled(n)
+		if err == nil || err.Error() != "compiled rule: an authenticator code alone is a way in" {
+			t.Errorf("%s: %v", js(n), err)
+		}
+		if _, err := FreshAccepted(n, onSet(Methods...)); err == nil {
+			t.Errorf("FreshAccepted(%s): no error", js(n))
+		}
+	}
+	for _, n := range []Node{
+		all(leaves("password", "totp")...),
+		anyOf(leaf("security_key"), all(leaves("totp", "passkey_synced")...)),
+	} {
+		if err := ValidateCompiled(n); err != nil {
+			t.Errorf("%s: %v", js(n), err)
+		}
+	}
+}
+
+func TestBuiltinsFive(t *testing.T) {
+	b := Builtins()
+	if len(b) != 5 {
+		t.Fatalf("%d built-ins", len(b))
+	}
+	p := b[4]
+	if p.ID != "password-and-code" || p.Name != "Password + authenticator code" || p.Enabled || !p.BuiltIn {
+		t.Errorf("fifth built-in %+v", p)
+	}
+	if js(p.Rule) != `{"op":"all","items":["password","totp"]}` {
+		t.Errorf("rule %s", js(p.Rule))
+	}
+	if s := ScoreOf(p.Rule, onSet(Methods...)); s.Tenths != 19 {
+		t.Errorf("score %+v", s)
+	}
+	if _, err := Compile(p.Rule, defaultOn()); !errors.Is(err, ErrUnmeetable) {
+		t.Errorf("with password and totp off: %v", err)
+	}
+}
+
+// A fresh sign-in under all[password, totp] needs the code (the stronger part).
+func TestFreshAcceptedPasswordAndCode(t *testing.T) {
+	on := onSet(Password, TOTP)
+	got, err := FreshAccepted(mustCompile(t, builtin(t, "password-and-code"), on), on)
+	if err != nil || len(got) != 1 || !got[TOTP] {
+		t.Errorf("FreshAccepted = %v, %v; want {totp}", got, err)
+	}
+}
+
+func TestSentenceTOTP(t *testing.T) {
+	if s := Sentence(all(leaves("password", "totp")...)); !strings.Contains(s, "a code from an authenticator app") {
+		t.Errorf("sentence %q", s)
 	}
 }

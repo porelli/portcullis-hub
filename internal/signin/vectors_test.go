@@ -12,7 +12,9 @@ import (
 // vectorFile is testdata/vectors.json, which group-gate, mcp-gate and the
 // Keycloak extension copy byte for byte. Readers use "compiled" only; "have"
 // holds amr values, mapped through the method table (inv and unknown values
-// count as nothing); "alternatives" compare as a set of sets.
+// count as nothing); "alternatives" compare as a set of sets. "error" is a
+// token, not error text: "unmeetable" (Compile fails with ErrUnmeetable) or
+// "code_only" (Validate refuses the source rule with a CodeOnlyError).
 type vectorFile struct {
 	Version int          `json:"version"`
 	Note    string       `json:"note"`
@@ -50,7 +52,7 @@ func TestSharedVectors(t *testing.T) {
 	}
 	names := map[string]bool{}
 	sawInv := false
-	rejects := 0
+	rejects, codeOnly := 0, 0
 	for _, c := range f.Cases {
 		if names[c.Name] {
 			t.Errorf("duplicate case name %q", c.Name)
@@ -80,11 +82,25 @@ func TestSharedVectors(t *testing.T) {
 		on := onSet(c.On...)
 		got, err := Compile(*c.Rule, on)
 		if c.Error != "" {
-			if c.Error != "unmeetable" || c.Compiled != nil || c.Have != nil || c.Satisfied != nil || c.Alternatives != nil {
-				t.Errorf("%s: an error case carries only error \"unmeetable\"", c.Name)
+			if c.Compiled != nil || c.Have != nil || c.Satisfied != nil || c.Alternatives != nil {
+				t.Errorf("%s: an error case carries only its error token", c.Name)
 			}
-			if !errors.Is(err, ErrUnmeetable) {
-				t.Errorf("%s: Compile = %s, %v; want unmeetable", c.Name, js(got), err)
+			switch c.Error {
+			case "unmeetable":
+				if !errors.Is(err, ErrUnmeetable) {
+					t.Errorf("%s: Compile = %s, %v; want unmeetable", c.Name, js(got), err)
+				}
+			case "code_only":
+				codeOnly++
+				var co *CodeOnlyError
+				if verr := Validate(*c.Rule); !errors.As(verr, &co) {
+					t.Errorf("%s: Validate = %v; want a CodeOnlyError", c.Name, verr)
+				}
+				if !errors.As(err, &co) {
+					t.Errorf("%s: Compile = %s, %v; want a CodeOnlyError", c.Name, js(got), err)
+				}
+			default:
+				t.Errorf("%s: unknown error token %q", c.Name, c.Error)
 			}
 			continue
 		}
@@ -132,6 +148,12 @@ func TestSharedVectors(t *testing.T) {
 	}
 	if rejects < 5 {
 		t.Errorf("%d reject cases, want at least 5", rejects)
+	}
+	if codeOnly < 1 {
+		t.Error(`no case with "error": "code_only"`)
+	}
+	if !names["reject: a code-only alternative"] {
+		t.Error("no reject case for a code-only alternative")
 	}
 	if !sawInv {
 		t.Error(`no case with "have": ["inv"]`)

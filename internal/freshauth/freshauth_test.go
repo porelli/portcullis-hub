@@ -103,8 +103,8 @@ func (p *idp) serveToken(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
-// allFresh are the six method ids, all switched on.
-var allFresh = []string{"password", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert"}
+// allFresh are the seven method ids, all switched on.
+var allFresh = []string{"password", "totp", "passkey_synced", "browser_cert", "passkey_device", "security_key", "yubikey_cert"}
 
 func (p *idp) verifier() *freshauth.Verifier {
 	return p.verifierWith(func() []string { return allFresh })
@@ -179,6 +179,7 @@ func TestFreshAuthAccepts(t *testing.T) {
 		{name: "passkey_synced", method: "passkey_synced", user: "alice"},
 		{name: "passkey_device", method: "passkey_device", user: "alice"},
 		{name: "yubikey_cert", method: "yubikey_cert", user: "alice"},
+		{name: "totp", method: "totp", user: "alice"},
 		// amr is never read: whatever the session accumulated.
 		{name: "amr pwd only", method: "security_key", user: "alice", edit: func(c map[string]any) { c["amr"] = []string{"pwd"} }},
 		{name: "no amr", method: "passkey_synced", user: "alice", edit: func(c map[string]any) { delete(c, "amr") }},
@@ -524,7 +525,7 @@ func TestFreshAuthInfo(t *testing.T) {
 	if string(b) != want {
 		t.Errorf("Info = %s", b)
 	}
-	if freshauth.MaxAge != 5*time.Minute || strings.Join(freshauth.FreshMethods, ",") != "password,passkey_synced,browser_cert,passkey_device,security_key,yubikey_cert" {
+	if freshauth.MaxAge != 5*time.Minute || strings.Join(freshauth.FreshMethods, ",") != "password,totp,passkey_synced,browser_cert,passkey_device,security_key,yubikey_cert" {
 		t.Errorf("MaxAge %v FreshMethods %v", freshauth.MaxAge, freshauth.FreshMethods)
 	}
 }
