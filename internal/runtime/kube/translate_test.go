@@ -55,7 +55,7 @@ func baseInput(t *testing.T, dir, instance string) Input {
 	in := Input{Instance: instance, Template: "echo", Namespace: "portcullis-apps", Model: m, Digests: digests(m), HubImage: hubImage,
 		BindRoots: []string{"/srv", "/mnt", "/media"},
 		Settings: Settings{PodCIDR: "10.42.0.0/16", ServiceCIDR: "10.43.0.0/16", TraefikServiceIP: "10.43.0.20", WGEdgeServiceIP: "10.43.0.22", Domain: "example.org",
-			LocalNetworks: []string{"192.168.1.0/24", "fd00::/8"}}}
+			LocalNetworks: []string{"192.168.1.0/24", "fd00::/8"}, NodeAddresses: []string{"192.0.2.10"}}}
 	if b, err := os.ReadFile(filepath.Join(dir, "case.json")); err == nil {
 		if err := json.Unmarshal(b, &in); err != nil {
 			t.Fatal(err)
@@ -116,7 +116,8 @@ func modelOf(t *testing.T, compose, instance string) *types.Project {
 
 func inputOf(t *testing.T, compose, instance string) Input {
 	m := modelOf(t, compose, instance)
-	return Input{Instance: instance, Template: "x", Namespace: "portcullis-apps", Model: m, Digests: digests(m), HubImage: hubImage, BindRoots: []string{"/srv"}}
+	return Input{Instance: instance, Template: "x", Namespace: "portcullis-apps", Model: m, Digests: digests(m), HubImage: hubImage, BindRoots: []string{"/srv"},
+		Settings: Settings{PodCIDR: "10.42.0.0/16", ServiceCIDR: "10.43.0.0/16", NodeAddresses: []string{"192.0.2.10"}}}
 }
 
 func TestTranslateNameCollisionRefused(t *testing.T) {
@@ -298,7 +299,7 @@ func TestTranslatorRefusesWhatCompatRefuses(t *testing.T) {
 			}
 		}
 		in := Input{Instance: "vec", Template: "echo", Namespace: "portcullis-apps", Model: model, Digests: digests(model), HubImage: hubImage, BindRoots: templates.DefaultKubeBindRoots,
-			TemplateFiles: map[string][]byte{"conf/x": []byte("x")}}
+			TemplateFiles: map[string][]byte{"conf/x": []byte("x")}, Settings: Settings{PodCIDR: "10.42.0.0/16", ServiceCIDR: "10.43.0.0/16", NodeAddresses: []string{"192.0.2.10"}}}
 		_, terr := Translate(in)
 		switch got.Status {
 		case templates.CompatRefused:

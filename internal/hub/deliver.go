@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
@@ -1057,6 +1059,12 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			}
 			werr := h.writeDataFile(id, o)
 			h.mu.RUnlock()
+			if werr == nil && !opt.lifecycle && !o.aiProviders && o.file.Service != "" && o.file.Mount != "" {
+				// Kubernetes: the running pod's copy is the ConfigMap's
+				// (the hash is recorded only once it is mounted).
+				werr = h.kubeDeliver(ctx, id, runtime.FileDelivery{Name: o.file.Name, FileName: o.file.FileName(), Data: o.data, Secrets: o.secrets,
+					Service: o.file.Service, Mount: o.file.Mount, Rev: o.hash})
+			}
 			if werr != nil {
 				u.Error = h.redactUnitError(id, werr)
 				if opt.lifecycle {

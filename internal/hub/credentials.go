@@ -826,6 +826,12 @@ func (h *Hub) credentialUnits(t *templates.Template, delivered *deliveredDoc, no
 		}
 	}
 	out := make([]UnitResult, 0, len(opts))
+	type pending struct {
+		i      int
+		o      *templates.Option
+		digest string
+	}
+	var sync []pending
 	h.mu.RLock()
 	for _, o := range opts {
 		u := UnitResult{Unit: credentialsUnit(o.Key), At: now}
@@ -840,11 +846,24 @@ func (h *Hub) credentialUnits(t *templates.Template, delivered *deliveredDoc, no
 			u.Skipped = SkipUnchanged
 		} else {
 			u.Message = fmt.Sprintf("%d active", n)
-			delivered.Hashes[u.Unit] = d
+			if h.kubeOn() {
+				// Kubernetes: recorded once the *-pw Secret is mounted.
+				sync = append(sync, pending{len(out), o, d})
+			} else {
+				delivered.Hashes[u.Unit] = d
+			}
 		}
 		out = append(out, u)
 	}
 	h.mu.RUnlock()
+	for _, p := range sync {
+		u := &out[p.i]
+		if err := h.kubeDeliverPersonSecret(context.Background(), t.ID, p.o, p.digest); err != nil {
+			u.OK, u.Message, u.Error = false, "", h.redactUnitError(t.ID, err)
+			continue
+		}
+		delivered.Hashes[u.Unit] = p.digest
+	}
 	return out, voided
 }
 

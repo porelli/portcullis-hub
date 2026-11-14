@@ -239,6 +239,7 @@ type Info struct {
 	// Kubernetes: the API server's gitVersion, the admission self-test
 	// (ok|missing|unknown) and the NetworkPolicy probe (proven|unproven).
 	EngineVersion string
+	Context       string
 	Admission     string
 	Netpol        string
 	// Networks are the runtime's networks with their subnets (the VPN

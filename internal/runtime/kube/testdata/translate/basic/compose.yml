@@ -28,6 +28,11 @@ services:
     labels:
       traefik.enable: "true"
       traefik.http.routers.echo.rule: Host(`echo.example.org`)
+      traefik.http.routers.echo.entrypoints: websecure
+      traefik.http.routers.echo.tls.options: authaware@file
+      traefik.http.routers.echo.middlewares: client-headers@file,portcullis-auth@docker,portcullis-groups@docker,echo-headers,security-headers@file
+      traefik.http.middlewares.echo-headers.headers.customrequestheaders.X_Forwarded_User: ""
+      traefik.http.services.echo.loadbalancer.server.port: "8080"
 volumes:
   echo-data: {}
 networks:

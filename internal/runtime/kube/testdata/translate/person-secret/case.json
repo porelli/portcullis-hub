@@ -1,1 +1,1 @@
-{"PersonSecrets": {"smb_password": {"alice.nt": "MDEyMw==", "bob.nt": "NDU2Nw=="}}}
+{"PersonSecrets": {"smb_password": {"alice.nt": "MDEyMw==", "bob.nt": "NDU2Nw=="}}, "Settings": {"NodeAddresses": ["192.0.2.10"], "PodCIDR": "10.42.0.0/16", "ServiceCIDR": "10.43.0.0/16"}}

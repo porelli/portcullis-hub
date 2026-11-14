@@ -20,6 +20,60 @@ type Project struct {
 	Name, Instance string
 	Files          ComposeFiles
 	Model          *types.Project
+	// Inputs are what a backend that doesn't read the host's files needs
+	// besides the model (Kubernetes; nil under Docker and Podman).
+	Inputs *ProjectInputs
+}
+
+// ProjectInputs carry an instance's files and facts into objects
+// (Kubernetes: ConfigMaps, Secrets, Services).
+type ProjectInputs struct {
+	// Template is the template id; TemplateFiles the files compose binds
+	// from ./templates/<template>/ (path relative to it → content).
+	Template      string
+	TemplateFiles map[string][]byte
+	// AppFiles: a data file's bind source (as in the model) → the file.
+	AppFiles map[string]AppFileInput
+	// PersonSecrets: person_secret option key → <user>.nt → content.
+	PersonSecrets map[string]map[string][]byte
+	// LanOnly: published ports whose manifest port is lan_only;
+	// LocalNetworks the Local networks (their source ranges).
+	LanOnly       map[int]bool
+	LocalNetworks []string
+	// Jobs are the one-off jobs (§3).
+	Jobs map[string]bool
+	// VPNSlot / IngressService: a wired VPN provider's slot and the
+	// service whose pod is its ingress (nil: not wired).
+	VPNSlot        *int
+	IngressService string
+}
+
+// AppFileInput is a data file (§13.7): its name, content, its secrets
+// file's (nil: none) and the delivery revision.
+type AppFileInput struct {
+	Name, FileName string
+	Data, Secrets  []byte
+	Rev            string
+}
+
+// SecretDelivery is a person_secret option's hash files delivered into
+// a running instance (Kubernetes: its *-pw Secret).
+type SecretDelivery struct {
+	Key            string
+	Files          map[string][]byte
+	Service, Mount string
+	Rev            string
+}
+
+// FileDelivery is a data file delivered into a running instance
+// (Kubernetes: its ConfigMap and Secret, then the mounted .rev waited
+// for): the file, its secrets file (nil: none), the service mounting it
+// at Mount, the revision.
+type FileDelivery struct {
+	Name, FileName string
+	Data, Secrets  []byte
+	Service, Mount string
+	Rev            string
 }
 
 // Instances is the runtime as the Hub uses it. Every method but Kind, Env

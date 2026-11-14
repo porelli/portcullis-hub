@@ -61,7 +61,7 @@ type AppFile struct {
 	// <name>.tsv; "" = <name>.json).
 	Name, FileName string
 	Data           []byte
-	Secrets []byte
+	Secrets        []byte
 	// Rev is the delivery revision (the objects' .rev key).
 	Rev string
 }
@@ -92,6 +92,10 @@ type Input struct {
 	// Jobs are the instance's one-off jobs (manifest jobs and
 	// service_completed_successfully targets).
 	Jobs map[string]bool
+	// CompanionPorts: AI companion service → the ports mcp-gate calls
+	// (§3.2); CoreNamespace is PORTCULLIS_NAMESPACE ("" = portcullis).
+	CompanionPorts map[string][]int
+	CoreNamespace  string
 }
 
 // WaitKind is what Up waits for after a step.
@@ -448,7 +452,9 @@ func (t *translator) templateFiles() error {
 	return t.addShared(cm)
 }
 
-func isUTF8(b []byte) bool { return strings.ToValidUTF8(string(b), "�") == string(b) && !strings.ContainsRune(string(b), 0) }
+func isUTF8(b []byte) bool {
+	return strings.ToValidUTF8(string(b), "�") == string(b) && !strings.ContainsRune(string(b), 0)
+}
 
 func checkSize(o *unstructured.Unstructured) error {
 	b, err := json.Marshal(o.Object)

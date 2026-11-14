@@ -256,6 +256,9 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	if len(mounters) == 0 {
 		return nil
 	}
+	if h.kubeOn() {
+		return nil // a *-pw Secret, not a volume subpath (§6 "On Kubernetes")
+	}
 	if h.noEngine() {
 		return statusErr(http.StatusServiceUnavailable, "%s was not started: per-person passwords need the Docker Engine API", t.ID)
 	}

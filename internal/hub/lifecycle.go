@@ -253,7 +253,11 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	// only then start: an image-label router is never live. On the
 	// operation's context: a Stop kills compose (compose down — the
 	// undo's — removes whatever it had made).
-	createErr := h.rt.Create(opCtx, h.runtimeProject(live))
+	up, perr := h.upProject(opCtx, live)
+	if perr != nil {
+		return perr
+	}
+	createErr := h.rt.Create(opCtx, up)
 	if volsBefore != nil {
 		h.recordCreatedVolumes(ctx, p.p, live.ID, volsBefore)
 	}
@@ -303,11 +307,11 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		} else {
 			close(watched)
 		}
-		upErr = h.rt.Up(opCtx, h.runtimeProject(live), nil)
+		upErr = h.rt.Up(opCtx, up, nil)
 		stopWatch()
 		<-watched
 	} else {
-		upErr = h.rt.Up(opCtx, h.runtimeProject(live), nil)
+		upErr = h.rt.Up(opCtx, up, nil)
 	}
 	if err := upErr; err != nil {
 		if len(probes) > 0 {
