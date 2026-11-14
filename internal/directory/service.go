@@ -421,7 +421,8 @@ type Overview struct {
 	PasswordOn bool `json:"password_on"`
 	// AuthenticatorOn: the totp method is switched on
 	// (AuthenticatorMethodOn; unset = off), so the setup-link dialog offers
-	// "Also set up an authenticator app".
+	// "Also set up an authenticator app" (every caller: holders and
+	// delegates send links too).
 	AuthenticatorOn bool `json:"authenticator_on"`
 	// Admin and Perms describe the caller (Me): admins hold every
 	// delegated permission.
@@ -531,8 +532,10 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 	}
 	if full {
 		ov.PasswordOn = s.PasswordMethodOn == nil || s.PasswordMethodOn()
-		ov.AuthenticatorOn = s.AuthenticatorMethodOn != nil && s.AuthenticatorMethodOn()
 	}
+	// A server switch, not sensitive: every caller who may send a setup
+	// link sees the dialog's option (review L6).
+	ov.AuthenticatorOn = s.AuthenticatorMethodOn != nil && s.AuthenticatorMethodOn()
 
 	// Load fields from Store if available
 	var cfg *Config
@@ -2008,7 +2011,13 @@ func (s *Service) RemoveAuthenticators(ctx context.Context, c *Caller, username,
 func (s *Service) SendInvite(ctx context.Context, c *Caller, username string, authenticator bool) (*Result, error) {
 	res := newResult()
 	perm := helpPerm(c, PermInvite)
-	detail := asHelp(perm, "")
+	// The audit records the link's option (review L1), as RemovePasskeys
+	// records new_invite.
+	opt := ""
+	if authenticator {
+		opt = "authenticator=true"
+	}
+	detail := asHelp(perm, opt)
 	err := s.run(ctx, c, perm, "user.invite", username, &detail, func() error {
 		if authenticator && (s.AuthenticatorMethodOn == nil || !s.AuthenticatorMethodOn()) {
 			return refuse("authenticator apps are off on this server")

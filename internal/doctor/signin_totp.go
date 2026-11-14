@@ -15,10 +15,13 @@ import (
 // setting that differs from the pinned policy (otpPolicyDigits, …; nil =
 // none, or unknown); Wrong counts each person's LOGIN_ERROR events with
 // pc_method totp in the last 24 h (nil = unknown); Day is today
-// (yyyy-mm-dd, UTC), the guessing findings' fingerprint subject.
+// (yyyy-mm-dd, UTC), the guessing findings' fingerprint subject. Capped:
+// the read stopped at its 1,000-event cap (review M1): the counts are
+// lower bounds, still judged.
 type SignInTOTPIn struct {
 	PolicyDrift []string
 	Wrong       map[string]int
+	Capped      bool
 	Day         string
 }
 
@@ -26,6 +29,9 @@ type SignInTOTPIn struct {
 const (
 	KindSignInTOTPPolicyDrift = "signin_totp_policy_drift"
 	KindSignInTOTPGuessing    = "signin_totp_guessing"
+	// KindSignInLoginErrorsCapped (Info): the guessing check's read hit
+	// its cap; one per day (Fingerprint(kind, day)).
+	KindSignInLoginErrorsCapped = "signin_login_errors_capped"
 )
 
 // TOTPGuessingThreshold is how many wrong codes in 24 h make a finding.
@@ -34,6 +40,28 @@ const TOTPGuessingThreshold = 20
 func init() {
 	Register(signInTOTPDriftCheck{})
 	Register(signInTOTPGuessingCheck{})
+	Register(signInLoginErrorsCappedCheck{})
+}
+
+type signInLoginErrorsCappedCheck struct{}
+
+func (signInLoginErrorsCappedCheck) Kind() string { return KindSignInLoginErrorsCapped }
+
+func (signInLoginErrorsCappedCheck) Run(in *Inputs) []Finding {
+	t := in.SignInTOTP
+	if t == nil || !t.Capped {
+		return nil
+	}
+	return []Finding{{
+		FP: Fingerprint(KindSignInLoginErrorsCapped, t.Day), Kind: KindSignInLoginErrorsCapped, Severity: Info,
+		Title: "LOGIN_ERROR read capped at 1,000 events: counts are lower bounds",
+		Why: "More than 1,000 sign-ins failed in the last 24 hours. The authenticator-code guessing check read the newest 1,000 only, " +
+			"so each person's count of wrong codes may be higher than shown; anyone at 20 or more is still reported. " +
+			"Many failed sign-ins with unknown usernames can be someone trying to hide a guessing attempt.",
+		Class:  FixExplain,
+		Steps:  []string{"Read Keycloak's events (Realm settings → Events) for the last day and see who is failing to sign in."},
+		Inputs: Digest([]any{t.Day, true}),
+	}}
 }
 
 type signInTOTPDriftCheck struct{}

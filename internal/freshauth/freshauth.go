@@ -269,7 +269,11 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	}
 	// A code is never the only proof (controller ruling, defence in depth
 	// beside the extension's flow): pc_fresh totp needs a primary method
-	// (any other known method) in amr as well.
+	// (any other known method) in amr as well. This check is session-level
+	// (Keycloak builds amr over the SSO session, so an earlier password in
+	// the session satisfies it); the binding rule is the extension's: it
+	// sets pc_fresh totp only with a primary method of the same
+	// authentication (review L4).
 	if method == string(signin.TOTP) && !primaryInAMR(c.AMR) {
 		return nil, refuse("pc_fresh names totp without a primary method in amr")
 	}

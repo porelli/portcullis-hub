@@ -57,3 +57,25 @@ func TestDoctorTOTPGuessing(t *testing.T) {
 		t.Errorf("unknown counts: %+v", got)
 	}
 }
+
+// TestDoctorTOTPCapped (review M1): over the 1,000-event cap the counts
+// still judge (a lower bound: 20 or more is still a Warning), and an Info
+// says the read was capped, once per day.
+func TestDoctorTOTPCapped(t *testing.T) {
+	in := &Inputs{SignInTOTP: &SignInTOTPIn{Wrong: map[string]int{"bob": 25}, Capped: true, Day: "2026-11-14"}}
+	if got := of(t, KindSignInTOTPGuessing, in); len(got) != 1 || got[0].Severity != Warning || got[0].Persons[0] != "bob" {
+		t.Errorf("guessing under the cap: %+v", got)
+	}
+	got := of(t, KindSignInLoginErrorsCapped, in)
+	if len(got) != 1 || got[0].Severity != Info || got[0].Title != "LOGIN_ERROR read capped at 1,000 events: counts are lower bounds" ||
+		got[0].FP != Fingerprint(KindSignInLoginErrorsCapped, "2026-11-14") {
+		t.Fatalf("capped: %+v", got)
+	}
+	in.SignInTOTP.Capped = false
+	if got := of(t, KindSignInLoginErrorsCapped, in); len(got) != 0 {
+		t.Errorf("not capped: %+v", got)
+	}
+	if got := of(t, KindSignInLoginErrorsCapped, &Inputs{}); len(got) != 0 {
+		t.Errorf("no input: %+v", got)
+	}
+}

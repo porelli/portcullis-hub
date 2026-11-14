@@ -272,6 +272,23 @@ func TestRemoveAuthenticatorsTargets(t *testing.T) {
 	if res, err := e.svc.RemoveAuthenticators(ctx, asRoot, "bea", "bea"); err != nil || res.Count != 1 {
 		t.Errorf("admin on bea = %+v %v", res, err)
 	}
+	// The takeover rule (review L2): another administrator's removal is
+	// flagged in the audit; the confirm itself isn't the check — "bea"
+	// typed for another admin passed only through checkAdminTakeover.
+	if en, _ := e.svc.Recent(1); en[0].Action != "user.remove_authenticators" || en[0].Detail != "1 removed target_is_lldap_admin=true" {
+		t.Errorf("admin on bea audit = %+v", en[0])
+	}
+	if _, err := e.svc.RemoveAuthenticators(ctx, asRoot, "bea", "be"); status(err) != 400 || !strings.Contains(err.Error(), "bea is an administrator: type the username to confirm") {
+		t.Errorf("admin on bea with a wrong name = %v, want checkAdminTakeover's 400", err)
+	}
+	// An ordinary person: no flag.
+	e.kc.Import("alice", kctest.Credential{ID: "o3", Type: "otp"})
+	if _, err := e.svc.RemoveAuthenticators(ctx, asRoot, "alice", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if en, _ := e.svc.Recent(1); en[0].Detail != "1 removed" {
+		t.Errorf("admin on alice audit = %+v", en[0])
+	}
 	for _, target := range []string{"portcullis-hub", directory.CoreAdmin} {
 		if _, err := e.svc.RemoveAuthenticators(ctx, asRoot, target, target); status(err) != 409 {
 			t.Errorf("admin on %s = %v", target, err)
@@ -304,6 +321,24 @@ func TestInviteAuthenticator(t *testing.T) {
 	e.invites.mu.Unlock()
 	if len(bodies) != 2 || bodies[0] != `{"username":"alice","authenticator":false}` || bodies[1] != `{"username":"alice","authenticator":true}` {
 		t.Errorf("bodies = %q", bodies)
+	}
+	// The audit records the choice (review L1); a holder's too.
+	if en, _ := e.svc.Recent(1); en[0].Action != "user.invite" || en[0].Detail != "authenticator=true" {
+		t.Errorf("invite audit = %+v", en[0])
+	}
+	if _, err := e.svc.SendInvite(ctx, callerFor(t, e, "helga"), "alice", true); err != nil {
+		t.Fatal(err)
+	}
+	if en, _ := e.svc.Recent(1); en[0].Detail != "authenticator=true; as sign_in_help" {
+		t.Errorf("holder invite audit = %+v", en[0])
+	}
+	// The dialog's switch is in every caller's overview (review L6): the
+	// route takes it from holders and delegates too.
+	for _, who := range []string{"root", "helga", "ivy"} {
+		ov, err := e.svc.OverviewFor(ctx, callerFor(t, e, who))
+		if err != nil || !ov.AuthenticatorOn {
+			t.Errorf("%s's overview: authenticator_on %v, %v", who, ov != nil && ov.AuthenticatorOn, err)
+		}
 	}
 	// Unset (no hook): off.
 	e.svc.AuthenticatorMethodOn = nil

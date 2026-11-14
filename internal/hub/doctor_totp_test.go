@@ -15,22 +15,31 @@ import (
 )
 
 type fakeTOTPKC struct {
-	policy    *keycloak.OTPPolicy
-	policyErr error
-	events    []keycloak.Event
-	eventsErr error
-	names     map[string]string
-	from, to  time.Time
+	policy     *keycloak.OTPPolicy
+	policyErr  error
+	events     []keycloak.Event
+	incomplete bool
+	eventsErr  error
+	block      bool // RealmLoginErrors waits for the deadline
+	names      map[string]string
+	namesErr   error
+	from, to   time.Time
 }
 
 func (f *fakeTOTPKC) OTPPolicy(context.Context) (*keycloak.OTPPolicy, error) {
 	return f.policy, f.policyErr
 }
-func (f *fakeTOTPKC) RealmLoginErrors(_ context.Context, from, to time.Time) ([]keycloak.Event, error) {
+func (f *fakeTOTPKC) RealmLoginErrors(ctx context.Context, from, to time.Time) ([]keycloak.Event, bool, error) {
 	f.from, f.to = from, to
-	return f.events, f.eventsErr
+	if f.block {
+		<-ctx.Done()
+		return nil, false, ctx.Err()
+	}
+	return f.events, f.incomplete, f.eventsErr
 }
-func (f *fakeTOTPKC) UsernamesByID(context.Context) (map[string]string, error) { return f.names, nil }
+func (f *fakeTOTPKC) UsernamesByID(context.Context) (map[string]string, error) {
+	return f.names, f.namesErr
+}
 
 func pinnedPolicy() *keycloak.OTPPolicy {
 	return &keycloak.OTPPolicy{Type: "totp", Algorithm: "HmacSHA1", Digits: 6, Period: 30, LookAhead: 1, InitialCounter: 0, CodeReusable: false, ConfigureMaxAge: 300, DeleteMaxAge: 300}
@@ -77,13 +86,38 @@ func TestDoctorTOTPInputs(t *testing.T) {
 	var logs bytes.Buffer
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
-	kc.eventsErr = errors.New("realm login errors: more than 1000: the read is incomplete")
-	if in := f.h.doctorTOTPIn(context.Background()); in == nil || in.Wrong != nil || len(in.PolicyDrift) != 1 {
+	// Over the cap (review M1): counted anyway, capped said.
+	kc.incomplete = true
+	if in := f.h.doctorTOTPIn(context.Background()); in == nil || !in.Capped || in.Wrong["alice"] != 2 {
+		t.Errorf("capped: %+v", in)
+	}
+	kc.incomplete = false
+	kc.eventsErr = errors.New("keycloak: events: HTTP 500")
+	if in := f.h.doctorTOTPIn(context.Background()); in == nil || in.Wrong != nil || in.Capped || len(in.PolicyDrift) != 1 {
 		t.Errorf("events unreadable: %+v", in)
 	}
-	if !strings.Contains(logs.String(), "incomplete") {
+	if !strings.Contains(logs.String(), "HTTP 500") {
 		t.Errorf("log = %q", logs.String())
 	}
+	// The user list unreadable (review L3): counts unknown, drift kept.
+	kc.eventsErr = nil
+	kc.namesErr = errors.New("keycloak: users: HTTP 503")
+	if in := f.h.doctorTOTPIn(context.Background()); in == nil || in.Wrong != nil || len(in.PolicyDrift) != 1 {
+		t.Errorf("users unreadable: %+v", in)
+	}
+	if !strings.Contains(logs.String(), "HTTP 503") {
+		t.Errorf("log = %q", logs.String())
+	}
+	// A read that never answers ends at the deadline (review L3).
+	kc.namesErr = nil
+	kc.block = true
+	defer func(d time.Duration) { totpDoctorTimeout = d }(totpDoctorTimeout)
+	totpDoctorTimeout = 50 * time.Millisecond
+	start := time.Now()
+	if in := f.h.doctorTOTPIn(context.Background()); in == nil || in.Wrong != nil || time.Since(start) > 5*time.Second {
+		t.Errorf("deadline: %+v after %v", in, time.Since(start))
+	}
+	kc.block = false
 	kc.policyErr = errors.New("keycloak down")
 	if in := f.h.doctorTOTPIn(context.Background()); in != nil {
 		t.Errorf("policy unreadable: %+v", in)

@@ -202,7 +202,7 @@ func freshJS(t *testing.T, expr string) any {
 	var v any
 	nodeJSON(t, freshDOM+webAsset(t, "freshauth.js")+`
 const F = window.PortcullisFreshAuth;
-const fire = d => { for (const f of listeners.message || []) f({ origin: 'https://people.example.org', source: popups[popups.length - 1], data: d }); };
+const fire = (d, o) => { o = o || {}; for (const f of listeners.message || []) f({ origin: o.origin || 'https://people.example.org', source: 'source' in o ? o.source : popups[popups.length - 1], data: d }); };
 Promise.resolve((async () => (`+expr+`))()).then(v => process.stdout.write(JSON.stringify(v)), e => process.stdout.write(JSON.stringify({ thrown: String(e && e.stack || e) })));
 `, &v)
 	if m, ok := v.(map[string]any); ok && m["thrown"] != nil {
@@ -382,5 +382,42 @@ func TestDirectoryTOTPActions(t *testing.T) {
 	}
 	if strings.Contains(js, "confirm('Create a new one-time invite link") {
 		t.Error("the setup link still uses confirm(): the dialog has the checkbox")
+	}
+}
+
+// TestFreshAuthStatelessRefusals (review L5): the one relaxed check — an
+// action's callback without state — is refused from another source,
+// another origin, and on a proof flow; the flow keeps waiting.
+func TestFreshAuthStatelessRefusals(t *testing.T) {
+	out := freshJS(t, `(async () => {
+  const fa = {authorize_url: 'https://auth.example.org/a', client_id: 'c', redirect_uri: 'https://people.example.org/signin'};
+  const res = {};
+  const h = (name) => ({ ctx: {x: name}, status() {}, busy() {}, end() {},
+    proof: p => { res[name + 'Proof'] = p; }, action: s => { res[name + 'Action'] = s; } });
+  const stateless = {type: 'portcullis-fresh-auth', state: '', code: '', error: '', kc_action_status: 'success'};
+  await F.start(fa, Object.assign(h('src'), {kcAction: 'CONFIGURE_TOTP'}));
+  fire(stateless, {source: {}});
+  res.srcWaiting = sessionStorage.getItem('portcullis-fresh-auth') !== null;
+  await F.start(fa, Object.assign(h('org'), {kcAction: 'CONFIGURE_TOTP'}));
+  fire(stateless, {origin: 'https://evil.example.org'});
+  res.orgWaiting = sessionStorage.getItem('portcullis-fresh-auth') !== null;
+  await F.start(fa, h('proof'));
+  fire(stateless);
+  res.proofWaiting = sessionStorage.getItem('portcullis-fresh-auth') !== null;
+  // The same flow still takes its own answer afterwards.
+  const st = JSON.parse(sessionStorage.getItem('portcullis-fresh-auth')).state;
+  fire({type: 'portcullis-fresh-auth', state: st, code: 'c1', error: ''});
+  return res;
+})()`).(map[string]any)
+	for _, k := range []string{"src", "org", "proof"} {
+		if out[k+"Waiting"] != true {
+			t.Errorf("%s: the flow stopped waiting", k)
+		}
+		if out[k+"Action"] != nil || (k != "proof" && out[k+"Proof"] != nil) {
+			t.Errorf("%s: action %v proof %v", k, out[k+"Action"], out[k+"Proof"])
+		}
+	}
+	if p, _ := out["proofProof"].(map[string]any); p == nil || p["code"] != "c1" {
+		t.Errorf("the proof flow's own answer = %v", out["proofProof"])
 	}
 }

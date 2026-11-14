@@ -235,21 +235,28 @@ const (
 
 // RealmLoginErrors reads the realm's LOGIN_ERROR events with from <= time
 // < to for every user at once (P16: the doctor's signin_totp_guessing; no
-// user filter), newest first, paged. More than 1,000 is an error: the read
-// is incomplete and the caller has no finding.
-func (c *Client) RealmLoginErrors(ctx context.Context, from, to time.Time) ([]Event, error) {
+// user filter), newest first, paged. It reads at most 1,000; incomplete
+// says there were more (review M1: the caller still counts the 1,000 it
+// has — each count a lower bound — never skips them). An error means
+// nothing could be read.
+func (c *Client) RealmLoginErrors(ctx context.Context, from, to time.Time) (evs []Event, incomplete bool, err error) {
 	out := []Event{}
 	for page := 0; page < realmErrorsPages; page++ {
 		evs, err := c.eventsQuery(ctx, "realm login errors", []string{"LOGIN_ERROR"}, "", "", from, to, len(out), realmErrorsPage)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out = append(out, evs...)
 		if len(evs) < realmErrorsPage {
-			return out, nil
+			return out, false, nil
 		}
 	}
-	return nil, fmt.Errorf("realm login errors: more than %d: the read is incomplete", realmErrorsPage*realmErrorsPages)
+	// The cap reached: one more event past it says whether there is more.
+	more, err := c.eventsQuery(ctx, "realm login errors", []string{"LOGIN_ERROR"}, "", "", from, to, len(out), 1)
+	if err != nil {
+		return out, true, nil // unknown beyond the cap: treat as more
+	}
+	return out, len(more) > 0, nil
 }
 
 // eventsQuery reads one page of events of the given types; userID ""

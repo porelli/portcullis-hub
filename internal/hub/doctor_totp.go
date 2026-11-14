@@ -16,7 +16,7 @@ import (
 // (implemented by *keycloak.Client).
 type TOTPKeycloak interface {
 	OTPPolicy(ctx context.Context) (*keycloak.OTPPolicy, error)
-	RealmLoginErrors(ctx context.Context, from, to time.Time) ([]keycloak.Event, error)
+	RealmLoginErrors(ctx context.Context, from, to time.Time) ([]keycloak.Event, bool, error)
 	UsernamesByID(ctx context.Context) (map[string]string, error)
 }
 
@@ -35,8 +35,9 @@ func (h *Hub) SetTOTPKeycloak(k TOTPKeycloak) {
 	h.totpDoc.kc = k
 }
 
-// totpDoctorTimeout bounds the authenticator-app inputs' Keycloak reads.
-const totpDoctorTimeout = 10 * time.Second
+// totpDoctorTimeout bounds the authenticator-app inputs' Keycloak reads
+// (a var: tests shorten it).
+var totpDoctorTimeout = 10 * time.Second
 
 // totpPolicyDrift names each setting of p that differs from the pinned
 // policy (contract §8.1 "Authenticator-app codes", core's
@@ -64,8 +65,10 @@ func totpPolicyDrift(p *keycloak.OTPPolicy) []string {
 // (10 s): the policy's drift, and each person's LOGIN_ERROR events with
 // pc_method totp in the last 24 h, from one realm-wide read (P16) keyed by
 // LLDAP username. No Keycloak, or an unreadable policy: nil (no findings,
-// the cause logged). An unreadable or incomplete event read: the counts
-// are unknown (nil, logged), the drift still judged.
+// the cause logged). An unreadable event read or user list: the counts
+// are unknown (nil, logged), the drift still judged. A read past its
+// 1,000-event cap is counted anyway (review M1: each count a lower bound)
+// and Capped is set.
 func (h *Hub) doctorTOTPIn(ctx context.Context) *doctor.SignInTOTPIn {
 	h.totpDoc.mu.Lock()
 	kc := h.totpDoc.kc
@@ -82,7 +85,7 @@ func (h *Hub) doctorTOTPIn(ctx context.Context) *doctor.SignInTOTPIn {
 	}
 	now := time.Now().UTC()
 	in := &doctor.SignInTOTPIn{PolicyDrift: totpPolicyDrift(p), Day: now.Format("2006-01-02")}
-	evs, err := kc.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
+	evs, capped, err := kc.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
 	if err != nil {
 		log.Printf("doctor: the realm's sign-in errors can't be read (%v): no authenticator-code guessing check", err)
 		return in
@@ -92,7 +95,10 @@ func (h *Hub) doctorTOTPIn(ctx context.Context) *doctor.SignInTOTPIn {
 		log.Printf("doctor: Keycloak's users can't be read (%v): no authenticator-code guessing check", err)
 		return in
 	}
-	in.Wrong = map[string]int{}
+	in.Wrong, in.Capped = map[string]int{}, capped
+	if capped {
+		log.Printf("doctor: more than %d failed sign-ins in 24 h: the authenticator-code counts are lower bounds", 1000)
+	}
 	for _, e := range evs {
 		if e.Type != "LOGIN_ERROR" || strings.TrimSpace(e.Details["pc_method"]) != string(signin.TOTP) {
 			continue

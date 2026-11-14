@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -304,9 +303,9 @@ func TestImpersonateEventsStored(t *testing.T) {
 	}
 }
 
-// TestRealmLoginErrors (P16): one realm-wide read of the LOGIN_ERROR
-// events in [from, to): no user filter, paged, capped at 1,000 (more is
-// an error: the doctor then has no finding).
+// TestRealmLoginErrors (P16, review M1): one realm-wide read of the
+// LOGIN_ERROR events in [from, to): no user filter, paged, capped at
+// 1,000 — over the cap it answers the newest 1,000 and incomplete.
 func TestRealmLoginErrors(t *testing.T) {
 	ctx := context.Background()
 	kc := kctest.New(t)
@@ -320,9 +319,9 @@ func TestRealmLoginErrors(t *testing.T) {
 		kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN", "userId": "u-0"})
 		kc.Events = append(kc.Events, map[string]any{"time": now.Add(-48 * time.Hour).UnixMilli(), "type": "LOGIN_ERROR", "userId": "u-0"})
 	})
-	evs, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
-	if err != nil || len(evs) != 150 {
-		t.Fatalf("RealmLoginErrors = %d, %v", len(evs), err)
+	evs, incomplete, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
+	if err != nil || incomplete || len(evs) != 150 {
+		t.Fatalf("RealmLoginErrors = %d, %v, %v", len(evs), incomplete, err)
 	}
 	if evs[0].Type != "LOGIN_ERROR" || evs[0].Details["pc_method"] != "totp" || evs[0].UserID == "" {
 		t.Errorf("event = %+v", evs[0])
@@ -335,13 +334,29 @@ func TestRealmLoginErrors(t *testing.T) {
 	if n := kc.CountCalls("GET /admin/realms/portcullis/events"); n != 2 {
 		t.Errorf("%d pages, want 2 (100 + 50)", n)
 	}
-	// Over the cap: incomplete, an error.
+	// Over the cap: the first 1,000 and incomplete, never an error (the
+	// doctor counts them as lower bounds).
 	kc.With(func() {
 		for range 1000 {
 			kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN_ERROR", "userId": "u-9"})
 		}
 	})
-	if _, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now); err == nil || !strings.Contains(err.Error(), "1000") {
-		t.Errorf("over the cap: %v", err)
+	evs, incomplete, err = c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now)
+	if err != nil || !incomplete || len(evs) != 1000 {
+		t.Errorf("over the cap: %d, %v, %v", len(evs), incomplete, err)
+	}
+	// Exactly 1,000: complete (the probe past the cap finds nothing).
+	kc.With(func() {
+		kc.Events = nil
+		for range 1000 {
+			kc.Events = append(kc.Events, map[string]any{"time": ms, "type": "LOGIN_ERROR", "userId": "u-8"})
+		}
+	})
+	if evs, incomplete, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now); err != nil || incomplete || len(evs) != 1000 {
+		t.Errorf("exactly 1,000: %d, %v, %v", len(evs), incomplete, err)
+	}
+	kc.SetDown(true)
+	if _, _, err := c.RealmLoginErrors(ctx, now.Add(-24*time.Hour), now); err == nil {
+		t.Error("Keycloak down: want an error")
 	}
 }
