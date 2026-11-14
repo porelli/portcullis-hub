@@ -444,6 +444,11 @@ var forwarderImageRe = regexp.MustCompile(`^ghcr\.io/porelli/portcullis-forwarde
 // service shares the pid or ipc namespace of one (service:<X>) or mounts
 // its volumes (volumes_from); proxy_protocol v2.
 func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) error {
+	// No anchors, aliases or merge keys: every check reads the nodes as
+	// written, with nothing a node walk could miss.
+	if vpnYAMLIndirection(compose) {
+		return fmt.Errorf("compose.yml: a VPN template uses no YAML anchors, aliases or merge keys")
+	}
 	s := m.VPN.Ingress.Service
 	infos := composeServiceInfos(compose)
 	info, ok := infos[s]
@@ -541,9 +546,12 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 		}
 		for _, mm := range ms {
 			if mm.bind {
-				norm := path.Clean(mm.src)
-				if !strings.HasPrefix(mm.src, "./templates/"+tid+"/") || !strings.HasPrefix(norm, "templates/"+tid+"/") || !mm.ro {
+				norm := strings.ToLower(path.Clean(mm.src))
+				if !strings.HasPrefix(strings.ToLower(mm.src), "./templates/"+strings.ToLower(tid)+"/") || !strings.HasPrefix(norm, "templates/"+strings.ToLower(tid)+"/") || !mm.ro {
 					return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN gateway binds only the template's own files (./templates/%s/…), read-only", mem, mm.entry, tid)
+				}
+				if vpnBindOutside(mm.src) {
+					return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds are relative, without .. segments", mem, mm.entry)
 				}
 				continue
 			}
@@ -552,6 +560,12 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 			}
 			memberVols[mm.src] = append(memberVols[mm.src], memberUse{mem, mm.ro})
 		}
+	}
+	// A volume is always a plain <project>_<key>: no name, external,
+	// driver or driver_opts on any top-level volume, so nothing can alias
+	// the gateway's or bind the host in disguise.
+	if err := vpnPlainVolumeIdentity(compose); err != nil {
+		return err
 	}
 	for _, n := range names {
 		for _, ns := range []struct{ key, val string }{{"pid", infos[n].pidOf}, {"ipc", infos[n].ipcOf}} {
@@ -586,9 +600,14 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 		// ancestors . and ./templates) are read-only for every service: a
 		// read-write bind could rewrite a script the gateway runs.
 		for _, om := range ms {
-			if om.bind && !om.ro && !strings.HasPrefix(om.src, "/") {
-				norm := path.Clean(om.src)
-				if norm == "." || norm == "templates" || norm == "templates/"+tid || strings.HasPrefix(norm, "templates/"+tid+"/") {
+			if om.bind && vpnBindOutside(om.src) {
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds are relative, without .. segments", n, om.entry)
+			}
+		}
+		for _, om := range ms {
+			if om.bind && !om.ro {
+				norm, ltid := strings.ToLower(path.Clean(om.src)), strings.ToLower(tid)
+				if norm == "." || norm == "templates" || norm == "templates/"+ltid || strings.HasPrefix(norm, "templates/"+ltid+"/") {
 					return fmt.Errorf("vpn.ingress.service: %s mounts %s: in a VPN template the template's files are read-only for every service", n, om.entry)
 				}
 			}
@@ -609,6 +628,21 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 	// are on the default network only.
 	aliases := vpnNetworkAliases(compose)
 	for _, n := range names {
+		// The service's own names answer on every network it joins.
+		joined := infos[n].networks
+		if len(joined) == 0 && !infos[n].networkMode {
+			joined = []string{"default"}
+		}
+		for _, own := range []string{n, infos[n].hostname, infos[n].containerName} {
+			if !strings.HasSuffix(strings.TrimRight(FoldKey(strings.TrimSpace(own)), "."), "-internal") {
+				continue
+			}
+			for _, net := range joined {
+				if net != "default" {
+					return fmt.Errorf("vpn: service %s answers to %s on network %s: a VPN template's -internal aliases are on the default network only", n, strings.TrimSpace(own), net)
+				}
+			}
+		}
 		for _, na := range aliases[n] {
 			if strings.HasSuffix(strings.TrimRight(FoldKey(strings.TrimSpace(na.alias)), "."), "-internal") && na.net != "default" {
 				return fmt.Errorf("vpn: service %s answers to %s on network %s: a VPN template's -internal aliases are on the default network only", n, strings.TrimSpace(na.alias), na.net)
@@ -617,6 +651,54 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 	}
 	if m.VPN.Ingress.ProxyProtocol != VPNProxyV2 {
 		return fmt.Errorf("vpn.ingress.proxy_protocol: only v2")
+	}
+	return nil
+}
+
+// vpnBindOutside: an absolute bind source, or one with a .. segment.
+func vpnBindOutside(src string) bool {
+	return strings.HasPrefix(src, "/") || slices.Contains(strings.Split(strings.ReplaceAll(src, "\\", "/"), "/"), "..")
+}
+
+// vpnYAMLIndirection: compose uses an anchor, an alias or a merge key
+// anywhere.
+func vpnYAMLIndirection(compose []byte) bool {
+	var doc yaml.Node
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return false
+	}
+	var walk func(n *yaml.Node) bool
+	walk = func(n *yaml.Node) bool {
+		if n.Anchor != "" || n.Kind == yaml.AliasNode || n.Tag == "!!merge" || n.Kind == yaml.ScalarNode && n.Value == "<<" && n.Style == 0 {
+			return true
+		}
+		for _, c := range n.Content {
+			if walk(c) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(&doc)
+}
+
+// vpnPlainVolumeIdentity refuses name, external, driver or driver_opts
+// on any top-level volume (sorted by key): a driver_opts bind is a
+// disguised host bind.
+func vpnPlainVolumeIdentity(compose []byte) error {
+	var doc struct {
+		Volumes map[string]interface{} `yaml:"volumes"`
+	}
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return nil
+	}
+	for _, k := range slices.Sorted(maps.Keys(doc.Volumes)) {
+		mm, _ := doc.Volumes[k].(map[string]interface{})
+		for _, key := range []string{"name", "external", "driver", "driver_opts"} {
+			if _, ok := mm[key]; ok {
+				return fmt.Errorf("vpn: volume %s sets %s: a VPN template's volumes are plain <project>_<key> volumes", k, key)
+			}
+		}
 	}
 	return nil
 }

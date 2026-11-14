@@ -584,9 +584,11 @@ type composeServiceInfo struct {
 	volumesFrom                    []string
 	// volumes: the volumes: value as decoded (vpnMounts parses it).
 	volumes interface{}
-	ports   bool     // ports: declared (published to the host)
-	named   []string // container_name / hostname present
-	image   string   // image: as written ("" = none or not a string)
+	// hostname, containerName: as written ("" = none or not a string).
+	hostname, containerName string
+	ports                   bool     // ports: declared (published to the host)
+	named                   []string // container_name / hostname present
+	image                   string   // image: as written ("" = none or not a string)
 	// capDrop, capAdd: the lists as written; privileged: present and
 	// neither false nor "false"; deviceKey: devices or
 	// device_cgroup_rules, the first present ("" = neither).
@@ -656,6 +658,8 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 				info.deviceKey = k
 			}
 		}
+		info.hostname, _ = s["hostname"].(string)
+		info.containerName, _ = s["container_name"].(string)
 		for _, f := range []string{"container_name", "hostname"} {
 			if _, ok := s[f]; ok {
 				info.named = append(info.named, f)
