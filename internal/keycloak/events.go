@@ -12,19 +12,21 @@ import (
 
 // ConfigEventTypes are the user events the Hub has Keycloak store
 // (contract §8 "Keycloak's events config", compared as a set): the sign-in
-// history's source (§8.2) and the impersonation start (§8.1).
-var ConfigEventTypes = []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE"}
+// history's source (§8.2), the impersonation start (§8.1) and the
+// credential events behind the authenticator-app entries (T11). Core's
+// realm-export.json lists the same five (P33).
+var ConfigEventTypes = []string{"LOGIN", "LOGIN_ERROR", "IMPERSONATE", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}
 
 // HistoryEventTypes are the types the sign-in history reads
-// (LoginEventsPage, §8.2: the query is unchanged by part 3).
-var HistoryEventTypes = []string{"LOGIN", "LOGIN_ERROR"}
+// (LoginEventsPage, §8.2): never IMPERSONATE.
+var HistoryEventTypes = []string{"LOGIN", "LOGIN_ERROR", "UPDATE_CREDENTIAL", "REMOVE_CREDENTIAL"}
 
 // eventsConfigPath is the realm's events config.
 func (c *Client) eventsConfigPath() string {
 	return c.BaseURL + "/admin/realms/" + Realm + "/events/config"
 }
 
-// EnsureEventsConfig makes the realm store LOGIN, LOGIN_ERROR and IMPERSONATE events
+// EnsureEventsConfig makes the realm store the ConfigEventTypes events
 // for historyDays days (contract §8 "Keycloak's events config"): it reads
 // the config and, when it differs, writes it back with eventsEnabled true,
 // enabledEventTypes ConfigEventTypes and eventsExpiration
@@ -107,7 +109,7 @@ func (c *Client) ImpersonateEventsStored(ctx context.Context) (bool, error) {
 }
 
 // Event is one of the realm's user events as the history reads it
-// (contract §8.2): LOGIN and LOGIN_ERROR, with the extension's pc_*
+// (contract §8.2): LOGIN, LOGIN_ERROR and the credential events, with the extension's pc_*
 // details (§8.1 "History details").
 type Event struct {
 	Time     time.Time
