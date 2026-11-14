@@ -665,7 +665,11 @@ security key and a password (`all[security_key, password]`) is confirmed with
 the security key — the password alone never is. Under *Password +
 authenticator code* the confirmation is your password (or key), then a code:
 the popup asks for your primary method first, then the code, because a code
-is never the only proof. A password alone is refused. A template that is
+is never the only proof. A password alone is refused. The popup asks for the code
+only when you have no other method the template accepts on its own; when
+none of your methods can pass it, the page says "This needs a stronger
+sign-in: you don't have a method it accepts yet." instead of opening the
+popup. A template that is
 disabled, gone or can't be met refuses.
 
 ## Traefik TLS tier
