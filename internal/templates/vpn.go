@@ -551,7 +551,7 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 					return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN gateway binds only the template's own files (./templates/%s/…), read-only", mem, mm.entry, tid)
 				}
 				if vpnBindOutside(mm.src) {
-					return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds are relative, without .. segments", mem, mm.entry)
+					return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds start with ./ and have no .. segment", mem, mm.entry)
 				}
 				continue
 			}
@@ -601,7 +601,7 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 		// read-write bind could rewrite a script the gateway runs.
 		for _, om := range ms {
 			if om.bind && vpnBindOutside(om.src) {
-				return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds are relative, without .. segments", n, om.entry)
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds start with ./ and have no .. segment", n, om.entry)
 			}
 		}
 		for _, om := range ms {
@@ -655,9 +655,11 @@ func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) er
 	return nil
 }
 
-// vpnBindOutside: an absolute bind source, or one with a .. segment.
+// vpnBindOutside: a bind source outside the allowlist: it must start
+// with ./ and hold no .. segment and no backslash (so no ~, /, drive
+// letter or UNC path, nothing Compose would expand or resolve elsewhere).
 func vpnBindOutside(src string) bool {
-	return strings.HasPrefix(src, "/") || slices.Contains(strings.Split(strings.ReplaceAll(src, "\\", "/"), "/"), "..")
+	return !strings.HasPrefix(src, "./") || strings.Contains(src, "\\") || slices.Contains(strings.Split(src, "/"), "..")
 }
 
 // vpnYAMLIndirection: compose uses an anchor, an alias or a merge key
