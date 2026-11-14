@@ -138,6 +138,15 @@ func (b *Backend) gate() error {
 	return b.cfg.Guard.Err()
 }
 
+// deployGate runs the guard's checks right before a deploy (Create, Up:
+// contract §6, "before every deploy"); a failed run refuses it.
+func (b *Backend) deployGate(ctx context.Context) error {
+	if c, ok := b.cfg.Guard.(interface{ Check(context.Context) error }); ok {
+		return c.Check(ctx)
+	}
+	return b.gate()
+}
+
 func (b *Backend) Kind() runtime.Kind { return runtime.KindKubernetes }
 
 // Env is empty: no Hub variable reaches a template's interpolation.
@@ -150,12 +159,29 @@ func (b *Backend) SetInfo(i runtime.Info) {
 	b.info = i
 }
 
+// Verified is closed once the cluster guard first verified (never
+// without a Guard that has one).
+func (b *Backend) Verified() <-chan struct{} {
+	if v, ok := b.cfg.Guard.(interface{ Verified() <-chan struct{} }); ok {
+		return v.Verified()
+	}
+	return make(chan struct{})
+}
+
 // Info is the guard's view: the pod and service CIDRs as two networks,
-// the forbidden roots, the API server's version.
+// the forbidden roots, the API server's version, the self-test and the
+// probe.
 func (b *Backend) Info(ctx context.Context) (runtime.Info, error) {
 	b.infoMu.Lock()
 	i := b.info
 	b.infoMu.Unlock()
+	if g, ok := b.cfg.Guard.(interface {
+		State() (string, string)
+		Version() string
+	}); ok {
+		i.Admission, i.Netpol = g.State()
+		i.EngineVersion = g.Version()
+	}
 	i.Kind = runtime.KindKubernetes
 	i.Context = b.cfg.Context
 	i.ForbiddenRoots = slices.Clone(b.cfg.RuntimeRoots)
@@ -299,7 +325,7 @@ func (b *Backend) plan(ctx context.Context, p runtime.Project) (Plan, map[string
 // Create applies the instance's objects with every Deployment at 0
 // replicas and no Job (nothing starts).
 func (b *Backend) Create(ctx context.Context, p runtime.Project) error {
-	if err := b.gate(); err != nil {
+	if err := b.deployGate(ctx); err != nil {
 		return err
 	}
 	pl, _, err := b.plan(ctx, p)
@@ -329,7 +355,7 @@ func (b *Backend) Create(ctx context.Context, p runtime.Project) error {
 // dependents need (readiness, completion); the digests resolved for it
 // are pinned only once every step succeeded.
 func (b *Backend) Up(ctx context.Context, p runtime.Project, onPull func(svc string, done, total int64, sized bool)) error {
-	if err := b.gate(); err != nil {
+	if err := b.deployGate(ctx); err != nil {
 		return err
 	}
 	pl, fresh, err := b.plan(ctx, p)

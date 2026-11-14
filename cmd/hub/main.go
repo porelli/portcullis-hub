@@ -73,10 +73,14 @@ func fixerImageFromEnv(getenv func(string) string) (string, error) {
 	return v, nil
 }
 
-// runtimeFromEnv is HUB_CONTAINER_RUNTIME (contract §6; core's compose sets
-// it from CONTAINER_RUNTIME): docker or podman, required — unset, empty or
-// anything else refuses the start. There is no default.
+// runtimeFromEnv is HUB_CONTAINER_RUNTIME (contract §6; core's compose and
+// chart set it from CONTAINER_RUNTIME): docker, podman or kubernetes,
+// required — unset, empty or anything else refuses the start. There is
+// no default.
 func runtimeFromEnv(getenv func(string) string) (runtime.Kind, error) {
+	if v := getenv("HUB_CONTAINER_RUNTIME"); v == string(runtime.KindKubernetes) {
+		return runtime.KindKubernetes, nil
+	}
 	rt, err := docker.ParseRuntime(getenv("HUB_CONTAINER_RUNTIME"))
 	if err != nil {
 		return "", fmt.Errorf("HUB_CONTAINER_RUNTIME: %v (core's compose sets it from CONTAINER_RUNTIME in .env)", err)
@@ -351,28 +355,15 @@ func main() {
 	// (but its version checks) and no compose command runs until the
 	// engine's /version agrees with HUB_CONTAINER_RUNTIME; a contradiction
 	// is permanent (503 until a restart).
-	runtime, err := runtimeFromEnv(os.Getenv)
+	kind, err := runtimeFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
-	guard := docker.NewGuard(runtime)
-	cfg.Runtime, cfg.Guard = runtime, guard
-	dockerHost := env("DOCKER_HOST", docker.DefaultHost)
-	engine, err := docker.New(dockerHost, guard)
-	if err != nil {
-		log.Fatalf("refusing to start: %v", err)
-	}
+	cfg.Runtime = kind
 	keycloakURL := env("KEYCLOAK_URL", "http://keycloak:8080")
 	kc := keycloak.New(keycloakURL, os.Getenv("KEYCLOAK_ADMIN"), os.Getenv("KEYCLOAK_ADMIN_PASSWORD"))
 	fa, err := freshAuthFromEnv(os.Getenv, cfg.Domain, keycloakURL)
 	if err != nil {
-		log.Fatalf("refusing to start: %v", err)
-	}
-
-	cli := compose.NewCLI(dockerHost, guard)
-	if v, err := cli.Version(context.Background()); err != nil {
-		log.Fatalf("refusing to start: %v", err)
-	} else if err := compose.CheckVersion(v); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	// The data directory's advisory lock, held while the Hub runs: `hub
@@ -386,19 +377,46 @@ func main() {
 		log.Fatalf("refusing to start: the data directory is in use (another Hub, or signin reset-core running?): %v", err)
 	}
 	defer releaseLock()
-	// Verify the engine before Init (bounded), then keep retrying in the
-	// background; an unverified or contradicting engine never stops the
-	// start.
 	guardCtx, stopGuard := context.WithCancel(context.Background())
 	defer stopGuard()
-	go guard.Run(guardCtx, engine, 10*time.Second)
-	select {
-	case <-guard.Settled():
-	case <-time.After(engineStartWait):
-		log.Printf("engine: not verified after %s: starting anyway, engine operations answer 503 until it is", engineStartWait)
+	var rt runtime.Instances
+	if kind == runtime.KindKubernetes {
+		// Kubernetes (contract §6 "On Kubernetes"): the in-cluster
+		// ServiceAccount, the cluster guard (fail closed: every runtime
+		// operation answers 503 until its four checks hold).
+		if rt, err = kubeRuntime(guardCtx, &cfg, os.Getenv); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+	} else {
+		// The engine runtime guard (contract §6): nothing reaches the
+		// engine (but its version checks) and no compose command runs
+		// until the engine's /version agrees with HUB_CONTAINER_RUNTIME;
+		// a contradiction is permanent (503 until a restart).
+		guard := docker.NewGuard(kind)
+		cfg.Guard = guard
+		dockerHost := env("DOCKER_HOST", docker.DefaultHost)
+		engine, err := docker.New(dockerHost, guard)
+		if err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+		cli := compose.NewCLI(dockerHost, guard)
+		if v, err := cli.Version(context.Background()); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		} else if err := compose.CheckVersion(v); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+		// Verify the engine before Init (bounded), then keep retrying in
+		// the background; an unverified or contradicting engine never
+		// stops the start.
+		go guard.Run(guardCtx, engine, 10*time.Second)
+		select {
+		case <-guard.Settled():
+		case <-time.After(engineStartWait):
+			log.Printf("engine: not verified after %s: starting anyway, engine operations answer 503 until it is", engineStartWait)
+		}
+		rt = dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: hub.HelperImage})
 	}
 	cfg.AccountURL = fa.AccountURL
-	rt := dockerrt.New(cli, engine, dockerrt.Options{Kind: runtime, Guard: guard, HelperImage: hub.HelperImage})
 	h, err := hub.New(cfg, rt, kc)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -550,7 +568,7 @@ func main() {
 	// Reconcile ran against a refused engine).
 	go func() {
 		select {
-		case <-guard.Verified():
+		case <-runtimeVerified(rt, cfg.Guard):
 			h.TriggerReconcile()
 		case <-ctx.Done():
 		}
@@ -631,7 +649,7 @@ func main() {
 			s.Shutdown(shutdown)
 		}
 	}()
-	log.Printf("Hub listening on %s, people on %s (domain: %s, docker: %s)", addr, peopleAddr, cfg.Domain, dockerHost)
+	log.Printf("Hub listening on %s, people on %s (domain: %s, runtime: %s)", addr, peopleAddr, cfg.Domain, kind)
 	errc := make(chan error, len(servers))
 	for _, s := range servers {
 		go func() { errc <- s.ListenAndServe() }()

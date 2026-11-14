@@ -1,0 +1,2489 @@
+[
+ {
+  "name": "a plain app pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ok",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a pod without portcullis.io/instance",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "nolabel",
+    "namespace": "portcullis-apps",
+    "labels": {}
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "without portcullis.io/instance"
+ },
+ {
+  "name": "a privileged pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "priv",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "privileged": true
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "privileged"
+ },
+ {
+  "name": "a privileged Deployment",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "privd",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "privileged": true
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "privileged"
+ },
+ {
+  "name": "a privileged Job",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "privj",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "privileged": true
+        }
+       }
+      ],
+      "restartPolicy": "Never"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "privileged"
+ },
+ {
+  "name": "hostNetwork",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hn",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostNetwork": true
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "host namespaces"
+ },
+ {
+  "name": "hostPID",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hp",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "hostPID": true
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "host namespaces"
+ },
+ {
+  "name": "a hostPort",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hport",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "ports": [
+       {
+        "containerPort": 80,
+        "hostPort": 8080
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostPort"
+ },
+ {
+  "name": "SYS_ADMIN",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "cap",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "capabilities": {
+        "add": [
+         "SYS_ADMIN"
+        ]
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "beyond the Kubernetes baseline"
+ },
+ {
+  "name": "baseline caps",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "capok",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "capabilities": {
+        "add": [
+         "CHOWN",
+         "DAC_OVERRIDE",
+         "FOWNER",
+         "NET_BIND_SERVICE"
+        ]
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "Unconfined seccomp",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "sc",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "securityContext": {
+     "seccompProfile": {
+      "type": "Unconfined"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "Unconfined seccomp"
+ },
+ {
+  "name": "an unsafe sysctl",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "sy",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "securityContext": {
+     "sysctls": [
+      {
+       "name": "kernel.msgmax",
+       "value": "1"
+      }
+     ]
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "sysctls"
+ },
+ {
+  "name": "hostPath /etc",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hpe",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/etc",
+       "type": "Directory"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostPath outside the bind roots"
+ },
+ {
+  "name": "hostPath /srv/sharedX on a Deployment",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "hpd",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+       }
+      ],
+      "volumes": [
+       {
+        "name": "h",
+        "hostPath": {
+         "path": "/srvX/shared",
+         "type": "Directory"
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "hostPath outside the bind roots"
+ },
+ {
+  "name": "hostPath under /srv",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hps",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/srv/shared/x",
+       "type": "Directory"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a token",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "tok",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": true,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "default ServiceAccount without a token"
+ },
+ {
+  "name": "another ServiceAccount",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "sa",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "serviceAccountName": "builder"
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "default ServiceAccount without a token"
+ },
+ {
+  "name": "another instance's Secret",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ref",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "volumes": [
+     {
+      "name": "s",
+      "secret": {
+       "secretName": "other--env"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "outside the pod's instance"
+ },
+ {
+  "name": "another instance's env Secret by secretKeyRef",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ref2",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "env": [
+       {
+        "name": "X",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "other--env",
+          "key": "web.X"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "outside the pod's instance"
+ },
+ {
+  "name": "its own Secret and a tpl- ConfigMap",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ref3",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "volumes": [
+     {
+      "name": "s",
+      "secret": {
+       "secretName": "app--env"
+      }
+     },
+     {
+      "name": "t",
+      "configMap": {
+       "name": "tpl-echo-0123456789"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "an instance-prefix trick (app-x--env for app)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "ref4",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "volumes": [
+     {
+      "name": "s",
+      "secret": {
+       "secretName": "appx--env"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "outside the pod's instance"
+ },
+ {
+  "name": "a Calico annotation",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "cni",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    },
+    "annotations": {
+     "cni.projectcalico.org/ipAddrs": "[\"10.42.3.3\"]"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "CNI annotations"
+ },
+ {
+  "name": "vpn-slot 46",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "s46",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/vpn-slot": "46"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "vpn-slot 47",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "s47",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/vpn-slot": "47"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "vpn-slot"
+ },
+ {
+  "name": "vpn-slot x1",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "sm1",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/vpn-slot": "x1"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "vpn-slot"
+ },
+ {
+  "name": "a helper with another image",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hub-helper-aaaaaaaa",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/helper": "volume"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "helper pod must be the Hub's own"
+ },
+ {
+  "name": "the Hub's volume helper",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hub-helper-bbbbbbbb",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/helper": "volume"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "command": [
+       "/usr/local/bin/hub",
+       "helper",
+       "idle"
+      ],
+      "securityContext": {
+       "runAsUser": 0,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ],
+        "add": [
+         "CHOWN",
+         "DAC_OVERRIDE",
+         "FOWNER"
+        ]
+       }
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "vol",
+      "persistentVolumeClaim": {
+       "claimName": "app--data"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "the Hub's fixer helper (DAC_READ_SEARCH)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hub-helper-cccccccc",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "portcullis-fixer",
+     "portcullis.io/helper": "fixer"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "command": [
+       "/usr/local/bin/hub",
+       "helper",
+       "idle"
+      ],
+      "securityContext": {
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ],
+        "add": [
+         "DAC_READ_SEARCH"
+        ]
+       }
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "b",
+      "hostPath": {
+       "path": "/srv/photos",
+       "type": "Directory"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "DAC_READ_SEARCH on an app pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "drs",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "capabilities": {
+        "add": [
+         "DAC_READ_SEARCH"
+        ]
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "beyond the Kubernetes baseline"
+ },
+ {
+  "name": "a helper with a network label",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hub-helper-dddddddd",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/helper": "volume",
+     "portcullis.io/net-default": "true"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "helper pod must be the Hub's own"
+ },
+ {
+  "name": "the Hub's probe pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "portcullis-probe-allow-x",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "portcullis-probe",
+     "portcullis.io/probe": "allow"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "command": [
+       "/usr/local/bin/hub",
+       "helper",
+       "listen",
+       ":8080"
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 10001
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a probe label on an app pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "fakeprobe",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/probe": "allow"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "portcullis.io/probe only"
+ },
+ {
+  "name": "a NodePort",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "np",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "type": "NodePort",
+    "ports": [
+     {
+      "port": 80
+     }
+    ],
+    "selector": {
+     "a": "b"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "NodePort"
+ },
+ {
+  "name": "ExternalName",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "en",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "type": "ExternalName",
+    "externalName": "example.org"
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "NodePort and ExternalName"
+ },
+ {
+  "name": "externalIPs",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "eip",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "ports": [
+     {
+      "port": 80
+     }
+    ],
+    "externalIPs": [
+     "192.0.2.9"
+    ],
+    "selector": {
+     "a": "b"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "externalIPs"
+ },
+ {
+  "name": "a LoadBalancer on 443",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "lb443",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "type": "LoadBalancer",
+    "allocateLoadBalancerNodePorts": false,
+    "ports": [
+     {
+      "port": 443
+     }
+    ],
+    "selector": {
+     "a": "b"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "core port"
+ },
+ {
+  "name": "a LoadBalancer on 8090",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "lb8090",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "type": "LoadBalancer",
+    "allocateLoadBalancerNodePorts": false,
+    "externalTrafficPolicy": "Local",
+    "ports": [
+     {
+      "port": 8090
+     }
+    ],
+    "selector": {
+     "a": "b"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a LoadBalancer allocating node ports",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "lbnp",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "type": "LoadBalancer",
+    "ports": [
+     {
+      "port": 8091
+     }
+    ],
+    "selector": {
+     "a": "b"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "node ports"
+ },
+ {
+  "name": "an IngressRoute with K15 @file names",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "okr",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-apps"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a core-namespace middleware",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "xns",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "hub-proxy-secret",
+        "namespace": "portcullis"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "middleware outside the namespace"
+ },
+ {
+  "name": "an unlisted @file middleware",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "strip",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "strip-forwarded@file"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "middleware outside"
+ },
+ {
+  "name": "an @internal service",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "int",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-apps"
+       }
+      ],
+      "services": [
+       {
+        "name": "api@internal",
+        "kind": "TraefikService"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a service outside"
+ },
+ {
+  "name": "a K15 file service",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "ffs",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-apps"
+       }
+      ],
+      "services": [
+       {
+        "name": "mcp-gate@file",
+        "kind": "TraefikService"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a service in another namespace",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "osvc",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-apps"
+       }
+      ],
+      "services": [
+       {
+        "name": "keycloak",
+        "namespace": "portcullis",
+        "port": 8080
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a service outside"
+ },
+ {
+  "name": "TLS options outside the tiers",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "tlsx",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-apps"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "default"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "TLS options"
+ },
+ {
+  "name": "a TLS secret",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "tlss",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-apps"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "secretName": "app--cert"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "TLS options"
+ },
+ {
+  "name": "a forwardAuth Middleware",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "Middleware",
+   "metadata": {
+    "name": "fa",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "forwardAuth": {
+     "address": "http://group-gate.portcullis.svc:8080"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "forwardAuth"
+ },
+ {
+  "name": "an X-Portcullis header",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "Middleware",
+   "metadata": {
+    "name": "xp",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "headers": {
+     "customRequestHeaders": {
+      "X-Portcullis-User": "root"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "X-Portcullis"
+ },
+ {
+  "name": "an X_Portcullis header spelling",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "Middleware",
+   "metadata": {
+    "name": "xp2",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "headers": {
+     "customRequestHeaders": {
+      "x_portcullis_proxy_secret": "x"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "X-Portcullis"
+ },
+ {
+  "name": "a stripping header Middleware",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "Middleware",
+   "metadata": {
+    "name": "strp",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "headers": {
+     "customRequestHeaders": {
+      "X-Forwarded-User": ""
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a basicAuth Middleware",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "Middleware",
+   "metadata": {
+    "name": "ba",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "basicAuth": {
+     "secret": "app--users"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "Secret"
+ },
+ {
+  "name": "routed port from Traefik",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "rt",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/service": "web"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "portcullis"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/component": "traefik"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 8080,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a foreign peer (all of 0.0.0.0/0)",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "all",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/service": "web"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "ipBlock": {
+         "cidr": "0.0.0.0/0"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "ingress peer"
+ },
+ {
+  "name": "a rule without peers",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "open",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/service": "web"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "ports": [
+       {
+        "port": 80
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "without peers"
+ },
+ {
+  "name": "an empty namespaceSelector",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "ens",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/service": "web"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "namespaceSelector": {}
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "empty namespaceSelector"
+ },
+ {
+  "name": "a selector without a key",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "sel",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "portcullis"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/component": "traefik"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "select one instance"
+ },
+ {
+  "name": "another instance's pods as peers",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "oth",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/net-default": "true"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/instance": "other"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "ingress peer"
+ },
+ {
+  "name": "egress inside the pod CIDR",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "pc",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/egress": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "10.42.3.0/24"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "egress peer"
+ },
+ {
+  "name": "the Hub's internet egress",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "eg",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/egress": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "0.0.0.0/0",
+         "except": [
+          "10.42.0.0/16",
+          "10.43.0.0/16",
+          "169.254.0.0/16",
+          "192.0.2.10/32"
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "192.0.2.10/32"
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 80,
+        "protocol": "TCP"
+       },
+       {
+        "port": 443,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "internet egress missing the node",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "eg2",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/egress": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "0.0.0.0/0",
+         "except": [
+          "10.42.0.0/16",
+          "10.43.0.0/16",
+          "169.254.0.0/16"
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "egress peer"
+ },
+ {
+  "name": "the node on 6443",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "kapi",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/egress": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "192.0.2.10/32"
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 6443
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "egress peer"
+ },
+ {
+  "name": "a gateway to its edge port",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "gw",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/vpn-slot": "3"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "portcullis"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/component": "wg"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 9004,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a gateway to another slot's port",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "gw2",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/vpn-slot": "3"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "portcullis"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/component": "wg"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 9005,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "egress peer"
+ },
+ {
+  "name": "kube-dns on 53",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "dns",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/net-default": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "kube-system"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "k8s-app": "kube-dns"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 53,
+        "protocol": "UDP"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "kube-dns on 80",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "dns80",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/net-default": "true"
+     }
+    },
+    "policyTypes": [
+     "Egress"
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "kube-system"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "k8s-app": "kube-dns"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 80
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "egress peer"
+ },
+ {
+  "name": "a probe policy between probe pods",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "pp",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/probe": "allow"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/probe": "client"
+         }
+        }
+       }
+      ],
+      "ports": [
+       {
+        "port": 8080,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a probe policy admitting Traefik",
+  "object": {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "pp2",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "portcullis.io/probe": "allow"
+     }
+    },
+    "policyTypes": [
+     "Ingress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "portcullis"
+         }
+        },
+        "podSelector": {
+         "matchLabels": {
+          "portcullis.io/component": "traefik"
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "probe pods only"
+ },
+ {
+  "name": "a service-account-token Secret",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "app--tok",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    },
+    "annotations": {
+     "kubernetes.io/service-account.name": "default"
+    }
+   },
+   "type": "kubernetes.io/service-account-token"
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "service-account-token"
+ },
+ {
+  "name": "an Opaque Secret",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "app--env",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "type": "Opaque",
+   "data": {
+    "web.X": "eA=="
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ }
+]

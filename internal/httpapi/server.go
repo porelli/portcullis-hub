@@ -14,6 +14,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/portcullis/hub/internal/runtime/kube"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/hub"
@@ -298,7 +300,7 @@ func errStatus(err error, def int) int {
 	var se *hub.StatusError
 	var busy hub.ErrBusy
 	switch {
-	case errors.Is(err, docker.ErrEngineRefused):
+	case errors.Is(err, docker.ErrEngineRefused), errors.Is(err, kube.ErrClusterUnverified):
 		return http.StatusServiceUnavailable
 	case errors.As(err, &se):
 		return se.Status

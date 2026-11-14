@@ -11,7 +11,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/vpn"
 )
 
@@ -181,5 +183,40 @@ func TestKubeReservedIncludesClusterCIDRs(t *testing.T) {
 		if !slices.Contains(core.Reserved, netip.MustParsePrefix(want)) {
 			t.Errorf("reserved lacks %s: %v", want, core.Reserved)
 		}
+	}
+}
+
+// degradedRT signals like the kube backend without kill in the image.
+type degradedRT struct{ runtime.Instances }
+
+func (degradedRT) Signal(context.Context, string, string) error { return kube.ErrReloadDegraded }
+
+// A reload whose signal can't be sent (Kubernetes, no kill) restarted the
+// pod: the unit is ok with reload_degraded, and the doctor lists the
+// instance (Info).
+func TestReloadDegraded(t *testing.T) {
+	f, _, _ := tmFixture(t)
+	if err := f.h.Enable(tmID); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	f.h.rt = degradedRT{f.h.rt}
+	res, err := f.h.SaveSettings(tmID, SettingsUpdate{Values: vals("greeting", "hello")}, directory.Human("admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	u, ok := unit(res.Deliveries, "reload")
+	if !ok || !u.OK || !strings.HasPrefix(u.Message, "reload_degraded") {
+		t.Errorf("reload unit = %+v", u)
+	}
+	f.h.cfg.Runtime = runtime.KindKubernetes
+	in := f.h.doctorKubeIn(context.Background())
+	if in == nil || !slices.Equal(in.ReloadDegraded, []string{tmID}) {
+		t.Errorf("doctor input %+v", in)
+	}
+	f.h.cfg.Runtime = runtime.KindDocker
+	if f.h.doctorKubeIn(context.Background()) != nil {
+		t.Error("a docker Hub has Kubernetes doctor inputs")
 	}
 }

@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime/kube"
+
 	"github.com/portcullis/hub/internal/runtime"
 
 	"golang.org/x/sync/singleflight"
@@ -275,6 +277,9 @@ type Hub struct {
 	fixerMu    sync.Mutex
 	fixerImage string
 	mountinfo  func() ([]byte, error)
+	// reloadDegraded: instance → true while its last reload restarted
+	// the pod instead (Kubernetes; doctor reload_degraded).
+	reloadDegraded sync.Map
 	// readIDMaps reads the Hub's own uid_map / gid_map (runtime_engine.go;
 	// nil = /proc/self, test-settable).
 	readIDMaps func() (uid, gid idmap.Map, err error)
@@ -920,7 +925,7 @@ func (e *StatusError) Unwrap() error { return e.Err }
 func statusErr(code int, format string, args ...interface{}) error {
 	err := fmt.Errorf(format, args...)
 	for _, a := range args {
-		if e, ok := a.(error); ok && errors.Is(e, docker.ErrEngineRefused) {
+		if e, ok := a.(error); ok && (errors.Is(e, docker.ErrEngineRefused) || errors.Is(e, kube.ErrClusterUnverified)) {
 			return &StatusError{Status: http.StatusServiceUnavailable, Err: &wrappedErr{msg: err.Error(), err: e}}
 		}
 	}

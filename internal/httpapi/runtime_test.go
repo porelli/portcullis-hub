@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/runtime/kube"
+
 	"github.com/portcullis/hub/internal/runtime/runtimetest"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -127,5 +129,14 @@ func TestRuntimeRouteNoKubeFields(t *testing.T) {
 		if strings.Contains(body, k) {
 			t.Errorf("docker view has %s: %s", k, body)
 		}
+	}
+}
+
+// The cluster guard's refusal is a 503 with its why, like the engine
+// guard's.
+func TestClusterUnverifiedIs503(t *testing.T) {
+	err := fmt.Errorf("listing: %w", &kube.UnverifiedError{Why: "admission self-test: the guard is missing"})
+	if got := errStatus(err, 500); got != 503 {
+		t.Errorf("status %d", got)
 	}
 }

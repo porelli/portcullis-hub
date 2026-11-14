@@ -295,13 +295,13 @@ func TestMaxMinutes(t *testing.T) {
 // TestRuntimeFromEnv: HUB_CONTAINER_RUNTIME is required, docker or podman
 // (contract §6, P0: no default).
 func TestRuntimeFromEnv(t *testing.T) {
-	for v, want := range map[string]runtime.Kind{"docker": runtime.KindDocker, "podman": runtime.KindPodman} {
+	for v, want := range map[string]runtime.Kind{"docker": runtime.KindDocker, "podman": runtime.KindPodman, "kubernetes": runtime.KindKubernetes} {
 		got, err := runtimeFromEnv(func(k string) string { return map[string]string{"HUB_CONTAINER_RUNTIME": v}[k] })
 		if err != nil || got != want {
 			t.Errorf("%q: %q, %v", v, got, err)
 		}
 	}
-	for _, v := range []string{"", "rkt", "Docker", "podman "} {
+	for _, v := range []string{"", "rkt", "Docker", "podman ", "Kubernetes", "k8s"} {
 		if _, err := runtimeFromEnv(func(k string) string { return map[string]string{"HUB_CONTAINER_RUNTIME": v}[k] }); err == nil || !strings.Contains(err.Error(), "HUB_CONTAINER_RUNTIME") {
 			t.Errorf("%q accepted or unnamed: %v", v, err)
 		}
@@ -380,6 +380,19 @@ func TestHubVPNSubcommand(t *testing.T) {
 	for _, bad := range [][]string{{}, {"add-device", "--user", "a"}, {"revoke"}, {"frob"}} {
 		if code := vpnMain(bad, nil, &stdout, &stderr, sock); code != 2 {
 			t.Errorf("%v: exit %d", bad, code)
+		}
+	}
+}
+
+// HUB_SELF_IMAGE: required under Kubernetes, pinned by digest.
+func TestSelfImageFromEnv(t *testing.T) {
+	img := "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("a", 64)
+	if got, err := selfImageFromEnv(func(string) string { return img }); err != nil || got != img {
+		t.Errorf("%q %v", got, err)
+	}
+	for _, v := range []string{"", "ghcr.io/porelli/portcullis-hub:edge", "ghcr.io/porelli/portcullis-hub@sha256:abc"} {
+		if _, err := selfImageFromEnv(func(string) string { return v }); err == nil {
+			t.Errorf("%q accepted", v)
 		}
 	}
 }

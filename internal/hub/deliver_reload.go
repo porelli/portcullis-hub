@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/kube"
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/templates"
@@ -71,11 +72,25 @@ func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template, ran map[str
 		u.Skipped = SkipNotRunning
 		return u
 	}
+	degraded := false
 	for _, id := range ids {
-		if err := h.rt.Signal(ctx, id, r.Signal); err != nil {
+		err := h.rt.Signal(ctx, id, r.Signal)
+		if errors.Is(err, kube.ErrReloadDegraded) {
+			// Kubernetes, no kill in the image: the pod was restarted
+			// through its Deployment (doctor reload_degraded).
+			degraded = true
+			continue
+		}
+		if err != nil {
 			return fail(fmt.Errorf("reload: sending %s to %s failed: %w", r.Signal, r.Service, err))
 		}
 	}
+	if degraded {
+		h.reloadDegraded.Store(t.ID, true)
+		u.OK, u.Message = true, reloadDegradedMsg
+		return u
+	}
+	h.reloadDegraded.Delete(t.ID)
 	if err := h.sleep(ctx, reloadGrace); err != nil {
 		return fail(fmt.Errorf("reload: %w", err))
 	}
@@ -97,3 +112,7 @@ func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template, ran map[str
 	}
 	return u
 }
+
+// reloadDegradedMsg is a reload unit's message when the pod had to be
+// restarted instead (Kubernetes, no kill in the image).
+const reloadDegradedMsg = "reload_degraded: the image has no kill, the pod was restarted"

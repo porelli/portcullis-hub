@@ -252,6 +252,8 @@ type Inputs struct {
 	// Engine: the container engine (engine.go, rootless Podman; nil = no
 	// guard: the engine kinds never fire).
 	Engine *EngineIn
+	// Kube is the cluster guard's state (nil: not Kubernetes).
+	Kube *KubeIn
 	// VPN: the VPN kinds' inputs (vpn.go; nil = none fire).
 	VPN *VPNIn
 }

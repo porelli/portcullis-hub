@@ -1,0 +1,465 @@
+# The admission guard behind the Hub's Role (contract §6 "On Kubernetes"):
+# five ValidatingAdmissionPolicies, each bound to the apps namespace by
+# its own binding (bindings.yaml) with the params ConfigMap (params.yaml).
+# Authored here (K13); core keeps byte copies under kube/admission/.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: portcullis-apps-pods
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: spec
+      expression: "object.spec"
+    - name: labels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: annotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: containers
+      expression: >-
+        variables.spec.containers
+        + (has(variables.spec.initContainers) ? variables.spec.initContainers : [])
+        + (has(variables.spec.ephemeralContainers) ? variables.spec.ephemeralContainers : [])
+    - name: instance
+      expression: "'portcullis.io/instance' in variables.labels ? variables.labels['portcullis.io/instance'] : ''"
+    - name: helper
+      expression: "'portcullis.io/helper' in variables.labels ? variables.labels['portcullis.io/helper'] : ''"
+    - name: probe
+      expression: "'portcullis.io/probe' in variables.labels"
+    - name: hubSA
+      expression: "request.userInfo.username == params.data.hubServiceAccount"
+    - name: baseline
+      expression: >-
+        ['AUDIT_WRITE', 'CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL', 'MKNOD',
+        'NET_BIND_SERVICE', 'SETFCAP', 'SETGID', 'SETPCAP', 'SETUID', 'SYS_CHROOT']
+    - name: allowedCaps
+      expression: >-
+        variables.baseline + (variables.helper == 'fixer' && variables.hubSA ? ['DAC_READ_SEARCH'] : [])
+    - name: bindRoots
+      expression: "params.data.bindRoots.split(',')"
+    - name: safeSysctls
+      expression: >-
+        ['kernel.shm_rmid_forced', 'net.ipv4.ip_local_port_range', 'net.ipv4.ip_unprivileged_port_start',
+        'net.ipv4.tcp_syncookies', 'net.ipv4.ping_group_range', 'net.ipv4.ip_local_reserved_ports',
+        'net.ipv4.tcp_keepalive_time', 'net.ipv4.tcp_fin_timeout', 'net.ipv4.tcp_keepalive_intvl',
+        'net.ipv4.tcp_keepalive_probes']
+  validations:
+    - expression: "variables.instance != ''"
+      message: "a pod without portcullis.io/instance"
+    - expression: >-
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)
+      message: "privileged containers are not allowed"
+    - expression: >-
+        (!has(variables.spec.hostNetwork) || !variables.spec.hostNetwork)
+        && (!has(variables.spec.hostPID) || !variables.spec.hostPID)
+        && (!has(variables.spec.hostIPC) || !variables.spec.hostIPC)
+      messageExpression: "'host namespaces are not allowed (' + object.metadata.name + ')'"
+    - expression: >-
+        variables.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))
+      message: "hostPort is not allowed"
+    - expression: >-
+        (!has(variables.spec.securityContext) || !has(variables.spec.securityContext.windowsOptions)
+          || !has(variables.spec.securityContext.windowsOptions.hostProcess) || !variables.spec.securityContext.windowsOptions.hostProcess)
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.windowsOptions)
+          || !has(c.securityContext.windowsOptions.hostProcess) || !c.securityContext.windowsOptions.hostProcess)
+      message: "hostProcess is not allowed"
+    - expression: >-
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities)
+          || !has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.all(a, a in variables.allowedCaps))
+      message: "capabilities beyond the Kubernetes baseline"
+    - expression: >-
+        (!has(variables.spec.securityContext) || !has(variables.spec.securityContext.seccompProfile)
+          || variables.spec.securityContext.seccompProfile.type != 'Unconfined')
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.seccompProfile)
+          || c.securityContext.seccompProfile.type != 'Unconfined')
+      message: "an Unconfined seccomp profile is not allowed"
+    - expression: >-
+        (!has(variables.spec.securityContext) || !has(variables.spec.securityContext.appArmorProfile)
+          || variables.spec.securityContext.appArmorProfile.type != 'Unconfined')
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.appArmorProfile)
+          || c.securityContext.appArmorProfile.type != 'Unconfined')
+        && !variables.annotations.exists(k, k.startsWith('container.apparmor.security.beta.kubernetes.io/') && variables.annotations[k] == 'unconfined')
+      message: "an Unconfined AppArmor profile is not allowed"
+    - expression: >-
+        (!has(variables.spec.securityContext) || !has(variables.spec.securityContext.seLinuxOptions)
+          || (!has(variables.spec.securityContext.seLinuxOptions.user) && !has(variables.spec.securityContext.seLinuxOptions.role)
+            && (!has(variables.spec.securityContext.seLinuxOptions.type)
+              || variables.spec.securityContext.seLinuxOptions.type in ['', 'container_t', 'container_init_t', 'container_kvm_t', 'container_engine_t'])))
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.seLinuxOptions)
+          || (!has(c.securityContext.seLinuxOptions.user) && !has(c.securityContext.seLinuxOptions.role)
+            && (!has(c.securityContext.seLinuxOptions.type)
+              || c.securityContext.seLinuxOptions.type in ['', 'container_t', 'container_init_t', 'container_kvm_t', 'container_engine_t'])))
+      message: "SELinux options outside the baseline"
+    - expression: >-
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.procMount) || c.securityContext.procMount == 'Default')
+      message: "a procMount other than Default"
+    - expression: >-
+        !has(variables.spec.securityContext) || !has(variables.spec.securityContext.sysctls)
+        || variables.spec.securityContext.sysctls.all(s, s.name in variables.safeSysctls)
+      message: "sysctls outside the baseline's safe set"
+    - expression: >-
+        !has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath)
+          || (!v.hostPath.path.contains('..') && variables.bindRoots.exists(r, r != '' && (v.hostPath.path == r || v.hostPath.path.startsWith(r + '/')))))
+      message: "a hostPath outside the bind roots"
+    - expression: >-
+        (!has(variables.spec.serviceAccountName) || variables.spec.serviceAccountName == '' || variables.spec.serviceAccountName == 'default')
+        && has(variables.spec.automountServiceAccountToken) && !variables.spec.automountServiceAccountToken
+      message: "pods run as the default ServiceAccount without a token"
+    - expression: >-
+        (!has(variables.spec.volumes) || variables.spec.volumes.all(v,
+          (!has(v.secret) || (v.secret.secretName.startsWith(variables.instance + '--') || v.secret.secretName.startsWith('tpl-'))) && (!has(v.configMap) || (v.configMap.name.startsWith(variables.instance + '--') || v.configMap.name.startsWith('tpl-')))
+          && (!has(v.persistentVolumeClaim) || (v.persistentVolumeClaim.claimName.startsWith(variables.instance + '--') || v.persistentVolumeClaim.claimName.startsWith('tpl-')))
+          && (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s, (!has(s.secret) || (s.secret.name.startsWith(variables.instance + '--') || s.secret.name.startsWith('tpl-'))) && (!has(s.configMap) || (s.configMap.name.startsWith(variables.instance + '--') || s.configMap.name.startsWith('tpl-')))))))
+        && variables.containers.all(c, (!has(c.envFrom) || c.envFrom.all(e, (!has(e.secretRef) || (e.secretRef.name.startsWith(variables.instance + '--') || e.secretRef.name.startsWith('tpl-'))) && (!has(e.configMapRef) || (e.configMapRef.name.startsWith(variables.instance + '--') || e.configMapRef.name.startsWith('tpl-')))))
+          && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || ((!has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.secretKeyRef.name.startsWith('tpl-'))) && (!has(e.valueFrom.configMapKeyRef) || (e.valueFrom.configMapKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.configMapKeyRef.name.startsWith('tpl-')))))))
+      message: "a Secret, ConfigMap or PVC outside the pod's instance"
+    - expression: >-
+        !variables.annotations.exists(k, k.startsWith('cni.projectcalico.org/') || k.startsWith('k8s.v1.cni.cncf.io/')
+          || k.startsWith('v1.multus-cni.io/') || k.startsWith('kube-router.io/') || k.startsWith('flannel.alpha.coreos.com/'))
+      message: "CNI annotations are not allowed"
+    - expression: >-
+        !('portcullis.io/vpn-slot' in variables.labels)
+        || variables.labels['portcullis.io/vpn-slot'].matches('^([0-9]|[1-3][0-9]|4[0-6])$')
+      message: "portcullis.io/vpn-slot must be an integer 0-46"
+    - expression: >-
+        variables.helper == '' || ((variables.helper == 'fixer' || variables.helper == 'volume') && variables.hubSA
+          && variables.containers.all(c, c.image == params.data.hubImage)
+          && !variables.labels.exists(k, k.startsWith('portcullis.io/net-') || k == 'portcullis.io/egress')
+          && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add)
+            || c.securityContext.capabilities.add.all(a, variables.helper == 'volume' ? a in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'] : a in variables.allowedCaps)))
+      message: "a helper pod must be the Hub's own (its image, its ServiceAccount, no network label, its mode's caps)"
+    - expression: >-
+        variables.helper != '' || variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities)
+          || !has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.all(a, a in variables.baseline))
+      message: "only the Hub's helpers get the capability exception"
+    - expression: >-
+        !variables.probe || (variables.instance == 'portcullis-probe' && variables.hubSA
+          && variables.containers.all(c, c.image == params.data.hubImage && has(c.command) && size(c.command) >= 3
+            && c.command[1] == 'helper' && c.command[2] in ['listen', 'idle', 'dial']
+            && (!has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
+            && has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot)
+          && !has(variables.spec.volumes)
+          && variables.labels.all(k, !k.startsWith('portcullis.io/') || k in ['portcullis.io/probe', 'portcullis.io/instance']))
+      message: "portcullis.io/probe only on the Hub's probe pods"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: portcullis-apps-workloads
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+  variables:
+    - name: isSecret
+      expression: "object.kind == 'Secret'"
+    - name: spec
+      expression: "object.spec.template.spec"
+    - name: labels
+      expression: "has(object.spec.template.metadata) && has(object.spec.template.metadata.labels) ? object.spec.template.metadata.labels : {}"
+    - name: annotations
+      expression: "has(object.spec.template.metadata) && has(object.spec.template.metadata.annotations) ? object.spec.template.metadata.annotations : {}"
+    - name: containers
+      expression: >-
+        variables.spec.containers
+        + (has(variables.spec.initContainers) ? variables.spec.initContainers : [])
+        + (has(variables.spec.ephemeralContainers) ? variables.spec.ephemeralContainers : [])
+    - name: instance
+      expression: "'portcullis.io/instance' in variables.labels ? variables.labels['portcullis.io/instance'] : ''"
+    - name: helper
+      expression: "'portcullis.io/helper' in variables.labels ? variables.labels['portcullis.io/helper'] : ''"
+    - name: probe
+      expression: "'portcullis.io/probe' in variables.labels"
+    - name: hubSA
+      expression: "request.userInfo.username == params.data.hubServiceAccount"
+    - name: baseline
+      expression: >-
+        ['AUDIT_WRITE', 'CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL', 'MKNOD',
+        'NET_BIND_SERVICE', 'SETFCAP', 'SETGID', 'SETPCAP', 'SETUID', 'SYS_CHROOT']
+    - name: allowedCaps
+      expression: >-
+        variables.baseline + (variables.helper == 'fixer' && variables.hubSA ? ['DAC_READ_SEARCH'] : [])
+    - name: bindRoots
+      expression: "params.data.bindRoots.split(',')"
+    - name: safeSysctls
+      expression: >-
+        ['kernel.shm_rmid_forced', 'net.ipv4.ip_local_port_range', 'net.ipv4.ip_unprivileged_port_start',
+        'net.ipv4.tcp_syncookies', 'net.ipv4.ping_group_range', 'net.ipv4.ip_local_reserved_ports',
+        'net.ipv4.tcp_keepalive_time', 'net.ipv4.tcp_fin_timeout', 'net.ipv4.tcp_keepalive_intvl',
+        'net.ipv4.tcp_keepalive_probes']
+  validations:
+    - expression: "!variables.isSecret || !has(object.type) || object.type != 'kubernetes.io/service-account-token'"
+      message: "a service-account-token Secret is not allowed"
+    - expression: "variables.isSecret || variables.instance != ''"
+      message: "a pod without portcullis.io/instance"
+    - expression: >-
+        variables.isSecret || variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)
+      message: "privileged containers are not allowed"
+    - expression: >-
+        variables.isSecret || ((!has(variables.spec.hostNetwork) || !variables.spec.hostNetwork)
+        && (!has(variables.spec.hostPID) || !variables.spec.hostPID)
+        && (!has(variables.spec.hostIPC) || !variables.spec.hostIPC))
+      messageExpression: "'host namespaces are not allowed (' + object.metadata.name + ')'"
+    - expression: >-
+        variables.isSecret || variables.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))
+      message: "hostPort is not allowed"
+    - expression: >-
+        variables.isSecret || ((!has(variables.spec.securityContext) || !has(variables.spec.securityContext.windowsOptions)
+          || !has(variables.spec.securityContext.windowsOptions.hostProcess) || !variables.spec.securityContext.windowsOptions.hostProcess)
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.windowsOptions)
+          || !has(c.securityContext.windowsOptions.hostProcess) || !c.securityContext.windowsOptions.hostProcess))
+      message: "hostProcess is not allowed"
+    - expression: >-
+        variables.isSecret || variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities)
+          || !has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.all(a, a in variables.baseline))
+      message: "capabilities beyond the Kubernetes baseline"
+    - expression: >-
+        variables.isSecret || ((!has(variables.spec.securityContext) || !has(variables.spec.securityContext.seccompProfile)
+          || variables.spec.securityContext.seccompProfile.type != 'Unconfined')
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.seccompProfile)
+          || c.securityContext.seccompProfile.type != 'Unconfined'))
+      message: "an Unconfined seccomp profile is not allowed"
+    - expression: >-
+        variables.isSecret || ((!has(variables.spec.securityContext) || !has(variables.spec.securityContext.appArmorProfile)
+          || variables.spec.securityContext.appArmorProfile.type != 'Unconfined')
+        && variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.appArmorProfile)
+          || c.securityContext.appArmorProfile.type != 'Unconfined')
+        && !variables.annotations.exists(k, k.startsWith('container.apparmor.security.beta.kubernetes.io/') && variables.annotations[k] == 'unconfined'))
+      message: "an Unconfined AppArmor profile is not allowed"
+    - expression: >-
+        variables.isSecret || variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.procMount) || c.securityContext.procMount == 'Default')
+      message: "a procMount other than Default"
+    - expression: >-
+        variables.isSecret || !has(variables.spec.securityContext) || !has(variables.spec.securityContext.sysctls)
+        || variables.spec.securityContext.sysctls.all(s, s.name in variables.safeSysctls)
+      message: "sysctls outside the baseline's safe set"
+    - expression: >-
+        variables.isSecret || !has(variables.spec.volumes) || variables.spec.volumes.all(v, !has(v.hostPath)
+          || (!v.hostPath.path.contains('..') && variables.bindRoots.exists(r, r != '' && (v.hostPath.path == r || v.hostPath.path.startsWith(r + '/')))))
+      message: "a hostPath outside the bind roots"
+    - expression: >-
+        variables.isSecret || ((!has(variables.spec.serviceAccountName) || variables.spec.serviceAccountName == '' || variables.spec.serviceAccountName == 'default')
+        && has(variables.spec.automountServiceAccountToken) && !variables.spec.automountServiceAccountToken)
+      message: "pods run as the default ServiceAccount without a token"
+    - expression: >-
+        variables.isSecret || ((!has(variables.spec.volumes) || variables.spec.volumes.all(v,
+          (!has(v.secret) || (v.secret.secretName.startsWith(variables.instance + '--') || v.secret.secretName.startsWith('tpl-'))) && (!has(v.configMap) || (v.configMap.name.startsWith(variables.instance + '--') || v.configMap.name.startsWith('tpl-')))
+          && (!has(v.persistentVolumeClaim) || (v.persistentVolumeClaim.claimName.startsWith(variables.instance + '--') || v.persistentVolumeClaim.claimName.startsWith('tpl-')))
+          && (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s, (!has(s.secret) || (s.secret.name.startsWith(variables.instance + '--') || s.secret.name.startsWith('tpl-'))) && (!has(s.configMap) || (s.configMap.name.startsWith(variables.instance + '--') || s.configMap.name.startsWith('tpl-')))))))
+        && variables.containers.all(c, (!has(c.envFrom) || c.envFrom.all(e, (!has(e.secretRef) || (e.secretRef.name.startsWith(variables.instance + '--') || e.secretRef.name.startsWith('tpl-'))) && (!has(e.configMapRef) || (e.configMapRef.name.startsWith(variables.instance + '--') || e.configMapRef.name.startsWith('tpl-')))))
+          && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || ((!has(e.valueFrom.secretKeyRef) || (e.valueFrom.secretKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.secretKeyRef.name.startsWith('tpl-'))) && (!has(e.valueFrom.configMapKeyRef) || (e.valueFrom.configMapKeyRef.name.startsWith(variables.instance + '--') || e.valueFrom.configMapKeyRef.name.startsWith('tpl-'))))))))
+      message: "a Secret, ConfigMap or PVC outside the pod's instance"
+    - expression: >-
+        variables.isSecret || !variables.annotations.exists(k, k.startsWith('cni.projectcalico.org/') || k.startsWith('k8s.v1.cni.cncf.io/')
+          || k.startsWith('v1.multus-cni.io/') || k.startsWith('kube-router.io/') || k.startsWith('flannel.alpha.coreos.com/'))
+      message: "CNI annotations are not allowed"
+    - expression: >-
+        variables.isSecret || !('portcullis.io/vpn-slot' in variables.labels)
+        || variables.labels['portcullis.io/vpn-slot'].matches('^([0-9]|[1-3][0-9]|4[0-6])$')
+      message: "portcullis.io/vpn-slot must be an integer 0-46"
+    - expression: "variables.isSecret || (variables.helper == '' && !variables.probe)"
+      message: "helpers and probes are pods of the Hub, never workloads"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: portcullis-apps-services
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  variables:
+    - name: type
+      expression: "has(object.spec.type) ? object.spec.type : 'ClusterIP'"
+    - name: corePorts
+      expression: "params.data.corePorts.split(',')"
+  validations:
+    - expression: "variables.type != 'NodePort' && variables.type != 'ExternalName'"
+      message: "NodePort and ExternalName Services are not allowed"
+    - expression: "!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0"
+      message: "externalIPs are not allowed"
+    - expression: "!has(object.spec.ports) || object.spec.ports.all(p, !has(p.nodePort) || p.nodePort == 0)"
+      message: "node ports are not allowed"
+    - expression: >-
+        variables.type != 'LoadBalancer' || (has(object.spec.allocateLoadBalancerNodePorts) && !object.spec.allocateLoadBalancerNodePorts)
+      message: "a LoadBalancer must set allocateLoadBalancerNodePorts: false"
+    - expression: >-
+        variables.type != 'LoadBalancer' || !has(object.spec.ports) || object.spec.ports.all(p, !(string(p.port) in variables.corePorts))
+      messageExpression: "'a LoadBalancer on a core port (' + object.metadata.name + ')'"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: portcullis-apps-traefik
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingressroutes", "middlewares", "ingressroutetcps", "ingressrouteudps", "traefikservices", "serverstransports", "tlsoptions", "tlsstores"]
+  variables:
+    - name: file
+      expression: "params.data.fileMiddlewares.split(',')"
+    - name: fileServices
+      expression: "['group-gate@file', 'forward-auth-ext@file', 'mcp-gate@file']"
+    - name: tiers
+      expression: "['authaware@file', 'public@file', 'protected@file', 'protected-any@file']"
+    - name: ns
+      expression: "object.metadata.namespace"
+    - name: mwOK
+      expression: >-
+        has(object.spec) && has(object.spec.routes) ? object.spec.routes.all(r, !has(r.middlewares) || r.middlewares.all(m,
+          (!has(m.namespace) || m.namespace == variables.ns) && (!m.name.contains('@') || m.name in variables.file))) : true
+    - name: svcOK
+      expression: >-
+        has(object.spec) && has(object.spec.routes) ? object.spec.routes.all(r, !has(r.services) || r.services.all(s,
+          has(s.kind) && s.kind == 'TraefikService' ? s.name in variables.fileServices
+          : !s.name.contains('@') && (!has(s.namespace) || s.namespace == variables.ns))) : true
+    - name: headers
+      expression: >-
+        object.kind == 'Middleware' && has(object.spec.headers)
+        ? (has(object.spec.headers.customRequestHeaders) ? object.spec.headers.customRequestHeaders : {})
+        : {}
+    - name: respHeaders
+      expression: >-
+        object.kind == 'Middleware' && has(object.spec.headers) && has(object.spec.headers.customResponseHeaders)
+        ? object.spec.headers.customResponseHeaders : {}
+  validations:
+    - expression: "object.kind in ['IngressRoute', 'Middleware']"
+      messageExpression: "object.kind + ' is not allowed for apps'"
+    - expression: "object.kind != 'IngressRoute' || variables.mwOK"
+      message: "a middleware outside the namespace or the @file list"
+    - expression: "object.kind != 'IngressRoute' || variables.svcOK"
+      message: "a service outside the namespace (or an @internal / unlisted TraefikService)"
+    - expression: >-
+        object.kind != 'IngressRoute' || !has(object.spec.tls) || ((!has(object.spec.tls.options) || object.spec.tls.options.name in variables.tiers)
+          && !has(object.spec.tls.secretName) && !has(object.spec.tls.store))
+      message: "TLS options outside the tiers, or a Secret reference"
+    - expression: "object.kind != 'Middleware' || !has(object.spec.forwardAuth)"
+      message: "a forwardAuth Middleware is not allowed"
+    - expression: >-
+        object.kind != 'Middleware' || (!has(object.spec.basicAuth) && !has(object.spec.digestAuth))
+      message: "a Middleware referencing a Secret is not allowed"
+    - expression: >-
+        !variables.headers.exists(k, k.lowerAscii().replace('_', '-').startsWith('x-portcullis-'))
+        && !variables.respHeaders.exists(k, k.lowerAscii().replace('_', '-').startsWith('x-portcullis-'))
+      message: "a Middleware may not set X-Portcullis-* headers"
+    - expression: >-
+        object.kind != 'Middleware' || !has(object.spec.chain) || !has(object.spec.chain.middlewares)
+        || object.spec.chain.middlewares.all(m, (!has(m.namespace) || m.namespace == variables.ns) && (!m.name.contains('@') || m.name in variables.file))
+      message: "a chain middleware outside the namespace or the @file list"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: portcullis-apps-netpol
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["networkpolicies"]
+  variables:
+    - name: sel
+      expression: "has(object.spec.podSelector.matchLabels) ? object.spec.podSelector.matchLabels : {}"
+    - name: inst
+      expression: "'portcullis.io/instance' in variables.sel ? variables.sel['portcullis.io/instance'] : ''"
+    - name: probe
+      expression: "'portcullis.io/probe' in variables.sel"
+    - name: slot
+      expression: "'portcullis.io/vpn-slot' in variables.sel ? variables.sel['portcullis.io/vpn-slot'] : ''"
+    - name: core
+      expression: "params.data.coreNamespace"
+    - name: nodes
+      expression: "params.data.nodeAddresses.split(',')"
+    - name: ingress
+      expression: "has(object.spec.ingress) ? object.spec.ingress : []"
+    - name: egress
+      expression: "has(object.spec.egress) ? object.spec.egress : []"
+  validations:
+    - expression: >-
+        variables.probe || (variables.inst != '' && variables.inst != 'portcullis-probe'
+          && (!has(object.spec.podSelector.matchExpressions) || size(object.spec.podSelector.matchExpressions) == 0)
+          && variables.sel.exists(k, k.startsWith('portcullis.io/net-') || k in ['portcullis.io/egress', 'portcullis.io/service', 'portcullis.io/vpn-slot']))
+      message: "a policy must select one instance's pods (with a net, egress, service or slot key)"
+    - expression: >-
+        variables.ingress.all(r, has(r.from) && size(r.from) > 0) && variables.egress.all(r, has(r.to) && size(r.to) > 0)
+      message: "a rule without peers"
+    - expression: >-
+        (variables.ingress.all(r, r.from.all(p, !has(p.namespaceSelector) || (has(p.namespaceSelector.matchLabels) && size(p.namespaceSelector.matchLabels) > 0)))
+        && variables.egress.all(r, r.to.all(p, !has(p.namespaceSelector) || (has(p.namespaceSelector.matchLabels) && size(p.namespaceSelector.matchLabels) > 0))))
+        && (variables.ingress.all(r, r.from.all(p, !has(p.podSelector) || (has(p.podSelector.matchLabels) && size(p.podSelector.matchLabels) > 0)))
+        && variables.egress.all(r, r.to.all(p, !has(p.podSelector) || (has(p.podSelector.matchLabels) && size(p.podSelector.matchLabels) > 0))))
+      message: "an empty namespaceSelector or podSelector"
+    - expression: >-
+        !variables.probe || (variables.ingress.all(r, r.from.all(p, !has(p.namespaceSelector) && !has(p.ipBlock)
+            && has(p.podSelector) && 'portcullis.io/probe' in p.podSelector.matchLabels))
+          && variables.egress.all(r, r.to.all(p, !has(p.namespaceSelector) && !has(p.ipBlock)
+            && has(p.podSelector) && 'portcullis.io/probe' in p.podSelector.matchLabels)))
+      message: "a probe policy's peers are probe pods only"
+    - expression: >-
+        variables.probe || variables.ingress.all(r, r.from.all(p,
+          (!has(p.namespaceSelector) && !has(p.ipBlock) && has(p.podSelector) && 'portcullis.io/instance' in p.podSelector.matchLabels
+            && p.podSelector.matchLabels['portcullis.io/instance'] == variables.inst)
+          || (!has(p.ipBlock) && has(p.namespaceSelector) && p.namespaceSelector.matchLabels == {'kubernetes.io/metadata.name': variables.core}
+            && has(p.podSelector) && (p.podSelector.matchLabels == {'portcullis.io/component': 'traefik'} || p.podSelector.matchLabels == {'portcullis.io/component': 'mcp-gate'}))))
+      message: "an ingress peer that isn't the instance, Traefik or mcp-gate"
+    - expression: >-
+        variables.probe || variables.egress.all(r, r.to.all(p,
+          (!has(p.namespaceSelector) && !has(p.ipBlock) && has(p.podSelector) && 'portcullis.io/instance' in p.podSelector.matchLabels
+            && p.podSelector.matchLabels['portcullis.io/instance'] == variables.inst)
+          || (!has(p.ipBlock) && has(p.namespaceSelector) && p.namespaceSelector.matchLabels == {'kubernetes.io/metadata.name': 'kube-system'}
+            && has(p.podSelector) && p.podSelector.matchLabels == {'k8s-app': 'kube-dns'}
+            && has(r.ports) && size(r.ports) > 0 && r.ports.all(q, has(q.port) && string(q.port) == '53'))
+          || (!has(p.ipBlock) && has(p.namespaceSelector) && p.namespaceSelector.matchLabels == {'kubernetes.io/metadata.name': variables.core}
+            && has(p.podSelector) && p.podSelector.matchLabels == {'portcullis.io/component': 'wg'}
+            && variables.slot != '' && has(r.ports) && size(r.ports) > 0
+            && r.ports.all(q, has(q.port) && string(q.port) == string(9001 + int(variables.slot))))
+          || (has(p.ipBlock) && !has(p.namespaceSelector) && !has(p.podSelector) && p.ipBlock.cidr == '0.0.0.0/0'
+            && has(p.ipBlock.except) && params.data.podCIDR in p.ipBlock.except && params.data.serviceCIDR in p.ipBlock.except
+            && '169.254.0.0/16' in p.ipBlock.except && variables.nodes.all(n, n == '' || n in p.ipBlock.except))
+          || (has(p.ipBlock) && !has(p.namespaceSelector) && !has(p.podSelector) && p.ipBlock.cidr in variables.nodes
+            && (!has(p.ipBlock.except) || size(p.ipBlock.except) == 0)
+            && has(r.ports) && size(r.ports) > 0 && r.ports.all(q, has(q.port) && (string(q.port) == '80' || string(q.port) == '443')))))
+      message: "an egress peer that isn't one of the Hub's shapes"
