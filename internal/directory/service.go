@@ -1436,7 +1436,12 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		for i, id := range groupIDs {
 			if err := s.LLDAP.AddUserToGroup(ctx, req.Username, id); err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("adding to %s failed: %v", groupNames[i], err))
-			} else if cfg != nil && cfg.clearGrace(groupNames[i], req.Username) {
+				continue
+			}
+			// The group's own entry, so its History shows the add
+			// (ForGroup matches the target only).
+			s.auditAlso(c, "group.add_member", groupNames[i], req.Username+" (account created)")
+			if cfg != nil && cfg.clearGrace(groupNames[i], req.Username) {
 				graceCleared = true // granted again
 			}
 		}
@@ -1635,6 +1640,13 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 			return err
 		}
 		deleted = u.ID
+		// Each group they were in gets its own entry, so its History
+		// shows the removal (ForGroup matches the target only).
+		for _, name := range slices.Sorted(maps.Keys(sn.groups)) {
+			if memberOf(sn.groups[name], u.ID) {
+				s.auditAlso(c, "group.remove_member", name, u.ID+" (account deleted)")
+			}
+		}
 		if kcID != "" {
 			if err := s.KC.DeleteUserByID(ctx, kcID); err != nil {
 				kcErr = "delete: " + err.Error()
