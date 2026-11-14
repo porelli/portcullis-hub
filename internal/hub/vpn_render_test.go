@@ -209,13 +209,13 @@ func TestGatewayOverrideKeepsTemplateNetworks(t *testing.T) {
 	for _, c := range []struct {
 		name, gateway, want string
 	}{
-		{"none declared", "  gateway:\n    image: x\n", "    networks:\n      \"default\": {}\n      portcullis-vpn:\n        ipv4_address: 172.31.254.16\n"},
-		{"list", "  gateway:\n    image: x\n    networks: [default, portcullis-proxy]\n", "    networks:\n      \"default\": {}\n      \"portcullis-proxy\": {}\n      portcullis-vpn:\n        ipv4_address: 172.31.254.16\n"},
-		{"map with aliases", "  gateway:\n    image: x\n    networks:\n      default:\n        aliases: [gw]\n", "    networks:\n      \"default\": {}\n      portcullis-vpn:\n        ipv4_address: 172.31.254.16\n"},
+		{"none declared", "  gateway:\n    image: x\n    cap_drop: [ALL]\n", "    networks:\n      \"default\": {}\n      portcullis-vpn:\n        ipv4_address: 172.31.254.16\n"},
+		{"list", "  gateway:\n    image: x\n    cap_drop: [ALL]\n    networks: [default, portcullis-proxy]\n", "    networks:\n      \"default\": {}\n      \"portcullis-proxy\": {}\n      portcullis-vpn:\n        ipv4_address: 172.31.254.16\n"},
+		{"map with aliases", "  gateway:\n    image: x\n    cap_drop: [ALL]\n    networks:\n      default:\n        aliases: [gw]\n", "    networks:\n      \"default\": {}\n      portcullis-vpn:\n        ipv4_address: 172.31.254.16\n"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := meshTemplate("mesh", "100.64.0.0/10", "oidc_sub")
-			m[1] = strings.Replace(m[1], "  gateway:\n    image: x\n", c.gateway+"  fwd:\n    image: ghcr.io/porelli/portcullis-forwarder:1@sha256:"+strings.Repeat("a", 64)+"\n    network_mode: service:gateway\n", 1)
+			m[1] = strings.Replace(m[1], "  gateway:\n    image: x\n    cap_drop: [ALL]\n", c.gateway+"  fwd:\n    image: ghcr.io/porelli/portcullis-forwarder:1@sha256:"+strings.Repeat("a", 64)+"\n    network_mode: service:gateway\n    cap_drop: [ALL]\n", 1)
 			v := newVPNFixtureExtra(t, nil, map[string][2]string{"mesh": m}, VPNModeApps)
 			if v.h.Template("mesh") == nil {
 				t.Fatal("mesh not loaded")

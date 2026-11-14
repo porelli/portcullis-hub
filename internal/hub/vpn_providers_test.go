@@ -52,7 +52,7 @@ vpn:
 const vpnMeshCompose = "services:\n  %s:\n    image: x\n    labels:\n" +
 	"      traefik.http.routers.%s.rule: Host(`${PORTCULLIS_HOST_%s:-%s.portcullis.local}`)\n" +
 	"      traefik.http.routers.%s.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
-	"    networks: [default, portcullis-proxy]\n  gateway:\n    image: x\n  glue:\n    image: x\nnetworks:\n  portcullis-proxy:\n    external: true\n"
+	"    networks: [default, portcullis-proxy]\n  gateway:\n    image: x\n    cap_drop: [ALL]\n  glue:\n    image: x\nnetworks:\n  portcullis-proxy:\n    external: true\n"
 
 func meshTemplate(router, rng, owner string) [2]string {
 	up := strings.ToUpper(router)
@@ -79,7 +79,7 @@ vpn:
 const vpnStaticCompose = "services:\n  wgui:\n    image: x\n    labels:\n" +
 	"      traefik.http.routers.wgui.rule: Host(`${PORTCULLIS_HOST_WGUI:-wgui.portcullis.local}`)\n" +
 	"      traefik.http.routers.wgui.middlewares: portcullis-auth@docker,portcullis-groups@docker\n" +
-	"    networks: [default, portcullis-proxy]\n  gateway:\n    image: x\nnetworks:\n  portcullis-proxy:\n    external: true\n"
+	"    networks: [default, portcullis-proxy]\n  gateway:\n    image: x\n    cap_drop: [ALL]\nnetworks:\n  portcullis-proxy:\n    external: true\n"
 
 var (
 	vpnServerKey = keyOf(1)

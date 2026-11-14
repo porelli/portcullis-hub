@@ -88,6 +88,12 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	}
 	routes, err := ParseRoutes(compose)
 	if err != nil {
+		// A control router whose rule isn't Host() or Host() &&
+		// PathPrefix() is refused as such first (templates' validate.py
+		// order: a PathPrefix-only control router).
+		if cerr := vpnControlRulesPrecheck(&m, compose); cerr != nil {
+			return Template{}, cerr
+		}
 		return Template{}, err
 	}
 	// Only method custom may have no HTTP router (§3, F48): a gateway

@@ -575,11 +575,26 @@ func rawVarRefs(s string) []rawRef {
 type composeServiceInfo struct {
 	networks    []string
 	networkMode bool
-	netModeOf   string   // network_mode's value when a string
-	pidOf       string   // pid's value when a string
-	ports       bool     // ports: declared (published to the host)
-	named       []string // container_name / hostname present
-	image       string   // image: as written ("" = none or not a string)
+	netModeOf   string // network_mode's value when a string
+	pidOf       string // pid's value when a string
+	ipcOf       string // ipc's value when a string
+	// hasPid, hasIpc, hasVolumesFrom: the key is set (any value);
+	// volumesFrom: its string entries.
+	hasPid, hasIpc, hasVolumesFrom bool
+	volumesFrom                    []string
+	// volumes: the volumes: value as decoded (vpnMounts parses it).
+	volumes interface{}
+	// hostname, containerName: as written ("" = none or not a string).
+	hostname, containerName string
+	ports                   bool     // ports: declared (published to the host)
+	named                   []string // container_name / hostname present
+	image                   string   // image: as written ("" = none or not a string)
+	// capDrop, capAdd: the lists as written; privileged: present and
+	// neither false nor "false"; deviceKey: devices or
+	// device_cgroup_rules, the first present ("" = neither).
+	capDrop, capAdd []string
+	privileged      bool
+	deviceKey       string
 }
 
 func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
@@ -607,8 +622,44 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 		_, info.networkMode = s["network_mode"]
 		info.netModeOf, _ = s["network_mode"].(string)
 		info.pidOf, _ = s["pid"].(string)
+		info.ipcOf, _ = s["ipc"].(string)
+		_, info.hasPid = s["pid"]
+		_, info.hasIpc = s["ipc"]
+		_, info.hasVolumesFrom = s["volumes_from"]
+		info.volumes = s["volumes"]
+		if l, ok := s["volumes_from"].([]interface{}); ok {
+			for _, x := range l {
+				if v, ok := x.(string); ok {
+					info.volumesFrom = append(info.volumesFrom, v)
+				}
+			}
+		}
 		_, info.ports = s["ports"]
 		info.image, _ = s["image"].(string)
+		strs := func(v interface{}) []string {
+			var out []string
+			switch l := v.(type) {
+			case []interface{}:
+				for _, x := range l {
+					out = append(out, fmt.Sprint(x))
+				}
+			case nil:
+			default:
+				out = append(out, fmt.Sprint(l))
+			}
+			return out
+		}
+		info.capDrop, info.capAdd = strs(s["cap_drop"]), strs(s["cap_add"])
+		if p, ok := s["privileged"]; ok && p != false && p != "false" {
+			info.privileged = true
+		}
+		for _, k := range []string{"devices", "device_cgroup_rules"} {
+			if _, ok := s[k]; ok && info.deviceKey == "" {
+				info.deviceKey = k
+			}
+		}
+		info.hostname, _ = s["hostname"].(string)
+		info.containerName, _ = s["container_name"].(string)
 		for _, f := range []string{"container_name", "hostname"} {
 			if _, ok := s[f]; ok {
 				info.named = append(info.named, f)
