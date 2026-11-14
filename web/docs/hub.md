@@ -1780,7 +1780,7 @@ engine to clear a mismatch.
   name and version, a mismatch's text, whether the engine is rootless and
   has SELinux, the Hub's own id maps and the host's
   `ip_unprivileged_port_start` (the maps and the port are `null` under
-  Docker). See [contract §11.10](../guides/integration-contracts.md#1110-rootless-compatibility-new-rootless).
+  Docker). See [contract §11.10](../guides/integration-contracts.md#1110-runtime-compatibility-new-rootless-kubernetes).
 
 ## Local networks
 
