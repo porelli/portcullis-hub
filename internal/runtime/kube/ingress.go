@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -48,6 +49,18 @@ type router struct {
 	rule, entrypoints, middlewares, svc   string
 	priority, tlsOptions, tlsCertResolver string
 	tls                                   bool
+}
+
+func init() {
+	// RuntimeCompat judges a template's Traefik labels with this code.
+	templates.KubeLabelCheck = func(labels map[string]map[string]string) string {
+		_, err := IngressObjects("compat", EdgeNamespace, "portcullis-apps", labels)
+		var r *ErrRefused
+		if errors.As(err, &r) {
+			return r.Reason
+		}
+		return ""
+	}
 }
 
 // IngressObjects converts an instance's rendered Traefik labels (per

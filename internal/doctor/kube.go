@@ -67,9 +67,9 @@ func (c kubeCheck) Run(in *Inputs) []Finding {
 		}
 		return []Finding{{FP: Fingerprint(c.kind), Kind: c.kind, Severity: Problem,
 			Title:  "The admission guard behind the Hub's Role is missing.",
-			Why:    "A forbidden object the Hub dry-ran wasn't rejected by its portcullis-apps-guard binding: nothing would stop a pod spec the Role allows. Every runtime operation answers 503.",
+			Why:    "A forbidden object the Hub dry-ran wasn't rejected by its own binding (portcullis-apps-guard-<policy>-<generation>, or portcullis-edge-guard-routes-<generation> in the edge namespace): a rejection by RBAC, a quota or another webhook counts as missing, so nothing would stop an object the Role allows. Every runtime operation answers 503.",
 			Class:  FixExplain,
-			Steps:  []string{"Run ./portcullis upgrade: it installs the five ValidatingAdmissionPolicies and their bindings again.", "Check ./portcullis status for the cluster check."},
+			Steps:  []string{"Run ./portcullis upgrade: it installs the six ValidatingAdmissionPolicies and their bindings (one per policy, named <binding>-<params generation>) again.", "Check ./portcullis status for the cluster check."},
 			Inputs: Digest(k.Admission + " " + k.Why)}}
 	case KindClusterUnverified:
 		if k.Verified || k.Admission == "missing" || (k.Netpol != "proven" && strings.Contains(k.Why, "NetworkPolicy probe")) {

@@ -1233,5 +1233,75 @@
     "service web mounts a volume but has no numeric user"
    ]
   }
+ },
+ {
+  "name": "kubernetes: an npipe volume refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    volumes:\n      - type: npipe\n        source: \\\\.\\pipe\\x\n        target: /x\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web mounts a npipe volume (not on Kubernetes)"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a non-numeric group_add refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    group_add: [audio]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web adds group audio: Kubernetes needs a numeric gid"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: an expose range refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    expose: [\"8000-8010\"]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web exposes \"8000-8010\": only single ports are on Kubernetes"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: sharing the network of a missing service refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    network_mode: service:ghost\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web shares the network of ghost, which isn't a service"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: sharing the network of a service that shares another's refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  a:\n    image: docker.io/library/nginx:1.29\n  b:\n    image: docker.io/library/nginx:1.29\n    network_mode: service:a\n  c:\n    image: docker.io/library/nginx:1.29\n    network_mode: service:b\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service c shares the network of b, which shares another's"
+   ]
+  }
  }
 ]

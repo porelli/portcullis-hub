@@ -402,9 +402,9 @@ func (t *translator) compat() error {
 		case s.Privileged:
 			return refused("service %s is privileged (not on Kubernetes)", n)
 		case s.Pid == "host":
-			return refused("service %s shares the host's pid namespace (not on Kubernetes)", n)
+			return refused("service %s shares the host's %s namespace (not on Kubernetes)", n, "pid")
 		case s.Ipc == "host":
-			return refused("service %s shares the host's ipc namespace (not on Kubernetes)", n)
+			return refused("service %s shares the host's %s namespace (not on Kubernetes)", n, "ipc")
 		case len(s.ExtraHosts) > 0:
 			return refused("service %s sets extra_hosts (not on Kubernetes)", n)
 		case s.Scale != nil && *s.Scale > 1:

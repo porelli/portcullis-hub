@@ -88,6 +88,20 @@ func kubeCompat(compose []byte, m Manifest, env map[string]string) Compat {
 		c.kubeService(s.name, s.node, env, roots, k)
 	}
 	c.kubeAliases(services, k, env)
+	c.kubeVolumeTypes(services, env)
+	c.kubeNetns(services, env)
+	if KubeLabelCheck != nil && k.labels != nil {
+		resolved := map[string]map[string]string{}
+		for svc, l := range k.labels {
+			resolved[svc] = map[string]string{}
+			for key, v := range l {
+				resolved[svc][key] = resolve(v, env)
+			}
+		}
+		if why := KubeLabelCheck(resolved); why != "" {
+			c.refuse("%s", why)
+		}
+	}
 	first := ""
 	if len(services) > 0 {
 		first = services[0].name
@@ -205,7 +219,6 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 	} else if name == kubePodsName {
 		c.refuse("service %s: the name is reserved on Kubernetes (the instance's pod DNS)", name)
 	}
-	tun := "service " + name + " uses TUN/NET_ADMIN (not on Kubernetes; prefer a userspace mode)"
 	devs, ok := scalars(field(s, "devices"))
 	if !ok {
 		c.refuse("service %s passes host devices (not on Kubernetes)", name)
@@ -216,7 +229,7 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 		case "/dev/null":
 			c.degrade("service %s has device slots: host devices can't be passed on Kubernetes", name)
 		case "/dev/net/tun":
-			c.refuse("%s", tun)
+			c.refuse("service %s uses TUN/NET_ADMIN (not on Kubernetes; prefer a userspace mode)", name)
 		default:
 			c.refuse("service %s passes host devices (not on Kubernetes)", name)
 		}
@@ -227,7 +240,7 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 		switch {
 		case v == "":
 		case v == "NET_ADMIN":
-			c.refuse("%s", tun)
+			c.refuse("service %s uses TUN/NET_ADMIN (not on Kubernetes; prefer a userspace mode)", name)
 		case !slices.Contains(KubeBaselineCaps, v):
 			if strings.Trim(v, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_") != "" || len(v) > 32 {
 				v = "a capability"
@@ -297,6 +310,27 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 	if eh := field(s, "extra_hosts"); eh != nil && eh.Tag != "!!null" && len(eh.Content) > 0 || eh != nil && eh.Kind == yaml.ScalarNode && eh.Tag != "!!null" && eh.Value != "" {
 		c.refuse("service %s sets extra_hosts (not on Kubernetes)", name)
 	}
+	ga, _ := scalars(field(s, "group_add"))
+	for _, g := range ga {
+		if g = strings.TrimSpace(resolve(g, env)); !numeric(g) {
+			shown := g
+			if !shownUserRe.MatchString(g) {
+				shown = "a non-numeric value"
+			}
+			c.refuse("service %s adds group %s: Kubernetes needs a numeric gid", name, shown)
+		}
+	}
+	ex, _ := scalars(field(s, "expose"))
+	for _, e := range ex {
+		e = strings.TrimSpace(resolve(e, env))
+		if num, _, _ := strings.Cut(e, "/"); !numeric(num) {
+			shown := e
+			if !shownUserRe.MatchString(e) {
+				shown = "a non-numeric value"
+			}
+			c.refuse("service %s exposes %q: only single ports are on Kubernetes", name, shown)
+		}
+	}
 	// A named volume's owner on Kubernetes is the service's uid (the
 	// translator's PVC annotations): none, nothing to own it.
 	if scalarValue(field(s, "user"), env) == "" {
@@ -359,6 +393,63 @@ func (c *compatReasons) kubeAliases(services []namedService, k kubeCtx, env map[
 	}
 	if len(owner) > kubeMaxAliases {
 		c.refuse("more than %d network aliases (not on Kubernetes)", kubeMaxAliases)
+	}
+}
+
+// KubeLabelCheck is the Kubernetes backend's judgment of a template's
+// Traefik labels (the IngressRoutes / Middlewares it would render),
+// installed by internal/runtime/kube (the same code the deploy runs, so
+// compat and the deploy agree): "" when they translate, else the
+// refusal. Nil when that package isn't linked.
+var KubeLabelCheck func(labels map[string]map[string]string) string
+
+// kubeNetns: network_mode service:<x> must name a service that owns its
+// network (the translator puts both in x's pod).
+func (c *compatReasons) kubeNetns(services []namedService, env map[string]string) {
+	target := map[string]string{}
+	for _, s := range services {
+		if v, ok := strings.CutPrefix(scalarValue(field(s.node, "network_mode"), env), "service:"); ok {
+			target[s.name] = v
+		}
+	}
+	names := map[string]bool{}
+	for _, s := range services {
+		names[s.name] = true
+	}
+	for _, s := range services {
+		x, ok := target[s.name]
+		switch {
+		case !ok:
+		case !names[x]:
+			c.refuse("service %s shares the network of %s, which isn't a service", s.name, x)
+		case target[x] != "":
+			c.refuse("service %s shares the network of %s, which shares another's", s.name, x)
+		}
+	}
+}
+
+// kubeVolumeTypes: the translator mounts bind, volume and tmpfs volumes
+// only (long syntax `type:`).
+func (c *compatReasons) kubeVolumeTypes(services []namedService, env map[string]string) {
+	for _, s := range services {
+		vols := field(s.node, "volumes")
+		if vols == nil || vols.Kind != yaml.SequenceNode {
+			continue
+		}
+		for _, v := range vols.Content {
+			if v.Kind != yaml.MappingNode {
+				continue
+			}
+			switch typ := scalarValue(field(v, "type"), env); typ {
+			case "", "bind", "volume", "tmpfs":
+			default:
+				shown := typ
+				if !podDNSName.MatchString(typ) {
+					shown = "an unknown"
+				}
+				c.refuse("service %s mounts a %s volume (not on Kubernetes)", s.name, shown)
+			}
+		}
 	}
 }
 

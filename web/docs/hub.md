@@ -1726,6 +1726,19 @@ never fire under Docker, and none has a one-click fix:
 | `selinux_label_missing` | Warning | On an SELinux host, a shared folder without the `container_file_t` label (or a scan that got `permission denied`) | Explain: the path regex-escaped in `semanage fcontext -a -t container_file_t '<path>(/.*)?'` and `restorecon -R '<path>'`, as root |
 | `udp_source_rewritten` | Info | An app publishes a UDP port: its clients appear with a rewritten source address | — |
 
+### Kubernetes checks
+
+On [Kubernetes](kubernetes.md) (experimental) the doctor adds five checks.
+They never fire under Docker or Podman, and none has a one-click fix:
+
+| Kind | Severity | Finds | Fix |
+|------|----------|-------|-----|
+| `netpol_not_enforced` | Problem | The Hub's own NetworkPolicy probe hasn't passed: every instance deploy is refused | Explain: k3s must run its network policy controller (no `--disable-network-policy`); the Hub retries every minute |
+| `admission_guard_missing` | Problem | An object of the admission self-test wasn't rejected by its own binding: every runtime operation answers `503` | Explain: `./portcullis upgrade` installs the policies and bindings again; check `./portcullis status` |
+| `cluster_unverified` | Problem | Another cluster guard check fails (the cluster check missing, `ok: false` or older than 24 h, or the Hub's permissions not exactly its Roles); shows why | Explain: `./portcullis up` writes the cluster check again |
+| `reload_degraded` | Info | An instance's image has no `kill`, so a settings reload restarts its pod instead | — |
+| `kube_api_public` | Warning | The Kubernetes API (`:6443`) or the kubelet (`:10250`) answers on the node's public address | Explain: allow them only from the administrators' addresses in the firewall |
+
 ### VPN checks
 
 With the [VPN](vpn.md) the doctor adds eighteen checks. All are explain-only,
@@ -1781,6 +1794,40 @@ engine to clear a mismatch.
   has SELinux, the Hub's own id maps and the host's
   `ip_unprivileged_port_start` (the maps and the port are `null` under
   Docker). See [contract §11.10](../guides/integration-contracts.md#1110-runtime-compatibility-new-rootless-kubernetes).
+
+## Kubernetes
+
+When core runs on [Kubernetes](kubernetes.md) (experimental) the Hub runs
+in the cluster with its own ServiceAccount, and deploys each instance as
+objects in the apps namespace (`portcullis-apps`) and its routes in
+`portcullis-edge`. Its permissions are two Roles, one per namespace, and
+nothing in the core namespace.
+
+- **The cluster guard.** At start, every 60 s and before every deploy the
+  Hub checks the CLI's cluster check (at most 24 hours old), that its
+  permissions are exactly its Roles, the admission self-test and its own
+  NetworkPolicy probe. Until all four hold, every runtime operation
+  answers `503` `the cluster is not verified: <why>`, and the doctor
+  names the failing check ([Kubernetes checks](#kubernetes-checks)).
+- **Badges.** The Marketplace card shows **Kubernetes: works**,
+  **limited** or **not available**, with the reasons in its tooltip; the
+  instance page lists them. Few templates work today
+  ([Kubernetes → Apps](kubernetes.md#apps-on-kubernetes)).
+- **Refusals.** Creating, restoring into a new id, enabling or restarting
+  an app that is not available is refused before anything is created:
+  `<id> can't run on Kubernetes: <reasons>`. Limited apps run.
+- **Images by digest.** Every image is resolved to `name@sha256:…`
+  before it is deployed; an image that doesn't resolve refuses the deploy.
+- **Shared folders** are `hostPath` mounts under the bind roots. The
+  fixer and volume copies (instance backups and restores) run in
+  short-lived helper pods with the Hub's own image, deleted afterwards.
+- **Settings reloads** send their signal by `exec`; an image without
+  `kill` gets its pod restarted instead (doctor `reload_degraded`).
+- **`GET /api/runtime`** answers `runtime: kubernetes`, the API server's
+  version as `engine_version`, the guard's `why` as `mismatch`, and three
+  more fields: `context` (the kube context core uses), `admission` (`ok`,
+  `missing` or `unknown`) and `netpol` (`proven` or `unproven`). See
+  [contract §11.10](../guides/integration-contracts.md#1110-runtime-compatibility-new-rootless-kubernetes).
 
 ## Local networks
 

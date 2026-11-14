@@ -280,4 +280,46 @@ Under Podman, check the [per-app table](rootless-podman.md#apps-under-rootless-p
 first: an app that isn't available there (host devices, DNS on port 53)
 can't be started after the move.
 
+**Onto Kubernetes** the steps are the same with
+`./portcullis init --runtime kubernetes --kube-context <ctx>`
+([Kubernetes → Moving to Kubernetes](kubernetes.md#moving-to-kubernetes)).
+The restore also keeps this host's `PORTCULLIS_KUBE_*`, namespace, CIDR
+and fixed ClusterIP keys, never the backup's. `init` must come first: a
+restore without an `.env` never detects Kubernetes. CI restores a Docker
+backup onto Kubernetes on every run.
+
+## Kubernetes
+
+On [Kubernetes](kubernetes.md) (experimental) the commands, the backup's
+layout and `MANIFEST.json` are the same. What changes is how the pieces
+are read and written:
+
+- **Vault**: the raft snapshot through a port-forward to the Vault pod.
+- **Postgres**: `pg_dump` and `pg_restore` by `exec` in its pod.
+- **Volumes**: each PVC (`lldap_data` → `lldap-data`) is read by a
+  short-lived helper pod in the core namespace, as the volume's owner,
+  never root, with the PVC read-only. It runs group-gate's image for the
+  SQLite-aware copy and streams the archive over `exec`. A restore empties
+  each PVC in place and unpacks the archive as its owner.
+- **The CLI's own Kubernetes state** (`secrets/kube/`: rendered values,
+  digests, the setup record) isn't archived: the next `up` regenerates it.
+- **Restore order**: the Hub and every instance that mounts per-person
+  file-share Secrets are scaled to 0, and those Secrets are emptied (a
+  restore voids every credential). Then come the pre-restore copy,
+  everything scaled to 0, `.env` (keeping this host's runtime and
+  Kubernetes keys), `certs/` and `config/`, Postgres and Vault emptied and
+  restored, the volumes, `hub-secrets` emptied, the LLDAP guard and the
+  release. Instances scaled to 0 for their Secrets aren't started again:
+  the restore names them, and you start each one from the Hub.
+- **Off-host backups** run the **host's** `restic`, version 0.19.1 or
+  later (the pinned image's version), since there is no container engine
+  to run it in. The repository password and provider credentials reach it
+  through its environment, never its arguments. A snapshot taken this way
+  keeps host paths.
+- **Instance backups** in the Hub work as on Docker; the Hub copies each
+  PVC through one of its helper pods.
+- **`backup schedule`** still writes units that require `docker.service`.
+  On a host without Docker, run `./portcullis backup --offsite` from your
+  own timer for now.
+
 See the [CLI Reference](cli.md#backups) for every option.
