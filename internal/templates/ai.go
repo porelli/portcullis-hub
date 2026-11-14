@@ -582,15 +582,59 @@ type composeServiceInfo struct {
 	// volumesFrom: its string entries.
 	hasPid, hasIpc, hasVolumesFrom bool
 	volumesFrom                    []string
-	ports                          bool     // ports: declared (published to the host)
-	named                          []string // container_name / hostname present
-	image                          string   // image: as written ("" = none or not a string)
+	// mounts: the named volumes and bind sources the service mounts.
+	mounts []composeMount
+	ports  bool     // ports: declared (published to the host)
+	named  []string // container_name / hostname present
+	image  string   // image: as written ("" = none or not a string)
 	// capDrop, capAdd: the lists as written; privileged: present and
 	// neither false nor "false"; deviceKey: devices or
 	// device_cgroup_rules, the first present ("" = neither).
 	capDrop, capAdd []string
 	privileged      bool
 	deviceKey       string
+}
+
+// composeMount is one volumes: entry with a source: a named volume or a
+// bind path (as written), read-only or not.
+type composeMount struct {
+	source   string
+	bind, ro bool
+}
+
+// composeMounts parses a service's volumes: (short "src:dst[:opts]" and
+// long {type, source, read_only} syntax). Anonymous volumes and tmpfs
+// mounts have no source and are left out.
+func composeMounts(v interface{}) []composeMount {
+	l, _ := v.([]interface{})
+	var out []composeMount
+	isBind := func(src string) bool {
+		return strings.HasPrefix(src, ".") || strings.HasPrefix(src, "/") || strings.HasPrefix(src, "~") || strings.HasPrefix(src, "$")
+	}
+	for _, x := range l {
+		switch e := x.(type) {
+		case string:
+			parts := strings.Split(strings.TrimSpace(e), ":")
+			if len(parts) < 2 || parts[0] == "" {
+				continue
+			}
+			m := composeMount{source: parts[0], bind: isBind(parts[0])}
+			if len(parts) > 2 {
+				m.ro = slices.Contains(strings.Split(parts[2], ","), "ro")
+			}
+			out = append(out, m)
+		case map[string]interface{}:
+			src, _ := e["source"].(string)
+			typ, _ := e["type"].(string)
+			if src == "" || typ == "tmpfs" || typ == "npipe" {
+				continue
+			}
+			m := composeMount{source: src, bind: typ == "bind" || typ == "" && isBind(src)}
+			m.ro = e["read_only"] == true || e["read_only"] == "true"
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
@@ -622,6 +666,7 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 		_, info.hasPid = s["pid"]
 		_, info.hasIpc = s["ipc"]
 		_, info.hasVolumesFrom = s["volumes_from"]
+		info.mounts = composeMounts(s["volumes"])
 		if l, ok := s["volumes_from"].([]interface{}); ok {
 			for _, x := range l {
 				if v, ok := x.(string); ok {

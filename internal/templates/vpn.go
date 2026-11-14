@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -254,6 +255,24 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 // (validate.py's _HOST_ONLY_RULE_RE with its optional group).
 var controlRuleRe = regexp.MustCompile("^Host\\(`[^`]*`\\)\\s*&&\\s*PathPrefix\\(`[^`]*`\\)$")
 
+// sameMountSource: a and b mount the same named volume, or binds of
+// the same path, one inside the other (cleaned, as written); two bind
+// sources that both interpolate a variable can't be told apart and
+// count as the same (fail closed).
+func sameMountSource(a, b composeMount) bool {
+	if a.bind != b.bind {
+		return false
+	}
+	if !a.bind {
+		return a.source == b.source
+	}
+	if strings.Contains(a.source, "$") && strings.Contains(b.source, "$") {
+		return true
+	}
+	x, y := path.Clean(a.source), path.Clean(b.source)
+	return x == y || strings.HasPrefix(x, y+"/") || strings.HasPrefix(y, x+"/") || x == "/" || y == "/"
+}
+
 // hostOnlyRuleRe is validate.py's _HOST_ONLY_RULE_RE without its
 // optional PathPrefix group.
 var hostOnlyRuleRe = regexp.MustCompile("^Host\\(`[^`]*`\\)$")
@@ -385,14 +404,41 @@ func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 				return fmt.Errorf("vpn.ingress.service: %s shares the %s namespace of %s", n, ns.key, strings.TrimSpace(x))
 			}
 		}
-		// volumes_from naming a member (service:<m>[:ro|rw] or <m>[:ro|rw]).
+		// volumes_from as Compose reads it: an optional service: prefix
+		// (any case), the name up to the first ':', then exactly ro or rw.
 		for _, e := range infos[n].volumesFrom {
-			m := strings.TrimPrefix(strings.TrimSpace(e), "service:")
-			if i := strings.LastIndex(m, ":"); i >= 0 && (m[i+1:] == "ro" || m[i+1:] == "rw") {
-				m = m[:i]
+			ref := strings.TrimSpace(e)
+			if len(ref) >= len("service:") && strings.EqualFold(ref[:len("service:")], "service:") {
+				ref = ref[len("service:"):]
 			}
-			if inNS[m] {
-				return fmt.Errorf("vpn.ingress.service: %s mounts the volumes of %s (volumes_from)", n, m)
+			name, mode, hasMode := strings.Cut(ref, ":")
+			if hasMode && mode != "ro" && mode != "rw" {
+				return fmt.Errorf("vpn.ingress.service: %s: volumes_from %s: the mode must be ro or rw", n, strings.TrimSpace(e))
+			}
+			if inNS[name] {
+				return fmt.Errorf("vpn.ingress.service: %s mounts the volumes of %s (volumes_from)", n, name)
+			}
+		}
+	}
+	// A volume or bind a member mounts read-write is the gateway's
+	// state: no other service mounts it (or, for a bind, a path inside or
+	// above it). One every member mounts read-only is a handover into the
+	// gateway (a key file a hook writes) and may be shared.
+	for _, n := range names {
+		if inNS[n] {
+			continue
+		}
+		for _, om := range infos[n].mounts {
+			for _, mem := range members {
+				for _, mm := range infos[mem].mounts {
+					if !mm.ro && sameMountSource(mm, om) {
+						why := ""
+						if mm.source != om.source {
+							why = " (" + mm.source + ")"
+						}
+						return fmt.Errorf("vpn.ingress.service: %s mounts %s, which %s mounts read-write%s", n, om.source, mem, why)
+					}
+				}
 			}
 		}
 	}
