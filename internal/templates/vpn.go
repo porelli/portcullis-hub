@@ -227,7 +227,14 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 			named[v.DNS.Hook] = true
 		}
 		for _, r := range v.ControlRouters {
-			if _, ok := routes.HostRouters[r]; !ok {
+			ri := routes.Info[r]
+			if ri == nil {
+				return fmt.Errorf("vpn.control_routers: %s is not a host router of the template", r)
+			}
+			// Host(...) alone, or Host(...) && one PathPrefix(...) (Task
+			// 19, the same match as templates' validate.py): a control
+			// router always names its host.
+			if _, host := routes.HostRouters[r]; !host && !controlRuleRe.MatchString(strings.TrimSpace(ri.Rule)) {
 				return fmt.Errorf("vpn.control_routers: %s is not a host router of the template", r)
 			}
 			if servesAdminUI(m, routes.Info[r]) {
@@ -238,6 +245,43 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 	for _, h := range m.Hooks {
 		if h.IsVPN() && !named[h.Name] {
 			return fmt.Errorf("hooks[%s]: when: [vpn] needs a vpn: block that names it", h.Name)
+		}
+	}
+	return nil
+}
+
+// controlRuleRe is a control router's Host() && one PathPrefix() rule
+// (validate.py's _HOST_ONLY_RULE_RE with its optional group).
+var controlRuleRe = regexp.MustCompile("^Host\\(`[^`]*`\\)\\s*&&\\s*PathPrefix\\(`[^`]*`\\)$")
+
+// hostOnlyRuleRe is validate.py's _HOST_ONLY_RULE_RE without its
+// optional PathPrefix group.
+var hostOnlyRuleRe = regexp.MustCompile("^Host\\(`[^`]*`\\)$")
+
+// vpnControlRulesPrecheck: a vpn.control_routers entry that is no
+// router of the compose file, or whose rule (as written) is neither
+// Host() alone nor Host() && one PathPrefix(). Only consulted when the
+// routes don't parse, so the refusal names the control router first.
+func vpnControlRulesPrecheck(m *Manifest, compose []byte) error {
+	if m.VPN == nil || len(m.VPN.ControlRouters) == 0 {
+		return nil
+	}
+	labels, err := ServiceLabels(compose)
+	if err != nil {
+		return nil
+	}
+	rules := map[string]string{}
+	for _, l := range labels {
+		for k, v := range l {
+			if name, ok := strings.CutSuffix(strings.TrimPrefix(k, "traefik.http.routers."), ".rule"); ok && strings.HasPrefix(k, "traefik.http.routers.") && !strings.Contains(name, ".") {
+				rules[name] = strings.TrimSpace(v)
+			}
+		}
+	}
+	for _, r := range m.VPN.ControlRouters {
+		rule, ok := rules[r]
+		if !ok || !hostOnlyRuleRe.MatchString(rule) && !controlRuleRe.MatchString(rule) {
+			return fmt.Errorf("vpn.control_routers: %s is not a host router of the template", r)
 		}
 	}
 	return nil
@@ -306,9 +350,39 @@ func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 		if infos[n].ports {
 			return fmt.Errorf("vpn.ingress.service: %s publishes ports", n)
 		}
+		if err := vpnNamespaceCaps(n, infos[n]); err != nil {
+			return err
+		}
 	}
 	if m.VPN.Ingress.ProxyProtocol != VPNProxyV2 {
 		return fmt.Errorf("vpn.ingress.proxy_protocol: only v2")
+	}
+	return nil
+}
+
+// vpnNamespaceCaps (Task 19, an allowlist): a service in the ingress's
+// network namespace isn't privileged (absent or literally false), drops
+// every capability (cap_drop includes ALL), adds none but
+// NET_BIND_SERVICE (the forwarder's :443; anything else, interpolation
+// included, is refused) and has no devices or device_cgroup_rules key
+// at all: without NET_ADMIN or NET_RAW a gateway can't take another
+// gateway's address on portcullis-vpn. Same order and texts as
+// templates' validate.py.
+func vpnNamespaceCaps(n string, info composeServiceInfo) error {
+	capName := func(c string) string { return strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(c)), "CAP_") }
+	if info.privileged {
+		return fmt.Errorf("vpn.ingress.service: %s is privileged", n)
+	}
+	if !slices.ContainsFunc(info.capDrop, func(c string) bool { return capName(c) == "ALL" }) {
+		return fmt.Errorf("vpn.ingress.service: %s must set cap_drop: [ALL]", n)
+	}
+	for _, c := range info.capAdd {
+		if capName(c) != "NET_BIND_SERVICE" {
+			return fmt.Errorf("vpn.ingress.service: %s adds %s: a VPN gateway may add only NET_BIND_SERVICE", n, strings.TrimSpace(c))
+		}
+	}
+	if info.deviceKey != "" {
+		return fmt.Errorf("vpn.ingress.service: %s has %s: a VPN gateway runs userspace (no devices)", n, info.deviceKey)
 	}
 	return nil
 }

@@ -580,6 +580,12 @@ type composeServiceInfo struct {
 	ports       bool     // ports: declared (published to the host)
 	named       []string // container_name / hostname present
 	image       string   // image: as written ("" = none or not a string)
+	// capDrop, capAdd: the lists as written; privileged: present and
+	// neither false nor "false"; deviceKey: devices or
+	// device_cgroup_rules, the first present ("" = neither).
+	capDrop, capAdd []string
+	privileged      bool
+	deviceKey       string
 }
 
 func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
@@ -609,6 +615,28 @@ func composeServiceInfos(compose []byte) map[string]composeServiceInfo {
 		info.pidOf, _ = s["pid"].(string)
 		_, info.ports = s["ports"]
 		info.image, _ = s["image"].(string)
+		strs := func(v interface{}) []string {
+			var out []string
+			switch l := v.(type) {
+			case []interface{}:
+				for _, x := range l {
+					out = append(out, fmt.Sprint(x))
+				}
+			case nil:
+			default:
+				out = append(out, fmt.Sprint(l))
+			}
+			return out
+		}
+		info.capDrop, info.capAdd = strs(s["cap_drop"]), strs(s["cap_add"])
+		if p, ok := s["privileged"]; ok && p != false && p != "false" {
+			info.privileged = true
+		}
+		for _, k := range []string{"devices", "device_cgroup_rules"} {
+			if _, ok := s[k]; ok && info.deviceKey == "" {
+				info.deviceKey = k
+			}
+		}
 		for _, f := range []string{"container_name", "hostname"} {
 			if _, ok := s[f]; ok {
 				info.named = append(info.named, f)
