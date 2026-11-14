@@ -47,6 +47,15 @@ spec:
     expression: >-
       variables.spec.containers + (has(variables.spec.initContainers) ? variables.spec.initContainers : []) + (has(variables.spec.ephemeralContainers)
       ? variables.spec.ephemeralContainers : [])
+  # The one-shot root shape (controller ruling): a Job's pod labelled
+  # portcullis.io/one-shot: "true", restart Never/OnFailure, no token,
+  # every container without privilege escalation, cap_drop ALL, cap_add
+  # within CHOWN, DAC_OVERRIDE, FOWNER and no ports. Only it (and the
+  # Hub's helpers) may run as uid 0.
+  - name: oneShot
+    expression: >-
+      has(variables.meta.ownerReferences) && variables.meta.ownerReferences.exists(r, r.apiVersion == 'batch/v1' && r.kind == 'Job' && has(r.controller) && r.controller)
+      && 'portcullis.io/one-shot' in variables.labels && variables.labels['portcullis.io/one-shot'] == 'true' && has(variables.spec.restartPolicy) && variables.spec.restartPolicy in ['Never', 'OnFailure'] && has(variables.spec.automountServiceAccountToken) && !variables.spec.automountServiceAccountToken && variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop && (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.all(x, x in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'])) && (!has(c.ports) || size(c.ports) == 0))
   - name: volumes
     expression: 'has(variables.spec.volumes) ? variables.spec.volumes : []'
   - name: baselineCaps
@@ -155,11 +164,11 @@ spec:
       a helper pod: portcullis.io/helper fixer or volume, the Hub's own image, no network label, created by the
       Hub
   - expression: >-
-      variables.helper != '' || (!(has(variables.spec.securityContext) && has(variables.spec.securityContext.runAsUser)
+      variables.helper != '' || variables.oneShot || (!(has(variables.spec.securityContext) && has(variables.spec.securityContext.runAsUser)
       && variables.spec.securityContext.runAsUser == 0)
           && variables.containers.all(c, !(has(c.securityContext) && has(c.securityContext.runAsUser) && c.securityContext.runAsUser
       == 0)))
-    message: only the Hub's helper pods may run as root
+    message: only the Hub's helper pods and one-shot Jobs in the ruled shape may run as root
   - expression: >-
       !variables.probe || (variables.inst == 'portcullis-probe'
           && variables.volumes.size() == 0
@@ -233,6 +242,14 @@ spec:
     expression: >-
       variables.spec.containers + (has(variables.spec.initContainers) ? variables.spec.initContainers : []) + (has(variables.spec.ephemeralContainers)
       ? variables.spec.ephemeralContainers : [])
+  # The one-shot root shape (controller ruling): a Job's pod labelled
+  # portcullis.io/one-shot: "true", restart Never/OnFailure, no token,
+  # every container without privilege escalation, cap_drop ALL, cap_add
+  # within CHOWN, DAC_OVERRIDE, FOWNER and no ports. Only it (and the
+  # Hub's helpers) may run as uid 0.
+  - name: oneShot
+    expression: >-
+      object.kind == 'Job' && 'portcullis.io/one-shot' in variables.labels && variables.labels['portcullis.io/one-shot'] == 'true' && has(variables.spec.restartPolicy) && variables.spec.restartPolicy in ['Never', 'OnFailure'] && has(variables.spec.automountServiceAccountToken) && !variables.spec.automountServiceAccountToken && variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation && has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && 'ALL' in c.securityContext.capabilities.drop && (!has(c.securityContext.capabilities.add) || c.securityContext.capabilities.add.all(x, x in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'])) && (!has(c.ports) || size(c.ports) == 0))
   - name: volumes
     expression: 'has(variables.spec.volumes) ? variables.spec.volumes : []'
   - name: baselineCaps
@@ -352,11 +369,11 @@ spec:
       a helper pod: portcullis.io/helper fixer or volume, the Hub's own image, no network label, created by the
       Hub
   - expression: >-
-      object.kind == 'Secret' || (variables.helper != '' || (!(has(variables.spec.securityContext) && has(variables.spec.securityContext.runAsUser)
+      object.kind == 'Secret' || (variables.helper != '' || variables.oneShot || (!(has(variables.spec.securityContext) && has(variables.spec.securityContext.runAsUser)
       && variables.spec.securityContext.runAsUser == 0)
           && variables.containers.all(c, !(has(c.securityContext) && has(c.securityContext.runAsUser) && c.securityContext.runAsUser
       == 0))))
-    message: only the Hub's helper pods may run as root
+    message: only the Hub's helper pods and one-shot Jobs in the ruled shape may run as root
   - expression: >-
       object.kind == 'Secret' || (!variables.probe || (variables.inst == 'portcullis-probe'
           && variables.volumes.size() == 0
@@ -612,12 +629,13 @@ spec:
     - name: ownName
       expression: "variables.inst + '--'"
   validations:
-    # The CLI's probe (kube_admission_probe): an annotation naming another
-    # params generation is refused, so only the params just written admit it.
+    # The CLI's probe (kube_admission_probe): an object annotated with
+    # exactly this binding's params generation is refused, naming it — the
+    # proof that bindings of that generation are live with their params.
     - expression: >-
         variables.del || !has(object.metadata.annotations) || !('portcullis.io/params-generation' in object.metadata.annotations)
-        || object.metadata.annotations['portcullis.io/params-generation'] == params.data.generation
-      message: "portcullis.io/params-generation isn't these params' generation"
+        || object.metadata.annotations['portcullis.io/params-generation'] != params.data.generation
+      messageExpression: "'admission probe: params generation ' + params.data.generation + ' in effect'"
     - expression: "variables.exempt || variables.del || object.kind in ['IngressRoute', 'Middleware']"
       messageExpression: "object.kind + ' is refused in portcullis-edge (only IngressRoute and Middleware)'"
     - expression: >-

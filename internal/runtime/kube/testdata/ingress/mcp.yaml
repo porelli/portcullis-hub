@@ -1,0 +1,21 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: app
+    portcullis.io/owner: hub
+  name: app--r-app-mcp
+  namespace: portcullis-edge
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`a.example.org`) && (Path(`/mcp/tok`) || Path(`/.well-known/oauth-protected-resource/mcp/tok`))
+    services:
+    - kind: TraefikService
+      name: mcp-gate@file
+  tls:
+    options:
+      name: protected-any@file

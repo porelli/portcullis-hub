@@ -243,8 +243,8 @@ func TestRealTemplatesRuntimeClassification(t *testing.T) {
 
 // kubePriorityWithinCap: a template that isn't refused on Kubernetes
 // never gets a route above kube.MaxAppPriority — its own routers'
-// bounds, and the Hub's public (+1) and extra-domain sign-in (+2)
-// routers above them (no MCP routers on Kubernetes). IngressObjects
+// bounds, and the Hub's public (+1), extra-domain sign-in (+2) and MCP
+// (+3) routers above them. IngressObjects
 // refuses anything higher, so a template over the cap must be classified
 // refused instead.
 func kubePriorityWithinCap(t *testing.T, id string, tp *templates.Template) {
@@ -254,7 +254,7 @@ func kubePriorityWithinCap(t *testing.T, id string, tp *templates.Template) {
 		t.Errorf("%s: %v", id, err)
 		return
 	}
-	if top := routes.MaxPriorityBound() + 2; top > kube.MaxAppPriority {
+	if top := routes.MaxPriorityBound() + 3; top > kube.MaxAppPriority {
 		t.Errorf("%s: classified usable on Kubernetes but its routes reach priority %d (> %d)", id, top, kube.MaxAppPriority)
 	}
 }

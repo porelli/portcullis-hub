@@ -33,6 +33,22 @@ spec:
   storageClassName: portcullis-apps
 ---
 # step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+  name: jobs--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: jobs
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -221,7 +237,11 @@ spec:
         - mountPath: /portcullis-bin
           name: portcullis-bin
           readOnly: true
+      dnsConfig:
+        searches:
+        - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: db
       initContainers:
       - command:
         - /usr/local/bin/hub
@@ -270,6 +290,7 @@ spec:
         fsGroup: 70
         seccompProfile:
           type: RuntimeDefault
+      subdomain: jobs--pods
       volumes:
       - emptyDir: {}
         name: portcullis-bin
@@ -310,14 +331,75 @@ spec:
         resources: {}
         securityContext:
           runAsUser: 10001
+      dnsConfig:
+        searches:
+        - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: migrate
       restartPolicy: Never
       securityContext:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      subdomain: jobs--pods
 ---
-# step 3 wait none
+# step 3 wait complete
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    portcullis.io/instance: jobs
+    portcullis.io/service: perms
+  name: jobs--perms
+  namespace: portcullis-apps
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"perms":"perms"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: jobs
+        portcullis.io/net-default: "true"
+        portcullis.io/one-shot: "true"
+        portcullis.io/service: perms
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - args:
+        - sh
+        - -c
+        - echo chown
+        image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: perms
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 0
+          runAsUser: 0
+      dnsConfig:
+        searches:
+        - jobs--pods.portcullis-apps.svc.cluster.local
+      enableServiceLinks: false
+      hostname: perms
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      subdomain: jobs--pods
+---
+# step 4 wait none
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -352,7 +434,12 @@ spec:
         name: app
         resources: {}
         securityContext: {}
+      dnsConfig:
+        searches:
+        - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: app
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      subdomain: jobs--pods

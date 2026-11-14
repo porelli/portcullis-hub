@@ -22,12 +22,7 @@ var FileMiddlewares = []string{
 
 // FileServices are the core services app routers may name: …@docker →
 // a TraefikService reference to …@file.
-var FileServices = []string{"group-gate", "forward-auth-ext"}
-
-// mcpGate is the companion MCP routers' service (on mcp.<domain>, shared
-// by path with core's reserved host): those routers aren't generated on
-// Kubernetes until the controller rules on that host.
-const mcpGate = "mcp-gate"
+var FileServices = []string{"group-gate", "forward-auth-ext", "mcp-gate"}
 
 // MaxAppPriority is the highest router priority an app route may carry
 // (core's admission params maxAppPriority; core's own routes rank above).
@@ -146,9 +141,6 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 	}
 	for _, name := range slices.Sorted(mapKeys(routers)) {
 		r := routers[name]
-		if svcName, _, _ := strings.Cut(r.svc, "@"); svcName == mcpGate {
-			continue
-		}
 		if r.rule == "" {
 			return nil, refused("router %s has no rule", name)
 		}

@@ -14,6 +14,10 @@ const (
 	LabelNetPrefix = "portcullis.io/net-"
 	LabelEgress    = "portcullis.io/egress"
 	LabelHelper    = "portcullis.io/helper"
+	// LabelOneShot marks a one-shot Job's pod template whose container
+	// runs as root in the ruled shape (core's admission allows uid 0 only
+	// there and for the Hub's helpers).
+	LabelOneShot   = "portcullis.io/one-shot"
 	LabelVolume    = "portcullis.io/volume"
 	LabelVPNSlot   = "portcullis.io/vpn-slot"
 	LabelComponent = "portcullis.io/component"

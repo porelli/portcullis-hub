@@ -298,6 +298,11 @@ func (t *translator) run() (Plan, error) {
 			egress = append(egress, n)
 		}
 	}
+	headless, err := t.podsService()
+	if err != nil {
+		return Plan{}, err
+	}
+	services = append(services, headless)
 	aliases, err := t.companionServices(podOf)
 	if err != nil {
 		return Plan{}, err
@@ -386,9 +391,33 @@ func (t *translator) compat() error {
 				return refused("service %s adds %s, outside the Kubernetes baseline", n, c)
 			}
 		}
+		if !podDNSLabel(n) {
+			return refused("service %s: its name isn't a DNS label without \"--\" (not on Kubernetes)", n)
+		}
+		if s.ContainerName != "" {
+			return refused("service %s sets container_name (not on Kubernetes)", n)
+		}
+		for _, net := range slices.Sorted(mapKeys(s.Networks)) {
+			if nc := s.Networks[net]; nc != nil {
+				for _, a := range nc.Aliases {
+					if !t.companionAlias(n, a) {
+						return refused("service %s answers to alias %s (not on Kubernetes)", n, a)
+					}
+				}
+			}
+		}
 		if s.User != "" {
-			if _, _, err := numericUser(s.User); err != nil {
+			uid, _, err := numericUser(s.User)
+			if err != nil {
 				return refused("service %s runs as user %s: Kubernetes needs a numeric uid", n, s.User)
+			}
+			if uid == 0 {
+				if !t.isJob(n) {
+					return refused("service %s runs as root (user 0)", n)
+				}
+				if !t.oneShotRoot(n) {
+					return refused("service %s runs as root (user 0): only a one-shot job (restart no or on-failure) with cap_drop [ALL], cap_add within CHOWN, DAC_OVERRIDE, FOWNER, no ports and no routes may", n)
+				}
 			}
 		}
 		for _, p := range s.Ports {
@@ -398,6 +427,63 @@ func (t *translator) compat() error {
 		}
 	}
 	return nil
+}
+
+// podDNSLabelRe: a compose service name that can be a pod's hostname.
+var podDNSLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// podDNSLabel: n can be a pod hostname, and no Hub object name
+// (<instance>--…, portcullis-mcp-<id>--…) can answer for it in the
+// namespace's search domain.
+func podDNSLabel(n string) bool { return podDNSLabelRe.MatchString(n) && !strings.Contains(n, "--") }
+
+// companionAlias: a the Hub's own gate alias of a companion on service n
+// (the override's portcullis-proxy alias: the alias Service on
+// Kubernetes).
+func (t *translator) companionAlias(n, a string) bool {
+	for _, c := range t.in.Companions {
+		if c.Alias == a && c.Service == n {
+			return true
+		}
+	}
+	return false
+}
+
+// oneShotCaps are the capabilities a one-shot root job may add.
+var oneShotCaps = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER"}
+
+// oneShotRoot: job n may run as uid 0 (the controller's ruling): restart
+// no or on-failure, no ports, no Traefik routers, its own pod (no
+// network_mode service: either way), cap_drop ALL and cap_add within
+// oneShotCaps.
+func (t *translator) oneShotRoot(n string) bool {
+	m := t.in.Model
+	s := m.Services[n]
+	if r := s.Restart; r != "" && r != types.RestartPolicyNo && r != types.RestartPolicyOnFailure && !strings.HasPrefix(r, types.RestartPolicyOnFailure+":") {
+		return false
+	}
+	if len(s.Ports) > 0 || strings.HasPrefix(s.NetworkMode, types.NetworkModeServicePrefix) {
+		return false
+	}
+	for k := range s.Labels {
+		if strings.HasPrefix(templates.FoldKey(k), "traefik.http.routers.") {
+			return false
+		}
+	}
+	for o, os := range m.Services {
+		if o != n && os.NetworkMode == types.NetworkModeServicePrefix+n {
+			return false
+		}
+	}
+	if !slices.ContainsFunc(s.CapDrop, func(c string) bool { return strings.EqualFold(strings.TrimPrefix(strings.ToUpper(c), "CAP_"), "ALL") }) {
+		return false
+	}
+	for _, c := range s.CapAdd {
+		if !slices.Contains(oneShotCaps, strings.TrimPrefix(strings.ToUpper(c), "CAP_")) {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *translator) corePorts() []int {
@@ -623,6 +709,11 @@ func (t *translator) isJob(n string) bool {
 	if t.in.Jobs[n] {
 		return true
 	}
+	for _, o := range t.in.Model.Services {
+		if d, ok := o.DependsOn[n]; ok && d.Condition == types.ServiceConditionCompletedSuccessfully {
+			return true
+		}
+	}
 	return t.in.Model.Services[n].Restart == types.RestartPolicyNo
 }
 
@@ -669,6 +760,9 @@ func (t *translator) workload(n string, members []string) (*unstructured.Unstruc
 	tmpl := corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: ann}, Spec: spec}
 	name := ObjectName(t.in.Instance, n)
 	if t.isJob(n) {
+		if uid, _, err := numericUser(s.User); s.User != "" && err == nil && uid == 0 {
+			tmpl.Labels[LabelOneShot] = "true"
+		}
 		tmpl.Spec.RestartPolicy = corev1.RestartPolicyNever
 		zero := int32(0)
 		j := &batchv1.Job{TypeMeta: metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"}, ObjectMeta: meta(name, t.in.Namespace, labels),
@@ -795,11 +889,14 @@ func (p *podSpec) container(n string, s types.ServiceConfig, main bool) error {
 		if err != nil {
 			return refused("service %s runs as user %s: Kubernetes needs a numeric uid", n, s.User)
 		}
-		if u == 0 {
-			return refused("service %s runs as root (user 0)", n)
-		}
 		uid, gid = u, g
 		sc.RunAsUser = &u
+		if u == 0 {
+			// Only a one-shot root job gets here (compat): never more
+			// privilege than root already has.
+			esc := false
+			sc.AllowPrivilegeEscalation = &esc
+		}
 		if g != nil {
 			sc.RunAsGroup = g
 		}
@@ -1204,7 +1301,14 @@ func (p *podSpec) appFile(n string, af AppFile, v types.ServiceVolumeConfig, c *
 func (p *podSpec) finish() corev1.PodSpec {
 	t := p.t
 	f := false
+	// Pod DNS: the compose service name resolves to this pod for the
+	// instance's own pods (<pod>.<instance>--pods.<ns>.svc, searched
+	// first).
+	sub := PodsServiceName(t.in.Instance)
 	spec := corev1.PodSpec{
+		Hostname:                      p.pod,
+		Subdomain:                     sub,
+		DNSConfig:                     &corev1.PodDNSConfig{Searches: []string{sub + "." + t.in.Namespace + ".svc." + ClusterDomain}},
 		AutomountServiceAccountToken:  &f,
 		EnableServiceLinks:            &f,
 		SecurityContext:               p.sc,
@@ -1234,6 +1338,27 @@ func (p *podSpec) finish() corev1.PodSpec {
 	sort.SliceStable(p.volumes, func(i, j int) bool { return p.volumes[i].Name < p.volumes[j].Name })
 	spec.Volumes = p.volumes
 	return spec
+}
+
+// ClusterDomain is the cluster's DNS domain (k3s and kubeadm default).
+const ClusterDomain = "cluster.local"
+
+// PodsServiceName is the instance's headless Service: every pod's
+// subdomain, so <compose service>.<it>.<ns>.svc names the pod.
+func PodsServiceName(instance string) string { return joinName(instance, "pods", "") }
+
+// podsService is the headless Service PodsServiceName selecting the
+// instance's pods, ready or not (a name resolves while its pod starts,
+// as on Docker).
+func (t *translator) podsService() (*unstructured.Unstructured, error) {
+	name := PodsServiceName(t.in.Instance)
+	if err := t.claim("service", name, "the instance's pod DNS"); err != nil {
+		return nil, err
+	}
+	sel := map[string]string{LabelInstance: t.in.Instance}
+	svc := &corev1.Service{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"}, ObjectMeta: meta(name, t.in.Namespace, map[string]string{LabelInstance: t.in.Instance}),
+		Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone, Selector: sel, PublishNotReadyAddresses: true}}
+	return toUnstructured(svc)
 }
 
 // companionAliasRe: a companion's gate alias (templates.MCPAlias's

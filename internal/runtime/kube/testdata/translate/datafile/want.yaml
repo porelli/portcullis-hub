@@ -35,6 +35,22 @@ metadata:
 type: Opaque
 ---
 # step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: datafile
+  name: datafile--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: datafile
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -151,7 +167,11 @@ spec:
         - mountPath: /portcullis-bin
           name: portcullis-bin
           readOnly: true
+      dnsConfig:
+        searches:
+        - datafile--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: app
       initContainers:
       - command:
         - /usr/local/bin/hub
@@ -177,6 +197,7 @@ spec:
         fsGroup: 101
         seccompProfile:
           type: RuntimeDefault
+      subdomain: datafile--pods
       volumes:
       - name: data-c9022680
         projected:

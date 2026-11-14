@@ -71,8 +71,15 @@ func kubeCompat(compose []byte, m Manifest, env map[string]string) Compat {
 	if v, ok := env[EnvBindRoots]; ok {
 		roots = strings.Split(v, ":")
 	}
+	k := kubeCtx{jobs: JobServices(&m, compose), netnsOwners: map[string]bool{}}
+	k.labels, _ = ServiceLabels(compose)
 	for _, s := range services {
-		c.kubeService(s.name, s.node, env, roots)
+		if v, ok := strings.CutPrefix(scalarValue(field(s.node, "network_mode"), env), "service:"); ok {
+			k.netnsOwners[v] = true
+		}
+	}
+	for _, s := range services {
+		c.kubeService(s.name, s.node, env, roots, k)
 	}
 	first := ""
 	if len(services) > 0 {
@@ -117,7 +124,75 @@ func scalarValue(n *yaml.Node, env map[string]string) string {
 	return strings.TrimSpace(resolve(n.Value, env))
 }
 
-func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]string, roots []string) {
+// kubeCtx is what kubeService needs from the whole compose file: the
+// one-shot jobs, each service's labels and the services others share a
+// network namespace with.
+type kubeCtx struct {
+	jobs        map[string]bool
+	labels      map[string]map[string]string
+	netnsOwners map[string]bool
+}
+
+// podDNSName: a compose service name that can be a pod's hostname, and
+// that no Hub object name (<instance>--…) can answer for.
+var podDNSName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// oneShotCaps are the capabilities a one-shot root job may add.
+var oneShotCaps = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER"}
+
+// kubeJob: name is a one-shot job (the translator's Job): a manifest job,
+// a service_completed_successfully target, or restart "no".
+func (k kubeCtx) job(name string, s *yaml.Node, env map[string]string) bool {
+	return k.jobs[name] || scalarValue(field(s, "restart"), env) == "no"
+}
+
+// oneShotRoot: job name may run as uid 0 (the controller's ruling).
+func (k kubeCtx) oneShotRoot(name string, s *yaml.Node, env map[string]string) bool {
+	if r := scalarValue(field(s, "restart"), env); r != "" && r != "no" && r != "on-failure" && !strings.HasPrefix(r, "on-failure:") {
+		return false
+	}
+	if p := field(s, "ports"); p != nil && p.Tag != "!!null" && len(p.Content) > 0 {
+		return false
+	}
+	if strings.HasPrefix(scalarValue(field(s, "network_mode"), env), "service:") || k.netnsOwners[name] {
+		return false
+	}
+	for key := range k.labels[name] {
+		if strings.HasPrefix(FoldKey(key), "traefik.http.routers.") {
+			return false
+		}
+	}
+	drop, _ := scalars(field(s, "cap_drop"))
+	if !slices.ContainsFunc(drop, func(d string) bool { return strings.EqualFold(strings.TrimSpace(resolve(d, env)), "ALL") }) {
+		return false
+	}
+	add, ok := scalars(field(s, "cap_add"))
+	for _, a := range add {
+		if !slices.Contains(oneShotCaps, strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(resolve(a, env))), "CAP_")) {
+			return false
+		}
+	}
+	return ok
+}
+
+// networkAliases are the aliases s declares on any network.
+func networkAliases(s *yaml.Node) []string {
+	nets := field(s, "networks")
+	if nets == nil || nets.Kind != yaml.MappingNode {
+		return nil
+	}
+	var out []string
+	for i := 1; i < len(nets.Content); i += 2 {
+		a, _ := scalars(field(nets.Content[i], "aliases"))
+		out = append(out, a...)
+	}
+	return out
+}
+
+func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]string, roots []string, k kubeCtx) {
+	if !podDNSName.MatchString(name) || strings.Contains(name, "--") {
+		c.refuse("service %s: its name isn't a DNS label without \"--\" (not on Kubernetes)", name)
+	}
 	tun := "service " + name + " uses TUN/NET_ADMIN (not on Kubernetes; prefer a userspace mode)"
 	devs, ok := scalars(field(s, "devices"))
 	if !ok {
@@ -157,8 +232,14 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 			}
 			c.refuse("service %s runs as user %s: Kubernetes needs a numeric uid", name, shown)
 		} else if n, err := strconv.ParseInt(uid, 10, 64); err == nil && n == 0 {
-			// Core's admission lets only the Hub's helper pods run as root.
-			c.refuse("service %s runs as root (user 0)", name)
+			// Core's admission lets only the Hub's helper pods and the
+			// one-shot shape run as root.
+			switch {
+			case !k.job(name, s, env):
+				c.refuse("service %s runs as root (user 0)", name)
+			case !k.oneShotRoot(name, s, env):
+				c.refuse("service %s runs as root (user 0): only a one-shot job (restart no or on-failure) with cap_drop [ALL], cap_add within CHOWN, DAC_OVERRIDE, FOWNER, no ports and no routes may", name)
+			}
 		}
 	}
 	if scalarValue(field(s, "network_mode"), env) == "host" {
@@ -190,6 +271,16 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 	}
 	if eh := field(s, "extra_hosts"); eh != nil && eh.Tag != "!!null" && len(eh.Content) > 0 || eh != nil && eh.Kind == yaml.ScalarNode && eh.Tag != "!!null" && eh.Value != "" {
 		c.refuse("service %s sets extra_hosts (not on Kubernetes)", name)
+	}
+	if scalarValue(field(s, "container_name"), env) != "" {
+		c.refuse("service %s sets container_name (not on Kubernetes)", name)
+	}
+	for _, a := range networkAliases(s) {
+		shown := a
+		if !podDNSName.MatchString(a) {
+			shown = "a name"
+		}
+		c.refuse("service %s answers to alias %s (not on Kubernetes)", name, shown)
 	}
 }
 

@@ -23,6 +23,22 @@ metadata:
 type: Opaque
 ---
 # step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: person-secret
+  name: person-secret--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: person-secret
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -139,7 +155,11 @@ spec:
         - mountPath: /portcullis-bin
           name: portcullis-bin
           readOnly: true
+      dnsConfig:
+        searches:
+        - person-secret--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: samba
       initContainers:
       - command:
         - /usr/local/bin/hub
@@ -165,6 +185,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      subdomain: person-secret--pods
       volumes:
       - emptyDir: {}
         name: portcullis-bin

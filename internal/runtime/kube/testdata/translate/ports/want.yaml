@@ -91,6 +91,22 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: ports
+  name: ports--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: ports
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ports
     portcullis.io/service: dns
   name: ports--dns
   namespace: portcullis-apps
@@ -223,7 +239,12 @@ spec:
         name: dns
         resources: {}
         securityContext: {}
+      dnsConfig:
+        searches:
+        - ports--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: dns
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      subdomain: ports--pods

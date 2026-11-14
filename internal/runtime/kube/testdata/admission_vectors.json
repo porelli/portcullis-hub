@@ -4395,8 +4395,8 @@
    }
   },
   "as": "hub",
-  "want": "deny",
-  "reason_contains": "params-generation"
+  "want": "allow",
+  "reason_contains": ""
  },
  {
   "name": "a VPN-only instance's VPN-required page on websecure group-gate",
@@ -4884,5 +4884,676 @@
   "as": "hub",
   "want": "allow",
   "reason_contains": ""
+ },
+ {
+  "name": "a one-shot root Job in the ruled shape",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a one-shot root Job restarting on failure",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms2",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "OnFailure",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a one-shot root Job's pod (owned by its Job)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "app--perms-x1",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms",
+     "portcullis.io/one-shot": "true"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "name": "app--perms",
+      "uid": "00000000-0000-0000-0000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "enableServiceLinks": false,
+    "restartPolicy": "Never",
+    "containers": [
+     {
+      "name": "perms",
+      "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "runAsUser": 0,
+       "runAsGroup": 0,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ],
+        "add": [
+         "CHOWN",
+         "DAC_OVERRIDE",
+         "FOWNER"
+        ]
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": ""
+ },
+ {
+  "name": "a root pod claiming one-shot without a Job owner",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "app--perms-x2",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms",
+     "portcullis.io/one-shot": "true"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "enableServiceLinks": false,
+    "restartPolicy": "Never",
+    "containers": [
+     {
+      "name": "perms",
+      "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "runAsUser": 0,
+       "runAsGroup": 0,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ],
+        "add": [
+         "CHOWN",
+         "DAC_OVERRIDE",
+         "FOWNER"
+        ]
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "a root Job without the one-shot label",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms3",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "a one-shot root Job adding SETUID",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms4",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "SETUID"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "a one-shot root Job without cap_drop ALL",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms5",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "add": [
+           "CHOWN"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "a one-shot root Job allowing privilege escalation",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms6",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": true,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "a one-shot root Job without allowPrivilegeEscalation",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms7",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "a one-shot root Job with a container port",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--perms8",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        },
+        "ports": [
+         {
+          "containerPort": 80
+         }
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "a root Deployment labelled one-shot",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "app--perms9",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/service": "perms"
+    }
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app",
+      "portcullis.io/service": "perms"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app",
+       "portcullis.io/service": "perms",
+       "portcullis.io/one-shot": "true"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "enableServiceLinks": false,
+      "restartPolicy": "Always",
+      "containers": [
+       {
+        "name": "perms",
+        "image": "docker.io/library/alpine:3.24@sha256:abababababababababababababababababababababababababababababababab",
+        "securityContext": {
+         "runAsUser": 0,
+         "runAsGroup": 0,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ],
+          "add": [
+           "CHOWN",
+           "DAC_OVERRIDE",
+           "FOWNER"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "one-shot Jobs in the ruled shape may run as root"
+ },
+ {
+  "name": "the probe annotation of these params' generation",
+  "object": {
+   "apiVersion": "traefik.io/v1alpha1",
+   "kind": "IngressRoute",
+   "metadata": {
+    "name": "another-params-generation-own",
+    "namespace": "portcullis-edge",
+    "labels": {
+     "portcullis.io/instance": "app",
+     "portcullis.io/owner": "hub"
+    },
+    "annotations": {
+     "portcullis.io/params-generation": "0123456789abcdef"
+    }
+   },
+   "spec": {
+    "entryPoints": [
+     "websecure"
+    ],
+    "routes": [
+     {
+      "match": "Host(`a.example.org`)",
+      "kind": "Rule",
+      "middlewares": [
+       {
+        "name": "portcullis-auth@file"
+       },
+       {
+        "name": "app--m-x",
+        "namespace": "portcullis-edge"
+       }
+      ],
+      "services": [
+       {
+        "name": "app--web",
+        "port": 80,
+        "kind": "Service",
+        "namespace": "portcullis-apps"
+       }
+      ]
+     }
+    ],
+    "tls": {
+     "options": {
+      "name": "authaware@file"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "admission probe: params generation 0123456789abcdef in effect"
  }
 ]

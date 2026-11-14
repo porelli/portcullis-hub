@@ -53,6 +53,22 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: basic
+  name: basic--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: basic
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: basic
     portcullis.io/service: web
   name: basic--web
   namespace: portcullis-apps
@@ -358,7 +374,11 @@ spec:
         - mountPath: /portcullis-bin
           name: portcullis-bin
           readOnly: true
+      dnsConfig:
+        searches:
+        - basic--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: web
       initContainers:
       - command:
         - /usr/local/bin/hub
@@ -407,6 +427,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      subdomain: basic--pods
       terminationGracePeriodSeconds: 20
       volumes:
       - hostPath:

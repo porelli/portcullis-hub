@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -122,9 +123,11 @@ func inputOf(t *testing.T, compose, instance string) Input {
 }
 
 func TestTranslateNameCollisionRefused(t *testing.T) {
-	_, err := Translate(inputOf(t, "services:\n  my_db:\n    image: docker.io/library/postgres:17\n  my-db:\n    image: docker.io/library/postgres:17\n", "app"))
+	// A compose service "pods" with a port: its Service is the
+	// instance's headless pod-DNS Service's name.
+	_, err := Translate(inputOf(t, "services:\n  pods:\n    image: docker.io/library/nginx:1.29\n    expose: [\"80\"]\n", "app"))
 	var r *ErrRefused
-	if !errors.As(err, &r) || !strings.Contains(r.Reason, "my_db") || !strings.Contains(r.Reason, "my-db") {
+	if !errors.As(err, &r) || !strings.Contains(r.Reason, "pod DNS") || !strings.Contains(r.Reason, "app--pods") {
 		t.Fatalf("collision: %v", err)
 	}
 	inst, svc := strings.Repeat("i", 40), strings.Repeat("s", 30)
@@ -356,9 +359,9 @@ func TestTranslatePortBindings(t *testing.T) {
 	}
 }
 
-// TestTranslateRootRefused: an app service running as uid 0 is refused
-// (core's admission lets only the Hub's helpers run as root); a gid 0
-// alone is not root.
+// TestTranslateRootRefused: a long-running service running as uid 0 is
+// refused (core's admission lets only the Hub's helpers and the one-shot
+// shape run as root); a gid 0 alone is not root.
 func TestTranslateRootRefused(t *testing.T) {
 	for _, u := range []string{"0:0", "0", "00:1000"} {
 		in := inputOf(t, "services:\n  samba:\n    image: docker.io/library/nginx:1.29\n    user: \""+u+"\"\n", "rr")
@@ -369,6 +372,68 @@ func TestTranslateRootRefused(t *testing.T) {
 	in := inputOf(t, "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:0\"\n", "rr")
 	if _, err := Translate(in); err != nil {
 		t.Errorf("1000:0: %v", err)
+	}
+}
+
+// oneShotCompose: app waits for perms, a root one-shot chown job.
+func oneShotCompose(perms string) string {
+	return "services:\n  app:\n    image: docker.io/library/nginx:1.29\n    depends_on:\n      perms:\n        condition: service_completed_successfully\n" +
+		"  perms:\n    image: docker.io/library/alpine:3.24\n    user: \"0:0\"\n    restart: \"no\"\n    read_only: true\n" + perms
+}
+
+// TestTranslateOneShotRoot: a one-shot job may run as uid 0 only in the
+// ruled shape — restart no/on-failure, a Job, no ports, no routes,
+// cap_drop ALL, cap_add within CHOWN, DAC_OVERRIDE, FOWNER — and its
+// pod template is labelled portcullis.io/one-shot: "true", no privilege
+// escalation, its read_only kept, no token.
+func TestTranslateOneShotRoot(t *testing.T) {
+	ok := "    cap_drop: [ALL]\n    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]\n"
+	var job *unstructured.Unstructured
+	for _, o := range objectsOf(t, inputOf(t, oneShotCompose(ok), "os")) {
+		if o.GetKind() == "Job" {
+			job = o
+		}
+		if o.GetKind() == "Deployment" {
+			if l, _, _ := unstructured.NestedStringMap(o.Object, "spec", "template", "metadata", "labels"); l[LabelOneShot] != "" {
+				t.Errorf("deployment labelled one-shot: %v", l)
+			}
+		}
+	}
+	if job == nil || job.GetName() != "os--perms" {
+		t.Fatalf("no job: %v", job)
+	}
+	l, _, _ := unstructured.NestedStringMap(job.Object, "spec", "template", "metadata", "labels")
+	if l[LabelOneShot] != "true" {
+		t.Errorf("labels %v", l)
+	}
+	if v, _, _ := unstructured.NestedBool(job.Object, "spec", "template", "spec", "automountServiceAccountToken"); v {
+		t.Error("token")
+	}
+	cs, _, _ := unstructured.NestedSlice(job.Object, "spec", "template", "spec", "containers")
+	sc := cs[0].(map[string]any)["securityContext"].(map[string]any)
+	if sc["runAsUser"] != int64(0) || sc["allowPrivilegeEscalation"] != false || sc["readOnlyRootFilesystem"] != true || sc["privileged"] != nil {
+		t.Errorf("security context %v", sc)
+	}
+	caps := sc["capabilities"].(map[string]any)
+	if fmt.Sprint(caps["drop"]) != "[ALL]" || fmt.Sprint(caps["add"]) != "[CHOWN DAC_OVERRIDE FOWNER]" {
+		t.Errorf("caps %v", caps)
+	}
+	why := "service perms runs as root (user 0): only a one-shot job (restart no or on-failure) with cap_drop [ALL], cap_add within CHOWN, DAC_OVERRIDE, FOWNER, no ports and no routes may"
+	for name, c := range map[string]string{
+		"no cap_drop":      "    cap_add: [CHOWN]\n",
+		"cap_drop not ALL": "    cap_drop: [NET_RAW]\n",
+		"SETUID":           "    cap_drop: [ALL]\n    cap_add: [CHOWN, SETUID]\n",
+		"a port":           ok + "    ports: [\"8080:80\"]\n",
+		"a route":          ok + "    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.p.rule: Host(`p.example.org`)\n",
+		"restart always":   strings.Replace(ok, "    cap_drop", "    restart: always\n    cap_drop", 1),
+	} {
+		compose := oneShotCompose(c)
+		if name == "restart always" {
+			compose = strings.Replace(compose, "    restart: \"no\"\n", "", 1)
+		}
+		if _, err := Translate(inputOf(t, compose, "os")); refusedErr(err) != why && refusedErr(err) != "service perms runs as root (user 0)" {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
@@ -394,7 +459,7 @@ func TestTranslateClusterIPServices(t *testing.T) {
 			continue
 		}
 		typ, _, _ := unstructured.NestedString(o.Object, "spec", "type")
-		if typ == "LoadBalancer" {
+		if typ == "LoadBalancer" || o.GetName() == "cs--pods" {
 			continue
 		}
 		if typ != "" && typ != "ClusterIP" {
@@ -460,5 +525,65 @@ func TestTranslateCompanionAliasService(t *testing.T) {
 		if _, err := Translate(in); refusedErr(err) == "" {
 			t.Errorf("%+v: %v", c, err)
 		}
+	}
+}
+
+// TestTranslatePodDNS: compose service names resolve to the instance's
+// pods: a headless Service <instance>--pods (publishNotReadyAddresses),
+// each pod hostname = its compose service, subdomain = that Service, the
+// instance's search domain first; the vpn gateway's netns members share
+// their owner's pod (no name of their own, as on Docker). Names that
+// can't be pod DNS names are refused.
+func TestTranslatePodDNS(t *testing.T) {
+	compose := "services:\n  web:\n    image: docker.io/library/nginx:1.29\n  db:\n    image: docker.io/library/postgres:17\n" +
+		"  side:\n    image: docker.io/library/nginx:1.29\n    network_mode: service:web\n"
+	var headless *unstructured.Unstructured
+	pods := map[string]map[string]any{}
+	for _, o := range objectsOf(t, inputOf(t, compose, "dn")) {
+		switch o.GetKind() {
+		case "Service":
+			if o.GetName() == "dn--pods" {
+				headless = o
+			}
+		case "Deployment", "Job":
+			spec, _, _ := unstructured.NestedMap(o.Object, "spec", "template", "spec")
+			pods[o.GetName()] = spec
+		}
+	}
+	if headless == nil {
+		t.Fatal("no headless Service")
+	}
+	spec := headless.Object["spec"].(map[string]any)
+	if spec["clusterIP"] != "None" || spec["publishNotReadyAddresses"] != true || fmt.Sprint(spec["selector"]) != "map[portcullis.io/instance:dn]" {
+		t.Errorf("headless %v", spec)
+	}
+	if len(pods) != 2 {
+		t.Fatalf("pods %v", slices.Sorted(mapKeys(pods)))
+	}
+	for name, svc := range map[string]string{"dn--web": "web", "dn--db": "db"} {
+		p := pods[name]
+		if p["hostname"] != svc || p["subdomain"] != "dn--pods" {
+			t.Errorf("%s: hostname %v subdomain %v", name, p["hostname"], p["subdomain"])
+		}
+		if s := fmt.Sprint(p["dnsConfig"]); s != "map[searches:[dn--pods.portcullis-apps.svc.cluster.local]]" {
+			t.Errorf("%s: dnsConfig %s", name, s)
+		}
+	}
+	for c, why := range map[string]string{
+		"services:\n  my_db:\n    image: docker.io/library/postgres:17\n":                                                              "service my_db: its name isn't a DNS label without \"--\" (not on Kubernetes)",
+		"services:\n  Web:\n    image: docker.io/library/nginx:1.29\n":                                                                 "service Web: its name isn't a DNS label without \"--\" (not on Kubernetes)",
+		"services:\n  a--b:\n    image: docker.io/library/nginx:1.29\n":                                                                "service a--b: its name isn't a DNS label without \"--\" (not on Kubernetes)",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    container_name: www\n":                                        "service web sets container_name (not on Kubernetes)",
+		"services:\n  web:\n    image: docker.io/library/nginx:1.29\n    networks:\n      default:\n        aliases: [web-internal]\n": "service web answers to alias web-internal (not on Kubernetes)",
+	} {
+		if _, err := Translate(inputOf(t, c, "dn")); refusedErr(err) != why {
+			t.Errorf("%q: %v", c, err)
+		}
+	}
+	// The Hub's own companion alias is the alias Service, not refused.
+	in := inputOf(t, "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    networks:\n      default:\n        aliases: [portcullis-mcp-dn--tok]\n", "dn")
+	in.Companions = []Companion{{Service: "web", Alias: "portcullis-mcp-dn--tok", Port: 80}}
+	if _, err := Translate(in); err != nil {
+		t.Errorf("companion alias: %v", err)
 	}
 }

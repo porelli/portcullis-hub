@@ -58,7 +58,7 @@ var ingressCases = map[string]map[string]map[string]string{
 		"traefik.http.services.app.loadbalancer.server.port":                                                 "8080",
 	}},
 	"mcp": {"companion": {
-		"traefik.http.routers.app-mcp.rule":        "Host(`mcp.example.org`) && PathPrefix(`/app/`)",
+		"traefik.http.routers.app-mcp.rule":        "Host(`a.example.org`) && (Path(`/mcp/tok`) || Path(`/.well-known/oauth-protected-resource/mcp/tok`))",
 		"traefik.http.routers.app-mcp.service":     "mcp-gate@docker",
 		"traefik.http.routers.app-mcp.tls.options": "protected-any@file",
 	}},
@@ -147,25 +147,23 @@ func TestForwardAuthMiddlewareRefused(t *testing.T) {
 	}
 }
 
-// TestMCPRoutersNotOnKubernetes: companion MCP routers (service
-// mcp-gate, on mcp.<domain>) aren't generated on Kubernetes until the
-// controller rules on the shared host; the instance's other routes are.
-func TestMCPRoutersNotOnKubernetes(t *testing.T) {
-	for _, svc := range []string{"mcp-gate@docker", "mcp-gate@file", "mcp-gate"} {
-		objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {
-			"traefik.http.routers.r.rule": "Host(`mcp.example.org`) && PathPrefix(`/app/`)", "traefik.http.routers.r.service": svc,
-			"traefik.http.routers.w.rule": "Host(`a.example.org`)", "traefik.http.routers.w.service": "group-gate@docker"}})
-		if err != nil {
-			t.Fatalf("%s: %v", svc, err)
-		}
-		if len(objs) != 1 || objs[0].GetName() != "app--r-w" {
-			t.Errorf("%s: %d objects, first %v", svc, len(objs), objs)
-		}
+// TestMCPRoutersOnKubernetes: companion MCP routers (on the app's own
+// host, exact paths) are generated as on Docker, to mcp-gate@file.
+func TestMCPRoutersOnKubernetes(t *testing.T) {
+	objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {
+		"traefik.http.routers.r.rule":    "Host(`a.example.org`) && (Path(`/mcp/tok`) || Path(`/.well-known/oauth-protected-resource/mcp/tok`))",
+		"traefik.http.routers.r.service": "mcp-gate@docker"}})
+	if err != nil || len(objs) != 1 {
+		t.Fatalf("%v %v", objs, err)
+	}
+	s := objs[0].Object["spec"].(map[string]any)["routes"].([]any)[0].(map[string]any)["services"].([]any)[0].(map[string]any)
+	if s["name"] != "mcp-gate@file" || s["kind"] != "TraefikService" {
+		t.Errorf("service %v", s)
 	}
 }
 
 func TestCoreServiceRefsAreFile(t *testing.T) {
-	for svc, want := range map[string]string{"forward-auth-ext@docker": "forward-auth-ext@file", "group-gate@docker": "group-gate@file"} {
+	for svc, want := range map[string]string{"forward-auth-ext@docker": "forward-auth-ext@file", "mcp-gate@docker": "mcp-gate@file", "group-gate@docker": "group-gate@file"} {
 		objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.routers.r.service": svc}})
 		if err != nil {
 			t.Fatalf("%s: %v", svc, err)

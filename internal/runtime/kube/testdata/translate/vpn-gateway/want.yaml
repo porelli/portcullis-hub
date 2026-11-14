@@ -14,6 +14,22 @@ metadata:
 type: Opaque
 ---
 # step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+  name: vpn-gateway--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: vpn-gateway
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -173,8 +189,13 @@ spec:
         name: derp
         resources: {}
         securityContext: {}
+      dnsConfig:
+        searches:
+        - vpn-gateway--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
+      hostname: headscale
       securityContext:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      subdomain: vpn-gateway--pods
