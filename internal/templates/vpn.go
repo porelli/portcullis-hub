@@ -1,9 +1,13 @@
 package templates
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/netip"
+	"os"
+	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -194,7 +198,11 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 		if a, b, ok := firstOverlap(lits); ok {
 			return fmt.Errorf("vpn.ranges: %s overlaps %s", a, b)
 		}
-		if err := checkVPNIngress(m, compose, routes); err != nil {
+		tid := t.TemplateID
+		if tid == "" {
+			tid = t.ID
+		}
+		if err := checkVPNIngress(m, tid, compose, routes); err != nil {
 			return err
 		}
 		id := v.Identity
@@ -227,7 +235,14 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 			named[v.DNS.Hook] = true
 		}
 		for _, r := range v.ControlRouters {
-			if _, ok := routes.HostRouters[r]; !ok {
+			ri := routes.Info[r]
+			if ri == nil {
+				return fmt.Errorf("vpn.control_routers: %s is not a host router of the template", r)
+			}
+			// Host(...) alone, or Host(...) && one PathPrefix(...) (Task
+			// 19, the same match as templates' validate.py): a control
+			// router always names its host.
+			if _, host := routes.HostRouters[r]; !host && !controlRuleRe.MatchString(strings.TrimSpace(ri.Rule)) {
 				return fmt.Errorf("vpn.control_routers: %s is not a host router of the template", r)
 			}
 			if servesAdminUI(m, routes.Info[r]) {
@@ -238,6 +253,195 @@ func ValidateVPN(t *Template, compose []byte, routes *Routes) error {
 	for _, h := range m.Hooks {
 		if h.IsVPN() && !named[h.Name] {
 			return fmt.Errorf("hooks[%s]: when: [vpn] needs a vpn: block that names it", h.Name)
+		}
+	}
+	if v != nil {
+		tid := t.TemplateID
+		if tid == "" {
+			tid = t.ID
+		}
+		return vpnBindEscapes(t.Path, tid, compose)
+	}
+	return nil
+}
+
+// controlRuleRe is a control router's Host() && one PathPrefix() rule
+// (validate.py's _HOST_ONLY_RULE_RE with its optional group).
+var controlRuleRe = regexp.MustCompile("^Host\\(`[^`]*`\\)\\s*&&\\s*PathPrefix\\(`[^`]*`\\)$")
+
+// vpnVolume is a top-level volumes: entry as declared.
+type vpnVolume struct {
+	// plain: null, or a mapping without external, name, driver or
+	// driver_opts.
+	plain bool
+}
+
+// topLevelVolumes is compose's top-level volumes: by key.
+func topLevelVolumes(compose []byte) map[string]vpnVolume {
+	var doc struct {
+		Volumes map[string]interface{} `yaml:"volumes"`
+	}
+	out := map[string]vpnVolume{}
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return out
+	}
+	for k, v := range doc.Volumes {
+		var tv vpnVolume
+		switch mm := v.(type) {
+		case nil:
+			tv.plain = true
+		case map[string]interface{}:
+			tv.plain = true
+			for _, key := range []string{"external", "name", "driver", "driver_opts"} {
+				if _, ok := mm[key]; ok {
+					tv.plain = false
+				}
+			}
+		}
+		out[k] = tv
+	}
+	return out
+}
+
+// vpnDriveRe is a Windows drive-letter source (X:\ or X:/).
+var vpnDriveRe = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+
+// vpnLetterText refuses a one-letter volume name (it reads as a drive).
+const vpnLetterText = "a VPN template's volume names are longer than one letter"
+
+// vpnVolumeNameRe is a named volume reference Compose accepts.
+var vpnVolumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// vpnMount is one volumes: entry with a source, as Compose reads it.
+type vpnMount struct {
+	bind       bool
+	src, entry string
+	ro         bool
+}
+
+// vpnMounts is a service's volumes: (validate.py's vpn_mounts): short
+// src:dst[:opts] and long {type, source, read_only}; anonymous volumes
+// and tmpfs are skipped. bad is the first entry that can't be resolved
+// (an interpolated source, an ambiguous short form, a type other than
+// bind / volume / tmpfs), "" when none.
+func vpnMounts(raw interface{}) (out []vpnMount, bad string) {
+	var l []interface{}
+	switch v := raw.(type) {
+	case []interface{}:
+		l = v
+	case nil:
+	default:
+		l = []interface{}{v}
+	}
+	for _, x := range l {
+		if e, ok := x.(map[string]interface{}); ok {
+			typ := "volume"
+			if t, ok := e["type"]; ok && t != nil && t != "" {
+				typ = fmt.Sprint(t)
+			}
+			src := ""
+			if sv, ok := e["source"]; ok && sv != nil {
+				src = strings.TrimSpace(fmt.Sprint(sv))
+			}
+			shown := src
+			if shown == "" {
+				shown = pyJSON(e)
+			}
+			if typ == "tmpfs" || typ == "volume" && src == "" {
+				continue
+			}
+			if typ != "bind" && typ != "volume" || strings.Contains(src, "$") {
+				return out, shown
+			}
+			ro := e["read_only"] == true || e["read_only"] == "true"
+			out = append(out, vpnMount{bind: typ == "bind", src: src, entry: src, ro: ro})
+			continue
+		}
+		entry := strings.TrimSpace(fmt.Sprint(x))
+		if strings.Contains(entry, "$") {
+			return out, entry
+		}
+		if vpnDriveRe.MatchString(entry) {
+			// X:\… or X:/…: a Windows host path, read before splitting on
+			// ':' (a bind, refused by the bind rules).
+			rest := strings.Split(entry[2:], ":")
+			ro := len(rest) > 2 && slices.Contains(strings.Split(rest[2], ","), "ro")
+			out = append(out, vpnMount{bind: true, src: entry[:2] + rest[0], entry: entry, ro: ro})
+			continue
+		}
+		parts := strings.Split(entry, ":")
+		if len(parts) == 1 {
+			continue // an anonymous volume
+		}
+		// ./… and /… are binds (the bind rules refuse all but ./…), a
+		// volume name a named volume (declared: checked by the caller);
+		// anything else (~, a bare relative path) is unresolvable.
+		src := parts[0]
+		bind := strings.HasPrefix(src, ".") || strings.HasPrefix(src, "/")
+		if len(parts) > 3 || src == "" || parts[1] == "" || !bind && !vpnVolumeNameRe.MatchString(src) {
+			return out, entry
+		}
+		ro := len(parts) == 3 && slices.Contains(strings.Split(parts[2], ","), "ro")
+		out = append(out, vpnMount{bind: bind, src: src, entry: entry, ro: ro})
+	}
+	return out, ""
+}
+
+// pyJSON is v as Python's json.dumps(v, sort_keys=True) writes it (", "
+// and ": " separators): how validate.py shows a long-syntax mount.
+func pyJSON(v interface{}) string {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		keys := slices.Sorted(maps.Keys(x))
+		parts := make([]string, len(keys))
+		for i, k := range keys {
+			kb, _ := json.Marshal(k)
+			parts[i] = string(kb) + ": " + pyJSON(x[k])
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
+	case []interface{}:
+		parts := make([]string, len(x))
+		for i, e := range x {
+			parts[i] = pyJSON(e)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	default:
+		b, err := json.Marshal(x)
+		if err != nil {
+			return fmt.Sprint(x)
+		}
+		return string(b)
+	}
+}
+
+// hostOnlyRuleRe is validate.py's _HOST_ONLY_RULE_RE without its
+// optional PathPrefix group.
+var hostOnlyRuleRe = regexp.MustCompile("^Host\\(`[^`]*`\\)$")
+
+// vpnControlRulesPrecheck: a vpn.control_routers entry that is no
+// router of the compose file, or whose rule (as written) is neither
+// Host() alone nor Host() && one PathPrefix(). Only consulted when the
+// routes don't parse, so the refusal names the control router first.
+func vpnControlRulesPrecheck(m *Manifest, compose []byte) error {
+	if m.VPN == nil || len(m.VPN.ControlRouters) == 0 {
+		return nil
+	}
+	labels, err := ServiceLabels(compose)
+	if err != nil {
+		return nil
+	}
+	rules := map[string]string{}
+	for _, l := range labels {
+		for k, v := range l {
+			if name, ok := strings.CutSuffix(strings.TrimPrefix(k, "traefik.http.routers."), ".rule"); ok && strings.HasPrefix(k, "traefik.http.routers.") && !strings.Contains(name, ".") {
+				rules[name] = strings.TrimSpace(v)
+			}
+		}
+	}
+	for _, r := range m.VPN.ControlRouters {
+		rule, ok := rules[r]
+		if !ok || !hostOnlyRuleRe.MatchString(rule) && !controlRuleRe.MatchString(rule) {
+			return fmt.Errorf("vpn.control_routers: %s is not a host router of the template", r)
 		}
 	}
 	return nil
@@ -252,9 +456,16 @@ var forwarderImageRe = regexp.MustCompile(`^ghcr\.io/porelli/portcullis-forwarde
 // a Traefik router or label uses host networking; every service in the ingress's network namespace (the
 // ingress and the services joining it, chains followed) is no job, no AI
 // companion, has no Traefik router or label and publishes no ports, and
-// besides the ingress only the pinned forwarder may join it;
-// proxy_protocol v2.
-func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
+// besides the ingress only the pinned forwarder may join it; the ingress
+// and its members set no pid, ipc or volumes_from key, and no other
+// service shares the pid or ipc namespace of one (service:<X>) or mounts
+// its volumes (volumes_from); proxy_protocol v2.
+func checkVPNIngress(m *Manifest, tid string, compose []byte, routes *Routes) error {
+	// No anchors, aliases or merge keys: every check reads the nodes as
+	// written, with nothing a node walk could miss.
+	if vpnYAMLIndirection(compose) {
+		return fmt.Errorf("compose.yml: a VPN template uses no YAML anchors, aliases or merge keys")
+	}
 	s := m.VPN.Ingress.Service
 	infos := composeServiceInfos(compose)
 	info, ok := infos[s]
@@ -306,9 +517,359 @@ func checkVPNIngress(m *Manifest, compose []byte, routes *Routes) error {
 		if infos[n].ports {
 			return fmt.Errorf("vpn.ingress.service: %s publishes ports", n)
 		}
+		if err := vpnNamespaceCaps(n, infos[n]); err != nil {
+			return err
+		}
+		// No pid or ipc key at all (host, service:, container:,
+		// shareable…): a member keeps its own namespaces.
+		for _, k := range []struct {
+			key string
+			set bool
+		}{{"pid", infos[n].hasPid}, {"ipc", infos[n].hasIpc}} {
+			if k.set {
+				return fmt.Errorf("vpn.ingress.service: %s sets %s: a VPN gateway keeps its own pid and ipc namespaces", n, k.key)
+			}
+		}
+		if infos[n].hasVolumesFrom {
+			return fmt.Errorf("vpn.ingress.service: %s uses volumes_from: a VPN gateway mounts no other service's volumes", n)
+		}
+	}
+	// No other service shares the pid or ipc namespace of the ingress or
+	// a member (it could reach the gateway's processes and, with
+	// capabilities, enter its network namespace) or mounts its volumes;
+	// container: targets are refused for every template already
+	// (checkCoreRefs).
+	inNS := map[string]bool{}
+	for _, n := range members {
+		inNS[n] = true
+	}
+	// Mounts (Task 19, strict; templates' validate.py vpn_mounts): a
+	// member binds only the template's own files under ./templates/<id>/,
+	// read-only; its named volumes are declared top-level with no
+	// external, name, driver or driver_opts; a member's volume is mounted
+	// by no other service unless every member mounts it read-only (a
+	// hand-over, like headscale's pre-auth key); anything unresolvable is
+	// refused.
+	vols := topLevelVolumes(compose)
+	type memberUse struct {
+		svc string
+		ro  bool
+	}
+	memberVols := map[string][]memberUse{}
+	for _, mem := range members {
+		ms, bad := vpnMounts(infos[mem].volumes)
+		if bad != "" {
+			return fmt.Errorf("vpn.ingress.service: %s mounts %s: unresolvable (a VPN gateway's mounts are literal)", mem, bad)
+		}
+		for _, mm := range ms {
+			if mm.bind {
+				norm := strings.ToLower(path.Clean(mm.src))
+				if !strings.HasPrefix(strings.ToLower(mm.src), "./templates/"+strings.ToLower(tid)+"/") || !strings.HasPrefix(norm, "templates/"+strings.ToLower(tid)+"/") || !mm.ro {
+					return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN gateway binds only the template's own files (./templates/%s/…), read-only", mem, mm.entry, tid)
+				}
+				if vpnBindOutside(mm.src) {
+					return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds start with ./ and have no .. segment", mem, mm.entry)
+				}
+				continue
+			}
+			if len(mm.src) == 1 {
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: %s", mem, mm.entry, vpnLetterText)
+			}
+			if d, ok := vols[mm.src]; !ok || !d.plain {
+				return fmt.Errorf("vpn.ingress.service: %s mounts volume %s: a VPN gateway's volumes are the template's own (declared, with no external, name, driver or driver_opts)", mem, mm.src)
+			}
+			memberVols[mm.src] = append(memberVols[mm.src], memberUse{mem, mm.ro})
+		}
+	}
+	// A volume is always a plain <project>_<key>: no name, external,
+	// driver or driver_opts on any top-level volume, so nothing can alias
+	// the gateway's or bind the host in disguise.
+	if err := vpnPlainVolumeIdentity(compose); err != nil {
+		return err
+	}
+	for _, n := range names {
+		for _, ns := range []struct{ key, val string }{{"pid", infos[n].pidOf}, {"ipc", infos[n].ipcOf}} {
+			v := strings.TrimSpace(ns.val)
+			if x, ok := strings.CutPrefix(v, "service:"); ok && inNS[strings.TrimSpace(x)] {
+				return fmt.Errorf("vpn.ingress.service: %s shares the %s namespace of %s", n, ns.key, strings.TrimSpace(x))
+			}
+		}
+		// volumes_from as Compose reads it: an optional service: prefix
+		// (any case), the name up to the first ':', then exactly ro or rw.
+		for _, e := range infos[n].volumesFrom {
+			ref := strings.TrimSpace(e)
+			if len(ref) >= len("service:") && strings.EqualFold(ref[:len("service:")], "service:") {
+				ref = ref[len("service:"):]
+			}
+			name, mode, hasMode := strings.Cut(ref, ":")
+			if hasMode && mode != "ro" && mode != "rw" {
+				return fmt.Errorf("vpn.ingress.service: %s volumes_from %s: the mode must be ro or rw", n, strings.TrimSpace(e))
+			}
+			if inNS[name] {
+				return fmt.Errorf("vpn.ingress.service: %s mounts the volumes of %s (volumes_from)", n, name)
+			}
+		}
+		if inNS[n] {
+			continue
+		}
+		ms, bad := vpnMounts(infos[n].volumes)
+		if bad != "" {
+			return fmt.Errorf("vpn.ingress.service: %s mounts %s: unresolvable (a VPN template's mounts are literal)", n, bad)
+		}
+		for _, om := range ms {
+			_, declared := vols[om.src]
+			switch {
+			case !om.bind && len(om.src) == 1:
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: %s", n, om.entry, vpnLetterText)
+			case !om.bind && om.entry != om.src && !declared:
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's short-syntax sources are ./ binds or declared volumes", n, om.entry)
+			case om.bind && vpnBindOutside(om.src):
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: a VPN template's binds start with ./ and have no .. segment", n, om.entry)
+			}
+		}
+		// The template's files (./templates/<id>/, what is inside, and its
+		// ancestors . and ./templates) are read-only for every service: a
+		// read-write bind could rewrite a script the gateway runs.
+		for _, om := range ms {
+			if om.bind && !om.ro {
+				norm, ltid := strings.ToLower(path.Clean(om.src)), strings.ToLower(tid)
+				if norm == "." || norm == "templates" || norm == "templates/"+ltid || strings.HasPrefix(norm, "templates/"+ltid+"/") {
+					return fmt.Errorf("vpn.ingress.service: %s mounts %s: in a VPN template the template's files are read-only for every service", n, om.entry)
+				}
+			}
+		}
+		for _, om := range ms {
+			if om.bind {
+				continue
+			}
+			for _, u := range memberVols[om.src] {
+				if !u.ro {
+					return fmt.Errorf("vpn.ingress.service: %s mounts volume %s, which %s mounts read-write", n, om.src, u.svc)
+				}
+			}
+		}
+	}
+	// A VPN template's -internal aliases (an app's upstream behind its
+	// own services, e.g. headscale-internal, the gateway's login server)
+	// are on the default network only.
+	aliases := vpnNetworkAliases(compose)
+	for _, n := range names {
+		// The service's own names answer on every network it joins.
+		joined := infos[n].networks
+		if len(joined) == 0 {
+			joined = []string{"default"}
+		}
+		if infos[n].networkMode {
+			joined = nil // no DNS name of its own
+		}
+		for _, own := range []string{n, infos[n].hostname, infos[n].containerName} {
+			if !strings.HasSuffix(strings.TrimRight(FoldKey(strings.TrimSpace(own)), "."), "-internal") {
+				continue
+			}
+			for _, net := range joined {
+				if net != "default" {
+					return fmt.Errorf("vpn: service %s answers to %s on network %s: a VPN template's -internal aliases are on the default network only", n, strings.TrimSpace(own), net)
+				}
+			}
+		}
+		for _, na := range aliases[n] {
+			if strings.HasSuffix(strings.TrimRight(FoldKey(strings.TrimSpace(na.alias)), "."), "-internal") && na.net != "default" {
+				return fmt.Errorf("vpn: service %s answers to %s on network %s: a VPN template's -internal aliases are on the default network only", n, strings.TrimSpace(na.alias), na.net)
+			}
+		}
 	}
 	if m.VPN.Ingress.ProxyProtocol != VPNProxyV2 {
 		return fmt.Errorf("vpn.ingress.proxy_protocol: only v2")
+	}
+	return nil
+}
+
+// vpnBindOutside: a bind source outside the allowlist: it must start
+// with ./ and hold no .. segment and no backslash (so no ~, /, drive
+// letter or UNC path, nothing Compose would expand or resolve elsewhere).
+func vpnBindOutside(src string) bool {
+	return !strings.HasPrefix(src, "./") || strings.Contains(src, "\\") || slices.Contains(strings.Split(src, "/"), "..")
+}
+
+// vpnYAMLIndirection: compose uses an anchor, an alias or a merge key
+// anywhere.
+func vpnYAMLIndirection(compose []byte) bool {
+	var doc yaml.Node
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return false
+	}
+	var walk func(n *yaml.Node) bool
+	walk = func(n *yaml.Node) bool {
+		if n.Anchor != "" || n.Kind == yaml.AliasNode || n.Tag == "!!merge" || n.Kind == yaml.ScalarNode && n.Value == "<<" && n.Style == 0 {
+			return true
+		}
+		for _, c := range n.Content {
+			if walk(c) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(&doc)
+}
+
+// vpnPlainVolumeIdentity refuses name, external, driver or driver_opts
+// on any top-level volume (sorted by key): a driver_opts bind is a
+// disguised host bind.
+func vpnPlainVolumeIdentity(compose []byte) error {
+	var doc struct {
+		Volumes map[string]interface{} `yaml:"volumes"`
+	}
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return nil
+	}
+	for _, k := range slices.Sorted(maps.Keys(doc.Volumes)) {
+		if len(k) == 1 {
+			return fmt.Errorf("vpn: volume %s: %s", k, vpnLetterText)
+		}
+		mm, _ := doc.Volumes[k].(map[string]interface{})
+		for _, key := range []string{"name", "external", "driver", "driver_opts"} {
+			if _, ok := mm[key]; ok {
+				return fmt.Errorf("vpn: volume %s sets %s: a VPN template's volumes are plain <project>_<key> volumes", k, key)
+			}
+		}
+	}
+	return nil
+}
+
+// vpnNetAlias is one network alias of a service.
+type vpnNetAlias struct{ net, alias string }
+
+// vpnNetworkAliases are each service's network aliases (map-form
+// networks, in file order).
+func vpnNetworkAliases(compose []byte) map[string][]vpnNetAlias {
+	var doc struct {
+		Services map[string]struct {
+			Networks yaml.Node `yaml:"networks"`
+		} `yaml:"services"`
+	}
+	out := map[string][]vpnNetAlias{}
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return out
+	}
+	for svc, sv := range doc.Services {
+		n := sv.Networks
+		if n.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			cfg := n.Content[i+1]
+			if cfg.Kind != yaml.MappingNode {
+				continue
+			}
+			for j := 0; j+1 < len(cfg.Content); j += 2 {
+				if cfg.Content[j].Value != "aliases" {
+					continue
+				}
+				al := cfg.Content[j+1]
+				items := []*yaml.Node{al}
+				if al.Kind == yaml.SequenceNode {
+					items = al.Content
+				}
+				for _, a := range items {
+					if a.Kind == yaml.ScalarNode {
+						out[svc] = append(out[svc], vpnNetAlias{n.Content[i].Value, a.Value})
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// vpnBindEscapes (validate.py's vpn_bind_escapes): every bind source
+// under ./templates/<id>/ (any service of a VPN template) resolves,
+// symlinks followed, inside the template's own directory. SyncFiles
+// refuses such links too; this names them when the template loads.
+func vpnBindEscapes(dir, tid string, compose []byte) error {
+	if dir == "" {
+		return nil
+	}
+	base := realPath(dir)
+	infos := composeServiceInfos(compose)
+	for _, n := range slices.Sorted(maps.Keys(infos)) {
+		ms, _ := vpnMounts(infos[n].volumes)
+		for _, mm := range ms {
+			norm := path.Clean(mm.src)
+			if !mm.bind || !(norm == "templates/"+tid || strings.HasPrefix(norm, "templates/"+tid+"/")) {
+				continue
+			}
+			rest := strings.TrimLeft(strings.TrimPrefix(norm, "templates/"+tid), "/")
+			real := realPath(filepath.Join(dir, filepath.FromSlash(rest)))
+			if real != base && !strings.HasPrefix(real, base+string(filepath.Separator)) {
+				return fmt.Errorf("vpn.ingress.service: %s mounts %s: it resolves outside templates/%s/ (a symlink)", n, mm.entry, tid)
+			}
+		}
+	}
+	return nil
+}
+
+// realPath is p with every symlink resolved, like Python's
+// os.path.realpath: a part that doesn't exist is kept as written.
+func realPath(p string) string {
+	p, _ = filepath.Abs(p)
+	return realPathN(p, 0)
+}
+
+func realPathN(p string, depth int) string {
+	if depth > 40 {
+		return p
+	}
+	vol := filepath.VolumeName(p)
+	parts := strings.Split(strings.TrimPrefix(p[len(vol):], string(filepath.Separator)), string(filepath.Separator))
+	cur := vol + string(filepath.Separator)
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		next := filepath.Join(cur, part)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			return filepath.Join(append([]string{cur}, parts[i:]...)...)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(next)
+			if err != nil {
+				return filepath.Join(append([]string{next}, parts[i+1:]...)...)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(cur, target)
+			}
+			next = realPathN(filepath.Clean(target), depth+1)
+		}
+		cur = next
+	}
+	return cur
+}
+
+// vpnNamespaceCaps (Task 19, an allowlist): a service in the ingress's
+// network namespace isn't privileged (absent or literally false), drops
+// every capability (cap_drop includes ALL), adds none but
+// NET_BIND_SERVICE (the forwarder's :443; anything else, interpolation
+// included, is refused) and has no devices or device_cgroup_rules key
+// at all: without NET_ADMIN or NET_RAW a gateway can't take another
+// gateway's address on portcullis-vpn. Same order and texts as
+// templates' validate.py.
+func vpnNamespaceCaps(n string, info composeServiceInfo) error {
+	capName := func(c string) string { return strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(c)), "CAP_") }
+	if info.privileged {
+		return fmt.Errorf("vpn.ingress.service: %s is privileged", n)
+	}
+	if !slices.ContainsFunc(info.capDrop, func(c string) bool { return capName(c) == "ALL" }) {
+		return fmt.Errorf("vpn.ingress.service: %s must set cap_drop: [ALL]", n)
+	}
+	for _, c := range info.capAdd {
+		if capName(c) != "NET_BIND_SERVICE" {
+			return fmt.Errorf("vpn.ingress.service: %s adds %s: a VPN gateway may add only NET_BIND_SERVICE", n, strings.TrimSpace(c))
+		}
+	}
+	if info.deviceKey != "" {
+		return fmt.Errorf("vpn.ingress.service: %s has %s: a VPN gateway runs userspace (no devices)", n, info.deviceKey)
 	}
 	return nil
 }

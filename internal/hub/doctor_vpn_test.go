@@ -31,7 +31,7 @@ func vpnFindings(t *testing.T, v *vpnFixture, kind string) []doctor.Finding {
 // naming the service; the inspect goes through the engine.
 func TestGatewayPrivilegedFromInspect(t *testing.T) {
 	m := meshTemplate("mesh", "100.64.0.0/10", "oidc_sub")
-	m[1] = strings.Replace(m[1], "  gateway:\n    image: x\n", "  gateway:\n    image: x\n  fwd:\n    image: ghcr.io/porelli/portcullis-forwarder:1@sha256:"+strings.Repeat("a", 64)+"\n    network_mode: service:gateway\n", 1)
+	m[1] = strings.Replace(m[1], "  gateway:\n    image: x\n    cap_drop: [ALL]\n", "  gateway:\n    image: x\n    cap_drop: [ALL]\n  fwd:\n    image: ghcr.io/porelli/portcullis-forwarder:1@sha256:"+strings.Repeat("a", 64)+"\n    network_mode: service:gateway\n    cap_drop: [ALL]\n", 1)
 	v := newVPNFixtureExtra(t, nil, map[string][2]string{"mesh": m}, VPNModeApps)
 	v.wire(t, "mesh")
 	v.engine.mu.Lock()

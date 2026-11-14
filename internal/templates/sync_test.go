@@ -3,8 +3,52 @@ package templates
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// A symlink that points outside the template refuses the copy (every
+// template): the published tree stays as it was.
+func TestSyncFilesRefusesOutboundSymlinks(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("top secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for name, link := range map[string]func(src string) (string, string){
+		"absolute":     func(string) (string, string) { return secret, "leak" },
+		"relative":     func(string) (string, string) { return "../../etc/passwd", "conf/leak" },
+		"dangling out": func(string) (string, string) { return "/nonexistent/x", "leak" },
+		"via a chain":  func(string) (string, string) { return "hop", "leak" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := t.TempDir()
+			root := filepath.Join(t.TempDir(), "templates")
+			tpl := &Template{ID: "app", Path: src}
+			os.MkdirAll(filepath.Join(src, "conf"), 0755)
+			os.WriteFile(filepath.Join(src, "compose.yml"), []byte("v1"), 0644)
+			if err := SyncFiles(tpl, root); err != nil {
+				t.Fatal(err)
+			}
+			target, at := link(src)
+			if name == "via a chain" {
+				os.Symlink(secret, filepath.Join(src, "hop"))
+				os.Remove(filepath.Join(src, "hop"))
+				os.Symlink(secret, filepath.Join(src, "hop"))
+			}
+			if err := os.Symlink(target, filepath.Join(src, at)); err != nil {
+				t.Fatal(err)
+			}
+			os.WriteFile(filepath.Join(src, "compose.yml"), []byte("v2"), 0644)
+			err := SyncFiles(tpl, root)
+			if err == nil || !strings.Contains(err.Error(), "points outside the template") {
+				t.Fatalf("err = %v", err)
+			}
+			if b, _ := os.ReadFile(filepath.Join(root, "app", "compose.yml")); string(b) != "v1" {
+				t.Errorf("published tree changed: %q", b)
+			}
+		})
+	}
+}
 
 func TestSyncFiles(t *testing.T) {
 	src := t.TempDir()
@@ -22,9 +66,8 @@ func TestSyncFiles(t *testing.T) {
 	must(os.WriteFile(filepath.Join(src, "conf", "nested", "setup.sh"), []byte("#!/bin/sh\n"), 0755))
 	must(os.MkdirAll(filepath.Join(src, ".git"), 0755))
 	must(os.WriteFile(filepath.Join(src, ".git", "config"), []byte("x"), 0644))
-	secret := filepath.Join(t.TempDir(), "secret")
-	must(os.WriteFile(secret, []byte("top secret"), 0600))
-	must(os.Symlink(secret, filepath.Join(src, "leak")))
+	// A link inside the template is skipped (never copied or followed).
+	must(os.Symlink(filepath.Join("conf", "nested", "setup.sh"), filepath.Join(src, "leak")))
 
 	must(SyncFiles(tpl, root))
 	dest := filepath.Join(root, "app")
