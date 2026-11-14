@@ -1931,6 +1931,7 @@
     } else if (admin && g.rule_allowed) {
       h += '<div class="pd-gp-rule"><span class="pd-muted">Manual: people are added and removed here.</span> <button type="button" class="pd-btn secondary xs" data-act="convert-open" data-group="' + esc(g.name) + '">Make rule-based…</button></div>';
     }
+    if (admin) h += anyFieldHtml(g);
     if (g.adds_blocked) h += '<div class="pd-warn">' + esc(g.adds_blocked) + '</div>';
     if (pageNote && pageNote.group === g.name) h += '<div class="pd-warn" role="status">' + esc(pageNote.text) + '</div>';
 
@@ -1959,6 +1960,24 @@
         '<button type="button" class="pd-btn ghost xs" data-act="gp-hist-reload">Refresh</button></div><div class="pd-gp-hist"><p class="pd-muted">Loading…</p></div></section>';
     }
     return h;
+  }
+
+  // "Allow any profile field in this group's rule": on app admin and
+  // privileged-value groups (the server sends allow_any_field only
+  // there, to admins), their rule may use fields that aren't admin-only.
+  const ANY_FIELD_LABEL = 'Allow any profile field in this group\'s rule';
+  const ANY_FIELD_WARN = 'A person who can edit these fields for others (a delegate with edit details) could then grant this group\'s rights.';
+  function anyFieldHtml(g) {
+    if (typeof g.allow_any_field !== 'boolean') return '';
+    const on = g.allow_any_field;
+    return '<div class="pd-gp-anyfield"><span class="pd-pill' + (on ? ' warn' : '') + '">' + (on ? 'on' : 'off') + '</span> <b>' + esc(ANY_FIELD_LABEL) + '</b> ' +
+      '<button type="button" class="pd-btn ' + (on ? 'secondary' : 'ghost') + ' xs" data-act="any-field" data-group="' + esc(g.name) + '" data-allow="' + (on ? 'false' : 'true') + '">' + (on ? 'Turn off' : 'Turn on…') + '</button>' +
+      '<p class="pd-muted pd-small">' + (on ? 'Its rule may use any profile field.' : 'Off: its rule may use only admin-only fields.') + ' ⚠ ' + esc(ANY_FIELD_WARN) + '</p></div>';
+  }
+  async function setAnyField(group, allow) {
+    if (allow && !confirm('Turn on “' + ANY_FIELD_LABEL + '” for ' + group + '?\n\n' + ANY_FIELD_WARN)) return null;
+    return groupAct(group, () => api('PUT', '/api/directory/groups/' + enc(group) + '/allow-any-field', { allow }),
+      (allow ? 'Turned on' : 'Turned off') + ' “' + ANY_FIELD_LABEL + '” for ' + group);
   }
 
   // Add people: a multi-pick (chips), an optional end, a reason on rule
@@ -2283,6 +2302,7 @@
       case 'group.expiry':
         if ((m = /^user=(\S+) until=(\S+)/.exec(d))) return m[2] === 'never' ? 'removed the end of ' + m[1] : 'set the end of ' + m[1] + ' to ' + fmtDate(m[2]);
         return 'changed an end';
+      case 'group.allow_any_field': return (/^allow=true/.test(d) ? 'turned on' : 'turned off') + ' “' + ANY_FIELD_LABEL + '”';
       case 'group.create': return 'created the group';
       case 'group.delete': return 'deleted the group';
       default: return e.action + (tu ? ' ' + tu : '');
@@ -2517,7 +2537,7 @@
     let h = dir.service_user ? '<p class="pd-note pd-service-account">Service account: <span class="pd-mono">' + esc(dir.service_user) +
       '</span> — used by the Hub to manage users and groups; it can\'t sign in.</p>' : '';
     h += '<section class="pd-sec" aria-labelledby="pd-fields-h"><h3 class="pd-h3" id="pd-fields-h">Fields</h3>' +
-      '<p class="pd-muted">Fields describe people. Everyone signed in can see them; <b>admin-only</b> fields can only be changed by admins (the rules of administrator and permission groups may only use those). <b>Share with apps</b> sends the value as an OIDC claim (<code>attr_&lt;field&gt;</code>) and as the <code>X-Forwarded-Attr-&lt;Field&gt;</code> header.</p>';
+      '<p class="pd-muted">Fields describe people. Everyone signed in can see them; <b>admin-only</b> fields can only be changed by admins (the rules of groups that grant extra rights — permission groups, app admin groups such as <code>admin_&lt;app&gt;</code> and groups that get a privileged app value — may only use those, unless an app admin or privileged group has “Allow any profile field in this group\'s rule” on). <b>Share with apps</b> sends the value as an OIDC claim (<code>attr_&lt;field&gt;</code>) and as the <code>X-Forwarded-Attr-&lt;Field&gt;</code> header.</p>';
     h += '<table class="pd-table pd-fields"><thead><tr><th scope="col">Name</th><th scope="col">Label</th><th scope="col">Kind</th><th scope="col">Values</th><th scope="col">Several values</th><th scope="col">Share with apps</th><th scope="col">Admin-only</th><th scope="col"><span class="pd-sr">Actions</span></th></tr></thead><tbody>';
     for (const f of fields()) {
       const p = 'pd-fd-' + f.name;
@@ -3018,6 +3038,7 @@
       case 'pick-add': return pickAdd();
       case 'pick-remove': pick.users = pick.users.filter(x => x !== user); redrawPicks(); { const el = root.querySelector('#pd-gp-pick'); if (el) el.focus(); } return;
       case 'pick-submit': return pickSubmit(group);
+      case 'any-field': return setAnyField(group, b.dataset.allow === 'true');
       case 'gp-hist-reload': return refreshExtras();
       case 'goto-setup': return userSelectTab('setup', true);
       case 'rule-open': return openRuleEditor(group);
