@@ -316,8 +316,11 @@ are read and written:
   file-share Secrets are scaled to 0, and those Secrets are emptied (a
   restore voids every credential). Then come the pre-restore copy,
   everything scaled to 0, `.env` (keeping this host's runtime and
-  Kubernetes keys), `certs/` and `config/`, Postgres and Vault emptied and
-  restored, the volumes, `hub-secrets` emptied, the LLDAP guard and the
+  Kubernetes keys), `certs/` and `config/`; then the backup's secret
+  variables are synced into the cluster **before** the emptied Postgres
+  starts, so it initialises with the backup's `POSTGRES_PASSWORD`, the one
+  Keycloak reads (this is what makes a Docker → Kubernetes restore work);
+  then Postgres and Vault emptied and restored, the volumes, `hub-secrets` emptied, the LLDAP guard and the
   release. Instances scaled to 0 for their Secrets aren't started again:
   the restore names them, and you start each one from the Hub.
 - **Off-host backups** run the **host's** `restic`, version 0.19.1 or
