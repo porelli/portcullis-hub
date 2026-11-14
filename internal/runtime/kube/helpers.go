@@ -13,8 +13,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -302,7 +302,9 @@ func (b *Backend) RunFixer(ctx context.Context, s runtime.FixerSpec, out func(ta
 	}
 	if res.ExitCode == 0 && s.OutPath != "" && out != nil {
 		pr, pw := io.Pipe()
-		go func() { pw.CloseWithError(ex([]string{"/usr/local/bin/hub", "volcopy", "out", s.OutPath}, nil, pw, io.Discard)) }()
+		go func() {
+			pw.CloseWithError(ex([]string{"/usr/local/bin/hub", "volcopy", "out", s.OutPath}, nil, pw, io.Discard))
+		}()
 		err := out(pr)
 		pr.Close()
 		if err != nil {

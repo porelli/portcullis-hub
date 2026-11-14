@@ -1,12 +1,12 @@
 package kube
 
 import (
-	"net/netip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,7 +37,7 @@ var ErrClusterUnverified = errors.New("the cluster is not verified")
 // UnverifiedError is the guard's refusal.
 type UnverifiedError struct{ Why string }
 
-func (e *UnverifiedError) Error() string       { return ErrClusterUnverified.Error() + ": " + e.Why }
+func (e *UnverifiedError) Error() string        { return ErrClusterUnverified.Error() + ": " + e.Why }
 func (e *UnverifiedError) Is(target error) bool { return target == ErrClusterUnverified }
 
 // DigestResolver resolves a fully qualified image reference to
