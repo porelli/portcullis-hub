@@ -11,21 +11,23 @@ import (
 	"strings"
 )
 
+// reservedPrefixes are the contract's Portcullis cookie names (§5): each
+// one exactly, or followed by "_" or "-" and anything (the split-cookie
+// forms _oauth2_proxy_0, __Host-portcullis_ext_1, …).
+var reservedPrefixes = []string{"_oauth2_proxy", "__host-portcullis_ext"}
+
 // Reserved reports whether a cookie name is a Portcullis cookie (contract
-// §5): _oauth2_proxy and _oauth2_proxy_*, __Host-portcullis_ext and
-// __Host-portcullis_ext-*, and the CSRF cookies (*_csrf*). Matched without
-// case, so a spelling variant never slips through.
+// §5), without case: a reserved name (reservedPrefixes) exactly or with
+// "_"/"-" and a suffix, or any name containing "_csrf" (the CSRF
+// cookies).
 func Reserved(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
-	switch {
-	case strings.HasPrefix(n, "_oauth2_proxy"):
-		return true
-	case n == "__host-portcullis_ext" || strings.HasPrefix(n, "__host-portcullis_ext-"):
-		return true
-	case strings.Contains(n, "_csrf"):
-		return true
+	for _, p := range reservedPrefixes {
+		if n == p || strings.HasPrefix(n, p+"_") || strings.HasPrefix(n, p+"-") {
+			return true
+		}
 	}
-	return false
+	return strings.Contains(n, "_csrf")
 }
 
 // FilterRequestCookies removes every Portcullis cookie from the request's

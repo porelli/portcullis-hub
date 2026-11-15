@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"sync"
@@ -261,4 +263,53 @@ func TestRelayHasNoOtherListener(t *testing.T) {
 		}
 	}
 	_ = strconv.Itoa
+}
+
+// TestInformationalSetCookieStripped (controller security ruling): a 1xx
+// (103 Early Hints) carrying Set-Cookie never reaches the browser with it.
+func TestInformationalSetCookieStripped(t *testing.T) {
+	be := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "_oauth2_proxy=evil; Domain=.example.org")
+		w.Header().Add("Set-Cookie", "app=1; Domain=.example.org")
+		w.Header().Set("Link", "</style.css>; rel=preload")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Del("Set-Cookie")
+		w.Header().Del("Link")
+		io.WriteString(w, "ok")
+	}))
+	defer be.Close()
+	link := newFakeLink(t, "tok", strings.TrimPrefix(be.URL, "http://"))
+	rs := relayFor(t, link, "tok", 80)
+	var got1xx []http.Header
+	var mu sync.Mutex
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, h textproto.MIMEHeader) error {
+		mu.Lock()
+		got1xx = append(got1xx, http.Header(h).Clone())
+		mu.Unlock()
+		return nil
+	}}
+	req, _ := http.NewRequest("GET", rs.URL, nil)
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "ok" {
+		t.Fatalf("body %q", b)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got1xx) == 0 {
+		t.Fatal("no 103 forwarded (the test can't tell)")
+	}
+	for _, h := range got1xx {
+		if len(h.Values("Set-Cookie")) != 0 {
+			t.Errorf("a 1xx carried Set-Cookie: %v", h)
+		}
+		if h.Get("Link") == "" {
+			t.Errorf("the 103's other headers were lost: %v", h)
+		}
+	}
 }

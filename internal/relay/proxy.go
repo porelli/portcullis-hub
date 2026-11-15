@@ -127,7 +127,7 @@ func (c Config) Handler(port int) http.Handler {
 	offline := OfflinePage(cleanLabel(c.App), cleanLabel(c.Server))
 	tr := &http.Transport{DialContext: c.dialer(port), MaxIdleConns: 32, IdleConnTimeout: 90 * time.Second,
 		ResponseHeaderTimeout: 0, ExpectContinueTimeout: time.Second, ForceAttemptHTTP2: false}
-	return &httputil.ReverseProxy{
+	rp := &httputil.ReverseProxy{
 		Transport: tr,
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.Out.URL.Scheme = "http"
@@ -146,6 +146,31 @@ func (c Config) Handler(port int) http.Handler {
 		},
 		ErrorHandler:  func(w http.ResponseWriter, r *http.Request, err error) { offline(w, r) },
 		FlushInterval: -1,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rp.ServeHTTP(&informational{ResponseWriter: w}, r)
+	})
+}
+
+// informational strips Set-Cookie from every 1xx response but 101
+// (ReverseProxy forwards 1xx such as 103 Early Hints without
+// ModifyResponse; 101 goes through ModifyResponse's filter).
+type informational struct{ http.ResponseWriter }
+
+func (i *informational) WriteHeader(code int) {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		i.Header().Del("Set-Cookie")
+	}
+	i.ResponseWriter.WriteHeader(code)
+}
+
+// Unwrap lets http.ResponseController reach the connection (Hijack for
+// upgrades, Flush for streams).
+func (i *informational) Unwrap() http.ResponseWriter { return i.ResponseWriter }
+
+func (i *informational) Flush() {
+	if f, ok := i.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 

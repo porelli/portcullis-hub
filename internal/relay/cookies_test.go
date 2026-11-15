@@ -95,3 +95,30 @@ func TestRequestCookiesStripped(t *testing.T) {
 		}
 	}
 }
+
+// TestReservedNamesExact (controller security ruling): the contract's
+// forms exactly — p, p_<x> and p-<x> for _oauth2_proxy and
+// __Host-portcullis_ext, case-insensitive — and *_csrf*.
+func TestReservedNamesExact(t *testing.T) {
+	for _, n := range []string{"__Host-portcullis_ext_0", "__host-portcullis_ext_12", "_oauth2_proxy_1", "_oauth2_proxy-csrf", "_OAuth2_Proxy",
+		"__HOST-PORTCULLIS_EXT-3", "_oauth2_proxy", "__Host-portcullis_ext", "x_csrf"} {
+		if !Reserved(n) {
+			t.Errorf("%s not reserved", n)
+		}
+	}
+	for _, n := range []string{"_oauth2_proxyish", "__Host-portcullis_extra", "oauth2_proxy_1", "__Host-app", "portcullis_ext"} {
+		if Reserved(n) {
+			t.Errorf("%s reserved", n)
+		}
+	}
+	h := http.Header{"Cookie": {"__Host-portcullis_ext_0=a; __Host-portcullis_ext_1=b; app=1"}}
+	FilterRequestCookies(h)
+	if got := h.Get("Cookie"); got != "app=1" {
+		t.Errorf("split cookies kept: %q", got)
+	}
+	r := http.Header{"Set-Cookie": {"__Host-portcullis_ext_0=a; Path=/; Secure", "app=1"}}
+	FilterResponseCookies(r, "x")
+	if got := r.Values("Set-Cookie"); len(got) != 1 || got[0] != "app=1" {
+		t.Errorf("split set-cookie kept: %q", got)
+	}
+}
