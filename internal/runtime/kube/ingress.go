@@ -147,7 +147,7 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 	}
 	var out []*unstructured.Unstructured
 	for _, name := range slices.Sorted(mapKeys(mws)) {
-		if !edgeNameOK("m-", name) {
+		if !edgeNameOK(instance, "m-", name) {
 			return nil, refused("middleware %s: its name isn't one DNS label once _ and . become - (no --, no trailing -; not on Kubernetes)", name)
 		}
 		spec, err := middlewareSpec(instance, name, mws[name], mws)
@@ -158,7 +158,7 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 	}
 	for _, name := range slices.Sorted(mapKeys(routers)) {
 		r := routers[name]
-		if !edgeNameOK("r-", name) {
+		if !edgeNameOK(instance, "r-", name) {
 			return nil, refused("router %s: its name isn't one DNS label once _ and . become - (no --, no trailing -; not on Kubernetes)", name)
 		}
 		if r.rule == "" {
@@ -276,10 +276,14 @@ func crd(kind, name, ns, instance string, spec map[string]any) *unstructured.Uns
 // (core's admission: one DNS label without "--").
 var edgePartRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// edgeNameOK: name (a router's or a middleware's, the template's own
-// label part) gives a valid edge object name once sanitized (_ and .
-// become -): no "--", no trailing -.
-func edgeNameOK(prefix, name string) bool {
+// edgeNameOK: the template-supplied part of a router's or middleware's
+// name gives one DNS label once sanitized (_ and . become -): no "--",
+// no trailing -. The Hub's own prefix portcullis-mcp-<instance>-- (a
+// companion's router, "--" by design) isn't judged, only what follows.
+func edgeNameOK(instance, prefix, name string) bool {
+	if rest, ok := strings.CutPrefix(name, templates.MCPNamePrefix+instance+"--"); ok {
+		name, prefix = rest, ""
+	}
 	part := prefix + sanitize(name)
 	return edgePartRe.MatchString(part) && !strings.Contains(part, "--")
 }

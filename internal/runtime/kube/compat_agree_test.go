@@ -242,3 +242,22 @@ func TestEdgeNamesStayOneLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestEdgeNameJudgesTemplatePartOnly: the Hub's companion router
+// portcullis-mcp-<instance>--<companion> passes (its "--" is the Hub's);
+// a template name with "__" is still refused, also after that prefix,
+// and another instance's prefix isn't the Hub's.
+func TestEdgeNameJudgesTemplatePartOnly(t *testing.T) {
+	route := func(r string) map[string]map[string]string {
+		return map[string]map[string]string{"web": {"traefik.http.routers." + r + ".rule": "Host(`a.example.org`) && (Path(`/mcp`) || Path(`/.well-known/oauth-protected-resource/mcp`))",
+			"traefik.http.routers." + r + ".service": "mcp-gate@docker", "traefik.http.services.web.loadbalancer.server.port": "80"}}
+	}
+	if _, err := IngressObjects("echo-k", EdgeNamespace, ns, route("portcullis-mcp-echo-k--echo")); err != nil {
+		t.Errorf("the companion router: %v", err)
+	}
+	for _, r := range []string{"portcullis-mcp-echo-k--a__b", "a__b", "portcullis-mcp-other--echo"} {
+		if _, err := IngressObjects("echo-k", EdgeNamespace, ns, route(r)); !strings.Contains(refusedErr(err), "isn't one DNS label") {
+			t.Errorf("%s: %v", r, err)
+		}
+	}
+}
