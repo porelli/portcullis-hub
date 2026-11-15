@@ -205,8 +205,9 @@ jobs:
             type=sha,prefix=sha-,format=short,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=edge,branch=main
 
-      # The agent's version (servers.Compatible): a release tag's semver,
-      # else 0.0.0-edge (every edge build is the same, compatible minor).
+      # The build's version, the Hub's and the agent's alike
+      # (servers.Compatible): a release tag's semver, else 0.0.0-edge
+      # (every edge build is the same, compatible minor).
       - name: Version
         id: version
         env:

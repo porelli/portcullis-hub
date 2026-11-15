@@ -3,6 +3,9 @@
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
 ARG TARGETOS
 ARG TARGETARCH
+# VERSION: semver (a release tag's, else 0.0.0-edge), the same as the
+# agent's: servers.Compatible pairs them.
+ARG VERSION=0.0.0-dev
 WORKDIR /src
 # Module download sits in its own layer keyed on go.mod/go.sum, so source
 # edits don't invalidate it. The cache mounts keep the module and build caches
@@ -14,7 +17,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /hub ./cmd/hub
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X github.com/portcullis/hub/internal/version.Version=${VERSION}" -o /hub ./cmd/hub
 
 # alpine:3.24
 FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf

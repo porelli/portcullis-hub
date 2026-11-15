@@ -269,10 +269,13 @@ type Hub struct {
 	// right after the definition is created, before the assignment is
 	// validated (doctorfix.go).
 	testHookManageDefined func()
-	// rt is the runtime (nil: unit tests without one).
-	rt    runtime.Instances
-	idp   IdP
-	attrs AttrStore // LLDAP user attributes (setting claims); nil: none
+	// rt is the primary's runtime (nil: unit tests without one); srv the
+	// worker servers' runtimes and which instance runs where (rtfor.go).
+	rt      runtime.Instances
+	srv     *serverRegistry
+	srvOnce sync.Once
+	idp     IdP
+	attrs   AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex
@@ -741,6 +744,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		return nil, err
 	}
 	h.st = st
+	h.noteServersLocked()
 	// Shared folders resolve from state (folders.go; P8); a stored folder
 	// this configuration refuses stops the start (P24).
 	h.folders = hubFolders{h}

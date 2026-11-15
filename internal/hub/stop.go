@@ -253,7 +253,7 @@ func groupsDetail(todo, created, all []string) string {
 // volumeSet is the names of id's project volumes (by the compose
 // project label; the Hub's secrets volume never).
 func (h *Hub) volumeSet(ctx context.Context, id string) (map[string]bool, error) {
-	vs, err := h.rt.ListVolumes(ctx, runtime.Filter{Instance: id})
+	vs, err := h.rtOf(id).ListVolumes(ctx, runtime.Filter{Instance: id})
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +299,7 @@ func (h *Hub) recordExpectedVolumes(ctx context.Context, p *Progress, t *templat
 	for _, v := range names {
 		// A volume of that name that exists already is no project volume
 		// (before lists those): someone else's, never this operation's.
-		if _, err := h.rt.InspectVolume(ctx, v); !docker.IsNotFound(err) {
+		if _, err := h.rtOf(t.ID).InspectVolume(ctx, v); !docker.IsNotFound(err) {
 			if err != nil {
 				log.Printf("instance %s: volume %s could not be inspected before the create (%v): not recorded unless the create makes it", t.ID, v, err)
 			}
@@ -377,7 +377,7 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 			if tmpl != nil {
 				err = h.rollbackUp(tmpl)
 			} else {
-				err = h.rt.DownByName(ctx, projectName(id))
+				err = h.rtOf(id).DownByName(ctx, projectName(id))
 			}
 			if err != nil {
 				return fmt.Errorf("compose down: %w", err)
@@ -629,7 +629,7 @@ func (h *Hub) undoRestart(id string, p *Progress) error {
 				err = h.rollbackUp(tmpl)
 			} else {
 				h.awaitDelivery(id)
-				err = h.rt.DownByName(context.Background(), projectName(id))
+				err = h.rtOf(id).DownByName(context.Background(), projectName(id))
 			}
 			if err != nil {
 				return fmt.Errorf("compose down: %w", err)
@@ -715,7 +715,7 @@ func (h *Hub) undoVolumes(ctx context.Context, p *Progress, id string, names []s
 		return statusErr(503, "Docker is not available: volumes %s were not removed", strings.Join(names, ", "))
 	}
 	for _, v := range names {
-		info, err := h.rt.InspectVolume(ctx, v)
+		info, err := h.rtOf(id).InspectVolume(ctx, v)
 		switch {
 		case docker.IsNotFound(err):
 			continue
@@ -725,7 +725,7 @@ func (h *Hub) undoVolumes(ctx context.Context, p *Progress, id string, names []s
 			p.Warn(fmt.Sprintf("volume %s was kept: it isn't a volume of %s", v, projectName(id)))
 			continue
 		}
-		if err := h.rt.RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {
+		if err := h.rtOf(id).RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {
 			return fmt.Errorf("removing volume %s: %w", v, err)
 		}
 	}

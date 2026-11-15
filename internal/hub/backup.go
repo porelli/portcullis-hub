@@ -269,7 +269,7 @@ func (h *Hub) applyConfigLocked(id string, c instanceConfig) {
 // project, by volume key (compose labels them; external volumes aren't
 // the instance's and carry no label).
 func (h *Hub) projectVolumes(ctx context.Context, id string) (map[string]docker.Volume, error) {
-	vs, err := h.rt.ListVolumes(ctx, runtime.Filter{Instance: id})
+	vs, err := h.rtOf(id).ListVolumes(ctx, runtime.Filter{Instance: id})
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +298,7 @@ func (h *Hub) projectVolumes(ctx context.Context, id string) (map[string]docker.
 
 // projectRunning reports whether any container of id's project runs.
 func (h *Hub) projectRunning(ctx context.Context, id string) (bool, error) {
-	cs, err := h.rt.List(ctx, runtime.Filter{Instance: id})
+	cs, err := h.rtOf(id).List(ctx, runtime.Filter{Instance: id})
 	if err != nil {
 		return false, err
 	}
@@ -444,7 +444,7 @@ func (h *Hub) backupCtx(ctx context.Context, id, reason string, keepStopped bool
 		p.AddStep(StepStart, "Starting the app again")
 	}
 	if len(vols) > 0 {
-		if err := h.rt.EnsureImage(ctx, HelperImage); err != nil {
+		if err := h.rtOf(id).EnsureImage(ctx, HelperImage); err != nil {
 			return nil, statusErr(503, "helper image %s: %v", HelperImage, err)
 		}
 	}
@@ -595,7 +595,7 @@ func (h *Hub) stopProject(tg *target) error {
 			return nil
 		}
 	}
-	if err := h.rt.DownByName(context.Background(), projectName(tg.id)); err != nil {
+	if err := h.rtOf(tg.id).DownByName(context.Background(), projectName(tg.id)); err != nil {
 		if downErr != nil {
 			return downErr
 		}
@@ -788,7 +788,7 @@ func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string, count fun
 	err := func() error {
 		// A read-only helper mounting the volume at helperMount (the
 		// runtime removes it when the stream is closed).
-		rc, err := h.rt.VolumeOut(ctx, id, name, helperMount)
+		rc, err := h.rtOf(id).VolumeOut(ctx, id, name, helperMount)
 		if err != nil {
 			return err
 		}
@@ -1237,13 +1237,13 @@ type fillOpts struct {
 // upload at once.
 func (h *Hub) fillVolumeWith(ctx context.Context, id string, v docker.Volume, existed bool, tarPath string, o fillOpts) (created bool, err error) {
 	if existed {
-		if err := h.rt.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
+		if err := h.rtOf(id).RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
 			return false, fmt.Errorf("emptying volume %s: %w", v.Name, err)
 		}
 	} else {
 		// Creating an existing volume is a no-op for Docker: it must
 		// really be new (nobody else's appeared meanwhile).
-		if old, err := h.rt.InspectVolume(ctx, v.Name); err == nil {
+		if old, err := h.rtOf(id).InspectVolume(ctx, v.Name); err == nil {
 			return false, fmt.Errorf("volume %s appeared meanwhile (labels %v): not touching it", old.Name, old.Labels)
 		} else if !docker.IsNotFound(err) {
 			return false, fmt.Errorf("volume %s: %w", v.Name, err)
@@ -1258,13 +1258,13 @@ func (h *Hub) fillVolumeWith(ctx context.Context, id string, v docker.Volume, ex
 		}
 		v.Options = owner
 	}
-	if err := h.rt.CreateVolume(ctx, v); err != nil {
+	if err := h.rtOf(id).CreateVolume(ctx, v); err != nil {
 		return false, fmt.Errorf("creating volume %s: %w", v.Name, err)
 	}
 	if o.created != nil && !existed {
 		o.created(v.Name)
 	}
-	got, err := h.rt.InspectVolume(ctx, v.Name)
+	got, err := h.rtOf(id).InspectVolume(ctx, v.Name)
 	if err != nil {
 		return false, fmt.Errorf("volume %s after creating it: %w", v.Name, err)
 	}
@@ -1282,7 +1282,7 @@ func (h *Hub) fillVolumeWith(ctx context.Context, id string, v docker.Volume, ex
 	// A writable helper mounting the volume at helperMount; the runtime
 	// extracts the canonical archive its own way (Podman: relative to
 	// the mount).
-	return true, h.rt.VolumeIn(ctx, id, v.Name, helperMount, &ctxReader{ctx: ctx, r: f, count: o.count})
+	return true, h.rtOf(id).VolumeIn(ctx, id, v.Name, helperMount, &ctxReader{ctx: ctx, r: f, count: o.count})
 }
 
 // freeMargin is the free space a backup or restore leaves on the data
@@ -1377,18 +1377,20 @@ func (h *Hub) SweepBackupLeftovers() {
 // sweepHelperContainers removes the helper containers (LabelHelper);
 // before > 0: only those created before it (Unix seconds).
 func (h *Hub) sweepHelperContainers(before int64) {
-	cs, err := h.rt.List(context.Background(), runtime.Filter{Helper: true})
-	if err != nil {
-		log.Printf("backups: cannot list leftover helper containers: %v", err)
-	}
-	for _, c := range cs {
-		if before > 0 && c.Created >= before {
-			continue
+	for server, rt := range h.runtimes() {
+		cs, err := rt.List(context.Background(), runtime.Filter{Helper: true})
+		if err != nil {
+			log.Printf("backups: %s: cannot list leftover helper containers: %v", server, err)
 		}
-		if err := h.rt.RemoveHelper(context.Background(), c.ID); err != nil {
-			log.Printf("backups: removing leftover helper container %s: %v", c.Name, err)
-		} else {
-			log.Printf("backups: removed leftover helper container %s", c.Name)
+		for _, c := range cs {
+			if before > 0 && c.Created >= before {
+				continue
+			}
+			if err := rt.RemoveHelper(context.Background(), c.ID); err != nil {
+				log.Printf("backups: %s: removing leftover helper container %s: %v", server, c.Name, err)
+			} else {
+				log.Printf("backups: %s: removed leftover helper container %s", server, c.Name)
+			}
 		}
 	}
 }

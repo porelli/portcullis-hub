@@ -215,6 +215,19 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		rep.Error = err.Error()
 		return h.storeDrift(rep)
 	}
+	// Every ready worker's units too (an unreachable one is skipped: its
+	// instances' state is the server's, not drift).
+	for id, rt := range h.runtimes() {
+		if id == "primary" {
+			continue
+		}
+		wcs, werr := rt.List(ctx, runtime.Filter{All: true})
+		if werr != nil {
+			log.Printf("reconcile: server %s: %v", id, werr)
+			continue
+		}
+		cs = append(cs, wcs...)
+	}
 	// Build maps of jobs and services per instance ID (contract §3 "One-off jobs"):
 	// a done job (exited 0) counts as running; failed/missing jobs are drift.
 	h.mu.RLock()
@@ -307,7 +320,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if !isRunning && c.State != "created" {
 				// The list has no exit code: inspected.
 				st = docker.State{Status: "dead"} // can't tell: failed
-				if s, ierr := h.rt.State(ctx, c.ID); ierr == nil {
+				if s, ierr := h.rtOf(c.Instance).State(ctx, c.ID); ierr == nil {
 					st = s
 				}
 			}
@@ -693,7 +706,7 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if h.IsEnabled(id) {
 			return statusErr(400, "%s is enabled — use disable instead", id)
 		}
-		err = h.rt.DownByName(context.Background(), projectName(id))
+		err = h.rtOf(id).DownByName(context.Background(), projectName(id))
 		if err != nil {
 			err = statusErr500Wrap("compose down failed", err)
 		}

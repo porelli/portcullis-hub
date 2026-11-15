@@ -58,7 +58,7 @@ func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template, ran map[str
 		h.finishDeliveryOp(t.ID, OpReload, err)
 		return u
 	}
-	cs, err := h.rt.List(ctx, runtime.Filter{Instance: t.ID, Service: r.Service})
+	cs, err := h.rtOf(t.ID).List(ctx, runtime.Filter{Instance: t.ID, Service: r.Service})
 	if err != nil {
 		return fail(fmt.Errorf("reload: listing the %s containers: %w", r.Service, err))
 	}
@@ -74,7 +74,7 @@ func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template, ran map[str
 	}
 	degraded := false
 	for _, id := range ids {
-		err := h.rt.Signal(ctx, id, r.Signal)
+		err := h.rtOf(t.ID).Signal(ctx, id, r.Signal)
 		if errors.Is(err, kube.ErrReloadDegraded) {
 			// Kubernetes, no kill in the image: the pod was restarted
 			// through its Deployment (doctor reload_degraded).
@@ -95,7 +95,7 @@ func (h *Hub) reloadUnit(ctx context.Context, t *templates.Template, ran map[str
 		return fail(fmt.Errorf("reload: %w", err))
 	}
 	for _, id := range ids {
-		st, err := h.rt.State(ctx, id)
+		st, err := h.rtOf(t.ID).State(ctx, id)
 		switch {
 		case err != nil:
 			return fail(fmt.Errorf("reload: checking %s after the %s signal: %w", r.Service, r.Signal, err))

@@ -307,6 +307,10 @@ func errStatus(err error, def int) int {
 	case errors.As(err, &busy):
 		return http.StatusConflict
 	}
+	var hs interface{ HTTPStatus() int }
+	if errors.As(err, &hs) {
+		return hs.HTTPStatus() // a worker's agent or the path to it
+	}
 	return def
 }
 

@@ -247,11 +247,12 @@ type appFile struct {
 	mode os.FileMode
 }
 
-// readAppFileTar: exactly <name>.json and optionally <name>.secrets.json,
+// readAppFileTar: exactly <name>.json or <name>.tsv (the data file's
+// formats) and optionally <name>.secrets.json,
 // regular files, ≤ MaxJSON each.
 func readAppFileTar(r io.Reader, name string) ([]appFile, error) {
 	tr := tar.NewReader(io.LimitReader(r, 4*agentapi.MaxJSON))
-	modes := map[string]os.FileMode{name + ".json": 0o640, name + ".secrets.json": 0o600}
+	modes := map[string]os.FileMode{name + ".json": 0o640, name + ".tsv": 0o640, name + ".secrets.json": 0o600}
 	var out []appFile
 	seen := map[string]bool{}
 	for {
@@ -273,8 +274,8 @@ func readAppFileTar(r io.Reader, name string) ([]appFile, error) {
 		}
 		out = append(out, appFile{name: hdr.Name, data: b, mode: mode})
 	}
-	if !seen[name+".json"] {
-		return nil, fmt.Errorf("%s.json is required", name)
+	if seen[name+".json"] == seen[name+".tsv"] {
+		return nil, fmt.Errorf("exactly one of %s.json or %s.tsv is required", name, name)
 	}
 	return out, nil
 }

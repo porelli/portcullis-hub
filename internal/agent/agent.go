@@ -13,12 +13,12 @@ import (
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/servers"
+	"github.com/portcullis/hub/internal/version"
 )
 
-// Version is the agent's version (semver; set at build time with
-// -ldflags "-X github.com/portcullis/hub/internal/agent.Version=…"). The
+// Version is the agent's version: the build's (internal/version). The
 // Hub accepts it when servers.Compatible says so.
-var Version = "0.1.0-dev"
+var Version = version.Version
 
 // Config is portcullis-agent run's configuration (env, contract §17.7).
 type Config struct {

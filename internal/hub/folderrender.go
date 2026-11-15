@@ -779,12 +779,12 @@ func (h *Hub) folderTakeDown(ctx context.Context, live *templates.Template, p *f
 // project name, else SIGKILL to every container of the project (an
 // error then: a restart policy may bring them back).
 func (h *Hub) forceDown(ctx context.Context, live *templates.Template) error {
-	err := h.rt.Down(ctx, h.runtimeProject(live))
+	err := h.rtOf(live.ID).Down(ctx, h.runtimeProject(live))
 	if err == nil {
 		return nil
 	}
 	log.Printf("shared folders: %s: compose down failed (%v): down by project name", live.ID, err)
-	if err2 := h.rt.DownByName(ctx, projectName(live.ID)); err2 == nil {
+	if err2 := h.rtOf(live.ID).DownByName(ctx, projectName(live.ID)); err2 == nil {
 		return nil
 	} else {
 		err = errors.Join(err, err2)
@@ -792,12 +792,12 @@ func (h *Hub) forceDown(ctx context.Context, live *templates.Template) error {
 	if h.noEngine() {
 		return err
 	}
-	cs, lerr := h.rt.List(ctx, runtime.Filter{Instance: live.ID})
+	cs, lerr := h.rtOf(live.ID).List(ctx, runtime.Filter{Instance: live.ID})
 	if lerr != nil {
 		return errors.Join(err, lerr)
 	}
 	for _, c := range cs {
-		if kerr := h.rt.Signal(ctx, c.ID, "KILL"); kerr != nil {
+		if kerr := h.rtOf(live.ID).Signal(ctx, c.ID, "KILL"); kerr != nil {
 			err = errors.Join(err, kerr)
 		}
 	}

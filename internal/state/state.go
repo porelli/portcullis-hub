@@ -113,6 +113,9 @@ type Instance struct {
 	// restore (InstanceRestoring): a rollback puts it back, so it counts
 	// as a use of its template until the restore ends.
 	PreRestorePick string `json:"pre_restore_sign_in_template,omitempty" yaml:"pre_restore_sign_in_template,omitempty"`
+	// Server is the worker server the instance runs on ("" = the
+	// primary; contract §11, §17).
+	Server string `json:"server,omitempty" yaml:"server,omitempty"`
 	// Label is the instance's display label (§11.9; "" = never set: the
 	// manifest's name for a default instance, the id otherwise). Display
 	// only: nothing keys on it.

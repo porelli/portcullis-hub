@@ -257,7 +257,7 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	if perr != nil {
 		return perr
 	}
-	createErr := h.rt.Create(opCtx, up)
+	createErr := h.rtOf(live.ID).Create(opCtx, up)
 	if volsBefore != nil {
 		h.recordCreatedVolumes(ctx, p.p, live.ID, volsBefore)
 	}
@@ -307,11 +307,11 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		} else {
 			close(watched)
 		}
-		upErr = h.rt.Up(opCtx, up, nil)
+		upErr = h.rtOf(live.ID).Up(opCtx, up, nil)
 		stopWatch()
 		<-watched
 	} else {
-		upErr = h.rt.Up(opCtx, up, nil)
+		upErr = h.rtOf(live.ID).Up(opCtx, up, nil)
 	}
 	if err := upErr; err != nil {
 		if len(probes) > 0 {
@@ -448,7 +448,7 @@ func (h *Hub) composeDown(t *templates.Template) error {
 		return nil
 	}
 	h.awaitDelivery(t.ID)
-	return h.rt.Down(context.Background(), h.runtimeProject(t))
+	return h.rtOf(t.ID).Down(context.Background(), h.runtimeProject(t))
 }
 
 // awaitDelivery waits up to lifecycleDeliverWait for instance id's
@@ -473,8 +473,8 @@ func (h *Hub) awaitDelivery(id string) {
 // rollbackUp removes what a failed compose up left behind (containers,
 // network; volumes are kept), by project name if the files don't work.
 func (h *Hub) rollbackUp(t *templates.Template) error {
-	err := h.rt.Down(context.Background(), h.runtimeProject(t))
-	if err != nil && h.rt.DownByName(context.Background(), projectName(t.ID)) == nil {
+	err := h.rtOf(t.ID).Down(context.Background(), h.runtimeProject(t))
+	if err != nil && h.rtOf(t.ID).DownByName(context.Background(), projectName(t.ID)) == nil {
 		return nil
 	}
 	return err
@@ -897,7 +897,7 @@ func (h *Hub) disableSteps(ctx context.Context, p *Progress, id string, tmpl *te
 		h.awaitDelivery(id) // composeDown waits otherwise (N4)
 	}
 	if tmpl == nil || downErr != nil {
-		if err := h.rt.DownByName(context.Background(), projectName(id)); err != nil {
+		if err := h.rtOf(id).DownByName(context.Background(), projectName(id)); err != nil {
 			if downErr == nil {
 				downErr = err
 			}

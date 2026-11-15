@@ -201,7 +201,7 @@ func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Templa
 	var wg sync.WaitGroup
 	for _, ip := range imgs {
 		wg.Go(func() {
-			err := h.rt.Pull(ctx, ip.ref, func(done, total int64, sized bool) {
+			err := h.rtOf(t.ID).Pull(ctx, ip.ref, func(done, total int64, sized bool) {
 				mu.Lock()
 				defer mu.Unlock()
 				ip.state, ip.done, ip.total, ip.sized = "pulling", done, total, sized
@@ -287,7 +287,7 @@ func (h *Hub) countContainers(ctx context.Context, t *templates.Template, servic
 		if services != nil && !services[c.Service] {
 			continue
 		}
-		st, err := h.rt.State(ctx, c.ID)
+		st, err := h.rtOf(t.ID).State(ctx, c.ID)
 		if err != nil {
 			return 0, 0, nil, nil, err
 		}

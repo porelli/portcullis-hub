@@ -684,7 +684,7 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 		if ctx.Err() != nil || len(out) >= maxRuntimeContainers {
 			break
 		}
-		cs, err := h.rt.List(ctx, runtime.Filter{Instance: id})
+		cs, err := h.rtOf(id).List(ctx, runtime.Filter{Instance: id})
 		if err != nil {
 			log.Printf("doctor: %s: listing containers: %v", id, err)
 			continue
@@ -700,7 +700,7 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 				continue
 			}
 			e := runtimeEntry{Instance: id, Service: c.Service, Container: c.Name, At: time.Now().UTC()}
-			ci, err := h.rt.Inspect(ctx, c.ID)
+			ci, err := h.rtOf(id).Inspect(ctx, c.ID)
 			if err == nil {
 				w := want[c.Service]
 				e.Memory, e.PidsLimit, e.WantMemory, e.WantPids = ci.Memory, ci.PidsLimit, w[0], w[1]
@@ -748,7 +748,7 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) (gids []int, read, t
 	pending := slices.Clone(h.gidExecs[id])
 	h.scanCacheMu.Unlock()
 	for _, x := range pending {
-		if running, err := h.rt.ExecRunning(ctx, x); err == nil && running {
+		if running, err := h.rtOf(id).ExecRunning(ctx, x); err == nil && running {
 			return nil, 0, 0, errors.New("a previous group check (timed out) is still running in it")
 		}
 	}
@@ -756,7 +756,7 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) (gids []int, read, t
 	delete(h.gidExecs, id)
 	h.scanCacheMu.Unlock()
 	exec := func(cmd []string) (*docker.ExecResult, error) {
-		res, err := h.rt.Exec(ctx, id, runtime.ExecInput{Cmd: cmd, Timeout: gidExecTimeout, NoStdin: true})
+		res, err := h.rtOf(id).Exec(ctx, id, runtime.ExecInput{Cmd: cmd, Timeout: gidExecTimeout, NoStdin: true})
 		if err == nil && res.TimedOut && res.ExecID != "" {
 			h.scanCacheMu.Lock()
 			if h.gidExecs == nil {

@@ -440,7 +440,7 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 			return fmt.Errorf("listing the volumes: %w", err)
 		}
 		for _, k := range sortedVolumeKeys(vols) {
-			if err := h.rt.RemoveVolume(ctx, vols[k].Name); err != nil && !docker.IsNotFound(err) {
+			if err := h.rtOf(id).RemoveVolume(ctx, vols[k].Name); err != nil && !docker.IsNotFound(err) {
 				return fmt.Errorf("removing volume %s: %w", vols[k].Name, err)
 			}
 		}

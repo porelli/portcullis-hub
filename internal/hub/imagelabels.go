@@ -142,7 +142,7 @@ func (h *Hub) imageLabelProblem(t *templates.Template) string {
 	if err != nil {
 		return "the expected labels can't be computed: " + err.Error()
 	}
-	cs, err := h.rt.List(context.Background(), runtime.Filter{Instance: t.ID})
+	cs, err := h.rtOf(t.ID).List(context.Background(), runtime.Filter{Instance: t.ID})
 	if err != nil {
 		return "the containers' labels can't be checked: " + err.Error()
 	}
@@ -157,7 +157,7 @@ func (h *Hub) imageLabelProblem(t *templates.Template) string {
 // refuseImageLabels takes the project down (volumes kept) and returns the
 // 409 for problem.
 func (h *Hub) refuseImageLabels(t *templates.Template, problem, when string) error {
-	if derr := h.rt.Down(context.Background(), h.runtimeProject(t)); derr != nil {
+	if derr := h.rtOf(t.ID).Down(context.Background(), h.runtimeProject(t)); derr != nil {
 		problem += fmt.Sprintf(" (taking the project down failed too: %v)", derr)
 	}
 	return statusErr(409, "instance %s %s: %s. Use an image without traefik.* labels (or one the template's labels fully override)", t.ID, when, problem)

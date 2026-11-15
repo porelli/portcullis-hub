@@ -363,7 +363,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	// containers survived) is someone else's: refuse. Docker first, never
 	// under mu.
 	if !h.noEngine() {
-		cs, err := h.rt.List(context.Background(), runtime.Filter{Instance: id})
+		cs, err := h.rtOf(id).List(context.Background(), runtime.Filter{Instance: id})
 		if err != nil {
 			return nil, statusErr(503, "cannot check for an existing compose project %s: %v", projectName(id), err)
 		}
