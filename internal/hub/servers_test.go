@@ -1226,9 +1226,10 @@ func TestRevokeDuringEnrolment(t *testing.T) {
 	if err := <-revokeDone; err != nil {
 		t.Fatal(err)
 	}
-	// RevokeServer returned: the op had finished before it advanced.
-	r := sf.h.LastOp(serverOpKey("nas"))
-	if r == nil || r.Running || r.OK || !strings.Contains(r.Error, "revoked") {
+	// RevokeServer returned once the op's work had ended (its record is
+	// written right after).
+	r := waitServerOp(t, sf.h, serverOpKey("nas"))
+	if r.OK || !strings.Contains(r.Error, "revoked") {
 		t.Errorf("op %+v", r)
 	}
 	sf.ca.mu.Lock()

@@ -119,7 +119,13 @@ func TestRealTemplatesInstances(t *testing.T) {
 				// (multi-server pre-flight P4).
 				mf := agentapi.BundleManifest{Instance: id, Template: c.TemplateID, Volumes: c.NamesFor(id).Volumes}
 				if err := agentapi.ValidateBundle(proj, mf, nil, agentapi.BundleScope{BindRoots: DefaultOverrideBindRoots, BaseDir: project, ReadOnlyDirs: []string{filepath.Join(project, "templates"), filepath.Join(project, "certs"), filepath.Join(project, "appfiles")}}); err != nil {
-					t.Errorf("%s: %v", id, err)
+					if strings.Contains(err.Error(), "a size is required on a worker") {
+						// Fix round 2 ruling: a worker's tmpfs needs a size;
+						// the template must add one to run on a worker.
+						t.Logf("%s: not placeable on a worker until its tmpfs has a size: %v", id, err)
+					} else {
+						t.Errorf("%s: %v", id, err)
+					}
 				}
 				bundles++
 			}

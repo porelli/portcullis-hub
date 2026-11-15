@@ -578,10 +578,11 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, sc BundleScop
 	}
 	switch m.Type {
 	case types.VolumeTypeTmpfs:
-		if m.Tmpfs != nil && (m.Tmpfs.Size < 0 || int64(m.Tmpfs.Size) > MaxTmpfsSize) {
-			return fmt.Errorf("tmpfs %s: size over %d bytes", clip(m.Target), int64(MaxTmpfsSize))
+		var n int64
+		if m.Tmpfs != nil {
+			n = int64(m.Tmpfs.Size)
 		}
-		return nil
+		return tmpfsSize(m.Target, n)
 	case types.VolumeTypeVolume:
 		if m.Source == "" {
 			return nil // anonymous
@@ -660,23 +661,49 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, sc BundleScop
 
 func under(p, root string) bool { return p == root || strings.HasPrefix(p, root+"/") }
 
+// tmpfsOptionKeys are the short-form tmpfs options a bundle may use
+// (nr_blocks / nr_inodes and anything else refused: a size could hide
+// behind them).
+var tmpfsOptionKeys = set("size", "mode", "uid", "gid", "noexec", "nosuid", "nodev", "exec", "suid", "dev", "ro", "rw")
+
 // checkTmpfsShort checks a short-form tmpfs ("/path:size=64m,mode=1777"):
-// a size option is at most MaxTmpfsSize, as the long form's (review A-L3).
+// only tmpfsOptionKeys, each at most once, and a size, at most
+// MaxTmpfsSize — the long form's rule (review A-L3).
 func checkTmpfsShort(t string) error {
 	target, opts, _ := strings.Cut(t, ":")
+	seen := map[string]bool{}
+	var size int64
 	for _, o := range strings.Split(opts, ",") {
-		k, v, _ := strings.Cut(strings.TrimSpace(o), "=")
-		if k != "size" {
+		o = strings.TrimSpace(o)
+		if o == "" {
 			continue
 		}
-		n, err := units.RAMInBytes(v)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("tmpfs %s: size %q isn't a size", clip(target), clip(v))
+		k, v, _ := strings.Cut(o, "=")
+		if !tmpfsOptionKeys[k] {
+			return fmt.Errorf("tmpfs %s: option %q is not allowed", clip(target), clip(k))
 		}
-		if n > MaxTmpfsSize {
-			return fmt.Errorf("tmpfs %s: size over %d bytes", clip(target), int64(MaxTmpfsSize))
+		if seen[k] {
+			return fmt.Errorf("tmpfs %s: option %q given twice", clip(target), clip(k))
 		}
-		return nil
+		seen[k] = true
+		if k == "size" {
+			n, err := units.RAMInBytes(v)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("tmpfs %s: size %q isn't a size", clip(target), clip(v))
+			}
+			size = n
+		}
+	}
+	return tmpfsSize(target, size)
+}
+
+// tmpfsSize: a tmpfs needs a size, at most MaxTmpfsSize.
+func tmpfsSize(target string, n int64) error {
+	switch {
+	case n <= 0:
+		return fmt.Errorf("tmpfs %s: a size is required on a worker", clip(target))
+	case n > MaxTmpfsSize:
+		return fmt.Errorf("tmpfs %s: size over %d bytes", clip(target), int64(MaxTmpfsSize))
 	}
 	return nil
 }
