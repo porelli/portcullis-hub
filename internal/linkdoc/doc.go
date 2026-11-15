@@ -70,6 +70,9 @@ type Doc struct {
 	Relays    []Relay      `json:"relays"`
 }
 
+// zeroKey is the all-zero key: never a peer's.
+const zeroKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
 // instanceRe is an instance id as the contract allows it (§11.1: segments
 // of [a-z0-9] joined by single "-", at most 64 characters).
 var instanceRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
@@ -81,7 +84,7 @@ var instanceRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 //   - version 1, written_at set (RFC 3339 UTC), subnet exactly 10.214.0.0/24;
 //   - at most 250 peers and 4096 relays;
 //   - each peer: a valid server id (never primary), a WireGuard public
-//     key, an ip inside the subnet in .10–.250, state enrolling|ready; ids,
+//     key (never all zeros), an ip inside the subnet in .10–.250, state enrolling|ready; ids,
 //     keys and ips unique;
 //   - each relay: token_sha256 64 lower-case hex digits (unique), a valid
 //     instance id, and server a ready peer.
@@ -125,7 +128,7 @@ func (d *Doc) check() error {
 		switch {
 		case servers.ValidID(p.ID) != nil:
 			return fmt.Errorf("peers[%d]: id is not a server id", i)
-		case !vpn.ValidPublicKey(p.PublicKey):
+		case !vpn.ValidPublicKey(p.PublicKey) || p.PublicKey == zeroKey:
 			return fmt.Errorf("peers[%d]: public_key is not a WireGuard key", i)
 		case !servers.TunnelIPOK(p.IP):
 			return fmt.Errorf("peers[%d]: ip is not a worker address of %s (.%d–.%d)", i, Subnet, servers.FirstHost, servers.LastHost)
