@@ -43,10 +43,12 @@ type Enrol struct {
 }
 
 // RevokeSteps records which revocation steps are done (spec §6).
+// Serials are the certificate serials still to revoke: the pinned one at
+// the revocation's start, and any signed while it is pending (an
+// enrolment or renewal that raced it); step 2 is done when it is empty.
 type RevokeSteps struct {
 	At         time.Time `json:"at" yaml:"at"`
-	Serial     string    `json:"serial,omitempty" yaml:"serial,omitempty"`
-	CertDone   bool      `json:"cert_done,omitempty" yaml:"cert_done,omitempty"`
+	Serials    []string  `json:"serials,omitempty" yaml:"serials,omitempty"`
 	RelaysDone bool      `json:"relays_done,omitempty" yaml:"relays_done,omitempty"`
 	Rotated    bool      `json:"rotated,omitempty" yaml:"rotated,omitempty"`
 	// Remove: a removal (the entry goes once every step is done).

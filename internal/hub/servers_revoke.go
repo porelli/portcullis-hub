@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -48,7 +50,7 @@ func (h *Hub) RevokeServer(ctx context.Context, actor directory.Actor, id string
 	}
 	h.beginRevokeLocked(id, false)
 	h.mu.Unlock()
-	h.dropEnrol(id)
+	h.stopEnrol(id)
 	h.advanceRevoke(ctx, id)
 	return nil
 }
@@ -86,7 +88,7 @@ func (h *Hub) RemoveServer(ctx context.Context, actor directory.Actor, id string
 	h.mu.Lock()
 	h.beginRevokeLocked(id, true)
 	h.mu.Unlock()
-	h.dropEnrol(id)
+	h.stopEnrol(id)
 	h.advanceRevoke(ctx, id)
 	return nil
 }
@@ -113,9 +115,10 @@ func (h *Hub) beginRevokeLocked(id string, remove bool) {
 	}
 	now := h.now().UTC()
 	if s.Revoke == nil {
-		s.Revoke = &state.RevokeSteps{At: now, Serial: s.CertSerial}
-	} else if s.CertSerial != "" && s.Revoke.Serial == "" {
-		s.Revoke.Serial = s.CertSerial
+		s.Revoke = &state.RevokeSteps{At: now}
+	}
+	if s.CertSerial != "" && !slices.Contains(s.Revoke.Serials, s.CertSerial) {
+		s.Revoke.Serials = append(s.Revoke.Serials, s.CertSerial)
 	}
 	s.Revoke.Remove = s.Revoke.Remove || remove
 	s.State, s.Enrol = ServerRevoked, nil
@@ -133,8 +136,13 @@ func (h *Hub) beginRevokeLocked(id string, remove bool) {
 	h.stopWatch(id)
 }
 
-// advanceRevoke runs the revocation steps still owed (none = nothing).
+// advanceRevoke runs the revocation steps still owed (none = nothing),
+// one pass per server at a time.
 func (h *Hub) advanceRevoke(ctx context.Context, id string) {
+	m, _ := h.revokeLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 	h.mu.Lock()
 	s, ok := h.st.Servers[id]
 	if !ok || s.Revoke == nil {
@@ -148,28 +156,22 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 		return
 	}
 	rv := *s.Revoke
+	serials := slices.Clone(rv.Serials)
 	placed := h.placedLocked(id)
+	// 3. unpin (the serials stay listed for step 2).
+	s.CertSerial, s.SPKI = "", ""
+	h.st.Servers[id] = s
 	h.mu.Unlock()
 
-	// 2. the certificate.
-	if !rv.CertDone {
-		if rv.Serial == "" {
-			rv.CertDone = true
-		} else if signer := h.nodeSigner(); signer == nil {
-			log.Printf("servers: revoking %s: enroll isn't configured (retried at the next tick)", id)
-		} else if err := signer.RevokeNode(ctx, rv.Serial); err != nil {
+	// 2. every serial owed.
+	var revoked []string
+	for _, serial := range serials {
+		if err := h.revokeSerial(ctx, serial); err != nil {
 			log.Printf("servers: revoking %s's certificate: %v (retried at the next tick)", id, err)
-		} else {
-			rv.CertDone = true
+			continue
 		}
+		revoked = append(revoked, serial)
 	}
-	// 3. unpin (Revoke keeps the serial for step 2).
-	h.mu.Lock()
-	if s, ok := h.st.Servers[id]; ok {
-		s.CertSerial, s.SPKI = "", ""
-		h.st.Servers[id] = s
-	}
-	h.mu.Unlock()
 	// 4. the relays (their primary projects).
 	if !rv.RelaysDone && h.rt != nil {
 		var errs []error
@@ -206,10 +208,13 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 	if !ok || s.Revoke == nil {
 		return
 	}
-	rv.Remove = rv.Remove || s.Revoke.Remove
-	s.Revoke = &rv
+	// Serials appended meanwhile stay owed.
+	cur := *s.Revoke
+	cur.Serials = slices.DeleteFunc(slices.Clone(cur.Serials), func(x string) bool { return slices.Contains(revoked, x) })
+	cur.RelaysDone, cur.Rotated = cur.RelaysDone || rv.RelaysDone, cur.Rotated || rv.Rotated
+	s.Revoke = &cur
 	h.st.Servers[id] = s
-	if rv.Remove && rv.CertDone && rv.RelaysDone && rv.Rotated && len(h.placedLocked(id)) == 0 {
+	if cur.Remove && len(cur.Serials) == 0 && cur.RelaysDone && cur.Rotated && len(h.placedLocked(id)) == 0 {
 		if h.st.Quarantined == nil {
 			h.st.Quarantined = map[string]time.Time{}
 		}
@@ -228,9 +233,48 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 	h.saveLocked()
 }
 
+// revokeSerial revokes one node certificate serial through enroll.
+func (h *Hub) revokeSerial(ctx context.Context, serial string) error {
+	signer := h.nodeSigner()
+	if signer == nil {
+		return errors.New("enroll isn't configured")
+	}
+	return signer.RevokeNode(ctx, serial)
+}
+
+// discardSerial: a certificate signed for server id that must never be
+// used (the server was revoked or left the state it was signed for
+// meanwhile) is revoked at once; when that fails it stays owed in the
+// server's revocation (retried each tick).
+func (h *Hub) discardSerial(ctx context.Context, id, serial string) {
+	// Even when the op that signed it was cancelled (a revocation).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := h.revokeSerial(ctx, serial); err == nil {
+		return
+	} else {
+		log.Printf("servers: revoking %s's unused certificate: %v (retried at the next tick)", id, err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s, ok := h.st.Servers[id]; ok {
+		if s.Revoke == nil {
+			s.Revoke = &state.RevokeSteps{At: h.now().UTC()}
+			s.State = ServerRevoked
+		}
+		if !slices.Contains(s.Revoke.Serials, serial) {
+			s.Revoke.Serials = append(s.Revoke.Serials, serial)
+		}
+		h.st.Servers[id] = s
+		h.saveLocked()
+	}
+}
+
 // rotateInstanceSecrets gives instance id new Keycloak client secrets (a
 // new random value in its .env, registered with Keycloak) and a new relay
-// token: nothing the revoked worker held stays valid.
+// token: nothing the revoked worker held stays valid. An ai_client is
+// deleted (every session of it, offline ones included, goes with it) and
+// created again with its new secret. Any failure: retried next tick.
 func (h *Hub) rotateInstanceSecrets(ctx context.Context, id string) error {
 	h.mu.Lock()
 	v := h.findLocked(id)
@@ -240,9 +284,10 @@ func (h *Hub) rotateInstanceSecrets(ctx context.Context, id string) error {
 	}
 	tmpl := *v
 	env := readEnvRaw(h.envPath(id))
-	changed := false
+	var specs []keycloak.ClientSpec
+	var aiClients []string
 	for _, c := range tmpl.Manifest.Clients {
-		if c.SecretEnv == "" || c.AIClient {
+		if c.SecretEnv == "" {
 			continue
 		}
 		sec, err := randomSecret()
@@ -250,17 +295,17 @@ func (h *Hub) rotateInstanceSecrets(ctx context.Context, id string) error {
 			h.mu.Unlock()
 			return err
 		}
-		env[c.SecretEnv], changed = sec, true
+		env[c.SecretEnv] = sec
 	}
-	if changed {
-		if err := writeEnvMap(h.envPath(id), env); err != nil {
-			h.mu.Unlock()
-			return err
-		}
+	if err := writeEnvMap(h.envPath(id), env); err != nil {
+		h.mu.Unlock()
+		return err
 	}
-	var specs []keycloak.ClientSpec
 	for _, c := range tmpl.Manifest.Clients {
-		if c.SecretEnv != "" && !c.AIClient {
+		switch {
+		case c.AIClient:
+			aiClients = append(aiClients, c.ClientID)
+		case c.SecretEnv != "":
 			specs = append(specs, h.clientSpec(&tmpl, c))
 		}
 	}
@@ -270,6 +315,25 @@ func (h *Hub) rotateInstanceSecrets(ctx context.Context, id string) error {
 			if _, err := h.idp.RegisterClient(ctx, sp); err != nil {
 				return err
 			}
+		}
+	} else if len(specs) > 0 {
+		return errors.New("Keycloak isn't configured")
+	}
+	if len(aiClients) > 0 {
+		kc := h.aiKeycloak()
+		if kc == nil {
+			return errors.New("Keycloak: the AI client calls are not configured")
+		}
+		for _, cid := range aiClients {
+			h.aiKCMu.Lock()
+			err := kc.DeleteAIClient(ctx, cid, tmpl.ID)
+			h.aiKCMu.Unlock()
+			if err != nil {
+				return fmt.Errorf("Keycloak: deleting AI client %s: %w", cid, err)
+			}
+		}
+		if _, err := h.ensureInstanceAIClient(ctx, &tmpl); err != nil {
+			return err
 		}
 	}
 	return h.newRelayToken(id)

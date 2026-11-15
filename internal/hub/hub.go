@@ -293,8 +293,10 @@ type Hub struct {
 	ctlSerial string
 	nodeMu    sync.Mutex
 	srvT      serverTimings
-	idp       IdP
-	attrs     AttrStore // LLDAP user attributes (setting claims); nil: none
+	// revokeLocks: per server, the *sync.Mutex advanceRevoke holds.
+	revokeLocks sync.Map
+	idp         IdP
+	attrs       AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

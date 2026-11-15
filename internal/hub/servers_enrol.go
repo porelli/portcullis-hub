@@ -18,6 +18,7 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/servers"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/version"
 )
 
@@ -30,6 +31,11 @@ import (
 type enrolRun struct {
 	secret []byte
 	actor  directory.Actor
+	// cancel ends the op's work (a revocation); done closes once the op
+	// has finished (its own undo included). Both set by runEnrol.
+	cancel  context.CancelFunc
+	done    chan struct{}
+	revoked bool
 }
 
 func enrolPlan() []Step {
@@ -44,6 +50,26 @@ func (h *Hub) enrolOf(id string) *enrolRun {
 	h.srvMu.Lock()
 	defer h.srvMu.Unlock()
 	return h.enrols[id]
+}
+
+// stopEnrol ends server id's running enrolment (a revocation or a
+// removal took it over) and waits until the op has finished.
+func (h *Hub) stopEnrol(id string) {
+	h.srvMu.Lock()
+	er := h.enrols[id]
+	var done chan struct{}
+	if er != nil && er.cancel != nil {
+		er.revoked = true
+		er.cancel()
+		done = er.done
+	}
+	h.srvMu.Unlock()
+	if er != nil && done == nil {
+		h.dropEnrol(id) // its op never started
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 func (h *Hub) dropEnrol(id string) {
@@ -71,12 +97,28 @@ func refused(format string, args ...any) error {
 // the handshake on, the server is revoked (§17.6).
 func (h *Hub) runEnrol(ctx context.Context, id string) error {
 	p := progressFrom(ctx)
-	er := h.enrolOf(id)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	h.srvMu.Lock()
+	er := h.enrols[id]
+	if er != nil {
+		er.cancel, er.done = cancel, make(chan struct{})
+		defer close(er.done) // last: after every undo below
+	}
+	h.srvMu.Unlock()
 	defer h.dropEnrol(id)
 	if er == nil {
 		return statusErr(409, "no enrolment of %s is in progress", id)
 	}
 	actor := er.actor
+	revokedErr := func() error {
+		h.srvMu.Lock()
+		defer h.srvMu.Unlock()
+		if er.revoked {
+			return statusErr(409, "server %s was revoked during its enrolment", id)
+		}
+		return nil
+	}
 
 	p.Start(StepJoin)
 	if err := h.waitJoin(ctx, id); err != nil {
@@ -87,6 +129,9 @@ func (h *Hub) runEnrol(ctx context.Context, id string) error {
 			h.forgetServerLocked(id)
 		}
 		h.mu.Unlock()
+		if rerr := revokedErr(); rerr != nil {
+			return rerr
+		}
 		if ctx.Err() != nil {
 			p.Undone(StepJoin)
 			return ErrStopped
@@ -110,6 +155,11 @@ func (h *Hub) runEnrol(ctx context.Context, id string) error {
 	h.mu.Unlock()
 
 	fail := func(step string, err error) error {
+		if rerr := revokedErr(); rerr != nil {
+			// The revocation runs its steps itself.
+			p.Fail(step, rerr)
+			return rerr
+		}
 		h.revokeEnrolling(id)
 		if ctx.Err() != nil {
 			return ErrStopped
@@ -140,6 +190,10 @@ func (h *Hub) runEnrol(ctx context.Context, id string) error {
 	kind := runtime.Kind(info.Runtime)
 	h.mu.Lock()
 	s = h.st.Servers[id]
+	if !enrollingOK(s) {
+		h.mu.Unlock()
+		return fail(StepVerify, statusErr(409, "server %s was revoked during its enrolment", id))
+	}
 	s.State, s.Enrol = ServerReady, nil
 	s.LastContact, s.AgentVersion = h.now().UTC(), info.AgentVersion
 	h.st.Servers[id] = s
@@ -280,7 +334,7 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 	if err := servers.ValidWGKey(csr.WGPublicKey); err != nil {
 		return refused("the worker's WireGuard key: %v", err)
 	}
-	leaf, nc, err := h.signWorker(ctx, id, csr.CSR)
+	leaf, nc, err := h.signWorker(ctx, id, csr.CSR, enrollingOK)
 	if err != nil {
 		return err
 	}
@@ -291,7 +345,9 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 		return err
 	}
 	// Pinned from here on: a revocation revokes this certificate.
-	h.pinServer(id, leaf, nc.Serial)
+	if err := h.pinServer(ctx, id, leaf, nc.Serial, enrollingOK); err != nil {
+		return err
+	}
 	np, err := h.networkParams()
 	if err != nil {
 		return err
@@ -386,7 +442,10 @@ func (h *Hub) waitHandshake(ctx context.Context, id string, since time.Time, d t
 // signWorker has enroll sign a worker CSR (node-worker, CN the node
 // name) and checks the answer: one certificate naming exactly the node
 // name, issued by the pinned pki_node CA.
-func (h *Hub) signWorker(ctx context.Context, id, csrPEM string) (*x509.Certificate, *NodeCert, error) {
+// ok judges the server's state once the certificate is signed: false
+// (revoked meanwhile, or no longer in the state it was signed for)
+// revokes the fresh serial at once.
+func (h *Hub) signWorker(ctx context.Context, id, csrPEM string, ok func(state.Server) bool) (*x509.Certificate, *NodeCert, error) {
 	signer := h.nodeSigner()
 	if signer == nil {
 		return nil, nil, statusErr(503, "enroll isn't configured: node certificates can't be signed")
@@ -411,19 +470,40 @@ func (h *Hub) signWorker(ctx context.Context, id, csrPEM string) (*x509.Certific
 	if !agentrt.SameSerial(leaf.SerialNumber, nc.Serial) {
 		return nil, nil, statusErr(502, "enroll's serial isn't the certificate's")
 	}
+	h.mu.RLock()
+	s, exists := h.st.Servers[id]
+	h.mu.RUnlock()
+	if !exists || !ok(s) {
+		h.discardSerial(ctx, id, nc.Serial)
+		return nil, nil, statusErr(409, "server %s was revoked while its certificate was signed", id)
+	}
 	return leaf, nc, nil
 }
 
-// pinServer pins a worker certificate (serial, SPKI, not after).
-func (h *Hub) pinServer(id string, leaf *x509.Certificate, serial string) {
+// enrollingOK / liveOK: the states a worker certificate may be pinned in
+// (never once a revocation started).
+func enrollingOK(s state.Server) bool { return s.Revoke == nil && s.State == ServerEnrolling }
+func liveOK(s state.Server) bool {
+	return s.Revoke == nil && (s.State == ServerReady || s.State == ServerOffline)
+}
+
+// pinServer pins a worker certificate (serial, SPKI, not after) when
+// the server is still in a state ok accepts; else the serial is revoked
+// at once and nothing is pinned.
+func (h *Hub) pinServer(ctx context.Context, id string, leaf *x509.Certificate, serial string, ok func(state.Server) bool) error {
 	sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if s, ok := h.st.Servers[id]; ok {
-		s.CertSerial, s.SPKI, s.CertNotAfter = serial, hex.EncodeToString(sum[:]), leaf.NotAfter.UTC()
-		h.st.Servers[id] = s
-		h.saveLocked()
+	s, exists := h.st.Servers[id]
+	if !exists || !ok(s) {
+		h.mu.Unlock()
+		h.discardSerial(ctx, id, serial)
+		return statusErr(409, "server %s was revoked: its new certificate is revoked too", id)
 	}
+	s.CertSerial, s.SPKI, s.CertNotAfter = serial, hex.EncodeToString(sum[:]), leaf.NotAfter.UTC()
+	h.st.Servers[id] = s
+	h.saveLocked()
+	h.mu.Unlock()
+	return nil
 }
 
 // revokeEnrolling ends a failed or stopped enrolment past its join: the

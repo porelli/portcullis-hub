@@ -327,7 +327,7 @@ func (h *Hub) renewServer(ctx context.Context, id string, b *agentrt.Backend) er
 	if err != nil {
 		return err
 	}
-	leaf, nc, err := h.signWorker(ctx, id, csr.CSR)
+	leaf, nc, err := h.signWorker(ctx, id, csr.CSR, liveOK)
 	if err != nil {
 		return err
 	}
@@ -345,7 +345,9 @@ func (h *Hub) renewServer(ctx context.Context, id string, b *agentrt.Backend) er
 	if err != nil {
 		return err
 	}
-	h.pinServer(id, leaf, nc.Serial)
+	if err := h.pinServer(ctx, id, leaf, nc.Serial, liveOK); err != nil {
+		return err
+	}
 	h.mu.RLock()
 	s := h.st.Servers[id]
 	h.mu.RUnlock()

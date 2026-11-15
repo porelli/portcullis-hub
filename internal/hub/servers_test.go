@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/keycloak/kctest"
 	"github.com/portcullis/hub/internal/linkdoc"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/servers"
@@ -46,9 +48,12 @@ type testNodeCA struct {
 	mu        sync.Mutex
 	revokeErr error
 	revoked   []string
-	// onRevoke runs at every revoke attempt (before its outcome).
+	// onRevoke runs at every revoke attempt (before its outcome);
+	// onSign at every sign, before it answers.
 	onRevoke func(serial string)
+	onSign   func(role string)
 	signs    []string // role:cn
+	issued   []string // the serials signed
 }
 
 func newTestNodeCA(t *testing.T) *testNodeCA {
@@ -102,7 +107,12 @@ func (c *testNodeCA) SignNode(_ context.Context, role, cn, csrPEM string) (*Node
 	}
 	c.mu.Lock()
 	c.signs = append(c.signs, role+":"+cn)
+	c.issued = append(c.issued, colonHex(serial))
+	hook := c.onSign
 	c.mu.Unlock()
+	if hook != nil {
+		hook(role)
+	}
 	return &NodeCert{Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), Serial: colonHex(serial),
 		CA: c.pem, NotAfter: tpl.NotAfter}, nil
 }
@@ -921,8 +931,8 @@ func TestRevokeOrderAndRetry(t *testing.T) {
 		t.Errorf("link.json still had the peer at step 2: %v", sawPeer)
 	}
 	s, _ := sf.server("nas")
-	if s.State != ServerRevoked || s.Revoke == nil || s.Revoke.CertDone || !s.Revoke.RelaysDone || !s.Revoke.Rotated ||
-		s.CertSerial != "" || s.SPKI != "" || s.Revoke.Serial != pinned.CertSerial {
+	if s.State != ServerRevoked || s.Revoke == nil || len(s.Revoke.Serials) != 1 || s.Revoke.Serials[0] != pinned.CertSerial ||
+		!s.Revoke.RelaysDone || !s.Revoke.Rotated || s.CertSerial != "" || s.SPKI != "" {
 		t.Errorf("after the first pass %+v %+v", s, s.Revoke)
 	}
 	if !strings.Contains(strings.Join(sf.runner.Calls()[callsBefore:], ","), "downbyname:portcullis-other") {
@@ -946,7 +956,7 @@ func TestRevokeOrderAndRetry(t *testing.T) {
 	sf.ca.mu.Unlock()
 	sf.h.serversTick(context.Background())
 	s, _ = sf.server("nas")
-	if !s.Revoke.CertDone || len(sf.ca.revoked) != 1 || sf.ca.revoked[0] != pinned.CertSerial {
+	if len(s.Revoke.Serials) != 0 || len(sf.ca.revoked) != 1 || sf.ca.revoked[0] != pinned.CertSerial {
 		t.Errorf("retry: %+v revoked %v", s.Revoke, sf.ca.revoked)
 	}
 	if err := sf.h.RevokeServer(context.Background(), admin, "nas"); errStatus(err) != 409 {
@@ -1142,5 +1152,165 @@ func TestKubernetesPrimaryRefusesServers(t *testing.T) {
 	}
 	if _, ok := sf.server("nas"); ok {
 		t.Error("recorded")
+	}
+}
+
+func (c *testNodeCA) revokedList() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.revoked...)
+}
+
+// TestRevokeDuringEnrolment: a revocation while enroll is signing the
+// worker's certificate cancels the enrolment and waits for it; the fresh
+// serial is revoked at once, nothing is pinned, the worker never gets it.
+func TestRevokeDuringEnrolment(t *testing.T) {
+	sf := newServersFixture(t)
+	revokeDone := make(chan error, 1)
+	sf.ca.onSign = func(role string) {
+		if role != RoleNodeWorker {
+			return
+		}
+		go func() { revokeDone <- sf.h.RevokeServer(context.Background(), admin, "nas") }()
+		for i := 0; i < 1000; i++ {
+			if s, _ := sf.server("nas"); s.State == ServerRevoked {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Error("the revocation didn't start")
+	}
+	code, _, err := sf.h.AddServer(context.Background(), admin, "nas", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sf.agent.takeCode(t, code)
+	sf.link.handshake("nas", time.Now().Add(time.Second))
+	if err := <-revokeDone; err != nil {
+		t.Fatal(err)
+	}
+	// RevokeServer returned: the op had finished before it advanced.
+	r := sf.h.LastOp(serverOpKey("nas"))
+	if r == nil || r.Running || r.OK || !strings.Contains(r.Error, "revoked") {
+		t.Errorf("op %+v", r)
+	}
+	sf.ca.mu.Lock()
+	fresh := sf.ca.issued[len(sf.ca.issued)-1]
+	sf.ca.mu.Unlock()
+	if !slices.Contains(sf.ca.revokedList(), fresh) {
+		t.Errorf("the fresh serial %s isn't revoked: %v", fresh, sf.ca.revokedList())
+	}
+	s, _ := sf.server("nas")
+	if s.State != ServerRevoked || s.CertSerial != "" || s.SPKI != "" || len(s.Revoke.Serials) != 0 {
+		t.Errorf("state %+v %+v", s, s.Revoke)
+	}
+	if slices.Contains(sf.agent.Calls(), "cert") {
+		t.Errorf("the worker got the certificate: %v", sf.agent.Calls())
+	}
+	if d := sf.linkDoc(t); len(d.Peers) != 0 {
+		t.Errorf("peers %+v", d.Peers)
+	}
+}
+
+// TestRenewRacingRevoke: a revocation while a renewal is being signed:
+// the new serial is revoked at once and never pinned, the old one is
+// revoked by the revocation.
+func TestRenewRacingRevoke(t *testing.T) {
+	sf := newServersFixture(t)
+	sf.enrol(t, "nas")
+	pinned, _ := sf.server("nas")
+	sf.h.mu.Lock()
+	s := sf.h.st.Servers["nas"]
+	s.CertNotAfter = time.Now().Add(9 * 24 * time.Hour)
+	sf.h.st.Servers["nas"] = s
+	sf.h.mu.Unlock()
+	sf.ca.onSign = func(role string) {
+		if role == RoleNodeWorker {
+			if err := sf.h.RevokeServer(context.Background(), admin, "nas"); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	sf.link.handshake("nas", time.Now())
+	calls := len(sf.agent.Calls())
+	sf.h.pollServer(context.Background(), "nas")
+	sf.ca.mu.Lock()
+	fresh := sf.ca.issued[len(sf.ca.issued)-1]
+	sf.ca.mu.Unlock()
+	rv := sf.ca.revokedList()
+	if !slices.Contains(rv, fresh) || !slices.Contains(rv, pinned.CertSerial) || fresh == pinned.CertSerial {
+		t.Errorf("revoked %v (pinned %s, fresh %s)", rv, pinned.CertSerial, fresh)
+	}
+	after, _ := sf.server("nas")
+	if after.State != ServerRevoked || after.CertSerial != "" || after.SPKI != "" || len(after.Revoke.Serials) != 0 {
+		t.Errorf("after %+v %+v", after, after.Revoke)
+	}
+	if slices.Contains(sf.agent.Calls()[calls:], "cert") {
+		t.Errorf("the worker got the renewed certificate: %v", sf.agent.Calls()[calls:])
+	}
+	// A pending revocation keeps a serial whose revoke failed owed.
+	sf.ca.mu.Lock()
+	sf.ca.revokeErr = errors.New("enroll down")
+	sf.ca.mu.Unlock()
+	sf.h.discardSerial(context.Background(), "nas", "0a:0b")
+	if s, _ := sf.server("nas"); !slices.Contains(s.Revoke.Serials, "0a:0b") {
+		t.Errorf("owed %+v", s.Revoke)
+	}
+	sf.ca.mu.Lock()
+	sf.ca.revokeErr = nil
+	sf.ca.mu.Unlock()
+	sf.h.serversTick(context.Background())
+	if s, _ := sf.server("nas"); len(s.Revoke.Serials) != 0 || !slices.Contains(sf.ca.revokedList(), "0a:0b") {
+		t.Errorf("retry %+v", s.Revoke)
+	}
+}
+
+// TestRevokeRotatesAIClient: a placed instance's ai_client gets a new
+// secret and is deleted and created again, so every session of it —
+// offline ones included — ends; Rotated only once that is done.
+func TestRevokeRotatesAIClient(t *testing.T) {
+	kc, c := hubAIRealm(t)
+	a := chatFixture23(t, nil)
+	a.h.SetAIKeycloak(c)
+	ctx := context.Background()
+	tmpl := a.h.Template("ai-chat")
+	writeFile(t, a.h.envPath("ai-chat"), "CHAT_MCP_SECRET=old-chat-secret\n")
+	if _, err := a.h.ensureInstanceAIClient(ctx, tmpl); err != nil {
+		t.Fatal(err)
+	}
+	old := kc.ClientByClientID(chatMCPID)
+	if old == nil {
+		t.Fatal("no ai_client")
+	}
+	oldSecret := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_SECRET"]
+	kc.Users["alice"] = &kctest.User{ID: "u-alice", Username: "alice", Enabled: true}
+	kc.AddOfflineSession("alice", time.Now(), time.Now(), old.ID)
+	kc.AddConsent("alice", chatMCPID, time.Now(), "mcp:all")
+	a.h.mu.Lock()
+	a.h.st.Servers = map[string]state.Server{"nas": {Name: "NAS", TunnelIP: "10.214.0.10", State: ServerReady, CertSerial: "0a"}}
+	in := a.h.st.Instances["ai-chat"]
+	in.ID, in.Template, in.Server = "ai-chat", "ai-chat", "nas"
+	a.h.st.Instances["ai-chat"] = in
+	a.h.noteServersLocked()
+	a.h.mu.Unlock()
+	if err := a.h.RevokeServer(ctx, root, "nas"); err != nil {
+		t.Fatal(err)
+	}
+	nw := kc.ClientByClientID(chatMCPID)
+	secret := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_SECRET"]
+	if nw == nil || nw.ID == old.ID || secret == "" || secret == oldSecret || nw.Secret != secret {
+		t.Errorf("ai_client not rotated: old %s new %+v secret changed %v", old.ID, nw, secret != oldSecret)
+	}
+	if got := kc.OfflineClients("alice"); len(got) != 0 {
+		t.Errorf("offline sessions left: %v", got)
+	}
+	if got := kc.UserConsents("alice"); slices.Contains(got, chatMCPID) {
+		t.Errorf("consent left: %v", got)
+	}
+	a.h.mu.RLock()
+	rv := a.h.st.Servers["nas"].Revoke
+	a.h.mu.RUnlock()
+	if rv == nil || !rv.Rotated {
+		t.Errorf("revoke %+v", rv)
 	}
 }
