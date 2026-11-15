@@ -19,16 +19,17 @@ type outer struct {
 	Net   netip.Prefix      `json:"net"`
 	Items []inner           `json:"items"`
 	Tags  map[string]string `json:"tags,omitempty"`
+	Raw   []byte            `json:"raw,omitempty"`
 }
 
-const good = `{"name":"x","at":"2026-11-15T10:00:00Z","ip":"10.214.0.10","net":"10.214.0.0/24","items":[{"a":"1"}],"tags":{"k":"v"}}`
+const good = `{"raw":"aGk=","name":"x","at":"2026-11-15T10:00:00Z","ip":"10.214.0.10","net":"10.214.0.0/24","items":[{"a":"1"}],"tags":{"k":"v"}}`
 
 func TestDecode(t *testing.T) {
 	var o outer
 	if err := Decode([]byte(good), &o); err != nil {
 		t.Fatal(err)
 	}
-	if o.IP != netip.MustParseAddr("10.214.0.10") || o.Net.Bits() != 24 || o.Items[0].A != "1" {
+	if string(o.Raw) != "hi" || o.IP != netip.MustParseAddr("10.214.0.10") || o.Net.Bits() != 24 || o.Items[0].A != "1" {
 		t.Errorf("decoded %+v", o)
 	}
 	for name, c := range map[string]struct{ doc, want string }{
@@ -50,6 +51,8 @@ func TestDecode(t *testing.T) {
 		"invalid json":         {`{"name":`, `not valid JSON`},
 		"top-level null":       {`null`, `$: null`},
 		"value never echoed":   {strings.Replace(good, `"name":"x"`, `"name":"s3cret","name":"s3cret"`, 1), `duplicate key`},
+		"bytes not base64":     {strings.Replace(good, `"aGk="`, `"a!"`, 1), `raw: wrong type`},
+		"bytes as list":        {strings.Replace(good, `"aGk="`, `[1]`, 1), `$.raw: not a base64 string`},
 		"nested list null obj": {strings.Replace(good, `[{"a":"1"}]`, `[null]`, 1), `$.items[0]: null`},
 	} {
 		var o outer

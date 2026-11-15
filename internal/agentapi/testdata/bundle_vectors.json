@@ -1,0 +1,3450 @@
+[
+ {
+  "name": "clean bundle",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "clean bundle with an empty file",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "appfiles/empty",
+    "type": "reg",
+    "mode": 420
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    },
+    "appfiles/empty": {
+     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "mode": 420,
+     "size": 0
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "clean bundle without directory entries",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "clean bundle at exactly the cap",
+  "entries": [
+   {
+    "name": "a",
+    "type": "reg",
+    "mode": 420,
+    "data": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "a": {
+     "sha256": "1d1801f753ccd9fa57966c46f360585caf83337a394a5f238d4e4e7d6005788d",
+     "mode": 420,
+     "size": 2048
+    }
+   }
+  },
+  "max_bytes": 3584,
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "symlink",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "templates/immich/link",
+    "type": "symlink",
+    "mode": 511,
+    "linkname": "/etc/passwd"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "only regular files and directories"
+ },
+ {
+  "name": "relative symlink",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "x",
+    "type": "symlink",
+    "mode": 511,
+    "linkname": "compose.yml"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "only regular files and directories"
+ },
+ {
+  "name": "hardlink",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "templates/immich/hard",
+    "type": "link",
+    "mode": 420,
+    "linkname": "env"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "only regular files and directories"
+ },
+ {
+  "name": "character device",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "dev",
+    "type": "char",
+    "mode": 384
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "only regular files and directories"
+ },
+ {
+  "name": "block device",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "disk",
+    "type": "block",
+    "mode": 384
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "only regular files and directories"
+ },
+ {
+  "name": "fifo",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "pipe",
+    "type": "fifo",
+    "mode": 384
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "only regular files and directories"
+ },
+ {
+  "name": "pax global header",
+  "entries": [
+   {
+    "name": "g",
+    "type": "xglobal",
+    "mode": 420
+   },
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "only regular files and directories"
+ },
+ {
+  "name": "absolute name",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "/etc/cron.d/x",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "dot-dot name",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "../escape",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "dot-dot inside",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "templates/../../x",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "dot-dot that stays inside",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "templates/../compose2.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "dot slash prefix",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "./compose2.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "double slash",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "templates//x",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "backslash",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "templates\\x",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "control character",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "a\u0007b",
+    "type": "reg",
+    "mode": 420,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "duplicate entry",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "duplicate entry"
+ },
+ {
+  "name": "duplicate directory",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "duplicate entry"
+ },
+ {
+  "name": "file below a file",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "env/x",
+    "type": "reg",
+    "mode": 420,
+    "data": "y"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    },
+    "env/x": {
+     "sha256": "a1fce4363854ff888cff4b8e7875d600c2682390412a8cf79b37d0b11148b0fa",
+     "mode": 420,
+     "size": 1
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "manifest: env/x is below the file env"
+ },
+ {
+  "name": "tar file below a file",
+  "entries": [
+   {
+    "name": "a",
+    "type": "reg",
+    "mode": 420,
+    "data": "1"
+   },
+   {
+    "name": "a/b",
+    "type": "reg",
+    "mode": 420,
+    "data": "2"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "a": {
+     "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+     "mode": 420,
+     "size": 1
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is below the file a"
+ },
+ {
+  "name": "directory listed as a file",
+  "entries": [
+   {
+    "name": "d/",
+    "type": "dir",
+    "mode": 493
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "d": {
+     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "mode": 420,
+     "size": 0
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is a directory, the manifest lists a file"
+ },
+ {
+  "name": "file missing from the manifest",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   },
+   {
+    "name": "extra.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "x: 1\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "extra.yml is not in the manifest"
+ },
+ {
+  "name": "manifest file missing from the tar",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    },
+    "missing.yml": {
+     "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+     "mode": 420,
+     "size": 1
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "missing.yml is in the manifest but not in the tar"
+ },
+ {
+  "name": "sha mismatch",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "6c363e843fc16bf78072e17cf6f574062508609fe3e852ee8f2aa57908b9901f",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "env: sha256 differs from the manifest"
+ },
+ {
+  "name": "size mismatch",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 3
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "env: size differs from the manifest"
+ },
+ {
+  "name": "mode mismatch",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 420,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "env: mode 0600 differs from the manifest's 0644"
+ },
+ {
+  "name": "setuid file",
+  "entries": [
+   {
+    "name": "tool",
+    "type": "reg",
+    "mode": 2541,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "tool": {
+     "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+     "mode": 2541,
+     "size": 1
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "has more than permission bits"
+ },
+ {
+  "name": "setuid header only",
+  "entries": [
+   {
+    "name": "tool",
+    "type": "reg",
+    "mode": 2541,
+    "data": "x"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "tool": {
+     "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+     "mode": 493,
+     "size": 1
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "differs from the manifest's"
+ },
+ {
+  "name": "size over cap",
+  "entries": [
+   {
+    "name": "big",
+    "type": "reg",
+    "mode": 420,
+    "data": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "big": {
+     "sha256": "a2e659dacb4691e887ac0139f8893d04764ee197d70fb73d3190d56113d18e3e",
+     "mode": 420,
+     "size": 4096
+    }
+   }
+  },
+  "max_bytes": 1024,
+  "valid": false,
+  "error": "files over the 1024-byte cap"
+ },
+ {
+  "name": "stream over cap",
+  "entries": [
+   {
+    "name": "a",
+    "type": "reg",
+    "mode": 420,
+    "data": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   {
+    "name": "d0/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "d1/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "d2/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "d3/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "d4/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "d5/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "d6/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "d7/",
+    "type": "dir",
+    "mode": 493
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "a": {
+     "sha256": "5130b33e6b87fbf5316ed9049e98924eb110800bcbaaad8050f642fba6df37c9",
+     "mode": 420,
+     "size": 600
+    }
+   }
+  },
+  "max_bytes": 2048,
+  "valid": false,
+  "error": "over the 2048-byte cap"
+ },
+ {
+  "name": "invalid manifest instance",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "Immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not an instance id"
+ },
+ {
+  "name": "manifest instance with portcullis segment",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "a-portcullis-b",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not an instance id"
+ },
+ {
+  "name": "manifest sha upper case",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91D6A3D55E9FEA7911C537AFAE6607C77FA8BC0F3A76C375E104AC5A8CFA84DB",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "sha256 must be 64 lower-case hex digits"
+ },
+ {
+  "name": "manifest path escapes",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": 4
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    },
+    "../x": {
+     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "mode": 420,
+     "size": 0
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "is not a clean relative path"
+ },
+ {
+  "name": "manifest negative size",
+  "entries": [
+   {
+    "name": "compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services:\n  app:\n    image: x\n"
+   },
+   {
+    "name": "env",
+    "type": "reg",
+    "mode": 384,
+    "data": "A=1\n"
+   },
+   {
+    "name": "override.yml",
+    "type": "reg",
+    "mode": 384,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/",
+    "type": "dir",
+    "mode": 493
+   },
+   {
+    "name": "templates/immich/compose.yml",
+    "type": "reg",
+    "mode": 420,
+    "data": "services: {}\n"
+   },
+   {
+    "name": "templates/immich/hooks/run.sh",
+    "type": "reg",
+    "mode": 493,
+    "data": "#!/bin/sh\n"
+   },
+   {
+    "name": "appfiles/settings/config.json",
+    "type": "reg",
+    "mode": 416,
+    "data": "{}\n"
+   },
+   {
+    "name": "certs/ca-bundle.crt",
+    "type": "reg",
+    "mode": 420,
+    "data": "-----BEGIN CERTIFICATE-----\n"
+   }
+  ],
+  "manifest": {
+   "instance": "immich",
+   "files": {
+    "compose.yml": {
+     "sha256": "b8c08a91a1f160aba90690c25261018f13e8404880d8c14bfaf3f1975b31dc8a",
+     "mode": 420,
+     "size": 30
+    },
+    "env": {
+     "sha256": "91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db",
+     "mode": 384,
+     "size": -1
+    },
+    "override.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 384,
+     "size": 13
+    },
+    "templates/immich/compose.yml": {
+     "sha256": "fa6ccea1ca4e3a031d9e99f25cc05db803aa9bac642c000ddab14f6d9da54b52",
+     "mode": 420,
+     "size": 13
+    },
+    "templates/immich/hooks/run.sh": {
+     "sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+     "mode": 493,
+     "size": 10
+    },
+    "appfiles/settings/config.json": {
+     "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+     "mode": 416,
+     "size": 3
+    },
+    "certs/ca-bundle.crt": {
+     "sha256": "b93f51c3ac1bdd90edcce2019d2452a328cbf97443f3744cc7ec63033a5b2c16",
+     "mode": 420,
+     "size": 28
+    }
+   }
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "negative size"
+ },
+ {
+  "name": "empty manifest",
+  "entries": [],
+  "manifest": {
+   "instance": "immich",
+   "files": {}
+  },
+  "max_bytes": 1048576,
+  "valid": false,
+  "error": "no files"
+ }
+]

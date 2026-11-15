@@ -65,7 +65,7 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 	// Top-level volumes: key → the core volume it is (by key or name).
 	coreOf := map[string]string{}
 	for k, raw := range doc.Volumes {
-		if c := coreVolumeName(k); c != "" {
+		if c := CoreVolumeName(k); c != "" {
 			coreOf[k] = c
 		}
 		v, _ := raw.(map[string]any)
@@ -75,7 +75,7 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 		}
 		for _, n := range names {
 			if s, ok := n.(string); ok {
-				if c := coreVolumeName(resolve(s, env)); c != "" {
+				if c := CoreVolumeName(resolve(s, env)); c != "" {
 					coreOf[k] = c
 				}
 			}
@@ -117,10 +117,10 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 	return len(reasons) > 0, reasons
 }
 
-// coreVolumeName is the core volume name n stands for ("" = none): a core
+// CoreVolumeName is the core volume name n stands for ("" = none): a core
 // volume key (portcullis_<key> too), link_doc, or the Hub's secrets
 // volume key.
-func coreVolumeName(n string) string {
+func CoreVolumeName(n string) string {
 	f := FoldKey(strings.TrimSpace(n))
 	if NamesSecretsVolumeKey(f) {
 		return SecretsVolumeKey
@@ -168,7 +168,7 @@ func (r *placementReasons) service(name string, s map[string]any, coreOf map[str
 		case "volume":
 			if c, ok := coreOf[src]; ok {
 				addOnce(&r.coreVolume, "mounts the core volume "+c)
-			} else if c := coreVolumeName(src); c != "" {
+			} else if c := CoreVolumeName(src); c != "" {
 				addOnce(&r.coreVolume, "mounts the core volume "+c)
 			}
 		case "bind":

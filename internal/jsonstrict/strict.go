@@ -83,6 +83,14 @@ func checkShape(raw []byte, t reflect.Type, path string) error {
 			}
 		}
 	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			// []byte: only a base64 string (encoding/json would also take
+			// a list of numbers).
+			if len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '"' {
+				return fmt.Errorf("%s: not a base64 string", path)
+			}
+			return nil
+		}
 		var items []json.RawMessage
 		if err := json.Unmarshal(raw, &items); err != nil {
 			return fmt.Errorf("%s: not a list", path)

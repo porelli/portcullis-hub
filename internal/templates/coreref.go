@@ -84,6 +84,21 @@ func reservedDNSName(name string) bool {
 	return false
 }
 
+// ReservedDNSName reports whether name (a service, container, host or
+// alias name) is core's DNS name (reservedDNSName; agentapi re-checks a
+// worker bundle's model with it).
+func ReservedDNSName(name string) bool { return reservedDNSName(name) }
+
+// HasDotDotSegment reports whether p has a ".." segment.
+func HasDotDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // CoreContainerClash returns the container name compose would give
 // service svc of project portcullis-<id> (portcullis-<id>-<svc>-<n>, or
 // portcullis_<id>_<svc>_<n> with the old separator) when it is a core
