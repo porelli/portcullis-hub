@@ -53,6 +53,9 @@ type DomainsAPI interface {
 	MainPlan(ctx context.Context, refresh bool) (domains.Plan, error)
 	ApplySets(ctx context.Context, name string, sets []string) (domains.Domain, error)
 	EnableDNSSEC(ctx context.Context, name string) (domains.Domain, error)
+	// Mail (§12.2 sets/mail): an added domain's wanted mail records.
+	SetMailSet(ctx context.Context, name string, recs []domains.MailRecord) (domains.Domain, error)
+	DeleteMailSet(ctx context.Context, name string) (domains.Domain, error)
 }
 
 // SetDomainsAPI connects the domains service; the known list in state.yaml
@@ -652,7 +655,10 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor directory.Actor, name stri
 	// check and the service call.
 	h.mu.Lock()
 	known, users, api := h.knownLocked(name), h.domainUsersLocked(name), h.domainsAPI
-	if known && len(users) == 0 {
+	// Mail on or draining for it: refused (no orphaned mail records or
+	// mailboxes; controller ruling 2026-11-15).
+	mailState := h.mailDomainStateLocked(name, false)
+	if known && len(users) == 0 && mailState == "off" {
 		if h.domainsDeleting == nil {
 			h.domainsDeleting = map[string]bool{}
 		}
@@ -665,6 +671,9 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor directory.Actor, name stri
 	}
 	if len(users) > 0 {
 		return "", statusErr(409, "%s is used by instance(s) %s: move their hostnames or delete them first", name, strings.Join(users, ", "))
+	}
+	if mailState != "off" {
+		return "", statusErr(409, "turn mail off for %s and wait for it to finish draining first", name)
 	}
 	warning, err = api.Delete(context.WithoutCancel(ctx), name)
 	var ae *domains.APIError
@@ -696,6 +705,13 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor directory.Actor, name stri
 	h.st.Domains = kept
 	if len(h.st.Domains) == 0 {
 		h.st.Domains = nil
+	}
+	// Its mail entry and lists go with it (mail was off).
+	delete(h.st.Mail.Domains, name)
+	for g, l := range h.st.Mail.Lists {
+		if strings.EqualFold(l.Domain, name) {
+			delete(h.st.Mail.Lists, g)
+		}
 	}
 	h.saveLocked()
 	h.mu.Unlock()

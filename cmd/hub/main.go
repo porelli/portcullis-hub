@@ -500,6 +500,9 @@ func main() {
 	h.SetOwnPasswords(dir)
 	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted
+	// Mail (contract §19.5): an admin's removals from mail_users may
+	// confirm a mass removal.
+	dir.MemberRemoved = h.MailMemberRemoved
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak
 	// attr_<field> claims (§9.6). Keycloak failures are logged and retried,
@@ -622,6 +625,7 @@ func main() {
 	})
 	// File-sharing holder checks (revoke on leave), on each trigger.
 	go h.RunCredentialChecks(ctx)
+	go h.RunMailSync(ctx)
 	if dir.Store != nil {
 		// Rule groups, exceptions and expiries -> LLDAP membership: every
 		// minute (expiries) and after each directory mutation. Started

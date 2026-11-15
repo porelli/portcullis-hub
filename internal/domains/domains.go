@@ -65,7 +65,21 @@ const (
 	SetAddress = "address"
 	SetCAA     = "caa"
 	SetNoMail  = "nomail"
+	// SetMail is the mail set (NEW, mail; §12.4): written with
+	// SetMailSet, never through Sets' apply alone.
+	SetMail = "mail"
 )
+
+// MailRecord is one wanted record of the mail set (§12.2 sets/mail).
+type MailRecord struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	TTL   int    `json:"ttl"`
+	Value string `json:"value"`
+}
+
+// MaxMailRecords is the most records sets/mail takes (§12.2).
+const MaxMailRecords = 200
 
 // Sets is every record set, in apply order.
 var Sets = []string{SetAddress, SetCAA, SetNoMail}
@@ -319,5 +333,29 @@ func (c *Client) EnableDNSSEC(ctx context.Context, name string) (Domain, error) 
 	_, err := c.do(ctx, http.MethodPost, path(name)+"/dnssec", struct {
 		Enable bool `json:"enable"`
 	}{true}, nil, &d)
+	return d, err
+}
+
+// SetMailSet stores name's wanted mail records (PUT
+// /domains/{name}/sets/mail): mail joins the domain's sets, nomail leaves.
+func (c *Client) SetMailSet(ctx context.Context, name string, recs []MailRecord) (Domain, error) {
+	if len(recs) > MaxMailRecords {
+		return Domain{}, fmt.Errorf("domains service: %d mail records (at most %d)", len(recs), MaxMailRecords)
+	}
+	if recs == nil {
+		recs = []MailRecord{}
+	}
+	var d Domain
+	_, err := c.do(ctx, http.MethodPut, path(name)+"/sets/mail", struct {
+		Records []MailRecord `json:"records"`
+	}{recs}, nil, &d)
+	return d, err
+}
+
+// DeleteMailSet removes name's mail set (DELETE /domains/{name}/sets/mail):
+// its records go, nomail comes back when it was there before.
+func (c *Client) DeleteMailSet(ctx context.Context, name string) (Domain, error) {
+	var d Domain
+	_, err := c.do(ctx, http.MethodDelete, path(name)+"/sets/mail", nil, nil, &d)
 	return d, err
 }

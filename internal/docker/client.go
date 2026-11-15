@@ -226,6 +226,21 @@ func (c *Client) ContainerKill(ctx context.Context, id, signal string) error {
 	return err
 }
 
+// ContainerRestart restarts container id (POST
+// /containers/{id}/restart?t=<seconds>): the daemon stops it (SIGTERM,
+// SIGKILL after timeout) and starts it again. The Hub's one use is core's
+// mail container (contract §6 "Restarting core mail").
+func (c *Client) ContainerRestart(ctx context.Context, id string, timeout time.Duration) error {
+	if id == "" {
+		return fmt.Errorf("container restart: no container")
+	}
+	secs := int(timeout / time.Second)
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout+timeout)
+	defer cancel()
+	_, err := c.api.ContainerRestart(ctx, id, client.ContainerRestartOptions{Timeout: &secs})
+	return err
+}
+
 // State is runtime.State.
 type State = runtime.State
 

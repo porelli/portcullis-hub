@@ -128,6 +128,10 @@ func (r *recorder) ContainerKill(_ context.Context, id, sig string) error {
 	r.rec("kill %s %s", id, sig)
 	return nil
 }
+func (r *recorder) ContainerRestart(_ context.Context, id string, timeout time.Duration) error {
+	r.rec("restart %s %s", id, timeout)
+	return nil
+}
 func (r *recorder) ContainerState(_ context.Context, id string) (engine.State, error) {
 	r.rec("state %s", id)
 	return engine.State{}, nil

@@ -60,22 +60,10 @@ func (h *Hub) mailCore() mailCoreEnv {
 // mailOn reports PORTCULLIS_MAIL=on.
 func (h *Hub) mailOn() bool { return h.mailCore().On }
 
-// mailDomainStateLocked is name's mail state: on, draining or off. The
-// main domain is on while core's mail is on, unless an admin turned it
-// off (an entry that isn't enabled); an added domain only by its entry.
-// Caller must hold mu.
+// mailDomainStateLocked is name's mail state: on, draining or off
+// (mailDomainState). Caller must hold mu.
 func (h *Hub) mailDomainStateLocked(name string, coreOn bool) string {
-	name = strings.ToLower(name)
-	d, ok := h.st.Mail.Domains[name]
-	switch {
-	case ok && d.Draining:
-		return "draining"
-	case ok && d.Enabled:
-		return "on"
-	case !ok && coreOn && name == strings.ToLower(h.cfg.Domain):
-		return "on"
-	}
-	return "off"
+	return mailDomainState(h.st.Mail, h.cfg.Domain, coreOn, name)
 }
 
 // mailDomainsLocked are the domains mail is on or draining for, sorted.
@@ -147,4 +135,23 @@ func (h *Hub) mailClient() MailAPI {
 		return nil
 	}
 	return api
+}
+
+// MailDomainStates is every domain's mail state (on, draining, off) as
+// the Hub's mail settings say (the per-domain mail flags): the main
+// domain and every added domain the Hub knows of.
+func (h *Hub) MailDomainStates() map[string]string {
+	coreOn := h.mailOn()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := map[string]string{strings.ToLower(h.cfg.Domain): h.mailDomainStateLocked(h.cfg.Domain, coreOn)}
+	for _, d := range h.st.Domains {
+		out[strings.ToLower(d.Name)] = h.mailDomainStateLocked(d.Name, coreOn)
+	}
+	for n := range h.st.Mail.Domains {
+		if _, ok := out[n]; !ok {
+			out[n] = h.mailDomainStateLocked(n, coreOn)
+		}
+	}
+	return out
 }

@@ -37,6 +37,9 @@ type MailDomain struct {
 	// HadMailRecords: an MX or SPF was there before Portcullis (DMARC
 	// starts at p=none).
 	HadMailRecords bool `json:"had_mail_records,omitempty" yaml:"had_mail_records,omitempty"`
+	// Retired: off, and its mail set removed (an added domain) or its off
+	// document applied (the main domain): no longer in documents.
+	Retired bool `json:"retired,omitempty" yaml:"retired,omitempty"`
 }
 
 // MailList is a group's list.

@@ -42,6 +42,8 @@ type Engine interface {
 	// ContainerKill signals a container (a settings reload, §13.8);
 	// ContainerState is its run state and health.
 	ContainerKill(ctx context.Context, id, signal string) error
+	// ContainerRestart restarts a container (core's mail only, §6).
+	ContainerRestart(ctx context.Context, id string, timeout time.Duration) error
 	ContainerState(ctx context.Context, id string) (engine.State, error)
 	// ExecStdin runs a settings hook (§13.8): argv, stdin written then
 	// closed, no TTY; ExecRunning: a timed-out exec still runs.
@@ -228,6 +230,10 @@ func (b *Backend) ExecRunning(ctx context.Context, execID string) (bool, error) 
 
 func (b *Backend) Signal(ctx context.Context, id, sig string) error {
 	return b.engine.ContainerKill(ctx, id, sig)
+}
+
+func (b *Backend) Restart(ctx context.Context, id string, timeout time.Duration) error {
+	return b.engine.ContainerRestart(ctx, id, timeout)
 }
 
 func (b *Backend) State(ctx context.Context, id string) (runtime.State, error) {

@@ -608,3 +608,21 @@ func TestListContainersNetworks(t *testing.T) {
 		t.Errorf("networks = %v", cs)
 	}
 }
+
+func TestContainerRestart(t *testing.T) {
+	var got string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		w.WriteHeader(204)
+	}))
+	if err := c.ContainerRestart(context.Background(), "c1", 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "POST /") || !strings.HasSuffix(got, "/containers/c1/restart?t=2") {
+		t.Errorf("request = %s", got)
+	}
+	got = ""
+	if err := c.ContainerRestart(context.Background(), "", time.Second); err == nil || got != "" {
+		t.Errorf("no id: %v %q", err, got)
+	}
+}

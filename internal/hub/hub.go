@@ -579,6 +579,13 @@ type Hub struct {
 	// goroutine only).
 	credKick     chan struct{}
 	credCheckErr string
+	// Mail (mail.go): mailKick is TriggerMailSync's coalesced request,
+	// mailState RunMailSync's memory, mailRestarts the shared restarts of
+	// core mail, mailClock the mail clock (nil: time.Now).
+	mailKick     chan struct{}
+	mailState    mailSync
+	mailRestarts sharedRestart
+	mailClock    func() time.Time
 	// testHookHolderJudged, if set, runs in CheckCredentialHolders
 	// between the judgement and the revocations (tests: a change racing
 	// the check).
@@ -721,6 +728,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		invKick:              make(chan struct{}, 1),
 		aiReconKick:          make(chan struct{}, 1),
 		credKick:             make(chan struct{}, 1),
+		mailKick:             make(chan struct{}, 1),
 		driftKey:             map[string]string{},
 		afterFunc:            realAfterFunc,
 		sleep:                realSleep,

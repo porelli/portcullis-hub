@@ -201,6 +201,9 @@ func (h *Hub) TriggerCredentialCheck() {
 	case h.credKick <- struct{}{}:
 	default:
 	}
+	// Mail's holders ride on the same triggers (directory changes, the
+	// evaluator's tick): a person leaving mail_users is a removal.
+	h.TriggerMailSync()
 }
 
 // RunCredentialChecks runs a holder check on each TriggerCredentialCheck
