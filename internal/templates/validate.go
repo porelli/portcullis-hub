@@ -72,6 +72,11 @@ func ValidateManifest(m *Manifest) error {
 	default:
 		return fmt.Errorf("instances %q must be multi or single", m.Instances)
 	}
+	switch m.Placement {
+	case "", PlacementAny, PlacementPrimaryOnly:
+	default:
+		return fmt.Errorf("placement %q must be any or primary_only", m.Placement)
+	}
 	for _, k := range manifestKeys(m) {
 		if ReservedVar(k) {
 			return fmt.Errorf("%s is an instance variable the Hub sets — a manifest may not declare it", k)

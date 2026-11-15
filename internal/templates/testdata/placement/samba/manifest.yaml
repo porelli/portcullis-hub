@@ -1,0 +1,14 @@
+# Minimal fixture: the samba template's placement-relevant parts.
+name: Samba
+instances: single
+auth: {method: custom}
+ai: {unsupported: "test fixture"}
+settings:
+  options:
+    - key: smb_password
+      label: SMB password
+      type: person_secret
+      scope: person
+      hash: nt
+      length: 24
+      delivery: file

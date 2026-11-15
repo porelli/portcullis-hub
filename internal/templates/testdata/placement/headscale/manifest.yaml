@@ -1,0 +1,11 @@
+# Minimal fixture: the headscale template's placement-relevant parts.
+name: Headscale
+auth: {method: native-oidc}
+ai: {unsupported: "test fixture"}
+vpn:
+  label: Headscale tailnet
+  ranges: ["100.64.0.0/10"]
+  ingress: {service: gateway, proxy_protocol: v2}
+  identity: {source: hook, hook: vpn-devices, owner: oidc_sub, refresh: 60s}
+  dns: {hook: vpn-dns}
+  control_routers: [headscale]

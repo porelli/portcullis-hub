@@ -38,7 +38,14 @@ const proxyNetwork = "portcullis-proxy"
 // middlewares and portcullis-vpnonly-<id> routers, contract §3.3) is the
 // Hub's too, with no exception (core's forwarder image is
 // ghcr.io/porelli/portcullis-forwarder, which doesn't match).
-var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix, VPNReservedPrefix}
+//
+// portcullis-link* (the link role's networks portcullis-link and
+// portcullis-link-data, contract §17) is core's: a template naming one
+// could join the Hub's control path or the relays' data path.
+var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcullis-oauth2-", MCPNamePrefix, VPNReservedPrefix, LinkReservedPrefix}
+
+// LinkReservedPrefix starts the link role's network names (contract §17).
+const LinkReservedPrefix = "portcullis-link"
 
 // coreServices are the services of core's docker-compose.yml (all
 // profiles), coreVolumes its volume keys (Docker names
@@ -50,7 +57,7 @@ var (
 		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
-		"group_gate_data", "wg_data", "vpn_doc")
+		"group_gate_data", "wg_data", "vpn_doc", "link_doc")
 	// coreAliases are core's network aliases that aren't service names
 	// (wg's metrics address on portcullis): reserved DNS names too.
 	coreAliases = set("wg-metrics")
@@ -257,6 +264,9 @@ func checkCoreRefs(compose []byte, hostVars map[string]string) error {
 			if strings.Contains(low, r) || strings.Contains(bare, r) {
 				if r == VPNReservedPrefix {
 					return fmt.Errorf("compose.yml references %q: names starting %s (the VPN network, middlewares and routers) are rendered by the Hub only (contract §3.3)", VPNReservedPrefix, VPNReservedPrefix)
+				}
+				if r == LinkReservedPrefix {
+					return fmt.Errorf("compose.yml references %q: names starting %s are the link role's networks (contract §17)", LinkReservedPrefix, LinkReservedPrefix)
 				}
 				if r == MCPNamePrefix {
 					return fmt.Errorf("compose.yml references %q: names starting %s (routers, services, middlewares, aliases, container names, hostnames) are the Hub's AI companion routes and aliases (contract §3.2)", MCPNamePrefix, MCPNamePrefix)
