@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,13 +48,29 @@ func ValidBundlePath(p string) bool {
 	return true
 }
 
-// ValidateManifest checks m before any byte of the tar is read: the
-// instance id, each path, each entry (64 lower-case hex digits, mode only
+// ManifestName is the bundle's first tar member, the BundleManifest.
+const ManifestName = "MANIFEST.json"
+
+// WriteManifest writes m as the first member of tw (mode 0600).
+func WriteManifest(tw *tar.Writer, m BundleManifest) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: ManifestName, Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(b)), Format: tar.FormatPAX}); err != nil {
+		return err
+	}
+	_, err = tw.Write(b)
+	return err
+}
+
+// ValidateManifest checks m before any file of the tar is read: the
+// instance and template ids, the volume names (validateIdentity), no entry for MANIFEST.json itself, each path, each entry (64 lower-case hex digits, mode only
 // permission bits, size ≥ 0), no file below another file, and the sizes'
 // total within maxBytes.
 func ValidateManifest(m BundleManifest, maxBytes int64) error {
-	if err := ValidInstance(m.Instance); err != nil {
-		return fmt.Errorf("bundle manifest: %w", err)
+	if err := validateIdentity(m); err != nil {
+		return err
 	}
 	if len(m.Files) == 0 {
 		return errors.New("bundle manifest: no files")
@@ -65,6 +82,8 @@ func ValidateManifest(m BundleManifest, maxBytes int64) error {
 	for _, p := range sortedFiles(m.Files) {
 		e := m.Files[p]
 		switch {
+		case p == ManifestName:
+			return fmt.Errorf("bundle manifest: %s lists itself", ManifestName)
 		case !ValidBundlePath(p):
 			return fmt.Errorf("bundle manifest: path %q is not a clean relative path", clip(p))
 		case !servers.ValidSHA256Hex(e.SHA256):
@@ -82,6 +101,23 @@ func ValidateManifest(m BundleManifest, maxBytes int64) error {
 		total += e.Size
 		if total > maxBytes {
 			return fmt.Errorf("bundle manifest: files over the %d-byte cap", maxBytes)
+		}
+	}
+	return nil
+}
+
+// validateIdentity: the instance and template ids and the volume names
+// (each one the instance's own form for its key, volumeNameOK).
+func validateIdentity(m BundleManifest) error {
+	if err := ValidInstance(m.Instance); err != nil {
+		return fmt.Errorf("bundle manifest: %w", err)
+	}
+	if !templates.ValidID(m.Template) {
+		return fmt.Errorf("bundle manifest: template %q is not a template id", clip(m.Template))
+	}
+	for _, k := range sortedKeys(m.Volumes) {
+		if !volumeKeyRe.MatchString(k) || !volumeNameOK(m, k, m.Volumes[k]) {
+			return fmt.Errorf("bundle manifest: volume %s: %q is not one of the instance's volume names", clip(k), clip(m.Volumes[k]))
 		}
 	}
 	return nil
@@ -175,11 +211,14 @@ func (v *verifyingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// ReadBundle reads the tar r (at most maxBytes in all, headers included)
-// against manifest m and calls write for each regular file, in tar
-// order, with its manifest mode and a reader that fails (instead of
-// ending) on a size or sha256 mismatch. Refused, before or while writing:
-//   - an invalid manifest (ValidateManifest);
+// ReadBundle reads the bundle tar r (PUT /v1/projects/{id}/bundle, at
+// most maxBytes in all, headers included) for instance: its first member
+// is MANIFEST.json (a regular file ≤ MaxJSON, decoded strictly, naming
+// instance; ValidateManifest), then it calls write for each other regular
+// file, in tar order, with its manifest mode and a reader that fails
+// (instead of ending) on a size or sha256 mismatch. Refused, before or
+// while writing:
+//   - a missing, misplaced or invalid manifest, or another instance's;
 //   - any entry type but a regular file or a directory (symlinks, hard
 //     links, devices, FIFOs, PAX global headers, sparse files…);
 //   - a name that isn't a clean relative path (absolute, "..", "./x",
@@ -192,16 +231,48 @@ func (v *verifyingReader) Read(p []byte) (int, error) {
 //
 // Directories are checked for their names only and never passed to
 // write (a writer creates parents itself). Any error refuses the whole
-// bundle: write must stage into a fresh directory and the caller commits
-// it only when ReadBundle returns nil. An error from write is returned
-// as is.
-func ReadBundle(r io.Reader, m BundleManifest, maxBytes int64, write func(name string, mode fs.FileMode, data io.Reader) error) error {
-	if err := ValidateManifest(m, maxBytes); err != nil {
-		return err
-	}
+// bundle: write must stage into a fresh directory (<data>/projects/<id>.new/)
+// and the caller renames it into place only when ReadBundle returns nil.
+// An error from write is returned as is.
+func ReadBundle(r io.Reader, instance string, maxBytes int64, write func(name string, mode fs.FileMode, data io.Reader) error) (BundleManifest, error) {
 	cr := &countingReader{r: r, max: maxBytes}
 	tr := tar.NewReader(cr)
-	seen := map[string]bool{}
+	m, err := readManifest(tr, instance, maxBytes)
+	if err != nil {
+		return BundleManifest{}, err
+	}
+	if err := readFiles(tr, cr, m, write); err != nil {
+		return BundleManifest{}, err
+	}
+	return m, nil
+}
+
+func readManifest(tr *tar.Reader, instance string, maxBytes int64) (BundleManifest, error) {
+	hdr, err := tr.Next()
+	if err != nil {
+		return BundleManifest{}, fmt.Errorf("bundle: no %s: %v", ManifestName, err)
+	}
+	if hdr.Name != ManifestName || hdr.Typeflag != tar.TypeReg {
+		return BundleManifest{}, fmt.Errorf("bundle: the first member must be %s", ManifestName)
+	}
+	if hdr.Size > MaxJSON {
+		return BundleManifest{}, fmt.Errorf("bundle: %s over %d bytes", ManifestName, MaxJSON)
+	}
+	var m BundleManifest
+	if err := Decode(tr, MaxJSON, &m); err != nil {
+		return BundleManifest{}, fmt.Errorf("bundle: %s: %v", ManifestName, err)
+	}
+	if err := ValidateManifest(m, maxBytes); err != nil {
+		return BundleManifest{}, err
+	}
+	if m.Instance != instance {
+		return BundleManifest{}, fmt.Errorf("bundle: the manifest names another instance than %s", clip(instance))
+	}
+	return m, nil
+}
+
+func readFiles(tr *tar.Reader, cr *countingReader, m BundleManifest, write func(name string, mode fs.FileMode, data io.Reader) error) error {
+	seen := map[string]bool{ManifestName: true}
 	files := map[string]bool{}
 	entries := 0
 	for {

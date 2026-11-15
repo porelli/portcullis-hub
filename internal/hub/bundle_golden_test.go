@@ -13,11 +13,13 @@ import (
 func TestGoldenRendersPassBundleRules(t *testing.T) {
 	f, _ := goldenRun(t, true)
 	for _, id := range []string{"grafana", "disks"} {
-		proj, err := f.h.loadRendered(t.Context(), f.h.Template(id))
+		tpl := f.h.Template(id)
+		proj, err := f.h.loadRendered(t.Context(), tpl)
 		if err != nil {
 			t.Fatalf("%s: %v", id, err)
 		}
-		if err := agentapi.ValidateBundle(proj, id, DefaultOverrideBindRoots, "/host/project"); err != nil {
+		mf := agentapi.BundleManifest{Instance: id, Template: tpl.TemplateID, Volumes: tpl.NamesFor(id).Volumes}
+		if err := agentapi.ValidateBundle(proj, mf, nil, DefaultOverrideBindRoots, "/host/project"); err != nil {
 			t.Errorf("%s: %v", id, err)
 		}
 	}

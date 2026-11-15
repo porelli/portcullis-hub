@@ -11,8 +11,8 @@
 package agentapi
 
 import (
-	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,12 +141,18 @@ func (i Info) RuntimeInfo() (runtime.Info, error) {
 	return out, nil
 }
 
-// BundleManifest is the sha256 manifest of a bundle: the body of PUT
-// /v1/projects/{id}/bundle is the manifest as one JSON line (ReadHeader),
-// then the tar (ReadBundle). Instance must be the path's id; Files maps
-// every regular file's path to its entry.
+// BundleManifest is a bundle's MANIFEST.json, the tar's first member
+// (ReadBundle): Instance must be the path's id; Files maps every other
+// regular file's path to its entry.
+//
+// Template is the instance's template id (the default instance's id is
+// its template's), Volumes each compose volume key's engine name as the
+// Hub derives it (§11.2, templates NamesFor): the only names the agent
+// lets the model use (ValidateBundle).
 type BundleManifest struct {
 	Instance string               `json:"instance"`
+	Template string               `json:"template"`
+	Volumes  map[string]string    `json:"volumes,omitempty"`
 	Files    map[string]FileEntry `json:"files"`
 }
 
@@ -164,25 +170,23 @@ const (
 	HelperFolderFix = "folder_fix"
 )
 
-// Volume IO directions (HelperSpec.Mode).
-const (
-	VolumeOut = "out"
-	VolumeIn  = "in"
-)
-
-// HelperSpec is the first line of a helper call (WriteHeader /
-// ReadHeader), then the stream: volume_io (Instance, Volume, Path the
-// helper's mount point, Mode out|in: VolumeOut / VolumeIn) or folder_fix
-// (Fixer: RunFixer). The agent runs only its own fixed specs: it rebuilds
-// a folder_fix spec with its own builder and compares the encodings byte
-// for byte (SameFixer), and runs it on its own image (P7).
+// HelperSpec is POST /v1/helpers (contract §17.4): volume_io (Instance,
+// Volume, Path the helper's mount point, Write: VolumeIn, else
+// VolumeOut) or folder_fix (Spec: RunFixer). The agent runs only fixed
+// specs: the Hub's volume helper, and the fixer it rebuilds with its own
+// builder and compares byte for byte (SameFixer), on its own image (P7).
 type HelperSpec struct {
 	Kind     string     `json:"kind"`
 	Instance string     `json:"instance,omitempty"`
 	Volume   string     `json:"volume,omitempty"`
 	Path     string     `json:"path,omitempty"`
-	Mode     string     `json:"mode,omitempty"`
-	Fixer    *FixerSpec `json:"fixer,omitempty"`
+	Write    bool       `json:"write,omitempty"`
+	Spec     *FixerSpec `json:"spec,omitempty"`
+}
+
+// HelperCreated is POST /v1/helpers' answer: the helper's id ({h}).
+type HelperCreated struct {
+	ID string `json:"id"`
 }
 
 // BindMount is runtime.BindMount on the wire.
@@ -245,8 +249,8 @@ func (f FixerSpec) Canonical() []byte {
 func SameFixer(got, built FixerSpec) bool { return bytes.Equal(got.Canonical(), built.Canonical()) }
 
 // RunResult is runtime.RunResult on the wire (POST
-// /v1/helpers/folder-fix: the first response line, then the out tar when
-// OutPath is set and the exit code is 0).
+// /v1/helpers/{h}/run; the out tar is then GET /v1/helpers/{h}/archive,
+// only when OutPath is set and the exit code is 0).
 type RunResult struct {
 	ExitCode      int    `json:"exit_code"`
 	Stdout        []byte `json:"stdout,omitempty"`
@@ -316,51 +320,12 @@ func readLine(r io.Reader, max int) ([]byte, error) {
 	}
 }
 
-// WriteHeader writes v as one JSON line (the header of a header + stream
-// body).
-func WriteHeader(w io.Writer, v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(append(b, '\n'))
-	return err
-}
-
-// ReadHeader decodes the first line of r (≤ MaxJSON) strictly into v and
-// returns the rest of the stream.
-func ReadHeader(r io.Reader, v any) (io.Reader, error) {
-	br := bufio.NewReaderSize(r, 64<<10)
-	line, err := br.ReadSlice('\n')
-	var full []byte
-	for errors.Is(err, bufio.ErrBufferFull) {
-		full = append(full, line...)
-		if len(full) > MaxJSON {
-			return nil, ErrTooLarge
-		}
-		line, err = br.ReadSlice('\n')
-	}
-	if err != nil {
-		if err == io.EOF {
-			return nil, io.ErrUnexpectedEOF
-		}
-		return nil, err
-	}
-	full = append(full, line[:len(line)-1]...)
-	if len(full) > MaxJSON {
-		return nil, ErrTooLarge
-	}
-	if err := jsonstrict.Decode(full, v); err != nil {
-		return nil, fmt.Errorf("agent API: header: %v", err)
-	}
-	return br, nil
-}
-
-// ProgressLine is one ndjson line of a long call (up, pull): progress of
-// a service's image (Service, Done/Total bytes, Sized), then exactly one
-// last line with End set (Error and Status when it failed: the status the
-// call would have answered, e.g. 409).
+// ProgressLine is one ndjson line of a long call (up: step, service,
+// done, total; pull: done, total, sized), then exactly one last line with
+// End set (Error and Status when it failed: the status the call would
+// have answered, e.g. 409).
 type ProgressLine struct {
+	Step    string `json:"step,omitempty"`
 	Service string `json:"service,omitempty"`
 	Done    int64  `json:"done,omitempty"`
 	Total   int64  `json:"total,omitempty"`
@@ -588,22 +553,39 @@ func ParseFilter(q map[string][]string) (runtime.Filter, error) {
 // Enrolment and identity bodies (contract §17; pre-flight P5/P6 order:
 // nonce → proof → CSR → sign → PUT cert → PUT network → PUT wg).
 
-// EnrolNonce is GET /v1/enrol/nonce: servers.NonceLen random bytes.
+// B64URL is bytes as base64url without padding (strict) on the wire.
+type B64URL []byte
+
+func (b B64URL) MarshalText() ([]byte, error) {
+	return []byte(base64.RawURLEncoding.EncodeToString(b)), nil
+}
+
+func (b *B64URL) UnmarshalText(t []byte) error {
+	d, err := base64.RawURLEncoding.Strict().DecodeString(string(t))
+	if err != nil {
+		return errors.New("not base64url without padding")
+	}
+	*b = d
+	return nil
+}
+
+// EnrolNonce is GET /v1/enrol/nonce: servers.NonceLen random bytes
+// (single use, valid 60 s).
 type EnrolNonce struct {
-	Nonce []byte `json:"nonce"`
+	Nonce B64URL `json:"nonce"`
 }
 
-// EnrolProof is POST /v1/enrol: the server id and servers.Proof over the
-// nonce and the agent's enrolling certificate SPKI.
+// EnrolProof is POST /v1/enrol: servers.Proof over the nonce and the
+// agent's enrolling certificate SPKI, and the CN the CSR must carry
+// (<id>.node.portcullis.internal). A good proof answers IdentityCSR.
 type EnrolProof struct {
-	ServerID string `json:"server_id"`
-	Nonce    []byte `json:"nonce"`
-	Proof    []byte `json:"proof"`
+	Proof B64URL `json:"proof"`
+	CSRCN string `json:"csr_cn"`
 }
 
-// IdentityCSR is POST /v1/identity/csr's answer: a PEM CSR for the
-// agent's new TLS key (CN/SAN <id>.node.portcullis.internal) and the
-// agent's new WireGuard public key (private keys never leave the worker).
+// IdentityCSR is the answer of POST /v1/enrol and POST
+// /v1/identity/csr: a PEM CSR for the agent's new TLS key and its new
+// WireGuard public key (private keys never leave the worker).
 type IdentityCSR struct {
 	CSR         string `json:"csr"`
 	WGPublicKey string `json:"wg_public_key"`
@@ -617,10 +599,18 @@ type IdentityCert struct {
 	CA          string `json:"ca"`
 }
 
-// NetworkParams is PUT /v1/network (once, at enrolment): the worker's
-// portcullis-proxy subnet and the address the agent pins itself at (the
-// primary's PORTCULLIS_PROXY_SUBNET / PORTCULLIS_TRAEFIK_IP).
+// NetworkParams is PUT /v1/network (once, at enrolment; contract §17.7):
+// the worker's portcullis-proxy subnet and dynamic range and the address
+// the agent pins itself at (the primary's PORTCULLIS_PROXY_SUBNET,
+// PORTCULLIS_PROXY_IP_RANGE and PORTCULLIS_TRAEFIK_IP).
 type NetworkParams struct {
-	ProxySubnet netip.Prefix `json:"proxy_subnet"`
-	TraefikIP   netip.Addr   `json:"traefik_ip"`
+	ProxySubnet  netip.Prefix `json:"proxy_subnet"`
+	ProxyIPRange netip.Prefix `json:"proxy_ip_range"`
+	TraefikIP    netip.Addr   `json:"traefik_ip"`
+}
+
+// IdentityWG is PUT /v1/identity/wg: the link's public key the agent
+// keeps as its peer when it switches to its own WireGuard key.
+type IdentityWG struct {
+	LinkPub string `json:"link_pub"`
 }

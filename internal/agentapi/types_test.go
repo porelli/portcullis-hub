@@ -78,9 +78,23 @@ func TestWireRoundTrip(t *testing.T) {
 	roundTrip(t, ExecResult{})
 	roundTrip(t, ExecSplitResult{ExitCode: -1})
 	roundTrip(t, RunResult{})
-	roundTrip(t, HelperSpec{Kind: HelperVolumeIO, Instance: "x", Volume: "v", Path: "/data", Mode: VolumeOut})
-	roundTrip(t, NetworkParams{ProxySubnet: netip.MustParsePrefix("172.31.254.0/26"), TraefikIP: netip.MustParseAddr("172.31.254.2")})
-	roundTrip(t, EnrolProof{ServerID: "nas", Nonce: []byte{1}, Proof: []byte{2}})
+	roundTrip(t, HelperSpec{Kind: HelperVolumeIO, Instance: "x", Volume: "v", Path: "/data", Write: true})
+	roundTrip(t, HelperCreated{ID: "h1"})
+	roundTrip(t, NetworkParams{ProxySubnet: netip.MustParsePrefix("172.31.254.0/26"), ProxyIPRange: netip.MustParsePrefix("172.31.254.32/27"), TraefikIP: netip.MustParseAddr("172.31.254.2")})
+	roundTrip(t, IdentityWG{LinkPub: "k"})
+	ep := roundTrip(t, EnrolProof{Proof: B64URL{0xfb, 0xff}, CSRCN: "nas.node.portcullis.internal"})
+	if string(ep.Proof) != "\xfb\xff" {
+		t.Errorf("proof %x", ep.Proof)
+	}
+	if b, _ := json.Marshal(EnrolNonce{Nonce: B64URL{0xfb, 0xff}}); string(b) != `{"nonce":"-_8"}` {
+		t.Errorf("nonce encoding %s (base64url, no padding)", b)
+	}
+	for _, bad := range []string{`{"nonce":"-_8="}`, `{"nonce":"+/8"}`, `{"nonce":[1]}`} {
+		var n EnrolNonce
+		if err := Decode(strings.NewReader(bad), MaxJSON, &n); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
 }
 
 // TestFixerSpecBytes: the wire spec drops the image and the reader, and

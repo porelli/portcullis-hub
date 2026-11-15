@@ -117,7 +117,8 @@ func TestRealTemplatesInstances(t *testing.T) {
 				// A worker-placeable instance's render (its Hub override
 				// included) passes the agent's bundle re-validation
 				// (multi-server pre-flight P4).
-				if err := agentapi.ValidateBundle(proj, id, DefaultOverrideBindRoots, project); err != nil {
+				mf := agentapi.BundleManifest{Instance: id, Template: c.TemplateID, Volumes: c.NamesFor(id).Volumes}
+				if err := agentapi.ValidateBundle(proj, mf, nil, DefaultOverrideBindRoots, project); err != nil {
 					t.Errorf("%s: %v", id, err)
 				}
 				bundles++

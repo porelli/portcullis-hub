@@ -39,17 +39,27 @@ func TestRoutesCoverInstances(t *testing.T) {
 		}
 	}
 	if len(Routes) != 24 {
-		t.Errorf("%d routes, want 24", len(Routes))
+		t.Errorf("%d methods with routes, want 24", len(Routes))
 	}
 	mux := http.NewServeMux()
 	seen := map[string]string{}
-	for _, table := range []map[string]Route{Routes, ExtraRoutes} {
-		for name, r := range table {
+	all := map[string][]Route{}
+	for m, rs := range Routes {
+		if len(rs) == 0 {
+			t.Errorf("%s: no route", m)
+		}
+		all[m] = rs
+	}
+	for n, r := range ExtraRoutes {
+		all["extra "+n] = []Route{r}
+	}
+	for name, rs := range all {
+		for _, r := range rs {
 			if !strings.HasPrefix(r.Path, "/v1/") {
 				t.Errorf("%s: %s outside /v1", name, r.Path)
 			}
-			if other, dup := seen[r.Pattern()]; dup {
-				t.Errorf("%s and %s share %s", name, other, r.Pattern())
+			if _, dup := seen[r.Pattern()]; dup {
+				continue // a shared helper route
 			}
 			seen[r.Pattern()] = name
 			func() {
@@ -62,7 +72,7 @@ func TestRoutesCoverInstances(t *testing.T) {
 			}()
 			for _, b := range []Body{r.Request, r.Response} {
 				switch b {
-				case BodyNone, BodyJSON, BodyNDJSON, BodyText, BodyTar, BodyHeaderTar:
+				case BodyNone, BodyJSON, BodyNDJSON, BodyText, BodyTar:
 				default:
 					t.Errorf("%s: body %q", name, b)
 				}
@@ -71,5 +81,18 @@ func TestRoutesCoverInstances(t *testing.T) {
 	}
 	if _, ok := ExtraRoutes["Metrics"]; !ok {
 		t.Error("no metrics route")
+	}
+	// Only the helper routes are shared, and an extra route is never an
+	// Instances route.
+	for p, n := range seen {
+		if strings.HasPrefix(n, "extra ") {
+			for m, rs := range Routes {
+				for _, r := range rs {
+					if r.Pattern() == p {
+						t.Errorf("%s is both %s and %s", p, n, m)
+					}
+				}
+			}
+		}
 	}
 }

@@ -15,10 +15,16 @@ import (
 // bundleVector is one entry of testdata/bundle_vectors.json (the agent's
 // TestBundleRefusesLinksAndEscapes reads the same file): tar entries in
 // order (type reg|dir|symlink|link|char|block|fifo|xglobal), the
-// manifest, the cap and the verdict (error: a substring of ReadBundle's).
+// manifest (written as MANIFEST.json, see ManifestMember), the path's
+// instance, the cap and the verdict (error: a substring of ReadBundle's).
 type bundleVector struct {
-	Name    string `json:"name"`
-	Entries []struct {
+	Name     string `json:"name"`
+	Instance string `json:"instance"`
+	// ManifestMember: first (MANIFEST.json written first, from Manifest
+	// or ManifestRaw), second (after the first entry) or missing.
+	ManifestMember string `json:"manifest_member"`
+	ManifestRaw    string `json:"manifest_raw"`
+	Entries        []struct {
 		Name     string `json:"name"`
 		Type     string `json:"type"`
 		Mode     int64  `json:"mode"`
@@ -37,7 +43,23 @@ var tarTypes = map[string]byte{"reg": tar.TypeReg, "dir": tar.TypeDir, "symlink"
 func (v bundleVector) tar(t *testing.T) []byte {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	for _, e := range v.Entries {
+	manifest := func() {
+		if v.ManifestRaw == "" {
+			if err := WriteManifest(tw, v.Manifest); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		tw.WriteHeader(&tar.Header{Name: ManifestName, Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(v.ManifestRaw)), Format: tar.FormatPAX})
+		tw.Write([]byte(v.ManifestRaw))
+	}
+	if v.ManifestMember == "first" {
+		manifest()
+	}
+	for i, e := range v.Entries {
+		if i == 1 && v.ManifestMember == "second" {
+			manifest()
+		}
 		typ, ok := tarTypes[e.Type]
 		if !ok {
 			t.Fatalf("%s: type %q", v.Name, e.Type)
@@ -82,7 +104,7 @@ func TestBundleVectors(t *testing.T) {
 	for _, v := range vs {
 		got := map[string]string{}
 		modes := map[string]fs.FileMode{}
-		err := ReadBundle(bytes.NewReader(v.tar(t)), v.Manifest, v.MaxBytes, func(name string, mode fs.FileMode, r io.Reader) error {
+		_, err := ReadBundle(bytes.NewReader(v.tar(t)), v.Instance, v.MaxBytes, func(name string, mode fs.FileMode, r io.Reader) error {
 			b, err := io.ReadAll(r)
 			if err != nil {
 				return err // a staging writer drops the file
@@ -122,7 +144,7 @@ func TestBundleMismatchNeverEnds(t *testing.T) {
 		}
 	}
 	var sawEOF bool
-	err := ReadBundle(bytes.NewReader(v.tar(t)), v.Manifest, v.MaxBytes, func(name string, _ fs.FileMode, r io.Reader) error {
+	_, err := ReadBundle(bytes.NewReader(v.tar(t)), v.Instance, v.MaxBytes, func(name string, _ fs.FileMode, r io.Reader) error {
 		if name != "env" {
 			return nil // lazy: never reads
 		}
@@ -146,35 +168,7 @@ func TestBundleMismatchNeverEnds(t *testing.T) {
 			v = x
 		}
 	}
-	if err := ReadBundle(bytes.NewReader(v.tar(t)), v.Manifest, v.MaxBytes, func(string, fs.FileMode, io.Reader) error { return boom }); !errors.Is(err, boom) {
+	if _, err := ReadBundle(bytes.NewReader(v.tar(t)), v.Instance, v.MaxBytes, func(string, fs.FileMode, io.Reader) error { return boom }); !errors.Is(err, boom) {
 		t.Errorf("write error: %v", err)
-	}
-}
-
-func TestReadHeaderThenStream(t *testing.T) {
-	var buf bytes.Buffer
-	m := BundleManifest{Instance: "immich", Files: map[string]FileEntry{"a": {SHA256: strings.Repeat("0", 64), Mode: 0o644, Size: 1}}}
-	if err := WriteHeader(&buf, m); err != nil {
-		t.Fatal(err)
-	}
-	buf.WriteString("TAR")
-	var got BundleManifest
-	rest, err := ReadHeader(&buf, &got)
-	if err != nil || got.Files["a"] != m.Files["a"] {
-		t.Fatalf("%v %+v", err, got)
-	}
-	if b, _ := io.ReadAll(rest); string(b) != "TAR" {
-		t.Errorf("rest %q", b)
-	}
-	for name, in := range map[string]string{
-		"no newline":    `{"instance":"x","files":{}}`,
-		"unknown key":   `{"instance":"x","files":{},"x":1}` + "\n",
-		"duplicate key": `{"instance":"x","instance":"y","files":{}}` + "\n",
-		"too long":      `{"instance":"` + strings.Repeat("x", MaxJSON) + `","files":{}}` + "\n",
-	} {
-		var m BundleManifest
-		if _, err := ReadHeader(strings.NewReader(in), &m); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
 	}
 }

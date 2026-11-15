@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -58,45 +60,222 @@ func reservedName(n string) bool {
 	return templates.ReservedDNSName(n) || workerNames[f] || workerNames[first]
 }
 
-// bundleError is one refusal.
 func bundleError(format string, args ...any) error {
 	return fmt.Errorf("bundle refused: "+format, args...)
 }
 
+// ── Allowlists (contract §17.4: a worker runs only what these name; any
+// other compose key, present or future, is refused by default) ──────────
+
+func set(names ...string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+var (
+	// serviceKeys a bundle's service may set (the templates' allowed keys
+	// as the real templates and the Hub's overrides use them; each one
+	// with a value rule below where it matters). Not here, so refused:
+	// hooks (pre_start, post_start, pre_stop), provider, models, develop,
+	// deploy, build, extends, privileged, use_api_socket, gpus, sysctls,
+	// userns_mode, uts, cgroup, cgroup_parent, runtime, isolation,
+	// credential_spec, label_file, annotations, env_file, configs,
+	// secrets, external_links, net, volume_driver, storage_opt,
+	// blkio_config, device_cgroup_rules, oom_kill_disable, the cpu_*
+	// scheduler knobs, and service-level x-* extensions.
+	serviceKeys = set("name", "profiles", "restart", "scale", "attach", "container_name", "links",
+		"cap_add", "cap_drop", "cpus", "cpu_shares", "cpuset", "command", "devices", "dns", "dns_opt", "dns_search",
+		"domainname", "entrypoint", "environment", "extra_hosts", "group_add", "hostname", "image", "init", "ipc",
+		"labels", "logging", "mem_limit", "mem_reservation", "memswap_limit", "mem_swappiness", "mac_address",
+		"network_mode", "networks", "oom_score_adj", "pid", "pids_limit", "platform", "pull_policy", "read_only",
+		"security_opt", "shm_size", "stop_grace_period", "stop_signal", "tmpfs", "ulimits", "user", "volumes",
+		"volumes_from", "working_dir",
+		"depends_on", "expose", "healthcheck", "ports", "stdin_open", "tty")
+	serviceNetworkKeys = set("aliases", "ipv4_address", "ipv6_address", "priority", "gw_priority")
+	mountKeys          = set("type", "source", "target", "read_only", "consistency", "bind", "volume", "tmpfs")
+	bindKeys           = set("propagation", "create_host_path", "selinux", "recursive")
+	mountVolumeKeys    = set("nocopy", "subpath")
+	mountTmpfsKeys     = set("size", "mode")
+	networkKeys        = set("name", "driver", "external", "internal", "attachable", "labels", "enable_ipv4", "enable_ipv6")
+	volumeKeys         = set("name", "driver", "labels")
+	loggingDrivers     = set("", "json-file", "local")
+)
+
+// checkKeys refuses every field of struct v (inline structs flattened)
+// that holds a value and whose yaml key isn't in allowed. Fields compose
+// fills itself (yaml "-") are skipped.
+func checkKeys(v reflect.Value, allowed map[string]bool, what string) error {
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("yaml")
+		name, opts, _ := strings.Cut(tag, ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" && strings.Contains(opts, "inline") && f.Type.Kind() == reflect.Struct {
+			if err := checkKeys(v.Field(i), allowed, what); err != nil {
+				return err
+			}
+			continue
+		}
+		if v.Field(i).IsZero() {
+			continue
+		}
+		if name == "#extensions" {
+			return fmt.Errorf("%s: x-* extension keys are not allowed in a worker bundle", what)
+		}
+		if !allowed[name] {
+			return fmt.Errorf("%s: compose key %s is not allowed in a worker bundle", what, name)
+		}
+	}
+	return nil
+}
+
+// ── Volume names (contract §11.2), from the Hub's manifest ──────────────
+
+var volumeKeyRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// ownVolumePrefixes are the prefixes an instance's own volume names
+// start with (the longest match decides ownership against another
+// instance's).
+func ownVolumePrefixes(instance string) []string {
+	return []string{runtime.ProjectName(instance) + "_", "portcullis_" + instance + "-", "portcullis_" + instance + "_"}
+}
+
+// volumeNameOK: name is one of the names the instance's key may have
+// (§11.2): compose's portcullis-<id>_<key>; a multi template's
+// portcullis_<id>-<key>; for the template's default instance only, a
+// multi template's portcullis_<key> or a single template's declared
+// portcullis_<id>[-_…]. Never a core volume's name.
+func volumeNameOK(m BundleManifest, key, name string) bool {
+	if templates.CoreVolumeName(name) != "" {
+		return false
+	}
+	inst := m.Instance
+	if name == runtime.ProjectName(inst)+"_"+key || name == "portcullis_"+inst+"-"+key {
+		return true
+	}
+	if m.Template != inst {
+		return false
+	}
+	own := "portcullis_" + inst
+	return name == "portcullis_"+key || name == own || strings.HasPrefix(name, own+"-") || strings.HasPrefix(name, own+"_")
+}
+
+// ownPrefixLen is the length of the longest own prefix name starts with
+// (len("portcullis_") for a default instance's portcullis_<key>).
+func ownPrefixLen(instance, name string) int {
+	n := 0
+	if name == "portcullis_"+instance {
+		n = len(name)
+	}
+	for _, p := range ownVolumePrefixes(instance) {
+		if strings.HasPrefix(name, p) && len(p) > n {
+			n = len(p)
+		}
+	}
+	if n == 0 && strings.HasPrefix(name, "portcullis_") {
+		n = len("portcullis_")
+	}
+	return n
+}
+
+// checkVolumeNames: m's volume names are the instance's own and none is
+// (or falls under) another bundled instance's: equal to a name another
+// manifest lists, or under another instance's prefix at least as long as
+// the instance's own matching prefix (instance photos may not name
+// portcullis_photos-2-…, which photos-2 owns; photos-2 may).
+func checkVolumeNames(m BundleManifest, others []BundleManifest) error {
+	taken := map[string]string{}
+	for _, o := range others {
+		if o.Instance == m.Instance {
+			continue
+		}
+		for _, n := range o.Volumes {
+			taken[n] = o.Instance
+		}
+	}
+	for _, k := range sortedKeys(m.Volumes) {
+		name := m.Volumes[k]
+		if inst, ok := taken[name]; ok {
+			return fmt.Errorf("volume %s: %s is instance %s's", clip(k), clip(name), inst)
+		}
+		own := ownPrefixLen(m.Instance, name)
+		for _, o := range others {
+			if o.Instance == m.Instance {
+				continue
+			}
+			pre := ownVolumePrefixes(o.Instance)
+			if name == "portcullis_"+o.Instance {
+				pre = append(pre, name)
+			}
+			for _, p := range pre {
+				if strings.HasPrefix(name, p) && len(p) >= own {
+					return fmt.Errorf("volume %s: %s falls under instance %s's names", clip(k), clip(name), o.Instance)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ── ValidateBundle ──────────────────────────────────────────────────────
+
 // ValidateBundle re-validates a bundle's loaded compose model (every
 // profile; services and disabled services) before the agent runs it
 // (pre-flight P4: the rules on the result, not on the override input).
-// instance is the bundle's id, bindRoots the worker's folder roots
-// (absolute, clean), bundleDir the bundle's directory (absolute, the
-// project directory; relative bind sources resolve there). Refused:
-//   - a project name other than portcullis-<instance>;
-//   - project-level configs, secrets or a network/volume that isn't the
-//     project's own: an external network other than portcullis-proxy, a
-//     network named other than <project>_<key>, any external volume, a
-//     volume named outside the instance's names (<project>_<key>,
-//     portcullis_<key>, portcullis_<instance>[-_…]), a core volume, a
-//     volume driver other than local or with driver_opts;
-//   - per service: build, privileged, devices other than /dev/null slots,
-//     device_cgroup_rules, gpus, deploy device reservations, cap_add
-//     outside Docker's default set (templates.KubeBaselineCaps),
-//     security_opt other than no-new-privileges, network_mode other than
-//     none / service:<own>, pid / ipc / uts / userns / cgroup sharing with
-//     the host or a container, cgroup_parent, runtime, isolation,
-//     sysctls, extra_hosts host-gateway, env_file, configs, secrets,
-//     external_links, volumes_from other than an own service,
-//     com.docker.compose.* labels, a reserved DNS name (core's or the
-//     worker stack's), attachment to a network the model doesn't declare;
+// m is the bundle's manifest (the Hub's: the instance, its template and
+// its volume names), others the manifests of the worker's other bundled
+// instances, bindRoots the worker's folder roots (absolute, clean),
+// bundleDir the bundle's directory (absolute; relative bind sources
+// resolve there).
+//
+// Everything is allowlisted: a compose key outside the lists above is
+// refused, whatever it is. Then, refused:
+//   - a project name other than portcullis-<instance>; jobs, models,
+//     configs or secrets;
+//   - networks: an external one other than portcullis-proxy, a name other
+//     than <project>_<key>, a driver other than bridge, driver_opts or a
+//     custom ipam;
+//   - volumes: an external one, a driver other than local, driver_opts,
+//     a core volume, a key the manifest doesn't name or a name other than
+//     the manifest's, a name outside the instance's §11.2 names or under
+//     another bundled instance's (checkVolumeNames);
+//   - per service: devices other than /dev/null slots, cap_add outside
+//     Docker's default set (templates.KubeBaselineCaps), security_opt
+//     other than no-new-privileges, network_mode other than none /
+//     service:<own>, pid / ipc sharing with the host or a container,
+//     extra_hosts host-gateway, pull_policy build, a logging driver other
+//     than json-file or local, links / volumes_from other than an own
+//     service, com.docker.compose.* labels, a reserved DNS name (core's or
+//     the worker stack's), a network the model doesn't declare, a fixed
+//     address on portcullis-proxy (the agent's own address there is the
+//     Traefik IP);
 //   - per mount: a volume source the model doesn't declare (or a core
-//     volume), a bind source with "..", "~", a socket (*.sock), the
-//     host's root, outside bundleDir and every root, bind propagation
-//     shared/slave, any type but bind, volume or tmpfs.
-func ValidateBundle(model *types.Project, instance string, bindRoots []string, bundleDir string) error {
+//     volume), a bind source with "..", "~", a socket (*.sock), the host's
+//     root, outside bundleDir and every root, propagation shared/slave,
+//     any type but bind, volume or tmpfs.
+func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManifest, bindRoots []string, bundleDir string) error {
 	if model == nil {
 		return bundleError("no compose model")
 	}
-	if err := ValidInstance(instance); err != nil {
+	if err := validateIdentity(m); err != nil {
 		return bundleError("%v", err)
 	}
+	instance := m.Instance
 	if !path.IsAbs(bundleDir) || path.Clean(bundleDir) != bundleDir || bundleDir == "/" {
 		return bundleError("the bundle directory must be an absolute clean path")
 	}
@@ -111,37 +290,60 @@ func ValidateBundle(model *types.Project, instance string, bindRoots []string, b
 	if model.Name != project {
 		return bundleError("project %q is not %s", clip(model.Name), project)
 	}
-	if len(model.Configs) > 0 || len(model.Secrets) > 0 {
+	switch {
+	case len(model.Jobs) > 0 || len(model.DisabledJobs) > 0:
+		return bundleError("compose jobs are not allowed in a worker bundle")
+	case len(model.Models) > 0:
+		return bundleError("compose models are not allowed in a worker bundle")
+	case len(model.Configs) > 0 || len(model.Secrets) > 0:
 		return bundleError("configs and secrets read files the Hub can't check")
+	}
+	if err := checkVolumeNames(m, others); err != nil {
+		return bundleError("%v", err)
 	}
 	for _, k := range sortedKeys(model.Networks) {
 		n := model.Networks[k]
+		what := "network " + clip(k)
+		if err := checkKeys(reflect.ValueOf(n), networkKeys, what); err != nil {
+			return bundleError("%v", err)
+		}
 		if bool(n.External) {
 			if n.Name != "portcullis-proxy" {
-				return bundleError("network %s: only portcullis-proxy may be external", clip(k))
+				return bundleError("%s: only portcullis-proxy may be external", what)
 			}
 			continue
 		}
 		if n.Name != project+"_"+k {
-			return bundleError("network %s: named %q, not the project's own %s_%s", clip(k), clip(n.Name), project, clip(k))
+			return bundleError("%s: named %q, not the project's own %s_%s", what, clip(n.Name), project, clip(k))
+		}
+		if n.Driver != "" && n.Driver != "bridge" {
+			return bundleError("%s: driver %q: only bridge", what, clip(n.Driver))
 		}
 	}
 	for _, k := range sortedKeys(model.Volumes) {
 		v := model.Volumes[k]
+		what := "volume " + clip(k)
 		if c := templates.CoreVolumeName(k); c != "" {
-			return bundleError("volume %s is core's (%s)", clip(k), c)
+			return bundleError("%s is core's (%s)", what, c)
 		}
 		if bool(v.External) {
-			return bundleError("volume %s: external volumes are another project's data", clip(k))
+			return bundleError("%s: external volumes are another project's data", what)
+		}
+		if err := checkKeys(reflect.ValueOf(v), volumeKeys, what); err != nil {
+			return bundleError("%v (a local driver_opts device is a bind)", err)
+		}
+		if v.Driver != "" && v.Driver != "local" {
+			return bundleError("%s: only the local driver", what)
 		}
 		if c := templates.CoreVolumeName(v.Name); c != "" {
-			return bundleError("volume %s is named %s, core's volume", clip(k), clip(v.Name))
+			return bundleError("%s is named %s, core's volume", what, clip(v.Name))
 		}
-		if !ownVolumeName(v.Name, k, instance) {
-			return bundleError("volume %s: named %q, outside the instance's names", clip(k), clip(v.Name))
+		want, ok := m.Volumes[k]
+		if !ok {
+			return bundleError("%s is not in the bundle manifest", what)
 		}
-		if (v.Driver != "" && v.Driver != "local") || len(v.DriverOpts) > 0 {
-			return bundleError("volume %s: only the local driver without driver_opts (a driver_opts device is a bind)", clip(k))
+		if v.Name != want {
+			return bundleError("%s: named %q, the manifest says %q", what, clip(v.Name), clip(want))
 		}
 	}
 	all := map[string]types.ServiceConfig{}
@@ -168,16 +370,6 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// ownVolumeName: the names an instance's volume may have (contract §11.2:
-// compose's <project>_<key>, a multi template's portcullis_<key> (default
-// instance) or portcullis_<id>-<key>, a single template's declared
-// portcullis_<id>[-_…]).
-func ownVolumeName(name, key, instance string) bool {
-	own := "portcullis_" + instance
-	return name == runtime.ProjectName(instance)+"_"+key || name == "portcullis_"+key ||
-		name == own || strings.HasPrefix(name, own+"-") || strings.HasPrefix(name, own+"_")
-}
-
 func nsOK(v string, own map[string]types.ServiceConfig, allowed ...string) bool {
 	if v == "" || slices.Contains(allowed, v) {
 		return true
@@ -190,47 +382,24 @@ func nsOK(v string, own map[string]types.ServiceConfig, allowed ...string) bool 
 }
 
 func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceConfig, model *types.Project, roots []string, bundleDir string) error {
+	what := "service " + clip(n)
 	fail := func(format string, args ...any) error {
-		return bundleError("service %s: "+format, append([]any{clip(n)}, args...)...)
+		return bundleError(what+": "+format, args...)
+	}
+	if err := checkKeys(reflect.ValueOf(s), serviceKeys, what); err != nil {
+		return bundleError("%v", err)
 	}
 	switch {
-	case s.Build != nil:
-		return fail("build is not allowed (the agent never builds)")
-	case s.Privileged:
-		return fail("privileged containers can take over the host")
-	case len(s.DeviceCgroupRules) > 0:
-		return fail("device_cgroup_rules grant host devices")
-	case len(s.Gpus) > 0:
-		return fail("gpus grant host devices")
-	case len(s.Sysctls) > 0:
-		return fail("sysctls are not allowed on a worker")
-	case len(s.EnvFiles) > 0:
-		return fail("env_file reads files the Hub can't check")
-	case len(s.Configs) > 0 || len(s.Secrets) > 0:
-		return fail("configs and secrets read files the Hub can't check")
-	case len(s.ExternalLinks) > 0:
-		return fail("external_links attach other containers")
-	case s.CgroupParent != "":
-		return fail("cgroup_parent moves the container out of the engine's cgroup")
-	case s.Runtime != "":
-		return fail("runtime changes the container's isolation")
-	case s.Isolation != "" && s.Isolation != "default":
-		return fail("isolation changes the container's isolation")
-	case s.UserNSMode != "":
-		return fail("userns_mode can disable user-namespace remapping")
-	case s.Uts != "":
-		return fail("uts shares the host's UTS namespace")
-	case s.Cgroup != "" && s.Cgroup != "private":
-		return fail("cgroup %q shares the host's cgroup namespace", clip(s.Cgroup))
 	case !nsOK(s.Pid, own):
 		return fail("pid %q shares another PID namespace", clip(s.Pid))
 	case !nsOK(s.Ipc, own, "private", "shareable", "none"):
 		return fail("ipc %q shares another IPC namespace", clip(s.Ipc))
 	case !nsOK(s.NetworkMode, own, "none"):
 		return fail("network_mode %q: only none or service:<own service>", clip(s.NetworkMode))
-	}
-	if s.Deploy != nil && s.Deploy.Resources.Reservations != nil && len(s.Deploy.Resources.Reservations.Devices) > 0 {
-		return fail("deploy device reservations grant host devices")
+	case s.PullPolicy == types.PullPolicyBuild:
+		return fail("pull_policy build: the agent never builds")
+	case s.Logging != nil && !loggingDrivers[s.Logging.Driver]:
+		return fail("logging driver %q: only json-file or local", clip(s.Logging.Driver))
 	}
 	for _, d := range s.Devices {
 		if d.Source != "/dev/null" {
@@ -259,11 +428,14 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 	}
 	for _, vf := range s.VolumesFrom {
 		src, _, _ := strings.Cut(vf, ":")
-		if strings.HasPrefix(vf, "container:") {
-			return fail("volumes_from %s mounts another container's volumes", clip(vf))
-		}
-		if _, ok := own[src]; !ok {
+		if _, ok := own[src]; !ok || strings.HasPrefix(vf, "container:") {
 			return fail("volumes_from %s is not a service of this project", clip(vf))
+		}
+	}
+	for _, l := range s.Links {
+		src, _, _ := strings.Cut(l, ":")
+		if _, ok := own[src]; !ok {
+			return fail("links %s is not a service of this project", clip(l))
 		}
 	}
 	for _, k := range sortedKeys(s.Labels) {
@@ -277,19 +449,28 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 		}
 	}
 	for _, net := range sortedKeys(s.Networks) {
-		if _, ok := model.Networks[net]; !ok {
+		decl, ok := model.Networks[net]
+		if !ok {
 			return fail("network %s is not declared", clip(net))
 		}
-		if cfg := s.Networks[net]; cfg != nil {
-			for _, a := range cfg.Aliases {
-				if reservedName(a) {
-					return fail("network alias %q is reserved", clip(a))
-				}
+		cfg := s.Networks[net]
+		if cfg == nil {
+			continue
+		}
+		if err := checkKeys(reflect.ValueOf(cfg), serviceNetworkKeys, what+": network "+clip(net)); err != nil {
+			return bundleError("%v", err)
+		}
+		if bool(decl.External) && (cfg.Ipv4Address != "" || cfg.Ipv6Address != "") {
+			return fail("network %s: a fixed address on a shared network (the agent holds the Traefik address there)", clip(net))
+		}
+		for _, a := range cfg.Aliases {
+			if reservedName(a) {
+				return fail("network alias %q is reserved", clip(a))
 			}
 		}
 	}
-	for _, m := range s.Volumes {
-		if err := checkMount(m, model, roots, bundleDir); err != nil {
+	for _, mnt := range s.Volumes {
+		if err := checkMount(mnt, model, roots, bundleDir); err != nil {
 			return fail("%v", err)
 		}
 	}
@@ -297,6 +478,17 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 }
 
 func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots []string, bundleDir string) error {
+	if err := checkKeys(reflect.ValueOf(m), mountKeys, "mount "+clip(m.Target)); err != nil {
+		return err
+	}
+	for _, sub := range []struct {
+		v       any
+		allowed map[string]bool
+	}{{m.Bind, bindKeys}, {m.Volume, mountVolumeKeys}, {m.Tmpfs, mountTmpfsKeys}} {
+		if err := checkKeys(reflect.ValueOf(sub.v), sub.allowed, "mount "+clip(m.Target)); err != nil {
+			return err
+		}
+	}
 	switch m.Type {
 	case types.VolumeTypeTmpfs:
 		return nil
