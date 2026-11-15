@@ -410,7 +410,10 @@
        "type": "Directory"
       }
      }
-    ]
+    ],
+    "securityContext": {
+     "supplementalGroupsPolicy": "Strict"
+    }
    }
   },
   "as": "hub",
@@ -501,7 +504,10 @@
        "type": "Directory"
       }
      }
-    ]
+    ],
+    "securityContext": {
+     "supplementalGroupsPolicy": "Strict"
+    }
    }
   },
   "as": "hub",
@@ -6412,7 +6418,10 @@
        "type": "Directory"
       }
      }
-    ]
+    ],
+    "securityContext": {
+     "supplementalGroupsPolicy": "Strict"
+    }
    }
   },
   "as": "hub",
@@ -6453,7 +6462,10 @@
        "type": "Directory"
       }
      }
-    ]
+    ],
+    "securityContext": {
+     "supplementalGroupsPolicy": "Strict"
+    }
    }
   },
   "as": "hub",
@@ -6494,11 +6506,55 @@
        "type": "Directory"
       }
      }
-    ]
+    ],
+    "securityContext": {
+     "supplementalGroupsPolicy": "Strict"
+    }
    }
   },
   "as": "hub",
   "want": "deny",
   "reason_contains": "a pod with a hostPath volume"
+ },
+ {
+  "name": "hostPath without supplementalGroupsPolicy Strict",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hp-merge",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "runAsUser": 1000,
+       "runAsGroup": 1000,
+       "runAsNonRoot": true,
+       "allowPrivilegeEscalation": false
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/srv/shared/x",
+       "type": "Directory"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "supplementalGroupsPolicy Strict"
  }
 ]
