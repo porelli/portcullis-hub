@@ -31,7 +31,7 @@ const (
 	// MaxSize the file.
 	MaxPeers  = 250
 	MaxRelays = 4096
-	MaxSize   = 4 << 20
+	MaxSize   = 1 << 20
 )
 
 // Peer states (pre-flight P23: every non-revoked server is a peer; the
@@ -78,7 +78,7 @@ var instanceRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 // no peers and refuses every CONNECT:
 //   - strict JSON: no unknown, duplicate, missing or null key, no
 //     trailing data, at most MaxSize bytes;
-//   - version 1, written_at set (RFC 3339), subnet exactly 10.214.0.0/24;
+//   - version 1, written_at set (RFC 3339 UTC), subnet exactly 10.214.0.0/24;
 //   - at most 250 peers and 4096 relays;
 //   - each peer: a valid server id (never primary), a WireGuard public
 //     key, an ip inside the subnet in .10–.250, state enrolling|ready; ids,
@@ -99,12 +99,19 @@ func Parse(b []byte) (*Doc, error) {
 	return &d, nil
 }
 
+func utcOffset(t time.Time) bool {
+	_, off := t.Zone()
+	return off == 0
+}
+
 func (d *Doc) check() error {
 	switch {
 	case d.Version != Version:
 		return fmt.Errorf("version %d: only version %d is understood", d.Version, Version)
 	case d.WrittenAt.IsZero():
 		return errors.New("written_at: not set")
+	case !utcOffset(d.WrittenAt):
+		return errors.New("written_at: must be UTC (Z)")
 	case d.Subnet != Subnet:
 		return fmt.Errorf("subnet: must be %s", Subnet)
 	case len(d.Peers) > MaxPeers:
@@ -159,6 +166,7 @@ func (d *Doc) check() error {
 // sees a file it can't read).
 func Write(dir string, gid int, d *Doc) error {
 	out := *d
+	out.WrittenAt = out.WrittenAt.UTC()
 	if out.Peers == nil {
 		out.Peers = []Peer{}
 	}

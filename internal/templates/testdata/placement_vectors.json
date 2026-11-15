@@ -681,6 +681,42 @@
   }
  },
  {
+  "name": "is an AI page",
+  "compose": "services:\n  app:\n    image: test:latest\n",
+  "manifest": {
+   "name": "Test App",
+   "auth": {
+    "method": "forward-auth"
+   },
+   "ai": {
+    "chat": {
+     "provider_kinds": {
+      "openai": "one"
+     },
+     "file": {
+      "service": "app",
+      "mount": "/p"
+     },
+     "env": {
+      "service": "app"
+     }
+    }
+   }
+  },
+  "env": {},
+  "bind_roots": [
+   "/srv",
+   "/mnt",
+   "/media"
+  ],
+  "want": {
+   "primary_only": true,
+   "reasons": [
+    "is an AI page (model-provider secrets stay on the primary)"
+   ]
+  }
+ },
+ {
   "name": "is a VPN provider",
   "compose": "services:\n  gateway:\n    image: tailscale:latest\n",
   "manifest": {
@@ -1064,6 +1100,33 @@
    "primary_only": true,
    "reasons": [
     "binds /srv/photos outside the server's folder roots"
+   ]
+  }
+ },
+ {
+  "name": "scheme comes after binds",
+  "compose": "services:\n  app:\n    image: test:latest\n    volumes:\n      - /etc:/e:ro\n    labels:\n      traefik.http.services.s.loadbalancer.server.scheme: h2c\n      traefik.tcp.routers.t.rule: x\n",
+  "manifest": {
+   "name": "Test App",
+   "auth": {
+    "method": "forward-auth"
+   },
+   "ai": {
+    "unsupported": "test fixture"
+   }
+  },
+  "env": {},
+  "bind_roots": [
+   "/srv",
+   "/mnt",
+   "/media"
+  ],
+  "want": {
+   "primary_only": true,
+   "reasons": [
+    "has a Traefik TCP/UDP router (t)",
+    "binds /etc outside the server's folder roots",
+    "uses a non-HTTP backend scheme (traefik.http.services.s.loadbalancer.server.scheme)"
    ]
   }
  },

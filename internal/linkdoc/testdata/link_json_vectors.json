@@ -2071,6 +2071,42 @@
   "error": "does not decode"
  },
  {
+  "name": "written_at not UTC",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T13:00:00+01:00",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "written_at: must be UTC"
+ },
+ {
   "name": "written_at zero",
   "doc": {
    "version": 1,

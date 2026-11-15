@@ -30,21 +30,22 @@ type placementReasons struct {
 // Placement reports whether compose + manifest m (with the instance's
 // effective values env; nil = the defaults) must stay on the primary for
 // a server whose folder roots are bindRoots, and why. Rules, in this
-// order (services in compose order within each):
+// order (contract §3 "Worker-placeable templates") (services in compose order within each):
 //   - mounts the core volume <v>: a core volume, the Hub's secrets volume
 //     or link_doc, by key, name or external name;
 //   - has a Traefik TCP/UDP router (<name>): a traefik.tcp.* /
 //     traefik.udp.* label (its router or service name);
-//   - uses a non-HTTP backend scheme (<label>): a
-//     loadbalancer.server.scheme other than http (a relay carries HTTP
-//     only; pre-flight P15);
 //   - has a per-person secret option (<key>);
-//   - has AI companions (mcp-gate reaches them on the primary);
+//   - has AI companions (mcp-gate reaches them on the primary): ai.mcp;
+//   - is an AI page (model-provider secrets stay on the primary): ai.chat;
 //   - is a VPN provider (vpn: block);
 //   - uses host-gateway (<service>);
 //   - binds <path> outside the server's folder roots: an absolute (or
 //     ~) bind source outside every root, or a relative one other than
 //     ./templates/… and ./certs/ca-bundle.crt (resolved, cleaned);
+//   - uses a non-HTTP backend scheme (<label>): a
+//     loadbalancer.server.scheme other than http (a relay carries HTTP
+//     only; pre-flight P15);
 //   - is marked placement: primary_only.
 //
 // An unreadable compose file is primary-only ("compose.yml can't be
@@ -94,7 +95,6 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 	}
 	out := r.coreVolume
 	out = append(out, r.router...)
-	out = append(out, r.scheme...)
 	if m.Settings != nil {
 		for _, o := range m.Settings.Options {
 			if o.Type == TypePersonSecret {
@@ -105,11 +105,15 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 	if m.AI != nil && len(m.AI.MCP) > 0 {
 		out = append(out, "has AI companions (mcp-gate reaches them on the primary)")
 	}
+	if m.AI != nil && m.AI.Chat != nil {
+		out = append(out, "is an AI page (model-provider secrets stay on the primary)")
+	}
 	if m.VPN != nil {
 		out = append(out, "is a VPN provider (vpn: block)")
 	}
 	out = append(out, r.hostGateway...)
 	out = append(out, r.bind...)
+	out = append(out, r.scheme...)
 	if m.Placement == PlacementPrimaryOnly {
 		out = append(out, "is marked placement: primary_only")
 	}
