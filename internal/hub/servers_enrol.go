@@ -531,10 +531,15 @@ func (h *Hub) pinServer(ctx context.Context, id string, leaf *x509.Certificate, 
 		h.discardSerial(ctx, id, serial)
 		return statusErr(409, "server %s was revoked: its new certificate is revoked too", id)
 	}
+	prev := s.CertSerial
 	s.CertSerial, s.SPKI, s.CertNotAfter = serial, hex.EncodeToString(sum[:]), leaf.NotAfter.UTC()
 	h.st.Servers[id] = s
-	// The server's live serial now: no longer owed.
+	// The server's live serial now: no longer owed. The one it replaces
+	// (a renewal) is owed: the tick revokes it.
 	h.settleSerialLocked(serial)
+	if prev != "" && prev != serial {
+		h.oweSerialLocked(id, prev)
+	}
 	h.saveLocked()
 	h.mu.Unlock()
 	return nil

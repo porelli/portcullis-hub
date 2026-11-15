@@ -862,6 +862,14 @@ func TestRenewAtOneThird(t *testing.T) {
 	if !strings.Contains(strings.Join(sf.actions(), " "), "server.renewed:ok") {
 		t.Errorf("audit %v", sf.actions())
 	}
+	// The replaced certificate is owed, and the next drain revokes it.
+	if owed := sf.owed(); len(owed) != 1 || owed[0] != "nas:"+before.CertSerial {
+		t.Errorf("owed after the renewal %v", owed)
+	}
+	sf.h.drainOwed(ctx, "")
+	if !slices.Contains(sf.ca.revokedList(), before.CertSerial) || len(sf.owed()) != 0 {
+		t.Errorf("the old certificate isn't revoked: %v owed %v", sf.ca.revokedList(), sf.owed())
+	}
 	// The new pins work: the next call isn't a mismatch.
 	sf.h.pollServer(ctx, "nas")
 	if s, _ := sf.server("nas"); s.State != ServerReady {
@@ -1345,6 +1353,7 @@ func TestRevokeRotatesAIClient(t *testing.T) {
 func TestOwedSerials(t *testing.T) {
 	sf := newServersFixture(t)
 	sf.enrol(t, "nas")
+	enrolled, _ := sf.server("nas")
 	if owed := sf.owed(); len(owed) != 0 {
 		t.Fatalf("a pinned serial is owed: %v", owed)
 	}
@@ -1378,9 +1387,11 @@ func TestOwedSerials(t *testing.T) {
 	if !slices.Contains(sf.ca.revokedList(), first) {
 		t.Errorf("the refused certificate %s wasn't revoked: %v", first, sf.ca.revokedList())
 	}
-	if owed := sf.owed(); len(owed) != 0 {
-		t.Errorf("owed after the tick %v (the renewed one is pinned)", owed)
+	// The renewed one is pinned; the one it replaced is owed.
+	if owed := sf.owed(); len(owed) != 1 || owed[0] != "nas:"+enrolled.CertSerial {
+		t.Errorf("owed after the tick %v", owed)
 	}
+	sf.h.drainOwed(context.Background(), "")
 	// The server is removed while a renewal is signed (and enroll is
 	// down at that moment): the serial is still revoked later.
 	due()
@@ -1414,6 +1425,7 @@ func TestOwedSerials(t *testing.T) {
 func TestInflightSerialNotDrained(t *testing.T) {
 	sf := newServersFixture(t)
 	sf.enrol(t, "nas")
+	enrolled, _ := sf.server("nas")
 	ctx := context.Background()
 	due := func() {
 		sf.h.mu.Lock()
@@ -1448,7 +1460,8 @@ func TestInflightSerialNotDrained(t *testing.T) {
 	if slices.Contains(sf.ca.revokedList(), fresh) {
 		t.Fatal("the drain revoked the in-flight serial")
 	}
-	if s, _ := sf.server("nas"); s.CertSerial != fresh || len(sf.owed()) != 0 {
+	// Pinned; only the certificate it replaced is owed.
+	if s, _ := sf.server("nas"); s.CertSerial != fresh || len(sf.owed()) != 1 || sf.owed()[0] != "nas:"+enrolled.CertSerial {
 		t.Errorf("pinned %s owed %v", s.CertSerial, sf.owed())
 	}
 	b, _ := sf.h.backendOf("nas")
