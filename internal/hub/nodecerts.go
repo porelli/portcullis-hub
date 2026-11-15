@@ -1,0 +1,254 @@
+package hub
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/portcullis/hub/internal/fsutil"
+)
+
+// Node certificates (contract §17.5): the Hub's hub.control certificate
+// (its key at <data>/nodes/control.key, 0600, never leaves the Hub) and
+// the workers' node-worker certificates, signed by core's enroll
+// (POST /internal/nodes/sign|revoke, the invite bearer). The Hub never
+// holds a Vault token.
+
+// Node roles enroll signs for the Hub.
+const (
+	RoleNodeWorker  = "node-worker"
+	RoleNodeControl = "node-control"
+	ControlCN       = "hub.control"
+)
+
+// NodeCert is enroll's answer: the PEM certificate, its serial (Vault's
+// "0a:1b:…"), when it ends and the pki_node CA (PEM).
+type NodeCert struct {
+	Certificate, Serial, CA string
+	NotAfter                time.Time
+}
+
+// NodeSigner signs and revokes node certificates (enroll).
+type NodeSigner interface {
+	SignNode(ctx context.Context, role, cn, csrPEM string) (*NodeCert, error)
+	RevokeNode(ctx context.Context, serial string) error
+}
+
+// EnrollNodes is NodeSigner over enroll's internal listener: the invite
+// API's host and secret file.
+type EnrollNodes struct {
+	Base       string // http://enroll:8444
+	SecretFile string
+	HTTP       *http.Client
+}
+
+// NewEnrollNodes takes the invite API URL (its scheme and host) and the
+// invite secret file.
+func NewEnrollNodes(inviteURL, secretFile string) (*EnrollNodes, error) {
+	u, err := url.Parse(inviteURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("the invite API URL %q isn't valid", inviteURL)
+	}
+	return &EnrollNodes{Base: u.Scheme + "://" + u.Host, SecretFile: secretFile, HTTP: &http.Client{Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+}
+
+func (e *EnrollNodes) post(ctx context.Context, p string, body, out any) error {
+	b, err := os.ReadFile(e.SecretFile)
+	if err != nil || len(strings.TrimSpace(string(b))) < 32 {
+		return errors.New("enroll: the invite secret is unavailable")
+	}
+	j, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, "POST", e.Base+p, bytes.NewReader(j))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := e.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("enroll: %w", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode >= 300 {
+		var eb struct {
+			Error string `json:"error"`
+		}
+		json.Unmarshal(rb, &eb)
+		return statusErr(502, "enroll answered %d: %s", resp.StatusCode, clipRunes(eb.Error, 200))
+	}
+	if out != nil {
+		return json.Unmarshal(rb, out)
+	}
+	return nil
+}
+
+func (e *EnrollNodes) SignNode(ctx context.Context, role, cn, csrPEM string) (*NodeCert, error) {
+	var r struct {
+		Certificate string `json:"certificate"`
+		Serial      string `json:"serial"`
+		NotAfter    string `json:"not_after"`
+		CA          string `json:"ca"`
+	}
+	if err := e.post(ctx, "/internal/nodes/sign", map[string]string{"role": role, "common_name": cn, "csr": csrPEM}, &r); err != nil {
+		return nil, err
+	}
+	na, err := time.Parse(time.RFC3339, r.NotAfter)
+	if err != nil {
+		return nil, errors.New("enroll: not_after isn't RFC 3339")
+	}
+	return &NodeCert{Certificate: r.Certificate, Serial: r.Serial, CA: r.CA, NotAfter: na}, nil
+}
+
+func (e *EnrollNodes) RevokeNode(ctx context.Context, serial string) error {
+	return e.post(ctx, "/internal/nodes/revoke", map[string]string{"serial": serial}, nil)
+}
+
+// SetNodeSigner wires enroll (cmd/hub/main.go).
+func (h *Hub) SetNodeSigner(s NodeSigner) {
+	h.srvMu.Lock()
+	h.signer = s
+	h.srvMu.Unlock()
+}
+
+func (h *Hub) nodeSigner() NodeSigner {
+	h.srvMu.Lock()
+	defer h.srvMu.Unlock()
+	return h.signer
+}
+
+func (h *Hub) nodesDir() string { return filepath.Join(h.cfg.DataDir, "nodes") }
+
+// newNodeKey is a node key (EC P-256, the roles' key type) and its CSR
+// for cn: the CN only (enroll refuses any SAN).
+func newNodeKey(cn string) (*ecdsa.PrivateKey, string, error) {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, "", err
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, k)
+	if err != nil {
+		return nil, "", err
+	}
+	return k, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})), nil
+}
+
+func parseOnePEMCert(p string) (*x509.Certificate, error) {
+	blk, rest := pem.Decode([]byte(p))
+	if blk == nil || blk.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("not exactly one PEM certificate")
+	}
+	return x509.ParseCertificate(blk.Bytes)
+}
+
+// checkNodeCA: the pki_node CA is a self-signed CA (its own root, P1).
+func checkNodeCA(c *x509.Certificate) error {
+	if !c.IsCA || c.CheckSignatureFrom(c) != nil {
+		return errors.New("the pki_node CA isn't a self-signed CA certificate")
+	}
+	return nil
+}
+
+// caSHA256 is the join code's ca_sha256: sha256 of the CA's DER (P5).
+func caSHA256(c *x509.Certificate) string {
+	s := sha256.Sum256(c.Raw)
+	return hex.EncodeToString(s[:])
+}
+
+// renewDue: less than ⅓ of the certificate's life is left.
+func renewDue(c *x509.Certificate, now time.Time) bool {
+	life := c.NotAfter.Sub(c.NotBefore)
+	return c.NotAfter.Sub(now) < life/3
+}
+
+// controlCert is the Hub's hub.control certificate (with the pki_node
+// CA): loaded from <data>/nodes, (re)issued through enroll when missing
+// or at ⅓ remaining life, a new key each time.
+func (h *Hub) controlCert(ctx context.Context) (tls.Certificate, *x509.Certificate, error) {
+	h.nodeMu.Lock()
+	defer h.nodeMu.Unlock()
+	dir := h.nodesDir()
+	cert, ca, err := loadControl(dir)
+	if err == nil && !renewDue(cert.Leaf, h.now()) {
+		return cert, ca, nil
+	}
+	signer := h.nodeSigner()
+	if signer == nil {
+		if err == nil {
+			return cert, ca, nil // due but no signer: keep using it until it ends
+		}
+		return tls.Certificate{}, nil, statusErr(503, "enroll isn't configured: node certificates can't be signed")
+	}
+	k, csr, kerr := newNodeKey(ControlCN)
+	if kerr != nil {
+		return tls.Certificate{}, nil, kerr
+	}
+	nc, serr := signer.SignNode(ctx, RoleNodeControl, ControlCN, csr)
+	if serr != nil {
+		if err == nil {
+			return cert, ca, nil
+		}
+		return tls.Certificate{}, nil, serr
+	}
+	leaf, perr := parseOnePEMCert(nc.Certificate)
+	nca, cerr := parseOnePEMCert(nc.CA)
+	if perr != nil || cerr != nil || leaf.Subject.CommonName != ControlCN {
+		return tls.Certificate{}, nil, statusErr(502, "enroll's control certificate is unusable")
+	}
+	if err := checkNodeCA(nca); err != nil {
+		return tls.Certificate{}, nil, statusErr(502, "%v", err)
+	}
+	if ca != nil && !ca.Equal(nca) {
+		return tls.Certificate{}, nil, statusErr(502, "enroll answered with another pki_node CA than the pinned one")
+	}
+	der, _ := x509.MarshalPKCS8PrivateKey(k)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	for name, b := range map[string][]byte{"control.key": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}),
+		"control.crt": []byte(nc.Certificate), "ca.crt": []byte(nc.CA)} {
+		if err := fsutil.WriteFileAtomic(filepath.Join(dir, name), b, 0o600); err != nil {
+			return tls.Certificate{}, nil, err
+		}
+	}
+	return loadControl(dir)
+}
+
+func loadControl(dir string) (tls.Certificate, *x509.Certificate, error) {
+	crt, err1 := os.ReadFile(filepath.Join(dir, "control.crt"))
+	key, err2 := os.ReadFile(filepath.Join(dir, "control.key"))
+	caB, err3 := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err1 != nil || err2 != nil || err3 != nil {
+		return tls.Certificate{}, nil, errors.New("no control certificate yet")
+	}
+	c, err := tls.X509KeyPair(crt, key)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	ca, err := parseOnePEMCert(string(caB))
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	// The chain carries the CA: an enrolling agent learns it from there.
+	c.Certificate = append(c.Certificate, ca.Raw)
+	return c, ca, nil
+}

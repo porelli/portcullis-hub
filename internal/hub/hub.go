@@ -153,6 +153,14 @@ type Config struct {
 	// group (shared only with wg and group-gate).
 	VPNDocDir string
 	VPNDocGID int
+	// LinkDocDir is HUB_LINK_DOC_DIR, the link_doc volume link.json is
+	// written to ("" = Servers off, contract §17.2); LinkDocGID its
+	// group (HUB_LINK_DOC_GID). LinkProxy is HUB_LINK_PROXY, link's
+	// control CONNECT listener; RelayImage HUB_RELAY_IMAGE.
+	LinkDocDir string
+	LinkDocGID int
+	LinkProxy  string
+	RelayImage string
 	// VPNNet overrides portcullis-vpn's subnet (tests; zero = the core
 	// env's PORTCULLIS_VPN_NET, default 172.31.254.0/26).
 	VPNNet netip.Prefix
@@ -274,8 +282,19 @@ type Hub struct {
 	rt      runtime.Instances
 	srv     *serverRegistry
 	srvOnce sync.Once
-	idp     IdP
-	attrs   AttrStore // LLDAP user attributes (setting claims); nil: none
+	// Worker servers (servers*.go): srvMu (a leaf lock, never held with
+	// mu or across a network call) guards signer, enrols (the join codes'
+	// secrets, memory only), polls and ctlSerial; nodeMu serialises the
+	// control certificate's issuance; srvT the timings and test hooks.
+	srvMu     sync.Mutex
+	signer    NodeSigner
+	enrols    map[string]*enrolRun
+	polls     map[string]*pollState
+	ctlSerial string
+	nodeMu    sync.Mutex
+	srvT      serverTimings
+	idp       IdP
+	attrs     AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

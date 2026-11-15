@@ -149,6 +149,9 @@ const (
 	InstanceCreated   = "created"
 	InstanceDeleting  = "deleting"
 	InstanceRestoring = "restoring"
+	// InstanceOrphaned: its server was revoked (contract §17.6): it can
+	// be restored onto another server or forgotten.
+	InstanceOrphaned = "orphaned"
 )
 
 // AppState tracks which apps are enabled and their settings.
@@ -161,7 +164,14 @@ type AppState struct {
 	// a label, a binding or a state: else it uses the template's
 	// hostnames on the main domain.
 	Instances map[string]Instance `json:"instances,omitempty" yaml:"instances,omitempty"`
-	Sources   []Source            `json:"sources" yaml:"sources"`
+	// Servers are the worker servers by id (contract §17.3);
+	// PrimaryBackups the primary's scheduled backups (§11.5).
+	Servers        map[string]Server `json:"servers,omitempty" yaml:"servers,omitempty"`
+	PrimaryBackups BackupSchedule    `json:"primary_backups" yaml:"primary_backups"`
+	// Quarantined: tunnel address → until when it stays unallocated (a
+	// revoked server's, kept after the server is removed; §17.3).
+	Quarantined map[string]time.Time `json:"quarantined,omitempty" yaml:"quarantined,omitempty"`
+	Sources     []Source             `json:"sources" yaml:"sources"`
 	// Settings are each instance's settings (contract §13), by id.
 	Settings map[string]InstanceSettings `json:"settings" yaml:"settings"`
 	// Published holds the last known group-gate config per enabled app.

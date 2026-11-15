@@ -13,11 +13,11 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -107,10 +107,22 @@ type Config struct {
 	// /v1/info (so a new request field never reaches an agent that
 	// doesn't know it).
 	HubVersion string
+	// Enrolling: the worker is still enrolling (contract §17.5 step 3):
+	// it presents a self-signed certificate, so nothing is pinned; the
+	// agent checks the Hub instead (ca_sha256). The SPKI it presented is
+	// kept (PeerSPKI) for the enrolment proof, which binds the channel.
+	Enrolling bool
 }
 
 // ErrIncompatible: the agent's version doesn't go with the Hub's.
 var ErrIncompatible = errors.New("server_agent_incompatible")
+
+// SameSerial compares a certificate serial with a stored one (Vault's
+// "0a:1b:…" form or plain hex, any case).
+func SameSerial(n *big.Int, stored string) bool {
+	v, ok := new(big.Int).SetString(strings.ReplaceAll(strings.TrimSpace(stored), ":", ""), 16)
+	return ok && n != nil && v.Cmp(n) == 0
+}
 
 // ErrIdentityMismatch: the worker's certificate isn't the pinned one.
 var ErrIdentityMismatch = errors.New("server_identity_mismatch: the worker presented another certificate than the one pinned")
@@ -120,7 +132,10 @@ var ErrIdentityMismatch = errors.New("server_identity_mismatch: the worker prese
 type Error struct {
 	Status int
 	Msg    string
-	err    error
+	// AgentStatus is the status the agent answered (0: none, a transport
+	// or identity failure); Status may be 502 for it (passedStatuses).
+	AgentStatus int
+	err         error
 }
 
 func (e *Error) Error() string   { return e.Msg }
@@ -137,13 +152,13 @@ var passedStatuses = map[int]bool{400: true, 404: true, 409: true, 422: true, 50
 // untrusted, so only passedStatuses keep their code and message.
 func (c *client) agentError(status int, msg string) *Error {
 	if !passedStatuses[status] {
-		return &Error{Status: http.StatusBadGateway, Msg: "the server " + c.cfg.ServerID + " answered unexpectedly"}
+		return &Error{Status: http.StatusBadGateway, Msg: "the server " + c.cfg.ServerID + " answered unexpectedly", AgentStatus: status}
 	}
 	msg = sanitize(msg)
 	if msg == "" {
 		msg = "the server " + c.cfg.ServerID + " refused the call"
 	}
-	return &Error{Status: status, Msg: msg}
+	return &Error{Status: status, Msg: msg, AgentStatus: status}
 }
 
 // sanitize keeps printable text only, at most 200 runes.
@@ -180,6 +195,7 @@ type client struct {
 
 	mu           sync.Mutex
 	agentVersion string
+	peerSPKI     []byte
 }
 
 // gate refuses every call but /v1/info to an agent of an incompatible
@@ -223,20 +239,31 @@ func newClient(cfg Config) *client {
 		RootCAs:      roots,
 		ServerName:   servers.NodeName(cfg.ServerID),
 		Certificates: []tls.Certificate{cfg.ControlCert},
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 {
-				return ErrIdentityMismatch
-			}
-			leaf := cs.PeerCertificates[0]
-			sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
-			if !bytes.Equal(sum[:], cfg.SPKI) || hex.EncodeToString(leaf.SerialNumber.Bytes()) != strings.ToLower(cfg.Serial) {
-				if cfg.OnMismatch != nil {
-					cfg.OnMismatch()
-				}
-				return ErrIdentityMismatch
-			}
+	}
+	c := &client{cfg: cfg, base: "https://" + servers.NodeName(cfg.ServerID)}
+	tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return ErrIdentityMismatch
+		}
+		leaf := cs.PeerCertificates[0]
+		sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+		if cfg.Enrolling {
+			c.mu.Lock()
+			c.peerSPKI = sum[:]
+			c.mu.Unlock()
 			return nil
-		},
+		}
+		if !bytes.Equal(sum[:], cfg.SPKI) || !SameSerial(leaf.SerialNumber, cfg.Serial) {
+			if cfg.OnMismatch != nil {
+				cfg.OnMismatch()
+			}
+			return ErrIdentityMismatch
+		}
+		return nil
+	}
+	if cfg.Enrolling {
+		// Only the SPKI is read (above); the proof binds it.
+		tlsCfg.InsecureSkipVerify = true
 	}
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -253,7 +280,8 @@ func newClient(cfg Config) *client {
 		},
 		MaxIdleConnsPerHost: 4, IdleConnTimeout: 60 * time.Second, ForceAttemptHTTP2: false,
 	}
-	return &client{cfg: cfg, base: "https://" + servers.NodeName(cfg.ServerID), http: &http.Client{Transport: tr}}
+	c.http = &http.Client{Transport: tr}
+	return c
 }
 
 // path fills a route's {name} wildcards (each value path-escaped).

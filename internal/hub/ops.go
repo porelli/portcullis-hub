@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/portcullis/hub/internal/servers"
 	"log"
 	"os"
 	"path/filepath"
@@ -327,6 +328,9 @@ func markInterrupted(r *OpRecord) {
 func validOpKey(k string) bool {
 	if fid, ok := strings.CutPrefix(k, "_folder."); ok {
 		return settings.FolderIDRe.MatchString(fid)
+	}
+	if sid, ok := strings.CutPrefix(k, serverOpPrefix); ok {
+		return servers.ValidID(sid) == nil
 	}
 	return k == opKeyDoctor || validDomainOpKey(k) || templates.ValidID(k)
 }

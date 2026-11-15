@@ -134,7 +134,9 @@ func (a *Agent) handleEnrol(w http.ResponseWriter, r *http.Request) {
 }
 
 func makeCSR(k *ecdsa.PrivateKey, cn string) (string, error) {
-	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}, DNSNames: []string{cn}}, k)
+	// The CN only: enroll refuses a CSR with any SAN (Vault adds the
+	// node name as the SAN from the role).
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, k)
 	if err != nil {
 		return "", err
 	}
