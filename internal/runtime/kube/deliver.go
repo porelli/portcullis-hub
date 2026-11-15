@@ -112,7 +112,7 @@ func (b *Backend) updateObject(ctx context.Context, instance string, obj Deliver
 	case "Secret":
 		cur, err := core.Secrets(b.cfg.Namespace).Get(ctx, obj.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			_, err = core.Secrets(b.cfg.Namespace).Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: obj.Name, Namespace: b.cfg.Namespace, Labels: labels}, Type: corev1.SecretTypeOpaque, Data: data}, metav1.CreateOptions{FieldManager: FieldManager})
+			_, err = core.Secrets(b.cfg.Namespace).Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: obj.Name, Namespace: b.cfg.Namespace, Labels: map[string]string{LabelInstance: instance, LabelOwner: OwnerHub}}, Type: corev1.SecretTypeOpaque, Data: data}, metav1.CreateOptions{FieldManager: FieldManager})
 			return err
 		}
 		if err != nil {

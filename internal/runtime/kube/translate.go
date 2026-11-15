@@ -162,7 +162,33 @@ func (p Plan) Objects() []*unstructured.Unstructured {
 // Translate translates in into a Plan, or refuses (*ErrRefused).
 func Translate(in Input) (Plan, error) {
 	t := &translator{in: in, names: map[string]string{}, done: map[string]bool{}}
-	return t.run()
+	p, err := t.run()
+	if err != nil {
+		return p, err
+	}
+	for _, o := range p.Objects() {
+		markOwned(o)
+	}
+	return p, nil
+}
+
+// ownedKinds are the apps namespace's kinds core's admission lets a
+// non-CLI identity update or delete only when owner=hub (the
+// default-deny NetworkPolicy and core's objects are owner=core).
+var ownedKinds = map[string]bool{"Service": true, "Secret": true, "NetworkPolicy": true}
+
+// markOwned labels o portcullis.io/owner: hub when it's one of
+// ownedKinds (the edge objects carry it already).
+func markOwned(o *unstructured.Unstructured) {
+	if !ownedKinds[o.GetKind()] {
+		return
+	}
+	l := o.GetLabels()
+	if l == nil {
+		l = map[string]string{}
+	}
+	l[LabelOwner] = OwnerHub
+	o.SetLabels(l)
 }
 
 type translator struct {
@@ -434,6 +460,9 @@ func (t *translator) compat() error {
 		if n == PodsName {
 			return refused("service %s: the name is reserved on Kubernetes (the instance's pod DNS)", n)
 		}
+		if s.User == "" && t.hostBind(s) {
+			return refused("service %s binds a host path but has no numeric user", n)
+		}
 		if s.User != "" {
 			uid, _, err := numericUser(s.User)
 			if err != nil {
@@ -510,6 +539,27 @@ func (t *translator) aliases() (map[string]string, error) {
 		return nil, refused("more than %d network aliases (not on Kubernetes)", MaxAliases)
 	}
 	return out, nil
+}
+
+// hostBind: s binds a host path (a shared folder: not the template's
+// files, not a data file).
+func (t *translator) hostBind(s types.ServiceConfig) bool {
+	tplPrefix := "templates/" + t.in.Template + "/"
+	for _, v := range s.Volumes {
+		if v.Type != types.VolumeTypeBind {
+			continue
+		}
+		if _, ok := t.in.AppFiles[v.Source]; ok {
+			continue
+		}
+		if rel := strings.TrimPrefix(path.Clean(v.Source), "./"); strings.HasPrefix(rel, tplPrefix) || rel+"/" == tplPrefix {
+			continue
+		}
+		if path.IsAbs(v.Source) {
+			return true
+		}
+	}
+	return false
 }
 
 // podDNSLabelRe: a compose service name that can be a pod's hostname.
@@ -1465,6 +1515,23 @@ func (p *podSpec) finish() corev1.PodSpec {
 	}
 	sort.SliceStable(p.volumes, func(i, j int) bool { return p.volumes[i].Name < p.volumes[j].Name })
 	spec.Volumes = p.volumes
+	// A pod with a host path: no container may be root or gain
+	// privilege (no setuid binary or device node lands in a shared
+	// folder).
+	if slices.ContainsFunc(spec.Volumes, func(v corev1.Volume) bool { return v.HostPath != nil }) {
+		t, f := true, false
+		harden := func(cs []corev1.Container) {
+			for i := range cs {
+				if cs[i].SecurityContext == nil {
+					cs[i].SecurityContext = &corev1.SecurityContext{}
+				}
+				cs[i].SecurityContext.RunAsNonRoot = &t
+				cs[i].SecurityContext.AllowPrivilegeEscalation = &f
+			}
+		}
+		harden(spec.Containers)
+		harden(spec.InitContainers)
+	}
 	return spec
 }
 

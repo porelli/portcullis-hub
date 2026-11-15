@@ -5,6 +5,7 @@ kind: Secret
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
   name: ports--env
   namespace: portcullis-apps
 type: Opaque
@@ -15,6 +16,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
     portcullis.io/service: dns
   name: ports--dns-53-udp
   namespace: portcullis-apps
@@ -39,6 +41,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
     portcullis.io/service: dns
   name: ports--dns-5353-tcp
   namespace: portcullis-apps
@@ -65,6 +68,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
     portcullis.io/service: dns
   name: ports--dns-445-tcp
   namespace: portcullis-apps
@@ -91,6 +95,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
   name: ports--pods
   namespace: portcullis-apps
 spec:
@@ -107,6 +112,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
     portcullis.io/service: dns
   name: ports--dns
   namespace: portcullis-apps
@@ -137,6 +143,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
   name: ports--net-default
   namespace: portcullis-apps
 spec:
@@ -178,6 +185,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: ports
+    portcullis.io/owner: hub
   name: ports--egress
   namespace: portcullis-apps
 spec:

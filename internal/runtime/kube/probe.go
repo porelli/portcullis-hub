@@ -54,7 +54,7 @@ func probePolicies(ns string) []*networkingv1.NetworkPolicy {
 	port := intstr.FromInt32(8080)
 	ports := []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}}
 	meta := func(n string) metav1.ObjectMeta {
-		return metav1.ObjectMeta{Name: "portcullis-probe-" + n, Namespace: ns, Labels: map[string]string{LabelInstance: ProbeInstance}}
+		return metav1.ObjectMeta{Name: "portcullis-probe-" + n, Namespace: ns, Labels: map[string]string{LabelInstance: ProbeInstance, LabelOwner: OwnerHub}}
 	}
 	peer := func(role string) []networkingv1.NetworkPolicyPeer {
 		s := probeSel(role)

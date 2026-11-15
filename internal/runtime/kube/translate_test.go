@@ -717,3 +717,106 @@ func TestTemplateFilesInstanceOwned(t *testing.T) {
 		t.Errorf("shared: %v", names)
 	}
 }
+
+// TestTranslateHostPathNonRoot: a service binding a host path needs a
+// numeric user (else refused, as kubeCompat does); every container of a
+// pod with a hostPath volume (init containers included) runs with
+// runAsNonRoot and no privilege escalation.
+func TestTranslateHostPathNonRoot(t *testing.T) {
+	if _, err := Translate(inputOf(t, "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    volumes: [\"/srv/share:/data\"]\n", "hp")); refusedErr(err) != "service web binds a host path but has no numeric user" {
+		t.Errorf("no user: %v", err)
+	}
+	in := inputOf(t, "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n    volumes: [\"/srv/share:/data\", \"data:/var/lib/x\"]\n"+
+		"  side:\n    image: docker.io/library/nginx:1.29\n    user: \"1001:1001\"\n    network_mode: service:web\nvolumes:\n  data: {}\n", "hp")
+	for _, o := range objectsOf(t, in) {
+		if o.GetKind() != "Deployment" {
+			continue
+		}
+		spec, _, _ := unstructured.NestedMap(o.Object, "spec", "template", "spec")
+		var all []any
+		for _, k := range []string{"containers", "initContainers"} {
+			if cs, ok := spec[k].([]any); ok {
+				all = append(all, cs...)
+			}
+		}
+		if len(all) < 3 {
+			t.Fatalf("containers %d", len(all))
+		}
+		for _, c := range all {
+			cm := c.(map[string]any)
+			sc, _ := cm["securityContext"].(map[string]any)
+			if sc["runAsNonRoot"] != true || sc["allowPrivilegeEscalation"] != false {
+				t.Errorf("%s: %v", cm["name"], sc)
+			}
+		}
+	}
+	// Without a hostPath nothing is forced.
+	for _, o := range objectsOf(t, inputOf(t, "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n", "np")) {
+		if o.GetKind() == "Deployment" {
+			cs, _, _ := unstructured.NestedSlice(o.Object, "spec", "template", "spec", "containers")
+			if sc, _ := cs[0].(map[string]any)["securityContext"].(map[string]any); sc["runAsNonRoot"] != nil {
+				t.Errorf("forced without a hostPath: %v", sc)
+			}
+		}
+	}
+}
+
+// TestOwnedObjectsLabelled: every Service, Secret and NetworkPolicy the
+// Hub creates carries portcullis.io/owner: hub (core's admission lets a
+// non-CLI identity update or delete only those), in both namespaces;
+// the probe's policies too.
+func TestOwnedObjectsLabelled(t *testing.T) {
+	for _, c := range []string{"basic", "jobs", "sidecar", "ports", "vpn-gateway", "person-secret", "datafile"} {
+		in := baseInput(t, "testdata/translate/"+c, c)
+		p, err := Translate(in)
+		if err != nil {
+			t.Fatalf("%s: %v", c, err)
+		}
+		for _, o := range p.Objects() {
+			if ownedKinds[o.GetKind()] && o.GetLabels()[LabelOwner] != OwnerHub {
+				t.Errorf("%s: %s %s labels %v", c, o.GetKind(), o.GetName(), o.GetLabels())
+			}
+		}
+	}
+	for _, np := range probePolicies(ns) {
+		if np.Labels[LabelOwner] != OwnerHub {
+			t.Errorf("probe policy %s: %v", np.Name, np.Labels)
+		}
+	}
+}
+
+// TestRoutesNeverAttachElsewhere: no IngressRoute the Hub renders sets
+// parentRefs (multi-layer routing under another route), ingressClassName
+// or a route syntax other than the default.
+func TestRoutesNeverAttachElsewhere(t *testing.T) {
+	for name, labels := range ingressCases {
+		objs, err := IngressObjects("app", EdgeNamespace, ns, labels)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, o := range objs {
+			if o.GetKind() != "IngressRoute" {
+				continue
+			}
+			spec := o.Object["spec"].(map[string]any)
+			for _, k := range []string{"parentRefs", "ingressClassName"} {
+				if _, ok := spec[k]; ok {
+					t.Errorf("%s: %s sets %s", name, o.GetName(), k)
+				}
+			}
+			for _, r := range spec["routes"].([]any) {
+				if s, ok := r.(map[string]any)["syntax"]; ok && s != "v3" {
+					t.Errorf("%s: route syntax %v", name, s)
+				}
+			}
+		}
+	}
+	// A label asking for them is refused, never passed through.
+	for _, f := range []string{"parentrefs", "ingressclassname", "rulesyntax"} {
+		_, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {"traefik.http.routers.r.rule": "Host(`a.example.org`)", "traefik.http.routers.r." + f: "x",
+			"traefik.http.services.web.loadbalancer.server.port": "80"}})
+		if refusedErr(err) == "" {
+			t.Errorf("router %s accepted: %v", f, err)
+		}
+	}
+}

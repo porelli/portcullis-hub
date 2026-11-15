@@ -286,6 +286,13 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 			c.refuse("service %s shares the host's %s namespace (not on Kubernetes)", name, ns)
 		}
 	}
+	if scalarValue(field(s, "user"), env) == "" && slices.ContainsFunc(bindSources(field(s, "volumes"), env), func(src string) bool {
+		return strings.HasPrefix(src, "/") || strings.HasPrefix(src, "~")
+	}) {
+		// A host path's pod runs non-root (runAsNonRoot): the service
+		// must say who it is.
+		c.refuse("service %s binds a host path but has no numeric user", name)
+	}
 	for _, src := range bindSources(field(s, "volumes"), env) {
 		if !strings.HasPrefix(src, "/") || underRoots(src, roots) {
 			continue

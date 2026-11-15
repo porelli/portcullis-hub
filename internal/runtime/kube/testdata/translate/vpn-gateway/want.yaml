@@ -9,6 +9,7 @@ kind: Secret
 metadata:
   labels:
     portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
   name: vpn-gateway--env
   namespace: portcullis-apps
 type: Opaque
@@ -19,6 +20,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
   name: vpn-gateway--pods
   namespace: portcullis-apps
 spec:
@@ -35,6 +37,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
   name: vpn-gateway--net-default
   namespace: portcullis-apps
 spec:
@@ -76,6 +79,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
   name: vpn-gateway--egress
   namespace: portcullis-apps
 spec:
@@ -109,6 +113,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
   name: vpn-gateway--vpn-edge
   namespace: portcullis-apps
 spec:

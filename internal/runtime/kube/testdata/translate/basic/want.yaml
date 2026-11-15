@@ -8,6 +8,7 @@ kind: Secret
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--env
   namespace: portcullis-apps
 type: Opaque
@@ -53,6 +54,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--pods
   namespace: portcullis-apps
 spec:
@@ -69,6 +71,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
     portcullis.io/service: web
   name: basic--web
   namespace: portcullis-apps
@@ -91,6 +94,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--net-default
   namespace: portcullis-apps
 spec:
@@ -132,6 +136,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--net-portcullis-proxy
   namespace: portcullis-apps
 spec:
@@ -173,6 +178,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--routed-web
   namespace: portcullis-apps
 spec:
@@ -200,6 +206,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
   name: basic--egress
   namespace: portcullis-apps
 spec:
@@ -373,6 +380,7 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
           runAsGroup: 10001
+          runAsNonRoot: true
           runAsUser: 10001
         volumeMounts:
         - mountPath: /tmp
@@ -412,6 +420,7 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
           runAsGroup: 10001
+          runAsNonRoot: true
           runAsUser: 10001
         volumeMounts:
         - mountPath: /portcullis-bin
@@ -432,6 +441,7 @@ spec:
             - ALL
           readOnlyRootFilesystem: true
           runAsGroup: 10001
+          runAsNonRoot: true
           runAsUser: 10001
         volumeMounts:
         - mountPath: /portcullis-bin

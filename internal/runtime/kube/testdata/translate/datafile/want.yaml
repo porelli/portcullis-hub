@@ -5,6 +5,7 @@ kind: Secret
 metadata:
   labels:
     portcullis.io/instance: datafile
+    portcullis.io/owner: hub
   name: datafile--env
   namespace: portcullis-apps
 type: Opaque
@@ -30,6 +31,7 @@ kind: Secret
 metadata:
   labels:
     portcullis.io/instance: datafile
+    portcullis.io/owner: hub
   name: datafile--people-secrets
   namespace: portcullis-apps
 type: Opaque
@@ -40,6 +42,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: datafile
+    portcullis.io/owner: hub
   name: datafile--pods
   namespace: portcullis-apps
 spec:
@@ -56,6 +59,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: datafile
+    portcullis.io/owner: hub
   name: datafile--net-default
   namespace: portcullis-apps
 spec:
@@ -97,6 +101,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: datafile
+    portcullis.io/owner: hub
   name: datafile--egress
   namespace: portcullis-apps
 spec:

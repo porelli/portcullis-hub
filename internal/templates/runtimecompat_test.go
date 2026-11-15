@@ -106,7 +106,7 @@ func TestRuntimeVectorsNameRuntimes(t *testing.T) {
 
 // The Hub passes its bind roots under EnvBindRoots.
 func TestKubeCompatBindRootsFromEnv(t *testing.T) {
-	compose := []byte("services:\n  a:\n    image: x\n    volumes:\n      - /data/photos:/photos\n")
+	compose := []byte("services:\n  a:\n    image: x\n    user: \"1000:1000\"\n    volumes:\n      - /data/photos:/photos\n")
 	if got := RuntimeCompat(runtime.KindKubernetes, compose, Manifest{}, nil, 80); got.Status != CompatRefused {
 		t.Errorf("default roots: %#v", got)
 	}

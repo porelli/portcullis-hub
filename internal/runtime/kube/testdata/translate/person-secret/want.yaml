@@ -5,6 +5,7 @@ kind: Secret
 metadata:
   labels:
     portcullis.io/instance: person-secret
+    portcullis.io/owner: hub
   name: person-secret--env
   namespace: portcullis-apps
 type: Opaque
@@ -18,6 +19,7 @@ kind: Secret
 metadata:
   labels:
     portcullis.io/instance: person-secret
+    portcullis.io/owner: hub
   name: person-secret--smb-password-pw
   namespace: portcullis-apps
 type: Opaque
@@ -28,6 +30,7 @@ kind: Service
 metadata:
   labels:
     portcullis.io/instance: person-secret
+    portcullis.io/owner: hub
   name: person-secret--pods
   namespace: portcullis-apps
 spec:
@@ -44,6 +47,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: person-secret
+    portcullis.io/owner: hub
   name: person-secret--net-default
   namespace: portcullis-apps
 spec:
@@ -85,6 +89,7 @@ kind: NetworkPolicy
 metadata:
   labels:
     portcullis.io/instance: person-secret
+    portcullis.io/owner: hub
   name: person-secret--egress
   namespace: portcullis-apps
 spec:
