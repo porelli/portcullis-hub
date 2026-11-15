@@ -37,6 +37,7 @@ metadata:
     portcullis.io/uid: "10001"
   labels:
     portcullis.io/instance: basic
+    portcullis.io/owner: hub
     portcullis.io/volume: echo-data
   name: basic--echo-data
   namespace: portcullis-apps
@@ -453,6 +454,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+        supplementalGroupsPolicy: Strict
       subdomain: basic--pods
       terminationGracePeriodSeconds: 20
       volumes:

@@ -15,7 +15,7 @@ import (
 
 // TestAdmissionCELCompiles compiles every expression of the admission
 // policies with the API server's CEL environment at the floor
-// (Kubernetes 1.32): a broken expression or a function 1.32 lacks fails
+// (Kubernetes 1.33): a broken expression or a function 1.33 lacks fails
 // here, before it reaches a cluster (core applies these files byte for
 // byte).
 func TestAdmissionCELCompiles(t *testing.T) {
@@ -23,7 +23,7 @@ func TestAdmissionCELCompiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := environment.MustBaseEnvSet(version.MajorMinor(1, 32))
+	base := environment.MustBaseEnvSet(version.MajorMinor(1, 33))
 	set, err := base.Extend(environment.VersionedOptions{IntroducedVersion: version.MajorMinor(1, 0), EnvOptions: []cel.EnvOption{
 		cel.Variable("object", cel.DynType), cel.Variable("oldObject", cel.DynType), cel.Variable("params", cel.DynType),
 		cel.Variable("request", cel.DynType), cel.Variable("namespaceObject", cel.DynType),
@@ -40,7 +40,7 @@ func TestAdmissionCELCompiles(t *testing.T) {
 	// floor, and a quote that isn't CEL.
 	for _, bad := range []string{"[[1]].flatten()", "'isn''t'"} {
 		if _, iss := env.Compile(bad); iss == nil || iss.Err() == nil {
-			t.Errorf("%s compiled at 1.32", bad)
+			t.Errorf("%s compiled at 1.33", bad)
 		}
 	}
 	dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), 4096)

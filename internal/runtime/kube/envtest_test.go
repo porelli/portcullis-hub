@@ -2,7 +2,7 @@
 
 package kube
 
-// Envtest (KUBEBUILDER_ASSETS from `setup-envtest use 1.32.x`): a real
+// Envtest (KUBEBUILDER_ASSETS from `setup-envtest use 1.33.x`): a real
 // API server with the admission policies, the Hub's Role and its
 // ServiceAccount, everything run as that ServiceAccount through
 // impersonation. Envtest has no kubelet: no pod ever runs.

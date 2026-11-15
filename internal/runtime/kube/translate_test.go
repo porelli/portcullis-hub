@@ -750,6 +750,13 @@ func TestTranslateHostPathNonRoot(t *testing.T) {
 			}
 		}
 	}
+	for _, o := range objectsOf(t, in) {
+		if o.GetKind() == "Deployment" {
+			if v, _, _ := unstructured.NestedString(o.Object, "spec", "template", "spec", "securityContext", "supplementalGroupsPolicy"); v != "Strict" {
+				t.Errorf("supplementalGroupsPolicy %q, want Strict", v)
+			}
+		}
+	}
 	// Without a hostPath nothing is forced.
 	for _, o := range objectsOf(t, inputOf(t, "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n", "np")) {
 		if o.GetKind() == "Deployment" {
@@ -776,6 +783,12 @@ func TestOwnedObjectsLabelled(t *testing.T) {
 			if ownedKinds[o.GetKind()] && o.GetLabels()[LabelOwner] != OwnerHub {
 				t.Errorf("%s: %s %s labels %v", c, o.GetKind(), o.GetName(), o.GetLabels())
 			}
+		}
+	}
+	// PVCs too (core judges a PVC update or delete by its old object).
+	for _, o := range objectsOf(t, baseInput(t, "testdata/translate/jobs", "jobs")) {
+		if o.GetKind() == "PersistentVolumeClaim" && (o.GetLabels()[LabelOwner] != OwnerHub || o.GetLabels()[LabelInstance] != "jobs") {
+			t.Errorf("pvc %s labels %v", o.GetName(), o.GetLabels())
 		}
 	}
 	for _, np := range probePolicies(ns) {

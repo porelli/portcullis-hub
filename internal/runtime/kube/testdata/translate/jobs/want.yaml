@@ -22,6 +22,7 @@ metadata:
     portcullis.io/uid: "70"
   labels:
     portcullis.io/instance: jobs
+    portcullis.io/owner: hub
     portcullis.io/volume: db-data
   name: jobs--db-data
   namespace: portcullis-apps

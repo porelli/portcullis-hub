@@ -175,7 +175,7 @@ func Translate(in Input) (Plan, error) {
 // ownedKinds are the apps namespace's kinds core's admission lets a
 // non-CLI identity update or delete only when owner=hub (the
 // default-deny NetworkPolicy and core's objects are owner=core).
-var ownedKinds = map[string]bool{"Service": true, "Secret": true, "NetworkPolicy": true}
+var ownedKinds = map[string]bool{"Service": true, "Secret": true, "NetworkPolicy": true, "PersistentVolumeClaim": true}
 
 // markOwned labels o portcullis.io/owner: hub when it's one of
 // ownedKinds (the edge objects carry it already).
@@ -1571,6 +1571,12 @@ func (p *podSpec) finish() corev1.PodSpec {
 		}
 		harden(spec.Containers)
 		harden(spec.InitContainers)
+		// The image's /etc/group adds nothing (no group 0 through it).
+		if spec.SecurityContext == nil {
+			spec.SecurityContext = &corev1.PodSecurityContext{}
+		}
+		strict := corev1.SupplementalGroupsPolicyStrict
+		spec.SecurityContext.SupplementalGroupsPolicy = &strict
 	}
 	return spec
 }

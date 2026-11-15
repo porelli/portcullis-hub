@@ -95,7 +95,7 @@ func (b *Backend) CreateVolume(ctx context.Context, v runtime.Volume) error {
 	}
 	sc := StorageClassApps
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: v.Name, Namespace: b.cfg.Namespace,
-		Labels: map[string]string{LabelInstance: inst, LabelVolume: sanitizeLabel(key)}, Annotations: ann},
+		Labels: map[string]string{LabelInstance: inst, LabelVolume: sanitizeLabel(key), LabelOwner: OwnerHub}, Annotations: ann},
 		Spec: corev1.PersistentVolumeClaimSpec{AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, StorageClassName: &sc,
 			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}}}}
 	_, err := b.cfg.Client.CoreV1().PersistentVolumeClaims(b.cfg.Namespace).Create(ctx, pvc, metav1.CreateOptions{FieldManager: FieldManager})
