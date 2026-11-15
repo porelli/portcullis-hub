@@ -29,6 +29,7 @@ import (
 	"time"
 
 	wagent "github.com/portcullis/hub/internal/agent"
+	"github.com/portcullis/hub/internal/agent/agenttest"
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fixerspec"
@@ -108,7 +109,7 @@ func newWorker(t *testing.T) *fakeWorker {
 		os.WriteFile(filepath.Join(id, name), b, 0o600)
 	}
 	engine := &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, LogsVal: map[string][]byte{}, States: map[string]runtime.State{}, Contents: map[string][]byte{}}
-	api := wagent.NewAPI(wagent.APIConfig{DataDir: data, BindRoots: []string{"/srv"}, Runtime: engine, SelfImage: "sha256:agent",
+	api := wagent.NewAPI(wagent.APIConfig{DataDir: data, BindRoots: []string{"/srv"}, Runtime: engine, SelfImage: "sha256:agent", Config: agenttest.Config,
 		HelperImage: "docker.io/library/alpine:3@sha256:" + strings.Repeat("a", 64)})
 	a, err := wagent.New(wagent.Config{DataDir: data, Runtime: "docker", Routes: api,
 		Info: func(context.Context) (agentapi.Info, error) {
@@ -367,5 +368,46 @@ func TestAgentVersionGate(t *testing.T) {
 		if _, err := b.AgentInfo(ctx); err != nil {
 			t.Errorf("hub %s: /v1/info refused: %v", hub, err)
 		}
+	}
+}
+
+// TestAgentStatusPolicy (commit review): a worker's status passes only
+// when it is 400/404/409/422/503 (message sanitized, capped); anything
+// else is 502 "the server <id> answered unexpectedly".
+func TestAgentStatusPolicy(t *testing.T) {
+	w := newWorker(t)
+	for _, c := range []struct {
+		status int
+		body   string
+		want   int
+		msg    string
+	}{
+		{401, `{"error":"x"}`, 502, "the server nas answered unexpectedly"},
+		{302, `{"error":"x"}`, 502, "the server nas answered unexpectedly"},
+		{999, `{"error":"x"}`, 502, "the server nas answered unexpectedly"},
+		{500, `{"error":"x"}`, 502, "the server nas answered unexpectedly"},
+		{403, `{"error":"x"}`, 502, "the server nas answered unexpectedly"},
+		{409, `{"error":"in use\u001b[31m now"}`, 409, "in use [31m now"},
+		{503, `not json`, 503, "the server nas refused the call"},
+		{404, `{"error":"` + strings.Repeat("y", 500) + `"}`, 404, ""},
+	} {
+		ln, _ := net.Listen("tcp", "127.0.0.1:0")
+		info := `{"agent_version":"` + wagent.Version + `","api":"v1","runtime":"docker","arch":"amd64","engine_version":"x","cpus":1,"mem_bytes":1,"docker_root_dir":"/","disk_total":0,"disk_free":0,"data_dir":"/d","data_total":0,"data_free":0,"unprivileged_port_start":1024,"clock":"2026-11-15T00:00:00Z"}`
+		srv := &http.Server{Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/info" {
+				io.WriteString(rw, info)
+				return
+			}
+			rw.WriteHeader(c.status)
+			io.WriteString(rw, c.body)
+		}), TLSConfig: &tls.Config{Certificates: []tls.Certificate{w.serverCert(t)}, ClientAuth: tls.RequireAnyClientCert}}
+		go srv.ServeTLS(ln, "", "")
+		b, _ := w.backend(t, func(cfg *Config) { cfg.Dial = &dialTo{addr: ln.Addr().String()} })
+		err := b.Down(context.Background(), runtime.Project{Instance: "app"})
+		var ae *Error
+		if !errors.As(err, &ae) || ae.Status != c.want || (c.msg != "" && ae.Msg != c.msg) || len([]rune(ae.Msg)) > 200 {
+			t.Errorf("%d: %v (%+v)", c.status, err, ae)
+		}
+		srv.Close()
 	}
 }

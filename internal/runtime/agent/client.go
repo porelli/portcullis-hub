@@ -129,6 +129,34 @@ func (e *Error) Unwrap() error   { return e.err }
 func (e *Error) NotFound() bool  { return e.Status == http.StatusNotFound }
 func (e *Error) Is(t error) bool { return t == cerrdefs.ErrNotFound && e.Status == http.StatusNotFound }
 
+// passedStatuses are the agent statuses the Hub passes on (with the
+// agent's message, sanitized and capped); any other is 502.
+var passedStatuses = map[int]bool{400: true, 404: true, 409: true, 422: true, 503: true}
+
+// agentError is the Hub's view of an agent's error answer: a worker is
+// untrusted, so only passedStatuses keep their code and message.
+func (c *client) agentError(status int, msg string) *Error {
+	if !passedStatuses[status] {
+		return &Error{Status: http.StatusBadGateway, Msg: "the server " + c.cfg.ServerID + " answered unexpectedly"}
+	}
+	msg = sanitize(msg)
+	if msg == "" {
+		msg = "the server " + c.cfg.ServerID + " refused the call"
+	}
+	return &Error{Status: status, Msg: msg}
+}
+
+// sanitize keeps printable text only, at most 200 runes.
+func sanitize(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029 || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return ' '
+		}
+		return r
+	}, s)
+	return clip(strings.TrimSpace(s))
+}
+
 func transportErr(err error) error {
 	if errors.Is(err, ErrIdentityMismatch) {
 		return &Error{Status: http.StatusBadGateway, Msg: ErrIdentityMismatch.Error(), err: ErrIdentityMismatch}
@@ -263,14 +291,14 @@ func (c *client) do(ctx context.Context, method, p string, q url.Values, body io
 	if err != nil {
 		return nil, transportErr(err)
 	}
-	if resp.StatusCode >= 300 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		var e agentapi.Error
-		msg := "the agent answered " + resp.Status
-		if agentapi.Decode(resp.Body, agentapi.MaxJSON, &e) == nil && e.Error != "" {
-			msg = clip(e.Error)
+		msg := ""
+		if agentapi.Decode(resp.Body, agentapi.MaxJSON, &e) == nil {
+			msg = e.Error
 		}
-		return nil, &Error{Status: resp.StatusCode, Msg: msg}
+		return nil, c.agentError(resp.StatusCode, msg)
 	}
 	return resp, nil
 }

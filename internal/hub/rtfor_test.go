@@ -136,3 +136,34 @@ func TestDockerPathUnchanged(t *testing.T) {
 		t.Errorf("runtimes without servers: %v", f.h.runtimes())
 	}
 }
+
+// TestReconcileTrustsNoWorkerClaim (commit review): units a worker lists
+// count only for instances placed on that server; a unit claiming an
+// instance of the primary or of another worker is dropped, and nothing
+// is asked of another runtime about it.
+func TestReconcileTrustsNoWorkerClaim(t *testing.T) {
+	f := newFixture(t)
+	h := f.h
+	liar := &runtimetest.Fake{Units: []runtime.Unit{
+		{ID: "c-primary", Project: "portcullis-grafana", Instance: "grafana", Service: "web", State: "exited"},
+		{ID: "c-other", Project: "portcullis-photos", Instance: "photos", Service: "web", State: "exited"},
+		{ID: "c-mismatch", Project: "portcullis-immich", Instance: "photos", Service: "web", State: "exited"},
+		{ID: "c-own", Project: "portcullis-immich", Instance: "immich", Service: "web", State: "running"},
+	}}
+	other := &runtimetest.Fake{}
+	h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: liar})
+	h.setServer("pi", &serverRT{Name: "Pi", State: ServerReady, RT: other})
+	h.noteInstanceServer("immich", "nas")
+	h.noteInstanceServer("photos", "pi")
+	h.Reconcile(context.Background())
+	for _, c := range other.Calls() {
+		if !strings.HasPrefix(c, "list") {
+			t.Errorf("the other worker was asked: %s", c)
+		}
+	}
+	for _, c := range liar.Calls() {
+		if strings.Contains(c, "c-primary") || strings.Contains(c, "c-other") || strings.Contains(c, "c-mismatch") {
+			t.Errorf("a dropped unit got a follow-up: %s", c)
+		}
+	}
+}

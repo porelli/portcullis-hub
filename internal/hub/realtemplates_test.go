@@ -118,7 +118,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 				// included) passes the agent's bundle re-validation
 				// (multi-server pre-flight P4).
 				mf := agentapi.BundleManifest{Instance: id, Template: c.TemplateID, Volumes: c.NamesFor(id).Volumes}
-				if err := agentapi.ValidateBundle(proj, mf, nil, DefaultOverrideBindRoots, project); err != nil {
+				if err := agentapi.ValidateBundle(proj, mf, nil, agentapi.BundleScope{BindRoots: DefaultOverrideBindRoots, BaseDir: project, ReadOnlyDirs: []string{filepath.Join(project, "templates"), filepath.Join(project, "certs"), filepath.Join(project, "appfiles")}}); err != nil {
 					t.Errorf("%s: %v", id, err)
 				}
 				bundles++

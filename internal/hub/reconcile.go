@@ -216,17 +216,35 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		return h.storeDrift(rep)
 	}
 	// Every ready worker's units too (an unreachable one is skipped: its
-	// instances' state is the server's, not drift).
-	for id, rt := range h.runtimes() {
-		if id == "primary" {
+	// instances' state is the server's, not drift). A worker is
+	// untrusted: a unit is kept only when its project label names an
+	// instance placed on THAT server and its Instance agrees; follow-up
+	// calls go to the runtime it came from (unitRT), never by its claim.
+	unitRT := map[string]runtime.Instances{}
+	for server, rt := range h.runtimes() {
+		if server == "primary" {
 			continue
 		}
 		wcs, werr := rt.List(ctx, runtime.Filter{All: true})
 		if werr != nil {
-			log.Printf("reconcile: server %s: %v", id, werr)
+			log.Printf("reconcile: server %s: %v", server, werr)
 			continue
 		}
-		cs = append(cs, wcs...)
+		for _, c := range wcs {
+			id, ok := strings.CutPrefix(c.Project, runtime.ProjectPrefix)
+			if !ok || id == "" || c.Instance != id || h.serverOf(id) != server {
+				log.Printf("reconcile: server %s reported a unit of %q that isn't placed there: ignored", server, clipRunes(c.Project, 80))
+				continue
+			}
+			unitRT[c.ID] = rt
+			cs = append(cs, c)
+		}
+	}
+	unitRuntime := func(c runtime.Unit) runtime.Instances {
+		if rt, ok := unitRT[c.ID]; ok {
+			return rt
+		}
+		return h.rt
 	}
 	// Build maps of jobs and services per instance ID (contract §3 "One-off jobs"):
 	// a done job (exited 0) counts as running; failed/missing jobs are drift.
@@ -320,7 +338,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if !isRunning && c.State != "created" {
 				// The list has no exit code: inspected.
 				st = docker.State{Status: "dead"} // can't tell: failed
-				if s, ierr := h.rtOf(c.Instance).State(ctx, c.ID); ierr == nil {
+				if s, ierr := unitRuntime(c).State(ctx, c.ID); ierr == nil {
 					st = s
 				}
 			}

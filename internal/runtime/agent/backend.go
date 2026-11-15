@@ -113,11 +113,7 @@ func (b *Backend) progress(ctx context.Context, p string, body any, fn func(agen
 	case end == nil:
 		return &Error{Status: http.StatusBadGateway, Msg: "the agent's progress stream ended early"}
 	case end.Error != "":
-		st := end.Status
-		if st < 400 || st > 599 {
-			st = http.StatusBadGateway
-		}
-		return &Error{Status: st, Msg: clip(end.Error)}
+		return b.c.agentError(end.Status, end.Error)
 	}
 	return nil
 }

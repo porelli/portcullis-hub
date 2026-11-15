@@ -19,7 +19,7 @@ func TestGoldenRendersPassBundleRules(t *testing.T) {
 			t.Fatalf("%s: %v", id, err)
 		}
 		mf := agentapi.BundleManifest{Instance: id, Template: tpl.TemplateID, Volumes: tpl.NamesFor(id).Volumes}
-		if err := agentapi.ValidateBundle(proj, mf, nil, DefaultOverrideBindRoots, "/host/project"); err != nil {
+		if err := agentapi.ValidateBundle(proj, mf, nil, agentapi.BundleScope{BindRoots: DefaultOverrideBindRoots, BaseDir: "/host/project", ReadOnlyDirs: []string{"/host/project/templates", "/host/project/certs", "/host/project/appfiles"}}); err != nil {
 			t.Errorf("%s: %v", id, err)
 		}
 	}
