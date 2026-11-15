@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/portcullis/hub/internal/agentapi"
@@ -55,8 +56,12 @@ func (a *API) createHelper(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "not a fixed helper: folder_fix takes its spec only")
 			return
 		}
-		if _, err := fixerspec.Rebuild(*req.Spec, AgentBinary, a.cfg.BindRoots); err != nil {
+		if _, err := fixerspec.Rebuild(*req.Spec, AgentBinary, a.cfg.BindRoots, a.protected()...); err != nil {
 			writeError(w, http.StatusForbidden, clipMsg(err.Error()))
+			return
+		}
+		if err := walkNoSymlink(a.cfg.BindRoots, req.Spec.Binds[0].Source); err != nil {
+			writeError(w, http.StatusForbidden, "not a fixed helper: "+clipMsg(err.Error()))
 			return
 		}
 		if a.cfg.SelfImage == "" {
@@ -114,7 +119,18 @@ func (a *API) helperArchiveIn(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case h.spec.Kind == agentapi.HelperVolumeIO && h.spec.Write:
-		if err := a.cfg.Runtime.VolumeIn(r.Context(), h.spec.Instance, h.spec.Volume, h.spec.Path, r.Body); err != nil {
+		// Every entry checked (review M1) and re-encoded: the engine only
+		// ever sees the checked stream.
+		pr, pw := io.Pipe()
+		go func() { pw.CloseWithError(checkedVolumeTar(r.Body, pw, path.Base(h.spec.Path))) }()
+		err := a.cfg.Runtime.VolumeIn(r.Context(), h.spec.Instance, h.spec.Volume, h.spec.Path, pr)
+		pr.CloseWithError(err)
+		if err != nil {
+			var ve *volumeTarError
+			if errors.As(err, &ve) {
+				writeError(w, http.StatusBadRequest, clipMsg(ve.Error()))
+				return
+			}
 			engineError(w, err)
 			return
 		}
@@ -170,6 +186,11 @@ func (a *API) helperRun(w http.ResponseWriter, r *http.Request) {
 		}
 		defer f.Close()
 		in = f
+	}
+	// The folder again, right before the run (C4).
+	if err := walkNoSymlink(a.cfg.BindRoots, h.spec.Spec.Binds[0].Source); err != nil {
+		writeError(w, http.StatusConflict, clipMsg(err.Error()))
+		return
 	}
 	spec := h.spec.Spec.Runtime(a.cfg.SelfImage, in)
 	outPath := ""
@@ -278,4 +299,78 @@ func readAppFileTar(r io.Reader, name string) ([]appFile, error) {
 		return nil, fmt.Errorf("exactly one of %s.json or %s.tsv is required", name, name)
 	}
 	return out, nil
+}
+
+// Volume archive caps (review M1).
+const (
+	MaxVolumeArchive = 256 << 30
+	MaxVolumeEntries = 5_000_000
+)
+
+type volumeTarError struct{ msg string }
+
+func (e *volumeTarError) Error() string { return "volume archive: " + e.msg }
+
+// checkedVolumeTar copies the tar r to w entry by entry: only regular
+// files and directories (no symlink, hard link, device or FIFO), every
+// name "<base>" or "<base>/…" clean (no absolute name, no ".."), at most
+// MaxVolumeEntries entries and MaxVolumeArchive bytes.
+func checkedVolumeTar(r io.Reader, w io.Writer, base string) error {
+	tr := tar.NewReader(r)
+	tw := tar.NewWriter(w)
+	var total int64
+	n := 0
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return tw.Close()
+		}
+		if err != nil {
+			return &volumeTarError{"not a tar: " + clipMsg(err.Error())}
+		}
+		n++
+		if n > MaxVolumeEntries {
+			return &volumeTarError{"too many entries"}
+		}
+		name := strings.TrimSuffix(hdr.Name, "/")
+		switch {
+		case hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir:
+			return &volumeTarError{fmt.Sprintf("%q: only regular files and directories", clipMsg(hdr.Name))}
+		case strings.HasPrefix(name, "/") || path.Clean(name) != name || name != base && !strings.HasPrefix(name, base+"/"):
+			return &volumeTarError{fmt.Sprintf("%q: not a clean name below %s", clipMsg(hdr.Name), base)}
+		}
+		for _, seg := range strings.Split(name, "/") {
+			if seg == ".." || seg == "." || seg == "" {
+				return &volumeTarError{fmt.Sprintf("%q: not a clean name", clipMsg(hdr.Name))}
+			}
+		}
+		total += hdr.Size
+		if total > MaxVolumeArchive {
+			return &volumeTarError{"over its size cap"}
+		}
+		out := &tar.Header{Name: hdr.Name, Typeflag: hdr.Typeflag, Mode: hdr.Mode & 0o7777, Uid: hdr.Uid, Gid: hdr.Gid, Size: hdr.Size,
+			ModTime: hdr.ModTime, Format: tar.FormatPAX, PAXRecords: xattrsOnly(hdr.PAXRecords)}
+		if err := tw.WriteHeader(out); err != nil {
+			return err
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			if _, err := io.CopyN(tw, tr, hdr.Size); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// xattrsOnly keeps the ACL / xattr records a restore carries.
+func xattrsOnly(r map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range r {
+		if strings.HasPrefix(k, "SCHILY.xattr.") {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[k] = v
+		}
+	}
+	return out
 }

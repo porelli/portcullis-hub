@@ -20,7 +20,10 @@ var ErrNotFixed = errors.New("not a fixed helper")
 // folderfix <mode> <flags>), its one bind, label and transfers, refuses a
 // folder outside roots, validates the run, rebuilds the spec with Spec and
 // accepts it only when the two encodings are byte for byte the same.
-func Rebuild(s agentapi.FixerSpec, binary string, roots []string) (Run, error) {
+//
+// protected are paths the folder may not equal, contain or be inside
+// (the agent's data dir, the engine's roots; "/" always).
+func Rebuild(s agentapi.FixerSpec, binary string, roots []string, protected ...string) (Run, error) {
 	refuse := func(format string, args ...any) (Run, error) {
 		return Run{}, fmt.Errorf("%w: "+format, append([]any{ErrNotFixed}, args...)...)
 	}
@@ -37,6 +40,12 @@ func Rebuild(s agentapi.FixerSpec, binary string, roots []string) (Run, error) {
 	src := s.Binds[0].Source
 	if !underAny(src, roots) {
 		return refuse("the folder is outside the server's folder roots")
+	}
+	for _, f := range append(protected, "/") {
+		f = path.Clean(f)
+		if src == f || (f != "/" && (strings.HasPrefix(src, f+"/") || strings.HasPrefix(f, src+"/"))) {
+			return refuse("the folder touches a protected path (%s)", f)
+		}
 	}
 	r := Run{Mode: mode, Source: src, Opts: o, Extra: x, Timeout: time.Duration(s.TimeoutMS) * time.Millisecond}
 	switch {

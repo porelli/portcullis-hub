@@ -236,6 +236,13 @@ func TestEnrolRefusals(t *testing.T) {
 	if !strings.Contains(ErrEnrolRefused.Error(), "run ./portcullis worker join again") {
 		t.Error(ErrEnrolRefused)
 	}
+	// The refusal survives a restart (review L1): no join code left, New refuses.
+	if a.store.exists(joinFile) {
+		t.Error("the join code survived the refusal")
+	}
+	if _, err := New(Config{DataDir: filepath.Dir(a.store.Dir), Runtime: "docker"}); !errors.Is(err, ErrEnrolRefused) {
+		t.Errorf("restart after the refusal: %v", err)
+	}
 	// A proof bound to another channel (another SPKI) is refused too.
 	b, _, _ := enrolling(t, l, ca, time.Now)
 	burl := serveLoopback(t, b)

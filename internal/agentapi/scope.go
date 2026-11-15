@@ -272,7 +272,36 @@ func checkVolumeNames(m BundleManifest, others []BundleManifest) error {
 //     volume), a bind source with "..", "~", a socket (*.sock), the host's
 //     root, outside bundleDir and every root, propagation shared/slave,
 //     any type but bind, volume or tmpfs.
-func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManifest, bindRoots []string, bundleDir string, readOnlyDirs ...string) error {
+//
+// BundleScope is where a bundle's binds may point (contract §17.4):
+//   - BindRoots: the worker's folder roots (a bind under one, read-write
+//     allowed; the root itself only when no protected path is in it);
+//   - ReadOnlyDirs: the instance's own files and appfiles directories
+//     (binds must be read-only; SELinux "z" allowed there only);
+//   - Protected: never bound — a bind equal to one, an ancestor of one or
+//     inside one is refused ("/" itself: equal only): the agent's data
+//     dir, the projects root, the engine's roots and sockets, "/";
+//   - ProjectDir: the directory of the compose files: no bind equals,
+//     contains or is inside it;
+//   - BaseDir: relative sources resolve here ("" = a relative source is
+//     refused: the agent validates compose config's absolute model).
+type BundleScope struct {
+	BindRoots, ReadOnlyDirs, Protected []string
+	ProjectDir, BaseDir                string
+}
+
+func cleanAbs(list []string, what string) ([]string, error) {
+	var out []string
+	for _, r := range list {
+		if !path.IsAbs(r) || path.Clean(r) != r {
+			return nil, fmt.Errorf("%s %q must be an absolute clean path", what, clip(r))
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManifest, scope BundleScope) error {
 	if model == nil {
 		return bundleError("no compose model")
 	}
@@ -280,21 +309,28 @@ func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManif
 		return bundleError("%v", err)
 	}
 	instance := m.Instance
-	if !path.IsAbs(bundleDir) || path.Clean(bundleDir) != bundleDir || bundleDir == "/" {
-		return bundleError("the bundle directory must be an absolute clean path")
-	}
-	var roots, ro []string
-	for _, r := range bindRoots {
-		if !path.IsAbs(r) || path.Clean(r) != r || r == "/" {
-			return bundleError("folder root %q must be an absolute clean path other than /", clip(r))
+	for _, l := range [][]string{scope.BindRoots, scope.ReadOnlyDirs} {
+		for _, r := range l {
+			if r == "/" {
+				return bundleError("the host's root can't be a folder root or a bundle directory")
+			}
 		}
-		roots = append(roots, r)
 	}
-	for _, r := range readOnlyDirs {
-		if !path.IsAbs(r) || path.Clean(r) != r || r == "/" {
-			return bundleError("directory %q must be an absolute clean path other than /", clip(r))
+	var err error
+	sc := scope
+	if sc.BindRoots, err = cleanAbs(scope.BindRoots, "folder root"); err != nil {
+		return bundleError("%v", err)
+	}
+	if sc.ReadOnlyDirs, err = cleanAbs(scope.ReadOnlyDirs, "directory"); err != nil {
+		return bundleError("%v", err)
+	}
+	if sc.Protected, err = cleanAbs(append(append([]string{}, scope.Protected...), "/"), "protected path"); err != nil {
+		return bundleError("%v", err)
+	}
+	for _, d := range []string{scope.ProjectDir, scope.BaseDir} {
+		if d != "" && (!path.IsAbs(d) || path.Clean(d) != d || d == "/") {
+			return bundleError("directory %q must be an absolute clean path other than /", clip(d))
 		}
-		ro = append(ro, r)
 	}
 	project := runtime.ProjectName(instance)
 	if model.Name != project {
@@ -317,6 +353,9 @@ func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManif
 		if err := checkKeys(reflect.ValueOf(n), networkKeys, what); err != nil {
 			return bundleError("%v", err)
 		}
+		if k := reservedLabel(n.Labels); k != "" {
+			return bundleError("%s: label %s is compose's or Portcullis's own", what, clip(k))
+		}
 		if bool(n.External) {
 			if n.Name != "portcullis-proxy" {
 				return bundleError("%s: only portcullis-proxy may be external", what)
@@ -338,6 +377,9 @@ func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManif
 		}
 		if bool(v.External) {
 			return bundleError("%s: external volumes are another project's data", what)
+		}
+		if k := reservedLabel(v.Labels); k != "" {
+			return bundleError("%s: label %s is compose's or Portcullis's own", what, clip(k))
 		}
 		if err := checkKeys(reflect.ValueOf(v), volumeKeys, what); err != nil {
 			return bundleError("%v (a local driver_opts device is a bind)", err)
@@ -364,7 +406,7 @@ func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManif
 		all[n] = s
 	}
 	for _, n := range sortedKeys(all) {
-		if err := checkService(n, all[n], all, model, roots, ro, bundleDir); err != nil {
+		if err := checkService(n, all[n], all, model, sc); err != nil {
 			return err
 		}
 	}
@@ -391,7 +433,7 @@ func nsOK(v string, own map[string]types.ServiceConfig, allowed ...string) bool 
 	return false
 }
 
-func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceConfig, model *types.Project, roots, ro []string, bundleDir string) error {
+func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceConfig, model *types.Project, sc BundleScope) error {
 	what := "service " + clip(n)
 	fail := func(format string, args ...any) error {
 		return bundleError(what+": "+format, args...)
@@ -451,10 +493,16 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 			return fail("links alias %q is reserved", clip(alias))
 		}
 	}
-	for _, k := range sortedKeys(s.Labels) {
-		if strings.HasPrefix(strings.ToLower(k), "com.docker.compose.") {
-			return fail("label %s is compose's own", clip(k))
-		}
+	if k := reservedLabel(s.Labels); k != "" {
+		return fail("label %s is compose's or Portcullis's own", clip(k))
+	}
+	// Resource bounds (review L6): no OOM preference over the host, and
+	// bounded shared memory.
+	if s.OomScoreAdj < 0 {
+		return fail("oom_score_adj below 0 is not allowed on a worker")
+	}
+	if s.ShmSize > MaxShmSize {
+		return fail("shm_size over %d bytes", int64(MaxShmSize))
 	}
 	for _, name := range []string{n, s.ContainerName, s.Hostname} {
 		if name != "" && reservedName(name) {
@@ -483,14 +531,33 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 		}
 	}
 	for _, mnt := range s.Volumes {
-		if err := checkMount(mnt, model, roots, ro, bundleDir); err != nil {
+		if err := checkMount(mnt, model, sc); err != nil {
 			return fail("%v", err)
 		}
 	}
 	return nil
 }
 
-func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots, ro []string, bundleDir string) error {
+// reservedLabel is the first label key compose or Portcullis owns
+// (com.docker.compose.*, io.portcullis.*: a container carrying the
+// helper label would pass for the agent's own).
+func reservedLabel(l map[string]string) string {
+	for _, k := range sortedKeys(l) {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "com.docker.compose.") || strings.HasPrefix(lk, "io.portcullis.") || strings.HasPrefix(lk, "io.portcullis/") {
+			return k
+		}
+	}
+	return ""
+}
+
+// MaxShmSize / MaxTmpfsSize bound a service's shared memory and tmpfs.
+const (
+	MaxShmSize   = 2 << 30
+	MaxTmpfsSize = 2 << 30
+)
+
+func checkMount(m types.ServiceVolumeConfig, model *types.Project, sc BundleScope) error {
 	if err := checkKeys(reflect.ValueOf(m), mountKeys, "mount "+clip(m.Target)); err != nil {
 		return err
 	}
@@ -504,6 +571,9 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots, ro []s
 	}
 	switch m.Type {
 	case types.VolumeTypeTmpfs:
+		if m.Tmpfs != nil && (m.Tmpfs.Size < 0 || int64(m.Tmpfs.Size) > MaxTmpfsSize) {
+			return fmt.Errorf("tmpfs %s: size over %d bytes", clip(m.Target), int64(MaxTmpfsSize))
+		}
 		return nil
 	case types.VolumeTypeVolume:
 		if m.Source == "" {
@@ -538,7 +608,10 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots, ro []s
 	}
 	p := src
 	if !path.IsAbs(p) {
-		p = path.Join(bundleDir, p)
+		if sc.BaseDir == "" {
+			return fmt.Errorf("bind %s: a relative source", clip(src))
+		}
+		p = path.Join(sc.BaseDir, p)
 	}
 	p = path.Clean(p)
 	if p == "/" {
@@ -547,7 +620,14 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots, ro []s
 	if strings.HasSuffix(p, ".sock") {
 		return fmt.Errorf("bind %s: sockets are not allowed", clip(src))
 	}
-	for _, r := range ro {
+	selinux := m.Bind != nil && m.Bind.SELinux != ""
+	if selinux && m.Bind.SELinux != "z" {
+		return fmt.Errorf("bind %s: SELinux %q (a private relabel) is not allowed", clip(src), clip(m.Bind.SELinux))
+	}
+	if d := sc.ProjectDir; d != "" && (under(p, d) || under(d, p)) {
+		return fmt.Errorf("bind %s: the compose files' directory is never bound", clip(src))
+	}
+	for _, r := range sc.ReadOnlyDirs {
 		if under(p, r) {
 			if !m.ReadOnly {
 				return fmt.Errorf("bind %s must be read-only", clip(src))
@@ -555,15 +635,20 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots, ro []s
 			return nil
 		}
 	}
-	if under(p, bundleDir) {
-		return nil
+	for _, f := range sc.Protected {
+		if p == f || (f != "/" && (under(p, f) || under(f, p))) {
+			return fmt.Errorf("a protected path (the agent's data, the engine's roots and sockets) is bound: %s (%s)", clip(src), clip(f))
+		}
 	}
-	for _, r := range roots {
+	if selinux {
+		return fmt.Errorf("bind %s: SELinux relabels are allowed only on the instance's own files", clip(src))
+	}
+	for _, r := range sc.BindRoots {
 		if under(p, r) {
 			return nil
 		}
 	}
-	return fmt.Errorf("bind %s is outside the bundle and the server's folder roots", clip(src))
+	return fmt.Errorf("bind %s is outside the server's folder roots", clip(src))
 }
 
 func under(p, root string) bool { return p == root || strings.HasPrefix(p, root+"/") }

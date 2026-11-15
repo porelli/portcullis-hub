@@ -171,7 +171,12 @@ func run(data string, getenv func(string) string) error {
 		return err
 	}
 	go guard.Run(ctx, engine, 10*time.Second)
-	rt := dockerrt.New(compose.NewCLI(host, guard), engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: dockerrt.HelperImage})
+	cli := compose.NewCLI(host, guard)
+	rt := dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: dockerrt.HelperImage})
+	protected, err := protectedPaths(ctx, rt, getenv("AGENT_PROTECTED"))
+	if err != nil {
+		return err
+	}
 	// The agent's own container and image (the fixer runs on it, P7).
 	self, _ := os.Hostname()
 	selfImage := ""
@@ -179,7 +184,7 @@ func run(data string, getenv func(string) string) error {
 		selfImage = ui.Image
 	}
 	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage,
-		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env()})
+		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env(), Config: cli.Config, Protected: protected})
 	engineInfo := agent.EngineInfo(rt, portStart)
 	info := func(ctx context.Context) (agentapi.Info, error) {
 		i, err := engineInfo(ctx)
@@ -248,4 +253,42 @@ func run(data string, getenv func(string) string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// defaultProtected are host paths no bind may equal, contain or be inside
+// (review C3): the engines' roots and run dirs (sockets), system dirs.
+var defaultProtected = []string{"/var/lib/docker", "/var/lib/containers", "/var/lib/containerd", "/run", "/var/run",
+	"/etc", "/proc", "/sys", "/dev", "/boot", "/root", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/var/lib/kubelet"}
+
+// protectedPaths: the defaults, the engine's data root (its Info, waited
+// for at most 30 s: an engine the agent can't ask refuses the start) and
+// AGENT_PROTECTED (a colon list of absolute paths).
+func protectedPaths(ctx context.Context, rt runtime.Instances, extra string) ([]string, error) {
+	out := append([]string{}, defaultProtected...)
+	ictx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var info runtime.Info
+	var err error
+	for {
+		if info, err = rt.Info(ictx); err == nil && len(info.ForbiddenRoots) > 0 {
+			break
+		}
+		select {
+		case <-ictx.Done():
+			return nil, errors.New("the engine's data root can't be read (it must be protected from binds): is socket-proxy-agent up?")
+		case <-time.After(time.Second):
+		}
+	}
+	out = append(out, info.ForbiddenRoots...)
+	for _, p := range strings.Split(extra, ":") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !path.IsAbs(p) || path.Clean(p) != p {
+			return nil, fmt.Errorf("AGENT_PROTECTED: %q must be an absolute clean path", p)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }

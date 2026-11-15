@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"net/netip"
@@ -20,7 +18,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/types"
 
 	"github.com/portcullis/hub/internal/agentapi"
@@ -67,6 +64,13 @@ type APIConfig struct {
 	SelfImage, HelperImage string
 	// ComposeEnv is the environment compose interpolates with.
 	ComposeEnv []string
+	// Protected are paths no bind may equal, contain or be inside (the
+	// engine's roots and sockets, system directories; the data dir is
+	// always added).
+	Protected []string
+	// Config runs `docker compose config` (compose.CLI.Config): the model
+	// the agent validates and runs is its output, never the bundle's files.
+	Config func(ctx context.Context, p compose.Project) ([]byte, error)
 }
 
 // project is one bundled instance as the agent holds it.
@@ -109,7 +113,7 @@ func NewAPI(cfg APIConfig) *API {
 		if !e.IsDir() || agentapi.ValidInstance(e.Name()) != nil {
 			continue
 		}
-		if p, err := a.loadProject(e.Name(), a.projectDir(e.Name())); err != nil {
+		if p, err := a.loadStored(e.Name()); err != nil {
 			log.Printf("bundle %s: %v (out of scope until the Hub sends it again)", e.Name(), err)
 		} else {
 			a.projects[e.Name()] = p
@@ -246,255 +250,6 @@ func engineError(w http.ResponseWriter, err error) {
 
 // ── bundles ──────────────────────────────────────────────────────────────
 
-// composeFiles are the bundle's compose files, in order, that exist.
-func composeFiles(dir string) []string {
-	var out []string
-	for _, f := range []string{BundleCompose, BundleOverride, BundleUserOverride} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
-			out = append(out, filepath.Join(dir, f))
-		}
-	}
-	return out
-}
-
-// loadModel loads the bundle in dir (compose-go, every profile, paths
-// unresolved: the Hub's loadRendered options).
-func (a *API) loadModel(id, dir string) (*types.Project, error) {
-	files := composeFiles(dir)
-	if len(files) == 0 || filepath.Base(files[0]) != BundleCompose {
-		return nil, errors.New("the bundle has no compose.yml")
-	}
-	opts := []cli.ProjectOptionsFn{cli.WithName(runtime.ProjectName(id)), cli.WithWorkingDirectory(dir), cli.WithEnv(a.cfg.ComposeEnv),
-		cli.WithProfiles([]string{"*"}), cli.WithConsistency(false), cli.WithResolvedPaths(false), cli.WithoutEnvironmentResolution}
-	if _, err := os.Stat(filepath.Join(dir, BundleEnv)); err == nil {
-		opts = append(opts, cli.WithEnvFiles(filepath.Join(dir, BundleEnv)), cli.WithDotEnv)
-	}
-	po, err := cli.NewProjectOptions(files, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return po.LoadProject(context.Background())
-}
-
-func (a *API) readManifest(dir string) (agentapi.BundleManifest, error) {
-	b, err := os.ReadFile(filepath.Join(dir, agentapi.ManifestName))
-	if err != nil {
-		return agentapi.BundleManifest{}, err
-	}
-	var m agentapi.BundleManifest
-	err = agentapi.Decode(strings.NewReader(string(b)), agentapi.MaxJSON, &m)
-	return m, err
-}
-
-// loadProject validates the bundle in dir as instance id's, to live at
-// the project directory (relative binds resolve there).
-func (a *API) loadProject(id, dir string) (*project, error) {
-	m, err := a.readManifest(dir)
-	if err != nil {
-		return nil, err
-	}
-	if m.Instance != id {
-		return nil, errors.New("the manifest names another instance")
-	}
-	model, err := a.loadModel(id, dir)
-	if err != nil {
-		return nil, err
-	}
-	var others []agentapi.BundleManifest
-	a.mu.Lock()
-	for oid, p := range a.projects {
-		if oid != id {
-			others = append(others, p.manifest)
-		}
-	}
-	a.mu.Unlock()
-	// Binds of the instance's appfiles must be read-only (a container
-	// can't plant anything the agent later writes through).
-	if err := agentapi.ValidateBundle(model, m, others, a.cfg.BindRoots, a.projectDir(id), a.appfilesDir(id)); err != nil {
-		return nil, err
-	}
-	p := &project{manifest: m, model: model, images: map[string]bool{}, routes: map[string]map[int]bool{}}
-	all := map[string]types.ServiceConfig{}
-	for n, s := range model.DisabledServices {
-		all[n] = s
-	}
-	for n, s := range model.Services {
-		all[n] = s
-	}
-	for n, s := range all {
-		if s.Image != "" {
-			p.images[s.Image] = true
-		}
-		for k, v := range s.Labels {
-			if routePortRe.MatchString(strings.ToLower(k)) {
-				if port, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && port > 0 && port < 65536 {
-					if p.routes[n] == nil {
-						p.routes[n] = map[int]bool{}
-					}
-					p.routes[n][port] = true
-				}
-			}
-		}
-	}
-	return p, nil
-}
-
-var routePortRe = regexp.MustCompile(`^traefik\.http\.services\.[^.]+\.loadbalancer\.server\.port$`)
-
-// putBundle writes the bundle into <data>/projects/<id>.new/, re-validates
-// it and only then renames it over <data>/projects/<id>/; the bundle's
-// appfiles/ go to <data>/appfiles/<id>/ (kept across bundles).
-func (a *API) putBundle(w http.ResponseWriter, r *http.Request, id string) {
-	staging := a.projectDir(id) + ".new"
-	os.RemoveAll(staging)
-	if err := os.MkdirAll(staging, 0o750); err != nil {
-		writeError(w, http.StatusInternalServerError, "can't stage the bundle")
-		return
-	}
-	defer os.RemoveAll(staging)
-	m, err := agentapi.ReadBundle(r.Body, id, agentapi.MaxBundle, func(name string, mode fs.FileMode, data io.Reader) error {
-		return writeStaged(staging, name, mode, data)
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, clipMsg(err.Error()))
-		return
-	}
-	// The manifest is kept with the bundle (restarts re-validate from it).
-	mb, _ := json.Marshal(m)
-	if err := writeStaged(staging, agentapi.ManifestName, 0o600, strings.NewReader(string(mb))); err != nil {
-		writeError(w, http.StatusInternalServerError, "can't stage the manifest")
-		return
-	}
-	p, err := a.loadProject(id, staging)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, clipMsg(err.Error()))
-		return
-	}
-	if err := a.commitBundle(id, staging); err != nil {
-		code := http.StatusInternalServerError
-		if errors.Is(err, ErrNotPlain) {
-			code = http.StatusConflict
-		}
-		writeError(w, code, clipMsg(err.Error()))
-		return
-	}
-	a.mu.Lock()
-	a.projects[id] = p
-	a.mu.Unlock()
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// writeStaged writes one bundle file under dir (name is clean and
-// relative: agentapi.ReadBundle), never following a symlink.
-func writeStaged(dir, name string, mode fs.FileMode, data io.Reader) error {
-	p := filepath.Join(dir, filepath.FromSlash(name))
-	if rel, err := filepath.Rel(dir, p); err != nil || strings.HasPrefix(rel, "..") {
-		return errors.New("bundle: a path escapes the bundle")
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscallNoFollow, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, data); err != nil {
-		f.Close()
-		os.Remove(p)
-		return err
-	}
-	if err := f.Chmod(mode); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
-}
-
-func (a *API) commitBundle(id, staging string) error {
-	// appfiles/ → <data>/appfiles/<id>/: every file checked against the
-	// instance's appfiles (no symlink, no other type in the way) before
-	// anything moves, then written there through os.Root; only then is
-	// the project directory swapped.
-	src := filepath.Join(staging, strings.TrimSuffix(BundleAppfiles, "/"))
-	var rels []string
-	if _, err := os.Lstat(src); err == nil {
-		err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.Type().IsRegular() {
-				rel, _ := filepath.Rel(src, p)
-				rels = append(rels, filepath.ToSlash(rel))
-			} else if !d.IsDir() {
-				return ErrNotPlain
-			}
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("appfiles: %w", err)
-		}
-	}
-	if len(rels) > 0 {
-		root, err := openPlainDir(a.appfilesDir(id), true)
-		if err != nil {
-			return fmt.Errorf("appfiles: %w", err)
-		}
-		defer root.Close()
-		for _, rel := range rels {
-			if err := checkRooted(root, rel); err != nil {
-				return fmt.Errorf("appfiles: %w", err)
-			}
-		}
-		for _, rel := range rels {
-			p := filepath.Join(src, filepath.FromSlash(rel))
-			fi, err := os.Lstat(p)
-			if err != nil {
-				return err
-			}
-			f, err := os.OpenFile(p, os.O_RDONLY|syscallNoFollow, 0)
-			if err != nil {
-				return err
-			}
-			err = writeRooted(root, rel, f, fi.Mode().Perm())
-			f.Close()
-			if err != nil {
-				return fmt.Errorf("appfiles: %w", err)
-			}
-		}
-		os.RemoveAll(src)
-	}
-	final, old := a.projectDir(id), a.projectDir(id)+".old"
-	os.RemoveAll(old)
-	if _, err := os.Stat(final); err == nil {
-		if err := os.Rename(final, old); err != nil {
-			return err
-		}
-	}
-	if err := os.Rename(staging, final); err != nil {
-		os.Rename(old, final)
-		return err
-	}
-	return os.RemoveAll(old)
-}
-
-func (a *API) removeProject(w http.ResponseWriter, r *http.Request, id string) {
-	units, err := a.cfg.Runtime.List(r.Context(), runtime.Filter{Instance: id})
-	if err != nil {
-		engineError(w, err)
-		return
-	}
-	if len(units) > 0 {
-		writeError(w, http.StatusConflict, "the project still has containers: take it down first")
-		return
-	}
-	a.mu.Lock()
-	delete(a.projects, id)
-	a.mu.Unlock()
-	os.RemoveAll(a.projectDir(id))
-	os.RemoveAll(a.appfilesDir(id))
-	w.WriteHeader(http.StatusNoContent)
-}
-
 var appFileNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // putAppFile is DeliverFile: a tar of exactly <name>.json (0640) and,
@@ -512,7 +267,7 @@ func (a *API) putAppFile(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	root, err := openPlainDir(a.appfilesDir(id), true)
+	root, err := a.appfilesRoot(id)
 	if err != nil {
 		writeError(w, http.StatusConflict, "the data file directory: "+clipMsg(err.Error()))
 		return
@@ -534,16 +289,6 @@ func (a *API) putAppFile(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // ── lifecycle ────────────────────────────────────────────────────────────
-
-func (a *API) runtimeProject(id string) runtime.Project {
-	p := a.project(id)
-	dir := a.projectDir(id)
-	cf := compose.Project{Name: runtime.ProjectName(id), Files: composeFiles(dir), ProjectDir: dir}
-	if _, err := os.Stat(filepath.Join(dir, BundleEnv)); err == nil {
-		cf.EnvFile = filepath.Join(dir, BundleEnv)
-	}
-	return runtime.Project{Name: cf.Name, Instance: id, Files: cf, Model: p.model}
-}
 
 // checkVolumes: every manifest volume that already exists carries this
 // instance's compose labels; one that doesn't is refused, never adopted.
@@ -637,6 +382,14 @@ func (a *API) lifecycle(verb string) func(w http.ResponseWriter, r *http.Request
 		ctx, done := a.opContext(r)
 		defer done()
 		p := a.runtimeProject(id)
+		if verb == "create" || verb == "up" {
+			// The bind sources again, right before the engine sees them
+			// (C4; the residual race until the engine mounts is ledgered).
+			if err := a.checkBindPaths(id, p.Model); err != nil {
+				writeError(w, http.StatusConflict, clipMsg(err.Error()))
+				return
+			}
+		}
 		switch verb {
 		case "create":
 			if err := a.checkVolumes(ctx, id); err != nil {

@@ -37,7 +37,7 @@ func manifestFor(instance, template string, vols map[string]string) BundleManife
 }
 
 func validate(m *types.Project, mf BundleManifest, roots []string, dir string) error {
-	return ValidateBundle(m, mf, nil, roots, dir)
+	return ValidateBundle(m, mf, nil, BundleScope{BindRoots: roots, BaseDir: dir, ReadOnlyDirs: []string{filepath.Join(dir, "templates"), filepath.Join(dir, "certs")}})
 }
 
 const cleanBundle = `services:
@@ -138,7 +138,7 @@ func TestValidateBundleRefusesEscapes(t *testing.T) {
 		"runtime":                {svc("    runtime: runc\n"), "runtime"},
 		"volumes_from container": {svc("    volumes_from: [\"container:abc\"]\n"), "volumes_from"},
 		"external links":         {svc("    external_links: [db]\n"), "external_links"},
-		"compose label":          {svc("    labels: {com.docker.compose.project: portcullis-other}\n"), "compose's own"},
+		"compose label":          {svc("    labels: {com.docker.compose.project: portcullis-other}\n"), "compose's or Portcullis's own"},
 		"core service name":      {"services:\n  traefik:\n    image: x\n", "reserved"},
 		"worker agent alias":     {svc("    networks:\n      default:\n        aliases: [agent]\n"), "reserved"},
 		"container name core":    {svc("    container_name: portcullis-hub-1\n"), "reserved"},
@@ -436,7 +436,7 @@ func TestBundleVolumeNamesCrossInstance(t *testing.T) {
 		{"another project in the manifest", load("photos", "portcullis-paperless_data"),
 			manifestFor("photos", "immich", map[string]string{"data": "portcullis-paperless_data"}), nil, "not one of the instance's volume names"},
 	} {
-		err := ValidateBundle(c.model, c.m, c.others, nil, dir)
+		err := ValidateBundle(c.model, c.m, c.others, BundleScope{BaseDir: dir})
 		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
 			t.Errorf("%s: err %v, want %q", c.name, err, c.want)
 		}
@@ -461,9 +461,66 @@ func TestBundleReadOnlyDirs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = ValidateBundle(m, mf, nil, []string{"/srv"}, dir, appfiles)
+		err = ValidateBundle(m, mf, nil, BundleScope{BindRoots: []string{"/srv"}, BaseDir: dir, ReadOnlyDirs: []string{appfiles}})
 		if ok != (err == nil) {
 			t.Errorf("%q: %v", c, err)
 		}
+	}
+}
+
+// TestBundleScopeProtected (review C1, C3, M2, L2, L6): the compose
+// files' dir is never bound; protected paths (the agent's data, the
+// engine's root, "/") are never bound, nor anything above or inside
+// them; a folder root itself only when nothing protected is in it;
+// SELinux relabels only on the instance's own read-only files; reserved
+// labels and unbounded resources refused.
+func TestBundleScopeProtected(t *testing.T) {
+	dir := t.TempDir()
+	mf := manifestFor("app", "app", nil)
+	scope := BundleScope{BindRoots: []string{"/srv", "/mnt"}, ReadOnlyDirs: []string{"/srv/pc/data/files/app", "/srv/pc/data/appfiles/app"},
+		Protected: []string{"/srv/pc/data", "/mnt/docker", "/var/run"}, ProjectDir: "/srv/pc/data/projects/app"}
+	svc := func(extra string) string { return "services:\n  web:\n    image: x\n" + extra }
+	for c, want := range map[string]string{
+		svc("    volumes: [\"/srv/photos:/p\"]\n"):                                                        "",
+		svc("    volumes: [\"/mnt/media:/m\"]\n"):                                                         "",
+		svc("    volumes: [\"/mnt:/m\"]\n"):                                                               "protected",
+		svc("    volumes: [\"/srv:/s\"]\n"):                                                               "compose files",
+		svc("    volumes: [\"/srv/pc:/s\"]\n"):                                                            "compose files",
+		svc("    volumes: [\"/srv/pc/data/identity:/i\"]\n"):                                              "protected",
+		svc("    volumes: [\"/mnt/docker/volumes:/v\"]\n"):                                                "protected",
+		svc("    volumes: [\"/srv/pc/data/projects/app:/x:ro\"]\n"):                                       "compose files",
+		svc("    volumes: [\"/srv/pc/data/projects:/x:ro\"]\n"):                                           "compose files",
+		svc("    volumes: [\"/srv/pc/data/files/app/templates/a/c:/c:ro\"]\n"):                            "",
+		svc("    volumes: [\"/srv/pc/data/files/app/templates/a/c:/c\"]\n"):                               "read-only",
+		svc("    volumes: [\"/srv/pc/data/files/app/templates/a/c:/c:ro,z\"]\n"):                          "",
+		svc("    volumes: [\"/srv/pc/data/files/app/templates/a/c:/c:ro,Z\"]\n"):                          "private relabel",
+		svc("    volumes: [\"/srv/photos:/p:z\"]\n"):                                                      "only on the instance's own files",
+		svc("    volumes: [\"/srv/photos:/p:Z\"]\n"):                                                      "private relabel",
+		svc("    volumes: [\"relative:/r\"]\n"):                                                           "",
+		svc("    volumes: [\"./rel:/r\"]\n"):                                                              "relative source",
+		svc("    labels: {io.portcullis.hub.helper: \"folder:x\"}\n"):                                     "Portcullis's own",
+		svc("    oom_score_adj: -500\n"):                                                                  "oom_score_adj",
+		svc("    shm_size: 8g\n"):                                                                         "shm_size",
+		svc("    tmpfs:\n      - /t:size=8g\n"):                                                           "",
+		svc("    volumes:\n      - type: tmpfs\n        target: /t\n        tmpfs: {size: 8589934592}\n"): "tmpfs",
+		svc("    networks: [n]\nnetworks:\n  n:\n    labels: {com.docker.compose.network: x}\n"):          "Portcullis's own",
+	} {
+		m, err := loadBundleModel(t, dir, "app", c, nil)
+		if err != nil {
+			t.Fatalf("%q: %v", c, err)
+		}
+		if strings.Contains(c, "relative:/r") {
+			// a named volume: declare it in the manifest
+			continue
+		}
+		err = ValidateBundle(m, mf, nil, scope)
+		if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+			t.Errorf("%q: err %v, want %q", c, err, want)
+		}
+	}
+	// "/" is protected even when a caller forgets it.
+	m, _ := loadBundleModel(t, dir, "app", svc("    volumes: [\"/:/host\"]\n"), nil)
+	if err := ValidateBundle(m, mf, nil, BundleScope{BindRoots: []string{"/srv"}}); err == nil {
+		t.Error("/ bound")
 	}
 }

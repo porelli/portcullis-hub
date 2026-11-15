@@ -62,6 +62,13 @@ func (a *Agent) handleNonce(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) failLocked() {
 	a.failures++
 	if a.failures >= MaxEnrolFailures {
+		// Survives a restart (review L1): the pins say refused and the
+		// join code is gone; only a new worker join starts over.
+		p := a.pins
+		p.State = StateRefused
+		a.store.SavePins(p)
+		os.Remove(a.store.path(joinFile))
+		a.pins, a.state = p, StateRefused
 		a.once.Do(func() { close(a.refused) })
 	}
 }

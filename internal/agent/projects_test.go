@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/agent/agenttest"
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fixerspec"
@@ -163,10 +164,13 @@ type apiFixture struct {
 
 func newAPI(t *testing.T) *apiFixture {
 	t.Helper()
-	data := t.TempDir()
-	rt := &eventsFake{Fake: &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, LogsVal: map[string][]byte{}, States: map[string]runtime.State{}}}
+	data, err := filepath.EvalSymlinks(t.TempDir()) // the walk refuses a symlinked path (macOS /var)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &eventsFake{Fake: &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, LogsVal: map[string][]byte{}, States: map[string]runtime.State{}, Contents: map[string][]byte{}}}
 	n := &fakeNet{addrs: map[string]netip.Addr{}, labels: map[string]map[string]string{}}
-	api := NewAPI(APIConfig{DataDir: data, BindRoots: []string{"/srv"}, Runtime: rt, Net: n, SelfImage: "sha256:agent", HelperImage: "docker.io/library/alpine:3@sha256:" + strings.Repeat("a", 64)})
+	api := NewAPI(APIConfig{DataDir: data, BindRoots: []string{"/srv"}, Runtime: rt, Net: n, SelfImage: "sha256:agent", Config: agenttest.Config, HelperImage: "docker.io/library/alpine:3@sha256:" + strings.Repeat("a", 64)})
 	srv := httptest.NewServer(api)
 	t.Cleanup(srv.Close)
 	return &apiFixture{api: api, rt: rt, net: n, data: data, srv: srv}
@@ -392,7 +396,7 @@ func TestBundleSwapKeepsAppfiles(t *testing.T) {
 		t.Errorf("hostile appfile: %d", c)
 	}
 	// A new bundle (no appfiles): the project dir is new, appfiles stay.
-	marker := filepath.Join(f.data, "projects", "app", "templates", "app", "app.conf")
+	marker := filepath.Join(f.data, "files", "app", "templates", "app", "app.conf")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +410,7 @@ func TestBundleSwapKeepsAppfiles(t *testing.T) {
 		}
 	}
 	// The bundle survives a restart (re-validated from disk).
-	api2 := NewAPI(APIConfig{DataDir: f.data, BindRoots: []string{"/srv"}, Runtime: f.rt, Net: f.net})
+	api2 := NewAPI(APIConfig{DataDir: f.data, BindRoots: []string{"/srv"}, Runtime: f.rt, Net: f.net, Config: agenttest.Config})
 	if api2.project("app") == nil {
 		t.Error("the bundle wasn't reloaded")
 	}
@@ -656,5 +660,139 @@ func TestBundleAppfilesSymlinkRefused(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(victim); string(got) != "keep" {
 		t.Errorf("the victim changed: %q", got)
+	}
+}
+
+// putBundleFiles PUTs a bundle of exactly files (name → content) for app.
+func (f *apiFixture) putBundleFiles(t *testing.T, files map[string]string) (int, string) {
+	var list []bundleFile
+	for n, d := range files {
+		mode := int64(0o644)
+		if n == BundleEnv {
+			mode = 0o600
+		}
+		list = append(list, bundleFile{name: n, data: d, mode: mode})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].name < list[j].name })
+	resp, b := f.req(t, "PUT", "/v1/projects/app/bundle", bytes.NewReader(bundleTar(t, "app", map[string]string{"data": "portcullis-app_data"}, list)))
+	return resp.StatusCode, string(b)
+}
+
+// TestFixRound1Bundles (review C1, C2, C3, C4): what runs is what was
+// validated, nothing outside the allowed names, no include/extends, the
+// env file interpolated as the CLI would, no bind of the compose files,
+// the agent's data or a symlinked source.
+func TestFixRound1Bundles(t *testing.T) {
+	f := newAPI(t)
+	outside := t.TempDir()
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	f.api.cfg.BindRoots = []string{root}
+	os.MkdirAll(filepath.Join(root, "real"), 0o755)
+	os.Symlink(outside, filepath.Join(root, "link"))
+	base := "services:\n  web:\n    image: ghcr.io/example/app:1\n    volumes: [\"data:/data\"]\nvolumes:\n  data: {}\n"
+	for name, c := range map[string]struct {
+		files map[string]string
+		want  string
+	}{
+		"a .env member (C2)":           {map[string]string{BundleCompose: base, ".env": "P=true\n"}, "only compose.yml"},
+		"an unknown root file":         {map[string]string{BundleCompose: base, "evil.yml": "x: 1\n"}, "only compose.yml"},
+		"interpolated privileged (C2)": {map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    privileged: ${P:-false}\n", BundleEnv: "P=true\n"}, "privileged"},
+		"interpolated bind (C2)":       {map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    volumes: [\"${SRC:-/srv/a}:/h\"]\n", BundleEnv: "SRC=/\n"}, "root"},
+		"include (C2)":                 {map[string]string{BundleCompose: "include: [/srv/x.yml]\nservices:\n  web:\n    image: x\n"}, "include"},
+		"extends (C2)":                 {map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    extends: {file: /srv/x.yml, service: s}\n"}, "extends"},
+		"extends in the override (C2)": {map[string]string{BundleCompose: base, BundleOverride: "services:\n  web:\n    extends: {service: other}\n"}, "extends"},
+		"the project dir bound (C1)":   {map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    volumes: [\"" + f.data + "/projects/app:/p\"]\n"}, "compose files"},
+		"the data dir bound (C3)":      {map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    volumes: [\"" + f.data + "/identity:/i\"]\n"}, "protected"},
+		"a symlinked source (C4)":      {map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    volumes: [\"" + root + "/link/x:/x\"]\n"}, "symlink"},
+		"a template bind rw (C1)":      {map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    volumes: [\"./templates/app:/t\"]\n", "templates/app/a": "x"}, "read-only"},
+	} {
+		code, body := f.putBundleFiles(t, c.files)
+		if code < 400 || !strings.Contains(body, c.want) {
+			t.Errorf("%s: %d %s (want %q)", name, code, body, c.want)
+		}
+		if f.api.project("app") != nil {
+			t.Fatalf("%s: bundled", name)
+		}
+	}
+	// A clean bundle under the root, then a symlink planted before up.
+	ok := map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    volumes: [\"" + root + "/real/sub:/x\", \"data:/data\"]\nvolumes:\n  data: {}\n",
+		BundleEnv: "COMPOSE_PROFILES=a,b\nX=1\n", BundleOverride: "services:\n  web:\n    environment: {A: \"$$HOME\"}\n"}
+	if code, body := f.putBundleFiles(t, ok); code != 204 {
+		t.Fatalf("clean bundle: %d %s", code, body)
+	}
+	// What runs: only the resolved model, its env file holding only the profiles.
+	p := f.api.runtimeProject("app")
+	if len(p.Files.Files) != 1 || p.Files.Files[0] != f.api.resolvedFile("app") || p.Files.EnvFile != f.api.resolvedEnv("app") || p.Files.ProjectDir != f.api.filesDir("app") {
+		t.Errorf("runtime project %+v", p.Files)
+	}
+	if env, _ := os.ReadFile(f.api.resolvedEnv("app")); string(env) != "COMPOSE_PROFILES=a,b\n" {
+		t.Errorf("run env %q", env)
+	}
+	// C1: rewriting the bundle's files afterwards changes nothing that runs.
+	os.WriteFile(filepath.Join(f.data, "projects", "app", BundleOverride), []byte("services:\n  web:\n    privileged: true\n"), 0o600)
+	if b, _ := os.ReadFile(f.api.resolvedFile("app")); strings.Contains(string(b), "privileged") {
+		t.Error("the resolved model changed")
+	}
+	if fi, _ := os.Stat(f.api.resolvedDir()); fi.Mode().Perm() != 0o700 {
+		t.Errorf("resolved dir %v", fi.Mode().Perm())
+	}
+	if c := f.code(t, "POST", "/v1/projects/app/create", nil); c != 204 {
+		t.Errorf("create: %d", c)
+	}
+	os.Symlink(outside, filepath.Join(root, "real", "sub"))
+	if c := f.code(t, "POST", "/v1/projects/app/up", nil); c != 409 {
+		t.Errorf("up after a symlink was planted (C4): %d", c)
+	}
+	// The fixer: a protected folder and a symlinked one are refused.
+	for _, src := range []string{f.data, filepath.Join(root, "link")} {
+		spec := agentapi.FixerSpecOf(fixerspec.Run{Mode: "scan", Source: src}.Spec("", AgentBinary))
+		f.api.cfg.BindRoots = []string{root, filepath.Dir(f.data)}
+		if c := f.code(t, "POST", "/v1/helpers", agentapi.HelperSpec{Kind: agentapi.HelperFolderFix, Spec: &spec}); c != 403 {
+			t.Errorf("fixer on %s: %d", src, c)
+		}
+	}
+}
+
+// TestVolumeInEntriesChecked (review M1): a volume archive with a device,
+// a "..", an absolute name, a symlink or a hard link is refused (400);
+// a clean one reaches the engine re-encoded.
+func TestVolumeInEntriesChecked(t *testing.T) {
+	f := newAPI(t)
+	f.bundle(t, "app")
+	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: map[string]string{docker.LabelProject: "portcullis-app"}}
+	helper := func() string {
+		_, b := f.req(t, "POST", "/v1/helpers", bytes.NewReader(mustJSON(agentapi.HelperSpec{Kind: agentapi.HelperVolumeIO, Instance: "app", Volume: "portcullis-app_data", Path: "/data", Write: true})))
+		var hc agentapi.HelperCreated
+		json.Unmarshal(b, &hc)
+		return hc.ID
+	}
+	mk := func(h *tar.Header) []byte {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		tw.WriteHeader(&tar.Header{Name: "data/", Typeflag: tar.TypeDir, Mode: 0o755})
+		tw.WriteHeader(h)
+		if h.Size > 0 {
+			tw.Write(bytes.Repeat([]byte("x"), int(h.Size)))
+		}
+		tw.Close()
+		return buf.Bytes()
+	}
+	for name, h := range map[string]*tar.Header{
+		"device":   {Name: "data/dev", Typeflag: tar.TypeChar, Mode: 0o600},
+		"fifo":     {Name: "data/p", Typeflag: tar.TypeFifo, Mode: 0o600},
+		"dot-dot":  {Name: "data/../etc/x", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+		"absolute": {Name: "/etc/x", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+		"symlink":  {Name: "data/l", Typeflag: tar.TypeSymlink, Linkname: "/etc/shadow"},
+		"hardlink": {Name: "data/h", Typeflag: tar.TypeLink, Linkname: "data/x"},
+		"outside":  {Name: "other/x", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+	} {
+		if c := f.code(t, "PUT", "/v1/helpers/"+helper()+"/archive", mk(h)); c != 400 {
+			t.Errorf("%s: %d", name, c)
+		}
+	}
+	f.rt.Contents["portcullis-app_data"] = nil
+	clean := mk(&tar.Header{Name: "data/f", Typeflag: tar.TypeReg, Mode: 0o644, Size: 3})
+	if c := f.code(t, "PUT", "/v1/helpers/"+helper()+"/archive", clean); c != 204 {
+		t.Errorf("clean: %d", c)
 	}
 }

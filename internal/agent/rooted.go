@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // Writes into directories tenant containers can see (the instance's
@@ -119,3 +122,35 @@ func writeRooted(r *os.Root, rel string, data io.Reader, mode fs.FileMode) error
 	}
 	return err
 }
+
+// appfilesRoot opens <data>/appfiles/<id> as a Root, walking from the
+// data dir with Lstat on each component (review L4): appfiles and
+// appfiles/<id> must be real directories (made 0750 when absent).
+func (a *API) appfilesRoot(id string) (*os.Root, error) {
+	data, err := os.OpenRoot(a.cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer data.Close()
+	for _, p := range []string{"appfiles", "appfiles/" + id} {
+		fi, err := data.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := data.Mkdir(p, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
+				return nil, err
+			}
+			fi, err = data.Lstat(p)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !fi.IsDir() || fi.Mode()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s: %w", p, ErrNotPlain)
+		}
+	}
+	return data.OpenRoot("appfiles/" + id)
+}
+
+func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
+
+// writeFileAtomic writes an agent-only file (0600).
+func writeFileAtomic(p string, b []byte) error { return fsutil.WriteFileAtomic(p, b, 0o600) }

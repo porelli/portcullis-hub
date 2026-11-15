@@ -88,6 +88,15 @@ func TestRebuildRefusesAnythingElse(t *testing.T) {
 	if _, err := Rebuild(probe, agentBinary, []string{"/srv"}); err == nil {
 		t.Error("a writable probe accepted")
 	}
+	// A folder that is, holds or is inside a protected path is refused.
+	for _, prot := range []string{"/srv/photos", "/srv/photos/sub", "/srv"} {
+		if _, err := Rebuild(good, agentBinary, []string{"/srv"}, prot); err == nil {
+			t.Errorf("protected %s: accepted", prot)
+		}
+	}
+	if _, err := Rebuild(good, agentBinary, []string{"/srv"}, "/srv/other"); err != nil {
+		t.Errorf("an unrelated protected path: %v", err)
+	}
 	// The roots decide.
 	if _, err := Rebuild(good, agentBinary, []string{"/mnt"}); err == nil {
 		t.Error("a folder outside the worker's roots accepted")

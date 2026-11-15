@@ -39,6 +39,8 @@ const (
 	StateNone      = "none"
 	StateEnrolling = "enrolling"
 	StateReady     = "ready"
+	// StateRefused: three failed enrolment steps; the agent won't start.
+	StateRefused = "refused"
 )
 
 // Pins is pins.json: what the agent learned at join and keeps after it.

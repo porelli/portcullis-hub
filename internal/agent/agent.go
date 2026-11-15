@@ -132,6 +132,8 @@ func New(cfg Config) (*Agent, error) {
 		if a.linkPub, err = ParseKey(pins.LinkPub); err != nil {
 			return nil, err
 		}
+	case StateRefused:
+		return nil, ErrEnrolRefused
 	default:
 		return nil, fmt.Errorf("identity: state %q", pins.State)
 	}
