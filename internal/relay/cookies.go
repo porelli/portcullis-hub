@@ -18,8 +18,8 @@ var reservedPrefixes = []string{"_oauth2_proxy", "__host-portcullis_ext"}
 
 // Reserved reports whether a cookie name is a Portcullis cookie (contract
 // §5), without case: a reserved name (reservedPrefixes) exactly or with
-// "_"/"-" and a suffix, or any name containing "_csrf" (the CSRF
-// cookies).
+// "_"/"-" and a suffix (oauth2-proxy's CSRF cookies included). An app's
+// own cookies (_csrf, session) aren't reserved.
 func Reserved(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	for _, p := range reservedPrefixes {
@@ -27,7 +27,7 @@ func Reserved(name string) bool {
 			return true
 		}
 	}
-	return strings.Contains(n, "_csrf")
+	return false
 }
 
 // FilterRequestCookies removes every Portcullis cookie from the request's
@@ -52,9 +52,10 @@ func FilterRequestCookies(h http.Header) {
 }
 
 // FilterResponseCookies makes the response's cookies host-only: each
-// Set-Cookie is parsed alone; a reserved name or an unparsable one is
-// dropped, every other loses its Domain attribute (so a worker app can
-// never set a cookie on the parent or a sibling host) and is re-encoded.
+// Set-Cookie is judged alone; a reserved name or an unparsable one is
+// dropped, every other loses its Domain attribute(s) textually — every
+// other attribute is kept byte for byte (review L3) — so a worker app can
+// never set a cookie on the parent or a sibling host.
 func FilterResponseCookies(h http.Header, host string) {
 	lines := h.Values("Set-Cookie")
 	if len(lines) == 0 {
@@ -66,10 +67,16 @@ func FilterResponseCookies(h http.Header, host string) {
 		if err != nil || c.Name == "" || Reserved(c.Name) {
 			continue
 		}
-		c.Domain = ""
-		if s := c.String(); s != "" {
-			keep = append(keep, s)
+		parts := strings.Split(line, ";")
+		out := parts[:1]
+		for _, a := range parts[1:] {
+			k, _, _ := strings.Cut(strings.TrimSpace(a), "=")
+			if strings.EqualFold(strings.TrimSpace(k), "domain") {
+				continue
+			}
+			out = append(out, a)
 		}
+		keep = append(keep, strings.Join(out, ";"))
 	}
 	h.Del("Set-Cookie")
 	for _, s := range keep {

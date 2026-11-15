@@ -27,6 +27,8 @@ func TestCookieFilterDomainVariants(t *testing.T) {
 		"__Host-portcullis_ext=x; Path=/; Secure",
 		"__Host-portcullis_ext-2=x; Path=/; Secure",
 		"my_csrf_token=x",
+		"_csrf=app-own",
+		"p=1; Priority=High; Partitioned; Secure; Domain=.example.org",
 		"_OAUTH2_PROXY=upper",
 		"not a cookie",
 		"=empty-name",
@@ -43,17 +45,20 @@ func TestCookieFilterDomainVariants(t *testing.T) {
 			t.Errorf("a Domain survived: %q", c)
 		}
 	}
-	for _, keep := range []string{"a", "b", "c", "d", "e", "f", "__Host-g", "__Secure-h"} {
+	for _, keep := range []string{"a", "b", "c", "d", "e", "f", "__Host-g", "__Secure-h", "my_csrf_token", "_csrf", "p"} {
 		if _, ok := byName[keep]; !ok {
 			t.Errorf("%s dropped: %v", keep, got)
 		}
 	}
-	for _, drop := range []string{"_oauth2_proxy", "_oauth2_proxy_0", "_oauth2_proxy_csrf_abc", "__Host-portcullis_ext", "__Host-portcullis_ext-2", "my_csrf_token", "_OAUTH2_PROXY", "not a cookie", ""} {
+	for _, drop := range []string{"_oauth2_proxy", "_oauth2_proxy_0", "_oauth2_proxy_csrf_abc", "__Host-portcullis_ext", "__Host-portcullis_ext-2", "_OAUTH2_PROXY", "not a cookie", ""} {
 		if c, ok := byName[drop]; ok {
 			t.Errorf("%q kept: %q", drop, c)
 		}
 	}
-	if len(got) != 8 {
+	if byName["p"] != "p=1; Priority=High; Partitioned; Secure" {
+		t.Errorf("attributes not kept as sent: %q", byName["p"])
+	}
+	if len(got) != 11 {
 		t.Errorf("%d cookies kept: %v", len(got), got)
 	}
 	if !strings.Contains(byName["c"], "Secure") || !strings.Contains(byName["c"], "HttpOnly") || !strings.Contains(byName["e"], "SameSite=Lax") || !strings.Contains(byName["a"], "Path=/") {
@@ -76,7 +81,7 @@ func TestRequestCookiesStripped(t *testing.T) {
 	h.Add("Cookie", "_oauth2_proxy=s2; __Host-portcullis_ext=e2; x_csrf_y=1")
 	FilterRequestCookies(h)
 	got := h.Values("Cookie")
-	if len(got) != 1 || got[0] != "app=1; theme=dark" {
+	if len(got) != 1 || got[0] != "app=1; theme=dark; x_csrf_y=1" {
 		t.Errorf("cookies %q", got)
 	}
 	only := http.Header{"Cookie": {"_oauth2_proxy_1=x"}}
@@ -84,7 +89,7 @@ func TestRequestCookiesStripped(t *testing.T) {
 	if _, ok := only["Cookie"]; ok {
 		t.Errorf("an empty Cookie header kept: %q", only["Cookie"])
 	}
-	for _, n := range []string{"_oauth2_proxy", "_oauth2_proxy_9", "_oauth2_proxy_csrf_a", "__Host-portcullis_ext", "__Host-portcullis_ext-3", "a_csrf", "__host-PORTCULLIS_EXT"} {
+	for _, n := range []string{"_oauth2_proxy", "_oauth2_proxy_9", "_oauth2_proxy_csrf_a", "__Host-portcullis_ext", "__Host-portcullis_ext-3", "__host-PORTCULLIS_EXT"} {
 		if !Reserved(n) {
 			t.Errorf("%s not reserved", n)
 		}
@@ -101,12 +106,12 @@ func TestRequestCookiesStripped(t *testing.T) {
 // __Host-portcullis_ext, case-insensitive — and *_csrf*.
 func TestReservedNamesExact(t *testing.T) {
 	for _, n := range []string{"__Host-portcullis_ext_0", "__host-portcullis_ext_12", "_oauth2_proxy_1", "_oauth2_proxy-csrf", "_OAuth2_Proxy",
-		"__HOST-PORTCULLIS_EXT-3", "_oauth2_proxy", "__Host-portcullis_ext", "x_csrf"} {
+		"__HOST-PORTCULLIS_EXT-3", "_oauth2_proxy", "__Host-portcullis_ext", "_oauth2_proxy_csrf"} {
 		if !Reserved(n) {
 			t.Errorf("%s not reserved", n)
 		}
 	}
-	for _, n := range []string{"_oauth2_proxyish", "__Host-portcullis_extra", "oauth2_proxy_1", "__Host-app", "portcullis_ext"} {
+	for _, n := range []string{"_oauth2_proxyish", "__Host-portcullis_extra", "oauth2_proxy_1", "__Host-app", "portcullis_ext", "_csrf", "a_csrf", "my_csrf_token"} {
 		if Reserved(n) {
 			t.Errorf("%s reserved", n)
 		}
