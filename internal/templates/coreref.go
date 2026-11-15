@@ -47,13 +47,17 @@ var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcull
 var (
 	coreServices = set("socket-proxy-traefik", "socket-proxy-hub", "traefik", "postgres", "vault", "lldap", "keycloak",
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "dns-tool", "prometheus", "alertmanager", "blackbox",
-		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg")
+		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg",
+		// Mail (contract §3 "Mail core names").
+		"mail", "mailctl", "mail-resolver", "mail-cert")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
-		"group_gate_data", "wg_data", "vpn_doc")
+		"group_gate_data", "wg_data", "vpn_doc",
+		"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data")
 	// coreAliases are core's network aliases that aren't service names
-	// (wg's metrics address on portcullis): reserved DNS names too.
-	coreAliases = set("wg-metrics")
+	// (wg's metrics address on portcullis, mail's and mailctl's on
+	// portcullis-metrics-mail): reserved DNS names too.
+	coreAliases = set("wg-metrics", "mail-metrics", "mailctl-metrics")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )

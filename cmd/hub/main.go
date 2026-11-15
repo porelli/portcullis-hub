@@ -34,6 +34,7 @@ import (
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/mailctl"
 	"github.com/portcullis/hub/internal/signinreset"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/web"
@@ -446,6 +447,13 @@ func main() {
 		log.Printf("domains disabled: %v", err)
 	}
 	h.SetDomainsAPI(dom)
+	// Mail (contract §19.1): core's mailctl, bearer secret from a file.
+	// Without it (or with PORTCULLIS_MAIL=off) mail is off for the Hub.
+	mc := mailctl.New(env("HUB_MAILCTL_API_URL", mailctl.DefaultAPIURL), env("HUB_MAILCTL_SECRET_FILE", mailctl.DefaultSecretFile))
+	if err := mc.Available(); err != nil {
+		log.Printf("mail disabled: %v", err)
+	}
+	h.SetMailAPI(mc)
 	dirStore, err := openDirectoryStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)

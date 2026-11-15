@@ -348,6 +348,19 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template, runtime map[string
 		}
 		mine[sub] = true
 	}
+	// Reserved for mail (contract §5): mail.<e>, mta-sts.<e>,
+	// autoconfig.<e>, autodiscover.<e> on every mail domain.
+	mailDomains := h.mailDomainsLocked(h.mailOn())
+	for _, r := range routers {
+		if why := mailReservedIn(v.Hosts[r], mailDomains); why != "" {
+			return statusErr(409, "%s", why)
+		}
+	}
+	for _, sub := range v.Subdomains {
+		if why := mailReservedIn(sub+"."+main, mailDomains); why != "" {
+			return statusErr(409, "%s", why)
+		}
+	}
 	subClash := func(subs []string) string {
 		for _, s := range subs {
 			if mine[s] {

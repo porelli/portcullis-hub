@@ -358,7 +358,10 @@ type Hub struct {
 	// configured); domainsReachable: its last call succeeded. Both guarded
 	// by mu. domainOpMu serialises enroll / token / delete (held across
 	// the service calls, never together with mu).
-	domainsAPI       DomainsAPI
+	domainsAPI DomainsAPI
+	// mailAPI is core's mailctl (mail_core.go; nil = not connected:
+	// mail is off for the Hub, contract §19.1).
+	mailAPI          MailAPI
 	domainsReachable bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable
 	// meanwhile); domainsGen changes with every domain operation's commit,
