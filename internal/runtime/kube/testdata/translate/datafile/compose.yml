@@ -1,0 +1,6 @@
+services:
+  app:
+    image: docker.io/library/nginx:1.29
+    user: "101:101"
+    volumes:
+      - /host/appfiles/datafile/people:/portcullis/people:ro

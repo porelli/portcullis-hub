@@ -63,7 +63,7 @@ func TestMissingTemplateEnforcesSnapshot(t *testing.T) {
 	check("after discover")
 
 	// Restart the Hub from disk: still enforced.
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestMissingTemplateKeepsKeycloakClients(t *testing.T) {
 		}
 	}
 	check("after discover", "strong")
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestDirectoryStateFailsClosed(t *testing.T) {
 
 	// Restart while the directory is still failing: the expiries come
 	// from the file on disk.
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestPublishedExpiringCorruptFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.data, "group-gate-policy.json"), []byte("{not json"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

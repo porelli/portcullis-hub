@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime/kube"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
@@ -646,13 +648,13 @@ func (h *Hub) RecoverRestores() {
 func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 	ctx := context.Background()
 	var errs []error
-	if h.engine != nil {
+	if !h.noEngine() {
 		vols, err := h.projectVolumes(ctx, id)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("listing its volumes: %w", err))
 		}
 		for _, v := range vols {
-			if err := h.engine.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
+			if err := h.rt.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
 				errs = append(errs, fmt.Errorf("volume %s: %w", v.Name, err))
 			}
 		}
@@ -700,7 +702,7 @@ func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 // anything changes: a key the template doesn't have, a volume that isn't
 // a plain local one (its data would survive the remove).
 func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]volumePlan, error) {
-	if h.engine == nil {
+	if h.noEngine() {
 		if len(sb.volumes) == 0 {
 			return nil, nil
 		}
@@ -710,7 +712,7 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 	if err != nil {
 		return nil, statusErr(503, "cannot list the volumes of %s: %v", id, err)
 	}
-	derived := view.NamesFor(id).Volumes
+	derived := h.volumeNamesFor(view, id)
 	keys := make([]string, 0, len(sb.volumes))
 	for k := range sb.volumes {
 		keys = append(keys, k)
@@ -734,7 +736,7 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 		if !ok {
 			return nil, statusErr(409, "the archive has volume %s, which template %s no longer defines", k, view.TemplateID)
 		}
-		if existing, err := h.engine.InspectVolume(context.Background(), name); err == nil {
+		if existing, err := h.rt.InspectVolume(context.Background(), name); err == nil {
 			return nil, statusErr(409, "volume %s exists but doesn't belong to %s (labels %v): refusing to overwrite it", existing.Name, projectName(id), existing.Labels)
 		} else if !docker.IsNotFound(err) {
 			return nil, statusErr(503, "volume %s: %v", name, err)
@@ -742,6 +744,20 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 		out = append(out, volumePlan{key: k, vol: composeVolume(id, k, name), tar: sb.volumes[k]})
 	}
 	return out, nil
+}
+
+// volumeNamesFor are instance id's volume names by key: Docker's
+// (NamesFor) or, under Kubernetes, its PVCs <instance>--<key> (§11.2).
+func (h *Hub) volumeNamesFor(t *templates.Template, id string) map[string]string {
+	n := t.NamesFor(id).Volumes
+	if !h.kubeOn() {
+		return n
+	}
+	out := make(map[string]string, len(n))
+	for k := range n {
+		out[k] = kube.PVCName(id, k)
+	}
+	return out
 }
 
 // composeVolume is a volume as compose would create it for id's project.
@@ -790,7 +806,7 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 		}
 	}()
 	if len(plan) > 0 {
-		if err := h.engine.EnsureImage(ctx, HelperImage); err != nil {
+		if err := h.rt.EnsureImage(ctx, HelperImage); err != nil {
 			return air, fmt.Errorf("helper image %s: %w", HelperImage, err)
 		}
 	}
@@ -1113,12 +1129,13 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 		return err
 	}
 	names := tmpl.NamesFor(newID)
+	names.Volumes = h.volumeNamesFor(&tmpl, newID)
 	for k := range sb.volumes {
 		if _, ok := names.Volumes[k]; !ok {
 			return statusErr(409, "the archive has volume %s, which template %s no longer defines", k, tmpl.ID)
 		}
 	}
-	if len(sb.volumes) > 0 && h.engine == nil {
+	if len(sb.volumes) > 0 && h.noEngine() {
 		return statusErr(503, "Docker is not available: cannot restore volumes")
 	}
 	defs := h.folderDefs()
@@ -1207,7 +1224,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 		}
 		var errs []error
 		for _, v := range createdVols {
-			if err := h.engine.RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {
+			if err := h.rt.RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {
 				errs = append(errs, err)
 			}
 		}
@@ -1341,7 +1358,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 	}
 	sort.Strings(keys)
 	if len(keys) > 0 {
-		if err := h.engine.EnsureImage(context.Background(), HelperImage); err != nil {
+		if err := h.rt.EnsureImage(context.Background(), HelperImage); err != nil {
 			return undo(statusErr(503, "helper image %s: %v", HelperImage, err))
 		}
 	}

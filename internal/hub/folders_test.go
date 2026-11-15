@@ -813,10 +813,10 @@ func TestFolderRefusedAtStart(t *testing.T) {
 	createFolder(t, f, "photos", "/srv/photos")
 	cfg := f.h.cfg
 	cfg.OverrideBindRoots = "/mnt"
-	if _, err := New(cfg, f.runner, f.engine, f.idp); err == nil || !strings.Contains(err.Error(), "photos") {
+	if _, err := newTestHub(cfg, f.runner, f.engine, f.idp); err == nil || !strings.Contains(err.Error(), "photos") {
 		t.Errorf("New with /srv no longer a bind root = %v", err)
 	}
-	if _, err := New(f.h.cfg, f.runner, f.engine, f.idp); err != nil {
+	if _, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp); err != nil {
 		t.Errorf("New = %v", err)
 	}
 }

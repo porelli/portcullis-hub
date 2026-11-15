@@ -1,0 +1,41 @@
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: app
+    portcullis.io/owner: hub
+  name: app--r-app
+  namespace: portcullis-edge
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`app.team-b.example.net`)
+    middlewares:
+    - name: portcullis-auth-ext@file
+    - name: portcullis-groups@file
+    services:
+    - kind: Service
+      name: app--web
+      port: 80
+  tls:
+    options:
+      name: authaware@file
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: app
+    portcullis.io/owner: hub
+  name: app--web
+  namespace: portcullis-edge
+spec:
+  externalName: app--web.portcullis-apps.svc.cluster.local
+  ports:
+  - name: tcp-80
+    port: 80
+    protocol: TCP
+  type: ExternalName

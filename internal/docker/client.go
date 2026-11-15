@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -224,16 +226,8 @@ func (c *Client) ContainerKill(ctx context.Context, id, signal string) error {
 	return err
 }
 
-// State is a container's run state: running, and its healthcheck status
-// ("" = no healthcheck; else starting, healthy or unhealthy); Status is
-// the daemon's (created, running, exited, restarting, …) and ExitCode the
-// last exit's (a finished one-shot: exited, 0).
-type State struct {
-	Running  bool
-	Health   string
-	Status   string
-	ExitCode int
-}
+// State is runtime.State.
+type State = runtime.State
 
 // ContainerState inspects container id's run state.
 func (c *Client) ContainerState(ctx context.Context, id string) (State, error) {

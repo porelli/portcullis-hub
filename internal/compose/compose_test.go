@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/docker"
 )
 
@@ -29,7 +31,7 @@ func (f fakeEngine) Components(context.Context) ([]docker.Component, error) { re
 // verifiedGuard is a docker guard verified against a fake engine.
 func verifiedGuard(t *testing.T) *docker.Guard {
 	t.Helper()
-	g := docker.NewGuard(docker.RuntimeDocker)
+	g := docker.NewGuard(runtime.KindDocker)
 	if err := g.Verify(context.Background(), fakeEngine{{Name: "Engine", Version: "29.0.0"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +42,7 @@ func verifiedGuard(t *testing.T) *docker.Guard {
 // (checked before the Hub starts) never reaches the engine and passes.
 func TestComposeRefusesUnverified(t *testing.T) {
 	c, log := stub(t, "echo 2.30.0\nexit 0\n")
-	c.Guard = docker.NewGuard(docker.RuntimePodman)
+	c.Guard = docker.NewGuard(runtime.KindPodman)
 	p := Project{Name: "portcullis-app", Files: []string{"/c.yml"}}
 	for name, f := range map[string]func() error{
 		"Create":     func() error { return c.Create(context.Background(), p) },

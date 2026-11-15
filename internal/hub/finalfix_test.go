@@ -3,13 +3,14 @@ package hub
 import (
 	"context"
 	"errors"
-	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/state"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // TestMissingDomainKeptWhileUsed (final review I1): a domain the service
@@ -400,7 +401,7 @@ func TestDefaultImmutableHostsPinned(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Main domain changes: the pinned hostname stays.
-	h2, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "new.example"}, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "new.example"}, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

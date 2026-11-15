@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
@@ -26,7 +28,7 @@ import (
 // is closed (or the pull's context ends: a Stop): an enable stays running
 // on its images step.
 type blockingPull struct {
-	hub.Engine
+	dockerrt.Engine
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
@@ -42,14 +44,14 @@ func (e *blockingPull) PullWithProgress(ctx context.Context, ref string, fn func
 	return nil
 }
 
-func newBlockingPull(e hub.Engine) *blockingPull {
+func newBlockingPull(e dockerrt.Engine) *blockingPull {
 	return &blockingPull{Engine: e, started: make(chan struct{}), release: make(chan struct{})}
 }
 
 func newBlockingEnv(t *testing.T) (*instEnv, *blockingPull) {
 	t.Helper()
 	var bp *blockingPull
-	e := newInstEnvWith(t, t.TempDir(), nil, func(f *fakeEngine) hub.Engine {
+	e := newInstEnvWith(t, t.TempDir(), nil, func(f *fakeEngine) dockerrt.Engine {
 		bp = newBlockingPull(f)
 		return bp
 	})
@@ -250,7 +252,7 @@ func TestBusyAndStopRoutes(t *testing.T) {
 // the stopping record, audited enable.stop via ai.
 func TestStopOpTool(t *testing.T) {
 	var bp *blockingPull
-	e := newToolEnvWith(t, mcpEnvOpts{wrap: func(f hub.Engine) hub.Engine {
+	e := newToolEnvWith(t, mcpEnvOpts{wrap: func(f dockerrt.Engine) dockerrt.Engine {
 		bp = newBlockingPull(f)
 		return bp
 	}})

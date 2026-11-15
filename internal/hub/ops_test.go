@@ -82,7 +82,7 @@ func TestEnableFailureExplainedAndRolledBack(t *testing.T) {
 	}
 
 	// The record survives a Hub restart.
-	h2, err := New(f.h.cfg, f.runner, f.engine, f.idp)
+	h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

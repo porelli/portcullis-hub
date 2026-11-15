@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/moby/moby/api/pkg/stdcopy"
 )
 
@@ -76,12 +78,12 @@ func newTestClient(t *testing.T, h http.Handler) *Client {
 
 func TestNew(t *testing.T) {
 	for _, h := range []string{"", "unix:///var/run/docker.sock", "tcp://socket-proxy-hub:2375", "http://1.2.3.4:2375"} {
-		if _, err := New(h, NewGuard(RuntimeDocker)); err != nil {
+		if _, err := New(h, NewGuard(runtime.KindDocker)); err != nil {
 			t.Errorf("New(%q): %v", h, err)
 		}
 	}
 	for _, h := range []string{"unix://", "tcp://", "https://x:2376", "ssh://host", "::bad"} {
-		if _, err := New(h, NewGuard(RuntimeDocker)); err == nil {
+		if _, err := New(h, NewGuard(runtime.KindDocker)); err == nil {
 			t.Errorf("New(%q) accepted", h)
 		}
 	}

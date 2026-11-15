@@ -1,0 +1,1 @@
+refused: service app binds a host path outside the shared-folder roots (not on Kubernetes)

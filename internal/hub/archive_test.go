@@ -9,8 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/docker"
 )
 
 type tEntry struct {
@@ -227,7 +228,7 @@ func TestReadSnapshotTarForms(t *testing.T) {
 // and a restore fills the volume (extract at /data, names relative).
 func TestBackupRestorePodmanArchives(t *testing.T) {
 	f, _, _ := grafanaB(t)
-	f.h.cfg.Runtime = docker.RuntimePodman
+	f.setRuntime(runtime.KindPodman)
 	ve := f.engine.vol()
 	ve.vmu.Lock()
 	ve.podman = true

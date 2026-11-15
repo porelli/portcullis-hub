@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/runtime"
 
 	"github.com/portcullis/hub/internal/directory"
 )
@@ -220,4 +222,19 @@ func (h *Hub) routedHostsOf(t *testing.T, id string) string {
 		t.Fatalf("%s hosts = %v", id, hosts)
 	}
 	return hosts[0]
+}
+
+// TestMyAppsUnderKubernetes: My apps reads the same gate policy under the
+// kubernetes runtime (the policy and the routes' hosts don't depend on
+// the runtime; the IngressRoutes carry the same Host() rules).
+func TestMyAppsUnderKubernetes(t *testing.T) {
+	f := myOpenFixture(t)
+	docker := appIDs(myApps(t, f, "alice"))
+	f.setRuntime(runtime.KindKubernetes)
+	if err := f.h.WritePolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if got := appIDs(myApps(t, f, "alice")); fmt.Sprint(got) != fmt.Sprint(docker) || len(got) == 0 {
+		t.Errorf("kubernetes: %v, docker: %v", got, docker)
+	}
 }

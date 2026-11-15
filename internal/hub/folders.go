@@ -294,10 +294,14 @@ func (h *Hub) folderPathRule(p string) error {
 // (Info DockerRootDir, wherever it was moved: image layers, containers,
 // volumes, the Hub's own state). Unreadable = 503. No lock held.
 func (h *Hub) dockerRootRule(ctx context.Context, p string) error {
-	if h.engine == nil {
+	if h.noEngine() {
 		return statusErr(http.StatusServiceUnavailable, "shared folders need the Docker Engine API")
 	}
-	root, err := h.engine.DockerRootDir(ctx)
+	info, err := h.rt.Info(ctx)
+	root := ""
+	if len(info.ForbiddenRoots) > 0 {
+		root = info.ForbiddenRoots[0]
+	}
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "shared folders: can't read Docker's data root: %v", err)
 	}

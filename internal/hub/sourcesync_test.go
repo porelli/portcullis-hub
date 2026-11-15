@@ -71,7 +71,7 @@ func (f *syncFixture) commit(t *testing.T, manifest string) string {
 
 func (f *syncFixture) start(t *testing.T, atStart bool) *Hub {
 	t.Helper()
-	h, err := New(Config{ProjectDir: f.project, DataDir: f.data, Domain: "example.org", SyncSourcesAtStart: atStart}, f.runner, f.engine, &fakeIdP{})
+	h, err := newTestHub(Config{ProjectDir: f.project, DataDir: f.data, Domain: "example.org", SyncSourcesAtStart: atStart}, f.runner, f.engine, &fakeIdP{})
 	if err != nil {
 		t.Fatal(err)
 	}

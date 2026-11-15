@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -49,8 +51,8 @@ func jobState(st docker.State) string {
 
 // appContainers lists the app's project containers that belong to services
 // of its compose file (one-off `compose run` containers excluded).
-func (h *Hub) appContainers(ctx context.Context, t *templates.Template) ([]docker.Container, []string, error) {
-	if h.engine == nil {
+func (h *Hub) appContainers(ctx context.Context, t *templates.Template) ([]runtime.Unit, []string, error) {
+	if h.noEngine() {
 		return nil, nil, fmt.Errorf("docker engine not configured")
 	}
 	services := templates.Services(t.ReadCompose())
@@ -58,21 +60,21 @@ func (h *Hub) appContainers(ctx context.Context, t *templates.Template) ([]docke
 	for _, s := range services {
 		known[s] = true
 	}
-	cs, err := h.engine.ListContainers(ctx, docker.ProjectFilter(projectName(t.ID)))
+	cs, err := h.rt.List(ctx, runtime.Filter{Instance: t.ID})
 	if err != nil {
 		return nil, services, err
 	}
 	out := cs[:0]
 	for _, c := range cs {
-		if c.Project() != projectName(t.ID) || c.Labels[docker.LabelOneoff] == "True" {
+		if c.Project != projectName(t.ID) || c.Labels[docker.LabelOneoff] == "True" {
 			continue
 		}
-		if len(known) > 0 && !known[c.Service()] {
+		if len(known) > 0 && !known[c.Service] {
 			continue
 		}
 		out = append(out, c)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, services, nil
 }
 
@@ -94,7 +96,7 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 	}
 	seen := map[string]bool{}
 	for _, c := range cs {
-		seen[c.Service()] = true
+		seen[c.Service] = true
 	}
 	missing := []ContainerStatus{}
 	for _, svc := range services {
@@ -109,14 +111,14 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 	}
 	out := make([]ContainerStatus, 0, len(cs))
 	for _, c := range cs {
-		if inactive[c.Service()] {
+		if inactive[c.Service] {
 			continue
 		}
-		status := ContainerStatus{Name: c.Name(), Service: c.Service(), State: c.State, Status: c.Status}
-		if t.Jobs[c.Service()] {
+		status := ContainerStatus{Name: c.Name, Service: c.Service, State: c.State, Status: c.Status}
+		if t.Jobs[c.Service] {
 			status.Job = true
 			// Get detailed state to determine JobState (I1: never omit it).
-			st, err := h.engine.ContainerState(ctx, c.ID)
+			st, err := h.rt.State(ctx, c.ID)
 			if err == nil {
 				status.JobState = jobState(st)
 			} else {
@@ -184,10 +186,10 @@ func (h *Hub) Logs(ctx context.Context, id, service string, lines int) ([]byte, 
 	}
 	sources := map[string][]byte{}
 	for _, c := range cs {
-		if service != "" && c.Service() != service {
+		if service != "" && c.Service != service {
 			continue
 		}
-		out, err := h.engine.Logs(ctx, c.ID, lines, true)
+		out, err := h.rt.Logs(ctx, c.ID, lines, true)
 		if err != nil {
 			out = []byte(fmt.Sprintf("[hub: cannot read logs: %v]\n", err))
 		}
@@ -197,7 +199,7 @@ func (h *Hub) Logs(ctx context.Context, id, service string, lines int) ([]byte, 
 		if rerr != nil {
 			return nil, rerr
 		}
-		sources[c.Name()] = []byte(red + "\n")
+		sources[c.Name] = []byte(red + "\n")
 	}
 	return docker.MergeLogs(sources, lines), nil
 }
@@ -231,7 +233,7 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 	if _, err := h.redactCredentialHashes(t, "", false); err != nil {
 		return nil, err // F44: unreadable hashes, nothing run
 	}
-	res, err := h.engine.Exec(ctx, target.ID, []string{"/bin/sh", "-c", command}, execTimeout)
+	res, err := h.rt.Exec(ctx, target.ID, runtime.ExecInput{Cmd: []string{"/bin/sh", "-c", command}, Timeout: execTimeout, NoStdin: true})
 	if err != nil && res == nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
@@ -257,11 +259,11 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 // instance's appContainers: its own project only, no one-off
 // containers), replica 1 preferred like `docker compose exec`; nil: none.
 // Shared by Exec and the settings hooks.
-func runningContainer(cs []docker.Container, service string) *docker.Container {
-	var target *docker.Container
+func runningContainer(cs []runtime.Unit, service string) *runtime.Unit {
+	var target *runtime.Unit
 	for i := range cs {
 		c := &cs[i]
-		if c.Service() != service || c.State != "running" {
+		if c.Service != service || c.State != "running" {
 			continue
 		}
 		if target == nil || c.Labels[docker.LabelNumber] == "1" {

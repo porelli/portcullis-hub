@@ -348,7 +348,7 @@ func (s *Server) registerAdminTools() {
 			ClassRead, "GET /api/instances/ops", "", func(context.Context, directory.Actor, noArgs) (any, error) {
 				return s.Hub.OpSummaries(), nil
 			}),
-		admin("get_runtime", "The container engine: {runtime (docker|podman), verified, engine, engine_version, mismatch, rootless, uid_map, gid_map, unprivileged_port_start, selinux}; the maps and the port start are null under Docker.",
+		admin("get_runtime", "The container runtime: {runtime (docker|podman|kubernetes), verified, engine, engine_version, mismatch, rootless, uid_map, gid_map, unprivileged_port_start, selinux}, under kubernetes also {context, admission (ok|missing|unknown), netpol (proven|unproven)}; the maps and the port start are null under Docker and Kubernetes.",
 			ClassRead, "GET /api/runtime", "", func(ctx context.Context, _ directory.Actor, _ noArgs) (any, error) {
 				return s.runtime(ctx), nil
 			}),

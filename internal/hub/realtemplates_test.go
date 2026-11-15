@@ -56,7 +56,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 	if err := st.Save(filepath.Join(data, "state.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	h, err := New(Config{ProjectDir: project, ProjectHostDir: project, DataDir: data, Domain: "example.org"}, newFakeRunner(), nil, nil)
+	h, err := newTestHub(Config{ProjectDir: project, ProjectHostDir: project, DataDir: data, Domain: "example.org"}, newFakeRunner(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

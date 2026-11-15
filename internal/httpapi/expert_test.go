@@ -46,7 +46,7 @@ func newExpertServerHub(t *testing.T, runner compose.Runner) (http.Handler, *dir
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: filepath.Dir(src)}}
 	st.Save(filepath.Join(data, "state.yaml"))
-	h, err := hub.New(hub.Config{ProjectDir: filepath.Join(root, "project"), DataDir: data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}, runner, nil, nil)
+	h, err := newTestHub(hub.Config{ProjectDir: filepath.Join(root, "project"), DataDir: data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}, runner, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

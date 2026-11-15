@@ -7,7 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -69,7 +70,7 @@ func (h *Hub) aiDoctorInputs(ctx context.Context) []doctor.AIIn {
 	h.mu.RUnlock()
 
 	// Docker, outside every lock: one listing per instance.
-	listed := map[string][]docker.Container{}
+	listed := map[string][]runtime.Unit{}
 	failed := map[string]bool{}
 	for i := range on {
 		x := &on[i]
@@ -88,7 +89,7 @@ func (h *Hub) aiDoctorInputs(ctx context.Context) []doctor.AIIn {
 		}
 		x.in.Status = "missing"
 		for _, c := range listed[id] {
-			if c.Service() != x.service {
+			if c.Service != x.service {
 				continue
 			}
 			st := c.State

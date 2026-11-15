@@ -264,40 +264,52 @@ func TestHubAppsPageStatic(t *testing.T) {
 	}
 }
 
-// TestHubAppsPageRootless (contract §11.10): the Marketplace cards carry
-// each template's verdict (data-rootless), rootlessBadge shows it only
-// under podman, and a refused template's Install… / + Add instance are
-// disabled.
-func TestHubAppsPageRootless(t *testing.T) {
+// TestHubAppsPageCompat (contract §11.10): the Marketplace cards carry
+// each template's verdict (data-compat, its runtime and reasons),
+// compatBadge shows it only for the active runtime (podman, kubernetes;
+// never docker) in that runtime's words, a refused template's Install… /
+// + Add instance are disabled, and the header names the runtime.
+func TestHubAppsPageCompat(t *testing.T) {
 	page := hubIndex(t)
-	for _, want := range []string{`data-rootless="`, `data-rootless-reasons="`, "function rootlessBadge(", "apiGet('/api/runtime')"} {
+	for _, want := range []string{`data-compat="`, `data-compat-runtime="`, `data-compat-reasons="`, "function compatBadge(", "apiGet('/api/runtime')", `id="runtime-badge"`,
+		"const RUNTIME_NAME = { docker: 'Docker', podman: 'Podman', kubernetes: 'Kubernetes' };"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the hub index lacks %q", want)
 		}
+	}
+	if strings.Contains(page, "rootlessBadge") || strings.Contains(page, "data-rootless") {
+		t.Error("the hub index still has the rootless names")
 	}
 	fill := hubFunc(t, page, "fillMarketplace")
 	if !strings.Contains(fill, "rl.status === 'refused' ? ' disabled") || strings.Count(fill, "+ off +") != 2 {
 		t.Errorf("fillMarketplace doesn't disable a refused template's create buttons:\n%s", fill)
 	}
-	fn := hubFunc(t, page, "rootlessBadge")
+	fn := hubFunc(t, page, "compatBadge")
+	start := strings.Index(page, "const COMPAT_TEXT = {")
+	end := strings.Index(page[start:], "};") + start + 2
 	script := "function escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\"/g, '&quot;'); }\n" +
-		"const ROOTLESS_TEXT = { ok: ['ok', 'Rootless: works'], degraded: ['warn', 'Rootless: limited'], refused: ['bad', 'Rootless: not available'] };\n" +
+		page[start:end] + "\n" +
 		"let runtimeInfo = {runtime: 'docker'};\n" + fn +
-		"const out = [rootlessBadge({status: 'refused', reasons: ['a']})];\n" +
+		"const out = [compatBadge({runtime: 'docker', status: 'refused', reasons: ['a']})];\n" +
 		"runtimeInfo = {runtime: 'podman'};\n" +
-		"out.push(rootlessBadge({status: 'refused', reasons: ['service x needs SYS_RAWIO', 'b<c']}), rootlessBadge({status: 'ok', reasons: []}), rootlessBadge(null), rootlessBadge({status: 'weird'}));\n" +
+		"out.push(compatBadge({runtime: 'podman', status: 'refused', reasons: ['service x needs SYS_RAWIO', 'b<c']}), compatBadge({runtime: 'podman', status: 'ok', reasons: []}), compatBadge(null), compatBadge({runtime: 'podman', status: 'weird'}));\n" +
+		"runtimeInfo = {runtime: 'kubernetes'};\n" +
+		"out.push(compatBadge({runtime: 'kubernetes', status: 'degraded', reasons: ['service z has device slots: host devices can\\'t be passed on Kubernetes']}), compatBadge({runtime: 'podman', status: 'ok', reasons: []}));\n" +
 		"process.stdout.write(JSON.stringify(out));\n"
 	var got []string
-	if err := json.Unmarshal([]byte(runNode(t, script)), &got); err != nil || len(got) != 5 {
-		t.Fatalf("rootlessBadge = %v (%v)", got, err)
+	if err := json.Unmarshal([]byte(runNode(t, script)), &got); err != nil || len(got) != 7 {
+		t.Fatalf("compatBadge = %v (%v)", got, err)
 	}
-	if got[0] != "" || got[3] != "" || got[4] != "" {
-		t.Errorf("badge under docker / without a verdict: %q", got)
+	if got[0] != "" || got[3] != "" || got[4] != "" || got[6] != "" {
+		t.Errorf("badge under docker / without a verdict / for another runtime: %q", got)
 	}
-	if want := `<span class="pill bad" data-rootless-badge="refused" title="service x needs SYS_RAWIO; b&lt;c">Rootless: not available</span>`; got[1] != want {
+	if want := `<span class="pill bad" data-compat-badge="refused" title="service x needs SYS_RAWIO; b&lt;c">Rootless: not available</span>`; got[1] != want {
 		t.Errorf("refused badge = %q", got[1])
 	}
 	if !strings.Contains(got[2], "Rootless: works") || strings.Contains(got[2], "title=") {
 		t.Errorf("ok badge = %q", got[2])
+	}
+	if !strings.Contains(got[5], "Kubernetes: limited") || !strings.Contains(got[5], `class="pill warn"`) {
+		t.Errorf("kubernetes badge = %q", got[5])
 	}
 }

@@ -19,6 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	cerrdefs "github.com/containerd/errdefs"
 
 	"github.com/portcullis/hub/internal/compose"
@@ -412,7 +415,7 @@ func newInstEnvAt(t *testing.T, root string) *instEnv {
 // newInstEnvWith is newInstEnvAt with extra templates (id → manifest,
 // compose) in the source, and engine wrapping the fake engine (nil: the
 // fake engine itself).
-func newInstEnvWith(t *testing.T, root string, extra map[string][2]string, engine func(*fakeEngine) hub.Engine) *instEnv {
+func newInstEnvWith(t *testing.T, root string, extra map[string][2]string, engine func(*fakeEngine) dockerrt.Engine) *instEnv {
 	t.Helper()
 	return newInstEnvOpts(t, root, instEnvOpts{extra: extra, engine: engine})
 }
@@ -421,12 +424,14 @@ func newInstEnvWith(t *testing.T, root string, extra map[string][2]string, engin
 // cfg changes the Hub's Config, seed the state before the Hub loads it.
 type instEnvOpts struct {
 	extra  map[string][2]string
-	engine func(*fakeEngine) hub.Engine
+	engine func(*fakeEngine) dockerrt.Engine
 	cfg    func(*hub.Config)
 	seed   func(*state.AppState)
 	runner compose.Runner // nil: nopRunner
 	// data writes files into the data directory before the Hub loads it.
 	data func(dir string)
+	// rt, if set, is the Hub's runtime (engine and runner unused).
+	rt runtime.Instances
 }
 
 func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
@@ -454,7 +459,7 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 	}
 	st.Save(filepath.Join(data, "state.yaml"))
 	eng := newFakeEngine()
-	var he hub.Engine = eng
+	var he dockerrt.Engine = eng
 	if engine != nil {
 		he = engine(eng)
 	}
@@ -466,7 +471,10 @@ func newInstEnvOpts(t *testing.T, root string, o instEnvOpts) *instEnv {
 	if o.runner != nil {
 		runner = o.runner
 	}
-	h, err := hub.New(cfg, runner, he, nil)
+	h, err := newTestHub(cfg, runner, he, nil)
+	if o.rt != nil {
+		h, err = hub.New(cfg, o.rt, nil)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

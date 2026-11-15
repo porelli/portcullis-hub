@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
@@ -63,6 +65,12 @@ func (h *Hub) project(t *templates.Template) compose.Project {
 		}
 	}
 	return p
+}
+
+// runtimeProject is t's project as the runtime takes it (the model is
+// loaded by the backends that need it).
+func (h *Hub) runtimeProject(t *templates.Template) runtime.Project {
+	return runtime.Project{Name: projectName(t.ID), Instance: t.ID, Files: h.project(t)}
 }
 
 // composeUp regenerates the Hub override, re-checks the custom override
@@ -133,13 +141,13 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		}
 		return nil, statusErr(500, "override generation failed: %v", err)
 	}
-	// Rootless Podman (contract §11.10): an instance that can't run here
-	// (its own ports, devices and env, as just written) never starts.
-	if h.rootlessOn() {
+	// Runtime compatibility (contract §11.10): an instance that can't run
+	// here (its own ports, devices and env, as just written) never starts.
+	if h.compatOn() {
 		h.mu.RLock()
 		s := h.st.Settings[t.ID]
 		h.mu.RUnlock()
-		if err := rootlessRefusal(t.ID, h.instanceCompat(live, s)); err != nil {
+		if err := compatRefusal(t.ID, h.instanceCompat(live, s)); err != nil {
 			return nil, err
 		}
 	}
@@ -227,7 +235,7 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		// Only an operation that plans the create keeps its volumes (an
 		// enable: its Stop removes them); a restart's or an AI switch's
 		// Stop never removes a volume.
-		if h.engine != nil && p.keys[StepCreate] {
+		if !h.noEngine() && p.keys[StepCreate] {
 			if volsBefore, err = h.volumeSet(ctx, live.ID); err != nil {
 				return statusErr(502, "listing the volumes of %s before creating it: %v", projectName(live.ID), err)
 			}
@@ -245,7 +253,11 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	// only then start: an image-label router is never live. On the
 	// operation's context: a Stop kills compose (compose down — the
 	// undo's — removes whatever it had made).
-	createErr := h.compose.Create(opCtx, h.project(live))
+	up, perr := h.upProject(opCtx, live)
+	if perr != nil {
+		return perr
+	}
+	createErr := h.rt.Create(opCtx, up)
 	if volsBefore != nil {
 		h.recordCreatedVolumes(ctx, p.p, live.ID, volsBefore)
 	}
@@ -295,11 +307,11 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		} else {
 			close(watched)
 		}
-		upErr = h.compose.Up(opCtx, h.project(live))
+		upErr = h.rt.Up(opCtx, up, nil)
 		stopWatch()
 		<-watched
 	} else {
-		upErr = h.compose.Up(opCtx, h.project(live))
+		upErr = h.rt.Up(opCtx, up, nil)
 	}
 	if err := upErr; err != nil {
 		if len(probes) > 0 {
@@ -436,7 +448,7 @@ func (h *Hub) composeDown(t *templates.Template) error {
 		return nil
 	}
 	h.awaitDelivery(t.ID)
-	return h.compose.Down(context.Background(), h.project(t))
+	return h.rt.Down(context.Background(), h.runtimeProject(t))
 }
 
 // awaitDelivery waits up to lifecycleDeliverWait for instance id's
@@ -461,8 +473,8 @@ func (h *Hub) awaitDelivery(id string) {
 // rollbackUp removes what a failed compose up left behind (containers,
 // network; volumes are kept), by project name if the files don't work.
 func (h *Hub) rollbackUp(t *templates.Template) error {
-	err := h.compose.Down(context.Background(), h.project(t))
-	if err != nil && h.compose.DownByName(context.Background(), projectName(t.ID)) == nil {
+	err := h.rt.Down(context.Background(), h.runtimeProject(t))
+	if err != nil && h.rt.DownByName(context.Background(), projectName(t.ID)) == nil {
 		return nil
 	}
 	return err
@@ -885,7 +897,7 @@ func (h *Hub) disableSteps(ctx context.Context, p *Progress, id string, tmpl *te
 		h.awaitDelivery(id) // composeDown waits otherwise (N4)
 	}
 	if tmpl == nil || downErr != nil {
-		if err := h.compose.DownByName(context.Background(), projectName(id)); err != nil {
+		if err := h.rt.DownByName(context.Background(), projectName(id)); err != nil {
 			if downErr == nil {
 				downErr = err
 			}
@@ -1034,7 +1046,7 @@ func (h *Hub) runRestartApp(ctx context.Context, id string, ready func()) error 
 func (h *Hub) restartOp(ctx context.Context, t *templates.Template) error {
 	p := progressFrom(ctx)
 	running := true // not known (no Docker, a failed listing): a Stop starts it again
-	if h.engine != nil {
+	if !h.noEngine() {
 		if r, err := h.projectRunning(context.Background(), t.ID); err == nil {
 			running = r
 		}

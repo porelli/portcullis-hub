@@ -29,9 +29,9 @@ func (h *Hub) doctorVPNIn(ctx context.Context, m *directory.Membership) *doctor.
 	priv := h.vpnGatewayPrivileged(ctx)
 	running := h.vpnGatewaysUp(ctx)
 	var dockerNets []netip.Prefix
-	if h.engine != nil {
-		if nets, err := h.engine.ListNetworks(ctx); err == nil {
-			for _, n := range nets {
+	if !h.noEngine() {
+		if info, err := h.rt.Info(ctx); err == nil {
+			for _, n := range info.Networks {
 				if n.Name == vpnNetwork {
 					continue // the Hub's own gateways sit there
 				}
@@ -130,7 +130,7 @@ func (h *Hub) doctorVPNIn(ctx context.Context, m *directory.Membership) *doctor.
 // container.
 func (h *Hub) vpnGatewaysUp(ctx context.Context) map[string]bool {
 	out := map[string]bool{}
-	if h.engine == nil {
+	if h.noEngine() {
 		return out
 	}
 	h.mu.RLock()

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
@@ -60,9 +62,9 @@ func (h *Hub) saveVPNRenderedLocked() {
 // the Hub can't tell the difference is a widening only: any VPN-relevant
 // difference (entrypoints, the allowlist, the friendly router) or a
 // container list it can't read.
-// eng is the engine read once by the caller (Init), never h.engine
+// eng is the runtime read once by the caller (Init), never h.rt
 // from the background goroutine.
-func (h *Hub) vpnStartCheck(ctx context.Context, eng Engine) {
+func (h *Hub) vpnStartCheck(ctx context.Context, eng runtime.Instances) {
 	if eng == nil {
 		return
 	}
@@ -89,7 +91,7 @@ func (h *Hub) vpnStartCheck(ctx context.Context, eng Engine) {
 	h.mu.RUnlock()
 	var restart []string
 	for _, w := range ws {
-		cs, err := eng.ListContainers(ctx, docker.Filters{"label": {docker.LabelProject + "=" + projectName(w.id)}})
+		cs, err := eng.List(ctx, runtime.Filter{Instance: w.id})
 		if err != nil {
 			if w.vpn {
 				restart = append(restart, w.id) // unknown: fail closed

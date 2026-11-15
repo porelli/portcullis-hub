@@ -58,7 +58,7 @@ func goldenRun(t *testing.T, v2 bool) (*fixture, map[string]string) {
 	if err := st.Save(filepath.Join(f.data, "state.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	h, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, f.idp)
+	h, err := newTestHub(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org"}, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

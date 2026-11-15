@@ -103,7 +103,7 @@ func credOf(h *Hub, inst, user string) (state.Credential, bool) {
 // audit, and runs Init.
 func restart(t *testing.T, f *fixture, secrets string, audit *fakeAudit, hook func(string)) *Hub {
 	t.Helper()
-	h, err := New(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", SecretsDir: secrets}, f.runner, f.engine, f.idp)
+	h, err := newTestHub(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", SecretsDir: secrets}, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

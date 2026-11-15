@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/portcullis/hub/internal/runtime"
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
@@ -201,13 +204,13 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	// Revoking AI credentials are retried at every reconcile (§15.5).
 	h.TriggerAIReconcile()
 	rep := DriftReport{CheckedAt: time.Now().UTC(), Items: []Drift{}}
-	if h.engine == nil {
+	if h.noEngine() {
 		rep.Error = "docker engine not configured"
 		return h.storeDrift(rep)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cs, err := h.engine.ListContainers(ctx, docker.Filters{"label": {docker.LabelProject}})
+	cs, err := h.rt.List(ctx, runtime.Filter{All: true})
 	if err != nil {
 		rep.Error = err.Error()
 		return h.storeDrift(rep)
@@ -256,7 +259,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	}
 	var live []running
 	for _, c := range cs {
-		p := c.Project()
+		p := c.Project
 		if !strings.HasPrefix(p, ProjectPrefix) || c.Labels[docker.LabelOneoff] == "True" {
 			continue
 		}
@@ -304,7 +307,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if !isRunning && c.State != "created" {
 				// The list has no exit code: inspected.
 				st = docker.State{Status: "dead"} // can't tell: failed
-				if s, ierr := h.engine.ContainerState(ctx, c.ID); ierr == nil {
+				if s, ierr := h.rt.State(ctx, c.ID); ierr == nil {
 					st = s
 				}
 			}
@@ -452,7 +455,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		// A portcullis-mcp- alias the Hub doesn't render makes a container
 		// reachable as a companion (§5), and a rendered one missing on a
 		// running companion breaks the gate's path: both exposure drift.
-		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" {
+		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" && !h.kubeOn() {
 			var extra, missing []string
 			have := map[string]bool{}
 			for _, a := range c.mcpAliases {
@@ -479,6 +482,22 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		if keys, ok := expectedKeys[c.id]; ok && exposureDiff[c.id] == "" {
 			if extra := extraTraefikKeys(keys[c.service], c.labels); len(extra) > 0 {
 				exposureDiff[c.id] = c.service + ": Traefik labels from the image, not from compose: " + strings.Join(extra, ", ")
+			}
+		}
+	}
+	// Kubernetes: the live IngressRoutes and Middlewares against the ones
+	// the Hub renders now (§5 "Exposure drift").
+	if ed, ok := h.rt.(exposureDrifter); ok && h.kubeOn() {
+		for _, id := range slices.Sorted(maps.Keys(desired)) {
+			if exposureDiff[id] != "" || !enabled[id] {
+				continue
+			}
+			d, err := h.kubeExposureDrift(ctx, ed, id)
+			switch {
+			case err != nil:
+				exposureDiff[id] = "routes: can't be compared: " + clip(err.Error(), 200)
+			case d != "":
+				exposureDiff[id] = "routes: " + d
 			}
 		}
 	}
@@ -561,7 +580,7 @@ func (h *Hub) TriggerReconcile() {
 // RunReconciler reconciles periodically, on Docker container events of app
 // projects and on TriggerReconcile, until ctx is done.
 func (h *Hub) RunReconciler(ctx context.Context) {
-	if h.engine != nil {
+	if !h.noEngine() {
 		go h.watchEvents(ctx)
 	}
 	go h.runAIReconcile(ctx)
@@ -592,10 +611,10 @@ func (h *Hub) RunReconciler(ctx context.Context) {
 
 func (h *Hub) watchEvents(ctx context.Context) {
 	backoff := time.Second
-	f := docker.Filters{"type": {"container"}, "label": {docker.LabelProject}}
+	f := runtime.Filter{All: true}
 	for ctx.Err() == nil {
 		start := time.Now()
-		err := h.engine.Events(ctx, f, func(ev docker.Event) {
+		err := h.rt.Events(ctx, f, func(ev runtime.Event) {
 			if strings.HasPrefix(ev.Actor.Attributes[docker.LabelProject], ProjectPrefix) {
 				switch ev.Action {
 				case "start", "die", "stop", "kill", "destroy", "create", "pause", "unpause", "restart", "oom":
@@ -674,7 +693,7 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if h.IsEnabled(id) {
 			return statusErr(400, "%s is enabled — use disable instead", id)
 		}
-		err = h.compose.DownByName(context.Background(), projectName(id))
+		err = h.rt.DownByName(context.Background(), projectName(id))
 		if err != nil {
 			err = statusErr500Wrap("compose down failed", err)
 		}

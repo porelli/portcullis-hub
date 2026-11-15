@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/runtime"
 )
 
 func TestCreateInstanceAsGroups(t *testing.T) {
@@ -98,6 +99,26 @@ func TestCreateInstanceAsGroups(t *testing.T) {
 	for _, id := range []string{"grafana-portcullis-b", "grafana--b", "grafana-"} {
 		if _, err := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: id, Label: "Test"}, directory.Human("alice")); statusOf(err) != 400 || !strings.Contains(err.Error(), "instance id") {
 			t.Errorf("%s = %v", id, err)
+		}
+	}
+}
+
+// TestInstanceIDNoDoubleHyphen: an id with "--" is refused at create and
+// restore-as on every runtime, saying why.
+func TestInstanceIDNoDoubleHyphen(t *testing.T) {
+	for _, rt := range []runtime.Kind{runtime.KindDocker, runtime.KindPodman, runtime.KindKubernetes} {
+		f, _, _ := grafanaB(t)
+		entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.setRuntime(rt)
+		_, cerr := f.h.CreateInstanceAs(CreateRequest{Template: "grafana", ID: "team--b", Label: "Test"}, directory.Human("alice"))
+		_, rerr := f.h.RestoreInstanceAs(entry.Archive, "team--c", directory.Human("root"))
+		for what, err := range map[string]error{"create": cerr, "restore-as": rerr} {
+			if statusOf(err) != 400 || !strings.Contains(err.Error(), `may not contain "--"`) {
+				t.Errorf("%s %s: %v", rt, what, err)
+			}
 		}
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/portcullis/hub/internal/confirm"
 	"html"
 	"io"
 	"maps"
@@ -28,6 +27,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/portcullis/hub/internal/confirm"
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
 
 	"github.com/portcullis/hub/internal/credentials"
 	"github.com/portcullis/hub/internal/directory"
@@ -200,7 +202,7 @@ func TestHarness(t *testing.T) {
 		extra:  extra,
 		runner: hrun,
 		data:   func(dir string) { seedInterruptedOp(t, dir) },
-		engine: func(f *fakeEngine) hub.Engine {
+		engine: func(f *fakeEngine) dockerrt.Engine {
 			eng = &harnessEngine{fakeEngine: f, disk: disk, prog: newHarnessProgress(), jobs: map[string]map[string]int{},
 				running: map[string][]string{"hookapp": {"app"}, "entryapp": {"app"}, "photos": {"server"}, "samba": {"samba"}, "smbfixture": {"smb"},
 					// aiapp's hooks run in its app service (the tok-mcp

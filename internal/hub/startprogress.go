@@ -163,7 +163,7 @@ func imageLabel(ref string) string {
 func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Template) error {
 	p.Start(StepImages)
 	var refs []string
-	if h.engine != nil {
+	if !h.noEngine() {
 		refs = h.pullRefs(ctx, t)
 	}
 	imgs := make([]*imagePull, len(refs))
@@ -201,7 +201,7 @@ func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Templa
 	var wg sync.WaitGroup
 	for _, ip := range imgs {
 		wg.Go(func() {
-			err := h.engine.PullWithProgress(ctx, ip.ref, func(done, total int64, sized bool) {
+			err := h.rt.Pull(ctx, ip.ref, func(done, total int64, sized bool) {
 				mu.Lock()
 				defer mu.Unlock()
 				ip.state, ip.done, ip.total, ip.sized = "pulling", done, total, sized
@@ -284,24 +284,24 @@ func (h *Hub) countContainers(ctx context.Context, t *templates.Template, servic
 		return 0, 0, nil, nil, err
 	}
 	for _, c := range cs {
-		if services != nil && !services[c.Service()] {
+		if services != nil && !services[c.Service] {
 			continue
 		}
-		st, err := h.engine.ContainerState(ctx, c.ID)
+		st, err := h.rt.State(ctx, c.ID)
 		if err != nil {
 			return 0, 0, nil, nil, err
 		}
 		m++
-		isJob := t.Jobs[c.Service()]
+		isJob := t.Jobs[c.Service]
 		if counted(st, isJob) {
 			n++
 			continue
 		}
-		if isJob && jobState(st) == jobFailed && !slices.Contains(failedJobs, c.Service()) {
-			failedJobs = append(failedJobs, c.Service())
+		if isJob && jobState(st) == jobFailed && !slices.Contains(failedJobs, c.Service) {
+			failedJobs = append(failedJobs, c.Service)
 		}
-		if !slices.Contains(others, c.Service()) {
-			others = append(others, c.Service())
+		if !slices.Contains(others, c.Service) {
+			others = append(others, c.Service)
 		}
 	}
 	return n, m, others, failedJobs, nil

@@ -46,7 +46,7 @@ func (h *Hub) aiServiceState(ctx context.Context, t *templates.Template, service
 	if c == nil {
 		return false, "", nil
 	}
-	st, err := h.engine.ContainerState(ctx, c.ID)
+	st, err := h.rt.State(ctx, c.ID)
 	if err != nil {
 		return false, "", err
 	}
@@ -66,7 +66,7 @@ func (h *Hub) aiServiceState(ctx context.Context, t *templates.Template, service
 // caller's owed flags stay).
 func (h *Hub) runAIHookAfterUp(ctx context.Context, t *templates.Template, name string, stdin []byte) (stdout []byte, res UnitResult) {
 	service := ""
-	if h.engine != nil {
+	if !h.noEngine() {
 		service = aiHookService(t, name)
 	}
 	start := time.Now()

@@ -11,24 +11,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+
 	"github.com/moby/moby/client"
-)
-
-// Runtime is the container engine core runs on (contract §6:
-// HUB_CONTAINER_RUNTIME, from core's CONTAINER_RUNTIME).
-type Runtime string
-
-const (
-	RuntimeDocker Runtime = "docker"
-	RuntimePodman Runtime = "podman"
 )
 
 // ParseRuntime accepts exactly "docker" or "podman"; anything else
 // (empty included) is an error. There is no default.
-func ParseRuntime(s string) (Runtime, error) {
-	switch Runtime(s) {
-	case RuntimeDocker, RuntimePodman:
-		return Runtime(s), nil
+func ParseRuntime(s string) (runtime.Kind, error) {
+	switch runtime.Kind(s) {
+	case runtime.KindDocker, runtime.KindPodman:
+		return runtime.Kind(s), nil
 	case "":
 		return "", errors.New("the container runtime is not set (docker or podman)")
 	}
@@ -97,24 +90,24 @@ type VersionReader interface {
 
 // RuntimeOf names the runtime the components describe: a "Podman Engine"
 // component → podman, else an "Engine" one → docker, else "".
-func RuntimeOf(cs []Component) Runtime {
+func RuntimeOf(cs []Component) runtime.Kind {
 	for _, c := range cs {
 		if c.Name == ComponentPodman {
-			return RuntimePodman
+			return runtime.KindPodman
 		}
 	}
 	for _, c := range cs {
 		if c.Name == ComponentDocker {
-			return RuntimeDocker
+			return runtime.KindDocker
 		}
 	}
 	return ""
 }
 
 // componentOf is the component that names rt.
-func componentOf(cs []Component, rt Runtime) Component {
+func componentOf(cs []Component, rt runtime.Kind) Component {
 	want := ComponentDocker
-	if rt == RuntimePodman {
+	if rt == runtime.KindPodman {
 		want = ComponentPodman
 	}
 	for _, c := range cs {
@@ -127,7 +120,7 @@ func componentOf(cs []Component, rt Runtime) Component {
 
 // EngineInfo is what the guard knows about the engine.
 type EngineInfo struct {
-	Runtime  Runtime // HUB_CONTAINER_RUNTIME
+	Runtime  runtime.Kind // HUB_CONTAINER_RUNTIME
 	Verified bool
 	Engine   string // the component that identified the engine ("Engine", "Podman Engine")
 	Version  string // its version
@@ -139,7 +132,7 @@ type EngineInfo struct {
 // by Run); a contradiction is permanent: the Hub keeps running and
 // answers 503 until it is restarted with a matching engine.
 type Guard struct {
-	want     Runtime
+	want     runtime.Kind
 	mu       sync.Mutex
 	err      error
 	info     EngineInfo
@@ -149,7 +142,7 @@ type Guard struct {
 }
 
 // NewGuard returns an unverified guard for want.
-func NewGuard(want Runtime) *Guard {
+func NewGuard(want runtime.Kind) *Guard {
 	return &Guard{
 		want:     want,
 		err:      &RefusedError{Why: "not checked yet"},
@@ -160,7 +153,7 @@ func NewGuard(want Runtime) *Guard {
 }
 
 // Runtime is the configured runtime.
-func (g *Guard) Runtime() Runtime { return g.want }
+func (g *Guard) Runtime() runtime.Kind { return g.want }
 
 // Err is nil once verified, else the refusal (wrapping ErrEngineRefused).
 func (g *Guard) Err() error {
@@ -216,7 +209,7 @@ func (g *Guard) Verify(ctx context.Context, r VersionReader) error {
 		engine := "unknown"
 		if rt != "" {
 			engine = componentOf(cs, rt).Name
-			if rt == RuntimeDocker {
+			if rt == runtime.KindDocker {
 				engine = "Docker Engine"
 			}
 		} else if names := componentNames(cs); names != "" {

@@ -12,9 +12,10 @@ import (
 	"testing"
 	"time"
 
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
-	"github.com/portcullis/hub/internal/hub"
 )
 
 // runningEngine is the fake engine with grafana's web container running
@@ -79,7 +80,7 @@ func localTemplateRepo(t *testing.T) string {
 // the log.
 func TestUnauditedMutationsNowAudited(t *testing.T) {
 	url := localTemplateRepo(t)
-	e := newInstEnvWith(t, t.TempDir(), nil, func(f *fakeEngine) hub.Engine { return runningEngine{f} })
+	e := newInstEnvWith(t, t.TempDir(), nil, func(f *fakeEngine) dockerrt.Engine { return runningEngine{f} })
 	handler, err := e.s.Handler()
 	if err != nil {
 		t.Fatal(err)

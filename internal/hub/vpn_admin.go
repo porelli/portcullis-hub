@@ -131,7 +131,7 @@ func (h *Hub) VPNOverview(ctx context.Context) VPNView {
 		}
 		v := t.Manifest.VPN
 		p, wired := h.st.VPN.Providers[t.ID]
-		pv := VPNProviderView{ID: t.ID, Label: v.Label, Source: v.Identity.Source, Wired: wired, Ranges: []string{}, Compat: t.Rootless,
+		pv := VPNProviderView{ID: t.ID, Label: v.Label, Source: v.Identity.Source, Wired: wired, Ranges: []string{}, Compat: t.Compat,
 			Problems: []vpn.Dropped{}, DNSManual: v.DNS.Manual, DNSAcked: p.DNSAcked, DNSRecords: []vpn.Record{}, Static: []state.VPNStatic{}}
 		refresh := time.Duration(p.Refresh)
 		if refresh == 0 {
@@ -282,7 +282,7 @@ func (h *Hub) AllVPNDevices(ctx context.Context, user string) []HostDeviceView {
 // The inspects go through the guarded engine.
 func (h *Hub) vpnGatewayPrivileged(ctx context.Context) map[string][]string {
 	out := map[string][]string{}
-	if h.engine == nil {
+	if h.noEngine() {
 		return out
 	}
 	h.mu.RLock()
@@ -309,7 +309,7 @@ func (h *Hub) vpnGatewayPrivileged(ctx context.Context) map[string][]string {
 			if ns, ok := routes.NetNS(svc); !ok || ns != ing {
 				continue
 			}
-			info, err := h.engine.InspectContainer(ctx, c.ID)
+			info, err := h.rt.Inspect(ctx, c.ID)
 			if err != nil {
 				continue
 			}

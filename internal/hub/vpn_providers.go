@@ -18,6 +18,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/kube"
+
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/policy"
@@ -105,9 +108,13 @@ type deviceMeta struct {
 // vpnRuntime is the Hub's VPN memory (under its own mutex; lock order
 // Hub.mu → vpnRuntime.mu, never the reverse; never held across an exec).
 type vpnRuntime struct {
-	mu   sync.Mutex
-	maps map[string]*providerMap
-	kc   VPNKeycloak
+	mu sync.Mutex
+	// gatewayIPs (Kubernetes, K5): wired provider → its gateway pod (IP
+	// and UID) while the watch confirms it Running, Ready and not
+	// terminating (absent: not published). Guarded by mu.
+	gatewayIPs map[string]kube.GatewayPod
+	maps       map[string]*providerMap
+	kc         VPNKeycloak
 	// members is the last directory snapshot the publisher read (nil:
 	// none yet).
 	members *directory.Membership
@@ -213,6 +220,15 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 	// podman) adds to them. Unset (an older core, a hand-edited
 	// core.env): the defaults only, never nothing (I8); the doctor warns.
 	c.Reserved = append(c.Reserved, vpn.DefaultReserved...)
+	// Kubernetes (K-P11): the pod and service CIDRs are reserved too (a
+	// provider range inside them could claim pod addresses).
+	if h.kubeOn() {
+		for _, k := range []string{VarPodCIDR, VarServiceCIDR} {
+			if p, err := netip.ParsePrefix(strings.TrimSpace(core[k])); err == nil && !slices.Contains(c.Reserved, p.Masked()) {
+				c.Reserved = append(c.Reserved, p.Masked())
+			}
+		}
+	}
 	reserved := core[VarVPNReserved]
 	if strings.TrimSpace(reserved) == "" {
 		c.ReservedDefault = true
@@ -317,16 +333,16 @@ func (h *Hub) SetVPNProvider(ctx context.Context, actor directory.Actor, id stri
 		action = "vpn.provider_wired"
 	}
 	defer func() { h.auditOp(actor, action, id, "", err) }()
-	var nets []docker.Network
+	var nets []runtime.Network
 	var st *vpn.Status
 	if wired {
 		if st, err = h.wgStatus(); err != nil || !st.Edge.OK {
 			return ErrVPNNotRunning
 		}
-		if h.engine == nil {
+		if h.noEngine() {
 			return statusErr(http.StatusServiceUnavailable, "no container engine: the Docker networks can't be checked")
 		}
-		if nets, err = h.engine.ListNetworks(ctx); err != nil {
+		if nets, err = h.runtimeNetworks(ctx); err != nil {
 			return statusErr(http.StatusServiceUnavailable, "listing the container networks failed: %v", err)
 		}
 	}
@@ -762,10 +778,10 @@ func (h *Hub) vpnCheckProviderOverlaps(ctx context.Context, now time.Time) {
 		h.vpnrt.overlapAt = now
 	}
 	h.vpnrt.mu.Unlock()
-	if !due || h.engine == nil {
+	if !due || h.noEngine() {
 		return
 	}
-	nets, err := h.engine.ListNetworks(ctx)
+	nets, err := h.runtimeNetworks(ctx)
 	if err != nil {
 		return // kept as they were: the next check retries
 	}
@@ -812,7 +828,7 @@ func (h *Hub) execVPNHook(ctx context.Context, t *templates.Template, name strin
 	if hk == nil {
 		return nil, fmt.Errorf("hook %s: not a vpn hook of the template", clip(name, 64))
 	}
-	if h.engine == nil {
+	if h.noEngine() {
 		return nil, fmt.Errorf("hook %s: no container engine", name)
 	}
 	cs, _, err := h.appContainers(ctx, t)
@@ -823,7 +839,7 @@ func (h *Hub) execVPNHook(ctx context.Context, t *templates.Template, name strin
 	if c == nil {
 		return nil, fmt.Errorf("hook %s: no running container of service %s", name, hk.Service)
 	}
-	r, err := h.engine.ExecStdinSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: slices.Clone(stdin), Timeout: hk.EffectiveTimeout()})
+	r, err := h.rt.ExecSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: slices.Clone(stdin), Timeout: hk.EffectiveTimeout()})
 	var why string
 	switch {
 	case err != nil:

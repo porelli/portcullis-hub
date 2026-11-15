@@ -1,0 +1,206 @@
+---
+# step 0 wait none
+apiVersion: v1
+data:
+  derp.PORTCULLIS_VPN_EDGE: MTAuNDMuMC4yMjo5MDA0
+  headscale.HS_LOG: aW5mbw==
+  headscale.PORTCULLIS_VPN_EDGE: MTAuNDMuMC4yMjo5MDA0
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
+  name: vpn-gateway--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
+  name: vpn-gateway--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: vpn-gateway
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
+  name: vpn-gateway--net-default
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: vpn-gateway
+          portcullis.io/net-default: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: vpn-gateway
+          portcullis.io/net-default: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: vpn-gateway
+      portcullis.io/net-default: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
+  name: vpn-gateway--egress
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.42.0.0/16
+        - 10.43.0.0/16
+        - 169.254.0.0/16
+        - 192.0.2.10/32
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.0.2.10/32
+  podSelector:
+    matchLabels:
+      portcullis.io/egress: "true"
+      portcullis.io/instance: vpn-gateway
+  policyTypes:
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+    portcullis.io/owner: hub
+  name: vpn-gateway--vpn-edge
+  namespace: portcullis-apps
+spec:
+  egress:
+  - ports:
+    - port: 9004
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: portcullis
+      podSelector:
+        matchLabels:
+          portcullis.io/component: wg
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: vpn-gateway
+      portcullis.io/vpn-slot: "3"
+  policyTypes:
+  - Egress
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: vpn-gateway
+    portcullis.io/service: headscale
+  name: vpn-gateway--headscale
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: vpn-gateway
+      portcullis.io/service: headscale
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"derp":"derp","headscale":"headscale"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: vpn-gateway
+        portcullis.io/net-default: "true"
+        portcullis.io/service: headscale
+        portcullis.io/vpn-slot: "3"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: HS_LOG
+          valueFrom:
+            secretKeyRef:
+              key: headscale.HS_LOG
+              name: vpn-gateway--env
+        - name: PORTCULLIS_VPN_EDGE
+          valueFrom:
+            secretKeyRef:
+              key: headscale.PORTCULLIS_VPN_EDGE
+              name: vpn-gateway--env
+        image: docker.io/headscale/headscale:0.27.0@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: headscale
+        resources: {}
+        securityContext:
+          runAsGroup: 10001
+          runAsUser: 10001
+      - env:
+        - name: PORTCULLIS_VPN_EDGE
+          valueFrom:
+            secretKeyRef:
+              key: derp.PORTCULLIS_VPN_EDGE
+              name: vpn-gateway--env
+        image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: derp
+        resources: {}
+        securityContext: {}
+      dnsConfig:
+        searches:
+        - vpn-gateway--pods.portcullis-apps.svc.cluster.local
+      enableServiceLinks: false
+      hostname: headscale
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      subdomain: vpn-gateway--pods

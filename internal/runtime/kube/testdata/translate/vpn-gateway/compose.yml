@@ -1,0 +1,9 @@
+services:
+  headscale:
+    image: docker.io/headscale/headscale:0.27.0
+    user: "10001:10001"
+    environment:
+      HS_LOG: info
+  derp:
+    image: docker.io/library/alpine:3.24.3
+    network_mode: service:headscale
