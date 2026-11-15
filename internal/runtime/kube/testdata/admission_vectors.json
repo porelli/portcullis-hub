@@ -484,7 +484,13 @@
     "containers": [
      {
       "name": "c",
-      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "runAsUser": 1000,
+       "runAsGroup": 1000,
+       "runAsNonRoot": true,
+       "allowPrivilegeEscalation": false
+      }
      }
     ],
     "volumes": [
@@ -1607,7 +1613,7 @@
    "apiVersion": "traefik.io/v1alpha1",
    "kind": "Middleware",
    "metadata": {
-    "name": "fa",
+    "name": "app--m-fa",
     "namespace": "portcullis-edge",
     "labels": {
      "portcullis.io/instance": "app",
@@ -1630,7 +1636,7 @@
    "apiVersion": "traefik.io/v1alpha1",
    "kind": "Middleware",
    "metadata": {
-    "name": "xp",
+    "name": "app--m-xp",
     "namespace": "portcullis-edge",
     "labels": {
      "portcullis.io/instance": "app",
@@ -1655,7 +1661,7 @@
    "apiVersion": "traefik.io/v1alpha1",
    "kind": "Middleware",
    "metadata": {
-    "name": "xp2",
+    "name": "app--m-xp2",
     "namespace": "portcullis-edge",
     "labels": {
      "portcullis.io/instance": "app",
@@ -1680,7 +1686,7 @@
    "apiVersion": "traefik.io/v1alpha1",
    "kind": "Middleware",
    "metadata": {
-    "name": "strp",
+    "name": "app--m-strp",
     "namespace": "portcullis-edge",
     "labels": {
      "portcullis.io/instance": "app",
@@ -1705,7 +1711,7 @@
    "apiVersion": "traefik.io/v1alpha1",
    "kind": "Middleware",
    "metadata": {
-    "name": "ba",
+    "name": "app--m-ba",
     "namespace": "portcullis-edge",
     "labels": {
      "portcullis.io/instance": "app",
@@ -6376,5 +6382,123 @@
   "as": "hub",
   "want": "deny",
   "reason_contains": "a service must be"
+ },
+ {
+  "name": "hostPath with no user (the image's)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hp-nouser",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {}
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/srv/shared/x",
+       "type": "Directory"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a pod with a hostPath volume"
+ },
+ {
+  "name": "hostPath allowing privilege escalation",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hp-esc",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "runAsUser": 1000,
+       "runAsGroup": 1000,
+       "runAsNonRoot": true,
+       "allowPrivilegeEscalation": true
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/srv/shared/x",
+       "type": "Directory"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a pod with a hostPath volume"
+ },
+ {
+  "name": "hostPath with group 0",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hp-gid0",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "securityContext": {
+       "runAsUser": 1000,
+       "runAsGroup": 0,
+       "runAsNonRoot": true,
+       "allowPrivilegeEscalation": false
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/srv/shared/x",
+       "type": "Directory"
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "a pod with a hostPath volume"
  }
 ]
