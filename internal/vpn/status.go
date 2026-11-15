@@ -18,6 +18,43 @@ type Status struct {
 	Mode    string       `json:"mode"`
 	Edge    RoleStatus   `json:"edge"`
 	People  *PeopleState `json:"people"`
+	// Link is the link role's state (contract §17.2; null or absent while
+	// the role is off): its public key and port go into join codes.
+	Link *LinkState `json:"link"`
+}
+
+// LinkState is the link role's state.
+type LinkState struct {
+	OK        bool       `json:"ok"`
+	Error     string     `json:"error"`
+	PublicKey string     `json:"public_key"`
+	Port      int        `json:"port"`
+	Peers     []LinkPeer `json:"peers"`
+}
+
+// LinkPeer is one worker's tunnel: its server id, tunnel address, last
+// handshake (null: none yet) and bytes received / sent.
+type LinkPeer struct {
+	ID        string     `json:"id"`
+	IP        string     `json:"ip"`
+	Handshake *time.Time `json:"handshake"`
+	Rx        int64      `json:"rx"`
+	Tx        int64      `json:"tx"`
+}
+
+// LinkHandshakes maps each link peer's server id to its last handshake
+// (absent: none yet, or the role is off).
+func (s *Status) LinkHandshakes() map[string]time.Time {
+	out := map[string]time.Time{}
+	if s == nil || s.Link == nil {
+		return out
+	}
+	for _, p := range s.Link.Peers {
+		if p.Handshake != nil {
+			out[p.ID] = *p.Handshake
+		}
+	}
+	return out
 }
 
 // RoleStatus is a role's health.

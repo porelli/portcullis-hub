@@ -40,3 +40,35 @@ func TestReadStatusStale(t *testing.T) {
 		t.Fatalf("%+v %v", off, err)
 	}
 }
+
+// TestStatusLinkBlock (contract §17.2): the link block absent, null or
+// populated all parse, and the people role reads the same.
+func TestStatusLinkBlock(t *testing.T) {
+	at := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	head := strings.TrimSuffix(statusDoc, "}")
+	link := `"link":{"ok":true,"error":"","public_key":"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=","port":51821,"peers":[{"id":"nas","ip":"10.214.0.10","handshake":"2026-11-13T11:59:30Z","rx":10,"tx":20},{"id":"pi","ip":"10.214.0.11","handshake":null,"rx":0,"tx":0}]}`
+	for name, doc := range map[string]string{
+		"absent":    statusDoc,
+		"null":      head + `,"link":null}`,
+		"populated": head + "," + link + "}",
+	} {
+		s, err := ParseStatus([]byte(doc), at)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if s.People == nil || s.People.Port != 51820 || len(s.Handshakes()) != 1 {
+			t.Errorf("%s: people %+v", name, s.People)
+		}
+		hs := s.LinkHandshakes()
+		if name == "populated" {
+			if s.Link == nil || s.Link.Port != 51821 || s.Link.PublicKey == "" || len(hs) != 1 || !hs["nas"].Equal(at.Add(-30*time.Second)) {
+				t.Errorf("link %+v %v", s.Link, hs)
+			}
+		} else if s.Link != nil || len(hs) != 0 {
+			t.Errorf("%s: link %+v", name, s.Link)
+		}
+	}
+	if _, err := ParseStatus([]byte(head+`,"link":{"ok":true,"evil":1}}`), at); err == nil {
+		t.Error("an unknown link key accepted")
+	}
+}
