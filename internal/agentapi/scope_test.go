@@ -156,6 +156,11 @@ func TestValidateBundleRefusesEscapes(t *testing.T) {
 		"env_file":               {svc("    env_file: [/etc/environment]\n"), "env_file"},
 		"profile hides escape":   {svc("  hidden:\n    image: x\n    privileged: true\n    profiles: [never]\n"), "privileged"},
 		"links outside":          {svc("    links: [db]\n"), "links db"},
+		"service mac_address":    {svc("    mac_address: 02:42:ac:11:00:02\n    networks: [portcullis-proxy]\nnetworks:\n  portcullis-proxy:\n    external: true\n"), "compose key mac_address"},
+		"network mac_address":    {svc("    networks:\n      portcullis-proxy:\n        mac_address: 02:42:ac:11:00:02\nnetworks:\n  portcullis-proxy:\n    external: true\n"), "compose key mac_address"},
+		"fixed proxy ipv6":       {svc("    networks:\n      portcullis-proxy:\n        ipv6_address: fd00::2\nnetworks:\n  portcullis-proxy:\n    external: true\n"), "fixed address"},
+		"link_local_ips":         {svc("    networks:\n      portcullis-proxy:\n        link_local_ips: [169.254.1.1]\nnetworks:\n  portcullis-proxy:\n    external: true\n"), "compose key link_local_ips"},
+		"link alias reserved":    {svc("    links: [\"db:traefik\"]\n  db:\n    image: x\n"), "links alias"},
 	}
 	for name, c := range cases {
 		m, err := loadBundleModel(t, dir, "app", c.compose, nil)

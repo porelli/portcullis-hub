@@ -83,13 +83,15 @@ var (
 	// deploy, build, extends, privileged, use_api_socket, gpus, sysctls,
 	// userns_mode, uts, cgroup, cgroup_parent, runtime, isolation,
 	// credential_spec, label_file, annotations, env_file, configs,
+	// mac_address (a service-level MAC lands on portcullis-proxy, where
+	// fixed addresses are refused; no template sets one),
 	// secrets, external_links, net, volume_driver, storage_opt,
 	// blkio_config, device_cgroup_rules, oom_kill_disable, the cpu_*
 	// scheduler knobs, and service-level x-* extensions.
 	serviceKeys = set("name", "profiles", "restart", "scale", "attach", "container_name", "links",
 		"cap_add", "cap_drop", "cpus", "cpu_shares", "cpuset", "command", "devices", "dns", "dns_opt", "dns_search",
 		"domainname", "entrypoint", "environment", "extra_hosts", "group_add", "hostname", "image", "init", "ipc",
-		"labels", "logging", "mem_limit", "mem_reservation", "memswap_limit", "mem_swappiness", "mac_address",
+		"labels", "logging", "mem_limit", "mem_reservation", "memswap_limit", "mem_swappiness",
 		"network_mode", "networks", "oom_score_adj", "pid", "pids_limit", "platform", "pull_policy", "read_only",
 		"security_opt", "shm_size", "stop_grace_period", "stop_signal", "tmpfs", "ulimits", "user", "volumes",
 		"volumes_from", "working_dir",
@@ -433,9 +435,12 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 		}
 	}
 	for _, l := range s.Links {
-		src, _, _ := strings.Cut(l, ":")
+		src, alias, _ := strings.Cut(l, ":")
 		if _, ok := own[src]; !ok {
 			return fail("links %s is not a service of this project", clip(l))
+		}
+		if alias != "" && reservedName(alias) {
+			return fail("links alias %q is reserved", clip(alias))
 		}
 	}
 	for _, k := range sortedKeys(s.Labels) {
