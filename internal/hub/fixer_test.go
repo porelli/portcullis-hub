@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/portcullis/hub/internal/agentapi"
+	"github.com/portcullis/hub/internal/fixerspec"
 	"io"
 	"net/http"
 	"os"
@@ -107,6 +109,12 @@ func TestFixerCapsByMode(t *testing.T) {
 			[]string{"DAC_READ_SEARCH"}, true, "/folder", []string{"/in"}, "/in", "", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			// The worker agent rebuilds the same spec byte for byte
+			// (multi-server Task 6: fixerspec.Rebuild).
+			sent := agentapi.FixerSpecOf(c.run.Spec("", "/usr/local/bin/portcullis-agent"))
+			if _, err := fixerspec.Rebuild(sent, "/usr/local/bin/portcullis-agent", []string{"/srv"}); err != nil {
+				t.Errorf("agent rebuild: %v", err)
+			}
 			f := newFixerFixture(t)
 			var err error
 			if c.run.Mode == "probe" {

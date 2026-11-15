@@ -30,8 +30,10 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/agent"
+	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
 	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
 	"github.com/portcullis/hub/internal/servers"
@@ -53,6 +55,11 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: portcullis-agent run|join|status|healthcheck|leave")
 		return 2
+	}
+	// The shared-folder fixer (pre-flight P7): the agent's own image runs
+	// it as "portcullis-agent folderfix <mode> …", before any env is read.
+	if args[0] == "folderfix" {
+		return folderfix.Main(args[1:], stdout, stderr)
 	}
 	data := getenv("AGENT_DATA")
 	if !path.IsAbs(data) || path.Clean(data) != data || data == "/" {
@@ -164,10 +171,36 @@ func run(data string, getenv func(string) string) error {
 		return err
 	}
 	go guard.Run(ctx, engine, 10*time.Second)
-	rt := dockerrt.New(compose.NewCLI(host, guard), engine, dockerrt.Options{Kind: kind, Guard: guard})
-	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: agent.EngineInfo(rt, portStart)})
+	rt := dockerrt.New(compose.NewCLI(host, guard), engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: dockerrt.HelperImage})
+	// The agent's own container and image (the fixer runs on it, P7).
+	self, _ := os.Hostname()
+	selfImage := ""
+	if ui, err := rt.Inspect(ctx, self); err == nil {
+		selfImage = ui.Image
+	}
+	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage,
+		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env()})
+	engineInfo := agent.EngineInfo(rt, portStart)
+	info := func(ctx context.Context) (agentapi.Info, error) {
+		i, err := engineInfo(ctx)
+		if err != nil {
+			return i, err
+		}
+		if i.PortBinds, err = agent.PortBinds(ctx, engine); err != nil {
+			return i, err
+		}
+		return i, nil
+	}
+	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api,
+		OnNetwork: func(ctx context.Context, n agentapi.NetworkParams) error { return api.SetupNetwork(ctx, n, self) }})
 	if err != nil {
 		return err
+	}
+	// At every start (P35): the worker's portcullis-proxy and the agent on it.
+	if n, err := a.Network(); err == nil {
+		if err := api.SetupNetwork(ctx, n, self); err != nil {
+			log.Printf("portcullis-proxy: %v", err)
+		}
 	}
 	tc, err := a.TunnelConfig(ctx)
 	if err != nil {
@@ -190,7 +223,7 @@ func run(data string, getenv func(string) string) error {
 	srv := agent.NewHTTPServer(a.Handler())
 	srv.ErrorLog = log.New(io.Discard, "", 0) // handshake noise; never certificate contents
 	go srv.Serve(tls.NewListener(ctl, a.TLSConfig()))
-	go agent.ServeData(dl, nil) // Task 6 serves the data path
+	go agent.ServeData(dl, api.HandleData)
 	go func() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()

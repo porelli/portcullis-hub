@@ -79,7 +79,7 @@ const (
 var ExtraRoutes = map[string]Route{
 	"Bundle":        {"PUT", Prefix + "/projects/{id}/bundle", BodyTar, BodyNone},
 	"RemoveProject": {"DELETE", Prefix + "/projects/{id}", BodyNone, BodyNone},
-	"AppFile":       {"PUT", Prefix + "/projects/{id}/appfiles/{name}", BodyText, BodyNone},
+	"AppFile":       {"PUT", Prefix + "/projects/{id}/appfiles/{name}", BodyTar, BodyNone},
 	"StopOp":        {"DELETE", Prefix + "/ops/{op}", BodyNone, BodyNone},
 	"Metrics":       {"GET", Prefix + "/metrics", BodyNone, BodyText},
 	"IdentityCSR":   {"POST", Prefix + "/identity/csr", BodyNone, BodyJSON},

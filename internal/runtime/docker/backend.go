@@ -65,6 +65,11 @@ type Engine interface {
 }
 
 // Options configure a Backend.
+// HelperImage is the volume I/O helper's image: core's pinned alpine
+// (shared by the Hub and the worker agent; the agent pulls only it and
+// the bundles' images).
+const HelperImage = "docker.io/library/alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+
 type Options struct {
 	// Kind is docker or podman (HUB_CONTAINER_RUNTIME).
 	Kind runtime.Kind

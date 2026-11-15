@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
+	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
 
 	"gopkg.in/yaml.v3"
 
@@ -56,7 +57,7 @@ import (
 // PORTCULLIS_HELPER_IMAGE (scripts/lib/common.sh; TestHelperImagePinned
 // keeps them equal), pinned by digest. It is only ever created, never
 // started, so its content never runs.
-const HelperImage = "docker.io/library/alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+const HelperImage = dockerrt.HelperImage
 
 // Backup reasons (MANIFEST.json "reason").
 const (

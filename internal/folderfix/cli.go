@@ -507,3 +507,7 @@ func dropSamples(r *Report) {
 		c.Sample = nil
 	}
 }
+
+// ParseArgs parses a fixer argv (the mode, then its flags) as Main does:
+// the inverse of Args (the worker agent rebuilds a spec from it).
+func ParseArgs(args []string) (string, Options, ArgsExtra, error) { return parseArgs(args) }
