@@ -106,7 +106,7 @@ func (s *sharedRestart) do(ctx context.Context, run func() error) error {
 
 func (s *sharedRestart) loop(r *restartRun, run func() error) {
 	for r != nil {
-		r.err = run()
+		r.err = safeRun(run)
 		close(r.done)
 		s.mu.Lock()
 		s.cur, s.next = s.next, nil
@@ -149,4 +149,15 @@ func prefixStrings(ps []netip.Prefix) []string {
 		out = append(out, p.String())
 	}
 	return out
+}
+
+// safeRun runs f; a panic is an error (a restart never takes the Hub
+// down).
+func safeRun(f func() error) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("restart failed: %v", p)
+		}
+	}()
+	return f()
 }

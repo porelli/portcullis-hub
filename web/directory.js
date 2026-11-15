@@ -993,6 +993,12 @@
       if (admin && !u.protected) h += '<p class="pd-muted pd-small" data-pw-hint>' + esc(passwordCopy()) + '</p>';
       h += '</section>';
     }
+    // Mail (contract §19.9): addresses, aliases (administrators edit
+    // them), mail passwords (list and revoke; nobody creates one for
+    // someone else). Filled by loadPersonMail; hidden when unavailable.
+    if (admin || tabbed) {
+      h += '<section class="pd-card pd-pp-card" aria-labelledby="pd-pp-mail-h" data-pp-mail="' + esc(u.username) + '" hidden><h3 class="pd-h3" id="pd-pp-mail-h">Mail</h3><div data-pp-mail-body></div></section>';
+    }
     // History (admins)
     if (admin) {
       h += '<section class="pd-sec" aria-labelledby="pd-pp-hist-h"><div class="pd-head"><h3 class="pd-h3" id="pd-pp-hist-h">History</h3>' +
@@ -1029,11 +1035,44 @@
       return { name: g.name, kind: k };
     });
   }
+  // personMailHtml (pure) is a person's Mail section: v = GET
+  // /api/directory/users/{u}/mail; admin: the aliases editor.
+  function personMailHtml(user, v, admin) {
+    const addrs = v.addresses || [];
+    let h = addrs.length ? '<p>' + addrs.map(a => '<span class="pd-mono">' + esc(a) + '</span>').join(', ') + '</p>'
+      : '<p class="pd-muted">No mailbox: ' + esc(user) + ' isn\'t in mail_users.</p>';
+    if (admin && addrs.length) {
+      h += '<label class="pd-small" for="pd-pp-aliases">Aliases (one address per line, on a mail domain)</label>' +
+        '<textarea class="pd-input" id="pd-pp-aliases" rows="3" data-pp-aliases>' + esc((v.aliases || []).join('\n')) + '</textarea>' +
+        '<div class="pd-actions"><button type="button" class="pd-btn secondary sm" data-act="mail-aliases-save" data-user="' + esc(user) + '">Save aliases</button></div>';
+    }
+    const pw = (v.passwords || []);
+    h += '<h4 class="pd-h4">Mail passwords</h4>';
+    if (!pw.length) h += '<p class="pd-muted">None.</p>';
+    for (const p of pw) {
+      h += '<div class="pd-row-inline"><strong>' + esc(p.label) + '</strong> <span class="pd-muted">created ' + esc(fmtDate(p.created_at)) + '</span> ' +
+        (p.status === 'voided' ? '<span class="pd-pill bad">reset by a restore</span>'
+          : '<button type="button" class="pd-btn danger xs" data-act="mail-pw-revoke" data-user="' + esc(user) + '" data-id="' + esc(p.id) + '" data-label="' + esc(p.label) + '">Revoke</button>') + '</div>';
+    }
+    h += '<p class="pd-muted pd-small">Only ' + esc(user) + ' can create a mail password, on their Sign-in page.</p>';
+    return h;
+  }
+  async function loadPersonMail(box) {
+    const sec = box && box.querySelector('[data-pp-mail]');
+    if (!sec) return;
+    const user = sec.dataset.ppMail;
+    let v;
+    try { v = await api('GET', '/api/directory/users/' + enc(user) + '/mail'); } catch (_) { sec.hidden = true; return; }
+    if (personPage !== user) return;
+    sec.querySelector('[data-pp-mail-body]').innerHTML = personMailHtml(user, v, isAdmin());
+    sec.hidden = false;
+  }
   function renderPersonPage() {
     const box = root.querySelector('.pd-person-page');
     box.hidden = !personPage;
     box.innerHTML = personPage ? personPageHtml(personPage) : '';
     if (personPage) renderExtras();
+    if (personPage) loadPersonMail(box);
     const sb = box.querySelector('[data-msi-person]');
     if (sb && window.PortcullisMySignIn) {
       const who = sb.dataset.msiPerson, fb = box.querySelector('[data-pp-sign-fallback]');
@@ -1860,9 +1899,30 @@
     return apps.length ? apps.join(', ') : '<span class="pd-muted">—</span>';
   }
 
+  // groupMailHtml (pure): the "Make this group a list" form for the
+  // domains mail is on for (settings = GET /api/mail/settings).
+  function groupMailHtml(group, settings) {
+    const doms = (settings.domains || []).filter(d => d.state === 'on');
+    if (!doms.length) return '<p class="pd-muted">Mail isn\'t on for any domain.</p>';
+    return '<p class="pd-muted pd-small">A list delivers to every member\'s mailbox at <span class="pd-mono">' + esc(String(group).toLowerCase()) + '@&lt;domain&gt;</span>.</p>' +
+      '<div class="pd-inline"><label for="pd-gp-mail-dom">Domain</label><select id="pd-gp-mail-dom" data-gp-mail-domain>' +
+      doms.map(d => '<option value="' + esc(d.name) + '">' + esc(d.name) + '</option>').join('') + '</select>' +
+      '<label for="pd-gp-mail-post">Who may post</label><select id="pd-gp-mail-post" data-gp-mail-posting><option value="members">members only</option><option value="anyone">anyone</option></select></div>' +
+      '<div class="pd-actions"><button type="button" class="pd-btn secondary sm" data-act="mail-list-on" data-group="' + esc(group) + '">Make this group a list</button>' +
+      '<button type="button" class="pd-btn ghost sm" data-act="mail-list-off" data-group="' + esc(group) + '">Stop the list</button></div>';
+  }
+  async function loadGroupMail(box) {
+    const sec = box && box.querySelector('[data-gp-mail]');
+    if (!sec) return;
+    let s;
+    try { s = await api('GET', '/api/mail/settings'); } catch (_) { sec.hidden = true; return; }
+    if (s.mail !== 'on' || s.kubernetes) { sec.hidden = true; return; }
+    sec.querySelector('[data-gp-mail-body]').innerHTML = groupMailHtml(sec.dataset.gpMail, s);
+    sec.hidden = false;
+  }
   function renderGroups() {
     const box = root.querySelector('.pd-groups');
-    if (groupPage) { box.innerHTML = groupPageHtml(groupPage); renderExtras(); return; }
+    if (groupPage) { box.innerHTML = groupPageHtml(groupPage); renderExtras(); loadGroupMail(box); return; }
     let h = '<div class="pd-toolbar"><label class="pd-sr" for="pd-gsearch">Search groups</label>' +
       '<input type="search" id="pd-gsearch" placeholder="search groups…" autocomplete="off" value="' + esc(gsearch) + '"><span class="pd-gcount pd-muted"></span><span class="pd-spacer"></span>';
     if (isAdmin()) {
@@ -1999,6 +2059,9 @@
     if (admin) h += addPeopleHtml(g);
     h += '</section>';
     if (admin) {
+      // Make this group a list (contract §19.9; Hub listener only: the
+      // section stays hidden where GET /api/mail/settings isn't served).
+      h += '<section class="pd-sec" aria-labelledby="pd-gp-mail-h" data-gp-mail="' + esc(g.name) + '" hidden><h3 class="pd-h3" id="pd-gp-mail-h">Mail list</h3><div data-gp-mail-body></div></section>';
       h += '<section class="pd-sec" aria-labelledby="pd-gp-uses-h"><h3 class="pd-h3" id="pd-gp-uses-h">Used by</h3><div class="pd-gp-uses"><p class="pd-muted">Loading…</p></div></section>';
       h += '<section class="pd-sec" aria-labelledby="pd-gp-hist-h"><div class="pd-head"><h3 class="pd-h3" id="pd-gp-hist-h">History</h3>' +
         '<button type="button" class="pd-btn ghost xs" data-act="gp-hist-reload">Refresh</button></div><div class="pd-gp-hist"><p class="pd-muted">Loading…</p></div></section>';
@@ -3102,6 +3165,28 @@
       case 'pick-submit': return pickSubmit(group);
       case 'any-field': return setAnyField(group, b.dataset.allow === 'true');
       case 'gp-hist-reload': return refreshExtras();
+      case 'mail-aliases-save': {
+        const ta = root.querySelector('[data-pp-aliases]');
+        const aliases = String(ta ? ta.value : '').split(/\n/).map(x => x.trim()).filter(Boolean);
+        try { await api('PUT', '/api/directory/users/' + enc(user) + '/mail', { aliases }); } catch (err) { alert(errText(err)); return; }
+        return loadPersonMail(root.querySelector('.pd-person-page'));
+      }
+      case 'mail-pw-revoke': {
+        if (!confirm('Revoke ' + user + '\'s mail password “' + (b.dataset.label || '') + '”? Mail apps using it stop at once.')) return;
+        try { await api('DELETE', '/api/directory/users/' + enc(user) + '/mail/passwords/' + enc(b.dataset.id || '')); } catch (err) { alert(errText(err)); return; }
+        return loadPersonMail(root.querySelector('.pd-person-page'));
+      }
+      case 'mail-list-on':
+      case 'mail-list-off': {
+        const sec = root.querySelector('[data-gp-mail]');
+        const on = a === 'mail-list-on';
+        const domain = on && sec ? sec.querySelector('[data-gp-mail-domain]').value : '';
+        const posting = on && sec ? sec.querySelector('[data-gp-mail-posting]').value : '';
+        if (!on && !confirm('Stop the list of ' + group + '? Mail to its address bounces from now on.')) return;
+        try { await api('PUT', '/api/directory/groups/' + enc(group) + '/mail-list', { enabled: on, domain, posting }); } catch (err) { alert(errText(err)); return; }
+        alert(on ? group + ' is a list at ' + String(group).toLowerCase() + '@' + domain + '.' : 'The list of ' + group + ' is stopped.');
+        return;
+      }
       case 'goto-setup': return userSelectTab('setup', true);
       case 'rule-open': return openRuleEditor(group);
       case 'rule-save': return saveRule(group);
@@ -3367,7 +3452,7 @@
 
   window.PortcullisDirectory = { show, openAt, openGroup, csvCell, renderAudit };
   // For the node tests: the person page and invite form over an overview (d) and caller (m).
-  window.PortcullisDirectory._test = { setOverview: (d, m) => { dir = d; me = m; }, personPageHtml, inviteFormHtml };
+  window.PortcullisDirectory._test = { setOverview: (d, m) => { dir = d; me = m; }, personPageHtml, inviteFormHtml, personMailHtml, groupMailHtml };
   window.PortcullisPicker = PortcullisPicker;
   window.PortcullisNav = PortcullisNav;
   window.PortcullisAI = { decision: aiDecision };

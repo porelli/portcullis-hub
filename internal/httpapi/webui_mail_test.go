@@ -60,3 +60,86 @@ func TestMySignInMailSection(t *testing.T) {
 		t.Errorf("five active:\n%s", h)
 	}
 }
+
+// nodeEval runs script under node and answers stdout (skipped without
+// node outside CI).
+func nodeEval(t *testing.T, script string) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("node is required in CI for the web UI tests")
+		}
+		t.Skip("node not installed")
+	}
+	cmd := exec.Command(node, "-")
+	cmd.Stdin = strings.NewReader(script)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node: %v", err)
+	}
+	return string(out)
+}
+
+// TestSettingsMailPanel: Settings → Mail shows each domain with its
+// state and the right button, the read-only facts, the drain warning,
+// the DQS hint; mail off and Kubernetes show their texts; values are
+// escaped.
+func TestSettingsMailPanel(t *testing.T) {
+	render := func(v, st any) string {
+		vb, _ := json.Marshal(v)
+		sb, _ := json.Marshal(st)
+		return nodeEval(t, "global.window = {};\n"+webAsset(t, "mail.js")+"\nprocess.stdout.write(window.PortcullisMail.settingsHtml("+string(vb)+","+string(sb)+"));\n")
+	}
+	view := map[string]any{"mail": "on", "kubernetes": false, "hostname": "mail.example.org", "primary_domain": "example.org",
+		"domains": []any{map[string]any{"name": "example.org", "enabled": true, "state": "on", "groups": []string{}},
+			map[string]any{"name": "team-b.example.net", "enabled": false, "state": "draining", "groups": []string{"team_b<x>"}}},
+		"spam":   map[string]any{"reject_score": 15, "junk_score": 5, "dnsbl": map[string]any{"spamhaus": true, "spamcop": false, "barracuda": true}, "allow": []string{"a.example"}, "block": []string{}},
+		"limits": map[string]any{"recipients_per_hour": 300, "recipients_per_day": 1000}, "quotas": []any{map[string]any{"group": "team_b", "bytes": 21474836480}},
+		"relay": "off", "submission_lan_only": false, "former_retention": "720h", "dqs_key": "not set"}
+	h := render(view, map[string]any{"mail": "on", "reachable": true})
+	for _, want := range []string{"mail.example.org", `data-mail-domain="team-b.example.net"`, "draining", `data-mail-act="domain-on"`, `data-mail-act="domain-off"`,
+		"team_b&lt;x&gt;", "up to 7 days", "MAIL_SPAMHAUS_DQS_KEY", "team_b = 20", "reachable", `data-mail-dnsbl="spamcop">`} {
+		if !strings.Contains(h, want) {
+			t.Errorf("panel lacks %q:\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "team_b<x>") {
+		t.Error("unescaped group")
+	}
+	view["mail"] = "off"
+	if h := render(view, nil); !strings.Contains(h, "Mail is off: run ./portcullis mail enable on the host") {
+		t.Errorf("off: %s", h)
+	}
+	view["kubernetes"] = true
+	if h := render(view, nil); !strings.Contains(h, "available on Kubernetes yet") || strings.Contains(h, "data-mail-settings") {
+		t.Errorf("kube: %s", h)
+	}
+}
+
+// TestDirectoryMailSections: a person's Mail section (aliases editor for
+// administrators only; Revoke per active password; no create) and the
+// group's list form.
+func TestDirectoryMailSections(t *testing.T) {
+	v := map[string]any{"addresses": []string{"alice@example.org"}, "aliases": []string{"sales@example.org"},
+		"passwords": []any{map[string]any{"id": "m1", "label": "Phone <1>", "created_at": "2026-11-15T09:00:00Z", "status": "active"},
+			map[string]any{"id": "m2", "label": "Old", "created_at": "2026-11-01T09:00:00Z", "status": "voided"}}}
+	vb, _ := json.Marshal(v)
+	stub := "global.window = { addEventListener() {}, location: { hash: '' } }; global.document = { addEventListener() {}, querySelector() { return null; } }; global.location = window.location;\n"
+	run := func(expr string) string {
+		return nodeEval(t, stub+webAsset(t, "directory.js")+"\nprocess.stdout.write("+expr+");\n")
+	}
+	h := run("window.PortcullisDirectory._test.personMailHtml('alice', " + string(vb) + ", true)")
+	for _, want := range []string{"alice@example.org", "data-pp-aliases", "sales@example.org", `data-act="mail-pw-revoke" data-user="alice" data-id="m1"`, "Phone &lt;1&gt;", "reset by a restore", "Only alice can create"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("person section lacks %q:\n%s", want, h)
+		}
+	}
+	if h := run("window.PortcullisDirectory._test.personMailHtml('alice', " + string(vb) + ", false)"); strings.Contains(h, "data-pp-aliases") {
+		t.Errorf("a helper gets the aliases editor:\n%s", h)
+	}
+	g := run(`window.PortcullisDirectory._test.groupMailHtml('Team_B', {domains: [{name: 'example.org', state: 'on'}, {name: 'off.example', state: 'off'}]})`)
+	if !strings.Contains(g, "team_b@&lt;domain&gt;") || !strings.Contains(g, `data-act="mail-list-on"`) || strings.Contains(g, "off.example") {
+		t.Errorf("group form:\n%s", g)
+	}
+}

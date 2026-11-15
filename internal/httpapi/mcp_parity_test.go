@@ -75,8 +75,22 @@ var fieldGuardNoToolRoutes = map[string]string{
 	"PUT /api/directory/groups/{group}/allow-any-field": "relaxes a guarding group's admin-only field rule: admin UI only, never by an AI",
 }
 
+// mailNoToolRoutes are the mail routes no tool mirrors (contract §15.10
+// "Mail routes without a tool"): mail_status is the only mail tool.
+var mailNoToolRoutes = map[string]string{
+	"GET /api/mail/settings":                                     "admin UI only (Settings → Mail)",
+	"PUT /api/mail/settings":                                     "admin UI only (Settings → Mail)",
+	"GET /api/mail/checks":                                       "admin UI only (the doctor reads them; mail_status has the status)",
+	"PUT /api/mail/domains/{name}":                               "admin UI only (Settings → Mail)",
+	"PUT /api/directory/groups/{group}/mail-list":                "admin UI only (the group's page)",
+	"POST /api/mail/actions/{action}":                            "admin UI only (the doctor's mail fixes go through doctor_apply_fix)",
+	"GET /api/directory/users/{username}/mail":                   "credentials: never through MCP",
+	"PUT /api/directory/users/{username}/mail":                   "admin UI only (the person's page)",
+	"DELETE /api/directory/users/{username}/mail/passwords/{id}": "credentials: never through MCP",
+}
+
 // adminVPN are the VPN tools (§15.10).
-var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach"}
+var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach", "mail_status"}
 
 // impersonationPartialTwins are the routes a tool mirrors for some
 // bodies only, listed once with the reason for the rest (F27):
@@ -224,7 +238,8 @@ func TestToolParity(t *testing.T) {
 		_, imp := impersonationNoToolRoutes[r]
 		_, vpnNo := vpnNoToolRoutes[r]
 		_, guardNo := fieldGuardNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo
+		_, mailNo := mailNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo || mailNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -255,7 +270,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -370,7 +385,9 @@ func TestToolParity(t *testing.T) {
 		// Rootless Podman (P3).
 		"get_runtime",
 		// VPN (§15.10).
-		"get_vpn", "list_vpn_devices"} {
+		"get_vpn", "list_vpn_devices",
+		// Mail (§15.10).
+		"mail_status"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}

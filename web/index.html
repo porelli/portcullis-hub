@@ -834,6 +834,13 @@
       </p>
       <div id="vpn-settings-root"></div>
 
+      <div class="category-title" style="margin: 2rem 0 1rem;">Mail</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        Mail for the main domain and the added domains you turn it on for: who gets an address where, the primary domain, the spam filter, sending limits and mailbox sizes.
+        Mailboxes go to the members of <code>mail_users</code>; people create their own mail passwords on their Sign-in page.
+      </p>
+      <div id="mail-settings-root"></div>
+
     </div>
   </div>
 
@@ -869,6 +876,7 @@
   </script>
   <script src="/static/folders.js"></script>
   <script src="/static/dns.js"></script>
+  <script src="/static/mail.js"></script>
   <script src="/static/doctor.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
@@ -887,6 +895,7 @@
         PortcullisFolders.render(document.getElementById('folders-root'));
         PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
         loadVPNSettings(document.getElementById('vpn-settings-root'));
+        if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
       }
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));

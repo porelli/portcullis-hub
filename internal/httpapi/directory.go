@@ -39,6 +39,8 @@ func (s *Server) registerDirectory(mux routeMux) {
 	s.registerSignInHelp(mux)
 	// Signing in as someone else: start and Stop (§9.7, part 3).
 	s.registerImpersonation(mux)
+	// The person's mail section (§19.9; both listeners).
+	s.registerPersonMail(mux)
 	mux.HandleFunc("DELETE /api/directory/keycloak-stale/{username}", s.handleRemoveStale)
 	mux.HandleFunc("POST /api/directory/groups", s.handleCreateGroup)
 	mux.HandleFunc("DELETE /api/directory/groups/{group}", s.handleDeleteGroup)
