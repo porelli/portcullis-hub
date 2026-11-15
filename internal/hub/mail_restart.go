@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -31,12 +30,10 @@ const (
 	opKeyMail = "_mail"
 )
 
-// errMailNotFound: no container is core's mail.
-var errMailNotFound = errors.New("core's mail container was not found")
-
-// restartCoreMail restarts exactly the one container labelled project
-// portcullis + service mail; zero or several matches restart nothing.
-// Never under Kubernetes.
+// restartCoreMail restarts core's mail container through the runtime's
+// narrow verb (exactly the one container of core's project, service mail,
+// not a one-off, in core's directory; zero or several matches restart
+// nothing). Never under Kubernetes.
 func (h *Hub) restartCoreMail(ctx context.Context) error {
 	if h.rt == nil {
 		return errors.New("no container runtime")
@@ -44,24 +41,7 @@ func (h *Hub) restartCoreMail(ctx context.Context) error {
 	if h.rt.Kind() == runtime.KindKubernetes {
 		return runtime.ErrUnsupported
 	}
-	us, err := h.rt.List(ctx, runtime.Filter{All: true})
-	if err != nil {
-		return fmt.Errorf("listing containers: %w", err)
-	}
-	var ids []string
-	for _, u := range us {
-		if u.Labels[docker.LabelProject] == coreProject && u.Labels[docker.LabelService] == coreMailService {
-			ids = append(ids, u.ID)
-		}
-	}
-	switch len(ids) {
-	case 0:
-		return errMailNotFound
-	case 1:
-	default:
-		return fmt.Errorf("%d containers are labelled as core's mail: none was restarted", len(ids))
-	}
-	return h.rt.Restart(ctx, ids[0], mailRestartGrace)
+	return h.rt.RestartCoreService(ctx, coreMailService, mailRestartGrace)
 }
 
 // sharedRestart runs restarts one at a time: a request while one runs

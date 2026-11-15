@@ -203,8 +203,8 @@ func TestRevokeOwnMailPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.h.Wait()
-	if len(f.mc.Creds("alice")) != 0 || len(f.h.MailPasswords("alice")) != 0 {
-		t.Fatalf("still there: %v %v", f.mc.Creds("alice"), f.h.MailPasswords("alice"))
+	if len(f.mc.Creds("alice")) != 0 || len(f.h.MailPasswords("alice", uuidAlice)) != 0 {
+		t.Fatalf("still there: %v %v", f.mc.Creds("alice"), f.h.MailPasswords("alice", uuidAlice))
 	}
 	if len(f.engine.Restarts()) == 0 {
 		t.Fatal("no restart after a revoke")

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -41,7 +42,13 @@ var ErrUnreachable = errors.New("mailctl unreachable")
 type APIError struct {
 	Status int
 	Msg    string
+	// Kind is mailctl's error_kind ("mass_removal" for the mass-removal
+	// 409; "" when absent): callers branch on it, never on Msg.
+	Kind string
 }
+
+// Error kinds (APIError.Kind).
+const ErrorKindMassRemoval = "mass_removal"
 
 func (e *APIError) Error() string {
 	if e.Msg != "" {
@@ -127,21 +134,89 @@ func clip(s string, n int) string {
 // contract's exact shape: an unknown key is a contract mismatch, refused).
 // Errors never carry the bearer secret.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) (int, error) {
+	status, raw, err := c.fetch(ctx, method, path, body)
+	defer wipe(raw)
+	if err != nil || out == nil {
+		return status, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return status, fmt.Errorf("mailctl: unexpected answer (HTTP %d)", status)
+	}
+	if dec.More() {
+		return status, fmt.Errorf("mailctl: unexpected answer (HTTP %d): trailing data", status)
+	}
+	return status, nil
+}
+
+// wipe zeroes b's whole backing array.
+func wipe(b []byte) {
+	b = b[:cap(b)]
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+// readOwned reads r (at most max bytes) into one buffer the caller owns:
+// every buffer it outgrows is zeroed before it is dropped (an answer may
+// hold a created password). Over max: an error, nothing kept.
+func readOwned(r io.Reader, hint int64, max int) ([]byte, error) {
+	size := 4096
+	if hint > 0 && hint <= int64(max) {
+		size = int(hint) + 1
+	}
+	buf := make([]byte, 0, size)
+	for {
+		if len(buf) == cap(buf) {
+			if len(buf) > max {
+				wipe(buf)
+				return nil, fmt.Errorf("mailctl: answer larger than %d bytes", max)
+			}
+			n := make([]byte, len(buf), 2*cap(buf))
+			copy(n, buf)
+			wipe(buf)
+			buf = n
+		}
+		k, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+k]
+		if len(buf) > max {
+			wipe(buf)
+			return nil, fmt.Errorf("mailctl: answer larger than %d bytes", max)
+		}
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			wipe(buf)
+			return nil, err
+		}
+	}
+}
+
+// rawHook, if set, sees every answer buffer (tests: it is zeroed once
+// the call returns).
+var rawHook func([]byte)
+
+// fetch sends one request and answers the status and the raw answer (a
+// buffer the caller wipes); a non-2xx is an *APIError. The bearer
+// secret never reaches an error.
+func (c *Client) fetch(ctx context.Context, method, path string, body any) (int, []byte, error) {
 	sec, err := c.secret()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, errors.New("encoding the request failed")
+			return 0, nil, errors.New("encoding the request failed")
 		}
 		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+path, rd)
 	if err != nil {
-		return 0, errors.New(redact(err.Error(), sec))
+		return 0, nil, errors.New(redact(err.Error(), sec))
 	}
 	req.Header.Set("Authorization", "Bearer "+sec)
 	if body != nil {
@@ -149,39 +224,29 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) (in
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("%w (%s)", ErrUnreachable, clip(redact(err.Error(), sec), 300))
+		return 0, nil, fmt.Errorf("%w (%s)", ErrUnreachable, clip(redact(err.Error(), sec), 300))
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxAnswer+1))
-	// The answer may hold a created password: wipe the buffer once decoded.
-	defer func() {
-		for i := range raw {
-			raw[i] = 0
-		}
-	}()
-	if len(raw) > maxAnswer {
-		return resp.StatusCode, fmt.Errorf("mailctl: answer larger than %d bytes (HTTP %d)", maxAnswer, resp.StatusCode)
+	// net/http's transport keeps its own read buffer (an accepted
+	// residual); the answer itself lives only in raw.
+	raw, err := readOwned(resp.Body, resp.ContentLength, maxAnswer)
+	if rawHook != nil && raw != nil {
+		rawHook(raw)
+	}
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("%v (HTTP %d)", err, resp.StatusCode)
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct {
 			Error string `json:"error"`
+			Kind  string `json:"error_kind"`
 		}
 		_ = json.Unmarshal(raw, &e)
 		// Redact first, then clip: clipping first could cut a secret so
 		// that its prefix escapes redaction.
-		return resp.StatusCode, &APIError{Status: resp.StatusCode, Msg: clip(redact(e.Error, sec), 500)}
+		return resp.StatusCode, raw, &APIError{Status: resp.StatusCode, Msg: clip(redact(e.Error, sec), 500), Kind: clip(e.Kind, 64)}
 	}
-	if out != nil {
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(out); err != nil {
-			return resp.StatusCode, fmt.Errorf("mailctl: unexpected answer (HTTP %d)", resp.StatusCode)
-		}
-		if dec.More() {
-			return resp.StatusCode, fmt.Errorf("mailctl: unexpected answer (HTTP %d): trailing data", resp.StatusCode)
-		}
-	}
-	return resp.StatusCode, nil
+	return resp.StatusCode, raw, nil
 }
 
 // PutState sends a document; the answer is the generation mailctl took.
@@ -205,10 +270,12 @@ func (c *Client) State(ctx context.Context) (StateStatus, error) {
 	return out, err
 }
 
-// DNS is domain's wanted mail set.
-func (c *Client) DNS(ctx context.Context, domain string) (DNSSet, error) {
+// DNS is domain's wanted mail set. wildcard: the domain's plan has a
+// *.<domain> address record (false: mailctl adds the CNAMEs for
+// mta-sts, autoconfig and autodiscover).
+func (c *Client) DNS(ctx context.Context, domain string, wildcard bool) (DNSSet, error) {
 	var out DNSSet
-	_, err := c.do(ctx, http.MethodGet, "/v1/dns/"+url.PathEscape(domain), nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/v1/dns/"+url.PathEscape(domain)+"?wildcard="+strconv.FormatBool(wildcard), nil, &out)
 	return out, err
 }
 
@@ -250,14 +317,49 @@ func (c *Client) CreateCredential(ctx context.Context, user, label string, expir
 		Label     string     `json:"label"`
 		ExpiresAt *time.Time `json:"expires_at"`
 	}{user, label, expires}
-	var out Created
-	if _, err := c.do(ctx, http.MethodPost, "/v1/credentials", body, &out); err != nil {
-		out.Secret.Zero()
+	status, raw, err := c.fetch(ctx, http.MethodPost, "/v1/credentials", body)
+	defer wipe(raw)
+	if err != nil {
 		return Created{}, err
+	}
+	out, err := decodeCreated(raw)
+	if err != nil {
+		return Created{}, fmt.Errorf("mailctl: unexpected answer (HTTP %d): %v", status, err)
+	}
+	return out, nil
+}
+
+// anyValue skips a JSON value without copying it (the key check).
+type anyValue struct{}
+
+func (*anyValue) UnmarshalJSON([]byte) error { return nil }
+
+// decodeCreated decodes POST /v1/credentials' answer strictly with
+// json.Unmarshal (no decoder buffer: Secret.UnmarshalJSON reads a
+// subslice of raw, so wiping raw wipes every encoded copy) and exactly
+// the contract's keys. The password is bytes only.
+func decodeCreated(raw []byte) (Created, error) {
+	var keys map[string]*anyValue
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return Created{}, errors.New("not an object")
+	}
+	want := map[string]bool{"id": true, "secret": true, "created_at": true, "expires_at": true}
+	if len(keys) != len(want) {
+		return Created{}, errors.New("unexpected keys")
+	}
+	for k := range keys {
+		if !want[k] {
+			return Created{}, errors.New("unexpected keys")
+		}
+	}
+	var out Created
+	if err := json.Unmarshal(raw, &out); err != nil {
+		out.Secret.Zero()
+		return Created{}, errors.New("bad fields")
 	}
 	if out.ID == "" || len(out.Secret) == 0 {
 		out.Secret.Zero()
-		return Created{}, errors.New("mailctl: unexpected answer (no id or no password)")
+		return Created{}, errors.New("no id or no password")
 	}
 	return out, nil
 }

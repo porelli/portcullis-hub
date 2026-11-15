@@ -57,6 +57,9 @@ type MailSettingsView struct {
 	// SubmissionLANOnlyRefusal (rootless Podman only): why LAN-only can't
 	// be turned on here (controller ruling; the CLI refuses it).
 	SubmissionLANOnlyRefusal string `json:"submission_lan_only_refusal,omitempty"`
+	// PendingRemoval: a mass removal mailctl refused, waiting for an
+	// administrator's confirmation (null: none).
+	PendingRemoval *MailPendingView `json:"pending_removal"`
 }
 
 // MailLANOnlyPodmanRefusal: LAN-only judges the client address, which
@@ -135,6 +138,7 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 		s := h.mailDomainStateLocked(n, core.On)
 		v.Domains = append(v.Domains, MailDomainView{Name: n, Enabled: s == mailctl.MailOn, State: s, Groups: nonNil(st.Domains[n].Groups)})
 	}
+	v.PendingRemoval = h.mailPendingViewLocked()
 	v.Lists = []MailListView{}
 	for g, l := range st.Lists {
 		posting := l.Posting
@@ -445,8 +449,8 @@ func (h *Hub) mailReservedUserLocked(e string) (string, string) {
 
 // mailAddressOwner is who uses addr in the document the directory builds
 // now (an account, someone's alias, a list) or a reserved local part;
-// "" = free. except: the user whose aliases are being replaced.
-func mailAddressOwner(doc *mailctl.MailState, st state.MailSettings, addr, exceptUser string) string {
+// "" = free. exceptUUID: the person whose aliases are being replaced.
+func mailAddressOwner(doc *mailctl.MailState, st state.MailSettings, addr, exceptUUID string) string {
 	local, _, _ := strings.Cut(addr, "@")
 	if slices.Contains(mailctl.ReservedLocalParts, local) {
 		return "reserved for mail"
@@ -456,9 +460,9 @@ func mailAddressOwner(doc *mailctl.MailState, st state.MailSettings, addr, excep
 			return a.Username + "'s address"
 		}
 	}
-	for u, list := range st.Aliases {
-		if u != exceptUser && slices.Contains(list, addr) {
-			return u + "'s alias"
+	for id, al := range st.Aliases {
+		if id != exceptUUID && slices.Contains(al.Addresses, addr) {
+			return al.Username + "'s alias"
 		}
 	}
 	for g, l := range st.Lists {
@@ -494,9 +498,11 @@ func (h *Hub) SetUserAliases(ctx context.Context, user string, addrs []string, a
 		}
 		return statusErr(http.StatusConflict, "mail isn't on for the primary domain: no aliases can be set")
 	}
-	if !slices.ContainsFunc(doc.Accounts, func(a mailctl.Account) bool { return a.Username == user }) {
+	i := slices.IndexFunc(doc.Accounts, func(a mailctl.Account) bool { return a.Username == user })
+	if i < 0 {
 		return statusErr(http.StatusNotFound, "%s has no mailbox (not in %s)", user, MailUsersGroup)
 	}
+	uuid := doc.Accounts[i].UUID
 	coreOn := h.mailOn()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -509,25 +515,25 @@ func (h *Hub) SetUserAliases(ctx context.Context, user string, addrs []string, a
 		if slices.Contains(out, a) {
 			continue
 		}
-		if owner := mailAddressOwner(doc, h.st.Mail, a, user); owner != "" {
+		if owner := mailAddressOwner(doc, h.st.Mail, a, uuid); owner != "" {
 			return statusErr(http.StatusConflict, "%s is already %s", a, owner)
 		}
 		out = append(out, a)
 	}
 	if h.st.Mail.Aliases == nil {
-		h.st.Mail.Aliases = map[string][]string{}
+		h.st.Mail.Aliases = map[string]state.MailAliases{}
 	}
-	old, had := h.st.Mail.Aliases[user]
+	old, had := h.st.Mail.Aliases[uuid]
 	if len(out) == 0 {
-		delete(h.st.Mail.Aliases, user)
+		delete(h.st.Mail.Aliases, uuid)
 	} else {
-		h.st.Mail.Aliases[user] = out
+		h.st.Mail.Aliases[uuid] = state.MailAliases{Username: user, Addresses: out}
 	}
 	if err := h.saveStateLocked(); err != nil {
 		if had {
-			h.st.Mail.Aliases[user] = old
+			h.st.Mail.Aliases[uuid] = old
 		} else {
-			delete(h.st.Mail.Aliases, user)
+			delete(h.st.Mail.Aliases, uuid)
 		}
 		return err
 	}
@@ -739,14 +745,17 @@ func (h *Hub) PersonMail(ctx context.Context, c *directory.Caller, user string) 
 	if err != nil {
 		return nil, err
 	}
-	v := &PersonMailView{Addresses: []string{}, Aliases: []string{}, Passwords: h.MailPasswords(u)}
+	v := &PersonMailView{Addresses: []string{}, Aliases: []string{}, Passwords: []MailPasswordView{}}
 	if acct, _, err := h.mailAccount(ctx, u); err == nil {
 		v.Addresses = acct.Addresses
-	}
-	if admin {
-		h.mu.RLock()
-		v.Aliases = nonNil(h.st.Mail.Aliases[u])
-		h.mu.RUnlock()
+		v.Passwords = h.MailPasswords(u, acct.UUID)
+		if admin {
+			h.mu.RLock()
+			v.Aliases = nonNil(h.st.Mail.Aliases[acct.UUID].Addresses)
+			h.mu.RUnlock()
+		}
+	} else if m, err := h.membership(ctx); err == nil {
+		v.Passwords = h.MailPasswords(u, m.UUIDs[u])
 	}
 	return v, nil
 }

@@ -555,7 +555,8 @@
   // mailHtml is the "Mail passwords" section from GET /api/me/mail: the
   // settings for a mail app, the person's addresses, their passwords
   // (never a secret; "reset by a restore" for voided ones) and Create.
-  function mailHtml(v) {
+  // readOnly (an administrator signed in as the person): no action.
+  function mailHtml(v, readOnly) {
     const pw = v.passwords || [];
     const active = pw.filter(p => p.status === 'active').length;
     let h = '<div class="pd-head"><h3 class="pd-h3">Mail passwords</h3></div><div class="msi-mail" data-msi-mail-body>' +
@@ -570,11 +571,12 @@
       h += '<div class="pd-row" data-msi-mailpw="' + esc(p.id) + '"><span><strong>' + esc(p.label) + '</strong> <span class="pd-muted">created ' + esc(fmtDay(p.created_at)) +
         (p.expires_at ? ' · expires ' + esc(fmtDay(p.expires_at)) : ' · no expiry') + '</span></span> ';
       if (p.status === 'voided') h += pill('bad', 'reset by a restore');
-      else h += button('danger', ' data-msi-act="mail-revoke" data-mail-id="' + esc(p.id) + '" data-mail-label="' + esc(p.label) + '"', 'Revoke');
+      else if (!readOnly) h += button('danger', ' data-msi-act="mail-revoke" data-mail-id="' + esc(p.id) + '" data-mail-label="' + esc(p.label) + '"', 'Revoke');
       h += '</div>';
     }
-    h += '<div class="pd-actions">' + (active < 5 ? button('secondary', ' data-msi-act="mail-create"', '+ New mail password')
-      : '<span class="pd-muted pd-small">At most 5 mail passwords: revoke one first.</span>') + '</div>' +
+    h += '<div class="pd-actions">' + (readOnly ? '<span class="pd-muted pd-small">Read-only while you are signed in as someone else.</span>'
+      : active < 5 ? button('secondary', ' data-msi-act="mail-create"', '+ New mail password')
+        : '<span class="pd-muted pd-small">At most 5 mail passwords: revoke one first.</span>') + '</div>' +
       '<div data-msi-panel="mail"></div></div>';
     return h;
   }
@@ -669,7 +671,7 @@
     }
     st.mail = v;
     box.hidden = false;
-    box.innerHTML = mailHtml(v);
+    box.innerHTML = mailHtml(v, !!st.readOnlyBy);
   }
 
   function openMailCreate(st) {

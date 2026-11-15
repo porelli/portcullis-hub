@@ -26,7 +26,7 @@ func okStatus() *mailctl.Status {
 	return &mailctl.Status{Bootstrap: true, Cert: mailctl.StatusCert{NotAfter: &na}, TimerSeenAt: &t}
 }
 
-// TestMailKinds: one fixture per kind (seventeen), each producing exactly
+// TestMailKinds: one fixture per kind (eighteen), each producing exactly
 // that kind with its severity and fix class; a clean input none.
 func TestMailKinds(t *testing.T) {
 	soon := mailNow.Add(2 * 24 * time.Hour)
@@ -76,6 +76,12 @@ func TestMailKinds(t *testing.T) {
 		{KindMailTimerMissing, Warning, FixExplain, func(m *MailIn) { m.Status.TimerSeenAt = &old }},
 		{KindMailDANEOff, Info, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("dane", "info", "no AD bit")} }},
 		{KindMailLANOnlyUnenforced, Problem, FixExplain, func(m *MailIn) { m.LANOnly, m.Podman = true, true }},
+		{KindMailMassRemovalPend, Problem, FixOneClick, func(m *MailIn) {
+			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice", "bob"}, UUIDs: []string{"u1", "u2"}}
+		}},
+		{KindMailMassRemovalPend, Problem, FixExplain, func(m *MailIn) {
+			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice"}, UUIDs: []string{"u1"}, Confirmed: true}
+		}},
 		{KindMailLANOnlyUnenforced, Problem, FixExplain, func(m *MailIn) { m.LANOnly = true; m.Status.ClientIP = "rewritten" }},
 	} {
 		m := &MailIn{Main: "example.org", Status: okStatus()}
@@ -89,7 +95,7 @@ func TestMailKinds(t *testing.T) {
 	for _, k := range MailKinds {
 		seen[k] = true
 	}
-	if len(MailKinds) != 17 || len(seen) != 17 {
+	if len(MailKinds) != 18 || len(seen) != 18 {
 		t.Fatalf("%d mail kinds", len(MailKinds))
 	}
 	if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk("port25", "ok", ""), chk("cert", "ok", "")}}); len(fs) != 0 {
@@ -183,5 +189,25 @@ func TestLANOnlyUnenforced(t *testing.T) {
 	fs := mailRun(&MailIn{Main: "example.org", Status: st, LANOnly: true, Podman: true})
 	if len(fs) != 1 || !strings.Contains(fs[0].Why, MailLANOnlyWhy) || fs[0].Steps[0] != MailLANOnlyStep {
 		t.Fatalf("podman LAN-only: %+v", fs)
+	}
+}
+
+// TestPTRReason: the reason decides missing vs mismatch, whatever the
+// detail says; without one the detail is the fallback.
+func TestPTRReason(t *testing.T) {
+	for _, c := range []struct {
+		reason, detail, want string
+	}{
+		{"missing", "203.0.113.5 → host.example.net", KindMailPTRMissing},
+		{"mismatch", "203.0.113.5 has no PTR record", KindMailPTRMismatch},
+		{"", "203.0.113.5 has no PTR record", KindMailPTRMissing},
+		{"", "203.0.113.5 → host.example.net", KindMailPTRMismatch},
+	} {
+		ch := chk("fcrdns_v4", "problem", c.detail)
+		ch.Reason = c.reason
+		fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{ch}})
+		if len(fs) != 1 || fs[0].Kind != c.want {
+			t.Errorf("%q %q: %+v", c.reason, c.detail, fs)
+		}
 	}
 }

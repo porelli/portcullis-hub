@@ -14,5 +14,5 @@ func newTestHub(cfg hub.Config, runner compose.Runner, eng dockerrt.Engine, idp 
 	if eng == nil || reflect.ValueOf(eng).Kind() == reflect.Pointer && reflect.ValueOf(eng).IsNil() {
 		eng = nil
 	}
-	return hub.New(cfg, dockerrt.New(runner, eng, dockerrt.Options{Kind: cfg.Runtime, Guard: cfg.Guard, HelperImage: hub.HelperImage}), idp)
+	return hub.New(cfg, dockerrt.New(runner, eng, dockerrt.Options{Kind: cfg.Runtime, Guard: cfg.Guard, HelperImage: hub.HelperImage, CoreDir: cfg.ProjectHostDir}), idp)
 }

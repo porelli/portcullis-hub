@@ -203,6 +203,6 @@ func (b *Backend) restartDeployment(ctx context.Context, instance, name, rev str
 
 // Restart is unsupported: the Hub's one restart is core's mail container,
 // and mail isn't available on Kubernetes (contract §19.12).
-func (b *Backend) Restart(context.Context, string, time.Duration) error {
+func (b *Backend) RestartCoreService(context.Context, string, time.Duration) error {
 	return runtime.ErrUnsupported
 }

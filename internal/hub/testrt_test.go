@@ -25,7 +25,7 @@ func newTestHub(cfg Config, runner compose.Runner, eng dockerrt.Engine, idp IdP)
 	if isNil(eng) {
 		eng = nil
 	}
-	return New(cfg, dockerrt.New(runner, eng, dockerrt.Options{Kind: cfg.Runtime, Guard: cfg.Guard, HelperImage: HelperImage}), idp)
+	return New(cfg, dockerrt.New(runner, eng, dockerrt.Options{Kind: cfg.Runtime, Guard: cfg.Guard, HelperImage: HelperImage, CoreDir: cfg.ProjectHostDir}), idp)
 }
 
 // setRuntime switches f's Hub to runtime kind (its config and its

@@ -350,14 +350,26 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template, runtime map[string
 	}
 	// Reserved for mail (contract §5): mail.<e>, mta-sts.<e>,
 	// autoconfig.<e>, autodiscover.<e> on every mail domain.
-	mailDomains := h.mailDomainsLocked(h.mailOn())
+	mc := h.mailCore()
+	mailDomains := h.mailDomainsLocked(mc.On)
+	mailHost := func(host string) string {
+		if why := mailReservedIn(host, mailDomains); why != "" {
+			return why
+		}
+		// The mail server's own name (MAIL_HOSTNAME: MX, TLSA, HELO) while
+		// mail is on, also a custom one.
+		if mc.On && mc.Hostname != "" && (host == mc.Hostname || strings.HasSuffix(host, "."+mc.Hostname)) {
+			return "hostname " + host + " is reserved for mail: it is the mail server's name"
+		}
+		return ""
+	}
 	for _, r := range routers {
-		if why := mailReservedIn(v.Hosts[r], mailDomains); why != "" {
+		if why := mailHost(v.Hosts[r]); why != "" {
 			return statusErr(409, "%s", why)
 		}
 	}
 	for _, sub := range v.Subdomains {
-		if why := mailReservedIn(sub+"."+main, mailDomains); why != "" {
+		if why := mailHost(sub + "." + main); why != "" {
 			return statusErr(409, "%s", why)
 		}
 	}

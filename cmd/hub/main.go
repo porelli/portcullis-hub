@@ -420,7 +420,7 @@ func main() {
 		case <-time.After(engineStartWait):
 			log.Printf("engine: not verified after %s: starting anyway, engine operations answer 503 until it is", engineStartWait)
 		}
-		rt = dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: hub.HelperImage})
+		rt = dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: hub.HelperImage, CoreDir: cfg.ProjectHostDir})
 	}
 	cfg.AccountURL = fa.AccountURL
 	h, err := hub.New(cfg, rt, kc)

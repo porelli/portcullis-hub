@@ -89,13 +89,6 @@ func (h *Hub) mailDomainsLocked(coreOn bool) []string {
 	return out
 }
 
-// mailReservedLocked returns the 409 text when host is equal to or under
-// a reserved mail label of a mail domain (contract §5), else "". Caller
-// must hold mu.
-func (h *Hub) mailReservedLocked(host string) string {
-	return mailReservedIn(NormalizeHost(host), h.mailDomainsLocked(h.mailOn()))
-}
-
 func mailReservedIn(host string, domains []string) string {
 	for _, e := range domains {
 		for _, l := range mailReservedLabels {
@@ -112,7 +105,7 @@ type MailAPI interface {
 	Available() error
 	PutState(ctx context.Context, st *mailctl.MailState) (int, error)
 	State(ctx context.Context) (mailctl.StateStatus, error)
-	DNS(ctx context.Context, domain string) (mailctl.DNSSet, error)
+	DNS(ctx context.Context, domain string, wildcard bool) (mailctl.DNSSet, error)
 	Checks(ctx context.Context, refresh bool) (mailctl.Checks, error)
 	Status(ctx context.Context) (mailctl.Status, error)
 	Credentials(ctx context.Context, user string) ([]mailctl.Credential, error)

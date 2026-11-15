@@ -2418,8 +2418,14 @@ func (h *Hub) ForgetDeletedPerson(ctx context.Context, actor directory.Actor, us
 // PersonDeleted is the directory's UserDeleted: the person's entered
 // values (PurgePersonValues), then their AI records (ForgetDeletedPerson).
 func (h *Hub) PersonDeleted(ctx context.Context, actor directory.Actor, user string) []string {
-	// An admin's delete through the Hub: mail's removal may be part of
-	// a confirmed mass removal (contract §19.5).
-	h.mailRecordHubRemoval(user)
+	// A full administrator's delete through the Hub: mail's removal may
+	// be part of a confirmed mass removal (contract §19.5); a delegate's
+	// never confirms one.
+	if h.isFullAdmin(ctx, actor.User) {
+		h.mailRecordHubRemoval(user)
+	} else {
+		h.TriggerMailSync()
+	}
+	h.mailForgetPerson(user)
 	return append(append(h.PurgePersonValues(ctx, actor, user), h.ForgetDeletedPerson(ctx, actor, user)...), h.forgetPassword(user)...)
 }

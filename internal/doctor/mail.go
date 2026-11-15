@@ -1,7 +1,9 @@
 package doctor
 
 import (
+	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,18 +34,20 @@ const (
 	KindMailTimerMissing      = "mail_timer_missing"
 	KindMailDANEOff           = "mail_dane_off"
 	KindMailLANOnlyUnenforced = "mail_lan_only_unenforced"
+	KindMailMassRemovalPend   = "mail_mass_removal_pending"
 )
 
-// MailKinds are the seventeen mail kinds.
+// MailKinds are the eighteen mail kinds.
 var MailKinds = []string{KindMailPort25Blocked, KindMailPTRMissing, KindMailPTRMismatch, KindMailBlocklisted, KindMailRecordsWrong,
 	KindMailDKIMStuck, KindMailDKIMManual, KindMailCertExpiring, KindMailDMARCFailures, KindMailDMARCPromote, KindMailMTASTSEnforce,
-	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced}
+	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend}
 
 // Mail fix kinds (§14.6); mail_records_wrong on an added domain uses
 // dns_apply with sets=mail.
 const (
-	FixMailDMARCPromote  = "mail_dmarc_promote"
-	FixMailMTASTSEnforce = "mail_mtasts_enforce"
+	FixMailDMARCPromote   = "mail_dmarc_promote"
+	FixMailMTASTSEnforce  = "mail_mtasts_enforce"
+	FixMailConfirmRemoval = "mail_confirm_removal"
 )
 
 // Mail steps the explain-only findings end with.
@@ -78,6 +82,17 @@ type MailIn struct {
 	// LANOnly: PORTCULLIS_MAIL_SUBMISSION_LAN_ONLY=true; Podman: the Hub
 	// runs under rootless Podman (client addresses are rewritten).
 	LANOnly, Podman bool
+	// Pending: a mass removal mailctl refused, waiting for confirmation
+	// (nil: none).
+	Pending *MailPendingIn
+}
+
+// MailPendingIn is a pending mass removal.
+type MailPendingIn struct {
+	Since     time.Time
+	Users     []string // sorted
+	UUIDs     []string // sorted
+	Confirmed bool
 }
 
 func init() {
@@ -150,7 +165,7 @@ func mailFindings(in *Inputs) []Finding {
 			mk(KindMailPort25Blocked, sevOf(c.Severity), title, why+" "+c.Detail, c.Steps, c, "")
 		case "fcrdns_v4":
 			kind, title := KindMailPTRMismatch, "The reverse DNS of the mail server's IPv4 address doesn't match"
-			if strings.Contains(strings.ToLower(c.Detail), "no ptr") {
+			if ptrMissing(c) {
 				kind, title = KindMailPTRMissing, "The mail server's IPv4 address has no reverse DNS"
 			}
 			mk(kind, Problem, title, "Receivers refuse or junk mail from an address whose PTR doesn't resolve back to it. "+c.Detail, c.Steps, c, "")
@@ -231,6 +246,18 @@ func mailFindings(in *Inputs) []Finding {
 			stepsOf(items), liveOf(items), p.Name)
 		mailRecordsFix(f, p.Name, m.Main)
 	}
+	if p := m.Pending; p != nil {
+		f := mk(KindMailMassRemovalPend, Problem, "Removing "+itoa(len(p.Users))+" mailboxes at once waits for your confirmation",
+			"More than half the mailboxes left mail_users at once ("+strings.Join(p.Users, ", ")+"), so mail refused to remove them on its own: an LDAP outage could look the same. Their mail passwords are revoked already and they can't sign in to mail; their mailboxes stay until you confirm. If they shouldn't have left, add them back to mail_users instead.",
+			[]string{"Check that these people really left mail_users, then confirm the removal (Settings → Mail or this fix)."},
+			struct {
+				UUIDs     []string
+				Confirmed bool
+			}{p.UUIDs, p.Confirmed}, "")
+		if !p.Confirmed {
+			f.Class, f.FixKind = FixOneClick, FixMailConfirmRemoval
+		}
+	}
 	if m.LANOnly && (m.Podman || (m.Status != nil && m.Status.ClientIP == "rewritten")) {
 		mk(KindMailLANOnlyUnenforced, Problem, "LAN-only mail can't be enforced here",
 			MailLANOnlyWhy+": mail passwords can't be limited to the local networks, so they work from anywhere.",
@@ -308,3 +335,18 @@ func mailRateHeld(mk func(string, Severity, string, string, []string, any, strin
 	f := mk(KindMailRateHeld, Warning, user+"'s mail is held by the sending limit", why, c.Steps, c, "", user)
 	f.Persons = []string{user}
 }
+
+// ptrMissing: the fcrdns check's reason is "missing". Without a reason
+// (an older mailctl) the detail decides ("no PTR"), logged as a fallback.
+func ptrMissing(c mailctl.Check) bool {
+	switch c.Reason {
+	case mailctl.ReasonPTRMissing:
+		return true
+	case mailctl.ReasonPTRMismatch:
+		return false
+	}
+	log.Printf("doctor: mail check %s has no reason (%q): judged from its detail", c.ID, c.Reason)
+	return strings.Contains(strings.ToLower(c.Detail), "no ptr")
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }

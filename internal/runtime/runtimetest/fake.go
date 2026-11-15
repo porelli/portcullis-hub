@@ -171,8 +171,8 @@ func (f *Fake) ExecRunning(_ context.Context, execID string) (bool, error) {
 
 func (f *Fake) Signal(_ context.Context, id, sig string) error { return f.rec("signal %s %s", id, sig) }
 
-func (f *Fake) Restart(_ context.Context, id string, timeout time.Duration) error {
-	return f.rec("restart %s %s", id, timeout)
+func (f *Fake) RestartCoreService(_ context.Context, service string, timeout time.Duration) error {
+	return f.rec("restart-core %s %s", service, timeout)
 }
 
 func (f *Fake) State(_ context.Context, id string) (runtime.State, error) {

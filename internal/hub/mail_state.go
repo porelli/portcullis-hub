@@ -182,23 +182,30 @@ func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
 		}
 		return false
 	}
-	users := make([]string, 0, len(st.Aliases))
-	for u := range st.Aliases {
-		users = append(users, u)
+	// Aliases are keyed by the person's uuid: only the account with that
+	// uuid gets them (a re-created username never inherits them).
+	byUUID := map[string]string{}
+	for _, a := range doc.Accounts {
+		byUUID[a.UUID] = a.Username
 	}
-	sort.Strings(users)
-	for _, u := range users {
-		if !accounts[strings.ToLower(u)] {
-			if len(st.Aliases[u]) > 0 {
-				note("mail: %s's aliases are left out: they have no mailbox", u)
+	uuids := make([]string, 0, len(st.Aliases))
+	for id := range st.Aliases {
+		uuids = append(uuids, id)
+	}
+	sort.Strings(uuids)
+	for _, id := range uuids {
+		u, ok := byUUID[id]
+		if !ok {
+			if len(st.Aliases[id].Addresses) > 0 {
+				note("mail: %s's aliases are left out: that account has no mailbox", st.Aliases[id].Username)
 			}
 			continue
 		}
-		for _, a := range st.Aliases[u] {
+		for _, a := range st.Aliases[id].Addresses {
 			a = strings.ToLower(a)
 			if addrOK(a, "alias") {
 				used[a] = u
-				doc.Aliases = append(doc.Aliases, mailctl.Alias{Address: a, Username: strings.ToLower(u)})
+				doc.Aliases = append(doc.Aliases, mailctl.Alias{Address: a, Username: u})
 			}
 		}
 	}

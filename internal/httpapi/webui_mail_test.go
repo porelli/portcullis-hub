@@ -59,6 +59,12 @@ func TestMySignInMailSection(t *testing.T) {
 	if h := mailSection(t, view); strings.Contains(h, "+ New mail password") || !strings.Contains(h, "At most 5 mail passwords") {
 		t.Errorf("five active:\n%s", h)
 	}
+	// Signed in as someone else: no create, no revoke.
+	vb, _ := json.Marshal(view)
+	ro := nodeEval(t, "global.window = { addEventListener() {} };\n"+webAsset(t, "mysignin.js")+"\nprocess.stdout.write(window.PortcullisMySignIn.mailHtml("+string(vb)+", true));\n")
+	if strings.Contains(ro, "mail-create") || strings.Contains(ro, "mail-revoke") || !strings.Contains(ro, "Read-only while you are signed in as someone else") {
+		t.Errorf("read-only:\n%s", ro)
+	}
 }
 
 // nodeEval runs script under node and answers stdout (skipped without
@@ -114,6 +120,12 @@ func TestSettingsMailPanel(t *testing.T) {
 	if h := render(view, nil); !strings.Contains(h, "data-mail-lan-refusal") || !strings.Contains(h, "rootless Podman rewrites it") {
 		t.Errorf("podman refusal: %s", h)
 	}
+	view["pending_removal"] = map[string]any{"since": "2026-11-15T09:00:00Z", "confirmed": false,
+		"accounts": []any{map[string]any{"username": "alice", "uuid": "u-1"}, map[string]any{"username": "bob<x>", "uuid": "u-2"}}}
+	if h := render(view, nil); !strings.Contains(h, "data-mail-pending") || !strings.Contains(h, `data-mail-uuids="u-1,u-2"`) || !strings.Contains(h, "bob&lt;x&gt;") {
+		t.Errorf("pending removal: %s", h)
+	}
+	view["pending_removal"] = nil
 	view["mail"] = "off"
 	if h := render(view, nil); !strings.Contains(h, "Mail is off: run ./portcullis mail enable on the host") {
 		t.Errorf("off: %s", h)

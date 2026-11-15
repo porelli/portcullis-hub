@@ -148,16 +148,20 @@ func (h *Hub) MyMail(ctx context.Context, user string) (*MyMailView, error) {
 		return nil, err
 	}
 	return &MyMailView{Addresses: acct.Addresses, Server: h.mailCore().Hostname, IMAPS: mailIMAPSPort, Submissions: mailSubmissionsPort,
-		Submission: mailSubmissionPort, Username: acct.Addresses[0], Passwords: h.MailPasswords(user)}, nil
+		Submission: mailSubmissionPort, Username: acct.Addresses[0], Passwords: h.MailPasswords(user, acct.UUID)}, nil
 }
 
 // MailPasswords are user's active and voided mail passwords (metadata
-// only), newest first.
-func (h *Hub) MailPasswords(user string) []MailPasswordView {
+// only), newest first: only the rows created under uuid, the person's
+// current account (a re-created username never sees the former holder's).
+func (h *Hub) MailPasswords(user, uuid string) []MailPasswordView {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	out := []MailPasswordView{}
 	for _, c := range h.st.MailCredentials[strings.ToLower(user)] {
+		if uuid == "" || c.UUID != uuid {
+			continue
+		}
 		status := ""
 		switch {
 		case c.Active():
@@ -231,10 +235,16 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 	if err != nil {
 		return nil, err
 	}
-	// 3. In mail_users (the document the directory builds now).
-	acct, _, err := h.mailAccount(ctx, user)
+	// 3. In mail_users (an unexpired membership; never the LLDAP admin).
+	if h.mailClient() == nil {
+		return nil, errNoMail
+	}
+	m, err := h.membership(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if _, in := m.Users[user][MailUsersGroup]; !in || m.Expired[user][MailUsersGroup] || user == mailNeverAccount {
+		return nil, errNoMail
 	}
 	// 4. Label and expiry.
 	if why := mailLabelProblem(label); why != "" {
@@ -245,16 +255,25 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 	if !ok {
 		return nil, statusErr(http.StatusBadRequest, "expiry must be none, 90d or 1y")
 	}
-	// 5. Fewer than 5 active (the rows reconciled with mailctl first).
-	if err := h.reconcileMailPasswords(ctx, api, user, acct.UUID); err != nil {
-		return nil, err
+	// 5. Fewer than 5 active (the rows reconciled with mailctl first;
+	// only the current account's rows count).
+	uuid := m.UUIDs[user]
+	if uuid != "" {
+		if err := h.reconcileMailPasswords(ctx, api, user, uuid); err != nil {
+			return nil, err
+		}
+		if n := len(h.activeMailRowsOf(user, uuid)); n >= mailctl.MaxActivePasswords {
+			return nil, statusErr(http.StatusConflict, "at most 5 mail passwords: revoke one first")
+		}
 	}
-	if n := len(h.activeMailRows(user)); n >= mailctl.MaxActivePasswords {
-		return nil, statusErr(http.StatusConflict, "at most 5 mail passwords: revoke one first")
-	}
-	// 6. The uuid (BuildMailState never lists an account without one).
-	if acct.UUID == "" {
+	// 6. The uuid (503), then the account in the document the directory
+	// builds now (a reserved username has none: not ready).
+	if uuid == "" {
 		return nil, statusErr(http.StatusServiceUnavailable, "Users & Groups gave no account id for %s: try again later", user)
+	}
+	acct, _, err := h.mailAccount(ctx, user)
+	if err != nil || acct.UUID != uuid {
+		return nil, errMailNotReady
 	}
 	// 7. The fresh-auth proof, governed by the people core template (the
 	// Sign-in page's), audited with the reason only.
@@ -309,6 +328,17 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 		prof = nil
 	}
 	return &CreatedMailPassword{ID: row.ID, Password: pw, MobileConfig: prof}, nil
+}
+
+// activeMailRowsOf are user's active rows created under uuid.
+func (h *Hub) activeMailRowsOf(user, uuid string) []state.MailCredential {
+	var out []state.MailCredential
+	for _, c := range h.activeMailRows(user) {
+		if c.UUID == uuid {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // activeMailRows are user's active rows.
@@ -382,11 +412,12 @@ func (h *Hub) reconcileMailPasswords(ctx context.Context, api MailAPI, user, uui
 			c.Reason = state.MailCredentialReasonExpired
 		case matchLive(*c, uuid, live):
 			continue
+		case c.UUID != uuid:
+			// The former holder of the username: they left.
+			c.Reason = state.MailCredentialReasonRevokeLeave
 		case restoredAt != nil && restoredAt.After(c.CreatedAt):
 			c.Reason = state.MailCredentialReasonVoidRestore
 			voided++
-		case c.UUID != uuid:
-			c.Reason = state.MailCredentialReasonRevokeLeave
 		default:
 			c.Reason = state.MailCredentialReasonMissing
 			log.Printf("mail: %s's mail password %s has no Stalwart password and no restore since it was created: ended (missing)", user, c.ID)
@@ -498,6 +529,29 @@ func (h *Hub) revokeMailPassword(ctx context.Context, user, id string, actor dir
 	if !row.Active() {
 		return nil
 	}
+	// The username's current account (it may have been re-created with a
+	// new uuid since the row was made).
+	m, err := h.membership(ctx)
+	if err != nil {
+		return err
+	}
+	cur := m.UUIDs[user]
+	if cur != row.UUID {
+		// The row's holder is gone: its password went with their account
+		// (mailctl destroys them first); never delete through it, the
+		// username now names someone else.
+		now := h.mailNow()
+		h.mu.Lock()
+		rows := h.st.MailCredentials[user]
+		for i := range rows {
+			if rows[i].ID == id && rows[i].Active() {
+				rows[i].RevokedAt, rows[i].Reason = &now, state.MailCredentialReasonRevokeLeave
+			}
+		}
+		saveErr := h.saveStateLocked()
+		h.mu.Unlock()
+		return saveErr
+	}
 	api, err := h.mailUp(ctx)
 	if err != nil {
 		return err
@@ -508,7 +562,7 @@ func (h *Hub) revokeMailPassword(ctx context.Context, user, id string, actor dir
 	if lerr != nil && mailctl.StatusOf(lerr) != http.StatusNotFound {
 		return errMailDown
 	}
-	if matchLive(*row, row.UUID, live) {
+	if matchLive(*row, cur, live) {
 		if err := api.RevokeCredential(ctx, user, row.StalwartID); err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
 			log.Printf("mail: revoking %s's mail password %s: %v", user, id, err)
 			return errMailDown
@@ -590,7 +644,17 @@ func mobileConfig(host, login, displayName, label string, pw []byte) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
+	// esc never grows (5 bytes per input byte at most), so no abandoned
+	// copy; it is zeroed on every path.
 	var esc bytes.Buffer
+	esc.Grow(len(pw) * 5)
+	defer func() {
+		b := esc.Bytes()
+		b = b[:cap(b)]
+		for i := range b {
+			b[i] = 0
+		}
+	}()
 	for _, c := range pw {
 		switch c {
 		case '&':
@@ -606,10 +670,6 @@ func mobileConfig(host, login, displayName, label string, pw []byte) ([]byte, er
 			esc.WriteByte(c)
 		}
 	}
-	escB := esc.Bytes()
-	out := bytes.ReplaceAll(tmpl, []byte(slot), escB)
-	for i := range escB {
-		escB[i] = 0
-	}
-	return out, nil
+	// One allocation of the final size (bytes.ReplaceAll counts first).
+	return bytes.ReplaceAll(tmpl, []byte(slot), esc.Bytes()), nil
 }

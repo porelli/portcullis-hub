@@ -50,7 +50,7 @@ func mailInput(m *directory.Membership) MailBuildInput {
 // what this membership builds.
 func TestBuildMailStateAddresses(t *testing.T) {
 	in := mailInput(mailMembership())
-	in.Settings.Aliases = map[string][]string{"alice": {"sales@example.com"}}
+	in.Settings.Aliases = map[string]state.MailAliases{uuidAlice: {Username: "alice", Addresses: []string{"sales@example.com"}}}
 	in.Settings.Lists = map[string]state.MailList{"team": {Domain: "example.com", Posting: "members"}}
 	in.Membership.Groups["team"] = directory.MemberGroup{ID: 4, Members: []string{"alice", "bob", "dave"}}
 	for _, u := range []string{"alice", "bob", "dave"} {
@@ -141,7 +141,8 @@ func TestBuildMailStateConflictsLeftOut(t *testing.T) {
 	m.Groups["Team A"] = directory.MemberGroup{ID: 5, Members: []string{"alice"}}
 	m.Groups["bob"] = directory.MemberGroup{ID: 6, Members: []string{"alice"}}
 	in := mailInput(m)
-	in.Settings.Aliases = map[string][]string{"alice": {"bob@example.com", "abuse@example.com", "x@other.test", "ok@team-b.example.org"}, "dave": {"d@example.com"}}
+	in.Settings.Aliases = map[string]state.MailAliases{uuidAlice: {Username: "alice", Addresses: []string{"bob@example.com", "abuse@example.com", "x@other.test", "ok@team-b.example.org"}},
+		"aaaaaaaa-2222-4333-8444-555555555555": {Username: "dave", Addresses: []string{"d@example.com"}}}
 	in.Settings.Lists = map[string]state.MailList{"Team A": {Domain: "example.com", Posting: "members"}, "bob": {Domain: "example.com", Posting: "anyone"}}
 	got, notes := BuildMailState(in)
 	for _, a := range got.Accounts {

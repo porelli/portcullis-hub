@@ -96,8 +96,14 @@ func newMailFixture(t *testing.T) *mailFixture {
 	f.h.st.Mail.Domains = map[string]state.MailDomain{}
 	f.h.mu.Unlock()
 	f.engine.mu.Lock()
-	f.engine.containers = append(f.engine.containers, docker.Container{ID: "core-mail-1", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mail"}})
+	f.engine.containers = append(f.engine.containers, coreMailContainer("core-mail-1"))
 	f.engine.mu.Unlock()
+	// As if a baseline existed (no blind first document): the restart
+	// tests below set it up themselves.
+	f.h.mailState.loaded = true
+	f.h.SetFreshAuth(ListenerPeople, &fakeFreshAuth{})
+	f.h.freshAuthReady.Store(true)
+	f.h.mailState.applyWait, f.h.mailState.applyPoll = 400*time.Millisecond, 20*time.Millisecond
 	return f
 }
 
@@ -207,17 +213,17 @@ func TestMassRemovalFlagOnlyForHubRemovals(t *testing.T) {
 		t.Fatalf("an unconfirmed mass removal was accepted: %d", f.mc.Puts())
 	}
 	// One Hub removal isn't enough.
-	f.h.MailMemberRemoved("mail_users", "alice")
+	f.h.MailMemberRemoved("mail_users", "alice", true)
 	f.sync(t)
 	if f.mc.Puts() != 1 {
 		t.Fatalf("partly confirmed: %d", f.mc.Puts())
 	}
-	f.h.MailMemberRemoved("other_group", "bob")
+	f.h.MailMemberRemoved("other_group", "bob", true)
 	f.sync(t)
 	if f.mc.Puts() != 1 {
 		t.Fatalf("another group's removal confirmed: %d", f.mc.Puts())
 	}
-	f.h.MailMemberRemoved("Mail_Users", "Bob")
+	f.h.MailMemberRemoved("Mail_Users", "Bob", true)
 	f.sync(t)
 	if f.mc.Puts() != 2 || !f.mc.Last().ConfirmMassRemoval || len(f.mc.Last().Accounts) != 1 {
 		t.Fatalf("confirmed: %d %+v", f.mc.Puts(), f.mc.Last())
@@ -232,15 +238,27 @@ func TestMassRemovalFlagOnlyForHubRemovals(t *testing.T) {
 	}
 }
 
-// TestMailRestartOnlyTargetsCoreMail: exactly the one container labelled
-// project portcullis + service mail; another project's mail is ignored;
-// two candidates refuse; none refuses; Kubernetes never restarts.
+// coreMailContainer is core's mail container as compose labels it.
+func coreMailContainer(id string) docker.Container {
+	return docker.Container{ID: id, Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mail",
+		"com.docker.compose.project.working_dir": "/host/project", "com.docker.compose.oneoff": "False"}}
+}
+
+// TestMailRestartOnlyTargetsCoreMail: exactly the one container of core's
+// project (service mail, not a one-off, in core's directory); another
+// project's mail, a one-off and another working directory are ignored;
+// two candidates refuse; none refuses; a failed restart is recorded.
 func TestMailRestartOnlyTargetsCoreMail(t *testing.T) {
 	f := newMailFixture(t)
+	oneoff := coreMailContainer("core-mail-run")
+	oneoff.Labels["com.docker.compose.oneoff"] = "True"
+	elsewhere := coreMailContainer("other-checkout")
+	elsewhere.Labels["com.docker.compose.project.working_dir"] = "/srv/other"
 	f.engine.mu.Lock()
 	f.engine.containers = append(f.engine.containers,
 		docker.Container{ID: "app-mail", Labels: map[string]string{docker.LabelProject: "portcullis-mailapp", docker.LabelService: "mail"}},
-		docker.Container{ID: "core-mailctl", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mailctl"}})
+		docker.Container{ID: "core-mailctl", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mailctl"}},
+		oneoff, elsewhere)
 	f.engine.mu.Unlock()
 	ctx := context.Background()
 	if err := f.h.restartCoreMail(ctx); err != nil {
@@ -250,16 +268,15 @@ func TestMailRestartOnlyTargetsCoreMail(t *testing.T) {
 		t.Fatalf("restarts %v", r)
 	}
 	f.engine.mu.Lock()
-	f.engine.containers = append(f.engine.containers, docker.Container{ID: "core-mail-2", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mail"}})
+	f.engine.containers = append(f.engine.containers, coreMailContainer("core-mail-2"))
 	f.engine.mu.Unlock()
 	if err := f.h.restartCoreMail(ctx); err == nil || !strings.Contains(err.Error(), "2 containers") {
 		t.Fatalf("two candidates: %v", err)
 	}
 	f.engine.mu.Lock()
-	f.engine.containers = f.engine.containers[:1]
-	f.engine.containers[0].Labels = map[string]string{docker.LabelProject: "portcullis-x", docker.LabelService: "mail"}
+	f.engine.containers = []docker.Container{oneoff, elsewhere}
 	f.engine.mu.Unlock()
-	if err := f.h.restartCoreMail(ctx); !errors.Is(err, errMailNotFound) {
+	if err := f.h.restartCoreMail(ctx); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("none: %v", err)
 	}
 	if r := f.engine.Restarts(); len(r) != 1 {
@@ -299,7 +316,7 @@ func TestRestartWhenApplyTimesOut(t *testing.T) {
 	f.people.setMembers("mail_users", "alice", "root")
 	start := time.Now()
 	f.sync(t)
-	if el := time.Since(start); el < mailApplyWait-mailApplyPoll || el > mailApplyWait+2*time.Second {
+	if el := time.Since(start); el < 380*time.Millisecond || el > 3*time.Second {
 		t.Errorf("waited %s", el)
 	}
 	if r := f.engine.Restarts(); len(r) != 1 {
@@ -376,6 +393,21 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	if calls != "put team-b.example.net" || len(recs) != 1 || recs[0].Value != "10 mail.example.org." {
 		t.Fatalf("calls %q recs %+v", calls, recs)
 	}
+	// No *.<e> address record in the plan: ?wildcard=false; with one, true.
+	var wc string
+	f.mc.Lock(func(s *mailctltest.Server) { wc = s.Wildcards["team-b.example.net"] })
+	if wc != "false" {
+		t.Fatalf("wildcard %q", wc)
+	}
+	f.dom.mu.Lock()
+	f.dom.plans["team-b.example.net"] = domains.Plan{Name: "team-b.example.net", Items: []domains.PlanItem{{Set: "address", Name: "*.team-b.example.net", Type: "A", Live: []string{"203.0.113.5"}}}}
+	f.dom.mu.Unlock()
+	f.advance(mailDNSEvery)
+	f.sync(t)
+	f.mc.Lock(func(s *mailctltest.Server) { wc = s.Wildcards["team-b.example.net"] })
+	if wc != "true" {
+		t.Fatalf("wildcard with *.<e>: %q", wc)
+	}
 	// Turned off: draining; mailctl still in mode none → still written.
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains["team-b.example.net"] = state.MailDomain{Draining: true, Groups: []string{"team_b"}}
@@ -437,8 +469,8 @@ func TestMassRemovalStaleEntryDoesNotConfirm(t *testing.T) {
 	f.sync(t)
 	// Recorded for alice and bob, then a document is accepted (a settings
 	// change): the entries are spent.
-	f.h.MailMemberRemoved("mail_users", "alice")
-	f.h.MailMemberRemoved("mail_users", "bob")
+	f.h.MailMemberRemoved("mail_users", "alice", true)
+	f.h.MailMemberRemoved("mail_users", "bob", true)
 	f.h.mu.Lock()
 	f.h.st.Mail.Spam.RejectScore = 20
 	f.h.mu.Unlock()
@@ -452,16 +484,16 @@ func TestMassRemovalStaleEntryDoesNotConfirm(t *testing.T) {
 		t.Fatal("entries from before the last accepted document confirmed a mass removal")
 	}
 	// Fresh entries, but older than 10 minutes: nothing.
-	f.h.MailMemberRemoved("mail_users", "alice")
-	f.h.MailMemberRemoved("mail_users", "bob")
+	f.h.MailMemberRemoved("mail_users", "alice", true)
+	f.h.MailMemberRemoved("mail_users", "bob", true)
 	f.advance(mailHubRemovalTTL + time.Second)
 	f.sync(t)
 	if f.mc.Puts() != 2 {
 		t.Fatal("an expired entry confirmed a mass removal")
 	}
 	// Within the limit: confirmed.
-	f.h.MailMemberRemoved("mail_users", "alice")
-	f.h.MailMemberRemoved("mail_users", "bob")
+	f.h.MailMemberRemoved("mail_users", "alice", true)
+	f.h.MailMemberRemoved("mail_users", "bob", true)
 	f.sync(t)
 	if f.mc.Puts() != 3 || !f.mc.Last().ConfirmMassRemoval {
 		t.Fatalf("fresh entries: puts %d", f.mc.Puts())
@@ -472,16 +504,16 @@ func TestMassRemovalStaleEntryDoesNotConfirm(t *testing.T) {
 // the last accepted document) records nothing.
 func TestHubRemovalNeedsMailbox(t *testing.T) {
 	f := newMailFixture(t)
-	f.h.MailMemberRemoved("mail_users", "alice") // no document yet
+	f.h.MailMemberRemoved("mail_users", "alice", true) // no document yet
 	f.sync(t)
-	f.h.MailMemberRemoved("mail_users", "dave") // no mailbox
+	f.h.MailMemberRemoved("mail_users", "dave", true) // no mailbox
 	f.h.mailState.mu.Lock()
 	n := len(f.h.mailState.hubRemoved)
 	f.h.mailState.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("%d entries recorded", n)
 	}
-	f.h.MailMemberRemoved("mail_users", "alice")
+	f.h.MailMemberRemoved("mail_users", "alice", true)
 	f.h.mailState.mu.Lock()
 	r, ok := f.h.mailState.hubRemoved[uuidAlice]
 	f.h.mailState.mu.Unlock()

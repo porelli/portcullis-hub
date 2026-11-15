@@ -74,7 +74,9 @@ func (s *Server) handleCreateMailPassword(w http.ResponseWriter, r *http.Request
 	// password, which couldn't be zeroed) and zeroed after the write.
 	prof := make([]byte, base64.StdEncoding.EncodedLen(len(cc.MobileConfig)))
 	base64.StdEncoding.Encode(prof, cc.MobileConfig)
-	buf := make([]byte, 0, len(cc.Password)*2+len(prof)+96)
+	// Sized for the worst escape (\u00XX: 6 bytes per byte) so appends
+	// never reallocate; net/http's bufio copy is an accepted residual.
+	buf := make([]byte, 0, len(cc.Password)*6+len(cc.ID)*6+len(prof)+96)
 	buf = append(buf, `{"id":`...)
 	buf = appendJSONString(buf, []byte(cc.ID))
 	buf = append(buf, `,"password":`...)

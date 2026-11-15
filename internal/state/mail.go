@@ -14,8 +14,9 @@ type MailSettings struct {
 	// Domains: domain name → its mail switch. The main domain needs no
 	// entry: it is on while core's mail profile is on (PORTCULLIS_MAIL).
 	Domains map[string]MailDomain `json:"domains,omitempty" yaml:"domains,omitempty"`
-	// Aliases: lowercase username → its alias addresses.
-	Aliases map[string][]string `json:"aliases,omitempty" yaml:"aliases,omitempty"`
+	// Aliases: the person's LLDAP uuid → their alias addresses (a
+	// re-created username, a new uuid, never inherits them).
+	Aliases map[string]MailAliases `json:"aliases,omitempty" yaml:"aliases,omitempty"`
 	// Lists: group name → its list.
 	Lists map[string]MailList `json:"lists,omitempty" yaml:"lists,omitempty"`
 	// Quotas are group-scoped rows, in the admin's order (first match).
@@ -25,6 +26,33 @@ type MailSettings struct {
 	// Generation is the last MailState generation the Hub sent (saved
 	// before the PUT).
 	Generation int `json:"generation" yaml:"generation"`
+	// PendingRemoval: mailctl refused a mass removal; the accounts wait
+	// for an administrator's confirmation (their mail passwords are
+	// revoked meanwhile). nil: none.
+	PendingRemoval *MailPendingRemoval `json:"pending_removal,omitempty" yaml:"pending_removal,omitempty"`
+}
+
+// MailAliases are one person's aliases (Username: the name they had when
+// they were set, for display and for the delete clean-up).
+type MailAliases struct {
+	Username  string   `json:"username" yaml:"username"`
+	Addresses []string `json:"addresses" yaml:"addresses"`
+}
+
+// MailPendingRemoval is a refused mass removal waiting for confirmation.
+type MailPendingRemoval struct {
+	Since    time.Time            `json:"since" yaml:"since"`
+	Accounts []MailPendingAccount `json:"accounts" yaml:"accounts"`
+	// Confirmed: the uuids an administrator confirmed (exactly Accounts'
+	// at the time); the next document removing only them carries
+	// confirm_mass_removal.
+	Confirmed []string `json:"confirmed,omitempty" yaml:"confirmed,omitempty"`
+}
+
+// MailPendingAccount is one account a pending mass removal would remove.
+type MailPendingAccount struct {
+	Username string `json:"username" yaml:"username"`
+	UUID     string `json:"uuid" yaml:"uuid"`
 }
 
 // MailDomain is one domain's mail switch.

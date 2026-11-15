@@ -658,6 +658,10 @@ func (h *Hub) DeleteDomain(ctx context.Context, actor directory.Actor, name stri
 	// Mail on or draining for it: refused (no orphaned mail records or
 	// mailboxes; controller ruling 2026-11-15).
 	mailState := h.mailDomainStateLocked(name, false)
+	if e, ok := h.st.Mail.Domains[name]; ok && !e.Retired && mailState == "off" {
+		// Off, but its mail set isn't removed yet (§19.9).
+		mailState = "draining"
+	}
 	if known && len(users) == 0 && mailState == "off" {
 		if h.domainsDeleting == nil {
 			h.domainsDeleting = map[string]bool{}

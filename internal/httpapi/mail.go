@@ -26,6 +26,26 @@ func (s *Server) registerMailAdmin(mux routeMux) {
 	mux.HandleFunc("PUT /api/mail/domains/{name}", s.handleSetMailDomain)
 	mux.HandleFunc("PUT /api/directory/groups/{group}/mail-list", s.handleSetGroupList)
 	mux.HandleFunc("POST /api/mail/actions/{action}", s.handleMailAction)
+	mux.HandleFunc("POST /api/mail/confirm-removal", s.handleConfirmMailRemoval)
+}
+
+// handleConfirmMailRemoval confirms the pending mass removal: the body
+// lists exactly its accounts' uuids (409 when it changed) → 204.
+func (s *Server) handleConfirmMailRemoval(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	var b struct {
+		Accounts []string `json:"accounts"`
+	}
+	if !readMailBody(w, r, &b, `{"accounts": ["<uuid>", …]}`) {
+		return
+	}
+	if err := s.Hub.ConfirmMailRemoval(r.Context(), b.Accounts, requestActor(r)); err != nil {
+		mailErr(w, "confirming a mail removal", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // registerPersonMail registers the person's mail routes (registerDirectory:

@@ -55,6 +55,8 @@ type Server struct {
 	ActionV  map[string]int // action name → status (default 202)
 	Actions  []string       // "<name> <domain>"
 	Requests []string       // "<METHOD> <path>"
+	// Wildcards: domain → the last ?wildcard= of GET /v1/dns/{domain}.
+	Wildcards map[string]string
 	// creds: username → its live passwords; nextNow the clock.
 	creds map[string][]fakeCred
 	Now   func() time.Time
@@ -189,6 +191,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, mailctl.StateStatus{Generation: gen, AppliedGeneration: s.Applied, Bootstrap: s.Bootstrap, Errors: []string{}})
 	case strings.HasPrefix(p, "/v1/dns/") && r.Method == http.MethodGet:
 		d := strings.TrimPrefix(p, "/v1/dns/")
+		wc := r.URL.Query().Get("wildcard")
+		if wc != "true" && wc != "false" {
+			errJSON(w, 400, "wildcard must be true or false")
+			return
+		}
+		if s.Wildcards == nil {
+			s.Wildcards = map[string]string{}
+		}
+		s.Wildcards[d] = wc
 		if !s.mailDomain(d) {
 			errJSON(w, 404, "%s is not a mail domain", d)
 			return
@@ -417,7 +428,7 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if gone*2 > len(s.Doc.Accounts) && !d.ConfirmMassRemoval {
-			errJSON(w, 409, "mass removal: %d of %d accounts", gone, len(s.Doc.Accounts))
+			writeJSON(w, 409, map[string]string{"error": fmt.Sprintf("mass removal: %d of %d accounts", gone, len(s.Doc.Accounts)), "error_kind": "mass_removal"})
 			return
 		}
 	}

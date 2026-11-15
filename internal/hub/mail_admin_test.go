@@ -158,7 +158,7 @@ func TestAliasConflict409(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.h.mu.RLock()
-	got := strings.Join(f.h.st.Mail.Aliases["alice"], ",")
+	got := strings.Join(f.h.st.Mail.Aliases[uuidAlice].Addresses, ",")
 	f.h.mu.RUnlock()
 	if got != "sales@example.org" {
 		t.Fatalf("aliases %s", got)

@@ -3,6 +3,7 @@ package directory_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -440,14 +441,14 @@ func TestRemoveMemberHook(t *testing.T) {
 	e, _ := evalEnv(t)
 	e.ll.AddGroup("mail_users", "bob", "carol")
 	var got []string
-	e.svc.MemberRemoved = func(g, u string) { got = append(got, g+":"+u) }
+	e.svc.MemberRemoved = func(g, u string, admin bool) { got = append(got, fmt.Sprintf("%s:%s:%v", g, u, admin)) }
 	if _, err := e.svc.RemoveMember(ctx, asRoot, "mail_users", "Bob"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.svc.RemoveMember(ctx, asRoot, "mail_users", "dave"); err == nil {
 		t.Fatal("removed a non-member")
 	}
-	if strings.Join(got, ",") != "mail_users:bob" {
+	if strings.Join(got, ",") != "mail_users:bob:true" {
 		t.Fatalf("hook calls %q", got)
 	}
 }

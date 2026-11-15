@@ -85,7 +85,15 @@ func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI) error {
 				h.TriggerMailSync()
 				continue
 			}
-			set, err := api.DNS(ctx, d.name)
+			// No *.<e> address record: mailctl adds the CNAMEs for
+			// mta-sts, autoconfig and autodiscover (?wildcard=false). A
+			// plan that can't be read skips the domain this pass.
+			wild, err := planHasWildcard(ctx, dapi, d.name)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("%s: reading the DNS plan: %v", d.name, err))
+				continue
+			}
+			set, err := api.DNS(ctx, d.name, wild)
 			if err != nil {
 				// 404: not in the applied document yet (the next pass).
 				if mailctl.StatusOf(err) != 404 {
@@ -127,4 +135,19 @@ func domainsStatus(err error) int {
 		return ae.Status
 	}
 	return 0
+}
+
+// planHasWildcard: name's cached DNS plan has a live *.<name> A or AAAA
+// address record.
+func planHasWildcard(ctx context.Context, dapi DomainsAPI, name string) (bool, error) {
+	p, err := dapi.Plan(ctx, name, false)
+	if err != nil {
+		return false, err
+	}
+	for _, it := range p.Items {
+		if it.Set == domains.SetAddress && strings.EqualFold(it.Name, "*."+name) && (it.Type == "A" || it.Type == "AAAA") && len(it.Live) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }

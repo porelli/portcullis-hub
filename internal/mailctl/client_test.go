@@ -207,10 +207,10 @@ func TestClientRequests(t *testing.T) {
 	if s, err := c.State(ctx); err != nil || s.AppliedGeneration != 12 || !s.Bootstrap {
 		t.Fatalf("State = %+v, %v", s, err)
 	}
-	if d, err := c.DNS(ctx, "team-b.example.org"); err != nil || len(d.Records) != 1 || d.Records[0].TTL != 3600 {
+	if d, err := c.DNS(ctx, "team-b.example.org", false); err != nil || len(d.Records) != 1 || d.Records[0].TTL != 3600 {
 		t.Fatalf("DNS = %+v, %v", d, err)
 	}
-	if _, err := c.DNS(ctx, "other.example"); StatusOf(err) != 404 {
+	if _, err := c.DNS(ctx, "other.example", true); StatusOf(err) != 404 {
 		t.Fatalf("DNS other = %v", err)
 	}
 	if ch, err := c.Checks(ctx, true); err != nil || ch.Checks[0].ID != "port25" {
@@ -248,8 +248,8 @@ func TestClientRequests(t *testing.T) {
 	want := []string{
 		`PUT /v1/state {"version":1,"generation":13,`,
 		`GET /v1/state `,
-		`GET /v1/dns/team-b.example.org `,
-		`GET /v1/dns/other.example `,
+		`GET /v1/dns/team-b.example.org?wildcard=false `,
+		`GET /v1/dns/other.example?wildcard=true `,
 		`GET /v1/checks?refresh=1 `,
 		`GET /v1/credentials?user=alice `,
 		`POST /v1/credentials {"username":"alice","label":"iPhone","expires_at":"2027-11-15T09:00:00Z"}`,
@@ -276,5 +276,94 @@ func TestClientRefusesUnknownAnswerKeys(t *testing.T) {
 	c := New(srv.URL, secretFile(t, testSecret))
 	if _, err := c.State(context.Background()); err == nil {
 		t.Fatal("unknown key accepted")
+	}
+}
+
+// TestChecksReasonDecodes: fcrdns checks carry reason missing|mismatch;
+// other checks omit it (both decode strictly).
+func TestChecksReasonDecodes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"checked_at":"2026-11-15T10:00:00Z","checks":[{"id":"fcrdns_v4","severity":"problem","detail":"x","steps":[],"reason":"missing"},{"id":"port25","severity":"ok","detail":"","steps":[]}]}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	ch, err := c.Checks(context.Background(), false)
+	if err != nil || ch.Checks[0].Reason != ReasonPTRMissing || ch.Checks[1].Reason != "" {
+		t.Fatalf("%+v %v", ch, err)
+	}
+}
+
+// TestSecretUnquoteBytes: the password is decoded by hand into fresh
+// bytes (escapes, \u, surrogate pairs); invalid literals are refused.
+func TestSecretUnquoteBytes(t *testing.T) {
+	for in, want := range map[string]string{
+		`"plain-123"`:     "plain-123",
+		`"a\"b\\c\/d"`:    `a"b\c/d`,
+		`"\b\f\n\r\t"`:    "\b\f\n\r\t",
+		`"Aé"`:            "Aé",
+		`"😀x"`:            "😀x",
+		`"\u0041\u00e9"`:  "Aé",
+		`"\ud83d\ude00x"`: "😀x",
+		`"ünïcode"`:       "ünïcode",
+	} {
+		var s Secret
+		if err := s.UnmarshalJSON([]byte(in)); err != nil || string(s) != want {
+			t.Errorf("%s → %q, %v", in, s, err)
+		}
+	}
+	for _, in := range []string{`plain`, `"unterminated`, `"bad\x"`, `"\u12"`, `"\ud83dx"`, "\"ctl\x01\"", `"a"b"`, `""x`} {
+		var s Secret
+		if err := s.UnmarshalJSON([]byte(in)); err == nil {
+			t.Errorf("%s accepted as %q", in, s)
+		}
+	}
+}
+
+// TestCreateCredentialBytesOnly: the answer buffer is zeroed once the call
+// returns, the password survives it (no alias), unknown keys are refused.
+func TestCreateCredentialBytesOnly(t *testing.T) {
+	var raws [][]byte
+	rawHook = func(b []byte) { raws = append(raws, b) }
+	t.Cleanup(func() { rawHook = nil })
+	answer := `{"id":"4","secret":"s3cret\"pwA","created_at":"2026-11-15T09:00:00Z","expires_at":null}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(201)
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	cr, err := c.CreateCredential(context.Background(), "alice", "x", nil)
+	if err != nil || string(cr.Secret) != `s3cret"pwA` {
+		t.Fatalf("%q %v", cr.Secret, err)
+	}
+	if len(raws) != 1 {
+		t.Fatalf("%d buffers", len(raws))
+	}
+	for _, b := range raws[0][:cap(raws[0])] {
+		if b != 0 {
+			t.Fatal("the answer buffer wasn't zeroed")
+		}
+	}
+	answer = `{"id":"4","secret":"x","created_at":"2026-11-15T09:00:00Z","expires_at":null,"extra":1}`
+	if _, err := c.CreateCredential(context.Background(), "alice", "x", nil); err == nil {
+		t.Fatal("unknown key accepted")
+	}
+	answer = `{"id":"4","created_at":"2026-11-15T09:00:00Z","expires_at":null,"other":"y"}`
+	if _, err := c.CreateCredential(context.Background(), "alice", "x", nil); err == nil {
+		t.Fatal("missing secret accepted")
+	}
+}
+
+// TestAPIErrorKind: error_kind reaches APIError.Kind.
+func TestAPIErrorKind(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(409)
+		w.Write([]byte(`{"error":"mass removal: 2 of 3 accounts","error_kind":"mass_removal"}`))
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, secretFile(t, testSecret)).PutState(context.Background(), &MailState{Version: 1})
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != 409 || ae.Kind != ErrorKindMassRemoval {
+		t.Fatalf("%#v", err)
 	}
 }

@@ -31,6 +31,8 @@ var fixerTouchesData = map[string]bool{
 	// access revoked; AlwaysConfirm makes them D through the AI.
 	doctor.FixMailDMARCPromote:  false,
 	doctor.FixMailMTASTSEnforce: false,
+	// Parks mailboxes (deleted after the retention): data.
+	doctor.FixMailConfirmRemoval: true,
 }
 
 func TestFixersDeclareTouchesData(t *testing.T) {

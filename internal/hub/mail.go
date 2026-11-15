@@ -2,11 +2,18 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/portcullis/hub/internal/fsutil"
 
 	"github.com/portcullis/hub/internal/mailctl"
 )
@@ -56,12 +63,65 @@ type mailSync struct {
 	// reconciled: the start-time reconcile of every person's mail
 	// passwords ran (after the first accepted document).
 	reconciled bool
+	// loaded: last was read from hub_data (mail-last.json) once; blind:
+	// it wasn't there, so the first accepted document may remove people
+	// (treated as a removal: wait, then restart mail).
+	loaded, blind bool
+	// removalRetry: the next retry of a failed removal (2 s, doubling to
+	// 30 s); zero after a success.
+	removalRetry time.Duration
+	// pendingRevoked: the accounts of a refused mass removal whose mail
+	// passwords were already revoked (by uuid).
+	pendingRevoked map[string]bool
+	// applyWait / applyPoll: mailWaitApplied's budget and poll (zero: the
+	// defaults; tests shorten them).
+	applyWait, applyPoll time.Duration
+	// recSeq counts recorded admin removals (a pass keeps only those
+	// recorded after it built its document).
+	recSeq uint64
+}
+
+// mailLastFile is the last accepted MailState in hub_data (0600): the
+// baseline removals are judged against across Hub restarts.
+const mailLastFile = "mail-last.json"
+
+func (h *Hub) mailLastPath() string { return filepath.Join(h.cfg.DataDir, mailLastFile) }
+
+// loadMailLast reads the persisted last accepted document (nil, true:
+// none or unreadable: the first document is treated as removing).
+func (h *Hub) loadMailLast() (*mailctl.MailState, bool) {
+	b, err := os.ReadFile(h.mailLastPath())
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("mail: %s unreadable (%v): the first document is treated as a removal", mailLastFile, err)
+		}
+		return nil, true
+	}
+	var d mailctl.MailState
+	if err := json.Unmarshal(b, &d); err != nil || d.Version != mailctl.StateVersion {
+		log.Printf("mail: %s is corrupt: the first document is treated as a removal", mailLastFile)
+		return nil, true
+	}
+	return &d, false
+}
+
+// saveMailLast persists an accepted document (a failure is logged: the
+// next start then treats its first document as a removal).
+func (h *Hub) saveMailLast(d *mailctl.MailState) {
+	b, err := json.Marshal(d)
+	if err == nil {
+		err = fsutil.WriteFileAtomic(h.mailLastPath(), b, 0600)
+	}
+	if err != nil {
+		log.Printf("mail: saving %s: %v", mailLastFile, err)
+	}
 }
 
 // hubRemoval is one recorded admin removal.
 type hubRemoval struct {
 	gen int
 	at  time.Time
+	seq uint64 // recSeq when recorded
 }
 
 // mailHubRemovalTTL: an admin removal older than this confirms nothing.
@@ -84,11 +144,18 @@ func (h *Hub) TriggerMailSync() {
 	}
 }
 
-// MailMemberRemoved records an admin's removal of user from group
-// (directory.Service.MemberRemoved): a shrink of mail_users made through
-// the Hub may confirm a mass removal (contract §19.5).
-func (h *Hub) MailMemberRemoved(group, user string) {
+// MailMemberRemoved records a full administrator's removal of user from
+// group (directory.Service.MemberRemoved): a shrink of mail_users made by
+// an admin through the Hub may confirm a mass removal (contract §19.5).
+// A delegate's removal goes through (and their passwords are revoked)
+// but never confirms one (controller ruling: deleting many mailboxes
+// destroys data; a delegate can't bypass the outage guard).
+func (h *Hub) MailMemberRemoved(group, user string, byAdmin bool) {
 	if !strings.EqualFold(group, MailUsersGroup) {
+		return
+	}
+	if !byAdmin {
+		h.TriggerMailSync()
 		return
 	}
 	h.mailRecordHubRemoval(user)
@@ -107,7 +174,8 @@ func (h *Hub) mailRecordHubRemoval(user string) {
 				if s.hubRemoved == nil {
 					s.hubRemoved = map[string]hubRemoval{}
 				}
-				s.hubRemoved[a.UUID] = hubRemoval{gen: s.last.Generation, at: now}
+				s.recSeq++
+				s.hubRemoved[a.UUID] = hubRemoval{gen: s.last.Generation, at: now, seq: s.recSeq}
 			}
 		}
 	}
@@ -215,6 +283,17 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	if api == nil {
 		return mailIdle
 	}
+	s.mu.Lock()
+	first := !s.loaded
+	if first {
+		s.loaded = true
+		s.last, s.blind = h.loadMailLast()
+	}
+	startSeq := s.recSeq
+	s.mu.Unlock()
+	if first {
+		h.mailWarnReservedInUse()
+	}
 	doc, err := h.mailBuild(ctx)
 	if err != nil {
 		h.mailLogOnce("mail: no state sent (nothing changes in mail): " + err.Error())
@@ -224,6 +303,12 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	s.mu.Lock()
 	last := s.last
 	d := diffMail(last, doc)
+	// No baseline (a first start, a lost mail-last.json): whoever left
+	// meanwhile is unknown, so the first document counts as a removal.
+	blind := s.blind && last == nil
+	if blind {
+		d.removal = true
+	}
 	if !d.any() {
 		s.addSince = time.Time{}
 		s.mu.Unlock()
@@ -240,29 +325,63 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	}
 	// A mass removal is confirmed only when every account that goes was
 	// taken out by an admin through the Hub since the last accepted
-	// document, within mailHubRemovalTTL.
+	// document, within mailHubRemovalTTL — or an administrator confirmed
+	// exactly the pending removal (ConfirmMailRemoval).
 	confirm := d.removedAccounts > 0 && last != nil
 	for _, uuid := range d.removedUUIDs {
 		r, ok := s.hubRemoved[uuid]
 		confirm = confirm && ok && r.gen == last.Generation && now.Sub(r.at) <= mailHubRemovalTTL
 	}
 	s.mu.Unlock()
+	confirm = confirm || (d.removedAccounts > 0 && h.mailPendingConfirmed(d.removedUUIDs))
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
 	if err != nil {
-		h.mailLogOnce("mail: the state was not sent (the next try in 30 s): " + err.Error())
-		return mailRetry
+		if isMassRemoval(err) {
+			return h.mailMassRefused(ctx, api, last, doc, d)
+		}
+		wait := mailRetry
+		if d.removal {
+			// A removal must reach mailctl within seconds: 2 s, doubling.
+			s.mu.Lock()
+			s.removalRetry = min(max(2*s.removalRetry, 2*time.Second), mailRetry)
+			wait = s.removalRetry
+			s.mu.Unlock()
+		}
+		h.mailLogOnce(fmt.Sprintf("mail: the state was not sent (the next try in %s): %v", wait, err))
+		return wait
 	}
 	h.mailLogOnce("")
 	s.mu.Lock()
 	sent := *doc
 	sent.Generation, sent.ConfirmMassRemoval = gen, confirm
-	s.last = &sent
+	prevGen := -1
+	if last != nil {
+		prevGen = last.Generation
+	}
+	s.last, s.blind, s.removalRetry = &sent, false, 0
 	s.addSince = time.Time{}
-	s.hubRemoved = nil
+	// Admin removals recorded during this pass, after its document was
+	// built, keep counting at the new generation; every other entry is
+	// spent (those it removed, those from before the accepted document).
+	gone := map[string]bool{}
+	for _, id := range d.removedUUIDs {
+		gone[id] = true
+	}
+	kept := map[string]hubRemoval{}
+	for id, r := range s.hubRemoved {
+		if gone[id] || r.gen != prevGen || r.seq <= startSeq {
+			continue
+		}
+		r.gen = gen
+		kept[id] = r
+	}
+	s.hubRemoved = kept
 	reconciled := s.reconciled
 	s.reconciled = true
 	s.mu.Unlock()
+	h.saveMailLast(&sent)
+	h.mailPendingSettled(&sent)
 	if d.removal {
 		h.mailWaitApplied(ctx, api, gen)
 		// Stalwart keeps open sessions through the change: restart mail
@@ -300,7 +419,7 @@ func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailctl.MailState,
 		if err == nil {
 			return gen, nil
 		}
-		if mailctl.StatusOf(err) != 409 || try > 0 || !strings.Contains(err.Error(), "generation") {
+		if mailctl.StatusOf(err) != 409 || try > 0 || isMassRemoval(err) {
 			return 0, err
 		}
 		st, serr := api.State(ctx)
@@ -317,20 +436,38 @@ func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailctl.MailState,
 // mailWaitApplied polls GET /v1/state until applied_generation reaches
 // gen, at most mailApplyWait.
 func (h *Hub) mailWaitApplied(ctx context.Context, api MailAPI, gen int) bool {
-	deadline := time.Now().Add(mailApplyWait)
+	s := &h.mailState
+	s.mu.Lock()
+	wait, poll := s.applyWait, s.applyPoll
+	s.mu.Unlock()
+	if wait <= 0 {
+		wait = mailApplyWait
+	}
+	if poll <= 0 {
+		poll = mailApplyPoll
+	}
+	deadline := time.Now().Add(wait)
 	for {
 		if st, err := api.State(ctx); err == nil && st.AppliedGeneration >= gen {
 			return true
 		}
-		if time.Now().Add(mailApplyPoll).After(deadline) {
+		if time.Now().Add(poll).After(deadline) {
 			return false
 		}
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(mailApplyPoll):
+		case <-time.After(poll):
 		}
 	}
+}
+
+// isMassRemoval: mailctl's 409 for a document removing more than half
+// the accounts, by its error_kind "mass_removal" only (never the text;
+// any other 409 is the generation's).
+func isMassRemoval(err error) bool {
+	var ae *mailctl.APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == mailctl.ErrorKindMassRemoval
 }
 
 // mailRetireMainLocked: the main domain turned off is no longer sent once
@@ -348,5 +485,23 @@ func (h *Hub) mailRetireMainLocked(doc *mailctl.MailState) {
 			h.saveLocked()
 		}
 		h.mu.Unlock()
+	}
+}
+
+// mailForgetPerson drops a deleted person's aliases (those set while the
+// username was theirs): a re-created username starts with none.
+func (h *Hub) mailForgetPerson(user string) {
+	user = strings.ToLower(user)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	changed := false
+	for id, al := range h.st.Mail.Aliases {
+		if strings.EqualFold(al.Username, user) {
+			delete(h.st.Mail.Aliases, id)
+			changed = true
+		}
+	}
+	if changed {
+		h.saveLocked()
 	}
 }

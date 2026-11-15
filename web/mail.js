@@ -35,6 +35,14 @@
     if (v.kubernetes) return '<p class="settings-empty" data-mail-kube>' + esc(KUBE_TEXT) + '</p>';
     let h = '';
     if (v.mail !== 'on') h += '<p class="settings-empty" data-mail-off>' + esc(OFF_TEXT) + '</p>';
+    const pr = v.pending_removal;
+    if (pr) {
+      const names = (pr.accounts || []).map(a => a.username);
+      h += '<div class="public-warn" data-mail-pending>Removing ' + esc(names.length) + ' mailboxes at once waits for your confirmation: ' + esc(names.join(', ')) +
+        '. Their mail passwords are revoked already; their mailboxes stay until you confirm. If they shouldn\'t have left mail_users, add them back instead.' +
+        (pr.confirmed ? ' <strong>Confirmed: the removal goes with the next update.</strong>'
+          : ' <button type="button" class="btn btn-sm btn-danger" data-mail-act="confirm-removal" data-mail-uuids="' + esc((pr.accounts || []).map(a => a.uuid).join(',')) + '">Confirm removal</button>') + '</div>';
+    }
     const reach = status && status.mail === 'on' ? (status.reachable ? pill('ok', 'reachable') : pill('warn', 'mailctl unreachable')) : '';
     h += '<dl class="inst-facts"><dt>Mail server</dt><dd><code>' + esc(v.hostname) + '</code> ' + reach + '</dd>' +
       '<dt>Relay</dt><dd>' + esc(v.relay === 'on' ? 'on (set in .env)' : 'off') + '</dd>' +
@@ -131,6 +139,14 @@
           await window.apiPut('/api/mail/domains/' + enc(row.dataset.mailDomain), { enabled: false, groups });
           window.showToast('Mail for ' + row.dataset.mailDomain + ' is draining.', 'success');
           break;
+        case 'confirm-removal': {
+          const uuids = String(b.dataset.mailUuids || '').split(',').filter(Boolean);
+          if (!confirm('Remove ' + uuids.length + ' mailboxes? They are parked and deleted after the retention period.')) return;
+          b.dataset.busy = '1';
+          await window.apiCall('/api/mail/confirm-removal', 'POST', { accounts: uuids });
+          window.showToast('Confirmed.', 'success');
+          break;
+        }
         case 'settings-save': {
           const f = b.closest('[data-mail-settings]');
           b.dataset.busy = '1';

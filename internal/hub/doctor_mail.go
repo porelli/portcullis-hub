@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +29,7 @@ const mailInputsTimeout = 10 * time.Second
 func init() {
 	RegisterFixer(mailActionFixer{kind: doctor.FixMailDMARCPromote, action: mailctl.ActionDMARCPromote})
 	RegisterFixer(mailActionFixer{kind: doctor.FixMailMTASTSEnforce, action: mailctl.ActionMTASTSEnforce})
+	RegisterFixer(mailConfirmRemovalFixer{})
 }
 
 // doctorMailIn gathers the mail kinds' inputs (never under mu). plans are
@@ -43,6 +46,16 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 	if _, why := h.MailRestartFailed(); why != "" {
 		in.RestartFailed = why
 	}
+	h.mu.RLock()
+	if p := h.st.Mail.PendingRemoval; p != nil {
+		pi := &doctor.MailPendingIn{Since: p.Since, UUIDs: pendingUUIDs(p.Accounts), Confirmed: len(p.Confirmed) > 0}
+		for _, a := range p.Accounts {
+			pi.Users = append(pi.Users, a.Username)
+		}
+		sort.Strings(pi.Users)
+		in.Pending = pi
+	}
+	h.mu.RUnlock()
 	if api == nil || api.Available() != nil {
 		in.Unavailable = true
 		return in
@@ -139,6 +152,16 @@ func (f mailActionFixer) Apply(h *Hub, fd doctor.Finding, params map[string]stri
 		return nil, statusErr(http.StatusConflict, "this finding names no single domain")
 	}
 	name := NormalizeHost(fd.Domains[0])
+	// A stale preview is the synchronous 409 (§14.6); the op checks again.
+	pctx, cancel := context.WithTimeout(context.Background(), mailInputsTimeout)
+	_, _, hash, err := h.mailFixPlan(pctx, f.kind, fd, params)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	if planHash == "" || hash != planHash {
+		return nil, statusErr(http.StatusConflict, "the setup changed since the preview")
+	}
 	return h.startAsync(opKeyDomain(name), f.kind, actor, nil, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		domain, _, hash, err := h.mailFixPlan(ctx, f.kind, fd, params)
 		if err != nil {
@@ -152,5 +175,63 @@ func (f mailActionFixer) Apply(h *Hub, fd doctor.Finding, params map[string]stri
 			return nil, nil, err
 		}
 		return map[string]string{"domain": domain}, nil, nil
+	})
+}
+
+// mailConfirmRemovalFixer is mail_mass_removal_pending's fix: the
+// administrator's confirmation of exactly the pending removal. It parks
+// the mailboxes (deleted after MAIL_FORMER_RETENTION): TouchesData, and
+// always confirmed through the AI.
+type mailConfirmRemovalFixer struct{}
+
+func (mailConfirmRemovalFixer) Kind() string { return doctor.FixMailConfirmRemoval }
+
+func (mailConfirmRemovalFixer) TouchesData() bool { return true }
+
+func (mailConfirmRemovalFixer) AlwaysConfirm() bool { return true }
+
+// confirmRemovalPlan is the preview's one line and the hash over the
+// pending uuids.
+func (h *Hub) confirmRemovalPlan(params map[string]string) (string, string, []string, error) {
+	if err := checkFixParams(params); err != nil {
+		return "", "", nil, err
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	p := h.st.Mail.PendingRemoval
+	if p == nil || len(p.Confirmed) > 0 {
+		return "", "", nil, statusErr(http.StatusConflict, "the setup changed since the preview")
+	}
+	var users []string
+	for _, a := range p.Accounts {
+		users = append(users, a.Username)
+	}
+	sort.Strings(users)
+	ids := pendingUUIDs(p.Accounts)
+	return "removes the mailboxes of " + strings.Join(users, ", ") + " (parked, deleted after MAIL_FORMER_RETENTION)", doctor.Digest(ids), ids, nil
+}
+
+func (mailConfirmRemovalFixer) Preview(_ context.Context, h *Hub, _ doctor.Finding, params map[string]string) (*FixPlan, error) {
+	line, hash, _, err := h.confirmRemovalPlan(params)
+	if err != nil {
+		return nil, err
+	}
+	return &FixPlan{Lines: []string{line}, Hash: hash, TouchesData: true}, nil
+}
+
+func (mailConfirmRemovalFixer) Apply(h *Hub, _ doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
+	_, hash, ids, err := h.confirmRemovalPlan(params)
+	if err != nil {
+		return nil, err
+	}
+	if planHash == "" || hash != planHash {
+		return nil, statusErr(http.StatusConflict, "the setup changed since the preview")
+	}
+	return h.startAsync(opKeyDomain(strings.ToLower(h.cfg.Domain)), doctor.FixMailConfirmRemoval, actor, nil, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		ready()
+		if err := h.ConfirmMailRemoval(ctx, ids, actor); err != nil {
+			return nil, nil, err
+		}
+		return map[string]string{"accounts": strconv.Itoa(len(ids))}, nil, nil
 	})
 }

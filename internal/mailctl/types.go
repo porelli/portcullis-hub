@@ -1,9 +1,10 @@
 package mailctl
 
 import (
-	"encoding/json"
 	"errors"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // The types mirror the mailctl API of contract §19.5 exactly (snake_case
@@ -118,7 +119,16 @@ type Check struct {
 	Severity string   `json:"severity"` // ok | info | warning | problem
 	Detail   string   `json:"detail"`
 	Steps    []string `json:"steps"`
+	// Reason (fcrdns_v4 / fcrdns_v6 only): "missing" (no PTR) or
+	// "mismatch" (the PTR's name doesn't resolve back); absent elsewhere.
+	Reason string `json:"reason,omitempty"`
 }
+
+// fcrdns reasons (Check.Reason).
+const (
+	ReasonPTRMissing  = "missing"
+	ReasonPTRMismatch = "mismatch"
+)
 
 // Check severities.
 const (
@@ -156,14 +166,109 @@ type Created struct {
 // zeroed; it never prints.
 type Secret []byte
 
-// UnmarshalJSON decodes a JSON string.
+// UnmarshalJSON decodes a JSON string into fresh bytes by hand: the
+// password never becomes a Go string (one that could never be zeroed).
+// b is the caller's buffer (json.Unmarshal passes a subslice of it), so
+// wiping that buffer wipes the encoded form too.
 func (s *Secret) UnmarshalJSON(b []byte) error {
-	var v string
-	if err := json.Unmarshal(b, &v); err != nil {
-		return errors.New("secret: not a string")
+	out, err := unquoteBytes(b)
+	if err != nil {
+		return err
 	}
-	*s = Secret(v)
+	*s = Secret(out)
 	return nil
+}
+
+// unquoteBytes decodes the JSON string literal b into a new byte slice
+// (\" \\ \/ \b \f \n \r \t and \uXXXX, surrogate pairs included);
+// anything else is refused.
+func unquoteBytes(b []byte) ([]byte, error) {
+	bad := errors.New("secret: not a JSON string")
+	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
+		return nil, bad
+	}
+	in := b[1 : len(b)-1]
+	out := make([]byte, 0, len(in))
+	hex4 := func(p []byte) (rune, bool) {
+		if len(p) < 4 {
+			return 0, false
+		}
+		var r rune
+		for _, c := range p[:4] {
+			r <<= 4
+			switch {
+			case c >= '0' && c <= '9':
+				r |= rune(c - '0')
+			case c >= 'a' && c <= 'f':
+				r |= rune(c-'a') + 10
+			case c >= 'A' && c <= 'F':
+				r |= rune(c-'A') + 10
+			default:
+				return 0, false
+			}
+		}
+		return r, true
+	}
+	fail := func() ([]byte, error) {
+		for i := range out[:cap(out)] {
+			out[:cap(out)][i] = 0
+		}
+		return nil, bad
+	}
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		switch {
+		case c == '"' || c < 0x20:
+			return fail()
+		case c != '\\':
+			out = append(out, c)
+			continue
+		}
+		i++
+		if i >= len(in) {
+			return fail()
+		}
+		switch in[i] {
+		case '"', '\\', '/':
+			out = append(out, in[i])
+		case 'b':
+			out = append(out, '\b')
+		case 'f':
+			out = append(out, '\f')
+		case 'n':
+			out = append(out, '\n')
+		case 'r':
+			out = append(out, '\r')
+		case 't':
+			out = append(out, '\t')
+		case 'u':
+			r, ok := hex4(in[i+1:])
+			if !ok {
+				return fail()
+			}
+			i += 4
+			if utf16.IsSurrogate(r) {
+				if i+2 >= len(in) || in[i+1] != '\\' || in[i+2] != 'u' {
+					return fail()
+				}
+				r2, ok := hex4(in[i+3:])
+				if !ok {
+					return fail()
+				}
+				r = utf16.DecodeRune(r, r2)
+				if r == utf8.RuneError {
+					return fail()
+				}
+				i += 6
+			}
+			var enc [4]byte
+			n := utf8.EncodeRune(enc[:], r)
+			out = append(out, enc[:n]...)
+		default:
+			return fail()
+		}
+	}
+	return out, nil
 }
 
 // MarshalJSON never encodes the secret.

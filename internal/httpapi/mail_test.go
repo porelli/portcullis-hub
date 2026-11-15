@@ -11,7 +11,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/mailctl"
 	"github.com/portcullis/hub/internal/mailctl/mailctltest"
 )
 
@@ -46,6 +50,7 @@ func TestMailRoutesAdminOnly(t *testing.T) {
 		{"GET", "/api/mail/settings", ""}, {"PUT", "/api/mail/settings", `{}`}, {"GET", "/api/mail/status", ""}, {"GET", "/api/mail/checks", ""},
 		{"PUT", "/api/mail/domains/example.org", `{"enabled":true,"groups":[]}`}, {"PUT", "/api/directory/groups/hr/mail-list", `{"enabled":false,"domain":"","posting":""}`},
 		{"POST", "/api/mail/actions/dkim-rotate", `{"domain":"example.org"}`},
+		{"POST", "/api/mail/confirm-removal", `{"accounts":[]}`},
 	}
 	for _, rt := range admin {
 		if r, _ := doAs(t, e.hub, "bob", rt[0], rt[1], rt[2]); r.StatusCode != 403 {
@@ -55,8 +60,11 @@ func TestMailRoutesAdminOnly(t *testing.T) {
 			t.Errorf("people listener %s %s = %d", rt[0], rt[1], r.StatusCode)
 		}
 	}
-	if r, b := doAs(t, e.hub, "ann", "GET", "/api/mail/settings", ""); r.StatusCode != 200 || !strings.Contains(b, `"mail":"on"`) {
+	if r, b := doAs(t, e.hub, "ann", "GET", "/api/mail/settings", ""); r.StatusCode != 200 || !strings.Contains(b, `"mail":"on"`) || !strings.Contains(b, `"pending_removal":null`) {
 		t.Fatalf("admin settings %d %s", r.StatusCode, b)
+	}
+	if r, b := doAs(t, e.hub, "ann", "POST", "/api/mail/confirm-removal", `{"accounts":[]}`); r.StatusCode != 409 || !strings.Contains(b, "no mass removal is waiting") {
+		t.Fatalf("confirm without pending %d %s", r.StatusCode, b)
 	}
 	if r, b := doAs(t, e.hub, "ann", "PUT", "/api/directory/users/alice/mail", `{"aliases":["sales@example.org"]}`); r.StatusCode != 200 || !strings.Contains(b, "sales@example.org") {
 		t.Fatalf("admin aliases %d %s", r.StatusCode, b)
@@ -200,5 +208,39 @@ func TestNoMailCredentialTool(t *testing.T) {
 		if why != "credentials: never through MCP" {
 			t.Errorf("%s: reason %q", r, why)
 		}
+	}
+}
+
+// TestMainDomainMailFixOpPoll: a DMARC promote on the main domain runs
+// under _domain.<main> and GET /api/domains/{main}/op answers its record
+// (contract §14.6: the main domain's mail fixes poll there too).
+func TestMainDomainMailFixOpPoll(t *testing.T) {
+	e, mc, _ := mailHelpEnv(t)
+	q := "quarantine"
+	seen := time.Now().UTC()
+	mc.Lock(func(s *mailctltest.Server) {
+		s.StatusV.DMARC = []mailctl.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
+		s.StatusV.TimerSeenAt = &seen
+	})
+	fp := doctor.Fingerprint(doctor.KindMailDMARCPromote, "example.org")
+	r, b := doAs(t, e.hub, "ann", "POST", "/api/doctor/findings/"+fp+"/preview", `{}`)
+	if r.StatusCode != 200 {
+		t.Fatalf("preview %d %s", r.StatusCode, b)
+	}
+	var p hub.FixPlan
+	json.Unmarshal([]byte(b), &p)
+	r, b = doAs(t, e.hub, "ann", "POST", "/api/doctor/findings/"+fp+"/apply", `{"plan_hash":"`+p.Hash+`"}`)
+	if r.StatusCode != 202 {
+		t.Fatalf("apply %d %s", r.StatusCode, b)
+	}
+	var acc map[string]string
+	json.Unmarshal([]byte(b), &acc)
+	if acc["poll"] != "/api/domains/example.org/op" || acc["op"] != doctor.FixMailDMARCPromote {
+		t.Fatalf("accepted %v", acc)
+	}
+	waitIdle(t, e.s.Hub, hub.OpKeyDomain("example.org"))
+	r, b = doAs(t, e.hub, "ann", "GET", acc["poll"], "")
+	if r.StatusCode != 200 || !strings.Contains(b, `"op_id":"`+acc["op_id"]+`"`) || !strings.Contains(b, `"ok":true`) {
+		t.Fatalf("op %d %s", r.StatusCode, b)
 	}
 }
