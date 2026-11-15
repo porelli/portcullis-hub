@@ -63,7 +63,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailc
 		}
 		failed := false
 		for _, c := range live {
-			if err := api.RevokeCredential(ctx, a.Username, c.ID); err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
+			if err := api.RevokeCredential(ctx, a.UUID, c.ID); err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
 				log.Printf("mail: revoking %s's mail password %s (pending removal): %v", a.Username, c.ID, err)
 				failed = true
 			}

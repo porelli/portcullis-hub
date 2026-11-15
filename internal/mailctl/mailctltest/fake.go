@@ -62,6 +62,10 @@ type Server struct {
 	Now   func() time.Time
 	// Created: every secret handed out (tests grep logs and state for them).
 	Created []string
+	// RevokeStatus: DELETE /v1/credentials answers it instead (0: 204).
+	RevokeStatus int
+	// Deletes: every DELETE /v1/credentials ("<uuid> <id>").
+	Deletes []string
 }
 
 type fakeCred struct {
@@ -227,9 +231,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case p == "/v1/credentials" && r.Method == http.MethodPost:
 		s.createCred(w, r)
 	case strings.HasPrefix(p, "/v1/credentials/") && r.Method == http.MethodDelete:
-		u := r.URL.Query().Get("user")
-		if !s.account(u) {
-			errJSON(w, 404, "no such account")
+		q := r.URL.Query()
+		if len(q) != 1 || q.Get("uuid") == "" {
+			errJSON(w, 400, "the query must be exactly ?uuid=")
+			return
+		}
+		s.Deletes = append(s.Deletes, q.Get("uuid")+" "+strings.TrimPrefix(p, "/v1/credentials/"))
+		u := s.userOfUUID(q.Get("uuid"))
+		if u == "" {
+			w.WriteHeader(204) // unknown (or parked) account: nothing here
+			return
+		}
+		if s.RevokeStatus != 0 {
+			errJSON(w, s.RevokeStatus, "mail server unreachable")
 			return
 		}
 		id := strings.TrimPrefix(p, "/v1/credentials/")
@@ -275,6 +289,32 @@ func (s *Server) mailDomain(d string) bool {
 		}
 	}
 	return false
+}
+
+// userOfUUID is the username of the account with uuid ("" = none).
+func (s *Server) userOfUUID(uuid string) string {
+	if s.Doc == nil {
+		return ""
+	}
+	for _, a := range s.Doc.Accounts {
+		if a.UUID == uuid {
+			return a.Username
+		}
+	}
+	return ""
+}
+
+// uuidOf is u's uuid in the applied document ("" = none).
+func (s *Server) uuidOf(u string) string {
+	if s.Doc == nil {
+		return ""
+	}
+	for _, a := range s.Doc.Accounts {
+		if a.Username == u {
+			return a.UUID
+		}
+	}
+	return ""
 }
 
 func (s *Server) account(u string) bool {
@@ -462,6 +502,7 @@ func (s *Server) Apply() {
 func (s *Server) createCred(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Username  string     `json:"username"`
+		UUID      string     `json:"uuid"`
 		Label     string     `json:"label"`
 		ExpiresAt *time.Time `json:"expires_at"`
 	}
@@ -480,6 +521,10 @@ func (s *Server) createCred(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.account(body.Username) {
 		errJSON(w, 404, "no such account")
+		return
+	}
+	if body.UUID != s.uuidOf(body.Username) {
+		writeJSON(w, 409, map[string]string{"error": "the account has another uuid", "error_kind": "account_mismatch"})
 		return
 	}
 	cs := s.creds[body.Username]

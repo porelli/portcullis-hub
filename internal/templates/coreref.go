@@ -838,10 +838,13 @@ var (
 		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
 			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp", "people-vpn-enrol",
 			"core-vpn-required", "dashboard-vpn", "grafana-metrics-vpn", "hub-vpn", "keycloak-admin-vpn", "keycloak-admin-vpn-required",
-			"people-vpn", "people-vpn-enrol-vpn", "portal-vpn"),
+			"people-vpn", "people-vpn-enrol-vpn", "portal-vpn",
+			// Mail (contract §5): mailctl's well-known router.
+			"mail-wellknown"),
 		"middlewares": set("vpn-required-path", "portcullis-groups-vpn", "portcullis-public-guard-vpn", "portal-vpn-path", "directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
-		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate"),
+		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate",
+			"mailctl", "mailctl-wellknown"),
 	}
 	// routerAttrRe: no tls.certresolver / tls.domains (certificates are
 	// core's: a template asking ACME for names it doesn't route).

@@ -109,8 +109,8 @@ type MailAPI interface {
 	Checks(ctx context.Context, refresh bool) (mailctl.Checks, error)
 	Status(ctx context.Context) (mailctl.Status, error)
 	Credentials(ctx context.Context, user string) ([]mailctl.Credential, error)
-	CreateCredential(ctx context.Context, user, label string, expires *time.Time) (mailctl.Created, error)
-	RevokeCredential(ctx context.Context, user, id string) error
+	CreateCredential(ctx context.Context, user, uuid, label string, expires *time.Time) (mailctl.Created, error)
+	RevokeCredential(ctx context.Context, uuid, id string) error
 	Action(ctx context.Context, name, domain string) error
 }
 

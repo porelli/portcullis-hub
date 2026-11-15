@@ -148,11 +148,18 @@ func TestRevokeAfterRecreate(t *testing.T) {
 		}
 	}
 	f.h.mu.Unlock()
+	// The former holder's row: revoked in the former account by its own
+	// uuid (DELETE ?uuid=<old>), never the new alice's; it ends on 204.
 	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", old.ID); err != nil {
-		t.Fatal(err)
+		t.Fatalf("former holder's row: %v", err)
 	}
 	if got := f.mc.Creds("alice"); len(got) != 1 {
 		t.Fatalf("the new holder's password was deleted: %+v", got)
+	}
+	var dels []string
+	f.mc.Lock(func(s *mailctltest.Server) { dels = append(dels, s.Deletes...) })
+	if len(dels) != 1 || !strings.HasPrefix(dels[0], uuidAlice+" ") {
+		t.Fatalf("deletes %v", dels)
 	}
 	f.h.mu.RLock()
 	defer f.h.mu.RUnlock()
@@ -349,5 +356,87 @@ func TestDelegateRemovalNeverConfirms(t *testing.T) {
 	f.sync(t)
 	if d := f.mc.Last(); !d.ConfirmMassRemoval || len(d.Accounts) != 1 {
 		t.Fatalf("admin removals: %+v", d)
+	}
+}
+
+// TestRevokeFailClosed: an unknown username (no uuid) is 503 with no row
+// change; a mailctl failure leaves the row active (503).
+func TestRevokeFailClosed(t *testing.T) {
+	f := newMailFixture(t)
+	f.sync(t)
+	c := f.create(t, "alice", "phone")
+	active := func() bool {
+		f.h.mu.RLock()
+		defer f.h.mu.RUnlock()
+		return f.h.st.MailCredentials["alice"][0].Active()
+	}
+	f.people.mu.Lock()
+	delete(f.people.m.UUIDs, "alice")
+	f.people.mu.Unlock()
+	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", c.ID); statusOf(err) != 503 || !active() {
+		t.Fatalf("no uuid: %v active %v", err, active())
+	}
+	f.people.mu.Lock()
+	f.people.m.UUIDs["alice"] = uuidAlice
+	f.people.mu.Unlock()
+	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 503 })
+	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", c.ID); statusOf(err) != 503 || !active() {
+		t.Fatalf("mailctl failure: %v active %v", err, active())
+	}
+	if len(f.mc.Creds("alice")) != 1 {
+		t.Fatal("password gone")
+	}
+	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 0 })
+	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", c.ID); err != nil || active() {
+		t.Fatalf("after recovery: %v active %v", err, active())
+	}
+}
+
+// TestCreateWhileStillRemoving: a re-created username is refused (409)
+// while a pending removal names it, while the last accepted document
+// lists it under another uuid, and when mailctl says account_mismatch.
+func TestCreateWhileStillRemoving(t *testing.T) {
+	f := newMailFixture(t)
+	f.sync(t)
+	ctx := context.Background()
+	want := "mail for alice is still being removed: try again after the removal"
+	try := func() error {
+		_, err := f.h.CreateMailPassword(ctx, "alice", "x", "none", testProof)
+		return err
+	}
+	f.h.mu.Lock()
+	f.h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: time.Now(), Accounts: []state.MailPendingAccount{{Username: "alice", UUID: "old"}}}
+	f.h.mu.Unlock()
+	if err := try(); statusOf(err) != 409 || err.Error() != want {
+		t.Fatalf("pending: %v", err)
+	}
+	f.h.mu.Lock()
+	f.h.st.Mail.PendingRemoval = nil
+	f.h.mu.Unlock()
+	// The last accepted document still has alice under another uuid.
+	f.h.mailState.mu.Lock()
+	l := *f.h.mailState.last
+	l.Accounts = append([]mailctl.Account(nil), l.Accounts...)
+	for i := range l.Accounts {
+		if l.Accounts[i].Username == "alice" {
+			l.Accounts[i].UUID = "99999999-0000-4000-8000-000000000001"
+		}
+	}
+	f.h.mailState.last = &l
+	f.h.mailState.mu.Unlock()
+	if err := try(); statusOf(err) != 409 || err.Error() != want {
+		t.Fatalf("stale last document: %v", err)
+	}
+	// mailctl itself sees another account under the name.
+	f.sync(t) // the current document again (alice with her uuid)
+	f.mc.Lock(func(s *mailctltest.Server) {
+		for i := range s.Doc.Accounts {
+			if s.Doc.Accounts[i].Username == "alice" {
+				s.Doc.Accounts[i].UUID = "99999999-0000-4000-8000-000000000002"
+			}
+		}
+	})
+	if err := try(); statusOf(err) != 409 || err.Error() != want {
+		t.Fatalf("account_mismatch: %v", err)
 	}
 }

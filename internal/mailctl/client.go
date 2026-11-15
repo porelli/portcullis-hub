@@ -48,7 +48,10 @@ type APIError struct {
 }
 
 // Error kinds (APIError.Kind).
-const ErrorKindMassRemoval = "mass_removal"
+const (
+	ErrorKindMassRemoval     = "mass_removal"
+	ErrorKindAccountMismatch = "account_mismatch"
+)
 
 func (e *APIError) Error() string {
 	if e.Msg != "" {
@@ -311,12 +314,15 @@ func (c *Client) Credentials(ctx context.Context, user string) ([]Credential, er
 
 // CreateCredential creates one mail password for user. The answer's
 // Secret is the only copy of the password: the caller zeroes it.
-func (c *Client) CreateCredential(ctx context.Context, user, label string, expires *time.Time) (Created, error) {
+// uuid is the person's LLDAP uuid: mailctl refuses (409, error_kind
+// account_mismatch) when the account under username has another one.
+func (c *Client) CreateCredential(ctx context.Context, user, uuid, label string, expires *time.Time) (Created, error) {
 	body := struct {
 		Username  string     `json:"username"`
+		UUID      string     `json:"uuid"`
 		Label     string     `json:"label"`
 		ExpiresAt *time.Time `json:"expires_at"`
-	}{user, label, expires}
+	}{user, uuid, label, expires}
 	status, raw, err := c.fetch(ctx, http.MethodPost, "/v1/credentials", body)
 	defer wipe(raw)
 	if err != nil {
@@ -364,10 +370,11 @@ func decodeCreated(raw []byte) (Created, error) {
 	return out, nil
 }
 
-// RevokeCredential destroys one of user's mail passwords (also when it
-// was already gone).
-func (c *Client) RevokeCredential(ctx context.Context, user, id string) error {
-	_, err := c.do(ctx, http.MethodDelete, "/v1/credentials/"+url.PathEscape(id)+"?user="+url.QueryEscape(user), nil, nil)
+// RevokeCredential destroys mail password id of the account with uuid
+// (parked accounts too; never resolved through a username). An unknown
+// uuid or id is 204 too.
+func (c *Client) RevokeCredential(ctx context.Context, uuid, id string) error {
+	_, err := c.do(ctx, http.MethodDelete, "/v1/credentials/"+url.PathEscape(id)+"?uuid="+url.QueryEscape(uuid), nil, nil)
 	return err
 }
 

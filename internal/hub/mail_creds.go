@@ -275,6 +275,12 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 	if err != nil || acct.UUID != uuid {
 		return nil, errMailNotReady
 	}
+	// The username's former account is still being removed: a pending
+	// mass removal names it, or the last document mailctl accepted lists
+	// it under another uuid (controller ruling, fail closed).
+	if h.mailStillRemoving(user, uuid) {
+		return nil, errMailStillRemoving(user)
+	}
 	// 7. The fresh-auth proof, governed by the people core template (the
 	// Sign-in page's), audited with the reason only.
 	if _, reason, err := h.checkFreshAuth(ctx, govCore("people"), p, user); err != nil {
@@ -282,9 +288,13 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 		return nil, err
 	}
 	// 8. mailctl.
-	created, err := api.CreateCredential(ctx, user, label, expires)
+	created, err := api.CreateCredential(ctx, user, uuid, label, expires)
 	if err != nil {
 		created.Secret.Zero()
+		var ae *mailctl.APIError
+		if errors.As(err, &ae) && ae.Kind == mailctl.ErrorKindAccountMismatch {
+			return nil, errMailStillRemoving(user)
+		}
 		switch mailctl.StatusOf(err) {
 		case http.StatusConflict:
 			return nil, statusErr(http.StatusConflict, "at most 5 mail passwords: revoke one first")
@@ -314,7 +324,7 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 	h.mu.Unlock()
 	if saveErr != nil {
 		// Never a password the Hub can't list: take it back.
-		if rerr := api.RevokeCredential(context.WithoutCancel(ctx), user, created.ID); rerr != nil {
+		if rerr := api.RevokeCredential(context.WithoutCancel(ctx), uuid, created.ID); rerr != nil {
 			log.Printf("mail: taking back %s's unrecorded mail password %s failed: %v", user, created.ID, rerr)
 		}
 		created.Secret.Zero()
@@ -536,25 +546,23 @@ func (h *Hub) revokeMailPassword(ctx context.Context, user, id string, actor dir
 		return err
 	}
 	cur := m.UUIDs[user]
-	if cur != row.UUID {
-		// The row's holder is gone: its password went with their account
-		// (mailctl destroys them first); never delete through it, the
-		// username now names someone else.
-		now := h.mailNow()
-		h.mu.Lock()
-		rows := h.st.MailCredentials[user]
-		for i := range rows {
-			if rows[i].ID == id && rows[i].Active() {
-				rows[i].RevokedAt, rows[i].Reason = &now, state.MailCredentialReasonRevokeLeave
-			}
-		}
-		saveErr := h.saveStateLocked()
-		h.mu.Unlock()
-		return saveErr
+	if cur == "" {
+		// The username isn't known (yet): decide nothing (fail closed).
+		return errMailNotReady
 	}
 	api, err := h.mailUp(ctx)
 	if err != nil {
 		return err
+	}
+	if cur != row.UUID {
+		// The row's holder is gone (the username was re-created): revoke
+		// it in the former account (by its uuid, parked or not); the row
+		// ends only on mailctl's 204.
+		if err := api.RevokeCredential(ctx, row.UUID, row.StalwartID); err != nil {
+			log.Printf("mail: revoking %s's former mail password %s: %v", user, id, err)
+			return errMailNotReady
+		}
+		return h.endMailRow(user, id, actor.User, state.MailCredentialReasonRevokeLeave)
 	}
 	// Delete only the password this row stands for: a reused Stalwart id
 	// may name a newer password now.
@@ -563,21 +571,15 @@ func (h *Hub) revokeMailPassword(ctx context.Context, user, id string, actor dir
 		return errMailDown
 	}
 	if matchLive(*row, cur, live) {
-		if err := api.RevokeCredential(ctx, user, row.StalwartID); err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
+		// Marked only after mailctl destroyed it; a failure leaves the
+		// row active (503).
+		if err := api.RevokeCredential(ctx, row.UUID, row.StalwartID); err != nil {
 			log.Printf("mail: revoking %s's mail password %s: %v", user, id, err)
 			return errMailDown
 		}
 	}
-	now := h.mailNow()
-	h.mu.Lock()
-	rows := h.st.MailCredentials[user]
-	for i := range rows {
-		if rows[i].ID == id && rows[i].Active() {
-			rows[i].RevokedAt, rows[i].RevokedBy, rows[i].Reason = &now, actor.User, state.MailCredentialReasonRevoked
-		}
-	}
-	saveErr := h.saveStateLocked()
-	h.mu.Unlock()
+	// Not live (mailctl's list is the confirmation: it is gone already).
+	saveErr := h.endMailRow(user, id, actor.User, state.MailCredentialReasonRevoked)
 	// Stalwart keeps sessions opened with it alive: restart mail.
 	h.goBackground(func() {
 		rctx, cancel := context.WithTimeout(context.Background(), mailRestartTimeout+5*time.Second)
@@ -672,4 +674,55 @@ func mobileConfig(host, login, displayName, label string, pw []byte) ([]byte, er
 	}
 	// One allocation of the final size (bytes.ReplaceAll counts first).
 	return bytes.ReplaceAll(tmpl, []byte(slot), esc.Bytes()), nil
+}
+
+// endMailRow ends user's active row id with reason (by: revoked_by).
+func (h *Hub) endMailRow(user, id, by, reason string) error {
+	now := h.mailNow()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rows := h.st.MailCredentials[user]
+	for i := range rows {
+		if rows[i].ID == id && rows[i].Active() {
+			rows[i].RevokedAt, rows[i].RevokedBy, rows[i].Reason = &now, by, reason
+		}
+	}
+	return h.saveStateLocked()
+}
+
+// errMailStillRemoving: the username's former account is still being
+// removed.
+func errMailStillRemoving(user string) error {
+	return statusErr(http.StatusConflict, "mail for %s is still being removed: try again after the removal", user)
+}
+
+// mailStillRemoving: user is in the pending mass removal, or the last
+// accepted document lists user under a uuid other than uuid.
+func (h *Hub) mailStillRemoving(user, uuid string) bool {
+	h.mu.RLock()
+	p := h.st.Mail.PendingRemoval
+	if p != nil {
+		for _, a := range p.Accounts {
+			if a.Username == user {
+				h.mu.RUnlock()
+				return true
+			}
+		}
+	}
+	h.mu.RUnlock()
+	s := &h.mailState
+	s.mu.Lock()
+	last := s.last
+	s.mu.Unlock()
+	if last == nil {
+		last, _ = h.loadMailLast()
+	}
+	if last != nil {
+		for _, a := range last.Accounts {
+			if a.Username == user && a.UUID != uuid {
+				return true
+			}
+		}
+	}
+	return false
 }

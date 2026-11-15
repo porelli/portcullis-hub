@@ -74,7 +74,7 @@ func TestClientRefusesWithoutSecretFile(t *testing.T) {
 		if _, err := c.State(context.Background()); !errors.Is(err, ErrNotConfigured) {
 			t.Fatalf("%q: State = %v", f, err)
 		}
-		if _, err := c.CreateCredential(context.Background(), "alice", "x", nil); !errors.Is(err, ErrNotConfigured) {
+		if _, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil); !errors.Is(err, ErrNotConfigured) {
 			t.Fatalf("%q: Create = %v", f, err)
 		}
 	}
@@ -220,7 +220,7 @@ func TestClientRequests(t *testing.T) {
 		t.Fatalf("Credentials = %+v, %v", cr, err)
 	}
 	exp := time.Date(2027, 11, 15, 9, 0, 0, 0, time.UTC)
-	cr, err := c.CreateCredential(ctx, "alice", "iPhone", &exp)
+	cr, err := c.CreateCredential(ctx, "alice", "u-1", "iPhone", &exp)
 	if err != nil || cr.ID != "4" || string(cr.Secret) != "s3cret-mail-password" {
 		t.Fatalf("Create = %+v, %v", cr, err)
 	}
@@ -236,7 +236,7 @@ func TestClientRequests(t *testing.T) {
 	if strings.Contains(string(cr.Secret), "s3cret") {
 		t.Fatal("Zero left the secret")
 	}
-	if err := c.RevokeCredential(ctx, "alice", "4"); err != nil {
+	if err := c.RevokeCredential(ctx, "u-1", "4"); err != nil {
 		t.Fatalf("Revoke = %v", err)
 	}
 	if err := c.Action(ctx, ActionDKIMRotate, "example.com"); err != nil {
@@ -252,8 +252,8 @@ func TestClientRequests(t *testing.T) {
 		`GET /v1/dns/other.example?wildcard=true `,
 		`GET /v1/checks?refresh=1 `,
 		`GET /v1/credentials?user=alice `,
-		`POST /v1/credentials {"username":"alice","label":"iPhone","expires_at":"2027-11-15T09:00:00Z"}`,
-		`DELETE /v1/credentials/4?user=alice `,
+		`POST /v1/credentials {"username":"alice","uuid":"u-1","label":"iPhone","expires_at":"2027-11-15T09:00:00Z"}`,
+		`DELETE /v1/credentials/4?uuid=u-1 `,
 		`POST /v1/actions/dkim-rotate {"domain":"example.com"}`,
 	}
 	if len(got) != len(want) {
@@ -332,7 +332,7 @@ func TestCreateCredentialBytesOnly(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := New(srv.URL, secretFile(t, testSecret))
-	cr, err := c.CreateCredential(context.Background(), "alice", "x", nil)
+	cr, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil)
 	if err != nil || string(cr.Secret) != `s3cret"pwA` {
 		t.Fatalf("%q %v", cr.Secret, err)
 	}
@@ -345,11 +345,11 @@ func TestCreateCredentialBytesOnly(t *testing.T) {
 		}
 	}
 	answer = `{"id":"4","secret":"x","created_at":"2026-11-15T09:00:00Z","expires_at":null,"extra":1}`
-	if _, err := c.CreateCredential(context.Background(), "alice", "x", nil); err == nil {
+	if _, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil); err == nil {
 		t.Fatal("unknown key accepted")
 	}
 	answer = `{"id":"4","created_at":"2026-11-15T09:00:00Z","expires_at":null,"other":"y"}`
-	if _, err := c.CreateCredential(context.Background(), "alice", "x", nil); err == nil {
+	if _, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil); err == nil {
 		t.Fatal("missing secret accepted")
 	}
 }
