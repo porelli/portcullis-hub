@@ -3,12 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
