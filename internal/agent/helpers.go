@@ -13,7 +13,6 @@ import (
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/fixerspec"
-	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -278,8 +277,4 @@ func readAppFileTar(r io.Reader, name string) ([]appFile, error) {
 		return nil, fmt.Errorf("%s.json is required", name)
 	}
 	return out, nil
-}
-
-func writeAtomic(p string, b []byte, mode os.FileMode) error {
-	return fsutil.WriteFileAtomic(p, b, mode)
 }

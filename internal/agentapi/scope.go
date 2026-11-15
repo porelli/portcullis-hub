@@ -243,7 +243,9 @@ func checkVolumeNames(m BundleManifest, others []BundleManifest) error {
 // its volume names), others the manifests of the worker's other bundled
 // instances, bindRoots the worker's folder roots (absolute, clean),
 // bundleDir the bundle's directory (absolute; relative bind sources
-// resolve there).
+// resolve there), readOnlyDirs directories binds may use read-only only
+// (the instance's appfiles: a container can't plant a symlink there for
+// the agent to write through).
 //
 // Everything is allowlisted: a compose key outside the lists above is
 // refused, whatever it is. Then, refused:
@@ -270,7 +272,7 @@ func checkVolumeNames(m BundleManifest, others []BundleManifest) error {
 //     volume), a bind source with "..", "~", a socket (*.sock), the host's
 //     root, outside bundleDir and every root, propagation shared/slave,
 //     any type but bind, volume or tmpfs.
-func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManifest, bindRoots []string, bundleDir string) error {
+func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManifest, bindRoots []string, bundleDir string, readOnlyDirs ...string) error {
 	if model == nil {
 		return bundleError("no compose model")
 	}
@@ -281,12 +283,18 @@ func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManif
 	if !path.IsAbs(bundleDir) || path.Clean(bundleDir) != bundleDir || bundleDir == "/" {
 		return bundleError("the bundle directory must be an absolute clean path")
 	}
-	var roots []string
+	var roots, ro []string
 	for _, r := range bindRoots {
 		if !path.IsAbs(r) || path.Clean(r) != r || r == "/" {
 			return bundleError("folder root %q must be an absolute clean path other than /", clip(r))
 		}
 		roots = append(roots, r)
+	}
+	for _, r := range readOnlyDirs {
+		if !path.IsAbs(r) || path.Clean(r) != r || r == "/" {
+			return bundleError("directory %q must be an absolute clean path other than /", clip(r))
+		}
+		ro = append(ro, r)
 	}
 	project := runtime.ProjectName(instance)
 	if model.Name != project {
@@ -356,7 +364,7 @@ func ValidateBundle(model *types.Project, m BundleManifest, others []BundleManif
 		all[n] = s
 	}
 	for _, n := range sortedKeys(all) {
-		if err := checkService(n, all[n], all, model, roots, bundleDir); err != nil {
+		if err := checkService(n, all[n], all, model, roots, ro, bundleDir); err != nil {
 			return err
 		}
 	}
@@ -383,7 +391,7 @@ func nsOK(v string, own map[string]types.ServiceConfig, allowed ...string) bool 
 	return false
 }
 
-func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceConfig, model *types.Project, roots []string, bundleDir string) error {
+func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceConfig, model *types.Project, roots, ro []string, bundleDir string) error {
 	what := "service " + clip(n)
 	fail := func(format string, args ...any) error {
 		return bundleError(what+": "+format, args...)
@@ -475,14 +483,14 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 		}
 	}
 	for _, mnt := range s.Volumes {
-		if err := checkMount(mnt, model, roots, bundleDir); err != nil {
+		if err := checkMount(mnt, model, roots, ro, bundleDir); err != nil {
 			return fail("%v", err)
 		}
 	}
 	return nil
 }
 
-func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots []string, bundleDir string) error {
+func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots, ro []string, bundleDir string) error {
 	if err := checkKeys(reflect.ValueOf(m), mountKeys, "mount "+clip(m.Target)); err != nil {
 		return err
 	}
@@ -538,6 +546,14 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, roots []strin
 	}
 	if strings.HasSuffix(p, ".sock") {
 		return fmt.Errorf("bind %s: sockets are not allowed", clip(src))
+	}
+	for _, r := range ro {
+		if under(p, r) {
+			if !m.ReadOnly {
+				return fmt.Errorf("bind %s must be read-only", clip(src))
+			}
+			return nil
+		}
 	}
 	if under(p, bundleDir) {
 		return nil

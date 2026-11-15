@@ -566,3 +566,95 @@ func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
+
+// plantSymlink makes <data>/appfiles/app/<rel> a symlink to target.
+func plantSymlink(t *testing.T, data, rel, target string) {
+	t.Helper()
+	p := filepath.Join(data, "appfiles", "app", rel)
+	os.MkdirAll(filepath.Dir(p), 0o750)
+	os.RemoveAll(p)
+	if err := os.Symlink(target, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func appFileTar(t *testing.T, files map[string]string) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for name, data := range files {
+		tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(data))})
+		tw.Write([]byte(data))
+	}
+	tw.Close()
+	return buf.Bytes()
+}
+
+// TestAppfilesSymlinkRefused (controller security ruling): a symlink a
+// container planted in the instance's appfiles (a directory or a file
+// pointing outside) makes the delivery fail, and nothing is written
+// outside.
+func TestAppfilesSymlinkRefused(t *testing.T) {
+	f := newAPI(t)
+	f.bundle(t, "app")
+	outside := t.TempDir()
+	// The data file's directory is a symlink to outside.
+	plantSymlink(t, f.data, "settings", outside)
+	if c := f.code(t, "PUT", "/v1/projects/app/appfiles/settings", appFileTar(t, map[string]string{"settings.json": "{}"})); c < 400 {
+		t.Errorf("symlinked directory: %d", c)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Errorf("written outside: %v", entries)
+	}
+	// The file itself is a symlink to a file outside.
+	os.Remove(filepath.Join(f.data, "appfiles", "app", "settings"))
+	victim := filepath.Join(outside, "victim")
+	os.WriteFile(victim, []byte("keep"), 0o644)
+	plantSymlink(t, f.data, "settings/settings.json", victim)
+	if c := f.code(t, "PUT", "/v1/projects/app/appfiles/settings", appFileTar(t, map[string]string{"settings.json": "{}"})); c < 400 {
+		t.Errorf("symlinked file: %d", c)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Errorf("the victim changed: %q", b)
+	}
+	// The instance's appfiles directory itself a symlink.
+	os.RemoveAll(filepath.Join(f.data, "appfiles", "app"))
+	os.Symlink(outside, filepath.Join(f.data, "appfiles", "app"))
+	if c := f.code(t, "PUT", "/v1/projects/app/appfiles/settings", appFileTar(t, map[string]string{"settings.json": "{}"})); c < 400 {
+		t.Errorf("symlinked instance dir: %d", c)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 1 {
+		t.Errorf("written outside: %v", entries)
+	}
+}
+
+// TestBundleAppfilesSymlinkRefused: the same through a bundle's
+// appfiles/: the bundle is refused, nothing is written outside, the
+// previous bundle stays.
+func TestBundleAppfilesSymlinkRefused(t *testing.T) {
+	f := newAPI(t)
+	f.bundle(t, "app")
+	before, _ := os.ReadFile(filepath.Join(f.data, "projects", "app", agentapi.ManifestName))
+	outside := t.TempDir()
+	plantSymlink(t, f.data, "settings", outside)
+	b := appBundle(t, "app", bundleFile{name: "appfiles/settings/settings.json", data: "{}", mode: 0o640}, bundleFile{name: "templates/app/new.conf", data: "n"})
+	if c := f.code(t, "PUT", "/v1/projects/app/bundle", b); c < 400 {
+		t.Errorf("bundle over a symlinked appfiles dir: %d", c)
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Errorf("written outside: %v", entries)
+	}
+	if after, _ := os.ReadFile(filepath.Join(f.data, "projects", "app", agentapi.ManifestName)); !bytes.Equal(before, after) {
+		t.Error("the previous bundle was replaced")
+	}
+	// A symlink deeper (a file) too.
+	os.Remove(filepath.Join(f.data, "appfiles", "app", "settings"))
+	victim := filepath.Join(outside, "victim")
+	os.WriteFile(victim, []byte("keep"), 0o644)
+	plantSymlink(t, f.data, "settings/settings.json", victim)
+	if c := f.code(t, "PUT", "/v1/projects/app/bundle", b); c < 400 {
+		t.Errorf("bundle over a symlinked appfile: %d", c)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "keep" {
+		t.Errorf("the victim changed: %q", got)
+	}
+}

@@ -442,3 +442,28 @@ func TestBundleVolumeNamesCrossInstance(t *testing.T) {
 		}
 	}
 }
+
+// TestBundleReadOnlyDirs (controller security ruling): binds under the
+// appfiles directory must be read-only, so a container can't plant
+// anything the agent later writes through.
+func TestBundleReadOnlyDirs(t *testing.T) {
+	dir := t.TempDir()
+	appfiles := "/data/appfiles/app"
+	mf := manifestFor("app", "app", nil)
+	for c, ok := range map[string]bool{
+		"services:\n  web:\n    image: x\n    volumes: [\"/data/appfiles/app/settings:/etc/settings:ro\"]\n":                                                     true,
+		"services:\n  web:\n    image: x\n    volumes: [\"/data/appfiles/app/settings:/etc/settings\"]\n":                                                        false,
+		"services:\n  web:\n    image: x\n    volumes:\n      - type: bind\n        source: /data/appfiles/app/s\n        target: /s\n":                          false,
+		"services:\n  web:\n    image: x\n    volumes:\n      - type: bind\n        source: /data/appfiles/app/s\n        target: /s\n        read_only: true\n": true,
+		"services:\n  web:\n    image: x\n    volumes: [\"/data/appfiles/other/x:/x:ro\"]\n":                                                                     false,
+	} {
+		m, err := loadBundleModel(t, dir, "app", c, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = ValidateBundle(m, mf, nil, []string{"/srv"}, dir, appfiles)
+		if ok != (err == nil) {
+			t.Errorf("%q: %v", c, err)
+		}
+	}
+}

@@ -244,7 +244,6 @@ func engineError(w http.ResponseWriter, err error) {
 	writeError(w, code, clipMsg(err.Error()))
 }
 
-
 // ── bundles ──────────────────────────────────────────────────────────────
 
 // composeFiles are the bundle's compose files, in order, that exist.
@@ -309,8 +308,9 @@ func (a *API) loadProject(id, dir string) (*project, error) {
 		}
 	}
 	a.mu.Unlock()
-	roots := append(append([]string{}, a.cfg.BindRoots...), a.appfilesDir(id))
-	if err := agentapi.ValidateBundle(model, m, others, roots, a.projectDir(id)); err != nil {
+	// Binds of the instance's appfiles must be read-only (a container
+	// can't plant anything the agent later writes through).
+	if err := agentapi.ValidateBundle(model, m, others, a.cfg.BindRoots, a.projectDir(id), a.appfilesDir(id)); err != nil {
 		return nil, err
 	}
 	p := &project{manifest: m, model: model, images: map[string]bool{}, routes: map[string]map[int]bool{}}
@@ -371,7 +371,11 @@ func (a *API) putBundle(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if err := a.commitBundle(id, staging); err != nil {
-		writeError(w, http.StatusInternalServerError, clipMsg(err.Error()))
+		code := http.StatusInternalServerError
+		if errors.Is(err, ErrNotPlain) {
+			code = http.StatusConflict
+		}
+		writeError(w, code, clipMsg(err.Error()))
 		return
 	}
 	a.mu.Lock()
@@ -407,22 +411,55 @@ func writeStaged(dir, name string, mode fs.FileMode, data io.Reader) error {
 }
 
 func (a *API) commitBundle(id, staging string) error {
-	// appfiles/ → <data>/appfiles/<id>/ (each file renamed into place).
+	// appfiles/ → <data>/appfiles/<id>/: every file checked against the
+	// instance's appfiles (no symlink, no other type in the way) before
+	// anything moves, then written there through os.Root; only then is
+	// the project directory swapped.
 	src := filepath.Join(staging, strings.TrimSuffix(BundleAppfiles, "/"))
-	if _, err := os.Stat(src); err == nil {
-		dst := a.appfilesDir(id)
+	var rels []string
+	if _, err := os.Lstat(src); err == nil {
 		err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			rel, _ := filepath.Rel(src, p)
-			if d.IsDir() {
-				return os.MkdirAll(filepath.Join(dst, rel), 0o750)
+			if d.Type().IsRegular() {
+				rel, _ := filepath.Rel(src, p)
+				rels = append(rels, filepath.ToSlash(rel))
+			} else if !d.IsDir() {
+				return ErrNotPlain
 			}
-			return os.Rename(p, filepath.Join(dst, rel))
+			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("appfiles: %v", err)
+			return fmt.Errorf("appfiles: %w", err)
+		}
+	}
+	if len(rels) > 0 {
+		root, err := openPlainDir(a.appfilesDir(id), true)
+		if err != nil {
+			return fmt.Errorf("appfiles: %w", err)
+		}
+		defer root.Close()
+		for _, rel := range rels {
+			if err := checkRooted(root, rel); err != nil {
+				return fmt.Errorf("appfiles: %w", err)
+			}
+		}
+		for _, rel := range rels {
+			p := filepath.Join(src, filepath.FromSlash(rel))
+			fi, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			f, err := os.OpenFile(p, os.O_RDONLY|syscallNoFollow, 0)
+			if err != nil {
+				return err
+			}
+			err = writeRooted(root, rel, f, fi.Mode().Perm())
+			f.Close()
+			if err != nil {
+				return fmt.Errorf("appfiles: %w", err)
+			}
 		}
 		os.RemoveAll(src)
 	}
@@ -475,14 +512,21 @@ func (a *API) putAppFile(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dir := filepath.Join(a.appfilesDir(id), name)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		writeError(w, http.StatusInternalServerError, "can't create the data file directory")
+	root, err := openPlainDir(a.appfilesDir(id), true)
+	if err != nil {
+		writeError(w, http.StatusConflict, "the data file directory: "+clipMsg(err.Error()))
 		return
 	}
+	defer root.Close()
 	for _, f := range files {
-		if err := writeAtomic(filepath.Join(dir, f.name), f.data, f.mode); err != nil {
-			writeError(w, http.StatusInternalServerError, "can't write the data file")
+		if err := checkRooted(root, name+"/"+f.name); err != nil {
+			writeError(w, http.StatusConflict, "the data file: "+clipMsg(err.Error()))
+			return
+		}
+	}
+	for _, f := range files {
+		if err := writeRooted(root, name+"/"+f.name, strings.NewReader(string(f.data)), f.mode); err != nil {
+			writeError(w, http.StatusConflict, "the data file: "+clipMsg(err.Error()))
 			return
 		}
 	}
