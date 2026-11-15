@@ -296,10 +296,14 @@ type Hub struct {
 	// revokeLocks: per server, the *sync.Mutex advanceRevoke holds.
 	revokeLocks sync.Map
 	// inflight: owed serials whose sign → send → pin op still runs
-	// (drainOwed skips them; empty after a restart). Guarded by mu.
+	// (drainOwed skips them; empty after a restart); removing: servers a
+	// RemoveServer is taking away (no placement meanwhile). Guarded by mu.
 	inflight map[string]bool
-	idp      IdP
-	attrs    AttrStore // LLDAP user attributes (setting claims); nil: none
+	removing map[string]bool
+	// rotateFail: server → why its revocation's rotation failed (srvMu).
+	rotateFail map[string]string
+	idp        IdP
+	attrs      AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

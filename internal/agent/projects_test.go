@@ -155,6 +155,7 @@ func appBundle(t *testing.T, instance string, extra ...bundleFile) []byte {
 }
 
 type apiFixture struct {
+	root string // the folder root (a real directory)
 	api  *API
 	rt   *eventsFake
 	net  *fakeNet
@@ -170,10 +171,12 @@ func newAPI(t *testing.T) *apiFixture {
 	}
 	rt := &eventsFake{Fake: &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, LogsVal: map[string][]byte{}, States: map[string]runtime.State{}, Contents: map[string][]byte{}}}
 	n := &fakeNet{addrs: map[string]netip.Addr{}, labels: map[string]map[string]string{}}
-	api := NewAPI(APIConfig{DataDir: data, BindRoots: []string{"/srv"}, Runtime: rt, Net: n, SelfImage: "sha256:agent", Config: agenttest.Config, HelperImage: "docker.io/library/alpine:3@sha256:" + strings.Repeat("a", 64)})
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	os.MkdirAll(filepath.Join(root, "photos"), 0o755)
+	api := NewAPI(APIConfig{DataDir: data, BindRoots: []string{root}, Runtime: rt, Net: n, SelfImage: "sha256:agent", Config: agenttest.Config, HelperImage: "docker.io/library/alpine:3@sha256:" + strings.Repeat("a", 64)})
 	srv := httptest.NewServer(api)
 	t.Cleanup(srv.Close)
-	return &apiFixture{api: api, rt: rt, net: n, data: data, srv: srv}
+	return &apiFixture{root: root, api: api, rt: rt, net: n, data: data, srv: srv}
 }
 
 func (f *apiFixture) req(t *testing.T, method, path string, body io.Reader) (*http.Response, []byte) {
@@ -227,7 +230,7 @@ func TestScopeTable(t *testing.T) {
 	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: map[string]string{docker.LabelProject: "portcullis-app"}}
 	f.rt.Volumes["portcullis-other_data"] = runtime.Volume{Name: "portcullis-other_data", Labels: map[string]string{docker.LabelProject: "portcullis-other"}}
 	f.rt.Volumes["portcullis_vault_data"] = runtime.Volume{Name: "portcullis_vault_data"}
-	fix := fixerspec.Run{Mode: "scan", Source: "/srv/photos"}
+	fix := fixerspec.Run{Mode: "scan", Source: f.root + "/photos"}
 	fixOK := agentapi.FixerSpecOf(fix.Spec("", AgentBinary))
 	fixOut := agentapi.FixerSpecOf(fixerspec.Run{Mode: "scan", Source: "/etc"}.Spec("", AgentBinary))
 	fixBad := fixOK
@@ -410,7 +413,7 @@ func TestBundleSwapKeepsAppfiles(t *testing.T) {
 		}
 	}
 	// The bundle survives a restart (re-validated from disk).
-	api2 := NewAPI(APIConfig{DataDir: f.data, BindRoots: []string{"/srv"}, Runtime: f.rt, Net: f.net, Config: agenttest.Config})
+	api2 := NewAPI(APIConfig{DataDir: f.data, BindRoots: []string{f.root}, Runtime: f.rt, Net: f.net, Config: agenttest.Config})
 	if api2.project("app") == nil {
 		t.Error("the bundle wasn't reloaded")
 	}
@@ -539,7 +542,7 @@ func TestSetupNetwork(t *testing.T) {
 // with its own binary.
 func TestFixerRunsOnOwnImage(t *testing.T) {
 	f := newAPI(t)
-	spec := agentapi.FixerSpecOf(fixerspec.Run{Mode: "scan", Source: "/srv/photos", Opts: folderfix.Options{}}.Spec("", AgentBinary))
+	spec := agentapi.FixerSpecOf(fixerspec.Run{Mode: "scan", Source: f.root + "/photos", Opts: folderfix.Options{}}.Spec("", AgentBinary))
 	resp, b := f.req(t, "POST", "/v1/helpers", bytes.NewReader(mustJSON(agentapi.HelperSpec{Kind: agentapi.HelperFolderFix, Spec: &spec})))
 	var hc agentapi.HelperCreated
 	json.Unmarshal(b, &hc)

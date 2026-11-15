@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -68,6 +69,9 @@ type serverTimings struct {
 	swapWait  time.Duration // how long a handshake on the new key may take
 	callWait  time.Duration // one agent call's timeout
 	dial      agentrt.Dialer
+	// beforeSetServer runs right before a backend is registered (tests:
+	// a revocation racing it).
+	beforeSetServer func(id string)
 }
 
 func (h *Hub) now() time.Time {
@@ -91,6 +95,18 @@ func (h *Hub) srvDialer() agentrt.Dialer {
 	return agentrt.LinkDialer{Proxy: h.cfg.LinkProxy}
 }
 
+// relayImageRe is HUB_RELAY_IMAGE: pinned by digest, or :edge.
+var relayImageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(:[0-9]+)?/[a-z0-9._/-]+(@sha256:[0-9a-f]{64}|:edge)$`)
+
+// RelayImageOK: ref is a relay image reference HUB_RELAY_IMAGE may hold.
+func RelayImageOK(ref string) bool { return relayImageRe.MatchString(ref) }
+
+// ErrNoRelayImage is the 503 while link_doc exists but HUB_RELAY_IMAGE
+// isn't a usable relay image (review B-L3: checked at every use).
+func errNoRelayImage() error {
+	return statusErr(503, "servers are off: HUB_RELAY_IMAGE must be set to the relay image, pinned by digest (@sha256:…) or :edge")
+}
+
 // errServersOff: Servers is off (no link_doc, or link isn't running).
 func errServersOff() error {
 	return statusErr(503, "servers are off: run ./portcullis link init on the primary")
@@ -108,6 +124,9 @@ func (h *Hub) serversOn() (*vpn.LinkState, error) {
 	}
 	if fi, err := os.Stat(h.cfg.LinkDocDir); err != nil || !fi.IsDir() {
 		return nil, errServersOff()
+	}
+	if !RelayImageOK(h.cfg.RelayImage) {
+		return nil, errNoRelayImage()
 	}
 	st, err := vpn.ReadStatus(h.cfg.VPNStatusFile, h.now())
 	if err != nil || st.Link == nil || !st.Link.OK || servers.ValidWGKey(st.Link.PublicKey) != nil || st.Link.Port < 1 || st.Link.Port > 65535 {

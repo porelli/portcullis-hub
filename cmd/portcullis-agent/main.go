@@ -173,18 +173,49 @@ func run(data string, getenv func(string) string) error {
 	go guard.Run(ctx, engine, 10*time.Second)
 	cli := compose.NewCLI(host, guard)
 	rt := dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: dockerrt.HelperImage})
+	// The agent's own container and image (the fixer runs on it, P7),
+	// and its compose working dir: the worker's install (./portcullis,
+	// .env, docker-compose.worker.yml) is protected like the data dir
+	// (A-H1). Unreadable: no start.
+	self, _ := os.Hostname()
+	ui, err := rt.Inspect(ctx, self)
+	if err != nil {
+		return fmt.Errorf("the agent can't inspect its own container (its install dir must be protected): %v", err)
+	}
+	selfImage := ui.Image
+	install, err := agent.InstallDirOf(ui.Labels)
+	if err != nil {
+		return err
+	}
 	protected, err := protectedPaths(ctx, rt, getenv("AGENT_PROTECTED"))
 	if err != nil {
 		return err
 	}
-	// The agent's own container and image (the fixer runs on it, P7).
-	self, _ := os.Hostname()
-	selfImage := ""
-	if ui, err := rt.Inspect(ctx, self); err == nil {
-		selfImage = ui.Image
+	protected = append(protected, install)
+	if sock := getenv("AGENT_ENGINE_SOCKET"); sock != "" {
+		if !path.IsAbs(sock) || path.Clean(sock) != sock {
+			return errors.New("AGENT_ENGINE_SOCKET must be an absolute clean path")
+		}
+		protected = append(protected, sock)
+	}
+	// A-H3: every folder root visible here; A-M2: nothing protected
+	// inside a folder root (by path and by dev/inode).
+	if err := agent.CheckRootsVisible(roots); err != nil {
+		return fmt.Errorf("%v: mount each folder root into the agent at the same path", err)
+	}
+	if err := agent.CheckProtectedOutsideRoots(append(append([]string{}, protected...), data), roots); err != nil {
+		return err
 	}
 	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage,
-		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env(), Config: cli.Config, Protected: protected})
+		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env(), Config: cli.Config, Protected: protected,
+		DiskFree: func(ctx context.Context) (int64, bool) {
+			i, err := engineInfoFor(ctx, rt)
+			if err != nil || i.DiskTotal == 0 {
+				return 0, false
+			}
+			// A margin: the engine needs room too.
+			return i.DiskFree - 1<<30, i.DiskFree > 1<<30
+		}})
 	engineInfo := agent.EngineInfo(rt, portStart)
 	info := func(ctx context.Context) (agentapi.Info, error) {
 		i, err := engineInfo(ctx)
@@ -194,6 +225,7 @@ func run(data string, getenv func(string) string) error {
 		if i.PortBinds, err = agent.PortBinds(ctx, engine); err != nil {
 			return i, err
 		}
+		i.Quarantined = api.Quarantined()
 		return i, nil
 	}
 	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api,
@@ -201,6 +233,8 @@ func run(data string, getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
+	// The bind-check backstop on every container start (A-H2b).
+	go api.WatchStarts(ctx)
 	// At every start (P35): the worker's portcullis-proxy and the agent on it.
 	if n, err := a.Network(); err == nil {
 		if err := api.SetupNetwork(ctx, n, self); err != nil {
@@ -253,6 +287,11 @@ func run(data string, getenv func(string) string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// engineInfoFor is the engine part of /v1/info (its disk: the data root).
+func engineInfoFor(ctx context.Context, rt runtime.Instances) (agentapi.Info, error) {
+	return agent.EngineInfo(rt, 0)(ctx)
 }
 
 // defaultProtected are host paths no bind may equal, contain or be inside

@@ -220,7 +220,10 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	// untrusted: a unit is kept only when its project label names an
 	// instance placed on THAT server and its Instance agrees; follow-up
 	// calls go to the runtime it came from (unitRT), never by its claim.
-	unitRT := map[string]runtime.Instances{}
+	// unitRT[i] is cs[i]'s runtime (nil: the primary's): by position,
+	// never by container id (review A-L1: a worker can't name a primary
+	// container and have its state read from the worker).
+	unitRT := make([]runtime.Instances, len(cs))
 	for server, rt := range h.runtimes() {
 		if server == "primary" {
 			continue
@@ -236,12 +239,12 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 				log.Printf("reconcile: server %s reported a unit of %q that isn't placed there: ignored", server, clipRunes(c.Project, 80))
 				continue
 			}
-			unitRT[c.ID] = rt
+			unitRT = append(unitRT, rt)
 			cs = append(cs, c)
 		}
 	}
-	unitRuntime := func(c runtime.Unit) runtime.Instances {
-		if rt, ok := unitRT[c.ID]; ok {
+	unitRuntime := func(i int) runtime.Instances {
+		if rt := unitRT[i]; rt != nil {
 			return rt
 		}
 		return h.rt
@@ -289,7 +292,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		mcpAliases []string
 	}
 	var live []running
-	for _, c := range cs {
+	for ci, c := range cs {
 		p := c.Project
 		if !strings.HasPrefix(p, ProjectPrefix) || c.Labels[docker.LabelOneoff] == "True" {
 			continue
@@ -338,7 +341,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if !isRunning && c.State != "created" {
 				// The list has no exit code: inspected.
 				st = docker.State{Status: "dead"} // can't tell: failed
-				if s, ierr := unitRuntime(c).State(ctx, c.ID); ierr == nil {
+				if s, ierr := unitRuntime(ci).State(ctx, c.ID); ierr == nil {
 					st = s
 				}
 			}

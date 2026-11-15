@@ -116,6 +116,10 @@ type Instance struct {
 	// Server is the worker server the instance runs on ("" = the
 	// primary; contract §11, §17).
 	Server string `json:"server,omitempty" yaml:"server,omitempty"`
+	// KeycloakClients are the Keycloak client ids the Hub registered for
+	// the instance (recorded at create and enable): a revocation rotates
+	// them even when the template no longer resolves (review B-M3).
+	KeycloakClients []string `json:"keycloak_clients,omitempty" yaml:"keycloak_clients,omitempty"`
 	// Label is the instance's display label (§11.9; "" = never set: the
 	// manifest's name for a default instance, the id otherwise). Display
 	// only: nothing keys on it.

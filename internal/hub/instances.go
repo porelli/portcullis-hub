@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -496,6 +497,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)
 		h.seedAIProvidersLocked(v)
+		h.recordClientsLocked(v)
 	}
 	h.saveLocked()
 	log.Printf("instance %s of %s created (hosts %v)", id, templateID, view.Hosts)
@@ -719,4 +721,26 @@ func firstClaimed(claims []string, claimed map[string]string) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+// recordClientsLocked records view v's Keycloak client ids on its state
+// entry (none: nothing; review B-M3). Caller holds mu (write).
+func (h *Hub) recordClientsLocked(v *templates.Template) bool {
+	in, ok := h.st.Instances[v.ID]
+	if !ok {
+		return false
+	}
+	ids := append([]string{}, in.KeycloakClients...)
+	for _, c := range v.Manifest.Clients {
+		if c.ClientID != "" && !slices.Contains(ids, c.ClientID) {
+			ids = append(ids, c.ClientID)
+		}
+	}
+	if len(ids) == len(in.KeycloakClients) {
+		return false
+	}
+	slices.Sort(ids)
+	in.KeycloakClients = ids
+	h.st.Instances[v.ID] = in
+	return true
 }

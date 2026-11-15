@@ -411,3 +411,31 @@ func TestAgentStatusPolicy(t *testing.T) {
 		srv.Close()
 	}
 }
+
+// TestHelperCleanupBounded (review B-L6): a worker that never answers a
+// helper's removal can't hold the Hub: deleteHelper ends at its timeout.
+func TestHelperCleanupBounded(t *testing.T) {
+	w := newWorker(t)
+	block := make(chan struct{})
+	defer close(block)
+	orig := w.srv.Config.Handler
+	w.srv.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/v1/helpers/") {
+			select {
+			case <-block:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		orig.ServeHTTP(rw, r)
+	})
+	old := HelperCleanupTimeout
+	HelperCleanupTimeout = 200 * time.Millisecond
+	defer func() { HelperCleanupTimeout = old }()
+	b, _ := w.backend(t, nil)
+	start := time.Now()
+	b.deleteHelper("h1")
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("deleteHelper took %s", d)
+	}
+}

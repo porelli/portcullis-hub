@@ -325,7 +325,7 @@ func main() {
 	}
 	// Servers (contract §17): link.json on the link_doc volume; off
 	// while the directory doesn't exist.
-	if cfg.LinkDocDir, cfg.LinkDocGID, cfg.LinkProxy, cfg.RelayImage, err = linkFromEnv(os.Getenv, dirExists); err != nil {
+	if cfg.LinkDocDir, cfg.LinkDocGID, cfg.LinkProxy, cfg.RelayImage, err = linkFromEnv(os.Getenv, dirExists, cfg.VPNDocGID); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
@@ -835,8 +835,6 @@ const (
 	defaultLinkProxy  = "172.31.254.83:3128"
 )
 
-var relayImageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(:[0-9]+)?/[a-z0-9._/-]+(@sha256:[0-9a-f]{64}|:edge)$`)
-
 func dirExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.IsDir()
@@ -846,13 +844,13 @@ func dirExists(p string) bool {
 // (default 10009, 1–65535, never 10001), HUB_LINK_PROXY (default
 // 172.31.254.83:3128, an IPv4:port) and HUB_RELAY_IMAGE (required when
 // the link_doc directory exists: pinned by digest or :edge).
-func linkFromEnv(getenv func(string) string, exists func(string) bool) (dir string, gid int, proxy, relay string, err error) {
+func linkFromEnv(getenv func(string) string, exists func(string) bool, vpnGID int) (dir string, gid int, proxy, relay string, err error) {
 	dir = getenv("HUB_LINK_DOC_DIR")
 	if dir == "" {
 		dir = defaultLinkDocDir
 	}
-	if !filepath.IsAbs(dir) {
-		return "", 0, "", "", fmt.Errorf("HUB_LINK_DOC_DIR must be an absolute path")
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return "", 0, "", "", fmt.Errorf("HUB_LINK_DOC_DIR must be an absolute, clean path")
 	}
 	gid = defaultLinkDocGID
 	if raw := getenv("HUB_LINK_DOC_GID"); raw != "" {
@@ -861,6 +859,9 @@ func linkFromEnv(getenv func(string) string, exists func(string) bool) (dir stri
 			return "", 0, "", "", fmt.Errorf("HUB_LINK_DOC_GID must be a group id 1–65535 other than 10001 (the Hub's own group)")
 		}
 		gid = n
+	}
+	if gid == vpnGID {
+		return "", 0, "", "", fmt.Errorf("HUB_LINK_DOC_GID must differ from HUB_VPN_DOC_GID (each document's group is its own)")
 	}
 	proxy = getenv("HUB_LINK_PROXY")
 	if proxy == "" {
@@ -871,10 +872,10 @@ func linkFromEnv(getenv func(string) string, exists func(string) bool) (dir stri
 	}
 	relay = getenv("HUB_RELAY_IMAGE")
 	if exists(dir) {
-		if !relayImageRe.MatchString(relay) {
+		if !hub.RelayImageOK(relay) {
 			return "", 0, "", "", fmt.Errorf("HUB_RELAY_IMAGE must be set to the relay image, pinned by digest (@sha256:…) or :edge")
 		}
-	} else if relay != "" && !relayImageRe.MatchString(relay) {
+	} else if relay != "" && !hub.RelayImageOK(relay) {
 		return "", 0, "", "", fmt.Errorf("HUB_RELAY_IMAGE must be pinned by digest (@sha256:…) or :edge")
 	}
 	return dir, gid, proxy, relay, nil

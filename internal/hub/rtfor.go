@@ -43,16 +43,40 @@ func (h *Hub) reg() *serverRegistry {
 	return h.srv
 }
 
-// setServer records (or with nil removes) a server's runtime state.
-func (h *Hub) setServer(id string, s *serverRT) {
+// setServer records (or with nil removes) a server's runtime state. A
+// revoked entry is terminal (review B-M1): only nil (the server's
+// removal) replaces it; anything else is refused (false).
+func (h *Hub) setServer(id string, s *serverRT) bool {
 	r := h.reg()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if s == nil {
 		delete(r.servers, id)
-		return
+		return true
+	}
+	if cur := r.servers[id]; cur != nil && cur.State == ServerRevoked && s.State != ServerRevoked {
+		return false
 	}
 	r.servers[id] = s
+	return true
+}
+
+// setLive registers server id's backend as state (ready or offline) —
+// only while state.yaml still has it neither revoked nor being revoked,
+// checked under mu with the registry write (B-M1: a revocation landing
+// between a check and the write can't be undone by it). ok: one of the
+// accepted states (nil: ready or offline).
+func (h *Hub) setLive(id string, rt runtime.Instances, stateName string) bool {
+	if h.srvT.beforeSetServer != nil {
+		h.srvT.beforeSetServer(id)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.st.Servers[id]
+	if !ok || s.Revoke != nil || s.State == ServerRevoked || s.State == ServerEnrolling {
+		return false
+	}
+	return h.setServer(id, &serverRT{Name: s.Name, State: stateName, RT: rt})
 }
 
 // noteInstanceServer records instance id's server ("" = primary).

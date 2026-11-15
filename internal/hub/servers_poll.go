@@ -21,6 +21,10 @@ import (
 // min; on return a reconcile and the doctor), and renews worker
 // certificates at ⅓ remaining life.
 
+// workerKickEvery: the shortest interval between reconciles one worker's
+// events trigger.
+const workerKickEvery = 10 * time.Second
+
 // pollState is one server's poll memory.
 type pollState struct {
 	misses int
@@ -120,8 +124,7 @@ func (h *Hub) startServers(ctx context.Context) {
 				h.setServer(id, &serverRT{Name: s.Name, State: ServerOffline})
 				continue
 			}
-			h.setServer(id, &serverRT{Name: s.Name, State: s.State, RT: b})
-			if s.State == ServerReady {
+			if h.setLive(id, b, s.State) && s.State == ServerReady {
 				h.watchServer(id, b)
 			}
 		case ServerRevoked:
@@ -187,8 +190,7 @@ func (h *Hub) rebuildBackends(ctx context.Context) {
 		}
 		h.srvMu.Unlock()
 		if b, err := h.serverBackend(ctx, id, s, kind); err == nil {
-			h.setServer(id, &serverRT{Name: s.Name, State: s.State, RT: b})
-			if s.State == ServerReady {
+			if h.setLive(id, b, s.State) && s.State == ServerReady {
 				h.watchServer(id, b)
 			}
 		}
@@ -211,7 +213,9 @@ func (h *Hub) pollServer(ctx context.Context, id string) {
 			return
 		}
 		b = nb
-		h.setServer(id, &serverRT{Name: s.Name, State: s.State, RT: b})
+		if !h.setLive(id, b, s.State) {
+			return
+		}
 	}
 	c, cancel := context.WithTimeout(ctx, orDur(h.srvT.callWait, 15*time.Second))
 	info, err := b.AgentInfo(c)
@@ -229,14 +233,17 @@ func (h *Hub) pollServer(ctx context.Context, id string) {
 			b = nb
 		}
 	}
-	stale := false
-	if hs := h.linkHandshakes(); hs != nil {
-		at, ok := hs[id]
-		stale = !ok || h.now().Sub(at) > handshakeMaxAge
+	// Fail closed (review B-L7): an unreadable link status is offline
+	// too — no routing to a worker whose tunnel nobody can vouch for.
+	why := ""
+	if hs := h.linkHandshakes(); hs == nil {
+		why = "link's status is unreadable"
+	} else if at, ok := hs[id]; !ok || h.now().Sub(at) > handshakeMaxAge {
+		why = "no handshake for 3 minutes"
 	}
-	if stale {
-		h.notePoll(id, &info, "no handshake for 3 minutes")
-		h.setOffline(id, "no handshake for 3 minutes")
+	if why != "" {
+		h.notePoll(id, &info, why)
+		h.setOffline(id, why)
 		return
 	}
 	h.notePoll(id, &info, "")
@@ -251,7 +258,9 @@ func (h *Hub) pollServer(ctx context.Context, id string) {
 	h.st.Servers[id] = s
 	h.saveLocked()
 	h.mu.Unlock()
-	h.setServer(id, &serverRT{Name: s.Name, State: ServerReady, RT: b})
+	if !h.setLive(id, b, ServerReady) {
+		return
+	}
 	h.watchServer(id, b)
 	if back {
 		log.Printf("servers: %s is back", id)
@@ -300,7 +309,7 @@ func (h *Hub) setOffline(id, why string) {
 	h.mu.Unlock()
 	r := h.reg()
 	r.mu.Lock()
-	if rs := r.servers[id]; rs != nil {
+	if rs := r.servers[id]; rs != nil && rs.State == ServerReady {
 		rs.State = ServerOffline
 	}
 	r.mu.Unlock()
@@ -359,7 +368,9 @@ func (h *Hub) renewServer(ctx context.Context, id string, b *agentrt.Backend) er
 	if err != nil {
 		return err
 	}
-	h.setServer(id, &serverRT{Name: s.Name, State: s.State, RT: nb})
+	if !h.setLive(id, nb, s.State) {
+		return statusErr(409, "server %s was revoked during the renewal", id)
+	}
 	if s.State == ServerReady {
 		h.watchServer(id, nb)
 	}
@@ -385,12 +396,18 @@ func (h *Hub) watchServer(id string, rt runtime.Instances) {
 	h.srvMu.Unlock()
 	go func() {
 		backoff := time.Second
+		// A worker's events kick a reconcile at most every 10 s (review
+		// B-L6: a worker can't keep the reconciler busy).
+		var last time.Time
 		for ctx.Err() == nil {
 			err := rt.Events(ctx, runtime.Filter{All: true}, func(ev runtime.Event) {
 				if strings.HasPrefix(ev.Actor.Attributes[docker.LabelProject], ProjectPrefix) {
 					switch ev.Action {
 					case "start", "die", "stop", "kill", "destroy", "create", "pause", "unpause", "restart", "oom":
-						h.TriggerReconcile()
+						if now := time.Now(); now.Sub(last) >= workerKickEvery {
+							last = now
+							h.TriggerReconcile()
+						}
 					}
 				}
 			})

@@ -589,6 +589,10 @@ func (h *Hub) redactionSetErr(id string) ([]string, error) {
 		vals = append(vals, envSecrets(t, readEnvFile(p))...)
 	}
 	vals = append(vals, h.knownSecrets(id)...)
+	// The instance's relay token (review B-L4).
+	if tok := readEnvRaw(h.relayEnvPath(id))[RelayTokenVar]; tok != "" {
+		vals = append(vals, tok)
+	}
 	// G30(c): every model provider secret, whichever instance selects it.
 	ps, perr := h.providerSecretValues()
 	vals = append(vals, ps...)

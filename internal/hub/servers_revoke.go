@@ -2,8 +2,11 @@ package hub
 
 import (
 	"context"
+	"maps"
+
 	"errors"
 	"fmt"
+	"github.com/portcullis/hub/internal/doctor"
 	"log"
 	"slices"
 	"sync"
@@ -66,16 +69,29 @@ func (h *Hub) RemoveServer(ctx context.Context, actor directory.Actor, id string
 	if servers.ValidID(id) != nil {
 		return statusErr(400, "invalid server id")
 	}
-	h.mu.RLock()
+	// Marked removing under mu with the check (B-L2): no placement lands
+	// on it from here on; checked again before the revocation.
+	h.mu.Lock()
 	s, ok := h.st.Servers[id]
 	placed := h.placedLocked(id)
-	h.mu.RUnlock()
+	if ok && len(placed) == 0 {
+		if h.removing == nil {
+			h.removing = map[string]bool{}
+		}
+		h.removing[id] = true
+	}
+	h.mu.Unlock()
 	if !ok {
 		return statusErr(404, "server %s not found", id)
 	}
 	if len(placed) > 0 {
 		return statusErr(409, "server %s still has %d instance(s): move, restore or forget them first", s.Name, len(placed))
 	}
+	defer func() {
+		h.mu.Lock()
+		delete(h.removing, id)
+		h.mu.Unlock()
+	}()
 	if s.State == ServerReady || s.State == ServerOffline {
 		if b, ok := h.backendOf(id); ok {
 			c, cancel := context.WithTimeout(ctx, orDur(h.srvT.callWait, 15*time.Second))
@@ -86,6 +102,10 @@ func (h *Hub) RemoveServer(ctx context.Context, actor directory.Actor, id string
 		}
 	}
 	h.mu.Lock()
+	if placed := h.placedLocked(id); len(placed) > 0 {
+		h.mu.Unlock()
+		return statusErr(409, "server %s still has %d instance(s): move, restore or forget them first", s.Name, len(placed))
+	}
 	h.beginRevokeLocked(id, true)
 	h.mu.Unlock()
 	h.stopEnrol(id)
@@ -131,9 +151,36 @@ func (h *Hub) beginRevokeLocked(id string, remove bool) {
 		in.State = state.InstanceOrphaned
 		h.st.Instances[iid] = in
 	}
+	// Step 1 at once, under the same lock (B-L1): the peer is out of
+	// link.json before anything waits (advanceRevoke retries a failure).
+	if err := h.publishLinkLocked(); err != nil {
+		log.Printf("servers: revoking %s: link.json: %v (retried)", id, err)
+	}
 	h.saveLocked()
 	h.setServer(id, &serverRT{Name: s.Name, State: ServerRevoked})
 	h.stopWatch(id)
+}
+
+// placeableLocked: server can take a new instance (not revoked, not being
+// revoked or removed). Caller holds mu.
+func (h *Hub) placeableLocked(server string) error {
+	s, ok := h.st.Servers[server]
+	switch {
+	case !ok:
+		return statusErr(409, "server %s is unknown", server)
+	case s.Revoke != nil || s.State == ServerRevoked:
+		return statusErr(409, "server %s is revoked", nameOr(s.Name, server))
+	case h.removing[server]:
+		return statusErr(409, "server %s is being removed", nameOr(s.Name, server))
+	}
+	return nil
+}
+
+func nameOr(name, id string) string {
+	if name == "" {
+		return id
+	}
+	return name
 }
 
 // advanceRevoke runs the revocation steps still owed (none = nothing),
@@ -190,8 +237,10 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 		}
 		if err := errors.Join(errs...); err != nil {
 			log.Printf("servers: revoking %s: rotation: %v (retried at the next tick)", id, err)
+			h.noteRotation(id, clipRunes(err.Error(), 300))
 		} else {
 			rv.Rotated = true
+			h.noteRotation(id, "")
 		}
 	}
 	h.mu.Lock()
@@ -299,6 +348,39 @@ func (h *Hub) discardSerial(ctx context.Context, id, serial string) {
 	h.mu.Unlock()
 }
 
+// clientLister lists the clients tagged with an owner (keycloak.Client).
+type clientLister interface {
+	ClientIDsOwnedBy(ctx context.Context, owner string) ([]string, error)
+}
+
+// rotateWithoutTemplate (review B-M3): an instance whose template no
+// longer resolves can't have its clients re-registered, so they are
+// deleted — the ids recorded on the instance, else every client tagged
+// with its id — and its relay token is replaced. A restore elsewhere
+// registers them again.
+func (h *Hub) rotateWithoutTemplate(ctx context.Context, id string, recorded []string) error {
+	if h.idp == nil {
+		return errors.New("Keycloak isn't configured")
+	}
+	ids := recorded
+	if len(ids) == 0 {
+		l, ok := h.idp.(clientLister)
+		if !ok {
+			return fmt.Errorf("instance %s: its template doesn't resolve and its Keycloak clients aren't recorded", id)
+		}
+		var err error
+		if ids, err = l.ClientIDsOwnedBy(ctx, id); err != nil {
+			return fmt.Errorf("listing %s's Keycloak clients: %w", id, err)
+		}
+	}
+	for _, cid := range ids {
+		if err := h.idp.DeleteClient(ctx, cid, id); err != nil {
+			return fmt.Errorf("Keycloak: deleting client %s of %s: %w", cid, id, err)
+		}
+	}
+	return h.newRelayToken(id)
+}
+
 // rotateInstanceSecrets gives instance id new Keycloak client secrets (a
 // new random value in its .env, registered with Keycloak) and a new relay
 // token: nothing the revoked worker held stays valid. An ai_client is
@@ -308,8 +390,9 @@ func (h *Hub) rotateInstanceSecrets(ctx context.Context, id string) error {
 	h.mu.Lock()
 	v := h.findLocked(id)
 	if v == nil {
+		recorded := append([]string{}, h.st.Instances[id].KeycloakClients...)
 		h.mu.Unlock()
-		return fmt.Errorf("instance %s does not resolve", id)
+		return h.rotateWithoutTemplate(ctx, id, recorded)
 	}
 	tmpl := *v
 	env := readEnvRaw(h.envPath(id))
@@ -366,4 +449,29 @@ func (h *Hub) rotateInstanceSecrets(ctx context.Context, id string) error {
 		}
 	}
 	return h.newRelayToken(id)
+}
+
+// noteRotation records why server id's step 5 failed ("" = it didn't):
+// the doctor's server_secrets_not_rotated.
+func (h *Hub) noteRotation(id, why string) {
+	h.srvMu.Lock()
+	defer h.srvMu.Unlock()
+	if why == "" {
+		delete(h.rotateFail, id)
+		return
+	}
+	if h.rotateFail == nil {
+		h.rotateFail = map[string]string{}
+	}
+	h.rotateFail[id] = why
+}
+
+// serversDoctorIn is the doctor's servers input.
+func (h *Hub) serversDoctorIn() *doctor.ServersIn {
+	h.srvMu.Lock()
+	defer h.srvMu.Unlock()
+	if len(h.rotateFail) == 0 {
+		return nil
+	}
+	return &doctor.ServersIn{NotRotated: maps.Clone(h.rotateFail)}
 }

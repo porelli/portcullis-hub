@@ -3,6 +3,7 @@ package agentapi
 import (
 	"errors"
 	"fmt"
+	units "github.com/docker/go-units"
 	"path"
 	"reflect"
 	"regexp"
@@ -504,6 +505,12 @@ func checkService(n string, s types.ServiceConfig, own map[string]types.ServiceC
 	if s.ShmSize > MaxShmSize {
 		return fail("shm_size over %d bytes", int64(MaxShmSize))
 	}
+	// The short tmpfs form too (review A-L3): a size, at most the cap.
+	for _, t := range s.Tmpfs {
+		if err := checkTmpfsShort(t); err != nil {
+			return fail("%v", err)
+		}
+	}
 	for _, name := range []string{n, s.ContainerName, s.Hostname} {
 		if name != "" && reservedName(name) {
 			return fail("the DNS name %q is reserved", clip(name))
@@ -652,3 +659,24 @@ func checkMount(m types.ServiceVolumeConfig, model *types.Project, sc BundleScop
 }
 
 func under(p, root string) bool { return p == root || strings.HasPrefix(p, root+"/") }
+
+// checkTmpfsShort checks a short-form tmpfs ("/path:size=64m,mode=1777"):
+// a size option is at most MaxTmpfsSize, as the long form's (review A-L3).
+func checkTmpfsShort(t string) error {
+	target, opts, _ := strings.Cut(t, ":")
+	for _, o := range strings.Split(opts, ",") {
+		k, v, _ := strings.Cut(strings.TrimSpace(o), "=")
+		if k != "size" {
+			continue
+		}
+		n, err := units.RAMInBytes(v)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("tmpfs %s: size %q isn't a size", clip(target), clip(v))
+		}
+		if n > MaxTmpfsSize {
+			return fmt.Errorf("tmpfs %s: size over %d bytes", clip(target), int64(MaxTmpfsSize))
+		}
+		return nil
+	}
+	return nil
+}

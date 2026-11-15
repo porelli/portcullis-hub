@@ -28,12 +28,14 @@ func TestRtForStates(t *testing.T) {
 	if _, err := h.rtFor("immich"); err == nil || errStatus(err) != 409 || !strings.Contains(err.Error(), "unknown") {
 		t.Errorf("unknown server: %v", err)
 	}
-	for state, want := range map[string]string{
-		ServerOffline:   "server NAS is offline",
-		ServerRevoked:   "server NAS is revoked",
-		ServerEnrolling: "server NAS isn't ready yet",
-		"":              "server NAS is offline",
+	// Revoked last: a revoked entry is terminal (review B-M1).
+	for _, c := range []struct{ state, want string }{
+		{ServerOffline, "server NAS is offline"},
+		{ServerEnrolling, "server NAS isn't ready yet"},
+		{"", "server NAS is offline"},
+		{ServerRevoked, "server NAS is revoked"},
 	} {
+		state, want := c.state, c.want
 		h.setServer("nas", &serverRT{Name: "NAS", State: state, RT: worker})
 		_, err := h.rtFor("immich")
 		if err == nil || errStatus(err) != 409 || err.Error() != want {
@@ -50,6 +52,10 @@ func TestRtForStates(t *testing.T) {
 	if len(worker.Calls()) != 0 {
 		t.Errorf("a server that isn't ready got calls: %v", worker.Calls())
 	}
+	if h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: worker}) {
+		t.Error("a revoked entry was replaced")
+	}
+	h.setServer("nas", nil) // removed: a new entry may follow
 	h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: worker})
 	if rt, err := h.rtFor("immich"); err != nil || rt != worker {
 		t.Errorf("ready: %v %v", rt, err)

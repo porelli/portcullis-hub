@@ -207,7 +207,12 @@ func (h *Hub) runEnrol(ctx context.Context, id string) error {
 	if err != nil {
 		return fail(StepVerify, statusErr(500, "the enrolled server's backend: %v", err))
 	}
-	h.setServer(id, &serverRT{Name: s.Name, State: ServerReady, RT: rb})
+	if !h.setLive(id, rb, ServerReady) {
+		return fail(StepVerify, statusErr(409, "server %s was revoked during its enrolment", id))
+	}
+	if rerr := revokedErr(); rerr != nil {
+		return fail(StepVerify, rerr)
+	}
 	h.notePoll(id, &info, "")
 	p.Done(StepVerify)
 	h.auditOp(actor, "server.enrolled", id, fmt.Sprintf("agent %s, %s", clipRunes(info.AgentVersion, 40), clipRunes(info.Runtime, 20)), nil)
@@ -537,11 +542,17 @@ func (h *Hub) pinServer(ctx context.Context, id string, leaf *x509.Certificate, 
 	// The server's live serial now: no longer owed. The one it replaces
 	// (a renewal) is owed: the tick revokes it.
 	h.settleSerialLocked(serial)
+	revokeNow := false
 	if prev != "" && prev != serial {
-		h.oweSerialLocked(id, prev)
+		// Not recorded (the save failed): revoked right away instead
+		// (review B-M2).
+		revokeNow = h.oweSerialLocked(id, prev) != nil
 	}
 	h.saveLocked()
 	h.mu.Unlock()
+	if revokeNow {
+		h.discardSerial(ctx, id, prev)
+	}
 	return nil
 }
 

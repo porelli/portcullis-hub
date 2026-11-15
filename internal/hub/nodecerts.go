@@ -16,10 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -174,6 +177,19 @@ func caSHA256(c *x509.Certificate) string {
 	return hex.EncodeToString(s[:])
 }
 
+// VaultSerial is a serial as Vault writes it ("0a:1b:…", lower case).
+func VaultSerial(n *big.Int) string {
+	b := n.Bytes()
+	if len(b) == 0 {
+		b = []byte{0}
+	}
+	parts := make([]string, len(b))
+	for i, x := range b {
+		parts[i] = hex.EncodeToString([]byte{x})
+	}
+	return strings.Join(parts, ":")
+}
+
 // renewDue: less than ⅓ of the certificate's life is left.
 func renewDue(c *x509.Certificate, now time.Time) bool {
 	life := c.NotAfter.Sub(c.NotBefore)
@@ -217,6 +233,10 @@ func (h *Hub) controlCert(ctx context.Context) (tls.Certificate, *x509.Certifica
 	if err := checkNodeCA(nca); err != nil {
 		return tls.Certificate{}, nil, statusErr(502, "%v", err)
 	}
+	// The new leaf chains to pki_node and is for client auth (B-L5).
+	if leaf.CheckSignatureFrom(nca) != nil || !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageClientAuth) {
+		return tls.Certificate{}, nil, statusErr(502, "enroll's control certificate isn't a pki_node client certificate")
+	}
 	if ca != nil && !ca.Equal(nca) {
 		return tls.Certificate{}, nil, statusErr(502, "enroll answered with another pki_node CA than the pinned one")
 	}
@@ -229,6 +249,15 @@ func (h *Hub) controlCert(ctx context.Context) (tls.Certificate, *x509.Certifica
 		if err := fsutil.WriteFileAtomic(filepath.Join(dir, name), b, 0o600); err != nil {
 			return tls.Certificate{}, nil, err
 		}
+	}
+	// The control certificate it replaces is owed: the tick revokes it
+	// (B-L5, as ruling 50 for the workers').
+	if err == nil && cert.Leaf != nil {
+		h.mu.Lock()
+		if oerr := h.oweSerialLocked("", VaultSerial(cert.Leaf.SerialNumber)); oerr != nil {
+			log.Printf("servers: recording the old control certificate for revocation: %v", oerr)
+		}
+		h.mu.Unlock()
 	}
 	return loadControl(dir)
 }

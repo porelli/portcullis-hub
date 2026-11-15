@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -79,7 +80,7 @@ func (a *API) scope(id string) agentapi.BundleScope {
 // refuseIncludeExtends decodes a compose file as YAML: a top-level
 // include or a service extends is refused (§3's rule again on the
 // worker: compose would read files the agent never validated).
-func refuseIncludeExtends(name string, b []byte) error {
+func refuseIncludeExtends(name string, b []byte, ownEnv []string) error {
 	var doc map[string]any
 	if err := yaml.Unmarshal(b, &doc); err != nil {
 		return fmt.Errorf("%s: %v", name, err)
@@ -93,9 +94,45 @@ func refuseIncludeExtends(name string, b []byte) error {
 			if _, ok := m["extends"]; ok {
 				return fmt.Errorf("%s: service %s: extends is not allowed", name, n)
 			}
+			// A-M1: compose config would read (and inline) the files, as
+			// the agent, before anything is validated.
+			for _, k := range []string{"env_file", "label_file"} {
+				if v, ok := m[k]; ok && !(k == "env_file" && envFileIsOwn(v, ownEnv)) {
+					return fmt.Errorf("%s: service %s: %s is not allowed", name, n, k)
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// envFileIsOwn: an env_file naming exactly the instance's own bundle env
+// file (one entry, a plain string or {path} without required: false).
+func envFileIsOwn(v any, own []string) bool {
+	one := func(x any) string {
+		switch t := x.(type) {
+		case string:
+			return t
+		case map[string]any:
+			if len(t) == 1 {
+				if p, ok := t["path"].(string); ok {
+					return p
+				}
+			}
+		}
+		return ""
+	}
+	var p string
+	switch t := v.(type) {
+	case []any:
+		if len(t) != 1 {
+			return false
+		}
+		p = one(t[0])
+	default:
+		p = one(t)
+	}
+	return p != "" && slices.Contains(own, p)
 }
 
 var profilesRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.,*-]*$`)
@@ -140,14 +177,19 @@ func loadResolved(id, file, workdir string) (*types.Project, error) {
 // builds the project's scope facts.
 func (a *API) validateResolved(id string, m agentapi.BundleManifest, model *types.Project) (*project, error) {
 	var others []agentapi.BundleManifest
+	otherBinds := map[string]map[string]bool{}
 	a.mu.Lock()
 	for oid, p := range a.projects {
 		if oid != id {
 			others = append(others, p.manifest)
+			otherBinds[oid] = bindsOf(p.model)
 		}
 	}
 	a.mu.Unlock()
 	if err := agentapi.ValidateBundle(model, m, others, a.scope(id)); err != nil {
+		return nil, err
+	}
+	if err := checkNestedBinds(id, bindsOf(model), otherBinds); err != nil {
 		return nil, err
 	}
 	if err := a.checkBindPaths(id, model); err != nil {
@@ -200,40 +242,76 @@ func bindSources(model *types.Project) []string {
 // checkBindPaths walks every bind source from the directory that allows
 // it (a folder root or the instance's files / appfiles dir), component by
 // component with os.Root.Lstat: a symlink anywhere is refused (C4). The
-// directory itself must be a real directory with no symlink in its path.
+// directory itself must be a real directory with no symlink in its path;
+// a folder root the agent can't see is refused (A-H3: never "passed").
 // A missing component ends the walk (the engine creates it below).
 func (a *API) checkBindPaths(id string, model *types.Project) error {
-	bases := append([]string{a.filesDir(id), a.appfilesDir(id)}, a.cfg.BindRoots...)
+	own := []string{a.filesDir(id), a.appfilesDir(id)}
 	for _, src := range bindSources(model) {
-		if err := walkNoSymlink(bases, src); err != nil {
+		if err := walkNoSymlink(own, a.cfg.BindRoots, src); err != nil {
 			return fmt.Errorf("%w (bind %s)", err, clipMsg(src))
 		}
 	}
 	return nil
 }
 
-// walkNoSymlink checks src below the longest base containing it.
-func walkNoSymlink(bases []string, src string) error {
+// ErrRootNotVisible: a folder root isn't a directory inside the agent.
+var ErrRootNotVisible = errors.New("isn't visible to the agent")
+
+// CheckRootsVisible: every folder root is a directory the agent sees, at
+// the same path, with no symlink in it (the agent's start refuses
+// otherwise: its walks would mean nothing).
+func CheckRootsVisible(roots []string) error {
+	for _, r := range roots {
+		real, err := filepath.EvalSymlinks(r)
+		if err != nil {
+			return fmt.Errorf("folder root %s %w", r, ErrRootNotVisible)
+		}
+		if real != r {
+			return fmt.Errorf("folder root %s has a symlink in its path: %w", r, ErrNotPlain)
+		}
+		if fi, err := os.Stat(r); err != nil || !fi.IsDir() {
+			return fmt.Errorf("folder root %s %w", r, ErrRootNotVisible)
+		}
+	}
+	return nil
+}
+
+// walkNoSymlink checks src below the longest base containing it: one of
+// own (the instance's own dirs: may not exist yet) or roots (the folder
+// roots: must exist, A-H3).
+func walkNoSymlink(own, roots []string, src string) error {
 	src = filepath.Clean(src)
-	base := ""
-	for _, b := range bases {
+	base, isRoot := "", false
+	for _, b := range own {
 		if (src == b || strings.HasPrefix(src, b+"/")) && len(b) > len(base) {
-			base = b
+			base, isRoot = b, false
+		}
+	}
+	for _, b := range roots {
+		if (src == b || strings.HasPrefix(src, b+"/")) && len(b) > len(base) {
+			base, isRoot = b, true
 		}
 	}
 	if base == "" {
 		return errors.New("not under a folder root")
 	}
-	if real, err := filepath.EvalSymlinks(base); err != nil {
-		if errors.Is(err, fs.ErrNotExist) && src != base {
-			return nil // the engine creates it (and nothing below can be a link yet)
-		}
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
+	real, err := filepath.EvalSymlinks(base)
+	switch {
+	case err != nil && errors.Is(err, fs.ErrNotExist) && !isRoot:
+		return nil // the instance's own dir, not made yet: nothing below can be a link
+	case err != nil && isRoot:
+		return fmt.Errorf("folder root %s %w", base, ErrRootNotVisible)
+	case err != nil:
 		return fmt.Errorf("%s: %w", base, err)
-	} else if real != base {
+	case real != base:
 		return fmt.Errorf("a symlink in a folder root's path (%s): %w", base, ErrNotPlain)
+	}
+	if fi, err := os.Stat(base); err != nil || !fi.IsDir() {
+		if isRoot {
+			return fmt.Errorf("folder root %s %w", base, ErrRootNotVisible)
+		}
+		return fmt.Errorf("%s isn't a directory: %w", base, ErrNotPlain)
 	}
 	if src == base {
 		return nil
@@ -256,6 +334,62 @@ func walkNoSymlink(bases []string, src string) error {
 		}
 		if fi.Mode()&fs.ModeSymlink != 0 {
 			return fmt.Errorf("a symlink in a bind source (%s): %w", path.Join(base, p), ErrNotPlain)
+		}
+	}
+	return nil
+}
+
+// bindsOf are a model's bind sources with whether each is writable.
+func bindsOf(model *types.Project) map[string]bool {
+	out := map[string]bool{}
+	for _, ss := range []types.Services{model.Services, model.DisabledServices} {
+		for _, s := range ss {
+			for _, v := range s.Volumes {
+				if v.Type == types.VolumeTypeBind && v.Source != "" {
+					src := filepath.Clean(v.Source)
+					out[src] = out[src] || !v.ReadOnly
+				}
+			}
+		}
+	}
+	return out
+}
+
+func strictlyUnder(p, dir string) bool {
+	return dir == "/" && p != "/" || strings.HasPrefix(p, dir+"/")
+}
+
+// checkNestedBinds (A-H2a): no bind source of instance id may be an
+// ancestor of, or inside, a bind source of another instance on this
+// worker, and none of its own writable binds may contain another of its
+// bind sources — so no container can rewrite a directory above another
+// container's bind source.
+func checkNestedBinds(id string, mine map[string]bool, others map[string]map[string]bool) error {
+	srcs := make([]string, 0, len(mine))
+	for s := range mine {
+		srcs = append(srcs, s)
+	}
+	sort.Strings(srcs)
+	for _, s := range srcs {
+		for _, o := range srcs {
+			if o != s && mine[s] && strictlyUnder(o, s) {
+				return fmt.Errorf("nested binds are refused: the writable bind %s contains %s", clipMsg(s), clipMsg(o))
+			}
+		}
+		oids := make([]string, 0, len(others))
+		for oid := range others {
+			oids = append(oids, oid)
+		}
+		sort.Strings(oids)
+		for _, oid := range oids {
+			if oid == id {
+				continue
+			}
+			for o := range others[oid] {
+				if strictlyUnder(o, s) || strictlyUnder(s, o) {
+					return fmt.Errorf("binds across instances may not nest (instance %s): %s and %s", oid, clipMsg(s), clipMsg(o))
+				}
+			}
 		}
 	}
 	return nil
@@ -313,7 +447,7 @@ func (a *API) putBundle(w http.ResponseWriter, r *http.Request, id string) {
 			continue
 		}
 		if err == nil {
-			err = refuseIncludeExtends(f, b)
+			err = refuseIncludeExtends(f, b, []string{filepath.Join(a.projectDir(id), BundleEnv)})
 		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, clipMsg(err.Error()))
@@ -380,6 +514,7 @@ func (a *API) putBundle(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	a.mu.Lock()
 	a.projects[id] = p
+	delete(a.quarantined, id) // a new, validated bundle
 	a.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -536,6 +671,7 @@ func (a *API) removeProject(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	a.mu.Lock()
 	delete(a.projects, id)
+	delete(a.quarantined, id)
 	a.mu.Unlock()
 	for _, p := range []string{a.projectDir(id), a.filesDir(id), a.appfilesDir(id), a.resolvedFile(id), a.resolvedEnv(id)} {
 		os.RemoveAll(p)
@@ -549,4 +685,55 @@ func (a *API) runtimeProject(id string) runtime.Project {
 	p := a.project(id)
 	cf := compose.Project{Name: runtime.ProjectName(id), Files: []string{a.resolvedFile(id)}, ProjectDir: a.filesDir(id), EnvFile: a.resolvedEnv(id)}
 	return runtime.Project{Name: cf.Name, Instance: id, Files: cf, Model: p.model}
+}
+
+// CheckProtectedOutsideRoots (A-M2): no protected path may be inside (or
+// equal to) a folder root — compared as text and, for every ancestor the
+// agent can see, by device and inode (os.SameFile), so an alias of the
+// same directory is caught where the kernel shows it. FUSE union views
+// (Unraid's /mnt/user vs /mnt/cache) can't be told apart: documented.
+func CheckProtectedOutsideRoots(protected, roots []string) error {
+	type id struct {
+		root string
+		fi   os.FileInfo
+	}
+	var rs []id
+	for _, r := range roots {
+		if fi, err := os.Stat(r); err == nil {
+			rs = append(rs, id{r, fi})
+		}
+	}
+	for _, p := range protected {
+		p = filepath.Clean(p)
+		for _, r := range roots {
+			if p == r || strings.HasPrefix(p, r+"/") {
+				return fmt.Errorf("the protected path %s is inside the folder root %s: move it outside the folder roots, or narrow PORTCULLIS_WORKER_BIND_ROOTS", p, r)
+			}
+		}
+		for a := p; ; a = filepath.Dir(a) {
+			if fi, err := os.Stat(a); err == nil {
+				for _, r := range rs {
+					if os.SameFile(fi, r.fi) {
+						return fmt.Errorf("the protected path %s is inside the folder root %s (the same directory as %s): move it outside the folder roots, or narrow PORTCULLIS_WORKER_BIND_ROOTS", p, r.root, a)
+					}
+				}
+			}
+			if a == "/" || a == "." {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// InstallDirOf is the agent's compose working dir (its own container's
+// com.docker.compose.project.working_dir label): the worker's install
+// (./portcullis, .env, docker-compose.worker.yml), protected like the
+// data dir (review A-H1). Missing or "/": no start.
+func InstallDirOf(labels map[string]string) (string, error) {
+	d := labels["com.docker.compose.project.working_dir"]
+	if d == "" || !filepath.IsAbs(d) || filepath.Clean(d) != d || d == "/" {
+		return "", errors.New("the agent's container has no usable com.docker.compose.project.working_dir label: start it with ./portcullis worker …")
+	}
+	return d, nil
 }

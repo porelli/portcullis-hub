@@ -403,40 +403,47 @@ func TestLinkFromEnv(t *testing.T) {
 	envOf := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 	never := func(string) bool { return false }
 	always := func(string) bool { return true }
-	dir, gid, proxy, relay, err := linkFromEnv(envOf(nil), never)
+	dir, gid, proxy, relay, err := linkFromEnv(envOf(nil), never, 10007)
 	if err != nil || dir != "/link-doc" || gid != 10009 || proxy != "172.31.254.83:3128" || relay != "" {
 		t.Fatalf("defaults %q %d %q %q %v", dir, gid, proxy, relay, err)
 	}
 	// The link_doc directory exists: the relay image is required.
-	if _, _, _, _, err := linkFromEnv(envOf(nil), always); err == nil || !strings.Contains(err.Error(), "HUB_RELAY_IMAGE") {
+	if _, _, _, _, err := linkFromEnv(envOf(nil), always, 10007); err == nil || !strings.Contains(err.Error(), "HUB_RELAY_IMAGE") {
 		t.Errorf("no relay image: %v", err)
 	}
 	for _, img := range []string{"ghcr.io/porelli/portcullis-relay:edge", "ghcr.io/porelli/portcullis-relay@sha256:" + strings.Repeat("a", 64)} {
-		if _, _, _, r, err := linkFromEnv(envOf(map[string]string{"HUB_RELAY_IMAGE": img}), always); err != nil || r != img {
+		if _, _, _, r, err := linkFromEnv(envOf(map[string]string{"HUB_RELAY_IMAGE": img}), always, 10007); err != nil || r != img {
 			t.Errorf("%s: %v", img, err)
 		}
 	}
 	for k, v := range map[string]string{
 		"HUB_LINK_DOC_GID": "10001", "HUB_RELAY_IMAGE": "ghcr.io/porelli/portcullis-relay:latest",
 	} {
-		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{k: v}), always); err == nil {
+		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{k: v}), always, 10007); err == nil {
 			t.Errorf("%s=%s accepted", k, v)
 		}
 	}
 	for k, v := range map[string]string{
 		"HUB_LINK_DOC_GID": "0", "HUB_LINK_PROXY": "proxy:3128", "HUB_LINK_DOC_DIR": "link-doc",
 	} {
-		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{k: v}), never); err == nil {
+		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{k: v}), never, 10007); err == nil {
 			t.Errorf("%s=%s accepted", k, v)
 		}
 	}
+	// Review B-I2: an unclean dir; the VPN doc's group.
+	if _, _, _, _, err := linkFromEnv(envOf(map[string]string{"HUB_LINK_DOC_DIR": "/link-doc/../x"}), never, 10007); err == nil {
+		t.Error("an unclean HUB_LINK_DOC_DIR accepted")
+	}
+	if _, _, _, _, err := linkFromEnv(envOf(map[string]string{"HUB_LINK_DOC_GID": "10007"}), never, 10007); err == nil {
+		t.Error("the VPN doc's gid accepted")
+	}
 	for _, bad := range []string{"65536", "x", "010009"} {
-		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{"HUB_LINK_DOC_GID": bad}), never); err == nil {
+		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{"HUB_LINK_DOC_GID": bad}), never, 10007); err == nil {
 			t.Errorf("gid %s accepted", bad)
 		}
 	}
 	for _, bad := range []string{"[::1]:3128", "172.31.254.83", "172.31.254.83:0"} {
-		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{"HUB_LINK_PROXY": bad}), never); err == nil {
+		if _, _, _, _, err := linkFromEnv(envOf(map[string]string{"HUB_LINK_PROXY": bad}), never, 10007); err == nil {
 			t.Errorf("proxy %s accepted", bad)
 		}
 	}

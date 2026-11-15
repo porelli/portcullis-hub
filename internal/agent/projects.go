@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"net/netip"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 
@@ -71,6 +73,9 @@ type APIConfig struct {
 	// Config runs `docker compose config` (compose.CLI.Config): the model
 	// the agent validates and runs is its output, never the bundle's files.
 	Config func(ctx context.Context, p compose.Project) ([]byte, error)
+	// DiskFree is the engine's free space a restore may fill (ok false:
+	// unreadable, restores refused; nil: no check, tests).
+	DiskFree func(ctx context.Context) (free int64, ok bool)
 }
 
 // project is one bundled instance as the agent holds it.
@@ -97,15 +102,18 @@ type API struct {
 
 	mu       sync.Mutex
 	projects map[string]*project
-	execs    map[string]bool
-	helpers  map[string]*helper
-	ops      map[string]context.CancelFunc
+	// quarantined: instance → why its bind sources failed the check at a
+	// container start the engine made (A-H2b): refused until a new bundle.
+	quarantined map[string]string
+	execs       map[string]bool
+	helpers     map[string]*helper
+	ops         map[string]context.CancelFunc
 }
 
 // NewAPI loads the bundles already on disk (each re-validated; an invalid
 // one is dropped from scope and logged).
 func NewAPI(cfg APIConfig) *API {
-	a := &API{cfg: cfg, projects: map[string]*project{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
+	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
 	a.mux = http.NewServeMux()
 	a.routes()
 	entries, _ := os.ReadDir(a.projectsDir())
@@ -382,6 +390,10 @@ func (a *API) lifecycle(verb string) func(w http.ResponseWriter, r *http.Request
 		ctx, done := a.opContext(r)
 		defer done()
 		p := a.runtimeProject(id)
+		if why := a.quarantineOf(id); why != "" && (verb == "create" || verb == "up") {
+			writeError(w, http.StatusConflict, clipMsg("the instance is quarantined: "+why+" (send its bundle again)"))
+			return
+		}
 		if verb == "create" || verb == "up" {
 			// The bind sources again, right before the engine sees them
 			// (C4; the residual race until the engine mounts is ledgered).
@@ -417,6 +429,7 @@ func (a *API) lifecycle(verb string) func(w http.ResponseWriter, r *http.Request
 			}
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			w.WriteHeader(http.StatusOK)
+			flush(w)
 			out := &ndjson{w: w}
 			err := a.cfg.Runtime.Up(ctx, p, func(svc string, done, total int64, sized bool) {
 				out.line(agentapi.ProgressLine{Step: "images", Service: svc, Done: done, Total: total, Sized: sized})
@@ -460,6 +473,7 @@ func (a *API) pull(w http.ResponseWriter, r *http.Request) {
 	defer done()
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
+	flush(w)
 	out := &ndjson{w: w}
 	err := a.cfg.Runtime.Pull(ctx, req.Ref, func(d, t int64, sized bool) {
 		out.line(agentapi.ProgressLine{Done: d, Total: t, Sized: sized})
@@ -786,4 +800,87 @@ func (a *API) helper(w http.ResponseWriter, r *http.Request) (string, *helper, b
 		return id, nil, false
 	}
 	return id, h, true
+}
+
+// quarantineOf is why instance id is quarantined ("" = it isn't).
+func (a *API) quarantineOf(id string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.quarantined[id]
+}
+
+// Quarantined are the quarantined instances and why (GET /v1/info).
+func (a *API) Quarantined() map[string]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.quarantined) == 0 {
+		return nil
+	}
+	return maps.Clone(a.quarantined)
+}
+
+// WatchStarts is the backstop of A-H2: every container start of a
+// bundled instance — the engine's own too (a restart policy, a daemon
+// restart, a reboot), which never goes through the agent — re-walks the
+// instance's bind sources. On a violation the container is killed, the
+// project taken down and the instance quarantined (reported in /v1/info)
+// until the Hub sends its bundle again. Runs until ctx ends.
+func (a *API) WatchStarts(ctx context.Context) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		err := a.cfg.Runtime.Events(ctx, runtime.Filter{All: true}, func(ev runtime.Event) {
+			if ev.Action != "start" {
+				return
+			}
+			a.CheckStarted(ctx, ev.Actor.ID, ev.Actor.Attributes[docker.LabelProject])
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("bind check: the engine's event stream ended (%v); retrying in %s", err, backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < time.Minute {
+			backoff *= 2
+		}
+	}
+}
+
+// CheckStarted runs the backstop for one started container of project.
+func (a *API) CheckStarted(ctx context.Context, container, project string) {
+	id, ok := strings.CutPrefix(project, runtime.ProjectPrefix)
+	if !ok {
+		return
+	}
+	p := a.project(id)
+	if p == nil {
+		return
+	}
+	err := a.checkBindPaths(id, p.model)
+	if err == nil {
+		return
+	}
+	why := clipMsg(err.Error())
+	log.Printf("bind check: %s: a started container fails the bind check (%s): killed, taken down, quarantined", id, why)
+	a.mu.Lock()
+	a.quarantined[id] = why
+	a.mu.Unlock()
+	if container != "" {
+		if err := a.cfg.Runtime.Signal(ctx, container, "KILL"); err != nil {
+			log.Printf("bind check: %s: kill %s: %v", id, clipMsg(container), err)
+		}
+	}
+	if err := a.cfg.Runtime.DownByName(ctx, runtime.ProjectName(id)); err != nil {
+		log.Printf("bind check: %s: down: %v", id, err)
+	}
+}
+
+// flush sends what is buffered (a stream's header at once).
+func flush(w http.ResponseWriter) {
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
 }

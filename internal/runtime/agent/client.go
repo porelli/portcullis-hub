@@ -305,8 +305,16 @@ func (c *client) do(ctx context.Context, method, p string, q url.Values, body io
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
+	// Every call has an overall deadline (review B-L6): a stalled or
+	// hostile worker never holds a Hub goroutine forever. The caller's
+	// own deadline wins; the cancel runs when the body is closed.
+	cancel := context.CancelFunc(func() {})
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, CallTimeout)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if ctype != "" {
@@ -317,8 +325,10 @@ func (c *client) do(ctx context.Context, method, p string, q url.Values, body io
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		cancel()
 		return nil, transportErr(err)
 	}
+	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		var e agentapi.Error
@@ -329,6 +339,23 @@ func (c *client) do(ctx context.Context, method, p string, q url.Values, body io
 		return nil, c.agentError(resp.StatusCode, msg)
 	}
 	return resp, nil
+}
+
+// CallTimeout bounds any agent call whose context has no deadline (long
+// lifecycle calls and streams included: the longest a backup's volume
+// stream may take).
+var CallTimeout = 2 * time.Hour
+
+// cancelBody cancels its call's context once closed.
+type cancelBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // json sends v (nil: no body) and decodes the answer into out (nil: none)

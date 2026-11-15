@@ -2,6 +2,7 @@ package agent
 
 import (
 	"archive/tar"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -60,7 +61,7 @@ func (a *API) createHelper(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, clipMsg(err.Error()))
 			return
 		}
-		if err := walkNoSymlink(a.cfg.BindRoots, req.Spec.Binds[0].Source); err != nil {
+		if err := walkNoSymlink(nil, a.cfg.BindRoots, req.Spec.Binds[0].Source); err != nil {
 			writeError(w, http.StatusForbidden, "not a fixed helper: "+clipMsg(err.Error()))
 			return
 		}
@@ -122,13 +123,22 @@ func (a *API) helperArchiveIn(w http.ResponseWriter, r *http.Request) {
 		// Every entry checked (review M1) and re-encoded: the engine only
 		// ever sees the checked stream.
 		pr, pw := io.Pipe()
-		go func() { pw.CloseWithError(checkedVolumeTar(r.Body, pw, path.Base(h.spec.Path))) }()
+		limit, ok := a.freeForRestore(r.Context())
+		if !ok {
+			writeError(w, http.StatusInsufficientStorage, "the engine's free space can't be read: a restore needs it")
+			return
+		}
+		go func() { pw.CloseWithError(checkedVolumeTar(r.Body, pw, path.Base(h.spec.Path), limit)) }()
 		err := a.cfg.Runtime.VolumeIn(r.Context(), h.spec.Instance, h.spec.Volume, h.spec.Path, pr)
 		pr.CloseWithError(err)
 		if err != nil {
 			var ve *volumeTarError
 			if errors.As(err, &ve) {
-				writeError(w, http.StatusBadRequest, clipMsg(ve.Error()))
+				code := http.StatusBadRequest
+				if ve.status != 0 {
+					code = ve.status
+				}
+				writeError(w, code, clipMsg(ve.Error()))
 				return
 			}
 			engineError(w, err)
@@ -188,7 +198,7 @@ func (a *API) helperRun(w http.ResponseWriter, r *http.Request) {
 		in = f
 	}
 	// The folder again, right before the run (C4).
-	if err := walkNoSymlink(a.cfg.BindRoots, h.spec.Spec.Binds[0].Source); err != nil {
+	if err := walkNoSymlink(nil, a.cfg.BindRoots, h.spec.Spec.Binds[0].Source); err != nil {
 		writeError(w, http.StatusConflict, clipMsg(err.Error()))
 		return
 	}
@@ -307,7 +317,10 @@ const (
 	MaxVolumeEntries = 5_000_000
 )
 
-type volumeTarError struct{ msg string }
+type volumeTarError struct {
+	msg    string
+	status int // 0: 400
+}
 
 func (e *volumeTarError) Error() string { return "volume archive: " + e.msg }
 
@@ -315,7 +328,10 @@ func (e *volumeTarError) Error() string { return "volume archive: " + e.msg }
 // files and directories (no symlink, hard link, device or FIFO), every
 // name "<base>" or "<base>/…" clean (no absolute name, no ".."), at most
 // MaxVolumeEntries entries and MaxVolumeArchive bytes.
-func checkedVolumeTar(r io.Reader, w io.Writer, base string) error {
+func checkedVolumeTar(r io.Reader, w io.Writer, base string, limit int64) error {
+	if limit <= 0 || limit > MaxVolumeArchive {
+		limit = MaxVolumeArchive
+	}
 	tr := tar.NewReader(r)
 	tw := tar.NewWriter(w)
 	var total int64
@@ -326,29 +342,34 @@ func checkedVolumeTar(r io.Reader, w io.Writer, base string) error {
 			return tw.Close()
 		}
 		if err != nil {
-			return &volumeTarError{"not a tar: " + clipMsg(err.Error())}
+			return &volumeTarError{msg: "not a tar: " + clipMsg(err.Error())}
 		}
 		n++
 		if n > MaxVolumeEntries {
-			return &volumeTarError{"too many entries"}
+			return &volumeTarError{msg: "too many entries"}
 		}
 		name := strings.TrimSuffix(hdr.Name, "/")
 		switch {
 		case hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir:
-			return &volumeTarError{fmt.Sprintf("%q: only regular files and directories", clipMsg(hdr.Name))}
+			return &volumeTarError{msg: fmt.Sprintf("%q: only regular files and directories", clipMsg(hdr.Name))}
 		case strings.HasPrefix(name, "/") || path.Clean(name) != name || name != base && !strings.HasPrefix(name, base+"/"):
-			return &volumeTarError{fmt.Sprintf("%q: not a clean name below %s", clipMsg(hdr.Name), base)}
+			return &volumeTarError{msg: fmt.Sprintf("%q: not a clean name below %s", clipMsg(hdr.Name), base)}
 		}
 		for _, seg := range strings.Split(name, "/") {
 			if seg == ".." || seg == "." || seg == "" {
-				return &volumeTarError{fmt.Sprintf("%q: not a clean name", clipMsg(hdr.Name))}
+				return &volumeTarError{msg: fmt.Sprintf("%q: not a clean name", clipMsg(hdr.Name))}
 			}
 		}
 		total += hdr.Size
-		if total > MaxVolumeArchive {
-			return &volumeTarError{"over its size cap"}
+		if total > limit {
+			if limit < MaxVolumeArchive {
+				return &volumeTarError{msg: "larger than the free space on the worker", status: http.StatusInsufficientStorage}
+			}
+			return &volumeTarError{msg: "over its size cap"}
 		}
-		out := &tar.Header{Name: hdr.Name, Typeflag: hdr.Typeflag, Mode: hdr.Mode & 0o7777, Uid: hdr.Uid, Gid: hdr.Gid, Size: hdr.Size,
+		// No setuid / setgid bits and no file capabilities from an
+		// archive a worker restores (review A-L2).
+		out := &tar.Header{Name: hdr.Name, Typeflag: hdr.Typeflag, Mode: hdr.Mode & 0o1777, Uid: hdr.Uid, Gid: hdr.Gid, Size: hdr.Size,
 			ModTime: hdr.ModTime, Format: tar.FormatPAX, PAXRecords: xattrsOnly(hdr.PAXRecords)}
 		if err := tw.WriteHeader(out); err != nil {
 			return err
@@ -361,11 +382,12 @@ func checkedVolumeTar(r io.Reader, w io.Writer, base string) error {
 	}
 }
 
-// xattrsOnly keeps the ACL / xattr records a restore carries.
+// xattrsOnly keeps the ACL / xattr records a restore carries, but no
+// security.* one other than security.selinux (no file capabilities).
 func xattrsOnly(r map[string]string) map[string]string {
 	var out map[string]string
 	for k, v := range r {
-		if strings.HasPrefix(k, "SCHILY.xattr.") {
+		if strings.HasPrefix(k, "SCHILY.xattr.") && (!strings.HasPrefix(k, "SCHILY.xattr.security.") || k == "SCHILY.xattr.security.selinux") {
 			if out == nil {
 				out = map[string]string{}
 			}
@@ -373,4 +395,14 @@ func xattrsOnly(r map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// freeForRestore is the engine's free space a volume restore may fill
+// (APIConfig.DiskFree; none configured: only the size cap; unreadable:
+// false, the restore is refused).
+func (a *API) freeForRestore(ctx context.Context) (int64, bool) {
+	if a.cfg.DiskFree == nil {
+		return 0, true
+	}
+	return a.cfg.DiskFree(ctx)
 }

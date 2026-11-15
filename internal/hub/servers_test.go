@@ -195,6 +195,7 @@ type fakeAgent struct {
 	left      bool
 	failCert  bool   // PUT /v1/identity/cert answers 400
 	onCert    func() // runs at PUT /v1/identity/cert, before it answers
+	onLeave   func() // runs at POST /v1/leave
 }
 
 func newFakeAgent(t *testing.T, ca *testNodeCA) *fakeAgent {
@@ -215,7 +216,11 @@ func newFakeAgent(t *testing.T, ca *testNodeCA) *fakeAgent {
 	mux.HandleFunc("POST /v1/leave", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.left = true
+		hook := a.onLeave
 		a.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		w.WriteHeader(204)
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -459,6 +464,7 @@ func newServersFixture(t *testing.T) *serversFixture {
 	os.MkdirAll(f.h.cfg.LinkDocDir, 0o750)
 	f.h.cfg.LinkDocGID = os.Getgid()
 	f.h.cfg.VPNStatusFile = sf.link.path
+	f.h.cfg.RelayImage = "ghcr.io/porelli/portcullis-relay:edge"
 	f.h.SetNodeSigner(sf.ca)
 	f.h.SetAudit(sf.audit)
 	sf.agent = newFakeAgent(t, sf.ca)

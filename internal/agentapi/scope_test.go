@@ -54,6 +54,7 @@ const cleanBundle = `services:
       - /srv/photos:/photos
       - type: tmpfs
         target: /tmp
+        tmpfs: {size: 16777216}
     extra_hosts: ["db.internal:192.0.2.10"]
     ports: ["8080:80"]
     labels:
@@ -501,7 +502,11 @@ func TestBundleScopeProtected(t *testing.T) {
 		svc("    labels: {io.portcullis.hub.helper: \"folder:x\"}\n"):                                     "Portcullis's own",
 		svc("    oom_score_adj: -500\n"):                                                                  "oom_score_adj",
 		svc("    shm_size: 8g\n"):                                                                         "shm_size",
-		svc("    tmpfs:\n      - /t:size=8g\n"):                                                           "",
+		svc("    tmpfs:\n      - /t:size=8g\n"):                                                           "tmpfs /t: size over",
+		svc("    tmpfs:\n      - /t:size=64m,mode=1777\n"):                                                "",
+		svc("    tmpfs: [/t]\n"):                                                                          "",
+		svc("    volumes:\n      - type: tmpfs\n        target: /t\n"):                                    "",
+		svc("    tmpfs: [\"/t:size=bogus\"]\n"):                                                           "isn't a size",
 		svc("    volumes:\n      - type: tmpfs\n        target: /t\n        tmpfs: {size: 8589934592}\n"): "tmpfs",
 		svc("    networks: [n]\nnetworks:\n  n:\n    labels: {com.docker.compose.network: x}\n"):          "Portcullis's own",
 	} {

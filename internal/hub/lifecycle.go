@@ -127,6 +127,9 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	if err == nil {
 		err = h.generateOverrideLocked(live, h.st.Settings[t.ID])
 	}
+	if err == nil && h.recordClientsLocked(live) {
+		h.saveLocked()
+	}
 	if err == nil {
 		err = h.refreshInstanceEnvLocked(live, members)
 	}

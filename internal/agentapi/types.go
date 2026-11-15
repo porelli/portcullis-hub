@@ -103,6 +103,9 @@ type Info struct {
 	// overlap guard, runtime.Info Networks).
 	Networks []Network `json:"networks,omitempty"`
 	Clock    time.Time `json:"clock"`
+	// Quarantined: instance → why a container start failed the agent's
+	// bind check (killed, taken down; refused until a new bundle).
+	Quarantined map[string]string `json:"quarantined,omitempty"`
 }
 
 // PortBind is one published host port: the compose project and service

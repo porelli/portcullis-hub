@@ -501,8 +501,8 @@ func TestCLIArgs(t *testing.T) {
 		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--gid=60001", "--files=rw", "--expect=1", "--mkdir=../x"},
 		{"apply", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--gid=60001", "--files=rw", "--expect=1", "--mkdir=a:b"},
 		{"apply", "--root=" + root, "--gid=60001", "--files=rw", "--expect=1"}, // no expected identity
-		{"scan", "--root=" + root, "--gid=60001"}, // no --files
-		{"scan", "--root=" + root, "--mkdir=x"},   // not a scan flag
+		{"scan", "--root=" + root, "--gid=60001"},                              // no --files
+		{"scan", "--root=" + root, "--mkdir=x"},                                // not a scan flag
 		{"scan", "--root=" + root, "--principal=a:b:c"},
 		{"scan", "--root=" + root, "extra"},
 		{"restore", "--root=" + root, "--expect-dev=1", "--expect-ino=2", "--in=/in/s.gz"}, // no --gid

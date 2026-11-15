@@ -254,6 +254,8 @@ type Inputs struct {
 	Engine *EngineIn
 	// Kube is the cluster guard's state (nil: not Kubernetes).
 	Kube *KubeIn
+	// Servers: the worker servers' state (nil: nothing to report).
+	Servers *ServersIn
 	// VPN: the VPN kinds' inputs (vpn.go; nil = none fire).
 	VPN *VPNIn
 	// SignInTOTP: the authenticator-app kinds' inputs (signin_totp.go;

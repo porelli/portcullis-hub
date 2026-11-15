@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/runtime"
@@ -274,8 +275,13 @@ func (b *Backend) createHelper(ctx context.Context, s agentapi.HelperSpec) (stri
 	return hc.ID, nil
 }
 
+// HelperCleanupTimeout bounds a helper's removal (a backup's Close).
+var HelperCleanupTimeout = 15 * time.Second
+
 func (b *Backend) deleteHelper(id string) {
-	b.c.json(context.Background(), "DELETE", path(R("RemoveHelper", 0), "h", id), nil, nil, nil, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), HelperCleanupTimeout)
+	defer cancel()
+	b.c.json(ctx, "DELETE", path(R("RemoveHelper", 0), "h", id), nil, nil, nil, 0)
 }
 
 type helperReader struct {
