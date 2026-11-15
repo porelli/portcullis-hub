@@ -42,13 +42,10 @@ type Enrol struct {
 	Step         string    `json:"step,omitempty" yaml:"step,omitempty"`
 }
 
-// RevokeSteps records which revocation steps are done (spec §6).
-// Serials are the certificate serials still to revoke: the pinned one at
-// the revocation's start, and any signed while it is pending (an
-// enrolment or renewal that raced it); step 2 is done when it is empty.
+// RevokeSteps records which revocation steps are done (spec §6). The
+// certificates to revoke (step 2) are AppState.OwedSerials.
 type RevokeSteps struct {
 	At         time.Time `json:"at" yaml:"at"`
-	Serials    []string  `json:"serials,omitempty" yaml:"serials,omitempty"`
 	RelaysDone bool      `json:"relays_done,omitempty" yaml:"relays_done,omitempty"`
 	Rotated    bool      `json:"rotated,omitempty" yaml:"rotated,omitempty"`
 	// Remove: a removal (the entry goes once every step is done).
@@ -61,4 +58,15 @@ type BackupSchedule struct {
 	Mode    string `json:"mode" yaml:"mode"`
 	Hour    int    `json:"hour" yaml:"hour"`
 	Weekday int    `json:"weekday" yaml:"weekday"`
+}
+
+// OwedSerial is a node certificate serial that must be revoked on
+// pki_node: one signed but not (yet) pinned — recorded before the
+// certificate leaves the Hub — or a revoked server's pinned one. It
+// stays until it is pinned or revoked, whether or not its server still
+// exists.
+type OwedSerial struct {
+	Server string    `json:"server" yaml:"server"`
+	Serial string    `json:"serial" yaml:"serial"`
+	Since  time.Time `json:"since" yaml:"since"`
 }

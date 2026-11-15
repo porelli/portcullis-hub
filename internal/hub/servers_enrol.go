@@ -459,6 +459,16 @@ func (h *Hub) signWorker(ctx context.Context, id, csrPEM string, ok func(state.S
 	if err != nil {
 		return nil, nil, err
 	}
+	// Owed from now on, before the certificate can leave the Hub: only a
+	// pin or its revocation settles it (any other exit leaves it to the
+	// tick). A failed save: not sent, revoked now.
+	h.mu.Lock()
+	serr := h.oweSerialLocked(id, nc.Serial)
+	h.mu.Unlock()
+	if serr != nil {
+		h.discardSerial(ctx, id, nc.Serial)
+		return nil, nil, statusErr(500, "recording the new certificate failed: %v", serr)
+	}
 	leaf, err1 := parseOnePEMCert(nc.Certificate)
 	nca, err2 := parseOnePEMCert(nc.CA)
 	if err1 != nil || err2 != nil || !nca.Equal(ca) {
@@ -501,6 +511,8 @@ func (h *Hub) pinServer(ctx context.Context, id string, leaf *x509.Certificate, 
 	}
 	s.CertSerial, s.SPKI, s.CertNotAfter = serial, hex.EncodeToString(sum[:]), leaf.NotAfter.UTC()
 	h.st.Servers[id] = s
+	// The server's live serial now: no longer owed.
+	h.settleSerialLocked(serial)
 	h.saveLocked()
 	h.mu.Unlock()
 	return nil

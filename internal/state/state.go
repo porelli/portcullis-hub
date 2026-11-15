@@ -171,7 +171,9 @@ type AppState struct {
 	// Quarantined: tunnel address → until when it stays unallocated (a
 	// revoked server's, kept after the server is removed; §17.3).
 	Quarantined map[string]time.Time `json:"quarantined,omitempty" yaml:"quarantined,omitempty"`
-	Sources     []Source             `json:"sources" yaml:"sources"`
+	// OwedSerials are the node certificate serials still to revoke.
+	OwedSerials []OwedSerial `json:"owed_serials,omitempty" yaml:"owed_serials,omitempty"`
+	Sources     []Source     `json:"sources" yaml:"sources"`
 	// Settings are each instance's settings (contract §13), by id.
 	Settings map[string]InstanceSettings `json:"settings" yaml:"settings"`
 	// Published holds the last known group-gate config per enabled app.

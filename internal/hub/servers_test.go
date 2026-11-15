@@ -193,6 +193,7 @@ type fakeAgent struct {
 	network   *agentapi.NetworkParams
 	calls     []string
 	left      bool
+	failCert  bool // PUT /v1/identity/cert answers 400
 }
 
 func newFakeAgent(t *testing.T, ca *testNodeCA) *fakeAgent {
@@ -338,6 +339,10 @@ func (a *fakeAgent) cert(w http.ResponseWriter, r *http.Request) {
 	c, err := x509.ParseCertificate(blk.Bytes)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.failCert {
+		writeAgentJSON(w, 400, agentapi.Error{Error: "no"})
+		return
+	}
 	if err != nil || req.CA != a.ca.pem || a.pending == nil || !c.PublicKey.(*ecdsa.PublicKey).Equal(&a.pending.PublicKey) {
 		writeAgentJSON(w, 400, agentapi.Error{Error: "certificate refused"})
 		return
@@ -475,6 +480,17 @@ func (sf *serversFixture) server(id string) (state.Server, bool) {
 	defer sf.h.mu.RUnlock()
 	s, ok := sf.h.st.Servers[id]
 	return s, ok
+}
+
+// owed lists the owed serials as server:serial.
+func (sf *serversFixture) owed() []string {
+	sf.h.mu.RLock()
+	defer sf.h.mu.RUnlock()
+	var out []string
+	for _, o := range sf.h.st.OwedSerials {
+		out = append(out, o.Server+":"+o.Serial)
+	}
+	return out
 }
 
 func (sf *serversFixture) actions() []string {
@@ -931,7 +947,7 @@ func TestRevokeOrderAndRetry(t *testing.T) {
 		t.Errorf("link.json still had the peer at step 2: %v", sawPeer)
 	}
 	s, _ := sf.server("nas")
-	if s.State != ServerRevoked || s.Revoke == nil || len(s.Revoke.Serials) != 1 || s.Revoke.Serials[0] != pinned.CertSerial ||
+	if owed := sf.owed(); s.State != ServerRevoked || s.Revoke == nil || len(owed) != 1 || owed[0] != "nas:"+pinned.CertSerial ||
 		!s.Revoke.RelaysDone || !s.Revoke.Rotated || s.CertSerial != "" || s.SPKI != "" {
 		t.Errorf("after the first pass %+v %+v", s, s.Revoke)
 	}
@@ -956,7 +972,7 @@ func TestRevokeOrderAndRetry(t *testing.T) {
 	sf.ca.mu.Unlock()
 	sf.h.serversTick(context.Background())
 	s, _ = sf.server("nas")
-	if len(s.Revoke.Serials) != 0 || len(sf.ca.revoked) != 1 || sf.ca.revoked[0] != pinned.CertSerial {
+	if len(sf.owed()) != 0 || len(sf.ca.revoked) != 1 || sf.ca.revoked[0] != pinned.CertSerial {
 		t.Errorf("retry: %+v revoked %v", s.Revoke, sf.ca.revoked)
 	}
 	if err := sf.h.RevokeServer(context.Background(), admin, "nas"); errStatus(err) != 409 {
@@ -1201,7 +1217,7 @@ func TestRevokeDuringEnrolment(t *testing.T) {
 		t.Errorf("the fresh serial %s isn't revoked: %v", fresh, sf.ca.revokedList())
 	}
 	s, _ := sf.server("nas")
-	if s.State != ServerRevoked || s.CertSerial != "" || s.SPKI != "" || len(s.Revoke.Serials) != 0 {
+	if s.State != ServerRevoked || s.CertSerial != "" || s.SPKI != "" || len(sf.owed()) != 0 {
 		t.Errorf("state %+v %+v", s, s.Revoke)
 	}
 	if slices.Contains(sf.agent.Calls(), "cert") {
@@ -1242,7 +1258,7 @@ func TestRenewRacingRevoke(t *testing.T) {
 		t.Errorf("revoked %v (pinned %s, fresh %s)", rv, pinned.CertSerial, fresh)
 	}
 	after, _ := sf.server("nas")
-	if after.State != ServerRevoked || after.CertSerial != "" || after.SPKI != "" || len(after.Revoke.Serials) != 0 {
+	if after.State != ServerRevoked || after.CertSerial != "" || after.SPKI != "" || len(sf.owed()) != 0 {
 		t.Errorf("after %+v %+v", after, after.Revoke)
 	}
 	if slices.Contains(sf.agent.Calls()[calls:], "cert") {
@@ -1253,15 +1269,15 @@ func TestRenewRacingRevoke(t *testing.T) {
 	sf.ca.revokeErr = errors.New("enroll down")
 	sf.ca.mu.Unlock()
 	sf.h.discardSerial(context.Background(), "nas", "0a:0b")
-	if s, _ := sf.server("nas"); !slices.Contains(s.Revoke.Serials, "0a:0b") {
-		t.Errorf("owed %+v", s.Revoke)
+	if owed := sf.owed(); !slices.Contains(owed, "nas:0a:0b") {
+		t.Errorf("owed %v", owed)
 	}
 	sf.ca.mu.Lock()
 	sf.ca.revokeErr = nil
 	sf.ca.mu.Unlock()
 	sf.h.serversTick(context.Background())
-	if s, _ := sf.server("nas"); len(s.Revoke.Serials) != 0 || !slices.Contains(sf.ca.revokedList(), "0a:0b") {
-		t.Errorf("retry %+v", s.Revoke)
+	if owed := sf.owed(); len(owed) != 0 || !slices.Contains(sf.ca.revokedList(), "0a:0b") {
+		t.Errorf("retry: owed %v", owed)
 	}
 }
 
@@ -1312,5 +1328,75 @@ func TestRevokeRotatesAIClient(t *testing.T) {
 	a.h.mu.RUnlock()
 	if rv == nil || !rv.Rotated {
 		t.Errorf("revoke %+v", rv)
+	}
+}
+
+// TestOwedSerials: every serial signed is owed until pinned or revoked —
+// a pinned one leaves the list; one whose PUT /v1/identity/cert failed is
+// revoked at the next tick; one of a server removed mid-renewal is still
+// revoked.
+func TestOwedSerials(t *testing.T) {
+	sf := newServersFixture(t)
+	sf.enrol(t, "nas")
+	if owed := sf.owed(); len(owed) != 0 {
+		t.Fatalf("a pinned serial is owed: %v", owed)
+	}
+	due := func() {
+		sf.h.mu.Lock()
+		s := sf.h.st.Servers["nas"]
+		s.CertNotAfter = time.Now().Add(9 * 24 * time.Hour)
+		sf.h.st.Servers["nas"] = s
+		sf.h.mu.Unlock()
+		sf.link.handshake("nas", time.Now())
+	}
+	// The worker refuses the renewed certificate.
+	due()
+	sf.agent.mu.Lock()
+	sf.agent.failCert = true
+	sf.agent.mu.Unlock()
+	sf.h.pollServer(context.Background(), "nas")
+	sf.ca.mu.Lock()
+	first := sf.ca.issued[len(sf.ca.issued)-1]
+	sf.ca.mu.Unlock()
+	if owed := sf.owed(); len(owed) != 1 || owed[0] != "nas:"+first {
+		t.Fatalf("owed %v", owed)
+	}
+	if slices.Contains(sf.ca.revokedList(), first) {
+		t.Fatal("revoked before the tick")
+	}
+	sf.agent.mu.Lock()
+	sf.agent.failCert = false
+	sf.agent.mu.Unlock()
+	sf.h.serversTick(context.Background()) // drains, then the renewal succeeds
+	if !slices.Contains(sf.ca.revokedList(), first) {
+		t.Errorf("the refused certificate %s wasn't revoked: %v", first, sf.ca.revokedList())
+	}
+	if owed := sf.owed(); len(owed) != 0 {
+		t.Errorf("owed after the tick %v (the renewed one is pinned)", owed)
+	}
+	// The server is removed while a renewal is signed (and enroll is
+	// down at that moment): the serial is still revoked later.
+	due()
+	sf.ca.mu.Lock()
+	sf.ca.onSign = func(role string) {
+		sf.h.mu.Lock()
+		delete(sf.h.st.Servers, "nas")
+		sf.h.mu.Unlock()
+		sf.ca.mu.Lock()
+		sf.ca.revokeErr = errors.New("enroll down")
+		sf.ca.mu.Unlock()
+	}
+	sf.ca.mu.Unlock()
+	sf.h.pollServer(context.Background(), "nas")
+	sf.ca.mu.Lock()
+	second := sf.ca.issued[len(sf.ca.issued)-1]
+	sf.ca.onSign, sf.ca.revokeErr = nil, nil
+	sf.ca.mu.Unlock()
+	if owed := sf.owed(); !slices.Contains(owed, "nas:"+second) {
+		t.Fatalf("owed %v", owed)
+	}
+	sf.h.serversTick(context.Background())
+	if !slices.Contains(sf.ca.revokedList(), second) || len(sf.owed()) != 0 {
+		t.Errorf("revoked %v owed %v", sf.ca.revokedList(), sf.owed())
 	}
 }

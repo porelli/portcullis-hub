@@ -117,8 +117,8 @@ func (h *Hub) beginRevokeLocked(id string, remove bool) {
 	if s.Revoke == nil {
 		s.Revoke = &state.RevokeSteps{At: now}
 	}
-	if s.CertSerial != "" && !slices.Contains(s.Revoke.Serials, s.CertSerial) {
-		s.Revoke.Serials = append(s.Revoke.Serials, s.CertSerial)
+	if s.CertSerial != "" {
+		h.oweSerialLocked(id, s.CertSerial)
 	}
 	s.Revoke.Remove = s.Revoke.Remove || remove
 	s.State, s.Enrol = ServerRevoked, nil
@@ -156,22 +156,14 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 		return
 	}
 	rv := *s.Revoke
-	serials := slices.Clone(rv.Serials)
 	placed := h.placedLocked(id)
 	// 3. unpin (the serials stay listed for step 2).
 	s.CertSerial, s.SPKI = "", ""
 	h.st.Servers[id] = s
 	h.mu.Unlock()
 
-	// 2. every serial owed.
-	var revoked []string
-	for _, serial := range serials {
-		if err := h.revokeSerial(ctx, serial); err != nil {
-			log.Printf("servers: revoking %s's certificate: %v (retried at the next tick)", id, err)
-			continue
-		}
-		revoked = append(revoked, serial)
-	}
+	// 2. every serial owed for it (the tick drains the rest too).
+	h.drainOwed(ctx, id)
 	// 4. the relays (their primary projects).
 	if !rv.RelaysDone && h.rt != nil {
 		var errs []error
@@ -208,13 +200,12 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 	if !ok || s.Revoke == nil {
 		return
 	}
-	// Serials appended meanwhile stay owed.
 	cur := *s.Revoke
-	cur.Serials = slices.DeleteFunc(slices.Clone(cur.Serials), func(x string) bool { return slices.Contains(revoked, x) })
 	cur.RelaysDone, cur.Rotated = cur.RelaysDone || rv.RelaysDone, cur.Rotated || rv.Rotated
 	s.Revoke = &cur
 	h.st.Servers[id] = s
-	if cur.Remove && len(cur.Serials) == 0 && cur.RelaysDone && cur.Rotated && len(h.placedLocked(id)) == 0 {
+	// The entry may go with serials still owed: OwedSerials outlives it.
+	if cur.Remove && cur.RelaysDone && cur.Rotated && len(h.placedLocked(id)) == 0 {
 		if h.st.Quarantined == nil {
 			h.st.Quarantined = map[string]time.Time{}
 		}
@@ -242,32 +233,69 @@ func (h *Hub) revokeSerial(ctx context.Context, serial string) error {
 	return signer.RevokeNode(ctx, serial)
 }
 
+// oweSerialLocked records serial (of server id) as owed and saves
+// state; the error is the save's. Caller holds mu (write).
+func (h *Hub) oweSerialLocked(id, serial string) error {
+	for _, o := range h.st.OwedSerials {
+		if o.Serial == serial {
+			return nil
+		}
+	}
+	h.st.OwedSerials = append(h.st.OwedSerials, state.OwedSerial{Server: id, Serial: serial, Since: h.now().UTC()})
+	return h.st.Save(h.statePath())
+}
+
+// settleSerialLocked drops serial from the owed list (pinned, or
+// revoked on pki_node). Caller holds mu (write).
+func (h *Hub) settleSerialLocked(serial string) {
+	n := len(h.st.OwedSerials)
+	h.st.OwedSerials = slices.DeleteFunc(h.st.OwedSerials, func(o state.OwedSerial) bool { return o.Serial == serial })
+	if len(h.st.OwedSerials) != n {
+		h.saveLocked()
+	}
+}
+
+// drainOwed revokes the owed serials (only server's; "" = all, whether
+// or not their server still exists). Each one revoked leaves the list; a
+// failure keeps it for the next tick. Core's revoke is idempotent.
+func (h *Hub) drainOwed(ctx context.Context, server string) {
+	h.mu.RLock()
+	var owed []state.OwedSerial
+	for _, o := range h.st.OwedSerials {
+		if server == "" || o.Server == server {
+			owed = append(owed, o)
+		}
+	}
+	h.mu.RUnlock()
+	for _, o := range owed {
+		if err := h.revokeSerial(ctx, o.Serial); err != nil {
+			log.Printf("servers: revoking a certificate of %s: %v (retried at the next tick)", o.Server, err)
+			continue
+		}
+		h.mu.Lock()
+		h.settleSerialLocked(o.Serial)
+		h.mu.Unlock()
+	}
+}
+
 // discardSerial: a certificate signed for server id that must never be
-// used (the server was revoked or left the state it was signed for
-// meanwhile) is revoked at once; when that fails it stays owed in the
-// server's revocation (retried each tick).
+// used (the server was revoked, removed or left the state it was signed
+// for) is revoked at once; it was owed since it was signed, so a failure
+// leaves it to the next tick.
 func (h *Hub) discardSerial(ctx context.Context, id, serial string) {
 	// Even when the op that signed it was cancelled (a revocation).
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	if err := h.revokeSerial(ctx, serial); err == nil {
-		return
-	} else {
+	if err := h.revokeSerial(ctx, serial); err != nil {
 		log.Printf("servers: revoking %s's unused certificate: %v (retried at the next tick)", id, err)
+		h.mu.Lock()
+		h.oweSerialLocked(id, serial)
+		h.mu.Unlock()
+		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if s, ok := h.st.Servers[id]; ok {
-		if s.Revoke == nil {
-			s.Revoke = &state.RevokeSteps{At: h.now().UTC()}
-			s.State = ServerRevoked
-		}
-		if !slices.Contains(s.Revoke.Serials, serial) {
-			s.Revoke.Serials = append(s.Revoke.Serials, serial)
-		}
-		h.st.Servers[id] = s
-		h.saveLocked()
-	}
+	h.settleSerialLocked(serial)
+	h.mu.Unlock()
 }
 
 // rotateInstanceSecrets gives instance id new Keycloak client secrets (a

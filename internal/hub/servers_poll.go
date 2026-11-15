@@ -144,6 +144,9 @@ func (h *Hub) serversTick(ctx context.Context) {
 	} else if err != nil && h.nodeSigner() != nil {
 		log.Printf("servers: the control certificate: %v", err)
 	}
+	// Serials owed (signed and never pinned, or of revoked servers),
+	// whether or not their server still exists.
+	h.drainOwed(ctx, "")
 	h.mu.RLock()
 	var ids []string
 	revoking := map[string]bool{}
