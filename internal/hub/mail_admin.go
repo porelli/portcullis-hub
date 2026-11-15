@@ -12,6 +12,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -39,18 +40,36 @@ type MailSpamView struct {
 
 // MailSettingsView is GET /api/mail/settings.
 type MailSettingsView struct {
-	Mail              string               `json:"mail"`
-	Kubernetes        bool                 `json:"kubernetes"`
-	Hostname          string               `json:"hostname"`
-	PrimaryDomain     string               `json:"primary_domain"`
-	Domains           []MailDomainView     `json:"domains"`
-	Spam              MailSpamView         `json:"spam"`
-	Limits            mailctl.Limits       `json:"limits"`
-	Quotas            []state.MailQuotaRow `json:"quotas"`
-	Relay             string               `json:"relay"`
-	SubmissionLANOnly bool                 `json:"submission_lan_only"`
-	FormerRetention   string               `json:"former_retention"`
-	DQSKey            string               `json:"dqs_key"`
+	Mail          string               `json:"mail"`
+	Kubernetes    bool                 `json:"kubernetes"`
+	Hostname      string               `json:"hostname"`
+	PrimaryDomain string               `json:"primary_domain"`
+	Domains       []MailDomainView     `json:"domains"`
+	Spam          MailSpamView         `json:"spam"`
+	Limits        mailctl.Limits       `json:"limits"`
+	Quotas        []state.MailQuotaRow `json:"quotas"`
+	// Lists are the groups made lists, by group (controller ruling).
+	Lists             []MailListView `json:"lists"`
+	Relay             string         `json:"relay"`
+	SubmissionLANOnly bool           `json:"submission_lan_only"`
+	FormerRetention   string         `json:"former_retention"`
+	DQSKey            string         `json:"dqs_key"`
+	// SubmissionLANOnlyRefusal (rootless Podman only): why LAN-only can't
+	// be turned on here (controller ruling; the CLI refuses it).
+	SubmissionLANOnlyRefusal string `json:"submission_lan_only_refusal,omitempty"`
+}
+
+// MailLANOnlyPodmanRefusal: LAN-only judges the client address, which
+// rootless Podman rewrites.
+const MailLANOnlyPodmanRefusal = "LAN-only needs the real client address; rootless Podman rewrites it"
+
+// MailListView is one group list of Settings → Mail: the group, its
+// address, its domain and who may post (members | anyone).
+type MailListView struct {
+	Group   string `json:"group"`
+	Address string `json:"address"`
+	Domain  string `json:"domain"`
+	Posting string `json:"posting"`
 }
 
 // MailSettingsInput is PUT /api/mail/settings.
@@ -109,10 +128,23 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 	if strings.TrimSpace(env[VarMailDQS]) == "on" {
 		v.DQSKey = "set in .env"
 	}
+	if h.cfg.Runtime == runtime.KindPodman {
+		v.SubmissionLANOnlyRefusal = MailLANOnlyPodmanRefusal
+	}
 	for _, n := range h.mailDomainNamesLocked() {
 		s := h.mailDomainStateLocked(n, core.On)
 		v.Domains = append(v.Domains, MailDomainView{Name: n, Enabled: s == mailctl.MailOn, State: s, Groups: nonNil(st.Domains[n].Groups)})
 	}
+	v.Lists = []MailListView{}
+	for g, l := range st.Lists {
+		posting := l.Posting
+		if posting == "" {
+			posting = state.MailPostingMembers
+		}
+		d := strings.ToLower(l.Domain)
+		v.Lists = append(v.Lists, MailListView{Group: g, Address: strings.ToLower(g) + "@" + d, Domain: d, Posting: posting})
+	}
+	sort.Slice(v.Lists, func(i, j int) bool { return v.Lists[i].Group < v.Lists[j].Group })
 	return v
 }
 

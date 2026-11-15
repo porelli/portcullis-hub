@@ -99,6 +99,8 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	vpnIn := h.doctorVPNIn(ctx, m)
 	// The authenticator-app kinds' inputs (Keycloak, 10 s): never under mu.
 	totpIn := h.doctorTOTPIn(ctx)
+	// The mail kinds' inputs (mailctl, 10 s): never under mu.
+	mailIn := h.doctorMailIn(ctx, dnsPlans)
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -109,7 +111,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
 		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn,
-		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), SignInTOTP: totpIn}
+		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), SignInTOTP: totpIn, Mail: mailIn}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}

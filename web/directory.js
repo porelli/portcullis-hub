@@ -1903,13 +1903,19 @@
   // domains mail is on for (settings = GET /api/mail/settings).
   function groupMailHtml(group, settings) {
     const doms = (settings.domains || []).filter(d => d.state === 'on');
-    if (!doms.length) return '<p class="pd-muted">Mail isn\'t on for any domain.</p>';
-    return '<p class="pd-muted pd-small">A list delivers to every member\'s mailbox at <span class="pd-mono">' + esc(String(group).toLowerCase()) + '@&lt;domain&gt;</span>.</p>' +
-      '<div class="pd-inline"><label for="pd-gp-mail-dom">Domain</label><select id="pd-gp-mail-dom" data-gp-mail-domain>' +
-      doms.map(d => '<option value="' + esc(d.name) + '">' + esc(d.name) + '</option>').join('') + '</select>' +
-      '<label for="pd-gp-mail-post">Who may post</label><select id="pd-gp-mail-post" data-gp-mail-posting><option value="members">members only</option><option value="anyone">anyone</option></select></div>' +
-      '<div class="pd-actions"><button type="button" class="pd-btn secondary sm" data-act="mail-list-on" data-group="' + esc(group) + '">Make this group a list</button>' +
-      '<button type="button" class="pd-btn ghost sm" data-act="mail-list-off" data-group="' + esc(group) + '">Stop the list</button></div>';
+    const cur = (settings.lists || []).find(l => l.group === group);
+    let h = cur ? '<p data-gp-mail-current>A list at <span class="pd-mono">' + esc(cur.address) + '</span> · ' + (cur.posting === 'anyone' ? 'anyone may post' : 'members only') + '</p>'
+      : '<p class="pd-muted pd-small">A list delivers to every member\'s mailbox at <span class="pd-mono">' + esc(String(group).toLowerCase()) + '@&lt;domain&gt;</span>.</p>';
+    if (!doms.length) return h + '<p class="pd-muted">Mail isn\'t on for any domain.</p>' +
+      (cur ? '<div class="pd-actions"><button type="button" class="pd-btn ghost sm" data-act="mail-list-off" data-group="' + esc(group) + '">Stop the list</button></div>' : '');
+    const sel = (a, b) => a === b ? ' selected' : '';
+    h += '<div class="pd-inline"><label for="pd-gp-mail-dom">Domain</label><select id="pd-gp-mail-dom" data-gp-mail-domain>' +
+      doms.map(d => '<option value="' + esc(d.name) + '"' + sel(cur && cur.domain, d.name) + '>' + esc(d.name) + '</option>').join('') + '</select>' +
+      '<label for="pd-gp-mail-post">Who may post</label><select id="pd-gp-mail-post" data-gp-mail-posting><option value="members">members only</option>' +
+      '<option value="anyone"' + sel(cur && cur.posting, 'anyone') + '>anyone</option></select></div>' +
+      '<div class="pd-actions"><button type="button" class="pd-btn secondary sm" data-act="mail-list-on" data-group="' + esc(group) + '">' + (cur ? 'Save the list' : 'Make this group a list') + '</button>' +
+      (cur ? '<button type="button" class="pd-btn ghost sm" data-act="mail-list-off" data-group="' + esc(group) + '">Stop the list</button>' : '') + '</div>';
+    return h;
   }
   async function loadGroupMail(box) {
     const sec = box && box.querySelector('[data-gp-mail]');
@@ -3185,7 +3191,7 @@
         if (!on && !confirm('Stop the list of ' + group + '? Mail to its address bounces from now on.')) return;
         try { await api('PUT', '/api/directory/groups/' + enc(group) + '/mail-list', { enabled: on, domain, posting }); } catch (err) { alert(errText(err)); return; }
         alert(on ? group + ' is a list at ' + String(group).toLowerCase() + '@' + domain + '.' : 'The list of ' + group + ' is stopped.');
-        return;
+        return loadGroupMail(root.querySelector('.pd-groups'));
       }
       case 'goto-setup': return userSelectTab('setup', true);
       case 'rule-open': return openRuleEditor(group);

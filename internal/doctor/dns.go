@@ -60,6 +60,8 @@ func DNSFixSets(kind string) []string {
 		return []string{domains.SetCAA}
 	case KindDNSNoMailRecommended:
 		return []string{domains.SetNoMail}
+	case KindMailRecordsWrong:
+		return []string{domains.SetMail}
 	}
 	return nil
 }

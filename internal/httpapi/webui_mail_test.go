@@ -107,6 +107,13 @@ func TestSettingsMailPanel(t *testing.T) {
 	if strings.Contains(h, "team_b<x>") {
 		t.Error("unescaped group")
 	}
+	if strings.Contains(h, "data-mail-lan-refusal") {
+		t.Error("a LAN-only refusal without one")
+	}
+	view["submission_lan_only_refusal"] = "LAN-only needs the real client address; rootless Podman rewrites it"
+	if h := render(view, nil); !strings.Contains(h, "data-mail-lan-refusal") || !strings.Contains(h, "rootless Podman rewrites it") {
+		t.Errorf("podman refusal: %s", h)
+	}
 	view["mail"] = "off"
 	if h := render(view, nil); !strings.Contains(h, "Mail is off: run ./portcullis mail enable on the host") {
 		t.Errorf("off: %s", h)
@@ -138,8 +145,13 @@ func TestDirectoryMailSections(t *testing.T) {
 	if h := run("window.PortcullisDirectory._test.personMailHtml('alice', " + string(vb) + ", false)"); strings.Contains(h, "data-pp-aliases") {
 		t.Errorf("a helper gets the aliases editor:\n%s", h)
 	}
-	g := run(`window.PortcullisDirectory._test.groupMailHtml('Team_B', {domains: [{name: 'example.org', state: 'on'}, {name: 'off.example', state: 'off'}]})`)
-	if !strings.Contains(g, "team_b@&lt;domain&gt;") || !strings.Contains(g, `data-act="mail-list-on"`) || strings.Contains(g, "off.example") {
+	g := run(`window.PortcullisDirectory._test.groupMailHtml('Team_B', {domains: [{name: 'example.org', state: 'on'}, {name: 'off.example', state: 'off'}], lists: []})`)
+	if !strings.Contains(g, "team_b@&lt;domain&gt;") || !strings.Contains(g, `data-act="mail-list-on"`) || strings.Contains(g, "off.example") || strings.Contains(g, "mail-list-off") {
 		t.Errorf("group form:\n%s", g)
+	}
+	g = run(`window.PortcullisDirectory._test.groupMailHtml('Team_B', {domains: [{name: 'example.org', state: 'on'}, {name: 'b.example', state: 'on'}], lists: [{group: 'Team_B', address: 'team_b@b.example', domain: 'b.example', posting: 'anyone'}]})`)
+	if !strings.Contains(g, "data-gp-mail-current") || !strings.Contains(g, "team_b@b.example") || !strings.Contains(g, "anyone may post") ||
+		!strings.Contains(g, `<option value="b.example" selected>`) || !strings.Contains(g, "Save the list") || !strings.Contains(g, "mail-list-off") {
+		t.Errorf("current list:\n%s", g)
 	}
 }

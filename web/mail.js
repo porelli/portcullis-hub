@@ -38,7 +38,8 @@
     const reach = status && status.mail === 'on' ? (status.reachable ? pill('ok', 'reachable') : pill('warn', 'mailctl unreachable')) : '';
     h += '<dl class="inst-facts"><dt>Mail server</dt><dd><code>' + esc(v.hostname) + '</code> ' + reach + '</dd>' +
       '<dt>Relay</dt><dd>' + esc(v.relay === 'on' ? 'on (set in .env)' : 'off') + '</dd>' +
-      '<dt>Submission</dt><dd>' + esc(v.submission_lan_only ? 'local networks only (MAIL_SUBMISSION_LAN_ONLY)' : 'from anywhere') + '</dd>' +
+      '<dt>Submission</dt><dd>' + esc(v.submission_lan_only ? 'local networks only (MAIL_SUBMISSION_LAN_ONLY)' : 'from anywhere') +
+        (v.submission_lan_only_refusal ? ' <small data-mail-lan-refusal>(LAN-only isn\'t possible here: ' + esc(v.submission_lan_only_refusal) + ')</small>' : '') + '</dd>' +
       '<dt>Former accounts kept</dt><dd>' + esc(v.former_retention) + ' <small>(MAIL_FORMER_RETENTION in .env)</small></dd>' +
       '<dt>Spamhaus DQS key</dt><dd data-mail-dqs>' + esc(v.dqs_key) + (v.dqs_key === 'not set'
         ? ' <small>(the free public Spamhaus mirrors refuse queries from many cloud resolvers: set MAIL_SPAMHAUS_DQS_KEY in .env)</small>' : '') + '</dd></dl>';

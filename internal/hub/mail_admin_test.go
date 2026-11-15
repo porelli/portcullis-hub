@@ -9,6 +9,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -212,6 +213,10 @@ func TestGroupListPosting(t *testing.T) {
 	if d := f.mc.Last(); len(d.Lists) != 1 || d.Lists[0].Posting != "anyone" || d.Lists[0].Address != "team_b@example.org" {
 		t.Fatalf("document lists %+v", d.Lists)
 	}
+	// The settings view lists it (the group page shows the current list).
+	if v := f.h.MailSettingsView(); len(v.Lists) != 1 || v.Lists[0] != (MailListView{Group: "team_b", Address: "team_b@example.org", Domain: "example.org", Posting: "anyone"}) {
+		t.Fatalf("view lists %+v", v.Lists)
+	}
 	// A group named like a person: its address is taken.
 	f.people.mu.Lock()
 	f.people.m.Groups["bob"] = directory.MemberGroup{ID: 9, Members: []string{"alice"}}
@@ -230,6 +235,9 @@ func TestGroupListPosting(t *testing.T) {
 	f.h.mu.RUnlock()
 	if still {
 		t.Fatal("list kept after off")
+	}
+	if v := f.h.MailSettingsView(); v.Lists == nil || len(v.Lists) != 0 {
+		t.Fatalf("view lists after off %+v", v.Lists)
 	}
 }
 
@@ -286,5 +294,18 @@ func TestPersonMailHelp(t *testing.T) {
 	}
 	if _, err := f.h.PersonMail(ctx, &directory.Caller{User: "bob"}, "alice"); err == nil {
 		t.Fatal("a non-helper read someone's mail")
+	}
+}
+
+// TestMailLANOnlyRefusalPodman: under rootless Podman the settings view
+// says why LAN-only isn't possible; under Docker it says nothing.
+func TestMailLANOnlyRefusalPodman(t *testing.T) {
+	f := newMailFixture(t)
+	if v := f.h.MailSettingsView(); v.SubmissionLANOnlyRefusal != "" {
+		t.Fatalf("docker: %q", v.SubmissionLANOnlyRefusal)
+	}
+	f.h.cfg.Runtime = runtime.KindPodman
+	if v := f.h.MailSettingsView(); v.SubmissionLANOnlyRefusal != "LAN-only needs the real client address; rootless Podman rewrites it" {
+		t.Fatalf("podman: %q", v.SubmissionLANOnlyRefusal)
 	}
 }
