@@ -45,7 +45,8 @@ func TestPlacementVectors(t *testing.T) {
 	// Every reason appears in some vector.
 	need := map[string]bool{"mounts the core volume": true, "has a Traefik TCP/UDP router": true, "has a per-person secret option": true,
 		"has AI companions": true, "is an AI page": true, "is a VPN provider": true, "uses host-gateway": true, "outside the server's folder roots": true,
-		"is marked placement: primary_only": true, "uses a non-HTTP backend scheme": true}
+		"is marked placement: primary_only": true, "uses a non-HTTP backend scheme": true,
+		"passes a host device": true, "adds the capability": true, "adds an unknown capability": true}
 	clean := 0
 	for _, v := range vs {
 		var m Manifest
@@ -133,7 +134,7 @@ func TestRealTemplatesPlacement(t *testing.T) {
 		t.Skip("PORTCULLIS_TEMPLATES_DIR not set")
 	}
 	mustPrimary := map[string]string{"samba": "per-person secret", "timemachine": "per-person secret", "headscale": "VPN provider",
-		"netbird": "non-HTTP backend scheme", "ai-chat": "AI page", "grafana": "AI companions", "gitea": "AI companions"}
+		"netbird": "non-HTTP backend scheme", "ai-chat": "AI page", "grafana": "AI companions", "gitea": "AI companions", "scrutiny": "adds the capability SYS_RAWIO"}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ package templates
 
 import (
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -24,7 +25,7 @@ const (
 // placementReasons collects reasons per rule, each once; rules are
 // reported in the order of the contract's list.
 type placementReasons struct {
-	coreVolume, router, scheme, hostGateway, bind []string
+	coreVolume, router, scheme, hostGateway, device, capability, bind []string
 }
 
 // Placement reports whether compose + manifest m (with the instance's
@@ -40,6 +41,11 @@ type placementReasons struct {
 //   - is an AI page (model-provider secrets stay on the primary): ai.chat;
 //   - is a VPN provider (vpn: block);
 //   - uses host-gateway (<service>);
+//   - passes a host device (<service>): a devices source other than
+//     /dev/null (resolved; a /dev/null slot travels);
+//   - adds the capability <CAP> (<service>): a cap_add outside Docker's
+//     default set (KubeBaselineCaps; ALL included; "adds an unknown
+//     capability (<service>)" for a name that isn't a Linux capability);
 //   - binds <path> outside the server's folder roots: an absolute (or
 //     ~) bind source outside every root, or a relative one other than
 //     ./templates/… and ./certs/ca-bundle.crt (resolved, cleaned);
@@ -112,6 +118,8 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 		out = append(out, "is a VPN provider (vpn: block)")
 	}
 	out = append(out, r.hostGateway...)
+	out = append(out, r.device...)
+	out = append(out, r.capability...)
 	out = append(out, r.bind...)
 	out = append(out, r.scheme...)
 	if m.Placement == PlacementPrimaryOnly {
@@ -211,6 +219,33 @@ func (r *placementReasons) service(name string, s map[string]any, coreOf map[str
 		h = resolve(h, env)
 		if strings.HasSuffix(h, ":host-gateway") || strings.HasSuffix(h, "=host-gateway") {
 			addOnce(&r.hostGateway, "uses host-gateway ("+name+")")
+		}
+	}
+	devs, _ := s["devices"].([]any)
+	for _, d := range devs {
+		ds, ok := d.(string)
+		if !ok {
+			addOnce(&r.device, "passes a host device ("+name+")")
+			continue
+		}
+		if src := strings.TrimSpace(resolve(splitOutsideVars(ds)[0], env)); src != "" && src != "/dev/null" {
+			addOnce(&r.device, "passes a host device ("+name+")")
+		}
+	}
+	caps, _ := s["cap_add"].([]any)
+	for _, c := range caps {
+		cs, _ := c.(string)
+		cp := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(resolve(cs, env))), "CAP_")
+		if slices.Contains(KubeBaselineCaps, cp) {
+			continue
+		}
+		switch shown := ShownCap(cp); {
+		case cp == "ALL":
+			addOnce(&r.capability, "adds the capability ALL ("+name+")")
+		case shown == "a capability":
+			addOnce(&r.capability, "adds an unknown capability ("+name+")")
+		default:
+			addOnce(&r.capability, "adds the capability "+shown+" ("+name+")")
 		}
 	}
 }
