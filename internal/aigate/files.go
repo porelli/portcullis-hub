@@ -15,6 +15,8 @@
 package aigate
 
 import (
+	"github.com/portcullis/hub/internal/jsonstrict"
+
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -208,7 +210,7 @@ func (t *Time) UnmarshalJSON(b []byte) error {
 // DecodeFile decodes and validates mcp-gate.json strictly.
 func DecodeFile(b []byte) (*File, error) {
 	var f File
-	if err := decodeStrict(b, &f); err != nil {
+	if err := jsonstrict.Decode(b, &f); err != nil {
 		return nil, err
 	}
 	if err := f.Validate(); err != nil {
@@ -221,7 +223,7 @@ func DecodeFile(b []byte) (*File, error) {
 // Errors name fields and entry indexes, never values.
 func DecodeCredFile(b []byte) (*CredFile, error) {
 	var c CredFile
-	if err := decodeStrict(b, &c); err != nil {
+	if err := jsonstrict.Decode(b, &c); err != nil {
 		return nil, err
 	}
 	if err := c.Validate(); err != nil {

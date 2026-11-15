@@ -1,0 +1,4672 @@
+[
+ {
+  "name": "valid ready and enrolling peers with relays",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "valid empty lists",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [],
+   "relays": []
+  },
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "valid peer at .250",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.250",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "valid enrolling-only peers no relays",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "enrolling"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": []
+  },
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "valid 241 peers (the whole range)",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "w0",
+     "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "w1",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.11",
+     "state": "ready"
+    },
+    {
+     "id": "w2",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.12",
+     "state": "ready"
+    },
+    {
+     "id": "w3",
+     "public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+     "ip": "10.214.0.13",
+     "state": "ready"
+    },
+    {
+     "id": "w4",
+     "public_key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+     "ip": "10.214.0.14",
+     "state": "ready"
+    },
+    {
+     "id": "w5",
+     "public_key": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+     "ip": "10.214.0.15",
+     "state": "ready"
+    },
+    {
+     "id": "w6",
+     "public_key": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+     "ip": "10.214.0.16",
+     "state": "ready"
+    },
+    {
+     "id": "w7",
+     "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+     "ip": "10.214.0.17",
+     "state": "ready"
+    },
+    {
+     "id": "w8",
+     "public_key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=",
+     "ip": "10.214.0.18",
+     "state": "ready"
+    },
+    {
+     "id": "w9",
+     "public_key": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=",
+     "ip": "10.214.0.19",
+     "state": "ready"
+    },
+    {
+     "id": "w10",
+     "public_key": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo=",
+     "ip": "10.214.0.20",
+     "state": "ready"
+    },
+    {
+     "id": "w11",
+     "public_key": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=",
+     "ip": "10.214.0.21",
+     "state": "ready"
+    },
+    {
+     "id": "w12",
+     "public_key": "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw=",
+     "ip": "10.214.0.22",
+     "state": "ready"
+    },
+    {
+     "id": "w13",
+     "public_key": "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0=",
+     "ip": "10.214.0.23",
+     "state": "ready"
+    },
+    {
+     "id": "w14",
+     "public_key": "Dg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4=",
+     "ip": "10.214.0.24",
+     "state": "ready"
+    },
+    {
+     "id": "w15",
+     "public_key": "Dw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8=",
+     "ip": "10.214.0.25",
+     "state": "ready"
+    },
+    {
+     "id": "w16",
+     "public_key": "EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA=",
+     "ip": "10.214.0.26",
+     "state": "ready"
+    },
+    {
+     "id": "w17",
+     "public_key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+     "ip": "10.214.0.27",
+     "state": "ready"
+    },
+    {
+     "id": "w18",
+     "public_key": "EhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhI=",
+     "ip": "10.214.0.28",
+     "state": "ready"
+    },
+    {
+     "id": "w19",
+     "public_key": "ExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM=",
+     "ip": "10.214.0.29",
+     "state": "ready"
+    },
+    {
+     "id": "w20",
+     "public_key": "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQ=",
+     "ip": "10.214.0.30",
+     "state": "ready"
+    },
+    {
+     "id": "w21",
+     "public_key": "FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU=",
+     "ip": "10.214.0.31",
+     "state": "ready"
+    },
+    {
+     "id": "w22",
+     "public_key": "FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY=",
+     "ip": "10.214.0.32",
+     "state": "ready"
+    },
+    {
+     "id": "w23",
+     "public_key": "FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=",
+     "ip": "10.214.0.33",
+     "state": "ready"
+    },
+    {
+     "id": "w24",
+     "public_key": "GBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBg=",
+     "ip": "10.214.0.34",
+     "state": "ready"
+    },
+    {
+     "id": "w25",
+     "public_key": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+     "ip": "10.214.0.35",
+     "state": "ready"
+    },
+    {
+     "id": "w26",
+     "public_key": "GhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGho=",
+     "ip": "10.214.0.36",
+     "state": "ready"
+    },
+    {
+     "id": "w27",
+     "public_key": "GxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxs=",
+     "ip": "10.214.0.37",
+     "state": "ready"
+    },
+    {
+     "id": "w28",
+     "public_key": "HBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw=",
+     "ip": "10.214.0.38",
+     "state": "ready"
+    },
+    {
+     "id": "w29",
+     "public_key": "HR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0=",
+     "ip": "10.214.0.39",
+     "state": "ready"
+    },
+    {
+     "id": "w30",
+     "public_key": "Hh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4=",
+     "ip": "10.214.0.40",
+     "state": "ready"
+    },
+    {
+     "id": "w31",
+     "public_key": "Hx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8=",
+     "ip": "10.214.0.41",
+     "state": "ready"
+    },
+    {
+     "id": "w32",
+     "public_key": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+     "ip": "10.214.0.42",
+     "state": "ready"
+    },
+    {
+     "id": "w33",
+     "public_key": "ISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISE=",
+     "ip": "10.214.0.43",
+     "state": "ready"
+    },
+    {
+     "id": "w34",
+     "public_key": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+     "ip": "10.214.0.44",
+     "state": "ready"
+    },
+    {
+     "id": "w35",
+     "public_key": "IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyM=",
+     "ip": "10.214.0.45",
+     "state": "ready"
+    },
+    {
+     "id": "w36",
+     "public_key": "JCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQ=",
+     "ip": "10.214.0.46",
+     "state": "ready"
+    },
+    {
+     "id": "w37",
+     "public_key": "JSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSU=",
+     "ip": "10.214.0.47",
+     "state": "ready"
+    },
+    {
+     "id": "w38",
+     "public_key": "JiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiY=",
+     "ip": "10.214.0.48",
+     "state": "ready"
+    },
+    {
+     "id": "w39",
+     "public_key": "JycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJyc=",
+     "ip": "10.214.0.49",
+     "state": "ready"
+    },
+    {
+     "id": "w40",
+     "public_key": "KCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCg=",
+     "ip": "10.214.0.50",
+     "state": "ready"
+    },
+    {
+     "id": "w41",
+     "public_key": "KSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSk=",
+     "ip": "10.214.0.51",
+     "state": "ready"
+    },
+    {
+     "id": "w42",
+     "public_key": "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=",
+     "ip": "10.214.0.52",
+     "state": "ready"
+    },
+    {
+     "id": "w43",
+     "public_key": "KysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKys=",
+     "ip": "10.214.0.53",
+     "state": "ready"
+    },
+    {
+     "id": "w44",
+     "public_key": "LCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCw=",
+     "ip": "10.214.0.54",
+     "state": "ready"
+    },
+    {
+     "id": "w45",
+     "public_key": "LS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0=",
+     "ip": "10.214.0.55",
+     "state": "ready"
+    },
+    {
+     "id": "w46",
+     "public_key": "Li4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4=",
+     "ip": "10.214.0.56",
+     "state": "ready"
+    },
+    {
+     "id": "w47",
+     "public_key": "Ly8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8=",
+     "ip": "10.214.0.57",
+     "state": "ready"
+    },
+    {
+     "id": "w48",
+     "public_key": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+     "ip": "10.214.0.58",
+     "state": "ready"
+    },
+    {
+     "id": "w49",
+     "public_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=",
+     "ip": "10.214.0.59",
+     "state": "ready"
+    },
+    {
+     "id": "w50",
+     "public_key": "MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjI=",
+     "ip": "10.214.0.60",
+     "state": "ready"
+    },
+    {
+     "id": "w51",
+     "public_key": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+     "ip": "10.214.0.61",
+     "state": "ready"
+    },
+    {
+     "id": "w52",
+     "public_key": "NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ=",
+     "ip": "10.214.0.62",
+     "state": "ready"
+    },
+    {
+     "id": "w53",
+     "public_key": "NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU=",
+     "ip": "10.214.0.63",
+     "state": "ready"
+    },
+    {
+     "id": "w54",
+     "public_key": "NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY=",
+     "ip": "10.214.0.64",
+     "state": "ready"
+    },
+    {
+     "id": "w55",
+     "public_key": "Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc=",
+     "ip": "10.214.0.65",
+     "state": "ready"
+    },
+    {
+     "id": "w56",
+     "public_key": "ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg=",
+     "ip": "10.214.0.66",
+     "state": "ready"
+    },
+    {
+     "id": "w57",
+     "public_key": "OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk=",
+     "ip": "10.214.0.67",
+     "state": "ready"
+    },
+    {
+     "id": "w58",
+     "public_key": "Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo=",
+     "ip": "10.214.0.68",
+     "state": "ready"
+    },
+    {
+     "id": "w59",
+     "public_key": "Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs=",
+     "ip": "10.214.0.69",
+     "state": "ready"
+    },
+    {
+     "id": "w60",
+     "public_key": "PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw=",
+     "ip": "10.214.0.70",
+     "state": "ready"
+    },
+    {
+     "id": "w61",
+     "public_key": "PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0=",
+     "ip": "10.214.0.71",
+     "state": "ready"
+    },
+    {
+     "id": "w62",
+     "public_key": "Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4=",
+     "ip": "10.214.0.72",
+     "state": "ready"
+    },
+    {
+     "id": "w63",
+     "public_key": "Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8=",
+     "ip": "10.214.0.73",
+     "state": "ready"
+    },
+    {
+     "id": "w64",
+     "public_key": "QEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA=",
+     "ip": "10.214.0.74",
+     "state": "ready"
+    },
+    {
+     "id": "w65",
+     "public_key": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
+     "ip": "10.214.0.75",
+     "state": "ready"
+    },
+    {
+     "id": "w66",
+     "public_key": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=",
+     "ip": "10.214.0.76",
+     "state": "ready"
+    },
+    {
+     "id": "w67",
+     "public_key": "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=",
+     "ip": "10.214.0.77",
+     "state": "ready"
+    },
+    {
+     "id": "w68",
+     "public_key": "REREREREREREREREREREREREREREREREREREREREREQ=",
+     "ip": "10.214.0.78",
+     "state": "ready"
+    },
+    {
+     "id": "w69",
+     "public_key": "RUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUU=",
+     "ip": "10.214.0.79",
+     "state": "ready"
+    },
+    {
+     "id": "w70",
+     "public_key": "RkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkY=",
+     "ip": "10.214.0.80",
+     "state": "ready"
+    },
+    {
+     "id": "w71",
+     "public_key": "R0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0c=",
+     "ip": "10.214.0.81",
+     "state": "ready"
+    },
+    {
+     "id": "w72",
+     "public_key": "SEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEg=",
+     "ip": "10.214.0.82",
+     "state": "ready"
+    },
+    {
+     "id": "w73",
+     "public_key": "SUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUk=",
+     "ip": "10.214.0.83",
+     "state": "ready"
+    },
+    {
+     "id": "w74",
+     "public_key": "SkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSko=",
+     "ip": "10.214.0.84",
+     "state": "ready"
+    },
+    {
+     "id": "w75",
+     "public_key": "S0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0s=",
+     "ip": "10.214.0.85",
+     "state": "ready"
+    },
+    {
+     "id": "w76",
+     "public_key": "TExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEw=",
+     "ip": "10.214.0.86",
+     "state": "ready"
+    },
+    {
+     "id": "w77",
+     "public_key": "TU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU0=",
+     "ip": "10.214.0.87",
+     "state": "ready"
+    },
+    {
+     "id": "w78",
+     "public_key": "Tk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk4=",
+     "ip": "10.214.0.88",
+     "state": "ready"
+    },
+    {
+     "id": "w79",
+     "public_key": "T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT08=",
+     "ip": "10.214.0.89",
+     "state": "ready"
+    },
+    {
+     "id": "w80",
+     "public_key": "UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFA=",
+     "ip": "10.214.0.90",
+     "state": "ready"
+    },
+    {
+     "id": "w81",
+     "public_key": "UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVE=",
+     "ip": "10.214.0.91",
+     "state": "ready"
+    },
+    {
+     "id": "w82",
+     "public_key": "UlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlI=",
+     "ip": "10.214.0.92",
+     "state": "ready"
+    },
+    {
+     "id": "w83",
+     "public_key": "U1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1M=",
+     "ip": "10.214.0.93",
+     "state": "ready"
+    },
+    {
+     "id": "w84",
+     "public_key": "VFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQ=",
+     "ip": "10.214.0.94",
+     "state": "ready"
+    },
+    {
+     "id": "w85",
+     "public_key": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=",
+     "ip": "10.214.0.95",
+     "state": "ready"
+    },
+    {
+     "id": "w86",
+     "public_key": "VlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlY=",
+     "ip": "10.214.0.96",
+     "state": "ready"
+    },
+    {
+     "id": "w87",
+     "public_key": "V1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1c=",
+     "ip": "10.214.0.97",
+     "state": "ready"
+    },
+    {
+     "id": "w88",
+     "public_key": "WFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFg=",
+     "ip": "10.214.0.98",
+     "state": "ready"
+    },
+    {
+     "id": "w89",
+     "public_key": "WVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVk=",
+     "ip": "10.214.0.99",
+     "state": "ready"
+    },
+    {
+     "id": "w90",
+     "public_key": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=",
+     "ip": "10.214.0.100",
+     "state": "ready"
+    },
+    {
+     "id": "w91",
+     "public_key": "W1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1s=",
+     "ip": "10.214.0.101",
+     "state": "ready"
+    },
+    {
+     "id": "w92",
+     "public_key": "XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw=",
+     "ip": "10.214.0.102",
+     "state": "ready"
+    },
+    {
+     "id": "w93",
+     "public_key": "XV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV0=",
+     "ip": "10.214.0.103",
+     "state": "ready"
+    },
+    {
+     "id": "w94",
+     "public_key": "Xl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl4=",
+     "ip": "10.214.0.104",
+     "state": "ready"
+    },
+    {
+     "id": "w95",
+     "public_key": "X19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX18=",
+     "ip": "10.214.0.105",
+     "state": "ready"
+    },
+    {
+     "id": "w96",
+     "public_key": "YGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGA=",
+     "ip": "10.214.0.106",
+     "state": "ready"
+    },
+    {
+     "id": "w97",
+     "public_key": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+     "ip": "10.214.0.107",
+     "state": "ready"
+    },
+    {
+     "id": "w98",
+     "public_key": "YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=",
+     "ip": "10.214.0.108",
+     "state": "ready"
+    },
+    {
+     "id": "w99",
+     "public_key": "Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=",
+     "ip": "10.214.0.109",
+     "state": "ready"
+    },
+    {
+     "id": "w100",
+     "public_key": "ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ=",
+     "ip": "10.214.0.110",
+     "state": "ready"
+    },
+    {
+     "id": "w101",
+     "public_key": "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=",
+     "ip": "10.214.0.111",
+     "state": "ready"
+    },
+    {
+     "id": "w102",
+     "public_key": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+     "ip": "10.214.0.112",
+     "state": "ready"
+    },
+    {
+     "id": "w103",
+     "public_key": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c=",
+     "ip": "10.214.0.113",
+     "state": "ready"
+    },
+    {
+     "id": "w104",
+     "public_key": "aGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGg=",
+     "ip": "10.214.0.114",
+     "state": "ready"
+    },
+    {
+     "id": "w105",
+     "public_key": "aWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWk=",
+     "ip": "10.214.0.115",
+     "state": "ready"
+    },
+    {
+     "id": "w106",
+     "public_key": "ampqampqampqampqampqampqampqampqampqampqamo=",
+     "ip": "10.214.0.116",
+     "state": "ready"
+    },
+    {
+     "id": "w107",
+     "public_key": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s=",
+     "ip": "10.214.0.117",
+     "state": "ready"
+    },
+    {
+     "id": "w108",
+     "public_key": "bGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGw=",
+     "ip": "10.214.0.118",
+     "state": "ready"
+    },
+    {
+     "id": "w109",
+     "public_key": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+     "ip": "10.214.0.119",
+     "state": "ready"
+    },
+    {
+     "id": "w110",
+     "public_key": "bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4=",
+     "ip": "10.214.0.120",
+     "state": "ready"
+    },
+    {
+     "id": "w111",
+     "public_key": "b29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb28=",
+     "ip": "10.214.0.121",
+     "state": "ready"
+    },
+    {
+     "id": "w112",
+     "public_key": "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA=",
+     "ip": "10.214.0.122",
+     "state": "ready"
+    },
+    {
+     "id": "w113",
+     "public_key": "cXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXE=",
+     "ip": "10.214.0.123",
+     "state": "ready"
+    },
+    {
+     "id": "w114",
+     "public_key": "cnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnI=",
+     "ip": "10.214.0.124",
+     "state": "ready"
+    },
+    {
+     "id": "w115",
+     "public_key": "c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M=",
+     "ip": "10.214.0.125",
+     "state": "ready"
+    },
+    {
+     "id": "w116",
+     "public_key": "dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHQ=",
+     "ip": "10.214.0.126",
+     "state": "ready"
+    },
+    {
+     "id": "w117",
+     "public_key": "dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXU=",
+     "ip": "10.214.0.127",
+     "state": "ready"
+    },
+    {
+     "id": "w118",
+     "public_key": "dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnY=",
+     "ip": "10.214.0.128",
+     "state": "ready"
+    },
+    {
+     "id": "w119",
+     "public_key": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3c=",
+     "ip": "10.214.0.129",
+     "state": "ready"
+    },
+    {
+     "id": "w120",
+     "public_key": "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=",
+     "ip": "10.214.0.130",
+     "state": "ready"
+    },
+    {
+     "id": "w121",
+     "public_key": "eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXk=",
+     "ip": "10.214.0.131",
+     "state": "ready"
+    },
+    {
+     "id": "w122",
+     "public_key": "enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6eno=",
+     "ip": "10.214.0.132",
+     "state": "ready"
+    },
+    {
+     "id": "w123",
+     "public_key": "e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s=",
+     "ip": "10.214.0.133",
+     "state": "ready"
+    },
+    {
+     "id": "w124",
+     "public_key": "fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHw=",
+     "ip": "10.214.0.134",
+     "state": "ready"
+    },
+    {
+     "id": "w125",
+     "public_key": "fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX0=",
+     "ip": "10.214.0.135",
+     "state": "ready"
+    },
+    {
+     "id": "w126",
+     "public_key": "fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn4=",
+     "ip": "10.214.0.136",
+     "state": "ready"
+    },
+    {
+     "id": "w127",
+     "public_key": "f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f38=",
+     "ip": "10.214.0.137",
+     "state": "ready"
+    },
+    {
+     "id": "w128",
+     "public_key": "gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA=",
+     "ip": "10.214.0.138",
+     "state": "ready"
+    },
+    {
+     "id": "w129",
+     "public_key": "gYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYE=",
+     "ip": "10.214.0.139",
+     "state": "ready"
+    },
+    {
+     "id": "w130",
+     "public_key": "goKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoI=",
+     "ip": "10.214.0.140",
+     "state": "ready"
+    },
+    {
+     "id": "w131",
+     "public_key": "g4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4M=",
+     "ip": "10.214.0.141",
+     "state": "ready"
+    },
+    {
+     "id": "w132",
+     "public_key": "hISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhIQ=",
+     "ip": "10.214.0.142",
+     "state": "ready"
+    },
+    {
+     "id": "w133",
+     "public_key": "hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYU=",
+     "ip": "10.214.0.143",
+     "state": "ready"
+    },
+    {
+     "id": "w134",
+     "public_key": "hoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoY=",
+     "ip": "10.214.0.144",
+     "state": "ready"
+    },
+    {
+     "id": "w135",
+     "public_key": "h4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4c=",
+     "ip": "10.214.0.145",
+     "state": "ready"
+    },
+    {
+     "id": "w136",
+     "public_key": "iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg=",
+     "ip": "10.214.0.146",
+     "state": "ready"
+    },
+    {
+     "id": "w137",
+     "public_key": "iYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYk=",
+     "ip": "10.214.0.147",
+     "state": "ready"
+    },
+    {
+     "id": "w138",
+     "public_key": "ioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioo=",
+     "ip": "10.214.0.148",
+     "state": "ready"
+    },
+    {
+     "id": "w139",
+     "public_key": "i4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4s=",
+     "ip": "10.214.0.149",
+     "state": "ready"
+    },
+    {
+     "id": "w140",
+     "public_key": "jIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIw=",
+     "ip": "10.214.0.150",
+     "state": "ready"
+    },
+    {
+     "id": "w141",
+     "public_key": "jY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY0=",
+     "ip": "10.214.0.151",
+     "state": "ready"
+    },
+    {
+     "id": "w142",
+     "public_key": "jo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo4=",
+     "ip": "10.214.0.152",
+     "state": "ready"
+    },
+    {
+     "id": "w143",
+     "public_key": "j4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj48=",
+     "ip": "10.214.0.153",
+     "state": "ready"
+    },
+    {
+     "id": "w144",
+     "public_key": "kJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJA=",
+     "ip": "10.214.0.154",
+     "state": "ready"
+    },
+    {
+     "id": "w145",
+     "public_key": "kZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZE=",
+     "ip": "10.214.0.155",
+     "state": "ready"
+    },
+    {
+     "id": "w146",
+     "public_key": "kpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpI=",
+     "ip": "10.214.0.156",
+     "state": "ready"
+    },
+    {
+     "id": "w147",
+     "public_key": "k5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5M=",
+     "ip": "10.214.0.157",
+     "state": "ready"
+    },
+    {
+     "id": "w148",
+     "public_key": "lJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJQ=",
+     "ip": "10.214.0.158",
+     "state": "ready"
+    },
+    {
+     "id": "w149",
+     "public_key": "lZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZU=",
+     "ip": "10.214.0.159",
+     "state": "ready"
+    },
+    {
+     "id": "w150",
+     "public_key": "lpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpY=",
+     "ip": "10.214.0.160",
+     "state": "ready"
+    },
+    {
+     "id": "w151",
+     "public_key": "l5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5c=",
+     "ip": "10.214.0.161",
+     "state": "ready"
+    },
+    {
+     "id": "w152",
+     "public_key": "mJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJg=",
+     "ip": "10.214.0.162",
+     "state": "ready"
+    },
+    {
+     "id": "w153",
+     "public_key": "mZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZk=",
+     "ip": "10.214.0.163",
+     "state": "ready"
+    },
+    {
+     "id": "w154",
+     "public_key": "mpqampqampqampqampqampqampqampqampqampqampo=",
+     "ip": "10.214.0.164",
+     "state": "ready"
+    },
+    {
+     "id": "w155",
+     "public_key": "m5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5s=",
+     "ip": "10.214.0.165",
+     "state": "ready"
+    },
+    {
+     "id": "w156",
+     "public_key": "nJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJw=",
+     "ip": "10.214.0.166",
+     "state": "ready"
+    },
+    {
+     "id": "w157",
+     "public_key": "nZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ0=",
+     "ip": "10.214.0.167",
+     "state": "ready"
+    },
+    {
+     "id": "w158",
+     "public_key": "np6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp4=",
+     "ip": "10.214.0.168",
+     "state": "ready"
+    },
+    {
+     "id": "w159",
+     "public_key": "n5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn58=",
+     "ip": "10.214.0.169",
+     "state": "ready"
+    },
+    {
+     "id": "w160",
+     "public_key": "oKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKA=",
+     "ip": "10.214.0.170",
+     "state": "ready"
+    },
+    {
+     "id": "w161",
+     "public_key": "oaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaE=",
+     "ip": "10.214.0.171",
+     "state": "ready"
+    },
+    {
+     "id": "w162",
+     "public_key": "oqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqI=",
+     "ip": "10.214.0.172",
+     "state": "ready"
+    },
+    {
+     "id": "w163",
+     "public_key": "o6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6M=",
+     "ip": "10.214.0.173",
+     "state": "ready"
+    },
+    {
+     "id": "w164",
+     "public_key": "pKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKQ=",
+     "ip": "10.214.0.174",
+     "state": "ready"
+    },
+    {
+     "id": "w165",
+     "public_key": "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=",
+     "ip": "10.214.0.175",
+     "state": "ready"
+    },
+    {
+     "id": "w166",
+     "public_key": "pqampqampqampqampqampqampqampqampqampqampqY=",
+     "ip": "10.214.0.176",
+     "state": "ready"
+    },
+    {
+     "id": "w167",
+     "public_key": "p6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6c=",
+     "ip": "10.214.0.177",
+     "state": "ready"
+    },
+    {
+     "id": "w168",
+     "public_key": "qKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKg=",
+     "ip": "10.214.0.178",
+     "state": "ready"
+    },
+    {
+     "id": "w169",
+     "public_key": "qampqampqampqampqampqampqampqampqampqampqak=",
+     "ip": "10.214.0.179",
+     "state": "ready"
+    },
+    {
+     "id": "w170",
+     "public_key": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=",
+     "ip": "10.214.0.180",
+     "state": "ready"
+    },
+    {
+     "id": "w171",
+     "public_key": "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+     "ip": "10.214.0.181",
+     "state": "ready"
+    },
+    {
+     "id": "w172",
+     "public_key": "rKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKw=",
+     "ip": "10.214.0.182",
+     "state": "ready"
+    },
+    {
+     "id": "w173",
+     "public_key": "ra2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra0=",
+     "ip": "10.214.0.183",
+     "state": "ready"
+    },
+    {
+     "id": "w174",
+     "public_key": "rq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq4=",
+     "ip": "10.214.0.184",
+     "state": "ready"
+    },
+    {
+     "id": "w175",
+     "public_key": "r6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr68=",
+     "ip": "10.214.0.185",
+     "state": "ready"
+    },
+    {
+     "id": "w176",
+     "public_key": "sLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLA=",
+     "ip": "10.214.0.186",
+     "state": "ready"
+    },
+    {
+     "id": "w177",
+     "public_key": "sbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbE=",
+     "ip": "10.214.0.187",
+     "state": "ready"
+    },
+    {
+     "id": "w178",
+     "public_key": "srKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrI=",
+     "ip": "10.214.0.188",
+     "state": "ready"
+    },
+    {
+     "id": "w179",
+     "public_key": "s7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7M=",
+     "ip": "10.214.0.189",
+     "state": "ready"
+    },
+    {
+     "id": "w180",
+     "public_key": "tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQ=",
+     "ip": "10.214.0.190",
+     "state": "ready"
+    },
+    {
+     "id": "w181",
+     "public_key": "tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbU=",
+     "ip": "10.214.0.191",
+     "state": "ready"
+    },
+    {
+     "id": "w182",
+     "public_key": "tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2trY=",
+     "ip": "10.214.0.192",
+     "state": "ready"
+    },
+    {
+     "id": "w183",
+     "public_key": "t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7c=",
+     "ip": "10.214.0.193",
+     "state": "ready"
+    },
+    {
+     "id": "w184",
+     "public_key": "uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLg=",
+     "ip": "10.214.0.194",
+     "state": "ready"
+    },
+    {
+     "id": "w185",
+     "public_key": "ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubk=",
+     "ip": "10.214.0.195",
+     "state": "ready"
+    },
+    {
+     "id": "w186",
+     "public_key": "urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6uro=",
+     "ip": "10.214.0.196",
+     "state": "ready"
+    },
+    {
+     "id": "w187",
+     "public_key": "u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s=",
+     "ip": "10.214.0.197",
+     "state": "ready"
+    },
+    {
+     "id": "w188",
+     "public_key": "vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLw=",
+     "ip": "10.214.0.198",
+     "state": "ready"
+    },
+    {
+     "id": "w189",
+     "public_key": "vb29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb0=",
+     "ip": "10.214.0.199",
+     "state": "ready"
+    },
+    {
+     "id": "w190",
+     "public_key": "vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr4=",
+     "ip": "10.214.0.200",
+     "state": "ready"
+    },
+    {
+     "id": "w191",
+     "public_key": "v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v78=",
+     "ip": "10.214.0.201",
+     "state": "ready"
+    },
+    {
+     "id": "w192",
+     "public_key": "wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMA=",
+     "ip": "10.214.0.202",
+     "state": "ready"
+    },
+    {
+     "id": "w193",
+     "public_key": "wcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcE=",
+     "ip": "10.214.0.203",
+     "state": "ready"
+    },
+    {
+     "id": "w194",
+     "public_key": "wsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsI=",
+     "ip": "10.214.0.204",
+     "state": "ready"
+    },
+    {
+     "id": "w195",
+     "public_key": "w8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8M=",
+     "ip": "10.214.0.205",
+     "state": "ready"
+    },
+    {
+     "id": "w196",
+     "public_key": "xMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMQ=",
+     "ip": "10.214.0.206",
+     "state": "ready"
+    },
+    {
+     "id": "w197",
+     "public_key": "xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcU=",
+     "ip": "10.214.0.207",
+     "state": "ready"
+    },
+    {
+     "id": "w198",
+     "public_key": "xsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsY=",
+     "ip": "10.214.0.208",
+     "state": "ready"
+    },
+    {
+     "id": "w199",
+     "public_key": "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=",
+     "ip": "10.214.0.209",
+     "state": "ready"
+    },
+    {
+     "id": "w200",
+     "public_key": "yMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMg=",
+     "ip": "10.214.0.210",
+     "state": "ready"
+    },
+    {
+     "id": "w201",
+     "public_key": "ycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJyck=",
+     "ip": "10.214.0.211",
+     "state": "ready"
+    },
+    {
+     "id": "w202",
+     "public_key": "ysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyso=",
+     "ip": "10.214.0.212",
+     "state": "ready"
+    },
+    {
+     "id": "w203",
+     "public_key": "y8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8s=",
+     "ip": "10.214.0.213",
+     "state": "ready"
+    },
+    {
+     "id": "w204",
+     "public_key": "zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw=",
+     "ip": "10.214.0.214",
+     "state": "ready"
+    },
+    {
+     "id": "w205",
+     "public_key": "zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0=",
+     "ip": "10.214.0.215",
+     "state": "ready"
+    },
+    {
+     "id": "w206",
+     "public_key": "zs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs4=",
+     "ip": "10.214.0.216",
+     "state": "ready"
+    },
+    {
+     "id": "w207",
+     "public_key": "z8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz88=",
+     "ip": "10.214.0.217",
+     "state": "ready"
+    },
+    {
+     "id": "w208",
+     "public_key": "0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NA=",
+     "ip": "10.214.0.218",
+     "state": "ready"
+    },
+    {
+     "id": "w209",
+     "public_key": "0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dE=",
+     "ip": "10.214.0.219",
+     "state": "ready"
+    },
+    {
+     "id": "w210",
+     "public_key": "0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tI=",
+     "ip": "10.214.0.220",
+     "state": "ready"
+    },
+    {
+     "id": "w211",
+     "public_key": "09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09M=",
+     "ip": "10.214.0.221",
+     "state": "ready"
+    },
+    {
+     "id": "w212",
+     "public_key": "1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NQ=",
+     "ip": "10.214.0.222",
+     "state": "ready"
+    },
+    {
+     "id": "w213",
+     "public_key": "1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dU=",
+     "ip": "10.214.0.223",
+     "state": "ready"
+    },
+    {
+     "id": "w214",
+     "public_key": "1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tY=",
+     "ip": "10.214.0.224",
+     "state": "ready"
+    },
+    {
+     "id": "w215",
+     "public_key": "19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19c=",
+     "ip": "10.214.0.225",
+     "state": "ready"
+    },
+    {
+     "id": "w216",
+     "public_key": "2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2Ng=",
+     "ip": "10.214.0.226",
+     "state": "ready"
+    },
+    {
+     "id": "w217",
+     "public_key": "2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dk=",
+     "ip": "10.214.0.227",
+     "state": "ready"
+    },
+    {
+     "id": "w218",
+     "public_key": "2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2to=",
+     "ip": "10.214.0.228",
+     "state": "ready"
+    },
+    {
+     "id": "w219",
+     "public_key": "29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb29s=",
+     "ip": "10.214.0.229",
+     "state": "ready"
+    },
+    {
+     "id": "w220",
+     "public_key": "3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nw=",
+     "ip": "10.214.0.230",
+     "state": "ready"
+    },
+    {
+     "id": "w221",
+     "public_key": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d0=",
+     "ip": "10.214.0.231",
+     "state": "ready"
+    },
+    {
+     "id": "w222",
+     "public_key": "3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t4=",
+     "ip": "10.214.0.232",
+     "state": "ready"
+    },
+    {
+     "id": "w223",
+     "public_key": "39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f398=",
+     "ip": "10.214.0.233",
+     "state": "ready"
+    },
+    {
+     "id": "w224",
+     "public_key": "4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4OA=",
+     "ip": "10.214.0.234",
+     "state": "ready"
+    },
+    {
+     "id": "w225",
+     "public_key": "4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eE=",
+     "ip": "10.214.0.235",
+     "state": "ready"
+    },
+    {
+     "id": "w226",
+     "public_key": "4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uI=",
+     "ip": "10.214.0.236",
+     "state": "ready"
+    },
+    {
+     "id": "w227",
+     "public_key": "4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+M=",
+     "ip": "10.214.0.237",
+     "state": "ready"
+    },
+    {
+     "id": "w228",
+     "public_key": "5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OQ=",
+     "ip": "10.214.0.238",
+     "state": "ready"
+    },
+    {
+     "id": "w229",
+     "public_key": "5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eU=",
+     "ip": "10.214.0.239",
+     "state": "ready"
+    },
+    {
+     "id": "w230",
+     "public_key": "5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5uY=",
+     "ip": "10.214.0.240",
+     "state": "ready"
+    },
+    {
+     "id": "w231",
+     "public_key": "5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+c=",
+     "ip": "10.214.0.241",
+     "state": "ready"
+    },
+    {
+     "id": "w232",
+     "public_key": "6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Og=",
+     "ip": "10.214.0.242",
+     "state": "ready"
+    },
+    {
+     "id": "w233",
+     "public_key": "6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6ek=",
+     "ip": "10.214.0.243",
+     "state": "ready"
+    },
+    {
+     "id": "w234",
+     "public_key": "6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6uo=",
+     "ip": "10.214.0.244",
+     "state": "ready"
+    },
+    {
+     "id": "w235",
+     "public_key": "6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+s=",
+     "ip": "10.214.0.245",
+     "state": "ready"
+    },
+    {
+     "id": "w236",
+     "public_key": "7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ow=",
+     "ip": "10.214.0.246",
+     "state": "ready"
+    },
+    {
+     "id": "w237",
+     "public_key": "7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e0=",
+     "ip": "10.214.0.247",
+     "state": "ready"
+    },
+    {
+     "id": "w238",
+     "public_key": "7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u4=",
+     "ip": "10.214.0.248",
+     "state": "ready"
+    },
+    {
+     "id": "w239",
+     "public_key": "7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+8=",
+     "ip": "10.214.0.249",
+     "state": "ready"
+    },
+    {
+     "id": "w240",
+     "public_key": "8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PA=",
+     "ip": "10.214.0.250",
+     "state": "ready"
+    }
+   ],
+   "relays": []
+  },
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "valid server id of 31 characters",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "wxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "wxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "wxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+   ]
+  },
+  "valid": true,
+  "error": ""
+ },
+ {
+  "name": "unknown top-level key",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ],
+   "extra": 1
+  },
+  "valid": false,
+  "error": "unknown field \"extra\""
+ },
+ {
+  "name": "unknown peer key",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready",
+     "endpoint": "192.0.2.1:51820"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "unknown field \"endpoint\""
+ },
+ {
+  "name": "unknown relay key",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas",
+     "token": "x"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "unknown field \"token\""
+ },
+ {
+  "name": "duplicate top-level key",
+  "doc": "{\"version\": 1, \"version\": 1, \"written_at\": \"2026-11-15T12:00:00Z\", \"subnet\": \"10.214.0.0/24\", \"peers\": [{\"id\": \"nas\", \"public_key\": \"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"ip\": \"10.214.0.10\", \"state\": \"ready\"}, {\"id\": \"pi\", \"public_key\": \"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\", \"ip\": \"10.214.0.11\", \"state\": \"enrolling\"}], \"relays\": [{\"token_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"instance\": \"immich\", \"server\": \"nas\"}, {\"token_sha256\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"instance\": \"photos-2\", \"server\": \"nas\"}]}",
+  "valid": false,
+  "error": "duplicate key \"version\""
+ },
+ {
+  "name": "duplicate peer key",
+  "doc": "{\"version\": 1, \"written_at\": \"2026-11-15T12:00:00Z\", \"subnet\": \"10.214.0.0/24\", \"peers\": [{\"id\": \"nas\", \"public_key\": \"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"ip\": \"10.214.0.10\", \"state\": \"ready\", \"state\": \"ready\"}, {\"id\": \"pi\", \"public_key\": \"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\", \"ip\": \"10.214.0.11\", \"state\": \"enrolling\"}], \"relays\": [{\"token_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"instance\": \"immich\", \"server\": \"nas\"}, {\"token_sha256\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"instance\": \"photos-2\", \"server\": \"nas\"}]}",
+  "valid": false,
+  "error": "duplicate key \"state\""
+ },
+ {
+  "name": "trailing data",
+  "doc": "{\"version\": 1, \"written_at\": \"2026-11-15T12:00:00Z\", \"subnet\": \"10.214.0.0/24\", \"peers\": [{\"id\": \"nas\", \"public_key\": \"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"ip\": \"10.214.0.10\", \"state\": \"ready\"}, {\"id\": \"pi\", \"public_key\": \"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\", \"ip\": \"10.214.0.11\", \"state\": \"enrolling\"}], \"relays\": [{\"token_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"instance\": \"immich\", \"server\": \"nas\"}, {\"token_sha256\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"instance\": \"photos-2\", \"server\": \"nas\"}]} {}",
+  "valid": false,
+  "error": "trailing"
+ },
+ {
+  "name": "not JSON",
+  "doc": "{\"version\": 1,",
+  "valid": false,
+  "error": "not valid JSON"
+ },
+ {
+  "name": "empty file",
+  "doc": "",
+  "valid": false,
+  "error": "not valid JSON"
+ },
+ {
+  "name": "top-level list",
+  "doc": [],
+  "valid": false,
+  "error": "not an object"
+ },
+ {
+  "name": "missing peers",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "missing field \"peers\""
+ },
+ {
+  "name": "missing relays",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "missing field \"relays\""
+ },
+ {
+  "name": "missing written_at",
+  "doc": {
+   "version": 1,
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "missing field \"written_at\""
+ },
+ {
+  "name": "null peers",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": null,
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "$.peers: null"
+ },
+ {
+  "name": "null peer ip",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": null,
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "$.peers[0].ip: null"
+ },
+ {
+  "name": "case-folded key",
+  "doc": {
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ],
+   "Version": 1
+  },
+  "valid": false,
+  "error": "unknown field \"Version\""
+ },
+ {
+  "name": "version 2",
+  "doc": {
+   "version": 2,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "version 2: only version 1"
+ },
+ {
+  "name": "version 0",
+  "doc": {
+   "version": 0,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "version 0: only version 1"
+ },
+ {
+  "name": "version as string",
+  "doc": {
+   "version": "1",
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "wrong type"
+ },
+ {
+  "name": "written_at not RFC 3339",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15 12:00:00",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "does not decode"
+ },
+ {
+  "name": "written_at zero",
+  "doc": {
+   "version": 1,
+   "written_at": "0001-01-01T00:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "written_at: not set"
+ },
+ {
+  "name": "another subnet",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.215.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "subnet: must be 10.214.0.0/24"
+ },
+ {
+  "name": "subnet not masked",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.1/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "subnet: must be 10.214.0.0/24"
+ },
+ {
+  "name": "subnet wider",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/16",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "subnet: must be 10.214.0.0/24"
+ },
+ {
+  "name": "peer id primary",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "primary",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: id is not a server id"
+ },
+ {
+  "name": "peer id upper case",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "NAS",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: id is not a server id"
+ },
+ {
+  "name": "peer id too long",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "wxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: id is not a server id"
+ },
+ {
+  "name": "peer id trailing hyphen",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas-",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: id is not a server id"
+ },
+ {
+  "name": "peer public key short",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: public_key is not a WireGuard key"
+ },
+ {
+  "name": "peer public key base64url",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_s=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: public_key is not a WireGuard key"
+ },
+ {
+  "name": "peer ip is link (.1)",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.1",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: ip is not a worker address"
+ },
+ {
+  "name": "peer ip below .10",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.9",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: ip is not a worker address"
+ },
+ {
+  "name": "peer ip above .250",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.251",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: ip is not a worker address"
+ },
+ {
+  "name": "peer ip outside the subnet",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.1.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: ip is not a worker address"
+ },
+ {
+  "name": "peer ip IPv4-mapped IPv6",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "::ffff:10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: ip is not a worker address"
+ },
+ {
+  "name": "peer ip with prefix",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10/32",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "does not decode"
+ },
+ {
+  "name": "peer state offline",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "offline"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: state must be enrolling or ready"
+ },
+ {
+  "name": "peer state revoked",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "revoked"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[0]: state must be enrolling or ready"
+ },
+ {
+  "name": "duplicate peer id",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "nas",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[1]: duplicate peer id"
+ },
+ {
+  "name": "duplicate peer public key",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[1]: duplicate public key"
+ },
+ {
+  "name": "duplicate peer ip",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.10",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "peers[1]: duplicate peer ip"
+ },
+ {
+  "name": "more than 250 peers",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "w0",
+     "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "w1",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.11",
+     "state": "ready"
+    },
+    {
+     "id": "w2",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.12",
+     "state": "ready"
+    },
+    {
+     "id": "w3",
+     "public_key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+     "ip": "10.214.0.13",
+     "state": "ready"
+    },
+    {
+     "id": "w4",
+     "public_key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+     "ip": "10.214.0.14",
+     "state": "ready"
+    },
+    {
+     "id": "w5",
+     "public_key": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+     "ip": "10.214.0.15",
+     "state": "ready"
+    },
+    {
+     "id": "w6",
+     "public_key": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+     "ip": "10.214.0.16",
+     "state": "ready"
+    },
+    {
+     "id": "w7",
+     "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+     "ip": "10.214.0.17",
+     "state": "ready"
+    },
+    {
+     "id": "w8",
+     "public_key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=",
+     "ip": "10.214.0.18",
+     "state": "ready"
+    },
+    {
+     "id": "w9",
+     "public_key": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=",
+     "ip": "10.214.0.19",
+     "state": "ready"
+    },
+    {
+     "id": "w10",
+     "public_key": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo=",
+     "ip": "10.214.0.20",
+     "state": "ready"
+    },
+    {
+     "id": "w11",
+     "public_key": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=",
+     "ip": "10.214.0.21",
+     "state": "ready"
+    },
+    {
+     "id": "w12",
+     "public_key": "DAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw=",
+     "ip": "10.214.0.22",
+     "state": "ready"
+    },
+    {
+     "id": "w13",
+     "public_key": "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0=",
+     "ip": "10.214.0.23",
+     "state": "ready"
+    },
+    {
+     "id": "w14",
+     "public_key": "Dg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4=",
+     "ip": "10.214.0.24",
+     "state": "ready"
+    },
+    {
+     "id": "w15",
+     "public_key": "Dw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8=",
+     "ip": "10.214.0.25",
+     "state": "ready"
+    },
+    {
+     "id": "w16",
+     "public_key": "EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA=",
+     "ip": "10.214.0.26",
+     "state": "ready"
+    },
+    {
+     "id": "w17",
+     "public_key": "ERERERERERERERERERERERERERERERERERERERERERE=",
+     "ip": "10.214.0.27",
+     "state": "ready"
+    },
+    {
+     "id": "w18",
+     "public_key": "EhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhI=",
+     "ip": "10.214.0.28",
+     "state": "ready"
+    },
+    {
+     "id": "w19",
+     "public_key": "ExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExM=",
+     "ip": "10.214.0.29",
+     "state": "ready"
+    },
+    {
+     "id": "w20",
+     "public_key": "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQ=",
+     "ip": "10.214.0.30",
+     "state": "ready"
+    },
+    {
+     "id": "w21",
+     "public_key": "FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU=",
+     "ip": "10.214.0.31",
+     "state": "ready"
+    },
+    {
+     "id": "w22",
+     "public_key": "FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY=",
+     "ip": "10.214.0.32",
+     "state": "ready"
+    },
+    {
+     "id": "w23",
+     "public_key": "FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=",
+     "ip": "10.214.0.33",
+     "state": "ready"
+    },
+    {
+     "id": "w24",
+     "public_key": "GBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBg=",
+     "ip": "10.214.0.34",
+     "state": "ready"
+    },
+    {
+     "id": "w25",
+     "public_key": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+     "ip": "10.214.0.35",
+     "state": "ready"
+    },
+    {
+     "id": "w26",
+     "public_key": "GhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGho=",
+     "ip": "10.214.0.36",
+     "state": "ready"
+    },
+    {
+     "id": "w27",
+     "public_key": "GxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxs=",
+     "ip": "10.214.0.37",
+     "state": "ready"
+    },
+    {
+     "id": "w28",
+     "public_key": "HBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw=",
+     "ip": "10.214.0.38",
+     "state": "ready"
+    },
+    {
+     "id": "w29",
+     "public_key": "HR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0=",
+     "ip": "10.214.0.39",
+     "state": "ready"
+    },
+    {
+     "id": "w30",
+     "public_key": "Hh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4=",
+     "ip": "10.214.0.40",
+     "state": "ready"
+    },
+    {
+     "id": "w31",
+     "public_key": "Hx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8=",
+     "ip": "10.214.0.41",
+     "state": "ready"
+    },
+    {
+     "id": "w32",
+     "public_key": "ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+     "ip": "10.214.0.42",
+     "state": "ready"
+    },
+    {
+     "id": "w33",
+     "public_key": "ISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISE=",
+     "ip": "10.214.0.43",
+     "state": "ready"
+    },
+    {
+     "id": "w34",
+     "public_key": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+     "ip": "10.214.0.44",
+     "state": "ready"
+    },
+    {
+     "id": "w35",
+     "public_key": "IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyM=",
+     "ip": "10.214.0.45",
+     "state": "ready"
+    },
+    {
+     "id": "w36",
+     "public_key": "JCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQ=",
+     "ip": "10.214.0.46",
+     "state": "ready"
+    },
+    {
+     "id": "w37",
+     "public_key": "JSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSU=",
+     "ip": "10.214.0.47",
+     "state": "ready"
+    },
+    {
+     "id": "w38",
+     "public_key": "JiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiY=",
+     "ip": "10.214.0.48",
+     "state": "ready"
+    },
+    {
+     "id": "w39",
+     "public_key": "JycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJyc=",
+     "ip": "10.214.0.49",
+     "state": "ready"
+    },
+    {
+     "id": "w40",
+     "public_key": "KCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCg=",
+     "ip": "10.214.0.50",
+     "state": "ready"
+    },
+    {
+     "id": "w41",
+     "public_key": "KSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSk=",
+     "ip": "10.214.0.51",
+     "state": "ready"
+    },
+    {
+     "id": "w42",
+     "public_key": "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=",
+     "ip": "10.214.0.52",
+     "state": "ready"
+    },
+    {
+     "id": "w43",
+     "public_key": "KysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKys=",
+     "ip": "10.214.0.53",
+     "state": "ready"
+    },
+    {
+     "id": "w44",
+     "public_key": "LCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCw=",
+     "ip": "10.214.0.54",
+     "state": "ready"
+    },
+    {
+     "id": "w45",
+     "public_key": "LS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0=",
+     "ip": "10.214.0.55",
+     "state": "ready"
+    },
+    {
+     "id": "w46",
+     "public_key": "Li4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4=",
+     "ip": "10.214.0.56",
+     "state": "ready"
+    },
+    {
+     "id": "w47",
+     "public_key": "Ly8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8=",
+     "ip": "10.214.0.57",
+     "state": "ready"
+    },
+    {
+     "id": "w48",
+     "public_key": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+     "ip": "10.214.0.58",
+     "state": "ready"
+    },
+    {
+     "id": "w49",
+     "public_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=",
+     "ip": "10.214.0.59",
+     "state": "ready"
+    },
+    {
+     "id": "w50",
+     "public_key": "MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjI=",
+     "ip": "10.214.0.60",
+     "state": "ready"
+    },
+    {
+     "id": "w51",
+     "public_key": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+     "ip": "10.214.0.61",
+     "state": "ready"
+    },
+    {
+     "id": "w52",
+     "public_key": "NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ=",
+     "ip": "10.214.0.62",
+     "state": "ready"
+    },
+    {
+     "id": "w53",
+     "public_key": "NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU=",
+     "ip": "10.214.0.63",
+     "state": "ready"
+    },
+    {
+     "id": "w54",
+     "public_key": "NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY=",
+     "ip": "10.214.0.64",
+     "state": "ready"
+    },
+    {
+     "id": "w55",
+     "public_key": "Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc=",
+     "ip": "10.214.0.65",
+     "state": "ready"
+    },
+    {
+     "id": "w56",
+     "public_key": "ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg=",
+     "ip": "10.214.0.66",
+     "state": "ready"
+    },
+    {
+     "id": "w57",
+     "public_key": "OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk=",
+     "ip": "10.214.0.67",
+     "state": "ready"
+    },
+    {
+     "id": "w58",
+     "public_key": "Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo=",
+     "ip": "10.214.0.68",
+     "state": "ready"
+    },
+    {
+     "id": "w59",
+     "public_key": "Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs=",
+     "ip": "10.214.0.69",
+     "state": "ready"
+    },
+    {
+     "id": "w60",
+     "public_key": "PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw=",
+     "ip": "10.214.0.70",
+     "state": "ready"
+    },
+    {
+     "id": "w61",
+     "public_key": "PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0=",
+     "ip": "10.214.0.71",
+     "state": "ready"
+    },
+    {
+     "id": "w62",
+     "public_key": "Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4=",
+     "ip": "10.214.0.72",
+     "state": "ready"
+    },
+    {
+     "id": "w63",
+     "public_key": "Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8=",
+     "ip": "10.214.0.73",
+     "state": "ready"
+    },
+    {
+     "id": "w64",
+     "public_key": "QEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA=",
+     "ip": "10.214.0.74",
+     "state": "ready"
+    },
+    {
+     "id": "w65",
+     "public_key": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
+     "ip": "10.214.0.75",
+     "state": "ready"
+    },
+    {
+     "id": "w66",
+     "public_key": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=",
+     "ip": "10.214.0.76",
+     "state": "ready"
+    },
+    {
+     "id": "w67",
+     "public_key": "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=",
+     "ip": "10.214.0.77",
+     "state": "ready"
+    },
+    {
+     "id": "w68",
+     "public_key": "REREREREREREREREREREREREREREREREREREREREREQ=",
+     "ip": "10.214.0.78",
+     "state": "ready"
+    },
+    {
+     "id": "w69",
+     "public_key": "RUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUU=",
+     "ip": "10.214.0.79",
+     "state": "ready"
+    },
+    {
+     "id": "w70",
+     "public_key": "RkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkY=",
+     "ip": "10.214.0.80",
+     "state": "ready"
+    },
+    {
+     "id": "w71",
+     "public_key": "R0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0c=",
+     "ip": "10.214.0.81",
+     "state": "ready"
+    },
+    {
+     "id": "w72",
+     "public_key": "SEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEg=",
+     "ip": "10.214.0.82",
+     "state": "ready"
+    },
+    {
+     "id": "w73",
+     "public_key": "SUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUk=",
+     "ip": "10.214.0.83",
+     "state": "ready"
+    },
+    {
+     "id": "w74",
+     "public_key": "SkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSko=",
+     "ip": "10.214.0.84",
+     "state": "ready"
+    },
+    {
+     "id": "w75",
+     "public_key": "S0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0s=",
+     "ip": "10.214.0.85",
+     "state": "ready"
+    },
+    {
+     "id": "w76",
+     "public_key": "TExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEw=",
+     "ip": "10.214.0.86",
+     "state": "ready"
+    },
+    {
+     "id": "w77",
+     "public_key": "TU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU0=",
+     "ip": "10.214.0.87",
+     "state": "ready"
+    },
+    {
+     "id": "w78",
+     "public_key": "Tk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk4=",
+     "ip": "10.214.0.88",
+     "state": "ready"
+    },
+    {
+     "id": "w79",
+     "public_key": "T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT08=",
+     "ip": "10.214.0.89",
+     "state": "ready"
+    },
+    {
+     "id": "w80",
+     "public_key": "UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFA=",
+     "ip": "10.214.0.90",
+     "state": "ready"
+    },
+    {
+     "id": "w81",
+     "public_key": "UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVE=",
+     "ip": "10.214.0.91",
+     "state": "ready"
+    },
+    {
+     "id": "w82",
+     "public_key": "UlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlI=",
+     "ip": "10.214.0.92",
+     "state": "ready"
+    },
+    {
+     "id": "w83",
+     "public_key": "U1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1M=",
+     "ip": "10.214.0.93",
+     "state": "ready"
+    },
+    {
+     "id": "w84",
+     "public_key": "VFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQ=",
+     "ip": "10.214.0.94",
+     "state": "ready"
+    },
+    {
+     "id": "w85",
+     "public_key": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=",
+     "ip": "10.214.0.95",
+     "state": "ready"
+    },
+    {
+     "id": "w86",
+     "public_key": "VlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlY=",
+     "ip": "10.214.0.96",
+     "state": "ready"
+    },
+    {
+     "id": "w87",
+     "public_key": "V1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1c=",
+     "ip": "10.214.0.97",
+     "state": "ready"
+    },
+    {
+     "id": "w88",
+     "public_key": "WFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFg=",
+     "ip": "10.214.0.98",
+     "state": "ready"
+    },
+    {
+     "id": "w89",
+     "public_key": "WVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVk=",
+     "ip": "10.214.0.99",
+     "state": "ready"
+    },
+    {
+     "id": "w90",
+     "public_key": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=",
+     "ip": "10.214.0.100",
+     "state": "ready"
+    },
+    {
+     "id": "w91",
+     "public_key": "W1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1s=",
+     "ip": "10.214.0.101",
+     "state": "ready"
+    },
+    {
+     "id": "w92",
+     "public_key": "XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw=",
+     "ip": "10.214.0.102",
+     "state": "ready"
+    },
+    {
+     "id": "w93",
+     "public_key": "XV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV0=",
+     "ip": "10.214.0.103",
+     "state": "ready"
+    },
+    {
+     "id": "w94",
+     "public_key": "Xl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl4=",
+     "ip": "10.214.0.104",
+     "state": "ready"
+    },
+    {
+     "id": "w95",
+     "public_key": "X19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX18=",
+     "ip": "10.214.0.105",
+     "state": "ready"
+    },
+    {
+     "id": "w96",
+     "public_key": "YGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGA=",
+     "ip": "10.214.0.106",
+     "state": "ready"
+    },
+    {
+     "id": "w97",
+     "public_key": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+     "ip": "10.214.0.107",
+     "state": "ready"
+    },
+    {
+     "id": "w98",
+     "public_key": "YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=",
+     "ip": "10.214.0.108",
+     "state": "ready"
+    },
+    {
+     "id": "w99",
+     "public_key": "Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=",
+     "ip": "10.214.0.109",
+     "state": "ready"
+    },
+    {
+     "id": "w100",
+     "public_key": "ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ=",
+     "ip": "10.214.0.110",
+     "state": "ready"
+    },
+    {
+     "id": "w101",
+     "public_key": "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=",
+     "ip": "10.214.0.111",
+     "state": "ready"
+    },
+    {
+     "id": "w102",
+     "public_key": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+     "ip": "10.214.0.112",
+     "state": "ready"
+    },
+    {
+     "id": "w103",
+     "public_key": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c=",
+     "ip": "10.214.0.113",
+     "state": "ready"
+    },
+    {
+     "id": "w104",
+     "public_key": "aGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGg=",
+     "ip": "10.214.0.114",
+     "state": "ready"
+    },
+    {
+     "id": "w105",
+     "public_key": "aWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWk=",
+     "ip": "10.214.0.115",
+     "state": "ready"
+    },
+    {
+     "id": "w106",
+     "public_key": "ampqampqampqampqampqampqampqampqampqampqamo=",
+     "ip": "10.214.0.116",
+     "state": "ready"
+    },
+    {
+     "id": "w107",
+     "public_key": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s=",
+     "ip": "10.214.0.117",
+     "state": "ready"
+    },
+    {
+     "id": "w108",
+     "public_key": "bGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGw=",
+     "ip": "10.214.0.118",
+     "state": "ready"
+    },
+    {
+     "id": "w109",
+     "public_key": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+     "ip": "10.214.0.119",
+     "state": "ready"
+    },
+    {
+     "id": "w110",
+     "public_key": "bm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm4=",
+     "ip": "10.214.0.120",
+     "state": "ready"
+    },
+    {
+     "id": "w111",
+     "public_key": "b29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb28=",
+     "ip": "10.214.0.121",
+     "state": "ready"
+    },
+    {
+     "id": "w112",
+     "public_key": "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA=",
+     "ip": "10.214.0.122",
+     "state": "ready"
+    },
+    {
+     "id": "w113",
+     "public_key": "cXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXE=",
+     "ip": "10.214.0.123",
+     "state": "ready"
+    },
+    {
+     "id": "w114",
+     "public_key": "cnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnI=",
+     "ip": "10.214.0.124",
+     "state": "ready"
+    },
+    {
+     "id": "w115",
+     "public_key": "c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M=",
+     "ip": "10.214.0.125",
+     "state": "ready"
+    },
+    {
+     "id": "w116",
+     "public_key": "dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHQ=",
+     "ip": "10.214.0.126",
+     "state": "ready"
+    },
+    {
+     "id": "w117",
+     "public_key": "dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXU=",
+     "ip": "10.214.0.127",
+     "state": "ready"
+    },
+    {
+     "id": "w118",
+     "public_key": "dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnY=",
+     "ip": "10.214.0.128",
+     "state": "ready"
+    },
+    {
+     "id": "w119",
+     "public_key": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3c=",
+     "ip": "10.214.0.129",
+     "state": "ready"
+    },
+    {
+     "id": "w120",
+     "public_key": "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=",
+     "ip": "10.214.0.130",
+     "state": "ready"
+    },
+    {
+     "id": "w121",
+     "public_key": "eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXk=",
+     "ip": "10.214.0.131",
+     "state": "ready"
+    },
+    {
+     "id": "w122",
+     "public_key": "enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6eno=",
+     "ip": "10.214.0.132",
+     "state": "ready"
+    },
+    {
+     "id": "w123",
+     "public_key": "e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3s=",
+     "ip": "10.214.0.133",
+     "state": "ready"
+    },
+    {
+     "id": "w124",
+     "public_key": "fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHw=",
+     "ip": "10.214.0.134",
+     "state": "ready"
+    },
+    {
+     "id": "w125",
+     "public_key": "fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX0=",
+     "ip": "10.214.0.135",
+     "state": "ready"
+    },
+    {
+     "id": "w126",
+     "public_key": "fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn4=",
+     "ip": "10.214.0.136",
+     "state": "ready"
+    },
+    {
+     "id": "w127",
+     "public_key": "f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f38=",
+     "ip": "10.214.0.137",
+     "state": "ready"
+    },
+    {
+     "id": "w128",
+     "public_key": "gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA=",
+     "ip": "10.214.0.138",
+     "state": "ready"
+    },
+    {
+     "id": "w129",
+     "public_key": "gYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYE=",
+     "ip": "10.214.0.139",
+     "state": "ready"
+    },
+    {
+     "id": "w130",
+     "public_key": "goKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoI=",
+     "ip": "10.214.0.140",
+     "state": "ready"
+    },
+    {
+     "id": "w131",
+     "public_key": "g4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4M=",
+     "ip": "10.214.0.141",
+     "state": "ready"
+    },
+    {
+     "id": "w132",
+     "public_key": "hISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhIQ=",
+     "ip": "10.214.0.142",
+     "state": "ready"
+    },
+    {
+     "id": "w133",
+     "public_key": "hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYU=",
+     "ip": "10.214.0.143",
+     "state": "ready"
+    },
+    {
+     "id": "w134",
+     "public_key": "hoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoY=",
+     "ip": "10.214.0.144",
+     "state": "ready"
+    },
+    {
+     "id": "w135",
+     "public_key": "h4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4c=",
+     "ip": "10.214.0.145",
+     "state": "ready"
+    },
+    {
+     "id": "w136",
+     "public_key": "iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg=",
+     "ip": "10.214.0.146",
+     "state": "ready"
+    },
+    {
+     "id": "w137",
+     "public_key": "iYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYk=",
+     "ip": "10.214.0.147",
+     "state": "ready"
+    },
+    {
+     "id": "w138",
+     "public_key": "ioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioo=",
+     "ip": "10.214.0.148",
+     "state": "ready"
+    },
+    {
+     "id": "w139",
+     "public_key": "i4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4s=",
+     "ip": "10.214.0.149",
+     "state": "ready"
+    },
+    {
+     "id": "w140",
+     "public_key": "jIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIw=",
+     "ip": "10.214.0.150",
+     "state": "ready"
+    },
+    {
+     "id": "w141",
+     "public_key": "jY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY0=",
+     "ip": "10.214.0.151",
+     "state": "ready"
+    },
+    {
+     "id": "w142",
+     "public_key": "jo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo4=",
+     "ip": "10.214.0.152",
+     "state": "ready"
+    },
+    {
+     "id": "w143",
+     "public_key": "j4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj48=",
+     "ip": "10.214.0.153",
+     "state": "ready"
+    },
+    {
+     "id": "w144",
+     "public_key": "kJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJA=",
+     "ip": "10.214.0.154",
+     "state": "ready"
+    },
+    {
+     "id": "w145",
+     "public_key": "kZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZE=",
+     "ip": "10.214.0.155",
+     "state": "ready"
+    },
+    {
+     "id": "w146",
+     "public_key": "kpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpI=",
+     "ip": "10.214.0.156",
+     "state": "ready"
+    },
+    {
+     "id": "w147",
+     "public_key": "k5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5M=",
+     "ip": "10.214.0.157",
+     "state": "ready"
+    },
+    {
+     "id": "w148",
+     "public_key": "lJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJQ=",
+     "ip": "10.214.0.158",
+     "state": "ready"
+    },
+    {
+     "id": "w149",
+     "public_key": "lZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZU=",
+     "ip": "10.214.0.159",
+     "state": "ready"
+    },
+    {
+     "id": "w150",
+     "public_key": "lpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpY=",
+     "ip": "10.214.0.160",
+     "state": "ready"
+    },
+    {
+     "id": "w151",
+     "public_key": "l5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5c=",
+     "ip": "10.214.0.161",
+     "state": "ready"
+    },
+    {
+     "id": "w152",
+     "public_key": "mJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJg=",
+     "ip": "10.214.0.162",
+     "state": "ready"
+    },
+    {
+     "id": "w153",
+     "public_key": "mZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZk=",
+     "ip": "10.214.0.163",
+     "state": "ready"
+    },
+    {
+     "id": "w154",
+     "public_key": "mpqampqampqampqampqampqampqampqampqampqampo=",
+     "ip": "10.214.0.164",
+     "state": "ready"
+    },
+    {
+     "id": "w155",
+     "public_key": "m5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5s=",
+     "ip": "10.214.0.165",
+     "state": "ready"
+    },
+    {
+     "id": "w156",
+     "public_key": "nJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJw=",
+     "ip": "10.214.0.166",
+     "state": "ready"
+    },
+    {
+     "id": "w157",
+     "public_key": "nZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ0=",
+     "ip": "10.214.0.167",
+     "state": "ready"
+    },
+    {
+     "id": "w158",
+     "public_key": "np6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp4=",
+     "ip": "10.214.0.168",
+     "state": "ready"
+    },
+    {
+     "id": "w159",
+     "public_key": "n5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn58=",
+     "ip": "10.214.0.169",
+     "state": "ready"
+    },
+    {
+     "id": "w160",
+     "public_key": "oKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKA=",
+     "ip": "10.214.0.170",
+     "state": "ready"
+    },
+    {
+     "id": "w161",
+     "public_key": "oaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaE=",
+     "ip": "10.214.0.171",
+     "state": "ready"
+    },
+    {
+     "id": "w162",
+     "public_key": "oqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqI=",
+     "ip": "10.214.0.172",
+     "state": "ready"
+    },
+    {
+     "id": "w163",
+     "public_key": "o6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6M=",
+     "ip": "10.214.0.173",
+     "state": "ready"
+    },
+    {
+     "id": "w164",
+     "public_key": "pKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkpKQ=",
+     "ip": "10.214.0.174",
+     "state": "ready"
+    },
+    {
+     "id": "w165",
+     "public_key": "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=",
+     "ip": "10.214.0.175",
+     "state": "ready"
+    },
+    {
+     "id": "w166",
+     "public_key": "pqampqampqampqampqampqampqampqampqampqampqY=",
+     "ip": "10.214.0.176",
+     "state": "ready"
+    },
+    {
+     "id": "w167",
+     "public_key": "p6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6c=",
+     "ip": "10.214.0.177",
+     "state": "ready"
+    },
+    {
+     "id": "w168",
+     "public_key": "qKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKg=",
+     "ip": "10.214.0.178",
+     "state": "ready"
+    },
+    {
+     "id": "w169",
+     "public_key": "qampqampqampqampqampqampqampqampqampqampqak=",
+     "ip": "10.214.0.179",
+     "state": "ready"
+    },
+    {
+     "id": "w170",
+     "public_key": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=",
+     "ip": "10.214.0.180",
+     "state": "ready"
+    },
+    {
+     "id": "w171",
+     "public_key": "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+     "ip": "10.214.0.181",
+     "state": "ready"
+    },
+    {
+     "id": "w172",
+     "public_key": "rKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKw=",
+     "ip": "10.214.0.182",
+     "state": "ready"
+    },
+    {
+     "id": "w173",
+     "public_key": "ra2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra0=",
+     "ip": "10.214.0.183",
+     "state": "ready"
+    },
+    {
+     "id": "w174",
+     "public_key": "rq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq4=",
+     "ip": "10.214.0.184",
+     "state": "ready"
+    },
+    {
+     "id": "w175",
+     "public_key": "r6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr68=",
+     "ip": "10.214.0.185",
+     "state": "ready"
+    },
+    {
+     "id": "w176",
+     "public_key": "sLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLA=",
+     "ip": "10.214.0.186",
+     "state": "ready"
+    },
+    {
+     "id": "w177",
+     "public_key": "sbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbE=",
+     "ip": "10.214.0.187",
+     "state": "ready"
+    },
+    {
+     "id": "w178",
+     "public_key": "srKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrI=",
+     "ip": "10.214.0.188",
+     "state": "ready"
+    },
+    {
+     "id": "w179",
+     "public_key": "s7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7M=",
+     "ip": "10.214.0.189",
+     "state": "ready"
+    },
+    {
+     "id": "w180",
+     "public_key": "tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQ=",
+     "ip": "10.214.0.190",
+     "state": "ready"
+    },
+    {
+     "id": "w181",
+     "public_key": "tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbU=",
+     "ip": "10.214.0.191",
+     "state": "ready"
+    },
+    {
+     "id": "w182",
+     "public_key": "tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2trY=",
+     "ip": "10.214.0.192",
+     "state": "ready"
+    },
+    {
+     "id": "w183",
+     "public_key": "t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7c=",
+     "ip": "10.214.0.193",
+     "state": "ready"
+    },
+    {
+     "id": "w184",
+     "public_key": "uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLg=",
+     "ip": "10.214.0.194",
+     "state": "ready"
+    },
+    {
+     "id": "w185",
+     "public_key": "ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubk=",
+     "ip": "10.214.0.195",
+     "state": "ready"
+    },
+    {
+     "id": "w186",
+     "public_key": "urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6uro=",
+     "ip": "10.214.0.196",
+     "state": "ready"
+    },
+    {
+     "id": "w187",
+     "public_key": "u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s=",
+     "ip": "10.214.0.197",
+     "state": "ready"
+    },
+    {
+     "id": "w188",
+     "public_key": "vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLw=",
+     "ip": "10.214.0.198",
+     "state": "ready"
+    },
+    {
+     "id": "w189",
+     "public_key": "vb29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb0=",
+     "ip": "10.214.0.199",
+     "state": "ready"
+    },
+    {
+     "id": "w190",
+     "public_key": "vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr4=",
+     "ip": "10.214.0.200",
+     "state": "ready"
+    },
+    {
+     "id": "w191",
+     "public_key": "v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v78=",
+     "ip": "10.214.0.201",
+     "state": "ready"
+    },
+    {
+     "id": "w192",
+     "public_key": "wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMA=",
+     "ip": "10.214.0.202",
+     "state": "ready"
+    },
+    {
+     "id": "w193",
+     "public_key": "wcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcE=",
+     "ip": "10.214.0.203",
+     "state": "ready"
+    },
+    {
+     "id": "w194",
+     "public_key": "wsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsI=",
+     "ip": "10.214.0.204",
+     "state": "ready"
+    },
+    {
+     "id": "w195",
+     "public_key": "w8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8M=",
+     "ip": "10.214.0.205",
+     "state": "ready"
+    },
+    {
+     "id": "w196",
+     "public_key": "xMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMQ=",
+     "ip": "10.214.0.206",
+     "state": "ready"
+    },
+    {
+     "id": "w197",
+     "public_key": "xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcU=",
+     "ip": "10.214.0.207",
+     "state": "ready"
+    },
+    {
+     "id": "w198",
+     "public_key": "xsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsY=",
+     "ip": "10.214.0.208",
+     "state": "ready"
+    },
+    {
+     "id": "w199",
+     "public_key": "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=",
+     "ip": "10.214.0.209",
+     "state": "ready"
+    },
+    {
+     "id": "w200",
+     "public_key": "yMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMg=",
+     "ip": "10.214.0.210",
+     "state": "ready"
+    },
+    {
+     "id": "w201",
+     "public_key": "ycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJyck=",
+     "ip": "10.214.0.211",
+     "state": "ready"
+    },
+    {
+     "id": "w202",
+     "public_key": "ysrKysrKysrKysrKysrKysrKysrKysrKysrKysrKyso=",
+     "ip": "10.214.0.212",
+     "state": "ready"
+    },
+    {
+     "id": "w203",
+     "public_key": "y8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8s=",
+     "ip": "10.214.0.213",
+     "state": "ready"
+    },
+    {
+     "id": "w204",
+     "public_key": "zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw=",
+     "ip": "10.214.0.214",
+     "state": "ready"
+    },
+    {
+     "id": "w205",
+     "public_key": "zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0=",
+     "ip": "10.214.0.215",
+     "state": "ready"
+    },
+    {
+     "id": "w206",
+     "public_key": "zs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs4=",
+     "ip": "10.214.0.216",
+     "state": "ready"
+    },
+    {
+     "id": "w207",
+     "public_key": "z8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz88=",
+     "ip": "10.214.0.217",
+     "state": "ready"
+    },
+    {
+     "id": "w208",
+     "public_key": "0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NA=",
+     "ip": "10.214.0.218",
+     "state": "ready"
+    },
+    {
+     "id": "w209",
+     "public_key": "0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dE=",
+     "ip": "10.214.0.219",
+     "state": "ready"
+    },
+    {
+     "id": "w210",
+     "public_key": "0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tI=",
+     "ip": "10.214.0.220",
+     "state": "ready"
+    },
+    {
+     "id": "w211",
+     "public_key": "09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09M=",
+     "ip": "10.214.0.221",
+     "state": "ready"
+    },
+    {
+     "id": "w212",
+     "public_key": "1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NQ=",
+     "ip": "10.214.0.222",
+     "state": "ready"
+    },
+    {
+     "id": "w213",
+     "public_key": "1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dU=",
+     "ip": "10.214.0.223",
+     "state": "ready"
+    },
+    {
+     "id": "w214",
+     "public_key": "1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tY=",
+     "ip": "10.214.0.224",
+     "state": "ready"
+    },
+    {
+     "id": "w215",
+     "public_key": "19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19c=",
+     "ip": "10.214.0.225",
+     "state": "ready"
+    },
+    {
+     "id": "w216",
+     "public_key": "2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2Ng=",
+     "ip": "10.214.0.226",
+     "state": "ready"
+    },
+    {
+     "id": "w217",
+     "public_key": "2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dk=",
+     "ip": "10.214.0.227",
+     "state": "ready"
+    },
+    {
+     "id": "w218",
+     "public_key": "2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2to=",
+     "ip": "10.214.0.228",
+     "state": "ready"
+    },
+    {
+     "id": "w219",
+     "public_key": "29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb29s=",
+     "ip": "10.214.0.229",
+     "state": "ready"
+    },
+    {
+     "id": "w220",
+     "public_key": "3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nw=",
+     "ip": "10.214.0.230",
+     "state": "ready"
+    },
+    {
+     "id": "w221",
+     "public_key": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d0=",
+     "ip": "10.214.0.231",
+     "state": "ready"
+    },
+    {
+     "id": "w222",
+     "public_key": "3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t4=",
+     "ip": "10.214.0.232",
+     "state": "ready"
+    },
+    {
+     "id": "w223",
+     "public_key": "39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f398=",
+     "ip": "10.214.0.233",
+     "state": "ready"
+    },
+    {
+     "id": "w224",
+     "public_key": "4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4OA=",
+     "ip": "10.214.0.234",
+     "state": "ready"
+    },
+    {
+     "id": "w225",
+     "public_key": "4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eE=",
+     "ip": "10.214.0.235",
+     "state": "ready"
+    },
+    {
+     "id": "w226",
+     "public_key": "4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uI=",
+     "ip": "10.214.0.236",
+     "state": "ready"
+    },
+    {
+     "id": "w227",
+     "public_key": "4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+M=",
+     "ip": "10.214.0.237",
+     "state": "ready"
+    },
+    {
+     "id": "w228",
+     "public_key": "5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OQ=",
+     "ip": "10.214.0.238",
+     "state": "ready"
+    },
+    {
+     "id": "w229",
+     "public_key": "5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eU=",
+     "ip": "10.214.0.239",
+     "state": "ready"
+    },
+    {
+     "id": "w230",
+     "public_key": "5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5uY=",
+     "ip": "10.214.0.240",
+     "state": "ready"
+    },
+    {
+     "id": "w231",
+     "public_key": "5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+c=",
+     "ip": "10.214.0.241",
+     "state": "ready"
+    },
+    {
+     "id": "w232",
+     "public_key": "6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Ojo6Og=",
+     "ip": "10.214.0.242",
+     "state": "ready"
+    },
+    {
+     "id": "w233",
+     "public_key": "6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6ek=",
+     "ip": "10.214.0.243",
+     "state": "ready"
+    },
+    {
+     "id": "w234",
+     "public_key": "6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6uo=",
+     "ip": "10.214.0.244",
+     "state": "ready"
+    },
+    {
+     "id": "w235",
+     "public_key": "6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+s=",
+     "ip": "10.214.0.245",
+     "state": "ready"
+    },
+    {
+     "id": "w236",
+     "public_key": "7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ow=",
+     "ip": "10.214.0.246",
+     "state": "ready"
+    },
+    {
+     "id": "w237",
+     "public_key": "7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e0=",
+     "ip": "10.214.0.247",
+     "state": "ready"
+    },
+    {
+     "id": "w238",
+     "public_key": "7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u4=",
+     "ip": "10.214.0.248",
+     "state": "ready"
+    },
+    {
+     "id": "w239",
+     "public_key": "7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+8=",
+     "ip": "10.214.0.249",
+     "state": "ready"
+    },
+    {
+     "id": "w240",
+     "public_key": "8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PA=",
+     "ip": "10.214.0.250",
+     "state": "ready"
+    },
+    {
+     "id": "w241",
+     "public_key": "8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "w242",
+     "public_key": "8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vLy8vI=",
+     "ip": "10.214.0.11",
+     "state": "ready"
+    },
+    {
+     "id": "w243",
+     "public_key": "8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/M=",
+     "ip": "10.214.0.12",
+     "state": "ready"
+    },
+    {
+     "id": "w244",
+     "public_key": "9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ=",
+     "ip": "10.214.0.13",
+     "state": "ready"
+    },
+    {
+     "id": "w245",
+     "public_key": "9fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fU=",
+     "ip": "10.214.0.14",
+     "state": "ready"
+    },
+    {
+     "id": "w246",
+     "public_key": "9vb29vb29vb29vb29vb29vb29vb29vb29vb29vb29vY=",
+     "ip": "10.214.0.15",
+     "state": "ready"
+    },
+    {
+     "id": "w247",
+     "public_key": "9/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/c=",
+     "ip": "10.214.0.16",
+     "state": "ready"
+    },
+    {
+     "id": "w248",
+     "public_key": "+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pg=",
+     "ip": "10.214.0.17",
+     "state": "ready"
+    },
+    {
+     "id": "w249",
+     "public_key": "+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fn5+fk=",
+     "ip": "10.214.0.18",
+     "state": "ready"
+    },
+    {
+     "id": "w250",
+     "public_key": "+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vr6+vo=",
+     "ip": "10.214.0.19",
+     "state": "ready"
+    }
+   ],
+   "relays": []
+  },
+  "valid": false,
+  "error": "more than 250 peers"
+ },
+ {
+  "name": "relay token upper hex",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: token_sha256 must be 64 lower-case hex digits"
+ },
+ {
+  "name": "relay token short",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: token_sha256 must be 64 lower-case hex digits"
+ },
+ {
+  "name": "duplicate relay token",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[1]: duplicate relay token"
+ },
+ {
+  "name": "relay instance invalid",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "Immich",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: instance is not an instance id"
+ },
+ {
+  "name": "relay instance with double hyphen",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "a--b",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: instance is not an instance id"
+ },
+ {
+  "name": "relay instance too long",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "server": "nas"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: instance is not an instance id"
+ },
+ {
+  "name": "relay on an enrolling peer",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "pi"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: server is not a ready peer"
+ },
+ {
+  "name": "relay on an unknown server",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "ghost"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: server is not a ready peer"
+ },
+ {
+  "name": "relay on primary",
+  "doc": {
+   "version": 1,
+   "written_at": "2026-11-15T12:00:00Z",
+   "subnet": "10.214.0.0/24",
+   "peers": [
+    {
+     "id": "nas",
+     "public_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+     "ip": "10.214.0.10",
+     "state": "ready"
+    },
+    {
+     "id": "pi",
+     "public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+     "ip": "10.214.0.11",
+     "state": "enrolling"
+    }
+   ],
+   "relays": [
+    {
+     "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "instance": "immich",
+     "server": "primary"
+    },
+    {
+     "token_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "instance": "photos-2",
+     "server": "nas"
+    }
+   ]
+  },
+  "valid": false,
+  "error": "relays[0]: server is not a ready peer"
+ }
+]

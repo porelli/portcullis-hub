@@ -11,6 +11,18 @@ import (
 // WriteFileAtomic writes via temp file + fsync + rename so readers never
 // observe a partially written file and a crash can't truncate the original.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeAtomic(path, data, perm, -1)
+}
+
+// WriteFileAtomicGroup is WriteFileAtomic with the file's group set to
+// gid before the rename, so a reader in that group never sees the new
+// file without access (a reader that refuses an unreadable file must not
+// flap between writes).
+func WriteFileAtomicGroup(path string, data []byte, perm os.FileMode, gid int) error {
+	return writeAtomic(path, data, perm, gid)
+}
+
+func writeAtomic(path string, data []byte, perm os.FileMode, gid int) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
@@ -24,6 +36,12 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
+	}
+	if gid >= 0 {
+		if err := tmp.Chown(-1, gid); err != nil {
+			tmp.Close()
+			return err
+		}
 	}
 	if err := tmp.Chmod(perm); err != nil {
 		tmp.Close()
