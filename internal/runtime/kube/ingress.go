@@ -147,6 +147,9 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 	}
 	var out []*unstructured.Unstructured
 	for _, name := range slices.Sorted(mapKeys(mws)) {
+		if !edgeNameOK("m-", name) {
+			return nil, refused("middleware %s: its name isn't one DNS label once _ and . become - (no --, no trailing -; not on Kubernetes)", name)
+		}
 		spec, err := middlewareSpec(instance, name, mws[name], mws)
 		if err != nil {
 			return nil, err
@@ -155,6 +158,9 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 	}
 	for _, name := range slices.Sorted(mapKeys(routers)) {
 		r := routers[name]
+		if !edgeNameOK("r-", name) {
+			return nil, refused("router %s: its name isn't one DNS label once _ and . become - (no --, no trailing -; not on Kubernetes)", name)
+		}
 		if r.rule == "" {
 			return nil, refused("router %s has no rule", name)
 		}
@@ -264,6 +270,18 @@ func crd(kind, name, ns, instance string, spec map[string]any) *unstructured.Uns
 		"metadata": map[string]any{"name": name, "namespace": ns, "labels": map[string]any{LabelInstance: instance, LabelOwner: OwnerHub}},
 		"spec":     spec,
 	}}
+}
+
+// edgePartRe: the part of an edge object's name after <instance>--
+// (core's admission: one DNS label without "--").
+var edgePartRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// edgeNameOK: name (a router's or a middleware's, the template's own
+// label part) gives a valid edge object name once sanitized (_ and .
+// become -): no "--", no trailing -.
+func edgeNameOK(prefix, name string) bool {
+	part := prefix + sanitize(name)
+	return edgePartRe.MatchString(part) && !strings.Contains(part, "--")
 }
 
 // mwName is an own middleware's object name.

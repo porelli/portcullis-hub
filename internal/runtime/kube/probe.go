@@ -44,7 +44,7 @@ func probePod(ns, image, role string, listen bool) *corev1.Pod {
 }
 
 func probeSel(role string) metav1.LabelSelector {
-	return metav1.LabelSelector{MatchLabels: map[string]string{LabelProbe: role}}
+	return metav1.LabelSelector{MatchLabels: map[string]string{LabelProbe: role, LabelInstance: ProbeInstance}}
 }
 
 // probePolicies: the deny listener admits nothing, the allow listener

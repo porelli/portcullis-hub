@@ -1316,5 +1316,73 @@
     "service web binds a host path but has no numeric user"
    ]
   }
+ },
+ {
+  "name": "kubernetes: a host bind with a uid but no gid refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000\"\n    volumes: [\"/srv/share:/data\"]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web binds a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a host bind with gid 0 refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:0\"\n    volumes: [\"/srv/share:/data\"]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web binds a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a host bind adding group 0 refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n    group_add: [\"0\"]\n    volumes: [\"/srv/share:/data\"]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service web binds a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a service sharing a host-path pod without a gid refused",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n    volumes: [\"/srv/share:/data\"]\n  side:\n    image: docker.io/library/nginx:1.29\n    user: \"1001\"\n    network_mode: service:web\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "refused",
+   "reasons": [
+    "service side shares a pod with a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0"
+   ]
+  }
+ },
+ {
+  "name": "kubernetes: a host bind with uid and gid ok",
+  "runtime": "kubernetes",
+  "compose": "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"1000:1000\"\n    volumes: [\"/srv/share:/data\"]\n",
+  "ports": [],
+  "env": {},
+  "port_start": 80,
+  "want": {
+   "status": "ok",
+   "reasons": []
+  }
  }
 ]

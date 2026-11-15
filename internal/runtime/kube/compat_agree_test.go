@@ -221,3 +221,24 @@ func TestRefusalsQuoteOnlyKnownNames(t *testing.T) {
 		t.Errorf("compat echoed: %v", c.Reasons)
 	}
 }
+
+// TestEdgeNamesStayOneLabel: a router or middleware whose name would
+// give an edge object name with "--" (or a trailing -) after <instance>--
+// once sanitized is refused, by RuntimeCompat and the translator alike
+// (core's admission: one DNS label without "--").
+func TestEdgeNamesStayOneLabel(t *testing.T) {
+	for labels, why := range map[string]string{
+		"      traefik.http.routers.web.rule: Host(`a.example.org`)\n      traefik.http.routers.web.middlewares: a__b\n      traefik.http.middlewares.a__b.headers.customrequestheaders.X: y\n      traefik.http.services.web.loadbalancer.server.port: \"80\"\n": "middleware a__b: its name isn't one DNS label once _ and . become - (no --, no trailing -; not on Kubernetes)",
+		"      traefik.http.routers.web_.rule: Host(`a.example.org`)\n      traefik.http.services.web.loadbalancer.server.port: \"80\"\n":                                                                                                                         "router web_: its name isn't one DNS label once _ and . become - (no --, no trailing -; not on Kubernetes)",
+		"      traefik.http.routers.web_1.rule: Host(`a.example.org`)\n      traefik.http.services.web.loadbalancer.server.port: \"80\"\n":                                                                                                                        "",
+	} {
+		compose := "services:\n  web:\n    image: docker.io/library/nginx:1.29\n    user: \"101:101\"\n    labels:\n      traefik.enable: \"true\"\n" + labels
+		c := templates.RuntimeCompat("kubernetes", []byte(compose), templates.Manifest{}, nil, 80)
+		if got := strings.Join(c.Reasons, "; "); got != why {
+			t.Errorf("compat %q, want %q", got, why)
+		}
+		if _, err := Translate(inputOf(t, compose, "en")); refusedErr(err) != why {
+			t.Errorf("translator %v, want %q", err, why)
+		}
+	}
+}

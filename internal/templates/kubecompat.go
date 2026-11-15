@@ -71,8 +71,19 @@ func kubeCompat(compose []byte, m Manifest, env map[string]string) Compat {
 	if v, ok := env[EnvBindRoots]; ok {
 		roots = strings.Split(v, ":")
 	}
-	k := kubeCtx{jobs: JobServices(&m, compose), netnsOwners: map[string]bool{}, volumeOwners: map[string]bool{}}
+	k := kubeCtx{jobs: JobServices(&m, compose), netnsOwners: map[string]bool{}, volumeOwners: map[string]bool{}, podOf: map[string]string{}, hostPods: map[string]bool{}}
 	k.labels, _ = ServiceLabels(compose)
+	for _, s := range services {
+		k.podOf[s.name] = s.name
+		if v, ok := strings.CutPrefix(scalarValue(field(s.node, "network_mode"), env), "service:"); ok {
+			k.podOf[s.name] = v
+		}
+	}
+	for _, s := range services {
+		if hostBindIn(field(s.node, "volumes"), env) {
+			k.hostPods[k.podOf[s.name]] = true
+		}
+	}
 	for _, s := range services {
 		uid, _, _ := strings.Cut(scalarValue(field(s.node, "user"), env), ":")
 		if n, err := strconv.ParseInt(uid, 10, 64); err != nil || n > 0 {
@@ -154,9 +165,13 @@ type kubeCtx struct {
 	// volumeOwners: named volume → whether a service not running as
 	// root mounts it (its owner on Kubernetes).
 	volumeOwners map[string]bool
-	jobs         map[string]bool
-	labels       map[string]map[string]string
-	netnsOwners  map[string]bool
+	// podOf: service → its pod's owner (network_mode service:);
+	// hostPods: pods with a host-path bind.
+	podOf       map[string]string
+	hostPods    map[string]bool
+	jobs        map[string]bool
+	labels      map[string]map[string]string
+	netnsOwners map[string]bool
 }
 
 // podDNSName: a compose service name that can be a pod's hostname, and
@@ -286,12 +301,19 @@ func (c *compatReasons) kubeService(name string, s *yaml.Node, env map[string]st
 			c.refuse("service %s shares the host's %s namespace (not on Kubernetes)", name, ns)
 		}
 	}
-	if scalarValue(field(s, "user"), env) == "" && slices.ContainsFunc(bindSources(field(s, "volumes"), env), func(src string) bool {
-		return strings.HasPrefix(src, "/") || strings.HasPrefix(src, "~")
-	}) {
+	user := scalarValue(field(s, "user"), env)
+	switch hb := hostBindIn(field(s, "volumes"), env); {
+	case user == "" && hb:
 		// A host path's pod runs non-root (runAsNonRoot): the service
 		// must say who it is.
 		c.refuse("service %s binds a host path but has no numeric user", name)
+	case k.hostPods[k.podOf[name]] && !rootGroupOK(user, field(s, "group_add"), env):
+		// …and never with group 0 (the image's group could be).
+		if hb {
+			c.refuse("service %s binds a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0", name)
+		} else {
+			c.refuse("service %s shares a pod with a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0", name)
+		}
 	}
 	for _, src := range bindSources(field(s, "volumes"), env) {
 		if !strings.HasPrefix(src, "/") || underRoots(src, roots) {
@@ -562,6 +584,14 @@ func rootGroupOK(user string, groupAdd *yaml.Node, env map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// hostBindIn: vols bind a host path (absolute or ~; not the template's
+// ./ files).
+func hostBindIn(vols *yaml.Node, env map[string]string) bool {
+	return slices.ContainsFunc(bindSources(vols, env), func(src string) bool {
+		return strings.HasPrefix(src, "/") || strings.HasPrefix(src, "~")
+	})
 }
 
 // namedVolumes are the named volume sources of a service's volumes.

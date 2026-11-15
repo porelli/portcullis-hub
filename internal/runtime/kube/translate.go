@@ -463,6 +463,12 @@ func (t *translator) compat() error {
 		if s.User == "" && t.hostBind(s) {
 			return refused("service %s binds a host path but has no numeric user", n)
 		}
+		if t.hostPathPod(n) && !groupNonZero(s.User, s.GroupAdd) {
+			if t.hostBind(s) {
+				return refused("service %s binds a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0", n)
+			}
+			return refused("service %s shares a pod with a host path but its group isn't set or is 0: set user \"<uid>:<gid>\" with a gid other than 0", n)
+		}
 		if s.User != "" {
 			uid, _, err := numericUser(s.User)
 			if err != nil {
@@ -560,6 +566,40 @@ func (t *translator) hostBind(s types.ServiceConfig) bool {
 		}
 	}
 	return false
+}
+
+// hostPathPod: n's pod (n, the service whose network it shares, and
+// every service sharing it) mounts a host path.
+func (t *translator) hostPathPod(n string) bool {
+	m := t.in.Model
+	owner := func(x string) string {
+		if o, ok := strings.CutPrefix(m.Services[x].NetworkMode, types.NetworkModeServicePrefix); ok {
+			return o
+		}
+		return x
+	}
+	pod := owner(n)
+	for x, s := range m.Services {
+		if owner(x) == pod && t.hostBind(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// groupNonZero: user names a gid other than 0 and groupAdd holds no 0 (a
+// host-path pod never runs with group 0).
+func groupNonZero(user string, groupAdd []string) bool {
+	_, g, ok := strings.Cut(user, ":")
+	if n, err := strconv.ParseInt(g, 10, 64); !ok || err != nil || n == 0 {
+		return false
+	}
+	for _, x := range groupAdd {
+		if n, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64); err == nil && n == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // podDNSLabelRe: a compose service name that can be a pod's hostname.
