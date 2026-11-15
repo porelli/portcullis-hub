@@ -300,10 +300,14 @@ type Hub struct {
 	// RemoveServer is taking away (no placement meanwhile). Guarded by mu.
 	inflight map[string]bool
 	removing map[string]bool
-	// rotateFail: server → why its revocation's rotation failed (srvMu).
+	// rotateFail: server → why its revocation's rotation failed (srvMu);
+	// schedRan: server → the hour slot its scheduled backups last ran.
 	rotateFail map[string]string
-	idp        IdP
-	attrs      AttrStore // LLDAP user attributes (setting claims); nil: none
+	schedRan   map[string]string
+	// testHookMove runs at each move phase's start (tests: a failure).
+	testHookMove func(phase string) error
+	idp          IdP
+	attrs        AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

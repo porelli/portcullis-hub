@@ -561,8 +561,9 @@ func (sf *serversFixture) place(id, server string) {
 // or link.json (only the secret's sha256 and the bootstrap public key).
 func TestAddServerCodeShownOnce(t *testing.T) {
 	sf := newServersFixture(t)
-	var logs bytes.Buffer
-	log.SetOutput(&logs)
+	// log is global: other tests' background goroutines write too.
+	logs := &syncBuffer{}
+	log.SetOutput(logs)
 	defer log.SetOutput(os.Stderr)
 	code, exp, err := sf.h.AddServer(context.Background(), admin, "nas", "NAS")
 	if err != nil {
@@ -1517,4 +1518,22 @@ func TestAddRefusedWhileSerialsOwed(t *testing.T) {
 	}
 	sf.h.StopServerEnrol("nas", admin, "")
 	waitServerOp(t, sf.h, serverOpKey("nas"))
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writers.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

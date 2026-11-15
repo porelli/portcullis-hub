@@ -91,13 +91,14 @@ func newPlacedFixture(t *testing.T) *placedFixture {
 		"tcpapp":   {"name: TCP\ncategory: misc\nai: {unsupported: t}\nplacement: primary_only\nauth: {method: forward-auth}\n", "services:\n  web:\n    image: tcp:1\n    labels:\n      traefik.http.routers.t.rule: Host(`${PORTCULLIS_HOST_T:-t.portcullis.local}`)\n"},
 		"lowport":  {"name: Low\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\nports:\n  - key: LOW_PORT\n    container: 80\n    default: 80\n    service: web\n", "services:\n  web:\n    image: low:1\n    labels:\n      traefik.http.routers.low.rule: Host(`${PORTCULLIS_HOST_LOW:-low.portcullis.local}`)\n"},
 		"filesapp": {"name: Files\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: files:1\n    restart: unless-stopped\n    volumes:\n      - ./templates/filesapp/conf.ini:/etc/conf.ini:ro\n      - data:/data\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.files.rule: Host(`${PORTCULLIS_HOST_FILES:-files.portcullis.local}`)\n      traefik.http.routers.files.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.files.loadbalancer.server.port: \"8080\"\nvolumes:\n  data: {}\n"},
+		"plainapp": {"name: Plain\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: plain:1\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.plain.rule: Host(`${PORTCULLIS_HOST_PLAIN:-plain.portcullis.local}`)\n      traefik.http.routers.plain.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.plain.loadbalancer.server.port: \"8080\"\n"},
 	} {
 		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), files[0])
 		writeFile(t, filepath.Join(f.src, id, "compose.yml"), files[1])
 	}
 	writeFile(t, filepath.Join(f.src, "filesapp", "conf.ini"), "[x]\n")
 	f.h.Discover()
-	for _, id := range []string{"tcpapp", "lowport", "filesapp"} {
+	for _, id := range []string{"tcpapp", "lowport", "filesapp", "plainapp"} {
 		if f.h.Template(id) == nil {
 			t.Fatalf("template %s not loaded", id)
 		}

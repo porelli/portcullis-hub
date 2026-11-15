@@ -66,9 +66,19 @@ func (h *Hub) notePoll(id string, info *agentapi.Info, reason string) {
 // settles enrolments a Hub restart interrupted.
 func (h *Hub) RunServers(ctx context.Context, every time.Duration) {
 	if h.kubeOn() || h.cfg.LinkDocDir == "" {
+		// Moves a restart interrupted settle all the same (between the
+		// primary's own instances, none: nothing to do).
+		if h.waitEngine() {
+			h.RecoverMoves()
+		}
 		return
 	}
 	h.startServers(ctx)
+	// Review Focus 2: with the servers' backends in place, after the
+	// engine guard.
+	if h.waitEngine() {
+		h.RecoverMoves()
+	}
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {

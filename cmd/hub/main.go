@@ -607,6 +607,8 @@ func main() {
 	go h.RunVPNMaps(ctx, 5*time.Second)
 	// Servers: link.json, enrolments, polls, renewals, revocations.
 	go h.RunServers(ctx, 30*time.Second)
+	// Scheduled backups (per server, the Hub's TZ), every minute.
+	go h.RunBackupSchedules(ctx, time.Minute)
 	// Kubernetes: the VPN gateway pods, watched (K5: vpn.json follows them
 	// at once; nothing published while the watch isn't confirmed).
 	go h.RunKubeGateways(ctx)

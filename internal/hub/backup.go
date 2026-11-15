@@ -64,6 +64,10 @@ const (
 	BackupManual  = "manual"
 	BackupDelete  = "delete"
 	BackupRestore = "restore"
+	// BackupMove is a move's backup (Task 11); BackupScheduled a
+	// scheduled one (the only ones ever pruned: the 3 newest kept).
+	BackupMove      = "move"
+	BackupScheduled = "scheduled"
 )
 
 const (
@@ -983,7 +987,7 @@ func (m *BackupManifest) validate() error {
 		return fmt.Errorf("%s: invalid instance or template id", manifestMember)
 	}
 	switch m.Reason {
-	case BackupManual, BackupDelete, BackupRestore:
+	case BackupManual, BackupDelete, BackupRestore, BackupMove, BackupScheduled:
 	default:
 		return fmt.Errorf("%s: invalid reason %q", manifestMember, m.Reason)
 	}

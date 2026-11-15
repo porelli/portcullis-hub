@@ -116,6 +116,11 @@ type Instance struct {
 	// Server is the worker server the instance runs on ("" = the
 	// primary; contract §11, §17).
 	Server string `json:"server,omitempty" yaml:"server,omitempty"`
+	// Move is a move to another server in progress (State
+	// InstanceMoving, Task 11); MovedFrom the source the last move left
+	// (its volumes kept for an undo until removed).
+	Move      *Move      `json:"move,omitempty" yaml:"move,omitempty"`
+	MovedFrom *MovedFrom `json:"moved_from,omitempty" yaml:"moved_from,omitempty"`
 	// KeycloakClients are the Keycloak client ids the Hub registered for
 	// the instance (recorded at create and enable): a revocation rotates
 	// them even when the template no longer resolves (review B-M3).
@@ -156,7 +161,26 @@ const (
 	// InstanceOrphaned: its server was revoked (contract §17.6): it can
 	// be restored onto another server or forgotten.
 	InstanceOrphaned = "orphaned"
+	// InstanceMoving: a move between servers runs (Instance.Move).
+	InstanceMoving = "moving"
 )
+
+// Move is a move in progress: from and to ("" = the primary), the
+// archive the backup wrote, when it started and its phase (check,
+// backup, restore, switch, keep).
+type Move struct {
+	From      string    `json:"from" yaml:"from"`
+	To        string    `json:"to" yaml:"to"`
+	Archive   string    `json:"archive,omitempty" yaml:"archive,omitempty"`
+	StartedAt time.Time `json:"started_at" yaml:"started_at"`
+	Phase     string    `json:"phase" yaml:"phase"`
+}
+
+// MovedFrom is the source a move left behind (its volumes) and when.
+type MovedFrom struct {
+	Server string    `json:"server" yaml:"server"`
+	At     time.Time `json:"at" yaml:"at"`
+}
 
 // AppState tracks which apps are enabled and their settings.
 type AppState struct {
