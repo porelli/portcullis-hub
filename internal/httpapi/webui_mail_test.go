@@ -121,8 +121,9 @@ func TestSettingsMailPanel(t *testing.T) {
 		t.Errorf("podman refusal: %s", h)
 	}
 	view["pending_removal"] = map[string]any{"since": "2026-11-15T09:00:00Z", "confirmed": false,
-		"accounts": []any{map[string]any{"username": "alice", "uuid": "u-1"}, map[string]any{"username": "bob<x>", "uuid": "u-2"}}}
-	if h := render(view, nil); !strings.Contains(h, "data-mail-pending") || !strings.Contains(h, `data-mail-uuids="u-1,u-2"`) || !strings.Contains(h, "bob&lt;x&gt;") {
+		"accounts": []any{map[string]any{"username": "alice", "uuid": "u-1", "revoked": true}, map[string]any{"username": "bob<x>", "uuid": "u-2", "revoked": false}}}
+	if h := render(view, nil); !strings.Contains(h, "data-mail-pending") || !strings.Contains(h, `data-mail-uuids="u-1,u-2"`) || !strings.Contains(h, "bob&lt;x&gt; (revoking failed: retrying)") ||
+		!strings.Contains(h, "alice (mail passwords revoked)") {
 		t.Errorf("pending removal: %s", h)
 	}
 	view["pending_removal"] = nil

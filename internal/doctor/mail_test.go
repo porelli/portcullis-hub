@@ -79,6 +79,7 @@ func TestMailKinds(t *testing.T) {
 		{KindMailMassRemovalPend, Problem, FixOneClick, func(m *MailIn) {
 			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice", "bob"}, UUIDs: []string{"u1", "u2"}}
 		}},
+		{KindMailSyncBlocked, Problem, FixExplain, func(m *MailIn) { m.SyncBlocked = "no baseline" }},
 		{KindMailMassRemovalPend, Problem, FixExplain, func(m *MailIn) {
 			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice"}, UUIDs: []string{"u1"}, Confirmed: true}
 		}},
@@ -95,7 +96,7 @@ func TestMailKinds(t *testing.T) {
 	for _, k := range MailKinds {
 		seen[k] = true
 	}
-	if len(MailKinds) != 18 || len(seen) != 18 {
+	if len(MailKinds) != 19 || len(seen) != 19 {
 		t.Fatalf("%d mail kinds", len(MailKinds))
 	}
 	if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk("port25", "ok", ""), chk("cert", "ok", "")}}); len(fs) != 0 {

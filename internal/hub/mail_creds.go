@@ -287,6 +287,22 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 		h.auditOp(directory.Human(user), "mail_credential.create", user, "reason="+reason, err)
 		return nil, err
 	}
+	// The create and the mail sync take the same lock: under it, the
+	// membership and the pending removal are checked again, so a removal
+	// can't be refused (and its passwords revoked) between the check and
+	// the create (L1).
+	h.mailState.pass.Lock()
+	defer h.mailState.pass.Unlock()
+	m2, err := h.membership(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, in := m2.Users[user][MailUsersGroup]; !in || m2.Expired[user][MailUsersGroup] || m2.UUIDs[user] != uuid {
+		return nil, errNoMail
+	}
+	if h.mailStillRemoving(user, uuid) {
+		return nil, errMailStillRemoving(user)
+	}
 	// 8. mailctl.
 	created, err := api.CreateCredential(ctx, user, uuid, label, expires)
 	if err != nil {

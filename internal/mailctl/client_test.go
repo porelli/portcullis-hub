@@ -367,3 +367,18 @@ func TestAPIErrorKind(t *testing.T) {
 		t.Fatalf("%#v", err)
 	}
 }
+
+// TestRevokeNeeds204 (L3): only 204 confirms a revoke.
+func TestRevokeNeeds204(t *testing.T) {
+	code := 200
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	if err := c.RevokeCredential(context.Background(), "u", "1"); err == nil {
+		t.Fatal("200 accepted")
+	}
+	code = 204
+	if err := c.RevokeCredential(context.Background(), "u", "1"); err != nil {
+		t.Fatal(err)
+	}
+}

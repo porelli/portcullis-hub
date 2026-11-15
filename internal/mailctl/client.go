@@ -45,6 +45,15 @@ type APIError struct {
 	// Kind is mailctl's error_kind ("mass_removal" for the mass-removal
 	// 409; "" when absent): callers branch on it, never on Msg.
 	Kind string
+	// Removed (the mass-removal 409): the live accounts the refused
+	// document would remove.
+	Removed []RemovedAccount
+}
+
+// RemovedAccount is one account a refused mass removal would remove.
+type RemovedAccount struct {
+	Username string `json:"username"`
+	UUID     string `json:"uuid"`
 }
 
 // Error kinds (APIError.Kind).
@@ -241,13 +250,17 @@ func (c *Client) fetch(ctx context.Context, method, path string, body any) (int,
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct {
-			Error string `json:"error"`
-			Kind  string `json:"error_kind"`
+			Error   string           `json:"error"`
+			Kind    string           `json:"error_kind"`
+			Removed []RemovedAccount `json:"removed"`
 		}
 		_ = json.Unmarshal(raw, &e)
+		if len(e.Removed) > 10000 {
+			e.Removed = nil
+		}
 		// Redact first, then clip: clipping first could cut a secret so
 		// that its prefix escapes redaction.
-		return resp.StatusCode, raw, &APIError{Status: resp.StatusCode, Msg: clip(redact(e.Error, sec), 500), Kind: clip(e.Kind, 64)}
+		return resp.StatusCode, raw, &APIError{Status: resp.StatusCode, Msg: clip(redact(e.Error, sec), 500), Kind: clip(e.Kind, 64), Removed: e.Removed}
 	}
 	return resp.StatusCode, raw, nil
 }
@@ -374,7 +387,11 @@ func decodeCreated(raw []byte) (Created, error) {
 // (parked accounts too; never resolved through a username). An unknown
 // uuid or id is 204 too.
 func (c *Client) RevokeCredential(ctx context.Context, uuid, id string) error {
-	_, err := c.do(ctx, http.MethodDelete, "/v1/credentials/"+url.PathEscape(id)+"?uuid="+url.QueryEscape(uuid), nil, nil)
+	status, err := c.do(ctx, http.MethodDelete, "/v1/credentials/"+url.PathEscape(id)+"?uuid="+url.QueryEscape(uuid), nil, nil)
+	if err == nil && status != http.StatusNoContent {
+		// Only 204 is mailctl's confirmation that the password is gone.
+		return fmt.Errorf("mailctl: revoke answered HTTP %d, not 204", status)
+	}
 	return err
 }
 

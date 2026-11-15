@@ -43,16 +43,17 @@ type MailAliases struct {
 type MailPendingRemoval struct {
 	Since    time.Time            `json:"since" yaml:"since"`
 	Accounts []MailPendingAccount `json:"accounts" yaml:"accounts"`
-	// Confirmed: the uuids an administrator confirmed (exactly Accounts'
-	// at the time); the next document removing only them carries
-	// confirm_mass_removal.
-	Confirmed []string `json:"confirmed,omitempty" yaml:"confirmed,omitempty"`
+	// ConfirmedHash: an administrator's confirmation, bound to the hash
+	// of exactly this set and Since; any change to the set voids it.
+	ConfirmedHash string `json:"confirmed_hash,omitempty" yaml:"confirmed_hash,omitempty"`
 }
 
 // MailPendingAccount is one account a pending mass removal would remove.
 type MailPendingAccount struct {
 	Username string `json:"username" yaml:"username"`
 	UUID     string `json:"uuid" yaml:"uuid"`
+	// Revoked: their mail passwords are revoked (false: still retrying).
+	Revoked bool `json:"revoked" yaml:"revoked"`
 }
 
 // MailDomain is one domain's mail switch.

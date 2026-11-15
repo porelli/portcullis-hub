@@ -2421,7 +2421,7 @@ func (h *Hub) PersonDeleted(ctx context.Context, actor directory.Actor, user str
 	// A full administrator's delete through the Hub: mail's removal may
 	// be part of a confirmed mass removal (contract §19.5); a delegate's
 	// never confirms one.
-	if h.isFullAdmin(ctx, actor.User) {
+	if h.isGlobalAdmin(ctx, actor.User) {
 		h.mailRecordHubRemoval(user)
 	} else {
 		h.TriggerMailSync()

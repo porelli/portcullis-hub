@@ -330,8 +330,8 @@ func TestDelegateRemovalNeverConfirms(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
 	f.people.setMembers("mail_users", "root")
-	f.h.MailMemberRemoved("mail_users", "alice", false)
-	f.h.MailMemberRemoved("mail_users", "bob", false)
+	f.h.MailMemberRemoved("mail_users", "alice", "carol")
+	f.h.MailMemberRemoved("mail_users", "bob", "carol")
 	f.sync(t)
 	if d := f.mc.Last(); d.ConfirmMassRemoval || len(d.Accounts) != 3 {
 		t.Fatalf("a delegate confirmed a mass removal: %+v", d)
@@ -351,8 +351,8 @@ func TestDelegateRemovalNeverConfirms(t *testing.T) {
 		t.Fatalf("%d entries from a delegate", n)
 	}
 	// A full administrator's removals confirm.
-	f.h.MailMemberRemoved("mail_users", "alice", true)
-	f.h.MailMemberRemoved("mail_users", "bob", true)
+	f.h.MailMemberRemoved("mail_users", "alice", "root")
+	f.h.MailMemberRemoved("mail_users", "bob", "root")
 	f.sync(t)
 	if d := f.mc.Last(); !d.ConfirmMassRemoval || len(d.Accounts) != 1 {
 		t.Fatalf("admin removals: %+v", d)

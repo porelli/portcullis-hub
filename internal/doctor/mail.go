@@ -35,12 +35,13 @@ const (
 	KindMailDANEOff           = "mail_dane_off"
 	KindMailLANOnlyUnenforced = "mail_lan_only_unenforced"
 	KindMailMassRemovalPend   = "mail_mass_removal_pending"
+	KindMailSyncBlocked       = "mail_sync_blocked"
 )
 
-// MailKinds are the eighteen mail kinds.
+// MailKinds are the nineteen mail kinds.
 var MailKinds = []string{KindMailPort25Blocked, KindMailPTRMissing, KindMailPTRMismatch, KindMailBlocklisted, KindMailRecordsWrong,
 	KindMailDKIMStuck, KindMailDKIMManual, KindMailCertExpiring, KindMailDMARCFailures, KindMailDMARCPromote, KindMailMTASTSEnforce,
-	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend}
+	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend, KindMailSyncBlocked}
 
 // Mail fix kinds (§14.6); mail_records_wrong on an added domain uses
 // dns_apply with sets=mail.
@@ -85,6 +86,8 @@ type MailIn struct {
 	// Pending: a mass removal mailctl refused, waiting for confirmation
 	// (nil: none).
 	Pending *MailPendingIn
+	// SyncBlocked: why the Hub sends mailctl nothing ("" = it does).
+	SyncBlocked string
 }
 
 // MailPendingIn is a pending mass removal.
@@ -93,6 +96,9 @@ type MailPendingIn struct {
 	Users     []string // sorted
 	UUIDs     []string // sorted
 	Confirmed bool
+	// Failed: the users whose mail passwords couldn't be revoked yet
+	// (retrying).
+	Failed []string
 }
 
 func init() {
@@ -247,16 +253,26 @@ func mailFindings(in *Inputs) []Finding {
 		mailRecordsFix(f, p.Name, m.Main)
 	}
 	if p := m.Pending; p != nil {
+		revokedLine := "Their mail passwords are revoked and they can't sign in to mail."
+		if len(p.Failed) > 0 {
+			revokedLine = "Revoking the mail passwords failed for " + strings.Join(p.Failed, ", ") + " (retrying); the others' are revoked."
+		}
 		f := mk(KindMailMassRemovalPend, Problem, "Removing "+itoa(len(p.Users))+" mailboxes at once waits for your confirmation",
-			"More than half the mailboxes left mail_users at once ("+strings.Join(p.Users, ", ")+"), so mail refused to remove them on its own: an LDAP outage could look the same. Their mail passwords are revoked already and they can't sign in to mail; their mailboxes stay until you confirm. If they shouldn't have left, add them back to mail_users instead.",
+			"More than half the mailboxes left mail_users at once ("+strings.Join(p.Users, ", ")+"), so mail refused to remove them on its own: an LDAP outage could look the same. "+revokedLine+" Their mailboxes stay until you confirm. If they shouldn't have left, add them back to mail_users instead.",
 			[]string{"Check that these people really left mail_users, then confirm the removal (Settings → Mail or this fix)."},
 			struct {
 				UUIDs     []string
 				Confirmed bool
-			}{p.UUIDs, p.Confirmed}, "")
+				Failed    []string
+			}{p.UUIDs, p.Confirmed, p.Failed}, "")
 		if !p.Confirmed {
 			f.Class, f.FixKind = FixOneClick, FixMailConfirmRemoval
 		}
+	}
+	if m.SyncBlocked != "" {
+		mk(KindMailSyncBlocked, Problem, "Mail changes aren't reaching the mail server",
+			"The Hub sends the mail server nothing until this is resolved: "+m.SyncBlocked+".",
+			[]string{"Confirm or resolve the pending removal (Settings → Mail), or put the people back in mail_users."}, m.SyncBlocked, "")
 	}
 	if m.LANOnly && (m.Podman || (m.Status != nil && m.Status.ClientIP == "rewritten")) {
 		mk(KindMailLANOnlyUnenforced, Problem, "LAN-only mail can't be enforced here",

@@ -66,6 +66,10 @@ type Server struct {
 	RevokeStatus int
 	// Deletes: every DELETE /v1/credentials ("<uuid> <id>").
 	Deletes []string
+	// OmitRemoved: the mass-removal 409 carries no "removed" list.
+	OmitRemoved bool
+	// RevokeOK: DELETE answers 200 instead of 204 (a non-204 success).
+	RevokeOK bool
 }
 
 type fakeCred struct {
@@ -244,6 +248,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.RevokeStatus != 0 {
 			errJSON(w, s.RevokeStatus, "mail server unreachable")
+			return
+		}
+		if s.RevokeOK {
+			w.WriteHeader(200)
 			return
 		}
 		id := strings.TrimPrefix(p, "/v1/credentials/")
@@ -462,13 +470,19 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 			now[a.UUID] = true
 		}
 		gone := 0
+		removed := []map[string]string{}
 		for _, a := range s.Doc.Accounts {
 			if !now[a.UUID] {
 				gone++
+				removed = append(removed, map[string]string{"username": a.Username, "uuid": a.UUID})
 			}
 		}
 		if gone*2 > len(s.Doc.Accounts) && !d.ConfirmMassRemoval {
-			writeJSON(w, 409, map[string]string{"error": fmt.Sprintf("mass removal: %d of %d accounts", gone, len(s.Doc.Accounts)), "error_kind": "mass_removal"})
+			body := map[string]any{"error": fmt.Sprintf("mass removal: %d of %d accounts", gone, len(s.Doc.Accounts)), "error_kind": "mass_removal"}
+			if !s.OmitRemoved {
+				body["removed"] = removed
+			}
+			writeJSON(w, 409, body)
 			return
 		}
 	}

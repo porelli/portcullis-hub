@@ -37,9 +37,10 @@
     if (v.mail !== 'on') h += '<p class="settings-empty" data-mail-off>' + esc(OFF_TEXT) + '</p>';
     const pr = v.pending_removal;
     if (pr) {
-      const names = (pr.accounts || []).map(a => a.username);
-      h += '<div class="public-warn" data-mail-pending>Removing ' + esc(names.length) + ' mailboxes at once waits for your confirmation: ' + esc(names.join(', ')) +
-        '. Their mail passwords are revoked already; their mailboxes stay until you confirm. If they shouldn\'t have left mail_users, add them back instead.' +
+      const accts = pr.accounts || [];
+      const who = accts.map(a => esc(a.username) + ' (' + (a.revoked ? 'mail passwords revoked' : 'revoking failed: retrying') + ')');
+      h += '<div class="public-warn" data-mail-pending>Removing ' + esc(accts.length) + ' mailboxes at once waits for your confirmation: ' + who.join(', ') +
+        '. Their mailboxes stay until you confirm. If they shouldn\'t have left mail_users, add them back instead.' +
         (pr.confirmed ? ' <strong>Confirmed: the removal goes with the next update.</strong>'
           : ' <button type="button" class="btn btn-sm btn-danger" data-mail-act="confirm-removal" data-mail-uuids="' + esc((pr.accounts || []).map(a => a.uuid).join(',')) + '">Confirm removal</button>') + '</div>';
     }

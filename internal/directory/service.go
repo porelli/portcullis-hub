@@ -207,9 +207,8 @@ type Service struct {
 	// username, outside s.mu: the Hub tells an admin's removals from
 	// other shrinks (mail's mass-removal confirmation, contract §19.5).
 	// It must not block.
-	// byAdmin: the caller is a full administrator (Caller.Admin), not a
-	// group's delegate.
-	MemberRemoved func(group, user string, byAdmin bool)
+	// actor: the caller's username (the Hub decides who counts).
+	MemberRemoved func(group, user, actor string)
 	// PasswordSet, if set, is called after the Hub set a person's LLDAP
 	// password (SetPassword, password onboarding) with their lowercase
 	// username, the LLDAP uuid of the account that was changed (read in
@@ -2496,13 +2495,21 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 	}
 	if s.MemberRemoved != nil {
 		if removed != "" {
-			s.MemberRemoved(group, strings.ToLower(removed), c != nil && c.Admin)
+			s.MemberRemoved(group, strings.ToLower(removed), callerName(c))
 		} else if handRemoved != "" && err == nil {
-			s.MemberRemoved(group, handRemoved, c != nil && c.Admin)
+			s.MemberRemoved(group, handRemoved, callerName(c))
 		}
 	}
 	if err != nil {
 		return res, err
 	}
 	return res, nil
+}
+
+// callerName is c's lowercase username ("" without one).
+func callerName(c *Caller) string {
+	if c == nil {
+		return ""
+	}
+	return strings.ToLower(c.User)
 }

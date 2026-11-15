@@ -213,17 +213,17 @@ func TestMassRemovalFlagOnlyForHubRemovals(t *testing.T) {
 		t.Fatalf("an unconfirmed mass removal was accepted: %d", f.mc.Puts())
 	}
 	// One Hub removal isn't enough.
-	f.h.MailMemberRemoved("mail_users", "alice", true)
+	f.h.MailMemberRemoved("mail_users", "alice", "root")
 	f.sync(t)
 	if f.mc.Puts() != 1 {
 		t.Fatalf("partly confirmed: %d", f.mc.Puts())
 	}
-	f.h.MailMemberRemoved("other_group", "bob", true)
+	f.h.MailMemberRemoved("other_group", "bob", "root")
 	f.sync(t)
 	if f.mc.Puts() != 1 {
 		t.Fatalf("another group's removal confirmed: %d", f.mc.Puts())
 	}
-	f.h.MailMemberRemoved("Mail_Users", "Bob", true)
+	f.h.MailMemberRemoved("Mail_Users", "Bob", "root")
 	f.sync(t)
 	if f.mc.Puts() != 2 || !f.mc.Last().ConfirmMassRemoval || len(f.mc.Last().Accounts) != 1 {
 		t.Fatalf("confirmed: %d %+v", f.mc.Puts(), f.mc.Last())
@@ -469,8 +469,8 @@ func TestMassRemovalStaleEntryDoesNotConfirm(t *testing.T) {
 	f.sync(t)
 	// Recorded for alice and bob, then a document is accepted (a settings
 	// change): the entries are spent.
-	f.h.MailMemberRemoved("mail_users", "alice", true)
-	f.h.MailMemberRemoved("mail_users", "bob", true)
+	f.h.MailMemberRemoved("mail_users", "alice", "root")
+	f.h.MailMemberRemoved("mail_users", "bob", "root")
 	f.h.mu.Lock()
 	f.h.st.Mail.Spam.RejectScore = 20
 	f.h.mu.Unlock()
@@ -484,16 +484,16 @@ func TestMassRemovalStaleEntryDoesNotConfirm(t *testing.T) {
 		t.Fatal("entries from before the last accepted document confirmed a mass removal")
 	}
 	// Fresh entries, but older than 10 minutes: nothing.
-	f.h.MailMemberRemoved("mail_users", "alice", true)
-	f.h.MailMemberRemoved("mail_users", "bob", true)
+	f.h.MailMemberRemoved("mail_users", "alice", "root")
+	f.h.MailMemberRemoved("mail_users", "bob", "root")
 	f.advance(mailHubRemovalTTL + time.Second)
 	f.sync(t)
 	if f.mc.Puts() != 2 {
 		t.Fatal("an expired entry confirmed a mass removal")
 	}
 	// Within the limit: confirmed.
-	f.h.MailMemberRemoved("mail_users", "alice", true)
-	f.h.MailMemberRemoved("mail_users", "bob", true)
+	f.h.MailMemberRemoved("mail_users", "alice", "root")
+	f.h.MailMemberRemoved("mail_users", "bob", "root")
 	f.sync(t)
 	if f.mc.Puts() != 3 || !f.mc.Last().ConfirmMassRemoval {
 		t.Fatalf("fresh entries: puts %d", f.mc.Puts())
@@ -504,16 +504,16 @@ func TestMassRemovalStaleEntryDoesNotConfirm(t *testing.T) {
 // the last accepted document) records nothing.
 func TestHubRemovalNeedsMailbox(t *testing.T) {
 	f := newMailFixture(t)
-	f.h.MailMemberRemoved("mail_users", "alice", true) // no document yet
+	f.h.MailMemberRemoved("mail_users", "alice", "root") // no document yet
 	f.sync(t)
-	f.h.MailMemberRemoved("mail_users", "dave", true) // no mailbox
+	f.h.MailMemberRemoved("mail_users", "dave", "root") // no mailbox
 	f.h.mailState.mu.Lock()
 	n := len(f.h.mailState.hubRemoved)
 	f.h.mailState.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("%d entries recorded", n)
 	}
-	f.h.MailMemberRemoved("mail_users", "alice", true)
+	f.h.MailMemberRemoved("mail_users", "alice", "root")
 	f.h.mailState.mu.Lock()
 	r, ok := f.h.mailState.hubRemoved[uuidAlice]
 	f.h.mailState.mu.Unlock()

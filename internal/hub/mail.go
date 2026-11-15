@@ -70,9 +70,9 @@ type mailSync struct {
 	// removalRetry: the next retry of a failed removal (2 s, doubling to
 	// 30 s); zero after a success.
 	removalRetry time.Duration
-	// pendingRevoked: the accounts of a refused mass removal whose mail
-	// passwords were already revoked (by uuid).
-	pendingRevoked map[string]bool
+	// blocked: why the sync sends nothing (doctor mail_sync_blocked; ""
+	// = it isn't).
+	blocked string
 	// applyWait / applyPoll: mailWaitApplied's budget and poll (zero: the
 	// defaults; tests shorten them).
 	applyWait, applyPoll time.Duration
@@ -144,17 +144,17 @@ func (h *Hub) TriggerMailSync() {
 	}
 }
 
-// MailMemberRemoved records a full administrator's removal of user from
-// group (directory.Service.MemberRemoved): a shrink of mail_users made by
-// an admin through the Hub may confirm a mass removal (contract §19.5).
-// A delegate's removal goes through (and their passwords are revoked)
-// but never confirms one (controller ruling: deleting many mailboxes
-// destroys data; a delegate can't bypass the outage guard).
-func (h *Hub) MailMemberRemoved(group, user string, byAdmin bool) {
+// MailMemberRemoved records a global administrator's removal of user
+// from group (directory.Service.MemberRemoved; actor: who removed): a
+// shrink of mail_users made by an lldap_admin member through the Hub may
+// confirm a mass removal (contract §19.5). Anyone else's removal (a
+// delegate, lldap_password_manager) goes through, and their passwords
+// are revoked, but never confirms one (rulings I2, M3).
+func (h *Hub) MailMemberRemoved(group, user, actor string) {
 	if !strings.EqualFold(group, MailUsersGroup) {
 		return
 	}
-	if !byAdmin {
+	if !h.isGlobalAdmin(context.Background(), actor) {
 		h.TriggerMailSync()
 		return
 	}
@@ -309,6 +309,14 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	if blind {
 		d.removal = true
 	}
+	s.mu.Unlock()
+	// People back in mail_users leave the pending removal on every pass
+	// (an emptied set clears it, a changed one voids its confirmation).
+	if err := h.mailPendingReconcile(doc); err != nil {
+		h.mailLogOnce("mail: saving the pending removal failed (nothing sent, retrying): " + err.Error())
+		return mailRetry
+	}
+	s.mu.Lock()
 	if !d.any() {
 		s.addSince = time.Time{}
 		s.mu.Unlock()
@@ -338,7 +346,7 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	gen, err := h.mailSend(ctx, api, doc, confirm)
 	if err != nil {
 		if isMassRemoval(err) {
-			return h.mailMassRefused(ctx, api, last, doc, d)
+			return h.mailMassRefused(ctx, api, last, doc, d, err)
 		}
 		wait := mailRetry
 		if d.removal {
@@ -381,7 +389,8 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	s.reconciled = true
 	s.mu.Unlock()
 	h.saveMailLast(&sent)
-	h.mailPendingSettled(&sent)
+	h.mailSetBlocked("")
+	settleErr := h.mailPendingSettled()
 	if d.removal {
 		h.mailWaitApplied(ctx, api, gen)
 		// Stalwart keeps open sessions through the change: restart mail
@@ -395,6 +404,10 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	}
 	if !reconciled {
 		h.reconcileAllMailPasswords(ctx, api)
+	}
+	if settleErr != nil {
+		h.mailLogOnce("mail: clearing the pending removal failed (retrying): " + settleErr.Error())
+		return mailRetry
 	}
 	h.mailRetireMainLocked(doc)
 	return h.mailDNSIfDue(ctx, api, now, true)

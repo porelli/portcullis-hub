@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/mailctl"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -26,69 +28,59 @@ import (
 // state.yaml (mail.pending_removal), so it survives Hub restarts; doctor
 // mail_mass_removal_pending and Settings → Mail show it and confirm it.
 
-// mailMassRefused handles mailctl's mass-removal 409 for doc (d: the diff
-// from last): records the pending removal, revokes the departed people's
-// passwords (once each) and restarts mail, then sends the fallback
-// document. It returns the next pass's sleep.
-func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailctl.MailState, d mailDiff) time.Duration {
-	if last == nil {
+// mailMassRefused handles mailctl's mass-removal 409 (refusal) for doc
+// (d: the diff from last): records the pending removal (from last, or on
+// a blind pass from the 409's own removed list), revokes the departed
+// people's passwords (each until it succeeds) and restarts mail, then
+// sends the fallback document. Anything it can't do safely blocks the
+// sync (mail_sync_blocked) and sends nothing. It returns the next sleep.
+func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailctl.MailState, d mailDiff, refusal error) time.Duration {
+	var gone []state.MailPendingAccount
+	if last != nil {
+		for _, a := range last.Accounts {
+			for _, id := range d.removedUUIDs {
+				if a.UUID == id {
+					gone = append(gone, state.MailPendingAccount{Username: a.Username, UUID: a.UUID})
+				}
+			}
+		}
+	} else {
+		// No baseline: mailctl's own list of the accounts it refused to
+		// remove is the only safe source.
+		var ae *mailctl.APIError
+		if errors.As(refusal, &ae) {
+			for _, r := range ae.Removed {
+				if r.UUID != "" && r.Username != "" {
+					gone = append(gone, state.MailPendingAccount{Username: strings.ToLower(r.Username), UUID: r.UUID})
+				}
+			}
+		}
+	}
+	if len(gone) == 0 {
+		h.mailSetBlocked("mailctl refused a mass removal and the Hub can't tell whose mailboxes it would remove (no baseline, and mailctl named none): nothing is sent until it can")
 		return mailRetry
 	}
-	var gone []mailctl.Account
-	for _, a := range last.Accounts {
-		for _, id := range d.removedUUIDs {
-			if a.UUID == id {
-				gone = append(gone, a)
-			}
-		}
-	}
 	sort.Slice(gone, func(i, j int) bool { return gone[i].Username < gone[j].Username })
-	h.mailRecordPending(gone)
-	h.mailLogOnce(fmt.Sprintf("mail: mailctl refused removing %d of %d mailboxes at once: waiting for an administrator's confirmation (their mail passwords are revoked meanwhile)", len(gone), len(last.Accounts)))
-
-	// Revoke the departed people's mail passwords now.
-	s := &h.mailState
-	revoked := map[string]string{}
-	for _, a := range gone {
-		s.mu.Lock()
-		done := s.pendingRevoked[a.UUID]
-		s.mu.Unlock()
-		if done {
-			continue
-		}
-		live, err := api.Credentials(ctx, a.Username)
-		if err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
-			log.Printf("mail: revoking %s's mail passwords (pending removal): %v", a.Username, err)
-			continue
-		}
-		failed := false
-		for _, c := range live {
-			if err := api.RevokeCredential(ctx, a.UUID, c.ID); err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
-				log.Printf("mail: revoking %s's mail password %s (pending removal): %v", a.Username, c.ID, err)
-				failed = true
-			}
-		}
-		if failed {
-			continue
-		}
-		s.mu.Lock()
-		if s.pendingRevoked == nil {
-			s.pendingRevoked = map[string]bool{}
-		}
-		s.pendingRevoked[a.UUID] = true
-		s.mu.Unlock()
-		revoked[a.Username] = a.UUID
+	if err := h.mailRecordPending(gone); err != nil {
+		h.mailLogOnce("mail: the pending removal couldn't be saved (nothing done, retrying): " + err.Error())
+		return mailRetry
 	}
-	if len(revoked) > 0 {
-		h.mailMarkLeft(revoked)
-		h.mailRestart(ctx, "revoking the mail passwords of a pending removal")
+	h.mailLogOnce(fmt.Sprintf("mail: mailctl refused removing %d mailboxes at once: waiting for an administrator's confirmation (their mail passwords are revoked meanwhile)", len(gone)))
+	if !h.mailRevokePending(ctx, api) {
+		return mailRetry
 	}
 
 	// Every other change: the document with the departed mailboxes kept.
-	fb := mailFallback(last, doc, d.removedUUIDs)
-	if fb == nil {
+	if last == nil {
+		h.mailSetBlocked("no baseline document: every other mail change waits until the pending removal is confirmed or the people are back in mail_users")
 		return mailRetry
 	}
+	fb := mailFallback(last, doc, d.removedUUIDs)
+	if fb == nil {
+		h.mailSetBlocked("a departed person's mailbox can't be kept meanwhile (their name or primary address is someone else's now): every other mail change waits until the pending removal is confirmed")
+		return mailRetry
+	}
+	h.mailSetBlocked("")
 	d2 := diffMail(last, fb)
 	if !d2.any() {
 		return mailRetry
@@ -100,6 +92,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailc
 	}
 	sent := *fb
 	sent.Generation = gen
+	s := &h.mailState
 	s.mu.Lock()
 	s.last, s.blind = &sent, false
 	s.mu.Unlock()
@@ -112,6 +105,85 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailc
 		}
 	}
 	return mailRetry
+}
+
+// mailRevokePending revokes the mail passwords of every pending account
+// not yet revoked, marks each one revoked once mailctl confirmed every
+// password, and restarts mail when any was. false: the state couldn't be
+// saved (the pass fails).
+func (h *Hub) mailRevokePending(ctx context.Context, api MailAPI) bool {
+	h.mu.RLock()
+	var todo []state.MailPendingAccount
+	if p := h.st.Mail.PendingRemoval; p != nil {
+		for _, a := range p.Accounts {
+			if !a.Revoked {
+				todo = append(todo, a)
+			}
+		}
+	}
+	h.mu.RUnlock()
+	revoked := map[string]string{}
+	for _, a := range todo {
+		live, err := api.Credentials(ctx, a.Username)
+		if err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
+			log.Printf("mail: revoking %s's mail passwords (pending removal): %v", a.Username, err)
+			continue
+		}
+		ok := true
+		for _, c := range live {
+			if err := api.RevokeCredential(ctx, a.UUID, c.ID); err != nil {
+				log.Printf("mail: revoking %s's mail password %s (pending removal): %v", a.Username, c.ID, err)
+				ok = false
+			}
+		}
+		if ok {
+			revoked[a.Username] = a.UUID
+		}
+	}
+	if len(revoked) == 0 {
+		return true
+	}
+	h.mu.Lock()
+	p := h.st.Mail.PendingRemoval
+	var undo []int
+	if p != nil {
+		for i := range p.Accounts {
+			if _, ok := revoked[p.Accounts[i].Username]; ok && revoked[p.Accounts[i].Username] == p.Accounts[i].UUID && !p.Accounts[i].Revoked {
+				p.Accounts[i].Revoked = true
+				undo = append(undo, i)
+			}
+		}
+	}
+	err := h.saveStateLocked()
+	if err != nil && p != nil {
+		for _, i := range undo {
+			p.Accounts[i].Revoked = false
+		}
+	}
+	h.mu.Unlock()
+	h.mailMarkLeft(revoked)
+	h.mailRestart(ctx, "revoking the mail passwords of a pending removal")
+	return err == nil
+}
+
+// mailSetBlocked records why the sync sends nothing ("" clears it): the
+// doctor's mail_sync_blocked.
+func (h *Hub) mailSetBlocked(why string) {
+	s := &h.mailState
+	s.mu.Lock()
+	s.blocked = why
+	s.mu.Unlock()
+	if why != "" {
+		h.mailLogOnce("mail: sync blocked: " + why)
+	}
+}
+
+// MailSyncBlocked is why the mail sync sends nothing ("" = it isn't).
+func (h *Hub) MailSyncBlocked() string {
+	s := &h.mailState
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.blocked
 }
 
 // mailFallback is doc with the accounts removed (by uuid) put back as last
@@ -171,21 +243,23 @@ func mailFallback(last, doc *mailctl.MailState, removed map[string]string) *mail
 	return &fb
 }
 
-// mailRecordPending persists the pending removal (a changed account set
-// drops an earlier confirmation).
-func (h *Hub) mailRecordPending(gone []mailctl.Account) {
-	accts := make([]state.MailPendingAccount, 0, len(gone))
-	for _, a := range gone {
-		accts = append(accts, state.MailPendingAccount{Username: a.Username, UUID: a.UUID})
-	}
+// mailRecordPending persists the pending removal: the same set keeps
+// what is recorded (revoked flags, a confirmation); a different set is a
+// new pending removal (a new Since, no confirmation). A save failure
+// leaves the old state and is returned (the pass fails).
+func (h *Hub) mailRecordPending(gone []state.MailPendingAccount) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval
-	if p != nil && slices.Equal(pendingUUIDs(p.Accounts), pendingUUIDs(accts)) {
-		return
+	if p != nil && slices.Equal(pendingUUIDs(p.Accounts), pendingUUIDs(gone)) {
+		return nil
 	}
-	h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: h.mailNow(), Accounts: accts}
-	h.saveLocked()
+	h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: h.mailNow(), Accounts: gone}
+	if err := h.saveStateLocked(); err != nil {
+		h.st.Mail.PendingRemoval = p
+		return err
+	}
+	return nil
 }
 
 func pendingUUIDs(a []state.MailPendingAccount) []string {
@@ -197,46 +271,92 @@ func pendingUUIDs(a []state.MailPendingAccount) []string {
 	return out
 }
 
-// mailPendingConfirmed: an administrator confirmed exactly a pending
-// removal that covers every account removed (by uuid).
+// pendingHash binds a confirmation to exactly p's set and Since.
+func pendingHash(p *state.MailPendingRemoval) string {
+	return doctor.Digest(struct {
+		UUIDs []string
+		Since string
+	}{pendingUUIDs(p.Accounts), p.Since.UTC().Format(time.RFC3339Nano)})
+}
+
+// mailPendingConfirmed: an administrator confirmed exactly the pending
+// set as it is now, and the document removes exactly that set.
 func (h *Hub) mailPendingConfirmed(removed map[string]string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	p := h.st.Mail.PendingRemoval
-	if p == nil || len(p.Confirmed) == 0 {
+	if p == nil || p.ConfirmedHash == "" || p.ConfirmedHash != pendingHash(p) {
 		return false
 	}
+	ids := make([]string, 0, len(removed))
 	for _, id := range removed {
-		if !slices.Contains(p.Confirmed, id) {
-			return false
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return slices.Equal(ids, pendingUUIDs(p.Accounts))
+}
+
+// mailPendingReconcile drops the pending accounts that are back in
+// mail_users (in doc); an emptied set clears the pending removal, any
+// change voids a confirmation. Their passwords stay revoked (they make
+// new ones). A save failure is returned (the pass fails).
+func (h *Hub) mailPendingReconcile(doc *mailctl.MailState) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := h.st.Mail.PendingRemoval
+	if p == nil {
+		return nil
+	}
+	back := map[string]bool{}
+	for _, a := range doc.Accounts {
+		back[a.UUID] = true
+	}
+	var keep []state.MailPendingAccount
+	for _, a := range p.Accounts {
+		if !back[a.UUID] {
+			keep = append(keep, a)
 		}
 	}
-	return true
+	if len(keep) == len(p.Accounts) {
+		return nil
+	}
+	old := *p
+	if len(keep) == 0 {
+		h.st.Mail.PendingRemoval = nil
+	} else {
+		h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: p.Since, Accounts: keep}
+	}
+	if err := h.saveStateLocked(); err != nil {
+		h.st.Mail.PendingRemoval = &old
+		return err
+	}
+	return nil
 }
 
 // mailPendingSettled clears the pending removal once a normal document
 // (the directory as it is, not the fallback) was accepted: its accounts
-// are either gone (confirmed, or no longer a mass removal) or back in
-// mail_users.
-func (h *Hub) mailPendingSettled(_ *mailctl.MailState) {
+// are gone (confirmed, or no longer a mass removal) or back. A save
+// failure keeps it and is returned.
+func (h *Hub) mailPendingSettled() error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval
-	if p != nil {
-		h.st.Mail.PendingRemoval = nil
-		h.saveLocked()
+	if p == nil {
+		return nil
 	}
-	h.mu.Unlock()
-	if p != nil {
-		s := &h.mailState
-		s.mu.Lock()
-		s.pendingRevoked = nil
-		s.mu.Unlock()
+	h.st.Mail.PendingRemoval = nil
+	if err := h.saveStateLocked(); err != nil {
+		h.st.Mail.PendingRemoval = p
+		return err
 	}
+	return nil
 }
 
 // MailPendingView is Settings → Mail's pending_removal.
 type MailPendingView struct {
-	Since     time.Time                  `json:"since"`
+	Since time.Time `json:"since"`
+	// Accounts: each with revoked (their mail passwords are revoked;
+	// false: revoking failed, retrying).
 	Accounts  []state.MailPendingAccount `json:"accounts"`
 	Confirmed bool                       `json:"confirmed"`
 }
@@ -247,7 +367,7 @@ func (h *Hub) mailPendingViewLocked() *MailPendingView {
 	if p == nil {
 		return nil
 	}
-	return &MailPendingView{Since: p.Since, Accounts: append([]state.MailPendingAccount{}, p.Accounts...), Confirmed: len(p.Confirmed) > 0}
+	return &MailPendingView{Since: p.Since, Accounts: append([]state.MailPendingAccount{}, p.Accounts...), Confirmed: p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p)}
 }
 
 // ConfirmMailRemoval confirms the pending mass removal: uuids must be
@@ -273,9 +393,9 @@ func (h *Hub) ConfirmMailRemoval(ctx context.Context, uuids []string, actor dire
 	if !slices.Equal(want, pendingUUIDs(p.Accounts)) {
 		return statusErr(http.StatusConflict, "the pending removal changed since it was shown: look again")
 	}
-	p.Confirmed = want
+	p.ConfirmedHash = pendingHash(p)
 	if err := h.saveStateLocked(); err != nil {
-		p.Confirmed = nil
+		p.ConfirmedHash = ""
 		return err
 	}
 	h.TriggerMailSync()
@@ -304,12 +424,14 @@ func (h *Hub) mailWarnReservedInUse() {
 	}
 }
 
-// isFullAdmin: user is in an administrator group (not a delegate), read
-// from the directory now; unknown = no (fail closed).
-func (h *Hub) isFullAdmin(ctx context.Context, user string) bool {
+// isGlobalAdmin is the one "full administrator" test for mail (I2 /
+// M3): membership of lldap_admin, the global admin group, read from the
+// directory now; unknown = no (fail closed). Delegates and the other
+// protected groups (lldap_password_manager, app admins) never are.
+func (h *Hub) isGlobalAdmin(ctx context.Context, user string) bool {
 	if strings.TrimSpace(user) == "" {
 		return false
 	}
 	m, err := h.membership(ctx)
-	return err == nil && m.Administrators[strings.ToLower(user)]
+	return err == nil && isLLDAPAdmin(m, strings.ToLower(user))
 }

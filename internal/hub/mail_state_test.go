@@ -24,12 +24,13 @@ func mailMembership() *directory.Membership {
 	m := &directory.Membership{
 		Users: map[string]map[string]int{
 			"alice": {"mail_users": 1, "team_b": 2}, "bob": {"mail_users": 1}, "root": {"mail_users": 1, "lldap_admin": 3},
-			"carol": {"mail_users": 1}, "admin": {"mail_users": 1, "lldap_admin": 3}, "dave": {},
+			"carol": {"mail_users": 1}, "admin": {"mail_users": 1, "lldap_admin": 3}, "dave": {}, "pm": {"lldap_password_manager": 7},
 		},
 		Groups: map[string]directory.MemberGroup{
-			"mail_users":  {ID: 1, Members: []string{"admin", "alice", "bob", "carol", "root"}},
-			"team_b":      {ID: 2, Members: []string{"alice", "dave"}},
-			"lldap_admin": {ID: 3, Members: []string{"admin", "root"}},
+			"mail_users":             {ID: 1, Members: []string{"admin", "alice", "bob", "carol", "root"}},
+			"team_b":                 {ID: 2, Members: []string{"alice", "dave"}},
+			"lldap_admin":            {ID: 3, Members: []string{"admin", "root"}},
+			"lldap_password_manager": {ID: 7, Members: []string{"pm"}},
 		},
 		UUIDs:        map[string]string{"alice": uuidAlice, "bob": uuidBob, "root": uuidRoot, "admin": "99999999-2222-4333-8444-555555555555", "dave": "aaaaaaaa-2222-4333-8444-555555555555"},
 		DisplayNames: map[string]string{"alice": "Alice A.", "bob": "Bob B.", "root": "Root"},

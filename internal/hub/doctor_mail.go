@@ -46,13 +46,18 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 	if _, why := h.MailRestartFailed(); why != "" {
 		in.RestartFailed = why
 	}
+	in.SyncBlocked = h.MailSyncBlocked()
 	h.mu.RLock()
 	if p := h.st.Mail.PendingRemoval; p != nil {
-		pi := &doctor.MailPendingIn{Since: p.Since, UUIDs: pendingUUIDs(p.Accounts), Confirmed: len(p.Confirmed) > 0}
+		pi := &doctor.MailPendingIn{Since: p.Since, UUIDs: pendingUUIDs(p.Accounts), Confirmed: p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p)}
 		for _, a := range p.Accounts {
 			pi.Users = append(pi.Users, a.Username)
+			if !a.Revoked {
+				pi.Failed = append(pi.Failed, a.Username)
+			}
 		}
 		sort.Strings(pi.Users)
+		sort.Strings(pi.Failed)
 		in.Pending = pi
 	}
 	h.mu.RUnlock()
@@ -199,7 +204,7 @@ func (h *Hub) confirmRemovalPlan(params map[string]string) (string, string, []st
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	p := h.st.Mail.PendingRemoval
-	if p == nil || len(p.Confirmed) > 0 {
+	if p == nil || (p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p)) {
 		return "", "", nil, statusErr(http.StatusConflict, "the setup changed since the preview")
 	}
 	var users []string
