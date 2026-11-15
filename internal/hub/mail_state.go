@@ -272,6 +272,9 @@ type mailDiff struct {
 	// count.
 	removedUsers    []string
 	removedAccounts int
+	// removedUUIDs: each removed account's username → its uuid (the
+	// mail passwords created under it end, revoke_leave).
+	removedUUIDs map[string]string
 }
 
 func (d mailDiff) any() bool { return d.removal || d.addition || d.other }
@@ -295,6 +298,10 @@ func diffMail(prev, next *mailctl.MailState) mailDiff {
 			d.removal = true
 			d.removedAccounts++
 			d.removedUsers = append(d.removedUsers, a.Username)
+			if d.removedUUIDs == nil {
+				d.removedUUIDs = map[string]string{}
+			}
+			d.removedUUIDs[a.Username] = id
 			continue
 		}
 		if !subset(a.Addresses, b.Addresses) {

@@ -43,6 +43,9 @@ type mailCoreEnv struct {
 // mailCore reads core.env's mail keys. Fail closed: PORTCULLIS_MAIL is on
 // only when it says exactly "on".
 func (h *Hub) mailCore() mailCoreEnv {
+	if c := h.mailCoreForTest.Load(); c != nil {
+		return *c
+	}
 	core := readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env"))
 	m := mailCoreEnv{
 		On:            strings.TrimSpace(core[VarMail]) == "on",
@@ -155,3 +158,12 @@ func (h *Hub) MailDomainStates() map[string]string {
 	}
 	return out
 }
+
+// SetMailCoreForTest replaces core.env's mail keys (tests outside the
+// package; nil = read core.env again).
+func (h *Hub) SetMailCoreForTest(on bool, hostname string) {
+	h.mailCoreForTest.Store(&mailCoreEnv{On: on, Hostname: hostname})
+}
+
+// SyncMailForTest runs one mail sync pass now.
+func (h *Hub) SyncMailForTest(ctx context.Context) { h.mailSyncOnce(ctx) }

@@ -41,19 +41,31 @@ type mailSync struct {
 	last *mailctl.MailState
 	// addSince: when the pending additions were first seen (zero: none).
 	addSince time.Time
-	// hubRemoved: people an admin took out of mail_users (or deleted)
-	// through the Hub since the last accepted document.
-	hubRemoved map[string]bool
+	// hubRemoved: the accounts (by uuid) an admin took out of mail_users
+	// (or deleted) through the Hub since the last accepted document: each
+	// recorded only while the person had a mailbox in last, with that
+	// document's generation and the time; cleared on every accepted
+	// document, worth nothing after mailHubRemovalTTL.
+	hubRemoved map[string]hubRemoval
 	// noted: the build notes already logged (each once).
 	noted map[string]bool
 	// lastErr: the last logged failure (each once in a row).
 	lastErr string
 	// dnsAt: the last mail-set pass.
 	dnsAt time.Time
-	// onRemoved (Task 15): called with the usernames whose accounts left
-	// an accepted and applied document.
-	onRemoved func(ctx context.Context, users []string)
+	// reconciled: the start-time reconcile of every person's mail
+	// passwords ran (after the first accepted document).
+	reconciled bool
 }
+
+// hubRemoval is one recorded admin removal.
+type hubRemoval struct {
+	gen int
+	at  time.Time
+}
+
+// mailHubRemovalTTL: an admin removal older than this confirms nothing.
+const mailHubRemovalTTL = 10 * time.Minute
 
 // mailNow is the mail clock (tests set h.mailClock).
 func (h *Hub) mailNow() time.Time {
@@ -83,12 +95,22 @@ func (h *Hub) MailMemberRemoved(group, user string) {
 }
 
 func (h *Hub) mailRecordHubRemoval(user string) {
+	user = strings.ToLower(user)
+	now := h.mailNow()
 	s := &h.mailState
 	s.mu.Lock()
-	if s.hubRemoved == nil {
-		s.hubRemoved = map[string]bool{}
+	// Only a person with a mailbox in the last accepted document, keyed
+	// by that account's uuid and the document's generation.
+	if s.last != nil {
+		for _, a := range s.last.Accounts {
+			if a.Username == user {
+				if s.hubRemoved == nil {
+					s.hubRemoved = map[string]hubRemoval{}
+				}
+				s.hubRemoved[a.UUID] = hubRemoval{gen: s.last.Generation, at: now}
+			}
+		}
 	}
-	s.hubRemoved[strings.ToLower(user)] = true
 	s.mu.Unlock()
 	h.TriggerMailSync()
 }
@@ -217,10 +239,12 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 		}
 	}
 	// A mass removal is confirmed only when every account that goes was
-	// taken out by an admin through the Hub.
-	confirm := d.removedAccounts > 0
-	for _, u := range d.removedUsers {
-		confirm = confirm && s.hubRemoved[u]
+	// taken out by an admin through the Hub since the last accepted
+	// document, within mailHubRemovalTTL.
+	confirm := d.removedAccounts > 0 && last != nil
+	for _, uuid := range d.removedUUIDs {
+		r, ok := s.hubRemoved[uuid]
+		confirm = confirm && ok && r.gen == last.Generation && now.Sub(r.at) <= mailHubRemovalTTL
 	}
 	s.mu.Unlock()
 
@@ -235,19 +259,23 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	sent.Generation, sent.ConfirmMassRemoval = gen, confirm
 	s.last = &sent
 	s.addSince = time.Time{}
-	for _, u := range d.removedUsers {
-		delete(s.hubRemoved, u)
-	}
-	onRemoved := s.onRemoved
+	s.hubRemoved = nil
+	reconciled := s.reconciled
+	s.reconciled = true
 	s.mu.Unlock()
 	if d.removal {
-		applied := h.mailWaitApplied(ctx, api, gen)
+		h.mailWaitApplied(ctx, api, gen)
 		// Stalwart keeps open sessions through the change: restart mail
 		// after every removal (contract §6), also when the wait timed out.
 		h.mailRestart(ctx, "a removal")
-		if applied && onRemoved != nil && len(d.removedUsers) > 0 {
-			onRemoved(ctx, d.removedUsers)
+		if len(d.removedUUIDs) > 0 {
+			// The holder left: mailctl destroys their passwords before it
+			// disables the account (and retries until it has).
+			h.mailMarkLeft(d.removedUUIDs)
 		}
+	}
+	if !reconciled {
+		h.reconcileAllMailPasswords(ctx, api)
 	}
 	h.mailRetireMainLocked(doc)
 	return h.mailDNSIfDue(ctx, api, now, true)

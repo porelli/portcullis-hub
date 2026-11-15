@@ -126,6 +126,7 @@
     const t = String(raw || '').trim();
     const n = Array.from(t).length;
     if (n < 1 || n > 64 || REASON_BAD.test(t)) {
+      if (kind === 'mail') return 'A mail password label is 1–64 characters on one line.';
       return kind === 'authenticator' ? 'An authenticator name is 1–64 characters on one line.' : 'A passkey name is 1–64 characters on one line.';
     }
     return '';
@@ -549,6 +550,171 @@
     return me;
   }
 
+  // ── mail passwords (contract §5.1 "Mail passwords") ────────────────
+
+  // mailHtml is the "Mail passwords" section from GET /api/me/mail: the
+  // settings for a mail app, the person's addresses, their passwords
+  // (never a secret; "reset by a restore" for voided ones) and Create.
+  function mailHtml(v) {
+    const pw = v.passwords || [];
+    const active = pw.filter(p => p.status === 'active').length;
+    let h = '<div class="pd-head"><h3 class="pd-h3">Mail passwords</h3></div><div class="msi-mail" data-msi-mail-body>' +
+      '<p class="pd-muted pd-small">Each device or mail app gets its own password. It works for mail only (never to sign in here), and you see it once.</p>' +
+      '<dl class="msi-mail-settings">' +
+      '<dt>Username</dt><dd class="pd-mono">' + esc(v.username) + '</dd>' +
+      '<dt>Incoming (IMAP)</dt><dd class="pd-mono">' + esc(v.server) + ' · port ' + esc(v.imaps) + ' · SSL/TLS</dd>' +
+      '<dt>Outgoing (SMTP)</dt><dd class="pd-mono">' + esc(v.server) + ' · port ' + esc(v.submissions) + ' · SSL/TLS (or ' + esc(v.submission) + ' · STARTTLS)</dd>' +
+      '<dt>Addresses</dt><dd>' + (v.addresses || []).map(a => '<span class="pd-mono">' + esc(a) + '</span>').join(', ') + '</dd></dl>';
+    if (!pw.length) h += '<p class="pd-muted">No mail passwords yet.</p>';
+    for (const p of pw) {
+      h += '<div class="pd-row" data-msi-mailpw="' + esc(p.id) + '"><span><strong>' + esc(p.label) + '</strong> <span class="pd-muted">created ' + esc(fmtDay(p.created_at)) +
+        (p.expires_at ? ' · expires ' + esc(fmtDay(p.expires_at)) : ' · no expiry') + '</span></span> ';
+      if (p.status === 'voided') h += pill('bad', 'reset by a restore');
+      else h += button('danger', ' data-msi-act="mail-revoke" data-mail-id="' + esc(p.id) + '" data-mail-label="' + esc(p.label) + '"', 'Revoke');
+      h += '</div>';
+    }
+    h += '<div class="pd-actions">' + (active < 5 ? button('secondary', ' data-msi-act="mail-create"', '+ New mail password')
+      : '<span class="pd-muted pd-small">At most 5 mail passwords: revoke one first.</span>') + '</div>' +
+      '<div data-msi-panel="mail"></div></div>';
+    return h;
+  }
+
+  function mailSettingsText(v) {
+    return 'IMAP ' + v.server + ':' + v.imaps + ' SSL/TLS · SMTP ' + v.server + ':' + v.submissions + ' SSL/TLS · username ' + v.username;
+  }
+
+  // openMailShown shows a new mail password once: the password with Copy,
+  // the manual settings, the .mobileconfig download (a Blob URL revoked
+  // right after each click and on close) and Done. Closing it (Done,
+  // Escape after a confirm, leaving the page) clears the field and drops
+  // the password and the profile bytes.
+  function openMailShown(answer, v) {
+    closeShown();
+    let secret = String(answer.password || '');
+    let bytes = answer.mobileconfig_b64 ? b64Bytes(answer.mobileconfig_b64) : null;
+    let url = '';
+    const filename = 'mail.mobileconfig';
+    const title = 'Your new mail password';
+    const code = el('code', { class: 'ma-pw', 'data-msi-mailsecret': '' }, [secret]);
+    const copy = el('button', { type: 'button', class: 'pd-btn secondary sm', 'data-msi-dlg': 'copy' }, ['Copy']);
+    const link = el('a', { class: 'pd-btn secondary sm', download: filename, 'data-msi-dl': '' }, ['Download for iPhone, iPad or Mac']);
+    const status = el('div', { class: 'ma-status pd-muted', 'data-msi-dlg-status': '', role: 'status' });
+    const done = el('button', { type: 'button', class: 'pd-btn primary sm', 'data-msi-dlg': 'done' }, ['Done']);
+    const dlg = el('dialog', { class: 'pd-dialog ma-pw-dialog msi-mail-dialog', 'aria-label': title }, [
+      el('div', { class: 'pd-dialog-headbar' }, [el('h3', { class: 'pd-dialog-title' }, [title])]),
+      el('div', { class: 'pd-dialog-body' }, [
+        el('div', { class: 'ma-pw-row' }, [el('span', { class: 'pd-muted' }, ['Password']), code, copy]),
+        el('p', { class: 'ma-pw-note' }, [el('strong', {}, ['This password is shown only now.']),
+          ' Type it into your mail app with these settings: ' + mailSettingsText(v || {}) + '.']),
+        bytes ? el('div', { class: 'ma-pw-row' }, [link, el('span', { class: 'pd-muted pd-small' }, ['a profile that sets up the account with this password'])]) : el('span', {}, []),
+        status,
+        el('div', { class: 'ma-pw-actions' }, [done])
+      ])
+    ]);
+    const arm = () => {
+      if (!bytes) return;
+      url = URL.createObjectURL(new Blob([bytes], { type: 'application/x-apple-aspen-config' }));
+      link.setAttribute('href', url);
+    };
+    const disarm = () => {
+      if (url) URL.revokeObjectURL(url);
+      url = '';
+      link.removeAttribute('href');
+    };
+    arm();
+    link.addEventListener('click', () => {
+      setTimeout(() => { disarm(); arm(); status.textContent = 'Downloaded ' + filename + ': open it to install the account.'; }, 0);
+    });
+    copy.addEventListener('click', () => {
+      if (!secret || !navigator.clipboard) { status.textContent = 'Copy isn\'t available here: select the password and copy it.'; return; }
+      navigator.clipboard.writeText(secret).then(
+        () => { status.textContent = 'Password copied.'; },
+        () => { status.textContent = 'Copy failed: select the password and copy it.'; });
+    });
+    const clear = () => {
+      secret = null;
+      code.textContent = '';
+      if (bytes) bytes.fill(0);
+      bytes = null;
+      disarm();
+      dlg.remove();
+      if (shown === me) shown = null;
+    };
+    const me = { close: () => { if (dlg.open) dlg.close(); clear(); } };
+    done.addEventListener('click', () => me.close());
+    dlg.addEventListener('cancel', e => {
+      e.preventDefault();
+      if (confirm('The password won\'t be shown again — close?')) me.close();
+    });
+    dlg.addEventListener('close', clear);
+    shown = me;
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    return me;
+  }
+
+  // loadMail reads GET /api/me/mail (one's own page only): a 404 (no
+  // mailbox, mail off) shows nothing.
+  async function loadMail(st) {
+    const box = st.el.querySelector('[data-msi-mail]');
+    if (!box) return;
+    let v;
+    try {
+      v = await call('GET', '/api/me/mail');
+    } catch (err) {
+      if (err.status === 404) { box.hidden = true; box.innerHTML = ''; return; }
+      box.hidden = false;
+      box.innerHTML = '<div class="pd-head"><h3 class="pd-h3">Mail passwords</h3></div><p class="pd-muted">Mail passwords aren\'t available: ' + esc(err.message) + '</p>';
+      return;
+    }
+    st.mail = v;
+    box.hidden = false;
+    box.innerHTML = mailHtml(v);
+  }
+
+  function openMailCreate(st) {
+    const p = panel(st, 'mail');
+    if (!p) return;
+    p.innerHTML = '<div class="msi-form"><label class="pd-small" for="msi-maillabel">Device or app (1–64 characters)</label>' +
+      '<input class="pd-input" type="text" id="msi-maillabel" maxlength="64" autocomplete="off" data-msi-maillabel>' +
+      '<label class="pd-small" for="msi-mailexp">Expires</label><select class="pd-input" id="msi-mailexp" data-msi-mailexp>' +
+      '<option value="none">never</option><option value="90d">after 90 days</option><option value="1y">after 1 year</option></select>' +
+      '<p class="pd-muted pd-small">You sign in again in a small window to confirm it\'s you. Then you see the password once.</p>' +
+      '<div class="pd-actions">' + button('primary', ' data-msi-act="mail-create-go"', 'Create') + button('secondary', ' data-msi-act="panel-close"', 'Cancel') + '</div>' + STATUS_SLOT + '</div>';
+    p.querySelector('[data-msi-maillabel]').focus();
+  }
+  function mailCreateGo(st) {
+    const p = panel(st, 'mail');
+    if (!p) return;
+    const label = String(p.querySelector('[data-msi-maillabel]').value).trim();
+    const expiry = p.querySelector('[data-msi-mailexp]').value;
+    const problem = labelProblem(label, 'mail');
+    if (problem) { panelStatus(p, problem, true); return; }
+    fresh(st, p, 'mail_password', async pr => {
+      panelStatus(p, 'Creating…', false, true);
+      let res;
+      try {
+        res = await call('POST', '/api/me/mail/passwords', { label, expiry, code: pr.code, code_verifier: pr.code_verifier, nonce: pr.nonce });
+      } catch (err) {
+        panelBusy(p, false);
+        panelStatus(p, err.message, true);
+        return;
+      }
+      p.innerHTML = '';
+      openMailShown(res, st.mail);
+      res = null;
+      loadMail(st);
+    });
+  }
+  async function mailRevoke(st, id, label) {
+    if (!confirm('Revoke the mail password “' + label + '”? Mail apps using it stop at once.')) return;
+    try {
+      await call('DELETE', '/api/me/mail/passwords/' + enc(id));
+    } catch (err) { setStatus(st, err.message, true); return; }
+    await loadMail(st);
+    setStatus(st, 'Revoked “' + label + '”.');
+  }
+
   // ── the issued / renewed YubiKey certificate ───────────────────────
 
   // pemPanel shows a certificate PEM (not a secret) with a download and
@@ -628,6 +794,7 @@
     h += methodsHtml(v, ctxOf(st));
     h += impersonationHtml(v, ctxOf(st), st.impNotice);
     h += appsHtml(v);
+    if (self) h += '<div data-msi-mail hidden></div>';
     h += '<div class="pd-head"><h3 class="pd-h3">VPN devices</h3></div><div data-msi-vpn><p class="pd-muted">Loading…</p></div>';
     h += '<div class="pd-head msi-hist-head"><h3 class="pd-h3">Sign-in history</h3>' + button('ghost xs', ' data-msi-act="hist-reload"', 'Refresh') + '</div>' +
       '<div data-msi-hist><p class="pd-muted">Loading…</p></div>';
@@ -748,6 +915,7 @@
     st.impNotice = impNoticeOf(st, v);
     draw(st);
     if (st.opts.onView) st.opts.onView(v);
+    if (st.opts.mode !== 'person') loadMail(st);
     loadVPN(st);
     loadHistory(st, false);
   }
@@ -1194,6 +1362,9 @@
       case 'hist-more': return loadHistory(st, true, b);
       case 'hist-reload': return loadHistory(st, false, b);
       case 'vpn-remove': return removeVPN(st, b.dataset.vpnId, b.dataset.vpnName);
+      case 'mail-create': return openMailCreate(st);
+      case 'mail-create-go': return mailCreateGo(st);
+      case 'mail-revoke': return mailRevoke(st, b.dataset.mailId, b.dataset.mailLabel);
       case 'imp-open': return openImpersonate(st);
       case 'imp-stop': return stopImpersonation(st, false);
       case 'imp-again': return stopImpersonation(st, true);
@@ -1213,6 +1384,7 @@
         if (e.target.matches('[data-msi-pw1], [data-msi-pw2]')) { e.preventDefault(); passwordGo(st); }
         else if (e.target.matches('[data-msi-days]')) { e.preventDefault(); createGo(st); }
         else if (e.target.matches('[data-msi-pklabel]')) { e.preventDefault(); renameGo(st, e.target.closest('[data-msi-panel]'), e.target.dataset.cred); }
+        else if (e.target.matches('[data-msi-maillabel]')) { e.preventDefault(); mailCreateGo(st); }
         else if (e.target.matches('[data-msi-authlabel]')) { e.preventDefault(); authRenameGo(st, e.target.closest('[data-msi-panel]'), e.target.dataset.cred); }
       });
     } else {
@@ -1233,7 +1405,7 @@
     for (const st of mounted) if (st.impStarted) { st.impStarted = false; load(st); }
   });
 
-  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, whatText, certFreshProblem, impersonationHtml, reasonProblem, labelProblem,
+  window.PortcullisMySignIn = { mount, methodsHtml, appsHtml, historyHtml, unknownHtml, openDownload, mailHtml, openMailShown, whatText, certFreshProblem, impersonationHtml, reasonProblem, labelProblem,
     // For the node tests: one mount's history paging and a passkey rename
     // over a stub fetch.
     _test: { loadHistory, renameGo, authRenameGo, kcAction, removeAuthenticator, readURL, mayAddCode,

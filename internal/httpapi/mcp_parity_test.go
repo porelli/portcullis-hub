@@ -95,6 +95,10 @@ var signInNoToolRoutes = map[string]string{
 	"DELETE /api/me/signin/password":                         "removing your password: on the Sign-in page, where my_password hands off (D33 lists no tool for it)",
 	"PUT /api/me/signin/passkeys/{credentialId}/label":       "naming your passkeys: on the Sign-in page, where you can see which key is which (my_sign_in lists names and models)",
 	"PUT /api/me/signin/authenticators/{credentialId}/label": "naming your authenticator apps: on the Sign-in page, next to each app",
+	// Mail (contract §15.10 "Mail routes without a tool").
+	"GET /api/me/mail":                   "credentials: never through MCP",
+	"POST /api/me/mail/passwords":        "credentials: never through MCP",
+	"DELETE /api/me/mail/passwords/{id}": "credentials: never through MCP",
 }
 
 // destructiveTwins are the routes whose handler deletes, restores over,

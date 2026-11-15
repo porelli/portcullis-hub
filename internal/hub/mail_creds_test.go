@@ -1,0 +1,334 @@
+package hub
+
+import (
+	"context"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"howett.net/plist"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/state"
+)
+
+// newMailCredFixture: newMailFixture with fresh auth in place, an audit
+// log, and the first document accepted (alice, bob and root have
+// mailboxes).
+func newMailCredFixture(t *testing.T) (*mailFixture, *fakeFreshAuth, *fakeAudit) {
+	t.Helper()
+	f := newMailFixture(t)
+	fa := &fakeFreshAuth{}
+	f.h.SetFreshAuth(ListenerPeople, fa)
+	f.h.freshAuthReady.Store(true)
+	audit := &fakeAudit{}
+	f.h.SetAudit(audit)
+	f.sync(t)
+	return f, fa, audit
+}
+
+func (f *mailFixture) create(t *testing.T, user, label string) *CreatedMailPassword {
+	t.Helper()
+	c, err := f.h.CreateMailPassword(context.Background(), user, label, "none", testProof)
+	if err != nil {
+		t.Fatalf("CreateMailPassword(%s): %v", user, err)
+	}
+	return c
+}
+
+// TestCreateMailPasswordOrder: each refusal in contract order, and the
+// proof is never looked at before step 7.
+func TestCreateMailPasswordOrder(t *testing.T) {
+	f, fa, audit := newMailCredFixture(t)
+	ctx := context.Background()
+	try := func(user, label, expiry string) error {
+		_, err := f.h.CreateMailPassword(ctx, user, label, expiry, testProof)
+		return err
+	}
+	// 2. mailctl without the base plan: 503.
+	f.mc.Lock(func(s *mailctltest.Server) { s.Bootstrap = false })
+	if err := try("alice", "iPhone", "none"); statusOf(err) != 503 || err.Error() != "mail isn't running right now" {
+		t.Fatalf("no bootstrap: %v", err)
+	}
+	f.mc.Lock(func(s *mailctltest.Server) { s.Bootstrap = true })
+	// 3. Not in mail_users: the shared 404 (dave, and nobody at all).
+	errDave, errNobody := try("dave", "x", "none"), try("nobody", "x", "none")
+	if statusOf(errDave) != 404 || errDave.Error() != errNobody.Error() || statusOf(errNobody) != 404 {
+		t.Fatalf("not a member: %v / %v", errDave, errNobody)
+	}
+	// 4. Label and expiry.
+	for _, c := range [][2]string{{"", "none"}, {strings.Repeat("x", 65), "none"}, {"two\nlines", "none"}, {"ok", "2y"}} {
+		if err := try("alice", c[0], c[1]); statusOf(err) != 400 {
+			t.Errorf("%q %q: %v", c[0], c[1], err)
+		}
+	}
+	if fa.calls.Load() != 0 {
+		t.Fatalf("the proof was checked %d times before step 7", fa.calls.Load())
+	}
+	// 7. The proof refused: 403, audited with the reason only.
+	fa.err = &freshauth.Error{Reason: "nonce mismatch"}
+	if err := try("alice", "iPhone", "none"); statusOf(err) != 403 {
+		t.Fatalf("refused proof: %v", err)
+	}
+	if e := audit.lastOf("mail_credential.create"); e.Result != "refused" || !strings.Contains(e.Detail, "nonce mismatch") || strings.Contains(e.Detail, testProof.Code) {
+		t.Fatalf("audit %+v", e)
+	}
+	fa.err = nil
+	// 5. At most 5 active: the sixth is 409 before the proof.
+	for i := 0; i < 5; i++ {
+		f.create(t, "alice", "device")
+	}
+	n := fa.calls.Load()
+	if err := try("alice", "sixth", "none"); statusOf(err) != 409 || err.Error() != "at most 5 mail passwords: revoke one first" {
+		t.Fatalf("sixth: %v", err)
+	}
+	if fa.calls.Load() != n {
+		t.Fatal("the proof was checked for a sixth password")
+	}
+	if got := len(f.mc.Creds("alice")); got != 5 {
+		t.Fatalf("mailctl holds %d", got)
+	}
+}
+
+// TestCreateRequiresMailUsers: someone outside mail_users gets the same
+// 404 as an unknown name, from create and from the view.
+func TestCreateRequiresMailUsers(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	_, e1 := f.h.MyMail(context.Background(), "dave")
+	_, e2 := f.h.MyMail(context.Background(), "nobody")
+	_, e3 := f.h.CreateMailPassword(context.Background(), "dave", "x", "none", testProof)
+	if statusOf(e1) != 404 || statusOf(e3) != 404 || e1.Error() != e2.Error() || e1.Error() != e3.Error() {
+		t.Fatalf("%v / %v / %v", e1, e2, e3)
+	}
+	v, err := f.h.MyMail(context.Background(), "alice")
+	if err != nil || v.Username != "alice@example.org" || v.Server != "mail.example.org" || v.IMAPS != 993 || v.Submissions != 465 || v.Submission != 587 || len(v.Passwords) != 0 {
+		t.Fatalf("alice: %+v %v", v, err)
+	}
+}
+
+// TestCreateWhileMailOff503: PORTCULLIS_MAIL=off: create 503, view 404.
+func TestCreateWhileMailOff503(t *testing.T) {
+	f, fa, _ := newMailCredFixture(t)
+	setCoreMail(t, f.fixture, false)
+	if _, err := f.h.CreateMailPassword(context.Background(), "alice", "x", "none", testProof); statusOf(err) != 503 || err.Error() != "mail isn't running right now" {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := f.h.MyMail(context.Background(), "alice"); statusOf(err) != 404 {
+		t.Fatalf("view: %v", err)
+	}
+	if fa.calls.Load() != 0 {
+		t.Fatal("proof checked")
+	}
+}
+
+// TestMobileConfigFields: the profile is an Apple configuration profile
+// for IMAP 993 SSL and SMTP 465 SSL with the login and the password.
+func TestMobileConfigFields(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	c := f.create(t, "alice", "iPhone & <Mac>")
+	secret := string(c.Password)
+	if secret == "" || !strings.HasPrefix(secret, "mailpw-alice-") {
+		t.Fatalf("password %q", secret)
+	}
+	var prof map[string]any
+	if _, err := plist.Unmarshal(c.MobileConfig, &prof); err != nil {
+		t.Fatalf("profile: %v\n%s", err, c.MobileConfig)
+	}
+	if prof["PayloadType"] != "Configuration" {
+		t.Fatalf("profile %+v", prof)
+	}
+	a := prof["PayloadContent"].([]any)[0].(map[string]any)
+	for k, want := range map[string]any{
+		"PayloadType": "com.apple.mail.managed", "EmailAccountType": "EmailTypeIMAP", "EmailAddress": "alice@example.org",
+		"IncomingMailServerHostName": "mail.example.org", "IncomingMailServerPortNumber": uint64(993), "IncomingMailServerUseSSL": true,
+		"IncomingMailServerUsername": "alice@example.org", "IncomingPassword": secret,
+		"OutgoingMailServerHostName": "mail.example.org", "OutgoingMailServerPortNumber": uint64(465), "OutgoingMailServerUseSSL": true,
+		"OutgoingMailServerUsername": "alice@example.org", "OutgoingPassword": secret,
+	} {
+		if a[k] != want {
+			t.Errorf("%s = %#v, want %#v", k, a[k], want)
+		}
+	}
+	if !strings.Contains(a["EmailAccountDescription"].(string), "iPhone & <Mac>") {
+		t.Errorf("description %v", a["EmailAccountDescription"])
+	}
+	c.Zero()
+	for _, b := range append(append([]byte{}, c.Password...), c.MobileConfig...) {
+		if b != 0 {
+			t.Fatal("Zero left bytes")
+		}
+	}
+}
+
+// TestSecretNotInAuditOrState: the password is in neither the audit log
+// nor state.yaml; the row is.
+func TestSecretNotInAuditOrState(t *testing.T) {
+	f, _, audit := newMailCredFixture(t)
+	c := f.create(t, "alice", "iPhone")
+	secret := string(c.Password)
+	raw, _ := os.ReadFile(f.h.statePath())
+	if strings.Contains(string(raw), secret) || !strings.Contains(string(raw), "mail_credentials:") {
+		t.Fatalf("state.yaml:\n%s", raw)
+	}
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	found := false
+	for _, e := range audit.entries {
+		if strings.Contains(e.Detail+e.Error+e.Target, secret) {
+			t.Fatalf("secret in audit %+v", e)
+		}
+		if e.Action == "mail_credential.create" && e.Result == "ok" {
+			found = strings.Contains(e.Detail, "id="+c.ID) && strings.Contains(e.Detail, "label_length=6")
+		}
+	}
+	if !found {
+		t.Fatalf("no create audit: %+v", audit.entries)
+	}
+}
+
+// TestRevokeOwnMailPassword: revoked in mailctl, marked, audited, mail
+// restarted; another's id is 404; a revoked row never deletes the newer
+// password that reused its Stalwart id.
+func TestRevokeOwnMailPassword(t *testing.T) {
+	f, _, audit := newMailCredFixture(t)
+	ctx := context.Background()
+	a := f.create(t, "alice", "one")
+	if err := f.h.RevokeOwnMailPassword(ctx, "bob", a.ID); statusOf(err) != 404 {
+		t.Fatalf("bob revoking alice's: %v", err)
+	}
+	if err := f.h.RevokeOwnMailPassword(ctx, "alice", a.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	if len(f.mc.Creds("alice")) != 0 || len(f.h.MailPasswords("alice")) != 0 {
+		t.Fatalf("still there: %v %v", f.mc.Creds("alice"), f.h.MailPasswords("alice"))
+	}
+	if len(f.engine.Restarts()) == 0 {
+		t.Fatal("no restart after a revoke")
+	}
+	if e := audit.lastOf("mail_credential.revoke"); e.Result != "ok" || !strings.Contains(e.Detail, "actor=alice") {
+		t.Fatalf("audit %+v", e)
+	}
+	if err := f.h.RevokeOwnMailPassword(ctx, "alice", a.ID); err != nil {
+		t.Fatalf("again: %v", err)
+	}
+	// Stalwart id reuse: b gets id 1 after a's password vanished behind
+	// the Hub's back; revoking a stale row must leave b alone.
+	tick := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	f.mc.Lock(func(s *mailctltest.Server) {
+		s.Now = func() time.Time { tick = tick.Add(time.Second); return tick }
+	})
+	f.mc.DropCreds("alice")
+	b0 := f.create(t, "alice", "two")
+	f.mc.DropCreds("alice")
+	b := f.create(t, "alice", "three")
+	if got := f.mc.Creds("alice"); len(got) != 1 || got[0].ID != "1" {
+		t.Fatalf("ids %+v", got)
+	}
+	f.h.mu.Lock()
+	for i, r := range f.h.st.MailCredentials["alice"] {
+		if r.ID == b0.ID { // keep the stale row active (as if never reconciled)
+			f.h.st.MailCredentials["alice"][i].RevokedAt = nil
+			f.h.st.MailCredentials["alice"][i].Reason = ""
+		}
+	}
+	f.h.mu.Unlock()
+	if err := f.h.RevokeOwnMailPassword(ctx, "alice", b0.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.mc.Creds("alice"); len(got) != 1 {
+		t.Fatalf("the newer password was deleted through a stale row: %+v (b %s)", got, b.ID)
+	}
+}
+
+// TestAdminRevokeMailPassword: revoked_by the admin; no admin create.
+func TestAdminRevokeMailPassword(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	a := f.create(t, "alice", "one")
+	if err := f.h.AdminRevokeMailPassword(context.Background(), "alice", a.ID, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	f.h.mu.RLock()
+	r := f.h.st.MailCredentials["alice"][0]
+	f.h.mu.RUnlock()
+	if r.Active() || r.RevokedBy != "root" || r.Reason != state.MailCredentialReasonRevoked {
+		t.Fatalf("row %+v", r)
+	}
+}
+
+// TestRevokeLeaveMarksRows: bob leaving mail_users ends his rows as
+// revoke_leave once the removal is sent, audited with the count.
+func TestRevokeLeaveMarksRows(t *testing.T) {
+	f, _, audit := newMailCredFixture(t)
+	f.create(t, "bob", "one")
+	f.create(t, "bob", "two")
+	f.create(t, "alice", "mine")
+	f.people.setMembers("mail_users", "alice", "root")
+	f.sync(t)
+	f.h.mu.RLock()
+	rows := append([]state.MailCredential{}, f.h.st.MailCredentials["bob"]...)
+	alice := f.h.st.MailCredentials["alice"][0]
+	f.h.mu.RUnlock()
+	for _, r := range rows {
+		if r.Active() || r.Reason != state.MailCredentialReasonRevokeLeave {
+			t.Fatalf("bob's row %+v", r)
+		}
+	}
+	if !alice.Active() {
+		t.Fatal("alice's row ended")
+	}
+	if e := audit.lastOf("mail_credential.revoke_leave"); e.Target != "bob" || e.Detail != "count=2" {
+		t.Fatalf("audit %+v", e)
+	}
+}
+
+// TestReconcileVoidRestore: a row with no live password after a restore
+// is voided (listed "voided"); without a restore it ends missing (not
+// listed); an expired one ends expired.
+func TestReconcileVoidRestore(t *testing.T) {
+	f, _, audit := newMailCredFixture(t)
+	ctx := context.Background()
+	f.create(t, "alice", "phone")
+	f.mc.DropCreds("alice")
+	later := time.Now().UTC().Add(time.Hour)
+	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	v, err := f.h.MyMail(ctx, "alice")
+	if err != nil || len(v.Passwords) != 1 || v.Passwords[0].Status != "voided" {
+		t.Fatalf("after a restore: %+v %v", v, err)
+	}
+	if e := audit.lastOf("mail_credential.void_restore"); e.Detail != "count=1" {
+		t.Fatalf("audit %+v", e)
+	}
+	// No restore since: missing (gone from the list).
+	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = nil })
+	f.create(t, "alice", "tablet")
+	f.mc.DropCreds("alice")
+	v, _ = f.h.MyMail(ctx, "alice")
+	if len(v.Passwords) != 1 {
+		t.Fatalf("missing row listed: %+v", v.Passwords)
+	}
+	f.h.mu.RLock()
+	last := f.h.st.MailCredentials["alice"][1]
+	f.h.mu.RUnlock()
+	if last.Reason != state.MailCredentialReasonMissing {
+		t.Fatalf("row %+v", last)
+	}
+	// Expired.
+	c, err := f.h.CreateMailPassword(ctx, "alice", "laptop", "90d", testProof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.advance(91 * 24 * time.Hour)
+	f.h.MyMail(ctx, "alice")
+	f.h.mu.RLock()
+	defer f.h.mu.RUnlock()
+	for _, r := range f.h.st.MailCredentials["alice"] {
+		if r.ID == c.ID && r.Reason != state.MailCredentialReasonExpired {
+			t.Fatalf("expired row %+v", r)
+		}
+	}
+}
