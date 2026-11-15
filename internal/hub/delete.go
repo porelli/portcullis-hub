@@ -56,6 +56,35 @@ func (h *Hub) DeleteInstance(id, confirm string, actor directory.Actor) (res *De
 	return res, err
 }
 
+// forgetKey marks a delete as a forget (Task 10): an orphaned instance's
+// state, clients and groups go; nothing on its dead worker is touched
+// (no backup, no down there, no volume removal).
+type forgetKey struct{}
+
+func forgetting(ctx context.Context) bool { b, _ := ctx.Value(forgetKey{}).(bool); return b }
+
+// ForgetInstance forgets orphaned instance id (DELETE
+// /api/instances/{id}?forget=1, typed id): state, Keycloak clients and
+// groups removed, its relays down on the primary, nothing on the revoked
+// worker touched. Audited instance.forget.
+func (h *Hub) ForgetInstance(id, confirm string, actor directory.Actor) (res *DeleteResult, err error) {
+	res = &DeleteResult{}
+	h.mu.RLock()
+	in, ok := h.st.Instances[id]
+	h.mu.RUnlock()
+	if !ok || in.State != state.InstanceOrphaned {
+		err = statusErr(409, "only an orphaned instance can be forgotten (its server revoked): delete %s instead", id)
+		h.auditOp(actor, "instance.forget", id, "", err)
+		return res, err
+	}
+	_, _, err = h.runOpSync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var derr error
+		res, derr = h.deleteInstance(context.WithValue(ctx, forgetKey{}, true), id, confirm, actor, ready)
+		return deleteResult(res, derr)
+	})
+	return res, err
+}
+
 // Delete step keys (contract §11.7 "Steps per operation"): backup (not
 // on a retry: the first backup is kept), stop, volumes (the point of no
 // return), keycloak, groups, files.
@@ -87,7 +116,11 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 		if len(res.Warnings) > 0 {
 			detail += fmt.Sprintf(" warnings=%d", len(res.Warnings))
 		}
-		h.auditOp(actor, "instance.delete", id, detail, err)
+		action := "instance.delete"
+		if forgetting(ctx) {
+			action = "instance.forget"
+		}
+		h.auditOp(actor, action, id, detail, err)
 	}()
 	if confirm != id {
 		return res, statusErr(400, "type the instance id (%s) to confirm the delete", id)
@@ -126,7 +159,7 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 		}
 	}
 	p := progressFrom(ctx)
-	retry := tg.entry.State == state.InstanceDeleting
+	retry := tg.entry.State == state.InstanceDeleting || forgetting(ctx)
 	if !retry {
 		p.AddStep(StepBackup, "Backing up")
 	}
@@ -158,7 +191,17 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 	} else if tg.entry.State == state.InstanceRestoring {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s had an unfinished restore: the delete backup holds its half-restored data; its data from before that restore is in the pre-restore backup %s", id, tg.entry.Backup))
 	}
-	if tg.entry.State == state.InstanceDeleting {
+	if forgetting(ctx) {
+		// No backup (its worker is gone): deleting from here on.
+		h.mu.Lock()
+		e := h.st.Instances[id]
+		e.State = state.InstanceDeleting
+		h.st.Instances[id] = e
+		h.st.SetEnabled(id, false)
+		h.rebuildLocked()
+		h.saveLocked()
+		h.mu.Unlock()
+	} else if tg.entry.State == state.InstanceDeleting {
 		res.Backup = tg.entry.Backup
 	} else {
 		p.Start(StepBackup)
@@ -372,7 +415,12 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 
 	// 3. Project down, then its volumes.
 	p.Start(StepStop)
-	if err := h.stopProject(tg); err != nil {
+	if forgetting(stopCtx) {
+		// Only its relays, on the primary: the worker isn't touched.
+		if err := h.relaysDown(ctx, id); err != nil {
+			return err
+		}
+	} else if err := h.stopProject(tg); err != nil {
 		return fmt.Errorf("compose down: %w", err)
 	}
 	h.mu.Lock()
@@ -432,7 +480,9 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	for _, r := range gone {
 		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor.User, r.reason), nil)
 	}
-	if h.noEngine() {
+	if forgetting(stopCtx) {
+		res.Warnings = append(res.Warnings, "forgotten: nothing on its revoked server was touched")
+	} else if h.noEngine() {
 		res.Warnings = append(res.Warnings, "Docker is not available: the volumes of "+projectName(id)+" were not removed")
 	} else {
 		vols, err := h.projectVolumes(ctx, id)
@@ -545,7 +595,7 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 
 	// 6. Files, ops record, state; policy and portal.
 	p.Start(StepFiles)
-	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id)} {
+	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id), h.relayEnvPath(id), h.relayComposePath(id)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}

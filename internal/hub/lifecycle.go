@@ -102,9 +102,15 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 // view the up uses. Failures are *StatusError.
 func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	members := h.groupSnapshot(t.ID)
-	// The engine's SELinux flag before the override is rendered (an
-	// engine call: never under mu; podman only, P10).
-	if h.rootlessOn() {
+	// A placed instance renders with its worker's engine facts, read now
+	// (Task 10): a server that isn't ready refuses (409) before anything.
+	if server := h.serverOf(t.ID); server != "" {
+		if _, err := h.refreshServerFacts(context.Background(), server); err != nil {
+			return nil, err
+		}
+	} else if h.rootlessOn() {
+		// The engine's SELinux flag before the override is rendered (an
+		// engine call: never under mu; podman only, P10).
 		// Unreadable: refused, never rendered unlabelled (M5).
 		if _, err := h.readEngineSELinux(context.Background()); err != nil {
 			return nil, statusErr(503, "can't read the container engine's security options (SELinux): %v", err)
@@ -146,7 +152,7 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	}
 	// Runtime compatibility (contract §11.10): an instance that can't run
 	// here (its own ports, devices and env, as just written) never starts.
-	if h.compatOn() {
+	if h.compatOnFor(t.ID) {
 		h.mu.RLock()
 		s := h.st.Settings[t.ID]
 		h.mu.RUnlock()

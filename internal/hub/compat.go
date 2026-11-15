@@ -65,7 +65,20 @@ func (h *Hub) instanceCompat(t *templates.Template, s state.InstanceSettings) te
 	if v, ok := s.Values[templates.AvahiServicesDirKey].(string); ok {
 		env[templates.AvahiServicesDirKey] = v
 	}
-	return templates.RuntimeCompat(h.cfg.Runtime, t.ReadCompose(), t.Manifest, h.compatEnv(env), h.unprivilegedPortStart())
+	// The engine it runs on (a worker's facts for a placed instance).
+	f := h.factsFor(t.ID)
+	env = h.compatEnv(env)
+	if h.serverOf(t.ID) != "" {
+		env[templates.EnvBindRoots] = strings.Join(f.BindRoots, ":")
+	}
+	return templates.RuntimeCompat(f.Kind, t.ReadCompose(), t.Manifest, env, f.UnprivilegedPortStart)
+}
+
+// compatOnFor: instance id's engine judges compatibility (podman,
+// kubernetes).
+func (h *Hub) compatOnFor(id string) bool {
+	k := h.factsFor(id).Kind
+	return k == runtime.KindPodman || k == runtime.KindKubernetes
 }
 
 // compatRefusal is the 409 for a refused verdict (nil otherwise).
@@ -105,7 +118,7 @@ func (h *Hub) withCompat(ts []templates.Template) []templates.Template {
 // down), so `always` never brings back what an admin stopped. nil under
 // Docker.
 func (h *Hub) podmanRestartAlways(t *templates.Template) map[string]bool {
-	if !h.rootlessOn() {
+	if h.factsFor(t.ID).Kind != runtime.KindPodman {
 		return nil
 	}
 	services, err := orderedServiceNodes(t.ReadCompose())

@@ -99,6 +99,11 @@ func (h *Hub) folderMountIn(rv renderView, t *templates.Template, o *templates.O
 	if !defined {
 		return nil, fmt.Errorf("no shared folder %q", id)
 	}
+	// A folder is on one server's host (Task 10): another server's
+	// instance can't bind it.
+	if on, runs := f.Server, h.serverOf(t.ID); on != runs {
+		return nil, fmt.Errorf("shared folder %s is on %s, but %s runs on %s", id, serverLabel(on), t.ID, serverLabel(runs))
+	}
 	// The view's definition (a planned one too: manage_as_folder plans a
 	// folder not stored yet), unless a test replaced the Hub's source.
 	src := h.folders
@@ -870,4 +875,12 @@ func dropWriteConfirmed(folders map[string]state.Folder, id string) {
 			folders[fid] = f
 		}
 	}
+}
+
+// serverLabel names a server in messages ("" = the primary).
+func serverLabel(id string) string {
+	if id == "" {
+		return "the primary"
+	}
+	return "server " + id
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/settings"
+	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -267,7 +268,7 @@ func (h *Hub) optionEnvIn(rv renderView, t *templates.Template, m *directory.Mem
 	}
 	// The Local networks (F35, §3.1): every .env write carries them, the
 	// canonical prefixes comma-joined ('' = saved empty: loopback only).
-	out[templates.VarLocalNetworks] = h.localNetworksEnvLocked()
+	out[templates.VarLocalNetworks] = h.localNetworksEnvForLocked(t.ID)
 	// The setup choices' compose profiles (§13.18): Hub-set, every .env
 	// write of a template with profiled services carries them ('' =
 	// none). A template without any has nothing a profile could start:
@@ -280,8 +281,32 @@ func (h *Hub) optionEnvIn(rv renderView, t *templates.Template, m *directory.Mem
 
 // localNetworksEnvLocked is PORTCULLIS_LOCAL_NETWORKS' value. Caller
 // holds mu (read).
-func (h *Hub) localNetworksEnvLocked() string {
-	nets := h.localNetworksLocked()
+func (h *Hub) localNetworksEnvLocked() string { return joinPrefixes(h.localNetworksLocked()) }
+
+// localNetworksEnvForLocked is instance id's Local networks (§14.7): a
+// placed instance's are its server's setting, else the Hub's default
+// list (DefaultLocalNetworks; never the primary's own setting). Caller
+// holds mu.
+func (h *Hub) localNetworksEnvForLocked(id string) string {
+	server := ""
+	if in, ok := h.st.Instances[id]; ok {
+		server = in.Server
+	}
+	if server == "" {
+		return h.localNetworksEnvLocked()
+	}
+	cidrs := DefaultLocalNetworks
+	if s, ok := h.st.Servers[server]; ok && s.LocalNetworks != nil {
+		cidrs = *s.LocalNetworks
+	}
+	nets, err := state.ParseLocalNetworks(cidrs)
+	if err != nil {
+		return "" // fail closed: loopback only
+	}
+	return joinPrefixes(nets)
+}
+
+func joinPrefixes(nets []netip.Prefix) string {
 	parts := make([]string, len(nets))
 	for i, p := range nets {
 		parts[i] = p.String()

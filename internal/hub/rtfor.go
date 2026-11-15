@@ -134,7 +134,9 @@ func (h *Hub) rtFor(id string) (runtime.Instances, error) {
 	}
 	switch {
 	case s.State == ServerReady && s.RT != nil:
-		return s.RT, nil
+		// The bundle before every create, the relays around up and
+		// down (Task 10).
+		return placedRT{Instances: s.RT, h: h, id: id}, nil
 	case s.State == ServerRevoked:
 		return nil, statusErr(409, "server %s is revoked", name)
 	case s.State == ServerEnrolling:

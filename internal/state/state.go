@@ -491,8 +491,12 @@ const (
 // at the last path change (R41, R43): every later run on the folder must
 // find exactly them.
 type Folder struct {
-	Name        string    `json:"name" yaml:"name"`
-	Path        string    `json:"path" yaml:"path"`
+	Name string `json:"name" yaml:"name"`
+	Path string `json:"path" yaml:"path"`
+	// Server is the server whose host the folder is on ("" = the
+	// primary; contract §17, Task 10): only that server's instances may
+	// bind it.
+	Server      string    `json:"server,omitempty" yaml:"server,omitempty"`
 	Description string    `json:"description,omitempty" yaml:"description,omitempty"`
 	GID         int       `json:"gid" yaml:"gid"`
 	Adopted     bool      `json:"adopted,omitempty" yaml:"adopted,omitempty"`

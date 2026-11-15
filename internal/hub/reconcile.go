@@ -318,6 +318,12 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 				log.Printf("reconcile: %s: %s: cannot derive hostnames from %v — denying only the hosts found (%v)", id, k, unparsed, hosts)
 			}
 		}
+		// A placed instance's units on the primary are its relays (Task
+		// 10): they count for its routes (above), never for its state —
+		// that is the worker's.
+		if unitRT[ci] == nil && h.serverOf(id) != "" {
+			continue
+		}
 		service := c.Labels[docker.LabelService]
 		// A leftover of a profile the setup choices leave off is not one
 		// of the instance's services (§13.18): never counted (running,

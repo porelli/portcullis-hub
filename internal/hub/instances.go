@@ -67,6 +67,9 @@ type InstanceView struct {
 // and the catalog's enabled flags and instance lists. Caller must hold mu
 // (write).
 func (h *Hub) rebuildLocked() {
+	// The instance → server index follows state (an entry removed or
+	// re-placed never keeps routing to its old server).
+	defer h.noteServersLocked()
 	extra := extraFunc(h.enrolledLocked())
 	var out []templates.Template
 	byTemplate := map[string][]string{}
@@ -346,7 +349,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	// Runtime compatibility (contract §11.10): a template that can't run
 	// here is never created (the API's create and restore into a new id
 	// come through here too).
-	if h.compatOn() {
+	if h.compatOn() && req.Server == "" {
 		h.mu.RLock()
 		var tc *templates.Template
 		if t := h.catalogLocked(templateID); t != nil {
@@ -363,8 +366,13 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	// A leftover project of that name (e.g. a deleted instance whose
 	// containers survived) is someone else's: refuse. Docker first, never
 	// under mu.
+	// The engine it will run on (Task 10: a worker's for a placement).
+	target, terr := h.rtForServer(req.Server)
+	if terr != nil {
+		return nil, terr
+	}
 	if !h.noEngine() {
-		cs, err := h.rtOf(id).List(context.Background(), runtime.Filter{Instance: id})
+		cs, err := target.List(context.Background(), runtime.Filter{Instance: id})
 		if err != nil {
 			return nil, statusErr(503, "cannot check for an existing compose project %s: %v", projectName(id), err)
 		}
@@ -385,7 +393,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 			want = h.volumeNamesFor(t, id)
 		}
 		h.mu.RUnlock()
-		vs, err := h.rt.ListVolumes(context.Background(), runtime.Filter{})
+		vs, err := target.ListVolumes(context.Background(), runtime.Filter{})
 		if err != nil {
 			return nil, statusErr(503, "cannot check for existing volumes: %v", err)
 		}
@@ -477,14 +485,20 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	}
 	next = h.pinSetupValuesLocked(t, next, false)
 	setupNext := &next
+	if req.Server != "" {
+		if err := h.placeableLocked(req.Server); err != nil {
+			return nil, err
+		}
+	}
 	e := state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated,
-		Label: req.Label, UsersGroup: users, AdminsGroup: admins, SignInTemplate: cur.SignInTemplate}
+		Label: req.Label, UsersGroup: users, AdminsGroup: admins, SignInTemplate: cur.SignInTemplate, Server: req.Server}
 	if def && !hasImmutableHosts(t) && reflect.DeepEqual(view.Hosts, t.DefaultHosts(h.cfg.Domain)) {
 		// The default instance on its default hostnames stores none: a
 		// main-domain change moves them (§11.3).
 		e.Hosts = nil
 	}
 	h.st.Instances[id] = e
+	h.noteInstanceServer(id, req.Server)
 	if setupNext != nil {
 		// Stored as the instance's values before anything starts.
 		if setupNext.IsZero() {

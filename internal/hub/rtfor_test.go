@@ -57,7 +57,7 @@ func TestRtForStates(t *testing.T) {
 	}
 	h.setServer("nas", nil) // removed: a new entry may follow
 	h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: worker})
-	if rt, err := h.rtFor("immich"); err != nil || rt != worker {
+	if rt, err := h.rtFor("immich"); err != nil || unwrapRT(rt) != worker {
 		t.Errorf("ready: %v %v", rt, err)
 	}
 	if rts := h.runtimes(); rts["nas"] != worker || rts["primary"] != h.rt {
