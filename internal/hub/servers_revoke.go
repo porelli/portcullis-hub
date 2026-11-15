@@ -262,7 +262,8 @@ func (h *Hub) drainOwed(ctx context.Context, server string) {
 	h.mu.RLock()
 	var owed []state.OwedSerial
 	for _, o := range h.st.OwedSerials {
-		if server == "" || o.Server == server {
+		// One whose sign → send → pin op still runs is that op's.
+		if (server == "" || o.Server == server) && !h.inflight[o.Serial] {
 			owed = append(owed, o)
 		}
 	}

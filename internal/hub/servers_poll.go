@@ -334,6 +334,7 @@ func (h *Hub) renewServer(ctx context.Context, id string, b *agentrt.Backend) er
 	if err != nil {
 		return err
 	}
+	defer h.endInflight(nc.Serial)
 	h.srvMu.Lock()
 	h.pollOf(id).renewing = true
 	h.srvMu.Unlock()

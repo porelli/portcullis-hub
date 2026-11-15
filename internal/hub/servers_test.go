@@ -193,7 +193,8 @@ type fakeAgent struct {
 	network   *agentapi.NetworkParams
 	calls     []string
 	left      bool
-	failCert  bool // PUT /v1/identity/cert answers 400
+	failCert  bool   // PUT /v1/identity/cert answers 400
+	onCert    func() // runs at PUT /v1/identity/cert, before it answers
 }
 
 func newFakeAgent(t *testing.T, ca *testNodeCA) *fakeAgent {
@@ -330,6 +331,12 @@ func (a *fakeAgent) enrol(w http.ResponseWriter, r *http.Request) {
 
 func (a *fakeAgent) cert(w http.ResponseWriter, r *http.Request) {
 	a.call("cert")
+	a.mu.Lock()
+	hook := a.onCert
+	a.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	var req agentapi.IdentityCert
 	if err := agentapi.Decode(r.Body, agentapi.MaxJSON, &req); err != nil {
 		writeAgentJSON(w, 400, agentapi.Error{Error: err.Error()})
@@ -1399,4 +1406,95 @@ func TestOwedSerials(t *testing.T) {
 	if !slices.Contains(sf.ca.revokedList(), second) || len(sf.owed()) != 0 {
 		t.Errorf("revoked %v owed %v", sf.ca.revokedList(), sf.owed())
 	}
+}
+
+// TestInflightSerialNotDrained: a tick's drain between sign and pin
+// leaves the serial of the running renewal alone (it is pinned and
+// works); once a renewal fails, the next tick revokes its serial.
+func TestInflightSerialNotDrained(t *testing.T) {
+	sf := newServersFixture(t)
+	sf.enrol(t, "nas")
+	ctx := context.Background()
+	due := func() {
+		sf.h.mu.Lock()
+		s := sf.h.st.Servers["nas"]
+		s.CertNotAfter = time.Now().Add(9 * 24 * time.Hour)
+		sf.h.st.Servers["nas"] = s
+		sf.h.mu.Unlock()
+		sf.link.handshake("nas", time.Now())
+	}
+	var (
+		winMu        sync.Mutex
+		owedInWindow []string
+	)
+	sf.agent.mu.Lock()
+	sf.agent.onCert = func() {
+		winMu.Lock()
+		owedInWindow = sf.owed()
+		winMu.Unlock()
+		sf.h.drainOwed(ctx, "") // a tick in the window
+	}
+	sf.agent.mu.Unlock()
+	due()
+	sf.h.pollServer(ctx, "nas")
+	sf.ca.mu.Lock()
+	fresh := sf.ca.issued[len(sf.ca.issued)-1]
+	sf.ca.mu.Unlock()
+	winMu.Lock()
+	if len(owedInWindow) != 1 || owedInWindow[0] != "nas:"+fresh {
+		t.Errorf("owed in the window %v", owedInWindow)
+	}
+	winMu.Unlock()
+	if slices.Contains(sf.ca.revokedList(), fresh) {
+		t.Fatal("the drain revoked the in-flight serial")
+	}
+	if s, _ := sf.server("nas"); s.CertSerial != fresh || len(sf.owed()) != 0 {
+		t.Errorf("pinned %s owed %v", s.CertSerial, sf.owed())
+	}
+	b, _ := sf.h.backendOf("nas")
+	if _, err := b.AgentInfo(ctx); err != nil {
+		t.Errorf("the renewed certificate doesn't work: %v", err)
+	}
+	// A failing renewal: in flight during the op, revoked by the next
+	// tick once it has failed.
+	sf.agent.mu.Lock()
+	sf.agent.failCert = true
+	sf.agent.mu.Unlock()
+	due()
+	sf.h.pollServer(ctx, "nas")
+	sf.ca.mu.Lock()
+	failed := sf.ca.issued[len(sf.ca.issued)-1]
+	sf.ca.mu.Unlock()
+	if slices.Contains(sf.ca.revokedList(), failed) {
+		t.Fatal("revoked while its op ran")
+	}
+	sf.agent.mu.Lock()
+	sf.agent.onCert, sf.agent.failCert = nil, false
+	sf.agent.mu.Unlock()
+	sf.h.drainOwed(ctx, "")
+	if !slices.Contains(sf.ca.revokedList(), failed) || len(sf.owed()) != 0 {
+		t.Errorf("after the op: revoked %v owed %v", sf.ca.revokedList(), sf.owed())
+	}
+}
+
+// TestAddRefusedWhileSerialsOwed: an id with serials still owed can't be
+// enrolled again until they are revoked.
+func TestAddRefusedWhileSerialsOwed(t *testing.T) {
+	sf := newServersFixture(t)
+	sf.h.mu.Lock()
+	sf.h.st.OwedSerials = []state.OwedSerial{{Server: "nas", Serial: "0a:01", Since: time.Now()}}
+	sf.h.mu.Unlock()
+	_, _, err := sf.h.AddServer(context.Background(), admin, "nas", "")
+	if errStatus(err) != 409 || err.Error() != "server nas is still being revoked: try again shortly" {
+		t.Fatalf("%v", err)
+	}
+	if _, ok := sf.server("nas"); ok {
+		t.Error("recorded")
+	}
+	sf.h.drainOwed(context.Background(), "")
+	if _, _, err := sf.h.AddServer(context.Background(), admin, "nas", ""); err != nil {
+		t.Errorf("after the drain: %v", err)
+	}
+	sf.h.StopServerEnrol("nas", admin, "")
+	waitServerOp(t, sf.h, serverOpKey("nas"))
 }

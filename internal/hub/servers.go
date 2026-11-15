@@ -265,6 +265,12 @@ func (h *Hub) AddServerOp(ctx context.Context, actor directory.Actor, id, name s
 		h.mu.Unlock()
 		return "", time.Time{}, "", statusErr(409, "server %s exists", id)
 	}
+	for _, o := range h.st.OwedSerials {
+		if o.Server == id {
+			h.mu.Unlock()
+			return "", time.Time{}, "", statusErr(409, "server %s is still being revoked: try again shortly", id)
+		}
+	}
 	ip, err := servers.AllocIP(servers.LinkSubnet, h.usedTunnelIPsLocked(), h.quarantineLocked(), now)
 	if err != nil {
 		h.mu.Unlock()

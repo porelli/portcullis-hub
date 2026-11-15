@@ -295,8 +295,11 @@ type Hub struct {
 	srvT      serverTimings
 	// revokeLocks: per server, the *sync.Mutex advanceRevoke holds.
 	revokeLocks sync.Map
-	idp         IdP
-	attrs       AttrStore // LLDAP user attributes (setting claims); nil: none
+	// inflight: owed serials whose sign → send → pin op still runs
+	// (drainOwed skips them; empty after a restart). Guarded by mu.
+	inflight map[string]bool
+	idp      IdP
+	attrs    AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

@@ -338,6 +338,7 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 	if err != nil {
 		return err
 	}
+	defer h.endInflight(nc.Serial)
 	c, cancel = call()
 	err = b.PutIdentityCert(c, agentapi.IdentityCert{Certificate: nc.Certificate, CA: nc.CA})
 	cancel()
@@ -444,8 +445,10 @@ func (h *Hub) waitHandshake(ctx context.Context, id string, since time.Time, d t
 // name, issued by the pinned pki_node CA.
 // ok judges the server's state once the certificate is signed: false
 // (revoked meanwhile, or no longer in the state it was signed for)
-// revokes the fresh serial at once.
-func (h *Hub) signWorker(ctx context.Context, id, csrPEM string, ok func(state.Server) bool) (*x509.Certificate, *NodeCert, error) {
+// revokes the fresh serial at once. On success the serial is in flight
+// (drainOwed leaves it alone): the caller ends that with endInflight once
+// its op is over, pinned or not.
+func (h *Hub) signWorker(ctx context.Context, id, csrPEM string, ok func(state.Server) bool) (_ *x509.Certificate, _ *NodeCert, err error) {
 	signer := h.nodeSigner()
 	if signer == nil {
 		return nil, nil, statusErr(503, "enroll isn't configured: node certificates can't be signed")
@@ -464,11 +467,22 @@ func (h *Hub) signWorker(ctx context.Context, id, csrPEM string, ok func(state.S
 	// tick). A failed save: not sent, revoked now.
 	h.mu.Lock()
 	serr := h.oweSerialLocked(id, nc.Serial)
+	if serr == nil {
+		if h.inflight == nil {
+			h.inflight = map[string]bool{}
+		}
+		h.inflight[nc.Serial] = true
+	}
 	h.mu.Unlock()
 	if serr != nil {
 		h.discardSerial(ctx, id, nc.Serial)
 		return nil, nil, statusErr(500, "recording the new certificate failed: %v", serr)
 	}
+	defer func() {
+		if err != nil {
+			h.endInflight(nc.Serial)
+		}
+	}()
 	leaf, err1 := parseOnePEMCert(nc.Certificate)
 	nca, err2 := parseOnePEMCert(nc.CA)
 	if err1 != nil || err2 != nil || !nca.Equal(ca) {
@@ -488,6 +502,14 @@ func (h *Hub) signWorker(ctx context.Context, id, csrPEM string, ok func(state.S
 		return nil, nil, statusErr(409, "server %s was revoked while its certificate was signed", id)
 	}
 	return leaf, nc, nil
+}
+
+// endInflight: serial's op is over (pinned or failed); an owed serial is
+// drained from now on.
+func (h *Hub) endInflight(serial string) {
+	h.mu.Lock()
+	delete(h.inflight, serial)
+	h.mu.Unlock()
 }
 
 // enrollingOK / liveOK: the states a worker certificate may be pinned in
