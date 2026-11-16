@@ -49,7 +49,35 @@ var (
 // IsMailUnavailable: err is one of mail's fixed 503s (mail isn't
 // running, the mailbox isn't ready), whose text the routes pass on.
 func IsMailUnavailable(err error) bool {
-	return errors.Is(err, errMailDown) || errors.Is(err, errMailNotReady)
+	return errors.Is(err, errMailDown) || errors.Is(err, errMailNotReady) || errors.Is(err, errMailSecret)
+}
+
+// MailSecretProblem is the doctor's and Settings → Mail's text when mail
+// is on but the Hub's mail secret is missing or too short.
+const MailSecretProblem = "Mail can't be managed: the Hub's mail secret is missing or too short"
+
+// errMailSecret: every mail write answers it while the secret is bad.
+var errMailSecret = &StatusError{Status: http.StatusServiceUnavailable, Err: errors.New(MailSecretProblem)}
+
+// mailSecretInvalid: PORTCULLIS_MAIL=on but mailctl isn't configured
+// (the secret file missing, unreadable or under 32 characters), read
+// again at every call (a fixed file clears it without a restart).
+func (h *Hub) mailSecretInvalid() bool {
+	if !h.mailOn() {
+		return false
+	}
+	h.mu.RLock()
+	api := h.mailAPI
+	h.mu.RUnlock()
+	return api == nil || api.Available() != nil
+}
+
+// mailWriteGuard refuses a mail write while the secret is bad (503).
+func (h *Hub) mailWriteGuard() error {
+	if h.mailSecretInvalid() {
+		return errMailSecret
+	}
+	return nil
 }
 
 // MailPasswordView is one mail password as people and admins see it
@@ -120,6 +148,9 @@ func (h *Hub) mailAccount(ctx context.Context, user string) (*mailctl.Account, *
 
 // mailUp: mailctl reachable with the base plan in place (else 503).
 func (h *Hub) mailUp(ctx context.Context) (MailAPI, error) {
+	if h.mailSecretInvalid() {
+		return nil, errMailSecret
+	}
 	api := h.mailClient()
 	if api == nil {
 		return nil, errMailDown

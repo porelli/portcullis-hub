@@ -375,6 +375,9 @@ func (h *Hub) mailPendingViewLocked() *MailPendingView {
 // The next document carries confirm_mass_removal for exactly them.
 // Audited mail.confirm_removal.
 func (h *Hub) ConfirmMailRemoval(ctx context.Context, uuids []string, actor directory.Actor) (err error) {
+	if err := h.mailWriteGuard(); err != nil {
+		return err
+	}
 	defer func() { h.auditOp(actor, "mail.confirm_removal", "mail", fmt.Sprintf("count=%d", len(uuids)), err) }()
 	if strings.TrimSpace(actor.User) == "" {
 		return statusErr(http.StatusBadRequest, "no signed-in user to audit the change as")

@@ -36,12 +36,13 @@ const (
 	KindMailLANOnlyUnenforced = "mail_lan_only_unenforced"
 	KindMailMassRemovalPend   = "mail_mass_removal_pending"
 	KindMailSyncBlocked       = "mail_sync_blocked"
+	KindMailHubSecretInvalid  = "mail_hub_secret_invalid"
 )
 
-// MailKinds are the nineteen mail kinds.
+// MailKinds are the twenty mail kinds.
 var MailKinds = []string{KindMailPort25Blocked, KindMailPTRMissing, KindMailPTRMismatch, KindMailBlocklisted, KindMailRecordsWrong,
 	KindMailDKIMStuck, KindMailDKIMManual, KindMailCertExpiring, KindMailDMARCFailures, KindMailDMARCPromote, KindMailMTASTSEnforce,
-	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend, KindMailSyncBlocked}
+	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend, KindMailSyncBlocked, KindMailHubSecretInvalid}
 
 // Mail fix kinds (§14.6); mail_records_wrong on an added domain uses
 // dns_apply with sets=mail.
@@ -88,6 +89,9 @@ type MailIn struct {
 	Pending *MailPendingIn
 	// SyncBlocked: why the Hub sends mailctl nothing ("" = it does).
 	SyncBlocked string
+	// HubSecretInvalid: mail is on but the Hub's mail secret is missing
+	// or too short: only mail_hub_secret_invalid fires.
+	HubSecretInvalid bool
 }
 
 // MailPendingIn is a pending mass removal.
@@ -134,6 +138,13 @@ func sevOf(s string) Severity {
 // mailFindings judges in.Mail (none while it's nil or unavailable).
 func mailFindings(in *Inputs) []Finding {
 	m := in.Mail
+	if m != nil && m.HubSecretInvalid {
+		return []Finding{{Kind: KindMailHubSecretInvalid, Severity: Problem,
+			Title: "Mail can't be managed: the Hub's mail secret is missing or too short",
+			Why:   "Mail is on, but the Hub can't reach mailctl without its secret (secrets/mail/hub-secret, at least 32 characters): nobody's mailbox, address or mail password changes, and removals don't reach the mail server.",
+			Class: FixExplain, Steps: []string{"./portcullis up recreates the Hub with the mail secret"},
+			FP: Fingerprint(KindMailHubSecretInvalid), Inputs: Digest(KindMailHubSecretInvalid)}}
+	}
 	if m == nil || m.Unavailable {
 		return nil
 	}

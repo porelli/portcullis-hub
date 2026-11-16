@@ -126,6 +126,11 @@ func TestSettingsMailPanel(t *testing.T) {
 		!strings.Contains(h, "alice (mail passwords revoked)") {
 		t.Errorf("pending removal: %s", h)
 	}
+	view["problem"] = "Mail can't be managed: the Hub's mail secret is missing or too short"
+	if h := render(view, nil); !strings.Contains(h, "data-mail-problem") || !strings.Contains(h, "./portcullis up") {
+		t.Errorf("secret problem: %s", h)
+	}
+	view["problem"] = nil
 	view["pending_removal"] = nil
 	view["mail"] = "off"
 	if h := render(view, nil); !strings.Contains(h, "Mail is off: run ./portcullis mail enable on the host") {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/mailctl"
 	"github.com/portcullis/hub/internal/mailctl/mailctltest"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -266,5 +267,53 @@ func TestPendingRevokeFailureShown(t *testing.T) {
 		if !a.Revoked {
 			t.Fatalf("retry didn't revoke %+v", a)
 		}
+	}
+}
+
+// TestMailHubSecretInvalid: mail on with a missing or short hub secret:
+// doctor mail_hub_secret_invalid, the Settings banner, every mail write
+// 503 with the text; once the file is valid (in place, no restart) all
+// of it clears.
+func TestMailHubSecretInvalid(t *testing.T) {
+	f := newMailFixture(t)
+	secret := f.data + "/hub-secret-test"
+	os.WriteFile(secret, []byte("short\n"), 0600)
+	f.h.SetMailAPI(mailctl.New(f.mc.URL(), secret))
+	ctx := context.Background()
+	r, _ := f.h.Doctor(ctx)
+	fd := findKind(r, doctor.KindMailHubSecretInvalid)
+	if fd == nil || fd.Severity != doctor.Problem || fd.FixKind != "" || fd.Steps[0] != "./portcullis up recreates the Hub with the mail secret" ||
+		fd.Title != "Mail can't be managed: the Hub's mail secret is missing or too short" {
+		t.Fatalf("finding %+v", fd)
+	}
+	if v := f.h.MailSettingsView(); v.Problem != MailSecretProblem {
+		t.Fatalf("view %q", v.Problem)
+	}
+	writes := map[string]error{
+		"settings": f.h.SetMailSettings(ctx, goodMailSettings(), mailAdmin),
+		"domain":   f.h.SetMailDomain(ctx, "example.org", true, nil, mailAdmin),
+		"aliases":  f.h.SetUserAliases(ctx, "alice", nil, mailAdmin),
+		"list":     f.h.SetGroupList(ctx, "team_b", false, "", "", mailAdmin),
+		"action":   f.h.MailAction(ctx, "dkim-rotate", "example.org", mailAdmin),
+		"confirm":  f.h.ConfirmMailRemoval(ctx, nil, mailAdmin),
+	}
+	_, cerr := f.h.CreateMailPassword(ctx, "alice", "x", "none", testProof)
+	writes["create"] = cerr
+	for k, err := range writes {
+		if statusOf(err) != 503 || err.Error() != MailSecretProblem {
+			t.Errorf("%s: %v", k, err)
+		}
+	}
+	// Fixed in place: no restart needed.
+	os.WriteFile(secret, []byte(mailctltest.Secret+"\n"), 0600)
+	r, _ = f.h.Doctor(ctx)
+	if findKind(r, doctor.KindMailHubSecretInvalid) != nil {
+		t.Fatal("still raised")
+	}
+	if v := f.h.MailSettingsView(); v.Problem != "" {
+		t.Fatalf("view %q", v.Problem)
+	}
+	if err := f.h.SetMailSettings(ctx, goodMailSettings(), mailAdmin); err != nil {
+		t.Fatalf("settings after the fix: %v", err)
 	}
 }

@@ -60,6 +60,9 @@ type MailSettingsView struct {
 	// PendingRemoval: a mass removal mailctl refused, waiting for an
 	// administrator's confirmation (null: none).
 	PendingRemoval *MailPendingView `json:"pending_removal"`
+	// Problem: mail is on but can't be managed (the Hub's mail secret is
+	// missing or too short); "" = none.
+	Problem string `json:"problem,omitempty"`
 }
 
 // MailLANOnlyPodmanRefusal: LAN-only judges the client address, which
@@ -112,6 +115,10 @@ func (h *Hub) mailDomainNamesLocked() []string {
 
 // MailSettingsView is Settings → Mail.
 func (h *Hub) MailSettingsView() MailSettingsView {
+	problem := ""
+	if h.mailSecretInvalid() {
+		problem = MailSecretProblem
+	}
 	core := h.mailCore()
 	env := readEnvRaw(h.coreEnvPath())
 	h.mu.RLock()
@@ -139,6 +146,7 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 		v.Domains = append(v.Domains, MailDomainView{Name: n, Enabled: s == mailctl.MailOn, State: s, Groups: nonNil(st.Domains[n].Groups)})
 	}
 	v.PendingRemoval = h.mailPendingViewLocked()
+	v.Problem = problem
 	v.Lists = []MailListView{}
 	for g, l := range st.Lists {
 		posting := l.Posting
@@ -173,6 +181,9 @@ func mailAddrOK(s string) bool {
 // SetMailSettings saves Settings → Mail (contract §19.9): 400 for a value
 // outside the contract's ranges; audited mail.settings; then a sync.
 func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor directory.Actor) (err error) {
+	if err := h.mailWriteGuard(); err != nil {
+		return err
+	}
 	defer func() { h.auditOp(actor, "mail.settings", "mail", mailSettingsDetail(in), err) }()
 	if strings.TrimSpace(actor.User) == "" {
 		return statusErr(http.StatusBadRequest, "no signed-in user to audit the change as")
@@ -338,6 +349,9 @@ func (h *Hub) hadMailRecords(ctx context.Context, name string) bool {
 // the domain had an MX or SPF before (dmarc_start). Off: the domain
 // drains (MTA-STS mode none for max_age, then off). Audited mail.domain.
 func (h *Hub) SetMailDomain(ctx context.Context, name string, enabled bool, groups []string, actor directory.Actor) (err error) {
+	if err := h.mailWriteGuard(); err != nil {
+		return err
+	}
 	name = NormalizeHost(name)
 	defer func() {
 		h.auditOp(actor, "mail.domain", name, fmt.Sprintf("enabled=%v groups=%s", enabled, strings.Join(groups, ",")), err)
@@ -483,6 +497,9 @@ func (h *Hub) mailAddrOnMailLocked(addr string, coreOn bool) bool {
 // address on a mail domain (400), unique Hub-wide (409 naming the owner).
 // Audited mail.alias.
 func (h *Hub) SetUserAliases(ctx context.Context, user string, addrs []string, actor directory.Actor) (err error) {
+	if err := h.mailWriteGuard(); err != nil {
+		return err
+	}
 	user = strings.ToLower(strings.TrimSpace(user))
 	defer func() { h.auditOp(actor, "mail.alias", user, fmt.Sprintf("count=%d", len(addrs)), err) }()
 	if strings.TrimSpace(actor.User) == "" {
@@ -545,6 +562,9 @@ func (h *Hub) SetUserAliases(ctx context.Context, user string, addrs []string, a
 // (contract §19.9; posting members|anyone, default members). Audited
 // mail.list.
 func (h *Hub) SetGroupList(ctx context.Context, group string, enabled bool, domain, posting string, actor directory.Actor) (err error) {
+	if err := h.mailWriteGuard(); err != nil {
+		return err
+	}
 	domain = NormalizeHost(domain)
 	defer func() {
 		h.auditOp(actor, "mail.list", group, fmt.Sprintf("enabled=%v domain=%s posting=%s", enabled, domain, posting), err)

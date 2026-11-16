@@ -62,7 +62,8 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 	}
 	h.mu.RUnlock()
 	if api == nil || api.Available() != nil {
-		in.Unavailable = true
+		// Read again at every doctor run: fixed in place, it clears.
+		in.HubSecretInvalid = true
 		return in
 	}
 	ctx, cancel := context.WithTimeout(ctx, mailInputsTimeout)

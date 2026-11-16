@@ -35,6 +35,7 @@
     if (v.kubernetes) return '<p class="settings-empty" data-mail-kube>' + esc(KUBE_TEXT) + '</p>';
     let h = '';
     if (v.mail !== 'on') h += '<p class="settings-empty" data-mail-off>' + esc(OFF_TEXT) + '</p>';
+    if (v.problem) h += '<div class="public-warn" data-mail-problem>' + esc(v.problem) + '. Run <code>./portcullis up</code> on the server: it recreates the Hub with the mail secret.</div>';
     const pr = v.pending_removal;
     if (pr) {
       const accts = pr.accounts || [];
