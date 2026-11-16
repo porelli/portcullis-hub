@@ -521,3 +521,89 @@ func TestHubRemovalNeedsMailbox(t *testing.T) {
 		t.Fatalf("alice's entry %+v %v", r, ok)
 	}
 }
+
+// TestMailDNSByHash: between the 6 h rewrites the Hub reads mailctl's
+// per-domain set hashes every 60 s: a changed hash → exactly one refetch
+// and PUT; the same hash → none; a failed PUT is retried on the next
+// pass (the hash is recorded only after the PUT succeeded). The main
+// domain is never written.
+func TestMailDNSByHash(t *testing.T) {
+	f := newMailFixture(t)
+	const d = "team-b.example.net"
+	f.h.mu.Lock()
+	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
+	f.h.mu.Unlock()
+	f.mc.Lock(func(s *mailctltest.Server) {
+		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+		s.StatusV.DNS = map[string]string{d: "h1", "example.org": "m1"}
+	})
+	f.sync(t) // the full pass: written, h1 recorded
+	counts := func() (gets, puts int) {
+		f.mc.Lock(func(s *mailctltest.Server) {
+			for _, r := range s.Requests {
+				if strings.HasPrefix(r, "GET /v1/dns/") {
+					gets++
+				}
+			}
+		})
+		f.dom.mu.Lock()
+		puts = len(f.dom.mailCalls)
+		f.dom.mu.Unlock()
+		return
+	}
+	g0, p0 := counts()
+	if g0 != 1 || p0 != 1 {
+		t.Fatalf("full pass: gets %d puts %d", g0, p0)
+	}
+	// Unchanged hash: nothing.
+	f.advance(mailDNSHashEvery)
+	f.sync(t)
+	if g, p := counts(); g != g0 || p != p0 {
+		t.Fatalf("unchanged: gets %d puts %d", g, p)
+	}
+	// Changed: exactly one refetch and PUT, then nothing again.
+	f.mc.Lock(func(s *mailctltest.Server) {
+		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail2.example.org."}}}
+		s.StatusV.DNS = map[string]string{d: "h2", "example.org": "m2"}
+	})
+	f.sync(t) // not due yet: nothing
+	if g, p := counts(); g != g0 || p != p0 {
+		t.Fatalf("before the tick: gets %d puts %d", g, p)
+	}
+	f.advance(mailDNSHashEvery)
+	f.sync(t)
+	f.dom.mu.Lock()
+	recs := f.dom.mailSets[d]
+	f.dom.mu.Unlock()
+	if g, p := counts(); g != g0+1 || p != p0+1 || len(recs) != 1 || recs[0].Value != "10 mail2.example.org." {
+		t.Fatalf("changed: gets %d puts %d recs %+v", g, p, recs)
+	}
+	f.advance(mailDNSHashEvery)
+	f.sync(t)
+	if g, p := counts(); g != g0+1 || p != p0+1 {
+		t.Fatalf("after the write: gets %d puts %d", g, p)
+	}
+	// A failed PUT: retried on the next tick, then recorded.
+	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.DNS = map[string]string{d: "h3"} })
+	f.dom.mu.Lock()
+	f.dom.mailSetErr = errors.New("domains service down")
+	f.dom.mu.Unlock()
+	f.advance(mailDNSHashEvery)
+	f.sync(t)
+	f.dom.mu.Lock()
+	f.dom.mailSetErr = nil
+	f.dom.mu.Unlock()
+	f.advance(mailDNSHashEvery)
+	f.sync(t)
+	f.advance(mailDNSHashEvery)
+	f.sync(t)
+	f.dom.mu.Lock()
+	calls := strings.Join(f.dom.mailCalls, ",")
+	f.dom.mu.Unlock()
+	if calls != "put "+d+",put "+d+",fail "+d+",put "+d {
+		t.Fatalf("calls %q", calls)
+	}
+	if strings.Contains(calls, "example.org") {
+		t.Fatalf("main domain written: %q", calls)
+	}
+}

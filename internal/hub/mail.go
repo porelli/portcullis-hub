@@ -58,8 +58,10 @@ type mailSync struct {
 	noted map[string]bool
 	// lastErr: the last logged failure (each once in a row).
 	lastErr string
-	// dnsAt: the last mail-set pass.
-	dnsAt time.Time
+	// dnsAt: the last full mail-set pass; hashAt the last hash pass;
+	// dnsHash: per added domain, mailctl's set hash last written.
+	dnsAt, hashAt time.Time
+	dnsHash       map[string]string
 	// reconciled: the start-time reconcile of every person's mail
 	// passwords ran (after the first accepted document).
 	reconciled bool

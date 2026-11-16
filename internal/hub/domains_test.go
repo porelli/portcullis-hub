@@ -49,6 +49,8 @@ type fakeDomainsAPI struct {
 	// ("put <name>", "delete <name>").
 	mailSets  map[string][]domains.MailRecord
 	mailCalls []string
+	// mailSetErr: SetMailSet fails with it (the call still counted).
+	mailSetErr error
 }
 
 func newFakeDomainsAPI() *fakeDomainsAPI {
@@ -127,6 +129,10 @@ func (f *fakeDomainsAPI) SetMailSet(_ context.Context, name string, recs []domai
 	d, ok := f.list[name]
 	if !ok {
 		return domains.Domain{}, &domains.APIError{Status: 404, Message: name + " is not enrolled"}
+	}
+	if f.mailSetErr != nil {
+		f.mailCalls = append(f.mailCalls, "fail "+name)
+		return domains.Domain{}, f.mailSetErr
 	}
 	if f.mailSets == nil {
 		f.mailSets = map[string][]domains.MailRecord{}

@@ -300,6 +300,9 @@ type Status struct {
 	RestoredAt      *time.Time     `json:"restored_at"`
 	TimerSeenAt     *time.Time     `json:"timer_seen_at"`
 	Former          []StatusFormer `json:"former"`
+	// DNS: mail domain → sha256 of its wanted mail set (absent from an
+	// older mailctl); a changed hash means the set must be written again.
+	DNS map[string]string `json:"dns"`
 }
 
 // StatusCert is the mail certificate.

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -12,24 +13,144 @@ import (
 	"github.com/portcullis/hub/internal/mailctl"
 )
 
-// mailDNSIfDue runs syncMailDNS after an accepted document (force) or
-// when mailDNSEvery has passed; it returns the sleep until the next one
-// (at most mailIdle).
+// mailDNSHashEvery: how often mailctl's per-domain set hashes are
+// compared (DKIM keys are made and move stages on mailctl's own passes).
+const mailDNSHashEvery = 60 * time.Second
+
+// mailDNSIfDue runs the full rewrite (syncMailDNS) after an accepted
+// document (force) or every mailDNSEvery (the backstop), and otherwise
+// the hash pass (mailDNSByHash) every mailDNSHashEvery: a domain whose
+// set hash in mailctl's status changed since the Hub last wrote it is
+// written again. It returns the sleep until the next one.
 func (h *Hub) mailDNSIfDue(ctx context.Context, api MailAPI, now time.Time, force bool) time.Duration {
 	s := &h.mailState
 	s.mu.Lock()
-	due := force || s.dnsAt.IsZero() || !now.Before(s.dnsAt.Add(mailDNSEvery))
-	if due {
+	full := force || s.dnsAt.IsZero() || !now.Before(s.dnsAt.Add(mailDNSEvery))
+	hash := full || s.hashAt.IsZero() || !now.Before(s.hashAt.Add(mailDNSHashEvery))
+	if full {
 		s.dnsAt = now
 	}
-	next := s.dnsAt.Add(mailDNSEvery).Sub(now)
+	if hash {
+		s.hashAt = now
+	}
+	nextFull := s.dnsAt.Add(mailDNSEvery).Sub(now)
+	nextHash := s.hashAt.Add(mailDNSHashEvery).Sub(now)
 	s.mu.Unlock()
-	if due {
-		if err := h.syncMailDNS(ctx, api); err != nil {
+	if hash {
+		var st *mailctl.Status
+		if v, err := api.Status(ctx); err == nil {
+			st = &v
+		}
+		var err error
+		if full {
+			err = h.syncMailDNS(ctx, api, st)
+		} else if st != nil {
+			err = h.mailDNSByHash(ctx, api, st)
+		}
+		if err != nil {
 			log.Printf("mail: DNS: %v", err)
 		}
 	}
-	return min(max(next, time.Second), mailIdle)
+	return min(max(min(nextFull, nextHash), time.Second), mailIdle)
+}
+
+// mailDNSDomains are the added mail domains (never the main domain: the
+// CLI's dns-tool owns it) that aren't retired, with their state.
+func (h *Hub) mailDNSDomains() []mailDNSDomain {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	main := strings.ToLower(h.cfg.Domain)
+	var ds []mailDNSDomain
+	for n, e := range h.st.Mail.Domains {
+		n = strings.ToLower(n)
+		if n == main || e.Retired {
+			continue
+		}
+		ds = append(ds, mailDNSDomain{n, mailDomainState(h.st.Mail, main, true, n)})
+	}
+	sort.Slice(ds, func(i, j int) bool { return ds[i].name < ds[j].name })
+	return ds
+}
+
+type mailDNSDomain struct{ name, state string }
+
+// mailDNSByHash writes again the set of every added domain on or
+// draining whose hash in st differs from the one last written; the hash
+// is recorded only after the PUT succeeded (a failure retries next pass).
+func (h *Hub) mailDNSByHash(ctx context.Context, api MailAPI, st *mailctl.Status) error {
+	h.mu.RLock()
+	dapi := h.domainsAPI
+	h.mu.RUnlock()
+	if dapi == nil {
+		return nil
+	}
+	s := &h.mailState
+	var errs []string
+	for _, d := range h.mailDNSDomains() {
+		if d.state != mailctl.MailOn && d.state != mailctl.MailDraining {
+			continue
+		}
+		want := st.DNS[d.name]
+		s.mu.Lock()
+		have := s.dnsHash[d.name]
+		s.mu.Unlock()
+		if want == "" || want == have {
+			continue
+		}
+		if err := h.writeMailSet(ctx, api, dapi, d.name); err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		h.mailRecordDNSHash(d.name, want)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (h *Hub) mailRecordDNSHash(name, hash string) {
+	if hash == "" {
+		return
+	}
+	s := &h.mailState
+	s.mu.Lock()
+	if s.dnsHash == nil {
+		s.dnsHash = map[string]string{}
+	}
+	s.dnsHash[name] = hash
+	s.mu.Unlock()
+}
+
+// errNotApplied: mailctl doesn't have the domain in its applied document
+// yet (GET /v1/dns 404): the next pass writes it.
+var errNotApplied = errors.New("not applied yet")
+
+// writeMailSet fetches name's wanted set from mailctl (with ?wildcard=
+// from its plan) and PUTs it to the domains service.
+func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, name string) error {
+	// No *.<e> address record: mailctl adds the CNAMEs for mta-sts,
+	// autoconfig and autodiscover (?wildcard=false). A plan that can't be
+	// read skips the domain this pass.
+	wild, err := planHasWildcard(ctx, dapi, name)
+	if err != nil {
+		return fmt.Errorf("%s: reading the DNS plan: %v", name, err)
+	}
+	set, err := api.DNS(ctx, name, wild)
+	if err != nil {
+		if mailctl.StatusOf(err) == 404 {
+			return errNotApplied
+		}
+		return fmt.Errorf("%s: reading the wanted mail records: %v", name, err)
+	}
+	recs := make([]domains.MailRecord, 0, len(set.Records))
+	for _, r := range set.Records {
+		recs = append(recs, domains.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
+	}
+	if _, err := dapi.SetMailSet(ctx, name, recs); err != nil {
+		return fmt.Errorf("%s: writing the mail set: %v", name, err)
+	}
+	return nil
 }
 
 // syncMailDNS writes the added mail domains' mail sets (contract §19.7):
@@ -38,35 +159,21 @@ func (h *Hub) mailDNSIfDue(ctx context.Context, api MailAPI, now time.Time, forc
 // a sync is asked for (its document says off); an off domain not yet
 // retired gets DELETE sets/mail, then is retired. The main domain is
 // never written here (the CLI's dns-tool owns it).
-func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI) error {
+// st is mailctl's status read for this pass (nil: unreadable): the
+// draining domains' MTA-STS modes, and the set hashes recorded for the
+// sets written.
+func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI, st *mailctl.Status) error {
 	h.mu.RLock()
 	dapi := h.domainsAPI
-	main := strings.ToLower(h.cfg.Domain)
-	type dom struct {
-		name, state string
-	}
-	var ds []dom
-	for n, e := range h.st.Mail.Domains {
-		n = strings.ToLower(n)
-		if n == main || e.Retired {
-			continue
-		}
-		ds = append(ds, dom{n, mailDomainState(h.st.Mail, main, true, n)})
-	}
 	h.mu.RUnlock()
+	ds := h.mailDNSDomains()
 	if dapi == nil || len(ds) == 0 {
 		return nil
 	}
-	sort.Slice(ds, func(i, j int) bool { return ds[i].name < ds[j].name })
-	var modes map[string]string
-	for _, d := range ds {
-		if d.state == mailctl.MailDraining && modes == nil {
-			modes = map[string]string{}
-			if st, err := api.Status(ctx); err == nil {
-				for _, m := range st.MTASTS {
-					modes[strings.ToLower(m.Domain)] = m.Mode
-				}
-			}
+	modes := map[string]string{}
+	if st != nil {
+		for _, m := range st.MTASTS {
+			modes[strings.ToLower(m.Domain)] = m.Mode
 		}
 	}
 	var errs []string
@@ -85,28 +192,16 @@ func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI) error {
 				h.TriggerMailSync()
 				continue
 			}
-			// No *.<e> address record: mailctl adds the CNAMEs for
-			// mta-sts, autoconfig and autodiscover (?wildcard=false). A
-			// plan that can't be read skips the domain this pass.
-			wild, err := planHasWildcard(ctx, dapi, d.name)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("%s: reading the DNS plan: %v", d.name, err))
-				continue
-			}
-			set, err := api.DNS(ctx, d.name, wild)
-			if err != nil {
-				// 404: not in the applied document yet (the next pass).
-				if mailctl.StatusOf(err) != 404 {
-					errs = append(errs, fmt.Sprintf("%s: reading the wanted mail records: %v", d.name, err))
+			// The hash read before the write: a set changed meanwhile
+			// differs from it, so the hash pass writes it again.
+			if err := h.writeMailSet(ctx, api, dapi, d.name); err != nil {
+				if err != errNotApplied {
+					errs = append(errs, err.Error())
 				}
 				continue
 			}
-			recs := make([]domains.MailRecord, 0, len(set.Records))
-			for _, r := range set.Records {
-				recs = append(recs, domains.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
-			}
-			if _, err := dapi.SetMailSet(ctx, d.name, recs); err != nil {
-				errs = append(errs, fmt.Sprintf("%s: writing the mail set: %v", d.name, err))
+			if st != nil {
+				h.mailRecordDNSHash(d.name, st.DNS[d.name])
 			}
 		case mailctl.MailOff:
 			if _, err := dapi.DeleteMailSet(ctx, d.name); err != nil && domainsStatus(err) != 404 {
