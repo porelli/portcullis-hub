@@ -132,6 +132,14 @@ func (h *Hub) SetOwnPasswords(p OwnPasswords) {
 // once per 30 s); a source it couldn't read leaves its methods unknown.
 // The directory unavailable is its error.
 func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) {
+	v, err := h.mySignInView(ctx, user)
+	if err == nil && v.FreshAuth != nil && v.FreshAuth.Refusal == freshNeedsStronger && h.freshRecheck(ctx, v.User) {
+		return h.mySignInView(ctx, user)
+	}
+	return v, err
+}
+
+func (h *Hub) mySignInView(ctx context.Context, user string) (*MySignIn, error) {
 	u, err := myUser(user)
 	if err != nil {
 		return nil, err
@@ -637,30 +645,40 @@ type refreshThrottle struct {
 	last map[string]time.Time
 }
 
-// RefreshMySignIn is GET /api/me/signin?refresh=1 (T5): it marks the
-// inventory stale, at most once per 10 s per caller; otherwise (or for no
-// user) it does nothing. Never an error.
-func (h *Hub) RefreshMySignIn(user string) {
+// RefreshMySignIn is GET /api/me/signin?refresh=1 (T5): at most once per
+// 10 s per caller, it reads the caller's own methods again
+// (refreshPerson; nothing cached yet: the view's read is the full one);
+// with no one-person read, it marks the inventory stale under the global
+// limit (markStaleLimited). Otherwise (or for no user) it does nothing.
+// Never an error.
+func (h *Hub) RefreshMySignIn(ctx context.Context, user string) {
 	u, err := myUser(user)
-	if err != nil {
+	if err != nil || !h.signInRefresh.allow(u, h.entryClock(), refreshMinGap) {
 		return
 	}
-	now := h.entryClock()
-	r := &h.signInRefresh
-	r.mu.Lock()
-	if t, ok := r.last[u]; ok && now.Sub(t) < refreshMinGap {
-		r.mu.Unlock()
+	if read := h.personSource(); read != nil {
+		h.refreshPerson(ctx, read, u)
 		return
+	}
+	h.markStaleLimited()
+}
+
+// allow records u's mark at now and is true unless u had one less than
+// gap ago (then nothing is recorded).
+func (r *refreshThrottle) allow(u string, now time.Time, gap time.Duration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.last[u]; ok && now.Sub(t) < gap {
+		return false
 	}
 	if r.last == nil {
 		r.last = map[string]time.Time{}
 	}
 	for k, t := range r.last { // keep the map small: drop the old marks
-		if now.Sub(t) >= refreshMinGap {
+		if now.Sub(t) >= gap {
 			delete(r.last, k)
 		}
 	}
 	r.last[u] = now
-	r.mu.Unlock()
-	h.MarkInventoryStale()
+	return true
 }

@@ -439,3 +439,9 @@ func (b *Backend) PushBundle(ctx context.Context, id string, files fs.FS, m agen
 	resp.Body.Close()
 	return nil
 }
+
+// RestartCoreService is refused: core (mail included) runs on the
+// primary only, never on a worker.
+func (b *Backend) RestartCoreService(context.Context, string, time.Duration) error {
+	return runtime.ErrUnsupported
+}

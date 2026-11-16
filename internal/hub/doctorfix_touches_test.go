@@ -27,6 +27,12 @@ var fixerTouchesData = map[string]bool{
 	doctor.FixPersonTreeOwner: true,  // chown + chmod of a person's folder
 	doctor.FixDNSApply:        false, // DNS records at the provider: no data on disk, no access (F9)
 	doctor.FixDNSSECSign:      false, // zone signing at the provider: no data on disk, no access (but AlwaysConfirm)
+	// Mail (§14.6): mailctl actions (DNS policy), no data on disk, no
+	// access revoked; AlwaysConfirm makes them D through the AI.
+	doctor.FixMailDMARCPromote:  false,
+	doctor.FixMailMTASTSEnforce: false,
+	// Parks mailboxes (deleted after the retention): data.
+	doctor.FixMailConfirmRemoval: true,
 }
 
 func TestFixersDeclareTouchesData(t *testing.T) {

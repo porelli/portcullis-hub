@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -139,6 +140,14 @@ type MyAppsView struct {
 // last written (gateOpenLocked), with no settings. The directory snapshot is taken
 // before mu; an unavailable directory is the membership error.
 func (h *Hub) MyApps(ctx context.Context, user string) (*MyAppsView, error) {
+	v, err := h.myApps(ctx, user)
+	if err == nil && slices.ContainsFunc(v.Apps, func(a MyApp) bool { return a.FreshRefusal == freshNeedsStronger }) && h.freshRecheck(ctx, user) {
+		return h.myApps(ctx, user)
+	}
+	return v, err
+}
+
+func (h *Hub) myApps(ctx context.Context, user string) (*MyAppsView, error) {
 	user = strings.ToLower(user)
 	m, err := h.membership(ctx)
 	if err != nil {

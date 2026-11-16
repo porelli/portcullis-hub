@@ -201,6 +201,14 @@ type Service struct {
 	// call 32). It must not block on the directory. Its warnings are
 	// added to the delete's.
 	UserDeleted func(ctx context.Context, actor Actor, name string) []string
+	// MemberRemoved, if set, is called after RemoveMember took a person
+	// out of a group (the LLDAP removal, or on a rule group the removal
+	// of their "added by hand" entry), with the group and the lowercase
+	// username, outside s.mu: the Hub tells an admin's removals from
+	// other shrinks (mail's mass-removal confirmation, contract §19.5).
+	// It must not block.
+	// actor: the caller's username (the Hub decides who counts).
+	MemberRemoved func(group, user, actor string)
 	// PasswordSet, if set, is called after the Hub set a person's LLDAP
 	// password (SetPassword, password onboarding) with their lowercase
 	// username, the LLDAP uuid of the account that was changed (read in
@@ -2396,7 +2404,7 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 	username = strings.TrimSpace(username)
 	action := "group.remove_member"
 	detail := username
-	var removed string
+	var removed, handRemoved string
 	err := s.runAs(ctx, c, permAdmin, &action, group, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
@@ -2416,6 +2424,9 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 			found, err := s.removeEntry(cfg, group, username, func(ex Exception) bool { return ex.Include }, &edetail)
 			if err != nil || found {
 				action, detail = "group.exception", edetail
+				if err == nil {
+					handRemoved = strings.ToLower(username)
+				}
 				return err
 			}
 		}
@@ -2482,8 +2493,23 @@ func (s *Service) RemoveMember(ctx context.Context, c *Caller, group, username s
 	if removed != "" {
 		s.logoutAll(ctx, []string{removed}, res)
 	}
+	if s.MemberRemoved != nil {
+		if removed != "" {
+			s.MemberRemoved(group, strings.ToLower(removed), callerName(c))
+		} else if handRemoved != "" && err == nil {
+			s.MemberRemoved(group, handRemoved, callerName(c))
+		}
+	}
 	if err != nil {
 		return res, err
 	}
 	return res, nil
+}
+
+// callerName is c's lowercase username ("" without one).
+func callerName(c *Caller) string {
+	if c == nil {
+		return ""
+	}
+	return strings.ToLower(c.User)
 }

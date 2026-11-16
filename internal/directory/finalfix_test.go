@@ -3,6 +3,7 @@ package directory_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -431,5 +432,23 @@ func TestPublishSuppressesOnlyKeptExceptionEnds(t *testing.T) {
 	}
 	if pub, _ = e.svc.Publish(ctx, now); !expiringHas(pub, "hr", "bob") {
 		t.Errorf("delegate-created member of a guarding group suppressed: %+v", pub.Expiring)
+	}
+}
+
+// MemberRemoved hears every successful RemoveMember (lowercase), never a
+// refused one (mail's mass-removal confirmation, contract §19.5).
+func TestRemoveMemberHook(t *testing.T) {
+	e, _ := evalEnv(t)
+	e.ll.AddGroup("mail_users", "bob", "carol")
+	var got []string
+	e.svc.MemberRemoved = func(g, u, actor string) { got = append(got, fmt.Sprintf("%s:%s:%s", g, u, actor)) }
+	if _, err := e.svc.RemoveMember(ctx, asRoot, "mail_users", "Bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.RemoveMember(ctx, asRoot, "mail_users", "dave"); err == nil {
+		t.Fatal("removed a non-member")
+	}
+	if strings.Join(got, ",") != "mail_users:bob:"+strings.ToLower(asRoot.User) {
+		t.Fatalf("hook calls %q", got)
 	}
 }

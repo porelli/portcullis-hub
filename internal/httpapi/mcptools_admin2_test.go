@@ -687,6 +687,7 @@ var adminToolFixtures = []struct {
 	{"get_op", map[string]any{"id": "secretapp"}},
 	{"list_ops", nil},
 	{"get_runtime", nil},
+	{"mail_status", nil},
 	{"wait_for_op", map[string]any{"id": "secretapp"}},
 	{"get_logs", map[string]any{"id": "smbfixture"}},
 	// Task 6: sign-in methods and templates.

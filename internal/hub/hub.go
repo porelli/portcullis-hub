@@ -400,7 +400,10 @@ type Hub struct {
 	// configured); domainsReachable: its last call succeeded. Both guarded
 	// by mu. domainOpMu serialises enroll / token / delete (held across
 	// the service calls, never together with mu).
-	domainsAPI       DomainsAPI
+	domainsAPI DomainsAPI
+	// mailAPI is core's mailctl (mail_core.go; nil = not connected:
+	// mail is off for the Hub, contract §19.1).
+	mailAPI          MailAPI
 	domainsReachable bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable
 	// meanwhile); domainsGen changes with every domain operation's commit,
@@ -493,6 +496,9 @@ type Hub struct {
 	signInInv inventoryCache
 	// signInRefresh throttles GET /api/me/signin?refresh=1 (T5).
 	signInRefresh refreshThrottle
+	// freshRecheckT throttles the forced inventory re-reads before a
+	// fresh-auth refusal (freshRecheck: once per 5 s per person).
+	freshRecheckT refreshThrottle
 	// totpDoc wires the authenticator-app doctor kinds (doctor_totp.go).
 	totpDoc totpDoctor
 	// certActions issues, renews and revokes certificates through enroll
@@ -618,6 +624,18 @@ type Hub struct {
 	// goroutine only).
 	credKick     chan struct{}
 	credCheckErr string
+	// Mail (mail.go): mailKick is TriggerMailSync's coalesced request,
+	// mailState RunMailSync's memory, mailRestarts the shared restarts of
+	// core mail, mailClock the mail clock (nil: time.Now).
+	mailKick     chan struct{}
+	mailState    mailSync
+	mailRestarts sharedRestart
+	mailClock    func() time.Time
+	// mailReconcileHook, when set (tests), runs in reconcileMailPasswords
+	// right after the live list is read.
+	mailReconcileHook func(user string)
+	// mailCoreForTest replaces core.env's mail keys (SetMailCoreForTest).
+	mailCoreForTest atomic.Pointer[mailCoreEnv]
 	// testHookHolderJudged, if set, runs in CheckCredentialHolders
 	// between the judgement and the revocations (tests: a change racing
 	// the check).
@@ -760,6 +778,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		invKick:              make(chan struct{}, 1),
 		aiReconKick:          make(chan struct{}, 1),
 		credKick:             make(chan struct{}, 1),
+		mailKick:             make(chan struct{}, 1),
 		driftKey:             map[string]string{},
 		afterFunc:            realAfterFunc,
 		sleep:                realSleep,

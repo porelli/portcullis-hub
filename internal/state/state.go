@@ -290,6 +290,13 @@ type AppState struct {
 	// VPN is Settings → VPN, the wired providers, the built-in devices and
 	// static assignments (contract §11).
 	VPN VPNState `json:"vpn" yaml:"vpn"`
+	// Mail is Settings → Mail (contract §19.9). Load starts from
+	// DefaultMailSettings, so keys a file lacks keep a new install's
+	// values.
+	Mail MailSettings `json:"mail" yaml:"mail"`
+	// MailCredentials: lowercase user → that person's mail passwords'
+	// metadata (contract §13.16 "Mail passwords"). Never a secret.
+	MailCredentials map[string][]MailCredential `json:"mail_credentials,omitempty" yaml:"mail_credentials,omitempty"`
 
 	// signInMissing: the file Load read has no sign_in section (or there
 	// was no file): the defaults EnsureSignIn filled are in memory only
@@ -666,7 +673,7 @@ const SignInNative = "native"
 
 // New returns an empty state with initialised maps.
 func New() *AppState {
-	s := &AppState{AI: DefaultAISettings(), signInMissing: true}
+	s := &AppState{AI: DefaultAISettings(), Mail: DefaultMailSettings(), signInMissing: true}
 	s.init()
 	s.EnsureSignIn()
 	return s
@@ -707,6 +714,9 @@ func (s *AppState) init() {
 	}
 	if s.Reach == nil {
 		s.Reach = make(map[string]Reach)
+	}
+	if s.MailCredentials == nil {
+		s.MailCredentials = make(map[string][]MailCredential)
 	}
 	if s.VPN.Providers == nil {
 		s.VPN.Providers = make(map[string]VPNProvider)
@@ -754,7 +764,7 @@ func Load(path string) (*AppState, error) {
 			return nil, fmt.Errorf("%s: the settings of %s are in the old flat form (before contract v3): they are not migrated — remove them from settings: and re-enter them (ports and bind addresses included) after the upgrade", path, strings.Join(legacy, ", "))
 		}
 	}
-	s := &AppState{AI: DefaultAISettings()}
+	s := &AppState{AI: DefaultAISettings(), Mail: DefaultMailSettings()}
 	if err := yaml.Unmarshal(data, s); err != nil {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
@@ -774,6 +784,9 @@ func Load(path string) (*AppState, error) {
 	}
 	if err := s.AI.Limits.CheckLimits(); err != nil {
 		return nil, fmt.Errorf("corrupt %s (ai: %v) — fix or move it aside, then restart", path, err)
+	}
+	if err := s.Mail.Check(); err != nil {
+		return nil, fmt.Errorf("corrupt %s (mail: %v) — fix or move it aside, then restart", path, err)
 	}
 	s.init()
 	s.signInMissing = signInMissing

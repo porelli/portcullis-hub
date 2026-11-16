@@ -321,6 +321,11 @@ func (h *Hub) SignInHistory(ctx context.Context, user, cursor string, limit int)
 		}()
 	}
 	wg.Wait()
+	for i, ns := range srcs {
+		if ns.name == HistoryKeycloak {
+			h.staleOnCredentialEvents(user, lists[i])
+		}
+	}
 	// The page ends after the newest Through: older entries wait for the
 	// next page, which starts at Through + 1 ns — only when that is older
 	// than this page's own bound (else the reader would never move on).
@@ -459,4 +464,40 @@ func (h *Hub) RunHistoryPrune(ctx context.Context, every time.Duration) {
 		case <-t.C:
 		}
 	}
+}
+
+// staleOnCredentialEvents marks user dirty when Keycloak shows them a
+// method set up or removed (a setup link used, an authenticator app
+// added, replaced or removed) after the Hub's own last read of their
+// methods (invBase.readAt). Each event acts once: it is remembered by its
+// own (Keycloak) time, so a Keycloak clock ahead of the Hub's never
+// re-marks the person on every history view. A later fresh read reads
+// them (refreshDirtyPeople; coalesced: markPersonDirty).
+func (h *Hub) staleOnCredentialEvents(user string, es []signinhistory.Entry) {
+	c := &h.signInInv
+	base := c.currentBase()
+	if base == nil {
+		return
+	}
+	at := base.readAt(user)
+	var newest time.Time
+	for _, e := range es {
+		if (e.Kind == signinhistory.KindMethod || e.Detail == signinhistory.SetupLinkDetail) && !e.Time.Before(at) && e.Time.After(newest) {
+			newest = e.Time
+		}
+	}
+	if newest.IsZero() {
+		return
+	}
+	c.mu.Lock()
+	if !newest.After(c.evSeen[user]) {
+		c.mu.Unlock()
+		return
+	}
+	if c.evSeen == nil {
+		c.evSeen = map[string]time.Time{}
+	}
+	c.evSeen[user] = newest
+	c.markDirtyLocked(user)
+	c.mu.Unlock()
 }

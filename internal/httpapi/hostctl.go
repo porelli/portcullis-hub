@@ -16,8 +16,9 @@ import (
 
 // The host control socket (contract §16): HTTP on a Unix socket in the
 // Hub's tmpfs (mode 0600), never on a TCP listener (the /host/ routes are
-// 404 on all three). Its only clients are `hub vpn …` inside the Hub
-// container (`./portcullis vpn …` on the host). The audit actor is host.
+// 404 on all three). Its only clients are `hub vpn …` and `hub mail …`
+// inside the Hub container (`./portcullis vpn …` / `mail disable` on the
+// host). The audit actor is host.
 
 // HostSocketPath is the control socket.
 const HostSocketPath = "/tmp/hub-host.sock"
@@ -61,6 +62,16 @@ func HostHandler(h *hub.Hub) http.Handler {
 	})
 	mux.HandleFunc("GET /host/vpn/info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.VPNHostInfo(r.Context()))
+	})
+	// Mail (contract §19.10): `./portcullis mail disable` drains every
+	// mail domain and waits for every one to be off.
+	mux.HandleFunc("POST /host/mail/drain", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]any{"domains": h.HostMailDrain(r.Context())})
+	})
+	mux.HandleFunc("GET /host/mail/domains", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, h.HostMailDomains())
 	})
 	return mux
 }

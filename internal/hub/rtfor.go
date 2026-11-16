@@ -2,10 +2,10 @@ package hub
 
 import (
 	"context"
-
 	"io"
 	"maps"
 	"sync"
+	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
 )
@@ -193,17 +193,18 @@ type refusedRT struct {
 
 var _ runtime.Instances = refusedRT{}
 
-func (r refusedRT) Kind() runtime.Kind                                 { return r.kind }
-func (r refusedRT) Env() []string                                      { return nil }
-func (r refusedRT) Info(context.Context) (runtime.Info, error)         { return runtime.Info{}, r.err }
-func (r refusedRT) Create(context.Context, runtime.Project) error      { return r.err }
-func (r refusedRT) Down(context.Context, runtime.Project) error        { return r.err }
-func (r refusedRT) DownByName(context.Context, string) error           { return r.err }
-func (r refusedRT) EnsureImage(context.Context, string) error          { return r.err }
-func (r refusedRT) RemoveVolume(context.Context, string) error         { return r.err }
-func (r refusedRT) RemoveHelper(context.Context, string) error         { return r.err }
-func (r refusedRT) CreateVolume(context.Context, runtime.Volume) error { return r.err }
-func (r refusedRT) Signal(context.Context, string, string) error       { return r.err }
+func (r refusedRT) Kind() runtime.Kind                                              { return r.kind }
+func (r refusedRT) Env() []string                                                   { return nil }
+func (r refusedRT) Info(context.Context) (runtime.Info, error)                      { return runtime.Info{}, r.err }
+func (r refusedRT) Create(context.Context, runtime.Project) error                   { return r.err }
+func (r refusedRT) Down(context.Context, runtime.Project) error                     { return r.err }
+func (r refusedRT) DownByName(context.Context, string) error                        { return r.err }
+func (r refusedRT) RestartCoreService(context.Context, string, time.Duration) error { return r.err }
+func (r refusedRT) EnsureImage(context.Context, string) error                       { return r.err }
+func (r refusedRT) RemoveVolume(context.Context, string) error                      { return r.err }
+func (r refusedRT) RemoveHelper(context.Context, string) error                      { return r.err }
+func (r refusedRT) CreateVolume(context.Context, runtime.Volume) error              { return r.err }
+func (r refusedRT) Signal(context.Context, string, string) error                    { return r.err }
 func (r refusedRT) Up(context.Context, runtime.Project, func(string, int64, int64, bool)) error {
 	return r.err
 }

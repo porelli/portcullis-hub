@@ -261,6 +261,10 @@ type Inputs struct {
 	// SignInTOTP: the authenticator-app kinds' inputs (signin_totp.go;
 	// nil = they couldn't be gathered: none fire).
 	SignInTOTP *SignInTOTPIn
+	// Mail: the mail kinds' inputs (mail.go; nil = PORTCULLIS_MAIL off:
+	// none fire; Unavailable: mailctl couldn't be read, no mail findings
+	// and Report.MailUnavailable).
+	Mail *MailIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify
@@ -343,6 +347,9 @@ type Report struct {
 	// lookups failed (dnsPartial), so the DNS checks didn't (fully) run (a
 	// field, not a finding: a clean report never hides it).
 	DNSUnavailable bool `json:"dns_unavailable,omitempty"`
+	// MailUnavailable: mail is on but mailctl couldn't be read, so the
+	// mail checks didn't run (contract §14.5, like dns_unavailable).
+	MailUnavailable bool `json:"mail_unavailable,omitempty"`
 }
 
 // ScanSummary is one cached disk scan.
@@ -387,7 +394,7 @@ func Run(in *Inputs, mutes map[string]Mute) Report {
 		}
 	}
 	r := Report{Findings: make([]Finding, 0, len(byFP)), Counts: map[Severity]int{Problem: 0, Warning: 0, Info: 0}, Scans: []ScanSummary{},
-		DNSUnavailable: in.DNS == nil || dnsPartial(in)}
+		DNSUnavailable: in.DNS == nil || dnsPartial(in), MailUnavailable: in.Mail != nil && in.Mail.Unavailable}
 	for _, f := range byFP {
 		f.Token = f.Inputs
 		if m, ok := mutes[f.FP]; ok && m.Inputs == f.Inputs {

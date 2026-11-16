@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
 )
 
@@ -801,21 +802,7 @@ func (c *Client) SignInCredentials(ctx context.Context) (map[string][]PasskeyCre
 				log.Printf("keycloak: sign-in methods of %s unknown: %v", u.Username, err)
 				return
 			}
-			keys := []PasskeyCredential{}
-			for _, cr := range creds {
-				var pk PasskeyCredential
-				if kind, ok := passkeyKinds[cr.Type]; ok {
-					pk = PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label, AAGUID: cr.AAGUID}
-				} else if cr.Type == OTPType {
-					pk = PasskeyCredential{ID: cr.ID, Type: string(signin.TOTP), Label: cr.Label}
-				} else {
-					continue
-				}
-				if cr.Created > 0 {
-					pk.Created = time.UnixMilli(cr.Created).UTC()
-				}
-				keys = append(keys, pk)
-			}
+			keys := signInKeys(creds)
 			mu.Lock()
 			out[strings.ToLower(u.Username)] = keys
 			mu.Unlock()
@@ -826,6 +813,53 @@ func (c *Client) SignInCredentials(ctx context.Context) (map[string][]PasskeyCre
 		return nil, fmt.Errorf("list credentials: %w", err)
 	}
 	return out, nil
+}
+
+// signInKeys is creds' passkeys and authenticator apps (never an empty
+// nil: an enabled user without any has []).
+func signInKeys(creds []credential) []PasskeyCredential {
+	keys := []PasskeyCredential{}
+	for _, cr := range creds {
+		var pk PasskeyCredential
+		if kind, ok := passkeyKinds[cr.Type]; ok {
+			pk = PasskeyCredential{ID: cr.ID, Type: string(kind), Label: cr.Label, AAGUID: cr.AAGUID}
+		} else if cr.Type == OTPType {
+			pk = PasskeyCredential{ID: cr.ID, Type: string(signin.TOTP), Label: cr.Label}
+		} else {
+			continue
+		}
+		if cr.Created > 0 {
+			pk.Created = time.UnixMilli(cr.Created).UTC()
+		}
+		keys = append(keys, pk)
+	}
+	return keys
+}
+
+// UserSignInCredentials is one user's SignInCredentials entry, read on
+// its own (one user lookup, one credential list): found false when
+// Keycloak doesn't know them; keys nil when they are disabled. Any read
+// failure is the error (their methods stay as they were).
+func (c *Client) UserSignInCredentials(ctx context.Context, username string) (keys []PasskeyCredential, found bool, err error) {
+	if !lldap.ValidUsername(username) {
+		return nil, false, fmt.Errorf("keycloak: %q isn't a valid username", username)
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	u, err := c.findUser(ctx, tok, username)
+	if err != nil || u == nil {
+		return nil, false, err
+	}
+	if u.Enabled == nil || !*u.Enabled {
+		return nil, true, nil
+	}
+	creds, err := c.credentials(ctx, tok, str(u.ID))
+	if err != nil {
+		return nil, false, err
+	}
+	return signInKeys(creds), true, nil
 }
 
 // UserStatus is a user's Keycloak-side state.

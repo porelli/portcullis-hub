@@ -21,6 +21,8 @@
   const esc = s => window.escapeHtml(s);
   const SEV_COLOR = { ok: '#4ade80', info: '#94a3b8', warning: '#fbbf24', problem: '#f87171' };
   const MAIN_FIX = 'Run <code>./portcullis dns setup</code> on the server';
+  // The main domain's mail records (contract §14.5 mail_records_wrong).
+  const MAIN_MAIL_FIX = 'Run <code>./portcullis dns setup --only mail</code> on the server';
   // Table cells: room between the columns.
   const CELL = '<style>.dns-panel th, .dns-panel td { padding: 0.25rem 0.75rem 0.25rem 0; }</style>';
 
@@ -45,7 +47,7 @@
     if (!opts.main && it.fix === 'auto') {
       action = '<button class="btn btn-sm" data-dns-fix="' + esc(it.set) + '">Fix</button>';
     } else if (opts.main && it.fix !== 'none' && it.status !== 'ok') {
-      action = '<small>' + MAIN_FIX + '</small>';
+      action = '<small>' + (it.set === 'mail' ? MAIN_MAIL_FIX : MAIN_FIX) + '</small>';
     }
     const steps = (it.steps || []).length
       ? '<ul style="margin:0.25rem 0 0 1rem;padding:0;color:#94a3b8">' + it.steps.map(s => '<li>' + esc(s) + '</li>').join('') + '</ul>' : '';

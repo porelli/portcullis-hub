@@ -383,6 +383,14 @@ type ConfirmationView struct {
 // ConfirmationPage is user's confirmation id on listener: 404 for an
 // unknown id, another person's and the other listener's.
 func (h *Hub) ConfirmationPage(ctx context.Context, listener, id, user string) (*ConfirmationView, error) {
+	v, err := h.confirmationPage(ctx, listener, id, user)
+	if err == nil && v.FreshAuth != nil && v.FreshAuth.Refusal == freshNeedsStronger && h.freshRecheck(ctx, user) {
+		return h.confirmationPage(ctx, listener, id, user)
+	}
+	return v, err
+}
+
+func (h *Hub) confirmationPage(ctx context.Context, listener, id, user string) (*ConfirmationView, error) {
 	c, err := h.confirms().Get(id, strings.ToLower(user))
 	if err != nil || c.Listener != listener {
 		return nil, errNoConfirmation

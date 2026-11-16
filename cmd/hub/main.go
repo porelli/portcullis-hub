@@ -35,6 +35,7 @@ import (
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/mailctl"
 	"github.com/portcullis/hub/internal/signinreset"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/web"
@@ -259,6 +260,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vpn" {
 		os.Exit(vpnMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
+	// `hub mail drain|domains` (contract §19.10): `./portcullis mail
+	// disable`'s clients.
+	if len(os.Args) > 1 && os.Args[1] == "mail" {
+		os.Exit(mailMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
+	}
 	// `hub signin reset-core`: the CLI's lockout recovery (contract §8.1),
 	// run against the data directory while the Hub is stopped. Before the
 	// Hub's configuration is read: only the data directory is needed.
@@ -420,7 +426,7 @@ func main() {
 		case <-time.After(engineStartWait):
 			log.Printf("engine: not verified after %s: starting anyway, engine operations answer 503 until it is", engineStartWait)
 		}
-		rt = dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: hub.HelperImage})
+		rt = dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: hub.HelperImage, CoreDir: cfg.ProjectHostDir})
 	}
 	cfg.AccountURL = fa.AccountURL
 	h, err := hub.New(cfg, rt, kc)
@@ -453,6 +459,13 @@ func main() {
 		log.Printf("domains disabled: %v", err)
 	}
 	h.SetDomainsAPI(dom)
+	// Mail (contract §19.1): core's mailctl, bearer secret from a file.
+	// Without it (or with PORTCULLIS_MAIL=off) mail is off for the Hub.
+	mc := mailctl.New(env("HUB_MAILCTL_API_URL", mailctl.DefaultAPIURL), env("HUB_MAILCTL_SECRET_FILE", mailctl.DefaultSecretFile))
+	if err := mc.Available(); err != nil {
+		log.Printf("mail disabled: %v", err)
+	}
+	h.SetMailAPI(mc)
 	dirStore, err := openDirectoryStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -492,7 +505,8 @@ func main() {
 	dir.AuthenticatorMethodOn = h.AuthenticatorMethodOn
 	// Who has which sign-in method: Keycloak's passkeys, enroll's
 	// YubiKey certificates (§8.1 "Inventory", §9.4).
-	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates, PasskeyLabel: kc.SetPasskeyLabel, AuthenticatorLabel: kc.SetAuthenticatorLabel})
+	h.SetSignInSources(hub.SignInSources{Passkeys: kc.SignInCredentials, Certificates: invites.Certificates, PasskeyLabel: kc.SetPasskeyLabel, AuthenticatorLabel: kc.SetAuthenticatorLabel,
+		PersonPasskeys: kc.UserSignInCredentials})
 	// The Sign-in page's own certificates (enroll, §9.4) and own
 	// password (the directory, §5.1).
 	h.SetCertActions(invites)
@@ -506,6 +520,9 @@ func main() {
 	h.SetOwnPasswords(dir)
 	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted
+	// Mail (contract §19.5): an admin's removals from mail_users may
+	// confirm a mass removal.
+	dir.MemberRemoved = h.MailMemberRemoved
 	// The policy file's expiring list and user-attributes.json come from
 	// the directory (contract §4, §4.1); shared fields become Keycloak
 	// attr_<field> claims (§9.6). Keycloak failures are logged and retried,
@@ -632,6 +649,7 @@ func main() {
 	})
 	// File-sharing holder checks (revoke on leave), on each trigger.
 	go h.RunCredentialChecks(ctx)
+	go h.RunMailSync(ctx)
 	if dir.Store != nil {
 		// Rule groups, exceptions and expiries -> LLDAP membership: every
 		// minute (expiries) and after each directory mutation. Started

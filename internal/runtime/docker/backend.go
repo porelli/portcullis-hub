@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/compose"
@@ -42,6 +44,8 @@ type Engine interface {
 	// ContainerKill signals a container (a settings reload, §13.8);
 	// ContainerState is its run state and health.
 	ContainerKill(ctx context.Context, id, signal string) error
+	// ContainerRestart restarts a container (core's mail only, §6).
+	ContainerRestart(ctx context.Context, id string, timeout time.Duration) error
 	ContainerState(ctx context.Context, id string) (engine.State, error)
 	// ExecStdin runs a settings hook (§13.8): argv, stdin written then
 	// closed, no TTY; ExecRunning: a timed-out exec still runs.
@@ -78,6 +82,10 @@ type Options struct {
 	Guard *engine.Guard
 	// HelperImage is the volume I/O helpers' image (pinned).
 	HelperImage string
+	// CoreDir is core's checkout on the host (PROJECT_HOST_DIR): the
+	// compose working directory of core's own containers
+	// (RestartCoreService; empty: refused).
+	CoreDir string
 }
 
 // Backend serves runtime.Instances from a compose runner and an engine.
@@ -233,6 +241,44 @@ func (b *Backend) ExecRunning(ctx context.Context, execID string) (bool, error) 
 
 func (b *Backend) Signal(ctx context.Context, id, sig string) error {
 	return b.engine.ContainerKill(ctx, id, sig)
+}
+
+// restartableCore are the core services RestartCoreService may restart.
+var restartableCore = map[string]bool{"mail": true}
+
+// Core's compose labels besides project and service.
+const (
+	labelOneOff     = "com.docker.compose.oneoff"
+	labelWorkingDir = "com.docker.compose.project.working_dir"
+	coreProjectName = "portcullis"
+)
+
+func (b *Backend) RestartCoreService(ctx context.Context, service string, timeout time.Duration) error {
+	if !restartableCore[service] {
+		return fmt.Errorf("restart: %q is not a core service the Hub may restart", service)
+	}
+	if b.opt.CoreDir == "" {
+		return errors.New("restart: core's directory is not known: nothing was restarted")
+	}
+	cs, err := b.engine.ListContainers(ctx, engine.Filters{"label": []string{engine.LabelProject + "=" + coreProjectName, engine.LabelService + "=" + service}})
+	if err != nil {
+		return fmt.Errorf("listing containers: %w", err)
+	}
+	var ids []string
+	for _, c := range cs {
+		if c.Labels[engine.LabelProject] != coreProjectName || c.Labels[engine.LabelService] != service ||
+			strings.EqualFold(c.Labels[labelOneOff], "true") || filepath.Clean(c.Labels[labelWorkingDir]) != filepath.Clean(b.opt.CoreDir) {
+			continue
+		}
+		ids = append(ids, c.ID)
+	}
+	switch len(ids) {
+	case 0:
+		return fmt.Errorf("core's %s container was not found", service)
+	case 1:
+		return b.engine.ContainerRestart(ctx, ids[0], timeout)
+	}
+	return fmt.Errorf("%d containers are core's %s: none was restarted", len(ids), service)
 }
 
 func (b *Backend) State(ctx context.Context, id string) (runtime.State, error) {

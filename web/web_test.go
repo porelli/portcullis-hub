@@ -132,3 +132,38 @@ func TestPagesCarryBranding(t *testing.T) {
 		}
 	}
 }
+
+// TestMySignInMailSectionAndDialog: the Sign-in page has the "Mail
+// passwords" section (one's own page only), and the shown-once dialog
+// clears the password field, revokes the profile's Blob URL and drops
+// the bytes on close.
+func TestMySignInMailSectionAndDialog(t *testing.T) {
+	b, err := fs.ReadFile(FS, "mysignin.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{"<h3 class=\"pd-h3\">Mail passwords</h3>", "if (self) h += '<div data-msi-mail hidden></div>';", "call('GET', '/api/me/mail')",
+		"call('POST', '/api/me/mail/passwords', { label, expiry, code: pr.code, code_verifier: pr.code_verifier, nonce: pr.nonce })"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("mysignin.js lacks %q", want)
+		}
+	}
+	i := strings.Index(s, "function openMailShown(")
+	j := strings.Index(s[i:], "\n  }\n") + i
+	if i < 0 || j <= i {
+		t.Fatal("no openMailShown")
+	}
+	dlg := s[i:j]
+	clear := dlg[strings.Index(dlg, "const clear = () => {"):]
+	for _, want := range []string{"secret = null;", "code.textContent = '';", "bytes.fill(0);", "disarm();", "dlg.remove();"} {
+		if !strings.Contains(clear, want) {
+			t.Errorf("the dialog's clear lacks %q", want)
+		}
+	}
+	for _, want := range []string{"URL.revokeObjectURL(url)", "dlg.addEventListener('close', clear);", "e.preventDefault();"} {
+		if !strings.Contains(dlg, want) {
+			t.Errorf("openMailShown lacks %q", want)
+		}
+	}
+}

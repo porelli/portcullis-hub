@@ -10,7 +10,8 @@ import (
 )
 
 // TestRoutesCoverInstances: one route per runtime.Instances method but
-// Kind and Env, no route for anything else, every pattern unique and
+// Kind, Env and RestartCoreService (the backend answers them: core never
+// runs on a worker), no route for anything else, every pattern unique and
 // valid for http.ServeMux (with the extra routes).
 func TestRoutesCoverInstances(t *testing.T) {
 	it := reflect.TypeFor[runtime.Instances]()
@@ -18,12 +19,12 @@ func TestRoutesCoverInstances(t *testing.T) {
 	for i := 0; i < it.NumMethod(); i++ {
 		methods[it.Method(i).Name] = true
 	}
-	if len(methods) != 26 {
+	if len(methods) != 27 {
 		t.Fatalf("runtime.Instances has %d methods: update Routes", len(methods))
 	}
 	for m := range methods {
 		_, ok := Routes[m]
-		if m == "Kind" || m == "Env" {
+		if m == "Kind" || m == "Env" || m == "RestartCoreService" {
 			if ok {
 				t.Errorf("%s has a route (the backend answers it)", m)
 			}

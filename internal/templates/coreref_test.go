@@ -753,3 +753,29 @@ func TestCoreFileMiddlewaresComplete(t *testing.T) {
 		}
 	}
 }
+
+// TestCoreNamesIncludeMail: the mail core names of contract §3 are
+// reserved (services, volumes, aliases; networks and routers are the
+// templates validator's).
+func TestCoreNamesIncludeMail(t *testing.T) {
+	for _, s := range []string{"mail", "mailctl", "mail-resolver", "mail-cert"} {
+		if !coreServices[s] || !reservedDNSName(s) || !reservedDNSName("portcullis-"+s+"-1") || !reservedDNSName(s+".portcullis") {
+			t.Errorf("service %s not reserved", s)
+		}
+	}
+	for _, v := range []string{"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data"} {
+		if !coreVolumes[v] {
+			t.Errorf("volume %s not reserved", v)
+		}
+	}
+	for _, a := range []string{"mail-metrics", "mailctl-metrics", "MAIL-METRICS."} {
+		if !reservedDNSName(a) {
+			t.Errorf("alias %s not reserved", a)
+		}
+	}
+	for _, ok := range []string{"webmail", "mailer", "mail-relay"} {
+		if reservedDNSName(ok) {
+			t.Errorf("%s reserved, but isn't a core name", ok)
+		}
+	}
+}
