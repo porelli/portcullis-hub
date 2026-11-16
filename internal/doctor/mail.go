@@ -235,7 +235,13 @@ func mailFindings(in *Inputs) []Finding {
 					MailExternalLookupsWhy, c.Steps, c, "")
 			}
 		case "dane":
-			mk(KindMailDANEOff, Info, "DANE is off: the resolver can't validate DNSSEC",
+			// A Problem while DANE is off (mailctl's check says problem);
+			// Info otherwise (invalid verdicts counted, nothing definite).
+			sev := Info
+			if c.Severity == mailctl.SeverityProblem {
+				sev = Problem
+			}
+			mk(KindMailDANEOff, sev, "DANE is off: the resolver can't validate DNSSEC",
 				"Outbound mail doesn't verify remote domains' DANE records because mail-resolver can't validate DNSSEC from this host; check that it reaches the root servers over port 53. "+c.Detail, c.Steps, c, "")
 		}
 	}

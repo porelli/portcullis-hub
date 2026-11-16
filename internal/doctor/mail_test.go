@@ -75,6 +75,8 @@ func TestMailKinds(t *testing.T) {
 		{KindMailRateHeld, Warning, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("rate_held:alice", "warning", "12 held")} }},
 		{KindMailTimerMissing, Warning, FixExplain, func(m *MailIn) { m.Status.TimerSeenAt = &old }},
 		{KindMailDANEOff, Info, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("dane", "info", "no AD bit")} }},
+		{KindMailDANEOff, Info, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("dane", "warning", "2 invalid verdicts")} }},
+		{KindMailDANEOff, Problem, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("dane", "problem", "DANE is off")} }},
 		{KindMailLANOnlyUnenforced, Problem, FixExplain, func(m *MailIn) { m.LANOnly, m.Podman = true, true }},
 		{KindMailMassRemovalPend, Problem, FixOneClick, func(m *MailIn) {
 			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice", "bob"}, UUIDs: []string{"u1", "u2"}}
