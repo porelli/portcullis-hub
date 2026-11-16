@@ -451,6 +451,11 @@ func lockID(string) func() {
 // agent runs. Only then is everything swapped into place.
 func (a *API) putBundle(w http.ResponseWriter, r *http.Request, id string) {
 	defer lockID(id)()
+	// An instance whose project would be the agent's own (fix round 3).
+	if a.cfg.OwnProject != "" && runtime.ProjectName(id) == a.cfg.OwnProject {
+		writeError(w, http.StatusBadRequest, "the instance id "+id+" is reserved on this worker: its project would be the agent's own")
+		return
+	}
 	if a.cfg.Config == nil {
 		writeError(w, http.StatusServiceUnavailable, "the agent can't run compose config")
 		return

@@ -212,7 +212,12 @@ func run(data string, getenv func(string) string) error {
 	if err := agent.CheckProtectedOutsideRoots(append(append([]string{}, protected...), data), roots); err != nil {
 		return err
 	}
-	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage, OwnProject: ui.Labels["com.docker.compose.project"],
+	ownProject := ui.Labels["com.docker.compose.project"]
+	ownContainers, err := ownContainerIDs(ctx, rt, ownProject, ui.ID)
+	if err != nil {
+		return err
+	}
+	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage, OwnProject: ownProject, OwnContainers: ownContainers,
 		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env(), Config: cli.Config, Protected: protected,
 		DiskFree: func(ctx context.Context) (int64, bool) {
 			i, err := engineInfoFor(ctx, rt)
@@ -232,6 +237,7 @@ func run(data string, getenv func(string) string) error {
 			return i, err
 		}
 		i.Quarantined = api.Quarantined()
+		i.OwnProject = ownProject
 		return i, nil
 	}
 	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api,
@@ -295,6 +301,26 @@ func run(data string, getenv func(string) string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// ownContainerIDs are the agent's own containers (its own and its compose
+// project's, by the labels read at start): the backstop's exemption is
+// by container id, never by project name.
+func ownContainerIDs(ctx context.Context, rt runtime.Instances, project, self string) ([]string, error) {
+	out := []string{self}
+	if project == "" {
+		return out, nil
+	}
+	units, err := rt.List(ctx, runtime.Filter{All: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing the agent's own containers: %v", err)
+	}
+	for _, u := range units {
+		if u.Project == project && u.ID != self {
+			out = append(out, u.ID)
+		}
+	}
+	return out, nil
 }
 
 // engineRoot is the engine's data root ("" when unreadable: protectedPaths

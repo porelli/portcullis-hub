@@ -106,6 +106,9 @@ type Info struct {
 	// Quarantined: instance → why a container start failed the agent's
 	// bind check (killed, taken down; refused until a new bundle).
 	Quarantined map[string]string `json:"quarantined,omitempty"`
+	// OwnProject is the agent's own compose project: no instance id may
+	// map to it on this worker.
+	OwnProject string `json:"own_project,omitempty"`
 }
 
 // PortBind is one published host port: the compose project and service

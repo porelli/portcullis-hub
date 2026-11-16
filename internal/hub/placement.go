@@ -188,28 +188,32 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 		return err
 	}
 	imgs := templates.ServiceImages(compose)
-	refs := make([]string, 0, len(imgs))
-	for _, ref := range imgs {
-		// ${VAR:-default} references resolved from the core env and the
-		// defaults (fix round 3: never skipped).
-		ref = expandRef(ref, env)
-		if ref != "" && !slices.Contains(refs, ref) {
-			refs = append(refs, ref)
+	type pull struct{ raw, ref string }
+	var pulls []pull
+	for _, raw := range imgs {
+		if raw == "" || slices.ContainsFunc(pulls, func(p pull) bool { return p.raw == raw }) {
+			continue
 		}
+		// Resolved only from the template's own defaults and the
+		// non-secret variables imageRefVars allows (never the core env:
+		// a ref is echoed in errors); anything else is refused.
+		ref, ok := expandRef(raw, imageRefEnv(h, inf))
+		if !ok {
+			return statusErr(409, "the image reference %s uses a variable that can't be resolved here", raw)
+		}
+		pulls = append(pulls, pull{raw, ref})
 	}
-	sort.Strings(refs)
+	sort.Slice(pulls, func(i, j int) bool { return pulls[i].raw < pulls[j].raw })
 	pctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
-	for _, ref := range refs {
-		if strings.Contains(ref, "$") {
-			return statusErr(409, "the image %s can't be resolved before the instance exists: pull it on %s first", ref, h.serverName(server))
-		}
-		if err := rt.Pull(pctx, ref, nil); err != nil {
+	for _, pl := range pulls {
+		// Messages name the template's unexpanded reference.
+		if err := rt.Pull(pctx, pl.ref, nil); err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "no matching manifest") || strings.Contains(msg, "platform") || strings.Contains(msg, "architecture") {
-				return statusErr(409, "%s has no %s image", ref, inf.Arch)
+				return statusErr(409, "%s has no %s image", pl.raw, inf.Arch)
 			}
-			return statusErr(409, "pulling %s on %s failed: %s", ref, h.serverName(server), clipRunes(err.Error(), 200))
+			return statusErr(409, "pulling %s on %s failed", pl.raw, h.serverName(server))
 		}
 	}
 	return nil
@@ -382,22 +386,58 @@ func (h *Hub) LiftQuarantine(ctx context.Context, actor directory.Actor, id stri
 	return err
 }
 
-// expandRef resolves ${VAR}, ${VAR:-def} and ${VAR-def} in an image
-// reference from env (an unresolvable one keeps its "$").
-func expandRef(ref string, env map[string]string) string {
-	return os.Expand(ref, func(k string) string {
+// imageRefVars are the only variables an image reference may name
+// (non-secret, listed explicitly): the main domain and the worker's
+// folder roots.
+var imageRefVars = []string{"PORTCULLIS_DOMAIN", templates.EnvBindRoots}
+
+// imageRefEnv is imageRefVars' values for a worker.
+func imageRefEnv(h *Hub, inf *agentapi.Info) map[string]string {
+	return map[string]string{"PORTCULLIS_DOMAIN": h.cfg.Domain, templates.EnvBindRoots: strings.Join(inf.BindRoots, ":")}
+}
+
+// expandRef resolves ${VAR}, ${VAR:-def}, ${VAR-def} and $VAR in an image
+// reference: an allowed variable from env, else the reference's own
+// (template-declared) default; ok false when a variable is neither.
+func expandRef(ref string, env map[string]string) (string, bool) {
+	ok := true
+	out := os.Expand(ref, func(k string) string {
 		name, def, hasDef := k, "", false
 		if i := strings.Index(k, ":-"); i >= 0 {
 			name, def, hasDef = k[:i], k[i+2:], true
 		} else if i := strings.Index(k, "-"); i >= 0 {
 			name, def, hasDef = k[:i], k[i+1:], true
 		}
-		if v, ok := env[name]; ok && v != "" {
-			return v
+		if slices.Contains(imageRefVars, name) {
+			if v := env[name]; v != "" {
+				return v
+			}
 		}
 		if hasDef {
 			return def
 		}
-		return "${" + k + "}"
+		ok = false
+		return ""
 	})
+	if strings.Contains(out, "$") {
+		ok = false
+	}
+	return out, ok
+}
+
+// reservedOnWorker: the instance ids no worker takes — "worker" (the
+// worker stack's own project name) and any whose project would be the
+// agent's own (its /v1/info own_project).
+func (h *Hub) checkReservedID(id, server string) error {
+	if server == "" {
+		return nil
+	}
+	own := ""
+	if inf := h.serverInfo(server); inf != nil {
+		own = inf.OwnProject
+	}
+	if id == "worker" || (own != "" && projectName(id) == own) {
+		return statusErr(409, "the instance id %s is reserved on a worker: its project would be the worker's own — choose another id", id)
+	}
+	return nil
 }

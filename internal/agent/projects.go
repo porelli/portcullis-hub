@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,8 +76,12 @@ type APIConfig struct {
 	// the agent validates and runs is its output, never the bundle's files.
 	Config func(ctx context.Context, p compose.Project) ([]byte, error)
 	// OwnProject is the agent's own compose project (its container's
-	// label): never treated as an instance's.
-	OwnProject string
+	// label): no instance may take its name (a bundle of that id is
+	// refused). OwnContainers are its containers' ids, read at start: the
+	// only ones the start backstop leaves alone by identity (never by
+	// project name).
+	OwnProject    string
+	OwnContainers []string
 	// DiskFree is the engine's free space a restore may fill (ok false:
 	// unreadable, restores refused; nil: no check, tests).
 	DiskFree func(ctx context.Context) (free int64, ok bool)
@@ -991,7 +996,7 @@ func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	if inspected && info.Labels[docker.LabelHelper] != "" {
 		return // the agent's own helper (its spec checked when created)
 	}
-	if project == "" || project == a.cfg.OwnProject {
+	if project == "" || slices.Contains(a.cfg.OwnContainers, container) {
 		return
 	}
 	id, ok := strings.CutPrefix(project, runtime.ProjectPrefix)

@@ -232,6 +232,9 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		if err := h.checkPlacement(ctx, &view, to); err != nil {
 			return err
 		}
+		if err := h.checkReservedID(id, to); err != nil {
+			return err
+		}
 	}
 	srcVols, err := h.volumeNamesOn(ctx, from, id)
 	if err != nil {
@@ -473,6 +476,9 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 		if err := h.checkPlacement(ctx, &view, src); err != nil {
 			return err
 		}
+		if err := h.checkReservedID(id, src); err != nil {
+			return err
+		}
 	}
 	curVols, _ := h.volumeNamesOn(ctx, cur, id)
 	p := progressFrom(ctx)
@@ -558,11 +564,7 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 		// stop the current copy (a worker; the primary's went at the switch).
 		p.Start(MoveUndoStop)
 		if cur != "" {
-			if rt, err := h.rtForServer(cur); err == nil {
-				if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(&view)); err != nil {
-					p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v", serverLabel(cur), err))
-				}
-			}
+			h.stopAndDropBundle(&view, cur, p)
 		}
 		p.Done(MoveUndoStop)
 		return nil
@@ -602,13 +604,27 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 	}
 	p.Done(MoveSwitch)
 	p.Start(MoveUndoStop)
-	if rt, err := h.rtForServer(cur); err == nil {
-		if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(&view)); err != nil {
-			p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v", serverLabel(cur), err))
-		}
-	}
+	h.stopAndDropBundle(&view, cur, p)
 	p.Done(MoveUndoStop)
 	return nil
+}
+
+// stopAndDropBundle stops the copy an undo leaves on worker cur and
+// removes its bundle there (env included), as a move's keep does (fix
+// round 3).
+func (h *Hub) stopAndDropBundle(t *templates.Template, cur string, p *Progress) {
+	rt, err := h.rtForServer(cur)
+	if err != nil {
+		p.Warn(fmt.Sprintf("the copy on %s wasn't stopped: %v", serverLabel(cur), err))
+		return
+	}
+	if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(t)); err != nil {
+		p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v", serverLabel(cur), err))
+		return
+	}
+	if err := h.removeWorkerBundle(context.Background(), cur, t.ID); err != nil {
+		p.Warn(fmt.Sprintf("the bundle of %s on %s wasn't removed: %v", t.ID, serverLabel(cur), err))
+	}
 }
 
 // setMoveServer points instance id's runtime at server for a moment

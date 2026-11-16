@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -476,5 +477,75 @@ func TestFailedMoveRecordsTargetLeftover(t *testing.T) {
 	}
 	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "nas", admin); err != nil {
 		t.Errorf("after the removal: %v", err)
+	}
+}
+
+// TestReservedIDOnWorker (fix round 3 review): "worker" and any id whose
+// project is the agent's own are refused at placement.
+func TestReservedIDOnWorker(t *testing.T) {
+	p := newPlacedFixture(t)
+	p.w.mu.Lock()
+	p.w.info.OwnProject = "portcullis-plainapp"
+	p.w.mu.Unlock()
+	err := p.create(t, "plainapp", "nas")
+	if errStatus(err) != 409 || !strings.Contains(err.Error(), "reserved on a worker") {
+		t.Errorf("own project: %v", err)
+	}
+	if err := p.h.checkReservedID("worker", "nas"); errStatus(err) != 409 {
+		t.Errorf("worker: %v", err)
+	}
+	if err := p.h.checkReservedID("worker", ""); err != nil {
+		t.Errorf("on the primary: %v", err)
+	}
+}
+
+// TestImageRefNoSecrets (fix round 3 review): an image reference naming
+// a variable outside the allowlist is refused; the secret is in neither
+// the error nor the audit; allowed variables and defaults resolve.
+func TestImageRefNoSecrets(t *testing.T) {
+	p := newPlacedFixture(t)
+	writeFile(t, filepath.Join(p.project, ".env"), "CORE_VAR=core-value\nREGISTRY_TOKEN=s3cr3t-token-value\n")
+	writeFile(t, filepath.Join(p.src, "plainapp", "compose.yml"), strings.Replace(mustReadS(t, filepath.Join(p.src, "plainapp", "compose.yml")),
+		"image: plain:1", "image: registry.example/${REGISTRY_TOKEN}/plain:1", 1))
+	p.h.Discover()
+	audit := &fakeAudit{}
+	p.h.SetAudit(audit)
+	err := p.create(t, "plainapp", "nas")
+	if errStatus(err) != 409 || !strings.Contains(err.Error(), "uses a variable that can't be resolved here") {
+		t.Fatalf("%v", err)
+	}
+	audit.mu.Lock()
+	all := fmt.Sprint(audit.entries)
+	audit.mu.Unlock()
+	if strings.Contains(err.Error(), "s3cr3t") || strings.Contains(all, "s3cr3t") {
+		t.Error("the secret leaked")
+	}
+	for in, want := range map[string]string{
+		"x/${PORTCULLIS_DOMAIN}/a:1": "x/example.org/a:1",
+		"x/a:${TAG:-1.2}":            "x/a:1.2",
+		"x/a:${REGISTRY_TOKEN:-1}":   "x/a:1",
+	} {
+		if got, ok := expandRef(in, map[string]string{"PORTCULLIS_DOMAIN": "example.org", "REGISTRY_TOKEN": "s3cr3t"}); !ok || got != want {
+			t.Errorf("%s: %q %v", in, got, ok)
+		}
+	}
+	if _, ok := expandRef("x/$SECRET/a", nil); ok {
+		t.Error("$SECRET resolved")
+	}
+}
+
+// TestUndoRemovesWorkerBundle (fix round 3 review): an undo away from a
+// worker removes the bundle it leaves there.
+func TestUndoRemovesWorkerBundle(t *testing.T) {
+	p := newPlacedFixture(t)
+	enabledOnPrimary(t, p)
+	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "nas", admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.h.UndoMove(context.Background(), "plainapp", "plainapp", admin); err != nil {
+		t.Fatal(err)
+	}
+	if !workerHas(p.w, "signal remove-project plainapp") {
+		t.Errorf("worker %v", p.w.Calls())
 	}
 }

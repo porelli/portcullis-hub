@@ -125,9 +125,9 @@ func TestStartBackstopFailClosed(t *testing.T) {
 			t.Error("the quarantine didn't survive a restart")
 		}
 	})
-	t.Run("own project and helpers ignored", func(t *testing.T) {
+	t.Run("own containers (by id) and helpers ignored", func(t *testing.T) {
 		f := newAPI(t)
-		f.api.cfg.OwnProject = "portcullis-worker"
+		f.api.cfg.OwnContainers = []string{"c-agent"}
 		f.api.CheckStarted(context.Background(), "c-agent", "portcullis-worker")
 		f.rt.Lock()
 		f.rt.Infos["c-h"] = runtime.UnitInfo{ID: "c-h", Labels: map[string]string{docker.LabelHelper: "volume_io", docker.LabelProject: "portcullis-app"}}
@@ -241,5 +241,28 @@ func TestCheckVisible(t *testing.T) {
 		if err := CheckVisible(d, bad); err == nil || !strings.Contains(err.Error(), "isn't visible to the agent") {
 			t.Errorf("%q: %v", bad, err)
 		}
+	}
+}
+
+// TestOwnContainersByID (fix round 3 review): the backstop exempts the
+// agent's own containers by id only — an instance whose project is the
+// agent's own name gets no pass — and a bundle of that id is refused.
+func TestOwnContainersByID(t *testing.T) {
+	f := newAPI(t)
+	f.api.cfg.OwnProject = "portcullis-worker"
+	f.api.cfg.OwnContainers = []string{"c-agent"}
+	f.api.CheckStarted(context.Background(), "c-agent", "portcullis-worker")
+	if f.api.Quarantined() != nil {
+		t.Fatalf("the agent's own container was acted on: %v", f.rt.Calls())
+	}
+	// Another container in that project (no bundle): stopped.
+	f.api.CheckStarted(context.Background(), "c-intruder", "portcullis-worker")
+	waitCall(t, f, "down-by-name portcullis-worker")
+	if countCalls(f, "signal c-intruder KILL") != 1 {
+		t.Errorf("calls %v", f.rt.Calls())
+	}
+	c, b := f.putFor(t, "worker", map[string]string{BundleCompose: "services:\n  web:\n    image: x\n"})
+	if c != 400 || !strings.Contains(b, "reserved") {
+		t.Errorf("bundle of the reserved id: %d %s", c, b)
 	}
 }
