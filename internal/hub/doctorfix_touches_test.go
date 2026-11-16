@@ -33,8 +33,6 @@ var fixerTouchesData = map[string]bool{
 	doctor.FixMailMTASTSEnforce: false,
 	// Parks mailboxes (deleted after the retention): data.
 	doctor.FixMailConfirmRemoval: true,
-	// Servers (§14.6): removes a move's leftover volumes.
-	doctor.FixRemoveMoveLeftover: true,
 }
 
 func TestFixersDeclareTouchesData(t *testing.T) {

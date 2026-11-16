@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"context"
 	"maps"
 	"net/netip"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
@@ -147,86 +145,4 @@ func (h *Hub) localNetworksOfLocked(id string, s state.Server) []netip.Prefix {
 	}
 	sort.Slice(nets, func(i, j int) bool { return nets[i].String() < nets[j].String() })
 	return nets
-}
-
-// OpMoveLeftover is remove_move_leftover's operation.
-const OpMoveLeftover = "move_leftover"
-
-func init() { RegisterFixer(removeMoveLeftoverFixer{}) }
-
-// removeMoveLeftoverFixer is server_move_leftover's one-click fix
-// (contract §14.6): preview one line per kept volume, "remove <volume>
-// on <server>"; apply (param confirm: the instance id typed) runs what
-// DELETE /api/instances/{id}/move-leftover runs.
-type removeMoveLeftoverFixer struct{}
-
-func (removeMoveLeftoverFixer) Kind() string { return doctor.FixRemoveMoveLeftover }
-
-// TouchesData (G45): it removes volumes.
-func (removeMoveLeftoverFixer) TouchesData() bool { return true }
-
-func (removeMoveLeftoverFixer) fixTarget(_ *Hub, f doctor.Finding, _ map[string]string) string {
-	if len(f.Instances) == 1 {
-		return f.Instances[0]
-	}
-	return ""
-}
-
-// leftoverPlan is the fix's lines and hash for finding f, as the state is
-// now (409 when nothing is left to remove).
-func (h *Hub) leftoverPlan(f doctor.Finding, params map[string]string) (string, []string, string, error) {
-	if err := checkFixParams(params, "confirm"); err != nil {
-		return "", nil, "", err
-	}
-	if len(f.Instances) != 1 {
-		return "", nil, "", statusErr(409, "this finding names no instance")
-	}
-	id := f.Instances[0]
-	h.mu.RLock()
-	e := h.st.Instances[id]
-	h.mu.RUnlock()
-	var lines []string
-	for _, l := range []*state.MovedFrom{e.MovedFrom, e.MoveTargetLeftover} {
-		if l == nil || l.Server == e.Server {
-			continue
-		}
-		for _, v := range l.Volumes {
-			lines = append(lines, "remove "+v+" on "+serverLabel(l.Server))
-		}
-	}
-	if len(lines) == 0 {
-		return "", nil, "", statusErr(409, "%s has no move leftover any more", id)
-	}
-	return id, lines, fixHash(struct {
-		Instance string
-		Lines    []string
-	}{id, lines}), nil
-}
-
-func (removeMoveLeftoverFixer) Preview(_ context.Context, h *Hub, f doctor.Finding, params map[string]string) (*FixPlan, error) {
-	_, lines, hash, err := h.leftoverPlan(f, params)
-	if err != nil {
-		return nil, err
-	}
-	return &FixPlan{Lines: lines, Hash: hash, Warnings: []string{"Undo move isn't possible afterwards."}}, nil
-}
-
-func (removeMoveLeftoverFixer) Apply(h *Hub, f doctor.Finding, params map[string]string, planHash string, actor directory.Actor) (*AsyncOp, error) {
-	id, _, hash, err := h.leftoverPlan(f, params)
-	if err != nil {
-		return nil, err
-	}
-	if params["confirm"] != id {
-		return nil, statusErr(400, "type the instance id (%s) to confirm (param confirm)", id)
-	}
-	if planHash == "" || planHash != hash {
-		return nil, statusErr(409, "the leftover changed since the preview: preview it again")
-	}
-	return h.startAsync(id, OpMoveLeftover, actor, nil, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		ready()
-		if _, _, now, err := h.leftoverPlan(f, params); err != nil || now != hash {
-			return nil, nil, statusErr(409, "the leftover changed since the preview: preview it again")
-		}
-		return nil, nil, h.RemoveMoveLeftover(ctx, id, id, actor)
-	})
 }

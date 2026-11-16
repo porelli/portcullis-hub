@@ -86,7 +86,7 @@ var serverNoToolRoutes = map[string]string{
 	"GET /api/servers/{id}/op":                 "admin UI only (the enrolment's progress)",
 	"POST /api/servers/{id}/op/stop":           "admin UI only (stopping an enrolment)",
 	"POST /api/instances/{id}/move/undo":       "admin UI only (Undo move, a fresh sign-in)",
-	"DELETE /api/instances/{id}/move-leftover": "admin UI only (a fresh sign-in); the doctor fix remove_move_leftover goes through doctor_apply_fix",
+	"DELETE /api/instances/{id}/move-leftover": "admin UI only (a fresh sign-in): no tool and no doctor fix reaches it",
 	"POST /api/instances/{id}/quarantine/lift": "admin UI only (a fresh sign-in): lifting a worker's start refusal",
 }
 

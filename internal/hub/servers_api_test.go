@@ -2,9 +2,11 @@ package hub
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/state"
@@ -122,21 +124,34 @@ func TestServerDoctorInputs(t *testing.T) {
 	if len(lf) != 1 {
 		t.Fatalf("leftover %v", lf)
 	}
-	plan, err := p.h.PreviewFix(context.Background(), lf[0].FP, nil)
-	if err != nil || len(plan.Lines) != 1 || plan.Lines[0] != "remove portcullis-plainapp_data on the primary" || !plan.TouchesData {
-		t.Fatalf("plan %+v %v", plan, err)
+	// † actions are never doctor fixes (commit security review): the
+	// finding is explain-only, every fix route refuses it, and the AI's
+	// doctor_apply_fix can't reach the removal either.
+	if lf[0].Class != doctor.FixExplain || lf[0].FixKind != "" {
+		t.Fatalf("leftover finding %+v", lf[0])
 	}
-	if _, err := p.h.ApplyFix(context.Background(), lf[0].FP, map[string]string{"confirm": "nope"}, plan.Hash, admin); errStatus(err) != 400 {
-		t.Errorf("mistyped: %v", err)
+	if _, err := p.h.PreviewFix(context.Background(), lf[0].FP, map[string]string{"confirm": "plainapp"}); errStatus(err) != 409 {
+		t.Errorf("preview: %v", err)
 	}
-	op, err := p.h.ApplyFix(context.Background(), lf[0].FP, map[string]string{"confirm": "plainapp"}, plan.Hash, admin)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := p.h.ApplyFix(context.Background(), lf[0].FP, map[string]string{"confirm": "plainapp"}, "x", admin); errStatus(err) != 409 {
+		t.Errorf("apply: %v", err)
 	}
-	if rec := waitOp(t, p.h, "plainapp", op.OpID); !rec.OK {
-		t.Fatalf("op %+v", rec)
+	ai := directory.Actor{User: "root", Via: directory.ViaAI, Client: "claude"}
+	if _, err := p.h.ApplyFix(context.Background(), lf[0].FP, map[string]string{"confirm": "plainapp", "fix": "remove_move_leftover"}, "x", ai); err == nil {
+		t.Error("the AI reached the leftover removal")
 	}
-	if in := p.instance("plainapp"); in.MovedFrom != nil {
-		t.Errorf("leftover kept %+v", in.MovedFrom)
+	if fixerFor("remove_move_leftover") != nil {
+		t.Error("a remove_move_leftover fixer is registered")
+	}
+	// No server finding offers a one-click fix (all † or explain).
+	for _, f := range r.Findings {
+		if strings.HasPrefix(f.Kind, "server_") || f.Kind == doctor.KindLinkSubnetOverlap || f.Kind == doctor.KindInstanceOrphaned {
+			if f.Class == doctor.FixOneClick {
+				t.Errorf("server finding %s offers fix %s", f.Kind, f.FixKind)
+			}
+		}
+	}
+	if in := p.instance("plainapp"); in.MovedFrom == nil {
+		t.Error("the leftover went without the gated route")
 	}
 }

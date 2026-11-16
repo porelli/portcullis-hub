@@ -22,10 +22,6 @@ const (
 	KindServerMoveLeftover      = "server_move_leftover"
 	KindLinkSubnetOverlap       = "link_subnet_overlap"
 	KindInstanceOrphaned        = "instance_orphaned"
-
-	// FixRemoveMoveLeftover removes a move's leftover volumes (param
-	// confirm: the instance id typed).
-	FixRemoveMoveLeftover = "remove_move_leftover"
 )
 
 // The thresholds (contract §14.5).
@@ -215,7 +211,9 @@ func (c serverKindCheck) Run(in *Inputs) []Finding {
 			add(Finding{Severity: Info, Title: l.Instance + ": " + what + " can be removed.",
 				Why:       "Undo move is no longer possible (or the move never finished there); its volumes only take space: " + strings.Join(l.Volumes, ", ") + ".",
 				Instances: []string{l.Instance}, Inputs: Digest([]any{l.Instance, l.Server, l.At, l.Volumes, l.Target}),
-				Class: FixOneClick, FixKind: FixRemoveMoveLeftover}, l.Instance)
+				// Never a one-click fix: the removal needs a fresh sign-in
+				// (contract §17.3 †), which the doctor and the AI can't give.
+				Steps: []string{"Open " + l.Instance + "'s page and use Remove the old copy… (a fresh sign-in and the typed instance id; DELETE /api/instances/" + l.Instance + "/move-leftover)."}}, l.Instance)
 		}
 	case KindLinkSubnetOverlap:
 		if !s.LinkSubnet.IsValid() {

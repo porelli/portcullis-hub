@@ -88,11 +88,13 @@ func TestServerKinds(t *testing.T) {
 			}
 		}
 	}
-	// The leftover offers its one-click fix; no Servers input: nothing.
+	// The leftover is explain-only (its removal is † : fresh sign-in),
+	// pointing at the gated page; no Servers input: nothing.
 	f := of(t, KindServerMoveLeftover, serversIn(func(in *ServersIn) {
 		in.Leftovers = []LeftoverIn{{Instance: "notes", At: t0.Add(-8 * 24 * time.Hour), Volumes: []string{"v"}}}
 	}))
-	if len(f) != 1 || f[0].Class != FixOneClick || f[0].FixKind != FixRemoveMoveLeftover || f[0].Instances[0] != "notes" {
+	if len(f) != 1 || f[0].Class != FixExplain || f[0].FixKind != "" || f[0].Instances[0] != "notes" || len(f[0].Steps) == 0 ||
+		!strings.Contains(f[0].Steps[0], "Remove the old copy") || !strings.Contains(f[0].Steps[0], "fresh sign-in") {
 		t.Errorf("leftover fix %+v", f)
 	}
 	for _, k := range []string{KindServerOffline, KindServerCertExpiring, KindLinkSubnetOverlap, KindInstanceOrphaned} {
