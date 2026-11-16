@@ -645,17 +645,22 @@ type refreshThrottle struct {
 	last map[string]time.Time
 }
 
-// RefreshMySignIn is GET /api/me/signin?refresh=1 (T5): it marks the
-// inventory stale, at most once per 10 s per caller; otherwise (or for no
-// user) it does nothing. Never an error.
-func (h *Hub) RefreshMySignIn(user string) {
+// RefreshMySignIn is GET /api/me/signin?refresh=1 (T5): at most once per
+// 10 s per caller, it reads the caller's own methods again
+// (refreshPerson; nothing cached yet: the view's read is the full one);
+// with no one-person read, it marks the inventory stale under the global
+// limit (markStaleLimited). Otherwise (or for no user) it does nothing.
+// Never an error.
+func (h *Hub) RefreshMySignIn(ctx context.Context, user string) {
 	u, err := myUser(user)
-	if err != nil {
+	if err != nil || !h.signInRefresh.allow(u, h.entryClock(), refreshMinGap) {
 		return
 	}
-	if h.signInRefresh.allow(u, h.entryClock(), refreshMinGap) {
-		h.MarkInventoryStale()
+	if read := h.personSource(); read != nil {
+		h.refreshPerson(ctx, read, u)
+		return
 	}
+	h.markStaleLimited()
 }
 
 // allow records u's mark at now and is true unless u had one less than

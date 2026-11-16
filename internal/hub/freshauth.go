@@ -10,6 +10,7 @@ import (
 
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -241,27 +242,40 @@ func (h *Hub) freshRecheck(ctx context.Context, user string) bool {
 	if !h.freshRecheckT.allow(u, h.entryClock(), freshRecheckGap) {
 		return false
 	}
-	c := &h.signInInv
-	c.mu.Lock()
-	read := c.src.PersonPasskeys
-	c.mu.Unlock()
-	if read != nil {
+	if read := h.personSource(); read != nil {
 		return h.refreshPerson(ctx, read, u)
 	}
-	now := c.clock()
-	c.mu.Lock()
-	skip := (c.base != nil && c.err == nil && now.Sub(c.base.at) < freshRecheckGap) ||
-		(!c.forcedAt.IsZero() && now.Sub(c.forcedAt) < freshRecheckGap)
-	if !skip {
-		c.forcedAt = now
-		c.tried = time.Time{}
-		c.gen++
-	}
-	c.mu.Unlock()
-	if skip {
+	if !h.markStaleLimited() {
 		return false
 	}
 	_, _ = h.inventoryBase(ctx, true)
+	return true
+}
+
+// personSource is the one-person Keycloak read (nil: not wired).
+func (h *Hub) personSource() func(context.Context, string) ([]keycloak.PasskeyCredential, bool, error) {
+	c := &h.signInInv
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.src.PersonPasskeys
+}
+
+// markStaleLimited is the fallback when there's no one-person read: it
+// marks the inventory stale for a full re-read at most once per
+// freshRecheckGap across everyone, and never while the cached inventory
+// is under that old. False: skipped.
+func (h *Hub) markStaleLimited() bool {
+	c := &h.signInInv
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if (c.base != nil && c.err == nil && now.Sub(c.base.at) < freshRecheckGap) ||
+		(!c.forcedAt.IsZero() && now.Sub(c.forcedAt) < freshRecheckGap) {
+		return false
+	}
+	c.forcedAt = now
+	c.tried = time.Time{}
+	c.gen++
 	return true
 }
 

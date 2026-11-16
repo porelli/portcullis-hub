@@ -32,6 +32,8 @@ type signInCertActions struct {
 	authLabels []string
 	// reads counts the inventory's Passkeys reads (review T7-L3).
 	reads int
+	// personReads counts the one-person reads (PersonPasskeys).
+	personReads int
 }
 
 // aliceOTPID is alice's authenticator app in signInEnv.
@@ -90,6 +92,15 @@ func signInEnv(t *testing.T) (*toolEnv, *signInCertActions) {
 			ca.mu.Unlock()
 			return map[string][]keycloak.PasskeyCredential{"alice": {{ID: alicePasskeyID, Type: string(signin.SecurityKey), Label: "YubiKey 5C"}},
 				"root": {{ID: "r", Type: string(signin.SecurityKey)}}}, nil
+		},
+		PersonPasskeys: func(_ context.Context, u string) ([]keycloak.PasskeyCredential, bool, error) {
+			ca.mu.Lock()
+			defer ca.mu.Unlock()
+			ca.personReads++
+			if u != "alice" {
+				return nil, false, nil
+			}
+			return []keycloak.PasskeyCredential{{ID: alicePasskeyID, Type: string(signin.SecurityKey), Label: "YubiKey 5C"}}, true, nil
 		},
 		AuthenticatorLabel: func(_ context.Context, user, id, label string) (string, error) {
 			ca.mu.Lock()
@@ -432,7 +443,8 @@ func TestMySignInRefresh(t *testing.T) {
 	now := time.Now()
 	var clockMu sync.Mutex
 	e.s.Hub.SetEntryClockForTest(func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now })
-	reads := func() int { ca.mu.Lock(); defer ca.mu.Unlock(); return ca.reads }
+	reads := func() int { ca.mu.Lock(); defer ca.mu.Unlock(); return ca.personReads }
+	full := func() int { ca.mu.Lock(); defer ca.mu.Unlock(); return ca.reads }
 	get := func(q string) {
 		t.Helper()
 		if r, b := doAs(t, e.ppl, "alice", "GET", "/api/me/signin"+q, ""); r.StatusCode != 200 || !strings.Contains(b, `"max_authenticators":3`) {
@@ -440,9 +452,10 @@ func TestMySignInRefresh(t *testing.T) {
 		}
 	}
 	get("")
-	base := reads()
-	// review T7-L3: ?refresh=1 re-reads the inventory once; a second one
-	// within 10 s and any other value don't (the 30 s cache answers).
+	base, full0 := reads(), full()
+	// review T7-L3: ?refresh=1 re-reads the caller's own methods once (a
+	// one-person read, never a full reload); a second one within 10 s and
+	// any other value don't (the 30 s cache answers).
 	get("?refresh=1")
 	if n := reads(); n != base+1 {
 		t.Errorf("after refresh=1: %d reads, want %d", n, base+1)
@@ -459,5 +472,8 @@ func TestMySignInRefresh(t *testing.T) {
 	get("?refresh=1")
 	if n := reads(); n != base+2 {
 		t.Errorf("after 10 s: %d reads, want %d", n, base+2)
+	}
+	if n := full(); n != full0 {
+		t.Errorf("full reloads %d, want 0", n-full0)
 	}
 }
