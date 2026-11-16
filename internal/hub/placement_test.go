@@ -35,6 +35,11 @@ type workerFake struct {
 	infoErr error
 	pullErr error
 	bundles []map[string]string
+	// pushErr refuses bundles; removeErrs fails the next RemoveProject
+	// calls; pushHook runs at each push.
+	pushErr    error
+	removeErrs int
+	pushHook   func()
 }
 
 func (w *workerFake) AgentInfo(context.Context) (agentapi.Info, error) {
@@ -51,6 +56,15 @@ func (w *workerFake) Pull(ctx context.Context, ref string, fn func(int64, int64,
 }
 
 func (w *workerFake) PushBundle(_ context.Context, id string, files fs.FS, m agentapi.BundleManifest) error {
+	w.mu.Lock()
+	perr, hook := w.pushErr, w.pushHook
+	w.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if perr != nil {
+		return perr
+	}
 	got := map[string]string{}
 	for n := range m.Files {
 		f, err := files.Open(n)
@@ -69,6 +83,15 @@ func (w *workerFake) PushBundle(_ context.Context, id string, files fs.FS, m age
 }
 
 func (w *workerFake) RemoveProject(_ context.Context, id string) error {
+	w.mu.Lock()
+	fail := w.removeErrs > 0
+	if fail {
+		w.removeErrs--
+	}
+	w.mu.Unlock()
+	if fail {
+		return errors.New("the worker refused the removal")
+	}
 	w.Fake.Signal(context.Background(), "remove-project", id)
 	return nil
 }

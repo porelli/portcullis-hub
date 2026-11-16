@@ -380,7 +380,7 @@ func (h *Hub) bundleOf(ctx context.Context, id string) (memFS, agentapi.BundleMa
 func (h *Hub) pushBundle(ctx context.Context, id string, rt runtime.Instances) error {
 	// Every push re-checks placement and the quarantine (fix round 3,
 	// B2-H1): a template turned primary-only sends nothing.
-	if err := h.placedPreflight(ctx, id); err != nil {
+	if err := h.placedCheck(ctx, id, false, true); err != nil {
 		return err
 	}
 	b, ok := unwrapRT(rt).(bundlePusher)

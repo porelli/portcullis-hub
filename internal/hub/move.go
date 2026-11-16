@@ -353,8 +353,8 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	h.saveLocked()
 	h.mu.Unlock()
 	if from != "" {
-		if err := h.removeWorkerBundle(context.Background(), from, id); err != nil {
-			p.Warn(fmt.Sprintf("the bundle of %s on %s wasn't removed: %v", id, serverLabel(from), err))
+		if err := h.dropBundleOwed(context.Background(), from, id); err != nil {
+			p.Warn(fmt.Sprintf("the bundle of %s on %s wasn't removed yet: %v (retried every 30 s)", id, serverLabel(from), err))
 		}
 	}
 	p.Done(MoveKeep)
@@ -390,7 +390,15 @@ func (h *Hub) removeWorkerBundle(ctx context.Context, server, id string) error {
 	if !ok {
 		return nil
 	}
-	return b.RemoveProject(ctx, id)
+	if err := b.RemoveProject(ctx, id); err != nil {
+		return err
+	}
+	// A quarantine goes with the project (R3-L4): audited here, as the
+	// Hub's removal is what lifted it.
+	if inf := h.serverInfo(server); inf != nil && inf.Quarantined[id] != "" {
+		h.auditOp(directory.Actor{}, "server.quarantine_removed_with_bundle", id, "on "+serverLabel(server), nil)
+	}
+	return nil
 }
 
 // restoreForMove restores archive into instance id on its (new)
@@ -511,9 +519,11 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			if err != nil {
 				return err
 			}
-			h.setMoveServer(id, src) // the bundle and render are the source's
+			// The bundle and render are the source's: the runtime index only,
+			// never the stored state (R3-L8: nothing persists or publishes it).
+			h.setMoveServer(id, src)
 			if _, err := h.prepareUp(&view); err != nil {
-				revert()
+				h.clearMoveServer(id)
 				return err
 			}
 			up, err := h.upProject(ctx, &view)
@@ -528,10 +538,10 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			}
 			if err != nil {
 				rt.Down(context.Background(), up)
-				revert()
+				h.clearMoveServer(id)
 				return fmt.Errorf("starting %s on %s failed — nothing changed: %w", id, serverLabel(src), err)
 			}
-			revert()
+			h.clearMoveServer(id)
 		}
 		p.Done(MoveUndoStart)
 		if !p.CloseStop() {
@@ -582,6 +592,12 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 	commit()
 	if enabled {
 		if err := h.startAgain(&view); err != nil {
+			// The primary copy must be down before the worker's relays
+			// route again (R3-L9); if it can't be, neither is routed.
+			if derr := h.rt.Down(context.Background(), h.runtimeProject(&view)); derr != nil {
+				h.setMove(id, &state.Move{From: cur, To: "", StartedAt: h.now().UTC(), Phase: MoveStuck}, "", state.InstanceMoving)
+				return fmt.Errorf("starting %s on the primary failed (%v), and taking it down failed too (%v): it runs nowhere until that succeeds (retried; doctor server_move_stuck)", id, err, derr)
+			}
 			revert()
 			h.mu.Lock()
 			in := h.st.Instances[id]
@@ -595,9 +611,9 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			return fmt.Errorf("starting %s on the primary failed — nothing changed: %w", id, err)
 		}
 	}
-	if !p.CloseStop() {
-		return ErrStopped
-	}
+	// Committed: a Stop now is too late — the stop step still runs
+	// (R3-L9).
+	p.CloseStop()
 	removeRelayFiles(h, id)
 	if err := h.publishLink(); err != nil {
 		return err
@@ -620,22 +636,89 @@ func (h *Hub) stopAndDropBundle(t *templates.Template, cur string, p *Progress) 
 	}
 	if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(t)); err != nil {
 		p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v", serverLabel(cur), err))
+		h.oweBundle(cur, t.ID)
 		return
 	}
-	if err := h.removeWorkerBundle(context.Background(), cur, t.ID); err != nil {
-		p.Warn(fmt.Sprintf("the bundle of %s on %s wasn't removed: %v", t.ID, serverLabel(cur), err))
+	if err := h.dropBundleOwed(context.Background(), cur, t.ID); err != nil {
+		p.Warn(fmt.Sprintf("the bundle of %s on %s wasn't removed yet: %v (retried every 30 s)", t.ID, serverLabel(cur), err))
+	}
+}
+
+// oweBundle records that instance id's bundle must go from server
+// (persisted; R3-L10).
+func (h *Hub) oweBundle(server, id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, o := range h.st.OwedBundles {
+		if o.Server == server && o.Instance == id {
+			return
+		}
+	}
+	h.st.OwedBundles = append(h.st.OwedBundles, state.OwedBundle{Server: server, Instance: id, Since: h.now().UTC()})
+	h.saveLocked()
+}
+
+// dropBundleOwed owes the removal first, then tries it: success settles it.
+func (h *Hub) dropBundleOwed(ctx context.Context, server, id string) error {
+	h.oweBundle(server, id)
+	if err := h.removeWorkerBundle(ctx, server, id); err != nil {
+		return err
+	}
+	h.settleBundle(server, id)
+	return nil
+}
+
+func (h *Hub) settleBundle(server, id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := len(h.st.OwedBundles)
+	h.st.OwedBundles = slices.DeleteFunc(h.st.OwedBundles, func(o state.OwedBundle) bool { return o.Server == server && o.Instance == id })
+	if len(h.st.OwedBundles) != n {
+		h.saveLocked()
+	}
+}
+
+// drainOwedBundles retries the owed bundle removals (each tick): done,
+// or its server is gone, settles one. The copy is down already; one the
+// instance runs on again (an undo back) is never removed.
+func (h *Hub) drainOwedBundles(ctx context.Context) {
+	h.mu.RLock()
+	owed := slices.Clone(h.st.OwedBundles)
+	h.mu.RUnlock()
+	for _, o := range owed {
+		h.mu.RLock()
+		_, known := h.st.Servers[o.Server]
+		runsThere := h.st.Instances[o.Instance].Server == o.Server
+		h.mu.RUnlock()
+		if !known || runsThere {
+			h.settleBundle(o.Server, o.Instance)
+			continue
+		}
+		if err := h.removeWorkerBundle(ctx, o.Server, o.Instance); err == nil {
+			h.settleBundle(o.Server, o.Instance)
+		}
 	}
 }
 
 // setMoveServer points instance id's runtime at server for a moment
-// (an undo renders and starts the source copy before the switch).
+// (an undo renders and starts the source copy before the switch): the
+// registry's override only, never h.st.
 func (h *Hub) setMoveServer(id, server string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	in := h.st.Instances[id]
-	in.Server = server
-	h.st.Instances[id] = in
-	h.noteInstanceServer(id, server)
+	r := h.reg()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.override == nil {
+		r.override = map[string]string{}
+	}
+	r.override[id] = server
+}
+
+// clearMoveServer ends setMoveServer's override.
+func (h *Hub) clearMoveServer(id string) {
+	r := h.reg()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.override, id)
 }
 
 // RemoveMoveLeftover removes the copies moves left (typed id): the

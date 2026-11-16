@@ -2,7 +2,10 @@ package hub
 
 import (
 	"context"
+	"github.com/portcullis/hub/internal/templates"
 	"maps"
+	"path/filepath"
+	"strings"
 
 	"errors"
 	"fmt"
@@ -491,12 +494,24 @@ func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
 			placed[id] = in.Server
 		}
 	}
+	// Placement judged now for every placed instance (R3-L7: not only
+	// after a start attempt, and after a restart too).
+	invalid := h.placementInvalidLocked()
 	h.srvMu.Lock()
-	in := &doctor.ServersIn{NotRotated: maps.Clone(h.rotateFail), PlacementInvalid: maps.Clone(h.placementInvalid), Stuck: stuck,
+	for id, why := range h.placementInvalid {
+		if invalid[id] == "" {
+			invalid[id] = why
+		}
+	}
+	in := &doctor.ServersIn{NotRotated: maps.Clone(h.rotateFail), PlacementInvalid: invalid, Stuck: stuck,
 		Quarantined: map[string]string{}}
 	for id, server := range placed {
 		if ps := h.polls[server]; ps != nil && ps.info != nil {
-			if why := ps.info.Quarantined[id]; why != "" {
+			why := ps.info.Quarantined[id]
+			if why == "" {
+				why = ps.info.Quarantined["*"]
+			}
+			if why != "" {
 				in.Quarantined[id] = server + ": " + why
 			}
 		}
@@ -506,4 +521,29 @@ func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
 		return nil
 	}
 	return in
+}
+
+// placementInvalidLocked: every placed instance whose template is now
+// primary-only, and why. Caller holds mu.
+func (h *Hub) placementInvalidLocked() map[string]string {
+	out := map[string]string{}
+	for id, in := range h.st.Instances {
+		if in.Server == "" {
+			continue
+		}
+		v := h.findLocked(id)
+		if v == nil {
+			continue
+		}
+		f := h.factsOfServer(in.Server)
+		env := h.compatEnv(readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env")))
+		for k, val := range readEnvRaw(h.envPath(id)) {
+			env[k] = val
+		}
+		env[templates.EnvBindRoots] = strings.Join(f.BindRoots, ":")
+		if po, reasons := templates.Placement(v.ReadCompose(), v.Manifest, env, f.BindRoots); po {
+			out[id] = strings.Join(reasons, "; ")
+		}
+	}
+	return out
 }

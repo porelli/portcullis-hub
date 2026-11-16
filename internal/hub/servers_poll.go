@@ -212,6 +212,8 @@ func (h *Hub) serversTick(ctx context.Context) {
 		}
 		h.pollServer(ctx, id)
 	}
+	// Worker bundles still owed a removal (R3-L10).
+	h.drainOwedBundles(ctx)
 	// Stuck moves (a rollback that couldn't take the target down) are
 	// retried each tick (review B2-M2).
 	h.mu.RLock()

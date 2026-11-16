@@ -263,8 +263,12 @@ func (p placedRT) DownByName(ctx context.Context, name string) error {
 	return p.Instances.DownByName(ctx, name)
 }
 
-// DeliverFile passes a data file to the agent (fileDeliverer).
+// DeliverFile passes a data file to the agent (fileDeliverer), after the
+// placement and quarantine checks (R3-L12; no stop from here).
 func (p placedRT) DeliverFile(ctx context.Context, instance string, f runtime.FileDelivery) error {
+	if err := p.h.placedCheck(ctx, instance, true, false); err != nil {
+		return err
+	}
 	d, ok := p.Instances.(fileDeliverer)
 	if !ok {
 		return statusErr(500, "the worker's runtime can't take data files")
@@ -279,6 +283,14 @@ func (p placedRT) DeliverFile(ctx context.Context, instance string, f runtime.Fi
 // turned primary-only stops the instance on the worker and is doctor
 // server_placement_invalid; nothing is rendered or sent.
 func (h *Hub) placedPreflight(ctx context.Context, id string) error {
+	return h.placedCheck(ctx, id, true, true)
+}
+
+// placedCheck is placedPreflight's work: quarantine whether the agent's
+// quarantine refuses (a bundle push doesn't: a PUT never lifts it, and a
+// lift is followed by a push, R3-M2); stop whether a primary-only
+// template is stopped on the worker.
+func (h *Hub) placedCheck(ctx context.Context, id string, quarantine, stop bool) error {
 	server := h.serverOf(id)
 	if server == "" {
 		return nil
@@ -304,18 +316,18 @@ func (h *Hub) placedPreflight(ctx context.Context, id string) error {
 		h.notePlacementInvalid(id, why)
 		// Stopped on the worker (and its relays on the primary), best
 		// effort: nothing new is sent either way.
-		if rt, err := h.rtFor(id); err == nil {
-			if derr := rt.Down(ctx, h.runtimeProject(&t)); derr != nil {
-				log.Printf("placement: %s: stopping it on %s: %v", id, serverLabel(server), derr)
-			}
-		} else if derr := h.relaysDown(ctx, id); derr != nil {
-			log.Printf("placement: %s: its relays: %v", id, derr)
+		if stop {
+			h.stopInvalidPlacement(ctx, &t, server)
 		}
 		return statusErr(409, "%s can't run on a worker any more: %s; move it to the primary", t.Manifest.Name, why)
 	}
 	h.notePlacementInvalid(id, "")
-	if inf := h.serverInfo(server); inf != nil {
-		if why := inf.Quarantined[id]; why != "" {
+	if inf := h.serverInfo(server); inf != nil && quarantine {
+		why := inf.Quarantined[id]
+		if why == "" {
+			why = inf.Quarantined["*"] // every instance (the agent's file is unreadable)
+		}
+		if why != "" {
 			return statusErr(409, "%s is quarantined on %s (%s): an admin must lift the quarantine", id, serverLabel(server), clipRunes(why, 200))
 		}
 	}
@@ -382,6 +394,12 @@ func (h *Hub) LiftQuarantine(ctx context.Context, actor directory.Actor, id stri
 	if err := b.Unquarantine(ctx, id); err != nil {
 		return err
 	}
+	// Then the bundle through the normal, validated path (R3-M2): the
+	// agent quarantines it again if it refuses it.
+	if err := h.pushBundle(ctx, id, rt); err != nil {
+		h.refreshServerFacts(ctx, server)
+		return fmt.Errorf("the quarantine was lifted, but the bundle was refused (quarantined again): %w", err)
+	}
 	_, err = h.refreshServerFacts(ctx, server)
 	return err
 }
@@ -440,4 +458,16 @@ func (h *Hub) checkReservedID(id, server string) error {
 		return statusErr(409, "the instance id %s is reserved on a worker: its project would be the worker's own — choose another id", id)
 	}
 	return nil
+}
+
+// stopInvalidPlacement stops a placed instance whose template turned
+// primary-only (on the worker, its relays on the primary), best effort.
+func (h *Hub) stopInvalidPlacement(ctx context.Context, t *templates.Template, server string) {
+	if rt, err := h.rtFor(t.ID); err == nil {
+		if derr := rt.Down(ctx, h.runtimeProject(t)); derr != nil {
+			log.Printf("placement: %s: stopping it on %s: %v", t.ID, serverLabel(server), derr)
+		}
+	} else if derr := h.relaysDown(ctx, t.ID); derr != nil {
+		log.Printf("placement: %s: its relays: %v", t.ID, derr)
+	}
 }

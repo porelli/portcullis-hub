@@ -112,17 +112,26 @@ type API struct {
 	mu       sync.Mutex
 	projects map[string]*project
 	// quarantined: instance → why its bind sources failed the check at a
-	// container start the engine made (A-H2b): refused until a new bundle.
-	quarantined map[string]string
-	execs       map[string]bool
-	helpers     map[string]*helper
-	ops         map[string]context.CancelFunc
+	// container start the engine made (A-H2b): refused until the Hub lifts
+	// it. quarantineAll: why every instance counts as quarantined (an
+	// unreadable quarantine.json, R3-L2; "" = none); saveErr: the last
+	// failed save (reported in /v1/info). lifted: ids lifted without a
+	// bundle, awaiting the Hub's push. downs: ids a down worker runs for.
+	quarantined   map[string]string
+	quarantineAll string
+	saveErr       string
+	lifted        map[string]bool
+	downs         map[string]bool
+	bundleMu      sync.Mutex
+	execs         map[string]bool
+	helpers       map[string]*helper
+	ops           map[string]context.CancelFunc
 }
 
 // NewAPI loads the bundles already on disk (each re-validated; an invalid
 // one is dropped from scope and logged).
 func NewAPI(cfg APIConfig) *API {
-	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
+	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, lifted: map[string]bool{}, downs: map[string]bool{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
 	a.mux = http.NewServeMux()
 	a.routes()
 	a.loadQuarantine()
@@ -402,7 +411,7 @@ func (a *API) lifecycle(verb string) func(w http.ResponseWriter, r *http.Request
 		defer done()
 		p := a.runtimeProject(id)
 		if why := a.quarantineOf(id); why != "" && (verb == "create" || verb == "up") {
-			writeError(w, http.StatusConflict, clipMsg("the instance is quarantined: "+why+" (send its bundle again)"))
+			writeError(w, http.StatusConflict, clipMsg("the instance is quarantined: "+why+" (an admin must lift it)"))
 			return
 		}
 		if verb == "create" || verb == "up" {
@@ -817,34 +826,67 @@ func (a *API) helper(w http.ResponseWriter, r *http.Request) (string, *helper, b
 func (a *API) quarantineOf(id string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.quarantineAll != "" {
+		return a.quarantineAll
+	}
 	return a.quarantined[id]
 }
 
-// Quarantined are the quarantined instances and why (GET /v1/info).
+// QuarantineAllKey is the /v1/info key standing for every instance.
+const QuarantineAllKey = "*"
+
+// Quarantined are the quarantined instances and why (GET /v1/info); key
+// "*" means every instance (an unreadable quarantine.json).
 func (a *API) Quarantined() map[string]string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.quarantined) == 0 {
+	if len(a.quarantined) == 0 && a.quarantineAll == "" {
 		return nil
 	}
-	return maps.Clone(a.quarantined)
+	out := maps.Clone(a.quarantined)
+	if out == nil {
+		out = map[string]string{}
+	}
+	if a.quarantineAll != "" {
+		out[QuarantineAllKey] = a.quarantineAll
+	}
+	return out
+}
+
+// QuarantineError is the last failed save of the quarantine ("" = none).
+func (a *API) QuarantineError() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.saveErr
 }
 
 func (a *API) quarantinePath() string { return filepath.Join(a.cfg.DataDir, "quarantine.json") }
 
-// loadQuarantine reads the persisted quarantine (review A2-M1: it
-// survives an agent restart). An unreadable file quarantines nothing it
-// can't name, so it is logged loudly.
+// loadQuarantine reads the persisted quarantine (review A2-M1). Fail
+// closed (R3-L2): a file that exists but can't be read or parsed makes
+// every instance quarantined until it is repaired (re-read every sweep).
 func (a *API) loadQuarantine() {
 	b, err := os.ReadFile(a.quarantinePath())
 	if errors.Is(err, fs.ErrNotExist) {
+		a.mu.Lock()
+		a.quarantineAll = ""
+		a.mu.Unlock()
 		return
 	}
 	var q map[string]string
-	if err != nil || json.Unmarshal(b, &q) != nil {
-		log.Printf("bind check: %s is unreadable: %v", a.quarantinePath(), err)
+	if err == nil {
+		err = json.Unmarshal(b, &q)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err != nil {
+		if a.quarantineAll == "" {
+			log.Printf("bind check: %s is unreadable (%v): every instance counts as quarantined until it is repaired", a.quarantinePath(), err)
+		}
+		a.quarantineAll = "the agent's quarantine.json is unreadable: repair or remove it on the worker"
 		return
 	}
+	a.quarantineAll = ""
 	for id, why := range q {
 		if agentapi.ValidInstance(id) == nil {
 			a.quarantined[id] = why
@@ -852,12 +894,17 @@ func (a *API) loadQuarantine() {
 	}
 }
 
-// saveQuarantineLocked persists the quarantine. Caller holds a.mu.
+// saveQuarantineLocked persists the quarantine; a failure is kept for
+// /v1/info (the quarantine holds in memory: kill and refuse anyway).
+// Caller holds a.mu.
 func (a *API) saveQuarantineLocked() {
 	b, _ := json.Marshal(a.quarantined)
 	if err := writeFileAtomic(a.quarantinePath(), b); err != nil {
-		log.Printf("bind check: saving the quarantine: %v", err)
+		a.saveErr = "saving the quarantine failed: " + err.Error()
+		log.Printf("bind check: %s", a.saveErr)
+		return
 	}
+	a.saveErr = ""
 }
 
 // quarantine marks instance id quarantined (persisted).
@@ -865,29 +912,44 @@ func (a *API) quarantine(id, why string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.quarantined[id] = why
+	delete(a.lifted, id)
 	a.saveQuarantineLocked()
 }
 
 // unquarantine is DELETE /v1/projects/{id}/quarantine: the Hub's explicit
-// admin action (never a bundle PUT). The bundle's bind sources are
-// walked again first; a failure keeps the quarantine (409).
+// admin action (never a bundle PUT), under the bundle lock (R3-L1).
+// Without a bundle (nothing of it can run) it simply clears, and the
+// Hub's next push must be accepted or the quarantine comes back (R3-M2);
+// with one, its bind sources are walked again first. Only the reason read
+// at the start is cleared: a new one meanwhile stays.
 func (a *API) unquarantine(w http.ResponseWriter, r *http.Request, id string) {
-	if a.quarantineOf(id) == "" {
+	defer a.lockID(id)()
+	a.mu.Lock()
+	all, why := a.quarantineAll, a.quarantined[id]
+	a.mu.Unlock()
+	if all != "" {
+		writeError(w, http.StatusConflict, clipMsg(all))
+		return
+	}
+	if why == "" {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	p := a.project(id)
-	if p == nil {
-		writeError(w, http.StatusConflict, "the instance has no bundle: send it first, then lift the quarantine")
-		return
-	}
-	if err := a.checkBindPaths(id, p.model); err != nil {
-		writeError(w, http.StatusConflict, clipMsg("still failing the bind check: "+err.Error()))
-		return
+	if p != nil {
+		if err := a.checkBindPaths(id, p.model); err != nil {
+			writeError(w, http.StatusConflict, clipMsg("still failing the bind check: "+err.Error()))
+			return
+		}
 	}
 	a.mu.Lock()
-	delete(a.quarantined, id)
-	a.saveQuarantineLocked()
+	if a.quarantined[id] == why {
+		delete(a.quarantined, id)
+		if p == nil {
+			a.lifted[id] = true
+		}
+		a.saveQuarantineLocked()
+	}
 	a.mu.Unlock()
 	log.Printf("bind check: %s: the quarantine was lifted by the Hub", id)
 	w.WriteHeader(http.StatusNoContent)
@@ -954,8 +1016,12 @@ func (a *API) WatchStarts(ctx context.Context) {
 	}
 }
 
-// Sweep checks every running container of an instance project.
+// Sweep checks every running container of an instance project (and
+// re-reads an unreadable quarantine.json: repaired, it applies again).
 func (a *API) Sweep(ctx context.Context) {
+	if a.quarantineOf("\x00") != "" {
+		a.loadQuarantine()
+	}
 	units, err := a.cfg.Runtime.List(ctx, runtime.Filter{All: true})
 	if err != nil {
 		log.Printf("bind check: listing the containers: %v", err)
@@ -982,7 +1048,7 @@ func (a *API) Sweep(ctx context.Context) {
 func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	var info runtime.UnitInfo
 	inspected := false
-	if project == "" || container != "" {
+	if container != "" {
 		if i, err := a.cfg.Runtime.Inspect(ctx, container); err == nil {
 			info, inspected = i, true
 			if project == "" {
@@ -996,7 +1062,10 @@ func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	if inspected && info.Labels[docker.LabelHelper] != "" {
 		return // the agent's own helper (its spec checked when created)
 	}
-	if project == "" || slices.Contains(a.cfg.OwnContainers, container) {
+	// The agent's own compose project is never acted on (R3-M1): no
+	// instance can map there (reserved ids), and a recreated sidecar or a
+	// compose run of the worker stack is the operator's.
+	if project == "" || slices.Contains(a.cfg.OwnContainers, container) || (a.cfg.OwnProject != "" && project == a.cfg.OwnProject) {
 		return
 	}
 	id, ok := strings.CutPrefix(project, runtime.ProjectPrefix)
@@ -1006,12 +1075,16 @@ func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	var why string
 	p := a.project(id)
 	switch {
+	case a.quarantineOf(id) != "":
+		why = a.quarantineOf(id) // quarantined (or all are): it must not run
 	case p == nil:
 		why = "a container of an instance the agent holds no valid bundle for"
+	case !inspected:
+		why = "the started container can't be inspected (its mounts unchecked)"
 	default:
 		if err := a.checkBindPaths(id, p.model); err != nil {
 			why = err.Error()
-		} else if inspected {
+		} else {
 			why = a.checkMounts(id, p, info.Mounts)
 		}
 	}
@@ -1020,13 +1093,27 @@ func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	}
 	why = clipMsg(why)
 	log.Printf("bind check: %s: a started container fails the bind check (%s): killed, taken down, quarantined", id, why)
-	a.quarantine(id, why)
+	if a.quarantineOf(id) == "" {
+		a.quarantine(id, why)
+	}
 	if container != "" {
 		if err := a.cfg.Runtime.Signal(ctx, container, "KILL"); err != nil {
 			log.Printf("bind check: %s: kill %s: %v", id, clipMsg(container), err)
 		}
 	}
-	go a.downUntilDone(ctx, id)
+	// One down worker per id (R3-L3: sweeps don't pile them up).
+	a.mu.Lock()
+	running := a.downs[id]
+	a.downs[id] = true
+	a.mu.Unlock()
+	if !running {
+		go func() {
+			a.downUntilDone(ctx, id)
+			a.mu.Lock()
+			delete(a.downs, id)
+			a.mu.Unlock()
+		}()
+	}
 }
 
 // checkMounts compares a container's actual bind mounts with its bundle:

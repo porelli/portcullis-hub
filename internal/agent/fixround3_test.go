@@ -244,25 +244,107 @@ func TestCheckVisible(t *testing.T) {
 	}
 }
 
-// TestOwnContainersByID (fix round 3 review): the backstop exempts the
-// agent's own containers by id only — an instance whose project is the
-// agent's own name gets no pass — and a bundle of that id is refused.
+// TestOwnContainersByID (fix rounds 3–4, R3-M1): the backstop never acts
+// on the agent's own compose project — a recreated sidecar or a compose
+// run there is left alone, nothing is quarantined, nothing taken down —
+// and a bundle whose id maps there is refused. A portcullis-x container
+// with no bundle is still taken down.
 func TestOwnContainersByID(t *testing.T) {
 	f := newAPI(t)
 	f.api.cfg.OwnProject = "portcullis-worker"
 	f.api.cfg.OwnContainers = []string{"c-agent"}
 	f.api.CheckStarted(context.Background(), "c-agent", "portcullis-worker")
-	if f.api.Quarantined() != nil {
-		t.Fatalf("the agent's own container was acted on: %v", f.rt.Calls())
+	f.api.CheckStarted(context.Background(), "c-sidecar-recreated", "portcullis-worker")
+	f.api.CheckStarted(context.Background(), "c-compose-run", "")
+	f.rt.Lock()
+	f.rt.Infos["c-compose-run"] = runtime.UnitInfo{ID: "c-compose-run", Labels: map[string]string{docker.LabelProject: "portcullis-worker"}}
+	f.rt.Unlock()
+	f.api.CheckStarted(context.Background(), "c-compose-run", "")
+	time.Sleep(50 * time.Millisecond)
+	if f.api.Quarantined() != nil || countCalls(f, "down-by-name portcullis-worker") != 0 || countCalls(f, "signal c-sidecar-recreated KILL") != 0 {
+		t.Fatalf("the agent's own project was acted on: %v %v", f.rt.Calls(), f.api.Quarantined())
 	}
-	// Another container in that project (no bundle): stopped.
-	f.api.CheckStarted(context.Background(), "c-intruder", "portcullis-worker")
-	waitCall(t, f, "down-by-name portcullis-worker")
-	if countCalls(f, "signal c-intruder KILL") != 1 {
-		t.Errorf("calls %v", f.rt.Calls())
-	}
+	f.api.CheckStarted(context.Background(), "c-x", "portcullis-x")
+	waitCall(t, f, "down-by-name portcullis-x")
 	c, b := f.putFor(t, "worker", map[string]string{BundleCompose: "services:\n  web:\n    image: x\n"})
 	if c != 400 || !strings.Contains(b, "reserved") {
 		t.Errorf("bundle of the reserved id: %d %s", c, b)
+	}
+}
+
+// TestLiftWithoutBundle (R3-M2): a quarantine with no bundle held is
+// lifted (nothing runs); the Hub's next push must be accepted, or the
+// instance is quarantined again.
+func TestLiftWithoutBundle(t *testing.T) {
+	f := newAPI(t)
+	f.api.quarantine("ghost", "a container of an instance the agent holds no valid bundle for")
+	if c := f.code(t, "DELETE", "/v1/projects/ghost/quarantine", nil); c != 204 {
+		t.Fatalf("lift: %d", c)
+	}
+	if f.api.Quarantined() != nil {
+		t.Fatal("still quarantined")
+	}
+	// The push after the lift is refused (a nested bind? here: include).
+	if c, _ := f.putFor(t, "ghost", map[string]string{BundleCompose: "include: [/x.yml]\nservices:\n  web:\n    image: x\n"}); c != 400 {
+		t.Fatalf("push: %d", c)
+	}
+	if f.api.Quarantined()["ghost"] == "" {
+		t.Error("a refused push after the lift didn't quarantine again")
+	}
+	// Lifted again, an accepted push completes it.
+	f.code(t, "DELETE", "/v1/projects/ghost/quarantine", nil)
+	if c, b := f.putFor(t, "ghost", map[string]string{BundleCompose: "services:\n  web:\n    image: x\n"}); c != 204 {
+		t.Fatalf("good push: %d %s", c, b)
+	}
+	if f.api.Quarantined() != nil {
+		t.Errorf("quarantined after a good push: %v", f.api.Quarantined())
+	}
+}
+
+// TestQuarantineFailsClosed (R3-L2): an unreadable quarantine.json makes
+// every instance quarantined (starts refused, running units killed)
+// until repaired; a failed save is reported.
+func TestQuarantineFailsClosed(t *testing.T) {
+	f := newAPI(t)
+	f.bundle(t, "app")
+	os.WriteFile(filepath.Join(f.data, "quarantine.json"), []byte("{not json"), 0o600)
+	api2 := NewAPI(APIConfig{DataDir: f.data, BindRoots: []string{f.root}, Runtime: f.rt, Net: f.net, Config: f.api.cfg.Config})
+	if q := api2.Quarantined(); q[QuarantineAllKey] == "" {
+		t.Fatalf("quarantine %v", q)
+	}
+	if api2.quarantineOf("app") == "" {
+		t.Error("app not quarantined")
+	}
+	f.rt.Lock()
+	f.rt.Infos["c-app"] = runtime.UnitInfo{ID: "c-app", Labels: map[string]string{docker.LabelProject: "portcullis-app"}}
+	f.rt.Unlock()
+	api2.CheckStarted(context.Background(), "c-app", "portcullis-app")
+	waitCall(t, f, "signal c-app KILL")
+	// Repaired: the next sweep reads it again.
+	os.WriteFile(filepath.Join(f.data, "quarantine.json"), []byte("{}"), 0o600)
+	api2.Sweep(context.Background())
+	if q := api2.Quarantined(); q[QuarantineAllKey] != "" {
+		t.Errorf("still all quarantined: %v", q)
+	}
+	// A failed save is reported.
+	os.Remove(filepath.Join(f.data, "quarantine.json"))
+	os.Mkdir(filepath.Join(f.data, "quarantine.json"), 0o700) // a directory: the rename fails
+	api2.quarantine("app", "x")
+	if api2.QuarantineError() == "" || api2.quarantineOf("app") == "" {
+		t.Errorf("save error %q", api2.QuarantineError())
+	}
+}
+
+// TestOneDownWorkerPerID (R3-L3): repeated violations of one id start a
+// single down worker.
+func TestOneDownWorkerPerID(t *testing.T) {
+	f := newAPI(t)
+	f.rt.downFails.Store(1000)
+	for i := 0; i < 5; i++ {
+		f.api.CheckStarted(context.Background(), "c-g", "portcullis-ghost")
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if n := countCalls(f, "down-by-name portcullis-ghost"); n > 2 {
+		t.Errorf("%d downs: the workers piled up", n)
 	}
 }

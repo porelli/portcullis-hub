@@ -53,12 +53,35 @@ func (h *Hub) pullRefs(ctx context.Context, t *templates.Template) []string {
 	if err != nil {
 		return nil
 	}
+	// A placed instance's refs (fix round 4, R3-L5): only the template's
+	// raw references resolved through the image-ref allowlist, never an
+	// env-resolved one (compose's create on the worker pulls the rest).
+	var raw map[string]string
+	var refEnv map[string]string
+	if server := h.serverOf(t.ID); server != "" {
+		raw = templates.ServiceImages(t.ReadCompose())
+		inf := h.serverInfo(server)
+		if inf == nil {
+			return nil
+		}
+		refEnv = imageRefEnv(h, inf)
+	}
 	var refs []string
-	for _, s := range proj.Services {
-		if !pullable(s) || slices.Contains(refs, s.Image) {
+	for name, s := range proj.Services {
+		if !pullable(s) {
 			continue
 		}
-		refs = append(refs, s.Image)
+		ref := s.Image
+		if raw != nil {
+			r, ok := expandRef(raw[name], refEnv)
+			if !ok || raw[name] == "" || r != s.Image {
+				continue // unresolvable here, or not the template's own image
+			}
+			ref = r
+		}
+		if !slices.Contains(refs, ref) {
+			refs = append(refs, ref)
+		}
 	}
 	slices.Sort(refs)
 	return refs

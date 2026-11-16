@@ -34,6 +34,9 @@ type serverRegistry struct {
 	mu        sync.RWMutex
 	servers   map[string]*serverRT
 	instances map[string]string
+	// override: instance → the server an undo is starting its copy on
+	// (never in state; serverOf answers it first).
+	override map[string]string
 }
 
 func (h *Hub) reg() *serverRegistry {
@@ -110,6 +113,9 @@ func (h *Hub) serverOf(id string) string {
 	r := h.reg()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if s, ok := r.override[id]; ok {
+		return s
+	}
 	return r.instances[id]
 }
 

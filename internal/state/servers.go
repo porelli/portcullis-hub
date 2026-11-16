@@ -60,6 +60,14 @@ type BackupSchedule struct {
 	Weekday int    `json:"weekday" yaml:"weekday"`
 }
 
+// OwedBundle is a worker bundle to remove: the server, the instance and
+// since when.
+type OwedBundle struct {
+	Server   string    `json:"server" yaml:"server"`
+	Instance string    `json:"instance" yaml:"instance"`
+	Since    time.Time `json:"since" yaml:"since"`
+}
+
 // OwedSerial is a node certificate serial that must be revoked on
 // pki_node: one signed but not (yet) pinned — recorded before the
 // certificate leaves the Hub — or a revoked server's pinned one. It

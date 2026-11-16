@@ -238,6 +238,7 @@ func run(data string, getenv func(string) string) error {
 		}
 		i.Quarantined = api.Quarantined()
 		i.OwnProject = ownProject
+		i.QuarantineError = api.QuarantineError()
 		return i, nil
 	}
 	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api,

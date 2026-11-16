@@ -86,6 +86,10 @@ func TestStartBackstop(t *testing.T) {
 	ev.Actor.ID = "c-app"
 	ev.Actor.Attributes = map[string]string{docker.LabelProject: "portcullis-app"}
 	f.rt.evs = []runtime.Event{ev}
+	f.rt.Lock()
+	f.rt.Infos["c-app"] = runtime.UnitInfo{ID: "c-app", Labels: map[string]string{docker.LabelProject: "portcullis-app"},
+		Mounts: []runtime.Mount{{Type: "bind", Source: f.root + "/real/sub", Destination: "/x", RW: true}}}
+	f.rt.Unlock()
 	// Clean: nothing happens.
 	f.api.CheckStarted(context.Background(), "c-app", "portcullis-app")
 	if q := f.api.Quarantined(); q != nil {

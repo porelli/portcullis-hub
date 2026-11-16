@@ -208,6 +208,10 @@ type AppState struct {
 	// its scheduled backups last ran ("2006-01-02 15": a restart within
 	// the hour or the DST fall-back hour never runs them twice).
 	ScheduleSlots map[string]string `json:"schedule_slots,omitempty" yaml:"schedule_slots,omitempty"`
+	// OwedBundles are worker bundles (their env included) still to remove
+	// from a server a copy left (R3-L10): retried each tick until done or
+	// the server is gone.
+	OwedBundles []OwedBundle `json:"owed_bundles,omitempty" yaml:"owed_bundles,omitempty"`
 	// OwedSerials are the node certificate serials still to revoke.
 	OwedSerials []OwedSerial `json:"owed_serials,omitempty" yaml:"owed_serials,omitempty"`
 	Sources     []Source     `json:"sources" yaml:"sources"`

@@ -288,10 +288,8 @@ func (h *Hub) localNetworksEnvLocked() string { return joinPrefixes(h.localNetwo
 // list (DefaultLocalNetworks; never the primary's own setting). Caller
 // holds mu.
 func (h *Hub) localNetworksEnvForLocked(id string) string {
-	server := ""
-	if in, ok := h.st.Instances[id]; ok {
-		server = in.Server
-	}
+	// The server its render is for (an undo's override included).
+	server := h.serverOf(id)
 	if server == "" {
 		return h.localNetworksEnvLocked()
 	}

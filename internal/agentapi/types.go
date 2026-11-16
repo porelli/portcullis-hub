@@ -109,6 +109,9 @@ type Info struct {
 	// OwnProject is the agent's own compose project: no instance id may
 	// map to it on this worker.
 	OwnProject string `json:"own_project,omitempty"`
+	// QuarantineError: the agent couldn't persist its quarantine (it
+	// holds in memory; "" = none).
+	QuarantineError string `json:"quarantine_error,omitempty"`
 }
 
 // PortBind is one published host port: the compose project and service

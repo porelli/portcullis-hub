@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/types"
@@ -433,14 +432,12 @@ func checkNestedBinds(id string, mine map[string]bool, others map[string]map[str
 	return nil
 }
 
-// bundleMu serialises every bundle PUT and project removal agent-wide
-// (review A2-M2): the cross-instance checks (nested binds, volume names)
-// and the commit happen under it, so two PUTs can't both pass them.
-var bundleMu sync.Mutex
-
-func lockID(string) func() {
-	bundleMu.Lock()
-	return bundleMu.Unlock
+// lockID takes the agent-wide bundle lock (review A2-M2; per API, I5):
+// every bundle PUT, project removal and quarantine lift run under it, so
+// the cross-instance checks and the commit can't interleave.
+func (a *API) lockID(string) func() {
+	a.bundleMu.Lock()
+	return a.bundleMu.Unlock
 }
 
 // putBundle: the tar into <data>/projects/<id>.new (only the bundle's
@@ -450,7 +447,42 @@ func lockID(string) func() {
 // validated (ValidateBundle, symlink walk) and becomes the only file the
 // agent runs. Only then is everything swapped into place.
 func (a *API) putBundle(w http.ResponseWriter, r *http.Request, id string) {
-	defer lockID(id)()
+	defer a.lockID(id)()
+	sw := &statusWriter{ResponseWriter: w}
+	a.putBundleLocked(sw, r, id)
+	// The bundle the Hub sends right after a lift (fix round 4, R3-M2):
+	// refused, the instance is quarantined again; accepted, the lift is
+	// complete.
+	a.mu.Lock()
+	lifted := a.lifted[id]
+	delete(a.lifted, id)
+	a.mu.Unlock()
+	if lifted && sw.code >= 400 {
+		a.quarantine(id, "the bundle sent after the quarantine was lifted was refused")
+	}
+}
+
+// statusWriter records the status a handler wrote.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (s *statusWriter) WriteHeader(c int) {
+	if s.code == 0 {
+		s.code = c
+	}
+	s.ResponseWriter.WriteHeader(c)
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	if s.code == 0 {
+		s.code = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string) {
 	// An instance whose project would be the agent's own (fix round 3).
 	if a.cfg.OwnProject != "" && runtime.ProjectName(id) == a.cfg.OwnProject {
 		writeError(w, http.StatusBadRequest, "the instance id "+id+" is reserved on this worker: its project would be the agent's own")
@@ -701,7 +733,7 @@ func swapDir(from, to string) error {
 }
 
 func (a *API) removeProject(w http.ResponseWriter, r *http.Request, id string) {
-	defer lockID(id)()
+	defer a.lockID(id)()
 	units, err := a.cfg.Runtime.List(r.Context(), runtime.Filter{Instance: id})
 	if err != nil {
 		engineError(w, err)

@@ -109,6 +109,14 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 // anything (an app is never left down by a refusal). Returns the live
 // view the up uses. Failures are *StatusError.
 func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
+	// A moving instance renders and starts only from its move, undo or
+	// recovery (R3-L11: restartSteps and the others come through here).
+	h.mu.RLock()
+	moving := h.st.Instances[t.ID].State == state.InstanceMoving
+	h.mu.RUnlock()
+	if _, owner := h.moveOwners.Load(t.ID); moving && !owner {
+		return nil, statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", t.ID)
+	}
 	members := h.groupSnapshot(t.ID)
 	server := h.serverOf(t.ID)
 	if server != "" {
