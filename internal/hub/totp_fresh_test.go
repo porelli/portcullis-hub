@@ -6,12 +6,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
+	"github.com/portcullis/hub/internal/signinhistory"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -412,4 +414,102 @@ func withPasswordAndCode(t *testing.T, c *certFixture, user string) {
 		t.Fatal(err)
 	}
 	c.f.h.MarkInventoryStale()
+}
+
+// TestFreshRecheckBeforeRefusal: a known person with none of the rule's
+// accepted methods gets exactly one forced inventory re-read (past the
+// 30 s throttle) before the refusal, still refused when they truly have
+// none; at most once per 5 s per person; a method set up just now (a
+// setup link redeemed, the inventory read seconds ago) is seen at once
+// and the popup is offered.
+func TestFreshRecheckBeforeRefusal(t *testing.T) {
+	c := newCertFixture(t)
+	h := c.f.h
+	setPeopleRule(c.f, siLeaves("any", "security_key"))
+	now := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	h.entryNow = clock
+	h.signInInv.mu.Lock()
+	h.signInInv.now = clock
+	h.signInInv.mu.Unlock()
+	c.src.set(func(s *fakeSignInSrc) { s.keys["alice"] = []signin.Method{} })
+	h.MarkInventoryStale()
+	calls := func() int {
+		c.src.mu.Lock()
+		defer c.src.mu.Unlock()
+		return c.src.calls
+	}
+	view := func() string {
+		t.Helper()
+		v, err := h.MySignInView(c.ctx, "alice")
+		if err != nil || v.FreshAuth == nil {
+			t.Fatalf("view %+v %v", v, err)
+		}
+		return v.FreshAuth.Refusal
+	}
+	n0 := calls()
+	if r := view(); r != freshNeedsStronger {
+		t.Fatalf("no method: refusal %q", r)
+	}
+	if got := calls() - n0; got != 2 { // the page's read, one forced re-read
+		t.Fatalf("reads %d, want 2", got)
+	}
+	// Within 5 s: no forced re-read (the 30 s throttle holds too).
+	now = now.Add(2 * time.Second)
+	n1 := calls()
+	if r := view(); r != freshNeedsStronger || calls() != n1 {
+		t.Fatalf("throttled: refusal %q, reads %d", r, calls()-n1)
+	}
+	// A setup link redeemed: a key, nothing marked stale.
+	c.src.set(func(s *fakeSignInSrc) { s.keys["alice"] = []signin.Method{signin.SecurityKey} })
+	now = now.Add(4 * time.Second) // 6 s after the last forced read, inside the 30 s
+	if r := view(); r != "" {
+		t.Fatalf("after the redeem: refusal %q", r)
+	}
+	if got := calls() - n1; got != 1 {
+		t.Fatalf("reads after the redeem %d, want 1", got)
+	}
+	// Offered: no re-read at all.
+	n2 := calls()
+	now = now.Add(10 * time.Second)
+	if r := view(); r != "" || calls() != n2 {
+		t.Fatalf("offered: refusal %q, reads %d", r, calls()-n2)
+	}
+}
+
+// TestHistoryCredentialEventMarksStale: a setup link used or an
+// authenticator app change Keycloak shows after the cached inventory was
+// read marks it stale; an older one doesn't.
+func TestHistoryCredentialEventMarksStale(t *testing.T) {
+	c := newCertFixture(t)
+	h := c.f.h
+	if _, err := h.inventoryBase(c.ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	base := h.signInInv.currentBase()
+	tried := func() bool {
+		h.signInInv.mu.Lock()
+		defer h.signInInv.mu.Unlock()
+		return !h.signInInv.tried.IsZero()
+	}
+	h.staleOnCredentialEvents([]signinhistory.Entry{
+		{Time: base.at.Add(-time.Minute), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail},
+		{Time: base.at.Add(time.Minute), Kind: signinhistory.KindSignIn},
+	})
+	if !tried() {
+		t.Fatal("an older setup link or a plain sign-in marked it stale")
+	}
+	for _, e := range []signinhistory.Entry{
+		{Time: base.at.Add(time.Second), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail},
+		{Time: base.at.Add(time.Second), Kind: signinhistory.KindMethod, Detail: "authenticator app added: phone"},
+	} {
+		if _, err := h.inventoryBase(c.ctx, true); err != nil {
+			t.Fatal(err)
+		}
+		e.Time = h.signInInv.currentBase().at.Add(time.Second)
+		h.staleOnCredentialEvents([]signinhistory.Entry{e})
+		if tried() {
+			t.Fatalf("%+v didn't mark it stale", e)
+		}
+	}
 }

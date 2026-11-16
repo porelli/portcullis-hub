@@ -454,6 +454,9 @@ type Hub struct {
 	signInInv inventoryCache
 	// signInRefresh throttles GET /api/me/signin?refresh=1 (T5).
 	signInRefresh refreshThrottle
+	// freshRecheckT throttles the forced inventory re-reads before a
+	// fresh-auth refusal (freshRecheck: once per 5 s per person).
+	freshRecheckT refreshThrottle
 	// totpDoc wires the authenticator-app doctor kinds (doctor_totp.go).
 	totpDoc totpDoctor
 	// certActions issues, renews and revokes certificates through enroll

@@ -132,6 +132,14 @@ func (h *Hub) SetOwnPasswords(p OwnPasswords) {
 // once per 30 s); a source it couldn't read leaves its methods unknown.
 // The directory unavailable is its error.
 func (h *Hub) MySignInView(ctx context.Context, user string) (*MySignIn, error) {
+	v, err := h.mySignInView(ctx, user)
+	if err == nil && v.FreshAuth != nil && v.FreshAuth.Refusal == freshNeedsStronger && h.freshRecheck(ctx, v.User) {
+		return h.mySignInView(ctx, user)
+	}
+	return v, err
+}
+
+func (h *Hub) mySignInView(ctx context.Context, user string) (*MySignIn, error) {
 	u, err := myUser(user)
 	if err != nil {
 		return nil, err
@@ -645,22 +653,27 @@ func (h *Hub) RefreshMySignIn(user string) {
 	if err != nil {
 		return
 	}
-	now := h.entryClock()
-	r := &h.signInRefresh
+	if h.signInRefresh.allow(u, h.entryClock(), refreshMinGap) {
+		h.MarkInventoryStale()
+	}
+}
+
+// allow records u's mark at now and is true unless u had one less than
+// gap ago (then nothing is recorded).
+func (r *refreshThrottle) allow(u string, now time.Time, gap time.Duration) bool {
 	r.mu.Lock()
-	if t, ok := r.last[u]; ok && now.Sub(t) < refreshMinGap {
-		r.mu.Unlock()
-		return
+	defer r.mu.Unlock()
+	if t, ok := r.last[u]; ok && now.Sub(t) < gap {
+		return false
 	}
 	if r.last == nil {
 		r.last = map[string]time.Time{}
 	}
 	for k, t := range r.last { // keep the map small: drop the old marks
-		if now.Sub(t) >= refreshMinGap {
+		if now.Sub(t) >= gap {
 			delete(r.last, k)
 		}
 	}
 	r.last[u] = now
-	r.mu.Unlock()
-	h.MarkInventoryStale()
+	return true
 }

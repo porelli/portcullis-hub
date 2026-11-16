@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/freshauth"
@@ -219,6 +220,25 @@ func withPcMethod(info *freshauth.AuthorizeInfo, pc, refusal string) *freshauth.
 	c := *info
 	c.PcMethod, c.Refusal = pc, refusal
 	return &c
+}
+
+// freshRecheckGap: a person is re-read before a refusal at most once per
+// 5 s (it reads Keycloak: never a way to hammer it).
+const freshRecheckGap = 5 * time.Second
+
+// freshRecheck is called when freshPcFor refused a known person
+// (freshNeedsStronger): the inventory may predate a method they just set
+// up (a setup link redeemed, an authenticator app added), so it is read
+// again at once, past the 30 s throttle — at most once per 5 s per
+// person. True: it was read again (the caller computes the answer
+// again, as strictly); false: throttled, the refusal stands.
+func (h *Hub) freshRecheck(ctx context.Context, user string) bool {
+	if !h.freshRecheckT.allow(strings.ToLower(user), h.entryClock(), freshRecheckGap) {
+		return false
+	}
+	h.MarkInventoryStale()
+	_, _ = h.inventoryBase(ctx, true)
+	return true
 }
 
 // personMethods is user's set-up methods from the sign-in inventory (read

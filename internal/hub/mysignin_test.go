@@ -836,6 +836,9 @@ func TestMySignInTOTPRowGuardAlone(t *testing.T) {
 	h.signInInv.tried, h.signInInv.err = at, nil
 	h.signInInv.mu.Unlock()
 	for _, u := range []string{"admin", "bob"} {
+		// The hand-made inventory stays: no forced re-read before a
+		// fresh-auth refusal (freshRecheck) replaces it.
+		h.freshRecheckT.allow(u, h.entryClock(), freshRecheckGap)
 		v, err := h.MySignInView(c.ctx, u)
 		if err != nil {
 			t.Fatal(err)
