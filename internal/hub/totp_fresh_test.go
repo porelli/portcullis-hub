@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -416,15 +417,16 @@ func withPasswordAndCode(t *testing.T, c *certFixture, user string) {
 	c.f.h.MarkInventoryStale()
 }
 
-// TestFreshRecheckBeforeRefusal: a known person with none of the rule's
-// accepted methods gets exactly one forced inventory re-read (past the
-// 30 s throttle) before the refusal, still refused when they truly have
-// none; at most once per 5 s per person; a method set up just now (a
-// setup link redeemed, the inventory read seconds ago) is seen at once
-// and the popup is offered.
-func TestFreshRecheckBeforeRefusal(t *testing.T) {
+// recheckFixture: the people page on a key-only rule, alice known with
+// no method, both clocks at *now; perPerson false wires no one-person
+// source (a forced re-read is a full one).
+func recheckFixture(t *testing.T, perPerson bool) (*certFixture, *time.Time) {
+	t.Helper()
 	c := newCertFixture(t)
 	h := c.f.h
+	if !perPerson {
+		h.SetSignInSources(SignInSources{Passkeys: c.src.passkeys, Certificates: c.src.certificates})
+	}
 	setPeopleRule(c.f, siLeaves("any", "security_key"))
 	now := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
@@ -434,82 +436,173 @@ func TestFreshRecheckBeforeRefusal(t *testing.T) {
 	h.signInInv.mu.Unlock()
 	c.src.set(func(s *fakeSignInSrc) { s.keys["alice"] = []signin.Method{} })
 	h.MarkInventoryStale()
-	calls := func() int {
-		c.src.mu.Lock()
-		defer c.src.mu.Unlock()
-		return c.src.calls
+	return c, &now
+}
+
+func (c *certFixture) reads() (full, person int) {
+	c.src.mu.Lock()
+	defer c.src.mu.Unlock()
+	return c.src.calls, c.src.personCalls
+}
+
+func (c *certFixture) refusal(t *testing.T, u string) string {
+	t.Helper()
+	v, err := c.f.h.MySignInView(c.ctx, u)
+	if err != nil || v.FreshAuth == nil {
+		t.Fatalf("view %+v %v", v, err)
 	}
-	view := func() string {
-		t.Helper()
-		v, err := h.MySignInView(c.ctx, "alice")
-		if err != nil || v.FreshAuth == nil {
-			t.Fatalf("view %+v %v", v, err)
-		}
-		return v.FreshAuth.Refusal
-	}
-	n0 := calls()
-	if r := view(); r != freshNeedsStronger {
+	return v.FreshAuth.Refusal
+}
+
+// TestFreshRecheckBeforeRefusal: a known person with none of the rule's
+// accepted methods gets exactly one re-read of their own methods (past
+// the 30 s throttle) before the refusal, still refused when they truly
+// have none; at most once per 5 s per person; a method set up just now (a
+// setup link redeemed seconds after the last read) is seen at once and
+// the popup is offered. Never a full reload.
+func TestFreshRecheckBeforeRefusal(t *testing.T) {
+	c, now := recheckFixture(t, true)
+	if r := c.refusal(t, "alice"); r != freshNeedsStronger {
 		t.Fatalf("no method: refusal %q", r)
 	}
-	if got := calls() - n0; got != 2 { // the page's read, one forced re-read
-		t.Fatalf("reads %d, want 2", got)
+	f0, p0 := c.reads()
+	if p0 != 1 {
+		t.Fatalf("one-person reads %d, want 1", p0)
 	}
-	// Within 5 s: no forced re-read (the 30 s throttle holds too).
-	now = now.Add(2 * time.Second)
-	n1 := calls()
-	if r := view(); r != freshNeedsStronger || calls() != n1 {
-		t.Fatalf("throttled: refusal %q, reads %d", r, calls()-n1)
+	// Within 5 s: no re-read (the 30 s throttle holds too).
+	*now = now.Add(2 * time.Second)
+	if r := c.refusal(t, "alice"); r != freshNeedsStronger {
+		t.Fatalf("throttled: refusal %q", r)
+	}
+	if f, p := c.reads(); f != f0 || p != p0 {
+		t.Fatalf("throttled: reads %d/%d", f-f0, p-p0)
 	}
 	// A setup link redeemed: a key, nothing marked stale.
 	c.src.set(func(s *fakeSignInSrc) { s.keys["alice"] = []signin.Method{signin.SecurityKey} })
-	now = now.Add(4 * time.Second) // 6 s after the last forced read, inside the 30 s
-	if r := view(); r != "" {
+	*now = now.Add(4 * time.Second) // 6 s after the last re-read, inside the 30 s
+	if r := c.refusal(t, "alice"); r != "" {
 		t.Fatalf("after the redeem: refusal %q", r)
 	}
-	if got := calls() - n1; got != 1 {
-		t.Fatalf("reads after the redeem %d, want 1", got)
+	if f, p := c.reads(); f != f0 || p != p0+1 {
+		t.Fatalf("after the redeem: reads %d/%d, want 0/1", f-f0, p-p0)
 	}
 	// Offered: no re-read at all.
-	n2 := calls()
-	now = now.Add(10 * time.Second)
-	if r := view(); r != "" || calls() != n2 {
-		t.Fatalf("offered: refusal %q, reads %d", r, calls()-n2)
+	*now = now.Add(10 * time.Second)
+	if r := c.refusal(t, "alice"); r != "" {
+		t.Fatalf("offered: refusal %q", r)
+	}
+	if f, p := c.reads(); f != f0 || p != p0+1 {
+		t.Fatalf("offered: reads %d/%d", f-f0, p-p0+1)
+	}
+}
+
+// TestFreshRecheckManyPeople: 100 people refused in one window are 100
+// one-person reads and no full reload; without a one-person source, at
+// most one full reload per 5 s overall (none while the inventory is
+// under 5 s old).
+func TestFreshRecheckManyPeople(t *testing.T) {
+	people := make([]string, 100)
+	for i := range people {
+		people[i] = fmt.Sprintf("p%03d", i)
+	}
+	for _, perPerson := range []bool{true, false} {
+		c, now := recheckFixture(t, perPerson)
+		c.src.set(func(s *fakeSignInSrc) {
+			for _, u := range people {
+				s.keys[u] = []signin.Method{}
+			}
+		})
+		if _, err := c.f.h.inventoryBase(c.ctx, true); err != nil {
+			t.Fatal(err)
+		}
+		*now = now.Add(6 * time.Second) // the inventory is 6 s old
+		f0, p0 := c.reads()
+		for _, u := range people {
+			if r := c.refusal(t, u); r != freshNeedsStronger {
+				t.Fatalf("%s: refusal %q", u, r)
+			}
+		}
+		f, p := c.reads()
+		if perPerson && (f != f0 || p-p0 != len(people)) {
+			t.Errorf("per person: full %d, one-person %d", f-f0, p-p0)
+		}
+		if !perPerson && (f-f0 != 1 || p != p0) {
+			t.Errorf("full only: full %d, want 1", f-f0)
+		}
+		if !perPerson {
+			// Under 5 s since that reload, even after the people's own 5 s.
+			*now = now.Add(4 * time.Second)
+			c.f.h.freshRecheckT = refreshThrottle{}
+			c.refusal(t, people[0])
+			if f2, _ := c.reads(); f2 != f {
+				t.Errorf("a fresh inventory was read again (%d)", f2-f)
+			}
+		}
 	}
 }
 
 // TestHistoryCredentialEventMarksStale: a setup link used or an
-// authenticator app change Keycloak shows after the cached inventory was
-// read marks it stale; an older one doesn't.
+// authenticator app change Keycloak shows after a person's methods were
+// read marks them dirty; an older one, or a plain sign-in, doesn't; a
+// burst of such events (any number of people) is one reload, then none
+// for 5 s.
 func TestHistoryCredentialEventMarksStale(t *testing.T) {
-	c := newCertFixture(t)
+	c, now := recheckFixture(t, true)
 	h := c.f.h
 	if _, err := h.inventoryBase(c.ctx, true); err != nil {
 		t.Fatal(err)
 	}
-	base := h.signInInv.currentBase()
-	tried := func() bool {
+	at := h.signInInv.currentBase().at
+	dirty := func() int {
 		h.signInInv.mu.Lock()
 		defer h.signInInv.mu.Unlock()
-		return !h.signInInv.tried.IsZero()
+		return len(h.signInInv.dirty)
 	}
-	h.staleOnCredentialEvents([]signinhistory.Entry{
-		{Time: base.at.Add(-time.Minute), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail},
-		{Time: base.at.Add(time.Minute), Kind: signinhistory.KindSignIn},
+	h.staleOnCredentialEvents("alice", []signinhistory.Entry{
+		{Time: at.Add(-time.Minute), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail},
+		{Time: at.Add(time.Minute), Kind: signinhistory.KindSignIn},
 	})
-	if !tried() {
-		t.Fatal("an older setup link or a plain sign-in marked it stale")
+	if dirty() != 0 {
+		t.Fatal("an older setup link or a plain sign-in marked it")
 	}
-	for _, e := range []signinhistory.Entry{
-		{Time: base.at.Add(time.Second), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail},
-		{Time: base.at.Add(time.Second), Kind: signinhistory.KindMethod, Detail: "authenticator app added: phone"},
-	} {
+	for i := 0; i < 50; i++ {
+		u := fmt.Sprintf("p%03d", i)
+		h.staleOnCredentialEvents(u, []signinhistory.Entry{{Time: at.Add(time.Second), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail}})
+		h.staleOnCredentialEvents(u, []signinhistory.Entry{{Time: at.Add(time.Second), Kind: signinhistory.KindMethod, Detail: "authenticator app added: phone"}})
+	}
+	if dirty() != 50 {
+		t.Fatalf("dirty %d, want 50", dirty())
+	}
+	f0, _ := c.reads()
+	*now = now.Add(time.Second) // well inside the 30 s
+	for range 10 {
 		if _, err := h.inventoryBase(c.ctx, true); err != nil {
 			t.Fatal(err)
 		}
-		e.Time = h.signInInv.currentBase().at.Add(time.Second)
-		h.staleOnCredentialEvents([]signinhistory.Entry{e})
-		if tried() {
-			t.Fatalf("%+v didn't mark it stale", e)
-		}
+	}
+	if f, _ := c.reads(); f-f0 != 1 || dirty() != 0 {
+		t.Fatalf("burst: %d reloads, %d dirty left", f-f0, dirty())
+	}
+	// More events inside the 5 s: wait for it, then one reload.
+	h.staleOnCredentialEvents("alice", []signinhistory.Entry{{Time: now.Add(time.Second), Kind: signinhistory.KindMethod}})
+	*now = now.Add(2 * time.Second)
+	h.inventoryBase(c.ctx, true)
+	if f, _ := c.reads(); f-f0 != 1 {
+		t.Fatalf("inside 5 s: %d reloads", f-f0)
+	}
+	*now = now.Add(4 * time.Second)
+	h.inventoryBase(c.ctx, true)
+	h.inventoryBase(c.ctx, true)
+	if f, _ := c.reads(); f-f0 != 2 || dirty() != 0 {
+		t.Fatalf("after 5 s: %d reloads, %d dirty", f-f0, dirty())
+	}
+	// A person read on their own after the event isn't marked by it.
+	h.freshRecheckT = refreshThrottle{}
+	ev := now.Add(time.Second)
+	*now = now.Add(2 * time.Second)
+	c.refusal(t, "alice") // refused: their own read, after ev
+	h.staleOnCredentialEvents("alice", []signinhistory.Entry{{Time: ev, Kind: signinhistory.KindMethod}})
+	if dirty() != 0 {
+		t.Fatal("an event older than the person's own read marked them")
 	}
 }

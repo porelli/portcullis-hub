@@ -26,6 +26,8 @@ type fakeSignInSrc struct {
 	certErr error
 	down    bool
 	calls   int
+	// personCalls counts the one-person reads (personPasskeys).
+	personCalls int
 	// creds, when set for a user, is their passkey list as is (instead
 	// of keys' generated one).
 	creds map[string][]keycloak.PasskeyCredential
@@ -35,6 +37,23 @@ func (s *fakeSignInSrc) passkeys(ctx context.Context) (map[string][]keycloak.Pas
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+	return s.listLocked()
+}
+
+// personPasskeys is one person's entry of passkeys (found false: absent).
+func (s *fakeSignInSrc) personPasskeys(ctx context.Context, u string) ([]keycloak.PasskeyCredential, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.personCalls++
+	all, err := s.listLocked()
+	if err != nil {
+		return nil, false, err
+	}
+	list, ok := all[u]
+	return list, ok, nil
+}
+
+func (s *fakeSignInSrc) listLocked() (map[string][]keycloak.PasskeyCredential, error) {
 	if s.down {
 		return nil, errors.New("keycloak: connection refused")
 	}
@@ -75,7 +94,7 @@ func (s *fakeSignInSrc) set(fn func(s *fakeSignInSrc)) {
 // on every reading (no refresh is ever skipped as too recent).
 func wireSignIn(h *Hub, p *fakePeople, src *fakeSignInSrc) {
 	h.SetPeople(p)
-	h.SetSignInSources(SignInSources{Passkeys: src.passkeys, Certificates: src.certificates})
+	h.SetSignInSources(SignInSources{Passkeys: src.passkeys, Certificates: src.certificates, PersonPasskeys: src.personPasskeys})
 	var mu sync.Mutex
 	clock := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	h.signInInv.now = func() time.Time {

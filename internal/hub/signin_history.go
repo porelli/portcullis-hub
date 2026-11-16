@@ -323,7 +323,7 @@ func (h *Hub) SignInHistory(ctx context.Context, user, cursor string, limit int)
 	wg.Wait()
 	for i, ns := range srcs {
 		if ns.name == HistoryKeycloak {
-			h.staleOnCredentialEvents(lists[i])
+			h.staleOnCredentialEvents(user, lists[i])
 		}
 	}
 	// The page ends after the newest Through: older entries wait for the
@@ -466,18 +466,19 @@ func (h *Hub) RunHistoryPrune(ctx context.Context, every time.Duration) {
 	}
 }
 
-// staleOnCredentialEvents marks the inventory stale when Keycloak shows a
+// staleOnCredentialEvents marks user dirty when Keycloak shows them a
 // method set up or removed (a setup link used, an authenticator app
-// added, replaced or removed) after the cached inventory was read: the
-// next fresh read (the Sign-in page, a fresh-auth popup) sees it.
-func (h *Hub) staleOnCredentialEvents(es []signinhistory.Entry) {
+// added, replaced or removed) after their methods were last read: a
+// later fresh read reloads (coalesced: markPersonDirty).
+func (h *Hub) staleOnCredentialEvents(user string, es []signinhistory.Entry) {
 	base := h.signInInv.currentBase()
 	if base == nil {
 		return
 	}
+	at := base.readAt(user)
 	for _, e := range es {
-		if (e.Kind == signinhistory.KindMethod || e.Detail == signinhistory.SetupLinkDetail) && !e.Time.Before(base.at) {
-			h.MarkInventoryStale()
+		if (e.Kind == signinhistory.KindMethod || e.Detail == signinhistory.SetupLinkDetail) && !e.Time.Before(at) {
+			h.markPersonDirty(user)
 			return
 		}
 	}

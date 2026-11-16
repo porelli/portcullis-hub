@@ -232,11 +232,35 @@ const freshRecheckGap = 5 * time.Second
 // again at once, past the 30 s throttle — at most once per 5 s per
 // person. True: it was read again (the caller computes the answer
 // again, as strictly); false: throttled, the refusal stands.
+//
+// With a per-person source only that person is read and patched in
+// (refreshPerson); without one, a full re-read runs at most once per 5 s
+// overall, and not when the cached inventory is under 5 s old.
 func (h *Hub) freshRecheck(ctx context.Context, user string) bool {
-	if !h.freshRecheckT.allow(strings.ToLower(user), h.entryClock(), freshRecheckGap) {
+	u := strings.ToLower(user)
+	if !h.freshRecheckT.allow(u, h.entryClock(), freshRecheckGap) {
 		return false
 	}
-	h.MarkInventoryStale()
+	c := &h.signInInv
+	c.mu.Lock()
+	read := c.src.PersonPasskeys
+	c.mu.Unlock()
+	if read != nil {
+		return h.refreshPerson(ctx, read, u)
+	}
+	now := c.clock()
+	c.mu.Lock()
+	skip := (c.base != nil && c.err == nil && now.Sub(c.base.at) < freshRecheckGap) ||
+		(!c.forcedAt.IsZero() && now.Sub(c.forcedAt) < freshRecheckGap)
+	if !skip {
+		c.forcedAt = now
+		c.tried = time.Time{}
+		c.gen++
+	}
+	c.mu.Unlock()
+	if skip {
+		return false
+	}
 	_, _ = h.inventoryBase(ctx, true)
 	return true
 }
