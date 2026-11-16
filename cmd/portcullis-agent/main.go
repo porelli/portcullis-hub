@@ -257,7 +257,7 @@ func run(data string, getenv func(string) string) error {
 		i.QuarantineError = api.QuarantineError()
 		return i, nil
 	}
-	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api,
+	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api, Unhealthy: api.Unhealthy,
 		OnNetwork: func(ctx context.Context, n agentapi.NetworkParams) error { return api.SetupNetwork(ctx, n, self) }})
 	if err != nil {
 		return err

@@ -121,6 +121,7 @@ var serverRoutes = []struct{ method, path, body string }{
 	{"POST", "/api/instances/grafana/move/undo", `{"confirm":"grafana",` + proofJSON + `}`},
 	{"DELETE", "/api/instances/grafana/move-leftover", `{"confirm":"grafana",` + proofJSON + `}`},
 	{"POST", "/api/instances/grafana/quarantine/lift", `{` + proofJSON + `}`},
+	{"DELETE", "/api/instances/grafana?forget=1", `{"confirm":"grafana"}`},
 }
 
 // TestServersRoutesAdminOnly: delegates, non-admins and anonymous
@@ -354,5 +355,42 @@ func TestMoveRoutesNeedFresh(t *testing.T) {
 	}
 	if code, b := e.do(t, "root", "DELETE", "/api/instances/grafana?forget=1", `{"confirm":"grafana"}`); code != 409 {
 		t.Errorf("forget a live instance = %d %s", code, b)
+	}
+}
+
+// TestFreshNotSpentOnBadInput (L4, I5): an invalid id or name on add and a
+// mistyped confirm on undo and leftover are 400 before the proof is
+// checked (no verifier call) and audit nothing; every early answer is
+// no-store.
+func TestFreshNotSpentOnBadInput(t *testing.T) {
+	e := newServersEnv(t)
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/api/servers", `{"id":"Bad Id!","name":"x",` + proofJSON + `}`},
+		{"POST", "/api/servers", `{"id":"nas","name":"` + strings.Repeat("n", 65) + `",` + proofJSON + `}`},
+		{"POST", "/api/instances/grafana/move/undo", `{"confirm":"nope",` + proofJSON + `}`},
+		{"DELETE", "/api/instances/grafana/move-leftover", `{"confirm":"nope",` + proofJSON + `}`},
+		{"POST", "/api/servers/nas/revoke", `{"confirm":"nope",` + proofJSON + `}`},
+	} {
+		resp, b := doAs(t, e.hub, "root", c.method, c.path, c.body)
+		if resp.StatusCode != 400 || resp.Header.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s %s = %d %q %s", c.method, c.path, resp.StatusCode, resp.Header.Get("Cache-Control"), b)
+		}
+	}
+	if n := e.fa.calls.Load(); n != 0 {
+		t.Errorf("the verifier was called %d times", n)
+	}
+	if a := append(e.auditActions(t, "server."), e.auditActions(t, "instance.move")...); len(a) != 0 {
+		t.Errorf("audited %v", a)
+	}
+	// Early refusals (a bad body, a bad id) are no-store too.
+	for _, c := range []struct{ method, path, body string }{
+		{"PUT", "/api/servers/nas/settings", `{"x":1}`},
+		{"GET", "/api/servers/Bad!", ""},
+		{"DELETE", "/api/instances/grafana?forget=1", `{"x":1}`},
+	} {
+		resp, _ := doAs(t, e.hub, "root", c.method, c.path, c.body)
+		if resp.StatusCode != 400 || resp.Header.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s %s = %d %q", c.method, c.path, resp.StatusCode, resp.Header.Get("Cache-Control"))
+		}
 	}
 }

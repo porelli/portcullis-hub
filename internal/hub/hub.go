@@ -307,6 +307,9 @@ type Hub struct {
 	placementInvalid map[string]string
 	// testHookMove runs at each move phase's start (tests: a failure).
 	testHookMove func(phase string) error
+	// testHookForget runs in a forget once the instance lock is held
+	// (tests: a restore elsewhere finishing meanwhile, L5).
+	testHookForget func(id string)
 	// moveOwners: instance ids a move, an undo or a move recovery is
 	// running for (the only ones composeUp starts while moving).
 	moveOwners sync.Map

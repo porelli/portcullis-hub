@@ -438,6 +438,7 @@ func (s *Server) clearEnvOverride(a directory.Actor, id, name string) (*hub.EnvC
 }
 
 func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	if !s.adminOnly(w, r) {
 		return
 	}

@@ -177,6 +177,12 @@ type ServerView struct {
 // Servers lists every server, the primary first.
 func (h *Hub) Servers(ctx context.Context) []ServerView {
 	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.serversLocked()
+}
+
+// serversLocked is Servers with mu held (read); it takes srvMu.
+func (h *Hub) serversLocked() []ServerView {
 	prim := ServerView{ID: servers.PrimaryID, Name: "Primary", State: ServerReady, Runtime: string(h.cfg.Runtime), Rootless: h.rootlessOn(), Instances: []string{}}
 	ids := make([]string, 0, len(h.st.Servers))
 	byServer := map[string][]string{}
@@ -190,23 +196,28 @@ func (h *Hub) Servers(ctx context.Context) []ServerView {
 	out := []ServerView{prim}
 	for _, id := range ids {
 		s := h.st.Servers[id]
-		v := ServerView{ID: id, Name: s.Name, State: s.State, LastContact: s.LastContact, AgentVersion: s.AgentVersion,
+		v := ServerView{ID: id, Name: s.Name, State: s.State, LastContact: s.LastContact, AgentVersion: untrusted(s.AgentVersion, 40),
 			CertNotAfter: s.CertNotAfter, TunnelIP: s.TunnelIP, Instances: []string{}}
 		out = append(out, v)
 	}
 	for _, iid := range byServer[""] {
 		out[0].Instances = append(out[0].Instances, iid)
 	}
-	h.mu.RUnlock()
 	h.srvMu.Lock()
 	for i := range out[1:] {
 		v := &out[i+1]
 		v.Instances = append(v.Instances, byServer[v.ID]...)
 		if ps := h.polls[v.ID]; ps != nil {
-			v.Error = ps.reason
+			// Worker-supplied text is untrusted (I2): one clipped line, no
+			// control characters, in every view and tool answer.
+			v.Error = untrusted(ps.reason, 300)
 			if inf := ps.info; inf != nil {
-				v.Runtime, v.Rootless, v.Arch, v.CPUs, v.MemBytes = inf.Runtime, inf.Rootless, inf.Arch, inf.CPUs, inf.MemBytes
-				v.DiskTotal, v.DiskFree, v.DataTotal, v.DataFree, v.BindRoots = inf.DiskTotal, inf.DiskFree, inf.DataTotal, inf.DataFree, inf.BindRoots
+				v.Runtime, v.Rootless, v.Arch, v.CPUs, v.MemBytes = untrusted(inf.Runtime, 20), inf.Rootless, untrusted(inf.Arch, 20), inf.CPUs, inf.MemBytes
+				v.DiskTotal, v.DiskFree, v.DataTotal, v.DataFree = inf.DiskTotal, inf.DiskFree, inf.DataTotal, inf.DataFree
+				v.BindRoots = make([]string, 0, len(inf.BindRoots))
+				for _, r := range inf.BindRoots {
+					v.BindRoots = append(v.BindRoots, untrusted(r, 200))
+				}
 			}
 		}
 	}
@@ -478,4 +489,18 @@ func (h *Hub) serverBackend(ctx context.Context, id string, s state.Server, kind
 	}
 	return agentrt.New(agentrt.Config{ServerID: id, TunnelIP: ip, CACert: ca, SPKI: spki, Serial: s.CertSerial, ControlCert: cert,
 		Dial: h.srvDialer(), Kind: kind, Env: env, OnMismatch: func() { h.identityMismatch(id) }}), nil
+}
+
+// untrusted is text a worker supplied (an error, a version, a path), made
+// safe to show and to hand an AI client (I2): control characters become
+// spaces, the result is one line clipped to n bytes on a rune boundary.
+// The UI escapes it besides; it is never markup.
+func untrusted(s string, n int) string {
+	b := []rune(s)
+	for i, r := range b {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029 {
+			b[i] = ' '
+		}
+	}
+	return clipRunes(strings.TrimSpace(string(b)), n)
 }

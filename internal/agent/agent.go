@@ -37,6 +37,10 @@ type Config struct {
 	// OnNetwork applies PUT /v1/network (the worker's portcullis-proxy and
 	// the agent's address on it; API.SetupNetwork); nil = stored only.
 	OnNetwork func(ctx context.Context, n agentapi.NetworkParams) error
+	// Unhealthy lists the bundled projects' containers whose health is
+	// unhealthy (metrics: portcullis_agent_container_unhealthy); nil =
+	// none reported.
+	Unhealthy func(ctx context.Context) []UnitHealth
 	// Now is the clock (tests).
 	Now func() time.Time
 	// SwitchDelay / SwitchTimeout: the WireGuard key switch after PUT
@@ -90,6 +94,8 @@ type Agent struct {
 
 	metricsOnce sync.Once
 	metrics     http.Handler
+	// rootDir: the engine's data root as last read (metrics' disk gauges).
+	rootDir string
 }
 
 // New loads the identity under <DataDir>/identity. An agent that never

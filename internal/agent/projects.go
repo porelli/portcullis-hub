@@ -1195,3 +1195,33 @@ func flush(w http.ResponseWriter) {
 // isNotFound: the engine says the container doesn't exist (its typed
 // errdefs error only, never a message match).
 func isNotFound(err error) bool { return docker.IsNotFound(err) }
+
+// Unhealthy lists the services of bundled instances with a container
+// whose health is unhealthy (its status "… (unhealthy)"), once each,
+// sorted; an unreadable engine lists none.
+func (a *API) Unhealthy(ctx context.Context) []UnitHealth {
+	units, err := a.cfg.Runtime.List(ctx, runtime.Filter{})
+	if err != nil {
+		return nil
+	}
+	seen := map[UnitHealth]bool{}
+	var out []UnitHealth
+	for _, u := range units {
+		id, ok := strings.CutPrefix(u.Project, runtime.ProjectPrefix)
+		if !ok || u.Service == "" || a.project(id) == nil || !strings.Contains(u.Status, "(unhealthy)") {
+			continue
+		}
+		k := UnitHealth{Instance: id, Service: u.Service}
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	slices.SortFunc(out, func(x, y UnitHealth) int {
+		if c := strings.Compare(x.Instance, y.Instance); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Service, y.Service)
+	})
+	return out
+}

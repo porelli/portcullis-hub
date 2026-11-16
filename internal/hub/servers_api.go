@@ -33,21 +33,25 @@ type ServerDetail struct {
 // ServerDetailOf is one server's detail ("primary" = the primary); 404
 // for an unknown id.
 func (h *Hub) ServerDetailOf(ctx context.Context, id string) (*ServerDetail, error) {
-	for _, v := range h.Servers(ctx) {
+	// One snapshot (L6): the view, the networks and the schedule under
+	// one read lock.
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, v := range h.serversLocked() {
 		if v.ID != id {
 			continue
 		}
 		d := &ServerDetail{ServerView: v}
 		if id == servers.PrimaryID {
-			d.LocalNetworks, d.LocalNetworksDefault = h.LocalNetworksView()
+			if h.st.LocalNetworks == nil {
+				d.LocalNetworks, d.LocalNetworksDefault = slices.Clone(DefaultLocalNetworks), true
+			} else {
+				d.LocalNetworks = slices.Clone(*h.st.LocalNetworks)
+			}
 			d.BindRoots = slices.Clone(h.bindRoots)
-			h.mu.RLock()
 			d.BackupSchedule = h.st.PrimaryBackups
-			h.mu.RUnlock()
 		} else {
-			h.mu.RLock()
 			s := h.st.Servers[id]
-			h.mu.RUnlock()
 			if s.LocalNetworks == nil {
 				d.LocalNetworks, d.LocalNetworksDefault = slices.Clone(DefaultLocalNetworks), true
 			} else {
@@ -219,6 +223,16 @@ func scheduleText(s state.BackupSchedule) string {
 		return fmt.Sprintf("weekly %d %02d:00", s.Weekday, s.Hour)
 	}
 	return "off"
+}
+
+// CheckServerInput is an add's cheap checks (the id, the name: 400),
+// run before a fresh sign-in proof is spent (L4).
+func CheckServerInput(id, name string) error {
+	if err := servers.ValidID(id); err != nil {
+		return statusErr(http.StatusBadRequest, "%v", err)
+	}
+	_, err := validServerName(id, name)
+	return err
 }
 
 // CheckAdminFresh checks an admin's fresh sign-in on the Hub listener

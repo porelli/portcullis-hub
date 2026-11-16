@@ -120,6 +120,16 @@ func portSubjects(p PortIn) []string {
 // the port a rebind_port finding is about by it).
 func PortFP(p PortIn) string { return Fingerprint(KindLANOnlyExposed, portSubjects(p)...) }
 
+// tunnelOf names the never-local range a is in ("" = none).
+func tunnelOf(in *Inputs, a netip.Addr) string {
+	for _, r := range in.NotLocal {
+		if r.Prefix.IsValid() && r.Prefix.Contains(a) {
+			return r.Name + " " + r.Prefix.String()
+		}
+	}
+	return ""
+}
+
 // portNets are the Local networks p's bind is judged against: its
 // server's (contract §14.7, multiple servers), the primary's for "".
 func portNets(in *Inputs, p PortIn) []netip.Prefix {
@@ -171,6 +181,11 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 			f.Severity = Problem
 			f.Title = fmt.Sprintf("%s: LAN-only port %s is bound to %s, an address of %s.", p.Instance, portName(p), a, in.Domain)
 			f.Why = fmt.Sprintf("The template marks this port LAN-only, but %s's A / AAAA records point at %s: the port is published where the internet reaches the Hub.", in.Domain, a)
+		case tunnelOf(in, a) != "":
+			why = "tunnel"
+			f.Severity = Problem
+			f.Title = fmt.Sprintf("%s: LAN-only port %s is bound to %s, an address of %s.", p.Instance, portName(p), a, tunnelOf(in, a))
+			f.Why = fmt.Sprintf("The template marks this port LAN-only, but %s is in %s: a tunnel, not a LAN. The port is reachable through the tunnel, not from the LAN.", a, tunnelOf(in, a))
 		case !IsLocal(a, portNets(in, p)):
 			why = "outside"
 			f.Severity = Problem

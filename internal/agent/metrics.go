@@ -36,6 +36,11 @@ func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
 	info.DataDir = a.cfg.DataDir
 	info.DataTotal, info.DataFree = diskOf(a.cfg.DataDir)
 	info.Clock = a.cfg.Now().UTC()
+	if info.DockerRootDir != "" {
+		a.mu.Lock()
+		a.rootDir = info.DockerRootDir
+		a.mu.Unlock()
+	}
 	b, err := json.Marshal(info)
 	if err != nil || len(b) > agentapi.MaxInfo {
 		writeError(w, http.StatusInternalServerError, "info over its cap")
@@ -123,7 +128,57 @@ func (a *Agent) registry() *prometheus.Registry {
 		}))
 	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "portcullis_agent_data_free_bytes", Help: "Free bytes of the agent's data dir."},
 		func() float64 { _, f := diskOf(a.cfg.DataDir); return float64(f) }))
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "portcullis_agent_data_total_bytes", Help: "Total bytes of the agent's data dir's filesystem."},
+		func() float64 { t, _ := diskOf(a.cfg.DataDir); return float64(t) }))
+	// The engine's data root (DockerRootDir): core's disk alerts.
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "portcullis_agent_disk_free_bytes", Help: "Free bytes of the engine's data root (DockerRootDir)."},
+		func() float64 { _, f := diskOf(a.engineRoot()); return float64(f) }))
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "portcullis_agent_disk_total_bytes", Help: "Total bytes of the engine's data root (DockerRootDir)."},
+		func() float64 { t, _ := diskOf(a.engineRoot()); return float64(t) }))
+	reg.MustRegister(unhealthyCollector{a})
 	return reg
+}
+
+// engineRoot is the engine's data root: the last /v1/info's, else read
+// now (5 s; "" when the engine can't be read: the gauges are 0).
+func (a *Agent) engineRoot() string {
+	a.mu.Lock()
+	root := a.rootDir
+	a.mu.Unlock()
+	if root != "" || a.cfg.Info == nil {
+		return root
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if inf, err := a.cfg.Info(ctx); err == nil && inf.DockerRootDir != "" {
+		a.mu.Lock()
+		a.rootDir = inf.DockerRootDir
+		a.mu.Unlock()
+		return inf.DockerRootDir
+	}
+	return ""
+}
+
+// UnitHealth is a bundled project's service with an unhealthy container.
+type UnitHealth struct{ Instance, Service string }
+
+var unhealthyDesc = prometheus.NewDesc("portcullis_agent_container_unhealthy",
+	"1 while a container of a bundled instance's service reports unhealthy.", []string{"instance", "service"}, nil)
+
+// unhealthyCollector reports Config.Unhealthy at each scrape (10 s).
+type unhealthyCollector struct{ a *Agent }
+
+func (unhealthyCollector) Describe(ch chan<- *prometheus.Desc) { ch <- unhealthyDesc }
+
+func (c unhealthyCollector) Collect(ch chan<- prometheus.Metric) {
+	if c.a.cfg.Unhealthy == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, u := range c.a.cfg.Unhealthy(ctx) {
+		ch <- prometheus.MustNewConstMetric(unhealthyDesc, prometheus.GaugeValue, 1, u.Instance, u.Service)
+	}
 }
 
 func (a *Agent) handleMetrics(w http.ResponseWriter, r *http.Request) {

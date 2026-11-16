@@ -70,6 +70,10 @@ func (s *Server) moveConsequences(_ context.Context, args json.RawMessage) []str
 		to = "the primary"
 	}
 	size := "its size isn't known yet (no backup)"
+	// Scoped to a valid id (I6): ListBackups("") lists every instance.
+	if instanceIDOK(a.ID) != nil {
+		return []string{"Moves instance " + q(a.ID) + " (invalid id: refused)."}
+	}
 	if list, err := s.Hub.ListBackups(a.ID); err == nil && len(list) > 0 {
 		newest := list[0]
 		for _, b := range list[1:] {

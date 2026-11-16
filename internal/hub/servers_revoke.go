@@ -475,14 +475,15 @@ func (h *Hub) noteRotation(id, why string) {
 
 // serversDoctorIn is the doctor's servers input.
 func (h *Hub) serversDoctorIn() *doctor.ServersIn {
+	backups := h.newestBackups() // read before mu (I1)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.serversDoctorInLocked()
+	return h.serversDoctorInLocked(backups)
 }
 
 // serversDoctorInLocked is serversDoctorIn; caller holds mu (read):
 // doctorInputs does, and a second RLock could deadlock with a writer.
-func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
+func (h *Hub) serversDoctorInLocked(backups map[string]time.Time) *doctor.ServersIn {
 	stuck := map[string]string{}
 	for id, to := range h.stuckMovesLocked() {
 		stuck[id] = serverLabel(to)
@@ -520,7 +521,7 @@ func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
 		}
 	}
 	h.srvMu.Unlock()
-	h.serverKindsInLocked(in)
+	h.serverKindsInLocked(in, backups)
 	if len(in.NotRotated)+len(in.PlacementInvalid)+len(in.Stuck)+len(in.Quarantined)+len(in.OwedCopies)+
 		len(in.Servers)+len(in.Placed)+len(in.Leftovers)+len(in.Orphaned) == 0 && !overlapsLink(in.Ranges) {
 		return nil

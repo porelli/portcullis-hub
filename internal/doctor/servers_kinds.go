@@ -132,7 +132,7 @@ func (c serverKindCheck) Run(in *Inputs) []Finding {
 			}
 			why := "It missed three polls in a row, or its tunnel has had no handshake for 3 minutes."
 			if sv.Reason != "" {
-				why = "The Hub can't reach it: " + sv.Reason + "."
+				why = "The Hub can't reach it; the reported reason (text from the connection, not from Portcullis) is \"" + clipText(sv.Reason) + "\"."
 			}
 			add(Finding{Severity: Problem, Title: "The server " + serverLabel(sv) + " is offline.", Why: why + " Its instances can't be reached until it is back.",
 				Instances: append([]string(nil), sv.Instances...), Inputs: Digest([]any{sv.ID, sv.Reason, sv.Instances}),
@@ -155,7 +155,7 @@ func (c serverKindCheck) Run(in *Inputs) []Finding {
 			}
 			incompatible := !servers.Compatible(s.HubVersion, sv.AgentVersion)
 			if c.kind == KindServerAgentIncompatible && incompatible {
-				add(Finding{Severity: Problem, Title: "The agent on server " + serverLabel(sv) + " (" + clipText(sv.AgentVersion) + ") doesn't fit this Hub (" + clipText(s.HubVersion) + ").",
+				add(Finding{Severity: Problem, Title: "The agent on server " + serverLabel(sv) + " (reported version \"" + clipText(sv.AgentVersion) + "\") doesn't fit this Hub (" + clipText(s.HubVersion) + ").",
 					Why:       "The Hub works with an agent of its own minor version or the one before. Every start, stop or change of its instances is refused until it is upgraded.",
 					Instances: append([]string(nil), sv.Instances...), Inputs: Digest([]any{sv.ID, sv.AgentVersion, s.HubVersion}),
 					Steps: []string{"On the server, run ./portcullis worker upgrade (or pull the agent image the primary's release pins)."}}, sv.ID)
@@ -251,12 +251,14 @@ func labelOrPrimary(s string) string {
 	return s
 }
 
+// clipText is reported text clipped to 300 runes (never mid-rune);
+// "unknown" when empty.
 func clipText(s string) string {
-	if len(s) > 40 {
-		return s[:40] + "…"
-	}
 	if s == "" {
 		return "unknown"
+	}
+	if r := []rune(s); len(r) > 300 {
+		return string(r[:300]) + "…"
 	}
 	return s
 }

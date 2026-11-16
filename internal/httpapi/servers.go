@@ -87,6 +87,7 @@ type serversPage struct {
 }
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -101,6 +102,7 @@ func (s *Server) listServers(ctx context.Context) []hub.ServerView {
 }
 
 func (s *Server) handleServer(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -134,6 +136,7 @@ type addedServer struct {
 }
 
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -146,6 +149,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
+	// Cheap checks first: a bad id never spends the proof, and only a
+	// valid id is ever an audit target (L4).
+	if err := hub.CheckServerInput(b.ID, b.Name); err != nil {
+		writeAPIErr(w, err)
+		return
+	}
 	if !s.fresh(w, r, "server.add", b.ID, b.freshBody) {
 		return
 	}
@@ -160,6 +169,7 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServerOp(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -185,6 +195,7 @@ func (s *Server) handleServerOp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStopServerOp(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -224,6 +235,7 @@ type serverSettingsBody struct {
 }
 
 func (s *Server) handleServerSettings(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -277,6 +289,7 @@ type serverConfirmBody struct {
 const serverConfirmUsage = `{"confirm": "<id>", ` + freshUsage + `}`
 
 func (s *Server) handleRevokeServer(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -305,6 +318,7 @@ func (s *Server) handleRevokeServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -333,6 +347,7 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMoveInstance(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -366,6 +381,7 @@ func (s *Server) startMove(a directory.Actor, id, server string) (*hub.AsyncOp, 
 }
 
 func (s *Server) handleUndoMove(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -378,6 +394,10 @@ func (s *Server) handleUndoMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
+	if b.Confirm != id {
+		http.Error(w, "type the instance id ("+id+") to confirm: changes since the move are lost", http.StatusBadRequest)
+		return
+	}
 	if !s.fresh(w, r, "instance.move_undo", id, b.freshBody) {
 		return
 	}
@@ -391,6 +411,7 @@ func (s *Server) handleUndoMove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemoveMoveLeftover(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
@@ -403,6 +424,10 @@ func (s *Server) handleRemoveMoveLeftover(w http.ResponseWriter, r *http.Request
 		return
 	}
 	noStore(w)
+	if b.Confirm != id {
+		http.Error(w, "type the instance id ("+id+") to confirm", http.StatusBadRequest)
+		return
+	}
 	if !s.fresh(w, r, "instance.move_leftover_removed", id, b.freshBody) {
 		return
 	}
@@ -420,6 +445,7 @@ func (s *Server) handleRemoveMoveLeftover(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleLiftQuarantine(w http.ResponseWriter, r *http.Request) {
+	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}

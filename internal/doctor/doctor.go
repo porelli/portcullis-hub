@@ -116,6 +116,8 @@ type Mute struct {
 // PathIn is one host directory an enabled instance mounts (the Hub's
 // PathUsage, copied field by field).
 type PathIn struct {
+	// Server: the instance's server ("" = the primary, L1).
+	Server                                                                                                      string
 	Instance, Key, Label, HostPath, Service, Mount, Access, Source, Folder, Subpath, JoinsGroup, UIDEnv, GIDEnv string
 	UID, GID                                                                                                    int
 	GIDs                                                                                                        []int
@@ -135,6 +137,8 @@ const (
 
 // FolderIn is a shared folder and its uses.
 type FolderIn struct {
+	// Server: the folder's server ("" = the primary).
+	Server         string
 	ID, Name, Path string
 	GID            int
 	Uses           []PathIn
@@ -230,6 +234,12 @@ type Inputs struct {
 	// ServerLocalNetworks: a worker's Local networks (server id → its
 	// list; a port on a worker missing here is judged by loopback only).
 	ServerLocalNetworks map[string][]netip.Prefix
+	// ServerBindRoots: a worker's folder roots (server id → its
+	// /v1/info bind roots; unknown = none).
+	ServerBindRoots map[string][]string
+	// NotLocal: ranges that are never a LAN whatever the Local networks
+	// say (L3: the link subnet, the built-in VPN subnet).
+	NotLocal []RangeIn
 	// Domain is the main domain, DomainAddrs its A / AAAA records;
 	// DomainErr: the lookup failed (nothing escalates on it).
 	Domain      string

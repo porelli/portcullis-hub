@@ -853,10 +853,11 @@ func (h *Hub) reachAboveErrIn(rv renderView, id string, f state.Folder, insts []
 			continue
 		}
 		for _, u := range h.instanceUsagesIn(rv, t) {
+			u.Server = h.st.Instances[inst].Server
 			paths = append(paths, pathIn(u))
 		}
 	}
-	reach := doctor.ReachedAbove(doctor.FolderIn{ID: id, Name: f.Name, Path: f.Path, GID: f.GID}, paths)
+	reach := doctor.ReachedAbove(doctor.FolderIn{ID: id, Server: f.Server, Name: f.Name, Path: f.Path, GID: f.GID}, paths)
 	if len(reach) == 0 {
 		return nil
 	}

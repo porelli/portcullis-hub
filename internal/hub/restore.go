@@ -327,7 +327,7 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		return err
 	}
 	if sb.cfg.Settings != nil {
-		if err := h.dockerRootValuesRule(context.Background(), view, sb.cfg.Settings.Values); err != nil {
+		if err := h.dockerRootValuesRule(context.Background(), h.serverOf(id), view, sb.cfg.Settings.Values); err != nil {
 			return err
 		}
 	}
@@ -1144,7 +1144,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 		return err
 	}
 	if sb.cfg.Settings != nil {
-		if err := h.dockerRootValuesRule(context.Background(), &tmpl, sb.cfg.Settings.Values); err != nil {
+		if err := h.dockerRootValuesRule(context.Background(), "", &tmpl, sb.cfg.Settings.Values); err != nil { // a restore-as lands on the primary
 			return err
 		}
 	}

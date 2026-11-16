@@ -85,6 +85,23 @@ func (h *Hub) ForgetInstance(id, confirm string, actor directory.Actor) (res *De
 	return res, err
 }
 
+// orphanedLocked: instance id is orphaned (persisted), or its server is
+// revoked or gone (a forget's retry finds it deleting). Caller holds mu.
+func (h *Hub) orphanedLocked(id string) bool {
+	e, ok := h.st.Instances[id]
+	if !ok {
+		return false
+	}
+	if e.State == state.InstanceOrphaned {
+		return true
+	}
+	if e.Server == "" {
+		return false
+	}
+	s, known := h.st.Servers[e.Server]
+	return !known || s.State == ServerRevoked
+}
+
 // Delete step keys (contract §11.7 "Steps per operation"): backup (not
 // on a retry: the first backup is kept), stop, volumes (the point of no
 // return), keycloak, groups, files.
@@ -139,6 +156,20 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	h.mu.RUnlock()
 	if !ok {
 		return res, statusErr(404, "instance not found: %s", id)
+	}
+	// A forget re-checks, under the instance lock, that the entry is
+	// still orphaned (L5): a restore elsewhere finished meanwhile must not
+	// be forgotten with no backup.
+	if forgetting(ctx) {
+		if h.testHookForget != nil {
+			h.testHookForget(id)
+		}
+		h.mu.RLock()
+		still := h.orphanedLocked(id)
+		h.mu.RUnlock()
+		if !still {
+			return res, statusErr(409, "%s isn't orphaned any more (its server is back or it was restored elsewhere): nothing was forgotten", id)
+		}
 	}
 	// A model provider pointing at it (a litellm provider's instance,
 	// §15.12) would point nowhere: refused until it is deleted or

@@ -856,6 +856,10 @@ func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor
 		if in.GID != nil && *in.GID != f.GID {
 			return f, false, badPath("a shared folder's gid can't change")
 		}
+		if in.Server != "" && in.Server != f.Server {
+			// I3: refused whatever else changes, never ignored.
+			return f, false, statusErr(http.StatusConflict, "a shared folder's server can't change (it is on %s)", serverLabel(f.Server))
+		}
 		if p == "" || p == f.Path {
 			return f, false, nil
 		}
@@ -876,9 +880,6 @@ func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor
 		h.mu.RLock()
 		server := h.st.Folders[id].Server
 		h.mu.RUnlock()
-		if in.Server != "" && in.Server != server {
-			return nil, badPath("a shared folder's server can't change")
-		}
 		if err := h.dockerRootRule(ctx, server, p); err != nil {
 			return nil, err
 		}
@@ -1176,10 +1177,11 @@ func (h *Hub) auditFolder(actor directory.Actor, action, id, detail string, err 
 // dockerRootValuesRule refuses (400, F16) every hand-typed path value in
 // values (option key → value; folder refs and nil skipped: a folder's
 // path passed dockerRootRule when it was defined) at, above or under the
-// Docker daemon's data root — hub_secrets and every other volume live
+// data root of server's engine ("" = the primary's; a worker's from its
+// agent's /v1/info, M1) — hub_secrets and every other volume live
 // there. An unreadable root is 503. SaveSettings (the changed values)
 // and both restores (the archived ones) run it, outside mu.
-func (h *Hub) dockerRootValuesRule(ctx context.Context, t *templates.Template, values map[string]any) error {
+func (h *Hub) dockerRootValuesRule(ctx context.Context, server string, t *templates.Template, values map[string]any) error {
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		keys = append(keys, k)
@@ -1206,7 +1208,7 @@ func (h *Hub) dockerRootValuesRule(ctx context.Context, t *templates.Template, v
 		if err != nil {
 			continue // refused by the value checks
 		}
-		if err := h.dockerRootRule(ctx, h.serverOf(t.ID), path.Clean(p)); err != nil {
+		if err := h.dockerRootRule(ctx, server, path.Clean(p)); err != nil {
 			var se *StatusError
 			if errors.As(err, &se) && se.Status == http.StatusBadRequest {
 				return statusErr(http.StatusBadRequest, "setting %s: %v", k, err)

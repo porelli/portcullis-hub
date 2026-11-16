@@ -693,8 +693,20 @@ func (h *Hub) rebindAddress(ctx context.Context, server, s string) (netip.Addr, 
 		return a, nil, statusErr(http.StatusBadRequest, "%s is every interface: give the host's LAN address", a)
 	}
 	h.mu.RLock()
-	nets := h.localNetworksOfLocked(server, h.st.Servers[server])
+	srv, known := h.st.Servers[server]
+	nets := h.localNetworksOfLocked(server, srv)
+	tunnels := h.tunnelRangesLocked()
 	h.mu.RUnlock()
+	if server != "" && (!known || srv.State == ServerRevoked) {
+		// Never the default list for a server that is gone (L2).
+		return a, nil, statusErr(http.StatusConflict, "server %s is gone: the port's Local networks are unknown", server)
+	}
+	for _, tr := range tunnels {
+		if tr.Prefix.Contains(a) {
+			// L3: a tunnel address is never a LAN, whatever the list says.
+			return a, nil, statusErr(http.StatusBadRequest, "%s is in %s (%s), not a LAN: give the host's LAN address", a, tr.Name, tr.Prefix)
+		}
+	}
 	if !IsLocal(a, nets) {
 		if server != "" {
 			return a, nil, statusErr(http.StatusBadRequest, "%s isn't in server %s's Local networks (Settings → Servers)", a, server)
@@ -721,16 +733,24 @@ func (h *Hub) rebindPlan(ctx context.Context, f doctor.Finding, params map[strin
 	if err := checkFixParams(params, "address"); err != nil {
 		return nil, err
 	}
+	// The port is resolved once (L2): the address is judged against the
+	// server of the port that is rewritten, and the hash names it.
 	h.mu.RLock()
-	port, _ := h.rebindPortLocked(f)
+	p, ok := h.rebindPortLocked(f)
 	h.mu.RUnlock()
-	a, warns, err := h.rebindAddress(ctx, port.Server, params["address"])
+	if !ok {
+		return nil, errSetupChanged()
+	}
+	a, warns, err := h.rebindAddress(ctx, p.Server, params["address"])
 	if err != nil {
 		return nil, err
 	}
 	c := &rebindCalc{addr: a.String(), warns: warns}
 	h.mu.RLock()
-	p, ok := h.rebindPortLocked(f)
+	if q, still := h.rebindPortLocked(f); !still || q.Server != p.Server || q.Instance != p.Instance || q.Key != p.Key {
+		h.mu.RUnlock()
+		return nil, errSetupChanged()
+	}
 	var t *templates.Template
 	if ok {
 		if l := h.findLocked(p.Instance); l != nil {
@@ -769,10 +789,10 @@ func (h *Hub) rebindPlan(ctx context.Context, f doctor.Finding, params map[strin
 	}
 	c.lines = []string{fmt.Sprintf("%s bind %s → %s, %s restarts", p.Key, c.oldBind, c.addr, appName(t))}
 	c.hash = fixHash(struct {
-		Kind, FP, Instance, Key, Old, Addr, Source string
-		Ports                                      map[string]string
-		Enabled                                    bool
-	}{doctor.FixRebindPort, f.FP, p.Instance, p.Key, c.oldBind, c.addr, src, c.cur, enabled})
+		Kind, FP, Instance, Server, Key, Old, Addr, Source string
+		Ports                                              map[string]string
+		Enabled                                            bool
+	}{doctor.FixRebindPort, f.FP, p.Instance, p.Server, p.Key, c.oldBind, c.addr, src, c.cur, enabled})
 	return c, nil
 }
 
