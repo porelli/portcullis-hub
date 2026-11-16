@@ -30,6 +30,9 @@ type MailSettings struct {
 	// for an administrator's confirmation (their mail passwords are
 	// revoked meanwhile). nil: none.
 	PendingRemoval *MailPendingRemoval `json:"pending_removal,omitempty" yaml:"pending_removal,omitempty"`
+	// RestoreHandled: mailctl's restored_at the last successful full
+	// reconcile of the mail passwords ran for (nil: none yet).
+	RestoreHandled *time.Time `json:"restore_handled,omitempty" yaml:"restore_handled,omitempty"`
 }
 
 // MailAliases are one person's aliases (Username: the name they had when

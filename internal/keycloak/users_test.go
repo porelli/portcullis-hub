@@ -581,4 +581,7 @@ func TestUserSignInCredentials(t *testing.T) {
 	if _, _, err := c.UserSignInCredentials(ctx, "broken"); err == nil {
 		t.Error("unreadable credentials: want an error")
 	}
+	if _, _, err := c.UserSignInCredentials(ctx, "a*"); err == nil {
+		t.Error("an invalid username: want an error")
+	}
 }

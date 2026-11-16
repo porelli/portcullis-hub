@@ -310,6 +310,14 @@ func (c *Client) Checks(ctx context.Context, refresh bool) (Checks, error) {
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	var out Status
 	_, err := c.do(ctx, http.MethodGet, "/v1/status", nil, &out)
+	if err == nil && out.DNS != nil {
+		// Domain names compare lowercase (the Hub's are).
+		dns := make(map[string]string, len(out.DNS))
+		for d, h := range out.DNS {
+			dns[strings.ToLower(d)] = h
+		}
+		out.DNS = dns
+	}
 	return out, err
 }
 

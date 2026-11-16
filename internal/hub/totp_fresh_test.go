@@ -12,6 +12,7 @@ import (
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/signinhistory"
@@ -543,66 +544,152 @@ func TestFreshRecheckManyPeople(t *testing.T) {
 
 // TestHistoryCredentialEventMarksStale: a setup link used or an
 // authenticator app change Keycloak shows after a person's methods were
-// read marks them dirty; an older one, or a plain sign-in, doesn't; a
-// burst of such events (any number of people) is one reload, then none
-// for 5 s.
+// read marks them dirty, each event once; an older one, or a plain
+// sign-in, doesn't. With the one-person read wired, a fresh read reads
+// the dirty people one by one (at most dirtyPeopleMax per 5 s, never a
+// full reload); without it, a burst is one full reload, then none for
+// 5 s.
 func TestHistoryCredentialEventMarksStale(t *testing.T) {
+	for _, perPerson := range []bool{true, false} {
+		c, now := recheckFixture(t, perPerson)
+		h := c.f.h
+		if _, err := h.inventoryBase(c.ctx, true); err != nil {
+			t.Fatal(err)
+		}
+		at := h.signInInv.currentBase().at
+		dirty := func() int {
+			h.signInInv.mu.Lock()
+			defer h.signInInv.mu.Unlock()
+			return len(h.signInInv.dirty)
+		}
+		h.staleOnCredentialEvents("alice", []signinhistory.Entry{
+			{Time: at.Add(-time.Minute), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail},
+			{Time: at.Add(time.Minute), Kind: signinhistory.KindSignIn},
+		})
+		if dirty() != 0 {
+			t.Fatal("an older setup link or a plain sign-in marked it")
+		}
+		n := 20
+		for i := 0; i < n; i++ {
+			u := fmt.Sprintf("p%03d", i)
+			h.staleOnCredentialEvents(u, []signinhistory.Entry{{Time: at.Add(time.Second), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail}})
+			h.staleOnCredentialEvents(u, []signinhistory.Entry{{Time: at.Add(time.Second), Kind: signinhistory.KindMethod, Detail: "authenticator app added: phone"}})
+		}
+		if dirty() != n {
+			t.Fatalf("dirty %d, want %d", dirty(), n)
+		}
+		// The same events again: no new mark (each acts once).
+		h.signInInv.mu.Lock()
+		h.signInInv.dirty = nil
+		h.signInInv.mu.Unlock()
+		h.staleOnCredentialEvents("p000", []signinhistory.Entry{{Time: at.Add(time.Second), Kind: signinhistory.KindMethod}})
+		if dirty() != 0 {
+			t.Fatal("an event acted on marked the person again")
+		}
+		for i := 0; i < n; i++ {
+			h.markPersonDirty(fmt.Sprintf("p%03d", i))
+		}
+		f0, p0 := c.reads()
+		*now = now.Add(time.Second) // well inside the 30 s
+		for range 10 {
+			if _, err := h.inventoryBase(c.ctx, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f, p := c.reads()
+		if perPerson {
+			if f != f0 || p-p0 != dirtyPeopleMax || dirty() != n-dirtyPeopleMax {
+				t.Fatalf("per person: full %d, one-person %d, %d dirty left", f-f0, p-p0, dirty())
+			}
+			*now = now.Add(5 * time.Second)
+			h.inventoryBase(c.ctx, true)
+			if f2, p2 := c.reads(); f2 != f0 || p2-p0 != n || dirty() != 0 {
+				t.Fatalf("next window: full %d, one-person %d, %d dirty", f2-f0, p2-p0, dirty())
+			}
+			continue
+		}
+		if f-f0 != 1 || dirty() != 0 {
+			t.Fatalf("burst: %d reloads, %d dirty left", f-f0, dirty())
+		}
+		// More events inside the 5 s: wait for it, then one reload.
+		h.staleOnCredentialEvents("alice", []signinhistory.Entry{{Time: now.Add(time.Second), Kind: signinhistory.KindMethod}})
+		*now = now.Add(2 * time.Second)
+		h.inventoryBase(c.ctx, true)
+		if f, _ := c.reads(); f-f0 != 1 {
+			t.Fatalf("inside 5 s: %d reloads", f-f0)
+		}
+		*now = now.Add(4 * time.Second)
+		h.inventoryBase(c.ctx, true)
+		h.inventoryBase(c.ctx, true)
+		if f, _ := c.reads(); f-f0 != 2 || dirty() != 0 {
+			t.Fatalf("after 5 s: %d reloads, %d dirty", f-f0, dirty())
+		}
+	}
+	// A person read on their own after the event isn't marked by it.
 	c, now := recheckFixture(t, true)
 	h := c.f.h
 	if _, err := h.inventoryBase(c.ctx, true); err != nil {
 		t.Fatal(err)
 	}
-	at := h.signInInv.currentBase().at
-	dirty := func() int {
-		h.signInInv.mu.Lock()
-		defer h.signInInv.mu.Unlock()
-		return len(h.signInInv.dirty)
-	}
-	h.staleOnCredentialEvents("alice", []signinhistory.Entry{
-		{Time: at.Add(-time.Minute), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail},
-		{Time: at.Add(time.Minute), Kind: signinhistory.KindSignIn},
-	})
-	if dirty() != 0 {
-		t.Fatal("an older setup link or a plain sign-in marked it")
-	}
-	for i := 0; i < 50; i++ {
-		u := fmt.Sprintf("p%03d", i)
-		h.staleOnCredentialEvents(u, []signinhistory.Entry{{Time: at.Add(time.Second), Kind: signinhistory.KindSignIn, Detail: signinhistory.SetupLinkDetail}})
-		h.staleOnCredentialEvents(u, []signinhistory.Entry{{Time: at.Add(time.Second), Kind: signinhistory.KindMethod, Detail: "authenticator app added: phone"}})
-	}
-	if dirty() != 50 {
-		t.Fatalf("dirty %d, want 50", dirty())
-	}
-	f0, _ := c.reads()
-	*now = now.Add(time.Second) // well inside the 30 s
-	for range 10 {
-		if _, err := h.inventoryBase(c.ctx, true); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if f, _ := c.reads(); f-f0 != 1 || dirty() != 0 {
-		t.Fatalf("burst: %d reloads, %d dirty left", f-f0, dirty())
-	}
-	// More events inside the 5 s: wait for it, then one reload.
-	h.staleOnCredentialEvents("alice", []signinhistory.Entry{{Time: now.Add(time.Second), Kind: signinhistory.KindMethod}})
-	*now = now.Add(2 * time.Second)
-	h.inventoryBase(c.ctx, true)
-	if f, _ := c.reads(); f-f0 != 1 {
-		t.Fatalf("inside 5 s: %d reloads", f-f0)
-	}
-	*now = now.Add(4 * time.Second)
-	h.inventoryBase(c.ctx, true)
-	h.inventoryBase(c.ctx, true)
-	if f, _ := c.reads(); f-f0 != 2 || dirty() != 0 {
-		t.Fatalf("after 5 s: %d reloads, %d dirty", f-f0, dirty())
-	}
-	// A person read on their own after the event isn't marked by it.
-	h.freshRecheckT = refreshThrottle{}
 	ev := now.Add(time.Second)
 	*now = now.Add(2 * time.Second)
 	c.refusal(t, "alice") // refused: their own read, after ev
 	h.staleOnCredentialEvents("alice", []signinhistory.Entry{{Time: ev, Kind: signinhistory.KindMethod}})
-	if dirty() != 0 {
+	h.signInInv.mu.Lock()
+	d := len(h.signInInv.dirty)
+	h.signInInv.mu.Unlock()
+	if d != 0 {
 		t.Fatal("an event older than the person's own read marked them")
+	}
+}
+
+// TestRefreshPersonNeverBlocksReads (final review L3): a slow one-person
+// read holds no inventory lock: a fresh read with a recent inventory
+// answers at once; a full load that started before the person's read
+// keeps that person's newer entry.
+func TestRefreshPersonNeverBlocksReads(t *testing.T) {
+	c, _ := recheckFixture(t, true)
+	h := c.f.h
+	if _, err := h.inventoryBase(c.ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	slow := func(ctx context.Context, u string) ([]keycloak.PasskeyCredential, bool, error) {
+		close(started)
+		<-release
+		return []keycloak.PasskeyCredential{{ID: "k", Type: string(signin.SecurityKey)}}, true, nil
+	}
+	done := make(chan bool)
+	go func() { done <- h.refreshPerson(c.ctx, slow, "alice") }()
+	<-started
+	got := make(chan error, 1)
+	go func() {
+		_, err := h.inventoryBase(c.ctx, true)
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a fresh read waited for a one-person read")
+	}
+	close(release)
+	if !<-done {
+		t.Fatal("the patch wasn't applied")
+	}
+	if ms := h.signInInv.currentBase().passkeys["alice"]; len(ms) != 1 || ms[0] != signin.SecurityKey {
+		t.Fatalf("alice %v", ms)
+	}
+	// A full load started before alice's own read keeps her entry.
+	old := h.signInInv.currentBase()
+	nb := patchPerson(old, "bob", true, nil, old.at) // any copy
+	nb.read = map[string]time.Time{}
+	delete(nb.passkeys, "alice")
+	carryPersonReads(old, nb, old.at.Add(-time.Hour))
+	if ms := nb.passkeys["alice"]; len(ms) != 1 {
+		t.Fatalf("carried: %v", ms)
 	}
 }

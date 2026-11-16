@@ -63,12 +63,16 @@ type mailSync struct {
 	dnsAt, hashAt time.Time
 	dnsHash       map[string]string
 	// reconciled: the start-time reconcile of every person's mail
-	// passwords ran (after the first accepted document).
-	reconciled bool
-	// restoreAt: the last restore check (mailRestoreIfDue);
-	// restoreDone: the restored_at the last successful full reconcile
-	// ran for (zero: none yet, so any restore counts).
-	restoreAt, restoreDone time.Time
+	// passwords succeeded (wanted after the first accepted document:
+	// reconAll).
+	reconciled, reconAll bool
+	// restoreAt: the last restore check (mailRestoreIfDue); reconRunning:
+	// the background reconcile runs (mailReconcileSoon), reconAgain: run
+	// it once more when it ends.
+	restoreAt                time.Time
+	reconRunning, reconAgain bool
+	// reconWG: the background reconcile runs (tests wait on it).
+	reconWG sync.WaitGroup
 	// personMu: each person's mail credential lock (mailPersonLock).
 	personMu map[string]*sync.Mutex
 	// loaded: last was read from hub_data (mail-last.json) once; blind:
@@ -291,10 +295,11 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	if api == nil {
 		return mailIdle
 	}
-	// Every pass (at start, then at least every 60 s): a restore of mail
-	// voids every mail password, also one the Hub outlived.
-	restoreNext := h.mailRestoreIfDue(ctx, api, h.mailNow())
-	defer func() { next = min(next, restoreNext) }()
+	// After every pass (so a slow mailctl never delays what it sent), in
+	// the background without the sync lock: the start-time reconcile and
+	// the restore check (a restore of mail voids every mail password,
+	// also one the Hub outlived), at least every 60 s.
+	defer func() { next = min(next, h.mailReconcileSoon(api)) }()
 	s.mu.Lock()
 	first := !s.loaded
 	if first {
@@ -397,8 +402,9 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		kept[id] = r
 	}
 	s.hubRemoved = kept
-	reconciled := s.reconciled
-	s.reconciled = true
+	if !s.reconciled {
+		s.reconAll = true
+	}
 	s.mu.Unlock()
 	h.saveMailLast(&sent)
 	h.mailSetBlocked("")
@@ -413,9 +419,6 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 			// disables the account (and retries until it has).
 			h.mailMarkLeft(d.removedUUIDs)
 		}
-	}
-	if !reconciled {
-		h.reconcileAllMailPasswords(ctx, api)
 	}
 	if settleErr != nil {
 		h.mailLogOnce("mail: clearing the pending removal failed (retrying): " + settleErr.Error())

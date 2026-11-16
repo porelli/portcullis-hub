@@ -449,15 +449,30 @@ func TestMailRestoreReconcile(t *testing.T) {
 	at2 := at.Add(time.Hour)
 	h.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &at2 })
 	api := h.mc.Client()
-	h.advance(mailRestoreEvery)
-	h.h.mailRestoreIfDue(context.Background(), failCreds{api}, h.h.mailNow())
-	if r := h.mailReason("alice", c.ID); r != "" || !h.h.mailState.restoreDone.Equal(at) {
-		t.Fatalf("failed: reason %q, done %v", r, h.h.mailState.restoreDone)
+	handled := func() time.Time {
+		h.h.mu.RLock()
+		defer h.h.mu.RUnlock()
+		if h.h.st.Mail.RestoreHandled == nil {
+			return time.Time{}
+		}
+		return *h.h.st.Mail.RestoreHandled
 	}
-	h.advance(mailRestoreEvery)
-	h.h.mailRestoreIfDue(context.Background(), api, h.h.mailNow())
-	if r := h.mailReason("alice", c.ID); r != state.MailCredentialReasonVoidRestore || !h.h.mailState.restoreDone.Equal(at2) {
-		t.Fatalf("retried: reason %q, done %v", r, h.h.mailState.restoreDone)
+	h.h.mailRestoreReconcile(context.Background(), failCreds{api})
+	if r := h.mailReason("alice", c.ID); r != "" || !handled().Equal(at) {
+		t.Fatalf("failed: reason %q, handled %v", r, handled())
+	}
+	h.h.mailRestoreReconcile(context.Background(), api)
+	if r := h.mailReason("alice", c.ID); r != state.MailCredentialReasonVoidRestore || !handled().Equal(at2) {
+		t.Fatalf("retried: reason %q, handled %v", r, handled())
+	}
+	// Persisted: a restarted Hub doesn't run it again.
+	h.h.mu.Lock()
+	h.h.st.MailCredentials["alice"] = append(h.h.st.MailCredentials["alice"], state.MailCredential{ID: "mx", StalwartID: "gone", UUID: h.h.st.MailCredentials["alice"][0].UUID, CreatedAt: at2.Add(-time.Minute)})
+	h.h.mu.Unlock()
+	h.h.mailState.reconciled = true
+	h.h.mailRestoreReconcile(context.Background(), api)
+	if r := h.mailReason("alice", "mx"); r != "" {
+		t.Fatalf("a handled restore ran again: %q", r)
 	}
 }
 
@@ -531,5 +546,126 @@ func TestReconcileCreateRace(t *testing.T) {
 	f.h.MyMail(ctx, "alice") // the next reconcile judges it
 	if r := f.mailReason("alice", "mlate"); r != state.MailCredentialReasonMissing {
 		t.Fatalf("next reconcile: %q", r)
+	}
+}
+
+// deletePerson takes user out of the fixture's directory entirely (no
+// uuid, no groups).
+func (f *mailFixture) deletePerson(user string) {
+	f.people.mu.Lock()
+	delete(f.people.m.UUIDs, user)
+	delete(f.people.m.Users, user)
+	f.people.mu.Unlock()
+}
+
+// TestRestoreReconcileKeepsUnremovedRows (final review M1): bob deleted
+// from the directory while mailctl still holds his account (the removal
+// document not accepted yet), a restore to handle: the reconcile at
+// start never ends his row on the directory's word alone; once mailctl
+// accepted the removal his row ends revoke_leave.
+func TestRestoreReconcileKeepsUnremovedRows(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	c := f.create(t, "bob", "phone")
+	f.deletePerson("bob")
+	later := time.Now().UTC().Add(time.Hour)
+	f.mc.Lock(func(s *mailctltest.Server) {
+		s.StatusV.RestoredAt = &later
+		s.PutStatus = 503 // the removal isn't accepted
+	})
+	f.advance(mailRestoreEvery)
+	f.sync(t)
+	if r := f.mailReason("bob", c.ID); r != "" {
+		t.Fatalf("ended before mailctl removed bob: %q", r)
+	}
+	// A pending removal naming him (its revoke failing) holds it too.
+	f.h.mu.Lock()
+	uuid := f.h.st.MailCredentials["bob"][0].UUID
+	f.h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: time.Now(), Accounts: []state.MailPendingAccount{{Username: "bob", UUID: uuid}}}
+	f.h.mu.Unlock()
+	if !f.h.reconcileAllMailPasswords(context.Background(), f.mc.Client(), nil) {
+		t.Fatal("reconcile failed")
+	}
+	if r := f.mailReason("bob", c.ID); r != "" {
+		t.Fatalf("ended while a removal is pending: %q", r)
+	}
+	f.h.mu.Lock()
+	f.h.st.Mail.PendingRemoval = nil
+	f.h.mu.Unlock()
+	// Accepted: ended revoke_leave.
+	f.mc.Lock(func(s *mailctltest.Server) { s.PutStatus = 0 })
+	f.sync(t)
+	if r := f.mailReason("bob", c.ID); r != state.MailCredentialReasonRevokeLeave {
+		t.Fatalf("after the removal: %q", r)
+	}
+}
+
+// TestPersonMailUnknownUserNoEnd (final review M1): an administrator's
+// view of a deleted username mailctl still holds leaves the rows as they
+// are (shown unconfirmed) and revokes nothing.
+func TestPersonMailUnknownUserNoEnd(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	c := f.create(t, "bob", "phone")
+	f.deletePerson("bob")
+	var dels int
+	f.mc.Lock(func(s *mailctltest.Server) { dels = len(s.Deletes) })
+	v, err := f.h.PersonMail(context.Background(), &directory.Caller{User: "root", Admin: true}, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := f.mailReason("bob", c.ID); r != "" {
+		t.Fatalf("a deleted username's row ended: %q", r)
+	}
+	for _, p := range v.Passwords {
+		if p.Status == "active" {
+			t.Fatalf("shown active: %+v", v.Passwords)
+		}
+	}
+	f.mc.Lock(func(s *mailctltest.Server) {
+		if len(s.Deletes) != dels {
+			t.Errorf("revoked: %v", s.Deletes[dels:])
+		}
+	})
+}
+
+// slowCreds is a MailAPI whose credential reads take 2 s.
+type slowCreds struct{ MailAPI }
+
+func (s slowCreds) Credentials(ctx context.Context, user string) ([]mailctl.Credential, error) {
+	time.Sleep(2 * time.Second)
+	return s.MailAPI.Credentials(ctx, user)
+}
+
+// TestRestoreReconcileNeverDelaysRemoval (final review L1): with a
+// restore check due and mailctl's credential reads slow, a removal is
+// still sent at once: the reconcile runs after the pass, in the
+// background, without the sync lock.
+func TestRestoreReconcileNeverDelaysRemoval(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	f.create(t, "alice", "phone")
+	f.mc.DropCreds("alice")
+	later := time.Now().UTC().Add(time.Hour)
+	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	f.h.SetMailAPI(slowCreds{f.mc.Client()})
+	f.advance(mailRestoreEvery)
+	puts := f.mc.Puts()
+	f.people.setMembers("mail_users", "alice", "root")
+	start := time.Now()
+	f.h.mailSyncOnce(context.Background())
+	if d := time.Since(start); d >= time.Second || f.mc.Puts() != puts+1 {
+		t.Fatalf("the removal took %v (%d puts)", d, f.mc.Puts()-puts)
+	}
+	// The sync lock is free while the reconcile runs: a second pass
+	// doesn't wait for it.
+	start = time.Now()
+	f.h.mailSyncOnce(context.Background())
+	if d := time.Since(start); d >= time.Second {
+		t.Fatalf("the next pass waited %v", d)
+	}
+	f.h.mailState.reconWG.Wait()
+	f.h.mu.RLock()
+	r := f.h.st.MailCredentials["alice"][0].Reason
+	f.h.mu.RUnlock()
+	if r != state.MailCredentialReasonVoidRestore {
+		t.Fatalf("after the background reconcile: %q", r)
 	}
 }

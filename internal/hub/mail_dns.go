@@ -98,7 +98,12 @@ func (h *Hub) mailDNSByHash(ctx context.Context, api MailAPI, st *mailctl.Status
 			continue
 		}
 		if err := h.writeMailSet(ctx, api, dapi, d.name); err != nil {
-			errs = append(errs, err.Error())
+			h.mailForgetDNSHash(d.name)
+			if errors.Is(err, errNotApplied) {
+				log.Printf("mail: DNS: %v (written on the next pass)", err)
+			} else {
+				errs = append(errs, err.Error())
+			}
 			continue
 		}
 		h.mailRecordDNSHash(d.name, want)
@@ -107,6 +112,15 @@ func (h *Hub) mailDNSByHash(ctx context.Context, api MailAPI, st *mailctl.Status
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// mailForgetDNSHash drops name's recorded hash (a failed write, a set
+// removed): the next hash pass writes it whatever the hash.
+func (h *Hub) mailForgetDNSHash(name string) {
+	s := &h.mailState
+	s.mu.Lock()
+	delete(s.dnsHash, name)
+	s.mu.Unlock()
 }
 
 func (h *Hub) mailRecordDNSHash(name, hash string) {
@@ -139,7 +153,7 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 	set, err := api.DNS(ctx, name, wild)
 	if err != nil {
 		if mailctl.StatusOf(err) == 404 {
-			return errNotApplied
+			return fmt.Errorf("%s: %w", name, errNotApplied)
 		}
 		return fmt.Errorf("%s: reading the wanted mail records: %v", name, err)
 	}
@@ -195,7 +209,10 @@ func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI, st *mailctl.Status) 
 			// The hash read before the write: a set changed meanwhile
 			// differs from it, so the hash pass writes it again.
 			if err := h.writeMailSet(ctx, api, dapi, d.name); err != nil {
-				if err != errNotApplied {
+				h.mailForgetDNSHash(d.name)
+				if errors.Is(err, errNotApplied) {
+					log.Printf("mail: DNS: %v (written on the next pass)", err)
+				} else {
 					errs = append(errs, err.Error())
 				}
 				continue
@@ -208,6 +225,7 @@ func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI, st *mailctl.Status) 
 				errs = append(errs, fmt.Sprintf("%s: removing the mail set: %v", d.name, err))
 				continue
 			}
+			h.mailForgetDNSHash(d.name)
 			h.mu.Lock()
 			if e, ok := h.st.Mail.Domains[d.name]; ok && !e.Enabled && !e.Draining {
 				e.Retired = true

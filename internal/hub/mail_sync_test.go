@@ -107,9 +107,12 @@ func newMailFixture(t *testing.T) *mailFixture {
 	return f
 }
 
+// sync is one pass, then the background reconcile it started.
 func (f *mailFixture) sync(t *testing.T) time.Duration {
 	t.Helper()
-	return f.h.mailSyncOnce(context.Background())
+	next := f.h.mailSyncOnce(context.Background())
+	f.h.mailState.reconWG.Wait()
+	return next
 }
 
 // TestFirstSyncSendsAtOnce: the first pass after start sends; the
@@ -605,5 +608,58 @@ func TestMailDNSByHash(t *testing.T) {
 	}
 	if strings.Contains(calls, "example.org") {
 		t.Fatalf("main domain written: %q", calls)
+	}
+}
+
+// TestMailDNSHashForgottenOnFailure (final review L4, I3): a forced full
+// pass whose write fails forgets the recorded hash, so the next 60 s hash
+// pass writes again although mailctl's hash didn't change; a removed set
+// forgets it too; mailctl's mixed-case domain keys are read lowercase.
+func TestMailDNSHashForgottenOnFailure(t *testing.T) {
+	f := newMailFixture(t)
+	const d = "team-b.example.net"
+	f.h.mu.Lock()
+	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
+	f.h.mu.Unlock()
+	f.mc.Lock(func(s *mailctltest.Server) {
+		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+		s.StatusV.DNS = map[string]string{"Team-B.Example.NET": "h1"}
+	})
+	f.sync(t) // written, h1 recorded (the key read lowercase)
+	f.h.mailState.mu.Lock()
+	have := f.h.mailState.dnsHash[d]
+	f.h.mailState.mu.Unlock()
+	if have != "h1" {
+		t.Fatalf("recorded %q", have)
+	}
+	puts := func() int {
+		f.dom.mu.Lock()
+		defer f.dom.mu.Unlock()
+		return strings.Count(strings.Join(f.dom.mailCalls, ","), "put "+d)
+	}
+	p0 := puts()
+	// A forced full pass (an accepted document) whose write fails.
+	f.dom.mu.Lock()
+	f.dom.mailSetErr = errors.New("domains service down")
+	f.dom.mu.Unlock()
+	f.h.mailDNSIfDue(context.Background(), f.mc.Client(), f.h.mailNow(), true)
+	f.dom.mu.Lock()
+	f.dom.mailSetErr = nil
+	f.dom.mu.Unlock()
+	f.advance(mailDNSHashEvery)
+	f.sync(t) // the same hash h1: written again
+	if puts() != p0+1 {
+		t.Fatalf("puts after the failure: %d", puts()-p0)
+	}
+	// Off: the set is removed and the hash forgotten.
+	f.h.mu.Lock()
+	f.h.st.Mail.Domains[d] = state.MailDomain{Groups: []string{"team_b"}}
+	f.h.mu.Unlock()
+	f.h.mailDNSIfDue(context.Background(), f.mc.Client(), f.h.mailNow(), true)
+	f.h.mailState.mu.Lock()
+	_, kept := f.h.mailState.dnsHash[d]
+	f.h.mailState.mu.Unlock()
+	if kept {
+		t.Fatal("the hash of a removed set was kept")
 	}
 }

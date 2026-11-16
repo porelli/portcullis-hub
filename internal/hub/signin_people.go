@@ -106,6 +106,11 @@ type inventoryCache struct {
 	// burst of events is one reload.
 	dirty     map[string]bool
 	dirtyLoad time.Time
+	// evSeen: per person, the newest Keycloak credential event (Keycloak's
+	// clock) already acted on: an event marks a person once.
+	evSeen map[string]time.Time
+	// personMu: one one-person read per person at a time (refreshPerson).
+	personMu map[string]*sync.Mutex
 	// forcedAt: the last forced full re-read before a refusal (no
 	// PersonPasskeys source): at most one per freshRecheckGap overall.
 	forcedAt time.Time
@@ -204,13 +209,18 @@ func (h *Hub) SignInInventory(ctx context.Context, fresh bool) (*Inventory, erro
 // inventoryBase is SignInInventory without the passwords.
 func (h *Hub) inventoryBase(ctx context.Context, fresh bool) (*invBase, error) {
 	c := &h.signInInv
+	if fresh {
+		h.refreshDirtyPeople(ctx)
+	}
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 	now := c.clock()
 	c.mu.Lock()
 	base, err, tried, src, gen := c.base, c.err, c.tried, c.src, c.gen
 	recent := !tried.IsZero() && now.Sub(tried) < inventoryMinAge
-	dirtyDue := fresh && len(c.dirty) > 0 && (c.dirtyLoad.IsZero() || now.Sub(c.dirtyLoad) >= inventoryCoalesce)
+	// Dirty marks reload everyone only without a one-person read (with
+	// one, refreshDirtyPeople has read them before this).
+	dirtyDue := fresh && src.PersonPasskeys == nil && len(c.dirty) > 0 && (c.dirtyLoad.IsZero() || now.Sub(c.dirtyLoad) >= inventoryCoalesce)
 	switch {
 	case recent && !dirtyDue && err != nil:
 		c.mu.Unlock()
@@ -231,6 +241,7 @@ func (h *Hub) inventoryBase(ctx context.Context, fresh bool) (*invBase, error) {
 	c.mu.Lock()
 	c.err = err
 	if err == nil {
+		carryPersonReads(c.base, base, now.UTC())
 		c.base = base
 	} else {
 		for u := range dirty {
@@ -278,6 +289,44 @@ func (c *inventoryCache) currentBase() *invBase {
 	return c.base
 }
 
+// dirtyPeopleMax bounds the people read on their own per
+// inventoryCoalesce for dirty marks (the rest wait for the next window).
+const dirtyPeopleMax = 16
+
+// refreshDirtyPeople reads the dirty people one by one (refreshPerson)
+// when the one-person source is wired, at most dirtyPeopleMax per
+// inventoryCoalesce across everyone; a failed read stays dirty. Without
+// that source (or without a cached base) the full reload covers them.
+func (h *Hub) refreshDirtyPeople(ctx context.Context) {
+	c := &h.signInInv
+	now := c.clock()
+	c.mu.Lock()
+	read := c.src.PersonPasskeys
+	if read == nil || c.base == nil || c.err != nil || len(c.dirty) == 0 ||
+		(!c.dirtyLoad.IsZero() && now.Sub(c.dirtyLoad) < inventoryCoalesce) {
+		c.mu.Unlock()
+		return
+	}
+	c.dirtyLoad = now
+	users := make([]string, 0, len(c.dirty))
+	for u := range c.dirty {
+		users = append(users, u)
+	}
+	slices.Sort(users)
+	if len(users) > dirtyPeopleMax {
+		users = users[:dirtyPeopleMax]
+	}
+	for _, u := range users {
+		delete(c.dirty, u)
+	}
+	c.mu.Unlock()
+	for _, u := range users {
+		if !h.refreshPerson(ctx, read, u) {
+			h.markPersonDirty(u)
+		}
+	}
+}
+
 func (c *inventoryCache) markDirtyLocked(u string) {
 	if c.dirty == nil {
 		c.dirty = map[string]bool{}
@@ -299,16 +348,30 @@ func (h *Hub) markPersonDirty(u string) {
 // patches it into the cached inventory (a copy: readers keep theirs).
 // False: nothing cached to patch (the page's own read is the full one),
 // or the read failed (their methods stay as they were).
+//
+// The Keycloak read holds neither refreshMu nor mu (only u's own lock: one
+// read per person at a time): the patch is applied under mu to whatever
+// base is current then (copy-on-write). A full load that started before
+// the read keeps it (inventoryBase carries newer person reads over).
 func (h *Hub) refreshPerson(ctx context.Context, read func(context.Context, string) ([]keycloak.PasskeyCredential, bool, error), u string) bool {
 	c := &h.signInInv
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
 	c.mu.Lock()
-	base, err := c.base, c.err
+	ok := c.base != nil && c.err == nil
+	if c.personMu == nil {
+		c.personMu = map[string]*sync.Mutex{}
+	}
+	pm := c.personMu[u]
+	if pm == nil {
+		pm = &sync.Mutex{}
+		c.personMu[u] = pm
+	}
 	c.mu.Unlock()
-	if base == nil || err != nil {
+	if !ok {
 		return false
 	}
+	pm.Lock()
+	defer pm.Unlock()
+	at := c.clock().UTC()
 	rctx, cancel := context.WithTimeout(ctx, inventoryTimeout)
 	defer cancel()
 	list, found, err := read(rctx, u)
@@ -316,6 +379,20 @@ func (h *Hub) refreshPerson(ctx context.Context, read func(context.Context, stri
 		log.Printf("signin: %s's sign-in methods couldn't be read again: %v", u, err)
 		return false
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	base := c.base
+	if base == nil || c.err != nil {
+		return false
+	}
+	nb := patchPerson(base, u, found, list, at)
+	c.base = nb
+	return true
+}
+
+// patchPerson is a copy of base with u's Keycloak entry replaced (found
+// false: unknown) as read at at.
+func patchPerson(base *invBase, u string, found bool, list []keycloak.PasskeyCredential, at time.Time) *invBase {
 	nb := *base
 	nb.passkeys, nb.keys, nb.disabled, nb.read = maps.Clone(base.passkeys), maps.Clone(base.keys), maps.Clone(base.disabled), maps.Clone(base.read)
 	if nb.read == nil {
@@ -328,11 +405,37 @@ func (h *Hub) refreshPerson(ctx context.Context, read func(context.Context, stri
 		delete(nb.keys, u)
 		delete(nb.disabled, u)
 	}
-	nb.read[u] = c.clock().UTC()
-	c.mu.Lock()
-	c.base = &nb // refreshMu held: nothing replaced base meanwhile
-	c.mu.Unlock()
-	return true
+	nb.read[u] = at
+	return &nb
+}
+
+// carryPersonReads copies into nb (a full load started at start) every
+// person read on their own after start in old: theirs is newer.
+func carryPersonReads(old, nb *invBase, start time.Time) {
+	if old == nil {
+		return
+	}
+	for u, t := range old.read {
+		if !t.After(start) {
+			continue
+		}
+		if nb.read == nil {
+			nb.read = map[string]time.Time{}
+		}
+		delete(nb.passkeys, u)
+		delete(nb.keys, u)
+		delete(nb.disabled, u)
+		if v, ok := old.passkeys[u]; ok {
+			nb.passkeys[u] = v
+		}
+		if v, ok := old.keys[u]; ok {
+			nb.keys[u] = v
+		}
+		if old.disabled[u] {
+			nb.disabled[u] = true
+		}
+		nb.read[u] = t
+	}
 }
 
 // MarkInventoryStale makes the next fresh read refresh at once (the

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -435,9 +437,15 @@ func matchLive(c state.MailCredential, uuid string, live []mailctl.Credential) b
 }
 
 // reconcileMailPasswords matches user's active rows with mailctl's live
-// passwords (contract §19.11): an active row with no live password ends
-// as void_restore (a restore since it was created) or missing (logged);
-// an expired one as expired. 404 (no account yet): nothing is live.
+// passwords (contract §19.11). A row ends only once mailctl confirmed its
+// password is gone:
+//   - the current account's (uuid): no longer in mailctl's live list →
+//     void_restore (a restore since it was created) or missing (logged);
+//   - a former holder's (another uuid; uuid "" = no current account):
+//     revoke_leave only when mailFormerGone (the last accepted document
+//     no longer lists that uuid, no pending removal names it, and
+//     mailctl's revoke answered 204); otherwise nothing changes;
+//   - an expired one (Stalwart enforces the expiry): expired.
 //
 // It holds user's mail credential lock (mailPersonLock), so a create or
 // revoke never lands between the live list and the rows it ends; and it
@@ -445,59 +453,81 @@ func matchLive(c state.MailCredential, uuid string, live []mailctl.Credential) b
 // recorded after it stays for the next reconcile: Hub-side order, no
 // clock comparison between the Hub and mailctl).
 func (h *Hub) reconcileMailPasswords(ctx context.Context, api MailAPI, user, uuid string) error {
+	return h.reconcileMailPasswordsWith(ctx, api, user, uuid, nil)
+}
+
+// reconcileMailPasswordsWith is reconcileMailPasswords with mailctl's
+// status already read (nil: read when needed).
+func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user, uuid string, st *mailctl.Status) error {
 	unlock := h.mailPersonLock(user)
 	defer unlock()
-	before := map[string]bool{}
-	for _, c := range h.activeMailRows(user) {
-		before[c.ID] = true
-	}
-	if len(before) == 0 {
+	rows0 := h.activeMailRows(user)
+	if len(rows0) == 0 {
 		return nil
 	}
-	live, err := api.Credentials(ctx, user)
-	if h.mailReconcileHook != nil {
-		h.mailReconcileHook(user)
+	before := map[string]bool{}
+	for _, c := range rows0 {
+		before[c.ID] = true
 	}
-	if mailctl.StatusOf(err) == http.StatusNotFound {
-		live, err = nil, nil
-	}
-	if err != nil {
-		return errMailDown
-	}
-	var restoredAt *time.Time
-	needStatus := false
-	for _, c := range h.activeMailRows(user) {
-		if !matchLive(c, uuid, live) {
-			needStatus = true
+	var live []mailctl.Credential
+	if uuid != "" {
+		var err error
+		live, err = api.Credentials(ctx, user)
+		if mailctl.StatusOf(err) == http.StatusNotFound {
+			live, err = nil, nil
 		}
-	}
-	if needStatus {
-		st, err := api.Status(ctx)
 		if err != nil {
 			return errMailDown
 		}
-		restoredAt = st.RestoredAt
+	}
+	if h.mailReconcileHook != nil {
+		h.mailReconcileHook(user)
 	}
 	now := h.mailNow()
+	needStatus := false
+	gone := map[string]bool{} // former holders' rows mailctl confirmed gone
+	for _, c := range rows0 {
+		switch {
+		case c.ExpiresAt != nil && !now.Before(*c.ExpiresAt):
+		case c.UUID != uuid:
+			if h.mailFormerGone(ctx, api, user, c) {
+				gone[c.ID] = true
+			}
+		case !matchLive(c, uuid, live):
+			needStatus = true
+		}
+	}
+	var restoredAt *time.Time
+	if needStatus {
+		if st == nil {
+			v, err := api.Status(ctx)
+			if err != nil {
+				return errMailDown
+			}
+			st = &v
+		}
+		restoredAt = st.RestoredAt
+	}
 	h.mu.Lock()
 	rows := h.st.MailCredentials[user]
 	voided, changed := 0, false
 	for i := range rows {
 		c := &rows[i]
-		if !c.Active() {
+		if !c.Active() || !before[c.ID] {
+			// Recorded after the list was read: not judged now.
 			continue
 		}
 		switch {
 		case c.ExpiresAt != nil && !now.Before(*c.ExpiresAt):
 			c.Reason = state.MailCredentialReasonExpired
+		case c.UUID != uuid:
+			if !gone[c.ID] {
+				continue
+			}
+			// The former holder of the username: mailctl confirmed it.
+			c.Reason = state.MailCredentialReasonRevokeLeave
 		case matchLive(*c, uuid, live):
 			continue
-		case !before[c.ID]:
-			// Recorded after the list was read: not judged now.
-			continue
-		case c.UUID != uuid:
-			// The former holder of the username: they left.
-			c.Reason = state.MailCredentialReasonRevokeLeave
 		case restoredAt != nil && restoredAt.After(c.CreatedAt):
 			c.Reason = state.MailCredentialReasonVoidRestore
 			voided++
@@ -518,6 +548,39 @@ func (h *Hub) reconcileMailPasswords(ctx context.Context, api MailAPI, user, uui
 		h.auditOp(directory.Human("hub"), "mail_credential.void_restore", user, fmt.Sprintf("count=%d", voided), nil)
 	}
 	return saveErr
+}
+
+// mailFormerGone: a former holder's row c (user's, under another uuid)
+// stands for no password any more — mailctl accepted the removal (the
+// last accepted document no longer lists c's uuid), no pending removal
+// names it, and mailctl's revoke of it in that account answered 204.
+// Anything unknown (no baseline, mailctl unreachable): false.
+func (h *Hub) mailFormerGone(ctx context.Context, api MailAPI, user string, c state.MailCredential) bool {
+	if c.UUID == "" {
+		return false
+	}
+	h.mu.RLock()
+	p := h.st.Mail.PendingRemoval
+	pending := p != nil && slices.ContainsFunc(p.Accounts, func(a state.MailPendingAccount) bool { return a.UUID == c.UUID })
+	h.mu.RUnlock()
+	if pending {
+		return false
+	}
+	s := &h.mailState
+	s.mu.Lock()
+	last := s.last
+	s.mu.Unlock()
+	if last == nil {
+		last, _ = h.loadMailLast()
+	}
+	if last == nil || slices.ContainsFunc(last.Accounts, func(a mailctl.Account) bool { return a.UUID == c.UUID }) {
+		return false
+	}
+	if err := api.RevokeCredential(ctx, c.UUID, c.StalwartID); err != nil {
+		log.Printf("mail: revoking %s's former mail password %s: %v", user, c.ID, err)
+		return false
+	}
+	return true
 }
 
 // mailPersonLock takes user's mail credential lock and returns its
@@ -541,44 +604,107 @@ func (h *Hub) mailPersonLock(user string) func() {
 }
 
 // mailRestoreEvery: how often mailctl's restored_at is compared with the
-// last full reconcile.
+// restore last handled.
 const mailRestoreEvery = 60 * time.Second
 
-// mailRestoreIfDue (the first pass, then every mailRestoreEvery): when
-// mailctl's restored_at is later than the restore the last full
-// reconcile ran for, everyone's rows are reconciled (the restored rows
-// end void_restore); that restore is recorded only once every person
-// reconciled, so a failure retries on the next check. It returns the
-// sleep until the next check.
-func (h *Hub) mailRestoreIfDue(ctx context.Context, api MailAPI, now time.Time) time.Duration {
+// mailReconcileConcurrency bounds the people reconciled at once.
+const mailReconcileConcurrency = 4
+
+// mailReconcileTimeout bounds one background reconcile.
+const mailReconcileTimeout = 5 * time.Minute
+
+// mailReconcileSoon (after every sync pass) starts the background
+// reconcile when it is due — the start-time one (reconAll, after the
+// first accepted document, until it succeeds) or the restore check
+// (first, then every mailRestoreEvery) — and returns the sleep until the
+// next check. It never holds the sync lock: one run at a time (a run
+// asked for while one runs follows it).
+func (h *Hub) mailReconcileSoon(api MailAPI) time.Duration {
+	now := h.mailNow()
 	s := &h.mailState
 	s.mu.Lock()
-	if !s.restoreAt.IsZero() && now.Before(s.restoreAt.Add(mailRestoreEvery)) {
+	due := s.reconAll || s.restoreAt.IsZero() || !now.Before(s.restoreAt.Add(mailRestoreEvery))
+	if !due {
 		next := s.restoreAt.Add(mailRestoreEvery).Sub(now)
 		s.mu.Unlock()
 		return max(next, time.Second)
 	}
 	s.restoreAt = now
-	done := s.restoreDone
-	s.mu.Unlock()
-	st, err := api.Status(ctx)
-	if err != nil || st.RestoredAt == nil || !st.RestoredAt.After(done) {
+	if s.reconRunning {
+		s.reconAgain = true
+		s.mu.Unlock()
 		return mailRestoreEvery
 	}
-	if h.reconcileAllMailPasswords(ctx, api) {
-		s.mu.Lock()
-		if st.RestoredAt.After(s.restoreDone) {
-			s.restoreDone = *st.RestoredAt
+	s.reconRunning = true
+	s.reconWG.Add(1)
+	s.mu.Unlock()
+	h.goBackground(func() {
+		defer s.reconWG.Done()
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), mailReconcileTimeout)
+			h.mailRestoreReconcile(ctx, api)
+			cancel()
+			s.mu.Lock()
+			again := s.reconAgain
+			s.reconAgain = false
+			s.reconRunning = again
+			s.mu.Unlock()
+			if !again {
+				return
+			}
 		}
-		s.mu.Unlock()
-	}
+	})
 	return mailRestoreEvery
 }
 
+// mailRestoreReconcile is one background run: everyone's rows are
+// reconciled when the start-time reconcile is wanted, or when mailctl's
+// restored_at is later than the restore last handled (state.yaml
+// mail.restore_handled: a restore once handled never re-runs it at
+// start). Each is recorded only when every person reconciled, so a
+// failure retries on the next check.
+func (h *Hub) mailRestoreReconcile(ctx context.Context, api MailAPI) {
+	s := &h.mailState
+	s.mu.Lock()
+	all := s.reconAll
+	s.mu.Unlock()
+	st, err := api.Status(ctx)
+	if err != nil {
+		return
+	}
+	h.mu.RLock()
+	handled := h.st.Mail.RestoreHandled
+	h.mu.RUnlock()
+	restore := st.RestoredAt != nil && (handled == nil || st.RestoredAt.After(*handled))
+	if !all && !restore {
+		return
+	}
+	if !h.reconcileAllMailPasswords(ctx, api, &st) {
+		return
+	}
+	if all {
+		s.mu.Lock()
+		s.reconAll, s.reconciled = false, true
+		s.mu.Unlock()
+	}
+	if restore {
+		h.mu.Lock()
+		t := st.RestoredAt.UTC()
+		prev := h.st.Mail.RestoreHandled
+		h.st.Mail.RestoreHandled = &t
+		if err := h.saveStateLocked(); err != nil {
+			h.st.Mail.RestoreHandled = prev
+			log.Printf("mail: recording the restore handled failed (it runs again): %v", err)
+		}
+		h.mu.Unlock()
+	}
+}
+
 // reconcileAllMailPasswords reconciles everyone with active rows (at
-// start, after the first accepted document, and after a restore): true
+// most mailReconcileConcurrency at once, each under their own lock), with
+// mailctl's status st read once (nil: each reads it when needed): true
 // when every person reconciled.
-func (h *Hub) reconcileAllMailPasswords(ctx context.Context, api MailAPI) bool {
+func (h *Hub) reconcileAllMailPasswords(ctx context.Context, api MailAPI, st *mailctl.Status) bool {
 	m, err := h.membership(ctx)
 	if err != nil {
 		log.Printf("mail: reconciling the mail passwords: the directory can't be read: %v", err)
@@ -591,14 +717,23 @@ func (h *Hub) reconcileAllMailPasswords(ctx context.Context, api MailAPI) bool {
 	}
 	h.mu.RUnlock()
 	sort.Strings(users)
-	ok := true
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, mailReconcileConcurrency)
 	for _, u := range users {
-		if err := h.reconcileMailPasswords(ctx, api, u, m.UUIDs[u]); err != nil {
-			log.Printf("mail: reconciling %s's mail passwords: %v", u, err)
-			ok = false
-		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := h.reconcileMailPasswordsWith(ctx, api, u, m.UUIDs[u], st); err != nil {
+				log.Printf("mail: reconciling %s's mail passwords: %v", u, err)
+				failed.Store(true)
+			}
+		}()
 	}
-	return ok
+	wg.Wait()
+	return !failed.Load()
 }
 
 // mailMarkLeft ends the active rows created under each removed account's

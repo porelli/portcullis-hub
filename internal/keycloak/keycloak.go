@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
 )
 
@@ -814,6 +815,9 @@ func signInKeys(creds []credential) []PasskeyCredential {
 // Keycloak doesn't know them; keys nil when they are disabled. Any read
 // failure is the error (their methods stay as they were).
 func (c *Client) UserSignInCredentials(ctx context.Context, username string) (keys []PasskeyCredential, found bool, err error) {
+	if !lldap.ValidUsername(username) {
+		return nil, false, fmt.Errorf("keycloak: %q isn't a valid username", username)
+	}
 	tok, err := c.token(ctx)
 	if err != nil {
 		return nil, false, err
