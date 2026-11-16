@@ -128,6 +128,10 @@ func (r *recorder) ContainerKill(_ context.Context, id, sig string) error {
 	r.rec("kill %s %s", id, sig)
 	return nil
 }
+func (r *recorder) ContainerRestart(_ context.Context, id string, timeout time.Duration) error {
+	r.rec("restart %s %s", id, timeout)
+	return nil
+}
 func (r *recorder) ContainerState(_ context.Context, id string) (engine.State, error) {
 	r.rec("state %s", id)
 	return engine.State{}, nil
@@ -384,5 +388,78 @@ func TestDockerBackendPodmanQuirks(t *testing.T) {
 	}
 	if b.Kind() != runtime.KindPodman {
 		t.Error("kind")
+	}
+}
+
+// coreListEngine answers ListContainers with cs (filtered by labels as
+// the engine would).
+type coreListEngine struct {
+	*recorder
+	cs []engine.Container
+}
+
+func (e *coreListEngine) ListContainers(_ context.Context, f engine.Filters) ([]engine.Container, error) {
+	e.rec("list %v", f)
+	var out []engine.Container
+	for _, c := range e.cs {
+		ok := true
+		for _, l := range f["label"] {
+			k, v, _ := strings.Cut(l, "=")
+			ok = ok && c.Labels[k] == v
+		}
+		if ok {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// TestRestartCoreServiceNarrow: only "mail"; only core's project, not a
+// one-off, in core's directory; 0 or several matches restart nothing;
+// no CoreDir refuses.
+func TestRestartCoreServiceNarrow(t *testing.T) {
+	ctx := context.Background()
+	core := func(id string) engine.Container {
+		return engine.Container{ID: id, Labels: map[string]string{engine.LabelProject: "portcullis", engine.LabelService: "mail",
+			labelWorkingDir: "/host/core", labelOneOff: "False"}}
+	}
+	oneoff, other := core("run1"), core("other")
+	oneoff.Labels[labelOneOff] = "True"
+	other.Labels[labelWorkingDir] = "/srv/x"
+	e := &coreListEngine{recorder: &recorder{}, cs: []engine.Container{core("m1"), oneoff, other,
+		{ID: "app", Labels: map[string]string{engine.LabelProject: "portcullis-app", engine.LabelService: "mail"}}}}
+	b := New(e.recorder, e, Options{Kind: runtime.KindDocker, CoreDir: "/host/core/"})
+	if err := b.RestartCoreService(ctx, "mail", 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	restarts := func() (n int, last string) {
+		for _, c := range e.Calls() {
+			if strings.HasPrefix(c, "restart ") {
+				n, last = n+1, c
+			}
+		}
+		return
+	}
+	if n, last := restarts(); n != 1 || last != "restart m1 2s" {
+		t.Fatalf("restarts %d %q", n, last)
+	}
+	for _, svc := range []string{"mailctl", "hub", "traefik", ""} {
+		if err := b.RestartCoreService(ctx, svc, time.Second); err == nil {
+			t.Errorf("service %q restarted", svc)
+		}
+	}
+	e.cs = append(e.cs, core("m2"))
+	if err := b.RestartCoreService(ctx, "mail", time.Second); err == nil || !strings.Contains(err.Error(), "2 containers") {
+		t.Fatalf("two: %v", err)
+	}
+	e.cs = []engine.Container{oneoff, other}
+	if err := b.RestartCoreService(ctx, "mail", time.Second); err == nil {
+		t.Fatal("restarted a one-off or another checkout")
+	}
+	if err := New(e.recorder, e, Options{Kind: runtime.KindDocker}).RestartCoreService(ctx, "mail", time.Second); err == nil {
+		t.Fatal("no CoreDir: restarted")
+	}
+	if n, _ := restarts(); n != 1 {
+		t.Fatalf("refused restarts ran: %d", n)
 	}
 }

@@ -203,3 +203,38 @@ func TestEnableDNSSEC409IsAPIError(t *testing.T) {
 		t.Fatalf("request %s %s", path, body)
 	}
 }
+
+func TestMailSet(t *testing.T) {
+	secret := strings.Repeat("k", 40)
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.Path+" "+string(b))
+		w.WriteHeader(202)
+		w.Write([]byte(`{"name":"team-b.test","provider":"cloudflare","records_ok":true,"cert_not_after":null,"last_error":"","state":"records"}`))
+	}))
+	defer srv.Close()
+	f := filepath.Join(t.TempDir(), "s")
+	os.WriteFile(f, []byte(secret), 0600)
+	c := New(srv.URL, f)
+	if _, err := c.SetMailSet(context.Background(), "team-b.test", []MailRecord{{Name: "team-b.test", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetMailSet(context.Background(), "team-b.test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteMailSet(context.Background(), "team-b.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetMailSet(context.Background(), "team-b.test", make([]MailRecord, MaxMailRecords+1)); err == nil {
+		t.Fatal("201 records sent")
+	}
+	want := []string{
+		`PUT /domains/team-b.test/sets/mail {"records":[{"name":"team-b.test","type":"MX","ttl":3600,"value":"10 mail.example.org."}]}`,
+		`PUT /domains/team-b.test/sets/mail {"records":[]}`,
+		`DELETE /domains/team-b.test/sets/mail `,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests\n%q\nwant\n%q", got, want)
+	}
+}

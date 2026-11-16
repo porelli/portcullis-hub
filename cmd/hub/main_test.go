@@ -396,3 +396,45 @@ func TestSelfImageFromEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestHubMailSubcommand (contract §19.10): `hub mail drain` POSTs
+// /host/mail/drain, `hub mail domains` GETs /host/mail/domains, the
+// answer on stdout; usage 2; no socket 1.
+func TestHubMailSubcommand(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	var stdout, stderr bytes.Buffer
+	if code := mailMain([]string{"domains"}, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "the Hub isn't running") {
+		t.Fatalf("no socket: %d %q", code, stderr.String())
+	}
+	for _, bad := range [][]string{nil, {"nope"}, {"drain", "x"}} {
+		if code := mailMain(bad, &stdout, &stderr, sock); code != 2 {
+			t.Errorf("%v: %d", bad, code)
+		}
+	}
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path)
+		w.Write([]byte(`[{"name":"example.org","state":"draining"}]`))
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+	stdout.Reset()
+	if code := mailMain([]string{"drain"}, &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), "draining") {
+		t.Fatalf("drain: %d %q %q", code, stdout.String(), stderr.String())
+	}
+	if code := mailMain([]string{"domains"}, &stdout, &stderr, sock); code != 0 {
+		t.Fatalf("domains: %d", code)
+	}
+	if strings.Join(got, ",") != "POST /host/mail/drain,GET /host/mail/domains" {
+		t.Fatalf("requests %v", got)
+	}
+}

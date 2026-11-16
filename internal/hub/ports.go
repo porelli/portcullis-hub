@@ -153,6 +153,18 @@ func (h *Hub) checkPortsLocked(t *templates.Template, candidate []portBinding) e
 	if len(candidate) == 0 {
 		return nil
 	}
+	// Core's mail publishes 25, 465, 587 and 993/tcp on every address
+	// while PORTCULLIS_MAIL=on (contract §19.2).
+	if h.mailOn() {
+		for _, c := range candidate {
+			for _, p := range mailPorts {
+				m := portBinding{Bind: "0.0.0.0", Port: p, Protocol: "tcp"}
+				if portOverlap(c, m) {
+					return statusErr(409, "port %s is mail's (core publishes %d/tcp while mail is on): change %s", portDesc(c), p, c.Key)
+				}
+			}
+		}
+	}
 	for _, enabledID := range h.st.Enabled {
 		if enabledID == t.ID {
 			continue

@@ -183,6 +183,7 @@
     const findings = r.findings || [];
     const live = findings.filter(f => !f.muted), muted = findings.filter(f => f.muted);
     if (r.dns_unavailable) h += '<div class="public-warn" data-dr-dns-unavailable>DNS checks didn\'t run: the domains service couldn\'t be read (or a lookup failed)</div>';
+    if (r.mail_unavailable) h += '<div class="public-warn" data-dr-mail-unavailable>Mail checks didn\'t run: mailctl couldn\'t be read</div>';
     if (!findings.length) h += '<p class="settings-empty">The doctor found nothing.</p>';
     for (const [k, l, cls] of SEV) {
       const fs = live.filter(f => f.severity === k);

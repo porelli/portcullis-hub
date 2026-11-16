@@ -229,7 +229,11 @@ func (h *Hub) ApplyFix(ctx context.Context, fp string, params map[string]string,
 	}
 	// A zone-wide DNSSEC signing (dnssec_sign) likewise.
 	if fixerAlwaysConfirms(fx) {
-		if err := aiUnconfirmed(actor, "fix "+fx.Kind()+" turns on signing for a whole DNS zone"); err != nil {
+		why := "fix " + fx.Kind() + " turns on signing for a whole DNS zone"
+		if fx.Kind() != doctor.FixDNSSECSign {
+			why = "fix " + fx.Kind() + " makes remote senders refuse mail that fails a stricter policy"
+		}
+		if err := aiUnconfirmed(actor, why); err != nil {
 			return nil, err
 		}
 	}

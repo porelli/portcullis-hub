@@ -62,6 +62,10 @@ type SignInSources struct {
 	// AuthenticatorLabel renames one of a person's authenticator apps
 	// (keycloak.Client.SetAuthenticatorLabel); nil: unavailable (503).
 	AuthenticatorLabel func(ctx context.Context, username, credentialID, label string) (string, error)
+	// PersonPasskeys reads one person's entry of Passkeys
+	// (keycloak.Client.UserSignInCredentials: found false = unknown, nil
+	// keys = disabled); nil: a forced re-read is a full one.
+	PersonPasskeys func(ctx context.Context, username string) ([]keycloak.PasskeyCredential, bool, error)
 }
 
 // SetSignInSources wires the inventory's sources (main: Keycloak and
@@ -96,8 +100,26 @@ type inventoryCache struct {
 	// that saw it move while it loaded leaves tried zero (its data may
 	// predate the change), so a mark is never lost.
 	gen uint64
-	now func() time.Time
+	// dirty: people Keycloak's events show a method change for since the
+	// cached read (markPersonDirty); a fresh read reloads for them at most
+	// once per inventoryCoalesce (dirtyLoad: the last such load), so a
+	// burst of events is one reload.
+	dirty     map[string]bool
+	dirtyLoad time.Time
+	// evSeen: per person, the newest Keycloak credential event (Keycloak's
+	// clock) already acted on: an event marks a person once.
+	evSeen map[string]time.Time
+	// personMu: one one-person read per person at a time (refreshPerson).
+	personMu map[string]*sync.Mutex
+	// forcedAt: the last forced full re-read before a refusal (no
+	// PersonPasskeys source): at most one per freshRecheckGap overall.
+	forcedAt time.Time
+	now      func() time.Time
 }
+
+// inventoryCoalesce: dirty marks reload the inventory at most once per
+// 5 s across everyone.
+const inventoryCoalesce = 5 * time.Second
 
 // invBase is a refresh's result without the passwords (those are read
 // from state.yaml whenever the inventory is used, so a recorded password
@@ -116,6 +138,42 @@ type invBase struct {
 	// uuids: lowercase user → LLDAP account uuid at the refresh (nil: the
 	// directory couldn't be read — no password counts).
 	uuids map[string]string
+	// read: people read on their own since (refreshPerson) → when.
+	read map[string]time.Time
+}
+
+// readAt is when u's methods were last read: their own read, else the
+// refresh.
+func (b *invBase) readAt(u string) time.Time {
+	if t, ok := b.read[u]; ok && t.After(b.at) {
+		return t
+	}
+	return b.at
+}
+
+// setUserKeys records u's (lowercase) Keycloak list in b: nil = disabled.
+func setUserKeys(b *invBase, u string, list []keycloak.PasskeyCredential) {
+	delete(b.disabled, u)
+	delete(b.passkeys, u)
+	delete(b.keys, u)
+	if list == nil {
+		b.disabled[u] = true
+		return
+	}
+	if ownPasswordRefused(u) {
+		// admin, portcullis-hub and every portcullis-* name never
+		// use an authenticator app (T4): never counted, never listed.
+		list = slices.DeleteFunc(slices.Clone(list), func(pk keycloak.PasskeyCredential) bool { return pk.Type == string(signin.TOTP) })
+	}
+	ms := []signin.Method{}
+	for _, pk := range list {
+		m := signin.Method(pk.Type)
+		if _, ok := signin.InfoOf(m); ok && !slices.Contains(ms, m) {
+			ms = append(ms, m)
+		}
+	}
+	b.passkeys[u] = ms
+	b.keys[u] = slices.Clone(list)
 }
 
 func (c *inventoryCache) clock() time.Time {
@@ -151,24 +209,44 @@ func (h *Hub) SignInInventory(ctx context.Context, fresh bool) (*Inventory, erro
 // inventoryBase is SignInInventory without the passwords.
 func (h *Hub) inventoryBase(ctx context.Context, fresh bool) (*invBase, error) {
 	c := &h.signInInv
+	if fresh {
+		h.refreshDirtyPeople(ctx)
+	}
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
+	now := c.clock()
 	c.mu.Lock()
 	base, err, tried, src, gen := c.base, c.err, c.tried, c.src, c.gen
-	c.mu.Unlock()
-	now := c.clock()
 	recent := !tried.IsZero() && now.Sub(tried) < inventoryMinAge
+	// Dirty marks reload everyone only without a one-person read (with
+	// one, refreshDirtyPeople has read them before this).
+	dirtyDue := fresh && src.PersonPasskeys == nil && len(c.dirty) > 0 && (c.dirtyLoad.IsZero() || now.Sub(c.dirtyLoad) >= inventoryCoalesce)
 	switch {
-	case recent && err != nil:
+	case recent && !dirtyDue && err != nil:
+		c.mu.Unlock()
 		return nil, err
-	case recent, !fresh && err == nil && base != nil:
+	case recent && !dirtyDue, !fresh && err == nil && base != nil:
+		c.mu.Unlock()
 		return base, nil
 	}
+	// This load covers every dirty mark made so far (marks made while it
+	// loads stay for the next one).
+	dirty := c.dirty
+	c.dirty = nil
+	if len(dirty) > 0 {
+		c.dirtyLoad = now
+	}
+	c.mu.Unlock()
 	base, err = h.loadInventory(ctx, src, now)
 	c.mu.Lock()
 	c.err = err
 	if err == nil {
+		carryPersonReads(c.base, base, now.UTC())
 		c.base = base
+	} else {
+		for u := range dirty {
+			c.markDirtyLocked(u)
+		}
 	}
 	if c.gen == gen {
 		c.tried = now
@@ -211,6 +289,155 @@ func (c *inventoryCache) currentBase() *invBase {
 	return c.base
 }
 
+// dirtyPeopleMax bounds the people read on their own per
+// inventoryCoalesce for dirty marks (the rest wait for the next window).
+const dirtyPeopleMax = 16
+
+// refreshDirtyPeople reads the dirty people one by one (refreshPerson)
+// when the one-person source is wired, at most dirtyPeopleMax per
+// inventoryCoalesce across everyone; a failed read stays dirty. Without
+// that source (or without a cached base) the full reload covers them.
+func (h *Hub) refreshDirtyPeople(ctx context.Context) {
+	c := &h.signInInv
+	now := c.clock()
+	c.mu.Lock()
+	read := c.src.PersonPasskeys
+	if read == nil || c.base == nil || c.err != nil || len(c.dirty) == 0 ||
+		(!c.dirtyLoad.IsZero() && now.Sub(c.dirtyLoad) < inventoryCoalesce) {
+		c.mu.Unlock()
+		return
+	}
+	c.dirtyLoad = now
+	users := make([]string, 0, len(c.dirty))
+	for u := range c.dirty {
+		users = append(users, u)
+	}
+	slices.Sort(users)
+	if len(users) > dirtyPeopleMax {
+		users = users[:dirtyPeopleMax]
+	}
+	for _, u := range users {
+		delete(c.dirty, u)
+	}
+	c.mu.Unlock()
+	for _, u := range users {
+		if !h.refreshPerson(ctx, read, u) {
+			h.markPersonDirty(u)
+		}
+	}
+}
+
+func (c *inventoryCache) markDirtyLocked(u string) {
+	if c.dirty == nil {
+		c.dirty = map[string]bool{}
+	}
+	c.dirty[u] = true
+}
+
+// markPersonDirty records that Keycloak shows a method change for u
+// (lowercase) since the cached read: the next fresh read reloads, at most
+// once per inventoryCoalesce across everyone (never on its own).
+func (h *Hub) markPersonDirty(u string) {
+	c := &h.signInInv
+	c.mu.Lock()
+	c.markDirtyLocked(u)
+	c.mu.Unlock()
+}
+
+// refreshPerson reads u's (lowercase) Keycloak entry on its own and
+// patches it into the cached inventory (a copy: readers keep theirs).
+// False: nothing cached to patch (the page's own read is the full one),
+// or the read failed (their methods stay as they were).
+//
+// The Keycloak read holds neither refreshMu nor mu (only u's own lock: one
+// read per person at a time): the patch is applied under mu to whatever
+// base is current then (copy-on-write). A full load that started before
+// the read keeps it (inventoryBase carries newer person reads over).
+func (h *Hub) refreshPerson(ctx context.Context, read func(context.Context, string) ([]keycloak.PasskeyCredential, bool, error), u string) bool {
+	c := &h.signInInv
+	c.mu.Lock()
+	ok := c.base != nil && c.err == nil
+	if c.personMu == nil {
+		c.personMu = map[string]*sync.Mutex{}
+	}
+	pm := c.personMu[u]
+	if pm == nil {
+		pm = &sync.Mutex{}
+		c.personMu[u] = pm
+	}
+	c.mu.Unlock()
+	if !ok {
+		return false
+	}
+	pm.Lock()
+	defer pm.Unlock()
+	at := c.clock().UTC()
+	rctx, cancel := context.WithTimeout(ctx, inventoryTimeout)
+	defer cancel()
+	list, found, err := read(rctx, u)
+	if err != nil {
+		log.Printf("signin: %s's sign-in methods couldn't be read again: %v", u, err)
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	base := c.base
+	if base == nil || c.err != nil {
+		return false
+	}
+	nb := patchPerson(base, u, found, list, at)
+	c.base = nb
+	return true
+}
+
+// patchPerson is a copy of base with u's Keycloak entry replaced (found
+// false: unknown) as read at at.
+func patchPerson(base *invBase, u string, found bool, list []keycloak.PasskeyCredential, at time.Time) *invBase {
+	nb := *base
+	nb.passkeys, nb.keys, nb.disabled, nb.read = maps.Clone(base.passkeys), maps.Clone(base.keys), maps.Clone(base.disabled), maps.Clone(base.read)
+	if nb.read == nil {
+		nb.read = map[string]time.Time{}
+	}
+	if found {
+		setUserKeys(&nb, u, list)
+	} else {
+		delete(nb.passkeys, u)
+		delete(nb.keys, u)
+		delete(nb.disabled, u)
+	}
+	nb.read[u] = at
+	return &nb
+}
+
+// carryPersonReads copies into nb (a full load started at start) every
+// person read on their own after start in old: theirs is newer.
+func carryPersonReads(old, nb *invBase, start time.Time) {
+	if old == nil {
+		return
+	}
+	for u, t := range old.read {
+		if !t.After(start) {
+			continue
+		}
+		if nb.read == nil {
+			nb.read = map[string]time.Time{}
+		}
+		delete(nb.passkeys, u)
+		delete(nb.keys, u)
+		delete(nb.disabled, u)
+		if v, ok := old.passkeys[u]; ok {
+			nb.passkeys[u] = v
+		}
+		if v, ok := old.keys[u]; ok {
+			nb.keys[u] = v
+		}
+		if old.disabled[u] {
+			nb.disabled[u] = true
+		}
+		nb.read[u] = t
+	}
+}
+
 // MarkInventoryStale makes the next fresh read refresh at once (the
 // directory changed: a passkey removed, an account created or deleted).
 // Non-blocking; the cached inventory stays for the non-fresh readers.
@@ -237,24 +464,7 @@ func (h *Hub) loadInventory(ctx context.Context, src SignInSources, now time.Tim
 	b := &invBase{at: now.UTC(), passkeys: map[string][]signin.Method{}, disabled: map[string]bool{}, certs: map[string][]signin.Method{},
 		keys: map[string][]keycloak.PasskeyCredential{}}
 	for u, list := range keys {
-		if list == nil {
-			b.disabled[strings.ToLower(u)] = true
-			continue
-		}
-		if ownPasswordRefused(strings.ToLower(u)) {
-			// admin, portcullis-hub and every portcullis-* name never
-			// use an authenticator app (T4): never counted, never listed.
-			list = slices.DeleteFunc(slices.Clone(list), func(pk keycloak.PasskeyCredential) bool { return pk.Type == string(signin.TOTP) })
-		}
-		ms := []signin.Method{}
-		for _, pk := range list {
-			m := signin.Method(pk.Type)
-			if _, ok := signin.InfoOf(m); ok && !slices.Contains(ms, m) {
-				ms = append(ms, m)
-			}
-		}
-		b.passkeys[strings.ToLower(u)] = ms
-		b.keys[strings.ToLower(u)] = slices.Clone(list)
+		setUserKeys(b, strings.ToLower(u), list)
 	}
 	// Password records count only for the account they were set for.
 	if m, merr := h.membership(ctx); merr != nil {

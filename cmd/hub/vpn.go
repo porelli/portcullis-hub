@@ -29,6 +29,44 @@ const vpnUsage = `usage: hub vpn add-device --user U --name N   (public key on s
        hub vpn revoke <device-id>
        hub vpn host-info`
 
+const mailUsage = `usage: hub mail drain     (every mail domain starts draining)
+       hub mail domains   (each mail domain's state: on, draining or off)`
+
+// mailMain runs `hub mail <args>` against the socket at sock (contract
+// §19.10): 0 done, 1 the Hub refused or isn't running, 2 usage.
+func mailMain(args []string, stdout, stderr io.Writer, sock string) int {
+	if len(args) != 1 || (args[0] != "drain" && args[0] != "domains") {
+		fmt.Fprintln(stderr, mailUsage)
+		return 2
+	}
+	if fi, err := os.Stat(sock); err != nil || fi.Mode()&os.ModeSocket == 0 {
+		fmt.Fprintln(stderr, "the Hub isn't running")
+		return 1
+	}
+	c := &http.Client{Timeout: time.Minute, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", sock)
+	}}}
+	method, path := http.MethodGet, "/host/mail/domains"
+	if args[0] == "drain" {
+		method, path = http.MethodPost, "/host/mail/drain"
+	}
+	req, _ := http.NewRequest(method, "http://hub"+path, nil)
+	res, err := c.Do(req)
+	if err != nil {
+		fmt.Fprintln(stderr, "the Hub isn't running")
+		return 1
+	}
+	defer res.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode >= 300 {
+		fmt.Fprintln(stderr, strings.TrimSpace(string(out)))
+		return 1
+	}
+	stdout.Write(out)
+	return 0
+}
+
 // vpnMain runs `hub vpn <args>` against the socket at sock; it returns
 // the exit code (1: the Hub refused or isn't running, 2: usage).
 func vpnMain(args []string, stdin io.Reader, stdout, stderr io.Writer, sock string) int {

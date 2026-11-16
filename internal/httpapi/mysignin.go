@@ -166,7 +166,7 @@ func (s *Server) handleMySignIn(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("refresh") == "1" {
 		// T5: after the account console, re-read the inventory (at most
 		// once per 10 s per caller; otherwise ignored, never an error).
-		s.Hub.RefreshMySignIn(user)
+		s.Hub.RefreshMySignIn(r.Context(), user)
 	}
 	v, err := s.Hub.MySignInView(r.Context(), user)
 	if err != nil {

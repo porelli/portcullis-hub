@@ -686,6 +686,10 @@ var peopleNoToolRoutes = func() map[string]string {
 	for r, why := range fieldGuardNoToolRoutes {
 		m[r] = why
 	}
+	// The person's mail routes are directory routes (both listeners).
+	for _, r := range []string{"GET /api/directory/users/{username}/mail", "PUT /api/directory/users/{username}/mail", "DELETE /api/directory/users/{username}/mail/passwords/{id}"} {
+		m[r] = mailNoToolRoutes[r]
+	}
 	m["POST /api/directory/users/{username}/impersonation/stop"] = "administrators only (403 here for everyone else): the admin MCP has stop_impersonation"
 	return m
 }()

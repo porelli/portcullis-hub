@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -784,36 +785,58 @@ func TestRenameOwnAuthenticator(t *testing.T) {
 	}
 }
 
-// TestRefreshMySignInThrottle (T5): at most one MarkInventoryStale per
-// caller per 10 s.
+// TestRefreshMySignInThrottle (T5): ?refresh=1 reads the caller's own
+// methods (one-person read, never a full reload), at most once per caller
+// per 10 s; N people refreshing are N one-person reads; with no
+// one-person read, a full re-read under the global 5 s limit.
 func TestRefreshMySignInThrottle(t *testing.T) {
-	c := newCertFixture(t)
+	c, now := recheckFixture(t, true)
 	h := c.f.h
-	now := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
-	h.entryNow = func() time.Time { return now }
+	if _, err := h.inventoryBase(c.ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	f0, p0 := c.reads()
+	h.RefreshMySignIn(c.ctx, "alice")
+	h.RefreshMySignIn(c.ctx, "ALICE")
+	if f, p := c.reads(); f != f0 || p-p0 != 1 {
+		t.Errorf("two calls: full %d, one-person %d", f-f0, p-p0)
+	}
+	// A key added in the account console: the next view has it.
+	c.src.set(func(s *fakeSignInSrc) { s.keys["alice"] = []signin.Method{signin.SecurityKey} })
+	*now = now.Add(10 * time.Second)
+	h.RefreshMySignIn(c.ctx, "alice")
+	if r := c.refusal(t, "alice"); r != "" {
+		t.Errorf("after the refresh: refusal %q", r)
+	}
+	if f, p := c.reads(); f != f0 || p-p0 != 2 {
+		t.Errorf("after 10 s: full %d, one-person %d", f-f0, p-p0)
+	}
+	h.RefreshMySignIn(c.ctx, "")
+	for i := range 50 {
+		h.RefreshMySignIn(c.ctx, fmt.Sprintf("p%03d", i))
+	}
+	if f, p := c.reads(); f != f0 || p-p0 != 52 {
+		t.Errorf("50 people: full %d, one-person %d", f-f0, p-p0-2)
+	}
+
+	// No one-person read: marks under the global limit only.
+	g, now2 := recheckFixture(t, false)
+	gh := g.f.h
+	if _, err := gh.inventoryBase(g.ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	*now2 = now2.Add(6 * time.Second)
 	gen := func() uint64 {
-		h.signInInv.mu.Lock()
-		defer h.signInInv.mu.Unlock()
-		return h.signInInv.gen
+		gh.signInInv.mu.Lock()
+		defer gh.signInInv.mu.Unlock()
+		return gh.signInInv.gen
 	}
 	g0 := gen()
-	h.RefreshMySignIn("alice")
-	h.RefreshMySignIn("ALICE")
+	for i := range 50 {
+		gh.RefreshMySignIn(g.ctx, fmt.Sprintf("p%03d", i))
+	}
 	if gen() != g0+1 {
-		t.Errorf("two calls: %d marks", gen()-g0)
-	}
-	h.RefreshMySignIn("bob")
-	if gen() != g0+2 {
-		t.Errorf("another caller: %d marks", gen()-g0)
-	}
-	now = now.Add(10 * time.Second)
-	h.RefreshMySignIn("alice")
-	if gen() != g0+3 {
-		t.Errorf("after 10 s: %d marks", gen()-g0)
-	}
-	h.RefreshMySignIn("")
-	if gen() != g0+3 {
-		t.Error("an empty user marked")
+		t.Errorf("fallback: %d marks, want 1", gen()-g0)
 	}
 }
 
@@ -836,6 +859,9 @@ func TestMySignInTOTPRowGuardAlone(t *testing.T) {
 	h.signInInv.tried, h.signInInv.err = at, nil
 	h.signInInv.mu.Unlock()
 	for _, u := range []string{"admin", "bob"} {
+		// The hand-made inventory stays: no forced re-read before a
+		// fresh-auth refusal (freshRecheck) replaces it.
+		h.freshRecheckT.allow(u, h.entryClock(), freshRecheckGap)
 		v, err := h.MySignInView(c.ctx, u)
 		if err != nil {
 			t.Fatal(err)

@@ -122,6 +122,9 @@ var peopleAppRoutes = []string{
 	"GET /api/me/impersonation",
 	"POST /api/me/impersonation/stop",
 	"GET /impersonation/stop",
+	"GET /api/me/mail",
+	"POST /api/me/mail/passwords",
+	"DELETE /api/me/mail/passwords/{id}",
 }
 
 // peopleVPNRoutes are the VPN page's seven routes under /vpn/ and People
@@ -142,8 +145,8 @@ var peopleVPNRoutes = []string{
 // directory API, peopleAppRoutes, /healthz, the page and its assets —
 // compared as sets of the patterns PeopleHandler registers.
 func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
-	if len(peopleAppRoutes) != 22 {
-		t.Errorf("peopleAppRoutes has %d routes, the contract (§5.1) twenty-two", len(peopleAppRoutes))
+	if len(peopleAppRoutes) != 25 {
+		t.Errorf("peopleAppRoutes has %d routes, the contract (§5.1) twenty-five", len(peopleAppRoutes))
 	}
 	e := newPeopleEnv(t)
 	dir := &recordingMux{ServeMux: http.NewServeMux()}

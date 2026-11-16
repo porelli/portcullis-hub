@@ -8,10 +8,15 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 )
+
+// ErrUnsupported: the runtime doesn't offer the verb (Kubernetes' Restart).
+var ErrUnsupported = errors.New("not supported by this runtime")
 
 // Project is one instance's project: its name (portcullis-<instance>),
 // the instance id, the compose invocation and (when loaded) the
@@ -119,6 +124,12 @@ type Instances interface {
 	ExecSplit(ctx context.Context, id string, in ExecInput) (*ExecSplitResult, error)
 	ExecRunning(ctx context.Context, execID string) (bool, error)
 	Signal(ctx context.Context, id, sig string) error
+	// RestartCoreService restarts core's own service (only "mail": the
+	// Hub's one engine action on a core container, contract §6): exactly
+	// the one non-one-off container of core's compose project in core's
+	// working directory; zero or several matches restart nothing.
+	// Kubernetes answers ErrUnsupported.
+	RestartCoreService(ctx context.Context, service string, timeout time.Duration) error
 	State(ctx context.Context, id string) (State, error)
 	Events(ctx context.Context, f Filter, fn func(Event)) error
 

@@ -140,7 +140,8 @@ func newFakeEngine() *fakeEngine {
 	return &fakeEngine{vols: map[string]*fakeVol{}, helpers: map[string]docker.HelperSpec{}}
 }
 
-func (e *fakeEngine) ContainerKill(context.Context, string, string) error { return nil }
+func (e *fakeEngine) ContainerKill(context.Context, string, string) error           { return nil }
+func (e *fakeEngine) ContainerRestart(context.Context, string, time.Duration) error { return nil }
 func (e *fakeEngine) ExecStdin(context.Context, string, docker.ExecInput) (*docker.ExecResult, error) {
 	return nil, cerrdefs.ErrNotFound.WithMessage("no such container")
 }

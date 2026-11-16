@@ -48,6 +48,9 @@ type Membership struct {
 	// excluded; "" = none). Only the gate file's people (identity_headers,
 	// contract §15.4) uses it: identity is the username, never the email.
 	Emails map[string]string
+	// DisplayNames: lowercase user → LLDAP display name (the service
+	// account excluded; "" = none). Mail's account display names only.
+	DisplayNames map[string]string
 	// Pending: user → group → the earliest expiry still ahead of now
 	// (contract §15.4 expiring: the gate refuses from that time on, even
 	// before the evaluator removes the membership).
@@ -113,7 +116,7 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Membership {
 	svc := strings.ToLower(s.serviceUser())
 	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{},
-		Emails: map[string]string{}, Pending: map[string]map[string]time.Time{},
+		Emails: map[string]string{}, DisplayNames: map[string]string{}, Pending: map[string]map[string]time.Time{},
 		Guarding: s.guardingGroups(cfg), GuardedFields: s.guardedFields(cfg), Administrators: map[string]bool{}}
 	for g := range s.adminGroups() {
 		for _, u := range sn.groups[g].Members() {
@@ -127,6 +130,7 @@ func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Member
 			m.Users[id] = map[string]int{}
 			m.UUIDs[id] = u.UUID
 			m.Emails[id] = u.Email
+			m.DisplayNames[id] = u.DisplayName
 		}
 	}
 	for name, g := range sn.groups {

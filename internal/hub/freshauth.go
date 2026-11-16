@@ -6,9 +6,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/confirm"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -219,6 +221,62 @@ func withPcMethod(info *freshauth.AuthorizeInfo, pc, refusal string) *freshauth.
 	c := *info
 	c.PcMethod, c.Refusal = pc, refusal
 	return &c
+}
+
+// freshRecheckGap: a person is re-read before a refusal at most once per
+// 5 s (it reads Keycloak: never a way to hammer it).
+const freshRecheckGap = 5 * time.Second
+
+// freshRecheck is called when freshPcFor refused a known person
+// (freshNeedsStronger): the inventory may predate a method they just set
+// up (a setup link redeemed, an authenticator app added), so it is read
+// again at once, past the 30 s throttle — at most once per 5 s per
+// person. True: it was read again (the caller computes the answer
+// again, as strictly); false: throttled, the refusal stands.
+//
+// With a per-person source only that person is read and patched in
+// (refreshPerson); without one, a full re-read runs at most once per 5 s
+// overall, and not when the cached inventory is under 5 s old.
+func (h *Hub) freshRecheck(ctx context.Context, user string) bool {
+	u := strings.ToLower(user)
+	if !h.freshRecheckT.allow(u, h.entryClock(), freshRecheckGap) {
+		return false
+	}
+	if read := h.personSource(); read != nil {
+		return h.refreshPerson(ctx, read, u)
+	}
+	if !h.markStaleLimited() {
+		return false
+	}
+	_, _ = h.inventoryBase(ctx, true)
+	return true
+}
+
+// personSource is the one-person Keycloak read (nil: not wired).
+func (h *Hub) personSource() func(context.Context, string) ([]keycloak.PasskeyCredential, bool, error) {
+	c := &h.signInInv
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.src.PersonPasskeys
+}
+
+// markStaleLimited is the fallback when there's no one-person read: it
+// marks the inventory stale for a full re-read at most once per
+// freshRecheckGap across everyone, and never while the cached inventory
+// is under that old. False: skipped.
+func (h *Hub) markStaleLimited() bool {
+	c := &h.signInInv
+	now := c.clock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if (c.base != nil && c.err == nil && now.Sub(c.base.at) < freshRecheckGap) ||
+		(!c.forcedAt.IsZero() && now.Sub(c.forcedAt) < freshRecheckGap) {
+		return false
+	}
+	c.forcedAt = now
+	c.tried = time.Time{}
+	c.gen++
+	return true
 }
 
 // personMethods is user's set-up methods from the sign-in inventory (read

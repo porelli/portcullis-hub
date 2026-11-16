@@ -183,7 +183,11 @@ type fakeEngine struct {
 	// listed state, no healthcheck).
 	kills    []string
 	killHook func(id, signal string)
-	states   map[string]docker.State
+	// restarts: "<container>:<timeout>" per ContainerRestart; restartErr
+	// answers it.
+	restarts   []string
+	restartErr error
+	states     map[string]docker.State
 	// ExecStdin (hooks): every call, in order; execStdin (if set) answers
 	// it (called without mu: it may block); execRunning: ExecRunning's
 	// answer per exec id; execInflight / execMaxInflight: overlap.
@@ -320,6 +324,19 @@ func (e *fakeEngine) ContainerKill(ctx context.Context, id, signal string) error
 		hook(id, signal)
 	}
 	return nil
+}
+
+func (e *fakeEngine) ContainerRestart(ctx context.Context, id string, timeout time.Duration) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.restarts = append(e.restarts, id+":"+timeout.String())
+	return e.restartErr
+}
+
+func (e *fakeEngine) Restarts() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.restarts...)
 }
 
 func (e *fakeEngine) ContainerState(ctx context.Context, id string) (docker.State, error) {

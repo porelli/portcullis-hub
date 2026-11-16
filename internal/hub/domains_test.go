@@ -15,6 +15,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/state"
 )
 
 const secretToken = "cf-SECRET-token-0123456789abcdef"
@@ -44,6 +45,12 @@ type fakeDomainsAPI struct {
 	refreshes int
 	signErr   error
 	planErr   error
+	// Mail sets (sets/mail): the stored records by name, every call
+	// ("put <name>", "delete <name>").
+	mailSets  map[string][]domains.MailRecord
+	mailCalls []string
+	// mailSetErr: SetMailSet fails with it (the call still counted).
+	mailSetErr error
 }
 
 func newFakeDomainsAPI() *fakeDomainsAPI {
@@ -113,6 +120,37 @@ func (f *fakeDomainsAPI) EnableDNSSEC(_ context.Context, name string) (domains.D
 	f.signed = append(f.signed, name)
 	d.State = "records"
 	f.list[name] = d
+	return d, nil
+}
+
+func (f *fakeDomainsAPI) SetMailSet(_ context.Context, name string, recs []domains.MailRecord) (domains.Domain, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.list[name]
+	if !ok {
+		return domains.Domain{}, &domains.APIError{Status: 404, Message: name + " is not enrolled"}
+	}
+	if f.mailSetErr != nil {
+		f.mailCalls = append(f.mailCalls, "fail "+name)
+		return domains.Domain{}, f.mailSetErr
+	}
+	if f.mailSets == nil {
+		f.mailSets = map[string][]domains.MailRecord{}
+	}
+	f.mailSets[name] = recs
+	f.mailCalls = append(f.mailCalls, "put "+name)
+	return d, nil
+}
+
+func (f *fakeDomainsAPI) DeleteMailSet(_ context.Context, name string) (domains.Domain, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.list[name]
+	if !ok {
+		return domains.Domain{}, &domains.APIError{Status: 404, Message: name + " is not enrolled"}
+	}
+	delete(f.mailSets, name)
+	f.mailCalls = append(f.mailCalls, "delete "+name)
 	return d, nil
 }
 
@@ -816,5 +854,49 @@ func TestDeleteDomainDropsOpRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(f.h.opPath(key)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("op file after delete: %v", err)
+	}
+}
+
+// TestDeleteDomainRefusedWhileMailOn: an added domain whose mail is on or
+// draining can't be deleted (409, nothing changes); once off it can, and
+// its mail entry and lists go with it.
+func TestDeleteDomainRefusedWhileMailOn(t *testing.T) {
+	f, api, _ := newDomainsFixture(t)
+	ctx := context.Background()
+	const d = "team-b.example.net"
+	f.h.EnrollDomain(ctx, directory.Human("alice"), d, "cloudflare", creds())
+	api.set(d, true, time.Now().Add(60*24*time.Hour))
+	f.h.RefreshDomains(ctx)
+	for _, md := range []state.MailDomain{{Enabled: true}, {Draining: true}} {
+		f.h.mu.Lock()
+		f.h.st.Mail.Domains = map[string]state.MailDomain{d: md}
+		f.h.st.Mail.Lists = map[string]state.MailList{"team": {Domain: d, Posting: "members"}}
+		f.h.mu.Unlock()
+		if got := f.h.MailDomainStates()[d]; got == "off" {
+			t.Fatalf("state %s", got)
+		}
+		_, err := f.h.DeleteDomain(ctx, directory.Human("alice"), d)
+		if statusOf(err) != 409 || err.Error() != "turn mail off for "+d+" and wait for it to finish draining first" {
+			t.Fatalf("%+v: %v", md, err)
+		}
+		if !f.h.knownLocked(d) || len(api.deleted) != 0 {
+			t.Fatalf("%+v: deleted anyway", md)
+		}
+	}
+	f.h.mu.Lock()
+	f.h.st.Mail.Domains[d] = state.MailDomain{Retired: true}
+	f.h.mu.Unlock()
+	if got := f.h.MailDomainStates()[d]; got != "off" {
+		t.Fatalf("state %s", got)
+	}
+	if _, err := f.h.DeleteDomain(ctx, directory.Human("alice"), d); err != nil {
+		t.Fatal(err)
+	}
+	f.h.mu.RLock()
+	_, entry := f.h.st.Mail.Domains[d]
+	nl := len(f.h.st.Mail.Lists)
+	f.h.mu.RUnlock()
+	if entry || nl != 0 {
+		t.Fatalf("mail entry %v lists %d after delete", entry, nl)
 	}
 }

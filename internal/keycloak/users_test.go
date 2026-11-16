@@ -548,3 +548,40 @@ func TestOTPPolicyReadsRealmAndActions(t *testing.T) {
 		t.Error("Keycloak down: want an error")
 	}
 }
+
+// TestUserSignInCredentials: one user's entry, as SignInCredentials
+// lists it: their keys, nil when disabled, not found when unknown, an
+// error when their credentials can't be read.
+func TestUserSignInCredentials(t *testing.T) {
+	f := kctest.New(t)
+	f.Import("alice", kctest.Credential{ID: "p1", Type: "password"}, kctest.Credential{ID: "w3", Type: "portcullis-security-key", UserLabel: "YubiKey"}, kctest.Credential{ID: "o1", Type: "otp"})
+	f.Import("bob")
+	f.Import("off", kctest.Credential{ID: "w6", Type: "portcullis-security-key"})
+	f.Update("off", func(u *kctest.User) { u.Enabled = false })
+	f.Import("broken", kctest.Credential{ID: "w5", Type: "portcullis-security-key"})
+	f.Update("broken", func(u *kctest.User) { u.CredentialsStatus = 500 })
+	c := keycloak.New(f.HTTP.URL, "admin", "admin")
+	ctx := context.Background()
+	all, err := c.SignInCredentials(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{"alice", "bob"} {
+		keys, found, err := c.UserSignInCredentials(ctx, u)
+		if err != nil || !found || keys == nil || !reflect.DeepEqual(keys, all[u]) {
+			t.Errorf("%s = %+v %v %v, all %+v", u, keys, found, err, all[u])
+		}
+	}
+	if keys, found, err := c.UserSignInCredentials(ctx, "off"); err != nil || !found || keys != nil {
+		t.Errorf("disabled = %+v %v %v", keys, found, err)
+	}
+	if _, found, err := c.UserSignInCredentials(ctx, "nobody"); err != nil || found {
+		t.Errorf("unknown = %v %v", found, err)
+	}
+	if _, _, err := c.UserSignInCredentials(ctx, "broken"); err == nil {
+		t.Error("unreadable credentials: want an error")
+	}
+	if _, _, err := c.UserSignInCredentials(ctx, "a*"); err == nil {
+		t.Error("an invalid username: want an error")
+	}
+}

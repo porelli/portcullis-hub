@@ -47,13 +47,17 @@ var reservedRefs = []string{"forward-auth-ext", "portcullis-auth-ext", "portcull
 var (
 	coreServices = set("socket-proxy-traefik", "socket-proxy-hub", "traefik", "postgres", "vault", "lldap", "keycloak",
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "dns-tool", "prometheus", "alertmanager", "blackbox",
-		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg")
+		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg",
+		// Mail (contract §3 "Mail core names").
+		"mail", "mailctl", "mail-resolver", "mail-cert")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
-		"group_gate_data", "wg_data", "vpn_doc")
+		"group_gate_data", "wg_data", "vpn_doc",
+		"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data")
 	// coreAliases are core's network aliases that aren't service names
-	// (wg's metrics address on portcullis): reserved DNS names too.
-	coreAliases = set("wg-metrics")
+	// (wg's metrics address on portcullis, mail's and mailctl's on
+	// portcullis-metrics-mail): reserved DNS names too.
+	coreAliases = set("wg-metrics", "mail-metrics", "mailctl-metrics")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
@@ -834,10 +838,13 @@ var (
 		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
 			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp", "people-vpn-enrol",
 			"core-vpn-required", "dashboard-vpn", "grafana-metrics-vpn", "hub-vpn", "keycloak-admin-vpn", "keycloak-admin-vpn-required",
-			"people-vpn", "people-vpn-enrol-vpn", "portal-vpn"),
+			"people-vpn", "people-vpn-enrol-vpn", "portal-vpn",
+			// Mail (contract §5): mailctl's well-known router.
+			"mail-wellknown"),
 		"middlewares": set("vpn-required-path", "portcullis-groups-vpn", "portcullis-public-guard-vpn", "portal-vpn-path", "directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
-		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate"),
+		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate",
+			"mailctl", "mailctl-wellknown"),
 	}
 	// routerAttrRe: no tls.certresolver / tls.domains (certificates are
 	// core's: a template asking ACME for names it doesn't route).
