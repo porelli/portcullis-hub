@@ -110,3 +110,69 @@ window.PortcullisServers.load().then(() => {
 		t.Errorf("after 7 days / on the primary:\n%s", h)
 	}
 }
+
+// TestServersConfirmOpensPopupFromClick: typed confirmations are inline
+// rows (no prompt or confirm dialog anywhere in servers.js); Confirm
+// runs only when the typed id matches, and then opens the fresh sign-in
+// popup synchronously, in the click itself, before any request; the
+// proof's request carries the typed id.
+func TestServersConfirmOpensPopupFromClick(t *testing.T) {
+	src := webAsset(t, "servers.js")
+	for _, bad := range []string{"prompt(", "confirm(", "alert("} {
+		if strings.Contains(src, bad) {
+			t.Errorf("servers.js calls %s", bad)
+		}
+	}
+	out := serversJS(t, `
+let started = [], calls = [];
+window.PortcullisFreshAuth = { start(fa, h) { started.push(h.ctx); h.proof({ code: 'c', code_verifier: 'v', nonce: 'n' }); } };
+window.showToast = () => {};
+window.apiCall = async (url, method, body) => { calls.push([url, method, body]); return { json: async () => ({ op_id: 'o', op: 'move_undo' }) }; };
+window.awaitOp = async () => ({});
+window.apiGet = async () => ({ servers: [{ id: 'primary', name: 'Primary', state: 'ready' }, { id: 'nas', name: 'NAS', state: 'ready' }], fresh_auth: { authorize_url: 'x' } });
+const S = window.PortcullisServers;
+const listRoot = { dataset: { srvWired: '1' }, innerHTML: '' };
+function row(action, expect, typed) {
+  return { dataset: { srvConfirm: action, srvExpect: expect }, querySelector: q => q === '[data-srv-typed]' && expect ? { value: typed } : null };
+}
+S.load().then(() => {
+  const res = {};
+  const html = S.confirmHtml('revoke', 'nas', 'Revoke <b>?', 'Revoke');
+  res.html = html.includes('data-srv-typed') && html.includes('data-srv-go disabled') && html.includes('Revoke &lt;b&gt;?');
+  // A mismatch: nothing starts.
+  res.mismatch = S.goConfirm(row('revoke', 'nas', 'na'), (a, t) => S.runListAction(listRoot, a, 'nas', t)) === false && started.length === 0;
+  // A match: the popup opens in the same call (synchronously).
+  const ok = S.goConfirm(row('revoke', 'nas', ' nas '), (a, t) => S.runListAction(listRoot, a, 'nas', t));
+  res.sync = ok && started.length === 1;
+  const inst = { id: 'notes', server: 'nas' };
+  S.goConfirm(row('undo', 'notes', 'notes'), (a, t) => S.runInstanceAction({ querySelector: () => null }, inst, a, t, null, () => {}));
+  res.undoSync = started.length === 2;
+  S.goConfirm(row('lift', '', ''), (a, t) => S.runInstanceAction({ querySelector: () => null }, inst, a, t, null, () => {}));
+  res.liftSync = started.length === 3;
+  setTimeout(() => { res.calls = calls; process.stdout.write(JSON.stringify(res)); }, 10);
+});`)
+	var got struct {
+		HTML, Mismatch, Sync, UndoSync, LiftSync bool
+		Calls                                    [][]any
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if !got.HTML || !got.Mismatch || !got.Sync || !got.UndoSync || !got.LiftSync {
+		t.Errorf("%+v", got)
+	}
+	want := map[string]string{"/api/servers/nas/revoke": "nas", "/api/instances/notes/move/undo": "notes"}
+	seen := 0
+	for _, c := range got.Calls {
+		body, _ := c[2].(map[string]any)
+		if w, ok := want[c[0].(string)]; ok {
+			seen++
+			if body["confirm"] != w || body["code"] != "c" {
+				t.Errorf("%v: body %v", c[0], body)
+			}
+		}
+	}
+	if seen != 2 || len(got.Calls) != 3 {
+		t.Errorf("calls %v", got.Calls)
+	}
+}

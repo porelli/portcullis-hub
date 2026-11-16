@@ -25,7 +25,9 @@
 //
 // † = a fresh sign-in first (PortcullisFreshAuth, started from the click).
 //
-// Rules: every value goes through esc. The join code is shown once, in a
+// Rules: every value goes through esc. Typed confirmations are inline
+// rows (confirm.js's pattern), never a prompt or confirm dialog: their Confirm
+// click opens the fresh sign-in popup directly, so no browser blocks it. The join code is shown once, in a
 // dialog built for it: it is never put in storage, never in the page
 // outside that dialog, and closing the dialog drops the dialog's markup
 // and the only reference to the code (Copy reads that reference).
@@ -213,6 +215,10 @@
     if (!root.dataset.srvWired) {
       root.dataset.srvWired = '1';
       root.addEventListener('click', e => act(root, e));
+      confirmEvents(root, (action, typed, row) => {
+        const tr = row.closest('[data-server]');
+        if (tr) runListAction(root, action, tr.dataset.server, typed, row.querySelector('[data-srv-go]'));
+      });
     }
   }
 
@@ -260,22 +266,94 @@
         return;
       case 'revoke':
       case 'remove': {
+        // An inline typed-id row (confirm.js's pattern): its Confirm click
+        // opens the fresh sign-in popup directly (no dialog before it).
         const verb = b.dataset.srvAct === 'revoke' ? 'Revoke' : 'Remove';
-        const typed = prompt(verb + ' server ' + serverName(id) + '? ' + (verb === 'Revoke'
+        showConfirm(b, b.dataset.srvAct, id, verb + ' server ' + serverName(id) + '? ' + (verb === 'Revoke'
           ? 'It can\'t reach the Hub any more, its certificate is revoked and its instances are orphaned (restore them elsewhere or forget them).'
-          : 'Only a server without instances can be removed.') + ' Type its id (' + id + ') to confirm:');
-        if (typed !== id) { if (typed !== null) window.showToast('The id didn\'t match: nothing changed.', 'error'); return; }
-        fresh(b.dataset.srvAct, async proof => {
-          b.dataset.busy = '1';
-          try {
-            await window.apiCall('/api/servers/' + enc(id) + (verb === 'Revoke' ? '/revoke' : ''), verb === 'Revoke' ? 'POST' : 'DELETE', Object.assign({ confirm: typed }, proof));
-            window.showToast(verb === 'Revoke' ? 'Revoked.' : 'Removed.', 'success');
-            render(root);
-          } catch (err) { fail(err); }
-        });
+          : 'Only a server without instances can be removed.') + ' Type its id to confirm:', verb);
         return;
       }
     }
+  }
+
+  // ── inline typed confirmations ───────────────────────
+
+  // confirmHtml is an inline confirmation row: text, the typed field
+  // (expect "" = none: a plain Confirm) and Confirm / Cancel. Confirm is
+  // enabled once the field holds expect.
+  function confirmHtml(action, expect, text, label) {
+    return '<div class="inst-row" data-srv-confirm="' + esc(action) + '" data-srv-expect="' + esc(expect) + '">' +
+      '<span>' + esc(text) + '</span>' +
+      (expect ? ' <input data-srv-typed autocomplete="off" spellcheck="false" placeholder="' + esc(expect) + '" aria-label="Type ' + esc(expect) + ' to confirm">' : '') +
+      ' <button type="button" class="btn btn-sm btn-danger" data-srv-go' + (expect ? ' disabled' : '') + '>' + esc(label || 'Confirm') + '</button>' +
+      ' <button type="button" class="btn btn-sm" data-srv-cancel>Cancel</button></div>';
+  }
+
+  // showConfirm puts one confirmation row under the button b.
+  function showConfirm(b, action, expect, text, label) {
+    const host = b.closest('td, .inst-row, [data-srv-inst]') || b.parentNode;
+    const old = host.querySelector('[data-srv-confirm]');
+    if (old) old.remove();
+    host.insertAdjacentHTML('beforeend', confirmHtml(action, expect, text, label));
+    const inp = host.querySelector('[data-srv-confirm] [data-srv-typed]');
+    if (inp) inp.focus();
+  }
+
+  // typedOf: the row's typed value when it matches (expect "" = ""), else
+  // null.
+  function typedOf(row) {
+    const expect = row.dataset.srvExpect || '';
+    const inp = row.querySelector('[data-srv-typed]');
+    const typed = inp ? String(inp.value).trim() : '';
+    return typed === expect ? typed : null;
+  }
+
+  // goConfirm runs a confirmation row's action from the click itself:
+  // run(action, typed) opens the popup before anything else. false: the
+  // typed id doesn't match (nothing runs).
+  function goConfirm(row, run) {
+    const typed = typedOf(row);
+    if (typed === null) return false;
+    run(row.dataset.srvConfirm, typed);
+    return true;
+  }
+
+  // confirmEvents wires rows under root: typing enables Confirm, Cancel
+  // drops the row, Confirm runs run(action, typed, row).
+  function confirmEvents(root, run) {
+    root.addEventListener('input', e => {
+      const row = e.target.closest && e.target.closest('[data-srv-confirm]');
+      if (!row) return;
+      const go = row.querySelector('[data-srv-go]');
+      if (go) go.disabled = typedOf(row) === null;
+    });
+    root.addEventListener('click', e => {
+      const t = e.target.closest && e.target.closest('[data-srv-go], [data-srv-cancel]');
+      if (!t || !root.contains(t)) return;
+      const row = t.closest('[data-srv-confirm]');
+      if (!row) return;
+      if (t.hasAttribute('data-srv-cancel')) { row.remove(); return; }
+      if (t.dataset.busy) return;
+      goConfirm(row, (action, typed) => run(action, typed, row, t));
+    });
+  }
+
+  // runListAction is a confirmed revoke or remove of server id: the fresh
+  // sign-in popup first (synchronously), then the request.
+  function runListAction(root, action, id, typed, btn) {
+    const verb = action === 'revoke' ? 'Revoke' : 'Remove';
+    fresh(action, async proof => {
+      if (btn) btn.dataset.busy = '1';
+      try {
+        await window.apiCall('/api/servers/' + enc(id) + (verb === 'Revoke' ? '/revoke' : ''), verb === 'Revoke' ? 'POST' : 'DELETE', Object.assign({ confirm: typed }, proof));
+        window.showToast(verb === 'Revoke' ? 'Revoked.' : 'Removed.', 'success');
+        render(root);
+      } catch (err) {
+        if (btn) delete btn.dataset.busy;
+        window.showToast(err.message || 'Failed', 'error');
+      }
+    });
   }
 
   // ── the instance page ────────────────────────────────
@@ -326,59 +404,71 @@
     return h + '</div>';
   }
 
-  // wire binds instanceSection's buttons in root; done() re-renders.
+  // runInstanceAction is a confirmed instance action: undo, leftover and
+  // lift open the fresh sign-in popup first (synchronously, from the
+  // confirming click); move needs none.
+  function runInstanceAction(root, inst, action, typed, btn, done) {
+    const id = inst.id;
+    const fail = err => { if (btn) delete btn.dataset.busy; if (!err.shown) window.showToast(err.message || 'Failed', 'error'); };
+    const busy = () => { if (btn) btn.dataset.busy = '1'; };
+    switch (action) {
+      case 'move': {
+        const sel = root.querySelector('[data-srv-move-to]');
+        busy();
+        window.apiCall('/api/instances/' + enc(id) + '/move', 'POST', { server: sel ? sel.value : '' })
+          .then(r => r.json()).then(acc => window.awaitOp(id, acc.op_id, acc.op)).then(done, fail);
+        return;
+      }
+      case 'undo':
+        fresh('undo', proof => {
+          busy();
+          window.apiCall('/api/instances/' + enc(id) + '/move/undo', 'POST', Object.assign({ confirm: typed }, proof))
+            .then(r => r.json()).then(acc => window.awaitOp(id, acc.op_id, acc.op)).then(done, fail);
+        });
+        return;
+      case 'leftover':
+        fresh('leftover', proof => {
+          busy();
+          window.apiCall('/api/instances/' + enc(id) + '/move-leftover', 'DELETE', Object.assign({ confirm: typed }, proof)).then(done, fail);
+        });
+        return;
+      case 'lift':
+        fresh('lift', proof => {
+          busy();
+          window.apiCall('/api/instances/' + enc(id) + '/quarantine/lift', 'POST', proof)
+            .then(() => { window.showToast('Quarantine lifted.', 'success'); done(); }, fail);
+        });
+    }
+  }
+
+  // wire binds instanceSection's buttons in root; done() re-renders. Each
+  // action shows its inline confirmation first.
   function wire(root, inst, done) {
+    const id = inst.id;
     root.addEventListener('click', e => {
       const b = e.target.closest && e.target.closest('[data-srv-iact]');
       if (!b || !root.contains(b) || b.dataset.busy) return;
-      const id = inst.id;
-      const fail = err => { delete b.dataset.busy; if (!err.shown) window.showToast(err.message || 'Failed', 'error'); };
-      const typedOK = what => {
-        const t = prompt(what + ' Type the instance id (' + id + ') to confirm:');
-        if (t !== id) { if (t !== null) window.showToast('The id didn\'t match: nothing changed.', 'error'); return null; }
-        return t;
-      };
       switch (b.dataset.srvIact) {
         case 'move': {
-          const to = root.querySelector('[data-srv-move-to]').value;
-          if (typedOK('Move ' + id + ' to ' + serverName(to) + '? It is down while it moves.') === null) return;
-          b.dataset.busy = '1';
-          window.apiCall('/api/instances/' + enc(id) + '/move', 'POST', { server: to })
-            .then(r => r.json()).then(acc => window.awaitOp(id, acc.op_id, acc.op)).then(done, fail);
+          const sel = root.querySelector('[data-srv-move-to]');
+          showConfirm(b, 'move', id, 'Move ' + id + ' to ' + serverName(sel ? sel.value : '') + '? It is down while it moves. Type the instance id to confirm:', 'Move');
           return;
         }
-        case 'undo': {
-          const t = typedOK('Undo the move of ' + id + '? Changes since the move are lost.');
-          if (t === null) return;
-          fresh('undo', proof => {
-            b.dataset.busy = '1';
-            window.apiCall('/api/instances/' + enc(id) + '/move/undo', 'POST', Object.assign({ confirm: t }, proof))
-              .then(r => r.json()).then(acc => window.awaitOp(id, acc.op_id, acc.op)).then(done, fail);
-          });
+        case 'undo':
+          showConfirm(b, 'undo', id, 'Undo the move of ' + id + '? Changes since the move are lost. Type the instance id to confirm (a fresh sign-in follows):', 'Undo move');
           return;
-        }
-        case 'leftover': {
-          const t = typedOK('Remove the old copy of ' + id + ' (its volumes on the old server)? Undo move isn\'t possible afterwards.');
-          if (t === null) return;
-          fresh('leftover', proof => {
-            b.dataset.busy = '1';
-            window.apiCall('/api/instances/' + enc(id) + '/move-leftover', 'DELETE', Object.assign({ confirm: t }, proof)).then(done, fail);
-          });
+        case 'leftover':
+          showConfirm(b, 'leftover', id, 'Remove the old copy of ' + id + ' (its volumes on the old server)? Undo move isn\'t possible afterwards. Type the instance id to confirm (a fresh sign-in follows):', 'Remove');
           return;
-        }
         case 'lift':
-          if (!confirm('Lift the quarantine of ' + id + ' on ' + serverName(inst.server) + '? Its bundle is checked and sent again; the agent refuses it again if the cause remains.')) return;
-          fresh('lift', proof => {
-            b.dataset.busy = '1';
-            window.apiCall('/api/instances/' + enc(id) + '/quarantine/lift', 'POST', proof)
-              .then(() => { window.showToast('Quarantine lifted.', 'success'); done(); }, fail);
-          });
+          showConfirm(b, 'lift', '', 'Lift the quarantine of ' + id + ' on ' + serverName(inst.server) + '? Its bundle is checked and sent again; the agent refuses it again if the cause remains (a fresh sign-in follows).', 'Lift');
       }
     });
+    confirmEvents(root, (action, typed, row, btn) => runInstanceAction(root, inst, action, typed, btn, done));
   }
 
   // cached is the last list (no request): folders.js's server choice.
   function cached() { return (page && page.servers) || []; }
 
-  window.PortcullisServers = { render, load, cached, listHtml, detailHtml, codeDialogHtml, openCodeDialog, runsOn, serverSelect, instanceSection, wire };
+  window.PortcullisServers = { render, load, cached, confirmHtml, goConfirm, runListAction, runInstanceAction, listHtml, detailHtml, codeDialogHtml, openCodeDialog, runsOn, serverSelect, instanceSection, wire };
 })();
