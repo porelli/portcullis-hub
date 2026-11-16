@@ -5,7 +5,6 @@ package runtimetest
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -13,8 +12,14 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 )
 
-// ErrNotFound is what the fake answers for an unknown unit or volume.
-var ErrNotFound = errors.New("not found")
+// ErrNotFound is what the fake answers for an unknown unit or volume:
+// typed like the engine's (errdefs.IsNotFound holds).
+var ErrNotFound error = notFoundErr{}
+
+type notFoundErr struct{}
+
+func (notFoundErr) Error() string { return "not found" }
+func (notFoundErr) NotFound()     {}
 
 // Fake is an in-memory runtime. The zero value is a docker runtime with
 // nothing in it; set the exported fields before use (or under Lock).

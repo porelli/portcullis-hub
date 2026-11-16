@@ -1064,16 +1064,15 @@ func (a *API) Sweep(ctx context.Context) {
 // (persisted) until the Hub lifts it.
 func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	var info runtime.UnitInfo
-	inspected := false
+	inspected, gone := false, false
 	if container != "" {
 		i, err := a.cfg.Runtime.Inspect(ctx, container)
 		if err != nil && isNotFound(err) {
 			// Gone (a recreate between the list and here, R4-L2): once
-			// more, then nothing to protect.
+			// more; still gone, it is ignored only for an instance with a
+			// valid, unquarantined bundle (below) — its siblings may run.
 			i, err = a.cfg.Runtime.Inspect(ctx, container)
-			if err != nil && isNotFound(err) {
-				return
-			}
+			gone = err != nil && isNotFound(err)
 		}
 		if err == nil {
 			info, inspected = i, true
@@ -1100,6 +1099,9 @@ func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	}
 	var why string
 	p := a.project(id)
+	if gone && p != nil && a.quarantineOf(id) == "" {
+		return // a vanished container of a valid instance: nothing to protect
+	}
 	switch {
 	case a.quarantineOf(id) != "":
 		why = a.quarantineOf(id) // quarantined (or all are): it must not run
@@ -1122,7 +1124,7 @@ func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	if a.quarantineOf(id) == "" {
 		a.quarantine(id, why)
 	}
-	if container != "" {
+	if container != "" && !gone {
 		if err := a.cfg.Runtime.Signal(ctx, container, "KILL"); err != nil {
 			log.Printf("bind check: %s: kill %s: %v", id, clipMsg(container), err)
 		}
@@ -1190,12 +1192,6 @@ func flush(w http.ResponseWriter) {
 	}
 }
 
-// isNotFound: the engine says the container doesn't exist.
-func isNotFound(err error) bool {
-	var nf interface{ NotFound() bool }
-	if errors.As(err, &nf) && nf.NotFound() {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return docker.IsNotFound(err) || strings.Contains(msg, "no such container") || msg == "not found"
-}
+// isNotFound: the engine says the container doesn't exist (its typed
+// errdefs error only, never a message match).
+func isNotFound(err error) bool { return docker.IsNotFound(err) }

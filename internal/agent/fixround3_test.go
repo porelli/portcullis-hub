@@ -419,8 +419,10 @@ func TestSelfIdentity(t *testing.T) {
 	}
 }
 
-// TestInspectNotFoundIgnored (R4-L2): a container gone between the list
-// and the inspect (a recreate) is ignored, not quarantined.
+// TestInspectNotFoundIgnored (R4-L2, commit review): a container gone
+// between the list and the inspect (typed not-found, twice) is ignored
+// only for an instance with a valid, unquarantined bundle; with no bundle
+// or a quarantine its project goes down (and is or stays quarantined).
 func TestInspectNotFoundIgnored(t *testing.T) {
 	f := backstopFixture(t)
 	f.rt.Lock()
@@ -430,6 +432,22 @@ func TestInspectNotFoundIgnored(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if f.api.Quarantined() != nil || countCalls(f, "down-by-name portcullis-app") != 0 {
 		t.Errorf("acted on a gone container: %v %v", f.api.Quarantined(), f.rt.Calls())
+	}
+	// No bundle for its project: fail closed (its siblings may run).
+	f.api.CheckStarted(context.Background(), "c-ghost", "portcullis-ghost")
+	waitCall(t, f, "down-by-name portcullis-ghost")
+	if f.api.Quarantined()["ghost"] == "" {
+		t.Errorf("no bundle: not quarantined %v", f.api.Quarantined())
+	}
+	// Quarantined: it stays so and goes down again.
+	f.api.quarantine("app", "an earlier violation")
+	f.api.CheckStarted(context.Background(), "c-app", "portcullis-app")
+	waitCall(t, f, "down-by-name portcullis-app")
+	if f.api.Quarantined()["app"] != "an earlier violation" {
+		t.Errorf("quarantined: %v", f.api.Quarantined())
+	}
+	if countCalls(f, "signal c-app KILL")+countCalls(f, "signal c-ghost KILL") != 0 {
+		t.Errorf("killed a gone container: %v", f.rt.Calls())
 	}
 }
 
