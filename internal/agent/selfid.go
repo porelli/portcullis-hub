@@ -16,7 +16,10 @@ import (
 // The agent's own container (fix round 5, R4-L1): never by a hostname
 // lookup (a bundle's container_name could take the hostname). Its id
 // comes from AGENT_CONTAINER_ID (core sets it), else from the kernel's
-// view of the container (/proc/self/mountinfo, /proc/self/cgroup), and
+// view of the container (/proc/self/mountinfo: first the sources of its
+// /etc/hostname, /etc/hosts and /etc/resolv.conf binds, which name the
+// innermost container even in a nested engine; else every id in
+// mountinfo and /proc/self/cgroup, which must be one), and
 // the container found must be exactly that id and carry the agent's
 // compose service label and the agent image's own label (plus the image
 // id, when AGENT_SELF_IMAGE_ID names it; not AGENT_IMAGE, which is core's
@@ -53,6 +56,55 @@ func containerIDFrom(files ...io.Reader) (string, error) {
 	return "", errors.New("more than one container id in /proc/self/mountinfo and /proc/self/cgroup: ambiguous")
 }
 
+// hostMountRe matches the engine-written files bound at /etc/hostname,
+// /etc/hosts and /etc/resolv.conf, by their path in the source
+// filesystem (mountinfo's root field): Docker's
+// <root>/containers/<id>/<file>, Podman's
+// <storage>/overlay-containers/<id>/userdata/<file>.
+var hostMountRe = regexp.MustCompile(`(?:^|/)(?:containers|overlay-containers)/([0-9a-f]{64})(?:/userdata)?/(?:hostname|hosts|resolv\.conf)$`)
+
+// hostMountID is the id the agent's own /etc/hostname, /etc/hosts and
+// /etc/resolv.conf mounts name (the innermost container's, even in a
+// nested engine whose outer container's id shows elsewhere): ok only when
+// at least one names an id and all that do agree.
+func hostMountID(mountinfo []byte) (string, bool) {
+	ids := map[string]bool{}
+	sc := bufio.NewScanner(strings.NewReader(string(mountinfo)))
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		// id parent maj:min root mountpoint …
+		f := strings.Fields(sc.Text())
+		if len(f) < 5 {
+			continue
+		}
+		switch f[4] {
+		case "/etc/hostname", "/etc/hosts", "/etc/resolv.conf":
+		default:
+			continue
+		}
+		if m := hostMountRe.FindStringSubmatch(f[3]); m != nil {
+			ids[m[1]] = true
+		}
+	}
+	if len(ids) != 1 {
+		return "", false
+	}
+	for id := range ids {
+		return id, true
+	}
+	return "", false
+}
+
+// selfIDFrom is the agent's id from the kernel's view: the host-file
+// mounts' id when they agree (nested engines), else the one id the
+// files name (containerIDFrom: several = ambiguous, an error).
+func selfIDFrom(mountinfo, cgroup []byte) (string, error) {
+	if id, ok := hostMountID(mountinfo); ok {
+		return id, nil
+	}
+	return containerIDFrom(strings.NewReader(string(mountinfo)), strings.NewReader(string(cgroup)))
+}
+
 // SelfContainerID is the agent's own container id: AGENT_CONTAINER_ID,
 // else the kernel's view (proc names the files to read).
 func SelfContainerID(getenv func(string) string, proc string) (string, error) {
@@ -62,14 +114,9 @@ func SelfContainerID(getenv func(string) string, proc string) (string, error) {
 		}
 		return id, nil
 	}
-	var rs []io.Reader
-	for _, n := range []string{"mountinfo", "cgroup"} {
-		if f, err := os.Open(proc + "/self/" + n); err == nil {
-			defer f.Close()
-			rs = append(rs, f)
-		}
-	}
-	return containerIDFrom(rs...)
+	mi, _ := os.ReadFile(proc + "/self/mountinfo")
+	cg, _ := os.ReadFile(proc + "/self/cgroup")
+	return selfIDFrom(mi, cg)
 }
 
 // VerifySelf inspects id and checks it is the agent's container: the
