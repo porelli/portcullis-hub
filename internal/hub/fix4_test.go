@@ -180,9 +180,11 @@ func TestExpandRefForms(t *testing.T) {
 	}
 }
 
-// TestOwedBundleVsUndo (round 4 review): an owed removal of (S, X) and
-// an undo back to S: the undo settles it first, the bundle survives and
-// the instance runs; a drain during a move/undo leaves it alone.
+// TestOwedBundleVsUndo (round 4 review, revised): an owed removal of
+// (S, X) and an undo back to S: settled only once the undo committed on
+// S with its bundle pushed; the bundle survives and the instance runs; a
+// drain during a move/undo leaves it alone; an undo that fails at its
+// placement check leaves it owed, and it drains after.
 func TestOwedBundleVsUndo(t *testing.T) {
 	p := newPlacedFixture(t)
 	placedEnabled(t, p, "plainapp")
@@ -215,5 +217,32 @@ func TestOwedBundleVsUndo(t *testing.T) {
 	release()
 	if workerHas(p.w, "signal remove-project plainapp") {
 		t.Error("drained during an owned move")
+	}
+}
+
+func TestOwedBundleUndoFails(t *testing.T) {
+	p := newPlacedFixture(t)
+	placedEnabled(t, p, "plainapp")
+	p.w.mu.Lock()
+	p.w.removeErrs = 1
+	p.w.mu.Unlock()
+	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "primary", admin); err != nil {
+		t.Fatal(err)
+	}
+	p.w.mu.Lock()
+	p.w.pullErr = errors.New("no matching manifest for linux/arm64")
+	p.w.mu.Unlock()
+	if err := p.h.UndoMove(context.Background(), "plainapp", "plainapp", admin); err == nil {
+		t.Fatal("undone")
+	}
+	p.h.mu.RLock()
+	owed := len(p.h.st.OwedBundles)
+	p.h.mu.RUnlock()
+	if owed != 1 {
+		t.Fatalf("owed %d after the failed undo", owed)
+	}
+	p.h.serversTick(context.Background())
+	if !workerHas(p.w, "signal remove-project plainapp") {
+		t.Errorf("not drained after: %v", p.w.Calls())
 	}
 }

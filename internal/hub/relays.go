@@ -394,5 +394,8 @@ func (h *Hub) pushBundle(ctx context.Context, id string, rt runtime.Instances) e
 	if err := b.PushBundle(ctx, id, files, m); err != nil {
 		return err
 	}
+	if server := h.serverOf(id); server != "" {
+		h.lastPush.Store(id, server)
+	}
 	return nil
 }

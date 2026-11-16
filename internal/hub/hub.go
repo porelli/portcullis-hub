@@ -310,8 +310,11 @@ type Hub struct {
 	// moveOwners: instance ids a move, an undo or a move recovery is
 	// running for (the only ones composeUp starts while moving).
 	moveOwners sync.Map
-	idp        IdP
-	attrs      AttrStore // LLDAP user attributes (setting claims); nil: none
+	// lastPush: instance → the server its last successful bundle push
+	// went to (an owed removal there is settled only after it).
+	lastPush sync.Map
+	idp      IdP
+	attrs    AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

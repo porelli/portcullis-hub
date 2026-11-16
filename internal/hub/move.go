@@ -220,11 +220,6 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return statusErr(409, "an earlier move left %s's half-restored volumes on %s: remove that leftover first", id, serverLabel(to))
 	}
 	view := *v
-	// A removal still owed on the target would take the bundle this move
-	// pushes: settled first, under the lock.
-	if to != "" {
-		h.settleBundle(to, id)
-	}
 	p := progressFrom(ctx)
 	ready()
 
@@ -357,6 +352,12 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	h.st.Instances[id] = in
 	h.saveLocked()
 	h.mu.Unlock()
+	// Committed, running on the target with the bundle just pushed there:
+	// a removal still owed on it is moot (revised ruling). Every failure
+	// path above left it in place (moveOwners kept the drain off it).
+	if to != "" {
+		h.settlePushed(to, id)
+	}
 	if from != "" {
 		if err := h.dropBundleOwed(context.Background(), from, id); err != nil {
 			p.Warn(fmt.Sprintf("the bundle of %s on %s wasn't removed yet: %v (retried every 30 s)", id, serverLabel(from), err))
@@ -485,11 +486,7 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 	}
 	src, cur := in.MovedFrom.Server, in.Server
 	view := *v
-	// A removal still owed on the source would take the bundle the undo
-	// pushes back: settled first, under the lock.
-	if src != "" {
-		h.settleBundle(src, id)
-	}
+
 	if src != "" {
 		if err := h.checkPlacement(ctx, &view, src); err != nil {
 			return err
@@ -581,6 +578,9 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			return err
 		}
 		p.Done(MoveSwitch)
+		// Committed on src with its bundle pushed: an owed removal there
+		// is moot (revised ruling; until here it stayed).
+		h.settlePushed(src, id)
 		// stop the current copy (a worker; the primary's went at the switch).
 		p.Start(MoveUndoStop)
 		if cur != "" {
@@ -676,6 +676,14 @@ func (h *Hub) dropBundleOwed(ctx context.Context, server, id string) error {
 	}
 	h.settleBundle(server, id)
 	return nil
+}
+
+// settlePushed settles an owed (server, id) removal only when this Hub's
+// last successful bundle push for id went to server.
+func (h *Hub) settlePushed(server, id string) {
+	if v, ok := h.lastPush.Load(id); ok && v.(string) == server {
+		h.settleBundle(server, id)
+	}
 }
 
 func (h *Hub) settleBundle(server, id string) {
