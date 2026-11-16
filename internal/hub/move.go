@@ -220,6 +220,11 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return statusErr(409, "an earlier move left %s's half-restored volumes on %s: remove that leftover first", id, serverLabel(to))
 	}
 	view := *v
+	// A removal still owed on the target would take the bundle this move
+	// pushes: settled first, under the lock.
+	if to != "" {
+		h.settleBundle(to, id)
+	}
 	p := progressFrom(ctx)
 	ready()
 
@@ -480,6 +485,11 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 	}
 	src, cur := in.MovedFrom.Server, in.Server
 	view := *v
+	// A removal still owed on the source would take the bundle the undo
+	// pushes back: settled first, under the lock.
+	if src != "" {
+		h.settleBundle(src, id)
+	}
 	if src != "" {
 		if err := h.checkPlacement(ctx, &view, src); err != nil {
 			return err
@@ -686,17 +696,33 @@ func (h *Hub) drainOwedBundles(ctx context.Context) {
 	owed := slices.Clone(h.st.OwedBundles)
 	h.mu.RUnlock()
 	for _, o := range owed {
-		h.mu.RLock()
-		_, known := h.st.Servers[o.Server]
-		runsThere := h.st.Instances[o.Instance].Server == o.Server
-		h.mu.RUnlock()
-		if !known || runsThere {
-			h.settleBundle(o.Server, o.Instance)
-			continue
-		}
-		if err := h.removeWorkerBundle(ctx, o.Server, o.Instance); err == nil {
-			h.settleBundle(o.Server, o.Instance)
-		}
+		h.drainOwedBundle(ctx, o)
+	}
+}
+
+// drainOwedBundle settles one owed removal under the instance's lock: an
+// instance a move or an undo owns is left alone (it may be pushing its
+// bundle back there); one that runs on that server (override included)
+// keeps its bundle; a gone server settles it.
+func (h *Hub) drainOwedBundle(ctx context.Context, o state.OwedBundle) {
+	unlock, err := h.lockApp(o.Instance)
+	if err != nil {
+		return // busy: the next tick
+	}
+	defer unlock()
+	if _, owned := h.moveOwners.Load(o.Instance); owned {
+		return
+	}
+	h.mu.RLock()
+	_, known := h.st.Servers[o.Server]
+	runsThere := h.st.Instances[o.Instance].Server == o.Server
+	h.mu.RUnlock()
+	if !known || runsThere || h.serverOf(o.Instance) == o.Server {
+		h.settleBundle(o.Server, o.Instance)
+		return
+	}
+	if err := h.removeWorkerBundle(ctx, o.Server, o.Instance); err == nil {
+		h.settleBundle(o.Server, o.Instance)
 	}
 }
 

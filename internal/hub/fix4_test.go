@@ -179,3 +179,41 @@ func TestExpandRefForms(t *testing.T) {
 		}
 	}
 }
+
+// TestOwedBundleVsUndo (round 4 review): an owed removal of (S, X) and
+// an undo back to S: the undo settles it first, the bundle survives and
+// the instance runs; a drain during a move/undo leaves it alone.
+func TestOwedBundleVsUndo(t *testing.T) {
+	p := newPlacedFixture(t)
+	placedEnabled(t, p, "plainapp")
+	p.w.mu.Lock()
+	p.w.removeErrs = 1 // the keep's removal fails: owed
+	p.w.mu.Unlock()
+	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "primary", admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.h.UndoMove(context.Background(), "plainapp", "plainapp", admin); err != nil {
+		t.Fatal(err)
+	}
+	p.h.mu.RLock()
+	owed := len(p.h.st.OwedBundles)
+	p.h.mu.RUnlock()
+	if owed != 0 {
+		t.Errorf("owed %d", owed)
+	}
+	p.h.serversTick(context.Background())
+	if workerHas(p.w, "signal remove-project plainapp") {
+		t.Errorf("the bundle the undo pushed back was removed: %v", p.w.Calls())
+	}
+	if in := p.instance("plainapp"); in.Server != "nas" {
+		t.Errorf("state %+v", in)
+	}
+	// A drain while a move/undo owns the instance leaves it alone.
+	p.h.oweBundle("nas", "plainapp")
+	release := p.h.ownMove("plainapp")
+	p.h.drainOwedBundle(context.Background(), state.OwedBundle{Server: "nas", Instance: "plainapp"})
+	release()
+	if workerHas(p.w, "signal remove-project plainapp") {
+		t.Error("drained during an owned move")
+	}
+}
