@@ -12,6 +12,7 @@ const (
 	KindInstanceQuarantined     = "server_instance_quarantined"
 	KindPlacementInvalid        = "server_placement_invalid"
 	KindMoveStuck               = "server_move_stuck"
+	KindCopyNotRemoved          = "server_copy_not_removed"
 )
 
 // ServersIn is the servers' state the doctor reads:
@@ -28,10 +29,13 @@ type ServersIn struct {
 	Quarantined      map[string]string
 	PlacementInvalid map[string]string
 	Stuck            map[string]string
+	// OwedCopies: instance → the server a copy of it is still to be
+	// stopped and removed from (an owed bundle removal).
+	OwedCopies map[string]string
 }
 
 func init() {
-	for _, k := range []string{KindServerSecretsNotRotated, KindInstanceQuarantined, KindPlacementInvalid, KindMoveStuck} {
+	for _, k := range []string{KindServerSecretsNotRotated, KindInstanceQuarantined, KindPlacementInvalid, KindMoveStuck, KindCopyNotRemoved} {
 		Register(serversCheck{kind: k})
 	}
 }
@@ -63,6 +67,8 @@ func (c serversCheck) Run(in *Inputs) []Finding {
 		src = in.Servers.PlacementInvalid
 	case KindMoveStuck:
 		src = in.Servers.Stuck
+	case KindCopyNotRemoved:
+		src = in.Servers.OwedCopies
 	}
 	var out []Finding
 	for _, id := range sortedKeys(src) {
@@ -81,6 +87,10 @@ func (c serversCheck) Run(in *Inputs) []Finding {
 			f.Title = "The instance " + id + " can't run on its worker any more."
 			f.Why = "Its template changed and is now primary-only (" + why + "): it was stopped on the worker and nothing more is sent there."
 			f.Steps = []string{"Move it to the primary (its data comes along), or pin the template to a version that can run on a worker."}
+		case KindCopyNotRemoved:
+			f.Title = "An old copy of " + id + " is still on " + why + "."
+			f.Why = "A move or an undo left a copy there (its env and bundle) that couldn't be stopped or removed yet. It is never routed; the Hub retries every 30 seconds."
+			f.Steps = []string{"Bring " + why + " back online, or remove the copy there by hand (its compose project portcullis-" + id + ")."}
 		case KindMoveStuck:
 			f.Title = "The move of " + id + " is stuck: it runs nowhere."
 			f.Why = "A failed move couldn't take the copy on " + why + " down, so the source wasn't started again (two routed copies never exist). The Hub retries every 30 seconds."

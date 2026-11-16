@@ -2,24 +2,23 @@ package hub
 
 import (
 	"context"
-	"github.com/portcullis/hub/internal/templates"
-	"maps"
-	"path/filepath"
-	"strings"
-
 	"errors"
 	"fmt"
-	"github.com/portcullis/hub/internal/doctor"
 	"log"
+	"maps"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/keycloak"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // Revocation and removal (contract §17.6). The server is revoked from
@@ -503,8 +502,12 @@ func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
 			invalid[id] = why
 		}
 	}
+	owed := map[string]string{}
+	for _, o := range h.st.OwedBundles {
+		owed[o.Instance] = serverLabel(o.Server)
+	}
 	in := &doctor.ServersIn{NotRotated: maps.Clone(h.rotateFail), PlacementInvalid: invalid, Stuck: stuck,
-		Quarantined: map[string]string{}}
+		Quarantined: map[string]string{}, OwedCopies: owed}
 	for id, server := range placed {
 		if ps := h.polls[server]; ps != nil && ps.info != nil {
 			why := ps.info.Quarantined[id]
@@ -517,7 +520,7 @@ func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
 		}
 	}
 	h.srvMu.Unlock()
-	if len(in.NotRotated)+len(in.PlacementInvalid)+len(in.Stuck)+len(in.Quarantined) == 0 {
+	if len(in.NotRotated)+len(in.PlacementInvalid)+len(in.Stuck)+len(in.Quarantined)+len(in.OwedCopies) == 0 {
 		return nil
 	}
 	return in

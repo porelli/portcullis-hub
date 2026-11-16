@@ -377,6 +377,14 @@ func (h *Hub) LiftQuarantine(ctx context.Context, actor directory.Actor, id stri
 	if actor.User == "" {
 		return statusErr(401, "no acting user")
 	}
+	unlock, err := h.lockApp(id)
+	if err != nil {
+		return h.busyErr(id, err)
+	}
+	defer unlock()
+	if err := h.pending(id); err != nil {
+		return err // moving (R4-L5), deleting, restoring
+	}
 	server := h.serverOf(id)
 	if server == "" {
 		return statusErr(409, "%s runs on the primary: nothing is quarantined", id)
@@ -398,7 +406,7 @@ func (h *Hub) LiftQuarantine(ctx context.Context, actor directory.Actor, id stri
 	// agent quarantines it again if it refuses it.
 	if err := h.pushBundle(ctx, id, rt); err != nil {
 		h.refreshServerFacts(ctx, server)
-		return fmt.Errorf("the quarantine was lifted, but the bundle was refused (quarantined again): %w", err)
+		return fmt.Errorf("the quarantine was lifted, but the bundle push failed (the instance stays refused until a push succeeds): %w", err)
 	}
 	_, err = h.refreshServerFacts(ctx, server)
 	return err

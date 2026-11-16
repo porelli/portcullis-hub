@@ -191,6 +191,18 @@ func (a *API) validateResolved(id string, m agentapi.BundleManifest, model *type
 	if err := checkNestedBinds(id, bindsOf(model), otherBinds); err != nil {
 		return nil, err
 	}
+	// The agent's own containers' names are reserved (R4-L1).
+	for _, ss := range []types.Services{model.Services, model.DisabledServices} {
+		for n, sv := range ss {
+			for _, name := range []string{sv.ContainerName, sv.Hostname} {
+				for _, r := range a.cfg.ReservedNames {
+					if name != "" && strings.EqualFold(strings.TrimPrefix(name, "/"), strings.TrimPrefix(r, "/")) {
+						return nil, fmt.Errorf("service %s: the name %q is the agent's own", n, name)
+					}
+				}
+			}
+		}
+	}
 	if err := a.checkBindPaths(id, model); err != nil {
 		return nil, err
 	}

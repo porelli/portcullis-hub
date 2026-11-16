@@ -36,7 +36,7 @@ func TestLiftQuarantineWithoutBundle(t *testing.T) {
 	p.w.pushErr = errors.New("bundle refused")
 	p.w.mu.Unlock()
 	p.h.refreshServerFacts(context.Background(), "nas")
-	if err := p.h.LiftQuarantine(context.Background(), admin, "plainapp"); err == nil || !strings.Contains(err.Error(), "quarantined again") {
+	if err := p.h.LiftQuarantine(context.Background(), admin, "plainapp"); err == nil || !strings.Contains(err.Error(), "bundle push failed") {
 		t.Errorf("refused push: %v", err)
 	}
 }

@@ -32,6 +32,9 @@ RUN apk add --no-cache ca-certificates=20261020-r0 docker-cli=29.9.3-r1 docker-c
  && adduser -S -D -H -u 10008 -G agent agent
 COPY --from=build /portcullis-agent /usr/local/bin/portcullis-agent
 USER 10008:10008
+# The agent finds its own container by id and checks it runs this image
+# (R4-L1): containers inherit the label.
+LABEL io.portcullis.agent="1"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
   CMD ["portcullis-agent", "healthcheck"]
 ENTRYPOINT ["portcullis-agent"]

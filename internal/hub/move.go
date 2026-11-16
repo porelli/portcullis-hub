@@ -42,6 +42,9 @@ const (
 	MoveSwitch  = "switch"
 	MoveKeep    = "keep"
 	MoveStuck   = "stuck"
+	// MoveUndoStarting: an undo is starting its copy on the source (the
+	// marker recovery uses to take that copy down after a crash, R4-L8).
+	MoveUndoStarting = "undo_start"
 	// Undo steps.
 	MoveUndoStart = StepStart
 	MoveUndoStop  = StepStop
@@ -485,6 +488,10 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 		return statusErr(409, "the move of %s is older than 7 days: it can't be undone (remove the source's data instead)", id)
 	}
 	src, cur := in.MovedFrom.Server, in.Server
+	if src == cur {
+		return statusErr(409, "the copy %s would return to is the one it runs on (%s): nothing to undo", id, serverLabel(cur))
+	}
+	origFrom := *in.MovedFrom
 	view := *v
 
 	if src != "" {
@@ -502,6 +509,7 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 		h.mu.Lock()
 		in := h.st.Instances[id]
 		in.Server = src
+		in.Move, in.State = nil, "" // the undo marker ends with the commit
 		in.MovedFrom = &state.MovedFrom{Server: cur, At: h.now().UTC(), Volumes: curVols}
 		h.st.Instances[id] = in
 		h.noteInstanceServer(id, src)
@@ -526,11 +534,16 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			if err != nil {
 				return err
 			}
+			// A marker first (R4-L8): a crash from here leaves recovery a
+			// record to take the src copy down by, the instance kept on cur.
+			h.setMove(id, &state.Move{From: cur, To: src, StartedAt: h.now().UTC(), Phase: MoveUndoStarting}, cur, state.InstanceMoving)
+			unmark := func() { h.setMove(id, nil, cur, "") }
 			// The bundle and render are the source's: the runtime index only,
 			// never the stored state (R3-L8: nothing persists or publishes it).
 			h.setMoveServer(id, src)
 			if _, err := h.prepareUp(&view); err != nil {
 				h.clearMoveServer(id)
+				unmark()
 				return err
 			}
 			up, err := h.upProject(ctx, &view)
@@ -544,8 +557,10 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 				err = rt.Up(ctx, up, nil)
 			}
 			if err != nil {
-				rt.Down(context.Background(), up)
 				h.clearMoveServer(id)
+				if derr := rt.Down(context.Background(), up); derr == nil {
+					unmark()
+				} // else the marker stays: recovery takes the copy down
 				return fmt.Errorf("starting %s on %s failed — nothing changed: %w", id, serverLabel(src), err)
 			}
 			h.clearMoveServer(id)
@@ -553,7 +568,9 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 		p.Done(MoveUndoStart)
 		if !p.CloseStop() {
 			if rt, err := h.rtForServer(src); err == nil {
-				rt.Down(context.Background(), h.runtimeProject(&view))
+				if rt.Down(context.Background(), h.runtimeProject(&view)) == nil {
+					h.setMove(id, nil, cur, "")
+				}
 			}
 			return ErrStopped
 		}
@@ -605,6 +622,14 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			// The primary copy must be down before the worker's relays
 			// route again (R3-L9); if it can't be, neither is routed.
 			if derr := h.rt.Down(context.Background(), h.runtimeProject(&view)); derr != nil {
+				// The move record names the right pair after recovery
+				// (R4-L7): MovedFrom back to the original source.
+				h.mu.Lock()
+				in := h.st.Instances[id]
+				mf := origFrom
+				in.MovedFrom = &mf
+				h.st.Instances[id] = in
+				h.mu.Unlock()
 				h.setMove(id, &state.Move{From: cur, To: "", StartedAt: h.now().UTC(), Phase: MoveStuck}, "", state.InstanceMoving)
 				return fmt.Errorf("starting %s on the primary failed (%v), and taking it down failed too (%v): it runs nowhere until that succeeds (retried; doctor server_move_stuck)", id, err, derr)
 			}
@@ -641,12 +666,13 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 func (h *Hub) stopAndDropBundle(t *templates.Template, cur string, p *Progress) {
 	rt, err := h.rtForServer(cur)
 	if err != nil {
-		p.Warn(fmt.Sprintf("the copy on %s wasn't stopped: %v", serverLabel(cur), err))
+		p.Warn(fmt.Sprintf("the copy on %s wasn't stopped: %v (retried every 30 s)", serverLabel(cur), err))
+		h.oweBundle(cur, t.ID) // owed (R4-L3): downed and removed by the drain
 		return
 	}
 	if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(t)); err != nil {
-		p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v", serverLabel(cur), err))
-		h.oweBundle(cur, t.ID)
+		p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v (retried every 30 s)", serverLabel(cur), err))
+		h.oweBundle(cur, t.ID) // owed (R4-L3): downed and removed by the drain
 		return
 	}
 	if err := h.dropBundleOwed(context.Background(), cur, t.ID); err != nil {
@@ -723,11 +749,26 @@ func (h *Hub) drainOwedBundle(ctx context.Context, o state.OwedBundle) {
 	}
 	h.mu.RLock()
 	_, known := h.st.Servers[o.Server]
-	runsThere := h.st.Instances[o.Instance].Server == o.Server
+	in := h.st.Instances[o.Instance]
+	v := h.findLocked(o.Instance)
 	h.mu.RUnlock()
-	if !known || runsThere || h.serverOf(o.Instance) == o.Server {
+	// A move or undo record still open (stuck included, R4-L4) needs the
+	// bundle for its recovery: left alone.
+	if in.State == state.InstanceMoving || in.Move != nil {
+		return
+	}
+	if !known || in.Server == o.Server || h.serverOf(o.Instance) == o.Server {
 		h.settleBundle(o.Server, o.Instance)
 		return
+	}
+	// The copy there must be down first (R4-L3: an undo's failed stop
+	// left it running); the agent refuses to remove a running project.
+	if v != nil {
+		if rt, err := h.rtForServer(o.Server); err == nil {
+			if err := unwrapRT(rt).Down(ctx, h.runtimeProject(v)); err != nil {
+				return
+			}
+		}
 	}
 	if err := h.removeWorkerBundle(ctx, o.Server, o.Instance); err == nil {
 		h.settleBundle(o.Server, o.Instance)
@@ -865,6 +906,22 @@ func (h *Hub) recoverMove(id string) {
 		return
 	}
 	mv := *in.Move
+	// An undo interrupted while starting its source copy (R4-L8): that
+	// copy (unrouted) goes; the current one keeps its routing.
+	if mv.Phase == MoveUndoStarting && v != nil {
+		if rt, err := h.rtForServer(mv.To); err == nil {
+			if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(v)); err != nil {
+				log.Printf("move recovery: %s: taking the undo's copy down on %s failed (%v): retried", id, serverLabel(mv.To), err)
+				return
+			}
+		} else {
+			log.Printf("move recovery: %s: %s isn't reachable to take the undo's copy down: retried", id, serverLabel(mv.To))
+			return
+		}
+		h.setMove(id, nil, mv.From, "")
+		log.Printf("move recovery: %s: an interrupted undo's copy on %s was taken down", id, serverLabel(mv.To))
+		return
+	}
 	if mv.Phase != MoveBackup && mv.Phase != MoveCheck && v != nil {
 		if err := h.downOn(context.Background(), mv.To, v); err != nil {
 			mv.Phase = MoveStuck

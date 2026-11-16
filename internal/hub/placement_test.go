@@ -40,6 +40,21 @@ type workerFake struct {
 	pushErr    error
 	removeErrs int
 	pushHook   func()
+	// downErrs fails the next Down calls.
+	downErrs int
+}
+
+func (w *workerFake) Down(ctx context.Context, p runtime.Project) error {
+	w.mu.Lock()
+	fail := w.downErrs > 0
+	if fail {
+		w.downErrs--
+	}
+	w.mu.Unlock()
+	if fail {
+		return errors.New("the worker's down failed")
+	}
+	return w.Fake.Down(ctx, p)
 }
 
 func (w *workerFake) AgentInfo(context.Context) (agentapi.Info, error) {

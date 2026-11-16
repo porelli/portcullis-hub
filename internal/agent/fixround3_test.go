@@ -82,6 +82,7 @@ func TestStartBackstopSweeps(t *testing.T) {
 func TestStartBackstopFailClosed(t *testing.T) {
 	t.Run("unknown project", func(t *testing.T) {
 		f := newAPI(t)
+		f.addInfo("c-x", "portcullis-ghost")
 		f.api.CheckStarted(context.Background(), "c-x", "portcullis-ghost")
 		waitCall(t, f, "down-by-name portcullis-ghost")
 		if countCalls(f, "signal c-x KILL") != 1 || f.api.Quarantined()["ghost"] == "" {
@@ -222,6 +223,8 @@ func TestProtectedAncestorAtBindTime(t *testing.T) {
 func TestBackstopKillsBeforeDown(t *testing.T) {
 	f := newAPI(t)
 	f.rt.downFails.Store(1000) // the downs keep failing
+	f.addInfo("c-1", "portcullis-x1")
+	f.addInfo("c-2", "portcullis-x2")
 	start := time.Now()
 	f.api.CheckStarted(context.Background(), "c-1", "portcullis-x1")
 	f.api.CheckStarted(context.Background(), "c-2", "portcullis-x2")
@@ -253,6 +256,8 @@ func TestOwnContainersByID(t *testing.T) {
 	f := newAPI(t)
 	f.api.cfg.OwnProject = "portcullis-worker"
 	f.api.cfg.OwnContainers = []string{"c-agent"}
+	f.addInfo("c-agent", "portcullis-worker")
+	f.addInfo("c-sidecar-recreated", "portcullis-worker")
 	f.api.CheckStarted(context.Background(), "c-agent", "portcullis-worker")
 	f.api.CheckStarted(context.Background(), "c-sidecar-recreated", "portcullis-worker")
 	f.api.CheckStarted(context.Background(), "c-compose-run", "")
@@ -264,6 +269,7 @@ func TestOwnContainersByID(t *testing.T) {
 	if f.api.Quarantined() != nil || countCalls(f, "down-by-name portcullis-worker") != 0 || countCalls(f, "signal c-sidecar-recreated KILL") != 0 {
 		t.Fatalf("the agent's own project was acted on: %v %v", f.rt.Calls(), f.api.Quarantined())
 	}
+	f.addInfo("c-x", "portcullis-x")
 	f.api.CheckStarted(context.Background(), "c-x", "portcullis-x")
 	waitCall(t, f, "down-by-name portcullis-x")
 	c, b := f.putFor(t, "worker", map[string]string{BundleCompose: "services:\n  web:\n    image: x\n"})
@@ -340,6 +346,7 @@ func TestQuarantineFailsClosed(t *testing.T) {
 func TestOneDownWorkerPerID(t *testing.T) {
 	f := newAPI(t)
 	f.rt.downFails.Store(1000)
+	f.addInfo("c-g", "portcullis-ghost")
 	for i := 0; i < 5; i++ {
 		f.api.CheckStarted(context.Background(), "c-g", "portcullis-ghost")
 	}
@@ -347,4 +354,104 @@ func TestOneDownWorkerPerID(t *testing.T) {
 	if n := countCalls(f, "down-by-name portcullis-ghost"); n > 2 {
 		t.Errorf("%d downs: the workers piled up", n)
 	}
+}
+
+// TestSelfIdentity (R4-L1): the agent's own container comes from its id
+// (env or the kernel's view), never a hostname; the container found must
+// be that id with the agent's service label; its names are reserved.
+func TestSelfIdentity(t *testing.T) {
+	id := strings.Repeat("ab", 32)
+	mi := "123 45 0:1 /var/lib/docker/containers/" + id + "/hostname /etc/hostname rw - ext4 /dev/sda1 rw\n"
+	if got, err := containerIDFrom(strings.NewReader(mi)); err != nil || got != id {
+		t.Errorf("mountinfo: %q %v", got, err)
+	}
+	other := strings.Repeat("cd", 32)
+	if _, err := containerIDFrom(strings.NewReader(mi + "1 2 0:1 /var/lib/docker/containers/" + other + "/hosts /etc/hosts rw\n")); err == nil {
+		t.Error("two ids accepted")
+	}
+	if got, _ := SelfContainerID(func(k string) string {
+		if k == "AGENT_CONTAINER_ID" {
+			return id
+		}
+		return ""
+	}, "/nonexistent"); got != id {
+		t.Errorf("env: %q", got)
+	}
+	f := newAPI(t)
+	f.rt.Lock()
+	f.rt.Infos[id] = runtime.UnitInfo{ID: id, Image: "sha256:agent", Labels: map[string]string{"com.docker.compose.service": "agent", "com.docker.compose.project": "portcullis-worker", SelfImageLabel: "1"}}
+	f.rt.Infos["spoof"] = runtime.UnitInfo{ID: other, Labels: map[string]string{"com.docker.compose.service": "web"}}
+	noImg := strings.Repeat("ef", 32)
+	f.rt.Infos[noImg] = runtime.UnitInfo{ID: noImg, Labels: map[string]string{"com.docker.compose.service": "agent"}}
+	f.rt.Unlock()
+	if _, err := VerifySelf(context.Background(), f.rt, id, "agent", ""); err != nil {
+		t.Errorf("verify: %v", err)
+	}
+	if _, err := VerifySelf(context.Background(), f.rt, id, "agent", "sha256:agent"); err != nil {
+		t.Errorf("verify with AGENT_SELF_IMAGE_ID: %v", err)
+	}
+	for name, c := range map[string]struct{ id, service, image string }{
+		"wrong service":       {id, "web", ""},
+		"wrong image":         {id, "agent", "sha256:other"},
+		"not the agent image": {noImg, "agent", ""},
+		"unknown id":          {strings.Repeat("01", 32), "agent", ""},
+	} {
+		if _, err := VerifySelf(context.Background(), f.rt, c.id, c.service, c.image); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// cgroup v1 form; none found → an error, never a guess.
+	if got, err := containerIDFrom(strings.NewReader("12:pids:/docker/" + id + "\n")); err != nil || got != id {
+		t.Errorf("cgroup: %q %v", got, err)
+	}
+	if _, err := containerIDFrom(strings.NewReader("0::/\n")); err == nil {
+		t.Error("no id accepted")
+	}
+	// The hostname resolves to another container: refused.
+	if _, err := VerifySelf(context.Background(), f.rt, "spoof", "agent", ""); err == nil {
+		t.Error("a container with another id accepted")
+	}
+	// Its names are reserved for bundles.
+	f.api.cfg.ReservedNames = []string{"portcullis-worker-agent-1", id[:12]}
+	c, b := f.putFor(t, "app", map[string]string{BundleCompose: "services:\n  web:\n    image: x\n    container_name: " + id[:12] + "\n"})
+	if c != 400 || !strings.Contains(b, "the agent's own") {
+		t.Errorf("container_name of the agent: %d %s", c, b)
+	}
+}
+
+// TestInspectNotFoundIgnored (R4-L2): a container gone between the list
+// and the inspect (a recreate) is ignored, not quarantined.
+func TestInspectNotFoundIgnored(t *testing.T) {
+	f := backstopFixture(t)
+	f.rt.Lock()
+	delete(f.rt.Infos, "c-app")
+	f.rt.Unlock()
+	f.api.CheckStarted(context.Background(), "c-app", "portcullis-app")
+	time.Sleep(20 * time.Millisecond)
+	if f.api.Quarantined() != nil || countCalls(f, "down-by-name portcullis-app") != 0 {
+		t.Errorf("acted on a gone container: %v %v", f.api.Quarantined(), f.rt.Calls())
+	}
+}
+
+// TestLiftRacesRequarantine (R3-L1, R4-L6): a re-quarantine with the same
+// text during the lift's walk survives the lift.
+func TestLiftRacesRequarantine(t *testing.T) {
+	f := newAPI(t)
+	f.bundle(t, "app")
+	const why = "a container of an instance the agent holds no valid bundle for"
+	f.api.quarantine("app", why)
+	f.api.testWalkHook = func(id string) { f.api.quarantine(id, why) }
+	if c := f.code(t, "DELETE", "/v1/projects/app/quarantine", nil); c != 204 {
+		t.Fatalf("lift: %d", c)
+	}
+	if f.api.Quarantined()["app"] == "" {
+		t.Error("the quarantine set during the lift was erased")
+	}
+}
+
+// addInfo makes container c (of project) exist in the fake engine.
+func (f *apiFixture) addInfo(c, project string) {
+	f.rt.Lock()
+	f.rt.Infos[c] = runtime.UnitInfo{ID: c, Labels: map[string]string{docker.LabelProject: project}}
+	f.rt.Unlock()
 }

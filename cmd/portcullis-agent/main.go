@@ -177,11 +177,20 @@ func run(data string, getenv func(string) string) error {
 	// and its compose working dir: the worker's install (./portcullis,
 	// .env, docker-compose.worker.yml) is protected like the data dir
 	// (A-H1). Unreadable: no start.
-	self, _ := os.Hostname()
-	ui, err := rt.Inspect(ctx, self)
+	// Its own container by id (R4-L1), never by a hostname lookup.
+	self, err := agent.SelfContainerID(getenv, "/proc")
 	if err != nil {
-		return fmt.Errorf("the agent can't inspect its own container (its install dir must be protected): %v", err)
+		return fmt.Errorf("the agent can't identify its own container (set AGENT_CONTAINER_ID): %v", err)
 	}
+	service := getenv("AGENT_SERVICE")
+	if service == "" {
+		service = "agent"
+	}
+	ui, err := agent.VerifySelf(ctx, rt, self, service, getenv("AGENT_SELF_IMAGE_ID"))
+	if err != nil {
+		return err
+	}
+	self = ui.ID
 	selfImage := ui.Image
 	install, err := agent.InstallDirOf(ui.Labels)
 	if err != nil {
@@ -213,11 +222,18 @@ func run(data string, getenv func(string) string) error {
 		return err
 	}
 	ownProject := ui.Labels["com.docker.compose.project"]
-	ownContainers, err := ownContainerIDs(ctx, rt, ownProject, ui.ID)
+	ownContainers, ownNames, err := ownContainerIDs(ctx, rt, ownProject, ui.ID)
 	if err != nil {
 		return err
 	}
-	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage, OwnProject: ownProject, OwnContainers: ownContainers,
+	// An own project that is an instance's (portcullis-<id> with a
+	// bundle on disk) is refused: the exemption would cover that instance.
+	if id, ok := strings.CutPrefix(ownProject, runtime.ProjectPrefix); ok {
+		if _, err := os.Stat(path.Join(data, "projects", id)); err == nil {
+			return fmt.Errorf("the agent's compose project %s is an instance's (a bundle of %s exists): refusing to start", ownProject, id)
+		}
+	}
+	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage, OwnProject: ownProject, OwnContainers: ownContainers, ReservedNames: ownNames,
 		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env(), Config: cli.Config, Protected: protected,
 		DiskFree: func(ctx context.Context) (int64, bool) {
 			i, err := engineInfoFor(ctx, rt)
@@ -307,21 +323,25 @@ func run(data string, getenv func(string) string) error {
 // ownContainerIDs are the agent's own containers (its own and its compose
 // project's, by the labels read at start): the backstop's exemption is
 // by container id, never by project name.
-func ownContainerIDs(ctx context.Context, rt runtime.Instances, project, self string) ([]string, error) {
-	out := []string{self}
-	if project == "" {
-		return out, nil
-	}
+func ownContainerIDs(ctx context.Context, rt runtime.Instances, project, self string) (ids, names []string, err error) {
+	ids = []string{self}
 	units, err := rt.List(ctx, runtime.Filter{All: true})
 	if err != nil {
-		return nil, fmt.Errorf("listing the agent's own containers: %v", err)
+		return nil, nil, fmt.Errorf("listing the agent's own containers: %v", err)
 	}
 	for _, u := range units {
-		if u.Project == project && u.ID != self {
-			out = append(out, u.ID)
+		if u.ID == self || (project != "" && u.Project == project) {
+			if u.ID != self {
+				ids = append(ids, u.ID)
+			}
+			if u.Name != "" {
+				names = append(names, u.Name)
+			}
 		}
 	}
-	return out, nil
+	// Its id prefixes too (a hostname): no bundle may take them (R4-L1).
+	names = append(names, self[:12])
+	return ids, names, nil
 }
 
 // engineRoot is the engine's data root ("" when unreadable: protectedPaths

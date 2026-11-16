@@ -82,6 +82,10 @@ type APIConfig struct {
 	// project name).
 	OwnProject    string
 	OwnContainers []string
+	// ReservedNames are the agent's own containers' names (and its id
+	// prefix): no bundle service may take one as container_name or
+	// hostname (R4-L1).
+	ReservedNames []string
 	// DiskFree is the engine's free space a restore may fill (ok false:
 	// unreadable, restores refused; nil: no check, tests).
 	DiskFree func(ctx context.Context) (free int64, ok bool)
@@ -118,20 +122,23 @@ type API struct {
 	// failed save (reported in /v1/info). lifted: ids lifted without a
 	// bundle, awaiting the Hub's push. downs: ids a down worker runs for.
 	quarantined   map[string]string
+	quarantineGen map[string]uint64 // bumped at every quarantine (R4-L6)
 	quarantineAll string
-	saveErr       string
-	lifted        map[string]bool
-	downs         map[string]bool
-	bundleMu      sync.Mutex
-	execs         map[string]bool
-	helpers       map[string]*helper
-	ops           map[string]context.CancelFunc
+	// testWalkHook runs inside a lift's walk (tests: a race).
+	testWalkHook func(id string)
+	saveErr      string
+	lifted       map[string]bool
+	downs        map[string]bool
+	bundleMu     sync.Mutex
+	execs        map[string]bool
+	helpers      map[string]*helper
+	ops          map[string]context.CancelFunc
 }
 
 // NewAPI loads the bundles already on disk (each re-validated; an invalid
 // one is dropped from scope and logged).
 func NewAPI(cfg APIConfig) *API {
-	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, lifted: map[string]bool{}, downs: map[string]bool{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
+	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, quarantineGen: map[string]uint64{}, lifted: map[string]bool{}, downs: map[string]bool{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
 	a.mux = http.NewServeMux()
 	a.routes()
 	a.loadQuarantine()
@@ -898,6 +905,10 @@ func (a *API) loadQuarantine() {
 // /v1/info (the quarantine holds in memory: kill and refuse anyway).
 // Caller holds a.mu.
 func (a *API) saveQuarantineLocked() {
+	// Never over an unreadable file (I-b): the operator repairs it.
+	if a.quarantineAll != "" {
+		return
+	}
 	b, _ := json.Marshal(a.quarantined)
 	if err := writeFileAtomic(a.quarantinePath(), b); err != nil {
 		a.saveErr = "saving the quarantine failed: " + err.Error()
@@ -912,6 +923,7 @@ func (a *API) quarantine(id, why string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.quarantined[id] = why
+	a.quarantineGen[id]++
 	delete(a.lifted, id)
 	a.saveQuarantineLocked()
 }
@@ -925,7 +937,7 @@ func (a *API) quarantine(id, why string) {
 func (a *API) unquarantine(w http.ResponseWriter, r *http.Request, id string) {
 	defer a.lockID(id)()
 	a.mu.Lock()
-	all, why := a.quarantineAll, a.quarantined[id]
+	all, why, gen := a.quarantineAll, a.quarantined[id], a.quarantineGen[id]
 	a.mu.Unlock()
 	if all != "" {
 		writeError(w, http.StatusConflict, clipMsg(all))
@@ -936,6 +948,9 @@ func (a *API) unquarantine(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	p := a.project(id)
+	if a.testWalkHook != nil {
+		a.testWalkHook(id)
+	}
 	if p != nil {
 		if err := a.checkBindPaths(id, p.model); err != nil {
 			writeError(w, http.StatusConflict, clipMsg("still failing the bind check: "+err.Error()))
@@ -943,7 +958,9 @@ func (a *API) unquarantine(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 	a.mu.Lock()
-	if a.quarantined[id] == why {
+	// Only the quarantine read at the start (its generation): one set
+	// meanwhile stays, even with the same text (R4-L6).
+	if a.quarantineGen[id] == gen && a.quarantined[id] == why {
 		delete(a.quarantined, id)
 		if p == nil {
 			a.lifted[id] = true
@@ -1049,7 +1066,16 @@ func (a *API) CheckStarted(ctx context.Context, container, project string) {
 	var info runtime.UnitInfo
 	inspected := false
 	if container != "" {
-		if i, err := a.cfg.Runtime.Inspect(ctx, container); err == nil {
+		i, err := a.cfg.Runtime.Inspect(ctx, container)
+		if err != nil && isNotFound(err) {
+			// Gone (a recreate between the list and here, R4-L2): once
+			// more, then nothing to protect.
+			i, err = a.cfg.Runtime.Inspect(ctx, container)
+			if err != nil && isNotFound(err) {
+				return
+			}
+		}
+		if err == nil {
 			info, inspected = i, true
 			if project == "" {
 				project = i.Labels[docker.LabelProject]
@@ -1162,4 +1188,14 @@ func flush(w http.ResponseWriter) {
 	if fl, ok := w.(http.Flusher); ok {
 		fl.Flush()
 	}
+}
+
+// isNotFound: the engine says the container doesn't exist.
+func isNotFound(err error) bool {
+	var nf interface{ NotFound() bool }
+	if errors.As(err, &nf) && nf.NotFound() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return docker.IsNotFound(err) || strings.Contains(msg, "no such container") || msg == "not found"
 }
