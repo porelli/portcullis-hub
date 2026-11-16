@@ -49,7 +49,7 @@ func TestAgentDiskAndHealthMetrics(t *testing.T) {
 	for _, l := range u[0].Label {
 		labels[l.GetName()] = l.GetValue()
 	}
-	if labels["instance"] != "notes" || labels["service"] != "web" || len(labels) != 2 {
+	if labels["app"] != "notes" || labels["service"] != "web" || len(labels) != 2 {
 		t.Errorf("labels %v", labels)
 	}
 	// No engine root known: the gauges are 0, never an error.

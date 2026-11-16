@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/portcullis/hub/internal/agentapi"
+	"github.com/portcullis/hub/internal/e2etest"
 	rt "github.com/portcullis/hub/internal/runtime"
 )
 
@@ -45,6 +47,11 @@ func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if err != nil || len(b) > agentapi.MaxInfo {
 		writeError(w, http.StatusInternalServerError, "info over its cap")
 		return
+	}
+	if e2etest.Enabled && a.cfg.OversizeInfo {
+		// Core's e2e only: valid JSON padded with whitespace past the
+		// Hub's 64 KiB cap (a constant false in a default build).
+		b = append(b, bytes.Repeat([]byte(" "), 65<<10)...)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -163,7 +170,7 @@ func (a *Agent) engineRoot() string {
 type UnitHealth struct{ Instance, Service string }
 
 var unhealthyDesc = prometheus.NewDesc("portcullis_agent_container_unhealthy",
-	"1 while a container of a bundled instance's service reports unhealthy.", []string{"instance", "service"}, nil)
+	"1 while a container of a bundled instance's service reports unhealthy (app: the instance id; not \"instance\", which Prometheus would rename exported_instance).", []string{"app", "service"}, nil)
 
 // unhealthyCollector reports Config.Unhealthy at each scrape (10 s).
 type unhealthyCollector struct{ a *Agent }

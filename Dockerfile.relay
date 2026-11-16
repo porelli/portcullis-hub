@@ -4,6 +4,10 @@
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
 ARG TARGETOS
 ARG TARGETARCH
+# GO_TAGS: Go build tags, empty by default. Core's CI builds its e2e
+# images with GO_TAGS=e2etest (internal/e2etest's test hooks); a default
+# image has none of that code (CI checks it).
+ARG GO_TAGS=""
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -11,7 +15,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /portcullis-relay ./cmd/portcullis-relay
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags "${GO_TAGS}" -ldflags="-s -w" -o /portcullis-relay ./cmd/portcullis-relay
 
 # gcr.io/distroless/static-debian12:nonroot
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab

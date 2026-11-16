@@ -41,6 +41,9 @@ type Config struct {
 	// unhealthy (metrics: portcullis_agent_container_unhealthy); nil =
 	// none reported.
 	Unhealthy func(ctx context.Context) []UnitHealth
+	// OversizeInfo is AGENT_TEST_OVERSIZE_INFO=1 (core's e2e, e2etest
+	// builds only: internal/e2etest): /v1/info is padded past 64 KiB.
+	OversizeInfo bool
 	// Now is the clock (tests).
 	Now func() time.Time
 	// SwitchDelay / SwitchTimeout: the WireGuard key switch after PUT

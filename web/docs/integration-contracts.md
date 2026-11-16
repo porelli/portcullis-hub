@@ -5667,6 +5667,8 @@ browser ─TLS─▶ primary Traefik ─(forward-auth, group-gate, tier)─▶ r
 
     `backup_schedule` is `{"mode": "off|daily|weekly", "hour": 0–23, "weekday": 0–6}` (`weekday` only for `weekly`, 0 = Sunday).
 
+- **CI-only test hooks (core's e2e).** The three images take `ARG GO_TAGS=""` (passed to `go build -tags`). Only images built with `GO_TAGS=e2etest` (core's CI, the `:ci` tags) honour `HUB_DEV_CLOCK_OFFSET_FILE=<path>` (the file holds a Go duration such as `16m`, added to the Hub's clock; re-read at most once a second; missing or empty = 0, unparsable = logged once and 0) and `AGENT_TEST_OVERSIZE_INFO=1` (the agent pads `/v1/info` past 64 KiB); a default build has none of that code, and either variable set on it refuses the start ("… needs an e2etest build"). CI checks the default binaries carry no e2etest marker.
+
 ### 17.4 The agent API v1
 
 The agent serves **`https://<tunnel ip>:7443/v1`** (control, mTLS) and **`<tunnel ip>:7000`** (data), both on its netstack only; it has no other listener anywhere. Every connection reaches it through link (§17.2), opened by the primary.
@@ -5680,7 +5682,7 @@ The agent serves **`https://<tunnel ip>:7443/v1`** (control, mTLS) and **`<tunne
     | Route | Method of `runtime.Instances` / purpose | Engine sections | Scope the agent enforces |
     |-------|------|------|------|
     | `GET /v1/info` | `Info`: agent version, `api` (`v1`), runtime (`docker`/`podman`), rootless, uid/gid maps, arch, CPUs, memory, engine version and API version, `DockerRootDir`, disk of `DockerRootDir` and of the data dir, `SecurityOptions`, SELinux, `unprivileged_port_start`, bind roots, published port binds, the agent's clock | INFO, VERSION, PING | — (also while enrolling) |
-    | `GET /v1/metrics` | Prometheus: `portcullis_agent_info{version,runtime}`, `portcullis_agent_ready`, `portcullis_agent_link_handshake_age_seconds`, `portcullis_agent_data_free_bytes` / `portcullis_agent_data_total_bytes` (the data dir), `portcullis_agent_disk_free_bytes` / `portcullis_agent_disk_total_bytes` (the engine's `DockerRootDir`), `portcullis_agent_container_unhealthy{instance,service}` = 1 while a bundled instance's container reports unhealthy (absent otherwise); link's scrape adds `server=<id>` | — | `hub.control` or `link.control` |
+    | `GET /v1/metrics` | Prometheus: `portcullis_agent_info{version,runtime}`, `portcullis_agent_ready`, `portcullis_agent_link_handshake_age_seconds`, `portcullis_agent_data_free_bytes` / `portcullis_agent_data_total_bytes` (the data dir), `portcullis_agent_disk_free_bytes` / `portcullis_agent_disk_total_bytes` (the engine's `DockerRootDir`), `portcullis_agent_container_unhealthy{app,service}` = 1 while a bundled instance's container reports unhealthy (`app` is the instance id: a label named `instance` would be renamed `exported_instance` by Prometheus; absent otherwise); link's scrape adds `server=<id>` | — | `hub.control` or `link.control` |
     | `GET /v1/enrol/nonce`, `POST /v1/enrol` | enrolment (§17.5) | — | `enrolling` only |
     | `PUT /v1/identity/cert`, `POST /v1/identity/csr`, `PUT /v1/identity/wg` | enrolment and renewal (§17.5); private keys never leave the worker | — | — |
     | `PUT /v1/network` | `{"proxy_subnet", "proxy_ip_range", "traefik_ip"}`: the worker's `portcullis-proxy` (§17.7) | NETWORKS, POST | at enrolment |

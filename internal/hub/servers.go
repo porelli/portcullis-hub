@@ -20,6 +20,7 @@ import (
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/e2etest"
 	"github.com/portcullis/hub/internal/runtime"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/servers"
@@ -79,6 +80,11 @@ type serverTimings struct {
 func (h *Hub) now() time.Time {
 	if h.srvT.now != nil {
 		return h.srvT.now()
+	}
+	if e2etest.Enabled && h.cfg.ClockOffset != nil {
+		// Core's e2e only (a -tags e2etest build; a constant false
+		// elsewhere, so the compiler drops this branch).
+		return time.Now().Add(h.cfg.ClockOffset())
 	}
 	return time.Now()
 }

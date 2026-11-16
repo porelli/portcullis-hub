@@ -6,6 +6,10 @@ ARG TARGETARCH
 # VERSION: semver (a release tag's, else 0.0.0-edge), the same as the
 # agent's: servers.Compatible pairs them.
 ARG VERSION=0.0.0-dev
+# GO_TAGS: Go build tags, empty by default. Core's CI builds its e2e
+# images with GO_TAGS=e2etest (internal/e2etest's test hooks); a default
+# image has none of that code (CI checks it).
+ARG GO_TAGS=""
 WORKDIR /src
 # Module download sits in its own layer keyed on go.mod/go.sum, so source
 # edits don't invalidate it. The cache mounts keep the module and build caches
@@ -17,7 +21,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X github.com/portcullis/hub/internal/version.Version=${VERSION}" -o /hub ./cmd/hub
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags "${GO_TAGS}" -ldflags="-s -w -X github.com/portcullis/hub/internal/version.Version=${VERSION}" -o /hub ./cmd/hub
 
 # alpine:3.24
 FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf

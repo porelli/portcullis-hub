@@ -26,6 +26,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/e2etest"
 	"github.com/portcullis/hub/internal/fidomds"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/freshauth"
@@ -337,6 +338,14 @@ func main() {
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
+	}
+	// Core's e2e clock hook: an e2etest build only; set on any other
+	// binary, the Hub refuses to start.
+	if cfg.ClockOffset, err = e2etest.ClockOffset(os.Getenv); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	if e2etest.Enabled {
+		log.Printf("%s: core e2e hooks are on (clock offset file: %v)", e2etest.Marker(), cfg.ClockOffset != nil)
 	}
 	cfg.FixerImage = fixerImage
 	cfg.Dev = os.Getenv("HUB_DEV") == "1"

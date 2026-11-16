@@ -33,6 +33,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/e2etest"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
 	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
@@ -257,7 +258,16 @@ func run(data string, getenv func(string) string) error {
 		i.QuarantineError = api.QuarantineError()
 		return i, nil
 	}
-	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api, Unhealthy: api.Unhealthy,
+	// Core's e2e info hook: an e2etest build only; set on any other
+	// binary, the agent refuses to start.
+	oversize, err := e2etest.OversizeInfo(getenv)
+	if err != nil {
+		return err
+	}
+	if e2etest.Enabled {
+		log.Printf("%s: core e2e hooks are on (oversize info %v)", e2etest.Marker(), oversize)
+	}
+	a, err := agent.New(agent.Config{DataDir: data, Runtime: string(kind), BindRoots: roots, Info: info, Routes: api, Unhealthy: api.Unhealthy, OversizeInfo: oversize,
 		OnNetwork: func(ctx context.Context, n agentapi.NetworkParams) error { return api.SetupNetwork(ctx, n, self) }})
 	if err != nil {
 		return err

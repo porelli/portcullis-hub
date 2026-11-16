@@ -161,6 +161,10 @@ type Config struct {
 	LinkDocGID int
 	LinkProxy  string
 	RelayImage string
+	// ClockOffset reads HUB_DEV_CLOCK_OFFSET_FILE's duration (core's e2e,
+	// e2etest builds only: internal/e2etest), added to h.now(); nil
+	// otherwise.
+	ClockOffset func() time.Duration
 	// VPNNet overrides portcullis-vpn's subnet (tests; zero = the core
 	// env's PORTCULLIS_VPN_NET, default 172.31.254.0/26).
 	VPNNet netip.Prefix
