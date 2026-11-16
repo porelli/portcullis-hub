@@ -148,14 +148,16 @@ func TestSettingsMailPanel(t *testing.T) {
 func TestDirectoryMailSections(t *testing.T) {
 	v := map[string]any{"addresses": []string{"alice@example.org"}, "aliases": []string{"sales@example.org"},
 		"passwords": []any{map[string]any{"id": "m1", "label": "Phone <1>", "created_at": "2026-11-15T09:00:00Z", "status": "active"},
-			map[string]any{"id": "m2", "label": "Old", "created_at": "2026-11-01T09:00:00Z", "status": "voided"}}}
+			map[string]any{"id": "m2", "label": "Old", "created_at": "2026-11-01T09:00:00Z", "status": "voided"},
+			map[string]any{"id": "m3", "label": "Tablet", "created_at": "2026-11-01T09:00:00Z", "status": "unconfirmed"}}}
 	vb, _ := json.Marshal(v)
 	stub := "global.window = { addEventListener() {}, location: { hash: '' } }; global.document = { addEventListener() {}, querySelector() { return null; } }; global.location = window.location;\n"
 	run := func(expr string) string {
 		return nodeEval(t, stub+webAsset(t, "directory.js")+"\nprocess.stdout.write("+expr+");\n")
 	}
 	h := run("window.PortcullisDirectory._test.personMailHtml('alice', " + string(vb) + ", true)")
-	for _, want := range []string{"alice@example.org", "data-pp-aliases", "sales@example.org", `data-act="mail-pw-revoke" data-user="alice" data-id="m1"`, "Phone &lt;1&gt;", "reset by a restore", "Only alice can create"} {
+	for _, want := range []string{"alice@example.org", "data-pp-aliases", "sales@example.org", `data-act="mail-pw-revoke" data-user="alice" data-id="m1"`, "Phone &lt;1&gt;", "reset by a restore", "Only alice can create",
+		"not confirmed: the mail server can't be read", `data-id="m3"`} {
 		if !strings.Contains(h, want) {
 			t.Errorf("person section lacks %q:\n%s", want, h)
 		}

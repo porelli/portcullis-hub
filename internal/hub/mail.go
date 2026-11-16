@@ -65,6 +65,12 @@ type mailSync struct {
 	// reconciled: the start-time reconcile of every person's mail
 	// passwords ran (after the first accepted document).
 	reconciled bool
+	// restoreAt: the last restore check (mailRestoreIfDue);
+	// restoreDone: the restored_at the last successful full reconcile
+	// ran for (zero: none yet, so any restore counts).
+	restoreAt, restoreDone time.Time
+	// personMu: each person's mail credential lock (mailPersonLock).
+	personMu map[string]*sync.Mutex
 	// loaded: last was read from hub_data (mail-last.json) once; blind:
 	// it wasn't there, so the first accepted document may remove people
 	// (treated as a removal: wait, then restart mail).
@@ -277,7 +283,7 @@ func (h *Hub) mailDNSSEC(ctx context.Context) map[string]string {
 // document, send (removals at once, additions after mailDebounce), wait
 // for a removal to apply and restart mail, then the DNS pass when due.
 // It returns how long to sleep before the next pass without a kick.
-func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
+func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	s := &h.mailState
 	s.pass.Lock()
 	defer s.pass.Unlock()
@@ -285,6 +291,10 @@ func (h *Hub) mailSyncOnce(ctx context.Context) time.Duration {
 	if api == nil {
 		return mailIdle
 	}
+	// Every pass (at start, then at least every 60 s): a restore of mail
+	// voids every mail password, also one the Hub outlived.
+	restoreNext := h.mailRestoreIfDue(ctx, api, h.mailNow())
+	defer func() { next = min(next, restoreNext) }()
 	s.mu.Lock()
 	first := !s.loaded
 	if first {

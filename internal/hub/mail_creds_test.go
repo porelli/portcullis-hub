@@ -2,8 +2,11 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/mailctl"
 	"github.com/portcullis/hub/internal/mailctl/mailctltest"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -330,5 +334,202 @@ func TestReconcileVoidRestore(t *testing.T) {
 		if r.ID == c.ID && r.Reason != state.MailCredentialReasonExpired {
 			t.Fatalf("expired row %+v", r)
 		}
+	}
+}
+
+// mailReason is user's row id's reason ("" = active).
+func (f *mailFixture) mailReason(user, id string) string {
+	f.h.mu.RLock()
+	defer f.h.mu.RUnlock()
+	for _, r := range f.h.st.MailCredentials[user] {
+		if r.ID == id {
+			return r.Reason
+		}
+	}
+	return "no row"
+}
+
+// TestPersonMailReconciles (§19.11): the administrator's view of a
+// person's mail reconciles with mailctl first (a restore's rows are
+// "voided" without the person opening their page); while mailctl can't
+// be read the active rows are "unconfirmed", never "active".
+func TestPersonMailReconciles(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	ctx := context.Background()
+	root := &directory.Caller{User: "root", Admin: true}
+	c := f.create(t, "alice", "phone")
+	f.mc.DropCreds("alice")
+	later := time.Now().UTC().Add(time.Hour)
+	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	v, err := f.h.PersonMail(ctx, root, "alice")
+	if err != nil || len(v.Passwords) != 1 || v.Passwords[0].Status != "voided" || f.mailReason("alice", c.ID) != state.MailCredentialReasonVoidRestore {
+		t.Fatalf("after a restore: %+v %v", v, err)
+	}
+	// mailctl unreachable: unconfirmed.
+	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = nil })
+	c2 := f.create(t, "alice", "tablet")
+	f.mc.Lock(func(s *mailctltest.Server) { s.Down = true })
+	v, err = f.h.PersonMail(ctx, root, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range v.Passwords {
+		if p.Status == "active" || (p.ID == c2.ID && p.Status != "unconfirmed") {
+			t.Fatalf("mailctl down: %+v", v.Passwords)
+		}
+	}
+	if f.mailReason("alice", c2.ID) != "" {
+		t.Fatal("an unconfirmed row was ended")
+	}
+	// Back: active again.
+	f.mc.Lock(func(s *mailctltest.Server) { s.Down = false })
+	v, _ = f.h.PersonMail(ctx, root, "alice")
+	for _, p := range v.Passwords {
+		if p.ID == c2.ID && p.Status != "active" {
+			t.Fatalf("mailctl back: %+v", v.Passwords)
+		}
+	}
+}
+
+// failCreds is a MailAPI whose credential reads fail.
+type failCreds struct{ MailAPI }
+
+func (failCreds) Credentials(context.Context, string) ([]mailctl.Credential, error) {
+	return nil, errors.New("mailctl: connection reset")
+}
+
+// TestMailRestoreReconcile (§19.11): mailctl's restored_at later than
+// the last full reconcile voids everyone's restored rows — at start
+// (the first pass, the restored mailctl already holding an applied
+// document) and on the 60 s tick (the Hub outlived a restore of mail
+// alone); the restore is recorded only after the reconcile succeeded,
+// so a failure retries on the next check.
+func TestMailRestoreReconcile(t *testing.T) {
+	// At start.
+	f := newMailFixture(t)
+	f.sync(t)
+	c := f.create(t, "alice", "phone")
+	f.mc.DropCreds("alice")
+	later := time.Now().UTC().Add(time.Hour)
+	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	g := newMailFixture(t) // a Hub started on the restored data
+	g.h.mu.Lock()
+	g.h.st.MailCredentials = f.h.st.MailCredentials
+	g.h.mu.Unlock()
+	g.h.SetMailAPI(f.mc.Client())
+	g.h.mailState.reconciled = true // no first accepted document
+	g.sync(t)
+	if r := g.mailReason("alice", c.ID); r != state.MailCredentialReasonVoidRestore {
+		t.Fatalf("at start: reason %q", r)
+	}
+
+	// On the tick: the Hub outlives the restore.
+	h := newMailFixture(t)
+	h.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = nil })
+	h.sync(t)
+	c = h.create(t, "bob", "phone")
+	h.mc.DropCreds("bob")
+	at := time.Now().UTC().Add(time.Hour)
+	h.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &at })
+	h.sync(t) // inside the 60 s: not checked yet
+	if r := h.mailReason("bob", c.ID); r != "" {
+		t.Fatalf("before the tick: reason %q", r)
+	}
+	h.advance(mailRestoreEvery)
+	if next := h.sync(t); next > mailRestoreEvery {
+		t.Fatalf("next pass in %v", next)
+	}
+	if r := h.mailReason("bob", c.ID); r != state.MailCredentialReasonVoidRestore {
+		t.Fatalf("on the tick: reason %q", r)
+	}
+
+	// A failed reconcile isn't recorded: the next check retries.
+	c = h.create(t, "alice", "laptop")
+	h.mc.DropCreds("alice")
+	at2 := at.Add(time.Hour)
+	h.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &at2 })
+	api := h.mc.Client()
+	h.advance(mailRestoreEvery)
+	h.h.mailRestoreIfDue(context.Background(), failCreds{api}, h.h.mailNow())
+	if r := h.mailReason("alice", c.ID); r != "" || !h.h.mailState.restoreDone.Equal(at) {
+		t.Fatalf("failed: reason %q, done %v", r, h.h.mailState.restoreDone)
+	}
+	h.advance(mailRestoreEvery)
+	h.h.mailRestoreIfDue(context.Background(), api, h.h.mailNow())
+	if r := h.mailReason("alice", c.ID); r != state.MailCredentialReasonVoidRestore || !h.h.mailState.restoreDone.Equal(at2) {
+		t.Fatalf("retried: reason %q, done %v", r, h.h.mailState.restoreDone)
+	}
+}
+
+// TestReconcileCreateRace: a create that lands between a reconcile's
+// live-list read and its end-rows step waits for it (the person's mail
+// credential lock) and its row stays active; a row recorded after the
+// list was read (bypassing the lock) is never ended by that reconcile.
+func TestReconcileCreateRace(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	ctx := context.Background()
+	f.create(t, "alice", "phone")
+	f.mc.DropCreds("alice") // the old row has no live password: ended
+	// (A flag, not sync.Once: Once would make the create's own reconcile
+	// wait on the hook, hiding a missing lock.)
+	var fired atomic.Bool
+	var created *CreatedMailPassword
+	var createErr error
+	done := make(chan struct{})
+	f.h.mailReconcileHook = func(user string) {
+		if fired.Swap(true) {
+			return
+		}
+		func() {
+			go func() {
+				defer close(done)
+				created, createErr = f.h.CreateMailPassword(context.Background(), "alice", "tablet", "none", testProof)
+			}()
+			select {
+			case <-done:
+				t.Error("the create didn't wait for the reconcile")
+			case <-time.After(150 * time.Millisecond):
+			}
+		}()
+	}
+	if _, err := f.h.MyMail(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	if r := f.mailReason("alice", created.ID); r != "" {
+		t.Fatalf("the new row ended: %q", r)
+	}
+	v, _ := f.h.MyMail(ctx, "alice")
+	if len(v.Passwords) != 1 || v.Passwords[0].ID != created.ID || v.Passwords[0].Status != "active" {
+		t.Fatalf("after: %+v", v.Passwords)
+	}
+
+	// Belt and braces: a row recorded after the list read (no live
+	// password in that list) isn't judged by that reconcile.
+	late := state.MailCredential{ID: "mlate", StalwartID: "s-late", Label: "late", UUID: "uuid-alice", CreatedAt: time.Now().UTC()}
+	var once2 sync.Once
+	f.h.mailReconcileHook = func(string) {
+		once2.Do(func() {
+			f.h.mu.Lock()
+			late.UUID = f.h.st.MailCredentials["alice"][0].UUID
+			f.h.st.MailCredentials["alice"] = append(f.h.st.MailCredentials["alice"], late)
+			f.h.mu.Unlock()
+		})
+	}
+	f.mc.DropCreds("alice")
+	f.h.MyMail(ctx, "alice")
+	if r := f.mailReason("alice", "mlate"); r != "" {
+		t.Fatalf("a row recorded after the list read was ended: %q", r)
+	}
+	if r := f.mailReason("alice", created.ID); r != state.MailCredentialReasonMissing {
+		t.Fatalf("the judged row: %q", r)
+	}
+	f.h.mailReconcileHook = nil
+	f.h.MyMail(ctx, "alice") // the next reconcile judges it
+	if r := f.mailReason("alice", "mlate"); r != state.MailCredentialReasonMissing {
+		t.Fatalf("next reconcile: %q", r)
 	}
 }

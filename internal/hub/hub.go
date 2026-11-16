@@ -589,6 +589,9 @@ type Hub struct {
 	mailState    mailSync
 	mailRestarts sharedRestart
 	mailClock    func() time.Time
+	// mailReconcileHook, when set (tests), runs in reconcileMailPasswords
+	// right after the live list is read.
+	mailReconcileHook func(user string)
 	// mailCoreForTest replaces core.env's mail keys (SetMailCoreForTest).
 	mailCoreForTest atomic.Pointer[mailCoreEnv]
 	// testHookHolderJudged, if set, runs in CheckCredentialHolders

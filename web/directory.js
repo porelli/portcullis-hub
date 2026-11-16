@@ -1052,7 +1052,8 @@
     for (const p of pw) {
       h += '<div class="pd-row-inline"><strong>' + esc(p.label) + '</strong> <span class="pd-muted">created ' + esc(fmtDate(p.created_at)) + '</span> ' +
         (p.status === 'voided' ? '<span class="pd-pill bad">reset by a restore</span>'
-          : '<button type="button" class="pd-btn danger xs" data-act="mail-pw-revoke" data-user="' + esc(user) + '" data-id="' + esc(p.id) + '" data-label="' + esc(p.label) + '">Revoke</button>') + '</div>';
+          : (p.status === 'unconfirmed' ? '<span class="pd-pill warn">not confirmed: the mail server can\'t be read</span> ' : '') +
+          '<button type="button" class="pd-btn danger xs" data-act="mail-pw-revoke" data-user="' + esc(user) + '" data-id="' + esc(p.id) + '" data-label="' + esc(p.label) + '">Revoke</button>') + '</div>';
     }
     h += '<p class="pd-muted pd-small">Only ' + esc(user) + ' can create a mail password, on their Sign-in page.</p>';
     return h;

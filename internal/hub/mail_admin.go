@@ -759,23 +759,40 @@ func (h *Hub) mailHelpAllowed(ctx context.Context, c *directory.Caller, user str
 }
 
 // PersonMail is a person's mail section for c: addresses, aliases (only
-// for administrators; [] for a sign_in_help holder) and passwords.
+// for administrators; [] for a sign_in_help holder) and passwords,
+// reconciled with mailctl first (as MyMail; contract §19.11); while
+// mailctl can't be read, every active row is "unconfirmed".
 func (h *Hub) PersonMail(ctx context.Context, c *directory.Caller, user string) (*PersonMailView, error) {
 	u, admin, err := h.mailHelpAllowed(ctx, c, user)
 	if err != nil {
 		return nil, err
 	}
 	v := &PersonMailView{Addresses: []string{}, Aliases: []string{}, Passwords: []MailPasswordView{}}
+	uuid := ""
 	if acct, _, err := h.mailAccount(ctx, u); err == nil {
 		v.Addresses = acct.Addresses
-		v.Passwords = h.MailPasswords(u, acct.UUID)
+		uuid = acct.UUID
 		if admin {
 			h.mu.RLock()
 			v.Aliases = nonNil(h.st.Mail.Aliases[acct.UUID].Addresses)
 			h.mu.RUnlock()
 		}
 	} else if m, err := h.membership(ctx); err == nil {
-		v.Passwords = h.MailPasswords(u, m.UUIDs[u])
+		uuid = m.UUIDs[u]
+	} else {
+		return v, nil
+	}
+	confirmed := false
+	if api, err := h.mailUp(ctx); err == nil {
+		confirmed = h.reconcileMailPasswords(ctx, api, u, uuid) == nil
+	}
+	v.Passwords = h.MailPasswords(u, uuid)
+	if !confirmed {
+		for i := range v.Passwords {
+			if v.Passwords[i].Status == "active" {
+				v.Passwords[i].Status = "unconfirmed"
+			}
+		}
 	}
 	return v, nil
 }
