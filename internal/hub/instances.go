@@ -143,6 +143,8 @@ func (h *Hub) pendingLocked(id string) error {
 		return statusErr(409, "shared folder %s is being applied to %s: try again when it has finished", name, id)
 	}
 	switch e := h.st.Instances[id]; e.State {
+	case state.InstanceMoving:
+		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", id)
 	case state.InstanceDeleting:
 		return statusErr(409, "instance %s is being deleted: delete it again to finish", id)
 	case state.InstanceRestoring:

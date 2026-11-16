@@ -378,6 +378,11 @@ func (h *Hub) bundleOf(ctx context.Context, id string) (memFS, agentapi.BundleMa
 // pushBundle sends instance id's bundle to its worker (before every
 // create: the agent validates it and runs only its resolved model).
 func (h *Hub) pushBundle(ctx context.Context, id string, rt runtime.Instances) error {
+	// Every push re-checks placement and the quarantine (fix round 3,
+	// B2-H1): a template turned primary-only sends nothing.
+	if err := h.placedPreflight(ctx, id); err != nil {
+		return err
+	}
 	b, ok := unwrapRT(rt).(bundlePusher)
 	if !ok {
 		return statusErr(500, "%s: the worker's runtime takes no bundles", id)

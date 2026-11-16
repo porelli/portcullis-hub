@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/cli"
 	"gopkg.in/yaml.v3"
@@ -20,6 +21,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/runtimetest"
+	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -66,6 +68,19 @@ func (w *workerFake) PushBundle(_ context.Context, id string, files fs.FS, m age
 	return nil
 }
 
+func (w *workerFake) RemoveProject(_ context.Context, id string) error {
+	w.Fake.Signal(context.Background(), "remove-project", id)
+	return nil
+}
+
+func (w *workerFake) Unquarantine(_ context.Context, id string) error {
+	w.Fake.Signal(context.Background(), "unquarantine", id)
+	w.mu.Lock()
+	delete(w.info.Quarantined, id)
+	w.mu.Unlock()
+	return nil
+}
+
 func (w *workerFake) lastBundle() map[string]string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -104,11 +119,21 @@ func newPlacedFixture(t *testing.T) *placedFixture {
 		}
 	}
 	f.h.cfg.RelayImage = relayImage
+	// Servers on: link_doc and link's status (fix round 3: placement
+	// checks serversOn).
+	dir := t.TempDir()
+	lk := &fakeLink{t: t, path: filepath.Join(dir, "status.json"), peers: map[string]time.Time{"nas": time.Now()}}
+	lk.write()
+	f.h.cfg.LinkDocDir = filepath.Join(dir, "link-doc")
+	os.MkdirAll(f.h.cfg.LinkDocDir, 0o750)
+	f.h.cfg.LinkDocGID = os.Getgid()
+	f.h.cfg.VPNStatusFile = lk.path
 	w := &workerFake{Fake: &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, States: map[string]runtime.State{}},
 		info: agentapi.Info{AgentVersion: "0.1.0", Runtime: "docker", Arch: "amd64", DataDir: "/srv/w/worker-data", DockerRootDir: "/var/lib/docker",
 			UnprivilegedPortStart: 1024, BindRoots: []string{"/srv", "/mnt"}}}
 	f.h.mu.Lock()
-	f.h.st.Servers = map[string]state.Server{"nas": {Name: "NAS", TunnelIP: "10.214.0.10", State: ServerReady}}
+	_, wgpub, _ := servers.NewWGKeyPair()
+	f.h.st.Servers = map[string]state.Server{"nas": {Name: "NAS", TunnelIP: "10.214.0.10", State: ServerReady, WGPublicKey: wgpub}}
 	f.h.mu.Unlock()
 	f.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: w})
 	return &placedFixture{fixture: f, w: w}
@@ -130,6 +155,7 @@ func TestPlacementRefusals(t *testing.T) {
 	}{
 		"offline":      {"filesapp", func(p *placedFixture) { p.h.setServer("nas", &serverRT{Name: "NAS", State: ServerOffline, RT: p.w}) }, "server NAS is offline"},
 		"unknown":      {"filesapp", func(p *placedFixture) { p.h.setServer("nas", nil) }, "server nas is unknown"},
+		"servers off":  {"filesapp", func(p *placedFixture) { p.h.cfg.LinkDocDir = "" }, "servers are off"},
 		"primary only": {"tcpapp", nil, "TCP can't run on a worker: "},
 		"compat":       {"lowport", func(p *placedFixture) { p.w.info.Runtime, p.w.info.Rootless = "podman", true }, "can't run on NAS (podman): host port 80/tcp"},
 		"no arch image": {"filesapp", func(p *placedFixture) {
@@ -150,7 +176,7 @@ func TestPlacementRefusals(t *testing.T) {
 				c.setup(p)
 			}
 			err := p.create(t, c.template, "nas")
-			if errStatus(err) != 409 || !strings.Contains(err.Error(), c.want) {
+			if (errStatus(err) != 409 && errStatus(err) != 503) || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("%v (want %q)", err, c.want)
 			}
 			p.h.mu.RLock()

@@ -2,7 +2,11 @@ package hub
 
 import (
 	"context"
+	"fmt"
+	"github.com/portcullis/hub/internal/directory"
 	"io/fs"
+	"log"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -152,9 +156,16 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 	if h.kubeOn() {
 		return statusErr(409, "servers need a Docker or Podman primary")
 	}
+	if _, err := h.serversOn(); err != nil {
+		return err
+	}
 	h.mu.RLock()
+	_, known := h.st.Servers[server]
 	perr := h.placeableLocked(server)
 	h.mu.RUnlock()
+	if !known {
+		return statusErr(400, "no server %s", server)
+	}
 	if perr != nil {
 		return perr
 	}
@@ -179,13 +190,21 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 	imgs := templates.ServiceImages(compose)
 	refs := make([]string, 0, len(imgs))
 	for _, ref := range imgs {
-		if ref != "" && !strings.Contains(ref, "$") && !slices.Contains(refs, ref) {
+		// ${VAR:-default} references resolved from the core env and the
+		// defaults (fix round 3: never skipped).
+		ref = expandRef(ref, env)
+		if ref != "" && !slices.Contains(refs, ref) {
 			refs = append(refs, ref)
 		}
 	}
 	sort.Strings(refs)
+	pctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
 	for _, ref := range refs {
-		if err := rt.Pull(ctx, ref, nil); err != nil {
+		if strings.Contains(ref, "$") {
+			return statusErr(409, "the image %s can't be resolved before the instance exists: pull it on %s first", ref, h.serverName(server))
+		}
+		if err := rt.Pull(pctx, ref, nil); err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "no matching manifest") || strings.Contains(msg, "platform") || strings.Contains(msg, "architecture") {
 				return statusErr(409, "%s has no %s image", ref, inf.Arch)
@@ -247,4 +266,138 @@ func (p placedRT) DeliverFile(ctx context.Context, instance string, f runtime.Fi
 		return statusErr(500, "the worker's runtime can't take data files")
 	}
 	return d.DeliverFile(ctx, instance, f)
+}
+
+// placedPreflight (fix round 3): a placed instance's template must still
+// be placeable — a template update can make it primary-only (an ai
+// block: its provider secrets never reach a worker; primary_only; a core
+// volume …) — and the instance not quarantined by its agent. A template
+// turned primary-only stops the instance on the worker and is doctor
+// server_placement_invalid; nothing is rendered or sent.
+func (h *Hub) placedPreflight(ctx context.Context, id string) error {
+	server := h.serverOf(id)
+	if server == "" {
+		return nil
+	}
+	h.mu.RLock()
+	v := h.findLocked(id)
+	var t templates.Template
+	if v != nil {
+		t = *v
+	}
+	h.mu.RUnlock()
+	if v == nil {
+		return statusErr(409, "instance %s does not resolve", id)
+	}
+	f := h.factsOfServer(server)
+	env := h.compatEnv(readEnvRaw(filepath.Join(h.cfg.ProjectDir, ".env")))
+	for k, val := range readEnvRaw(h.envPath(id)) {
+		env[k] = val
+	}
+	env[templates.EnvBindRoots] = strings.Join(f.BindRoots, ":")
+	if primaryOnly, reasons := templates.Placement(t.ReadCompose(), t.Manifest, env, f.BindRoots); primaryOnly {
+		why := strings.Join(reasons, "; ")
+		h.notePlacementInvalid(id, why)
+		// Stopped on the worker (and its relays on the primary), best
+		// effort: nothing new is sent either way.
+		if rt, err := h.rtFor(id); err == nil {
+			if derr := rt.Down(ctx, h.runtimeProject(&t)); derr != nil {
+				log.Printf("placement: %s: stopping it on %s: %v", id, serverLabel(server), derr)
+			}
+		} else if derr := h.relaysDown(ctx, id); derr != nil {
+			log.Printf("placement: %s: its relays: %v", id, derr)
+		}
+		return statusErr(409, "%s can't run on a worker any more: %s; move it to the primary", t.Manifest.Name, why)
+	}
+	h.notePlacementInvalid(id, "")
+	if inf := h.serverInfo(server); inf != nil {
+		if why := inf.Quarantined[id]; why != "" {
+			return statusErr(409, "%s is quarantined on %s (%s): an admin must lift the quarantine", id, serverLabel(server), clipRunes(why, 200))
+		}
+	}
+	return nil
+}
+
+// notePlacementInvalid records why instance id can't run on its worker
+// any more ("" = it can): doctor server_placement_invalid.
+func (h *Hub) notePlacementInvalid(id, why string) {
+	h.srvMu.Lock()
+	defer h.srvMu.Unlock()
+	if why == "" {
+		delete(h.placementInvalid, id)
+		return
+	}
+	if h.placementInvalid == nil {
+		h.placementInvalid = map[string]string{}
+	}
+	h.placementInvalid[id] = why
+}
+
+// relaysFirst brings a placed, enabled instance's relays to the labels
+// the Hub renders now, on the primary, before anything on the worker
+// (review B2-H2). A relay that can't be updated is stopped (fail closed).
+func (h *Hub) relaysFirst(ctx context.Context, t *templates.Template) error {
+	h.mu.RLock()
+	enabled := h.st.IsEnabled(t.ID)
+	h.mu.RUnlock()
+	if !enabled {
+		return nil
+	}
+	if err := h.relaysUp(ctx, t.ID); err != nil {
+		if derr := h.relaysDown(ctx, t.ID); derr != nil {
+			return fmt.Errorf("%s: its relays couldn't be updated (%v) nor stopped: %w", t.ID, err, derr)
+		}
+		return fmt.Errorf("%s: its relays couldn't be updated, so they were stopped: %w", t.ID, err)
+	}
+	return nil
+}
+
+// LiftQuarantine asks instance id's worker to lift the agent's
+// quarantine (fix round 3, A2-M1; the T12 route: admin, fresh sign-in):
+// the agent walks the bundle's bind sources again first. Audited
+// server.quarantine_lift.
+func (h *Hub) LiftQuarantine(ctx context.Context, actor directory.Actor, id string) (err error) {
+	defer func() { h.auditOp(actor, "server.quarantine_lift", id, "", err) }()
+	if actor.User == "" {
+		return statusErr(401, "no acting user")
+	}
+	server := h.serverOf(id)
+	if server == "" {
+		return statusErr(409, "%s runs on the primary: nothing is quarantined", id)
+	}
+	rt, err := h.rtForServer(server)
+	if err != nil {
+		return err
+	}
+	b, ok := unwrapRT(rt).(interface {
+		Unquarantine(ctx context.Context, id string) error
+	})
+	if !ok {
+		return statusErr(500, "the worker's runtime can't lift a quarantine")
+	}
+	if err := b.Unquarantine(ctx, id); err != nil {
+		return err
+	}
+	_, err = h.refreshServerFacts(ctx, server)
+	return err
+}
+
+// expandRef resolves ${VAR}, ${VAR:-def} and ${VAR-def} in an image
+// reference from env (an unresolvable one keeps its "$").
+func expandRef(ref string, env map[string]string) string {
+	return os.Expand(ref, func(k string) string {
+		name, def, hasDef := k, "", false
+		if i := strings.Index(k, ":-"); i >= 0 {
+			name, def, hasDef = k[:i], k[i+2:], true
+		} else if i := strings.Index(k, "-"); i >= 0 {
+			name, def, hasDef = k[:i], k[i+1:], true
+		}
+		if v, ok := env[name]; ok && v != "" {
+			return v
+		}
+		if hasDef {
+			return def
+		}
+		return "${" + k + "}"
+	})
 }

@@ -322,6 +322,14 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		// 10): they count for its routes (above), never for its state —
 		// that is the worker's.
 		if unitRT[ci] == nil && h.serverOf(id) != "" {
+			// They are what Traefik routes: their labels are what exposure
+			// drift compares with the Hub's desired ones (review B2-H2).
+			if c.State == "running" {
+				if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
+					havePublic[id] = true
+				}
+				live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, nil})
+			}
 			continue
 		}
 		service := c.Labels[docker.LabelService]
@@ -375,8 +383,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		if isRunning {
 			pc.running++
-			// M1: Don't set havePublic for a done job.
-			if !isDoneJob {
+			// M1: Don't set havePublic for a done job. A worker's units
+			// route nothing (their relays do): no exposure from them.
+			if !isDoneJob && unitRT[ci] == nil {
 				if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
 					havePublic[id] = true
 				}
@@ -387,8 +396,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 					aliases = append(aliases, strings.ToLower(n))
 				}
 			}
-			// A done job is not "live" for exposure drift (it serves nothing).
-			if !isDoneJob {
+			// A done job is not "live" for exposure drift (it serves
+			// nothing), nor a worker's unit (its relays are, above).
+			if !isDoneJob && unitRT[ci] == nil {
 				live = append(live, running{id, service, c.Labels, aliases})
 			}
 		}

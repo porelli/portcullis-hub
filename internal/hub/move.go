@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/settings"
@@ -17,23 +19,32 @@ import (
 	"github.com/portcullis/hub/internal/templates"
 )
 
-// Moves between servers (contract §17, Task 11): the instance is backed
-// up on its source (which stops it), restored into the same id on the
-// target, then switched (relays follow, a new relay token) and started
-// there. Until the switch has started the target, any failure or Stop
-// puts the routing back on the source and starts it again: two routed
-// copies never exist, and the instance is never left stopped. The
-// source's volumes stay (MovedFrom) for an undo within 7 days, until
-// removed.
+// Moves between servers (contract §17, Task 11; fix round 3). The
+// instance is backed up on its source (which stops it), restored into
+// the same id on the target, then switched (relays follow, a new relay
+// token, link.json republished) and started there. Until the switch has
+// committed, any failure or Stop takes the target down and puts the
+// routing back on the source, which starts again; when the target can't
+// be taken down, the instance is routed to neither ("stuck", doctor
+// server_move_stuck) and retried. Two routed copies never exist. The
+// source's copy (its volume names pinned at move time) stays for an
+// undo within 7 days, until removed. While an instance is "moving" only
+// its move and the recovery may start it.
 
 const (
-	OpMove = "move"
-	// Move phases (the op's steps and Instance.Move.Phase).
+	OpMove     = "move"
+	OpMoveUndo = "move_undo"
+	// Move phases (the op's steps and Instance.Move.Phase); MoveStuck: a
+	// rollback couldn't take the target down.
 	MoveCheck   = "check"
 	MoveBackup  = "backup"
 	MoveRestore = "restore"
 	MoveSwitch  = "switch"
 	MoveKeep    = "keep"
+	MoveStuck   = "stuck"
+	// Undo steps.
+	MoveUndoStart = StepStart
+	MoveUndoStop  = StepStop
 	// UndoWindow: a move can be undone this long after it.
 	UndoWindow = 7 * 24 * time.Hour
 )
@@ -48,11 +59,61 @@ func movePlan() []Step {
 	}
 }
 
+func undoPlan() []Step {
+	return []Step{
+		{Key: MoveUndoStart, Label: "Starting the copy it returns to"},
+		{Key: MoveSwitch, Label: "Switching the routing"},
+		{Key: MoveUndoStop, Label: "Stopping the current copy"},
+	}
+}
+
 func normServer(s string) string {
 	if s == servers.PrimaryID {
 		return ""
 	}
 	return s
+}
+
+// moveHook runs the test hook at a phase's start (nil: none).
+func (h *Hub) moveHook(phase string) error {
+	if h.testHookMove != nil {
+		return h.testHookMove(phase)
+	}
+	return nil
+}
+
+// ownMove marks id as started by a move, an undo or a recovery (the
+// only starts composeUp allows while it is moving); the release.
+func (h *Hub) ownMove(id string) func() {
+	h.moveOwners.Store(id, true)
+	return func() { h.moveOwners.Delete(id) }
+}
+
+// publishLink republishes link.json (a relay token changed or went;
+// review B2-M5): the op fails when it can't.
+func (h *Hub) publishLink() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.publishLinkLocked(); err != nil {
+		return statusErr(500, "link.json: %v", err)
+	}
+	return nil
+}
+
+func removeRelayFiles(h *Hub, id string) {
+	for _, p := range []string{h.relayComposePath(id), h.relayEnvPath(id)} {
+		os.Remove(p)
+	}
+}
+
+// dropRelays takes instance id's relays down and their files and token
+// away, then republishes link.json (its relay is gone).
+func (h *Hub) dropRelays(ctx context.Context, id string) error {
+	if err := h.relaysDown(ctx, id); err != nil {
+		return err
+	}
+	removeRelayFiles(h, id)
+	return h.publishLink()
 }
 
 // MoveInstance moves instance id to server to ("" or "primary": the
@@ -85,6 +146,43 @@ func (h *Hub) setMove(id string, mv *state.Move, server string, st string) {
 	h.saveLocked()
 }
 
+// volumeNamesOn are instance id's volumes on server's runtime (its
+// compose project's).
+func (h *Hub) volumeNamesOn(ctx context.Context, server, id string) ([]string, error) {
+	rt, err := h.rtForServer(server)
+	if err != nil {
+		return nil, err
+	}
+	vs, err := rt.ListVolumes(ctx, runtime.Filter{Instance: id})
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, v := range vs {
+		if v.Labels[docker.LabelProject] == projectName(id) {
+			out = append(out, v.Name)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// downOn takes instance t down on server's runtime (a worker's relays
+// first, through its placed runtime).
+func (h *Hub) downOn(ctx context.Context, server string, t *templates.Template) error {
+	if server == "" {
+		return h.rt.Down(ctx, h.runtimeProject(t))
+	}
+	rt, err := h.rtForServer(server)
+	if err != nil {
+		return err
+	}
+	if err := h.relaysDown(ctx, t.ID); err != nil {
+		return err
+	}
+	return rt.Down(ctx, h.runtimeProject(t))
+}
+
 func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.Actor, ready func()) (err error) {
 	defer func() {
 		h.auditOp(actor, "instance.move", id, "to "+serverLabel(to), err)
@@ -97,6 +195,7 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return h.busyErr(id, err)
 	}
 	defer unlock()
+	defer h.ownMove(id)()
 	h.mu.Lock()
 	v := h.findLocked(id)
 	in, has := h.st.Instances[id]
@@ -117,6 +216,8 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return statusErr(409, "%s is %s: it can't be moved now", id, in.State)
 	case bound:
 		return statusErr(409, "unbind folders first; folder contents aren't moved")
+	case in.MoveTargetLeftover != nil && in.MoveTargetLeftover.Server == to:
+		return statusErr(409, "an earlier move left %s's half-restored volumes on %s: remove that leftover first", id, serverLabel(to))
 	}
 	view := *v
 	p := progressFrom(ctx)
@@ -132,17 +233,33 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 			return err
 		}
 	}
-	if from != "" {
-		if _, err := h.rtForServer(from); err != nil {
-			return err
-		}
+	srcVols, err := h.volumeNamesOn(ctx, from, id)
+	if err != nil {
+		return statusErr(409, "%s: %v", serverLabel(from), err)
 	}
 	p.Done(MoveCheck)
 	mv := &state.Move{From: from, To: to, StartedAt: h.now().UTC(), Phase: MoveBackup}
 	h.setMove(id, mv, from, state.InstanceMoving)
-	// back: before the switch, everything goes back to the source.
+	// back: before the switch, everything goes back to the source — once
+	// the target is down (else routed to neither: stuck).
+	targetTouched := false
 	back := func(cause error) error {
+		if targetTouched {
+			if derr := h.downOn(context.Background(), to, &view); derr != nil {
+				mv.Phase = MoveStuck
+				h.setMove(id, mv, from, state.InstanceMoving)
+				h.relaysDown(context.Background(), id)
+				return fmt.Errorf("%w — and taking %s down on %s failed (%v): it runs nowhere until that succeeds (retried; doctor server_move_stuck)", cause, id, serverLabel(to), derr)
+			}
+			h.recordTargetLeftover(id, to)
+		}
 		h.setMove(id, nil, from, "")
+		if from == "" {
+			removeRelayFiles(h, id)
+		}
+		if perr := h.publishLink(); perr != nil {
+			return fmt.Errorf("%w — %v", cause, perr)
+		}
 		if enabled {
 			h.mu.RLock()
 			lv := h.findLocked(id)
@@ -178,6 +295,7 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	// From here on the instance's runtime is the target's (not routed:
 	// nothing runs there until the switch).
 	h.setMove(id, mv, to, state.InstanceMoving)
+	targetTouched = true
 
 	// restore (same id, target runtime, new volumes)
 	p.Start(MoveRestore)
@@ -185,16 +303,14 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return stopped(err)
 	}
 	if err := h.restoreForMove(ctx, id, entry.Archive, actor); err != nil {
-		return stopped(fmt.Errorf("the restore on %s failed — %s runs on %s again: %w", serverLabel(to), id, serverLabel(from), err))
+		return stopped(fmt.Errorf("the restore on %s failed — %s goes back to %s: %w", serverLabel(to), id, serverLabel(from), err))
 	}
 	p.Done(MoveRestore)
 	if ctx.Err() != nil {
 		return stopped(ctx.Err())
 	}
 
-	// switch: relays follow (Up brings them up for a worker target; a
-	// primary target needs the source's relays gone), a new relay token,
-	// then the start on the target.
+	// switch: relays follow, a new relay token, link.json, the start.
 	mv.Phase = MoveSwitch
 	h.setMove(id, mv, to, state.InstanceMoving)
 	p.Start(MoveSwitch)
@@ -202,53 +318,76 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return stopped(err)
 	}
 	if to == "" {
-		if err := h.relaysDown(context.Background(), id); err != nil {
+		if err := h.dropRelays(context.Background(), id); err != nil {
 			return stopped(err)
 		}
-		removeRelayFiles(h, id)
-	} else if err := h.newRelayToken(id); err != nil {
-		return stopped(statusErr(500, "the relay token: %v", err))
+	} else {
+		if err := h.newRelayToken(id); err != nil {
+			return stopped(statusErr(500, "the relay token: %v", err))
+		}
+		if err := h.publishLink(); err != nil {
+			return stopped(err)
+		}
 	}
 	if enabled {
 		if err := h.startAgain(&view); err != nil {
-			// Not routed yet (the up failed): take the target down, back
-			// to the source.
-			h.rtOf(id).Down(context.Background(), h.runtimeProject(&view))
-			return stopped(fmt.Errorf("starting %s on %s failed — it runs on %s again: %w", id, serverLabel(to), serverLabel(from), err))
+			return stopped(fmt.Errorf("starting %s on %s failed — it goes back to %s: %w", id, serverLabel(to), serverLabel(from), err))
 		}
 	}
 	if !p.CloseStop() {
-		h.rtOf(id).Down(context.Background(), h.runtimeProject(&view))
 		return back(ErrStopped)
 	}
 	p.Done(MoveSwitch)
 
-	// keep
+	// keep: the source's copy (volume names pinned) for an undo; its
+	// worker bundle (env included) goes (review B2-M4).
 	p.Start(MoveKeep)
 	h.mu.Lock()
 	in = h.st.Instances[id]
 	in.Move, in.State = nil, ""
-	in.MovedFrom = &state.MovedFrom{Server: from, At: h.now().UTC()}
+	in.MovedFrom = &state.MovedFrom{Server: from, At: h.now().UTC(), Volumes: srcVols}
 	h.st.Instances[id] = in
 	h.saveLocked()
 	h.mu.Unlock()
+	if from != "" {
+		if err := h.removeWorkerBundle(context.Background(), from, id); err != nil {
+			p.Warn(fmt.Sprintf("the bundle of %s on %s wasn't removed: %v", id, serverLabel(from), err))
+		}
+	}
 	p.Done(MoveKeep)
 	log.Printf("instance %s moved from %s to %s (archive %s)", id, serverLabel(from), serverLabel(to), entry.Archive)
 	return nil
 }
 
-// moveHook runs the test hook at a phase's start (nil: none).
-func (h *Hub) moveHook(phase string) error {
-	if h.testHookMove != nil {
-		return h.testHookMove(phase)
+// recordTargetLeftover records the volumes a failed move left on its
+// target (review B2-L5).
+func (h *Hub) recordTargetLeftover(id, to string) {
+	vols, err := h.volumeNamesOn(context.Background(), to, id)
+	if err != nil || len(vols) == 0 {
+		return
 	}
-	return nil
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	in := h.st.Instances[id]
+	in.MoveTargetLeftover = &state.MovedFrom{Server: to, At: h.now().UTC(), Volumes: vols}
+	h.st.Instances[id] = in
+	h.saveLocked()
 }
 
-func removeRelayFiles(h *Hub, id string) {
-	for _, p := range []string{h.relayComposePath(id), h.relayEnvPath(id)} {
-		os.Remove(p)
+// removeWorkerBundle removes instance id's bundle from worker server
+// (its containers are down): DELETE /v1/projects/{id}.
+func (h *Hub) removeWorkerBundle(ctx context.Context, server, id string) error {
+	rt, err := h.rtForServer(server)
+	if err != nil {
+		return err
 	}
+	b, ok := unwrapRT(rt).(interface {
+		RemoveProject(ctx context.Context, id string) error
+	})
+	if !ok {
+		return nil
+	}
+	return b.RemoveProject(ctx, id)
 }
 
 // restoreForMove restores archive into instance id on its (new)
@@ -288,12 +427,22 @@ func (h *Hub) restoreForMove(ctx context.Context, id, archive string, actor dire
 	return err
 }
 
-// UndoMove switches instance id back to the source of its last move
-// (within 7 days; the API's confirm is the typed id — changes since the
-// move are lost): it stops on the current server and starts on the
-// source volumes. Audited instance.move_undo.
+// UndoMove undoes instance id's last move (within 7 days; confirm is the
+// typed id — changes since the move are lost) as op move_undo: start the
+// copy it returns to, switch the routing, stop the current copy. A
+// failure before the switch changes nothing. Audited instance.move_undo.
 func (h *Hub) UndoMove(ctx context.Context, id, confirm string, actor directory.Actor) (err error) {
+	_, _, err = h.runOpSync(id, OpMoveUndo, actor, undoPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		return nil, nil, h.undoMove(ctx, id, confirm, actor, ready)
+	})
+	return err
+}
+
+func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.Actor, ready func()) (err error) {
 	defer func() { h.auditOp(actor, "instance.move_undo", id, "", err) }()
+	if actor.User == "" {
+		return statusErr(401, "no acting user")
+	}
 	if confirm != id {
 		return statusErr(400, "type the instance id (%s) to confirm: changes since the move are lost", id)
 	}
@@ -302,6 +451,7 @@ func (h *Hub) UndoMove(ctx context.Context, id, confirm string, actor directory.
 		return h.busyErr(id, err)
 	}
 	defer unlock()
+	defer h.ownMove(id)()
 	h.mu.RLock()
 	in := h.st.Instances[id]
 	v := h.findLocked(id)
@@ -310,59 +460,177 @@ func (h *Hub) UndoMove(ctx context.Context, id, confirm string, actor directory.
 	switch {
 	case v == nil:
 		return statusErr(404, "instance not found: %s", id)
+	case in.State == state.InstanceMoving:
+		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", id)
 	case in.MovedFrom == nil:
 		return statusErr(409, "%s has no move to undo", id)
 	case h.now().Sub(in.MovedFrom.At) > UndoWindow:
 		return statusErr(409, "the move of %s is older than 7 days: it can't be undone (remove the source's data instead)", id)
 	}
-	src := in.MovedFrom.Server
+	src, cur := in.MovedFrom.Server, in.Server
+	view := *v
 	if src != "" {
-		if _, err := h.rtForServer(src); err != nil {
+		if err := h.checkPlacement(ctx, &view, src); err != nil {
 			return err
 		}
 	}
-	view := *v
-	if err := h.composeDownFor(&view); err != nil {
-		return err
+	curVols, _ := h.volumeNamesOn(ctx, cur, id)
+	p := progressFrom(ctx)
+	ready()
+	commit := func() {
+		h.mu.Lock()
+		in := h.st.Instances[id]
+		in.Server = src
+		in.MovedFrom = &state.MovedFrom{Server: cur, At: h.now().UTC(), Volumes: curVols}
+		h.st.Instances[id] = in
+		h.noteInstanceServer(id, src)
+		h.saveLocked()
+		h.mu.Unlock()
 	}
-	if in.Server == "" {
-		// Leaving the primary for a worker: its relays come with the up.
+	revert := func() {
+		h.mu.Lock()
+		in := h.st.Instances[id]
+		in.Server = cur
+		h.st.Instances[id] = in
+		h.noteInstanceServer(id, cur)
+		h.saveLocked()
+		h.mu.Unlock()
+	}
+
+	if src != "" {
+		// start: the worker copy, unrouted (no relays yet).
+		p.Start(MoveUndoStart)
+		if enabled {
+			rt, err := h.rtForServer(src)
+			if err != nil {
+				return err
+			}
+			h.setMoveServer(id, src) // the bundle and render are the source's
+			if _, err := h.prepareUp(&view); err != nil {
+				revert()
+				return err
+			}
+			up, err := h.upProject(ctx, &view)
+			if err == nil {
+				err = h.pushBundle(ctx, id, rt)
+			}
+			if err == nil {
+				err = rt.Create(ctx, up)
+			}
+			if err == nil {
+				err = rt.Up(ctx, up, nil)
+			}
+			if err != nil {
+				rt.Down(context.Background(), up)
+				revert()
+				return fmt.Errorf("starting %s on %s failed — nothing changed: %w", id, serverLabel(src), err)
+			}
+			revert()
+		}
+		p.Done(MoveUndoStart)
+		if !p.CloseStop() {
+			if rt, err := h.rtForServer(src); err == nil {
+				rt.Down(context.Background(), h.runtimeProject(&view))
+			}
+			return ErrStopped
+		}
+		// switch: the current copy's routing off, the relays to src.
+		p.Start(MoveSwitch)
+		if cur == "" {
+			if err := h.rt.Down(context.Background(), h.runtimeProject(&view)); err != nil {
+				return fmt.Errorf("stopping %s on the primary: %w", id, err)
+			}
+		} else if err := h.relaysDown(context.Background(), id); err != nil {
+			return err
+		}
+		commit()
 		if err := h.newRelayToken(id); err != nil {
 			return err
 		}
+		if enabled {
+			if err := h.relaysUp(context.Background(), id); err != nil {
+				return err
+			}
+		} else if err := h.publishLink(); err != nil {
+			return err
+		}
+		p.Done(MoveSwitch)
+		// stop the current copy (a worker; the primary's went at the switch).
+		p.Start(MoveUndoStop)
+		if cur != "" {
+			if rt, err := h.rtForServer(cur); err == nil {
+				if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(&view)); err != nil {
+					p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v", serverLabel(cur), err))
+				}
+			}
+		}
+		p.Done(MoveUndoStop)
+		return nil
 	}
-	h.mu.Lock()
-	in = h.st.Instances[id]
-	in.Server, in.MovedFrom = src, nil
-	h.st.Instances[id] = in
-	h.noteInstanceServer(id, src)
-	h.saveLocked()
-	h.mu.Unlock()
-	if src == "" {
-		h.relaysDown(context.Background(), id)
-		removeRelayFiles(h, id)
+
+	// Back to the primary: the primary's copy is routed as soon as it
+	// starts, so the worker's relays go first (the switch), then the
+	// start; a failed start puts the relays back (nothing changed).
+	p.Start(MoveUndoStart)
+	p.Done(MoveUndoStart)
+	p.Start(MoveSwitch)
+	if err := h.relaysDown(context.Background(), id); err != nil {
+		return err
 	}
+	commit()
 	if enabled {
 		if err := h.startAgain(&view); err != nil {
-			return fmt.Errorf("starting %s on %s failed: %w", id, serverLabel(src), err)
+			revert()
+			h.mu.Lock()
+			in := h.st.Instances[id]
+			in.MovedFrom = &state.MovedFrom{Server: src, At: in.MovedFrom.At, Volumes: nil}
+			h.st.Instances[id] = in
+			h.saveLocked()
+			h.mu.Unlock()
+			if rerr := h.relaysUp(context.Background(), id); rerr != nil {
+				return fmt.Errorf("starting %s on the primary failed (%v), and its relays couldn't come back: %w", id, err, rerr)
+			}
+			return fmt.Errorf("starting %s on the primary failed — nothing changed: %w", id, err)
 		}
 	}
-	return nil
-}
-
-// composeDownFor takes instance t down on its current runtime.
-func (h *Hub) composeDownFor(t *templates.Template) error {
-	if err := h.rtOf(t.ID).Down(context.Background(), h.runtimeProject(t)); err != nil {
-		return fmt.Errorf("stopping %s: %w", t.ID, err)
+	if !p.CloseStop() {
+		return ErrStopped
 	}
+	removeRelayFiles(h, id)
+	if err := h.publishLink(); err != nil {
+		return err
+	}
+	p.Done(MoveSwitch)
+	p.Start(MoveUndoStop)
+	if rt, err := h.rtForServer(cur); err == nil {
+		if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(&view)); err != nil {
+			p.Warn(fmt.Sprintf("stopping the copy on %s failed: %v", serverLabel(cur), err))
+		}
+	}
+	p.Done(MoveUndoStop)
 	return nil
 }
 
-// RemoveMoveLeftover removes the volumes a move left on its source
-// (typed id), through the source's runtime. Audited
-// instance.move_leftover_removed.
+// setMoveServer points instance id's runtime at server for a moment
+// (an undo renders and starts the source copy before the switch).
+func (h *Hub) setMoveServer(id, server string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	in := h.st.Instances[id]
+	in.Server = server
+	h.st.Instances[id] = in
+	h.noteInstanceServer(id, server)
+}
+
+// RemoveMoveLeftover removes the copies moves left (typed id): the
+// source's volumes named at move time, and a failed move's on its
+// target, through their servers' runtimes; then their worker bundles.
+// Audited instance.move_leftover_removed.
 func (h *Hub) RemoveMoveLeftover(ctx context.Context, id, confirm string, actor directory.Actor) (err error) {
 	defer func() { h.auditOp(actor, "instance.move_leftover_removed", id, "", err) }()
+	if actor.User == "" {
+		return statusErr(401, "no acting user")
+	}
 	if confirm != id {
 		return statusErr(400, "type the instance id (%s) to confirm", id)
 	}
@@ -374,44 +642,65 @@ func (h *Hub) RemoveMoveLeftover(ctx context.Context, id, confirm string, actor 
 	h.mu.RLock()
 	in := h.st.Instances[id]
 	h.mu.RUnlock()
-	if in.MovedFrom == nil {
-		return statusErr(409, "%s has no move leftover", id)
+	if in.State == state.InstanceMoving {
+		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", id)
 	}
-	rt, err := h.rtForServer(in.MovedFrom.Server)
-	if err != nil {
-		return err
-	}
-	vs, err := rt.ListVolumes(ctx, runtime.Filter{Instance: id})
-	if err != nil {
-		return statusErr(502, "listing %s's volumes on %s: %v", id, serverLabel(in.MovedFrom.Server), err)
-	}
-	var errs []error
-	for _, v := range vs {
-		if v.Labels["com.docker.compose.project"] != projectName(id) {
+	var lefts []*state.MovedFrom
+	for _, l := range []*state.MovedFrom{in.MovedFrom, in.MoveTargetLeftover} {
+		if l == nil {
 			continue
 		}
-		if err := rt.RemoveVolume(ctx, v.Name); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", v.Name, err))
+		if l.Server == in.Server {
+			return statusErr(409, "the leftover of %s is on %s, where it runs now: refusing to touch it", id, serverLabel(l.Server))
 		}
+		lefts = append(lefts, l)
 	}
-	if err := errors.Join(errs...); err != nil {
-		return statusErr(502, "removing the leftover volumes: %v", err)
+	if len(lefts) == 0 {
+		return statusErr(409, "%s has no move leftover", id)
+	}
+	for _, l := range lefts {
+		rt, err := h.rtForServer(l.Server)
+		if err != nil {
+			return err
+		}
+		vs, err := rt.ListVolumes(ctx, runtime.Filter{Instance: id})
+		if err != nil {
+			return statusErr(502, "listing %s's volumes on %s: %v", id, serverLabel(l.Server), err)
+		}
+		var errs []error
+		for _, v := range vs {
+			// Only the names pinned at move time, still the project's.
+			if !slices.Contains(l.Volumes, v.Name) || v.Labels[docker.LabelProject] != projectName(id) {
+				continue
+			}
+			if err := rt.RemoveVolume(ctx, v.Name); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", v.Name, err))
+			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			return statusErr(502, "removing the leftover volumes: %v", err)
+		}
+		if l.Server != "" {
+			if err := h.removeWorkerBundle(ctx, l.Server, id); err != nil {
+				return statusErr(502, "removing the bundle of %s on %s: %v", id, serverLabel(l.Server), err)
+			}
+		}
 	}
 	h.mu.Lock()
 	in = h.st.Instances[id]
-	in.MovedFrom = nil
+	in.MovedFrom, in.MoveTargetLeftover = nil, nil
 	h.st.Instances[id] = in
 	h.saveLocked()
 	h.mu.Unlock()
 	return nil
 }
 
-// RecoverMoves (Review Focus 2) settles moves a Hub restart interrupted:
-// before the switch, the routing goes back to the source, which starts
-// again; one interrupted at the switch has its target taken down first
-// (never two routed copies), then the same. The target's half-restored
-// volumes are left for the move leftover cleanup. Run after the engine
-// guard.
+// RecoverMoves (Review Focus 2) settles moves a Hub restart interrupted,
+// and retries stuck ones (each under the instance's lock; a busy one is
+// left to the next call): from the restore on, the target is taken down
+// first — when that fails, the instance runs nowhere (stuck) —; then the
+// routing goes back to the source, which starts again. The target's
+// half-restored volumes are recorded as its leftover.
 func (h *Hub) RecoverMoves() {
 	h.mu.RLock()
 	var ids []string
@@ -421,38 +710,61 @@ func (h *Hub) RecoverMoves() {
 		}
 	}
 	h.mu.RUnlock()
+	slices.Sort(ids)
 	for _, id := range ids {
-		h.mu.RLock()
-		in := h.st.Instances[id]
-		v := h.findLocked(id)
-		enabled := h.st.IsEnabled(id)
-		h.mu.RUnlock()
-		mv := *in.Move
-		if mv.Phase == MoveSwitch && v != nil {
-			if rt, err := h.rtForServer(mv.To); err == nil {
-				if err := rt.Down(context.Background(), h.runtimeProject(v)); err != nil {
-					log.Printf("move recovery: %s: taking it down on %s: %v", id, serverLabel(mv.To), err)
-				}
-			}
-			if mv.To != "" {
-				h.relaysDown(context.Background(), id)
-			}
+		h.recoverMove(id)
+	}
+}
+
+func (h *Hub) recoverMove(id string) {
+	unlock, err := h.lockApp(id)
+	if err != nil {
+		return // its own move runs; or retried next time
+	}
+	defer unlock()
+	defer h.ownMove(id)()
+	h.mu.RLock()
+	in := h.st.Instances[id]
+	v := h.findLocked(id)
+	enabled := h.st.IsEnabled(id)
+	h.mu.RUnlock()
+	if in.State != state.InstanceMoving || in.Move == nil {
+		return
+	}
+	mv := *in.Move
+	if mv.Phase != MoveBackup && mv.Phase != MoveCheck && v != nil {
+		if err := h.downOn(context.Background(), mv.To, v); err != nil {
+			mv.Phase = MoveStuck
+			h.setMove(id, &mv, mv.From, state.InstanceMoving)
+			h.relaysDown(context.Background(), id)
+			log.Printf("move recovery: %s: taking it down on %s failed (%v): it runs nowhere, retried", id, serverLabel(mv.To), err)
+			return
 		}
-		h.mu.Lock()
-		in = h.st.Instances[id]
-		in.Server, in.Move, in.State = mv.From, nil, ""
-		if mv.Archive != "" {
-			in.MovedFrom = nil
-		}
-		h.st.Instances[id] = in
-		h.noteInstanceServer(id, mv.From)
-		h.saveLocked()
-		h.mu.Unlock()
-		log.Printf("move recovery: %s was interrupted at %s: it runs on %s again", id, mv.Phase, serverLabel(mv.From))
-		if enabled && v != nil {
-			if err := h.startAgain(v); err != nil {
-				log.Printf("move recovery: starting %s on %s: %v", id, serverLabel(mv.From), err)
-			}
+		h.recordTargetLeftover(id, mv.To)
+	}
+	h.setMove(id, nil, mv.From, "")
+	if mv.From == "" {
+		removeRelayFiles(h, id)
+	}
+	if err := h.publishLink(); err != nil {
+		log.Printf("move recovery: %s: %v", id, err)
+	}
+	log.Printf("move recovery: %s was interrupted at %s: it runs on %s again", id, mv.Phase, serverLabel(mv.From))
+	if enabled && v != nil {
+		if err := h.startAgain(v); err != nil {
+			log.Printf("move recovery: starting %s on %s: %v", id, serverLabel(mv.From), err)
 		}
 	}
+}
+
+// stuckMovesLocked are the instances a move left routed to neither copy
+// (doctor server_move_stuck). Caller holds mu.
+func (h *Hub) stuckMovesLocked() map[string]string {
+	out := map[string]string{}
+	for id, in := range h.st.Instances {
+		if in.State == state.InstanceMoving && in.Move != nil && in.Move.Phase == MoveStuck {
+			out[id] = in.Move.To
+		}
+	}
+	return out
 }

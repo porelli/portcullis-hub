@@ -300,14 +300,18 @@ type Hub struct {
 	// RemoveServer is taking away (no placement meanwhile). Guarded by mu.
 	inflight map[string]bool
 	removing map[string]bool
-	// rotateFail: server → why its revocation's rotation failed (srvMu);
-	// schedRan: server → the hour slot its scheduled backups last ran.
+	// rotateFail: server → why its revocation's rotation failed (srvMu).
 	rotateFail map[string]string
-	schedRan   map[string]string
+	// placementInvalid: placed instance → why its template can't run on
+	// a worker any more (srvMu; doctor server_placement_invalid).
+	placementInvalid map[string]string
 	// testHookMove runs at each move phase's start (tests: a failure).
 	testHookMove func(phase string) error
-	idp          IdP
-	attrs        AttrStore // LLDAP user attributes (setting claims); nil: none
+	// moveOwners: instance ids a move, an undo or a move recovery is
+	// running for (the only ones composeUp starts while moving).
+	moveOwners sync.Map
+	idp        IdP
+	attrs      AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex

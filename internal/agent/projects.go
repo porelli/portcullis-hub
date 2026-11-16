@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"maps"
 	"net/http"
@@ -73,6 +74,9 @@ type APIConfig struct {
 	// Config runs `docker compose config` (compose.CLI.Config): the model
 	// the agent validates and runs is its output, never the bundle's files.
 	Config func(ctx context.Context, p compose.Project) ([]byte, error)
+	// OwnProject is the agent's own compose project (its container's
+	// label): never treated as an instance's.
+	OwnProject string
 	// DiskFree is the engine's free space a restore may fill (ok false:
 	// unreadable, restores refused; nil: no check, tests).
 	DiskFree func(ctx context.Context) (free int64, ok bool)
@@ -116,6 +120,7 @@ func NewAPI(cfg APIConfig) *API {
 	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
 	a.mux = http.NewServeMux()
 	a.routes()
+	a.loadQuarantine()
 	entries, _ := os.ReadDir(a.projectsDir())
 	for _, e := range entries {
 		if !e.IsDir() || agentapi.ValidInstance(e.Name()) != nil {
@@ -145,6 +150,7 @@ func (a *API) routes() {
 	X := agentapi.ExtraRoutes
 	h(X["Bundle"], a.withProjectID(false, a.putBundle))
 	h(X["RemoveProject"], a.withProjectID(true, a.removeProject))
+	h(X["Unquarantine"], a.withProjectID(false, a.unquarantine))
 	h(X["AppFile"], a.withProjectID(true, a.putAppFile))
 	h(X["StopOp"], a.stopOp)
 	h(R["Create"][0], a.withProjectID(true, a.lifecycle("create")))
@@ -819,21 +825,114 @@ func (a *API) Quarantined() map[string]string {
 	return maps.Clone(a.quarantined)
 }
 
-// WatchStarts is the backstop of A-H2: every container start of a
-// bundled instance — the engine's own too (a restart policy, a daemon
-// restart, a reboot), which never goes through the agent — re-walks the
-// instance's bind sources. On a violation the container is killed, the
-// project taken down and the instance quarantined (reported in /v1/info)
-// until the Hub sends its bundle again. Runs until ctx ends.
+func (a *API) quarantinePath() string { return filepath.Join(a.cfg.DataDir, "quarantine.json") }
+
+// loadQuarantine reads the persisted quarantine (review A2-M1: it
+// survives an agent restart). An unreadable file quarantines nothing it
+// can't name, so it is logged loudly.
+func (a *API) loadQuarantine() {
+	b, err := os.ReadFile(a.quarantinePath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	var q map[string]string
+	if err != nil || json.Unmarshal(b, &q) != nil {
+		log.Printf("bind check: %s is unreadable: %v", a.quarantinePath(), err)
+		return
+	}
+	for id, why := range q {
+		if agentapi.ValidInstance(id) == nil {
+			a.quarantined[id] = why
+		}
+	}
+}
+
+// saveQuarantineLocked persists the quarantine. Caller holds a.mu.
+func (a *API) saveQuarantineLocked() {
+	b, _ := json.Marshal(a.quarantined)
+	if err := writeFileAtomic(a.quarantinePath(), b); err != nil {
+		log.Printf("bind check: saving the quarantine: %v", err)
+	}
+}
+
+// quarantine marks instance id quarantined (persisted).
+func (a *API) quarantine(id, why string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.quarantined[id] = why
+	a.saveQuarantineLocked()
+}
+
+// unquarantine is DELETE /v1/projects/{id}/quarantine: the Hub's explicit
+// admin action (never a bundle PUT). The bundle's bind sources are
+// walked again first; a failure keeps the quarantine (409).
+func (a *API) unquarantine(w http.ResponseWriter, r *http.Request, id string) {
+	if a.quarantineOf(id) == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	p := a.project(id)
+	if p == nil {
+		writeError(w, http.StatusConflict, "the instance has no bundle: send it first, then lift the quarantine")
+		return
+	}
+	if err := a.checkBindPaths(id, p.model); err != nil {
+		writeError(w, http.StatusConflict, clipMsg("still failing the bind check: "+err.Error()))
+		return
+	}
+	a.mu.Lock()
+	delete(a.quarantined, id)
+	a.saveQuarantineLocked()
+	a.mu.Unlock()
+	log.Printf("bind check: %s: the quarantine was lifted by the Hub", id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// SweepEvery is how often the backstop re-checks every running container
+// of the agent's projects, whatever the event stream saw.
+var SweepEvery = 30 * time.Second
+
+// WatchStarts is the backstop of A-H2: every container start of an
+// instance project — the engine's own too (a restart policy, a daemon
+// restart, a reboot), which never goes through the agent — is checked.
+// Starts the stream can't have seen (before the agent ran, while the
+// stream reconnects) are caught by a sweep of every running container:
+// once at start, right after every (re)subscribe, and every SweepEvery
+// (review A2-H1). Runs until ctx ends.
 func (a *API) WatchStarts(ctx context.Context) {
+	a.Sweep(ctx)
+	go func() {
+		t := time.NewTicker(SweepEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				a.Sweep(ctx)
+			}
+		}
+	}()
 	backoff := time.Second
 	for ctx.Err() == nil {
+		subscribed := make(chan struct{})
+		go func() {
+			// Once the subscription has had a moment to be established:
+			// what started before it is swept.
+			select {
+			case <-ctx.Done():
+			case <-subscribed:
+			case <-time.After(time.Second):
+				a.Sweep(ctx)
+			}
+		}()
 		err := a.cfg.Runtime.Events(ctx, runtime.Filter{All: true}, func(ev runtime.Event) {
 			if ev.Action != "start" {
 				return
 			}
 			a.CheckStarted(ctx, ev.Actor.ID, ev.Actor.Attributes[docker.LabelProject])
 		})
+		close(subscribed)
 		if ctx.Err() != nil {
 			return
 		}
@@ -846,35 +945,123 @@ func (a *API) WatchStarts(ctx context.Context) {
 		if backoff < time.Minute {
 			backoff *= 2
 		}
+		a.Sweep(ctx)
 	}
 }
 
-// CheckStarted runs the backstop for one started container of project.
+// Sweep checks every running container of an instance project.
+func (a *API) Sweep(ctx context.Context) {
+	units, err := a.cfg.Runtime.List(ctx, runtime.Filter{All: true})
+	if err != nil {
+		log.Printf("bind check: listing the containers: %v", err)
+		return
+	}
+	for _, u := range units {
+		if u.State != "running" && u.State != "restarting" {
+			continue
+		}
+		a.CheckStarted(ctx, u.ID, u.Project)
+	}
+}
+
+// CheckStarted runs the backstop for one started container (project:
+// its label as the event carried it, "" = read by inspection, review
+// A2-M1). A violation:
+//   - an instance project the agent holds no bundle for (unknown, or
+//     dropped at load): stopped;
+//   - a bind mount the bundle doesn't have, or one failing the walk;
+//
+// kills the container now and takes the project down in the background,
+// retried with backoff until it succeeds; the instance is quarantined
+// (persisted) until the Hub lifts it.
 func (a *API) CheckStarted(ctx context.Context, container, project string) {
+	var info runtime.UnitInfo
+	inspected := false
+	if project == "" || container != "" {
+		if i, err := a.cfg.Runtime.Inspect(ctx, container); err == nil {
+			info, inspected = i, true
+			if project == "" {
+				project = i.Labels[docker.LabelProject]
+			}
+		} else if project == "" {
+			log.Printf("bind check: can't inspect %s: %v", clipMsg(container), err)
+			return
+		}
+	}
+	if inspected && info.Labels[docker.LabelHelper] != "" {
+		return // the agent's own helper (its spec checked when created)
+	}
+	if project == "" || project == a.cfg.OwnProject {
+		return
+	}
 	id, ok := strings.CutPrefix(project, runtime.ProjectPrefix)
-	if !ok {
+	if !ok || agentapi.ValidInstance(id) != nil {
 		return
 	}
+	var why string
 	p := a.project(id)
-	if p == nil {
+	switch {
+	case p == nil:
+		why = "a container of an instance the agent holds no valid bundle for"
+	default:
+		if err := a.checkBindPaths(id, p.model); err != nil {
+			why = err.Error()
+		} else if inspected {
+			why = a.checkMounts(id, p, info.Mounts)
+		}
+	}
+	if why == "" {
 		return
 	}
-	err := a.checkBindPaths(id, p.model)
-	if err == nil {
-		return
-	}
-	why := clipMsg(err.Error())
+	why = clipMsg(why)
 	log.Printf("bind check: %s: a started container fails the bind check (%s): killed, taken down, quarantined", id, why)
-	a.mu.Lock()
-	a.quarantined[id] = why
-	a.mu.Unlock()
+	a.quarantine(id, why)
 	if container != "" {
 		if err := a.cfg.Runtime.Signal(ctx, container, "KILL"); err != nil {
 			log.Printf("bind check: %s: kill %s: %v", id, clipMsg(container), err)
 		}
 	}
-	if err := a.cfg.Runtime.DownByName(ctx, runtime.ProjectName(id)); err != nil {
-		log.Printf("bind check: %s: down: %v", id, err)
+	go a.downUntilDone(ctx, id)
+}
+
+// checkMounts compares a container's actual bind mounts with its bundle:
+// each must be one of the bundle's bind sources and pass the walk.
+func (a *API) checkMounts(id string, p *project, mounts []runtime.Mount) string {
+	want := bindsOf(p.model)
+	own := []string{a.filesDir(id), a.appfilesDir(id)}
+	for _, m := range mounts {
+		if m.Type != "bind" {
+			continue
+		}
+		src := filepath.Clean(m.Source)
+		if _, ok := want[src]; !ok {
+			return "the container has the bind mount " + src + ", which its bundle doesn't"
+		}
+		if err := walkNoSymlink(own, a.cfg.BindRoots, src); err != nil {
+			return err.Error()
+		}
+	}
+	return ""
+}
+
+// downUntilDone takes instance id's project down, retried with backoff
+// (1 s … 1 min) until it succeeds or ctx ends; the quarantine stays.
+func (a *API) downUntilDone(ctx context.Context, id string) {
+	backoff := time.Second
+	for {
+		err := a.cfg.Runtime.DownByName(ctx, runtime.ProjectName(id))
+		if err == nil {
+			return
+		}
+		log.Printf("bind check: %s: down: %v (retried in %s)", id, err, backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < time.Minute {
+			backoff *= 2
+		}
 	}
 }
 

@@ -494,6 +494,13 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 				return fmt.Errorf("removing volume %s: %w", vols[k].Name, err)
 			}
 		}
+		// A placed instance's bundle (its env, secrets included) goes
+		// from the worker too (review B2-M4).
+		if server := h.serverOf(id); server != "" {
+			if err := h.removeWorkerBundle(ctx, server, id); err != nil {
+				return fmt.Errorf("removing the bundle on %s: %w", serverLabel(server), err)
+			}
+		}
 	}
 	p.Done(StepVolumes)
 	p.Start(StepKeycloak)
@@ -650,6 +657,10 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	}
 	if err := h.WritePolicy(); err != nil {
 		res.Warnings = append(res.Warnings, "the policy file write failed (it is retried with the next change): "+err.Error())
+	}
+	// Its relay token is gone: link.json drops it (review B2-M5).
+	if err := h.publishLink(); err != nil {
+		return err
 	}
 	p.Done(StepFiles)
 	h.TriggerReconcile()

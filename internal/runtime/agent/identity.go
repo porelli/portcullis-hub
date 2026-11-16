@@ -64,3 +64,17 @@ func (b *Backend) PutIdentityWG(ctx context.Context, linkPub string) error {
 func (b *Backend) Leave(ctx context.Context) error {
 	return b.c.json(ctx, "POST", xr("Leave"), nil, nil, nil, 0)
 }
+
+// RemoveProject is DELETE /v1/projects/{id}: the instance's bundle (its
+// env included), files and appfiles go from the worker (its containers
+// must be down: 409 otherwise).
+func (b *Backend) RemoveProject(ctx context.Context, id string) error {
+	return b.c.json(ctx, "DELETE", path(agentapi.ExtraRoutes["RemoveProject"], "id", id), nil, nil, nil, 0)
+}
+
+// Unquarantine is DELETE /v1/projects/{id}/quarantine: the agent walks
+// the bundle's bind sources again and lifts the quarantine (409 if they
+// still fail).
+func (b *Backend) Unquarantine(ctx context.Context, id string) error {
+	return b.c.json(ctx, "DELETE", path(agentapi.ExtraRoutes["Unquarantine"], "id", id), nil, nil, nil, 0)
+}

@@ -288,6 +288,9 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo
 			ci.Devices = append(ci.Devices, d.PathOnHost)
 		}
 	}
+	for _, m := range res.Container.Mounts {
+		ci.Mounts = append(ci.Mounts, runtime.Mount{Type: string(m.Type), Source: m.Source, Destination: m.Destination, RW: m.RW})
+	}
 	return ci, nil
 }
 

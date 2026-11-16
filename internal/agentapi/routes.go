@@ -79,14 +79,17 @@ const (
 var ExtraRoutes = map[string]Route{
 	"Bundle":        {"PUT", Prefix + "/projects/{id}/bundle", BodyTar, BodyNone},
 	"RemoveProject": {"DELETE", Prefix + "/projects/{id}", BodyNone, BodyNone},
-	"AppFile":       {"PUT", Prefix + "/projects/{id}/appfiles/{name}", BodyTar, BodyNone},
-	"StopOp":        {"DELETE", Prefix + "/ops/{op}", BodyNone, BodyNone},
-	"Metrics":       {"GET", Prefix + "/metrics", BodyNone, BodyText},
-	"IdentityCSR":   {"POST", Prefix + "/identity/csr", BodyNone, BodyJSON},
-	"IdentityCert":  {"PUT", Prefix + "/identity/cert", BodyJSON, BodyNone},
-	"IdentityWG":    {"PUT", Prefix + "/identity/wg", BodyJSON, BodyNone},
-	"Network":       {"PUT", Prefix + "/network", BodyJSON, BodyNone},
-	"Leave":         {"POST", Prefix + "/leave", BodyNone, BodyNone},
-	"EnrolNonce":    {"GET", Prefix + "/enrol/nonce", BodyNone, BodyJSON},
-	"Enrol":         {"POST", Prefix + "/enrol", BodyJSON, BodyJSON},
+	// Unquarantine lifts the start backstop's quarantine (the Hub's
+	// explicit admin action, after the agent's re-validation).
+	"Unquarantine": {"DELETE", Prefix + "/projects/{id}/quarantine", BodyNone, BodyNone},
+	"AppFile":      {"PUT", Prefix + "/projects/{id}/appfiles/{name}", BodyTar, BodyNone},
+	"StopOp":       {"DELETE", Prefix + "/ops/{op}", BodyNone, BodyNone},
+	"Metrics":      {"GET", Prefix + "/metrics", BodyNone, BodyText},
+	"IdentityCSR":  {"POST", Prefix + "/identity/csr", BodyNone, BodyJSON},
+	"IdentityCert": {"PUT", Prefix + "/identity/cert", BodyJSON, BodyNone},
+	"IdentityWG":   {"PUT", Prefix + "/identity/wg", BodyJSON, BodyNone},
+	"Network":      {"PUT", Prefix + "/network", BodyJSON, BodyNone},
+	"Leave":        {"POST", Prefix + "/leave", BodyNone, BodyNone},
+	"EnrolNonce":   {"GET", Prefix + "/enrol/nonce", BodyNone, BodyJSON},
+	"Enrol":        {"POST", Prefix + "/enrol", BodyJSON, BodyJSON},
 }

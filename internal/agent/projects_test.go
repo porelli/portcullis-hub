@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,6 +73,17 @@ func (n *fakeNet) PortBinds(context.Context) ([]docker.PortBind, error) { return
 type eventsFake struct {
 	*runtimetest.Fake
 	evs []runtime.Event
+	// downFails: the next DownByName calls that fail.
+	downFails atomic.Int32
+}
+
+func (e *eventsFake) DownByName(ctx context.Context, name string) error {
+	err := e.Fake.DownByName(ctx, name)
+	if e.downFails.Load() > 0 {
+		e.downFails.Add(-1)
+		return errors.New("the engine refused the down")
+	}
+	return err
 }
 
 func (e *eventsFake) Events(ctx context.Context, f runtime.Filter, fn func(runtime.Event)) error {

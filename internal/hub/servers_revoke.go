@@ -291,6 +291,11 @@ func (h *Hub) oweSerialLocked(id, serial string) error {
 		}
 	}
 	h.st.OwedSerials = append(h.st.OwedSerials, state.OwedSerial{Server: id, Serial: serial, Since: h.now().UTC()})
+	if h.srvT.oweSaveErr != nil {
+		if err := h.srvT.oweSaveErr(serial); err != nil {
+			return err
+		}
+	}
 	return h.st.Save(h.statePath())
 }
 
@@ -468,10 +473,37 @@ func (h *Hub) noteRotation(id, why string) {
 
 // serversDoctorIn is the doctor's servers input.
 func (h *Hub) serversDoctorIn() *doctor.ServersIn {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.serversDoctorInLocked()
+}
+
+// serversDoctorInLocked is serversDoctorIn; caller holds mu (read):
+// doctorInputs does, and a second RLock could deadlock with a writer.
+func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
+	stuck := map[string]string{}
+	for id, to := range h.stuckMovesLocked() {
+		stuck[id] = serverLabel(to)
+	}
+	placed := map[string]string{}
+	for id, in := range h.st.Instances {
+		if in.Server != "" {
+			placed[id] = in.Server
+		}
+	}
 	h.srvMu.Lock()
-	defer h.srvMu.Unlock()
-	if len(h.rotateFail) == 0 {
+	in := &doctor.ServersIn{NotRotated: maps.Clone(h.rotateFail), PlacementInvalid: maps.Clone(h.placementInvalid), Stuck: stuck,
+		Quarantined: map[string]string{}}
+	for id, server := range placed {
+		if ps := h.polls[server]; ps != nil && ps.info != nil {
+			if why := ps.info.Quarantined[id]; why != "" {
+				in.Quarantined[id] = server + ": " + why
+			}
+		}
+	}
+	h.srvMu.Unlock()
+	if len(in.NotRotated)+len(in.PlacementInvalid)+len(in.Stuck)+len(in.Quarantined) == 0 {
 		return nil
 	}
-	return &doctor.ServersIn{NotRotated: maps.Clone(h.rotateFail)}
+	return in
 }

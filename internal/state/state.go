@@ -121,6 +121,9 @@ type Instance struct {
 	// (its volumes kept for an undo until removed).
 	Move      *Move      `json:"move,omitempty" yaml:"move,omitempty"`
 	MovedFrom *MovedFrom `json:"moved_from,omitempty" yaml:"moved_from,omitempty"`
+	// MoveTargetLeftover is what a failed move left on its target (its
+	// half-restored volumes): a later move there waits for its removal.
+	MoveTargetLeftover *MovedFrom `json:"move_target_leftover,omitempty" yaml:"move_target_leftover,omitempty"`
 	// KeycloakClients are the Keycloak client ids the Hub registered for
 	// the instance (recorded at create and enable): a revocation rotates
 	// them even when the template no longer resolves (review B-M3).
@@ -176,10 +179,12 @@ type Move struct {
 	Phase     string    `json:"phase" yaml:"phase"`
 }
 
-// MovedFrom is the source a move left behind (its volumes) and when.
+// MovedFrom is a copy a move left behind on a server: when, and the
+// volume names it had then (only those are ever removed).
 type MovedFrom struct {
-	Server string    `json:"server" yaml:"server"`
-	At     time.Time `json:"at" yaml:"at"`
+	Server  string    `json:"server" yaml:"server"`
+	At      time.Time `json:"at" yaml:"at"`
+	Volumes []string  `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 }
 
 // AppState tracks which apps are enabled and their settings.
@@ -199,6 +204,10 @@ type AppState struct {
 	// Quarantined: tunnel address → until when it stays unallocated (a
 	// revoked server's, kept after the server is removed; §17.3).
 	Quarantined map[string]time.Time `json:"quarantined,omitempty" yaml:"quarantined,omitempty"`
+	// ScheduleSlots: server ("" = the primary) → the local date and hour
+	// its scheduled backups last ran ("2006-01-02 15": a restart within
+	// the hour or the DST fall-back hour never runs them twice).
+	ScheduleSlots map[string]string `json:"schedule_slots,omitempty" yaml:"schedule_slots,omitempty"`
 	// OwedSerials are the node certificate serials still to revoke.
 	OwedSerials []OwedSerial `json:"owed_serials,omitempty" yaml:"owed_serials,omitempty"`
 	Sources     []Source     `json:"sources" yaml:"sources"`

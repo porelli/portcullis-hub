@@ -282,3 +282,8 @@ func (f *Fake) RunFixer(_ context.Context, s runtime.FixerSpec, _ func(io.Reader
 }
 
 func (f *Fake) EnsureImage(_ context.Context, ref string) error { return f.rec("ensure-image %s", ref) }
+
+// Lock / Unlock guard the exported fields while a test changes them
+// under running calls.
+func (f *Fake) Lock()   { f.mu.Lock() }
+func (f *Fake) Unlock() { f.mu.Unlock() }

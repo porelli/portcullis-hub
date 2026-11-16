@@ -251,8 +251,46 @@ func (a *API) checkBindPaths(id string, model *types.Project) error {
 		if err := walkNoSymlink(own, a.cfg.BindRoots, src); err != nil {
 			return fmt.Errorf("%w (bind %s)", err, clipMsg(src))
 		}
+		// The instance's own files and appfiles dirs live in the data
+		// dir by design (read-only binds, ValidateBundle); every other
+		// source is a folder root's.
+		if underAny(filepath.Clean(src), own) {
+			continue
+		}
+		if err := a.protectedAncestor(src); err != nil {
+			return fmt.Errorf("%w (bind %s)", err, clipMsg(src))
+		}
 	}
 	return nil
+}
+
+// protectedAncestor (review A2-M3): no existing ancestor of src (src
+// included) may be the same directory (device and inode) as a protected
+// one the agent can see — an alias the text compare can't tell, a bind
+// mount of it under a folder root. "/" is protected by equality only.
+func (a *API) protectedAncestor(src string) error {
+	var prot []os.FileInfo
+	var names []string
+	for _, p := range a.protected() {
+		if p == "/" {
+			continue
+		}
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			prot, names = append(prot, fi), append(names, p)
+		}
+	}
+	for cur := filepath.Clean(src); ; cur = filepath.Dir(cur) {
+		if fi, err := os.Stat(cur); err == nil {
+			for i, p := range prot {
+				if os.SameFile(fi, p) {
+					return fmt.Errorf("the same directory as the protected %s: refused", names[i])
+				}
+			}
+		}
+		if cur == "/" || cur == "." {
+			return nil
+		}
+	}
 }
 
 // ErrRootNotVisible: a folder root isn't a directory inside the agent.
@@ -395,14 +433,14 @@ func checkNestedBinds(id string, mine map[string]bool, others map[string]map[str
 	return nil
 }
 
-// bundleLocks serialises one id's bundle PUTs (review L5).
-var bundleLocks sync.Map
+// bundleMu serialises every bundle PUT and project removal agent-wide
+// (review A2-M2): the cross-instance checks (nested binds, volume names)
+// and the commit happen under it, so two PUTs can't both pass them.
+var bundleMu sync.Mutex
 
-func lockID(id string) func() {
-	v, _ := bundleLocks.LoadOrStore(id, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+func lockID(string) func() {
+	bundleMu.Lock()
+	return bundleMu.Unlock
 }
 
 // putBundle: the tar into <data>/projects/<id>.new (only the bundle's
@@ -513,8 +551,7 @@ func (a *API) putBundle(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	a.mu.Lock()
-	a.projects[id] = p
-	delete(a.quarantined, id) // a new, validated bundle
+	a.projects[id] = p // a quarantine stays: only the Hub's explicit lift ends it
 	a.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -671,7 +708,10 @@ func (a *API) removeProject(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	a.mu.Lock()
 	delete(a.projects, id)
-	delete(a.quarantined, id)
+	if _, ok := a.quarantined[id]; ok {
+		delete(a.quarantined, id) // the project is gone with its bundle
+		a.saveQuarantineLocked()
+	}
 	a.mu.Unlock()
 	for _, p := range []string{a.projectDir(id), a.filesDir(id), a.appfilesDir(id), a.resolvedFile(id), a.resolvedEnv(id)} {
 		os.RemoveAll(p)
@@ -736,4 +776,23 @@ func InstallDirOf(labels map[string]string) (string, error) {
 		return "", errors.New("the agent's container has no usable com.docker.compose.project.working_dir label: start it with ./portcullis worker …")
 	}
 	return d, nil
+}
+
+func underAny(p string, dirs []string) bool {
+	for _, d := range dirs {
+		if p == d || strings.HasPrefix(p, d+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckVisible: each path is a directory the agent sees (review A2-M3).
+func CheckVisible(paths ...string) error {
+	for _, p := range paths {
+		if fi, err := os.Stat(p); p == "" || err != nil || !fi.IsDir() {
+			return fmt.Errorf("%q isn't visible to the agent: mount it read-only at the same path (the install dir and the engine's data root are compared by device and inode)", p)
+		}
+	}
+	return nil
 }

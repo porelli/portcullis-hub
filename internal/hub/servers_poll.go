@@ -5,6 +5,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/agentapi"
@@ -23,7 +24,39 @@ import (
 
 // workerKickEvery: the shortest interval between reconciles one worker's
 // events trigger.
-const workerKickEvery = 10 * time.Second
+var workerKickEvery = 10 * time.Second
+
+// newKicker calls fn at most once per every; a call inside the interval
+// arms one trailing call at its end (none is lost), until ctx ends.
+func newKicker(ctx context.Context, every time.Duration, fn func()) func() {
+	var (
+		mu      sync.Mutex
+		last    time.Time
+		pending bool
+	)
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		if now.Sub(last) >= every {
+			last = now
+			fn()
+			return
+		}
+		if pending {
+			return
+		}
+		pending = true
+		time.AfterFunc(last.Add(every).Sub(now), func() {
+			mu.Lock()
+			pending, last = false, time.Now()
+			mu.Unlock()
+			if ctx.Err() == nil {
+				fn()
+			}
+		})
+	}
+}
 
 // pollState is one server's poll memory.
 type pollState struct {
@@ -178,6 +211,14 @@ func (h *Hub) serversTick(ctx context.Context) {
 			continue
 		}
 		h.pollServer(ctx, id)
+	}
+	// Stuck moves (a rollback that couldn't take the target down) are
+	// retried each tick (review B2-M2).
+	h.mu.RLock()
+	stuck := len(h.stuckMovesLocked()) > 0
+	h.mu.RUnlock()
+	if stuck {
+		h.RecoverMoves()
 	}
 }
 
@@ -391,6 +432,15 @@ func (h *Hub) renewServer(ctx context.Context, id string, b *agentrt.Backend) er
 // watchServer (re)starts a ready server's engine event stream: an
 // instance container's event triggers a reconcile, as the primary's.
 func (h *Hub) watchServer(id string, rt runtime.Instances) {
+	// Only for a server still ready in the registry (review A2-L1: a
+	// revocation between its registration and here wins).
+	r := h.reg()
+	r.mu.RLock()
+	cur := r.servers[id]
+	r.mu.RUnlock()
+	if cur == nil || cur.State != ServerReady {
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.srvMu.Lock()
 	ps := h.pollOf(id)
@@ -407,17 +457,16 @@ func (h *Hub) watchServer(id string, rt runtime.Instances) {
 	go func() {
 		backoff := time.Second
 		// A worker's events kick a reconcile at most every 10 s (review
-		// B-L6: a worker can't keep the reconciler busy).
-		var last time.Time
+		// B-L6: a worker can't keep the reconciler busy); a throttled one
+		// arms a single trailing kick (review A2-L4: none is lost).
+		kick := newKicker(ctx, workerKickEvery, h.TriggerReconcile)
+
 		for ctx.Err() == nil {
 			err := rt.Events(ctx, runtime.Filter{All: true}, func(ev runtime.Event) {
 				if strings.HasPrefix(ev.Actor.Attributes[docker.LabelProject], ProjectPrefix) {
 					switch ev.Action {
 					case "start", "die", "stop", "kill", "destroy", "create", "pause", "unpause", "restart", "oom":
-						if now := time.Now(); now.Sub(last) >= workerKickEvery {
-							last = now
-							h.TriggerReconcile()
-						}
+						kick()
 					}
 				}
 			})

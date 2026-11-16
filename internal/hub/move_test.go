@@ -211,8 +211,12 @@ func TestUndoWithin7Days(t *testing.T) {
 	if err := p.h.UndoMove(context.Background(), "plainapp", "plainapp", admin); err != nil {
 		t.Fatal(err)
 	}
-	if in := p.instance("plainapp"); in.Server != "" || in.MovedFrom != nil {
+	// The copy it left (on nas) is now the leftover.
+	if in := p.instance("plainapp"); in.Server != "" || in.MovedFrom == nil || in.MovedFrom.Server != "nas" {
 		t.Errorf("state %+v", in)
+	}
+	if r := p.h.LastOp("plainapp"); r == nil || r.Op != OpMoveUndo || !r.OK || len(r.Steps) != 3 {
+		t.Errorf("undo op %+v", r)
 	}
 	if !workerHas(p.w, "down ") || upCount(p.runner.Calls(), "portcullis-plainapp") <= ups {
 		t.Errorf("worker %v primary %v", p.w.Calls(), p.runner.Calls())
@@ -287,12 +291,19 @@ func TestScheduledPruneKeepsManual(t *testing.T) {
 	base := time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC)
 	var sched []string
 	for i := 0; i < 5; i++ {
-		sched = append(sched, writeFakeArchive(t, f.h, "grafana", BackupScheduled, base.Add(time.Duration(i)*24*time.Hour)))
+		at := base.Add(time.Duration(i) * 24 * time.Hour)
+		a := writeFakeArchive(t, f.h, "grafana", BackupScheduled, at)
+		sched = append(sched, a)
+		if err := f.h.listScheduled("grafana", a, at); err != nil {
+			t.Fatal(err)
+		}
 	}
 	others := []string{
 		writeFakeArchive(t, f.h, "grafana", BackupManual, base.Add(-time.Hour)),
 		writeFakeArchive(t, f.h, "grafana", BackupMove, base.Add(-2*time.Hour)),
 		writeFakeArchive(t, f.h, "grafana", BackupDelete, base.Add(-3*time.Hour)),
+		// Copied in, calling itself scheduled, old (review B2-L2): kept.
+		writeFakeArchive(t, f.h, "grafana", BackupScheduled, base.Add(-48*time.Hour)),
 	}
 	if err := f.h.pruneScheduled("grafana"); err != nil {
 		t.Fatal(err)

@@ -157,6 +157,10 @@ func (h *Hub) checkPortsLocked(t *templates.Template, candidate []portBinding) e
 		if enabledID == t.ID {
 			continue
 		}
+		// Ports collide only on the same server's host (fix round 3).
+		if h.st.Instances[enabledID].Server != h.st.Instances[t.ID].Server {
+			continue
+		}
 		other := h.findLocked(enabledID)
 		if other == nil {
 			continue

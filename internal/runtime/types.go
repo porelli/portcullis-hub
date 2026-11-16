@@ -215,6 +215,16 @@ type UnitInfo struct {
 	Privileged bool
 	CapAdd     []string
 	Devices    []string
+	// Mounts are the container's mounts as the engine made them (the
+	// agent's start backstop compares them with the bundle).
+	Mounts []Mount
+}
+
+// Mount is one container mount: its type (bind, volume, tmpfs, …), the
+// source the engine mounted, the destination and whether it's writable.
+type Mount struct {
+	Type, Source, Destination string
+	RW                        bool
 }
 
 // Info is what the runtime says about itself.

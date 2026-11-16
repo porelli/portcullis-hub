@@ -104,17 +104,27 @@ func TestStartBackstop(t *testing.T) {
 	if !strings.Contains(q["app"], "symlink") {
 		t.Fatalf("quarantine %v", q)
 	}
-	calls := strings.Join(f.rt.Calls(), "\n")
-	if !strings.Contains(calls, "signal c-app KILL") || !strings.Contains(calls, "down-by-name portcullis-app") {
+	waitCall(t, f, "down-by-name portcullis-app")
+	if calls := strings.Join(f.rt.Calls(), "\n"); !strings.Contains(calls, "signal c-app KILL") {
 		t.Errorf("calls %s", calls)
 	}
 	if c := f.code(t, "POST", "/v1/projects/app/up", nil); c != 409 {
 		t.Errorf("up while quarantined: %d", c)
 	}
-	// A new, clean bundle lifts it.
+	// A bundle never lifts it (review A2-M1); the Hub's explicit lift
+	// does, after the walk passes again.
+	if c := f.code(t, "DELETE", "/v1/projects/app/quarantine", nil); c != 409 {
+		t.Errorf("lift while still failing: %d", c)
+	}
 	os.Remove(filepath.Join(f.root, "real", "sub"))
 	if c, b := f.putFor(t, "app", files); c != 204 {
 		t.Fatalf("re-bundle: %d %s", c, b)
+	}
+	if q := f.api.Quarantined(); q == nil {
+		t.Error("a bundle lifted the quarantine")
+	}
+	if c := f.code(t, "DELETE", "/v1/projects/app/quarantine", nil); c != 204 {
+		t.Errorf("lift: %d", c)
 	}
 	if q := f.api.Quarantined(); q != nil {
 		t.Errorf("still quarantined: %v", q)

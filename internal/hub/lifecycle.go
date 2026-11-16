@@ -82,6 +82,14 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
+	// An instance being moved starts only from its move or its recovery
+	// (review B2-M1): nothing else may start a half-restored copy.
+	h.mu.RLock()
+	moving := h.st.Instances[t.ID].State == state.InstanceMoving
+	h.mu.RUnlock()
+	if _, owner := h.moveOwners.Load(t.ID); moving && !owner {
+		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", t.ID)
+	}
 	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUp(t)
 	if err != nil {
@@ -102,10 +110,12 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 // view the up uses. Failures are *StatusError.
 func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	members := h.groupSnapshot(t.ID)
-	// A placed instance renders with its worker's engine facts, read now
-	// (Task 10): a server that isn't ready refuses (409) before anything.
-	if server := h.serverOf(t.ID); server != "" {
-		if _, err := h.refreshServerFacts(context.Background(), server); err != nil {
+	server := h.serverOf(t.ID)
+	if server != "" {
+		// A placed instance (fix round 3, B2-H1): its template must still
+		// be placeable and the instance not quarantined, before anything
+		// is rendered or sent.
+		if err := h.placedPreflight(context.Background(), t.ID); err != nil {
 			return nil, err
 		}
 	} else if h.rootlessOn() {
@@ -149,6 +159,27 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 			return nil, err // a refusal (a folder-range gid: 409)
 		}
 		return nil, statusErr(500, "override generation failed: %v", err)
+	}
+	if server != "" {
+		// B2-H2: the relays follow the Hub's desired labels first, on the
+		// primary, whether or not the worker answers (a failure stops
+		// them); a move, an undo or a recovery drives its own.
+		if _, owned := h.moveOwners.Load(t.ID); !owned {
+			if err := h.relaysFirst(context.Background(), live); err != nil {
+				return nil, err
+			}
+		}
+		// Then the worker's facts, read now (a server that isn't ready
+		// refuses, 409), and the render again with them.
+		if _, err := h.refreshServerFacts(context.Background(), server); err != nil {
+			return nil, err
+		}
+		h.mu.Lock()
+		err = h.generateOverrideLocked(live, h.st.Settings[t.ID])
+		h.mu.Unlock()
+		if err != nil {
+			return nil, statusErr(500, "override generation failed: %v", err)
+		}
 	}
 	// Runtime compatibility (contract §11.10): an instance that can't run
 	// here (its own ports, devices and env, as just written) never starts.

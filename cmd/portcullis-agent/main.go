@@ -192,6 +192,12 @@ func run(data string, getenv func(string) string) error {
 		return err
 	}
 	protected = append(protected, install)
+	// A2-M3: the alias checks compare by device and inode, so the install
+	// dir and the engine's data root must be visible here (core mounts
+	// both read-only at their host paths).
+	if err := agent.CheckVisible(install, engineRoot(ctx, rt)); err != nil {
+		return err
+	}
 	if sock := getenv("AGENT_ENGINE_SOCKET"); sock != "" {
 		if !path.IsAbs(sock) || path.Clean(sock) != sock {
 			return errors.New("AGENT_ENGINE_SOCKET must be an absolute clean path")
@@ -206,7 +212,7 @@ func run(data string, getenv func(string) string) error {
 	if err := agent.CheckProtectedOutsideRoots(append(append([]string{}, protected...), data), roots); err != nil {
 		return err
 	}
-	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage,
+	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, SelfImage: selfImage, OwnProject: ui.Labels["com.docker.compose.project"],
 		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env(), Config: cli.Config, Protected: protected,
 		DiskFree: func(ctx context.Context) (int64, bool) {
 			i, err := engineInfoFor(ctx, rt)
@@ -234,6 +240,8 @@ func run(data string, getenv func(string) string) error {
 		return err
 	}
 	// The bind-check backstop on every container start (A-H2b).
+	// Every running container checked before anything is served (A2-H1).
+	api.Sweep(ctx)
 	go api.WatchStarts(ctx)
 	// At every start (P35): the worker's portcullis-proxy and the agent on it.
 	if n, err := a.Network(); err == nil {
@@ -287,6 +295,15 @@ func run(data string, getenv func(string) string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// engineRoot is the engine's data root ("" when unreadable: protectedPaths
+// already refused that).
+func engineRoot(ctx context.Context, rt runtime.Instances) string {
+	if i, err := rt.Info(ctx); err == nil && len(i.ForbiddenRoots) > 0 {
+		return i.ForbiddenRoots[0]
+	}
+	return ""
 }
 
 // engineInfoFor is the engine part of /v1/info (its disk: the data root).

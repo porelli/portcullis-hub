@@ -72,6 +72,8 @@ type serverTimings struct {
 	// beforeSetServer runs right before a backend is registered (tests:
 	// a revocation racing it).
 	beforeSetServer func(id string)
+	// oweSaveErr fails the save of an owed serial (tests).
+	oweSaveErr func(serial string) error
 }
 
 func (h *Hub) now() time.Time {
