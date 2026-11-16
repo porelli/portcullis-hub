@@ -90,6 +90,9 @@ type Run struct {
 	// are still required, the mount root isn't known yet (H5). Every other
 	// folder scan and every snapshot checks dev, ino and mount root.
 	Unchecked bool
+	// Server is the server whose engine runs it ("" = the primary; a
+	// worker's agent rebuilds the spec on its own image). The Hub's only.
+	Server string
 }
 
 func Timeout(r Run) time.Duration {

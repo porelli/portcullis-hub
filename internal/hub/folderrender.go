@@ -617,6 +617,7 @@ func (h *Hub) FolderChanges() []FolderChange {
 type folderProbe struct {
 	key, folder, name, sub string
 	root, rel              string // the bind root and the folder's path below it
+	server                 string // the folder's server ("" = the primary)
 	dev, ino               uint64 // the folder root's, as stored
 	mountRoot              string // the folder root's, as stored
 	subDev, subIno         uint64 // the subpath's, from the probe before the up
@@ -632,12 +633,12 @@ func (h *Hub) folderProbesLocked(t *templates.Template) ([]folderProbe, error) {
 	}
 	var out []folderProbe
 	for _, fm := range mounts {
-		root, rel := h.bindRootOf(fm.folder.Path)
+		root, rel := h.bindRootOf(fm.folder.Server, fm.folder.Path)
 		if root == "" || rel == "" {
 			return nil, statusErr(http.StatusConflict, "shared folder %s: %s is not under a bind root", fm.folder.Name, fm.folder.Path)
 		}
 		out = append(out, folderProbe{key: fm.o.Key, folder: fm.id, name: fm.folder.Name, sub: fm.sub,
-			root: root, rel: rel, dev: fm.folder.Dev, ino: fm.folder.Ino, mountRoot: fm.folder.MountRoot})
+			root: root, rel: rel, server: fm.folder.Server, dev: fm.folder.Dev, ino: fm.folder.Ino, mountRoot: fm.folder.MountRoot})
 	}
 	return out, nil
 }
@@ -706,7 +707,7 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 				subs = append(subs, s)
 			}
 		}
-		rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: fid, Source: first.root, Extra: folderfix.ArgsExtra{Rel: first.rel, Subs: subs}})
+		rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: fid, Source: first.root, Server: first.server, Extra: folderfix.ArgsExtra{Rel: first.rel, Subs: subs}})
 		if err != nil {
 			// Follow-up (d): a refusal while walking a subpath is that
 			// subpath's value's (the report lists the subpaths before it).

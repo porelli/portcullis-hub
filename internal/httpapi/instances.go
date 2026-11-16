@@ -178,6 +178,8 @@ type instanceCreateBody struct {
 	// Setup: the template's setup options (option key → JSON value,
 	// §11.9, §13.18).
 	Setup map[string]json.RawMessage `json:"setup"`
+	// Server: the worker to place it on ("" = the primary; contract §11).
+	Server string `json:"server"`
 }
 
 // groupsBody is the create body's groups (§11.9).
@@ -188,7 +190,7 @@ type groupsBody struct {
 }
 
 func (b instanceCreateBody) request() hub.CreateRequest {
-	req := hub.CreateRequest{Template: b.Template, ID: b.ID, Label: b.Label, Hosts: b.Hosts, Setup: b.Setup}
+	req := hub.CreateRequest{Template: b.Template, ID: b.ID, Label: b.Label, Hosts: b.Hosts, Setup: b.Setup, Server: b.Server}
 	if b.Groups != nil {
 		req.Groups = hub.GroupChoice{Mode: b.Groups.Mode, Users: b.Groups.Users, Admins: b.Groups.Admins}
 		if req.Groups.Mode == "" {
@@ -447,6 +449,22 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 		Confirm string `json:"confirm"`
 	}
 	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>"}`) {
+		return
+	}
+	if q, asked := r.URL.Query()["forget"]; asked {
+		// Forget an orphaned instance (contract §11, multiple servers).
+		if len(q) != 1 || q[0] != "1" {
+			http.Error(w, "forget must be 1", http.StatusBadRequest)
+			return
+		}
+		s.rec("StartForget", id, b.Confirm)
+		op, err := s.Hub.StartForget(id, b.Confirm, requestActor(r))
+		noStore(w)
+		if err != nil {
+			writeErr(w, err, http.StatusBadGateway)
+			return
+		}
+		writeAccepted(w, op)
 		return
 	}
 	op, err := s.startDelete(requestActor(r), id, b.Confirm)

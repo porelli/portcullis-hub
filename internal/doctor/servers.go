@@ -1,12 +1,14 @@
 package doctor
 
 import (
+	"net/netip"
 	"sort"
 	"strings"
+	"time"
 )
 
-// Servers (contract §17, §14.5). More kinds follow with the servers'
-// doctor (plan Task 13).
+// Servers (contract §17, §14.5); the Task 13 kinds are in
+// servers_kinds.go.
 const (
 	KindServerSecretsNotRotated = "server_secrets_not_rotated"
 	KindInstanceQuarantined     = "server_instance_quarantined"
@@ -32,6 +34,18 @@ type ServersIn struct {
 	// OwedCopies: instance → the server a copy of it is still to be
 	// stopped and removed from (an owed bundle removal).
 	OwedCopies map[string]string
+
+	// Task 13 (servers_kinds.go): the workers, the instances on them, the
+	// copies moves left, the ranges the link subnet must not overlap,
+	// orphaned instance → its revoked server, the Hub's version and now.
+	Servers    []ServerIn
+	Placed     []PlacedIn
+	Leftovers  []LeftoverIn
+	Ranges     []RangeIn
+	LinkSubnet netip.Prefix
+	Orphaned   map[string]string
+	HubVersion string
+	Now        time.Time
 }
 
 func init() {

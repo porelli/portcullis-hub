@@ -223,6 +223,15 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return statusErr(409, "an earlier move left %s's half-restored volumes on %s: remove that leftover first", id, serverLabel(to))
 	}
 	view := *v
+	if to != "" {
+		// An unknown or revoked target: refused before the op is accepted.
+		h.mu.RLock()
+		ts, known := h.st.Servers[to]
+		h.mu.RUnlock()
+		if !known || ts.State == ServerRevoked || ts.State == ServerEnrolling {
+			return statusErr(404, "no server %s to move %s to", to, id)
+		}
+	}
 	p := progressFrom(ctx)
 	ready()
 

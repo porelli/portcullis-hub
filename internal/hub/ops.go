@@ -200,6 +200,26 @@ func (h *Hub) OpByID(id, opID string) *OpRecord {
 	if !OpIDRe.MatchString(opID) || !templates.ValidID(id) {
 		return nil
 	}
+	return h.opByKey(id, opID)
+}
+
+// ServerOp is server id's enrolment op record (op key _server.<id>): the
+// one with opID, else ("") the last; nil when none was recorded.
+func (h *Hub) ServerOp(id, opID string) *OpRecord {
+	if servers.ValidID(id) != nil {
+		return nil
+	}
+	if opID == "" {
+		return h.LastOp(serverOpKey(id))
+	}
+	if !OpIDRe.MatchString(opID) {
+		return nil
+	}
+	return h.opByKey(serverOpKey(id), opID)
+}
+
+// opByKey is OpByID for a validated op key.
+func (h *Hub) opByKey(id, opID string) *OpRecord {
 	h.opsMu.Lock()
 	if r, ok := h.ops[id]; ok && r.OpID == opID {
 		h.opsMu.Unlock()

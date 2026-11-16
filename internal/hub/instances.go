@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
 
@@ -34,6 +35,12 @@ const (
 	// (an interrupted one is rolled back on the next restore or start).
 	StateRestoring = "restoring"
 	StateError     = "error"
+	// The view-only states (multiple servers, contract §11.2): derived,
+	// never persisted by the view. Precedence: deleting, moving,
+	// orphaned, unreachable, then the persisted state.
+	StateMoving      = "moving"
+	StateOrphaned    = "orphaned"
+	StateUnreachable = "unreachable"
 )
 
 // InstanceView is one instance as GET /api/instances shows it (§11.7).
@@ -61,6 +68,51 @@ type InstanceView struct {
 	// Compat is the instance's runtime verdict with its own
 	// values (contract §11.10; podman and kubernetes, absent under Docker).
 	Compat *templates.Compat `json:"compat,omitempty"`
+	// Server is the server the instance runs on ("" = the primary); Move
+	// is set while a move runs, MovedFrom while a move's source copy is
+	// kept (contract §11.7; never a volume list).
+	Server    string         `json:"server"`
+	Move      *MoveView      `json:"move,omitempty"`
+	MovedFrom *MovedFromView `json:"moved_from,omitempty"`
+}
+
+// MoveView is a running move as the views show it.
+type MoveView struct {
+	From      string    `json:"from"`
+	To        string    `json:"to"`
+	Phase     string    `json:"phase"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// MovedFromView is a move's kept source copy: where and since when.
+type MovedFromView struct {
+	Server string    `json:"server"`
+	At     time.Time `json:"at"`
+}
+
+// serverViewLocked fills v's server fields and its view state from e
+// (precedence: deleting, moving, orphaned, unreachable, the rest).
+// Caller holds mu.
+func (h *Hub) serverViewLocked(v *InstanceView, e state.Instance) {
+	v.Server = e.Server
+	if m := e.Move; m != nil {
+		v.Move = &MoveView{From: m.From, To: m.To, Phase: m.Phase, StartedAt: m.StartedAt}
+	}
+	if mf := e.MovedFrom; mf != nil {
+		v.MovedFrom = &MovedFromView{Server: mf.Server, At: mf.At}
+	}
+	if v.State == StateDeleting {
+		return
+	}
+	srv, placed := h.st.Servers[e.Server]
+	switch {
+	case e.State == state.InstanceMoving || e.Move != nil:
+		v.State = StateMoving
+	case e.State == state.InstanceOrphaned || (e.Server != "" && (!placed || srv.State == ServerRevoked)):
+		v.State = StateOrphaned
+	case e.Server != "" && (srv.State == ServerOffline || srv.State == ServerEnrolling):
+		v.State = StateUnreachable
+	}
 }
 
 // rebuildLocked recomputes the instance views from the catalog and state
@@ -222,6 +274,7 @@ func (h *Hub) Instances() []InstanceView {
 		default:
 			v.State = StateDisabled
 		}
+		h.serverViewLocked(&v, e)
 		out = append(out, v)
 	}
 	for id, reason := range h.brokenInstances {

@@ -326,7 +326,7 @@ func TestRevokeRotatesWithoutTemplate(t *testing.T) {
 	if !s.Revoke.Rotated || deleted != "gone:gone,gone-mcp:gone" || sf.h.relayTokenSHA("gone") == old {
 		t.Errorf("rotation %+v deleted %s", s.Revoke, deleted)
 	}
-	if sf.h.serversDoctorIn() != nil {
+	if in := sf.h.serversDoctorIn(); in != nil && in.NotRotated["nas"] != "" {
 		t.Error("the doctor problem stays")
 	}
 }

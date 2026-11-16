@@ -147,6 +147,9 @@ type FolderIn struct {
 // container port, LanOnly from it). Port is the host port (a range's
 // first), Bind the host address as written ("" = all interfaces).
 type PortIn struct {
+	// Server: the server the instance runs on ("" = the primary): the
+	// bind is judged against that server's Local networks.
+	Server                              string
 	Instance, Key, Label, Service, Bind string
 	Port, PortEnd, Container            int
 	Protocol                            string
@@ -224,6 +227,9 @@ type Inputs struct {
 	Person        []PersonIn
 	Changes       []ChangeIn
 	LocalNetworks []netip.Prefix
+	// ServerLocalNetworks: a worker's Local networks (server id → its
+	// list; a port on a worker missing here is judged by loopback only).
+	ServerLocalNetworks map[string][]netip.Prefix
 	// Domain is the main domain, DomainAddrs its A / AAAA records;
 	// DomainErr: the lookup failed (nothing escalates on it).
 	Domain      string

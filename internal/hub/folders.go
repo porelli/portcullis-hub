@@ -80,6 +80,9 @@ type FolderInput struct {
 	Description string `json:"description"`
 	GID         *int   `json:"gid,omitempty"`
 	Create      bool   `json:"create"`
+	// Server is the server whose host the path is on ("" = the primary;
+	// Task 12): the probe and check run there, its folder roots apply.
+	Server string `json:"server,omitempty"`
 }
 
 // PathCheck is check path's answer (contract §14.1).
@@ -104,9 +107,11 @@ type PathCheck struct {
 
 // FolderView is a folder as the API shows it.
 type FolderView struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Path        string          `json:"path"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+	// Server is the server whose host the folder is on ("" = the primary).
+	Server      string          `json:"server"`
 	Description string          `json:"description"`
 	GID         int             `json:"gid"`
 	Adopted     bool            `json:"adopted"`
@@ -264,7 +269,7 @@ func cleanFolderPath(p string) (string, error) {
 // system or sensitive path, not at, above or under the core checkout or
 // the data files' host directory, strictly under a bind root. It needs no
 // lock (configuration only).
-func (h *Hub) folderPathRule(p string) error {
+func (h *Hub) folderPathRule(server, p string) error {
 	for _, sys := range systemRoots {
 		if pathsNear(p, sys) {
 			return badPath("%s is (or contains) the system path %s", p, sys)
@@ -275,8 +280,20 @@ func (h *Hub) folderPathRule(p string) error {
 			return badPath("%s is (or contains) the sensitive path %s", p, s)
 		}
 	}
-	if slices.Contains(h.bindRoots, p) {
+	roots, err := h.folderRootsOf(server)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(roots, p) {
 		return badPath("%s is a bind root itself: choose a folder below it", p)
+	}
+	if server != "" {
+		// A worker's install and engine root are the agent's protected
+		// paths (it refuses binds there); the primary's dirs aren't on it.
+		if root, _ := h.bindRootOf(server, p); root == "" {
+			return badPath("%s is not under one of %s's folder roots (%s; PORTCULLIS_WORKER_BIND_ROOTS)", p, serverLabel(server), strings.Join(roots, ", "))
+		}
+		return nil
 	}
 	if core := path.Clean(h.cfg.ProjectHostDir); h.cfg.ProjectHostDir != "" && pathsNear(p, core) {
 		return badPath("%s overlaps the Portcullis core checkout %s", p, core)
@@ -284,7 +301,7 @@ func (h *Hub) folderPathRule(p string) error {
 	if af := path.Clean(h.cfg.AppFilesHostDir); h.cfg.AppFilesHostDir != "" && pathsNear(p, af) {
 		return badPath("%s overlaps the settings data files directory %s", p, af)
 	}
-	if root, _ := h.bindRootOf(p); root == "" {
+	if root, _ := h.bindRootOf(server, p); root == "" {
 		return badPath("%s is not under a bind root (%s; HUB_OVERRIDE_BIND_ROOTS)", p, strings.Join(h.bindRoots, ", "))
 	}
 	return nil
@@ -293,11 +310,18 @@ func (h *Hub) folderPathRule(p string) error {
 // dockerRootRule: p is not at, above or under the daemon's data root
 // (Info DockerRootDir, wherever it was moved: image layers, containers,
 // volumes, the Hub's own state). Unreadable = 503. No lock held.
-func (h *Hub) dockerRootRule(ctx context.Context, p string) error {
-	if h.noEngine() {
+func (h *Hub) dockerRootRule(ctx context.Context, server, p string) error {
+	rt := h.rt
+	if server != "" {
+		wrt, err := h.rtForServer(server)
+		if err != nil {
+			return err
+		}
+		rt = unwrapRT(wrt)
+	} else if h.noEngine() {
 		return statusErr(http.StatusServiceUnavailable, "shared folders need the Docker Engine API")
 	}
-	info, err := h.rt.Info(ctx)
+	info, err := rt.Info(ctx)
 	root := ""
 	if len(info.ForbiddenRoots) > 0 {
 		root = info.ForbiddenRoots[0]
@@ -316,8 +340,9 @@ func (h *Hub) dockerRootRule(ctx context.Context, p string) error {
 
 // bindRootOf is the bind root strictly above p and p relative to it ("",
 // "" if none).
-func (h *Hub) bindRootOf(p string) (root, rel string) {
-	for _, r := range h.bindRoots {
+func (h *Hub) bindRootOf(server, p string) (root, rel string) {
+	roots, _ := h.folderRootsOf(server)
+	for _, r := range roots {
 		if p != r && pathUnder(p, r) {
 			return r, strings.TrimPrefix(p, r+"/")
 		}
@@ -325,8 +350,38 @@ func (h *Hub) bindRootOf(p string) (root, rel string) {
 	return "", ""
 }
 
-// overlapLocked: p at, above or under another folder than selfID (409).
-func (h *Hub) overlapLocked(p, selfID string) error {
+// checkFolderServer: "" (the primary) or a known, not revoked worker
+// (404 otherwise); a worker must be reachable for its checks (rtForServer
+// answers 409 while it's offline).
+func (h *Hub) checkFolderServer(server string) error {
+	if server == "" {
+		return nil
+	}
+	h.mu.RLock()
+	s, ok := h.st.Servers[server]
+	h.mu.RUnlock()
+	if !ok || s.State == ServerRevoked || s.State == ServerEnrolling {
+		return statusErr(http.StatusNotFound, "no server %s to define a folder on", server)
+	}
+	return nil
+}
+
+// folderRootsOf are server's folder (bind) roots: the primary's
+// configuration, a worker's as its agent reports them (no facts: 503).
+func (h *Hub) folderRootsOf(server string) ([]string, error) {
+	if server == "" {
+		return h.bindRoots, nil
+	}
+	inf := h.serverInfo(server)
+	if inf == nil {
+		return nil, statusErr(http.StatusServiceUnavailable, "%s hasn't reported its folder roots yet: try again when it is online", serverLabel(server))
+	}
+	return inf.BindRoots, nil
+}
+
+// overlapLocked: p at, above or under another folder on the same server
+// than selfID (409).
+func (h *Hub) overlapLocked(server, p, selfID string) error {
 	ids := make([]string, 0, len(h.st.Folders))
 	for id := range h.st.Folders {
 		ids = append(ids, id)
@@ -334,7 +389,7 @@ func (h *Hub) overlapLocked(p, selfID string) error {
 	sort.Strings(ids)
 	for _, id := range ids {
 		f := h.st.Folders[id]
-		if id != selfID && pathsNear(p, f.Path) {
+		if id != selfID && f.Server == server && pathsNear(p, f.Path) {
 			return statusErr(http.StatusConflict, "%s overlaps shared folder %s (%s): folders can't be at or under each other", p, id, f.Path)
 		}
 	}
@@ -344,12 +399,12 @@ func (h *Hub) overlapLocked(p, selfID string) error {
 // sameDirLocked: a folder other than selfID whose root is dev/ino — the
 // same directory through another path (a host bind mount, another
 // spelling on a case-insensitive filesystem): 409. dev 0 = not probed.
-func (h *Hub) sameDirLocked(dev, ino uint64, selfID string) error {
+func (h *Hub) sameDirLocked(server string, dev, ino uint64, selfID string) error {
 	if dev == 0 {
 		return nil
 	}
 	for id, f := range h.st.Folders {
-		if id != selfID && f.Dev == dev && f.Ino == ino {
+		if id != selfID && f.Server == server && f.Dev == dev && f.Ino == ino {
 			return statusErr(http.StatusConflict, "this directory is already shared folder %s (%s), reached through another path", id, f.Path)
 		}
 	}
@@ -358,23 +413,23 @@ func (h *Hub) sameDirLocked(dev, ino uint64, selfID string) error {
 
 // checkFolderPathLocked is every path rule a save checks under mu: the
 // configuration's (folderPathRule) and no overlap with another folder.
-func (h *Hub) checkFolderPathLocked(p, selfID string) error {
-	if err := h.folderPathRule(p); err != nil {
+func (h *Hub) checkFolderPathLocked(server, p, selfID string) error {
+	if err := h.folderPathRule(server, p); err != nil {
 		return err
 	}
-	return h.overlapLocked(p, selfID)
+	return h.overlapLocked(server, p, selfID)
 }
 
 // ── probe and check (fixer runs; never under mu) ─────────
 
 // probePath probes p below its bind root (contract §14.2): a symlink
 // component is 409. folder labels the run ("" = path-check).
-func (h *Hub) probePath(ctx context.Context, p string, create bool, folder string) (*folderfix.ProbeReport, error) {
-	root, rel := h.bindRootOf(p)
+func (h *Hub) probePath(ctx context.Context, server, p string, create bool, folder string) (*folderfix.ProbeReport, error) {
+	root, rel := h.bindRootOf(server, p)
 	if root == "" {
 		return nil, badPath("%s is not under a bind root", p)
 	}
-	rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: folder, Source: root, Extra: folderfix.ArgsExtra{Rel: rel, Create: create}})
+	rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: folder, Source: root, Server: server, Extra: folderfix.ArgsExtra{Rel: rel, Create: create}})
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +448,7 @@ func (h *Hub) probePath(ctx context.Context, p string, create bool, folder strin
 
 // probeFolder: p's device and inode (a symlink component: 409).
 func (h *Hub) probeFolder(ctx context.Context, p string, create bool) (dev, ino uint64, exists bool, err error) {
-	rep, err := h.probePath(ctx, p, create, "")
+	rep, err := h.probePath(ctx, "", p, create, "")
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -403,8 +458,8 @@ func (h *Hub) probeFolder(ctx context.Context, p string, create bool) (dev, ino 
 // scanPath scans p (bound at /folder) with the preview caps; the root
 // must be the probe's dev / ino (the fixer refuses another, and the Hub
 // checks its report too).
-func (h *Hub) scanPath(ctx context.Context, p, folder string, dev, ino uint64) (*folderfix.Report, error) {
-	rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: folder, Source: p, Unchecked: folder != "",
+func (h *Hub) scanPath(ctx context.Context, server, p, folder string, dev, ino uint64) (*folderfix.Report, error) {
+	rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: folder, Source: p, Server: server, Unchecked: folder != "",
 		Opts: folderfix.Options{ExpectDev: dev, ExpectIno: ino, MaxEntries: scanMaxEntries, MaxTime: previewMaxTime}})
 	if err != nil {
 		return nil, err
@@ -430,22 +485,25 @@ func fsProblem(p, fs string) string {
 // with the preview caps (contract §14.1). Path rules are refusals (400)
 // before any run; a symlink component is 409; an overlap with a folder
 // and a refused filesystem are Problems.
-func (h *Hub) CheckFolderPath(ctx context.Context, p string, create bool) (*PathCheck, error) {
+func (h *Hub) CheckFolderPath(ctx context.Context, server, p string, create bool) (*PathCheck, error) {
+	if err := h.checkFolderServer(server); err != nil {
+		return nil, err
+	}
 	c, err := cleanFolderPath(p)
 	if err != nil {
 		return nil, err
 	}
-	if err := h.folderPathRule(c); err != nil {
+	if err := h.folderPathRule(server, c); err != nil {
 		return nil, err
 	}
-	if err := h.dockerRootRule(ctx, c); err != nil {
+	if err := h.dockerRootRule(ctx, server, c); err != nil {
 		return nil, err
 	}
 	h.mu.RLock()
-	overlap := h.overlapLocked(c, "")
+	overlap := h.overlapLocked(server, c, "")
 	h.mu.RUnlock()
 	// Never create a directory inside (or above) another folder.
-	pr, err := h.probePath(ctx, c, create && overlap == nil, "")
+	pr, err := h.probePath(ctx, server, c, create && overlap == nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -454,7 +512,7 @@ func (h *Hub) CheckFolderPath(ctx context.Context, p string, create bool) (*Path
 		pc.Problems = append(pc.Problems, overlap.Error())
 	}
 	h.mu.RLock()
-	same := h.sameDirLocked(pr.Dev, pr.Ino, "")
+	same := h.sameDirLocked(server, pr.Dev, pr.Ino, "")
 	h.mu.RUnlock()
 	if same != nil {
 		pc.Problems = append(pc.Problems, same.Error())
@@ -463,7 +521,7 @@ func (h *Hub) CheckFolderPath(ctx context.Context, p string, create bool) (*Path
 		pc.Summary = "missing"
 		return pc, nil
 	}
-	rep, err := h.scanPath(ctx, c, "", pr.Dev, pr.Ino)
+	rep, err := h.scanPath(ctx, server, c, "", pr.Dev, pr.Ino)
 	if err != nil {
 		return nil, err
 	}
@@ -570,10 +628,10 @@ func (h *Hub) createChecksLocked(in FolderInput, p string, dev, ino uint64) erro
 	if _, ok := h.st.Folders[in.ID]; ok {
 		return statusErr(http.StatusConflict, "shared folder %s already exists", in.ID)
 	}
-	if err := h.checkFolderPathLocked(p, in.ID); err != nil {
+	if err := h.checkFolderPathLocked(in.Server, p, in.ID); err != nil {
 		return err
 	}
-	if err := h.sameDirLocked(dev, ino, in.ID); err != nil {
+	if err := h.sameDirLocked(in.Server, dev, ino, in.ID); err != nil {
 		return err
 	}
 	if in.GID != nil {
@@ -589,15 +647,15 @@ func (h *Hub) createChecksLocked(in FolderInput, p string, dev, ino uint64) erro
 // probeAndCheck runs the probe and the check of p for folder id (outside
 // mu): it must exist (or be created), be no symlink, not on a refused
 // filesystem. Warnings: a filesystem the fixer won't write to.
-func (h *Hub) probeAndCheck(ctx context.Context, id, p string, create bool) (*folderfix.ProbeReport, *folderfix.Report, []string, error) {
-	pr, err := h.probePath(ctx, p, create, id)
+func (h *Hub) probeAndCheck(ctx context.Context, server, id, p string, create bool) (*folderfix.ProbeReport, *folderfix.Report, []string, error) {
+	pr, err := h.probePath(ctx, server, p, create, id)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if !pr.Exists {
 		return nil, nil, nil, statusErr(http.StatusConflict, "%s doesn't exist: create it, or ask the Hub to (create)", p)
 	}
-	rep, err := h.scanPath(ctx, p, id, pr.Dev, pr.Ino)
+	rep, err := h.scanPath(ctx, server, p, id, pr.Dev, pr.Ino)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -656,10 +714,13 @@ func (h *Hub) folderPrechecks(ctx context.Context, in FolderInput) (string, erro
 			return "", badPath("gid %d can't be adopted: %s", *in.GID, why)
 		}
 	}
-	if err := h.folderPathRule(p); err != nil {
+	if err := h.checkFolderServer(in.Server); err != nil {
 		return "", err
 	}
-	if err := h.dockerRootRule(ctx, p); err != nil {
+	if err := h.folderPathRule(in.Server, p); err != nil {
+		return "", err
+	}
+	if err := h.dockerRootRule(ctx, in.Server, p); err != nil {
 		return "", err
 	}
 	h.mu.RLock()
@@ -676,7 +737,7 @@ func (h *Hub) folderPrechecks(ctx context.Context, in FolderInput) (string, erro
 // now, ruling 34: predicted, not reserved), after the probe and the check;
 // nothing is stored. Caller holds in.ID's folder lock.
 func (h *Hub) planFolderHeld(ctx context.Context, in FolderInput, p string) (state.Folder, []string, error) {
-	pr, rep, warns, err := h.probeAndCheck(ctx, in.ID, p, in.Create)
+	pr, rep, warns, err := h.probeAndCheck(ctx, in.Server, in.ID, p, in.Create)
 	if err != nil {
 		return state.Folder{}, nil, err
 	}
@@ -685,7 +746,7 @@ func (h *Hub) planFolderHeld(ctx context.Context, in FolderInput, p string) (sta
 	if err := h.createChecksLocked(in, p, pr.Dev, pr.Ino); err != nil {
 		return state.Folder{}, nil, err
 	}
-	f := state.Folder{Name: in.Name, Path: p, Description: in.Description, Dev: pr.Dev, Ino: pr.Ino, MountRoot: rep.MountRoot}
+	f := state.Folder{Name: in.Name, Path: p, Server: in.Server, Description: in.Description, Dev: pr.Dev, Ino: pr.Ino, MountRoot: rep.MountRoot}
 	if in.GID != nil {
 		f.GID, f.Adopted = *in.GID, true
 	} else {
@@ -702,7 +763,7 @@ func (h *Hub) planFolderHeld(ctx context.Context, in FolderInput, p string) (sta
 // across the create and the assignment's validation). It doesn't audit:
 // detail is folder.create's, for the caller to write after its locks.
 func (h *Hub) defineFolderHeld(ctx context.Context, in FolderInput, p string) (f state.Folder, view *FolderView, warns []string, detail string, err error) {
-	pr, rep, warns, err := h.probeAndCheck(ctx, in.ID, p, in.Create)
+	pr, rep, warns, err := h.probeAndCheck(ctx, in.Server, in.ID, p, in.Create)
 	if err != nil {
 		return f, nil, nil, "", err
 	}
@@ -714,7 +775,7 @@ func (h *Hub) defineFolderHeld(ctx context.Context, in FolderInput, p string) (f
 		h.mu.Unlock()
 		return f, nil, nil, "", err
 	}
-	f = state.Folder{Name: in.Name, Path: p, Description: in.Description, CreatedAt: time.Now().UTC(),
+	f = state.Folder{Name: in.Name, Path: p, Server: in.Server, Description: in.Description, CreatedAt: time.Now().UTC(),
 		Dev: pr.Dev, Ino: pr.Ino, MountRoot: rep.MountRoot}
 	if in.GID != nil {
 		f.GID, f.Adopted = *in.GID, true
@@ -801,7 +862,7 @@ func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor
 		if uses := h.folderUsesLocked(id); len(uses) > 0 {
 			return f, true, statusErr(http.StatusConflict, "shared folder %s is used by %s: its path can't change while it is used", id, usesText(uses))
 		}
-		return f, true, h.checkFolderPathLocked(p, id)
+		return f, true, h.checkFolderPathLocked(f.Server, p, id)
 	}
 	h.mu.RLock()
 	_, moved, err := changeChecks()
@@ -812,10 +873,16 @@ func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor
 	var pr *folderfix.ProbeReport
 	var rep *folderfix.Report
 	if moved {
-		if err := h.dockerRootRule(ctx, p); err != nil {
+		h.mu.RLock()
+		server := h.st.Folders[id].Server
+		h.mu.RUnlock()
+		if in.Server != "" && in.Server != server {
+			return nil, badPath("a shared folder's server can't change")
+		}
+		if err := h.dockerRootRule(ctx, server, p); err != nil {
 			return nil, err
 		}
-		if pr, rep, _, err = h.probeAndCheck(ctx, id, p, in.Create); err != nil {
+		if pr, rep, _, err = h.probeAndCheck(ctx, server, id, p, in.Create); err != nil {
 			return nil, err
 		}
 	}
@@ -826,7 +893,7 @@ func (h *Hub) UpdateFolder(ctx context.Context, id string, in FolderInput, actor
 		err = statusErr(http.StatusConflict, "shared folder %s changed meanwhile: try again", id)
 	}
 	if err == nil && moved {
-		err = h.sameDirLocked(pr.Dev, pr.Ino, id)
+		err = h.sameDirLocked(f.Server, pr.Dev, pr.Ino, id)
 	}
 	if err != nil {
 		h.mu.Unlock()
@@ -932,7 +999,7 @@ func (h *Hub) Folders() []FolderView {
 // folderViewLocked is folder id's view without its op record.
 func (h *Hub) folderViewLocked(id string) FolderView {
 	f := h.st.Folders[id]
-	v := FolderView{ID: id, Name: f.Name, Path: f.Path, Description: f.Description, GID: f.GID, Adopted: f.Adopted,
+	v := FolderView{ID: id, Name: f.Name, Path: f.Path, Server: f.Server, Description: f.Description, GID: f.GID, Adopted: f.Adopted,
 		Uses: h.folderUsesLocked(id)}
 	if f.LastApply != nil {
 		la := *f.LastApply
@@ -1026,11 +1093,14 @@ func (h *Hub) folderUsesLocked(id string) []FolderUseView {
 // files): the Hub doesn't start on them (P24).
 func (h *Hub) checkFoldersAtStart() error {
 	for id, f := range h.st.Folders {
-		if err := h.folderPathRule(f.Path); err != nil {
+		if f.Server != "" {
+			continue // a worker's: its agent enforces its folder roots
+		}
+		if err := h.folderPathRule("", f.Path); err != nil {
 			return fmt.Errorf("state.yaml: shared folder %s: %v — fix HUB_OVERRIDE_BIND_ROOTS or the folder, then restart", id, err)
 		}
 		for other, g := range h.st.Folders {
-			if other != id && pathUnder(f.Path, g.Path) {
+			if other != id && g.Server == "" && pathUnder(f.Path, g.Path) {
 				return fmt.Errorf("state.yaml: shared folders %s and %s overlap", id, other)
 			}
 		}
@@ -1136,7 +1206,7 @@ func (h *Hub) dockerRootValuesRule(ctx context.Context, t *templates.Template, v
 		if err != nil {
 			continue // refused by the value checks
 		}
-		if err := h.dockerRootRule(ctx, path.Clean(p)); err != nil {
+		if err := h.dockerRootRule(ctx, h.serverOf(t.ID), path.Clean(p)); err != nil {
 			var se *StatusError
 			if errors.As(err, &se) && se.Status == http.StatusBadRequest {
 				return statusErr(http.StatusBadRequest, "setting %s: %v", k, err)

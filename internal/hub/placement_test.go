@@ -42,6 +42,8 @@ type workerFake struct {
 	pushHook   func()
 	// downErrs fails the next Down calls.
 	downErrs int
+	// disk answers the worker's fixer runs (worker folders).
+	disk *fakeDisk
 }
 
 func (w *workerFake) Down(ctx context.Context, p runtime.Project) error {
@@ -626,4 +628,17 @@ func TestRelayNeverDropsAuthMiddlewares(t *testing.T) {
 	if err := checkRelayAuth(model, relays); err == nil || !strings.Contains(err.Error(), "middlewares") {
 		t.Errorf("a relay without portcullis-groups passed: %v", err)
 	}
+}
+
+// RunFixer answers from the worker's fake disk (disk nil: the engine's
+// default empty run).
+func (w *workerFake) RunFixer(ctx context.Context, s runtime.FixerSpec, out func(io.Reader) error) (*runtime.RunResult, error) {
+	w.mu.Lock()
+	d := w.disk
+	w.mu.Unlock()
+	if d == nil {
+		return w.Fake.RunFixer(ctx, s, out)
+	}
+	w.Fake.Signal(ctx, "fixer", fixerMode(s.Cmd))
+	return d.run(s, out)
 }

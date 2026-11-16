@@ -120,6 +120,15 @@ func portSubjects(p PortIn) []string {
 // the port a rebind_port finding is about by it).
 func PortFP(p PortIn) string { return Fingerprint(KindLANOnlyExposed, portSubjects(p)...) }
 
+// portNets are the Local networks p's bind is judged against: its
+// server's (contract §14.7, multiple servers), the primary's for "".
+func portNets(in *Inputs, p PortIn) []netip.Prefix {
+	if p.Server == "" {
+		return in.LocalNetworks
+	}
+	return in.ServerLocalNetworks[p.Server]
+}
+
 type lanOnlyExposedCheck struct{}
 
 func (lanOnlyExposedCheck) Kind() string { return KindLANOnlyExposed }
@@ -162,11 +171,15 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 			f.Severity = Problem
 			f.Title = fmt.Sprintf("%s: LAN-only port %s is bound to %s, an address of %s.", p.Instance, portName(p), a, in.Domain)
 			f.Why = fmt.Sprintf("The template marks this port LAN-only, but %s's A / AAAA records point at %s: the port is published where the internet reaches the Hub.", in.Domain, a)
-		case !IsLocal(a, in.LocalNetworks):
+		case !IsLocal(a, portNets(in, p)):
 			why = "outside"
 			f.Severity = Problem
 			f.Title = fmt.Sprintf("%s: LAN-only port %s is bound to %s, outside the local networks.", p.Instance, portName(p), a)
-			f.Why = fmt.Sprintf("The template marks this port LAN-only, but %s isn't in the local networks (Hub Settings → Local networks): it is reachable from outside the LAN.", a)
+			where := "Hub Settings → Local networks"
+			if p.Server != "" {
+				where = "server " + p.Server + "'s Local networks, Settings → Servers"
+			}
+			f.Why = fmt.Sprintf("The template marks this port LAN-only, but %s isn't in the local networks (%s): it is reachable from outside the LAN.", a, where)
 		default:
 			continue
 		}

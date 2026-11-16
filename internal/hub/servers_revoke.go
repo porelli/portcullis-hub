@@ -520,10 +520,23 @@ func (h *Hub) serversDoctorInLocked() *doctor.ServersIn {
 		}
 	}
 	h.srvMu.Unlock()
-	if len(in.NotRotated)+len(in.PlacementInvalid)+len(in.Stuck)+len(in.Quarantined)+len(in.OwedCopies) == 0 {
+	h.serverKindsInLocked(in)
+	if len(in.NotRotated)+len(in.PlacementInvalid)+len(in.Stuck)+len(in.Quarantined)+len(in.OwedCopies)+
+		len(in.Servers)+len(in.Placed)+len(in.Leftovers)+len(in.Orphaned) == 0 && !overlapsLink(in.Ranges) {
 		return nil
 	}
 	return in
+}
+
+// overlapsLink: some range overlaps the link subnet (link_subnet_overlap
+// fires without any server too).
+func overlapsLink(rs []doctor.RangeIn) bool {
+	for _, r := range rs {
+		if r.Prefix.IsValid() && r.Prefix.Overlaps(servers.LinkSubnet) {
+			return true
+		}
+	}
+	return false
 }
 
 // placementInvalidLocked: every placed instance whose template is now

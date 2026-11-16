@@ -683,7 +683,7 @@ type rebindCalc struct {
 // rebindAddress checks the typed address (400): an IP, no zone, not
 // unspecified, inside the local networks, not a main-domain address.
 // A failed lookup of the main domain is a warning only.
-func (h *Hub) rebindAddress(ctx context.Context, s string) (netip.Addr, []string, error) {
+func (h *Hub) rebindAddress(ctx context.Context, server, s string) (netip.Addr, []string, error) {
 	a, err := netip.ParseAddr(strings.TrimSpace(s))
 	if err != nil || a.Zone() != "" {
 		return a, nil, statusErr(http.StatusBadRequest, "the address must be an IP address, e.g. 192.168.1.10")
@@ -692,7 +692,13 @@ func (h *Hub) rebindAddress(ctx context.Context, s string) (netip.Addr, []string
 	if a.IsUnspecified() {
 		return a, nil, statusErr(http.StatusBadRequest, "%s is every interface: give the host's LAN address", a)
 	}
-	if !IsLocal(a, h.LocalNetworks()) {
+	h.mu.RLock()
+	nets := h.localNetworksOfLocked(server, h.st.Servers[server])
+	h.mu.RUnlock()
+	if !IsLocal(a, nets) {
+		if server != "" {
+			return a, nil, statusErr(http.StatusBadRequest, "%s isn't in server %s's Local networks (Settings → Servers)", a, server)
+		}
 		return a, nil, statusErr(http.StatusBadRequest, "%s isn't in the local networks (Hub Settings → Local networks)", a)
 	}
 	var warns []string
@@ -715,7 +721,10 @@ func (h *Hub) rebindPlan(ctx context.Context, f doctor.Finding, params map[strin
 	if err := checkFixParams(params, "address"); err != nil {
 		return nil, err
 	}
-	a, warns, err := h.rebindAddress(ctx, params["address"])
+	h.mu.RLock()
+	port, _ := h.rebindPortLocked(f)
+	h.mu.RUnlock()
+	a, warns, err := h.rebindAddress(ctx, port.Server, params["address"])
 	if err != nil {
 		return nil, err
 	}

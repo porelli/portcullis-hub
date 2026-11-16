@@ -727,7 +727,7 @@ func (h *Hub) runningOf(ctx context.Context, ids []string, enabled, running map[
 // change that would cut anyone's access is refused (explain-only).
 func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 	f, d := c.folder, c.plan.Disk
-	pr, err := h.probePath(ctx, f.Path, false, id)
+	pr, err := h.probePath(ctx, f.Server, f.Path, false, id)
 	if err != nil {
 		return err
 	}
@@ -744,7 +744,7 @@ func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 		}
 	}
 	for _, sub := range slices.Sorted(maps.Keys(subs)) {
-		sp, err := h.probePath(ctx, path.Join(f.Path, sub), false, id)
+		sp, err := h.probePath(ctx, f.Server, path.Join(f.Path, sub), false, id)
 		if err != nil {
 			return err
 		}
@@ -753,7 +753,7 @@ func (h *Hub) diskPlan(ctx context.Context, id string, c *assignCalc) error {
 		}
 	}
 	scan := func() (*folderfix.Report, error) {
-		rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: id, Source: f.Path, Opts: folderfix.Options{
+		rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: id, Source: f.Path, Server: f.Server, Opts: folderfix.Options{
 			ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot,
 			Target:     folderfix.Target{GID: f.GID, Files: d.Files, OwnerUID: d.OwnerUID},
 			MaxEntries: scanMaxEntries, MaxTime: previewMaxTime}})
@@ -1584,7 +1584,7 @@ func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskP
 	target := folderfix.Target{GID: f.GID, Files: d.Files, OwnerUID: d.OwnerUID}
 	base := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: target}
 	var saved string
-	snapRep, err := h.runFixer(ctx, fixerRun{Mode: "snapshot", Folder: id, Source: f.Path, Opts: base,
+	snapRep, err := h.runFixer(ctx, fixerRun{Mode: "snapshot", Folder: id, Source: f.Path, Server: f.Server, Opts: base,
 		Out: func(r io.Reader) error {
 			rel, err := h.saveSnapshot(id, r)
 			saved = rel
@@ -1625,7 +1625,7 @@ func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskP
 	applyOpts := base
 	applyOpts.ExpectDigest = snapRep.Plan.Digest
 	applyOpts.Target.Mkdir = d.Mkdir
-	applyRep, err := h.runFixer(ctx, fixerRun{Mode: "apply", Folder: id, Source: f.Path, Opts: applyOpts,
+	applyRep, err := h.runFixer(ctx, fixerRun{Mode: "apply", Folder: id, Source: f.Path, Server: f.Server, Opts: applyOpts,
 		Extra: folderfix.ArgsExtra{Expect: snapRep.Plan.Changes}})
 	if applyRep != nil {
 		changed = applyRep.Changed
@@ -1637,7 +1637,7 @@ func (h *Hub) applyDisk(ctx context.Context, id string, f state.Folder, d *DiskP
 	}
 	verOpts := base
 	verOpts.Principals = d.principals
-	ver, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: id, Source: f.Path, Opts: verOpts})
+	ver, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: id, Source: f.Path, Server: f.Server, Opts: verOpts})
 	warns = append(warns, prefixed("verify", fixerWarnings(ver))...)
 	if err != nil {
 		return saved, changed, warns, true, fmt.Errorf("the verify scan failed: %w", err)
@@ -1704,7 +1704,7 @@ func (h *Hub) snapshotRun(ctx context.Context, rel string, r fixerRun) (*folderf
 func (h *Hub) restoreDryRun(ctx context.Context, id, rel string, f state.Folder) (*folderfix.Report, error) {
 	o := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: folderfix.Target{GID: f.GID}}
 	withSnapshotRoot(&o, f)
-	return h.snapshotRun(ctx, rel, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Opts: o,
+	return h.snapshotRun(ctx, rel, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Server: f.Server, Opts: o,
 		Extra: folderfix.ArgsExtra{DryRun: true}})
 }
 
@@ -1781,7 +1781,7 @@ func (h *Hub) computeUndo(ctx context.Context, id string) (*undoCalc, error) {
 	if err := h.runningOf(ctx, u.affected, u.enabled, u.running); err != nil {
 		return nil, err
 	}
-	pr, err := h.probePath(ctx, f.Path, false, id)
+	pr, err := h.probePath(ctx, f.Server, f.Path, false, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1969,7 +1969,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 	base := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: u.target}
 	withSnapshotRoot(&base, f)
 	saved := ""
-	urep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "snapshot", Folder: id, Source: f.Path, Opts: base, Extra: folderfix.ArgsExtra{Kind: "undo"},
+	urep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "snapshot", Folder: id, Source: f.Path, Server: f.Server, Opts: base, Extra: folderfix.ArgsExtra{Kind: "undo"},
 		Out: func(r io.Reader) error {
 			rel, err := h.saveSnapshot(id, r)
 			saved = rel
@@ -1991,7 +1991,7 @@ func (h *Hub) runUndo(id string, u *undoCalc) (map[string]string, []string, stri
 	}
 	restoreOpts := folderfix.Options{ExpectDev: f.Dev, ExpectIno: f.Ino, ExpectMountRoot: f.MountRoot, Target: folderfix.Target{GID: f.GID}}
 	withSnapshotRoot(&restoreOpts, f)
-	rep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Opts: restoreOpts})
+	rep, err := h.snapshotRun(ctx, u.apply.Snapshot, fixerRun{Mode: "restore", Folder: id, Source: f.Path, Server: f.Server, Opts: restoreOpts})
 	warnings = append(warnings, prefixed("restore", skippedWarnings(rep))...)
 	if err != nil {
 		return result, warnings, detail(), fail(fmt.Errorf("the restore failed: %w", err), errStatus(err) != http.StatusConflict)

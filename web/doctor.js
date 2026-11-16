@@ -36,12 +36,14 @@
     reapply_folder: 'Apply again…',
     undo_folder: 'Undo last fix…',
     revoke_leaver: 'Revoke the password…',
-    person_tree_owner: 'Fix the owner…'
+    person_tree_owner: 'Fix the owner…',
+    remove_move_leftover: 'Remove the old copy…'
   };
   // The parameters each fix kind takes (the Hub refuses others).
   const FIX_PARAMS = {
     rebind_port: [['address', 'LAN address to bind to', '192.168.1.10']],
-    manage_as_folder: [['name', 'Folder name (optional)', 'Family media'], ['id', 'Folder id (optional)', 'family-media']]
+    manage_as_folder: [['name', 'Folder name (optional)', 'Family media'], ['id', 'Folder id (optional)', 'family-media']],
+    remove_move_leftover: [['confirm', 'Type the instance id to confirm', 'the instance id']]
   };
 
   let rootEl = null;

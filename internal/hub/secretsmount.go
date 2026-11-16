@@ -114,7 +114,7 @@ func (h *Hub) dockerRootMounts(ctx context.Context, t *templates.Template, proj 
 		}
 	}
 	for _, u := range uses {
-		if err := h.dockerRootRule(ctx, u.p); err != nil {
+		if err := h.dockerRootRule(ctx, "", u.p); err != nil { // primary-only (placement)
 			var se *StatusError
 			if errors.As(err, &se) && se.Status == http.StatusBadRequest {
 				return statusErr(http.StatusBadRequest, "%s was not started: %s: %v", t.ID, u.what, err)

@@ -102,19 +102,31 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 	if err := r.Validate(); err != nil {
 		return statusErr(http.StatusInternalServerError, "shared folder fixer: %v", err)
 	}
-	if h.noEngine() {
-		return statusErr(http.StatusServiceUnavailable, "shared folders need the Docker Engine API")
+	rt, kind, image := h.rt, h.cfg.Runtime, ""
+	if r.Server != "" {
+		// A worker's folder (Task 12): its agent runs the helper, on
+		// the agent's own image (it rebuilds the spec).
+		wrt, err := h.rtForServer(r.Server)
+		if err != nil {
+			return err
+		}
+		rt = unwrapRT(wrt)
+		kind, image = rt.Kind(), "agent"
+	} else {
+		if h.noEngine() {
+			return statusErr(http.StatusServiceUnavailable, "shared folders need the Docker Engine API")
+		}
+		var err error
+		if image, err = h.selfImage(ctx); err != nil {
+			return err
+		}
 	}
-	image, err := h.selfImage(ctx)
-	if err != nil {
-		return err
-	}
-	info, err := h.rt.Info(ctx)
+	info, err := rt.Info(ctx)
 	opts := info.SecurityOptions
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "shared folders: can't read the Docker daemon's security options: %v", err)
 	}
-	if err := fixerIDsAllowed(h.cfg.Runtime, opts); err != nil {
+	if err := fixerIDsAllowed(kind, opts); err != nil {
 		return err
 	}
 	s := r.Spec(image, fixerBinary)
@@ -129,7 +141,7 @@ func (h *Hub) execFixer(ctx context.Context, r fixerRun, rep any, errs func() []
 	if r.Out != nil {
 		out = func(t io.Reader) error { return readSnapshotTar(t, r.Out) }
 	}
-	res, err := h.rt.RunFixer(ctx, s, out)
+	res, err := rt.RunFixer(ctx, s, out)
 	if err != nil {
 		var se *StatusError
 		if errors.As(err, &se) {
