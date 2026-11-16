@@ -81,6 +81,12 @@ func TestMailKinds(t *testing.T) {
 		}},
 		{KindMailSyncBlocked, Problem, FixExplain, func(m *MailIn) { m.SyncBlocked = "no baseline" }},
 		{KindMailHubSecretInvalid, Problem, FixExplain, func(m *MailIn) { m.HubSecretInvalid = true }},
+		{KindMailSpamRulesMissing, Problem, FixExplain, func(m *MailIn) {
+			m.Checks = []mailctl.Check{chk("spam_rules", "problem", "no spam-filter rules imported")}
+		}},
+		{KindMailExternalLookupsOn, Problem, FixExplain, func(m *MailIn) {
+			m.Checks = []mailctl.Check{chk("external_lookups", "problem", "couldn't turn them off")}
+		}},
 		{KindMailMassRemovalPend, Problem, FixExplain, func(m *MailIn) {
 			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice"}, UUIDs: []string{"u1"}, Confirmed: true}
 		}},
@@ -97,7 +103,7 @@ func TestMailKinds(t *testing.T) {
 	for _, k := range MailKinds {
 		seen[k] = true
 	}
-	if len(MailKinds) != 20 || len(seen) != 20 {
+	if len(MailKinds) != 22 || len(seen) != 22 {
 		t.Fatalf("%d mail kinds", len(MailKinds))
 	}
 	if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk("port25", "ok", ""), chk("cert", "ok", "")}}); len(fs) != 0 {
@@ -106,6 +112,26 @@ func TestMailKinds(t *testing.T) {
 	for _, k := range MailKinds {
 		if !slices.Contains(Kinds(), k) {
 			t.Errorf("kind %s not registered", k)
+		}
+	}
+}
+
+// TestMailSpamRulesAndLookups: the spam_rules / external_lookups
+// checks' problem is mail_spam_rules_missing / mail_external_lookups_on
+// with the ruled text and no fix; ok (or a warning, info) clears it.
+func TestMailSpamRulesAndLookups(t *testing.T) {
+	for id, want := range map[string][2]string{
+		"spam_rules":       {KindMailSpamRulesMissing, MailSpamRulesWhy},
+		"external_lookups": {KindMailExternalLookupsOn, MailExternalLookupsWhy},
+	} {
+		fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk(id, "problem", "x")}})
+		if len(fs) != 1 || fs[0].Kind != want[0] || fs[0].Severity != Problem || fs[0].Why != want[1] || fs[0].FixKind != "" || fs[0].Class != FixExplain {
+			t.Fatalf("%s problem: %+v", id, fs)
+		}
+		for _, sev := range []string{"ok", "warning", "info"} {
+			if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk(id, sev, "")}}); len(fs) != 0 {
+				t.Errorf("%s %s: %+v", id, sev, fs)
+			}
 		}
 	}
 }

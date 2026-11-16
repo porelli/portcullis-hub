@@ -37,12 +37,15 @@ const (
 	KindMailMassRemovalPend   = "mail_mass_removal_pending"
 	KindMailSyncBlocked       = "mail_sync_blocked"
 	KindMailHubSecretInvalid  = "mail_hub_secret_invalid"
+	KindMailSpamRulesMissing  = "mail_spam_rules_missing"
+	KindMailExternalLookupsOn = "mail_external_lookups_on"
 )
 
-// MailKinds are the twenty mail kinds.
+// MailKinds are the twenty-two mail kinds.
 var MailKinds = []string{KindMailPort25Blocked, KindMailPTRMissing, KindMailPTRMismatch, KindMailBlocklisted, KindMailRecordsWrong,
 	KindMailDKIMStuck, KindMailDKIMManual, KindMailCertExpiring, KindMailDMARCFailures, KindMailDMARCPromote, KindMailMTASTSEnforce,
-	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend, KindMailSyncBlocked, KindMailHubSecretInvalid}
+	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend, KindMailSyncBlocked, KindMailHubSecretInvalid,
+	KindMailSpamRulesMissing, KindMailExternalLookupsOn}
 
 // Mail fix kinds (§14.6); mail_records_wrong on an added domain uses
 // dns_apply with sets=mail.
@@ -54,12 +57,14 @@ const (
 
 // Mail steps the explain-only findings end with.
 const (
-	MailMainRecordsStep = "Run `./portcullis dns setup --only mail` on the server"
-	MailCertStep        = "Run `./portcullis mail cert` on the server"
-	MailTimerStep       = "Run `./portcullis mail schedule --systemd` on the server"
-	MailSessionsLine    = "mail sessions may still be open"
-	MailLANOnlyWhy      = "LAN-only needs the real client address; rootless Podman rewrites it"
-	MailLANOnlyStep     = "Turn LAN-only off: run `./portcullis mail enable --lan-only false` on the server"
+	MailMainRecordsStep    = "Run `./portcullis dns setup --only mail` on the server"
+	MailCertStep           = "Run `./portcullis mail cert` on the server"
+	MailTimerStep          = "Run `./portcullis mail schedule --systemd` on the server"
+	MailSessionsLine       = "mail sessions may still be open"
+	MailLANOnlyWhy         = "LAN-only needs the real client address; rootless Podman rewrites it"
+	MailLANOnlyStep        = "Turn LAN-only off: run `./portcullis mail enable --lan-only false` on the server"
+	MailExternalLookupsWhy = "The spam filter's external lookups may be on and couldn't be turned off, so the mail server may contact outside feeds. mailctl retries every minute; see mailctl's log ('external lookups')."
+	MailSpamRulesWhy       = "The mail server's spam filter has no rules yet, so it scores nothing (GTUBE and junk detection are off). mailctl asks for the import every minute; if this stays, see mailctl's log ('spam rules') and run ./portcullis up."
 )
 
 // Mail timing (§14.5).
@@ -218,6 +223,17 @@ func mailFindings(in *Inputs) []Finding {
 				"Under rootless Podman SPF, iprev and the IP blocklists are off and DMARC never rejects. "+c.Detail, c.Steps, c, "")
 		case "rate_held":
 			mailRateHeld(mk, m, byID, sub, c)
+		case "spam_rules":
+			// Only a problem (no rules imported): explain-only, no fix.
+			if c.Severity == mailctl.SeverityProblem {
+				mk(KindMailSpamRulesMissing, Problem, "The mail server's spam filter has no rules yet",
+					MailSpamRulesWhy, c.Steps, c, "")
+			}
+		case "external_lookups":
+			if c.Severity == mailctl.SeverityProblem {
+				mk(KindMailExternalLookupsOn, Problem, "The spam filter's external lookups may be on",
+					MailExternalLookupsWhy, c.Steps, c, "")
+			}
 		case "dane":
 			mk(KindMailDANEOff, Info, "DANE is off: the resolver can't validate DNSSEC",
 				"Outbound mail doesn't verify remote domains' DANE records because mail-resolver can't validate DNSSEC from this host; check that it reaches the root servers over port 53. "+c.Detail, c.Steps, c, "")
