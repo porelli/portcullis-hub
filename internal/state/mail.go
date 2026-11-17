@@ -117,6 +117,9 @@ type MailHold struct {
 	// or a session reset, so the Hub stopped it (Ruling R-HH1, fail
 	// closed); it stays stopped until the re-confirm.
 	Stopped *time.Time `json:"stopped,omitempty" yaml:"stopped,omitempty"`
+	// StopError: the stop is owed (recorded before the down) and its
+	// last attempt failed; retried until it succeeds (doctor Problem).
+	StopError string `json:"stop_error,omitempty" yaml:"stop_error,omitempty"`
 }
 
 // MailRecord is one DNS record of a mail set.

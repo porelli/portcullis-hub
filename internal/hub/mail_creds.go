@@ -414,13 +414,21 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 				mine = append(mine, c)
 			}
 		}
-		if lerr != nil || len(mine) != 1 || len(h.checkAllowedIPs(ctx, api, user, uuid, mine)) > 0 {
-			if lerr != nil || len(mine) != 1 {
-				if rerr := api.RevokeCredential(context.WithoutCancel(ctx), uuid, created.ID); rerr != nil {
-					log.Printf("mail: taking back %s's unverified mail password %s failed: %v", user, created.ID, rerr)
-				}
+		// R-HH2: the password is never returned unless the new
+		// credential is verified limited; a take-back the provider
+		// doesn't confirm keeps the row and voids the provider.
+		refused := lerr != nil || len(mine) != 1
+		if refused {
+			if rerr := h.mailRevokeBounded(ctx, api, uuid, created.ID); rerr != nil {
+				log.Printf("mail: taking back %s's unverified mail password %s failed: %v", user, created.ID, rerr)
+				h.mailFailClosed(user + "'s unverified mail password can't be taken back")
+			} else {
 				h.mailEndRowsOf(user, uuid, mailprovider.Credential{ID: created.ID, CreatedAt: created.CreatedAt}, "lan-only")
 			}
+		} else if wider, _ := h.checkAllowedIPs(ctx, api, user, uuid, mine); wider > 0 {
+			refused = true
+		}
+		if refused {
 			created.Secret.Zero()
 			return nil, statusErr(http.StatusServiceUnavailable, "mail passwords can't be limited to the local networks right now: try again later")
 		}
@@ -519,7 +527,7 @@ func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user,
 		}
 		// LAN-only (contract §19.6): a credential wider than the Local
 		// networks is revoked now; its row has ended.
-		if ids := h.checkAllowedIPs(ctx, api, user, uuid, live); len(ids) > 0 {
+		if _, ids := h.checkAllowedIPs(ctx, api, user, uuid, live); len(ids) > 0 {
 			live = slices.DeleteFunc(live, func(c mailprovider.Credential) bool { return slices.Contains(ids, c.ID) })
 			rows0 = h.activeMailRows(user)
 			before = map[string]bool{}

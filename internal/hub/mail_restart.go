@@ -41,15 +41,23 @@ func (h *Hub) restartMailProvider(ctx context.Context) error {
 	if h.rt.Kind() == runtime.KindKubernetes {
 		return runtime.ErrUnsupported
 	}
-	h.mu.RLock()
+	h.mu.Lock()
 	t, m := h.mailWiredLocked()
 	var project, service string
+	var holdErr error
 	if t != nil {
 		project, service = projectName(t.ID), m.Sessions.Restart
+		// A held provider (or one whose tree changed on disk) is never
+		// restarted in place (R-HH3): its sessions end by stopping it.
+		holdErr = h.mailHoldGateLocked(t)
 	}
-	h.mu.RUnlock()
+	h.mu.Unlock()
 	if t == nil {
 		return errMailNotWired
+	}
+	if holdErr != nil {
+		h.mailStopHeld("a session reset (no restart in place while held)")
+		return nil
 	}
 	return h.rt.RestartService(ctx, project, service, mailRestartGrace)
 }
@@ -120,6 +128,9 @@ func (h *Hub) mailRestart(ctx context.Context, why string) error {
 		if held {
 			h.mailStopHeld("a session reset: " + err.Error()) // R-HH1
 		}
+	}
+	if h.MailHeldStopError() != "" && err == nil {
+		err = errors.New("the held provider's stop failed: mail sessions may still be open")
 	}
 	rec := OpRecord{Op: OpMailRestart, At: h.mailNow(), OK: err == nil}
 	if err != nil {

@@ -893,6 +893,17 @@ func (h *Hub) deliverOnce(ctx context.Context, id string, trig Trigger, opt deli
 			h.forgetOwed(id)
 			return rep, "", false, nil
 		}
+		// A held mail provider gets nothing of its changed tree, not
+		// even data files or hooks in its running containers (R-HH3);
+		// the delivery stays owed and runs after the re-confirm.
+		h.mu.Lock()
+		holdErr := h.mailHoldGateLocked(&tmpl)
+		h.mu.Unlock()
+		if holdErr != nil {
+			rep.Units = append(rep.Units, UnitResult{Unit: unitBusy, Skipped: SkipBusy, Message: holdErr.Error(), At: now})
+			h.setOwed(id, opt.effect)
+			return rep, "", false, nil
+		}
 		// The run's own effect is owed until it is applied (after the
 		// busy and pending checks: a busy run's re-queue records it).
 		owedSeq = h.setOwed(id, opt.effect)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -306,4 +307,65 @@ func TestRevokeRestartsWithin8s(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// TestLANOnlyCreateFailedRevokeNeverReturns (H2, R-HH2, fault
+// injection): a wider credential whose revoke fails never reaches the
+// person; the row stays active (M6: only the provider's word ends it)
+// and the provider is voided.
+func TestLANOnlyCreateFailedRevokeNeverReturns(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	lanOnly(t, f)
+	f.sync(t)
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.AllowedIPs = []netip.Prefix{}
+		s.RevokeStatus = 500
+	})
+	c, err := f.h.CreateMailPassword(context.Background(), "alice", "laptop", "none", testProof)
+	if statusOf(err) != 503 || c != nil {
+		t.Fatalf("a wider password was handed out: %v", err)
+	}
+	f.h.mu.RLock()
+	owed := f.h.st.Mail.VoidOwed
+	active := 0
+	for _, r := range f.h.st.MailCredentials["alice"] {
+		if r.Active() && r.Label == "laptop" {
+			active++
+		}
+	}
+	f.h.mu.RUnlock()
+	if owed == nil || active != 1 {
+		t.Fatalf("void %+v, active laptop rows %d", owed, active)
+	}
+}
+
+// TestLANOnlyTakeBackNeedsProviderWord (M6, fault injection): the list
+// fails and so does the take-back: the row stays active, the provider
+// is voided.
+func TestLANOnlyTakeBackNeedsProviderWord(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	lanOnly(t, f)
+	f.sync(t)
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 500 })
+	f.h.SetMailAPI(&listFailAPI{MailAPI: f.h.mailClient()})
+	if _, err := f.h.CreateMailPassword(context.Background(), "alice", "laptop", "none", testProof); statusOf(err) != 503 {
+		t.Fatalf("create: %v", err)
+	}
+	f.h.mu.RLock()
+	defer f.h.mu.RUnlock()
+	for _, r := range f.h.st.MailCredentials["alice"] {
+		if r.Label == "laptop" && !r.Active() {
+			t.Fatal("the row ended without the provider's word")
+		}
+	}
+	if f.h.st.Mail.VoidOwed == nil {
+		t.Fatal("not voided")
+	}
+}
+
+// listFailAPI fails every credential list.
+type listFailAPI struct{ MailAPI }
+
+func (a *listFailAPI) Credentials(context.Context, string) ([]mailprovider.Credential, error) {
+	return nil, errors.New("list timed out")
 }

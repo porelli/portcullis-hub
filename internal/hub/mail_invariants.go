@@ -138,29 +138,30 @@ func addrRanges(ps []netip.Prefix) [][2]*big.Int {
 
 // checkAllowedIPs (LAN-only, contract §19.6): every live credential of
 // the account whose allowed_ips doesn't cover exactly the Local networks
-// is revoked at once (its row ends revoked, by lan-only), the sessions
-// reset and the breach kept for the doctor. Answers the ids revoked
-// (the ones whose revoke the provider confirmed). Nothing while LAN-only
-// is off.
-func (h *Hub) checkAllowedIPs(ctx context.Context, api MailAPI, user, uuid string, live []mailprovider.Credential) []string {
+// is revoked at once (bounded; its row ends revoked, by lan-only, only on
+// the provider's word: 204 or 404, M6), the sessions reset and the
+// breach kept for the doctor. A revoke the provider doesn't confirm
+// leaves the row active and voids the provider (Ruling R-HH2, fail
+// closed). Answers how many were wider and the ids revoked. Nothing
+// while LAN-only is off.
+func (h *Hub) checkAllowedIPs(ctx context.Context, api MailAPI, user, uuid string, live []mailprovider.Credential) (wider int, revoked []string) {
 	if !h.mailCore().SubmissionLAN || uuid == "" {
-		return nil
+		return 0, nil
 	}
 	want := h.mailLocalNetworks()
-	var revoked []string
+	failed := false
 	for _, c := range live {
 		if sameAddressSet(c.AllowedIPs, want) {
 			continue
 		}
+		wider++
 		h.mailLAN.mu.Lock()
 		h.mailLAN.last, h.mailLAN.user = h.mailNow(), user
 		h.mailLAN.mu.Unlock()
 		log.Printf("mail: %s's mail password %s may authenticate from beyond the Local networks under LAN-only: revoked", user, c.ID)
-		rctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
-		err := api.RevokeCredential(rctx, uuid, c.ID)
-		cancel()
-		if err != nil {
+		if err := h.mailRevokeBounded(ctx, api, uuid, c.ID); err != nil {
 			log.Printf("mail: revoking %s's mail password %s (LAN-only): %v", user, c.ID, err)
+			failed = true
 			continue
 		}
 		revoked = append(revoked, c.ID)
@@ -169,7 +170,45 @@ func (h *Hub) checkAllowedIPs(ctx context.Context, api MailAPI, user, uuid strin
 	if len(revoked) > 0 {
 		h.goBackground(func() { h.mailRestart(context.Background(), "a LAN-only revoke") })
 	}
-	return revoked
+	if failed {
+		h.mailFailClosed(user + "'s mail password beyond the Local networks can't be revoked")
+	}
+	return wider, revoked
+}
+
+// mailRevokeBounded revokes one credential within mailCallTimeout (never
+// cancelled by the request); nil on the provider's 204 or 404.
+func (h *Hub) mailRevokeBounded(ctx context.Context, api MailAPI, uuid, id string) error {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mailCallTimeout)
+	defer cancel()
+	err := api.RevokeCredential(rctx, uuid, id)
+	if mailprovider.StatusOf(err) == http.StatusNotFound {
+		return nil
+	}
+	return err
+}
+
+// mailFailClosed voids the wired provider (Ruling R-HH2): a credential
+// that must not live can't be removed, so every password goes — a void
+// owed (the gate closes at once, void mode at the next up) and the void
+// started now. Reason wire: the provider's own store is untrusted.
+func (h *Hub) mailFailClosed(why string) {
+	h.mu.Lock()
+	p := h.st.Mail.Provider
+	var err error
+	if p != nil {
+		err = h.markVoidOwedLocked(state.MailVoidWire)
+	}
+	h.mu.Unlock()
+	if p == nil {
+		return
+	}
+	log.Printf("mail: %s: voiding the provider %s (fail closed)", why, p.Instance)
+	if err != nil {
+		log.Printf("mail: recording the void of %s: %v", p.Instance, err)
+	}
+	h.writeMailTargets()
+	h.kickMailVoid()
 }
 
 // mailEndRowsOf ends the active row standing for live credential c.

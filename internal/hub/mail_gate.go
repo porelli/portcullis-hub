@@ -522,6 +522,9 @@ func (h *Hub) mailVoidRetryOnce(ctx context.Context) {
 	h.mu.RLock()
 	p, owed, held := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held
 	h.mu.RUnlock()
+	if held != nil && held.Stopped != nil && held.StopError != "" {
+		h.mailRetryHeldStop()
+	}
 	if p == nil || owed == nil || held != nil {
 		return
 	}

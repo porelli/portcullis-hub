@@ -310,30 +310,68 @@ func (a *heldMailAPI) State(ctx context.Context) (mailprovider.StateStatus, erro
 }
 
 // mailStopHeld stops the held provider (R-HH1): it can't take what the
-// Hub must send, and its changed tree can't be started. Recorded in the
-// hold (saved): mail stays down until the re-confirm.
+// Hub must send, and its changed tree can't be started. The stop is
+// recorded in the hold (saved) BEFORE the down, so mailClient and the
+// targets treat it as stopped at once (fail closed); a failed down is
+// kept (StopError, a doctor Problem) and retried (mailRetryHeldStop)
+// until it succeeds. Mail stays down until the re-confirm.
 func (h *Hub) mailStopHeld(why string) {
+	now := h.mailNow().UTC()
+	h.mu.Lock()
+	p, hd := h.st.Mail.Provider, h.st.Mail.Held
+	if p == nil || hd == nil || hd.Stopped != nil {
+		h.mu.Unlock()
+		return
+	}
+	c := *hd
+	c.Stopped = &now
+	h.st.Mail.Held = &c
+	h.saveLocked()
+	h.mu.Unlock()
+	log.Printf("mail: the held provider %s can't take %s: stopping it (no mail until an administrator confirms its template)", p.Instance, why)
+	h.writeMailTargets()
+	h.mailRetryHeldStop()
+}
+
+// mailRetryHeldStop runs the owed down of a stopped hold (at the stop
+// and from the void retry loop): the error kept, or cleared on success.
+func (h *Hub) mailRetryHeldStop() {
 	h.mu.RLock()
 	p, hd := h.st.Mail.Provider, h.st.Mail.Held
 	h.mu.RUnlock()
-	if p == nil || hd == nil || hd.Stopped != nil || h.rt == nil {
+	if p == nil || hd == nil || hd.Stopped == nil {
 		return
 	}
-	log.Printf("mail: the held provider %s can't take %s: stopping it (no mail until an administrator confirms its template)", p.Instance, why)
-	if err := h.rt.DownByName(context.Background(), projectName(p.Instance)); err != nil {
-		log.Printf("mail: stopping the held provider %s failed: %v", p.Instance, err)
-		return
+	var err error
+	if h.rt == nil {
+		err = errors.New("no container runtime")
+	} else {
+		err = h.rt.DownByName(context.Background(), projectName(p.Instance))
 	}
-	now := h.mailNow().UTC()
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+		log.Printf("mail: stopping the held provider %s failed (retrying): %v", p.Instance, err)
+	}
 	h.mu.Lock()
-	if cur := h.st.Mail.Held; cur != nil && h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == p.Instance {
+	if cur := h.st.Mail.Held; cur != nil && cur.Stopped != nil && cur.StopError != msg && h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == p.Instance {
 		c := *cur
-		c.Stopped = &now
+		c.StopError = msg
 		h.st.Mail.Held = &c
 		h.saveLocked()
 	}
 	h.mu.Unlock()
-	h.writeMailTargets()
+}
+
+// MailHeldStopError is the owed stop's last error ("" = none owed or
+// done): the doctor's Problem (the held provider may still serve).
+func (h *Hub) MailHeldStopError() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if hd := h.st.Mail.Held; hd != nil && hd.Stopped != nil {
+		return hd.StopError
+	}
+	return ""
 }
 
 // WireMailForTest records instance as the wired provider in normal mode

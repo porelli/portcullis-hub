@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,23 +93,44 @@ func TestUpBeforeHoldRecordedRefused(t *testing.T) {
 	}
 }
 
-// TestHeldKeepsRevoking (R-HH1): while held, a revoke and a removal
-// reach the running provider; one it can't take stops the provider.
+// TestHeldKeepsRevoking (R-HH1): while held, a revoke reaches the
+// running provider; its session reset never restarts it in place, it
+// stops it instead (R-HH3).
 func TestHeldKeepsRevoking(t *testing.T) {
 	w := wiredFix(t)
 	c := w.create(t, "alice", "phone").ID
 	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
 	syncNow(w)
+	before := len(w.mc.Creds("alice"))
 	if err := w.h.RevokeOwnMailPassword(context.Background(), "alice", c); err != nil {
 		t.Fatal(err)
 	}
-	if len(w.mc.Creds("alice")) != 0 {
+	w.h.Wait()
+	if len(w.mc.Creds("alice")) != before-1 {
 		t.Fatal("the revoke didn't reach the held provider")
 	}
-	c2 := w.create(t, "alice", "laptop").ID
+	w.h.mu.RLock()
+	held := w.h.st.Mail.Held
+	w.h.mu.RUnlock()
+	if held == nil || held.Stopped == nil {
+		t.Fatalf("the session reset didn't stop the held provider: %+v", held)
+	}
+	v, _ := w.h.InstanceMailProvider(context.Background(), mailProviderID)
+	if v.Mode != "stopped" || w.h.mailClient() != nil {
+		t.Fatalf("mode %q", v.Mode)
+	}
+}
+
+// TestHeldFailedRevokeStops (R-HH1, fault injection): a revoke the held
+// provider can't take stops it at once.
+func TestHeldFailedRevokeStops(t *testing.T) {
+	w := wiredFix(t)
+	c := w.create(t, "alice", "phone").ID
+	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
+	syncNow(w)
 	w.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 500 })
 	downs := len(w.runner.callsMatching("downbyname"))
-	if err := w.h.RevokeOwnMailPassword(context.Background(), "alice", c2); err == nil {
+	if err := w.h.RevokeOwnMailPassword(context.Background(), "alice", c); err == nil {
 		t.Fatal("a failed revoke answered ok")
 	}
 	w.h.mu.RLock()
@@ -116,13 +138,6 @@ func TestHeldKeepsRevoking(t *testing.T) {
 	w.h.mu.RUnlock()
 	if held == nil || held.Stopped == nil || len(w.runner.callsMatching("downbyname")) == downs {
 		t.Fatalf("the held provider wasn't stopped: %+v", held)
-	}
-	if w.h.mailClient() != nil {
-		t.Fatal("a stopped provider still served")
-	}
-	v, _ := w.h.InstanceMailProvider(context.Background(), mailProviderID)
-	if v.Mode != "stopped" {
-		t.Fatalf("mode %q", v.Mode)
 	}
 }
 
@@ -253,5 +268,77 @@ func TestTemplateNowInvalidHolds(t *testing.T) {
 	defer w.h.mu.RUnlock()
 	if h := w.h.st.Mail.Held; h == nil || h.Reason != MailInvalidText {
 		t.Fatalf("held %+v", h)
+	}
+}
+
+// heldFix is a wired provider held by a template change.
+func heldFix(t *testing.T) *wireFix {
+	t.Helper()
+	w := wiredFix(t)
+	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
+	syncNow(w)
+	w.h.mu.RLock()
+	held := w.h.st.Mail.Held
+	w.h.mu.RUnlock()
+	if held == nil {
+		t.Fatal("not held")
+	}
+	return w
+}
+
+// TestHeldStopOwedBeforeDown (security review): the stop is recorded
+// before the down, so a failed down still leaves the provider treated as
+// stopped (no client, no targets), the error kept for the doctor and the
+// down retried until it succeeds.
+func TestHeldStopOwedBeforeDown(t *testing.T) {
+	w := heldFix(t)
+	w.runner.byNameErr = errors.New("engine down")
+	w.h.mailStopHeld("a test")
+	if w.h.mailClient() != nil || len(readTargets(t, w.fixture)) != 0 {
+		t.Fatal("a stop owed still serves")
+	}
+	if w.h.MailHeldStopError() == "" {
+		t.Fatal("the failed down isn't kept")
+	}
+	st, _ := state.Load(w.h.statePath())
+	if st.Mail.Held == nil || st.Mail.Held.Stopped == nil {
+		t.Fatal("the owed stop isn't saved")
+	}
+	w.runner.byNameErr = nil
+	w.h.mailVoidRetryOnce(context.Background())
+	if w.h.MailHeldStopError() != "" {
+		t.Fatal("the retry didn't clear the error")
+	}
+}
+
+// TestHeldNoRestartInPlace (R-HH3): a session reset of a held provider
+// never restarts it in place: it is stopped instead.
+func TestHeldNoRestartInPlace(t *testing.T) {
+	w := heldFix(t)
+	n := len(w.engine.Restarts())
+	if err := w.h.mailRestart(context.Background(), "a test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.engine.Restarts()) != n {
+		t.Fatal("restarted in place while held")
+	}
+	w.h.mu.RLock()
+	held := w.h.st.Mail.Held
+	w.h.mu.RUnlock()
+	if held.Stopped == nil {
+		t.Fatal("not stopped")
+	}
+}
+
+// TestHeldGetsNoDelivery (R-HH3): no data files or hooks of the changed
+// tree reach a held provider's running containers.
+func TestHeldGetsNoDelivery(t *testing.T) {
+	w := heldFix(t)
+	rep, err := w.h.Deliver(context.Background(), mailProviderID, TriggerSave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Units) != 1 || rep.Units[0].Skipped != SkipBusy || !strings.Contains(rep.Units[0].Message, "template changed") {
+		t.Fatalf("%+v", rep.Units)
 	}
 }
