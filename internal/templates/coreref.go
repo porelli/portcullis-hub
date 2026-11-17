@@ -57,7 +57,7 @@ var (
 	// coreAliases are core's network aliases that aren't service names
 	// (wg's metrics address on portcullis, mail's and mailctl's on
 	// portcullis-metrics-mail): reserved DNS names too.
-	coreAliases = set("wg-metrics", "mail-metrics", "mailctl-metrics")
+	coreAliases = set("wg-metrics", "mail-metrics", "mailctl-metrics", "hub-metrics")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )
