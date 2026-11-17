@@ -689,6 +689,32 @@ The router is generated from the manifest, not shipped in `compose.yml`: only
 the Hub knows whether the exception is on, which shares are listed and which
 TLS tier the host gets, and a template can't open paths by itself.
 
+## SSH access
+
+**Hub → SSH access** (administrators; off until switched on in its
+Settings tab) holds the mapping described in [SSH Access](ssh-access.md):
+
+| Tab | What it holds |
+|---|---|
+| Hosts | managed hosts with their state, last sync, bundle serial, drift and host certificate expiry, *Access*, *Remove account*, *Remove host*; unmanaged entries with their patterns and the `host trust` command |
+| Host groups | members, governing template, source addresses (*Only through the Portcullis VPN*), host certificates, delegable, *Portcullis creates shared accounts*, the setup commands |
+| Grants | group → host group, accounts, sudo, TTL, forwarding; the preview of an unsaved change |
+| Access preview | who can reach a host, a host group or where a person can log in, with a "root or sudo only" filter |
+| Certificates | the issued certificates, *Revoke*, *Sign a host key*, the revoked-keys list |
+| Settings | on/off, default TTL (1–12 h, default 8 h), the CA fingerprints |
+
+*Add host*, privileged grants and *Sign a host key* ask for a fresh sign-in;
+privileged grants also ask for the group's name typed again. The enrolment
+code is shown once, with a *Copy* button and the command to run.
+
+On `people.<domain>`, each person's **Sign-in** page has an SSH access card
+(their host groups, accounts, sudo, hosts and certificates, *Revoke all my
+SSH certificates*, and how to start with the CLI). Administrators and
+`sign_in_help` holders see the same card on **People → person**, with
+*Revoke all SSH certificates*. `ssh_access` holders get an **SSH access**
+page with the grants and previews of delegable host groups, and group pages
+show lines such as "SSH: web (own account), all (own account, sudo)".
+
 ## App settings
 
 Templates declare their options under `settings:` in the manifest
@@ -1425,6 +1451,7 @@ The tab also has **AI support** (the master switch, AI clients, the
 Portcullis MCP, connection length, rate limits, allowed origins and the model
 providers: [AI support → Settings → AI](ai.md#settings-ai)),
 **Domains** ([Adding extra domains](#adding-extra-domains)),
+**Mail** ([below](#mail)),
 **Shared folders** ([below](#shared-folders)) and **Local networks**
 ([below](#local-networks)).
 
@@ -1660,6 +1687,109 @@ The doctor's file-sharing findings
 - a share slot served to nobody;
 - a refused share name or username, as reported by the app.
 
+## Mail
+
+With the [mail server](../setup/mail.md) on, the Hub manages who gets a
+mailbox, the mail domains, the spam settings, aliases, lists and mail
+passwords; mailctl applies them to Stalwart. Mail itself is turned on and off
+on the server (`./portcullis mail enable` / `disable`): until then Settings →
+Mail says "Mail is off: run ./portcullis mail enable on the host", and on
+Kubernetes "Mail isn't available on Kubernetes yet (Docker or rootless Podman
+only)". Interfaces: [contracts §19.9](../guides/integration-contracts.md#199-hub-api-and-audit).
+
+### Settings → Mail
+
+Administrators only (Hub listener):
+
+- **Facts** (read-only, from the server): the mail server's name with
+  "reachable" / "mailctl unreachable", the relay (on / off, set in `.env`),
+  submission ("from anywhere" or "local networks only"; under rootless Podman
+  why LAN-only isn't possible), how long former accounts are kept
+  (`MAIL_FORMER_RETENTION`) and whether a Spamhaus DQS key is set (with a
+  hint when it isn't).
+- **Domains**: one row per mail-capable domain (the main domain and every
+  added domain) with its state (on, draining, off), **Turn on** / **Turn
+  off** and the **groups** whose members get an address there (empty: every
+  mailbox on the main domain, nobody on an added domain). Turning off warns
+  first: "Turning mail off removes the MX after the MTA-STS max_age (up to 7
+  days); mail sent meanwhile is still received." An added domain with mail
+  on or draining can't be deleted until it is off. Turning mail on is
+  refused while an instance uses `mail.`, `mta-sts.`, `autoconfig.` or
+  `autodiscover.` of that domain, naming the instance; and no instance may
+  take those names, or `MAIL_HOSTNAME` itself, while mail is on.
+- **Primary domain**: every login and first address (`<username>@<primary>`).
+- **Spam**: **Junk at score** (5), **Reject at score** (15), the three
+  blocklists, **Always accept** and **Always refuse** (one domain or address
+  per line). See [Mail operations → Spam](mail.md#spam).
+- **Sending limits**: recipients per hour (300) and per day (1000) per person.
+- **Mailbox size per group**: `group = GiB` per line; a person who matches
+  several rows gets the largest; 10 GiB otherwise (at most 1 TiB).
+- **Pending removal**: when more than half the mailboxes would go at once,
+  a banner lists the people, each with "mail passwords revoked" or "revoking
+  failed: retrying", and **Confirm removal** (full administrators only,
+  `lldap_admin`; it asks first: "Remove N mailboxes? They are parked and
+  deleted after the retention period."). See
+  [Mass removals](mail.md#mass-removals).
+- A banner when mail can't be managed (the Hub's mail secret missing or too
+  short): run `./portcullis up` on the server.
+
+Saved with `PUT /api/mail/settings` and `PUT /api/mail/domains/{name}`,
+audited `mail.settings` and `mail.domain`; added domains' DNS follows within
+about a minute. The policy steps (DMARC, MTA-STS) are
+[doctor fixes](#mail-checks); DKIM rotates on its own (or with
+`./portcullis mail dkim rotate <domain>`). The Portcullis MCP has one read-only tool,
+`mail_status`; nothing about mail passwords is ever a tool.
+
+### A person's mail
+
+On a person's page (People → person), the **Mail** card shows their
+addresses or "No mailbox: &lt;name&gt; isn't in mail_users", and:
+
+- **Aliases** (administrators): extra addresses on any mail domain, one per
+  line, delivered to and sendable as by the person (**Save aliases**; an
+  address already used by someone, a list or a reserved name is refused,
+  naming the owner). Aliases belong to the person's LLDAP account, not the
+  username: they go when the person is deleted.
+- **Mail passwords**: label, created, expiry and status, each with
+  **Revoke** (administrators, and holders of `sign_in_help` for the people
+  they may help). A password reset by a restore shows "reset by a restore";
+  while the mail server can't be read, active ones show "not confirmed: the
+  mail server can't be read". "Only &lt;name&gt; can create a mail password,
+  on their Sign-in page": nobody creates one for someone else.
+
+### A group's list
+
+On a group's page, administrators can **Make this group a list** at
+`<group>@<domain>` (a mail domain), with **Who may post**: *members only*
+(the default: the server refuses outside senders) or *anyone*. A list
+delivers to every member's mailbox; no archive, no subscriptions. **Stop the
+list** ends it. Audited `mail.list`.
+
+### Mail passwords
+
+Each person creates their own mail passwords on their
+[Sign-in page](auth-policies.md#the-sign-in-page)
+(`https://people.<domain>/signin`), in the **Mail passwords** section, which
+shows only for people in `mail_users`. It shows:
+
+- the settings for a mail app: username (the primary address), incoming
+  (IMAP) `MAIL_HOSTNAME` port 993 SSL/TLS, outgoing (SMTP) port 465 SSL/TLS
+  or 587 STARTTLS, and their addresses;
+- their mail passwords: label, created, expiry ("no expiry"), **Revoke**
+  ("Mail apps using it stop at once"), or "reset by a restore";
+- **+ New mail password**: a label for the device or app (1–64 characters)
+  and an expiry (never, 90 days, 1 year), then a fresh sign-in in a small
+  window. At most **5** active: "At most 5 mail passwords: revoke one first."
+
+The new password is **shown once**, in a dialog with **Copy**, the settings,
+and **Download for iPhone, iPad or Mac** (a `.mobileconfig` profile that sets
+up the account with that password). Closing the dialog drops the password
+from the page; it is never shown again and Portcullis doesn't keep it
+(Stalwart stores only its hash). A mail password works for mail only: never
+to sign in to Portcullis. Revoking one, or leaving `mail_users`, stops it
+within 8 seconds, open sessions included. While an administrator is signed
+in as the person, the section is read-only.
+
 ## Doctor
 
 The **Doctor** tab checks the whole setup, including folders and paths you
@@ -1752,6 +1882,41 @@ They never fire under Docker or Podman, and none has a one-click fix:
 | `cluster_unverified` | Problem | Another cluster guard check fails (the cluster check missing, `ok: false` or older than 24 h, or the Hub's permissions not exactly its Roles); shows why | Explain: `./portcullis up` writes the cluster check again |
 | `reload_degraded` | Info | An instance's image has no `kill`, so a settings reload restarts its pod instead | — |
 | `kube_api_public` | Warning | The Kubernetes API (`:6443`) or the kubelet (`:10250`) answers on the node's public address | Explain: allow them only from the administrators' addresses in the firewall |
+
+### Mail checks
+
+With the [mail server](../setup/mail.md) on, the doctor adds twenty-two
+checks, from mailctl's checks and status and from the added mail domains' DNS
+plans. While mailctl can't be read there are no mail findings and the tab
+says so. What each one means and what to do:
+[Mail operations → Troubleshooting](mail.md#troubleshooting).
+
+| Kind | Severity | Fix |
+|------|----------|-----|
+| `mail_port25_blocked` | Problem (Info: not known yet) | Explain |
+| `mail_ptr_missing`, `mail_ptr_mismatch` | Problem | Explain, with the provider's steps |
+| `mail_ipv6_ptr` | Info | — |
+| `mail_blocklisted` | Problem (Warning: lookup refused) | Explain |
+| `mail_records_wrong` | Problem | One click on an added domain (apply the `mail` set); explain on the main domain ("Run `./portcullis dns setup --only mail` on the server") |
+| `mail_dkim_stuck` | Warning | Explain |
+| `mail_dkim_manual` | Info | Explain |
+| `mail_cert_expiring` | Warning / Problem | Explain ("Run `./portcullis mail cert` on the server") |
+| `mail_timer_missing` | Warning | Explain ("Run `./portcullis mail schedule --systemd` on the server") |
+| `mail_dmarc_failures` | Warning | Explain |
+| `mail_dmarc_promote` | Info | One click: `<domain>: DMARC p=<policy> → p=<proposed>` |
+| `mail_mtasts_enforce` | Info | One click: `<domain>: MTA-STS testing → enforce (max_age 604800)` |
+| `mail_dane_off` | Problem | Explain |
+| `mail_client_ip_rewritten` | Warning | Explain |
+| `mail_lan_only_unenforced` | Problem | Explain |
+| `mail_rate_held` | Warning | Explain |
+| `mail_mass_removal_pending` | Problem | One click (full administrators): "removes the mailboxes of &lt;users&gt; (parked, deleted after MAIL_FORMER_RETENTION)" |
+| `mail_sync_blocked` | Problem | Explain |
+| `mail_hub_secret_invalid` | Problem | Explain ("./portcullis up recreates the Hub with the mail secret"); while it fires it is the only mail finding |
+| `mail_spam_rules_missing` | Problem | Explain |
+| `mail_external_lookups_on` | Problem | Explain |
+
+The promotions and the removal confirmation always ask an AI tool for a
+confirmation in your browser.
 
 ### VPN checks
 

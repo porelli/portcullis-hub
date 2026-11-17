@@ -134,7 +134,7 @@ For each rule-based group (skipping administrator and built-in groups):
 Rules of **protected groups** may only reference **admin-only fields**:
 
 - **Administrator groups**: `lldap_admin`, `lldap_password_manager`, core-subdomain groups (`auth`, `traefik`, `hub`, `directory`, `people`, `metrics`, `mcp`), `INVITE_PROTECTED_GROUPS`
-- **Permission groups**: the groups holding a delegated permission (`edit_details`, `invite`, `remove`, `sign_in_help`)
+- **Permission groups**: the groups holding a delegated permission (`edit_details`, `invite`, `remove`, `sign_in_help`, `ssh_access`)
 - **App admin groups**: any group used as an app's `admin_group` or in `path_groups`
 - **Privileged setting groups**: any group with a row in an app's [privileged option](hub.md#per-group-values) (a role or admin flag, e.g. Grafana's or Immich's role). The Hub works these out from the apps' current settings; the reason shown is "a privileged value of app <id>"
 
@@ -180,6 +180,13 @@ members.
     only to people you would trust with those accounts.
 
 Details: [Hub → Delegated permissions](hub.md#delegated-permissions).
+
+**SSH access (`ssh_access`).** Members of the group holding `ssh_access`
+manage non-privileged SSH grants on host groups marked *delegable*
+([SSH Access](ssh-access.md#delegation)). They can't grant sudo, root or
+forwarding, or grant to a group they're in. Every group an SSH grant uses
+is a guarding group ("an SSH access group"), and the members of a group with
+a privileged SSH grant are protected: no delegate can target them.
 
 ### Membership Flow for Rule-Based Groups
 
