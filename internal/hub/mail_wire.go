@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 
@@ -428,9 +429,18 @@ func (h *Hub) undoWireMail(id string, recordGen int) {
 		}
 		h.saveLocked()
 	}
-	for _, f := range []string{mailGateAPISecret, mailGatePresent, mailGateFileVoidSession, mailGateVoidPending} {
+	// Every gate file, as the unwire (final review L3).
+	for _, f := range []string{mailGateAPISecret, mailGatePresent, mailGateMetricsSecret, mailGateRelayPassword, mailGateFileVoidSession, mailGateVoidPending} {
 		if err := h.mailGateRemove(id, f); err != nil {
 			log.Printf("mail: undoing the wiring of %s: %v", id, err)
+		}
+	}
+	if h.cfg.MailSlotDir != "" {
+		if r, err := os.OpenRoot(h.cfg.MailSlotDir); err == nil {
+			if err := r.Remove(mailGateMetricsSecret); err != nil && !os.IsNotExist(err) {
+				log.Printf("mail: undoing the wiring of %s: mail_slot's metrics-secret: %v", id, err)
+			}
+			r.Close()
 		}
 	}
 	var live *templates.Template

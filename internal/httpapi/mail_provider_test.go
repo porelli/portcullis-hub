@@ -121,3 +121,19 @@ func TestNoAIExecIntoMailProvider(t *testing.T) {
 	}
 
 }
+
+// TestMailProviderRefusalsAudited (final review L8): a non-admin's
+// mail-provider write is audited as refused.
+func TestMailProviderRefusalsAudited(t *testing.T) {
+	e, _ := mailEnv(t)
+	before := len(readAudit(t, e.audit))
+	if r, _ := doAs(t, e.hub, "bob", "PUT", "/api/instances/mailsrv/mail-provider", `{"wired": true, "confirm": "mailsrv"}`); r.StatusCode != 403 {
+		t.Fatalf("bob: %d", r.StatusCode)
+	}
+	for _, a := range readAudit(t, e.audit)[before:] {
+		if a.Action == "mail.provider" && a.Actor == "bob" && a.Result != "ok" {
+			return
+		}
+	}
+	t.Fatal("the refusal isn't audited")
+}

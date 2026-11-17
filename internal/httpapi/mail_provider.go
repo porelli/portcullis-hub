@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
 )
@@ -48,14 +50,25 @@ func (s *Server) handleSwitchMailProvider(w http.ResponseWriter, r *http.Request
 	writeJSONStatus(w, http.StatusAccepted, mailWireAccepted{acceptedBody(op), hub.MailWarning})
 }
 
+// errMailAdminOnly: a non-admin's mail-provider write.
+var errMailAdminOnly = errors.New("not allowed: admins only")
+
 // mailProviderGate: an AI or MCP actor is refused first (403), then a
 // non-admin (adminOnly).
 func (s *Server) mailProviderGate(w http.ResponseWriter, r *http.Request) bool {
-	if a := requestActor(r); a.Via != "" {
+	a := requestActor(r)
+	if a.Via != "" {
 		http.Error(w, "not allowed: mail providers are never wired, switched or unwired through MCP or AI", http.StatusForbidden)
 		return false
 	}
-	return s.adminOnly(w, r)
+	if !s.adminOnly(w, r) {
+		// Audited (final review L8), the write routes only.
+		if r.Method != http.MethodGet && a.User != "" {
+			s.auditOpAs(a, r.PathValue("id"), directory.AuditEntry{Action: "mail.provider", Target: r.URL.Path, Detail: r.Method}, &hub.StatusError{Status: http.StatusForbidden, Err: errMailAdminOnly}, http.StatusForbidden)
+		}
+		return false
+	}
+	return true
 }
 
 // handleInstanceMailProvider: GET /api/instances/{id}/mail-provider → the

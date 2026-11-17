@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"html"
-	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -491,17 +490,11 @@ func mailRateHeld(mk mailMk, m *MailIn, user string, c mailprovider.Check) {
 	f.Persons = []string{user}
 }
 
-// ptrMissing: the fcrdns check's reason is "missing". Without a reason
-// (an older mailctl) the detail decides ("no PTR"), logged as a fallback.
+// ptrMissing: the fcrdns check's reason is "missing" (the provider API's
+// reason field; without one it counts as a mismatch: no fallback on the
+// detail's wording, final review L13).
 func ptrMissing(c mailprovider.Check) bool {
-	switch c.Reason {
-	case mailprovider.ReasonPTRMissing:
-		return true
-	case mailprovider.ReasonPTRMismatch:
-		return false
-	}
-	log.Printf("doctor: mail check %s has no reason (%q): judged from its detail", c.ID, c.Reason)
-	return strings.Contains(strings.ToLower(c.Detail), "no ptr")
+	return c.Reason == mailprovider.ReasonPTRMissing
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

@@ -450,6 +450,9 @@ type Hub struct {
 		since time.Time
 		why   string
 	}
+	// testHookDeleteBeforeLock runs between a delete's first mail check
+	// and its instance lock (tests).
+	testHookDeleteBeforeLock func(id string)
 	// mailStopWait bounds one owed down of a held provider (0: 2 min).
 	mailStopWait  time.Duration
 	mailPollEvery time.Duration

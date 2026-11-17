@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/portcullis/hub/internal/directory"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/portcullis/hub/internal/state"
@@ -100,6 +101,13 @@ func TestFinalReviewWireStopDuringVoid(t *testing.T) {
 	p, owed := w.h.st.Mail.Provider, w.h.st.Mail.VoidOwed
 	w.h.mu.RUnlock()
 	t.Logf("after Stop: provider=%+v owed=%+v", p, owed)
+	// L3: the undo removes every gate file and mail_slot's metrics secret.
+	if gateFile(t, w.fixture, mailGateMetricsSecret) != "" || gateFile(t, w.fixture, mailGateRelayPassword) != "" {
+		t.Fatal("secrets left in the gate after the undo")
+	}
+	if _, err := os.Stat(filepath.Join(w.h.cfg.MailSlotDir, mailGateMetricsSecret)); !os.IsNotExist(err) {
+		t.Fatal("mail_slot's metrics secret left after the undo")
+	}
 	if p != nil {
 		// does the retry loop finish the stopped wiring?
 		w.h.mailVoidRetryOnce(context.Background())
@@ -273,6 +281,7 @@ func TestFinalReviewHoldGateTOCTOU(t *testing.T) {
 	w.mu.Lock()
 	w.ups = nil
 	w.mu.Unlock()
+	downs := len(w.runner.callsMatching("down"))
 	unlock, _ := w.h.lockApp(mailProviderID)
 	err := w.h.composeUp(context.Background(), w.h.Template(mailProviderID))
 	unlock()
@@ -285,6 +294,9 @@ func TestFinalReviewHoldGateTOCTOU(t *testing.T) {
 	t.Logf("up err=%v ups=%d held=%v", err, n, held != nil)
 	if err == nil && n > 0 {
 		t.Fatal("the changed (unreviewed) tree was brought up: the gate isn't re-checked after the create/up")
+	}
+	if held == nil || len(w.runner.callsMatching("down")) == downs {
+		t.Fatal("the changed tree wasn't held and stopped after its up")
 	}
 }
 

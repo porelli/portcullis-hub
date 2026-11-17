@@ -437,6 +437,9 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 		return err
 	}
 	runGen := h.st.Mail.VoidGen
+	// The stored debt's reason (L10): a restore owed wins over a stale
+	// caller's wire.
+	reason = h.st.Mail.VoidOwed.Reason
 	// A fresh void session for this run; the secrets the provider needs
 	// (a core restore emptied hub_secrets).
 	err := h.mailVoidFilesLocked(id)

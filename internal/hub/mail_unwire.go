@@ -89,7 +89,9 @@ func (h *Hub) startUnwireMail(id string, drain bool, actor directory.Actor, host
 	p := h.st.Mail.Provider
 	h.mu.RUnlock()
 	if p == nil || p.Instance != id {
-		return nil, statusErr(http.StatusConflict, "%s isn't this server's mail provider", id)
+		err := statusErr(http.StatusConflict, "%s isn't this server's mail provider", id)
+		h.auditOp(actor, "mail.provider_unwired", id, "", err) // L8
+		return nil, err
 	}
 	return h.startAsync(id, OpMailUnwire, actor, mailUnwirePlan(drain), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		unlockSlot, err := h.lockMailSlot()

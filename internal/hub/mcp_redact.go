@@ -61,7 +61,38 @@ func (h *Hub) toolRedactionIDs() []string {
 // (redactionSetErr). err: some set exists but can't be read whole — the
 // caller then hides the result (fail closed).
 func (h *Hub) ToolRedactionSet() ([]string, error) {
-	return h.redactionSets(h.toolRedactionIDs()...)
+	set, err := h.redactionSets(h.toolRedactionIDs()...)
+	return append(set, h.mailRedactionSecrets()...), err
+}
+
+// mailRedactionFiles are the mail secrets the AI never sees (final
+// review L6): every instance's gate secrets and the relay password.
+func (h *Hub) mailRedactionFiles() []string {
+	out := []string{filepath.Join(h.cfg.DataDir, mailRelayPasswordFile)}
+	if h.cfg.MailSlotDir != "" {
+		out = append(out, filepath.Join(h.cfg.MailSlotDir, mailGateMetricsSecret))
+	}
+	for _, id := range h.toolRedactionIDs() {
+		if dir := h.mailSlotDir(id); dir != "" {
+			for _, f := range []string{mailGateAPISecret, mailGateMetricsSecret, mailGateRelayPassword} {
+				out = append(out, filepath.Join(dir, f))
+			}
+		}
+	}
+	return out
+}
+
+// mailRedactionSecrets are those files' values (absent ones skipped).
+func (h *Hub) mailRedactionSecrets() []string {
+	var out []string
+	for _, p := range h.mailRedactionFiles() {
+		if b, err := os.ReadFile(p); err == nil {
+			if v := strings.TrimSpace(string(b)); len(v) >= 4 {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }
 
 // ToolRedactionKey changes whenever ToolRedactionSet may: it names every
@@ -87,6 +118,9 @@ func (h *Hub) ToolRedactionKey() string {
 	}
 	stat(filepath.Join(h.cfg.ProjectDir, ".env"))
 	stat(h.providerSecretsPath())
+	for _, p := range h.mailRedactionFiles() {
+		stat(p)
+	}
 	if h.secretsErr != nil {
 		fmt.Fprintf(&b, "secrets-volume:%v\n", h.secretsErr)
 	}

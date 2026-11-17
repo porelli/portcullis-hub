@@ -149,6 +149,9 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	if wired {
 		return res, statusErr(409, "%s", mailDeleteRefusal)
 	}
+	if h.testHookDeleteBeforeLock != nil {
+		h.testHookDeleteBeforeLock(id)
+	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
 		return res, h.busyErr(id, err)
@@ -158,6 +161,9 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	// (its entry is dropped in step 6); one that waits sees the instance
 	// deleting, then gone.
 	defer h.lifecycleAILock(id)()
+	if h.IsWiredMailProvider(id) { // again under the lock (L11)
+		return res, statusErr(409, "%s", mailDeleteRefusal)
+	}
 	h.mu.RLock()
 	tg, ok := h.targetLocked(id)
 	h.mu.RUnlock()

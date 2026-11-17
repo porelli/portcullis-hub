@@ -44,7 +44,9 @@ func TestMailKinds24(t *testing.T) {
 			m.Checks = []mailprovider.Check{chk("port25", "info", "no outbound delivery yet: not known")}
 		}},
 		{KindMailPTRMissing, Problem, FixExplain, func(m *MailIn) {
-			m.Checks = []mailprovider.Check{chk("fcrdns_v4", "problem", "203.0.113.5 has no PTR record")}
+			c := chk("fcrdns_v4", "problem", "203.0.113.5 has no PTR record")
+			c.Reason = mailprovider.ReasonPTRMissing
+			m.Checks = []mailprovider.Check{c}
 		}},
 		{KindMailPTRMismatch, Problem, FixExplain, func(m *MailIn) {
 			m.Checks = []mailprovider.Check{chk("fcrdns_v4", "problem", "203.0.113.5 → host.example.net, which doesn't resolve back")}
@@ -326,7 +328,7 @@ func TestPTRReason(t *testing.T) {
 	}{
 		{"missing", "203.0.113.5 → host.example.net", KindMailPTRMissing},
 		{"mismatch", "203.0.113.5 has no PTR record", KindMailPTRMismatch},
-		{"", "203.0.113.5 has no PTR record", KindMailPTRMissing},
+		{"", "203.0.113.5 has no PTR record", KindMailPTRMismatch},
 		{"", "203.0.113.5 → host.example.net", KindMailPTRMismatch},
 	} {
 		ch := chk("fcrdns_v4", "problem", c.detail)

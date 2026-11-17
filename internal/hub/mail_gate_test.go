@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"slices"
 	"testing"
 	"time"
 
@@ -540,5 +541,21 @@ func TestRetryVoidRoute(t *testing.T) {
 	f.h.mu.RUnlock()
 	if owed != nil || len(f.mc.Voids) == voids {
 		t.Fatalf("owed %+v voids %d", owed, len(f.mc.Voids))
+	}
+}
+
+// TestMailSecretsInToolRedaction (final review L6): the gate's API and
+// metrics secrets and the relay password are in the MCP redaction set.
+func TestMailSecretsInToolRedaction(t *testing.T) {
+	f := voidFixture(t)
+	if err := runVoidNow(t, f); err != nil {
+		t.Fatal(err)
+	}
+	set, _ := f.h.ToolRedactionSet()
+	for _, name := range []string{mailGateAPISecret, mailGateMetricsSecret} {
+		v := gateFile(t, f.fixture, name)
+		if v == "" || !slices.Contains(set, v) {
+			t.Errorf("%s not redacted", name)
+		}
 	}
 }

@@ -381,6 +381,11 @@ func (h *Hub) mailModeAfterUp(ctx context.Context, t *templates.Template, mode m
 		h.mailUpModes.mu.Unlock()
 		log.Printf("mail: %s: its template changed during the start: stopping it", t.ID)
 		h.mailStopHeld("its template changed during the start")
+		// The caller holds the app lock (the owed down's retry is busy
+		// now): down here at once.
+		if derr := h.composeDown(t); derr != nil {
+			log.Printf("mail: stopping %s: %v", t.ID, derr)
+		}
 		return holdErr
 	}
 	err := h.mailCheckNetworks(ctx, t, mode)

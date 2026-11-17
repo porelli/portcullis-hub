@@ -470,11 +470,18 @@ func TestConcurrentSwitchesOneWins(t *testing.T) {
 	_, err := w.h.StartSwitchMail(context.Background(), otherMailID, in, rootActor())
 	_, uerr := w.h.StartUnwireMail(mailProviderID, false, rootActor())
 	close(gate)
-	go func() {
-		for range entered {
+	done := make(chan struct{})
+	go func() { // drains entered until the ops end (no leak: L14)
+		for {
+			select {
+			case <-entered:
+			case <-done:
+				return
+			}
 		}
 	}()
 	w.h.Wait()
+	close(done)
 	if statusOf(err) != 409 || statusOf(uerr) != 409 {
 		t.Fatalf("second switch %v, unwire %v", err, uerr)
 	}
@@ -651,5 +658,19 @@ func TestRetiringDKIMShapedAndDeduped(t *testing.T) {
 	c := mailprovider.RuleContext{Domain: teamB, Draining: true}
 	if got := mailMergeRetiring(c, nil, w.h.st.Mail.RetiringDKIM[teamB].Records); len(got) != 0 {
 		t.Fatalf("merged into a draining set: %v", got)
+	}
+}
+
+// TestDeleteRechecksWiredUnderLock (final review L11): wired between the
+// first check and the instance lock: still refused.
+func TestDeleteRechecksWiredUnderLock(t *testing.T) {
+	w := newWireFix(t)
+	w.h.testHookDeleteBeforeLock = func(id string) {
+		w.h.mu.Lock()
+		w.h.st.Mail.Provider = &state.MailProvider{Instance: id, Template: id, Source: "local"}
+		w.h.mu.Unlock()
+	}
+	if _, err := w.h.DeleteInstance(mailProviderID, mailProviderID, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("%v", err)
 	}
 }

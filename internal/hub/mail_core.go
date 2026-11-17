@@ -346,6 +346,19 @@ func (h *Hub) mailRetryHeldStop() {
 	if p == nil || hd == nil || !hd.DownOwed {
 		return
 	}
+	// Under the app lock (L10): never racing a re-confirm's up; busy =
+	// the next pass.
+	unlock, lerr := h.lockApp(p.Instance)
+	if lerr != nil {
+		return
+	}
+	defer unlock()
+	h.mu.RLock()
+	cur := h.st.Mail.Held
+	h.mu.RUnlock()
+	if cur == nil || !cur.DownOwed {
+		return // re-confirmed meanwhile
+	}
 	var err error
 	if h.rt == nil {
 		err = errors.New("no container runtime")

@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -372,6 +373,13 @@ func TestWireStopUndoes(t *testing.T) {
 	w.h.mu.RUnlock()
 	if p != nil || owed != nil || gateFile(t, w.fixture, mailGateAPISecret) != "" {
 		t.Fatalf("not undone: %+v %+v", p, owed)
+	}
+	// L3: every gate file goes, mail_slot's metrics secret too.
+	if gateFile(t, w.fixture, mailGateMetricsSecret) != "" || gateFile(t, w.fixture, mailGateRelayPassword) != "" {
+		t.Fatal("secrets left in the gate")
+	}
+	if _, err := os.Stat(filepath.Join(w.h.cfg.MailSlotDir, mailGateMetricsSecret)); !os.IsNotExist(err) {
+		t.Fatal("mail_slot's metrics secret left")
 	}
 }
 
