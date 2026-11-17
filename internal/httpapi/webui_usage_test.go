@@ -130,3 +130,34 @@ func TestUsageCSVLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageStorageView(t *testing.T) {
+	js := usageJS(t)
+	for _, want := range []string{
+		"DISK_WARN = 90", "DISK_BAD = 97", "Measure now", "data-usage-measure", `{ instance: instance }`,
+		"shared, not in total", "Hub-managed files", "measured ' + fmtAge(", "172800", "usage-dim",
+		"'≥ ' + figHtml", "stopped after 2 min", "if (v.metrics_scraped)", "History in Grafana ↗",
+		"/api/usage/storage/measure", "'/api/usage/storage'", "openOpPanel('_usage'",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("usage.js lacks %q", want)
+		}
+	}
+}
+
+func TestOppStopUsageKey(t *testing.T) {
+	b, _ := fs.ReadFile(web.FS, "index.html")
+	h := string(b)
+	for _, want := range []string{
+		"id === OP_KEY_USAGE ? '/api/usage/storage/op/stop'", "if (id === OP_KEY_USAGE) return '/api/usage/storage/op';",
+		"fetch(opStopURL(id),", "const url = opRecordURL(tr.id, tr.opId);",
+		"usage_measure: { ing: 'Measuring storage', ed: 'measured', short: 'Measuring', stopped: 'stopped: the figures measured so far are kept' }",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	if strings.Contains(h, "fetch('/api/instances/' + encodeURIComponent(id) + '/op/stop'") {
+		t.Error("the panel's Stop still posts the instance route for every key")
+	}
+}

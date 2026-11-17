@@ -8,6 +8,9 @@
 // GET /api/usage                       the overview (the Hub's cache; polled every 15 s while visible)
 // GET /api/usage/instances/{id}        one instance with its last hour
 // GET /api/usage/export.csv?view=…     the CSV download
+// GET /api/usage/storage               the Storage view (the storage cache)
+// POST /api/usage/storage/measure      {instance?} → 202; progress in the operation panel (key _usage),
+//                                      whose Stop posts /api/usage/storage/op/stop
 //
 // Rules: every interpolation goes through esc() or a number formatter
 // (fmtBytes, fmtCores, fmtRate, fmtPct, fmtNum) or an *Html() helper
@@ -170,6 +173,10 @@
         const v = await getJSON('/api/usage');
         if (current !== c) return;
         c.data = v;
+        if (c.view === 'storage') {
+          try { c.storage = await getJSON('/api/usage/storage'); c.storageErr = ''; } catch (e) { c.storageErr = e.message; }
+          if (current !== c) return;
+        }
         draw(c);
       }
     } catch (e) {
@@ -222,9 +229,10 @@
 
   function navHtml(view) {
     const btnHtml = (k, label) => '<button type="button" class="btn btn-sm ' + esc(view === k ? 'btn-primary' : '') + '" data-usage-view="' + esc(k) + '">' + esc(label) + '</button>';
-    return '<div class="usage-nav">' + btnHtml('apps', 'By app') + btnHtml('containers', 'By container') + (window.PortcullisUsage.storageView ? btnHtml('storage', 'Storage') : '') +
-      ' <a class="btn btn-secondary btn-sm" href="/api/usage/export.csv?view=' + esc(view === 'containers' ? 'containers' : 'apps') + '" download>CSV</a>' +
-      ' <a class="usage-sub" href="/api/usage/export.csv?view=apps" download>apps.csv</a> · <a class="usage-sub" href="/api/usage/export.csv?view=containers" download>containers.csv</a></div>';
+    return '<div class="usage-nav">' + btnHtml('apps', 'By app') + btnHtml('containers', 'By container') + btnHtml('storage', 'Storage') +
+      ' <a class="btn btn-secondary btn-sm" href="/api/usage/export.csv?view=' + esc(view) + '" download>CSV</a>' +
+      ' <a class="usage-sub" href="/api/usage/export.csv?view=apps" download>apps.csv</a> · <a class="usage-sub" href="/api/usage/export.csv?view=containers" download>containers.csv</a>' +
+      ' · <a class="usage-sub" href="/api/usage/export.csv?view=storage" download>storage.csv</a></div>';
   }
 
   function containerRowsHtml(g, host, indent) {
@@ -292,7 +300,7 @@
   function draw(c) {
     if (!c.data && c.view !== 'storage') { c.el.innerHTML = '<p class="settings-empty">Loading…</p>'; return; }
     let bodyHtml;
-    if (c.view === 'storage' && window.PortcullisUsage.storageView) bodyHtml = window.PortcullisUsage.storageView(c);
+    if (c.view === 'storage') bodyHtml = storageViewHtml(c);
     else bodyHtml = (c.view === 'containers' ? containersTableHtml(c) : appsTableHtml(c));
     const focus = document.activeElement && document.activeElement.hasAttribute && document.activeElement.hasAttribute('data-usage-filter');
     c.el.innerHTML = navHtml(c.view) + (c.data ? headerHtml(c.data) : '') + bodyHtml;
@@ -313,9 +321,11 @@
         c.view = v.dataset.usageView;
         history.replaceState(null, '', '#usage/' + enc(c.view));
         draw(c);
-        if (c.view === 'storage' && window.PortcullisUsage.loadStorage) window.PortcullisUsage.loadStorage(c);
+        if (c.view === 'storage') loadStorage(c);
         return;
       }
+      const m = ev.target.closest('[data-usage-measure]');
+      if (m) { measure(m.dataset.usageMeasure, m); return; }
       const s = ev.target.closest('[data-usage-sort]');
       if (s) {
         const k = s.dataset.usageSort;
@@ -342,7 +352,7 @@
     current = { kind: 'tab', el, view: view === 'containers' || view === 'storage' ? view : 'apps', sort: 'name', dir: 'asc', filter: '', open: {}, data: null };
     bind(el);
     draw(current);
-    if (current.view === 'storage' && window.PortcullisUsage.loadStorage) window.PortcullisUsage.loadStorage(current);
+    if (current.view === 'storage') loadStorage(current);
     refresh();
   }
 
@@ -361,7 +371,7 @@
       html += '</tbody></table>';
     }
     html += '</div>';
-    if (window.PortcullisUsage.instanceStorageHtml) html += window.PortcullisUsage.instanceStorageHtml(g);
+    html += instanceStorageHtml(g);
     c.el.innerHTML = html;
   }
 
@@ -374,9 +384,130 @@
     refresh();
   }
 
-  window.PortcullisUsage = {
-    render, renderInstance, stop,
-    // For the Storage view (its own file section below).
-    _h: { esc, fmtBytes, fmtAge, fmtNum, fmtPct, getJSON, NOT_MEASURED, draw: c => draw(c), isNum }
-  };
+  // ── the Storage view ──
+  const DIM_AFTER_S = 172800; // figures older than 48 h are dimmed
+  const DISK_WARN = 90, DISK_BAD = 97; // used %
+  const STOP_WORDS = { time: 'stopped after 2 min', entries: 'stopped after 2,000,000 entries', hard_links: 'too many hard links',
+    failed: 'some entries couldn\'t be read', names: 'a directory with too many names', depth: 'too deep' };
+
+  async function loadStorage(c) {
+    try { c.storage = await getJSON('/api/usage/storage'); c.storageErr = ''; } catch (e) { c.storageErr = e.message; }
+    if (current === c) draw(c);
+  }
+
+  function ageSeconds(iso) { return iso ? (Date.now() - new Date(iso).getTime()) / 1000 : Infinity; }
+
+  // sizeHtml: an item's figure — "not measured" with why, "≥ … (stopped
+  // after …)" for a capped one, dimmed past 48 h, its age beside it.
+  function sizeHtml(it) {
+    if (!isNum(it.alloc_bytes)) {
+      const whyHtml = it.error ? ' <span class="usage-sub">' + esc(it.error.replace(/^not measured: /, '')) + '</span>' : (it.note ? ' <span class="usage-sub">' + esc(it.note) + '</span>' : '');
+      return NOT_MEASURED + whyHtml;
+    }
+    let figHtml = fmtBytes(it.alloc_bytes);
+    if (it.partial) figHtml = '≥ ' + figHtml + ' <span class="usage-sub">(' + esc(STOP_WORDS[it.partial_reason] || 'the figure is a lower bound') + ')</span>';
+    const dimHtml = ageSeconds(it.measured_at) > DIM_AFTER_S ? 'usage-dim' : '';
+    const titleHtml = isNum(it.apparent_bytes) ? ' title="apparent size ' + fmtBytes(it.apparent_bytes) + '"' : '';
+    return '<span class="' + esc(dimHtml) + '"' + titleHtml + '>' + figHtml + ' <span class="usage-sub">measured ' + fmtAge(it.measured_at) + '</span></span>';
+  }
+
+  const KIND_WORDS = { volume: 'volume', bind: 'host path', folder: 'shared folder', layer: 'writable layer', image: 'image', hub_files: 'Hub-managed files' };
+
+  function itemRowHtml(it) {
+    const kindHtml = esc(KIND_WORDS[it.kind] || it.kind);
+    let noteHtml = '';
+    if (it.kind === 'image') noteHtml = ' <span class="usage-sub">shared, not in total</span>';
+    else if (it.shared_with && it.shared_with.length) noteHtml = ' <span class="usage-sub">shared with ' + esc(it.shared_with.join(', ')) + ', not in total</span>';
+    else if (it.kind === 'folder') noteHtml = ' <span class="usage-sub">shared, not in total</span>';
+    const targetHtml = it.kind === 'hub_files' ? esc('Hub-managed files') : '<code>' + esc(it.target) + '</code>';
+    const figHtml = it.kind === 'hub_files' ? '<span class="usage-sub">not measured (small, written by the Hub)</span>' : sizeHtml(it);
+    return '<tr><td>' + kindHtml + '</td><td>' + targetHtml + noteHtml + '</td><td>' + figHtml + '</td></tr>';
+  }
+
+  function diskStripHtml(disks) {
+    if (!disks || !disks.length) return '<p class="usage-sub">No filesystem measured yet.</p>';
+    return '<div class="usage-disks">' + diskCellsHtml(disks) + '</div>';
+  }
+
+  function diskCellsHtml(disks) {
+    return disks.map(d => {
+      const pct = Number(d.used_percent) || 0;
+      const cls = pct >= DISK_BAD ? 'usage-bar-bad' : pct >= DISK_WARN ? 'usage-bar-warn' : 'usage-bar-ok';
+      return '<div class="usage-disk"><div class="usage-bar ' + esc(cls) + '"><span style="width:' + esc(Number(pct).toFixed(1)) + '%"></span></div>' +
+        fmtBytes(d.total_bytes - d.free_bytes) + ' / ' + fmtBytes(d.total_bytes) + ' <span class="usage-sub">' + fmtPct(pct) + ' used, ' + fmtBytes(d.free_bytes) + ' free</span>' +
+        '<br><span class="usage-sub">' + esc((d.owners || []).join(', ') || 'nothing measured on it') + '</span></div>';
+    }).join('');
+  }
+
+  function groupStorageHtml(g, withButton) {
+    const btnHtml = withButton ? ' <button type="button" class="btn btn-secondary btn-sm" data-usage-measure="' + esc(g.instance) + '">Measure</button>' : '';
+    const totalHtml = isNum(g.total_alloc_bytes) ? geHtml(g.partial, fmtBytes(g.total_alloc_bytes)) : NOT_MEASURED;
+    return '<h5 class="usage-h5">' + esc(g.name || g.instance) + ' <span class="usage-sub">total ' + totalHtml + '</span>' + btnHtml + '</h5>' +
+      '<table class="usage-table"><tbody>' + (g.items || []).map(itemRowHtml).join('') + '</tbody></table>';
+  }
+
+  function storageViewHtml(c) {
+    if (c.storageErr) return '<p class="settings-empty">Storage can\'t be read: ' + esc(c.storageErr) + '</p>';
+    const v = c.storage;
+    if (!v) return '<p class="settings-empty">Loading…</p>';
+    let html = '<div class="usage-nav"><button type="button" class="btn btn-primary btn-sm" data-usage-measure="">Measure now</button>' +
+      ' <span class="usage-sub">last full run ' + fmtAge(v.measured_at) + '</span>' +
+      (v.running_op ? ' <span class="usage-status usage-status-info">' + esc('measuring…') + '</span>' : '') +
+      (v.metrics_scraped ? ' <a href="' + esc(grafanaURL()) + '" target="_blank" rel="noopener">History in Grafana ↗</a>' : '') + '</div>';
+    html += '<h4 class="usage-h4">Disks</h4>' + diskStripHtml(v.disks);
+    html += '<h4 class="usage-h4">Apps</h4>';
+    if (!(v.apps || []).length) html += '<p class="usage-sub">No app storage measured yet: Measure now.</p>';
+    (v.apps || []).forEach(g => { html += groupStorageHtml(g, true); });
+    html += '<h4 class="usage-h4">Shared folders</h4>';
+    if (!(v.folders || []).length) html += '<p class="usage-sub">No shared folders.</p>';
+    else {
+      html += '<table class="usage-table"><thead><tr><th>Folder</th><th>Size</th><th>Used by</th></tr></thead><tbody>' + folderRowsHtml(v.folders) + '</tbody></table>';
+    }
+    html += '<h4 class="usage-h4">Core</h4>';
+    if (!(v.core || []).length) html += '<p class="usage-sub">Core volumes not measured yet.</p>';
+    else html += '<table class="usage-table"><tbody>' + coreRowsHtml(v.core) + '</tbody></table>';
+    return html;
+  }
+
+  function coreRowsHtml(items) { return items.map(itemRowHtml).join(''); }
+
+  function folderRowsHtml(folders) {
+    return folders.map(f =>
+        '<tr><td>' + esc(f.name || f.id) + ' <span class="usage-sub">' + esc(f.id) + '</span></td><td>' +
+        sizeHtml({ alloc_bytes: f.alloc_bytes, partial: f.partial, measured_at: f.measured_at, note: f.note }) +
+        '</td><td>' + esc((f.used_by || []).join(', ') || '—') + '</td></tr>').join('');
+  }
+
+  function instanceStorageHtml(g) {
+    const st = g.storage;
+    let html = '<div class="inst-section"><h4>Storage</h4>';
+    if (!st) html += '<p class="usage-sub">Not measured yet. <button type="button" class="btn btn-secondary btn-sm" data-usage-measure="' + esc(g.instance) + '">Measure</button></p>';
+    else html += groupStorageHtml(st, true);
+    return html + '</div>';
+  }
+
+  // measure: POST the measurement, then follow it in the operation panel
+  // (its Stop ends it between targets).
+  async function measure(instance, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/usage/storage/measure', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(instance ? { instance: instance } : {}) });
+      if (!r.ok) {
+        let msg = String(r.status);
+        try { const b = await r.json(); if (b && b.error) msg = b.error; } catch (_) { /* text */ }
+        throw new Error(msg);
+      }
+      const op = await r.json();
+      if (typeof window.openOpPanel === 'function') window.openOpPanel('_usage', null);
+      if (typeof window.showToast === 'function') window.showToast('Measuring storage', 'success');
+      return op;
+    } catch (e) {
+      if (typeof window.showToast === 'function') window.showToast('Measure: '.concat(e.message), 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  window.PortcullisUsage = { render, renderInstance, stop };
 })();

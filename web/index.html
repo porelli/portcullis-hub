@@ -605,6 +605,10 @@
     .usage-spark { color: #60a5fa; vertical-align: middle; }
     .usage-table a, .usage-strip a, .usage-nav a.usage-sub { color: #93c5fd; }
     .usage-nav a.btn { text-decoration: none; }
+    .usage-disks { display: flex; flex-wrap: wrap; gap: 1rem 2rem; margin-bottom: 1rem; font-size: 0.8125rem; }
+    .usage-disk .usage-bar { width: 12rem; }
+    .usage-h4 { margin: 1rem 0 0.5rem; font-size: 0.9rem; color: #e2e8f0; }
+    .usage-h5 { margin: 0.75rem 0 0.25rem; font-size: 0.85rem; color: #cbd5e1; display: flex; gap: 0.5rem; align-items: center; }
     .usage-filter { margin-bottom: 0.5rem; padding: 0.35rem 0.5rem; width: 18rem; max-width: 100%; }
   </style>
   <link rel="stylesheet" href="/static/directory.css">
@@ -1124,7 +1128,18 @@
       restore: { ing: 'Restoring', ed: 'restored', short: 'Restoring', stopped: 'rolled back: everything is back as before' },
       create:  { ing: 'Creating', ed: 'created', short: 'Creating', stopped: 'the new instance was removed' },
       delete:  { ing: 'Deleting', ed: 'deleted', short: 'Deleting', stopped: 'the delete was cancelled; the app is back as before' },
+      usage_measure: { ing: 'Measuring storage', ed: 'measured', short: 'Measuring', stopped: 'stopped: the figures measured so far are kept' },
     };
+    // The storage measurement's record key (contract §11.11): its own
+    // routes, not an instance's.
+    const OP_KEY_USAGE = '_usage';
+    function opRecordURL(id, opId) {
+      if (id === OP_KEY_USAGE) return '/api/usage/storage/op';
+      return '/api/instances/' + encodeURIComponent(id) + '/op' + (opId ? '?op_id=' + encodeURIComponent(opId) : '');
+    }
+    function opStopURL(id) {
+      return id === OP_KEY_USAGE ? '/api/usage/storage/op/stop' : '/api/instances/' + encodeURIComponent(id) + '/op/stop';
+    }
     const OPP_STATES = {
       done: ['✓', 'ok', 'done'], running: ['◐', 'run', 'running'], waiting: ['○', 'wait', 'waiting'],
       stopped: ['■', 'stop', 'stopped'], failed: ['✗', 'bad', 'failed'], undone: ['↺', 'undone', 'undone'],
@@ -1145,6 +1160,7 @@
     // instance too); an id the list doesn't know yet (a create's first
     // poll) by its app's name and id.
     function opAppName(id) {
+      if (id === OP_KEY_USAGE) return 'storage';
       const inst = instancesCache.find(i => i.id === id);
       if (inst) return instName(inst);
       const name = appName(id);
@@ -1192,6 +1208,14 @@
     // The panel's title for r (also the toast when it ends unseen).
     function oppTitle(r, app) {
       const w = opWords(r.op);
+      if (r.op === 'usage_measure') {
+        // The storage measurement is no app's (contract §11.11).
+        const ph = oppPhase(r);
+        if (ph === 'ok') return 'Storage is measured';
+        if (ph === 'stopped') return 'Storage measurement stopped: the figures measured so far are kept';
+        if (ph === 'running' || ph === 'stopping') return w.ing;
+        return w.ing + (ph === 'interrupted' ? ' was interrupted' : ' failed');
+      }
       switch (oppPhase(r)) {
         case 'running': return w.ing + ' ' + app;
         case 'stopping': return 'Stopping ' + app + ' — undoing';
@@ -1403,7 +1427,7 @@
       let rec = null, status = 0;
       const seq = opBegin(id);
       try {
-        const res = await fetch('/api/instances/' + encodeURIComponent(id) + '/op/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sent ? { op_id: sent } : {}) });
+        const res = await fetch(opStopURL(id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sent ? { op_id: sent } : {}) });
         status = res.status;
         if ((res.headers.get('Content-Type') || '').includes('application/json')) rec = await res.json();
         else opp.notice = 'Stop failed: ' + ((await res.text()).trim() || 'HTTP ' + status);
@@ -1492,7 +1516,7 @@
       const seq = opBegin(tr.id);
       // By op id (contract §11.7 "Op history"): always this operation's
       // own record, running or ended, whatever became the app's since.
-      const url = '/api/instances/' + encodeURIComponent(tr.id) + '/op' + (tr.opId ? '?op_id=' + encodeURIComponent(tr.opId) : '');
+      const url = opRecordURL(tr.id, tr.opId);
       try { rec = await apiGet(url); tr.err = null; } catch (e) { tr.err = e; }
       if (!opLive(tr)) return;
       // 404 by op id: the Hub keeps no record of it any more (pruned from
@@ -1559,7 +1583,7 @@
       clearTimeout(tr.thenTimer);
       if (!(opp.id === tr.id && oppOpen()) || opTracks[tr.id] !== tr || !tr.ended) return;
       let cur = null;
-      try { cur = await apiGet('/api/instances/' + encodeURIComponent(tr.id) + '/op'); } catch (e) { cur = null; }
+      try { cur = await apiGet(opRecordURL(tr.id, '')); } catch (e) { cur = null; }
       if (opTracks[tr.id] !== tr) return;
       const next = cur && cur.op && cur.op_id && cur.op_id !== tr.opId ? cur : null;
       if (next || !cur || cur.op_id === tr.opId) tr.then = next;

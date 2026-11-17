@@ -331,6 +331,9 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 		got[t.Key] = e
 	}
 	var warns []string
+	if failed > 0 {
+		warns = append(warns, fmt.Sprintf("%d of %d targets couldn't be measured (Usage → Storage shows why)", failed, total))
+	}
 	if budgetSpent {
 		warns = append(warns, fmt.Sprintf("not measured: the run's time budget (%s) is spent: %d targets keep their previous figures", storageRunBudget, skipped))
 	}
