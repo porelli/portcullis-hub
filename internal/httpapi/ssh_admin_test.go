@@ -227,3 +227,33 @@ func TestSSHToolConsequencesShowEveryField(t *testing.T) {
 		}
 	}
 }
+
+// The UI's reads: Settings carries the listener's fresh sign-in flow
+// field, the delegate list its delegable host groups (none yet), the
+// group page's uses the group's SSH line.
+func TestSSHPageReads(t *testing.T) {
+	e := sshPeopleEnv(t)
+	var set map[string]any
+	json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/ssh/settings", "", 200)), &set)
+	if _, ok := set["user_ca_fp"]; !ok {
+		t.Errorf("settings lost the view's fields: %v", set)
+	}
+	if b := mustDo(t, e.people, "sam", "GET", "/api/ssh/delegated/grants", "", 200); !strings.Contains(b, `"host_groups":[]`) {
+		t.Errorf("delegated %s", b)
+	}
+	e.s.Hub.SetPeople(e.s.Directory)
+	e.s.Hub.SetSSHDirectory(e.s.Directory)
+	mustDo(t, e.hub, "root", "POST", "/api/ssh/hostgroups", `{"id":"web","label":"Web"}`, 204)
+	mustDo(t, e.hub, "root", "POST", "/api/ssh/grants", `{"group":"ssh_mgrs","host_group":"web","accounts":["{username}"],"sudo":"none"}`, 200)
+	var u struct {
+		SSH []string `json:"ssh"`
+	}
+	json.Unmarshal([]byte(mustDo(t, e.people, "root", "GET", "/api/directory/groups/ssh_mgrs/uses", "", 200)), &u)
+	if !reflect.DeepEqual(u.SSH, []string{"web (own account)"}) {
+		t.Errorf("group uses ssh %v", u.SSH)
+	}
+	json.Unmarshal([]byte(mustDo(t, e.people, "root", "GET", "/api/directory/groups/hr_help/uses", "", 200)), &u)
+	if u.SSH == nil || len(u.SSH) != 0 {
+		t.Errorf("unused group ssh %v, want []", u.SSH)
+	}
+}

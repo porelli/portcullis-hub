@@ -71,8 +71,19 @@ func (p proofBody) proofOrNil() *freshauth.Proof {
 	return &pp
 }
 
+// sshSettingsPage is Settings plus the listener's fresh sign-in flow
+// (the page's fresh actions: freshauth.js).
+type sshSettingsPage struct {
+	hub.SSHSettingsView
+	FreshAuth *freshauth.AuthorizeInfo `json:"fresh_auth,omitempty"`
+}
+
+func (s *Server) sshSettingsPage(r *http.Request) sshSettingsPage {
+	return sshSettingsPage{SSHSettingsView: s.Hub.SSHSettings(), FreshAuth: s.Hub.FreshAuthInfoFor(listenerOf(r))}
+}
+
 func (s *Server) handleSSHSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.Hub.SSHSettings())
+	writeJSON(w, s.sshSettingsPage(r))
 }
 
 func (s *Server) handleSSHSetSettings(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +99,7 @@ func (s *Server) handleSSHSetSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, s.Hub.SSHSettings())
+	writeJSON(w, s.sshSettingsPage(r))
 }
 
 func (s *Server) handleSSHHostGroups(w http.ResponseWriter, r *http.Request) {
@@ -216,9 +227,28 @@ func (s *Server) handleSSHRemoveAccount(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// sshDelegableGroup is a delegable host group as the delegate page
+// shows it (no patterns, addresses or commands).
+type sshDelegableGroup struct {
+	ID           string `json:"id"`
+	Label        string `json:"label,omitempty"`
+	Description  string `json:"description,omitempty"`
+	CreateShared bool   `json:"create_shared,omitempty"`
+}
+
 func (s *Server) handleSSHGrants(delegated bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"grants": s.Hub.SSHGrants(delegated)})
+		if !delegated {
+			writeJSON(w, map[string]any{"grants": s.Hub.SSHGrants(false)})
+			return
+		}
+		hgs := []sshDelegableGroup{}
+		for _, g := range s.Hub.SSHHostGroups() {
+			if g.Delegable {
+				hgs = append(hgs, sshDelegableGroup{ID: g.ID, Label: g.Label, Description: g.Description, CreateShared: g.CreateShared})
+			}
+		}
+		writeJSON(w, map[string]any{"grants": s.Hub.SSHGrants(true), "host_groups": hgs})
 	}
 }
 

@@ -601,11 +601,12 @@
     </header>
 
     <!-- Apps (what runs here) · Marketplace (what can be added, and the
-         template sources it comes from) · Audit log · Doctor · Settings ·
+         template sources it comes from) · SSH access · Audit log · Doctor · Settings ·
          People ↗ (people.<domain>, href set below from PortcullisPeople). -->
     <div class="tabs">
       <div class="tab active" data-tab="apps">Apps</div>
       <div class="tab" data-tab="marketplace">Marketplace</div>
+      <div class="tab" data-tab="ssh">SSH access</div>
       <div class="tab" data-tab="audit">Audit log</div>
       <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
       <div class="tab" data-tab="settings">Settings</div>
@@ -772,6 +773,16 @@
       <div id="doctor-root"></div>
     </div>
 
+    <!-- SSH access Tab (web/ssh.js: PortcullisSSH.render; contract §18) -->
+    <div class="tab-content" id="tab-ssh">
+      <div class="category-title" style="margin-bottom: 1rem;">SSH access</div>
+      <p class="settings-empty" style="margin-bottom:1rem">
+        Short-lived SSH certificates for people's host groups, signed after a Portcullis sign-in (<code>portcullis login</code>).
+        Managed hosts are enrolled once and kept current; unmanaged hosts trust the CA with <code>portcullis host trust</code>.
+      </p>
+      <div id="ssh-root"></div>
+    </div>
+
     <!-- Audit log Tab (web/directory.js: PortcullisDirectory.renderAudit) -->
     <div class="tab-content" id="tab-audit">
       <p class="settings-empty" style="margin-bottom:1rem">
@@ -878,9 +889,11 @@
   <script src="/static/dns.js"></script>
   <script src="/static/mail.js"></script>
   <script src="/static/doctor.js"></script>
+  <script src="/static/freshauth.js"></script>
+  <script src="/static/ssh.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
-    // showTab(name): one of the top tabs (apps, marketplace, audit,
+    // showTab(name): one of the top tabs (apps, marketplace, ssh, audit,
     // doctor, settings) or "instance" (an instance's page: the Apps tab
     // stays highlighted). The tab's content loads on every selection.
     // Leaving an instance page with unsaved work asks first: false = the
@@ -898,6 +911,7 @@
         if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
       }
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
+      if (name === 'ssh' && window.PortcullisSSH) PortcullisSSH.render(document.getElementById('ssh-root'));
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
       if (name === 'apps') renderApps();
       if (name === 'marketplace') fillMarketplace();

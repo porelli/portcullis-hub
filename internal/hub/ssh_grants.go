@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/portcullis/hub/internal/cliapi"
@@ -52,6 +53,32 @@ func (h *Hub) SSHGroupsForDirectory() directory.SSHGroups {
 		}
 	}
 	out.Granting, out.Privileged = dedupStrings(out.Granting), dedupStrings(out.Privileged)
+	return out
+}
+
+// sshGroupLinesLocked is group's SSH grants in words, by host group:
+// "web (own account)", "all (own account, deploy, sudo)" (a grant saved
+// for an older group of that name, another id, grants nothing: left out).
+func sshGroupLinesLocked(st state.SSHState, group string, gid int) []string {
+	out := []string{}
+	for _, g := range st.Grants {
+		if g.Group != group || (g.GroupID != 0 && gid != 0 && g.GroupID != gid) {
+			continue
+		}
+		var what []string
+		for _, a := range g.Accounts {
+			if a == cliapi.UsernamePlaceholder {
+				what = append(what, "own account")
+			} else {
+				what = append(what, a)
+			}
+		}
+		if g.Sudo == state.SudoFull {
+			what = append(what, "sudo")
+		}
+		out = append(out, g.HostGroup+" ("+strings.Join(what, ", ")+")")
+	}
+	sort.Strings(out)
 	return out
 }
 

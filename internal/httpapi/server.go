@@ -432,7 +432,7 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 // peopleStatic are the assets people.html and the confirmation page
 // load, plus the logo and favicon set: the people listener serves these
 // only (never the Hub's index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "impersonation.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true,
+var peopleStatic = map[string]bool{"directory.js": true, "impersonation.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "myssh.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true,
 	"favicon.svg": true, "favicon.ico": true, "apple-touch-icon.png": true, "icon-192.png": true, "icon-512.png": true, "maskable-512.png": true, "site.webmanifest": true, "mark.svg": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.
