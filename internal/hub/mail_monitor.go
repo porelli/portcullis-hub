@@ -280,15 +280,39 @@ func (h *Hub) mailRestoreGate(ctx context.Context, id, archive string) error {
 	h.mu.RLock()
 	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
 	h.mu.RUnlock()
-	if !wired || !h.mailRestorePending() {
+	if !wired || !h.mailRestoreHolds(id) {
 		return nil
 	}
 	v, _ := ctx.Value(mailHostRestoreKey{}).(mailHostRestore)
-	want, _, err := h.mailRestorePendingArchive()
-	if v.id != id || err != nil || v.archive != archive || want != archive {
+	want, pending, err := h.mailRestorePendingArchive()
+	if v.id != id || err != nil || v.archive != archive || (pending && want != archive) {
 		return statusErr(http.StatusConflict, "a core restore is pending: run ./portcullis restore")
 	}
 	return nil
+}
+
+// mailRestoreHolds: instance id is the wired provider and a core
+// restore's hold is on (the file, or RestoreHeld after it went).
+func (h *Hub) mailRestoreHolds(id string) bool {
+	h.mu.RLock()
+	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
+	held := h.st.Mail.RestoreHeld
+	h.mu.RUnlock()
+	return wired && (held || h.mailRestorePending())
+}
+
+// mailNoteRestorePending records a hold file seen (RestoreHeld), at the
+// start, the retry loop and `hub mail restore`.
+func (h *Hub) mailNoteRestorePending() {
+	if !h.mailRestorePending() {
+		return
+	}
+	h.mu.Lock()
+	if h.st.Mail.Provider != nil && !h.st.Mail.RestoreHeld {
+		h.st.Mail.RestoreHeld = true
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 }
 
 // mailRestorePending: the C1 hold is on (an unreadable data directory
@@ -354,6 +378,7 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 	if err := h.archiveExists(archive); err != nil {
 		return nil, err
 	}
+	h.mailNoteRestorePending()
 	actor := directory.Human(HostActor)
 	return h.startAsync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		// Only the restore's final start, after its volumes came back,
@@ -365,6 +390,11 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 		if err == nil {
 			if rerr := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); rerr != nil && !os.IsNotExist(rerr) {
 				err = fmt.Errorf("the provider is restored, but removing %s failed: %w", mailRestorePendingFile, rerr)
+			} else {
+				h.mu.Lock()
+				h.st.Mail.RestoreHeld = false
+				h.saveLocked()
+				h.mu.Unlock()
 			}
 			h.kickMailVoid() // the owed void's normal up, now the hold is gone
 		}

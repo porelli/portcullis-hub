@@ -284,7 +284,9 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	h.mu.Lock()
 	p := &state.MailProvider{Instance: id, Template: t.TemplateID, Source: t.Source, SourceURL: h.mailSourceURLLocked(t.Source), Commit: gitHead(t.Path), BlockHash: hash,
 		WiredAt: h.mailNow().UTC(), WiredBy: by}
-	prevP, prevV, prevGen := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen
+	prevP, prevV, prevGen, prevSeq := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen, h.st.Mail.WireSeq
+	h.st.Mail.WireSeq++
+	p.Seq = h.st.Mail.WireSeq
 	h.st.Mail.Provider = p
 	h.raiseVoidDebtLocked(voidReason)
 	// The undo clears only a debt this record started (not an older one
@@ -295,7 +297,7 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	}
 	h.st.Mail.Held = nil
 	if err := h.saveStateLocked(); err != nil {
-		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen = prevP, prevV, prevGen
+		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen, h.st.Mail.WireSeq = prevP, prevV, prevGen, prevSeq
 		h.mu.Unlock()
 		return nil, fail(StepMailRecord, err)
 	}
@@ -320,6 +322,10 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	}
 	h.mu.Unlock()
 	if err != nil {
+		if stopped() { // a Stop during the step: undone (M7)
+			fail(StepMailGate, err)
+			return p, undo()
+		}
 		return p, fail(StepMailGate, err)
 	}
 	done(StepMailGate)
@@ -329,6 +335,10 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	// 3. void_mode: the void-mode override and up (enabled if it isn't).
 	step(StepMailVoidMode)
 	if err := h.mailUpInstance(ctx, id); err != nil {
+		if stopped() { // a Stop during the step: undone (M7)
+			fail(StepMailVoidMode, err)
+			return p, undo()
+		}
 		return p, fail(StepMailVoidMode, err)
 	}
 	done(StepMailVoidMode)
@@ -344,6 +354,10 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	}
 	h.mu.RUnlock()
 	if err := h.runVoid(ctx, id, reason); err != nil {
+		if stopped() { // a Stop during the step: undone (M7)
+			fail(StepMailVoid, err)
+			return p, undo()
+		}
 		return p, fail(StepMailVoid, err)
 	}
 	done(StepMailVoid)
@@ -444,6 +458,7 @@ func (h *Hub) resumeMail() {
 		h.goBackground(h.mailRetryHeldStop)
 	}
 	h.goBackground(h.mailResumeClosing)
+	h.mailNoteRestorePending()
 	if sw != nil {
 		h.goBackground(func() { h.resumeSwitchMail(sw) })
 		return

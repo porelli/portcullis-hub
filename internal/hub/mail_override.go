@@ -326,7 +326,7 @@ func (h *Hub) mailModeBeforeUp(ctx context.Context, t *templates.Template) (mail
 	if known && rendered != mode {
 		return mode, statusErr(http.StatusConflict, "%s's mail mode changed to %s during the start: try again", t.ID, mode)
 	}
-	if wired && !mailRestoreCommitted(ctx, t.ID) && h.mailRestorePending() {
+	if wired && !mailRestoreCommitted(ctx, t.ID) && h.mailRestoreHolds(t.ID) {
 		return mode, errMailRestorePending
 	}
 	h.mailUpModes.mu.Lock()
@@ -348,6 +348,19 @@ func (h *Hub) mailModeBeforeUp(ctx context.Context, t *templates.Template) (mail
 
 // mailModeAfterUp records mode and checks the engine's networks.
 func (h *Hub) mailModeAfterUp(ctx context.Context, t *templates.Template, mode mailMode) error {
+	// The hold once more, after the up (M6): a tree that changed on
+	// disk while compose read it (a pull mid-start) is stopped at once.
+	h.mu.Lock()
+	holdErr := h.mailHoldGateLocked(t)
+	h.mu.Unlock()
+	if holdErr != nil {
+		h.mailUpModes.mu.Lock()
+		delete(h.mailUpModes.m, t.ID)
+		h.mailUpModes.mu.Unlock()
+		log.Printf("mail: %s: its template changed during the start: stopping it", t.ID)
+		h.mailStopHeld("its template changed during the start")
+		return holdErr
+	}
 	err := h.mailCheckNetworks(ctx, t, mode)
 	h.mailUpModes.mu.Lock()
 	if h.mailUpModes.m == nil {

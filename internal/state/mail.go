@@ -69,6 +69,13 @@ type MailSettings struct {
 	// clears the debt only if it is still the generation it started on
 	// (L19 and the security review: a debt raised during a run stays).
 	VoidGen int `json:"void_gen,omitempty" yaml:"void_gen,omitempty"`
+	// RestoreHeld: a core restore's hold (hub_data/mail-restore-pending)
+	// was seen; it stays after the file goes (`mail restore-hold clear`)
+	// until a successful `hub mail restore` or an administrator's Retry,
+	// so the provider is never started on its own (FH-H3 c).
+	RestoreHeld bool `json:"restore_held,omitempty" yaml:"restore_held,omitempty"`
+	// WireSeq numbers the wirings (monotonic): MailProvider.Seq.
+	WireSeq int `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries
 	// _mta-sts.<d> (the Hub's own record of it: the MTA-STS policy check
 	// runs for exactly those, M13).
@@ -85,6 +92,11 @@ type MailUnwiring struct {
 	// its verified stop is still owed: resumed at start and by the retry
 	// loop until the instance is down (M4).
 	Closing bool `json:"closing,omitempty" yaml:"closing,omitempty"`
+	// WiredAt is the wiring this unwire is of (Ruling FH-H2): a retry
+	// acts only while the slot still holds exactly that wiring (or
+	// nothing); else the record is stale and dropped.
+	WiredAt time.Time `json:"wired_at,omitempty" yaml:"wired_at,omitempty"`
+	WireSeq int       `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 }
 
 // MailSwitch is a switch in progress.
@@ -111,6 +123,9 @@ type MailProvider struct {
 	BlockHash string    `json:"block_hash" yaml:"block_hash"`
 	WiredAt   time.Time `json:"wired_at" yaml:"wired_at"`
 	WiredBy   string    `json:"wired_by" yaml:"wired_by"`
+	// Seq identifies this wiring (Mail.WireSeq at its record): an
+	// unwire record of another wiring is stale (FH-H2).
+	Seq int `json:"seq,omitempty" yaml:"seq,omitempty"`
 }
 
 // MailVoid is an owed void (reason wire or restore).

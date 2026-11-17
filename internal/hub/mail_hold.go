@@ -236,6 +236,15 @@ func (h *Hub) runRewireMail(ctx context.Context, t *templates.Template, actor di
 	owed := h.st.Mail.VoidOwed
 	h.mu.Unlock()
 	prog.planned(StepMailRecord).Done(StepMailRecord)
+	// A core restore holds the provider (FH-H3 b): the confirmation is
+	// recorded and nothing starts; `hub mail restore` starts it.
+	if h.mailRestoreHolds(id) {
+		for _, k := range []string{StepMailVoid, StepMailNormal, StepMailDocument} {
+			prog.planned(k).Detail(k, "a core restore is pending: the provider starts after `hub mail restore`")
+			prog.planned(k).Done(k)
+		}
+		return &np, nil
+	}
 	prog.planned(StepMailVoid).Start(StepMailVoid)
 	if owed != nil {
 		if err := h.runVoid(ctx, id, owed.Reason); err != nil {

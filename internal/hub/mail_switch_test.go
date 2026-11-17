@@ -156,7 +156,8 @@ func TestUnwireDrainThenRemoveSets(t *testing.T) {
 func TestUnwireCrashMidCloseResumes(t *testing.T) {
 	w := wiredFix(t)
 	w.h.mu.Lock()
-	w.h.st.Mail.Unwiring = &state.MailUnwiring{Instance: mailProviderID, By: "root", Closing: true}
+	pr := w.h.st.Mail.Provider
+	w.h.st.Mail.Unwiring = &state.MailUnwiring{Instance: mailProviderID, By: "root", Closing: true, WiredAt: pr.WiredAt, WireSeq: pr.Seq}
 	w.h.mu.Unlock()
 	w.h.resumeMail()
 	w.h.Wait()

@@ -52,6 +52,10 @@ type mailSync struct {
 	// own mass-removal refusal named: a confirmation of exactly that set
 	// is the only one that sends confirm_mass_removal (R-L8).
 	blindListed []string
+	// blindDoc: the accounts of the document that refusal answered; the
+	// flag is sent only for a document keeping every one of them (M1:
+	// nobody else rides on the confirmation).
+	blindDoc []string
 	// addSince: when the pending additions were first seen (zero: none).
 	addSince time.Time
 	// hubRemoved: the accounts (by uuid) an admin took out of mail_users
@@ -405,7 +409,13 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		s.mu.Lock()
 		listed := s.blindListed
 		s.mu.Unlock()
-		confirm = confirmed && len(listed) > 0 && slices.Equal(listed, pending)
+		kept := true
+		s.mu.Lock()
+		for _, u := range s.blindDoc {
+			kept = kept && slices.ContainsFunc(doc.Accounts, func(a mailprovider.Account) bool { return a.UUID == u })
+		}
+		s.mu.Unlock()
+		confirm = confirmed && len(listed) > 0 && slices.Equal(listed, pending) && kept
 	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
@@ -421,8 +431,12 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 					ids = append(ids, r.UUID)
 				}
 				sort.Strings(ids)
+				docIDs := make([]string, 0, len(doc.Accounts))
+				for _, a := range doc.Accounts {
+					docIDs = append(docIDs, a.UUID)
+				}
 				s.mu.Lock()
-				s.blindListed = ids
+				s.blindListed, s.blindDoc = ids, docIDs
 				s.mu.Unlock()
 			}
 			return h.mailMassRefused(ctx, api, last, doc, d, err)

@@ -533,3 +533,28 @@ func TestRestorePendingRefusesOtherRestores(t *testing.T) {
 		t.Fatalf("another archive: %v", err)
 	}
 }
+
+// TestRestoreHoldClearedByHandStaysStopped (FH-H3 c): the hold file
+// removed by hand (`mail restore-hold clear`) never starts the provider
+// on its own; the administrator's Retry does, through a void.
+func TestRestoreHoldClearedByHandStaysStopped(t *testing.T) {
+	w, _, pending := restoreFix(t)
+	w.h.mailNoteRestorePending()
+	os.Remove(pending)
+	w.h.mailVoidRetryOnce(context.Background())
+	w.h.Wait()
+	if err := w.h.composeUp(context.Background(), w.h.Template(mailProviderID)); statusOf(err) != 409 {
+		t.Fatalf("an up after the hand clear: %v", err)
+	}
+	if n := w.upCount(); n != 0 {
+		t.Fatalf("%d ups", n)
+	}
+	voids := len(w.mc.Voids)
+	if _, err := w.h.RetryMailVoid(rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if w.upCount() == 0 || len(w.mc.Voids) == voids {
+		t.Fatalf("Retry: ups %d voids %d → %d", w.upCount(), voids, len(w.mc.Voids))
+	}
+}

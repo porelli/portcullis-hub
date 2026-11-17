@@ -559,16 +559,19 @@ func (h *Hub) kickMailVoid() {
 
 // mailVoidRetryOnce runs one retry when one is due.
 func (h *Hub) mailVoidRetryOnce(ctx context.Context) {
-	if !h.mailOn() {
-		return
-	}
 	h.mu.RLock()
 	p, owed, held := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held
 	h.mu.RUnlock()
+	// Owed stops first, whatever the slot (M8): a closed slot never
+	// leaves an old provider serving.
 	if held != nil && held.DownOwed {
 		h.mailRetryHeldStop()
 	}
 	h.mailResumeClosing()
+	h.mailNoteRestorePending()
+	if !h.mailOn() {
+		return
+	}
 	if p == nil || owed == nil || held != nil {
 		return
 	}
@@ -608,9 +611,23 @@ const OpMailVoidRetry = "mail_void_retry"
 // the owed void and, verified, the normal up, now (409: no void owed or
 // the provider is held). Audited mail.void_retry.
 func (h *Hub) RetryMailVoid(actor directory.Actor) (*AsyncOp, error) {
-	h.mu.RLock()
-	p, owed, held := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held
-	h.mu.RUnlock()
+	if h.mailRestorePending() {
+		return nil, errMailRestorePending
+	}
+	h.mu.Lock()
+	p, held := h.st.Mail.Provider, h.st.Mail.Held
+	// After a core restore's hold went by hand (`mail restore-hold
+	// clear`), the administrator's Retry is what starts the provider
+	// again, always through a void (FH-H3 c).
+	if p != nil && h.st.Mail.RestoreHeld {
+		h.st.Mail.RestoreHeld = false
+		if h.st.Mail.VoidOwed == nil {
+			h.raiseVoidDebtLocked(state.MailVoidRestore)
+		}
+		h.saveLocked()
+	}
+	owed := h.st.Mail.VoidOwed
+	h.mu.Unlock()
 	if p == nil || owed == nil {
 		return nil, statusErr(http.StatusConflict, "no void of the mail passwords is owed")
 	}

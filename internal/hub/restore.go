@@ -377,7 +377,7 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		if !p.CloseStop() {
 			return context.Canceled // the Stop's undo starts it again
 		}
-		if wasEnabled {
+		if wasEnabled && !h.mailRestoreHolds(id) {
 			if rerr := h.startAgain(view); rerr != nil {
 				log.Printf("instance %s: starting again after a refused restore: %v", id, rerr)
 			}
@@ -971,6 +971,13 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 	rep.Done(StepConfig)
 	if err := ctx.Err(); err != nil {
 		return air, err
+	}
+	// A rollback or a recovery of the wired mail provider while a core
+	// restore holds it leaves it stopped (FH-H3): only the restore's own
+	// final start (its commit token) starts it.
+	if wasEnabled && !(void && mailHostRestoreOf(ctx) == id) && h.mailRestoreHolds(id) {
+		h.writePolicyLogged()
+		return air, nil
 	}
 	if wasEnabled {
 		rep.Start(StepStart)

@@ -126,6 +126,9 @@ func (h *Hub) runUnwireMail(ctx context.Context, id string, drain bool, actor di
 		h.mailDrainAll(actor)
 		h.mu.Lock()
 		h.st.Mail.Unwiring = &state.MailUnwiring{Instance: id, Since: h.mailNow().UTC(), By: actor.User}
+		if p := h.st.Mail.Provider; p != nil && p.Instance == id {
+			h.st.Mail.Unwiring.WiredAt, h.st.Mail.Unwiring.WireSeq = p.WiredAt, p.Seq
+		}
 		err := h.saveStateLocked()
 		h.mu.Unlock()
 		if err != nil {
@@ -225,16 +228,19 @@ func (h *Hub) mailRemoveAllSets(ctx context.Context) error {
 // closed. Caller holds the app lock.
 func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.Actor) error {
 	h.mu.Lock()
-	// An unwire's close is recorded first (M4): a crash or a failed stop
-	// from here on is resumed until the instance is verified down. A
-	// switch's own record (Switch) resumes its close.
-	if sw := h.st.Mail.Switch; sw == nil || sw.From != id {
+	// The close is recorded first (M4, and a switch's too: M5): a crash
+	// or a failed stop from here on is resumed until the instance is
+	// verified down — bound to this wiring (FH-H2).
+	{
 		u := h.st.Mail.Unwiring
 		if u == nil || u.Instance != id {
 			u = &state.MailUnwiring{Instance: id, Since: h.mailNow().UTC(), By: actor.User}
 		} else {
 			c := *u
 			u = &c
+		}
+		if p := h.st.Mail.Provider; p != nil && p.Instance == id {
+			u.WiredAt, u.WireSeq = p.WiredAt, p.Seq
 		}
 		u.Closing = true
 		prevU := h.st.Mail.Unwiring
@@ -350,11 +356,16 @@ func (h *Hub) mailResumeClosing() {
 	defer unlock()
 	h.mu.RLock()
 	still := h.st.Mail.Unwiring != nil && h.st.Mail.Unwiring.Closing && h.st.Mail.Unwiring.Instance == u.Instance
+	stale := h.mailUnwiringStaleLocked(u)
 	h.mu.RUnlock()
 	if !still {
 		return
 	}
 	actor := directory.Human(u.By)
+	if stale {
+		h.mailDropStaleUnwiring(u, actor)
+		return
+	}
 	err = h.closeMailProvider(context.Background(), u.Instance, actor)
 	if err != nil {
 		log.Printf("mail: finishing the unwire of %s (retrying): %v", u.Instance, err)
@@ -384,11 +395,16 @@ func (h *Hub) mailFinishUnwireIfDrained() {
 		defer unlock()
 		h.mu.RLock()
 		still := h.st.Mail.Unwiring != nil && h.st.Mail.Unwiring.Instance == u.Instance
+		stale := h.mailUnwiringStaleLocked(u)
 		h.mu.RUnlock()
 		if !still {
 			return
 		}
 		actor := directory.Human(u.By)
+		if stale {
+			h.mailDropStaleUnwiring(u, actor)
+			return
+		}
 		// Every added domain's set goes first (M5, spec §5.3); a DELETE
 		// that fails keeps the unwire for the next pass.
 		if err := h.mailRemoveAllSets(context.Background()); err != nil {
@@ -678,4 +694,42 @@ func (h *Hub) HostMailUnwire(drain bool) (*AsyncOp, error) {
 		return nil, statusErr(http.StatusConflict, "no mail provider is wired")
 	}
 	return h.startUnwireMail(p.Instance, drain, directory.Human(HostActor), true)
+}
+
+// mailUnwiringStaleLocked: u is of another wiring than the slot holds
+// now (FH-H2): something else (or the same instance again) was wired
+// since. Nothing wired is not stale (the close is still owed). Caller
+// must hold mu.
+func (h *Hub) mailUnwiringStaleLocked(u *state.MailUnwiring) bool {
+	p := h.st.Mail.Provider
+	if p == nil {
+		return false
+	}
+	return p.Instance != u.Instance || p.Seq != u.WireSeq || !p.WiredAt.Equal(u.WiredAt)
+}
+
+// mailDropStaleUnwiring drops a stale unwiring record (FH-H2) once the
+// old instance is confirmed stopped (another instance: its owed down;
+// the same one wired again: its new wiring is running, nothing to stop).
+// Never a void or an unwire of the current wiring. Audited
+// mail.unwire_stale.
+func (h *Hub) mailDropStaleUnwiring(u *state.MailUnwiring, actor directory.Actor) {
+	h.mu.RLock()
+	p := h.st.Mail.Provider
+	h.mu.RUnlock()
+	var err error
+	if p == nil || p.Instance != u.Instance {
+		ctx, cancel := context.WithTimeout(context.Background(), mailStopTimeout)
+		err = h.rt.DownByName(ctx, projectName(u.Instance))
+		cancel()
+	}
+	if err == nil {
+		h.mu.Lock()
+		if cur := h.st.Mail.Unwiring; cur != nil && cur.Instance == u.Instance && cur.WireSeq == u.WireSeq && cur.WiredAt.Equal(u.WiredAt) {
+			h.st.Mail.Unwiring = nil
+			h.saveLocked()
+		}
+		h.mu.Unlock()
+	}
+	h.auditOp(actor, "mail.unwire_stale", u.Instance, "", err)
 }
