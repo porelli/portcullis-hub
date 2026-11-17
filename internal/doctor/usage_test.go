@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -148,5 +149,78 @@ func TestUsageNilInputsNoFindings(t *testing.T) {
 		if !strings.Contains(kinds, k) {
 			t.Errorf("%s isn't registered", k)
 		}
+	}
+}
+
+const gib = 1 << 30
+
+func diskRun(fs ...FilesystemIn) []Finding {
+	return storageCheck{kind: KindDiskNearlyFull}.Run(&Inputs{Storage: &StorageIn{Filesystems: fs}})
+}
+
+func TestDiskNearlyFullBands(t *testing.T) {
+	for _, c := range []struct {
+		free, total uint64
+		want        Severity
+	}{
+		{12 * gib, 100 * gib, ""}, {9 * gib, 100 * gib, Warning}, {gib * 5 / 2, 100 * gib, Problem},
+		{4 * gib, 20 * gib, Warning}, {gib * 9 / 10, 20 * gib, Problem},
+	} {
+		fs := diskRun(FilesystemIn{Dev: 1, Path: "/srv", Free: c.free, Total: c.total, Owners: []string{"a"}})
+		switch {
+		case c.want == "" && len(fs) != 0:
+			t.Errorf("%d/%d: %+v", c.free, c.total, fs)
+		case c.want != "" && (len(fs) != 1 || fs[0].Severity != c.want):
+			t.Errorf("%d/%d: %+v, want %s", c.free, c.total, fs, c.want)
+		}
+	}
+}
+
+func TestDiskNearlyFullDedupByDev(t *testing.T) {
+	fs := diskRun(
+		FilesystemIn{Dev: 5, Path: "/srv/data", Free: gib, Total: 100 * gib, Owners: []string{"paperless", "core"}},
+		FilesystemIn{Dev: 5, Path: "/srv/media", Free: gib, Total: 100 * gib, Owners: []string{"folder:media"}},
+		FilesystemIn{Dev: 5, Path: "/data", Free: gib, Total: 100 * gib, Owners: []string{"core"}},
+	)
+	if len(fs) != 1 {
+		t.Fatalf("findings = %+v", fs)
+	}
+	f := fs[0]
+	if !strings.Contains(f.Why, "paperless, core, shared folder media") || f.Fix != "free space or move the data" ||
+		f.Link == nil || f.Link.Instance != "paperless" || f.Link.Tab != TabUsage || !slices.Equal(f.Paths, []string{"/srv/data"}) {
+		t.Errorf("finding = %+v", f)
+	}
+}
+
+func TestDiskNearlyFullNoNumbers(t *testing.T) {
+	if fs := diskRun(FilesystemIn{Dev: 1, Path: "/srv", Total: 0}); len(fs) != 0 {
+		t.Errorf("no numbers: %+v", fs)
+	}
+	if fs := (storageCheck{kind: KindDiskNearlyFull}).Run(&Inputs{}); len(fs) != 0 {
+		t.Error("nil storage fired")
+	}
+}
+
+func TestStorageMeasurePartial(t *testing.T) {
+	fs := storageCheck{kind: KindStorageMeasurePartial}.Run(&Inputs{Storage: &StorageIn{Partial: []StoragePartialIn{{Target: "portcullis-a_data", Owner: "a", Reason: "time"}}}})
+	if len(fs) != 1 || fs[0].Severity != Info || !strings.Contains(fs[0].Why, "the figure is a lower bound") ||
+		fs[0].FP != Fingerprint(KindStorageMeasurePartial, "a", "portcullis-a_data") {
+		t.Errorf("partial = %+v", fs)
+	}
+}
+
+func TestDiskTokenStableInBand(t *testing.T) {
+	tok := func(free uint64) string {
+		r := Run(&Inputs{Storage: &StorageIn{Filesystems: []FilesystemIn{{Dev: 1, Path: "/srv", Free: free, Total: 100 * gib}}}}, nil)
+		for _, f := range r.Findings {
+			if f.Kind == KindDiskNearlyFull {
+				return f.Token
+			}
+		}
+		return ""
+	}
+	a, b, c := tok(9*gib), tok(gib*17/2), tok(gib*29/10)
+	if a == "" || a != b || c == a {
+		t.Errorf("tokens %q %q %q", a, b, c)
 	}
 }

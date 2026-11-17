@@ -3,6 +3,7 @@ package doctor
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -252,4 +253,146 @@ func usageNotMeasured(u *UsageIn) []Finding {
 		Steps:  []string{"Check the engine's state in Settings (GET /api/runtime) and the Hub's log for \"usage:\" lines."},
 		Inputs: Digest(why),
 	}}
+}
+
+// StorageKinds are the storage kinds (Inputs.Storage).
+var StorageKinds = []string{KindDiskNearlyFull, KindStorageMeasurePartial}
+
+// The disk bands (contract §14.5).
+const (
+	diskWarnPercent  = 10
+	diskWarnBytes    = 5 << 30
+	diskProblemPerc  = 3
+	diskProblemBytes = 1 << 30
+)
+
+func init() {
+	for _, k := range StorageKinds {
+		Register(storageCheck{kind: k})
+	}
+}
+
+type storageCheck struct{ kind string }
+
+func (c storageCheck) Kind() string { return c.kind }
+
+func (c storageCheck) Run(in *Inputs) []Finding {
+	if in.Storage == nil {
+		return nil
+	}
+	if c.kind == KindDiskNearlyFull {
+		return diskNearlyFull(in.Storage)
+	}
+	return storageMeasurePartial(in.Storage)
+}
+
+// diskBand is a filesystem's band: "problem", "warning" or "".
+func diskBand(free, total uint64) string {
+	if total == 0 {
+		return ""
+	}
+	switch {
+	case free*100 < total*diskProblemPerc || free < diskProblemBytes:
+		return "problem"
+	case free*100 < total*diskWarnPercent || free < diskWarnBytes:
+		return "warning"
+	}
+	return ""
+}
+
+// fmtGiB is bytes in GiB, one decimal.
+func fmtGiB(n uint64) string { return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30)) }
+
+func diskNearlyFull(s *StorageIn) []Finding {
+	// One finding per filesystem: the same dev from several sources is
+	// merged (owners kept in order, largest first as given).
+	type fsAgg struct {
+		f      FilesystemIn
+		owners []string
+	}
+	var order []uint64
+	byDev := map[uint64]*fsAgg{}
+	for _, f := range s.Filesystems {
+		a := byDev[f.Dev]
+		if a == nil {
+			a = &fsAgg{f: f}
+			byDev[f.Dev] = a
+			order = append(order, f.Dev)
+		}
+		for _, o := range f.Owners {
+			if !contains(a.owners, o) {
+				a.owners = append(a.owners, o)
+			}
+		}
+	}
+	var out []Finding
+	for _, dev := range order {
+		a := byDev[dev]
+		band := diskBand(a.f.Free, a.f.Total)
+		if band == "" {
+			continue
+		}
+		sev := Warning
+		if band == "problem" {
+			sev = Problem
+		}
+		pct := float64(a.f.Free) * 100 / float64(a.f.Total)
+		var insts, folders, names []string
+		var link *Link
+		for _, o := range a.owners {
+			switch {
+			case o == "core":
+				names = append(names, "core")
+			case strings.HasPrefix(o, "folder:"):
+				id := strings.TrimPrefix(o, "folder:")
+				folders = append(folders, id)
+				names = append(names, "shared folder "+id)
+			default:
+				insts = append(insts, o)
+				names = append(names, o)
+				if link == nil {
+					link = &Link{Instance: o, Tab: TabUsage}
+				}
+			}
+		}
+		why := fmt.Sprintf("%s free of %s (%.1f %%). When it fills, apps can't write: databases stop, uploads and backups fail.", fmtGiB(a.f.Free), fmtGiB(a.f.Total), pct)
+		if len(names) > 0 {
+			why += " Data there, largest first: " + strings.Join(names, ", ") + "."
+		}
+		out = append(out, Finding{
+			FP: Fingerprint(KindDiskNearlyFull, strconv.FormatUint(dev, 10), a.f.Path), Kind: KindDiskNearlyFull, Severity: sev,
+			Title:     fmt.Sprintf("The disk with %s is nearly full.", a.f.Path),
+			Why:       why,
+			Fix:       "free space or move the data",
+			Class:     FixExplain,
+			Instances: insts, Folders: folders, Paths: []string{a.f.Path},
+			Steps: []string{
+				"Free space or move the data: Usage → Storage shows what is on this disk, largest first.",
+				"Old backups (Settings, an instance's Backups) and unused images are often the quickest to remove.",
+			},
+			Link:   link,
+			Inputs: Digest(band),
+		})
+	}
+	return out
+}
+
+func storageMeasurePartial(s *StorageIn) []Finding {
+	var out []Finding
+	for _, p := range s.Partial {
+		f := Finding{
+			FP: Fingerprint(KindStorageMeasurePartial, p.Owner, p.Target), Kind: KindStorageMeasurePartial, Severity: Info,
+			Title:  fmt.Sprintf("The storage of %s's %s was measured only in part.", p.Owner, p.Target),
+			Why:    "The measurement stopped at its cap (" + p.Reason + "): the figure is a lower bound.",
+			Class:  FixExplain,
+			Steps:  []string{"Nothing to do: the next run measures it again. A very large tree is always capped; the Usage page shows it as \"≥\"."},
+			Inputs: Digest(p.Reason),
+		}
+		if p.Owner != "core" {
+			f.Instances = []string{p.Owner}
+			f.Link = &Link{Instance: p.Owner, Tab: TabUsage}
+		}
+		out = append(out, f)
+	}
+	return out
 }

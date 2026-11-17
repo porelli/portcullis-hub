@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -48,5 +50,42 @@ func TestUsageDoctorInFromSnapshot(t *testing.T) {
 	}
 	if !c.OOMSeenHour {
 		t.Error("the OOM kill wasn't seen")
+	}
+}
+
+// The storage kinds' input: the cache's disks with their owners
+// (folders prefixed) and the capped targets.
+func TestStorageDoctorIn(t *testing.T) {
+	e := newStorageEnv(t)
+	e.rep = func(r fixerRun) (*folderfix.Report, error) {
+		rep := &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10, Dev: 7, FreeBytes: 1, TotalBytes: 100}
+		if r.Volume.Name == "portcullis-a_data" {
+			rep.Partial, rep.PartialReason = true, "entries"
+		}
+		return rep, nil
+	}
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	in := e.h.storageDoctorIn()
+	var d7 *doctor.FilesystemIn
+	for i := range in.Filesystems {
+		if in.Filesystems[i].Dev == 7 {
+			d7 = &in.Filesystems[i]
+		}
+	}
+	if d7 == nil || d7.Total != 100 || len(d7.Owners) < 3 {
+		t.Fatalf("filesystems = %+v", in.Filesystems)
+	}
+	if len(in.Partial) != 1 || in.Partial[0].Target != "portcullis-a_data" || in.Partial[0].Owner != "a" {
+		t.Errorf("partial = %+v", in.Partial)
+	}
+	r := doctor.Run(&doctor.Inputs{Storage: in}, nil)
+	kinds := map[string]bool{}
+	for _, f := range r.Findings {
+		kinds[f.Kind] = true
+	}
+	if !kinds[doctor.KindDiskNearlyFull] || !kinds[doctor.KindStorageMeasurePartial] {
+		t.Errorf("kinds = %v", kinds)
 	}
 }

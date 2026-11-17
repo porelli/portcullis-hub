@@ -661,8 +661,12 @@ func (h *Hub) storageModel() StorageView {
 			addDisk(e.Report.Dev, e.Report.FreeBytes, e.Report.TotalBytes, fid, fs.AllocBytes, folders[fid].Path)
 		}
 	}
-	if dev, free, total, err := statDir(h.cfg.DataDir); err == nil {
-		addDisk(dev, free, total, usageCoreOwner, nil, h.cfg.DataDir)
+	// The Hub's data directory, once the measurer has run (before that
+	// nothing of the storage view is judged).
+	if sf.LastRun != nil || len(sf.Entries) > 0 {
+		if dev, free, total, err := statDir(h.cfg.DataDir); err == nil {
+			addDisk(dev, free, total, usageCoreOwner, nil, h.cfg.DataDir)
+		}
 	}
 	for _, dev := range slices.Sorted(maps.Keys(disks)) {
 		d := disks[dev]
