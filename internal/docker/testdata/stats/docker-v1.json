@@ -1,0 +1,5 @@
+{"read":"2026-11-15T10:00:15Z","pids_stats":{"current":3},
+ "blkio_stats":{"io_service_bytes_recursive":[{"major":8,"minor":0,"op":"Read","value":700},{"major":8,"minor":0,"op":"Write","value":300},{"major":8,"minor":0,"op":"Sync","value":1000},{"major":8,"minor":0,"op":"Total","value":1000}]},
+ "cpu_stats":{"cpu_usage":{"total_usage":5000000000}},
+ "memory_stats":{"usage":2000000,"stats":{"total_inactive_file":500000,"cache":600000}},
+ "networks":{"eth0":{"rx_bytes":10,"tx_bytes":20}}}

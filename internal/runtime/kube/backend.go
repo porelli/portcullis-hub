@@ -920,3 +920,15 @@ func parsePrefix(s string) ([]netip.Prefix, error) {
 	}
 	return []netip.Prefix{p.Masked()}, nil
 }
+
+// notMeasuredKube: usage figures on Kubernetes come with the pod metrics
+// part (contract §6 "On Kubernetes").
+var notMeasuredKube = &runtime.NotMeasuredError{Why: "not measured on Kubernetes yet"}
+
+func (b *Backend) Stats(context.Context, string) (runtime.UnitStats, error) {
+	return runtime.UnitStats{}, notMeasuredKube
+}
+
+func (b *Backend) LayerSize(context.Context, string) (int64, error) { return 0, notMeasuredKube }
+
+func (b *Backend) ImageSize(context.Context, string) (int64, error) { return 0, notMeasuredKube }

@@ -66,6 +66,13 @@ type Engine interface {
 	APIVersion(ctx context.Context) (string, error)
 	// ListNetworks lists the engine's networks with their subnets.
 	ListNetworks(ctx context.Context) ([]engine.Network, error)
+	// The usage page (contract §6 "Resource usage"): one stats sample, a
+	// writable layer's size, an image's size and the host's CPUs and
+	// memory.
+	ContainerStats(ctx context.Context, id string) (runtime.UnitStats, error)
+	ContainerSizeRw(ctx context.Context, id string) (int64, error)
+	ImageSize(ctx context.Context, ref string) (int64, error)
+	HostResources(ctx context.Context) (cpus int, mem int64, err error)
 }
 
 // Options configure a Backend.
@@ -136,6 +143,9 @@ func (b *Backend) Info(ctx context.Context) (runtime.Info, error) {
 	}
 	if i.Networks, err = b.engine.ListNetworks(ctx); err != nil {
 		return i, fmt.Errorf("the networks: %w", err)
+	}
+	if i.CPUs, i.MemoryBytes, err = b.engine.HostResources(ctx); err != nil {
+		return i, fmt.Errorf("the host's resources: %w", err)
 	}
 	return i, nil
 }
@@ -383,6 +393,18 @@ func (b *Backend) RemoveHelper(ctx context.Context, id string) error {
 
 func (b *Backend) RunFixer(ctx context.Context, s runtime.FixerSpec, out func(tar io.Reader) error) (*runtime.RunResult, error) {
 	return b.engine.RunHelper(ctx, s, out)
+}
+
+func (b *Backend) Stats(ctx context.Context, id string) (runtime.UnitStats, error) {
+	return b.engine.ContainerStats(ctx, id)
+}
+
+func (b *Backend) LayerSize(ctx context.Context, id string) (int64, error) {
+	return b.engine.ContainerSizeRw(ctx, id)
+}
+
+func (b *Backend) ImageSize(ctx context.Context, ref string) (int64, error) {
+	return b.engine.ImageSize(ctx, ref)
 }
 
 func (b *Backend) EnsureImage(ctx context.Context, ref string) error {

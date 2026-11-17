@@ -165,6 +165,8 @@ type FixerSpec struct {
 	Env []string
 	// Binds are the only host paths the helper sees.
 	Binds []BindMount
+	// Volumes are named volumes mounted read-only (the usage mode).
+	Volumes []VolumeMount
 	// Scratch are anonymous volume targets ("/out", "/in"), removed with
 	// the container.
 	Scratch []string
@@ -215,7 +217,54 @@ type UnitInfo struct {
 	Privileged bool
 	CapAdd     []string
 	Devices    []string
+	// NanoCPUs / CPUQuota / CPUPeriod: HostConfig's CPU limit (0 = none;
+	// the usage page's cpu_limit_cores). NetworkMode is HostConfig's
+	// (host, none, container:<id>, service:<name>: no own network rates).
+	NanoCPUs, CPUQuota, CPUPeriod int64
+	NetworkMode                   string
+	// OOMKilled / StartedAt: State's, for the current start;
+	// RestartCount: the engine's restart count.
+	OOMKilled    bool
+	RestartCount int
+	StartedAt    time.Time
+	// Mounts: each mount's type, volume name, source, destination and
+	// whether it is writable (the storage measurer's bind targets).
+	Mounts []UnitMount
 }
+
+// UnitMount is one mount of a unit (inspect Mounts[]): Type bind or
+// volume, Name the volume name, Source the host path.
+type UnitMount struct {
+	Type, Name, Source, Destination string
+	RW                              bool
+}
+
+// UnitStats is one stats sample of a unit, field by field (contract §6
+// "Resource usage"). A nil field is absent in the engine's answer: never
+// read it as 0.
+type UnitStats struct {
+	Read            time.Time // the engine's sample time
+	CPUUsageNS      *uint64   // cpu_stats.cpu_usage.total_usage
+	CPUCores        *float64  // a rate the runtime gives directly (Kubernetes)
+	MemUsage        *uint64   // memory_stats.usage
+	MemInactiveFile *uint64   // stats.inactive_file (v2) or stats.total_inactive_file (v1)
+	MemWorkingSet   *uint64   // given directly (Kubernetes)
+	Pids            *uint64
+	NetRx, NetTx    *uint64 // Σ networks{}; nil: no networks object
+	// BlkRead / BlkWrite: Σ io_service_bytes_recursive op read / write.
+	BlkRead, BlkWrite *uint64
+}
+
+// NotMeasuredError: the runtime can't give this figure (Why is fixed
+// text, shown as "not measured: <why>").
+type NotMeasuredError struct{ Why string }
+
+func (e *NotMeasuredError) Error() string { return "not measured: " + e.Why }
+
+// VolumeMount is one named volume mounted into a started helper: always
+// read-only, never copied up (NoCopy). Instance names its owner (the kube
+// backend's PVC namespace label; "" for core).
+type VolumeMount struct{ Name, Target, Instance string }
 
 // Info is what the runtime says about itself.
 type Info struct {
@@ -246,6 +295,10 @@ type Info struct {
 	// overlap guard, contract §3.3; on Kubernetes the pod and service
 	// CIDRs).
 	Networks []Network
+	// CPUs / MemoryBytes: the host's (Docker's Info NCPU / MemTotal; 0 =
+	// unknown).
+	CPUs        int
+	MemoryBytes int64
 }
 
 // SecurityOption reports whether Docker's SecurityOptions carry

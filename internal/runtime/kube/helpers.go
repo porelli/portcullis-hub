@@ -269,6 +269,10 @@ func (b *Backend) RunFixer(ctx context.Context, s runtime.FixerSpec, out func(ta
 	if len(s.Cmd) == 0 || !path.IsAbs(s.Cmd[0]) {
 		return nil, errors.New("helper argv must start with an absolute path")
 	}
+	if len(s.Volumes) > 0 {
+		// The read-only PVC usage helper comes with the pod metrics part.
+		return nil, &runtime.NotMeasuredError{Why: "not measured on Kubernetes yet"}
+	}
 	timeout := s.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Minute

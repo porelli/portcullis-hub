@@ -172,6 +172,23 @@ func (r *recorder) ListNetworks(context.Context) ([]engine.Network, error) {
 	r.rec("networks")
 	return r.nets, nil
 }
+func (r *recorder) ContainerStats(_ context.Context, id string) (runtime.UnitStats, error) {
+	r.rec("stats %s", id)
+	n := uint64(7)
+	return runtime.UnitStats{MemUsage: &n}, nil
+}
+func (r *recorder) ContainerSizeRw(_ context.Context, id string) (int64, error) {
+	r.rec("size-rw %s", id)
+	return 11, nil
+}
+func (r *recorder) ImageSize(_ context.Context, ref string) (int64, error) {
+	r.rec("image-size %s", ref)
+	return 13, nil
+}
+func (r *recorder) HostResources(context.Context) (int, int64, error) {
+	r.rec("host-resources")
+	return 8, 16 << 30, nil
+}
 
 const testHelper = "docker.io/library/alpine:3@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -293,7 +310,7 @@ func TestDockerBackendMatchesEngine(t *testing.T) {
 	if !bytes.Equal(r.tarIn["/"], r.tarOut) {
 		t.Error("docker: the restore didn't send the canonical archive to /")
 	}
-	step("fixer", []string{"security-options", "docker-root", "api-version", "networks", "run-helper sha256:abc [/usr/local/bin/hub folderfix check] folder:x"}, func() error {
+	step("fixer", []string{"security-options", "docker-root", "api-version", "networks", "host-resources", "run-helper sha256:abc [/usr/local/bin/hub folderfix check] folder:x"}, func() error {
 		if _, err := b.Info(ctx); err != nil {
 			return err
 		}
@@ -461,5 +478,36 @@ func TestRestartCoreServiceNarrow(t *testing.T) {
 	}
 	if n, _ := restarts(); n != 1 {
 		t.Fatalf("refused restarts ran: %d", n)
+	}
+}
+
+// TestBackendInfoHostResources: Info carries the host's CPUs and memory
+// (Info NCPU / MemTotal).
+func TestBackendInfoHostResources(t *testing.T) {
+	r := &recorder{}
+	b := New(r, r, Options{Kind: runtime.KindDocker, HelperImage: testHelper})
+	i, err := b.Info(context.Background())
+	if err != nil || i.CPUs != 8 || i.MemoryBytes != 16<<30 {
+		t.Errorf("Info = %+v, %v", i, err)
+	}
+}
+
+// TestBackendStatsPassThrough: the usage verbs reach the engine as is.
+func TestBackendStatsPassThrough(t *testing.T) {
+	ctx := context.Background()
+	r := &recorder{}
+	b := New(r, r, Options{Kind: runtime.KindDocker, HelperImage: testHelper})
+	s, err := b.Stats(ctx, "c1")
+	if err != nil || s.MemUsage == nil || *s.MemUsage != 7 {
+		t.Errorf("Stats = %+v, %v", s, err)
+	}
+	if n, err := b.LayerSize(ctx, "c1"); err != nil || n != 11 {
+		t.Errorf("LayerSize = %d, %v", n, err)
+	}
+	if n, err := b.ImageSize(ctx, "sha256:x"); err != nil || n != 13 {
+		t.Errorf("ImageSize = %d, %v", n, err)
+	}
+	if got, want := r.Calls(), []string{"stats c1", "size-rw c1", "image-size sha256:x"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("calls = %q, want %q", got, want)
 	}
 }
