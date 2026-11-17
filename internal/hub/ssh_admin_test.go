@@ -93,10 +93,11 @@ func TestHostCertificateNeedsSecurityKeyAdmin(t *testing.T) {
 	if _, err := f.h.SignHostKey(context.Background(), rootActor, req, freshauth.Proof{}); sshStatusOf(err) != 409 {
 		t.Errorf("a name outside the patterns = %v", err)
 	}
-	req.Names = []string{"web-1.example.com"} // a managed host of web
-	if _, err := f.h.SignHostKey(context.Background(), rootActor, req, freshauth.Proof{}); err != nil {
+	req.Names = []string{"web-1.example.com"} // a managed host of web: its own key's certificate only (L-A1)
+	if _, err := f.h.SignHostKey(context.Background(), rootActor, req, freshauth.Proof{}); sshStatusOf(err) != 409 {
 		t.Errorf("a managed host's name = %v", err)
 	}
+	req.Names = []string{"web-9.lab.example.com"}
 	if _, err := f.h.SignHostKey(context.Background(), directory.Actor{User: "root", Via: directory.ViaAI}, req, freshauth.Proof{}); err == nil {
 		t.Error("a host key signed via AI")
 	}
