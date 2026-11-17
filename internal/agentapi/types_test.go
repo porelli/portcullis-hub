@@ -53,6 +53,12 @@ func TestWireRoundTrip(t *testing.T) {
 	if got := roundTrip(t, UnitOf(u)).Runtime(); !reflect.DeepEqual(got, u) {
 		t.Errorf("unit %+v", got)
 	}
+	// A created, never started container: a network without aliases
+	// (nil) crosses as [] (seen live: the strict decoder refused null).
+	created := runtime.Unit{ID: "c2", Name: "m", Networks: map[string][]string{"portcullis-proxy": nil, "d": {"web"}}}
+	if got := roundTrip(t, UnitOf(created)).Runtime(); len(got.Networks["portcullis-proxy"]) != 0 || got.Networks["d"][0] != "web" {
+		t.Errorf("created unit %+v", got)
+	}
 	ui := runtime.UnitInfo{ID: "c1", Image: "sha256:x", CapAdd: []string{"CHOWN"}, Memory: 5}
 	if got := roundTrip(t, UnitInfoOf(ui)).Runtime(); !reflect.DeepEqual(got, ui) {
 		t.Errorf("unit info %+v", got)

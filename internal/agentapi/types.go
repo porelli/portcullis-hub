@@ -416,10 +416,22 @@ type Unit struct {
 	Networks map[string][]string `json:"networks,omitempty"`
 }
 
-// UnitOf / Runtime convert units.
+// UnitOf / Runtime convert units. A network without aliases (a created,
+// never started container's) is an empty list on the wire, never null
+// (the strict decoder refuses null).
 func UnitOf(u runtime.Unit) Unit {
+	nets := u.Networks
+	if nets != nil {
+		nets = make(map[string][]string, len(u.Networks))
+		for n, a := range u.Networks {
+			if a == nil {
+				a = []string{}
+			}
+			nets[n] = a
+		}
+	}
 	return Unit{ID: u.ID, Name: u.Name, Project: u.Project, Instance: u.Instance, Service: u.Service, Image: u.Image,
-		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: u.Networks}
+		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: nets}
 }
 
 func (u Unit) Runtime() runtime.Unit {
