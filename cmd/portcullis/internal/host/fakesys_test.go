@@ -78,6 +78,7 @@ func newFakeSys(t *testing.T) *fakeSys {
 	f.files["/usr/sbin/sshd"] = []byte("bin")
 	f.files["/usr/bin/systemctl"] = []byte("bin")
 	f.files["/run/sshd.pid"] = []byte("4242\n")
+	f.files["/proc/4242/comm"] = []byte("sshd\n")
 	return f
 }
 

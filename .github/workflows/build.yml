@@ -107,6 +107,16 @@ jobs:
           go vet -tags docker ./internal/hub/
           go test -tags docker -count=1 -v -run 'TestDocker' ./internal/hub/
 
+      # The Portcullis CLI's host agent against real sshd (Debian 13,
+      # Ubuntu 24.04, Rocky 9; pinned bases): enrol against a fake Hub,
+      # real logins with test-CA certificates, drift, locks, remove.
+      - name: host agent against real sshd
+        env:
+          PORTCULLIS_DOCKER_TEST: require
+        run: |
+          go vet -tags sshd ./cmd/portcullis/internal/host/
+          go test -tags sshd -count=1 -v ./cmd/portcullis/internal/host/
+
       - name: go build
         run: go build -o /dev/null ./cmd/hub
 

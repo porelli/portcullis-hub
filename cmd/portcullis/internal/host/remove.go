@@ -27,7 +27,7 @@ func RemoveTrust(ctx context.Context, sys System, deleteAccounts, serviceNone bo
 	tx := NewTransaction(sys)
 	ps, _ := sys.Glob(PrincipalsDir + "/*")
 	files := append([]string{DropInFile, SudoersFile, HostCertFile, UserCAFile}, ps...)
-	files = append(files, SyncUnit, SyncPlist, revokedService, revokedTimer, revokedPlist, revokedDomain, AgentFile, StateFile, CeilingFile)
+	files = append(files, SyncUnit, SyncPlist, revokedService, revokedTimer, revokedPlist, revokedDomain, AgentFile, StateFile, CeilingFile, BundleFile)
 	for _, f := range files {
 		if err := tx.StageRemove(f); err != nil {
 			_ = tx.Rollback()

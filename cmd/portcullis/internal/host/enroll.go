@@ -24,6 +24,8 @@ type EnrollOptions struct {
 	Service string
 	Self    string
 	CAFile  string
+	// PeopleURL overrides https://people.<domain> (the container tests).
+	PeopleURL string
 	// Client talks to https://people.<domain>.
 	Client Client
 	Now    func() time.Time
@@ -121,7 +123,7 @@ func Enroll(ctx context.Context, sys System, o EnrollOptions) (err error) {
 	if err := tx.Stage(CeilingFile, CeilingBytes(o.Ceiling), 0o644); err != nil {
 		return err
 	}
-	if err := tx.Stage(AgentFile, agentConfigBytes(AgentConfig{Domain: c.Domain, HostID: c.HostID, CAFile: o.CAFile, ServiceNone: o.Service == "none"}), 0o600); err != nil {
+	if err := tx.Stage(AgentFile, agentConfigBytes(AgentConfig{Domain: c.Domain, HostID: c.HostID, CAFile: o.CAFile, ServiceNone: o.Service == "none", PeopleURL: o.PeopleURL}), 0o600); err != nil {
 		return err
 	}
 	if kind != "" {
@@ -145,6 +147,7 @@ func Enroll(ctx context.Context, sys System, o EnrollOptions) (err error) {
 	}
 	st.Reported = o.Now().UTC()
 	_ = SaveState(sys, st)
+	saveBundle(sys, &b)
 	report(nil, st, fs)
 	return nil
 }

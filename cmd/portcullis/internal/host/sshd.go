@@ -196,7 +196,11 @@ func Reload(ctx context.Context, sys System, serviceNone bool) error {
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-		if err != nil || pid < 2 {
+		if err != nil || pid < 1 {
+			continue
+		}
+		// Only ever an sshd (the pid file could be stale): /proc's comm.
+		if comm, err := sys.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm"); err != nil || !strings.HasPrefix(strings.TrimSpace(string(comm)), "sshd") {
 			continue
 		}
 		if err := signalHUP(sys, pid); err == nil {

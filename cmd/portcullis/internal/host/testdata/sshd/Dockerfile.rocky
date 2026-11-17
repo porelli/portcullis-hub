@@ -1,0 +1,7 @@
+# The host agent's real-sshd test (host_sshd_test.go, build tag sshd).
+FROM rockylinux@sha256:03303863808e9cd79f0c58c833db3e5f9cde9f2abe16804a267b05dc54af86e4
+RUN dnf -y -q install openssh-server openssh-clients sudo passwd procps-ng shadow-utils >/dev/null && dnf clean all >/dev/null \
+ && mkdir -p /run/sshd && ssh-keygen -A && useradd -m -s /bin/bash breakglass && mkdir -p /home/breakglass/.ssh \
+ && chown breakglass: /home/breakglass/.ssh && chmod 700 /home/breakglass/.ssh
+# sshd -D writes no pid file: the shell records its pid, then becomes sshd.
+CMD ["/bin/sh", "-c", "echo $$ > /run/sshd.pid; exec /usr/sbin/sshd -D -e"]

@@ -53,7 +53,7 @@ func hostClient(domain, peopleURL, caFile string) (*api.Client, error) {
 }
 
 func enrollCmd() *cobra.Command {
-	var service, uidRange, caFile string
+	var service, uidRange, caFile, peopleURL string
 	var noBG bool
 	ceil := cliapi.DefaultCeiling()
 	c := &cobra.Command{Use: "enroll [-]", Short: "Managed host: enrol with the one-time code (read from stdin; - prompts)", Args: cobra.MaximumNArgs(1),
@@ -89,12 +89,12 @@ func enrollCmd() *cobra.Command {
 			if err := confirmCeiling(ceil); err != nil {
 				return err
 			}
-			cl, err := hostClient(code.Domain, "", caFile)
+			cl, err := hostClient(code.Domain, peopleURL, caFile)
 			if err != nil {
 				return err
 			}
 			self, _ := os.Executable()
-			if err := host.Enroll(cmd.Context(), host.OS{}, host.EnrollOptions{Code: code, Ceiling: ceil, NoBreakglass: noBG, Service: service, Self: self, CAFile: caFile, Client: cl}); err != nil {
+			if err := host.Enroll(cmd.Context(), host.OS{}, host.EnrollOptions{Code: code, Ceiling: ceil, NoBreakglass: noBG, Service: service, Self: self, CAFile: caFile, PeopleURL: peopleURL, Client: cl}); err != nil {
 				return api.Errorf(api.ExitCode(err), "%v", err)
 			}
 			fmt.Println("Enrolled as " + code.HostID + " in " + code.Domain + ".")
@@ -112,6 +112,10 @@ func enrollCmd() *cobra.Command {
 	f.IntVar(&ceil.MaxAccounts, "max-accounts", cliapi.DefaultMaxAccounts, "at most this many Portcullis accounts")
 	f.StringVar(&uidRange, "uid-range", "20000-59999", "the uids Portcullis accounts may use")
 	f.StringVar(&caFile, "ca-file", "", "trust an extra CA (a test server's staging root)")
+	// Hidden: the container tests' fake Hub (TLS still verified; the
+	// first CA still pinned by the code).
+	f.StringVar(&peopleURL, "people-url", "", "")
+	_ = f.MarkHidden("people-url")
 	return c
 }
 

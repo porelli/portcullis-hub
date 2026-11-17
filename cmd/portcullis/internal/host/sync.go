@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -134,6 +135,19 @@ func (s *SyncState) round(ctx context.Context, sys System, o SyncOptions) error 
 		return err
 	}
 	if code == http.StatusNoContent {
+		// Re-apply the last bundle when a report is due: hand-edited
+		// managed files are rewritten (and reported fixed).
+		if s.st != nil && o.Now().Sub(s.st.Applied) >= ReportEvery {
+			if last := loadBundle(sys); last != nil && last.Serial == s.st.Serial && ValidateBundle(last, s.cfg.HostID, s.signer.PublicKey()) == nil {
+				st, fs, err := Apply(ctx, sys, last, *s.ceiling, s.st, ApplyOptions{Domain: s.cfg.Domain, ServiceNone: s.cfg.ServiceNone, Now: o.Now()})
+				s.bundle, s.findings = last, fs
+				if err == nil {
+					s.st = st
+				}
+				s.report(ctx, sys, o, err)
+				return nil
+			}
+		}
 		s.maybeReport(ctx, sys, o, nil)
 		return nil
 	}
@@ -149,8 +163,31 @@ func (s *SyncState) round(ctx context.Context, sys System, o SyncOptions) error 
 		return err
 	}
 	s.st = st
+	saveBundle(sys, &b)
 	s.report(ctx, sys, o, nil)
 	return nil
+}
+
+// BundleFile is the last applied bundle (0600), re-applied to heal drift.
+const BundleFile = "/etc/portcullis/bundle.json"
+
+func saveBundle(sys System, b *cliapi.Bundle) {
+	raw, err := json.Marshal(b)
+	if err == nil {
+		_ = sys.WriteFileAtomic(BundleFile, raw, 0o600)
+	}
+}
+
+func loadBundle(sys System) *cliapi.Bundle {
+	raw, err := sys.ReadFile(BundleFile)
+	if err != nil || len(raw) > cliapi.MaxBundle {
+		return nil
+	}
+	var b cliapi.Bundle
+	if cliapi.UnmarshalStrict(raw, &b) != nil {
+		return nil
+	}
+	return &b
 }
 
 func (s *SyncState) maybeReport(ctx context.Context, sys System, o SyncOptions, err error) {

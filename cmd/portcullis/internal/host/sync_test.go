@@ -229,13 +229,25 @@ func TestSyncKeepsFilesOnBadBundle(t *testing.T) {
 	other := f.bundle()
 	other.HostID, other.Serial = "web-2", 9
 	for name, ans := range map[string]func() (int, any, error){
-		"5xx":          func() (int, any, error) { return 502, nil, &api.Error{Code: 1, Msg: "bad gateway", Status: 502} },
-		"cut":          func() (int, any, error) { return 0, nil, &api.Error{Code: 5, Msg: "EOF"} },
-		"5 MiB":        func() (int, any, error) { return 200, nil, &api.Error{Code: 1, Msg: "the answer is too large"} },
-		"unknown":      func() (int, any, error) { return 200, map[string]any{"version": 1, "host_id": "web-1", "evil": true}, nil },
-		"other host":   func() (int, any, error) { return 200, other, nil },
-		"bad keys":     func() (int, any, error) { b := f.bundle(); b.Serial = 9; b.RevokedKeys = []string{"nope"}; return 200, b, nil },
-		"kind clash":   func() (int, any, error) { b := f.bundle(); b.Serial = 9; b.Accounts[0].Principals = []string{"s:alice@web"}; return 200, b, nil },
+		"5xx":   func() (int, any, error) { return 502, nil, &api.Error{Code: 1, Msg: "bad gateway", Status: 502} },
+		"cut":   func() (int, any, error) { return 0, nil, &api.Error{Code: 5, Msg: "EOF"} },
+		"5 MiB": func() (int, any, error) { return 200, nil, &api.Error{Code: 1, Msg: "the answer is too large"} },
+		"unknown": func() (int, any, error) {
+			return 200, map[string]any{"version": 1, "host_id": "web-1", "evil": true}, nil
+		},
+		"other host": func() (int, any, error) { return 200, other, nil },
+		"bad keys": func() (int, any, error) {
+			b := f.bundle()
+			b.Serial = 9
+			b.RevokedKeys = []string{"nope"}
+			return 200, b, nil
+		},
+		"kind clash": func() (int, any, error) {
+			b := f.bundle()
+			b.Serial = 9
+			b.Accounts[0].Principals = []string{"s:alice@web"}
+			return 200, b, nil
+		},
 		"oversize big": func() (int, any, error) { return 200, big, nil },
 	} {
 		f.hub.bundles = []func() (int, any, error){ans}
@@ -371,5 +383,30 @@ func TestStatusErrorShape(t *testing.T) {
 	var se StatusError = &api.Error{Status: 403, Server: "removed"}
 	if se.HTTPStatus() != 403 || se.Text() != "removed" {
 		t.Error("api.Error is a StatusError")
+	}
+}
+
+func TestSyncHealsDriftWithLastBundle(t *testing.T) {
+	f := newHostFix(t)
+	if err := f.enroll(t, "none"); err != nil {
+		t.Fatal(err)
+	}
+	f.sys.files[PrincipalsFile("alice")] = []byte("u:mallory@web\n")
+	f.hub.bundles = []func() (int, any, error){func() (int, any, error) { return 204, nil, nil }}
+	if err := syncOnce(t, f); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(f.sys.files[PrincipalsFile("alice")]); got != "u:alice@web\n" {
+		t.Errorf("not healed: %q", got)
+	}
+	r := f.hub.reports[len(f.hub.reports)-1]
+	found := false
+	for _, x := range r.Findings {
+		if x.Kind == cliapi.FindingDrift && x.Subject == PrincipalsFile("alice") && x.Detail == "fixed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("report %+v", r.Findings)
 	}
 }
