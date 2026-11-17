@@ -83,6 +83,11 @@ type MailSettings struct {
 	// The instance it holds (N-L1: per instance; never blocks wiring
 	// another one).
 	RestoreHeld string `json:"restore_held,omitempty" yaml:"restore_held,omitempty"`
+	// UpMode is the wired provider's mode at its last successful up
+	// (normal | void), with the instance: a Hub start that finds the
+	// running networks matching it needs no down before the next up.
+	UpMode         string `json:"up_mode,omitempty" yaml:"up_mode,omitempty"`
+	UpModeInstance string `json:"up_mode_instance,omitempty" yaml:"up_mode_instance,omitempty"`
 	// WireSeq numbers the wirings (monotonic): MailProvider.Seq.
 	WireSeq int `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries

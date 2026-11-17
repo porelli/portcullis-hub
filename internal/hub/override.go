@@ -907,6 +907,21 @@ func (h *Hub) desiredRouteLabelsLocked(t *templates.Template) (map[string]map[st
 		}
 		out[svc] = m
 	}
+	// A mail provider's well-known router is the Hub's mail override's,
+	// not the template's routes: its labels are wanted too, or every Hub
+	// start would find them "unexpected" and restart a running provider.
+	if t.Manifest.Mail != nil {
+		if mr, err := h.mailRenderLocked(t, h.mailRenderModeLocked(t)); err == nil {
+			for svc, l := range mr.labels {
+				if out[svc] == nil {
+					out[svc] = map[string]string{}
+				}
+				for k, v := range l {
+					out[svc][k] = v
+				}
+			}
+		}
+	}
 	return out, nil
 }
 

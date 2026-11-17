@@ -384,6 +384,7 @@ func (h *Hub) mailModeAfterUp(ctx context.Context, t *templates.Template, mode m
 		h.mailUpModes.mu.Lock()
 		delete(h.mailUpModes.m, t.ID)
 		h.mailUpModes.mu.Unlock()
+		h.mailPersistUpMode(t.ID, mailUnwired, false)
 		log.Printf("mail: %s: its template changed during the start: stopping it", t.ID)
 		h.mailStopHeld("its template changed during the start")
 		// The caller holds the app lock (the owed down's retry is busy
@@ -404,6 +405,7 @@ func (h *Hub) mailModeAfterUp(ctx context.Context, t *templates.Template, mode m
 		h.mailUpModes.m[t.ID] = mode
 	}
 	h.mailUpModes.mu.Unlock()
+	h.mailPersistUpMode(t.ID, mode, err == nil)
 	if err == nil {
 		return nil
 	}
@@ -442,4 +444,93 @@ func (h *Hub) mailCheckNetworks(ctx context.Context, t *templates.Template, mode
 		}
 	}
 	return nil
+}
+
+// mailSeedUpMode (Hub start): the wired provider's persisted mode is
+// trusted for the next up only when the running project's networks
+// confirm it — every declared network found, each internal flag as that
+// mode wants. Anything else (a mismatch, unreadable networks, nothing
+// recorded) keeps the down before the first up (fail closed).
+func (h *Hub) mailSeedUpMode(ctx context.Context) {
+	h.mu.RLock()
+	p := h.st.Mail.Provider
+	upMode, upInst := h.st.Mail.UpMode, h.st.Mail.UpModeInstance
+	var t *templates.Template
+	if p != nil {
+		if lt := h.findLocked(p.Instance); lt != nil {
+			c := *lt
+			t = &c
+		}
+	}
+	h.mu.RUnlock()
+	if p == nil || t == nil || upInst != p.Instance || h.noEngine() {
+		return
+	}
+	var mode mailMode
+	switch upMode {
+	case mailNormal.String():
+		mode = mailNormal
+	case mailVoid.String():
+		mode = mailVoid
+	default:
+		return
+	}
+	info, err := h.rt.Info(ctx)
+	if err != nil {
+		return
+	}
+	names, external, declared := topLevelNetworkFlags(t.ReadCompose())
+	project := projectName(t.ID)
+	seen := map[string]bool{}
+	for _, n := range info.Networks {
+		if n.Labels["com.docker.compose.project"] != project {
+			continue
+		}
+		key := n.Labels["com.docker.compose.network"]
+		if key == "" || external[key] {
+			continue
+		}
+		if n.Internal != (mode == mailVoid || declared[key]) {
+			return // the running networks contradict the record
+		}
+		seen[key] = true
+	}
+	found := 0
+	for _, k := range names {
+		if external[k] {
+			continue
+		}
+		if !seen[k] {
+			return // a declared network isn't there: can't confirm
+		}
+		found++
+	}
+	if found == 0 {
+		return
+	}
+	h.mailUpModes.mu.Lock()
+	if h.mailUpModes.m == nil {
+		h.mailUpModes.m = map[string]mailMode{}
+	}
+	if _, known := h.mailUpModes.m[t.ID]; !known {
+		h.mailUpModes.m[t.ID] = mode
+	}
+	h.mailUpModes.mu.Unlock()
+}
+
+// mailPersistUpMode records the wired provider's applied mode for the
+// next Hub start (mailSeedUpMode); a failed or unconfirmed up clears it.
+func (h *Hub) mailPersistUpMode(id string, mode mailMode, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	nm, ni := "", ""
+	if p := h.st.Mail.Provider; p != nil && p.Instance == id && ok && mode != mailUnwired {
+		nm, ni = mode.String(), id
+	} else if h.st.Mail.UpModeInstance != id && h.st.Mail.UpModeInstance != "" {
+		return // another instance's record: not this up's to touch
+	}
+	if h.st.Mail.UpMode != nm || h.st.Mail.UpModeInstance != ni {
+		h.st.Mail.UpMode, h.st.Mail.UpModeInstance = nm, ni
+		h.saveLocked()
+	}
 }

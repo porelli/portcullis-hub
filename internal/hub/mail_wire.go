@@ -299,6 +299,8 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	h.st.Mail.WireSeq++
 	p.Seq = h.st.Mail.WireSeq
 	h.st.Mail.Provider = p
+	// A new wiring has no confirmed applied mode yet.
+	h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
 	h.raiseVoidDebtLocked(voidReason)
 	// The undo clears only a debt this record started (not an older one
 	// it joined) and only while nothing was raised since.
@@ -432,6 +434,7 @@ func (h *Hub) undoWireMail(id string, recordGen int) {
 	h.mu.Lock()
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
 		h.st.Mail.Provider = nil
+		h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
 		// Only the record's own debt: one raised since (a restore, the
 		// secrets epoch) stays owed.
 		if h.st.Mail.VoidOwed != nil && h.st.Mail.VoidGen == recordGen {
@@ -480,6 +483,9 @@ func (h *Hub) resumeMail() {
 	h.mu.RLock()
 	p, owed, held, sw := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held, h.st.Mail.Switch
 	h.mu.RUnlock()
+	// The last applied mode, if the running networks confirm it, before
+	// any resumed up (none then needs a down first).
+	h.mailSeedUpMode(context.Background())
 	// An owed down of a stopped hold first (a crash between its save
 	// and the down).
 	if held != nil && held.DownOwed {

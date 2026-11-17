@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/runtime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -378,4 +379,149 @@ func TestRRSideServiceJoinsCoreProxyStatic(t *testing.T) {
 	if statusOf(err) != 409 || !strings.Contains(err.Error(), "core network") {
 		t.Fatalf("render check: %v", err)
 	}
+}
+
+// TestHubRestartLeavesRunningProviderAlone (core build-and-test): a Hub
+// start with the wired provider running and unchanged (same tree, same
+// rendering, nothing owed or held) issues no compose up, down or restart
+// of the provider's project: a Hub upgrade never interrupts mail.
+func TestHubRestartLeavesRunningProviderAlone(t *testing.T) {
+	w := wiredFix(t)
+	// The running containers carry exactly the rendered override's labels.
+	w.h.mu.Lock()
+	r, err := w.h.mailRenderLocked(w.h.findLocked(mailProviderID), mailNormal)
+	w.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.engine.mu.Lock()
+	for _, svc := range []string{"stalwart", "adapter", "resolver", "bootstrap"} {
+		c := container("prov-"+svc, "portcullis-"+mailProviderID, svc, "running")
+		for k, v := range r.labels[svc] {
+			c.Labels[k] = v
+		}
+		w.engine.containers = append(w.engine.containers, c)
+	}
+	w.engine.mu.Unlock()
+	before := len(w.runner.Calls())
+	restarts := len(w.engine.Restarts())
+	// The start's mail and VPN passes, as Init runs them.
+	w.h.checkMailHold()
+	w.h.writeMailTargets()
+	w.h.resumeMail()
+	w.h.vpnStartCheck(context.Background(), w.h.rt)
+	w.h.Wait()
+	w.h.owedMu.Lock()
+	owedEffect := w.h.owedLocked(mailProviderID)
+	w.h.owedMu.Unlock()
+	var touched []string
+	for _, c := range w.runner.Calls()[before:] {
+		if strings.Contains(c, "portcullis-"+mailProviderID) {
+			touched = append(touched, c)
+		}
+	}
+	if len(touched) > 0 || len(w.engine.Restarts()) != restarts || owedEffect != "" && owedEffect != "none" {
+		t.Fatalf("the start touched the running provider: %v restarts %d→%d owed %q", touched, restarts, len(w.engine.Restarts()), owedEffect)
+	}
+}
+
+// TestRestartSameModeUpNoDown: the provider's last applied mode is
+// persisted after each successful up; a Hub start whose running
+// networks confirm it needs no down before a later up in that mode. A
+// network contradicting the record, a missing one, or networks that
+// can't be read keep the down first (fail closed).
+func TestRestartSameModeUpNoDown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		networks func(declared map[string]bool, names []string, external map[string]bool) []runtime.Network
+		listErr  error
+		wantDown bool
+	}{
+		{name: "confirmed", networks: projectNets(func(k string, declared map[string]bool) bool { return declared[k] })},
+		{name: "contradicted", wantDown: true, networks: projectNets(func(string, map[string]bool) bool { return true })},
+		{name: "missing", wantDown: true, networks: func(map[string]bool, []string, map[string]bool) []runtime.Network { return nil }},
+		{name: "unreadable", wantDown: true, listErr: errors.New("engine away"),
+			networks: projectNets(func(k string, declared map[string]bool) bool { return declared[k] })},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := wiredFix(t)
+			w.h.mu.RLock()
+			upMode, upInst := w.h.st.Mail.UpMode, w.h.st.Mail.UpModeInstance
+			w.h.mu.RUnlock()
+			if upMode != "normal" || upInst != mailProviderID {
+				t.Fatalf("persisted mode %q %q", upMode, upInst)
+			}
+			names, external, declared := topLevelNetworkFlags(w.h.Template(mailProviderID).ReadCompose())
+			w.engine.mu.Lock()
+			w.engine.networks = append(w.engine.networks, tc.networks(declared, names, external)...)
+			w.engine.networksErr = tc.listErr
+			w.engine.mu.Unlock()
+			downs := providerDowns(w)
+			// A Hub restart: the new Hub knows only the saved state.
+			h := reopen(t, w.fixture)
+			h.SetPeople(w.people)
+			h.SetMailAPI(w.mc.Client())
+			h.SetDomainsAPI(w.dom)
+			h.Init() // resumeMail cross-checks the record here
+			h.Wait()
+			w.engine.mu.Lock()
+			w.engine.networksErr = nil
+			w.engine.mu.Unlock()
+			tp := h.Template(mailProviderID)
+			if tp == nil {
+				t.Fatal("no template after the restart")
+			}
+			if _, err := os.Stat(tp.ComposePath()); err != nil {
+				t.Fatal(err)
+			}
+			ups := len(w.runner.callsMatching("up"))
+			// An owed delivery's up, same mode.
+			unlock, err := h.lockApp(mailProviderID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = h.composeUp(context.Background(), h.Template(mailProviderID))
+			unlock()
+			if err != nil && !tc.wantDown {
+				t.Fatal(err)
+			}
+			if len(w.runner.callsMatching("up")) == ups {
+				t.Fatal("no up ran")
+			}
+			// The start and the up together: a confirmed record downs
+			// nothing; anything else downs before an up (the start's own
+			// or this one).
+			got := providerDowns(w) > downs
+			if got != tc.wantDown {
+				t.Fatalf("down before the up: %v, want %v (%v)", got, tc.wantDown, w.runner.Calls())
+			}
+		})
+	}
+}
+
+// projectNets is the provider project's declared networks with internal
+// flags from flag.
+func projectNets(flag func(key string, declared map[string]bool) bool) func(map[string]bool, []string, map[string]bool) []runtime.Network {
+	return func(declared map[string]bool, names []string, external map[string]bool) []runtime.Network {
+		var out []runtime.Network
+		for _, k := range names {
+			if external[k] {
+				continue
+			}
+			out = append(out, runtime.Network{Name: "portcullis-" + mailProviderID + "_" + k, Internal: flag(k, declared),
+				Labels: map[string]string{"com.docker.compose.project": "portcullis-" + mailProviderID, "com.docker.compose.network": k}})
+		}
+		return out
+	}
+}
+
+// providerDowns counts the provider project's downs so far.
+func providerDowns(w *wireFix) int {
+	n := 0
+	for _, c := range w.runner.Calls() {
+		if c == "down:portcullis-"+mailProviderID {
+			n++
+		}
+	}
+	return n
 }
