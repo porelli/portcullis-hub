@@ -33,7 +33,7 @@ func main() {
 	root := rootCmd()
 	err := root.ExecuteContext(ctx)
 	if err != nil && err.Error() != "" {
-		fmt.Fprintln(os.Stderr, "portcullis: "+err.Error())
+		fmt.Fprintln(os.Stderr, "portcullis: "+api.Printable(err.Error()))
 	}
 	os.Exit(api.ExitCode(err))
 }

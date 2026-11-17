@@ -100,8 +100,8 @@ func Status(o Options) error {
 		l, _ := agentx.List(ag)
 		for _, k := range l {
 			found = true
-			fmt.Fprintf(o.Stdout, "agent  %-20s %-10s %s  %s  until %s%s\n", k.Domain, k.HostGroup, k.KeyType,
-				strings.Join(k.Certificate.ValidPrincipals, ","), time.Unix(int64(k.Certificate.ValidBefore), 0).Local().Format("Mon 02 Jan 15:04"), expired(k.Certificate.ValidBefore, now))
+			fmt.Fprintf(o.Stdout, "agent  %-20s %-10s %s  %s  until %s%s\n", api.Printable(k.Domain), api.Printable(k.HostGroup), api.Printable(k.KeyType),
+				api.Printable(strings.Join(k.Certificate.ValidPrincipals, ",")), time.Unix(int64(k.Certificate.ValidBefore), 0).Local().Format("Mon 02 Jan 15:04"), expired(k.Certificate.ValidBefore, now))
 		}
 	} else {
 		fmt.Fprintln(o.Stderr, "No ssh-agent: only the written files are listed.")
@@ -118,8 +118,8 @@ func Status(o Options) error {
 			continue
 		}
 		found = true
-		fmt.Fprintf(o.Stdout, "file   %-20s %-10s %s  %s  until %s%s\n", filepath.Base(filepath.Dir(p)), strings.TrimSuffix(filepath.Base(p), "-cert.pub"), c.Key.Type(),
-			strings.Join(c.ValidPrincipals, ","), time.Unix(int64(c.ValidBefore), 0).Local().Format("Mon 02 Jan 15:04"), expired(c.ValidBefore, now))
+		fmt.Fprintf(o.Stdout, "file   %-20s %-10s %s  %s  until %s%s\n", api.Printable(filepath.Base(filepath.Dir(p))), api.Printable(strings.TrimSuffix(filepath.Base(p), "-cert.pub")), api.Printable(c.Key.Type()),
+			api.Printable(strings.Join(c.ValidPrincipals, ",")), time.Unix(int64(c.ValidBefore), 0).Local().Format("Mon 02 Jan 15:04"), expired(c.ValidBefore, now))
 	}
 	if !found {
 		fmt.Fprintln(o.Stdout, "No Portcullis SSH certificates: run portcullis login <domain>.")

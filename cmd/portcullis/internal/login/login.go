@@ -160,11 +160,11 @@ func DoSignIn(ctx context.Context, o *Options, cfg *cliapi.Config) (*SignIn, err
 	verifier, state, nonce := oauth2.GenerateVerifier(), random(), random()
 	u := AuthorizeURL(cfg, l.RedirectURI(), state, nonce, verifier, o.Method)
 	if o.NoBrowser || o.OpenBrowser == nil {
-		fmt.Fprintf(o.Stderr, "Open this address in a browser on this computer to sign in:\n\n  %s\n\n", u)
+		fmt.Fprintf(o.Stderr, "Open this address in a browser on this computer to sign in:\n\n  %s\n\n", api.Printable(u))
 	} else {
 		fmt.Fprintf(o.Stderr, "Opening your browser to sign in to %s…\n", o.Domain)
 		if err := o.OpenBrowser(u); err != nil {
-			fmt.Fprintf(o.Stderr, "Couldn't open a browser: open this address on this computer:\n\n  %s\n\n", u)
+			fmt.Fprintf(o.Stderr, "Couldn't open a browser: open this address on this computer:\n\n  %s\n\n", api.Printable(u))
 		}
 	}
 	code, err := l.Wait(ctx, state)
@@ -248,15 +248,17 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	res := &Result{Answer: &ans}
+	// The whole answer is checked before anything is printed, loaded or
+	// written: a name outside the grammars the Hub signs with refuses it.
+	entries, err := checkAnswer(&ans, k)
+	if err != nil {
+		return nil, err
+	}
 	for _, r := range ans.Refused {
 		fmt.Fprintf(o.Stderr, "%s: %s\n", api.Printable(r.HostGroup), api.Printable(r.Reason))
 	}
 	if len(ans.Certificates) == 0 {
 		return res, api.Errorf(api.ExitNoCert, "signed in as %s, but no SSH certificate was issued", api.Printable(ans.User))
-	}
-	entries, err := checkAnswer(&ans, k)
-	if err != nil {
-		return nil, err
 	}
 	if ag != nil && k.priv != nil {
 		notes, err := agentx.ReplaceDomain(ag, o.Domain, entries, o.Now())
@@ -289,10 +291,10 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		res.Notes = append(res.Notes, "couldn't save the CLI's settings: "+err.Error())
 	}
 	for _, cert := range ans.Certificates {
-		fmt.Fprintf(o.Stdout, "%s: %s until %s\n", cert.HostGroup, strings.Join(cert.Principals, ", "), cert.ValidBefore.Local().Format("Mon 15:04"))
+		fmt.Fprintf(o.Stdout, "%s: %s until %s\n", api.Printable(cert.HostGroup), api.Printable(strings.Join(cert.Principals, ", ")), cert.ValidBefore.Local().Format("Mon 15:04"))
 	}
 	for _, n := range res.Notes {
-		fmt.Fprintln(o.Stderr, n)
+		fmt.Fprintln(o.Stderr, api.Printable(n))
 	}
 	if !sshconf.Installed(o.Home) {
 		fmt.Fprintln(o.Stderr, "Run portcullis ssh-config --install once so ssh uses these certificates.")
@@ -330,9 +332,49 @@ func chooseKey(o Options, ag agent.ExtendedAgent) (*key, error) {
 	return &key{signer: s, priv: priv, norm: cliapi.NormalAuthorizedKey(s.PublicKey())}, nil
 }
 
-// checkAnswer: every certificate is a user certificate for our key, with
-// the principals and a key id the answer names.
+// checkAnswer: every server-supplied name passes the grammar the Hub
+// signs with (user, host groups, principals, host names, keys), and every
+// certificate is a user certificate for our key with the principals and
+// a key id the answer names. Any failure refuses the whole answer.
 func checkAnswer(ans *cliapi.CertAnswer, k *key) ([]agentx.Entry, error) {
+	bad := func(what string) error {
+		return api.Errorf(api.ExitError, "the server's answer has an invalid %s: nothing was loaded or written", what)
+	}
+	if !cliapi.ValidUsername(ans.User) {
+		return nil, bad("username")
+	}
+	for _, r := range ans.Refused {
+		if !cliapi.ValidHostGroupID(r.HostGroup) {
+			return nil, bad("host group")
+		}
+	}
+	for _, l := range append(append([]string{}, ans.HostCAs...), ans.RevokedHostKeys...) {
+		if _, _, err := cliapi.ParseAuthorizedKey(l); err != nil {
+			return nil, bad("host CA key")
+		}
+	}
+	for _, ic := range ans.Certificates {
+		if !cliapi.ValidHostGroupID(ic.HostGroup) {
+			return nil, bad("host group")
+		}
+		if len(ic.Principals) == 0 {
+			return nil, bad("principal")
+		}
+		for _, p := range ic.Principals {
+			kind, acct, hg, ok := cliapi.ParsePrincipal(p)
+			if !ok || hg != ic.HostGroup || (kind == cliapi.PrincipalPersonal && acct != ans.User) {
+				return nil, bad("principal")
+			}
+		}
+		for _, h := range ic.Hosts {
+			if !cliapi.ValidHostPattern(h) {
+				return nil, bad("host name")
+			}
+		}
+		if len(ic.Serial) > 40 || strings.IndexFunc(ic.Serial, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+			return nil, bad("serial")
+		}
+	}
 	var out []agentx.Entry
 	want := k.signer.PublicKey().Marshal()
 	for _, ic := range ans.Certificates {

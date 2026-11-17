@@ -30,14 +30,16 @@ import (
 )
 
 type fakeHub struct {
-	t       *testing.T
-	srv     *httptest.Server
-	ca      ssh.Signer
-	mu      sync.Mutex
-	reqs    []cliapi.CertRequest
-	status  int // != 0: answer this status to certificates
-	refuse  bool
-	proofOK bool
+	// principal overrides the certificate's principal (hostile answers).
+	principal string
+	t         *testing.T
+	srv       *httptest.Server
+	ca        ssh.Signer
+	mu        sync.Mutex
+	reqs      []cliapi.CertRequest
+	status    int // != 0: answer this status to certificates
+	refuse    bool
+	proofOK   bool
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -86,11 +88,15 @@ func (f *fakeHub) certificates(w http.ResponseWriter, r *http.Request) {
 		ans.Refused = append(ans.Refused, cliapi.Refusal{HostGroup: "web", Reason: "web needs a YubiKey touch: sign in with --method security_key"})
 	} else {
 		until := time.Now().Add(8 * time.Hour).Truncate(time.Second)
-		c := &ssh.Certificate{Key: pub, CertType: ssh.UserCert, KeyId: "pc:alice:web:0123456789abcdef", ValidPrincipals: []string{"u:alice@web"},
+		pr := "u:alice@web"
+		if f.principal != "" {
+			pr = f.principal
+		}
+		c := &ssh.Certificate{Key: pub, CertType: ssh.UserCert, KeyId: "pc:alice:web:0123456789abcdef", ValidPrincipals: []string{pr},
 			ValidBefore: uint64(until.Unix()), Permissions: ssh.Permissions{Extensions: map[string]string{"permit-pty": ""}}}
 		c.SignCert(rand.Reader, f.ca)
 		ans.Certificates = append(ans.Certificates, cliapi.IssuedCert{HostGroup: "web", Certificate: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(c))),
-			Principals: []string{"u:alice@web"}, Serial: "1", ValidBefore: until, Hosts: []string{"web-1.example.org"}})
+			Principals: []string{pr}, Serial: "1", ValidBefore: until, Hosts: []string{"web-1.example.org"}})
 	}
 	json.NewEncoder(w).Encode(ans)
 }
@@ -287,5 +293,31 @@ func TestWriteFiles0600(t *testing.T) {
 	k, err := ssh.ParseRawPrivateKey(raw)
 	if err != nil || k == nil {
 		t.Errorf("id isn't a private key: %v", err)
+	}
+}
+
+// A hostile answer: an escape sequence in a principal (signed into the
+// certificate too) refuses the whole answer; nothing reaches the
+// terminal, the agent or the files.
+func TestHostileAnswerRefused(t *testing.T) {
+	for _, p := range []string{"u:alice@web\x1b[2J", "u:bob@web", "s:deploy@db", "u:alice@web\n"} {
+		f := newFakeHub(t)
+		f.principal = p
+		kr := agent.NewKeyring().(agent.ExtendedAgent)
+		var seen url.URL
+		o := opts(t, f, kr, &seen)
+		var stdout bytes.Buffer
+		o.Stdout = &stdout
+		_, err := Run(context.Background(), o)
+		if err == nil || strings.ContainsRune(err.Error(), 0x1b) {
+			t.Errorf("%q: %v", p, err)
+		}
+		keys, _ := kr.List()
+		if len(keys) != 0 || stdout.Len() != 0 || strings.ContainsRune(o.Stderr.(*bytes.Buffer).String(), 0x1b) {
+			t.Errorf("%q: agent %v stdout %q", p, keys, stdout.String())
+		}
+		if _, err := os.Stat(filepath.Join(o.Home, ".ssh/portcullis")); err == nil {
+			t.Errorf("%q: files written", p)
+		}
 	}
 }
