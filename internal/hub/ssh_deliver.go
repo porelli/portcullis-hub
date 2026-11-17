@@ -52,11 +52,20 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 	people := h.people
 	h.mu.RUnlock()
 	acts := h.sshActions()
-	if !st.Settings.Enabled {
-		h.sshrt.mu.Lock()
-		h.sshrt.compiled, h.sshrt.compileErr = nil, ""
-		h.sshrt.mu.Unlock()
-		return nil // off: no role is written (plan C29)
+	off := !st.Settings.Enabled
+	if off {
+		// M6: switching SSH access off ends access, it doesn't freeze it:
+		// while managed hosts or unexpired certificates exist, compile with
+		// no grants — every host's bundle locks every Portcullis account
+		// and every certificate is revoked on leave. No role is written
+		// while off (plan C29); signing is refused anyway.
+		if len(st.Hosts) == 0 && !h.anyValidIssued() {
+			h.sshrt.mu.Lock()
+			h.sshrt.compiled, h.sshrt.compileErr = nil, ""
+			h.sshrt.mu.Unlock()
+			return nil
+		}
+		st.Grants = nil
 	}
 	if acts == nil || people == nil {
 		return h.sshCompileFailed(errors.New("enroll or the directory isn't connected"))
@@ -75,8 +84,10 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 	if err := h.refreshSSHCA(ctx, acts); err != nil {
 		return h.sshCompileFailed(err)
 	}
-	if err := h.renewHostCerts(ctx, acts, &st, now); err != nil {
-		log.Printf("ssh: host certificates: %v", err)
+	if !off {
+		if err := h.renewHostCerts(ctx, acts, &st, now); err != nil {
+			log.Printf("ssh: host certificates: %v", err)
+		}
 	}
 	revoked, err := h.sshRevokedList()
 	if err != nil {
@@ -115,7 +126,9 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 			return h.sshCompileFailed(err)
 		}
 	}
-	h.deliverRoles(ctx, acts, c)
+	if !off {
+		h.deliverRoles(ctx, acts, c)
+	}
 	changed := h.bumpSerials(c, now)
 	h.sshrt.mu.Lock()
 	h.sshrt.compiled, h.sshrt.compileErr = c, ""
@@ -125,6 +138,17 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 		h.sshBroadcast()
 	}
 	return nil
+}
+
+// anyValidIssued: some issued certificate hasn't expired yet.
+func (h *Hub) anyValidIssued() bool {
+	now := h.sshrt.clock()
+	for _, r := range h.IssuedFor("") {
+		if r.ValidBefore.After(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // sshAfterCompile runs the compile's follow-ups: revocation on leave.

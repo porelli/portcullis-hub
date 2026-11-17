@@ -89,9 +89,6 @@ func (h *Hub) reportPath(id string) string { return filepath.Join(h.sshDir(), "h
 // HostReport stores host hostID's report (already signature-checked) and
 // audits each new finding (ssh.host.drift) and each removal it confirms.
 func (h *Hub) HostReport(ctx context.Context, hostID string, r cliapi.Report) error {
-	if !h.SSHEnabled() {
-		return refusal(http.StatusServiceUnavailable, TextHostsOff, "ssh off")
-	}
 	if !cliapi.ValidHostID(hostID) {
 		return refusal(http.StatusForbidden, TextRemoved, "bad host id")
 	}

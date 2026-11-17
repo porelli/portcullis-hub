@@ -23,9 +23,8 @@ const (
 // VerifyHostRequest checks r's signature over body and answers the host
 // id. Every failure is a refusal that names nothing the request carried.
 func (h *Hub) VerifyHostRequest(r *http.Request, body []byte) (string, error) {
-	if !h.SSHEnabled() {
-		return "", refusal(http.StatusServiceUnavailable, TextHostsOff, "ssh off")
-	}
+	// Enrolled hosts still sync while SSH is off (M6: their bundle locks
+	// every Portcullis account); enrolment itself is refused while off.
 	id := r.Header.Get(cliapi.HeaderHostID)
 	tm := r.Header.Get(cliapi.HeaderHostTime)
 	nonce := r.Header.Get(cliapi.HeaderHostNonce)

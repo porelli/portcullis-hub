@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -344,11 +345,35 @@ func TestHostEndpointsOff503(t *testing.T) {
 	check("challenge", err)
 	_, err = f.h.Enrol(context.Background(), cliapi.EnrolRequest{HostID: "web-2"}, "")
 	check("enrol", err)
-	_, err = f.h.HostBundle(context.Background(), "web-2", 0)
-	check("bundle", err)
-	_, err = f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "GET", "/x", nil, f.clock(), newNonce()), nil)
-	check("signed request", err)
-	check("report", f.h.HostReport(context.Background(), "web-2", cliapi.Report{}))
+}
+
+// TestSSHOffLocksEveryone (M6): switching SSH access off ends access —
+// an enrolled host still syncs and gets a bundle without any account, and
+// every valid certificate is revoked; nothing is frozen.
+func TestSSHOffLocksEveryone(t *testing.T) {
+	f := newGrantFixture(t)
+	if _, err := f.h.SignSSH(context.Background(), f.request(t, f.signer), "192.0.2.50"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.h.sshCompiled().Bundles["web-1"].Accounts) == 0 {
+		t.Fatal("no accounts while on")
+	}
+	f.h.mu.Lock()
+	f.h.st.SSH.Settings.Enabled = false
+	f.h.mu.Unlock()
+	f.compile(t)
+	b, err := f.h.bundleFor("web-1")
+	if err != nil {
+		t.Fatalf("no bundle while off: %v", err)
+	}
+	for _, a := range b.Accounts {
+		if len(a.Principals) > 0 {
+			t.Errorf("account %s keeps principals while SSH is off", a.Name)
+		}
+	}
+	if keys := f.h.RevokedKeys(); !slices.Contains(keys, cliapi.NormalAuthorizedKey(f.signer.PublicKey())) {
+		t.Errorf("alice's key not revoked when SSH went off: %v", keys)
+	}
 }
 
 func TestCreateHostNeedsFresh(t *testing.T) {

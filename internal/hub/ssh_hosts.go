@@ -346,9 +346,7 @@ func (h *Hub) bundleFor(id string) (*cliapi.Bundle, error) {
 // HostBundle is GET hosts/bundle?since=: the bundle as soon as the host's
 // serial is above since, else nil (204) after 55 s.
 func (h *Hub) HostBundle(ctx context.Context, hostID string, since int64) (*cliapi.Bundle, error) {
-	if !h.SSHEnabled() {
-		return nil, refusal(http.StatusServiceUnavailable, TextHostsOff, "ssh off")
-	}
+	// Served while SSH is off too (M6): the bundle then locks everyone.
 	timer := time.NewTimer(bundlePollMax)
 	defer timer.Stop()
 	for {
