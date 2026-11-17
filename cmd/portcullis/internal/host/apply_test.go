@@ -314,15 +314,26 @@ func TestApplyFailureRestoresFiles(t *testing.T) {
 	before := sys.snapshot()
 	b := bundle(t)
 	b.Accounts = b.Accounts[:1]
+	revokedKey, _ := caKey(t)
+	b.RevokedKeys = []string{revokedKey}
 	sys.sshdT = errors.New("exit 255")
 	if _, _, err := apply(t, sys, b, cliapi.DefaultCeiling(), st); err == nil {
 		t.Fatal("applied despite sshd -t")
 	}
 	after := sys.snapshot()
-	for _, p := range []string{PrincipalsFile("bob"), UserCAFile, DropInFile, SudoersFile, RevokedKeysFile} {
+	// What could widen (or needs sshd -t) is rolled back...
+	for _, p := range []string{UserCAFile, DropInFile, SudoersFile, PrincipalsFile("alice")} {
 		if before[p] != after[p] {
 			t.Errorf("%s changed", p)
 		}
+	}
+	// ...what narrows applies anyway (M4): bob's principals gone, the new
+	// revoked key listed.
+	if _, ok := after[PrincipalsFile("bob")]; ok {
+		t.Error("the rollback brought bob's principals back")
+	}
+	if !strings.Contains(after[RevokedKeysFile], strings.Fields(revokedKey)[1]) {
+		t.Errorf("the revocation was rolled back: %q", after[RevokedKeysFile])
 	}
 	_ = reflect.DeepEqual
 }

@@ -364,6 +364,13 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 	})
 	if err != nil {
 		findings = append(findings, finding(cliapi.FindingDrift, cliapi.SeverityProblem, "sshd", err.Error()))
+		// M4: the rollback must never bring back what this bundle took
+		// away. sshd reads revoked_keys and the principals files per
+		// connection, so the narrowing part applies anyway: every revoked
+		// key (old and new), and principals only where old and new agree.
+		if nerr := applyNarrowing(sys, revoked, principals); nerr != nil {
+			findings = append(findings, finding(cliapi.FindingDrift, cliapi.SeverityProblem, RevokedKeysFile, "narrowing after a refused apply: "+nerr.Error()))
+		}
 		return nil, findings, err
 	}
 	st := &State{HostID: b.HostID, Domain: o.Domain, Serial: b.Serial, Files: map[string]string{}, Locked: sortedKeys(locked), Removed: removed, Applied: o.Now.UTC(), ServiceNone: o.ServiceNone}
@@ -429,4 +436,55 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// applyNarrowing writes only what narrows access after a refused apply
+// (M4): revoked_keys = the old lines plus revoked; each existing
+// principals file keeps only the lines also in principals (removed when
+// none remain). Nothing is added, so sshd -t isn't involved.
+func applyNarrowing(sys System, revoked []string, principals map[string][]string) error {
+	old, _ := readMaybe(sys, RevokedKeysFile)
+	if !exists(sys, RevokedKeysFile) {
+		// No Portcullis trust on this host yet (a refused enrol): nothing
+		// reads a revoked list or principals files.
+		return nil
+	}
+	set := map[string]bool{}
+	for _, l := range strings.Split(string(old), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			set[l] = true
+		}
+	}
+	for _, k := range revoked {
+		set[k] = true
+	}
+	lines := make([]string, 0, len(set))
+	for k := range set {
+		lines = append(lines, k)
+	}
+	sort.Strings(lines)
+	if err := sys.WriteFileAtomic(RevokedKeysFile, linesBody(lines), fsMode(0o644)); err != nil {
+		return err
+	}
+	have, _ := sys.Glob(PrincipalsDir + "/*")
+	for _, p := range have {
+		want := principals[filepathBase(p)]
+		cur, _ := readMaybe(sys, p)
+		var keep []string
+		for _, l := range strings.Split(string(cur), "\n") {
+			if l = strings.TrimSpace(l); l != "" && slices.Contains(want, l) {
+				keep = append(keep, l)
+			}
+		}
+		if len(keep) == 0 {
+			if err := sys.Remove(p); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := sys.WriteFileAtomic(p, principalsBody(keep), fsMode(0o644)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
