@@ -1340,6 +1340,7 @@ The Hub reads `DOCKER_HOST` for both the `docker compose` CLI (only `up`/`down`)
     | `pods/log` | `get` |
     | `pods/exec` | `create` only, **never `get`** (`create` is enough for every client and transport; `get` alone opens a WebSocket exec, as it does on every supported Kubernetes release) |
     | `events` | `list`, `watch` |
+    | `metrics.k8s.io` `pods` (**NEW, usage**) | `get`, `list` (read-only pod metrics for the Usage page, §11.11; never `nodes`, `nodes/stats` or `nodes/proxy`) |
 
     Each Role object must equal these rules exactly: the Hub keeps them as `internal/runtime/kube/testdata/role.yaml` and `role-edge.yaml`, core's chart keeps byte copies (`charts/portcullis/files/hub-role.yaml`, `hub-role-edge.yaml`), and core CI compares them. RBAC can't limit what the Hub puts in a pod spec: the admission policies below do.
 
@@ -1422,7 +1423,7 @@ The Hub reads `DOCKER_HOST` for both the `docker compose` CLI (only `up`/`down`)
 
 - **Exec and signals.** Hooks run through `pods/exec` with stdin, with the split output of AI hooks unchanged. A reload signal is an exec of `kill -s <SIG> 1` in the container (§13.8).
 
-- **Resource usage (NEW, usage).** Not measured on Kubernetes yet: the usage routes (§11.11) answer `null` figures with `not measured on Kubernetes yet`, the storage measurer skips every target with the same reason, and the Hub's Roles above are unchanged. A later part reads `metrics.k8s.io` pod metrics through one more read-only, namespaced rule; until it lands that rule is not granted.
+- **Resource usage (NEW, usage; §11.11).** CPU and memory per container come from `metrics.k8s.io/v1beta1` `PodMetrics` (metrics-server; k3s bundles it), one list of the apps namespace cached 10 s so a sweep makes one call; CPU is a gauge (no counter series, §16.2). PIDs, network and block IO are `null`: kubelet stats need `nodes/stats` or `nodes/proxy`, which are never granted. Without metrics-server (404 / 503) every figure is `null` and the doctor says `usage_not_measured` "the cluster has no metrics API (metrics-server)"; a 403 says "the Hub's Role can't read pod metrics". Limits, OOM kills and restarts come from the pod (`resources.limits`, `lastState.terminated.reason == OOMKilled`, `restartCount`). Storage: a PVC is measured by the volume kind's helper pod with the PVC read-only at `/vol`, a read-only root and `DAC_OVERRIDE` only (the volume kind's admitted caps never include `DAC_READ_SEARCH`), running `hub folderfix usage` through exec; a hand-typed `hostPath` by the fixer kind as for folders. Writable layers and images are `null` ("not measured on Kubernetes": the CRI isn't reachable). The core group is `not_measured` "not measured on Kubernetes yet" (nothing of the Hub's Roles is in the core namespace), and `not_shown` is 0 (the Hub sees only its namespace). `HUB_METRICS_ADDR` stays unset (no listener).
 
 ## 7. Docs ⇄ templates
 
@@ -3170,7 +3171,7 @@ The Hub's **Usage** page and each instance's **Usage** tab show live CPU, memory
 - `containers`: `instance,service,number,id12,state,cpu_cores,mem_bytes,mem_limit_bytes,cpu_limit_cores,pids,pids_limit,net_rx_bps,net_tx_bps,blk_read_bps,blk_write_bps,oom_killed,restarts,measured_at`
 - `storage`: `owner,kind,target,alloc_bytes,apparent_bytes,partial,in_total,shared_with,measured_at` (`shared_with` joined by `;`)
 
-**Runtimes.** The same on Docker and rootless Podman (CPU `null` without the delegated `cpu` controller, block IO usually `null` without `io`). On Kubernetes nothing is measured yet: groups are `not_measured` with `not measured on Kubernetes yet` (§6 "On Kubernetes").
+**Runtimes.** The same on Docker and rootless Podman (CPU `null` without the delegated `cpu` controller, block IO usually `null` without `io`). On Kubernetes: CPU and memory from pod metrics, the rest `null`, the core group `not_measured` (§6 "On Kubernetes").
 
 ## 12. Domains service (core ⇄ Hub ⇄ Traefik) — NEW (domains API)
 

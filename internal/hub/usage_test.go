@@ -438,3 +438,24 @@ func TestUsageHistoryKeyedByServiceNumber(t *testing.T) {
 		t.Errorf("bad id: %v", err)
 	}
 }
+
+// On Kubernetes the core group is not measured (the Hub's Role has
+// nothing in the core namespace), nothing is counted as not shown, and a
+// runtime-wide NotMeasuredError reaches the doctor.
+func TestUsageKubeCoreNotMeasured(t *testing.T) {
+	e := newUsageEnv(t, "a")
+	e.rt.K = runtime.KindKubernetes
+	e.setUnits(uunit("a--web-x/web", "portcullis-a", "web", 1, "running"), runtime.Unit{ID: "x/y", State: "running"})
+	e.rt.StatsErr = map[string]error{"a--web-x/web": &runtime.NotMeasuredError{Why: "the cluster has no metrics API (metrics-server)"}}
+	e.sweep()
+	v := e.h.UsageOverview()
+	if v.Core.Status != "not_measured" || v.Core.Why != "not measured on Kubernetes yet" || v.NotShown != 0 {
+		t.Errorf("core %q %q, not shown %d", v.Core.Status, v.Core.Why, v.NotShown)
+	}
+	if g := v.Apps[0]; g.Status != "not_measured" || g.Why != "the cluster has no metrics API (metrics-server)" {
+		t.Errorf("app = %q %q", g.Status, g.Why)
+	}
+	if in := e.h.usageDoctorIn(); in == nil || in.NotMeasured != "the cluster has no metrics API (metrics-server)" {
+		t.Errorf("doctor in = %+v", in)
+	}
+}

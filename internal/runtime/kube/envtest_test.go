@@ -19,6 +19,7 @@ import (
 	"time"
 
 	authnv1 "k8s.io/api/authentication/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -418,6 +419,26 @@ func TestRoleIsEnough(t *testing.T) {
 	}
 	if _, err := e.hubK.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); !apierrors.IsForbidden(err) {
 		t.Errorf("nodes: %v", err)
+	}
+	// Pod metrics (the Usage page): list in the apps namespace allowed,
+	// nodes/stats and node metrics denied.
+	for _, c := range []struct {
+		attr  authorizationv1.ResourceAttributes
+		allow bool
+	}{
+		{authorizationv1.ResourceAttributes{Namespace: ns, Verb: "list", Group: "metrics.k8s.io", Resource: "pods"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: ns, Verb: "get", Group: "metrics.k8s.io", Resource: "pods"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "list", Group: "metrics.k8s.io", Resource: "pods"}, false},
+		{authorizationv1.ResourceAttributes{Verb: "list", Group: "metrics.k8s.io", Resource: "nodes"}, false},
+		{authorizationv1.ResourceAttributes{Verb: "list", Resource: "nodes", Subresource: "stats"}, false},
+		{authorizationv1.ResourceAttributes{Verb: "get", Resource: "nodes", Subresource: "proxy"}, false},
+	} {
+		a := c.attr
+		r, err := e.hubK.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authorizationv1.SelfSubjectAccessReview{
+			Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &a}}, metav1.CreateOptions{})
+		if err != nil || r.Status.Allowed != c.allow {
+			t.Errorf("can-i %s %s/%s %s in %q = %v (%v), want %v", a.Verb, a.Group, a.Resource, a.Subresource, a.Namespace, r != nil && r.Status.Allowed, err, c.allow)
+		}
 	}
 	// The rules review equals the Role.
 	g := NewGuard(GuardConfig{Client: e.hubK, Dynamic: e.hub, AppsNamespace: ns, CoreNamespace: "portcullis", EdgeNamespace: EdgeNamespace})

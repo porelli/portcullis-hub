@@ -94,6 +94,8 @@ type Backend struct {
 	// info: the guard's view for Info (set by the guard).
 	infoMu sync.Mutex
 	info   runtime.Info
+	// metrics: the last pod metrics list (metrics.go).
+	metrics metricsCache
 }
 
 var _ runtime.Instances = (*Backend)(nil)
@@ -839,6 +841,24 @@ func (b *Backend) Inspect(ctx context.Context, id string) (runtime.UnitInfo, err
 		if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
 			i.Memory = q.Value()
 		}
+		if q, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+			i.NanoCPUs = q.MilliValue() * 1_000_000
+		}
+		// Mounts (the storage measurer's binds and volumes): hostPath as
+		// bind, a PVC as volume (its claim's name).
+		for _, vm := range c.VolumeMounts {
+			for _, v := range p.Spec.Volumes {
+				if v.Name != vm.Name {
+					continue
+				}
+				switch {
+				case v.HostPath != nil:
+					i.Mounts = append(i.Mounts, runtime.UnitMount{Type: "bind", Source: v.HostPath.Path, Destination: vm.MountPath, RW: !vm.ReadOnly})
+				case v.PersistentVolumeClaim != nil:
+					i.Mounts = append(i.Mounts, runtime.UnitMount{Type: "volume", Name: v.PersistentVolumeClaim.ClaimName, Destination: vm.MountPath, RW: !vm.ReadOnly})
+				}
+			}
+		}
 		if sc := c.SecurityContext; sc != nil {
 			i.Privileged = sc.Privileged != nil && *sc.Privileged
 			if sc.Capabilities != nil {
@@ -850,6 +870,20 @@ func (b *Backend) Inspect(ctx context.Context, id string) (runtime.UnitInfo, err
 	}
 	if p.Spec.HostPID {
 		i.PidMode = "host"
+	}
+	// The usage page's fields (contract §11.11): one network namespace per
+	// pod (no own per-container rates), OOM kills, restarts and the start.
+	i.NetworkMode = "pod"
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.Name != cn {
+			continue
+		}
+		i.RestartCount = int(cs.RestartCount)
+		if r := cs.State.Running; r != nil {
+			i.StartedAt = r.StartedAt.Time
+		}
+		oom := func(t *corev1.ContainerStateTerminated) bool { return t != nil && t.Reason == "OOMKilled" }
+		i.OOMKilled = oom(cs.State.Terminated) || oom(cs.LastTerminationState.Terminated)
 	}
 	return i, nil
 }
@@ -920,15 +954,3 @@ func parsePrefix(s string) ([]netip.Prefix, error) {
 	}
 	return []netip.Prefix{p.Masked()}, nil
 }
-
-// notMeasuredKube: usage figures on Kubernetes come with the pod metrics
-// part (contract §6 "On Kubernetes").
-var notMeasuredKube = &runtime.NotMeasuredError{Why: "not measured on Kubernetes yet"}
-
-func (b *Backend) Stats(context.Context, string) (runtime.UnitStats, error) {
-	return runtime.UnitStats{}, notMeasuredKube
-}
-
-func (b *Backend) LayerSize(context.Context, string) (int64, error) { return 0, notMeasuredKube }
-
-func (b *Backend) ImageSize(context.Context, string) (int64, error) { return 0, notMeasuredKube }

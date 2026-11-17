@@ -50,6 +50,7 @@ func newCluster(t *testing.T, objs ...k8sruntime.Object) *cluster {
 	for k, r := range kinds {
 		lists[r] = k + "List"
 	}
+	lists[PodMetricsGVR] = "PodMetricsList"
 	c.dyn = dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, lists, objs...)
 	// Server-side apply: record it and mirror Deployments and Jobs into
 	// the typed clientset (the backend reads their status there).
@@ -628,21 +629,5 @@ func TestUpHostAliases(t *testing.T) {
 				t.Errorf("%s hostAliases %v", d, ha)
 			}
 		}
-	}
-}
-
-// Usage figures aren't measured on Kubernetes yet; a started helper with
-// a named volume is refused.
-func TestKubeUsageNotMeasuredYet(t *testing.T) {
-	b := &Backend{}
-	var nm *runtime.NotMeasuredError
-	if _, err := b.Stats(context.Background(), "x"); !errors.As(err, &nm) || nm.Why != "not measured on Kubernetes yet" {
-		t.Errorf("Stats: %v", err)
-	}
-	if _, err := b.LayerSize(context.Background(), "x"); !errors.As(err, &nm) {
-		t.Errorf("LayerSize: %v", err)
-	}
-	if _, err := b.ImageSize(context.Background(), "x"); !errors.As(err, &nm) {
-		t.Errorf("ImageSize: %v", err)
 	}
 }

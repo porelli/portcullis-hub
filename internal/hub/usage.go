@@ -226,6 +226,10 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		return
 	}
 	in, notShown := usageScope(units, insts)
+	if kind == string(runtime.KindKubernetes) {
+		// The Hub sees only its apps namespace: nothing else to count.
+		notShown = 0
+	}
 	over := 0
 	if len(in) > usage.MaxContainers {
 		over = len(in) - usage.MaxContainers

@@ -269,9 +269,25 @@ func (b *Backend) RunFixer(ctx context.Context, s runtime.FixerSpec, out func(ta
 	if len(s.Cmd) == 0 || !path.IsAbs(s.Cmd[0]) {
 		return nil, errors.New("helper argv must start with an absolute path")
 	}
-	if len(s.Volumes) > 0 {
-		// The read-only PVC usage helper comes with the pod metrics part.
-		return nil, &runtime.NotMeasuredError{Why: "not measured on Kubernetes yet"}
+	var p *corev1.Pod
+	switch {
+	case len(s.Volumes) > 0 && (len(s.Binds) > 0 || len(s.Scratch) > 0 || s.In != nil || s.OutPath != ""):
+		return nil, errors.New("a usage helper mounts exactly one volume and nothing else")
+	case len(s.Volumes) > 1:
+		return nil, errors.New("a usage helper mounts exactly one volume")
+	case len(s.Volumes) == 1:
+		// The usage mode (U17): the volume kind's helper pod, the PVC
+		// read-only at /vol, read-only root, DAC_OVERRIDE only (reading
+		// any entry: the admission policy admits the volume kind's caps
+		// only, never DAC_READ_SEARCH).
+		v := s.Volumes[0]
+		if v.Target != helperMount {
+			return nil, fmt.Errorf("a usage helper mounts its volume at %s", helperMount)
+		}
+		p = b.helperPod(HelperVolume, v.Instance, v.Name, true, nil)
+		p.Spec.Containers[0].SecurityContext.Capabilities.Add = []corev1.Capability{"DAC_OVERRIDE"}
+	default:
+		p = b.helperPod(HelperFixer, "", "", false, &s)
 	}
 	timeout := s.Timeout
 	if timeout <= 0 {
@@ -279,7 +295,6 @@ func (b *Backend) RunFixer(ctx context.Context, s runtime.FixerSpec, out func(ta
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	p := b.helperPod(HelperFixer, "", "", false, &s)
 	stop, err := b.startHelper(ctx, p)
 	if err != nil {
 		return nil, err
