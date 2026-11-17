@@ -812,6 +812,7 @@ func (a *API) removeProject(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	a.mu.Lock()
 	delete(a.projects, id)
+	a.tombstoneLocked(id) // an unbundled Down may be asked for it later
 	if _, ok := a.quarantined[id]; ok {
 		delete(a.quarantined, id) // the project is gone with its bundle
 		a.saveQuarantineLocked()

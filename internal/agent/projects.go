@@ -151,6 +151,7 @@ type API struct {
 	helpers      map[string]*helper
 	ops          map[string]context.CancelFunc
 	preflight    *preflightState
+	tombs        map[string]time.Time // ids whose bundle was removed (tombstones.go)
 }
 
 // NewAPI loads the bundles already on disk (each re-validated; an invalid
@@ -160,6 +161,7 @@ func NewAPI(cfg APIConfig) *API {
 	a.mux = http.NewServeMux()
 	a.routes()
 	a.loadQuarantine()
+	a.loadTombstones()
 	entries, _ := os.ReadDir(a.projectsDir())
 	for _, e := range entries {
 		if !e.IsDir() || agentapi.ValidInstance(e.Name()) != nil {
@@ -1191,23 +1193,64 @@ func (a *API) checkMounts(id string, p *project, mounts []runtime.Mount) string 
 }
 
 // unbundledDown is a Down for a project the agent holds no bundle of (a
-// copy whose bundle went: a move's rollback, a drain): every container
-// labelled with its compose project is taken down by name (the sweep's
-// way; volumes kept), then 204 only when none remains — else 409, never
-// a guessed "down".
+// copy whose bundle went: a move's rollback, a drain). Never the agent's
+// own project (400); only an id it once held (a tombstone) or quarantined
+// (404 otherwise: no fishing for unrelated portcullis-* projects); never
+// one of its own containers. Every container labelled with the project is
+// taken down by name (the sweep's way; volumes kept), then 204 only when
+// none remains — else 409, never a guessed "down".
 func (a *API) unbundledDown(ctx context.Context, w http.ResponseWriter, id string) {
 	name := runtime.ProjectName(id)
-	if err := a.cfg.Runtime.DownByName(ctx, name); err != nil {
-		writeError(w, http.StatusConflict, clipMsg("containers of "+id+" are still running: "+err.Error()))
+	if name == a.cfg.OwnProject {
+		writeError(w, http.StatusBadRequest, "that is the agent's own project")
 		return
 	}
-	units, err := a.cfg.Runtime.List(ctx, runtime.Filter{Instance: id})
+	a.mu.Lock()
+	_, tomb := a.tombs[id]
+	_, quarantined := a.quarantined[id]
+	a.mu.Unlock()
+	if !tomb && !quarantined {
+		writeError(w, http.StatusNotFound, "no such project")
+		return
+	}
+	left := func() (int, bool, error) {
+		units, err := a.cfg.Runtime.List(ctx, runtime.Filter{Instance: id})
+		if err != nil {
+			return 0, false, err
+		}
+		n, own := 0, false
+		for _, u := range units {
+			if u.Project != name {
+				continue
+			}
+			if slices.Contains(a.cfg.OwnContainers, u.ID) {
+				own = true
+				continue
+			}
+			n++
+		}
+		return n, own, nil
+	}
+	n, own, err := left()
 	if err != nil {
 		engineError(w, err)
 		return
 	}
-	for _, u := range units {
-		if u.Project == name {
+	if own {
+		// A down by name can't spare a container by id: refused untouched.
+		writeError(w, http.StatusConflict, "one of the agent's own containers carries the label of "+id+": refused")
+		return
+	}
+	if n > 0 {
+		if err := a.cfg.Runtime.DownByName(ctx, name); err != nil {
+			writeError(w, http.StatusConflict, clipMsg("containers of "+id+" are still running: "+err.Error()))
+			return
+		}
+		if n, _, err = left(); err != nil {
+			engineError(w, err)
+			return
+		}
+		if n > 0 {
 			writeError(w, http.StatusConflict, "containers of "+id+" are still running")
 			return
 		}

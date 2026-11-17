@@ -489,26 +489,30 @@ func TestPreflightPullOverTheWire(t *testing.T) {
 	}
 }
 
-// TestDownOfUnbundledProject (security review): over the wire, a down of
-// a project the agent holds no bundle of is done only on the agent's 204
-// (nothing of it left); a leftover container that stays is the agent's
-// 409, an error the Hub never reads as "down"; a create of one is refused.
+// TestDownOfUnbundledProject (security reviews): over the wire, a down of
+// a project the agent once held (bundle removed: a tombstone) is done only
+// on the agent's 204; a leftover container that stays is its 409, an error
+// the Hub never reads as "down"; an id it never held is a 404 error.
 func TestDownOfUnbundledProject(t *testing.T) {
 	w := newWorker(t)
 	b, _ := w.backend(t, nil)
-	p := runtime.Project{Name: "portcullis-other", Instance: "other"}
+	pushBundle(t, b)
+	if err := b.RemoveProject(context.Background(), "app"); err != nil {
+		t.Fatal(err)
+	}
+	p := runtime.Project{Name: "portcullis-app", Instance: "app"}
 	if err := b.Down(context.Background(), p); err != nil {
 		t.Fatalf("down with nothing there: %v", err)
 	}
 	w.engine.Lock()
-	w.engine.Units = append(w.engine.Units, runtime.Unit{ID: "c9", Project: "portcullis-other", Instance: "other", State: "running"})
+	w.engine.Units = append(w.engine.Units, runtime.Unit{ID: "c9", Project: "portcullis-app", Instance: "app", State: "running"})
 	w.engine.Unlock()
 	var ae *Error
 	if err := b.Down(context.Background(), p); !errors.As(err, &ae) || ae.Status != http.StatusConflict || !strings.Contains(ae.Msg, "still running") {
 		t.Errorf("down with a leftover that stays: %v", err)
 	}
-	if err := b.Create(context.Background(), p); !errors.As(err, &ae) || ae.Status != http.StatusNotFound {
-		t.Errorf("create of an unbundled project: %v", err)
+	if err := b.Down(context.Background(), runtime.Project{Name: "portcullis-stranger", Instance: "stranger"}); !errors.As(err, &ae) || ae.Status != http.StatusNotFound {
+		t.Errorf("down of an id the agent never held: %v", err)
 	}
 }
 
