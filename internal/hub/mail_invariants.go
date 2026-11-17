@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -228,4 +229,40 @@ func (h *Hub) mailEndRowsOf(user, uuid string, c mailprovider.Credential, by str
 	if changed {
 		h.saveLocked()
 	}
+}
+
+// mailRowBaseline is the accounts the Hub knows exist on the provider
+// without a baseline document (Ruling R-L8): every uuid with an active
+// mail password, with its username.
+func (h *Hub) mailRowBaseline() map[string]string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := map[string]string{}
+	for user, rows := range h.st.MailCredentials {
+		for _, r := range rows {
+			if r.Active() && r.UUID != "" {
+				out[r.UUID] = user
+			}
+		}
+	}
+	return out
+}
+
+// mailRemovedFromRows are base's accounts doc no longer has, sorted.
+func mailRemovedFromRows(base map[string]string, doc *mailprovider.MailState) []mailprovider.Removed {
+	if doc == nil || len(base) == 0 {
+		return nil
+	}
+	in := map[string]bool{}
+	for _, a := range doc.Accounts {
+		in[a.UUID] = true
+	}
+	var out []mailprovider.Removed
+	for uuid, user := range base {
+		if !in[uuid] {
+			out = append(out, mailprovider.Removed{Username: user, UUID: uuid})
+		}
+	}
+	slices.SortFunc(out, func(a, b mailprovider.Removed) int { return strings.Compare(a.Username, b.Username) })
+	return out
 }

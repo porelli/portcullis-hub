@@ -186,3 +186,12 @@ func (h *Hub) mailProviderAPILocked() MailAPI {
 	}
 	return h.mailClients.c
 }
+
+// IsWiredMailProvider: id is the wired mail provider (Ruling R-L23: no
+// AI path into its containers).
+func (h *Hub) IsWiredMailProvider(id string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	p := h.st.Mail.Provider
+	return p != nil && p.Instance == id
+}

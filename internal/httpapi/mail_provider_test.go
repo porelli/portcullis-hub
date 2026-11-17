@@ -3,8 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
 )
 
 // TestNoMailWiringTool: no MCP tool wires, switches or unwires a mail
@@ -81,5 +85,38 @@ func TestMCPMailStatusProvider(t *testing.T) {
 	}
 	if strings.Contains(string(b), "secret") {
 		t.Fatalf("a secret in %s", b)
+	}
+}
+
+// mailErrStatus is err's HTTP status (0: none).
+func mailErrStatus(err error) int {
+	var se *hub.StatusError
+	if errors.As(err, &se) {
+		return se.Status
+	}
+	return 0
+}
+
+// TestNoAIExecIntoMailProvider (Ruling R-L23): an AI or MCP actor never
+// execs into the wired provider's containers: 403, audited refused; a
+// person at the browser still can (the route's own rules).
+func TestNoAIExecIntoMailProvider(t *testing.T) {
+	e, _ := mailEnv(t)
+	ai := directory.Actor{User: "root", Via: directory.ViaAI, Client: "portcullis-ai-claude-code"}
+	before := len(readAudit(t, e.audit))
+	if _, err := e.s.execInstance(context.Background(), ai, "mailsrv", "stalwart", "cat /run/secrets/x"); mailErrStatus(err) != 403 {
+		t.Fatalf("AI exec: %v", err)
+	}
+	var found bool
+	for _, a := range readAudit(t, e.audit)[before:] {
+		if a.Action == "instance.exec" && a.Target == "mailsrv" && a.Result != "ok" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the refusal isn't audited")
+	}
+	if _, err := e.s.execInstance(context.Background(), directory.Human("root"), "mailsrv", "stalwart", "true"); mailErrStatus(err) == 403 {
+		t.Fatal("a person was refused as an AI")
 	}
 }

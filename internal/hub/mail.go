@@ -369,6 +369,23 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	if removed, needs := mailMassRemoval(doc, last); needs && !confirm {
 		return h.mailMassRefused(ctx, api, last, doc, d, errHubMassRemoval(removed))
 	}
+	// No baseline (mail-last.json lost; Ruling R-L8): the provider API
+	// has no account list, so the Hub's own record of accounts that
+	// exist there (every person with an active mail password) is the
+	// baseline, and a document removing any of them waits for an
+	// administrator's confirmation.
+	if last == nil {
+		if removed := mailRemovedFromRows(h.mailRowBaseline(), doc); len(removed) > 0 {
+			ids := map[string]string{}
+			for _, r := range removed {
+				ids[r.Username] = r.UUID
+			}
+			if !h.mailPendingConfirmed(ids) {
+				return h.mailMassRefused(ctx, api, nil, doc, d, errHubMassRemoval(removed))
+			}
+			confirm = true
+		}
+	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
 	if err != nil {

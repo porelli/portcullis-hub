@@ -397,3 +397,34 @@ func TestRelayPasswordRolledBackOnFailedSave(t *testing.T) {
 		t.Fatalf("hub_data %q gate %q", b, gateFile(t, w.fixture, mailGateRelayPassword))
 	}
 }
+
+// TestNoBaselineRemovalWaits (Ruling R-L8): with mail-last.json lost,
+// the people with an active mail password are the baseline: a document
+// removing any of them is not sent until an administrator confirms.
+func TestNoBaselineRemovalWaits(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	f.create(t, "bob", "phone")
+	os.Remove(f.h.mailLastPath())
+	f.h.mailState.mu.Lock()
+	f.h.mailState.last = nil
+	f.h.mailState.mu.Unlock()
+	puts := f.mc.Puts()
+	f.people.setMembers("mail_users", "root", "alice")
+	f.sync(t)
+	if f.mc.Puts() != puts {
+		t.Fatal("a document removing bob was sent without a baseline")
+	}
+	f.h.mu.RLock()
+	p := f.h.st.Mail.PendingRemoval
+	f.h.mu.RUnlock()
+	if p == nil || len(p.Accounts) != 1 || p.Accounts[0].Username != "bob" {
+		t.Fatalf("pending %+v", p)
+	}
+	if err := f.h.ConfirmMailRemoval(context.Background(), []string{p.Accounts[0].UUID}, directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	f.sync(t)
+	if f.mc.Puts() == puts {
+		t.Fatal("the confirmed removal wasn't sent")
+	}
+}
