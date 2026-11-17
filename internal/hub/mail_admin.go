@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/runtime"

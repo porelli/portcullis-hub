@@ -25,12 +25,12 @@ type runtimeVector struct {
 		Protocol string `json:"protocol"`
 		Service  string `json:"service"`
 	} `json:"ports"`
-	Env       map[string]string `json:"env"`
-	Settings  map[string]string `json:"settings"`
+	Env      map[string]string `json:"env"`
+	Settings map[string]string `json:"settings"`
 	// PersonSecrets are person_secret option keys (Ruling R-POD2).
 	PersonSecrets []string `json:"person_secrets,omitempty"`
-	PortStart int               `json:"port_start"`
-	Want      Compat            `json:"want"`
+	PortStart     int      `json:"port_start"`
+	Want          Compat   `json:"want"`
 }
 
 func loadRuntimeVectors(t *testing.T) []runtimeVector {

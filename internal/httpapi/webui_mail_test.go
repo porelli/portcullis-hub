@@ -267,7 +267,7 @@ func TestWebMailSensitiveAndFormer(t *testing.T) {
 		return nodeEval(t, "global.window = {};\n"+webAsset(t, "mail.js")+"\nprocess.stdout.write(window.PortcullisMail.settingsHtml("+string(vb)+","+string(sb)+",[]));\n")
 	}
 	view := map[string]any{"mail": "on", "hostname": "mail.example.org", "domains": []any{}, "spam": map[string]any{}, "limits": map[string]any{},
-		"relay": map[string]any{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "", "password_set": true},
+		"relay":       map[string]any{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "", "password_set": true},
 		"dkim_rotate": "4320h", "former_retention": "720h", "problem": "Mail can't be managed: x"}
 	st := map[string]any{"mail": "on", "reachable": false, "provider": nil,
 		"status": map[string]any{"former": []any{map[string]any{"id": "f1", "username": "bob<x>", "since": "2026-11-01T00:00:00Z"}}}}
