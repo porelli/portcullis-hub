@@ -53,11 +53,17 @@ var (
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
 		"group_gate_data", "wg_data", "vpn_doc",
-		"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data")
+		"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data",
+		// The mail slot (mail provider plan P9; the removed mail names
+		// above stay until core has merged).
+		"mail_slot")
 	// coreAliases are core's network aliases that aren't service names
 	// (wg's metrics address on portcullis, mail's and mailctl's on
 	// portcullis-metrics-mail): reserved DNS names too.
-	coreAliases = set("wg-metrics", "mail-metrics", "mailctl-metrics")
+	coreAliases = set("wg-metrics", "mail-metrics", "mailctl-metrics",
+		// The wired mail provider's aliases on portcullis-mail-api and
+		// portcullis-metrics-mail (the Hub's override sets them).
+		"mail-api", "mail-provider-metrics", "mail-provider-server-metrics")
 	// coreContainerRe: compose's container names for core's services.
 	coreContainerRe = regexp.MustCompile(`^portcullis[-_](.+)[-_][0-9]+$`)
 )

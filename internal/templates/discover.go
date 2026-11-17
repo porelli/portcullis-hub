@@ -96,6 +96,14 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		}
 		return Template{}, err
 	}
+	// A mail template's first refusal is always a mail one (contract
+	// §3.5): before the generic rules, which would word some of the same
+	// defects otherwise (person_secret, core volume names).
+	if m.Mail != nil {
+		if err := ValidateMail(&Template{ID: id, TemplateID: id, Path: path, Manifest: m}, compose, routes); err != nil {
+			return Template{}, err
+		}
+	}
 	// Only method custom may have no HTTP router (§3, F48): a gateway
 	// method with none would protect nothing.
 	if len(routes.Info) == 0 && m.Auth.Method != "custom" {
@@ -135,6 +143,7 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		NamedVolumes: declaredVolumeNames(compose),
 		Services:     services,
 		Names:        routes.Names,
+		MailProvider: m.Mail != nil,
 		raw:          &raw,
 	}
 	if err := ValidateSettingsSpec(&t, compose, routes, kinds); err != nil {

@@ -211,6 +211,9 @@ type Manifest struct {
 	// VPN is the optional vpn: block (contract §3.3): the template can be
 	// wired as a VPN provider.
 	VPN *VPN `yaml:"vpn" json:"vpn,omitempty"`
+	// Mail is the optional mail: block (contract §3.5): the template can
+	// be wired as the server's mail provider.
+	Mail *Mail `yaml:"mail" json:"mail,omitempty"`
 	// Jobs are compose services that run once and exit (contract §3
 	// "One-off jobs"); JobServices adds the service_completed_successfully
 	// dependencies.
@@ -273,6 +276,9 @@ type Template struct {
 	Manifest   Manifest `json:"manifest"`
 	Path       string   `json:"-"` // filesystem path
 	Enabled    bool     `json:"enabled"`
+	// MailProvider: the template has a valid mail: block (the
+	// Marketplace's "Mail server" badge, contract §3.5).
+	MailProvider bool `json:"mail_provider"`
 	// Subdomains routed by the template's Traefik rules (see ParseRoutes);
 	// in an instance view, the instance's (main-domain labels).
 	Subdomains []string `json:"subdomains"`
