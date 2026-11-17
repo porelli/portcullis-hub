@@ -463,8 +463,8 @@ func ValidateMail(t *Template, compose []byte, routes *Routes) error {
 	if err := plainVolumeIdentity(compose, "mail", "a mail template's", mailLetterText); err != nil {
 		return err
 	}
-	if nw := ipv6Network(compose); nw != "" {
-		return fmt.Errorf("mail: network %s enables IPv6", nw)
+	if err := mailNetworkRefusal(compose); err != nil {
+		return err
 	}
 	if vpnYAMLIndirection(compose) {
 		return fmt.Errorf("compose.yml: a mail template uses no YAML anchors, aliases or merge keys")
@@ -482,24 +482,69 @@ func countOf(l []string, s string) int {
 	return n
 }
 
-// ipv6Network is the first top-level network (file order) whose
-// enable_ipv6 is set to anything but false ("" = none).
-func ipv6Network(compose []byte) string {
+// mailNetworkText ends the refusal of a network key outside the
+// allowlist (parity with templates' validate.py).
+const mailNetworkText = "a mail template's networks are plain project networks (internal, ipam subnets and IP ranges, enable_ipv6: false)"
+
+// mailNetworkRefusal is the networks' allowlist: per top-level network
+// (file order), its keys in file order — enable_ipv6 only false
+// ("enables IPv6"), internal, ipam with only config, each config entry
+// only subnet and ip_range; any other key (driver, driver_opts, name,
+// external, attachable, labels, ipam.driver, …) is refused.
+func mailNetworkRefusal(compose []byte) error {
 	var doc yaml.Node
 	if yaml.Unmarshal(compose, &doc) != nil || len(doc.Content) == 0 {
-		return ""
+		return nil
 	}
 	nets := mapValue(doc.Content[0], "networks")
 	if nets == nil || nets.Kind != yaml.MappingNode {
-		return ""
+		return nil
+	}
+	sets := func(n, key string) error {
+		return fmt.Errorf("mail: network %s sets %s: %s", n, key, mailNetworkText)
 	}
 	for i := 0; i+1 < len(nets.Content); i += 2 {
-		v := mapValue(nets.Content[i+1], "enable_ipv6")
-		if v != nil && !(v.Kind == yaml.ScalarNode && (v.Value == "false" || v.Value == "False" || v.Value == "FALSE")) {
-			return nets.Content[i].Value
+		n, body := nets.Content[i].Value, nets.Content[i+1]
+		if body.Kind != yaml.MappingNode {
+			continue // null: a plain network
+		}
+		for j := 0; j+1 < len(body.Content); j += 2 {
+			k, v := body.Content[j].Value, body.Content[j+1]
+			switch k {
+			case "enable_ipv6":
+				if !(v.Kind == yaml.ScalarNode && (v.Value == "false" || v.Value == "False" || v.Value == "FALSE")) {
+					return fmt.Errorf("mail: network %s enables IPv6", n)
+				}
+			case "internal":
+			case "ipam":
+				if v.Kind != yaml.MappingNode {
+					return sets(n, "ipam")
+				}
+				for a := 0; a+1 < len(v.Content); a += 2 {
+					ik, iv := v.Content[a].Value, v.Content[a+1]
+					if ik != "config" {
+						return sets(n, "ipam."+ik)
+					}
+					if iv.Kind != yaml.SequenceNode {
+						return sets(n, "ipam.config")
+					}
+					for _, c := range iv.Content {
+						if c.Kind != yaml.MappingNode {
+							return sets(n, "ipam.config")
+						}
+						for b := 0; b+1 < len(c.Content); b += 2 {
+							if ck := c.Content[b].Value; ck != "subnet" && ck != "ip_range" {
+								return sets(n, "ipam.config."+ck)
+							}
+						}
+					}
+				}
+			default:
+				return sets(n, k)
+			}
 		}
 	}
-	return ""
+	return nil
 }
 
 // MailBlockHash is the wired provider's template fingerprint (plan P4,
