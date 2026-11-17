@@ -145,6 +145,42 @@ func parseRoots(v string) ([]string, error) {
 	return out, nil
 }
 
+// engineStartWait bounds the start's wait for the runtime guard's first
+// verification (cmd/hub's): past it the agent refuses to start.
+const engineStartWait = 30 * time.Second
+
+// startGuard is what the start waits on (docker.Guard).
+type startGuard interface {
+	Settled() <-chan struct{}
+	Err() error
+	LastError() error
+}
+
+// waitEngine waits for g's first verification (at most wait): nil once
+// verified; a mismatch (the engine isn't the configured runtime) and a
+// time-out are refusals naming which, with the last error seen.
+func waitEngine(ctx context.Context, g startGuard, wait time.Duration) error {
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	last := func() string {
+		if le := g.LastError(); le != nil {
+			return " (last error: " + le.Error() + ")"
+		}
+		return ""
+	}
+	select {
+	case <-g.Settled():
+		if err := g.Err(); err != nil {
+			return fmt.Errorf("refusing to start: the container engine failed its start-time check: %v", err)
+		}
+		return nil
+	case <-t.C:
+		return fmt.Errorf("refusing to start: the container engine wasn't verified within %s (timed out)%s", wait, last())
+	case <-ctx.Done():
+		return fmt.Errorf("stopped while waiting for the container engine's start-time check: %w", ctx.Err())
+	}
+}
+
 func run(data string, getenv func(string) string) error {
 	kind := runtime.Kind(getenv("AGENT_RUNTIME"))
 	if kind != runtime.KindDocker && kind != runtime.KindPodman {
@@ -172,6 +208,12 @@ func run(data string, getenv func(string) string) error {
 		return err
 	}
 	go guard.Run(ctx, engine, 10*time.Second)
+	// Every start-time engine call (VerifySelf, protectedPaths, the own
+	// containers, the bundles' sweep) waits for the guard's first
+	// verification: the engine refuses everything until then.
+	if err := waitEngine(ctx, guard, engineStartWait); err != nil {
+		return err
+	}
 	cli := compose.NewCLI(host, guard)
 	rt := dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: dockerrt.HelperImage})
 	// The agent's own container and image (the fixer runs on it, P7),
