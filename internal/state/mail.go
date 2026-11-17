@@ -64,7 +64,7 @@ type MailSettings struct {
 	// Hub validated and published (or the CLI read for the main domain):
 	// with dmarc_start it makes dmarc_floor (contract §19.5).
 	DMARCPublished map[string]string `json:"dmarc_published,omitempty" yaml:"dmarc_published,omitempty"`
-	Switch   *MailSwitch   `json:"switch,omitempty" yaml:"switch,omitempty"`
+	Switch         *MailSwitch       `json:"switch,omitempty" yaml:"switch,omitempty"`
 }
 
 // MailUnwiring is a draining unwire.

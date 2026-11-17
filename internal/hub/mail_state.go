@@ -106,7 +106,7 @@ func BuildMailState(in MailBuildInput) (*mailprovider.MailState, []string) {
 	doc := &mailprovider.MailState{Version: mailprovider.StateVersion, Generation: in.Generation, PrimaryDomain: primary,
 		MailHostname: in.MailHostname, ClientIP: clientIP, SubmissionLANOnly: in.SubmissionLANOnly,
 		DKIMRotate: mailDuration(st.DKIMRotate, defaultDKIMRotate), FormerRetention: mailDuration(st.FormerRetention, defaultFormerRetention),
-		TLS: mailprovider.StateTLS{SPKISHA256: append([]string{}, st.TLS.SPKISHA256...)},
+		TLS:     mailprovider.StateTLS{SPKISHA256: append([]string{}, st.TLS.SPKISHA256...)},
 		Domains: []mailprovider.Domain{}, Accounts: []mailprovider.Account{}, Aliases: []mailprovider.Alias{}, Lists: []mailprovider.List{},
 		Postmaster: []string{}, LocalNetworks: append([]string{}, in.LocalNetworks...),
 		Limits: mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
