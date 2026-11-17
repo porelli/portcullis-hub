@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/mailprovider"
@@ -106,6 +107,11 @@ type MailSettingsInput struct {
 	Relay           json.RawMessage      `json:"relay,omitempty"`
 	DKIMRotate      *string              `json:"dkim_rotate,omitempty"`
 	FormerRetention *string              `json:"former_retention,omitempty"`
+	// Proof is the fresh sign-in a change of the relay, the DKIM
+	// rotation or the former retention needs (T28 gap 1); Listener the
+	// request's (set by the route).
+	Proof    *freshauth.Proof `json:"-"`
+	Listener string           `json:"-"`
 }
 
 // mailRelayInput is the relay in PUT /api/mail/settings; Password
@@ -277,6 +283,42 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 		v, perr := time.ParseDuration(*d)
 		if perr != nil || v < mailDurationMin || v > mailDurationMax {
 			return statusErr(http.StatusBadRequest, "dkim_rotate and former_retention must be durations from 24h to 8760h")
+		}
+	}
+	// A change of the relay (its password included), the DKIM rotation
+	// or the former retention: never from AI or MCP, and only with a
+	// fresh sign-in (the relay carries a secret; the other two decide
+	// key and mailbox lifetimes).
+	h.mu.RLock()
+	cur := h.st.Mail
+	h.mu.RUnlock()
+	sensitive := password != nil || (in.DKIMRotate != nil && *in.DKIMRotate != mailDuration(cur.DKIMRotate, defaultDKIMRotate)) ||
+		(in.FormerRetention != nil && *in.FormerRetention != mailDuration(cur.FormerRetention, defaultFormerRetention))
+	if relaySet {
+		switch {
+		case (relay == nil) != (cur.Relay == nil):
+			sensitive = true
+		case relay != nil && *relay != *cur.Relay:
+			sensitive = true
+		}
+	}
+	if sensitive {
+		if actor.Via != "" {
+			return statusErr(http.StatusForbidden, "the relay, DKIM rotation and former retention change only in the browser, never through MCP or AI")
+		}
+		if in.Proof == nil {
+			return statusErr(http.StatusForbidden, "changing the relay, DKIM rotation or former retention needs a fresh sign-in")
+		}
+		listener := in.Listener
+		if listener == "" {
+			listener = ListenerHub
+		}
+		if _, err := h.verifyTouch(ctx, listener, *in.Proof, actor.User); err != nil {
+			var tr *touchRefused
+			if errors.As(err, &tr) {
+				return tr.err
+			}
+			return errFreshAuth
 		}
 	}
 	primary := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(in.PrimaryDomain), "."))

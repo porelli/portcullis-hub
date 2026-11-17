@@ -419,7 +419,7 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
-	if errors.Is(err, errMailPendingHold) {
+	if errors.Is(err, errMailPendingHold) || errors.Is(err, errMailNoTLS) {
 		return mailRetry
 	}
 	if err != nil {
@@ -507,6 +507,9 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 // mailSend saves the next generation, then PUTs the document. A 409
 // "generation not greater" (state.yaml older than mailctl's) moves the
 // generation past mailctl's and tries once more.
+// errMailNoTLS: no certificate key posted yet; nothing is sent.
+var errMailNoTLS = errors.New("no mail certificate key posted yet")
+
 func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailprovider.MailState, confirm bool) (int, error) {
 	// An unconfirmed pending removal holds every document that still
 	// omits one of its accounts (security review of R-L8): only an
@@ -514,6 +517,13 @@ func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailprovider.MailS
 	// (A document confirmed by the Hub's own removal records, confirm,
 	// is the reviewed second path: every account that goes was taken out
 	// by an administrator through the Hub.)
+	// No certificate key posted yet (core: the provider refuses a
+	// document whose tls.spki_sha256 isn't 1–2 keys): nothing is sent
+	// until `./portcullis mail rotate` posts one (POST /host/mail/tls).
+	if len(doc.TLS.SPKISHA256) == 0 {
+		h.mailLogOnce("mail: no state sent yet: the mail certificate's key isn't posted (./portcullis mail rotate on the host posts it)")
+		return 0, errMailNoTLS
+	}
 	if who := h.mailPendingOmitted(doc); who != "" && !confirm {
 		h.mailSetBlocked("the pending removal of " + who + " waits for an administrator's confirmation: nothing that removes them is sent")
 		return 0, errMailPendingHold

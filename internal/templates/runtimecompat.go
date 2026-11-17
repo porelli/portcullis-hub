@@ -106,6 +106,16 @@ func rootlessCompat(compose []byte, m Manifest, env map[string]string, portStart
 		c.port(p, env, portStart)
 	}
 	c.runsAs(m)
+	// Per-person passwords mount hub_secrets by subpath, which Podman's
+	// compat API ignores (Ruling R-POD2): refused under Podman.
+	if m.Settings != nil {
+		for _, o := range m.Settings.Options {
+			if o.Type == TypePersonSecret {
+				c.refuse("option %s is a per-person password: per-person passwords need Docker for now", o.Key)
+				break
+			}
+		}
+	}
 	switch {
 	case len(c.refused) > 0:
 		return Compat{Status: CompatRefused, Reasons: c.refused}

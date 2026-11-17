@@ -242,6 +242,7 @@ func TestRelayPasswordWriteOnly(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	in := MailSettingsInput{PrimaryDomain: "example.org", Spam: MailSpamView{RejectScore: 15, JunkScore: 5}, Limits: mailprovider.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000},
 		Relay: json.RawMessage(`{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "_spf.relay.example.net", "password": "s3cret-relay"}`)}
+	in.Proof, in.Listener = &wireProof, ListenerHub
 	if err := w.h.SetMailSettings(ctx, in, rootActor()); err != nil {
 		t.Fatal(err)
 	}
@@ -381,6 +382,7 @@ func TestRelayPasswordRolledBackOnFailedSave(t *testing.T) {
 	ctx := context.Background()
 	in := MailSettingsInput{PrimaryDomain: "example.org", Spam: MailSpamView{RejectScore: 15, JunkScore: 5}, Limits: mailprovider.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000},
 		Relay: json.RawMessage(`{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "", "password": "first-pass"}`)}
+	in.Proof, in.Listener = &wireProof, ListenerHub
 	if err := w.h.SetMailSettings(ctx, in, rootActor()); err != nil {
 		t.Fatal(err)
 	}
@@ -465,5 +467,40 @@ func TestNoBaselineProviderListConfirms(t *testing.T) {
 	}
 	if f.mc.Puts() != puts+1 || !f.mc.Last().ConfirmMassRemoval {
 		t.Fatalf("puts %d, last %+v", f.mc.Puts()-puts, f.mc.Last())
+	}
+}
+
+// TestSensitiveMailSettingsNeedFreshProof (T28 gap 1): changing the
+// relay, the DKIM rotation or the former retention needs a fresh sign-in
+// and is never an AI's; the other settings and an unchanged relay don't.
+func TestSensitiveMailSettingsNeedFreshProof(t *testing.T) {
+	w := wiredFix(t)
+	ctx := context.Background()
+	base := MailSettingsInput{PrimaryDomain: "example.org", Spam: MailSpamView{RejectScore: 15, JunkScore: 5}, Limits: mailprovider.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000}}
+	relay := json.RawMessage(`{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": ""}`)
+	d := "2160h"
+	for name, in := range map[string]MailSettingsInput{
+		"relay":            func() MailSettingsInput { i := base; i.Relay = relay; return i }(),
+		"dkim_rotate":      func() MailSettingsInput { i := base; i.DKIMRotate = &d; return i }(),
+		"former_retention": func() MailSettingsInput { i := base; i.FormerRetention = &d; return i }(),
+	} {
+		if err := w.h.SetMailSettings(ctx, in, rootActor()); statusOf(err) != 403 {
+			t.Errorf("%s without a proof: %v", name, err)
+		}
+		in.Proof, in.Listener = &wireProof, ListenerHub
+		ai := directory.Actor{User: "root", Via: directory.ViaAI, Client: "portcullis-ai-claude-code"}
+		if err := w.h.SetMailSettings(ctx, in, ai); statusOf(err) != 403 {
+			t.Errorf("%s from AI: %v", name, err)
+		}
+		if err := w.h.SetMailSettings(ctx, in, rootActor()); err != nil {
+			t.Errorf("%s with a proof: %v", name, err)
+		}
+	}
+	// The spam scores alone, and the same relay again: no proof needed.
+	i := base
+	i.Spam.RejectScore = 16
+	i.Relay = relay
+	if err := w.h.SetMailSettings(ctx, i, rootActor()); err != nil {
+		t.Fatalf("an unchanged relay: %v", err)
 	}
 }

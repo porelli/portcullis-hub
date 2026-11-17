@@ -95,6 +95,8 @@ func newMailFixture(t *testing.T, others ...string) *mailFixture {
 	}
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains = map[string]state.MailDomain{}
+	// A posted certificate key (nothing is sent before one, T28 gap 5).
+	f.h.st.Mail.TLS = state.MailTLS{SPKISHA256: []string{strings.Repeat("ab", 32)}}
 	f.h.mu.Unlock()
 	f.engine.mu.Lock()
 	f.engine.containers = append(f.engine.containers, providerContainer("prov-mail-1"))
@@ -671,4 +673,24 @@ func TestMailDNSHashForgottenOnFailure(t *testing.T) {
 // dmarcRec is a valid _dmarc record for d (p=reject: every floor).
 func dmarcRec(d string) mailprovider.Record {
 	return mailprovider.Record{Name: "_dmarc." + d, Type: "TXT", TTL: 3600, Value: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d}
+}
+
+// TestNoDocumentWithoutCertKey (T28 gap 5, core): with no certificate
+// key posted, nothing is sent; once one is, the document goes.
+func TestNoDocumentWithoutCertKey(t *testing.T) {
+	f := newMailFixture(t)
+	f.h.mu.Lock()
+	f.h.st.Mail.TLS = state.MailTLS{}
+	f.h.mu.Unlock()
+	f.sync(t)
+	if f.mc.Puts() != 0 {
+		t.Fatalf("%d documents without a key", f.mc.Puts())
+	}
+	if _, err := f.h.HostMailTLS(context.Background(), []string{strings.Repeat("cd", 32)}, f.now.Add(60*24*time.Hour)); err != nil {
+		t.Logf("tls: %v", err) // the reload may fail before a first document; the key is recorded
+	}
+	f.sync(t)
+	if f.mc.Puts() != 1 || len(f.mc.Last().TLS.SPKISHA256) != 1 {
+		t.Fatalf("puts %d", f.mc.Puts())
+	}
 }

@@ -406,6 +406,9 @@ func (h *Hub) WireMailForTest(instance string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.st.Mail.Provider = &state.MailProvider{Instance: instance, Template: instance}
+	if len(h.st.Mail.TLS.SPKISHA256) == 0 {
+		h.st.Mail.TLS = state.MailTLS{SPKISHA256: []string{strings.Repeat("ab", 32)}}
+	}
 }
 
 // MailDomainStates is every domain's mail state (on, draining, off) as

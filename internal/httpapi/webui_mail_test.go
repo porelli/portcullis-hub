@@ -129,7 +129,7 @@ func TestSettingsMailPanel(t *testing.T) {
 		t.Errorf("pending removal: %s", h)
 	}
 	view["problem"] = "Mail can't be managed: the Hub's mail secret is missing or too short"
-	if h := render(view, nil); !strings.Contains(h, "data-mail-problem") || !strings.Contains(h, "./portcullis up") {
+	if h := render(view, nil); !strings.Contains(h, "data-mail-problem") || !strings.Contains(h, `data-mail-act="retry-void"`) {
 		t.Errorf("secret problem: %s", h)
 	}
 	view["problem"] = nil
@@ -253,5 +253,37 @@ process.stdout.write(JSON.stringify({ skel, warning: node('[data-mail-warning]')
 		if !strings.Contains(idx, want) {
 			t.Errorf("index.html lacks %q", want)
 		}
+	}
+}
+
+// TestWebMailSensitiveAndFormer (T28 gaps 1–3): the relay, DKIM rotation
+// and former retention form (password write-only, a fresh sign-in on
+// save), the former accounts read-only with the export hint, the
+// provider pill and the secret banner's Retry.
+func TestWebMailSensitiveAndFormer(t *testing.T) {
+	render := func(v, st any) string {
+		vb, _ := json.Marshal(v)
+		sb, _ := json.Marshal(st)
+		return nodeEval(t, "global.window = {};\n"+webAsset(t, "mail.js")+"\nprocess.stdout.write(window.PortcullisMail.settingsHtml("+string(vb)+","+string(sb)+",[]));\n")
+	}
+	view := map[string]any{"mail": "on", "hostname": "mail.example.org", "domains": []any{}, "spam": map[string]any{}, "limits": map[string]any{},
+		"relay": map[string]any{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "", "password_set": true},
+		"dkim_rotate": "4320h", "former_retention": "720h", "problem": "Mail can't be managed: x"}
+	st := map[string]any{"mail": "on", "reachable": false, "provider": nil,
+		"status": map[string]any{"former": []any{map[string]any{"id": "f1", "username": "bob<x>", "since": "2026-11-01T00:00:00Z"}}}}
+	h := render(view, st)
+	for _, want := range []string{`data-mail-sensitive`, `data-mail-act="sensitive-save"`, `type="password"`, `placeholder="unchanged (set)"`, `value="4320h"`,
+		`data-mail-former-list`, `bob&lt;x&gt;`, `./portcullis mail export &lt;id&gt;`, "mail provider unreachable", `data-mail-act="retry-void"`, "A fresh sign-in"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"mailctl unreachable", "./portcullis up", "bob<x>"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("has %q", bad)
+		}
+	}
+	if !strings.Contains(webAsset(t, "mail.js"), "PortcullisFreshAuth.start(fa") {
+		t.Error("the sensitive save doesn't run the fresh sign-in")
 	}
 }

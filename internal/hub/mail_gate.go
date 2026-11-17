@@ -638,8 +638,15 @@ func (h *Hub) RetryMailVoid(actor directory.Actor) (*AsyncOp, error) {
 	if cur != nil && h.mailRestorePendingFor(cur.Instance) {
 		return nil, errMailRestorePending
 	}
+	// A missing or short API secret (the slot emptied) is fixed by a
+	// void, which writes a fresh one (T28 gap 3): Retry owes one then.
+	secretBad := h.mailSecretInvalid()
 	h.mu.Lock()
 	p, held := h.st.Mail.Provider, h.st.Mail.Held
+	if p != nil && secretBad && h.st.Mail.VoidOwed == nil {
+		h.raiseVoidDebtLocked(state.MailVoidWire)
+		h.saveLocked()
+	}
 	// After a core restore's hold went by hand (`mail restore-hold
 	// clear`), the administrator's Retry is what starts the provider
 	// again, always through a void (FH-H3 c).

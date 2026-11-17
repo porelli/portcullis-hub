@@ -228,7 +228,7 @@ func TestPresentWrittenOnlyAfterVerify(t *testing.T) {
 func TestGateFilesInPlace(t *testing.T) {
 	f := voidFixture(t)
 	ino := func() uint64 {
-		fi, err := os.Stat(filepath.Join(f.h.cfg.SecretsDir, mailProviderID, "_mail", mailGateAPISecret))
+		fi, err := os.Stat(filepath.Join(f.h.cfg.MailProviderSlotDir, mailGateAPISecret))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -253,7 +253,7 @@ func TestGateFilesInPlace(t *testing.T) {
 	if b, s2 := ino(), gateFile(t, f.fixture, mailGateAPISecret); a != b || s1 == s2 || !regexp.MustCompile(`^[A-Za-z0-9]{48}$`).MatchString(s2) {
 		t.Fatalf("inode %d → %d, secret %q → %q", a, b, s1, s2)
 	}
-	di, err := os.Stat(filepath.Join(f.h.cfg.SecretsDir, mailProviderID, "_mail"))
+	di, err := os.Stat(f.h.cfg.MailProviderSlotDir)
 	if err != nil || di.Mode().Perm() != 0o750 || di.Mode()&os.ModeSetgid == 0 {
 		t.Fatalf("dir %v %v", di.Mode(), err)
 	}
@@ -577,5 +577,24 @@ func TestMailRedactionFailsClosed(t *testing.T) {
 	}
 	if _, err := f.h.ToolRedactionSet(); err == nil {
 		t.Fatal("an unreadable mail secret didn't fail the redaction set")
+	}
+}
+
+// TestRetryFixesMissingSecret (T28 gap 3): with the API secret gone and
+// no void owed, Retry owes one and the void writes a fresh secret.
+func TestRetryFixesMissingSecret(t *testing.T) {
+	w := wiredFix(t)
+	secret := filepath.Join(w.h.cfg.MailProviderSlotDir, mailGateAPISecret)
+	w.h.SetMailAPI(mailprovider.New(w.mc.URL(), secret)) // reads the slot's secret, as in production
+	os.Remove(secret)
+	if !w.h.mailSecretInvalid() {
+		t.Fatal("the secret isn't seen as missing")
+	}
+	if _, err := w.h.RetryMailVoid(rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if len(gateFile(t, w.fixture, mailGateAPISecret)) != mailSecretLen || w.h.mailSecretInvalid() {
+		t.Fatal("no fresh secret")
 	}
 }

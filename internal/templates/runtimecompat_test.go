@@ -27,6 +27,8 @@ type runtimeVector struct {
 	} `json:"ports"`
 	Env       map[string]string `json:"env"`
 	Settings  map[string]string `json:"settings"`
+	// PersonSecrets are person_secret option keys (Ruling R-POD2).
+	PersonSecrets []string `json:"person_secrets,omitempty"`
 	PortStart int               `json:"port_start"`
 	Want      Compat            `json:"want"`
 }
@@ -60,6 +62,12 @@ func vectorVerdict(v runtimeVector) Compat {
 			m.Settings.Options = append(m.Settings.Options, Option{Key: k, Type: "path"})
 			env[k] = val
 		}
+	}
+	for _, k := range v.PersonSecrets {
+		if m.Settings == nil {
+			m.Settings = &SettingsSpec{}
+		}
+		m.Settings.Options = append(m.Settings.Options, Option{Key: k, Type: TypePersonSecret})
 	}
 	return RuntimeCompat(v.Runtime, []byte(v.Compose), m, env, v.PortStart)
 }
