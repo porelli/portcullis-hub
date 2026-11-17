@@ -424,7 +424,7 @@ func TestUnmanagedPreviewUnknown(t *testing.T) {
 	if !slices.Contains(c.Hosts["web"], "*.lab.example.com") || slices.Contains(c.Hosts["web"], "lab-1.lab.example.com") {
 		t.Errorf("client names %v", c.Hosts["web"])
 	}
-	if strings.Join(c.Hints["web"], ",") != "alice,bob,deploy" {
+	if strings.Join(c.Hints["web"], ",") != "s:deploy,u:alice,u:bob" {
 		t.Errorf("hints %v", c.Hints["web"])
 	}
 	golden(t, "unmanaged.preview.lab-1.json", js(rows))

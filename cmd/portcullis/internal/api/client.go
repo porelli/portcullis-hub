@@ -218,3 +218,26 @@ func (c *Client) debugf(format string, a ...any) {
 		fmt.Fprintf(c.Debug, format+"\n", a...)
 	}
 }
+
+// Get fetches path's raw answer (public text routes).
+func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(cliapi.HeaderCLI, cliapi.CLIHeaderValue(c.Version))
+	c.debugf("> GET %s", redactURL(req.URL.String()))
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, Errorf(ExitUnreachable, "can't reach %s: %v", c.Base, cleanNetErr(err))
+	}
+	defer resp.Body.Close()
+	ans, err := io.ReadAll(io.LimitReader(resp.Body, MaxAnswer+1))
+	if err != nil || len(ans) > MaxAnswer {
+		return nil, Errorf(ExitError, "%s: the answer is cut off or too large", c.Base)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, statusError(resp.StatusCode, ans)
+	}
+	return ans, nil
+}

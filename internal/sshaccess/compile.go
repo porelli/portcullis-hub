@@ -106,7 +106,7 @@ func Compile(in Input) (*Compiled, error) {
 		hint := map[string]bool{}
 		for _, u := range uses {
 			if u.hg == hg && cliapi.ValidAccount(u.account) {
-				hint[u.account] = true
+				hint[u.kind+":"+u.account] = true
 			}
 		}
 		if len(hint) > 0 {

@@ -141,7 +141,11 @@ func trustCommand(domain, hg string, userCAs, hints []string) string {
 	var b strings.Builder
 	b.WriteString("sudo portcullis host trust --domain " + domain + " --host-group " + hg + " \\\n     --ca-key '" + userCAs[0] + "'")
 	for _, a := range hints {
-		b.WriteString(" --account " + a)
+		if acct, ok := strings.CutPrefix(a, cliapi.PrincipalPersonal+":"); ok {
+			b.WriteString(" --person " + acct)
+		} else if acct, ok := strings.CutPrefix(a, cliapi.PrincipalShared+":"); ok {
+			b.WriteString(" --account " + acct)
+		}
 	}
 	b.WriteString(" --revoked-keys")
 	return b.String()

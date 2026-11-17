@@ -46,7 +46,8 @@ type Compiled struct {
 	// Hosts: host group → the names clients use (managed hosts' names and
 	// addresses, then the group's patterns).
 	Hosts map[string][]string
-	// Hints: host group → the `--account` lines for `host trust`.
+	// Hints: host group → `u:<username>` / `s:<account>` for `host trust`'s
+	// --person / --account flags.
 	Hints map[string][]string
 	// Collisions: personal grants skipped because the username is an
 	// account that isn't the person's (ssh_username_collision).
