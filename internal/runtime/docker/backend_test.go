@@ -446,6 +446,16 @@ func TestRestartServiceNarrow(t *testing.T) {
 			t.Errorf("%q restarted", c)
 		}
 	}
+	// An exited leftover of the service doesn't count (L20).
+	left := svc("s0", "portcullis-mailsrv", "stalwart")
+	left.State = "exited"
+	e.cs = append(e.cs, left)
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err != nil {
+		t.Fatalf("an exited leftover blocked the restart: %v", err)
+	}
+	if n, last := restarts(); n != 2 || last != "restart s1 1s" {
+		t.Fatalf("restarts %d %q", n, last)
+	}
 	e.cs = append(e.cs, svc("s2", "portcullis-mailsrv", "stalwart"))
 	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err == nil || !strings.Contains(err.Error(), "2 containers") {
 		t.Fatalf("two: %v", err)
@@ -454,7 +464,7 @@ func TestRestartServiceNarrow(t *testing.T) {
 	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err == nil {
 		t.Fatal("restarted a one-off")
 	}
-	if n, _ := restarts(); n != 1 {
+	if n, _ := restarts(); n != 2 {
 		t.Fatalf("refused restarts ran: %d", n)
 	}
 }

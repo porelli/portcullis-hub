@@ -112,6 +112,9 @@ type MailProvider struct {
 type MailVoid struct {
 	Reason string    `json:"reason" yaml:"reason"`
 	Since  time.Time `json:"since" yaml:"since"`
+	// Seq grows with every debt raised while one is owed (a restore
+	// during a void): a run clears only the debt it started on (L19).
+	Seq int `json:"seq,omitempty" yaml:"seq,omitempty"`
 }
 
 // Void reasons (MailVoid.Reason).

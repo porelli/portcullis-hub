@@ -436,3 +436,16 @@ func TestHubSecretsMailSubpathOnlyGated(t *testing.T) {
 		t.Fatal("an unwired instance's gate mount passed")
 	}
 }
+
+// TestClosedSlotRendersNoPorts (L18): a wired provider with the slot
+// closed renders void mode (no public listeners).
+func TestClosedSlotRendersNoPorts(t *testing.T) {
+	f := mailOverrideFixture(t)
+	f.h.SetMailCoreForTest(false, "mail.example.org")
+	f.h.mu.RLock()
+	mode := f.h.mailModeLocked(mailProviderID)
+	f.h.mu.RUnlock()
+	if mode != mailVoid {
+		t.Fatalf("mode %v", mode)
+	}
+}

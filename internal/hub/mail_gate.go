@@ -246,12 +246,21 @@ func wipeBytes(b []byte) {
 // Caller must hold mu (write).
 func (h *Hub) markVoidOwedLocked(reason string) error {
 	prev := h.st.Mail.VoidOwed
-	if prev == nil {
-		h.st.Mail.VoidOwed = &state.MailVoid{Reason: reason, Since: h.mailNow().UTC()}
-		if err := h.saveStateLocked(); err != nil {
-			h.st.Mail.VoidOwed = prev
-			return err
+	next := &state.MailVoid{Reason: reason, Since: h.mailNow().UTC()}
+	if prev != nil {
+		// Another debt while one is owed (L19): the same void, one more
+		// seq, so a run in progress doesn't clear it.
+		c := *prev
+		c.Seq++
+		if reason == state.MailVoidRestore {
+			c.Reason = reason
 		}
+		next = &c
+	}
+	h.st.Mail.VoidOwed = next
+	if err := h.saveStateLocked(); err != nil {
+		h.st.Mail.VoidOwed = prev
+		return err
 	}
 	p := h.st.Mail.Provider
 	if p == nil {
@@ -322,6 +331,9 @@ func (h *Hub) mailVoidUUIDs(ctx context.Context) ([]string, error) {
 func verifyMailVoid(ctx context.Context, api MailAPI, uuids []string) error {
 	list := func(u string) ([]mailprovider.Credential, error) {
 		rows, err := api.Credentials(ctx, u)
+		// 404: the provider has no account with that uuid (contract
+		// §19.5), so it holds no credential of it either (L21): nothing
+		// to revoke, and nothing that could survive.
 		if mailprovider.StatusOf(err) == http.StatusNotFound {
 			return nil, nil
 		}
@@ -418,6 +430,7 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 		h.mu.Unlock()
 		return err
 	}
+	runSeq := h.st.Mail.VoidOwed.Seq
 	// A fresh void session for this run; the secrets the provider needs
 	// (a core restore emptied hub_secrets).
 	err := h.mailVoidFilesLocked(id)
@@ -479,9 +492,15 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 	if err := verifyMailVoid(ctx, api, uuids); err != nil {
 		return err
 	}
-	// Verified: open the gate, then clear the debt.
+	// Verified: open the gate, then clear the debt — only the debt this
+	// run started on (L19): a newer one keeps the gate closed and runs
+	// again.
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if cur := h.st.Mail.VoidOwed; cur != nil && cur.Seq != runSeq {
+		h.kickMailVoid()
+		return statusErr(http.StatusConflict, "another void was owed during this one (%s): it runs again", cur.Reason)
+	}
 	if err := h.mailGateWrite(id, mailGatePresent, []byte(mailGateSentinel+"\n")); err != nil {
 		return err
 	}

@@ -2,9 +2,12 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -289,6 +292,15 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 	saveErr := h.saveStateLocked()
 	h.mu.Unlock()
 	h.writeMailTargets()
+	// mail_slot's copy of the metrics secret goes too (L22).
+	if h.cfg.MailSlotDir != "" {
+		if r, err := os.OpenRoot(h.cfg.MailSlotDir); err == nil {
+			if err := r.Remove(mailGateMetricsSecret); err != nil && !errors.Is(err, fs.ErrNotExist) && gateErr == nil {
+				gateErr = fmt.Errorf("removing mail_slot's metrics-secret: %w", err)
+			}
+			r.Close()
+		}
+	}
 	var downErr error
 	if live != nil {
 		downErr = h.composeDown(live)

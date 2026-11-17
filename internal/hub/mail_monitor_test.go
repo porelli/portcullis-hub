@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -352,5 +353,37 @@ func TestRestorePendingNamesTheArchive(t *testing.T) {
 	w.h.Wait()
 	if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || !v.OK {
 		t.Fatalf("op %+v", v)
+	}
+}
+
+// TestUnwireRemovesSlotMetricsSecret (L22): mail_slot's metrics secret
+// goes with the unwire.
+func TestUnwireRemovesSlotMetricsSecret(t *testing.T) {
+	w := wiredFix(t)
+	p := filepath.Join(w.h.cfg.MailSlotDir, mailGateMetricsSecret)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.unwire(t, false, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("still there: %v", err)
+	}
+}
+
+// notFoundListAPI answers 404 to every credential list.
+type notFoundListAPI struct{ MailAPI }
+
+func (a *notFoundListAPI) Credentials(context.Context, string) ([]mailprovider.Credential, error) {
+	return nil, &mailprovider.APIError{Status: 404, Msg: "no such account"}
+}
+
+// TestVoidVerify404IsNoCredentials (L21): a 404 list is an account the
+// provider doesn't have: nothing to revoke, the verification passes.
+func TestVoidVerify404IsNoCredentials(t *testing.T) {
+	w := wiredFix(t)
+	if err := verifyMailVoid(context.Background(), &notFoundListAPI{MailAPI: w.mc.Client()}, []string{uuidAlice}); err != nil {
+		t.Fatal(err)
 	}
 }

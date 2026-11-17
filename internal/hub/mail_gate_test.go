@@ -434,3 +434,31 @@ func TestVoidListsDocumentAccounts(t *testing.T) {
 		t.Fatal("a void that kept a member's password passed")
 	}
 }
+
+// TestVoidKeepsDebtRaisedMidRun (L19): a restore debt raised while a
+// void runs isn't cleared by it: the gate stays closed and it runs again.
+func TestVoidKeepsDebtRaisedMidRun(t *testing.T) {
+	f := voidFixture(t)
+	raised := false
+	f.runner.upHook = func(project string) {
+		if project == "portcullis-"+mailProviderID && !raised {
+			raised = true
+			f.h.mu.Lock()
+			f.h.markVoidOwedLocked(state.MailVoidRestore)
+			f.h.mu.Unlock()
+		}
+	}
+	if err := runVoidNow(t, f); err == nil {
+		t.Fatal("the run cleared a debt raised during it")
+	}
+	f.h.mu.RLock()
+	owed := f.h.st.Mail.VoidOwed
+	f.h.mu.RUnlock()
+	if owed == nil || owed.Reason != state.MailVoidRestore || gateFile(t, f.fixture, mailGatePresent) != "" {
+		t.Fatalf("owed %+v present %q", owed, gateFile(t, f.fixture, mailGatePresent))
+	}
+	f.runner.upHook = nil
+	if err := runVoidNow(t, f); err != nil {
+		t.Fatal(err)
+	}
+}

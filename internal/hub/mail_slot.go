@@ -89,7 +89,9 @@ func (h *Hub) mailModeLocked(id string) mailMode {
 	if p == nil || p.Instance != id {
 		return mailUnwired
 	}
-	if h.st.Mail.VoidOwed != nil {
+	// A closed or invalid slot (PORTCULLIS_MAIL off or a bad key) never
+	// renders the public listeners (L18): void mode, fail closed.
+	if h.st.Mail.VoidOwed != nil || !h.mailOn() {
 		return mailVoid
 	}
 	return mailNormal

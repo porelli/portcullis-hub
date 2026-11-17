@@ -253,6 +253,11 @@ func (b *Backend) RestartService(ctx context.Context, project, service string, t
 		if c.Labels[engine.LabelProject] != project || c.Labels[engine.LabelService] != service || strings.EqualFold(c.Labels[labelOneOff], "true") {
 			continue
 		}
+		// An exited leftover isn't the serving container (L20): only a
+		// live one counts.
+		if c.State == "exited" || c.State == "dead" || c.State == "created" {
+			continue
+		}
 		ids = append(ids, c.ID)
 	}
 	switch len(ids) {
