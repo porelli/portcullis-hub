@@ -91,8 +91,8 @@ type HostMailStatusView struct {
 	AppliedGeneration int                          `json:"applied_generation"`
 	// VoidOwed and Held are null or an object, never false (core
 	// interface fix round 1, item 4).
-	VoidOwed *MailVoidView   `json:"void_owed"`
-	Held     *state.MailHold `json:"held"`
+	VoidOwed *MailVoidView        `json:"void_owed"`
+	Held     *state.MailHold      `json:"held"`
 	Checks   *mailprovider.Checks `json:"checks"`
 }
 
