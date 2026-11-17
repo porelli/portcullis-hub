@@ -21,6 +21,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/runtime"
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/runtime/runtimetest"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
@@ -36,6 +37,9 @@ type workerFake struct {
 	infoErr error
 	pullErr error
 	bundles []map[string]string
+	// held: instance ids with a pushed bundle (removed with the project):
+	// the agent's List scope.
+	held map[string]bool
 	// pushErr refuses bundles; removeErrs fails the next RemoveProject
 	// calls; pushHook runs at each push.
 	pushErr    error
@@ -121,6 +125,10 @@ func (w *workerFake) PushBundle(_ context.Context, id string, files fs.FS, m age
 	}
 	w.mu.Lock()
 	w.bundles = append(w.bundles, got)
+	if w.held == nil {
+		w.held = map[string]bool{}
+	}
+	w.held[id] = true
 	w.mu.Unlock()
 	w.Fake.Signal(context.Background(), "bundle", id) // recorded in order
 	return nil
@@ -137,7 +145,24 @@ func (w *workerFake) RemoveProject(_ context.Context, id string) error {
 		return errors.New("the worker refused the removal")
 	}
 	w.Fake.Signal(context.Background(), "remove-project", id)
+	w.mu.Lock()
+	delete(w.held, id)
+	w.mu.Unlock()
 	return nil
+}
+
+// List is the agent's: an instance it holds no bundle of is 404 "no such
+// project" (contract §17.4 scope), as the real agent answers.
+func (w *workerFake) List(ctx context.Context, f runtime.Filter) ([]runtime.Unit, error) {
+	if f.Instance != "" {
+		w.mu.Lock()
+		held := w.held[f.Instance]
+		w.mu.Unlock()
+		if !held {
+			return nil, &agentrt.Error{Status: 404, Msg: "no such project", AgentStatus: 404}
+		}
+	}
+	return w.Fake.List(ctx, f)
 }
 
 func (w *workerFake) Unquarantine(_ context.Context, id string) error {

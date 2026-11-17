@@ -428,6 +428,11 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	}
 	if !h.noEngine() {
 		cs, err := target.List(context.Background(), runtime.Filter{Instance: id})
+		if err != nil && req.Server != "" && docker.IsNotFound(err) {
+			// A worker's agent answers 404 for a project it holds no bundle
+			// of (its scope, contract §17.4): none there.
+			cs, err = nil, nil
+		}
 		if err != nil {
 			return nil, statusErr(503, "cannot check for an existing compose project %s: %v", projectName(id), err)
 		}
