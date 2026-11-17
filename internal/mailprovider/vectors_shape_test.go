@@ -185,6 +185,8 @@ func TestDNSVectorsShape(t *testing.T) {
 		// Ruling R-H3: the canonical DMARC floor
 		"two dmarc records refused", "dmarc missing under floor reject refused", "dmarc tag p twice refused",
 		"dmarc sp=none under floor reject refused", "dmarc pct=0 refused", "dmarc t=y refused", "a draining set without dmarc ok",
+		"dmarc np=none under floor reject refused", "dmarc unknown tag refused", "dmarc P=none;p=reject refused", "dmarc uppercase tag refused",
+		"a draining set with an MX refused", "a draining set with an SPF refused",
 	} {
 		if !names[n] {
 			t.Errorf("case %q missing", n)

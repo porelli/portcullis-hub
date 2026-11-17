@@ -65,6 +65,11 @@ func ValidateSet(c RuleContext, rs []Record) error {
 			return refuse(t + " records are not allowed")
 		}
 		rel := strings.TrimSuffix(strings.TrimSuffix(n, e), ".")
+		// A draining domain's set is only its _mta-sts record (§19.7):
+		// nothing else, so the DMARC waiver can't let anything through.
+		if c.Draining && !(rel == "_mta-sts" && t == "TXT") {
+			return refuse("a draining set holds only _mta-sts." + e)
+		}
 		v := strings.TrimSpace(r.Value)
 		switch {
 		case n == e:
@@ -166,30 +171,43 @@ func ValidateSet(c RuleContext, rs []Record) error {
 	return nil
 }
 
-// dmarcRule: "" or the why (Ruling R-H3: canonical): every tag once;
-// no ruf; rua only mailto: addresses on e; no t=y; pct only 100; p (and
-// sp when given) none, quarantine or reject, both at or above the floor.
+// dmarcTags are the DMARC tags a record may carry (RFC 7489 §6.3; ruf
+// is then refused by its own rule).
+var dmarcTags = map[string]bool{"v": true, "p": true, "sp": true, "np": true, "rua": true, "ruf": true, "adkim": true, "aspf": true,
+	"fo": true, "rf": true, "ri": true, "pct": true, "t": true}
+
+// dmarcRule: "" or the why (Ruling R-H3, canonical): lowercase tag
+// names, every tag once, only the known tags; no ruf; rua only mailto:
+// addresses on e; no t=y; pct only 100; p (and sp, np when given) none,
+// quarantine or reject, all at or above the floor.
 func dmarcRule(v, e, floor string) string {
 	if !strings.HasPrefix(v, "v=DMARC1;") {
 		return "must start with v=DMARC1;"
 	}
-	p, sp, hasSP := "", "", false
-	seen := map[string]bool{}
+	p := ""
+	sub := map[string]string{} // sp, np as given
+	seen := map[string]bool{"v": true}
 	for _, tag := range strings.Split(v, ";")[1:] {
 		if strings.TrimSpace(tag) == "" {
 			continue
 		}
 		k, val, _ := strings.Cut(strings.TrimSpace(tag), "=")
-		k, val = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(val)
+		k, val = strings.TrimSpace(k), strings.TrimSpace(val)
+		if k != strings.ToLower(k) {
+			return "tag " + k + " must be lowercase"
+		}
 		if seen[k] {
 			return "tag " + k + " is given twice"
 		}
 		seen[k] = true
+		if !dmarcTags[k] {
+			return "tag " + k + " is not allowed"
+		}
 		switch k {
 		case "p":
 			p = strings.ToLower(val)
-		case "sp":
-			sp, hasSP = strings.ToLower(val), true
+		case "sp", "np":
+			sub[k] = strings.ToLower(val)
 		case "ruf":
 			return "ruf is not allowed"
 		case "t":
@@ -218,13 +236,17 @@ func dmarcRule(v, e, floor string) string {
 	if floorSet && rp < rf {
 		return "p=" + p + " is below the floor " + floor
 	}
-	if hasSP {
-		rs, ok := dmarcRank[sp]
+	for _, k := range []string{"sp", "np"} {
+		val, given := sub[k]
+		if !given {
+			continue
+		}
+		rs, ok := dmarcRank[val]
 		if !ok {
-			return "must carry sp=none, quarantine or reject"
+			return "must carry " + k + "=none, quarantine or reject"
 		}
 		if floorSet && rs < rf {
-			return "sp=" + sp + " is below the floor " + floor
+			return k + "=" + val + " is below the floor " + floor
 		}
 	}
 	return ""

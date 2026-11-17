@@ -89,6 +89,9 @@ type Server struct {
 	// AllowedIPs, when set, replaces every credential row's allowed_ips
 	// (a provider that doesn't enforce LAN-only).
 	AllowedIPs []netip.Prefix
+	// NoMassGuard: the provider has no mass-removal guard (a hostile or
+	// buggy one): every document is accepted.
+	NoMassGuard bool
 }
 
 type fakeCred struct {
@@ -271,6 +274,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		set, ok := s.DNSSets[d]
+		if !ok && s.draining(d) {
+			// A draining domain's set: only its _mta-sts record (§19.7).
+			set, ok = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: "_mta-sts." + d, Type: "TXT", TTL: 3600, Value: "v=STSv1; id=fakedrain1"}}}, true
+		}
 		if !ok {
 			set = mailprovider.DNSSet{Domain: d, Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."},
 				{Name: "_dmarc." + d, Type: "TXT", TTL: 3600, Value: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d}}, DKIM: "auto"}
@@ -395,6 +402,19 @@ func (s *Server) void(w http.ResponseWriter, r *http.Request) {
 	now := s.Now()
 	s.StatusV.RestoredAt = &now
 	writeJSON(w, 200, map[string]any{"voided": n, "restored_at": now})
+}
+
+// draining: d is draining in the applied document.
+func (s *Server) draining(d string) bool {
+	if s.Doc == nil {
+		return false
+	}
+	for _, x := range s.Doc.Domains {
+		if x.Name == d {
+			return x.Mail == mailprovider.MailDraining
+		}
+	}
+	return false
 }
 
 func (s *Server) mailDomain(d string) bool {
@@ -597,7 +617,7 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 409, "generation %d is not greater than %d", d.Generation, s.Doc.Generation)
 		return
 	}
-	if s.Doc != nil && len(s.Doc.Accounts) > 0 {
+	if s.Doc != nil && len(s.Doc.Accounts) > 0 && !s.NoMassGuard {
 		now := map[string]bool{}
 		for _, a := range d.Accounts {
 			now[a.UUID] = true
