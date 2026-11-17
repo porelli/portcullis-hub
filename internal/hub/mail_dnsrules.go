@@ -53,7 +53,8 @@ func (h *Hub) mailRuleContextLocked(name string, wildcard bool) mailprovider.Rul
 		include = r.SPFInclude
 	}
 	return mailprovider.RuleContext{Domain: n, MailHostname: h.mailCore().Hostname, RelayInclude: include,
-		DMARCFloor: mailDMARCFloor(h.st.Mail, n, start), Wildcard: wildcard}
+		DMARCFloor: mailDMARCFloor(h.st.Mail, n, start), Wildcard: wildcard,
+		Draining: mailDomainState(h.st.Mail, h.cfg.Domain, true, n) == mailprovider.MailDraining}
 }
 
 // validateMailSet judges name's set; a refusal is recorded and logged.

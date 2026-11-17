@@ -183,7 +183,12 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 			}
 		}
 	}
-	if _, err := dapi.SetMailSet(ctx, name, recs); err != nil {
+	h.mu.RLock()
+	rc := h.mailRuleContextLocked(name, wild)
+	h.mu.RUnlock()
+	body := domains.MailSet{Records: recs, MailHostname: rc.MailHostname, RelayInclude: rc.RelayInclude, DMARCFloor: rc.DMARCFloor,
+		Wildcard: rc.Wildcard, Draining: rc.Draining}
+	if _, err := dapi.SetMailSet(ctx, name, body); err != nil {
 		return fmt.Errorf("%s: writing the mail set: %v", name, err)
 	}
 	h.mailSetPublished(name, set.Records)

@@ -29,7 +29,7 @@ func TestDNSRuleVectors(t *testing.T) {
 		for _, r := range k.Records {
 			rs = append(rs, Record{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
 		}
-		err := ValidateSet(RuleContext{Domain: c.Domain, MailHostname: c.MailHostname, RelayInclude: c.RelayInclude, DMARCFloor: c.DMARCFloor, Wildcard: c.Wildcard}, rs)
+		err := ValidateSet(RuleContext{Domain: c.Domain, MailHostname: c.MailHostname, RelayInclude: c.RelayInclude, DMARCFloor: c.DMARCFloor, Wildcard: c.Wildcard, Draining: c.Draining}, rs)
 		got := ""
 		if err != nil {
 			got = err.Error()

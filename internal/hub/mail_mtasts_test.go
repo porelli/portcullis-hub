@@ -249,3 +249,25 @@ func TestMTASTSPolicySkippedWhenOff(t *testing.T) {
 		t.Fatalf("server mode: %v, %d fetches", err, hits.Load())
 	}
 }
+
+// TestMailSetBodyCarriesRules: the PUT carries the rules' inputs the
+// domains service judges with (mail_hostname, relay_include,
+// dmarc_floor, wildcard, draining).
+func TestMailSetBodyCarriesRules(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.Domains[teamB] = state.MailDomain{Enabled: true}
+	w.h.st.Mail.Relay = &state.MailRelay{Host: "smtp.relay.example.net", Port: 465, SPFInclude: "_spf.relay.example.net"}
+	w.h.mu.Unlock()
+	w.sync(t)
+	w.setDNS(teamB, goodSet(teamB, "reject"))
+	if err := w.writeSet(t, teamB); err != nil {
+		t.Fatal(err)
+	}
+	w.dom.mu.Lock()
+	b := w.dom.mailBodies[len(w.dom.mailBodies)-1]
+	w.dom.mu.Unlock()
+	if b.MailHostname != "mail.example.org" || b.RelayInclude != "_spf.relay.example.net" || b.DMARCFloor != "reject" || b.Draining || len(b.Records) != 3 {
+		t.Fatalf("%+v", b)
+	}
+}

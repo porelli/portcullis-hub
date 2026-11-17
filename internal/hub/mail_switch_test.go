@@ -282,7 +282,7 @@ func TestSwitchKeepsOldDKIM7Days(t *testing.T) {
 	w.h.mu.Unlock()
 	w.mc.Lock(func(s *mailprovidertest.Server) {
 		s.DNSSets["team-b.example.net"] = mailprovider.DNSSet{Domain: "team-b.example.net", DKIM: "auto", Records: []mailprovider.Record{
-			{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."},
+			{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec("team-b.example.net"),
 			{Name: "old1._domainkey.team-b.example.net", Type: "TXT", TTL: 3600, Value: "v=DKIM1; k=ed25519; p=OLD"}}}
 	})
 	w.sync(t)
@@ -296,7 +296,7 @@ func TestSwitchKeepsOldDKIM7Days(t *testing.T) {
 	// The new set carries the retiring record until Until.
 	w.mc.Lock(func(s *mailprovidertest.Server) {
 		s.DNSSets["team-b.example.net"] = mailprovider.DNSSet{Domain: "team-b.example.net", DKIM: "auto", Records: []mailprovider.Record{
-			{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+			{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec("team-b.example.net")}}
 	})
 	if err := w.h.writeMailSet(context.Background(), w.mc.Client(), w.dom, "team-b.example.net"); err != nil {
 		t.Fatal(err)

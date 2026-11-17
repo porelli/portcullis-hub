@@ -109,6 +109,7 @@ type dnsContext struct {
 	RelayInclude string `json:"relay_include"`
 	DMARCFloor   string `json:"dmarc_floor"`
 	Wildcard     bool   `json:"wildcard"`
+	Draining     bool   `json:"draining"`
 }
 
 // TestDNSVectorsShape: strict shape, unique names, one ok case per row of
@@ -124,7 +125,7 @@ func TestDNSVectorsShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := v.Context
-	if c.Domain == "" || c.MailHostname == "" || c.RelayInclude == "" || c.DMARCFloor != "reject" {
+	if c.Domain == "" || c.MailHostname == "" || c.RelayInclude == "" || c.DMARCFloor != "none" || c.Draining {
 		t.Fatalf("context %+v", c)
 	}
 	wantRe := regexp.MustCompile(`^mail set: (\S+) ([A-Z]+): \S.*$`)
@@ -166,7 +167,8 @@ func TestDNSVectorsShape(t *testing.T) {
 		for _, r := range k.Records {
 			found = found || (r.Name == m[1] && r.Type == m[2])
 		}
-		if !found {
+		// A missing record (R-H3) names the record that isn't there.
+		if !found && !strings.Contains(k.WantError, ": required while ") {
 			t.Errorf("%s: %q names none of its records", k.Name, k.WantError)
 		}
 	}
@@ -180,6 +182,9 @@ func TestDNSVectorsShape(t *testing.T) {
 		"dkim selector with a dot refused", "dmarc p=none under floor reject refused", "dmarc rua off-domain refused",
 		"dmarc ruf refused", "mta-sts id of 33 characters refused", "srv on a wrong port refused", "_imap._tcp not 0 0 0 . refused",
 		"cname with wildcard=true refused", "a name outside the table refused", "a name under another domain refused",
+		// Ruling R-H3: the canonical DMARC floor
+		"two dmarc records refused", "dmarc missing under floor reject refused", "dmarc tag p twice refused",
+		"dmarc sp=none under floor reject refused", "dmarc pct=0 refused", "dmarc t=y refused", "a draining set without dmarc ok",
 	} {
 		if !names[n] {
 			t.Errorf("case %q missing", n)

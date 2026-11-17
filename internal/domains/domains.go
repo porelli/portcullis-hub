@@ -338,18 +338,28 @@ func (c *Client) EnableDNSSEC(ctx context.Context, name string) (Domain, error) 
 
 // SetMailSet stores name's wanted mail records (PUT
 // /domains/{name}/sets/mail): mail joins the domain's sets, nomail leaves.
-func (c *Client) SetMailSet(ctx context.Context, name string, recs []MailRecord) (Domain, error) {
-	if len(recs) > MaxMailRecords {
-		return Domain{}, fmt.Errorf("domains service: %d mail records (at most %d)", len(recs), MaxMailRecords)
+func (c *Client) SetMailSet(ctx context.Context, name string, set MailSet) (Domain, error) {
+	if len(set.Records) > MaxMailRecords {
+		return Domain{}, fmt.Errorf("domains service: %d mail records (at most %d)", len(set.Records), MaxMailRecords)
 	}
-	if recs == nil {
-		recs = []MailRecord{}
+	if set.Records == nil {
+		set.Records = []MailRecord{}
 	}
 	var d Domain
-	_, err := c.do(ctx, http.MethodPut, path(name)+"/sets/mail", struct {
-		Records []MailRecord `json:"records"`
-	}{recs}, nil, &d)
+	_, err := c.do(ctx, http.MethodPut, path(name)+"/sets/mail", set, nil, &d)
 	return d, err
+}
+
+// MailSet is PUT /domains/{name}/sets/mail's body (contract §12.2): the
+// records and the shared rules' inputs the service judges them with
+// (§19.7; relay_include "" = none).
+type MailSet struct {
+	Records      []MailRecord `json:"records"`
+	MailHostname string       `json:"mail_hostname"`
+	RelayInclude string       `json:"relay_include"`
+	DMARCFloor   string       `json:"dmarc_floor"`
+	Wildcard     bool         `json:"wildcard"`
+	Draining     bool         `json:"draining"`
 }
 
 // DeleteMailSet removes name's mail set (DELETE /domains/{name}/sets/mail):

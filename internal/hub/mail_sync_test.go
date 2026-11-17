@@ -390,14 +390,14 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	f.h.mu.Unlock()
 	f.mc.Lock(func(s *mailprovidertest.Server) {
 		s.DNSSets["team-b.example.net"] = mailprovider.DNSSet{Domain: "team-b.example.net", DKIM: "auto",
-			Records: []mailprovider.Record{{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+			Records: []mailprovider.Record{{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec("team-b.example.net")}}
 	})
 	f.sync(t)
 	f.dom.mu.Lock()
 	calls := strings.Join(f.dom.mailCalls, ",")
 	recs := f.dom.mailSets["team-b.example.net"]
 	f.dom.mu.Unlock()
-	if calls != "put team-b.example.net" || len(recs) != 1 || recs[0].Value != "10 mail.example.org." {
+	if calls != "put team-b.example.net" || len(recs) != 2 || recs[0].Value != "10 mail.example.org." {
 		t.Fatalf("calls %q recs %+v", calls, recs)
 	}
 	// No *.<e> address record in the plan: ?wildcard=false; with one, true.
@@ -541,7 +541,7 @@ func TestMailDNSByHash(t *testing.T) {
 	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
 	f.mc.Lock(func(s *mailprovidertest.Server) {
-		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec(d)}}
 		s.StatusV.DNS = map[string]string{d: "h1", "example.org": "m1"}
 	})
 	f.sync(t) // the full pass: written, h1 recorded
@@ -570,7 +570,7 @@ func TestMailDNSByHash(t *testing.T) {
 	}
 	// Changed: exactly one refetch and PUT, then nothing again.
 	f.mc.Lock(func(s *mailprovidertest.Server) {
-		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "20 mail.example.org."}}}
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "20 mail.example.org."}, dmarcRec(d)}}
 		s.StatusV.DNS = map[string]string{d: "h2", "example.org": "m2"}
 	})
 	f.sync(t) // not due yet: nothing
@@ -582,7 +582,7 @@ func TestMailDNSByHash(t *testing.T) {
 	f.dom.mu.Lock()
 	recs := f.dom.mailSets[d]
 	f.dom.mu.Unlock()
-	if g, p := counts(); g != g0+1 || p != p0+1 || len(recs) != 1 || recs[0].Value != "20 mail.example.org." {
+	if g, p := counts(); g != g0+1 || p != p0+1 || len(recs) != 2 || recs[0].Value != "20 mail.example.org." {
 		t.Fatalf("changed: gets %d puts %d recs %+v", g, p, recs)
 	}
 	f.advance(mailDNSHashEvery)
@@ -626,7 +626,7 @@ func TestMailDNSHashForgottenOnFailure(t *testing.T) {
 	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
 	f.mc.Lock(func(s *mailprovidertest.Server) {
-		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec(d)}}
 		s.StatusV.DNS = map[string]string{"Team-B.Example.NET": "h1"}
 	})
 	f.sync(t) // written, h1 recorded (the key read lowercase)
@@ -666,4 +666,9 @@ func TestMailDNSHashForgottenOnFailure(t *testing.T) {
 	if kept {
 		t.Fatal("the hash of a removed set was kept")
 	}
+}
+
+// dmarcRec is a valid _dmarc record for d (p=reject: every floor).
+func dmarcRec(d string) mailprovider.Record {
+	return mailprovider.Record{Name: "_dmarc." + d, Type: "TXT", TTL: 3600, Value: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d}
 }

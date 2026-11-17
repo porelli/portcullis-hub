@@ -27,6 +27,9 @@ type RuleContext struct {
 	RelayInclude string // the relay's SPF include ("" = none)
 	DMARCFloor   string // none | quarantine | reject
 	Wildcard     bool   // the domain's plan has a *.<e> address record (no CNAMEs then)
+	// Draining: the domain's mail is draining (its set is only the
+	// _mta-sts record): no _dmarc record is required then.
+	Draining bool
 }
 
 var (
@@ -51,7 +54,7 @@ var srvNull = []string{"_imap._tcp", "_pop3._tcp", "_pop3s._tcp"}
 func ValidateSet(c RuleContext, rs []Record) error {
 	e := bare(c.Domain)
 	h := bare(c.MailHostname)
-	spf := 0
+	spf, dmarc := 0, 0
 	for _, r := range rs {
 		n, t := bare(r.Name), strings.ToUpper(r.Type)
 		refuse := func(why string) error { return fmt.Errorf("mail set: %s %s: %s", n, t, why) }
@@ -104,6 +107,10 @@ func ValidateSet(c RuleContext, rs []Record) error {
 			if t != "TXT" {
 				return refuse("only TXT here")
 			}
+			dmarc++
+			if dmarc > 1 {
+				return refuse("more than one DMARC record")
+			}
 			if err := dmarcRule(v, e, c.DMARCFloor); err != "" {
 				return refuse(err)
 			}
@@ -151,24 +158,48 @@ func ValidateSet(c RuleContext, rs []Record) error {
 			return refuse("not a mail record name")
 		}
 	}
+	// Ruling R-H3: with a floor set (quarantine or reject) an active
+	// domain's set carries exactly one DMARC record, never none.
+	if dmarc == 0 && !c.Draining && dmarcRank[c.DMARCFloor] > 0 {
+		return fmt.Errorf("mail set: _dmarc.%s TXT: required while the DMARC floor is %s", e, c.DMARCFloor)
+	}
 	return nil
 }
 
-// dmarcRule: "" or the why. p= at or above the floor, rua only mailto:
-// addresses on e, no ruf.
+// dmarcRule: "" or the why (Ruling R-H3: canonical): every tag once;
+// no ruf; rua only mailto: addresses on e; no t=y; pct only 100; p (and
+// sp when given) none, quarantine or reject, both at or above the floor.
 func dmarcRule(v, e, floor string) string {
 	if !strings.HasPrefix(v, "v=DMARC1;") {
 		return "must start with v=DMARC1;"
 	}
-	p := ""
+	p, sp, hasSP := "", "", false
+	seen := map[string]bool{}
 	for _, tag := range strings.Split(v, ";")[1:] {
+		if strings.TrimSpace(tag) == "" {
+			continue
+		}
 		k, val, _ := strings.Cut(strings.TrimSpace(tag), "=")
 		k, val = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(val)
+		if seen[k] {
+			return "tag " + k + " is given twice"
+		}
+		seen[k] = true
 		switch k {
 		case "p":
 			p = strings.ToLower(val)
+		case "sp":
+			sp, hasSP = strings.ToLower(val), true
 		case "ruf":
 			return "ruf is not allowed"
+		case "t":
+			if strings.EqualFold(val, "y") {
+				return "t=y is not allowed"
+			}
+		case "pct":
+			if val != "100" {
+				return "pct must be 100 or absent"
+			}
 		case "rua":
 			for _, u := range strings.Split(val, ",") {
 				u = strings.TrimSpace(u)
@@ -183,8 +214,18 @@ func dmarcRule(v, e, floor string) string {
 	if !ok {
 		return "must carry p=none, quarantine or reject"
 	}
-	if rf, ok := dmarcRank[floor]; ok && rp < rf {
+	rf, floorSet := dmarcRank[floor]
+	if floorSet && rp < rf {
 		return "p=" + p + " is below the floor " + floor
+	}
+	if hasSP {
+		rs, ok := dmarcRank[sp]
+		if !ok {
+			return "must carry sp=none, quarantine or reject"
+		}
+		if floorSet && rs < rf {
+			return "sp=" + sp + " is below the floor " + floor
+		}
 	}
 	return ""
 }
