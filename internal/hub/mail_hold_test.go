@@ -465,3 +465,12 @@ func TestMailNoCustomOverride(t *testing.T) {
 		t.Fatalf("an up with a stored override: %v", err)
 	}
 }
+
+// TestIsMailInstance (final review M4): every instance of a mail
+// template counts, wired or not; other apps don't.
+func TestIsMailInstance(t *testing.T) {
+	w := newWireFix(t, otherMailID)
+	if !w.h.IsMailInstance(otherMailID) || !w.h.IsMailInstance(mailProviderID) || w.h.IsMailInstance("grafana") {
+		t.Fatal("IsMailInstance")
+	}
+}

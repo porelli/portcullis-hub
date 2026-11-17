@@ -100,6 +100,11 @@ func (h *Hub) mailWireRefusalsLocked(t *templates.Template, except string) []str
 	if !core.On {
 		out = append(out, mailSlotOffText)
 	}
+	// Primary only (final review M2): the gate, mail_tls and the API
+	// network exist on the primary; its listeners are MAIL_HOSTNAME's.
+	if s := h.st.Instances[t.ID].Server; s != "" {
+		out = append(out, "a mail provider runs on the primary server ("+t.ID+" is on "+s+")")
+	}
 	if p := h.st.Mail.Provider; p != nil && p.Instance != t.ID && p.Instance != except {
 		out = append(out, p.Instance+" is this server's mail provider: switch instead")
 	}

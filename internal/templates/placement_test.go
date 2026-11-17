@@ -44,7 +44,7 @@ func TestPlacementVectors(t *testing.T) {
 	}
 	// Every reason appears in some vector.
 	need := map[string]bool{"mounts the core volume": true, "has a Traefik TCP/UDP router": true, "has a per-person secret option": true,
-		"has AI companions": true, "is an AI page": true, "is a VPN provider": true, "uses host-gateway": true, "outside the server's folder roots": true,
+		"has AI companions": true, "is an AI page": true, "is a VPN provider": true, "is a mail provider": true, "uses host-gateway": true, "outside the server's folder roots": true,
 		"is marked placement: primary_only": true, "uses a non-HTTP backend scheme": true,
 		"passes a host device": true, "adds the capability": true, "adds an unknown capability": true}
 	clean := 0

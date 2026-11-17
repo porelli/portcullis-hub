@@ -878,7 +878,7 @@ func (s *Server) handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 }
 
 // errMailExecRefused: R-L23's refusal text.
-var errMailExecRefused = errors.New("not allowed: an AI or MCP client never runs commands in the wired mail provider's containers")
+var errMailExecRefused = errors.New("not allowed: an AI or MCP client never runs commands in a mail provider's containers")
 
 // execInstance is the exec's work (route and exec); audited
 // instance.exec with the service and the exit code only: the command and
@@ -887,9 +887,10 @@ func (s *Server) execInstance(ctx context.Context, a directory.Actor, id, servic
 	s.rec("Exec", id, service, command)
 	var res *hub.ExecResult
 	var err error
-	if a.Via != "" && s.Hub.IsWiredMailProvider(id) {
-		// Ruling R-L23: no AI or MCP path into the wired mail provider's
-		// containers (its API secret, every mailbox).
+	if a.Via != "" && s.Hub.IsMailInstance(id) {
+		// Ruling R-L23 (and final review M4): no AI or MCP path into any
+		// mail provider instance's containers — wired, switched away or a
+		// restored copy (an API secret, every mailbox).
 		err = &hub.StatusError{Status: http.StatusForbidden, Err: errMailExecRefused}
 	} else {
 		res, err = s.Hub.Exec(ctx, id, service, command)

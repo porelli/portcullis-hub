@@ -280,10 +280,22 @@ func (h *Hub) mailRestoreGate(ctx context.Context, id, archive string) error {
 	h.mu.RLock()
 	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
 	h.mu.RUnlock()
-	if !wired || !h.mailRestoreHolds(id) {
+	if !wired {
 		return nil
 	}
 	v, _ := ctx.Value(mailHostRestoreKey{}).(mailHostRestore)
+	// The wired provider is restored only by `hub mail restore` (final
+	// review M3): a UI, API or MCP restore would rewrite its env and
+	// store outside every wiring guard.
+	if v.id != id {
+		if h.mailRestoreHolds(id) {
+			return statusErr(http.StatusConflict, "a core restore is pending: run ./portcullis restore")
+		}
+		return statusErr(http.StatusConflict, "%s is this server's mail provider: it is restored only on the host (./portcullis restore, or unwire it first)", id)
+	}
+	if !h.mailRestoreHolds(id) {
+		return nil
+	}
 	want, pending, err := h.mailRestorePendingArchive()
 	if v.id != id || err != nil || v.archive != archive || (pending && want != archive) {
 		return statusErr(http.StatusConflict, "a core restore is pending: run ./portcullis restore")

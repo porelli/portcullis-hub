@@ -451,3 +451,27 @@ func TestWireRefusalsRecheckedUnderLocks(t *testing.T) {
 		t.Fatalf("%v, provider %+v", err, p)
 	}
 }
+
+// TestWireRefusedOnWorker and the move refusal (final review M2): a
+// mail provider instance on a worker can't be wired; the wired one
+// can't move.
+func TestWireRefusedOnWorker(t *testing.T) {
+	w := newWireFix(t)
+	w.h.mu.Lock()
+	in := w.h.st.Instances[mailProviderID]
+	in.ID, in.Template, in.Server = mailProviderID, mailProviderID, "nas"
+	w.h.st.Instances[mailProviderID] = in
+	refusals := w.h.mailWireRefusalsLocked(w.h.findLocked(mailProviderID), "")
+	w.h.mu.Unlock()
+	found := false
+	for _, r := range refusals {
+		found = found || strings.Contains(r, "runs on the primary server")
+	}
+	if !found {
+		t.Fatalf("refusals %v", refusals)
+	}
+	v := wiredFix(t)
+	if err := v.h.moveInstance(context.Background(), mailProviderID, "nas", rootActor(), func() {}); statusOf(err) != 409 {
+		t.Fatalf("move: %v", err)
+	}
+}

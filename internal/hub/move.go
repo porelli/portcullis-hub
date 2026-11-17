@@ -241,6 +241,11 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	// moved, failed back or stopped alike.
 	defer h.writePolicyLogged()
 	defer h.ownMove(id)()
+	// The wired mail provider never moves (final review M2): primary
+	// only, and its mailboxes stay off any bundle.
+	if h.IsWiredMailProvider(id) {
+		return statusErr(409, "%s is this server's mail provider: it runs on the primary only (unwire it first)", id)
+	}
 	h.mu.Lock()
 	v := h.findLocked(id)
 	in, has := h.st.Instances[id]

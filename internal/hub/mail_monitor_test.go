@@ -558,3 +558,34 @@ func TestRestoreHoldClearedByHandStaysStopped(t *testing.T) {
 		t.Fatalf("Retry: ups %d voids %d → %d", w.upCount(), voids, len(w.mc.Voids))
 	}
 }
+
+// TestWiredProviderRestoredOnlyOnHost (final review M3): without any
+// pending core restore, a UI/API/MCP restore of the wired provider is
+// 409 and starts nothing; `hub mail restore` still works.
+func TestWiredProviderRestoredOnlyOnHost(t *testing.T) {
+	w := wiredFix(t)
+	archive, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	w.ups = nil
+	w.mu.Unlock()
+	if _, err := w.h.RestoreInstance(mailProviderID, archive, rootActor()); statusOf(err) != 409 || !strings.Contains(err.Error(), "restored only on the host") {
+		t.Fatalf("RestoreInstance: %v", err)
+	}
+	if _, err := w.h.StartRestore(mailProviderID, archive, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("StartRestore: %v", err)
+	}
+	if w.upCount() != 0 {
+		t.Fatal("an up")
+	}
+	op, err := w.h.HostMailRestore(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || !v.OK {
+		t.Fatalf("host restore %+v", v)
+	}
+}

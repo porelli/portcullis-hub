@@ -119,4 +119,5 @@ func TestNoAIExecIntoMailProvider(t *testing.T) {
 	if _, err := e.s.execInstance(context.Background(), directory.Human("root"), "mailsrv", "stalwart", "true"); mailErrStatus(err) == 403 {
 		t.Fatal("a person was refused as an AI")
 	}
+
 }

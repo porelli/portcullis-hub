@@ -195,3 +195,12 @@ func (h *Hub) IsWiredMailProvider(id string) bool {
 	p := h.st.Mail.Provider
 	return p != nil && p.Instance == id
 }
+
+// IsMailInstance: id is an instance of a mail provider template (a
+// mail: block), wired or not (final review M4).
+func (h *Hub) IsMailInstance(id string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	t := h.findLocked(id)
+	return (t != nil && t.Manifest.Mail != nil) || (h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id)
+}
