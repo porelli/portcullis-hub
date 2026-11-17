@@ -64,22 +64,29 @@ func (h *Hub) validateMailSet(name string, wildcard bool, rs []mailprovider.Reco
 	c := h.mailRuleContextLocked(name, wildcard)
 	h.mu.RUnlock()
 	err := mailprovider.ValidateSet(c, rs)
+	// The refusal echoes provider names and values: shaped (one
+	// printable line, clipped) before a log, the doctor or a host answer
+	// sees it (M9).
+	msg := ""
+	if err != nil {
+		msg = mailprovider.Shape(err.Error(), 500)
+	}
 	h.mailDNSProb.mu.Lock()
 	if h.mailDNSProb.sets == nil {
 		h.mailDNSProb.sets = map[string]string{}
 	}
 	prev := h.mailDNSProb.sets[c.Domain]
 	if err != nil {
-		h.mailDNSProb.sets[c.Domain] = err.Error()
+		h.mailDNSProb.sets[c.Domain] = msg
 	} else {
 		delete(h.mailDNSProb.sets, c.Domain)
 	}
 	h.mailDNSProb.mu.Unlock()
 	if err != nil {
-		if prev != err.Error() {
-			log.Printf("mail: DNS: %s: the provider's set is refused (the last good one stays): %v", c.Domain, err)
+		if prev != msg {
+			log.Printf("mail: DNS: %s: the provider's set is refused (the last good one stays): %s", c.Domain, msg)
 		}
-		return &mailSetRefusal{err.Error()}
+		return &mailSetRefusal{msg}
 	}
 	return nil
 }
@@ -89,19 +96,36 @@ func (h *Hub) validateMailSet(name string, wildcard bool, rs []mailprovider.Reco
 func (h *Hub) mailSetPublished(name string, rs []mailprovider.Record) {
 	n := strings.ToLower(name)
 	p := mailprovider.DMARCPolicy(n, rs)
-	if p == "" {
-		return
+	sts := false
+	for _, r := range rs {
+		if strings.EqualFold(strings.TrimSuffix(r.Name, "."), "_mta-sts."+n) && strings.EqualFold(r.Type, "TXT") {
+			sts = true
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.st.Mail.DMARCPublished[n] == p {
-		return
+	changed := false
+	if p != "" && h.st.Mail.DMARCPublished[n] != p {
+		if h.st.Mail.DMARCPublished == nil {
+			h.st.Mail.DMARCPublished = map[string]string{}
+		}
+		h.st.Mail.DMARCPublished[n] = p
+		changed = true
 	}
-	if h.st.Mail.DMARCPublished == nil {
-		h.st.Mail.DMARCPublished = map[string]string{}
+	if h.st.Mail.MTASTSPublished[n] != sts {
+		if h.st.Mail.MTASTSPublished == nil {
+			h.st.Mail.MTASTSPublished = map[string]bool{}
+		}
+		if sts {
+			h.st.Mail.MTASTSPublished[n] = true
+		} else {
+			delete(h.st.Mail.MTASTSPublished, n)
+		}
+		changed = true
 	}
-	h.st.Mail.DMARCPublished[n] = p
-	h.saveLocked()
+	if changed {
+		h.saveLocked()
+	}
 }
 
 // MailDNSProblems are the refused sets and policies, sorted by domain.

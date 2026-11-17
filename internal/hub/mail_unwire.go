@@ -207,6 +207,7 @@ func (h *Hub) mailRemoveAllSets(ctx context.Context) error {
 			}
 		} else {
 			h.mailForgetDNSHash(d.name)
+			h.mailSetPublished(d.name, nil) // no _mta-sts any more (M13)
 		}
 		cancel()
 	}

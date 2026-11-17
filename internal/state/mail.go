@@ -64,6 +64,10 @@ type MailSettings struct {
 	// Hub validated and published (or the CLI read for the main domain):
 	// with dmarc_start it makes dmarc_floor (contract §19.5).
 	DMARCPublished map[string]string `json:"dmarc_published,omitempty" yaml:"dmarc_published,omitempty"`
+	// MTASTSPublished: the mail domains whose last published set carries
+	// _mta-sts.<d> (the Hub's own record of it: the MTA-STS policy check
+	// runs for exactly those, M13).
+	MTASTSPublished map[string]bool `json:"mta_sts_published,omitempty" yaml:"mta_sts_published,omitempty"`
 	Switch         *MailSwitch       `json:"switch,omitempty" yaml:"switch,omitempty"`
 }
 

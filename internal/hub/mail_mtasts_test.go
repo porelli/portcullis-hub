@@ -200,9 +200,9 @@ func policyServer(t *testing.T, w *wireFix, body string) *atomic.Int32 {
 	}))
 	t.Cleanup(srv.Close)
 	w.h.cfg.MailPolicyAddr = strings.TrimPrefix(srv.URL, "https://")
-	w.mc.Lock(func(s *mailprovidertest.Server) {
-		s.StatusV.MTASTS = []mailprovider.StatusMTASTS{{Domain: "example.org", Mode: "testing"}}
-	})
+	w.h.mu.Lock()
+	w.h.st.Mail.MTASTSPublished = map[string]bool{"example.org": true}
+	w.h.mu.Unlock()
 	return &hits
 }
 
@@ -230,23 +230,48 @@ func TestMTASTSPolicyWrongMX(t *testing.T) {
 	}
 }
 
-// TestMTASTSPolicySkippedWhenOff: no fetch while the domain's MTA-STS is
-// off or the well-known router isn't public (VPN server mode).
+// TestMTASTSPolicySkippedWhenOff: no fetch while the Hub published no
+// _mta-sts record for the domain or the well-known router isn't public
+// (VPN server mode); the provider's word never switches it off (M13).
 func TestMTASTSPolicySkippedWhenOff(t *testing.T) {
 	w := wiredFix(t)
 	hits := policyServer(t, w, "version: STSv1\nmx: mx.evil.example.net\n")
+	// The provider reports off, but the Hub published the record: judged.
 	w.mc.Lock(func(s *mailprovidertest.Server) {
 		s.StatusV.MTASTS = []mailprovider.StatusMTASTS{{Domain: "example.org", Mode: "off"}}
 	})
-	if err := w.h.checkMTASTSPolicy(context.Background(), "example.org"); err != nil || hits.Load() != 0 {
-		t.Fatalf("off: %v, %d fetches", err, hits.Load())
+	if err := w.h.checkMTASTSPolicy(context.Background(), "example.org"); err == nil || hits.Load() != 1 {
+		t.Fatalf("provider off: %v, %d fetches", err, hits.Load())
 	}
-	w.mc.Lock(func(s *mailprovidertest.Server) {
-		s.StatusV.MTASTS = []mailprovider.StatusMTASTS{{Domain: "example.org", Mode: "testing"}}
-	})
+	w.h.mu.Lock()
+	w.h.st.Mail.MTASTSPublished = nil
+	w.h.mu.Unlock()
+	if err := w.h.checkMTASTSPolicy(context.Background(), "example.org"); err != nil || hits.Load() != 1 {
+		t.Fatalf("unpublished: %v, %d fetches", err, hits.Load())
+	}
+	w.h.mu.Lock()
+	w.h.st.Mail.MTASTSPublished = map[string]bool{"example.org": true}
+	w.h.mu.Unlock()
 	writeFile(t, filepath.Join(w.project, ".env"), "CORE_VAR=core-value\nPORTCULLIS_MAIL=on\nPORTCULLIS_MAIL_HOSTNAME=mail.example.org\n"+VarVPNMode+"="+VPNModeServer+"\n")
-	if err := w.h.checkMTASTSPolicy(context.Background(), "example.org"); err != nil || hits.Load() != 0 {
+	if err := w.h.checkMTASTSPolicy(context.Background(), "example.org"); err != nil || hits.Load() != 1 {
 		t.Fatalf("server mode: %v, %d fetches", err, hits.Load())
+	}
+}
+
+// TestPublishedSetRecordsMTASTS (M13): publishing a set records whether
+// it carries _mta-sts.<d>.
+func TestPublishedSetRecordsMTASTS(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mailSetPublished("Example.org", []mailprovider.Record{{Name: "_mta-sts.example.org", Type: "TXT", Value: "v=STSv1; id=1"}})
+	w.h.mu.RLock()
+	on := w.h.st.Mail.MTASTSPublished["example.org"]
+	w.h.mu.RUnlock()
+	w.h.mailSetPublished("example.org", nil)
+	w.h.mu.RLock()
+	off := w.h.st.Mail.MTASTSPublished["example.org"]
+	w.h.mu.RUnlock()
+	if !on || off {
+		t.Fatalf("on %v off %v", on, off)
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/portcullis/hub/internal/mailprovider"
 )
 
 // The MTA-STS policy check (contract §19.7, P12): every 6 h the Hub
@@ -56,31 +58,16 @@ func (h *Hub) checkMTASTSPolicy(ctx context.Context, domain string) error {
 	return err
 }
 
-// mailPolicySkipped: MTA-STS is off for e — the well-known router isn't
-// on websecure (VPN server mode) or the provider reports mode off.
-func (h *Hub) mailPolicySkipped(ctx context.Context, e string) bool {
+// mailPolicySkipped: the well-known router isn't on websecure (VPN
+// server mode), or the Hub's own last published set of e carries no
+// _mta-sts record (M13: never the provider's word, which could switch
+// the check off).
+func (h *Hub) mailPolicySkipped(_ context.Context, e string) bool {
 	h.mu.RLock()
 	ep := h.mailEntrypointsLocked()
+	published := h.st.Mail.MTASTSPublished[e]
 	h.mu.RUnlock()
-	if !strings.Contains(ep, "websecure") {
-		return true
-	}
-	api := h.mailClient()
-	if api == nil {
-		return true
-	}
-	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	st, err := api.Status(sctx)
-	if err != nil {
-		return true // unknown: nothing judged (the provider's own checks report it)
-	}
-	for _, m := range st.MTASTS {
-		if strings.EqualFold(m.Domain, e) {
-			return m.Mode == "off"
-		}
-	}
-	return true // no MTA-STS state for e: nothing published yet
+	return !strings.Contains(ep, "websecure") || !published
 }
 
 // fetchMTASTSPolicy reads and judges e's policy.
@@ -139,7 +126,10 @@ func judgeMTASTSPolicy(host string, b []byte, mailHost string) error {
 		return fmt.Errorf("%s: the MTA-STS policy isn't version: STSv1", host)
 	}
 	if len(mx) != 1 || !strings.EqualFold(strings.TrimSuffix(mx[0], "."), mailHost) {
-		return fmt.Errorf("%s: the MTA-STS policy must name exactly one mx: %s (it names %s)", host, mailHost, strings.Join(mx, ", "))
+		if len(mx) > 3 {
+			mx = append(mx[:3], fmt.Sprintf("and %d more", len(mx)-3))
+		}
+		return fmt.Errorf("%s: the MTA-STS policy must name exactly one mx: %s (it names %s)", host, mailHost, mailprovider.Shape(strings.Join(mx, ", "), 200))
 	}
 	return nil
 }
@@ -164,13 +154,16 @@ func (h *Hub) recordMailPolicy(e, msg string) {
 // RunMailPolicyCheck checks every mail domain's policy every `every`
 // (main: 6 h), the first time after `every` too.
 func (h *Hub) RunMailPolicyCheck(ctx context.Context, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
+	// The first check soon after the start (L14), then every period.
+	first := min(every, 5*time.Minute)
+	timer := time.NewTimer(first)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-timer.C:
+			timer.Reset(every)
 		}
 		if h.mailClient() == nil {
 			continue
