@@ -506,3 +506,30 @@ func TestRestoreCommitTokenOnly(t *testing.T) {
 		}
 	})
 }
+
+// TestRestorePendingRefusesOtherRestores (security review): while a core
+// restore is pending, the wired provider's UI/API/MCP restore is 409 and
+// starts nothing; `hub mail restore` with another archive is 409.
+func TestRestorePendingRefusesOtherRestores(t *testing.T) {
+	w, archive, _ := restoreFix(t)
+	if _, err := w.h.RestoreInstance(mailProviderID, archive, rootActor()); statusOf(err) != 409 || !strings.Contains(err.Error(), "a core restore is pending") {
+		t.Fatalf("RestoreInstance: %v", err)
+	}
+	if _, err := w.h.StartRestore(mailProviderID, archive, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("StartRestore: %v", err)
+	}
+	w.h.Wait()
+	if n := w.upCount(); n != 0 {
+		t.Fatalf("%d ups", n)
+	}
+	other, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == archive {
+		t.Skip("same second: no second archive name")
+	}
+	if _, err := w.h.HostMailRestore(other); statusOf(err) != 409 {
+		t.Fatalf("another archive: %v", err)
+	}
+}

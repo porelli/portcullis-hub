@@ -260,6 +260,37 @@ func mailRestoreCommitted(ctx context.Context, id string) bool {
 	return v != "" && v == id
 }
 
+// mailHostRestoreKey marks `hub mail restore`'s op (the instance and
+// the archive the pending core restore names): the only restore whose
+// final start gets the commit token.
+type mailHostRestoreKey struct{}
+
+type mailHostRestore struct{ id, archive string }
+
+// mailHostRestoreOf is ctx's `hub mail restore` instance ("" = none).
+func mailHostRestoreOf(ctx context.Context) string {
+	v, _ := ctx.Value(mailHostRestoreKey{}).(mailHostRestore)
+	return v.id
+}
+
+// mailRestoreGate refuses a restore of the wired provider while a core
+// restore is pending, unless it is `hub mail restore`'s with the archive
+// the pending file names.
+func (h *Hub) mailRestoreGate(ctx context.Context, id, archive string) error {
+	h.mu.RLock()
+	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
+	h.mu.RUnlock()
+	if !wired || !h.mailRestorePending() {
+		return nil
+	}
+	v, _ := ctx.Value(mailHostRestoreKey{}).(mailHostRestore)
+	want, _, err := h.mailRestorePendingArchive()
+	if v.id != id || err != nil || v.archive != archive || want != archive {
+		return statusErr(http.StatusConflict, "a core restore is pending: run ./portcullis restore")
+	}
+	return nil
+}
+
 // mailRestorePending: the C1 hold is on (an unreadable data directory
 // holds too: fail closed).
 func (h *Hub) mailRestorePending() bool {
@@ -329,6 +360,7 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 		// passes the hold (applyRestore's commit token); the hold goes
 		// only once the restore succeeded (R2-N4): a failed one keeps it,
 		// so no empty store goes live.
+		ctx = context.WithValue(ctx, mailHostRestoreKey{}, mailHostRestore{id: id, archive: archive})
 		res, err := h.restoreInstance(ctx, id, archive, actor, ready)
 		if err == nil {
 			if rerr := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); rerr != nil && !os.IsNotExist(rerr) {

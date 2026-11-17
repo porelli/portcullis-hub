@@ -260,6 +260,11 @@ func (h *Hub) restoreInstance(ctx context.Context, id, archive string, actor dir
 	if mm := archiveRe.FindStringSubmatch(archive); mm == nil || mm[1] != id {
 		return res, statusErr(400, "archive must be %s/<YYYYMMDDTHHMMSSZ>.tar (an archive of this instance)", id)
 	}
+	// While a core restore is pending, the wired mail provider is
+	// restored only by `hub mail restore` with the archive it names.
+	if err := h.mailRestoreGate(ctx, id, archive); err != nil {
+		return res, err
+	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
 		return res, h.busyErr(id, err)
@@ -971,11 +976,11 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 		rep.Start(StepStart)
 		// The enable reports nothing into the restore's record (its own
 		// commit gate is not the restore's) but stops with it.
-		// The archive's volumes are back: this start (only; never a
-		// rollback's, void false) passes the mail provider's
-		// restore-pending hold.
+		// The archive's volumes are back: in `hub mail restore`'s op
+		// only (its marker in ctx; never a rollback's, void false) this
+		// start passes the mail provider's restore-pending hold.
 		sctx := withProgress(ctx, nil)
-		if void {
+		if void && mailHostRestoreOf(ctx) == id {
 			sctx = withMailRestoreCommit(sctx, id)
 		}
 		if _, err := h.enableInner(sctx, id, true); err != nil {
