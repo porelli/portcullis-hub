@@ -29,19 +29,19 @@ import (
 // fakeRunner records compose calls and checks that no two operations on the
 // same project ever overlap.
 type fakeRunner struct {
-	mu         sync.Mutex
-	calls      []string
-	projects   []compose.Project
-	active     map[string]int
-	overlap    []string
-	upErr      error
-	downErr    error
-	byNameErr  error
+	mu        sync.Mutex
+	calls     []string
+	projects  []compose.Project
+	active    map[string]int
+	overlap   []string
+	upErr     error
+	downErr   error
+	byNameErr error
 	// byNameBlock: DownByName waits for its context (a down that hangs).
 	byNameBlock bool
-	creates    []string
-	createHook func(project string)
-	upHook     func(project string) // runs inside Up (after begin)
+	creates     []string
+	createHook  func(project string)
+	upHook      func(project string) // runs inside Up (after begin)
 	// upCtxHook runs inside Up before upHook with Up's context (a killed
 	// up — its context cancelled meanwhile — returns its error).
 	upCtxHook func(ctx context.Context)
