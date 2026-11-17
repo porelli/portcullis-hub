@@ -537,6 +537,9 @@ type Hub struct {
 	// freshAuthEnsure re-asserts the fresh-auth Keycloak client in the
 	// directory sync loop (freshauth.go); under policyWriteMu like attrSync.
 	freshAuthEnsure func(ctx context.Context) error
+	// cli is the CLI Keycloak client's verifier and readiness (ssh_cli.go,
+	// contract §18.2).
+	cli cliClient
 	// eventsEnsure re-asserts Keycloak's events config with history_days
 	// (signin_limits.go: the sync loop and every limits change); under
 	// policyWriteMu like attrSync.

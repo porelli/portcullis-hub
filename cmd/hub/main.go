@@ -21,6 +21,7 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
 
+	"github.com/portcullis/hub/internal/cliapi"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -240,6 +241,17 @@ func (fa freshAuthSetup) verifierConfigs(httpc *http.Client, accepted func() []s
 		}
 	}
 	return out
+}
+
+// cliVerifierConfig is the CLI verifier's config (hub's VerifierCLI,
+// contract §18.2): client portcullis-cli, redirect URIs exactly the three
+// loopback URLs, the same realm and switched-on methods.
+func (fa freshAuthSetup) cliVerifierConfig(httpc *http.Client, accepted func() []string) freshauth.Config {
+	return freshauth.Config{
+		Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
+		AuthorizeURL: fa.AuthorizeURL, ClientID: keycloak.CLIClientID,
+		RedirectURIs: cliapi.RedirectURIs(), HTTP: httpc, Accepted: accepted,
+	}
 }
 
 func main() {
@@ -541,6 +553,11 @@ func main() {
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, fa.redirectURIs(), fa.webOrigins())
 	})
+	// The CLI's loopback sign-in (contract §18.2): its own Hub-owned client
+	// and verifier (the three 127.0.0.1 redirect URIs; the username comes
+	// from the token), ensured in the same loop.
+	h.SetCLIVerifier(freshauth.New(fa.cliVerifierConfig(faHTTP, h.FreshAuthAccepted)))
+	h.SetCLIClient(kc.EnsureCLIClient)
 	// Keycloak's events config (contract §8): the sign-in history's
 	// source, kept history_days; re-asserted in the directory sync loop
 	// and on every limits change.

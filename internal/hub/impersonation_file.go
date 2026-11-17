@@ -150,7 +150,7 @@ func validImpPending(r state.Impersonation) bool {
 		!r.FreshAt.IsZero() && !r.FreshAt.Truncate(time.Second).After(r.Started.Truncate(time.Second).Add(5*time.Second))
 }
 
-// impFileClient: id may be in clients (never the fresh-auth client or an
+// impFileClient: id may be in clients (never the fresh-auth or CLI client or an
 // AI client: signInClientIDs already skips ai_client, F30; this is the
 // belt to those braces) and is inside the reader's rule.
 func impFileClient(id string) bool {
@@ -158,7 +158,7 @@ func impFileClient(id string) bool {
 		return false
 	}
 	switch id {
-	case freshauth.ClientID, keycloak.AIClientIDs.Claude, keycloak.AIClientIDs.ClaudeCode, keycloak.AIClientIDs.Generic:
+	case freshauth.ClientID, keycloak.CLIClientID, keycloak.AIClientIDs.Claude, keycloak.AIClientIDs.ClaudeCode, keycloak.AIClientIDs.Generic:
 		return false
 	}
 	return !strings.HasPrefix(strings.ToLower(id), keycloak.AIClientPrefix)
