@@ -29,7 +29,8 @@ func Redact(b []byte) string {
 	if len(s) > 2000 {
 		s = s[:2000] + "…"
 	}
-	return s
+	// json.Marshal escapes C0 controls, not C1 or bidi controls.
+	return clean(s, 0)
 }
 
 func redactValue(v any) any {

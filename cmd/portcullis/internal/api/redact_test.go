@@ -71,3 +71,21 @@ func TestTLSConfigCAFile(t *testing.T) {
 		t.Errorf("%v %v", tc, err)
 	}
 }
+
+// L-D1: bidi controls, marks and separators never reach the terminal,
+// in server texts or in --debug bodies.
+func TestPrintableBidi(t *testing.T) {
+	for _, r := range []rune{0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x200e, 0x200f, 0x061c, 0x2028, 0x2029, 0x2066, 0x2069, 0x85, 0x9b} {
+		s := "a" + string(r) + "b"
+		if got := Printable(s); got != "a b" {
+			t.Errorf("Printable(%U) = %q", r, got)
+		}
+		if got := Redact([]byte(`{"x":"` + s + `"}`)); strings.ContainsRune(got, r) {
+			t.Errorf("Redact keeps %U: %q", r, got)
+		}
+	}
+	long := strings.Repeat("x", 500)
+	if PrintableURL(long) != long || len([]rune(Printable(long))) != 300 {
+		t.Error("PrintableURL must not cut, Printable must")
+	}
+}

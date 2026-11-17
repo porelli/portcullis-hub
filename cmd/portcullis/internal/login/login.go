@@ -160,11 +160,11 @@ func DoSignIn(ctx context.Context, o *Options, cfg *cliapi.Config) (*SignIn, err
 	verifier, state, nonce := oauth2.GenerateVerifier(), random(), random()
 	u := AuthorizeURL(cfg, l.RedirectURI(), state, nonce, verifier, o.Method)
 	if o.NoBrowser || o.OpenBrowser == nil {
-		fmt.Fprintf(o.Stderr, "Open this address in a browser on this computer to sign in:\n\n  %s\n\n", api.Printable(u))
+		fmt.Fprintf(o.Stderr, "Open this address in a browser on this computer to sign in:\n\n  %s\n\n", api.PrintableURL(u))
 	} else {
 		fmt.Fprintf(o.Stderr, "Opening your browser to sign in to %s…\n", o.Domain)
 		if err := o.OpenBrowser(u); err != nil {
-			fmt.Fprintf(o.Stderr, "Couldn't open a browser: open this address on this computer:\n\n  %s\n\n", api.Printable(u))
+			fmt.Fprintf(o.Stderr, "Couldn't open a browser: open this address on this computer:\n\n  %s\n\n", api.PrintableURL(u))
 		}
 	}
 	code, err := l.Wait(ctx, state)

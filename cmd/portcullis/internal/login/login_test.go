@@ -329,3 +329,28 @@ func TestHostileAnswerRefused(t *testing.T) {
 		}
 	}
 }
+
+// M8: the address printed when the browser can't be opened is the whole
+// sign-in URL (a cut one loses state and the login times out).
+func TestPrintedSignInURLWhole(t *testing.T) {
+	f := newFakeHub(t)
+	var seen url.URL
+	kr := agent.NewKeyring().(agent.ExtendedAgent)
+	o := opts(t, f, kr, &seen)
+	open := o.OpenBrowser
+	var opened string
+	o.OpenBrowser = func(u string) error {
+		opened = u
+		_ = open(u)
+		return errors.New("no browser")
+	}
+	if _, err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) <= 300 {
+		t.Fatalf("the test URL is too short to show a cut: %d", len(opened))
+	}
+	if !strings.Contains(o.Stderr.(*bytes.Buffer).String(), "  "+opened+"\n") {
+		t.Errorf("the printed address isn't the whole URL")
+	}
+}

@@ -193,25 +193,46 @@ func statusErrorText(code int, text string) *Error {
 	return Errorf(ExitError, "%s", text)
 }
 
-// printable keeps a server text to one printable line of ≤ 300 runes
-// (a server can't move the terminal's cursor or fake a prompt).
-func printable(s string) string {
+// unsafeRune: a rune that could move the terminal's cursor, end the line
+// or reorder what's shown — C0/C1 controls, DEL, the bidi embeddings,
+// overrides, isolates and marks, and the line/paragraph separators.
+func unsafeRune(r rune) bool {
+	switch {
+	case r < 0x20, r == 0x7f, r >= 0x80 && r < 0xa0:
+		return true
+	case r == 0x061c, r == 0x200e, r == 0x200f, r >= 0x2028 && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
+}
+
+// clean replaces every unsafeRune with a space and keeps at most max
+// runes (max ≤ 0: no cap).
+func clean(s string, max int) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x202e || r == 0x2066 || r == 0x2067 || r == 0x2068 || r == 0x2069 {
+		if unsafeRune(r) {
 			r = ' '
 		}
 		b.WriteRune(r)
-		if n++; n >= 300 {
+		if n++; max > 0 && n >= max {
 			break
 		}
 	}
 	return b.String()
 }
 
+// printable keeps a server text to one printable line of ≤ 300 runes
+// (a server can't move the terminal's cursor or fake a prompt).
+func printable(s string) string { return clean(s, 300) }
+
 // Printable is printable for other packages.
 func Printable(s string) string { return printable(s) }
+
+// PrintableURL is a locally built address made safe to print, never
+// truncated (a cut sign-in URL loses its state: final review M8).
+func PrintableURL(s string) string { return clean(s, 0) }
 
 func isDial(err error) bool {
 	var op *net.OpError
