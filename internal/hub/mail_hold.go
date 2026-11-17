@@ -23,7 +23,21 @@ import (
 const (
 	MailHoldText    = "the mail provider's template changed: review and confirm on its Mail tab"
 	MailInvalidText = "the mail provider's template no longer validates: fix or update it, then confirm on its Mail tab"
+	// MailSourceChangedText: its source now points at another repository
+	// (M7): no re-confirm, only an unwire and a new wiring (a void).
+	MailSourceChangedText = "the mail provider's template source now points at another repository: unwire it and wire it again"
 )
+
+// mailSourceURLLocked is source name's URL ("" when unknown). Caller
+// must hold mu.
+func (h *Hub) mailSourceURLLocked(name string) string {
+	for _, s := range h.st.Sources {
+		if s.Name == name {
+			return s.URL
+		}
+	}
+	return ""
+}
 
 // OpMailRewire is the re-confirm op.
 const OpMailRewire = "mail_rewire"
@@ -38,6 +52,9 @@ func (h *Hub) mailHoldReasonLocked() string {
 	t := h.findLocked(p.Instance)
 	if t == nil || t.Manifest.Mail == nil || !t.MailProvider {
 		return MailInvalidText
+	}
+	if t.Source != p.Source || (p.SourceURL != "" && h.mailSourceURLLocked(t.Source) != p.SourceURL) {
+		return MailSourceChangedText
 	}
 	hash, err := templates.MailBlockHash(t.Path, t.Manifest.Mail, t.ReadCompose())
 	if err != nil {
@@ -113,6 +130,14 @@ func (h *Hub) startRewireMail(t *templates.Template, actor directory.Actor, in W
 	h.mu.RUnlock()
 	if !held {
 		err := statusErr(http.StatusConflict, "%s is already this server's mail provider", t.ID)
+		h.auditOp(actor, "mail.provider_wired", t.ID, "reconfirm=true", err)
+		return nil, err
+	}
+	h.mu.Lock()
+	sourceChanged := h.mailHoldReasonLocked() == MailSourceChangedText || (h.st.Mail.Held != nil && h.st.Mail.Held.Reason == MailSourceChangedText)
+	h.mu.Unlock()
+	if sourceChanged {
+		err := statusErr(http.StatusConflict, "%s", MailSourceChangedText)
 		h.auditOp(actor, "mail.provider_wired", t.ID, "reconfirm=true", err)
 		return nil, err
 	}

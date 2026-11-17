@@ -408,3 +408,34 @@ func TestHeldDownTimeoutStaysOwed(t *testing.T) {
 		t.Fatalf("%+v", hd)
 	}
 }
+
+// TestWiredSourceNotRemovable (M7): the wired provider's source can't be
+// removed while it is wired.
+func TestWiredSourceNotRemovable(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Sources = append(w.h.st.Sources, state.Source{Name: "local", URL: "https://example.org/a.git"})
+	w.h.mu.Unlock()
+	if err := w.h.RemoveSource("local"); statusOf(err) != 409 || !strings.Contains(err.Error(), "unwire it first") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// TestSourceURLChangeIsNoRewire (M7): the same source name pointing at
+// another repository holds the provider and refuses the re-confirm.
+func TestSourceURLChangeIsNoRewire(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Sources = append(w.h.st.Sources, state.Source{Name: "local", URL: "https://example.org/a.git"})
+	w.h.st.Mail.Provider.SourceURL = "https://example.org/a.git"
+	w.h.st.Sources[len(w.h.st.Sources)-1].URL = "https://example.net/other.git"
+	w.h.mu.Unlock()
+	w.h.checkMailHold()
+	v, _ := w.h.InstanceMailProvider(context.Background(), mailProviderID)
+	if v.Held == nil || v.Held.Reason != MailSourceChangedText {
+		t.Fatalf("held %+v", v.Held)
+	}
+	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof, BlockHash: v.BlockHash}, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("re-confirm: %v", err)
+	}
+}

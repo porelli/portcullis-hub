@@ -267,9 +267,9 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	if by == "" {
 		by = "host"
 	}
-	p := &state.MailProvider{Instance: id, Template: t.TemplateID, Source: t.Source, Commit: gitHead(t.Path), BlockHash: hash,
-		WiredAt: h.mailNow().UTC(), WiredBy: by}
 	h.mu.Lock()
+	p := &state.MailProvider{Instance: id, Template: t.TemplateID, Source: t.Source, SourceURL: h.mailSourceURLLocked(t.Source), Commit: gitHead(t.Path), BlockHash: hash,
+		WiredAt: h.mailNow().UTC(), WiredBy: by}
 	prevP, prevV := h.st.Mail.Provider, h.st.Mail.VoidOwed
 	h.st.Mail.Provider = p
 	if h.st.Mail.VoidOwed == nil {
