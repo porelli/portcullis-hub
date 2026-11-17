@@ -82,6 +82,38 @@ func sshGroupLinesLocked(st state.SSHState, group string, gid int) []string {
 	return out
 }
 
+// mergedGrants is the union of the grants of group on hostGroup (nil:
+// none): every account, the longest TTL, sudo and forwarding if any has
+// them — what a new grant there is compared with (M5).
+func mergedGrants(grants []state.SSHGrant, group, hostGroup string) *state.SSHGrant {
+	var m *state.SSHGrant
+	for _, x := range grants {
+		if x.Group != group || x.HostGroup != hostGroup {
+			continue
+		}
+		if m == nil {
+			c := x
+			c.Accounts = slices.Clone(x.Accounts)
+			m = &c
+			continue
+		}
+		for _, a := range x.Accounts {
+			if !slices.Contains(m.Accounts, a) {
+				m.Accounts = append(m.Accounts, a)
+			}
+		}
+		if x.Sudo == state.SudoFull {
+			m.Sudo = state.SudoFull
+		}
+		if x.TTLHours == 0 || (m.TTLHours != 0 && x.TTLHours > m.TTLHours) {
+			m.TTLHours = x.TTLHours
+		}
+		m.PortForwarding = m.PortForwarding || x.PortForwarding
+		m.AgentForwarding = m.AgentForwarding || x.AgentForwarding
+	}
+	return m
+}
+
 func newGrantID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
@@ -130,7 +162,14 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 		return nil, statusErr(http.StatusNotFound, "no grant %s", g.ID)
 	}
 	priv, why := sshaccess.Privileged(g)
-	widen := sshaccess.WideningReasons(before, g, st.Settings)
+	// M5: a new grant for a group and host group that already have grants
+	// is judged against their merged access, so a second grant can't widen
+	// what an edit of the first one couldn't.
+	compare := before
+	if before == nil {
+		compare = mergedGrants(st.Grants, g.Group, g.HostGroup)
+	}
+	widen := sshaccess.WideningReasons(compare, g, st.Settings)
 	defer func() {
 		d := grantDetail(before) + " → " + grantDetail(&g)
 		if priv {
@@ -166,6 +205,9 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 	g.GroupID = gid
 	if before != nil && before.GroupID != gid {
 		widen = sshaccess.WideningReasons(before, g, st.Settings)
+	} else if before == nil && compare != nil {
+		compare.GroupID = gid
+		widen = sshaccess.WideningReasons(compare, g, st.Settings)
 	}
 	hg, ok := st.HostGroups[g.HostGroup]
 	if !ok {
@@ -188,9 +230,9 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 			if bp, _ := sshaccess.Privileged(*before); bp || !st.HostGroups[before.HostGroup].Delegable {
 				return nil, statusErr(http.StatusForbidden, TextOnlyAdminsPrivileged)
 			}
-			if len(widen) > 0 {
-				return nil, statusErr(http.StatusForbidden, TextOnlyAdminsWiden)
-			}
+		}
+		if len(widen) > 0 {
+			return nil, statusErr(http.StatusForbidden, TextOnlyAdminsWiden)
 		}
 	default: // an administrator
 		if priv && (before == nil || len(widen) > 0 || !privSame(before, g)) {

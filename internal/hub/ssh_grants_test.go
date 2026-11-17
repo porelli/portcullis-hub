@@ -166,7 +166,9 @@ func TestGrantAuditBeforeAfter(t *testing.T) {
 	if e.Target != saved.ID || !strings.Contains(e.Detail, "- → ssh_ops→web") || !strings.Contains(e.Detail, "privileged=true") || e.Actor != "root" {
 		t.Errorf("create audit %+v", e)
 	}
-	d, _ := f.h.SaveGrant(context.Background(), asDelegate, state.SSHGrant{Group: "ssh_ops", HostGroup: "web", Accounts: []string{"deploy"}}, "", nil)
+	// (Another group: a second ssh_ops→web grant adding deploy would widen
+	// the first, which a delegate can't, M5.)
+	d, _ := f.h.SaveGrant(context.Background(), asDelegate, state.SSHGrant{Group: "ssh_admins", HostGroup: "web", Accounts: []string{"deploy"}}, "", nil)
 	if d == nil {
 		t.Fatal("delegate grant")
 	}
@@ -176,7 +178,7 @@ func TestGrantAuditBeforeAfter(t *testing.T) {
 	n := *d
 	n.TTLHours = 1
 	f.h.SaveGrant(context.Background(), asDelegate, n, "", nil)
-	if e := f.audit.lastOf("ssh.grant.update"); !strings.Contains(e.Detail, "ttl=0 pf=false af=false → ssh_ops→web") {
+	if e := f.audit.lastOf("ssh.grant.update"); !strings.Contains(e.Detail, "ttl=0 pf=false af=false → ssh_admins→web") {
 		t.Errorf("update audit %+v", e)
 	}
 }
@@ -370,5 +372,36 @@ func TestCloudDefaultAccountGrantIsPrivileged(t *testing.T) {
 	}
 	if _, err := f.h.SaveGrant(context.Background(), asAdmin, g, "ssh_ops", nil); sshStatusOf(err) != 403 {
 		t.Errorf("admin without a fresh sign-in: %v", err)
+	}
+}
+
+// TestSecondGrantCantWiden (M5): a new grant for the same group and host
+// group is compared with the existing ones: extra accounts or port
+// forwarding need a fresh sign-in from an administrator, and are refused
+// for a delegate and through the AI — as the equivalent edit is.
+func TestSecondGrantCantWiden(t *testing.T) {
+	f := newGrantFixture(t)
+	g := state.SSHGrant{Group: "ssh_web", HostGroup: "web", Accounts: []string{"{username}", "deploy"}, Sudo: "none"}
+	if _, err := f.h.SaveGrant(context.Background(), asAI, g, "", nil); err == nil {
+		t.Error("AI: a second grant adding deploy accepted")
+	}
+	if _, err := f.h.SaveGrant(context.Background(), asDelegate, g, "", nil); err == nil || err.Error() != TextOnlyAdminsWiden {
+		t.Errorf("delegate: %v", err)
+	}
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, g, "", nil); sshStatusOf(err) != 403 {
+		t.Errorf("admin without a fresh sign-in: %v", err)
+	}
+	pf := state.SSHGrant{Group: "ssh_web", HostGroup: "web", Accounts: []string{"{username}"}, Sudo: "none", PortForwarding: true}
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, pf, "", nil); sshStatusOf(err) != 403 {
+		t.Errorf("admin, port forwarding, no fresh sign-in: %v", err)
+	}
+	// The same access again (no widening) needs nothing more.
+	same := state.SSHGrant{Group: "ssh_web", HostGroup: "web", Accounts: []string{"{username}"}, Sudo: "none"}
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, same, "", nil); err != nil {
+		t.Errorf("a non-widening second grant: %v", err)
+	}
+	// With the fresh sign-in the admin may.
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, g, "", &freshauth.Proof{Code: "c"}); err != nil {
+		t.Errorf("admin with a fresh sign-in: %v", err)
 	}
 }
