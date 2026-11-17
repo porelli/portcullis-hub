@@ -594,6 +594,7 @@ mail:
     - `mail: network <n> enables IPv6`
     - `mail: network <n> sets <key>: a mail template's networks are plain project networks (internal, ipam subnets and IP ranges, enable_ipv6: false)` — `<key>` is the top-level key, `ipam.<k>` for an ipam key other than `config`, `ipam.config.<k>` for a config key other than `subnet` / `ip_range`
     - `compose.yml: a mail template uses no YAML anchors, aliases or merge keys`
+    - `mail: <service> image must be a literal reference: a mail template's images are hashed (no ${…})`
 
     The mount texts are the VPN template's (§3.3) with the prefix `mail:` and "mail template" for "VPN template".
 

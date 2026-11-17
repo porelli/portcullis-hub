@@ -470,7 +470,29 @@ func ValidateMail(t *Template, compose []byte, routes *Routes) error {
 	if vpnYAMLIndirection(compose) {
 		return fmt.Errorf("compose.yml: a mail template uses no YAML anchors, aliases or merge keys")
 	}
+	if s := mailInterpolatedImage(compose); s != "" {
+		return fmt.Errorf("mail: %s image must be a literal reference: a mail template's images are hashed (no ${…})", s)
+	}
 	return nil
+}
+
+// mailInterpolatedImage is the first service (in file order) whose
+// image: interpolates ($): its block hash couldn't pin it (M14).
+func mailInterpolatedImage(compose []byte) string {
+	var doc yaml.Node
+	if yaml.Unmarshal(compose, &doc) != nil || len(doc.Content) == 0 {
+		return ""
+	}
+	svcs := mapValue(doc.Content[0], "services")
+	if svcs == nil || svcs.Kind != yaml.MappingNode {
+		return ""
+	}
+	for i := 0; i+1 < len(svcs.Content); i += 2 {
+		if img := mapValue(svcs.Content[i+1], "image"); img != nil && strings.Contains(img.Value, "$") {
+			return svcs.Content[i].Value
+		}
+	}
+	return ""
 }
 
 func countOf(l []string, s string) int {

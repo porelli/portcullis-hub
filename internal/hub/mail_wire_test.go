@@ -323,7 +323,7 @@ func TestWireResumesVoidAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.h.mu.Lock()
-	w.h.st.Mail.Provider = &state.MailProvider{Instance: mailProviderID, Template: mailProviderID, BlockHash: hash}
+	w.h.st.Mail.Provider = &state.MailProvider{Instance: mailProviderID, Template: mailProviderID, Source: "local", BlockHash: hash}
 	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidWire}
 	w.h.mu.Unlock()
 	w.h.resumeMail()

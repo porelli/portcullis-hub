@@ -439,3 +439,15 @@ func TestSourceURLChangeIsNoRewire(t *testing.T) {
 		t.Fatalf("re-confirm: %v", err)
 	}
 }
+
+// TestWiredEnvOverrideRefused (M14): no env override changes the wired
+// provider outside its template.
+func TestWiredEnvOverrideRefused(t *testing.T) {
+	w := wiredFix(t)
+	if _, err := w.h.SetEnvOverride(mailProviderID, "IMAGE_TAG", "evil", rootActor()); statusOf(err) != 409 {
+		t.Fatalf("set: %v", err)
+	}
+	if _, err := w.h.ClearEnvOverride(mailProviderID, "IMAGE_TAG", rootActor()); statusOf(err) != 409 {
+		t.Fatalf("clear: %v", err)
+	}
+}

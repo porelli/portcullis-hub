@@ -563,7 +563,7 @@ func crashAfterSwitchRecord(t *testing.T, w *wireFix) {
 		t.Fatal(err)
 	}
 	w.h.mu.Lock()
-	w.h.st.Mail.Provider = &state.MailProvider{Instance: otherMailID, Template: otherMailID, BlockHash: hash}
+	w.h.st.Mail.Provider = &state.MailProvider{Instance: otherMailID, Template: otherMailID, Source: "local", BlockHash: hash}
 	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidWire}
 	w.h.mu.Unlock()
 }
