@@ -9,7 +9,9 @@ files.
 
 Who may log into which host, as which account, with or without sudo, is set
 on one page: **Hub → SSH access**. It is off until an administrator switches
-it on. The interfaces are in
+it on. Switching it off again ends access: enrolled hosts keep syncing, lock
+every Portcullis account and get every certificate revoked; nothing new is
+enrolled or signed. The interfaces are in
 [contracts §18](../guides/integration-contracts.md#18-ssh-access-and-the-cli-new-ssh-cli-login).
 The person's side is in [The Portcullis CLI](../guides/cli.md).
 
@@ -132,6 +134,11 @@ and **never changed by Portcullis**:
 | `breakglass_account` | `breakglass` |
 | `max_accounts` | 500 |
 
+With `allow_sudo: false`, any account that can reach root on the host by
+other means (a `sudo`/`wheel`/`admin` group, a sudoers rule anywhere, uid 0 —
+the host asks `id` and `sudo -l` rather than reading sudoers) gets no
+certificate login there.
+
 A grant that would exceed it is skipped on that host and reported. This is
 what bounds a compromised Hub: it can't grant root where you said no, and it
 can't touch protected accounts.
@@ -169,8 +176,13 @@ Without `--revoked-keys` the host never talks to Portcullis.
   the next sync, removes its principals and ends its running sessions.
   Accounts are never deleted automatically: *Remove account* on the host's
   page deletes it and keeps the home directory under `/home/.portcullis-removed/`.
+- **A deleted person's account** stays locked with its uid. If someone new
+  later gets the same username, they never inherit it: the old uid is
+  retired, every managed host removes the old account first (home kept as
+  above), then the newcomer gets a fresh uid and an empty account.
 - **sudo** comes from `/etc/sudoers.d/portcullis`, checked with `visudo -cf`
-  before it replaces the old file. Portcullis accounts have no password, so
+  before it replaces the old file; a candidate `visudo` refuses removes the
+  file (nobody keeps Portcullis sudo) and is reported. Portcullis accounts have no password, so
   the lines are `NOPASSWD`: the proof is the fresh hardware sign-in that
   made the certificate, bounded by its lifetime.
 - Shared accounts are created only when the host group says *Portcullis
@@ -190,7 +202,10 @@ grant editor shows it for an unsaved change ("this gives sudo on 12 hosts to
   person's own *Revoke all my SSH certificates* ("I lost a device") and
   `portcullis logout --revoke` put the key on the revoked list.
 - Leaving a grant's group revokes that person's certificates for it
-  automatically, and locks the account on managed hosts.
+  automatically (losing any one account of a certificate is enough), and
+  locks the account on managed hosts.
+- A host key signed with *Sign a host key* is revoked from the
+  certificates list by its fingerprint; it is never signed again.
 - Managed hosts get the list within seconds; unmanaged hosts with
   `--revoked-keys` within 5 minutes; others when the certificate expires
   (at most 12 hours).
