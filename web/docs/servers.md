@@ -109,8 +109,9 @@ Settings → Servers.
 
 !!! warning "Not under /root"
     The agent runs as uid 10008 and must read the checkout. `worker join`
-    refuses an install under `/root` ("…/root, which the agent (uid 10008)
-    can't traverse"): put the checkout elsewhere, e.g. `/opt/portcullis`.
+    refuses an install under `/root`, also through a symlink ("…/root, which
+    the agent (uid 10008) can't traverse"): put the checkout elsewhere, e.g.
+    `/opt/portcullis`.
 
 Before anything is written, `join` also refuses:
 
@@ -118,7 +119,10 @@ Before anything is written, `join` also refuses:
   checkout, of its own);
 - Kubernetes (`--runtime kubernetes`, or `CONTAINER_RUNTIME=kubernetes`);
 - a worker that already has an identity (`--force` joins again over it);
-- a missing **folder root**, or an install inside one ([below](#folder-roots)).
+- a missing **folder root**, or a folder root that contains the install, its
+  `worker-data/`, the engine socket or the engine's data root (every path
+  resolved first: `/var/run` is usually a link to `/run`,
+  [below](#folder-roots)).
 
 **The clock.** The worker's clock must be within **5 minutes** of the
 primary's. Otherwise the enrolment fails with "the worker's clock is <n>
@@ -196,7 +200,13 @@ The Hub detects it, and refuses with "<app> can't run on a worker:
 | uses a non-HTTP backend scheme | A relay carries plain HTTP |
 | passes a host device | A device of the worker's host (anything but `/dev/null`) |
 | adds the capability `<cap>` | A capability beyond the Kubernetes baseline (`CHOWN`, `SETUID`, `NET_BIND_SERVICE`, …), `ALL` or an unknown one |
+| delivers a settings secrets file | Only the primary can hand a `<name>.secrets.json` to the app's reader (uid 10001, `0600`); a worker's agent refuses one too (`400`) |
 | is marked `placement: primary_only` | The template says so ([manifest reference](../guides/manifest-reference.md#placement)) |
+
+A worker also refuses an image that isn't pinned by digest: "image <ref>
+isn't pinned by digest: templates must pin images to run on a worker". The
+Hub checks it on create and at every start, also for an image an admin
+overrides in Settings.
 
 So **AI** (`ai.mcp` companions and the AI chat page) and **mail** are
 primary-only, as are VPN providers and file sharing. An app that declares
@@ -259,6 +269,15 @@ move are lost.** After 7 days *Undo move* is gone and the doctor shows
 deletes the old copy's volumes, after which no undo is possible. Both need a
 fresh sign-in and the typed instance id.
 
+**Earlier copies on a worker.** Creating an instance on a worker, or moving
+one there, is refused while that worker still holds a copy of the same
+instance id — its bundle or its volumes, for example from a failed move — and
+also when the worker can't be asked. Remove the old copy first. A kept copy
+on a server that was revoked or removed can't be reached any more: deleting
+or forgetting the instance drops it from the record and audits it
+(`instance.copy_dropped`), and whatever is left on that machine is yours to
+wipe.
+
 ## Backups
 
 An instance on a worker is backed up like any other: the archive streams
@@ -303,7 +322,9 @@ archives are kept).
 refused while instances remain ("move, restore or forget them first"); it
 tells the worker to take its apps down and wipe its identity, then revokes
 it. On the worker, `./portcullis worker leave` does the same from that side
-(and removes `worker-data/`); revoke or remove the server in the Hub too.
+(and removes `worker-data/`); it fails, keeping the identity and
+`worker-data/`, while any app container is still there. Revoke or remove the
+server in the Hub too.
 
 ### Fresh sign-in and typed ids
 
@@ -333,8 +354,9 @@ sign-in): the agent checks the bind sources again before it lifts it.
 - `lan_only` ports a worker app publishes on the worker's LAN keep working,
   as they are outside sign-in anyway;
 - the break-glass on the worker still works:
-  `./portcullis worker stop <instance>` and `worker start <instance>`. They
-  never change what the primary routes;
+  `./portcullis worker stop <instance>` and `worker start <instance>`, as the
+  worker's operator (no root needed; they find the instance through the
+  engine). They never change what the primary routes;
 - what stops: every routed app, scheduled backups, and the renewal of the
   worker's certificate (30 days, renewed with a third of its life left).
 
