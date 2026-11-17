@@ -435,30 +435,58 @@ func TestVoidListsDocumentAccounts(t *testing.T) {
 	}
 }
 
-// TestVoidKeepsDebtRaisedMidRun (L19): a restore debt raised while a
-// void runs isn't cleared by it: the gate stays closed and it runs again.
+// TestVoidKeepsDebtRaisedMidRun (L19, security review): a debt raised
+// while a void runs, from each raising path (a restore's mark, the
+// secrets epoch reconcile, the wiring record), isn't cleared by it: the
+// gate stays closed and it runs again; the generation never resets.
 func TestVoidKeepsDebtRaisedMidRun(t *testing.T) {
-	f := voidFixture(t)
-	raised := false
-	f.runner.upHook = func(project string) {
-		if project == "portcullis-"+mailProviderID && !raised {
-			raised = true
+	for name, raise := range map[string]func(f *mailFixture){
+		"restore": func(f *mailFixture) {
 			f.h.mu.Lock()
 			f.h.markVoidOwedLocked(state.MailVoidRestore)
 			f.h.mu.Unlock()
-		}
-	}
-	if err := runVoidNow(t, f); err == nil {
-		t.Fatal("the run cleared a debt raised during it")
-	}
-	f.h.mu.RLock()
-	owed := f.h.st.Mail.VoidOwed
-	f.h.mu.RUnlock()
-	if owed == nil || owed.Reason != state.MailVoidRestore || gateFile(t, f.fixture, mailGatePresent) != "" {
-		t.Fatalf("owed %+v present %q", owed, gateFile(t, f.fixture, mailGatePresent))
-	}
-	f.runner.upHook = nil
-	if err := runVoidNow(t, f); err != nil {
-		t.Fatal(err)
+		},
+		"epoch": func(f *mailFixture) {
+			os.WriteFile(filepath.Join(f.h.cfg.SecretsDir, epochFile), []byte("0000"), 0o600)
+			f.h.reconcileSecrets("test")
+		},
+		"wire record": func(f *mailFixture) {
+			f.h.mu.Lock()
+			f.h.raiseVoidDebtLocked(state.MailVoidWire)
+			f.h.saveLocked()
+			f.h.mu.Unlock()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := voidFixture(t)
+			raised := false
+			f.runner.upHook = func(project string) {
+				if project == "portcullis-"+mailProviderID && !raised {
+					raised = true
+					raise(f)
+				}
+			}
+			f.h.mu.RLock()
+			gen0 := f.h.st.Mail.VoidGen
+			f.h.mu.RUnlock()
+			if err := runVoidNow(t, f); err == nil {
+				t.Fatal("the run cleared a debt raised during it")
+			}
+			f.h.mu.RLock()
+			owed, gen := f.h.st.Mail.VoidOwed, f.h.st.Mail.VoidGen
+			f.h.mu.RUnlock()
+			if owed == nil || gen <= gen0+1 || gateFile(t, f.fixture, mailGatePresent) != "" {
+				t.Fatalf("owed %+v gen %d → %d present %q", owed, gen0, gen, gateFile(t, f.fixture, mailGatePresent))
+			}
+			f.runner.upHook = nil
+			if err := runVoidNow(t, f); err != nil {
+				t.Fatal(err)
+			}
+			f.h.mu.RLock()
+			defer f.h.mu.RUnlock()
+			if f.h.st.Mail.VoidOwed != nil || f.h.st.Mail.VoidGen < gen {
+				t.Fatalf("after: %+v gen %d", f.h.st.Mail.VoidOwed, f.h.st.Mail.VoidGen)
+			}
+		})
 	}
 }

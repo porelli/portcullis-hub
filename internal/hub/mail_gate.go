@@ -245,21 +245,10 @@ func wipeBytes(b []byte) {
 // .present removed. A void already owed keeps its reason and since.
 // Caller must hold mu (write).
 func (h *Hub) markVoidOwedLocked(reason string) error {
-	prev := h.st.Mail.VoidOwed
-	next := &state.MailVoid{Reason: reason, Since: h.mailNow().UTC()}
-	if prev != nil {
-		// Another debt while one is owed (L19): the same void, one more
-		// seq, so a run in progress doesn't clear it.
-		c := *prev
-		c.Seq++
-		if reason == state.MailVoidRestore {
-			c.Reason = reason
-		}
-		next = &c
-	}
-	h.st.Mail.VoidOwed = next
+	prev, prevGen := h.st.Mail.VoidOwed, h.st.Mail.VoidGen
+	h.raiseVoidDebtLocked(reason)
 	if err := h.saveStateLocked(); err != nil {
-		h.st.Mail.VoidOwed = prev
+		h.st.Mail.VoidOwed, h.st.Mail.VoidGen = prev, prevGen
 		return err
 	}
 	p := h.st.Mail.Provider
@@ -267,6 +256,22 @@ func (h *Hub) markVoidOwedLocked(reason string) error {
 		return nil
 	}
 	return h.mailVoidFilesLocked(p.Instance)
+}
+
+// raiseVoidDebtLocked raises a void debt in memory (the caller saves):
+// the generation always grows, also while a void is owed; an owed void
+// keeps its start and becomes a restore when this one is. Every path
+// that owes a void goes through it. Caller must hold mu (write).
+func (h *Hub) raiseVoidDebtLocked(reason string) {
+	h.st.Mail.VoidGen++
+	next := state.MailVoid{Reason: reason, Since: h.mailNow().UTC()}
+	if prev := h.st.Mail.VoidOwed; prev != nil {
+		next = *prev
+		if reason == state.MailVoidRestore {
+			next.Reason = reason
+		}
+	}
+	h.st.Mail.VoidOwed = &next
 }
 
 // mailVoidFilesLocked writes void-pending and a fresh void-session, then
@@ -430,7 +435,7 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 		h.mu.Unlock()
 		return err
 	}
-	runSeq := h.st.Mail.VoidOwed.Seq
+	runGen := h.st.Mail.VoidGen
 	// A fresh void session for this run; the secrets the provider needs
 	// (a core restore emptied hub_secrets).
 	err := h.mailVoidFilesLocked(id)
@@ -497,7 +502,7 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 	// again.
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if cur := h.st.Mail.VoidOwed; cur != nil && cur.Seq != runSeq {
+	if cur := h.st.Mail.VoidOwed; cur != nil && h.st.Mail.VoidGen != runGen {
 		h.kickMailVoid()
 		return statusErr(http.StatusConflict, "another void was owed during this one (%s): it runs again", cur.Reason)
 	}

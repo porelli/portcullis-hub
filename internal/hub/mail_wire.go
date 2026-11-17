@@ -283,14 +283,12 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	h.mu.Lock()
 	p := &state.MailProvider{Instance: id, Template: t.TemplateID, Source: t.Source, SourceURL: h.mailSourceURLLocked(t.Source), Commit: gitHead(t.Path), BlockHash: hash,
 		WiredAt: h.mailNow().UTC(), WiredBy: by}
-	prevP, prevV := h.st.Mail.Provider, h.st.Mail.VoidOwed
+	prevP, prevV, prevGen := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen
 	h.st.Mail.Provider = p
-	if h.st.Mail.VoidOwed == nil {
-		h.st.Mail.VoidOwed = &state.MailVoid{Reason: voidReason, Since: h.mailNow().UTC()}
-	}
+	h.raiseVoidDebtLocked(voidReason)
 	h.st.Mail.Held = nil
 	if err := h.saveStateLocked(); err != nil {
-		h.st.Mail.Provider, h.st.Mail.VoidOwed = prevP, prevV
+		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen = prevP, prevV, prevGen
 		h.mu.Unlock()
 		return nil, fail(StepMailRecord, err)
 	}

@@ -64,6 +64,11 @@ type MailSettings struct {
 	// Hub validated and published (or the CLI read for the main domain):
 	// with dmarc_start it makes dmarc_floor (contract §19.5).
 	DMARCPublished map[string]string `json:"dmarc_published,omitempty" yaml:"dmarc_published,omitempty"`
+	// VoidGen is the void debt's generation: monotonic, never reset,
+	// bumped by every debt raised (also while one is owed). A void run
+	// clears the debt only if it is still the generation it started on
+	// (L19 and the security review: a debt raised during a run stays).
+	VoidGen int `json:"void_gen,omitempty" yaml:"void_gen,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries
 	// _mta-sts.<d> (the Hub's own record of it: the MTA-STS policy check
 	// runs for exactly those, M13).
@@ -112,9 +117,6 @@ type MailProvider struct {
 type MailVoid struct {
 	Reason string    `json:"reason" yaml:"reason"`
 	Since  time.Time `json:"since" yaml:"since"`
-	// Seq grows with every debt raised while one is owed (a restore
-	// during a void): a run clears only the debt it started on (L19).
-	Seq int `json:"seq,omitempty" yaml:"seq,omitempty"`
 }
 
 // Void reasons (MailVoid.Reason).

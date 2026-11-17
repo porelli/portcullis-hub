@@ -521,8 +521,8 @@ func (h *Hub) reconcileSecretsLocked(why string) (counts map[string]int, mismatc
 		// the slot open and a provider wired, its mail passwords are
 		// voided before any mail port listens (§19.11), saved with the
 		// epoch below.
-		if h.st.Mail.Provider != nil && h.st.Mail.VoidOwed == nil && h.mailOn() {
-			h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidRestore, Since: now}
+		if h.st.Mail.Provider != nil && h.mailOn() {
+			h.raiseVoidDebtLocked(state.MailVoidRestore)
 			log.Printf("mail: the secrets epoch differs: a void of %s's mail passwords is owed", h.st.Mail.Provider.Instance)
 			defer h.kickMailVoid()
 		}
