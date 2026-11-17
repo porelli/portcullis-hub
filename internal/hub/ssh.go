@@ -56,6 +56,9 @@ type sshRuntime struct {
 	dir SSHDirectory
 	// incomplete: fingerprints revoked without their key (Ruling C21-b).
 	incomplete map[string]time.Time
+	// breakglassImported / breakglassMalformed: ImportBreakglass's counts
+	// (the doctor's ssh_breakglass_cert).
+	breakglassImported, breakglassMalformed int
 
 	runMu   sync.Mutex
 	pending atomic.Bool

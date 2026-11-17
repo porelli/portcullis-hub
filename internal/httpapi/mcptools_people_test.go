@@ -26,7 +26,7 @@ import (
 
 // peopleSelfTools are the people tools every signed-in person sees.
 var peopleSelfTools = []string{"directory", "disconnect_ai", "my_ai_connections", "my_apps", "my_browser_certificate", "my_file_share_password", "my_password", "my_profile",
-	"my_sign_in", "revoke_my_certificate"}
+	"my_sign_in", "my_ssh_access", "revoke_my_certificate", "revoke_my_ssh_certificates"}
 
 // peopleConnKC is the AI Keycloak with per-person connections (MyAI,
 // DisconnectAI): revokes are recorded as user/client and drop the
@@ -532,6 +532,8 @@ func TestPeopleToolParity(t *testing.T) {
 		// Help to reset (sign-in part 2 Task 7): sign_in_help.
 		"person_sign_in": ClassRead, "revoke_person_certificate": ClassDestructive, "remove_passkeys": ClassDestructive,
 		"remove_authenticators": ClassDestructive,
+		// SSH access (contract §15.10).
+		"my_ssh_access": ClassRead, "revoke_my_ssh_certificates": ClassWrite,
 	}
 	if len(tools) != len(want) {
 		t.Errorf("%d people tools, want %d", len(tools), len(want))
@@ -691,5 +693,13 @@ var peopleNoToolRoutes = func() map[string]string {
 		m[r] = mailNoToolRoutes[r]
 	}
 	m["POST /api/directory/users/{username}/impersonation/stop"] = "administrators only (403 here for everyone else): the admin MCP has stop_impersonation"
+	// SSH access (contract §15.10, spec §9.12): a person's card and the
+	// delegated grants are the people page's; my_ssh_access and
+	// revoke_my_ssh_certificates are the person's own tools.
+	for _, r := range peopleSSHRoutes {
+		if r != "GET /api/me/ssh" && r != "POST /api/me/ssh/revoke-all" {
+			m[r] = "people page only (SSH access for helpers and ssh_access holders)"
+		}
+	}
 	return m
 }()

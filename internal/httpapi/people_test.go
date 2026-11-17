@@ -152,7 +152,7 @@ func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	dir := &recordingMux{ServeMux: http.NewServeMux()}
 	e.s.registerDirectory(dir)
 	want := map[string]bool{"/healthz": true, "/": true, "/static/": true}
-	for _, p := range append(append(append([]string{}, dir.patterns...), peopleAppRoutes...), peopleVPNRoutes...) {
+	for _, p := range append(append(append(append([]string{}, dir.patterns...), peopleAppRoutes...), peopleVPNRoutes...), peopleSSHRoutes...) {
 		want[p] = true
 	}
 	got := map[string]bool{}

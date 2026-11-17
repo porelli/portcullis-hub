@@ -144,6 +144,8 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerVPN(mux)
 	// Settings → Mail and the admin mail routes (§19.9; Hub listener only).
 	s.registerMailAdmin(mux)
+	// SSH access (contract §18; Hub listener only).
+	s.registerSSHAdmin(mux)
 	return mux
 }
 
@@ -194,6 +196,8 @@ func (s *Server) peopleMux() *recordingMux {
 	// The VPN page and People → person's VPN devices (contract §5.1,
 	// §9.7): people listener only.
 	s.registerVPNPeople(mux)
+	// SSH access on people.<d> (contract §18, spec §9.11).
+	s.registerSSHPeople(mux)
 	return mux
 }
 

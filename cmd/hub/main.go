@@ -345,6 +345,8 @@ func main() {
 		// vpn.json goes to the vpn_doc volume (never hub_data), group
 		// shared only with wg and group-gate (contract §4, §16).
 		VPNDocDir: env("HUB_VPN_DOC_DIR", hub.DefaultVPNDocDir),
+		// The break-glass SSH record core writes (contract §18.13).
+		SSHBreakglassFile: env("HUB_SSH_BREAKGLASS_FILE", "/run/portcullis/ssh/breakglass.jsonl"),
 	}
 	if cfg.VPNDocGID, err = vpnDocGIDFromEnv(os.Getenv); err != nil {
 		log.Fatalf("refusing to start: %v", err)

@@ -153,6 +153,9 @@ type Config struct {
 	// group (shared only with wg and group-gate).
 	VPNDocDir string
 	VPNDocGID int
+	// SSHBreakglassFile is HUB_SSH_BREAKGLASS_FILE, core's break-glass
+	// record (mounted read-only; "" = none; contract §18.13).
+	SSHBreakglassFile string
 	// VPNNet overrides portcullis-vpn's subnet (tests; zero = the core
 	// env's PORTCULLIS_VPN_NET, default 172.31.254.0/26).
 	VPNNet netip.Prefix
@@ -795,6 +798,11 @@ func (h *Hub) Init() {
 	// The sign-in defaults (D1 / D11 / D12) of a state that lacks them,
 	// before anything reads them.
 	h.ensureSignIn()
+	// Break-glass SSH certificates signed while the Hub was down
+	// (contract §18.13): into the audit, once.
+	if n, bad := h.ImportBreakglass(); n > 0 || bad > 0 {
+		log.Printf("ssh: imported %d break-glass certificate record(s), %d malformed line(s) skipped", n, bad)
+	}
 	// Before anything can start a backup or restore.
 	h.SweepBackupLeftovers()
 	// The secrets epoch (§11.6) before anything can start or deliver: a

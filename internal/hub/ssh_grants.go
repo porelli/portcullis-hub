@@ -85,9 +85,6 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 		g.Sudo = state.SudoNone
 	}
 	newGrant := g.ID == ""
-	if newGrant {
-		g.ID = newGrantID()
-	}
 	var before *state.SSHGrant
 	h.mu.RLock()
 	st := h.st.SSH.Clone()
@@ -115,7 +112,11 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 		if !c.Admin {
 			d += " as ssh_access"
 		}
-		h.auditOp(actor, action, g.ID, d, err)
+		target := g.ID
+		if target == "" {
+			target = "(new)"
+		}
+		h.auditOp(actor, action, target, d, err)
 	}()
 	// The directory's checks on a fresh snapshot (also gives the group id).
 	h.sshrt.mu.Lock()
@@ -144,8 +145,8 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 		return nil, statusErr(http.StatusBadRequest, "no host group %s", g.HostGroup)
 	}
 	switch {
-	case c.Via == directory.ViaAI && (priv || len(widen) > 0):
-		return nil, statusErr(http.StatusForbidden, "privileged grants and widening edits can't be made through an AI assistant")
+	case c.Via == directory.ViaAI && (priv || len(widen) > 0 || g.PortForwarding):
+		return nil, statusErr(http.StatusForbidden, "privileged grants, port forwarding and widening edits can't be made through an AI assistant")
 	case !c.Admin:
 		if !c.Perms[directory.PermSSHAccess] {
 			return nil, statusErr(http.StatusForbidden, "not allowed: needs ssh_access")
@@ -184,6 +185,9 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 		return nil, statusErr(http.StatusServiceUnavailable, "the directory can't be read")
 	} else if err := sshaccess.CheckSharedAgainstUsers(g, m); err != nil {
 		return nil, statusErr(http.StatusConflict, "%v", err)
+	}
+	if newGrant {
+		g.ID = newGrantID()
 	}
 	h.mu.Lock()
 	next := h.st.SSH.Clone()

@@ -63,6 +63,7 @@ func (s *Server) cliMux() *recordingMux {
 	mux.HandleFunc("POST /api/cli/v1/ssh/revocations", s.handleCLIRevocations)
 	mux.HandleFunc("GET /api/cli/v1/ssh/ca", s.handleCLICA)
 	mux.HandleFunc("GET /api/cli/v1/ssh/revoked-keys", s.handleCLIRevokedKeys)
+	mux.HandleFunc("POST /api/cli/v1/ssh/host-certificates", s.handleCLIHostCertificates)
 	s.registerCLIHosts(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { cliError(w, http.StatusNotFound, "not found") })
 	return mux
@@ -198,4 +199,17 @@ func (s *Server) handleCLIRevokedKeys(w http.ResponseWriter, r *http.Request) {
 		b.WriteString(k + "\n")
 	}
 	_, _ = w.Write([]byte(b.String()))
+}
+
+func (s *Server) handleCLIHostCertificates(w http.ResponseWriter, r *http.Request) {
+	var req cliapi.HostCertRequest
+	if !cliDecode(w, r, cliapi.MaxCertRequest, &req) {
+		return
+	}
+	ans, err := s.Hub.SignHostKeyCLI(r.Context(), req, cliAddr(r))
+	if err != nil {
+		cliHubError(w, err)
+		return
+	}
+	cliJSON(w, http.StatusOK, ans)
 }

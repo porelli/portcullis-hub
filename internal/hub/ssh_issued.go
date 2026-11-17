@@ -243,3 +243,5 @@ func (h *Hub) pruneKeys(now time.Time) {
 		_ = fsutil.WriteFileAtomic(h.keysPath(), raw, 0o600)
 	}
 }
+
+func writeFile0600(p string, b []byte) error { return fsutil.WriteFileAtomic(p, b, 0o600) }
