@@ -261,7 +261,7 @@ func main() {
 	// `hub mail drain|domains` (contract §19.10): `./portcullis mail
 	// disable`'s clients.
 	if len(os.Args) > 1 && os.Args[1] == "mail" {
-		os.Exit(mailMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
+		os.Exit(mailMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
 	// `hub signin reset-core`: the CLI's lockout recovery (contract §8.1),
 	// run against the data directory while the Hub is stopped. Before the

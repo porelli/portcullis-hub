@@ -1,10 +1,22 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
+	"time"
+
+	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // Metrics discovery (contract §19.8, P7): mail_slot/mail-targets.json
@@ -60,4 +72,242 @@ func (h *Hub) writeMailTargets() {
 	if err := writeInPlace(r, mailTargetsFile, append(b, '\n'), -1); err != nil {
 		log.Printf("mail: writing %s: %v", mailTargetsFile, err)
 	}
+}
+
+// HostMailStatusView is GET /host/mail/status (contract §19.10): the
+// Hub's view, read by `./portcullis mail status` (core interface item
+// 4: wired, reachable, void_owed, held, checks.checks[].severity).
+type HostMailStatusView struct {
+	Slot              string                       `json:"slot"`
+	Wired             bool                         `json:"wired"`
+	Instance          string                       `json:"instance"`
+	Template          string                       `json:"template"`
+	Mode              string                       `json:"mode"`
+	Reachable         bool                         `json:"reachable"`
+	Provider          *mailprovider.StatusProvider `json:"provider"`
+	Generation        int                          `json:"generation"`
+	AppliedGeneration int                          `json:"applied_generation"`
+	VoidOwed          bool                         `json:"void_owed"`
+	VoidError         string                       `json:"void_error"`
+	Held              bool                         `json:"held"`
+	HeldReason        string                       `json:"held_reason"`
+	Checks            *mailprovider.Checks         `json:"checks"`
+}
+
+// HostMailStatus is the host status view (the provider read with a
+// bound; unreachable is a fact, not an error).
+func (h *Hub) HostMailStatus(ctx context.Context) HostMailStatusView {
+	v := HostMailStatusView{Slot: "closed", Mode: mailUnwired.String()}
+	if h.mailOn() {
+		v.Slot = "open"
+	}
+	h.mu.RLock()
+	if p := h.st.Mail.Provider; p != nil {
+		v.Wired, v.Instance, v.Template = true, p.Instance, p.Template
+		v.Mode = h.mailModeLocked(p.Instance).String()
+	}
+	v.Generation = h.st.Mail.Generation
+	v.VoidOwed = h.st.Mail.VoidOwed != nil
+	if hd := h.st.Mail.Held; hd != nil {
+		v.Held, v.HeldReason = true, hd.Reason
+	}
+	h.mu.RUnlock()
+	if v.VoidOwed {
+		v.VoidError, _ = h.MailVoidError()
+	}
+	api := h.mailClient()
+	if api == nil {
+		return v
+	}
+	sctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
+	defer cancel()
+	st, err := api.State(sctx)
+	if err != nil || !st.Bootstrap {
+		return v
+	}
+	v.Reachable, v.AppliedGeneration = true, st.AppliedGeneration
+	if s, err := api.Status(sctx); err == nil {
+		p := s.Provider
+		v.Provider = &p
+	}
+	if ch, err := api.Checks(sctx, false); err == nil {
+		v.Checks = &ch
+	}
+	return v
+}
+
+// spkiHexRe is one SPKI sha256 (64 lowercase hex).
+var spkiHexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// HostMailTLS is POST /host/mail/tls {spki_sha256, not_after} (contract
+// §19.3): the certificate recorded with the timer's visit, then, while a
+// provider is wired and serving, the provider's reload; answers the SPKI
+// it then serves ("" when nothing reloaded). A serving SPKI outside the
+// list is logged (its cert check reports it).
+func (h *Hub) HostMailTLS(ctx context.Context, spki []string, notAfter time.Time) (string, error) {
+	if len(spki) < 1 || len(spki) > 2 {
+		return "", statusErr(http.StatusBadRequest, "spki_sha256 must list 1 or 2 SPKIs")
+	}
+	for _, k := range spki {
+		if !spkiHexRe.MatchString(k) {
+			return "", statusErr(http.StatusBadRequest, "an SPKI must be 64 lowercase hex")
+		}
+	}
+	if notAfter.IsZero() {
+		return "", statusErr(http.StatusBadRequest, "not_after is required")
+	}
+	now := h.mailNow().UTC()
+	na := notAfter.UTC()
+	h.mu.Lock()
+	prev := h.st.Mail.TLS
+	h.st.Mail.TLS = state.MailTLS{SPKISHA256: append([]string{}, spki...), NotAfter: &na, SeenAt: &now}
+	if err := h.saveStateLocked(); err != nil {
+		h.st.Mail.TLS = prev
+		h.mu.Unlock()
+		return "", err
+	}
+	h.mu.Unlock()
+	h.TriggerMailSync() // MailState v2 carries the SPKIs
+	api := h.mailClient()
+	if api == nil {
+		return "", nil
+	}
+	rctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
+	defer cancel()
+	serving, err := api.TLSReload(rctx, spki)
+	if err != nil {
+		return "", statusErr(http.StatusServiceUnavailable, "the mail provider didn't reload its certificate: %v", err)
+	}
+	if !slices.Contains(spki, serving) {
+		log.Printf("mail: the provider serves SPKI %s, not one of the mail certificate's", serving)
+	}
+	return serving, nil
+}
+
+// HostMailTest is POST /host/mail/test {to}: the provider's test message.
+func (h *Hub) HostMailTest(ctx context.Context, to string) (string, error) {
+	api := h.mailClient()
+	if api == nil {
+		return "", errMailDown
+	}
+	tctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
+	defer cancel()
+	q, err := api.Test(tctx, to)
+	if err != nil {
+		var ae *mailprovider.APIError
+		if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 {
+			return "", statusErr(ae.Status, "%s", ae.Msg)
+		}
+		return "", statusErr(http.StatusServiceUnavailable, "the mail provider can't send the test: %v", err)
+	}
+	return q, nil
+}
+
+// HostMailBackup is POST /host/mail/backup (contract §19.11): an
+// instance backup of the wired provider with reason core, waited for;
+// answers the archive's path relative to the backups directory. While a
+// void is owed or the provider is held it comes back in void mode (the
+// render), or stays stopped.
+func (h *Hub) HostMailBackup() (string, error) {
+	h.mu.RLock()
+	p := h.st.Mail.Provider
+	h.mu.RUnlock()
+	if p == nil {
+		return "", statusErr(http.StatusConflict, "no mail provider is wired")
+	}
+	var entry *BackupEntry
+	_, _, err := h.runOpSync(p.Instance, OpBackup, directory.Human(HostActor), []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var berr error
+		entry, berr = h.backupInstanceReason(ctx, p.Instance, directory.Human(HostActor), ready, BackupCore)
+		if entry != nil {
+			return map[string]string{"archive": entry.Archive}, nil, berr
+		}
+		return nil, nil, berr
+	})
+	if err != nil {
+		return "", err
+	}
+	return entry.Archive, nil
+}
+
+// mailRestorePendingFile (core interface C1): core writes
+// hub_data/mail-restore-pending (the archive's name) before the Hub
+// starts in a core restore; while it exists the wired provider is never
+// started (no void, no up: its volumes come back first, Ruling R-C1).
+// `hub mail restore` removes it as its op starts.
+const mailRestorePendingFile = "mail-restore-pending"
+
+var errMailRestorePending = statusErr(http.StatusConflict, "a core restore of the mail provider is pending: the provider starts after `hub mail restore`")
+
+// mailRestorePending: the C1 hold is on (an unreadable data directory
+// holds too: fail closed).
+func (h *Hub) mailRestorePending() bool {
+	if h.cfg.DataDir == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(h.cfg.DataDir, mailRestorePendingFile))
+	return err == nil || !os.IsNotExist(err)
+}
+
+// HostMailRestore is POST /host/mail/restore {archive}: the wired
+// provider restored from that archive in the background (a void is owed
+// before its volumes are replaced; restoreSteps). The C1 hold is removed
+// as the op starts, before the restore's own up.
+func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
+	h.mu.RLock()
+	p := h.st.Mail.Provider
+	h.mu.RUnlock()
+	if p == nil {
+		return nil, statusErr(http.StatusConflict, "no mail provider is wired")
+	}
+	if err := h.archiveExists(archive); err != nil {
+		return nil, err
+	}
+	actor := directory.Human(HostActor)
+	id := p.Instance
+	return h.startAsync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		if err := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); err != nil && !os.IsNotExist(err) {
+			ready()
+			return nil, nil, fmt.Errorf("removing %s: %w", mailRestorePendingFile, err)
+		}
+		res, err := h.restoreInstance(ctx, id, archive, actor, ready)
+		return restoreResult(res, archive, ""), restoreWarnings(res), err
+	})
+}
+
+// HostMailOpView is GET /host/mail/op (core interface H6): one op's
+// state with running and ok always present.
+type HostMailOpView struct {
+	OpID     string `json:"op_id"`
+	Op       string `json:"op"`
+	Instance string `json:"instance"`
+	Running  bool   `json:"running"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error"`
+	Status   int    `json:"status"`
+}
+
+// HostMailOp is instance's record of op opID (nil: none).
+func (h *Hub) HostMailOp(instance, opID string) *HostMailOpView {
+	r := h.OpByID(instance, opID)
+	if r == nil {
+		return nil
+	}
+	return &HostMailOpView{OpID: r.OpID, Op: r.Op, Instance: instance, Running: r.Running, OK: r.OK && !r.Running, Error: r.Error, Status: r.Status}
+}
+
+// MailRulesView is the rule context core passes to dns-tool with the
+// main set (core interface H5/M6).
+type MailRulesView struct {
+	RelayInclude string `json:"relay_include"`
+	DMARCFloor   string `json:"dmarc_floor"`
+	Draining     bool   `json:"draining"`
+}
+
+// HostMailDNSRules is the main domain's rule context.
+func (h *Hub) HostMailDNSRules() MailRulesView {
+	h.mu.RLock()
+	c := h.mailRuleContextLocked(h.cfg.Domain, true)
+	h.mu.RUnlock()
+	return MailRulesView{RelayInclude: c.RelayInclude, DMARCFloor: c.DMARCFloor, Draining: c.Draining}
 }

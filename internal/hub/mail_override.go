@@ -312,7 +312,11 @@ type mailUpModes struct {
 func (h *Hub) mailModeBeforeUp(t *templates.Template) (mailMode, error) {
 	h.mu.RLock()
 	mode := h.mailRenderModeLocked(t)
+	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == t.ID
 	h.mu.RUnlock()
+	if wired && h.mailRestorePending() {
+		return mode, errMailRestorePending
+	}
 	h.mailUpModes.mu.Lock()
 	prev, known := h.mailUpModes.m[t.ID]
 	h.mailUpModes.mu.Unlock()

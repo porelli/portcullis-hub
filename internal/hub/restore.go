@@ -380,6 +380,22 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		return statusErr(500, "recording the restore failed — nothing was restored: %v", err)
 	}
 	p.Before(beforeRestoring, "true")
+	// The wired mail provider (contract §19.11): a void is owed before
+	// its volumes are replaced, so it comes back in void mode and every
+	// restored mail password is voided before any mail port listens.
+	h.mu.Lock()
+	wiredMail := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
+	var voidErr error
+	if wiredMail {
+		voidErr = h.markVoidOwedLocked(state.MailVoidRestore)
+	}
+	h.mu.Unlock()
+	if voidErr != nil {
+		return statusErr(500, "owing the mail void failed — nothing was restored: %v", voidErr)
+	}
+	if wiredMail {
+		defer h.kickMailVoid()
+	}
 	// A never-enabled instance is "created" again afterwards.
 	keep := ""
 	if e.State == state.InstanceCreated {

@@ -1,0 +1,261 @@
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
+	"github.com/portcullis/hub/internal/state"
+)
+
+func readTargets(t *testing.T, f *fixture) []mailTarget {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(f.h.cfg.MailSlotDir, mailTargetsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []mailTarget
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	return out
+}
+
+// TestMailTargetsEmptyWhenUnwired: [] with nothing wired, in void mode
+// and after an unwire.
+func TestMailTargetsEmptyWhenUnwired(t *testing.T) {
+	f := newMailSlotFixture(t, false)
+	f.h.writeMailTargets()
+	if tg := readTargets(t, f); tg == nil || len(tg) != 0 {
+		t.Fatalf("%+v", tg)
+	}
+	w := wiredFix(t)
+	if len(readTargets(t, w.fixture)) == 0 {
+		t.Fatal("no targets once wired")
+	}
+	w.h.mu.Lock()
+	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidRestore}
+	w.h.mu.Unlock()
+	w.h.writeMailTargets()
+	if len(readTargets(t, w.fixture)) != 0 {
+		t.Fatal("targets in void mode")
+	}
+	w.h.mu.Lock()
+	w.h.st.Mail.VoidOwed = nil
+	w.h.mu.Unlock()
+	if err := w.unwire(t, false, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	if len(readTargets(t, w.fixture)) != 0 {
+		t.Fatal("targets after the unwire")
+	}
+}
+
+// TestMailTargetsLabelsAndPath: the provider target with service
+// provider, the server's with service server and its metrics path.
+func TestMailTargetsLabelsAndPath(t *testing.T) {
+	w := wiredFix(t)
+	tg := readTargets(t, w.fixture)
+	if len(tg) != 2 || tg[0].Targets[0] != "mail-provider-metrics:9100" || tg[0].Labels["service"] != "provider" ||
+		tg[1].Targets[0] != "mail-provider-server-metrics:9180" || tg[1].Labels["service"] != "server" || tg[1].Labels["__metrics_path__"] != "/metrics/prometheus" {
+		t.Fatalf("%+v", tg)
+	}
+}
+
+// TestMetricsSecretGid65534: the metrics secret in a setgid mail_slot
+// directory takes the directory's group (Prometheus's 65534 on a host),
+// mode 0640, the same value as the gate's.
+func TestMetricsSecretGid65534(t *testing.T) {
+	w := wiredFix(t)
+	if err := os.Chmod(w.h.cfg.MailSlotDir, 0o2750); err != nil {
+		t.Fatal(err)
+	}
+	w.h.mu.Lock()
+	err := w.h.writeMailMetricsSecretLocked(mailProviderID)
+	w.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	di, _ := os.Stat(w.h.cfg.MailSlotDir)
+	fi, err := os.Stat(filepath.Join(w.h.cfg.MailSlotDir, mailGateMetricsSecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o640 || fi.Sys().(*syscall.Stat_t).Gid != di.Sys().(*syscall.Stat_t).Gid {
+		t.Fatalf("mode %v gid %d (dir %d)", fi.Mode(), fi.Sys().(*syscall.Stat_t).Gid, di.Sys().(*syscall.Stat_t).Gid)
+	}
+	b, _ := os.ReadFile(filepath.Join(w.h.cfg.MailSlotDir, mailGateMetricsSecret))
+	if string(b) != gateFile(t, w.fixture, mailGateMetricsSecret) {
+		t.Fatal("the two metrics secrets differ")
+	}
+}
+
+// TestHostTLSRecordsAndReloads: POST /host/mail/tls records the SPKIs,
+// not_after and the timer's visit, then reloads the provider; the next
+// document carries the SPKIs; bad SPKIs are refused.
+func TestHostTLSRecordsAndReloads(t *testing.T) {
+	w := wiredFix(t)
+	spki := strings.Repeat("ab", 32)
+	na := w.now.Add(60 * 24 * time.Hour)
+	serving, err := w.h.HostMailTLS(context.Background(), []string{spki}, na)
+	if err != nil || serving != spki {
+		t.Fatalf("%q %v", serving, err)
+	}
+	w.h.mu.RLock()
+	tls := w.h.st.Mail.TLS
+	w.h.mu.RUnlock()
+	if len(tls.SPKISHA256) != 1 || tls.NotAfter == nil || !tls.NotAfter.Equal(na) || tls.SeenAt == nil {
+		t.Fatalf("%+v", tls)
+	}
+	var reloads int
+	w.mc.Lock(func(s *mailprovidertest.Server) { reloads = len(s.Reloads) })
+	if reloads != 1 {
+		t.Fatalf("reloads %d", reloads)
+	}
+	w.advance(time.Minute)
+	w.sync(t)
+	if got := w.mc.Last().TLS.SPKISHA256; len(got) != 1 || got[0] != spki {
+		t.Fatalf("document tls %v", got)
+	}
+	for _, bad := range [][]string{nil, {"AB"}, {spki, spki, spki}} {
+		if _, err := w.h.HostMailTLS(context.Background(), bad, na); statusOf(err) != 400 {
+			t.Errorf("%v: %v", bad, err)
+		}
+	}
+}
+
+// TestHostBackupReasonCore: POST /host/mail/backup backs the wired
+// provider up with reason core and answers the archive.
+func TestHostBackupReasonCore(t *testing.T) {
+	w := wiredFix(t)
+	archive, err := w.h.HostMailBackup()
+	if err != nil || !strings.HasPrefix(archive, mailProviderID+"/") {
+		t.Fatalf("%q %v", archive, err)
+	}
+	list, err := w.h.ListBackups(mailProviderID)
+	if err != nil || len(list) == 0 || list[0].Reason != BackupCore {
+		t.Fatalf("%+v %v", list, err)
+	}
+	w.h.mu.Lock()
+	w.h.st.Mail.Provider = nil
+	w.h.mu.Unlock()
+	if _, err := w.h.HostMailBackup(); statusOf(err) != 409 {
+		t.Fatalf("nothing wired: %v", err)
+	}
+}
+
+// TestCoreBackupDuringVoidStaysVoid (Review Focus 2): a core backup while
+// a void is owed starts the provider again in void mode, never normal.
+func TestCoreBackupDuringVoidStaysVoid(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidRestore}
+	w.h.mu.Unlock()
+	w.engine.containers = append(w.engine.containers, container("portcullis-"+mailProviderID+"-c", "portcullis-"+mailProviderID, "stalwart", "running"))
+	w.mu.Lock()
+	w.ups = nil
+	w.mu.Unlock()
+	if _, err := w.h.HostMailBackup(); err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.ups) == 0 {
+		t.Fatal("the provider wasn't started again")
+	}
+	for _, u := range w.ups {
+		if strings.Contains(u.override, "0.0.0.0:25:") || !strings.Contains(u.override, "internal: true") {
+			t.Fatal("a normal up during an owed void")
+		}
+	}
+}
+
+// TestInstanceRestoreOwesVoidFirst: restoring the wired provider owes a
+// restore void before its volumes are replaced (saved), so it starts in
+// void mode.
+func TestInstanceRestoreOwesVoidFirst(t *testing.T) {
+	w := wiredFix(t)
+	archive, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owedAtUp []bool
+	w.runner.upHook = func(project string) {
+		w.h.mu.RLock()
+		owedAtUp = append(owedAtUp, w.h.st.Mail.VoidOwed != nil)
+		w.h.mu.RUnlock()
+	}
+	op, err := w.h.HostMailRestore(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || v.Running || !v.OK {
+		t.Fatalf("op %+v", v)
+	}
+	if len(owedAtUp) == 0 || !owedAtUp[0] {
+		t.Fatalf("ups with a void owed: %v", owedAtUp)
+	}
+	st, err := state.Load(w.h.statePath())
+	if err != nil || st.Mail.VoidOwed == nil || st.Mail.VoidOwed.Reason != state.MailVoidRestore {
+		t.Fatalf("saved %+v %v", st.Mail.VoidOwed, err)
+	}
+}
+
+// TestRestorePendingHoldsProvider (core interface C1): while
+// hub_data/mail-restore-pending exists the wired provider is never
+// started; `hub mail restore` removes it and the restore starts it (in
+// void mode).
+func TestRestorePendingHoldsProvider(t *testing.T) {
+	w := wiredFix(t)
+	archive, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(w.h.cfg.DataDir, mailRestorePendingFile)
+	writeFile(t, pending, archive+"\n")
+	w.mu.Lock()
+	w.ups = nil
+	w.mu.Unlock()
+	if err := w.h.composeUp(context.Background(), w.h.Template(mailProviderID)); statusOf(err) != 409 {
+		t.Fatalf("an up during the hold: %v", err)
+	}
+	w.mu.Lock()
+	n := len(w.ups)
+	w.mu.Unlock()
+	if n != 0 {
+		t.Fatal("the provider started during the hold")
+	}
+	op, err := w.h.HostMailRestore(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || !v.OK {
+		t.Fatalf("op %+v", v)
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatal("the hold wasn't removed")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.ups) == 0 || strings.Contains(w.ups[0].override, "0.0.0.0:25:") {
+		t.Fatalf("ups %d", len(w.ups))
+	}
+}
+
+// TestHostDNSMainRules (core interface H5/M6): the rule context with the
+// main set.
+func TestHostDNSMainRules(t *testing.T) {
+	w := wiredFix(t)
+	r := w.h.HostMailDNSRules()
+	if r.DMARCFloor == "" || r.Draining {
+		t.Fatalf("%+v", r)
+	}
+}

@@ -63,6 +63,9 @@ const (
 	BackupManual  = "manual"
 	BackupDelete  = "delete"
 	BackupRestore = "restore"
+	// BackupCore is `./portcullis backup`'s backup of the wired mail
+	// provider (POST /host/mail/backup, contract §19.11).
+	BackupCore = "core"
 )
 
 const (
@@ -335,6 +338,12 @@ func (h *Hub) BackupInstance(id string, actor directory.Actor) (entry *BackupEnt
 // its undo (settleOp: the partial archive deleted, the app started again
 // if it ran).
 func (h *Hub) backupInstance(ctx context.Context, id string, actor directory.Actor, ready func()) (entry *BackupEntry, err error) {
+	return h.backupInstanceReason(ctx, id, actor, ready, BackupManual)
+}
+
+// backupInstanceReason is backupInstance with the manifest's reason
+// (manual, or core for the mail provider).
+func (h *Hub) backupInstanceReason(ctx context.Context, id string, actor directory.Actor, ready func(), reason string) (entry *BackupEntry, err error) {
 	defer func() {
 		detail := ""
 		if entry != nil {
@@ -364,7 +373,7 @@ func (h *Hub) backupInstance(ctx context.Context, id string, actor directory.Act
 	}
 	ready()
 	p := progressFrom(ctx)
-	entry, err = h.backupCtx(ctx, id, BackupManual, false)
+	entry, err = h.backupCtx(ctx, id, reason, false)
 	if serr := h.settleOp(id, OpBackup, p, err); serr != err {
 		return nil, serr
 	}
@@ -404,7 +413,7 @@ func (h *Hub) backupLocked(id, reason string, keepStopped bool) (*BackupEntry, e
 func (h *Hub) backupCtx(ctx context.Context, id, reason string, keepStopped bool) (*BackupEntry, error) {
 	op := progressFrom(ctx)
 	var p *Progress // the backup's own steps: a manual backup's only
-	if reason == BackupManual {
+	if reason == BackupManual || reason == BackupCore {
 		p = op
 	}
 	h.mu.RLock()
@@ -982,7 +991,7 @@ func (m *BackupManifest) validate() error {
 		return fmt.Errorf("%s: invalid instance or template id", manifestMember)
 	}
 	switch m.Reason {
-	case BackupManual, BackupDelete, BackupRestore:
+	case BackupManual, BackupDelete, BackupRestore, BackupCore:
 	default:
 		return fmt.Errorf("%s: invalid reason %q", manifestMember, m.Reason)
 	}
