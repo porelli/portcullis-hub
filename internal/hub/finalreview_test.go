@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -227,17 +228,23 @@ func TestRotationWaitsForLinkDrop(t *testing.T) {
 	}
 }
 
-// TestPushRacingRevokeCarriesNoRotatedSecret (M2): pushes racing a
-// revocation either went before it (old secrets) or are refused; the
-// rotated token never reaches the worker.
+// TestPushRacingRevokeCarriesNoRotatedSecret (M2; re-review: asserts,
+// never skips): pushes run in a loop; at least one lands before the
+// revocation; from the revocation on every push is refused before it is
+// sent, so the token rotated after it never reaches the worker.
 func TestPushRacingRevokeCarriesNoRotatedSecret(t *testing.T) {
 	p := newPlacedFixture(t)
 	placedEnabled(t, p, "plainapp")
-	if err := p.h.newRelayToken("plainapp"); err != nil {
-		t.Fatal(err)
+	landed := func() int {
+		p.w.mu.Lock()
+		defer p.w.mu.Unlock()
+		return len(p.w.bundles)
 	}
+	before := landed()
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
+	var refusedAfter atomic.Int32
+	var revoked atomic.Bool
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -247,36 +254,59 @@ func TestPushRacingRevokeCarriesNoRotatedSecret(t *testing.T) {
 				return
 			default:
 			}
-			p.h.pushBundle(context.Background(), "plainapp", p.w)
+			after := revoked.Load()
+			if err := p.h.pushBundle(context.Background(), "plainapp", p.w); err != nil && after {
+				if errStatus(err) != 409 {
+					t.Errorf("a push after the revocation: %v (want the 409 refusal)", err)
+				}
+				refusedAfter.Add(1)
+			}
 		}
 	}()
-	time.Sleep(20 * time.Millisecond)
+	deadline := time.Now().Add(10 * time.Second)
+	for landed() == before {
+		if time.Now().After(deadline) {
+			close(stop)
+			wg.Wait()
+			t.Fatal("no push landed before the revocation")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	p.h.mu.Lock()
 	p.h.beginRevokeLocked("nas", false)
 	p.h.mu.Unlock()
-	// What the rotation would write: a new token from here on.
-	if err := p.h.newRelayToken("plainapp"); err != nil {
+	revoked.Store(true)
+	// A push in flight at the revocation read its env before it: let it end.
+	time.Sleep(50 * time.Millisecond)
+	settled := landed()
+	// What the rotation writes into the instance's env (a new client
+	// secret) from here on.
+	rotated := "rotated-" + strings.Repeat("9f8e", 8)
+	env := readEnvRaw(p.h.envPath("plainapp"))
+	env["PORTCULLIS_OIDC_CLIENT_SECRET_ROTATED"] = rotated
+	if err := writeEnvMap(p.h.envPath("plainapp"), env); err != nil {
 		t.Fatal(err)
 	}
-	rotated := readEnvFile(p.h.envPath("plainapp"))
-	time.Sleep(20 * time.Millisecond)
+	for refusedAfter.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	close(stop)
 	wg.Wait()
-	n := len(p.w.bundles)
-	if n == 0 {
-		t.Skip("no push landed before the revocation")
+	if refusedAfter.Load() < 3 {
+		t.Fatalf("pushes after the revocation weren't refused (%d)", refusedAfter.Load())
 	}
-	for k, v := range rotated {
-		if !strings.Contains(k, "RELAY") || len(v) < 8 {
-			continue
+	if n := landed(); n != settled {
+		t.Errorf("%d pushes landed after the revocation", n-settled)
+	}
+	p.w.mu.Lock()
+	defer p.w.mu.Unlock()
+	if len(p.w.bundles) == 0 || p.w.bundles[len(p.w.bundles)-1][bundleEnv] == "" {
+		t.Fatal("the landed bundles carry no env to check")
+	}
+	for _, b := range p.w.bundles {
+		if strings.Contains(b[bundleEnv], rotated) {
+			t.Error("a push carried the rotated secret")
 		}
-		p.w.mu.Lock()
-		for _, b := range p.w.bundles {
-			if strings.Contains(b[bundleEnv], v) {
-				t.Errorf("a push carried the rotated %s", k)
-			}
-		}
-		p.w.mu.Unlock()
 	}
 }
 

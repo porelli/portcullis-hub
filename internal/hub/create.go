@@ -146,6 +146,9 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 		if err := h.checkReservedID(id, req.Server); err != nil {
 			return res, err
 		}
+		if err := h.checkWorkerClean(context.Background(), req.Server, id); err != nil {
+			return res, err
+		}
 	}
 	// The setup choices (§11.9, §13.18): checked like a settings save's
 	// values before anything is created, against the catalog read above;

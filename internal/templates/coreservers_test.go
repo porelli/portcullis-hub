@@ -31,6 +31,27 @@ func TestCoreServersVarsRefused(t *testing.T) {
 			t.Errorf("manifest env %s: %v", k, err)
 		}
 	}
+	// N8: an environment name (set or a bare pass-through) and a key.
+	for name, env := range map[string]string{
+		"set":          "      AGENT_IMAGE: x\n",
+		"pass-through": "    environment:\n      - RELAY_IMAGE\n",
+		"list set":     "    environment:\n      - PORTCULLIS_WORKER_DATA=x\n",
+	} {
+		c := string(compose("x"))
+		if strings.HasPrefix(env, "    environment:") {
+			c = strings.Replace(c, "    environment:\n      V: x\n", env, 1)
+		} else {
+			c = strings.Replace(c, "      V: x\n", "      V: x\n"+env, 1)
+		}
+		_, err := build("plain", "src", "", []byte(manifest), []byte(c), "example.org", nil)
+		if err == nil || !strings.Contains(err.Error(), "reserved for core (multiple servers)") {
+			t.Errorf("environment %s: %v", name, err)
+		}
+	}
+	keyed := string(compose("x")) + "x-notes:\n  ${AGENT_IMAGE}: \"1\"\n"
+	if _, err := build("plain", "src", "", []byte(manifest), []byte(keyed), "example.org", nil); err == nil || !strings.Contains(err.Error(), "reserved for core") {
+		t.Errorf("a key reference: %v", err)
+	}
 	for _, k := range []string{"PORTCULLIS_LINKS", "PORTCULLIS_WORKERS", "MY_AGENT_IMAGE"} {
 		if CoreServersVar(k) {
 			t.Errorf("%s is refused", k)

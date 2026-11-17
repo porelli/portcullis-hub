@@ -291,6 +291,9 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		if err := h.checkReservedID(id, to); err != nil {
 			return err
 		}
+		if err := h.checkWorkerClean(ctx, to, id); err != nil {
+			return err
+		}
 		// The rendered images too (env overrides included), before the
 		// backup (final review H2): a refusal here leaves nothing anywhere.
 		if err := h.placedImages(ctx, &view, to); err != nil {
@@ -320,13 +323,12 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	}
 	back := func(cause error) error {
 		if touched() {
-			if derr := h.downOn(context.Background(), to, &view); derr != nil {
+			if _, derr := h.downMoveTarget(context.Background(), id, to, &view); derr != nil {
 				mv.Phase = MoveStuck
 				h.setMove(id, mv, from, state.InstanceMoving)
 				h.relaysDown(context.Background(), id)
 				return fmt.Errorf("%w — and taking %s down on %s failed (%v): it runs nowhere until that succeeds (retried; doctor server_move_stuck)", cause, id, serverLabel(to), derr)
 			}
-			h.recordTargetLeftover(id, to)
 		}
 		h.setMove(id, nil, from, "")
 		if from == "" {
@@ -451,18 +453,49 @@ func (h *Hub) movePushed(id string) bool {
 }
 
 // markMovePush records (write-ahead, saved) that a bundle push of id to
-// server is about to happen while a move to server is open; pushed false
-// after the agent refused it (4xx: nothing landed) clears it again.
-func (h *Hub) markMovePush(id, server string, pushed bool) {
+// server is about to happen while a move to server is open, and returns
+// the mark before. The caller puts that back only after the agent
+// refused the push (a 4xx: nothing of this push landed) — an earlier
+// push of the move that landed stays marked (final re-review N2). Any
+// other failure (5xx, transport, Stop, a crash after this save) keeps
+// the mark: the push may have landed, and the rollback's down finds out
+// (a never-held id's 404 is "nothing there", N1).
+func (h *Hub) markMovePush(id, server string, pushed bool) (prev bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	in, ok := h.st.Instances[id]
-	if !ok || in.Move == nil || in.Move.To != server || in.Move.Pushed == pushed {
-		return
+	if !ok || in.Move == nil || in.Move.To != server {
+		return false
+	}
+	prev = in.Move.Pushed
+	if prev == pushed {
+		return prev
 	}
 	// In place: the move's own record (setMove stores its pointer) keeps it.
 	in.Move.Pushed = pushed
 	h.saveLocked()
+	return prev
+}
+
+// downMoveTarget takes a move's target copy down for its rollback or
+// recovery. On a worker, the agent's 404 (no bundle, no tombstone, no
+// quarantine of the id) is "nothing there" (final re-review N1): gone
+// true, nothing to record or remove. A copy that was there is downed,
+// its volumes recorded as the target's leftover and its bundle (env
+// included) owed for removal (N2): never silently kept.
+func (h *Hub) downMoveTarget(ctx context.Context, id, to string, t *templates.Template) (gone bool, err error) {
+	err = h.downOn(ctx, to, t)
+	if to != "" && workerNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	h.recordTargetLeftover(id, to)
+	if to != "" {
+		h.oweBundle(to, id)
+	}
+	return false, nil
 }
 
 // recordTargetLeftover records the volumes a failed move left on its
@@ -988,6 +1021,14 @@ func (h *Hub) RemoveMoveLeftover(ctx context.Context, id, confirm string, actor 
 	return nil
 }
 
+// serverGone: server is revoked or no longer known (removed).
+func (h *Hub) serverGone(server string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s, known := h.st.Servers[server]
+	return !known || s.State == ServerRevoked
+}
+
 // removeKeptCopies removes copies (instance id's kept ones), each on its
 // own: a record goes only once every volume it pinned is confirmed gone;
 // a failure keeps it (and the move guard), and the doctor shows
@@ -996,6 +1037,15 @@ func (h *Hub) removeKeptCopies(ctx context.Context, id string, copies []state.Mo
 	var errs []error
 	gone := map[string]bool{}
 	for _, l := range copies {
+		// A copy on a revoked or removed server can't be reached again
+		// (its identity is gone): recorded (audit, log) and dropped
+		// (final re-review N3) — its volumes stay on that machine.
+		if l.Server != "" && h.serverGone(l.Server) {
+			log.Printf("%s: the old copy on %s (revoked or removed) is dropped from the record; its volumes %s stay on that machine", id, serverLabel(l.Server), strings.Join(l.Volumes, ", "))
+			h.auditOp(directory.Actor{}, "instance.copy_dropped", id, "on "+serverLabel(l.Server)+" (revoked or removed): "+strings.Join(l.Volumes, ", "), nil)
+			gone[l.Server] = true
+			continue
+		}
 		if err := h.removeCopy(ctx, id, l); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", serverLabel(l.Server), err))
 			h.noteCopyRemoveFail(id, serverLabel(l.Server)+": "+untrusted(err.Error(), 200))
@@ -1173,7 +1223,8 @@ func (h *Hub) recoverMove(id string) {
 	// copy (unrouted) goes; the current one keeps its routing.
 	if mv.Phase == MoveUndoStarting && v != nil {
 		if rt, err := h.rtForServer(mv.To); err == nil {
-			if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(v)); err != nil {
+			// Its 404: the worker holds nothing of the id (N1).
+			if err := unwrapRT(rt).Down(context.Background(), h.runtimeProject(v)); err != nil && !(mv.To != "" && workerNotFound(err)) {
 				log.Printf("move recovery: %s: taking the undo's copy down on %s failed (%v): retried", id, serverLabel(mv.To), err)
 				return
 			}
@@ -1187,14 +1238,13 @@ func (h *Hub) recoverMove(id string) {
 	}
 	// A worker target nothing was pushed to holds nothing (H2): no down.
 	if mv.Phase != MoveBackup && mv.Phase != MoveCheck && v != nil && (mv.To == "" || mv.Pushed) {
-		if err := h.downOn(context.Background(), mv.To, v); err != nil {
+		if _, err := h.downMoveTarget(context.Background(), id, mv.To, v); err != nil {
 			mv.Phase = MoveStuck
 			h.setMove(id, &mv, mv.From, state.InstanceMoving)
 			h.relaysDown(context.Background(), id)
 			log.Printf("move recovery: %s: taking it down on %s failed (%v): it runs nowhere, retried", id, serverLabel(mv.To), err)
 			return
 		}
-		h.recordTargetLeftover(id, mv.To)
 	}
 	h.setMove(id, nil, mv.From, "")
 	if mv.From == "" {

@@ -488,11 +488,14 @@ func (h *Hub) pushBundleAdopt(ctx context.Context, id string, rt runtime.Instanc
 		return err
 	}
 	// A move's target: marked before the push may land (H2).
-	h.markMovePush(id, server, true)
+	prev := h.markMovePush(id, server, true)
 	if err := b.PushBundle(ctx, id, files, m); err != nil {
+		// Refused (the agent's 4xx): nothing of this push landed — the
+		// mark goes back to what it was (an earlier landed push keeps
+		// it, N2). Anything else may have landed: kept (N1).
 		var ae *agentrt.Error
 		if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 {
-			h.markMovePush(id, server, false) // refused: nothing landed
+			h.markMovePush(id, server, prev)
 		}
 		return err
 	}

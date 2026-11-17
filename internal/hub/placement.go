@@ -492,6 +492,30 @@ func (h *Hub) checkReservedID(id, server string) error {
 	return nil
 }
 
+// checkWorkerClean refuses (409) a create or move of id onto worker
+// server while the agent still holds a bundle of id the Hub doesn't run
+// there (final re-review N2/M1: an earlier copy, its env and volumes,
+// would be taken over silently). The agent's 404 is "holds nothing"; an
+// unreadable answer refuses too (fail closed).
+func (h *Hub) checkWorkerClean(ctx context.Context, server, id string) error {
+	if server == "" {
+		return nil
+	}
+	rt, err := h.rtForServer(server)
+	if err != nil {
+		return statusErr(502, "%s: %v", serverLabel(server), err)
+	}
+	_, err = unwrapRT(rt).List(ctx, runtime.Filter{Instance: id})
+	switch {
+	case workerNotFound(err):
+		return nil
+	case err == nil:
+		return statusErr(409, "%s still holds an earlier copy of %s (its bundle): wait for its removal (retried each minute) or remove it on the worker, then try again", serverLabel(server), id)
+	default:
+		return statusErr(502, "%s: can't check for an earlier copy of %s: %s", serverLabel(server), id, untrusted(err.Error(), 200))
+	}
+}
+
 // stopInvalidPlacement stops a placed instance whose template turned
 // primary-only (on the worker, its relays on the primary), best effort.
 func (h *Hub) stopInvalidPlacement(ctx context.Context, t *templates.Template, server string) {

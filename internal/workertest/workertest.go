@@ -128,6 +128,7 @@ type fault struct {
 	status int
 	msg    string
 	hook   func(r *http.Request)
+	drop   bool // the connection drops (no answer)
 }
 
 // DefaultHelperImage is the harness agent's helper image: the one the
@@ -226,6 +227,10 @@ func (w *Worker) middleware(next http.Handler) http.Handler {
 			if hit.hook != nil {
 				hit.hook(r)
 			}
+			if hit.drop {
+				// The transport drops mid-request: no answer at all.
+				panic(http.ErrAbortHandler)
+			}
 			if hit.status != 0 {
 				rw.Header().Set("Content-Type", "application/json")
 				rw.WriteHeader(hit.status)
@@ -251,6 +256,14 @@ func (w *Worker) Hook(pattern string, times int, fn func(r *http.Request)) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.faults = append(w.faults, &fault{re: regexp.MustCompile(pattern), times: times, hook: fn})
+}
+
+// Drop drops the connection of the next times requests matching pattern
+// (after reading nothing more: a lost tunnel), without reaching the agent.
+func (w *Worker) Drop(pattern string, times int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.faults = append(w.faults, &fault{re: regexp.MustCompile(pattern), times: times, drop: true})
 }
 
 // ClearFaults drops every fault and hook.

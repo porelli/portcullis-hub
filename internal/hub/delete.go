@@ -189,18 +189,11 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor.User, err)
 		}
 	}
-	// Kept copies (final review M1): a delete never forgets one. They go
-	// first (each confirmed gone), or nothing is deleted. A forget leaves
-	// those on a revoked or removed server (unreachable for good).
+	// Kept copies (final review M1): a delete never forgets one silently.
+	// They go first (each confirmed gone), or nothing is deleted; one on
+	// a revoked or removed server is recorded and dropped (N3).
 	h.mu.RLock()
-	var copies []state.MovedFrom
-	for _, c := range keptCopies(h.st.Instances[id]) {
-		srv, known := h.st.Servers[c.Server]
-		if c.Server != "" && forgetting(ctx) && (!known || srv.State == ServerRevoked) {
-			continue
-		}
-		copies = append(copies, c)
-	}
+	copies := keptCopies(h.st.Instances[id])
 	h.mu.RUnlock()
 	if len(copies) > 0 {
 		if err := h.removeKeptCopies(ctx, id, copies); err != nil {

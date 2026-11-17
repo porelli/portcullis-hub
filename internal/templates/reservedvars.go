@@ -2,6 +2,7 @@ package templates
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -82,6 +83,30 @@ func ReferencesLocalNetworks(compose []byte) bool {
 // reservedVarRefs refuses compose references to the reserved variables
 // outside their one allowed form (above).
 func (v *specCheck) reservedVarRefs() error {
+	// Core's multiple-servers settings as a service's environment name
+	// (set, or a bare pass-through `environment: [AGENT_IMAGE]`), and in
+	// any mapping key (final re-review N8: the templates validator's
+	// parity).
+	for _, svc := range sortedServices(v.env) {
+		for _, k := range slices.Sorted(maps.Keys(v.env[svc])) {
+			if CoreServersVar(k) {
+				return fmt.Errorf("compose.yml: services.%s.environment %s is reserved for core (multiple servers): a template may not set or pass it through", svc, k)
+			}
+		}
+	}
+	var doc interface{}
+	if err := yaml.Unmarshal(v.compose, &doc); err == nil {
+		var keys []string
+		mappingKeys(doc, &keys)
+		sort.Strings(keys)
+		for _, k := range keys {
+			for _, r := range varRefs(k) {
+				if CoreServersVar(r.name) {
+					return fmt.Errorf("compose.yml: ${%s} is reserved for core (multiple servers): a template may not reference it", r.name)
+				}
+			}
+		}
+	}
 	// Folder gid variable → the services whose environment may read it.
 	allowed := map[string][]string{}
 	for _, o := range v.m.Options() {
@@ -139,4 +164,26 @@ func (v *specCheck) reservedVarRefs() error {
 
 func folderVarRefusal(name string) error {
 	return fmt.Errorf("compose.yml: %s is set by the Hub: only ${PORTCULLIS_FOLDER_GID_<KEY>} may be read, exactly so, as a whole environment: value of the service that <KEY>'s folder block targets", name)
+}
+
+// mappingKeys collects every mapping key of a decoded YAML document.
+func mappingKeys(x interface{}, out *[]string) {
+	switch t := x.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			*out = append(*out, k)
+			mappingKeys(val, out)
+		}
+	case map[interface{}]interface{}:
+		for k, val := range t {
+			if ks, ok := k.(string); ok {
+				*out = append(*out, ks)
+			}
+			mappingKeys(val, out)
+		}
+	case []interface{}:
+		for _, e := range t {
+			mappingKeys(e, out)
+		}
+	}
 }

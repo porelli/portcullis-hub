@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/dotenv"
 	"github.com/compose-spec/compose-go/v2/types"
 	"gopkg.in/yaml.v3"
 
@@ -965,20 +966,47 @@ func (a *API) hiddenVolumes(ctx context.Context, id string, m agentapi.BundleMan
 }
 
 // redactEnvValues replaces in msg every value of the env file env (4
-// characters or longer; quotes trimmed), longest first, with "***".
+// characters or longer), longest first, with "***". Each value in every
+// form an error may quote it (final re-review N7): as compose's dotenv
+// reads it (quotes, escapes, an inline comment and `export` resolved),
+// as written raw (quotes trimmed, an inline ` #` comment cut or kept),
+// and Go-quoted (%q escapes) — so no secret reaches an error text.
 func redactEnvValues(msg string, env []byte) string {
+	seen := map[string]bool{}
 	var vals []string
+	add := func(v string) {
+		if len(v) >= 4 && !seen[v] {
+			seen[v] = true
+			vals = append(vals, v)
+		}
+	}
+	addForms := func(v string) {
+		add(v)
+		if q := strconv.Quote(v); len(q) > 2 {
+			add(q[1 : len(q)-1])
+		}
+	}
+	if parsed, err := dotenv.UnmarshalBytesWithLookup(env, func(string) (string, bool) { return "", false }); err == nil {
+		for _, v := range parsed {
+			addForms(v)
+		}
+	}
 	for _, line := range strings.Split(string(env), "\n") {
-		_, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		line = strings.TrimPrefix(strings.TrimSpace(line), "export ")
+		_, v, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
 		v = strings.TrimSpace(v)
-		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
-			v = v[1 : len(v)-1]
+		forms := []string{v}
+		if c, _, cut := strings.Cut(v, " #"); cut {
+			forms = append(forms, strings.TrimSpace(c))
 		}
-		if len(v) >= 4 {
-			vals = append(vals, v)
+		for _, f := range forms {
+			if len(f) >= 2 && (f[0] == '"' || f[0] == '\'') && f[len(f)-1] == f[0] {
+				f = f[1 : len(f)-1]
+			}
+			addForms(f)
 		}
 	}
 	sort.Slice(vals, func(i, j int) bool { return len(vals[i]) > len(vals[j]) })
