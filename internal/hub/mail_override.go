@@ -133,6 +133,28 @@ func topLevelNetworkFlags(compose []byte) (names []string, external, internal ma
 // mailRenderLocked is the mail part of t's override in mode (contract
 // §19.1). Caller must hold mu.
 func (h *Hub) mailRenderLocked(t *templates.Template, mode mailMode) (*mailRender, error) {
+	r, err := h.mailRenderBodyLocked(t, mode)
+	if err != nil || r == nil {
+		return r, err
+	}
+	// Post-render (Ruling FH-H1): every core network the override joins
+	// is exactly the override's own entry: the template declares no
+	// network under that key (its attributes would merge into it).
+	names, _ := topLevelNetworks(t.ReadCompose())
+	for n, body := range r.topNetworks {
+		if !strings.Contains(body, "external: true") {
+			continue
+		}
+		for _, tn := range names {
+			if strings.EqualFold(strings.TrimSpace(tn), n) {
+				return nil, fmt.Errorf("mail: the template declares the core network %s the Hub joins: refused", tn)
+			}
+		}
+	}
+	return r, nil
+}
+
+func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailRender, error) {
 	r := &mailRender{mode: mode}
 	b := t.Manifest.Mail
 	if b == nil || mode == mailUnwired {

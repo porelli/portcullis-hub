@@ -507,6 +507,13 @@ func countOf(l []string, s string) int {
 	return n
 }
 
+// mailCoreNetworks are core's network keys and names (core
+// docker-compose.yml, folded to lower case).
+var mailCoreNetworks = map[string]bool{"portcullis": true, "portcullis-proxy": true, "portcullis-auth": true, "socket-proxy-traefik": true,
+	"socket-proxy-hub": true, "monitoring": true, "alerting": true, "portcullis-domains": true, "portcullis-certs": true, "domains-egress": true,
+	"portcullis-mcp": true, "portcullis-sessions": true, "portcullis-vpn": true, "portcullis-vpn-edge": true, "wg-egress": true,
+	"portcullis-metrics-wg": true, "portcullis-link": true, "portcullis-link-data": true, "portcullis-mail-api": true, "portcullis-metrics-mail": true}
+
 // mailNetworkText ends the refusal of a network key outside the
 // allowlist (parity with templates' validate.py).
 const mailNetworkText = "a mail template's networks are plain project networks (internal, ipam subnets and IP ranges, enable_ipv6: false)"
@@ -530,6 +537,12 @@ func mailNetworkRefusal(compose []byte) error {
 	}
 	for i := 0; i+1 < len(nets.Content); i += 2 {
 		n, body := nets.Content[i].Value, nets.Content[i+1]
+		// Never one of core's network keys or names (Ruling FH-H1): the
+		// Hub's override merges its own external entries under some of
+		// them (portcullis-proxy, the mail API and metrics networks).
+		if mailCoreNetworks[strings.ToLower(strings.TrimSpace(n))] {
+			return fmt.Errorf("mail: network %s is one of core's networks: a mail template declares only its own", n)
+		}
 		if body.Kind != yaml.MappingNode {
 			continue // null: a plain network
 		}

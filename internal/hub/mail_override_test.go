@@ -449,3 +449,22 @@ func TestClosedSlotRendersNoPorts(t *testing.T) {
 		t.Fatalf("mode %v", mode)
 	}
 }
+
+// TestRenderRefusesTemplateCoreNetwork (FH-H1, post-render): a template
+// whose compose declares a core network the Hub's override joins never
+// renders (its attributes would merge into the Hub's entry).
+func TestRenderRefusesTemplateCoreNetwork(t *testing.T) {
+	f := mailOverrideFixture(t)
+	tp := f.h.Template(mailProviderID)
+	b, err := os.ReadFile(tp.ComposePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, tp.ComposePath(), strings.Replace(string(b), "\nnetworks:\n", "\nnetworks:\n  portcullis-mail-api:\n    internal: true\n", 1))
+	f.h.mu.Lock()
+	_, err = f.h.mailRenderLocked(f.h.findLocked(mailProviderID), mailNormal)
+	f.h.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "core network") {
+		t.Fatalf("%v", err)
+	}
+}

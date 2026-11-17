@@ -93,6 +93,7 @@ Always use the default form, e.g. `${PORTCULLIS_TRAEFIK_SOURCE:-172.31.250.2/32}
     - `has AI companions (mcp-gate reaches them on the primary)`: an `ai.mcp` block (§3.2; `mcp-gate` reaches companions on the primary's `portcullis-mcp-<id>--*` networks);
     - `is an AI page (model-provider secrets stay on the primary)`: an `ai.chat` block (§3.2, §15.12; the provider variables would travel in the bundle). Every `ai:` block that turns AI on — `ai.mcp` or `ai.chat` — makes a template primary-only; a block with only `ai.unsupported` (and `ai.alternative`) says the app has no AI support and doesn't count;
     - `is a VPN provider (vpn: block)`: a `vpn:` block (§3.3; its gateway joins the primary's `portcullis-vpn`);
+    - `is a mail provider (mail: block)`: a `mail:` block (§19; a wired provider joins core networks and mounts core volumes);
     - `uses host-gateway (<service>)`: `host-gateway` in a service's `extra_hosts`;
     - `passes a host device (<service>)`: a `devices` entry whose source isn't `/dev/null`;
     - `adds the capability <cap> (<service>)` (also `adds the capability ALL (<service>)` and `adds an unknown capability (<service>)`): a `cap_add` beyond the Kubernetes baseline set (§3.4);
@@ -613,6 +614,7 @@ mail:
     - `mail: volume <v> sets <key>: a mail template's volumes are plain <project>_<key> volumes`
     - `mail: network <n> enables IPv6`
     - `mail: network <n> sets <key>: a mail template's networks are plain project networks (internal, ipam subnets and IP ranges, enable_ipv6: false)` — `<key>` is the top-level key, `ipam.<k>` for an ipam key other than `config`, `ipam.config.<k>` for a config key other than `subnet` / `ip_range`
+    - `mail: network <n> is one of core's networks: a mail template declares only its own` — every core network key and name, case-folded (the Hub adds the core networks a wired provider joins)
     - `compose.yml: a mail template uses no YAML anchors, aliases or merge keys`
     - `mail: <service> image must be a literal reference: a mail template's images are hashed (no ${…})`
 
