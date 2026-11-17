@@ -28,7 +28,7 @@ func upCount(calls []string, p string) int {
 	return n
 }
 
-func workerHas(w *workerFake, prefix string) bool {
+func workerHas(w interface{ Calls() []string }, prefix string) bool {
 	return slices.ContainsFunc(w.Calls(), func(c string) bool { return strings.HasPrefix(c, prefix) })
 }
 
@@ -157,6 +157,12 @@ func TestMoveRecoveryAfterHubRestart(t *testing.T) {
 			p.h.st.Instances["plainapp"] = in
 			p.h.noteServersLocked()
 			p.h.mu.Unlock()
+			if phase != MoveBackup {
+				// From the restore on its bundle went to the target (H2).
+				if err := p.h.pushBundle(context.Background(), "plainapp", p.w); err != nil {
+					t.Fatal(err)
+				}
+			}
 			p.h.RecoverMoves()
 			in = p.instance("plainapp")
 			if in.Server != "" || in.State != "" || in.Move != nil || p.h.serverOf("plainapp") != "" {

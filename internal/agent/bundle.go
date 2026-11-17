@@ -24,6 +24,7 @@ import (
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -528,6 +529,10 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, http.StatusBadRequest, "the bundle has no compose.yml")
 		return
 	}
+	if msg := a.hiddenVolumes(r.Context(), id, m); msg != "" {
+		writeError(w, http.StatusConflict, msg)
+		return
+	}
 	var files []string
 	for _, f := range []string{BundleCompose, BundleOverride, BundleUserOverride} {
 		b, err := os.ReadFile(filepath.Join(staging, f))
@@ -554,9 +559,13 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, http.StatusInternalServerError, "can't read the env file")
 		return
 	}
+	// Every error from here on may echo a value of the bundle's env (a
+	// compose error quoting it): redacted, then clipped (final review L3:
+	// a clip cutting a secret mid-value leaves a part the Hub can't match).
+	fail := func(code int, msg string) { writeError(w, code, clipMsg(redactEnvValues(msg, envBytes))) }
 	profiles, err := profilesOf(envBytes)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		fail(http.StatusBadRequest, err.Error())
 		return
 	}
 	// templates/ and certs/ → the files dir (the project directory).
@@ -579,7 +588,7 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 	// files and the CA bundle (the env, overrides and manifest stay in the
 	// 0700 project dir, appfiles — data and secrets files — in appfiles/).
 	if err := filesTreeOnly(filesStaging); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		fail(http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := openDirs(filesStaging); err != nil {
@@ -588,7 +597,7 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 	}
 	out, err := a.cfg.Config(r.Context(), compose.Project{Name: runtime.ProjectName(id), Files: files, ProjectDir: a.filesDir(id), EnvFile: envFile})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "compose config: "+clipMsg(err.Error()))
+		fail(http.StatusBadRequest, "compose config: "+err.Error())
 		return
 	}
 	resolvedStaging := filepath.Join(staging, ".resolved.json")
@@ -598,12 +607,12 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 	}
 	model, err := loadResolved(id, resolvedStaging, a.filesDir(id))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "the resolved model: "+clipMsg(err.Error()))
+		fail(http.StatusBadRequest, "the resolved model: "+err.Error())
 		return
 	}
 	p, err := a.validateResolved(id, m, model)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, clipMsg(err.Error()))
+		fail(http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := a.commitBundle(id, staging, filesStaging, out, profiles, m); err != nil {
@@ -611,7 +620,7 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 		if errors.Is(err, ErrNotPlain) {
 			code = http.StatusConflict
 		}
-		writeError(w, code, clipMsg(err.Error()))
+		fail(code, err.Error())
 		return
 	}
 	a.mu.Lock()
@@ -848,8 +857,18 @@ func CheckProtectedOutsideRoots(protected, roots []string) error {
 			rs = append(rs, id{r, fi})
 		}
 	}
+	var ps []string
 	for _, p := range protected {
 		p = filepath.Clean(p)
+		ps = append(ps, p)
+		// Compared resolved too (final review L9): a protected path that
+		// is a symlink, or sits behind one, into a root (the engine
+		// socket under a linked directory).
+		if r := resolveVisible(p); r != p {
+			ps = append(ps, r)
+		}
+	}
+	for _, p := range ps {
 		for _, r := range roots {
 			if p == r || strings.HasPrefix(p, r+"/") {
 				return fmt.Errorf("the protected path %s is inside the folder root %s: move it outside the folder roots, or narrow PORTCULLIS_WORKER_BIND_ROOTS", p, r)
@@ -869,6 +888,22 @@ func CheckProtectedOutsideRoots(protected, roots []string) error {
 		}
 	}
 	return nil
+}
+
+// resolveVisible is p with every symlink this process can see resolved:
+// the longest existing prefix through filepath.EvalSymlinks, the rest as
+// written (a path the agent can't see, e.g. the host's engine socket).
+func resolveVisible(p string) string {
+	rest := ""
+	for a := p; ; a = filepath.Dir(a) {
+		if r, err := filepath.EvalSymlinks(a); err == nil {
+			return filepath.Join(r, rest)
+		}
+		if a == "/" || a == "." {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(a), rest)
+	}
 }
 
 // InstallDirOf is the agent's compose working dir (its own container's
@@ -900,4 +935,55 @@ func CheckVisible(paths ...string) error {
 		}
 	}
 	return nil
+}
+
+// hiddenVolumes refuses a first bundle of an id this agent holds no
+// bundle of and never held (no tombstone) while volumes labelled with its
+// compose project exist, unless the Hub marked the push AdoptVolumes
+// (final review M1): an earlier instance's data is never adopted by a
+// new one by accident. An unreadable engine refuses too (fail closed).
+func (a *API) hiddenVolumes(ctx context.Context, id string, m agentapi.BundleManifest) string {
+	if m.AdoptVolumes || a.project(id) != nil {
+		return ""
+	}
+	a.mu.Lock()
+	_, tomb := a.tombs[id]
+	a.mu.Unlock()
+	if tomb {
+		return ""
+	}
+	vs, err := a.cfg.Runtime.ListVolumes(ctx, runtime.Filter{Instance: id})
+	if err != nil {
+		return "the engine's volumes can't be listed: try again"
+	}
+	for _, v := range vs {
+		if v.Labels[docker.LabelProject] == runtime.ProjectName(id) {
+			return "volumes of an earlier " + id + " are still on this worker (" + clipMsg(v.Name) + "): remove them before creating it again"
+		}
+	}
+	return ""
+}
+
+// redactEnvValues replaces in msg every value of the env file env (4
+// characters or longer; quotes trimmed), longest first, with "***".
+func redactEnvValues(msg string, env []byte) string {
+	var vals []string
+	for _, line := range strings.Split(string(env), "\n") {
+		_, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		if len(v) >= 4 {
+			vals = append(vals, v)
+		}
+	}
+	sort.Slice(vals, func(i, j int) bool { return len(vals[i]) > len(vals[j]) })
+	for _, v := range vals {
+		msg = strings.ReplaceAll(msg, v, "***")
+	}
+	return msg
 }

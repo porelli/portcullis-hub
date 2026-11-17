@@ -121,7 +121,13 @@ type bundleFile struct {
 // files; the manifest lists every regular file.
 func bundleTar(t *testing.T, instance string, vols map[string]string, files []bundleFile) []byte {
 	t.Helper()
-	m := agentapi.BundleManifest{Instance: instance, Template: instance, Volumes: vols, Files: map[string]agentapi.FileEntry{}}
+	return bundleTarAdopt(t, instance, vols, files, false)
+}
+
+// bundleTarAdopt is bundleTar with the manifest's adopt_volumes set to adopt.
+func bundleTarAdopt(t *testing.T, instance string, vols map[string]string, files []bundleFile, adopt bool) []byte {
+	t.Helper()
+	m := agentapi.BundleManifest{Instance: instance, Template: instance, Volumes: vols, Files: map[string]agentapi.FileEntry{}, AdoptVolumes: adopt}
 	for _, f := range files {
 		if f.typ == 0 || f.typ == tar.TypeReg {
 			sum := sha256.Sum256([]byte(f.data))
@@ -265,7 +271,7 @@ func TestScopeTable(t *testing.T) {
 		{"own exec", "POST", "/v1/containers/c-mine/exec", agentapi.ExecRequest{Cmd: []string{"id"}}, 200},
 		{"bad signal", "POST", "/v1/containers/c-mine/kill", agentapi.SignalRequest{Signal: "KILL"}, 400},
 		{"own signal", "POST", "/v1/containers/c-mine/kill", agentapi.SignalRequest{Signal: "HUP"}, 204},
-		{"unknown exec id", "GET", "/v1/execs/abc", nil, 403},
+		{"unknown exec id", "GET", "/v1/execs/abc", nil, 404}, // final review B6: not running
 		{"foreign volume", "GET", "/v1/volumes/portcullis-other_data", nil, 403},
 		{"core volume", "DELETE", "/v1/volumes/portcullis_vault_data", nil, 403},
 		{"own volume", "GET", "/v1/volumes/portcullis-app_data", nil, 200},

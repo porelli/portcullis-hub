@@ -24,9 +24,12 @@ func TestVolumesOnlyBundle(t *testing.T) {
 	if c := f.code(t, "DELETE", "/v1/volumes/"+vol, nil); c < 400 {
 		t.Fatalf("an unbundled copy was removable: %d", c)
 	}
-	b := bundleTar(t, "app", map[string]string{"k0": vol}, []bundleFile{
-		{name: BundleCompose, data: "services: {}\nvolumes:\n  k0:\n    name: " + vol + "\n"},
-	})
+	files := []bundleFile{{name: BundleCompose, data: "services: {}\nvolumes:\n  k0:\n    name: " + vol + "\n"}}
+	// Unmarked, the agent refuses to adopt the volumes (final review M1).
+	if c := f.code(t, "PUT", "/v1/projects/app/bundle", bundleTar(t, "app", map[string]string{"k0": vol}, files)); c != 409 {
+		t.Fatalf("an unmarked bundle over hidden volumes: %d", c)
+	}
+	b := bundleTarAdopt(t, "app", map[string]string{"k0": vol}, files, true)
 	if c := f.code(t, "PUT", "/v1/projects/app/bundle", b); c != 204 {
 		t.Fatalf("a volumes-only bundle: %d", c)
 	}

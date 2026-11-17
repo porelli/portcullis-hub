@@ -17,9 +17,7 @@ import (
 func TestLiftQuarantineWithoutBundle(t *testing.T) {
 	p := newPlacedFixture(t)
 	placedEnabled(t, p, "plainapp")
-	p.w.mu.Lock()
-	p.w.info.Quarantined = map[string]string{"plainapp": "a container of an instance the agent holds no valid bundle for"}
-	p.w.mu.Unlock()
+	p.w.quarantine("plainapp", "a container of an instance the agent holds no valid bundle for")
 	p.h.refreshServerFacts(context.Background(), "nas")
 	bundles := len(p.w.bundles)
 	if err := p.h.LiftQuarantine(context.Background(), admin, "plainapp"); err != nil {
@@ -31,8 +29,8 @@ func TestLiftQuarantineWithoutBundle(t *testing.T) {
 	if err := p.h.RestartApp("plainapp"); err != nil {
 		t.Errorf("restart after the lift: %v", err)
 	}
+	p.w.quarantine("plainapp", "x")
 	p.w.mu.Lock()
-	p.w.info.Quarantined = map[string]string{"plainapp": "x"}
 	p.w.pushErr = errors.New("bundle refused")
 	p.w.mu.Unlock()
 	p.h.refreshServerFacts(context.Background(), "nas")
@@ -47,9 +45,7 @@ func TestLiftQuarantineWithoutBundle(t *testing.T) {
 func TestQuarantineAllAndDeliverFile(t *testing.T) {
 	p := newPlacedFixture(t)
 	placedEnabled(t, p, "plainapp")
-	p.w.mu.Lock()
-	p.w.info.Quarantined = map[string]string{"*": "the agent's quarantine.json is unreadable"}
-	p.w.mu.Unlock()
+	p.w.quarantineAll("the agent's quarantine.json is unreadable")
 	p.h.refreshServerFacts(context.Background(), "nas")
 	if err := p.h.RestartApp("plainapp"); errStatus(err) != 409 || !strings.Contains(err.Error(), "quarantined") {
 		t.Errorf("restart: %v", err)

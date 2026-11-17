@@ -164,6 +164,14 @@ func (l *fakeLink) write() {
 	os.Rename(l.path+".tmp", l.path)
 }
 
+// drop is link reloading link.json without peer id (a revocation).
+func (l *fakeLink) drop(id string) {
+	l.mu.Lock()
+	delete(l.peers, id)
+	l.mu.Unlock()
+	l.write()
+}
+
 func (l *fakeLink) handshake(id string, at time.Time) {
 	l.mu.Lock()
 	l.peers[id] = at
@@ -962,6 +970,7 @@ func TestRevokeOrderAndRetry(t *testing.T) {
 	sf.runner.mu.Lock()
 	callsBefore := len(sf.runner.calls)
 	sf.runner.mu.Unlock()
+	sf.link.drop("nas") // link reloaded without the peer (M2)
 	if err := sf.h.RevokeServer(context.Background(), admin, "nas"); err != nil {
 		t.Fatal(err)
 	}
@@ -997,6 +1006,7 @@ func TestRevokeOrderAndRetry(t *testing.T) {
 	if len(sf.owed()) != 0 || len(sf.ca.revoked) != 1 || sf.ca.revoked[0] != pinned.CertSerial {
 		t.Errorf("retry: %+v revoked %v", s.Revoke, sf.ca.revoked)
 	}
+	sf.link.drop("nas") // link reloaded without the peer (M2)
 	if err := sf.h.RevokeServer(context.Background(), admin, "nas"); errStatus(err) != 409 {
 		t.Errorf("revoke again: %v", err)
 	}
@@ -1013,6 +1023,7 @@ func TestRevokeRotatesClientSecretsAndTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldTok := sf.h.relayTokenSHA("other")
+	sf.link.drop("nas") // link reloaded without the peer (M2)
 	if err := sf.h.RevokeServer(context.Background(), admin, "nas"); err != nil {
 		t.Fatal(err)
 	}
@@ -1044,6 +1055,7 @@ func TestRevokeRotatesClientSecretsAndTokens(t *testing.T) {
 	sf2.idp.mu.Lock()
 	sf2.idp.registerErr = errors.New("keycloak down")
 	sf2.idp.mu.Unlock()
+	sf2.link.drop("nas") // link reloaded without the peer (M2)
 	sf2.h.RevokeServer(context.Background(), admin, "nas")
 	if s, _ := sf2.server("nas"); s.Revoke == nil || s.Revoke.Rotated {
 		t.Errorf("rotation with Keycloak down: %+v", s.Revoke)
@@ -1071,6 +1083,7 @@ func TestRemoveRefusesWithInstances(t *testing.T) {
 		t.Errorf("state after the refusal: %s", s.State)
 	}
 	sf.place("other", "")
+	sf.link.drop("nas") // link reloaded without the peer (M2)
 	if err := sf.h.RemoveServer(context.Background(), admin, "nas"); err != nil {
 		t.Fatal(err)
 	}
@@ -1265,6 +1278,7 @@ func TestRenewRacingRevoke(t *testing.T) {
 	sf.h.mu.Unlock()
 	sf.ca.onSign = func(role string) {
 		if role == RoleNodeWorker {
+			sf.link.drop("nas") // link reloaded without the peer (M2)
 			if err := sf.h.RevokeServer(context.Background(), admin, "nas"); err != nil {
 				t.Error(err)
 			}
@@ -1547,9 +1561,12 @@ func TestHandshakeAfterSecondGranularity(t *testing.T) {
 		hs   time.Time
 		want bool
 	}{
-		{at.Truncate(time.Second).Add(time.Second), true}, // 06:00:10 (status) for a handshake at 06:00:10.3
-		{at.Truncate(time.Second).Add(2 * time.Second), true},
-		{at.Truncate(time.Second), false}, // the switch's own second: not provably after
+		// Final review L2: strictly after the switch rounded up (06:00:10):
+		// a handshake recorded at 06:00:10 may be the old key's, before
+		// link reloaded; the new key's comes 2 s after the switch.
+		{at.Truncate(time.Second).Add(time.Second), false},
+		{at.Truncate(time.Second).Add(2 * time.Second), true}, // the agent's switch, 2 s later
+		{at.Truncate(time.Second), false},                     // the switch's own second
 		{at.Add(-time.Minute), false},
 	} {
 		if got := handshakeAfter(c.hs, at); got != c.want {

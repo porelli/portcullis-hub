@@ -1,27 +1,17 @@
-package agent
+package agent_test
 
 import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"github.com/portcullis/hub/internal/servers"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
-	"net/http/httptest"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,123 +21,22 @@ import (
 	"time"
 
 	wagent "github.com/portcullis/hub/internal/agent"
-	"github.com/portcullis/hub/internal/agent/agenttest"
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fixerspec"
 	"github.com/portcullis/hub/internal/runtime"
-	"github.com/portcullis/hub/internal/runtime/runtimetest"
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
+	"github.com/portcullis/hub/internal/workertest"
 )
 
-type pki struct {
-	key  *ecdsa.PrivateKey
-	cert *x509.Certificate
-	n    int64
+// newWorker is the shared real-agent harness (internal/workertest) for
+// these backend tests.
+func newWorker(t *testing.T) *workertest.Worker {
+	return workertest.NewWorker(t, workertest.Opts{BindRoots: []string{"/srv"}})
 }
 
-func newPKI(t *testing.T, name string) *pki {
-	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name}, IsCA: true, BasicConstraintsValid: true,
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), KeyUsage: x509.KeyUsageCertSign}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, _ := x509.ParseCertificate(der)
-	return &pki{key: k, cert: c, n: 100}
-}
-
-func (p *pki) issue(t *testing.T, cn string, usage ...x509.ExtKeyUsage) (*x509.Certificate, *ecdsa.PrivateKey) {
-	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	p.n++
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(p.n * 7919), Subject: pkix.Name{CommonName: cn}, NotBefore: time.Now().Add(-time.Minute),
-		NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: usage}
-	if strings.HasSuffix(cn, ".node.portcullis.internal") {
-		tpl.DNSNames = []string{cn}
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, p.cert, &k.PublicKey, p.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, _ := x509.ParseCertificate(der)
-	return c, k
-}
-
-func pemCert(c *x509.Certificate) []byte {
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
-}
-
-func pemKey(k *ecdsa.PrivateKey) []byte {
-	der, _ := x509.MarshalPKCS8PrivateKey(k)
-	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-}
-
-// fakeWorker is a real portcullis-agent (internal/agent) in the ready
-// state, its identity written as enrolment leaves it, with an in-memory
-// engine behind it, served over TLS on loopback.
-type fakeWorker struct {
-	ca       *pki
-	node     *x509.Certificate
-	control  tls.Certificate
-	engine   *runtimetest.Fake
-	srv      *httptest.Server
-	dataDir  string
-	listener string
-}
-
-func newWorker(t *testing.T) *fakeWorker {
-	ca := newPKI(t, "example.org Node CA")
-	node, nodeKey := ca.issue(t, "nas.node.portcullis.internal", x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth)
-	ctl, ctlKey := ca.issue(t, wagent.CNControl, x509.ExtKeyUsageClientAuth)
-	data := t.TempDir()
-	id := filepath.Join(data, "identity")
-	os.MkdirAll(id, 0o700)
-	wg, _ := wagent.GenerateKey()
-	link, _ := wagent.GenerateKey()
-	sum := sha256.Sum256(ca.cert.Raw)
-	pins, _ := json.Marshal(wagent.Pins{State: wagent.StateReady, ServerID: "nas", TunnelIP: "10.214.0.10", Endpoint: "example.org:51821",
-		LinkPub: link.Public().String(), CASHA256: hex.EncodeToString(sum[:])})
-	for name, b := range map[string][]byte{"pins.json": pins, "ca.crt": pemCert(ca.cert), "tls.crt": pemCert(node), "tls.key": pemKey(nodeKey), "wg.key": []byte(wg.String() + "\n")} {
-		os.WriteFile(filepath.Join(id, name), b, 0o600)
-	}
-	engine := &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, LogsVal: map[string][]byte{}, States: map[string]runtime.State{}, Contents: map[string][]byte{}}
-	api := wagent.NewAPI(wagent.APIConfig{DataDir: data, BindRoots: []string{"/srv"}, Runtime: engine, SelfImage: "sha256:agent", Config: agenttest.Config,
-		HelperImage: "docker.io/library/alpine:3@sha256:" + strings.Repeat("a", 64)})
-	a, err := wagent.New(wagent.Config{DataDir: data, Runtime: "docker", Routes: api,
-		Info: func(context.Context) (agentapi.Info, error) {
-			return agentapi.Info{EngineVersion: "29.0", EngineAPI: "1.45", DockerRootDir: "/var/lib/docker", SELinux: true}, nil
-		}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(a.Handler())
-	srv.TLS = a.TLSConfig()
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	return &fakeWorker{ca: ca, node: node, control: tls.Certificate{Certificate: [][]byte{ctl.Raw}, PrivateKey: ctlKey, Leaf: ctl},
-		engine: engine, srv: srv, dataDir: data, listener: srv.Listener.Addr().String()}
-}
-
-// dialTo dials the worker's loopback listener whatever the address (the
-// tunnel stand-in), recording what was asked.
-type dialTo struct{ addr, asked string }
-
-func (d *dialTo) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	d.asked = addr
-	var nd net.Dialer
-	return nd.DialContext(ctx, "tcp", d.addr)
-}
-
-func (w *fakeWorker) backend(t *testing.T, mutate func(*Config)) (*Backend, *dialTo) {
-	sum := sha256.Sum256(w.node.RawSubjectPublicKeyInfo)
-	d := &dialTo{addr: w.listener}
-	cfg := Config{ServerID: "nas", TunnelIP: netip.MustParseAddr("10.214.0.10"), CACert: w.ca.cert, SPKI: sum[:],
-		Serial: hex.EncodeToString(w.node.SerialNumber.Bytes()), ControlCert: w.control, Dial: d, Kind: runtime.KindDocker}
-	if mutate != nil {
-		mutate(&cfg)
-	}
-	return New(cfg), d
-}
+// dialTo dials addr whatever the address asked.
+func dialTo(addr string) *workertest.Dialer { return workertest.DialerTo(addr) }
 
 const compose = `services:
   web:
@@ -159,7 +48,7 @@ volumes:
   data: {}
 `
 
-func pushBundle(t *testing.T, b *Backend) {
+func pushBundle(t *testing.T, b *agentrt.Backend) {
 	files := fstest.MapFS{"compose.yml": {Data: []byte(compose), Mode: 0o644}, "env": {Data: []byte("A=1\n"), Mode: 0o600}}
 	m := agentapi.BundleManifest{Instance: "app", Template: "app", Volumes: map[string]string{"data": "portcullis-app_data"}, Files: map[string]agentapi.FileEntry{}}
 	for n, f := range files {
@@ -186,18 +75,20 @@ func volTar(t *testing.T) []byte {
 // (pinned mTLS, the agent's scope checks, the wire types).
 func TestAgentBackendAgainstFakeAgent(t *testing.T) {
 	w := newWorker(t)
-	b, d := w.backend(t, nil)
+	// A route-coverage walk: the down keeps c1 for the calls after it.
+	w.Engine.DownRemovesUnits = false
+	b, d := w.Backend(nil)
 	ctx := context.Background()
 	pushBundle(t, b)
-	if d.asked != "10.214.0.10:7443" {
-		t.Errorf("dialed %q", d.asked)
+	if d.Asked() != "10.214.0.10:7443" {
+		t.Errorf("dialed %q", d.Asked())
 	}
 	mine := map[string]string{docker.LabelProject: "portcullis-app", docker.LabelService: "web"}
-	w.engine.Units = []runtime.Unit{{ID: "c1", Project: "portcullis-app", Instance: "app", Service: "web", State: "running", Labels: mine}}
-	w.engine.Infos["c1"] = runtime.UnitInfo{ID: "c1", Labels: mine, Image: "sha256:x"}
-	w.engine.LogsVal["c1"] = []byte("log line\n")
-	w.engine.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: map[string]string{docker.LabelProject: "portcullis-app"}}
-	w.engine.Contents["portcullis-app_data"] = volTar(t)
+	w.Engine.Units = []runtime.Unit{{ID: "c1", Project: "portcullis-app", Instance: "app", Service: "web", State: "running", Labels: mine}}
+	w.Engine.Infos["c1"] = runtime.UnitInfo{ID: "c1", Labels: mine, Image: "sha256:x"}
+	w.Engine.LogsVal["c1"] = []byte("log line\n")
+	w.Engine.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: map[string]string{docker.LabelProject: "portcullis-app"}}
+	w.Engine.Contents["portcullis-app_data"] = volTar(t)
 	p := runtime.Project{Name: "portcullis-app", Instance: "app"}
 	check := func(what string, err error) {
 		t.Helper()
@@ -275,22 +166,22 @@ func TestAgentBackendAgainstFakeAgent(t *testing.T) {
 	if err := b.DeliverFile(ctx, "app", runtime.FileDelivery{Name: "settings", Data: []byte("{}"), Secrets: []byte("{}")}); err == nil || !strings.Contains(err.Error(), "primary-only") {
 		t.Errorf("a secrets file delivered: %v", err)
 	}
-	calls := strings.Join(w.engine.Calls(), "\n")
+	calls := strings.Join(w.Engine.Calls(), "\n")
 	for _, want := range []string{"create portcullis-app", "up portcullis-app", "down portcullis-app", "down-by-name portcullis-app", "pull ghcr.io/example/app:1",
 		"ensure-image ghcr.io/example/app:1", "exec c1", "exec-split c1", "signal c1 HUP", "fixer [" + wagent.AgentBinary + " folderfix scan"} {
 		if !strings.Contains(calls, want) {
 			t.Errorf("the engine never got %q:\n%s", want, calls)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(w.dataDir, "appfiles", "app", "settings", "settings.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(w.DataDir, "appfiles", "app", "settings", "settings.json")); err != nil {
 		t.Errorf("delivered file: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(w.dataDir, "appfiles", "app", "settings", "settings.secrets.json")); err == nil {
+	if _, err := os.Stat(filepath.Join(w.DataDir, "appfiles", "app", "settings", "settings.secrets.json")); err == nil {
 		t.Error("a secrets file reached the worker")
 	}
 	// Refusals come back with the agent's status.
 	err = b.Create(ctx, runtime.Project{Name: "portcullis-other", Instance: "other"})
-	var ae *Error
+	var ae *agentrt.Error
 	if !errors.As(err, &ae) || ae.Status != http.StatusNotFound {
 		t.Errorf("an unbundled project: %v", err)
 	}
@@ -305,25 +196,25 @@ func TestAgentBackendAgainstFakeAgent(t *testing.T) {
 func TestIdentityMismatch(t *testing.T) {
 	w := newWorker(t)
 	other := newWorker(t)
-	for name, mut := range map[string]func(*Config){
-		"another serial":     func(c *Config) { c.Serial = "01" },
-		"another SPKI":       func(c *Config) { c.SPKI = make([]byte, 32) },
-		"another server id":  func(c *Config) { c.ServerID = "nas2" },
-		"another server's":   func(c *Config) { c.Dial = &dialTo{addr: other.listener} },
-		"another CA trusted": func(c *Config) { c.CACert = other.ca.cert },
+	for name, mut := range map[string]func(*agentrt.Config){
+		"another serial":     func(c *agentrt.Config) { c.Serial = "01" },
+		"another SPKI":       func(c *agentrt.Config) { c.SPKI = make([]byte, 32) },
+		"another server id":  func(c *agentrt.Config) { c.ServerID = "nas2" },
+		"another server's":   func(c *agentrt.Config) { c.Dial = dialTo(other.Server.Listener.Addr().String()) },
+		"another CA trusted": func(c *agentrt.Config) { c.CACert = other.CA.Cert },
 	} {
 		mismatch := false
-		b, _ := w.backend(t, func(c *Config) { mut(c); c.OnMismatch = func() { mismatch = true } })
+		b, _ := w.Backend(func(c *agentrt.Config) { mut(c); c.OnMismatch = func() { mismatch = true } })
 		_, err := b.AgentInfo(context.Background())
-		var ae *Error
+		var ae *agentrt.Error
 		if err == nil || !errors.As(err, &ae) || ae.Status != http.StatusBadGateway {
 			t.Errorf("%s: %v", name, err)
 		}
-		if (name == "another serial" || name == "another SPKI") && (!mismatch || !errors.Is(err, ErrIdentityMismatch)) {
+		if (name == "another serial" || name == "another SPKI") && (!mismatch || !errors.Is(err, agentrt.ErrIdentityMismatch)) {
 			t.Errorf("%s: mismatch %v err %v", name, mismatch, err)
 		}
 	}
-	b, _ := w.backend(t, nil)
+	b, _ := w.Backend(nil)
 	if _, err := b.AgentInfo(context.Background()); err != nil {
 		t.Errorf("the pinned identity: %v", err)
 	}
@@ -339,9 +230,9 @@ func TestOversizedInfoCut(t *testing.T) {
 	} {
 		ln, _ := net.Listen("tcp", "127.0.0.1:0")
 		srv := &http.Server{Handler: http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) { io.WriteString(rw, body) }),
-			TLSConfig: &tls.Config{Certificates: []tls.Certificate{w.serverCert(t)}, ClientAuth: tls.RequireAnyClientCert}}
+			TLSConfig: &tls.Config{Certificates: []tls.Certificate{serverCert(t, w)}, ClientAuth: tls.RequireAnyClientCert}}
 		go srv.ServeTLS(ln, "", "")
-		b, _ := w.backend(t, func(c *Config) { c.Dial = &dialTo{addr: ln.Addr().String()} })
+		b, _ := w.Backend(func(c *agentrt.Config) { c.Dial = dialTo(ln.Addr().String()) })
 		if _, err := b.AgentInfo(context.Background()); err == nil {
 			t.Errorf("%s: decoded", name)
 		}
@@ -349,9 +240,9 @@ func TestOversizedInfoCut(t *testing.T) {
 	}
 }
 
-func (w *fakeWorker) serverCert(t *testing.T) tls.Certificate {
-	key, _ := os.ReadFile(filepath.Join(w.dataDir, "identity", "tls.key"))
-	crt, _ := os.ReadFile(filepath.Join(w.dataDir, "identity", "tls.crt"))
+func serverCert(t *testing.T, w *workertest.Worker) tls.Certificate {
+	key, _ := os.ReadFile(filepath.Join(w.DataDir, "identity", "tls.key"))
+	crt, _ := os.ReadFile(filepath.Join(w.DataDir, "identity", "tls.crt"))
 	c, err := tls.X509KeyPair(crt, key)
 	if err != nil {
 		t.Fatal(err)
@@ -365,13 +256,13 @@ func TestAgentVersionGate(t *testing.T) {
 	w := newWorker(t)
 	ctx := context.Background()
 	for hub, ok := range map[string]bool{wagent.Version: true, "0.2.0": true, "0.3.0": false, "1.1.0": false, "edge": false} {
-		b, _ := w.backend(t, func(c *Config) { c.HubVersion = hub })
+		b, _ := w.Backend(func(c *agentrt.Config) { c.HubVersion = hub })
 		_, err := b.List(ctx, runtime.Filter{})
-		var ae *Error
+		var ae *agentrt.Error
 		if ok && err != nil {
 			t.Errorf("hub %s: %v", hub, err)
 		}
-		if !ok && (!errors.As(err, &ae) || ae.Status != http.StatusConflict || !errors.Is(err, ErrIncompatible) || !strings.Contains(err.Error(), "server_agent_incompatible")) {
+		if !ok && (!errors.As(err, &ae) || ae.Status != http.StatusConflict || !errors.Is(err, agentrt.ErrIncompatible) || !strings.Contains(err.Error(), "server_agent_incompatible")) {
 			t.Errorf("hub %s (agent %s): %v", hub, wagent.Version, err)
 		}
 		if _, err := b.AgentInfo(ctx); err != nil {
@@ -409,11 +300,11 @@ func TestAgentStatusPolicy(t *testing.T) {
 			}
 			rw.WriteHeader(c.status)
 			io.WriteString(rw, c.body)
-		}), TLSConfig: &tls.Config{Certificates: []tls.Certificate{w.serverCert(t)}, ClientAuth: tls.RequireAnyClientCert}}
+		}), TLSConfig: &tls.Config{Certificates: []tls.Certificate{serverCert(t, w)}, ClientAuth: tls.RequireAnyClientCert}}
 		go srv.ServeTLS(ln, "", "")
-		b, _ := w.backend(t, func(cfg *Config) { cfg.Dial = &dialTo{addr: ln.Addr().String()} })
+		b, _ := w.Backend(func(cfg *agentrt.Config) { cfg.Dial = dialTo(ln.Addr().String()) })
 		err := b.Down(context.Background(), runtime.Project{Instance: "app"})
-		var ae *Error
+		var ae *agentrt.Error
 		if !errors.As(err, &ae) || ae.Status != c.want || (c.msg != "" && ae.Msg != c.msg) || len([]rune(ae.Msg)) > 200 {
 			t.Errorf("%d: %v (%+v)", c.status, err, ae)
 		}
@@ -427,8 +318,8 @@ func TestHelperCleanupBounded(t *testing.T) {
 	w := newWorker(t)
 	block := make(chan struct{})
 	defer close(block)
-	orig := w.srv.Config.Handler
-	w.srv.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	orig := w.Server.Config.Handler
+	w.Server.Config.Handler = http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/v1/helpers/") {
 			select {
 			case <-block:
@@ -438,12 +329,12 @@ func TestHelperCleanupBounded(t *testing.T) {
 		}
 		orig.ServeHTTP(rw, r)
 	})
-	old := HelperCleanupTimeout
-	HelperCleanupTimeout = 200 * time.Millisecond
-	defer func() { HelperCleanupTimeout = old }()
-	b, _ := w.backend(t, nil)
+	old := agentrt.HelperCleanupTimeout
+	agentrt.HelperCleanupTimeout = 200 * time.Millisecond
+	defer func() { agentrt.HelperCleanupTimeout = old }()
+	b, _ := w.Backend(nil)
 	start := time.Now()
-	b.deleteHelper("h1")
+	b.DeleteHelperForTest("h1")
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("deleteHelper took %s", d)
 	}
@@ -456,14 +347,14 @@ func TestHelperCleanupBounded(t *testing.T) {
 // enrolment fail "the worker refused the enrolment proof").
 func TestEnrollingPeerSPKIIsTheDER(t *testing.T) {
 	w := newWorker(t)
-	b, _ := w.backend(t, func(c *Config) { c.Enrolling = true })
+	b, _ := w.Backend(func(c *agentrt.Config) { c.Enrolling = true })
 	b.AgentInfo(context.Background())
 	got := b.PeerSPKI()
-	if !bytes.Equal(got, w.node.RawSubjectPublicKeyInfo) {
-		t.Fatalf("PeerSPKI is %d bytes, not the certificate's DER SPKI (%d bytes)", len(got), len(w.node.RawSubjectPublicKeyInfo))
+	if !bytes.Equal(got, w.Node.RawSubjectPublicKeyInfo) {
+		t.Fatalf("PeerSPKI is %d bytes, not the certificate's DER SPKI (%d bytes)", len(got), len(w.Node.RawSubjectPublicKeyInfo))
 	}
 	secret, nonce := bytes.Repeat([]byte{7}, servers.SecretLen), bytes.Repeat([]byte{9}, servers.NonceLen)
-	if !servers.VerifyProof(secret, nonce, "nas", w.node.RawSubjectPublicKeyInfo, servers.Proof(secret, nonce, "nas", got)) {
+	if !servers.VerifyProof(secret, nonce, "nas", w.Node.RawSubjectPublicKeyInfo, servers.Proof(secret, nonce, "nas", got)) {
 		t.Fatal("the Hub's proof doesn't verify the agent's way")
 	}
 }
@@ -473,7 +364,7 @@ func TestEnrollingPeerSPKIIsTheDER(t *testing.T) {
 // agent's 400, and a plain Pull of the same ref is refused (imageOK).
 func TestPreflightPullOverTheWire(t *testing.T) {
 	w := newWorker(t)
-	b, _ := w.backend(t, nil)
+	b, _ := w.Backend(nil)
 	ref := "docker.io/library/busybox:1@sha256:" + strings.Repeat("e", 64)
 	if err := b.Pull(context.Background(), ref, nil); err == nil {
 		t.Fatal("a plain pull without a bundle was accepted")
@@ -481,8 +372,8 @@ func TestPreflightPullOverTheWire(t *testing.T) {
 	if err := b.PreflightPull(context.Background(), ref); err != nil {
 		t.Fatalf("PreflightPull: %v", err)
 	}
-	if !slices.Contains(w.engine.Calls(), "pull "+ref) {
-		t.Errorf("the engine never pulled %s: %v", ref, w.engine.Calls())
+	if !slices.Contains(w.Engine.Calls(), "pull "+ref) {
+		t.Errorf("the engine never pulled %s: %v", ref, w.Engine.Calls())
 	}
 	if err := b.PreflightPull(context.Background(), "docker.io/library/busybox:1"); err == nil || !strings.Contains(err.Error(), "pinned by digest") {
 		t.Errorf("an unpinned preflight: %v", err)
@@ -495,7 +386,7 @@ func TestPreflightPullOverTheWire(t *testing.T) {
 // the Hub never reads as "down"; an id it never held is a 404 error.
 func TestDownOfUnbundledProject(t *testing.T) {
 	w := newWorker(t)
-	b, _ := w.backend(t, nil)
+	b, _ := w.Backend(nil)
 	pushBundle(t, b)
 	if err := b.RemoveProject(context.Background(), "app"); err != nil {
 		t.Fatal(err)
@@ -504,10 +395,11 @@ func TestDownOfUnbundledProject(t *testing.T) {
 	if err := b.Down(context.Background(), p); err != nil {
 		t.Fatalf("down with nothing there: %v", err)
 	}
-	w.engine.Lock()
-	w.engine.Units = append(w.engine.Units, runtime.Unit{ID: "c9", Project: "portcullis-app", Instance: "app", State: "running"})
-	w.engine.Unlock()
-	var ae *Error
+	w.Engine.Lock()
+	w.Engine.DownRemovesUnits = false // a container the engine's down can't remove
+	w.Engine.Units = append(w.Engine.Units, runtime.Unit{ID: "c9", Project: "portcullis-app", Instance: "app", State: "running"})
+	w.Engine.Unlock()
+	var ae *agentrt.Error
 	if err := b.Down(context.Background(), p); !errors.As(err, &ae) || ae.Status != http.StatusConflict || !strings.Contains(ae.Msg, "still running") {
 		t.Errorf("down with a leftover that stays: %v", err)
 	}
@@ -522,9 +414,9 @@ func TestDownOfUnbundledProject(t *testing.T) {
 // the server and the volume.
 func TestCreateVolumeRefusalIs409(t *testing.T) {
 	w := newWorker(t)
-	b, _ := w.backend(t, nil)
+	b, _ := w.Backend(nil)
 	err := b.CreateVolume(context.Background(), runtime.Volume{Name: "portcullis_se1-marker", Labels: map[string]string{docker.LabelProject: "portcullis-se1"}})
-	var ae *Error
+	var ae *agentrt.Error
 	if !errors.As(err, &ae) || ae.Status != http.StatusConflict ||
 		ae.Msg != "the server nas refused to create volume portcullis_se1-marker: a previous copy may still be there" {
 		t.Fatalf("%v", err)

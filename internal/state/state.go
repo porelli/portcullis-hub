@@ -182,6 +182,11 @@ type Move struct {
 	Archive   string    `json:"archive,omitempty" yaml:"archive,omitempty"`
 	StartedAt time.Time `json:"started_at" yaml:"started_at"`
 	Phase     string    `json:"phase" yaml:"phase"`
+	// Pushed: a bundle push to the target may have landed during this
+	// move (set before the push, cleared when the agent refused it):
+	// only then does a rollback or a recovery take the target down
+	// (final review H2: a never-held id's down is the agent's 404).
+	Pushed bool `json:"pushed,omitempty" yaml:"pushed,omitempty"`
 }
 
 // MovedFrom is a copy a move left behind on a server: when, and the
@@ -190,6 +195,12 @@ type MovedFrom struct {
 	Server  string    `json:"server" yaml:"server"`
 	At      time.Time `json:"at" yaml:"at"`
 	Volumes []string  `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	// Keys: each volume name → its compose key, and Template: the
+	// instance's template id, both pinned at move time (final review
+	// H1): a worker copy's removal brings exactly these into the agent's
+	// scope with a volumes-only bundle that passes its validation.
+	Keys     map[string]string `json:"keys,omitempty" yaml:"keys,omitempty"`
+	Template string            `json:"template,omitempty" yaml:"template,omitempty"`
 }
 
 // AppState tracks which apps are enabled and their settings.

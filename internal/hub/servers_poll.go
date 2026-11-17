@@ -14,6 +14,7 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // The servers loop (contract §17.3): every tick it renews the control
@@ -89,9 +90,10 @@ func (h *Hub) notePoll(id string, info *agentapi.Info, reason string) {
 	ps := h.pollOf(id)
 	if info != nil {
 		i := *info
+		i = sanitizeInfo(i)
 		ps.info, ps.misses = &i, 0
 	}
-	ps.reason = reason
+	ps.reason = untrusted(reason, 300) // the agent's words may be in it (L4)
 }
 
 // RunServers runs the servers loop every `every` (30 s) until ctx ends.
@@ -494,4 +496,29 @@ func (h *Hub) stopWatch(id string) {
 		ps.stop()
 		ps.stop, ps.watched = nil, nil
 	}
+}
+
+// sanitizeInfo makes a worker's /v1/info text fields safe to show, log
+// and hand an AI client (final review L4): its arch, versions, data dir,
+// quarantine reasons and error text one clipped line each, with no
+// control or bidi characters. Bind roots aren't rewritten (they are
+// paths the checks compare): one carrying a control character is dropped.
+func sanitizeInfo(i agentapi.Info) agentapi.Info {
+	i.Arch, i.AgentVersion, i.EngineVersion = untrusted(i.Arch, 20), untrusted(i.AgentVersion, 40), untrusted(i.EngineVersion, 40)
+	i.QuarantineError, i.OwnProject = untrusted(i.QuarantineError, 300), untrusted(i.OwnProject, 80)
+	if len(i.Quarantined) > 0 {
+		q := make(map[string]string, len(i.Quarantined))
+		for k, v := range i.Quarantined {
+			q[untrusted(k, 64)] = untrusted(v, 300)
+		}
+		i.Quarantined = q
+	}
+	roots := i.BindRoots[:0:0]
+	for _, r := range i.BindRoots {
+		if !templates.HasControlChars(r) {
+			roots = append(roots, r)
+		}
+	}
+	i.BindRoots = roots
+	return i
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/docker"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/templates"
@@ -24,8 +25,7 @@ const (
 // pullFailureCategory classifies a pre-pull failure without keeping any
 // of its text.
 func pullFailureCategory(err error) string {
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "no matching manifest") || strings.Contains(msg, "platform") || strings.Contains(msg, "architecture") {
+	if noPlatform(err) {
 		return pullArchMismatch
 	}
 	status := 0
@@ -40,6 +40,14 @@ func pullFailureCategory(err error) string {
 		return pullRefused
 	}
 	return pullFailed
+}
+
+// noPlatform: a worker's pull failed for want of an image for its
+// platform — the agent's error_kind only, never its words (final review
+// B2: a worker's message is untrusted and masked anyway).
+func noPlatform(err error) bool {
+	var ae *agentrt.Error
+	return errors.As(err, &ae) && ae.Kind == agentapi.ErrorKindNoPlatform
 }
 
 // placedImages: every image a worker instance's rendered project runs
@@ -111,7 +119,7 @@ func (h *Hub) placedImages(ctx context.Context, t *templates.Template, server st
 				log.Printf("placement: pre-pull of service %s's overridden image of %s on %s: %s", svcOf[ref], t.ID, server, cat)
 				arch := ""
 				if inf := h.serverInfo(server); inf != nil {
-					arch = inf.Arch
+					arch = untrusted(inf.Arch, 20)
 				}
 				if cat == pullArchMismatch {
 					return statusErr(409, "an overridden image of %s has no %s image", t.ID, arch)

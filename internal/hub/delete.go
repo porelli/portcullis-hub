@@ -189,6 +189,24 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor.User, err)
 		}
 	}
+	// Kept copies (final review M1): a delete never forgets one. They go
+	// first (each confirmed gone), or nothing is deleted. A forget leaves
+	// those on a revoked or removed server (unreachable for good).
+	h.mu.RLock()
+	var copies []state.MovedFrom
+	for _, c := range keptCopies(h.st.Instances[id]) {
+		srv, known := h.st.Servers[c.Server]
+		if c.Server != "" && forgetting(ctx) && (!known || srv.State == ServerRevoked) {
+			continue
+		}
+		copies = append(copies, c)
+	}
+	h.mu.RUnlock()
+	if len(copies) > 0 {
+		if err := h.removeKeptCopies(ctx, id, copies); err != nil {
+			return res, statusErr(409, "the old copies of %s couldn't be removed first, so nothing was deleted: %v (bring the server back, or use Remove the old copy…, then delete again)", id, err)
+		}
+	}
 	p := progressFrom(ctx)
 	retry := tg.entry.State == state.InstanceDeleting || forgetting(ctx)
 	if !retry {

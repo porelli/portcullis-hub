@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/runtime"
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -189,6 +191,13 @@ func (h *Hub) renderRelaysLocked(t *templates.Template, model *types.Project) ([
 func (h *Hub) relaysUp(ctx context.Context, id string) error {
 	if h.rt == nil {
 		return nil
+	}
+	// Never for an orphaned instance (L1): its relays stay down after a
+	// revocation.
+	if h.serverOf(id) != "" {
+		if err := h.notOrphaned(id); err != nil {
+			return err
+		}
 	}
 	if h.relayTokenSHA(id) == "" {
 		if err := h.newRelayToken(id); err != nil {
@@ -384,6 +393,15 @@ func (h *Hub) bundleOf(ctx context.Context, id string) (memFS, agentapi.BundleMa
 			if d.Type()&fs.ModeSymlink != 0 || !d.Type().IsRegular() {
 				return nil
 			}
+			// A settings secrets file never leaves the primary (§17.4; a
+			// template delivering one is primary-only). One left over from
+			// before the instance was placed (a template that stopped
+			// delivering it) is stale: skipped, never sent (the agent
+			// would refuse every push for it; final review I2).
+			if prefix == bundleAppfiles && strings.HasSuffix(d.Name(), ".secrets.json") {
+				log.Printf("placement: %s: a stale settings secrets file (%s) stays on the primary", id, d.Name())
+				return nil
+			}
 			rel, _ := filepath.Rel(root, p)
 			return add(prefix+filepath.ToSlash(rel), p, true)
 		})
@@ -421,7 +439,36 @@ func (h *Hub) bundleOf(ctx context.Context, id string) (memFS, agentapi.BundleMa
 
 // pushBundle sends instance id's bundle to its worker (before every
 // create: the agent validates it and runs only its resolved model).
+// pushAllowed: a bundle or a data file may go to server now — ready, not
+// revoked or being revoked or removed (final review M2: a push racing a
+// revocation never reaches the worker; the backend's own Revoke aborts
+// one already sent). "" (the primary): always.
+func (h *Hub) pushAllowed(server string) error {
+	if server == "" {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	s, ok := h.st.Servers[server]
+	switch {
+	case !ok:
+		return statusErr(409, "server %s is unknown", server)
+	case s.Revoke != nil || s.State == ServerRevoked:
+		return statusErr(409, "server %s is revoked: nothing more is sent to it", nameOr(s.Name, server))
+	case h.removing[server]:
+		return statusErr(409, "server %s is being removed", nameOr(s.Name, server))
+	}
+	return nil
+}
+
 func (h *Hub) pushBundle(ctx context.Context, id string, rt runtime.Instances) error {
+	return h.pushBundleAdopt(ctx, id, rt, false)
+}
+
+// pushBundleAdopt is pushBundle; adopt marks the bundle AdoptVolumes (an
+// undo onto its kept copy: the agent would refuse a first bundle meeting
+// the instance's existing volumes otherwise).
+func (h *Hub) pushBundleAdopt(ctx context.Context, id string, rt runtime.Instances, adopt bool) error {
 	// Every push re-checks placement and the quarantine (fix round 3,
 	// B2-H1): a template turned primary-only sends nothing.
 	if err := h.placedCheck(ctx, id, false, true); err != nil {
@@ -435,7 +482,18 @@ func (h *Hub) pushBundle(ctx context.Context, id string, rt runtime.Instances) e
 	if err != nil {
 		return err
 	}
+	m.AdoptVolumes = adopt
+	server := h.serverOf(id)
+	if err := h.pushAllowed(server); err != nil {
+		return err
+	}
+	// A move's target: marked before the push may land (H2).
+	h.markMovePush(id, server, true)
 	if err := b.PushBundle(ctx, id, files, m); err != nil {
+		var ae *agentrt.Error
+		if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 {
+			h.markMovePush(id, server, false) // refused: nothing landed
+		}
 		return err
 	}
 	if server := h.serverOf(id); server != "" {

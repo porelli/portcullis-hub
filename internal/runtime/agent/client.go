@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -135,7 +136,10 @@ type Error struct {
 	// AgentStatus is the status the agent answered (0: none, a transport
 	// or identity failure); Status may be 502 for it (passedStatuses).
 	AgentStatus int
-	err         error
+	// Kind is the agent's error_kind (agentapi.ErrorKind*): the only
+	// part of a worker's failure the Hub classifies on (final review B2).
+	Kind string
+	err  error
 }
 
 func (e *Error) Error() string   { return e.Msg }
@@ -196,7 +200,16 @@ type client struct {
 	mu           sync.Mutex
 	agentVersion string
 	peerSPKI     []byte
+
+	// revoked (final review M2): the server was revoked; every call is
+	// refused from then on, and stop aborts the calls in flight.
+	revoked atomic.Bool
+	stopCtx context.Context
+	stop    context.CancelFunc
 }
+
+// ErrRevoked is every call to a revoked server's backend.
+var ErrRevoked = errors.New("the server is revoked")
 
 // gate refuses every call but /v1/info to an agent of an incompatible
 // version (its version read once, then from each /v1/info).
@@ -241,6 +254,7 @@ func newClient(cfg Config) *client {
 		Certificates: []tls.Certificate{cfg.ControlCert},
 	}
 	c := &client{cfg: cfg, base: "https://" + servers.NodeName(cfg.ServerID)}
+	c.stopCtx, c.stop = context.WithCancel(context.Background())
 	tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
 			return ErrIdentityMismatch
@@ -298,6 +312,9 @@ func path(r agentapi.Route, vals ...string) string {
 // do sends one request; a non-2xx answer becomes *Error from the agent's
 // {"error"} (≤ MaxJSON read, strictly decoded, else a generic message).
 func (c *client) do(ctx context.Context, method, p string, q url.Values, body io.Reader, ctype string, hdr map[string]string) (*http.Response, error) {
+	if c.revoked.Load() {
+		return nil, c.revokedErr()
+	}
 	if p != agentapi.Routes["Info"][0].Path {
 		if err := c.gate(ctx); err != nil {
 			return nil, err
@@ -313,6 +330,16 @@ func (c *client) do(ctx context.Context, method, p string, q url.Values, body io
 	cancel := context.CancelFunc(func() {})
 	if _, ok := ctx.Deadline(); !ok {
 		ctx, cancel = context.WithTimeout(ctx, CallTimeout)
+	}
+	// A revocation aborts the call (its body included) at once.
+	inner := cancel
+	cctx, ccancel := context.WithCancel(ctx)
+	stopAfter := context.AfterFunc(c.stopCtx, ccancel)
+	ctx = cctx
+	cancel = func() { stopAfter(); ccancel(); inner() }
+	if c.stopCtx.Err() != nil {
+		cancel()
+		return nil, c.revokedErr()
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
@@ -338,9 +365,17 @@ func (c *client) do(ctx context.Context, method, p string, q url.Values, body io
 		if agentapi.Decode(resp.Body, agentapi.MaxJSON, &e) == nil {
 			msg = e.Error
 		}
-		return nil, c.agentError(resp.StatusCode, msg)
+		ae := c.agentError(resp.StatusCode, msg)
+		ae.Kind = e.Kind
+		return nil, ae
 	}
 	return resp, nil
+}
+
+// revokedErr is the refusal of a revoked server's call: 409, its own
+// sentinel (never "answered unexpectedly").
+func (c *client) revokedErr() error {
+	return &Error{Status: 409, Msg: "the server " + c.cfg.ServerID + " is revoked", AgentStatus: 0, err: ErrRevoked}
 }
 
 // CallTimeout bounds any agent call whose context has no deadline (long

@@ -19,6 +19,7 @@ import (
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/vpn"
 )
 
 // Revocation and removal (contract §17.6). The server is revoked from
@@ -115,6 +116,19 @@ func (h *Hub) RemoveServer(ctx context.Context, actor directory.Actor, id string
 	return nil
 }
 
+// linkListsPeer reads link's status: listed, it still names server id's
+// peer; known false when the status can't be read or has no link.
+func (h *Hub) linkListsPeer(id string) (listed, known bool) {
+	if h.cfg.VPNStatusFile == "" {
+		return false, true // no link at all: nothing lists the peer
+	}
+	st, err := vpn.ReadStatus(h.cfg.VPNStatusFile, h.now())
+	if err != nil {
+		return false, false
+	}
+	return st.LinkLists(id)
+}
+
 // backendOf is a server's agent backend (any state).
 func (h *Hub) backendOf(id string) (*agentrt.Backend, bool) {
 	r := h.reg()
@@ -159,6 +173,12 @@ func (h *Hub) beginRevokeLocked(id string, remove bool) {
 		log.Printf("servers: revoking %s: link.json: %v (retried)", id, err)
 	}
 	h.saveLocked()
+	// The live backend goes dead at once (final review M2): an op that
+	// took it before keeps nothing working — later calls are refused,
+	// the ones in flight aborted.
+	if b, ok := h.backendOf(id); ok {
+		b.Revoke()
+	}
 	h.setServer(id, &serverRT{Name: s.Name, State: ServerRevoked})
 	h.stopWatch(id)
 }
@@ -229,8 +249,22 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 	} else if h.rt == nil {
 		rv.RelaysDone = true
 	}
-	// 5. rotation.
+	// 5. rotation — only once link has dropped the peer (final review
+	// M2: until then a stale session could still fetch what a push
+	// carried); a status that doesn't show it gone waits (doctor after
+	// a minute: server_secrets_not_rotated).
 	if !rv.Rotated {
+		if listed, known := h.linkListsPeer(id); listed || !known {
+			why := "link still lists the server's peer: the rotation waits until it is gone"
+			if !known {
+				why = "link's status can't be read: the rotation waits until it shows the server's peer gone"
+			}
+			if h.now().Sub(rv.At) > time.Minute {
+				h.noteRotation(id, why)
+			}
+			log.Printf("servers: revoking %s: %s (retried at the next tick)", id, why)
+			goto save
+		}
 		var errs []error
 		for _, iid := range placed {
 			if err := h.rotateInstanceSecrets(ctx, iid); err != nil {
@@ -245,6 +279,7 @@ func (h *Hub) advanceRevoke(ctx context.Context, id string) {
 			h.noteRotation(id, "")
 		}
 	}
+save:
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s, ok = h.st.Servers[id]
@@ -521,7 +556,8 @@ func (h *Hub) serversDoctorInLocked(backups map[string]time.Time) *doctor.Server
 				why = ps.info.Quarantined["*"]
 			}
 			if why != "" {
-				in.Quarantined[id] = server + ": " + why
+				// The agent's words are untrusted (final review L4).
+				in.Quarantined[id] = server + ": " + untrusted(why, 300)
 			}
 		}
 	}

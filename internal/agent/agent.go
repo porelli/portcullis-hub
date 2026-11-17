@@ -94,6 +94,9 @@ type Agent struct {
 	tunnel  *Tunnel
 	refused chan struct{}
 	once    sync.Once
+	// left is closed once POST /v1/leave wiped the identity (B3).
+	left     chan struct{}
+	leftOnce sync.Once
 
 	metricsOnce sync.Once
 	metrics     http.Handler
@@ -113,7 +116,7 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.SwitchTimeout == 0 {
 		cfg.SwitchTimeout = 120 * time.Second
 	}
-	a := &Agent{cfg: cfg, store: Store{Dir: identityDir(cfg.DataDir)}, refused: make(chan struct{})}
+	a := &Agent{cfg: cfg, store: Store{Dir: identityDir(cfg.DataDir)}, refused: make(chan struct{}), left: make(chan struct{})}
 	pins, err := a.store.Pins()
 	if err != nil {
 		return nil, errors.New("this worker hasn't joined: run ./portcullis worker join")
@@ -160,6 +163,13 @@ func (a *Agent) State() string {
 
 // Refused is closed after MaxEnrolFailures wrong proofs.
 func (a *Agent) Refused() <-chan struct{} { return a.refused }
+
+// Left is closed once the Hub's POST /v1/leave wiped the identity: the
+// agent then exits (it has nothing left to serve).
+func (a *Agent) Left() <-chan struct{} { return a.left }
+
+// ErrLeft: the Hub removed this server (POST /v1/leave).
+var ErrLeft = errors.New("the Hub removed this server: its identity is gone (run ./portcullis worker join to enrol it again)")
 
 // TunnelConfig is the tunnel the identity needs now: the bootstrap key
 // while enrolling, the agent's own key once ready.

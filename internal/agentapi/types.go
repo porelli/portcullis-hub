@@ -36,7 +36,14 @@ const Prefix = "/" + Version
 // MaxError runes.
 type Error struct {
 	Error string `json:"error"`
+	// Kind classifies the failure where the Hub must act on it (final
+	// review B2): the Hub never reads the message for that.
+	Kind string `json:"error_kind,omitempty"`
 }
+
+// ErrorKindNoPlatform: the image has no variant for the worker's
+// platform (an architecture mismatch).
+const ErrorKindNoPlatform = "no_platform"
 
 // ErrorBody is msg as the error shape (redact before: this only clips).
 func ErrorBody(msg string) []byte {
@@ -163,6 +170,12 @@ type BundleManifest struct {
 	Template string               `json:"template"`
 	Volumes  map[string]string    `json:"volumes,omitempty"`
 	Files    map[string]FileEntry `json:"files"`
+	// AdoptVolumes: the Hub knowingly brings existing volumes of the
+	// instance into scope (an undo onto a kept copy, a kept copy's
+	// removal). Without it a first bundle of an id the agent never held
+	// is refused while volumes labelled with its project exist (final
+	// review M1: never a silent adoption of an earlier instance's data).
+	AdoptVolumes bool `json:"adopt_volumes,omitempty"`
 }
 
 // FileEntry is one bundle file: its sha256 (hex), permission bits (0–0777;
@@ -342,6 +355,8 @@ type ProgressLine struct {
 	End     bool   `json:"end,omitempty"`
 	Error   string `json:"error,omitempty"`
 	Status  int    `json:"status,omitempty"`
+	// Kind classifies an end line's error (ErrorKindNoPlatform).
+	Kind string `json:"error_kind,omitempty"`
 }
 
 // RefRequest names an image (POST /v1/images/pull, /v1/images/ensure).

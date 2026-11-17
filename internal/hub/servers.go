@@ -25,6 +25,7 @@ import (
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 	"github.com/portcullis/hub/internal/vpn"
 )
 
@@ -504,7 +505,7 @@ func (h *Hub) serverBackend(ctx context.Context, id string, s state.Server, kind
 func untrusted(s string, n int) string {
 	b := []rune(s)
 	for i, r := range b {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029 {
+		if templates.IsControlRune(r) { // bidi controls too (L4)
 			b[i] = ' '
 		}
 	}

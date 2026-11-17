@@ -377,7 +377,7 @@ func (h *Hub) undoEnable(id string, p *Progress) error {
 			if tmpl != nil {
 				err = h.rollbackUp(tmpl)
 			} else {
-				err = h.rtOf(id).DownByName(ctx, projectName(id))
+				err = h.downByName(ctx, id)
 			}
 			if err != nil {
 				return fmt.Errorf("compose down: %w", err)
@@ -629,7 +629,7 @@ func (h *Hub) undoRestart(id string, p *Progress) error {
 				err = h.rollbackUp(tmpl)
 			} else {
 				h.awaitDelivery(id)
-				err = h.rtOf(id).DownByName(context.Background(), projectName(id))
+				err = h.downByName(context.Background(), id)
 			}
 			if err != nil {
 				return fmt.Errorf("compose down: %w", err)

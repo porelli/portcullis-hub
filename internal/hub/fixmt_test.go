@@ -10,13 +10,14 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/workertest"
 )
 
 // Fix round after T12/T13 (review-merge-t12-t13.md).
 
-// workerRoot: nas reports its engine data root at root and folder roots
-// roots (its facts refreshed).
-func workerRoot(t *testing.T, p *placedFixture, root string, roots ...string) {
+// fakeWorkerRoot: the fake nas reports its engine data root at root and
+// folder roots roots (its facts refreshed).
+func fakeWorkerRoot(t *testing.T, p *fakePlacedFixture, root string, roots ...string) {
 	t.Helper()
 	p.w.mu.Lock()
 	p.w.info.BindRoots = roots
@@ -33,8 +34,14 @@ func workerRoot(t *testing.T, p *placedFixture, root string, roots ...string) {
 // values are judged against the worker's engine root, never the
 // primary's; a primary instance's against the primary's.
 func TestDockerRootTargetServer(t *testing.T) {
-	p := newPlacedFixture(t)
-	workerRoot(t, p, "/srv/docker", "/srv", "/var")
+	// The real agent (its engine root /srv/docker, roots /srv and /var).
+	p := newPlacedFixtureOpts(t, workertest.Opts{BindRoots: []string{"/srv", "/var"}})
+	p.w.mu.Lock()
+	p.w.info.DockerRootDir = "/srv/docker"
+	p.w.mu.Unlock()
+	if _, err := p.h.refreshServerFacts(context.Background(), "nas"); err != nil {
+		t.Fatal(err)
+	}
 	priRoot, err := p.h.rt.Info(context.Background())
 	if err != nil || len(priRoot.ForbiddenRoots) == 0 {
 		t.Fatalf("primary root %+v %v", priRoot, err)
@@ -153,13 +160,13 @@ func TestServerDetailOneSnapshot(t *testing.T) {
 // TestFolderServerNeverChanges (I3): an update naming another server is
 // 409, the path unchanged or not.
 func TestFolderServerNeverChanges(t *testing.T) {
-	p := newPlacedFixture(t)
+	p := newFakePlacedFixture(t)
 	d := &fakeDisk{paths: map[string]*diskPath{}, symlinks: map[string]bool{}}
 	d.add("/mnt/media", "ext4")
 	p.w.mu.Lock()
 	p.w.disk = d
 	p.w.mu.Unlock()
-	workerRoot(t, p, "/var/lib/docker", "/mnt")
+	fakeWorkerRoot(t, p, "/var/lib/docker", "/mnt")
 	if _, _, err := p.h.CreateFolder(context.Background(), FolderInput{ID: "media", Name: "Media", Path: "/mnt/media", Server: "nas"}, admin); err != nil {
 		t.Fatal(err)
 	}

@@ -80,6 +80,7 @@ func TestRevokeRacesRegistry(t *testing.T) {
 					return
 				}
 				fired = true
+				sf.link.drop("nas") // link reloaded without the peer (M2)
 				if err := sf.h.RevokeServer(context.Background(), admin, id); err != nil {
 					t.Error(err)
 				}
@@ -308,6 +309,7 @@ func TestRevokeRotatesWithoutTemplate(t *testing.T) {
 	sf.idp.mu.Lock()
 	sf.idp.deleteErr = errors.New("keycloak down")
 	sf.idp.mu.Unlock()
+	sf.link.drop("nas") // link reloaded without the peer (M2)
 	sf.h.RevokeServer(context.Background(), admin, "nas")
 	if s, _ := sf.server("nas"); s.Revoke == nil || s.Revoke.Rotated {
 		t.Fatalf("rotated with Keycloak failing: %+v", s.Revoke)

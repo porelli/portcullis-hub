@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
@@ -91,7 +93,7 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", t.ID)
 	}
 	seq := h.owedSeqOf(t.ID)
-	live, err := h.prepareUp(t)
+	live, err := h.prepareUpCtx(ctx, t)
 	if err != nil {
 		return err
 	}
@@ -109,6 +111,12 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 // anything (an app is never left down by a refusal). Returns the live
 // view the up uses. Failures are *StatusError.
 func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
+	return h.prepareUpCtx(context.Background(), t)
+}
+
+// prepareUpCtx is prepareUp under ctx: an operation's Stop ends its slow
+// parts (the placed images' preflight; final review L5).
+func (h *Hub) prepareUpCtx(ctx context.Context, t *templates.Template) (*templates.Template, error) {
 	// A moving instance renders and starts only from its move, undo or
 	// recovery (R3-L11: restartSteps and the others come through here).
 	h.mu.RLock()
@@ -123,7 +131,13 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		// A placed instance (fix round 3, B2-H1): its template must still
 		// be placeable and the instance not quarantined, before anything
 		// is rendered or sent.
-		if err := h.placedPreflight(context.Background(), t.ID); err != nil {
+		if err := h.placedPreflight(ctx, t.ID); err != nil {
+			return nil, err
+		}
+		// Never for an orphaned instance (final review L1): nothing, its
+		// relays included, comes back up. (An offline server still gets
+		// its relays narrowed first, B2-H2; its start is refused below.)
+		if err := h.notOrphaned(t.ID); err != nil {
 			return nil, err
 		}
 	} else if h.rootlessOn() {
@@ -171,7 +185,7 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	if server != "" {
 		// Every image pinned by digest, overrides included (§11.7):
 		// refused before the relays or the worker see anything.
-		if err := h.placedImages(context.Background(), live, server); err != nil {
+		if err := h.placedImages(ctx, live, server); err != nil {
 			return nil, err
 		}
 		// B2-H2: the relays follow the Hub's desired labels first, on the
@@ -527,10 +541,39 @@ func (h *Hub) awaitDelivery(id string) {
 // network; volumes are kept), by project name if the files don't work.
 func (h *Hub) rollbackUp(t *templates.Template) error {
 	err := h.rtOf(t.ID).Down(context.Background(), h.runtimeProject(t))
-	if err != nil && h.rtOf(t.ID).DownByName(context.Background(), projectName(t.ID)) == nil {
+	if err != nil && h.downByName(context.Background(), t.ID) == nil {
 		return nil
 	}
 	return err
+}
+
+// notOrphaned: 409 for an orphaned instance (its server revoked or gone:
+// final review L1).
+func (h *Hub) notOrphaned(id string) error {
+	h.mu.RLock()
+	orphaned := h.orphanedLocked(id)
+	h.mu.RUnlock()
+	if orphaned {
+		return statusErr(409, "%s is orphaned (its server was revoked): restore it from a backup or Forget it", id)
+	}
+	return nil
+}
+
+// downByName takes instance id's project down by name; on a worker, the
+// agent's 404 (it holds no bundle of id and never did: nothing of it can
+// run there) is nothing to take down (final review B5).
+func (h *Hub) downByName(ctx context.Context, id string) error {
+	err := h.rtOf(id).DownByName(ctx, projectName(id))
+	if err != nil && h.serverOf(id) != "" && workerNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// workerNotFound: err is a worker agent's 404 (agentrt.Error).
+func workerNotFound(err error) bool {
+	var ae *agentrt.Error
+	return errors.As(err, &ae) && ae.Status == http.StatusNotFound
 }
 
 // composeFailed reports whether err came from compose itself rather than
@@ -950,7 +993,7 @@ func (h *Hub) disableSteps(ctx context.Context, p *Progress, id string, tmpl *te
 		h.awaitDelivery(id) // composeDown waits otherwise (N4)
 	}
 	if tmpl == nil || downErr != nil {
-		if err := h.rtOf(id).DownByName(context.Background(), projectName(id)); err != nil {
+		if err := h.downByName(context.Background(), id); err != nil {
 			if downErr == nil {
 				downErr = err
 			}
@@ -1138,7 +1181,7 @@ func (h *Hub) restartSteps(ctx context.Context, t *templates.Template) (stopped 
 		return false, nil, nil
 	}
 	seq := h.owedSeqOf(t.ID)
-	live, err := h.prepareUp(t)
+	live, err := h.prepareUpCtx(ctx, t)
 	if err != nil {
 		return false, nil, err
 	}

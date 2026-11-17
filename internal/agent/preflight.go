@@ -124,7 +124,7 @@ func (a *API) preflightPull(w http.ResponseWriter, r *http.Request, ref string) 
 	})
 	end := agentapi.ProgressLine{End: true}
 	if err != nil {
-		end.Error, end.Status = clipMsg(err.Error()), statusOfErr(err)
+		end.Error, end.Status, end.Kind = clipMsg(err.Error()), statusOfErr(err), pullKind(err)
 	} else if !present {
 		a.recordPreflight(ref)
 	}

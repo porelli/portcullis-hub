@@ -57,6 +57,20 @@ func (s *Status) LinkHandshakes() map[string]time.Time {
 	return out
 }
 
+// LinkLists: link's status names peer id (with or without a handshake);
+// known false when the status carries no link state.
+func (s *Status) LinkLists(id string) (listed, known bool) {
+	if s == nil || s.Link == nil {
+		return false, false
+	}
+	for _, p := range s.Link.Peers {
+		if p.ID == id {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 // RoleStatus is a role's health.
 type RoleStatus struct {
 	OK    bool   `json:"ok"`

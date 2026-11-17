@@ -401,6 +401,10 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	if exists {
 		return nil, statusErr(409, "instance %s already exists", id)
 	}
+	// A recorded copy of id on the target (final review M1): never adopted.
+	if keptOn(cur, req.Server) {
+		return nil, statusErr(409, "%s still holds an earlier copy of %s: remove it first", serverLabel(req.Server), id)
+	}
 	// Runtime compatibility (contract §11.10): a template that can't run
 	// here is never created (the API's create and restore into a new id
 	// come through here too).

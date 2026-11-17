@@ -90,7 +90,9 @@ func TestOwedBundleKeptForStuckMove(t *testing.T) {
 		t.Fatalf("not recovered: %+v", in)
 	}
 	p.h.drainOwedBundles(context.Background())
-	if !workerHas(p.w, "signal remove-project plainapp") || owedCount(p) != 0 {
+	// The agent never held it (nothing was pushed): its 404 settles the
+	// removal (final review B4).
+	if owedCount(p) != 0 {
 		t.Errorf("not drained after the recovery: %v", p.w.Calls())
 	}
 }
@@ -176,11 +178,13 @@ func TestUndoMarkerRecovered(t *testing.T) {
 	}
 	ups := upCount(p.runner.Calls(), "portcullis-plainapp")
 	before := len(p.w.Calls())
+	reqs := len(p.w.wt.Requests())
 	p.h.RecoverMoves()
 	if in := p.instance("plainapp"); in.State != "" || in.Move != nil || in.Server != "" || p.h.serverOf("plainapp") != "" {
 		t.Errorf("after recovery %+v", in)
 	}
-	if c := p.w.Calls()[before:]; !slices.Contains(c, "down portcullis-plainapp") || slices.Contains(c, "up portcullis-plainapp") {
+	// The down reached the agent (nothing of it runs there: its 204).
+	if r := p.w.wt.Requests()[reqs:]; !slices.Contains(r, "POST /v1/projects/plainapp/down") || slices.Contains(p.w.Calls()[before:], "up portcullis-plainapp") {
 		t.Errorf("worker calls %v", p.w.Calls())
 	}
 	if upCount(p.runner.Calls(), "portcullis-plainapp") != ups {

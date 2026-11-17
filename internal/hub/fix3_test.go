@@ -119,7 +119,8 @@ func TestRelayExposureDrift(t *testing.T) {
 	labels[docker.LabelProject], labels[docker.LabelService] = "portcullis-plainapp", "web"
 	// The worker runs it (its state is the worker's).
 	p.w.Lock()
-	p.w.Units = []runtime.Unit{{ID: "w-1", Project: "portcullis-plainapp", Instance: "plainapp", Service: "web", State: "running"}}
+	p.w.eng.Units = []runtime.Unit{{ID: "w-1", Project: "portcullis-plainapp", Instance: "plainapp", Service: "web", State: "running",
+		Labels: map[string]string{docker.LabelProject: "portcullis-plainapp", docker.LabelService: "web"}}}
 	p.w.Unlock()
 	set := func(l map[string]string) {
 		p.engine.mu.Lock()
@@ -162,9 +163,7 @@ func TestRelayExposureDrift(t *testing.T) {
 func TestQuarantinedInstanceRefused(t *testing.T) {
 	p := newPlacedFixture(t)
 	placedEnabled(t, p, "plainapp")
-	p.w.mu.Lock()
-	p.w.info.Quarantined = map[string]string{"plainapp": "a symlink in a bind source"}
-	p.w.mu.Unlock()
+	p.w.quarantine("plainapp", "a symlink in a bind source")
 	p.h.refreshServerFacts(context.Background(), "nas")
 	bundles := len(p.w.bundles)
 	if err := p.h.RestartApp("plainapp"); errStatus(err) != 409 || !strings.Contains(err.Error(), "quarantined") {
@@ -200,6 +199,10 @@ func TestMoveRecoveryHoldsLock(t *testing.T) {
 	p.h.st.Instances["plainapp"] = in
 	p.h.noteServersLocked()
 	p.h.mu.Unlock()
+	// The restore had pushed its bundle (the target touched, H2).
+	if err := p.h.pushBundle(context.Background(), "plainapp", p.w); err != nil {
+		t.Fatal(err)
+	}
 	if err := p.h.Enable("plainapp"); errStatus(err) != 409 || !strings.Contains(err.Error(), "being moved") {
 		t.Errorf("enable while moving: %v", err)
 	}
@@ -225,13 +228,12 @@ func TestMoveStuckWhenTargetDownFails(t *testing.T) {
 	p := newPlacedFixture(t)
 	enabledOnPrimary(t, p)
 	ups := upCount(p.runner.Calls(), "portcullis-plainapp")
-	p.h.testHookMove = func(ph string) error {
-		if ph == MoveSwitch {
-			p.w.Fake.Err = errors.New("the worker is gone")
-			return errors.New("the start failed")
-		}
-		return nil
-	}
+	// The start on the worker fails after its bundle was pushed (the
+	// target touched, final review H2), and so does its down.
+	p.w.eng.Lock()
+	p.w.eng.ErrOn = map[string]error{"up portcullis-plainapp": errors.New("the start failed"), "down portcullis-plainapp": errors.New("the worker is gone"),
+		"down-by-name portcullis-plainapp": errors.New("the worker is gone")}
+	p.w.eng.Unlock()
 	_, err := p.h.MoveInstance(context.Background(), "plainapp", "nas", admin)
 	if err == nil || !strings.Contains(err.Error(), "runs nowhere") {
 		t.Fatalf("%v", err)
@@ -247,8 +249,9 @@ func TestMoveStuckWhenTargetDownFails(t *testing.T) {
 		t.Errorf("doctor %+v", d)
 	}
 	// The worker answers again: the next tick settles it.
-	p.w.Fake.Err = nil
-	p.h.testHookMove = nil
+	p.w.eng.Lock()
+	p.w.eng.ErrOn = nil
+	p.w.eng.Unlock()
 	p.h.serversTick(context.Background())
 	if in := p.instance("plainapp"); in.State != "" || in.Server != "" {
 		t.Errorf("after the retry %+v", in)
@@ -312,12 +315,12 @@ func TestMoveLeftoverOnlyRecordedVolumes(t *testing.T) {
 	p := newPlacedFixture(t)
 	placedEnabled(t, p, "plainapp")
 	p.w.Lock()
-	p.w.Volumes["portcullis-plainapp_data"] = runtimeVolume("portcullis-plainapp_data", "portcullis-plainapp")
-	p.w.Volumes["portcullis-plainapp_extra"] = runtimeVolume("portcullis-plainapp_extra", "portcullis-plainapp")
+	p.w.eng.Volumes["portcullis-plainapp_data"] = runtimeVolume("portcullis-plainapp_data", "portcullis-plainapp")
+	p.w.eng.Volumes["portcullis-plainapp_extra"] = runtimeVolume("portcullis-plainapp_extra", "portcullis-plainapp")
 	p.w.Unlock()
 	p.h.mu.Lock()
 	in := p.h.st.Instances["plainapp"]
-	in.Server, in.MovedFrom = "", &state.MovedFrom{Server: "nas", At: time.Now(), Volumes: []string{"portcullis-plainapp_data"}}
+	in.Server, in.MovedFrom = "", &state.MovedFrom{Server: "nas", At: time.Now(), Volumes: []string{"portcullis-plainapp_data"}, Keys: map[string]string{"portcullis-plainapp_data": "data"}, Template: "plainapp"}
 	p.h.st.Instances["plainapp"] = in
 	p.h.noteServersLocked()
 	p.h.mu.Unlock()
@@ -325,8 +328,8 @@ func TestMoveLeftoverOnlyRecordedVolumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.w.Lock()
-	_, data := p.w.Volumes["portcullis-plainapp_data"]
-	_, extra := p.w.Volumes["portcullis-plainapp_extra"]
+	_, data := p.w.eng.Volumes["portcullis-plainapp_data"]
+	_, extra := p.w.eng.Volumes["portcullis-plainapp_extra"]
 	p.w.Unlock()
 	if data || !extra {
 		t.Errorf("data removed %v, extra kept %v", !data, extra)
@@ -427,6 +430,7 @@ func TestRevokeRotatesWithoutTemplateByOwnerTag(t *testing.T) {
 	sf.h.st.Instances["gone"] = state.Instance{ID: "gone", Template: "no-such-template", Server: "nas"}
 	sf.h.noteServersLocked()
 	sf.h.mu.Unlock()
+	sf.link.drop("nas") // link reloaded without the peer (M2)
 	sf.h.RevokeServer(context.Background(), admin, "nas")
 	s, _ := sf.server("nas")
 	sf.idp.mu.Lock()
@@ -459,10 +463,13 @@ func TestFailedMoveRecordsTargetLeftover(t *testing.T) {
 	}
 	// The restore made the instance's volume on the target, then failed.
 	vol := p.h.volumeNamesFor(p.h.Template("filesapp"), "filesapp")["data"]
+	// Its data on the primary: the move's backup holds a volume, so the
+	// restore pushes its bundle to the worker first (the target touched).
+	p.engine.addVolume(vol, "portcullis-filesapp", "data", 0, fakeFile{Name: "marker", Mode: 0o644, Body: "hi"})
 	p.h.testHookApplyRestore = func(stage string) error {
 		if stage == "volumes" {
 			p.w.Lock()
-			p.w.Volumes[vol] = runtimeVolume(vol, "portcullis-filesapp")
+			p.w.eng.Volumes[vol] = runtimeVolume(vol, "portcullis-filesapp")
 			p.w.Unlock()
 			return errors.New("the target's volume upload failed")
 		}
@@ -478,7 +485,7 @@ func TestFailedMoveRecordsTargetLeftover(t *testing.T) {
 	}
 	// The failed restore removed the bundle it pushed (no env left there).
 	p.w.mu.Lock()
-	held := p.w.held["filesapp"]
+	held := p.w.holds("filesapp")
 	p.w.mu.Unlock()
 	if held {
 		t.Error("the failed restore left its bundle on the worker")
@@ -490,7 +497,7 @@ func TestFailedMoveRecordsTargetLeftover(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.w.Lock()
-	_, still := p.w.Volumes[vol]
+	_, still := p.w.eng.Volumes[vol]
 	p.w.Unlock()
 	if still {
 		t.Error("the leftover volume is still on the worker")
@@ -507,6 +514,8 @@ func TestReservedIDOnWorker(t *testing.T) {
 	p.w.mu.Lock()
 	p.w.info.OwnProject = "portcullis-plainapp"
 	p.w.mu.Unlock()
+	p.w.wt.API.SetOwnProjectForTest("portcullis-plainapp")
+	p.h.refreshServerFacts(context.Background(), "nas")
 	err := p.create(t, "plainapp", "nas")
 	if errStatus(err) != 409 || !strings.Contains(err.Error(), "reserved on a worker") {
 		t.Errorf("own project: %v", err)

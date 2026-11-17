@@ -743,7 +743,7 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if h.IsEnabled(id) {
 			return statusErr(400, "%s is enabled — use disable instead", id)
 		}
-		err = h.rtOf(id).DownByName(context.Background(), projectName(id))
+		err = h.downByName(context.Background(), id)
 		if err != nil {
 			err = statusErr500Wrap("compose down failed", err)
 		}

@@ -12,7 +12,6 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/runtime"
-	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 )
 
 // TestPlacedEnvOverrideImages (contract §11.7): an override of a worker
@@ -86,26 +85,48 @@ func TestPlacedOverridePullFailureLog(t *testing.T) {
 	if _, _, err := p.h.SaveUserOverride("ovrapp", "services:\n  web:\n    image: "+secretish+"\n"); err != nil {
 		t.Fatal(err)
 	}
+	// Each failure as the real agent gives it: an engine error (its end
+	// line: 502, error_kind no_platform for an architecture), the agent's
+	// own 429 (rate limit) or 400.
+	engineFails := func(e error) func() {
+		return func() {
+			p.w.mu.Lock()
+			p.w.pullErr = e
+			p.w.mu.Unlock()
+		}
+	}
+	agentAnswers := func(status int, msg string) func() {
+		return func() { p.w.wt.Fail(`^POST /v1/images/pull$`, 1, status, msg) }
+	}
 	for _, c := range []struct {
-		err  error
-		cat  string
-		want string
+		inject func()
+		cat    string
+		want   string
 	}{
-		{errors.New("pull " + secretish + ": no matching manifest for linux/arm64"), pullArchMismatch, "has no amd64 image"},
-		{&agentrt.Error{Status: 502, Msg: "the server nas answered unexpectedly", AgentStatus: 429}, pullRateLimited, "pulling an overridden image of ovrapp on NAS failed"},
-		{&agentrt.Error{Status: 400, Msg: "pull " + secretish + " refused", AgentStatus: 400}, pullRefused, "pulling an overridden image of ovrapp on NAS failed"},
-		{errors.New("pull " + secretish + ": tok-9f8e7d6c5b4a: connection reset"), pullFailed, "pulling an overridden image of ovrapp on NAS failed"},
+		{engineFails(errors.New("pull " + secretish + ": no matching manifest for linux/arm64")), pullArchMismatch, "has no amd64 image"},
+		{agentAnswers(429, "too many preflight pulls"), pullRateLimited, "pulling an overridden image of ovrapp on NAS failed"},
+		{agentAnswers(400, "pull "+secretish+" refused"), pullRefused, "pulling an overridden image of ovrapp on NAS failed"},
+		{engineFails(errors.New("pull " + secretish + ": tok-9f8e7d6c5b4a: connection reset")), pullFailed, "pulling an overridden image of ovrapp on NAS failed"},
 	} {
 		p.h.overridePreflight.Delete("ovrapp")
 		p.w.mu.Lock()
-		p.w.pullErr = c.err
+		p.w.pullErr = nil
 		p.w.mu.Unlock()
+		c.inject()
 		logs := captureLog(t)
 		err := p.h.Enable("ovrapp")
 		if errStatus(err) != 409 || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v (want %q)", c.cat, err, c.want)
 		}
-		out := logs.String()
+		// The in-process agent logs on the same logger: its own lines (the
+		// worker's log, which knows the ref anyway) are not the Hub's.
+		var hubLines []string
+		for _, l := range strings.Split(logs.String(), "\n") {
+			if !strings.Contains(l, " preflight pull ") {
+				hubLines = append(hubLines, l)
+			}
+		}
+		out := strings.Join(hubLines, "\n")
 		if strings.Contains(out, "tok-9f8e7d6c5b4a") || strings.Contains(out, "registry.example") || strings.Contains(err.Error(), "tok-9f8e7d6c5b4a") {
 			t.Errorf("%s: the override value leaked: log %q, error %v", c.cat, out, err)
 		}

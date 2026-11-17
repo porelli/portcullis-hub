@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -147,6 +146,9 @@ func (h *Hub) setMove(id string, mv *state.Move, server string, st string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	in := h.st.Instances[id]
+	if mv != nil && in.Move != nil && in.Move != mv && in.Move.StartedAt.Equal(mv.StartedAt) {
+		mv.Pushed = mv.Pushed || in.Move.Pushed // the same move: a push stays known
+	}
 	in.Move, in.Server, in.State = mv, server, st
 	h.st.Instances[id] = in
 	h.noteInstanceServer(id, server)
@@ -156,22 +158,54 @@ func (h *Hub) setMove(id string, mv *state.Move, server string, st string) {
 // volumeNamesOn are instance id's volumes on server's runtime (its
 // compose project's).
 func (h *Hub) volumeNamesOn(ctx context.Context, server, id string) ([]string, error) {
+	names, _, err := h.volumesOn(ctx, server, id)
+	return names, err
+}
+
+// volumesOn is instance id's project volumes on server: their names
+// (sorted) and each name's compose key (its compose volume label, else
+// the instance's own key for that name).
+func (h *Hub) volumesOn(ctx context.Context, server, id string) ([]string, map[string]string, error) {
 	rt, err := h.rtForServer(server)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	vs, err := rt.ListVolumes(ctx, runtime.Filter{Instance: id})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	h.mu.RLock()
+	own := map[string]string{} // name → key
+	if t := h.findLocked(id); t != nil {
+		for k, n := range h.volumeNamesFor(t, id) {
+			own[n] = k
+		}
+	}
+	h.mu.RUnlock()
 	var out []string
+	keys := map[string]string{}
 	for _, v := range vs {
-		if v.Labels[docker.LabelProject] == projectName(id) {
-			out = append(out, v.Name)
+		if v.Labels[docker.LabelProject] != projectName(id) {
+			continue
+		}
+		out = append(out, v.Name)
+		if k := v.Labels[docker.LabelVolume]; k != "" {
+			keys[v.Name] = k
+		} else if k := own[v.Name]; k != "" {
+			keys[v.Name] = k
 		}
 	}
 	slices.Sort(out)
-	return out, nil
+	return out, keys, nil
+}
+
+// templateOfLocked is instance id's template id (its entry's, else the
+// id: a default instance). Caller holds mu.
+func (h *Hub) templateOfLocked(id string) string {
+	if e, ok := h.st.Instances[id]; ok && e.Template != "" {
+		return e.Template
+	}
+	return id
 }
 
 // downOn takes instance t down on server's runtime (a worker's relays
@@ -257,8 +291,13 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		if err := h.checkReservedID(id, to); err != nil {
 			return err
 		}
+		// The rendered images too (env overrides included), before the
+		// backup (final review H2): a refusal here leaves nothing anywhere.
+		if err := h.placedImages(ctx, &view, to); err != nil {
+			return err
+		}
 	}
-	srcVols, err := h.volumeNamesOn(ctx, from, id)
+	srcVols, srcKeys, err := h.volumesOn(ctx, from, id)
 	if err != nil {
 		return statusErr(409, "%s: %v", serverLabel(from), err)
 	}
@@ -267,9 +306,20 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	h.setMove(id, mv, from, state.InstanceMoving)
 	// back: before the switch, everything goes back to the source — once
 	// the target is down (else routed to neither: stuck).
+	// targetTouched: something may exist on the target. On the primary,
+	// from the restore on; on a worker only once a bundle push to it
+	// may have landed (Move.Pushed, set by pushBundle; final review H2):
+	// every worker volume and container follows a push, and a never-held
+	// id's down is the agent's 404 — an untouched target needs none.
 	targetTouched := false
+	touched := func() bool {
+		if to != "" {
+			return h.movePushed(id)
+		}
+		return targetTouched
+	}
 	back := func(cause error) error {
-		if targetTouched {
+		if touched() {
 			if derr := h.downOn(context.Background(), to, &view); derr != nil {
 				mv.Phase = MoveStuck
 				h.setMove(id, mv, from, state.InstanceMoving)
@@ -371,7 +421,7 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	in = h.st.Instances[id]
 	in.Move, in.State = nil, ""
 	keepOlder(&in, in.MovedFrom, to)
-	in.MovedFrom = &state.MovedFrom{Server: from, At: h.now().UTC(), Volumes: srcVols}
+	in.MovedFrom = &state.MovedFrom{Server: from, At: h.now().UTC(), Volumes: srcVols, Keys: srcKeys, Template: h.templateOfLocked(id)}
 	h.st.Instances[id] = in
 	h.saveLocked()
 	h.mu.Unlock()
@@ -391,10 +441,35 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 	return nil
 }
 
+// movePushed: a bundle push to the target of instance id's open move may
+// have landed (H2).
+func (h *Hub) movePushed(id string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	m := h.st.Instances[id].Move
+	return m != nil && m.Pushed
+}
+
+// markMovePush records (write-ahead, saved) that a bundle push of id to
+// server is about to happen while a move to server is open; pushed false
+// after the agent refused it (4xx: nothing landed) clears it again.
+func (h *Hub) markMovePush(id, server string, pushed bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	in, ok := h.st.Instances[id]
+	if !ok || in.Move == nil || in.Move.To != server || in.Move.Pushed == pushed {
+		return
+	}
+	// In place: the move's own record (setMove stores its pointer) keeps it.
+	in.Move.Pushed = pushed
+	h.saveLocked()
+}
+
 // recordTargetLeftover records the volumes a failed move left on its
 // target (review B2-L5).
 func (h *Hub) recordTargetLeftover(id, to string) {
 	var vols []string
+	keys := map[string]string{}
 	if to != "" {
 		// A worker's agent hides the volumes of a project it holds no
 		// bundle of (the failed restore removed the one it pushed): the
@@ -402,12 +477,16 @@ func (h *Hub) recordTargetLeftover(id, to string) {
 		// one never made is gone already for the removal.
 		h.mu.RLock()
 		if t := h.findLocked(id); t != nil {
-			vols = slices.Sorted(maps.Values(h.volumeNamesFor(t, id)))
+			for k, n := range h.volumeNamesFor(t, id) {
+				vols = append(vols, n)
+				keys[n] = k
+			}
+			slices.Sort(vols)
 		}
 		h.mu.RUnlock()
 	} else {
 		var err error
-		if vols, err = h.volumeNamesOn(context.Background(), to, id); err != nil {
+		if vols, keys, err = h.volumesOn(context.Background(), to, id); err != nil {
 			return
 		}
 	}
@@ -418,7 +497,7 @@ func (h *Hub) recordTargetLeftover(id, to string) {
 	defer h.mu.Unlock()
 	in := h.st.Instances[id]
 	keepOlder(&in, in.MoveTargetLeftover, in.Server)
-	in.MoveTargetLeftover = &state.MovedFrom{Server: to, At: h.now().UTC(), Volumes: vols}
+	in.MoveTargetLeftover = &state.MovedFrom{Server: to, At: h.now().UTC(), Volumes: vols, Keys: keys, Template: h.templateOfLocked(id)}
 	h.st.Instances[id] = in
 	h.saveLocked()
 }
@@ -468,7 +547,9 @@ func (h *Hub) removeWorkerBundle(ctx context.Context, server, id string) error {
 	if !ok {
 		return nil
 	}
-	if err := b.RemoveProject(ctx, id); err != nil {
+	// Its 404 is "no such project": already gone (final review B4: a lost
+	// answer, an earlier removal, a bundle the agent dropped at load).
+	if err := b.RemoveProject(ctx, id); err != nil && !workerNotFound(err) {
 		return err
 	}
 	// A quarantine goes with the project (R3-L4): audited here, as the
@@ -572,7 +653,7 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			return err
 		}
 	}
-	curVols, _ := h.volumeNamesOn(ctx, cur, id)
+	curVols, curKeys, _ := h.volumesOn(ctx, cur, id)
 	p := progressFrom(ctx)
 	ready()
 	commit := func() {
@@ -581,7 +662,7 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 		in.Server = src
 		in.Move, in.State = nil, "" // the undo marker ends with the commit
 		keepOlder(&in, nil, src)    // the copy on src runs again: no longer a kept one
-		in.MovedFrom = &state.MovedFrom{Server: cur, At: h.now().UTC(), Volumes: curVols}
+		in.MovedFrom = &state.MovedFrom{Server: cur, At: h.now().UTC(), Volumes: curVols, Keys: curKeys, Template: h.templateOfLocked(id)}
 		h.st.Instances[id] = in
 		h.noteInstanceServer(id, src)
 		h.saveLocked()
@@ -619,7 +700,8 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 			}
 			up, err := h.upProject(ctx, &view)
 			if err == nil {
-				err = h.pushBundle(ctx, id, rt)
+				// The kept copy's volumes are adopted knowingly (M1).
+				err = h.pushBundleAdopt(ctx, id, rt, true)
 			}
 			if err == nil {
 				err = rt.Create(ctx, up)
@@ -836,7 +918,8 @@ func (h *Hub) drainOwedBundle(ctx context.Context, o state.OwedBundle) {
 	// left it running); the agent refuses to remove a running project.
 	if v != nil {
 		if rt, err := h.rtForServer(o.Server); err == nil {
-			if err := unwrapRT(rt).Down(ctx, h.runtimeProject(v)); err != nil {
+			// Its 404: it holds nothing of the id (B4) — removable.
+			if err := unwrapRT(rt).Down(ctx, h.runtimeProject(v)); err != nil && !workerNotFound(err) {
 				return
 			}
 		}
@@ -899,21 +982,29 @@ func (h *Hub) RemoveMoveLeftover(ctx context.Context, id, confirm string, actor 
 	if len(lefts) == 0 {
 		return statusErr(409, "%s has no move leftover", id)
 	}
-	// Each copy on its own: a record goes only once every volume it pinned
-	// is confirmed gone; a failure keeps it (and the move guard), and the
-	// doctor shows server_copy_not_removed.
+	if err := h.removeKeptCopies(ctx, id, lefts); err != nil {
+		return statusErr(502, "removing the old copies of %s: %v (kept on record; retry)", id, err)
+	}
+	return nil
+}
+
+// removeKeptCopies removes copies (instance id's kept ones), each on its
+// own: a record goes only once every volume it pinned is confirmed gone;
+// a failure keeps it (and the move guard), and the doctor shows
+// server_copy_not_removed. Caller holds id's lock.
+func (h *Hub) removeKeptCopies(ctx context.Context, id string, copies []state.MovedFrom) error {
 	var errs []error
 	gone := map[string]bool{}
-	for _, l := range lefts {
+	for _, l := range copies {
 		if err := h.removeCopy(ctx, id, l); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", serverLabel(l.Server), err))
-			h.noteCopyRemoveFail(id, serverLabel(l.Server)+": "+clip(err.Error(), 200))
+			h.noteCopyRemoveFail(id, serverLabel(l.Server)+": "+untrusted(err.Error(), 200))
 			continue
 		}
 		gone[l.Server] = true
 	}
 	h.mu.Lock()
-	in = h.st.Instances[id]
+	in := h.st.Instances[id]
 	if in.MovedFrom != nil && gone[in.MovedFrom.Server] {
 		in.MovedFrom = nil
 	}
@@ -921,11 +1012,13 @@ func (h *Hub) RemoveMoveLeftover(ctx context.Context, id, confirm string, actor 
 		in.MoveTargetLeftover = nil
 	}
 	in.OlderCopies = slices.DeleteFunc(in.OlderCopies, func(c state.MovedFrom) bool { return gone[c.Server] })
-	h.st.Instances[id] = in
-	h.saveLocked()
+	if _, ok := h.st.Instances[id]; ok {
+		h.st.Instances[id] = in
+		h.saveLocked()
+	}
 	h.mu.Unlock()
 	if err := errors.Join(errs...); err != nil {
-		return statusErr(502, "removing the old copies of %s: %v (kept on record; retry)", id, err)
+		return err
 	}
 	h.noteCopyRemoveFail(id, "")
 	return nil
@@ -946,7 +1039,10 @@ func (h *Hub) removeCopy(ctx context.Context, id string, l state.MovedFrom) (err
 		if !ok {
 			return errors.New("the worker's runtime takes no bundles")
 		}
-		files, m := volumesOnlyBundle(id, l.Volumes)
+		files, m, err := volumesOnlyBundle(id, l)
+		if err != nil {
+			return fmt.Errorf("bringing the copy into scope: %w", err)
+		}
 		if err := b.PushBundle(ctx, id, files, m); err != nil {
 			return fmt.Errorf("bringing the copy into scope: %w", err)
 		}
@@ -986,22 +1082,39 @@ func (h *Hub) removeCopy(ctx context.Context, id string, l state.MovedFrom) (err
 	return nil
 }
 
-// volumesOnlyBundle is a bundle declaring only the given volumes (keys
-// v0, v1, … with their pinned names): no services, no env, no overrides,
-// no templates, appfiles or certificates.
-func volumesOnlyBundle(id string, names []string) (memFS, agentapi.BundleManifest) {
+// volumesOnlyBundle is a bundle declaring only kept copy l's volumes,
+// under the compose keys and the template id pinned at move time (final
+// review H1): no services, no env, no overrides, no templates, appfiles
+// or certificates. Validated here (agentapi.ValidateManifest, the
+// agent's own manifest rules): a copy whose pins don't fit fails loudly.
+func volumesOnlyBundle(id string, l state.MovedFrom) (memFS, agentapi.BundleManifest, error) {
+	tmpl := l.Template
+	if tmpl == "" {
+		tmpl = id
+	}
 	var b strings.Builder
 	b.WriteString("services: {}\nvolumes:\n")
-	m := agentapi.BundleManifest{Instance: id, Volumes: map[string]string{}, Files: map[string]agentapi.FileEntry{}}
-	for i, n := range names {
-		k := fmt.Sprintf("v%d", i)
+	m := agentapi.BundleManifest{Instance: id, Template: tmpl, Volumes: map[string]string{}, Files: map[string]agentapi.FileEntry{}, AdoptVolumes: true}
+	names := slices.Clone(l.Volumes)
+	slices.Sort(names)
+	for _, n := range names {
+		k := l.Keys[n]
+		if k == "" {
+			return nil, m, fmt.Errorf("volume %s has no compose key pinned: remove it by hand on %s", n, serverLabel(l.Server))
+		}
+		if _, dup := m.Volumes[k]; dup {
+			return nil, m, fmt.Errorf("two kept volumes pinned under key %s", k)
+		}
 		fmt.Fprintf(&b, "  %s:\n    name: %q\n", k, n)
 		m.Volumes[k] = n
 	}
 	compose := []byte(b.String())
 	sum := sha256.Sum256(compose)
 	m.Files[bundleCompose] = agentapi.FileEntry{SHA256: hex.EncodeToString(sum[:]), Mode: 0o644, Size: int64(len(compose))}
-	return memFS{bundleCompose: compose}, m
+	if err := agentapi.ValidateManifest(m, agentapi.MaxBundle); err != nil {
+		return nil, m, fmt.Errorf("the volumes-only bundle: %w", err)
+	}
+	return memFS{bundleCompose: compose}, m, nil
 }
 
 // noteCopyRemoveFail records (why != "") or clears a kept copy's failed
@@ -1072,7 +1185,8 @@ func (h *Hub) recoverMove(id string) {
 		log.Printf("move recovery: %s: an interrupted undo's copy on %s was taken down", id, serverLabel(mv.To))
 		return
 	}
-	if mv.Phase != MoveBackup && mv.Phase != MoveCheck && v != nil {
+	// A worker target nothing was pushed to holds nothing (H2): no down.
+	if mv.Phase != MoveBackup && mv.Phase != MoveCheck && v != nil && (mv.To == "" || mv.Pushed) {
 		if err := h.downOn(context.Background(), mv.To, v); err != nil {
 			mv.Phase = MoveStuck
 			h.setMove(id, &mv, mv.From, state.InstanceMoving)

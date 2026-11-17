@@ -367,6 +367,11 @@ func run(data string, getenv func(string) string) error {
 	case <-a.Refused():
 		srv.Close()
 		return agent.ErrEnrolRefused
+	case <-a.Left():
+		// The leave's 204 is out; then nothing more is served.
+		time.Sleep(time.Second)
+		srv.Close()
+		return agent.ErrLeft
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

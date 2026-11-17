@@ -438,11 +438,20 @@ func (h *Hub) setPeerKey(id, key string) error {
 }
 
 // handshakeAfter: link's handshake hs (wg_data/status.json, whole
-// seconds: contract §17.2) is after t. t is cut to its second too:
-// compared with t's nanoseconds, a handshake in the same second never
-// counted, and the next one comes only at WireGuard's 2-minute rekey (CI
-// e2e-servers: every key switch timed out at 120 s).
-func handshakeAfter(hs, t time.Time) bool { return hs.After(t.Truncate(time.Second)) }
+// seconds: contract §17.2) is strictly later than t rounded up to its
+// next whole second (final review L2): a handshake recorded in the
+// second t falls in never counts — it may be the old key's, before link
+// reloaded. The new key's own handshake comes agentSwitchDelay (2 s)
+// after t, so it always lands in a later second.
+func handshakeAfter(hs, t time.Time) bool { return hs.After(ceilSecond(t)) }
+
+// ceilSecond is t rounded up to a whole second (a whole second stays).
+func ceilSecond(t time.Time) time.Time {
+	if c := t.Truncate(time.Second); !c.Equal(t) {
+		return c.Add(time.Second)
+	}
+	return t
+}
 
 // waitHandshake waits up to d for a handshake of server id after since.
 func (h *Hub) waitHandshake(ctx context.Context, id string, since time.Time, d time.Duration) bool {

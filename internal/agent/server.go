@@ -125,6 +125,7 @@ func (a *Agent) Handler() http.Handler {
 	route(agentapi.ExtraRoutes["Network"], ctl, enrolling, a.handleNetwork)
 	route(agentapi.ExtraRoutes["IdentityWG"], ctl, enrolling, a.handleWG)
 	route(agentapi.ExtraRoutes["IdentityCSR"], ctl, ready, a.handleCSR)
+	route(agentapi.ExtraRoutes["Leave"], ctl, ready, a.handleLeave)
 	rest := a.guard(ctl, ready, func(w http.ResponseWriter, r *http.Request) {
 		if a.cfg.Routes == nil || !strings.HasPrefix(r.URL.Path, agentapi.Prefix+"/") {
 			writeError(w, http.StatusNotFound, "not found")
@@ -206,4 +207,23 @@ func fromLink(addr net.Addr) bool {
 // timeouts; bodies are capped per route).
 func NewHTTPServer(h http.Handler) *http.Server {
 	return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
+}
+
+// handleLeave is POST /v1/leave (Remove server, contract §17.6): the
+// worker's identity is wiped as `portcullis-agent leave` does (its keys,
+// certificate and pins), 204, then the agent stops serving and exits
+// (final review B3). Nothing else is touched: bundles and data stay.
+func (a *Agent) handleLeave(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	err := a.store.Wipe()
+	if err == nil {
+		a.state = StateNone
+	}
+	a.mu.Unlock()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "the identity couldn't be removed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+	a.leftOnce.Do(func() { close(a.left) })
 }

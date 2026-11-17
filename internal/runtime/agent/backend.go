@@ -27,6 +27,18 @@ var _ runtime.Instances = (*Backend)(nil)
 // New is the backend of cfg's worker.
 func New(cfg Config) *Backend { return &Backend{c: newClient(cfg)} }
 
+// Revoke disables the backend for good (final review M2): every later
+// call is refused (409, ErrRevoked), the calls in flight are aborted and
+// its idle connections closed. Idempotent.
+func (b *Backend) Revoke() {
+	b.c.revoked.Store(true)
+	b.c.stop()
+	b.c.http.CloseIdleConnections()
+}
+
+// Revoked: Revoke was called.
+func (b *Backend) Revoked() bool { return b.c.revoked.Load() }
+
 // R is the route of method m (its i-th step).
 func R(m string, i int) agentapi.Route { return agentapi.Routes[m][i] }
 
@@ -119,7 +131,9 @@ func (b *Backend) progress(ctx context.Context, p string, body any, fn func(agen
 	case end == nil:
 		return &Error{Status: http.StatusBadGateway, Msg: "the agent's progress stream ended early"}
 	case end.Error != "":
-		return b.c.agentError(end.Status, end.Error)
+		e := b.c.agentError(end.Status, end.Error)
+		e.Kind = end.Kind
+		return e
 	}
 	return nil
 }

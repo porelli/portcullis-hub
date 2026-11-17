@@ -85,7 +85,9 @@ func (h *Hub) serverKindsInLocked(in *doctor.ServersIn, backups map[string]time.
 func (h *Hub) linkOverlapRangesLocked() []doctor.RangeIn {
 	var out []doctor.RangeIn
 	for _, r := range h.vpnAllowRangesLocked([]string{state.ReachAny}) {
-		if p, err := netip.ParsePrefix(r); err == nil {
+		// vpnAllowRanges is never empty: no client range is its
+		// unspecified sentinel (vpnNoClient), not a range.
+		if p, err := netip.ParsePrefix(r); err == nil && !p.Addr().IsUnspecified() {
 			out = append(out, doctor.RangeIn{Name: "the VPN range", Prefix: p.Masked()})
 		}
 	}

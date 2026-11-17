@@ -13,7 +13,7 @@ import (
 // folder roots apply (not the primary's), paths on different hosts never
 // overlap, and an unknown server is 404.
 func TestFolderOnWorker(t *testing.T) {
-	p := newPlacedFixture(t)
+	p := newFakePlacedFixture(t)
 	d := &fakeDisk{paths: map[string]*diskPath{}, symlinks: map[string]bool{}}
 	d.add("/mnt/media", "ext4")
 	p.w.mu.Lock()

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -25,17 +26,17 @@ func movedToPrimary(t *testing.T) (*placedFixture, string) {
 	}
 	vol := p.h.volumeNamesFor(p.h.Template("filesapp"), "filesapp")["data"]
 	p.w.Lock()
-	p.w.Volumes[vol] = runtime.Volume{Name: vol, Labels: map[string]string{docker.LabelProject: "portcullis-filesapp", docker.LabelVolume: "data"}}
+	p.w.eng.Volumes[vol] = runtime.Volume{Name: vol, Labels: map[string]string{docker.LabelProject: "portcullis-filesapp", docker.LabelVolume: "data"}}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	tw.WriteHeader(&tar.Header{Name: "data/", Typeflag: tar.TypeDir, Mode: 0o755})
 	tw.WriteHeader(&tar.Header{Name: "data/marker", Typeflag: tar.TypeReg, Mode: 0o644, Size: 2})
 	tw.Write([]byte("hi"))
 	tw.Close()
-	if p.w.Contents == nil {
-		p.w.Contents = map[string][]byte{}
+	if p.w.eng.Contents == nil {
+		p.w.eng.Contents = map[string][]byte{}
 	}
-	p.w.Contents[vol] = buf.Bytes()
+	p.w.eng.Contents[vol] = buf.Bytes()
 	p.w.Unlock()
 	if _, err := p.h.MoveInstance(context.Background(), "filesapp", "primary", admin); err != nil {
 		t.Fatal(err)
@@ -80,7 +81,7 @@ func TestRemoveKeptCopyOnWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.w.Lock()
-	_, still := p.w.Volumes[vol]
+	_, still := p.w.eng.Volumes[vol]
 	p.w.Unlock()
 	if still {
 		t.Error("the kept volume is still on the worker")
@@ -93,7 +94,7 @@ func TestRemoveKeptCopyOnWorker(t *testing.T) {
 		t.Errorf("the volumes-only bundle: %q", c)
 	}
 	p.w.mu.Lock()
-	held := p.w.held["filesapp"]
+	held := p.w.holds("filesapp")
 	p.w.mu.Unlock()
 	if held {
 		t.Error("the volumes-only bundle stayed on the worker")
@@ -112,9 +113,10 @@ func TestRemoveKeptCopyOnWorker(t *testing.T) {
 // server_copy_not_removed.
 func TestRemoveKeptCopyInUse(t *testing.T) {
 	p, vol := movedToPrimary(t)
-	p.w.mu.Lock()
-	p.w.inUse = map[string]bool{vol: true}
-	p.w.mu.Unlock()
+	// The engine refuses the removal (in use), as Docker does.
+	p.w.eng.Lock()
+	p.w.eng.ErrOn = map[string]error{"remove-volume " + vol: errors.New("volume is in use")}
+	p.w.eng.Unlock()
 	if err := p.h.RemoveMoveLeftover(context.Background(), "filesapp", "filesapp", admin); err == nil {
 		t.Fatal("removed")
 	}

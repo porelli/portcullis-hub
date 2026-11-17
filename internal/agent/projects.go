@@ -535,9 +535,22 @@ func (a *API) pull(w http.ResponseWriter, r *http.Request) {
 	})
 	end := agentapi.ProgressLine{End: true}
 	if err != nil {
-		end.Error, end.Status = clipMsg(err.Error()), statusOfErr(err)
+		end.Error, end.Status, end.Kind = clipMsg(err.Error()), statusOfErr(err), pullKind(err)
 	}
 	out.line(end)
+}
+
+// pullKind classifies a pull failure the Hub acts on (final review B2):
+// the engine's "no matching manifest" / platform mismatch is
+// ErrorKindNoPlatform (the agent reads its own engine's words; the Hub
+// only this field).
+func pullKind(err error) string {
+	m := strings.ToLower(err.Error())
+	if strings.Contains(m, "no matching manifest") || strings.Contains(m, "does not match the specified platform") ||
+		strings.Contains(m, "no image found in manifest list for architecture") {
+		return agentapi.ErrorKindNoPlatform
+	}
+	return ""
 }
 
 func (a *API) ensureImage(w http.ResponseWriter, r *http.Request) {
@@ -689,7 +702,10 @@ func (a *API) execRunning(w http.ResponseWriter, r *http.Request) {
 	ok := a.execs[id]
 	a.mu.Unlock()
 	if !ok {
-		writeError(w, http.StatusForbidden, "not an exec the agent started")
+		// Not one this agent process started (or it restarted since):
+		// nothing it runs (final review B6) — the Hub reads 404 as "not
+		// running". The engine is never asked about a foreign id.
+		writeError(w, http.StatusNotFound, "no exec the agent started")
 		return
 	}
 	running, err := a.cfg.Runtime.ExecRunning(r.Context(), id)

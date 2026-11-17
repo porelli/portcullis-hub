@@ -225,10 +225,9 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 		if err := pre.PreflightPull(pctx, pl.ref); err != nil {
 			// The agent's own words in the log only (the ref, the server and
 			// its message, clipped; refs carry no secret: imageRefEnv).
-			log.Printf("placement: pre-pull of %s on %s failed: %s", pl.ref, server, clip(err.Error(), 300))
-			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "no matching manifest") || strings.Contains(msg, "platform") || strings.Contains(msg, "architecture") {
-				return statusErr(409, "%s has no %s image", pl.raw, inf.Arch)
+			log.Printf("placement: pre-pull of %s on %s failed: %s", pl.ref, server, untrusted(err.Error(), 300))
+			if noPlatform(err) {
+				return statusErr(409, "%s has no %s image", pl.raw, untrusted(inf.Arch, 20))
 			}
 			return statusErr(409, "pulling %s on %s failed", pl.raw, h.serverName(server))
 		}
@@ -291,6 +290,9 @@ func (p placedRT) DeliverFile(ctx context.Context, instance string, f runtime.Fi
 	if err := p.h.placedCheck(ctx, instance, true, false); err != nil {
 		return err
 	}
+	if err := p.h.pushAllowed(p.h.serverOf(instance)); err != nil {
+		return err
+	}
 	d, ok := p.Instances.(fileDeliverer)
 	if !ok {
 		return statusErr(500, "the worker's runtime can't take data files")
@@ -350,7 +352,7 @@ func (h *Hub) placedCheck(ctx context.Context, id string, quarantine, stop bool)
 			why = inf.Quarantined["*"] // every instance (the agent's file is unreadable)
 		}
 		if why != "" {
-			return statusErr(409, "%s is quarantined on %s (%s): an admin must lift the quarantine", id, serverLabel(server), clipRunes(why, 200))
+			return statusErr(409, "%s is quarantined on %s (%s): an admin must lift the quarantine", id, serverLabel(server), untrusted(why, 200))
 		}
 	}
 	return nil

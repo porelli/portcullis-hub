@@ -27,6 +27,7 @@ import (
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/workertest"
 )
 
 // workerFake is a worker's agent backend as the Hub sees it: an engine
@@ -55,6 +56,37 @@ type workerFake struct {
 	downErrs int
 	// disk answers the worker's fixer runs (worker folders).
 	disk *fakeDisk
+	// tombs: ids whose bundle was removed (the agent's tombstones).
+	tombs map[string]bool
+}
+
+// notHeld is the agent's 404 for an id it holds no bundle of.
+func notHeld() error { return &agentrt.Error{Status: 404, Msg: "no such project", AgentStatus: 404} }
+
+func (w *workerFake) holds(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.held[id]
+}
+
+// Create / DownByName / ExecRunning are the agent's (the conformance
+// suite): 404 for an id it holds no bundle of, an exec it didn't start.
+func (w *workerFake) Create(ctx context.Context, p runtime.Project) error {
+	if !w.holds(p.Instance) {
+		return notHeld()
+	}
+	return w.Fake.Create(ctx, p)
+}
+
+func (w *workerFake) DownByName(ctx context.Context, name string) error {
+	if !w.holds(strings.TrimPrefix(name, runtime.ProjectPrefix)) {
+		return notHeld()
+	}
+	return w.Fake.DownByName(ctx, name)
+}
+
+func (w *workerFake) ExecRunning(context.Context, string) (bool, error) {
+	return false, &agentrt.Error{Status: 404, Msg: "no exec the agent started", AgentStatus: 404}
 }
 
 func (w *workerFake) Down(ctx context.Context, p runtime.Project) error {
@@ -63,7 +95,11 @@ func (w *workerFake) Down(ctx context.Context, p runtime.Project) error {
 	if fail {
 		w.downErrs--
 	}
+	known := w.held[p.Instance] || w.tombs[p.Instance]
 	w.mu.Unlock()
+	if !known {
+		return notHeld()
+	}
 	if fail {
 		return errors.New("the worker's down failed")
 	}
@@ -119,6 +155,13 @@ func (w *workerFake) PushBundle(_ context.Context, id string, files fs.FS, m age
 	if perr != nil {
 		return perr
 	}
+	// The backend's own check, then the agent's first ones.
+	if err := agentapi.ValidateManifest(m, agentapi.MaxBundle); err != nil {
+		return err
+	}
+	if _, ok := m.Files["compose.yml"]; !ok {
+		return &agentrt.Error{Status: 400, Msg: "the bundle has no compose.yml", AgentStatus: 400}
+	}
 	got := map[string]string{}
 	for n := range m.Files {
 		f, err := files.Open(n)
@@ -154,10 +197,20 @@ func (w *workerFake) RemoveProject(_ context.Context, id string) error {
 	if fail {
 		return errors.New("the worker refused the removal")
 	}
+	if !w.holds(id) {
+		return notHeld()
+	}
+	if us, _ := w.Fake.List(context.Background(), runtime.Filter{Instance: id, All: true}); len(us) > 0 {
+		return &agentrt.Error{Status: 409, Msg: "the project still has containers", AgentStatus: 409}
+	}
 	w.Fake.Signal(context.Background(), "remove-project", id)
 	w.mu.Lock()
 	delete(w.held, id)
 	delete(w.bundleVols, id)
+	if w.tombs == nil {
+		w.tombs = map[string]bool{}
+	}
+	w.tombs[id] = true
 	w.mu.Unlock()
 	return nil
 }
@@ -260,16 +313,50 @@ func (w *workerFake) lastBundle() map[string]string {
 	return w.bundles[len(w.bundles)-1]
 }
 
+// placedFixture runs the real backend and agent in process (realWorker);
+// fakePlacedFixture keeps the method-level fake (workerFake) for what
+// can't run in process (the folder fixer's walks of real host paths).
 type placedFixture struct {
+	*fixture
+	w *realWorker
+}
+
+type fakePlacedFixture struct {
 	*fixture
 	w *workerFake
 }
 
 const relayImage = "ghcr.io/porelli/portcullis-relay:edge"
 
-// newPlacedFixture: a ready worker "nas" (docker, amd64) behind a fake
-// agent backend, and the templates of the placement tests.
+// newPlacedFixture: a ready worker "nas" (docker, amd64): the real
+// backend and agent in process, and the templates of the placement tests.
 func newPlacedFixture(t *testing.T) *placedFixture {
+	return newPlacedFixtureOpts(t, workertest.Opts{})
+}
+
+// newPlacedFixtureOpts is newPlacedFixture with the worker's options.
+func newPlacedFixtureOpts(t *testing.T, o workertest.Opts) *placedFixture {
+	t.Helper()
+	f := placedBase(t)
+	w := newRealWorker(t, o)
+	f.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: w})
+	return &placedFixture{fixture: f, w: w}
+}
+
+// newFakePlacedFixture is newPlacedFixture on the method-level fake.
+func newFakePlacedFixture(t *testing.T) *fakePlacedFixture {
+	t.Helper()
+	f := placedBase(t)
+	w := &workerFake{Fake: &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, States: map[string]runtime.State{}},
+		info: agentapi.Info{AgentVersion: "0.1.0", Runtime: "docker", Arch: "amd64", DataDir: "/srv/w/worker-data", DockerRootDir: "/var/lib/docker",
+			UnprivilegedPortStart: 1024, BindRoots: []string{"/srv", "/mnt"}}}
+	f.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: w})
+	return &fakePlacedFixture{fixture: f, w: w}
+}
+
+// placedBase: the templates of the placement tests, servers on, the
+// server "nas" in state (its runtime set by the caller).
+func placedBase(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t)
 	for id, files := range map[string][2]string{
@@ -298,18 +385,20 @@ func newPlacedFixture(t *testing.T) *placedFixture {
 	os.MkdirAll(f.h.cfg.LinkDocDir, 0o750)
 	f.h.cfg.LinkDocGID = os.Getgid()
 	f.h.cfg.VPNStatusFile = lk.path
-	w := &workerFake{Fake: &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, States: map[string]runtime.State{}},
-		info: agentapi.Info{AgentVersion: "0.1.0", Runtime: "docker", Arch: "amd64", DataDir: "/srv/w/worker-data", DockerRootDir: "/var/lib/docker",
-			UnprivilegedPortStart: 1024, BindRoots: []string{"/srv", "/mnt"}}}
 	f.h.mu.Lock()
 	_, wgpub, _ := servers.NewWGKeyPair()
 	f.h.st.Servers = map[string]state.Server{"nas": {Name: "NAS", TunnelIP: "10.214.0.10", State: ServerReady, WGPublicKey: wgpub}}
 	f.h.mu.Unlock()
-	f.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: w})
-	return &placedFixture{fixture: f, w: w}
+	return f
 }
 
 func (p *placedFixture) create(t *testing.T, template, server string) error {
+	t.Helper()
+	_, err := p.h.CreateInstanceAs(CreateRequest{Template: template, ID: template, Label: template, Server: server}, admin)
+	return err
+}
+
+func (p *fakePlacedFixture) create(t *testing.T, template, server string) error {
 	t.Helper()
 	_, err := p.h.CreateInstanceAs(CreateRequest{Template: template, ID: template, Label: template, Server: server}, admin)
 	return err
@@ -327,7 +416,12 @@ func TestPlacementRefusals(t *testing.T) {
 		"unknown":      {"filesapp", func(p *placedFixture) { p.h.setServer("nas", nil) }, "server nas is unknown"},
 		"servers off":  {"filesapp", func(p *placedFixture) { p.h.cfg.LinkDocDir = "" }, "servers are off"},
 		"primary only": {"tcpapp", nil, "TCP can't run on a worker: "},
-		"compat":       {"lowport", func(p *placedFixture) { p.w.info.Runtime, p.w.info.Rootless = "podman", true }, "can't run on NAS (podman): host port 80/tcp"},
+		// A rootless Podman worker (the agent's own runtime setting).
+		"compat": {"lowport", func(p *placedFixture) {
+			p.w = newRealWorker(t, workertest.Opts{Runtime: "podman"})
+			p.w.info.Rootless = true
+			p.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: p.w})
+		}, "can't run on NAS (podman): host port 80/tcp"},
 		"no arch image": {"filesapp", func(p *placedFixture) {
 			p.w.pullErr = errors.New("no matching manifest for linux/arm64 in the manifest list entries")
 			p.w.info.Arch = "arm64"
@@ -494,7 +588,7 @@ func TestLifecycleOfflineIs409(t *testing.T) {
 // docker primary: z relabels and restart: always only in the worker's
 // render; the data files at the worker's <data>/appfiles.
 func TestRenderUsesTargetEngineFacts(t *testing.T) {
-	p := newPlacedFixture(t)
+	p := newFakePlacedFixture(t) // render rules from given facts: no agent call
 	if err := p.create(t, "filesapp", ""); err != nil {
 		t.Fatal(err)
 	}

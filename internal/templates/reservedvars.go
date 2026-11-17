@@ -111,6 +111,8 @@ func (v *specCheck) reservedVarRefs() error {
 				if !r.exact {
 					return fmt.Errorf("compose.yml: %s may appear only as exactly ${%s} (no default or alternate form, no bare $%s)", VarLocalNetworks, VarLocalNetworks, VarLocalNetworks)
 				}
+			case CoreServersVar(r.name):
+				return fmt.Errorf("compose.yml: ${%s} is reserved for core (multiple servers): a template may not reference it", r.name)
 			case strings.HasPrefix(r.name, varVPNPrefix):
 				return fmt.Errorf("compose.yml: ${%s} is reserved: PORTCULLIS_VPN_* are core's and the Hub's (the Hub sets PORTCULLIS_VPN_EDGE in the ingress container's environment: read it in a container shell as $$PORTCULLIS_VPN_EDGE)", r.name)
 			case strings.HasPrefix(r.name, varFolderPrefix):

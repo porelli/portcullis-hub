@@ -81,6 +81,9 @@ func ValidateManifest(m *Manifest) error {
 		if ReservedVar(k) {
 			return fmt.Errorf("%s is an instance variable the Hub sets — a manifest may not declare it", k)
 		}
+		if CoreServersVar(k) {
+			return fmt.Errorf("%s is reserved for core (multiple servers) — a manifest may not declare it", k)
+		}
 	}
 	clientKeys := map[string]string{}
 	for _, c := range m.Clients {
