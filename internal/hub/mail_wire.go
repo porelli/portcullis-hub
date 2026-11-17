@@ -501,6 +501,12 @@ func (h *Hub) resumeMail() {
 	if p == nil || owed == nil || held != nil || !h.mailOn() {
 		return
 	}
+	if h.mailRestoreHolds(p.Instance) {
+		// `hub mail restore` runs the void (a try now would hold the app
+		// lock it needs, and the up is refused anyway).
+		log.Printf("mail: %s: a core restore is pending: the void waits for `hub mail restore`", p.Instance)
+		return
+	}
 	id, reason := p.Instance, owed.Reason
 	h.goBackground(func() {
 		if err := h.mailVoidAndResume(context.Background(), id, reason); err != nil {

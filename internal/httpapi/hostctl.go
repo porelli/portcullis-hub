@@ -216,6 +216,10 @@ func hostErr(w http.ResponseWriter, err error) {
 		http.Error(w, se.Error(), se.Status)
 		return
 	}
+	if errors.As(err, new(hub.ErrBusy)) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	log.Printf("host socket: %v", err)
 	http.Error(w, "the Hub couldn't do it: see its log", http.StatusInternalServerError)
 }

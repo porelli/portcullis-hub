@@ -92,6 +92,12 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 	if _, owner := h.moveOwners.Load(t.ID); moving && !owner {
 		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", t.ID)
 	}
+	// A core restore's hold refuses before anything is written or
+	// delivered (no override, no env, no data files into volumes the
+	// restore brings back): only the restore's own commit passes.
+	if !mailRestoreCommitted(ctx, t.ID) && h.mailRestoreHolds(t.ID) {
+		return errMailRestorePending
+	}
 	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUpCtx(ctx, t)
 	if err != nil {
@@ -1197,6 +1203,9 @@ func (h *Hub) restartSteps(ctx context.Context, t *templates.Template) (stopped 
 	// refusal there leaves the app running as it was.
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return false, nil, nil
+	}
+	if !mailRestoreCommitted(ctx, t.ID) && h.mailRestoreHolds(t.ID) {
+		return false, nil, errMailRestorePending // as composeUp
 	}
 	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUpCtx(ctx, t)

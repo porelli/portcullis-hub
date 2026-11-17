@@ -596,6 +596,11 @@ func (h *Hub) mailVoidRetryOnce(ctx context.Context) {
 	if p == nil || owed == nil || held != nil {
 		return
 	}
+	// A pending core restore runs the void itself (`hub mail restore`):
+	// a retry now would only hold the app lock that restore needs.
+	if h.mailRestoreHolds(p.Instance) {
+		return
+	}
 	if err := h.mailVoidAndResume(ctx, p.Instance, owed.Reason); err != nil && !errors.As(err, new(ErrBusy)) && !strings.Contains(err.Error(), "already running") {
 		log.Printf("mail: void retry: %v", err)
 	}

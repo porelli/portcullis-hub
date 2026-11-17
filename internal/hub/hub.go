@@ -528,6 +528,9 @@ type Hub struct {
 	// op record; the restart stays owed).
 	lockPoll    time.Duration
 	restartWait time.Duration
+	// hostLockWait is how long a host mail op (`hub mail backup` /
+	// `restore`) waits for the instance's app lock (0: hostLockWaitDefault).
+	hostLockWait time.Duration
 	// owed: per instance, the strongest effect (reload, restart) a
 	// committed change still owes, mirrored in delivered.json "owed"
 	// (Init re-queues it); owedSeq counts its updates. Under owedMu,

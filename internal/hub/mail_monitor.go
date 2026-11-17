@@ -221,13 +221,16 @@ func (h *Hub) HostMailBackup() (string, error) {
 		return "", statusErr(http.StatusConflict, "no mail provider is wired")
 	}
 	var entry *BackupEntry
-	_, _, err := h.runOpSync(p.Instance, OpBackup, directory.Human(HostActor), []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		var berr error
-		entry, berr = h.backupInstanceReason(ctx, p.Instance, directory.Human(HostActor), ready, BackupCore)
-		if entry != nil {
-			return map[string]string{"archive": entry.Archive}, nil, berr
-		}
-		return nil, nil, berr
+	err := h.hostWaitFree(p.Instance, func() error {
+		_, _, err := h.runOpSync(p.Instance, OpBackup, directory.Human(HostActor), []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+			var berr error
+			entry, berr = h.backupInstanceReason(ctx, p.Instance, directory.Human(HostActor), ready, BackupCore)
+			if entry != nil {
+				return map[string]string{"archive": entry.Archive}, nil, berr
+			}
+			return nil, nil, berr
+		})
+		return err
 	})
 	if err != nil {
 		return "", err
@@ -411,6 +414,42 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 	}
 	h.mailNoteRestorePending()
 	actor := directory.Human(HostActor)
+	var op *AsyncOp
+	err := h.hostWaitFree(id, func() (err error) {
+		op, err = h.hostMailRestoreOp(id, archive, actor)
+		return err
+	})
+	return op, err
+}
+
+// hostLockWaitDefault is how long a host mail op waits for the
+// instance's app lock (another short operation: a delivery, a queued
+// restart) before it is refused.
+const hostLockWaitDefault = 2 * time.Minute
+
+// hostWaitFree runs start, again while the instance's app lock is held
+// by another operation (ErrBusy, before anything was accepted), up to
+// hostLockWait. Still busy then: a 409 (never the host socket's bare
+// 500).
+func (h *Hub) hostWaitFree(id string, start func() error) error {
+	wait := h.hostLockWait
+	if wait <= 0 {
+		wait = hostLockWaitDefault
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		err := start()
+		if !errors.As(err, new(ErrBusy)) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return statusErr(http.StatusConflict, "%v", err)
+		}
+		time.Sleep(h.lockPoll)
+	}
+}
+
+func (h *Hub) hostMailRestoreOp(id, archive string, actor directory.Actor) (*AsyncOp, error) {
 	return h.startAsync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		// Only the restore's final start, after its volumes came back,
 		// passes the hold (applyRestore's commit token); the hold goes

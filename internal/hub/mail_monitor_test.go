@@ -609,3 +609,133 @@ func TestRestoreHoldPerInstance(t *testing.T) {
 		t.Fatal("mailRestorePendingFor")
 	}
 }
+
+// TestCoreOffsiteRestoreFlow is core's `./portcullis restore
+// --from-offsite`: a fresh Hub start on a restored hub_data (mail wired,
+// the hold file naming the archive, the archive under backups/), with
+// the provider's volumes gone and mail_provider_slot and hub_secrets
+// emptied; then `hub mail restore` {instance, archive} succeeds and the
+// hold goes.
+func TestCoreOffsiteRestoreFlow(t *testing.T) {
+	w, h, archive, pending := offsiteRestart(t)
+	// The start owes nothing it could run while the hold is on: the void
+	// isn't tried (no void session written, the app lock never taken), so
+	// `hub mail restore` right after the start finds the instance free.
+	if gateFile(t, w.fixture, mailGateFileVoidSession) != "" {
+		t.Fatal("the start ran the void under the restore hold")
+	}
+	// Another short operation holds the instance as core asks: the
+	// restore waits for it instead of failing (it was a 500, "the Hub
+	// couldn't do it").
+	unlock, err := h.lockApp(mailProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { time.Sleep(150 * time.Millisecond); unlock() }()
+	op, err := h.HostMailRestore(archive)
+	if err != nil {
+		t.Fatalf("hub mail restore: %v", err)
+	}
+	h.Wait()
+	if v := h.HostMailOp(op.Instance, op.OpID); v == nil || !v.OK {
+		t.Fatalf("op %+v", v)
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatal("the hold stayed")
+	}
+	for k, name := range h.Template(mailProviderID).NamesFor(mailProviderID).Volumes {
+		if f := w.engine.volumeFiles(name)["data"]; f.Body != "store-"+k {
+			t.Errorf("volume %s not restored: %+v", name, w.engine.volumeFiles(name))
+		}
+	}
+}
+
+// TestCoreRestoreBusyIs409: an instance held past the wait is a 409
+// (a StatusError: the host socket's text), never a bare 500.
+func TestCoreRestoreBusyIs409(t *testing.T) {
+	_, h, archive, _ := offsiteRestart(t)
+	h.hostLockWait = 50 * time.Millisecond
+	unlock, err := h.lockApp(mailProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	_, err = h.HostMailRestore(archive)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != 409 {
+		t.Fatalf("busy restore: %T %v", err, err)
+	}
+	if _, err := h.HostMailBackup(); !errors.As(err, &se) || se.Status != 409 {
+		t.Fatalf("busy backup: %T %v", err, err)
+	}
+}
+
+// TestRestoreHeldUpTouchesNothing: an up refused by the restore hold is
+// refused before the override, the env and the start's deliveries.
+func TestRestoreHeldUpTouchesNothing(t *testing.T) {
+	_, h, _, _ := offsiteRestart(t)
+	ov := h.overridePath(mailProviderID)
+	os.Remove(ov)
+	unlock, _ := h.lockApp(mailProviderID)
+	err := h.composeUp(context.Background(), h.Template(mailProviderID))
+	unlock()
+	if !errors.Is(err, errMailRestorePending) {
+		t.Fatalf("up: %v", err)
+	}
+	if _, serr := os.Stat(ov); !os.IsNotExist(serr) {
+		t.Fatal("the refused up wrote the override")
+	}
+}
+
+// offsiteRestart is the state core's offsite restore starts the Hub on.
+func offsiteRestart(t *testing.T) (*wireFix, *Hub, string, string) {
+	t.Helper()
+	w := wiredFix(t)
+	for k, name := range w.h.Template(mailProviderID).NamesFor(mailProviderID).Volumes {
+		w.engine.addVolume(name, "portcullis-"+mailProviderID, k, 0, fakeFile{Name: "data", Body: "store-" + k})
+	}
+	archive, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(w.h.cfg.DataDir, mailRestorePendingFile)
+	writeFile(t, pending, archive+"\n")
+	w.h.Wait()
+	// The provider's volumes are gone (a fresh server).
+	for _, name := range w.engine.volumeNames() {
+		ve := w.engine.vol()
+		ve.vmu.Lock()
+		delete(ve.volumes, name)
+		ve.vmu.Unlock()
+	}
+	cfg := w.h.cfg
+	for _, d := range []string{cfg.MailProviderSlotDir, cfg.SecretsDir} {
+		ents, _ := os.ReadDir(d)
+		for _, e := range ents {
+			if err := os.RemoveAll(filepath.Join(d, e.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	w.engine.mu.Lock()
+	w.engine.containers = nil
+	w.engine.networks = nil
+	w.engine.mu.Unlock()
+	h, err := newTestHub(cfg, w.runner, w.engine, w.idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.lockPoll = 5 * time.Millisecond
+	h.mountinfo = w.h.mountinfo
+	h.SetAudit(w.audit)
+	h.SetPeople(w.people)
+	h.SetMailAPI(w.mc.Client())
+	h.SetDomainsAPI(w.dom)
+	h.SetFreshAuth(ListenerHub, w.fa)
+	h.SetFreshAuth(ListenerPeople, w.fa)
+	h.freshAuthReady.Store(true)
+	h.mailBootstrapWait, h.mailPollEvery = 500*time.Millisecond, time.Millisecond
+	h.Init()
+	h.Wait()
+	return w, h, archive, pending
+}
