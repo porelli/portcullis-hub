@@ -129,6 +129,11 @@ type SSHHost struct {
 	Ceiling *cliapi.Ceiling `json:"ceiling,omitempty" yaml:"ceiling,omitempty"`
 	// Removed: *Remove host* ran; requests get 403 removed.
 	Removed bool `json:"removed,omitempty" yaml:"removed,omitempty"`
+	// SudoCapable / SudoChecked: the accounts that can reach root on the
+	// host, from its last report (RR-H1); SudoChecked false = not known
+	// (no report yet, or too many accounts), read as "any account may".
+	SudoCapable []string `json:"sudo_capable,omitempty" yaml:"sudo_capable,omitempty"`
+	SudoChecked bool     `json:"sudo_checked,omitempty" yaml:"sudo_checked,omitempty"`
 	// RemoveAccounts: *Remove account* asked for these (bundle `remove`).
 	RemoveAccounts []string `json:"remove_accounts,omitempty" yaml:"remove_accounts,omitempty"`
 	// BundleHash is sshaccess.BundleHash of the bundle at Serial.
@@ -153,6 +158,11 @@ type SSHGrant struct {
 	TTLHours        int  `json:"ttl_hours,omitempty" yaml:"ttl_hours,omitempty"`
 	PortForwarding  bool `json:"port_forwarding,omitempty" yaml:"port_forwarding,omitempty"`
 	AgentForwarding bool `json:"agent_forwarding,omitempty" yaml:"agent_forwarding,omitempty"`
+	// PrivilegedSave: saved through the privileged path (an administrator,
+	// a fresh sign-in, the group's name typed) — set by SaveGrant only
+	// (RR-H1). A grant that becomes privileged later from a host's report
+	// gives a sudo-capable account nothing until it's saved again so.
+	PrivilegedSave bool `json:"privileged_save,omitempty" yaml:"privileged_save,omitempty"`
 }
 
 // Sudo levels.

@@ -125,6 +125,7 @@ var sshNoToolRoutes = map[string]string{
 	"DELETE /api/ssh/grants/{id}":                     "admin UI only",
 	"POST /api/ssh/grants/preview":                    "admin UI only (the grant editor)",
 	"POST /api/ssh/host-certificates":                 "signing a host key: never through MCP",
+	"POST /api/ssh/certificates/unrevoke":             "taking a key off the revoked list: a fresh sign-in, never through MCP (RR-M5)",
 }
 
 // adminVPN are the VPN tools (§15.10).

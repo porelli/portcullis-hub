@@ -438,7 +438,17 @@
         try { const a = await call('POST', API + '/certificates/revoke', { fingerprints: fps }); status('Revoked ' + a.revoked + '.'); draw(); } catch (e) { status(e.message, true); }
       }, 'btn-danger') : null);
     const rv = (v.revoked || []).map(r => el('tr', null, el('td', null, code(r.fp)), el('td', { text: r.reason }), el('td', { text: r.actor }),
-      el('td', { text: when(r.added) }), el('td', { text: r.until ? when(r.until) : 'never ends' }), el('td', null, r.no_key ? pill('warn', 'key unknown') : null)));
+      el('td', { text: when(r.added) }), el('td', { text: r.until ? when(r.until) : 'never ends' }), el('td', null, r.no_key ? pill('warn', 'key unknown') : null,
+        // RR-M5: an administrator takes a key off the list: the fingerprint
+        // typed again, a fresh sign-in (no MCP twin).
+        ' ', btn('Un-revoke…', () => {
+          const typed = prompt('Type the key\'s fingerprint to take it off the revoked list:\n' + r.fp);
+          if (typed === null) return;
+          if (typed !== r.fp) { status('The fingerprint doesn\'t match.', true); return; }
+          fresh('unrevoke', async p => {
+            try { await call('POST', API + '/certificates/unrevoke', Object.assign({ fingerprint: r.fp, confirm: typed }, p)); status('Taken off the revoked list.'); draw(); } catch (e) { status(e.message, true); }
+          });
+        }))));
     put(box, el('h4', { text: 'Revoked keys' }), rv.length ? table(['Key', 'Why', 'By', 'Added', 'Listed until', ''], rv) : el('p', { class: 'settings-empty', text: 'None.' }));
     // Sign a host key.
     if (!hostGroups.length) hostGroups = ((await call('GET', API + '/hostgroups')).host_groups) || [];

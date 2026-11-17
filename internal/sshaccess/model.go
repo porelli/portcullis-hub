@@ -84,9 +84,13 @@ type grantUse struct {
 	account string
 	until   *time.Time
 	// end is the membership's end when temporary.
-	end      *time.Time
-	sudo     bool
-	priv     bool
+	end  *time.Time
+	sudo bool
+	priv bool
+	// approved: the grant went through the privileged path (Privileged by
+	// its own fields, or saved while PrivilegedIn: PrivilegedSave). Only
+	// then may a host give an account with sudo by other means principals.
+	approved bool
 	root     bool
 	personal bool
 	kind     string

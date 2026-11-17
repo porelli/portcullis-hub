@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -50,10 +51,16 @@ func RemoveTrust(ctx context.Context, sys System, deleteAccounts, serviceNone, f
 		}
 		return Reload(ctx, sys, serviceNone)
 	}); err != nil {
+		// RR-M1: a failed removal never restores trust. The rollback put
+		// the files back; the CA, the principals files and the drop-in go
+		// again (sshd reads TrustedUserCAKeys and AuthorizedPrincipalsFile
+		// at every login and fails closed without them; sshd -t doesn't
+		// need them), the Portcullis accounts stay locked.
+		left := removeTrustFiles(sys)
 		if fromAgent {
-			return fmt.Errorf("removing the Portcullis files would break sshd: %v (the files are kept, the Portcullis accounts are locked; fix sshd and run portcullis host remove)", err)
+			return fmt.Errorf("sshd -t or its reload failed while removing the Portcullis files: %v (the CA, principals and drop-in are removed%s, the Portcullis accounts are locked; fix sshd and run portcullis host remove)", err, left)
 		}
-		return fmt.Errorf("removing the Portcullis files would break sshd: %v (the files are kept, the Portcullis accounts are locked and the sync service is stopped; fix sshd and run portcullis host remove again)", err)
+		return fmt.Errorf("sshd -t or its reload failed while removing the Portcullis files: %v (the CA, principals and drop-in are removed%s, the Portcullis accounts are locked and the sync service is stopped; fix sshd and run portcullis host remove again)", err, left)
 	}
 	// The revoked-keys file goes last, after sshd stopped reading it.
 	_ = sys.Remove(RevokedKeysFile)
@@ -64,4 +71,23 @@ func RemoveTrust(ctx context.Context, sys System, deleteAccounts, serviceNone, f
 		_, _ = sys.Run(ctx, "systemctl", "daemon-reload")
 	}
 	return nil
+}
+
+// removeTrustFiles removes what makes this host trust Portcullis
+// certificates — the user CA, every principals file, the drop-in — outside
+// any transaction. It says what couldn't be removed ("" = all gone).
+func removeTrustFiles(sys System) string {
+	ps, _ := sys.Glob(PrincipalsDir + "/*")
+	var bad []string
+	for _, f := range append([]string{UserCAFile, DropInFile}, ps...) {
+		if exists(sys, f) {
+			if err := sys.Remove(f); err != nil {
+				bad = append(bad, f)
+			}
+		}
+	}
+	if len(bad) == 0 {
+		return ""
+	}
+	return " except " + strings.Join(bad, ", ")
 }

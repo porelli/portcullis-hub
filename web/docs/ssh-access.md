@@ -134,10 +134,16 @@ and **never changed by Portcullis**:
 | `breakglass_account` | `breakglass` |
 | `max_accounts` | 500 |
 
-With `allow_sudo: false`, any account that can reach root on the host by
-other means (a `sudo`/`wheel`/`admin` group, a sudoers rule anywhere, uid 0 —
-the host asks `id` and `sudo -l` rather than reading sudoers) gets no
-certificate login there.
+Any account that can reach root on the host by other means — a
+`sudo`/`wheel`/`admin` group, a root-equivalent group (`docker`, `lxd`,
+`incus`, `libvirt`, `disk`), a doas rule, a sudoers rule anywhere, uid 0; the
+host asks `id`, doas.conf and `sudo -l` rather than reading sudoers — gets a
+certificate login there only through a privileged grant, and with
+`allow_sudo: false` never. Every host reports such accounts; until a managed
+host has reported, every shared-account grant on its host groups counts as
+privileged (typed group name and a fresh sign-in). A grant that becomes
+privileged later (the host reports the account with sudo) gives that account
+nothing until an administrator saves it again.
 
 A grant that would exceed it is skipped on that host and reported. This is
 what bounds a compromised Hub: it can't grant root where you said no, and it
@@ -206,6 +212,11 @@ grant editor shows it for an unsaved change ("this gives sudo on 12 hosts to
   locks the account on managed hosts.
 - A host key signed with *Sign a host key* is revoked from the
   certificates list by its fingerprint; it is never signed again.
+- Revoking a person's own key (`login --key`, e.g. a security key) yourself
+  or as an administrator is for good; *Un-revoke…* on the revoked list (the
+  fingerprint typed again, a fresh sign-in) takes it off. Automatic
+  revocations (leaving a group, switching SSH access off) expire 24 hours
+  after the key's last certificate.
 - Managed hosts get the list within seconds; unmanaged hosts with
   `--revoked-keys` within 5 minutes; others when the certificate expires
   (at most 12 hours).

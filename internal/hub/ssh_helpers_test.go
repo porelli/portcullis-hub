@@ -221,7 +221,7 @@ func newSSHFixture(t *testing.T) *sshFixture {
 	h.st.SSH.Settings.Enabled = true
 	h.st.SSH.HostGroups["web"] = state.SSHHostGroup{Label: "Web"}
 	h.st.SSH.Hosts = map[string]state.SSHHost{
-		"web-1": {Names: []string{"web-1.example.com"}, Addrs: []string{"192.0.2.11"}, HostGroups: []string{"web"}, Managed: true, HostKey: key},
+		"web-1": {Names: []string{"web-1.example.com"}, Addrs: []string{"192.0.2.11"}, HostGroups: []string{"web"}, Managed: true, HostKey: key, SudoChecked: true}, // reported: no account with sudo
 	}
 	h.st.SSH.Grants = []state.SSHGrant{
 		{ID: "g-web", Group: "ssh_web", GroupID: 11, HostGroup: "web", Accounts: []string{"{username}"}, Sudo: "none"},

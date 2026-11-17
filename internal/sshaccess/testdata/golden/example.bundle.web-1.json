@@ -16,7 +16,8 @@
         "u:alice@all",
         "u:alice@web"
       ],
-      "sudo": true
+      "sudo": true,
+      "privileged": true
     },
     {
       "name": "bob",

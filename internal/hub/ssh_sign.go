@@ -246,6 +246,7 @@ func (h *Hub) SignSSH(ctx context.Context, req cliapi.CertRequest, addr string) 
 	// Step 8: enroll signs; every answer is checked before it's handed out.
 	userCAs := h.sshUserCAs()
 	var recs []IssuedRecord
+	var issuedAudit []string
 	for _, hg := range issue {
 		p := plans[hg]
 		secs := int(p.Until.Sub(now) / time.Second)
@@ -268,14 +269,24 @@ func (h *Hub) SignSSH(ctx context.Context, req cliapi.CertRequest, addr string) 
 		}
 		ans.Certificates = append(ans.Certificates, cliapi.IssuedCert{HostGroup: hg, Certificate: signed.Certificate, Principals: p.Principals,
 			Serial: signed.Serial, ValidBefore: signed.ValidBefore.UTC(), Hosts: nonNilStrings(c.Hosts[hg])})
-		// Step 9: audit and the issued index.
-		h.auditSSH(user, action, user, fmt.Sprintf("%s: principals=%s key=%s %s serial=%s until=%s flow=%s method=%s addr=%s",
-			hg, strings.Join(p.Principals, ","), pub.Type(), fp, signed.Serial, signed.ValidBefore.UTC().Format(time.RFC3339), flowLoopback, vc.res.Method, clip(addr, 64)), nil)
+		// Step 9: the issued index, then the audit.
+		issuedAudit = append(issuedAudit, fmt.Sprintf("%s: principals=%s key=%s %s serial=%s until=%s flow=%s method=%s addr=%s",
+			hg, strings.Join(p.Principals, ","), pub.Type(), fp, signed.Serial, signed.ValidBefore.UTC().Format(time.RFC3339), flowLoopback, vc.res.Method, clip(addr, 64)))
 		recs = append(recs, IssuedRecord{Time: now.UTC(), User: user, HostGroup: hg, Serial: signed.Serial, KeyFP: fp, Principals: p.Principals,
 			ValidBefore: signed.ValidBefore.UTC(), Flow: flowLoopback, Addr: clip(addr, 64), Own: req.OwnKey})
 	}
+	// RR-M3: a certificate the index doesn't hold could never be revoked
+	// on leave: nothing is issued (the signed certificates never leave).
 	if err := h.appendIssued(recs, now); err != nil {
 		log.Printf("ssh: issued index: %v", err)
+		r := refusal(http.StatusServiceUnavailable, TextSSHUnavailable, "the issued index can't be written")
+		for _, d := range issuedAudit {
+			h.auditSSH(user, action, user, d, r)
+		}
+		return nil, r
+	}
+	for _, d := range issuedAudit {
+		h.auditSSH(user, action, user, d, nil)
 	}
 	return ans, nil
 }

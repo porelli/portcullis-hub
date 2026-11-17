@@ -66,8 +66,16 @@ func (a *accountsCtx) ours(name string) bool {
 	return ok && u.Comment == PortcullisComment(name) && a.members[name]
 }
 
-// sudoGroups are the groups that give sudo on common distributions.
-var sudoGroups = []string{"sudo", "wheel", "admin"}
+// rootGroups are the groups that give root on common distributions: sudo
+// by default, or root-equivalent (the container and VM sockets, raw disks;
+// RR-M4).
+var rootGroups = []string{"sudo", "wheel", "admin", "docker", "lxd", "incus", "libvirt", "disk"}
+
+// sudoBinaries / doasConfigs: where sudo and doas live.
+var (
+	sudoBinaries = []string{"/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo", "/usr/sbin/sudo"}
+	doasConfigs  = []string{"/etc/doas.conf", "/usr/local/etc/doas.conf"}
+)
 
 // sudoCheckTimeout bounds each of sudoVia's commands.
 const sudoCheckTimeout = 10 * time.Second
@@ -92,10 +100,29 @@ func (a *accountsCtx) sudoVia(ctx context.Context, sys System, name string) stri
 	if err != nil || len(bytes.TrimSpace(out)) == 0 {
 		return "its groups can't be read (id -Gn failed)"
 	}
-	for _, g := range strings.Fields(string(out)) {
-		if slices.Contains(sudoGroups, g) {
+	groups := strings.Fields(string(out))
+	for _, g := range groups {
+		if slices.Contains(rootGroups, g) {
 			return "the " + g + " group"
 		}
+	}
+	// doas (RR-M4): any permit rule naming the account or one of its
+	// groups; a config that can't be read counts too (uncertain = sudo).
+	for _, p := range doasConfigs {
+		if !exists(sys, p) {
+			continue
+		}
+		raw, err := sys.ReadFile(p)
+		if err != nil {
+			return "doas (" + p + " can't be read)"
+		}
+		if doasPermits(string(raw), name, groups) {
+			return "a doas rule (" + p + ")"
+		}
+	}
+	// No sudo installed: no sudoers rule can exist (N-L2).
+	if !slices.ContainsFunc(sudoBinaries, func(p string) bool { return exists(sys, p) }) {
+		return ""
 	}
 	// Every account is checked, Portcullis's own included (a hand-added
 	// rule for a u: account must not bypass the ceiling). Portcullis's own
@@ -106,10 +133,11 @@ func (a *accountsCtx) sudoVia(ctx context.Context, sys System, name string) stri
 	out, err = sys.Run(cctx2, "env", "LC_ALL=C", "sudo", "-n", "-l", "-U", name)
 	text := string(out)
 	switch {
-	case strings.Contains(text, "is not allowed to run sudo on"):
-		return ""
+	// "may run" first (N-L3): a sudoers text could quote the other phrase.
 	case strings.Contains(text, "may run the following commands on"):
 		return "a sudoers rule (sudo -l -U " + name + ")"
+	case strings.Contains(text, "is not allowed to run sudo on"):
+		return ""
 	case err != nil:
 		return "sudo -l -U " + name + " failed: " + firstLine(out)
 	}
@@ -218,4 +246,26 @@ func validBundleAccount(a cliapi.Account) bool {
 		}
 	}
 	return len(a.Principals) == len(slices.Compact(slices.Clone(a.Principals)))
+}
+
+// doasPermits: a `permit` line of doas.conf whose identity is name or
+// ":<group>" of one of groups. Any token is compared, not just the
+// identity, so options or commands that look like one count too (fail
+// closed).
+func doasPermits(conf, name string, groups []string) bool {
+	for _, l := range strings.Split(conf, "\n") {
+		if i := strings.IndexByte(l, '#'); i >= 0 {
+			l = l[:i]
+		}
+		f := strings.Fields(l)
+		if len(f) == 0 || f[0] != "permit" {
+			continue
+		}
+		for _, t := range f[1:] {
+			if t == name || strings.HasPrefix(t, ":") && slices.Contains(groups, t[1:]) {
+				return true
+			}
+		}
+	}
+	return false
 }

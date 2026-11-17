@@ -47,6 +47,13 @@ func validReport(hostID string, r cliapi.Report) error {
 		return errors.New("bad string")
 	case r.AuthorizedKeysShared < 0 || r.Logins.Portcullis < 0 || r.Logins.Breakglass < 0:
 		return errors.New("negative count")
+	case len(r.Accounts.SudoCapable) > cliapi.MaxSudoChecked:
+		return errors.New("too many sudo accounts")
+	}
+	for _, a := range r.Accounts.SudoCapable {
+		if !cliapi.ValidAccount(a) {
+			return errors.New("bad sudo account")
+		}
 	}
 	for k, v := range r.Files {
 		if !reportStringOK(k) || !reportStringOK(v) {
@@ -116,6 +123,30 @@ func (h *Hub) HostReport(ctx context.Context, hostID string, r cliapi.Report) er
 		if !had[f.Kind+"\x00"+f.Subject+"\x00"+f.Detail] && f.Kind == cliapi.FindingDrift {
 			h.auditSSH("-", "ssh.host.drift", hostID, clip(f.Subject, 128)+": "+clip(f.Detail, 128), nil)
 		}
+	}
+	// RR-H1: which accounts can reach root there; a change recompiles
+	// (grants of those accounts become privileged, bundles mark them).
+	capable := slices.Clone(r.Accounts.SudoCapable)
+	slices.Sort(capable)
+	if !r.Accounts.SudoChecked {
+		capable = nil
+	}
+	h.mu.Lock()
+	sudoChanged := false
+	if hst, ok := h.st.SSH.Hosts[hostID]; ok && (hst.SudoChecked != r.Accounts.SudoChecked || !slices.Equal(hst.SudoCapable, capable)) {
+		hst.SudoChecked, hst.SudoCapable = r.Accounts.SudoChecked, capable
+		h.st.SSH.Hosts[hostID] = hst
+		h.saveLocked()
+		sudoChanged = true
+	}
+	h.mu.Unlock()
+	if sudoChanged {
+		for _, a := range capable {
+			if h.SSHSharedAccount(a) {
+				h.auditSSH("-", "ssh.host.sudo_account", hostID, "shared account "+a+" has sudo there: its grants are privileged", nil)
+			}
+		}
+		h.TriggerSSHCompile()
 	}
 	// Removals the report confirms leave the bundle's remove list.
 	if len(r.Accounts.Removed) > 0 {

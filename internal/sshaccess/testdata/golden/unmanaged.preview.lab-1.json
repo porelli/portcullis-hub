@@ -25,7 +25,7 @@
     "root": false,
     "sudo": false,
     "via": [
-      "ssh_deploy → web"
+      "ssh_deploy → web (privileged)"
     ],
     "status": "accounts and sudo unknown (unmanaged)"
   }

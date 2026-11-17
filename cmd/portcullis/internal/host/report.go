@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,10 @@ func BuildReport(ctx context.Context, sys System, hostID string, b *cliapi.Bundl
 	}
 	r.SSHDVersion, _, _, _ = SSHDVersion(ctx, sys)
 	acc, err := loadAccounts(sys)
+	r.Accounts.SudoCapable = []string{}
+	if err == nil {
+		r.Accounts.SudoCapable, r.Accounts.SudoChecked = sudoCapable(ctx, sys, acc)
+	}
 	if err == nil && b != nil {
 		for _, a := range b.Accounts {
 			if _, ok := acc.users[a.Name]; ok {
@@ -139,4 +144,27 @@ func loginCounts(ctx context.Context, sys System, breakglass string, since time.
 		}
 	}
 	return por, bg, last
+}
+
+// sudoCapable (RR-H1) is every local account with uid ≥ 1000 that can
+// reach root here (sudoVia), sorted; checked false when there are more
+// than cliapi.MaxSudoChecked such accounts (the Hub then assumes any may).
+func sudoCapable(ctx context.Context, sys System, acc *accountsCtx) ([]string, bool) {
+	var names []string
+	for n, u := range acc.users {
+		if u.UID >= cliapi.ProtectedBelowUID {
+			names = append(names, n)
+		}
+	}
+	if len(names) > cliapi.MaxSudoChecked {
+		return []string{}, false
+	}
+	sort.Strings(names)
+	out := []string{}
+	for _, n := range names {
+		if acc.sudoVia(ctx, sys, n) != "" {
+			out = append(out, n)
+		}
+	}
+	return out, true
 }

@@ -80,6 +80,7 @@ func newFakeSys(t *testing.T) *fakeSys {
 	f.files["/etc/group"] = []byte("root:x:0:\nbreakglass:x:1001:\nops:x:1002:\n")
 	f.files["/home/breakglass/.ssh/authorized_keys"] = []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFXf2yZXNFwHqiadxQBruvDLwOZYX4l4+MUIDqyknOMZ safe key\n")
 	f.files["/bin/bash"] = []byte("#!")
+	f.files["/usr/bin/sudo"] = []byte("bin")
 	f.files["/usr/sbin/sshd"] = []byte("bin")
 	f.files["/usr/bin/systemctl"] = []byte("bin")
 	f.files["/run/sshd.pid"] = []byte("4242\n")

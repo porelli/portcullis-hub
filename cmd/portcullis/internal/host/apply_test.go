@@ -23,7 +23,7 @@ func bundle(t *testing.T) *cliapi.Bundle {
 	ca, _ := caKey(t)
 	return &cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 3, UserCAs: []string{ca},
 		Accounts: []cliapi.Account{
-			{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@all", "u:alice@web"}, Sudo: true},
+			{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@all", "u:alice@web"}, Sudo: true, Privileged: true},
 			{Name: "bob", Kind: "person", UID: 20002, Principals: []string{"u:bob@web"}},
 			{Name: "deploy", Kind: "shared", Principals: []string{"s:deploy@web"}},
 		}, Locked: []string{}, Remove: []string{}, RevokedKeys: []string{}}
@@ -97,7 +97,7 @@ func TestAccountInvalidSkipped(t *testing.T) {
 func TestCeilingRefusesRootAndProtected(t *testing.T) {
 	sys := newFakeSys(t)
 	b := bundle(t)
-	b.Accounts = append(b.Accounts, cliapi.Account{Name: "root", Kind: "shared", Principals: []string{"s:root@all"}, Sudo: true},
+	b.Accounts = append(b.Accounts, cliapi.Account{Name: "root", Kind: "shared", Principals: []string{"s:root@all"}, Sudo: true, Privileged: true},
 		cliapi.Account{Name: "breakglass", Kind: "shared", Principals: []string{"s:breakglass@all"}},
 		cliapi.Account{Name: "daemon", Kind: "shared", Principals: []string{"s:daemon@all"}})
 	_, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
@@ -502,16 +502,28 @@ func TestCeilingNoSudoRefusesAccountsWithSudo(t *testing.T) {
 		if k := kinds(fs)[cliapi.FindingCeiling]; !slices.Contains(k, "ubuntu") {
 			t.Errorf("%s: not reported: %+v", name, fs)
 		}
-		// Allowed by the ceiling: the principals file is written (the
-		// grant was privileged on the Hub).
+		// Allowed by the ceiling (RR-H1): only a grant the Hub marks
+		// privileged gives the account principals.
 		sys2 := newFakeSys(t)
 		sys2.files["/etc/passwd"] = append(sys2.files["/etc/passwd"], []byte("ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n")...)
 		setup(sys2)
-		if _, _, err := apply(t, sys2, b, cliapi.DefaultCeiling(), nil); err != nil {
+		_, fs2, err := apply(t, sys2, b, cliapi.DefaultCeiling(), nil)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := sys2.files[PrincipalsFile("ubuntu")]; !ok {
-			t.Errorf("%s: allow_sudo on: no principals file", name)
+		if _, ok := sys2.files[PrincipalsFile("ubuntu")]; ok || !slices.Contains(kinds(fs2)[cliapi.FindingCeiling], "ubuntu") {
+			t.Errorf("%s: allow_sudo on, a plain grant: principals written or not reported (%+v)", name, fs2)
+		}
+		sys3 := newFakeSys(t)
+		sys3.files["/etc/passwd"] = append(sys3.files["/etc/passwd"], []byte("ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n")...)
+		setup(sys3)
+		bp := bundle(t)
+		bp.Accounts = []cliapi.Account{{Name: "ubuntu", Kind: "shared", Principals: []string{"s:ubuntu@web"}, Privileged: true}}
+		if _, _, err := apply(t, sys3, bp, cliapi.DefaultCeiling(), nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := sys3.files[PrincipalsFile("ubuntu")]; !ok {
+			t.Errorf("%s: allow_sudo on, a privileged grant: no principals file", name)
 		}
 	}
 }
@@ -611,5 +623,122 @@ func TestCheckRootFile(t *testing.T) {
 	sys.links["/etc/ssl/link.pem"] = "/home/alice/ca.pem"
 	if err := CheckRootFile(sys, "/etc/ssl/link.pem"); err == nil {
 		t.Error("a symlink to a user's file accepted")
+	}
+}
+
+// RR-M2: a failed apply's rollback never brings back a sudo rule the new
+// bundle removed.
+func TestApplyFailureKeepsSudoRemoved(t *testing.T) {
+	sys := newFakeSys(t)
+	b := bundle(t)
+	b.Accounts[1].Sudo, b.Accounts[1].Privileged = true, true // bob had sudo
+	st, _, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
+	if err != nil || !strings.Contains(string(sys.files[SudoersFile]), "bob ALL") {
+		t.Fatalf("setup: %v %q", err, sys.files[SudoersFile])
+	}
+	b2 := bundle(t) // bob without sudo
+	b2.Serial++
+	sys.sshdT = errors.New("exit 255")
+	if _, _, err := apply(t, sys, b2, cliapi.DefaultCeiling(), st); err == nil {
+		t.Fatal("applied despite sshd -t")
+	}
+	got := string(sys.files[SudoersFile])
+	if strings.Contains(got, "bob ALL") || !strings.Contains(got, "alice ALL") {
+		t.Errorf("sudoers after the rollback: %q", got)
+	}
+}
+
+// RR-H1: Portcullis's own old rule for an account the bundle no longer
+// gives sudo doesn't count as "sudo by other means" (it goes first).
+func TestOwnOldSudoRuleNotInTheWay(t *testing.T) {
+	sys := newFakeSys(t)
+	sys.files[SudoersFile] = SudoersBody([]string{"alice", "bob"})
+	sys.files["/etc/passwd"] = append(sys.files["/etc/passwd"], []byte("bob:x:20002:20002:portcullis bob:/home/bob:/bin/bash\n")...)
+	sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("portcullis-users:x:999:bob\n")...)
+	if _, fs, err := apply(t, sys, bundle(t), cliapi.DefaultCeiling(), nil); err != nil || slices.Contains(kinds(fs)[cliapi.FindingCeiling], "bob") {
+		t.Fatalf("%v %+v", err, fs)
+	}
+	if _, ok := sys.files[PrincipalsFile("bob")]; !ok {
+		t.Error("bob refused for Portcullis's own old rule")
+	}
+	if strings.Contains(string(sys.files[SudoersFile]), "bob") {
+		t.Error("bob kept sudo")
+	}
+}
+
+// RR-M4, N-L2, N-L3: root-equivalent groups and doas rules count as sudo;
+// no sudo installed means no sudoers rule; "may run" wins over the other
+// phrase.
+func TestSudoViaMore(t *testing.T) {
+	via := func(setup func(sys *fakeSys)) string {
+		sys := newFakeSys(t)
+		sys.files["/etc/passwd"] = append(sys.files["/etc/passwd"], []byte("ansible:x:1500:1500::/home/ansible:/bin/bash\n")...)
+		sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("ansible:x:1500:\n")...)
+		setup(sys)
+		acc, err := loadAccounts(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return acc.sudoVia(context.Background(), sys, "ansible")
+	}
+	for _, g := range []string{"docker", "lxd", "incus", "libvirt", "disk"} {
+		if v := via(func(sys *fakeSys) {
+			sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte(g+":x:990:ansible\n")...)
+		}); v == "" {
+			t.Errorf("the %s group isn't sudo", g)
+		}
+	}
+	if v := via(func(sys *fakeSys) { sys.files["/etc/doas.conf"] = []byte("permit nopass ansible as root\n") }); v == "" {
+		t.Error("a doas rule isn't sudo")
+	}
+	if v := via(func(sys *fakeSys) {
+		sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("ops2:x:991:ansible\n")...)
+		sys.files["/etc/doas.conf"] = []byte("# none\npermit persist :ops2\n")
+	}); v == "" {
+		t.Error("a doas group rule isn't sudo")
+	}
+	if v := via(func(sys *fakeSys) { sys.files["/etc/doas.conf"] = []byte("permit :wheelz\n") }); v != "" {
+		t.Errorf("an unrelated doas rule: %q", v)
+	}
+	if v := via(func(sys *fakeSys) {
+		delete(sys.files, "/usr/bin/sudo")
+		sys.handler["env"] = func(args []string) ([]byte, error) {
+			if args[1] == "sudo" {
+				t.Error("sudo -l run without sudo installed")
+			}
+			return sys.idGroups(args[len(args)-1])
+		}
+	}); v != "" {
+		t.Errorf("no sudo installed: %q", v)
+	}
+	if v := via(func(sys *fakeSys) {
+		sys.handler["env"] = func(args []string) ([]byte, error) {
+			if args[1] == "sudo" {
+				return []byte("User ansible may run the following commands on web-1:\n    (ALL) /bin/echo is not allowed to run sudo on\n"), nil
+			}
+			return sys.idGroups(args[len(args)-1])
+		}
+	}); v == "" {
+		t.Error("a rule quoting the other phrase read as no sudo")
+	}
+	if v := via(func(sys *fakeSys) {
+		sys.handler["env"] = func(args []string) ([]byte, error) {
+			if args[1] == "id" {
+				return nil, errors.New("exit 1")
+			}
+			return nil, nil
+		}
+	}); v == "" {
+		t.Error("id failing isn't fail closed")
+	}
+	if v := via(func(sys *fakeSys) {
+		sys.handler["env"] = func(args []string) ([]byte, error) {
+			if args[1] == "sudo" {
+				return []byte("Sudoers-Eintrag gefunden\n"), nil
+			}
+			return sys.idGroups(args[len(args)-1])
+		}
+	}); v == "" {
+		t.Error("unexpected sudo output isn't fail closed")
 	}
 }

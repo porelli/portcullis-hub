@@ -450,3 +450,141 @@ func TestRevokeOfChecksPerson(t *testing.T) {
 		t.Errorf("alice's own key: %d %v", n, err)
 	}
 }
+
+// RR-H1: a shared account that a managed host reports with sudo, or a
+// managed host that hasn't reported yet, makes a grant of it privileged
+// (no delegate, no AI, the whole privileged path for an admin); the bundle
+// marks an account privileged only for a grant saved through that path.
+func TestHostReportedSudoMakesGrantPrivileged(t *testing.T) {
+	f := newGrantFixture(t)
+	g := state.SSHGrant{Group: "ssh_deploy", HostGroup: "web", Accounts: []string{"ansible"}}
+	setHost := func(checked bool, capable ...string) {
+		f.h.mu.Lock()
+		h := f.h.st.SSH.Hosts["web-1"]
+		h.SudoChecked, h.SudoCapable = checked, capable
+		f.h.st.SSH.Hosts["web-1"] = h
+		f.h.mu.Unlock()
+	}
+	for name, set := range map[string]func(){
+		"reported with sudo": func() { setHost(true, "ansible") },
+		"not reported yet":   func() { setHost(false) },
+	} {
+		set()
+		if _, err := f.h.SaveGrant(context.Background(), asDelegate, g, "", nil); err == nil || err.Error() != TextOnlyAdminsPrivileged {
+			t.Errorf("%s: delegate = %v", name, err)
+		}
+		if _, err := f.h.SaveGrant(context.Background(), asAI, g, "ssh_deploy", &freshauth.Proof{Code: "c"}); err == nil {
+			t.Errorf("%s: via AI accepted", name)
+		}
+	}
+	// A plain grant saved while the host had no sudo account, then the
+	// host reports one: the grant shows privileged, the bundle doesn't
+	// mark the account (the host refuses it) until an admin saves it again
+	// through the privileged path.
+	setHost(true)
+	saved, err := f.h.SaveGrant(context.Background(), asAdmin, g, "", &freshauth.Proof{Code: "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHost(true, "ansible")
+	f.compile(t)
+	acct := func() cliapi.Account {
+		for _, a := range f.h.sshCompiled().Bundles["web-1"].Accounts {
+			if a.Name == "ansible" {
+				return a
+			}
+		}
+		return cliapi.Account{}
+	}
+	if a := acct(); a.Name == "" || a.Privileged {
+		t.Errorf("before approval: %+v", a)
+	}
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, *saved, "", &freshauth.Proof{Code: "c"}); err == nil {
+		t.Error("an unchanged re-save approved without the typed name")
+	}
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, *saved, "ssh_deploy", &freshauth.Proof{Code: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	f.compile(t)
+	if a := acct(); !a.Privileged {
+		t.Errorf("after approval: %+v", a)
+	}
+}
+
+// RR-M3: an issued index that can't be written means nothing is issued
+// (a certificate missing from it could never be revoked on leave).
+func TestIssuedIndexFailureIssuesNothing(t *testing.T) {
+	f := newSignFixture(t, "alice", "security_key")
+	os.MkdirAll(f.h.issuedPath(), 0o700) // issued.jsonl can't be written
+	ans, err := f.h.SignSSH(context.Background(), f.request(t, f.signer), "192.0.2.50")
+	if sshStatusOf(err) != 503 || ans != nil {
+		t.Errorf("issued anyway (answer %v): %v", ans != nil, err)
+	}
+	if e := f.audit.lastOf("ssh.certificate.issue"); e.Result == "ok" {
+		t.Errorf("audited as issued: %+v", e)
+	}
+}
+
+// RR-M5: an automatic revocation (leaving a group) of a person's own key
+// expires 24 h after its last certificate; an explicit one is permanent;
+// an administrator can take a key off the list (typed fingerprint, fresh
+// sign-in, never through the AI; audited).
+func TestOwnKeyAutoRevocationExpires(t *testing.T) {
+	f := newGrantFixture(t)
+	req := f.request(t, f.signer)
+	req.OwnKey = true
+	ans, err := f.h.SignSSH(context.Background(), req, "192.0.2.50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := cliapi.Fingerprint(f.signer.PublicKey())
+	f.people.set(func(p *sshPeople) { delete(p.users["alice"], "ssh_web") })
+	f.compile(t)
+	l, _ := f.h.sshRevokedList()
+	var last time.Time
+	for _, c := range ans.Certificates {
+		if c.ValidBefore.After(last) {
+			last = c.ValidBefore
+		}
+	}
+	if len(l) != 1 || l[0].FP != fp || !l[0].Until.Equal(last.Add(24*time.Hour)) {
+		t.Fatalf("automatic revocation of an own key: %+v (last %v)", l, last)
+	}
+	// Explicit: permanent.
+	if _, err := f.h.RevokeAllSSH(directory.Actor{User: "alice"}, "alice", "I lost a device"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := f.h.sshRevokedList(); len(l) != 1 || !l[0].Until.IsZero() {
+		t.Fatalf("explicit revocation of an own key: %+v", l)
+	}
+	// Un-revoke.
+	p := freshauth.Proof{Code: "c"}
+	if err := f.h.UnrevokeSSHKey(context.Background(), directory.Actor{User: "root", Via: directory.ViaAI}, fp, fp, p); err == nil {
+		t.Error("un-revoked through the AI")
+	}
+	if err := f.h.UnrevokeSSHKey(context.Background(), rootActor, fp, "SHA256:other", p); err == nil || err.Error() != TextUnrevokeConfirm {
+		t.Errorf("a wrong typed fingerprint = %v", err)
+	}
+	if err := f.h.UnrevokeSSHKey(context.Background(), rootActor, fp, fp, p); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := f.h.sshRevokedList(); len(l) != 0 {
+		t.Errorf("still revoked: %+v", l)
+	}
+	if e := f.audit.lastOf("ssh.certificate.unrevoke"); e.Result != "ok" || !strings.Contains(e.Detail, fp) {
+		t.Errorf("audit %+v", e)
+	}
+}
+
+// N-L6: a stale grant (its group deleted and re-created: another id)
+// isn't what a new grant is compared with.
+func TestStaleGrantNotMerged(t *testing.T) {
+	f := newGrantFixture(t)
+	f.h.mu.Lock()
+	f.h.st.SSH.Grants = append(f.h.st.SSH.Grants, state.SSHGrant{ID: "g-stale", Group: "ssh_ops", GroupID: 99, HostGroup: "web", Accounts: []string{"deploy", "backup"}, Sudo: "none"})
+	f.h.mu.Unlock()
+	g := state.SSHGrant{Group: "ssh_ops", HostGroup: "web", Accounts: []string{"deploy", "backup", "{username}"}}
+	if _, err := f.h.SaveGrant(context.Background(), asDelegate, g, "", nil); err != nil {
+		t.Errorf("a new grant judged against a stale one: %v", err)
+	}
+}

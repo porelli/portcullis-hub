@@ -25,7 +25,7 @@ func (h *Hub) doctorSSHIn() *doctor.SSHIn {
 		in.Incomplete = append(in.Incomplete, fp)
 	}
 	for _, g := range st.Grants {
-		if p, why := sshaccess.Privileged(g); p {
+		if p, why := sshaccess.PrivilegedIn(st, g); p {
 			in.Privileged = append(in.Privileged, doctor.SSHGrantIn{ID: g.ID, Group: g.Group, HostGroup: g.HostGroup, Why: why})
 		}
 	}

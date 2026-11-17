@@ -253,6 +253,10 @@ type Account struct {
 	UID        int      `json:"uid,omitempty"`
 	Principals []string `json:"principals"`
 	Sudo       bool     `json:"sudo"`
+	// Privileged: a privileged grant gives this account on this host
+	// (RR-H1): only then may an account that has sudo by other means get
+	// principals.
+	Privileged bool `json:"privileged,omitempty"`
 }
 
 // BundleOptions are the host group switches a host needs.
@@ -310,7 +314,18 @@ type ReportAccounts struct {
 	Missing []string `json:"missing"`
 	Locked  []string `json:"locked"`
 	Removed []string `json:"removed"`
+	// SudoCapable: every local account (uid ≥ 1000) that can reach root
+	// on the host (RR-H1: sudo -l, id -Gn incl. root-equivalent groups,
+	// doas), whatever the ceiling; SudoChecked false = unknown (too many
+	// accounts, the accounts unreadable), which the Hub reads as "every
+	// account may".
+	SudoCapable []string `json:"sudo_capable"`
+	SudoChecked bool     `json:"sudo_checked"`
 }
+
+// MaxSudoChecked is how many local accounts a report checks for sudo; a
+// host with more reports SudoChecked false.
+const MaxSudoChecked = 256
 
 // LoginEvent is the last break-glass login.
 type LoginEvent struct {

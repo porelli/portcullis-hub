@@ -48,7 +48,7 @@ func (h *Hub) SSHGroupsForDirectory() directory.SSHGroups {
 	var out directory.SSHGroups
 	for _, g := range h.st.SSH.Grants {
 		out.Granting = append(out.Granting, g.Group)
-		if p, _ := sshaccess.Privileged(g); p {
+		if p, _ := sshaccess.PrivilegedIn(h.st.SSH, g); p {
 			out.Privileged = append(out.Privileged, g.Group)
 		}
 	}
@@ -161,7 +161,7 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 	if !newGrant && before == nil {
 		return nil, statusErr(http.StatusNotFound, "no grant %s", g.ID)
 	}
-	priv, why := sshaccess.Privileged(g)
+	priv, why := sshaccess.PrivilegedIn(st, g)
 	// M5: a new grant for a group and host group that already have grants
 	// is judged against their merged access, so a second grant can't widen
 	// what an edit of the first one couldn't.
@@ -205,9 +205,20 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 	g.GroupID = gid
 	if before != nil && before.GroupID != gid {
 		widen = sshaccess.WideningReasons(before, g, st.Settings)
-	} else if before == nil && compare != nil {
-		compare.GroupID = gid
-		widen = sshaccess.WideningReasons(compare, g, st.Settings)
+	} else if before == nil {
+		// N-L6: only grants of the group as it is now (a stale grant, of
+		// a deleted and re-created group, grants nothing to compare with).
+		var live []state.SSHGrant
+		for _, x := range st.Grants {
+			if x.GroupID == gid {
+				live = append(live, x)
+			}
+		}
+		if compare = mergedGrants(live, g.Group, g.HostGroup); compare != nil {
+			widen = sshaccess.WideningReasons(compare, g, st.Settings)
+		} else {
+			widen = sshaccess.WideningReasons(nil, g, st.Settings)
+		}
 	}
 	hg, ok := st.HostGroups[g.HostGroup]
 	if !ok {
@@ -227,7 +238,7 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 			return nil, statusErr(http.StatusForbidden, "host group %s isn't delegable (admins only)", g.HostGroup)
 		}
 		if before != nil {
-			if bp, _ := sshaccess.Privileged(*before); bp || !st.HostGroups[before.HostGroup].Delegable {
+			if bp, _ := sshaccess.PrivilegedIn(st, *before); bp || !st.HostGroups[before.HostGroup].Delegable {
 				return nil, statusErr(http.StatusForbidden, TextOnlyAdminsPrivileged)
 			}
 		}
@@ -235,12 +246,15 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 			return nil, statusErr(http.StatusForbidden, TextOnlyAdminsWiden)
 		}
 	default: // an administrator
-		if priv && (before == nil || len(widen) > 0 || !privSame(before, g)) {
+		// A grant newly privileged (from a host's report, RR-H1) needs the
+		// whole privileged path once, even unchanged.
+		approvedBefore := before != nil && before.PrivilegedSave
+		if priv && (before == nil || len(widen) > 0 || !privSame(st, before, g) || !approvedBefore) {
 			if typedGroup != g.Group {
 				return nil, statusErr(http.StatusBadRequest, "type the group's name (%s) to confirm a privileged grant", g.Group)
 			}
 		}
-		if (priv && (before == nil || len(widen) > 0)) || len(widen) > 0 {
+		if (priv && (before == nil || len(widen) > 0 || !approvedBefore)) || len(widen) > 0 {
 			if p == nil {
 				return nil, statusErr(http.StatusForbidden, freshauth.Message)
 			}
@@ -249,6 +263,8 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 			}
 		}
 	}
+	// Only SaveGrant sets it: here priv means the privileged path passed.
+	g.PrivilegedSave = priv
 	// Shape, then the shared account against the directory's usernames.
 	if m, merr := h.sshMembers(ctx); merr != nil {
 		return nil, statusErr(http.StatusServiceUnavailable, "the directory can't be read")
@@ -284,9 +300,9 @@ func (h *Hub) SaveGrant(ctx context.Context, c *directory.Caller, g state.SSHGra
 
 // privSame: an edit of a privileged grant that keeps its privilege
 // exactly (narrowing): no typed name needed.
-func privSame(before *state.SSHGrant, after state.SSHGrant) bool {
-	_, wb := sshaccess.Privileged(*before)
-	_, wa := sshaccess.Privileged(after)
+func privSame(st state.SSHState, before *state.SSHGrant, after state.SSHGrant) bool {
+	_, wb := sshaccess.PrivilegedIn(st, *before)
+	_, wa := sshaccess.PrivilegedIn(st, after)
 	return wb == wa && before.Group == after.Group && before.HostGroup == after.HostGroup
 }
 
@@ -324,6 +340,10 @@ func (h *Hub) DeleteGrant(ctx context.Context, c *directory.Caller, id string) (
 		}
 	}
 	delegable := g != nil && h.st.SSH.HostGroups[g.HostGroup].Delegable
+	priv := false
+	if g != nil {
+		priv, _ = sshaccess.PrivilegedIn(h.st.SSH, *g)
+	}
 	h.mu.RUnlock()
 	defer func() {
 		d := grantDetail(g) + " → -"
@@ -336,7 +356,7 @@ func (h *Hub) DeleteGrant(ctx context.Context, c *directory.Caller, id string) (
 		return statusErr(http.StatusNotFound, "no grant %s", id)
 	}
 	if !c.Admin {
-		if p, _ := sshaccess.Privileged(*g); p || !delegable || !c.Perms[directory.PermSSHAccess] {
+		if priv || !delegable || !c.Perms[directory.PermSSHAccess] {
 			return statusErr(http.StatusForbidden, TextOnlyAdminsPrivileged)
 		}
 		h.sshrt.mu.Lock()

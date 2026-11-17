@@ -2,11 +2,13 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/cliapi"
 	"github.com/portcullis/hub/internal/directory"
@@ -240,7 +242,8 @@ func TestHostKeyNamesNegationAndManaged(t *testing.T) {
 	f := newHostFixture(t)
 	f.h.mu.Lock()
 	g := f.h.st.SSH.HostGroups["web"]
-	g.Patterns = []string{"*.lab.example.com", "!vault.lab.example.com"}
+	// *.example.com also matches the managed web-1.example.com (N-L5).
+	g.Patterns = []string{"*.lab.example.com", "!vault.lab.example.com", "*.example.com"}
 	f.h.st.SSH.HostGroups["web"] = g
 	f.h.mu.Unlock()
 	f.h.SetFreshAuth(ListenerHub, fakeFresh{method: "security_key"})
@@ -252,5 +255,32 @@ func TestHostKeyNamesNegationAndManaged(t *testing.T) {
 	}
 	if _, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: hostKey(t), Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{}); err != nil {
 		t.Errorf("a matching name: %v", err)
+	}
+}
+
+// N-L4: a break-glass record's public key is recorded, so revoking its
+// fingerprint (before or after the import) puts the key in the bundles.
+func TestBreakglassKeyRevocable(t *testing.T) {
+	f := newSSHFixture(t)
+	_, signer := newSigner(t)
+	pub := cliapi.NormalAuthorizedKey(signer.PublicKey())
+	fp := cliapi.Fingerprint(signer.PublicKey())
+	f.h.RevokeFingerprints("root", "leaked", []string{fp}, "-") // key unknown: fingerprint only
+	if slices.Contains(f.h.RevokedKeys(), pub) {
+		t.Fatal("setup: the key is already known")
+	}
+	p := filepath.Join(t.TempDir(), "breakglass.jsonl")
+	f.h.cfg.SSHBreakglassFile = p
+	rec, _ := json.Marshal(BreakglassRecord{Time: sshNow, User: "alice", HostGroup: "web", Principals: []string{"s:deploy@web"}, KeyFP: fp, Serial: "90",
+		ValidBefore: sshNow.Add(time.Hour), Note: "outage", PublicKey: pub})
+	os.WriteFile(p, append(rec, '\n'), 0o600)
+	if n, bad := f.h.ImportBreakglass(); n != 1 || bad != 0 {
+		t.Fatalf("imported %d malformed %d", n, bad)
+	}
+	if !slices.Contains(f.h.RevokedKeys(), pub) {
+		t.Error("the break-glass key isn't on the revoked list after the import")
+	}
+	if f.h.issuedKey(fp) != pub {
+		t.Error("the break-glass key isn't recorded")
 	}
 }

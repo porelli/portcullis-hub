@@ -49,6 +49,43 @@ func Privileged(g state.SSHGrant) (bool, string) {
 	return true, strings.Join(why, ", ")
 }
 
+// PrivilegedIn is Privileged with what the managed hosts reported
+// (RR-H1): a grant of a shared account is privileged too when a managed
+// host of its host group reports that account can reach root (sudo,
+// root-equivalent groups, doas), or when one of them hasn't reported its
+// accounts' sudo yet (unknown = privileged, fail closed). Unmanaged hosts
+// don't count: their principals are set by their own operator.
+func PrivilegedIn(st state.SSHState, g state.SSHGrant) (bool, string) {
+	p, why := Privileged(g)
+	var more []string
+	for _, a := range g.Accounts {
+		if a == cliapi.UsernamePlaceholder {
+			continue
+		}
+		for _, id := range sortedKeys(st.Hosts) {
+			h := st.Hosts[id]
+			if !h.Managed || h.Removed || !slices.Contains(h.HostGroups, g.HostGroup) {
+				continue
+			}
+			if !h.SudoChecked {
+				more = append(more, "the account "+a+" (host "+id+" hasn't reported which accounts have sudo yet)")
+				break
+			}
+			if slices.Contains(h.SudoCapable, a) {
+				more = append(more, "the account "+a+" (it has sudo on host "+id+")")
+				break
+			}
+		}
+	}
+	if len(more) == 0 {
+		return p, why
+	}
+	if why != "" {
+		more = append([]string{why}, more...)
+	}
+	return true, strings.Join(more, ", ")
+}
+
 // CloudDefaultAccounts are the default users of common cloud and board
 // images, which usually have passwordless sudo (FR-H4): a grant of one is
 // privileged whatever its sudo setting (the typed group name and a fresh

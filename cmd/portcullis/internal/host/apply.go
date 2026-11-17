@@ -150,6 +150,20 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 			return nil, findings, fmt.Errorf("removing %s (sudo isn't allowed by this host's ceiling): %v", SudoersFile, err)
 		}
 	}
+	// RR-H1: Portcullis's own rules for accounts the bundle no longer gives
+	// sudo go before the checks (narrowing), so what sudo -l still lists
+	// for an account comes from a privileged grant or from elsewhere.
+	if c.AllowSudo {
+		bundleSudo := map[string]bool{}
+		for _, a := range b.Accounts {
+			if a.Sudo {
+				bundleSudo[a.Name] = true
+			}
+		}
+		if err := NarrowSudoers(ctx, sys, func(n string) bool { return bundleSudo[n] }); err != nil {
+			return nil, findings, fmt.Errorf("narrowing %s: %v", SudoersFile, err)
+		}
+	}
 	principals := map[string][]string{}
 	var sudo []string
 	wantNames := map[string]bool{}
@@ -224,12 +238,18 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 				findings = append(findings, finding(cliapi.FindingAuthorizedKeysShared, cliapi.SeverityInfo, a.Name, fmt.Sprintf("%d authorized_keys entries", n)))
 			}
 		}
-		// FR-H4: an account that can reach root by other means is sudo,
-		// whatever the bundle says; with sudo off by the ceiling it gets no
-		// principals (a cloud image's default user, an admin's own login).
-		if !c.AllowSudo {
-			if via := acc.sudoVia(ctx, sys, a.Name); via != "" {
+		// FR-H4 / RR-H1: an account that can reach root by other means is
+		// sudo, whatever the bundle says. With sudo off by the ceiling it
+		// gets no principals; with sudo allowed only when a privileged grant
+		// gives it (a cloud image's default user, an ansible account, an
+		// admin's own login are never reached through a plain grant).
+		if via := acc.sudoVia(ctx, sys, a.Name); via != "" {
+			if !c.AllowSudo {
 				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and this host's ceiling doesn't allow sudo"))
+				continue
+			}
+			if !a.Privileged {
+				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and no privileged grant gives this account"))
 				continue
 			}
 		}
@@ -381,7 +401,7 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 		// away. sshd reads revoked_keys and the principals files per
 		// connection, so the narrowing part applies anyway: every revoked
 		// key (old and new), and principals only where old and new agree.
-		if nerr := applyNarrowing(sys, revoked, principals); nerr != nil {
+		if nerr := applyNarrowing(ctx, sys, revoked, principals, sudo); nerr != nil {
 			findings = append(findings, finding(cliapi.FindingDrift, cliapi.SeverityProblem, RevokedKeysFile, "narrowing after a refused apply: "+nerr.Error()))
 		}
 		return nil, findings, err
@@ -455,7 +475,12 @@ func sortedKeys[V any](m map[string]V) []string {
 // (M4): revoked_keys = the old lines plus revoked; each existing
 // principals file keeps only the lines also in principals (removed when
 // none remain). Nothing is added, so sshd -t isn't involved.
-func applyNarrowing(sys System, revoked []string, principals map[string][]string) error {
+func applyNarrowing(ctx context.Context, sys System, revoked []string, principals map[string][]string, sudo []string) error {
+	// RR-M2: the rollback put the old sudoers file back; keep only the
+	// rules the new bundle still gives.
+	if err := NarrowSudoers(ctx, sys, func(n string) bool { return slices.Contains(sudo, n) }); err != nil {
+		return err
+	}
 	old, _ := readMaybe(sys, RevokedKeysFile)
 	if !exists(sys, RevokedKeysFile) {
 		// No Portcullis trust on this host yet (a refused enrol): nothing

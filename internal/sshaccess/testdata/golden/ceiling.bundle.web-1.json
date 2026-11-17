@@ -16,7 +16,8 @@
         "u:alice@all",
         "u:alice@web"
       ],
-      "sudo": true
+      "sudo": true,
+      "privileged": true
     },
     {
       "name": "bob",
@@ -41,7 +42,8 @@
       "principals": [
         "s:root@web"
       ],
-      "sudo": false
+      "sudo": false,
+      "privileged": true
     }
   ],
   "locked": [],

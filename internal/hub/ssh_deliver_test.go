@@ -226,3 +226,29 @@ func TestReusedNameRetiresUID(t *testing.T) {
 		}
 	}
 }
+
+// RR-H1: a report's sudo accounts land on the host (unknown when not
+// checked) and recompile.
+func TestHostReportStoresSudoAccounts(t *testing.T) {
+	f := newSSHFixture(t)
+	r := cliapi.Report{Version: cliapi.ReportVersion, HostID: "web-1", Files: map[string]string{}, Effective: map[string]map[string]string{},
+		Findings: []cliapi.Finding{}, Accounts: cliapi.ReportAccounts{SudoCapable: []string{"deploy", "ansible"}, SudoChecked: true}}
+	if err := f.h.HostReport(context.Background(), "web-1", r); err != nil {
+		t.Fatal(err)
+	}
+	h := f.h.sshHostForTest("web-1")
+	if !h.SudoChecked || !slices.Equal(h.SudoCapable, []string{"ansible", "deploy"}) {
+		t.Errorf("stored %v %v", h.SudoChecked, h.SudoCapable)
+	}
+	r.Accounts = cliapi.ReportAccounts{SudoCapable: []string{"x"}, SudoChecked: false}
+	if err := f.h.HostReport(context.Background(), "web-1", r); err != nil {
+		t.Fatal(err)
+	}
+	if h := f.h.sshHostForTest("web-1"); h.SudoChecked || len(h.SudoCapable) != 0 {
+		t.Errorf("unknown stored as %v %v", h.SudoChecked, h.SudoCapable)
+	}
+	r.Accounts = cliapi.ReportAccounts{SudoCapable: []string{"Bad Name"}, SudoChecked: true}
+	if err := f.h.HostReport(context.Background(), "web-1", r); err == nil {
+		t.Error("a bad account name accepted")
+	}
+}

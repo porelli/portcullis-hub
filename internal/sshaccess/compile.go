@@ -139,7 +139,9 @@ func (c *Compiled) uses() []grantUse {
 	shared, protected := sharedAccounts(st), protectedAccounts(st)
 	c.Collisions = nil
 	for _, g := range grants {
-		priv, _ := Privileged(g)
+		priv, _ := PrivilegedIn(st, g)
+		static, _ := Privileged(g)
+		approved := static || g.PrivilegedSave
 		ttl := time.Duration(GrantTTLHours(g, st.Settings)) * time.Hour
 		for _, user := range sortedKeys(in.Members) {
 			gid, ok := in.Members[user][g.Group]
@@ -172,7 +174,7 @@ func (c *Compiled) uses() []grantUse {
 				}
 				u := until
 				out = append(out, grantUse{grant: g.ID, group: g.Group, hg: g.HostGroup, person: user, account: acct,
-					until: &u, sudo: g.Sudo == state.SudoFull, priv: priv, root: acct == "root", end: end,
+					until: &u, sudo: g.Sudo == state.SudoFull, priv: priv, approved: approved, root: acct == "root", end: end,
 					personal: kind == cliapi.PrincipalPersonal, kind: kind})
 			}
 		}
@@ -217,6 +219,7 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 		uid   int
 		p     map[string]bool
 		sudo  bool
+		priv  bool
 		valid bool
 	}
 	accts := map[string]*acc{}
@@ -247,6 +250,7 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 		}
 		a.valid = true
 		a.p[u.principal()] = true
+		a.priv = a.priv || u.approved
 		if u.sudo {
 			a.sudo = true
 			c.sudo[id][u.account] = dedupSorted(append(c.sudo[id][u.account], u.grant))
@@ -266,7 +270,7 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 			// (M11: a reused name's old account goes first); it's locked.
 			continue
 		}
-		out := cliapi.Account{Name: name, Kind: a.kind, Principals: sortedKeys(a.p), Sudo: a.sudo}
+		out := cliapi.Account{Name: name, Kind: a.kind, Principals: sortedKeys(a.p), Sudo: a.sudo, Privileged: a.priv}
 		if out.Principals == nil {
 			out.Principals = []string{}
 		}

@@ -122,7 +122,7 @@ func newHostFix(t *testing.T) *hostFix {
 
 func (f *hostFix) bundle() *cliapi.Bundle {
 	return &cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 1, UserCAs: []string{f.ca},
-		Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true}},
+		Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Privileged: true}},
 		Locked:   []string{}, Remove: []string{}, RevokedKeys: []string{}}
 }
 
@@ -503,5 +503,42 @@ func TestReportEffectiveRootApart(t *testing.T) {
 	}
 	if _, ok := r.Effective["breakglass"]; !ok {
 		t.Errorf("no breakglass block: %v", slices.Collect(maps.Keys(r.Effective)))
+	}
+}
+
+// RR-H1: every report lists the local accounts (uid ≥ 1000) that can
+// reach root, whatever the ceiling.
+func TestReportSudoCapable(t *testing.T) {
+	f := newHostFix(t)
+	f.sys.files["/etc/passwd"] = append(f.sys.files["/etc/passwd"], []byte("ansible:x:1500:1500::/home/ansible:/bin/bash\n")...)
+	f.sys.sudoers["ansible"] = true
+	if err := f.enroll(t, "none"); err != nil {
+		t.Fatal(err)
+	}
+	r := f.hub.reports[len(f.hub.reports)-1]
+	if !r.Accounts.SudoChecked || !slices.Contains(r.Accounts.SudoCapable, "ansible") || slices.Contains(r.Accounts.SudoCapable, "ops") {
+		t.Errorf("sudo %v %v", r.Accounts.SudoChecked, r.Accounts.SudoCapable)
+	}
+}
+
+// RR-M1: a removal whose sshd -t fails still leaves no trust behind: the
+// CA, the principals files and the drop-in are gone, the error says so.
+func TestRemoveFailureNeverRestoresTrust(t *testing.T) {
+	f := newHostFix(t)
+	if err := f.enroll(t, "none"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.sys.files[UserCAFile]; !ok {
+		t.Fatal("not enrolled")
+	}
+	f.sys.sshdT = errors.New("exit 255")
+	err := RemoveTrust(context.Background(), f.sys, false, true, true)
+	if err == nil || !strings.Contains(err.Error(), "are removed") {
+		t.Fatalf("err = %v", err)
+	}
+	for _, p := range []string{UserCAFile, DropInFile, PrincipalsFile("alice")} {
+		if _, ok := f.sys.files[p]; ok {
+			t.Errorf("%s restored after a failed removal", p)
+		}
 	}
 }

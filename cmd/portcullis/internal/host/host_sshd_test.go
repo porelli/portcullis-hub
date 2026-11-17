@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,7 +259,7 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	rand.Read(secret)
 	hub := &sshdHub{t: t, domain: "example.org", secret: base64.RawURLEncoding.EncodeToString(secret), chal: map[string]bool{},
 		bundle: cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 1, UserCAs: []string{cliapi.NormalAuthorizedKey(caSigner.PublicKey())},
-			Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true},
+			Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Privileged: true},
 				{Name: "bob", Kind: "person", UID: 20002, Principals: []string{"u:bob@web"}}},
 			Locked: []string{}, Remove: []string{}, RevokedKeys: []string{}}}
 	ln, err := net.Listen("tcp", net.JoinHostPort(gw.String(), "0"))
@@ -430,6 +431,79 @@ useradd -m -s /bin/bash plain`)
 	}
 	exec_("rm", "-f", "/etc/sudoers.d/zz-foreign")
 	exec_("sed", "-i", `s/"allow_sudo": false/"allow_sudo": true/`, "/etc/portcullis/host.json")
+	// RR-H1 / N-H1: with the default allow_sudo the same accounts — and
+	// one in the root-equivalent docker group (RR-M4) — get principals only
+	// through a grant the Hub marks privileged; every report names them.
+	exec_("sh", "-c", "groupadd -f docker && useradd -m -s /bin/bash -G docker dock")
+	sudoAccounts = append(sudoAccounts, "dock")
+	hub.setBundle(func(b *cliapi.Bundle) {
+		b.Accounts = append(b.Accounts, cliapi.Account{Name: "dock", Kind: "shared", Principals: []string{"s:dock@web"}})
+	})
+	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err != nil {
+		t.Errorf("sync: %v %s", err, out)
+	}
+	r := hub.lastReport()
+	for _, n := range sudoAccounts {
+		if out, _ := exec_("sh", "-c", "ls /etc/ssh/portcullis/principals/"+n+" 2>&1"); !strings.Contains(out, "No such file") {
+			t.Errorf("%s (sudo outside Portcullis) got a principals file through a plain grant: %s", n, out)
+		}
+		if !hasFindingPrefix(r, cliapi.FindingCeiling, n, "has sudo on this host") {
+			t.Errorf("%s not reported: %+v", n, r.Findings)
+		}
+		if !r.Accounts.SudoChecked || !slices.Contains(r.Accounts.SudoCapable, n) {
+			t.Errorf("the report doesn't list %s with sudo: %v %v", n, r.Accounts.SudoChecked, r.Accounts.SudoCapable)
+		}
+	}
+	if slices.Contains(r.Accounts.SudoCapable, "plain") {
+		t.Errorf("plain listed with sudo: %v", r.Accounts.SudoCapable)
+	}
+	if out, _ := exec_("cat", "/etc/ssh/portcullis/principals/plain"); strings.TrimSpace(out) != "s:plain@web" {
+		t.Errorf("plain lost its principals: %q", out)
+	}
+	hub.setBundle(func(b *cliapi.Bundle) {
+		for i := range b.Accounts {
+			if b.Accounts[i].Name == "dock" {
+				b.Accounts[i].Privileged = true
+			}
+		}
+	})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
+	if out, err := sshRun(addr, "dock", userCert(t, caSigner, "s:dock@web", "pc:x:web:0123456789abcdef"), "id -un"); err != nil || out != "dock" {
+		t.Errorf("dock through a privileged grant: %v %q", err, out)
+	}
+	// RR-M2: a failed apply (sshd -t refuses an unrelated main config line)
+	// never gives back a sudo rule the new bundle removed.
+	hub.setBundle(func(b *cliapi.Bundle) {
+		for i := range b.Accounts {
+			if b.Accounts[i].Name == "plain" {
+				b.Accounts[i].Sudo, b.Accounts[i].Privileged = true, true
+			}
+		}
+	})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
+	if out, _ := exec_("cat", "/etc/sudoers.d/portcullis"); !strings.Contains(out, "plain ALL") {
+		t.Fatalf("setup: plain has no Portcullis sudo: %q", out)
+	}
+	exec_("sh", "-c", "echo 'BogusPortcullisTest yes' >> /etc/ssh/sshd_config")
+	hub.setBundle(func(b *cliapi.Bundle) {
+		for i := range b.Accounts {
+			if b.Accounts[i].Name == "plain" {
+				b.Accounts[i].Sudo, b.Accounts[i].Privileged = false, false
+			}
+		}
+	})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
+	if r := hub.lastReport(); r.Applied {
+		t.Error("applied despite sshd -t")
+	}
+	if out, _ := exec_("cat", "/etc/sudoers.d/portcullis"); strings.Contains(out, "plain") {
+		t.Errorf("the rollback gave plain its sudo back: %q", out)
+	}
+	if out, _ := sshRun(addr, "plain", userCert(t, caSigner, "s:plain@web", "pc:x:web:0123456789abcdef"), "sudo -n true && echo SUDO"); strings.Contains(out, "SUDO") {
+		t.Error("plain has sudo after the failed apply")
+	}
+	exec_("sed", "-i", "$d", "/etc/ssh/sshd_config")
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
 	// Bare principals (security review 2: Vault signs one a tampered role
 	// lists): every account's sshd reads the principals file, which holds
 	// only u:/s: names, so a certificate for "root", "alice" or "breakglass"
@@ -450,6 +524,23 @@ useradd -m -s /bin/bash plain`)
 	hub.mu.Lock()
 	hub.removed = true
 	hub.mu.Unlock()
+	// RR-M1: first with sshd -t failing (an unrelated main config line):
+	// the removal fails, but the trust never comes back — the CA and the
+	// principals are gone and a valid certificate opens nothing.
+	exec_("sh", "-c", "echo 'BogusPortcullisTest yes' >> /etc/ssh/sshd_config")
+	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err == nil && !strings.Contains(out, "are removed") {
+		t.Logf("sync with a broken sshd_config: %s", out)
+	}
+	if out, _ := exec_("sh", "-c", "ls /etc/ssh/portcullis/user_ca.pub /etc/ssh/portcullis/principals/alice 2>&1"); strings.Count(out, "No such file") != 2 {
+		t.Errorf("a failed removal restored the trust: %s", out)
+	}
+	if _, err := sshRun(addr, "alice", alice, "true"); err == nil {
+		t.Error("alice logs in after a failed removal")
+	}
+	if _, err := sshRun(addr, "plain", userCert(t, caSigner, "s:plain@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
+		t.Error("a shared account logs in after a failed removal")
+	}
+	exec_("sed", "-i", "$d", "/etc/ssh/sshd_config")
 	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err != nil {
 		t.Fatalf("sync after removal: %v %s", err, out)
 	}

@@ -449,7 +449,7 @@ func (h *Hub) SSHGrants(onlyDelegable bool) []SSHGrantView {
 		if onlyDelegable && !st.HostGroups[g.HostGroup].Delegable {
 			continue
 		}
-		p, why := sshaccess.Privileged(g)
+		p, why := sshaccess.PrivilegedIn(st, g)
 		out = append(out, SSHGrantView{SSHGrant: g, Privileged: p, Why: why, TTL: sshaccess.GrantTTLHours(g, st.Settings)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -813,6 +813,9 @@ type BreakglassRecord struct {
 	Serial      string    `json:"serial"`
 	ValidBefore time.Time `json:"valid_before"`
 	Note        string    `json:"note"`
+	// PublicKey is the certified key (N-L4): recorded in keys.json so a
+	// revocation by fingerprint reaches the hosts.
+	PublicKey string `json:"public_key,omitempty"`
 }
 
 func (h *Hub) breakglassImportedPath() string {
@@ -861,6 +864,12 @@ func (h *Hub) ImportBreakglass() (imported, malformed int) {
 		}
 		done[r.Serial] = true
 		imported++
+		if pub, norm, err := cliapi.ParseAuthorizedKey(r.PublicKey); err == nil && cliapi.Fingerprint(pub) == r.KeyFP {
+			if err := h.rememberKey(r.KeyFP, norm, h.sshrt.clock()); err != nil {
+				log.Printf("ssh: break-glass key %s: %v", r.KeyFP, err)
+			}
+			h.fillRevokedKey(r.KeyFP, norm)
+		}
 		h.auditSSH("-", "ssh.certificate.breakglass", clip(r.User, 64), fmt.Sprintf("%s: principals=%s key %s serial=%s until=%s note=%s",
 			r.HostGroup, clip(strings.Join(r.Principals, ","), 200), r.KeyFP, r.Serial, r.ValidBefore.UTC().Format(time.RFC3339), clip(r.Note, 128)), nil)
 	}

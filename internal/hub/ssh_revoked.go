@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/cliapi"
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/fsutil"
 )
@@ -161,10 +162,15 @@ func (h *Hub) sshRevocationsIncomplete() map[string]time.Time {
 
 // revokedUntil is when key fp's entry may go: 24 h after the last
 // certificate issued for it; zero (never) for a person's own key.
-func (h *Hub) revokedUntil(fp string) time.Time {
+//
+// auto (RR-M5): an automatic revocation (revocation on leave, SSH switched
+// off) of a person's own key expires like the others — a group change
+// mustn't burn a security key for good; an explicit one (an admin, the
+// person, logout --revoke) is permanent.
+func (h *Hub) revokedUntil(fp string, auto bool) time.Time {
 	var last time.Time
 	for _, r := range h.issuedByFP(fp) {
-		if r.Own {
+		if r.Own && !auto {
 			return time.Time{}
 		}
 		if r.ValidBefore.After(last) {
@@ -190,7 +196,7 @@ func (h *Hub) RevokeKeys(actor, reason string, keys []string, target string) (in
 			continue
 		}
 		fp := cliapi.Fingerprint(pub)
-		adds = append(adds, add{RevokedKey{Key: norm, FP: fp, Reason: clip(reason, 200), Actor: clip(actor, 64), Added: now.UTC(), Until: h.revokedUntil(fp)}})
+		adds = append(adds, add{RevokedKey{Key: norm, FP: fp, Reason: clip(reason, 200), Actor: clip(actor, 64), Added: now.UTC(), Until: h.revokedUntil(fp, actor == "-")}})
 	}
 	if len(adds) == 0 {
 		return 0, nil
@@ -275,4 +281,79 @@ func (h *Hub) RevokeOwnSSH(ctx context.Context, req cliapi.RevocationRequest, ad
 		}
 	}
 	return h.RevokeKeys(vc.user, "logout --revoke", keys, vc.user)
+}
+
+// TextUnrevokeConfirm is the refusal when the typed fingerprint doesn't
+// match.
+const TextUnrevokeConfirm = "type the key's fingerprint to confirm"
+
+// UnrevokeSSHKey takes key fp off the revoked list (RR-M5): an
+// administrator, a fresh sign-in under the hub template, the fingerprint
+// typed again, never through an AI assistant; audited
+// ssh.certificate.unrevoke. Managed hosts get the shorter list at their
+// next bundle.
+func (h *Hub) UnrevokeSSHKey(ctx context.Context, actor directory.Actor, fp, typed string, p freshauth.Proof) error {
+	err := h.unrevokeSSHKey(ctx, actor, fp, typed, p)
+	h.auditSSH(actor.User, "ssh.certificate.unrevoke", "-", "key "+clip(fp, 80), err)
+	return err
+}
+
+func (h *Hub) unrevokeSSHKey(ctx context.Context, actor directory.Actor, fp, typed string, p freshauth.Proof) error {
+	if actor.Via == directory.ViaAI {
+		return statusErr(http.StatusForbidden, "not through an AI assistant")
+	}
+	if !strings.HasPrefix(fp, "SHA256:") || len(fp) > 80 {
+		return statusErr(http.StatusBadRequest, "not a key fingerprint")
+	}
+	if typed != fp {
+		return statusErr(http.StatusBadRequest, TextUnrevokeConfirm)
+	}
+	if err := h.checkAdminFresh(ctx, actor, p); err != nil {
+		return err
+	}
+	h.sshrev.mu.Lock()
+	list, err := h.loadRevokedLocked()
+	if err != nil {
+		h.sshrev.mu.Unlock()
+		return err
+	}
+	i := slices.IndexFunc(list, func(e RevokedKey) bool { return e.FP == fp })
+	if i < 0 {
+		h.sshrev.mu.Unlock()
+		return statusErr(http.StatusNotFound, "this key isn't revoked")
+	}
+	list = slices.Delete(list, i, i+1)
+	err = h.saveRevokedLocked(list)
+	h.sshrev.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	h.TriggerSSHCompile()
+	return nil
+}
+
+// fillRevokedKey gives a fingerprint-only revocation of fp its key once
+// the key is known (a break-glass key imported after its revocation,
+// N-L4), so the bundles carry it.
+func (h *Hub) fillRevokedKey(fp, key string) {
+	h.sshrev.mu.Lock()
+	list, err := h.loadRevokedLocked()
+	changed := false
+	if err == nil {
+		for i := range list {
+			if list[i].FP == fp && list[i].Key == "" {
+				list[i].Key, changed = key, true
+			}
+		}
+		if changed {
+			err = h.saveRevokedLocked(list)
+		}
+	}
+	h.sshrev.mu.Unlock()
+	if err != nil {
+		log.Printf("ssh: revoked keys: %v", err)
+	}
+	if changed {
+		h.TriggerSSHCompile()
+	}
 }

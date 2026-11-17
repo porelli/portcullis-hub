@@ -37,6 +37,7 @@ func (s *Server) registerSSHAdmin(mux *recordingMux) {
 	mux.HandleFunc("POST /api/ssh/grants/preview", s.sshAdmin(s.handleSSHPreviewGrant))
 	mux.HandleFunc("GET /api/ssh/certificates", s.sshAdmin(s.handleSSHCertificates))
 	mux.HandleFunc("POST /api/ssh/certificates/revoke", s.sshAdmin(s.handleSSHRevoke))
+	mux.HandleFunc("POST /api/ssh/certificates/unrevoke", s.sshAdmin(s.handleSSHUnrevoke))
 	mux.HandleFunc("POST /api/ssh/host-certificates", s.sshAdmin(s.handleSSHSignHostKey))
 }
 
@@ -327,6 +328,24 @@ func (s *Server) handleSSHRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"revoked": n})
+}
+
+// handleSSHUnrevoke is POST /api/ssh/certificates/unrevoke (RR-M5): no
+// MCP twin.
+func (s *Server) handleSSHUnrevoke(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Fingerprint string `json:"fingerprint"`
+		Confirm     string `json:"confirm"`
+		proofBody
+	}
+	if !decodeStrictJSON(w, r, &b) {
+		return
+	}
+	if err := s.Hub.UnrevokeSSHKey(r.Context(), requestActor(r), b.Fingerprint, b.Confirm, b.proof()); err != nil {
+		writeAnyErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"unrevoked": true})
 }
 
 func (s *Server) handleSSHSignHostKey(w http.ResponseWriter, r *http.Request) {
