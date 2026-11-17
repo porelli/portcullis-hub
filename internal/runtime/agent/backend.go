@@ -65,8 +65,17 @@ func (b *Backend) project(ctx context.Context, m string, p runtime.Project) erro
 func (b *Backend) Create(ctx context.Context, p runtime.Project) error {
 	return b.project(ctx, "Create", p)
 }
+// Down takes the project down. The agent's 404 "no such project" (it holds
+// no bundle of it: never created there, or removed) is a down — nothing of
+// it runs there; every caller (a move's rollback, a recovery, a drain)
+// would otherwise stay stuck on it.
 func (b *Backend) Down(ctx context.Context, p runtime.Project) error {
-	return b.project(ctx, "Down", p)
+	err := b.project(ctx, "Down", p)
+	var ae *Error
+	if errors.As(err, &ae) && ae.AgentStatus == http.StatusNotFound {
+		return nil
+	}
+	return err
 }
 
 // DownByName takes portcullis-<id> down (name must be one).

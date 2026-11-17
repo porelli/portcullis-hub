@@ -488,3 +488,20 @@ func TestPreflightPullOverTheWire(t *testing.T) {
 		t.Errorf("an unpinned preflight: %v", err)
 	}
 }
+
+// TestDownOfUnbundledProjectIsDone (seen live: a move back's rollback was
+// stuck on "taking se1 down on w1 failed (no such project)"): over the wire,
+// a down of a project the agent holds no bundle of is done — the agent's
+// 404 means nothing of it runs there; a create of one is still refused.
+func TestDownOfUnbundledProjectIsDone(t *testing.T) {
+	w := newWorker(t)
+	b, _ := w.backend(t, nil)
+	p := runtime.Project{Name: "portcullis-other", Instance: "other"}
+	if err := b.Down(context.Background(), p); err != nil {
+		t.Fatalf("down of an unbundled project: %v", err)
+	}
+	var ae *Error
+	if err := b.Create(context.Background(), p); !errors.As(err, &ae) || ae.Status != http.StatusNotFound {
+		t.Errorf("create of an unbundled project: %v", err)
+	}
+}
