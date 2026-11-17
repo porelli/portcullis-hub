@@ -80,6 +80,7 @@ type mailProviderBody struct {
 	CodeVerifier string `json:"code_verifier"`
 	Nonce        string `json:"nonce"`
 	Drain        *bool  `json:"drain"`
+	BlockHash    string `json:"block_hash"`
 }
 
 // mailWireAccepted is the PUT and switch answers: the op and the warning.
@@ -114,7 +115,7 @@ func (s *Server) handleSetInstanceMailProvider(w http.ResponseWriter, r *http.Re
 		writeJSONStatus(w, http.StatusAccepted, mailWireAccepted{acceptedBody(op), hub.MailWarning})
 		return
 	}
-	in := hub.WireRequest{Confirm: b.Confirm, Listener: listenerOf(r)}
+	in := hub.WireRequest{Confirm: b.Confirm, Listener: listenerOf(r), BlockHash: b.BlockHash}
 	if b.Code != "" || b.CodeVerifier != "" || b.Nonce != "" {
 		in.Proof = &freshauth.Proof{Code: b.Code, CodeVerifier: b.CodeVerifier, Nonce: b.Nonce}
 	}

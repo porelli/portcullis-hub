@@ -173,7 +173,7 @@ func TestRewireClearsHoldAndKeepsPasswords(t *testing.T) {
 	if v.Held == nil || v.HoldWarning != MailHoldWarning || v.Mode != "normal" {
 		t.Fatalf("view %+v", v)
 	}
-	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof}, rootActor()); err != nil {
+	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof, BlockHash: v.BlockHash}, rootActor()); err != nil {
 		t.Fatal(err)
 	}
 	if lo := w.h.LastOp(mailProviderID); lo == nil || !lo.OK || lo.Op != OpMailRewire {
@@ -198,6 +198,30 @@ func TestRewireClearsHoldAndKeepsPasswords(t *testing.T) {
 	// Not held any more: a second confirm is refused.
 	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof}, rootActor()); statusOf(err) != 409 {
 		t.Fatalf("second confirm: %v", err)
+	}
+}
+
+// TestRewireBoundToReviewedTree (M1): the re-confirm echoes the Mail
+// tab's block_hash; a second change since the review (or no hash) is
+// refused and the hold stays.
+func TestRewireBoundToReviewedTree(t *testing.T) {
+	w := wiredFix(t)
+	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
+	syncNow(w)
+	v, _ := w.h.InstanceMailProvider(context.Background(), mailProviderID)
+	if len(v.BlockHash) != 64 {
+		t.Fatalf("no block_hash in the view: %q", v.BlockHash)
+	}
+	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed again\n")
+	for _, hash := range []string{v.BlockHash, ""} {
+		if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof, BlockHash: hash}, rootActor()); statusOf(err) != 409 {
+			t.Fatalf("%q: %v", hash, err)
+		}
+	}
+	w.h.mu.RLock()
+	defer w.h.mu.RUnlock()
+	if w.h.st.Mail.Held == nil {
+		t.Fatal("the hold went")
 	}
 }
 

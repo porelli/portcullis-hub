@@ -107,12 +107,31 @@ func mailRewirePlan() []Step {
 // normal override and up — no void (isRewire), unless a void is owed for
 // another reason (a restore), which runs first. Audited
 // mail.provider_wired reconfirm=true.
-func (h *Hub) startRewireMail(t *templates.Template, actor directory.Actor) (*AsyncOp, error) {
+func (h *Hub) startRewireMail(t *templates.Template, actor directory.Actor, in WireRequest) (*AsyncOp, error) {
 	h.mu.RLock()
 	held := h.st.Mail.Held != nil
 	h.mu.RUnlock()
 	if !held {
 		err := statusErr(http.StatusConflict, "%s is already this server's mail provider", t.ID)
+		h.auditOp(actor, "mail.provider_wired", t.ID, "reconfirm=true", err)
+		return nil, err
+	}
+	// The reviewed tree (M1): the browser echoes the Mail tab's
+	// block_hash; the host path confirms the tree on disk now.
+	live := h.Template(t.ID)
+	if live == nil || live.Manifest.Mail == nil {
+		return nil, statusErr(http.StatusConflict, "%s", MailInvalidText)
+	}
+	now, herr := templates.MailBlockHash(live.Path, live.Manifest.Mail, live.ReadCompose())
+	if herr != nil {
+		return nil, statusErr(http.StatusConflict, "%s", MailInvalidText)
+	}
+	confirmed := in.BlockHash
+	if in.Host {
+		confirmed = now
+	}
+	if confirmed == "" || confirmed != now {
+		err := statusErr(http.StatusConflict, "the template changed since you reviewed it: look again")
 		h.auditOp(actor, "mail.provider_wired", t.ID, "reconfirm=true", err)
 		return nil, err
 	}
@@ -138,7 +157,7 @@ func (h *Hub) startRewireMail(t *templates.Template, actor directory.Actor) (*As
 			return nil, nil, err
 		}
 		ready()
-		p, err := h.runRewireMail(context.WithoutCancel(ctx), t, actor)
+		p, err := h.runRewireMail(context.WithoutCancel(ctx), t, actor, confirmed)
 		detail := "reconfirm=true"
 		if p != nil {
 			detail += " " + mailWiredDetail(p)
@@ -149,7 +168,7 @@ func (h *Hub) startRewireMail(t *templates.Template, actor directory.Actor) (*As
 }
 
 // runRewireMail is the re-confirm's work. Caller holds the app lock.
-func (h *Hub) runRewireMail(ctx context.Context, t *templates.Template, actor directory.Actor) (*state.MailProvider, error) {
+func (h *Hub) runRewireMail(ctx context.Context, t *templates.Template, actor directory.Actor, confirmed string) (*state.MailProvider, error) {
 	prog := progressFrom(ctx)
 	id := t.ID
 	prog.planned(StepMailRecord).Start(StepMailRecord)
@@ -162,6 +181,13 @@ func (h *Hub) runRewireMail(ctx context.Context, t *templates.Template, actor di
 	}
 	hash, err := templates.MailBlockHash(live.Path, live.Manifest.Mail, live.ReadCompose())
 	if err != nil {
+		prog.planned(StepMailRecord).Fail(StepMailRecord, err)
+		return nil, err
+	}
+	// Another change landed since the review (M1): never accepted
+	// unreviewed.
+	if hash != confirmed {
+		err := statusErr(http.StatusConflict, "the template changed again since you reviewed it: look again")
 		prog.planned(StepMailRecord).Fail(StepMailRecord, err)
 		return nil, err
 	}

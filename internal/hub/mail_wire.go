@@ -70,6 +70,10 @@ type WireRequest struct {
 	Proof    *freshauth.Proof
 	Listener string
 	Host     bool
+	// BlockHash: a re-confirm's reviewed tree (the Mail tab's
+	// block_hash, M1): the op refuses another one. The host path's
+	// re-confirm takes the tree on disk at the request.
+	BlockHash string
 }
 
 // mailActorGuard is guards 1–2 (and the host path's own actor): an AI
@@ -195,7 +199,7 @@ func (h *Hub) StartWireMail(ctx context.Context, id string, in WireRequest, acto
 		return nil, err
 	}
 	if rewire {
-		return h.startRewireMail(t, actor)
+		return h.startRewireMail(t, actor, in)
 	}
 	return h.startAsync(id, OpMailWire, actor, mailWirePlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		unlockSlot, err := h.lockMailSlot()
@@ -446,6 +450,9 @@ type MailProviderView struct {
 	RefusedBecause []string            `json:"refused_because"`
 	Warning        string              `json:"warning"`
 	HoldWarning    string              `json:"hold_warning,omitempty"`
+	// BlockHash is the held tree's hash as on disk now: the re-confirm
+	// echoes it (M1).
+	BlockHash string `json:"block_hash,omitempty"`
 	Wiring         *state.MailProvider `json:"-"`
 }
 
@@ -484,6 +491,9 @@ func (h *Hub) InstanceMailProvider(ctx context.Context, id string) (*MailProvide
 			c := *hd
 			v.Held = &c
 			v.HoldWarning = MailHoldWarning
+			if hash, err := templates.MailBlockHash(t.Path, t.Manifest.Mail, t.ReadCompose()); err == nil {
+				v.BlockHash = hash
+			}
 		}
 	}
 	if !v.Wired || v.Held != nil {
