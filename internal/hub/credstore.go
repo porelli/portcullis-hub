@@ -517,6 +517,15 @@ func (h *Hub) reconcileSecretsLocked(why string) (counts map[string]int, mismatc
 		for inst := range h.st.Credentials {
 			counts[inst] += h.voidActiveLocked(inst, state.CredentialReasonRestore, now)
 		}
+		// A core restore emptied hub_secrets, the mail gate with it: with
+		// the slot open and a provider wired, its mail passwords are
+		// voided before any mail port listens (§19.11), saved with the
+		// epoch below.
+		if h.st.Mail.Provider != nil && h.st.Mail.VoidOwed == nil && h.mailOn() {
+			h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidRestore, Since: now}
+			log.Printf("mail: the secrets epoch differs: a void of %s's mail passwords is owed", h.st.Mail.Provider.Instance)
+			defer h.kickMailVoid()
+		}
 		// F8 / A3: every person-id pool advances before any allocation,
 		// in memory now and saved with the epoch rotation below (one
 		// save: a matching epoch can never hide a lost advance). Kept in
@@ -601,6 +610,17 @@ func (h *Hub) reconcileOrphansLocked(r *os.Root, now time.Time) (bool, map[strin
 		for _, ke := range keys {
 			key := ke.Name()
 			kdir := inst + "/" + key
+			// The wired mail provider's gate (§19.1) isn't a credential:
+			// kept; any other instance's is removed.
+			if key == mailSlotSub {
+				if ke.IsDir() && h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == inst {
+					continue
+				}
+				if err := remove(kdir); err != nil {
+					return false, nil, err
+				}
+				continue
+			}
 			if !ke.IsDir() || !secretNameRe.MatchString(key) {
 				if err := remove(kdir); err != nil {
 					return false, nil, err

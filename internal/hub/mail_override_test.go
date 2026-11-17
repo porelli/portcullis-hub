@@ -25,7 +25,6 @@ func mailOverrideFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := newMailSlotFixture(t, true)
 	f.h.SetMailCoreForTest(true, "mail.example.org")
-	f.h.cfg.SecretsDir = filepath.Join(t.TempDir(), "secrets")
 	writeFile(t, filepath.Join(f.h.cfg.SecretsDir, mailProviderID, "_mail", "void-session"), testVoidSession+"\n")
 	return f
 }

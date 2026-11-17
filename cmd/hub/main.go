@@ -601,6 +601,9 @@ func main() {
 	go h.RunHistoryPrune(ctx, 24*time.Hour)
 	// Impersonations: expiry, not used, the file every minute (D41, D37).
 	go h.RunImpersonationExpiry(ctx, 5*time.Second)
+	// An owed mail void (a wiring, a restore) is retried every 5 min
+	// (contract §19.11) and at once when owed.
+	go h.RunMailVoidRetry(ctx, hub.MailVoidRetryEvery)
 	// VPN providers: identity and dns hooks when due, vpn.json (§16).
 	go h.RunVPNMaps(ctx, 5*time.Second)
 	// Kubernetes: the VPN gateway pods, watched (K5: vpn.json follows them

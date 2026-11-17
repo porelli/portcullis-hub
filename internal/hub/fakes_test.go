@@ -860,12 +860,12 @@ func writeFile(t *testing.T, path, content string) {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	return newFixtureExtra(t, nil)
+	return newFixtureExtra(t, nil, nil)
 }
 
 // newFixtureExtra is newFixture with extra templates in the source
 // (id → path under the template dir → content).
-func newFixtureExtra(t *testing.T, extra map[string]map[string]string) *fixture {
+func newFixtureExtra(t *testing.T, extra map[string]map[string]string, cfg func(root string, c *Config)) *fixture {
 	t.Helper()
 	root := t.TempDir()
 	f := &fixture{
@@ -894,7 +894,11 @@ func newFixtureExtra(t *testing.T, extra map[string]map[string]string) *fixture 
 	if err := st.Save(filepath.Join(f.data, "state.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	h, err := newTestHub(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}, f.runner, f.engine, f.idp)
+	c := Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}
+	if cfg != nil {
+		cfg(root, &c)
+	}
+	h, err := newTestHub(c, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

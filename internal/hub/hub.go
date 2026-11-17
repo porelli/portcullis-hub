@@ -89,6 +89,9 @@ type Config struct {
 	// (the mail_slot volume, "" = /mail-slot).
 	MailAPIURL  string
 	MailSlotDir string
+	// MailGID is the mail gate's group (0 = 2000, CT_GID_MAIL_PROVIDER;
+	// tests use their own).
+	MailGID int
 	// MCPGateRecipientFile is HUB_MCP_GATE_RECIPIENT_FILE, the gate's age
 	// recipient (contract §15.4; "" or unreadable = no gate: Settings → AI
 	// shows gate_present false).
@@ -372,7 +375,14 @@ type Hub struct {
 	// under mu).
 	mailClients       mailClients
 	mailModeForRender *mailMode
-	domainsReachable  bool
+	// mailVoid is the last void's outcome; mailBootstrapWait and
+	// mailPollEvery shorten the void's waits in tests.
+	mailVoid          mailVoidState
+	mailBootstrapWait time.Duration
+	mailPollEvery     time.Duration
+	// mailVoidKick wakes RunMailVoidRetry (kickMailVoid).
+	mailVoidKick     chan struct{}
+	domainsReachable bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable
 	// meanwhile); domainsGen changes with every domain operation's commit,
 	// so a RefreshDomains that started before it drops its stale list.
@@ -752,6 +762,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		invKick:              make(chan struct{}, 1),
 		aiReconKick:          make(chan struct{}, 1),
 		credKick:             make(chan struct{}, 1),
+		mailVoidKick:         make(chan struct{}, 1),
 		mailKick:             make(chan struct{}, 1),
 		driftKey:             map[string]string{},
 		afterFunc:            realAfterFunc,

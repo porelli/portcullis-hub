@@ -41,7 +41,17 @@ func mailTemplateFiles(t *testing.T) map[string]string {
 // mailsrv; wired: it is the wired provider (normal mode).
 func newMailSlotFixture(t *testing.T, wired bool) *fixture {
 	t.Helper()
-	f := newFixtureExtra(t, map[string]map[string]string{mailProviderID: mailTemplateFiles(t)})
+	f := newFixtureExtra(t, map[string]map[string]string{mailProviderID: mailTemplateFiles(t)}, func(root string, c *Config) {
+		c.SecretsDir = filepath.Join(root, "secrets")
+		if err := os.Mkdir(c.SecretsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		c.MailSlotDir = filepath.Join(root, "mail-slot")
+		if err := os.Mkdir(c.MailSlotDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		c.MailGID = os.Getgid()
+	})
 	if f.h.Template(mailProviderID) == nil {
 		t.Fatal("the mail template didn't load (see the log)")
 	}
