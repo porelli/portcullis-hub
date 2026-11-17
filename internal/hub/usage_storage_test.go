@@ -513,3 +513,17 @@ func TestStorageFoldersFromScans(t *testing.T) {
 }
 
 var _ = errors.New
+
+// A Stop before the first target ends the run stopped, never failed.
+func TestStorageStopBeforeTargets(t *testing.T) {
+	e := newStorageEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, _, err := e.h.measureStorage(ctx, "")
+	if !errors.Is(err, ErrStopped) || res["measured"] != "0" || res["skipped"] != "8" {
+		t.Errorf("res %v, err %v", res, err)
+	}
+	if n := len(e.fixerRuns()); n != 0 {
+		t.Errorf("%d runs after a Stop", n)
+	}
+}

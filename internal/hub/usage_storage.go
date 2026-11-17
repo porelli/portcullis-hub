@@ -240,13 +240,16 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 	s := h.usage
 	start := s.now()
 	p := progressFrom(ctx)
+	// The listing finishes on a Stop too (a Stop then skips every target):
+	// a Stop is never a failure of the run.
+	listCtx := context.WithoutCancel(ctx)
 	var roots []string
-	if info, err := h.rt.Info(ctx); err == nil {
+	if info, err := h.rt.Info(listCtx); err == nil {
 		roots = info.ForbiddenRoots
 	} else if usageRefused(err) {
 		return nil, nil, statusErr(http.StatusServiceUnavailable, "%s", usageRefusal(err))
 	}
-	disk, sizes, err := h.storageTargets(ctx, instance, roots)
+	disk, sizes, err := h.storageTargets(listCtx, instance, roots)
 	if err != nil {
 		return nil, nil, statusErr(http.StatusServiceUnavailable, "storage targets: %s", usageErrText(err))
 	}
