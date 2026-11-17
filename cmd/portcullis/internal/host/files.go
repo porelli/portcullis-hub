@@ -182,3 +182,5 @@ func principalsBody(ps []string) []byte {
 	}
 	return []byte(strings.Join(ps, "\n") + "\n")
 }
+
+func fsMode(m uint32) fs.FileMode { return fs.FileMode(m) }

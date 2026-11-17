@@ -104,7 +104,21 @@ func (f *fakeSys) Run(_ context.Context, name string, args ...string) ([]byte, e
 			return []byte("[Unit]"), nil
 		}
 		return nil, nil
-	case "visudo", "useradd", "usermod", "userdel", "groupadd", "loginctl", "pkill", "launchctl":
+	case "useradd":
+		return nil, f.useradd(args)
+	case "usermod":
+		return nil, f.usermod(args)
+	case "userdel":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.files["/etc/passwd"] = []byte(dropLine(string(f.files["/etc/passwd"]), args[len(args)-1]))
+		return nil, nil
+	case "groupadd":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.files["/etc/group"] = append(f.files["/etc/group"], []byte(args[len(args)-1]+":x:999:\n")...)
+		return nil, nil
+	case "visudo", "loginctl", "pkill", "launchctl":
 		return nil, nil
 	}
 	return nil, fmt.Errorf("fake: %s not handled", name)
@@ -299,4 +313,85 @@ func (f *fakeSys) snapshot() map[string]string {
 		out[k] = string(v)
 	}
 	return out
+}
+
+func dropLine(passwd, name string) string {
+	var out []string
+	for _, l := range strings.Split(passwd, "\n") {
+		if l != "" && !strings.HasPrefix(l, name+":") {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+// useradd: [-u uid] [-U] [-G group] [-m] [-s shell] [-c comment] name.
+func (f *fakeSys) useradd(args []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	uid, shell, comment, group := "3000", "/bin/sh", "", ""
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "-u":
+			uid = args[i+1]
+		case "-s":
+			shell = args[i+1]
+		case "-c":
+			comment = args[i+1]
+		case "-G":
+			group = args[i+1]
+		}
+	}
+	name := args[len(args)-1]
+	if strings.Contains(comment, ":") {
+		return errors.New("useradd: invalid comment")
+	}
+	if strings.Contains(string(f.files["/etc/passwd"]), "\n"+name+":") || strings.HasPrefix(string(f.files["/etc/passwd"]), name+":") {
+		return errors.New("useradd: user exists")
+	}
+	f.files["/etc/passwd"] = append(f.files["/etc/passwd"], []byte(name+":x:"+uid+":"+uid+":"+comment+":/home/"+name+":"+shell+"\n")...)
+	f.dirs["/home/"+name] = true
+	if group != "" {
+		var out []string
+		for _, l := range strings.Split(string(f.files["/etc/group"]), "\n") {
+			if strings.HasPrefix(l, group+":") {
+				if strings.HasSuffix(l, ":") {
+					l += name
+				} else {
+					l += "," + name
+				}
+			}
+			if l != "" {
+				out = append(out, l)
+			}
+		}
+		f.files["/etc/group"] = []byte(strings.Join(out, "\n") + "\n")
+	}
+	return nil
+}
+
+// usermod: -s shell sets the shell (the lock and unlock).
+func (f *fakeSys) usermod(args []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name := args[len(args)-1]
+	shell := ""
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-s" {
+			shell = args[i+1]
+		}
+	}
+	var out []string
+	for _, l := range strings.Split(string(f.files["/etc/passwd"]), "\n") {
+		if strings.HasPrefix(l, name+":") && shell != "" {
+			p := strings.Split(l, ":")
+			p[6] = shell
+			l = strings.Join(p, ":")
+		}
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	f.files["/etc/passwd"] = []byte(strings.Join(out, "\n") + "\n")
+	return nil
 }
