@@ -99,7 +99,10 @@ type Client struct {
 // New returns a client for baseURL; secretFile holds the bearer (the
 // wired instance's _mail/api-secret). Every call is bounded at 30 s.
 func New(baseURL, secretFile string) *Client {
-	return &Client{APIURL: strings.TrimSuffix(baseURL, "/"), SecretFile: secretFile, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	// Redirects are never followed (M11): the Hub would replay its calls
+	// from its own network position; a 3xx is an error answer.
+	return &Client{APIURL: strings.TrimSuffix(baseURL, "/"), SecretFile: secretFile, HTTP: &http.Client{Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
 // minSecret is the shortest bearer accepted (the Hub writes 48).
@@ -172,7 +175,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) (in
 	if err := dec.Decode(out); err != nil {
 		return status, fmt.Errorf("mail provider: unexpected answer (HTTP %d)", status)
 	}
-	if dec.More() {
+	// Exactly one value (L9: More misses a stray } or ]).
+	if _, err := dec.Token(); err != io.EOF {
 		return status, fmt.Errorf("mail provider: unexpected answer (HTTP %d): trailing data", status)
 	}
 	return status, nil
@@ -511,17 +515,95 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	if _, err := c.do(ctx, http.MethodGet, "/v1/status", nil, &out); err != nil {
 		return Status{}, err
 	}
-	out.Provider.Name = clipText(out.Provider.Name, 64)
-	out.Provider.Version = clipText(out.Provider.Version, 64)
-	if out.DNS != nil {
-		// Domain names compare lowercase (the Hub's are).
-		dns := make(map[string]string, len(out.DNS))
-		for d, h := range out.DNS {
-			dns[strings.ToLower(d)] = h
-		}
-		out.DNS = dns
-	}
+	shapeStatus(&out)
 	return out, nil
+}
+
+var (
+	statusDomainRe = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$`)
+	statusWordRe   = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
+	selectorRe     = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$`)
+	formerIDRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+	hashTokenRe    = regexp.MustCompile(`^[A-Za-z0-9+/=_.:-]{1,128}$`)
+	dmarcPolicies  = map[string]bool{"none": true, "quarantine": true, "reject": true}
+	mtastsModes    = map[string]bool{"none": true, "testing": true, "enforce": true, "off": true}
+)
+
+// statusDomain is d lowercased when it is a DNS name ("" otherwise).
+func statusDomain(d string) string {
+	d = strings.ToLower(strings.TrimSuffix(d, "."))
+	if len(d) > 253 || !statusDomainRe.MatchString(d) {
+		return ""
+	}
+	return d
+}
+
+// shapeStatus keeps only shaped values of GET /v1/status (M10, spec
+// §10.2.4): every string that reaches the UI, the host CLI or the AI is
+// a DNS name, a known word, a shaped id or a hash; anything else (and
+// every entry beyond a bound) is dropped.
+func shapeStatus(s *Status) {
+	s.Provider.Name = clipText(s.Provider.Name, 64)
+	s.Provider.Version = clipText(s.Provider.Version, 64)
+	var sans []string
+	for _, n := range s.Cert.SANs {
+		if d := statusDomain(n); d != "" && len(sans) < 100 {
+			sans = append(sans, d)
+		}
+	}
+	s.Cert.SANs = sans
+	if !spkiRe.MatchString(s.Cert.SPKISHA256) {
+		s.Cert.SPKISHA256 = ""
+	}
+	var dkim []StatusDKIM
+	for _, k := range s.DKIM {
+		k.Domain = statusDomain(k.Domain)
+		if k.Domain == "" || !statusWordRe.MatchString(k.Algorithm) || !selectorRe.MatchString(k.Selector) || !statusWordRe.MatchString(k.Stage) || len(dkim) >= 1000 {
+			continue
+		}
+		dkim = append(dkim, k)
+	}
+	s.DKIM = dkim
+	var sts []StatusMTASTS
+	for _, m := range s.MTASTS {
+		m.Domain = statusDomain(m.Domain)
+		if m.Domain == "" || !mtastsModes[m.Mode] || len(sts) >= 1000 {
+			continue
+		}
+		sts = append(sts, m)
+	}
+	s.MTASTS = sts
+	var dm []StatusDMARC
+	for _, d := range s.DMARC {
+		d.Domain = statusDomain(d.Domain)
+		if d.Domain == "" || !dmarcPolicies[d.Policy] || len(dm) >= 1000 {
+			continue
+		}
+		if d.Proposed != nil && !dmarcPolicies[*d.Proposed] {
+			d.Proposed = nil
+		}
+		dm = append(dm, d)
+	}
+	s.DMARC = dm
+	s.Queue.Messages, s.Queue.Deferred = max(s.Queue.Messages, 0), max(s.Queue.Deferred, 0)
+	var former []StatusFormer
+	for _, f := range s.Former {
+		if !formerIDRe.MatchString(f.ID) || !usernameRe.MatchString(f.Username) || len(former) >= 10000 {
+			continue
+		}
+		former = append(former, f)
+	}
+	s.Former = former
+	if s.DNS != nil {
+		// Domain names compare lowercase (the Hub's are).
+		dns := make(map[string]string, len(s.DNS))
+		for d, h := range s.DNS {
+			if n := statusDomain(d); n != "" && hashTokenRe.MatchString(h) && len(dns) < 1000 {
+				dns[n] = h
+			}
+		}
+		s.DNS = dns
+	}
 }
 
 // Credentials are the live mail passwords of the account with uuid
@@ -538,8 +620,13 @@ func (c *Client) Credentials(ctx context.Context, uuid string) ([]Credential, er
 	if len(out) > maxList {
 		return nil, errors.New("mail provider: unexpected answer: too many credentials")
 	}
+	ids := map[string]bool{}
 	for i := range out {
 		r := &out[i]
+		if ids[r.ID] {
+			return nil, errors.New("mail provider: unexpected answer: a credential id twice")
+		}
+		ids[r.ID] = true
 		if r.UUID != uuid {
 			return nil, errors.New("mail provider: unexpected answer: a credential of another account")
 		}
@@ -616,6 +703,18 @@ func decodeCreated(raw []byte) (Created, error) {
 	if !credIDRe.MatchString(out.ID) || len(out.Secret) == 0 {
 		out.Secret.Zero()
 		return Created{}, errors.New("no id or no password")
+	}
+	// L11: created_at required; the password 8–256 printable ASCII
+	// characters, no space (8 at least).
+	if out.CreatedAt.IsZero() || len(out.Secret) < 8 || len(out.Secret) > 256 {
+		out.Secret.Zero()
+		return Created{}, errors.New("no created_at or a malformed password")
+	}
+	for _, b := range out.Secret {
+		if b < 0x21 || b > 0x7e {
+			out.Secret.Zero()
+			return Created{}, errors.New("a malformed password")
+		}
 	}
 	return out, nil
 }

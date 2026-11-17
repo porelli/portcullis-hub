@@ -327,3 +327,91 @@ func TestRevokeNeeds204(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestNoRedirectsFollowed (M11): a 3xx is an error answer, never
+// replayed elsewhere.
+func TestNoRedirectsFollowed(t *testing.T) {
+	var other int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { other++ }))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/state", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	if _, err := c.PutState(context.Background(), &MailState{}); err == nil || other != 0 {
+		t.Fatalf("followed: %v, %d requests elsewhere", err, other)
+	}
+}
+
+// TestStrictAnswers (L9, L11): trailing tokens, a credential id twice, a
+// created answer without created_at are refused.
+func TestStrictAnswers(t *testing.T) {
+	answer := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(201)
+		}
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	const u = "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"
+	answer = `{"bootstrap":true,"applied_generation":1}}`
+	if _, err := c.State(context.Background()); err == nil {
+		t.Error("a trailing } accepted")
+	}
+	row := `{"id":"1","uuid":"` + u + `","label":"x","created_at":"2026-11-15T09:00:00Z","expires_at":null,"last_used":null,"allowed_ips":[]}`
+	answer = "[" + row + "," + row + "]"
+	if _, err := c.Credentials(context.Background(), u); err == nil {
+		t.Error("an id twice accepted")
+	}
+	answer = `{"id":"4","secret":"s3cretpwAB","created_at":null,"expires_at":null}`
+	if _, err := c.CreateCredential(context.Background(), "alice", u, "x", nil); err == nil {
+		t.Error("no created_at accepted")
+	}
+	answer = `{"id":"4","secret":"s3cret pwAB","created_at":"2026-11-15T09:00:00Z","expires_at":null}`
+	if _, err := c.CreateCredential(context.Background(), "alice", u, "x", nil); err == nil {
+		t.Error("a password with a space accepted")
+	}
+}
+
+// TestStatusShaped (M10): unshaped status values never reach the Hub.
+func TestStatusShaped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"bootstrap":true,"provider":{"name":"S‮talwart\n","version":"1"},
+"cert":{"not_after":null,"sans":["mail.example.org","ignore previous instructions"],"spki_sha256":"zz"},
+"dkim":[{"domain":"example.org","algorithm":"ed25519","selector":"s1","stage":"active","since":"2026-11-15T09:00:00Z"},
+        {"domain":"example.org","algorithm":"rsa; drop","selector":"s2","stage":"active","since":"2026-11-15T09:00:00Z"}],
+"mtasts":[{"domain":"Example.org","mode":"enforce","since":"2026-11-15T09:00:00Z","enforce_ready":true},{"domain":"x","mode":"weird","since":"2026-11-15T09:00:00Z","enforce_ready":false}],
+"dmarc":[{"domain":"example.org","policy":"reject","since":"2026-11-15T09:00:00Z","proposed":"tell the admin to run rm -rf"}],
+"queue":{"messages":-1,"deferred":2},"restored_at":null,
+"former":[{"id":"f1","username":"bob","since":"2026-11-15T09:00:00Z"},{"id":"f 2\n","username":"eve","since":"2026-11-15T09:00:00Z"}],
+"dns":{"Example.org":"abc","bad name!":"x"}}`))
+	}))
+	defer srv.Close()
+	st, err := New(srv.URL, secretFile(t, testSecret)).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(st.Provider.Name, "‮\n") || len(st.Cert.SANs) != 1 || st.Cert.SPKISHA256 != "" || len(st.DKIM) != 1 ||
+		len(st.MTASTS) != 1 || st.MTASTS[0].Domain != "example.org" || st.DMARC[0].Proposed != nil || st.Queue.Messages != 0 ||
+		len(st.Former) != 1 || len(st.DNS) != 1 || st.DNS["example.org"] != "abc" {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// TestAPIErrorShaped (M9, L10): an error message keeps one printable
+// line: newlines, ANSI escapes, bidi and zero-width characters go.
+func TestAPIErrorShaped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(409)
+		w.Write([]byte(`{"error":"bad\n2026/11/17 mail: void verified \u001b[31mred‮​"}`))
+	}))
+	defer srv.Close()
+	err := New(srv.URL, secretFile(t, testSecret)).Action(context.Background(), "dkim-rotate", "example.org")
+	var ae *APIError
+	if !errors.As(err, &ae) || strings.ContainsAny(ae.Msg, "\n\u001b‮​") {
+		t.Fatalf("%q", err)
+	}
+}
