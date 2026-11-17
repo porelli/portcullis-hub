@@ -401,7 +401,7 @@
   // after …)" for a capped one, dimmed past 48 h, its age beside it.
   function sizeHtml(it) {
     if (!isNum(it.alloc_bytes)) {
-      const whyHtml = it.error ? ' <span class="usage-sub">' + esc(it.error.replace(/^not measured: /, '')) + '</span>' : (it.note ? ' <span class="usage-sub">' + esc(it.note) + '</span>' : '');
+      const whyHtml = it.error ? ' <span class="usage-sub">' + esc(it.error.replace(/^(not measured:? ?)+/, '')) + '</span>' : (it.note ? ' <span class="usage-sub">' + esc(it.note) + '</span>' : '');
       return NOT_MEASURED + whyHtml;
     }
     let figHtml = fmtBytes(it.alloc_bytes);

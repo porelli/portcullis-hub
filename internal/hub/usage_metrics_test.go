@@ -26,20 +26,20 @@ func TestUsageCollectorSeries(t *testing.T) {
 	want := `
 # HELP portcullis_container_cpu_seconds_total CPU time the container used (seconds).
 # TYPE portcullis_container_cpu_seconds_total counter
-portcullis_container_cpu_seconds_total{instance="a",number="1",service="web"} 3
+portcullis_container_cpu_seconds_total{app="a",number="1",service="web"} 3
 # HELP portcullis_container_memory_working_set_bytes The container's working set (usage minus inactive file pages).
 # TYPE portcullis_container_memory_working_set_bytes gauge
-portcullis_container_memory_working_set_bytes{instance="a",number="1",service="web"} 1.048576e+06
+portcullis_container_memory_working_set_bytes{app="a",number="1",service="web"} 1.048576e+06
 # HELP portcullis_container_memory_limit_bytes The container's memory limit (left out when it has none).
 # TYPE portcullis_container_memory_limit_bytes gauge
-portcullis_container_memory_limit_bytes{instance="a",number="1",service="web"} 6.7108864e+07
+portcullis_container_memory_limit_bytes{app="a",number="1",service="web"} 6.7108864e+07
 # HELP portcullis_container_pids Processes and threads in the container.
 # TYPE portcullis_container_pids gauge
-portcullis_container_pids{instance="a",number="1",service="db"} 2
-portcullis_container_pids{instance="a",number="1",service="web"} 4
+portcullis_container_pids{app="a",number="1",service="db"} 2
+portcullis_container_pids{app="a",number="1",service="web"} 4
 # HELP portcullis_container_network_receive_bytes_total Bytes the container received.
 # TYPE portcullis_container_network_receive_bytes_total counter
-portcullis_container_network_receive_bytes_total{instance="a",number="1",service="web"} 10
+portcullis_container_network_receive_bytes_total{app="a",number="1",service="web"} 10
 `
 	c := e.h.UsageCollector()
 	if err := testutil.CollectAndCompare(c, strings.NewReader(want),
@@ -127,5 +127,52 @@ func TestMetricsScrapedRecently(t *testing.T) {
 	e.clock.Add(6 * time.Minute)
 	if e.h.MetricsScrapedRecently() {
 		t.Error("still scraped 6 min later")
+	}
+}
+
+// FR-H1: no series carries a label Prometheus sets on scrape (instance,
+// job), so a scraped series keeps its app.
+func TestUsageCollectorNoTargetLabels(t *testing.T) {
+	e := newStorageEnv(t)
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(e.h.UsageCollector())
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			n++
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "instance" || l.GetName() == "job" {
+					t.Errorf("%s carries %s=%q", mf.GetName(), l.GetName(), l.GetValue())
+				}
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no series")
+	}
+}
+
+// L6: two running containers with one label set (one-offs of a service)
+// export one series each metric, and the scrape still gathers.
+func TestUsageCollectorDuplicateLabels(t *testing.T) {
+	e := newUsageEnv(t, "a")
+	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "web", 1, "running"))
+	e.rt.SetStats("a1", runtime.UnitStats{Read: e.clock.Now(), Pids: pu(4)})
+	e.rt.SetStats("a2", runtime.UnitStats{Read: e.clock.Now(), Pids: pu(5)})
+	e.sweep()
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(e.h.UsageCollector())
+	if _, err := reg.Gather(); err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	if n := testutil.CollectAndCount(e.h.UsageCollector(), "portcullis_container_pids"); n != 1 {
+		t.Errorf("pids series = %d", n)
 	}
 }

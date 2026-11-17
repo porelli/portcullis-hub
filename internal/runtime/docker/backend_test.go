@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -22,11 +23,12 @@ import (
 // recorder is a fake engine + compose runner recording every call (name
 // and the arguments that matter) in order.
 type recorder struct {
-	mu     sync.Mutex
-	calls  []string
-	nets   []engine.Network
-	tarOut []byte // CopyFromContainer's answer
-	tarIn  map[string][]byte
+	mu      sync.Mutex
+	calls   []string
+	nets    []engine.Network
+	tarOut  []byte // CopyFromContainer's answer
+	tarIn   map[string][]byte
+	hostErr error // HostResources' answer
 }
 
 func (r *recorder) rec(format string, a ...any) {
@@ -187,6 +189,9 @@ func (r *recorder) ImageSize(_ context.Context, ref string) (int64, error) {
 }
 func (r *recorder) HostResources(context.Context) (int, int64, error) {
 	r.rec("host-resources")
+	if r.hostErr != nil {
+		return 0, 0, r.hostErr
+	}
 	return 8, 16 << 30, nil
 }
 
@@ -489,6 +494,12 @@ func TestBackendInfoHostResources(t *testing.T) {
 	i, err := b.Info(context.Background())
 	if err != nil || i.CPUs != 8 || i.MemoryBytes != 16<<30 {
 		t.Errorf("Info = %+v, %v", i, err)
+	}
+	// L10: the host line is best effort: its failure never fails Info.
+	r.hostErr = errors.New("info down")
+	i, err = b.Info(context.Background())
+	if err != nil || i.CPUs != 0 || i.MemoryBytes != 0 || len(i.ForbiddenRoots) != 1 {
+		t.Errorf("Info with no host resources = %+v, %v", i, err)
 	}
 }
 

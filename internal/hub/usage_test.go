@@ -459,3 +459,88 @@ func TestUsageKubeCoreNotMeasured(t *testing.T) {
 		t.Errorf("doctor in = %+v", in)
 	}
 }
+
+// M4: a restart right after the working set neared the limit is an OOM
+// kill even when the engine has cleared OOMKilled again: the CPU counter
+// going down triggers an inspect at once, the restart count is fresh and
+// the point is marked.
+func TestUsageOOMRestartLoopSeen(t *testing.T) {
+	for name, c := range map[string]struct {
+		mem  uint64
+		want bool
+	}{"near the limit": {95 << 20, true}, "far from it": {40 << 20, false}} {
+		t.Run(name, func(t *testing.T) {
+			e := newUsageEnv(t, "a")
+			e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"))
+			t0 := usageT0.Add(-time.Hour)
+			e.rt.Infos = map[string]runtime.UnitInfo{"a1": {ID: "a1", Memory: 100 << 20, StartedAt: t0}}
+			e.stats("a1", 10e9, c.mem)
+			e.sweep()
+			e.clock.Add(15 * time.Second)
+			// Killed and started again between two sweeps: OOMKilled is
+			// already false.
+			e.rt.Lock()
+			e.rt.Infos["a1"] = runtime.UnitInfo{ID: "a1", Memory: 100 << 20, StartedAt: t0.Add(time.Hour), RestartCount: 1}
+			e.rt.Unlock()
+			e.stats("a1", 1e8, 10<<20)
+			e.sweep()
+			if n := usageCalls(e.rt.Calls(), "inspect a1"); n != 2 {
+				t.Errorf("inspects = %d, want one at once after the restart", n)
+			}
+			in := e.h.usageDoctorIn()
+			if in == nil || len(in.Containers) != 1 {
+				t.Fatalf("in = %+v", in)
+			}
+			if got := in.Containers[0]; got.Restarts != 1 || got.OOMSeenHour != c.want {
+				t.Errorf("restarts %d, OOM seen %v (want %v)", got.Restarts, got.OOMSeenHour, c.want)
+			}
+		})
+	}
+}
+
+// M4: a container seen not running and then running again is inspected
+// at once (its restart count is fresh), not after 5 minutes.
+func TestUsageInspectAfterRestartState(t *testing.T) {
+	e := newUsageEnv(t, "a")
+	e.rt.Infos = map[string]runtime.UnitInfo{"a1": {ID: "a1", Memory: 64 << 20}}
+	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"))
+	e.stats("a1", 1e9, 1)
+	e.sweep()
+	e.clock.Add(15 * time.Second)
+	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "restarting"))
+	e.sweep()
+	n := usageCalls(e.rt.Calls(), "inspect a1")
+	e.clock.Add(15 * time.Second)
+	e.rt.Lock()
+	e.rt.Infos["a1"] = runtime.UnitInfo{ID: "a1", Memory: 64 << 20, RestartCount: 1}
+	e.rt.Unlock()
+	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"))
+	e.sweep()
+	if usageCalls(e.rt.Calls(), "inspect a1") != n+1 {
+		t.Error("not inspected when it ran again")
+	}
+	if c := e.h.UsageOverview().Apps[0].Containers[0]; c.Restarts != 1 {
+		t.Errorf("restarts = %d", c.Restarts)
+	}
+}
+
+// M5: a member whose stats call failed keeps its known limits, so the
+// group's memory limit stays the sum (never "partly unlimited").
+func TestUsageFailedStatsKeepsGroupLimit(t *testing.T) {
+	e := newUsageEnv(t, "a")
+	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "db", 1, "running"))
+	e.rt.Infos = map[string]runtime.UnitInfo{"a1": {ID: "a1", Memory: 64 << 20, PidsLimit: 10}, "a2": {ID: "a2", Memory: 32 << 20, PidsLimit: 5}}
+	e.stats("a1", 1e9, 100)
+	e.rt.StatsErr = map[string]error{"a2": errors.New("timeout")}
+	e.sweep()
+	g := e.h.UsageOverview().Apps[0]
+	if g.Totals.MemLimitBytes == nil || *g.Totals.MemLimitBytes != 96<<20 {
+		t.Errorf("group memory limit = %v, want 96 MiB", g.Totals.MemLimitBytes)
+	}
+	if g.Totals.PidsLimit == nil || *g.Totals.PidsLimit != 15 {
+		t.Errorf("group pids limit = %v", g.Totals.PidsLimit)
+	}
+	if g.Totals.MemBytes == nil || !g.Partial {
+		t.Errorf("figures %v partial %v", g.Totals.MemBytes, g.Partial)
+	}
+}

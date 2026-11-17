@@ -52,6 +52,13 @@ type Limits struct {
 	Restarts    int
 }
 
+// LimitsSample is a sample with only l's limits (a failed stats call: no
+// figure, the limits still known).
+func LimitsSample(l Limits) Sample {
+	mem, pids := l.MemBytes, l.Pids
+	return Sample{MemLimitBytes: &mem, CPULimitCores: l.CPUCores, PidsLimit: &pids}
+}
+
 // LimitsOf reads the limits from an inspect: NanoCPUs, else
 // CPUQuota/CPUPeriod.
 func LimitsOf(i runtime.UnitInfo) Limits {

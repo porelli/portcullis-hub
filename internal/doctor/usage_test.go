@@ -209,6 +209,23 @@ func TestStorageMeasurePartial(t *testing.T) {
 	}
 }
 
+// L4: the why and the advice follow the reason: unreadable entries never
+// say "the next run measures it again".
+func TestStorageMeasurePartialByReason(t *testing.T) {
+	for reason, want := range map[string]string{
+		"failed": "couldn't be read", "hard_links": "hard-linked", "entries": "stopped at its cap (entries)",
+		"time": "stopped at its cap (time)", "names": "was skipped (names)", "depth": "was skipped (depth)",
+	} {
+		fs := storageCheck{kind: KindStorageMeasurePartial}.Run(&Inputs{Storage: &StorageIn{Partial: []StoragePartialIn{{Target: "t", Owner: "a", Reason: reason}}}})
+		if len(fs) != 1 || !strings.Contains(fs[0].Why, want) || !strings.Contains(fs[0].Why, "lower bound") {
+			t.Errorf("%s: why %q", reason, fs[0].Why)
+		}
+		if reason == "failed" && strings.Contains(strings.Join(fs[0].Steps, " "), "next run") {
+			t.Errorf("failed: steps %q", fs[0].Steps)
+		}
+	}
+}
+
 func TestDiskTokenStableInBand(t *testing.T) {
 	tok := func(free uint64) string {
 		r := Run(&Inputs{Storage: &StorageIn{Filesystems: []FilesystemIn{{Dev: 1, Path: "/srv", Free: free, Total: 100 * gib}}}}, nil)

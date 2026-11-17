@@ -121,7 +121,7 @@ func (e *storageEnv) measure(t *testing.T, instance string) (map[string]string, 
 
 func TestStorageTargets(t *testing.T) {
 	e := newStorageEnv(t)
-	disk, sizes, err := e.h.storageTargets(context.Background(), "", nil)
+	disk, sizes, err := e.h.storageTargets(context.Background(), "", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,12 +141,12 @@ func TestStorageTargets(t *testing.T) {
 		t.Errorf("sizes = %q", sk)
 	}
 	// One instance: its targets only, no core.
-	disk, _, _ = e.h.storageTargets(context.Background(), "b", nil)
+	disk, _, _ = e.h.storageTargets(context.Background(), "b", nil, true)
 	if len(disk) != 1 || disk[0].Key != "bind:/srv/data/shared" {
 		t.Errorf("b's targets = %+v", disk)
 	}
 	// A bind under the engine's root is listed, never measured.
-	disk, _, _ = e.h.storageTargets(context.Background(), "b", []string{"/srv/data"})
+	disk, _, _ = e.h.storageTargets(context.Background(), "b", []string{"/srv/data"}, true)
 	if len(disk) != 1 || disk[0].Refused != "refused: under the engine's data root" {
 		t.Errorf("refused = %+v", disk)
 	}
@@ -471,6 +471,20 @@ func TestStorageScheduleFirstRun(t *testing.T) {
 	}
 }
 
+// L11: a scheduled run that couldn't run (busy, no engine) retries in an
+// hour, not a day.
+func TestStorageScheduleRetryWhenSkipped(t *testing.T) {
+	if d := usageStorageNext(true, 24*time.Hour); d != 24*time.Hour {
+		t.Errorf("ran: %s", d)
+	}
+	if d := usageStorageNext(false, 24*time.Hour); d != time.Hour {
+		t.Errorf("skipped: %s", d)
+	}
+	if d := usageStorageNext(false, time.Minute); d != time.Minute {
+		t.Errorf("skipped, short interval: %s", d)
+	}
+}
+
 func TestStorageFoldersFromScans(t *testing.T) {
 	e := newStorageEnv(t)
 	h := e.h
@@ -525,5 +539,174 @@ func TestStorageStopBeforeTargets(t *testing.T) {
 	}
 	if n := len(e.fixerRuns()); n != 0 {
 		t.Errorf("%d runs after a Stop", n)
+	}
+}
+
+// M1: a target the listing no longer has (a dropped volume, a removed
+// container's layer) leaves the cache on a full run; on an instance's
+// run only that instance's ownership goes, and the other owners of a
+// shared image stay.
+func TestStoragePrunesGoneTargets(t *testing.T) {
+	e := newStorageEnv(t)
+	e.rt.ImageSizes["img-shared"] = 2 << 20
+	b2 := uunit("b2", "portcullis-a", "worker", 1, "running")
+	b2.Image = "img-shared"
+	a1, b1 := uunit("a1", "portcullis-a", "web", 1, "running"), uunit("b1", "portcullis-b", "web", 1, "running")
+	a1.Image, b1.Image = "img-a", "img-shared"
+	e.setUnits(a1, b1, b2)
+	e.sweep()
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	sf := e.h.storageSnapshot()
+	if en := sf.Entries["image:img-shared"]; !slices.Equal(en.Owners, []string{"a", "b"}) {
+		t.Fatalf("shared image owners %v", en.Owners)
+	}
+	// a drops its cache volume and its worker (so a no longer uses
+	// img-shared); an instance run of a.
+	e.rt.Lock()
+	delete(e.rt.Volumes, "portcullis-a_cache")
+	e.rt.Unlock()
+	e.setUnits(a1, b1)
+	e.sweep()
+	if _, _, err := e.measure(t, "a"); err != nil {
+		t.Fatal(err)
+	}
+	sf = e.h.storageSnapshot()
+	if _, ok := sf.Entries["volume:portcullis-a_cache"]; ok {
+		t.Error("the dropped volume stays after a's run")
+	}
+	if _, ok := sf.Entries["layer:a/worker.1"]; ok {
+		t.Error("the removed container's layer stays after a's run")
+	}
+	if en := sf.Entries["image:img-shared"]; !slices.Equal(en.Owners, []string{"b"}) {
+		t.Errorf("shared image owners after a's run %v (want b)", en.Owners)
+	}
+	if _, ok := sf.Entries["volume:portcullis_postgres_data"]; !ok {
+		t.Error("an instance run dropped core's volume")
+	}
+	// A full run with b's container gone: the image leaves too.
+	e.setUnits(a1)
+	e.sweep()
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	sf = e.h.storageSnapshot()
+	if _, ok := sf.Entries["image:img-shared"]; ok {
+		t.Error("an unused image stays after a full run")
+	}
+	if _, ok := sf.Entries["layer:b/web.1"]; ok {
+		t.Error("b's removed layer stays after a full run")
+	}
+}
+
+// M3: a volume deleted after the listing is never mounted (the engine
+// would recreate it), and a volume the helper's create recreated anyway
+// (no labels) is removed; neither is cached.
+func TestStorageNeverRecreatesDeletedVolume(t *testing.T) {
+	e := newStorageEnv(t)
+	e.rep = func(r fixerRun) (*folderfix.Report, error) {
+		e.rt.Lock()
+		defer e.rt.Unlock()
+		switch r.Volume.Name {
+		case "portcullis-a_cache":
+			// Deleted while this target ran: the next one is gone.
+			delete(e.rt.Volumes, "portcullis-a_data")
+		case "portcullis_postgres_data":
+			// Deleted between the check and the create: the engine made it
+			// anew, without labels.
+			e.rt.Volumes["portcullis_postgres_data"] = runtime.Volume{Name: "portcullis_postgres_data"}
+		}
+		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10}, nil
+	}
+	res, _, err := e.measure(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(e.fixerRuns(), "volume:portcullis-a_data") {
+		t.Error("the deleted volume was mounted")
+	}
+	if res["gone"] != "2" {
+		t.Errorf("res %v", res)
+	}
+	e.rt.Lock()
+	_, recreated := e.rt.Volumes["portcullis_postgres_data"]
+	e.rt.Unlock()
+	if recreated {
+		t.Error("the recreated volume wasn't removed")
+	}
+	sf := e.h.storageSnapshot()
+	for _, k := range []string{"volume:portcullis-a_data", "volume:portcullis_postgres_data"} {
+		if _, ok := sf.Entries[k]; ok {
+			t.Errorf("%s is cached", k)
+		}
+	}
+	if _, ok := sf.Entries["volume:portcullis-a_cache"]; !ok {
+		t.Error("a live volume wasn't measured")
+	}
+}
+
+// M3: a volume whose instance was deleted after the listing is skipped
+// before any engine call.
+func TestStorageSkipsVolumeOfDeletedInstance(t *testing.T) {
+	e := newStorageEnv(t)
+	e.rep = func(r fixerRun) (*folderfix.Report, error) {
+		if r.Volume.Name == "portcullis-a_cache" {
+			e.h.usage.instances = func() []usageInst { return []usageInst{{ID: "b", Template: "tmpl", Name: "App b"}} }
+		}
+		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10}, nil
+	}
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(e.fixerRuns(), "volume:portcullis-a_data") {
+		t.Error("a deleted instance's volume was mounted")
+	}
+}
+
+// L1: the engine's info failing refuses every bind (its data root can't
+// be checked); volumes are still measured.
+func TestStorageInfoErrorRefusesBinds(t *testing.T) {
+	e := newStorageEnv(t)
+	e.rt.Lock()
+	e.rt.InfoErr = errors.New("info down")
+	e.rt.Unlock()
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range e.fixerRuns() {
+		if strings.HasPrefix(r, "bind:") {
+			t.Errorf("%s was measured", r)
+		}
+	}
+	en := e.h.storageSnapshot().Entries["bind:/srv/data/shared"]
+	if en.Error != "refused: the engine's data root is unknown" {
+		t.Errorf("bind entry %+v", en)
+	}
+	if !slices.Contains(e.fixerRuns(), "volume:portcullis-a_data") {
+		t.Error("volumes weren't measured")
+	}
+}
+
+// M2: the data directory's live statfs beats a cached run's free space
+// on the same filesystem (the disk strip, the doctor and the alert).
+func TestStorageDiskUsesLiveFreeSpace(t *testing.T) {
+	e := newStorageEnv(t)
+	dev, _, total, err := statDir(e.h.cfg.DataDir)
+	if err != nil {
+		t.Skip(err)
+	}
+	e.rep = func(fixerRun) (*folderfix.Report, error) {
+		// A day-old reading of the same filesystem: nearly full.
+		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10, Dev: dev, FreeBytes: 1, TotalBytes: 2}, nil
+	}
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Add(24 * time.Hour)
+	for _, d := range e.h.UsageStorage().Disks {
+		if d.Dev == dev && (d.TotalBytes != total || d.FreeBytes == 1) {
+			t.Errorf("disk %d = free %d of %d, want the live statfs (total %d)", dev, d.FreeBytes, d.TotalBytes, total)
+		}
 	}
 }

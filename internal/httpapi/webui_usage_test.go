@@ -161,3 +161,22 @@ func TestOppStopUsageKey(t *testing.T) {
 		t.Error("the panel's Stop still posts the instance route for every key")
 	}
 }
+
+// L12: an item's "not measured: not measured on Kubernetes" reads "not
+// measured on Kubernetes" once, never "not measured not measured …".
+func TestUsageJSNotMeasuredOnce(t *testing.T) {
+	block := jsBlock(t, usageJS(t), "  function sizeHtml(it) {", "\n  }\n")
+	script := nodeEsc + "const NOT_MEASURED = 'not measured';\nconst isNum = v => typeof v === 'number' && isFinite(v);\n" + block + `
+console.log(JSON.stringify([
+  sizeHtml({ error: 'not measured: not measured on Kubernetes' }),
+  sizeHtml({ error: 'not measured: the cluster has no metrics API (metrics-server)' }),
+  sizeHtml({ error: 'timed out' }),
+].map(h => h.replace(/<[^>]*>/g, ''))));
+`
+	var got []string
+	nodeJSON(t, script, &got)
+	want := []string{"not measured on Kubernetes", "not measured the cluster has no metrics API (metrics-server)", "not measured timed out"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("got %q", got)
+	}
+}

@@ -16,7 +16,7 @@ import (
 func MetricsHandler(c prometheus.Collector, onScrape func()) http.Handler {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(c)
-	prom := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+	prom := promhttp.HandlerFor(reg, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}) // one bad series never empties the scrape (L6)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		if onScrape != nil {

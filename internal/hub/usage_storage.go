@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
@@ -44,6 +45,7 @@ const (
 	storageRunBudget  = time.Hour
 	storageFirstDelay = 10 * time.Minute
 	storageEvery      = 24 * time.Hour
+	storageBusyRetry  = time.Hour // a scheduled run that couldn't start (L11)
 )
 
 const usageCoreOwner = "core"
@@ -56,13 +58,17 @@ type storageTarget struct {
 	Source            string              // a bind's host path
 	Unit              string              // a layer's container id
 	Refused           string              // listed, not measured (why)
+	Labelled          bool                // a volume that had labels when listed (M3)
 }
 
 // storageTargets lists instance's targets (all: "") in run order: apps
 // by id (volumes, then binds), then core's volumes; then the layers and
 // images. A bind or volume several instances use is one target with
 // every owner.
-func (h *Hub) storageTargets(ctx context.Context, instance string, roots []string) (disk, sizes []storageTarget, err error) {
+//
+// rootsKnown false (the engine's info failed): every bind is refused,
+// since none can be checked against the engine's data root (L1).
+func (h *Hub) storageTargets(ctx context.Context, instance string, roots []string, rootsKnown bool) (disk, sizes []storageTarget, err error) {
 	insts := h.usageInstances()
 	ids := slices.Sorted(maps.Keys(insts))
 	if instance != "" {
@@ -128,12 +134,14 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 			return nil, nil, err
 		}
 		names := make([]string, 0, len(vols))
+		labelled := map[string]bool{}
 		for _, v := range vols {
 			names = append(names, v.Name)
+			labelled[v.Name] = len(v.Labels) > 0
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			add(storageTarget{Key: "volume:" + n, Kind: "volume", Target: n, Volume: runtime.VolumeMount{Name: n, Instance: id}}, id)
+			add(storageTarget{Key: "volume:" + n, Kind: "volume", Target: n, Volume: runtime.VolumeMount{Name: n, Instance: id}, Labelled: labelled[n]}, id)
 		}
 		var binds []string
 		for src, owners := range bindOwners {
@@ -144,6 +152,9 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		sort.Strings(binds)
 		for _, src := range binds {
 			t := storageTarget{Key: "bind:" + src, Kind: "bind", Target: src, Source: src}
+			if !rootsKnown {
+				t.Refused = "refused: the engine's data root is unknown"
+			}
 			for _, r := range roots {
 				if pathUnder(src, r) {
 					t.Refused = "refused: under the engine's data root"
@@ -170,7 +181,7 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 			}
 			sort.Strings(names)
 			for _, n := range names {
-				add(storageTarget{Key: "volume:" + n, Kind: "volume", Target: n, Volume: runtime.VolumeMount{Name: n}}, usageCoreOwner)
+				add(storageTarget{Key: "volume:" + n, Kind: "volume", Target: n, Volume: runtime.VolumeMount{Name: n}, Labelled: true}, usageCoreOwner)
 			}
 		}
 	}
@@ -199,6 +210,38 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		sizes = append(sizes, storageTarget{Key: "image:" + ref, Kind: "image", Target: ref, Owners: owners})
 	}
 	return disk, sizes, nil
+}
+
+// storageVolumeLive: t's volume still exists, and so does its instance
+// (an instance's volume). An inspect error but "not found" counts as live:
+// the helper run reports the real failure.
+func (h *Hub) storageVolumeLive(ctx context.Context, t storageTarget) bool {
+	if id := t.Volume.Instance; id != "" {
+		if _, ok := h.usageInstances()[id]; !ok {
+			return false
+		}
+	}
+	_, err := h.rt.InspectVolume(ctx, t.Volume.Name)
+	return err == nil || !docker.IsNotFound(err)
+}
+
+// storageVolumeRecreated: the volume was deleted between the check and the
+// helper's create, so the engine made it anew, without labels (M3). The
+// new, empty volume is removed (never forced), and the target is gone.
+func (h *Hub) storageVolumeRecreated(ctx context.Context, t storageTarget) bool {
+	if !t.Labelled || h.rt.Kind() == runtime.KindKubernetes {
+		return false
+	}
+	v, err := h.rt.InspectVolume(ctx, t.Volume.Name)
+	if err != nil || len(v.Labels) > 0 {
+		return false
+	}
+	if err := h.rt.RemoveVolume(ctx, t.Volume.Name); err != nil {
+		log.Printf("usage: removing the volume %s the helper recreated: %s", clipRunes(t.Volume.Name, 120), usageErrText(err))
+	} else {
+		log.Printf("usage: removed the volume %s the helper recreated", clipRunes(t.Volume.Name, 120))
+	}
+	return true
 }
 
 // LabelComposeProject is compose's project label on volumes.
@@ -244,17 +287,18 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 	// a Stop is never a failure of the run.
 	listCtx := context.WithoutCancel(ctx)
 	var roots []string
+	rootsKnown := false
 	if info, err := h.rt.Info(listCtx); err == nil {
-		roots = info.ForbiddenRoots
+		roots, rootsKnown = info.ForbiddenRoots, true
 	} else if usageRefused(err) {
 		return nil, nil, statusErr(http.StatusServiceUnavailable, "%s", usageRefusal(err))
 	}
-	disk, sizes, err := h.storageTargets(listCtx, instance, roots)
+	disk, sizes, err := h.storageTargets(listCtx, instance, roots, rootsKnown)
 	if err != nil {
 		return nil, nil, statusErr(http.StatusServiceUnavailable, "storage targets: %s", usageErrText(err))
 	}
 	total := len(disk) + len(sizes)
-	measured, failed, skipped := 0, 0, 0
+	measured, failed, skipped, gone := 0, 0, 0, 0
 	budgetSpent, stopped := false, false
 	got := map[string]storageEntry{}
 	owned := map[string]bool{}
@@ -292,11 +336,24 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 			failed++
 			continue
 		}
+		// M3: a volume (or its instance) deleted since the listing is gone,
+		// never mounted: the engine would recreate it empty.
+		if t.Kind == "volume" && !h.storageVolumeLive(runCtx, t) {
+			log.Printf("usage: %s %s is gone: skipped", t.Kind, clipRunes(t.Target, 120))
+			delete(owned, t.Key)
+			gone++
+			continue
+		}
 		r := fixerRun{Mode: "usage", Volume: t.Volume, Source: t.Source, Opts: folderfix.Options{MaxEntries: storageMaxEntries, MaxTime: storageMaxTime}}
 		began := time.Now()
 		s.diskMu.Lock()
 		rep, err := h.usageFixerRun(runCtx, r)
 		s.diskMu.Unlock()
+		if t.Kind == "volume" && h.storageVolumeRecreated(runCtx, t) {
+			delete(owned, t.Key)
+			gone++
+			continue
+		}
 		e.DurationMS = time.Since(began).Milliseconds()
 		if err != nil || rep == nil {
 			e.Error = usageErrText(err)
@@ -341,16 +398,39 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 		warns = append(warns, fmt.Sprintf("not measured: the run's time budget (%s) is spent: %d targets keep their previous figures", storageRunBudget, skipped))
 	}
 	// The cache: measured entries replace theirs; entries whose owners
-	// are all gone (a deleted instance) are dropped.
+	// are all gone (a deleted instance) are dropped, and so are targets
+	// the run's listing (always complete, even on Stop) no longer has
+	// (M1): all of them on a full run; on an instance's run, that
+	// instance's ownership.
 	insts := h.usageInstances()
 	now := s.now()
 	s.storeMu.Lock()
 	sf := h.storageLoadLocked()
 	next2 := &storageFile{Version: storageCacheVersion, LastRun: sf.LastRun, Entries: map[string]storageEntry{}}
 	for k, e := range sf.Entries {
-		next2.Entries[k] = e
+		if owned[k] {
+			next2.Entries[k] = e
+			continue
+		}
+		if instance == "" {
+			continue
+		}
+		e.Owners = slices.DeleteFunc(slices.Clone(e.Owners), func(o string) bool { return o == instance })
+		if len(e.Owners) > 0 {
+			next2.Entries[k] = e
+		}
 	}
 	for k, e := range got {
+		if prev, ok := next2.Entries[k]; ok && instance != "" {
+			// An instance's run lists only that instance's users of a
+			// shared image: the other owners stay.
+			for _, o := range prev.Owners {
+				if o != instance && !slices.Contains(e.Owners, o) {
+					e.Owners = append(slices.Clone(e.Owners), o)
+				}
+			}
+			sort.Strings(e.Owners)
+		}
 		next2.Entries[k] = e
 	}
 	for k, e := range next2.Entries {
@@ -376,7 +456,7 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 	}
 	s.store = next2
 	s.storeMu.Unlock()
-	res := map[string]string{"targets": strconv.Itoa(total), "measured": strconv.Itoa(measured), "failed": strconv.Itoa(failed), "skipped": strconv.Itoa(skipped)}
+	res := map[string]string{"targets": strconv.Itoa(total), "measured": strconv.Itoa(measured), "failed": strconv.Itoa(failed), "skipped": strconv.Itoa(skipped), "gone": strconv.Itoa(gone)}
 	if stopped {
 		return res, warns, ErrStopped
 	}
@@ -459,6 +539,16 @@ func usageStorageFirstDelay(now time.Time, last *time.Time, every time.Duration)
 	return max(last.Add(every).Sub(now), storageFirstDelay)
 }
 
+// usageStorageNext is the wait after a scheduled run: the interval, or
+// storageBusyRetry when it couldn't run (another run going, no engine) —
+// never a whole day without a full run (L11).
+func usageStorageNext(ran bool, every time.Duration) time.Duration {
+	if ran {
+		return every
+	}
+	return min(storageBusyRetry, every)
+}
+
 // RunUsageStorage measures everything every interval until ctx ends
 // (main: daily), as the Hub (not audited, like the doctor's daily scans).
 func (h *Hub) RunUsageStorage(ctx context.Context, every time.Duration) {
@@ -474,10 +564,13 @@ func (h *Hub) RunUsageStorage(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 		}
+		ran := false
 		if !h.noEngine() {
+			busy := false
 			_, finished, err := h.startOp(opKeyUsage, OpUsageMeasure, directory.Actor{User: "hub", Via: "schedule"}, []Step{{Key: "measure", Label: "Measure storage"}},
 				func(octx context.Context, ready func()) (map[string]string, []string, error) {
 					if !h.usage.measureMu.TryLock() {
+						busy = true
 						return nil, nil, statusErr(http.StatusConflict, "a storage measurement is already running")
 					}
 					defer h.usage.measureMu.Unlock()
@@ -489,12 +582,13 @@ func (h *Hub) RunUsageStorage(ctx context.Context, every time.Duration) {
 			} else {
 				select {
 				case <-finished:
+					ran = !busy
 				case <-ctx.Done():
 					return
 				}
 			}
 		}
-		t.Reset(every)
+		t.Reset(usageStorageNext(ran, every))
 	}
 }
 
@@ -575,21 +669,26 @@ func (h *Hub) storageModel() StorageView {
 			folderScan[e.Folder] = e
 		}
 	}
-	// disks: dev → owner → bytes
+	// disks: dev → owner → bytes. Free and total are the newest reading
+	// of the dev (M2): the live statfs of the data directory beats any
+	// cached run's, a newer folder scan beats an older cache entry.
 	type disk struct {
 		free, total uint64
+		at          time.Time
 		owners      map[string]int64
 		path        string
 	}
 	disks := map[uint64]*disk{}
-	addDisk := func(dev, free, total uint64, owner string, alloc *int64, path string) {
+	addDisk := func(dev, free, total uint64, at time.Time, owner string, alloc *int64, path string) {
 		if total == 0 {
 			return
 		}
 		d := disks[dev]
 		if d == nil {
-			d = &disk{free: free, total: total, owners: map[string]int64{}, path: path}
+			d = &disk{free: free, total: total, at: at, owners: map[string]int64{}, path: path}
 			disks[dev] = d
+		} else if !at.Before(d.at) {
+			d.free, d.total, d.at = free, total, at
 		}
 		var n int64
 		if alloc != nil {
@@ -654,7 +753,7 @@ func (h *Hub) storageModel() StorageView {
 	for _, k := range keys {
 		e := sf.Entries[k]
 		for _, o := range e.Owners {
-			addDisk(e.Dev, e.Free, e.Total, o, e.AllocBytes, e.Target)
+			addDisk(e.Dev, e.Free, e.Total, e.MeasuredAt, o, e.AllocBytes, e.Target)
 		}
 		if slices.Contains(e.Owners, usageCoreOwner) {
 			v.Core = append(v.Core, itemOf(e, usageCoreOwner))
@@ -664,14 +763,14 @@ func (h *Hub) storageModel() StorageView {
 		fs := h.folderStorage(fid, folders[fid], folderScan, folderUsers[fid])
 		v.Folders = append(v.Folders, fs)
 		if e, ok := folderScan[fid]; ok && e.Report != nil {
-			addDisk(e.Report.Dev, e.Report.FreeBytes, e.Report.TotalBytes, fid, fs.AllocBytes, folders[fid].Path)
+			addDisk(e.Report.Dev, e.Report.FreeBytes, e.Report.TotalBytes, e.At, fid, fs.AllocBytes, folders[fid].Path)
 		}
 	}
 	// The Hub's data directory, once the measurer has run (before that
 	// nothing of the storage view is judged).
 	if sf.LastRun != nil || len(sf.Entries) > 0 {
 		if dev, free, total, err := statDir(h.cfg.DataDir); err == nil {
-			addDisk(dev, free, total, usageCoreOwner, nil, h.cfg.DataDir)
+			addDisk(dev, free, total, s.now(), usageCoreOwner, nil, h.cfg.DataDir)
 		}
 	}
 	for _, dev := range slices.Sorted(maps.Keys(disks)) {

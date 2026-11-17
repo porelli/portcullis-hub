@@ -377,15 +377,35 @@ func diskNearlyFull(s *StorageIn) []Finding {
 	return out
 }
 
+// partialText is a partial measurement's why and steps by its reason
+// (L4): a cap is a lower bound the next run repeats; unreadable entries
+// stay unreadable until their owner or mode changes.
+func partialText(reason string) (why string, steps []string) {
+	switch reason {
+	case "failed":
+		return "Some files or folders in it couldn't be read: the figure is a lower bound.",
+			[]string{"The Hub's helper reads sizes only, as root; entries it can't read usually belong to an unmapped user (rootless Podman) or sit on a filesystem that refuses root. Check the owners of the target's files; the finding stays until they are readable."}
+	case "hard_links":
+		return "It has more hard-linked files than the measurer tracks: those past the limit aren't counted, so the figure is a lower bound.",
+			[]string{"Nothing to do: it stays a lower bound on every run. Snapshot or backup trees made of hard links often do this."}
+	case "entries", "time":
+		return "The measurement stopped at its cap (" + reason + "): the figure is a lower bound.",
+			[]string{"Nothing to do: the next run measures it again. A very large tree is always capped; the Usage page shows it as \"≥\"."}
+	}
+	return "Part of it was skipped (" + reason + "): the figure is a lower bound.",
+		[]string{"Nothing to do: a folder with too many names or nested too deep is skipped past its limit; the Usage page shows the figure as \"≥\"."}
+}
+
 func storageMeasurePartial(s *StorageIn) []Finding {
 	var out []Finding
 	for _, p := range s.Partial {
+		why, steps := partialText(p.Reason)
 		f := Finding{
 			FP: Fingerprint(KindStorageMeasurePartial, p.Owner, p.Target), Kind: KindStorageMeasurePartial, Severity: Info,
 			Title:  fmt.Sprintf("The storage of %s's %s was measured only in part.", p.Owner, p.Target),
-			Why:    "The measurement stopped at its cap (" + p.Reason + "): the figure is a lower bound.",
+			Why:    why,
 			Class:  FixExplain,
-			Steps:  []string{"Nothing to do: the next run measures it again. A very large tree is always capped; the Usage page shows it as \"≥\"."},
+			Steps:  steps,
 			Inputs: Digest(p.Reason),
 		}
 		if p.Owner != "core" {

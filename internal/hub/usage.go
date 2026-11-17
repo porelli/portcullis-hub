@@ -62,6 +62,9 @@ type usageCont struct {
 	// the storage measurer's layers, images and bind targets.
 	Image  string
 	Mounts []runtime.UnitMount
+	// LastMem is the last measured working set, kept across a stop (M4:
+	// a restart right after it neared the limit is an OOM suspect).
+	LastMem *int64
 }
 
 const (
@@ -237,19 +240,28 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	}
 
 	// What each container needs, read under the sampler's lock only.
+	// A container that started again since the last sweep (its state
+	// went back to running, or its CPU counter went down) is inspected at
+	// once: its restart count and OOM state are fresh (M4).
 	type job struct {
 		u       usageUnit
 		inspect bool
+		prevCPU *uint64
 	}
 	var jobs []job
 	s.mu.RLock()
 	for _, u := range in {
 		c := s.conts[u.ID]
-		due := c == nil || c.Inspect.IsZero() || now.Sub(c.Inspect) >= usage.InspectEvery
+		due := c == nil || c.Inspect.IsZero() || now.Sub(c.Inspect) >= usage.InspectEvery ||
+			(u.State == "running" && c.State != "running")
 		if u.State != "running" && !due {
 			continue
 		}
-		jobs = append(jobs, job{u: u, inspect: due})
+		j := job{u: u, inspect: due}
+		if c != nil && c.Prev != nil {
+			j.prevCPU = c.Prev.CPUUsageNS
+		}
+		jobs = append(jobs, j)
 	}
 	budget, statsTimeout := s.budget, s.statsTimeout
 	s.mu.RUnlock()
@@ -296,6 +308,13 @@ func (h *Hub) usageSweep(ctx context.Context) {
 				switch {
 				case err == nil:
 					r.stats = &st
+					if !j.inspect && j.prevCPU != nil && st.CPUUsageNS != nil && *st.CPUUsageNS < *j.prevCPU {
+						ictx, icancel := context.WithTimeout(bctx, statsTimeout)
+						if ui, err := h.rt.Inspect(ictx, j.u.ID); err == nil {
+							r.inspected, r.info = true, ui
+						}
+						icancel()
+					}
 				case usageRefused(err):
 					refusedMu.Lock()
 					refused = err
@@ -356,9 +375,22 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			skipped++
 			continue
 		}
+		// A restart: the counter went down, or a later inspect has more
+		// restarts or another start. Just after the working set was at
+		// 90 % of the limit, it is an OOM suspect even when the engine
+		// has already cleared OOMKilled (M4).
+		old, hadInspect := c.Limits, !c.Inspect.IsZero()
+		restarted := r.stats != nil && c.Prev != nil && c.Prev.CPUUsageNS != nil && r.stats.CPUUsageNS != nil && *r.stats.CPUUsageNS < *c.Prev.CPUUsageNS
 		if r.inspected {
 			c.Limits, c.Inspect = usage.LimitsOf(r.info), now
 			c.Mounts = slices.Clone(r.info.Mounts)
+			if hadInspect && (c.Limits.Restarts > old.Restarts || !c.Limits.StartedAt.Equal(old.StartedAt)) {
+				restarted = true
+			}
+		}
+		oomSuspect := restarted && c.LastMem != nil && old.MemBytes > 0 && *c.LastMem >= old.MemBytes/10*9
+		if restarted {
+			c.LastMem = nil
 		}
 		if !c.Running {
 			continue
@@ -379,7 +411,16 @@ func (h *Hub) usageSweep(ctx context.Context) {
 				// Never the error's text: only its class (no engine body).
 				log.Printf("usage: stats of %s: %s", shortContainerID(c.ID), usageErrClass(r.err))
 			}
+			// M5: the limits stay known (from the inspect): one failed
+			// call never makes a group's limit "partly unlimited".
 			c.Sample, c.Sampled, c.Prev = usage.Sample{}, false, nil
+			if !c.Inspect.IsZero() {
+				c.Sample = usage.LimitsSample(c.Limits)
+			}
+		}
+		if c.Sample.MemBytes != nil {
+			m := *c.Sample.MemBytes
+			c.LastMem = &m
 		}
 		if c.Kind == usageApp || c.Kind == usageCore {
 			key := c.Group + "\x00" + usageKey(c.Service, c.Number)
@@ -388,7 +429,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 				rg = usage.NewRing(usage.RingSize)
 				s.rings[key] = rg
 			}
-			rg.Add(usage.Point{T: now, S: c.Sample, Restarts: c.Limits.Restarts, OOMKilled: c.Limits.OOMKilled, ID: c.ID})
+			rg.Add(usage.Point{T: now, S: c.Sample, Restarts: c.Limits.Restarts, OOMKilled: c.Limits.OOMKilled || oomSuspect, ID: c.ID})
 		}
 	}
 	s.notMeasured = ""

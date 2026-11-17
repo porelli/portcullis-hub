@@ -144,8 +144,10 @@ func (b *Backend) Info(ctx context.Context) (runtime.Info, error) {
 	if i.Networks, err = b.engine.ListNetworks(ctx); err != nil {
 		return i, fmt.Errorf("the networks: %w", err)
 	}
-	if i.CPUs, i.MemoryBytes, err = b.engine.HostResources(ctx); err != nil {
-		return i, fmt.Errorf("the host's resources: %w", err)
+	// Best effort (L10): the Usage page's host line only; 0 = unknown,
+	// never a failed Info.
+	if cpus, mem, err := b.engine.HostResources(ctx); err == nil {
+		i.CPUs, i.MemoryBytes = cpus, mem
 	}
 	return i, nil
 }
