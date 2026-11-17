@@ -596,8 +596,9 @@ func (h *Hub) mailRetainDKIM(ctx context.Context) {
 		}
 		var recs []state.MailRecord
 		for _, r := range set.Records {
-			if strings.EqualFold(r.Type, "TXT") && strings.Contains(strings.ToLower(r.Name), "._domainkey.") {
-				recs = append(recs, state.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
+			mr := state.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value}
+			if mailRetiringShape(name, mr) { // M8: the shape at retention too
+				recs = append(recs, mr)
 			}
 		}
 		if len(recs) > 0 {

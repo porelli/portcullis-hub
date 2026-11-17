@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // The Hub's judgement of a provider's mail sets (contract §19.7): every
@@ -152,11 +153,6 @@ func (h *Hub) HostMailDNSMain(ctx context.Context) ([]mailprovider.Record, error
 	if err := h.validateMailSet(main, true, set.Records); err != nil {
 		return nil, statusErr(http.StatusConflict, "%v", err)
 	}
-	out := append([]mailprovider.Record{}, set.Records...)
-	seen := map[string]bool{}
-	for _, r := range out {
-		seen[strings.ToLower(r.Name)+" "+strings.ToUpper(r.Type)+" "+r.Value] = true
-	}
 	now := h.mailNow()
 	h.mu.RLock()
 	ret, ok := h.st.Mail.RetiringDKIM[main]
@@ -169,13 +165,47 @@ func (h *Hub) HostMailDNSMain(ctx context.Context) ([]mailprovider.Record, error
 		}
 		h.mu.Unlock()
 	}
+	out := append([]mailprovider.Record{}, set.Records...)
 	if ok && now.Before(ret.Until) {
-		for _, r := range ret.Records {
-			if !seen[strings.ToLower(r.Name)+" "+strings.ToUpper(r.Type)+" "+r.Value] {
-				out = append(out, mailprovider.Record{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
-			}
-		}
+		h.mu.RLock()
+		rc := h.mailRuleContextLocked(main, true)
+		h.mu.RUnlock()
+		out = mailMergeRetiring(rc, set.Records, ret.Records)
 	}
 	h.mailSetPublished(main, set.Records)
 	return out, nil
+}
+
+// mailRetiringShape: a retiring record is exactly one DKIM TXT at
+// <selector>._domainkey.<domain> (one label) starting v=DKIM1; (M8).
+func mailRetiringShape(domain string, r state.MailRecord) bool {
+	sel, ok := strings.CutSuffix(strings.ToLower(strings.TrimSuffix(r.Name, ".")), "._domainkey."+strings.ToLower(domain))
+	return ok && strings.EqualFold(r.Type, "TXT") && sel != "" && !strings.Contains(sel, ".") && strings.HasPrefix(r.Value, "v=DKIM1;")
+}
+
+// mailMergeRetiring is set with domain's retiring DKIM records added
+// (M8): never into a draining set; never one whose name the new set uses
+// (a reused selector: one TXT per name); each only when the merged set
+// still passes the shared rules.
+func mailMergeRetiring(c mailprovider.RuleContext, set []mailprovider.Record, ret []state.MailRecord) []mailprovider.Record {
+	out := append([]mailprovider.Record{}, set...)
+	if c.Draining {
+		return out
+	}
+	used := map[string]bool{}
+	for _, r := range set {
+		used[strings.ToLower(strings.TrimSuffix(r.Name, "."))] = true
+	}
+	for _, r := range ret {
+		n := strings.ToLower(strings.TrimSuffix(r.Name, "."))
+		if used[n] || !mailRetiringShape(c.Domain, r) {
+			continue
+		}
+		cand := append(append([]mailprovider.Record{}, out...), mailprovider.Record{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
+		if mailprovider.ValidateSet(c, cand) != nil {
+			continue
+		}
+		out, used[n] = cand, true
+	}
+	return out
 }

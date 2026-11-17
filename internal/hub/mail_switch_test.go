@@ -605,3 +605,50 @@ func TestSwitchResumeAfterRecordFailsVisibly(t *testing.T) {
 		t.Fatalf("audit %+v", e)
 	}
 }
+
+// TestRetiringDKIMShapedAndDeduped (M8): only well-formed retiring DKIM
+// records of the domain are merged, never at a name the new set uses,
+// never into a draining set.
+func TestRetiringDKIMShapedAndDeduped(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.Domains[teamB] = state.MailDomain{Enabled: true}
+	w.h.mu.Unlock()
+	w.sync(t)
+	const key = "v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
+	set := goodSet(teamB, "reject")
+	set.Records = append(set.Records, mailprovider.Record{Name: "sel._domainkey." + teamB, Type: "TXT", TTL: 3600, Value: key})
+	w.setDNS(teamB, set)
+	w.h.mu.Lock()
+	w.h.st.Mail.RetiringDKIM = map[string]state.RetiringDKIM{teamB: {Until: w.now.Add(time.Hour), Records: []state.MailRecord{
+		{Name: "old._domainkey." + teamB, Type: "TXT", TTL: 3600, Value: key},
+		{Name: "sel._domainkey." + teamB, Type: "TXT", TTL: 3600, Value: key + "x"},
+		{Name: "a.b._domainkey." + teamB, Type: "TXT", TTL: 3600, Value: key},
+		{Name: "x._domainkey.example.com", Type: "TXT", TTL: 3600, Value: key},
+		{Name: "bad._domainkey." + teamB, Type: "TXT", TTL: 3600, Value: "not dkim"},
+	}}}
+	w.h.mu.Unlock()
+	if err := w.writeSet(t, teamB); err != nil {
+		t.Fatal(err)
+	}
+	w.dom.mu.Lock()
+	var names []string
+	for _, r := range w.dom.mailSets[teamB] {
+		if strings.Contains(r.Name, "_domainkey") {
+			names = append(names, r.Name)
+		}
+	}
+	w.dom.mu.Unlock()
+	slices.Sort(names)
+	if strings.Join(names, " ") != "old._domainkey."+teamB+" sel._domainkey."+teamB {
+		t.Fatalf("dkim names %v", names)
+	}
+	// Draining: no retiring record merged.
+	w.h.mu.Lock()
+	w.h.st.Mail.Domains[teamB] = state.MailDomain{Draining: true}
+	w.h.mu.Unlock()
+	c := mailprovider.RuleContext{Domain: teamB, Draining: true}
+	if got := mailMergeRetiring(c, nil, w.h.st.Mail.RetiringDKIM[teamB].Records); len(got) != 0 {
+		t.Fatalf("merged into a draining set: %v", got)
+	}
+}

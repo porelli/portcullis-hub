@@ -163,29 +163,22 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 	if err := h.validateMailSet(name, wild, set.Records); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
-	recs := make([]domains.MailRecord, 0, len(set.Records))
-	seen := map[string]bool{}
-	for _, r := range set.Records {
-		recs = append(recs, domains.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
-		seen[strings.ToLower(r.Name)+" "+strings.ToUpper(r.Type)+" "+r.Value] = true
-	}
 	// A switch's retiring DKIM records (§19.7) stay in the set until
-	// their 7 days are over.
+	// their 7 days are over, each only as the shared rules allow (M8).
 	now := h.mailNow()
 	h.mu.RLock()
 	ret, retiring := h.st.Mail.RetiringDKIM[name]
-	h.mu.RUnlock()
-	expired := retiring && !now.Before(ret.Until)
-	if retiring && !expired {
-		for _, r := range ret.Records {
-			if !seen[strings.ToLower(r.Name)+" "+strings.ToUpper(r.Type)+" "+r.Value] {
-				recs = append(recs, domains.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
-			}
-		}
-	}
-	h.mu.RLock()
 	rc := h.mailRuleContextLocked(name, wild)
 	h.mu.RUnlock()
+	expired := retiring && !now.Before(ret.Until)
+	merged := set.Records
+	if retiring && !expired {
+		merged = mailMergeRetiring(rc, set.Records, ret.Records)
+	}
+	recs := make([]domains.MailRecord, 0, len(merged))
+	for _, r := range merged {
+		recs = append(recs, domains.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
+	}
 	body := domains.MailSet{Records: recs, MailHostname: rc.MailHostname, RelayInclude: rc.RelayInclude, DMARCFloor: rc.DMARCFloor,
 		Wildcard: rc.Wildcard, Draining: rc.Draining}
 	if _, err := dapi.SetMailSet(ctx, name, body); err != nil {

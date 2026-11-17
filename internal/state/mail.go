@@ -92,9 +92,9 @@ type MailSwitch struct {
 // the instance, its template, source and commit, and the block hash at
 // wiring (templates.MailBlockHash).
 type MailProvider struct {
-	Instance  string    `json:"instance" yaml:"instance"`
-	Template  string    `json:"template" yaml:"template"`
-	Source    string    `json:"source" yaml:"source"`
+	Instance string `json:"instance" yaml:"instance"`
+	Template string `json:"template" yaml:"template"`
+	Source   string `json:"source" yaml:"source"`
 	// SourceURL is the source's URL at the wiring (M7): another URL
 	// under the same name is another repository, never a re-confirm.
 	SourceURL string    `json:"source_url,omitempty" yaml:"source_url,omitempty"`
