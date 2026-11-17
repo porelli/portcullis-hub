@@ -489,4 +489,33 @@ func TestVoidKeepsDebtRaisedMidRun(t *testing.T) {
 			}
 		})
 	}
+	// A wiring undone after a restore debt was raised past its record
+	// leaves that debt owed; one undone on its own record clears it.
+	t.Run("wire undone", func(t *testing.T) {
+		f := voidFixture(t)
+		f.h.mu.Lock()
+		f.h.raiseVoidDebtLocked(state.MailVoidWire)
+		recordGen := f.h.st.Mail.VoidGen
+		f.h.markVoidOwedLocked(state.MailVoidRestore)
+		f.h.mu.Unlock()
+		f.h.undoWireMail(mailProviderID, recordGen)
+		f.h.mu.RLock()
+		owed := f.h.st.Mail.VoidOwed
+		f.h.mu.RUnlock()
+		if owed == nil || owed.Reason != state.MailVoidRestore {
+			t.Fatalf("the undo dropped a later debt: %+v", owed)
+		}
+		f.h.mu.Lock()
+		f.h.st.Mail.Provider = &state.MailProvider{Instance: mailProviderID}
+		f.h.st.Mail.VoidOwed = nil
+		f.h.raiseVoidDebtLocked(state.MailVoidWire)
+		own := f.h.st.Mail.VoidGen
+		f.h.mu.Unlock()
+		f.h.undoWireMail(mailProviderID, own)
+		f.h.mu.RLock()
+		defer f.h.mu.RUnlock()
+		if f.h.st.Mail.VoidOwed != nil {
+			t.Fatalf("the undo kept its own debt: %+v", f.h.st.Mail.VoidOwed)
+		}
+	})
 }

@@ -971,7 +971,14 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 		rep.Start(StepStart)
 		// The enable reports nothing into the restore's record (its own
 		// commit gate is not the restore's) but stops with it.
-		if _, err := h.enableInner(withProgress(ctx, nil), id, true); err != nil {
+		// The archive's volumes are back: this start (only; never a
+		// rollback's, void false) passes the mail provider's
+		// restore-pending hold.
+		sctx := withProgress(ctx, nil)
+		if void {
+			sctx = withMailRestoreCommit(sctx, id)
+		}
+		if _, err := h.enableInner(sctx, id, true); err != nil {
 			return air, err
 		}
 		rep.Done(StepStart)

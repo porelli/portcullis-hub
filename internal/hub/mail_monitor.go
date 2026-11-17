@@ -244,6 +244,22 @@ const mailRestorePendingFile = "mail-restore-pending"
 
 var errMailRestorePending = statusErr(http.StatusConflict, "a core restore of the mail provider is pending: the provider starts after `hub mail restore`")
 
+// mailRestoreCommitKey marks the one up that may pass the restore hold:
+// a restore's final start, after applyRestore restored the volumes. Its
+// value is the instance.
+type mailRestoreCommitKey struct{}
+
+// withMailRestoreCommit is ctx carrying id's restore-commit token.
+func withMailRestoreCommit(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, mailRestoreCommitKey{}, id)
+}
+
+// mailRestoreCommitted: ctx is id's restore commit.
+func mailRestoreCommitted(ctx context.Context, id string) bool {
+	v, _ := ctx.Value(mailRestoreCommitKey{}).(string)
+	return v != "" && v == id
+}
+
 // mailRestorePending: the C1 hold is on (an unreadable data directory
 // holds too: fail closed).
 func (h *Hub) mailRestorePending() bool {
@@ -309,16 +325,16 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 	}
 	actor := directory.Human(HostActor)
 	return h.startAsync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		// This restore's own up passes the hold; the hold goes only once
-		// the restore succeeded (R2-N4): a failed one keeps it, so no
-		// empty store goes live.
-		h.mailRestoreOp.Store(id)
-		defer h.mailRestoreOp.Store("")
+		// Only the restore's final start, after its volumes came back,
+		// passes the hold (applyRestore's commit token); the hold goes
+		// only once the restore succeeded (R2-N4): a failed one keeps it,
+		// so no empty store goes live.
 		res, err := h.restoreInstance(ctx, id, archive, actor, ready)
 		if err == nil {
 			if rerr := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); rerr != nil && !os.IsNotExist(rerr) {
 				err = fmt.Errorf("the provider is restored, but removing %s failed: %w", mailRestorePendingFile, rerr)
 			}
+			h.kickMailVoid() // the owed void's normal up, now the hold is gone
 		}
 		return restoreResult(res, archive, ""), restoreWarnings(res), err
 	})

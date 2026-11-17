@@ -266,8 +266,9 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 		return err
 	}
 	stopped := func() bool { return ctx.Err() != nil }
+	recordGen := 0 // the void generation the record raised
 	undo := func() error {
-		h.undoWireMail(id)
+		h.undoWireMail(id, recordGen)
 		return ctx.Err()
 	}
 	// 1. record: the provider and the owed void in one save.
@@ -286,6 +287,12 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	prevP, prevV, prevGen := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen
 	h.st.Mail.Provider = p
 	h.raiseVoidDebtLocked(voidReason)
+	// The undo clears only a debt this record started (not an older one
+	// it joined) and only while nothing was raised since.
+	recordGen = -1
+	if prevV == nil {
+		recordGen = h.st.Mail.VoidGen
+	}
 	h.st.Mail.Held = nil
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.VoidGen = prevP, prevV, prevGen
@@ -391,11 +398,13 @@ func (h *Hub) mailUpInstance(ctx context.Context, id string) error {
 // undoWireMail is a Stopped wiring's undo: the gate closed, the provider
 // record and the wiring's void cleared, the unwired override rendered
 // and the instance stopped. Caller holds the app lock.
-func (h *Hub) undoWireMail(id string) {
+func (h *Hub) undoWireMail(id string, recordGen int) {
 	h.mu.Lock()
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
 		h.st.Mail.Provider = nil
-		if v := h.st.Mail.VoidOwed; v != nil && v.Reason == state.MailVoidWire {
+		// Only the record's own debt: one raised since (a restore, the
+		// secrets epoch) stays owed.
+		if h.st.Mail.VoidOwed != nil && h.st.Mail.VoidGen == recordGen {
 			h.st.Mail.VoidOwed = nil
 		}
 		h.saveLocked()

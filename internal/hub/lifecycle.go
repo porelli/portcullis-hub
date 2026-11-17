@@ -297,7 +297,7 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	// so its networks are recreated (Ruling T8-void).
 	var mm mailMode
 	if live.Manifest.Mail != nil {
-		if mm, err = h.mailModeBeforeUp(live); err != nil {
+		if mm, err = h.mailModeBeforeUp(opCtx, live); err != nil {
 			return err
 		}
 	}

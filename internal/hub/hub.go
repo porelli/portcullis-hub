@@ -450,9 +450,6 @@ type Hub struct {
 		since time.Time
 		why   string
 	}
-	// mailRestoreOp is the instance whose `hub mail restore` op runs
-	// (its up passes the restore-pending hold).
-	mailRestoreOp atomic.Value
 	// mailStopWait bounds one owed down of a held provider (0: 2 min).
 	mailStopWait  time.Duration
 	mailPollEvery time.Duration

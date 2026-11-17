@@ -416,3 +416,93 @@ func TestRestorePendingKeptOnFailedRestore(t *testing.T) {
 		t.Fatalf("an up after the failed restore: %v", err)
 	}
 }
+
+// restoreFix is a wired provider with a backup and a pending core
+// restore naming it.
+func restoreFix(t *testing.T) (*wireFix, string, string) {
+	t.Helper()
+	w := wiredFix(t)
+	archive, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(w.h.cfg.DataDir, mailRestorePendingFile)
+	writeFile(t, pending, archive+"\n")
+	w.mu.Lock()
+	w.ups = nil
+	w.mu.Unlock()
+	return w, archive, pending
+}
+
+func (w *wireFix) upCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.ups)
+}
+
+// TestRestoreCommitTokenOnly (security review): only the restore's final
+// start, after its volumes came back, passes the hold.
+func TestRestoreCommitTokenOnly(t *testing.T) {
+	t.Run("failed before the start", func(t *testing.T) {
+		w, archive, pending := restoreFix(t)
+		w.h.testHookApplyRestore = func(stage string) error {
+			if stage == "volumes" {
+				return errors.New("a volume failed")
+			}
+			return nil
+		}
+		op, err := w.h.HostMailRestore(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.h.Wait()
+		if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || v.OK {
+			t.Fatalf("op %+v", v)
+		}
+		if n := w.upCount(); n != 0 {
+			t.Fatalf("%d ups passed the hold (the rollback's included)", n)
+		}
+		if _, err := os.Stat(pending); err != nil {
+			t.Fatal("the hold went")
+		}
+	})
+	t.Run("concurrent up", func(t *testing.T) {
+		w, archive, _ := restoreFix(t)
+		var upErr error
+		w.h.testHookApplyRestore = func(stage string) error {
+			if stage == "volumes" {
+				upErr = w.h.composeUp(context.Background(), w.h.Template(mailProviderID))
+			}
+			return nil
+		}
+		if _, err := w.h.HostMailRestore(archive); err != nil {
+			t.Fatal(err)
+		}
+		w.h.Wait()
+		if statusOf(upErr) != 409 {
+			t.Fatalf("a concurrent up: %v", upErr)
+		}
+	})
+	t.Run("success", func(t *testing.T) {
+		w, archive, pending := restoreFix(t)
+		var pendingAtUp []bool
+		w.runner.upHook = func(project string) {
+			_, err := os.Stat(pending)
+			pendingAtUp = append(pendingAtUp, err == nil)
+		}
+		op, err := w.h.HostMailRestore(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.h.Wait()
+		if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || !v.OK {
+			t.Fatalf("op %+v", v)
+		}
+		if len(pendingAtUp) != 1 || !pendingAtUp[0] {
+			t.Fatalf("ups %v (want exactly one, with the hold still on)", pendingAtUp)
+		}
+		if _, err := os.Stat(pending); !os.IsNotExist(err) {
+			t.Fatal("the hold stayed after a successful restore")
+		}
+	})
+}
