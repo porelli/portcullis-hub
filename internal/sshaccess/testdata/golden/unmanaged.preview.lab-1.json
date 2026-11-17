@@ -1,0 +1,32 @@
+[
+  {
+    "person": "alice",
+    "account": "alice",
+    "root": false,
+    "sudo": false,
+    "via": [
+      "ssh_web → web"
+    ],
+    "status": "accounts and sudo unknown (unmanaged)"
+  },
+  {
+    "person": "bob",
+    "account": "bob",
+    "root": false,
+    "sudo": false,
+    "via": [
+      "ssh_web → web"
+    ],
+    "status": "accounts and sudo unknown (unmanaged)"
+  },
+  {
+    "person": "bob",
+    "account": "deploy",
+    "root": false,
+    "sudo": false,
+    "via": [
+      "ssh_deploy → web"
+    ],
+    "status": "accounts and sudo unknown (unmanaged)"
+  }
+]

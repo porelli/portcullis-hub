@@ -386,3 +386,12 @@ func TestVectorsFile(t *testing.T) {
 		}
 	}
 }
+
+func TestKnownHostsScoped(t *testing.T) {
+	got := KnownHosts([]ClientGroup{{HostGroup: "web", Hosts: []string{"web-1.example.com", "*.lab.example.com"}}, {HostGroup: "db"}},
+		[]string{"ssh-ed25519 AAAAhost"}, []string{"ssh-ed25519 AAAAbad"})
+	want := "@cert-authority web-1.example.com,*.lab.example.com ssh-ed25519 AAAAhost\n@revoked * ssh-ed25519 AAAAbad\n"
+	if got != want {
+		t.Errorf("got %q", got)
+	}
+}

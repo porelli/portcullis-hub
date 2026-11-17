@@ -241,6 +241,8 @@ type AppState struct {
 	// MailCredentials: lowercase user → that person's mail passwords'
 	// metadata (contract §13.16 "Mail passwords"). Never a secret.
 	MailCredentials map[string][]MailCredential `json:"mail_credentials,omitempty" yaml:"mail_credentials,omitempty"`
+	// SSH is Hub → SSH access (contract §18.12; off by default).
+	SSH SSHState `json:"ssh" yaml:"ssh"`
 
 	// signInMissing: the file Load read has no sign_in section (or there
 	// was no file): the defaults EnsureSignIn filled are in memory only
@@ -625,6 +627,7 @@ func New() *AppState {
 func (s *AppState) SignInMissing() bool { return s.signInMissing }
 
 func (s *AppState) init() {
+	s.SSH.EnsureBuiltins()
 	if s.Instances == nil {
 		s.Instances = make(map[string]Instance)
 	}

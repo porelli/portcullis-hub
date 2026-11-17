@@ -1,0 +1,18 @@
+{
+  "HostGroups": {
+    "web": {
+      "Principals": [
+        "bob@web",
+        "deploy@web"
+      ],
+      "Extensions": [
+        "permit-pty"
+      ],
+      "Until": "2026-11-15T09:20:00Z",
+      "Grants": [
+        "g-deploy",
+        "g-web"
+      ]
+    }
+  }
+}
