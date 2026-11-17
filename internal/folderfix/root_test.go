@@ -1393,6 +1393,7 @@ func TestRootChildFix(t *testing.T) {
 func TestRootUsageMatchesDu(t *testing.T) {
 	needRoot(t)
 	root := folderRoot(t)
+	os.Chmod(root, 0o755) // searchable without DAC_READ_SEARCH: only priv is closed
 	os.WriteFile(filepath.Join(root, "f"), bytes.Repeat([]byte("x"), 1<<20), 0o644)
 	os.Link(filepath.Join(root, "f"), filepath.Join(root, "f2"))
 	sp, _ := os.Create(filepath.Join(root, "sparse"))
