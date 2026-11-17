@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/docker"
@@ -11,8 +12,11 @@ import (
 )
 
 // mailProviderID is the fixtures' mail provider instance (the shared
-// vectors' template id).
-const mailProviderID = "mailsrv"
+// vectors' template id); otherMailID a second mail template's.
+const (
+	mailProviderID = "mailsrv"
+	otherMailID    = "othermail"
+)
 
 // mailTemplateFiles is the stalwart-shaped template of the shared mail
 // vectors (internal/templates/testdata/mail_vectors.json) as files.
@@ -39,9 +43,15 @@ func mailTemplateFiles(t *testing.T) map[string]string {
 
 // newMailSlotFixture is a fixture whose source has the mail template
 // mailsrv; wired: it is the wired provider (normal mode).
-func newMailSlotFixture(t *testing.T, wired bool) *fixture {
+func newMailSlotFixture(t *testing.T, wired bool, others ...string) *fixture {
 	t.Helper()
-	f := newFixtureExtra(t, map[string]map[string]string{mailProviderID: mailTemplateFiles(t)}, func(root string, c *Config) {
+	extra := map[string]map[string]string{mailProviderID: mailTemplateFiles(t)}
+	for _, id := range others {
+		fs := mailTemplateFiles(t)
+		fs["compose.yml"] = strings.ReplaceAll(fs["compose.yml"], "templates/"+mailProviderID+"/", "templates/"+id+"/")
+		extra[id] = fs
+	}
+	f := newFixtureExtra(t, extra, func(root string, c *Config) {
 		c.SecretsDir = filepath.Join(root, "secrets")
 		if err := os.Mkdir(c.SecretsDir, 0o700); err != nil {
 			t.Fatal(err)

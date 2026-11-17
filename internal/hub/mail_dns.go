@@ -158,11 +158,37 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 		return fmt.Errorf("%s: reading the wanted mail records: %v", name, err)
 	}
 	recs := make([]domains.MailRecord, 0, len(set.Records))
+	seen := map[string]bool{}
 	for _, r := range set.Records {
 		recs = append(recs, domains.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
+		seen[strings.ToLower(r.Name)+" "+strings.ToUpper(r.Type)+" "+r.Value] = true
+	}
+	// A switch's retiring DKIM records (§19.7) stay in the set until
+	// their 7 days are over.
+	now := h.mailNow()
+	h.mu.RLock()
+	ret, retiring := h.st.Mail.RetiringDKIM[name]
+	h.mu.RUnlock()
+	expired := retiring && !now.Before(ret.Until)
+	if retiring && !expired {
+		for _, r := range ret.Records {
+			if !seen[strings.ToLower(r.Name)+" "+strings.ToUpper(r.Type)+" "+r.Value] {
+				recs = append(recs, domains.MailRecord{Name: r.Name, Type: r.Type, TTL: r.TTL, Value: r.Value})
+			}
+		}
 	}
 	if _, err := dapi.SetMailSet(ctx, name, recs); err != nil {
 		return fmt.Errorf("%s: writing the mail set: %v", name, err)
+	}
+	// Cleared only after this domain's own new set was written and the
+	// 7 days have passed.
+	if expired {
+		h.mu.Lock()
+		if r, ok := h.st.Mail.RetiringDKIM[name]; ok && !now.Before(r.Until) {
+			delete(h.st.Mail.RetiringDKIM, name)
+			h.saveLocked()
+		}
+		h.mu.Unlock()
 	}
 	return nil
 }

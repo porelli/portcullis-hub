@@ -302,6 +302,8 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	// the restore check (a restore of mail voids every mail password,
 	// also one the Hub outlived), at least every 60 s.
 	defer func() { next = min(next, h.mailReconcileSoon(api)) }()
+	// A draining unwire finishes once every domain is off.
+	defer h.mailFinishUnwireIfDrained()
 	s.mu.Lock()
 	first := !s.loaded
 	if first {

@@ -56,6 +56,26 @@ type MailSettings struct {
 	// = the defaults 4320h and 720h).
 	DKIMRotate      string `json:"dkim_rotate,omitempty" yaml:"dkim_rotate,omitempty"`
 	FormerRetention string `json:"former_retention,omitempty" yaml:"former_retention,omitempty"`
+	// Unwiring: a draining unwire waits for every mail domain to be off,
+	// then closes the provider (nil: none). Switch: a switch in progress
+	// (resumed at start, never leaving both providers on the ports).
+	Unwiring *MailUnwiring `json:"unwiring,omitempty" yaml:"unwiring,omitempty"`
+	Switch   *MailSwitch   `json:"switch,omitempty" yaml:"switch,omitempty"`
+}
+
+// MailUnwiring is a draining unwire.
+type MailUnwiring struct {
+	Instance string    `json:"instance" yaml:"instance"`
+	Since    time.Time `json:"since" yaml:"since"`
+	By       string    `json:"by" yaml:"by"`
+}
+
+// MailSwitch is a switch in progress.
+type MailSwitch struct {
+	From  string    `json:"from" yaml:"from"`
+	To    string    `json:"to" yaml:"to"`
+	Since time.Time `json:"since" yaml:"since"`
+	By    string    `json:"by" yaml:"by"`
 }
 
 // MailProvider is the wired mail provider (state.yaml mail.provider):
@@ -269,4 +289,7 @@ const (
 	MailCredentialReasonVoidRestore = "void_restore"
 	MailCredentialReasonExpired     = "expired"
 	MailCredentialReasonMissing     = "missing"
+	// MailCredentialReasonProviderChanged: the mail provider was
+	// unwired or switched (contract §19.9).
+	MailCredentialReasonProviderChanged = "provider_changed"
 )

@@ -381,21 +381,7 @@ func (h *Hub) undoWireMail(id string) {
 
 // startRewireMail is Task 10's re-confirm (stub until Task 10: refused).
 func (h *Hub) startRewireMail(t *templates.Template, actor directory.Actor) (*AsyncOp, error) {
-	h.mu.RLock()
-	held := h.st.Mail.Held != nil
-	h.mu.RUnlock()
-	if !held {
-		return nil, statusErr(http.StatusConflict, "%s is already this server's mail provider", t.ID)
-	}
 	return nil, statusErr(http.StatusConflict, "re-confirming a held provider is not available yet")
-}
-
-// StartUnwireMail unwires (Task 9).
-func (h *Hub) StartUnwireMail(id string, drain bool, actor directory.Actor) (*AsyncOp, error) {
-	if err := h.mailActorGuard(context.Background(), actor, actor.User == HostActor); err != nil {
-		return nil, err
-	}
-	return nil, statusErr(http.StatusConflict, "unwiring is not available yet")
 }
 
 // resumeMail resumes the slot at start (contract §19.9 "Resuming"): a
@@ -403,8 +389,13 @@ func (h *Hub) StartUnwireMail(id string, drain bool, actor directory.Actor) (*As
 // the void, never the normal override first.
 func (h *Hub) resumeMail() {
 	h.mu.RLock()
-	p, owed, held := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held
+	p, owed, held, sw := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held, h.st.Mail.Switch
 	h.mu.RUnlock()
+	if sw != nil {
+		h.goBackground(func() { h.resumeSwitchMail(sw) })
+		return
+	}
+	h.mailFinishUnwireIfDrained()
 	if p == nil || owed == nil || held != nil || !h.mailOn() {
 		return
 	}

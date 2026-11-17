@@ -98,10 +98,12 @@ type MailPasswordView struct {
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	LastUsed  *time.Time `json:"last_used"`
-	// Status: active | voided (reset by a restore) | unconfirmed (an
-	// administrator's view while mailctl can't be read: never shown as
-	// active).
+	// Status: active | voided (reset by a restore, or the mail server
+	// changed) | unconfirmed (an administrator's view while the provider
+	// can't be read: never shown as active).
 	Status string `json:"status"`
+	// VoidedReason says why a voided password ended (contract §19.9).
+	VoidedReason string `json:"voided_reason,omitempty"`
 }
 
 // MyMailView is GET /api/me/mail.
@@ -206,16 +208,22 @@ func (h *Hub) MailPasswords(user, uuid string) []MailPasswordView {
 		if uuid == "" || c.UUID != uuid {
 			continue
 		}
-		status := ""
+		status, why := "", ""
 		switch {
 		case c.Active():
 			status = "active"
 		case c.Reason == state.MailCredentialReasonVoidRestore:
-			status = "voided"
+			status, why = "voided", "reset by a restore"
+		case c.Reason == state.MailCredentialReasonProviderChanged:
+			on := ""
+			if c.RevokedAt != nil {
+				on = c.RevokedAt.UTC().Format("2006-01-02")
+			}
+			status, why = "voided", "the mail server changed on "+on+": create a new mail password"
 		default:
 			continue
 		}
-		out = append(out, MailPasswordView{ID: c.ID, Label: c.Label, CreatedAt: c.CreatedAt, ExpiresAt: c.ExpiresAt, Status: status})
+		out = append(out, MailPasswordView{ID: c.ID, Label: c.Label, CreatedAt: c.CreatedAt, ExpiresAt: c.ExpiresAt, Status: status, VoidedReason: why})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out

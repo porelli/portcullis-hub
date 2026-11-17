@@ -15,6 +15,36 @@ import (
 func (s *Server) registerMailProvider(mux routeMux) {
 	mux.HandleFunc("GET /api/instances/{id}/mail-provider", s.handleInstanceMailProvider)
 	mux.HandleFunc("PUT /api/instances/{id}/mail-provider", s.handleSetInstanceMailProvider)
+	mux.HandleFunc("POST /api/mail/provider/switch", s.handleSwitchMailProvider)
+}
+
+// handleSwitchMailProvider: POST /api/mail/provider/switch {to, confirm,
+// confirm_empty, code, code_verifier, nonce} → 202 {op of to…, warning}.
+func (s *Server) handleSwitchMailProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.mailProviderGate(w, r) {
+		return
+	}
+	var b struct {
+		To           string `json:"to"`
+		Confirm      string `json:"confirm"`
+		ConfirmEmpty string `json:"confirm_empty"`
+		Code         string `json:"code"`
+		CodeVerifier string `json:"code_verifier"`
+		Nonce        string `json:"nonce"`
+	}
+	if !readMailBody(w, r, &b, `{"to": "<instance>", "confirm": "<instance>", "confirm_empty": "<n> mailboxes start empty", "code": "…", "code_verifier": "…", "nonce": "…"}`) {
+		return
+	}
+	in := hub.SwitchRequest{Confirm: b.Confirm, ConfirmEmpty: b.ConfirmEmpty, Listener: listenerOf(r)}
+	if b.Code != "" || b.CodeVerifier != "" || b.Nonce != "" {
+		in.Proof = &freshauth.Proof{Code: b.Code, CodeVerifier: b.CodeVerifier, Nonce: b.Nonce}
+	}
+	op, err := s.Hub.StartSwitchMail(r.Context(), b.To, in, requestActor(r))
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSONStatus(w, http.StatusAccepted, mailWireAccepted{acceptedBody(op), hub.MailWarning})
 }
 
 // mailProviderGate: an AI or MCP actor is refused first (403), then a

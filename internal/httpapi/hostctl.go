@@ -79,6 +79,21 @@ func HostHandler(h *hub.Hub) http.Handler {
 	mux.HandleFunc("GET /host/mail/provider", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.HostMailProviderView(r.Context()))
 	})
+	mux.HandleFunc("POST /host/mail/unwire", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Drain *bool `json:"drain"`
+		}
+		if !hostBody(w, r, &b, `{"drain": <bool>}`) {
+			return
+		}
+		drain := b.Drain == nil || *b.Drain
+		op, err := h.HostMailUnwire(drain)
+		if err != nil {
+			hostErr(w, err)
+			return
+		}
+		writeJSONStatus(w, http.StatusAccepted, acceptedBody(op))
+	})
 	mux.HandleFunc("POST /host/mail/install", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
 			Template string `json:"template"`

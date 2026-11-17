@@ -92,6 +92,13 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	if confirm != id {
 		return res, statusErr(400, "type the instance id (%s) to confirm the delete", id)
 	}
+	// The wired mail provider is never deleted (contract §19.9).
+	h.mu.RLock()
+	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
+	h.mu.RUnlock()
+	if wired {
+		return res, statusErr(409, "%s", mailDeleteRefusal)
+	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
 		return res, h.busyErr(id, err)

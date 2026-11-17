@@ -35,9 +35,9 @@ type wireUp struct {
 
 var wireProof = freshauth.Proof{Code: "c", CodeVerifier: "v", Nonce: "n"}
 
-func newWireFix(t *testing.T) *wireFix {
+func newWireFix(t *testing.T, others ...string) *wireFix {
 	t.Helper()
-	m := newMailFixture(t)
+	m := newMailFixture(t, others...)
 	w := &wireFix{mailFixture: m, fa: &touchFA{method: "security_key"}, audit: &fakeAudit{}}
 	m.h.mu.Lock()
 	m.h.st.Mail.Provider = nil
@@ -56,7 +56,7 @@ func newWireFix(t *testing.T) *wireFix {
 		if project != "portcullis-"+mailProviderID {
 			return
 		}
-		b, _ := os.ReadFile(m.h.overridePath(mailProviderID))
+		b, _ := os.ReadFile(m.h.overridePath(strings.TrimPrefix(project, "portcullis-")))
 		w.mu.Lock()
 		w.ups = append(w.ups, wireUp{string(b), m.mc.Puts()})
 		w.mu.Unlock()
