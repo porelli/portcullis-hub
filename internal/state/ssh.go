@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/portcullis/hub/internal/cliapi"
@@ -108,6 +109,8 @@ type SSHHost struct {
 	Removed bool `json:"removed,omitempty" yaml:"removed,omitempty"`
 	// RemoveAccounts: *Remove account* asked for these (bundle `remove`).
 	RemoveAccounts []string `json:"remove_accounts,omitempty" yaml:"remove_accounts,omitempty"`
+	// BundleHash is sshaccess.BundleHash of the bundle at Serial.
+	BundleHash string `json:"bundle_hash,omitempty" yaml:"bundle_hash,omitempty"`
 	// LastSync is the last signed request.
 	LastSync time.Time `json:"last_sync,omitempty" yaml:"last_sync,omitempty"`
 }
@@ -144,4 +147,17 @@ func (s *SSHState) EnsureBuiltins() {
 	if _, ok := s.HostGroups[cliapi.BuiltinAllHostGroup]; !ok {
 		s.HostGroups[cliapi.BuiltinAllHostGroup] = SSHHostGroup{Label: "All managed hosts"}
 	}
+}
+
+// Clone is a deep copy (JSON round trip: every field is plain data).
+func (s SSHState) Clone() SSHState {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	var out SSHState
+	if err := json.Unmarshal(raw, &out); err != nil {
+		panic(err)
+	}
+	return out
 }

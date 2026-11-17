@@ -515,6 +515,10 @@ func main() {
 	// The Sign-in page's own certificates (enroll, §9.4) and own
 	// password (the directory, §5.1).
 	h.SetCertActions(invites)
+	// SSH access (contract §18): enroll's SSH endpoints, on the same
+	// listener and bearer; and no username may equal a shared SSH account.
+	h.SetSSHActions(invites)
+	dir.SSHSharedAccount = h.SSHSharedAccount
 	h.SetOwnPasswords(dir)
 	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted
@@ -625,6 +629,9 @@ func main() {
 	go h.RunImpersonationExpiry(ctx, 5*time.Second)
 	// VPN providers: identity and dns hooks when due, vpn.json (§16).
 	go h.RunVPNMaps(ctx, 5*time.Second)
+	// SSH access: a compile every minute (temporary memberships ending,
+	// host certificates to renew) on top of the change triggers.
+	go h.RunSSH(ctx, time.Minute)
 	// Kubernetes: the VPN gateway pods, watched (K5: vpn.json follows them
 	// at once; nothing published while the watch isn't confirmed).
 	go h.RunKubeGateways(ctx)
@@ -807,6 +814,7 @@ type directoryHub interface {
 	TriggerCredentialCheck()
 	MarkInventoryStale()
 	TriggerVPNPublish()
+	TriggerSSHCompile()
 }
 
 // wireDirectoryHooks sets dir's OnChange and OnEvaluated (both
@@ -827,8 +835,14 @@ func wireDirectoryHooks(dir *directory.Service, h directoryHub) {
 		// A person left, was disabled or re-created: their devices drop
 		// out of vpn.json (contract §16).
 		h.TriggerVPNPublish()
+		// Membership drives SSH principals, accounts and revocation on
+		// leave (contract §18.12).
+		h.TriggerSSHCompile()
 	}
-	dir.OnEvaluated = h.TriggerCredentialCheck
+	dir.OnEvaluated = func() {
+		h.TriggerCredentialCheck()
+		h.TriggerSSHCompile()
+	}
 }
 
 // vpnDocGIDFromEnv is HUB_VPN_DOC_GID (default hub.DefaultVPNDocGID):

@@ -190,9 +190,10 @@ func TestPeopleVerifierRedirect(t *testing.T) {
 	}
 }
 
-type fakeDirHub struct{ syncs, checks, stale, vpn int }
+type fakeDirHub struct{ syncs, checks, stale, vpn, ssh int }
 
 func (f *fakeDirHub) TriggerVPNPublish() { f.vpn++ }
+func (f *fakeDirHub) TriggerSSHCompile() { f.ssh++ }
 
 func (f *fakeDirHub) TriggerDirectorySync()   { f.syncs++ }
 func (f *fakeDirHub) TriggerCredentialCheck() { f.checks++ }
@@ -208,12 +209,12 @@ func TestWireDirectoryHooks(t *testing.T) {
 		t.Fatal("hooks not set")
 	}
 	dir.OnChange()
-	if h.syncs != 1 || h.checks != 1 || h.stale != 1 || h.vpn != 1 {
-		t.Errorf("OnChange: syncs %d checks %d stale %d vpn %d", h.syncs, h.checks, h.stale, h.vpn)
+	if h.syncs != 1 || h.checks != 1 || h.stale != 1 || h.vpn != 1 || h.ssh != 1 {
+		t.Errorf("OnChange: syncs %d checks %d stale %d vpn %d ssh %d", h.syncs, h.checks, h.stale, h.vpn, h.ssh)
 	}
 	dir.OnEvaluated()
-	if h.syncs != 1 || h.checks != 2 || h.stale != 1 {
-		t.Errorf("OnEvaluated: syncs %d checks %d", h.syncs, h.checks)
+	if h.syncs != 1 || h.checks != 2 || h.stale != 1 || h.ssh != 2 {
+		t.Errorf("OnEvaluated: syncs %d checks %d ssh %d", h.syncs, h.checks, h.ssh)
 	}
 }
 

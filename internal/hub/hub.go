@@ -540,6 +540,10 @@ type Hub struct {
 	// cli is the CLI Keycloak client's verifier and readiness (ssh_cli.go,
 	// contract §18.2).
 	cli cliClient
+	// sshrt is SSH access's derived state (ssh.go; own lock).
+	sshrt sshRuntime
+	// sshrev guards hub_data/ssh/revoked.json (ssh_revoked.go).
+	sshrev revokedStore
 	// eventsEnsure re-asserts Keycloak's events config with history_days
 	// (signin_limits.go: the sync loop and every limits change); under
 	// policyWriteMu like attrSync.
