@@ -1,6 +1,7 @@
 package cliapi
 
 import (
+	"golang.org/x/net/publicsuffix"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -161,12 +162,36 @@ func ValidHostPattern(s string) bool {
 		return a.Zone() == ""
 	}
 	s = strings.TrimPrefix(s, "!")
-	for _, l := range strings.Split(s, ".") {
+	labels := strings.Split(s, ".")
+	for _, l := range labels {
 		if !hostLabelRE.MatchString(l) {
 			return false
 		}
 	}
-	return true
+	return narrowPattern(labels)
+}
+
+// narrowPattern (final review M9): a pattern with * or ? must keep a
+// literal suffix longer than its public suffix — at least a registrable
+// domain like lab.example.org in *.lab.example.org. `*`, `*.org`,
+// `web-?.org` or `*.lab` (an unlisted TLD counts as one public suffix)
+// would point every member's ssh (IdentitiesOnly) and the Portcullis host
+// CA (@cert-authority) at hosts far beyond the operator's own. A name
+// without pattern characters is one host and always fine.
+func narrowPattern(labels []string) bool {
+	i := len(labels)
+	for i > 0 && !strings.ContainsAny(labels[i-1], "*?") {
+		i--
+	}
+	if i == 0 {
+		return true
+	}
+	lit := strings.ToLower(strings.Join(labels[i:], "."))
+	if lit == "" {
+		return false
+	}
+	ps, _ := publicsuffix.PublicSuffix(lit)
+	return len(lit) > len(ps)
 }
 
 // ValidHostName is ValidHostPattern without pattern characters: a host's
