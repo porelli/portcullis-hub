@@ -251,7 +251,7 @@ var capBits = map[string]uint{"CHOWN": 0, "DAC_OVERRIDE": 1, "DAC_READ_SEARCH": 
 // runInHelper runs argv in the helper a fixer run of r would get.
 func runInHelper(t *testing.T, c *docker.Client, h *Hub, r fixerRun, argv ...string) *docker.RunResult {
 	t.Helper()
-	s := r.spec(h.fixerImage)
+	s := r.Spec(h.fixerImage, fixerBinary)
 	s.Cmd = argv
 	res, err := c.RunHelper(context.Background(), s, nil)
 	if err != nil {
@@ -272,7 +272,7 @@ func TestDockerFixerIsolation(t *testing.T) {
 		{Mode: "apply", Folder: "dockertest", Source: src},
 	} {
 		var want uint64
-		for _, c := range r.spec(h.fixerImage).CapAdd {
+		for _, c := range r.Spec(h.fixerImage, fixerBinary).CapAdd {
 			want |= 1 << capBits[c]
 		}
 		res := runInHelper(t, c, h, r, "/bin/cat", "/proc/self/status", "/proc/net/dev", "/proc/net/route")
@@ -357,10 +357,10 @@ func TestDockerFixerCapsMinimal(t *testing.T) {
 					o.Target.Mkdir = []string{"a/new"}
 				}
 				r := fixerRun{Mode: "apply", Folder: "dockertest", Source: src, Opts: o, Extra: folderfix.ArgsExtra{Expect: s.Plan.Changes}}
-				if err := r.validate(); err != nil {
+				if err := r.Validate(); err != nil {
 					t.Fatal(err)
 				}
-				spec := r.spec(h.fixerImage)
+				spec := r.Spec(h.fixerImage, fixerBinary)
 				spec.CapAdd = slices.DeleteFunc(spec.CapAdd, func(c string) bool { return c == drop })
 				res, err := c.RunHelper(ctx, spec, nil)
 				if err != nil {
@@ -384,7 +384,7 @@ func TestDockerFixerCapsMinimal(t *testing.T) {
 	}
 	// Scan without DAC_READ_SEARCH can't read the 0750 directories.
 	src := testFolder(t)
-	spec := fixerRun{Mode: "scan", Folder: "dockertest", Source: src}.spec(h.fixerImage)
+	spec := fixerRun{Mode: "scan", Folder: "dockertest", Source: src}.Spec(h.fixerImage, fixerBinary)
 	spec.CapAdd = nil
 	res, err := c.RunHelper(ctx, spec, nil)
 	if err != nil {
@@ -460,10 +460,10 @@ func TestDockerChildFixCaps(t *testing.T) {
 			r := fixerRun{Mode: "childfix", Source: src,
 				Opts:  folderfix.Options{ExpectDev: pr.Dev, ExpectIno: pr.Ino, ExpectMountRoot: pr.RelMountRoot},
 				Extra: folderfix.ArgsExtra{Rel: "t", Child: folderfix.ChildFix{Name: "alice", UID: 20000, Owner: 20000}}}
-			if err := r.validate(); err != nil {
+			if err := r.Validate(); err != nil {
 				t.Fatal(err)
 			}
-			spec := r.spec(h.fixerImage)
+			spec := r.Spec(h.fixerImage, fixerBinary)
 			spec.CapAdd = slices.DeleteFunc(spec.CapAdd, func(c string) bool { return c == drop })
 			res, err := c.RunHelper(ctx, spec, nil)
 			if err != nil {

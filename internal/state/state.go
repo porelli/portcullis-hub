@@ -113,6 +113,26 @@ type Instance struct {
 	// restore (InstanceRestoring): a rollback puts it back, so it counts
 	// as a use of its template until the restore ends.
 	PreRestorePick string `json:"pre_restore_sign_in_template,omitempty" yaml:"pre_restore_sign_in_template,omitempty"`
+	// Server is the worker server the instance runs on ("" = the
+	// primary; contract §11, §17).
+	Server string `json:"server,omitempty" yaml:"server,omitempty"`
+	// Move is a move to another server in progress (State
+	// InstanceMoving, Task 11); MovedFrom the source the last move left
+	// (its volumes kept for an undo until removed).
+	Move      *Move      `json:"move,omitempty" yaml:"move,omitempty"`
+	MovedFrom *MovedFrom `json:"moved_from,omitempty" yaml:"moved_from,omitempty"`
+	// MoveTargetLeftover is what a failed move left on its target (its
+	// half-restored volumes): a later move there waits for its removal.
+	MoveTargetLeftover *MovedFrom `json:"move_target_leftover,omitempty" yaml:"move_target_leftover,omitempty"`
+	// OlderCopies are kept copies a later move would otherwise have
+	// forgotten (an earlier MovedFrom or MoveTargetLeftover, on another
+	// server): every recorded copy of the instance, per server, until
+	// removed (a move onto a server holding one is refused, contract §17.6).
+	OlderCopies []MovedFrom `json:"older_copies,omitempty" yaml:"older_copies,omitempty"`
+	// KeycloakClients are the Keycloak client ids the Hub registered for
+	// the instance (recorded at create and enable): a revocation rotates
+	// them even when the template no longer resolves (review B-M3).
+	KeycloakClients []string `json:"keycloak_clients,omitempty" yaml:"keycloak_clients,omitempty"`
 	// Label is the instance's display label (§11.9; "" = never set: the
 	// manifest's name for a default instance, the id otherwise). Display
 	// only: nothing keys on it.
@@ -146,7 +166,42 @@ const (
 	InstanceCreated   = "created"
 	InstanceDeleting  = "deleting"
 	InstanceRestoring = "restoring"
+	// InstanceOrphaned: its server was revoked (contract §17.6): it can
+	// be restored onto another server or forgotten.
+	InstanceOrphaned = "orphaned"
+	// InstanceMoving: a move between servers runs (Instance.Move).
+	InstanceMoving = "moving"
 )
+
+// Move is a move in progress: from and to ("" = the primary), the
+// archive the backup wrote, when it started and its phase (check,
+// backup, restore, switch, keep).
+type Move struct {
+	From      string    `json:"from" yaml:"from"`
+	To        string    `json:"to" yaml:"to"`
+	Archive   string    `json:"archive,omitempty" yaml:"archive,omitempty"`
+	StartedAt time.Time `json:"started_at" yaml:"started_at"`
+	Phase     string    `json:"phase" yaml:"phase"`
+	// Pushed: a bundle push to the target may have landed during this
+	// move (set before the push, cleared when the agent refused it):
+	// only then does a rollback or a recovery take the target down
+	// (final review H2: a never-held id's down is the agent's 404).
+	Pushed bool `json:"pushed,omitempty" yaml:"pushed,omitempty"`
+}
+
+// MovedFrom is a copy a move left behind on a server: when, and the
+// volume names it had then (only those are ever removed).
+type MovedFrom struct {
+	Server  string    `json:"server" yaml:"server"`
+	At      time.Time `json:"at" yaml:"at"`
+	Volumes []string  `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	// Keys: each volume name → its compose key, and Template: the
+	// instance's template id, both pinned at move time (final review
+	// H1): a worker copy's removal brings exactly these into the agent's
+	// scope with a volumes-only bundle that passes its validation.
+	Keys     map[string]string `json:"keys,omitempty" yaml:"keys,omitempty"`
+	Template string            `json:"template,omitempty" yaml:"template,omitempty"`
+}
 
 // AppState tracks which apps are enabled and their settings.
 type AppState struct {
@@ -158,7 +213,24 @@ type AppState struct {
 	// a label, a binding or a state: else it uses the template's
 	// hostnames on the main domain.
 	Instances map[string]Instance `json:"instances,omitempty" yaml:"instances,omitempty"`
-	Sources   []Source            `json:"sources" yaml:"sources"`
+	// Servers are the worker servers by id (contract §17.3);
+	// PrimaryBackups the primary's scheduled backups (§11.5).
+	Servers        map[string]Server `json:"servers,omitempty" yaml:"servers,omitempty"`
+	PrimaryBackups BackupSchedule    `json:"primary_backups" yaml:"primary_backups"`
+	// Quarantined: tunnel address → until when it stays unallocated (a
+	// revoked server's, kept after the server is removed; §17.3).
+	Quarantined map[string]time.Time `json:"quarantined,omitempty" yaml:"quarantined,omitempty"`
+	// ScheduleSlots: server ("" = the primary) → the local date and hour
+	// its scheduled backups last ran ("2006-01-02 15": a restart within
+	// the hour or the DST fall-back hour never runs them twice).
+	ScheduleSlots map[string]string `json:"schedule_slots,omitempty" yaml:"schedule_slots,omitempty"`
+	// OwedBundles are worker bundles (their env included) still to remove
+	// from a server a copy left (R3-L10): retried each tick until done or
+	// the server is gone.
+	OwedBundles []OwedBundle `json:"owed_bundles,omitempty" yaml:"owed_bundles,omitempty"`
+	// OwedSerials are the node certificate serials still to revoke.
+	OwedSerials []OwedSerial `json:"owed_serials,omitempty" yaml:"owed_serials,omitempty"`
+	Sources     []Source     `json:"sources" yaml:"sources"`
 	// Settings are each instance's settings (contract §13), by id.
 	Settings map[string]InstanceSettings `json:"settings" yaml:"settings"`
 	// Published holds the last known group-gate config per enabled app.
@@ -479,8 +551,12 @@ const (
 // at the last path change (R41, R43): every later run on the folder must
 // find exactly them.
 type Folder struct {
-	Name        string    `json:"name" yaml:"name"`
-	Path        string    `json:"path" yaml:"path"`
+	Name string `json:"name" yaml:"name"`
+	Path string `json:"path" yaml:"path"`
+	// Server is the server whose host the folder is on ("" = the
+	// primary; contract §17, Task 10): only that server's instances may
+	// bind it.
+	Server      string    `json:"server,omitempty" yaml:"server,omitempty"`
 	Description string    `json:"description,omitempty" yaml:"description,omitempty"`
 	GID         int       `json:"gid" yaml:"gid"`
 	Adopted     bool      `json:"adopted,omitempty" yaml:"adopted,omitempty"`

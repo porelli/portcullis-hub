@@ -50,6 +50,10 @@ func PinnedImage(ref string) bool {
 	return imageIDRe.MatchString(ref) || imageDigestRe.MatchString(ref)
 }
 
+// DigestRef reports whether ref is a repository reference pinned by
+// digest (name[:tag]@sha256:…), never a bare image ID.
+func DigestRef(ref string) bool { return imageDigestRe.MatchString(ref) }
+
 func cleanAbsPath(p string) bool {
 	return strings.HasPrefix(p, "/") && path.Clean(p) == p && !strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
@@ -287,6 +291,9 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo
 		for _, d := range res.Container.HostConfig.Devices {
 			ci.Devices = append(ci.Devices, d.PathOnHost)
 		}
+	}
+	for _, m := range res.Container.Mounts {
+		ci.Mounts = append(ci.Mounts, runtime.Mount{Type: string(m.Type), Source: m.Source, Destination: m.Destination, RW: m.RW})
 	}
 	return ci, nil
 }

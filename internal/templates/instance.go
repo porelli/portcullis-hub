@@ -78,6 +78,19 @@ func ReadOnlyVar(companion string) string {
 	return varAIReadOnly + strings.ToUpper(strings.ReplaceAll(companion, "-", "_"))
 }
 
+// CoreServersVar reports whether k is one of core's multiple-servers
+// settings (contract §2, final review M4): PORTCULLIS_LINK and
+// PORTCULLIS_LINK_*, PORTCULLIS_WORKER_*, PORTCULLIS_ROLE, AGENT_IMAGE,
+// RELAY_IMAGE. Never a template variable: a compose.yml may not reference
+// one, a manifest may not declare one.
+func CoreServersVar(k string) bool {
+	switch k {
+	case "PORTCULLIS_LINK", "PORTCULLIS_ROLE", "AGENT_IMAGE", "RELAY_IMAGE":
+		return true
+	}
+	return strings.HasPrefix(k, "PORTCULLIS_LINK_") || strings.HasPrefix(k, "PORTCULLIS_WORKER_")
+}
+
 // ReservedVar reports whether k is an instance variable name a manifest
 // may not declare in env, settings or ports.
 func ReservedVar(k string) bool {

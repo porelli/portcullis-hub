@@ -53,12 +53,35 @@ func (h *Hub) pullRefs(ctx context.Context, t *templates.Template) []string {
 	if err != nil {
 		return nil
 	}
+	// A placed instance's refs (fix round 4, R3-L5): only the template's
+	// raw references resolved through the image-ref allowlist, never an
+	// env-resolved one (compose's create on the worker pulls the rest).
+	var raw map[string]string
+	var refEnv map[string]string
+	if server := h.serverOf(t.ID); server != "" {
+		raw = templates.ServiceImages(t.ReadCompose())
+		inf := h.serverInfo(server)
+		if inf == nil {
+			return nil
+		}
+		refEnv = imageRefEnv(h, inf)
+	}
 	var refs []string
-	for _, s := range proj.Services {
-		if !pullable(s) || slices.Contains(refs, s.Image) {
+	for name, s := range proj.Services {
+		if !pullable(s) {
 			continue
 		}
-		refs = append(refs, s.Image)
+		ref := s.Image
+		if raw != nil {
+			r, ok := expandRef(raw[name], refEnv)
+			if !ok || raw[name] == "" || r != s.Image {
+				continue // unresolvable here, or not the template's own image
+			}
+			ref = r
+		}
+		if !slices.Contains(refs, ref) {
+			refs = append(refs, ref)
+		}
 	}
 	slices.Sort(refs)
 	return refs
@@ -166,6 +189,14 @@ func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Templa
 	if !h.noEngine() {
 		refs = h.pullRefs(ctx, t)
 	}
+	// A worker instance's bundle first (contract §17.4: bundle → pulls):
+	// the agent pulls only images a bundle names, so a first up's pulls
+	// would all be refused (and hidden by the fallback below).
+	if pr, ok := h.rtOf(t.ID).(placedRT); ok && len(refs) > 0 {
+		if err := h.pushBundle(ctx, t.ID, pr.Instances); err != nil {
+			return err
+		}
+	}
 	imgs := make([]*imagePull, len(refs))
 	for i, r := range refs {
 		imgs[i] = &imagePull{ref: r, label: imageLabel(r)}
@@ -201,7 +232,7 @@ func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Templa
 	var wg sync.WaitGroup
 	for _, ip := range imgs {
 		wg.Go(func() {
-			err := h.rt.Pull(ctx, ip.ref, func(done, total int64, sized bool) {
+			err := h.rtOf(t.ID).Pull(ctx, ip.ref, func(done, total int64, sized bool) {
 				mu.Lock()
 				defer mu.Unlock()
 				ip.state, ip.done, ip.total, ip.sized = "pulling", done, total, sized
@@ -287,7 +318,7 @@ func (h *Hub) countContainers(ctx context.Context, t *templates.Template, servic
 		if services != nil && !services[c.Service] {
 			continue
 		}
-		st, err := h.rt.State(ctx, c.ID)
+		st, err := h.rtOf(t.ID).State(ctx, c.ID)
 		if err != nil {
 			return 0, 0, nil, nil, err
 		}

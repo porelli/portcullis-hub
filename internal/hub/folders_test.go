@@ -264,7 +264,7 @@ func TestFolderPathRules(t *testing.T) {
 		if statusOf(err) != 400 || !strings.Contains(err.Error(), why) {
 			t.Errorf("%q: %v, want 400 naming %q", p, err, why)
 		}
-		if _, err := f.h.CheckFolderPath(context.Background(), p, true); statusOf(err) != 400 {
+		if _, err := f.h.CheckFolderPath(context.Background(), "", p, true); statusOf(err) != 400 {
 			t.Errorf("check %q: %v, want 400", p, err)
 		}
 	}
@@ -303,7 +303,7 @@ func TestFolderPathNormalised(t *testing.T) {
 		t.Errorf("a folder above another: %v", err)
 	}
 	// Check path reports the overlap as a problem.
-	pc, err := f.h.CheckFolderPath(context.Background(), "/srv//photos/2026/", false)
+	pc, err := f.h.CheckFolderPath(context.Background(), "", "/srv//photos/2026/", false)
 	if err != nil || pc.Path != "/srv/photos/2026" || len(pc.Problems) == 0 || !strings.Contains(pc.Problems[0], "photos") {
 		t.Errorf("check = %+v, %v", pc, err)
 	}
@@ -333,7 +333,7 @@ func TestFolderPathSymlinkRefused(t *testing.T) {
 	}
 	// An ancestor below the root, through check path too.
 	d.symlinks["/mnt/a"] = true
-	if _, err := f.h.CheckFolderPath(context.Background(), "/mnt/a/b", true); statusOf(err) != 409 || err.Error() != "/mnt/a is a symlink; give the real path" {
+	if _, err := f.h.CheckFolderPath(context.Background(), "", "/mnt/a/b", true); statusOf(err) != 409 || err.Error() != "/mnt/a is a symlink; give the real path" {
 		t.Errorf("check = %v", err)
 	}
 	if _, ok := storedFolder(f, "photos"); ok {
@@ -489,7 +489,7 @@ func TestGIDRangeExhausted(t *testing.T) {
 
 func TestCheckFolderPath(t *testing.T) {
 	f, _, d := folderFixture(t)
-	pc, err := f.h.CheckFolderPath(context.Background(), "/srv/new", false)
+	pc, err := f.h.CheckFolderPath(context.Background(), "", "/srv/new", false)
 	if err != nil || pc.Exists || pc.Created || pc.Path != "/srv/new" || pc.Summary != "missing" {
 		t.Fatalf("missing = %+v, %v", pc, err)
 	}
@@ -503,7 +503,7 @@ func TestCheckFolderPath(t *testing.T) {
 	if d.paths["/srv/new"] != nil {
 		t.Error("created without create")
 	}
-	pc, err = f.h.CheckFolderPath(context.Background(), "/srv/new", true)
+	pc, err = f.h.CheckFolderPath(context.Background(), "", "/srv/new", true)
 	if err != nil || !pc.Exists || !pc.Created {
 		t.Fatalf("create = %+v, %v", pc, err)
 	}
@@ -511,7 +511,7 @@ func TestCheckFolderPath(t *testing.T) {
 	if _, c := argValue(specs[1].Cmd, "create"); !c || specs[1].Binds[0].ReadOnly {
 		t.Errorf("probe --create = %v %+v", specs[1].Cmd, specs[1].Binds)
 	}
-	pc, err = f.h.CheckFolderPath(context.Background(), "/srv/photos", false)
+	pc, err = f.h.CheckFolderPath(context.Background(), "", "/srv/photos", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestCheckFolderPath(t *testing.T) {
 	e := d.add("/srv/nas", "nfs")
 	e.acl = false
 	e.owners = []folderfix.OwnerCount{{UID: 1000, GID: 1000, N: 12000}, {UID: 0, GID: 0, N: 723}}
-	pc, err = f.h.CheckFolderPath(context.Background(), "/srv/nas", false)
+	pc, err = f.h.CheckFolderPath(context.Background(), "", "/srv/nas", false)
 	if err != nil || len(pc.Problems) != 1 || !strings.Contains(pc.Problems[0], "nfs") {
 		t.Errorf("nfs = %+v, %v", pc, err)
 	}
@@ -942,7 +942,7 @@ func TestFolderDockerRootRefused(t *testing.T) {
 		if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "x", Name: "X", Path: p}, directory.Human("admin")); statusOf(err) != 400 || !strings.Contains(err.Error(), "Docker") {
 			t.Errorf("create %q: %v, want 400", p, err)
 		}
-		if _, err := f.h.CheckFolderPath(context.Background(), p, false); statusOf(err) != 400 {
+		if _, err := f.h.CheckFolderPath(context.Background(), "", p, false); statusOf(err) != 400 {
 			t.Errorf("check %q: %v, want 400", p, err)
 		}
 	}
@@ -960,7 +960,7 @@ func TestFolderDockerRootRefused(t *testing.T) {
 	if _, _, err := f.h.CreateFolder(context.Background(), FolderInput{ID: "music", Name: "M", Path: "/srv/music"}, directory.Human("admin")); statusOf(err) != 503 {
 		t.Errorf("unreadable root: %v, want 503", err)
 	}
-	if _, err := f.h.CheckFolderPath(context.Background(), "/srv/music", false); statusOf(err) != 503 {
+	if _, err := f.h.CheckFolderPath(context.Background(), "", "/srv/music", false); statusOf(err) != 503 {
 		t.Errorf("check, unreadable root: %v", err)
 	}
 	fx.fmu.Lock()
@@ -975,7 +975,7 @@ func TestFolderDockerRootRefused(t *testing.T) {
 func TestCheckFolderPathOverlapNoCreate(t *testing.T) {
 	f, _, d := folderFixture(t)
 	createFolder(t, f, "photos", "/srv/photos")
-	pc, err := f.h.CheckFolderPath(context.Background(), "/srv/photos/2026", true)
+	pc, err := f.h.CheckFolderPath(context.Background(), "", "/srv/photos/2026", true)
 	if err != nil || pc.Exists || pc.Created || len(pc.Problems) == 0 {
 		t.Errorf("check = %+v, %v", pc, err)
 	}

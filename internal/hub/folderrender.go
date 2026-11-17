@@ -99,6 +99,11 @@ func (h *Hub) folderMountIn(rv renderView, t *templates.Template, o *templates.O
 	if !defined {
 		return nil, fmt.Errorf("no shared folder %q", id)
 	}
+	// A folder is on one server's host (Task 10): another server's
+	// instance can't bind it.
+	if on, runs := f.Server, h.serverOf(t.ID); on != runs {
+		return nil, fmt.Errorf("shared folder %s is on %s, but %s runs on %s", id, serverLabel(on), t.ID, serverLabel(runs))
+	}
 	// The view's definition (a planned one too: manage_as_folder plans a
 	// folder not stored yet), unless a test replaced the Hub's source.
 	src := h.folders
@@ -612,6 +617,7 @@ func (h *Hub) FolderChanges() []FolderChange {
 type folderProbe struct {
 	key, folder, name, sub string
 	root, rel              string // the bind root and the folder's path below it
+	server                 string // the folder's server ("" = the primary)
 	dev, ino               uint64 // the folder root's, as stored
 	mountRoot              string // the folder root's, as stored
 	subDev, subIno         uint64 // the subpath's, from the probe before the up
@@ -627,12 +633,12 @@ func (h *Hub) folderProbesLocked(t *templates.Template) ([]folderProbe, error) {
 	}
 	var out []folderProbe
 	for _, fm := range mounts {
-		root, rel := h.bindRootOf(fm.folder.Path)
+		root, rel := h.bindRootOf(fm.folder.Server, fm.folder.Path)
 		if root == "" || rel == "" {
 			return nil, statusErr(http.StatusConflict, "shared folder %s: %s is not under a bind root", fm.folder.Name, fm.folder.Path)
 		}
 		out = append(out, folderProbe{key: fm.o.Key, folder: fm.id, name: fm.folder.Name, sub: fm.sub,
-			root: root, rel: rel, dev: fm.folder.Dev, ino: fm.folder.Ino, mountRoot: fm.folder.MountRoot})
+			root: root, rel: rel, server: fm.folder.Server, dev: fm.folder.Dev, ino: fm.folder.Ino, mountRoot: fm.folder.MountRoot})
 	}
 	return out, nil
 }
@@ -701,7 +707,7 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 				subs = append(subs, s)
 			}
 		}
-		rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: fid, Source: first.root, Extra: folderfix.ArgsExtra{Rel: first.rel, Subs: subs}})
+		rep, err := h.runProbe(ctx, fixerRun{Mode: "probe", Folder: fid, Source: first.root, Server: first.server, Extra: folderfix.ArgsExtra{Rel: first.rel, Subs: subs}})
 		if err != nil {
 			// Follow-up (d): a refusal while walking a subpath is that
 			// subpath's value's (the report lists the subpaths before it).
@@ -779,12 +785,12 @@ func (h *Hub) folderTakeDown(ctx context.Context, live *templates.Template, p *f
 // project name, else SIGKILL to every container of the project (an
 // error then: a restart policy may bring them back).
 func (h *Hub) forceDown(ctx context.Context, live *templates.Template) error {
-	err := h.rt.Down(ctx, h.runtimeProject(live))
+	err := h.rtOf(live.ID).Down(ctx, h.runtimeProject(live))
 	if err == nil {
 		return nil
 	}
 	log.Printf("shared folders: %s: compose down failed (%v): down by project name", live.ID, err)
-	if err2 := h.rt.DownByName(ctx, projectName(live.ID)); err2 == nil {
+	if err2 := h.rtOf(live.ID).DownByName(ctx, projectName(live.ID)); err2 == nil {
 		return nil
 	} else {
 		err = errors.Join(err, err2)
@@ -792,12 +798,12 @@ func (h *Hub) forceDown(ctx context.Context, live *templates.Template) error {
 	if h.noEngine() {
 		return err
 	}
-	cs, lerr := h.rt.List(ctx, runtime.Filter{Instance: live.ID})
+	cs, lerr := h.rtOf(live.ID).List(ctx, runtime.Filter{Instance: live.ID})
 	if lerr != nil {
 		return errors.Join(err, lerr)
 	}
 	for _, c := range cs {
-		if kerr := h.rt.Signal(ctx, c.ID, "KILL"); kerr != nil {
+		if kerr := h.rtOf(live.ID).Signal(ctx, c.ID, "KILL"); kerr != nil {
 			err = errors.Join(err, kerr)
 		}
 	}
@@ -870,4 +876,12 @@ func dropWriteConfirmed(folders map[string]state.Folder, id string) {
 			folders[fid] = f
 		}
 	}
+}
+
+// serverLabel names a server in messages ("" = the primary).
+func serverLabel(id string) string {
+	if id == "" {
+		return "the primary"
+	}
+	return "server " + id
 }

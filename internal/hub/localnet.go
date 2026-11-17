@@ -208,7 +208,7 @@ func (h *Hub) portInsLocked() []doctor.PortIn {
 		}
 		for _, b := range h.appPortsLocked(t) {
 			pi := doctor.PortIn{
-				Instance: t.ID, Key: b.Key, Service: b.Service, Bind: b.Bind, Port: b.Port, Container: b.Container,
+				Server: h.st.Instances[t.ID].Server, Instance: t.ID, Key: b.Key, Service: b.Service, Bind: b.Bind, Port: b.Port, Container: b.Container,
 				Protocol: b.Protocol, HostNetwork: b.NetworkModeHost, Custom: b.Custom,
 			}
 			if b.RangeEnd > 0 {

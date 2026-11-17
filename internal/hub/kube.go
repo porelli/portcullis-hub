@@ -181,23 +181,31 @@ func (h *Hub) personSecretFiles(id, key string) (map[string][]byte, error) {
 	return out, nil
 }
 
-// kubeDeliverer is the kube backend's delivery into a running instance
-// (§13.7 "On Kubernetes"): the object updated with .rev, then the mounted
-// copy waited for; nil only once it matches.
-type kubeDeliverer interface {
+// fileDeliverer / secretDeliverer are a runtime's delivery into a
+// running instance (pre-flight P11, split from kubeDeliverer): the kube
+// backend (§13.7 "On Kubernetes": the object updated with .rev, then the
+// mounted copy waited for) and the agent backend (files only: person
+// secrets are primary-only). Each is used when the instance's runtime
+// implements it.
+type fileDeliverer interface {
 	DeliverFile(ctx context.Context, instance string, f runtime.FileDelivery) error
+}
+
+type secretDeliverer interface {
 	DeliverPersonSecret(ctx context.Context, instance string, s runtime.SecretDelivery) error
 }
 
 // kubeDeliverPersonSecret delivers option o's hash files of instance id
 // as its *-pw Secret into the running instance (revision digest).
 func (h *Hub) kubeDeliverPersonSecret(ctx context.Context, id string, o *templates.Option, digest string) error {
-	if !h.kubeOn() || h.rt == nil {
+	if h.rt == nil {
 		return nil
 	}
-	d, ok := h.rt.(kubeDeliverer)
+	// Only a runtime that delivers secrets does (Kubernetes; person
+	// secrets are primary-only, pre-flight P11).
+	d, ok := h.rtOf(id).(secretDeliverer)
 	if !ok {
-		return errors.New("the runtime can't deliver files")
+		return nil
 	}
 	files, err := h.personSecretFiles(id, o.Key)
 	if err != nil {
@@ -213,12 +221,18 @@ func (h *Hub) kubeDeliverPersonSecret(ctx context.Context, id string, o *templat
 // kubeDeliver delivers f into instance id when the runtime needs it
 // (Kubernetes); elsewhere the bind mount already has it (nil).
 func (h *Hub) kubeDeliver(ctx context.Context, id string, f runtime.FileDelivery) error {
-	if !h.kubeOn() || h.rt == nil {
+	if h.rt == nil {
 		return nil
 	}
-	d, ok := h.rt.(kubeDeliverer)
+	// The instance's runtime delivers when it implements it (Kubernetes,
+	// a worker's agent); elsewhere the bind mount already has it.
+	rt, err := h.rtFor(id)
+	if err != nil {
+		return err
+	}
+	d, ok := rt.(fileDeliverer)
 	if !ok {
-		return errors.New("the runtime can't deliver files")
+		return nil
 	}
 	return d.DeliverFile(ctx, id, f)
 }

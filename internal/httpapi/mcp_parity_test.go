@@ -77,6 +77,19 @@ var fieldGuardNoToolRoutes = map[string]string{
 
 // mailNoToolRoutes are the mail routes no tool mirrors (contract §15.10
 // "Mail routes without a tool"): mail_status is the only mail tool.
+// serverNoToolRoutes are the Servers routes no tool mirrors (contract
+// §15.10 "Server routes without a tool").
+var serverNoToolRoutes = map[string]string{
+	"POST /api/servers":                        "a join code must never land in a transcript",
+	"POST /api/servers/{id}/revoke":            "revocation stays a human action",
+	"DELETE /api/servers/{id}":                 "revocation stays a human action",
+	"GET /api/servers/{id}/op":                 "admin UI only (the enrolment's progress)",
+	"POST /api/servers/{id}/op/stop":           "admin UI only (stopping an enrolment)",
+	"POST /api/instances/{id}/move/undo":       "admin UI only (Undo move, a fresh sign-in)",
+	"DELETE /api/instances/{id}/move-leftover": "admin UI only (a fresh sign-in): no tool and no doctor fix reaches it",
+	"POST /api/instances/{id}/quarantine/lift": "admin UI only (a fresh sign-in): lifting a worker's start refusal",
+}
+
 var mailNoToolRoutes = map[string]string{
 	"GET /api/mail/settings":                                     "admin UI only (Settings → Mail)",
 	"PUT /api/mail/settings":                                     "admin UI only (Settings → Mail)",
@@ -157,6 +170,8 @@ var destructiveTwins = map[string]string{
 	"POST /api/doctor/findings/{fp}/apply": "a one-click fix: D when its plan touches data (a folder apply or undo, an ownership change, a revocation; G45)",
 	// VPN (§15.10).
 	"DELETE /api/vpn/devices/{id}": "revokes a person's VPN device",
+	// Servers (§15.10, Task 12).
+	"POST /api/instances/{id}/move": "moves an instance between servers: down for the move, typed on the instance id",
 }
 
 // accessWidening are the tools that are D only for some arguments (G37,
@@ -243,7 +258,8 @@ func TestToolParity(t *testing.T) {
 		_, vpnNo := vpnNoToolRoutes[r]
 		_, guardNo := fieldGuardNoToolRoutes[r]
 		_, mailNo := mailNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo
+		_, serverNo := serverNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || serverNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {

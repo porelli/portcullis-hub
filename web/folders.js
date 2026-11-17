@@ -12,7 +12,7 @@
 // POST   /api/folders                       create {id, name, path, description, gid?, create}
 // PUT    /api/folders/{id}                  update {name, path, description}
 // DELETE /api/folders/{id}                  remove (409 while apps use it; files stay)
-// POST   /api/folders/check                 {path, create} → PathCheck
+// POST   /api/folders/check                 {path, create, server} → PathCheck
 // POST   /api/folders/{id}/assign/preview   {uses} → AssignPlan
 // POST   /api/folders/{id}/assign/apply     {plan_hash, uses} → 202 {op_id, poll}
 // POST   /api/folders/{id}/undo/preview     → AssignPlan (the last apply's snapshot)
@@ -197,12 +197,13 @@
     if (!folders.length) {
       h += '<p class="settings-empty">No shared folders yet.</p>';
     } else {
-      h += '<table class="inst-table fd-table"><thead><tr><th>Name</th><th>Path</th><th>Group</th><th>Apps</th><th>Last check</th><th></th></tr></thead><tbody>';
+      h += '<table class="inst-table fd-table"><thead><tr><th>Name</th><th>Server</th><th>Path</th><th>Group</th><th>Apps</th><th>Last check</th><th></th></tr></thead><tbody>';
       for (const f of folders) {
         const lc = f.last_check;
         const op = f.last_op;
         h += '<tr data-fd-row="' + esc(f.id) + '"><td><strong>' + esc(f.name) + '</strong> <code class="settings-empty">' + esc(f.id) + '</code>' +
           (f.description ? '<div class="settings-empty fd-desc">' + esc(f.description) + '</div>' : '') + '</td>' +
+          '<td data-fd-server>' + (f.server ? '<code>' + esc(f.server) + '</code>' : 'primary') + '</td>' +
           '<td><code>' + esc(f.path) + '</code></td>' +
           '<td>' + esc(f.gid) + (f.adopted ? ' <span class="pill warn">adopted</span>' : '') + '</td>' +
           '<td>' + usesText(f) + '</td>' +
@@ -213,7 +214,7 @@
           '<button type="button" class="btn btn-secondary btn-sm" data-fd-recheck="' + esc(f.id) + '" title="After a reboot on btrfs or LVM the folder\'s device number can change: check it and store the new one">Re-check identity…</button> ' +
           (f.last_apply && f.last_apply.snapshot ? '<button type="button" class="btn btn-secondary btn-sm" data-fd-undo="' + esc(f.id) + '" title="Restore the permissions the last apply changed">Undo last fix…</button> ' : '') +
           '<button type="button" class="btn btn-danger btn-sm" data-fd-remove="' + esc(f.id) + '">Remove</button></td></tr>' +
-          '<tr data-fd-panel="' + esc(f.id) + '" hidden><td colspan="6"></td></tr>';
+          '<tr data-fd-panel="' + esc(f.id) + '" hidden><td colspan="7"></td></tr>';
       }
       h += '</tbody></table>';
     }
@@ -327,6 +328,7 @@
     let h = head(id ? 'Edit shared folder <code>' + esc(id) + '</code>' : 'Add shared folder');
     h += '<form class="settings-form fd-form" data-fd-form novalidate>';
     h += '<div class="form-group"><label for="fd-name">Name</label><input type="text" id="fd-name" maxlength="64" required value="' + esc(f ? f.name : '') + '" placeholder="Family photos"></div>';
+    if (!id) h += serverField();
     if (!id) h += '<div class="form-group"><label for="fd-id">Id</label><small>Lowercase letters, digits and dashes; it never changes.</small><input type="text" id="fd-id" maxlength="31" spellcheck="false" placeholder="family-photos"></div>';
     h += '<div class="form-group"><label for="fd-path">Host path</label><small>Under one of the Hub\'s bind roots (HUB_OVERRIDE_BIND_ROOTS).</small>' +
       '<div class="inst-row" style="margin-top:0"><input type="text" id="fd-path" spellcheck="false" value="' + esc(f ? f.path : '') + '" placeholder="/srv/photos" style="flex:1">' +
@@ -394,6 +396,19 @@
     return h;
   }
 
+  // serverField: the new folder's server (Settings → Servers' list, when
+  // there are workers); its instances only may bind it.
+  function serverField() {
+    const list = ((window.PortcullisServers && window.PortcullisServers.cached && window.PortcullisServers.cached()) || []).filter(s => s.id !== 'primary' && s.state === 'ready');
+    if (!list.length) return '';
+    return '<div class="form-group"><label for="fd-server">Server</label><small>The host the folder is on: only that server\'s apps can use it; its folder roots apply.</small>' +
+      '<select id="fd-server"><option value="">the primary</option>' + list.map(s => '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>').join('') + '</select></div>';
+  }
+  function chosenServer(box) {
+    const s = box.querySelector('#fd-server');
+    return s ? s.value : '';
+  }
+
   async function checkPath(create) {
     const box = dialogBox();
     const out = box.querySelector('[data-fd-check-result]');
@@ -401,7 +416,7 @@
     if (!p) { out.innerHTML = '<div class="op-msg inst-error">Enter a host path first.</div>'; return; }
     out.innerHTML = '<p class="settings-empty">' + (create ? 'Creating…' : 'Checking…') + '</p>';
     try {
-      const pc = await window.apiPost('/api/folders/check', { path: p, create: !!create });
+      const pc = await window.apiPost('/api/folders/check', { path: p, create: !!create, server: chosenServer(box) });
       if (box !== dialogBox()) return;
       out.innerHTML = checkLine(pc);
     } catch (err) { out.innerHTML = window.errorBox(err); }
@@ -429,6 +444,7 @@
       if (!ID_RE.test(id)) { out.innerHTML = '<div class="op-msg inst-error">The id must start with a letter and use lowercase letters, digits and dashes (at most 31).</div>'; return; }
       body.id = id;
       body.create = false;
+      if (chosenServer(box)) body.server = chosenServer(box);
       const gid = box.querySelector('#fd-gid').value.trim();
       if (gid !== '') {
         if (!/^\d+$/.test(gid)) { out.innerHTML = '<div class="op-msg inst-error">The gid must be a whole number.</div>'; return; }

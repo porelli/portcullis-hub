@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -83,5 +84,27 @@ func TestTryLock(t *testing.T) {
 	again()
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0600 {
 		t.Errorf("lock file = %v, %v", fi, err)
+	}
+}
+
+func TestWriteFileAtomicGroup(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f")
+	gid := os.Getgid()
+	if err := WriteFileAtomicGroup(p, []byte("x"), 0o640, gid); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(p)
+	if fi.Mode().Perm() != 0o640 || int(fi.Sys().(*syscall.Stat_t).Gid) != gid {
+		t.Errorf("mode %v gid %v", fi.Mode().Perm(), fi.Sys().(*syscall.Stat_t).Gid)
+	}
+	// A group the caller can't set: nothing is written or left behind.
+	if os.Getuid() != 0 {
+		if err := WriteFileAtomicGroup(filepath.Join(dir, "g"), []byte("x"), 0o640, 1); err == nil {
+			t.Skip("chown to gid 1 allowed here")
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+			t.Errorf("left behind: %d entries", len(entries))
+		}
 	}
 }

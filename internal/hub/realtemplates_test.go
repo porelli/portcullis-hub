@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -79,7 +80,7 @@ func TestRealTemplatesInstances(t *testing.T) {
 	if !haveCompose {
 		t.Log("docker compose not available: rendering only")
 	}
-	n := 0
+	n, bundles := 0, 0
 	for _, cat := range h.Templates() {
 		ids := []string{cat.ID}
 		if cat.Manifest.Multi() {
@@ -109,15 +110,31 @@ func TestRealTemplatesInstances(t *testing.T) {
 			n++
 			// The pre-up check's loader (compose-go, F15) must read every
 			// real template with its Hub override as compose does.
-			if _, err := h.loadRendered(t.Context(), &c); err != nil {
+			proj, err := h.loadRendered(t.Context(), &c)
+			if err != nil {
 				t.Errorf("%s: compose-go loader: %v", id, err)
+			} else if po, _ := templates.Placement(c.ReadCompose(), c.Manifest, nil, DefaultOverrideBindRoots); !po {
+				// A worker-placeable instance's render (its Hub override
+				// included) passes the agent's bundle re-validation
+				// (multi-server pre-flight P4).
+				mf := agentapi.BundleManifest{Instance: id, Template: c.TemplateID, Volumes: c.NamesFor(id).Volumes}
+				if err := agentapi.ValidateBundle(proj, mf, nil, agentapi.BundleScope{BindRoots: DefaultOverrideBindRoots, BaseDir: project, ReadOnlyDirs: []string{filepath.Join(project, "templates"), filepath.Join(project, "certs"), filepath.Join(project, "appfiles")}}); err != nil {
+					if strings.Contains(err.Error(), "a size is required on a worker") {
+						// Fix round 2 ruling: a worker's tmpfs needs a size;
+						// the template must add one to run on a worker.
+						t.Logf("%s: not placeable on a worker until its tmpfs has a size: %v", id, err)
+					} else {
+						t.Errorf("%s: %v", id, err)
+					}
+				}
+				bundles++
 			}
 			if haveCompose {
 				checkComposeConfig(t, h, &c)
 			}
 		}
 	}
-	t.Logf("%d instances rendered", n)
+	t.Logf("%d instances rendered, %d checked as worker bundles", n, bundles)
 }
 
 func checkComposeConfig(t *testing.T, h *Hub, v *templates.Template) {

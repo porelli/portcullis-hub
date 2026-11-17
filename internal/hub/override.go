@@ -145,7 +145,7 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	// Rootless Podman on SELinux (P10): the template's own files are
 	// re-declared with bind.selinux z (data files above already are);
 	// shared folders and other host paths never are.
-	if h.relabelBinds() {
+	if h.relabelFor(t.ID) {
 		for svc, mounts := range selinuxRelabels(t.ReadCompose()) {
 			serviceMounts[svc] = append(serviceMounts[svc], mounts...)
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
@@ -82,8 +84,16 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return nil
 	}
+	// An instance being moved starts only from its move or its recovery
+	// (review B2-M1): nothing else may start a half-restored copy.
+	h.mu.RLock()
+	moving := h.st.Instances[t.ID].State == state.InstanceMoving
+	h.mu.RUnlock()
+	if _, owner := h.moveOwners.Load(t.ID); moving && !owner {
+		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", t.ID)
+	}
 	seq := h.owedSeqOf(t.ID)
-	live, err := h.prepareUp(t)
+	live, err := h.prepareUpCtx(ctx, t)
 	if err != nil {
 		return err
 	}
@@ -101,10 +111,38 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 // anything (an app is never left down by a refusal). Returns the live
 // view the up uses. Failures are *StatusError.
 func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
+	return h.prepareUpCtx(context.Background(), t)
+}
+
+// prepareUpCtx is prepareUp under ctx: an operation's Stop ends its slow
+// parts (the placed images' preflight; final review L5).
+func (h *Hub) prepareUpCtx(ctx context.Context, t *templates.Template) (*templates.Template, error) {
+	// A moving instance renders and starts only from its move, undo or
+	// recovery (R3-L11: restartSteps and the others come through here).
+	h.mu.RLock()
+	moving := h.st.Instances[t.ID].State == state.InstanceMoving
+	h.mu.RUnlock()
+	if _, owner := h.moveOwners.Load(t.ID); moving && !owner {
+		return nil, statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", t.ID)
+	}
 	members := h.groupSnapshot(t.ID)
-	// The engine's SELinux flag before the override is rendered (an
-	// engine call: never under mu; podman only, P10).
-	if h.rootlessOn() {
+	server := h.serverOf(t.ID)
+	if server != "" {
+		// A placed instance (fix round 3, B2-H1): its template must still
+		// be placeable and the instance not quarantined, before anything
+		// is rendered or sent.
+		if err := h.placedPreflight(ctx, t.ID); err != nil {
+			return nil, err
+		}
+		// Never for an orphaned instance (final review L1): nothing, its
+		// relays included, comes back up. (An offline server still gets
+		// its relays narrowed first, B2-H2; its start is refused below.)
+		if err := h.notOrphaned(t.ID); err != nil {
+			return nil, err
+		}
+	} else if h.rootlessOn() {
+		// The engine's SELinux flag before the override is rendered (an
+		// engine call: never under mu; podman only, P10).
 		// Unreadable: refused, never rendered unlabelled (M5).
 		if _, err := h.readEngineSELinux(context.Background()); err != nil {
 			return nil, statusErr(503, "can't read the container engine's security options (SELinux): %v", err)
@@ -131,6 +169,9 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 	if err == nil {
 		err = h.generateOverrideLocked(live, h.st.Settings[t.ID])
 	}
+	if err == nil && h.recordClientsLocked(live) {
+		h.saveLocked()
+	}
 	if err == nil {
 		err = h.refreshInstanceEnvLocked(live, members)
 	}
@@ -145,9 +186,35 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		}
 		return nil, statusErr(500, "override generation failed: %v", err)
 	}
+	if server != "" {
+		// Every image pinned by digest, overrides included (§11.7):
+		// refused before the relays or the worker see anything.
+		if err := h.placedImages(ctx, live, server); err != nil {
+			return nil, err
+		}
+		// B2-H2: the relays follow the Hub's desired labels first, on the
+		// primary, whether or not the worker answers (a failure stops
+		// them); a move, an undo or a recovery drives its own.
+		if _, owned := h.moveOwners.Load(t.ID); !owned {
+			if err := h.relaysFirst(context.Background(), live); err != nil {
+				return nil, err
+			}
+		}
+		// Then the worker's facts, read now (a server that isn't ready
+		// refuses, 409), and the render again with them.
+		if _, err := h.refreshServerFacts(context.Background(), server); err != nil {
+			return nil, err
+		}
+		h.mu.Lock()
+		err = h.generateOverrideLocked(live, h.st.Settings[t.ID])
+		h.mu.Unlock()
+		if err != nil {
+			return nil, statusErr(500, "override generation failed: %v", err)
+		}
+	}
 	// Runtime compatibility (contract §11.10): an instance that can't run
 	// here (its own ports, devices and env, as just written) never starts.
-	if h.compatOn() {
+	if h.compatOnFor(t.ID) {
 		h.mu.RLock()
 		s := h.st.Settings[t.ID]
 		h.mu.RUnlock()
@@ -269,7 +336,7 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	if perr != nil {
 		return perr
 	}
-	createErr := h.rt.Create(opCtx, up)
+	createErr := h.rtOf(live.ID).Create(opCtx, up)
 	if volsBefore != nil {
 		h.recordCreatedVolumes(ctx, p.p, live.ID, volsBefore)
 	}
@@ -319,11 +386,11 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 		} else {
 			close(watched)
 		}
-		upErr = h.rt.Up(opCtx, up, nil)
+		upErr = h.rtOf(live.ID).Up(opCtx, up, nil)
 		stopWatch()
 		<-watched
 	} else {
-		upErr = h.rt.Up(opCtx, up, nil)
+		upErr = h.rtOf(live.ID).Up(opCtx, up, nil)
 	}
 	if err := upErr; err != nil {
 		if len(probes) > 0 {
@@ -466,7 +533,7 @@ func (h *Hub) composeDown(t *templates.Template) error {
 		return nil
 	}
 	h.awaitDelivery(t.ID)
-	return h.rt.Down(context.Background(), h.runtimeProject(t))
+	return h.rtOf(t.ID).Down(context.Background(), h.runtimeProject(t))
 }
 
 // awaitDelivery waits up to lifecycleDeliverWait for instance id's
@@ -491,11 +558,40 @@ func (h *Hub) awaitDelivery(id string) {
 // rollbackUp removes what a failed compose up left behind (containers,
 // network; volumes are kept), by project name if the files don't work.
 func (h *Hub) rollbackUp(t *templates.Template) error {
-	err := h.rt.Down(context.Background(), h.runtimeProject(t))
-	if err != nil && h.rt.DownByName(context.Background(), projectName(t.ID)) == nil {
+	err := h.rtOf(t.ID).Down(context.Background(), h.runtimeProject(t))
+	if err != nil && h.downByName(context.Background(), t.ID) == nil {
 		return nil
 	}
 	return err
+}
+
+// notOrphaned: 409 for an orphaned instance (its server revoked or gone:
+// final review L1).
+func (h *Hub) notOrphaned(id string) error {
+	h.mu.RLock()
+	orphaned := h.orphanedLocked(id)
+	h.mu.RUnlock()
+	if orphaned {
+		return statusErr(409, "%s is orphaned (its server was revoked): restore it from a backup or Forget it", id)
+	}
+	return nil
+}
+
+// downByName takes instance id's project down by name; on a worker, the
+// agent's 404 (it holds no bundle of id and never did: nothing of it can
+// run there) is nothing to take down (final review B5).
+func (h *Hub) downByName(ctx context.Context, id string) error {
+	err := h.rtOf(id).DownByName(ctx, projectName(id))
+	if err != nil && h.serverOf(id) != "" && workerNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// workerNotFound: err is a worker agent's 404 (agentrt.Error).
+func workerNotFound(err error) bool {
+	var ae *agentrt.Error
+	return errors.As(err, &ae) && ae.Status == http.StatusNotFound
 }
 
 // composeFailed reports whether err came from compose itself rather than
@@ -915,7 +1011,7 @@ func (h *Hub) disableSteps(ctx context.Context, p *Progress, id string, tmpl *te
 		h.awaitDelivery(id) // composeDown waits otherwise (N4)
 	}
 	if tmpl == nil || downErr != nil {
-		if err := h.rt.DownByName(context.Background(), projectName(id)); err != nil {
+		if err := h.downByName(context.Background(), id); err != nil {
 			if downErr == nil {
 				downErr = err
 			}
@@ -1103,7 +1199,7 @@ func (h *Hub) restartSteps(ctx context.Context, t *templates.Template) (stopped 
 		return false, nil, nil
 	}
 	seq := h.owedSeqOf(t.ID)
-	live, err := h.prepareUp(t)
+	live, err := h.prepareUpCtx(ctx, t)
 	if err != nil {
 		return false, nil, err
 	}

@@ -1,0 +1,26 @@
+# portcullis-relay: a placed instance's relay on the primary (contract §5,
+# §17.2). Distroless static, no shell, uid 65534.
+# golang:1.27-alpine
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
+ARG TARGETOS
+ARG TARGETARCH
+# GO_TAGS: Go build tags, empty by default. Core's CI builds its e2e
+# images with GO_TAGS=e2etest (internal/e2etest's test hooks); a default
+# image has none of that code (CI checks it).
+ARG GO_TAGS=""
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags "${GO_TAGS}" -ldflags="-s -w" -o /portcullis-relay ./cmd/portcullis-relay
+
+# gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+COPY --from=build /portcullis-relay /portcullis-relay
+USER 65534:65534
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD ["/portcullis-relay", "healthcheck"]
+ENTRYPOINT ["/portcullis-relay"]

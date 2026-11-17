@@ -102,8 +102,10 @@ func (h *Hub) dataFileMounts(t *templates.Template) map[string][]string {
 		if f.Service == "" || f.Mount == "" || !templates.ValidID(t.ID) {
 			continue
 		}
-		host := path.Join(filepath.ToSlash(h.cfg.AppFilesHostDir), t.ID, f.Name)
-		if h.relabelBinds() {
+		// The data files' directory on the engine's host (a worker's
+		// <data>/appfiles for a placed instance).
+		host := path.Join(h.appFilesHostFor(t.ID), t.ID, f.Name)
+		if h.relabelFor(t.ID) {
 			out[f.Service] = append(out[f.Service], relabelBindEntry(host, f.Mount, true))
 			continue
 		}

@@ -1,17 +1,22 @@
-package aigate
-
-// Strict decoding, ported from core mcp-gate/internal/config/strict.go
-// (keep the two in step: the gate refuses what this refuses).
+// Package jsonstrict is the Hub's one strict JSON decoder (moved from
+// internal/aigate, which ports core mcp-gate/internal/config/strict.go:
+// keep the two in step, the gate refuses what this refuses). The gate
+// files, link.json, join codes and the agent API decode through it.
+package jsonstrict
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
 )
 
-var unmarshalerType = reflect.TypeFor[json.Unmarshaler]()
+var (
+	unmarshalerType     = reflect.TypeFor[json.Unmarshaler]()
+	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+)
 
 func typeOf(v any) reflect.Type { return reflect.TypeOf(v).Elem() }
 
@@ -25,8 +30,8 @@ func checkShape(raw []byte, t reflect.Type, path string) error {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return fmt.Errorf("%s: null", path)
 	}
-	if reflect.PointerTo(t).Implements(unmarshalerType) {
-		return nil // a leaf with its own decoder (Time)
+	if reflect.PointerTo(t).Implements(unmarshalerType) || reflect.PointerTo(t).Implements(textUnmarshalerType) {
+		return nil // a leaf with its own decoder (time.Time, netip.Addr, netip.Prefix)
 	}
 	switch t.Kind() {
 	case reflect.Struct:
@@ -78,6 +83,14 @@ func checkShape(raw []byte, t reflect.Type, path string) error {
 			}
 		}
 	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			// []byte: only a base64 string (encoding/json would also take
+			// a list of numbers).
+			if len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '"' {
+				return fmt.Errorf("%s: not a base64 string", path)
+			}
+			return nil
+		}
 		var items []json.RawMessage
 		if err := json.Unmarshal(raw, &items); err != nil {
 			return fmt.Errorf("%s: not a list", path)
@@ -122,10 +135,10 @@ func object(raw []byte, path string) ([]string, []json.RawMessage, error) {
 	return keys, vals, nil
 }
 
-// decodeStrict: valid JSON with no trailing data, exactly the struct's
-// keys (case-sensitive, no duplicates, none missing unless omitempty, no
-// null), then the typed decode.
-func decodeStrict(b []byte, v any) error {
+// Decode: valid JSON with no trailing data, exactly the struct's keys
+// (case-sensitive, no duplicates, none missing unless omitempty, no
+// null), then the typed decode. Errors carry JSON paths, never values.
+func Decode(b []byte, v any) error {
 	if !json.Valid(b) {
 		// Never echo the content (the credentials file holds ciphertexts).
 		return fmt.Errorf("not valid JSON (or trailing data)")

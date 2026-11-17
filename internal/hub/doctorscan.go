@@ -147,6 +147,9 @@ func (h *Hub) scanTargetsLocked() []ScanTarget {
 	var out []ScanTarget
 	for _, id := range slices.Sorted(maps.Keys(h.st.Folders)) {
 		f := h.st.Folders[id]
+		if f.Server != "" {
+			continue // a worker's folder: the disk check covers the primary's paths
+		}
 		t := ScanTarget{Path: f.Path, Folder: id}
 		if a := f.LastApply; a != nil {
 			t.Target = &folderfix.Target{GID: f.GID, Files: a.Files}
@@ -168,6 +171,9 @@ func (h *Hub) scanTargetsLocked() []ScanTarget {
 	for _, u := range uses {
 		if (u.Source != PathSourceSetting && u.Source != PathSourceCustomOverride) || u.HostPath == "" {
 			continue
+		}
+		if h.st.Instances[u.Instance].Server != "" {
+			continue // a path on a worker's host: not the primary's disk check
 		}
 		if u.PersonTree {
 			if p := path.Clean(u.HostPath); h.underBindRoots(p) {
@@ -564,13 +570,13 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 		}
 		return fail(err)
 	}
-	if err := h.folderPathRule(p); err != nil {
+	if err := h.folderPathRule("", p); err != nil {
 		return fail(err)
 	}
-	if err := h.dockerRootRule(ctx, p); err != nil {
+	if err := h.dockerRootRule(ctx, "", p); err != nil {
 		return fail(err)
 	}
-	pr, err := h.probePath(ctx, p, false, "")
+	pr, err := h.probePath(ctx, "", p, false, "")
 	if err != nil {
 		return fail(err)
 	}
@@ -585,7 +591,7 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 	if rep.Dev != pr.Dev || rep.Ino != pr.Ino {
 		return fail(fmt.Errorf("%s changed while it was checked: checked next time", p))
 	}
-	if _, rel := h.bindRootOf(p); rel == "" || (rep.MountRoot != "/"+rel && !strings.HasSuffix(rep.MountRoot, "/"+rel)) {
+	if _, rel := h.bindRootOf("", p); rel == "" || (rep.MountRoot != "/"+rel && !strings.HasSuffix(rep.MountRoot, "/"+rel)) {
 		return fail(fmt.Errorf("the mount root %q of %s doesn't end with %q: the path resolved elsewhere, so its check was discarded", clipRunes(rep.MountRoot, 200), p, "/"+rel))
 	}
 	if t.Children {
@@ -684,7 +690,7 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 		if ctx.Err() != nil || len(out) >= maxRuntimeContainers {
 			break
 		}
-		cs, err := h.rt.List(ctx, runtime.Filter{Instance: id})
+		cs, err := h.rtOf(id).List(ctx, runtime.Filter{Instance: id})
 		if err != nil {
 			log.Printf("doctor: %s: listing containers: %v", id, err)
 			continue
@@ -700,7 +706,7 @@ func (h *Hub) collectRuntime(ctx context.Context, ids []string) []runtimeEntry {
 				continue
 			}
 			e := runtimeEntry{Instance: id, Service: c.Service, Container: c.Name, At: time.Now().UTC()}
-			ci, err := h.rt.Inspect(ctx, c.ID)
+			ci, err := h.rtOf(id).Inspect(ctx, c.ID)
 			if err == nil {
 				w := want[c.Service]
 				e.Memory, e.PidsLimit, e.WantMemory, e.WantPids = ci.Memory, ci.PidsLimit, w[0], w[1]
@@ -748,7 +754,7 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) (gids []int, read, t
 	pending := slices.Clone(h.gidExecs[id])
 	h.scanCacheMu.Unlock()
 	for _, x := range pending {
-		if running, err := h.rt.ExecRunning(ctx, x); err == nil && running {
+		if running, err := h.rtOf(id).ExecRunning(ctx, x); err == nil && running {
 			return nil, 0, 0, errors.New("a previous group check (timed out) is still running in it")
 		}
 	}
@@ -756,7 +762,7 @@ func (h *Hub) containerGIDs(ctx context.Context, id string) (gids []int, read, t
 	delete(h.gidExecs, id)
 	h.scanCacheMu.Unlock()
 	exec := func(cmd []string) (*docker.ExecResult, error) {
-		res, err := h.rt.Exec(ctx, id, runtime.ExecInput{Cmd: cmd, Timeout: gidExecTimeout, NoStdin: true})
+		res, err := h.rtOf(id).Exec(ctx, id, runtime.ExecInput{Cmd: cmd, Timeout: gidExecTimeout, NoStdin: true})
 		if err == nil && res.TimedOut && res.ExecID != "" {
 			h.scanCacheMu.Lock()
 			if h.gidExecs == nil {
