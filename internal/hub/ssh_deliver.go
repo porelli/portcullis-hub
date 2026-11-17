@@ -122,14 +122,9 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 	return nil
 }
 
-// sshAfterCompile runs the compile's follow-ups (revocation on leave:
-// ssh_grants.go sets it). nil = none.
-var sshAfterCompileHook func(h *Hub, ctx context.Context, c *sshaccess.Compiled)
-
+// sshAfterCompile runs the compile's follow-ups: revocation on leave.
 func (h *Hub) sshAfterCompile(ctx context.Context, c *sshaccess.Compiled) {
-	if sshAfterCompileHook != nil {
-		sshAfterCompileHook(h, ctx, c)
-	}
+	h.revokeOnLeave(ctx, c)
 }
 
 func clone[K comparable, V any](m map[K]V) map[K]V {
@@ -370,6 +365,7 @@ func (h *Hub) RunSSH(ctx context.Context, tick time.Duration) {
 		case <-t.C:
 			if now := h.sshrt.clock(); now.Sub(pruned) > 24*time.Hour {
 				h.pruneRevoked(now)
+				h.pruneKeys(now)
 				pruned = now
 			}
 			h.TriggerSSHCompile()

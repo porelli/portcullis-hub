@@ -234,6 +234,15 @@ func (h *Hub) SignSSH(ctx context.Context, req cliapi.CertRequest, addr string) 
 			return nil, r
 		}
 	}
+	// The key is recorded before anything is signed (fail closed): a
+	// certificate whose key the Hub can't put on the revoked list later
+	// (revocation on leave) is never issued.
+	if err := h.rememberKey(fp, norm, now); err != nil {
+		log.Printf("ssh: recording the key to sign failed: %v", err)
+		r := refusal(http.StatusServiceUnavailable, TextSSHUnavailable, "the key couldn't be recorded")
+		h.auditSSH(user, action, user, "key="+pub.Type()+" "+fp+" addr="+clip(addr, 64), r)
+		return nil, r
+	}
 	// Step 8: enroll signs; every answer is checked before it's handed out.
 	userCAs := h.sshUserCAs()
 	var recs []IssuedRecord

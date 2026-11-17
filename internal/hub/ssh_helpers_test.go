@@ -226,3 +226,10 @@ func (f *sshFixture) compile(t *testing.T) {
 }
 
 var errDirDown = errors.New("lldap down")
+
+func newSigner(t *testing.T) (ed25519.PublicKey, ssh.Signer) {
+	t.Helper()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	s, _ := ssh.NewSignerFromKey(priv)
+	return pub, s
+}

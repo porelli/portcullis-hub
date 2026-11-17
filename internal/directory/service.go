@@ -164,6 +164,10 @@ type Service struct {
 	Invites Inviter
 	Audit   *AuditLog
 	Apps    func() []App
+	// SSHGroups, if set, reports the LLDAP groups SSH grants use (contract
+	// §18.12): every one is a guarding group, and the members of those
+	// with a privileged grant are protected targets. Read outside s.mu.
+	SSHGroups func() SSHGroups
 	// AdminGroups returns the groups whose members are administrators:
 	// core refuses to invite them (§9.4) and the Hub asks for a typed
 	// confirmation before handing over their sign-in. nil: lldap_admin and
@@ -2520,4 +2524,12 @@ func callerName(c *Caller) string {
 		return ""
 	}
 	return strings.ToLower(c.User)
+}
+
+// SSHGroups are the groups SSH access uses (Service.SSHGroups).
+type SSHGroups struct {
+	// Granting: every group used by a grant.
+	Granting []string
+	// Privileged: the groups of privileged grants.
+	Privileged []string
 }

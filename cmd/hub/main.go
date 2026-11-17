@@ -529,6 +529,8 @@ func main() {
 	h.SetSSHActions(invites)
 	h.SetSSHKeycloak(kc)
 	dir.SSHSharedAccount = h.SSHSharedAccount
+	dir.SSHGroups = h.SSHGroupsForDirectory
+	h.SetSSHDirectory(dir)
 	h.SetOwnPasswords(dir)
 	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted

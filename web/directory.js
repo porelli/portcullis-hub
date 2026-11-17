@@ -27,6 +27,7 @@
     ['invite', 'Invite people', 'create accounts (no groups) and re-invite the ones they created'],
     ['remove', 'Remove people', 'delete accounts'],
     ['sign_in_help', 'Help with sign-in', 'setup link, remove passkeys, revoke certificates'],
+    ['ssh_access', 'SSH access', 'grants without sudo, root or forwarding on delegable host groups'],
   ];
 
   // api answers the parsed JSON body, or throws an Error with .status and,

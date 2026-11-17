@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,10 +90,66 @@ func (h *Hub) RevokedKeys() []string {
 	}
 	out := make([]string, 0, len(l))
 	for _, e := range l {
-		out = append(out, e.Key)
+		if e.Key != "" { // a fingerprint-only entry (key unknown) is refused at signing only
+			out = append(out, e.Key)
+		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TextRevocationIncomplete is the audit and doctor text of a revocation
+// whose key the Hub doesn't know (Ruling C21-b): the fingerprint is
+// recorded (never signed again) but hosts can't refuse the key.
+const TextRevocationIncomplete = "revocation incomplete: key unknown"
+
+// RevokeFingerprints revokes the keys with these fingerprints (an admin's
+// Revoke, revocation on leave). A fingerprint whose key isn't in
+// keys.json is still recorded — the Hub never signs it again, and the
+// account side (locks) follows the mapping anyway — and raises
+// TextRevocationIncomplete in the audit and the doctor; never a silent
+// no-op.
+func (h *Hub) RevokeFingerprints(actor, reason string, fps []string, target string) (int, error) {
+	var keys []string
+	n := 0
+	for _, fp := range fps {
+		if k := h.issuedKey(fp); k != "" {
+			keys = append(keys, k)
+			continue
+		}
+		if !strings.HasPrefix(fp, "SHA256:") || len(fp) > 80 {
+			continue
+		}
+		now := h.sshrt.clock()
+		h.sshrev.mu.Lock()
+		list, err := h.loadRevokedLocked()
+		if err == nil && !slices.ContainsFunc(list, func(e RevokedKey) bool { return e.FP == fp }) {
+			list = append(list, RevokedKey{FP: fp, Reason: clip(reason, 200), Actor: clip(actor, 64), Added: now.UTC()})
+			err = h.saveRevokedLocked(list)
+			n++
+		}
+		h.sshrev.mu.Unlock()
+		h.sshrt.mu.Lock()
+		if h.sshrt.incomplete == nil {
+			h.sshrt.incomplete = map[string]time.Time{}
+		}
+		h.sshrt.incomplete[fp] = now
+		h.sshrt.mu.Unlock()
+		if err == nil {
+			err = refusal(http.StatusConflict, TextRevocationIncomplete, TextRevocationIncomplete+" "+fp)
+		}
+		h.auditSSH(actor, "ssh.certificate.revoke", target, "key "+fp+": "+clip(reason, 200), err)
+	}
+	m, err := h.RevokeKeys(actor, reason, keys, target)
+	return n + m, err
+}
+
+// sshRevocationsIncomplete are the fingerprints revoked without a key
+// (the doctor's input).
+func (h *Hub) sshRevocationsIncomplete() map[string]time.Time {
+	h.sshrt.mu.Lock()
+	defer h.sshrt.mu.Unlock()
+	return clone(h.sshrt.incomplete)
 }
 
 // revokedUntil is when key fp's entry may go: 24 h after the last

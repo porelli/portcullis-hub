@@ -52,6 +52,10 @@ type sshRuntime struct {
 
 	// kc looks up a person's Keycloak account (disabled = nothing).
 	kc SSHUserLookup
+	// dir is the directory's SSH checks (ssh_grants.go).
+	dir SSHDirectory
+	// incomplete: fingerprints revoked without their key (Ruling C21-b).
+	incomplete map[string]time.Time
 
 	runMu   sync.Mutex
 	pending atomic.Bool
