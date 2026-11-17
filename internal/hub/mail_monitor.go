@@ -260,11 +260,16 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 	if p == nil {
 		return nil, statusErr(http.StatusConflict, "no mail provider is wired")
 	}
+	id := p.Instance
+	// The name first (never a filesystem call on an unchecked path: no
+	// traversal, no existence oracle), and only the provider's own.
+	if mm := archiveRe.FindStringSubmatch(archive); mm == nil || mm[1] != id {
+		return nil, statusErr(http.StatusBadRequest, "archive must be %s/<YYYYMMDDTHHMMSSZ>.tar (an archive of the wired provider)", id)
+	}
 	if err := h.archiveExists(archive); err != nil {
 		return nil, err
 	}
 	actor := directory.Human(HostActor)
-	id := p.Instance
 	return h.startAsync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		if err := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); err != nil && !os.IsNotExist(err) {
 			ready()

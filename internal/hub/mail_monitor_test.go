@@ -259,3 +259,23 @@ func TestHostDNSMainRules(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// TestHostRestoreArchiveChecked: the archive name is checked before any
+// filesystem call: a traversal or another instance's archive is 400, the
+// same as a missing one would never be told apart by existence.
+func TestHostRestoreArchiveChecked(t *testing.T) {
+	w := wiredFix(t)
+	other := filepath.Join(w.h.backupsDir(), "grafana")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(other, "20261117T000000Z.tar"), "x")
+	for _, a := range []string{"../../etc/passwd", "../../no-such-file", "grafana/20261118T000000Z.tar", mailProviderID + "/../grafana/20261117T000000Z.tar", "grafana/20261117T000000Z.tar", mailProviderID + "/x.tar", ""} {
+		if _, err := w.h.HostMailRestore(a); statusOf(err) != 400 {
+			t.Errorf("%q: %v", a, err)
+		}
+	}
+	if _, err := w.h.HostMailRestore(mailProviderID + "/20261117T000000Z.tar"); statusOf(err) != 404 {
+		t.Fatalf("a missing archive of its own: %v", err)
+	}
+}
