@@ -248,8 +248,10 @@ func newClient(cfg Config) *client {
 		leaf := cs.PeerCertificates[0]
 		sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
 		if cfg.Enrolling {
+			// The DER SPKI itself: servers.Proof hashes it (the agent
+			// passes its certificate's DER SPKI to VerifyProof too).
 			c.mu.Lock()
-			c.peerSPKI = sum[:]
+			c.peerSPKI = append([]byte(nil), leaf.RawSubjectPublicKeyInfo...)
 			c.mu.Unlock()
 			return nil
 		}

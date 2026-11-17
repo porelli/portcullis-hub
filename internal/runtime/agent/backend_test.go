@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"github.com/portcullis/hub/internal/servers"
 	"io"
 	"math/big"
 	"net"
@@ -437,5 +438,24 @@ func TestHelperCleanupBounded(t *testing.T) {
 	b.deleteHelper("h1")
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("deleteHelper took %s", d)
+	}
+}
+
+// TestEnrollingPeerSPKIIsTheDER: in enrolling mode PeerSPKI is the DER
+// SubjectPublicKeyInfo of the worker's certificate, the value the agent
+// binds into the proof (internal/agent/enrol.go): a proof the Hub makes
+// with it verifies the agent's way (CI e2e-servers: a hash here made every
+// enrolment fail "the worker refused the enrolment proof").
+func TestEnrollingPeerSPKIIsTheDER(t *testing.T) {
+	w := newWorker(t)
+	b, _ := w.backend(t, func(c *Config) { c.Enrolling = true })
+	b.AgentInfo(context.Background())
+	got := b.PeerSPKI()
+	if !bytes.Equal(got, w.node.RawSubjectPublicKeyInfo) {
+		t.Fatalf("PeerSPKI is %d bytes, not the certificate's DER SPKI (%d bytes)", len(got), len(w.node.RawSubjectPublicKeyInfo))
+	}
+	secret, nonce := bytes.Repeat([]byte{7}, servers.SecretLen), bytes.Repeat([]byte{9}, servers.NonceLen)
+	if !servers.VerifyProof(secret, nonce, "nas", w.node.RawSubjectPublicKeyInfo, servers.Proof(secret, nonce, "nas", got)) {
+		t.Fatal("the Hub's proof doesn't verify the agent's way")
 	}
 }

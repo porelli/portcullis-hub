@@ -318,7 +318,7 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 		return err
 	}
 	spki := b.PeerSPKI()
-	if len(spki) != sha256.Size {
+	if len(spki) == 0 {
 		return refused("the worker presented no certificate")
 	}
 	name := servers.NodeName(id)

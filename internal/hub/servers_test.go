@@ -317,10 +317,10 @@ func (a *fakeAgent) enrol(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	spki := sha256.Sum256(a.enrolCert.RawSubjectPublicKeyInfo)
+	// As the real agent (internal/agent/enrol.go): the DER SPKI.
 	nonce := a.nonce
 	a.nonce = nil
-	if nonce == nil || !servers.VerifyProof(a.secret, nonce, a.id, spki[:], req.Proof) {
+	if nonce == nil || !servers.VerifyProof(a.secret, nonce, a.id, a.enrolCert.RawSubjectPublicKeyInfo, req.Proof) {
 		writeAgentJSON(w, 403, agentapi.Error{Error: "enrolment proof refused"})
 		return
 	}

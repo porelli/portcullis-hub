@@ -12,8 +12,9 @@ import (
 
 func xr(name string) string { return agentapi.ExtraRoutes[name].Path }
 
-// PeerSPKI is the sha256 of the SPKI the agent presented on the last
-// connection (enrolling mode; nil before any).
+// PeerSPKI is the DER SubjectPublicKeyInfo the agent presented on the
+// last connection (enrolling mode; nil before any): what servers.Proof
+// binds (it hashes it).
 func (b *Backend) PeerSPKI() []byte {
 	b.c.mu.Lock()
 	defer b.c.mu.Unlock()
