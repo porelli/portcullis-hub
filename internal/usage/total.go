@@ -2,7 +2,8 @@ package usage
 
 // Total sums samples. A usage field summing any nil is a lower bound
 // (partial true); all nil stays nil. A limit sums only when every member
-// has one (non-zero), else nil: "partly unlimited".
+// has one (non-zero); none with one is 0 (no limit); some is nil: "partly
+// unlimited".
 func Total(ss []Sample) (Sample, bool) {
 	var t Sample
 	partial := false
@@ -45,14 +46,26 @@ func Total(ss []Sample) (Sample, bool) {
 			return nil
 		}
 		var sum int64
+		zeros := 0
 		for _, s := range ss {
 			v := get(s)
-			if v == nil || *v <= 0 {
+			switch {
+			case v == nil:
 				return nil
+			case *v <= 0:
+				zeros++
+			default:
+				sum += *v
 			}
-			sum += *v
 		}
-		return &sum
+		switch zeros {
+		case 0:
+			return &sum
+		case len(ss):
+			var none int64 // no member has a limit: no limit (0)
+			return &none
+		}
+		return nil // partly unlimited
 	}
 	limF := func(get func(Sample) *float64) *float64 {
 		if len(ss) == 0 {

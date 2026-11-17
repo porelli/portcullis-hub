@@ -141,6 +141,10 @@ func TestTotalPartial(t *testing.T) {
 	if tot.MemLimitBytes != nil {
 		t.Errorf("partly unlimited = %v", *tot.MemLimitBytes)
 	}
+	tot, _ = Total([]Sample{{MemLimitBytes: i64(0)}, {MemLimitBytes: i64(0)}})
+	if tot.MemLimitBytes == nil || *tot.MemLimitBytes != 0 {
+		t.Errorf("no limits = %v", tot.MemLimitBytes)
+	}
 	tot, partial = Total([]Sample{{}, {}})
 	if tot.MemBytes != nil || tot.CPUCores != nil || partial {
 		t.Errorf("all nil = %+v %v", tot, partial)

@@ -374,3 +374,7 @@ func (f *Fake) SetStats(id string, s runtime.UnitStats) {
 }
 
 func (f *Fake) EnsureImage(_ context.Context, ref string) error { return f.rec("ensure-image %s", ref) }
+
+// Lock / Unlock guard the exported fields while the fake is in use.
+func (f *Fake) Lock()   { f.mu.Lock() }
+func (f *Fake) Unlock() { f.mu.Unlock() }
