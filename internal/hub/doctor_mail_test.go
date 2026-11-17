@@ -183,3 +183,21 @@ type testErr string
 func (e testErr) Error() string { return string(e) }
 
 const errTestRestartText = testErr("the engine refused the restart")
+
+// TestDoctorBootstrapFalseIsProblem (core: a key file that doesn't match
+// the store makes the adapter fail closed, GET /v1/state bootstrap:
+// false, every other route 503): a Problem once it lasts 10 min.
+func TestDoctorBootstrapFalseIsProblem(t *testing.T) {
+	w := wiredFix(t)
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.Bootstrap = false })
+	r, _ := w.h.Doctor(context.Background())
+	if !r.MailUnavailable {
+		t.Fatal("no mail_unavailable")
+	}
+	w.advance(11 * time.Minute)
+	r, _ = w.h.Doctor(context.Background())
+	fd := findKind(r, doctor.KindMailProviderUnreach)
+	if fd == nil || fd.Severity != doctor.Problem || !strings.Contains(fd.Why, "bootstrap: false") {
+		t.Fatalf("%+v", r.Findings)
+	}
+}

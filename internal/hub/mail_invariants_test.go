@@ -420,11 +420,50 @@ func TestNoBaselineRemovalWaits(t *testing.T) {
 	if p == nil || len(p.Accounts) != 1 || p.Accounts[0].Username != "bob" {
 		t.Fatalf("pending %+v", p)
 	}
+	// A second pass (the leaver's rows now revoked) still sends nothing.
+	f.sync(t)
+	f.sync(t)
+	if f.mc.Puts() != puts {
+		t.Fatal("a later pass sent the removal without a confirmation")
+	}
 	if err := f.h.ConfirmMailRemoval(context.Background(), []string{p.Accounts[0].UUID}, directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.sync(t)
-	if f.mc.Puts() == puts {
-		t.Fatal("the confirmed removal wasn't sent")
+	if n := f.mc.Puts() - puts; n != 1 {
+		t.Fatalf("%d documents after the confirmation (want exactly 1)", n)
+	}
+}
+
+// TestNoBaselineProviderListConfirms (R-L8): without a baseline, the
+// Hub-known set confirmed, the provider's own refusal names more; only a
+// confirmation of exactly the provider's set sends confirm_mass_removal.
+func TestNoBaselineProviderListConfirms(t *testing.T) {
+	f, _, _ := newMailCredFixture(t)
+	os.Remove(f.h.mailLastPath())
+	f.h.mailState.mu.Lock()
+	f.h.mailState.last = nil
+	f.h.mailState.mu.Unlock()
+	puts := f.mc.Puts()
+	f.people.setMembers("mail_users", "root")
+	f.sync(t)
+	confirmAll := func() {
+		t.Helper()
+		f.h.mu.RLock()
+		var ids []string
+		for _, a := range f.h.st.Mail.PendingRemoval.Accounts {
+			ids = append(ids, a.UUID)
+		}
+		f.h.mu.RUnlock()
+		if err := f.h.ConfirmMailRemoval(context.Background(), ids, directory.Human("root")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3 && f.mc.Puts() == puts; i++ {
+		confirmAll()
+		f.sync(t)
+	}
+	if f.mc.Puts() != puts+1 || !f.mc.Last().ConfirmMassRemoval {
+		t.Fatalf("puts %d, last %+v", f.mc.Puts()-puts, f.mc.Last())
 	}
 }

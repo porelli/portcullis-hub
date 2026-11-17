@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,10 @@ type mailSync struct {
 	mu sync.Mutex
 	// last is the last document mailctl accepted (nil: none since start).
 	last *mailprovider.MailState
+	// blindListed: without a baseline, the uuids (sorted) the provider's
+	// own mass-removal refusal named: a confirmation of exactly that set
+	// is the only one that sends confirm_mass_removal (R-L8).
+	blindListed []string
 	// addSince: when the pending additions were first seen (zero: none).
 	addSince time.Time
 	// hubRemoved: the accounts (by uuid) an admin took out of mail_users
@@ -374,22 +380,51 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	// exist there (every person with an active mail password) is the
 	// baseline, and a document removing any of them waits for an
 	// administrator's confirmation.
+	// A confirmation then sends confirm_mass_removal only when it is of
+	// exactly the set the provider's own refusal named; otherwise the
+	// provider's guard judges the rest (a guardless one gets only what
+	// an administrator confirmed the Hub knows of).
 	if last == nil {
+		h.mu.RLock()
+		pr := h.st.Mail.PendingRemoval
+		confirmed := pr != nil && pr.ConfirmedHash != "" && pr.ConfirmedHash == pendingHash(pr)
+		var pending []string
+		if pr != nil {
+			pending = pendingUUIDs(pr.Accounts)
+		}
+		h.mu.RUnlock()
 		if removed := mailRemovedFromRows(h.mailRowBaseline(), doc); len(removed) > 0 {
-			ids := map[string]string{}
+			covered := confirmed
 			for _, r := range removed {
-				ids[r.Username] = r.UUID
+				covered = covered && slices.Contains(pending, r.UUID)
 			}
-			if !h.mailPendingConfirmed(ids) {
+			if !covered {
 				return h.mailMassRefused(ctx, api, nil, doc, d, errHubMassRemoval(removed))
 			}
-			confirm = true
 		}
+		s.mu.Lock()
+		listed := s.blindListed
+		s.mu.Unlock()
+		confirm = confirmed && len(listed) > 0 && slices.Equal(listed, pending)
 	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
+	if errors.Is(err, errMailPendingHold) {
+		return mailRetry
+	}
 	if err != nil {
 		if isMassRemoval(err) {
+			var ae *mailprovider.APIError
+			if last == nil && errors.As(err, &ae) {
+				ids := make([]string, 0, len(ae.Removed))
+				for _, r := range ae.Removed {
+					ids = append(ids, r.UUID)
+				}
+				sort.Strings(ids)
+				s.mu.Lock()
+				s.blindListed = ids
+				s.mu.Unlock()
+			}
 			return h.mailMassRefused(ctx, api, last, doc, d, err)
 		}
 		wait := mailRetry
@@ -459,6 +494,16 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 // "generation not greater" (state.yaml older than mailctl's) moves the
 // generation past mailctl's and tries once more.
 func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailprovider.MailState, confirm bool) (int, error) {
+	// An unconfirmed pending removal holds every document that still
+	// omits one of its accounts (security review of R-L8): only an
+	// administrator's confirmation of exactly that set releases it.
+	// (A document confirmed by the Hub's own removal records, confirm,
+	// is the reviewed second path: every account that goes was taken out
+	// by an administrator through the Hub.)
+	if who := h.mailPendingOmitted(doc); who != "" && !confirm {
+		h.mailSetBlocked("the pending removal of " + who + " waits for an administrator's confirmation: nothing that removes them is sent")
+		return 0, errMailPendingHold
+	}
 	for try := 0; try < 2; try++ {
 		h.mu.Lock()
 		h.st.Mail.Generation++

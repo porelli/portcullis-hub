@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/big"
 	"net/http"
@@ -240,12 +241,43 @@ func (h *Hub) mailRowBaseline() map[string]string {
 	out := map[string]string{}
 	for user, rows := range h.st.MailCredentials {
 		for _, r := range rows {
-			if r.Active() && r.UUID != "" {
+			// Active, or ended because the person left mail_users (a
+			// refused removal revokes them first: they still count).
+			if r.UUID != "" && (r.Active() || r.Reason == state.MailCredentialReasonRevokeLeave) {
 				out[r.UUID] = user
 			}
 		}
 	}
+	if p := h.st.Mail.PendingRemoval; p != nil {
+		for _, a := range p.Accounts {
+			out[a.UUID] = a.Username
+		}
+	}
 	return out
+}
+
+// errMailPendingHold: a send held by an unconfirmed pending removal.
+var errMailPendingHold = errors.New("held by an unconfirmed pending removal")
+
+// mailPendingOmitted is the first account of an unconfirmed pending
+// removal that doc omits ("" = none, or the removal is confirmed).
+func (h *Hub) mailPendingOmitted(doc *mailprovider.MailState) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	p := h.st.Mail.PendingRemoval
+	if p == nil || doc == nil || (p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p)) {
+		return ""
+	}
+	in := map[string]bool{}
+	for _, a := range doc.Accounts {
+		in[a.UUID] = true
+	}
+	for _, a := range p.Accounts {
+		if !in[a.UUID] {
+			return a.Username
+		}
+	}
+	return ""
 }
 
 // mailRemovedFromRows are base's accounts doc no longer has, sorted.

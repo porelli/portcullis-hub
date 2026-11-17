@@ -111,8 +111,10 @@ func TestBlindMassRefusal(t *testing.T) {
 	f.people.setMembers("mail_users", "root")
 	puts := f.mc.Puts()
 	f.sync(t)
+	// The Hub's own baseline (R-L8: alice has a mail password) refuses
+	// first, naming whom it knows of.
 	p := f.pending()
-	if p == nil || len(p.Accounts) != 2 {
+	if p == nil || len(p.Accounts) != 1 || p.Accounts[0].Username != "alice" {
 		t.Fatalf("pending %+v", p)
 	}
 	if len(f.mc.Creds("alice")) != 0 {
