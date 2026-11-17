@@ -10,12 +10,13 @@ membership of `lldap_admin`.
 
 ## Navigation
 
-The Hub has six main tabs under the shared navigation (Portal · Hub · People):
+The Hub has seven main tabs under the shared navigation (Portal · Hub · People):
 
 - **Apps** — installed apps and their instances (one per app, showing all its instances)
 - **Marketplace** — all available templates from every [template source](#template-sources), with installation and template source management
 - **Audit log** — [operation and access audit](#audit-log)
 - **Doctor** — [system health checks and fixes](#doctor)
+- **Usage** — [CPU, memory and storage per app and per container](#usage)
 - **Settings** — [global server settings](#settings-tab-global) (shared folders, local networks, domains)
 - **People ↗** — opens the People subdomain (`people.<domain>`) in the same tab
 
@@ -1425,6 +1426,7 @@ The tab also has **AI support** (the master switch, AI clients, the
 Portcullis MCP, connection length, rate limits, allowed origins and the model
 providers: [AI support → Settings → AI](ai.md#settings-ai)),
 **Domains** ([Adding extra domains](#adding-extra-domains)),
+**Mail** ([below](#mail)),
 **Shared folders** ([below](#shared-folders)) and **Local networks**
 ([below](#local-networks)).
 
@@ -1660,6 +1662,109 @@ The doctor's file-sharing findings
 - a share slot served to nobody;
 - a refused share name or username, as reported by the app.
 
+## Mail
+
+With the [mail server](../setup/mail.md) on, the Hub manages who gets a
+mailbox, the mail domains, the spam settings, aliases, lists and mail
+passwords; mailctl applies them to Stalwart. Mail itself is turned on and off
+on the server (`./portcullis mail enable` / `disable`): until then Settings →
+Mail says "Mail is off: run ./portcullis mail enable on the host", and on
+Kubernetes "Mail isn't available on Kubernetes yet (Docker or rootless Podman
+only)". Interfaces: [contracts §19.9](../guides/integration-contracts.md#199-hub-api-and-audit).
+
+### Settings → Mail
+
+Administrators only (Hub listener):
+
+- **Facts** (read-only, from the server): the mail server's name with
+  "reachable" / "mailctl unreachable", the relay (on / off, set in `.env`),
+  submission ("from anywhere" or "local networks only"; under rootless Podman
+  why LAN-only isn't possible), how long former accounts are kept
+  (`MAIL_FORMER_RETENTION`) and whether a Spamhaus DQS key is set (with a
+  hint when it isn't).
+- **Domains**: one row per mail-capable domain (the main domain and every
+  added domain) with its state (on, draining, off), **Turn on** / **Turn
+  off** and the **groups** whose members get an address there (empty: every
+  mailbox on the main domain, nobody on an added domain). Turning off warns
+  first: "Turning mail off removes the MX after the MTA-STS max_age (up to 7
+  days); mail sent meanwhile is still received." An added domain with mail
+  on or draining can't be deleted until it is off. Turning mail on is
+  refused while an instance uses `mail.`, `mta-sts.`, `autoconfig.` or
+  `autodiscover.` of that domain, naming the instance; and no instance may
+  take those names, or `MAIL_HOSTNAME` itself, while mail is on.
+- **Primary domain**: every login and first address (`<username>@<primary>`).
+- **Spam**: **Junk at score** (5), **Reject at score** (15), the three
+  blocklists, **Always accept** and **Always refuse** (one domain or address
+  per line). See [Mail operations → Spam](mail.md#spam).
+- **Sending limits**: recipients per hour (300) and per day (1000) per person.
+- **Mailbox size per group**: `group = GiB` per line; a person who matches
+  several rows gets the largest; 10 GiB otherwise (at most 1 TiB).
+- **Pending removal**: when more than half the mailboxes would go at once,
+  a banner lists the people, each with "mail passwords revoked" or "revoking
+  failed: retrying", and **Confirm removal** (full administrators only,
+  `lldap_admin`; it asks first: "Remove N mailboxes? They are parked and
+  deleted after the retention period."). See
+  [Mass removals](mail.md#mass-removals).
+- A banner when mail can't be managed (the Hub's mail secret missing or too
+  short): run `./portcullis up` on the server.
+
+Saved with `PUT /api/mail/settings` and `PUT /api/mail/domains/{name}`,
+audited `mail.settings` and `mail.domain`; added domains' DNS follows within
+about a minute. The policy steps (DMARC, MTA-STS) are
+[doctor fixes](#mail-checks); DKIM rotates on its own (or with
+`./portcullis mail dkim rotate <domain>`). The Portcullis MCP has one read-only tool,
+`mail_status`; nothing about mail passwords is ever a tool.
+
+### A person's mail
+
+On a person's page (People → person), the **Mail** card shows their
+addresses or "No mailbox: &lt;name&gt; isn't in mail_users", and:
+
+- **Aliases** (administrators): extra addresses on any mail domain, one per
+  line, delivered to and sendable as by the person (**Save aliases**; an
+  address already used by someone, a list or a reserved name is refused,
+  naming the owner). Aliases belong to the person's LLDAP account, not the
+  username: they go when the person is deleted.
+- **Mail passwords**: label, created, expiry and status, each with
+  **Revoke** (administrators, and holders of `sign_in_help` for the people
+  they may help). A password reset by a restore shows "reset by a restore";
+  while the mail server can't be read, active ones show "not confirmed: the
+  mail server can't be read". "Only &lt;name&gt; can create a mail password,
+  on their Sign-in page": nobody creates one for someone else.
+
+### A group's list
+
+On a group's page, administrators can **Make this group a list** at
+`<group>@<domain>` (a mail domain), with **Who may post**: *members only*
+(the default: the server refuses outside senders) or *anyone*. A list
+delivers to every member's mailbox; no archive, no subscriptions. **Stop the
+list** ends it. Audited `mail.list`.
+
+### Mail passwords
+
+Each person creates their own mail passwords on their
+[Sign-in page](auth-policies.md#the-sign-in-page)
+(`https://people.<domain>/signin`), in the **Mail passwords** section, which
+shows only for people in `mail_users`. It shows:
+
+- the settings for a mail app: username (the primary address), incoming
+  (IMAP) `MAIL_HOSTNAME` port 993 SSL/TLS, outgoing (SMTP) port 465 SSL/TLS
+  or 587 STARTTLS, and their addresses;
+- their mail passwords: label, created, expiry ("no expiry"), **Revoke**
+  ("Mail apps using it stop at once"), or "reset by a restore";
+- **+ New mail password**: a label for the device or app (1–64 characters)
+  and an expiry (never, 90 days, 1 year), then a fresh sign-in in a small
+  window. At most **5** active: "At most 5 mail passwords: revoke one first."
+
+The new password is **shown once**, in a dialog with **Copy**, the settings,
+and **Download for iPhone, iPad or Mac** (a `.mobileconfig` profile that sets
+up the account with that password). Closing the dialog drops the password
+from the page; it is never shown again and Portcullis doesn't keep it
+(Stalwart stores only its hash). A mail password works for mail only: never
+to sign in to Portcullis. Revoking one, or leaving `mail_users`, stops it
+within 8 seconds, open sessions included. While an administrator is signed
+in as the person, the section is read-only.
+
 ## Doctor
 
 The **Doctor** tab checks the whole setup, including folders and paths you
@@ -1753,6 +1858,41 @@ They never fire under Docker or Podman, and none has a one-click fix:
 | `reload_degraded` | Info | An instance's image has no `kill`, so a settings reload restarts its pod instead | — |
 | `kube_api_public` | Warning | The Kubernetes API (`:6443`) or the kubelet (`:10250`) answers on the node's public address | Explain: allow them only from the administrators' addresses in the firewall |
 
+### Mail checks
+
+With the [mail server](../setup/mail.md) on, the doctor adds twenty-two
+checks, from mailctl's checks and status and from the added mail domains' DNS
+plans. While mailctl can't be read there are no mail findings and the tab
+says so. What each one means and what to do:
+[Mail operations → Troubleshooting](mail.md#troubleshooting).
+
+| Kind | Severity | Fix |
+|------|----------|-----|
+| `mail_port25_blocked` | Problem (Info: not known yet) | Explain |
+| `mail_ptr_missing`, `mail_ptr_mismatch` | Problem | Explain, with the provider's steps |
+| `mail_ipv6_ptr` | Info | — |
+| `mail_blocklisted` | Problem (Warning: lookup refused) | Explain |
+| `mail_records_wrong` | Problem | One click on an added domain (apply the `mail` set); explain on the main domain ("Run `./portcullis dns setup --only mail` on the server") |
+| `mail_dkim_stuck` | Warning | Explain |
+| `mail_dkim_manual` | Info | Explain |
+| `mail_cert_expiring` | Warning / Problem | Explain ("Run `./portcullis mail cert` on the server") |
+| `mail_timer_missing` | Warning | Explain ("Run `./portcullis mail schedule --systemd` on the server") |
+| `mail_dmarc_failures` | Warning | Explain |
+| `mail_dmarc_promote` | Info | One click: `<domain>: DMARC p=<policy> → p=<proposed>` |
+| `mail_mtasts_enforce` | Info | One click: `<domain>: MTA-STS testing → enforce (max_age 604800)` |
+| `mail_dane_off` | Problem | Explain |
+| `mail_client_ip_rewritten` | Warning | Explain |
+| `mail_lan_only_unenforced` | Problem | Explain |
+| `mail_rate_held` | Warning | Explain |
+| `mail_mass_removal_pending` | Problem | One click (full administrators): "removes the mailboxes of &lt;users&gt; (parked, deleted after MAIL_FORMER_RETENTION)" |
+| `mail_sync_blocked` | Problem | Explain |
+| `mail_hub_secret_invalid` | Problem | Explain ("./portcullis up recreates the Hub with the mail secret"); while it fires it is the only mail finding |
+| `mail_spam_rules_missing` | Problem | Explain |
+| `mail_external_lookups_on` | Problem | Explain |
+
+The promotions and the removal confirmation always ask an AI tool for a
+confirmation in your browser.
+
 ### VPN checks
 
 With the [VPN](vpn.md) the doctor adds eighteen checks. All are explain-only,
@@ -1779,6 +1919,74 @@ and none fires without the VPN service, a provider or a mode other than
 | `vpn_publish_failed` | Problem | The Hub couldn't write `vpn.json`: every VPN request is denied once its `valid_until` passes |
 | `vpn_reserved_defaults` | Warning | `core.env` lacks `PORTCULLIS_VPN_RESERVED_RANGES`, so the Hub uses the default reserved ranges |
 | `vpn_reach_failed_closed` | Problem | A narrowing render failed, so the Hub stopped the instance; clears after the next successful render |
+
+## Usage
+
+The **Usage** tab shows how much CPU, memory, network, disk IO and storage each
+app uses, aggregated per app and per container, with the core services as
+their own group. Only Hub administrators see it (it is on `hub.<domain>`
+only). Numbers come from the Hub's own sampler (every 15 s, through the
+existing socket proxy) and storage measurer (daily and on demand): opening
+the page never asks the engine anything, however many people look.
+
+- **By app** (the default): one row per app instance with CPU ("0.35 CPU",
+  with the percentage of its CPU limit or, without one, of the host's
+  CPUs), memory as a bar against its limit (amber at 80 %, red at 90 %, "no
+  limit" when there is none), network ↓/↑, disk IO, PIDs, its storage total
+  and a 1 h memory sparkline. Click a row to see its containers. The
+  **Core** group is last. The header shows the host's CPUs and memory, the
+  sums, when the last sample was taken, and how many other containers on
+  the engine are not shown (they are never named or sampled).
+- **By container**: every container in one table, with a filter box (app,
+  service) and the limits as numbers.
+- **Storage**: a **Disks** strip (used / total and free per filesystem,
+  amber at 90 % used, red at 97 %, and which apps have data there), then per
+  app its volumes, binds, writable layers and images ("shared, not in
+  total": instances share images), the shared folders (from the doctor's
+  scans), and the core volumes. **Measure now** measures everything;
+  **Measure** on an app measures only its storage. The run shows in the
+  progress panel, and **Stop** ends it between targets: what was measured
+  so far is kept. With the monitoring profile on, **History in Grafana ↗**
+  opens the "Portcullis usage" dashboard.
+
+The instance page has a **Usage** tab too: that instance's containers, 1 h
+CPU and memory sparklines, and its storage.
+
+How to read the figures:
+
+- **not measured** means the Hub has no figure, with the reason (a
+  container's first sample, a restart, rootless Podman without the `cpu` or
+  `io` controller, the engine not verified). Missing data is never shown as
+  0.
+- **≥ 1.2 GiB** is a lower bound: a total that includes a container or a
+  target without a figure, or a measurement that stopped at its cap
+  ("≥ 120 GiB (stopped after 2 min)").
+- Every storage figure carries its age ("measured 3 h ago"); figures older
+  than 48 h are dimmed.
+- A host path or volume used by two apps is measured once and listed on
+  both as shared, never counted twice.
+
+**Export:** each view has a CSV download (raw numbers; an empty cell when
+not measured). The same data is in the Portcullis MCP as `usage_overview`,
+`usage_instance`, `usage_storage`, `usage_storage_measure` and
+`usage_storage_op`.
+
+### Usage checks
+
+The doctor judges the Usage figures with six checks, none with a one-click
+fix. None fires from a missing figure:
+
+| Kind | Severity | Finds | Fix |
+|------|----------|-------|-----|
+| `disk_nearly_full` | Warning (< 10 % or < 5 GiB free), Problem (< 3 % or < 1 GiB) | A filesystem with app, folder or Hub data is nearly full | Explain: free space or move the data; the apps with data there, largest first |
+| `memory_near_limit` | Warning | A container's memory has been at 90 % of its limit or more for 10 min | Explain: raise the limit (the app's setting, else the Expert override), or check its Logs |
+| `oom_killed` | Warning | A container was killed for running out of memory (or restarted 3 times in an hour after one) | Explain, as above |
+| `pids_near_limit` | Warning | A container has used 90 % of its process limit for 10 min | Explain |
+| `usage_not_measured` | Info | The sampler has had no good sample for 5 min, or the runtime can't measure | Explain: the reason |
+| `storage_measure_partial` | Info | A storage measurement stopped at its cap: the figure is a lower bound | — |
+
+A core service near its limit is a Warning naming the service: core limits
+are compose values ([Security & Hardening](hardening.md#container-hardening)).
 
 ## Rootless Podman
 
