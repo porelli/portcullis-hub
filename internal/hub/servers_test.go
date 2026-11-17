@@ -1574,3 +1574,28 @@ func TestHandshakeAfterSecondGranularity(t *testing.T) {
 		}
 	}
 }
+
+// Servers off (Kubernetes, or no link_doc mounted): publishing link.json
+// writes nothing and never fails, so an instance's lifecycle (delete's
+// files step on k3s) doesn't stop on it.
+func TestPublishLinkOffWritesNothing(t *testing.T) {
+	sf := newServersFixture(t)
+	sf.h.mu.Lock()
+	sf.h.cfg.Runtime = runtime.KindKubernetes
+	err := sf.h.publishLinkLocked()
+	sf.h.mu.Unlock()
+	if err != nil {
+		t.Fatalf("kubernetes: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sf.h.cfg.LinkDocDir, linkdoc.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("kubernetes: link.json written (%v)", err)
+	}
+	sf.h.cfg.Runtime = runtime.KindDocker
+	sf.h.cfg.LinkDocDir = filepath.Join(t.TempDir(), "absent")
+	sf.h.mu.Lock()
+	err = sf.h.publishLinkLocked()
+	sf.h.mu.Unlock()
+	if err != nil {
+		t.Fatalf("unmounted: %v", err)
+	}
+}

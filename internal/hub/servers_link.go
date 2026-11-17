@@ -2,6 +2,7 @@ package hub
 
 import (
 	"net/netip"
+	"os"
 	"sort"
 
 	"github.com/portcullis/hub/internal/linkdoc"
@@ -13,10 +14,16 @@ import (
 // every server that isn't revoked is a peer (P23: enrolling while
 // enrolling, else ready — offline is the Hub's own notion, so an offline
 // worker can come back), and every placed instance of a ready peer that
-// has a relay token is a relay. Without HUB_LINK_DOC_DIR nothing is
-// written. Caller holds mu.
+// has a relay token is a relay. Without HUB_LINK_DOC_DIR, under
+// Kubernetes (no servers there, no link_doc volume) or while the
+// directory isn't mounted, nothing is written: Servers is off, and an
+// instance's lifecycle must not fail on a document nobody reads.
+// Caller holds mu.
 func (h *Hub) publishLinkLocked() error {
-	if h.cfg.LinkDocDir == "" {
+	if h.cfg.LinkDocDir == "" || h.kubeOn() {
+		return nil
+	}
+	if fi, err := os.Stat(h.cfg.LinkDocDir); err != nil || !fi.IsDir() {
 		return nil
 	}
 	d := &linkdoc.Doc{Version: 1, WrittenAt: h.now().UTC(), Subnet: servers.LinkSubnet}
