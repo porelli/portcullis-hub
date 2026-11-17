@@ -601,6 +601,8 @@ func main() {
 	go h.RunDoctorScans(ctx, 24*time.Hour)
 	go h.RunUsageSampler(ctx, usage.Interval)
 	go h.RunUsageStorage(ctx, 24*time.Hour)
+	// The usage metrics (contract §16.2): unset = no listener.
+	serveMetrics(ctx, os.Getenv("HUB_METRICS_ADDR"), h)
 	// The FIDO metadata (contract §8.1): the cached BLOB, then a daily
 	// refresh (and at its nextUpdate) into signin-keycloak.json.
 	go h.RunMDS(ctx, 24*time.Hour)

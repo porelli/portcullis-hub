@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/portcullis/hub/internal/docker"
@@ -116,6 +117,8 @@ type usageState struct {
 	storeMu   sync.Mutex
 	store     *storageFile
 	fixer     func(ctx context.Context, r fixerRun) (*folderfix.Report, error)
+	// scrapedAt: the metrics listener's last scrape (Unix ns; 0 = never).
+	scrapedAt atomic.Int64
 }
 
 func newUsageState() *usageState {
