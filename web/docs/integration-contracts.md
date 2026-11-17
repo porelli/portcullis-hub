@@ -5939,6 +5939,7 @@ Unknown or ungranted ids in `host_groups` are listed in `refused` as "not availa
     ```
 
     Canonical = these four keys in this order, no whitespace, Go `encoding/json` string escaping (`cliapi.KeyProofMessage`). The Hub rebuilds it and verifies; the code is single-use, so a proof can't be replayed.
+
 - **Fingerprints** everywhere are `ssh.FingerprintSHA256` (`SHA256:<base64, no padding>`).
 
 ### 18.7 Vault: mounts, roles and the policy
