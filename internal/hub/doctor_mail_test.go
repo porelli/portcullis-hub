@@ -2,6 +2,8 @@ package hub
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -199,5 +201,21 @@ func TestDoctorBootstrapFalseIsProblem(t *testing.T) {
 	fd := findKind(r, doctor.KindMailProviderUnreach)
 	if fd == nil || fd.Severity != doctor.Problem || !strings.Contains(fd.Why, "bootstrap: false") {
 		t.Fatalf("%+v", r.Findings)
+	}
+}
+
+// TestDoctorSecretMissingStep: the wired provider's API secret gone: the
+// unreachable finding's step is Retry on Settings → Mail.
+func TestDoctorSecretMissingStep(t *testing.T) {
+	w := wiredFix(t)
+	secret := filepath.Join(w.h.cfg.MailProviderSlotDir, mailGateAPISecret)
+	w.h.SetMailAPI(mailprovider.New(w.mc.URL(), secret))
+	os.Remove(secret)
+	w.h.Doctor(context.Background())
+	w.advance(11 * time.Minute)
+	r, _ := w.h.Doctor(context.Background())
+	fd := findKind(r, doctor.KindMailProviderUnreach)
+	if fd == nil || fd.Steps[0] != doctor.MailSecretStep {
+		t.Fatalf("%+v", fd)
 	}
 }

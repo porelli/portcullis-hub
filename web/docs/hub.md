@@ -1760,11 +1760,25 @@ Then, editable whether or not a provider is wired (they are Hub settings,
 sent once one is):
 
 - **Facts** (read-only): the mail server's name with "reachable" /
-  "mailctl unreachable", the relay ("none (direct delivery)", or its host,
+  "mail provider unreachable", the relay ("none (direct delivery)", or its host,
   port, user and "(password set)"), submission ("from anywhere" or "local
   networks only (MAIL_SUBMISSION_LAN_ONLY)"; under rootless Podman why
   LAN-only isn't possible), how often DKIM keys rotate and how long former
   accounts are kept.
+- **Former accounts**: the parked former mailboxes (username, id, since
+  when), read-only, or "No former accounts.", with "Export one with
+  `./portcullis mail export <id>` on the host; they are deleted after the
+  retention above."
+- **Relay, DKIM rotation and former accounts**: *No relay (direct
+  delivery)*, or the relay's host, port (default 587), user, SPF include
+  (optional) and password (write-only: "unchanged (set)" when one is set;
+  "The password is never shown again; leave it empty to keep it."), how
+  often DKIM keys rotate and how long former accounts are kept (24h–8760h
+  each). **Save** asks for a fresh sign-in with your security key first: a
+  change here is refused without one ("changing the relay, DKIM rotation or
+  former retention needs a fresh sign-in") and is never possible through MCP
+  or AI ("the relay, DKIM rotation and former retention change only in the
+  browser, never through MCP or AI"). The other settings save without it.
 - **Domains**: one row per mail-capable domain (the main domain and every
   added domain) with its state (on, draining, off), **Turn on** / **Turn
   off** / **Save groups** and the **groups** whose members get an address
@@ -1790,13 +1804,15 @@ sent once one is):
   retention period."). See [Mass removals](mail.md#mass-removals).
 - A banner when the wired provider can't be managed: "Mail can't be
   managed: the Hub's secret for the wired mail provider is missing or too
-  short".
+  short. **Retry** voids every mail password and writes a fresh secret for
+  the wired provider (or unwire it and wire it again)." with **Retry**.
+  Retry owes a void, and the void writes a fresh secret
+  ([The void](mail.md#the-void)); `./portcullis up` doesn't fix it. The
+  doctor's `mail_provider_unreachable` names the missing secret meanwhile.
 
 Saved with `PUT /api/mail/settings` and `PUT /api/mail/domains/{name}`,
 audited `mail.settings` and `mail.domain`; added domains' DNS follows within
-about a minute. The relay, the DKIM rotation and the former retention are
-part of `PUT /api/mail/settings` (`relay`, `dkim_rotate`, `former_retention`)
-but have no form on the page: it shows them only. The policy steps (DMARC,
+about a minute. The policy steps (DMARC,
 MTA-STS) are [doctor fixes](#mail-checks); DKIM rotates on its own (or with
 `./portcullis mail dkim rotate <domain>`). The Portcullis MCP has one
 read-only tool, `mail_status`; nothing about mail passwords or the provider

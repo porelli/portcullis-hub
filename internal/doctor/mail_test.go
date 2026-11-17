@@ -339,3 +339,13 @@ func TestPTRReason(t *testing.T) {
 		}
 	}
 }
+
+// TestUnreachableSecretStep: a missing or short API secret names the
+// fix (Retry on Settings → Mail), not the instance's logs.
+func TestUnreachableSecretStep(t *testing.T) {
+	fs := mailRun(&MailIn{Wired: true, Instance: "mailsrv", Main: "example.org", Unavailable: true, SecretInvalid: true,
+		UnreachableSince: ptrTime(mailNow.Add(-11 * time.Minute))})
+	if len(fs) != 1 || fs[0].Steps[0] != MailSecretStep || MailSecretStep != "Press Retry on Settings → Mail (it writes a fresh secret)" {
+		t.Fatalf("%+v", fs)
+	}
+}

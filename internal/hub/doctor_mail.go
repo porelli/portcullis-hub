@@ -118,6 +118,8 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 		why := "its API secret is missing or too short"
 		if in.StopError != "" || in.Refused != "" {
 			why = "it is held and stopped"
+		} else {
+			in.SecretInvalid = h.mailSecretInvalid()
 		}
 		in.UnreachableSince, in.UnreachableWhy = h.mailReach(false, why)
 		return in

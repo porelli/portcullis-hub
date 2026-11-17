@@ -71,6 +71,7 @@ const (
 	MailLANOnlyStep     = "Turn LAN-only off: run `./portcullis mail enable --lan-only false` on the server"
 	MailUnreachTitle    = "Mail can't be managed: the mail provider doesn't answer"
 	MailUnreachStep     = "Check the instance on its Mail tab and its logs"
+	MailSecretStep      = "Press Retry on Settings → Mail (it writes a fresh secret)"
 	MailMissingStep     = "Wire a mail server (Settings → Mail) or run ./portcullis mail disable"
 	MailVoidStep        = "Retry on the Mail tab, or look at the provider's logs"
 	MailRefusedTitle    = "the mail provider's template changed: review and confirm on its Mail tab"
@@ -99,6 +100,9 @@ type MailIn struct {
 	Unavailable      bool
 	UnreachableSince *time.Time
 	UnreachableWhy   string
+	// SecretInvalid: the reason is the API secret (missing or short):
+	// Retry on Settings → Mail writes a fresh one.
+	SecretInvalid bool
 	// VoidError: a void is owed and its last attempt failed ("" = none).
 	VoidOwed  bool
 	VoidError string
@@ -362,7 +366,11 @@ func mailHubFindings(in *Inputs, m *MailIn, mk mailMk, recWrong map[string]bool)
 		if m.UnreachableWhy != "" {
 			why += " " + plainText(m.UnreachableWhy, 300)
 		}
-		mk(KindMailProviderUnreach, Problem, MailUnreachTitle, why, []string{MailUnreachStep}, m.Instance, "")
+		step := MailUnreachStep
+		if m.SecretInvalid {
+			step = MailSecretStep
+		}
+		mk(KindMailProviderUnreach, Problem, MailUnreachTitle, why, []string{step}, m.Instance, "")
 	}
 	if m.VoidOwed && m.VoidError != "" {
 		mk(KindMailVoidPending, Problem, "Mail passwords couldn't be voided: the mail provider stays stopped",
