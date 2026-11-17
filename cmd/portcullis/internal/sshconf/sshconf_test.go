@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +108,10 @@ func TestDirModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(home, ".ssh/portcullis/example.com")
+	if runtime.GOOS == "windows" {
+		// No mode bits on Windows: the user profile's ACL keeps it private.
+		t.Skip("no Unix modes on Windows")
+	}
 	st, _ := os.Stat(dir)
 	if st.Mode().Perm() != 0o700 {
 		t.Errorf("dir %o", st.Mode().Perm())

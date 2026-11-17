@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -286,7 +287,9 @@ func TestWriteFiles0600(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(filepath.Join(o.Home, ".ssh/portcullis/example.org/id"))
-	if err != nil || st.Mode().Perm() != 0o600 {
+	// Windows has no mode bits: the file is private through the user
+	// profile's ACL (os.Stat reports 0666 there).
+	if err != nil || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o600) {
 		t.Fatalf("id %v %v", st, err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(o.Home, ".ssh/portcullis/example.org/id"))

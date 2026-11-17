@@ -218,7 +218,8 @@ func TestHostAgentAgainstRealSSHD(t *testing.T) {
 	}
 	arch := mustDocker(t, nil, "version", "-f", "{{.Server.Arch}}")
 	bin := filepath.Join(t.TempDir(), "portcullis")
-	build := exec.Command("go", "build", "-trimpath", "-o", bin, "../..")
+	// -tags sshtest: the hidden --people-url (the fake Hub) exists only there.
+	build := exec.Command("go", "build", "-tags", "sshtest", "-trimpath", "-o", bin, "../..")
 	build.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building the CLI: %v\n%s", err, out)
