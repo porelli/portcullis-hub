@@ -79,7 +79,7 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		id, group, service string
 		number             int
 		image              string
-		mounts             []runtime.UnitMount
+		mounts             []runtime.Mount
 	}
 	var conts []cont
 	s := h.usage

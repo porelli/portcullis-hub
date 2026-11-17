@@ -67,14 +67,22 @@ func (h *Hub) loadRenderedWith(ctx context.Context, t *templates.Template, profi
 }
 
 // dockerRootMounts refuses (400, dockerRootRule) every bind source and
-// every local volume's driver_opts.device at, above or under the Docker
-// daemon's data root; unreadable = 503. Relative bind sources are the
-// daemon's paths under the project directory.
+// every local volume's driver_opts.device at, above or under the data
+// root of the engine the instance runs on (M1: a worker instance's is its
+// agent's /v1/info DockerRootDir, the primary's only for a primary
+// instance); unreadable = 503. On the primary, relative bind sources are
+// the daemon's paths under the project directory; on a worker they lie
+// inside the instance's bundle directory, which the agent resolves and
+// confines (its bind checks), so only absolute ones are judged here.
 func (h *Hub) dockerRootMounts(ctx context.Context, t *templates.Template, proj *types.Project) error {
+	server := h.serverOf(t.ID)
 	type use struct{ what, p string }
 	var uses []use
 	add := func(what, p string) {
 		if p == "" {
+			return
+		}
+		if !path.IsAbs(p) && server != "" {
 			return
 		}
 		if !path.IsAbs(p) {
@@ -114,7 +122,7 @@ func (h *Hub) dockerRootMounts(ctx context.Context, t *templates.Template, proj 
 		}
 	}
 	for _, u := range uses {
-		if err := h.dockerRootRule(ctx, u.p); err != nil {
+		if err := h.dockerRootRule(ctx, server, u.p); err != nil {
 			var se *StatusError
 			if errors.As(err, &se) && se.Status == http.StatusBadRequest {
 				return statusErr(http.StatusBadRequest, "%s was not started: %s: %v", t.ID, u.what, err)

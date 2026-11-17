@@ -132,7 +132,7 @@ func TestKubeInspectOOMAndLimits(t *testing.T) {
 	if !i.OOMKilled || i.RestartCount != 2 || i.NanoCPUs != 5e8 || i.Memory != 64<<20 || i.NetworkMode != "pod" || !i.StartedAt.Equal(started.Time) {
 		t.Errorf("inspect = %+v", i)
 	}
-	if want := []runtime.UnitMount{{Type: "volume", Name: "app--data", Destination: "/data", RW: true}, {Type: "bind", Source: "/srv/media", Destination: "/media"}}; !slices.Equal(i.Mounts, want) {
+	if want := []runtime.Mount{{Type: "volume", Name: "app--data", Destination: "/data", RW: true}, {Type: "bind", Source: "/srv/media", Destination: "/media"}}; !slices.Equal(i.Mounts, want) {
 		t.Errorf("mounts = %+v", i.Mounts)
 	}
 	var nm *runtime.NotMeasuredError

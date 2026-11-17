@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/portcullis/hub/internal/servers"
 	"log"
 	"os"
 	"path/filepath"
@@ -199,6 +200,26 @@ func (h *Hub) OpByID(id, opID string) *OpRecord {
 	if !OpIDRe.MatchString(opID) || !templates.ValidID(id) {
 		return nil
 	}
+	return h.opByKey(id, opID)
+}
+
+// ServerOp is server id's enrolment op record (op key _server.<id>): the
+// one with opID, else ("") the last; nil when none was recorded.
+func (h *Hub) ServerOp(id, opID string) *OpRecord {
+	if servers.ValidID(id) != nil {
+		return nil
+	}
+	if opID == "" {
+		return h.LastOp(serverOpKey(id))
+	}
+	if !OpIDRe.MatchString(opID) {
+		return nil
+	}
+	return h.opByKey(serverOpKey(id), opID)
+}
+
+// opByKey is OpByID for a validated op key.
+func (h *Hub) opByKey(id, opID string) *OpRecord {
 	h.opsMu.Lock()
 	if r, ok := h.ops[id]; ok && r.OpID == opID {
 		h.opsMu.Unlock()
@@ -327,6 +348,9 @@ func markInterrupted(r *OpRecord) {
 func validOpKey(k string) bool {
 	if fid, ok := strings.CutPrefix(k, "_folder."); ok {
 		return settings.FolderIDRe.MatchString(fid)
+	}
+	if sid, ok := strings.CutPrefix(k, serverOpPrefix); ok {
+		return servers.ValidID(sid) == nil
 	}
 	return k == opKeyDoctor || k == opKeyMail || k == opKeyUsage || validDomainOpKey(k) || templates.ValidID(k)
 }
@@ -585,6 +609,10 @@ func (h *Hub) redactionSetErr(id string) ([]string, error) {
 		vals = append(vals, envSecrets(t, readEnvFile(p))...)
 	}
 	vals = append(vals, h.knownSecrets(id)...)
+	// The instance's relay token (review B-L4).
+	if tok := readEnvRaw(h.relayEnvPath(id))[RelayTokenVar]; tok != "" {
+		vals = append(vals, tok)
+	}
 	// G30(c): every model provider secret, whichever instance selects it.
 	ps, perr := h.providerSecretValues()
 	vals = append(vals, ps...)

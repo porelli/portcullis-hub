@@ -56,6 +56,52 @@ func (h *Hub) DeleteInstance(id, confirm string, actor directory.Actor) (res *De
 	return res, err
 }
 
+// forgetKey marks a delete as a forget (Task 10): an orphaned instance's
+// state, clients and groups go; nothing on its dead worker is touched
+// (no backup, no down there, no volume removal).
+type forgetKey struct{}
+
+func forgetting(ctx context.Context) bool { b, _ := ctx.Value(forgetKey{}).(bool); return b }
+
+// ForgetInstance forgets orphaned instance id (DELETE
+// /api/instances/{id}?forget=1, typed id): state, Keycloak clients and
+// groups removed, its relays down on the primary, nothing on the revoked
+// worker touched. Audited instance.forget.
+func (h *Hub) ForgetInstance(id, confirm string, actor directory.Actor) (res *DeleteResult, err error) {
+	res = &DeleteResult{}
+	h.mu.RLock()
+	in, ok := h.st.Instances[id]
+	h.mu.RUnlock()
+	if !ok || in.State != state.InstanceOrphaned {
+		err = statusErr(409, "only an orphaned instance can be forgotten (its server revoked): delete %s instead", id)
+		h.auditOp(actor, "instance.forget", id, "", err)
+		return res, err
+	}
+	_, _, err = h.runOpSync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		var derr error
+		res, derr = h.deleteInstance(context.WithValue(ctx, forgetKey{}, true), id, confirm, actor, ready)
+		return deleteResult(res, derr)
+	})
+	return res, err
+}
+
+// orphanedLocked: instance id is orphaned (persisted), or its server is
+// revoked or gone (a forget's retry finds it deleting). Caller holds mu.
+func (h *Hub) orphanedLocked(id string) bool {
+	e, ok := h.st.Instances[id]
+	if !ok {
+		return false
+	}
+	if e.State == state.InstanceOrphaned {
+		return true
+	}
+	if e.Server == "" {
+		return false
+	}
+	s, known := h.st.Servers[e.Server]
+	return !known || s.State == ServerRevoked
+}
+
 // Delete step keys (contract §11.7 "Steps per operation"): backup (not
 // on a retry: the first backup is kept), stop, volumes (the point of no
 // return), keycloak, groups, files.
@@ -87,7 +133,11 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 		if len(res.Warnings) > 0 {
 			detail += fmt.Sprintf(" warnings=%d", len(res.Warnings))
 		}
-		h.auditOp(actor, "instance.delete", id, detail, err)
+		action := "instance.delete"
+		if forgetting(ctx) {
+			action = "instance.forget"
+		}
+		h.auditOp(actor, action, id, detail, err)
 	}()
 	if confirm != id {
 		return res, statusErr(400, "type the instance id (%s) to confirm the delete", id)
@@ -107,6 +157,20 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	if !ok {
 		return res, statusErr(404, "instance not found: %s", id)
 	}
+	// A forget re-checks, under the instance lock, that the entry is
+	// still orphaned (L5): a restore elsewhere finished meanwhile must not
+	// be forgotten with no backup.
+	if forgetting(ctx) {
+		if h.testHookForget != nil {
+			h.testHookForget(id)
+		}
+		h.mu.RLock()
+		still := h.orphanedLocked(id)
+		h.mu.RUnlock()
+		if !still {
+			return res, statusErr(409, "%s isn't orphaned any more (its server is back or it was restored elsewhere): nothing was forgotten", id)
+		}
+	}
 	// A model provider pointing at it (a litellm provider's instance,
 	// §15.12) would point nowhere: refused until it is deleted or
 	// repointed (a delete in progress continues: nothing can point at a
@@ -125,8 +189,19 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 			return res, fmt.Errorf("the acting admin %q can't delete the instance's groups — nothing was deleted: %w", actor.User, err)
 		}
 	}
+	// Kept copies (final review M1): a delete never forgets one silently.
+	// They go first (each confirmed gone), or nothing is deleted; one on
+	// a revoked or removed server is recorded and dropped (N3).
+	h.mu.RLock()
+	copies := keptCopies(h.st.Instances[id])
+	h.mu.RUnlock()
+	if len(copies) > 0 {
+		if err := h.removeKeptCopies(ctx, id, copies); err != nil {
+			return res, statusErr(409, "the old copies of %s couldn't be removed first, so nothing was deleted: %v (bring the server back, or use Remove the old copy…, then delete again)", id, err)
+		}
+	}
 	p := progressFrom(ctx)
-	retry := tg.entry.State == state.InstanceDeleting
+	retry := tg.entry.State == state.InstanceDeleting || forgetting(ctx)
 	if !retry {
 		p.AddStep(StepBackup, "Backing up")
 	}
@@ -158,7 +233,17 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 	} else if tg.entry.State == state.InstanceRestoring {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%s had an unfinished restore: the delete backup holds its half-restored data; its data from before that restore is in the pre-restore backup %s", id, tg.entry.Backup))
 	}
-	if tg.entry.State == state.InstanceDeleting {
+	if forgetting(ctx) {
+		// No backup (its worker is gone): deleting from here on.
+		h.mu.Lock()
+		e := h.st.Instances[id]
+		e.State = state.InstanceDeleting
+		h.st.Instances[id] = e
+		h.st.SetEnabled(id, false)
+		h.rebuildLocked()
+		h.saveLocked()
+		h.mu.Unlock()
+	} else if tg.entry.State == state.InstanceDeleting {
 		res.Backup = tg.entry.Backup
 	} else {
 		p.Start(StepBackup)
@@ -372,7 +457,12 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 
 	// 3. Project down, then its volumes.
 	p.Start(StepStop)
-	if err := h.stopProject(tg); err != nil {
+	if forgetting(stopCtx) {
+		// Only its relays, on the primary: the worker isn't touched.
+		if err := h.relaysDown(ctx, id); err != nil {
+			return err
+		}
+	} else if err := h.stopProject(tg); err != nil {
 		return fmt.Errorf("compose down: %w", err)
 	}
 	h.mu.Lock()
@@ -432,7 +522,9 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	for _, r := range gone {
 		h.auditOp(actor, revokeAuditAction(r.reason), id+"/"+r.key+"/"+r.user, credentialDetail(id, r.key, r.user, actor.User, r.reason), nil)
 	}
-	if h.noEngine() {
+	if forgetting(stopCtx) {
+		res.Warnings = append(res.Warnings, "forgotten: nothing on its revoked server was touched")
+	} else if h.noEngine() {
 		res.Warnings = append(res.Warnings, "Docker is not available: the volumes of "+projectName(id)+" were not removed")
 	} else {
 		vols, err := h.projectVolumes(ctx, id)
@@ -440,8 +532,15 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 			return fmt.Errorf("listing the volumes: %w", err)
 		}
 		for _, k := range sortedVolumeKeys(vols) {
-			if err := h.rt.RemoveVolume(ctx, vols[k].Name); err != nil && !docker.IsNotFound(err) {
+			if err := h.rtOf(id).RemoveVolume(ctx, vols[k].Name); err != nil && !docker.IsNotFound(err) {
 				return fmt.Errorf("removing volume %s: %w", vols[k].Name, err)
+			}
+		}
+		// A placed instance's bundle (its env, secrets included) goes
+		// from the worker too (review B2-M4).
+		if server := h.serverOf(id); server != "" {
+			if err := h.removeWorkerBundle(ctx, server, id); err != nil {
+				return fmt.Errorf("removing the bundle on %s: %w", serverLabel(server), err)
 			}
 		}
 	}
@@ -545,7 +644,7 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 
 	// 6. Files, ops record, state; policy and portal.
 	p.Start(StepFiles)
-	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id)} {
+	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id), h.relayEnvPath(id), h.relayComposePath(id)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}
@@ -600,6 +699,10 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	}
 	if err := h.WritePolicy(); err != nil {
 		res.Warnings = append(res.Warnings, "the policy file write failed (it is retried with the next change): "+err.Error())
+	}
+	// Its relay token is gone: link.json drops it (review B2-M5).
+	if err := h.publishLink(); err != nil {
+		return err
 	}
 	p.Done(StepFiles)
 	h.TriggerReconcile()

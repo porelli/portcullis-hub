@@ -215,6 +215,9 @@ type Manifest struct {
 	// "One-off jobs"); JobServices adds the service_completed_successfully
 	// dependencies.
 	Jobs []string `yaml:"jobs" json:"jobs,omitempty"`
+	// Placement is "" / any (worker-placeable unless detected otherwise)
+	// or primary_only (contract §3 "Worker-placeable templates"; Placement).
+	Placement string `yaml:"placement" json:"placement,omitempty"`
 
 	// routerless: compose.yml has no HTTP router (set by Discover;
 	// Routerless).

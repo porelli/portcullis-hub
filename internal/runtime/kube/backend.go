@@ -853,9 +853,9 @@ func (b *Backend) Inspect(ctx context.Context, id string) (runtime.UnitInfo, err
 				}
 				switch {
 				case v.HostPath != nil:
-					i.Mounts = append(i.Mounts, runtime.UnitMount{Type: "bind", Source: v.HostPath.Path, Destination: vm.MountPath, RW: !vm.ReadOnly})
+					i.Mounts = append(i.Mounts, runtime.Mount{Type: "bind", Source: v.HostPath.Path, Destination: vm.MountPath, RW: !vm.ReadOnly})
 				case v.PersistentVolumeClaim != nil:
-					i.Mounts = append(i.Mounts, runtime.UnitMount{Type: "volume", Name: v.PersistentVolumeClaim.ClaimName, Destination: vm.MountPath, RW: !vm.ReadOnly})
+					i.Mounts = append(i.Mounts, runtime.Mount{Type: "volume", Name: v.PersistentVolumeClaim.ClaimName, Destination: vm.MountPath, RW: !vm.ReadOnly})
 				}
 			}
 		}

@@ -4,6 +4,7 @@
 package compose
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -264,6 +265,56 @@ func (c *CLI) Up(ctx context.Context, p Project) error {
 // env file's COMPOSE_PROFILES.
 func (c *CLI) Down(ctx context.Context, p Project) error {
 	return c.run(ctx, c.DownTimeout, "down", Args(p, "--profile", "*", "down", "--remove-orphans"))
+}
+
+// MaxConfig bounds Config's output.
+const MaxConfig = 8 << 20
+
+// Config runs `--profile '*' config --format json`: the model exactly as
+// compose will run it — interpolated from the env file (and nothing
+// else in the project directory), include / extends merged, env_file
+// inlined, paths absolute. The worker agent validates this output and
+// runs only it (never the files it came from).
+func (c *CLI) Config(ctx context.Context, p Project) ([]byte, error) {
+	if c.Guard == nil {
+		return nil, errors.New("docker compose config: no runtime guard")
+	}
+	if err := c.Guard.Err(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	bin := c.Binary
+	if bin == "" {
+		bin = "docker"
+	}
+	cmd := exec.CommandContext(ctx, bin, Args(p, "--profile", "*", "config", "--format", "json")...)
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Env = c.Env()
+	var out capped
+	errTail := &tail{max: OutputTail}
+	cmd.Stdout, cmd.Stderr = &out, errTail
+	if err := cmd.Run(); err != nil {
+		return nil, &Error{Command: "config", Err: err, Output: errTail.String()}
+	}
+	if out.over {
+		return nil, fmt.Errorf("docker compose config: output over %d bytes", MaxConfig)
+	}
+	return out.b.Bytes(), nil
+}
+
+// capped keeps at most MaxConfig bytes (over: there were more).
+type capped struct {
+	b    bytes.Buffer
+	over bool
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	if c.b.Len()+len(p) > MaxConfig {
+		c.over = true
+		return len(p), nil
+	}
+	return c.b.Write(p)
 }
 
 // DownByName runs `compose -p <name> down --remove-orphans`: with no

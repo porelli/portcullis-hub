@@ -92,9 +92,9 @@ func newStorageEnv(t *testing.T) *storageEnv {
 	a1.Image, b1.Image = "img-a", "img-shared"
 	ue.setUnits(a1, b1)
 	ue.rt.Infos = map[string]runtime.UnitInfo{
-		"a1": {ID: "a1", Mounts: []runtime.UnitMount{{Type: "bind", Source: "/srv/data/shared", Destination: "/s"}, {Type: "bind", Source: "/srv/media/a", Destination: "/m"},
+		"a1": {ID: "a1", Mounts: []runtime.Mount{{Type: "bind", Source: "/srv/data/shared", Destination: "/s"}, {Type: "bind", Source: "/srv/media/a", Destination: "/m"},
 			{Type: "bind", Source: "/opt/templates/x", Destination: "/t"}}},
-		"b1": {ID: "b1", Mounts: []runtime.UnitMount{{Type: "bind", Source: "/srv/data/shared", Destination: "/s"}}},
+		"b1": {ID: "b1", Mounts: []runtime.Mount{{Type: "bind", Source: "/srv/data/shared", Destination: "/s"}}},
 	}
 	ue.stats("a1", 1, 1)
 	ue.stats("b1", 1, 1)

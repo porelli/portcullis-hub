@@ -879,6 +879,13 @@
       </p>
       <div id="mail-settings-root"></div>
 
+      <div class="category-title" style="margin: 2rem 0 1rem;">Servers</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        The primary and the worker servers your apps can run on: their state, free space and certificates, each one's Local networks and scheduled backups.
+        Adding, revoking and removing a server need a fresh sign-in.
+      </p>
+      <div id="servers-root"></div>
+
     </div>
   </div>
 
@@ -915,6 +922,8 @@
   <script src="/static/folders.js"></script>
   <script src="/static/dns.js"></script>
   <script src="/static/mail.js"></script>
+  <script src="/static/freshauth.js"></script>
+  <script src="/static/servers.js"></script>
   <script src="/static/doctor.js"></script>
   <script src="/static/usage.js"></script>
   <script>
@@ -937,6 +946,7 @@
         PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
         loadVPNSettings(document.getElementById('vpn-settings-root'));
         if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
+        if (window.PortcullisServers) PortcullisServers.render(document.getElementById('servers-root'));
       }
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
       // The Usage tab polls while shown; leaving it (or an instance's
@@ -944,7 +954,7 @@
       if (window.PortcullisUsage) PortcullisUsage.stop();
       if (name === 'usage') PortcullisUsage.render(document.getElementById('usage-root'), usageView);
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
-      if (name === 'apps') renderApps();
+      if (name === 'apps') { renderApps(); if (window.PortcullisServers) PortcullisServers.load().catch(() => {}); }
       if (name === 'marketplace') fillMarketplace();
       // Leaving an instance's page drops it (its drafts too).
       if (name !== 'instance' && pageCtx) { pageCtx = null; document.getElementById('instance-page').innerHTML = ''; }
@@ -3905,6 +3915,7 @@
         '<dt>App</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
         '<dt>Instance id</dt><dd><code>' + escapeHtml(inst.id) + '</code></dd>' +
         '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
+        (window.PortcullisServers ? PortcullisServers.runsOn(inst) : '') +
         (inst.access_group ? '<dt>Users group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + ' <button type="button" class="opp-link" data-page-tab-go="groups">who is in it</button></dd>' : '') +
         (inst.admin_group ? '<dt>Admins group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + '</dd>' : '') +
         ((inst.keycloak_clients || []).length ? '<dt>Keycloak clients</dt><dd>' + inst.keycloak_clients.map(c => '<code>' + escapeHtml(c) + '</code>').join(', ') + '</dd>' : '') +
@@ -3918,7 +3929,17 @@
       h += '<div class="inst-section"><h4>Containers</h4><div data-pg-containers><p class="settings-empty">Loading…</p></div>' +
         '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-pg-containers-reload>Refresh</button></div></div>';
       h += '<div class="inst-section"><h4>Last operation</h4><div id="inst-lastop"><p class="settings-empty">Loading…</p></div></div>';
+      h += '<div data-srv-inst-box></div>';
       pane.innerHTML = h;
+      if (window.PortcullisServers) {
+        // The servers list (names, targets, fresh sign-in) first.
+        PortcullisServers.load().then(() => {
+          const sb = pane.querySelector('[data-srv-inst-box]');
+          if (!sb) return;
+          sb.innerHTML = PortcullisServers.instanceSection(inst);
+          PortcullisServers.wire(sb, inst, () => openInstancePage(inst.id, 'overview'));
+        }).catch(() => {});
+      }
       loadContainers(id, pane);
       loadReach(id, pane);
       loadInstLastOp(pane.querySelector('#inst-lastop'), inst.id);
@@ -4171,7 +4192,8 @@
         '<div class="setup-err setup-warn" data-setup-warn="id" role="status" hidden></div>' +
         '<small>' + (ctx.first ? '🔒 The first instance of ' + escapeHtml(app) + ' keeps the app\'s id.'
           : 'Derived from the label; edit it now if you like: it can\'t change once the instance exists (it names the compose project, the volumes and the Keycloak client).') + '</small></div>' +
-        '<div class="inst-section"><h4>Address</h4><div data-setup-hosts><p class="settings-empty">Loading…</p></div>' + err('hosts') + '</div>';
+        '<div class="inst-section"><h4>Address</h4><div data-setup-hosts><p class="settings-empty">Loading…</p></div>' + err('hosts') + '</div>' +
+        (typeof window !== 'undefined' && window.PortcullisServers && PortcullisServers.serverSelect('') ? '<div class="inst-section"><h4>Server</h4>' + PortcullisServers.serverSelect('') + err('server') + '</div>' : '');
       if (ctx.access || ctx.admin) {
         const g = setupGroupNames(ctx, ctx.first ? ctx.tid : '');
         h += '<div class="inst-section setup-groups"><h4>Who can use it</h4>' +
@@ -4363,6 +4385,8 @@
         }
       }
       if (Object.keys(v.setup).length) body.setup = Object.assign({}, v.setup);
+      const srv = typeof document !== 'undefined' && document.querySelector ? document.querySelector('#setup-form [data-setup-server]') : null;
+      if (srv && srv.value) body.server = srv.value;
       return body;
     }
 

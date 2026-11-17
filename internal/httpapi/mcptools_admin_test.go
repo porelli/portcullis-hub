@@ -414,6 +414,12 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 		// the same both ways, on each per-call branch.
 		{tool: "remove_vpn_device", args: map[string]any{"id": "nope"},
 			method: "DELETE", path: "/api/vpn/devices/nope", body: ``},
+		// Servers (§15.10): no such server, the same refusal both ways; the
+		// primary's schedule saved both ways.
+		{tool: "move_instance", args: map[string]any{"id": "cloud", "server": "nope"},
+			method: "POST", path: "/api/instances/cloud/move", body: `{"server":"nope"}`, instance: "cloud"},
+		{tool: "set_backup_schedule", args: map[string]any{"server": "primary", "mode": "daily", "hour": 3},
+			method: "PUT", path: "/api/servers/primary/settings", body: `{"backup_schedule":{"mode":"daily","hour":3,"weekday":0}}`},
 		{tool: "set_vpn_provider", args: map[string]any{"id": "cloud", "wired": true},
 			method: "PUT", path: "/api/instances/cloud/vpn-provider", body: `{"wired":true}`},
 		{tool: "set_vpn_provider", args: map[string]any{"id": "cloud", "wired": false},

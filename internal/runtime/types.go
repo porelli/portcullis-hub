@@ -227,14 +227,16 @@ type UnitInfo struct {
 	OOMKilled    bool
 	RestartCount int
 	StartedAt    time.Time
-	// Mounts: each mount's type, volume name, source, destination and
-	// whether it is writable (the storage measurer's bind targets).
-	Mounts []UnitMount
+	// Mounts are the container's mounts as the engine made them (the
+	// agent's start backstop compares them with the bundle; the storage
+	// measurer's bind and volume targets).
+	Mounts []Mount
 }
 
-// UnitMount is one mount of a unit (inspect Mounts[]): Type bind or
-// volume, Name the volume name, Source the host path.
-type UnitMount struct {
+// Mount is one container mount: its type (bind, volume, tmpfs, …), the
+// volume's name (a volume), the source the engine mounted, the
+// destination and whether it's writable.
+type Mount struct {
 	Type, Name, Source, Destination string
 	RW                              bool
 }

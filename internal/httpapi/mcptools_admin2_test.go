@@ -563,6 +563,11 @@ var adminToolFixtures = []struct {
 	{"get_vpn", nil},
 	{"list_vpn_devices", nil},
 	{"remove_vpn_device", map[string]any{"id": "nope"}},
+	// Servers (§15.10).
+	{"list_servers", nil},
+	{"get_server", map[string]any{"id": "primary"}},
+	{"move_instance", map[string]any{"id": "cloud", "server": "nope"}},
+	{"set_backup_schedule", map[string]any{"server": "primary", "mode": "off", "hour": 0}},
 	{"set_vpn_provider", map[string]any{"id": "cloud", "wired": false}},
 	{"assign_vpn_address", map[string]any{"id": "cloud", "ip": "10.8.0.5", "remove": true}},
 	{"set_instance_reach", map[string]any{"id": "cloud", "mode": "internet"}},

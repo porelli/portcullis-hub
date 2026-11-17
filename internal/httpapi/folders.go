@@ -41,9 +41,9 @@ func (s *Server) registerFolders(mux routeMux) {
 
 // Usage texts of the bodies (a 400 answers "body must be " + usage).
 const (
-	folderCreateUsage = `{"id": "<folder id>", "name": "<name>", "path": "<host path>", "description": "<text>", "gid": <number> (optional), "create": true | false}`
+	folderCreateUsage = `{"id": "<folder id>", "name": "<name>", "path": "<host path>", "description": "<text>", "gid": <number> (optional), "create": true | false, "server": "<server id>" (optional, "" = the primary)}`
 	folderUpdateUsage = `{"name": "<name>", "path": "<host path>", "description": "<text>"}`
-	folderCheckUsage  = `{"path": "<host path>", "create": true | false}`
+	folderCheckUsage  = `{"path": "<host path>", "create": true | false, "server": "<server id, \"\" = the primary>"}`
 	assignUsage       = `{"uses": [{"instance": "<id>", "key": "<option>", "subpath": "<relative path>", "write": true | false}]}`
 	assignApplyUsage  = `{"plan_hash": "<hash>", "uses": [{"instance": "<id>", "key": "<option>", "subpath": "<relative path>", "write": true | false}]}`
 	undoApplyUsage    = `{"plan_hash": "<hash>"}`
@@ -229,11 +229,12 @@ func (s *Server) handleCheckFolderPath(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Path   string `json:"path"`
 		Create bool   `json:"create"`
+		Server string `json:"server"`
 	}
 	if !decodeAPI(w, r, &b, folderCheckUsage) {
 		return
 	}
-	pc, err := s.checkFolderPath(r.Context(), b.Path, b.Create)
+	pc, err := s.checkFolderPath(r.Context(), b.Server, b.Path, b.Create)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -516,7 +517,7 @@ func (s *Server) applyRecheck(ctx context.Context, id, planHash string, confirmD
 	return s.Hub.ApplyRecheck(ctx, id, planHash, confirmDifferent, a)
 }
 
-func (s *Server) checkFolderPath(ctx context.Context, p string, create bool) (*hub.PathCheck, error) {
+func (s *Server) checkFolderPath(ctx context.Context, server, p string, create bool) (*hub.PathCheck, error) {
 	s.rec("CheckFolderPath", p, create)
-	return s.Hub.CheckFolderPath(ctx, p, create)
+	return s.Hub.CheckFolderPath(ctx, server, p, create)
 }

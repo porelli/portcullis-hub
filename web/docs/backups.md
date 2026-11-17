@@ -56,13 +56,48 @@ Back those up per app instance in the Hub (**instance backups**): the Hub's
 These are stored in `<hub data>/backups/<instance-id>/<UTC timestamp>.tar`
 (sha256-checksummed). The Hub also takes an automatic backup before every
 instance restore and delete. Instance backups live in `hub_data`, so the **core
-backup** (and `--offsite`) includes every instance backup taken so far. They are
-never pruned automatically and hold app secrets in clear: protect them like the
-rest of the backup.
+backup** (and `--offsite`) includes every instance backup taken so far. They
+hold app secrets in clear: protect them like the rest of the backup. Only
+[scheduled](#scheduled-instance-backups) archives are ever pruned; the others
+are kept until you delete them.
 
 An instance backup can be restored into the same instance (replacing its data)
 or into a **new instance id** (creating a copy). See [integration contracts
 §11.5](../guides/integration-contracts.md#115-backups).
+
+### Instances on worker servers
+
+An instance on a [worker server](servers.md) is backed up the same way: the
+agent copies its volumes out through a helper container on the worker, and
+the archive streams over the tunnel into the primary's
+`<hub data>/backups/<instance-id>/`, so the core backup and `--offsite`
+cover it like any other. A restore streams it back. A **move** is a backup
+on the source (reason `move`) and a restore on the target. The worker's own
+state (its identity, the bundles the Hub sent) is never backed up: a re-join
+creates a new identity and the Hub renders the apps again.
+
+While the primary is down, nothing backs up a worker's apps.
+
+### Scheduled instance backups
+
+Each server, the primary included, has a **Scheduled backups** setting in
+the Hub (Settings → Servers → *Settings*; MCP `set_backup_schedule`):
+
+- **off** (the default), **daily** at an hour, or **weekly** on a weekday
+  at an hour, in the Hub's time zone (`TZ`);
+- at the slot, each enabled instance on that server is backed up in turn,
+  with reason `scheduled`, under the usual consistency rule (each app stops
+  briefly);
+- the **3 newest scheduled archives** per instance are kept; manual, move,
+  pre-restore and pre-delete archives are never pruned;
+- a server that isn't ready is skipped, with a note on each of its
+  instances' last operation ("scheduled backup skipped: server NAS is
+  offline").
+
+This complements the core backup timer ([below](#schedule-systemd-timer)),
+which copies `hub_data` and therefore the archives. The doctor warns
+(`server_no_recent_backup`) about an enabled instance on a worker without an
+archive in 14 days.
 
 ### Shared folders and host paths
 

@@ -153,6 +153,18 @@ type Config struct {
 	// group (shared only with wg and group-gate).
 	VPNDocDir string
 	VPNDocGID int
+	// LinkDocDir is HUB_LINK_DOC_DIR, the link_doc volume link.json is
+	// written to ("" = Servers off, contract §17.2); LinkDocGID its
+	// group (HUB_LINK_DOC_GID). LinkProxy is HUB_LINK_PROXY, link's
+	// control CONNECT listener; RelayImage HUB_RELAY_IMAGE.
+	LinkDocDir string
+	LinkDocGID int
+	LinkProxy  string
+	RelayImage string
+	// ClockOffset reads HUB_DEV_CLOCK_OFFSET_FILE's duration (core's e2e,
+	// e2etest builds only: internal/e2etest), added to h.now(); nil
+	// otherwise.
+	ClockOffset func() time.Duration
 	// VPNNet overrides portcullis-vpn's subnet (tests; zero = the core
 	// env's PORTCULLIS_VPN_NET, default 172.31.254.0/26).
 	VPNNet netip.Prefix
@@ -269,10 +281,53 @@ type Hub struct {
 	// right after the definition is created, before the assignment is
 	// validated (doctorfix.go).
 	testHookManageDefined func()
-	// rt is the runtime (nil: unit tests without one).
-	rt    runtime.Instances
-	idp   IdP
-	attrs AttrStore // LLDAP user attributes (setting claims); nil: none
+	// rt is the primary's runtime (nil: unit tests without one); srv the
+	// worker servers' runtimes and which instance runs where (rtfor.go).
+	rt      runtime.Instances
+	srv     *serverRegistry
+	srvOnce sync.Once
+	// Worker servers (servers*.go): srvMu (a leaf lock, never held with
+	// mu or across a network call) guards signer, enrols (the join codes'
+	// secrets, memory only), polls and ctlSerial; nodeMu serialises the
+	// control certificate's issuance; srvT the timings and test hooks.
+	srvMu     sync.Mutex
+	signer    NodeSigner
+	enrols    map[string]*enrolRun
+	polls     map[string]*pollState
+	ctlSerial string
+	nodeMu    sync.Mutex
+	srvT      serverTimings
+	// revokeLocks: per server, the *sync.Mutex advanceRevoke holds.
+	revokeLocks sync.Map
+	// inflight: owed serials whose sign → send → pin op still runs
+	// (drainOwed skips them; empty after a restart); removing: servers a
+	// RemoveServer is taking away (no placement meanwhile). Guarded by mu.
+	inflight map[string]bool
+	removing map[string]bool
+	// rotateFail: server → why its revocation's rotation failed (srvMu).
+	rotateFail map[string]string
+	// placementInvalid: placed instance → why its template can't run on
+	// a worker any more (srvMu; doctor server_placement_invalid).
+	placementInvalid map[string]string
+	// testHookMove runs at each move phase's start (tests: a failure).
+	testHookMove func(phase string) error
+	// testHookForget runs in a forget once the instance lock is held
+	// (tests: a restore elsewhere finishing meanwhile, L5).
+	testHookForget func(id string)
+	// moveOwners: instance ids a move, an undo or a move recovery is
+	// running for (the only ones composeUp starts while moving).
+	moveOwners sync.Map
+	// overridePreflight: instance → the server and overridden image
+	// refs its last start preflight-pulled (placedImages).
+	overridePreflight sync.Map
+	// copyRemoveFail: instance → where (and why) removing a kept copy
+	// failed (srvMu; the doctor's server_copy_not_removed).
+	copyRemoveFail map[string]string
+	// lastPush: instance → the server its last successful bundle push
+	// went to (an owed removal there is settled only after it).
+	lastPush sync.Map
+	idp      IdP
+	attrs    AttrStore // LLDAP user attributes (setting claims); nil: none
 	// fixerImage caches selfImage (fixer.go; guarded by fixerMu, never
 	// mu); mountinfo reads /proc/self/mountinfo (test-settable).
 	fixerMu    sync.Mutex
@@ -763,6 +818,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		return nil, err
 	}
 	h.st = st
+	h.noteServersLocked()
 	// Shared folders resolve from state (folders.go; P8); a stored folder
 	// this configuration refuses stops the start (P24).
 	h.folders = hubFolders{h}

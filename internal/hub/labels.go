@@ -51,10 +51,13 @@ type GroupChoice struct {
 type CreateRequest struct {
 	Template string
 	ID       string
-	Label    string
-	Hosts    map[string]string
-	Groups   GroupChoice
-	Setup    map[string]json.RawMessage
+	// Server is the worker server to place the instance on ("" or
+	// "primary": the primary; contract §17, Task 10).
+	Server string
+	Label  string
+	Hosts  map[string]string
+	Groups GroupChoice
+	Setup  map[string]json.RawMessage
 	// recheck, if set, runs right before the create commits (outside
 	// mu): an "existing" binding checked again against the directory.
 	recheck func() error

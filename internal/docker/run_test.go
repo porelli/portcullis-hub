@@ -467,7 +467,7 @@ func TestInspectCopiesNamedFieldsOnly(t *testing.T) {
 	if want := time.Date(2026, 11, 15, 9, 0, 0, 5e8, time.UTC); !ci.StartedAt.Equal(want) {
 		t.Errorf("started = %v", ci.StartedAt)
 	}
-	want := []runtime.UnitMount{
+	want := []runtime.Mount{
 		{Type: "volume", Name: "portcullis-x_data", Source: "/var/lib/docker/volumes/portcullis-x_data/_data", Destination: "/data", RW: true},
 		{Type: "bind", Source: "/srv/media", Destination: "/media"},
 	}

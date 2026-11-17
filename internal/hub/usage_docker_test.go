@@ -36,7 +36,7 @@ func TestDockerUsageHelper(t *testing.T) {
 	}
 	// The same spec, another command: the mount is read-only and the
 	// capabilities are exactly DAC_READ_SEARCH (bit 2).
-	s := r.spec(h.fixerImage)
+	s := r.Spec(h.fixerImage, fixerBinary)
 	s.Cmd = []string{"/bin/sh", "-c", "touch /vol/x 2>/dev/null; echo rc=$?; grep CapEff /proc/self/status"}
 	res, err := c.RunHelper(ctx, s, nil)
 	if err != nil {

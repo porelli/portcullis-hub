@@ -67,7 +67,7 @@ func TestUsageCollectorNoHostPath(t *testing.T) {
 		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10, Dev: 3, TotalBytes: 100, FreeBytes: 50}, nil
 	}
 	e.rt.Lock()
-	e.rt.Infos["a1"] = runtime.UnitInfo{ID: "a1", Mounts: []runtime.UnitMount{{Type: "bind", Source: "/srv/media-x/x", Destination: "/x"}}}
+	e.rt.Infos["a1"] = runtime.UnitInfo{ID: "a1", Mounts: []runtime.Mount{{Type: "bind", Source: "/srv/media-x/x", Destination: "/x"}}}
 	e.rt.Unlock()
 	e.h.usage.mu.Lock()
 	e.h.usage.conts["a1"].Inspect = time.Time{}

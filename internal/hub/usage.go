@@ -61,7 +61,7 @@ type usageCont struct {
 	// Image (the list's image reference) and Mounts (from the inspect):
 	// the storage measurer's layers, images and bind targets.
 	Image  string
-	Mounts []runtime.UnitMount
+	Mounts []runtime.Mount
 	// LastMem is the last measured working set, kept across a stop (M4:
 	// a restart right after it neared the limit is an OOM suspect).
 	LastMem *int64
