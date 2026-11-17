@@ -270,7 +270,11 @@ func TestAgentBackendAgainstFakeAgent(t *testing.T) {
 	if err := b.RemoveHelper(ctx, "nope"); err == nil || !docker.IsNotFound(err) {
 		t.Errorf("RemoveHelper of nothing: %v (want a not-found)", err)
 	}
-	check("DeliverFile", b.DeliverFile(ctx, "app", runtime.FileDelivery{Name: "settings", Data: []byte("{}"), Secrets: []byte("{}")}))
+	check("DeliverFile", b.DeliverFile(ctx, "app", runtime.FileDelivery{Name: "settings", Data: []byte("{}")}))
+	// A settings secrets file is primary-only (contract §17.4): the agent's 400.
+	if err := b.DeliverFile(ctx, "app", runtime.FileDelivery{Name: "settings", Data: []byte("{}"), Secrets: []byte("{}")}); err == nil || !strings.Contains(err.Error(), "primary-only") {
+		t.Errorf("a secrets file delivered: %v", err)
+	}
 	calls := strings.Join(w.engine.Calls(), "\n")
 	for _, want := range []string{"create portcullis-app", "up portcullis-app", "down portcullis-app", "down-by-name portcullis-app", "pull ghcr.io/example/app:1",
 		"ensure-image ghcr.io/example/app:1", "exec c1", "exec-split c1", "signal c1 HUP", "fixer [" + wagent.AgentBinary + " folderfix scan"} {
@@ -278,8 +282,11 @@ func TestAgentBackendAgainstFakeAgent(t *testing.T) {
 			t.Errorf("the engine never got %q:\n%s", want, calls)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(w.dataDir, "appfiles", "app", "settings", "settings.secrets.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(w.dataDir, "appfiles", "app", "settings", "settings.json")); err != nil {
 		t.Errorf("delivered file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.dataDir, "appfiles", "app", "settings", "settings.secrets.json")); err == nil {
+		t.Error("a secrets file reached the worker")
 	}
 	// Refusals come back with the agent's status.
 	err = b.Create(ctx, runtime.Project{Name: "portcullis-other", Instance: "other"})
