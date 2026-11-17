@@ -31,8 +31,9 @@ type AgentConfig struct {
 	HostID      string `json:"host_id"`
 	CAFile      string `json:"ca_file,omitempty"`
 	ServiceNone bool   `json:"service_none,omitempty"`
-	// PeopleURL overrides https://people.<domain> (a -tags sshtest build only; a release binary refuses an agent.json that sets it; the
-	// container test's fake Hub).
+	// PeopleURL overrides https://people.<domain>: the container
+	// tests' fake Hub. Only a -tags sshtest CLI honours it; a release
+	// binary refuses an agent.json that sets it.
 	PeopleURL string `json:"people_url,omitempty"`
 }
 
