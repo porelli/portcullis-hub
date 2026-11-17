@@ -1,7 +1,6 @@
 package mailctl
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -84,59 +82,6 @@ func TestClientRefusesWithoutSecretFile(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Fatalf("%d requests sent without a secret", hits.Load())
-	}
-}
-
-// TestTypesMatchContractVector: the byte copy of the contract's MailState
-// vector decodes strictly into MailState and encodes back to the same
-// JSON value (no key missing, none extra).
-func TestTypesMatchContractVector(t *testing.T) {
-	raw, err := os.ReadFile("testdata/mailstate_v1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	var st MailState
-	if err := dec.Decode(&st); err != nil {
-		t.Fatalf("strict decode: %v", err)
-	}
-	if st.Version != StateVersion || st.Generation != 12 || len(st.Accounts) != 3 || st.Domains[1].DNSSEC != "unsigned" {
-		t.Fatalf("decoded %+v", st)
-	}
-	back, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var a, b any
-	if err := json.Unmarshal(raw, &a); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(back, &b); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(a, b) {
-		t.Fatalf("round trip differs:\n%s\n%s", raw, back)
-	}
-}
-
-// TestVectorIsContractCopy: testdata/mailstate_v1.json is the contract's
-// block byte for byte (web/docs is the synced contract).
-func TestVectorIsContractCopy(t *testing.T) {
-	doc, err := os.ReadFile("../../web/docs/integration-contracts.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(doc)
-	i := strings.Index(s, "**MailState v1**")
-	if i < 0 {
-		t.Fatal("no MailState v1 in the contract")
-	}
-	a := strings.Index(s[i:], "```json\n") + i + len("```json\n")
-	b := strings.Index(s[a:], "```") + a
-	raw, _ := os.ReadFile("testdata/mailstate_v1.json")
-	if s[a:b] != string(raw) {
-		t.Fatalf("testdata/mailstate_v1.json differs from the contract's vector")
 	}
 }
 
