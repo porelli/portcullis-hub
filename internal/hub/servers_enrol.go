@@ -240,7 +240,7 @@ func (h *Hub) waitJoin(ctx context.Context, id string) error {
 		if !ok || s.Enrol == nil {
 			return statusErr(409, "server %s is no longer enrolling", id)
 		}
-		if hs, ok := h.linkHandshakes()[id]; ok && hs.After(s.Enrol.IssuedAt) {
+		if hs, ok := h.linkHandshakes()[id]; ok && handshakeAfter(hs, s.Enrol.IssuedAt) {
 			return nil
 		}
 		if h.now().After(s.Enrol.ExpiresAt) {
@@ -379,7 +379,10 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 			return err
 		}
 		log.Printf("server_enrol %s: key switch %d requested, link.json has the new key", id, try+1)
-		if h.waitHandshake(ctx, id, at.Add(agentSwitchDelay), orDur(h.srvT.swapWait, 120*time.Second)) {
+		// Since the new key went into link.json: on this peer only the new
+		// key can shake hands from here on (the agent switches
+		// agentSwitchDelay later).
+		if h.waitHandshake(ctx, id, at, orDur(h.srvT.swapWait, 120*time.Second)) {
 			return nil
 		}
 		log.Printf("server_enrol %s: no handshake on the new key (switch %d): back to the bootstrap key", id, try+1)
@@ -434,11 +437,18 @@ func (h *Hub) setPeerKey(id, key string) error {
 	return nil
 }
 
+// handshakeAfter: link's handshake hs (wg_data/status.json, whole
+// seconds: contract §17.2) is after t. t is cut to its second too:
+// compared with t's nanoseconds, a handshake in the same second never
+// counted, and the next one comes only at WireGuard's 2-minute rekey (CI
+// e2e-servers: every key switch timed out at 120 s).
+func handshakeAfter(hs, t time.Time) bool { return hs.After(t.Truncate(time.Second)) }
+
 // waitHandshake waits up to d for a handshake of server id after since.
 func (h *Hub) waitHandshake(ctx context.Context, id string, since time.Time, d time.Duration) bool {
 	deadline := h.now().Add(d)
 	for {
-		if hs, ok := h.linkHandshakes()[id]; ok && hs.After(since) {
+		if hs, ok := h.linkHandshakes()[id]; ok && handshakeAfter(hs, since) {
 			return true
 		}
 		if h.now().After(deadline) {

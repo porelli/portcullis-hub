@@ -1537,3 +1537,23 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// TestHandshakeAfterSecondGranularity: link's status has whole seconds; a
+// handshake in the same second as the switch counts once that second has
+// passed it (never only at the next rekey).
+func TestHandshakeAfterSecondGranularity(t *testing.T) {
+	at := time.Date(2026, 11, 17, 6, 0, 9, 400_000_000, time.UTC)
+	for _, c := range []struct {
+		hs   time.Time
+		want bool
+	}{
+		{at.Truncate(time.Second).Add(time.Second), true}, // 06:00:10 (status) for a handshake at 06:00:10.3
+		{at.Truncate(time.Second).Add(2 * time.Second), true},
+		{at.Truncate(time.Second), false}, // the switch's own second: not provably after
+		{at.Add(-time.Minute), false},
+	} {
+		if got := handshakeAfter(c.hs, at); got != c.want {
+			t.Errorf("handshakeAfter(%s, %s) = %v, want %v", c.hs.Format(time.RFC3339), at.Format(time.RFC3339Nano), got, c.want)
+		}
+	}
+}
