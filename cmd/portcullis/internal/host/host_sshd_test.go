@@ -179,7 +179,7 @@ func userCert(t *testing.T, ca ssh.Signer, principal, keyID string) ssh.Signer {
 	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	s, _ := ssh.NewSignerFromKey(priv)
-	c := &ssh.Certificate{Key: s.PublicKey(), CertType: ssh.UserCert, KeyId: keyID, ValidPrincipals: []string{principal},
+	c := &ssh.Certificate{Key: s.PublicKey(), CertType: ssh.UserCert, KeyId: keyID, ValidPrincipals: strings.Split(principal, ","),
 		ValidAfter: uint64(time.Now().Add(-time.Minute).Unix()), ValidBefore: uint64(time.Now().Add(time.Hour).Unix()),
 		Permissions: ssh.Permissions{Extensions: map[string]string{"permit-pty": ""}}}
 	if err := c.SignCert(rand.Reader, ca); err != nil {
@@ -348,6 +348,19 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	exec_("sh", "-c", "kill -HUP 1")
 	time.Sleep(time.Second)
 	waitSSH()
+	// Bare principals (security review 2: Vault signs one a tampered role
+	// lists): every account's sshd reads the principals file, which holds
+	// only u:/s: names, so a certificate for "root", "alice" or "breakglass"
+	// opens nothing — also with a valid namespaced principal next to it for
+	// another account.
+	for name, c := range map[string][2]string{"bare root": {"root", "root"}, "bare alice": {"alice", "alice"}, "bare breakglass": {"breakglass", "breakglass"}, "bare bob": {"bob", "bob"}} {
+		if _, err := sshRun(addr, c[0], userCert(t, caSigner, c[1], "pc:x:web:0123456789abcdef"), "true"); err == nil {
+			t.Errorf("%s: logged in", name)
+		}
+	}
+	if _, err := sshRun(addr, "root", userCert(t, caSigner, "root,u:alice@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
+		t.Error("root with root,u:alice@web: logged in")
+	}
 	// Remove: Portcullis's paths gone, the box's own ones unchanged.
 	if out, err := exec_("/usr/local/bin/portcullis", "host", "remove"); err != nil {
 		t.Fatalf("remove: %v %s", err, out)

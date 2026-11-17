@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -129,6 +130,12 @@ func EffectiveCheck(ctx context.Context, sys System, portcullisUser, other strin
 	users := []string{other}
 	if portcullisUser != "" {
 		users = append([]string{portcullisUser}, other)
+	}
+	// root too, always (security review 2): its certificates must go
+	// through the principals file like everyone's, so root never accepts a
+	// certificate naming "root" — Vault would sign that for a tampered role.
+	if !slices.Contains(users, "root") {
+		users = append(users, "root")
 	}
 	for _, u := range users {
 		m, err := Effective(ctx, sys, u)

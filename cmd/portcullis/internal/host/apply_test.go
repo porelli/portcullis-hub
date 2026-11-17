@@ -128,6 +128,13 @@ func TestBundleKindMismatchRefused(t *testing.T) {
 		{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:bob@web"}},
 		{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"s:alice@web"}},
 		{Name: "alice", Kind: "admin", Principals: []string{"u:alice@web"}},
+		// Bare principals never reach a principals file (security review 2:
+		// Vault would sign them for a role listing them).
+		{Name: "root", Kind: "shared", Principals: []string{"root"}},
+		{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"alice"}},
+		{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web", "root"}},
+		{Name: "deploy", Kind: "shared", Principals: []string{"s:deploy@web,root"}},
+		{Name: "deploy", Kind: "shared", Principals: []string{"s:deploy@web", "*"}},
 	} {
 		b := bundle(t)
 		b.Accounts = []cliapi.Account{a}
@@ -374,4 +381,39 @@ func TestOursNeedsCommentAndGroup(t *testing.T) {
 			t.Errorf("%s got principals", n)
 		}
 	}
+}
+
+// TestPrincipalsFilesOnlyNamespaced: every principals file Apply and Trust
+// write holds only u:/s: principals of its own account (the host-side
+// fence: no account accepts its own name, root or a bare name).
+func TestPrincipalsFilesOnlyNamespaced(t *testing.T) {
+	check := func(name string, sys *fakeSys) {
+		t.Helper()
+		n := 0
+		for p, body := range sys.files {
+			if !strings.HasPrefix(p, PrincipalsDir+"/") {
+				continue
+			}
+			n++
+			acct := strings.TrimPrefix(p, PrincipalsDir+"/")
+			for _, l := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+				if _, a, _, ok := cliapi.ParsePrincipal(l); !ok || a != acct {
+					t.Errorf("%s: %s holds %q", name, p, l)
+				}
+			}
+		}
+		if n == 0 {
+			t.Errorf("%s: no principals file written", name)
+		}
+	}
+	sys := newFakeSys(t)
+	if _, _, err := apply(t, sys, bundle(t), cliapi.DefaultCeiling(), nil); err != nil {
+		t.Fatal(err)
+	}
+	check("apply", sys)
+	tsys := newFakeSys(t)
+	if err := Trust(context.Background(), tsys, trustOpts(t)); err != nil {
+		t.Fatal(err)
+	}
+	check("trust", tsys)
 }
