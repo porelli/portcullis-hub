@@ -15,6 +15,16 @@ updates:
       # image's docker-cli-compose (internal/hub/secretsmount.go).
       compose-go:
         patterns: ["github.com/compose-spec/compose-go*"]
+      # The Portcullis CLI's own libraries (cmd/portcullis): reviewed as one
+      # bump, since they sit on people's laptops and on managed hosts.
+      cli:
+        patterns:
+          - "github.com/hiddeco/sshsig"
+          - "github.com/spf13/cobra"
+          - "github.com/pkg/browser"
+          - "github.com/Microsoft/go-winio"
+          - "golang.org/x/term"
+          - "golang.org/x/time"
       go:
         patterns: ["*"]
 
