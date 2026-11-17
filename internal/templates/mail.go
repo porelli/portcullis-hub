@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -533,7 +534,13 @@ func mailNetworkRefusal(compose []byte) error {
 							return sets(n, "ipam.config")
 						}
 						for b := 0; b+1 < len(c.Content); b += 2 {
-							if ck := c.Content[b].Value; ck != "subnet" && ck != "ip_range" {
+							ck, cv := c.Content[b].Value, c.Content[b+1]
+							if ck != "subnet" && ck != "ip_range" {
+								return sets(n, "ipam.config."+ck)
+							}
+							// IPv4 only (enable_ipv6 is false): an IPv6
+							// or unparsable range is refused.
+							if p, err := netip.ParsePrefix(cv.Value); cv.Kind != yaml.ScalarNode || err != nil || !p.Addr().Is4() {
 								return sets(n, "ipam.config."+ck)
 							}
 						}

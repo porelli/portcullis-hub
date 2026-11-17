@@ -89,7 +89,8 @@ var mailRefusalMulti = map[string]bool{
 
 // TestMailVectorsShape: every refusal text of §3.5 is the want_error of
 // at least one vector (exactly one, but the networks allowlist's text,
-// one vector per refused key; the symlink text excepted), every refused
+// one vector per refused key; the symlink text excepted; "extra: "
+// vectors add inputs for a text outside that count and order), every refused
 // vector's text is one of them, the refused vectors follow contract
 // order, and the names are unique; the ok shapes the plan names are
 // there.
@@ -128,6 +129,9 @@ func TestMailVectorsShape(t *testing.T) {
 		if matched < 0 {
 			t.Errorf("%s: %q is no refusal text of §3.5", v.Name, v.WantError)
 			continue
+		}
+		if strings.HasPrefix(v.Name, "extra: ") {
+			continue // more inputs for a vectored text, outside the order
 		}
 		hits[matched]++
 		if matched < last || (matched == last && !mailRefusalMulti[texts[matched]]) {
