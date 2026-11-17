@@ -53,8 +53,11 @@ jobs:
         with:
           go-version-file: go.mod
           # Module + build cache, keyed on go.sum. PR runs only save to their
-          # own PR-ref scope, which main and other PRs can't read.
-          cache: true
+          # own PR-ref scope, which main and other PRs can't read. Never on
+          # the self-hosted builder (runner=builder): it must not write the
+          # Actions cache GitHub-hosted runs restore (it has its own caches;
+          # .github/lint_builder_cache.sh checks every such step).
+          cache: ${{ !(github.event_name == 'workflow_dispatch' && inputs.runner == 'builder') }}
           cache-dependency-path: go.sum
 
       - name: gofmt
@@ -111,8 +114,14 @@ jobs:
       # fixtures, no network.
       - name: Dependabot auto-merge tests
         run: |
-          shellcheck -S warning .github/automerge/*.sh
+          shellcheck -S warning .github/automerge/*.sh .github/lint_builder_cache.sh
           bash .github/automerge/test.sh
+
+      # A job that can run on the self-hosted builder never writes the
+      # shared Actions cache from there (a byte copy of core's
+      # tests/lint_builder_cache.sh).
+      - name: No Actions cache write from the builder
+        run: bash .github/lint_builder_cache.sh .github/workflows/build.yml
 
       # The real templates and core: every published template must load
       # with the Hub's rules (TestRealTemplates*), and the Hub's lists of
