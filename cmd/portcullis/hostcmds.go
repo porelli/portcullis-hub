@@ -47,6 +47,9 @@ func readCode(args []string, stdin io.Reader) (string, error) {
 func hostClient(domain, peopleURL, caFile string) (*api.Client, error) {
 	base := "https://people." + domain
 	if peopleURL != "" {
+		if !testOverrides {
+			return nil, api.Errorf(api.ExitUsage, "%s sets people_url, which this binary doesn't accept (test builds only): re-enrol this host", host.AgentFile)
+		}
 		base = peopleURL
 	}
 	return api.New(base, version, caFile)
@@ -112,10 +115,7 @@ func enrollCmd() *cobra.Command {
 	f.IntVar(&ceil.MaxAccounts, "max-accounts", cliapi.DefaultMaxAccounts, "at most this many Portcullis accounts")
 	f.StringVar(&uidRange, "uid-range", "20000-59999", "the uids Portcullis accounts may use")
 	f.StringVar(&caFile, "ca-file", "", "trust an extra CA (a test server's staging root)")
-	// Hidden: the container tests' fake Hub (TLS still verified; the
-	// first CA still pinned by the code).
-	f.StringVar(&peopleURL, "people-url", "", "")
-	_ = f.MarkHidden("people-url")
+	addTestOverrideFlags(c, &peopleURL)
 	return c
 }
 
