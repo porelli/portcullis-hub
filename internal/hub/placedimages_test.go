@@ -109,3 +109,31 @@ func TestPlacedOverridePullFailureLog(t *testing.T) {
 		}
 	}
 }
+
+// TestPlacedUpPullsAfterBundle (seen live on both runtimes: "downloading
+// … failed, compose will pull it: the server w1 answered unexpectedly"):
+// a worker instance's first up pushes its bundle before the image step,
+// so the agent (which pulls only images a bundle names; the fake refuses
+// as it does) pulls them and nothing falls back to compose.
+func TestPlacedUpPullsAfterBundle(t *testing.T) {
+	p := newPlacedFixture(t)
+	if err := p.create(t, "filesapp", "nas"); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	before := len(p.w.Calls())
+	_, ctx := acceptedProgress(p.fixture, "filesapp") // an up that plans its image step
+	if err := p.h.composeUp(ctx, p.h.Template("filesapp")); err != nil {
+		t.Fatal(err)
+	}
+	if out := logs.String(); strings.Contains(out, "compose will pull it") {
+		t.Errorf("a pull fell back to compose: %s", out)
+	}
+	calls := p.w.Calls()[before:]
+	ref := "pull files:1@sha256:" + strings.Repeat("f", 64)
+	bundle := slices.IndexFunc(calls, func(c string) bool { return strings.HasPrefix(c, "signal bundle") })
+	pull := slices.Index(calls, ref)
+	if bundle < 0 || pull < 0 || pull < bundle {
+		t.Errorf("want the bundle, then the pull: %v", calls)
+	}
+}

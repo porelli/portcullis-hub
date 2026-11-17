@@ -189,6 +189,14 @@ func (h *Hub) pullImages(ctx context.Context, p *startSteps, t *templates.Templa
 	if !h.noEngine() {
 		refs = h.pullRefs(ctx, t)
 	}
+	// A worker instance's bundle first (contract §17.4: bundle → pulls):
+	// the agent pulls only images a bundle names, so a first up's pulls
+	// would all be refused (and hidden by the fallback below).
+	if pr, ok := h.rtOf(t.ID).(placedRT); ok && len(refs) > 0 {
+		if err := h.pushBundle(ctx, t.ID, pr.Instances); err != nil {
+			return err
+		}
+	}
 	imgs := make([]*imagePull, len(refs))
 	for i, r := range refs {
 		imgs[i] = &imagePull{ref: r, label: imageLabel(r)}
