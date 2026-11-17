@@ -548,6 +548,9 @@ type Hub struct {
 	sshlim sshLimits
 	// sshiss guards hub_data/ssh/issued.jsonl (ssh_issued.go).
 	sshiss issuedIndex
+	// sshhosts are the managed hosts' challenges, nonces and syncs
+	// (ssh_hosts.go).
+	sshhosts hostRuntime
 	// eventsEnsure re-asserts Keycloak's events config with history_days
 	// (signin_limits.go: the sync loop and every limits change); under
 	// policyWriteMu like attrSync.

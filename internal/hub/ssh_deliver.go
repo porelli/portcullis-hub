@@ -301,9 +301,19 @@ func wantsHostCert(st state.SSHState, hst state.SSHHost) bool {
 // bumpSerials gives each host whose bundle content changed the next
 // Hub-wide serial (plan C22) and reports whether any moved.
 func (h *Hub) bumpSerials(c *sshaccess.Compiled, now time.Time) bool {
+	h.sshhosts.mu.Lock()
+	syncs := clone(h.sshhosts.lastSync)
+	h.sshhosts.mu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	changed := false
+	changed, dirty := false, false
+	for id, t := range syncs {
+		if hst, ok := h.st.SSH.Hosts[id]; ok && t.Sub(hst.LastSync) > time.Minute {
+			hst.LastSync = t.UTC()
+			h.st.SSH.Hosts[id] = hst
+			dirty = true
+		}
+	}
 	for _, id := range sshKeys(c.Bundles) {
 		b := c.Bundles[id]
 		hash := sshaccess.BundleHash(b)
@@ -319,7 +329,7 @@ func (h *Hub) bumpSerials(c *sshaccess.Compiled, now time.Time) bool {
 		}
 		b.Serial, b.Generated = hst.Serial, now.UTC()
 	}
-	if changed {
+	if changed || dirty {
 		h.saveLocked()
 	}
 	return changed

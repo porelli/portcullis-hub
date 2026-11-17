@@ -68,15 +68,6 @@ func (s *Server) cliMux() *recordingMux {
 	return mux
 }
 
-// registerCLIHosts adds the host routes (cli_hosts.go; plan Task 8).
-var registerCLIHostsHook func(s *Server, mux *recordingMux)
-
-func (s *Server) registerCLIHosts(mux *recordingMux) {
-	if registerCLIHostsHook != nil {
-		registerCLIHostsHook(s, mux)
-	}
-}
-
 // cliProxySecret: exactly one X-Portcullis-Proxy-Secret equal to secret
 // (constant time), else 401; the header is removed afterwards.
 func cliProxySecret(secret string, next http.Handler) http.Handler {
