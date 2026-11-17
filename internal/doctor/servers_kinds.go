@@ -238,7 +238,7 @@ func (c serverKindCheck) Run(in *Inputs) []Finding {
 		for _, id := range sortedKeys(s.Orphaned) {
 			add(Finding{Severity: Problem, Title: "The instance " + id + " is orphaned: its server " + s.Orphaned[id] + " was revoked.",
 				Why: "It runs nowhere Portcullis can reach. Its data is in its last backup.", Instances: []string{id}, Inputs: Digest([]any{id, s.Orphaned[id]}),
-				Steps: []string{"Restore its last backup onto another server, or forget it (its page: Delete → Forget)."}}, id)
+				Steps: []string{"Restore it from a backup (it lands on this server; move it afterwards) or Forget it (its page: Forget…)."}}, id)
 		}
 	}
 	return out

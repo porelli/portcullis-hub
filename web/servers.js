@@ -22,6 +22,7 @@
 // POST   /api/instances/{id}/move/undo †  {confirm, proof}
 // DELETE /api/instances/{id}/move-leftover † {confirm, proof}
 // POST   /api/instances/{id}/quarantine/lift † {proof}
+// DELETE /api/instances/{id}?forget=1       {confirm} (an orphaned instance; not †)
 //
 // † = a fresh sign-in first (PortcullisFreshAuth, started from the click).
 //
@@ -270,7 +271,7 @@
         // opens the fresh sign-in popup directly (no dialog before it).
         const verb = b.dataset.srvAct === 'revoke' ? 'Revoke' : 'Remove';
         showConfirm(b, b.dataset.srvAct, id, verb + ' server ' + serverName(id) + '? ' + (verb === 'Revoke'
-          ? 'It can\'t reach the Hub any more, its certificate is revoked and its instances are orphaned (restore them elsewhere or forget them).'
+          ? 'It can\'t reach the Hub any more, its certificate is revoked and its instances are orphaned: restore each from a backup (it lands on this server; move it afterwards) or Forget it.'
           : 'Only a server without instances can be removed.') + ' Type its id to confirm:', verb);
         return;
       }
@@ -400,7 +401,12 @@
         ' <button type="button" class="btn btn-sm" data-srv-iact="move">Move…</button></div>' +
         '<small>A move stops the app, backs it up, restores it on the other server and starts it there: it is down meanwhile. Folders must be unbound first.</small>';
     }
-    if (inst.server) h += '<div class="inst-row"><button type="button" class="btn btn-sm" data-srv-iact="lift">Lift quarantine…</button> <small>Only when the doctor shows the instance quarantined on its server and you fixed the cause.</small></div>';
+    if (inst.state === 'orphaned') {
+      h += '<div class="public-warn" data-srv-orphaned>Its server ' + esc(serverName(inst.server)) + ' was revoked: it runs nowhere Portcullis can reach. ' +
+        'Restore it from a backup (it lands on this server; move it afterwards) or Forget it. ' +
+        '<button type="button" class="btn btn-sm btn-danger" data-srv-iact="forget">Forget…</button></div>';
+    }
+    if (inst.server && inst.state !== 'orphaned') h += '<div class="inst-row"><button type="button" class="btn btn-sm" data-srv-iact="lift">Lift quarantine…</button> <small>Only when the doctor shows the instance quarantined on its server and you fixed the cause.</small></div>';
     return h + '</div>';
   }
 
@@ -432,6 +438,12 @@
           window.apiCall('/api/instances/' + enc(id) + '/move-leftover', 'DELETE', Object.assign({ confirm: typed }, proof)).then(done, fail);
         });
         return;
+      case 'forget':
+        // Not † (the route needs the typed id only): no fresh sign-in.
+        busy();
+        window.apiCall('/api/instances/' + enc(id) + '?forget=1', 'DELETE', { confirm: typed })
+          .then(r => r.json()).then(acc => window.awaitOp(id, acc.op_id, acc.op)).then(done, fail);
+        return;
       case 'lift':
         fresh('lift', proof => {
           busy();
@@ -459,6 +471,9 @@
           return;
         case 'leftover':
           showConfirm(b, 'leftover', id, 'Remove the old copy of ' + id + ' (its volumes on the old server)? Undo move isn\'t possible afterwards. Type the instance id to confirm (a fresh sign-in follows):', 'Remove');
+          return;
+        case 'forget':
+          showConfirm(b, 'forget', id, 'Forget ' + id + '? Its state, Keycloak clients and groups are removed; nothing on the revoked server is touched and no backup is taken. Type the instance id to confirm:', 'Forget');
           return;
         case 'lift':
           showConfirm(b, 'lift', '', 'Lift the quarantine of ' + id + ' on ' + serverName(inst.server) + '? Its bundle is checked and sent again; the agent refuses it again if the cause remains (a fresh sign-in follows).', 'Lift');

@@ -176,3 +176,46 @@ S.load().then(() => {
 		t.Errorf("calls %v", got.Calls)
 	}
 }
+
+// TestOrphanedForget: an orphaned instance's section offers Forget
+// (typed id, no fresh sign-in, DELETE …?forget=1), the restore-or-forget
+// text, and neither Move nor the lift.
+func TestOrphanedForget(t *testing.T) {
+	out := serversJS(t, `
+let started = 0, calls = [];
+window.PortcullisFreshAuth = { start() { started++; } };
+window.showToast = () => {};
+window.apiCall = async (url, method, body) => { calls.push([url, method, body]); return { json: async () => ({ op_id: 'o', op: 'delete' }) }; };
+window.awaitOp = async () => ({});
+window.apiGet = async () => ({ servers: [{ id: 'primary', name: 'Primary', state: 'ready' }, { id: 'nas', name: 'NAS', state: 'revoked' }], fresh_auth: {} });
+const S = window.PortcullisServers;
+S.load().then(() => {
+  const inst = { id: 'notes', server: 'nas', state: 'orphaned' };
+  const html = S.instanceSection(inst);
+  const row = { dataset: { srvConfirm: 'forget', srvExpect: 'notes' }, querySelector: q => q === '[data-srv-typed]' ? { value: 'notes' } : null };
+  S.goConfirm(row, (a, t) => S.runInstanceAction({ querySelector: () => null }, inst, a, t, null, () => {}));
+  setTimeout(() => process.stdout.write(JSON.stringify({ html, started, calls })), 10);
+});`)
+	var got struct {
+		HTML    string
+		Started int
+		Calls   [][]any
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	for _, want := range []string{`data-srv-iact="forget"`, "Restore it from a backup (it lands on this server; move it afterwards) or Forget it."} {
+		if !strings.Contains(got.HTML, want) {
+			t.Errorf("section lacks %q:\n%s", want, got.HTML)
+		}
+	}
+	if strings.Contains(got.HTML, `data-srv-iact="lift"`) || strings.Contains(got.HTML, `data-srv-iact="move"`) {
+		t.Errorf("lift or move on an orphan:\n%s", got.HTML)
+	}
+	if got.Started != 0 || len(got.Calls) != 1 || got.Calls[0][0] != "/api/instances/notes?forget=1" || got.Calls[0][1] != "DELETE" {
+		t.Fatalf("calls %v started %d", got.Calls, got.Started)
+	}
+	if body, _ := got.Calls[0][2].(map[string]any); body["confirm"] != "notes" {
+		t.Errorf("body %v", got.Calls[0][2])
+	}
+}
