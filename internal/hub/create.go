@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/portcullis/hub/internal/servers"
 	"log"
 	"maps"
 	"slices"
@@ -134,10 +135,25 @@ func (h *Hub) createInstance(ctx context.Context, req CreateRequest, actor direc
 	if choiceErr != nil {
 		return res, choiceErr
 	}
+	if req.Server == servers.PrimaryID {
+		req.Server = ""
+	}
+	// Placement (Task 10): every refusal a 409 before anything exists.
+	if req.Server != "" {
+		if err := h.checkPlacement(context.Background(), t, req.Server); err != nil {
+			return res, err
+		}
+		if err := h.checkReservedID(id, req.Server); err != nil {
+			return res, err
+		}
+		if err := h.checkWorkerClean(context.Background(), req.Server, id); err != nil {
+			return res, err
+		}
+	}
 	// The setup choices (§11.9, §13.18): checked like a settings save's
 	// values before anything is created, against the catalog read above;
 	// createEntry stores exactly this result (409 if the catalog changed).
-	if req.setup, err = h.parseSetup(context.Background(), t, req.Setup); err != nil {
+	if req.setup, err = h.parseSetup(context.Background(), normServer(req.Server), t, req.Setup); err != nil {
 		return res, err
 	}
 	req.checked = true

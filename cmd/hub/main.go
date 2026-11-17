@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -26,6 +27,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/e2etest"
 	"github.com/portcullis/hub/internal/fidomds"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/freshauth"
@@ -355,9 +357,22 @@ func main() {
 	if cfg.VPNDocGID, err = vpnDocGIDFromEnv(os.Getenv); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
+	// Servers (contract §17): link.json on the link_doc volume; off
+	// while the directory doesn't exist.
+	if cfg.LinkDocDir, cfg.LinkDocGID, cfg.LinkProxy, cfg.RelayImage, err = linkFromEnv(os.Getenv, dirExists, cfg.VPNDocGID); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	fixerImage, err := fixerImageFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
+	}
+	// Core's e2e clock hook: an e2etest build only; set on any other
+	// binary, the Hub refuses to start.
+	if cfg.ClockOffset, err = e2etest.ClockOffset(os.Getenv); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	if e2etest.Enabled {
+		log.Printf("%s: core e2e hooks are on (clock offset file: %v)", e2etest.Marker(), cfg.ClockOffset != nil)
 	}
 	cfg.FixerImage = fixerImage
 	cfg.Dev = os.Getenv("HUB_DEV") == "1"
@@ -467,7 +482,8 @@ func main() {
 	if err := ll.Available(); err != nil {
 		log.Printf("users & groups disabled: %v", err)
 	}
-	invites := invite.New(env("HUB_INVITE_API_URL", invite.DefaultAPIURL), env("HUB_INVITE_SECRET_FILE", invite.DefaultSecretFile))
+	inviteURL, inviteSecret := env("HUB_INVITE_API_URL", invite.DefaultAPIURL), env("HUB_INVITE_SECRET_FILE", invite.DefaultSecretFile)
+	invites := invite.New(inviteURL, inviteSecret)
 	if err := invites.Available(); err != nil {
 		log.Printf("invite links disabled (password fallback only): %v", err)
 	}
@@ -537,6 +553,13 @@ func main() {
 	dir.SSHSharedAccount = h.SSHSharedAccount
 	dir.SSHGroups = h.SSHGroupsForDirectory
 	h.SetSSHDirectory(dir)
+	// Node certificates (§17.5) through enroll's internal listener, the
+	// invites' host and bearer: the Hub never holds a Vault token.
+	if nodes, err := hub.NewEnrollNodes(inviteURL, inviteSecret); err != nil {
+		log.Printf("servers: node certificates disabled: %v", err)
+	} else {
+		h.SetNodeSigner(nodes)
+	}
 	h.SetOwnPasswords(dir)
 	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted
@@ -652,6 +675,10 @@ func main() {
 	// SSH access: a compile every minute (temporary memberships ending,
 	// host certificates to renew) on top of the change triggers.
 	go h.RunSSH(ctx, time.Minute)
+	// Servers: link.json, enrolments, polls, renewals, revocations.
+	go h.RunServers(ctx, 30*time.Second)
+	// Scheduled backups (per server, the Hub's TZ), every minute.
+	go h.RunBackupSchedules(ctx, time.Minute)
 	// Kubernetes: the VPN gateway pods, watched (K5: vpn.json follows them
 	// at once; nothing published while the watch isn't confirmed).
 	go h.RunKubeGateways(ctx)
@@ -888,4 +915,57 @@ func vpnDocGIDFromEnv(getenv func(string) string) (int, error) {
 		return 0, fmt.Errorf("HUB_VPN_DOC_GID must be a group id 1–65535 other than 10001 (the Hub's own group)")
 	}
 	return n, nil
+}
+
+// Servers' environment defaults (contract §17.2).
+const (
+	defaultLinkDocDir = "/link-doc"
+	defaultLinkDocGID = 10009
+	defaultLinkProxy  = "172.31.254.83:3128"
+)
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+// linkFromEnv is HUB_LINK_DOC_DIR (default /link-doc), HUB_LINK_DOC_GID
+// (default 10009, 1–65535, never 10001), HUB_LINK_PROXY (default
+// 172.31.254.83:3128, an IPv4:port) and HUB_RELAY_IMAGE (required when
+// the link_doc directory exists: pinned by digest or :edge).
+func linkFromEnv(getenv func(string) string, exists func(string) bool, vpnGID int) (dir string, gid int, proxy, relay string, err error) {
+	dir = getenv("HUB_LINK_DOC_DIR")
+	if dir == "" {
+		dir = defaultLinkDocDir
+	}
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return "", 0, "", "", fmt.Errorf("HUB_LINK_DOC_DIR must be an absolute, clean path")
+	}
+	gid = defaultLinkDocGID
+	if raw := getenv("HUB_LINK_DOC_GID"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 65535 || n == 10001 || strconv.Itoa(n) != raw {
+			return "", 0, "", "", fmt.Errorf("HUB_LINK_DOC_GID must be a group id 1–65535 other than 10001 (the Hub's own group)")
+		}
+		gid = n
+	}
+	if gid == vpnGID {
+		return "", 0, "", "", fmt.Errorf("HUB_LINK_DOC_GID must differ from HUB_VPN_DOC_GID (each document's group is its own)")
+	}
+	proxy = getenv("HUB_LINK_PROXY")
+	if proxy == "" {
+		proxy = defaultLinkProxy
+	}
+	if ap, err := netip.ParseAddrPort(proxy); err != nil || !ap.Addr().Is4() || ap.Port() == 0 || ap.String() != proxy {
+		return "", 0, "", "", fmt.Errorf("HUB_LINK_PROXY must be an IPv4 address and port")
+	}
+	relay = getenv("HUB_RELAY_IMAGE")
+	if exists(dir) {
+		if !hub.RelayImageOK(relay) {
+			return "", 0, "", "", fmt.Errorf("HUB_RELAY_IMAGE must be set to the relay image, pinned by digest (@sha256:…) or :edge")
+		}
+	} else if relay != "" && !hub.RelayImageOK(relay) {
+		return "", 0, "", "", fmt.Errorf("HUB_RELAY_IMAGE must be pinned by digest (@sha256:…) or :edge")
+	}
+	return dir, gid, proxy, relay, nil
 }

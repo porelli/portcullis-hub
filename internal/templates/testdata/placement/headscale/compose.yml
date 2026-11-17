@@ -1,0 +1,13 @@
+services:
+  headscale:
+    image: headscale/headscale:0.26
+    networks: [portcullis-proxy]
+    labels:
+      traefik.http.routers.headscale.rule: Host(`${PORTCULLIS_HOST_HEADSCALE:-vpn.portcullis.local}`)
+  gateway:
+    image: ghcr.io/example/gateway:1
+    extra_hosts:
+      - "${PORTCULLIS_HOST_HEADSCALE:-vpn.portcullis.local}:host-gateway"
+networks:
+  portcullis-proxy:
+    external: true

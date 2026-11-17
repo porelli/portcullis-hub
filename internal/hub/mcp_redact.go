@@ -36,6 +36,10 @@ func (h *Hub) toolRedactionIDs() []string {
 			if id, ok := strings.CutSuffix(e.Name(), ".env"); ok && templates.ValidID(id) {
 				seen[id] = true
 			}
+			// A relay env (<id>.relay.env): its instance's set holds the token.
+			if id, ok := strings.CutSuffix(e.Name(), ".relay.env"); ok && templates.ValidID(id) {
+				seen[id] = true
+			}
 		}
 	}
 	if es, err := os.ReadDir(filepath.Join(h.cfg.DataDir, "settings")); err == nil {
@@ -89,6 +93,7 @@ func (h *Hub) ToolRedactionKey() string {
 	for _, id := range h.toolRedactionIDs() {
 		fmt.Fprintf(&b, "id %s\n", id)
 		stat(h.envPath(id))
+		stat(h.relayEnvPath(id))
 		stat(h.secretsPath(id))
 		t := h.Template(id)
 		if t == nil {

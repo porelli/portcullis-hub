@@ -52,7 +52,7 @@ func (h *Hub) Doctor(ctx context.Context) (*doctor.Report, error) {
 // pathIn is u as the doctor reads it (field by field: TestPathInCopiesEveryField).
 func pathIn(u PathUsage) doctor.PathIn {
 	return doctor.PathIn{
-		Instance: u.Instance, Key: u.Key, Label: u.Label, HostPath: u.HostPath, Service: u.Service, Mount: u.Mount,
+		Instance: u.Instance, Server: u.Server, Key: u.Key, Label: u.Label, HostPath: u.HostPath, Service: u.Service, Mount: u.Mount,
 		Access: u.Access, Source: u.Source, Folder: u.Folder, Subpath: u.Subpath, JoinsGroup: u.JoinsGroup,
 		UIDEnv: u.UIDEnv, GIDEnv: u.GIDEnv, UID: u.UID, GID: u.GID, GIDs: slices.Clone(u.GIDs),
 		OwnerKnown: u.OwnerKnown, Writes: u.Writes, ReadOnly: u.ReadOnly, MustOwn: u.MustOwn, Declared: u.Declared,
@@ -70,6 +70,9 @@ func pathIn(u PathUsage) doctor.PathIn {
 // networks, and the cached disk scans of the current targets with the
 // enabled instances' container gids (doctorscan.go).
 func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
+	// The backups directory is read before mu (I1: a slow disk never
+	// stalls mu's writers).
+	backups := h.newestBackups()
 	h.mu.RLock()
 	people := h.people
 	h.mu.RUnlock()
@@ -112,8 +115,8 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	defer h.mu.RUnlock()
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
-		LocalNetworks: h.localNetworksLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn,
-		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), SignInTOTP: totpIn, Mail: mailIn, SSH: sshIn}
+		LocalNetworks: h.localNetworksLocked(), ServerLocalNetworks: h.serverLocalNetworksLocked(), ServerBindRoots: h.serverBindRootsLocked(), NotLocal: h.tunnelRangesLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn,
+		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), SignInTOTP: totpIn, Mail: mailIn, SSH: sshIn, Servers: h.serversDoctorInLocked(backups)}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}
@@ -125,7 +128,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		f := h.st.Folders[id]
-		fi := doctor.FolderIn{ID: id, Name: f.Name, Path: f.Path, GID: f.GID}
+		fi := doctor.FolderIn{ID: id, Server: f.Server, Name: f.Name, Path: f.Path, GID: f.GID}
 		if f.LastApply != nil {
 			at := f.LastApply.At
 			fi.LastApply = &at

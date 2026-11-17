@@ -14,6 +14,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
@@ -27,12 +28,17 @@ import (
 
 // Opt-in test of the access role against a real Keycloak (the version core
 // pins) with the portcullis-keycloak extension — every access flow ends
-// with its portcullis-template step, which stock Keycloak doesn't have —
-// and a valid /hub-data/signin-keycloak.json that lists none of the test's
-// clients (an unlisted client passes the step; a missing file denies), e.g.
+// with its portcullis-template step, which stock Keycloak doesn't have. The
+// test writes a minimal valid signin-keycloak.json into the container's
+// /hub-data (unlisted clients pass the template step) and removes it on
+// cleanup. Setup:
 //
-//	bin/kc.sh start-dev --http-port=18080   # in the portcullis-keycloak image
-//	PORTCULLIS_KEYCLOAK_LIVE_URL=http://127.0.0.1:18080 go test ./internal/keycloak -run Live
+//	docker run -d --name test-kc -p 18080:8080 \
+//	  -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
+//	  ghcr.io/porelli/portcullis-keycloak:edge start-dev --http-port=8080
+//	PORTCULLIS_KEYCLOAK_LIVE_URL=http://127.0.0.1:18080 \
+//	PORTCULLIS_KEYCLOAK_LIVE_WIPE=portcullis PORTCULLIS_KEYCLOAK_LIVE_CONTAINER=test-kc \
+//	  go test ./internal/keycloak -run Live
 //
 // Admin credentials: PORTCULLIS_KEYCLOAK_LIVE_ADMIN / _PASSWORD (default
 // admin / admin, a throwaway dev server). It DELETES and recreates the
@@ -46,6 +52,55 @@ type liveEnv struct {
 	base string
 	g    *gocloak.GoCloak
 	tok  string
+	kc   string // the container, for /hub-data
+}
+
+// liveSigninConfig is a minimal valid signin-keycloak.json: no methods on,
+// no templates, no clients listed (an unlisted client passes the template step).
+const liveSigninConfig = `{"version": 1, "methods": [], "add_stronger": false, "templates": {}, "clients": {}, "authenticators": {}, "mds": {"serial": 0, "next_update": "2099-01-01T00:00:00Z"}}`
+
+// liveContainer is the Keycloak container the test may write /hub-data in.
+// It must be named explicitly: the test never picks a container on its own.
+func liveContainer(t *testing.T) string {
+	t.Helper()
+	c := os.Getenv("PORTCULLIS_KEYCLOAK_LIVE_CONTAINER")
+	if c == "" {
+		t.Skip("PORTCULLIS_KEYCLOAK_LIVE_CONTAINER not set (the container behind PORTCULLIS_KEYCLOAK_LIVE_URL)")
+	}
+	return c
+}
+
+// putSigninConfig writes (on) or removes (off) /hub-data/signin-keycloak.json
+// in the container (test-only). The content goes on stdin, never on argv.
+func putSigninConfig(t *testing.T, container string, on bool) {
+	t.Helper()
+	cmd := exec.Command("docker", "exec", "-u", "root", container, "rm", "-f", "/hub-data/signin-keycloak.json")
+	if on {
+		cmd = exec.Command("docker", "exec", "-i", "-u", "root", container, "sh", "-c",
+			"mkdir -p /hub-data && cat > /hub-data/signin-keycloak.json")
+		cmd.Stdin = strings.NewReader(liveSigninConfig)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("signin-keycloak.json on=%v (container %s): %v: %s", on, container, err, out)
+	}
+}
+
+// awaitLogin polls alice's sign-in to clientID until want(result) holds,
+// failing after limit.
+func (e *liveEnv) awaitLogin(t *testing.T, clientID, what string, limit time.Duration, want func(string) bool) {
+	t.Helper()
+	start := time.Now()
+	for {
+		r := e.login(t, clientID, "alice", nil)
+		if want(r) {
+			t.Logf("%s after %v (%s)", what, time.Since(start).Round(time.Millisecond), r)
+			return
+		}
+		if time.Since(start) > limit {
+			t.Fatalf("%s: still %q after %v", what, r, limit)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func liveSetup(t *testing.T) (*liveEnv, *keycloak.Client) {
@@ -67,7 +122,9 @@ func liveSetup(t *testing.T) (*liveEnv, *keycloak.Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &liveEnv{base: base, g: g, tok: jwt.AccessToken}
+	e := &liveEnv{base: base, g: g, tok: jwt.AccessToken, kc: liveContainer(t)}
+	putSigninConfig(t, e.kc, true)
+	t.Cleanup(func() { putSigninConfig(t, e.kc, false) })
 	_ = g.DeleteRealm(ctx, e.tok, keycloak.Realm)
 	if _, err := g.CreateRealm(ctx, e.tok, gocloak.RealmRepresentation{Realm: gocloak.StringP(keycloak.Realm), Enabled: gocloak.BoolP(true)}); err != nil {
 		t.Fatal(err)
@@ -107,7 +164,8 @@ var formAction = regexp.MustCompile(`<form[^>]+id="kc-form-login"[^>]+action="([
 
 // login signs user in to clientID in a browser with jar (nil: a fresh
 // one): "allowed" (redirected back with a code), "denied" (Keycloak's
-// access-denied page with the Hub's message) or the page text.
+// access-denied page with the Hub's message), "unavailable" (the sign-in
+// settings error page when signin-keycloak.json is missing) or the page text.
 func (e *liveEnv) login(t *testing.T, clientID, user string, jar http.CookieJar) string {
 	t.Helper()
 	if jar == nil {
@@ -137,10 +195,14 @@ func (e *liveEnv) login(t *testing.T, clientID, user string, jar http.CookieJar)
 		if strings.Contains(html.UnescapeString(page), keycloak.AccessDeniedMessage) {
 			return "denied"
 		}
+		if strings.Contains(html.UnescapeString(page), "Sign-in isn&#39;t available right now") ||
+			strings.Contains(page, "Sign-in isn't available right now") {
+			return "unavailable"
+		}
 		m := formAction.FindStringSubmatch(page)
 		if m == nil || i > 0 {
-			if len(page) > 400 {
-				page = page[:400]
+			if len(page) > 1000 {
+				page = page[:1000]
 			}
 			return "unexpected page: " + page
 		}
@@ -290,6 +352,20 @@ func TestLiveClientAccess(t *testing.T) {
 	if _, err := e.g.GetClientRole(ctx, e.tok, keycloak.Realm, uuid, keycloak.AccessRole); !errors.As(err, &apiErr) || apiErr.Code != 404 {
 		t.Errorf("role left: %v", err)
 	}
+
+	// Fail closed: without signin-keycloak.json, no authorization code is issued.
+	// Give app the access flow back, remove the file, poll until sign-in is refused.
+	if err := c.EnsureClientAccess(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	e.expect(t, "access flow back", "app", "alice", nil, "allowed")
+
+	putSigninConfig(t, e.kc, false)
+	// Any result but "allowed" (a code issued) is a refusal.
+	e.awaitLogin(t, "app", "fail-closed: refused without the file", 30*time.Second, func(r string) bool { return r != "allowed" })
+	// Positive control, so the refusal above can't pass vacuously.
+	putSigninConfig(t, e.kc, true)
+	e.awaitLogin(t, "app", "positive control: allowed with the file back", 10*time.Second, func(r string) bool { return r == "allowed" })
 }
 
 // ── AI clients (contract §8, plan 4 Task 10) ─────────────

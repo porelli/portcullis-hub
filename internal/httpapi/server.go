@@ -142,6 +142,7 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerConfirm(mux)
 	// VPN admin (contract §11; Hub listener only).
 	s.registerVPN(mux)
+	s.registerServers(mux)
 	// Settings → Mail and the admin mail routes (§19.9; Hub listener only).
 	s.registerMailAdmin(mux)
 	// SSH access (contract §18; Hub listener only).
@@ -314,6 +315,10 @@ func errStatus(err error, def int) int {
 		return se.Status
 	case errors.As(err, &busy):
 		return http.StatusConflict
+	}
+	var hs interface{ HTTPStatus() int }
+	if errors.As(err, &hs) {
+		return hs.HTTPStatus() // a worker's agent or the path to it
 	}
 	return def
 }

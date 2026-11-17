@@ -250,11 +250,15 @@ func (h *Hub) recordOpUnlessOther(id string, r OpRecord) bool {
 func errStatus(err error) int {
 	var se *StatusError
 	var busy ErrBusy
+	var hs interface{ HTTPStatus() int }
 	switch {
 	case errors.As(err, &busy):
 		return 409
 	case errors.As(err, &se):
 		return se.Status
+	case errors.As(err, &hs):
+		// A worker's agent (or the path to it): its status.
+		return hs.HTTPStatus()
 	}
 	return 500
 }

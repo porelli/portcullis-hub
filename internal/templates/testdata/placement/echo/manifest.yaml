@@ -1,0 +1,5 @@
+# Minimal fixture: a clean, worker-placeable app.
+name: Echo
+instances: multi
+auth: {method: forward-auth}
+ai: {unsupported: "test fixture"}

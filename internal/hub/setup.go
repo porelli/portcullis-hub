@@ -250,7 +250,7 @@ func checkSetupKeys(t *templates.Template, setup map[string]json.RawMessage) err
 // root rule as SaveSettings runs them) — 400 (409) naming the option.
 // required / requires are checked against the stored result by
 // createEntry (nextSettingsLocked). nil without setup values. Outside mu.
-func (h *Hub) parseSetup(ctx context.Context, t *templates.Template, setup map[string]json.RawMessage) (*parsedSettings, error) {
+func (h *Hub) parseSetup(ctx context.Context, server string, t *templates.Template, setup map[string]json.RawMessage) (*parsedSettings, error) {
 	if len(setup) == 0 {
 		return nil, nil
 	}
@@ -272,7 +272,7 @@ func (h *Hub) parseSetup(ctx context.Context, t *templates.Template, setup map[s
 	if err := gidRangeSaveCheck(t, parsed); err != nil {
 		return nil, err
 	}
-	if err := h.dockerRootValuesRule(ctx, t, parsed.values); err != nil {
+	if err := h.dockerRootValuesRule(ctx, server, t, parsed.values); err != nil { // the target server's root (M1)
 		return nil, err
 	}
 	return parsed, nil

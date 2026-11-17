@@ -250,7 +250,7 @@ func (s *Server) registerDoctorTools() {
 			}},
 		admin("check_folder_path", "Check a host path before defining a folder there: whether it exists, its filesystem, ACL and xattr support, the files, directories and owners, and problems in plain words. Nothing is created or changed.",
 			ClassRead, "POST /api/folders/check", "", func(ctx context.Context, _ directory.Actor, in checkPathArgs) (any, error) {
-				pc, err := s.checkFolderPath(ctx, in.Path, false)
+				pc, err := s.checkFolderPath(ctx, "", in.Path, false)
 				return pc, apiErr(err)
 			}),
 		admin("folder_preview", "What assigning a shared folder to these uses would do (nothing changes): per use add / remove / keep with its access, the disk plan (files that change group, ACLs, a snapshot first), the apps restarted and the downtime, warnings, and the plan_hash folder_apply needs.",

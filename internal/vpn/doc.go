@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -154,10 +153,9 @@ func WriteGroup(path string, d Doc, gid int, now time.Time) error {
 	if _, err := Parse(b, now); err != nil {
 		return fmt.Errorf("vpn.json: refusing to write an invalid document: %w", err)
 	}
-	if err := fsutil.WriteFileAtomic(path, append(b, '\n'), 0o640); err != nil {
-		return err
-	}
-	return os.Chown(path, -1, gid)
+	// The group is set on the temp file before the rename: a reader never
+	// sees a vpn.json it can't read (which it would take for "deny all").
+	return fsutil.WriteFileAtomicGroup(path, append(b, '\n'), 0o640, gid)
 }
 
 // strictJSON decodes b into v, refusing unknown keys and trailing data.

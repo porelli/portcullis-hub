@@ -5,17 +5,23 @@ package runtimetest
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
 )
 
-// ErrNotFound is what the fake answers for an unknown unit or volume.
-var ErrNotFound = errors.New("not found")
+// ErrNotFound is what the fake answers for an unknown unit or volume:
+// typed like the engine's (errdefs.IsNotFound holds).
+var ErrNotFound error = notFoundErr{}
+
+type notFoundErr struct{}
+
+func (notFoundErr) Error() string { return "not found" }
+func (notFoundErr) NotFound()     {}
 
 // Fake is an in-memory runtime. The zero value is a docker runtime with
 // nothing in it; set the exported fields before use (or under Lock).
@@ -36,6 +42,12 @@ type Fake struct {
 	// every method but Kind/Env.
 	ExecFn func(id string, in runtime.ExecInput) (*runtime.ExecResult, error)
 	Err    error
+	// ErrOn fails a call whose record starts with a key ("pull ghcr.io/x",
+	// "down portcullis-app"): fault injection at the engine.
+	ErrOn map[string]error
+	// DownRemovesUnits: Down / DownByName drop the project's Units (as a
+	// compose down does; the real-agent harness sets it).
+	DownRemovesUnits bool
 
 	calls []string
 }
@@ -45,8 +57,30 @@ var _ runtime.Instances = (*Fake)(nil)
 func (f *Fake) rec(format string, a ...any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, fmt.Sprintf(format, a...))
+	call := fmt.Sprintf(format, a...)
+	f.calls = append(f.calls, call)
+	for k, err := range f.ErrOn {
+		if strings.HasPrefix(call, k) {
+			return err
+		}
+	}
 	return f.Err
+}
+
+// dropUnits removes project's units (DownRemovesUnits).
+func (f *Fake) dropUnits(project string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.DownRemovesUnits {
+		return
+	}
+	var keep []runtime.Unit
+	for _, u := range f.Units {
+		if u.Project != project {
+			keep = append(keep, u)
+		}
+	}
+	f.Units = keep
 }
 
 // Calls are the calls made so far, in order ("up portcullis-x", …).
@@ -89,10 +123,20 @@ func (f *Fake) Up(_ context.Context, p runtime.Project, _ func(string, int64, in
 	return f.rec("up %s", p.Name)
 }
 
-func (f *Fake) Down(_ context.Context, p runtime.Project) error { return f.rec("down %s", p.Name) }
+func (f *Fake) Down(_ context.Context, p runtime.Project) error {
+	if err := f.rec("down %s", p.Name); err != nil {
+		return err
+	}
+	f.dropUnits(p.Name)
+	return nil
+}
 
 func (f *Fake) DownByName(_ context.Context, name string) error {
-	return f.rec("down-by-name %s", name)
+	if err := f.rec("down-by-name %s", name); err != nil {
+		return err
+	}
+	f.dropUnits(name)
+	return nil
 }
 
 func (f *Fake) Pull(_ context.Context, ref string, _ func(int64, int64, bool)) error {
@@ -287,3 +331,8 @@ func (f *Fake) RunFixer(_ context.Context, s runtime.FixerSpec, _ func(io.Reader
 }
 
 func (f *Fake) EnsureImage(_ context.Context, ref string) error { return f.rec("ensure-image %s", ref) }
+
+// Lock / Unlock guard the exported fields while a test changes them
+// under running calls.
+func (f *Fake) Lock()   { f.mu.Lock() }
+func (f *Fake) Unlock() { f.mu.Unlock() }

@@ -164,6 +164,34 @@ func TestWriteMode0640Group(t *testing.T) {
 	}
 }
 
+// TestWriteGroupBeforeRename: WriteGroup sets the group on the file it
+// renames into place (fsutil.WriteFileAtomicGroup), and a group the
+// writer can't set leaves the previous file and no temp file behind.
+func TestWriteGroupBeforeRename(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, FileName)
+	vu := time.Now().Add(time.Hour)
+	if err := WriteGroup(p, Doc{Version: DocVersion, ValidUntil: &vu}, os.Getgid(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(p)
+	if st.Mode().Perm() != 0o640 || int(st.Sys().(*syscall.Stat_t).Gid) != os.Getgid() {
+		t.Fatalf("mode %v gid %d", st.Mode(), st.Sys().(*syscall.Stat_t).Gid)
+	}
+	before, _ := os.ReadFile(p)
+	if os.Geteuid() != 0 {
+		if err := WriteGroup(p, Doc{Version: DocVersion, ValidUntil: &vu, Providers: []Provider{}}, 1, time.Now()); err == nil {
+			t.Skip("chown to gid 1 allowed here")
+		}
+		if after, _ := os.ReadFile(p); string(after) != string(before) {
+			t.Error("a failed group write replaced the file")
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+			t.Errorf("left behind: %d entries", len(entries))
+		}
+	}
+}
+
 func TestValidPublicKey(t *testing.T) {
 	for k, ok := range map[string]bool{
 		"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=": true,

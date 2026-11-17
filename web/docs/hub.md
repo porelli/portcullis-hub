@@ -1452,10 +1452,78 @@ Portcullis MCP, connection length, rate limits, allowed origins and the model
 providers: [AI support → Settings → AI](ai.md#settings-ai)),
 **Domains** ([Adding extra domains](#adding-extra-domains)),
 **Mail** ([below](#mail)),
-**Shared folders** ([below](#shared-folders)) and **Local networks**
-([below](#local-networks)).
+**Shared folders** ([below](#shared-folders)), **Servers**
+([below](#servers)) and **Local networks** ([below](#local-networks)).
 
 People and groups are managed on the people page: see [Users & Groups](#users-groups).
+
+## Servers
+
+**Settings → Servers** lists the primary and the [worker
+servers](servers.md) apps can run on. Until `./portcullis link init` has run
+on the primary it says "run ./portcullis link init on the primary"; on a
+Kubernetes primary, "servers need a Docker or Podman primary".
+
+- **The list:** each server's name and id, state (`enrolling`, `ready`,
+  `offline`, `revoked`), engine (Docker or Podman, rootless or not, the
+  architecture), CPUs and memory, disk free (the engine's data root), data
+  free (the agent's data directory), its instance count, last contact, agent
+  version and certificate expiry. It never shows a key, a serial or a join
+  code.
+- **Settings** opens a server's form: its **Name**, its **Local networks**
+  (one CIDR per line, or **Use the default list**: a worker's LAN isn't the
+  primary's, and the doctor judges each worker's `lan_only` ports against its
+  own list), its **Scheduled backups** (off / daily / weekly, at an hour in
+  the Hub's time zone; [Backups](backups.md#scheduled-instance-backups)), its
+  folder roots (read-only: they are set on the worker,
+  `PORTCULLIS_WORKER_BIND_ROOTS`) and its instances. The primary's form has
+  only Scheduled backups. Saved with `PUT /api/servers/<id>/settings`,
+  audited `server.settings`.
+- **+ Add server…** (id and name; fresh sign-in): shows the join code for
+  `./portcullis worker join` once, in a dialog (**Copy code**, **Close**:
+  closing forgets it). The enrolment shows in the operation progress panel
+  as `server_enrol`; **Stop enrolment** ends it
+  ([Multiple servers → Setting up](servers.md#setting-up)).
+- **Revoke…** and **Remove…** (typed id, then a fresh sign-in): revoke a
+  lost or compromised server now (its instances become orphaned), or remove
+  one without instances
+  ([Revoking and removing](servers.md#revoking-and-removing)).
+
+### On the instance page
+
+The Overview shows **Runs on** (the server's name), and a **Server** section
+for admins:
+
+- **Move…**: choose the target and type the instance id. The app is down
+  while it moves (backup, restore, start on the target); bound shared
+  folders must be unbound first. It runs in the progress panel and can be
+  stopped ([Moving an instance](servers.md#moving-an-instance)).
+- After a move, "Moved from <server> …" with **Undo move…** for 7 days
+  (changes since the move are lost), and **Remove the old copy…** (its
+  volumes on the old server; no undo afterwards). Both need the typed id and
+  a fresh sign-in.
+- **Lift quarantine…** (fresh sign-in): only when the doctor shows the
+  instance quarantined on its server and you fixed the cause
+  ([Quarantine](servers.md#quarantine)).
+
+The setup form's **Runs on** picks the server for a new instance, with
+each server's runtime, architecture, free data space and memory; apps that
+need the primary are refused there with the reason
+([Primary-only apps](servers.md#primary-only-apps)). An instance whose
+server is offline shows `unreachable`; one whose server was revoked,
+`orphaned`; one being moved, `moving`.
+
+**Shared Folders** has a **Server** column: a folder is defined on one
+server (its path is checked there), and only that server's instances can be
+bound to it.
+
+**AI tools** (admin, per-call confirmation): `list_servers` and
+`get_server` read, `move_instance` (typed on the instance id; its
+consequences name the downtime and the backup's size) and
+`set_backup_schedule`. Adding, revoking or removing a server, *Undo move*,
+*Remove the old copy*, *Lift quarantine* and the enrolment are never tools:
+a join code must never land in a transcript, and revocation stays a human
+action.
 
 ## Shared folders
 
@@ -1944,6 +2012,34 @@ and none fires without the VPN service, a provider or a mode other than
 | `vpn_publish_failed` | Problem | The Hub couldn't write `vpn.json`: every VPN request is denied once its `valid_until` passes |
 | `vpn_reserved_defaults` | Warning | `core.env` lacks `PORTCULLIS_VPN_RESERVED_RANGES`, so the Hub uses the default reserved ranges |
 | `vpn_reach_failed_closed` | Problem | A narrowing render failed, so the Hub stopped the instance; clears after the next successful render |
+
+### Server checks
+
+With [worker servers](servers.md) the doctor adds fourteen checks. None of
+them offers a one-click fix: the ones whose remedy needs a fresh sign-in
+(*Remove the old copy*, *Lift quarantine*) explain it and point at the
+button on the instance page, and no AI tool can reach them.
+
+| Kind | Severity | Finds |
+|------|----------|-------|
+| `server_offline` | Problem | A worker that missed three 30-second polls or had no handshake for 3 minutes (or answers with another certificate than the pinned one), with its instances |
+| `server_cert_expiring` | Warning | A worker's certificate expires within 7 days (it is renewed with a third of its 30 days left, while the server is reachable) |
+| `server_agent_incompatible` | Problem | The worker's agent isn't the Hub's minor version or one behind: lifecycle calls are refused. Run `./portcullis worker upgrade` on it |
+| `server_agent_outdated` | Info | The agent is one minor version behind |
+| `server_disk_low` | Warning | Less than 10 % free on a worker's engine data root or data directory |
+| `server_no_recent_backup` | Warning | An enabled instance on a worker without an archive in 14 days |
+| `server_move_leftover` | Info | A move's old copy kept more than 7 days, or a failed move's leftover on its target (it blocks the next move there): **Remove the old copy…** on the instance page |
+| `server_move_stuck` | Problem | A failed move couldn't take the target's copy down, so the app runs nowhere; retried every 30 s |
+| `server_copy_not_removed` | Problem | An undo left a copy on a server that couldn't be stopped or removed yet (never routed); retried every 30 s |
+| `server_placement_invalid` | Problem | A template update made a placed instance primary-only: it was stopped on the worker. Move it to the primary |
+| `server_instance_quarantined` | Problem | The worker's agent quarantined the instance (a container started with a bind that failed its checks). Fix the cause, then **Lift quarantine…** |
+| `server_secrets_not_rotated` | Problem | A revocation couldn't rotate an instance's Keycloak client secrets or relay token yet; retried every 30 s |
+| `link_subnet_overlap` | Problem | The link subnet `10.214.0.0/24` overlaps the built-in VPN subnet, a wired provider's range or a Local network set on a server |
+| `instance_orphaned` | Problem | An instance whose server was revoked: restore its last backup, or forget it |
+
+`lan_only_exposed` judges each port against **its own server's** Local
+networks. An address in the link subnet or the built-in VPN subnet never
+counts as local, whatever the list says.
 
 ## Rootless Podman
 

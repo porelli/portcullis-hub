@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -209,6 +210,31 @@ func (c *Client) findClient(ctx context.Context, token, clientID string) (*goclo
 		}
 	}
 	return nil, fmt.Errorf("client %s: %w", clientID, ErrClientNotFound)
+}
+
+// ClientIDsOwnedBy are the clientIds of every client tagged with owner
+// (OwnerAttr): an instance's clients when nothing else records them.
+func (c *Client) ClientIDsOwnedBy(ctx context.Context, owner string) ([]string, error) {
+	if owner == "" {
+		return nil, errors.New("no owner")
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	max := 100000
+	clients, err := c.api().GetClients(ctx, tok, Realm, gocloak.GetClientsParams{Max: &max})
+	if err != nil {
+		return nil, opErr("client list", err)
+	}
+	var out []string
+	for _, cl := range clients {
+		if cl != nil && cl.Attributes[OwnerAttr] == owner && !protectedClient(str(cl.ClientID)) {
+			out = append(out, str(cl.ClientID))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // ErrClientNotFound: no client with that clientId exists.

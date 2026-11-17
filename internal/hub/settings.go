@@ -872,7 +872,7 @@ func (h *Hub) SaveSettings(id string, u SettingsUpdate, actor directory.Actor) (
 		return nil, err
 	}
 	// No hand-typed path at, above or under Docker's data root (F16).
-	if err := h.dockerRootValuesRule(context.Background(), t, parsed.values); err != nil {
+	if err := h.dockerRootValuesRule(context.Background(), h.serverOf(t.ID), t, parsed.values); err != nil {
 		return nil, err
 	}
 	// Rows and records are bound to the directory's group ids (and a

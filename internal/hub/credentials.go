@@ -693,7 +693,7 @@ func (h *Hub) previousHookDone(ctx context.Context, id string) bool {
 	if prev.execID == "" {
 		return true
 	}
-	running, err := h.rt.ExecRunning(ctx, prev.execID)
+	running, err := h.rtOf(id).ExecRunning(ctx, prev.execID)
 	if (err == nil && !running) || docker.IsNotFound(err) {
 		h.deliveryMu.Lock()
 		if h.hookExecs[id] == prev {
@@ -741,16 +741,16 @@ func (h *Hub) revocationKillByName(id string) bool {
 	var cs []runtime.Unit
 	if !h.noEngine() {
 		var lerr error
-		cs, lerr = h.rt.List(ctx, runtime.Filter{Instance: id})
+		cs, lerr = h.rtOf(id).List(ctx, runtime.Filter{Instance: id})
 		if lerr == nil && len(cs) == 0 {
 			return false
 		}
 	}
 	log.Printf("credentials: %s: a revocation on an instance without a template: stopping project %s", id, name)
-	err := h.rt.DownByName(ctx, name)
+	err := h.rtOf(id).DownByName(ctx, name)
 	if err != nil && !h.noEngine() {
 		for _, c := range cs {
-			if kerr := h.rt.Signal(ctx, c.ID, "KILL"); kerr != nil {
+			if kerr := h.rtOf(id).Signal(ctx, c.ID, "KILL"); kerr != nil {
 				err = errors.Join(err, kerr)
 			}
 		}

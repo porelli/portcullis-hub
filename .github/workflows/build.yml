@@ -78,6 +78,24 @@ jobs:
       - name: go test -race
         run: go test -race -count=1 ./...
 
+      # Core's e2e hooks (internal/e2etest) exist only in -tags e2etest
+      # builds: their tests run with the tag, and the default binaries
+      # (built as the Dockerfiles do, GO_TAGS empty) must not carry the
+      # e2etest marker; the tagged ones must (the check works).
+      - name: e2etest hooks only with the tag
+        run: |
+          go test -count=1 -tags e2etest ./internal/e2etest/ ./internal/agent/ ./internal/hub/ -run 'E2E'
+          for c in hub portcullis-agent portcullis-relay; do
+            CGO_ENABLED=0 go build -trimpath -tags "" -ldflags="-s -w" -o "/tmp/$c" "./cmd/$c"
+            if LC_ALL=C grep -a -q PORTCULLIS-E2ETEST-BUILD-HOOKS "/tmp/$c"; then
+              echo "::error::default $c binary carries the e2etest hooks"; exit 1
+            fi
+          done
+          for c in hub portcullis-agent; do
+            CGO_ENABLED=0 go build -trimpath -tags e2etest -ldflags="-s -w" -o "/tmp/$c-e2e" "./cmd/$c"
+            LC_ALL=C grep -a -q PORTCULLIS-E2ETEST-BUILD-HOOKS "/tmp/$c-e2e" || { echo "::error::the e2etest marker check finds nothing in an e2etest $c"; exit 1; }
+          done
+
       # The kube backend against a real API server (envtest, Kubernetes
       # 1.33, the floor): the admission policies and their vectors, the
       # self-test, the Hub's Role (internal/runtime/kube envtest_test.go).
@@ -118,7 +136,10 @@ jobs:
           go test -tags sshd -count=1 -v ./cmd/portcullis/internal/host/
 
       - name: go build
-        run: go build -o /dev/null ./cmd/hub
+        run: |
+          go build -o /dev/null ./cmd/hub
+          go build -o /dev/null ./cmd/portcullis-agent
+          go build -o /dev/null ./cmd/portcullis-relay
 
       # .github/automerge/automerge.sh (Dependabot auto-merge): fake gh +
       # fixtures, no network.
@@ -295,15 +316,34 @@ jobs:
           gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" --verify-tag --title "$TAG" --notes "Portcullis CLI $TAG: verify with SHA256SUMS, the .sigstore.json bundles (cosign verify-blob) or gh attestation verify."
           gh release upload "$TAG" -R "$REPO" --clobber dist/*
 
+  # The three images of this repo (multiple servers, contract §17): the
+  # Hub, the worker agent and the relay, built, tagged, attested and
+  # signed the same way.
   build:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: hub
+            dockerfile: Dockerfile
+            name: ghcr.io/porelli/portcullis-hub
+            cache: image-main
+          - image: agent
+            dockerfile: Dockerfile.agent
+            name: ghcr.io/porelli/portcullis-agent
+            cache: image-main-agent
+          - image: relay
+            dockerfile: Dockerfile.relay
+            name: ghcr.io/porelli/portcullis-relay
+            cache: image-main-relay
     permissions:
       contents: read
       packages: write   # push to GHCR
       id-token: write   # keyless cosign signing (GitHub OIDC)
     env:
-      IMAGE: ghcr.io/${{ github.repository }}
+      IMAGE: ${{ matrix.name }}
       # Pushes (main → edge, v* tags) and dispatched runs on main (the
       # auto-merge job, after a Dependabot merge) publish; PRs and dispatched
       # feature-branch runs just build.
@@ -343,11 +383,27 @@ jobs:
             type=sha,prefix=sha-,format=short,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=edge,branch=main
 
+      # The build's version, the Hub's and the agent's alike
+      # (servers.Compatible): a release tag's semver, else 0.0.0-edge
+      # (every edge build is the same, compatible minor).
+      - name: Version
+        id: version
+        env:
+          TAG_VERSION: ${{ steps.meta.outputs.version }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          v=0.0.0-edge
+          if [ "$IS_TAG" = true ] && [[ "$TAG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then v="$TAG_VERSION"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
           push: ${{ env.PUSH == 'true' }}
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
@@ -359,11 +415,12 @@ jobs:
           # both platforms, under one content-addressed scope); PRs and tags
           # only read it. PR-written caches would never be read by main, and
           # tag-ref caches aren't readable from any other ref.
-          cache-from: type=gha,scope=image-main
-          cache-to: ${{ (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) && 'type=gha,scope=image-main,mode=max' || '' }}
+          cache-from: type=gha,scope=${{ matrix.cache }}
+          cache-to: ${{ (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) && format('type=gha,scope={0},mode=max', matrix.cache) || '' }}
 
       # The CLI in the image runs (amd64, from the layer cache just built).
       - name: The image's portcullis CLI
+        if: matrix.image == 'hub'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -372,6 +429,7 @@ jobs:
           tags: hub-cli-check:local
           cache-from: type=gha,scope=image-main
       - name: portcullis version in the image
+        if: matrix.image == 'hub'
         run: docker run --rm --entrypoint portcullis hub-cli-check:local version
 
       - name: Install cosign
