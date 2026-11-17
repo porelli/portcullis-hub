@@ -23,7 +23,7 @@ func bundle(t *testing.T) *cliapi.Bundle {
 	ca, _ := caKey(t)
 	return &cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 3, UserCAs: []string{ca},
 		Accounts: []cliapi.Account{
-			{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@all", "u:alice@web"}, Sudo: true, Privileged: true},
+			{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@all", "u:alice@web"}, Sudo: true, Approved: []string{"u:alice@all", "u:alice@web"}},
 			{Name: "bob", Kind: "person", UID: 20002, Principals: []string{"u:bob@web"}},
 			{Name: "deploy", Kind: "shared", Principals: []string{"s:deploy@web"}},
 		}, Locked: []string{}, Remove: []string{}, RevokedKeys: []string{}}
@@ -97,7 +97,7 @@ func TestAccountInvalidSkipped(t *testing.T) {
 func TestCeilingRefusesRootAndProtected(t *testing.T) {
 	sys := newFakeSys(t)
 	b := bundle(t)
-	b.Accounts = append(b.Accounts, cliapi.Account{Name: "root", Kind: "shared", Principals: []string{"s:root@all"}, Sudo: true, Privileged: true},
+	b.Accounts = append(b.Accounts, cliapi.Account{Name: "root", Kind: "shared", Principals: []string{"s:root@all"}, Sudo: true, Approved: []string{"s:root@all"}},
 		cliapi.Account{Name: "breakglass", Kind: "shared", Principals: []string{"s:breakglass@all"}},
 		cliapi.Account{Name: "daemon", Kind: "shared", Principals: []string{"s:daemon@all"}})
 	_, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
@@ -518,7 +518,7 @@ func TestCeilingNoSudoRefusesAccountsWithSudo(t *testing.T) {
 		sys3.files["/etc/passwd"] = append(sys3.files["/etc/passwd"], []byte("ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n")...)
 		setup(sys3)
 		bp := bundle(t)
-		bp.Accounts = []cliapi.Account{{Name: "ubuntu", Kind: "shared", Principals: []string{"s:ubuntu@web"}, Privileged: true}}
+		bp.Accounts = []cliapi.Account{{Name: "ubuntu", Kind: "shared", Principals: []string{"s:ubuntu@web"}, Approved: []string{"s:ubuntu@web"}}}
 		if _, _, err := apply(t, sys3, bp, cliapi.DefaultCeiling(), nil); err != nil {
 			t.Fatal(err)
 		}
@@ -631,7 +631,7 @@ func TestCheckRootFile(t *testing.T) {
 func TestApplyFailureKeepsSudoRemoved(t *testing.T) {
 	sys := newFakeSys(t)
 	b := bundle(t)
-	b.Accounts[1].Sudo, b.Accounts[1].Privileged = true, true // bob had sudo
+	b.Accounts[1].Sudo, b.Accounts[1].Approved = true, b.Accounts[1].Principals // bob had sudo
 	st, _, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
 	if err != nil || !strings.Contains(string(sys.files[SudoersFile]), "bob ALL") {
 		t.Fatalf("setup: %v %q", err, sys.files[SudoersFile])
@@ -700,6 +700,18 @@ func TestSudoViaMore(t *testing.T) {
 	if v := via(func(sys *fakeSys) { sys.files["/etc/doas.conf"] = []byte("permit :wheelz\n") }); v != "" {
 		t.Errorf("an unrelated doas rule: %q", v)
 	}
+	for _, p := range []string{"/etc/sudoers", "/etc/sudoers.d"} {
+		if v := via(func(sys *fakeSys) {
+			delete(sys.files, "/usr/bin/sudo")
+			if p == "/etc/sudoers.d" {
+				sys.dirs[p] = true
+			} else {
+				sys.files[p] = []byte("root ALL=(ALL) ALL\n")
+			}
+		}); v == "" {
+			t.Errorf("%s without a sudo command found isn't sudo", p)
+		}
+	}
 	if v := via(func(sys *fakeSys) {
 		delete(sys.files, "/usr/bin/sudo")
 		sys.handler["env"] = func(args []string) ([]byte, error) {
@@ -740,5 +752,25 @@ func TestSudoViaMore(t *testing.T) {
 		}
 	}); v == "" {
 		t.Error("unexpected sudo output isn't fail closed")
+	}
+}
+
+// Security review of RR-H1: on an account with sudo by other means only
+// the principals the bundle marks approved are written.
+func TestSudoCapableKeepsOnlyApprovedPrincipals(t *testing.T) {
+	sys := newFakeSys(t)
+	sys.files["/etc/passwd"] = append(sys.files["/etc/passwd"], []byte("ansible:x:1500:1500::/home/ansible:/bin/bash\n")...)
+	sys.sudoers["ansible"] = true
+	b := bundle(t)
+	b.Accounts = []cliapi.Account{{Name: "ansible", Kind: "shared", Principals: []string{"s:ansible@all", "s:ansible@web"}, Approved: []string{"s:ansible@all"}}}
+	_, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(sys.files[PrincipalsFile("ansible")]); got != "s:ansible@all\n" {
+		t.Errorf("principals %q", got)
+	}
+	if !slices.Contains(kinds(fs)[cliapi.FindingCeiling], "ansible") {
+		t.Errorf("the left-out principal isn't reported: %+v", fs)
 	}
 }

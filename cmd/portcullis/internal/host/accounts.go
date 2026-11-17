@@ -71,10 +71,10 @@ func (a *accountsCtx) ours(name string) bool {
 // RR-M4).
 var rootGroups = []string{"sudo", "wheel", "admin", "docker", "lxd", "incus", "libvirt", "disk"}
 
-// sudoBinaries / doasConfigs: where sudo and doas live.
+// doasConfigs: where doas reads its rules; sudoersPaths: sudo's.
 var (
-	sudoBinaries = []string{"/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo", "/usr/sbin/sudo"}
 	doasConfigs  = []string{"/etc/doas.conf", "/usr/local/etc/doas.conf"}
+	sudoersPaths = []string{"/etc/sudoers", "/etc/sudoers.d", "/usr/local/etc/sudoers"}
 )
 
 // sudoCheckTimeout bounds each of sudoVia's commands.
@@ -120,8 +120,15 @@ func (a *accountsCtx) sudoVia(ctx context.Context, sys System, name string) stri
 			return "a doas rule (" + p + ")"
 		}
 	}
-	// No sudo installed: no sudoers rule can exist (N-L2).
-	if !slices.ContainsFunc(sudoBinaries, func(p string) bool { return exists(sys, p) }) {
+	// sudo resolved as `env` runs it (the agent's PATH). Not found: no
+	// rule only when there's no sudoers either (N-L2); sudoers without a
+	// binary we can find is uncertain, so sudo (security review).
+	if sys.LookPath("sudo") == "" {
+		for _, p := range sudoersPaths {
+			if exists(sys, p) {
+				return "sudo is configured (" + p + ") but no sudo command was found"
+			}
+		}
 		return ""
 	}
 	// Every account is checked, Portcullis's own included (a hand-added

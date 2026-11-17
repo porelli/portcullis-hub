@@ -259,7 +259,7 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	rand.Read(secret)
 	hub := &sshdHub{t: t, domain: "example.org", secret: base64.RawURLEncoding.EncodeToString(secret), chal: map[string]bool{},
 		bundle: cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 1, UserCAs: []string{cliapi.NormalAuthorizedKey(caSigner.PublicKey())},
-			Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Privileged: true},
+			Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Approved: []string{"u:alice@web"}},
 				{Name: "bob", Kind: "person", UID: 20002, Principals: []string{"u:bob@web"}}},
 			Locked: []string{}, Remove: []string{}, RevokedKeys: []string{}}}
 	ln, err := net.Listen("tcp", net.JoinHostPort(gw.String(), "0"))
@@ -460,10 +460,13 @@ useradd -m -s /bin/bash plain`)
 	if out, _ := exec_("cat", "/etc/ssh/portcullis/principals/plain"); strings.TrimSpace(out) != "s:plain@web" {
 		t.Errorf("plain lost its principals: %q", out)
 	}
+	// Approval is per principal: s:dock@web comes from an approved grant,
+	// s:dock@all from a plain one — its holder is refused as dock.
 	hub.setBundle(func(b *cliapi.Bundle) {
 		for i := range b.Accounts {
 			if b.Accounts[i].Name == "dock" {
-				b.Accounts[i].Privileged = true
+				b.Accounts[i].Principals = []string{"s:dock@all", "s:dock@web"}
+				b.Accounts[i].Approved = []string{"s:dock@web"}
 			}
 		}
 	})
@@ -471,12 +474,15 @@ useradd -m -s /bin/bash plain`)
 	if out, err := sshRun(addr, "dock", userCert(t, caSigner, "s:dock@web", "pc:x:web:0123456789abcdef"), "id -un"); err != nil || out != "dock" {
 		t.Errorf("dock through a privileged grant: %v %q", err, out)
 	}
+	if _, err := sshRun(addr, "dock", userCert(t, caSigner, "s:dock@all", "pc:y:all:0123456789abcdef"), "true"); err == nil {
+		t.Error("dock through a plain grant's principal: logged in")
+	}
 	// RR-M2: a failed apply (sshd -t refuses an unrelated main config line)
 	// never gives back a sudo rule the new bundle removed.
 	hub.setBundle(func(b *cliapi.Bundle) {
 		for i := range b.Accounts {
 			if b.Accounts[i].Name == "plain" {
-				b.Accounts[i].Sudo, b.Accounts[i].Privileged = true, true
+				b.Accounts[i].Sudo, b.Accounts[i].Approved = true, b.Accounts[i].Principals
 			}
 		}
 	})
@@ -488,7 +494,7 @@ useradd -m -s /bin/bash plain`)
 	hub.setBundle(func(b *cliapi.Bundle) {
 		for i := range b.Accounts {
 			if b.Accounts[i].Name == "plain" {
-				b.Accounts[i].Sudo, b.Accounts[i].Privileged = false, false
+				b.Accounts[i].Sudo, b.Accounts[i].Approved = false, nil
 			}
 		}
 	})

@@ -122,7 +122,7 @@ func newHostFix(t *testing.T) *hostFix {
 
 func (f *hostFix) bundle() *cliapi.Bundle {
 	return &cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 1, UserCAs: []string{f.ca},
-		Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Privileged: true}},
+		Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Approved: []string{"u:alice@web"}}},
 		Locked:   []string{}, Remove: []string{}, RevokedKeys: []string{}}
 }
 

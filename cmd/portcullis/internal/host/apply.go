@@ -248,10 +248,23 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and this host's ceiling doesn't allow sudo"))
 				continue
 			}
-			if !a.Privileged {
+			// Per principal (security review of RR-H1): only those the
+			// bundle marks approved; one privileged grant doesn't open the
+			// account to the others.
+			var keep []string
+			for _, p := range a.Principals {
+				if slices.Contains(a.Approved, p) {
+					keep = append(keep, p)
+				}
+			}
+			if len(keep) == 0 {
 				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and no privileged grant gives this account"))
 				continue
 			}
+			if len(keep) < len(a.Principals) {
+				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, fmt.Sprintf("has sudo on this host (%s): %d principal(s) not from a privileged grant left out", via, len(a.Principals)-len(keep))))
+			}
+			a.Principals = keep
 		}
 		principals[a.Name] = a.Principals
 		if a.Sudo {

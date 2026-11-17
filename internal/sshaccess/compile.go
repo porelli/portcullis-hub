@@ -215,12 +215,13 @@ func inGroup(h state.SSHHost, hg string) bool {
 func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[string]bool) *cliapi.Bundle {
 	st := c.in.State
 	type acc struct {
-		kind  string
-		uid   int
-		p     map[string]bool
-		sudo  bool
-		priv  bool
-		valid bool
+		kind string
+		uid  int
+		p    map[string]bool
+		sudo bool
+		// per principal: given by an approved use / by another one
+		approved, plain map[string]bool
+		valid           bool
 	}
 	accts := map[string]*acc{}
 	c.sudo[id] = map[string][]string{}
@@ -236,7 +237,7 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 		}
 		a := accts[u.account]
 		if a == nil {
-			a = &acc{kind: kind, p: map[string]bool{}}
+			a = &acc{kind: kind, p: map[string]bool{}, approved: map[string]bool{}, plain: map[string]bool{}}
 			accts[u.account] = a
 		}
 		if a.kind != kind {
@@ -250,7 +251,11 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 		}
 		a.valid = true
 		a.p[u.principal()] = true
-		a.priv = a.priv || u.approved
+		if u.approved {
+			a.approved[u.principal()] = true
+		} else {
+			a.plain[u.principal()] = true
+		}
 		if u.sudo {
 			a.sudo = true
 			c.sudo[id][u.account] = dedupSorted(append(c.sudo[id][u.account], u.grant))
@@ -270,7 +275,17 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 			// (M11: a reused name's old account goes first); it's locked.
 			continue
 		}
-		out := cliapi.Account{Name: name, Kind: a.kind, Principals: sortedKeys(a.p), Sudo: a.sudo, Privileged: a.priv}
+		out := cliapi.Account{Name: name, Kind: a.kind, Principals: sortedKeys(a.p), Sudo: a.sudo}
+		for _, p := range out.Principals {
+			if a.approved[p] && (a.kind == cliapi.AccountPerson || !a.plain[p]) {
+				out.Approved = append(out.Approved, p)
+			}
+		}
+		// The host reports this account with sudo (or hasn't reported, for
+		// a shared account): only approved principals reach it at all.
+		if h.Managed && (slices.Contains(h.SudoCapable, name) || !h.SudoChecked && a.kind == cliapi.AccountShared) {
+			out.Principals = nonNil(out.Approved)
+		}
 		if out.Principals == nil {
 			out.Principals = []string{}
 		}

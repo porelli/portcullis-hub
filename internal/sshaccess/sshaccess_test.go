@@ -27,7 +27,7 @@ func example() Input {
 	st.EnsureBuiltins()
 	st.HostGroups["web"] = state.SSHHostGroup{Label: "Web servers"}
 	st.Hosts = map[string]state.SSHHost{
-		"web-1": {Names: []string{"web-1.example.com"}, Addrs: []string{"192.0.2.11"}, HostGroups: []string{"web"}, Managed: true, HostKey: "ssh-ed25519 AAAA"},
+		"web-1": {Names: []string{"web-1.example.com"}, Addrs: []string{"192.0.2.11"}, HostGroups: []string{"web"}, Managed: true, HostKey: "ssh-ed25519 AAAA", SudoChecked: true}, // reported: no account with sudo
 		"web-2": {Names: []string{"web-2.example.com"}, Addrs: []string{"192.0.2.12"}, HostGroups: []string{"web"}, Managed: true, HostKey: "ssh-ed25519 BBBB"},
 	}
 	st.Grants = []state.SSHGrant{
