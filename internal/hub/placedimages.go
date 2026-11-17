@@ -2,14 +2,45 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/docker"
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/templates"
 )
+
+// Pull failure categories (the only thing logged for an override).
+const (
+	pullArchMismatch = "arch mismatch"
+	pullRefused      = "pull refused"
+	pullFailed       = "pull failed"
+	pullRateLimited  = "rate limited"
+)
+
+// pullFailureCategory classifies a pre-pull failure without keeping any
+// of its text.
+func pullFailureCategory(err error) string {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "no matching manifest") || strings.Contains(msg, "platform") || strings.Contains(msg, "architecture") {
+		return pullArchMismatch
+	}
+	status := 0
+	var ae *agentrt.Error
+	if errors.As(err, &ae) {
+		status = ae.AgentStatus
+	}
+	switch {
+	case status == 429:
+		return pullRateLimited
+	case status == 400 || status == 401 || status == 403 || status == 404:
+		return pullRefused
+	}
+	return pullFailed
+}
 
 // placedImages: every image a worker instance's rendered project runs
 // (every profile; the custom compose override, the settings and the
@@ -32,6 +63,7 @@ func (h *Hub) placedImages(ctx context.Context, t *templates.Template, server st
 		refEnv = imageRefEnv(h, inf)
 	}
 	var overridden []string
+	svcOf := map[string]string{} // an overridden ref → its first service (the log names it, never the ref)
 	names := make([]string, 0, len(proj.Services))
 	for name := range proj.Services {
 		names = append(names, name)
@@ -53,6 +85,7 @@ func (h *Hub) placedImages(ctx context.Context, t *templates.Template, server st
 		}
 		if !isOwn && !slices.Contains(overridden, s.Image) {
 			overridden = append(overridden, s.Image)
+			svcOf[s.Image] = name
 		}
 	}
 	key := server + "\x00" + strings.Join(overridden, "\x00")
@@ -72,13 +105,15 @@ func (h *Hub) placedImages(ctx context.Context, t *templates.Template, server st
 		defer cancel()
 		for _, ref := range overridden {
 			if err := pre.PreflightPull(pctx, ref); err != nil {
-				log.Printf("placement: pre-pull of an overridden image of %s on %s failed: %s", t.ID, server, clip(err.Error(), 300))
-				msg := strings.ToLower(err.Error())
+				// The ref and the agent's words may carry a setting's value:
+				// the log has the instance, server, service and a category only.
+				cat := pullFailureCategory(err)
+				log.Printf("placement: pre-pull of service %s's overridden image of %s on %s: %s", svcOf[ref], t.ID, server, cat)
 				arch := ""
 				if inf := h.serverInfo(server); inf != nil {
 					arch = inf.Arch
 				}
-				if strings.Contains(msg, "no matching manifest") || strings.Contains(msg, "platform") || strings.Contains(msg, "architecture") {
+				if cat == pullArchMismatch {
 					return statusErr(409, "an overridden image of %s has no %s image", t.ID, arch)
 				}
 				return statusErr(409, "pulling an overridden image of %s on %s failed", t.ID, h.serverName(server))

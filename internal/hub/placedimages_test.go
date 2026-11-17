@@ -1,10 +1,13 @@
 package hub
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 )
 
 // TestPlacedEnvOverrideImages (contract §11.7): an override of a worker
@@ -59,5 +62,50 @@ func TestPlacedEnvOverrideImages(t *testing.T) {
 	}
 	if slices.Contains(p.w.Calls()[before:], "pull "+pinned) {
 		t.Error("an unchanged override was preflighted again")
+	}
+}
+
+// TestPlacedOverridePullFailureLog (security review of b15bd02): a failed
+// pre-pull of an overridden image logs the instance, server, service and
+// a category only — never the ref or the agent's message (either may
+// carry a setting's value).
+func TestPlacedOverridePullFailureLog(t *testing.T) {
+	p := newPlacedFixture(t)
+	writeFile(t, filepath.Join(p.src, "ovrapp", "manifest.yaml"), "name: Ovr\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\n")
+	writeFile(t, filepath.Join(p.src, "ovrapp", "compose.yml"), "services:\n  web:\n    image: ovr:1@sha256:"+strings.Repeat("7", 64)+"\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.ovr.rule: Host(`${PORTCULLIS_HOST_OVR:-ovr.portcullis.local}`)\n      traefik.http.routers.ovr.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.ovr.loadbalancer.server.port: \"8080\"\n")
+	p.h.Discover()
+	if err := p.create(t, "ovrapp", "nas"); err != nil {
+		t.Fatal(err)
+	}
+	secretish := "registry.example/tok-9f8e7d6c5b4a/ovr:2@sha256:" + strings.Repeat("9", 64)
+	if _, _, err := p.h.SaveUserOverride("ovrapp", "services:\n  web:\n    image: "+secretish+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		err  error
+		cat  string
+		want string
+	}{
+		{errors.New("pull " + secretish + ": no matching manifest for linux/arm64"), pullArchMismatch, "has no amd64 image"},
+		{&agentrt.Error{Status: 502, Msg: "the server nas answered unexpectedly", AgentStatus: 429}, pullRateLimited, "pulling an overridden image of ovrapp on NAS failed"},
+		{&agentrt.Error{Status: 400, Msg: "pull " + secretish + " refused", AgentStatus: 400}, pullRefused, "pulling an overridden image of ovrapp on NAS failed"},
+		{errors.New("pull " + secretish + ": tok-9f8e7d6c5b4a: connection reset"), pullFailed, "pulling an overridden image of ovrapp on NAS failed"},
+	} {
+		p.h.overridePreflight.Delete("ovrapp")
+		p.w.mu.Lock()
+		p.w.pullErr = c.err
+		p.w.mu.Unlock()
+		logs := captureLog(t)
+		err := p.h.Enable("ovrapp")
+		if errStatus(err) != 409 || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v (want %q)", c.cat, err, c.want)
+		}
+		out := logs.String()
+		if strings.Contains(out, "tok-9f8e7d6c5b4a") || strings.Contains(out, "registry.example") || strings.Contains(err.Error(), "tok-9f8e7d6c5b4a") {
+			t.Errorf("%s: the override value leaked: log %q, error %v", c.cat, out, err)
+		}
+		if !strings.Contains(out, "service web's overridden image of ovrapp on nas: "+c.cat) {
+			t.Errorf("%s: log %q", c.cat, out)
+		}
 	}
 }
