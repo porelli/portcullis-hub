@@ -466,11 +466,22 @@ type SSHRevokedView struct {
 	NoKey  bool       `json:"no_key,omitempty"`
 }
 
+// SSHHostKeyView is one signed unmanaged host key.
+type SSHHostKeyView struct {
+	FP        string    `json:"fp"`
+	HostGroup string    `json:"host_group"`
+	Names     []string  `json:"names"`
+	Until     time.Time `json:"until"`
+	Revoked   bool      `json:"revoked"`
+}
+
 // SSHCertificatesView is Certificates.
 type SSHCertificatesView struct {
 	Issued     []IssuedRecord   `json:"issued"`
 	Revoked    []SSHRevokedView `json:"revoked"`
 	Incomplete []string         `json:"incomplete"`
+	// HostKeys: the unmanaged hosts' signed keys (revocable by fingerprint).
+	HostKeys []SSHHostKeyView `json:"host_keys"`
 }
 
 // SSHCertificates is the issued index (newest first; user "" = all) and
@@ -478,7 +489,7 @@ type SSHCertificatesView struct {
 func (h *Hub) SSHCertificates(user string) SSHCertificatesView {
 	recs := h.IssuedFor(user)
 	slices.Reverse(recs)
-	v := SSHCertificatesView{Issued: recs, Revoked: []SSHRevokedView{}, Incomplete: []string{}}
+	v := SSHCertificatesView{Issued: recs, Revoked: []SSHRevokedView{}, Incomplete: []string{}, HostKeys: []SSHHostKeyView{}}
 	l, _ := h.sshRevokedList()
 	for _, e := range l {
 		rv := SSHRevokedView{FP: e.FP, Reason: e.Reason, Actor: e.Actor, Added: e.Added, NoKey: e.Key == ""}
@@ -492,6 +503,12 @@ func (h *Hub) SSHCertificates(user string) SSHCertificatesView {
 		v.Incomplete = append(v.Incomplete, fp)
 	}
 	sort.Strings(v.Incomplete)
+	h.mu.RLock()
+	for fp, hk := range h.st.SSH.HostKeys {
+		v.HostKeys = append(v.HostKeys, SSHHostKeyView{FP: fp, HostGroup: hk.HostGroup, Names: slices.Clone(hk.Names), Until: hk.Until, Revoked: hk.Revoked})
+	}
+	h.mu.RUnlock()
+	sort.Slice(v.HostKeys, func(i, j int) bool { return v.HostKeys[i].FP < v.HostKeys[j].FP })
 	return v
 }
 
@@ -503,11 +520,41 @@ func (h *Hub) RevokeSSHCertificates(actor directory.Actor, fps []string, reason 
 	if strings.TrimSpace(reason) == "" {
 		reason = "revoked by " + actor.User
 	}
+	// Unmanaged hosts' signed keys (M1) are revoked here: clients get them
+	// as @revoked lines at their next login.
+	var userFPs []string
+	n := 0
+	h.mu.Lock()
+	for _, fp := range fps {
+		hk, ok := h.st.SSH.HostKeys[fp]
+		if !ok {
+			userFPs = append(userFPs, fp)
+			continue
+		}
+		if !hk.Revoked {
+			hk.Revoked = true
+			h.st.SSH.HostKeys[fp] = hk
+			n++
+		}
+	}
+	if n > 0 {
+		h.saveLocked()
+	}
+	h.mu.Unlock()
+	for _, fp := range fps {
+		if !slices.Contains(userFPs, fp) {
+			h.auditSSH(actor.User, "ssh.host_certificate.revoke", "-", "key "+fp+": "+clip(reason, 200), nil)
+		}
+	}
+	if len(userFPs) == 0 {
+		return n, nil
+	}
 	target := "-"
-	if recs := h.issuedByFP(fps[0]); len(recs) > 0 {
+	if recs := h.issuedByFP(userFPs[0]); len(recs) > 0 {
 		target = recs[0].User
 	}
-	return h.RevokeFingerprints(actor.User, reason, fps, target)
+	m, err := h.RevokeFingerprints(actor.User, reason, userFPs, target)
+	return n + m, err
 }
 
 // RevokeAllSSH revokes every unexpired certificate's key of user.
@@ -619,6 +666,20 @@ func (h *Hub) signHostKey(ctx context.Context, actor string, req HostKeyRequest)
 	if serr != nil {
 		return nil, refusal(http.StatusServiceUnavailable, TextSSHUnavailable, "enroll refused")
 	}
+	// Recorded so it can be revoked (M1): clients get @revoked lines.
+	now := h.sshrt.clock()
+	h.mu.Lock()
+	if h.st.SSH.HostKeys == nil {
+		h.st.SSH.HostKeys = map[string]state.SSHHostKey{}
+	}
+	for k, v := range h.st.SSH.HostKeys {
+		if !v.Until.After(now) {
+			delete(h.st.SSH.HostKeys, k)
+		}
+	}
+	h.st.SSH.HostKeys[fp] = state.SSHHostKey{Key: norm, HostGroup: req.HostGroup, Names: slices.Clone(req.Names), Until: signed.ValidBefore.UTC()}
+	h.saveLocked()
+	h.mu.Unlock()
 	return &cliapi.HostCertAnswer{Certificate: signed.Certificate, ValidBefore: signed.ValidBefore.UTC()}, nil
 }
 

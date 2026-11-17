@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -169,5 +170,46 @@ not json
 	}
 	if in := f.h.doctorSSHIn(); in.BreakglassImported != 1 {
 		t.Errorf("doctor input %d", in.BreakglassImported)
+	}
+}
+
+// TestUnmanagedHostKeyRevocable (M1): a signed unmanaged host key is
+// recorded and listed; revoking its fingerprint makes it a client
+// @revoked line (and is audited).
+func TestUnmanagedHostKeyRevocable(t *testing.T) {
+	f := newHostFixture(t)
+	f.h.mu.Lock()
+	g := f.h.st.SSH.HostGroups["web"]
+	g.Patterns = []string{"*.lab.example.com"}
+	f.h.st.SSH.HostGroups["web"] = g
+	f.h.mu.Unlock()
+	key := hostKey(t)
+	f.h.SetFreshAuth(ListenerHub, fakeFresh{method: "security_key"})
+	if _, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: key, Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{}); err != nil {
+		t.Fatal(err)
+	}
+	k, _, _ := cliapi.ParseAuthorizedKey(key)
+	fp := cliapi.Fingerprint(k)
+	v := f.h.SSHCertificates("")
+	if len(v.HostKeys) != 1 || v.HostKeys[0].FP != fp || v.HostKeys[0].Revoked {
+		t.Fatalf("host keys %+v", v.HostKeys)
+	}
+	f.h.mu.RLock()
+	before := revokedHostKeys(f.h.st.SSH.Clone())
+	f.h.mu.RUnlock()
+	if slices.Contains(before, key) {
+		t.Fatal("revoked before revocation")
+	}
+	if n, err := f.h.RevokeSSHCertificates(rootActor, []string{fp}, ""); err != nil || n != 1 {
+		t.Fatalf("revoke %d %v", n, err)
+	}
+	f.h.mu.RLock()
+	after := revokedHostKeys(f.h.st.SSH.Clone())
+	f.h.mu.RUnlock()
+	if !slices.Contains(after, key) {
+		t.Errorf("the revoked host key isn't an @revoked line: %v", after)
+	}
+	if !f.h.SSHCertificates("").HostKeys[0].Revoked {
+		t.Error("not shown revoked")
 	}
 }

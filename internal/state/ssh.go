@@ -21,6 +21,19 @@ type SSHState struct {
 	UIDsUsed []int `json:"uids_used,omitempty" yaml:"uids_used,omitempty"`
 	// Serial: the Hub-wide bundle counter (plan C22).
 	Serial int64 `json:"serial,omitempty" yaml:"serial,omitempty"`
+	// HostKeys: the host keys signed for unmanaged hosts (Sign a host key,
+	// host certify), by fingerprint, so one can be revoked (M1); pruned
+	// once its certificate expired.
+	HostKeys map[string]SSHHostKey `json:"host_keys,omitempty" yaml:"host_keys,omitempty"`
+}
+
+// SSHHostKey is one signed unmanaged host key.
+type SSHHostKey struct {
+	Key       string    `json:"key" yaml:"key"`
+	HostGroup string    `json:"host_group" yaml:"host_group"`
+	Names     []string  `json:"names" yaml:"names"`
+	Until     time.Time `json:"until" yaml:"until"`
+	Revoked   bool      `json:"revoked,omitempty" yaml:"revoked,omitempty"`
 }
 
 // SSHSettings are Settings → SSH.

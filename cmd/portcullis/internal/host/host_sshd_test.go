@@ -356,25 +356,61 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	exec_("sh", "-c", "kill -HUP 1")
 	time.Sleep(time.Second)
 	waitSSH()
-	// FR-H4: a cloud image's default user with its own NOPASSWD sudo rule;
-	// with the ceiling's allow_sudo off it gets no principals file, so a
-	// valid s:ubuntu@web certificate opens nothing (reported).
-	exec_("sh", "-c", "useradd -m -s /bin/bash ubuntu && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-cloud-init-users && chmod 440 /etc/sudoers.d/90-cloud-init-users")
+	// FR-H4: accounts that reach root by other means than Portcullis — a
+	// cloud image's default user (cloud-init's sudoers.d rule), a rule in a
+	// directory pulled in by #includedir, a User_Alias, a sudo group as the
+	// primary group. With the ceiling's allow_sudo off none of them gets a
+	// principals file, so a valid s:<account>@web certificate opens nothing.
+	exec_("sh", "-c", `set -e
+(id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu) && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-cloud-init-users && chmod 440 /etc/sudoers.d/90-cloud-init-users
+useradd -m -s /bin/bash incl && mkdir -p /etc/sudoers.extra && echo 'incl ALL=(ALL) ALL' > /etc/sudoers.extra/incl && chmod 440 /etc/sudoers.extra/incl && echo '#includedir /etc/sudoers.extra' >> /etc/sudoers
+useradd -m -s /bin/bash alias1 && printf 'User_Alias OPS = alias1\nOPS ALL=(ALL) ALL\n' > /etc/sudoers.d/ops && chmod 440 /etc/sudoers.d/ops
+groupadd -f wheel && useradd -m -s /bin/bash -g wheel prim
+useradd -m -s /bin/bash plain`)
+	sudoAccounts := []string{"ubuntu", "incl", "alias1", "prim"}
 	exec_("sed", "-i", `s/"allow_sudo": true/"allow_sudo": false/`, "/etc/portcullis/host.json")
 	hub.setBundle(func(b *cliapi.Bundle) {
-		b.Accounts = append(b.Accounts, cliapi.Account{Name: "ubuntu", Kind: "shared", Principals: []string{"s:ubuntu@web"}})
+		for _, n := range append(sudoAccounts, "plain") {
+			b.Accounts = append(b.Accounts, cliapi.Account{Name: n, Kind: "shared", Principals: []string{"s:" + n + "@web"}})
+		}
 	})
 	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err != nil {
 		t.Errorf("sync: %v %s", err, out)
 	}
-	if out, _ := exec_("sh", "-c", "ls /etc/ssh/portcullis/principals/ubuntu 2>&1"); !strings.Contains(out, "No such file") {
-		t.Errorf("ubuntu got a principals file under allow_sudo=false: %s", out)
+	for _, n := range sudoAccounts {
+		if out, _ := exec_("sh", "-c", "ls /etc/ssh/portcullis/principals/"+n+" 2>&1"); !strings.Contains(out, "No such file") {
+			t.Errorf("%s got a principals file under allow_sudo=false: %s", n, out)
+		}
+		if _, err := sshRun(addr, n, userCert(t, caSigner, "s:"+n+"@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
+			t.Errorf("%s (sudo outside Portcullis) logged in under allow_sudo=false", n)
+		}
+		want := []string{"a sudoers rule"}
+		switch n {
+		case "prim":
+			want = []string{"the wheel group"}
+		case "ubuntu": // Ubuntu's image has its own ubuntu, in the sudo group
+			want = append(want, "the sudo group")
+		}
+		found := false
+		for _, f := range hub.lastReport().Findings {
+			for _, w := range want {
+				found = found || (f.Kind == cliapi.FindingCeiling && f.Subject == n && strings.Contains(f.Detail, w))
+			}
+		}
+		if !found {
+			t.Errorf("%s not reported as %q (sudo itself, not a failed check): %+v", n, want, hub.lastReport().Findings)
+		}
 	}
-	if _, err := sshRun(addr, "ubuntu", userCert(t, caSigner, "s:ubuntu@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
-		t.Error("ubuntu (cloud-init sudo) logged in under allow_sudo=false")
+	// Portcullis's own sudo for alice isn't "sudo by other means".
+	for _, f := range hub.lastReport().Findings {
+		if f.Kind == cliapi.FindingCeiling && f.Subject == "alice" && strings.Contains(f.Detail, "has sudo on this host") {
+			t.Errorf("alice refused for Portcullis's own sudoers rule: %+v", f)
+		}
 	}
-	if !hasFinding(hub.lastReport(), cliapi.FindingCeiling, "ubuntu", "") {
-		t.Errorf("not reported: %+v", hub.lastReport().Findings)
+	// The control: an account without sudo still gets its principals
+	// (the check asks sudo, it doesn't refuse everyone).
+	if out, _ := exec_("cat", "/etc/ssh/portcullis/principals/plain"); strings.TrimSpace(out) != "s:plain@web" {
+		t.Errorf("plain (no sudo) has no principals file under allow_sudo=false: %q", out)
 	}
 	exec_("sed", "-i", `s/"allow_sudo": false/"allow_sudo": true/`, "/etc/portcullis/host.json")
 	// Bare principals (security review 2: Vault signs one a tampered role

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ type fakeSys struct {
 	writes  []string
 	runs    []string
 	handler map[string]func(args []string) ([]byte, error)
+	// sudoers: accounts sudo -l -U lists a rule for (FR-H4).
+	sudoers map[string]bool
 	version string
 	goos    string
 	sshdT   error
@@ -67,7 +70,7 @@ func newFakeSys(t *testing.T) *fakeSys {
 		}
 		return errors.New("no")
 	}
-	f := &fakeSys{files: map[string][]byte{}, modes: map[string]fs.FileMode{}, dirs: map[string]bool{}, handler: map[string]func([]string) ([]byte, error){},
+	f := &fakeSys{files: map[string][]byte{}, modes: map[string]fs.FileMode{}, dirs: map[string]bool{}, handler: map[string]func([]string) ([]byte, error){}, sudoers: map[string]bool{},
 		owners: map[string]ownerOf{}, links: map[string]string{},
 		version: "OpenSSH_9.6p1 Ubuntu", goos: "linux"}
 	f.files[MainConfig] = []byte("Include /etc/ssh/sshd_config.d/*.conf\nKbdInteractiveAuthentication no\nUsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n")
@@ -131,6 +134,24 @@ func (f *fakeSys) Run(_ context.Context, name string, args ...string) ([]byte, e
 		return nil, nil
 	case "visudo", "loginctl", "pkill", "launchctl":
 		return nil, nil
+	case "env":
+		// env LC_ALL=C <cmd> …: the accounts' sudo checks (FR-H4).
+		if len(args) >= 2 && args[0] == "LC_ALL=C" {
+			return f.Run(context.Background(), args[1], args[2:]...)
+		}
+	case "id":
+		// id -Gn -- <name>: the primary group and every group listing it.
+		if len(args) == 3 && args[0] == "-Gn" {
+			return f.idGroups(args[2])
+		}
+	case "sudo":
+		// sudo -n -l -U <name>: f.sudoers[name] has a rule.
+		if len(args) == 4 && args[2] == "-U" {
+			if f.sudoers[args[3]] {
+				return []byte("User " + args[3] + " may run the following commands on web-1:\n    (ALL) NOPASSWD: ALL\n"), nil
+			}
+			return []byte("User " + args[3] + " is not allowed to run sudo on web-1.\n"), nil
+		}
 	}
 	return nil, fmt.Errorf("fake: %s not handled", name)
 }
@@ -405,4 +426,35 @@ func (f *fakeSys) usermod(args []string) error {
 	}
 	f.files["/etc/passwd"] = []byte(strings.Join(out, "\n") + "\n")
 	return nil
+}
+
+// idGroups is id -Gn: the passwd entry's primary group, then every group
+// of /etc/group that lists name.
+func (f *fakeSys) idGroups(name string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	gid := ""
+	for _, l := range strings.Split(string(f.files["/etc/passwd"]), "\n") {
+		p := strings.Split(l, ":")
+		if len(p) >= 4 && p[0] == name {
+			gid = p[3]
+		}
+	}
+	if gid == "" {
+		return []byte("id: '" + name + "': no such user"), fmt.Errorf("exit status 1")
+	}
+	var out []string
+	for _, l := range strings.Split(string(f.files["/etc/group"]), "\n") {
+		p := strings.Split(l, ":")
+		if len(p) < 4 {
+			continue
+		}
+		if p[2] == gid || slices.Contains(strings.Split(p[3], ","), name) {
+			out = append(out, p[0])
+		}
+	}
+	if len(out) == 0 {
+		out = []string{name}
+	}
+	return []byte(strings.Join(out, " ") + "\n"), nil
 }

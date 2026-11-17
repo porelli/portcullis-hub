@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -455,15 +456,20 @@ func TestInvalidRevokedKeyDroppedNotRefused(t *testing.T) {
 // rule, the sudo / wheel group, uid 0) gets no principals file.
 func TestCeilingNoSudoRefusesAccountsWithSudo(t *testing.T) {
 	for name, setup := range map[string]func(sys *fakeSys){
-		"sudoers.d rule": func(sys *fakeSys) {
-			sys.files["/etc/sudoers.d/90-cloud-init-users"] = []byte("# Created by cloud-init\nubuntu ALL=(ALL) NOPASSWD:ALL\n")
-		},
+		"a sudoers rule (sudo -l)": func(sys *fakeSys) { sys.sudoers["ubuntu"] = true },
 		"sudo group": func(sys *fakeSys) {
 			sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("sudo:x:27:ubuntu\n")...)
 		},
-		"group rule": func(sys *fakeSys) {
-			sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("ops:x:3000:ubuntu\n")...)
-			sys.files["/etc/sudoers"] = []byte("Defaults env_reset\n%ops ALL=(ALL) ALL\n")
+		"wheel as primary group": func(sys *fakeSys) {
+			sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("wheel:x:1000:\n")...)
+		},
+		"sudo -l unreadable (fail closed)": func(sys *fakeSys) {
+			sys.handler["env"] = func(args []string) ([]byte, error) {
+				if args[1] == "sudo" {
+					return []byte("sudo: unable to resolve host"), fmt.Errorf("exit status 1")
+				}
+				return sys.idGroups(args[len(args)-1])
+			}
 		},
 	} {
 		sys := newFakeSys(t)

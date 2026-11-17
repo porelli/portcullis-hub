@@ -213,7 +213,7 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 		// whatever the bundle says; with sudo off by the ceiling it gets no
 		// principals (a cloud image's default user, an admin's own login).
 		if !c.AllowSudo {
-			if via := acc.sudoVia(sys, a.Name); via != "" {
+			if via := acc.sudoVia(ctx, sys, a.Name); via != "" {
 				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and this host's ceiling doesn't allow sudo"))
 				continue
 			}

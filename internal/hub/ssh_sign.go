@@ -394,12 +394,18 @@ func (h *Hub) sshHostCAs() []string {
 	return nonNilStrings(slices.Clone(h.sshrt.hostCAs))
 }
 
-// revokedHostKeys are removed hosts' pinned keys (clients' @revoked).
+// revokedHostKeys are removed hosts' pinned keys and revoked unmanaged
+// host keys (clients' @revoked).
 func revokedHostKeys(st state.SSHState) []string {
 	out := []string{}
 	for _, id := range sshKeys(st.Hosts) {
 		if h := st.Hosts[id]; h.Removed && h.HostKey != "" {
 			out = append(out, h.HostKey)
+		}
+	}
+	for _, fp := range sshKeys(st.HostKeys) {
+		if hk := st.HostKeys[fp]; hk.Revoked && hk.Key != "" {
+			out = append(out, hk.Key)
 		}
 	}
 	return out

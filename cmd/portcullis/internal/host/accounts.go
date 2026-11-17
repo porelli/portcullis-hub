@@ -69,11 +69,16 @@ func (a *accountsCtx) ours(name string) bool {
 // sudoGroups are the groups that give sudo on common distributions.
 var sudoGroups = []string{"sudo", "wheel", "admin"}
 
-// sudoVia says how name can reach root on this host outside Portcullis's
-// own sudoers file (FR-H4): uid 0, a sudo / wheel / admin group, or a
-// sudoers rule naming it or one of its groups (cloud-init writes
-// "ubuntu ALL=(ALL) NOPASSWD:ALL" to /etc/sudoers.d). "" = none seen.
-func (a *accountsCtx) sudoVia(sys System, name string) string {
+// sudoCheckTimeout bounds each of sudoVia's commands.
+const sudoCheckTimeout = 10 * time.Second
+
+// sudoVia says how name can reach root on this host (FR-H4), asking the
+// system itself rather than parsing sudoers (aliases, %#gid, #include…):
+// uid 0; `id -Gn <name>` (the primary group included) naming sudo, wheel
+// or admin; or `sudo -n -l -U <name>` (as root, LC_ALL=C) listing any
+// rule. Fail closed: a command that fails, times out or prints what this
+// can't read counts as sudo, with why. "" = no sudo seen.
+func (a *accountsCtx) sudoVia(ctx context.Context, sys System, name string) string {
 	u, ok := a.users[name]
 	if !ok {
 		return ""
@@ -81,42 +86,37 @@ func (a *accountsCtx) sudoVia(sys System, name string) string {
 	if u.UID == 0 {
 		return "uid 0"
 	}
-	var mine []string
-	for g, ms := range a.groups {
-		if slices.Contains(ms, name) {
-			mine = append(mine, g)
-		}
+	cctx, cancel := context.WithTimeout(ctx, sudoCheckTimeout)
+	defer cancel()
+	out, err := sys.Run(cctx, "env", "LC_ALL=C", "id", "-Gn", "--", name)
+	if err != nil || len(bytes.TrimSpace(out)) == 0 {
+		return "its groups can't be read (id -Gn failed)"
 	}
-	for _, g := range sudoGroups {
-		if slices.Contains(mine, g) {
+	for _, g := range strings.Fields(string(out)) {
+		if slices.Contains(sudoGroups, g) {
 			return "the " + g + " group"
 		}
 	}
-	files := []string{"/etc/sudoers"}
-	more, _ := sys.Glob("/etc/sudoers.d/*")
-	for _, f := range more {
-		if f != SudoersFile {
-			files = append(files, f)
-		}
+	// A Portcullis-created account's sudoers rules are Portcullis's own
+	// (/etc/sudoers.d/portcullis, which the ceiling already governs): sudo
+	// -l would list the previous apply's rule and lock the person out of
+	// one round. Its groups are still checked above.
+	if a.ours(name) {
+		return ""
 	}
-	for _, f := range files {
-		raw, _ := readMaybe(sys, f)
-		if len(raw) > 1<<20 {
-			raw = raw[:1<<20]
-		}
-		for _, l := range bytes.Split(raw, []byte("\n")) {
-			fs := bytes.Fields(l)
-			if len(fs) < 2 || bytes.HasPrefix(fs[0], []byte("#")) || bytes.HasPrefix(fs[0], []byte("Defaults")) {
-				continue
-			}
-			who := string(fs[0])
-			if who == name || (strings.HasPrefix(who, "%") && slices.Contains(mine, who[1:])) ||
-				(who == "User_Alias" && bytes.Contains(l, []byte(name))) {
-				return "a rule in " + f
-			}
-		}
+	cctx2, cancel2 := context.WithTimeout(ctx, sudoCheckTimeout)
+	defer cancel2()
+	out, err = sys.Run(cctx2, "env", "LC_ALL=C", "sudo", "-n", "-l", "-U", name)
+	text := string(out)
+	switch {
+	case strings.Contains(text, "is not allowed to run sudo on"):
+		return ""
+	case strings.Contains(text, "may run the following commands on"):
+		return "a sudoers rule (sudo -l -U " + name + ")"
+	case err != nil:
+		return "sudo -l -U " + name + " failed: " + firstLine(out)
 	}
-	return ""
+	return "sudo -l -U " + name + " printed something unexpected"
 }
 
 // ensureGroup creates portcullis-users once.
