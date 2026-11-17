@@ -16,6 +16,7 @@ func (s *Server) registerMailProvider(mux routeMux) {
 	mux.HandleFunc("GET /api/instances/{id}/mail-provider", s.handleInstanceMailProvider)
 	mux.HandleFunc("PUT /api/instances/{id}/mail-provider", s.handleSetInstanceMailProvider)
 	mux.HandleFunc("POST /api/mail/provider/switch", s.handleSwitchMailProvider)
+	mux.HandleFunc("POST /api/mail/provider/retry-void", s.handleRetryMailVoid)
 }
 
 // handleSwitchMailProvider: POST /api/mail/provider/switch {to, confirm,
@@ -69,7 +70,25 @@ func (s *Server) handleInstanceMailProvider(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	noStore(w)
-	writeJSON(w, v)
+	// The Hub listener's fresh sign-in parameters for the wiring's proof.
+	writeJSON(w, struct {
+		*hub.MailProviderView
+		FreshAuth *freshauth.AuthorizeInfo `json:"fresh_auth"`
+	}{v, s.Hub.AdminFreshAuthInfo()})
+}
+
+// handleRetryMailVoid: POST /api/mail/provider/retry-void → 202 the
+// owed void retried now (409: none owed).
+func (s *Server) handleRetryMailVoid(w http.ResponseWriter, r *http.Request) {
+	if !s.mailProviderGate(w, r) {
+		return
+	}
+	op, err := s.Hub.RetryMailVoid(requestActor(r))
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSONStatus(w, http.StatusAccepted, acceptedBody(op))
 }
 
 // mailProviderBody is the PUT's body.

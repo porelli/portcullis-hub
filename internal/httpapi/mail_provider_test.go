@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -42,5 +44,42 @@ func TestMailProviderRoutesAdminOnly(t *testing.T) {
 	}
 	if r, b := doAs(t, e.hub, "root", "PUT", "/api/instances/grafana/mail-provider", `{"wired": true, "confirm": "grafana"}`); r.StatusCode != 403 {
 		t.Fatalf("no proof: %d %s", r.StatusCode, b)
+	}
+}
+
+// TestMCPHasNoMailWiring (T15): the name the plan gives the no-wiring
+// rule; TestNoMailWiringTool is its body.
+func TestMCPHasNoMailWiring(t *testing.T) { TestNoMailWiringTool(t) }
+
+// TestMCPMailStatusProvider (T15): mail_status (and its twin route)
+// carries the wired provider: instance, template, mode; never a secret.
+func TestMCPMailStatusProvider(t *testing.T) {
+	e, _ := mailEnv(t)
+	e.s.registerMCPTools()
+	var tool *Tool
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		if tl.Name == "mail_status" {
+			tl := tl
+			tool = &tl
+		}
+	}
+	if tool == nil {
+		t.Fatal("no mail_status")
+	}
+	out, err := tool.Run(context.Background(), nil, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(out)
+	var v struct {
+		Provider *struct {
+			Instance, Template, Mode, Version string
+		} `json:"provider"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil || v.Provider == nil || v.Provider.Instance != "mailsrv" || v.Provider.Mode != "normal" || v.Provider.Version == "" {
+		t.Fatalf("%s %v", b, err)
+	}
+	if strings.Contains(string(b), "secret") {
+		t.Fatalf("a secret in %s", b)
 	}
 }

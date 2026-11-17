@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -598,4 +599,29 @@ func (h *Hub) mailVoidAndResume(ctx context.Context, id, reason string) error {
 		return errMailNotWired
 	}
 	return h.composeUp(ctx, live)
+}
+
+// OpMailVoidRetry is the Mail tab's Retry of an owed void.
+const OpMailVoidRetry = "mail_void_retry"
+
+// RetryMailVoid is POST /api/mail/provider/retry-void (contract §19.11):
+// the owed void and, verified, the normal up, now (409: no void owed or
+// the provider is held). Audited mail.void_retry.
+func (h *Hub) RetryMailVoid(actor directory.Actor) (*AsyncOp, error) {
+	h.mu.RLock()
+	p, owed, held := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held
+	h.mu.RUnlock()
+	if p == nil || owed == nil {
+		return nil, statusErr(http.StatusConflict, "no void of the mail passwords is owed")
+	}
+	if held != nil {
+		return nil, statusErr(http.StatusConflict, "%s", held.Reason)
+	}
+	id, reason := p.Instance, owed.Reason
+	return h.startAsync(id, OpMailVoidRetry, actor, nil, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		ready()
+		err := h.mailVoidAndResume(context.WithoutCancel(ctx), id, reason)
+		h.auditOp(actor, "mail.void_retry", id, "reason="+reason, err)
+		return nil, nil, err
+	})
 }

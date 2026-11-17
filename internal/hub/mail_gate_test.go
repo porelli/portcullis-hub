@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
@@ -518,4 +519,26 @@ func TestVoidKeepsDebtRaisedMidRun(t *testing.T) {
 			t.Fatalf("the undo kept its own debt: %+v", f.h.st.Mail.VoidOwed)
 		}
 	})
+}
+
+// TestRetryVoidRoute: Retry runs the owed void now; nothing owed is 409.
+func TestRetryVoidRoute(t *testing.T) {
+	f := voidFixture(t)
+	if _, err := f.h.RetryMailVoid(directory.Human("root")); statusOf(err) != 409 {
+		t.Fatalf("nothing owed: %v", err)
+	}
+	f.h.mu.Lock()
+	f.h.markVoidOwedLocked(state.MailVoidRestore)
+	f.h.mu.Unlock()
+	voids := len(f.mc.Voids)
+	if _, err := f.h.RetryMailVoid(directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	f.h.Wait()
+	f.h.mu.RLock()
+	owed := f.h.st.Mail.VoidOwed
+	f.h.mu.RUnlock()
+	if owed != nil || len(f.mc.Voids) == voids {
+		t.Fatalf("owed %+v voids %d", owed, len(f.mc.Voids))
+	}
 }

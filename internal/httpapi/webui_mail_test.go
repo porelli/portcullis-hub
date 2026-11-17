@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/hub"
 )
 
 // mailSection renders mysignin.js's mailHtml(view) under node (skipped
@@ -173,5 +175,83 @@ func TestDirectoryMailSections(t *testing.T) {
 	if !strings.Contains(g, "data-gp-mail-current") || !strings.Contains(g, "team_b@b.example") || !strings.Contains(g, "anyone may post") ||
 		!strings.Contains(g, `<option value="b.example" selected>`) || !strings.Contains(g, "Save the list") || !strings.Contains(g, "mail-list-off") {
 		t.Errorf("current list:\n%s", g)
+	}
+}
+
+// TestWebMailStates (T15): Settings → Mail's three slot states by id
+// (closed, none with the Marketplace link and the installed mail
+// instances, wired with Switch…, Unwire… and Retry), the Mail tab's
+// warning node filled with exactly hub.MailWarning, and no provider text
+// ever put into innerHTML.
+func TestWebMailStates(t *testing.T) {
+	view := map[string]any{"mail": "on", "kubernetes": false, "hostname": "mail.example.org", "domains": []any{}, "spam": map[string]any{}, "limits": map[string]any{}}
+	state := func(v, st, insts any) string {
+		vb, _ := json.Marshal(v)
+		sb, _ := json.Marshal(st)
+		ib, _ := json.Marshal(insts)
+		return nodeEval(t, "global.window = {};\n"+webAsset(t, "mail.js")+"\nprocess.stdout.write(window.PortcullisMail.stateHtml("+string(vb)+","+string(sb)+","+string(ib)+"));\n")
+	}
+	if h := state(map[string]any{"mail": "off"}, nil, nil); !strings.Contains(h, `data-mail-state="closed"`) {
+		t.Errorf("closed: %s", h)
+	}
+	h := state(view, map[string]any{"mail": "on", "provider": nil}, []any{map[string]any{"id": "stalwart", "label": "Mail<x>"}})
+	if !strings.Contains(h, `data-mail-state="none"`) || !strings.Contains(h, `href="#marketplace?filter=mail"`) || !strings.Contains(h, `href="#apps/stalwart/mail"`) || strings.Contains(h, "Mail<x>") {
+		t.Errorf("none: %s", h)
+	}
+	prov := map[string]any{"instance": "stalwart", "template": "stalwart", "label": "<img src=x onerror=alert(1)>", "version": "<b>1</b>", "mode": "void",
+		"void": map[string]any{"reason": "restore", "since": "2026-11-17T00:00:00Z", "error": "<script>"}}
+	h = state(view, map[string]any{"mail": "on", "provider": prov}, nil)
+	for _, want := range []string{`data-mail-state="wired"`, `data-mail-act="switch"`, `data-mail-act="unwire"`, `data-mail-act="retry-void"`, `href="#apps/stalwart/mail"`} {
+		if !strings.Contains(h, want) {
+			t.Errorf("wired lacks %q: %s", want, h)
+		}
+	}
+	if strings.Contains(h, "<img") || strings.Contains(h, "<b>1") || strings.Contains(h, "<script>") {
+		t.Errorf("provider text in the markup: %s", h)
+	}
+	// The Mail tab: provider text never in the skeleton; the warning
+	// node gets exactly MailWarning (by textContent, under a fake DOM).
+	tv := map[string]any{"wired": true, "mode": "normal", "warning": hub.MailWarning, "provider": map[string]any{"name": "<i>S</i>", "version": "1", "checks": []string{}},
+		"refused_because": []string{"<u>no</u>"}, "held": map[string]any{"reason": "<em>held</em>"}, "hold_warning": "w", "void": nil}
+	tb, _ := json.Marshal(tv)
+	out := nodeEval(t, `
+const nodes = {};
+function node(sel) { return nodes[sel] || (nodes[sel] = { textContent: '', children: [], appendChild(c) { this.children.push(c); } }); }
+global.document = { createElement() { return { textContent: '' }; } };
+global.window = {};
+`+webAsset(t, "mailprovider.js")+`
+const v = `+string(tb)+`;
+const skel = window.PortcullisMailProvider.tabSkeleton(v);
+window.PortcullisMailProvider.fillTab({ querySelector: node }, v);
+process.stdout.write(JSON.stringify({ skel, warning: node('[data-mail-warning]').textContent, refused: node('[data-mail-refused]').children.map(c => c.textContent), info: node('[data-mail-provider-info]').textContent }));
+`)
+	var got struct {
+		Skel, Warning, Info string
+		Refused             []string
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if got.Warning != hub.MailWarning || len(got.Refused) != 1 || got.Refused[0] != "<u>no</u>" || !strings.Contains(got.Info, "<i>S</i>") {
+		t.Fatalf("%+v", got)
+	}
+	for _, bad := range []string{"<i>S", "<u>no", "<em>held", hub.MailWarning} {
+		if strings.Contains(got.Skel, bad) {
+			t.Errorf("%q in the skeleton's markup", bad)
+		}
+	}
+	// No innerHTML assignment in mailprovider.js carries a view field.
+	src := webAsset(t, "mailprovider.js")
+	for _, ln := range strings.Split(src, "\n") {
+		if strings.Contains(ln, "innerHTML") && (strings.Contains(ln, "v.provider") || strings.Contains(ln, "v.warning") || strings.Contains(ln, "refused_because") || strings.Contains(ln, "e.message")) {
+			t.Errorf("provider text into innerHTML: %s", ln)
+		}
+	}
+	// The Mail tab and the Marketplace filter are wired into the page.
+	idx := webAsset(t, "index.html")
+	for _, want := range []string{"['mail', 'Mail']", "templateIsMailProvider", "/static/mailprovider.js", "data-mail-badge", "filterMarketplace("} {
+		if !strings.Contains(idx, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
 	}
 }

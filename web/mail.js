@@ -29,12 +29,46 @@
   function pill(cls, t) { return '<span class="pill ' + cls + '">' + esc(t) + '</span>'; }
   function stateOf(s) { return s === 'on' ? pill('ok', 'on') : s === 'draining' ? pill('warn', 'draining') : pill('', 'off'); }
 
-  // settingsHtml is the panel for GET /api/mail/settings (view) and GET
-  // /api/mail/status (status, may be null).
-  function settingsHtml(v, status) {
+  // stateHtml is the slot's state (spec §8): closed; open with nothing
+  // wired (the installed mail instances, a Marketplace link); wired (the
+  // provider's row, Switch…, Unwire…, the void). Provider text (label,
+  // version, the void's error) is filled by fillState with textContent.
+  // insts: the installed instances of mail templates [{id, label}].
+  function stateHtml(v, status, insts) {
+    if (v.mail !== 'on') return '<div class="inst-section" data-mail-state="closed"><p class="settings-empty" data-mail-off>' + esc(OFF_TEXT) + '</p></div>';
+    const p = status && status.provider;
+    if (!p) {
+      const list = (insts || []).map(i => '<li><a href="#apps/' + enc(i.id) + '/mail">' + esc(i.label || i.id) + '</a></li>').join('');
+      return '<div class="inst-section" data-mail-state="none"><h4>No mail server is wired</h4>' +
+        (list ? '<p>Installed mail servers (open one\'s Mail tab to wire it):</p><ul data-mail-instances>' + list + '</ul>' : '<p>No mail server app is installed.</p>') +
+        '<p><a href="#marketplace?filter=mail" data-mail-marketplace>Find a mail server in the Marketplace</a></p></div>';
+    }
+    return '<div class="inst-section" data-mail-state="wired"><div class="inst-row">' +
+      '<strong data-mail-label></strong> <span data-mail-version></span> · <a href="#apps/' + enc(p.instance) + '/mail" data-mail-instance>' + esc(p.instance) + '</a> ' +
+      '<span class="pill" data-mail-mode></span> ' +
+      '<button type="button" class="btn btn-sm" data-mail-act="switch" data-mail-from="' + esc(p.instance) + '">Switch…</button> ' +
+      '<button type="button" class="btn btn-sm btn-danger" data-mail-act="unwire" data-mail-from="' + esc(p.instance) + '">Unwire…</button></div>' +
+      (p.void ? '<div class="public-warn" data-mail-void><span data-mail-void-text></span> <button type="button" class="btn btn-sm" data-mail-act="retry-void">Retry</button></div>' : '') +
+      '</div>';
+  }
+
+  // fillState sets the wired provider's texts with textContent.
+  function fillState(root, status) {
+    const p = status && status.provider;
+    if (!p) return;
+    const set = (sel, t) => { const el = root.querySelector(sel); if (el) el.textContent = t; };
+    set('[data-mail-label]', p.label || p.template);
+    set('[data-mail-version]', p.version || '');
+    set('[data-mail-mode]', p.held ? p.mode + ' · held' : p.mode);
+    if (p.void) set('[data-mail-void-text]', 'A void of every mail password is owed (' + p.void.reason + ')' + (p.void.error ? ': ' + p.void.error : '') + '.');
+  }
+
+  // settingsHtml is the panel for GET /api/mail/settings (view), GET
+  // /api/mail/status (status, may be null) and the installed mail
+  // instances (insts).
+  function settingsHtml(v, status, insts) {
     if (v.kubernetes) return '<p class="settings-empty" data-mail-kube>' + esc(KUBE_TEXT) + '</p>';
-    let h = '';
-    if (v.mail !== 'on') h += '<p class="settings-empty" data-mail-off>' + esc(OFF_TEXT) + '</p>';
+    let h = stateHtml(v, status, insts);
     if (v.problem) h += '<div class="public-warn" data-mail-problem>' + esc(v.problem) + '. Run <code>./portcullis up</code> on the server: it recreates the Hub with the mail secret.</div>';
     const pr = v.pending_removal;
     if (pr) {
@@ -111,7 +145,15 @@
       v = await window.apiGet('/api/mail/settings');
     } catch (e) { root.innerHTML = '<div class="public-warn">' + esc(e.message) + '</div>'; return; }
     try { st = await window.apiGet('/api/mail/status'); } catch (_) { st = null; }
-    root.innerHTML = settingsHtml(v, st);
+    let insts = [];
+    try {
+      const [list, tpls] = await Promise.all([window.apiGet('/api/instances'), window.apiGet('/api/templates')]);
+      const mailT = new Set((tpls || []).filter(t => t.mail_provider).map(t => t.id));
+      insts = (list || []).filter(i => mailT.has(i.template)).map(i => ({ id: i.id, label: i.label }));
+    } catch (_) { insts = []; }
+    root.mailInsts = insts;
+    root.innerHTML = settingsHtml(v, st, insts);
+    fillState(root, st);
     if (!root.dataset.mailWired) {
       root.dataset.mailWired = '1';
       root.addEventListener('click', e => act(root, e));
@@ -149,6 +191,18 @@
           window.showToast('Confirmed.', 'success');
           break;
         }
+        case 'switch':
+          if (window.PortcullisMailProvider) window.PortcullisMailProvider.switchDialog(b.dataset.mailFrom, (root.mailInsts || []).map(i => i.id));
+          return;
+        case 'unwire':
+          // Draining (the Mail tab offers stopping at once).
+          b.dataset.busy = '1';
+          await window.PortcullisMailProvider.unwire(b.dataset.mailFrom, true);
+          break;
+        case 'retry-void':
+          b.dataset.busy = '1';
+          await window.PortcullisMailProvider.retryVoid();
+          break;
         case 'settings-save': {
           const f = b.closest('[data-mail-settings]');
           b.dataset.busy = '1';
@@ -166,5 +220,5 @@
     render(root);
   }
 
-  window.PortcullisMail = { render, settingsHtml, readSettings, OFF_TEXT, DRAIN_WARNING };
+  window.PortcullisMail = { render, settingsHtml, stateHtml, fillState, readSettings, OFF_TEXT, DRAIN_WARNING };
 })();

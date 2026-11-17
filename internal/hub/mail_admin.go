@@ -798,6 +798,20 @@ type MailStatusView struct {
 	Reachable bool                 `json:"reachable"`
 	Status    *mailprovider.Status `json:"status"`
 	Domains   []MailDomainStateRow `json:"domains"`
+	// Provider is the wired provider (nil: nothing wired).
+	Provider *MailProviderSummary `json:"provider"`
+}
+
+// MailProviderSummary is the wired provider as Settings → Mail and the
+// mail_status tool show it (never a secret).
+type MailProviderSummary struct {
+	Instance string        `json:"instance"`
+	Template string        `json:"template"`
+	Label    string        `json:"label"`
+	Version  string        `json:"version"`
+	Mode     string        `json:"mode"`
+	Void     *MailVoidView `json:"void"`
+	Held     bool          `json:"held"`
 }
 
 // MailDomainStateRow is one domain's mail state (also the host routes').
@@ -824,11 +838,27 @@ func (h *Hub) mailDomainRows() []MailDomainStateRow {
 // MailStatus is GET /api/mail/status: never a credential.
 func (h *Hub) MailStatus(ctx context.Context) MailStatusView {
 	v := MailStatusView{Mail: "off", Domains: h.mailDomainRows()}
+	if h.mailOn() {
+		h.mu.RLock()
+		if p := h.st.Mail.Provider; p != nil {
+			ps := &MailProviderSummary{Instance: p.Instance, Template: p.Template, Mode: h.mailModeTextLocked(p.Instance), Void: h.mailVoidViewLocked(), Held: h.st.Mail.Held != nil}
+			if _, m := h.mailWiredLocked(); m != nil {
+				ps.Label = m.Label
+			}
+			v.Provider = ps
+		}
+		h.mu.RUnlock()
+	}
 	api := h.mailClient()
 	if api == nil {
 		return v
 	}
 	v.Mail = "on"
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if info, err := api.Provider(pctx); err == nil && v.Provider != nil {
+		v.Provider.Version = info.Version
+	}
+	cancel()
 	if st, err := api.Status(ctx); err == nil {
 		v.Reachable, v.Status = true, &st
 	}

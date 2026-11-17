@@ -104,6 +104,7 @@ var mailNoToolRoutes = map[string]string{
 	"GET /api/instances/{id}/mail-provider":                      "mail providers: never through MCP or AI (contract §19.9)",
 	"PUT /api/instances/{id}/mail-provider":                      "mail providers: never wired, switched or unwired through MCP or AI (contract §19.9)",
 	"POST /api/mail/provider/switch":                             "mail providers: never switched through MCP or AI (contract §19.9)",
+	"POST /api/mail/provider/retry-void":                         "mail providers: the void is retried from the Mail tab only (contract §19.11)",
 }
 
 // adminVPN are the VPN tools (§15.10).
