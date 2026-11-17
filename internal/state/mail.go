@@ -68,7 +68,7 @@ type MailSettings struct {
 	// _mta-sts.<d> (the Hub's own record of it: the MTA-STS policy check
 	// runs for exactly those, M13).
 	MTASTSPublished map[string]bool `json:"mta_sts_published,omitempty" yaml:"mta_sts_published,omitempty"`
-	Switch         *MailSwitch       `json:"switch,omitempty" yaml:"switch,omitempty"`
+	Switch          *MailSwitch     `json:"switch,omitempty" yaml:"switch,omitempty"`
 }
 
 // MailUnwiring is a draining unwire.
