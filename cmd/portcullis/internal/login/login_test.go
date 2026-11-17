@@ -297,6 +297,11 @@ func TestWriteFiles0600(t *testing.T) {
 	if err != nil || k == nil {
 		t.Errorf("id isn't a private key: %v", err)
 	}
+	// M7: with no agent, ssh must be pointed at the private key itself.
+	cfg, _ := os.ReadFile(filepath.Join(o.Home, ".ssh/portcullis/example.org/config"))
+	if !strings.Contains(string(cfg), "  IdentityFile ~/.ssh/portcullis/example.org/id\n") {
+		t.Errorf("config doesn't name the private key:\n%s", cfg)
+	}
 }
 
 // A hostile answer: an escape sequence in a principal (signed into the

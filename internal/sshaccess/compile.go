@@ -316,7 +316,7 @@ func ClientConfig(domain string, plans map[string]CertPlan, hosts map[string][]s
 	for _, hg := range sortedKeys(plans) {
 		gs = append(gs, cliapi.ClientGroup{HostGroup: hg, Hosts: hosts[hg]})
 	}
-	return cliapi.ClientConfig(domain, gs)
+	return cliapi.ClientConfig(domain, gs, false)
 }
 
 // ErrNoUID is AllocUID's exhaustion.

@@ -127,14 +127,14 @@ func TestClientConfigRefusesInjection(t *testing.T) {
 		{HostGroup: "web", Hosts: []string{"a,b"}},
 		{HostGroup: "web\nHost *", Hosts: []string{"a"}},
 	} {
-		if out, err := ClientConfig("example.com", []ClientGroup{bad}); err == nil || out != "" {
+		if out, err := ClientConfig("example.com", []ClientGroup{bad}, false); err == nil || out != "" {
 			t.Errorf("%q rendered: %q", bad, out)
 		}
 		if out, err := KnownHosts("example.com", []ClientGroup{bad}, nil, nil); err == nil || out != "" {
 			t.Errorf("known_hosts %q rendered: %q", bad, out)
 		}
 	}
-	if _, err := ClientConfig("example.com\nHost *", nil); err == nil {
+	if _, err := ClientConfig("example.com\nHost *", nil, false); err == nil {
 		t.Error("a bad domain rendered")
 	}
 	if _, err := KnownHosts("example.com", nil, []string{"ssh-ed25519 AAAA\n@cert-authority * x"}, nil); err == nil {
@@ -149,7 +149,7 @@ func FuzzClientConfig(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, name string) {
-		out, err := ClientConfig("example.com", []ClientGroup{{HostGroup: "web", Hosts: []string{name}}})
+		out, err := ClientConfig("example.com", []ClientGroup{{HostGroup: "web", Hosts: []string{name}}}, false)
 		if err != nil {
 			return
 		}

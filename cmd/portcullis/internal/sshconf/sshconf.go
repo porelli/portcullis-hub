@@ -39,7 +39,7 @@ func Write(home, domain string, ans *cliapi.CertAnswer, pub string, privPEM []by
 		groups = append(groups, cliapi.ClientGroup{HostGroup: c.HostGroup, Hosts: c.Hosts})
 		certs[c.HostGroup] = strings.TrimSpace(c.Certificate) + "\n"
 	}
-	cfg, err := cliapi.ClientConfig(domain, groups)
+	cfg, err := cliapi.ClientConfig(domain, groups, privPEM != nil)
 	if err != nil {
 		return fmt.Errorf("the server's answer can't be written as SSH config: %w", err)
 	}

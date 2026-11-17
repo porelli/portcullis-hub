@@ -50,8 +50,12 @@ func clipQ(s string) string {
 // ClientConfig is ~/.ssh/portcullis/<domain>/config (spec §6): one Match
 // block per host group with names, sorted by host group. A group without
 // names gets no block (ssh still tries every agent identity). Any value
-// outside its grammar is an error and nothing is rendered.
-func ClientConfig(domain string, groups []ClientGroup) (string, error) {
+// outside its grammar is an error and nothing is rendered. withPrivate:
+// the private key is written next to it (`login --write-files`, no agent
+// needed) and IdentityFile names it (`id`); otherwise IdentityFile names
+// `id.pub`, which selects the agent's key (OpenSSH can't sign with a .pub
+// alone — final review M7).
+func ClientConfig(domain string, groups []ClientGroup, withPrivate bool) (string, error) {
 	if err := checkGroups(domain, groups); err != nil {
 		return "", err
 	}
@@ -65,7 +69,11 @@ func ClientConfig(domain string, groups []ClientGroup) (string, error) {
 			continue
 		}
 		b.WriteString("Match host " + strings.Join(g.Hosts, ",") + "\n")
-		b.WriteString("  IdentityFile " + dir + "/id.pub\n")
+		if withPrivate {
+			b.WriteString("  IdentityFile " + dir + "/id\n")
+		} else {
+			b.WriteString("  IdentityFile " + dir + "/id.pub\n")
+		}
 		b.WriteString("  CertificateFile " + dir + "/" + g.HostGroup + "-cert.pub\n")
 		b.WriteString("  IdentitiesOnly yes\n")
 		b.WriteString("  UserKnownHostsFile ~/.ssh/known_hosts " + dir + "/known_hosts\n")
