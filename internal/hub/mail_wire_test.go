@@ -433,3 +433,21 @@ func TestVoidNetworkNotInternalStops(t *testing.T) {
 		t.Fatalf("void reported applied: owed %+v voids %v", w.h.st.Mail.VoidOwed, w.mc.Voids)
 	}
 }
+
+// TestWireRefusalsRecheckedUnderLocks (L2): the slot closing between
+// the guards and the locks refuses the wiring.
+func TestWireRefusalsRecheckedUnderLocks(t *testing.T) {
+	w := newWireFix(t)
+	w.h.testHookMailSlotLocked = func(op string) {
+		if op == OpMailWire {
+			setCoreMail(t, w.fixture, false)
+		}
+	}
+	_, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof, Listener: ListenerHub}, rootActor())
+	w.h.mu.RLock()
+	p := w.h.st.Mail.Provider
+	w.h.mu.RUnlock()
+	if statusOf(err) != 409 || p != nil {
+		t.Fatalf("%v, provider %+v", err, p)
+	}
+}

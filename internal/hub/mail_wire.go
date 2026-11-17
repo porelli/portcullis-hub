@@ -218,9 +218,22 @@ func (h *Hub) StartWireMail(ctx context.Context, id string, in WireRequest, acto
 		h.mailSlotLocked(OpMailWire)
 		h.mu.RLock()
 		cur := h.st.Mail.Provider
+		// Every 409 refusal again under the locks (L2: the slot, the
+		// runtime, the ports, the template's validity may have changed).
+		var refusals []string
+		if lt := h.findLocked(id); lt == nil {
+			refusals = []string{id + " is no instance any more"}
+		} else {
+			refusals = h.mailWireRefusalsLocked(lt, "")
+		}
 		h.mu.RUnlock()
 		if cur != nil {
 			err := statusErr(http.StatusConflict, "%s is this server's mail provider: switch instead", cur.Instance)
+			h.auditOp(actor, "mail.provider_wired", id, "", err)
+			return nil, nil, err
+		}
+		if len(refusals) > 0 {
+			err := statusErr(http.StatusConflict, "%s", refusals[0])
 			h.auditOp(actor, "mail.provider_wired", id, "", err)
 			return nil, nil, err
 		}

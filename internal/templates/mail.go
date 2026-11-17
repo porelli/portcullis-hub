@@ -444,8 +444,10 @@ func ValidateMail(t *Template, compose []byte, routes *Routes) error {
 				if vpnBindOutside(mm.src) {
 					return fmt.Errorf("mail: %s mounts %s: a mail template's binds start with ./ and have no .. segment", s, mm.entry)
 				}
-				norm := strings.ToLower(path.Clean(mm.src))
-				if !strings.HasPrefix(strings.ToLower(mm.src), "./templates/"+strings.ToLower(tid)+"/") || !strings.HasPrefix(norm, "templates/"+strings.ToLower(tid)+"/") || !mm.ro {
+				// Case-sensitive (L12): ./templates/STALWART/ is another
+				// directory on Linux.
+				norm := path.Clean(mm.src)
+				if !strings.HasPrefix(mm.src, "./templates/"+tid+"/") || !strings.HasPrefix(norm, "templates/"+tid+"/") || !mm.ro {
 					return fmt.Errorf("mail: %s mounts %s: a mail provider binds only the template's own files (./templates/%s/…), read-only", s, mm.entry, tid)
 				}
 				continue

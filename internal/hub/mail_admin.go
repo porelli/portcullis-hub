@@ -323,6 +323,9 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 		empty := ""
 		password = &empty
 	}
+	// L5: a save that fails puts the previous password back too.
+	prevPw, _ := os.ReadFile(filepath.Join(h.cfg.DataDir, mailRelayPasswordFile))
+	defer clear(prevPw)
 	if password != nil {
 		if err := h.writeMailRelayPasswordLocked(*password); err != nil {
 			h.st.Mail = old
@@ -331,6 +334,11 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 	}
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail = old
+		if password != nil {
+			if rerr := h.writeMailRelayPasswordLocked(string(prevPw)); rerr != nil {
+				log.Printf("mail: putting the previous relay password back: %v", rerr)
+			}
+		}
 		return err
 	}
 	h.TriggerMailSync()

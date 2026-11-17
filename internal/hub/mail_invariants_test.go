@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -236,6 +237,9 @@ func TestBuildMailStateV2Vector(t *testing.T) {
 func TestRelayPasswordWriteOnly(t *testing.T) {
 	w := wiredFix(t)
 	ctx := context.Background()
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	in := MailSettingsInput{PrimaryDomain: "example.org", Spam: MailSpamView{RejectScore: 15, JunkScore: 5}, Limits: mailprovider.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000},
 		Relay: json.RawMessage(`{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "_spf.relay.example.net", "password": "s3cret-relay"}`)}
 	if err := w.h.SetMailSettings(ctx, in, rootActor()); err != nil {
@@ -257,7 +261,7 @@ func TestRelayPasswordWriteOnly(t *testing.T) {
 	}
 	vb, _ := json.Marshal(v)
 	stb, _ := os.ReadFile(w.h.statePath())
-	if strings.Contains(string(vb), "s3cret") || strings.Contains(string(stb), "s3cret") || strings.Contains(w.audit.last().Detail, "s3cret") {
+	if strings.Contains(string(vb), "s3cret") || strings.Contains(string(stb), "s3cret") || strings.Contains(w.audit.last().Detail, "s3cret") || strings.Contains(logs.String(), "s3cret") {
 		t.Fatal("the password leaked")
 	}
 	// Absent keeps it.
@@ -368,4 +372,28 @@ type listFailAPI struct{ MailAPI }
 
 func (a *listFailAPI) Credentials(context.Context, string) ([]mailprovider.Credential, error) {
 	return nil, errors.New("list timed out")
+}
+
+// TestRelayPasswordRolledBackOnFailedSave (L5): a failed save keeps the
+// previous relay password, in hub_data and in the gate.
+func TestRelayPasswordRolledBackOnFailedSave(t *testing.T) {
+	w := wiredFix(t)
+	ctx := context.Background()
+	in := MailSettingsInput{PrimaryDomain: "example.org", Spam: MailSpamView{RejectScore: 15, JunkScore: 5}, Limits: mailprovider.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000},
+		Relay: json.RawMessage(`{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "", "password": "first-pass"}`)}
+	if err := w.h.SetMailSettings(ctx, in, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	sp := w.h.statePath()
+	os.Remove(sp)
+	if err := os.Mkdir(sp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	in.Relay = json.RawMessage(`{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "", "password": "second-pass"}`)
+	if err := w.h.SetMailSettings(ctx, in, rootActor()); err == nil {
+		t.Fatal("the save didn't fail")
+	}
+	if b, _ := os.ReadFile(filepath.Join(w.data, mailRelayPasswordFile)); string(b) != "first-pass" || gateFile(t, w.fixture, mailGateRelayPassword) != "first-pass" {
+		t.Fatalf("hub_data %q gate %q", b, gateFile(t, w.fixture, mailGateRelayPassword))
+	}
 }
