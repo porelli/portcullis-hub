@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
-	"slices"
 	"testing"
 	"time"
 
