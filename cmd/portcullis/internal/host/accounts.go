@@ -7,6 +7,7 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -33,8 +34,9 @@ func shellFor(sys System) string {
 // accountsCtx is the host's accounts as an apply sees them.
 type accountsCtx struct {
 	users   map[string]Passwd
-	members map[string]bool // members of portcullis-users
-	created int             // Portcullis-created accounts present
+	members map[string]bool     // members of portcullis-users
+	groups  map[string][]string // every group's members (/etc/group)
+	created int                 // Portcullis-created accounts present
 }
 
 func loadAccounts(sys System) (*accountsCtx, error) {
@@ -46,7 +48,7 @@ func loadAccounts(sys System) (*accountsCtx, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &accountsCtx{users: u, members: map[string]bool{}}
+	a := &accountsCtx{users: u, members: map[string]bool{}, groups: g}
 	for _, m := range g[UsersGroup] {
 		a.members[m] = true
 	}
@@ -62,6 +64,59 @@ func loadAccounts(sys System) (*accountsCtx, error) {
 func (a *accountsCtx) ours(name string) bool {
 	u, ok := a.users[name]
 	return ok && u.Comment == PortcullisComment(name) && a.members[name]
+}
+
+// sudoGroups are the groups that give sudo on common distributions.
+var sudoGroups = []string{"sudo", "wheel", "admin"}
+
+// sudoVia says how name can reach root on this host outside Portcullis's
+// own sudoers file (FR-H4): uid 0, a sudo / wheel / admin group, or a
+// sudoers rule naming it or one of its groups (cloud-init writes
+// "ubuntu ALL=(ALL) NOPASSWD:ALL" to /etc/sudoers.d). "" = none seen.
+func (a *accountsCtx) sudoVia(sys System, name string) string {
+	u, ok := a.users[name]
+	if !ok {
+		return ""
+	}
+	if u.UID == 0 {
+		return "uid 0"
+	}
+	var mine []string
+	for g, ms := range a.groups {
+		if slices.Contains(ms, name) {
+			mine = append(mine, g)
+		}
+	}
+	for _, g := range sudoGroups {
+		if slices.Contains(mine, g) {
+			return "the " + g + " group"
+		}
+	}
+	files := []string{"/etc/sudoers"}
+	more, _ := sys.Glob("/etc/sudoers.d/*")
+	for _, f := range more {
+		if f != SudoersFile {
+			files = append(files, f)
+		}
+	}
+	for _, f := range files {
+		raw, _ := readMaybe(sys, f)
+		if len(raw) > 1<<20 {
+			raw = raw[:1<<20]
+		}
+		for _, l := range bytes.Split(raw, []byte("\n")) {
+			fs := bytes.Fields(l)
+			if len(fs) < 2 || bytes.HasPrefix(fs[0], []byte("#")) || bytes.HasPrefix(fs[0], []byte("Defaults")) {
+				continue
+			}
+			who := string(fs[0])
+			if who == name || (strings.HasPrefix(who, "%") && slices.Contains(mine, who[1:])) ||
+				(who == "User_Alias" && bytes.Contains(l, []byte(name))) {
+				return "a rule in " + f
+			}
+		}
+	}
+	return ""
 }
 
 // ensureGroup creates portcullis-users once.

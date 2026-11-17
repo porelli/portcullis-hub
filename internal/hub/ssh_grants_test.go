@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -268,6 +269,16 @@ func TestRevokeOnLeaveKeyUnknown(t *testing.T) {
 			}
 		}
 	}
+	// FR-H1: every bundle still carries only parseable revoked keys (a
+	// fingerprint-only entry would make every managed host refuse it).
+	f.compile(t) // the revocation was recorded after the first compile
+	for id, b := range f.h.sshCompiled().Bundles {
+		for _, k := range b.RevokedKeys {
+			if _, _, err := cliapi.ParseAuthorizedKey(k); err != nil {
+				t.Errorf("bundle %s carries a revoked key that isn't a public key: %q", id, k)
+			}
+		}
+	}
 	// The fingerprint is never signed again.
 	f.people.set(func(p *sshPeople) { p.users["alice"]["ssh_web"] = 11 })
 	f.compile(t)
@@ -308,5 +319,56 @@ func TestKeysKeptWhileRevoked(t *testing.T) {
 	f.h.pruneKeys(f.clock().Add(100 * 24 * time.Hour))
 	if f.h.issuedKey(fp) != "" {
 		t.Error("an old, unrevoked key's record kept")
+	}
+}
+
+// TestRevokeOnLosingOnePrincipal (FR-H2): bob holds u:bob@web (ssh_web)
+// and s:deploy@web (ssh_deploy) in one certificate; leaving ssh_deploy
+// revokes the key although u:bob@web is still his (the host can't fence
+// one holder out of a shared principal).
+func TestRevokeOnLosingOnePrincipal(t *testing.T) {
+	f := newGrantFixture(t)
+	f.v.res.User = "bob"
+	ans, err := f.h.SignSSH(context.Background(), f.request(t, f.signer, "web"), "192.0.2.60")
+	if err != nil || len(ans.Certificates) != 1 || !slices.Contains(ans.Certificates[0].Principals, "s:deploy@web") || !slices.Contains(ans.Certificates[0].Principals, "u:bob@web") {
+		t.Fatalf("%+v %v", ans, err)
+	}
+	f.people.set(func(p *sshPeople) { delete(p.users["bob"], "ssh_deploy") })
+	f.compile(t)
+	keys := f.h.RevokedKeys()
+	if len(keys) != 1 || keys[0] != cliapi.NormalAuthorizedKey(f.signer.PublicKey()) {
+		t.Fatalf("revoked %v (want bob's key: s:deploy@web is gone)", keys)
+	}
+	l, _ := f.h.sshRevokedList()
+	if l[0].Reason != "left ssh_deploy" && !strings.Contains(l[0].Reason, "ssh_deploy") {
+		t.Errorf("reason %q", l[0].Reason)
+	}
+	// Signing in again gives only what bob still holds.
+	f.compile(t)
+	_, s2 := newSigner(t)
+	ans, err = f.h.SignSSH(context.Background(), f.request(t, s2, "web"), "192.0.2.61")
+	if err != nil || len(ans.Certificates) != 1 || slices.Contains(ans.Certificates[0].Principals, "s:deploy@web") {
+		t.Fatalf("after leaving: %+v %v", ans, err)
+	}
+}
+
+// TestCloudDefaultAccountGrantIsPrivileged (FR-H4): a shared grant of a
+// cloud image's default user is privileged — refused for a delegate and
+// through the AI, and an administrator needs the typed name + fresh
+// sign-in.
+func TestCloudDefaultAccountGrantIsPrivileged(t *testing.T) {
+	f := newGrantFixture(t)
+	g := state.SSHGrant{Group: "ssh_ops", HostGroup: "web", Accounts: []string{"ubuntu"}, Sudo: "none"}
+	if _, err := f.h.SaveGrant(context.Background(), asDelegate, g, "", nil); err == nil || err.Error() != TextOnlyAdminsPrivileged {
+		t.Errorf("delegate: %v", err)
+	}
+	if _, err := f.h.SaveGrant(context.Background(), asAI, g, "ssh_ops", nil); err == nil {
+		t.Error("AI accepted")
+	}
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, g, "", nil); sshStatusOf(err) != 400 {
+		t.Errorf("admin without the typed name: %v", err)
+	}
+	if _, err := f.h.SaveGrant(context.Background(), asAdmin, g, "ssh_ops", nil); sshStatusOf(err) != 403 {
+		t.Errorf("admin without a fresh sign-in: %v", err)
 	}
 }

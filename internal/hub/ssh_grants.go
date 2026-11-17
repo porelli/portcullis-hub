@@ -372,15 +372,19 @@ func (h *Hub) revokeOnLeave(ctx context.Context, c *sshaccess.Compiled) {
 		if !rec.ValidBefore.After(now) || done[rec.KeyFP] {
 			continue
 		}
+		// FR-H2: revoked when ANY principal of the certificate is no
+		// longer the person's (a shared s: principal is the same for every
+		// holder, so the host can't fence one person out of it; key-level:
+		// the person signs in again for what they still hold).
 		have := c.People[rec.User].HostGroups[rec.HostGroup].Principals
-		keep := false
+		lost := false
 		for _, p := range rec.Principals {
-			if slices.Contains(have, p) {
-				keep = true
+			if !slices.Contains(have, p) {
+				lost = true
 				break
 			}
 		}
-		if keep {
+		if !lost {
 			continue
 		}
 		reason := "left " + leftGroup(grants, rec)

@@ -199,6 +199,10 @@ func TestPrivileged(t *testing.T) {
 		"shared sudo":    func(g *state.SSHGrant) { g.Accounts = []string{"deploy"}; g.Sudo = "full" },
 		"all":            func(g *state.SSHGrant) { g.HostGroup = "all" },
 		"portcullis-...": func(g *state.SSHGrant) { g.HostGroup = "portcullis-servers" },
+		// FR-H4: a cloud image's default user (usually NOPASSWD sudo).
+		"ubuntu":   func(g *state.SSHGrant) { g.Accounts = []string{"ubuntu"} },
+		"ec2-user": func(g *state.SSHGrant) { g.Accounts = []string{"deploy", "ec2-user"} },
+		"pi":       func(g *state.SSHGrant) { g.Accounts = []string{"pi"} },
 	} {
 		g := base
 		g.Accounts = slices.Clone(base.Accounts)

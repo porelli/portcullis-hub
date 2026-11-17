@@ -91,7 +91,7 @@ func Sync(ctx context.Context, sys System, o SyncOptions) error {
 		switch {
 		case errors.Is(err, ErrRemoved):
 			log.Printf("portcullis: %v: removing the Portcullis trust", err)
-			return RemoveTrust(ctx, sys, false, cfg.ServiceNone)
+			return RemoveTrust(ctx, sys, false, cfg.ServiceNone, true)
 		case err != nil:
 			log.Printf("portcullis: %v (the last files stay)", err)
 			if o.Once {

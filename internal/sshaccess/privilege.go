@@ -31,6 +31,12 @@ func Privileged(g state.SSHGrant) (bool, string) {
 			break
 		}
 	}
+	for _, a := range g.Accounts {
+		if slices.Contains(CloudDefaultAccounts, a) {
+			why = append(why, "the account "+a+" (a cloud image's default user, usually with sudo)")
+			break
+		}
+	}
 	if g.AgentForwarding {
 		why = append(why, "agent forwarding")
 	}
@@ -42,6 +48,14 @@ func Privileged(g state.SSHGrant) (bool, string) {
 	}
 	return true, strings.Join(why, ", ")
 }
+
+// CloudDefaultAccounts are the default users of common cloud and board
+// images, which usually have passwordless sudo (FR-H4): a grant of one is
+// privileged whatever its sudo setting (the typed group name and a fresh
+// sign-in; never by a delegate or through the AI). The host's ceiling
+// also refuses any account with sudo when allow_sudo is off.
+var CloudDefaultAccounts = []string{"ubuntu", "ec2-user", "admin", "centos", "debian", "rocky", "almalinux", "fedora",
+	"azureuser", "opc", "cloud-user", "pi", "alpine", "arch"}
 
 // GrantTTLHours is the grant's effective TTL: its own, else 4 h for a
 // privileged grant, else the setting; never above the setting's maximum.

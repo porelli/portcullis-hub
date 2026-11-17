@@ -417,3 +417,82 @@ func TestPrincipalsFilesOnlyNamespaced(t *testing.T) {
 	}
 	check("trust", tsys)
 }
+
+// TestInvalidRevokedKeyDroppedNotRefused (FR-H1): a revoked-key line
+// that isn't a public key is dropped and reported; the bundle still
+// applies (refusing it would freeze the host for good).
+func TestInvalidRevokedKeyDroppedNotRefused(t *testing.T) {
+	sys := newFakeSys(t)
+	b := bundle(t)
+	good, _ := caKey(t)
+	b.RevokedKeys = []string{"", "FP:SHA256:abc", good}
+	if err := ValidateBundle(b, "web-1", nil); err != nil {
+		t.Fatalf("refused: %v", err)
+	}
+	_, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(sys.files[RevokedKeysFile])); strings.Count(got, "\n") != 0 || !strings.HasPrefix(got, "ssh-ed25519 ") {
+		t.Errorf("revoked_keys %q (only the good key)", got)
+	}
+	found := false
+	for _, f := range fs {
+		found = found || (f.Subject == RevokedKeysFile && strings.Contains(f.Detail, "2 revoked key line(s)"))
+	}
+	if !found {
+		t.Errorf("not reported: %+v", fs)
+	}
+	// A bad user CA still refuses the bundle.
+	b.UserCAs = []string{"not a key"}
+	if err := ValidateBundle(b, "web-1", nil); err == nil {
+		t.Error("a bad user CA accepted")
+	}
+}
+
+// TestCeilingNoSudoRefusesAccountsWithSudo (FR-H4): with allow_sudo off,
+// a shared account that has sudo some other way (a cloud-init sudoers
+// rule, the sudo / wheel group, uid 0) gets no principals file.
+func TestCeilingNoSudoRefusesAccountsWithSudo(t *testing.T) {
+	for name, setup := range map[string]func(sys *fakeSys){
+		"sudoers.d rule": func(sys *fakeSys) {
+			sys.files["/etc/sudoers.d/90-cloud-init-users"] = []byte("# Created by cloud-init\nubuntu ALL=(ALL) NOPASSWD:ALL\n")
+		},
+		"sudo group": func(sys *fakeSys) {
+			sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("sudo:x:27:ubuntu\n")...)
+		},
+		"group rule": func(sys *fakeSys) {
+			sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("ops:x:3000:ubuntu\n")...)
+			sys.files["/etc/sudoers"] = []byte("Defaults env_reset\n%ops ALL=(ALL) ALL\n")
+		},
+	} {
+		sys := newFakeSys(t)
+		sys.files["/etc/passwd"] = append(sys.files["/etc/passwd"], []byte("ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n")...)
+		setup(sys)
+		b := bundle(t)
+		b.Accounts = []cliapi.Account{{Name: "ubuntu", Kind: "shared", Principals: []string{"s:ubuntu@web"}}}
+		c := cliapi.DefaultCeiling()
+		c.AllowSudo = false
+		_, fs, err := apply(t, sys, b, c, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, ok := sys.files[PrincipalsFile("ubuntu")]; ok {
+			t.Errorf("%s: ubuntu got a principals file under allow_sudo=false", name)
+		}
+		if k := kinds(fs)[cliapi.FindingCeiling]; !slices.Contains(k, "ubuntu") {
+			t.Errorf("%s: not reported: %+v", name, fs)
+		}
+		// Allowed by the ceiling: the principals file is written (the
+		// grant was privileged on the Hub).
+		sys2 := newFakeSys(t)
+		sys2.files["/etc/passwd"] = append(sys2.files["/etc/passwd"], []byte("ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n")...)
+		setup(sys2)
+		if _, _, err := apply(t, sys2, b, cliapi.DefaultCeiling(), nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := sys2.files[PrincipalsFile("ubuntu")]; !ok {
+			t.Errorf("%s: allow_sudo on: no principals file", name)
+		}
+	}
+}

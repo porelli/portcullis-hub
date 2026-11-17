@@ -187,7 +187,7 @@ func hostRemoveCmd() *cobra.Command {
 			if cfg, err := host.LoadAgentConfig(host.OS{}); err == nil {
 				none = cfg.ServiceNone
 			}
-			if err := host.RemoveTrust(cmd.Context(), host.OS{}, del, none); err != nil {
+			if err := host.RemoveTrust(cmd.Context(), host.OS{}, del, none, false); err != nil {
 				return api.Errorf(api.ExitError, "%v", err)
 			}
 			fmt.Println("Removed. The host's own login paths are as they were.")

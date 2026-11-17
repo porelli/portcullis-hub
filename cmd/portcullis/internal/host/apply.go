@@ -89,11 +89,14 @@ func ValidateBundle(b *cliapi.Bundle, hostID string, hostKey ssh.PublicKey) erro
 	case len(b.Accounts) > 100000 || len(b.RevokedKeys) > 100000:
 		return errors.New("bundle too large")
 	}
-	for _, k := range append(slices.Clone(b.UserCAs), b.RevokedKeys...) {
+	for _, k := range b.UserCAs {
 		if _, _, err := cliapi.ParseAuthorizedKey(k); err != nil {
-			return errors.New("bundle holds a key that isn't a public key")
+			return errors.New("bundle holds a user CA that isn't a public key")
 		}
 	}
+	// Revoked keys: an invalid line is dropped and reported by Apply
+	// (FR-H1), never a reason to refuse the bundle — that would freeze the
+	// host (no later revocation, lock or removal would arrive).
 	seen := map[string]bool{}
 	for _, a := range b.Accounts {
 		if seen[a.Name] || !validBundleAccount(a) || len(a.Name) == 0 || len(a.Name) > 64 || strings.ContainsAny(a.Name, "/:\n\x00 ") {
@@ -206,6 +209,15 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 				findings = append(findings, finding(cliapi.FindingAuthorizedKeysShared, cliapi.SeverityInfo, a.Name, fmt.Sprintf("%d authorized_keys entries", n)))
 			}
 		}
+		// FR-H4: an account that can reach root by other means is sudo,
+		// whatever the bundle says; with sudo off by the ceiling it gets no
+		// principals (a cloud image's default user, an admin's own login).
+		if !c.AllowSudo {
+			if via := acc.sudoVia(sys, a.Name); via != "" {
+				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and this host's ceiling doesn't allow sudo"))
+				continue
+			}
+		}
 		principals[a.Name] = a.Principals
 		if a.Sudo {
 			if !c.AllowSudo {
@@ -257,9 +269,17 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 		_, n, _ := cliapi.ParseAuthorizedKey(k)
 		cas = append(cas, n)
 	}
+	dropped := 0
 	for _, k := range b.RevokedKeys {
-		_, n, _ := cliapi.ParseAuthorizedKey(k)
+		_, n, err := cliapi.ParseAuthorizedKey(k)
+		if err != nil {
+			dropped++
+			continue
+		}
 		revoked = append(revoked, n)
+	}
+	if dropped > 0 {
+		findings = append(findings, finding(cliapi.FindingDrift, cliapi.SeverityWarning, RevokedKeysFile, fmt.Sprintf("%d revoked key line(s) from the Hub weren't public keys: dropped", dropped)))
 	}
 	sort.Strings(revoked)
 	stage := func(p string, body []byte, mode uint32) error { return tx.Stage(p, body, fsMode(mode)) }

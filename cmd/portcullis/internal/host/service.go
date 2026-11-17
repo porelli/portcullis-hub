@@ -106,12 +106,26 @@ func startService(ctx context.Context, sys System, kind string) error {
 	return nil
 }
 
-func stopService(ctx context.Context, sys System) {
-	if exists(sys, SyncUnit) {
-		_, _ = sys.Run(ctx, "systemctl", "disable", "--now", "portcullis-host-sync.service")
-	}
-	if exists(sys, SyncPlist) {
-		_, _ = sys.Run(ctx, "launchctl", "bootout", "system/eu.portcullis.host-sync")
+// stopService disables and stops the agent's services. self: the sync
+// agent stopping its own unit after removing everything (FR-H3) — the
+// unit files may already be gone, so it doesn't look for them, and the
+// stop is queued (--no-block) so systemd's SIGTERM comes after the work.
+func stopService(ctx context.Context, sys System, self bool) {
+	if self {
+		if exists(sys, "/run/systemd/system") {
+			_, _ = sys.Run(ctx, "systemctl", "disable", "portcullis-host-sync.service")
+			_, _ = sys.Run(ctx, "systemctl", "stop", "--no-block", "portcullis-host-sync.service")
+		}
+		if exists(sys, "/Library/LaunchDaemons") {
+			_, _ = sys.Run(ctx, "launchctl", "bootout", "system/eu.portcullis.host-sync")
+		}
+	} else {
+		if exists(sys, SyncUnit) {
+			_, _ = sys.Run(ctx, "systemctl", "disable", "--now", "portcullis-host-sync.service")
+		}
+		if exists(sys, SyncPlist) {
+			_, _ = sys.Run(ctx, "launchctl", "bootout", "system/eu.portcullis.host-sync")
+		}
 	}
 	if exists(sys, revokedTimer) {
 		_, _ = sys.Run(ctx, "systemctl", "disable", "--now", "portcullis-revoked-keys.timer")

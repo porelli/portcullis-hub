@@ -82,9 +82,14 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 	if err != nil {
 		return h.sshCompileFailed(err)
 	}
+	// Only parseable public keys (FR-H1): a fingerprint-only revocation
+	// (the key was never recorded, C21-b) stays in revoked.json and the
+	// doctor's "revocation incomplete"; the person's account lock carries it.
 	keys := make([]string, 0, len(revoked))
 	for _, r := range revoked {
-		keys = append(keys, r.Key)
+		if _, _, err := cliapi.ParseAuthorizedKey(r.Key); err == nil {
+			keys = append(keys, r.Key)
+		}
 	}
 	slices.Sort(keys)
 	h.sshrt.mu.Lock()

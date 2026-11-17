@@ -363,7 +363,7 @@ func TestRemoveDeletesOnlyOwnFiles(t *testing.T) {
 	if err := f.enroll(t, "none"); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveTrust(context.Background(), f.sys, false, true); err != nil {
+	if err := RemoveTrust(context.Background(), f.sys, false, true, false); err != nil {
 		t.Fatal(err)
 	}
 	after := f.sys.snapshot()
@@ -408,5 +408,46 @@ func TestSyncHealsDriftWithLastBundle(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("report %+v", r.Findings)
+	}
+}
+
+// TestAgentRemovalStopsItselfLast (FR-H3): the sync agent removing the
+// host after the Hub said "removed" takes the trust away (CA, principals,
+// drop-in, accounts locked, sshd reloaded) BEFORE it stops its own unit:
+// systemd's stop kills the agent, so anything after it never happens.
+func TestAgentRemovalStopsItselfLast(t *testing.T) {
+	f := newHostFix(t)
+	f.sys.dirs["/run/systemd/system"] = true
+	f.sys.files["/run/systemd/system/.x"] = []byte{}
+	if err := f.enroll(t, "none"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.sys.files[UserCAFile]; !ok {
+		t.Fatal("enrol wrote no CA")
+	}
+	f.sys.files[SyncUnit] = SyncUnitBody("/usr/local/bin/portcullis") // the agent runs as this unit
+	var atStop []string
+	f.sys.handler["systemctl"] = func(args []string) ([]byte, error) {
+		cmd := strings.Join(args, " ")
+		if strings.Contains(cmd, "portcullis-host-sync.service") && (strings.HasPrefix(cmd, "stop") || strings.Contains(cmd, "--now")) {
+			for _, p := range []string{UserCAFile, DropInFile, PrincipalsFile("alice")} {
+				if _, ok := f.sys.files[p]; ok {
+					atStop = append(atStop, p)
+				}
+			}
+			if !f.sys.ran("usermod -L") {
+				atStop = append(atStop, "alice not locked")
+			}
+		}
+		return nil, nil
+	}
+	if err := RemoveTrust(context.Background(), f.sys, false, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if !f.sys.ran("systemctl stop --no-block portcullis-host-sync.service") {
+		t.Errorf("the agent never stopped its own unit: %v", f.sys.runs)
+	}
+	if len(atStop) != 0 {
+		t.Errorf("still in place when the agent stopped itself: %v", atStop)
 	}
 }

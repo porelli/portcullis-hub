@@ -75,6 +75,8 @@ type sshdHub struct {
 	hostKey ssh.PublicKey
 	bundle  cliapi.Bundle
 	reports []cliapi.Report
+	// removed: the Hub answers the host's requests 403 removed.
+	removed bool
 }
 
 func (h *sshdHub) setBundle(edit func(*cliapi.Bundle)) {
@@ -137,6 +139,12 @@ func (h *sshdHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.t.Errorf("a host request with a bad signature: %s", r.URL.Path)
 			w.WriteHeader(403)
 			w.Write([]byte(`{"error":"bad signature"}`))
+			return
+		}
+		if h.removed {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(403)
+			w.Write([]byte(`{"error":"removed"}`))
 			return
 		}
 		switch r.URL.Path {
@@ -348,6 +356,27 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	exec_("sh", "-c", "kill -HUP 1")
 	time.Sleep(time.Second)
 	waitSSH()
+	// FR-H4: a cloud image's default user with its own NOPASSWD sudo rule;
+	// with the ceiling's allow_sudo off it gets no principals file, so a
+	// valid s:ubuntu@web certificate opens nothing (reported).
+	exec_("sh", "-c", "useradd -m -s /bin/bash ubuntu && echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-cloud-init-users && chmod 440 /etc/sudoers.d/90-cloud-init-users")
+	exec_("sed", "-i", `s/"allow_sudo": true/"allow_sudo": false/`, "/etc/portcullis/host.json")
+	hub.setBundle(func(b *cliapi.Bundle) {
+		b.Accounts = append(b.Accounts, cliapi.Account{Name: "ubuntu", Kind: "shared", Principals: []string{"s:ubuntu@web"}})
+	})
+	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err != nil {
+		t.Errorf("sync: %v %s", err, out)
+	}
+	if out, _ := exec_("sh", "-c", "ls /etc/ssh/portcullis/principals/ubuntu 2>&1"); !strings.Contains(out, "No such file") {
+		t.Errorf("ubuntu got a principals file under allow_sudo=false: %s", out)
+	}
+	if _, err := sshRun(addr, "ubuntu", userCert(t, caSigner, "s:ubuntu@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
+		t.Error("ubuntu (cloud-init sudo) logged in under allow_sudo=false")
+	}
+	if !hasFinding(hub.lastReport(), cliapi.FindingCeiling, "ubuntu", "") {
+		t.Errorf("not reported: %+v", hub.lastReport().Findings)
+	}
+	exec_("sed", "-i", `s/"allow_sudo": false/"allow_sudo": true/`, "/etc/portcullis/host.json")
 	// Bare principals (security review 2: Vault signs one a tampered role
 	// lists): every account's sshd reads the principals file, which holds
 	// only u:/s: names, so a certificate for "root", "alice" or "breakglass"
@@ -361,9 +390,15 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	if _, err := sshRun(addr, "root", userCert(t, caSigner, "root,u:alice@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
 		t.Error("root with root,u:alice@web: logged in")
 	}
-	// Remove: Portcullis's paths gone, the box's own ones unchanged.
-	if out, err := exec_("/usr/local/bin/portcullis", "host", "remove"); err != nil {
-		t.Fatalf("remove: %v %s", err, out)
+	// Removed from the Hub (FR-H3): the agent removes the trust itself —
+	// a valid certificate is refused afterwards and Portcullis's paths are
+	// gone, the box's own ones unchanged. (The manual `host remove` is
+	// TestRemoveDeletesOnlyOwnFiles.)
+	hub.mu.Lock()
+	hub.removed = true
+	hub.mu.Unlock()
+	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err != nil {
+		t.Fatalf("sync after removal: %v %s", err, out)
 	}
 	time.Sleep(time.Second)
 	waitSSH()
