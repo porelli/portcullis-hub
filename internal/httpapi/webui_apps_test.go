@@ -208,7 +208,7 @@ func TestHubInstLineEscapes(t *testing.T) {
 }
 
 // TestHubAppsPageStatic: the top tabs (Apps · Marketplace · SSH access · Audit log ·
-// Doctor · Settings · People ↗); the card's detail panel, the instance
+// Doctor · Usage · Settings · People ↗); the card's detail panel, the instance
 // dialog and the Template Sources tab are gone; the Marketplace carries
 // the sources; the Apps / Marketplace / instance page code and markup
 // use data-* attributes and delegated listeners, never inline handlers.
@@ -219,7 +219,7 @@ func TestHubAppsPageStatic(t *testing.T) {
 	for _, m := range tabs {
 		names = append(names, m[1])
 	}
-	if strings.Join(names, ",") != "apps,marketplace,ssh,audit,doctor,settings" || !strings.Contains(b, `<a class="tab" data-people-link href="#">People &#8599;</a>`) ||
+	if strings.Join(names, ",") != "apps,marketplace,ssh,audit,doctor,usage,settings" || !strings.Contains(b, `<a class="tab" data-people-link href="#">People &#8599;</a>`) ||
 		!strings.Contains(b, "document.querySelector('[data-people-link]').href = PortcullisPeople.base;") {
 		t.Errorf("top tabs = %v", names)
 	}

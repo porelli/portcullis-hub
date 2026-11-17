@@ -31,7 +31,7 @@ func fstatFD(fd int) (fileStat, error) {
 
 func fromStat(st *unix.Stat_t) fileStat {
 	return fileStat{Dev: uint64(st.Dev), Ino: uint64(st.Ino), Mode: uint32(st.Mode), Nlink: uint64(st.Nlink),
-		UID: st.Uid, GID: st.Gid}
+		UID: st.Uid, GID: st.Gid, Blocks: uint64(st.Blocks), HasBlocks: true, Size: uint64(st.Size)}
 }
 
 func ignoringEINTR(f func() error) error {

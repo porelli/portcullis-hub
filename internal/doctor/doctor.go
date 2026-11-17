@@ -283,6 +283,10 @@ type Inputs struct {
 	Mail *MailIn
 	// SSH: the SSH access kinds' inputs (ssh.go; nil = none fire).
 	SSH *SSHIn
+	// Usage / Storage: the usage kinds' inputs (usage.go; nil = none
+	// fire).
+	Usage   *UsageIn
+	Storage *StorageIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify

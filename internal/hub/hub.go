@@ -702,6 +702,8 @@ type Hub struct {
 	testOverrideWriteErr func(path string) error
 	// vpnrt is the VPN providers' memory (vpn_providers.go; own mutex).
 	vpnrt *vpnRuntime
+	// usage is the usage sampler's cache (usage.go; its own lock).
+	usage *usageState
 	// aiReapply: per instance, the companions whose last change failed
 	// after its state save (under aiErrMu); aiApplying: instances an
 	// UpdateInstanceAI is applying (startUp leaves the owed hooks to it).
@@ -794,6 +796,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 	}
 	h := &Hub{
 		vpnrt:                newVPNRuntime(),
+		usage:                newUsageState(),
 		kinds:                settings.NewRegistry(),
 		bindRoots:            roots,
 		cfg:                  cfg,

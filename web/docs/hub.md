@@ -10,12 +10,13 @@ membership of `lldap_admin`.
 
 ## Navigation
 
-The Hub has six main tabs under the shared navigation (Portal · Hub · People):
+The Hub has seven main tabs under the shared navigation (Portal · Hub · People):
 
 - **Apps** — installed apps and their instances (one per app, showing all its instances)
 - **Marketplace** — all available templates from every [template source](#template-sources), with installation and template source management
 - **Audit log** — [operation and access audit](#audit-log)
 - **Doctor** — [system health checks and fixes](#doctor)
+- **Usage** — [CPU, memory and storage per app and per container](#usage)
 - **Settings** — [global server settings](#settings-tab-global) (shared folders, local networks, domains)
 - **People ↗** — opens the People subdomain (`people.<domain>`) in the same tab
 
@@ -2040,6 +2041,73 @@ button on the instance page, and no AI tool can reach them.
 `lan_only_exposed` judges each port against **its own server's** Local
 networks. An address in the link subnet or the built-in VPN subnet never
 counts as local, whatever the list says.
+## Usage
+
+The **Usage** tab shows how much CPU, memory, network, disk IO and storage each
+app uses, aggregated per app and per container, with the core services as
+their own group. Only Hub administrators see it (it is on `hub.<domain>`
+only). Numbers come from the Hub's own sampler (every 15 s, through the
+existing socket proxy) and storage measurer (daily and on demand): opening
+the page never asks the engine anything, however many people look.
+
+- **By app** (the default): one row per app instance with CPU ("0.35 CPU",
+  with the percentage of its CPU limit or, without one, of the host's
+  CPUs), memory as a bar against its limit (amber at 80 %, red at 90 %, "no
+  limit" when there is none), network ↓/↑, disk IO, PIDs, its storage total
+  and a 1 h memory sparkline. Click a row to see its containers. The
+  **Core** group is last. The header shows the host's CPUs and memory, the
+  sums, when the last sample was taken, and how many other containers on
+  the engine are not shown (they are never named or sampled).
+- **By container**: every container in one table, with a filter box (app,
+  service) and the limits as numbers.
+- **Storage**: a **Disks** strip (used / total and free per filesystem,
+  amber at 90 % used, red at 97 %, and which apps have data there), then per
+  app its volumes, binds, writable layers and images ("shared, not in
+  total": instances share images), the shared folders (from the doctor's
+  scans), and the core volumes. **Measure now** measures everything;
+  **Measure** on an app measures only its storage. The run shows in the
+  progress panel, and **Stop** ends it between targets: what was measured
+  so far is kept. With the monitoring profile on, **History in Grafana ↗**
+  opens the "Portcullis usage" dashboard.
+
+The instance page has a **Usage** tab too: that instance's containers, 1 h
+CPU and memory sparklines, and its storage.
+
+How to read the figures:
+
+- **not measured** means the Hub has no figure, with the reason (a
+  container's first sample, a restart, rootless Podman without the `cpu` or
+  `io` controller, the engine not verified). Missing data is never shown as
+  0.
+- **≥ 1.2 GiB** is a lower bound: a total that includes a container or a
+  target without a figure, or a measurement that stopped at its cap
+  ("≥ 120 GiB (stopped after 2 min)").
+- Every storage figure carries its age ("measured 3 h ago"); figures older
+  than 48 h are dimmed.
+- A host path or volume used by two apps is measured once and listed on
+  both as shared, never counted twice.
+
+**Export:** each view has a CSV download (raw numbers; an empty cell when
+not measured). The same data is in the Portcullis MCP as `usage_overview`,
+`usage_instance`, `usage_storage`, `usage_storage_measure` and
+`usage_storage_op`.
+
+### Usage checks
+
+The doctor judges the Usage figures with six checks, none with a one-click
+fix. None fires from a missing figure:
+
+| Kind | Severity | Finds | Fix |
+|------|----------|-------|-----|
+| `disk_nearly_full` | Warning (< 10 % or < 5 GiB free), Problem (< 3 % or < 1 GiB) | A filesystem with app, folder or Hub data is nearly full | Explain: free space or move the data; the apps with data there, largest first |
+| `memory_near_limit` | Warning | A container's memory has been at 90 % of its limit or more for 10 min | Explain: raise the limit (the app's setting, else the Expert override), or check its Logs |
+| `oom_killed` | Warning | A container was killed for running out of memory (or restarted 3 times in an hour after one) | Explain, as above |
+| `pids_near_limit` | Warning | A container has used 90 % of its process limit for 10 min | Explain |
+| `usage_not_measured` | Info | The sampler has had no good sample for 5 min, or the runtime can't measure | Explain: the reason |
+| `storage_measure_partial` | Info | A storage measurement stopped at its cap: the figure is a lower bound | — |
+
+A core service near its limit is a Warning naming the service: core limits
+are compose values ([Security & Hardening](hardening.md#container-hardening)).
 
 ## Rootless Podman
 

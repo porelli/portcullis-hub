@@ -242,3 +242,8 @@ func (r refusedRT) VolumeIn(context.Context, string, string, string, io.Reader) 
 func (r refusedRT) RunFixer(context.Context, runtime.FixerSpec, func(io.Reader) error) (*runtime.RunResult, error) {
 	return nil, r.err
 }
+func (r refusedRT) Stats(context.Context, string) (runtime.UnitStats, error) {
+	return runtime.UnitStats{}, r.err
+}
+func (r refusedRT) LayerSize(context.Context, string) (int64, error) { return 0, r.err }
+func (r refusedRT) ImageSize(context.Context, string) (int64, error) { return 0, r.err }

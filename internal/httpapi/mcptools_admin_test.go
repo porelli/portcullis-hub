@@ -328,6 +328,8 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "DELETE", path: "/api/folders/media", body: ``},
 		{tool: "doctor_scan", args: map[string]any{},
 			method: "POST", path: "/api/doctor/scan", body: ``, instance: "_doctor"},
+		{tool: "usage_storage_measure", args: map[string]any{},
+			method: "POST", path: "/api/usage/storage/measure", body: `{}`, instance: "_usage"},
 		{tool: "doctor_mute", args: map[string]any{"fp": "{{fp}}", "reason": "behind the router", "finding_token": "{{token}}"},
 			method: "POST", path: "/api/doctor/findings/{{fp}}/mute", body: `{"reason":"behind the router","token":"{{token}}"}`,
 			vars: fixVars(doctor.KindLANOnlyExposed, nil)},

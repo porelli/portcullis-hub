@@ -278,6 +278,7 @@ func TestHarness(t *testing.T) {
 	hfa := seedConfirmations(t, h, addr, paddr)
 	flaky := seedGroupPages(t, e)
 	seedApps(t, e, eng)
+	seedUsage(t, e) // the Usage tab: the sampler over the running fixtures
 	seedSignIn(t, e)
 	impID := seedImpersonation(t, e, fa)
 

@@ -39,6 +39,8 @@ const (
 	fixerOut      = fixerspec.Out
 	fixerPids     = fixerspec.Pids
 	fixerMemory   = fixerspec.Memory
+	// fixerUsageRoot: where a usage run mounts its volume or bind.
+	fixerUsageRoot = fixerspec.UsageRoot
 )
 
 // fixerRun is one helper run (internal/fixerspec.Run).
@@ -79,6 +81,15 @@ func (h *Hub) runFixer(ctx context.Context, r fixerRun) (*folderfix.Report, erro
 		return &rep, err
 	}
 	return &rep, nil
+}
+
+// runUsageFixer runs one usage measurement (a volume or a bind at /vol)
+// through execFixer: the same refusals and strict report decoding.
+func (h *Hub) runUsageFixer(ctx context.Context, r fixerRun) (*folderfix.Report, error) {
+	if r.Mode != "usage" {
+		return nil, statusErr(http.StatusInternalServerError, "shared folder fixer: runUsageFixer runs usage only")
+	}
+	return h.runFixer(ctx, r)
 }
 
 // runProbe runs a probe of r.Extra.Rel below the bind root r.Source.

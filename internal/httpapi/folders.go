@@ -131,6 +131,8 @@ func opAcceptedBody(op *hub.AsyncOp) map[string]string {
 		body["poll"] = "/api/domains/" + name + "/op"
 	case op.Instance == "_doctor":
 		body["poll"] = "/api/doctor/op"
+	case op.Instance == "_usage":
+		body["poll"] = "/api/usage/storage/op"
 	default:
 		body["poll"] = instanceOpPoll(op)
 	}

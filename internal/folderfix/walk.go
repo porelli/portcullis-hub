@@ -27,6 +27,10 @@ type fileStat struct {
 	Nlink    uint64
 	UID, GID uint32
 	MntID    uint64 // 0 = unknown
+	// Blocks (512-byte units) and Size: st_blocks and st_size (the usage
+	// sums); HasBlocks: the kernel gave st_blocks.
+	Blocks, Size uint64
+	HasBlocks    bool
 }
 
 // File types (S_IFMT values, the same on every unix).
@@ -79,6 +83,12 @@ var (
 
 // maxDirNames caps the names read from one directory (a var for tests).
 var maxDirNames = 1_000_000
+
+// maxHardLinkSet caps the (dev, ino) set that counts a hard-linked inode
+// once (contract §6, the usage mode); past it the report is partial
+// (hard_links) and further multi-link inodes aren't counted (a var for
+// tests).
+var maxHardLinkSet = 1_000_000
 
 // mountEntry is one line of /proc/self/mountinfo.
 type mountEntry struct {
@@ -293,6 +303,11 @@ type walker struct {
 	// as read (idMapsAllowed).
 	idm            *IDMaps
 	uidMap, gidMap idmap.Map
+	// links: the multi-link inodes already counted in the size sums;
+	// statOnly (usage): regular files are measured from their fstatat
+	// alone, never opened.
+	links    map[[2]uint64]struct{}
+	statOnly bool
 }
 
 type level struct {
@@ -427,6 +442,7 @@ func (w *walker) reset() {
 		w.children = map[string]*ChildOwner{}
 	}
 	w.start = time.Now()
+	w.links = nil
 	w.owners = map[[2]uint32]int64{}
 	for i := range w.pt {
 		w.pt[i].out = &PrincipalAccess{Name: w.pt[i].p.Name, UID: w.pt[i].p.UID}
@@ -551,6 +567,32 @@ func (w *walker) readState(n *node) error {
 	return nil
 }
 
+// addSize adds one entry to the size sums (every mode): st_blocks × 512
+// and st_size, an inode with more than one link once.
+func (w *walker) addSize(st fileStat) {
+	if !st.isDir() && st.Nlink > 1 {
+		k := [2]uint64{st.Dev, st.Ino}
+		if _, seen := w.links[k]; seen {
+			return
+		}
+		if len(w.links) >= maxHardLinkSet {
+			if !w.r.Partial {
+				w.r.Partial, w.r.PartialReason = true, "hard_links"
+			}
+			return
+		}
+		if w.links == nil {
+			w.links = map[[2]uint64]struct{}{}
+		}
+		w.links[k] = struct{}{}
+	}
+	if !st.HasBlocks {
+		return
+	}
+	w.r.AllocBytes += st.Blocks * 512
+	w.r.ApparentBytes += st.Size
+}
+
 func (w *walker) fail(rel string, err error) {
 	w.r.Failed.add(rel)
 	w.r.errorf("%s: %v", rel, err)
@@ -600,6 +642,7 @@ func (w *walker) handle(n *node, anc []bool) bool {
 		}
 	}
 	w.owners[[2]uint32{n.st.UID, n.st.GID}]++
+	w.addSize(n.st)
 	if unmappedID(w.idm, n.st.UID, n.st.GID) {
 		w.r.Unmapped.add(n.rel)
 	}
@@ -682,6 +725,15 @@ func (w *walker) dir(fd int, self fileStat, rel string, depth int, anc []bool) {
 			w.r.Dirs++
 		} else {
 			w.r.Files++
+		}
+		if w.statOnly && !isDir {
+			// usage: a file is measured from its fstatat, never opened.
+			if st.Nlink > 1 {
+				w.r.HardLinks.add(crel)
+			}
+			w.owners[[2]uint32{st.UID, st.GID}]++
+			w.addSize(st)
+			continue
 		}
 		if testHookBeforeOpen != nil {
 			testHookBeforeOpen(crel)

@@ -151,7 +151,13 @@ type Report struct {
 	Dirs          int64  `json:"dirs"`
 	Files         int64  `json:"files"`
 	Partial       bool   `json:"partial"`
-	PartialReason string `json:"partial_reason,omitempty"` // "entries" | "time" | "depth"
+	PartialReason string `json:"partial_reason,omitempty"` // "entries" | "time" | "depth" | "names" | "hard_links" | "failed" (usage)
+	// AllocBytes / ApparentBytes: Σ st_blocks × 512 (what du reports) and
+	// Σ st_size, a hard-linked inode once (scan and usage, contract §6).
+	AllocBytes    uint64 `json:"alloc_bytes"`
+	ApparentBytes uint64 `json:"apparent_bytes"`
+	// IOIdle (usage only): whether the idle IO class was set.
+	IOIdle *bool `json:"io_idle,omitempty"`
 
 	// IDMap: the fixer's own id maps, omitted under the identity
 	// (rootless Podman, contract §14.2).
