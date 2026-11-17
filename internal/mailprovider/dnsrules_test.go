@@ -67,3 +67,14 @@ func TestDMARCPolicyAndFloor(t *testing.T) {
 		}
 	}
 }
+
+// TestTypesExactUpperCase (final review L2): a lower-case or
+// Unicode-folded type is refused, never upper-cased into a rule.
+func TestTypesExactUpperCase(t *testing.T) {
+	c := RuleContext{Domain: "example.com", MailHostname: "mail.example.com"}
+	for _, typ := range []string{"mx", "Mx", "ſRV"} {
+		if err := ValidateSet(c, []Record{{Name: "example.com", Type: typ, TTL: 3600, Value: "10 mail.example.com."}}); err == nil {
+			t.Errorf("%q accepted", typ)
+		}
+	}
+}

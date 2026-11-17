@@ -33,14 +33,15 @@ type RuleContext struct {
 }
 
 var (
-	reSTS     = regexp.MustCompile(`^v=STSv1; id=[A-Za-z0-9]{1,32}$`)
-	reTLSRPT  = regexp.MustCompile(`^v=TLSRPTv1; rua=mailto:(\S+)$`)
-	reSRV     = regexp.MustCompile(`^([0-9]{1,5}) ([0-9]{1,5}) ([0-9]{1,5}) (\S+)$`)
-	reMX      = regexp.MustCompile(`^([0-9]{1,5}) (\S+)$`)
-	reLabel1  = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$`)
-	reSeconds = regexp.MustCompile(`^[0-9]{1,10}$`)
-	reDKIMTag = regexp.MustCompile(`^[a-z]{1,8}$`)
-	reBase64  = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
+	reSTS       = regexp.MustCompile(`^v=STSv1; id=[A-Za-z0-9]{1,32}$`)
+	reTLSRPT    = regexp.MustCompile(`^v=TLSRPTv1; rua=mailto:(\S+)$`)
+	reSRV       = regexp.MustCompile(`^([0-9]{1,5}) ([0-9]{1,5}) ([0-9]{1,5}) (\S+)$`)
+	reMX        = regexp.MustCompile(`^([0-9]{1,5}) (\S+)$`)
+	reLabel1    = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$`)
+	reSeconds   = regexp.MustCompile(`^[0-9]{1,10}$`)
+	reASCIIName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}$`)
+	reDKIMTag   = regexp.MustCompile(`^[a-z]{1,8}$`)
+	reBase64    = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
 )
 
 // Value shape bounds (M12).
@@ -125,8 +126,16 @@ func ValidateSet(c RuleContext, rs []Record) error {
 	h := bare(c.MailHostname)
 	spf, dmarc := 0, 0
 	for _, r := range rs {
-		n, t := bare(r.Name), strings.ToUpper(r.Type)
+		// Exact ASCII names and upper-case types (final review L2): no
+		// Unicode case folding (K → k, ſ → S) decides a name or a type.
+		n, t := bare(r.Name), asciiUpper(r.Type)
 		refuse := func(why string) error { return fmt.Errorf("mail set: %s %s: %s", n, t, why) }
+		if t != r.Type {
+			return refuse("the type must be upper case")
+		}
+		if !reASCIIName.MatchString(r.Name) {
+			return fmt.Errorf("mail set: %s %s: the name must be ASCII letters, digits, '.', '-' and '_'", r.Name, t)
+		}
 		if !under(n, e) {
 			return refuse("not under " + e)
 		}
@@ -230,7 +239,7 @@ func ValidateSet(c RuleContext, rs []Record) error {
 			if t != "SRV" {
 				return refuse("only SRV here")
 			}
-			if strings.Join(strings.Fields(v), " ") != "0 0 0 ." {
+			if v != "0 0 0 ." { // the raw value, exactly (L1)
 				return refuse("must be 0 0 0 .")
 			}
 		case contains(mailCNAMELabels, rel):
@@ -271,9 +280,15 @@ func dmarcRule(v, e, floor string) string {
 	p := ""
 	sub := map[string]string{} // sp, np as given
 	seen := map[string]bool{"v": true}
-	for _, tag := range strings.Split(v, ";")[1:] {
+	tags := strings.Split(v, ";")[1:]
+	for i, tag := range tags {
 		if strings.TrimSpace(tag) == "" {
-			continue
+			// Only a final separator may be empty (RFC 7489: no empty
+			// tag; final review L1).
+			if i == len(tags)-1 {
+				continue
+			}
+			return "an empty tag is not allowed"
 		}
 		k, val, _ := strings.Cut(strings.TrimSpace(tag), "=")
 		k, val = strings.TrimSpace(k), strings.TrimSpace(val)
@@ -411,4 +426,15 @@ func StricterDMARC(a, b string) string {
 		return "none"
 	}
 	return a
+}
+
+// asciiUpper upper-cases ASCII letters only (no Unicode folding).
+func asciiUpper(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'a' && c <= 'z' {
+			b[i] = c - 32
+		}
+	}
+	return string(b)
 }
