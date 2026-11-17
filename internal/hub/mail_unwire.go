@@ -89,11 +89,23 @@ func (h *Hub) startUnwireMail(id string, drain bool, actor directory.Actor, host
 		return nil, statusErr(http.StatusConflict, "%s isn't this server's mail provider", id)
 	}
 	return h.startAsync(id, OpMailUnwire, actor, mailUnwirePlan(drain), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		unlockSlot, err := h.lockMailSlot()
+		if err != nil {
+			return nil, nil, err
+		}
+		defer unlockSlot()
 		unlock, err := h.lockApp(id)
 		if err != nil {
 			return nil, nil, h.busyErr(id, err)
 		}
 		defer unlock()
+		h.mailSlotLocked(OpMailUnwire)
+		h.mu.RLock()
+		cur := h.st.Mail.Provider
+		h.mu.RUnlock()
+		if cur == nil || cur.Instance != id {
+			return nil, nil, statusErr(http.StatusConflict, "%s isn't this server's mail provider any more", id)
+		}
 		ready()
 		// An unwire can't be stopped (contract §19.9 "Stop").
 		ctx = context.WithoutCancel(ctx)
@@ -227,6 +239,13 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
 		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held, h.st.Mail.Unwiring = nil, nil, nil, nil
 	}
+	// A switch's close is recorded in the same save (its resume relies
+	// on it).
+	if sw := h.st.Mail.Switch; sw != nil && sw.From == id {
+		c := *sw
+		c.Closed = true
+		h.st.Mail.Switch = &c
+	}
 	var live *templates.Template
 	if t := h.findLocked(id); t != nil {
 		c := *t
@@ -272,11 +291,22 @@ func (h *Hub) mailFinishUnwireIfDrained() {
 		return
 	}
 	h.goBackground(func() {
+		unlockSlot, err := h.lockMailSlot()
+		if err != nil {
+			return // another slot op: the next pass tries again
+		}
+		defer unlockSlot()
 		unlock, err := h.lockApp(u.Instance)
 		if err != nil {
 			return // busy: the next pass tries again
 		}
 		defer unlock()
+		h.mu.RLock()
+		still := h.st.Mail.Unwiring != nil && h.st.Mail.Unwiring.Instance == u.Instance
+		h.mu.RUnlock()
+		if !still {
+			return
+		}
 		actor := directory.Human(u.By)
 		err = h.closeMailProvider(context.Background(), u.Instance, actor)
 		h.auditOp(actor, "mail.provider_unwired", u.Instance, "drain=true (finished)", err)
@@ -331,6 +361,12 @@ func (h *Hub) StartSwitchMail(ctx context.Context, to string, in SwitchRequest, 
 		return nil, err
 	}
 	return h.startAsync(to, OpMailSwitch, actor, mailSwitchPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		unlockSlot, err := h.lockMailSlot()
+		if err != nil {
+			h.auditOp(actor, "mail.provider_switched", to, "from="+from, err)
+			return nil, nil, err
+		}
+		defer unlockSlot()
 		unlock, err := h.lockApp(to)
 		if err != nil {
 			return nil, nil, h.busyErr(to, err)
@@ -340,17 +376,30 @@ func (h *Hub) StartSwitchMail(ctx context.Context, to string, in SwitchRequest, 
 		if err != nil {
 			return nil, nil, h.busyErr(from, err)
 		}
-		ready()
-		// The switch, recorded first: a restart resumes it (never both
-		// providers on the ports).
+		// The guards ran before the locks: the provider must still be
+		// from, and no switch may be pending; then the switch is recorded
+		// first (a restart resumes it: never both providers on the ports).
+		h.mailSlotLocked(OpMailSwitch)
 		h.mu.Lock()
+		cur := h.st.Mail.Provider
+		if cur == nil || cur.Instance != from || h.st.Mail.Switch != nil {
+			h.mu.Unlock()
+			unlockFrom()
+			err := statusErr(http.StatusConflict, "the mail provider changed meanwhile: look again before switching")
+			h.auditOp(actor, "mail.provider_switched", to, "from="+from, err)
+			return nil, nil, err
+		}
 		h.st.Mail.Switch = &state.MailSwitch{From: from, To: to, Since: h.mailNow().UTC(), By: actor.User}
 		serr := h.saveStateLocked()
+		if serr != nil {
+			h.st.Mail.Switch = nil
+		}
 		h.mu.Unlock()
 		if serr != nil {
 			unlockFrom()
 			return nil, nil, serr
 		}
+		ready()
 		_, err = h.runSwitchMail(ctx, t, from, actor, unlockFrom)
 		h.auditOp(actor, "mail.provider_switched", to, "from="+from+" to="+to, err)
 		return nil, nil, err
@@ -373,16 +422,40 @@ func (h *Hub) runSwitchMail(ctx context.Context, t *templates.Template, from str
 	}
 	ctx = context.WithoutCancel(ctx)
 	prog.planned(StepMailUnwire).Start(StepMailUnwire)
+	// Under the slot op and both app locks: the old provider is closed
+	// when it is still wired; nothing wired is fine only when the
+	// persisted switch says its close is done (a resume); the new one
+	// already wired means it is finished; anything else aborts.
 	h.mu.RLock()
-	stillFrom := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == from
+	cur, sw := h.st.Mail.Provider, h.st.Mail.Switch
 	h.mu.RUnlock()
-	if stillFrom {
+	to := t.ID
+	switch {
+	case cur != nil && cur.Instance == from:
 		h.mailRetainDKIM(ctx)
 		if err := h.closeMailProvider(ctx, from, actor); err != nil {
 			unlockFrom()
 			prog.planned(StepMailUnwire).Fail(StepMailUnwire, err)
 			return nil, err
 		}
+	case cur == nil && sw != nil && sw.From == from && sw.To == to && sw.Closed:
+	case cur != nil && cur.Instance == to && sw != nil && sw.Closed:
+		unlockFrom()
+		prog.planned(StepMailUnwire).Done(StepMailUnwire)
+		h.mu.Lock()
+		h.st.Mail.Switch = nil
+		h.saveLocked()
+		h.mu.Unlock()
+		return cur, nil
+	default:
+		unlockFrom()
+		h.mu.Lock()
+		h.st.Mail.Switch = nil
+		h.saveLocked()
+		h.mu.Unlock()
+		err := statusErr(http.StatusConflict, "the mail provider changed meanwhile: the switch from %s to %s was dropped", from, to)
+		prog.planned(StepMailUnwire).Fail(StepMailUnwire, err)
+		return nil, err
 	}
 	unlockFrom()
 	prog.planned(StepMailUnwire).Done(StepMailUnwire)
@@ -459,6 +532,12 @@ func (h *Hub) mailRetainDKIM(ctx context.Context) {
 // §19.9 "Resuming"): the old provider closed when it is still wired,
 // then the wiring of the new one; never both on the ports.
 func (h *Hub) resumeSwitchMail(sw *state.MailSwitch) {
+	unlockSlot, err := h.lockMailSlot()
+	if err != nil {
+		log.Printf("mail: resuming the switch to %s: %v (the next start resumes it)", sw.To, err)
+		return
+	}
+	defer unlockSlot()
 	unlock, err := h.lockApp(sw.To)
 	if err != nil {
 		log.Printf("mail: resuming the switch to %s: %v", sw.To, err)

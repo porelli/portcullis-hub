@@ -376,3 +376,92 @@ func setHas(w *wireFix, d, name string) bool {
 	}
 	return false
 }
+
+// TestConcurrentSwitchesOneWins: while one switch runs (its void-mode up
+// held), a second slot op is refused 409; the first completes.
+func TestConcurrentSwitchesOneWins(t *testing.T) {
+	w := switchFix(t)
+	gate, entered := make(chan struct{}), make(chan string, 4)
+	w.runner.gate, w.runner.entered = gate, entered
+	in := SwitchRequest{Confirm: otherMailID, ConfirmEmpty: "3 mailboxes start empty", Proof: &wireProof}
+	if _, err := w.h.StartSwitchMail(context.Background(), otherMailID, in, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	<-entered // the first switch is inside an up
+	_, err := w.h.StartSwitchMail(context.Background(), otherMailID, in, rootActor())
+	_, uerr := w.h.StartUnwireMail(mailProviderID, false, rootActor())
+	close(gate)
+	go func() {
+		for range entered {
+		}
+	}()
+	w.h.Wait()
+	if statusOf(err) != 409 || statusOf(uerr) != 409 {
+		t.Fatalf("second switch %v, unwire %v", err, uerr)
+	}
+	w.h.mu.RLock()
+	defer w.h.mu.RUnlock()
+	if p := w.h.st.Mail.Provider; p == nil || p.Instance != otherMailID || w.h.st.Mail.Switch != nil {
+		t.Fatalf("provider %+v switch %+v", p, w.h.st.Mail.Switch)
+	}
+}
+
+// TestSwitchProviderChangedMeanwhile409: a provider that changed between
+// the guards and the locks aborts the switch: 409, nothing wired, the
+// old one untouched.
+func TestSwitchProviderChangedMeanwhile409(t *testing.T) {
+	w := switchFix(t)
+	w.h.testHookMailSlotLocked = func(op string) {
+		if op == OpMailSwitch {
+			w.h.mu.Lock()
+			w.h.st.Mail.Provider = &state.MailProvider{Instance: "elsewhere"}
+			w.h.mu.Unlock()
+		}
+	}
+	in := SwitchRequest{Confirm: otherMailID, ConfirmEmpty: "3 mailboxes start empty", Proof: &wireProof}
+	_, err := w.h.StartSwitchMail(context.Background(), otherMailID, in, rootActor())
+	w.h.Wait()
+	if statusOf(err) != 409 {
+		t.Fatalf("%v", err)
+	}
+	w.h.mu.RLock()
+	defer w.h.mu.RUnlock()
+	if w.h.st.Mail.Switch != nil || w.h.st.IsEnabled(otherMailID) || !w.h.st.IsEnabled(mailProviderID) {
+		t.Fatalf("switch %+v other %v old %v", w.h.st.Mail.Switch, w.h.st.IsEnabled(otherMailID), w.h.st.IsEnabled(mailProviderID))
+	}
+}
+
+// TestSwitchResumeAfterCloseCompletes: the close records the switch's
+// Closed in its own save; a resume with nothing wired then completes the
+// wiring; a resume with an unrelated provider wired drops the switch.
+func TestSwitchResumeAfterCloseCompletes(t *testing.T) {
+	w := switchFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.Switch = &state.MailSwitch{From: mailProviderID, To: otherMailID, By: "root"}
+	w.h.mu.Unlock()
+	unlock, _ := w.h.lockApp(mailProviderID)
+	if err := w.h.closeMailProvider(context.Background(), mailProviderID, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	st, err := state.Load(w.h.statePath())
+	if err != nil || st.Mail.Switch == nil || !st.Mail.Switch.Closed || st.Mail.Provider != nil {
+		t.Fatalf("saved %+v %v", st.Mail.Switch, err)
+	}
+	w.h.resumeMail()
+	w.h.Wait()
+	w.h.mu.Lock()
+	p := w.h.st.Mail.Provider
+	w.h.st.Mail.Switch = &state.MailSwitch{From: "a", To: "b", Closed: true}
+	w.h.mu.Unlock()
+	if p == nil || p.Instance != otherMailID {
+		t.Fatalf("provider %+v", p)
+	}
+	// An unrelated record (another provider wired): dropped, nothing done.
+	w.h.resumeSwitchMail(&state.MailSwitch{From: "a", To: otherMailID, Closed: true})
+	w.h.mu.RLock()
+	defer w.h.mu.RUnlock()
+	if w.h.st.Mail.Provider.Instance != otherMailID {
+		t.Fatal("the resume changed the provider")
+	}
+}

@@ -384,8 +384,14 @@ type Hub struct {
 	mailBootstrapWait time.Duration
 	mailPollEvery     time.Duration
 	// mailVoidKick wakes RunMailVoidRetry (kickMailVoid).
-	mailVoidKick     chan struct{}
-	domainsReachable bool
+	mailVoidKick chan struct{}
+	// mailSlotOp serialises every mail wire, unwire, switch and
+	// re-confirm (lockMailSlot: a second one is refused 409);
+	// testHookMailSlotLocked runs once an op holds its locks, before its
+	// re-check (tests).
+	mailSlotOp             sync.Mutex
+	testHookMailSlotLocked func(op string)
+	domainsReachable       bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable
 	// meanwhile); domainsGen changes with every domain operation's commit,
 	// so a RefreshDomains that started before it drops its stale list.

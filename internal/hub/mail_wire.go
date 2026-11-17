@@ -197,11 +197,28 @@ func (h *Hub) StartWireMail(ctx context.Context, id string, in WireRequest, acto
 		return h.startRewireMail(t, actor)
 	}
 	return h.startAsync(id, OpMailWire, actor, mailWirePlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		unlockSlot, err := h.lockMailSlot()
+		if err != nil {
+			h.auditOp(actor, "mail.provider_wired", id, "", err)
+			return nil, nil, err
+		}
+		defer unlockSlot()
 		unlock, err := h.lockApp(id)
 		if err != nil {
 			return nil, nil, h.busyErr(id, err)
 		}
 		defer unlock()
+		// The guards ran before the locks: nothing may have been wired
+		// meanwhile.
+		h.mailSlotLocked(OpMailWire)
+		h.mu.RLock()
+		cur := h.st.Mail.Provider
+		h.mu.RUnlock()
+		if cur != nil {
+			err := statusErr(http.StatusConflict, "%s is this server's mail provider: switch instead", cur.Instance)
+			h.auditOp(actor, "mail.provider_wired", id, "", err)
+			return nil, nil, err
+		}
 		ready()
 		p, err := h.runWireMail(ctx, t, actor, state.MailVoidWire)
 		detail := ""
@@ -547,4 +564,20 @@ func (h *Hub) HostMailInstall(ctx context.Context, template, source, confirm str
 		return nil, statusErr(http.StatusNotFound, "no template %s from source %s", template, strconv.Quote(source))
 	}
 	return h.StartWireMail(ctx, id, WireRequest{Confirm: confirm, Host: true}, actor)
+}
+
+// lockMailSlot takes the one mail-slot op (wire, unwire, switch,
+// re-confirm); a second one at the same time is refused (409).
+func (h *Hub) lockMailSlot() (func(), error) {
+	if !h.mailSlotOp.TryLock() {
+		return nil, statusErr(http.StatusConflict, "another mail provider operation is running: try again when it has ended")
+	}
+	return h.mailSlotOp.Unlock, nil
+}
+
+// mailSlotLocked runs the test hook once an op holds its locks.
+func (h *Hub) mailSlotLocked(op string) {
+	if h.testHookMailSlotLocked != nil {
+		h.testHookMailSlotLocked(op)
+	}
 }

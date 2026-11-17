@@ -76,6 +76,8 @@ type MailSwitch struct {
 	To    string    `json:"to" yaml:"to"`
 	Since time.Time `json:"since" yaml:"since"`
 	By    string    `json:"by" yaml:"by"`
+	// Closed: the old provider's close step is done (saved with it).
+	Closed bool `json:"closed,omitempty" yaml:"closed,omitempty"`
 }
 
 // MailProvider is the wired mail provider (state.yaml mail.provider):
