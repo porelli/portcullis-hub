@@ -29,9 +29,10 @@ FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5
 # uid 10008 (contract §17.7); group 10001 is added at run time (group_add)
 # so appfiles keep the primary's group. /usr/local/bin/portcullis stays
 # free for SSH part 2.
-# Pinned package versions (review L7): what the agent validates with
+# Package versions pinned to a release line (review L7; `~` = that minor,
+# so an Alpine patch release doesn't break the build): what the agent validates with
 # `compose config` and runs with `compose up` is one known compose.
-RUN apk add --no-cache ca-certificates=20261020-r0 docker-cli=29.9.3-r1 docker-cli-compose=5.6.1-r0 \
+RUN apk add --no-cache ca-certificates~20261020 docker-cli~29.9 docker-cli-compose~5.7 \
  && addgroup -S -g 10008 agent \
  && adduser -S -D -H -u 10008 -G agent agent
 COPY --from=build /portcullis-agent /usr/local/bin/portcullis-agent
