@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -413,6 +414,11 @@ func (h *Hub) resumeMail() {
 	h.mu.RLock()
 	p, owed, held, sw := h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held, h.st.Mail.Switch
 	h.mu.RUnlock()
+	// An owed down of a stopped hold first (a crash between its save
+	// and the down).
+	if held != nil && held.DownOwed {
+		h.goBackground(h.mailRetryHeldStop)
+	}
 	if sw != nil {
 		h.goBackground(func() { h.resumeSwitchMail(sw) })
 		return
@@ -556,17 +562,50 @@ func (h *Hub) HostMailInstall(ctx context.Context, template, source, confirm str
 	if !templates.ValidID(template) {
 		return nil, statusErr(http.StatusBadRequest, "invalid template id")
 	}
+	// The source is required (L1): never another source's template of
+	// the same name.
+	if source == "" {
+		return nil, statusErr(http.StatusBadRequest, "source is required")
+	}
 	h.mu.RLock()
+	ct := h.catalogLocked(template)
+	found := ct != nil && ct.Source == source
+	label := ""
+	if found {
+		label = ct.Manifest.Name
+	}
+	// An instance of it that exists (created): the default one first.
 	id := ""
-	for i := range h.instances {
-		if it := &h.instances[i]; it.TemplateID == template && (source == "" || it.Source == source) {
-			id = it.ID
-			break
+	if found {
+		var ids []string
+		for iid, e := range h.st.Instances {
+			if e.Template == template {
+				ids = append(ids, iid)
+			}
+		}
+		slices.Sort(ids)
+		// The default instance exists implicitly once enabled (§11.1).
+		if slices.Contains(ids, template) || h.st.IsEnabled(template) {
+			id = template
+		} else if len(ids) > 0 {
+			id = ids[0]
 		}
 	}
 	h.mu.RUnlock()
-	if id == "" {
+	if !found {
 		return nil, statusErr(http.StatusNotFound, "no template %s from source %s", template, strconv.Quote(source))
+	}
+	if id == "" {
+		// None yet: its default instance is installed first (R-HH5,
+		// contract §19.10), then wired. The typed id is checked first:
+		// a wrong confirmation installs nothing.
+		if confirm != template {
+			return nil, statusErr(http.StatusBadRequest, "%s", mailTypeIDText)
+		}
+		if _, err := h.CreateInstanceAs(CreateRequest{Template: template, ID: template, Label: label}, actor); err != nil {
+			return nil, err
+		}
+		id = template
 	}
 	return h.StartWireMail(ctx, id, WireRequest{Confirm: confirm, Host: true}, actor)
 }

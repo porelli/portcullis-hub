@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
@@ -151,14 +152,47 @@ func TestWirePortCollision(t *testing.T) {
 // TestWireRefusedFromAI, TestWireRefusedForDelegate, TestWireNeedsFreshProof
 // and TestWireTypedID are rows of TestWireGuardOrder; the host path:
 
+// TestHostInstallCreatesDefault (R-HH5, H5): with no instance of the
+// template created, the host install creates its default instance, then
+// wires it; a wrong source or no source installs nothing.
+func TestHostInstallCreatesDefault(t *testing.T) {
+	w := newWireFix(t)
+	w.h.mu.Lock()
+	delete(w.h.st.Instances, mailProviderID)
+	w.h.st.SetEnabled(mailProviderID, false)
+	w.h.mu.Unlock()
+	w.engine.mu.Lock()
+	w.engine.containers = slices.DeleteFunc(w.engine.containers, func(c docker.Container) bool { return c.Labels[docker.LabelProject] == "portcullis-"+mailProviderID })
+	w.engine.mu.Unlock()
+	for _, src := range []string{"", "elsewhere"} {
+		if _, err := w.h.HostMailInstall(context.Background(), mailProviderID, src, mailProviderID); err == nil {
+			t.Fatalf("source %q accepted", src)
+		}
+	}
+	if _, err := w.h.HostMailInstall(context.Background(), mailProviderID, "local", mailProviderID); err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	w.h.mu.RLock()
+	_, created := w.h.st.Instances[mailProviderID]
+	p := w.h.st.Mail.Provider
+	w.h.mu.RUnlock()
+	if !created || p == nil || p.Instance != mailProviderID {
+		t.Fatalf("created %v provider %+v", created, p)
+	}
+}
+
 // TestWireHostPathNoProofButConfirm: the host socket wires with the typed
 // id and no proof (actor host); a wrong id is still refused.
 func TestWireHostPathNoProofButConfirm(t *testing.T) {
 	w := newWireFix(t)
-	if _, err := w.h.HostMailInstall(context.Background(), mailProviderID, "", "nope"); statusOf(err) != 400 {
+	w.h.mu.Lock()
+	w.h.st.SetEnabled(mailProviderID, true)
+	w.h.mu.Unlock()
+	if _, err := w.h.HostMailInstall(context.Background(), mailProviderID, "local", "nope"); statusOf(err) != 400 {
 		t.Fatalf("wrong id: %v", err)
 	}
-	if _, err := w.h.HostMailInstall(context.Background(), mailProviderID, "", mailProviderID); err != nil {
+	if _, err := w.h.HostMailInstall(context.Background(), mailProviderID, "local", mailProviderID); err != nil {
 		t.Fatal(err)
 	}
 	w.h.Wait()

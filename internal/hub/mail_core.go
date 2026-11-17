@@ -324,7 +324,7 @@ func (h *Hub) mailStopHeld(why string) {
 		return
 	}
 	c := *hd
-	c.Stopped = &now
+	c.Stopped, c.DownOwed = &now, true
 	h.st.Mail.Held = &c
 	h.saveLocked()
 	h.mu.Unlock()
@@ -333,20 +333,30 @@ func (h *Hub) mailStopHeld(why string) {
 	h.mailRetryHeldStop()
 }
 
-// mailRetryHeldStop runs the owed down of a stopped hold (at the stop
-// and from the void retry loop): the error kept, or cleared on success.
+// mailStopTimeout bounds one owed down.
+const mailStopTimeout = 2 * time.Minute
+
+// mailRetryHeldStop runs the owed down of a stopped hold (at the stop,
+// at every start and from the void retry loop), bounded: DownOwed is
+// cleared only once it succeeded; a failure keeps its error.
 func (h *Hub) mailRetryHeldStop() {
 	h.mu.RLock()
 	p, hd := h.st.Mail.Provider, h.st.Mail.Held
 	h.mu.RUnlock()
-	if p == nil || hd == nil || hd.Stopped == nil {
+	if p == nil || hd == nil || !hd.DownOwed {
 		return
 	}
 	var err error
 	if h.rt == nil {
 		err = errors.New("no container runtime")
 	} else {
-		err = h.rt.DownByName(context.Background(), projectName(p.Instance))
+		timeout := mailStopTimeout
+		if h.mailStopWait > 0 {
+			timeout = h.mailStopWait
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		err = h.rt.DownByName(ctx, projectName(p.Instance))
+		cancel()
 	}
 	msg := ""
 	if err != nil {
@@ -354,22 +364,25 @@ func (h *Hub) mailRetryHeldStop() {
 		log.Printf("mail: stopping the held provider %s failed (retrying): %v", p.Instance, err)
 	}
 	h.mu.Lock()
-	if cur := h.st.Mail.Held; cur != nil && cur.Stopped != nil && cur.StopError != msg && h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == p.Instance {
+	if cur := h.st.Mail.Held; cur != nil && cur.DownOwed && h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == p.Instance {
 		c := *cur
-		c.StopError = msg
+		c.StopError, c.DownOwed = msg, err != nil
 		h.st.Mail.Held = &c
 		h.saveLocked()
 	}
 	h.mu.Unlock()
 }
 
-// MailHeldStopError is the owed stop's last error ("" = none owed or
-// done): the doctor's Problem (the held provider may still serve).
+// MailHeldStopError is the owed stop's state ("" = none owed, or done):
+// the doctor's Problem (the held provider may still serve).
 func (h *Hub) MailHeldStopError() string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if hd := h.st.Mail.Held; hd != nil && hd.Stopped != nil {
-		return hd.StopError
+	if hd := h.st.Mail.Held; hd != nil && hd.DownOwed {
+		if hd.StopError != "" {
+			return "stopping the held mail provider failed (retrying): " + hd.StopError
+		}
+		return "stopping the held mail provider is owed and not done yet"
 	}
 	return ""
 }

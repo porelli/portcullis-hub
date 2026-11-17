@@ -37,6 +37,8 @@ type fakeRunner struct {
 	upErr      error
 	downErr    error
 	byNameErr  error
+	// byNameBlock: DownByName waits for its context (a down that hangs).
+	byNameBlock bool
 	creates    []string
 	createHook func(project string)
 	upHook     func(project string) // runs inside Up (after begin)
@@ -141,6 +143,10 @@ func (f *fakeRunner) Env() []string { return compose.Environ("") }
 func (f *fakeRunner) DownByName(ctx context.Context, name string) error {
 	f.begin("downbyname", name, compose.Project{Name: name})
 	defer f.end(name)
+	if f.byNameBlock {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if f.byNameErr == nil && f.onDown != nil {
 		f.onDown(name)
 	}

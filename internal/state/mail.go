@@ -117,8 +117,10 @@ type MailHold struct {
 	// or a session reset, so the Hub stopped it (Ruling R-HH1, fail
 	// closed); it stays stopped until the re-confirm.
 	Stopped *time.Time `json:"stopped,omitempty" yaml:"stopped,omitempty"`
-	// StopError: the stop is owed (recorded before the down) and its
-	// last attempt failed; retried until it succeeds (doctor Problem).
+	// DownOwed: the down is owed (saved with Stopped, before the down;
+	// cleared only once it succeeded), retried at every start and by the
+	// retry loop. StopError: its last attempt's error.
+	DownOwed  bool   `json:"down_owed,omitempty" yaml:"down_owed,omitempty"`
 	StopError string `json:"stop_error,omitempty" yaml:"stop_error,omitempty"`
 }
 

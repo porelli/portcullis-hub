@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
@@ -340,5 +341,46 @@ func TestHeldGetsNoDelivery(t *testing.T) {
 	}
 	if len(rep.Units) != 1 || rep.Units[0].Skipped != SkipBusy || !strings.Contains(rep.Units[0].Message, "template changed") {
 		t.Fatalf("%+v", rep.Units)
+	}
+}
+
+// TestHeldDownOwedRetriedAtStart (security review): a crash between the
+// saved stop and the down: the start retries the owed down.
+func TestHeldDownOwedRetriedAtStart(t *testing.T) {
+	w := heldFix(t)
+	now := w.now
+	w.h.mu.Lock()
+	c := *w.h.st.Mail.Held
+	c.Stopped, c.DownOwed = &now, true
+	w.h.st.Mail.Held = &c
+	w.h.mu.Unlock()
+	if w.h.MailHeldStopError() == "" {
+		t.Fatal("an owed down isn't reported")
+	}
+	downs := len(w.runner.callsMatching("downbyname"))
+	w.h.resumeMail()
+	w.h.Wait()
+	if len(w.runner.callsMatching("downbyname")) == downs || w.h.MailHeldStopError() != "" {
+		t.Fatal("the owed down wasn't retried at start")
+	}
+	w.h.mu.RLock()
+	defer w.h.mu.RUnlock()
+	if w.h.st.Mail.Held.DownOwed || w.h.st.Mail.Held.Stopped == nil {
+		t.Fatalf("%+v", w.h.st.Mail.Held)
+	}
+}
+
+// TestHeldDownTimeoutStaysOwed: a down that hangs is cut at the bound
+// and stays owed.
+func TestHeldDownTimeoutStaysOwed(t *testing.T) {
+	w := heldFix(t)
+	w.h.mailStopWait = 50 * time.Millisecond
+	w.runner.byNameBlock = true
+	w.h.mailStopHeld("a test")
+	w.h.mu.RLock()
+	hd := *w.h.st.Mail.Held
+	w.h.mu.RUnlock()
+	if !hd.DownOwed || hd.StopError == "" || w.h.mailClient() != nil {
+		t.Fatalf("%+v", hd)
 	}
 }

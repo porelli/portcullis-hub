@@ -129,7 +129,7 @@ func (h *Hub) mailRestart(ctx context.Context, why string) error {
 			h.mailStopHeld("a session reset: " + err.Error()) // R-HH1
 		}
 	}
-	if h.MailHeldStopError() != "" && err == nil {
+	if err == nil && h.MailHeldStopError() != "" {
 		err = errors.New("the held provider's stop failed: mail sessions may still be open")
 	}
 	rec := OpRecord{Op: OpMailRestart, At: h.mailNow(), OK: err == nil}

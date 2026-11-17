@@ -388,6 +388,8 @@ type Hub struct {
 	// T8-void).
 	mailUpModes       mailUpModes
 	mailBootstrapWait time.Duration
+	// mailStopWait bounds one owed down of a held provider (0: 2 min).
+	mailStopWait time.Duration
 	mailPollEvery     time.Duration
 	// mailVoidKick wakes RunMailVoidRetry (kickMailVoid).
 	mailVoidKick chan struct{}
