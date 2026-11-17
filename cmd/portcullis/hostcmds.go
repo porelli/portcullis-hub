@@ -52,6 +52,11 @@ func hostClient(domain, peopleURL, caFile string) (*api.Client, error) {
 		}
 		base = peopleURL
 	}
+	if caFile != "" {
+		if err := host.CheckRootFile(host.OS{}, caFile); err != nil {
+			return nil, api.Errorf(api.ExitUsage, "%v", err)
+		}
+	}
 	return api.New(base, version, caFile)
 }
 

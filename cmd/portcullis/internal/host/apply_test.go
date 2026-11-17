@@ -221,7 +221,9 @@ func TestSharedAccountsOnlyWhenOptedIn(t *testing.T) {
 	}
 }
 
-func TestSudoersValidatedAndKept(t *testing.T) {
+// A visudo refusal fails closed (L-B1): the old file goes, nobody keeps
+// Portcullis sudo on a file that can't be updated.
+func TestSudoersValidatedFailClosed(t *testing.T) {
 	sys := newFakeSys(t)
 	sys.files[SudoersFile] = []byte("old\n")
 	sys.handler["visudo"] = func([]string) ([]byte, error) { return []byte("parse error"), errors.New("exit 1") }
@@ -229,8 +231,8 @@ func TestSudoersValidatedAndKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(sys.files[SudoersFile]) != "old\n" {
-		t.Error("the old sudoers file wasn't kept")
+	if _, ok := sys.files[SudoersFile]; ok {
+		t.Error("the old sudoers file was kept")
 	}
 	if !slices.Contains(kinds(fs)[cliapi.FindingDrift], SudoersFile) {
 		t.Errorf("findings %v", fs)
@@ -544,5 +546,70 @@ func TestCeilingNoSudoChecksPortcullisAccounts(t *testing.T) {
 	}
 	if k := kinds(fs)[cliapi.FindingCeiling]; !slices.Contains(k, "alice") {
 		t.Errorf("not reported: %+v", fs)
+	}
+}
+
+// TestReusedNameNotUnlocked (final review M11): an account Portcullis made
+// for a former person keeps its uid; a bundle naming the name with
+// another uid never unlocks it (account_conflict) — the Hub removes it
+// first.
+func TestReusedNameNotUnlocked(t *testing.T) {
+	sys := newFakeSys(t)
+	sys.files["/etc/passwd"] = append(sys.files["/etc/passwd"], []byte("alice:x:20009:20009:portcullis alice:/home/alice:/usr/sbin/nologin\n")...)
+	sys.files["/etc/group"] = append(sys.files["/etc/group"], []byte("portcullis-users:x:999:alice\n")...)
+	prev := &State{Locked: []string{"alice"}}
+	_, fs, err := apply(t, sys, bundle(t), cliapi.DefaultCeiling(), prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(kinds(fs)[cliapi.FindingAccountConflict], "alice") {
+		t.Errorf("findings %v", fs)
+	}
+	if _, ok := sys.files[PrincipalsFile("alice")]; ok || sys.ran("usermod -U -e  -s /bin/bash alice") {
+		t.Error("the former person's account was unlocked or given principals")
+	}
+	if strings.Contains(string(sys.files[SudoersFile]), "alice") {
+		t.Error("sudo for the former person's account")
+	}
+}
+
+// L-B2: a shared account that doesn't exist (and isn't created) gets no
+// principals file — a later local account of that name would get the
+// grant at once.
+func TestMissingSharedAccountNoPrincipals(t *testing.T) {
+	sys := newFakeSys(t)
+	_, fs, err := apply(t, sys, bundle(t), cliapi.DefaultCeiling(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(kinds(fs)[cliapi.FindingAccountMissing], "deploy") {
+		t.Errorf("findings %v", fs)
+	}
+	if _, ok := sys.files[PrincipalsFile("deploy")]; ok {
+		t.Error("principals written for a missing shared account")
+	}
+}
+
+// L-B4: --ca-file, read by root on every agent start, must be absolute
+// and root's alone (the file and every parent).
+func TestCheckRootFile(t *testing.T) {
+	sys := newFakeSys(t)
+	if err := CheckRootFile(sys, "/etc/ssl/ca.pem"); err != nil {
+		t.Errorf("root-owned: %v", err)
+	}
+	if err := CheckRootFile(sys, "ca.pem"); err == nil {
+		t.Error("a relative path accepted")
+	}
+	sys.owners["/home/alice/ca.pem"] = ownerOf{uid: 1000, mode: 0o644}
+	if err := CheckRootFile(sys, "/home/alice/ca.pem"); err == nil {
+		t.Error("a user's file accepted")
+	}
+	sys.owners["/tmp"] = ownerOf{uid: 0, mode: 0o777}
+	if err := CheckRootFile(sys, "/tmp/ca.pem"); err == nil {
+		t.Error("a file in a world-writable directory accepted")
+	}
+	sys.links["/etc/ssl/link.pem"] = "/home/alice/ca.pem"
+	if err := CheckRootFile(sys, "/etc/ssl/link.pem"); err == nil {
+		t.Error("a symlink to a user's file accepted")
 	}
 }

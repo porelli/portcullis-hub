@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"maps"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -485,5 +487,21 @@ func TestUserCAsPinnedAtEnrol(t *testing.T) {
 	}
 	if string(f.sys.files[UserCAFile]) != ca {
 		t.Error("the CA file changed")
+	}
+}
+
+// L-B6: the report's effective blocks name root and the break-glass
+// account apart (they used to share "breakglass", the last one winning).
+func TestReportEffectiveRootApart(t *testing.T) {
+	f := newHostFix(t)
+	if err := f.enroll(t, "none"); err != nil {
+		t.Fatal(err)
+	}
+	r := f.hub.reports[len(f.hub.reports)-1]
+	if _, ok := r.Effective["root"]; !ok {
+		t.Errorf("no root block: %v", slices.Collect(maps.Keys(r.Effective)))
+	}
+	if _, ok := r.Effective["breakglass"]; !ok {
+		t.Errorf("no breakglass block: %v", slices.Collect(maps.Keys(r.Effective)))
 	}
 }

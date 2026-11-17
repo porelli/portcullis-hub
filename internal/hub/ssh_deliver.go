@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -81,6 +82,12 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 	h.sshrt.mu.Lock()
 	h.sshrt.dirErr = ""
 	h.sshrt.mu.Unlock()
+	if h.retireReusedUIDs(m.UUIDs) {
+		h.mu.RLock()
+		cur := h.st.SSH.Clone()
+		h.mu.RUnlock()
+		st.UIDs, st.UIDOwners, st.UIDsUsed, st.Hosts = cur.UIDs, cur.UIDOwners, cur.UIDsUsed, cur.Hosts
+	}
 	if err := h.refreshSSHCA(ctx, acts); err != nil {
 		return h.sshCompileFailed(err)
 	}
@@ -117,10 +124,15 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 		for _, u := range c.NeedUIDs {
 			if _, err := sshaccess.AllocUID(&h.st.SSH, u); err != nil {
 				log.Printf("ssh: %s: %v", u, err)
+			} else if id := m.UUIDs[u]; id != "" {
+				if h.st.SSH.UIDOwners == nil {
+					h.st.SSH.UIDOwners = map[string]string{}
+				}
+				h.st.SSH.UIDOwners[u] = id
 			}
 		}
 		h.saveLocked()
-		in.State.UIDs, in.State.UIDsUsed = clone(h.st.SSH.UIDs), slices.Clone(h.st.SSH.UIDsUsed)
+		in.State.UIDs, in.State.UIDsUsed, in.State.UIDOwners = clone(h.st.SSH.UIDs), slices.Clone(h.st.SSH.UIDsUsed), clone(h.st.SSH.UIDOwners)
 		h.mu.Unlock()
 		if c, err = sshaccess.Compile(in); err != nil {
 			return h.sshCompileFailed(err)
@@ -138,6 +150,56 @@ func (h *Hub) compileSSH(ctx context.Context) error {
 		h.sshBroadcast()
 	}
 	return nil
+}
+
+// retireReusedUIDs (final review M11): a username whose LLDAP uuid isn't
+// the one its uid was given to belongs to someone new. Their
+// predecessor's uid is retired (UIDsUsed keeps it, it's never given
+// again) and every managed host is asked to move the old account aside
+// (Remove account: locked, home kept under the removed homes, userdel);
+// the bundle names no account of that name until the host reported it
+// removed, then the new person gets a fresh uid and a fresh account.
+// A name with no uuid now (the person is gone) keeps its uid: the account
+// stays locked. Reports whether anything changed (saved).
+func (h *Hub) retireReusedUIDs(uuids map[string]string) bool {
+	h.mu.Lock()
+	s := &h.st.SSH
+	changed := false
+	var retired []string
+	for _, name := range slices.Sorted(maps.Keys(s.UIDs)) {
+		now, was := uuids[name], s.UIDOwners[name]
+		switch {
+		case now == "":
+			continue
+		case was == "":
+			if s.UIDOwners == nil {
+				s.UIDOwners = map[string]string{}
+			}
+			s.UIDOwners[name] = now
+			changed = true
+			continue
+		case now == was:
+			continue
+		}
+		delete(s.UIDs, name)
+		delete(s.UIDOwners, name)
+		for id, hst := range s.Hosts {
+			if !slices.Contains(hst.RemoveAccounts, name) {
+				hst.RemoveAccounts = append(hst.RemoveAccounts, name)
+				s.Hosts[id] = hst
+			}
+		}
+		retired = append(retired, name)
+		changed = true
+	}
+	if changed {
+		h.saveLocked()
+	}
+	h.mu.Unlock()
+	for _, name := range retired {
+		h.auditSSH("-", "ssh.uid.retire", name, "the name belongs to a new person: the old uid is retired, its host accounts are moved aside", nil)
+	}
+	return changed
 }
 
 // anyValidIssued: some issued certificate hasn't expired yet.

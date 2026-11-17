@@ -196,6 +196,12 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 					continue
 				}
 				acc.created++
+			case a.UID != 0 && u.UID != a.UID:
+				// M11: an account of a former person under a reused name
+				// (the Hub retired its uid): never unlocked for someone
+				// else; the Hub asks for its removal first.
+				findings = append(findings, finding(cliapi.FindingAccountConflict, cliapi.SeverityWarning, a.Name, fmt.Sprintf("the account has uid %d, not %d: it belonged to someone else (remove it)", u.UID, a.UID)))
+				continue
 			default:
 				if u.Shell == nologin || prev != nil && slices.Contains(prev.Locked, a.Name) {
 					if err := unlock(ctx, sys, a.Name); err != nil {
@@ -209,6 +215,7 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 			if !existsU {
 				if !b.Options.CreateSharedAccounts {
 					findings = append(findings, finding(cliapi.FindingAccountMissing, cliapi.SeverityWarning, a.Name, "the shared account doesn't exist: create it, or let Portcullis create shared accounts"))
+					continue // L-B2: no principals for an account that isn't there
 				} else if out, err := sys.Run(ctx, "useradd", "-m", "-s", shellFor(sys), a.Name); err != nil {
 					findings = append(findings, finding(cliapi.FindingAccountMissing, cliapi.SeverityWarning, a.Name, "useradd: "+firstLine(out)))
 					continue
@@ -328,8 +335,14 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 	sudoBody := SudoersBody(sudo)
 	if sudoBody != nil {
 		if err := CheckSudoers(ctx, sys, sudoBody); err != nil {
-			// The old sudoers file stays; the rest still applies.
+			// Fail closed (L-B1): the old file goes too (it could still
+			// name a person who lost sudo); nobody has Portcullis sudo
+			// until a candidate passes visudo. The rest still applies.
 			findings = append(findings, finding(cliapi.FindingDrift, cliapi.SeverityProblem, SudoersFile, err.Error()))
+			if err := tx.StageRemove(SudoersFile); err != nil {
+				tx.Rollback()
+				return nil, findings, err
+			}
 		} else if err := tx.Stage(SudoersFile, sudoBody, 0o440); err != nil {
 			tx.Rollback()
 			return nil, findings, err

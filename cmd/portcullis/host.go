@@ -25,6 +25,11 @@ func hostCmd() *cobra.Command {
 // fetcher GETs public CLI paths on https://people.<domain>.
 func fetcher(domain, caFile string) func(context.Context, string) ([]byte, error) {
 	return func(ctx context.Context, path string) ([]byte, error) {
+		if caFile != "" {
+			if err := host.CheckRootFile(host.OS{}, caFile); err != nil {
+				return nil, err
+			}
+		}
 		c, err := api.New("https://people."+domain, version, caFile)
 		if err != nil {
 			return nil, err

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ type sshPeople struct {
 	mu      sync.Mutex
 	users   map[string]map[string]int
 	pending map[string]map[string]time.Time
+	uuids   map[string]string // user → LLDAP uuid (absent: none)
 	err     error
 	calls   int
 }
@@ -37,6 +39,7 @@ func (p *sshPeople) Membership(context.Context, time.Time) (*directory.Membershi
 		return nil, p.err
 	}
 	m := &directory.Membership{Users: map[string]map[string]int{}, Groups: map[string]directory.MemberGroup{}, Expired: map[string]map[string]bool{}, Pending: map[string]map[string]time.Time{}}
+	m.UUIDs = maps.Clone(p.uuids)
 	for u, gs := range p.users {
 		m.Users[u] = map[string]int{}
 		for g, id := range gs {
@@ -264,4 +267,11 @@ func (h *Hub) sshHostOKForTest(id string) (state.SSHHost, bool) {
 	defer h.mu.RUnlock()
 	x, ok := h.st.SSH.Hosts[id]
 	return x, ok
+}
+
+// sshStateForTest is a locked copy of the SSH state.
+func (h *Hub) sshStateForTest() state.SSHState {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.st.SSH.Clone()
 }

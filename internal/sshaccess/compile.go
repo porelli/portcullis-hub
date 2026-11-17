@@ -261,6 +261,11 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 	active := map[string]bool{}
 	for _, name := range sortedKeys(accts) {
 		a := accts[name]
+		if slices.Contains(b.Remove, name) {
+			// Remove account wins until the host reported it removed
+			// (M11: a reused name's old account goes first); it's locked.
+			continue
+		}
 		out := cliapi.Account{Name: name, Kind: a.kind, Principals: sortedKeys(a.p), Sudo: a.sudo}
 		if out.Principals == nil {
 			out.Principals = []string{}

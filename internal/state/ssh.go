@@ -17,6 +17,12 @@ type SSHState struct {
 	Grants     []SSHGrant              `json:"grants,omitempty" yaml:"grants,omitempty"`
 	// UIDs: username → uid (20000–59999, plan C19).
 	UIDs map[string]int `json:"uids,omitempty" yaml:"uids,omitempty"`
+	// UIDOwners: username → the LLDAP uuid of the person the uid was
+	// given to (M11). A different uuid under the name — the person was
+	// deleted and someone new got the name — retires the uid (it stays in
+	// UIDsUsed) and moves the old host account aside before the new
+	// person gets a fresh one.
+	UIDOwners map[string]string `json:"uid_owners,omitempty" yaml:"uid_owners,omitempty"`
 	// UIDsUsed: every uid ever allocated, sorted; never shrinks.
 	UIDsUsed []int `json:"uids_used,omitempty" yaml:"uids_used,omitempty"`
 	// Serial: the Hub-wide bundle counter (plan C22).

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -154,8 +155,17 @@ func TestCompileOffWritesNothing(t *testing.T) {
 	f.h.st.SSH.Settings.Enabled = false
 	f.h.mu.Unlock()
 	f.compile(t)
-	if p, _ := f.ssh.counts(); p != 0 || f.h.sshCompiled() != nil {
+	if p, _ := f.ssh.counts(); p != 0 {
 		t.Error("SSH off wrote roles")
+	}
+	// With a managed host the compile still runs (M6: its bundle locks
+	// everyone); with none and no certificate, nothing is compiled.
+	f.h.mu.Lock()
+	f.h.st.SSH.Hosts = nil
+	f.h.mu.Unlock()
+	f.compile(t)
+	if p, _ := f.ssh.counts(); p != 0 || f.h.sshCompiled() != nil {
+		t.Error("SSH off with no host compiled")
 	}
 }
 
@@ -163,5 +173,56 @@ func TestSSHSharedAccount(t *testing.T) {
 	f := newSSHFixture(t)
 	if !f.h.SSHSharedAccount("deploy") || f.h.SSHSharedAccount("alice") || f.h.SSHSharedAccount("{username}") {
 		t.Error("SSHSharedAccount")
+	}
+}
+
+// TestReusedNameRetiresUID (final review M11): a person deleted and a new
+// one created under the same name (another LLDAP uuid) never inherits the
+// old uid or host account: the uid is retired, every host is asked to
+// move the old account aside, the bundle names no account of that name
+// until the host reported it removed, then a fresh uid.
+func TestReusedNameRetiresUID(t *testing.T) {
+	f := newSSHFixture(t)
+	f.people.uuids = map[string]string{"alice": "uuid-1", "bob": "uuid-b"}
+	f.compile(t)
+	f.h.mu.RLock()
+	old := f.h.st.SSH.UIDs["alice"]
+	f.h.mu.RUnlock()
+	if old == 0 || f.h.sshStateForTest().UIDOwners["alice"] != "uuid-1" {
+		t.Fatalf("alice uid %d owners %v", old, f.h.st.SSH.UIDOwners)
+	}
+	f.people.mu.Lock()
+	f.people.uuids["alice"] = "uuid-2"
+	f.people.mu.Unlock()
+	f.compile(t)
+	b := f.h.sshCompiled().Bundles["web-1"]
+	for _, a := range b.Accounts {
+		if a.Name == "alice" {
+			t.Fatalf("the new alice gets an account before the old one is removed: %+v", a)
+		}
+	}
+	if !slices.Contains(b.Remove, "alice") || !slices.Contains(b.Locked, "alice") {
+		t.Errorf("the old account isn't removed and locked: remove %v locked %v", b.Remove, b.Locked)
+	}
+	if f.audit.lastOf("ssh.uid.retire").Target != "alice" {
+		t.Error("not audited")
+	}
+	// The host reports the removal: the new alice gets a fresh uid.
+	f.h.mu.Lock()
+	hst := f.h.st.SSH.Hosts["web-1"]
+	hst.RemoveAccounts = nil
+	f.h.st.SSH.Hosts["web-1"] = hst
+	f.h.mu.Unlock()
+	f.compile(t)
+	f.h.mu.RLock()
+	now, owner := f.h.st.SSH.UIDs["alice"], f.h.st.SSH.UIDOwners["alice"]
+	f.h.mu.RUnlock()
+	if now == 0 || now == old || owner != "uuid-2" {
+		t.Errorf("new uid %d (old %d) owner %q", now, old, owner)
+	}
+	for _, a := range f.h.sshCompiled().Bundles["web-1"].Accounts {
+		if a.Name == "alice" && a.UID != now {
+			t.Errorf("bundle uid %d", a.UID)
+		}
 	}
 }

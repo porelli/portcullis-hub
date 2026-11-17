@@ -57,9 +57,14 @@ func BuildReport(ctx context.Context, sys System, hostID string, b *cliapi.Bundl
 	}
 	if bad, eff, err := EffectiveCheck(ctx, sys, check, other, b != nil && b.HostCertificate != ""); err == nil {
 		for u, m := range eff {
+			// One key per account checked (L-B6: root and the break-glass
+			// account no longer share "breakglass").
 			key := "breakglass"
-			if u == check {
+			switch u {
+			case check:
 				key = "portcullis"
+			case "root":
+				key = "root"
 			}
 			r.Effective[key] = m
 		}
