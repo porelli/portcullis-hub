@@ -36,10 +36,13 @@ const (
 	// bind root) is bound in the helper.
 	fixerFolder   = "/folder"
 	fixerBindRoot = "/broot"
-	fixerIn       = "/in"
-	fixerOut      = "/out"
-	fixerPids     = 16
-	fixerMemory   = 256 << 20
+	// fixerUsageRoot: where a usage run mounts its volume or bind
+	// (never an image path: the Podman domains_data lesson).
+	fixerUsageRoot = "/vol"
+	fixerIn        = "/in"
+	fixerOut       = "/out"
+	fixerPids      = 16
+	fixerMemory    = 256 << 20
 )
 
 // fixerEnv keeps the Go runtime inside the helper's limits: pids 16 counts
@@ -79,7 +82,7 @@ var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // fixerRun is one helper run.
 type fixerRun struct {
-	Mode string // probe | scan | snapshot | apply | restore | childfix
+	Mode string // probe | scan | snapshot | apply | restore | childfix | usage
 	// Folder is the folder id (label "folder:<id>"); "" = a path check or
 	// a scan of a hand-typed path (label "path-check").
 	Folder string
@@ -87,6 +90,9 @@ type fixerRun struct {
 	// root, bound at /broot. The caller has validated it (folder path
 	// rules); runFixer only refuses what is malformed.
 	Source string
+	// Volume: usage only, a named volume mounted read-only at /vol in
+	// place of Source (exactly one of the two).
+	Volume runtime.VolumeMount
 	// Opts and Extra are the fixer's flags, rendered by folderfix.Args
 	// (ruling 38). Root and the /in, /out paths are set here.
 	Opts  folderfix.Options
@@ -114,6 +120,8 @@ func fixerTimeout(r fixerRun) time.Duration {
 		return r.Timeout
 	case r.Mode == "probe", r.Mode == "childfix":
 		return 2 * time.Minute
+	case r.Mode == "usage":
+		return r.Opts.MaxTime + 30*time.Second
 	case r.Mode == "scan" && r.Opts.MaxTime > 0:
 		return r.Opts.MaxTime + 2*time.Minute
 	case r.Mode == "scan":
@@ -128,6 +136,12 @@ func fixerTimeout(r fixerRun) time.Duration {
 // root check on a write, caps on a non-scan, a mode without its transfer.
 func (r fixerRun) validate() error {
 	o := r.Opts
+	if r.Mode == "usage" {
+		return r.validateUsage()
+	}
+	if r.Volume != (runtime.VolumeMount{}) {
+		return errors.New("a named volume is for the usage mode only")
+	}
 	if r.Folder != "" && !settings.FolderIDRe.MatchString(r.Folder) {
 		return fmt.Errorf("folder id %q", r.Folder)
 	}
@@ -213,6 +227,44 @@ func (r fixerRun) validate() error {
 	return nil
 }
 
+// validateUsage: a usage run measures exactly one volume or one bind,
+// read-only, with its caps and nothing else (contract §6).
+func (r fixerRun) validateUsage() error {
+	o, x := r.Opts, r.Extra
+	hasVol := r.Volume != (runtime.VolumeMount{})
+	switch {
+	case hasVol == (r.Source != ""):
+		return errors.New("usage measures exactly one volume or one bind")
+	case hasVol && (r.Volume.Name == "" || strings.ContainsAny(r.Volume.Name, "/\x00") || strings.ContainsFunc(r.Volume.Name, func(c rune) bool { return c < 0x20 || c == 0x7f })):
+		return fmt.Errorf("usage: volume %q", r.Volume.Name)
+	case !hasVol && (!strings.HasPrefix(r.Source, "/") || path.Clean(r.Source) != r.Source || r.Source == "/" ||
+		strings.ContainsFunc(r.Source, func(c rune) bool { return c < 0x20 || c == 0x7f })):
+		return fmt.Errorf("source %q: want an absolute, clean path below /", r.Source)
+	case r.Folder != "" || r.Unchecked || r.In != nil || r.Out != nil:
+		return errors.New("usage takes no folder, transfer or identity check")
+	case o.MaxEntries <= 0 || o.MaxTime <= 0:
+		return errors.New("usage needs --max-entries and --max-time")
+	case o.Target.GID != 0 || o.Target.OwnerUID != nil || len(o.Target.Mkdir) > 0 || len(o.Principals) > 0 || o.Children || o.TopOnly ||
+		o.ExpectDev != 0 || o.ExpectIno != 0 || o.ExpectMountRoot != "" || o.ExpectDigest != "" || o.SnapshotRootDev != 0 || o.SnapshotRootIno != 0:
+		return errors.New("usage takes the caps only")
+	case x.Rel != "" || x.Create || len(x.Subs) > 0 || x.Expect != 0 || x.In != "" || x.Out != "" || x.Kind != "" || x.DryRun || x.Child != (folderfix.ChildFix{}):
+		return errors.New("usage takes the caps only")
+	}
+	return nil
+}
+
+// usageTargetLabel is a usage run's label target, clipped to 200 runes.
+func usageTargetLabel(r fixerRun) string {
+	t := r.Source
+	if r.Volume.Name != "" {
+		t = r.Volume.Name
+	}
+	if rs := []rune(t); len(rs) > 200 {
+		t = string(rs[:200])
+	}
+	return t
+}
+
 // validSub: a clean relative path below the bind root or folder.
 func validSub(sub string) bool {
 	return sub != "" && !strings.HasPrefix(sub, "/") && path.Clean(sub) == sub && sub != "." && sub != ".." && !strings.HasPrefix(sub, "../") &&
@@ -234,6 +286,18 @@ func (r fixerRun) spec(image string) docker.RunSpec {
 	}
 	if r.Folder != "" {
 		s.Label = "folder:" + r.Folder
+	}
+	if r.Mode == "usage" {
+		// One read-only mount at /vol: a volume (NoCopy) or a bind.
+		s.Label = "usage:" + usageTargetLabel(r)
+		o.Root = fixerUsageRoot
+		if r.Volume.Name != "" {
+			s.Volumes = []runtime.VolumeMount{{Name: r.Volume.Name, Target: fixerUsageRoot, Instance: r.Volume.Instance}}
+		} else {
+			s.Binds = []docker.BindMount{{Source: r.Source, Target: fixerUsageRoot, ReadOnly: true}}
+		}
+		s.Cmd = append([]string{fixerBinary, "folderfix"}, folderfix.Args(r.Mode, o, x)...)
+		return s
 	}
 	bind := docker.BindMount{Source: r.Source, Target: fixerFolder, ReadOnly: true}
 	o.Root = fixerFolder
@@ -294,6 +358,15 @@ func (h *Hub) runFixer(ctx context.Context, r fixerRun) (*folderfix.Report, erro
 		return &rep, err
 	}
 	return &rep, nil
+}
+
+// runUsageFixer runs one usage measurement (a volume or a bind at /vol)
+// through execFixer: the same refusals and strict report decoding.
+func (h *Hub) runUsageFixer(ctx context.Context, r fixerRun) (*folderfix.Report, error) {
+	if r.Mode != "usage" {
+		return nil, statusErr(http.StatusInternalServerError, "shared folder fixer: runUsageFixer runs usage only")
+	}
+	return h.runFixer(ctx, r)
 }
 
 // runProbe runs a probe of r.Extra.Rel below the bind root r.Source.
