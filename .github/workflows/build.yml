@@ -20,6 +20,16 @@ on:
         description: templates/core branch to compare against (empty = same-named, else main)
         required: false
         default: ""
+      # `-f runner=builder`: the test job runs on the self-hosted dev builder
+      # (labels self-hosted, linux, x64, pc-builder; ephemeral, one job per
+      # registration). Only a workflow_dispatch can pick it: push and
+      # pull_request always run on GitHub's runners, and the build job
+      # (GHCR push, cosign's OIDC token) never leaves them.
+      runner:
+        description: "Where the test job runs: github (GitHub-hosted) or builder (self-hosted dev builder)"
+        type: choice
+        options: [github, builder]
+        default: github
 
 permissions: {}
 
@@ -31,7 +41,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner == 'builder' && fromJSON('["self-hosted","linux","x64","pc-builder"]') || 'ubuntu-latest' }}
     permissions:
       contents: read
     steps:
