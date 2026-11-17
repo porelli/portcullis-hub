@@ -90,6 +90,19 @@ var mailNoToolRoutes = map[string]string{
 	"DELETE /api/directory/users/{username}/mail/passwords/{id}": "credentials: never through MCP",
 }
 
+// usageNoToolRoutes are the usage routes no tool mirrors (contract §15.10
+// "Usage routes without a tool", U11).
+var usageNoToolRoutes = map[string]string{
+	"GET /api/usage/export.csv": "a file download; usage_overview and usage_storage answer the same data",
+}
+
+// adminUsage are the usage tools (§15.10); the storage ones come with the
+// storage measurer.
+var adminUsage = []string{"usage_overview", "usage_instance", "usage_storage", "usage_storage_measure", "usage_storage_op"}
+
+// adminUsageRegistered are the ones registered so far.
+var adminUsageRegistered = adminUsage[:2]
+
 // adminVPN are the VPN tools (§15.10).
 var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach", "mail_status"}
 
@@ -240,7 +253,8 @@ func TestToolParity(t *testing.T) {
 		_, vpnNo := vpnNoToolRoutes[r]
 		_, guardNo := fieldGuardNoToolRoutes[r]
 		_, mailNo := mailNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo
+		_, usageNo := usageNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || usageNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -271,7 +285,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, usageNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -394,7 +408,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// The tools of every part are all there.
-	for _, n := range append(append(append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...), adminSignIn...), adminVPN...) {
+	for _, n := range append(append(append(append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...), adminSignIn...), adminVPN...), adminUsageRegistered...) {
 		if _, ok := byName[n]; !ok {
 			t.Errorf("tool %s is not registered", n)
 		}

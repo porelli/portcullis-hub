@@ -131,6 +131,8 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerSettings(mux)
 	s.registerFolders(mux)
 	s.registerDoctor(mux)
+	// Usage (contract §11.11; Hub listener only).
+	s.registerUsage(mux)
 	s.registerAI(mux)
 	s.registerSignIn(mux)
 	// Signing in as someone else: the list and the switch (§8.1).
