@@ -354,6 +354,7 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 	if err := h.pinServer(ctx, id, leaf, nc.Serial, enrollingOK); err != nil {
 		return err
 	}
+	log.Printf("server_enrol %s: certificate pinned", id)
 	np, err := h.networkParams()
 	if err != nil {
 		return err
@@ -364,6 +365,7 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 	if err != nil {
 		return err
 	}
+	log.Printf("server_enrol %s: network set", id)
 	link, err := h.serversOn()
 	if err != nil {
 		return err
@@ -376,9 +378,11 @@ func (h *Hub) enrolVerify(ctx context.Context, id string, b *agentrt.Backend, se
 		if err := h.setPeerKey(id, csr.WGPublicKey); err != nil {
 			return err
 		}
+		log.Printf("server_enrol %s: key switch %d requested, link.json has the new key", id, try+1)
 		if h.waitHandshake(ctx, id, at.Add(agentSwitchDelay), orDur(h.srvT.swapWait, 120*time.Second)) {
 			return nil
 		}
+		log.Printf("server_enrol %s: no handshake on the new key (switch %d): back to the bootstrap key", id, try+1)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -406,6 +410,7 @@ func (h *Hub) putWG(ctx context.Context, b *agentrt.Backend, linkPub string) err
 		if err == nil || ctx.Err() != nil || h.now().After(deadline) {
 			return err
 		}
+		log.Printf("server_enrol: the key switch request failed, retrying: %v", err)
 		if !sleepCtx(ctx, orDur(h.srvT.enrolPoll, 2*time.Second)) {
 			return ctx.Err()
 		}
