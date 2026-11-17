@@ -36,7 +36,7 @@ const (
 	// mounted whole and read-only into the gated services (R-POD2).
 	mailProviderSlotVolume    = "portcullis_mail_provider_slot"
 	mailProviderSlotVolumeKey = "portcullis-mail-provider-slot"
-	mailTLSVolume    = "portcullis_mail_tls"
+	mailTLSVolume             = "portcullis_mail_tls"
 	// The provider's mount points (contract §19.4).
 	MailSlotMount = "/run/portcullis/mail/slot"
 	MailTLSMount  = "/run/portcullis/mail/tls"
