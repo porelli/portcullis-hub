@@ -165,7 +165,7 @@ func (h *Hub) ApplyRecheck(ctx context.Context, id string, planHash string, conf
 		h.mu.Unlock()
 		return nil, statusErr(http.StatusConflict, "shared folder %s changed since the re-check's preview: re-check it again", id)
 	}
-	if err := h.sameDirLocked(c.New.Dev, c.New.Ino, id); err != nil {
+	if err := h.sameDirLocked(f.Server, c.New.Dev, c.New.Ino, id); err != nil {
 		h.mu.Unlock()
 		return nil, err
 	}
@@ -229,19 +229,19 @@ func (h *Hub) computeRecheck(ctx context.Context, id string) (*IdentityCheck, er
 	if !ok {
 		return nil, ErrNotFound
 	}
-	if err := h.folderPathRule(f.Path); err != nil {
+	if err := h.folderPathRule(f.Server, f.Path); err != nil {
 		return nil, err
 	}
-	if err := h.dockerRootRule(ctx, f.Path); err != nil {
+	if err := h.dockerRootRule(ctx, f.Server, f.Path); err != nil {
 		return nil, err
 	}
 	h.mu.RLock()
-	err := h.checkFolderPathLocked(f.Path, id)
+	err := h.checkFolderPathLocked(f.Server, f.Path, id)
 	h.mu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
-	_, rep, _, err := h.probeAndCheck(ctx, id, f.Path, false)
+	_, rep, _, err := h.probeAndCheck(ctx, f.Server, id, f.Path, false)
 	if err != nil {
 		return nil, err
 	}

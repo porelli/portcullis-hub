@@ -135,7 +135,15 @@ func (c *Client) PullWithProgress(ctx context.Context, ref string, onBytes func(
 		return fmt.Errorf("pull %s: %w", ref, cerr)
 	}
 	if !finished {
-		return fmt.Errorf("pull %s: %w", ref, errPullUnfinished)
+		// Podman's compat stream never sends Docker's closing Digest: /
+		// Status: lines: a stream that ended cleanly counts only when the
+		// image is there now (a cut stream leaves it absent).
+		ictx, cancel := context.WithTimeout(ctx, requestTimeout)
+		_, ierr := c.api.ImageInspect(ictx, ref)
+		cancel()
+		if ierr != nil {
+			return fmt.Errorf("pull %s: %w", ref, errPullUnfinished)
+		}
 	}
 	report(true)
 	return nil

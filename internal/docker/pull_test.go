@@ -143,6 +143,38 @@ func TestPullStreamUnfinished(t *testing.T) {
 	}
 }
 
+// TestPullStreamPodmanShape: Podman's compat stream ends after the layer
+// lines, with no Digest: / Status: line; the pull counts once the image is
+// present afterwards (contract §6 runtimes; seen live on Podman 6.1).
+func TestPullStreamPodmanShape(t *testing.T) {
+	podman := `{"status":"Pulling fs layer","progressDetail":{},"id":"2013d9003084"}
+{"status":"Download complete","progressDetail":{},"id":"2013d9003084"}
+{"status":"Pulling fs layer","progressDetail":{},"id":"cf45b89a82fa"}
+{"status":"Download complete","progressDetail":{},"id":"cf45b89a82fa"}
+`
+	pulled := false
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/_ping":
+		case r.Method == "GET" && !pulled:
+			w.WriteHeader(404)
+			fmt.Fprint(w, `{"message":"No such image"}`)
+		case r.Method == "GET":
+			fmt.Fprint(w, `{"Id":"sha256:cf45"}`)
+		default:
+			pulled = true
+			fmt.Fprint(w, podman)
+		}
+	}))
+	var final [2]int64
+	if err := c.PullWithProgress(context.Background(), "docker.io/library/busybox:1@sha256:"+strings.Repeat("a", 64), func(d, t int64, _ bool) { final = [2]int64{d, t} }); err != nil {
+		t.Fatalf("a Podman-shaped pull: %v", err)
+	}
+	if final[0] != final[1] {
+		t.Errorf("progress didn't end at 100%%: %v", final)
+	}
+}
+
 // TestPullWithProgressCancelled: cancelling the context stops a pull in
 // progress (the stream is closed) with the context's error.
 func TestPullWithProgressCancelled(t *testing.T) {

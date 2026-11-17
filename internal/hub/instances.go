@@ -4,8 +4,10 @@ import (
 	"context"
 	"log"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
 
@@ -33,6 +35,12 @@ const (
 	// (an interrupted one is rolled back on the next restore or start).
 	StateRestoring = "restoring"
 	StateError     = "error"
+	// The view-only states (multiple servers, contract §11.2): derived,
+	// never persisted by the view. Precedence: deleting, moving,
+	// orphaned, unreachable, then the persisted state.
+	StateMoving      = "moving"
+	StateOrphaned    = "orphaned"
+	StateUnreachable = "unreachable"
 )
 
 // InstanceView is one instance as GET /api/instances shows it (§11.7).
@@ -60,12 +68,60 @@ type InstanceView struct {
 	// Compat is the instance's runtime verdict with its own
 	// values (contract §11.10; podman and kubernetes, absent under Docker).
 	Compat *templates.Compat `json:"compat,omitempty"`
+	// Server is the server the instance runs on ("" = the primary); Move
+	// is set while a move runs, MovedFrom while a move's source copy is
+	// kept (contract §11.7; never a volume list).
+	Server    string         `json:"server"`
+	Move      *MoveView      `json:"move,omitempty"`
+	MovedFrom *MovedFromView `json:"moved_from,omitempty"`
+}
+
+// MoveView is a running move as the views show it.
+type MoveView struct {
+	From      string    `json:"from"`
+	To        string    `json:"to"`
+	Phase     string    `json:"phase"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// MovedFromView is a move's kept source copy: where and since when.
+type MovedFromView struct {
+	Server string    `json:"server"`
+	At     time.Time `json:"at"`
+}
+
+// serverViewLocked fills v's server fields and its view state from e
+// (precedence: deleting, moving, orphaned, unreachable, the rest).
+// Caller holds mu.
+func (h *Hub) serverViewLocked(v *InstanceView, e state.Instance) {
+	v.Server = e.Server
+	if m := e.Move; m != nil {
+		v.Move = &MoveView{From: m.From, To: m.To, Phase: m.Phase, StartedAt: m.StartedAt}
+	}
+	if mf := e.MovedFrom; mf != nil {
+		v.MovedFrom = &MovedFromView{Server: mf.Server, At: mf.At}
+	}
+	if v.State == StateDeleting {
+		return
+	}
+	srv, placed := h.st.Servers[e.Server]
+	switch {
+	case e.State == state.InstanceMoving || e.Move != nil:
+		v.State = StateMoving
+	case e.State == state.InstanceOrphaned || (e.Server != "" && (!placed || srv.State == ServerRevoked)):
+		v.State = StateOrphaned
+	case e.Server != "" && (srv.State == ServerOffline || srv.State == ServerEnrolling):
+		v.State = StateUnreachable
+	}
 }
 
 // rebuildLocked recomputes the instance views from the catalog and state
 // and the catalog's enabled flags and instance lists. Caller must hold mu
 // (write).
 func (h *Hub) rebuildLocked() {
+	// The instance → server index follows state (an entry removed or
+	// re-placed never keeps routing to its old server).
+	defer h.noteServersLocked()
 	extra := extraFunc(h.enrolledLocked())
 	var out []templates.Template
 	byTemplate := map[string][]string{}
@@ -139,6 +195,8 @@ func (h *Hub) pendingLocked(id string) error {
 		return statusErr(409, "shared folder %s is being applied to %s: try again when it has finished", name, id)
 	}
 	switch e := h.st.Instances[id]; e.State {
+	case state.InstanceMoving:
+		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", id)
 	case state.InstanceDeleting:
 		return statusErr(409, "instance %s is being deleted: delete it again to finish", id)
 	case state.InstanceRestoring:
@@ -216,6 +274,7 @@ func (h *Hub) Instances() []InstanceView {
 		default:
 			v.State = StateDisabled
 		}
+		h.serverViewLocked(&v, e)
 		out = append(out, v)
 	}
 	for id, reason := range h.brokenInstances {
@@ -342,10 +401,14 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	if exists {
 		return nil, statusErr(409, "instance %s already exists", id)
 	}
+	// A recorded copy of id on the target (final review M1): never adopted.
+	if keptOn(cur, req.Server) {
+		return nil, statusErr(409, "%s still holds an earlier copy of %s: remove it first", serverLabel(req.Server), id)
+	}
 	// Runtime compatibility (contract §11.10): a template that can't run
 	// here is never created (the API's create and restore into a new id
 	// come through here too).
-	if h.compatOn() {
+	if h.compatOn() && req.Server == "" {
 		h.mu.RLock()
 		var tc *templates.Template
 		if t := h.catalogLocked(templateID); t != nil {
@@ -362,8 +425,18 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	// A leftover project of that name (e.g. a deleted instance whose
 	// containers survived) is someone else's: refuse. Docker first, never
 	// under mu.
+	// The engine it will run on (Task 10: a worker's for a placement).
+	target, terr := h.rtForServer(req.Server)
+	if terr != nil {
+		return nil, terr
+	}
 	if !h.noEngine() {
-		cs, err := h.rt.List(context.Background(), runtime.Filter{Instance: id})
+		cs, err := target.List(context.Background(), runtime.Filter{Instance: id})
+		if err != nil && req.Server != "" && docker.IsNotFound(err) {
+			// A worker's agent answers 404 for a project it holds no bundle
+			// of (its scope, contract §17.4): none there.
+			cs, err = nil, nil
+		}
 		if err != nil {
 			return nil, statusErr(503, "cannot check for an existing compose project %s: %v", projectName(id), err)
 		}
@@ -384,7 +457,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 			want = h.volumeNamesFor(t, id)
 		}
 		h.mu.RUnlock()
-		vs, err := h.rt.ListVolumes(context.Background(), runtime.Filter{})
+		vs, err := target.ListVolumes(context.Background(), runtime.Filter{})
 		if err != nil {
 			return nil, statusErr(503, "cannot check for existing volumes: %v", err)
 		}
@@ -476,14 +549,20 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	}
 	next = h.pinSetupValuesLocked(t, next, false)
 	setupNext := &next
+	if req.Server != "" {
+		if err := h.placeableLocked(req.Server); err != nil {
+			return nil, err
+		}
+	}
 	e := state.Instance{ID: id, Template: templateID, Hosts: view.Hosts, State: state.InstanceCreated,
-		Label: req.Label, UsersGroup: users, AdminsGroup: admins, SignInTemplate: cur.SignInTemplate}
+		Label: req.Label, UsersGroup: users, AdminsGroup: admins, SignInTemplate: cur.SignInTemplate, Server: req.Server}
 	if def && !hasImmutableHosts(t) && reflect.DeepEqual(view.Hosts, t.DefaultHosts(h.cfg.Domain)) {
 		// The default instance on its default hostnames stores none: a
 		// main-domain change moves them (§11.3).
 		e.Hosts = nil
 	}
 	h.st.Instances[id] = e
+	h.noteInstanceServer(id, req.Server)
 	if setupNext != nil {
 		// Stored as the instance's values before anything starts.
 		if setupNext.IsZero() {
@@ -496,6 +575,7 @@ func (h *Hub) createEntry(req CreateRequest, users, admins string) (*priorSettin
 	if v := h.findLocked(id); v != nil {
 		h.seedSettingsLocked(v)
 		h.seedAIProvidersLocked(v)
+		h.recordClientsLocked(v)
 	}
 	h.saveLocked()
 	log.Printf("instance %s of %s created (hosts %v)", id, templateID, view.Hosts)
@@ -719,4 +799,26 @@ func firstClaimed(claims []string, claimed map[string]string) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+// recordClientsLocked records view v's Keycloak client ids on its state
+// entry (none: nothing; review B-M3). Caller holds mu (write).
+func (h *Hub) recordClientsLocked(v *templates.Template) bool {
+	in, ok := h.st.Instances[v.ID]
+	if !ok {
+		return false
+	}
+	ids := append([]string{}, in.KeycloakClients...)
+	for _, c := range v.Manifest.Clients {
+		if c.ClientID != "" && !slices.Contains(ids, c.ClientID) {
+			ids = append(ids, c.ClientID)
+		}
+	}
+	if len(ids) == len(in.KeycloakClients) {
+		return false
+	}
+	slices.Sort(ids)
+	in.KeycloakClients = ids
+	h.st.Instances[v.ID] = in
+	return true
 }

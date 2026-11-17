@@ -1483,7 +1483,7 @@ func (h *Hub) execAIHook(ctx context.Context, t *templates.Template, name string
 		res.Error = fmt.Sprintf("hook %s: no running container of service %s", name, hk.Service)
 		return nil, exit, res, false
 	}
-	r, err := h.rt.ExecSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(slices.Clone(stdin), '\n'), Timeout: hk.EffectiveTimeout()})
+	r, err := h.rtOf(t.ID).ExecSplit(ctx, c.ID, docker.ExecInput{Cmd: slices.Clone(hk.Command), User: hk.User, Stdin: append(slices.Clone(stdin), '\n'), Timeout: hk.EffectiveTimeout()})
 	var why string
 	switch {
 	case err != nil:

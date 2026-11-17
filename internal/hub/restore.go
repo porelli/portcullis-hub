@@ -327,7 +327,7 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		return err
 	}
 	if sb.cfg.Settings != nil {
-		if err := h.dockerRootValuesRule(context.Background(), view, sb.cfg.Settings.Values); err != nil {
+		if err := h.dockerRootValuesRule(context.Background(), h.serverOf(id), view, sb.cfg.Settings.Values); err != nil {
 			return err
 		}
 	}
@@ -654,7 +654,7 @@ func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 			errs = append(errs, fmt.Errorf("listing its volumes: %w", err))
 		}
 		for _, v := range vols {
-			if err := h.rt.RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
+			if err := h.rtOf(id).RemoveVolume(ctx, v.Name); err != nil && !docker.IsNotFound(err) {
 				errs = append(errs, fmt.Errorf("volume %s: %w", v.Name, err))
 			}
 		}
@@ -736,7 +736,7 @@ func (h *Hub) restorePlan(id string, view *templates.Template, sb *staged) ([]vo
 		if !ok {
 			return nil, statusErr(409, "the archive has volume %s, which template %s no longer defines", k, view.TemplateID)
 		}
-		if existing, err := h.rt.InspectVolume(context.Background(), name); err == nil {
+		if existing, err := h.rtOf(id).InspectVolume(context.Background(), name); err == nil {
 			return nil, statusErr(409, "volume %s exists but doesn't belong to %s (labels %v): refusing to overwrite it", existing.Name, projectName(id), existing.Labels)
 		} else if !docker.IsNotFound(err) {
 			return nil, statusErr(503, "volume %s: %v", name, err)
@@ -806,7 +806,38 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 		}
 	}()
 	if len(plan) > 0 {
-		if err := h.rt.EnsureImage(ctx, HelperImage); err != nil {
+		// A worker's agent creates only volumes a bundle names (contract
+		// §17.4): the instance's bundle first, as an up's (a move's restore
+		// onto a worker included — nothing was pushed there yet).
+		if pr, ok := h.rtOf(id).(placedRT); ok {
+			server := h.serverOf(id)
+			// The checks before anything is sent, as at create: the pinned
+			// images (placedImages); placement and quarantine are
+			// pushBundle's own first step (placedCheck).
+			if t := h.Template(id); t != nil {
+				if err := h.placedImages(ctx, t, server); err != nil {
+					return air, err
+				}
+			}
+			prev, _ := h.lastPush.Load(id)
+			hadBundle := prev == server
+			if err := h.pushBundle(ctx, id, pr.Instances); err != nil {
+				return air, fmt.Errorf("the bundle of %s before its volumes: %w", id, err)
+			}
+			if !hadBundle {
+				// A failed restore leaves no bundle (no env) there it put
+				// there itself; a removal that fails is owed.
+				defer func() {
+					if err == nil {
+						return
+					}
+					if rerr := h.removeWorkerBundle(context.Background(), server, id); rerr != nil {
+						h.oweBundle(server, id)
+					}
+				}()
+			}
+		}
+		if err := h.rtOf(id).EnsureImage(ctx, HelperImage); err != nil {
 			return air, fmt.Errorf("helper image %s: %w", HelperImage, err)
 		}
 	}
@@ -1144,7 +1175,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 		return err
 	}
 	if sb.cfg.Settings != nil {
-		if err := h.dockerRootValuesRule(context.Background(), &tmpl, sb.cfg.Settings.Values); err != nil {
+		if err := h.dockerRootValuesRule(context.Background(), "", &tmpl, sb.cfg.Settings.Values); err != nil { // a restore-as lands on the primary
 			return err
 		}
 	}
@@ -1224,7 +1255,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 		}
 		var errs []error
 		for _, v := range createdVols {
-			if err := h.rt.RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {
+			if err := h.rtOf(newID).RemoveVolume(ctx, v); err != nil && !docker.IsNotFound(err) {
 				errs = append(errs, err)
 			}
 		}
@@ -1358,7 +1389,7 @@ func (h *Hub) restoreAsSteps(ctx context.Context, p *Progress, archive, newID st
 	}
 	sort.Strings(keys)
 	if len(keys) > 0 {
-		if err := h.rt.EnsureImage(context.Background(), HelperImage); err != nil {
+		if err := h.rtOf(newID).EnsureImage(context.Background(), HelperImage); err != nil {
 			return undo(statusErr(503, "helper image %s: %v", HelperImage, err))
 		}
 	}

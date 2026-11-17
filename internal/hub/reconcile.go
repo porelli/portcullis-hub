@@ -215,6 +215,40 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		rep.Error = err.Error()
 		return h.storeDrift(rep)
 	}
+	// Every ready worker's units too (an unreachable one is skipped: its
+	// instances' state is the server's, not drift). A worker is
+	// untrusted: a unit is kept only when its project label names an
+	// instance placed on THAT server and its Instance agrees; follow-up
+	// calls go to the runtime it came from (unitRT), never by its claim.
+	// unitRT[i] is cs[i]'s runtime (nil: the primary's): by position,
+	// never by container id (review A-L1: a worker can't name a primary
+	// container and have its state read from the worker).
+	unitRT := make([]runtime.Instances, len(cs))
+	for server, rt := range h.runtimes() {
+		if server == "primary" {
+			continue
+		}
+		wcs, werr := rt.List(ctx, runtime.Filter{All: true})
+		if werr != nil {
+			log.Printf("reconcile: server %s: %v", server, werr)
+			continue
+		}
+		for _, c := range wcs {
+			id, ok := strings.CutPrefix(c.Project, runtime.ProjectPrefix)
+			if !ok || id == "" || c.Instance != id || h.serverOf(id) != server {
+				log.Printf("reconcile: server %s reported a unit of %q that isn't placed there: ignored", server, clipRunes(c.Project, 80))
+				continue
+			}
+			unitRT = append(unitRT, rt)
+			cs = append(cs, c)
+		}
+	}
+	unitRuntime := func(i int) runtime.Instances {
+		if rt := unitRT[i]; rt != nil {
+			return rt
+		}
+		return h.rt
+	}
 	// Build maps of jobs and services per instance ID (contract §3 "One-off jobs"):
 	// a done job (exited 0) counts as running; failed/missing jobs are drift.
 	h.mu.RLock()
@@ -258,7 +292,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		mcpAliases []string
 	}
 	var live []running
-	for _, c := range cs {
+	for ci, c := range cs {
 		p := c.Project
 		if !strings.HasPrefix(p, ProjectPrefix) || c.Labels[docker.LabelOneoff] == "True" {
 			continue
@@ -284,6 +318,20 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 				log.Printf("reconcile: %s: %s: cannot derive hostnames from %v — denying only the hosts found (%v)", id, k, unparsed, hosts)
 			}
 		}
+		// A placed instance's units on the primary are its relays (Task
+		// 10): they count for its routes (above), never for its state —
+		// that is the worker's.
+		if unitRT[ci] == nil && h.serverOf(id) != "" {
+			// They are what Traefik routes: their labels are what exposure
+			// drift compares with the Hub's desired ones (review B2-H2).
+			if c.State == "running" {
+				if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
+					havePublic[id] = true
+				}
+				live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, nil})
+			}
+			continue
+		}
 		service := c.Labels[docker.LabelService]
 		// A leftover of a profile the setup choices leave off is not one
 		// of the instance's services (§13.18): never counted (running,
@@ -307,7 +355,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			if !isRunning && c.State != "created" {
 				// The list has no exit code: inspected.
 				st = docker.State{Status: "dead"} // can't tell: failed
-				if s, ierr := h.rt.State(ctx, c.ID); ierr == nil {
+				if s, ierr := unitRuntime(ci).State(ctx, c.ID); ierr == nil {
 					st = s
 				}
 			}
@@ -335,8 +383,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		if isRunning {
 			pc.running++
-			// M1: Don't set havePublic for a done job.
-			if !isDoneJob {
+			// M1: Don't set havePublic for a done job. A worker's units
+			// route nothing (their relays do): no exposure from them.
+			if !isDoneJob && unitRT[ci] == nil {
 				if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
 					havePublic[id] = true
 				}
@@ -347,8 +396,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 					aliases = append(aliases, strings.ToLower(n))
 				}
 			}
-			// A done job is not "live" for exposure drift (it serves nothing).
-			if !isDoneJob {
+			// A done job is not "live" for exposure drift (it serves
+			// nothing), nor a worker's unit (its relays are, above).
+			if !isDoneJob && unitRT[ci] == nil {
 				live = append(live, running{id, service, c.Labels, aliases})
 			}
 		}
@@ -693,7 +743,7 @@ func (h *Hub) ResolveDrift(id, action string) error {
 		if h.IsEnabled(id) {
 			return statusErr(400, "%s is enabled — use disable instead", id)
 		}
-		err = h.rt.DownByName(context.Background(), projectName(id))
+		err = h.downByName(context.Background(), id)
 		if err != nil {
 			err = statusErr500Wrap("compose down failed", err)
 		}

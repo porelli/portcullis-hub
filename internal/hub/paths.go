@@ -23,6 +23,9 @@ const (
 // OwnerKnown false = not declared or not resolvable.
 type PathUsage struct {
 	Instance string `json:"instance"`
+	// Server is the instance's server ("" = the primary): host paths of
+	// different servers are different directories (L1).
+	Server   string `json:"server,omitempty"`
 	Key      string `json:"key"`   // "" for a custom-override mount
 	Label    string `json:"label"` // the option's label
 	Type     string `json:"type"`  // the option's type; "bind" for the custom override
@@ -74,7 +77,13 @@ func (h *Hub) PathUsages() []PathUsage {
 }
 
 // pathUsagesLocked is PathUsages for a caller holding mu (read or write).
-func (h *Hub) pathUsagesLocked() []PathUsage { return h.pathUsagesIn(h.liveView()) }
+func (h *Hub) pathUsagesLocked() []PathUsage {
+	us := h.pathUsagesIn(h.liveView())
+	for i := range us {
+		us[i].Server = h.st.Instances[us[i].Instance].Server
+	}
+	return us
+}
 
 // pathUsagesIn is PathUsages over view v (its settings and folders; the
 // live state or a planned copy, folderrender.go renderView): it reads v,

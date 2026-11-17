@@ -1,0 +1,903 @@
+package hub
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/compose-spec/compose-go/v2/cli"
+	"gopkg.in/yaml.v3"
+
+	"github.com/portcullis/hub/internal/agentapi"
+	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/runtime"
+	agentrt "github.com/portcullis/hub/internal/runtime/agent"
+	"github.com/portcullis/hub/internal/runtime/runtimetest"
+	"github.com/portcullis/hub/internal/servers"
+	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
+	"github.com/portcullis/hub/internal/workertest"
+)
+
+// workerFake is a worker's agent backend as the Hub sees it: an engine
+// (runtimetest.Fake), its /v1/info and the bundles pushed to it.
+type workerFake struct {
+	*runtimetest.Fake
+	mu      sync.Mutex
+	info    agentapi.Info
+	infoErr error
+	pullErr error
+	bundles []map[string]string
+	// held: instance ids with a pushed bundle (removed with the project):
+	// the agent's List scope.
+	held map[string]bool
+	// inUse: volume names whose removal fails (in use).
+	inUse map[string]bool
+	// bundleVols: each held bundle's manifest volume names (CreateVolume's
+	// scope, as the agent's).
+	bundleVols map[string][]string
+	// pushErr refuses bundles; removeErrs fails the next RemoveProject
+	// calls; pushHook runs at each push.
+	pushErr    error
+	removeErrs int
+	pushHook   func()
+	// downErrs fails the next Down calls.
+	downErrs int
+	// disk answers the worker's fixer runs (worker folders).
+	disk *fakeDisk
+	// tombs: ids whose bundle was removed (the agent's tombstones).
+	tombs map[string]bool
+}
+
+// notHeld is the agent's 404 for an id it holds no bundle of.
+func notHeld() error { return &agentrt.Error{Status: 404, Msg: "no such project", AgentStatus: 404} }
+
+func (w *workerFake) holds(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.held[id]
+}
+
+// Create / DownByName / ExecRunning are the agent's (the conformance
+// suite): 404 for an id it holds no bundle of, an exec it didn't start.
+func (w *workerFake) Create(ctx context.Context, p runtime.Project) error {
+	if !w.holds(p.Instance) {
+		return notHeld()
+	}
+	return w.Fake.Create(ctx, p)
+}
+
+func (w *workerFake) DownByName(ctx context.Context, name string) error {
+	if !w.holds(strings.TrimPrefix(name, runtime.ProjectPrefix)) {
+		return notHeld()
+	}
+	return w.Fake.DownByName(ctx, name)
+}
+
+func (w *workerFake) ExecRunning(context.Context, string) (bool, error) {
+	return false, &agentrt.Error{Status: 404, Msg: "no exec the agent started", AgentStatus: 404}
+}
+
+func (w *workerFake) Down(ctx context.Context, p runtime.Project) error {
+	w.mu.Lock()
+	fail := w.downErrs > 0
+	if fail {
+		w.downErrs--
+	}
+	known := w.held[p.Instance] || w.tombs[p.Instance]
+	w.mu.Unlock()
+	if !known {
+		return notHeld()
+	}
+	if fail {
+		return errors.New("the worker's down failed")
+	}
+	return w.Fake.Down(ctx, p)
+}
+
+func (w *workerFake) AgentInfo(context.Context) (agentapi.Info, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.info, w.infoErr
+}
+
+// Pull is the agent's: a ref no pushed bundle names is refused, as the
+// real agent's imageOK does (contract §17.4) — a pull before the bundle
+// (a placement pre-pull without preflight) fails here as it would there.
+func (w *workerFake) Pull(ctx context.Context, ref string, fn func(int64, int64, bool)) error {
+	w.mu.Lock()
+	named := false
+	for _, b := range w.bundles {
+		for _, content := range b {
+			named = named || strings.Contains(content, ref)
+		}
+	}
+	w.mu.Unlock()
+	if !named {
+		return errors.New("agent 403: the image is in no bundle")
+	}
+	w.Fake.Pull(ctx, ref, fn)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pullErr
+}
+
+// PreflightPull is the agent's preflight: no bundle needed, a ref pinned
+// by digest only (400 otherwise).
+func (w *workerFake) PreflightPull(ctx context.Context, ref string) error {
+	if !docker.DigestRef(ref) {
+		return errors.New("agent 400: a preflight pull needs a reference pinned by digest")
+	}
+	w.Fake.Pull(ctx, ref, nil)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pullErr
+}
+
+func (w *workerFake) PushBundle(_ context.Context, id string, files fs.FS, m agentapi.BundleManifest) error {
+	w.mu.Lock()
+	perr, hook := w.pushErr, w.pushHook
+	w.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if perr != nil {
+		return perr
+	}
+	// The backend's own check, then the agent's first ones.
+	if err := agentapi.ValidateManifest(m, agentapi.MaxBundle); err != nil {
+		return err
+	}
+	if _, ok := m.Files["compose.yml"]; !ok {
+		return &agentrt.Error{Status: 400, Msg: "the bundle has no compose.yml", AgentStatus: 400}
+	}
+	got := map[string]string{}
+	for n := range m.Files {
+		f, err := files.Open(n)
+		if err != nil {
+			return err
+		}
+		b, _ := io.ReadAll(f)
+		f.Close()
+		got[n] = string(b)
+	}
+	w.mu.Lock()
+	w.bundles = append(w.bundles, got)
+	if w.held == nil {
+		w.held = map[string]bool{}
+	}
+	w.held[id] = true
+	if w.bundleVols == nil {
+		w.bundleVols = map[string][]string{}
+	}
+	w.bundleVols[id] = slices.Collect(maps.Values(m.Volumes))
+	w.mu.Unlock()
+	w.Fake.Signal(context.Background(), "bundle", id) // recorded in order
+	return nil
+}
+
+func (w *workerFake) RemoveProject(_ context.Context, id string) error {
+	w.mu.Lock()
+	fail := w.removeErrs > 0
+	if fail {
+		w.removeErrs--
+	}
+	w.mu.Unlock()
+	if fail {
+		return errors.New("the worker refused the removal")
+	}
+	if !w.holds(id) {
+		return notHeld()
+	}
+	if us, _ := w.Fake.List(context.Background(), runtime.Filter{Instance: id, All: true}); len(us) > 0 {
+		return &agentrt.Error{Status: 409, Msg: "the project still has containers", AgentStatus: 409}
+	}
+	w.Fake.Signal(context.Background(), "remove-project", id)
+	w.mu.Lock()
+	delete(w.held, id)
+	delete(w.bundleVols, id)
+	if w.tombs == nil {
+		w.tombs = map[string]bool{}
+	}
+	w.tombs[id] = true
+	w.mu.Unlock()
+	return nil
+}
+
+// ListVolumes / RemoveVolume are the agent's scope: only volumes of a
+// project it holds a bundle of are listed or removable (403 otherwise);
+// inUse makes a removal fail as the engine does for a volume in use.
+func (w *workerFake) ListVolumes(ctx context.Context, f runtime.Filter) ([]runtime.Volume, error) {
+	vs, err := w.Fake.ListVolumes(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := vs[:0]
+	for _, v := range vs {
+		if w.held[strings.TrimPrefix(v.Labels[docker.LabelProject], runtime.ProjectPrefix)] {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+func (w *workerFake) RemoveVolume(ctx context.Context, name string) error {
+	w.Fake.Lock()
+	v, ok := w.Fake.Volumes[name]
+	w.Fake.Unlock()
+	w.mu.Lock()
+	held := ok && w.held[strings.TrimPrefix(v.Labels[docker.LabelProject], runtime.ProjectPrefix)]
+	busy := w.inUse[name]
+	w.mu.Unlock()
+	if ok && !held {
+		return &agentrt.Error{Status: 502, Msg: "the server nas answered unexpectedly", AgentStatus: 403}
+	}
+	if busy {
+		return &agentrt.Error{Status: 409, Msg: "volume is in use", AgentStatus: 409}
+	}
+	return w.Fake.RemoveVolume(ctx, name)
+}
+
+// InspectVolume is the agent's scope too: a volume of a project it holds
+// no bundle of isn't there for the Hub (the backend's 502 for the 403).
+func (w *workerFake) InspectVolume(ctx context.Context, name string) (runtime.Volume, error) {
+	v, err := w.Fake.InspectVolume(ctx, name)
+	if err != nil {
+		return v, err
+	}
+	w.mu.Lock()
+	held := w.held[strings.TrimPrefix(v.Labels[docker.LabelProject], runtime.ProjectPrefix)]
+	w.mu.Unlock()
+	if !held {
+		return runtime.Volume{}, &agentrt.Error{Status: 502, Msg: "the server nas answered unexpectedly", AgentStatus: 403}
+	}
+	return v, nil
+}
+
+// CreateVolume is the agent's (through the backend's mapping): only a
+// volume a held bundle's manifest names.
+func (w *workerFake) CreateVolume(ctx context.Context, v runtime.Volume) error {
+	w.mu.Lock()
+	named := false
+	for id, names := range w.bundleVols {
+		named = named || (w.held[id] && slices.Contains(names, v.Name))
+	}
+	w.mu.Unlock()
+	if !named {
+		return &agentrt.Error{Status: 409, Msg: "the server nas refused to create volume " + v.Name + ": a previous copy may still be there", AgentStatus: 403}
+	}
+	return w.Fake.CreateVolume(ctx, v)
+}
+
+// List is the agent's: an instance it holds no bundle of is 404 "no such
+// project" (contract §17.4 scope), as the real agent answers.
+func (w *workerFake) List(ctx context.Context, f runtime.Filter) ([]runtime.Unit, error) {
+	if f.Instance != "" {
+		w.mu.Lock()
+		held := w.held[f.Instance]
+		w.mu.Unlock()
+		if !held {
+			return nil, &agentrt.Error{Status: 404, Msg: "no such project", AgentStatus: 404}
+		}
+	}
+	return w.Fake.List(ctx, f)
+}
+
+func (w *workerFake) Unquarantine(_ context.Context, id string) error {
+	w.Fake.Signal(context.Background(), "unquarantine", id)
+	w.mu.Lock()
+	delete(w.info.Quarantined, id)
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *workerFake) lastBundle() map[string]string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.bundles) == 0 {
+		return nil
+	}
+	return w.bundles[len(w.bundles)-1]
+}
+
+// placedFixture runs the real backend and agent in process (realWorker);
+// fakePlacedFixture keeps the method-level fake (workerFake) for what
+// can't run in process (the folder fixer's walks of real host paths).
+type placedFixture struct {
+	*fixture
+	w *realWorker
+}
+
+type fakePlacedFixture struct {
+	*fixture
+	w *workerFake
+}
+
+const relayImage = "ghcr.io/porelli/portcullis-relay:edge"
+
+// newPlacedFixture: a ready worker "nas" (docker, amd64): the real
+// backend and agent in process, and the templates of the placement tests.
+func newPlacedFixture(t *testing.T) *placedFixture {
+	return newPlacedFixtureOpts(t, workertest.Opts{})
+}
+
+// newPlacedFixtureOpts is newPlacedFixture with the worker's options.
+func newPlacedFixtureOpts(t *testing.T, o workertest.Opts) *placedFixture {
+	t.Helper()
+	f := placedBase(t)
+	w := newRealWorker(t, o)
+	f.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: w})
+	return &placedFixture{fixture: f, w: w}
+}
+
+// newFakePlacedFixture is newPlacedFixture on the method-level fake.
+func newFakePlacedFixture(t *testing.T) *fakePlacedFixture {
+	t.Helper()
+	f := placedBase(t)
+	w := &workerFake{Fake: &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, States: map[string]runtime.State{}},
+		info: agentapi.Info{AgentVersion: "0.1.0", Runtime: "docker", Arch: "amd64", DataDir: "/srv/w/worker-data", DockerRootDir: "/var/lib/docker",
+			UnprivilegedPortStart: 1024, BindRoots: []string{"/srv", "/mnt"}}}
+	f.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: w})
+	return &fakePlacedFixture{fixture: f, w: w}
+}
+
+// placedBase: the templates of the placement tests, servers on, the
+// server "nas" in state (its runtime set by the caller).
+func placedBase(t *testing.T) *fixture {
+	t.Helper()
+	f := newFixture(t)
+	for id, files := range map[string][2]string{
+		"tcpapp":   {"name: TCP\ncategory: misc\nai: {unsupported: t}\nplacement: primary_only\nauth: {method: forward-auth}\n", "services:\n  web:\n    image: tcp:1@sha256:1111111111111111111111111111111111111111111111111111111111111111\n    labels:\n      traefik.http.routers.t.rule: Host(`${PORTCULLIS_HOST_T:-t.portcullis.local}`)\n"},
+		"lowport":  {"name: Low\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\nports:\n  - key: LOW_PORT\n    container: 80\n    default: 80\n    service: web\n", "services:\n  web:\n    image: low:1@sha256:2222222222222222222222222222222222222222222222222222222222222222\n    labels:\n      traefik.http.routers.low.rule: Host(`${PORTCULLIS_HOST_LOW:-low.portcullis.local}`)\n"},
+		"filesapp": {"name: Files\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: files:1@sha256:" + strings.Repeat("f", 64) + "\n    restart: unless-stopped\n    volumes:\n      - ./templates/filesapp/conf.ini:/etc/conf.ini:ro\n      - data:/data\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.files.rule: Host(`${PORTCULLIS_HOST_FILES:-files.portcullis.local}`)\n      traefik.http.routers.files.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.files.loadbalancer.server.port: \"8080\"\nvolumes:\n  data: {}\n"},
+		"plainapp": {"name: Plain\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: plain:1@sha256:3333333333333333333333333333333333333333333333333333333333333333\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.plain.rule: Host(`${PORTCULLIS_HOST_PLAIN:-plain.portcullis.local}`)\n      traefik.http.routers.plain.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.plain.loadbalancer.server.port: \"8080\"\n"},
+	} {
+		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), files[0])
+		writeFile(t, filepath.Join(f.src, id, "compose.yml"), files[1])
+	}
+	writeFile(t, filepath.Join(f.src, "filesapp", "conf.ini"), "[x]\n")
+	f.h.Discover()
+	for _, id := range []string{"tcpapp", "lowport", "filesapp", "plainapp"} {
+		if f.h.Template(id) == nil {
+			t.Fatalf("template %s not loaded", id)
+		}
+	}
+	f.h.cfg.RelayImage = relayImage
+	// Servers on: link_doc and link's status (fix round 3: placement
+	// checks serversOn).
+	dir := t.TempDir()
+	lk := &fakeLink{t: t, path: filepath.Join(dir, "status.json"), peers: map[string]time.Time{"nas": time.Now()}}
+	lk.write()
+	f.h.cfg.LinkDocDir = filepath.Join(dir, "link-doc")
+	os.MkdirAll(f.h.cfg.LinkDocDir, 0o750)
+	f.h.cfg.LinkDocGID = os.Getgid()
+	f.h.cfg.VPNStatusFile = lk.path
+	f.h.mu.Lock()
+	_, wgpub, _ := servers.NewWGKeyPair()
+	f.h.st.Servers = map[string]state.Server{"nas": {Name: "NAS", TunnelIP: "10.214.0.10", State: ServerReady, WGPublicKey: wgpub}}
+	f.h.mu.Unlock()
+	return f
+}
+
+func (p *placedFixture) create(t *testing.T, template, server string) error {
+	t.Helper()
+	_, err := p.h.CreateInstanceAs(CreateRequest{Template: template, ID: template, Label: template, Server: server}, admin)
+	return err
+}
+
+func (p *fakePlacedFixture) create(t *testing.T, template, server string) error {
+	t.Helper()
+	_, err := p.h.CreateInstanceAs(CreateRequest{Template: template, ID: template, Label: template, Server: server}, admin)
+	return err
+}
+
+// TestPlacementRefusals: each refusal is a 409 before anything is
+// created — no project, no client, no group, no state entry.
+func TestPlacementRefusals(t *testing.T) {
+	for name, c := range map[string]struct {
+		template string
+		setup    func(p *placedFixture)
+		want     string
+	}{
+		"offline":      {"filesapp", func(p *placedFixture) { p.h.setServer("nas", &serverRT{Name: "NAS", State: ServerOffline, RT: p.w}) }, "server NAS is offline"},
+		"unknown":      {"filesapp", func(p *placedFixture) { p.h.setServer("nas", nil) }, "server nas is unknown"},
+		"servers off":  {"filesapp", func(p *placedFixture) { p.h.cfg.LinkDocDir = "" }, "servers are off"},
+		"primary only": {"tcpapp", nil, "TCP can't run on a worker: "},
+		// A rootless Podman worker (the agent's own runtime setting).
+		"compat": {"lowport", func(p *placedFixture) {
+			p.w = newRealWorker(t, workertest.Opts{Runtime: "podman"})
+			p.w.info.Rootless = true
+			p.h.setServer("nas", &serverRT{Name: "NAS", State: ServerReady, RT: p.w})
+		}, "can't run on NAS (podman): host port 80/tcp"},
+		"no arch image": {"filesapp", func(p *placedFixture) {
+			p.w.pullErr = errors.New("no matching manifest for linux/arm64 in the manifest list entries")
+			p.w.info.Arch = "arm64"
+		}, "files:1@sha256:" + strings.Repeat("f", 64) + " has no arm64 image"},
+		"unpinned image": {"plainapp", func(p *placedFixture) { p.unpin(t, "plainapp") },
+			"image plain:1 isn't pinned by digest: templates must pin images to run on a worker"},
+		"revoked meanwhile": {"filesapp", func(p *placedFixture) {
+			p.h.mu.Lock()
+			s := p.h.st.Servers["nas"]
+			s.Revoke = &state.RevokeSteps{}
+			p.h.st.Servers["nas"] = s
+			p.h.mu.Unlock()
+		}, "server NAS is revoked"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newPlacedFixture(t)
+			if c.setup != nil {
+				c.setup(p)
+			}
+			err := p.create(t, c.template, "nas")
+			if (errStatus(err) != 409 && errStatus(err) != 503) || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("%v (want %q)", err, c.want)
+			}
+			p.h.mu.RLock()
+			_, entry := p.h.st.Instances[c.template]
+			p.h.mu.RUnlock()
+			if entry {
+				t.Error("a state entry was made")
+			}
+			for _, call := range p.w.Calls() {
+				if !strings.HasPrefix(call, "pull ") {
+					t.Errorf("the worker got %s", call)
+				}
+			}
+			if len(p.idp.registered) != 0 || len(p.runner.Calls()) != 0 {
+				t.Errorf("created: clients %v, primary %v", p.idp.registered, p.runner.Calls())
+			}
+		})
+	}
+}
+
+// TestLifecycleOnWorker (Task 10 order): bundle, create and up on the
+// worker, then the relay token, link.json and the relays on the primary;
+// a down takes the relays down first.
+// TestPlacementPrePullIsPreflight: the create's pre-pull runs before any
+// bundle (the fake refuses a plain pull of an unbundled image, as the
+// agent's imageOK does), so it must be a preflight pull — of the pinned
+// ref only; an unpinned ref is left to the up.
+func TestPlacementPrePullIsPreflight(t *testing.T) {
+	p := newPlacedFixture(t)
+	if err := p.create(t, "filesapp", "nas"); err != nil {
+		t.Fatalf("create on the worker: %v", err)
+	}
+	pinned := "pull files:1@sha256:" + strings.Repeat("f", 64)
+	calls := p.w.Calls()
+	if len(calls) == 0 || calls[0] != pinned {
+		t.Errorf("worker calls %v: want the preflight %q first", calls, pinned)
+	}
+	// The primary is unchanged: an unpinned image is still accepted there.
+	q := newPlacedFixture(t)
+	q.unpin(t, "plainapp")
+	if err := q.create(t, "plainapp", ""); err != nil {
+		t.Fatalf("an unpinned template on the primary: %v", err)
+	}
+	if calls := q.w.Calls(); len(calls) != 0 {
+		t.Errorf("the worker was asked %v", calls)
+	}
+}
+
+// unpin rewrites template id's image to its unpinned tag (plain:1).
+func (p *placedFixture) unpin(t *testing.T, id string) {
+	t.Helper()
+	f := filepath.Join(p.src, id, "compose.yml")
+	writeFile(t, f, strings.Replace(mustReadS(t, f), "@sha256:"+strings.Repeat("3", 64), "", 1))
+	p.h.Discover()
+}
+
+func TestLifecycleOnWorker(t *testing.T) {
+	p := newPlacedFixture(t)
+	if err := p.create(t, "filesapp", "nas"); err != nil {
+		t.Fatal(err)
+	}
+	if p.h.serverOf("filesapp") != "nas" {
+		t.Fatalf("server %q", p.h.serverOf("filesapp"))
+	}
+	if err := p.h.Enable("filesapp"); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, c := range p.w.Calls() {
+		if strings.HasPrefix(c, "signal bundle") || strings.HasPrefix(c, "create ") || strings.HasPrefix(c, "up ") {
+			order = append(order, strings.Fields(c)[0])
+		}
+	}
+	if strings.Join(order, ",") != "signal,create,up" {
+		t.Errorf("worker order %v (%v)", order, p.w.Calls())
+	}
+	b := p.w.lastBundle()
+	for _, n := range []string{"compose.yml", "env", "templates/filesapp/conf.ini"} {
+		if _, ok := b[n]; !ok {
+			t.Errorf("bundle lacks %s: %v", n, slices.Sorted(maps2keys(b)))
+		}
+	}
+	// The relays on the primary, after the worker's up.
+	p.runner.mu.Lock()
+	creates := append([]string(nil), p.runner.creates...)
+	p.runner.mu.Unlock()
+	if pc := strings.Join(p.runner.Calls(), ","); !slices.Contains(creates, "portcullis-filesapp") || !strings.Contains(pc, "up:portcullis-filesapp") {
+		t.Errorf("primary calls %s, creates %v", pc, creates)
+	}
+	if p.h.relayTokenSHA("filesapp") == "" {
+		t.Error("no relay token")
+	}
+	relay, err := os.ReadFile(p.h.relayComposePath("filesapp"))
+	if err != nil || !strings.Contains(string(relay), relayImage) || !strings.Contains(string(relay), "RELAY_TARGET: filesapp.web.relay") {
+		t.Errorf("relay file %v:\n%s", err, relay)
+	}
+	if fi, err := os.Stat(p.h.relayComposePath("filesapp")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("relay file mode %v %v", fi, err)
+	}
+	// Down: relays first.
+	before := len(p.runner.Calls())
+	wbefore := len(p.w.Calls())
+	if err := p.h.Disable("filesapp"); err != nil {
+		t.Fatal(err)
+	}
+	if pc := p.runner.Calls()[before:]; len(pc) == 0 || pc[0] != "downbyname:portcullis-filesapp" {
+		t.Errorf("primary on down %v", pc)
+	}
+	if !slices.ContainsFunc(p.w.Calls()[wbefore:], func(c string) bool { return strings.HasPrefix(c, "down ") }) {
+		t.Errorf("worker on down %v", p.w.Calls()[wbefore:])
+	}
+}
+
+func maps2keys(m map[string]string) func(func(string) bool) {
+	return func(yield func(string) bool) {
+		for k := range m {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+// TestLifecycleOfflineIs409: a placed instance's lifecycle while its
+// server is offline is 409 "server NAS is offline"; nothing reaches it.
+func TestLifecycleOfflineIs409(t *testing.T) {
+	p := newPlacedFixture(t)
+	if err := p.create(t, "filesapp", "nas"); err != nil {
+		t.Fatal(err)
+	}
+	p.h.setServer("nas", &serverRT{Name: "NAS", State: ServerOffline, RT: p.w})
+	calls := len(p.w.Calls())
+	err := p.h.Enable("filesapp")
+	if errStatus(err) != 409 || !strings.Contains(err.Error(), "server NAS is offline") {
+		t.Errorf("enable: %v", err)
+	}
+	if got := p.w.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the offline worker got %v", got)
+	}
+}
+
+// TestRenderUsesTargetEngineFacts: a podman + SELinux worker under a
+// docker primary: z relabels and restart: always only in the worker's
+// render; the data files at the worker's <data>/appfiles.
+func TestRenderUsesTargetEngineFacts(t *testing.T) {
+	p := newFakePlacedFixture(t) // render rules from given facts: no agent call
+	if err := p.create(t, "filesapp", ""); err != nil {
+		t.Fatal(err)
+	}
+	render := func() string {
+		p.h.mu.Lock()
+		defer p.h.mu.Unlock()
+		v := p.h.findLocked("filesapp")
+		out, err := p.h.renderOverrideLocked(v, p.h.st.Settings["filesapp"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	primary := render()
+	if strings.Contains(primary, "selinux: z") || strings.Contains(primary, "restart: always") {
+		t.Errorf("docker primary render:\n%s", primary)
+	}
+	p.w.info.Runtime, p.w.info.Rootless, p.w.info.SELinux = "podman", true, true
+	p.h.notePoll("nas", &p.w.info, "")
+	p.h.mu.Lock()
+	in := p.h.st.Instances["filesapp"]
+	in.Server = "nas"
+	p.h.st.Instances["filesapp"] = in
+	p.h.noteServersLocked()
+	p.h.mu.Unlock()
+	worker := render()
+	if !strings.Contains(worker, "selinux: z") || !strings.Contains(worker, "restart: always") {
+		t.Errorf("podman+SELinux worker render:\n%s", worker)
+	}
+	if f := p.h.factsFor("filesapp"); f.AppFilesHost != "/srv/w/worker-data/appfiles" || f.Kind != runtime.KindPodman {
+		t.Errorf("facts %+v", f)
+	}
+}
+
+// TestFolderOfOtherServerRefused: a shared folder on the primary can't
+// be bound by an instance on a worker (and the reverse).
+func TestFolderOfOtherServerRefused(t *testing.T) {
+	p := newPlacedFixture(t)
+	p.h.mu.Lock()
+	if p.h.st.Folders == nil {
+		p.h.st.Folders = map[string]state.Folder{}
+	}
+	p.h.st.Folders["photos"] = state.Folder{Name: "Photos", Path: "/srv/photos", GID: 60001}
+	p.h.mu.Unlock()
+	f := state.Folder{Name: "Photos", Path: "/srv/photos", GID: 60001}
+	rv := renderView{folders: map[string]state.Folder{"photos": f}}
+	v := p.h.Template("grafana")
+	var opt *templates.Option
+	for i := range v.Manifest.Settings.Options {
+		if v.Manifest.Settings.Options[i].Key == "media" {
+			opt = &v.Manifest.Settings.Options[i]
+		}
+	}
+	p.h.noteInstanceServer("grafana", "nas")
+	_, err := p.h.folderMountIn(rv, v, opt, "folder:photos")
+	if err == nil || !strings.Contains(err.Error(), "shared folder photos is on the primary, but grafana runs on server nas") {
+		t.Errorf("worker instance, primary folder: %v", err)
+	}
+	f.Server = "nas"
+	rv.folders["photos"] = f
+	p.h.noteInstanceServer("grafana", "")
+	_, err = p.h.folderMountIn(rv, v, opt, "folder:photos")
+	if err == nil || !strings.Contains(err.Error(), "is on server nas, but grafana runs on the primary") {
+		t.Errorf("primary instance, worker folder: %v", err)
+	}
+}
+
+// TestLanOnlyUsesServerLocalNetworks: a placed instance's Local networks
+// are its server's (default: the Hub's default list, never the primary's
+// own setting).
+func TestLanOnlyUsesServerLocalNetworks(t *testing.T) {
+	p := newPlacedFixture(t)
+	if err := p.create(t, "filesapp", "nas"); err != nil {
+		t.Fatal(err)
+	}
+	mine := []string{"10.9.0.0/16"}
+	p.h.mu.Lock()
+	p.h.st.LocalNetworks = &mine
+	got := p.h.localNetworksEnvForLocked("filesapp")
+	s := p.h.st.Servers["nas"]
+	theirs := []string{"192.168.7.0/24"}
+	s.LocalNetworks = &theirs
+	p.h.st.Servers["nas"] = s
+	got2 := p.h.localNetworksEnvForLocked("filesapp")
+	primary := p.h.localNetworksEnvForLocked("grafana")
+	p.h.mu.Unlock()
+	if got != strings.Join(DefaultLocalNetworks, ",") {
+		t.Errorf("default for a worker: %q", got)
+	}
+	if got2 != "192.168.7.0/24" || primary != "10.9.0.0/16" {
+		t.Errorf("worker %q primary %q", got2, primary)
+	}
+}
+
+// TestOrphanForget: an orphaned instance is forgotten (state, clients
+// removed, relays down on the primary), nothing on its worker touched;
+// anything else refuses.
+func TestOrphanForget(t *testing.T) {
+	p := newPlacedFixture(t)
+	if err := p.create(t, "filesapp", "nas"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.h.ForgetInstance("filesapp", "filesapp", admin); errStatus(err) != 409 {
+		t.Errorf("forget a live one: %v", err)
+	}
+	p.h.mu.Lock()
+	p.h.beginRevokeLocked("nas", false)
+	p.h.mu.Unlock()
+	calls := len(p.w.Calls())
+	if _, err := p.h.ForgetInstance("filesapp", "wrong", admin); errStatus(err) != 400 {
+		t.Errorf("no typed id: %v", err)
+	}
+	if _, err := p.h.ForgetInstance("filesapp", "filesapp", admin); err != nil {
+		t.Fatal(err)
+	}
+	p.h.mu.RLock()
+	_, still := p.h.st.Instances["filesapp"]
+	p.h.mu.RUnlock()
+	if still || p.h.serverOf("filesapp") != "" {
+		t.Error("still in state")
+	}
+	if got := p.w.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the revoked worker was touched: %v", got)
+	}
+	if !slices.Contains(p.runner.Calls(), "downbyname:portcullis-filesapp") {
+		t.Errorf("relays not down: %v", p.runner.Calls())
+	}
+}
+
+// relayLabelsOf is what compose would put on each relay container: the
+// relay file loaded with compose-go (its $$ unescaped).
+func relayLabelsOf(t *testing.T, file string) map[string]map[string]string {
+	t.Helper()
+	po, err := cli.NewProjectOptions([]string{file}, cli.WithName("relays"), cli.WithWorkingDirectory(filepath.Dir(file)),
+		cli.WithConsistency(false), cli.WithoutEnvironmentResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj, err := po.LoadProject(context.Background())
+	if err != nil {
+		t.Fatalf("the relay file doesn't load: %v", err)
+	}
+	out := map[string]map[string]string{}
+	for n, s := range proj.Services {
+		out[n] = s.Labels
+	}
+	return out
+}
+
+// checkRelayAuth: for every router of the instance (its loaded model),
+// the relay carries the same middlewares — portcullis-auth and
+// portcullis-groups included — and the same rule, entrypoints and TLS.
+func checkRelayAuth(model map[string]map[string]string, relays map[string]map[string]string) error {
+	for svc, labels := range model {
+		routed := false
+		for k, v := range labels {
+			if templates.FoldKey(k) == "traefik.enable" && strings.EqualFold(v, "true") {
+				routed = true
+			}
+		}
+		if !routed {
+			continue
+		}
+		r, ok := relays[svc]
+		if !ok {
+			return fmt.Errorf("service %s has no relay", svc)
+		}
+		for k, v := range labels {
+			if !strings.HasPrefix(templates.FoldKey(k), "traefik.") {
+				continue
+			}
+			if r[k] != v {
+				return fmt.Errorf("service %s: %s is %q on the relay, %q on the primary", svc, k, r[k], v)
+			}
+		}
+		for k := range r {
+			if _, ok := labels[k]; !ok && strings.HasPrefix(k, "traefik.") {
+				return fmt.Errorf("service %s: the relay adds %s", svc, k)
+			}
+		}
+	}
+	return nil
+}
+
+// relayCheck renders instance id's relays and compares them with the
+// labels its containers would carry on the primary.
+func relayCheck(t *testing.T, h *Hub, id string) (model, relays map[string]map[string]string) {
+	t.Helper()
+	h.cfg.RelayImage = relayImage
+	h.newRelayToken(id)
+	h.mu.RLock()
+	v := *h.findLocked(id)
+	h.mu.RUnlock()
+	proj, err := h.loadRuntime(context.Background(), &v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.mu.RLock()
+	b, err := h.renderRelaysLocked(&v, proj)
+	h.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model = map[string]map[string]string{}
+	for n, s := range proj.Services {
+		model[n] = s.Labels
+	}
+	if b == nil {
+		return model, map[string]map[string]string{}
+	}
+	file := filepath.Join(t.TempDir(), "relays.yml")
+	os.WriteFile(file, b, 0o600)
+	var parsed relayFile
+	if err := yaml.Unmarshal(b, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for n, s := range parsed.Services {
+		if s.Image != relayImage || s.User != "65534:65534" || !s.ReadOnly || !slices.Equal(s.CapDrop, []string{"ALL"}) || s.MemLimit != "64m" || s.PidsLimit != 64 {
+			t.Errorf("%s relay %s: %+v", id, n, s)
+		}
+		if _, ok := s.Networks["portcullis-proxy"]; !ok {
+			t.Errorf("%s relay %s networks %v", id, n, s.Networks)
+		}
+		for k := range s.Labels {
+			if strings.HasPrefix(k, "com.docker.compose") {
+				t.Errorf("%s relay %s carries %s", id, n, k)
+			}
+		}
+	}
+	return model, relayLabelsOf(t, file)
+}
+
+// TestRelayLabelsEqualPrimaryGoldens: for the golden instances (grafana,
+// disks) and every VPN reach golden, the relay's labels are exactly the
+// labels the instance's container carries on the primary.
+func TestRelayLabelsEqualPrimaryGoldens(t *testing.T) {
+	f, _ := goldenRun(t, false)
+	for _, id := range []string{"grafana", "disks"} {
+		model, relays := relayCheck(t, f.h, id)
+		if err := checkRelayAuth(model, relays); err != nil {
+			t.Errorf("%s: %v", id, err)
+		}
+	}
+	if _, r := relayCheck(t, f.h, "grafana"); !strings.Contains(r["web"]["traefik.http.routers.grafana.middlewares"], "portcullis-groups@docker") {
+		t.Errorf("grafana relay middlewares %v", r["web"])
+	}
+	for _, mode := range []string{VPNModeApps, VPNModeServer} {
+		for _, rc := range []struct {
+			name string
+			r    *state.Reach
+		}{{"internet", nil}, {"vpn_any", &state.Reach{Mode: state.ReachVPN, Via: []string{"*"}}}, {"vpn_builtin", &state.Reach{Mode: state.ReachVPN, Via: []string{"builtin"}}}} {
+			t.Run(mode+"_"+rc.name, func(t *testing.T) {
+				v := newReachFixture(t, mode)
+				v.wire(t, "mesh")
+				v.devicesOut = devicesDoc("100.64.0.1")
+				v.h.runVPNProvider(context.Background(), "mesh")
+				if rc.r != nil {
+					setReach(t, v, "cloud", *rc.r)
+				}
+				overrideOf(t, v, "cloud")
+				model, relays := relayCheck(t, v.h, "cloud")
+				if err := checkRelayAuth(model, relays); err != nil {
+					t.Error(err)
+				}
+				if len(relays) == 0 {
+					t.Error("no relay")
+				}
+			})
+		}
+	}
+}
+
+// TestRelayNeverDropsAuthMiddlewares: the check catches a relay that
+// lost portcullis-groups (a mutation of the rendered relay).
+func TestRelayNeverDropsAuthMiddlewares(t *testing.T) {
+	f, _ := goldenRun(t, false)
+	model, relays := relayCheck(t, f.h, "grafana")
+	if err := checkRelayAuth(model, relays); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 0)
+	for k := range relays["web"] {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	mutated := false
+	for _, k := range keys {
+		if strings.HasSuffix(k, ".middlewares") && strings.Contains(relays["web"][k], "portcullis-groups@docker") {
+			relays["web"][k] = strings.ReplaceAll(relays["web"][k], "portcullis-groups@docker,", "")
+			mutated = true
+		}
+	}
+	if !mutated {
+		t.Fatal("no portcullis-groups to remove")
+	}
+	if err := checkRelayAuth(model, relays); err == nil || !strings.Contains(err.Error(), "middlewares") {
+		t.Errorf("a relay without portcullis-groups passed: %v", err)
+	}
+}
+
+// RunFixer answers from the worker's fake disk (disk nil: the engine's
+// default empty run).
+func (w *workerFake) RunFixer(ctx context.Context, s runtime.FixerSpec, out func(io.Reader) error) (*runtime.RunResult, error) {
+	w.mu.Lock()
+	d := w.disk
+	w.mu.Unlock()
+	if d == nil {
+		return w.Fake.RunFixer(ctx, s, out)
+	}
+	w.Fake.Signal(ctx, "fixer", fixerMode(s.Cmd))
+	return d.run(s, out)
+}

@@ -992,7 +992,21 @@ func (s *Server) serveClients(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		cid := s.Clients[parts[0]].ClientID
 		delete(s.Clients, parts[0])
+		// Like Keycloak: the client's consents and its part of every
+		// offline session go with it (an emptied session ends).
+		for _, u := range s.Users {
+			delete(u.Consents, cid)
+			kept := u.OfflineSessions[:0]
+			for _, os := range u.OfflineSessions {
+				delete(os.Clients, parts[0])
+				if len(os.Clients) > 0 {
+					kept = append(kept, os)
+				}
+			}
+			u.OfflineSessions = kept
+		}
 		w.WriteHeader(204)
 	case len(parts) == 1 && r.Method == "PUT":
 		old := s.Clients[parts[0]]

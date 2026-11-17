@@ -1425,10 +1425,79 @@ The tab also has **AI support** (the master switch, AI clients, the
 Portcullis MCP, connection length, rate limits, allowed origins and the model
 providers: [AI support → Settings → AI](ai.md#settings-ai)),
 **Domains** ([Adding extra domains](#adding-extra-domains)),
-**Shared folders** ([below](#shared-folders)) and **Local networks**
-([below](#local-networks)).
+**Mail** ([below](#mail)),
+**Shared folders** ([below](#shared-folders)), **Servers**
+([below](#servers)) and **Local networks** ([below](#local-networks)).
 
 People and groups are managed on the people page: see [Users & Groups](#users-groups).
+
+## Servers
+
+**Settings → Servers** lists the primary and the [worker
+servers](servers.md) apps can run on. Until `./portcullis link init` has run
+on the primary it says "run ./portcullis link init on the primary"; on a
+Kubernetes primary, "servers need a Docker or Podman primary".
+
+- **The list:** each server's name and id, state (`enrolling`, `ready`,
+  `offline`, `revoked`), engine (Docker or Podman, rootless or not, the
+  architecture), CPUs and memory, disk free (the engine's data root), data
+  free (the agent's data directory), its instance count, last contact, agent
+  version and certificate expiry. It never shows a key, a serial or a join
+  code.
+- **Settings** opens a server's form: its **Name**, its **Local networks**
+  (one CIDR per line, or **Use the default list**: a worker's LAN isn't the
+  primary's, and the doctor judges each worker's `lan_only` ports against its
+  own list), its **Scheduled backups** (off / daily / weekly, at an hour in
+  the Hub's time zone; [Backups](backups.md#scheduled-instance-backups)), its
+  folder roots (read-only: they are set on the worker,
+  `PORTCULLIS_WORKER_BIND_ROOTS`) and its instances. The primary's form has
+  only Scheduled backups. Saved with `PUT /api/servers/<id>/settings`,
+  audited `server.settings`.
+- **+ Add server…** (id and name; fresh sign-in): shows the join code for
+  `./portcullis worker join` once, in a dialog (**Copy code**, **Close**:
+  closing forgets it). The enrolment shows in the operation progress panel
+  as `server_enrol`; **Stop enrolment** ends it
+  ([Multiple servers → Setting up](servers.md#setting-up)).
+- **Revoke…** and **Remove…** (typed id, then a fresh sign-in): revoke a
+  lost or compromised server now (its instances become orphaned), or remove
+  one without instances
+  ([Revoking and removing](servers.md#revoking-and-removing)).
+
+### On the instance page
+
+The Overview shows **Runs on** (the server's name), and a **Server** section
+for admins:
+
+- **Move…**: choose the target and type the instance id. The app is down
+  while it moves (backup, restore, start on the target); bound shared
+  folders must be unbound first. It runs in the progress panel and can be
+  stopped ([Moving an instance](servers.md#moving-an-instance)).
+- After a move, "Moved from <server> …" with **Undo move…** for 7 days
+  (changes since the move are lost), and **Remove the old copy…** (its
+  volumes on the old server; no undo afterwards). Both need the typed id and
+  a fresh sign-in.
+- **Lift quarantine…** (fresh sign-in): only when the doctor shows the
+  instance quarantined on its server and you fixed the cause
+  ([Quarantine](servers.md#quarantine)).
+
+The setup form's **Runs on** picks the server for a new instance, with
+each server's runtime, architecture, free data space and memory; apps that
+need the primary are refused there with the reason
+([Primary-only apps](servers.md#primary-only-apps)). An instance whose
+server is offline shows `unreachable`; one whose server was revoked,
+`orphaned`; one being moved, `moving`.
+
+**Shared Folders** has a **Server** column: a folder is defined on one
+server (its path is checked there), and only that server's instances can be
+bound to it.
+
+**AI tools** (admin, per-call confirmation): `list_servers` and
+`get_server` read, `move_instance` (typed on the instance id; its
+consequences name the downtime and the backup's size) and
+`set_backup_schedule`. Adding, revoking or removing a server, *Undo move*,
+*Remove the old copy*, *Lift quarantine* and the enrolment are never tools:
+a join code must never land in a transcript, and revocation stays a human
+action.
 
 ## Shared folders
 
@@ -1660,6 +1729,109 @@ The doctor's file-sharing findings
 - a share slot served to nobody;
 - a refused share name or username, as reported by the app.
 
+## Mail
+
+With the [mail server](../setup/mail.md) on, the Hub manages who gets a
+mailbox, the mail domains, the spam settings, aliases, lists and mail
+passwords; mailctl applies them to Stalwart. Mail itself is turned on and off
+on the server (`./portcullis mail enable` / `disable`): until then Settings →
+Mail says "Mail is off: run ./portcullis mail enable on the host", and on
+Kubernetes "Mail isn't available on Kubernetes yet (Docker or rootless Podman
+only)". Interfaces: [contracts §19.9](../guides/integration-contracts.md#199-hub-api-and-audit).
+
+### Settings → Mail
+
+Administrators only (Hub listener):
+
+- **Facts** (read-only, from the server): the mail server's name with
+  "reachable" / "mailctl unreachable", the relay (on / off, set in `.env`),
+  submission ("from anywhere" or "local networks only"; under rootless Podman
+  why LAN-only isn't possible), how long former accounts are kept
+  (`MAIL_FORMER_RETENTION`) and whether a Spamhaus DQS key is set (with a
+  hint when it isn't).
+- **Domains**: one row per mail-capable domain (the main domain and every
+  added domain) with its state (on, draining, off), **Turn on** / **Turn
+  off** and the **groups** whose members get an address there (empty: every
+  mailbox on the main domain, nobody on an added domain). Turning off warns
+  first: "Turning mail off removes the MX after the MTA-STS max_age (up to 7
+  days); mail sent meanwhile is still received." An added domain with mail
+  on or draining can't be deleted until it is off. Turning mail on is
+  refused while an instance uses `mail.`, `mta-sts.`, `autoconfig.` or
+  `autodiscover.` of that domain, naming the instance; and no instance may
+  take those names, or `MAIL_HOSTNAME` itself, while mail is on.
+- **Primary domain**: every login and first address (`<username>@<primary>`).
+- **Spam**: **Junk at score** (5), **Reject at score** (15), the three
+  blocklists, **Always accept** and **Always refuse** (one domain or address
+  per line). See [Mail operations → Spam](mail.md#spam).
+- **Sending limits**: recipients per hour (300) and per day (1000) per person.
+- **Mailbox size per group**: `group = GiB` per line; a person who matches
+  several rows gets the largest; 10 GiB otherwise (at most 1 TiB).
+- **Pending removal**: when more than half the mailboxes would go at once,
+  a banner lists the people, each with "mail passwords revoked" or "revoking
+  failed: retrying", and **Confirm removal** (full administrators only,
+  `lldap_admin`; it asks first: "Remove N mailboxes? They are parked and
+  deleted after the retention period."). See
+  [Mass removals](mail.md#mass-removals).
+- A banner when mail can't be managed (the Hub's mail secret missing or too
+  short): run `./portcullis up` on the server.
+
+Saved with `PUT /api/mail/settings` and `PUT /api/mail/domains/{name}`,
+audited `mail.settings` and `mail.domain`; added domains' DNS follows within
+about a minute. The policy steps (DMARC, MTA-STS) are
+[doctor fixes](#mail-checks); DKIM rotates on its own (or with
+`./portcullis mail dkim rotate <domain>`). The Portcullis MCP has one read-only tool,
+`mail_status`; nothing about mail passwords is ever a tool.
+
+### A person's mail
+
+On a person's page (People → person), the **Mail** card shows their
+addresses or "No mailbox: &lt;name&gt; isn't in mail_users", and:
+
+- **Aliases** (administrators): extra addresses on any mail domain, one per
+  line, delivered to and sendable as by the person (**Save aliases**; an
+  address already used by someone, a list or a reserved name is refused,
+  naming the owner). Aliases belong to the person's LLDAP account, not the
+  username: they go when the person is deleted.
+- **Mail passwords**: label, created, expiry and status, each with
+  **Revoke** (administrators, and holders of `sign_in_help` for the people
+  they may help). A password reset by a restore shows "reset by a restore";
+  while the mail server can't be read, active ones show "not confirmed: the
+  mail server can't be read". "Only &lt;name&gt; can create a mail password,
+  on their Sign-in page": nobody creates one for someone else.
+
+### A group's list
+
+On a group's page, administrators can **Make this group a list** at
+`<group>@<domain>` (a mail domain), with **Who may post**: *members only*
+(the default: the server refuses outside senders) or *anyone*. A list
+delivers to every member's mailbox; no archive, no subscriptions. **Stop the
+list** ends it. Audited `mail.list`.
+
+### Mail passwords
+
+Each person creates their own mail passwords on their
+[Sign-in page](auth-policies.md#the-sign-in-page)
+(`https://people.<domain>/signin`), in the **Mail passwords** section, which
+shows only for people in `mail_users`. It shows:
+
+- the settings for a mail app: username (the primary address), incoming
+  (IMAP) `MAIL_HOSTNAME` port 993 SSL/TLS, outgoing (SMTP) port 465 SSL/TLS
+  or 587 STARTTLS, and their addresses;
+- their mail passwords: label, created, expiry ("no expiry"), **Revoke**
+  ("Mail apps using it stop at once"), or "reset by a restore";
+- **+ New mail password**: a label for the device or app (1–64 characters)
+  and an expiry (never, 90 days, 1 year), then a fresh sign-in in a small
+  window. At most **5** active: "At most 5 mail passwords: revoke one first."
+
+The new password is **shown once**, in a dialog with **Copy**, the settings,
+and **Download for iPhone, iPad or Mac** (a `.mobileconfig` profile that sets
+up the account with that password). Closing the dialog drops the password
+from the page; it is never shown again and Portcullis doesn't keep it
+(Stalwart stores only its hash). A mail password works for mail only: never
+to sign in to Portcullis. Revoking one, or leaving `mail_users`, stops it
+within 8 seconds, open sessions included. While an administrator is signed
+in as the person, the section is read-only.
+
 ## Doctor
 
 The **Doctor** tab checks the whole setup, including folders and paths you
@@ -1753,6 +1925,41 @@ They never fire under Docker or Podman, and none has a one-click fix:
 | `reload_degraded` | Info | An instance's image has no `kill`, so a settings reload restarts its pod instead | — |
 | `kube_api_public` | Warning | The Kubernetes API (`:6443`) or the kubelet (`:10250`) answers on the node's public address | Explain: allow them only from the administrators' addresses in the firewall |
 
+### Mail checks
+
+With the [mail server](../setup/mail.md) on, the doctor adds twenty-two
+checks, from mailctl's checks and status and from the added mail domains' DNS
+plans. While mailctl can't be read there are no mail findings and the tab
+says so. What each one means and what to do:
+[Mail operations → Troubleshooting](mail.md#troubleshooting).
+
+| Kind | Severity | Fix |
+|------|----------|-----|
+| `mail_port25_blocked` | Problem (Info: not known yet) | Explain |
+| `mail_ptr_missing`, `mail_ptr_mismatch` | Problem | Explain, with the provider's steps |
+| `mail_ipv6_ptr` | Info | — |
+| `mail_blocklisted` | Problem (Warning: lookup refused) | Explain |
+| `mail_records_wrong` | Problem | One click on an added domain (apply the `mail` set); explain on the main domain ("Run `./portcullis dns setup --only mail` on the server") |
+| `mail_dkim_stuck` | Warning | Explain |
+| `mail_dkim_manual` | Info | Explain |
+| `mail_cert_expiring` | Warning / Problem | Explain ("Run `./portcullis mail cert` on the server") |
+| `mail_timer_missing` | Warning | Explain ("Run `./portcullis mail schedule --systemd` on the server") |
+| `mail_dmarc_failures` | Warning | Explain |
+| `mail_dmarc_promote` | Info | One click: `<domain>: DMARC p=<policy> → p=<proposed>` |
+| `mail_mtasts_enforce` | Info | One click: `<domain>: MTA-STS testing → enforce (max_age 604800)` |
+| `mail_dane_off` | Problem | Explain |
+| `mail_client_ip_rewritten` | Warning | Explain |
+| `mail_lan_only_unenforced` | Problem | Explain |
+| `mail_rate_held` | Warning | Explain |
+| `mail_mass_removal_pending` | Problem | One click (full administrators): "removes the mailboxes of &lt;users&gt; (parked, deleted after MAIL_FORMER_RETENTION)" |
+| `mail_sync_blocked` | Problem | Explain |
+| `mail_hub_secret_invalid` | Problem | Explain ("./portcullis up recreates the Hub with the mail secret"); while it fires it is the only mail finding |
+| `mail_spam_rules_missing` | Problem | Explain |
+| `mail_external_lookups_on` | Problem | Explain |
+
+The promotions and the removal confirmation always ask an AI tool for a
+confirmation in your browser.
+
 ### VPN checks
 
 With the [VPN](vpn.md) the doctor adds eighteen checks. All are explain-only,
@@ -1779,6 +1986,34 @@ and none fires without the VPN service, a provider or a mode other than
 | `vpn_publish_failed` | Problem | The Hub couldn't write `vpn.json`: every VPN request is denied once its `valid_until` passes |
 | `vpn_reserved_defaults` | Warning | `core.env` lacks `PORTCULLIS_VPN_RESERVED_RANGES`, so the Hub uses the default reserved ranges |
 | `vpn_reach_failed_closed` | Problem | A narrowing render failed, so the Hub stopped the instance; clears after the next successful render |
+
+### Server checks
+
+With [worker servers](servers.md) the doctor adds fourteen checks. None of
+them offers a one-click fix: the ones whose remedy needs a fresh sign-in
+(*Remove the old copy*, *Lift quarantine*) explain it and point at the
+button on the instance page, and no AI tool can reach them.
+
+| Kind | Severity | Finds |
+|------|----------|-------|
+| `server_offline` | Problem | A worker that missed three 30-second polls or had no handshake for 3 minutes (or answers with another certificate than the pinned one), with its instances |
+| `server_cert_expiring` | Warning | A worker's certificate expires within 7 days (it is renewed with a third of its 30 days left, while the server is reachable) |
+| `server_agent_incompatible` | Problem | The worker's agent isn't the Hub's minor version or one behind: lifecycle calls are refused. Run `./portcullis worker upgrade` on it |
+| `server_agent_outdated` | Info | The agent is one minor version behind |
+| `server_disk_low` | Warning | Less than 10 % free on a worker's engine data root or data directory |
+| `server_no_recent_backup` | Warning | An enabled instance on a worker without an archive in 14 days |
+| `server_move_leftover` | Info | A move's old copy kept more than 7 days, or a failed move's leftover on its target (it blocks the next move there): **Remove the old copy…** on the instance page |
+| `server_move_stuck` | Problem | A failed move couldn't take the target's copy down, so the app runs nowhere; retried every 30 s |
+| `server_copy_not_removed` | Problem | An undo left a copy on a server that couldn't be stopped or removed yet (never routed); retried every 30 s |
+| `server_placement_invalid` | Problem | A template update made a placed instance primary-only: it was stopped on the worker. Move it to the primary |
+| `server_instance_quarantined` | Problem | The worker's agent quarantined the instance (a container started with a bind that failed its checks). Fix the cause, then **Lift quarantine…** |
+| `server_secrets_not_rotated` | Problem | A revocation couldn't rotate an instance's Keycloak client secrets or relay token yet; retried every 30 s |
+| `link_subnet_overlap` | Problem | The link subnet `10.214.0.0/24` overlaps the built-in VPN subnet, a wired provider's range or a Local network set on a server |
+| `instance_orphaned` | Problem | An instance whose server was revoked: restore its last backup, or forget it |
+
+`lan_only_exposed` judges each port against **its own server's** Local
+networks. An address in the link subnet or the built-in VPN subnet never
+counts as local, whatever the list says.
 
 ## Rootless Podman
 

@@ -1,0 +1,15 @@
+services:
+  echo:
+    image: ghcr.io/example/echo:1
+    networks: [portcullis-proxy]
+    volumes:
+      - ./templates/echo/echo.conf:/etc/echo.conf:ro
+      - data:/data
+    labels:
+      traefik.http.routers.echo.rule: Host(`${PORTCULLIS_HOST_ECHO:-echo.portcullis.local}`)
+      traefik.http.services.echo.loadbalancer.server.port: "8080"
+networks:
+  portcullis-proxy:
+    external: true
+volumes:
+  data: {}

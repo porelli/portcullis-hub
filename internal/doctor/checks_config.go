@@ -183,6 +183,15 @@ func folderName(fs map[string]FolderIn, id string) string {
 
 // ── shared_path ─────────────────────────────────────────
 
+// rootsOf are server's folder roots: the primary's bind roots, a
+// worker's as its agent reports them.
+func rootsOf(in *Inputs, server string) []string {
+	if server == "" {
+		return in.BindRoots
+	}
+	return in.ServerBindRoots[server]
+}
+
 type sharedPathCheck struct{}
 
 func (sharedPathCheck) Kind() string { return KindSharedPath }
@@ -212,7 +221,8 @@ func clusters(paths []PathIn) [][]PathIn {
 	}
 	for i := range us {
 		for j := i + 1; j < len(us); j++ {
-			if near(us[i].HostPath, us[j].HostPath) {
+			// Paths on different servers are different directories (L1).
+			if us[i].Server == us[j].Server && near(us[i].HostPath, us[j].HostPath) {
 				parent[find(i)] = find(j)
 			}
 		}
@@ -240,10 +250,12 @@ func (sharedPathCheck) Run(in *Inputs) []Finding {
 	for _, cl := range clusters(in.Paths) {
 		insts, paths := instancesOf(cl), pathsOf(cl)
 		custom := false
+		server := cl[0].Server
+		roots := rootsOf(in, server)
 		inRoots := true
 		for _, u := range cl {
 			custom = custom || u.Source == SourceCustomOverride
-			inRoots = inRoots && underRoots(u.HostPath, in.BindRoots)
+			inRoots = inRoots && underRoots(u.HostPath, roots)
 		}
 		var title string
 		switch {
@@ -266,7 +278,12 @@ func (sharedPathCheck) Run(in *Inputs) []Finding {
 				strings.Join(hows, "; ") + ".",
 			Instances: insts, Paths: paths, Inputs: Digest(cl),
 		}
-		if len(paths) == 1 && inRoots && !custom {
+		if server != "" {
+			// A worker's paths: manage_as_folder probes the primary's host,
+			// so it isn't offered (L1); the step names the gated way.
+			f.Class = FixExplain
+			f.Steps = append(f.Steps, "Define a shared folder for `"+paths[0]+"` on server "+server+" (Settings → Shared folders, server "+server+"), then assign the apps to it.")
+		} else if len(paths) == 1 && inRoots && !custom {
 			f.Class, f.FixKind = FixOneClick, FixManageAsFolder
 			f.Fix = fmt.Sprintf("Manage `%s` as a shared folder: one group for every app that uses it, setgid directories and default ACLs, so new files stay readable and writable for all of them (previewed first).", paths[0])
 		} else {
@@ -275,7 +292,7 @@ func (sharedPathCheck) Run(in *Inputs) []Finding {
 			case len(paths) > 1:
 				f.Steps = append(f.Steps, stepOneFolder)
 			case !inRoots:
-				f.Steps = append(f.Steps, "Move the data under one of the Hub's bind roots ("+strings.Join(in.BindRoots, ", ")+"), then manage it as a shared folder.")
+				f.Steps = append(f.Steps, "Move the data under one of the Hub's bind roots ("+strings.Join(roots, ", ")+"), then manage it as a shared folder.")
 			}
 			if custom {
 				f.Steps = append(f.Steps, stepCustomOverride)
@@ -298,14 +315,15 @@ func (pathOutsideRootsCheck) Kind() string { return KindPathOutsideRoots }
 func (pathOutsideRootsCheck) Run(in *Inputs) []Finding {
 	var out []Finding
 	for _, u := range sortedUses(in.Paths) {
-		if u.Source != SourceSetting || u.HostPath == "" || underRoots(u.HostPath, in.BindRoots) {
+		roots := rootsOf(in, u.Server)
+		if u.Source != SourceSetting || u.HostPath == "" || underRoots(u.HostPath, roots) {
 			continue
 		}
 		p := path.Clean(u.HostPath)
 		out = append(out, Finding{
 			FP: Fingerprint(KindPathOutsideRoots, useID(u)), Kind: KindPathOutsideRoots, Severity: Warning,
 			Title:     fmt.Sprintf("%s (`%s`) is outside the bind roots.", useName(u), p),
-			Why:       "The Hub manages and scans only host paths under its bind roots (" + strings.Join(in.BindRoots, ", ") + "): it can't check or fix the ownership of this one.",
+			Why:       "The Hub manages and scans only host paths under its bind roots (" + strings.Join(roots, ", ") + "): it can't check or fix the ownership of this one.",
 			Class:     FixExplain,
 			Steps:     []string{"Move the data under one of the bind roots and point the setting at it, or add its parent to HUB_OVERRIDE_BIND_ROOTS in core's configuration."},
 			Instances: []string{u.Instance}, Paths: []string{p}, Inputs: Digest([]string{u.HostPath, u.Access}),
@@ -697,7 +715,7 @@ func ReachedAbove(f FolderIn, paths []PathIn) []Reach {
 	var out []Reach
 	for _, o := range sortedUses(paths) {
 		u, ok := uses[svc{o.Instance, o.Service}]
-		if !ok || o.HostPath == "" || (o.Source == SourceFolder && o.Folder == f.ID) || !strings.HasPrefix(o.HostPath, "/") {
+		if !ok || o.HostPath == "" || o.Server != f.Server || (o.Source == SourceFolder && o.Folder == f.ID) || !strings.HasPrefix(o.HostPath, "/") {
 			continue
 		}
 		if under(root, path.Clean(o.HostPath)) {

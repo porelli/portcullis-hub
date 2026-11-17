@@ -355,6 +355,7 @@ func (s *Server) registerMCPTools() {
 	s.registerSignInHelpTools()
 	s.registerImpersonationTools()
 	s.registerVPNTools()
+	s.registerServerTools()
 	s.registerMailTools()
 }
 

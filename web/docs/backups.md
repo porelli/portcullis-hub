@@ -1,7 +1,8 @@
 # Backups
 
 `./portcullis backup` makes a **consistent** backup while everything keeps
-running. `--offsite` also uploads it, encrypted, to a
+running (the one exception: the [mail server](../setup/mail.md), stopped while
+its store is copied). `--offsite` also uploads it, encrypted, to a
 [restic](https://restic.net) repository on another machine or in object
 storage. `./portcullis backup verify` proves that a backup can be restored, and
 `./portcullis restore` puts one back, on the same host or on a new one.
@@ -32,6 +33,7 @@ storage. `./portcullis backup verify` proves that a backup can be restored, and
 | Hub state (`hub_data`), ACME account and certs (`traefik_acme`), the AI access log (`mcp_gate_data`), group-gate's opened log (`group_gate_data`, part of everyone's [sign-in history](auth-policies.md#sign-in-history), kept a year by default) | Same → `hub_data.tar.gz`, `traefik_acme.tar.gz`, `mcp_gate_data.tar.gz`, `group_gate_data.tar.gz` (restored owned `10003:10001`) | `hub_data` includes the AI model provider keys in clear (`ai/provider-secrets.json`) and the AI app credentials encrypted to the gate's key, which is in `secrets/mcp-gate/` (lose that key and every AI resource answers `503` until the app credentials are dropped: [AI support residuals](ai.md#residuals)) |
 | `.env`, `certs/`, `secrets/`, `config/`, `keycloak/realm-export.json`, `headscale/config.yaml`, `docker-compose.override.yml` | Copied | Except `secrets/domains/last-public-ipv4` / `-ipv6`, the host's last detected public addresses ([public IP detection](hardening.md#public-ip-detection)), and `secrets/domains/acme-relax.env`, a pending ACME flip's settle point ([Certificates → Switching](../setup/certificates.md#switching)): never archived; a restore deletes the addresses and keeps a live settle point |
 | The VPN ([VPN-only access](vpn.md)) | `secrets/wg/` (the built-in VPN's key `people.key`) is in `secrets/`; the built-in devices, provider wiring and static assignments are in `hub_data` (the Hub's state). `vpn_doc` (`vpn.json`) and `wg_data` (`wg`'s `status.json`, status only) are **not** backed up | The Hub rewrites `vpn.json` from its state after a restore, and `wg` rewrites its status every 10 s. Restoring the key keeps every built-in device's configuration working |
+| **Mail** ([Mail server](../setup/mail.md), only with the `mail` profile) | `mail_data` and `mail_etc` (Stalwart's store and config) → `mail_data.tar.gz`, `mail_etc.tar.gz` **with `mail` stopped**; `mailctl_data` (its state machines), `mail_tls` (the mail certificate) and `mail_acme` (its ACME account and the TLSA next key) online | Stalwart's store has no online backup: `mail` (and the Hub, which would restart it after a revoke) is stopped for the copy and always started again, also when the copy fails; if `mail` is running again when the copy ends, the backup fails rather than keep a torn copy. **The one exception to "nothing is stopped"**; other servers retry while port 25 is closed. Mail passwords come back in the store but are voided by every restore ([below](#restore)) |
 | **File-share credentials (`hub_secrets`)** | **Never backed up** | Hashes are voided by every restore ([File Sharing](file-sharing.md#restores)) |
 | `MANIFEST.json` | Format, time, core version, Hub and Keycloak images, sha256 of every file | `verify` and `restore` refuse a backup whose files changed |
 
@@ -54,13 +56,48 @@ Back those up per app instance in the Hub (**instance backups**): the Hub's
 These are stored in `<hub data>/backups/<instance-id>/<UTC timestamp>.tar`
 (sha256-checksummed). The Hub also takes an automatic backup before every
 instance restore and delete. Instance backups live in `hub_data`, so the **core
-backup** (and `--offsite`) includes every instance backup taken so far. They are
-never pruned automatically and hold app secrets in clear: protect them like the
-rest of the backup.
+backup** (and `--offsite`) includes every instance backup taken so far. They
+hold app secrets in clear: protect them like the rest of the backup. Only
+[scheduled](#scheduled-instance-backups) archives are ever pruned; the others
+are kept until you delete them.
 
 An instance backup can be restored into the same instance (replacing its data)
 or into a **new instance id** (creating a copy). See [integration contracts
 §11.5](../guides/integration-contracts.md#115-backups).
+
+### Instances on worker servers
+
+An instance on a [worker server](servers.md) is backed up the same way: the
+agent copies its volumes out through a helper container on the worker, and
+the archive streams over the tunnel into the primary's
+`<hub data>/backups/<instance-id>/`, so the core backup and `--offsite`
+cover it like any other. A restore streams it back. A **move** is a backup
+on the source (reason `move`) and a restore on the target. The worker's own
+state (its identity, the bundles the Hub sent) is never backed up: a re-join
+creates a new identity and the Hub renders the apps again.
+
+While the primary is down, nothing backs up a worker's apps.
+
+### Scheduled instance backups
+
+Each server, the primary included, has a **Scheduled backups** setting in
+the Hub (Settings → Servers → *Settings*; MCP `set_backup_schedule`):
+
+- **off** (the default), **daily** at an hour, or **weekly** on a weekday
+  at an hour, in the Hub's time zone (`TZ`);
+- at the slot, each enabled instance on that server is backed up in turn,
+  with reason `scheduled`, under the usual consistency rule (each app stops
+  briefly);
+- the **3 newest scheduled archives** per instance are kept; manual, move,
+  pre-restore and pre-delete archives are never pruned;
+- a server that isn't ready is skipped, with a note on each of its
+  instances' last operation ("scheduled backup skipped: server NAS is
+  offline").
+
+This complements the core backup timer ([below](#schedule-systemd-timer)),
+which copies `hub_data` and therefore the archives. The doctor warns
+(`server_no_recent_backup`) about an enabled instance on a worker without an
+archive in 14 days.
 
 ### Shared folders and host paths
 
@@ -231,6 +268,7 @@ says so). It saves the current `.env`, `secrets/` and `certs/` to
    nothing else is started. Restore a backup that includes LLDAP, or, if the
    users really are gone, re-run with `--allow-empty-lldap`.
 7. Builds the local images on both runtimes (Docker and rootless Podman), then runs `vault init`, which refreshes the enroll AppRole secret and the metrics token. Everything is started and the restore waits for Vault, Postgres, LLDAP and Keycloak.
+8. **Mail** (only with the `mail` profile): before it restores the mail volumes (with step 5) it writes the marker `secrets/mail/gate/void-pending`; when the stack starts, a recovery session (no egress) destroys every mail password of the restored store and records the restore for the Hub, which shows people "reset by a restore". Only then does `mail` start normally, and the marker goes. While the marker exists nothing starts mail normally (`up`, `upgrade`, the Hub's restart and the container itself refuse). If the void fails, `mail` and `mailctl` stay stopped, the rest starts, and the restore exits 1 with "mail passwords could not be voided: mail stays stopped (./portcullis mail enable to retry)": run `./portcullis mail enable` once the cause is fixed. DKIM keys survive. See [Mail operations](mail.md#backups-and-restores).
 
 Use `--yes` to skip the confirmation.
 

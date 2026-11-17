@@ -350,14 +350,17 @@ func (h *Hub) treePlan(ctx context.Context, f doctor.Finding, params map[string]
 		}
 		return nil, err
 	}
-	if err := h.folderPathRule(c.tree); err != nil {
+	if h.serverOf(c.inst) != "" {
+		return nil, statusErr(http.StatusConflict, "%s runs on %s: its per-person folders are fixed there by hand", c.inst, serverLabel(h.serverOf(c.inst)))
+	}
+	if err := h.folderPathRule("", c.tree); err != nil {
 		return nil, err
 	}
-	if err := h.dockerRootRule(ctx, c.tree); err != nil {
+	if err := h.dockerRootRule(ctx, "", c.tree); err != nil {
 		return nil, err
 	}
 	child := path.Join(c.tree, c.user)
-	pr, err := h.probePath(ctx, child, false, "")
+	pr, err := h.probePath(ctx, "", child, false, "")
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +422,7 @@ func (personTreeOwnerFixer) Apply(h *Hub, f doctor.Finding, params map[string]st
 			return nil, nil, errSetupChanged()
 		}
 		ready()
-		root, rel := h.bindRootOf(c.tree)
+		root, rel := h.bindRootOf("", c.tree)
 		if root == "" {
 			return nil, nil, badPath("%s is not under a bind root", c.tree)
 		}

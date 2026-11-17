@@ -1,0 +1,45 @@
+# portcullis-agent: the worker's agent (contract §17.4–§17.7). Same build
+# and runtime base as the Hub image (pre-flight P12): internal/compose
+# execs `docker compose` against AGENT_ENGINE (socket-proxy-agent over
+# TCP), so the image carries docker-cli + the compose plugin; no socket
+# file, no root.
+# golang:1.27-alpine
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
+ARG TARGETOS
+ARG TARGETARCH
+# VERSION: semver (a release tag's, else 0.0.0-edge); the Hub accepts
+# the same or the previous minor (servers.Compatible).
+ARG VERSION=0.0.0-dev
+# GO_TAGS: Go build tags, empty by default. Core's CI builds its e2e
+# images with GO_TAGS=e2etest (internal/e2etest's test hooks); a default
+# image has none of that code (CI checks it).
+ARG GO_TAGS=""
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags "${GO_TAGS}" \
+      -ldflags="-s -w -X github.com/portcullis/hub/internal/version.Version=${VERSION}" -o /portcullis-agent ./cmd/portcullis-agent
+
+# alpine:3.24
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+# uid 10008 (contract §17.7); group 10001 is added at run time (group_add)
+# so appfiles keep the primary's group. /usr/local/bin/portcullis stays
+# free for SSH part 2.
+# Pinned package versions (review L7): what the agent validates with
+# `compose config` and runs with `compose up` is one known compose.
+RUN apk add --no-cache ca-certificates=20261020-r0 docker-cli=29.9.3-r1 docker-cli-compose=5.6.1-r0 \
+ && addgroup -S -g 10008 agent \
+ && adduser -S -D -H -u 10008 -G agent agent
+COPY --from=build /portcullis-agent /usr/local/bin/portcullis-agent
+USER 10008:10008
+# The agent finds its own container by id and checks it runs this image
+# (R4-L1): containers inherit the label.
+LABEL io.portcullis.agent="1"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
+  CMD ["portcullis-agent", "healthcheck"]
+ENTRYPOINT ["portcullis-agent"]
+CMD ["run"]

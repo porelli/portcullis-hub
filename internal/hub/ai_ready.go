@@ -46,7 +46,7 @@ func (h *Hub) aiServiceState(ctx context.Context, t *templates.Template, service
 	if c == nil {
 		return false, "", nil
 	}
-	st, err := h.rt.State(ctx, c.ID)
+	st, err := h.rtOf(t.ID).State(ctx, c.ID)
 	if err != nil {
 		return false, "", err
 	}

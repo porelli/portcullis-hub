@@ -60,7 +60,7 @@ func (h *Hub) appContainers(ctx context.Context, t *templates.Template) ([]runti
 	for _, s := range services {
 		known[s] = true
 	}
-	cs, err := h.rt.List(ctx, runtime.Filter{Instance: t.ID})
+	cs, err := h.rtOf(t.ID).List(ctx, runtime.Filter{Instance: t.ID})
 	if err != nil {
 		return nil, services, err
 	}
@@ -118,7 +118,7 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 		if t.Jobs[c.Service] {
 			status.Job = true
 			// Get detailed state to determine JobState (I1: never omit it).
-			st, err := h.rt.State(ctx, c.ID)
+			st, err := h.rtOf(id).State(ctx, c.ID)
 			if err == nil {
 				status.JobState = jobState(st)
 			} else {
@@ -189,7 +189,7 @@ func (h *Hub) Logs(ctx context.Context, id, service string, lines int) ([]byte, 
 		if service != "" && c.Service != service {
 			continue
 		}
-		out, err := h.rt.Logs(ctx, c.ID, lines, true)
+		out, err := h.rtOf(id).Logs(ctx, c.ID, lines, true)
 		if err != nil {
 			out = []byte(fmt.Sprintf("[hub: cannot read logs: %v]\n", err))
 		}
@@ -233,7 +233,7 @@ func (h *Hub) Exec(ctx context.Context, id, service, command string) (*ExecResul
 	if _, err := h.redactCredentialHashes(t, "", false); err != nil {
 		return nil, err // F44: unreadable hashes, nothing run
 	}
-	res, err := h.rt.Exec(ctx, target.ID, runtime.ExecInput{Cmd: []string{"/bin/sh", "-c", command}, Timeout: execTimeout, NoStdin: true})
+	res, err := h.rtOf(id).Exec(ctx, target.ID, runtime.ExecInput{Cmd: []string{"/bin/sh", "-c", command}, Timeout: execTimeout, NoStdin: true})
 	if err != nil && res == nil {
 		return nil, statusErr(502, "docker: %v", err)
 	}
