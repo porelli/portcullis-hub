@@ -241,6 +241,10 @@ func hostKey(t *testing.T) string {
 
 func (f *sshFixture) compile(t *testing.T) {
 	t.Helper()
+	// Serialised with the background compiles a write triggers (they hold
+	// runMu): none can finish after this one with an older state.
+	f.h.sshrt.runMu.Lock()
+	defer f.h.sshrt.runMu.Unlock()
 	if err := f.h.compileSSH(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -259,7 +259,7 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	rand.Read(secret)
 	hub := &sshdHub{t: t, domain: "example.org", secret: base64.RawURLEncoding.EncodeToString(secret), chal: map[string]bool{},
 		bundle: cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 1, UserCAs: []string{cliapi.NormalAuthorizedKey(caSigner.PublicKey())},
-			Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Approved: []string{"u:alice@web"}},
+			Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"up:alice@web"}, Sudo: true},
 				{Name: "bob", Kind: "person", UID: 20002, Principals: []string{"u:bob@web"}}},
 			Locked: []string{}, Remove: []string{}, RevokedKeys: []string{}}}
 	ln, err := net.Listen("tcp", net.JoinHostPort(gw.String(), "0"))
@@ -309,7 +309,9 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	time.Sleep(time.Second) // sshd re-executes on SIGHUP
 	waitSSH()
 	// alice: a person account, certificate-only, with sudo.
-	alice := userCert(t, caSigner, "u:alice@web", "pc:alice:web:0123456789abcdef")
+	// alice has Portcullis sudo: her grant went through the privileged
+	// path, so her certificate carries up: (Ruling RR3).
+	alice := userCert(t, caSigner, "up:alice@web", "pc:alice:web:0123456789abcdef")
 	out, err := sshRun(addr, "alice", alice, "id -un; sudo -n true && echo SUDO")
 	if err != nil || !strings.Contains(out, "alice") || !strings.Contains(out, "SUDO") {
 		t.Fatalf("alice: %v %q", err, out)
@@ -334,7 +336,7 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err != nil {
 		t.Errorf("sync: %v %s", err, out)
 	}
-	if got, _ := exec_("cat", "/etc/ssh/portcullis/principals/alice"); strings.TrimSpace(got) != "u:alice@web" {
+	if got, _ := exec_("cat", "/etc/ssh/portcullis/principals/alice"); strings.TrimSpace(got) != "up:alice@web" {
 		t.Errorf("not healed: %q", got)
 	}
 	if !hasFinding(hub.lastReport(), cliapi.FindingDrift, "/etc/ssh/portcullis/principals/alice", "fixed") {
@@ -460,29 +462,63 @@ useradd -m -s /bin/bash plain`)
 	if out, _ := exec_("cat", "/etc/ssh/portcullis/principals/plain"); strings.TrimSpace(out) != "s:plain@web" {
 		t.Errorf("plain lost its principals: %q", out)
 	}
-	// Approval is per principal: s:dock@web comes from an approved grant,
-	// s:dock@all from a plain one — its holder is refused as dock.
+	// Ruling RR3: approval travels in the certificate. dock (docker group)
+	// takes sp:dock@web (an approved grant's) and not s:dock@web (a plain
+	// grant's), even with both in the bundle.
 	hub.setBundle(func(b *cliapi.Bundle) {
 		for i := range b.Accounts {
 			if b.Accounts[i].Name == "dock" {
-				b.Accounts[i].Principals = []string{"s:dock@all", "s:dock@web"}
-				b.Accounts[i].Approved = []string{"s:dock@web"}
+				b.Accounts[i].Principals = []string{"s:dock@web", "sp:dock@web"}
 			}
 		}
 	})
 	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
-	if out, err := sshRun(addr, "dock", userCert(t, caSigner, "s:dock@web", "pc:x:web:0123456789abcdef"), "id -un"); err != nil || out != "dock" {
-		t.Errorf("dock through a privileged grant: %v %q", err, out)
+	if out, err := sshRun(addr, "dock", userCert(t, caSigner, "sp:dock@web", "pc:x:web:0123456789abcdef"), "id -un"); err != nil || out != "dock" {
+		t.Errorf("dock through a privileged grant (sp:): %v %q", err, out)
 	}
-	if _, err := sshRun(addr, "dock", userCert(t, caSigner, "s:dock@all", "pc:y:all:0123456789abcdef"), "true"); err == nil {
+	if _, err := sshRun(addr, "dock", userCert(t, caSigner, "s:dock@web", "pc:y:web:0123456789abcdef"), "true"); err == nil {
 		t.Error("dock through a plain grant's principal: logged in")
 	}
+	// A still-valid plain-grant certificate stops working once the account
+	// becomes sudo-capable (here: added to the docker group).
+	plainCert := userCert(t, caSigner, "s:plain@web", "pc:z:web:0123456789abcdef")
+	if _, err := sshRun(addr, "plain", plainCert, "true"); err != nil {
+		t.Fatalf("plain before it has sudo: %v", err)
+	}
+	exec_("usermod", "-aG", "docker", "plain")
+	// The next apply (a new bundle here; also every report-due re-apply of
+	// the cached one) sees the new sudo.
+	hub.setBundle(func(*cliapi.Bundle) {})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
+	if _, err := sshRun(addr, "plain", plainCert, "true"); err == nil {
+		t.Error("a still-valid plain-grant certificate logged in after the account got sudo")
+	}
+	hub.setBundle(func(b *cliapi.Bundle) {
+		for i := range b.Accounts {
+			if b.Accounts[i].Name == "plain" {
+				b.Accounts[i].Principals = []string{"s:plain@web", "sp:plain@web"}
+			}
+		}
+	})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
+	if out, err := sshRun(addr, "plain", userCert(t, caSigner, "sp:plain@web", "pc:z:web:0123456789abcdef"), "id -un"); err != nil || out != "plain" {
+		t.Errorf("plain through an approved grant (sp:): %v %q", err, out)
+	}
+	exec_("gpasswd", "-d", "plain", "docker")
+	hub.setBundle(func(b *cliapi.Bundle) {
+		for i := range b.Accounts {
+			if b.Accounts[i].Name == "plain" {
+				b.Accounts[i].Principals = []string{"s:plain@web"}
+			}
+		}
+	})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
 	// RR-M2: a failed apply (sshd -t refuses an unrelated main config line)
 	// never gives back a sudo rule the new bundle removed.
 	hub.setBundle(func(b *cliapi.Bundle) {
 		for i := range b.Accounts {
 			if b.Accounts[i].Name == "plain" {
-				b.Accounts[i].Sudo, b.Accounts[i].Approved = true, b.Accounts[i].Principals
+				b.Accounts[i].Sudo, b.Accounts[i].Principals = true, []string{"sp:plain@web"}
 			}
 		}
 	})
@@ -494,7 +530,7 @@ useradd -m -s /bin/bash plain`)
 	hub.setBundle(func(b *cliapi.Bundle) {
 		for i := range b.Accounts {
 			if b.Accounts[i].Name == "plain" {
-				b.Accounts[i].Sudo, b.Accounts[i].Approved = false, nil
+				b.Accounts[i].Sudo, b.Accounts[i].Principals = false, []string{"s:plain@web"}
 			}
 		}
 	})
@@ -520,8 +556,8 @@ useradd -m -s /bin/bash plain`)
 			t.Errorf("%s: logged in", name)
 		}
 	}
-	if _, err := sshRun(addr, "root", userCert(t, caSigner, "root,u:alice@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
-		t.Error("root with root,u:alice@web: logged in")
+	if _, err := sshRun(addr, "root", userCert(t, caSigner, "root,up:alice@web", "pc:x:web:0123456789abcdef"), "true"); err == nil {
+		t.Error("root with root,up:alice@web: logged in")
 	}
 	// Removed from the Hub (FR-H3): the agent removes the trust itself —
 	// a valid certificate is refused afterwards and Portcullis's paths are

@@ -140,10 +140,21 @@ func trustCommand(domain, hg string, userCAs, hints []string) string {
 	}
 	var b strings.Builder
 	b.WriteString("sudo portcullis host trust --domain " + domain + " --host-group " + hg + " \\\n     --ca-key '" + userCAs[0] + "'")
+	seen := map[string]bool{}
 	for _, a := range hints {
-		if acct, ok := strings.CutPrefix(a, cliapi.PrincipalPersonal+":"); ok {
+		// Plain or approved (RR3) principals both name the account.
+		kind, acct, _, ok := cliapi.ParsePrincipal(a + "@x")
+		if !ok {
+			kind, acct, _, ok = cliapi.ParsePrincipal(a)
+		}
+		if !ok || seen[kind+acct] {
+			continue
+		}
+		seen[kind+acct] = true
+		switch kind {
+		case cliapi.PrincipalPersonal:
 			b.WriteString(" --person " + acct)
-		} else if acct, ok := strings.CutPrefix(a, cliapi.PrincipalShared+":"); ok {
+		case cliapi.PrincipalShared:
 			b.WriteString(" --account " + acct)
 		}
 	}

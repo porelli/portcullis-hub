@@ -375,7 +375,11 @@ func TestVectorsFile(t *testing.T) {
 	v := loadVectors(t)
 	for _, c := range v.Principals {
 		k, a, g, ok := ParsePrincipal(c.In)
-		if ok != c.OK || (ok && (k != c.Kind || a != c.Account || g != c.HostGroup || Principal(k, a, g) != c.In)) {
+		build := Principal
+		if IsApprovedPrincipal(c.In) {
+			build = ApprovedPrincipal
+		}
+		if ok != c.OK || (ok && (k != c.Kind || a != c.Account || g != c.HostGroup || build(k, a, g) != c.In)) {
 			t.Errorf("principal %q: %q %q %q %v", c.In, k, a, g, ok)
 		}
 	}

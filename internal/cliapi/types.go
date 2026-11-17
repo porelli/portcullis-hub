@@ -253,12 +253,6 @@ type Account struct {
 	UID        int      `json:"uid,omitempty"`
 	Principals []string `json:"principals"`
 	Sudo       bool     `json:"sudo"`
-	// Approved: the principals that only grants which went through the
-	// privileged path give (RR-H1, per principal): a u: principal when one
-	// of that person's grants here is approved, an s: principal only when
-	// every grant giving it is (it's the same string for every holder). An
-	// account with sudo by other means gets only these.
-	Approved []string `json:"approved,omitempty"`
 }
 
 // BundleOptions are the host group switches a host needs.

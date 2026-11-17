@@ -447,3 +447,24 @@ func TestSignLogsNoSecret(t *testing.T) {
 		}
 	}
 }
+
+// Ruling RR3: a plain grant never issues an approved (sp:/up:) principal;
+// one saved through the privileged path issues only those.
+func TestPlainGrantNeverApprovedPrincipal(t *testing.T) {
+	for _, user := range []string{"alice", "bob"} {
+		f := newSignFixture(t, user, "security_key")
+		ans, err := f.h.SignSSH(context.Background(), f.request(t, f.signer), "192.0.2.50")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range ans.Certificates {
+			for _, p := range c.Principals {
+				approved := cliapi.IsApprovedPrincipal(p)
+				// The fixture's privileged grant: ssh_admins → all (sudo).
+				if want := c.HostGroup == "all"; approved != want {
+					t.Errorf("%s %s: %s approved=%v", user, c.HostGroup, p, approved)
+				}
+			}
+		}
+	}
+}

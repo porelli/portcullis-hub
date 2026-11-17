@@ -139,7 +139,10 @@ Any account that can reach root on the host by other means — a
 `incus`, `libvirt`, `disk`), a doas rule, a sudoers rule anywhere, uid 0; the
 host asks `id`, doas.conf and `sudo -l` rather than reading sudoers — gets a
 certificate login there only through a privileged grant, and with
-`allow_sudo: false` never. Every host reports such accounts; until a managed
+`allow_sudo: false` never. The approval is in the certificate: a privileged
+grant's certificates carry `up:` / `sp:` principals, and an account with sudo
+— Portcullis's own included — accepts only those, so a certificate from a
+plain grant stops working there the moment the account gets sudo. Every host reports such accounts; until a managed
 host has reported, every shared-account grant on its host groups counts as
 privileged (typed group name and a fresh sign-in). A grant that becomes
 privileged later (the host reports the account with sudo) gives that account

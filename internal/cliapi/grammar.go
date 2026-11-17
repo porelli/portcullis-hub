@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	principalRE  = regexp.MustCompile(`^([us]):([a-z_][a-z0-9._-]{0,31})@([a-z][a-z0-9-]{0,30})$`)
+	principalRE  = regexp.MustCompile(`^([us])(p?):([a-z_][a-z0-9._-]{0,31})@([a-z][a-z0-9-]{0,30})$`)
 	hostGroupRE  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 	usernameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	accountRE    = regexp.MustCompile(`^[a-z_][a-z0-9._-]{0,31}$`)
@@ -43,15 +43,29 @@ func Principal(kind, account, hostGroup string) string {
 	return kind + ":" + account + "@" + hostGroup
 }
 
-// ParsePrincipal reports whether s is `<u|s>:<account>@<host group>`
-// (contract §18.12). Reservation of `portcullis-*` host groups is
-// sshaccess's check.
+// ApprovedPrincipal is `<kind>p:<account>@<host group>` (Ruling RR3): the
+// principal a grant that went through the privileged path issues. A
+// host lists only these for an account that has sudo by any means, so a
+// certificate from a plain grant — outstanding or new — never matches.
+func ApprovedPrincipal(kind, account, hostGroup string) string {
+	return kind + "p:" + account + "@" + hostGroup
+}
+
+// ParsePrincipal reports whether s is `<u|s>[p]:<account>@<host group>`
+// (contract §18.12); kind is the base kind (u or s) for both namespaces.
+// Reservation of `portcullis-*` host groups is sshaccess's check.
 func ParsePrincipal(s string) (kind, account, hostGroup string, ok bool) {
 	m := principalRE.FindStringSubmatch(s)
 	if m == nil {
 		return "", "", "", false
 	}
-	return m[1], m[2], m[3], true
+	return m[1], m[3], m[4], true
+}
+
+// IsApprovedPrincipal: s is an up: / sp: principal (a privileged grant's).
+func IsApprovedPrincipal(s string) bool {
+	m := principalRE.FindStringSubmatch(s)
+	return m != nil && m[2] == "p"
 }
 
 // ValidHostGroupID is the host group id grammar (without the reservation).

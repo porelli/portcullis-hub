@@ -23,7 +23,7 @@ func bundle(t *testing.T) *cliapi.Bundle {
 	ca, _ := caKey(t)
 	return &cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 3, UserCAs: []string{ca},
 		Accounts: []cliapi.Account{
-			{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@all", "u:alice@web"}, Sudo: true, Approved: []string{"u:alice@all", "u:alice@web"}},
+			{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"up:alice@all", "up:alice@web"}, Sudo: true},
 			{Name: "bob", Kind: "person", UID: 20002, Principals: []string{"u:bob@web"}},
 			{Name: "deploy", Kind: "shared", Principals: []string{"s:deploy@web"}},
 		}, Locked: []string{}, Remove: []string{}, RevokedKeys: []string{}}
@@ -50,7 +50,7 @@ func TestCreatePersonAccount(t *testing.T) {
 	if !sys.ran("useradd -u 20001 -U -G portcullis-users -m -s /bin/bash -c portcullis alice alice") {
 		t.Errorf("runs %v", sys.runs)
 	}
-	if got := string(sys.files[PrincipalsFile("alice")]); got != "u:alice@all\nu:alice@web\n" {
+	if got := string(sys.files[PrincipalsFile("alice")]); got != "up:alice@all\nup:alice@web\n" {
 		t.Errorf("alice principals %q", got)
 	}
 	if got := string(sys.files[SudoersFile]); !strings.Contains(got, "alice ALL=(ALL:ALL) NOPASSWD: ALL\n") || strings.Contains(got, "bob") || sys.modes[SudoersFile] != 0o440 {
@@ -97,7 +97,7 @@ func TestAccountInvalidSkipped(t *testing.T) {
 func TestCeilingRefusesRootAndProtected(t *testing.T) {
 	sys := newFakeSys(t)
 	b := bundle(t)
-	b.Accounts = append(b.Accounts, cliapi.Account{Name: "root", Kind: "shared", Principals: []string{"s:root@all"}, Sudo: true, Approved: []string{"s:root@all"}},
+	b.Accounts = append(b.Accounts, cliapi.Account{Name: "root", Kind: "shared", Principals: []string{"sp:root@all"}, Sudo: true},
 		cliapi.Account{Name: "breakglass", Kind: "shared", Principals: []string{"s:breakglass@all"}},
 		cliapi.Account{Name: "daemon", Kind: "shared", Principals: []string{"s:daemon@all"}})
 	_, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
@@ -118,7 +118,7 @@ func TestCeilingRefusesRootAndProtected(t *testing.T) {
 	c.AllowRootLogin = true
 	sys = newFakeSys(t)
 	apply(t, sys, b, c, nil)
-	if got := string(sys.files[PrincipalsFile("root")]); got != "s:root@all\n" {
+	if got := string(sys.files[PrincipalsFile("root")]); got != "sp:root@all\n" {
 		t.Errorf("root %q", got)
 	}
 }
@@ -302,7 +302,7 @@ func TestReloadOnlyOnChange(t *testing.T) {
 	// A hand-edited principals file is put back and reported fixed.
 	sys.files[PrincipalsFile("alice")] = []byte("u:mallory@web\n")
 	_, fs, err = apply(t, sys, b, cliapi.DefaultCeiling(), st)
-	if err != nil || string(sys.files[PrincipalsFile("alice")]) != "u:alice@all\nu:alice@web\n" || sys.reloads != 2 {
+	if err != nil || string(sys.files[PrincipalsFile("alice")]) != "up:alice@all\nup:alice@web\n" || sys.reloads != 2 {
 		t.Errorf("drift not healed: %v %q %d", err, sys.files[PrincipalsFile("alice")], sys.reloads)
 	}
 	if d := kinds(fs)[cliapi.FindingDrift]; !slices.Contains(d, PrincipalsFile("alice")) {
@@ -518,7 +518,7 @@ func TestCeilingNoSudoRefusesAccountsWithSudo(t *testing.T) {
 		sys3.files["/etc/passwd"] = append(sys3.files["/etc/passwd"], []byte("ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n")...)
 		setup(sys3)
 		bp := bundle(t)
-		bp.Accounts = []cliapi.Account{{Name: "ubuntu", Kind: "shared", Principals: []string{"s:ubuntu@web"}, Approved: []string{"s:ubuntu@web"}}}
+		bp.Accounts = []cliapi.Account{{Name: "ubuntu", Kind: "shared", Principals: []string{"sp:ubuntu@web"}}}
 		if _, _, err := apply(t, sys3, bp, cliapi.DefaultCeiling(), nil); err != nil {
 			t.Fatal(err)
 		}
@@ -631,7 +631,7 @@ func TestCheckRootFile(t *testing.T) {
 func TestApplyFailureKeepsSudoRemoved(t *testing.T) {
 	sys := newFakeSys(t)
 	b := bundle(t)
-	b.Accounts[1].Sudo, b.Accounts[1].Approved = true, b.Accounts[1].Principals // bob had sudo
+	b.Accounts[1].Sudo, b.Accounts[1].Principals = true, []string{"up:bob@web"} // bob had sudo (an approved grant)
 	st, _, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
 	if err != nil || !strings.Contains(string(sys.files[SudoersFile]), "bob ALL") {
 		t.Fatalf("setup: %v %q", err, sys.files[SudoersFile])
@@ -755,19 +755,19 @@ func TestSudoViaMore(t *testing.T) {
 	}
 }
 
-// Security review of RR-H1: on an account with sudo by other means only
-// the principals the bundle marks approved are written.
+// Ruling RR3: on an account with sudo by other means only the approved
+// (sp:/up:) principals are written.
 func TestSudoCapableKeepsOnlyApprovedPrincipals(t *testing.T) {
 	sys := newFakeSys(t)
 	sys.files["/etc/passwd"] = append(sys.files["/etc/passwd"], []byte("ansible:x:1500:1500::/home/ansible:/bin/bash\n")...)
 	sys.sudoers["ansible"] = true
 	b := bundle(t)
-	b.Accounts = []cliapi.Account{{Name: "ansible", Kind: "shared", Principals: []string{"s:ansible@all", "s:ansible@web"}, Approved: []string{"s:ansible@all"}}}
+	b.Accounts = []cliapi.Account{{Name: "ansible", Kind: "shared", Principals: []string{"sp:ansible@all", "s:ansible@web"}}}
 	_, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(sys.files[PrincipalsFile("ansible")]); got != "s:ansible@all\n" {
+	if got := string(sys.files[PrincipalsFile("ansible")]); got != "sp:ansible@all\n" {
 		t.Errorf("principals %q", got)
 	}
 	if !slices.Contains(kinds(fs)[cliapi.FindingCeiling], "ansible") {

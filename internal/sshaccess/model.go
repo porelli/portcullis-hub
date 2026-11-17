@@ -96,8 +96,14 @@ type grantUse struct {
 	kind     string
 }
 
-// principal is the use's `<kind>:<account>@<hg>`.
-func (u grantUse) principal() string { return cliapi.Principal(u.kind, u.account, u.hg) }
+// principal is the use's `<kind>:<account>@<hg>`, `<kind>p:…` for a use of
+// an approved (privileged-path) grant (Ruling RR3).
+func (u grantUse) principal() string {
+	if u.approved {
+		return cliapi.ApprovedPrincipal(u.kind, u.account, u.hg)
+	}
+	return cliapi.Principal(u.kind, u.account, u.hg)
+}
 
 // validPrincipal: the principal passes the grammar (a username that can't
 // be a local account doesn't).

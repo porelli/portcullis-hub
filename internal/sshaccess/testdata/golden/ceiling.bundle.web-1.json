@@ -13,13 +13,9 @@
       "kind": "person",
       "uid": 20001,
       "principals": [
-        "u:alice@all",
-        "u:alice@web"
+        "up:alice@all"
       ],
-      "sudo": true,
-      "approved": [
-        "u:alice@all"
-      ]
+      "sudo": true
     },
     {
       "name": "bob",
@@ -42,12 +38,9 @@
       "name": "root",
       "kind": "shared",
       "principals": [
-        "s:root@web"
+        "sp:root@web"
       ],
-      "sudo": false,
-      "approved": [
-        "s:root@web"
-      ]
+      "sudo": false
     }
   ],
   "locked": [],

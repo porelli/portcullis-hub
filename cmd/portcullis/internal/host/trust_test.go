@@ -65,10 +65,10 @@ func TestRevokedKeysCreatedEmptyFirst(t *testing.T) {
 	if ri < 0 || di < 0 || ri > di || len(sys.files[RevokedKeysFile]) != 0 {
 		t.Errorf("writes %v", sys.writes)
 	}
-	if got := string(sys.files[PrincipalsFile("alice")]); got != "u:alice@web\n" {
+	if got := string(sys.files[PrincipalsFile("alice")]); got != "u:alice@web\nup:alice@web\n" {
 		t.Errorf("alice %q", got)
 	}
-	if got := string(sys.files[PrincipalsFile("deploy")]); got != "s:deploy@web\n" {
+	if got := string(sys.files[PrincipalsFile("deploy")]); got != "s:deploy@web\nsp:deploy@web\n" {
 		t.Errorf("deploy %q", got)
 	}
 	if sys.reloads != 1 {

@@ -238,22 +238,24 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 				findings = append(findings, finding(cliapi.FindingAuthorizedKeysShared, cliapi.SeverityInfo, a.Name, fmt.Sprintf("%d authorized_keys entries", n)))
 			}
 		}
-		// FR-H4 / RR-H1: an account that can reach root by other means is
-		// sudo, whatever the bundle says. With sudo off by the ceiling it
-		// gets no principals; with sudo allowed only when a privileged grant
-		// gives it (a cloud image's default user, an ansible account, an
-		// admin's own login are never reached through a plain grant).
-		if via := acc.sudoVia(ctx, sys, a.Name); via != "" {
-			if !c.AllowSudo {
-				findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and this host's ceiling doesn't allow sudo"))
-				continue
-			}
-			// Per principal (security review of RR-H1): only those the
-			// bundle marks approved; one privileged grant doesn't open the
-			// account to the others.
+		// FR-H4 / RR-H1 / Ruling RR3: an account that can reach root —
+		// by other means (sudoVia) or through Portcullis's own sudo — takes
+		// only approved principals (up:/sp:, issued by grants that went
+		// through the privileged path), so a plain grant's certificate,
+		// outstanding or new, never opens it. With sudo off by the ceiling,
+		// an account with sudo by other means gets nothing.
+		via := acc.sudoVia(ctx, sys, a.Name)
+		if via != "" && !c.AllowSudo {
+			findings = append(findings, finding(cliapi.FindingCeiling, cliapi.SeverityWarning, a.Name, "has sudo on this host ("+via+") and this host's ceiling doesn't allow sudo"))
+			continue
+		}
+		if via == "" && a.Sudo && c.AllowSudo {
+			via = "Portcullis gives it sudo"
+		}
+		if via != "" {
 			var keep []string
 			for _, p := range a.Principals {
-				if slices.Contains(a.Approved, p) {
+				if cliapi.IsApprovedPrincipal(p) {
 					keep = append(keep, p)
 				}
 			}

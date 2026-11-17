@@ -496,7 +496,7 @@ func TestHostReportedSudoMakesGrantPrivileged(t *testing.T) {
 		}
 		return cliapi.Account{}
 	}
-	if a := acct(); a.Name == "" || len(a.Principals) != 0 || len(a.Approved) != 0 {
+	if a := acct(); a.Name == "" || len(a.Principals) != 0 {
 		t.Errorf("before approval (web-1 reports ansible with sudo): %+v", a)
 	}
 	if _, err := f.h.SaveGrant(context.Background(), asAdmin, *saved, "", &freshauth.Proof{Code: "c"}); err == nil {
@@ -506,7 +506,7 @@ func TestHostReportedSudoMakesGrantPrivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.compile(t)
-	if a := acct(); !slices.Equal(a.Principals, []string{"s:ansible@web"}) || !slices.Equal(a.Approved, []string{"s:ansible@web"}) {
+	if a := acct(); !slices.Equal(a.Principals, []string{"sp:ansible@web"}) {
 		t.Errorf("after approval: %+v", a)
 	}
 }
@@ -589,19 +589,17 @@ func TestStaleGrantNotMerged(t *testing.T) {
 	}
 }
 
-// Security review of RR-H1: approval is per principal. An approved and a
-// plain grant of the same shared account on a host that reports it with
-// sudo: the shared principal (one string for every holder) is left out
-// while a plain grant gives it; a person's own principal counts as
-// approved when one of their grants is.
+// Ruling RR3: approval travels in the principal. An approved and a plain
+// grant of the same shared account on a host that reports it with sudo:
+// only the approved grant's sp: principal reaches it (the plain grant's
+// s: principal — the same account — doesn't); a person with sudo there
+// gets only their up: principal.
 func TestApprovalPerPrincipal(t *testing.T) {
 	f := newGrantFixture(t)
 	f.h.mu.Lock()
 	h := f.h.st.SSH.Hosts["web-1"]
 	h.SudoChecked, h.SudoCapable = true, []string{"ansible", "alice"}
 	f.h.st.SSH.Hosts["web-1"] = h
-	// Approved (saved through the privileged path) for ssh_admins (alice),
-	// plain for ssh_deploy (bob) — the same account.
 	f.h.st.SSH.Grants = append(f.h.st.SSH.Grants,
 		state.SSHGrant{ID: "g-a", Group: "ssh_admins", GroupID: 12, HostGroup: "web", Accounts: []string{"ansible", "{username}"}, Sudo: "none", PrivilegedSave: true},
 		state.SSHGrant{ID: "g-b", Group: "ssh_deploy", GroupID: 13, HostGroup: "web", Accounts: []string{"ansible"}, Sudo: "none"})
@@ -615,18 +613,14 @@ func TestApprovalPerPrincipal(t *testing.T) {
 		}
 		return cliapi.Account{}
 	}
-	if a := get("ansible"); len(a.Principals) != 0 || len(a.Approved) != 0 {
-		t.Errorf("a shared principal a plain grant also gives reaches a sudo-capable account: %+v", a)
+	if a := get("ansible"); !slices.Equal(a.Principals, []string{"sp:ansible@web"}) {
+		t.Errorf("ansible on a host where it has sudo: %+v", a)
 	}
-	if a := get("alice"); !slices.Contains(a.Principals, "u:alice@web") || !slices.Contains(a.Approved, "u:alice@web") {
-		t.Errorf("alice's own principal from an approved grant: %+v", a)
+	if a := get("alice"); !slices.Contains(a.Principals, "up:alice@web") || slices.Contains(a.Principals, "u:alice@web") {
+		t.Errorf("alice on a host where she has sudo: %+v", a)
 	}
-	// Without the plain grant the approved one gives the shared account.
-	f.h.mu.Lock()
-	f.h.st.SSH.Grants = f.h.st.SSH.Grants[:len(f.h.st.SSH.Grants)-1]
-	f.h.mu.Unlock()
-	f.compile(t)
-	if a := get("ansible"); !slices.Equal(a.Principals, []string{"s:ansible@web"}) {
-		t.Errorf("approved only: %+v", a)
+	// The plain grant's role principal is s:, never sp:.
+	if r := f.h.sshCompiled().Roles["web"]; !slices.Contains(r.Principals, "s:ansible@web") || !slices.Contains(r.Principals, "sp:ansible@web") {
+		t.Errorf("role %+v", r)
 	}
 }

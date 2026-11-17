@@ -1,7 +1,7 @@
 {
   "all": {
     "principals": [
-      "u:alice@all"
+      "up:alice@all"
     ],
     "extensions": "permit-pty",
     "source_address": [],

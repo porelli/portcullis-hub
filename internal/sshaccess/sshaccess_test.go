@@ -88,7 +88,7 @@ func TestCompileExampleGolden(t *testing.T) {
 		t.Errorf("hg-web %+v", web)
 	}
 	all := c.Roles["all"]
-	if strings.Join(all.Principals, ",") != "u:alice@all" || all.MaxTTLSeconds != 4*3600 {
+	if strings.Join(all.Principals, ",") != "up:alice@all" || all.MaxTTLSeconds != 4*3600 {
 		t.Errorf("hg-all %+v", all)
 	}
 	b := c.Bundles["web-1"]
@@ -96,7 +96,7 @@ func TestCompileExampleGolden(t *testing.T) {
 		t.Fatalf("web-1 accounts %+v", b.Accounts)
 	}
 	a := b.Accounts[0]
-	if a.Name != "alice" || !a.Sudo || a.UID != 20001 || strings.Join(a.Principals, ",") != "u:alice@all,u:alice@web" {
+	if a.Name != "alice" || !a.Sudo || a.UID != 20001 || strings.Join(a.Principals, ",") != "up:alice@all" { // Portcullis sudo: approved principals only (RR3)
 		t.Errorf("alice %+v", a)
 	}
 	if b.Accounts[1].Name != "bob" || b.Accounts[1].Sudo || b.Accounts[2].Name != "deploy" || b.Accounts[2].Kind != "shared" || b.Accounts[2].UID != 0 {

@@ -198,7 +198,7 @@ func TestLoginPostsProofNeverCallsTokenEndpoint(t *testing.T) {
 		t.Errorf("answer %+v", res.Answer)
 	}
 	keys, _ := kr.List()
-	if len(keys) != 1 || keys[0].Comment != "portcullis example.org web" {
+	if len(keys) != 2 || keys[0].Comment != "portcullis example.org (key)" || keys[1].Comment != "portcullis example.org web" {
 		t.Errorf("agent %v", keys)
 	}
 	// Nothing secret printed.

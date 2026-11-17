@@ -53,7 +53,22 @@ func TestReplaceDomainKeepsOtherKeys(t *testing.T) {
 	if len(l) != 2 {
 		t.Errorf("listed %+v", l)
 	}
-	if n, _ := RemoveDomain(kr, ""); n != 2 {
+	// The plain key is in the agent too (an ssh config pairing id.pub with
+	// a CertificateFile signs with it).
+	if !strings.Contains(got, "portcullis example.org (key)") {
+		t.Errorf("no plain key: %v", comments)
+	}
+	signers, _ := kr.Signers()
+	plain := false
+	for _, s := range signers {
+		if _, isCert := s.PublicKey().(*ssh.Certificate); !isCert && string(s.PublicKey().Marshal()) == string(c3.Key.Marshal()) {
+			plain = true
+		}
+	}
+	if !plain {
+		t.Error("the agent can't sign with the plain key")
+	}
+	if n, _ := RemoveDomain(kr, ""); n != 3 {
 		t.Errorf("logout removed %d", n)
 	}
 }
@@ -77,7 +92,8 @@ func TestLifetimeRefusedFallsBack(t *testing.T) {
 	r := &refusingAgent{ExtendedAgent: agent.NewKeyring().(agent.ExtendedAgent)}
 	p, c := newCert(t, time.Now().Add(time.Hour))
 	notes, err := ReplaceDomain(r, "example.org", []Entry{{HostGroup: "web", Key: p, Certificate: c}}, time.Now())
-	if err != nil || len(notes) != 1 || len(r.added) != 1 || r.added[0].LifetimeSecs != 0 {
+	// The plain key and the certificate, both without a lifetime; one note.
+	if err != nil || len(notes) != 1 || len(r.added) != 2 || r.added[0].LifetimeSecs != 0 || r.added[1].LifetimeSecs != 0 {
 		t.Errorf("notes %v err %v added %+v", notes, err, r.added)
 	}
 }
@@ -97,7 +113,7 @@ func TestLifetimeIsCertificateExpiry(t *testing.T) {
 	now := time.Now()
 	p, c := newCert(t, now.Add(2*time.Hour))
 	ReplaceDomain(r, "example.org", []Entry{{HostGroup: "web", Key: p, Certificate: c}}, now)
-	if len(r.added) != 1 || r.added[0].LifetimeSecs < 7190 || r.added[0].LifetimeSecs > 7200 {
+	if len(r.added) != 2 || r.added[0].LifetimeSecs < 7190 || r.added[0].LifetimeSecs > 7200 || r.added[1].LifetimeSecs != r.added[0].LifetimeSecs {
 		t.Errorf("lifetime %+v", r.added)
 	}
 }

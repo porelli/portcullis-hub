@@ -65,6 +65,34 @@ func ReplaceDomain(a agent.ExtendedAgent, domain string, keys []Entry, now time.
 	if _, err := RemoveDomain(a, domain); err != nil {
 		return nil, err
 	}
+	// The plain key too, once, for the longest certificate (found in e2e):
+	// the written ssh config pairs IdentityFile id.pub with each
+	// CertificateFile, and ssh then asks the agent to sign with the plain
+	// key — an agent holding only the certificate identities refuses. The
+	// plain key alone opens nothing (no authorized_keys anywhere).
+	var plain any
+	var plainLife int64
+	for _, e := range keys {
+		life := int64(time.Unix(int64(e.Certificate.ValidBefore), 0).Sub(now) / time.Second)
+		if plain == nil {
+			plain = e.Key
+		}
+		if life > plainLife {
+			plainLife = life
+		}
+	}
+	if plain != nil {
+		if plainLife < 1 {
+			plainLife = 1
+		}
+		k := agent.AddedKey{PrivateKey: plain, Comment: CommentPrefix(domain) + "(key)", LifetimeSecs: uint32(plainLife)}
+		if err := a.Add(k); err != nil {
+			k.LifetimeSecs = 0
+			if err2 := a.Add(k); err2 != nil {
+				return notes, fmt.Errorf("your ssh-agent refused the key (%v): agents like 1Password or Secretive can't take new keys; sign one of their keys with --key instead", err2)
+			}
+		}
+	}
 	for _, e := range keys {
 		life := int64(time.Unix(int64(e.Certificate.ValidBefore), 0).Sub(now) / time.Second)
 		if life < 1 {

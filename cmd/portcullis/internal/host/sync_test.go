@@ -122,7 +122,7 @@ func newHostFix(t *testing.T) *hostFix {
 
 func (f *hostFix) bundle() *cliapi.Bundle {
 	return &cliapi.Bundle{Version: 1, HostID: "web-1", Serial: 1, UserCAs: []string{f.ca},
-		Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"u:alice@web"}, Sudo: true, Approved: []string{"u:alice@web"}}},
+		Accounts: []cliapi.Account{{Name: "alice", Kind: "person", UID: 20001, Principals: []string{"up:alice@web"}, Sudo: true}},
 		Locked:   []string{}, Remove: []string{}, RevokedKeys: []string{}}
 }
 
@@ -144,7 +144,7 @@ func TestEnrolServiceNone(t *testing.T) {
 	if err != nil || cfg.HostID != "web-1" || !cfg.ServiceNone || f.sys.modes[AgentFile] != 0o600 {
 		t.Errorf("agent config %+v %v", cfg, err)
 	}
-	if got := string(f.sys.files[PrincipalsFile("alice")]); got != "u:alice@web\n" {
+	if got := string(f.sys.files[PrincipalsFile("alice")]); got != "up:alice@web\n" {
 		t.Errorf("principals %q", got)
 	}
 	if len(f.hub.reports) != 1 || !f.hub.reports[0].Applied || f.hub.signed[0] != "web-1" {
@@ -398,7 +398,7 @@ func TestSyncHealsDriftWithLastBundle(t *testing.T) {
 	if err := syncOnce(t, f); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(f.sys.files[PrincipalsFile("alice")]); got != "u:alice@web\n" {
+	if got := string(f.sys.files[PrincipalsFile("alice")]); got != "up:alice@web\n" {
 		t.Errorf("not healed: %q", got)
 	}
 	r := f.hub.reports[len(f.hub.reports)-1]

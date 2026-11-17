@@ -106,12 +106,12 @@ func Trust(ctx context.Context, sys System, o TrustOptions) (err error) {
 		return err
 	}
 	for _, a := range o.Persons {
-		if err := tx.Stage(PrincipalsFile(a), principalsBody([]string{cliapi.Principal(cliapi.PrincipalPersonal, a, o.HostGroup)}), 0o644); err != nil {
+		if err := tx.Stage(PrincipalsFile(a), principalsBody([]string{cliapi.Principal(cliapi.PrincipalPersonal, a, o.HostGroup), cliapi.ApprovedPrincipal(cliapi.PrincipalPersonal, a, o.HostGroup)}), 0o644); err != nil {
 			return err
 		}
 	}
 	for _, a := range o.Accounts {
-		if err := tx.Stage(PrincipalsFile(a), principalsBody([]string{cliapi.Principal(cliapi.PrincipalShared, a, o.HostGroup)}), 0o644); err != nil {
+		if err := tx.Stage(PrincipalsFile(a), principalsBody([]string{cliapi.Principal(cliapi.PrincipalShared, a, o.HostGroup), cliapi.ApprovedPrincipal(cliapi.PrincipalShared, a, o.HostGroup)}), 0o644); err != nil {
 			return err
 		}
 	}
