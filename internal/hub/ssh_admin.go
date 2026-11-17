@@ -534,6 +534,10 @@ func (h *Hub) RevokeSSHCertificates(actor directory.Actor, fps []string, reason 
 		if !hk.Revoked {
 			hk.Revoked = true
 			h.st.SSH.HostKeys[fp] = hk
+			if h.st.SSH.RevokedHostKeys == nil {
+				h.st.SSH.RevokedHostKeys = map[string]string{}
+			}
+			h.st.SSH.RevokedHostKeys[fp] = hk.Key
 			n++
 		}
 	}
@@ -658,6 +662,9 @@ func (h *Hub) signHostKey(ctx context.Context, actor string, req HostKeyRequest)
 			return nil, refusal(http.StatusConflict, fmt.Sprintf("%s matches none of host group %s's patterns or hosts", clip(n, 64), req.HostGroup), "name outside the group")
 		}
 	}
+	if _, revoked := st.RevokedHostKeys[fp]; revoked {
+		return nil, refusal(http.StatusConflict, "this host key was revoked: make the host a new key (ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key)", "a revoked host key")
+	}
 	acts := h.sshActions()
 	if acts == nil {
 		return nil, refusal(http.StatusServiceUnavailable, TextSSHUnavailable, "enroll not connected")
@@ -677,7 +684,8 @@ func (h *Hub) signHostKey(ctx context.Context, actor string, req HostKeyRequest)
 			delete(h.st.SSH.HostKeys, k)
 		}
 	}
-	h.st.SSH.HostKeys[fp] = state.SSHHostKey{Key: norm, HostGroup: req.HostGroup, Names: slices.Clone(req.Names), Until: signed.ValidBefore.UTC()}
+	_, wasRevoked := h.st.SSH.RevokedHostKeys[fp]
+	h.st.SSH.HostKeys[fp] = state.SSHHostKey{Key: norm, HostGroup: req.HostGroup, Names: slices.Clone(req.Names), Until: signed.ValidBefore.UTC(), Revoked: wasRevoked}
 	h.saveLocked()
 	h.mu.Unlock()
 	return &cliapi.HostCertAnswer{Certificate: signed.Certificate, ValidBefore: signed.ValidBefore.UTC()}, nil

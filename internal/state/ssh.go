@@ -25,6 +25,9 @@ type SSHState struct {
 	// host certify), by fingerprint, so one can be revoked (M1); pruned
 	// once its certificate expired.
 	HostKeys map[string]SSHHostKey `json:"host_keys,omitempty" yaml:"host_keys,omitempty"`
+	// RevokedHostKeys: fingerprint → key of every revoked unmanaged host
+	// key; never pruned (such a key is never signed again).
+	RevokedHostKeys map[string]string `json:"revoked_host_keys,omitempty" yaml:"revoked_host_keys,omitempty"`
 }
 
 // SSHHostKey is one signed unmanaged host key.

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/hiddeco/sshsig"
@@ -35,6 +36,23 @@ type AgentConfig struct {
 	// tests' fake Hub. Only a -tags sshtest CLI honours it; a release
 	// binary refuses an agent.json that sets it.
 	PeopleURL string `json:"people_url,omitempty"`
+	// UserCAFPs pins the user CAs (M2): the one the enrolment code named.
+	// A bundle carrying any other CA is refused (CA rotation is part 2).
+	UserCAFPs []string `json:"user_ca_fps"`
+}
+
+// checkPinnedCAs refuses a bundle with a user CA outside pinned.
+func checkPinnedCAs(b *cliapi.Bundle, pinned []string) error {
+	if len(pinned) == 0 {
+		return errors.New("no pinned user CA: enroll this host again")
+	}
+	for _, k := range b.UserCAs {
+		pk, _, err := cliapi.ParseAuthorizedKey(k)
+		if err != nil || !slices.Contains(pinned, cliapi.Fingerprint(pk)) {
+			return errors.New("the bundle carries a user CA this host didn't pin at enrolment: refusing")
+		}
+	}
+	return nil
 }
 
 // LoadAgentConfig reads it.

@@ -142,6 +142,14 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 			}
 		}
 	}
+	// Under allow_sudo=false Portcullis's own sudoers file goes first
+	// (narrowing; this apply would remove it anyway), so the per-account
+	// sudo checks below see only sudo that comes from elsewhere.
+	if !c.AllowSudo && exists(sys, SudoersFile) {
+		if err := sys.Remove(SudoersFile); err != nil {
+			return nil, findings, fmt.Errorf("removing %s (sudo isn't allowed by this host's ceiling): %v", SudoersFile, err)
+		}
+	}
 	principals := map[string][]string{}
 	var sudo []string
 	wantNames := map[string]bool{}

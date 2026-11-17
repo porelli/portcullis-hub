@@ -412,6 +412,23 @@ useradd -m -s /bin/bash plain`)
 	if out, _ := exec_("cat", "/etc/ssh/portcullis/principals/plain"); strings.TrimSpace(out) != "s:plain@web" {
 		t.Errorf("plain (no sudo) has no principals file under allow_sudo=false: %q", out)
 	}
+	// A hand-added sudoers rule for a Portcullis account (alice) also
+	// counts: no principals for her under allow_sudo=false, reported.
+	exec_("sh", "-c", "echo 'alice ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/zz-foreign && chmod 440 /etc/sudoers.d/zz-foreign")
+	hub.setBundle(func(*cliapi.Bundle) {})
+	if out, err := exec_("/usr/local/bin/portcullis", "host", "sync", "--once"); err != nil {
+		t.Errorf("sync: %v %s", err, out)
+	}
+	if out, _ := exec_("sh", "-c", "ls /etc/ssh/portcullis/principals/alice 2>&1"); !strings.Contains(out, "No such file") {
+		t.Errorf("alice kept her principals with a foreign sudoers rule under allow_sudo=false: %s", out)
+	}
+	if _, err := sshRun(addr, "alice", alice, "true"); err == nil {
+		t.Error("alice (foreign sudo) logged in under allow_sudo=false")
+	}
+	if !hasFindingPrefix(hub.lastReport(), cliapi.FindingCeiling, "alice", "has sudo on this host") {
+		t.Errorf("alice's foreign sudo not reported: %+v", hub.lastReport().Findings)
+	}
+	exec_("rm", "-f", "/etc/sudoers.d/zz-foreign")
 	exec_("sed", "-i", `s/"allow_sudo": false/"allow_sudo": true/`, "/etc/portcullis/host.json")
 	// Bare principals (security review 2: Vault signs one a tampered role
 	// lists): every account's sshd reads the principals file, which holds
@@ -453,6 +470,15 @@ useradd -m -s /bin/bash plain`)
 	_ = sha256.Sum256
 	_ = hex.EncodeToString
 	_ = context.Background
+}
+
+func hasFindingPrefix(r cliapi.Report, kind, subject, detail string) bool {
+	for _, f := range r.Findings {
+		if f.Kind == kind && f.Subject == subject && strings.HasPrefix(f.Detail, detail) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasFinding(r cliapi.Report, kind, subject, detail string) bool {

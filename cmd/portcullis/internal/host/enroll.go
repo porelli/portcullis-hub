@@ -88,9 +88,9 @@ func Enroll(ctx context.Context, sys System, o EnrollOptions) (err error) {
 	if _, err := o.Client.Do(ctx, http.MethodPost, "/api/cli/v1/hosts/enrol", req, &b, nil); err != nil {
 		return err
 	}
-	// The first user CA is pinned by the code.
-	if len(b.UserCAs) == 0 {
-		return errors.New("the first bundle has no user CA: refusing")
+	// The user CA is pinned by the code (M2): exactly one, the code's.
+	if len(b.UserCAs) != 1 {
+		return errors.New("the first bundle must carry exactly the enrolment code's user CA: refusing, nothing was written")
 	}
 	if k, _, err := cliapi.ParseAuthorizedKey(b.UserCAs[0]); err != nil || cliapi.Fingerprint(k) != c.UserCAFP {
 		return errors.New("the server's user CA doesn't match the enrolment code's fingerprint: refusing, nothing was written")
@@ -123,7 +123,7 @@ func Enroll(ctx context.Context, sys System, o EnrollOptions) (err error) {
 	if err := tx.Stage(CeilingFile, CeilingBytes(o.Ceiling), 0o644); err != nil {
 		return err
 	}
-	if err := tx.Stage(AgentFile, agentConfigBytes(AgentConfig{Domain: c.Domain, HostID: c.HostID, CAFile: o.CAFile, ServiceNone: o.Service == "none", PeopleURL: o.PeopleURL}), 0o600); err != nil {
+	if err := tx.Stage(AgentFile, agentConfigBytes(AgentConfig{Domain: c.Domain, HostID: c.HostID, CAFile: o.CAFile, ServiceNone: o.Service == "none", PeopleURL: o.PeopleURL, UserCAFPs: []string{c.UserCAFP}}), 0o600); err != nil {
 		return err
 	}
 	if kind != "" {

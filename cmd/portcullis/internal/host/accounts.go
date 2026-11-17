@@ -97,13 +97,10 @@ func (a *accountsCtx) sudoVia(ctx context.Context, sys System, name string) stri
 			return "the " + g + " group"
 		}
 	}
-	// A Portcullis-created account's sudoers rules are Portcullis's own
-	// (/etc/sudoers.d/portcullis, which the ceiling already governs): sudo
-	// -l would list the previous apply's rule and lock the person out of
-	// one round. Its groups are still checked above.
-	if a.ours(name) {
-		return ""
-	}
+	// Every account is checked, Portcullis's own included (a hand-added
+	// rule for a u: account must not bypass the ceiling). Portcullis's own
+	// rules are never in the way: Apply removes /etc/sudoers.d/portcullis
+	// before these checks whenever the ceiling forbids sudo.
 	cctx2, cancel2 := context.WithTimeout(ctx, sudoCheckTimeout)
 	defer cancel2()
 	out, err = sys.Run(cctx2, "env", "LC_ALL=C", "sudo", "-n", "-l", "-U", name)
@@ -189,7 +186,7 @@ func removeAccount(ctx context.Context, sys System, a *accountsCtx, name string,
 func authorizedKeysCount(sys System, u Passwd) int {
 	n := 0
 	for _, f := range []string{u.Home + "/.ssh/authorized_keys", u.Home + "/.ssh/authorized_keys2"} {
-		raw, err := sys.ReadFile(f)
+		raw, err := sys.ReadUserFile(f, maxAuthorizedKeys)
 		if err != nil {
 			continue
 		}

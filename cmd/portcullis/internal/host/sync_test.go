@@ -451,3 +451,39 @@ func TestAgentRemovalStopsItselfLast(t *testing.T) {
 		t.Errorf("still in place when the agent stopped itself: %v", atStop)
 	}
 }
+
+// TestUserCAsPinnedAtEnrol (M2): the first bundle must carry exactly the
+// code's user CA, and a later bundle with any other CA is refused (the
+// files stay as they were).
+func TestUserCAsPinnedAtEnrol(t *testing.T) {
+	f := newHostFix(t)
+	other, _ := caKey(t)
+	f.hub.enrol = func(cliapi.EnrolRequest) (*cliapi.Bundle, error) {
+		b := f.bundle()
+		b.UserCAs = []string{f.ca, other}
+		return b, nil
+	}
+	if err := f.enroll(t, "none"); err == nil {
+		t.Fatal("a first bundle with an extra user CA enrolled")
+	}
+	if _, ok := f.sys.files[UserCAFile]; ok {
+		t.Error("files written")
+	}
+	f = newHostFix(t)
+	if err := f.enroll(t, "none"); err != nil {
+		t.Fatal(err)
+	}
+	ca := string(f.sys.files[UserCAFile])
+	f.hub.bundles = []func() (int, any, error){func() (int, any, error) {
+		b := f.bundle()
+		b.Serial = 2
+		b.UserCAs = []string{f.ca, other}
+		return 200, b, nil
+	}}
+	if err := syncOnce(t, f); err == nil || !strings.Contains(err.Error(), "didn't pin") {
+		t.Errorf("a bundle with an unpinned CA: %v", err)
+	}
+	if string(f.sys.files[UserCAFile]) != ca {
+		t.Error("the CA file changed")
+	}
+}

@@ -403,9 +403,9 @@ func revokedHostKeys(st state.SSHState) []string {
 			out = append(out, h.HostKey)
 		}
 	}
-	for _, fp := range sshKeys(st.HostKeys) {
-		if hk := st.HostKeys[fp]; hk.Revoked && hk.Key != "" {
-			out = append(out, hk.Key)
+	for _, fp := range sshKeys(st.RevokedHostKeys) {
+		if k := st.RevokedHostKeys[fp]; k != "" {
+			out = append(out, k)
 		}
 	}
 	return out

@@ -502,3 +502,36 @@ func TestCeilingNoSudoRefusesAccountsWithSudo(t *testing.T) {
 		}
 	}
 }
+
+// TestCeilingNoSudoChecksPortcullisAccounts (review of FR-H4): a
+// Portcullis account with a hand-added sudoers rule gets no principals
+// under allow_sudo=false; Portcullis's own previous rule doesn't count
+// (its file goes first).
+func TestCeilingNoSudoChecksPortcullisAccounts(t *testing.T) {
+	sys := newFakeSys(t)
+	if _, _, err := apply(t, sys, bundle(t), cliapi.DefaultCeiling(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sys.files[SudoersFile]), "alice ") {
+		t.Fatalf("no Portcullis sudo for alice: %q", sys.files[SudoersFile])
+	}
+	c := cliapi.DefaultCeiling()
+	c.AllowSudo = false
+	if _, _, err := apply(t, sys, bundle(t), c, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sys.files[PrincipalsFile("alice")]; !ok {
+		t.Error("alice lost her principals for Portcullis's own (previous) sudo rule")
+	}
+	sys.sudoers["alice"] = true // a hand-added rule elsewhere
+	_, fs, err := apply(t, sys, bundle(t), c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sys.files[PrincipalsFile("alice")]; ok {
+		t.Error("alice kept her principals with a foreign sudo rule under allow_sudo=false")
+	}
+	if k := kinds(fs)[cliapi.FindingCeiling]; !slices.Contains(k, "alice") {
+		t.Errorf("not reported: %+v", fs)
+	}
+}

@@ -138,7 +138,7 @@ func (s *SyncState) round(ctx context.Context, sys System, o SyncOptions) error 
 		// Re-apply the last bundle when a report is due: hand-edited
 		// managed files are rewritten (and reported fixed).
 		if s.st != nil && o.Now().Sub(s.st.Applied) >= ReportEvery {
-			if last := loadBundle(sys); last != nil && last.Serial == s.st.Serial && ValidateBundle(last, s.cfg.HostID, s.signer.PublicKey()) == nil {
+			if last := loadBundle(sys); last != nil && last.Serial == s.st.Serial && ValidateBundle(last, s.cfg.HostID, s.signer.PublicKey()) == nil && checkPinnedCAs(last, s.cfg.UserCAFPs) == nil {
 				st, fs, err := Apply(ctx, sys, last, *s.ceiling, s.st, ApplyOptions{Domain: s.cfg.Domain, ServiceNone: s.cfg.ServiceNone, Now: o.Now()})
 				s.bundle, s.findings = last, fs
 				if err == nil {
@@ -151,7 +151,11 @@ func (s *SyncState) round(ctx context.Context, sys System, o SyncOptions) error 
 		s.maybeReport(ctx, sys, o, nil)
 		return nil
 	}
-	if err := ValidateBundle(&b, s.cfg.HostID, s.signer.PublicKey()); err != nil {
+	err = ValidateBundle(&b, s.cfg.HostID, s.signer.PublicKey())
+	if err == nil {
+		err = checkPinnedCAs(&b, s.cfg.UserCAFPs)
+	}
+	if err != nil {
 		e := fmt.Errorf("refused the bundle: %v", err)
 		s.maybeReport(ctx, sys, o, e)
 		return e

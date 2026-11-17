@@ -26,6 +26,8 @@ type fakeSys struct {
 	handler map[string]func(args []string) ([]byte, error)
 	// sudoers: accounts sudo -l -U lists a rule for (FR-H4).
 	sudoers map[string]bool
+	// special: paths that are a "fifo" or a "symlink" (M3).
+	special map[string]string
 	version string
 	goos    string
 	sshdT   error
@@ -70,7 +72,7 @@ func newFakeSys(t *testing.T) *fakeSys {
 		}
 		return errors.New("no")
 	}
-	f := &fakeSys{files: map[string][]byte{}, modes: map[string]fs.FileMode{}, dirs: map[string]bool{}, handler: map[string]func([]string) ([]byte, error){}, sudoers: map[string]bool{},
+	f := &fakeSys{files: map[string][]byte{}, modes: map[string]fs.FileMode{}, dirs: map[string]bool{}, handler: map[string]func([]string) ([]byte, error){}, sudoers: map[string]bool{}, special: map[string]string{},
 		owners: map[string]ownerOf{}, links: map[string]string{},
 		version: "OpenSSH_9.6p1 Ubuntu", goos: "linux"}
 	f.files[MainConfig] = []byte("Include /etc/ssh/sshd_config.d/*.conf\nKbdInteractiveAuthentication no\nUsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n")
@@ -147,7 +149,10 @@ func (f *fakeSys) Run(_ context.Context, name string, args ...string) ([]byte, e
 	case "sudo":
 		// sudo -n -l -U <name>: f.sudoers[name] has a rule.
 		if len(args) == 4 && args[2] == "-U" {
-			if f.sudoers[args[3]] {
+			f.mu.Lock()
+			own := strings.Contains(string(f.files[SudoersFile]), args[3]+" ")
+			f.mu.Unlock()
+			if f.sudoers[args[3]] || own {
 				return []byte("User " + args[3] + " may run the following commands on web-1:\n    (ALL) NOPASSWD: ALL\n"), nil
 			}
 			return []byte("User " + args[3] + " is not allowed to run sudo on web-1.\n"), nil
@@ -457,4 +462,22 @@ func (f *fakeSys) idGroups(name string) ([]byte, error) {
 		out = []string{name}
 	}
 	return []byte(strings.Join(out, " ") + "\n"), nil
+}
+
+// ReadUserFile refuses fake FIFOs and symlinks and caps the size.
+func (f *fakeSys) ReadUserFile(p string, max int64) ([]byte, error) {
+	f.mu.Lock()
+	kind := f.special[p]
+	f.mu.Unlock()
+	if kind != "" {
+		return nil, fmt.Errorf("%s: a %s", p, kind)
+	}
+	b, err := f.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		b = b[:max]
+	}
+	return b, nil
 }

@@ -68,7 +68,7 @@ func CheckBreakglass(sys System, account string, noBreakglass bool) error {
 		return fmt.Errorf("the break-glass account %s doesn't exist: create it with an authorized_keys entry first (or pass --no-breakglass-i-have-console-access)", account)
 	}
 	for _, f := range []string{u.Home + "/.ssh/authorized_keys", u.Home + "/.ssh/authorized_keys2"} {
-		raw, err := sys.ReadFile(f)
+		raw, err := sys.ReadUserFile(f, maxAuthorizedKeys)
 		if err != nil {
 			continue
 		}

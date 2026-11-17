@@ -212,4 +212,22 @@ func TestUnmanagedHostKeyRevocable(t *testing.T) {
 	if !f.h.SSHCertificates("").HostKeys[0].Revoked {
 		t.Error("not shown revoked")
 	}
+	// Signing the revoked key again is refused (409, audited) and the key
+	// stays revoked, even after its record is pruned.
+	_, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: key, Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{})
+	if sshStatusOf(err) != 409 {
+		t.Errorf("re-signing a revoked host key = %v", err)
+	}
+	if e := f.audit.lastOf("ssh.host_certificate.issue"); e.Result == "ok" {
+		t.Errorf("not audited as refused: %+v", e)
+	}
+	f.h.mu.Lock()
+	delete(f.h.st.SSH.HostKeys, fp)
+	f.h.mu.Unlock()
+	f.h.mu.RLock()
+	still := revokedHostKeys(f.h.st.SSH.Clone())
+	f.h.mu.RUnlock()
+	if !slices.Contains(still, key) {
+		t.Error("a pruned record dropped the revocation")
+	}
 }

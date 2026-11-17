@@ -39,7 +39,17 @@ type System interface {
 	// (the link itself, not its target).
 	EvalSymlinks(path string) (string, error)
 	Owner(path string) (uid int, mode fs.FileMode, err error)
+	// ReadUserFile reads a file a person controls (M3): never through a
+	// symlink, never blocking on a FIFO, a regular file only, at most max
+	// bytes.
+	ReadUserFile(path string, max int64) ([]byte, error)
 }
+
+// ReadUserFile: readUserFile under Root.
+func (s OS) ReadUserFile(path string, max int64) ([]byte, error) { return readUserFile(s.p(path), max) }
+
+// maxAuthorizedKeys bounds an authorized_keys read.
+const maxAuthorizedKeys = 1 << 20
 
 // OS is the real system; Root prefixes every path (tests: a directory).
 type OS struct{ Root string }
