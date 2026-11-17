@@ -14,7 +14,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /hub ./cmd/hub
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /hub ./cmd/hub \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /portcullis ./cmd/portcullis
 
 # alpine:3.24
 FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
@@ -28,6 +29,9 @@ RUN apk add --no-cache ca-certificates git docker-cli docker-cli-compose \
  && chown 10001:10001 /data /secrets \
  && chmod 0700 /secrets
 COPY --from=build /hub /usr/local/bin/hub
+# The Portcullis CLI (contract §18): the server's `portcullis` wrapper runs
+# it from the Hub's image (a release build: no test overrides).
+COPY --from=build /portcullis /usr/local/bin/portcullis
 # Writable paths (must be owned by / writable for uid 10001):
 #   /data               HUB_DATA_DIR — a fresh named volume inherits this ownership
 #   /secrets            HUB_SECRETS_DIR (core's hub_secrets): 10001:10001 0700, checked at start
