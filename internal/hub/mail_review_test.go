@@ -11,8 +11,8 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -58,7 +58,7 @@ func TestMassRemovalPendingKeepsAccessClosed(t *testing.T) {
 	f.create(t, "bob", "laptop")
 	puts := f.mc.Puts()
 	// An LDAP-side shrink: alice and bob gone, root stays; and a settings
-	// change that must still reach mailctl.
+	// change that must still reach mailprovider.
 	f.people.setMembers("mail_users", "root")
 	f.h.mu.Lock()
 	f.h.st.Mail.Spam.RejectScore = 20
@@ -125,7 +125,7 @@ func TestMassRemovalPendingKeepsAccessClosed(t *testing.T) {
 func TestRevokeAfterRecreate(t *testing.T) {
 	f := newMailFixture(t)
 	tick := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
-	f.mc.Lock(func(s *mailctltest.Server) { s.Now = func() time.Time { return tick } })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.Now = func() time.Time { return tick } })
 	f.sync(t)
 	old := f.create(t, "alice", "old")
 	// alice is deleted and created again: a new uuid, a new account in
@@ -157,7 +157,7 @@ func TestRevokeAfterRecreate(t *testing.T) {
 		t.Fatalf("the new holder's password was deleted: %+v", got)
 	}
 	var dels []string
-	f.mc.Lock(func(s *mailctltest.Server) { dels = append(dels, s.Deletes...) })
+	f.mc.Lock(func(s *mailprovidertest.Server) { dels = append(dels, s.Deletes...) })
 	if len(dels) != 1 || !strings.HasPrefix(dels[0], uuidAlice+" ") {
 		t.Fatalf("deletes %v", dels)
 	}
@@ -236,16 +236,16 @@ func TestCreateWithoutUUID503(t *testing.T) {
 func TestRemovalRetriesFast(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
-	f.mc.Lock(func(s *mailctltest.Server) { s.PutStatus, s.PutMsg = 500, "boom" })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.PutStatus, s.PutMsg = 500, "boom" })
 	f.people.setMembers("mail_users", "alice", "root")
 	for _, want := range []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second} {
 		if w := f.sync(t); w != want {
 			t.Fatalf("retry %s, want %s", w, want)
 		}
 	}
-	f.mc.Lock(func(s *mailctltest.Server) { s.PutStatus = 0 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.PutStatus = 0 })
 	f.sync(t)
-	f.mc.Lock(func(s *mailctltest.Server) { s.PutStatus, s.PutMsg = 500, "boom" })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.PutStatus, s.PutMsg = 500, "boom" })
 	f.h.mu.Lock()
 	f.h.st.Mail.Spam.RejectScore = 30
 	f.h.mu.Unlock()
@@ -256,9 +256,9 @@ func TestRemovalRetriesFast(t *testing.T) {
 
 // TestMassVsGenerationConflict (F18): the two 409s are told apart.
 func TestMassVsGenerationConflict(t *testing.T) {
-	gen := &mailctl.APIError{Status: 409, Msg: "generation 3 is not greater than 5"}
-	mass := &mailctl.APIError{Status: 409, Msg: "anything", Kind: mailctl.ErrorKindMassRemoval}
-	textOnly := &mailctl.APIError{Status: 409, Msg: "mass removal: 2 of 3 accounts"}
+	gen := &mailprovider.APIError{Status: 409, Msg: "generation 3 is not greater than 5"}
+	mass := &mailprovider.APIError{Status: 409, Msg: "anything", Kind: mailprovider.ErrorKindMassRemoval}
+	textOnly := &mailprovider.APIError{Status: 409, Msg: "mass removal: 2 of 3 accounts"}
 	if isMassRemoval(gen) || !isMassRemoval(mass) || isMassRemoval(textOnly) {
 		t.Fatal("misclassified (error_kind only, no text fallback)")
 	}
@@ -308,10 +308,8 @@ func TestMailFixStaleHash409(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
 	q := "quarantine"
-	seen := time.Now().UTC()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.StatusV.DMARC = []mailctl.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
-		s.StatusV.TimerSeenAt = &seen
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.StatusV.DMARC = []mailprovider.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
 	})
 	r, _ := f.h.Doctor(context.Background())
 	fd := findKind(r, doctor.KindMailDMARCPromote)
@@ -379,14 +377,14 @@ func TestRevokeFailClosed(t *testing.T) {
 	f.people.mu.Lock()
 	f.people.m.UUIDs["alice"] = uuidAlice
 	f.people.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 503 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 503 })
 	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", c.ID); statusOf(err) != 503 || !active() {
 		t.Fatalf("mailctl failure: %v active %v", err, active())
 	}
 	if len(f.mc.Creds("alice")) != 1 {
 		t.Fatal("password gone")
 	}
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 0 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 0 })
 	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", c.ID); err != nil || active() {
 		t.Fatalf("after recovery: %v active %v", err, active())
 	}
@@ -416,7 +414,7 @@ func TestCreateWhileStillRemoving(t *testing.T) {
 	// The last accepted document still has alice under another uuid.
 	f.h.mailState.mu.Lock()
 	l := *f.h.mailState.last
-	l.Accounts = append([]mailctl.Account(nil), l.Accounts...)
+	l.Accounts = append([]mailprovider.Account(nil), l.Accounts...)
 	for i := range l.Accounts {
 		if l.Accounts[i].Username == "alice" {
 			l.Accounts[i].UUID = "99999999-0000-4000-8000-000000000001"
@@ -429,7 +427,7 @@ func TestCreateWhileStillRemoving(t *testing.T) {
 	}
 	// mailctl itself sees another account under the name.
 	f.sync(t) // the current document again (alice with her uuid)
-	f.mc.Lock(func(s *mailctltest.Server) {
+	f.mc.Lock(func(s *mailprovidertest.Server) {
 		for i := range s.Doc.Accounts {
 			if s.Doc.Accounts[i].Username == "alice" {
 				s.Doc.Accounts[i].UUID = "99999999-0000-4000-8000-000000000002"

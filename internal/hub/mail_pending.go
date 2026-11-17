@@ -13,7 +13,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -34,7 +34,7 @@ import (
 // people's passwords (each until it succeeds) and restarts mail, then
 // sends the fallback document. Anything it can't do safely blocks the
 // sync (mail_sync_blocked) and sends nothing. It returns the next sleep.
-func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailctl.MailState, d mailDiff, refusal error) time.Duration {
+func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailprovider.MailState, d mailDiff, refusal error) time.Duration {
 	var gone []state.MailPendingAccount
 	if last != nil {
 		for _, a := range last.Accounts {
@@ -47,7 +47,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailc
 	} else {
 		// No baseline: mailctl's own list of the accounts it refused to
 		// remove is the only safe source.
-		var ae *mailctl.APIError
+		var ae *mailprovider.APIError
 		if errors.As(refusal, &ae) {
 			for _, r := range ae.Removed {
 				if r.UUID != "" && r.Username != "" {
@@ -124,8 +124,8 @@ func (h *Hub) mailRevokePending(ctx context.Context, api MailAPI) bool {
 	h.mu.RUnlock()
 	revoked := map[string]string{}
 	for _, a := range todo {
-		live, err := api.Credentials(ctx, a.Username)
-		if err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
+		live, err := api.Credentials(ctx, a.UUID)
+		if err != nil && mailprovider.StatusOf(err) != http.StatusNotFound {
 			log.Printf("mail: revoking %s's mail passwords (pending removal): %v", a.Username, err)
 			continue
 		}
@@ -189,13 +189,13 @@ func (h *Hub) MailSyncBlocked() string {
 // mailFallback is doc with the accounts removed (by uuid) put back as last
 // had them: their addresses that are still on a live domain of doc and
 // unused there; nil when one can't keep its primary address.
-func mailFallback(last, doc *mailctl.MailState, removed map[string]string) *mailctl.MailState {
+func mailFallback(last, doc *mailprovider.MailState, removed map[string]string) *mailprovider.MailState {
 	fb := *doc
-	fb.Accounts = append([]mailctl.Account(nil), doc.Accounts...)
+	fb.Accounts = append([]mailprovider.Account(nil), doc.Accounts...)
 	fb.ConfirmMassRemoval = false
 	live := map[string]bool{}
 	for _, dm := range doc.Domains {
-		if dm.Mail != mailctl.MailOff {
+		if dm.Mail != mailprovider.MailOff {
 			live[dm.Name] = true
 		}
 	}
@@ -219,7 +219,7 @@ func mailFallback(last, doc *mailctl.MailState, removed map[string]string) *mail
 		if !ids[a.UUID] {
 			continue
 		}
-		if slices.ContainsFunc(fb.Accounts, func(x mailctl.Account) bool { return x.Username == a.Username }) {
+		if slices.ContainsFunc(fb.Accounts, func(x mailprovider.Account) bool { return x.Username == a.Username }) {
 			// The username is someone else's now: their old mailbox can
 			// only wait for the confirmation.
 			return nil
@@ -300,7 +300,7 @@ func (h *Hub) mailPendingConfirmed(removed map[string]string) bool {
 // mail_users (in doc); an emptied set clears the pending removal, any
 // change voids a confirmation. Their passwords stay revoked (they make
 // new ones). A save failure is returned (the pass fails).
-func (h *Hub) mailPendingReconcile(doc *mailctl.MailState) error {
+func (h *Hub) mailPendingReconcile(doc *mailprovider.MailState) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval

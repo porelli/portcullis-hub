@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -136,7 +136,7 @@ func TestBlindMassRefusal(t *testing.T) {
 	g.sync(t)
 	os.Remove(g.h.mailLastPath())
 	g.h.mailState = mailSync{applyWait: 400 * time.Millisecond, applyPoll: 20 * time.Millisecond}
-	g.mc.Lock(func(s *mailctltest.Server) { s.OmitRemoved = true })
+	g.mc.Lock(func(s *mailprovidertest.Server) { s.OmitRemoved = true })
 	g.people.setMembers("mail_users", "root")
 	puts = g.mc.Puts()
 	g.sync(t)
@@ -192,7 +192,7 @@ func TestRevokeOnly204(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
 	c := f.create(t, "alice", "phone")
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeOK = true })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeOK = true })
 	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", c.ID); statusOf(err) != 503 {
 		t.Fatalf("200: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestPendingRevokeFailureShown(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
 	f.create(t, "alice", "phone")
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 503 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 503 })
 	f.people.setMembers("mail_users", "root")
 	f.sync(t)
 	v := f.h.MailSettingsView().PendingRemoval
@@ -260,7 +260,7 @@ func TestPendingRevokeFailureShown(t *testing.T) {
 	if fd := findKind(r, doctor.KindMailMassRemovalPend); fd == nil || !strings.Contains(fd.Why, "failed for alice") {
 		t.Fatalf("finding %+v", fd)
 	}
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 0 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 0 })
 	f.advance(time.Minute)
 	f.sync(t)
 	for _, a := range f.pending().Accounts {
@@ -278,7 +278,7 @@ func TestMailHubSecretInvalid(t *testing.T) {
 	f := newMailFixture(t)
 	secret := f.data + "/hub-secret-test"
 	os.WriteFile(secret, []byte("short\n"), 0600)
-	f.h.SetMailAPI(mailctl.New(f.mc.URL(), secret))
+	f.h.SetMailAPI(mailprovider.New(f.mc.URL(), secret))
 	ctx := context.Background()
 	r, _ := f.h.Doctor(ctx)
 	fd := findKind(r, doctor.KindMailHubSecretInvalid)
@@ -305,7 +305,7 @@ func TestMailHubSecretInvalid(t *testing.T) {
 		}
 	}
 	// Fixed in place: no restart needed.
-	os.WriteFile(secret, []byte(mailctltest.Secret+"\n"), 0600)
+	os.WriteFile(secret, []byte(mailprovidertest.Secret+"\n"), 0600)
 	r, _ = f.h.Doctor(ctx)
 	if findKind(r, doctor.KindMailHubSecretInvalid) != nil {
 		t.Fatal("still raised")

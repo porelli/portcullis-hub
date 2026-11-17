@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 )
 
 // Mail kinds (contract §14.5 "Mail"): sixteen kinds judged on mailctl's
@@ -78,8 +78,8 @@ const (
 type MailIn struct {
 	// Unavailable: mailctl couldn't be read (no mail findings).
 	Unavailable bool
-	Checks      []mailctl.Check
-	Status      *mailctl.Status
+	Checks      []mailprovider.Check
+	Status      *mailprovider.Status
 	// Plans are the added mail domains' DNS plans (their mail items).
 	Plans []domains.Plan
 	// Main is the main domain (its records are the CLI's: explain-only).
@@ -89,6 +89,13 @@ type MailIn struct {
 	// LANOnly: PORTCULLIS_MAIL_SUBMISSION_LAN_ONLY=true; Podman: the Hub
 	// runs under rootless Podman (client addresses are rewritten).
 	LANOnly, Podman bool
+	// ClientIPRewritten: core.env PORTCULLIS_MAIL_CLIENT_IP=rewritten
+	// (the Hub's knowledge, never the provider's word).
+	ClientIPRewritten bool
+	// TimerKnown: the Hub tracks the mail timer's visits (POST
+	// /host/mail/tls); TimerSeenAt the last one (nil: never).
+	TimerKnown  bool
+	TimerSeenAt *time.Time
 	// Pending: a mass removal mailctl refused, waiting for confirmation
 	// (nil: none).
 	Pending *MailPendingIn
@@ -132,9 +139,9 @@ func (c mailCheck) Run(in *Inputs) []Finding {
 
 func sevOf(s string) Severity {
 	switch s {
-	case mailctl.SeverityProblem:
+	case mailprovider.SeverityProblem:
 		return Problem
-	case mailctl.SeverityWarning:
+	case mailprovider.SeverityWarning:
 		return Warning
 	}
 	return Info
@@ -166,11 +173,11 @@ func mailFindings(in *Inputs) []Finding {
 		out = append(out, f)
 		return &out[len(out)-1]
 	}
-	byID := map[string]mailctl.Check{}
+	byID := map[string]mailprovider.Check{}
 	for _, c := range m.Checks {
 		byID[c.ID] = c
 	}
-	bad := func(c mailctl.Check) bool { return c.Severity != mailctl.SeverityOK && c.Severity != "" }
+	bad := func(c mailprovider.Check) bool { return c.Severity != mailprovider.SeverityOK && c.Severity != "" }
 	recWrong := map[string]bool{}
 	for _, c := range m.Checks {
 		if !bad(c) {
@@ -181,7 +188,7 @@ func mailFindings(in *Inputs) []Finding {
 		case "port25":
 			title := "Outbound mail on port 25 looks blocked"
 			why := "Every delivery of the last 24 hours failed to connect to the receivers' port 25: the provider blocks it. Ask them to unblock port 25, or set a relay (MAIL_RELAY_HOST)."
-			if c.Severity == mailctl.SeverityInfo {
+			if c.Severity == mailprovider.SeverityInfo {
 				title, why = "No outbound delivery yet: not known whether port 25 is open", "Nothing has been sent yet, so Portcullis can't tell whether the provider blocks port 25 (it never probes)."
 			}
 			mk(KindMailPort25Blocked, sevOf(c.Severity), title, why+" "+c.Detail, c.Steps, c, "")
@@ -196,7 +203,7 @@ func mailFindings(in *Inputs) []Finding {
 				"Mail is sent over IPv6 only when its PTR resolves back to it. "+c.Detail, c.Steps, c, "")
 		case "blocklist":
 			sev := Problem
-			if c.Severity == mailctl.SeverityWarning {
+			if c.Severity == mailprovider.SeverityWarning {
 				sev = Warning
 			}
 			mk(KindMailBlocklisted, sev, "The mail server's address is on a blocklist (or the lookup was refused)",
@@ -225,12 +232,12 @@ func mailFindings(in *Inputs) []Finding {
 			mailRateHeld(mk, m, byID, sub, c)
 		case "spam_rules":
 			// Only a problem (no rules imported): explain-only, no fix.
-			if c.Severity == mailctl.SeverityProblem {
+			if c.Severity == mailprovider.SeverityProblem {
 				mk(KindMailSpamRulesMissing, Problem, "The mail server's spam filter has no rules yet",
 					MailSpamRulesWhy, c.Steps, c, "")
 			}
 		case "external_lookups":
-			if c.Severity == mailctl.SeverityProblem {
+			if c.Severity == mailprovider.SeverityProblem {
 				mk(KindMailExternalLookupsOn, Problem, "The spam filter's external lookups may be on",
 					MailExternalLookupsWhy, c.Steps, c, "")
 			}
@@ -238,7 +245,7 @@ func mailFindings(in *Inputs) []Finding {
 			// A Problem while DANE is off (mailctl's check says problem);
 			// Info otherwise (invalid verdicts counted, nothing definite).
 			sev := Info
-			if c.Severity == mailctl.SeverityProblem {
+			if c.Severity == mailprovider.SeverityProblem {
 				sev = Problem
 			}
 			mk(KindMailDANEOff, sev, "DANE is off: the resolver can't validate DNSSEC",
@@ -307,7 +314,7 @@ func mailFindings(in *Inputs) []Finding {
 			"The Hub sends the mail server nothing until this is resolved: "+m.SyncBlocked+".",
 			[]string{"Confirm or resolve the pending removal (Settings → Mail), or put the people back in mail_users."}, m.SyncBlocked, "")
 	}
-	if m.LANOnly && (m.Podman || (m.Status != nil && m.Status.ClientIP == "rewritten")) {
+	if m.LANOnly && (m.Podman || m.ClientIPRewritten) {
 		mk(KindMailLANOnlyUnenforced, Problem, "LAN-only mail can't be enforced here",
 			MailLANOnlyWhy+": mail passwords can't be limited to the local networks, so they work from anywhere.",
 			[]string{MailLANOnlyStep}, struct{ LANOnly, Podman bool }{m.LANOnly, m.Podman}, "")
@@ -343,15 +350,15 @@ func mailFindings(in *Inputs) []Finding {
 				f.Class, f.FixKind = FixOneClick, FixMailMTASTSEnforce
 			}
 		}
-		if st.TimerSeenAt == nil || in.Now.Sub(*st.TimerSeenAt) > mailTimerOld {
-			last := "never"
-			if st.TimerSeenAt != nil {
-				last = st.TimerSeenAt.UTC().Format(time.RFC3339)
-			}
-			mk(KindMailTimerMissing, Warning, "The daily mail timer hasn't run",
-				"Without it the mail certificate isn't renewed and the main domain's DKIM doesn't rotate (last run: "+last+").",
-				[]string{MailTimerStep}, last, "")
+	}
+	if m.TimerKnown && (m.TimerSeenAt == nil || in.Now.Sub(*m.TimerSeenAt) > mailTimerOld) {
+		last := "never"
+		if m.TimerSeenAt != nil {
+			last = m.TimerSeenAt.UTC().Format(time.RFC3339)
 		}
+		mk(KindMailTimerMissing, Warning, "The daily mail timer hasn't run",
+			"Without it the mail certificate isn't renewed and the main domain's DKIM doesn't rotate (last run: "+last+").",
+			[]string{MailTimerStep}, last, "")
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].FP < out[j].FP })
 	return out
@@ -370,12 +377,12 @@ func mailRecordsFix(f *Finding, dom, main string) {
 
 // mailRateHeld is one held account's mail_rate_held, with the
 // auth_failures, sessions_open and restart lines.
-func mailRateHeld(mk func(string, Severity, string, string, []string, any, string, ...string) *Finding, m *MailIn, byID map[string]mailctl.Check, user string, c mailctl.Check) {
+func mailRateHeld(mk func(string, Severity, string, string, []string, any, string, ...string) *Finding, m *MailIn, byID map[string]mailprovider.Check, user string, c mailprovider.Check) {
 	why := user + "'s outgoing mail is held by the sending limit. " + c.Detail
-	if a, ok := byID["auth_failures:"+user]; ok && a.Severity != mailctl.SeverityOK {
+	if a, ok := byID["auth_failures:"+user]; ok && a.Severity != mailprovider.SeverityOK {
 		why += " " + a.Detail
 	}
-	if s, ok := byID["sessions_open"]; ok && s.Severity != mailctl.SeverityOK {
+	if s, ok := byID["sessions_open"]; ok && s.Severity != mailprovider.SeverityOK {
 		why += " " + s.Detail
 	}
 	if m.RestartFailed != "" {
@@ -387,11 +394,11 @@ func mailRateHeld(mk func(string, Severity, string, string, []string, any, strin
 
 // ptrMissing: the fcrdns check's reason is "missing". Without a reason
 // (an older mailctl) the detail decides ("no PTR"), logged as a fallback.
-func ptrMissing(c mailctl.Check) bool {
+func ptrMissing(c mailprovider.Check) bool {
 	switch c.Reason {
-	case mailctl.ReasonPTRMissing:
+	case mailprovider.ReasonPTRMissing:
 		return true
-	case mailctl.ReasonPTRMismatch:
+	case mailprovider.ReasonPTRMismatch:
 		return false
 	}
 	log.Printf("doctor: mail check %s has no reason (%q): judged from its detail", c.ID, c.Reason)

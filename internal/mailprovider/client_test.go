@@ -1,4 +1,4 @@
-package mailctl
+package mailprovider
 
 import (
 	"context"
@@ -66,18 +66,18 @@ func TestClientRefusesWithoutSecretFile(t *testing.T) {
 	defer srv.Close()
 	for _, f := range []string{"", filepath.Join(t.TempDir(), "missing"), secretFile(t, "short")} {
 		c := New(srv.URL, f)
-		if err := c.Available(); !errors.Is(err, ErrNotConfigured) {
+		if err := c.Available(); !errors.Is(err, ErrNoSecret) {
 			t.Fatalf("%q: Available = %v", f, err)
 		}
-		if _, err := c.State(context.Background()); !errors.Is(err, ErrNotConfigured) {
+		if _, err := c.State(context.Background()); !errors.Is(err, ErrNoSecret) {
 			t.Fatalf("%q: State = %v", f, err)
 		}
-		if _, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil); !errors.Is(err, ErrNotConfigured) {
+		if _, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil); !errors.Is(err, ErrNoSecret) {
 			t.Fatalf("%q: Create = %v", f, err)
 		}
 	}
 	var nilClient *Client
-	if err := nilClient.Available(); !errors.Is(err, ErrNotConfigured) {
+	if err := nilClient.Available(); !errors.Is(err, ErrNoSecret) {
 		t.Fatalf("nil client: %v", err)
 	}
 	if hits.Load() != 0 {
@@ -102,7 +102,7 @@ func TestStatusMatchesContractExample(t *testing.T) {
 	if err := dec.Decode(&st); err != nil {
 		t.Fatalf("strict decode: %v", err)
 	}
-	if !st.Bootstrap || st.Cert.NotAfter == nil || len(st.DKIM) != 1 || st.DMARC[0].Proposed != nil || st.TimerSeenAt == nil || st.Former[0].Username != "alice" {
+	if !st.Bootstrap || st.Cert.NotAfter == nil || len(st.DKIM) != 1 || st.DMARC[0].Proposed != nil || st.Provider.Name != "Stalwart" || st.Former[0].Username != "alice" {
 		t.Fatalf("decoded %+v", st)
 	}
 }
@@ -125,11 +125,11 @@ func TestClientRequests(t *testing.T) {
 		case "GET /v1/state":
 			w.Write([]byte(`{"generation":13,"applied_generation":12,"bootstrap":true,"errors":[]}`))
 		case "GET /v1/dns/team-b.example.org":
-			w.Write([]byte(`{"domain":"team-b.example.org","records":[{"name":"team-b.example.org","type":"MX","ttl":3600,"value":"10 mail.example.com."}],"dkim":"auto","tlsa":"withheld: dnssec unsigned"}`))
+			w.Write([]byte(`{"domain":"team-b.example.org","records":[{"name":"team-b.example.org","type":"MX","ttl":3600,"value":"10 mail.example.com."}],"dkim":"auto"}`))
 		case "GET /v1/checks":
 			w.Write([]byte(`{"checked_at":"2026-11-15T10:00:00Z","checks":[{"id":"port25","severity":"info","detail":"no outbound delivery yet: not known","steps":[]}]}`))
 		case "GET /v1/credentials":
-			w.Write([]byte(`[{"id":"3","label":"iPhone","created_at":"2026-11-15T09:00:00Z","expires_at":null,"last_used":null}]`))
+			w.Write([]byte(`[{"id":"3","uuid":"6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b","label":"iPhone","created_at":"2026-11-15T09:00:00Z","expires_at":null,"last_used":null,"allowed_ips":[]}]`))
 		case "POST /v1/credentials":
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(201)
@@ -146,7 +146,7 @@ func TestClientRequests(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL+"/", secretFile(t, testSecret))
 	ctx := context.Background()
-	if g, err := c.PutState(ctx, &MailState{Version: 1, Generation: 13}); err != nil || g != 13 {
+	if g, err := c.PutState(ctx, &MailState{Version: 2, Generation: 13}); err != nil || g != 13 {
 		t.Fatalf("PutState = %d, %v", g, err)
 	}
 	if s, err := c.State(ctx); err != nil || s.AppliedGeneration != 12 || !s.Bootstrap {
@@ -161,7 +161,7 @@ func TestClientRequests(t *testing.T) {
 	if ch, err := c.Checks(ctx, true); err != nil || ch.Checks[0].ID != "port25" {
 		t.Fatalf("Checks = %+v, %v", ch, err)
 	}
-	if cr, err := c.Credentials(ctx, "alice"); err != nil || len(cr) != 1 || cr[0].ExpiresAt != nil {
+	if cr, err := c.Credentials(ctx, "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"); err != nil || len(cr) != 1 || cr[0].ExpiresAt != nil {
 		t.Fatalf("Credentials = %+v, %v", cr, err)
 	}
 	exp := time.Date(2027, 11, 15, 9, 0, 0, 0, time.UTC)
@@ -191,12 +191,12 @@ func TestClientRequests(t *testing.T) {
 		t.Fatal("an unknown action was sent")
 	}
 	want := []string{
-		`PUT /v1/state {"version":1,"generation":13,`,
+		`PUT /v1/state {"version":2,"generation":13,`,
 		`GET /v1/state `,
 		`GET /v1/dns/team-b.example.org?wildcard=false `,
 		`GET /v1/dns/other.example?wildcard=true `,
 		`GET /v1/checks?refresh=1 `,
-		`GET /v1/credentials?user=alice `,
+		`GET /v1/credentials?uuid=6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b `,
 		`POST /v1/credentials {"username":"alice","uuid":"u-1","label":"iPhone","expires_at":"2027-11-15T09:00:00Z"}`,
 		`DELETE /v1/credentials/4?uuid=u-1 `,
 		`POST /v1/actions/dkim-rotate {"domain":"example.com"}`,
@@ -306,7 +306,7 @@ func TestAPIErrorKind(t *testing.T) {
 		w.Write([]byte(`{"error":"mass removal: 2 of 3 accounts","error_kind":"mass_removal"}`))
 	}))
 	defer srv.Close()
-	_, err := New(srv.URL, secretFile(t, testSecret)).PutState(context.Background(), &MailState{Version: 1})
+	_, err := New(srv.URL, secretFile(t, testSecret)).PutState(context.Background(), &MailState{Version: 2})
 	var ae *APIError
 	if !errors.As(err, &ae) || ae.Status != 409 || ae.Kind != ErrorKindMassRemoval {
 		t.Fatalf("%#v", err)

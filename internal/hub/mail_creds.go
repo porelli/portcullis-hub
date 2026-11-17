@@ -21,7 +21,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -132,7 +132,7 @@ func (c *CreatedMailPassword) Zero() {
 
 // mailAccount is the caller's account in the document the directory
 // builds now (nil, errNoMail: not in mail_users or mail off).
-func (h *Hub) mailAccount(ctx context.Context, user string) (*mailctl.Account, *mailctl.MailState, error) {
+func (h *Hub) mailAccount(ctx context.Context, user string) (*mailprovider.Account, *mailprovider.MailState, error) {
 	if h.mailClient() == nil {
 		return nil, nil, errNoMail
 	}
@@ -299,7 +299,7 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 		if err := h.reconcileMailPasswords(ctx, api, user, uuid); err != nil {
 			return nil, err
 		}
-		if n := len(h.activeMailRowsOf(user, uuid)); n >= mailctl.MaxActivePasswords {
+		if n := len(h.activeMailRowsOf(user, uuid)); n >= mailprovider.MaxActivePasswords {
 			return nil, statusErr(http.StatusConflict, "at most 5 mail passwords: revoke one first")
 		}
 	}
@@ -344,15 +344,15 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 	if h.mailStillRemoving(user, uuid) {
 		return nil, errMailStillRemoving(user)
 	}
-	// 8. mailctl.
+	// 8. mailprovider.
 	created, err := api.CreateCredential(ctx, user, uuid, label, expires)
 	if err != nil {
 		created.Secret.Zero()
-		var ae *mailctl.APIError
-		if errors.As(err, &ae) && ae.Kind == mailctl.ErrorKindAccountMismatch {
+		var ae *mailprovider.APIError
+		if errors.As(err, &ae) && ae.Kind == mailprovider.ErrorKindAccountMismatch {
 			return nil, errMailStillRemoving(user)
 		}
-		switch mailctl.StatusOf(err) {
+		switch mailprovider.StatusOf(err) {
 		case http.StatusConflict:
 			return nil, statusErr(http.StatusConflict, "at most 5 mail passwords: revoke one first")
 		case http.StatusBadRequest:
@@ -424,7 +424,7 @@ func (h *Hub) activeMailRows(user string) []state.MailCredential {
 // matchLive is the live password row c stands for: the same Stalwart id
 // and created_at, under the uuid the row was created with (a reused id
 // never revives a row).
-func matchLive(c state.MailCredential, uuid string, live []mailctl.Credential) bool {
+func matchLive(c state.MailCredential, uuid string, live []mailprovider.Credential) bool {
 	if c.UUID != uuid {
 		return false
 	}
@@ -458,7 +458,7 @@ func (h *Hub) reconcileMailPasswords(ctx context.Context, api MailAPI, user, uui
 
 // reconcileMailPasswordsWith is reconcileMailPasswords with mailctl's
 // status already read (nil: read when needed).
-func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user, uuid string, st *mailctl.Status) error {
+func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user, uuid string, st *mailprovider.Status) error {
 	unlock := h.mailPersonLock(user)
 	defer unlock()
 	rows0 := h.activeMailRows(user)
@@ -469,11 +469,11 @@ func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user,
 	for _, c := range rows0 {
 		before[c.ID] = true
 	}
-	var live []mailctl.Credential
+	var live []mailprovider.Credential
 	if uuid != "" {
 		var err error
-		live, err = api.Credentials(ctx, user)
-		if mailctl.StatusOf(err) == http.StatusNotFound {
+		live, err = api.Credentials(ctx, uuid)
+		if mailprovider.StatusOf(err) == http.StatusNotFound {
 			live, err = nil, nil
 		}
 		if err != nil {
@@ -573,7 +573,7 @@ func (h *Hub) mailFormerGone(ctx context.Context, api MailAPI, user string, c st
 	if last == nil {
 		last, _ = h.loadMailLast()
 	}
-	if last == nil || slices.ContainsFunc(last.Accounts, func(a mailctl.Account) bool { return a.UUID == c.UUID }) {
+	if last == nil || slices.ContainsFunc(last.Accounts, func(a mailprovider.Account) bool { return a.UUID == c.UUID }) {
 		return false
 	}
 	if err := api.RevokeCredential(ctx, c.UUID, c.StalwartID); err != nil {
@@ -704,7 +704,7 @@ func (h *Hub) mailRestoreReconcile(ctx context.Context, api MailAPI) {
 // most mailReconcileConcurrency at once, each under their own lock), with
 // mailctl's status st read once (nil: each reads it when needed): true
 // when every person reconciled.
-func (h *Hub) reconcileAllMailPasswords(ctx context.Context, api MailAPI, st *mailctl.Status) bool {
+func (h *Hub) reconcileAllMailPasswords(ctx context.Context, api MailAPI, st *mailprovider.Status) bool {
 	m, err := h.membership(ctx)
 	if err != nil {
 		log.Printf("mail: reconciling the mail passwords: the directory can't be read: %v", err)
@@ -836,8 +836,8 @@ func (h *Hub) revokeMailPassword(ctx context.Context, user, id string, actor dir
 	}
 	// Delete only the password this row stands for: a reused Stalwart id
 	// may name a newer password now.
-	live, lerr := api.Credentials(ctx, user)
-	if lerr != nil && mailctl.StatusOf(lerr) != http.StatusNotFound {
+	live, lerr := api.Credentials(ctx, cur)
+	if lerr != nil && mailprovider.StatusOf(lerr) != http.StatusNotFound {
 		return errMailDown
 	}
 	if matchLive(*row, cur, live) {

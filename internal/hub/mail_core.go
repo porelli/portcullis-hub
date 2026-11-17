@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 )
 
 // Core env keys of mail (contract §2): the whole PORTCULLIS_MAIL prefix
@@ -18,6 +18,9 @@ const (
 	VarMailHostname          = "PORTCULLIS_MAIL_HOSTNAME"
 	VarMailSubmissionLANOnly = "PORTCULLIS_MAIL_SUBMISSION_LAN_ONLY"
 	VarMailRelay             = "PORTCULLIS_MAIL_RELAY"
+	// VarMailClientIP is core's client-address mode (preserved |
+	// rewritten), sent as MailState v2 client_ip.
+	VarMailClientIP = "PORTCULLIS_MAIL_CLIENT_IP"
 )
 
 // coreOnlyVar: a core env key the Hub never copies into an instance.
@@ -38,6 +41,8 @@ type mailCoreEnv struct {
 	SubmissionLAN   bool
 	Relay           bool
 	HostnameMissing bool
+	// ClientIPRewritten: PORTCULLIS_MAIL_CLIENT_IP is exactly rewritten.
+	ClientIPRewritten bool
 }
 
 // mailCore reads core.env's mail keys. Fail closed: PORTCULLIS_MAIL is on
@@ -52,6 +57,9 @@ func (h *Hub) mailCore() mailCoreEnv {
 		Hostname:      strings.ToLower(strings.TrimSuffix(strings.TrimSpace(core[VarMailHostname]), ".")),
 		SubmissionLAN: strings.TrimSpace(core[VarMailSubmissionLANOnly]) == "true",
 		Relay:         strings.TrimSpace(core[VarMailRelay]) == "on",
+		// Anything but "preserved" counts as rewritten (fail closed: the
+		// provider then runs degraded, §19.8).
+		ClientIPRewritten: strings.TrimSpace(core[VarMailClientIP]) != mailprovider.ClientIPPreserved,
 	}
 	if m.Hostname == "" {
 		m.HostnameMissing = true
@@ -100,16 +108,21 @@ func mailReservedIn(host string, domains []string) string {
 	return ""
 }
 
-// MailAPI is core's mailctl (internal/mailctl.Client, contract §19.5).
+// MailAPI is the wired mail provider's API v1 (internal/mailprovider.Client,
+// contract §19.5): the seam the Hub's tests replace.
 type MailAPI interface {
+	Provider(ctx context.Context) (mailprovider.ProviderInfo, error)
+	Void(ctx context.Context, reason string) (mailprovider.VoidResult, error)
+	TLSReload(ctx context.Context, spki []string) (string, error)
+	Test(ctx context.Context, to string) (string, error)
 	Available() error
-	PutState(ctx context.Context, st *mailctl.MailState) (int, error)
-	State(ctx context.Context) (mailctl.StateStatus, error)
-	DNS(ctx context.Context, domain string, wildcard bool) (mailctl.DNSSet, error)
-	Checks(ctx context.Context, refresh bool) (mailctl.Checks, error)
-	Status(ctx context.Context) (mailctl.Status, error)
-	Credentials(ctx context.Context, user string) ([]mailctl.Credential, error)
-	CreateCredential(ctx context.Context, user, uuid, label string, expires *time.Time) (mailctl.Created, error)
+	PutState(ctx context.Context, st *mailprovider.MailState) (int, error)
+	State(ctx context.Context) (mailprovider.StateStatus, error)
+	DNS(ctx context.Context, domain string, wildcard bool) (mailprovider.DNSSet, error)
+	Checks(ctx context.Context, refresh bool) (mailprovider.Checks, error)
+	Status(ctx context.Context) (mailprovider.Status, error)
+	Credentials(ctx context.Context, uuid string) ([]mailprovider.Credential, error)
+	CreateCredential(ctx context.Context, user, uuid, label string, expires *time.Time) (mailprovider.Created, error)
 	RevokeCredential(ctx context.Context, uuid, id string) error
 	Action(ctx context.Context, name, domain string) error
 }

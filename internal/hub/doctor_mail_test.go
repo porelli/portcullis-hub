@@ -8,8 +8,8 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 )
 
 func findKind(r *doctor.Report, kind string) *doctor.Finding {
@@ -30,10 +30,8 @@ func TestDmarcPromoteFixConfirms(t *testing.T) {
 	f.sync(t)
 	ctx := context.Background()
 	q := "quarantine"
-	seen := time.Now().UTC()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.StatusV.DMARC = []mailctl.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
-		s.StatusV.TimerSeenAt = &seen
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.StatusV.DMARC = []mailprovider.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
 	})
 	r, err := f.h.Doctor(ctx)
 	if err != nil {
@@ -69,17 +67,17 @@ func TestDmarcPromoteFixConfirms(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	var acts []string
-	f.mc.Lock(func(s *mailctltest.Server) { acts = append(acts, s.Actions...) })
+	f.mc.Lock(func(s *mailprovidertest.Server) { acts = append(acts, s.Actions...) })
 	if strings.Join(acts, ",") != "dmarc-promote example.org" {
 		t.Fatalf("actions %v", acts)
 	}
 	// The proposal changed since the preview: 409.
 	r2 := "reject"
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.DMARC[0].Proposed = &r2 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.DMARC[0].Proposed = &r2 })
 	if _, _, h2, err := f.h.mailFixPlan(ctx, doctor.FixMailDMARCPromote, *fd, nil); err != nil || h2 == p.Hash {
 		t.Fatalf("hash unchanged after the proposal changed (%v)", err)
 	}
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.DMARC = nil })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.DMARC = nil })
 	if _, err := f.h.PreviewFixIn(ctx, r, fd.FP, nil); statusOf(err) != 409 {
 		t.Fatalf("proposal gone: %v", err)
 	}

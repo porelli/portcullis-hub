@@ -8,7 +8,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -29,7 +29,7 @@ func withTeamB(t *testing.T, f *mailFixture) {
 
 func goodMailSettings() MailSettingsInput {
 	return MailSettingsInput{PrimaryDomain: "example.org", Spam: MailSpamView{RejectScore: 15, JunkScore: 5, Allow: []string{}, Block: []string{}},
-		Limits: mailctl.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000}}
+		Limits: mailprovider.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000}}
 }
 
 // TestSetMailSettingsValidation: every contract range, refused with 400

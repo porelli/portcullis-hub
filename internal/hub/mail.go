@@ -15,7 +15,7 @@ import (
 
 	"github.com/portcullis/hub/internal/fsutil"
 
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 )
 
 // Mail sync timing (contract §19.6).
@@ -45,7 +45,7 @@ type mailSync struct {
 
 	mu sync.Mutex
 	// last is the last document mailctl accepted (nil: none since start).
-	last *mailctl.MailState
+	last *mailprovider.MailState
 	// addSince: when the pending additions were first seen (zero: none).
 	addSince time.Time
 	// hubRemoved: the accounts (by uuid) an admin took out of mail_users
@@ -101,7 +101,7 @@ func (h *Hub) mailLastPath() string { return filepath.Join(h.cfg.DataDir, mailLa
 
 // loadMailLast reads the persisted last accepted document (nil, true:
 // none or unreadable: the first document is treated as removing).
-func (h *Hub) loadMailLast() (*mailctl.MailState, bool) {
+func (h *Hub) loadMailLast() (*mailprovider.MailState, bool) {
 	b, err := os.ReadFile(h.mailLastPath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -109,8 +109,8 @@ func (h *Hub) loadMailLast() (*mailctl.MailState, bool) {
 		}
 		return nil, true
 	}
-	var d mailctl.MailState
-	if err := json.Unmarshal(b, &d); err != nil || d.Version != mailctl.StateVersion {
+	var d mailprovider.MailState
+	if err := json.Unmarshal(b, &d); err != nil || d.Version != mailprovider.StateVersion {
 		log.Printf("mail: %s is corrupt: the first document is treated as a removal", mailLastFile)
 		return nil, true
 	}
@@ -119,7 +119,7 @@ func (h *Hub) loadMailLast() (*mailctl.MailState, bool) {
 
 // saveMailLast persists an accepted document (a failure is logged: the
 // next start then treats its first document as a removal).
-func (h *Hub) saveMailLast(d *mailctl.MailState) {
+func (h *Hub) saveMailLast(d *mailprovider.MailState) {
 	b, err := json.Marshal(d)
 	if err == nil {
 		err = fsutil.WriteFileAtomic(h.mailLastPath(), b, 0600)
@@ -229,16 +229,18 @@ func (h *Hub) mailLogOnce(msg string) {
 
 // mailBuild reads the directory and builds the document (nil: nothing
 // to send, with why).
-func (h *Hub) mailBuild(ctx context.Context) (*mailctl.MailState, error) {
+func (h *Hub) mailBuild(ctx context.Context) (*mailprovider.MailState, error) {
 	m, err := h.membership(ctx)
 	if err != nil {
 		// A directory error sends nothing (contract §19.5).
 		return nil, err
 	}
 	dnssec := h.mailDNSSEC(ctx)
+	core := h.mailCore()
 	h.mu.RLock()
 	in := MailBuildInput{Membership: m, Settings: h.st.Mail, MainDomain: h.cfg.Domain, CoreOn: true, DNSSEC: dnssec,
-		LocalNetworks: prefixStrings(h.localNetworksLocked()), Generation: h.st.Mail.Generation}
+		LocalNetworks: prefixStrings(h.localNetworksLocked()), Generation: h.st.Mail.Generation,
+		MailHostname: core.Hostname, ClientIPRewritten: core.ClientIPRewritten, SubmissionLANOnly: core.SubmissionLAN}
 	doc, notes := BuildMailState(in)
 	h.mu.RUnlock()
 	s := &h.mailState
@@ -431,7 +433,7 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 // mailSend saves the next generation, then PUTs the document. A 409
 // "generation not greater" (state.yaml older than mailctl's) moves the
 // generation past mailctl's and tries once more.
-func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailctl.MailState, confirm bool) (int, error) {
+func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailprovider.MailState, confirm bool) (int, error) {
 	for try := 0; try < 2; try++ {
 		h.mu.Lock()
 		h.st.Mail.Generation++
@@ -447,7 +449,7 @@ func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailctl.MailState,
 		if err == nil {
 			return gen, nil
 		}
-		if mailctl.StatusOf(err) != 409 || try > 0 || isMassRemoval(err) {
+		if mailprovider.StatusOf(err) != 409 || try > 0 || isMassRemoval(err) {
 			return 0, err
 		}
 		st, serr := api.State(ctx)
@@ -494,16 +496,16 @@ func (h *Hub) mailWaitApplied(ctx context.Context, api MailAPI, gen int) bool {
 // the accounts, by its error_kind "mass_removal" only (never the text;
 // any other 409 is the generation's).
 func isMassRemoval(err error) bool {
-	var ae *mailctl.APIError
-	return errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == mailctl.ErrorKindMassRemoval
+	var ae *mailprovider.APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == mailprovider.ErrorKindMassRemoval
 }
 
 // mailRetireMainLocked: the main domain turned off is no longer sent once
 // a document with it off was accepted (the CLI owns its DNS).
-func (h *Hub) mailRetireMainLocked(doc *mailctl.MailState) {
+func (h *Hub) mailRetireMainLocked(doc *mailprovider.MailState) {
 	main := strings.ToLower(h.cfg.Domain)
 	for _, d := range doc.Domains {
-		if d.Name != main || d.Mail != mailctl.MailOff {
+		if d.Name != main || d.Mail != mailprovider.MailOff {
 			continue
 		}
 		h.mu.Lock()

@@ -7,23 +7,22 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 )
 
 var mailNow = time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 
-func chk(id, sev, detail string) mailctl.Check {
-	return mailctl.Check{ID: id, Severity: sev, Detail: detail, Steps: []string{}}
+func chk(id, sev, detail string) mailprovider.Check {
+	return mailprovider.Check{ID: id, Severity: sev, Detail: detail, Steps: []string{}}
 }
 
 func mailRun(m *MailIn) []Finding {
 	return mailFindings(&Inputs{Now: mailNow, Mail: m})
 }
 
-func okStatus() *mailctl.Status {
-	t := mailNow.Add(-time.Hour)
+func okStatus() *mailprovider.Status {
 	na := mailNow.Add(60 * 24 * time.Hour)
-	return &mailctl.Status{Bootstrap: true, Cert: mailctl.StatusCert{NotAfter: &na}, TimerSeenAt: &t}
+	return &mailprovider.Status{Bootstrap: true, Cert: mailprovider.StatusCert{NotAfter: &na}}
 }
 
 // TestMailKinds: one fixture per kind (eighteen), each producing exactly
@@ -39,44 +38,48 @@ func TestMailKinds(t *testing.T) {
 		class FixClass
 		in    func(m *MailIn)
 	}{
-		{KindMailPort25Blocked, Problem, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("port25", "problem", "2 MX hosts timed out")} }},
+		{KindMailPort25Blocked, Problem, FixExplain, func(m *MailIn) { m.Checks = []mailprovider.Check{chk("port25", "problem", "2 MX hosts timed out")} }},
 		{KindMailPort25Blocked, Info, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("port25", "info", "no outbound delivery yet: not known")}
+			m.Checks = []mailprovider.Check{chk("port25", "info", "no outbound delivery yet: not known")}
 		}},
 		{KindMailPTRMissing, Problem, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("fcrdns_v4", "problem", "203.0.113.5 has no PTR record")}
+			m.Checks = []mailprovider.Check{chk("fcrdns_v4", "problem", "203.0.113.5 has no PTR record")}
 		}},
 		{KindMailPTRMismatch, Problem, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("fcrdns_v4", "problem", "203.0.113.5 → host.example.net, which doesn't resolve back")}
+			m.Checks = []mailprovider.Check{chk("fcrdns_v4", "problem", "203.0.113.5 → host.example.net, which doesn't resolve back")}
 		}},
-		{KindMailBlocklisted, Problem, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("blocklist", "problem", "listed on zen.spamhaus.org")} }},
+		{KindMailBlocklisted, Problem, FixExplain, func(m *MailIn) {
+			m.Checks = []mailprovider.Check{chk("blocklist", "problem", "listed on zen.spamhaus.org")}
+		}},
 		{KindMailRecordsWrong, Problem, FixOneClick, func(m *MailIn) {
 			m.Plans = []domains.Plan{{Name: "team-b.example.net", Items: []domains.PlanItem{{Set: "mail", Name: "team-b.example.net", Type: "MX", Status: "missing", Want: []string{"10 mail.example.org."}}}}}
 		}},
 		{KindMailDKIMStuck, Warning, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("dkim_stuck:team-b.example.net", "warning", "pending 30 h")}
+			m.Checks = []mailprovider.Check{chk("dkim_stuck:team-b.example.net", "warning", "pending 30 h")}
 		}},
 		{KindMailDKIMManual, Info, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("dkim_manual:example.org", "info", "publish v1-rsa-…")}
+			m.Checks = []mailprovider.Check{chk("dkim_manual:example.org", "info", "publish v1-rsa-…")}
 		}},
 		{KindMailCertExpiring, Problem, FixExplain, func(m *MailIn) { m.Status.Cert.NotAfter = &soon }},
 		{KindMailCertExpiring, Warning, FixExplain, func(m *MailIn) { m.Status.Cert.NotAfter = &inWeek }},
 		{KindMailDMARCFailures, Warning, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("dmarc_reports", "warning", "198.51.100.7 fails both")}
+			m.Checks = []mailprovider.Check{chk("dmarc_reports", "warning", "198.51.100.7 fails both")}
 		}},
 		{KindMailDMARCPromote, Info, FixOneClick, func(m *MailIn) {
-			m.Status.DMARC = []mailctl.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
+			m.Status.DMARC = []mailprovider.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
 		}},
 		{KindMailMTASTSEnforce, Info, FixOneClick, func(m *MailIn) {
-			m.Status.MTASTS = []mailctl.StatusMTASTS{{Domain: "example.org", Mode: "testing", EnforceReady: true}}
+			m.Status.MTASTS = []mailprovider.StatusMTASTS{{Domain: "example.org", Mode: "testing", EnforceReady: true}}
 		}},
-		{KindMailIPv6PTR, Info, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("fcrdns_v6", "warning", "2001:db8::5 has no PTR")} }},
-		{KindMailClientIPRewritten, Warning, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("client_ip", "warning", "rewritten")} }},
-		{KindMailRateHeld, Warning, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("rate_held:alice", "warning", "12 held")} }},
-		{KindMailTimerMissing, Warning, FixExplain, func(m *MailIn) { m.Status.TimerSeenAt = &old }},
-		{KindMailDANEOff, Info, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("dane", "info", "no AD bit")} }},
-		{KindMailDANEOff, Info, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("dane", "warning", "2 invalid verdicts")} }},
-		{KindMailDANEOff, Problem, FixExplain, func(m *MailIn) { m.Checks = []mailctl.Check{chk("dane", "problem", "DANE is off")} }},
+		{KindMailIPv6PTR, Info, FixExplain, func(m *MailIn) {
+			m.Checks = []mailprovider.Check{chk("fcrdns_v6", "warning", "2001:db8::5 has no PTR")}
+		}},
+		{KindMailClientIPRewritten, Warning, FixExplain, func(m *MailIn) { m.Checks = []mailprovider.Check{chk("client_ip", "warning", "rewritten")} }},
+		{KindMailRateHeld, Warning, FixExplain, func(m *MailIn) { m.Checks = []mailprovider.Check{chk("rate_held:alice", "warning", "12 held")} }},
+		{KindMailTimerMissing, Warning, FixExplain, func(m *MailIn) { m.TimerKnown, m.TimerSeenAt = true, &old }},
+		{KindMailDANEOff, Info, FixExplain, func(m *MailIn) { m.Checks = []mailprovider.Check{chk("dane", "info", "no AD bit")} }},
+		{KindMailDANEOff, Info, FixExplain, func(m *MailIn) { m.Checks = []mailprovider.Check{chk("dane", "warning", "2 invalid verdicts")} }},
+		{KindMailDANEOff, Problem, FixExplain, func(m *MailIn) { m.Checks = []mailprovider.Check{chk("dane", "problem", "DANE is off")} }},
 		{KindMailLANOnlyUnenforced, Problem, FixExplain, func(m *MailIn) { m.LANOnly, m.Podman = true, true }},
 		{KindMailMassRemovalPend, Problem, FixOneClick, func(m *MailIn) {
 			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice", "bob"}, UUIDs: []string{"u1", "u2"}}
@@ -84,15 +87,15 @@ func TestMailKinds(t *testing.T) {
 		{KindMailSyncBlocked, Problem, FixExplain, func(m *MailIn) { m.SyncBlocked = "no baseline" }},
 		{KindMailHubSecretInvalid, Problem, FixExplain, func(m *MailIn) { m.HubSecretInvalid = true }},
 		{KindMailSpamRulesMissing, Problem, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("spam_rules", "problem", "no spam-filter rules imported")}
+			m.Checks = []mailprovider.Check{chk("spam_rules", "problem", "no spam-filter rules imported")}
 		}},
 		{KindMailExternalLookupsOn, Problem, FixExplain, func(m *MailIn) {
-			m.Checks = []mailctl.Check{chk("external_lookups", "problem", "couldn't turn them off")}
+			m.Checks = []mailprovider.Check{chk("external_lookups", "problem", "couldn't turn them off")}
 		}},
 		{KindMailMassRemovalPend, Problem, FixExplain, func(m *MailIn) {
 			m.Pending = &MailPendingIn{Since: mailNow, Users: []string{"alice"}, UUIDs: []string{"u1"}, Confirmed: true}
 		}},
-		{KindMailLANOnlyUnenforced, Problem, FixExplain, func(m *MailIn) { m.LANOnly = true; m.Status.ClientIP = "rewritten" }},
+		{KindMailLANOnlyUnenforced, Problem, FixExplain, func(m *MailIn) { m.LANOnly = true; m.ClientIPRewritten = true }},
 	} {
 		m := &MailIn{Main: "example.org", Status: okStatus()}
 		c.in(m)
@@ -108,7 +111,7 @@ func TestMailKinds(t *testing.T) {
 	if len(MailKinds) != 22 || len(seen) != 22 {
 		t.Fatalf("%d mail kinds", len(MailKinds))
 	}
-	if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk("port25", "ok", ""), chk("cert", "ok", "")}}); len(fs) != 0 {
+	if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailprovider.Check{chk("port25", "ok", ""), chk("cert", "ok", "")}}); len(fs) != 0 {
 		t.Fatalf("clean: %+v", fs)
 	}
 	for _, k := range MailKinds {
@@ -126,12 +129,12 @@ func TestMailSpamRulesAndLookups(t *testing.T) {
 		"spam_rules":       {KindMailSpamRulesMissing, MailSpamRulesWhy},
 		"external_lookups": {KindMailExternalLookupsOn, MailExternalLookupsWhy},
 	} {
-		fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk(id, "problem", "x")}})
+		fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailprovider.Check{chk(id, "problem", "x")}})
 		if len(fs) != 1 || fs[0].Kind != want[0] || fs[0].Severity != Problem || fs[0].Why != want[1] || fs[0].FixKind != "" || fs[0].Class != FixExplain {
 			t.Fatalf("%s problem: %+v", id, fs)
 		}
 		for _, sev := range []string{"ok", "warning", "info"} {
-			if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk(id, sev, "")}}); len(fs) != 0 {
+			if fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailprovider.Check{chk(id, sev, "")}}); len(fs) != 0 {
 				t.Errorf("%s %s: %+v", id, sev, fs)
 			}
 		}
@@ -144,7 +147,7 @@ func TestMailOffAndUnavailable(t *testing.T) {
 	if fs := mailFindings(&Inputs{Now: mailNow}); fs != nil {
 		t.Fatalf("off: %+v", fs)
 	}
-	in := &Inputs{Now: mailNow, Mail: &MailIn{Unavailable: true, Checks: []mailctl.Check{chk("port25", "problem", "x")}}}
+	in := &Inputs{Now: mailNow, Mail: &MailIn{Unavailable: true, Checks: []mailprovider.Check{chk("port25", "problem", "x")}}}
 	if fs := mailFindings(in); fs != nil {
 		t.Fatalf("unavailable: %+v", fs)
 	}
@@ -163,11 +166,11 @@ func TestMailRecordsWrongFixSets(t *testing.T) {
 	if s := DNSFixSets(KindMailRecordsWrong); len(s) != 1 || s[0] != "mail" {
 		t.Fatalf("sets %v", s)
 	}
-	fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk("dkim_selftest:example.org", "problem", "p= differs")}})
+	fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailprovider.Check{chk("dkim_selftest:example.org", "problem", "p= differs")}})
 	if len(fs) != 1 || fs[0].Class != FixExplain || fs[0].Steps[len(fs[0].Steps)-1] != MailMainRecordsStep || fs[0].Domains[0] != "example.org" {
 		t.Fatalf("main: %+v", fs)
 	}
-	fs = mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{chk("dkim_selftest:team-b.example.net", "problem", "p= differs")},
+	fs = mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailprovider.Check{chk("dkim_selftest:team-b.example.net", "problem", "p= differs")},
 		Plans: []domains.Plan{{Name: "team-b.example.net", Items: []domains.PlanItem{{Set: "mail", Name: "x", Type: "TXT", Status: "wrong"}}}}})
 	if len(fs) != 1 || fs[0].FixKind != FixDNSApply || fs[0].Domains[0] != "team-b.example.net" {
 		t.Fatalf("added: %+v", fs)
@@ -180,9 +183,7 @@ func TestTimerMissingAfter36h(t *testing.T) {
 		at   *time.Time
 		fire bool
 	}{{nil, true}, {ptrTime(mailNow.Add(-36*time.Hour - time.Minute)), true}, {ptrTime(mailNow.Add(-35 * time.Hour)), false}} {
-		st := okStatus()
-		st.TimerSeenAt = c.at
-		fs := mailRun(&MailIn{Main: "example.org", Status: st})
+		fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), TimerKnown: true, TimerSeenAt: c.at})
 		if (len(fs) == 1 && fs[0].Kind == KindMailTimerMissing) != c.fire {
 			t.Errorf("%v: %+v", c.at, fs)
 		}
@@ -199,7 +200,7 @@ func TestMailRateHeldLines(t *testing.T) {
 		t.Fatalf("restart failed: %+v", fs)
 	}
 	fs = mailRun(&MailIn{Main: "example.org", Status: okStatus(), RestartFailed: "x",
-		Checks: []mailctl.Check{chk("rate_held:bob", "warning", "3 held"), chk("auth_failures:bob", "info", "25 failed logins")}})
+		Checks: []mailprovider.Check{chk("rate_held:bob", "warning", "3 held"), chk("auth_failures:bob", "info", "25 failed logins")}})
 	if len(fs) != 1 || fs[0].Persons[0] != "bob" || !strings.Contains(fs[0].Why, "25 failed logins") || !strings.Contains(fs[0].Why, MailSessionsLine) {
 		t.Fatalf("held: %+v", fs)
 	}
@@ -209,7 +210,6 @@ func TestMailRateHeldLines(t *testing.T) {
 // fine; off is fine under Podman.
 func TestLANOnlyUnenforced(t *testing.T) {
 	st := okStatus()
-	st.ClientIP = "preserved"
 	if fs := mailRun(&MailIn{Main: "example.org", Status: st, LANOnly: true}); len(fs) != 0 {
 		t.Fatalf("docker LAN-only: %+v", fs)
 	}
@@ -235,7 +235,7 @@ func TestPTRReason(t *testing.T) {
 	} {
 		ch := chk("fcrdns_v4", "problem", c.detail)
 		ch.Reason = c.reason
-		fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailctl.Check{ch}})
+		fs := mailRun(&MailIn{Main: "example.org", Status: okStatus(), Checks: []mailprovider.Check{ch}})
 		if len(fs) != 1 || fs[0].Kind != c.want {
 			t.Errorf("%q %q: %+v", c.reason, c.detail, fs)
 		}

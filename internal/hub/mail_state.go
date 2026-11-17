@@ -10,7 +10,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/lldap"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -36,7 +36,18 @@ type MailBuildInput struct {
 	DNSSEC        map[string]string
 	LocalNetworks []string
 	Generation    int
+	// MailHostname is MAIL_HOSTNAME; ClientIPRewritten and
+	// SubmissionLANOnly come from core.env (contract §19.5).
+	MailHostname      string
+	ClientIPRewritten bool
+	SubmissionLANOnly bool
 }
+
+// MailState v2 defaults until Settings → Mail carries them (Task 12).
+const (
+	defaultDKIMRotate      = "4320h"
+	defaultFormerRetention = "720h"
+)
 
 // mailDomainState is name's mail state from the settings: on, draining or
 // off. The main domain is on while core mail is on, unless an entry turns
@@ -46,13 +57,13 @@ func mailDomainState(st state.MailSettings, main string, coreOn bool, name strin
 	d, ok := st.Domains[name]
 	switch {
 	case ok && d.Draining:
-		return mailctl.MailDraining
+		return mailprovider.MailDraining
 	case ok && d.Enabled:
-		return mailctl.MailOn
+		return mailprovider.MailOn
 	case !ok && coreOn && name == strings.ToLower(main):
-		return mailctl.MailOn
+		return mailprovider.MailOn
 	}
-	return mailctl.MailOff
+	return mailprovider.MailOff
 }
 
 // mailPrimary is the primary domain ("" = the main domain).
@@ -69,7 +80,7 @@ func mailPrimary(st state.MailSettings, main string) string {
 // and why (the caller logs them once): a person without a uuid, a
 // reserved username, an alias or list mailctl would refuse. Left out
 // means fewer addresses, never a refused document.
-func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
+func BuildMailState(in MailBuildInput) (*mailprovider.MailState, []string) {
 	if !in.CoreOn {
 		return nil, []string{"core mail is off"}
 	}
@@ -88,18 +99,24 @@ func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
 		}
 	}
 	sort.Strings(names[1:])
-	doc := &mailctl.MailState{Version: mailctl.StateVersion, Generation: in.Generation, PrimaryDomain: primary,
-		Domains: []mailctl.Domain{}, Accounts: []mailctl.Account{}, Aliases: []mailctl.Alias{}, Lists: []mailctl.List{},
+	clientIP := mailprovider.ClientIPPreserved
+	if in.ClientIPRewritten {
+		clientIP = mailprovider.ClientIPRewritten
+	}
+	doc := &mailprovider.MailState{Version: mailprovider.StateVersion, Generation: in.Generation, PrimaryDomain: primary,
+		MailHostname: in.MailHostname, ClientIP: clientIP, SubmissionLANOnly: in.SubmissionLANOnly,
+		DKIMRotate: defaultDKIMRotate, FormerRetention: defaultFormerRetention, TLS: mailprovider.StateTLS{SPKISHA256: []string{}},
+		Domains: []mailprovider.Domain{}, Accounts: []mailprovider.Account{}, Aliases: []mailprovider.Alias{}, Lists: []mailprovider.List{},
 		Postmaster: []string{}, LocalNetworks: append([]string{}, in.LocalNetworks...),
-		Limits: mailctl.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
-		Spam: mailctl.Spam{RejectScore: st.Spam.RejectScore, JunkScore: st.Spam.JunkScore,
-			DNSBL: mailctl.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
+		Limits: mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
+		Spam: mailprovider.Spam{RejectScore: st.Spam.RejectScore, JunkScore: st.Spam.JunkScore,
+			DNSBL: mailprovider.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
 			Allow: append([]string{}, st.Spam.Allow...), Block: append([]string{}, st.Spam.Block...)}}
 	live := map[string]bool{} // on or draining: addresses live there
 	for _, n := range names {
 		s := mailDomainState(st, main, in.CoreOn, n)
 		e, ok := st.Domains[n]
-		if s == mailctl.MailOff && (!ok || e.Retired) {
+		if s == mailprovider.MailOff && (!ok || e.Retired) {
 			continue
 		}
 		dmarc := "reject"
@@ -110,8 +127,8 @@ func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
 		if dnssec == "" {
 			dnssec = "unknown"
 		}
-		doc.Domains = append(doc.Domains, mailctl.Domain{Name: n, DMARCStart: dmarc, Mail: s, DNSSEC: dnssec})
-		if s != mailctl.MailOff {
+		doc.Domains = append(doc.Domains, mailprovider.Domain{Name: n, DMARCStart: dmarc, DMARCFloor: dmarc, Mail: s, DNSSEC: dnssec})
+		if s != mailprovider.MailOff {
 			live[n] = true
 		}
 	}
@@ -125,7 +142,7 @@ func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
 		_, ok := m.Users[u][g]
 		return ok && !m.Expired[u][g]
 	}
-	reserved := func(local string) bool { return slices.Contains(mailctl.ReservedLocalParts, local) }
+	reserved := func(local string) bool { return slices.Contains(mailprovider.ReservedLocalParts, local) }
 	used := map[string]string{}
 
 	// Accounts: mail_users' members (a membership that has expired
@@ -165,7 +182,7 @@ func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
 			used[a] = u
 		}
 		accounts[u] = true
-		doc.Accounts = append(doc.Accounts, mailctl.Account{Username: u, UUID: m.UUIDs[u], DisplayName: m.DisplayNames[u], Addresses: addrs, QuotaBytes: mailQuota(st, m, u)})
+		doc.Accounts = append(doc.Accounts, mailprovider.Account{Username: u, UUID: m.UUIDs[u], DisplayName: m.DisplayNames[u], Addresses: addrs, QuotaBytes: mailQuota(st, m, u)})
 	}
 	// addrOK: addr is on a live mail domain, not reserved and unused.
 	addrOK := func(addr, what string) bool {
@@ -205,7 +222,7 @@ func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
 			a = strings.ToLower(a)
 			if addrOK(a, "alias") {
 				used[a] = u
-				doc.Aliases = append(doc.Aliases, mailctl.Alias{Address: a, Username: u})
+				doc.Aliases = append(doc.Aliases, mailprovider.Alias{Address: a, Username: u})
 			}
 		}
 	}
@@ -240,7 +257,7 @@ func BuildMailState(in MailBuildInput) (*mailctl.MailState, []string) {
 		if posting == "" {
 			posting = state.MailPostingMembers
 		}
-		doc.Lists = append(doc.Lists, mailctl.List{Address: addr, Members: ms, Posting: posting})
+		doc.Lists = append(doc.Lists, mailprovider.List{Address: addr, Members: ms, Posting: posting})
 	}
 	for _, u := range m.Groups[lldap.AdminGroup].Members {
 		if u = strings.ToLower(u); accounts[u] {
@@ -286,13 +303,13 @@ type mailDiff struct {
 
 func (d mailDiff) any() bool { return d.removal || d.addition || d.other }
 
-func diffMail(prev, next *mailctl.MailState) mailDiff {
+func diffMail(prev, next *mailprovider.MailState) mailDiff {
 	var d mailDiff
 	if prev == nil {
 		d.other = true
 		return d
 	}
-	pa, na := map[string]mailctl.Account{}, map[string]mailctl.Account{}
+	pa, na := map[string]mailprovider.Account{}, map[string]mailprovider.Account{}
 	for _, a := range prev.Accounts {
 		pa[a.UUID] = a
 	}
@@ -324,7 +341,7 @@ func diffMail(prev, next *mailctl.MailState) mailDiff {
 		}
 	}
 	sort.Strings(d.removedUsers)
-	alias := func(s []mailctl.Alias) []string {
+	alias := func(s []mailprovider.Alias) []string {
 		var out []string
 		for _, a := range s {
 			out = append(out, a.Address+"\x00"+a.Username)
@@ -337,7 +354,7 @@ func diffMail(prev, next *mailctl.MailState) mailDiff {
 	if !subset(alias(next.Aliases), alias(prev.Aliases)) {
 		d.addition = true
 	}
-	pl, nl := map[string]mailctl.List{}, map[string]mailctl.List{}
+	pl, nl := map[string]mailprovider.List{}, map[string]mailprovider.List{}
 	for _, l := range prev.Lists {
 		pl[l.Address] = l
 	}
@@ -369,7 +386,7 @@ func diffMail(prev, next *mailctl.MailState) mailDiff {
 		d.addition = true
 	}
 	// Everything else: compare the documents without the parts above.
-	strip := func(s *mailctl.MailState) mailctl.MailState {
+	strip := func(s *mailprovider.MailState) mailprovider.MailState {
 		c := *s
 		c.Generation, c.ConfirmMassRemoval = 0, false
 		c.Aliases, c.Lists, c.Postmaster = nil, nil, nil
@@ -383,8 +400,8 @@ func diffMail(prev, next *mailctl.MailState) mailDiff {
 	}
 	sp, sn := strip(prev), strip(next)
 	// Accounts added or removed already count; compare the kept ones.
-	keep := func(s []mailctl.Account, other map[string]mailctl.Account) []mailctl.Account {
-		var out []mailctl.Account
+	keep := func(s []mailprovider.Account, other map[string]mailprovider.Account) []mailprovider.Account {
+		var out []mailprovider.Account
 		for _, a := range s {
 			if _, ok := other[a.UUID]; ok {
 				out = append(out, a)

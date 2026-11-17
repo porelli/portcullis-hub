@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 )
 
 // mailDNSHashEvery: how often mailctl's per-domain set hashes are
@@ -37,7 +37,7 @@ func (h *Hub) mailDNSIfDue(ctx context.Context, api MailAPI, now time.Time, forc
 	nextHash := s.hashAt.Add(mailDNSHashEvery).Sub(now)
 	s.mu.Unlock()
 	if hash {
-		var st *mailctl.Status
+		var st *mailprovider.Status
 		if v, err := api.Status(ctx); err == nil {
 			st = &v
 		}
@@ -77,7 +77,7 @@ type mailDNSDomain struct{ name, state string }
 // mailDNSByHash writes again the set of every added domain on or
 // draining whose hash in st differs from the one last written; the hash
 // is recorded only after the PUT succeeded (a failure retries next pass).
-func (h *Hub) mailDNSByHash(ctx context.Context, api MailAPI, st *mailctl.Status) error {
+func (h *Hub) mailDNSByHash(ctx context.Context, api MailAPI, st *mailprovider.Status) error {
 	h.mu.RLock()
 	dapi := h.domainsAPI
 	h.mu.RUnlock()
@@ -87,7 +87,7 @@ func (h *Hub) mailDNSByHash(ctx context.Context, api MailAPI, st *mailctl.Status
 	s := &h.mailState
 	var errs []string
 	for _, d := range h.mailDNSDomains() {
-		if d.state != mailctl.MailOn && d.state != mailctl.MailDraining {
+		if d.state != mailprovider.MailOn && d.state != mailprovider.MailDraining {
 			continue
 		}
 		want := st.DNS[d.name]
@@ -152,7 +152,7 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 	}
 	set, err := api.DNS(ctx, name, wild)
 	if err != nil {
-		if mailctl.StatusOf(err) == 404 {
+		if mailprovider.StatusOf(err) == 404 {
 			return fmt.Errorf("%s: %w", name, errNotApplied)
 		}
 		return fmt.Errorf("%s: reading the wanted mail records: %v", name, err)
@@ -176,7 +176,7 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 // st is mailctl's status read for this pass (nil: unreadable): the
 // draining domains' MTA-STS modes, and the set hashes recorded for the
 // sets written.
-func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI, st *mailctl.Status) error {
+func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI, st *mailprovider.Status) error {
 	h.mu.RLock()
 	dapi := h.domainsAPI
 	h.mu.RUnlock()
@@ -193,8 +193,8 @@ func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI, st *mailctl.Status) 
 	var errs []string
 	for _, d := range ds {
 		switch d.state {
-		case mailctl.MailOn, mailctl.MailDraining:
-			if d.state == mailctl.MailDraining && modes[d.name] == mailctl.MailOff {
+		case mailprovider.MailOn, mailprovider.MailDraining:
+			if d.state == mailprovider.MailDraining && modes[d.name] == mailprovider.MailOff {
 				h.mu.Lock()
 				if e, ok := h.st.Mail.Domains[d.name]; ok && e.Draining {
 					e.Draining = false
@@ -220,7 +220,7 @@ func (h *Hub) syncMailDNS(ctx context.Context, api MailAPI, st *mailctl.Status) 
 			if st != nil {
 				h.mailRecordDNSHash(d.name, st.DNS[d.name])
 			}
-		case mailctl.MailOff:
+		case mailprovider.MailOff:
 			if _, err := dapi.DeleteMailSet(ctx, d.name); err != nil && domainsStatus(err) != 404 {
 				errs = append(errs, fmt.Sprintf("%s: removing the mail set: %v", d.name, err))
 				continue

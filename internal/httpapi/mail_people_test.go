@@ -7,16 +7,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 )
 
 // mailEnv: signInEnv with alice and bob in mail_users, core mail on, the
 // fake mailctl wired and the first document accepted.
-func mailEnv(t *testing.T) (*toolEnv, *mailctltest.Server) {
+func mailEnv(t *testing.T) (*toolEnv, *mailprovidertest.Server) {
 	t.Helper()
 	e, _ := signInEnv(t)
 	e.ll.AddGroup("mail_users", "alice", "bob")
-	mc := mailctltest.New(t)
+	mc := mailprovidertest.New(t)
 	h := e.s.Hub
 	h.SetMailAPI(mc.Client())
 	h.SetMailCoreForTest(true, "mail.example.org")

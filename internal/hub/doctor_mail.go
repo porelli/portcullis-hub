@@ -12,7 +12,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -27,8 +27,8 @@ import (
 const mailInputsTimeout = 10 * time.Second
 
 func init() {
-	RegisterFixer(mailActionFixer{kind: doctor.FixMailDMARCPromote, action: mailctl.ActionDMARCPromote})
-	RegisterFixer(mailActionFixer{kind: doctor.FixMailMTASTSEnforce, action: mailctl.ActionMTASTSEnforce})
+	RegisterFixer(mailActionFixer{kind: doctor.FixMailDMARCPromote, action: mailprovider.ActionDMARCPromote})
+	RegisterFixer(mailActionFixer{kind: doctor.FixMailMTASTSEnforce, action: mailprovider.ActionMTASTSEnforce})
 	RegisterFixer(mailConfirmRemovalFixer{})
 }
 
@@ -42,7 +42,9 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 		return nil
 	}
 	core := h.mailCore()
-	in := &doctor.MailIn{Main: strings.ToLower(h.cfg.Domain), LANOnly: core.SubmissionLAN, Podman: h.cfg.Runtime == runtime.KindPodman}
+	in := &doctor.MailIn{Main: strings.ToLower(h.cfg.Domain), LANOnly: core.SubmissionLAN, Podman: h.cfg.Runtime == runtime.KindPodman,
+		// The timer's visits are recorded by POST /host/mail/tls (Task 13).
+		ClientIPRewritten: core.ClientIPRewritten}
 	if _, why := h.MailRestartFailed(); why != "" {
 		in.RestartFailed = why
 	}
@@ -83,7 +85,7 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 	in.Checks, in.Status = ch.Checks, &st
 	states := h.MailDomainStates()
 	for _, p := range plans {
-		if s := states[strings.ToLower(p.Name)]; s == mailctl.MailOn || s == mailctl.MailDraining {
+		if s := states[strings.ToLower(p.Name)]; s == mailprovider.MailOn || s == mailprovider.MailDraining {
 			in.Plans = append(in.Plans, p)
 		}
 	}

@@ -14,8 +14,8 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -53,11 +53,11 @@ func TestCreateMailPasswordOrder(t *testing.T) {
 		return err
 	}
 	// 2. mailctl without the base plan: 503.
-	f.mc.Lock(func(s *mailctltest.Server) { s.Bootstrap = false })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.Bootstrap = false })
 	if err := try("alice", "iPhone", "none"); statusOf(err) != 503 || err.Error() != "mail isn't running right now" {
 		t.Fatalf("no bootstrap: %v", err)
 	}
-	f.mc.Lock(func(s *mailctltest.Server) { s.Bootstrap = true })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.Bootstrap = true })
 	// 3. Not in mail_users: the shared 404 (dave, and nobody at all).
 	errDave, errNobody := try("dave", "x", "none"), try("nobody", "x", "none")
 	if statusOf(errDave) != 404 || errDave.Error() != errNobody.Error() || statusOf(errNobody) != 404 {
@@ -222,7 +222,7 @@ func TestRevokeOwnMailPassword(t *testing.T) {
 	// Stalwart id reuse: b gets id 1 after a's password vanished behind
 	// the Hub's back; revoking a stale row must leave b alone.
 	tick := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
-	f.mc.Lock(func(s *mailctltest.Server) {
+	f.mc.Lock(func(s *mailprovidertest.Server) {
 		s.Now = func() time.Time { tick = tick.Add(time.Second); return tick }
 	})
 	f.mc.DropCreds("alice")
@@ -299,7 +299,7 @@ func TestReconcileVoidRestore(t *testing.T) {
 	f.create(t, "alice", "phone")
 	f.mc.DropCreds("alice")
 	later := time.Now().UTC().Add(time.Hour)
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = &later })
 	v, err := f.h.MyMail(ctx, "alice")
 	if err != nil || len(v.Passwords) != 1 || v.Passwords[0].Status != "voided" {
 		t.Fatalf("after a restore: %+v %v", v, err)
@@ -308,7 +308,7 @@ func TestReconcileVoidRestore(t *testing.T) {
 		t.Fatalf("audit %+v", e)
 	}
 	// No restore since: missing (gone from the list).
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = nil })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = nil })
 	f.create(t, "alice", "tablet")
 	f.mc.DropCreds("alice")
 	v, _ = f.h.MyMail(ctx, "alice")
@@ -360,15 +360,15 @@ func TestPersonMailReconciles(t *testing.T) {
 	c := f.create(t, "alice", "phone")
 	f.mc.DropCreds("alice")
 	later := time.Now().UTC().Add(time.Hour)
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = &later })
 	v, err := f.h.PersonMail(ctx, root, "alice")
 	if err != nil || len(v.Passwords) != 1 || v.Passwords[0].Status != "voided" || f.mailReason("alice", c.ID) != state.MailCredentialReasonVoidRestore {
 		t.Fatalf("after a restore: %+v %v", v, err)
 	}
 	// mailctl unreachable: unconfirmed.
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = nil })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = nil })
 	c2 := f.create(t, "alice", "tablet")
-	f.mc.Lock(func(s *mailctltest.Server) { s.Down = true })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.Down = true })
 	v, err = f.h.PersonMail(ctx, root, "alice")
 	if err != nil {
 		t.Fatal(err)
@@ -382,7 +382,7 @@ func TestPersonMailReconciles(t *testing.T) {
 		t.Fatal("an unconfirmed row was ended")
 	}
 	// Back: active again.
-	f.mc.Lock(func(s *mailctltest.Server) { s.Down = false })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.Down = false })
 	v, _ = f.h.PersonMail(ctx, root, "alice")
 	for _, p := range v.Passwords {
 		if p.ID == c2.ID && p.Status != "active" {
@@ -394,7 +394,7 @@ func TestPersonMailReconciles(t *testing.T) {
 // failCreds is a MailAPI whose credential reads fail.
 type failCreds struct{ MailAPI }
 
-func (failCreds) Credentials(context.Context, string) ([]mailctl.Credential, error) {
+func (failCreds) Credentials(context.Context, string) ([]mailprovider.Credential, error) {
 	return nil, errors.New("mailctl: connection reset")
 }
 
@@ -411,7 +411,7 @@ func TestMailRestoreReconcile(t *testing.T) {
 	c := f.create(t, "alice", "phone")
 	f.mc.DropCreds("alice")
 	later := time.Now().UTC().Add(time.Hour)
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = &later })
 	g := newMailFixture(t) // a Hub started on the restored data
 	g.h.mu.Lock()
 	g.h.st.MailCredentials = f.h.st.MailCredentials
@@ -425,12 +425,12 @@ func TestMailRestoreReconcile(t *testing.T) {
 
 	// On the tick: the Hub outlives the restore.
 	h := newMailFixture(t)
-	h.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = nil })
+	h.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = nil })
 	h.sync(t)
 	c = h.create(t, "bob", "phone")
 	h.mc.DropCreds("bob")
 	at := time.Now().UTC().Add(time.Hour)
-	h.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &at })
+	h.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = &at })
 	h.sync(t) // inside the 60 s: not checked yet
 	if r := h.mailReason("bob", c.ID); r != "" {
 		t.Fatalf("before the tick: reason %q", r)
@@ -447,7 +447,7 @@ func TestMailRestoreReconcile(t *testing.T) {
 	c = h.create(t, "alice", "laptop")
 	h.mc.DropCreds("alice")
 	at2 := at.Add(time.Hour)
-	h.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &at2 })
+	h.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = &at2 })
 	api := h.mc.Client()
 	handled := func() time.Time {
 		h.h.mu.RLock()
@@ -568,7 +568,7 @@ func TestRestoreReconcileKeepsUnremovedRows(t *testing.T) {
 	c := f.create(t, "bob", "phone")
 	f.deletePerson("bob")
 	later := time.Now().UTC().Add(time.Hour)
-	f.mc.Lock(func(s *mailctltest.Server) {
+	f.mc.Lock(func(s *mailprovidertest.Server) {
 		s.StatusV.RestoredAt = &later
 		s.PutStatus = 503 // the removal isn't accepted
 	})
@@ -592,7 +592,7 @@ func TestRestoreReconcileKeepsUnremovedRows(t *testing.T) {
 	f.h.st.Mail.PendingRemoval = nil
 	f.h.mu.Unlock()
 	// Accepted: ended revoke_leave.
-	f.mc.Lock(func(s *mailctltest.Server) { s.PutStatus = 0 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.PutStatus = 0 })
 	f.sync(t)
 	if r := f.mailReason("bob", c.ID); r != state.MailCredentialReasonRevokeLeave {
 		t.Fatalf("after the removal: %q", r)
@@ -607,7 +607,7 @@ func TestPersonMailUnknownUserNoEnd(t *testing.T) {
 	c := f.create(t, "bob", "phone")
 	f.deletePerson("bob")
 	var dels int
-	f.mc.Lock(func(s *mailctltest.Server) { dels = len(s.Deletes) })
+	f.mc.Lock(func(s *mailprovidertest.Server) { dels = len(s.Deletes) })
 	v, err := f.h.PersonMail(context.Background(), &directory.Caller{User: "root", Admin: true}, "bob")
 	if err != nil {
 		t.Fatal(err)
@@ -620,7 +620,7 @@ func TestPersonMailUnknownUserNoEnd(t *testing.T) {
 			t.Fatalf("shown active: %+v", v.Passwords)
 		}
 	}
-	f.mc.Lock(func(s *mailctltest.Server) {
+	f.mc.Lock(func(s *mailprovidertest.Server) {
 		if len(s.Deletes) != dels {
 			t.Errorf("revoked: %v", s.Deletes[dels:])
 		}
@@ -630,7 +630,7 @@ func TestPersonMailUnknownUserNoEnd(t *testing.T) {
 // slowCreds is a MailAPI whose credential reads take 2 s.
 type slowCreds struct{ MailAPI }
 
-func (s slowCreds) Credentials(ctx context.Context, user string) ([]mailctl.Credential, error) {
+func (s slowCreds) Credentials(ctx context.Context, user string) ([]mailprovider.Credential, error) {
 	time.Sleep(2 * time.Second)
 	return s.MailAPI.Credentials(ctx, user)
 }
@@ -644,7 +644,7 @@ func TestRestoreReconcileNeverDelaysRemoval(t *testing.T) {
 	f.create(t, "alice", "phone")
 	f.mc.DropCreds("alice")
 	later := time.Now().UTC().Add(time.Hour)
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.RestoredAt = &later })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.RestoredAt = &later })
 	f.h.SetMailAPI(slowCreds{f.mc.Client()})
 	f.advance(mailRestoreEvery)
 	puts := f.mc.Puts()

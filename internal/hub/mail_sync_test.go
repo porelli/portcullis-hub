@@ -11,8 +11,8 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -61,7 +61,7 @@ func (p *mailPeople) setMembers(group string, users ...string) {
 
 type mailFixture struct {
 	*fixture
-	mc     *mailctltest.Server
+	mc     *mailprovidertest.Server
 	people *mailPeople
 	dom    *fakeDomainsAPI
 	now    time.Time
@@ -78,7 +78,7 @@ func (f *mailFixture) advance(d time.Duration) {
 // alice, bob, root (admin) in mail_users, the main domain example.org.
 func newMailFixture(t *testing.T) *mailFixture {
 	t.Helper()
-	f := &mailFixture{fixture: newFixture(t), mc: mailctltest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
+	f := &mailFixture{fixture: newFixture(t), mc: mailprovidertest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
 	setCoreMail(t, f.fixture, true)
 	m := mailMembership()
 	f.people = &mailPeople{m: m}
@@ -315,7 +315,7 @@ func (kubeKindRuntime) Kind() runtime.Kind { return runtime.KindKubernetes }
 func TestRestartWhenApplyTimesOut(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
-	f.mc.Lock(func(s *mailctltest.Server) { s.HoldApply = true })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.HoldApply = true })
 	f.people.setMembers("mail_users", "alice", "root")
 	start := time.Now()
 	f.sync(t)
@@ -384,9 +384,9 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains["team-b.example.net"] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets["team-b.example.net"] = mailctl.DNSSet{Domain: "team-b.example.net", DKIM: "auto", TLSA: "withheld: dnssec unsigned",
-			Records: []mailctl.Record{{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets["team-b.example.net"] = mailprovider.DNSSet{Domain: "team-b.example.net", DKIM: "auto",
+			Records: []mailprovider.Record{{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
 	})
 	f.sync(t)
 	f.dom.mu.Lock()
@@ -398,7 +398,7 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	}
 	// No *.<e> address record in the plan: ?wildcard=false; with one, true.
 	var wc string
-	f.mc.Lock(func(s *mailctltest.Server) { wc = s.Wildcards["team-b.example.net"] })
+	f.mc.Lock(func(s *mailprovidertest.Server) { wc = s.Wildcards["team-b.example.net"] })
 	if wc != "false" {
 		t.Fatalf("wildcard %q", wc)
 	}
@@ -407,7 +407,7 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	f.dom.mu.Unlock()
 	f.advance(mailDNSEvery)
 	f.sync(t)
-	f.mc.Lock(func(s *mailctltest.Server) { wc = s.Wildcards["team-b.example.net"] })
+	f.mc.Lock(func(s *mailprovidertest.Server) { wc = s.Wildcards["team-b.example.net"] })
 	if wc != "true" {
 		t.Fatalf("wildcard with *.<e>: %q", wc)
 	}
@@ -415,15 +415,15 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains["team-b.example.net"] = state.MailDomain{Draining: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.StatusV.MTASTS = []mailctl.StatusMTASTS{{Domain: "team-b.example.net", Mode: "none"}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.StatusV.MTASTS = []mailprovider.StatusMTASTS{{Domain: "team-b.example.net", Mode: "none"}}
 	})
 	f.sync(t)
 	if d := f.mc.Last().Domains; d[1].Mail != "draining" {
 		t.Fatalf("draining doc %+v", d)
 	}
 	// mailctl reports it off: the Hub turns it off, sends off, deletes.
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.MTASTS[0].Mode = "off" })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.MTASTS[0].Mode = "off" })
 	f.advance(mailDNSEvery)
 	f.sync(t) // the DNS pass sees off
 	f.sync(t) // sends off, then deletes the set
@@ -536,13 +536,13 @@ func TestMailDNSByHash(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
 		s.StatusV.DNS = map[string]string{d: "h1", "example.org": "m1"}
 	})
 	f.sync(t) // the full pass: written, h1 recorded
 	counts := func() (gets, puts int) {
-		f.mc.Lock(func(s *mailctltest.Server) {
+		f.mc.Lock(func(s *mailprovidertest.Server) {
 			for _, r := range s.Requests {
 				if strings.HasPrefix(r, "GET /v1/dns/") {
 					gets++
@@ -565,8 +565,8 @@ func TestMailDNSByHash(t *testing.T) {
 		t.Fatalf("unchanged: gets %d puts %d", g, p)
 	}
 	// Changed: exactly one refetch and PUT, then nothing again.
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail2.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail2.example.org."}}}
 		s.StatusV.DNS = map[string]string{d: "h2", "example.org": "m2"}
 	})
 	f.sync(t) // not due yet: nothing
@@ -587,7 +587,7 @@ func TestMailDNSByHash(t *testing.T) {
 		t.Fatalf("after the write: gets %d puts %d", g, p)
 	}
 	// A failed PUT: retried on the next tick, then recorded.
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.DNS = map[string]string{d: "h3"} })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.DNS = map[string]string{d: "h3"} })
 	f.dom.mu.Lock()
 	f.dom.mailSetErr = errors.New("domains service down")
 	f.dom.mu.Unlock()
@@ -621,8 +621,8 @@ func TestMailDNSHashForgottenOnFailure(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
 		s.StatusV.DNS = map[string]string{"Team-B.Example.NET": "h1"}
 	})
 	f.sync(t) // written, h1 recorded (the key read lowercase)

@@ -11,7 +11,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -31,11 +31,11 @@ type MailDomainView struct {
 
 // MailSpamView is the spam settings on the wire.
 type MailSpamView struct {
-	RejectScore int           `json:"reject_score"`
-	JunkScore   int           `json:"junk_score"`
-	DNSBL       mailctl.DNSBL `json:"dnsbl"`
-	Allow       []string      `json:"allow"`
-	Block       []string      `json:"block"`
+	RejectScore int                `json:"reject_score"`
+	JunkScore   int                `json:"junk_score"`
+	DNSBL       mailprovider.DNSBL `json:"dnsbl"`
+	Allow       []string           `json:"allow"`
+	Block       []string           `json:"block"`
 }
 
 // MailSettingsView is GET /api/mail/settings.
@@ -46,7 +46,7 @@ type MailSettingsView struct {
 	PrimaryDomain string               `json:"primary_domain"`
 	Domains       []MailDomainView     `json:"domains"`
 	Spam          MailSpamView         `json:"spam"`
-	Limits        mailctl.Limits       `json:"limits"`
+	Limits        mailprovider.Limits  `json:"limits"`
 	Quotas        []state.MailQuotaRow `json:"quotas"`
 	// Lists are the groups made lists, by group (controller ruling).
 	Lists             []MailListView `json:"lists"`
@@ -82,7 +82,7 @@ type MailListView struct {
 type MailSettingsInput struct {
 	PrimaryDomain string               `json:"primary_domain"`
 	Spam          MailSpamView         `json:"spam"`
-	Limits        mailctl.Limits       `json:"limits"`
+	Limits        mailprovider.Limits  `json:"limits"`
 	Quotas        []state.MailQuotaRow `json:"quotas"`
 }
 
@@ -127,9 +127,9 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 	v := MailSettingsView{Mail: map[bool]string{true: "on", false: "off"}[core.On], Kubernetes: h.kubeOn(), Hostname: core.Hostname,
 		PrimaryDomain: mailPrimary(st, h.cfg.Domain), Domains: []MailDomainView{},
 		Spam: MailSpamView{RejectScore: st.Spam.RejectScore, JunkScore: st.Spam.JunkScore,
-			DNSBL: mailctl.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
+			DNSBL: mailprovider.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
 			Allow: nonNil(st.Spam.Allow), Block: nonNil(st.Spam.Block)},
-		Limits: mailctl.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
+		Limits: mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
 		Quotas: append([]state.MailQuotaRow{}, st.Quotas...), Relay: map[bool]string{true: "on", false: "off"}[core.Relay],
 		SubmissionLANOnly: core.SubmissionLAN, FormerRetention: "720h", DQSKey: "not set"}
 	if r := strings.TrimSpace(env[VarMailFormerRetention]); r != "" {
@@ -143,7 +143,7 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 	}
 	for _, n := range h.mailDomainNamesLocked() {
 		s := h.mailDomainStateLocked(n, core.On)
-		v.Domains = append(v.Domains, MailDomainView{Name: n, Enabled: s == mailctl.MailOn, State: s, Groups: nonNil(st.Domains[n].Groups)})
+		v.Domains = append(v.Domains, MailDomainView{Name: n, Enabled: s == mailprovider.MailOn, State: s, Groups: nonNil(st.Domains[n].Groups)})
 	}
 	v.PendingRemoval = h.mailPendingViewLocked()
 	v.Problem = problem
@@ -254,7 +254,7 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 	}
 	// Every login is on the primary domain: it must be one mail is on for
 	// (else no document could be sent, removals included).
-	if mailDomainState(h.st.Mail, h.cfg.Domain, coreOn || primary == main, primary) != mailctl.MailOn {
+	if mailDomainState(h.st.Mail, h.cfg.Domain, coreOn || primary == main, primary) != mailprovider.MailOn {
 		return statusErr(http.StatusBadRequest, "turn mail on for %s first", primary)
 	}
 	old := h.st.Mail
@@ -388,20 +388,20 @@ func (h *Hub) SetMailDomain(ctx context.Context, name string, enabled bool, grou
 	cur := h.mailDomainStateLocked(name, coreOn)
 	e := h.st.Mail.Domains[name]
 	if enabled {
-		if cur != mailctl.MailOn {
+		if cur != mailprovider.MailOn {
 			if id, host := h.mailReservedUserLocked(name); id != "" {
 				return statusErr(http.StatusConflict, "instance %s uses %s, which mail reserves on %s: move it first", id, host, name)
 			}
 		}
-		if cur == mailctl.MailOff {
+		if cur == mailprovider.MailOff {
 			e.HadMailRecords = had
 		}
 		e.Enabled, e.Draining, e.Retired = true, false, false
 	} else {
-		if name == mailPrimary(h.st.Mail, h.cfg.Domain) && cur != mailctl.MailOff {
+		if name == mailPrimary(h.st.Mail, h.cfg.Domain) && cur != mailprovider.MailOff {
 			return statusErr(http.StatusConflict, "%s is the primary mail domain: pick another one first", name)
 		}
-		if cur == mailctl.MailOn {
+		if cur == mailprovider.MailOn {
 			e.Draining = true
 		}
 		e.Enabled = false
@@ -464,9 +464,9 @@ func (h *Hub) mailReservedUserLocked(e string) (string, string) {
 // mailAddressOwner is who uses addr in the document the directory builds
 // now (an account, someone's alias, a list) or a reserved local part;
 // "" = free. exceptUUID: the person whose aliases are being replaced.
-func mailAddressOwner(doc *mailctl.MailState, st state.MailSettings, addr, exceptUUID string) string {
+func mailAddressOwner(doc *mailprovider.MailState, st state.MailSettings, addr, exceptUUID string) string {
 	local, _, _ := strings.Cut(addr, "@")
-	if slices.Contains(mailctl.ReservedLocalParts, local) {
+	if slices.Contains(mailprovider.ReservedLocalParts, local) {
 		return "reserved for mail"
 	}
 	for _, a := range doc.Accounts {
@@ -490,7 +490,7 @@ func mailAddressOwner(doc *mailctl.MailState, st state.MailSettings, addr, excep
 // mailAddrOnMail: addr is an address on a domain mail is on or draining.
 func (h *Hub) mailAddrOnMailLocked(addr string, coreOn bool) bool {
 	local, dom, ok := strings.Cut(addr, "@")
-	return ok && local != "" && localPartRe.MatchString(local) && h.mailDomainStateLocked(dom, coreOn) != mailctl.MailOff
+	return ok && local != "" && localPartRe.MatchString(local) && h.mailDomainStateLocked(dom, coreOn) != mailprovider.MailOff
 }
 
 // SetUserAliases replaces user's aliases (contract §19.9): each an
@@ -515,7 +515,7 @@ func (h *Hub) SetUserAliases(ctx context.Context, user string, addrs []string, a
 		}
 		return statusErr(http.StatusConflict, "mail isn't on for the primary domain: no aliases can be set")
 	}
-	i := slices.IndexFunc(doc.Accounts, func(a mailctl.Account) bool { return a.Username == user })
+	i := slices.IndexFunc(doc.Accounts, func(a mailprovider.Account) bool { return a.Username == user })
 	if i < 0 {
 		return statusErr(http.StatusNotFound, "%s has no mailbox (not in %s)", user, MailUsersGroup)
 	}
@@ -615,7 +615,7 @@ func (h *Hub) SetGroupList(ctx context.Context, group string, enabled bool, doma
 	coreOn := h.mailOn()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.mailDomainStateLocked(domain, coreOn) != mailctl.MailOn {
+	if h.mailDomainStateLocked(domain, coreOn) != mailprovider.MailOn {
 		return statusErr(http.StatusBadRequest, "mail isn't on for %s", domain)
 	}
 	cur, had := h.st.Mail.Lists[group]
@@ -652,7 +652,7 @@ func (h *Hub) SetGroupList(ctx context.Context, group string, enabled bool, doma
 type MailStatusView struct {
 	Mail      string               `json:"mail"`
 	Reachable bool                 `json:"reachable"`
-	Status    *mailctl.Status      `json:"status"`
+	Status    *mailprovider.Status `json:"status"`
 	Domains   []MailDomainStateRow `json:"domains"`
 }
 
@@ -692,7 +692,7 @@ func (h *Hub) MailStatus(ctx context.Context) MailStatusView {
 }
 
 // MailChecks is mailctl's GET /v1/checks (503 while mail isn't running).
-func (h *Hub) MailChecks(ctx context.Context, refresh bool) (*mailctl.Checks, error) {
+func (h *Hub) MailChecks(ctx context.Context, refresh bool) (*mailprovider.Checks, error) {
 	api, err := h.mailUp(ctx)
 	if err != nil {
 		return nil, err
@@ -708,7 +708,7 @@ func (h *Hub) MailChecks(ctx context.Context, refresh bool) (*mailctl.Checks, er
 // 202; 404 not a mail domain; 409 nothing to do. Audited mail.<action>.
 func (h *Hub) MailAction(ctx context.Context, action, domain string, actor directory.Actor) (err error) {
 	domain = NormalizeHost(domain)
-	audit := map[string]string{mailctl.ActionDKIMRotate: "mail.dkim_rotate", mailctl.ActionDMARCPromote: "mail.dmarc_promote", mailctl.ActionMTASTSEnforce: "mail.mtasts_enforce"}[action]
+	audit := map[string]string{mailprovider.ActionDKIMRotate: "mail.dkim_rotate", mailprovider.ActionDMARCPromote: "mail.dmarc_promote", mailprovider.ActionMTASTSEnforce: "mail.mtasts_enforce"}[action]
 	if audit == "" {
 		return statusErr(http.StatusNotFound, "no mail action %q", clipText(action))
 	}
@@ -718,7 +718,7 @@ func (h *Hub) MailAction(ctx context.Context, action, domain string, actor direc
 		return err
 	}
 	if err := api.Action(ctx, action, domain); err != nil {
-		var ae *mailctl.APIError
+		var ae *mailprovider.APIError
 		if asAPIError(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusConflict || ae.Status == http.StatusBadRequest) {
 			return statusErr(ae.Status, "%s", ae.Msg)
 		}
@@ -727,8 +727,8 @@ func (h *Hub) MailAction(ctx context.Context, action, domain string, actor direc
 	return nil
 }
 
-func asAPIError(err error, out **mailctl.APIError) bool {
-	ae, ok := err.(*mailctl.APIError)
+func asAPIError(err error, out **mailprovider.APIError) bool {
+	ae, ok := err.(*mailprovider.APIError)
 	if ok {
 		*out = ae
 	}
@@ -814,7 +814,7 @@ func (h *Hub) HostMailDrain(ctx context.Context) []MailDomainStateRow {
 	h.mu.Lock()
 	var changed []string
 	for _, n := range h.mailDomainNamesLocked() {
-		if h.mailDomainStateLocked(n, coreOn) != mailctl.MailOn {
+		if h.mailDomainStateLocked(n, coreOn) != mailprovider.MailOn {
 			continue
 		}
 		if h.st.Mail.Domains == nil {
@@ -846,13 +846,13 @@ func (h *Hub) HostMailDomains() []MailDomainStateRow {
 	for _, n := range h.mailDomainNamesLocked() {
 		_, entry := h.st.Mail.Domains[n]
 		s := h.mailDomainStateLocked(n, coreOn)
-		if s == mailctl.MailOff && !entry {
+		if s == mailprovider.MailOff && !entry {
 			continue
 		}
 		// Off but its mail set not removed yet: still draining for the
 		// CLI (mail disable waits for every domain off).
-		if e := h.st.Mail.Domains[n]; s == mailctl.MailOff && entry && !e.Retired && n != strings.ToLower(h.cfg.Domain) {
-			s = mailctl.MailDraining
+		if e := h.st.Mail.Domains[n]; s == mailprovider.MailOff && entry && !e.Retired && n != strings.ToLower(h.cfg.Domain) {
+			s = mailprovider.MailDraining
 		}
 		out = append(out, MailDomainStateRow{Name: n, State: s})
 	}
