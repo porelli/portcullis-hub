@@ -169,6 +169,11 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		return nil, statusErr(500, "override generation failed: %v", err)
 	}
 	if server != "" {
+		// Every image pinned by digest, overrides included (§11.7):
+		// refused before the relays or the worker see anything.
+		if err := h.placedImages(context.Background(), live, server); err != nil {
+			return nil, err
+		}
 		// B2-H2: the relays follow the Hub's desired labels first, on the
 		// primary, whether or not the worker answers (a failure stops
 		// them); a move, an undo or a recovery drives its own.

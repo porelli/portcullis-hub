@@ -317,6 +317,9 @@ type Hub struct {
 	// moveOwners: instance ids a move, an undo or a move recovery is
 	// running for (the only ones composeUp starts while moving).
 	moveOwners sync.Map
+	// overridePreflight: instance → the server and overridden image
+	// refs its last start preflight-pulled (placedImages).
+	overridePreflight sync.Map
 	// lastPush: instance → the server its last successful bundle push
 	// went to (an owed removal there is settled only after it).
 	lastPush sync.Map
