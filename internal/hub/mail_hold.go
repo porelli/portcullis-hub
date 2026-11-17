@@ -49,6 +49,24 @@ func (h *Hub) mailHoldReasonLocked() string {
 	return ""
 }
 
+// mailHoldGateLocked is the hold in the start primitive (Ruling R-HH3):
+// an up of the wired provider is refused (409) while it is held or its
+// tree on disk no longer matches the confirmed hash (the hold is then
+// recorded), on every up path — boot restarts, reconcile, owed restarts,
+// the void retry, doctor fixes. The stored hold is only a cache of this.
+// Caller must hold mu (write).
+func (h *Hub) mailHoldGateLocked(t *templates.Template) error {
+	p := h.st.Mail.Provider
+	if p == nil || p.Instance != t.ID {
+		return nil
+	}
+	h.checkMailHoldLocked()
+	if hd := h.st.Mail.Held; hd != nil {
+		return statusErr(http.StatusConflict, "%s", hd.Reason)
+	}
+	return nil
+}
+
 // checkMailHoldLocked holds the wired provider when its template changed
 // (saved; no up). Caller must hold mu (write).
 func (h *Hub) checkMailHoldLocked() bool {

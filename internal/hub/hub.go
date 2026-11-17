@@ -378,6 +378,9 @@ type Hub struct {
 	// under mu).
 	mailClients       mailClients
 	mailModeForRender *mailMode
+	// mailRendered is each mail instance's mode at its last override
+	// render: startUp refuses an up whose mode changed since.
+	mailRendered mailUpModes
 	// mailVoid is the last void's outcome; mailBootstrapWait and
 	// mailPollEvery shorten the void's waits in tests.
 	mailVoid mailVoidState

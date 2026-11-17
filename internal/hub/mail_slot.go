@@ -79,18 +79,30 @@ func (m mailMode) String() string {
 // must hold mu.
 func (h *Hub) mailProviderLocked() *state.MailProvider { return h.st.Mail.Provider }
 
-// mailModeLocked is instance id's mode (P4): void while a void is owed or
-// the provider is held, normal otherwise; unwired unless it is the wired
-// instance. Caller must hold mu.
+// mailModeLocked is instance id's mode (P4): void while a void is owed,
+// normal otherwise; unwired unless it is the wired instance. A hold
+// changes no mode (Ruling R-HH1): the running, confirmed containers keep
+// serving and keep taking revocations; it only refuses every up of the
+// changed tree (mailHoldGateLocked, R-HH3). Caller must hold mu.
 func (h *Hub) mailModeLocked(id string) mailMode {
 	p := h.st.Mail.Provider
 	if p == nil || p.Instance != id {
 		return mailUnwired
 	}
-	if h.st.Mail.VoidOwed != nil || h.st.Mail.Held != nil {
+	if h.st.Mail.VoidOwed != nil {
 		return mailVoid
 	}
 	return mailNormal
+}
+
+// mailModeTextLocked is the mode as reported (M2): "stopped" for a held
+// provider the Hub stopped, else the mode. Caller must hold mu.
+func (h *Hub) mailModeTextLocked(id string) string {
+	m := h.mailModeLocked(id)
+	if hd := h.st.Mail.Held; m != mailUnwired && hd != nil && hd.Stopped != nil {
+		return "stopped"
+	}
+	return m.String()
 }
 
 // mailWiredLocked is the wired instance's view and its mail: block (nil

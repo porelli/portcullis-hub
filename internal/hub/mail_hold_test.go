@@ -9,6 +9,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -39,14 +40,15 @@ func TestTemplateChangeHoldsNoUp(t *testing.T) {
 	if err != nil || st.Mail.Held == nil || st.Mail.Held.Reason != MailHoldText {
 		t.Fatalf("held %+v %v", st.Mail.Held, err)
 	}
-	if w.h.mailClient() != nil {
-		t.Fatal("mail routes still served while held")
+	// R-HH1: the running, confirmed provider keeps taking revocations.
+	if _, ok := w.h.mailClient().(*heldMailAPI); !ok {
+		t.Fatal("no held client: revocations would pause while held")
 	}
 }
 
-// TestHeldUpRendersVoidOnly: an up while held (a restart) renders void
-// mode and runs no void.
-func TestHeldUpRendersVoidOnly(t *testing.T) {
+// TestHeldUpRefused (R-HH3): an up while held (a restart) is refused in
+// the start primitive: nothing of the changed tree starts, no void runs.
+func TestHeldUpRefused(t *testing.T) {
 	w := wiredFix(t)
 	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
 	syncNow(w)
@@ -54,16 +56,73 @@ func TestHeldUpRendersVoidOnly(t *testing.T) {
 	w.mu.Lock()
 	w.ups = nil
 	w.mu.Unlock()
-	if err := w.h.RestartApp(mailProviderID); err != nil {
-		t.Fatal(err)
+	if err := w.h.RestartApp(mailProviderID); statusOf(err) != 409 {
+		t.Fatalf("a held restart: %v", err)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.ups) == 0 || strings.Contains(w.ups[len(w.ups)-1].override, "0.0.0.0:25:") || !strings.Contains(w.ups[len(w.ups)-1].override, "internal: true") {
-		t.Fatalf("held up isn't void mode")
+	if len(w.ups) != 0 {
+		t.Fatalf("%d ups while held", len(w.ups))
 	}
 	if len(w.mc.Voids) != voids {
 		t.Fatal("a void ran while held")
+	}
+}
+
+// TestUpBeforeHoldRecordedRefused (H3): the tree changed on disk but no
+// sync recorded the hold yet (a pull mid-sync, a boot restart): the up
+// is refused and the hold recorded.
+func TestUpBeforeHoldRecordedRefused(t *testing.T) {
+	w := wiredFix(t)
+	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
+	w.mu.Lock()
+	w.ups = nil
+	w.mu.Unlock()
+	if err := w.h.composeUp(context.Background(), w.h.Template(mailProviderID)); statusOf(err) != 409 {
+		t.Fatalf("an up of the unreviewed tree: %v", err)
+	}
+	w.mu.Lock()
+	n := len(w.ups)
+	w.mu.Unlock()
+	w.h.mu.RLock()
+	held := w.h.st.Mail.Held
+	w.h.mu.RUnlock()
+	if n != 0 || held == nil {
+		t.Fatalf("ups %d held %+v", n, held)
+	}
+}
+
+// TestHeldKeepsRevoking (R-HH1): while held, a revoke and a removal
+// reach the running provider; one it can't take stops the provider.
+func TestHeldKeepsRevoking(t *testing.T) {
+	w := wiredFix(t)
+	c := w.create(t, "alice", "phone").ID
+	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
+	syncNow(w)
+	if err := w.h.RevokeOwnMailPassword(context.Background(), "alice", c); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.mc.Creds("alice")) != 0 {
+		t.Fatal("the revoke didn't reach the held provider")
+	}
+	c2 := w.create(t, "alice", "laptop").ID
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 500 })
+	downs := len(w.runner.callsMatching("downbyname"))
+	if err := w.h.RevokeOwnMailPassword(context.Background(), "alice", c2); err == nil {
+		t.Fatal("a failed revoke answered ok")
+	}
+	w.h.mu.RLock()
+	held := w.h.st.Mail.Held
+	w.h.mu.RUnlock()
+	if held == nil || held.Stopped == nil || len(w.runner.callsMatching("downbyname")) == downs {
+		t.Fatalf("the held provider wasn't stopped: %+v", held)
+	}
+	if w.h.mailClient() != nil {
+		t.Fatal("a stopped provider still served")
+	}
+	v, _ := w.h.InstanceMailProvider(context.Background(), mailProviderID)
+	if v.Mode != "stopped" {
+		t.Fatalf("mode %q", v.Mode)
 	}
 }
 
@@ -95,7 +154,7 @@ func TestRewireClearsHoldAndKeepsPasswords(t *testing.T) {
 	changeMailTemplate(t, w, "gate.sh", "#!/bin/sh\necho changed\n")
 	syncNow(w)
 	v, _ := w.h.InstanceMailProvider(context.Background(), mailProviderID)
-	if v.Held == nil || v.HoldWarning != MailHoldWarning || v.Mode != "void" {
+	if v.Held == nil || v.HoldWarning != MailHoldWarning || v.Mode != "normal" {
 		t.Fatalf("view %+v", v)
 	}
 	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof}, rootActor()); err != nil {

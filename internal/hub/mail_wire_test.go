@@ -13,6 +13,7 @@ import (
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // wireFix is the mail fixture with nothing wired: the slot open,
@@ -282,8 +283,13 @@ func TestWarningTextExact(t *testing.T) {
 // first; nothing owed resumes nothing.
 func TestWireResumesVoidAfterRestart(t *testing.T) {
 	w := newWireFix(t)
+	tp := w.h.Template(mailProviderID)
+	hash, err := templates.MailBlockHash(tp.Path, tp.Manifest.Mail, tp.ReadCompose())
+	if err != nil {
+		t.Fatal(err)
+	}
 	w.h.mu.Lock()
-	w.h.st.Mail.Provider = &state.MailProvider{Instance: mailProviderID, Template: mailProviderID}
+	w.h.st.Mail.Provider = &state.MailProvider{Instance: mailProviderID, Template: mailProviderID, BlockHash: hash}
 	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidWire}
 	w.h.mu.Unlock()
 	w.h.resumeMail()

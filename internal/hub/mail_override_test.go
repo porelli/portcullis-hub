@@ -216,7 +216,8 @@ func TestVoidModeNoPortsInternalNetworks(t *testing.T) {
 			t.Errorf("%s tls mount %+v", s, m)
 		}
 	}
-	// The state's void owed (or a hold) renders void mode.
+	// The state's void owed renders void mode; a hold changes no mode
+	// (R-HH1: it refuses ups instead).
 	f.h.mu.Lock()
 	f.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidWire}
 	mode := f.h.mailModeLocked(mailProviderID)
@@ -224,7 +225,7 @@ func TestVoidModeNoPortsInternalNetworks(t *testing.T) {
 	held := f.h.mailModeLocked(mailProviderID)
 	f.h.st.Mail.Held = nil
 	f.h.mu.Unlock()
-	if mode != mailVoid || held != mailVoid {
+	if mode != mailVoid || held != mailNormal {
 		t.Fatalf("modes %v %v", mode, held)
 	}
 }

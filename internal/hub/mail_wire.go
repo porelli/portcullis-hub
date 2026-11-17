@@ -469,7 +469,7 @@ func (h *Hub) InstanceMailProvider(ctx context.Context, id string) (*MailProvide
 		return nil, statusErr(http.StatusNotFound, "%s is no instance of a mail provider template", id)
 	}
 	mode := h.mailModeLocked(id)
-	v := &MailProviderView{Wired: mode != mailUnwired, Mode: mode.String(), Warning: MailWarning, RefusedBecause: []string{}}
+	v := &MailProviderView{Wired: mode != mailUnwired, Mode: h.mailModeTextLocked(id), Warning: MailWarning, RefusedBecause: []string{}}
 	except := ""
 	if v.Wired {
 		except = id

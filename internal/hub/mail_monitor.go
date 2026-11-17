@@ -36,7 +36,7 @@ type mailTarget struct {
 func (h *Hub) mailTargetsLocked() []mailTarget {
 	out := []mailTarget{}
 	p := h.st.Mail.Provider
-	if p == nil || h.mailModeLocked(p.Instance) != mailNormal {
+	if p == nil || h.mailModeLocked(p.Instance) != mailNormal || (h.st.Mail.Held != nil && h.st.Mail.Held.Stopped != nil) {
 		return out
 	}
 	_, m := h.mailWiredLocked()
@@ -104,7 +104,7 @@ func (h *Hub) HostMailStatus(ctx context.Context) HostMailStatusView {
 	h.mu.RLock()
 	if p := h.st.Mail.Provider; p != nil {
 		v.Wired, v.Instance, v.Template = true, p.Instance, p.Template
-		v.Mode = h.mailModeLocked(p.Instance).String()
+		v.Mode = h.mailModeTextLocked(p.Instance)
 	}
 	v.Generation = h.st.Mail.Generation
 	v.VoidOwed = h.st.Mail.VoidOwed != nil

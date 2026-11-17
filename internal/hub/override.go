@@ -271,7 +271,16 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	// A mail template's instance (contract §19.1): unwired = nothing,
 	// void = the API attachment, mounts and env with every network
 	// internal, normal = everything.
-	mr, err := h.mailRenderLocked(t, h.mailRenderModeLocked(t))
+	rmode := h.mailRenderModeLocked(t)
+	if h.mailModeForRender == nil && t.Manifest.Mail != nil {
+		h.mailRendered.mu.Lock()
+		if h.mailRendered.m == nil {
+			h.mailRendered.m = map[string]mailMode{}
+		}
+		h.mailRendered.m[t.ID] = rmode
+		h.mailRendered.mu.Unlock()
+	}
+	mr, err := h.mailRenderLocked(t, rmode)
 	if err != nil {
 		return "", err
 	}

@@ -113,6 +113,10 @@ const (
 type MailHold struct {
 	Reason string    `json:"reason" yaml:"reason"`
 	Since  time.Time `json:"since" yaml:"since"`
+	// Stopped: the held provider couldn't take a revocation, a removal
+	// or a session reset, so the Hub stopped it (Ruling R-HH1, fail
+	// closed); it stays stopped until the re-confirm.
+	Stopped *time.Time `json:"stopped,omitempty" yaml:"stopped,omitempty"`
 }
 
 // MailRecord is one DNS record of a mail set.

@@ -310,10 +310,22 @@ type mailUpModes struct {
 // mailModeBeforeUp downs t's project when its mode changes; answers the
 // mode the up renders. Caller holds the app lock.
 func (h *Hub) mailModeBeforeUp(t *templates.Template) (mailMode, error) {
-	h.mu.RLock()
+	h.mu.Lock()
 	mode := h.mailRenderModeLocked(t)
 	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == t.ID
-	h.mu.RUnlock()
+	// Right before the up again: the hold (R-HH3) and one mode per up
+	// (the override was rendered in rendered; a change since is refused).
+	err := h.mailHoldGateLocked(t)
+	h.mu.Unlock()
+	h.mailRendered.mu.Lock()
+	rendered, known := h.mailRendered.m[t.ID]
+	h.mailRendered.mu.Unlock()
+	if err != nil {
+		return mode, err
+	}
+	if known && rendered != mode {
+		return mode, statusErr(http.StatusConflict, "%s's mail mode changed to %s during the start: try again", t.ID, mode)
+	}
 	if wired && h.mailRestorePending() {
 		return mode, errMailRestorePending
 	}

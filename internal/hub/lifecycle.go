@@ -116,9 +116,13 @@ func (h *Hub) prepareUp(t *templates.Template) (*templates.Template, error) {
 		c := *l
 		live = &c
 	}
-	// The secrets volume's hash directories first (F14: unusable =
-	// refused, 503).
-	err := h.ensureSecretDirsLocked(live)
+	// A held mail provider's changed tree never starts (R-HH3).
+	err := h.mailHoldGateLocked(live)
+	if err == nil {
+		// The secrets volume's hash directories first (F14: unusable =
+		// refused, 503).
+		err = h.ensureSecretDirsLocked(live)
+	}
 	if err == nil {
 		// A locked setup choice the template no longer fits: never
 		// started on other data (§13.18).

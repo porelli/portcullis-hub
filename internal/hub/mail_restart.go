@@ -113,6 +113,14 @@ func (h *Hub) mailRestart(ctx context.Context, why string) error {
 		defer cancel()
 		return h.restartMailProvider(rctx)
 	})
+	if err != nil {
+		h.mu.RLock()
+		held := h.st.Mail.Held != nil
+		h.mu.RUnlock()
+		if held {
+			h.mailStopHeld("a session reset: " + err.Error()) // R-HH1
+		}
+	}
 	rec := OpRecord{Op: OpMailRestart, At: h.mailNow(), OK: err == nil}
 	if err != nil {
 		rec.Error = "restarting mail after " + why + " failed: " + err.Error() + ": mail sessions may still be open"

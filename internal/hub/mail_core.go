@@ -2,6 +2,9 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"log"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"regexp"
@@ -250,14 +253,87 @@ func (h *Hub) mailClient() MailAPI {
 	}
 	h.mu.RLock()
 	var api MailAPI
+	held := false
 	if p := h.st.Mail.Provider; p != nil && h.mailModeLocked(p.Instance) == mailNormal {
-		api = h.mailProviderAPILocked()
+		if hd := h.st.Mail.Held; hd == nil || hd.Stopped == nil {
+			api = h.mailProviderAPILocked()
+			held = hd != nil
+		}
 	}
 	h.mu.RUnlock()
 	if api == nil || api.Available() != nil {
 		return nil
 	}
+	if held {
+		return &heldMailAPI{MailAPI: api, h: h}
+	}
 	return api
+}
+
+// heldMailAPI is the held provider's client (Ruling R-HH1): the running,
+// confirmed containers take every revocation, removal and document as
+// usual; one they can't take stops the provider (fail closed).
+type heldMailAPI struct {
+	MailAPI
+	h *Hub
+}
+
+// mailRefusedByProvider: a 4xx answer (the provider took the request and
+// refused it, e.g. the mass-removal guard) rather than a failure.
+func mailRefusedByProvider(err error) bool {
+	var ae *mailprovider.APIError
+	return errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500
+}
+
+func (a *heldMailAPI) PutState(ctx context.Context, st *mailprovider.MailState) (int, error) {
+	g, err := a.MailAPI.PutState(ctx, st)
+	if err != nil && !mailRefusedByProvider(err) {
+		a.h.mailStopHeld("the mail document: " + err.Error())
+	}
+	return g, err
+}
+
+func (a *heldMailAPI) RevokeCredential(ctx context.Context, uuid, id string) error {
+	err := a.MailAPI.RevokeCredential(ctx, uuid, id)
+	if err != nil && mailprovider.StatusOf(err) != http.StatusNotFound {
+		a.h.mailStopHeld("a revocation: " + err.Error())
+	}
+	return err
+}
+
+func (a *heldMailAPI) State(ctx context.Context) (mailprovider.StateStatus, error) {
+	st, err := a.MailAPI.State(ctx)
+	if err != nil {
+		a.h.mailStopHeld("its state: " + err.Error())
+	}
+	return st, err
+}
+
+// mailStopHeld stops the held provider (R-HH1): it can't take what the
+// Hub must send, and its changed tree can't be started. Recorded in the
+// hold (saved): mail stays down until the re-confirm.
+func (h *Hub) mailStopHeld(why string) {
+	h.mu.RLock()
+	p, hd := h.st.Mail.Provider, h.st.Mail.Held
+	h.mu.RUnlock()
+	if p == nil || hd == nil || hd.Stopped != nil || h.rt == nil {
+		return
+	}
+	log.Printf("mail: the held provider %s can't take %s: stopping it (no mail until an administrator confirms its template)", p.Instance, why)
+	if err := h.rt.DownByName(context.Background(), projectName(p.Instance)); err != nil {
+		log.Printf("mail: stopping the held provider %s failed: %v", p.Instance, err)
+		return
+	}
+	now := h.mailNow().UTC()
+	h.mu.Lock()
+	if cur := h.st.Mail.Held; cur != nil && h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == p.Instance {
+		c := *cur
+		c.Stopped = &now
+		h.st.Mail.Held = &c
+		h.saveLocked()
+	}
+	h.mu.Unlock()
+	h.writeMailTargets()
 }
 
 // WireMailForTest records instance as the wired provider in normal mode
