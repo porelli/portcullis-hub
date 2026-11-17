@@ -559,3 +559,23 @@ func TestMailSecretsInToolRedaction(t *testing.T) {
 		}
 	}
 }
+
+// TestMailRedactionFailsClosed (re-review N-L3): an unreadable mail
+// secret makes the redaction set an error (the AI answer is refused).
+func TestMailRedactionFailsClosed(t *testing.T) {
+	f := voidFixture(t)
+	if err := runVoidNow(t, f); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(f.h.cfg.MailProviderSlotDir, mailGateAPISecret)
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(p, 0o640) })
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything")
+	}
+	if _, err := f.h.ToolRedactionSet(); err == nil {
+		t.Fatal("an unreadable mail secret didn't fail the redaction set")
+	}
+}

@@ -69,11 +69,17 @@ type MailSettings struct {
 	// clears the debt only if it is still the generation it started on
 	// (L19 and the security review: a debt raised during a run stays).
 	VoidGen int `json:"void_gen,omitempty" yaml:"void_gen,omitempty"`
+	// OwedCloses: closes whose stop failed (Ruling RR2-M1): each retried
+	// until its instance is verified down, never overwritten by a later
+	// unwire; a wiring is refused while any is owed.
+	OwedCloses []MailUnwiring `json:"owed_closes,omitempty" yaml:"owed_closes,omitempty"`
 	// RestoreHeld: a core restore's hold (hub_data/mail-restore-pending)
 	// was seen; it stays after the file goes (`mail restore-hold clear`)
 	// until a successful `hub mail restore` or an administrator's Retry,
 	// so the provider is never started on its own (FH-H3 c).
-	RestoreHeld bool `json:"restore_held,omitempty" yaml:"restore_held,omitempty"`
+	// The instance it holds (N-L1: per instance; never blocks wiring
+	// another one).
+	RestoreHeld string `json:"restore_held,omitempty" yaml:"restore_held,omitempty"`
 	// WireSeq numbers the wirings (monotonic): MailProvider.Seq.
 	WireSeq int `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries

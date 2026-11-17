@@ -62,7 +62,11 @@ func (h *Hub) toolRedactionIDs() []string {
 // caller then hides the result (fail closed).
 func (h *Hub) ToolRedactionSet() ([]string, error) {
 	set, err := h.redactionSets(h.toolRedactionIDs()...)
-	return append(set, h.mailRedactionSecrets()...), err
+	mail, merr := h.mailRedactionSecrets()
+	if err == nil {
+		err = merr
+	}
+	return append(set, mail...), err
 }
 
 // mailRedactionFiles are the mail secrets the AI never sees (final
@@ -82,17 +86,27 @@ func (h *Hub) mailRedactionFiles() []string {
 	return out
 }
 
-// mailRedactionSecrets are those files' values (absent ones skipped).
-func (h *Hub) mailRedactionSecrets() []string {
+// mailRedactionSecrets are those files' values (absent ones skipped);
+// any other read error is an error: the caller then hides the result
+// (re-review N-L3: fail closed, never unredacted).
+func (h *Hub) mailRedactionSecrets() ([]string, error) {
 	var out []string
+	var first error
 	for _, p := range h.mailRedactionFiles() {
-		if b, err := os.ReadFile(p); err == nil {
+		b, err := os.ReadFile(p)
+		switch {
+		case err == nil:
 			if v := strings.TrimSpace(string(b)); len(v) >= 4 {
 				out = append(out, v)
 			}
+		case errors.Is(err, fs.ErrNotExist):
+		default:
+			if first == nil {
+				first = fmt.Errorf("reading a mail secret for redaction: %w", err)
+			}
 		}
 	}
-	return out
+	return out, first
 }
 
 // ToolRedactionKey changes whenever ToolRedactionSet may: it names every

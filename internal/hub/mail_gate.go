@@ -632,7 +632,10 @@ const OpMailVoidRetry = "mail_void_retry"
 // the owed void and, verified, the normal up, now (409: no void owed or
 // the provider is held). Audited mail.void_retry.
 func (h *Hub) RetryMailVoid(actor directory.Actor) (*AsyncOp, error) {
-	if h.mailRestorePending() {
+	h.mu.RLock()
+	cur := h.st.Mail.Provider
+	h.mu.RUnlock()
+	if cur != nil && h.mailRestorePendingFor(cur.Instance) {
 		return nil, errMailRestorePending
 	}
 	h.mu.Lock()
@@ -640,8 +643,8 @@ func (h *Hub) RetryMailVoid(actor directory.Actor) (*AsyncOp, error) {
 	// After a core restore's hold went by hand (`mail restore-hold
 	// clear`), the administrator's Retry is what starts the provider
 	// again, always through a void (FH-H3 c).
-	if p != nil && h.st.Mail.RestoreHeld {
-		h.st.Mail.RestoreHeld = false
+	if p != nil && h.st.Mail.RestoreHeld == p.Instance {
+		h.st.Mail.RestoreHeld = ""
 		if h.st.Mail.VoidOwed == nil {
 			h.raiseVoidDebtLocked(state.MailVoidRestore)
 		}

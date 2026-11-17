@@ -101,6 +101,11 @@ func (h *Hub) mailWireRefusalsLocked(t *templates.Template, except string) []str
 	if !core.On {
 		out = append(out, mailSlotOffText)
 	}
+	// A former provider's stop still owed (RR2-M1): no wiring until it
+	// is down.
+	if len(h.st.Mail.OwedCloses) > 0 {
+		out = append(out, "the previous provider's stop is still owed ("+h.st.Mail.OwedCloses[0].Instance+"): it is retried; wire again once it is down")
+	}
 	// Primary only (final review M2): the gate, mail_tls and the API
 	// network exist on the primary; its listeners are MAIL_HOSTNAME's.
 	if s := h.st.Instances[t.ID].Server; s != "" {

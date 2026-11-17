@@ -67,7 +67,7 @@ func TestFinalReviewSwitchFailedStopRetried(t *testing.T) {
 	calls := w.runner.Calls()[before:]
 	downs := 0
 	for _, c := range calls {
-		if c == "down:portcullis-"+mailProviderID {
+		if c == "down:portcullis-"+mailProviderID || c == "downbyname:portcullis-"+mailProviderID {
 			downs++
 		}
 	}
@@ -170,7 +170,12 @@ func TestFinalReviewStaleClosingUnwiresNewWiring(t *testing.T) {
 	w.h.mu.RLock()
 	t.Logf("after failed unwire: provider=%v unwiring=%+v", w.h.st.Mail.Provider != nil, w.h.st.Mail.Unwiring)
 	w.h.mu.RUnlock()
-	// Wire again before the retry loop's next pass.
+	// RR2-M1: no wiring while the stop is owed; the retry downs it,
+	// then the wiring goes.
+	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof}, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("re-wire while the stop is owed: %v", err)
+	}
+	w.h.mailVoidRetryOnce(context.Background())
 	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof}, rootActor()); err != nil {
 		t.Fatalf("re-wire: %v", err)
 	}
@@ -229,6 +234,10 @@ func TestFinalReviewStaleClosingVoidsOtherProvider(t *testing.T) {
 	w.runner.downErr, w.runner.byNameErr = errors.New("engine down"), errors.New("engine down")
 	_ = w.unwire(t, false, rootActor())
 	w.runner.downErr, w.runner.byNameErr = nil, nil
+	if _, err := w.h.StartWireMail(context.Background(), otherMailID, WireRequest{Confirm: otherMailID, Proof: &wireProof}, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("wire othermail while the stop is owed: %v", err)
+	}
+	w.h.mailVoidRetryOnce(context.Background())
 	if _, err := w.h.StartWireMail(context.Background(), otherMailID, WireRequest{Confirm: otherMailID, Proof: &wireProof}, rootActor()); err != nil {
 		t.Fatalf("wire othermail: %v", err)
 	}

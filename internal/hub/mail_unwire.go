@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -326,6 +327,21 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 	}
 	h.writePolicyLogged()
 	h.TriggerReconcile()
+	if downErr != nil {
+		// The stop is owed in its own list (RR2-M1): retried until done,
+		// never overwritten by the next unwire; wiring waits for it.
+		h.mu.Lock()
+		owed := state.MailUnwiring{Instance: id, Since: h.mailNow().UTC(), Closing: true}
+		if u := h.st.Mail.Unwiring; u != nil && u.Instance == id {
+			owed = *u
+			h.st.Mail.Unwiring = nil
+		}
+		if !slices.ContainsFunc(h.st.Mail.OwedCloses, func(o state.MailUnwiring) bool { return o.Instance == id }) {
+			h.st.Mail.OwedCloses = append(h.st.Mail.OwedCloses, owed)
+		}
+		h.saveLocked()
+		h.mu.Unlock()
+	}
 	for _, err := range []error{gateErr, saveErr, downErr} {
 		if err != nil {
 			return err
@@ -341,9 +357,33 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 	return nil
 }
 
+// mailRetryOwedCloses retries every owed stop (RR2-M1), bounded: an
+// entry goes once its instance is verified down (audited
+// mail.provider_stopped).
+func (h *Hub) mailRetryOwedCloses() {
+	h.mu.RLock()
+	owed := slices.Clone(h.st.Mail.OwedCloses)
+	h.mu.RUnlock()
+	for _, o := range owed {
+		ctx, cancel := context.WithTimeout(context.Background(), mailStopTimeout)
+		err := h.rt.DownByName(ctx, projectName(o.Instance))
+		cancel()
+		if err != nil {
+			log.Printf("mail: the owed stop of %s failed (retrying): %v", o.Instance, err)
+			continue
+		}
+		h.mu.Lock()
+		h.st.Mail.OwedCloses = slices.DeleteFunc(h.st.Mail.OwedCloses, func(x state.MailUnwiring) bool { return x.Instance == o.Instance })
+		h.saveLocked()
+		h.mu.Unlock()
+		h.auditOp(directory.Human(o.By), "mail.provider_stopped", o.Instance, "owed stop", nil)
+	}
+}
+
 // mailResumeClosing finishes a close that crashed or whose stop failed
 // (M4): at start and from the retry loop.
 func (h *Hub) mailResumeClosing() {
+	h.mailRetryOwedCloses()
 	h.mu.RLock()
 	u := h.st.Mail.Unwiring
 	h.mu.RUnlock()
@@ -583,6 +623,16 @@ func (h *Hub) runSwitchMail(ctx context.Context, t *templates.Template, from str
 		return nil, err
 	}
 	unlockFrom()
+	// The old provider's stop still owed (RR2-M1): the new one waits;
+	// the switch record stays and resumes once it is down.
+	h.mu.RLock()
+	owedStop := len(h.st.Mail.OwedCloses) > 0
+	h.mu.RUnlock()
+	if owedStop {
+		err := statusErr(http.StatusConflict, "the previous provider's stop is still owed (%s): the switch resumes once it is down", from)
+		prog.planned(StepMailUnwire).Fail(StepMailUnwire, err)
+		return nil, err
+	}
 	prog.planned(StepMailUnwire).Done(StepMailUnwire)
 	p, err := h.runWireMail(ctx, t, actor, state.MailVoidWire)
 	h.mu.Lock()

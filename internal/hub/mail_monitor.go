@@ -308,9 +308,23 @@ func (h *Hub) mailRestoreGate(ctx context.Context, id, archive string) error {
 func (h *Hub) mailRestoreHolds(id string) bool {
 	h.mu.RLock()
 	wired := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
-	held := h.st.Mail.RestoreHeld
+	held := h.st.Mail.RestoreHeld == id
 	h.mu.RUnlock()
-	return wired && (held || h.mailRestorePending())
+	return wired && (held || h.mailRestorePendingFor(id))
+}
+
+// mailRestorePendingFor: the hold file names an archive of id (an
+// unreadable or malformed file holds every instance: fail closed).
+func (h *Hub) mailRestorePendingFor(id string) bool {
+	if !h.mailRestorePending() {
+		return false
+	}
+	name, ok, err := h.mailRestorePendingArchive()
+	if err != nil || !ok {
+		return err != nil
+	}
+	inst, _, _ := strings.Cut(name, "/")
+	return inst == id
 }
 
 // mailNoteRestorePending records a hold file seen (RestoreHeld), at the
@@ -320,8 +334,13 @@ func (h *Hub) mailNoteRestorePending() {
 		return
 	}
 	h.mu.Lock()
-	if h.st.Mail.Provider != nil && !h.st.Mail.RestoreHeld {
-		h.st.Mail.RestoreHeld = true
+	if p := h.st.Mail.Provider; p != nil && h.st.Mail.RestoreHeld != p.Instance {
+		h.mu.Unlock()
+		if !h.mailRestorePendingFor(p.Instance) {
+			return
+		}
+		h.mu.Lock()
+		h.st.Mail.RestoreHeld = p.Instance
 		h.saveLocked()
 	}
 	h.mu.Unlock()
@@ -404,7 +423,7 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 				err = fmt.Errorf("the provider is restored, but removing %s failed: %w", mailRestorePendingFile, rerr)
 			} else {
 				h.mu.Lock()
-				h.st.Mail.RestoreHeld = false
+				h.st.Mail.RestoreHeld = ""
 				h.saveLocked()
 				h.mu.Unlock()
 			}

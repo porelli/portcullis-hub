@@ -589,3 +589,23 @@ func TestWiredProviderRestoredOnlyOnHost(t *testing.T) {
 		t.Fatalf("host restore %+v", v)
 	}
 }
+
+// TestRestoreHoldPerInstance (re-review N-L1, Ruling RR2-L): a core
+// restore's hold of one instance never blocks wiring another.
+func TestRestoreHoldPerInstance(t *testing.T) {
+	w := newWireFix(t, otherMailID)
+	writeFile(t, filepath.Join(w.h.cfg.DataDir, mailRestorePendingFile), mailProviderID+"/20261117T000000Z.tar\n")
+	w.h.mu.Lock()
+	w.h.st.Mail.RestoreHeld = mailProviderID
+	w.h.mu.Unlock()
+	if _, err := w.h.StartWireMail(context.Background(), otherMailID, WireRequest{Confirm: otherMailID, Proof: &wireProof, Listener: ListenerHub}, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if lo := w.h.LastOp(otherMailID); lo == nil || !lo.OK {
+		t.Fatalf("wiring another instance under the hold: %+v", lo)
+	}
+	if !w.h.mailRestorePendingFor(mailProviderID) || w.h.mailRestorePendingFor(otherMailID) {
+		t.Fatal("mailRestorePendingFor")
+	}
+}

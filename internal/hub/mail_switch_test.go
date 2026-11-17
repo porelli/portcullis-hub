@@ -179,15 +179,35 @@ func TestUnwireFailedStopStaysOwed(t *testing.T) {
 		}
 	}
 	st, _ := state.Load(w.h.statePath())
-	if st.Mail.Unwiring == nil || !st.Mail.Unwiring.Closing {
-		t.Fatalf("the owed close isn't saved: %+v", st.Mail.Unwiring)
+	if len(st.Mail.OwedCloses) != 1 || st.Mail.OwedCloses[0].Instance != mailProviderID {
+		t.Fatalf("the owed stop isn't saved: %+v", st.Mail.OwedCloses)
 	}
 	w.runner.downErr, w.runner.byNameErr = nil, nil
 	w.h.mailVoidRetryOnce(context.Background())
 	w.h.mu.RLock()
 	defer w.h.mu.RUnlock()
-	if w.h.st.Mail.Unwiring != nil {
-		t.Fatalf("the retry didn't finish it: %+v", w.h.st.Mail.Unwiring)
+	if w.h.st.Mail.Unwiring != nil || len(w.h.st.Mail.OwedCloses) != 0 {
+		t.Fatalf("the retry didn't finish it: %+v %+v", w.h.st.Mail.Unwiring, w.h.st.Mail.OwedCloses)
+	}
+}
+
+// TestRROwedStopNeverOverwritten (re-review N-M1, Ruling RR2-M1): an
+// owed stop stays in its own list: no wiring while it is owed, and a
+// later unwire never drops it.
+func TestRROwedStopNeverOverwritten(t *testing.T) {
+	w := switchFix(t)
+	w.runner.downErr, w.runner.byNameErr = errors.New("engine down"), errors.New("engine down")
+	_ = w.unwire(t, false, rootActor())
+	if _, err := w.h.StartWireMail(context.Background(), otherMailID, WireRequest{Confirm: otherMailID, Proof: &wireProof}, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("wiring while a stop is owed: %v", err)
+	}
+	// Retries that still fail keep it.
+	w.h.mailVoidRetryOnce(context.Background())
+	w.h.mu.RLock()
+	n := len(w.h.st.Mail.OwedCloses)
+	w.h.mu.RUnlock()
+	if n != 1 {
+		t.Fatalf("owed %d", n)
 	}
 }
 
@@ -672,5 +692,17 @@ func TestDeleteRechecksWiredUnderLock(t *testing.T) {
 	}
 	if _, err := w.h.DeleteInstance(mailProviderID, mailProviderID, rootActor()); statusOf(err) != 409 {
 		t.Fatalf("%v", err)
+	}
+}
+
+// TestUnwireOfUnwiredAudited (re-review N-L4, L8): the unwire's 409 for
+// an instance that isn't the provider is audited.
+func TestUnwireOfUnwiredAudited(t *testing.T) {
+	w := wiredFix(t)
+	if _, err := w.h.StartUnwireMail(otherMailID, false, rootActor()); statusOf(err) != 409 {
+		t.Fatalf("%v", err)
+	}
+	if e := w.audit.last(); e.Action != "mail.provider_unwired" || e.Target != otherMailID || e.Result == "ok" {
+		t.Fatalf("audit %+v", e)
 	}
 }

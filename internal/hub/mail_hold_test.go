@@ -474,3 +474,20 @@ func TestIsMailInstance(t *testing.T) {
 		t.Fatal("IsMailInstance")
 	}
 }
+
+// TestNoAIExecIntoUnwiredMailInstance (re-review N-L4, M4 end to end):
+// an AI actor's exec into an unwired mail instance is 403; a person's
+// reaches the engine's checks.
+func TestNoAIExecIntoUnwiredMailInstance(t *testing.T) {
+	w := switchFix(t)
+	ai := directory.Actor{User: "root", Via: directory.ViaAI, Client: "portcullis-ai-claude-code"}
+	if _, err := w.h.ExecAs(context.Background(), ai, otherMailID, "stalwart", "true"); statusOf(err) != 403 {
+		t.Fatalf("AI exec into the unwired mail instance: %v", err)
+	}
+	if _, err := w.h.ExecAs(context.Background(), ai, mailProviderID, "stalwart", "true"); statusOf(err) != 403 {
+		t.Fatalf("AI exec into the wired provider: %v", err)
+	}
+	if _, err := w.h.ExecAs(context.Background(), rootActor(), otherMailID, "stalwart", "true"); statusOf(err) == 403 {
+		t.Fatal("a person refused as an AI")
+	}
+}
