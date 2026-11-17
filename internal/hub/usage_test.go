@@ -224,8 +224,9 @@ func TestUsageInspectEvery5Min(t *testing.T) {
 
 func TestUsageNeverKeepsEnv(t *testing.T) {
 	var logs bytes.Buffer
+	prev := log.Writer()
 	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(nil) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 	e := newUsageEnv(t, "a")
 	u := uunit("a1", "portcullis-a", "web", 1, "running")
 	u.Labels["io.example.secret"] = "SECRET_TOKEN=abc"
@@ -371,8 +372,9 @@ func TestUsageStoppedAppShowsStopped(t *testing.T) {
 
 func TestUsageSweepBudget(t *testing.T) {
 	var logs bytes.Buffer
+	prev := log.Writer()
 	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(nil) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 	e := newUsageEnv(t, "a")
 	var us []runtime.Unit
 	for i := range 40 {
