@@ -489,19 +489,40 @@ func TestPreflightPullOverTheWire(t *testing.T) {
 	}
 }
 
-// TestDownOfUnbundledProjectIsDone (seen live: a move back's rollback was
-// stuck on "taking se1 down on w1 failed (no such project)"): over the wire,
-// a down of a project the agent holds no bundle of is done — the agent's
-// 404 means nothing of it runs there; a create of one is still refused.
-func TestDownOfUnbundledProjectIsDone(t *testing.T) {
+// TestDownOfUnbundledProject (security review): over the wire, a down of
+// a project the agent holds no bundle of is done only on the agent's 204
+// (nothing of it left); a leftover container that stays is the agent's
+// 409, an error the Hub never reads as "down"; a create of one is refused.
+func TestDownOfUnbundledProject(t *testing.T) {
 	w := newWorker(t)
 	b, _ := w.backend(t, nil)
 	p := runtime.Project{Name: "portcullis-other", Instance: "other"}
 	if err := b.Down(context.Background(), p); err != nil {
-		t.Fatalf("down of an unbundled project: %v", err)
+		t.Fatalf("down with nothing there: %v", err)
 	}
+	w.engine.Lock()
+	w.engine.Units = append(w.engine.Units, runtime.Unit{ID: "c9", Project: "portcullis-other", Instance: "other", State: "running"})
+	w.engine.Unlock()
 	var ae *Error
+	if err := b.Down(context.Background(), p); !errors.As(err, &ae) || ae.Status != http.StatusConflict || !strings.Contains(ae.Msg, "still running") {
+		t.Errorf("down with a leftover that stays: %v", err)
+	}
 	if err := b.Create(context.Background(), p); !errors.As(err, &ae) || ae.Status != http.StatusNotFound {
 		t.Errorf("create of an unbundled project: %v", err)
+	}
+}
+
+// TestCreateVolumeRefusalIs409 (seen live: a move back onto a worker that
+// still held the previous copy failed as "answered unexpectedly"): the
+// agent's 403 for a volume in no bundle's manifest is a clear 409 naming
+// the server and the volume.
+func TestCreateVolumeRefusalIs409(t *testing.T) {
+	w := newWorker(t)
+	b, _ := w.backend(t, nil)
+	err := b.CreateVolume(context.Background(), runtime.Volume{Name: "portcullis_se1-marker", Labels: map[string]string{docker.LabelProject: "portcullis-se1"}})
+	var ae *Error
+	if !errors.As(err, &ae) || ae.Status != http.StatusConflict ||
+		ae.Msg != "the server nas refused to create volume portcullis_se1-marker: a previous copy may still be there" {
+		t.Fatalf("%v", err)
 	}
 }

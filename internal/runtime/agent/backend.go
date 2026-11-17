@@ -65,17 +65,13 @@ func (b *Backend) project(ctx context.Context, m string, p runtime.Project) erro
 func (b *Backend) Create(ctx context.Context, p runtime.Project) error {
 	return b.project(ctx, "Create", p)
 }
-// Down takes the project down. The agent's 404 "no such project" (it holds
-// no bundle of it: never created there, or removed) is a down — nothing of
-// it runs there; every caller (a move's rollback, a recovery, a drain)
-// would otherwise stay stuck on it.
+
+// Down takes the project down: only the agent's 204 is done. For a
+// project it holds no bundle of, the agent takes every container
+// labelled with it down by name and answers 409 while any remains — never
+// a 404 read as "down".
 func (b *Backend) Down(ctx context.Context, p runtime.Project) error {
-	err := b.project(ctx, "Down", p)
-	var ae *Error
-	if errors.As(err, &ae) && ae.AgentStatus == http.StatusNotFound {
-		return nil
-	}
-	return err
+	return b.project(ctx, "Down", p)
 }
 
 // DownByName takes portcullis-<id> down (name must be one).
@@ -271,8 +267,17 @@ func (b *Backend) InspectVolume(ctx context.Context, name string) (runtime.Volum
 	return v.Runtime(), err
 }
 
+// CreateVolume creates v. The agent's 403 (the volume is in no bundle's
+// manifest — on a move's restore, a previous copy of the instance still
+// there) is a clear 409, never the generic 502 (contract §17.6).
 func (b *Backend) CreateVolume(ctx context.Context, v runtime.Volume) error {
-	return b.c.json(ctx, "POST", R("CreateVolume", 0).Path, nil, agentapi.VolumeOf(v), nil, 0)
+	err := b.c.json(ctx, "POST", R("CreateVolume", 0).Path, nil, agentapi.VolumeOf(v), nil, 0)
+	var ae *Error
+	if errors.As(err, &ae) && ae.AgentStatus == http.StatusForbidden {
+		return &Error{Status: http.StatusConflict, AgentStatus: ae.AgentStatus,
+			Msg: "the server " + b.c.cfg.ServerID + " refused to create volume " + v.Name + ": a previous copy may still be there"}
+	}
+	return err
 }
 
 func (b *Backend) RemoveVolume(ctx context.Context, name string) error {

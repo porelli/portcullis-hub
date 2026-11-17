@@ -194,7 +194,7 @@ func (a *API) routes() {
 	h(X["StopOp"], a.stopOp)
 	h(R["Create"][0], a.withProjectID(true, a.lifecycle("create")))
 	h(R["Up"][0], a.withProjectID(true, a.lifecycle("up")))
-	h(R["Down"][0], a.withProjectID(true, a.lifecycle("down")))
+	h(R["Down"][0], a.withProjectID(false, a.lifecycle("down"))) // an unbundled one too: unbundledDown
 	h(R["DownByName"][0], a.withProjectID(true, a.lifecycle("down-by-name")))
 	h(R["Pull"][0], a.pull)
 	h(R["EnsureImage"][0], a.ensureImage)
@@ -434,6 +434,10 @@ func (a *API) lifecycle(verb string) func(w http.ResponseWriter, r *http.Request
 	return func(w http.ResponseWriter, r *http.Request, id string) {
 		ctx, done := a.opContext(r)
 		defer done()
+		if verb == "down" && a.project(id) == nil {
+			a.unbundledDown(ctx, w, id)
+			return
+		}
 		p := a.runtimeProject(id)
 		if why := a.quarantineOf(id); why != "" && (verb == "create" || verb == "up") {
 			writeError(w, http.StatusConflict, clipMsg("the instance is quarantined: "+why+" (an admin must lift it)"))
@@ -1184,6 +1188,31 @@ func (a *API) checkMounts(id string, p *project, mounts []runtime.Mount) string 
 		}
 	}
 	return ""
+}
+
+// unbundledDown is a Down for a project the agent holds no bundle of (a
+// copy whose bundle went: a move's rollback, a drain): every container
+// labelled with its compose project is taken down by name (the sweep's
+// way; volumes kept), then 204 only when none remains — else 409, never
+// a guessed "down".
+func (a *API) unbundledDown(ctx context.Context, w http.ResponseWriter, id string) {
+	name := runtime.ProjectName(id)
+	if err := a.cfg.Runtime.DownByName(ctx, name); err != nil {
+		writeError(w, http.StatusConflict, clipMsg("containers of "+id+" are still running: "+err.Error()))
+		return
+	}
+	units, err := a.cfg.Runtime.List(ctx, runtime.Filter{Instance: id})
+	if err != nil {
+		engineError(w, err)
+		return
+	}
+	for _, u := range units {
+		if u.Project == name {
+			writeError(w, http.StatusConflict, "containers of "+id+" are still running")
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // downUntilDone takes instance id's project down, retried with backoff
