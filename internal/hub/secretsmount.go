@@ -17,6 +17,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"golang.org/x/mod/semver"
 
+	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -288,14 +289,40 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 		return statusErr(http.StatusServiceUnavailable, "%s was not started: per-person passwords need the Docker Engine API", t.ID)
 	}
 	info, err := h.rt.Info(ctx)
-	api := info.APIVersion
 	if err != nil {
-		return statusErr(http.StatusServiceUnavailable, "%s was not started: can't read the Docker Engine API version: %v", t.ID, err)
+		return statusErr(http.StatusServiceUnavailable, "%s was not started: can't read the container engine's version: %v", t.ID, err)
 	}
-	if !semver.IsValid("v"+api) || semver.Compare("v"+api, "v"+MinSubpathAPI) < 0 {
-		return statusErr(http.StatusConflict, "%s was not started: Docker Engine API %s is too old for per-person passwords (volume subpath mounts need API %s, Docker Engine 26.0 or newer)", t.ID, clip(api, 40), MinSubpathAPI)
+	if why := subpathRefusal(h.cfg.Runtime, info); why != "" {
+		return statusErr(http.StatusConflict, "%s was not started: %s", t.ID, why)
 	}
 	return nil
+}
+
+// MinSubpathPodman is the Podman version whose volume subpath mounts
+// the Hub relies on (core's floor, Ruling R-POD).
+const MinSubpathPodman = "5.4"
+
+// subpathRefusal is why the engine can't do volume subpath mounts (""
+// = it can). Under Podman its own version (/version's "Podman Engine"
+// component) decides, never the compat API version (always 1.41);
+// under Docker the Engine API version (1.45). The runtime fence stays
+// the adapter's CheckLayout.
+func subpathRefusal(kind runtime.Kind, info runtime.Info) string {
+	if kind == runtime.KindPodman {
+		v := info.EngineVersion
+		if !semver.IsValid("v"+v) || semver.Compare("v"+v, "v"+MinSubpathPodman) < 0 {
+			if v == "" {
+				v = "(unknown)"
+			}
+			return "Podman " + clip(v, 40) + " is too old for volume subpath mounts (per-person passwords, the mail slot): Podman " + MinSubpathPodman + " or newer is needed"
+		}
+		return ""
+	}
+	api := info.APIVersion
+	if !semver.IsValid("v"+api) || semver.Compare("v"+api, "v"+MinSubpathAPI) < 0 {
+		return "Docker Engine API " + clip(api, 40) + " is too old for per-person passwords (volume subpath mounts need API " + MinSubpathAPI + ", Docker Engine 26.0 or newer)"
+	}
+	return ""
 }
 
 // checkMailMounts is contract §19.1's mail_tls check on t's rendered

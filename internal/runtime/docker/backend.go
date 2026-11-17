@@ -138,6 +138,21 @@ func (b *Backend) Info(ctx context.Context) (runtime.Info, error) {
 	if i.APIVersion, err = b.engine.APIVersion(ctx); err != nil {
 		return i, fmt.Errorf("the API version: %w", err)
 	}
+	// The engine's own version from /version's Components (Ruling R-POD:
+	// Podman's compat API always says 1.41; its own version decides).
+	if vr, ok := b.engine.(engine.VersionReader); ok {
+		if cs, cerr := vr.Components(ctx); cerr == nil {
+			want := engine.ComponentDocker
+			if b.opt.Kind == runtime.KindPodman {
+				want = engine.ComponentPodman
+			}
+			for _, c := range cs {
+				if c.Name == want {
+					i.EngineVersion = c.Version
+				}
+			}
+		}
+	}
 	if i.Networks, err = b.engine.ListNetworks(ctx); err != nil {
 		return i, fmt.Errorf("the networks: %w", err)
 	}

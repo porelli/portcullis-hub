@@ -468,3 +468,35 @@ func TestRestartServiceNarrow(t *testing.T) {
 		t.Fatalf("refused restarts ran: %d", n)
 	}
 }
+
+// versionEngine answers /version's Components (Ruling R-POD).
+type versionEngine struct {
+	*recorder
+	cs []engine.Component
+}
+
+func (v *versionEngine) Components(context.Context) ([]engine.Component, error) { return v.cs, nil }
+
+// TestInfoEngineVersionFromComponents (R-POD): Info's EngineVersion is
+// the runtime's own component version: "Podman Engine" under Podman,
+// "Engine" under Docker; the compat API version never stands in.
+func TestInfoEngineVersionFromComponents(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		kind runtime.Kind
+		cs   []engine.Component
+		want string
+	}{
+		{runtime.KindPodman, []engine.Component{{Name: "Podman Engine", Version: "5.4.0"}}, "5.4.0"},
+		{runtime.KindPodman, []engine.Component{{Name: "Podman Engine", Version: "4.9.3"}}, "4.9.3"},
+		{runtime.KindDocker, []engine.Component{{Name: "Engine", Version: "26.0.0"}, {Name: "containerd", Version: "1.7"}}, "26.0.0"},
+	} {
+		r := &recorder{}
+		e := &versionEngine{recorder: r, cs: c.cs}
+		b := New(r, e, Options{Kind: c.kind, HelperImage: testHelper})
+		info, err := b.Info(ctx)
+		if err != nil || info.EngineVersion != c.want {
+			t.Errorf("%s %v: %q %v", c.kind, c.cs, info.EngineVersion, err)
+		}
+	}
+}
