@@ -197,18 +197,18 @@ func TestPlacedPullRefs(t *testing.T) {
 	writeFile(t, filepath.Join(p.src, "refapp", "manifest.yaml"), "name: Refs\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\n")
 	writeFile(t, filepath.Join(p.src, "refapp", "compose.yml"), `services:
   plain:
-    image: plain:1
+    image: plain:1@sha256:3333333333333333333333333333333333333333333333333333333333333333
     labels:
       traefik.enable: "true"
       traefik.http.routers.refs.rule: Host(`+"`${PORTCULLIS_HOST_REFS:-refs.portcullis.local}`"+`)
       traefik.http.routers.refs.middlewares: portcullis-auth@docker,portcullis-groups@docker
       traefik.http.services.refs.loadbalancer.server.port: "8080"
   defaulted:
-    image: ${IMG_DEF:-reg.example/def:1}
+    image: ${IMG_DEF:-reg.example/def:1@sha256:4444444444444444444444444444444444444444444444444444444444444444}
   overridden:
-    image: ${IMG_OVR:-reg.example/ovr:1}
+    image: ${IMG_OVR:-reg.example/ovr:1@sha256:5555555555555555555555555555555555555555555555555555555555555555}
   domain:
-    image: reg.${PORTCULLIS_DOMAIN}/dom:1
+    image: reg.${PORTCULLIS_DOMAIN}/dom:1@sha256:6666666666666666666666666666666666666666666666666666666666666666
 `)
 	p.h.Discover()
 	if err := p.create(t, "refapp", "nas"); err != nil {
@@ -224,7 +224,7 @@ func TestPlacedPullRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := p.h.pullRefs(context.Background(), p.h.Template("refapp"))
-	want := []string{"plain:1", "reg." + p.h.cfg.Domain + "/dom:1", "reg.example/def:1"}
+	want := []string{"plain:1@sha256:3333333333333333333333333333333333333333333333333333333333333333", "reg." + p.h.cfg.Domain + "/dom:1@sha256:6666666666666666666666666666666666666666666666666666666666666666", "reg.example/def:1@sha256:4444444444444444444444444444444444444444444444444444444444444444"}
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("pullRefs = %v, want %v", got, want)

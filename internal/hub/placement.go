@@ -205,6 +205,13 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 		pulls = append(pulls, pull{raw, ref})
 	}
 	sort.Slice(pulls, func(i, j int) bool { return pulls[i].raw < pulls[j].raw })
+	// A worker runs only images pinned by digest (it never pulls a
+	// mutable tag): every ref is checked before any pull.
+	for _, pl := range pulls {
+		if !docker.DigestRef(pl.ref) {
+			return statusErr(409, "image %s isn't pinned by digest: templates must pin images to run on a worker", pl.raw)
+		}
+	}
 	// No bundle exists yet: the agent pulls only with preflight (a ref
 	// pinned by digest, contract §17.4).
 	pre, ok := rt.(preflighter)
@@ -214,11 +221,6 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 	pctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	for _, pl := range pulls {
-		// Only a ref pinned by digest is pre-pulled (the agent refuses
-		// others); an unpinned one is pulled at the up, after its bundle.
-		if !docker.DigestRef(pl.ref) {
-			continue
-		}
 		// Messages name the template's unexpanded reference.
 		if err := pre.PreflightPull(pctx, pl.ref); err != nil {
 			// The agent's own words in the log only (the ref, the server and

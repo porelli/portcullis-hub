@@ -170,10 +170,10 @@ func newPlacedFixture(t *testing.T) *placedFixture {
 	t.Helper()
 	f := newFixture(t)
 	for id, files := range map[string][2]string{
-		"tcpapp":   {"name: TCP\ncategory: misc\nai: {unsupported: t}\nplacement: primary_only\nauth: {method: forward-auth}\n", "services:\n  web:\n    image: tcp:1\n    labels:\n      traefik.http.routers.t.rule: Host(`${PORTCULLIS_HOST_T:-t.portcullis.local}`)\n"},
-		"lowport":  {"name: Low\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\nports:\n  - key: LOW_PORT\n    container: 80\n    default: 80\n    service: web\n", "services:\n  web:\n    image: low:1\n    labels:\n      traefik.http.routers.low.rule: Host(`${PORTCULLIS_HOST_LOW:-low.portcullis.local}`)\n"},
+		"tcpapp":   {"name: TCP\ncategory: misc\nai: {unsupported: t}\nplacement: primary_only\nauth: {method: forward-auth}\n", "services:\n  web:\n    image: tcp:1@sha256:1111111111111111111111111111111111111111111111111111111111111111\n    labels:\n      traefik.http.routers.t.rule: Host(`${PORTCULLIS_HOST_T:-t.portcullis.local}`)\n"},
+		"lowport":  {"name: Low\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\nports:\n  - key: LOW_PORT\n    container: 80\n    default: 80\n    service: web\n", "services:\n  web:\n    image: low:1@sha256:2222222222222222222222222222222222222222222222222222222222222222\n    labels:\n      traefik.http.routers.low.rule: Host(`${PORTCULLIS_HOST_LOW:-low.portcullis.local}`)\n"},
 		"filesapp": {"name: Files\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: files:1@sha256:" + strings.Repeat("f", 64) + "\n    restart: unless-stopped\n    volumes:\n      - ./templates/filesapp/conf.ini:/etc/conf.ini:ro\n      - data:/data\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.files.rule: Host(`${PORTCULLIS_HOST_FILES:-files.portcullis.local}`)\n      traefik.http.routers.files.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.files.loadbalancer.server.port: \"8080\"\nvolumes:\n  data: {}\n"},
-		"plainapp": {"name: Plain\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: plain:1\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.plain.rule: Host(`${PORTCULLIS_HOST_PLAIN:-plain.portcullis.local}`)\n      traefik.http.routers.plain.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.plain.loadbalancer.server.port: \"8080\"\n"},
+		"plainapp": {"name: Plain\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: plain:1@sha256:3333333333333333333333333333333333333333333333333333333333333333\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.plain.rule: Host(`${PORTCULLIS_HOST_PLAIN:-plain.portcullis.local}`)\n      traefik.http.routers.plain.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.plain.loadbalancer.server.port: \"8080\"\n"},
 	} {
 		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), files[0])
 		writeFile(t, filepath.Join(f.src, id, "compose.yml"), files[1])
@@ -229,6 +229,8 @@ func TestPlacementRefusals(t *testing.T) {
 			p.w.pullErr = errors.New("no matching manifest for linux/arm64 in the manifest list entries")
 			p.w.info.Arch = "arm64"
 		}, "files:1@sha256:" + strings.Repeat("f", 64) + " has no arm64 image"},
+		"unpinned image": {"plainapp", func(p *placedFixture) { p.unpin(t, "plainapp") },
+			"image plain:1 isn't pinned by digest: templates must pin images to run on a worker"},
 		"revoked meanwhile": {"filesapp", func(p *placedFixture) {
 			p.h.mu.Lock()
 			s := p.h.st.Servers["nas"]
@@ -281,15 +283,23 @@ func TestPlacementPrePullIsPreflight(t *testing.T) {
 	if len(calls) == 0 || calls[0] != pinned {
 		t.Errorf("worker calls %v: want the preflight %q first", calls, pinned)
 	}
+	// The primary is unchanged: an unpinned image is still accepted there.
 	q := newPlacedFixture(t)
-	if err := q.create(t, "plainapp", "nas"); err != nil {
-		t.Fatalf("an unpinned template on the worker: %v", err)
+	q.unpin(t, "plainapp")
+	if err := q.create(t, "plainapp", ""); err != nil {
+		t.Fatalf("an unpinned template on the primary: %v", err)
 	}
-	for _, c := range q.w.Calls() {
-		if strings.HasPrefix(c, "pull ") {
-			t.Errorf("an unpinned ref was pre-pulled: %s", c)
-		}
+	if calls := q.w.Calls(); len(calls) != 0 {
+		t.Errorf("the worker was asked %v", calls)
 	}
+}
+
+// unpin rewrites template id's image to its unpinned tag (plain:1).
+func (p *placedFixture) unpin(t *testing.T, id string) {
+	t.Helper()
+	f := filepath.Join(p.src, id, "compose.yml")
+	writeFile(t, f, strings.Replace(mustReadS(t, f), "@sha256:"+strings.Repeat("3", 64), "", 1))
+	p.h.Discover()
 }
 
 func TestLifecycleOnWorker(t *testing.T) {

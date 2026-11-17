@@ -42,7 +42,7 @@ func TestDockerRootTargetServer(t *testing.T) {
 	pr := priRoot.ForbiddenRoots[0]
 	bind := func(id, src string) {
 		writeFile(t, filepath.Join(p.src, id, "manifest.yaml"), "name: B\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\n")
-		writeFile(t, filepath.Join(p.src, id, "compose.yml"), "services:\n  web:\n    image: plain:1\n    volumes:\n      - "+src+":/x\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers."+id+".rule: Host(`${PORTCULLIS_HOST_"+strings.ToUpper(id)+":-"+id+".portcullis.local}`)\n      traefik.http.routers."+id+".middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services."+id+".loadbalancer.server.port: \"8080\"\n")
+		writeFile(t, filepath.Join(p.src, id, "compose.yml"), "services:\n  web:\n    image: plain:1@sha256:3333333333333333333333333333333333333333333333333333333333333333\n    volumes:\n      - "+src+":/x\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers."+id+".rule: Host(`${PORTCULLIS_HOST_"+strings.ToUpper(id)+":-"+id+".portcullis.local}`)\n      traefik.http.routers."+id+".middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services."+id+".loadbalancer.server.port: \"8080\"\n")
 	}
 	bind("nearworker", "/srv/docker/volumes")
 	bind("nearprimary", filepath.ToSlash(filepath.Join(pr, "volumes")))
