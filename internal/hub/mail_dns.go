@@ -157,6 +157,12 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 		}
 		return fmt.Errorf("%s: reading the wanted mail records: %v", name, err)
 	}
+	// The Hub's own judgement first (contract §19.7): a set outside the
+	// table is dropped, the last good one stays published, the doctor
+	// says why (mail_records_wrong).
+	if err := h.validateMailSet(name, wild, set.Records); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
 	recs := make([]domains.MailRecord, 0, len(set.Records))
 	seen := map[string]bool{}
 	for _, r := range set.Records {
@@ -180,6 +186,7 @@ func (h *Hub) writeMailSet(ctx context.Context, api MailAPI, dapi DomainsAPI, na
 	if _, err := dapi.SetMailSet(ctx, name, recs); err != nil {
 		return fmt.Errorf("%s: writing the mail set: %v", name, err)
 	}
+	h.mailSetPublished(name, set.Records)
 	// Cleared only after this domain's own new set was written and the
 	// 7 days have passed.
 	if expired {

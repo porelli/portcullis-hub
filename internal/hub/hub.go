@@ -92,6 +92,9 @@ type Config struct {
 	// MailGID is the mail gate's group (0 = 2000, CT_GID_MAIL_PROVIDER;
 	// tests use their own).
 	MailGID int
+	// MailPolicyAddr is where the MTA-STS policy check dials Traefik's
+	// websecure ("" = traefik:443 on portcullis-proxy; tests).
+	MailPolicyAddr string
 	// MCPGateRecipientFile is HUB_MCP_GATE_RECIPIENT_FILE, the gate's age
 	// recipient (contract §15.4; "" or unreadable = no gate: Settings → AI
 	// shows gate_present false).
@@ -389,7 +392,9 @@ type Hub struct {
 	// re-confirm (lockMailSlot: a second one is refused 409);
 	// testHookMailSlotLocked runs once an op holds its locks, before its
 	// re-check (tests).
-	mailSlotOp             sync.Mutex
+	mailSlotOp sync.Mutex
+	// mailDNSProb: refused mail sets and MTA-STS policies per domain.
+	mailDNSProb            mailDNSProblems
 	testHookMailSlotLocked func(op string)
 	domainsReachable       bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable

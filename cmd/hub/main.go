@@ -604,6 +604,8 @@ func main() {
 	// An owed mail void (a wiring, a restore) is retried every 5 min
 	// (contract §19.11) and at once when owed.
 	go h.RunMailVoidRetry(ctx, hub.MailVoidRetryEvery)
+	// Each mail domain's MTA-STS policy, through Traefik, every 6 h (P12).
+	go h.RunMailPolicyCheck(ctx, hub.MailPolicyEvery)
 	// VPN providers: identity and dns hooks when due, vpn.json (§16).
 	go h.RunVPNMaps(ctx, 5*time.Second)
 	// Kubernetes: the VPN gateway pods, watched (K5: vpn.json follows them

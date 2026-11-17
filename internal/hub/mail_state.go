@@ -127,7 +127,7 @@ func BuildMailState(in MailBuildInput) (*mailprovider.MailState, []string) {
 		if dnssec == "" {
 			dnssec = "unknown"
 		}
-		doc.Domains = append(doc.Domains, mailprovider.Domain{Name: n, DMARCStart: dmarc, DMARCFloor: dmarc, Mail: s, DNSSEC: dnssec})
+		doc.Domains = append(doc.Domains, mailprovider.Domain{Name: n, DMARCStart: dmarc, DMARCFloor: mailDMARCFloor(st, n, dmarc), Mail: s, DNSSEC: dnssec})
 		if s != mailprovider.MailOff {
 			live[n] = true
 		}
@@ -428,4 +428,11 @@ func subset(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// mailDMARCFloor is domain n's dmarc_floor (contract §19.5): the
+// stricter of the policy its last validated set published and its
+// dmarc_start.
+func mailDMARCFloor(st state.MailSettings, n, start string) string {
+	return mailprovider.StricterDMARC(start, st.DMARCPublished[strings.ToLower(n)])
 }

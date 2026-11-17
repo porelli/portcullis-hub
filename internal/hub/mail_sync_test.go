@@ -570,7 +570,7 @@ func TestMailDNSByHash(t *testing.T) {
 	}
 	// Changed: exactly one refetch and PUT, then nothing again.
 	f.mc.Lock(func(s *mailprovidertest.Server) {
-		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail2.example.org."}}}
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "20 mail.example.org."}}}
 		s.StatusV.DNS = map[string]string{d: "h2", "example.org": "m2"}
 	})
 	f.sync(t) // not due yet: nothing
@@ -582,7 +582,7 @@ func TestMailDNSByHash(t *testing.T) {
 	f.dom.mu.Lock()
 	recs := f.dom.mailSets[d]
 	f.dom.mu.Unlock()
-	if g, p := counts(); g != g0+1 || p != p0+1 || len(recs) != 1 || recs[0].Value != "10 mail2.example.org." {
+	if g, p := counts(); g != g0+1 || p != p0+1 || len(recs) != 1 || recs[0].Value != "20 mail.example.org." {
 		t.Fatalf("changed: gets %d puts %d recs %+v", g, p, recs)
 	}
 	f.advance(mailDNSHashEvery)

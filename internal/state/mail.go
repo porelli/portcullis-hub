@@ -60,6 +60,10 @@ type MailSettings struct {
 	// then closes the provider (nil: none). Switch: a switch in progress
 	// (resumed at start, never leaving both providers on the ports).
 	Unwiring *MailUnwiring `json:"unwiring,omitempty" yaml:"unwiring,omitempty"`
+	// DMARCPublished: per mail domain, the DMARC p= of the last set the
+	// Hub validated and published (or the CLI read for the main domain):
+	// with dmarc_start it makes dmarc_floor (contract §19.5).
+	DMARCPublished map[string]string `json:"dmarc_published,omitempty" yaml:"dmarc_published,omitempty"`
 	Switch   *MailSwitch   `json:"switch,omitempty" yaml:"switch,omitempty"`
 }
 
