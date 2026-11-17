@@ -2,11 +2,15 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/usage"
 )
@@ -17,6 +21,96 @@ func (s *Server) registerUsage(mux routeMux) {
 	mux.HandleFunc("GET /api/usage", s.handleUsage)
 	mux.HandleFunc("GET /api/usage/instances/{id}", s.handleUsageInstance)
 	mux.HandleFunc("GET /api/usage/export.csv", s.handleUsageCSV)
+	mux.HandleFunc("GET /api/usage/storage", s.handleUsageStorage)
+	mux.HandleFunc("POST /api/usage/storage/measure", s.handleUsageMeasure)
+	mux.HandleFunc("GET /api/usage/storage/op", s.handleUsageStorageOp)
+	mux.HandleFunc("POST /api/usage/storage/op/stop", s.handleUsageStorageStop)
+}
+
+// usageBodyMax caps the storage routes' bodies (contract §11.11).
+const usageBodyMax = 1 << 10
+
+// usageBody decodes a strict body of at most 1 KiB: 413 above it, 400
+// on anything else wrong (a fixed message, never the decoder's).
+func usageBody(w http.ResponseWriter, r *http.Request, v any, usage string) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, usageBodyMax))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(v)
+	if err == nil && dec.Decode(&struct{}{}) != io.EOF {
+		err = errors.New("trailing data")
+	}
+	var mbe *http.MaxBytesError
+	switch {
+	case errors.As(err, &mbe):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "the body is over 1 KiB")
+		return false
+	case err != nil:
+		writeJSONError(w, http.StatusBadRequest, "body must be "+usage)
+		return false
+	}
+	return true
+}
+
+// usageMeasure: the route's and the tool's work.
+func (s *Server) usageMeasure(a directory.Actor, instance string) (*hub.AsyncOp, error) {
+	return s.Hub.StartUsageMeasure(a, instance)
+}
+
+func (s *Server) handleUsageStorage(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	noStore(w)
+	writeJSON(w, s.Hub.UsageStorage())
+}
+
+func (s *Server) handleUsageMeasure(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	var b struct {
+		Instance string `json:"instance"`
+	}
+	if !usageBody(w, r, &b, `{} or {"instance": "<id>"}`) {
+		return
+	}
+	op, err := s.usageMeasure(requestActor(r), b.Instance)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	writeOpAccepted(w, op)
+}
+
+func (s *Server) handleUsageStorageOp(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	s.writeOpRecord(w, "_usage", "the storage measurement")
+}
+
+func (s *Server) handleUsageStorageStop(w http.ResponseWriter, r *http.Request) {
+	if !s.folderAdmin(w, r) {
+		return
+	}
+	var b struct {
+		OpID string `json:"op_id"`
+	}
+	const usage = `{} or {"op_id": "<16 hex>"}`
+	if !usageBody(w, r, &b, usage) {
+		return
+	}
+	if b.OpID != "" && !stopOpIDRe.MatchString(b.OpID) {
+		writeJSONError(w, http.StatusBadRequest, "body must be "+usage)
+		return
+	}
+	rec, err := s.Hub.StopUsageMeasure(requestActor(r), b.OpID)
+	noStore(w)
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	writeJSONStatus(w, http.StatusAccepted, rec)
 }
 
 // usageOverview / usageInstance: the route's and the tool's work.

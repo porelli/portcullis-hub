@@ -93,7 +93,8 @@ var mailNoToolRoutes = map[string]string{
 // usageNoToolRoutes are the usage routes no tool mirrors (contract §15.10
 // "Usage routes without a tool", U11).
 var usageNoToolRoutes = map[string]string{
-	"GET /api/usage/export.csv": "a file download; usage_overview and usage_storage answer the same data",
+	"GET /api/usage/export.csv":       "a file download; usage_overview and usage_storage answer the same data",
+	"POST /api/usage/storage/op/stop": "stops a read-only measurement in the admin UI's progress panel; the figures measured so far are kept",
 }
 
 // adminUsage are the usage tools (§15.10); the storage ones come with the

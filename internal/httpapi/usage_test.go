@@ -227,3 +227,63 @@ func TestUsageReadsNeverReachEngine(t *testing.T) {
 }
 
 var _ = http.StatusOK
+
+func waitUsageIdle(t *testing.T, e *instEnv) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if r := e.s.Hub.LastOp("_usage"); r == nil || !r.Running {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the measurement didn't end")
+}
+
+func TestUsageStorageRoutes(t *testing.T) {
+	e, _ := usageEnv(t, "Team A")
+	checkAdminOnly(t, e, []route{
+		{"GET", "/api/usage/storage", ""}, {"POST", "/api/usage/storage/measure", "{}"},
+		{"GET", "/api/usage/storage/op", ""}, {"POST", "/api/usage/storage/op/stop", "{}"},
+	})
+	if code, body := e.do(t, "root", "GET", "/api/usage/storage/op", ""); code != 404 {
+		t.Errorf("op before any = %d %s", code, body)
+	}
+	if code, body := e.do(t, "root", "POST", "/api/usage/storage/op/stop", "{}"); code != 404 {
+		t.Errorf("stop before any = %d %s", code, body)
+	}
+	if code, _ := e.do(t, "root", "POST", "/api/usage/storage/measure", `{"instance":"nope"}`); code != 404 {
+		t.Errorf("unknown instance = %d", code)
+	}
+	if code, _ := e.do(t, "root", "POST", "/api/usage/storage/measure", `{"bogus":1}`); code != 400 {
+		t.Errorf("unknown field = %d", code)
+	}
+	if code, _ := e.do(t, "root", "POST", "/api/usage/storage/measure", `{"instance":"`+strings.Repeat("x", 2000)+`"}`); code != 413 {
+		t.Errorf("big body = %d", code)
+	}
+	code, body := e.do(t, "root", "POST", "/api/usage/storage/measure", "{}")
+	var op map[string]string
+	json.Unmarshal([]byte(body), &op)
+	if code != 202 || op["op"] != "usage_measure" || op["instance"] != "_usage" || op["poll"] != "/api/usage/storage/op" || len(op["op_id"]) != 16 {
+		t.Fatalf("measure = %d %s", code, body)
+	}
+	if code, _ := e.do(t, "root", "POST", "/api/usage/storage/op/stop", `{"op_id":"`+op["op_id"]+`"}`); code != 202 && code != 409 {
+		t.Errorf("stop = %d", code)
+	}
+	waitUsageIdle(t, e)
+	resp, body := doAs(t, e.hub, "root", "GET", "/api/usage/storage/op", "")
+	if resp.StatusCode != 200 || !strings.Contains(body, `"op":"usage_measure"`) {
+		t.Errorf("op = %d %s", resp.StatusCode, body)
+	}
+	resp, body = doAs(t, e.hub, "root", "GET", "/api/usage/storage", "")
+	if resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("storage = %d", resp.StatusCode)
+	}
+	var v map[string]any
+	json.Unmarshal([]byte(body), &v)
+	for _, k := range []string{"measured_at", "running_op", "disks", "apps", "folders", "core", "metrics_scraped"} {
+		if _, ok := v[k]; !ok {
+			t.Errorf("storage lacks %q", k)
+		}
+	}
+}

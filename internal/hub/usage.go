@@ -17,12 +17,14 @@ import (
 	"context"
 	"errors"
 	"log"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/usage"
@@ -55,6 +57,10 @@ type usageCont struct {
 	Err      string // usageStatsUnavailable, or ""
 	NotMeas  string // a NotMeasuredError's Why
 	LastSeen time.Time
+	// Image (the list's image reference) and Mounts (from the inspect):
+	// the storage measurer's layers, images and bind targets.
+	Image  string
+	Mounts []runtime.UnitMount
 }
 
 const (
@@ -99,6 +105,17 @@ type usageState struct {
 	notMeasured string
 	// sweeping: one sweep at a time.
 	sweeping sync.Mutex
+
+	// The storage measurer (usage_storage.go): diskMu is held around each
+	// fixer run, by the doctor's scans too (U12: never two walks at
+	// once); measureMu = one run at a time (try-lock, 409); storeMu
+	// guards store, the storage cache (nil = not loaded); fixer replaces
+	// the usage fixer run (tests).
+	diskMu    sync.Mutex
+	measureMu sync.Mutex
+	storeMu   sync.Mutex
+	store     *storageFile
+	fixer     func(ctx context.Context, r fixerRun) (*folderfix.Report, error)
 }
 
 func newUsageState() *usageState {
@@ -313,7 +330,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			c = &usageCont{ID: u.ID}
 			s.conts[u.ID] = c
 		}
-		c.Group, c.Kind, c.Service, c.Number, c.State, c.LastSeen = u.Group, u.Kind, u.Service, u.Number, u.State, now
+		c.Group, c.Kind, c.Service, c.Number, c.State, c.LastSeen, c.Image = u.Group, u.Kind, u.Service, u.Number, u.State, now, u.Image
 		c.Running = u.State == "running"
 		if !c.Running {
 			c.Sampled, c.Prev, c.Sample, c.Err, c.NotMeas = false, nil, usage.Sample{}, "", ""
@@ -334,6 +351,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		}
 		if r.inspected {
 			c.Limits, c.Inspect = usage.LimitsOf(r.info), now
+			c.Mounts = slices.Clone(r.info.Mounts)
 		}
 		if !c.Running {
 			continue

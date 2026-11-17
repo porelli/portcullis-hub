@@ -540,7 +540,10 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 		}
 		opts.ExpectDev, opts.ExpectIno, opts.ExpectMountRoot = f.Dev, f.Ino, f.MountRoot
 		e.Dev, e.Ino = f.Dev, f.Ino
+		// One walk at a time with the storage measurer (U12).
+		h.usage.diskMu.Lock()
 		rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Folder: t.Folder, Source: f.Path, Opts: opts})
+		h.usage.diskMu.Unlock()
 		if err != nil {
 			return fail(err)
 		}
@@ -578,7 +581,9 @@ func (h *Hub) scanOne(ctx context.Context, t ScanTarget) (e scanEntry, why strin
 		return fail(fmt.Errorf("%s doesn't exist", p))
 	}
 	opts.ExpectDev, opts.ExpectIno = pr.Dev, pr.Ino
+	h.usage.diskMu.Lock()
 	rep, err := h.runFixer(ctx, fixerRun{Mode: "scan", Source: p, Opts: opts})
+	h.usage.diskMu.Unlock()
 	if err != nil {
 		return fail(err)
 	}
