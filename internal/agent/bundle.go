@@ -571,6 +571,13 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 			}
 		}
 	}
+	// The app's own user reads its template files (bind sources) as on
+	// the primary (templates/ there is 0755): every directory of the files
+	// tree 0755; the files keep the primary's modes.
+	if err := openDirs(filesStaging); err != nil {
+		writeError(w, http.StatusInternalServerError, "can't stage the files")
+		return
+	}
 	out, err := a.cfg.Config(r.Context(), compose.Project{Name: runtime.ProjectName(id), Files: files, ProjectDir: a.filesDir(id), EnvFile: envFile})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "compose config: "+clipMsg(err.Error()))
@@ -715,6 +722,11 @@ func (a *API) commitBundle(id, staging, filesStaging string, resolved []byte, pr
 			return err
 		}
 	}
+	// files/ itself: traversable, never listable (no instance sees which
+	// others there are).
+	if err := os.Chmod(filepath.Dir(a.filesDir(id)), 0o711); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(a.resolvedDir(), 0o700); err != nil {
 		return err
 	}
@@ -723,6 +735,20 @@ func (a *API) commitBundle(id, staging, filesStaging string, resolved []byte, pr
 		return err
 	}
 	return writeFileAtomic(a.resolvedFile(id), resolved)
+}
+
+// openDirs makes every directory under root (root included) 0755; links
+// are never followed (WalkDir doesn't).
+func openDirs(root string) error {
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.Chmod(p, 0o755)
+		}
+		return nil
+	})
 }
 
 // swapDir renames from over to (the old one removed; links not followed).
