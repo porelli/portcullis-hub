@@ -287,3 +287,26 @@ func TestUsageStorageRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageCSVStorage(t *testing.T) {
+	e, _ := usageEnv(t, "Team A")
+	mustDo(t, e.hub, "root", "POST", "/api/usage/storage/measure", "{}", 202)
+	waitUsageIdle(t, e)
+	resp, body := doAs(t, e.hub, "root", "GET", "/api/usage/export.csv?view=storage", "")
+	if resp.StatusCode != 200 || !strings.HasPrefix(body, "owner,kind,target,alloc_bytes,apparent_bytes,partial,in_total,shared_with,measured_at\n") {
+		t.Fatalf("storage csv = %d %s", resp.StatusCode, body)
+	}
+	recs, _ := csv.NewReader(strings.NewReader(body)).ReadAll()
+	found := false
+	for _, r := range recs[1:] {
+		if r[1] == "hub_files" {
+			found = true
+			if r[3] != "" || r[4] != "" {
+				t.Errorf("null sizes = %q", r)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no hub_files row: %q", recs)
+	}
+}

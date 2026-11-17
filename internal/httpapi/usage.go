@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -53,6 +54,7 @@ func usageBody(w http.ResponseWriter, r *http.Request, v any, usage string) bool
 
 // usageMeasure: the route's and the tool's work.
 func (s *Server) usageMeasure(a directory.Actor, instance string) (*hub.AsyncOp, error) {
+	s.rec("StartUsageMeasure", a.User, instance)
 	return s.Hub.StartUsageMeasure(a, instance)
 }
 
@@ -143,6 +145,7 @@ func (s *Server) handleUsageInstance(w http.ResponseWriter, r *http.Request) {
 var (
 	usageCSVApps = []string{"instance", "template", "name", "status", "cpu_cores", "mem_bytes", "mem_limit_bytes", "cpu_limit_cores",
 		"pids", "pids_limit", "net_rx_bps", "net_tx_bps", "blk_read_bps", "blk_write_bps", "partial", "measured_at"}
+	usageCSVStorage    = []string{"owner", "kind", "target", "alloc_bytes", "apparent_bytes", "partial", "in_total", "shared_with", "measured_at"}
 	usageCSVContainers = []string{"instance", "service", "number", "id12", "state", "cpu_cores", "mem_bytes", "mem_limit_bytes", "cpu_limit_cores",
 		"pids", "pids_limit", "net_rx_bps", "net_tx_bps", "blk_read_bps", "blk_write_bps", "oom_killed", "restarts", "measured_at"}
 )
@@ -190,6 +193,8 @@ func (s *Server) usageCSV(view string) ([]string, [][]string, bool) {
 			return usageCSVApps, rows, true
 		}
 		return usageCSVContainers, rows, true
+	case "storage":
+		return usageCSVStorage, s.usageStorageRows(), true
 	}
 	return nil, nil, false
 }
@@ -201,7 +206,7 @@ func (s *Server) handleUsageCSV(w http.ResponseWriter, r *http.Request) {
 	view := r.URL.Query().Get("view")
 	header, rows, ok := s.usageCSV(view)
 	if !ok {
-		writeJSONError(w, http.StatusBadRequest, "view must be apps or containers")
+		writeJSONError(w, http.StatusBadRequest, "view must be apps, containers or storage")
 		return
 	}
 	var b bytes.Buffer
@@ -214,4 +219,27 @@ func (s *Server) handleUsageCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="portcullis-usage-%s-%s.csv"`, view, time.Now().UTC().Format(usageCSVTime)))
 	w.Write(b.Bytes())
+}
+
+// usageStorageRows are the storage view's CSV rows (the storage cache).
+func (s *Server) usageStorageRows() [][]string {
+	v := s.Hub.UsageStorage()
+	var rows [][]string
+	add := func(it hub.StorageItem) {
+		rows = append(rows, []string{it.Owner, it.Kind, it.Target, usage.Int(it.AllocBytes), usage.Int(it.ApparentBytes),
+			strconv.FormatBool(it.Partial), strconv.FormatBool(it.InTotal), strings.Join(it.Shared, ";"), csvTime(it.MeasuredAt)})
+	}
+	for _, g := range v.Apps {
+		for _, it := range g.Items {
+			add(it)
+		}
+	}
+	for _, f := range v.Folders {
+		rows = append(rows, []string{f.ID, "folder", f.ID, usage.Int(f.AllocBytes), "", strconv.FormatBool(f.Partial), "false",
+			strings.Join(f.UsedBy, ";"), csvTime(f.MeasuredAt)})
+	}
+	for _, it := range v.Core {
+		add(it)
+	}
+	return rows
 }

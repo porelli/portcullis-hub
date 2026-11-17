@@ -2,8 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // usageIDArgs names one instance (the instance routes' {id} rule: an
@@ -25,7 +30,35 @@ func (s *Server) registerUsageTools() {
 			ClassRead, "GET /api/usage/instances/{id}", "", func(_ context.Context, _ directory.Actor, in usageIDArgs) (any, error) {
 				return s.usageInstance(in.ID)
 			}),
+		admin("usage_storage", "Disk use per app volume, bind, shared folder and core volume, and each filesystem's free space, as last measured (with dates): null figures are not measured, partial ones lower bounds.",
+			ClassRead, "GET /api/usage/storage", "", func(context.Context, directory.Actor, noArgs) (any, error) {
+				return s.Hub.UsageStorage(), nil
+			}),
+		admin("usage_storage_measure", "Measure storage now (all, or instance) in the background: answers {op_id, op, instance, poll}; see usage_storage_op. Read-only on disk and bounded (2 min per target, 1 h per run).",
+			ClassWrite, "POST /api/usage/storage/measure", "usage.measure", func(_ context.Context, a directory.Actor, in usageMeasureArgs) (any, error) {
+				if in.Instance != "" && !templates.InstanceIDRe.MatchString(in.Instance) && !templates.ValidID(in.Instance) {
+					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: fmt.Errorf("app instance not found: %s", in.Instance)}
+				}
+				op, err := s.usageMeasure(a, in.Instance)
+				if err != nil {
+					return nil, err
+				}
+				return opAcceptedBody(op), nil
+			}),
+		admin("usage_storage_op", "The last storage measurement's op record: its step, ok / error, the result {targets, measured, failed, skipped} and warnings.",
+			ClassRead, "GET /api/usage/storage/op", "", func(context.Context, directory.Actor, noArgs) (any, error) {
+				rec := s.Hub.LastOp("_usage")
+				if rec == nil {
+					return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("no operation recorded for the storage measurement")}
+				}
+				return rec, nil
+			}),
 	} {
 		s.registerTool(t)
 	}
+}
+
+// usageMeasureArgs: one instance (optional; "" = everything).
+type usageMeasureArgs struct {
+	Instance string `json:"instance,omitempty" jsonschema:"the instance id whose storage to measure (default: everything)"`
 }

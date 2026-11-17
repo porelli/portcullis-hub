@@ -101,8 +101,8 @@ var usageNoToolRoutes = map[string]string{
 // storage measurer.
 var adminUsage = []string{"usage_overview", "usage_instance", "usage_storage", "usage_storage_measure", "usage_storage_op"}
 
-// adminUsageRegistered are the ones registered so far.
-var adminUsageRegistered = adminUsage[:2]
+// adminUsageRegistered are the ones registered (all of them).
+var adminUsageRegistered = adminUsage
 
 // adminVPN are the VPN tools (§15.10).
 var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach", "mail_status"}

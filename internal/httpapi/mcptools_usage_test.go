@@ -114,3 +114,75 @@ func TestUsageToolsParity(t *testing.T) {
 		t.Errorf("bad id = %v %s", isErr, txt)
 	}
 }
+
+func TestUsageStorageToolsParity(t *testing.T) {
+	e := usageToolEnv(t)
+	byName := map[string]Tool{}
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		byName[tl.Name] = tl
+	}
+	for name, want := range map[string][2]string{
+		"usage_storage":         {string(ClassRead), "GET /api/usage/storage"},
+		"usage_storage_measure": {string(ClassWrite), "POST /api/usage/storage/measure"},
+		"usage_storage_op":      {string(ClassRead), "GET /api/usage/storage/op"},
+	} {
+		if tl := byName[name]; string(tl.Class) != want[0] || tl.Twin != want[1] {
+			t.Errorf("%s = %s %s", name, tl.Class, tl.Twin)
+		}
+	}
+	if tl := byName["usage_storage_measure"]; tl.Audit != "usage.measure" {
+		t.Errorf("measure audit = %q", tl.Audit)
+	}
+	if txt, isErr, _ := e.tool(t, "usage_storage_op", map[string]any{}); !isErr || !strings.Contains(txt, "404") {
+		t.Errorf("op before any = %v %s", isErr, txt)
+	}
+	txt, isErr, _ := e.tool(t, "usage_storage", map[string]any{})
+	route := mustDo(t, e.hub, "root", "GET", "/api/usage/storage", "", 200)
+	// The disks' free bytes are read live (the data directory): equal
+	// apart from them.
+	noDisks := func(s string) string {
+		var v map[string]any
+		json.Unmarshal([]byte(s), &v)
+		delete(v, "disks")
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	if isErr || noDisks(txt) != noDisks(route) {
+		t.Errorf("usage_storage differs:\n tool  %s\n route %s", txt, route)
+	}
+	txt, isErr, _ = e.tool(t, "usage_storage_measure", map[string]any{"instance": "grafana-a"})
+	if isErr || !strings.Contains(txt, `"poll":"/api/usage/storage/op"`) && !strings.Contains(txt, `"poll": "/api/usage/storage/op"`) {
+		t.Fatalf("measure = %v %s", isErr, txt)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if r := e.s.Hub.LastOp("_usage"); r != nil && !r.Running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the measurement didn't end")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	txt, isErr, _ = e.tool(t, "usage_storage_op", map[string]any{})
+	route = mustDo(t, e.hub, "root", "GET", "/api/usage/storage/op", "", 200)
+	if isErr || canonJSON(t, txt) != canonJSON(t, route) {
+		t.Errorf("usage_storage_op differs:\n tool  %s\n route %s", txt, route)
+	}
+	entry := lastEntry(t, e, "usage.measure")
+	if entry.Via != "ai" || entry.Client == "" || entry.Actor != "root" || entry.Detail == "" || !strings.Contains(entry.Detail, "scope=grafana-a") {
+		t.Errorf("audit = %+v", entry)
+	}
+	if txt, isErr, _ := e.tool(t, "usage_storage_measure", map[string]any{"instance": "../x"}); !isErr || !strings.Contains(txt, "404") {
+		t.Errorf("bad instance = %v %s", isErr, txt)
+	}
+}
+
+func TestUsageNoDTool(t *testing.T) {
+	e := usageToolEnv(t)
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		if strings.HasPrefix(tl.Name, "usage_") && tl.Class == ClassDestructive {
+			t.Errorf("%s is D", tl.Name)
+		}
+	}
+}
