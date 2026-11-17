@@ -240,7 +240,11 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 		t.Fatal("no gateway")
 	}
 	// The fake Hub on the network's gateway only.
-	caSigner := func() ssh.Signer { _, k, _ := ed25519.GenerateKey(rand.Reader); s, _ := ssh.NewSignerFromKey(k); return s }()
+	caSigner := func() ssh.Signer {
+		_, k, _ := ed25519.GenerateKey(rand.Reader)
+		s, _ := ssh.NewSignerFromKey(k)
+		return s
+	}()
 	secret := make([]byte, 32)
 	rand.Read(secret)
 	hub := &sshdHub{t: t, domain: "example.org", secret: base64.RawURLEncoding.EncodeToString(secret), chal: map[string]bool{},
@@ -273,7 +277,9 @@ func runSSHDCase(t *testing.T, osName, bin string) {
 	bg, _ := ssh.NewSignerFromKey(bgPriv)
 	mustDocker(t, ssh.MarshalAuthorizedKey(bg.PublicKey()), "exec", "-i", name, "sh", "-c", "cat > /home/breakglass/.ssh/authorized_keys && chown breakglass: /home/breakglass/.ssh/authorized_keys && chmod 600 /home/breakglass/.ssh/authorized_keys")
 	mainBefore := mustDocker(t, nil, "exec", name, "sha256sum", "/etc/ssh/sshd_config")
-	exec_ := func(args ...string) (string, error) { return docker(t, nil, append([]string{"exec", name}, args...)...) }
+	exec_ := func(args ...string) (string, error) {
+		return docker(t, nil, append([]string{"exec", name}, args...)...)
+	}
 	waitSSH := func() {
 		for i := 0; i < 50; i++ {
 			if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
