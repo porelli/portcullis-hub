@@ -574,6 +574,13 @@ func (a *API) putBundleLocked(w http.ResponseWriter, r *http.Request, id string)
 	// The app's own user reads its template files (bind sources) as on
 	// the primary (templates/ there is 0755): every directory of the files
 	// tree 0755; the files keep the primary's modes.
+	// Nothing secret is ever in that world-readable tree: only template
+	// files and the CA bundle (the env, overrides and manifest stay in the
+	// 0700 project dir, appfiles — data and secrets files — in appfiles/).
+	if err := filesTreeOnly(filesStaging); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := openDirs(filesStaging); err != nil {
 		writeError(w, http.StatusInternalServerError, "can't stage the files")
 		return
@@ -735,6 +742,27 @@ func (a *API) commitBundle(id, staging, filesStaging string, resolved []byte, pr
 		return err
 	}
 	return writeFileAtomic(a.resolvedFile(id), resolved)
+}
+
+// filesTreeOnly: root holds only templates/** and certs/ca-bundle.crt
+// (regular files and directories).
+func filesTreeOnly(root string) error {
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		rel = filepath.ToSlash(rel)
+		switch {
+		case rel == "." || rel == "templates" || rel == "certs":
+			return nil
+		case d.IsDir() && strings.HasPrefix(rel, "templates/"):
+			return nil
+		case d.Type().IsRegular() && (strings.HasPrefix(rel, "templates/") || rel == certsBundle):
+			return nil
+		}
+		return fmt.Errorf("bundle: %s doesn't belong in the files tree", rel)
+	})
 }
 
 // openDirs makes every directory under root (root included) 0755; links
