@@ -879,8 +879,10 @@ func (h *Hub) Init() {
 	} else {
 		h.afterEngineVerified("settings: owed reloads and restarts", h.requeueOwed)
 	}
-	// The mail slot (contract §19.8, §19.9 "Resuming"): the targets
+	// The mail slot (contract §19.8, §19.9 "Resuming"): a template that
+	// changed while the Hub was down holds the provider, the targets
 	// file, then an owed void resumes in void mode, never normal first.
+	h.checkMailHold()
 	h.writeMailTargets()
 	if h.engineVerifiedNow() {
 		h.resumeMail()

@@ -329,6 +329,9 @@ func (h *Hub) syncSources(trigger string, timeout time.Duration) SourceSyncStatu
 	if reverted {
 		h.Discover()
 	}
+	// The wired mail provider's template changed (or no longer
+	// validates): held, no up (contract §19.9, P4).
+	h.checkMailHold()
 	// Only after the final Discover (a rolled-back update drops nothing).
 	h.pruneSettings()
 	// AI companions the templates dropped or changed (G33).

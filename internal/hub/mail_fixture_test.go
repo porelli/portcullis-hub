@@ -9,6 +9,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // mailProviderID is the fixtures' mail provider instance (the shared
@@ -66,8 +67,13 @@ func newMailSlotFixture(t *testing.T, wired bool, others ...string) *fixture {
 		t.Fatal("the mail template didn't load (see the log)")
 	}
 	if wired {
+		tp := f.h.Template(mailProviderID)
+		hash, err := templates.MailBlockHash(tp.Path, tp.Manifest.Mail, tp.ReadCompose())
+		if err != nil {
+			t.Fatal(err)
+		}
 		f.h.mu.Lock()
-		f.h.st.Mail.Provider = &state.MailProvider{Instance: mailProviderID, Template: mailProviderID, Source: "local"}
+		f.h.st.Mail.Provider = &state.MailProvider{Instance: mailProviderID, Template: mailProviderID, Source: "local", BlockHash: hash}
 		f.h.mu.Unlock()
 	}
 	return f

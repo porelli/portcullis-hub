@@ -327,6 +327,16 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	if stopped() {
 		return p, undo()
 	}
+	// The tree changed since the record (a sync meanwhile): the hold
+	// wins, no normal override for it.
+	h.mu.Lock()
+	h.checkMailHoldLocked()
+	held := h.st.Mail.Held
+	h.mu.Unlock()
+	if held != nil {
+		err := statusErr(http.StatusConflict, "%s", held.Reason)
+		return p, fail(StepMailNormal, err)
+	}
 	// 5. normal: the normal override and up (no Stop from here on).
 	step(StepMailNormal)
 	if err := h.mailUpInstance(context.WithoutCancel(ctx), id); err != nil {
@@ -394,11 +404,6 @@ func (h *Hub) undoWireMail(id string) {
 		}
 	}
 	h.writeMailTargets()
-}
-
-// startRewireMail is Task 10's re-confirm (stub until Task 10: refused).
-func (h *Hub) startRewireMail(t *templates.Template, actor directory.Actor) (*AsyncOp, error) {
-	return nil, statusErr(http.StatusConflict, "re-confirming a held provider is not available yet")
 }
 
 // resumeMail resumes the slot at start (contract §19.9 "Resuming"): a
