@@ -239,7 +239,7 @@ func (h *Hub) HostMailBackup() (string, error) {
 // hub_data/mail-restore-pending (the archive's name) before the Hub
 // starts in a core restore; while it exists the wired provider is never
 // started (no void, no up: its volumes come back first, Ruling R-C1).
-// `hub mail restore` removes it as its op starts.
+// `hub mail restore`'s op passes it and removes it once it succeeded.
 const mailRestorePendingFile = "mail-restore-pending"
 
 var errMailRestorePending = statusErr(http.StatusConflict, "a core restore of the mail provider is pending: the provider starts after `hub mail restore`")
@@ -309,11 +309,17 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 	}
 	actor := directory.Human(HostActor)
 	return h.startAsync(id, OpRestore, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		if err := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); err != nil && !os.IsNotExist(err) {
-			ready()
-			return nil, nil, fmt.Errorf("removing %s: %w", mailRestorePendingFile, err)
-		}
+		// This restore's own up passes the hold; the hold goes only once
+		// the restore succeeded (R2-N4): a failed one keeps it, so no
+		// empty store goes live.
+		h.mailRestoreOp.Store(id)
+		defer h.mailRestoreOp.Store("")
 		res, err := h.restoreInstance(ctx, id, archive, actor, ready)
+		if err == nil {
+			if rerr := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); rerr != nil && !os.IsNotExist(rerr) {
+				err = fmt.Errorf("the provider is restored, but removing %s failed: %w", mailRestorePendingFile, rerr)
+			}
+		}
 		return restoreResult(res, archive, ""), restoreWarnings(res), err
 	})
 }

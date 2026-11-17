@@ -326,7 +326,7 @@ func (h *Hub) mailModeBeforeUp(t *templates.Template) (mailMode, error) {
 	if known && rendered != mode {
 		return mode, statusErr(http.StatusConflict, "%s's mail mode changed to %s during the start: try again", t.ID, mode)
 	}
-	if wired && h.mailRestorePending() {
+	if op, _ := h.mailRestoreOp.Load().(string); wired && op != t.ID && h.mailRestorePending() {
 		return mode, errMailRestorePending
 	}
 	h.mailUpModes.mu.Lock()

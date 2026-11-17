@@ -443,6 +443,16 @@ type Hub struct {
 	// T8-void).
 	mailUpModes       mailUpModes
 	mailBootstrapWait time.Duration
+	// mailUnreach: since when the wired provider hasn't answered the
+	// doctor (mail_provider_unreachable after 10 min).
+	mailUnreach struct {
+		mu    sync.Mutex
+		since time.Time
+		why   string
+	}
+	// mailRestoreOp is the instance whose `hub mail restore` op runs
+	// (its up passes the restore-pending hold).
+	mailRestoreOp atomic.Value
 	// mailStopWait bounds one owed down of a held provider (0: 2 min).
 	mailStopWait  time.Duration
 	mailPollEvery time.Duration

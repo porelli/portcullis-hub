@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -385,5 +386,33 @@ func TestVoidVerify404IsNoCredentials(t *testing.T) {
 	w := wiredFix(t)
 	if err := verifyMailVoid(context.Background(), &notFoundListAPI{MailAPI: w.mc.Client()}, []string{uuidAlice}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRestorePendingKeptOnFailedRestore (R2-N4, fault injection): a
+// restore that fails keeps the hold: no empty store goes live.
+func TestRestorePendingKeptOnFailedRestore(t *testing.T) {
+	w := wiredFix(t)
+	archive, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(w.h.cfg.DataDir, mailRestorePendingFile)
+	writeFile(t, pending, archive+"\n")
+	w.runner.upErr = errors.New("compose up failed")
+	op, err := w.h.HostMailRestore(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || v.OK {
+		t.Fatalf("op %+v", v)
+	}
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("the hold went with a failed restore: %v", err)
+	}
+	w.runner.upErr = nil
+	if err := w.h.composeUp(context.Background(), w.h.Template(mailProviderID)); statusOf(err) != 409 {
+		t.Fatalf("an up after the failed restore: %v", err)
 	}
 }
