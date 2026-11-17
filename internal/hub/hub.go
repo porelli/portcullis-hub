@@ -544,6 +544,10 @@ type Hub struct {
 	sshrt sshRuntime
 	// sshrev guards hub_data/ssh/revoked.json (ssh_revoked.go).
 	sshrev revokedStore
+	// sshlim are the CLI signing routes' rate limits (ssh_limits.go).
+	sshlim sshLimits
+	// sshiss guards hub_data/ssh/issued.jsonl (ssh_issued.go).
+	sshiss issuedIndex
 	// eventsEnsure re-asserts Keycloak's events config with history_days
 	// (signin_limits.go: the sync loop and every limits change); under
 	// policyWriteMu like attrSync.

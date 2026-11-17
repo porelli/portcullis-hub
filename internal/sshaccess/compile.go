@@ -393,3 +393,12 @@ func nonNil(s []string) []string {
 	}
 	return slices.Clone(s)
 }
+
+// SortedHostGroups are a person's plan host groups, sorted.
+func SortedHostGroups(plans map[string]CertPlan) []string {
+	out := sortedKeys(plans)
+	if out == nil {
+		return []string{}
+	}
+	return out
+}

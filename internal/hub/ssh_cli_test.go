@@ -14,6 +14,7 @@ func newBareHub(t *testing.T) *Hub {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(h.Wait)
 	return h
 }
 

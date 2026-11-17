@@ -101,6 +101,9 @@ type CertRequest struct {
 	PublicKey    string   `json:"public_key"`
 	KeyProof     string   `json:"key_proof"`
 	HostGroups   []string `json:"host_groups"`
+	// OwnKey: the key is the person's own (`login --key`), not this
+	// login's ephemeral key: its revocation never expires (contract §18.10).
+	OwnKey bool `json:"own_key,omitempty"`
 }
 
 // IssuedCert is one certificate of a CertAnswer.

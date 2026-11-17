@@ -326,7 +326,13 @@ func (h *Hub) bumpSerials(c *sshaccess.Compiled, now time.Time) bool {
 }
 
 // auditSSH appends an SSH audit entry with actor (a username or "-").
+// A refusal is audited with its reason (never its input) and result
+// refused (status < 500) or error.
 func (h *Hub) auditSSH(actor, action, target, detail string, err error) {
+	var r *sshRefusal
+	if errors.As(err, &r) {
+		err = &StatusError{Status: r.status, Err: errors.New(r.reason)}
+	}
 	h.auditOp(directory.Actor{User: actor}, action, target, detail, err)
 }
 
@@ -346,11 +352,16 @@ func (h *Hub) RunSSH(ctx context.Context, tick time.Duration) {
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	h.TriggerSSHCompile()
+	var pruned time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if now := h.sshrt.clock(); now.Sub(pruned) > 24*time.Hour {
+				h.pruneRevoked(now)
+				pruned = now
+			}
 			h.TriggerSSHCompile()
 		}
 	}

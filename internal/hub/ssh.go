@@ -6,8 +6,10 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/portcullis/hub/internal/cliapi"
@@ -47,6 +49,9 @@ type sshRuntime struct {
 	// changed is closed (and replaced) whenever a host's serial moves:
 	// the long-polls wake on it.
 	changed chan struct{}
+
+	// kc looks up a person's Keycloak account (disabled = nothing).
+	kc SSHUserLookup
 
 	runMu   sync.Mutex
 	pending atomic.Bool
@@ -120,4 +125,15 @@ func (h *Hub) sshBroadcast() {
 		close(h.sshrt.changed)
 	}
 	h.sshrt.changed = make(chan struct{})
+}
+
+// SetSSHEnabledForTest switches SSH access (tests of other packages).
+func (h *Hub) SetSSHEnabledForTest(on bool) error {
+	if !testing.Testing() {
+		return errors.New("SetSSHEnabledForTest: tests only")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.st.SSH.Settings.Enabled = on
+	return nil
 }

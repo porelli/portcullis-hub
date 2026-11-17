@@ -291,6 +291,15 @@ func main() {
 	if err := httpapi.CheckSecret(secret); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
+	// The CLI listener's own proxy secret (contract §18.3, plan C7):
+	// required, and never the Hub's other secret. Never logged.
+	cliSecret := os.Getenv("HUB_CLI_PROXY_SECRET")
+	if err := httpapi.CheckCLISecret(cliSecret); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	if cliSecret == secret {
+		log.Fatalf("refusing to start: HUB_CLI_PROXY_SECRET must differ from HUB_PROXY_SECRET")
+	}
 
 	// The MCP listener's secret (contract §15.7): read once, here. A
 	// missing file = no listener and AI support off; a short or
@@ -518,6 +527,7 @@ func main() {
 	// SSH access (contract §18): enroll's SSH endpoints, on the same
 	// listener and bearer; and no username may equal a shared SSH account.
 	h.SetSSHActions(invites)
+	h.SetSSHKeycloak(kc)
 	dir.SSHSharedAccount = h.SSHSharedAccount
 	h.SetOwnPasswords(dir)
 	h.SetSignInHelp(dir)
@@ -584,8 +594,10 @@ func main() {
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
 		MCPSecret:  mcp.secret,
-		Web:        web.FS,
-		Docs:       web.Docs,
+		CLI: httpapi.CLIOptions{Secret: cliSecret, Issuer: fa.Issuer, AuthorizeURL: fa.AuthorizeURL,
+			MinCLI: os.Getenv("HUB_CLI_MIN_VERSION")},
+		Web:  web.FS,
+		Docs: web.Docs,
 		// The Portcullis MCP redacts every result with these too (G40).
 		RedactFiles:    []string{invites.SecretFile, dom.SecretFile, filepath.Join(ll.CredentialsDir, "password")},
 		RedactLiterals: []string{os.Getenv("KEYCLOAK_ADMIN_PASSWORD")},
@@ -667,6 +679,15 @@ func main() {
 	addr := env("HUB_LISTEN_ADDR", ":8888")
 	peopleAddr := env("HUB_PEOPLE_ADDR", ":8889")
 	servers := []*http.Server{newHTTPServer(addr, handler), newHTTPServer(peopleAddr, peopleHandler)}
+	// The CLI listener (contract §18.3): /api/cli/v1/* only, behind core's
+	// people-cli router and its own proxy secret.
+	cliHandler, err := srv.CLIHandler()
+	if err != nil {
+		log.Fatalf("cli listener: %v", err)
+	}
+	cliAddr := env("HUB_CLI_ADDR", ":8891")
+	servers = append(servers, newHTTPServer(cliAddr, cliHandler))
+	log.Printf("CLI listener on %s", cliAddr)
 	// The MCP listener (mcp-gate only, contract §15.7): only with its
 	// secret. It listens on every Hub network; the secret protects it
 	// and no Traefik router targets it (G36).

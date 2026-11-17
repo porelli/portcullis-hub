@@ -5,17 +5,21 @@ package hub
 // bundles carry the keys, the Hub's views the fingerprints.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/cliapi"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/fsutil"
 )
 
@@ -89,4 +93,122 @@ func (h *Hub) RevokedKeys() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// revokedUntil is when key fp's entry may go: 24 h after the last
+// certificate issued for it; zero (never) for a person's own key.
+func (h *Hub) revokedUntil(fp string) time.Time {
+	var last time.Time
+	for _, r := range h.issuedByFP(fp) {
+		if r.Own {
+			return time.Time{}
+		}
+		if r.ValidBefore.After(last) {
+			last = r.ValidBefore
+		}
+	}
+	if last.IsZero() {
+		return time.Time{} // never issued here: kept until removed
+	}
+	return last.Add(24 * time.Hour)
+}
+
+// RevokeKeys puts keys on the list (each audited ssh.certificate.revoke
+// with its fingerprint, actor and reason) and triggers a compile so the
+// bundles carry it. A key already listed keeps the later until.
+func (h *Hub) RevokeKeys(actor, reason string, keys []string, target string) (int, error) {
+	now := h.sshrt.clock()
+	type add struct{ e RevokedKey }
+	var adds []add
+	for _, k := range keys {
+		pub, norm, err := cliapi.ParseAuthorizedKey(k)
+		if err != nil {
+			continue
+		}
+		fp := cliapi.Fingerprint(pub)
+		adds = append(adds, add{RevokedKey{Key: norm, FP: fp, Reason: clip(reason, 200), Actor: clip(actor, 64), Added: now.UTC(), Until: h.revokedUntil(fp)}})
+	}
+	if len(adds) == 0 {
+		return 0, nil
+	}
+	h.sshrev.mu.Lock()
+	list, err := h.loadRevokedLocked()
+	if err != nil {
+		h.sshrev.mu.Unlock()
+		return 0, err
+	}
+	n := 0
+	for _, a := range adds {
+		i := slices.IndexFunc(list, func(e RevokedKey) bool { return e.FP == a.e.FP })
+		if i >= 0 {
+			if list[i].Until.IsZero() || a.e.Until.IsZero() {
+				list[i].Until = time.Time{}
+			} else if a.e.Until.After(list[i].Until) {
+				list[i].Until = a.e.Until
+			}
+			continue
+		}
+		list = append(list, a.e)
+		n++
+	}
+	err = h.saveRevokedLocked(list)
+	h.sshrev.mu.Unlock()
+	for _, a := range adds {
+		h.auditSSH(actor, "ssh.certificate.revoke", target, "key "+a.e.FP+": "+clip(reason, 200), err)
+	}
+	if err != nil {
+		return 0, err
+	}
+	h.TriggerSSHCompile()
+	return n, nil
+}
+
+// pruneRevoked drops entries past their until (daily, from RunSSH).
+func (h *Hub) pruneRevoked(now time.Time) {
+	h.sshrev.mu.Lock()
+	defer h.sshrev.mu.Unlock()
+	list, err := h.loadRevokedLocked()
+	if err != nil {
+		return
+	}
+	keep := list[:0]
+	for _, e := range list {
+		if e.Until.IsZero() || now.Before(e.Until) {
+			keep = append(keep, e)
+		}
+	}
+	if len(keep) != len(list) {
+		if err := h.saveRevokedLocked(keep); err != nil {
+			log.Printf("ssh: pruning revoked keys: %v", err)
+		}
+	}
+}
+
+// RevokeOwnSSH is POST ssh/revocations (plan C30): a proof that passes
+// freshauth for portcullis-cli (any switched-on method); revokes only the
+// listed keys the issued index shows were issued to that person.
+func (h *Hub) RevokeOwnSSH(ctx context.Context, req cliapi.RevocationRequest, addr string) (int, error) {
+	const action = "ssh.certificate.revoke"
+	if !h.SSHEnabled() {
+		return 0, refusal(http.StatusConflict, TextSSHOff, "ssh access off")
+	}
+	vc, err := h.verifyCLIProof(ctx, freshauth.Proof{Code: req.Code, CodeVerifier: req.CodeVerifier, Nonce: req.Nonce, RedirectURI: req.RedirectURI}, addr, action)
+	if err != nil {
+		return 0, err
+	}
+	if len(req.PublicKeys) > 64 {
+		return 0, refusal(http.StatusBadRequest, "at most 64 keys", "too many keys")
+	}
+	mine := map[string]bool{}
+	for _, r := range h.IssuedFor(vc.user) {
+		mine[r.KeyFP] = true
+	}
+	var keys []string
+	for _, k := range req.PublicKeys {
+		pub, _, err := cliapi.ParseAuthorizedKey(k)
+		if err == nil && mine[cliapi.Fingerprint(pub)] {
+			keys = append(keys, k)
+		}
+	}
+	return h.RevokeKeys(vc.user, "logout --revoke", keys, vc.user)
 }

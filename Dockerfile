@@ -34,7 +34,7 @@ COPY --from=build /hub /usr/local/bin/hub
 #   /project/templates  bind mount of <core>/templates on the host
 USER 10001:10001
 ENV HOME=/home/hub
-EXPOSE 8888 8889
+EXPOSE 8888 8889 8891
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
   CMD wget -q -O /dev/null http://127.0.0.1:8888/healthz || exit 1
 ENTRYPOINT ["hub"]

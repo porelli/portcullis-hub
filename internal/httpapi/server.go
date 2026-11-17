@@ -46,7 +46,9 @@ type Server struct {
 	// MCPSecret is HUB_MCP_GATE_SECRET (the MCP listener, MCPHandler;
 	// "" = no MCP listener).
 	MCPSecret string
-	Web       fs.FS // contains index.html
+	// CLI configures the CLI listener (cli_listener.go, contract §18.3).
+	CLI CLIOptions
+	Web fs.FS // contains index.html
 	// Docs holds docs/*.md, the docs pages the Portcullis MCP serves as
 	// resources (web.Docs; nil = none).
 	Docs fs.FS
