@@ -440,13 +440,29 @@ func (h *Hub) runSwitchMail(ctx context.Context, t *templates.Template, from str
 		}
 	case cur == nil && sw != nil && sw.From == from && sw.To == to && sw.Closed:
 	case cur != nil && cur.Instance == to && sw != nil && sw.Closed:
+		// The new one is recorded, but its wiring may be unfinished (a
+		// crash after the record, M3): a void still owed runs the wiring
+		// again from the gate on; else the normal up, the targets and
+		// the document (idempotent). The switch ends only on success.
 		unlockFrom()
 		prog.planned(StepMailUnwire).Done(StepMailUnwire)
-		h.mu.Lock()
-		h.st.Mail.Switch = nil
-		h.saveLocked()
-		h.mu.Unlock()
-		return cur, nil
+		h.mu.RLock()
+		owed := h.st.Mail.VoidOwed
+		h.mu.RUnlock()
+		p, err := cur, error(nil)
+		if owed != nil {
+			p, err = h.runWireMail(ctx, t, actor, owed.Reason)
+		} else if err = h.mailUpInstance(ctx, to); err == nil {
+			h.writeMailTargets()
+			h.mailSyncOnce(ctx)
+		}
+		if err == nil {
+			h.mu.Lock()
+			h.st.Mail.Switch = nil
+			h.saveLocked()
+			h.mu.Unlock()
+		}
+		return p, err
 	default:
 		unlockFrom()
 		h.mu.Lock()

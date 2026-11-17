@@ -11,6 +11,7 @@ import (
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // wiredFix is a wireFix with mailsrv wired through the op and alice
@@ -463,5 +464,67 @@ func TestSwitchResumeAfterCloseCompletes(t *testing.T) {
 	defer w.h.mu.RUnlock()
 	if w.h.st.Mail.Provider.Instance != otherMailID {
 		t.Fatal("the resume changed the provider")
+	}
+}
+
+// crashAfterSwitchRecord leaves the state of a switch that crashed right
+// after the new provider's record step: the old one closed, the new one
+// recorded with its void owed.
+func crashAfterSwitchRecord(t *testing.T, w *wireFix) {
+	t.Helper()
+	unlock, _ := w.h.lockApp(mailProviderID)
+	w.h.mu.Lock()
+	w.h.st.Mail.Switch = &state.MailSwitch{From: mailProviderID, To: otherMailID, By: "root"}
+	w.h.mu.Unlock()
+	if err := w.h.closeMailProvider(context.Background(), mailProviderID, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	tp := w.h.Template(otherMailID)
+	hash, err := templates.MailBlockHash(tp.Path, tp.Manifest.Mail, tp.ReadCompose())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.h.mu.Lock()
+	w.h.st.Mail.Provider = &state.MailProvider{Instance: otherMailID, Template: otherMailID, BlockHash: hash}
+	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidWire}
+	w.h.mu.Unlock()
+}
+
+// TestSwitchResumeAfterRecordFinishesWiring (M3): the resume finishes
+// the unfinished wiring (void, normal up) before the switch ends.
+func TestSwitchResumeAfterRecordFinishesWiring(t *testing.T) {
+	w := switchFix(t)
+	crashAfterSwitchRecord(t, w)
+	voids := len(w.mc.Voids)
+	w.h.resumeMail()
+	w.h.Wait()
+	w.h.mu.RLock()
+	sw, owed := w.h.st.Mail.Switch, w.h.st.Mail.VoidOwed
+	w.h.mu.RUnlock()
+	if sw != nil || owed != nil || len(w.mc.Voids) == voids {
+		t.Fatalf("switch %+v owed %+v voids %d → %d", sw, owed, voids, len(w.mc.Voids))
+	}
+	if e := w.audit.last(); e.Action != "mail.provider_switched" || e.Result != "ok" {
+		t.Fatalf("audit %+v", e)
+	}
+}
+
+// TestSwitchResumeAfterRecordFailsVisibly (M3, fault injection): a void
+// that fails keeps the switch and audits the failure, never "switched".
+func TestSwitchResumeAfterRecordFailsVisibly(t *testing.T) {
+	w := switchFix(t)
+	crashAfterSwitchRecord(t, w)
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.VoidStatus = 500 })
+	w.h.resumeMail()
+	w.h.Wait()
+	w.h.mu.RLock()
+	sw := w.h.st.Mail.Switch
+	w.h.mu.RUnlock()
+	if sw == nil {
+		t.Fatal("the switch ended with its wiring unfinished")
+	}
+	if e := w.audit.last(); e.Action != "mail.provider_switched" || e.Result == "ok" {
+		t.Fatalf("audit %+v", e)
 	}
 }

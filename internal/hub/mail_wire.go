@@ -442,18 +442,18 @@ func (h *Hub) resumeMail() {
 // MailProviderView is GET /api/instances/{id}/mail-provider (the
 // instance's Mail tab).
 type MailProviderView struct {
-	Wired          bool                `json:"wired"`
-	Mode           string              `json:"mode"`
-	Provider       any                 `json:"provider"`
-	Void           *MailVoidView       `json:"void"`
-	Held           *state.MailHold     `json:"held"`
-	RefusedBecause []string            `json:"refused_because"`
-	Warning        string              `json:"warning"`
-	HoldWarning    string              `json:"hold_warning,omitempty"`
+	Wired          bool            `json:"wired"`
+	Mode           string          `json:"mode"`
+	Provider       any             `json:"provider"`
+	Void           *MailVoidView   `json:"void"`
+	Held           *state.MailHold `json:"held"`
+	RefusedBecause []string        `json:"refused_because"`
+	Warning        string          `json:"warning"`
+	HoldWarning    string          `json:"hold_warning,omitempty"`
 	// BlockHash is the held tree's hash as on disk now: the re-confirm
 	// echoes it (M1).
-	BlockHash string `json:"block_hash,omitempty"`
-	Wiring         *state.MailProvider `json:"-"`
+	BlockHash string              `json:"block_hash,omitempty"`
+	Wiring    *state.MailProvider `json:"-"`
 }
 
 // MailVoidView is an owed void with the last attempt's error.
