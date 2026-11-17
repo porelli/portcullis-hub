@@ -27,13 +27,12 @@ func canRead(st os.FileInfo, uid int, groups []int, dir bool) bool {
 	return perm&bit == bit
 }
 
-// TestAppfilesGroup (the primary's §13.7 layout, file by file): on a
-// worker the instance's appfiles directories are 0750 and its data files
-// 0640, all in the appfiles group (the Hub's 10001 in production); a
-// secrets file keeps the primary's 0600. A uid other than the agent's,
-// with the group (an app's group_add), reads the data file and enters its
-// directories; one without the group reads neither; nobody but the owner
-// reads the secrets file.
+// TestAppfilesGroup (the primary's §13.7 layout): on a worker the
+// instance's appfiles directories are 0750 and its data files 0640, all in
+// the appfiles group (the Hub's 10001 in production). A uid other than the
+// agent's, with the group (an app's group_add), reads the data files and
+// enters their directories; one without the group reads neither. (A
+// settings secrets file is primary-only: refused on a worker.)
 func TestAppfilesGroup(t *testing.T) {
 	f := newAPI(t)
 	// A supplementary group of this process other than its primary one (the
@@ -56,7 +55,6 @@ func TestAppfilesGroup(t *testing.T) {
 		{name: BundleEnv, data: "A=1\n", mode: 0o600},
 		{name: "templates/app/app.conf", data: "x=1\n"},
 		{name: "appfiles/people/people.json", data: `{"alice":1}`, mode: 0o640},
-		{name: "appfiles/people/people.secrets.json", data: `{"t":"s"}`, mode: 0o600},
 	})
 	if c := f.code(t, "PUT", "/v1/projects/app/bundle", b); c != 204 {
 		t.Fatalf("bundle: %d", c)
@@ -67,12 +65,11 @@ func TestAppfilesGroup(t *testing.T) {
 	}
 	app := 4242                 // an app's uid: not the agent's
 	paths := map[string][2]any{ // path → {mode, is dir}
-		filepath.Join(f.data, "appfiles"):                                        {os.FileMode(0o750), true},
-		f.api.appfilesDir("app"):                                                 {os.FileMode(0o750), true},
-		filepath.Join(f.api.appfilesDir("app"), "people"):                        {os.FileMode(0o750), true},
-		filepath.Join(f.api.appfilesDir("app"), "people", "people.json"):         {os.FileMode(0o640), false},
-		filepath.Join(f.api.appfilesDir("app"), "people", "people.secrets.json"): {os.FileMode(0o600), false},
-		filepath.Join(f.api.appfilesDir("app"), "settings", "settings.json"):     {os.FileMode(0o640), false},
+		filepath.Join(f.data, "appfiles"):                                    {os.FileMode(0o750), true},
+		f.api.appfilesDir("app"):                                             {os.FileMode(0o750), true},
+		filepath.Join(f.api.appfilesDir("app"), "people"):                    {os.FileMode(0o750), true},
+		filepath.Join(f.api.appfilesDir("app"), "people", "people.json"):     {os.FileMode(0o640), false},
+		filepath.Join(f.api.appfilesDir("app"), "settings", "settings.json"): {os.FileMode(0o640), false},
 	}
 	for p, w := range paths {
 		st, err := os.Stat(p)
@@ -82,8 +79,7 @@ func TestAppfilesGroup(t *testing.T) {
 		if st.Mode().Perm() != w[0].(os.FileMode) || int(st.Sys().(*syscall.Stat_t).Gid) != gid {
 			t.Errorf("%s: %o group %d, want %o group %d", p, st.Mode().Perm(), st.Sys().(*syscall.Stat_t).Gid, w[0], gid)
 		}
-		secret := filepath.Base(p) == "people.secrets.json"
-		if got := canRead(st, app, []int{gid}, w[1].(bool)); got == secret {
+		if got := canRead(st, app, []int{gid}, w[1].(bool)); !got {
 			t.Errorf("%s: an app with the group reads it = %v", p, got)
 		}
 		if canRead(st, app, []int{gid + 1}, w[1].(bool)) {

@@ -281,9 +281,16 @@ type appFile struct {
 // readAppFileTar: exactly <name>.json or <name>.tsv (the data file's
 // formats) and optionally <name>.secrets.json,
 // regular files, ≤ MaxJSON each.
+// errSecretsFile: a settings secrets file can't be handed to an app on a
+// worker (only the primary gives it its reader's owner).
+var errSecretsFile = errors.New("a settings secrets file (<name>.secrets.json) is primary-only: a worker can't hand it to the app's reader")
+
 func readAppFileTar(r io.Reader, name string) ([]appFile, error) {
 	tr := tar.NewReader(io.LimitReader(r, 4*agentapi.MaxJSON))
-	modes := map[string]os.FileMode{name + ".json": 0o640, name + ".tsv": 0o640, name + ".secrets.json": 0o600}
+	// No secrets file on a worker (contract §17.4): the primary's is uid
+	// 10001's 0600 and the agent can't give it that owner — a template
+	// delivering one is primary-only (templates.Placement); refused here too.
+	modes := map[string]os.FileMode{name + ".json": 0o640, name + ".tsv": 0o640}
 	var out []appFile
 	seen := map[string]bool{}
 	for {
@@ -294,9 +301,12 @@ func readAppFileTar(r io.Reader, name string) ([]appFile, error) {
 		if err != nil {
 			return nil, errors.New("not a tar")
 		}
+		if hdr.Name == name+".secrets.json" {
+			return nil, errSecretsFile
+		}
 		mode, ok := modes[hdr.Name]
 		if !ok || hdr.Typeflag != tar.TypeReg || seen[hdr.Name] || hdr.Size > agentapi.MaxJSON {
-			return nil, fmt.Errorf("only %s.json and %s.secrets.json, once each, as regular files", name, name)
+			return nil, fmt.Errorf("only %s.json or %s.tsv, once, as a regular file", name, name)
 		}
 		seen[hdr.Name] = true
 		b, err := io.ReadAll(tr)

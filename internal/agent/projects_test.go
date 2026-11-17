@@ -391,7 +391,7 @@ func TestBundleSwapKeepsAppfiles(t *testing.T) {
 	// Deliver a data file.
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	for name, data := range map[string]string{"settings.json": `{"a":1}`, "settings.secrets.json": `{"s":1}`} {
+	for name, data := range map[string]string{"settings.json": `{"a":1}`} {
 		tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(data))})
 		tw.Write([]byte(data))
 	}
@@ -399,8 +399,13 @@ func TestBundleSwapKeepsAppfiles(t *testing.T) {
 	if c := f.code(t, "PUT", "/v1/projects/app/appfiles/settings", buf.Bytes()); c != 204 {
 		t.Fatalf("appfile: %d", c)
 	}
-	if fi, err := os.Stat(filepath.Join(f.data, "appfiles", "app", "settings", "settings.secrets.json")); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("secrets file: %v %v", err, fi)
+	// A settings secrets file is primary-only (contract §17.4): refused,
+	// nothing written.
+	if c := f.code(t, "PUT", "/v1/projects/app/appfiles/settings", appFileTar(t, map[string]string{"settings.json": "{}", "settings.secrets.json": `{"s":1}`})); c != 400 {
+		t.Errorf("a secrets file: %d, want 400", c)
+	}
+	if _, err := os.Stat(filepath.Join(f.data, "appfiles", "app", "settings", "settings.secrets.json")); err == nil {
+		t.Error("the secrets file was written")
 	}
 	// A tar naming anything else is refused.
 	var bad bytes.Buffer

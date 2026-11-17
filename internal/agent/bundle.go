@@ -54,7 +54,8 @@ func bundlePathOK(p string) bool {
 	case strings.HasPrefix(p, "templates/") && len(p) > len("templates/"):
 		return true
 	case strings.HasPrefix(p, BundleAppfiles) && len(p) > len(BundleAppfiles):
-		return true
+		// Never a settings secrets file (errSecretsFile): primary-only.
+		return !strings.HasSuffix(p, ".secrets.json")
 	}
 	return false
 }

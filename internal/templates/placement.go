@@ -107,6 +107,20 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 				addOnce(&out, "has a per-person secret option ("+o.Key+")")
 			}
 		}
+		// A secret option delivered into a data file makes its
+		// <name>.secrets.json (0600, uid 10001's on the primary): a worker's
+		// agent can't give it that owner, so the app's reader couldn't read
+		// it there (contract §3, §17.4; the agent refuses one too).
+		for _, o := range m.Settings.Options {
+			if o.Type != TypeSecret {
+				continue
+			}
+			for _, d := range o.Delivery {
+				if d.File != nil {
+					addOnce(&out, "delivers a settings secrets file (only the primary can hand it to the app's reader)")
+				}
+			}
+		}
 	}
 	if m.AI != nil && len(m.AI.MCP) > 0 {
 		out = append(out, "has AI companions (mcp-gate reaches them on the primary)")

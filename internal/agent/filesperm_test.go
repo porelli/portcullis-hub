@@ -53,7 +53,6 @@ func TestNoSecretInFilesTree(t *testing.T) {
 		{name: BundleEnv, data: "A=1\nAPP_SECRET=" + envSecret + "\n", mode: 0o600},
 		{name: "templates/app/app.conf", data: "x=1\n"},
 		{name: "appfiles/people/people.json", data: `{"alice":1}`, mode: 0o640},
-		{name: "appfiles/people/people.secrets.json", data: `{"token":"` + fileSecret + `"}`, mode: 0o600},
 		{name: certsBundle, data: "-----BEGIN CERTIFICATE-----\n"},
 	})
 	if c := f.code(t, "PUT", "/v1/projects/app/bundle", b); c != 204 {
@@ -76,10 +75,18 @@ func TestNoSecretInFilesTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A bundle with a settings secrets file is refused whole (primary-only).
+	withSecret := bundleTar(t, "app", map[string]string{"data": "portcullis-app_data"}, []bundleFile{
+		{name: BundleCompose, data: testCompose}, {name: BundleEnv, data: "A=1\n", mode: 0o600},
+		{name: "appfiles/people/people.json", data: `{}`, mode: 0o640},
+		{name: "appfiles/people/people.secrets.json", data: `{"token":"` + fileSecret + `"}`, mode: 0o600},
+	})
+	if c := f.code(t, "PUT", "/v1/projects/app/bundle", withSecret); c != 400 {
+		t.Errorf("a bundle with a secrets file: %d, want 400", c)
+	}
 	for p, want := range map[string]os.FileMode{
-		f.api.projectDir("app"):                                                  0o700,
-		filepath.Join(f.api.projectDir("app"), BundleEnv):                        0o600,
-		filepath.Join(f.api.appfilesDir("app"), "people", "people.secrets.json"): 0o600,
+		f.api.projectDir("app"):                           0o700,
+		filepath.Join(f.api.projectDir("app"), BundleEnv): 0o600,
 	} {
 		st, err := os.Stat(p)
 		if err != nil || st.Mode().Perm() != want {
