@@ -263,6 +263,10 @@ type Inputs struct {
 	// none fire; Unavailable: mailctl couldn't be read, no mail findings
 	// and Report.MailUnavailable).
 	Mail *MailIn
+	// Usage / Storage: the usage kinds' inputs (usage.go; nil = none
+	// fire).
+	Usage   *UsageIn
+	Storage *StorageIn
 }
 
 // UnverifiableIn is one active credential the holder check can't verify
