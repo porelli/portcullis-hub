@@ -860,6 +860,13 @@ func writeFile(t *testing.T, path, content string) {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureExtra(t, nil)
+}
+
+// newFixtureExtra is newFixture with extra templates in the source
+// (id → path under the template dir → content).
+func newFixtureExtra(t *testing.T, extra map[string]map[string]string) *fixture {
+	t.Helper()
 	root := t.TempDir()
 	f := &fixture{
 		runner:  newFakeRunner(),
@@ -875,6 +882,11 @@ func newFixture(t *testing.T) *fixture {
 	writeFile(t, filepath.Join(f.src, "grafana", "conf", "grafana.ini"), "[x]\n")
 	writeFile(t, filepath.Join(f.src, "other", "manifest.yaml"), otherManifest)
 	writeFile(t, filepath.Join(f.src, "other", "compose.yml"), otherCompose)
+	for id, files := range extra {
+		for name, content := range files {
+			writeFile(t, filepath.Join(f.src, id, name), content)
+		}
+	}
 
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: f.src}}

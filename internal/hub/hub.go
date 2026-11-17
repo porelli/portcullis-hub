@@ -84,6 +84,11 @@ type Config struct {
 	// "" = DefaultSecretsVolume), mounted into apps by subpath.
 	SecretsDir    string
 	SecretsVolume string
+	// MailAPIURL is HUB_MAIL_API_URL ("" = http://mail-api:<api.port>
+	// of the wired block, contract §19.1); MailSlotDir HUB_MAIL_SLOT_DIR
+	// (the mail_slot volume, "" = /mail-slot).
+	MailAPIURL  string
+	MailSlotDir string
 	// MCPGateRecipientFile is HUB_MCP_GATE_RECIPIENT_FILE, the gate's age
 	// recipient (contract §15.4; "" or unreadable = no gate: Settings → AI
 	// shows gate_present false).
@@ -361,8 +366,13 @@ type Hub struct {
 	domainsAPI DomainsAPI
 	// mailAPI is core's mailctl (mail_core.go; nil = not connected:
 	// mail is off for the Hub, contract §19.1).
-	mailAPI          MailAPI
-	domainsReachable bool
+	mailAPI MailAPI
+	// mailClients caches the wired provider's client (mail_slot.go);
+	// mailModeForRender forces a render's mail mode (mailOverrideLocked,
+	// under mu).
+	mailClients       mailClients
+	mailModeForRender *mailMode
+	domainsReachable  bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable
 	// meanwhile); domainsGen changes with every domain operation's commit,
 	// so a RefreshDomains that started before it drops its stale list.
@@ -713,6 +723,12 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 	// Fail closed: an unpinned, env-selected root-capable image (S1).
 	if cfg.FixerImage != "" && (!strings.Contains(cfg.FixerImage, "@sha256:") || !docker.PinnedImage(cfg.FixerImage)) {
 		return nil, fmt.Errorf("HUB_FIXER_IMAGE %q must be pinned by digest (name@sha256:<64 hex>)", cfg.FixerImage)
+	}
+	if err := checkMailAPIURL(cfg.MailAPIURL); err != nil {
+		return nil, err
+	}
+	if cfg.MailSlotDir != "" && !filepath.IsAbs(cfg.MailSlotDir) {
+		return nil, fmt.Errorf("HUB_MAIL_SLOT_DIR %q must be an absolute path", cfg.MailSlotDir)
 	}
 	if cfg.SecretsVolume == "" {
 		cfg.SecretsVolume = DefaultSecretsVolume

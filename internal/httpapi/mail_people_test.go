@@ -20,6 +20,7 @@ func mailEnv(t *testing.T) (*toolEnv, *mailprovidertest.Server) {
 	h := e.s.Hub
 	h.SetMailAPI(mc.Client())
 	h.SetMailCoreForTest(true, "mail.example.org")
+	h.WireMailForTest("mailsrv")
 	h.SyncMailForTest(context.Background())
 	if mc.Puts() != 1 {
 		t.Fatalf("no first document: %v", mc.Requests)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -147,6 +148,12 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	if err := h.dockerRootMounts(ctx, t, proj); err != nil {
 		return err
 	}
+	h.mu.RLock()
+	mode := h.mailRenderModeLocked(t)
+	h.mu.RUnlock()
+	if err := checkMailMounts(proj, t, mode); err != nil {
+		return err
+	}
 	vol := h.cfg.SecretsVolume
 	type want struct{ sub string }
 	expected := map[string]map[string]want{} // service → target → subpath
@@ -159,6 +166,16 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 			expected[o.Mount.Service] = map[string]want{}
 		}
 		expected[o.Mount.Service][o.Mount.Path] = want{sub: sub}
+	}
+	// The wired mail provider's gate directory (contract §19.1): its
+	// gated services only, read-only, exactly <instance>/_mail.
+	if mode != mailUnwired {
+		for _, svc := range t.Manifest.Mail.Gated {
+			if expected[svc] == nil {
+				expected[svc] = map[string]want{}
+			}
+			expected[svc][MailSlotMount] = want{sub: mailSlotDirRel(t.ID)}
+		}
 	}
 	refuse := func(format string, args ...any) error {
 		return statusErr(http.StatusConflict, "%s was not started: %s (the Hub's secrets volume %s may only be mounted by a per-person password's service, read-only, at its own subpath)", t.ID, fmt.Sprintf(format, args...), vol)
@@ -269,6 +286,71 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	}
 	if !semver.IsValid("v"+api) || semver.Compare("v"+api, "v"+MinSubpathAPI) < 0 {
 		return statusErr(http.StatusConflict, "%s was not started: Docker Engine API %s is too old for per-person passwords (volume subpath mounts need API %s, Docker Engine 26.0 or newer)", t.ID, clip(api, 40), MinSubpathAPI)
+	}
+	return nil
+}
+
+// checkMailMounts is contract §19.1's mail_tls check on t's rendered
+// project: a volume whose resolved name is portcullis_mail_tls, under
+// any key, is mounted only by the wired provider's tls services (mode
+// void or normal), read-only. Anything else refuses the up (409).
+func checkMailMounts(proj *types.Project, t *templates.Template, mode mailMode) error {
+	keys := map[string]bool{}
+	for k, v := range proj.Volumes {
+		name := v.Name
+		if name == "" {
+			name = k
+			if !bool(v.External) {
+				name = proj.Name + "_" + k
+			}
+		}
+		if name == mailTLSVolume || k == mailTLSVolumeKey {
+			keys[k] = true
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	var tls []string
+	if mode != mailUnwired && t.Manifest.Mail != nil {
+		tls = t.Manifest.Mail.TLS
+	}
+	all := map[string]types.ServiceConfig{}
+	for n, sv := range proj.Services {
+		all[n] = sv
+	}
+	for n, sv := range proj.DisabledServices {
+		if _, dup := all[n]; !dup {
+			all[n] = sv
+		}
+	}
+	names := make([]string, 0, len(all))
+	for n := range all {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	refuse := func(format string, args ...any) error {
+		return statusErr(http.StatusConflict, "%s was not started: %s (the mail certificate %s may only be mounted read-only by the wired mail provider's tls services)", t.ID, fmt.Sprintf(format, args...), mailTLSVolume)
+	}
+	for _, n := range names {
+		for _, m := range all[n].Volumes {
+			if m.Type != types.VolumeTypeVolume || !keys[m.Source] {
+				continue
+			}
+			switch {
+			case !slices.Contains(tls, n):
+				return refuse("service %s mounts it", n)
+			case !m.ReadOnly:
+				return refuse("service %s mounts it writable", n)
+			}
+		}
+		for _, vf := range all[n].VolumesFrom {
+			src := strings.TrimPrefix(vf, "service:")
+			src, _, _ = strings.Cut(src, ":")
+			if slices.Contains(tls, src) && !slices.Contains(tls, n) {
+				return refuse("service %s takes the volumes of %s (volumes_from)", n, vf)
+			}
+		}
 	}
 	return nil
 }

@@ -30,9 +30,92 @@ type MailSettings struct {
 	// for an administrator's confirmation (their mail passwords are
 	// revoked meanwhile). nil: none.
 	PendingRemoval *MailPendingRemoval `json:"pending_removal,omitempty" yaml:"pending_removal,omitempty"`
-	// RestoreHandled: mailctl's restored_at the last successful full
+	// RestoreHandled: the provider's restored_at the last successful full
 	// reconcile of the mail passwords ran for (nil: none yet).
 	RestoreHandled *time.Time `json:"restore_handled,omitempty" yaml:"restore_handled,omitempty"`
+
+	// The mail slot (contract §19.1, §19.9). Provider: the wired
+	// instance (nil: nothing wired). VoidOwed: a void is owed (saved
+	// before anything else; the provider runs in void mode until a
+	// verified void clears it). Held: the wired template changed (or no
+	// longer validates) since wiring: void mode, no void, until an admin
+	// re-confirms.
+	Provider *MailProvider `json:"provider,omitempty" yaml:"provider,omitempty"`
+	VoidOwed *MailVoid     `json:"void_owed,omitempty" yaml:"void_owed,omitempty"`
+	Held     *MailHold     `json:"held,omitempty" yaml:"held,omitempty"`
+	// RetiringDKIM: per mail domain, the old provider's DKIM records kept
+	// in its set after a switch, until Until (§19.7).
+	RetiringDKIM map[string]RetiringDKIM `json:"retiring_dkim,omitempty" yaml:"retiring_dkim,omitempty"`
+	// TLS: the mail certificate as the CLI last reported it (POST
+	// /host/mail/tls, §19.3); SeenAt is also the timer's last visit.
+	TLS MailTLS `json:"tls" yaml:"tls"`
+	// Relay: the outbound relay (nil: deliver directly). Its password is
+	// hub_data/mail-relay-password, never here.
+	Relay *MailRelay `json:"relay,omitempty" yaml:"relay,omitempty"`
+	// DKIMRotate and FormerRetention are Go durations, 24h–8760h (""
+	// = the defaults 4320h and 720h).
+	DKIMRotate      string `json:"dkim_rotate,omitempty" yaml:"dkim_rotate,omitempty"`
+	FormerRetention string `json:"former_retention,omitempty" yaml:"former_retention,omitempty"`
+}
+
+// MailProvider is the wired mail provider (state.yaml mail.provider):
+// the instance, its template, source and commit, and the block hash at
+// wiring (templates.MailBlockHash).
+type MailProvider struct {
+	Instance  string    `json:"instance" yaml:"instance"`
+	Template  string    `json:"template" yaml:"template"`
+	Source    string    `json:"source" yaml:"source"`
+	Commit    string    `json:"commit" yaml:"commit"`
+	BlockHash string    `json:"block_hash" yaml:"block_hash"`
+	WiredAt   time.Time `json:"wired_at" yaml:"wired_at"`
+	WiredBy   string    `json:"wired_by" yaml:"wired_by"`
+}
+
+// MailVoid is an owed void (reason wire or restore).
+type MailVoid struct {
+	Reason string    `json:"reason" yaml:"reason"`
+	Since  time.Time `json:"since" yaml:"since"`
+}
+
+// Void reasons (MailVoid.Reason).
+const (
+	MailVoidWire    = "wire"
+	MailVoidRestore = "restore"
+)
+
+// MailHold is a held provider (its template changed since wiring).
+type MailHold struct {
+	Reason string    `json:"reason" yaml:"reason"`
+	Since  time.Time `json:"since" yaml:"since"`
+}
+
+// MailRecord is one DNS record of a mail set.
+type MailRecord struct {
+	Name  string `json:"name" yaml:"name"`
+	Type  string `json:"type" yaml:"type"`
+	TTL   int    `json:"ttl" yaml:"ttl"`
+	Value string `json:"value" yaml:"value"`
+}
+
+// RetiringDKIM is one domain's retained DKIM records after a switch.
+type RetiringDKIM struct {
+	Records []MailRecord `json:"records" yaml:"records"`
+	Until   time.Time    `json:"until" yaml:"until"`
+}
+
+// MailTLS is the mail certificate's SPKIs and expiry as the CLI reported.
+type MailTLS struct {
+	SPKISHA256 []string   `json:"spki_sha256,omitempty" yaml:"spki_sha256,omitempty"`
+	NotAfter   *time.Time `json:"not_after,omitempty" yaml:"not_after,omitempty"`
+	SeenAt     *time.Time `json:"seen_at,omitempty" yaml:"seen_at,omitempty"`
+}
+
+// MailRelay is the outbound relay (Settings → Mail).
+type MailRelay struct {
+	Host       string `json:"host" yaml:"host"`
+	Port       int    `json:"port" yaml:"port"`
+	Username   string `json:"username" yaml:"username"`
+	SPFInclude string `json:"spf_include" yaml:"spf_include"`
 }
 
 // MailAliases are one person's aliases (Username: the name they had when

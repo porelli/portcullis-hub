@@ -74,11 +74,12 @@ func (f *mailFixture) advance(d time.Duration) {
 	f.nowMu.Unlock()
 }
 
-// newMailFixture: core mail on, the fake mailctl wired, a directory with
-// alice, bob, root (admin) in mail_users, the main domain example.org.
+// newMailFixture: the slot open, mailsrv wired with the fake provider as
+// its API, a directory with alice, bob, root (admin) in mail_users, the
+// main domain example.org.
 func newMailFixture(t *testing.T) *mailFixture {
 	t.Helper()
-	f := &mailFixture{fixture: newFixture(t), mc: mailprovidertest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
+	f := &mailFixture{fixture: newMailSlotFixture(t, true), mc: mailprovidertest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
 	setCoreMail(t, f.fixture, true)
 	m := mailMembership()
 	f.people = &mailPeople{m: m}
@@ -96,7 +97,7 @@ func newMailFixture(t *testing.T) *mailFixture {
 	f.h.st.Mail.Domains = map[string]state.MailDomain{}
 	f.h.mu.Unlock()
 	f.engine.mu.Lock()
-	f.engine.containers = append(f.engine.containers, coreMailContainer("core-mail-1"))
+	f.engine.containers = append(f.engine.containers, providerContainer("prov-mail-1"))
 	f.engine.mu.Unlock()
 	// As if a baseline existed (no blind first document): the restart
 	// tests below set it up themselves.
@@ -146,7 +147,7 @@ func TestRemovalSentImmediately(t *testing.T) {
 	if f.mc.Puts() != 2 || len(f.mc.Last().Accounts) != 2 {
 		t.Fatalf("puts %d, %+v", f.mc.Puts(), f.mc.Last())
 	}
-	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "core-mail-1:2s" {
+	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "prov-mail-1:2s" {
 		t.Errorf("restarts %v", r)
 	}
 	if lo := f.h.LastOp(opKeyMail); lo == nil || !lo.OK || lo.Op != OpMailRestart {
@@ -241,47 +242,50 @@ func TestMassRemovalFlagOnlyForHubRemovals(t *testing.T) {
 	}
 }
 
-// coreMailContainer is core's mail container as compose labels it.
-func coreMailContainer(id string) docker.Container {
-	return docker.Container{ID: id, Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mail",
-		"com.docker.compose.project.working_dir": "/host/project", "com.docker.compose.oneoff": "False"}}
-}
-
-// TestMailRestartOnlyTargetsCoreMail: exactly the one container of core's
-// project (service mail, not a one-off, in core's directory); another
-// project's mail, a one-off and another working directory are ignored;
-// two candidates refuse; none refuses; a failed restart is recorded.
-func TestMailRestartOnlyTargetsCoreMail(t *testing.T) {
+// TestMailRestartTargetsWiredProvider: exactly the one container of the
+// wired provider's project and sessions.restart service (not a one-off);
+// another service, another project and core's are ignored; two
+// candidates refuse; none refuses; nothing wired refuses.
+func TestMailRestartTargetsWiredProvider(t *testing.T) {
 	f := newMailFixture(t)
-	oneoff := coreMailContainer("core-mail-run")
+	oneoff := providerContainer("prov-run")
 	oneoff.Labels["com.docker.compose.oneoff"] = "True"
-	elsewhere := coreMailContainer("other-checkout")
-	elsewhere.Labels["com.docker.compose.project.working_dir"] = "/srv/other"
 	f.engine.mu.Lock()
 	f.engine.containers = append(f.engine.containers,
-		docker.Container{ID: "app-mail", Labels: map[string]string{docker.LabelProject: "portcullis-mailapp", docker.LabelService: "mail"}},
-		docker.Container{ID: "core-mailctl", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mailctl"}},
-		oneoff, elsewhere)
+		docker.Container{ID: "other-stalwart", Labels: map[string]string{docker.LabelProject: "portcullis-mailapp", docker.LabelService: "stalwart"}},
+		docker.Container{ID: "prov-adapter", Labels: map[string]string{docker.LabelProject: "portcullis-mailsrv", docker.LabelService: "adapter"}},
+		docker.Container{ID: "core-mail", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "stalwart"}},
+		oneoff)
 	f.engine.mu.Unlock()
 	ctx := context.Background()
-	if err := f.h.restartCoreMail(ctx); err != nil {
+	if err := f.h.restartMailProvider(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "core-mail-1:2s" {
+	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "prov-mail-1:2s" {
 		t.Fatalf("restarts %v", r)
 	}
 	f.engine.mu.Lock()
-	f.engine.containers = append(f.engine.containers, coreMailContainer("core-mail-2"))
+	f.engine.containers = append(f.engine.containers, providerContainer("prov-mail-2"))
 	f.engine.mu.Unlock()
-	if err := f.h.restartCoreMail(ctx); err == nil || !strings.Contains(err.Error(), "2 containers") {
+	if err := f.h.restartMailProvider(ctx); err == nil || !strings.Contains(err.Error(), "2 containers") {
 		t.Fatalf("two candidates: %v", err)
 	}
 	f.engine.mu.Lock()
-	f.engine.containers = []docker.Container{oneoff, elsewhere}
+	f.engine.containers = []docker.Container{oneoff}
 	f.engine.mu.Unlock()
-	if err := f.h.restartCoreMail(ctx); err == nil || !strings.Contains(err.Error(), "not found") {
+	if err := f.h.restartMailProvider(ctx); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("none: %v", err)
 	}
+	f.h.mu.Lock()
+	wired := f.h.st.Mail.Provider
+	f.h.st.Mail.Provider = nil
+	f.h.mu.Unlock()
+	if err := f.h.restartMailProvider(ctx); !errors.Is(err, errMailNotWired) {
+		t.Fatalf("nothing wired: %v", err)
+	}
+	f.h.mu.Lock()
+	f.h.st.Mail.Provider = wired
+	f.h.mu.Unlock()
 	if r := f.engine.Restarts(); len(r) != 1 {
 		t.Fatalf("refused restarts ran: %v", r)
 	}
@@ -298,7 +302,7 @@ func TestMailRestartOnlyTargetsCoreMail(t *testing.T) {
 func TestKubeNeverRestartsMail(t *testing.T) {
 	f := newFixture(t)
 	f.h.rt = kubeKindRuntime{f.h.rt}
-	if err := f.h.restartCoreMail(context.Background()); !errors.Is(err, runtime.ErrUnsupported) {
+	if err := f.h.restartMailProvider(context.Background()); !errors.Is(err, runtime.ErrUnsupported) {
 		t.Fatalf("kube: %v", err)
 	}
 	if len(f.engine.Restarts()) != 0 {

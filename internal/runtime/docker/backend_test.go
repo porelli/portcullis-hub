@@ -414,22 +414,20 @@ func (e *coreListEngine) ListContainers(_ context.Context, f engine.Filters) ([]
 	return out, nil
 }
 
-// TestRestartCoreServiceNarrow: only "mail"; only core's project, not a
-// one-off, in core's directory; 0 or several matches restart nothing;
-// no CoreDir refuses.
-func TestRestartCoreServiceNarrow(t *testing.T) {
+// TestRestartServiceNarrow: only the named instance project and
+// service, never a one-off; 0 or several matches restart nothing; core's
+// project is refused.
+func TestRestartServiceNarrow(t *testing.T) {
 	ctx := context.Background()
-	core := func(id string) engine.Container {
-		return engine.Container{ID: id, Labels: map[string]string{engine.LabelProject: "portcullis", engine.LabelService: "mail",
-			labelWorkingDir: "/host/core", labelOneOff: "False"}}
+	svc := func(id, project, service string) engine.Container {
+		return engine.Container{ID: id, Labels: map[string]string{engine.LabelProject: project, engine.LabelService: service, labelOneOff: "False"}}
 	}
-	oneoff, other := core("run1"), core("other")
+	oneoff := svc("run1", "portcullis-mailsrv", "stalwart")
 	oneoff.Labels[labelOneOff] = "True"
-	other.Labels[labelWorkingDir] = "/srv/x"
-	e := &coreListEngine{recorder: &recorder{}, cs: []engine.Container{core("m1"), oneoff, other,
-		{ID: "app", Labels: map[string]string{engine.LabelProject: "portcullis-app", engine.LabelService: "mail"}}}}
-	b := New(e.recorder, e, Options{Kind: runtime.KindDocker, CoreDir: "/host/core/"})
-	if err := b.RestartCoreService(ctx, "mail", 2*time.Second); err != nil {
+	e := &coreListEngine{recorder: &recorder{}, cs: []engine.Container{svc("s1", "portcullis-mailsrv", "stalwart"), oneoff,
+		svc("a1", "portcullis-mailsrv", "adapter"), svc("o1", "portcullis-other", "stalwart"), svc("core", "portcullis", "stalwart")}}
+	b := New(e.recorder, e, Options{Kind: runtime.KindDocker})
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	restarts := func() (n int, last string) {
@@ -440,24 +438,21 @@ func TestRestartCoreServiceNarrow(t *testing.T) {
 		}
 		return
 	}
-	if n, last := restarts(); n != 1 || last != "restart m1 2s" {
+	if n, last := restarts(); n != 1 || last != "restart s1 2s" {
 		t.Fatalf("restarts %d %q", n, last)
 	}
-	for _, svc := range []string{"mailctl", "hub", "traefik", ""} {
-		if err := b.RestartCoreService(ctx, svc, time.Second); err == nil {
-			t.Errorf("service %q restarted", svc)
+	for _, c := range [][2]string{{"portcullis", "stalwart"}, {"", "stalwart"}, {"portcullis-mailsrv", ""}, {"portcullis-mailsrv", "nope"}} {
+		if err := b.RestartService(ctx, c[0], c[1], time.Second); err == nil {
+			t.Errorf("%q restarted", c)
 		}
 	}
-	e.cs = append(e.cs, core("m2"))
-	if err := b.RestartCoreService(ctx, "mail", time.Second); err == nil || !strings.Contains(err.Error(), "2 containers") {
+	e.cs = append(e.cs, svc("s2", "portcullis-mailsrv", "stalwart"))
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err == nil || !strings.Contains(err.Error(), "2 containers") {
 		t.Fatalf("two: %v", err)
 	}
-	e.cs = []engine.Container{oneoff, other}
-	if err := b.RestartCoreService(ctx, "mail", time.Second); err == nil {
-		t.Fatal("restarted a one-off or another checkout")
-	}
-	if err := New(e.recorder, e, Options{Kind: runtime.KindDocker}).RestartCoreService(ctx, "mail", time.Second); err == nil {
-		t.Fatal("no CoreDir: restarted")
+	e.cs = []engine.Container{oneoff}
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err == nil {
+		t.Fatal("restarted a one-off")
 	}
 	if n, _ := restarts(); n != 1 {
 		t.Fatalf("refused restarts ran: %d", n)

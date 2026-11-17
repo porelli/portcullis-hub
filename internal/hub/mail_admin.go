@@ -130,7 +130,7 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 			DNSBL: mailprovider.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
 			Allow: nonNil(st.Spam.Allow), Block: nonNil(st.Spam.Block)},
 		Limits: mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
-		Quotas: append([]state.MailQuotaRow{}, st.Quotas...), Relay: map[bool]string{true: "on", false: "off"}[core.Relay],
+		Quotas: append([]state.MailQuotaRow{}, st.Quotas...), Relay: map[bool]string{true: "on", false: "off"}[st.Relay != nil],
 		SubmissionLANOnly: core.SubmissionLAN, FormerRetention: "720h", DQSKey: "not set"}
 	if r := strings.TrimSpace(env[VarMailFormerRetention]); r != "" {
 		v.FormerRetention = r

@@ -34,7 +34,6 @@ import (
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
-	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/signinreset"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/web"
@@ -311,6 +310,9 @@ func main() {
 		// Hub's uid, 0700); unusable = those apps refuse to start.
 		SecretsDir:    env("HUB_SECRETS_DIR", "/secrets"),
 		SecretsVolume: env("HUB_SECRETS_VOLUME", hub.DefaultSecretsVolume),
+		// The mail slot (contract §19.1): "" = http://mail-api:<api.port>.
+		MailAPIURL:  os.Getenv("HUB_MAIL_API_URL"),
+		MailSlotDir: env("HUB_MAIL_SLOT_DIR", "/mail-slot"),
 		// The gate's age recipient (contract §15.4): readable = the core
 		// has an mcp-gate (Settings → AI gate_present).
 		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
@@ -452,12 +454,6 @@ func main() {
 		log.Printf("domains disabled: %v", err)
 	}
 	h.SetDomainsAPI(dom)
-	// Mail (contract §19.1): the wired provider's API on
-	// HUB_MAIL_API_URL. Its bearer is the wired instance's
-	// hub_secrets/<instance>/_mail/api-secret, which the slot (Task 6)
-	// supplies; until a provider is wired the client has none and sends
-	// nothing (mail routes answer 503).
-	h.SetMailAPI(mailprovider.New(env("HUB_MAIL_API_URL", mailprovider.DefaultAPIURL), ""))
 	dirStore, err := openDirectoryStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)

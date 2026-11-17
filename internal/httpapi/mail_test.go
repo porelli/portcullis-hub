@@ -29,6 +29,7 @@ func mailHelpEnv(t *testing.T) (*helpEnv, *mailprovidertest.Server, string) {
 	h := e.s.Hub
 	h.SetMailAPI(mc.Client())
 	h.SetMailCoreForTest(true, "mail.example.org")
+	h.WireMailForTest("mailsrv")
 	h.SyncMailForTest(context.Background())
 	r, b := doAs(t, e.people, "alice", "POST", "/api/me/mail/passwords", `{"label":"phone","expiry":"none","code":"c","code_verifier":"v","nonce":"n"}`)
 	if r.StatusCode != 201 {

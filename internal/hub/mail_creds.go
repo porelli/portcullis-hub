@@ -55,24 +55,31 @@ func IsMailUnavailable(err error) bool {
 	return errors.Is(err, errMailDown) || errors.Is(err, errMailNotReady) || errors.Is(err, errMailSecret)
 }
 
-// MailSecretProblem is the doctor's and Settings → Mail's text when mail
-// is on but the Hub's mail secret is missing or too short.
-const MailSecretProblem = "Mail can't be managed: the Hub's mail secret is missing or too short"
+// MailSecretProblem is the doctor's and Settings → Mail's text when a
+// provider is wired but the Hub has no usable API secret for it.
+const MailSecretProblem = "Mail can't be managed: the Hub's secret for the wired mail provider is missing or too short"
 
 // errMailSecret: every mail write answers it while the secret is bad.
 var errMailSecret = &StatusError{Status: http.StatusServiceUnavailable, Err: errors.New(MailSecretProblem)}
 
-// mailSecretInvalid: PORTCULLIS_MAIL=on but mailctl isn't configured
-// (the secret file missing, unreadable or under 32 characters), read
-// again at every call (a fixed file clears it without a restart).
+// mailSecretInvalid: the slot is open and a provider is wired in normal
+// mode, but its API client has no usable secret (the file missing,
+// unreadable or under 32 characters), read again at every call. Nothing
+// wired, a void owed or a hold are other states (the routes answer 503
+// "mail isn't running right now"; the settings stay editable).
 func (h *Hub) mailSecretInvalid() bool {
 	if !h.mailOn() {
 		return false
 	}
 	h.mu.RLock()
-	api := h.mailAPI
+	var api MailAPI
+	wired := false
+	if p := h.st.Mail.Provider; p != nil && h.mailModeLocked(p.Instance) == mailNormal {
+		wired = true
+		api = h.mailProviderAPILocked()
+	}
 	h.mu.RUnlock()
-	return api == nil || api.Available() != nil
+	return wired && (api == nil || api.Available() != nil)
 }
 
 // mailWriteGuard refuses a mail write while the secret is bad (503).
