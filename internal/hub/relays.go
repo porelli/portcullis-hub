@@ -236,7 +236,51 @@ func (h *Hub) relaysUp(ctx context.Context, id string) error {
 	if err := h.rt.Up(ctx, rp, nil); err != nil {
 		return fmt.Errorf("relays of %s: %w", id, err)
 	}
-	return nil
+	// Routable before the up is done: Traefik ignores a container until its
+	// health check passes, so until then the app's host has no router (404,
+	// and a kept-alive connection from then answers 421).
+	return h.waitRelaysHealthy(ctx, id)
+}
+
+// RelayHealthyWait bounds waitRelaysHealthy (a var for tests).
+var RelayHealthyWait = 90 * time.Second
+
+// waitRelaysHealthy waits until every relay of instance id with a health
+// check reports healthy (one without passes when running); a relay that
+// stopped fails at once, and none healthy within RelayHealthyWait fails
+// the up (never reported done while unroutable).
+func (h *Hub) waitRelaysHealthy(ctx context.Context, id string) error {
+	deadline := time.Now().Add(RelayHealthyWait)
+	for {
+		units, err := h.rt.List(ctx, runtime.Filter{Instance: id})
+		if err != nil {
+			return fmt.Errorf("relays of %s: %w", id, err)
+		}
+		waiting := ""
+		for _, u := range units {
+			st, err := h.rt.State(ctx, u.ID)
+			if err != nil {
+				return fmt.Errorf("relays of %s: %w", id, err)
+			}
+			switch {
+			case !st.Running:
+				return statusErr(502, "the relay %s of %s isn't running (%s)", u.Name, id, st.Status)
+			case st.Health != "" && st.Health != "healthy":
+				waiting = u.Name + " is " + st.Health
+			}
+		}
+		if waiting == "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return statusErr(504, "the relays of %s aren't healthy after %s (%s)", id, RelayHealthyWait, waiting)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // relaysDown takes instance id's relays down on the primary (before its

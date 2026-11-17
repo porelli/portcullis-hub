@@ -1,12 +1,17 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/runtime"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 )
 
@@ -135,5 +140,60 @@ func TestPlacedUpPullsAfterBundle(t *testing.T) {
 	pull := slices.Index(calls, ref)
 	if bundle < 0 || pull < 0 || pull < bundle {
 		t.Errorf("want the bundle, then the pull: %v", calls)
+	}
+}
+
+// TestRelaysHealthyBeforeUpIsDone (seen live: the enable was done while
+// Traefik still had no router for the host — 404, then 421 on the kept
+// connection): relaysUp waits for its relays' health checks, and a relay
+// that never turns healthy fails the up.
+func TestRelaysHealthyBeforeUpIsDone(t *testing.T) {
+	p := newPlacedFixture(t)
+	placedEnabled(t, p, "plainapp")
+	// The relay container on the primary (the fake engine lists what it holds).
+	p.engine.mu.Lock()
+	p.engine.containers = append(p.engine.containers, docker.Container{ID: "relay-1", State: "running",
+		Labels: map[string]string{docker.LabelProject: "portcullis-plainapp", docker.LabelService: "web"}})
+	p.engine.mu.Unlock()
+	units, err := p.h.rt.List(context.Background(), runtime.Filter{Instance: "plainapp"})
+	if err != nil || len(units) == 0 {
+		t.Fatalf("no relay listed on the primary: %v %v", units, err)
+	}
+	var mu sync.Mutex
+	asks := 0
+	p.engine.mu.Lock()
+	p.engine.stateHook = func(id string, st docker.State) docker.State {
+		mu.Lock()
+		defer mu.Unlock()
+		asks++
+		st.Running = true
+		st.Health = "starting"
+		if asks > 3 {
+			st.Health = "healthy"
+		}
+		return st
+	}
+	p.engine.mu.Unlock()
+	if err := p.h.relaysUp(context.Background(), "plainapp"); err != nil {
+		t.Fatalf("relaysUp: %v", err)
+	}
+	mu.Lock()
+	n := asks
+	mu.Unlock()
+	if n < 4 {
+		t.Errorf("relaysUp returned before the relays were healthy (%d state reads)", n)
+	}
+	old := RelayHealthyWait
+	RelayHealthyWait = 1500 * time.Millisecond
+	t.Cleanup(func() { RelayHealthyWait = old })
+	p.engine.mu.Lock()
+	p.engine.stateHook = func(id string, st docker.State) docker.State {
+		st.Running, st.Health = true, "unhealthy"
+		return st
+	}
+	p.engine.mu.Unlock()
+	err = p.h.relaysUp(context.Background(), "plainapp")
+	if errStatus(err) != 504 || !strings.Contains(err.Error(), "aren't healthy") {
+		t.Errorf("an unhealthy relay: %v", err)
 	}
 }
