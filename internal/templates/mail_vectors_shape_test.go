@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -74,21 +73,6 @@ func contractMailRefusals(t *testing.T) (texts []string, pats []*regexp.Regexp) 
 	if len(texts) < 30 {
 		t.Fatalf("only %d refusal texts in §3.5", len(texts))
 	}
-	for _, p := range mailRefusalPendingContract {
-		if slices.Contains(texts, p.text) {
-			continue // the contract has it now
-		}
-		i := slices.Index(texts, p.after)
-		if i < 0 {
-			t.Fatalf("pending text's anchor %q not in §3.5", p.after)
-		}
-		parts := ph.Split(p.text, -1)
-		for k := range parts {
-			parts[k] = regexp.QuoteMeta(parts[k])
-		}
-		texts = slices.Insert(texts, i+1, p.text)
-		pats = slices.Insert(pats, i+1, regexp.MustCompile("^"+strings.Join(parts, ".+")+"$"))
-	}
 	return texts, pats
 }
 
@@ -101,14 +85,6 @@ var mailRefusalNotVectored = map[string]bool{
 // mailRefusalMulti: texts with one vector per variant (the refused key).
 var mailRefusalMulti = map[string]bool{
 	"mail: network <n> sets <key>: a mail template's networks are plain project networks (internal, ipam subnets and IP ranges, enable_ipv6: false)": true,
-}
-
-// mailRefusalPendingContract are refusal texts the Hub and templates
-// share before the contract's §3.5 list carries them (the coordinator's
-// networks allowlist, 2026-11-17): placed right after "enables IPv6".
-// Drop an entry once the synced contract has it.
-var mailRefusalPendingContract = []struct{ after, text string }{
-	{"mail: network <n> enables IPv6", "mail: network <n> sets <key>: a mail template's networks are plain project networks (internal, ipam subnets and IP ranges, enable_ipv6: false)"},
 }
 
 // TestMailVectorsShape: every refusal text of §3.5 is the want_error of
