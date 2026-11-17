@@ -210,6 +210,7 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 					continue
 				}
 				acc.created++
+				acc.reload(sys) // V-M1: the new account is checked like any other
 			case a.UID != 0 && u.UID != a.UID:
 				// M11: an account of a former person under a reused name
 				// (the Hub retired its uid): never unlocked for someone
@@ -233,6 +234,8 @@ func Apply(ctx context.Context, sys System, b *cliapi.Bundle, c cliapi.Ceiling, 
 				} else if out, err := sys.Run(ctx, "useradd", "-m", "-s", shellFor(sys), a.Name); err != nil {
 					findings = append(findings, finding(cliapi.FindingAccountMissing, cliapi.SeverityWarning, a.Name, "useradd: "+firstLine(out)))
 					continue
+				} else {
+					acc.reload(sys) // V-M1
 				}
 			} else if n := authorizedKeysCount(sys, u); n > 0 {
 				findings = append(findings, finding(cliapi.FindingAuthorizedKeysShared, cliapi.SeverityInfo, a.Name, fmt.Sprintf("%d authorized_keys entries", n)))

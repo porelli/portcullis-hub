@@ -63,6 +63,7 @@ func trustCmd() *cobra.Command {
 			if self, err := os.Executable(); err == nil {
 				o.Self = self
 			}
+			o.Note = func(s string) { fmt.Println(s) }
 			if err := host.Trust(cmd.Context(), host.OS{}, o); err != nil {
 				return api.Errorf(api.ExitError, "%v", err)
 			}
@@ -79,6 +80,7 @@ func trustCmd() *cobra.Command {
 	f.StringVar(&o.CAFingerprint, "ca-fingerprint", "", "fetch the CA key and accept it only with this fingerprint (SHA256:…)")
 	f.StringSliceVar(&o.Persons, "person", nil, "a person's own account (repeatable)")
 	f.StringSliceVar(&o.Accounts, "account", nil, "a shared account (repeatable)")
+	f.BoolVar(&o.ApprovedOnly, "approved-only", false, "accept only privileged grants' certificates (up:/sp:) for every account; accounts with sudo get only those anyway")
 	f.BoolVar(&o.RevokedKeys, "revoked-keys", false, "pull the revoked keys every 5 minutes")
 	f.StringVar(&o.Breakglass, "breakglass-account", cliapi.DefaultBreakglassAccount, "the account with its own authorized_keys that keeps working without Portcullis")
 	f.BoolVar(&o.NoBreakglass, "no-breakglass-i-have-console-access", false, "no break-glass account: you have console access")

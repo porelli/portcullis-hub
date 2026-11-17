@@ -165,6 +165,12 @@ lines the current grants need. `--ca-fingerprint SHA256:…`
 fetches the key instead, and only accepts it when the fingerprint matches.
 Without `--revoked-keys` the host never talks to Portcullis.
 
+`host trust` checks each named account for sudo the same way a managed host
+does: an account with sudo accepts only a privileged grant's certificates
+(`sp:` / `up:`), and `--approved-only` makes every account do so. It prints
+which form each account got. Nobody watches an unmanaged host afterwards: run
+`host trust` again when an account's sudo changes.
+
 ## Accounts and sudo (managed hosts)
 
 - Each person gets an account named after their LLDAP username, with the

@@ -89,7 +89,9 @@ const sudoCheckTimeout = 10 * time.Second
 func (a *accountsCtx) sudoVia(ctx context.Context, sys System, name string) string {
 	u, ok := a.users[name]
 	if !ok {
-		return ""
+		// V-M1: an account this run doesn't know (created after the list
+		// was read, or gone) is uncertain: sudo (fail closed).
+		return "the account wasn't in the accounts list when checked"
 	}
 	if u.UID == 0 {
 		return "uid 0"
@@ -275,4 +277,17 @@ func doasPermits(conf, name string, groups []string) bool {
 		}
 	}
 	return false
+}
+
+// reload re-reads the accounts and groups after an account was created
+// (V-M1), keeping the run's created count. A failed read keeps the old
+// lists: the new account is then unknown, which sudoVia counts as sudo.
+func (a *accountsCtx) reload(sys System) {
+	n, err := loadAccounts(sys)
+	if err != nil {
+		return
+	}
+	created := a.created
+	*a = *n
+	a.created = created
 }

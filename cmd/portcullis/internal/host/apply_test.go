@@ -774,3 +774,67 @@ func TestSudoCapableKeepsOnlyApprovedPrincipals(t *testing.T) {
 		t.Errorf("the left-out principal isn't reported: %+v", fs)
 	}
 }
+
+// V-M1: an account this apply creates is checked too — a sudoers rule
+// that already names it means only approved principals.
+func TestCreatedAccountSudoChecked(t *testing.T) {
+	// A shared account created with create_shared_accounts.
+	sys := newFakeSys(t)
+	sys.sudoers["ansible"] = true
+	b := bundle(t)
+	b.Options.CreateSharedAccounts = true
+	b.Accounts = []cliapi.Account{{Name: "ansible", Kind: "shared", Principals: []string{"s:ansible@web"}}}
+	if _, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil); err != nil || !slices.Contains(kinds(fs)[cliapi.FindingCeiling], "ansible") {
+		t.Fatalf("%v %+v", err, fs)
+	}
+	if _, ok := sys.files[PrincipalsFile("ansible")]; ok {
+		t.Error("a created shared account named by a sudoers rule got a plain principal")
+	}
+	// A new person.
+	sys = newFakeSys(t)
+	sys.sudoers["carol"] = true
+	b = bundle(t)
+	b.Accounts = []cliapi.Account{{Name: "carol", Kind: "person", UID: 20003, Principals: []string{"u:carol@web"}}}
+	apply(t, sys, b, cliapi.DefaultCeiling(), nil)
+	if _, ok := sys.files[PrincipalsFile("carol")]; ok {
+		t.Error("a created person named by a sudoers rule got a plain principal")
+	}
+}
+
+// V-L3: Portcullis's own sudo for an account (first time, no rule yet)
+// takes only approved principals: a plain u: with sudo: true writes
+// neither the principals file nor the sudo line.
+func TestPortcullisSudoNeedsApprovedPrincipal(t *testing.T) {
+	sys := newFakeSys(t)
+	b := bundle(t)
+	b.Accounts = []cliapi.Account{{Name: "carol", Kind: "person", UID: 20003, Principals: []string{"u:carol@web"}, Sudo: true}}
+	if _, fs, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil); err != nil || !slices.Contains(kinds(fs)[cliapi.FindingCeiling], "carol") {
+		t.Fatalf("%v %+v", err, fs)
+	}
+	if _, ok := sys.files[PrincipalsFile("carol")]; ok || strings.Contains(string(sys.files[SudoersFile]), "carol") {
+		t.Errorf("principals %q sudoers %q", sys.files[PrincipalsFile("carol")], sys.files[SudoersFile])
+	}
+}
+
+// V-L3: the rollback-only narrowing — an account the bundle still gives
+// sudo but this apply skips (no approved principal) loses its old rule
+// even when sshd -t fails.
+func TestRollbackNarrowsSkippedSudo(t *testing.T) {
+	sys := newFakeSys(t)
+	b := bundle(t)
+	b.Accounts = append(b.Accounts, cliapi.Account{Name: "carol", Kind: "person", UID: 20003, Principals: []string{"up:carol@web"}, Sudo: true})
+	st, _, err := apply(t, sys, b, cliapi.DefaultCeiling(), nil)
+	if err != nil || !strings.Contains(string(sys.files[SudoersFile]), "carol ALL") {
+		t.Fatalf("setup: %v %q", err, sys.files[SudoersFile])
+	}
+	b2 := bundle(t)
+	b2.Serial++
+	b2.Accounts = append(b2.Accounts, cliapi.Account{Name: "carol", Kind: "person", UID: 20003, Principals: []string{"u:carol@web"}, Sudo: true})
+	sys.sshdT = errors.New("exit 255")
+	if _, _, err := apply(t, sys, b2, cliapi.DefaultCeiling(), st); err == nil {
+		t.Fatal("applied despite sshd -t")
+	}
+	if strings.Contains(string(sys.files[SudoersFile]), "carol") {
+		t.Errorf("carol kept sudo after the rollback: %q", sys.files[SudoersFile])
+	}
+}

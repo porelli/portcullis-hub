@@ -513,6 +513,29 @@ useradd -m -s /bin/bash plain`)
 		}
 	})
 	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
+	// V-M1: a sudoers rule already names an account that doesn't exist
+	// yet; the apply that creates it (create_shared_accounts) checks it
+	// too, so a plain certificate never opens it.
+	exec_("sh", "-c", "echo 'fresh ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/zz-fresh && chmod 440 /etc/sudoers.d/zz-fresh")
+	hub.setBundle(func(b *cliapi.Bundle) {
+		b.Options.CreateSharedAccounts = true
+		b.Accounts = append(b.Accounts, cliapi.Account{Name: "fresh", Kind: "shared", Principals: []string{"s:fresh@web"}})
+	})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
+	if out, _ := exec_("id", "-un", "fresh"); strings.TrimSpace(out) != "fresh" {
+		t.Errorf("fresh wasn't created: %q", out)
+	}
+	if _, err := sshRun(addr, "fresh", userCert(t, caSigner, "s:fresh@web", "pc:f:web:0123456789abcdef"), "true"); err == nil {
+		t.Error("a just-created account with a sudoers rule took a plain certificate")
+	}
+	if !hasFindingPrefix(hub.lastReport(), cliapi.FindingCeiling, "fresh", "has sudo on this host") {
+		t.Errorf("fresh not reported: %+v", hub.lastReport().Findings)
+	}
+	hub.setBundle(func(b *cliapi.Bundle) {
+		b.Options.CreateSharedAccounts = false
+		b.Accounts = slices.DeleteFunc(b.Accounts, func(a cliapi.Account) bool { return a.Name == "fresh" })
+	})
+	exec_("/usr/local/bin/portcullis", "host", "sync", "--once")
 	// RR-M2: a failed apply (sshd -t refuses an unrelated main config line)
 	// never gives back a sudo rule the new bundle removed.
 	hub.setBundle(func(b *cliapi.Bundle) {
@@ -599,6 +622,40 @@ useradd -m -s /bin/bash plain`)
 	}
 	if out, _ := exec_("sh", "-c", "ls /etc/ssh/sshd_config.d/50-portcullis.conf /etc/ssh/portcullis 2>&1"); !strings.Contains(out, "No such file") {
 		t.Errorf("files left: %s", out)
+	}
+	// V-M2: host trust (unmanaged) runs the same sudo check: plain (no
+	// sudo) takes both forms, dock (docker) only sp:, and --approved-only
+	// gives plain only sp: as well.
+	caLine := cliapi.NormalAuthorizedKey(caSigner.PublicKey())
+	trust := func(extra ...string) string {
+		out, err := exec_(append([]string{"/usr/local/bin/portcullis", "host", "trust", "--domain", "example.org", "--host-group", "web", "--ca-key", caLine,
+			"--account", "plain", "--account", "dock", "--service-none"}, extra...)...)
+		if err != nil {
+			t.Fatalf("host trust %v: %v %s", extra, err, out)
+		}
+		time.Sleep(time.Second)
+		waitSSH()
+		return out
+	}
+	out = trust()
+	if !strings.Contains(out, "dock: only sp:dock@web") || !strings.Contains(out, "plain: s:plain@web and sp:plain@web") {
+		t.Errorf("host trust didn't say which forms: %s", out)
+	}
+	if _, err := sshRun(addr, "plain", userCert(t, caSigner, "s:plain@web", "pc:t:web:0123456789abcdef"), "true"); err != nil {
+		t.Errorf("trust: plain (no sudo) with s:: %v", err)
+	}
+	if _, err := sshRun(addr, "dock", userCert(t, caSigner, "s:dock@web", "pc:t:web:0123456789abcdef"), "true"); err == nil {
+		t.Error("trust: dock (docker) took a plain certificate")
+	}
+	if _, err := sshRun(addr, "dock", userCert(t, caSigner, "sp:dock@web", "pc:t:web:0123456789abcdef"), "true"); err != nil {
+		t.Errorf("trust: dock with sp:: %v", err)
+	}
+	trust("--approved-only")
+	if _, err := sshRun(addr, "plain", userCert(t, caSigner, "s:plain@web", "pc:t:web:0123456789abcdef"), "true"); err == nil {
+		t.Error("trust --approved-only: plain took a plain certificate")
+	}
+	if _, err := sshRun(addr, "plain", userCert(t, caSigner, "sp:plain@web", "pc:t:web:0123456789abcdef"), "true"); err != nil {
+		t.Errorf("trust --approved-only: plain with sp:: %v", err)
 	}
 	_ = sha256.Sum256
 	_ = hex.EncodeToString

@@ -58,6 +58,7 @@ func TestDropInGolden(t *testing.T) {
 
 func TestRevokedKeysCreatedEmptyFirst(t *testing.T) {
 	sys := newFakeSys(t)
+	addTrustAccounts(sys)
 	if err := Trust(context.Background(), sys, trustOpts(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -286,5 +287,48 @@ func TestRevokedTimerRefusesUnsafeBinary(t *testing.T) {
 	}
 	if got := xmlEscape(`/a&b<c>`); got != "/a&amp;b&lt;c&gt;" {
 		t.Errorf("xml %q", got)
+	}
+}
+
+// addTrustAccounts: alice and deploy exist, neither with sudo.
+func addTrustAccounts(sys *fakeSys) {
+	sys.files["/etc/passwd"] = append(sys.files["/etc/passwd"], []byte("alice:x:1600:1600::/home/alice:/bin/bash\ndeploy:x:1601:1601::/home/deploy:/bin/bash\n")...)
+}
+
+// V-M2: host trust runs the managed hosts' sudo check. An account with
+// sudo, an unknown one, or --approved-only gets only the approved form;
+// each account's form is reported.
+func TestTrustApprovedOnlyForSudo(t *testing.T) {
+	for name, c := range map[string]struct {
+		setup         func(*fakeSys)
+		approvedOnly  bool
+		alice, deploy string
+	}{
+		"deploy has sudo": {func(s *fakeSys) { addTrustAccounts(s); s.sudoers["deploy"] = true }, false, "u:alice@web\nup:alice@web\n", "sp:deploy@web\n"},
+		"alice in docker": {func(s *fakeSys) {
+			addTrustAccounts(s)
+			s.files["/etc/group"] = append(s.files["/etc/group"], []byte("docker:x:990:alice\n")...)
+		}, false, "up:alice@web\n", "s:deploy@web\nsp:deploy@web\n"},
+		"not created yet": {func(*fakeSys) {}, false, "up:alice@web\n", "sp:deploy@web\n"},
+		"--approved-only": {addTrustAccounts, true, "up:alice@web\n", "sp:deploy@web\n"},
+	} {
+		sys := newFakeSys(t)
+		c.setup(sys)
+		o := trustOpts(t)
+		o.ApprovedOnly = c.approvedOnly
+		var notes []string
+		o.Note = func(s string) { notes = append(notes, s) }
+		if err := Trust(context.Background(), sys, o); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := string(sys.files[PrincipalsFile("alice")]); got != c.alice {
+			t.Errorf("%s: alice %q", name, got)
+		}
+		if got := string(sys.files[PrincipalsFile("deploy")]); got != c.deploy {
+			t.Errorf("%s: deploy %q", name, got)
+		}
+		if len(notes) != 2 {
+			t.Errorf("%s: notes %v", name, notes)
+		}
 	}
 }

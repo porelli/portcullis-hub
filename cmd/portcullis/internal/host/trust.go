@@ -29,6 +29,12 @@ type TrustOptions struct {
 	Fetch func(ctx context.Context, path string) ([]byte, error)
 	// Self is this binary's path (the revoked-keys timer runs it).
 	Self string
+	// ApprovedOnly (--approved-only) writes only up:/sp: for every account
+	// (V-M2); an account with sudo, or one whose sudo can't be told, gets
+	// only those anyway.
+	ApprovedOnly bool
+	// Note receives one line per account: which principals were written.
+	Note func(string)
 }
 
 // Trust sets up an unmanaged host (contract §18.8): the CA key, one
@@ -105,13 +111,37 @@ func Trust(ctx context.Context, sys System, o TrustOptions) (err error) {
 	if err := tx.Stage(UserCAFile, []byte(ca+"\n"), 0o644); err != nil {
 		return err
 	}
+	// V-M2: the same sudo check as a managed host's. An account that can
+	// reach root (or whose check is uncertain, or that doesn't exist yet)
+	// takes only the approved form: a plain grant's certificate never opens
+	// it. This host isn't watched afterwards: a later sudo change needs
+	// host trust again.
+	acc, aerr := loadAccounts(sys)
+	stage := func(kind, a string) error {
+		via := "the accounts can't be read"
+		if aerr == nil {
+			via = acc.sudoVia(ctx, sys, a)
+		}
+		ps := []string{cliapi.Principal(kind, a, o.HostGroup), cliapi.ApprovedPrincipal(kind, a, o.HostGroup)}
+		switch {
+		case via != "":
+			ps = ps[1:]
+			o.note(a + ": only " + ps[0] + " (it has sudo here: " + via + "; a privileged grant's certificates only)")
+		case o.ApprovedOnly:
+			ps = ps[1:]
+			o.note(a + ": only " + ps[0] + " (--approved-only)")
+		default:
+			o.note(a + ": " + strings.Join(ps, " and ") + " (no sudo seen here; run host trust again if that changes)")
+		}
+		return tx.Stage(PrincipalsFile(a), principalsBody(ps), 0o644)
+	}
 	for _, a := range o.Persons {
-		if err := tx.Stage(PrincipalsFile(a), principalsBody([]string{cliapi.Principal(cliapi.PrincipalPersonal, a, o.HostGroup), cliapi.ApprovedPrincipal(cliapi.PrincipalPersonal, a, o.HostGroup)}), 0o644); err != nil {
+		if err := stage(cliapi.PrincipalPersonal, a); err != nil {
 			return err
 		}
 	}
 	for _, a := range o.Accounts {
-		if err := tx.Stage(PrincipalsFile(a), principalsBody([]string{cliapi.Principal(cliapi.PrincipalShared, a, o.HostGroup), cliapi.ApprovedPrincipal(cliapi.PrincipalShared, a, o.HostGroup)}), 0o644); err != nil {
+		if err := stage(cliapi.PrincipalShared, a); err != nil {
 			return err
 		}
 	}
@@ -331,3 +361,9 @@ func RevokedDomain(sys System) (string, string, error) {
 
 // notef prints a note on stderr (a var for tests).
 var notef = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
+
+func (o TrustOptions) note(s string) {
+	if o.Note != nil {
+		o.Note(s)
+	}
+}
