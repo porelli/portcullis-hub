@@ -806,6 +806,37 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 		}
 	}()
 	if len(plan) > 0 {
+		// A worker's agent creates only volumes a bundle names (contract
+		// §17.4): the instance's bundle first, as an up's (a move's restore
+		// onto a worker included — nothing was pushed there yet).
+		if pr, ok := h.rtOf(id).(placedRT); ok {
+			server := h.serverOf(id)
+			// The checks before anything is sent, as at create: the pinned
+			// images (placedImages); placement and quarantine are
+			// pushBundle's own first step (placedCheck).
+			if t := h.Template(id); t != nil {
+				if err := h.placedImages(ctx, t, server); err != nil {
+					return air, err
+				}
+			}
+			prev, _ := h.lastPush.Load(id)
+			hadBundle := prev == server
+			if err := h.pushBundle(ctx, id, pr.Instances); err != nil {
+				return air, fmt.Errorf("the bundle of %s before its volumes: %w", id, err)
+			}
+			if !hadBundle {
+				// A failed restore leaves no bundle (no env) there it put
+				// there itself; a removal that fails is owed.
+				defer func() {
+					if err == nil {
+						return
+					}
+					if rerr := h.removeWorkerBundle(context.Background(), server, id); rerr != nil {
+						h.oweBundle(server, id)
+					}
+				}()
+			}
+		}
 		if err := h.rtOf(id).EnsureImage(ctx, HelperImage); err != nil {
 			return air, fmt.Errorf("helper image %s: %w", HelperImage, err)
 		}

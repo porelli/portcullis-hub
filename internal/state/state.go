@@ -124,6 +124,11 @@ type Instance struct {
 	// MoveTargetLeftover is what a failed move left on its target (its
 	// half-restored volumes): a later move there waits for its removal.
 	MoveTargetLeftover *MovedFrom `json:"move_target_leftover,omitempty" yaml:"move_target_leftover,omitempty"`
+	// OlderCopies are kept copies a later move would otherwise have
+	// forgotten (an earlier MovedFrom or MoveTargetLeftover, on another
+	// server): every recorded copy of the instance, per server, until
+	// removed (a move onto a server holding one is refused, contract §17.6).
+	OlderCopies []MovedFrom `json:"older_copies,omitempty" yaml:"older_copies,omitempty"`
 	// KeycloakClients are the Keycloak client ids the Hub registered for
 	// the instance (recorded at create and enable): a revocation rotates
 	// them even when the template no longer resolves (review B-M3).

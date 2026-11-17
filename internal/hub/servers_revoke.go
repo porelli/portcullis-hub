@@ -507,6 +507,11 @@ func (h *Hub) serversDoctorInLocked(backups map[string]time.Time) *doctor.Server
 	for _, o := range h.st.OwedBundles {
 		owed[o.Instance] = serverLabel(o.Server)
 	}
+	for id, why := range h.copyRemoveFail {
+		if owed[id] == "" {
+			owed[id] = why
+		}
+	}
 	in := &doctor.ServersIn{NotRotated: maps.Clone(h.rotateFail), PlacementInvalid: invalid, Stuck: stuck,
 		Quarantined: map[string]string{}, OwedCopies: owed}
 	for id, server := range placed {

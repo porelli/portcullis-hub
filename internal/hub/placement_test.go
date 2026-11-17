@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -40,6 +41,11 @@ type workerFake struct {
 	// held: instance ids with a pushed bundle (removed with the project):
 	// the agent's List scope.
 	held map[string]bool
+	// inUse: volume names whose removal fails (in use).
+	inUse map[string]bool
+	// bundleVols: each held bundle's manifest volume names (CreateVolume's
+	// scope, as the agent's).
+	bundleVols map[string][]string
 	// pushErr refuses bundles; removeErrs fails the next RemoveProject
 	// calls; pushHook runs at each push.
 	pushErr    error
@@ -129,6 +135,10 @@ func (w *workerFake) PushBundle(_ context.Context, id string, files fs.FS, m age
 		w.held = map[string]bool{}
 	}
 	w.held[id] = true
+	if w.bundleVols == nil {
+		w.bundleVols = map[string][]string{}
+	}
+	w.bundleVols[id] = slices.Collect(maps.Values(m.Volumes))
 	w.mu.Unlock()
 	w.Fake.Signal(context.Background(), "bundle", id) // recorded in order
 	return nil
@@ -147,8 +157,76 @@ func (w *workerFake) RemoveProject(_ context.Context, id string) error {
 	w.Fake.Signal(context.Background(), "remove-project", id)
 	w.mu.Lock()
 	delete(w.held, id)
+	delete(w.bundleVols, id)
 	w.mu.Unlock()
 	return nil
+}
+
+// ListVolumes / RemoveVolume are the agent's scope: only volumes of a
+// project it holds a bundle of are listed or removable (403 otherwise);
+// inUse makes a removal fail as the engine does for a volume in use.
+func (w *workerFake) ListVolumes(ctx context.Context, f runtime.Filter) ([]runtime.Volume, error) {
+	vs, err := w.Fake.ListVolumes(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := vs[:0]
+	for _, v := range vs {
+		if w.held[strings.TrimPrefix(v.Labels[docker.LabelProject], runtime.ProjectPrefix)] {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+func (w *workerFake) RemoveVolume(ctx context.Context, name string) error {
+	w.Fake.Lock()
+	v, ok := w.Fake.Volumes[name]
+	w.Fake.Unlock()
+	w.mu.Lock()
+	held := ok && w.held[strings.TrimPrefix(v.Labels[docker.LabelProject], runtime.ProjectPrefix)]
+	busy := w.inUse[name]
+	w.mu.Unlock()
+	if ok && !held {
+		return &agentrt.Error{Status: 502, Msg: "the server nas answered unexpectedly", AgentStatus: 403}
+	}
+	if busy {
+		return &agentrt.Error{Status: 409, Msg: "volume is in use", AgentStatus: 409}
+	}
+	return w.Fake.RemoveVolume(ctx, name)
+}
+
+// InspectVolume is the agent's scope too: a volume of a project it holds
+// no bundle of isn't there for the Hub (the backend's 502 for the 403).
+func (w *workerFake) InspectVolume(ctx context.Context, name string) (runtime.Volume, error) {
+	v, err := w.Fake.InspectVolume(ctx, name)
+	if err != nil {
+		return v, err
+	}
+	w.mu.Lock()
+	held := w.held[strings.TrimPrefix(v.Labels[docker.LabelProject], runtime.ProjectPrefix)]
+	w.mu.Unlock()
+	if !held {
+		return runtime.Volume{}, &agentrt.Error{Status: 502, Msg: "the server nas answered unexpectedly", AgentStatus: 403}
+	}
+	return v, nil
+}
+
+// CreateVolume is the agent's (through the backend's mapping): only a
+// volume a held bundle's manifest names.
+func (w *workerFake) CreateVolume(ctx context.Context, v runtime.Volume) error {
+	w.mu.Lock()
+	named := false
+	for id, names := range w.bundleVols {
+		named = named || (w.held[id] && slices.Contains(names, v.Name))
+	}
+	w.mu.Unlock()
+	if !named {
+		return &agentrt.Error{Status: 409, Msg: "the server nas refused to create volume " + v.Name + ": a previous copy may still be there", AgentStatus: 403}
+	}
+	return w.Fake.CreateVolume(ctx, v)
 }
 
 // List is the agent's: an instance it holds no bundle of is 404 "no such

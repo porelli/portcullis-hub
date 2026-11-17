@@ -31,7 +31,7 @@ func (h *Hub) serverKindsInLocked(in *doctor.ServersIn, backups map[string]time.
 	byServer := map[string][]string{}
 	for _, id := range slices.Sorted(maps.Keys(h.st.Instances)) {
 		e := h.st.Instances[id]
-		if e.Server == "" && e.MovedFrom == nil && e.MoveTargetLeftover == nil {
+		if e.Server == "" && e.MovedFrom == nil && e.MoveTargetLeftover == nil && len(e.OlderCopies) == 0 {
 			continue
 		}
 		if e.Server != "" {
@@ -50,6 +50,11 @@ func (h *Hub) serverKindsInLocked(in *doctor.ServersIn, backups map[string]time.
 			}
 			if tl := e.MoveTargetLeftover; tl != nil && len(tl.Volumes) > 0 && tl.Server != e.Server {
 				in.Leftovers = append(in.Leftovers, doctor.LeftoverIn{Instance: id, Server: tl.Server, At: tl.At, Volumes: slices.Clone(tl.Volumes), Target: true})
+			}
+			for _, oc := range e.OlderCopies {
+				if len(oc.Volumes) > 0 && oc.Server != e.Server {
+					in.Leftovers = append(in.Leftovers, doctor.LeftoverIn{Instance: id, Server: oc.Server, At: oc.At, Volumes: slices.Clone(oc.Volumes)})
+				}
 			}
 		}
 	}

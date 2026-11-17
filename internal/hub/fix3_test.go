@@ -451,31 +451,51 @@ func (l *listingIdP) ClientIDsOwnedBy(_ context.Context, owner string) ([]string
 // their removal, which then lets it go.
 func TestFailedMoveRecordsTargetLeftover(t *testing.T) {
 	p := newPlacedFixture(t)
-	enabledOnPrimary(t, p)
+	if err := p.create(t, "filesapp", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.h.Enable("filesapp"); err != nil {
+		t.Fatal(err)
+	}
+	// The restore made the instance's volume on the target, then failed.
+	vol := p.h.volumeNamesFor(p.h.Template("filesapp"), "filesapp")["data"]
 	p.h.testHookApplyRestore = func(stage string) error {
 		if stage == "volumes" {
 			p.w.Lock()
-			p.w.Volumes["portcullis-plainapp_half"] = runtimeVolume("portcullis-plainapp_half", "portcullis-plainapp")
+			p.w.Volumes[vol] = runtimeVolume(vol, "portcullis-filesapp")
 			p.w.Unlock()
 			return errors.New("the target's volume upload failed")
 		}
 		return nil
 	}
-	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "nas", admin); err == nil {
+	if _, err := p.h.MoveInstance(context.Background(), "filesapp", "nas", admin); err == nil {
 		t.Fatal("moved")
 	}
 	p.h.testHookApplyRestore = nil
-	in := p.instance("plainapp")
-	if in.MoveTargetLeftover == nil || in.MoveTargetLeftover.Server != "nas" || !slices.Contains(in.MoveTargetLeftover.Volumes, "portcullis-plainapp_half") {
+	in := p.instance("filesapp")
+	if in.MoveTargetLeftover == nil || in.MoveTargetLeftover.Server != "nas" || !slices.Contains(in.MoveTargetLeftover.Volumes, vol) {
 		t.Fatalf("leftover %+v", in.MoveTargetLeftover)
 	}
-	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "nas", admin); errStatus(err) != 409 || !strings.Contains(err.Error(), "leftover") {
+	// The failed restore removed the bundle it pushed (no env left there).
+	p.w.mu.Lock()
+	held := p.w.held["filesapp"]
+	p.w.mu.Unlock()
+	if held {
+		t.Error("the failed restore left its bundle on the worker")
+	}
+	if _, err := p.h.MoveInstance(context.Background(), "filesapp", "nas", admin); errStatus(err) != 409 || !strings.Contains(err.Error(), "still holds a previous copy of filesapp") {
 		t.Errorf("a move onto the leftover: %v", err)
 	}
-	if err := p.h.RemoveMoveLeftover(context.Background(), "plainapp", "plainapp", admin); err != nil {
+	if err := p.h.RemoveMoveLeftover(context.Background(), "filesapp", "filesapp", admin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "nas", admin); err != nil {
+	p.w.Lock()
+	_, still := p.w.Volumes[vol]
+	p.w.Unlock()
+	if still {
+		t.Error("the leftover volume is still on the worker")
+	}
+	if _, err := p.h.MoveInstance(context.Background(), "filesapp", "nas", admin); err != nil {
 		t.Errorf("after the removal: %v", err)
 	}
 }

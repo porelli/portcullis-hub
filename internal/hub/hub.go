@@ -320,6 +320,9 @@ type Hub struct {
 	// overridePreflight: instance → the server and overridden image
 	// refs its last start preflight-pulled (placedImages).
 	overridePreflight sync.Map
+	// copyRemoveFail: instance → where (and why) removing a kept copy
+	// failed (srvMu; the doctor's server_copy_not_removed).
+	copyRemoveFail map[string]string
 	// lastPush: instance → the server its last successful bundle push
 	// went to (an owed removal there is settled only after it).
 	lastPush sync.Map
