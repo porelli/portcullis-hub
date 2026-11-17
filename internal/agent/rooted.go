@@ -77,8 +77,11 @@ func checkRooted(r *os.Root, rel string) error {
 
 // writeRooted writes rel in r atomically (a temp file in the same
 // directory, then a rename), making missing directories 0750; every
-// existing component is checked first (checkRooted).
-func writeRooted(r *os.Root, rel string, data io.Reader, mode fs.FileMode) error {
+// existing component is checked first (checkRooted). gid ≥ 0: every
+// directory it makes and the file get that group (the primary's appfiles
+// are the Hub's group, 10001: apps read them through group_add); a
+// failed chgrp fails the write.
+func writeRooted(r *os.Root, rel string, data io.Reader, mode fs.FileMode, gid int) error {
 	if err := checkRooted(r, rel); err != nil {
 		return err
 	}
@@ -94,6 +97,11 @@ func writeRooted(r *os.Root, rel string, data io.Reader, mode fs.FileMode) error
 			if fi, err := r.Lstat(p); err != nil || !fi.IsDir() || fi.Mode()&fs.ModeSymlink != 0 {
 				return fmt.Errorf("%s: %w", p, ErrNotPlain)
 			}
+			if gid >= 0 {
+				if err := r.Lchown(p, -1, gid); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	tmp := path.Join(dir, ".tmp-"+randomID())
@@ -102,6 +110,9 @@ func writeRooted(r *os.Root, rel string, data io.Reader, mode fs.FileMode) error
 		return err
 	}
 	_, err = io.Copy(f, data)
+	if err == nil && gid >= 0 {
+		err = f.Chown(-1, gid)
+	}
 	if err == nil {
 		err = f.Chmod(mode)
 	}
@@ -145,6 +156,11 @@ func (a *API) appfilesRoot(id string) (*os.Root, error) {
 		}
 		if !fi.IsDir() || fi.Mode()&fs.ModeSymlink != 0 {
 			return nil, fmt.Errorf("%s: %w", p, ErrNotPlain)
+		}
+		if g := a.appfilesGID(); g >= 0 {
+			if err := data.Lchown(p, -1, g); err != nil {
+				return nil, fmt.Errorf("%s: the group %d: %w", p, g, err)
+			}
 		}
 	}
 	return data.OpenRoot("appfiles/" + id)

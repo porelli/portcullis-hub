@@ -91,6 +91,21 @@ type APIConfig struct {
 	DiskFree func(ctx context.Context) (free int64, ok bool)
 	// Images records and sweeps preflight pulls (nil: neither).
 	Images Images
+	// AppfilesGID is the group of the instances' data files and their
+	// directories (the primary's: the Hub's 10001, HubGID; apps read them
+	// through group_add). 0: none (tests); the agent's container has the
+	// group as a supplementary one, so the chgrp needs no capability.
+	AppfilesGID int
+}
+
+// HubGID is the primary's appfiles group (core's CT_UID_HUB, contract §13.7).
+const HubGID = 10001
+
+func (a *API) appfilesGID() int {
+	if a.cfg.AppfilesGID <= 0 {
+		return -1
+	}
+	return a.cfg.AppfilesGID
 }
 
 // project is one bundled instance as the agent holds it.
@@ -318,7 +333,7 @@ func (a *API) putAppFile(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 	for _, f := range files {
-		if err := writeRooted(root, name+"/"+f.name, strings.NewReader(string(f.data)), f.mode); err != nil {
+		if err := writeRooted(root, name+"/"+f.name, strings.NewReader(string(f.data)), f.mode, a.appfilesGID()); err != nil {
 			writeError(w, http.StatusConflict, "the data file: "+clipMsg(err.Error()))
 			return
 		}

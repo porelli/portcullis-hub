@@ -276,7 +276,7 @@ func run(data string, getenv func(string) string) error {
 			return fmt.Errorf("the agent's compose project %s is an instance's (a bundle of %s exists): refusing to start", ownProject, id)
 		}
 	}
-	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, Images: engine, SelfImage: selfImage, OwnProject: ownProject, OwnContainers: ownContainers, ReservedNames: ownNames,
+	api := agent.NewAPI(agent.APIConfig{DataDir: data, BindRoots: roots, Runtime: rt, Net: engine, Images: engine, AppfilesGID: agent.HubGID, SelfImage: selfImage, OwnProject: ownProject, OwnContainers: ownContainers, ReservedNames: ownNames,
 		HelperImage: dockerrt.HelperImage, ComposeEnv: rt.Env(), Config: cli.Config, Protected: protected,
 		DiskFree: func(ctx context.Context) (int64, bool) {
 			i, err := engineInfoFor(ctx, rt)

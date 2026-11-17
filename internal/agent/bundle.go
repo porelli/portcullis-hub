@@ -710,7 +710,7 @@ func (a *API) commitBundle(id, staging, filesStaging string, resolved []byte, pr
 			if err != nil {
 				return err
 			}
-			err = writeRooted(root, rel, f, fi.Mode().Perm())
+			err = writeRooted(root, rel, f, fi.Mode().Perm(), a.appfilesGID())
 			f.Close()
 			if err != nil {
 				return fmt.Errorf("appfiles: %w", err)
