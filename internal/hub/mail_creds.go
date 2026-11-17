@@ -402,6 +402,29 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 		created.Secret.Zero()
 		return nil, saveErr
 	}
+	// LAN-only (contract §19.6): the new credential must be limited to
+	// exactly the Local networks, else it is taken back and refused.
+	if h.mailCore().SubmissionLAN {
+		lctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
+		live, lerr := api.Credentials(lctx, uuid)
+		cancel()
+		var mine []mailprovider.Credential
+		for _, c := range live {
+			if c.ID == created.ID && c.CreatedAt.Equal(created.CreatedAt) {
+				mine = append(mine, c)
+			}
+		}
+		if lerr != nil || len(mine) != 1 || len(h.checkAllowedIPs(ctx, api, user, uuid, mine)) > 0 {
+			if lerr != nil || len(mine) != 1 {
+				if rerr := api.RevokeCredential(context.WithoutCancel(ctx), uuid, created.ID); rerr != nil {
+					log.Printf("mail: taking back %s's unverified mail password %s failed: %v", user, created.ID, rerr)
+				}
+				h.mailEndRowsOf(user, uuid, mailprovider.Credential{ID: created.ID, CreatedAt: created.CreatedAt}, "lan-only")
+			}
+			created.Secret.Zero()
+			return nil, statusErr(http.StatusServiceUnavailable, "mail passwords can't be limited to the local networks right now: try again later")
+		}
+	}
 	h.auditOp(directory.Human(user), "mail_credential.create", user, fmt.Sprintf("id=%s label_length=%d", row.ID, utf8.RuneCountInString(label)), nil)
 	pw := []byte(created.Secret)
 	prof, err := mobileConfig(h.mailCore().Hostname, acct.Addresses[0], acct.DisplayName, label, pw)
@@ -493,6 +516,16 @@ func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user,
 		}
 		if err != nil {
 			return errMailDown
+		}
+		// LAN-only (contract §19.6): a credential wider than the Local
+		// networks is revoked now; its row has ended.
+		if ids := h.checkAllowedIPs(ctx, api, user, uuid, live); len(ids) > 0 {
+			live = slices.DeleteFunc(live, func(c mailprovider.Credential) bool { return slices.Contains(ids, c.ID) })
+			rows0 = h.activeMailRows(user)
+			before = map[string]bool{}
+			for _, c := range rows0 {
+				before[c.ID] = true
+			}
 		}
 	}
 	if h.mailReconcileHook != nil {

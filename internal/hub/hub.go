@@ -394,7 +394,9 @@ type Hub struct {
 	// re-check (tests).
 	mailSlotOp sync.Mutex
 	// mailDNSProb: refused mail sets and MTA-STS policies per domain.
-	mailDNSProb            mailDNSProblems
+	mailDNSProb mailDNSProblems
+	// mailLAN: the LAN-only verification's last breach.
+	mailLAN                mailLANOnly
 	testHookMailSlotLocked func(op string)
 	domainsReachable       bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable

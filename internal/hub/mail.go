@@ -363,6 +363,12 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	}
 	s.mu.Unlock()
 	confirm = confirm || (d.removedAccounts > 0 && h.mailPendingConfirmed(d.removedUUIDs))
+	// The Hub's own guard first (contract §19.5): a document removing
+	// more than half of the last accepted one's accounts is never sent
+	// unconfirmed, whatever the provider would do.
+	if removed, needs := mailMassRemoval(doc, last); needs && !confirm {
+		return h.mailMassRefused(ctx, api, last, doc, d, errHubMassRemoval(removed))
+	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
 	if err != nil {

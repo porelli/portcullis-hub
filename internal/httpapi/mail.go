@@ -90,7 +90,7 @@ func (s *Server) handleSetMailSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in hub.MailSettingsInput
-	if !readMailBody(w, r, &in, `{"primary_domain", "spam", "limits", "quotas"}`) {
+	if !readMailBody(w, r, &in, `{"primary_domain", "spam", "limits", "quotas", "relay"?, "dkim_rotate"?, "former_retention"?}`) {
 		return
 	}
 	if err := s.Hub.SetMailSettings(r.Context(), in, requestActor(r)); err != nil {

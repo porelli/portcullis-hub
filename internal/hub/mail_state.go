@@ -43,7 +43,7 @@ type MailBuildInput struct {
 	SubmissionLANOnly bool
 }
 
-// MailState v2 defaults until Settings → Mail carries them (Task 12).
+// MailState v2's duration defaults (Settings → Mail, contract §19.9).
 const (
 	defaultDKIMRotate      = "4320h"
 	defaultFormerRetention = "720h"
@@ -105,13 +105,17 @@ func BuildMailState(in MailBuildInput) (*mailprovider.MailState, []string) {
 	}
 	doc := &mailprovider.MailState{Version: mailprovider.StateVersion, Generation: in.Generation, PrimaryDomain: primary,
 		MailHostname: in.MailHostname, ClientIP: clientIP, SubmissionLANOnly: in.SubmissionLANOnly,
-		DKIMRotate: defaultDKIMRotate, FormerRetention: defaultFormerRetention, TLS: mailprovider.StateTLS{SPKISHA256: []string{}},
+		DKIMRotate: mailDuration(st.DKIMRotate, defaultDKIMRotate), FormerRetention: mailDuration(st.FormerRetention, defaultFormerRetention),
+		TLS: mailprovider.StateTLS{SPKISHA256: append([]string{}, st.TLS.SPKISHA256...)},
 		Domains: []mailprovider.Domain{}, Accounts: []mailprovider.Account{}, Aliases: []mailprovider.Alias{}, Lists: []mailprovider.List{},
 		Postmaster: []string{}, LocalNetworks: append([]string{}, in.LocalNetworks...),
 		Limits: mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
 		Spam: mailprovider.Spam{RejectScore: st.Spam.RejectScore, JunkScore: st.Spam.JunkScore,
 			DNSBL: mailprovider.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
 			Allow: append([]string{}, st.Spam.Allow...), Block: append([]string{}, st.Spam.Block...)}}
+	if r := st.Relay; r != nil {
+		doc.Relay = &mailprovider.Relay{Host: r.Host, Port: r.Port, Username: r.Username, SPFInclude: r.SPFInclude}
+	}
 	live := map[string]bool{} // on or draining: addresses live there
 	for _, n := range names {
 		s := mailDomainState(st, main, in.CoreOn, n)
@@ -435,4 +439,12 @@ func subset(a, b []string) bool {
 // dmarc_start.
 func mailDMARCFloor(st state.MailSettings, n, start string) string {
 	return mailprovider.StricterDMARC(start, st.DMARCPublished[strings.ToLower(n)])
+}
+
+// mailDuration is a Settings → Mail duration, or def when unset.
+func mailDuration(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }

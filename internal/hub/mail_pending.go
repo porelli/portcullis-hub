@@ -385,6 +385,11 @@ func (h *Hub) ConfirmMailRemoval(ctx context.Context, uuids []string, actor dire
 	if err := aiUnconfirmed(actor, "confirming a mass removal of mailboxes"); err != nil {
 		return err
 	}
+	// Full administrators only (lldap_admin, one predicate): never a
+	// delegate, whatever route or fix called it.
+	if !h.isGlobalAdmin(ctx, actor.User) {
+		return statusErr(http.StatusForbidden, "%s", mailNotAdminText)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval

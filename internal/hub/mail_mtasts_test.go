@@ -88,8 +88,8 @@ func TestFloorFromPublished(t *testing.T) {
 	w.h.mu.Lock()
 	w.h.st.Mail.Domains[teamB] = state.MailDomain{Enabled: true, HadMailRecords: true} // dmarc_start none
 	w.h.mu.Unlock()
-	w.sync(t)
 	w.setDNS(teamB, goodSet(teamB, "quarantine"))
+	w.sync(t)
 	if err := w.writeSet(t, teamB); err != nil {
 		t.Fatal(err)
 	}

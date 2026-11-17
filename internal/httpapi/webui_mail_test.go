@@ -102,10 +102,10 @@ func TestSettingsMailPanel(t *testing.T) {
 			map[string]any{"name": "team-b.example.net", "enabled": false, "state": "draining", "groups": []string{"team_b<x>"}}},
 		"spam":   map[string]any{"reject_score": 15, "junk_score": 5, "dnsbl": map[string]any{"spamhaus": true, "spamcop": false, "barracuda": true}, "allow": []string{"a.example"}, "block": []string{}},
 		"limits": map[string]any{"recipients_per_hour": 300, "recipients_per_day": 1000}, "quotas": []any{map[string]any{"group": "team_b", "bytes": 21474836480}},
-		"relay": "off", "submission_lan_only": false, "former_retention": "720h", "dqs_key": "not set"}
+		"relay": nil, "submission_lan_only": false, "dkim_rotate": "4320h", "former_retention": "720h"}
 	h := render(view, map[string]any{"mail": "on", "reachable": true})
 	for _, want := range []string{"mail.example.org", `data-mail-domain="team-b.example.net"`, "draining", `data-mail-act="domain-on"`, `data-mail-act="domain-off"`,
-		"team_b&lt;x&gt;", "up to 7 days", "MAIL_SPAMHAUS_DQS_KEY", "team_b = 20", "reachable", `data-mail-dnsbl="spamcop">`} {
+		"team_b&lt;x&gt;", "up to 7 days", "none (direct delivery)", "4320h", "team_b = 20", "reachable", `data-mail-dnsbl="spamcop">`} {
 		if !strings.Contains(h, want) {
 			t.Errorf("panel lacks %q:\n%s", want, h)
 		}

@@ -2,15 +2,22 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
@@ -49,11 +56,13 @@ type MailSettingsView struct {
 	Limits        mailprovider.Limits  `json:"limits"`
 	Quotas        []state.MailQuotaRow `json:"quotas"`
 	// Lists are the groups made lists, by group (controller ruling).
-	Lists             []MailListView `json:"lists"`
-	Relay             string         `json:"relay"`
+	Lists []MailListView `json:"lists"`
+	// Relay is the outbound relay (null: deliver directly); its password
+	// is never returned (password_set).
+	Relay             *MailRelayView `json:"relay"`
 	SubmissionLANOnly bool           `json:"submission_lan_only"`
+	DKIMRotate        string         `json:"dkim_rotate"`
 	FormerRetention   string         `json:"former_retention"`
-	DQSKey            string         `json:"dqs_key"`
 	// SubmissionLANOnlyRefusal (rootless Podman only): why LAN-only can't
 	// be turned on here (controller ruling; the CLI refuses it).
 	SubmissionLANOnlyRefusal string `json:"submission_lan_only_refusal,omitempty"`
@@ -78,19 +87,41 @@ type MailListView struct {
 	Posting string `json:"posting"`
 }
 
-// MailSettingsInput is PUT /api/mail/settings.
-type MailSettingsInput struct {
-	PrimaryDomain string               `json:"primary_domain"`
-	Spam          MailSpamView         `json:"spam"`
-	Limits        mailprovider.Limits  `json:"limits"`
-	Quotas        []state.MailQuotaRow `json:"quotas"`
+// MailRelayView is Settings → Mail's relay (never its password).
+type MailRelayView struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	SPFInclude  string `json:"spf_include"`
+	PasswordSet bool   `json:"password_set"`
 }
 
-// core.env keys Settings → Mail shows read-only (contract §19.9 lists the
-// facts; core writes these two when it has them).
+// MailSettingsInput is PUT /api/mail/settings. Relay, DKIMRotate and
+// FormerRetention absent keep what is saved; relay null clears it.
+type MailSettingsInput struct {
+	PrimaryDomain   string               `json:"primary_domain"`
+	Spam            MailSpamView         `json:"spam"`
+	Limits          mailprovider.Limits  `json:"limits"`
+	Quotas          []state.MailQuotaRow `json:"quotas"`
+	Relay           json.RawMessage      `json:"relay,omitempty"`
+	DKIMRotate      *string              `json:"dkim_rotate,omitempty"`
+	FormerRetention *string              `json:"former_retention,omitempty"`
+}
+
+// mailRelayInput is the relay in PUT /api/mail/settings; Password
+// absent keeps the saved one, "" clears it (write-only).
+type mailRelayInput struct {
+	Host       string  `json:"host"`
+	Port       int     `json:"port"`
+	Username   string  `json:"username"`
+	SPFInclude string  `json:"spf_include"`
+	Password   *string `json:"password"`
+}
+
+// The durations' range (contract §19.5).
 const (
-	VarMailFormerRetention = "PORTCULLIS_MAIL_FORMER_RETENTION"
-	VarMailDQS             = "PORTCULLIS_MAIL_DQS"
+	mailDurationMin = 24 * time.Hour
+	mailDurationMax = 8760 * time.Hour
 )
 
 // mailDomainNames are the main domain and every added domain the Hub
@@ -120,7 +151,6 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 		problem = MailSecretProblem
 	}
 	core := h.mailCore()
-	env := readEnvRaw(h.coreEnvPath())
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	st := h.st.Mail
@@ -129,14 +159,12 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 		Spam: MailSpamView{RejectScore: st.Spam.RejectScore, JunkScore: st.Spam.JunkScore,
 			DNSBL: mailprovider.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
 			Allow: nonNil(st.Spam.Allow), Block: nonNil(st.Spam.Block)},
-		Limits: mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
-		Quotas: append([]state.MailQuotaRow{}, st.Quotas...), Relay: map[bool]string{true: "on", false: "off"}[st.Relay != nil],
-		SubmissionLANOnly: core.SubmissionLAN, FormerRetention: "720h", DQSKey: "not set"}
-	if r := strings.TrimSpace(env[VarMailFormerRetention]); r != "" {
-		v.FormerRetention = r
-	}
-	if strings.TrimSpace(env[VarMailDQS]) == "on" {
-		v.DQSKey = "set in .env"
+		Limits:            mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
+		Quotas:            append([]state.MailQuotaRow{}, st.Quotas...),
+		SubmissionLANOnly: core.SubmissionLAN, DKIMRotate: mailDuration(st.DKIMRotate, defaultDKIMRotate),
+		FormerRetention: mailDuration(st.FormerRetention, defaultFormerRetention)}
+	if r := st.Relay; r != nil {
+		v.Relay = &MailRelayView{Host: r.Host, Port: r.Port, Username: r.Username, SPFInclude: r.SPFInclude, PasswordSet: h.mailRelayPasswordSet()}
 	}
 	if h.cfg.Runtime == runtime.KindPodman {
 		v.SubmissionLANOnlyRefusal = MailLANOnlyPodmanRefusal
@@ -238,6 +266,19 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 			return statusErr(http.StatusBadRequest, "quota row %s: the size must be more than 0 and at most 1 TiB", q.Group)
 		}
 	}
+	relay, relaySet, password, err := parseMailRelay(in.Relay)
+	if err != nil {
+		return err
+	}
+	for _, d := range []*string{in.DKIMRotate, in.FormerRetention} {
+		if d == nil {
+			continue
+		}
+		v, perr := time.ParseDuration(*d)
+		if perr != nil || v < mailDurationMin || v > mailDurationMax {
+			return statusErr(http.StatusBadRequest, "dkim_rotate and former_retention must be durations from 24h to 8760h")
+		}
+	}
 	primary := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(in.PrimaryDomain), "."))
 	main := strings.ToLower(h.cfg.Domain)
 	coreOn := h.mailOn()
@@ -267,6 +308,27 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 		Barracuda: s.DNSBL.Barracuda, Allow: allow, Block: block}
 	h.st.Mail.Limits = state.MailLimits{RecipientsPerHour: l.RecipientsPerHour, RecipientsPerDay: l.RecipientsPerDay}
 	h.st.Mail.Quotas = append([]state.MailQuotaRow(nil), in.Quotas...)
+	if relaySet {
+		h.st.Mail.Relay = relay
+	}
+	if in.DKIMRotate != nil {
+		h.st.Mail.DKIMRotate = *in.DKIMRotate
+	}
+	if in.FormerRetention != nil {
+		h.st.Mail.FormerRetention = *in.FormerRetention
+	}
+	// The relay password first (write-only, never in state.yaml): a
+	// cleared relay clears it.
+	if relaySet && relay == nil {
+		empty := ""
+		password = &empty
+	}
+	if password != nil {
+		if err := h.writeMailRelayPasswordLocked(*password); err != nil {
+			h.st.Mail = old
+			return err
+		}
+	}
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail = old
 		return err
@@ -275,9 +337,83 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 	return nil
 }
 
+// parseMailRelay is the input's relay: absent (set false: keep), null
+// (nil, set: clear) or a relay (password: nil keeps the saved one).
+func parseMailRelay(raw json.RawMessage) (r *state.MailRelay, set bool, password *string, err error) {
+	if len(raw) == 0 {
+		return nil, false, nil, nil
+	}
+	if string(raw) == "null" {
+		return nil, true, nil, nil
+	}
+	var in mailRelayInput
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&in) != nil {
+		return nil, false, nil, statusErr(http.StatusBadRequest, `relay must be null or {"host", "port", "username", "spf_include", "password"?}`)
+	}
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(in.Host), "."))
+	inc := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(in.SPFInclude), "."))
+	switch {
+	case !templates.ValidHostname(host):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "relay host %q isn't a host name", clipText(in.Host))
+	case in.Port < 1 || in.Port > 65535:
+		return nil, false, nil, statusErr(http.StatusBadRequest, "relay port must be 1 to 65535")
+	case len(in.Username) > 255 || strings.ContainsAny(in.Username, "\x00\r\n\t"):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "the relay username must be one line of at most 255 characters")
+	case inc != "" && (!spfIncludeRe.MatchString(inc) || len(inc) > 253):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "relay spf_include %q isn't a host name", clipText(in.SPFInclude))
+	case in.Password != nil && (len(*in.Password) > 1024 || strings.ContainsAny(*in.Password, "\x00\r\n")):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "the relay password must be one line of at most 1024 bytes")
+	}
+	return &state.MailRelay{Host: host, Port: in.Port, Username: in.Username, SPFInclude: inc}, true, in.Password, nil
+}
+
+// spfIncludeRe is an SPF include: a DNS name whose labels may carry _.
+var spfIncludeRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)+$`)
+
+// mailRelayPasswordSet: hub_data/mail-relay-password holds a password.
+func (h *Hub) mailRelayPasswordSet() bool {
+	fi, err := os.Stat(filepath.Join(h.cfg.DataDir, mailRelayPasswordFile))
+	return err == nil && fi.Size() > 0
+}
+
+// writeMailRelayPasswordLocked writes the Hub's copy (0600; "" removes
+// it) and, with a provider wired, its gate copy (in place). Never logged.
+// Caller must hold mu (write).
+func (h *Hub) writeMailRelayPasswordLocked(pw string) error {
+	f := filepath.Join(h.cfg.DataDir, mailRelayPasswordFile)
+	if pw == "" {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return statusErr(http.StatusInternalServerError, "removing the relay password failed")
+		}
+	} else if err := fsutil.WriteFileAtomic(f, []byte(pw), 0o600); err != nil {
+		return statusErr(http.StatusInternalServerError, "saving the relay password failed")
+	}
+	if p := h.st.Mail.Provider; p != nil && h.mailSlotDir(p.Instance) != "" {
+		if err := h.writeRelayPasswordLocked(p.Instance); err != nil {
+			log.Printf("mail: delivering the relay password to %s: %v", p.Instance, err)
+		}
+	}
+	return nil
+}
+
 func mailSettingsDetail(in MailSettingsInput) string {
-	return fmt.Sprintf("primary=%s reject=%d junk=%d limits=%d/%d quotas=%d", in.PrimaryDomain, in.Spam.RejectScore, in.Spam.JunkScore,
+	d := fmt.Sprintf("primary=%s reject=%d junk=%d limits=%d/%d quotas=%d", in.PrimaryDomain, in.Spam.RejectScore, in.Spam.JunkScore,
 		in.Limits.RecipientsPerHour, in.Limits.RecipientsPerDay, len(in.Quotas))
+	switch {
+	case string(in.Relay) == "null":
+		d += " relay=none"
+	case len(in.Relay) > 0:
+		d += " relay=set" // never the password
+	}
+	if in.DKIMRotate != nil {
+		d += " dkim_rotate=" + clipText(*in.DKIMRotate)
+	}
+	if in.FormerRetention != nil {
+		d += " former_retention=" + clipText(*in.FormerRetention)
+	}
+	return d
 }
 
 // clipText is s, at most 64 bytes of it (refusal texts).
