@@ -58,6 +58,15 @@ func (f *fakeSys) Owner(p string) (int, fs.FileMode, error) {
 func newFakeSys(t *testing.T) *fakeSys {
 	t.Helper()
 	notef = func(string, ...any) {}
+	signalHUP = func(sys System, pid int) error {
+		if fs, ok := sys.(*fakeSys); ok && pid > 1 {
+			fs.mu.Lock()
+			fs.reloads++
+			fs.mu.Unlock()
+			return nil
+		}
+		return errors.New("no")
+	}
 	f := &fakeSys{files: map[string][]byte{}, modes: map[string]fs.FileMode{}, dirs: map[string]bool{}, handler: map[string]func([]string) ([]byte, error){},
 		owners: map[string]ownerOf{}, links: map[string]string{},
 		version: "OpenSSH_9.6p1 Ubuntu", goos: "linux"}
@@ -68,6 +77,7 @@ func newFakeSys(t *testing.T) *fakeSys {
 	f.files["/bin/bash"] = []byte("#!")
 	f.files["/usr/sbin/sshd"] = []byte("bin")
 	f.files["/usr/bin/systemctl"] = []byte("bin")
+	f.files["/run/sshd.pid"] = []byte("4242\n")
 	return f
 }
 

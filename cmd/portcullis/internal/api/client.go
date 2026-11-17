@@ -33,12 +33,22 @@ const (
 )
 
 // Error is an error with its exit code. Its text is safe to print.
+// Status and Server are the HTTP status and the server's own text (0 and
+// "" when no answer came).
 type Error struct {
-	Code int
-	Msg  string
+	Code   int
+	Msg    string
+	Status int
+	Server string
 }
 
 func (e *Error) Error() string { return e.Msg }
+
+// HTTPStatus is the answer's status (0 = none).
+func (e *Error) HTTPStatus() int { return e.Status }
+
+// Text is the server's {"error"} text.
+func (e *Error) Text() string { return e.Server }
 
 // Errorf is an *Error.
 func Errorf(code int, format string, a ...any) *Error {
@@ -160,9 +170,16 @@ func statusError(code int, ans []byte) error {
 	if json.Unmarshal(ans, &e) == nil {
 		text = printable(e.Error)
 	}
+	server := text
 	if text == "" {
 		text = http.StatusText(code)
 	}
+	err := statusErrorText(code, text)
+	err.Status, err.Server = code, server
+	return err
+}
+
+func statusErrorText(code int, text string) *Error {
 	switch {
 	case code == http.StatusUpgradeRequired:
 		return Errorf(ExitError, "%s", text)
