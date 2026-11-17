@@ -376,6 +376,19 @@ func (h *Hub) PreviewGrant(ctx context.Context, c *directory.Caller, g state.SSH
 	if !c.Admin && !st.HostGroups[g.HostGroup].Delegable {
 		return nil, statusErr(http.StatusForbidden, "host group %s isn't delegable (admins only)", g.HostGroup)
 	}
+	if !c.Admin {
+		// L-C4: a delegate previews only a group they could grant to (the
+		// preview lists its members).
+		h.sshrt.mu.Lock()
+		dir := h.sshrt.dir
+		h.sshrt.mu.Unlock()
+		if dir == nil {
+			return nil, statusErr(http.StatusServiceUnavailable, "the directory isn't connected")
+		}
+		if _, err := dir.CheckSSHGrantGroup(ctx, c, g.Group); err != nil {
+			return nil, err
+		}
+	}
 	if people == nil {
 		return nil, statusErr(http.StatusServiceUnavailable, "the directory isn't connected")
 	}

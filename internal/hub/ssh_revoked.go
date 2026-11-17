@@ -129,12 +129,6 @@ func (h *Hub) RevokeFingerprints(actor, reason string, fps []string, target stri
 			n++
 		}
 		h.sshrev.mu.Unlock()
-		h.sshrt.mu.Lock()
-		if h.sshrt.incomplete == nil {
-			h.sshrt.incomplete = map[string]time.Time{}
-		}
-		h.sshrt.incomplete[fp] = now
-		h.sshrt.mu.Unlock()
 		if err == nil {
 			err = refusal(http.StatusConflict, TextRevocationIncomplete, TextRevocationIncomplete+" "+fp)
 		}
@@ -144,12 +138,25 @@ func (h *Hub) RevokeFingerprints(actor, reason string, fps []string, target stri
 	return n + m, err
 }
 
-// sshRevocationsIncomplete are the fingerprints revoked without a key
-// (the doctor's input).
+// sshRevocationsIncomplete are the fingerprints revoked without a
+// usable key (the doctor's input), with when: read from revoked.json, so
+// they survive a restart (L-C2). An unreadable list logs and answers nil.
 func (h *Hub) sshRevocationsIncomplete() map[string]time.Time {
-	h.sshrt.mu.Lock()
-	defer h.sshrt.mu.Unlock()
-	return clone(h.sshrt.incomplete)
+	l, err := h.sshRevokedList()
+	if err != nil {
+		log.Printf("ssh: %v", err)
+		return nil
+	}
+	var out map[string]time.Time
+	for _, e := range l {
+		if _, _, perr := cliapi.ParseAuthorizedKey(e.Key); e.Key == "" || perr != nil {
+			if out == nil {
+				out = map[string]time.Time{}
+			}
+			out[e.FP] = e.Added
+		}
+	}
+	return out
 }
 
 // revokedUntil is when key fp's entry may go: 24 h after the last

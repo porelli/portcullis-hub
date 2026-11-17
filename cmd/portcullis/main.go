@@ -94,7 +94,7 @@ func rootCmd() *cobra.Command {
 			common(&o)
 			return login.Logout(cmd.Context(), o, revoke)
 		}}
-	logoutCmd.Flags().BoolVar(&revoke, "revoke", false, "also revoke this login's certificates (signs you in again)")
+	logoutCmd.Flags().BoolVar(&revoke, "revoke", false, "also revoke this login's keys for good — never certified again, a --key key of your own too (signs you in again)")
 	logoutCmd.Flags().StringVar(&logoutDomain, "domain", "", "the Portcullis domain")
 	root.AddCommand(logoutCmd)
 

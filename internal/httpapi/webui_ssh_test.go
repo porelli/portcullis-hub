@@ -2,6 +2,9 @@ package httpapi
 
 import (
 	"encoding/json"
+	"github.com/portcullis/hub/web"
+	"io/fs"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -90,5 +93,21 @@ process.stdout.write(JSON.stringify([
 	body, _ := json.Marshal(got[5])
 	if string(body) != `{"host_certs":false,"label":"W","vpn_via":["netbird"]}` {
 		t.Errorf("hgBody %s (view-only fields must never be sent: the Hub's strict decode refuses them)", body)
+	}
+}
+
+// TestPagesLoadEachScriptOnce (L-C3): a page loading a script twice runs
+// its listeners twice.
+func TestPagesLoadEachScriptOnce(t *testing.T) {
+	re := regexp.MustCompile(`<script src="([^"]+)"`)
+	pages, _ := fs.Glob(web.FS, "*.html")
+	for _, p := range pages {
+		seen := map[string]bool{}
+		for _, m := range re.FindAllStringSubmatch(webAsset(t, p), -1) {
+			if seen[m[1]] {
+				t.Errorf("%s loads %s twice", p, m[1])
+			}
+			seen[m[1]] = true
+		}
 	}
 }

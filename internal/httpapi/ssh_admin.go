@@ -395,5 +395,8 @@ func (s *Server) revokeSSH(ctx context.Context, a directory.Actor, user string, 
 		}
 		return s.Hub.RevokeAllSSH(a, user, "revoked by "+a.User)
 	}
+	if user != "" {
+		return s.Hub.RevokeSSHCertificatesOf(a, user, fps, "revoked by "+a.User)
+	}
 	return s.Hub.RevokeSSHCertificates(a, fps, "revoked by "+a.User)
 }

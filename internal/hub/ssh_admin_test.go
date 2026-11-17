@@ -231,3 +231,25 @@ func TestUnmanagedHostKeyRevocable(t *testing.T) {
 		t.Error("a pruned record dropped the revocation")
 	}
 }
+
+// L-A1: an unmanaged host key's names: a negated pattern refuses a name
+// it matches, and a managed host's own name is never signed for another
+// key.
+func TestHostKeyNamesNegationAndManaged(t *testing.T) {
+	f := newHostFixture(t)
+	f.h.mu.Lock()
+	g := f.h.st.SSH.HostGroups["web"]
+	g.Patterns = []string{"*.lab.example.com", "!vault.lab.example.com"}
+	f.h.st.SSH.HostGroups["web"] = g
+	f.h.mu.Unlock()
+	f.h.SetFreshAuth(ListenerHub, fakeFresh{method: "security_key"})
+	for _, name := range []string{"vault.lab.example.com", "web-1.example.com"} {
+		_, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: hostKey(t), Names: []string{name}}, freshauth.Proof{})
+		if err == nil {
+			t.Errorf("%s signed", name)
+		}
+	}
+	if _, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: hostKey(t), Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{}); err != nil {
+		t.Errorf("a matching name: %v", err)
+	}
+}

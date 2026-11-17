@@ -54,8 +54,6 @@ type sshRuntime struct {
 	kc SSHUserLookup
 	// dir is the directory's SSH checks (ssh_grants.go).
 	dir SSHDirectory
-	// incomplete: fingerprints revoked without their key (Ruling C21-b).
-	incomplete map[string]time.Time
 	// breakglassImported / breakglassMalformed: ImportBreakglass's counts
 	// (the doctor's ssh_breakglass_cert).
 	breakglassImported, breakglassMalformed int

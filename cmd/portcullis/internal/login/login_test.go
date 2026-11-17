@@ -60,6 +60,11 @@ func newFakeHub(t *testing.T) *fakeHub {
 		t.Error("the CLI called the token endpoint")
 	})
 	mux.HandleFunc("POST /api/cli/v1/ssh/certificates", f.certificates)
+	mux.HandleFunc("POST /api/cli/v1/ssh/revocations", func(w http.ResponseWriter, r *http.Request) {
+		var req cliapi.RevocationRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		json.NewEncoder(w).Encode(cliapi.RevocationAnswer{Revoked: len(req.PublicKeys)})
+	})
 	f.srv = httptest.NewTLSServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -352,5 +357,33 @@ func TestPrintedSignInURLWhole(t *testing.T) {
 	}
 	if !strings.Contains(o.Stderr.(*bytes.Buffer).String(), "  "+opened+"\n") {
 		t.Errorf("the printed address isn't the whole URL")
+	}
+}
+
+// L-D2: logout --revoke says first that the keys are revoked for good
+// (a --key key of your own too), naming them.
+func TestLogoutRevokeWarns(t *testing.T) {
+	f := newFakeHub(t)
+	kr := agent.NewKeyring().(agent.ExtendedAgent)
+	var seen url.URL
+	o := opts(t, f, kr, &seen)
+	if _, err := Run(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := kr.List()
+	if len(keys) == 0 {
+		t.Fatal("no key in the agent")
+	}
+	o.Stderr = &bytes.Buffer{}
+	if err := Logout(context.Background(), o, true); err != nil {
+		t.Fatal(err)
+	}
+	pk, _ := ssh.ParsePublicKey(keys[0].Blob)
+	if c, ok := pk.(*ssh.Certificate); ok {
+		pk = c.Key
+	}
+	errOut := o.Stderr.(*bytes.Buffer).String()
+	if !strings.Contains(errOut, "for good") || !strings.Contains(errOut, cliapi.Fingerprint(pk)) {
+		t.Errorf("no warning naming the key: %q", errOut)
 	}
 }

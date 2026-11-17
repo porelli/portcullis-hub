@@ -58,6 +58,14 @@ func Logout(ctx context.Context, o Options, revoke bool) error {
 		if err != nil {
 			return err
 		}
+		// L-D2: revocation is for good — a key of your own (login --key,
+		// e.g. a security key) is never certified again.
+		fmt.Fprintf(o.Stderr, "Revoking for good (never certified again, a key of your own from login --key too):\n")
+		for _, k := range dedup(keys) {
+			if pk, _, err := cliapi.ParseAuthorizedKey(k); err == nil {
+				fmt.Fprintf(o.Stderr, "  %s\n", cliapi.Fingerprint(pk))
+			}
+		}
 		si, err := DoSignIn(ctx, &o, cfg)
 		if err != nil {
 			return err

@@ -140,7 +140,9 @@ func TestPrivilegedNeedsAdminFreshAndTypedName(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A plain widening edit needs the fresh sign-in too (no typed name).
-	plain, _ := f.h.SaveGrant(context.Background(), asAdmin, state.SSHGrant{Group: "ssh_ops", HostGroup: "web", Accounts: []string{"deploy"}}, "", nil)
+	// (On "db": a new grant beside ssh_ops's web grant is judged against
+	// it, M5 — see TestSecondGrantCantWiden.)
+	plain, _ := f.h.SaveGrant(context.Background(), asAdmin, state.SSHGrant{Group: "ssh_ops", HostGroup: "db", Accounts: []string{"deploy"}}, "", nil)
 	if plain == nil {
 		t.Fatal("a new plain grant by an admin needs no fresh sign-in")
 	}
@@ -260,6 +262,15 @@ func TestRevokeOnLeaveKeyUnknown(t *testing.T) {
 	}
 	if _, ok := f.h.sshRevocationsIncomplete()[fp]; !ok {
 		t.Error("no doctor input")
+	}
+	// L-C2: a restarted Hub (same data directory) still reports it.
+	h2, err := newTestHub(Config{ProjectDir: t.TempDir(), ProjectHostDir: "/hp", DataDir: f.h.cfg.DataDir, Domain: "example.org"}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h2.Wait)
+	if _, ok := h2.sshRevocationsIncomplete()[fp]; !ok {
+		t.Error("the incomplete revocation is gone after a restart")
 	}
 	// The account side: alice no longer has web principals on web-1.
 	for _, a := range f.h.sshCompiled().Bundles["web-1"].Accounts {
@@ -403,5 +414,39 @@ func TestSecondGrantCantWiden(t *testing.T) {
 	// With the fresh sign-in the admin may.
 	if _, err := f.h.SaveGrant(context.Background(), asAdmin, g, "", &freshauth.Proof{Code: "c"}); err != nil {
 		t.Errorf("admin with a fresh sign-in: %v", err)
+	}
+}
+
+// L-C4: a delegate's preview runs the directory's group check (a group
+// they couldn't grant to isn't previewed: it lists members).
+func TestDelegatePreviewChecksGroup(t *testing.T) {
+	f := newGrantFixture(t)
+	f.h.SetSSHDirectory(fakeSSHDir{ids: map[string]int{"ssh_web": 11, "ssh_ops": 14}, own: map[string]bool{"ssh_ops": true}})
+	g := state.SSHGrant{Group: "ssh_ops", HostGroup: "web", Accounts: []string{"{username}"}}
+	if _, err := f.h.PreviewGrant(context.Background(), asDelegate, g); err == nil || err.Error() != directory.TextSSHOwnGroup {
+		t.Errorf("delegate preview of a refused group = %v", err)
+	}
+	if _, err := f.h.PreviewGrant(context.Background(), asAdmin, g); err != nil {
+		t.Errorf("admin preview = %v", err)
+	}
+}
+
+// L-C1: fingerprints named as one person's are checked: another person's
+// key isn't revoked under their name.
+func TestRevokeOfChecksPerson(t *testing.T) {
+	f := newGrantFixture(t)
+	if _, err := f.h.SignSSH(context.Background(), f.request(t, f.signer), "192.0.2.50"); err != nil {
+		t.Fatal(err)
+	}
+	fp := cliapi.Fingerprint(f.signer.PublicKey())
+	a := directory.Actor{User: "root"}
+	if n, err := f.h.RevokeSSHCertificatesOf(a, "bob", []string{fp}, ""); err == nil || n != 0 {
+		t.Errorf("alice's key revoked as bob's: %d %v", n, err)
+	}
+	if keys := f.h.RevokedKeys(); len(keys) != 0 {
+		t.Errorf("revoked %v", keys)
+	}
+	if n, err := f.h.RevokeSSHCertificatesOf(a, "alice", []string{fp}, ""); err != nil || n != 1 {
+		t.Errorf("alice's own key: %d %v", n, err)
 	}
 }

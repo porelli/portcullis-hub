@@ -513,6 +513,23 @@ func (h *Hub) SSHCertificates(user string) SSHCertificatesView {
 }
 
 // RevokeSSHCertificates revokes keys by fingerprint (an admin's Revoke).
+// RevokeSSHCertificatesOf is RevokeSSHCertificates for keys the caller
+// named as user's (L-C1): every fingerprint must be a key a certificate
+// was issued to user for, or nothing is revoked — the confirmation names
+// user, so it can't revoke someone else's key.
+func (h *Hub) RevokeSSHCertificatesOf(actor directory.Actor, user string, fps []string, reason string) (int, error) {
+	own := map[string]bool{}
+	for _, r := range h.IssuedFor(user) {
+		own[r.KeyFP] = true
+	}
+	for _, fp := range fps {
+		if !own[fp] {
+			return 0, statusErr(http.StatusBadRequest, "%s isn't a key of %s", clip(fp, 80), user)
+		}
+	}
+	return h.RevokeSSHCertificates(actor, fps, reason)
+}
+
 func (h *Hub) RevokeSSHCertificates(actor directory.Actor, fps []string, reason string) (int, error) {
 	if len(fps) == 0 || len(fps) > 256 {
 		return 0, statusErr(http.StatusBadRequest, "1–256 fingerprints")
@@ -691,21 +708,36 @@ func (h *Hub) signHostKey(ctx context.Context, actor string, req HostKeyRequest)
 	return &cliapi.HostCertAnswer{Certificate: signed.Certificate, ValidBefore: signed.ValidBefore.UTC()}, nil
 }
 
-// hostNameAllowed: name matches one of the group's patterns, or is a
-// managed host's name or address in that group.
+// hostNameAllowed: name may go in an unmanaged host key's certificate
+// for host group id (L-A1): never a managed host's name or address (it
+// has its own host certificate, from its own key); a negated pattern
+// matching it refuses it (as ssh reads the list); else a pattern matches
+// it, or it's an unmanaged host's name or address in that group.
 func hostNameAllowed(st state.SSHState, id string, g state.SSHHostGroup, name string) bool {
 	low := strings.ToLower(name)
-	for _, p := range g.Patterns {
-		if strings.HasPrefix(p, "!") {
-			continue
+	for _, hst := range st.Hosts {
+		if !hst.Removed && hst.Managed && (slices.ContainsFunc(hst.Names, func(n string) bool { return strings.EqualFold(n, name) }) || slices.Contains(hst.Addrs, name)) {
+			return false
 		}
-		if ok, _ := path.Match(strings.ToLower(p), low); ok && !strings.Contains(strings.TrimPrefix(low, strings.TrimSuffix(strings.ToLower(p), "*")), "/") {
+	}
+	match := func(p string) bool {
+		p = strings.ToLower(p)
+		ok, _ := path.Match(p, low)
+		return ok && !strings.Contains(strings.TrimPrefix(low, strings.TrimSuffix(p, "*")), "/")
+	}
+	for _, p := range g.Patterns {
+		if strings.HasPrefix(p, "!") && match(strings.TrimPrefix(p, "!")) {
+			return false
+		}
+	}
+	for _, p := range g.Patterns {
+		if !strings.HasPrefix(p, "!") && match(p) {
 			return true
 		}
 	}
 	for _, hst := range st.Hosts {
-		if !hst.Removed && (slices.Contains(hst.HostGroups, id) || id == cliapi.BuiltinAllHostGroup && hst.Managed) {
-			if slices.Contains(hst.Names, name) || slices.Contains(hst.Addrs, name) {
+		if !hst.Removed && !hst.Managed && slices.Contains(hst.HostGroups, id) {
+			if slices.ContainsFunc(hst.Names, func(n string) bool { return strings.EqualFold(n, name) }) || slices.Contains(hst.Addrs, name) {
 				return true
 			}
 		}
