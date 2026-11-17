@@ -345,8 +345,11 @@ type ProgressLine struct {
 }
 
 // RefRequest names an image (POST /v1/images/pull, /v1/images/ensure).
+// Preflight (pull only): the Hub's placement pre-pull before any bundle
+// exists — the ref must be pinned by digest (contract §17.4).
 type RefRequest struct {
-	Ref string `json:"ref"`
+	Ref       string `json:"ref"`
+	Preflight bool   `json:"preflight,omitempty"`
 }
 
 // SignalRequest is POST /v1/containers/{cid}/signal.

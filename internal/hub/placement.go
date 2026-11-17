@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/agentapi"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/templates"
@@ -204,11 +205,25 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 		pulls = append(pulls, pull{raw, ref})
 	}
 	sort.Slice(pulls, func(i, j int) bool { return pulls[i].raw < pulls[j].raw })
+	// No bundle exists yet: the agent pulls only with preflight (a ref
+	// pinned by digest, contract §17.4).
+	pre, ok := rt.(preflighter)
+	if !ok {
+		return statusErr(409, "%s can't pre-pull images", h.serverName(server))
+	}
 	pctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	for _, pl := range pulls {
+		// Only a ref pinned by digest is pre-pulled (the agent refuses
+		// others); an unpinned one is pulled at the up, after its bundle.
+		if !docker.DigestRef(pl.ref) {
+			continue
+		}
 		// Messages name the template's unexpanded reference.
-		if err := rt.Pull(pctx, pl.ref, nil); err != nil {
+		if err := pre.PreflightPull(pctx, pl.ref); err != nil {
+			// The agent's own words in the log only (the ref, the server and
+			// its message, clipped; refs carry no secret: imageRefEnv).
+			log.Printf("placement: pre-pull of %s on %s failed: %s", pl.ref, server, clip(err.Error(), 300))
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "no matching manifest") || strings.Contains(msg, "platform") || strings.Contains(msg, "architecture") {
 				return statusErr(409, "%s has no %s image", pl.raw, inf.Arch)
@@ -217,6 +232,11 @@ func (h *Hub) checkPlacement(ctx context.Context, t *templates.Template, server 
 		}
 	}
 	return nil
+}
+
+// preflighter is an agent backend's placement pre-pull.
+type preflighter interface {
+	PreflightPull(ctx context.Context, ref string) error
 }
 
 // placedRT is a worker instance's runtime: the agent backend, with the

@@ -24,6 +24,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -457,5 +458,26 @@ func TestEnrollingPeerSPKIIsTheDER(t *testing.T) {
 	secret, nonce := bytes.Repeat([]byte{7}, servers.SecretLen), bytes.Repeat([]byte{9}, servers.NonceLen)
 	if !servers.VerifyProof(secret, nonce, "nas", w.node.RawSubjectPublicKeyInfo, servers.Proof(secret, nonce, "nas", got)) {
 		t.Fatal("the Hub's proof doesn't verify the agent's way")
+	}
+}
+
+// TestPreflightPullOverTheWire: the placement pre-pull against the real
+// agent API with no bundle: a pinned ref pulls, an unpinned one is the
+// agent's 400, and a plain Pull of the same ref is refused (imageOK).
+func TestPreflightPullOverTheWire(t *testing.T) {
+	w := newWorker(t)
+	b, _ := w.backend(t, nil)
+	ref := "docker.io/library/busybox:1@sha256:" + strings.Repeat("e", 64)
+	if err := b.Pull(context.Background(), ref, nil); err == nil {
+		t.Fatal("a plain pull without a bundle was accepted")
+	}
+	if err := b.PreflightPull(context.Background(), ref); err != nil {
+		t.Fatalf("PreflightPull: %v", err)
+	}
+	if !slices.Contains(w.engine.Calls(), "pull "+ref) {
+		t.Errorf("the engine never pulled %s: %v", ref, w.engine.Calls())
+	}
+	if err := b.PreflightPull(context.Background(), "docker.io/library/busybox:1"); err == nil || !strings.Contains(err.Error(), "pinned by digest") {
+		t.Errorf("an unpinned preflight: %v", err)
 	}
 }

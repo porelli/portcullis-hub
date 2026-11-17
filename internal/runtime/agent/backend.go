@@ -135,6 +135,12 @@ func (b *Backend) Pull(ctx context.Context, ref string, onBytes func(done, total
 	})
 }
 
+// PreflightPull is the placement pre-pull (contract §17.4): ref, pinned
+// by digest, pulled before any bundle of the instance exists.
+func (b *Backend) PreflightPull(ctx context.Context, ref string) error {
+	return b.progress(ctx, R("Pull", 0).Path, agentapi.RefRequest{Ref: ref, Preflight: true}, func(agentapi.ProgressLine) {})
+}
+
 func (b *Backend) EnsureImage(ctx context.Context, ref string) error {
 	return b.c.json(ctx, "POST", R("EnsureImage", 0).Path, nil, agentapi.RefRequest{Ref: ref}, nil, 0)
 }

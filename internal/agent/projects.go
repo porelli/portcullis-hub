@@ -89,6 +89,8 @@ type APIConfig struct {
 	// DiskFree is the engine's free space a restore may fill (ok false:
 	// unreadable, restores refused; nil: no check, tests).
 	DiskFree func(ctx context.Context) (free int64, ok bool)
+	// Images records and sweeps preflight pulls (nil: neither).
+	Images Images
 }
 
 // project is one bundled instance as the agent holds it.
@@ -133,12 +135,13 @@ type API struct {
 	execs        map[string]bool
 	helpers      map[string]*helper
 	ops          map[string]context.CancelFunc
+	preflight    *preflightState
 }
 
 // NewAPI loads the bundles already on disk (each re-validated; an invalid
 // one is dropped from scope and logged).
 func NewAPI(cfg APIConfig) *API {
-	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, quarantineGen: map[string]uint64{}, lifted: map[string]bool{}, downs: map[string]bool{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}}
+	a := &API{cfg: cfg, projects: map[string]*project{}, quarantined: map[string]string{}, quarantineGen: map[string]uint64{}, lifted: map[string]bool{}, downs: map[string]bool{}, execs: map[string]bool{}, helpers: map[string]*helper{}, ops: map[string]context.CancelFunc{}, preflight: newPreflightState()}
 	a.mux = http.NewServeMux()
 	a.routes()
 	a.loadQuarantine()
@@ -490,6 +493,10 @@ func (a *API) imageOK(ref string) bool {
 func (a *API) pull(w http.ResponseWriter, r *http.Request) {
 	var req agentapi.RefRequest
 	if !decodeBody(w, r, &req) {
+		return
+	}
+	if req.Preflight {
+		a.preflightPull(w, r, req.Ref)
 		return
 	}
 	if !a.imageOK(req.Ref) {

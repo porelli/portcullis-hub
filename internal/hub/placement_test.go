@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/portcullis/hub/internal/agentapi"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/runtimetest"
 	"github.com/portcullis/hub/internal/servers"
@@ -65,8 +66,34 @@ func (w *workerFake) AgentInfo(context.Context) (agentapi.Info, error) {
 	return w.info, w.infoErr
 }
 
+// Pull is the agent's: a ref no pushed bundle names is refused, as the
+// real agent's imageOK does (contract §17.4) — a pull before the bundle
+// (a placement pre-pull without preflight) fails here as it would there.
 func (w *workerFake) Pull(ctx context.Context, ref string, fn func(int64, int64, bool)) error {
+	w.mu.Lock()
+	named := false
+	for _, b := range w.bundles {
+		for _, content := range b {
+			named = named || strings.Contains(content, ref)
+		}
+	}
+	w.mu.Unlock()
+	if !named {
+		return errors.New("agent 403: the image is in no bundle")
+	}
 	w.Fake.Pull(ctx, ref, fn)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pullErr
+}
+
+// PreflightPull is the agent's preflight: no bundle needed, a ref pinned
+// by digest only (400 otherwise).
+func (w *workerFake) PreflightPull(ctx context.Context, ref string) error {
+	if !docker.DigestRef(ref) {
+		return errors.New("agent 400: a preflight pull needs a reference pinned by digest")
+	}
+	w.Fake.Pull(ctx, ref, nil)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.pullErr
@@ -145,7 +172,7 @@ func newPlacedFixture(t *testing.T) *placedFixture {
 	for id, files := range map[string][2]string{
 		"tcpapp":   {"name: TCP\ncategory: misc\nai: {unsupported: t}\nplacement: primary_only\nauth: {method: forward-auth}\n", "services:\n  web:\n    image: tcp:1\n    labels:\n      traefik.http.routers.t.rule: Host(`${PORTCULLIS_HOST_T:-t.portcullis.local}`)\n"},
 		"lowport":  {"name: Low\ncategory: misc\nai: {unsupported: t}\nauth: {method: forward-auth}\nports:\n  - key: LOW_PORT\n    container: 80\n    default: 80\n    service: web\n", "services:\n  web:\n    image: low:1\n    labels:\n      traefik.http.routers.low.rule: Host(`${PORTCULLIS_HOST_LOW:-low.portcullis.local}`)\n"},
-		"filesapp": {"name: Files\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: files:1\n    restart: unless-stopped\n    volumes:\n      - ./templates/filesapp/conf.ini:/etc/conf.ini:ro\n      - data:/data\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.files.rule: Host(`${PORTCULLIS_HOST_FILES:-files.portcullis.local}`)\n      traefik.http.routers.files.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.files.loadbalancer.server.port: \"8080\"\nvolumes:\n  data: {}\n"},
+		"filesapp": {"name: Files\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: files:1@sha256:" + strings.Repeat("f", 64) + "\n    restart: unless-stopped\n    volumes:\n      - ./templates/filesapp/conf.ini:/etc/conf.ini:ro\n      - data:/data\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.files.rule: Host(`${PORTCULLIS_HOST_FILES:-files.portcullis.local}`)\n      traefik.http.routers.files.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.files.loadbalancer.server.port: \"8080\"\nvolumes:\n  data: {}\n"},
 		"plainapp": {"name: Plain\ncategory: misc\nai: {unsupported: t}\nauth:\n  method: forward-auth\n", "services:\n  web:\n    image: plain:1\n    labels:\n      traefik.enable: \"true\"\n      traefik.http.routers.plain.rule: Host(`${PORTCULLIS_HOST_PLAIN:-plain.portcullis.local}`)\n      traefik.http.routers.plain.middlewares: portcullis-auth@docker,portcullis-groups@docker\n      traefik.http.services.plain.loadbalancer.server.port: \"8080\"\n"},
 	} {
 		writeFile(t, filepath.Join(f.src, id, "manifest.yaml"), files[0])
@@ -201,7 +228,7 @@ func TestPlacementRefusals(t *testing.T) {
 		"no arch image": {"filesapp", func(p *placedFixture) {
 			p.w.pullErr = errors.New("no matching manifest for linux/arm64 in the manifest list entries")
 			p.w.info.Arch = "arm64"
-		}, "files:1 has no arm64 image"},
+		}, "files:1@sha256:" + strings.Repeat("f", 64) + " has no arm64 image"},
 		"revoked meanwhile": {"filesapp", func(p *placedFixture) {
 			p.h.mu.Lock()
 			s := p.h.st.Servers["nas"]
@@ -240,6 +267,31 @@ func TestPlacementRefusals(t *testing.T) {
 // TestLifecycleOnWorker (Task 10 order): bundle, create and up on the
 // worker, then the relay token, link.json and the relays on the primary;
 // a down takes the relays down first.
+// TestPlacementPrePullIsPreflight: the create's pre-pull runs before any
+// bundle (the fake refuses a plain pull of an unbundled image, as the
+// agent's imageOK does), so it must be a preflight pull — of the pinned
+// ref only; an unpinned ref is left to the up.
+func TestPlacementPrePullIsPreflight(t *testing.T) {
+	p := newPlacedFixture(t)
+	if err := p.create(t, "filesapp", "nas"); err != nil {
+		t.Fatalf("create on the worker: %v", err)
+	}
+	pinned := "pull files:1@sha256:" + strings.Repeat("f", 64)
+	calls := p.w.Calls()
+	if len(calls) == 0 || calls[0] != pinned {
+		t.Errorf("worker calls %v: want the preflight %q first", calls, pinned)
+	}
+	q := newPlacedFixture(t)
+	if err := q.create(t, "plainapp", "nas"); err != nil {
+		t.Fatalf("an unpinned template on the worker: %v", err)
+	}
+	for _, c := range q.w.Calls() {
+		if strings.HasPrefix(c, "pull ") {
+			t.Errorf("an unpinned ref was pre-pulled: %s", c)
+		}
+	}
+}
+
 func TestLifecycleOnWorker(t *testing.T) {
 	p := newPlacedFixture(t)
 	if err := p.create(t, "filesapp", "nas"); err != nil {

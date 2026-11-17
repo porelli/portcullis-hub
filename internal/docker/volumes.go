@@ -94,6 +94,29 @@ func (c *Client) EnsureImage(ctx context.Context, ref string) error {
 	return nil
 }
 
+// ImagePresent reports whether the daemon has ref.
+func (c *Client) ImagePresent(ctx context.Context, ref string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	_, err := c.api.ImageInspect(ctx, ref)
+	if err == nil {
+		return true, nil
+	}
+	if IsNotFound(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+// RemoveImage removes the reference ref (never forced: an image a
+// container uses is an error; a missing one is IsNotFound).
+func (c *Client) RemoveImage(ctx context.Context, ref string) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	_, err := c.api.ImageRemove(ctx, ref, client.ImageRemoveOptions{})
+	return err
+}
+
 // HelperSpec is a volume I/O helper container: created, never started.
 // The daemon reads and writes the mounted volumes itself (the archive
 // endpoints), so no process ever runs in it.
