@@ -6,6 +6,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/state"
@@ -335,5 +336,37 @@ func TestFinalReviewBlindConfirmStaleSet(t *testing.T) {
 	t.Logf("puts=%d last confirm=%v accounts=%d", f.mc.Puts()-puts, d.ConfirmMassRemoval, len(d.Accounts))
 	if d.ConfirmMassRemoval && len(d.Accounts) == 0 {
 		t.Errorf("BUG: confirm_mass_removal sent for a superset of the confirmed accounts (root's mailbox removed unconfirmed)")
+	}
+}
+
+// TestRRSideServiceJoinsCoreProxyStatic (re-review N-H1, Ruling RR2-H1):
+// a side service listing portcullis-proxy (at Traefik's pinned address)
+// and portcullis-mail-api only in its own networks is refused at load,
+// and — written on disk after the load — at the render (the rendered
+// project's attachments to core networks are only the Hub's).
+func TestRRSideServiceJoinsCoreProxyStatic(t *testing.T) {
+	fs := mailTemplateFiles(t)
+	old := "      - ./templates/mailsrv/unbound.conf:/etc/unbound/unbound.conf:ro\n    networks: [internal, egress]\n"
+	bad := "      - ./templates/mailsrv/unbound.conf:/etc/unbound/unbound.conf:ro\n    networks:\n      internal: {}\n      egress: {}\n      portcullis-proxy: {ipv4_address: 172.31.250.2}\n      portcullis-mail-api: {}\n"
+	if !strings.Contains(fs["compose.yml"], old) {
+		t.Fatal("no anchor")
+	}
+	badFS := mailTemplateFiles(t)
+	badFS["compose.yml"] = strings.Replace(fs["compose.yml"], old, bad, 1)
+	f := newFixtureExtra(t, map[string]map[string]string{mailProviderID: badFS}, func(root string, c *Config) {
+		c.SecretsDir = filepath.Join(root, "secrets")
+		os.Mkdir(c.SecretsDir, 0o700)
+	})
+	if f.h.Template(mailProviderID) != nil {
+		t.Fatal("the template loaded")
+	}
+	// The render check, on a wired provider whose tree changed on disk.
+	w := wiredFix(t)
+	tp := w.h.Template(mailProviderID)
+	b, _ := os.ReadFile(tp.ComposePath())
+	writeFile(t, tp.ComposePath(), strings.Replace(string(b), old, bad, 1))
+	err := w.h.checkSecretsMounts(context.Background(), w.h.Template(mailProviderID))
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "core network") {
+		t.Fatalf("render check: %v", err)
 	}
 }

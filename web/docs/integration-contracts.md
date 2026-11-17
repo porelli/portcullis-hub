@@ -615,6 +615,8 @@ mail:
     - `mail: network <n> enables IPv6`
     - `mail: network <n> sets <key>: a mail template's networks are plain project networks (internal, ipam subnets and IP ranges, enable_ipv6: false)` — `<key>` is the top-level key, `ipam.<k>` for an ipam key other than `config`, `ipam.config.<k>` for a config key other than `subnet` / `ip_range`
     - `mail: network <n> is one of core's networks: a mail template declares only its own` — every core network key and name, case-folded (the Hub adds the core networks a wired provider joins)
+    - `mail: service <s> joins network <n>: a mail template's services join only networks it declares at the top level`
+    - `mail: service <s> sets <key> on network <n>: a mail template's fixed addresses are IPv4 inside that network's own declared subnet` — `ipv4_address` only inside the declared ipam subnet of a network the template declares; `ipv6_address` and `link_local_ips` always refused; on core / external networks every address and alias is the Hub's
     - `compose.yml: a mail template uses no YAML anchors, aliases or merge keys`
     - `mail: <service> image must be a literal reference: a mail template's images are hashed (no ${…})`
 

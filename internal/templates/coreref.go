@@ -63,7 +63,10 @@ var (
 		"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data",
 		// The mail slot (mail provider plan P9; the removed mail names
 		// above stay until core has merged).
-		"mail_slot")
+		"mail_slot",
+		// The provider's slot volume (Ruling R-POD2: the whole volume is
+		// mounted into the provider, never a hub_secrets subpath).
+		"mail_provider_slot")
 	// coreAliases are core's network aliases that aren't service names
 	// (wg's metrics address on portcullis, mail's and mailctl's on
 	// portcullis-metrics-mail): reserved DNS names too.

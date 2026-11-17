@@ -469,6 +469,9 @@ func ValidateMail(t *Template, compose []byte, routes *Routes) error {
 	if err := mailNetworkRefusal(compose); err != nil {
 		return err
 	}
+	if err := mailServiceNetworkRefusal(compose); err != nil {
+		return err
+	}
 	if vpnYAMLIndirection(compose) {
 		return fmt.Errorf("compose.yml: a mail template uses no YAML anchors, aliases or merge keys")
 	}
@@ -690,4 +693,93 @@ func jsonable(v any) any {
 	default:
 		return x
 	}
+}
+
+// mailServiceNetworkRefusal (Ruling RR2-H1): every network a service
+// joins is one the template declares at the top level (or the implicit
+// default), so no service-level reference can resolve to a network the
+// Hub's override declares (core's portcullis-proxy, the mail API and
+// metrics networks); and a fixed address is only an IPv4 one inside
+// that network's own declared subnet (never ipv6_address or
+// link_local_ips): the Hub assigns every address on a core network.
+func mailServiceNetworkRefusal(compose []byte) error {
+	var doc yaml.Node
+	if yaml.Unmarshal(compose, &doc) != nil || len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	subnets := map[string][]netip.Prefix{"default": nil}
+	if nets := mapValue(root, "networks"); nets != nil && nets.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(nets.Content); i += 2 {
+			n := nets.Content[i].Value
+			subnets[n] = nil
+			if ipam := mapValue(nets.Content[i+1], "ipam"); ipam != nil {
+				if cfg := mapValue(ipam, "config"); cfg != nil && cfg.Kind == yaml.SequenceNode {
+					for _, c := range cfg.Content {
+						if sn := mapValue(c, "subnet"); sn != nil {
+							if p, err := netip.ParsePrefix(sn.Value); err == nil {
+								subnets[n] = append(subnets[n], p)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	svcs := mapValue(root, "services")
+	if svcs == nil || svcs.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(svcs.Content); i += 2 {
+		s := svcs.Content[i].Value
+		nn := mapValue(svcs.Content[i+1], "networks")
+		if nn == nil {
+			continue
+		}
+		type join struct {
+			name string
+			cfg  *yaml.Node
+		}
+		var joins []join
+		switch nn.Kind {
+		case yaml.SequenceNode:
+			for _, x := range nn.Content {
+				joins = append(joins, join{x.Value, nil})
+			}
+		case yaml.MappingNode:
+			for j := 0; j+1 < len(nn.Content); j += 2 {
+				joins = append(joins, join{nn.Content[j].Value, nn.Content[j+1]})
+			}
+		}
+		for _, jn := range joins {
+			own, declared := subnets[jn.name]
+			if !declared {
+				return fmt.Errorf("mail: service %s joins network %s: a mail template's services join only networks it declares at the top level", s, jn.name)
+			}
+			if jn.cfg == nil || jn.cfg.Kind != yaml.MappingNode {
+				continue
+			}
+			for k := 0; k+1 < len(jn.cfg.Content); k += 2 {
+				key, v := jn.cfg.Content[k].Value, jn.cfg.Content[k+1]
+				bad := ""
+				switch key {
+				case "ipv6_address", "link_local_ips":
+					bad = key
+				case "ipv4_address":
+					a, err := netip.ParseAddr(v.Value)
+					in := false
+					for _, p := range own {
+						in = in || (err == nil && p.Contains(a))
+					}
+					if !in {
+						bad = key
+					}
+				}
+				if bad != "" {
+					return fmt.Errorf("mail: service %s sets %s on network %s: a mail template's fixed addresses are IPv4 inside that network's own declared subnet", s, bad, jn.name)
+				}
+			}
+		}
+	}
+	return nil
 }

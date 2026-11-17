@@ -163,6 +163,9 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	if err := checkMailMounts(proj, t, mode); err != nil {
 		return err
 	}
+	if err := checkMailNetworkAttachments(proj, t, mode, h.mailCore().ProviderIP.String()); err != nil {
+		return err
+	}
 	vol := h.cfg.SecretsVolume
 	type want struct{ sub string }
 	expected := map[string]map[string]want{} // service → target → subpath
@@ -384,6 +387,90 @@ func checkMailMounts(proj *types.Project, t *templates.Template, mode mailMode) 
 			src, _, _ = strings.Cut(src, ":")
 			if slices.Contains(tls, src) && !slices.Contains(tls, n) {
 				return refuse("service %s takes the volumes of %s (volumes_from)", n, vf)
+			}
+		}
+	}
+	return nil
+}
+
+// mailAttach is one attachment the Hub's override makes on a core
+// network: the service, its address ("" none) and aliases (sorted).
+type mailAttach struct {
+	ip      string
+	aliases []string
+}
+
+// checkMailNetworkAttachments is Ruling RR2-H1 (c) on a mail template's
+// rendered project: on every external network only the Hub's own
+// attachments exist — the API service on portcullis-mail-api at the
+// provider address with its alias; in normal mode the metrics services
+// on portcullis-metrics-mail with theirs and the well-known service on
+// portcullis-proxy (no address, no alias). Any other service, address
+// or alias there refuses the up (409).
+func checkMailNetworkAttachments(proj *types.Project, t *templates.Template, mode mailMode, providerIP string) error {
+	b := t.Manifest.Mail
+	if b == nil {
+		return nil
+	}
+	want := map[string]map[string]mailAttach{} // network → service → attachment
+	add := func(n, s, ip string, aliases ...string) {
+		if want[n] == nil {
+			want[n] = map[string]mailAttach{}
+		}
+		a := want[n][s]
+		if ip != "" {
+			a.ip = ip
+		}
+		a.aliases = append(a.aliases, aliases...)
+		slices.Sort(a.aliases)
+		want[n][s] = a
+	}
+	if mode != mailUnwired {
+		add(mailAPINetwork, b.API.Service, providerIP, mailAPIAlias)
+	}
+	if mode == mailNormal {
+		add(mailMetricsNetwork, b.Metrics.Service, "", mailMetricsAlias)
+		if sm := b.ServerMetrics; sm != nil {
+			add(mailMetricsNetwork, sm.Service, "", mailServerMetricsAlias)
+		}
+		add(mailProxyNetwork, b.Wellknown.Service, "")
+	}
+	refuse := func(f string, a ...any) error {
+		return statusErr(http.StatusConflict, "%s was not started: "+f, append([]any{t.ID}, a...)...)
+	}
+	for key, n := range proj.Networks {
+		if !bool(n.External) {
+			continue
+		}
+		name := n.Name
+		if name == "" {
+			name = key
+		}
+		allowed := want[name]
+		for sname, svc := range proj.Services {
+			c, on := svc.Networks[key]
+			if !on {
+				continue
+			}
+			w, ok := allowed[sname]
+			if !ok {
+				return refuse("service %s is on the core network %s: only the Hub's own attachments are (RR2-H1)", sname, name)
+			}
+			ip, aliases := "", []string{}
+			if c != nil {
+				ip = c.Ipv4Address
+				if c.Ipv6Address != "" || len(c.LinkLocalIPs) > 0 {
+					return refuse("service %s has an IPv6 or link-local address on %s", sname, name)
+				}
+				aliases = append(aliases, c.Aliases...)
+			}
+			slices.Sort(aliases)
+			wa := w.aliases
+			if wa == nil {
+				wa = []string{}
+			}
+			if ip != w.ip || !slices.Equal(aliases, wa) {
+				return refuse("service %s's attachment to %s isn't the Hub's (address %q, aliases %v)", sname, name, ip, aliases)
 			}
 		}
 	}
