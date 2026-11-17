@@ -50,6 +50,7 @@ func newCluster(t *testing.T, objs ...k8sruntime.Object) *cluster {
 	for k, r := range kinds {
 		lists[r] = k + "List"
 	}
+	lists[PodMetricsGVR] = "PodMetricsList"
 	c.dyn = dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, lists, objs...)
 	// Server-side apply: record it and mirror Deployments and Jobs into
 	// the typed clientset (the backend reads their status there).

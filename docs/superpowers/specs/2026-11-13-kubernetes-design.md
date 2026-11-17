@@ -121,7 +121,8 @@ The existing `compose.Runner` + `hub.Engine` become the `docker` backend, which 
 - create/update/patch/delete/get/list/watch on deployments, jobs, services, persistentvolumeclaims, configmaps, secrets, networkpolicies, `traefik.io` ingressroutes/middlewares;
 - get/list/watch/delete on pods;
 - get on `pods/log`, create on `pods/exec`;
-- list/watch on events.
+- list/watch on events;
+- get/list on `metrics.k8s.io` pods (added by the resource-usage plan, 2026-11-15: the Usage page's pod CPU and memory; read-only and namespaced — never `nodes`, `nodes/stats` or `nodes/proxy`).
 
 That is the k8s form of `socket-proxy-hub`. Everything else is denied, and there is nothing in `portcullis`. The Hub reads its own inputs (core.env, LLDAP/invite/domains/mcp-gate secrets) as mounted Secrets, as today.
 

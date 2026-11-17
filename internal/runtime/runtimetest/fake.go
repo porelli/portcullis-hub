@@ -42,6 +42,18 @@ type Fake struct {
 	// every method but Kind/Env.
 	ExecFn func(id string, in runtime.ExecInput) (*runtime.ExecResult, error)
 	Err    error
+	// Usage: Stats answers StatsVal (StatsErr first); with StatsBlock
+	// set, Stats waits until it is closed (or ctx is done). LayerSizes /
+	// ImageSizes answer LayerSize / ImageSize (missing: a
+	// NotMeasuredError). StatsDelay delays each Stats call.
+	StatsVal   map[string]runtime.UnitStats
+	StatsErr   map[string]error
+	StatsBlock chan struct{}
+	StatsDelay time.Duration
+	LayerSizes map[string]int64
+	ImageSizes map[string]int64
+	// FixerFn answers RunFixer (nil: exit 0, no output).
+	FixerFn func(s runtime.FixerSpec) (*runtime.RunResult, error)
 	// ErrOn fails a call whose record starts with a key ("pull ghcr.io/x",
 	// "down portcullis-app"): fault injection at the engine.
 	ErrOn map[string]error
@@ -327,7 +339,82 @@ func (f *Fake) RunFixer(_ context.Context, s runtime.FixerSpec, _ func(io.Reader
 	if err := f.rec("fixer %v", s.Cmd); err != nil {
 		return nil, err
 	}
+	f.mu.Lock()
+	fn := f.FixerFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(s)
+	}
 	return &runtime.RunResult{}, nil
+}
+
+func (f *Fake) Stats(ctx context.Context, id string) (runtime.UnitStats, error) {
+	if err := f.rec("stats %s", id); err != nil {
+		return runtime.UnitStats{}, err
+	}
+	f.mu.Lock()
+	block, delay := f.StatsBlock, f.StatsDelay
+	f.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return runtime.UnitStats{}, ctx.Err()
+		}
+	}
+	if delay > 0 {
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return runtime.UnitStats{}, ctx.Err()
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.StatsErr[id]; err != nil {
+		return runtime.UnitStats{}, err
+	}
+	if s, ok := f.StatsVal[id]; ok {
+		return s, nil
+	}
+	return runtime.UnitStats{}, ErrNotFound
+}
+
+func (f *Fake) LayerSize(_ context.Context, id string) (int64, error) {
+	if err := f.rec("layer-size %s", id); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n, ok := f.LayerSizes[id]; ok {
+		return n, nil
+	}
+	return 0, &runtime.NotMeasuredError{Why: "the engine didn't report a size"}
+}
+
+func (f *Fake) ImageSize(_ context.Context, ref string) (int64, error) {
+	if err := f.rec("image-size %s", ref); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n, ok := f.ImageSizes[ref]; ok {
+		return n, nil
+	}
+	return 0, &runtime.NotMeasuredError{Why: "the engine didn't report a size"}
+}
+
+// SetStats changes one unit's stats answer (safe while the fake is in
+// use).
+func (f *Fake) SetStats(id string, s runtime.UnitStats) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.StatsVal == nil {
+		f.StatsVal = map[string]runtime.UnitStats{}
+	}
+	f.StatsVal[id] = s
 }
 
 func (f *Fake) EnsureImage(_ context.Context, ref string) error { return f.rec("ensure-image %s", ref) }

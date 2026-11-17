@@ -20,7 +20,7 @@ import (
 var noStatx atomic.Bool // statx returned ENOSYS once: fstatat from then on
 
 const statxWant = unix.STATX_TYPE | unix.STATX_MODE | unix.STATX_NLINK | unix.STATX_UID |
-	unix.STATX_GID | unix.STATX_INO | unix.STATX_MNT_ID
+	unix.STATX_GID | unix.STATX_INO | unix.STATX_MNT_ID | unix.STATX_BLOCKS | unix.STATX_SIZE
 
 const statxNeed = unix.STATX_TYPE | unix.STATX_MODE | unix.STATX_NLINK | unix.STATX_UID |
 	unix.STATX_GID | unix.STATX_INO
@@ -42,6 +42,12 @@ func statAt(dirfd int, name string, flags int) (fileStat, error) {
 			if x.Mask&unix.STATX_MNT_ID != 0 {
 				s.MntID = x.Mnt_id
 			}
+			if x.Mask&unix.STATX_BLOCKS != 0 {
+				s.Blocks, s.HasBlocks = x.Blocks, true
+			}
+			if x.Mask&unix.STATX_SIZE != 0 {
+				s.Size = x.Size
+			}
 			return s, nil
 		}
 		if !errors.Is(err, unix.ENOSYS) {
@@ -54,7 +60,7 @@ func statAt(dirfd int, name string, flags int) (fileStat, error) {
 		return fileStat{}, err
 	}
 	return fileStat{Dev: uint64(st.Dev), Ino: uint64(st.Ino), Mode: st.Mode, Nlink: uint64(st.Nlink),
-		UID: st.Uid, GID: st.Gid}, nil
+		UID: st.Uid, GID: st.Gid, Blocks: uint64(st.Blocks), HasBlocks: true, Size: uint64(st.Size)}, nil
 }
 
 func lstatAt(dirfd int, name string) (fileStat, error) {

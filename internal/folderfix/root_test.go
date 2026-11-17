@@ -1385,3 +1385,67 @@ func TestRootChildFix(t *testing.T) {
 		t.Errorf("a refused childfix changed something")
 	}
 }
+
+// TestRootUsageMatchesDu: the usage mode equals du -s --block-size=1 -x
+// on a tree with hard links, a sparse file, a mount point (a tmpfs: not
+// crossed) and a 0700 directory of another uid; with DAC_READ_SEARCH and
+// DAC_OVERRIDE dropped that directory counts as failed.
+func TestRootUsageMatchesDu(t *testing.T) {
+	needRoot(t)
+	root := folderRoot(t)
+	os.Chmod(root, 0o755) // searchable without DAC_READ_SEARCH: only priv is closed
+	os.WriteFile(filepath.Join(root, "f"), bytes.Repeat([]byte("x"), 1<<20), 0o644)
+	os.Link(filepath.Join(root, "f"), filepath.Join(root, "f2"))
+	sp, _ := os.Create(filepath.Join(root, "sparse"))
+	sp.Write(bytes.Repeat([]byte("y"), 4096))
+	sp.Truncate(256 << 20)
+	sp.Close()
+	mnt := filepath.Join(root, "mnt")
+	os.Mkdir(mnt, 0o755)
+	if err := unix.Mount("tmpfs", mnt, "tmpfs", 0, "size=4m"); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	t.Cleanup(func() { unix.Unmount(mnt, unix.MNT_DETACH) })
+	os.WriteFile(filepath.Join(mnt, "inside"), bytes.Repeat([]byte("z"), 1<<20), 0o644)
+	priv := filepath.Join(root, "priv")
+	mkdirOwned(t, priv, 0o700, 2001, 2001)
+	os.WriteFile(filepath.Join(priv, "p"), bytes.Repeat([]byte("p"), 64<<10), 0o600)
+	os.Chown(filepath.Join(priv, "p"), 2001, 2001)
+
+	r, err := Usage(Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("du", "-s", "--block-size=1", "-x", root).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	du, _ := strconv.ParseUint(strings.Fields(string(out))[0], 10, 64)
+	if r.AllocBytes != du || r.MountPoints.N != 1 || r.Failed.N != 0 || r.Partial {
+		t.Errorf("usage %d, du %d; mount points %d failed %d partial %v", r.AllocBytes, du, r.MountPoints.N, r.Failed.N, r.Partial)
+	}
+	if _, err := exec.LookPath("capsh"); err != nil {
+		t.Fatalf("capsh: %v", err)
+	}
+	cmd := exec.Command("capsh", "--drop=cap_dac_read_search,cap_dac_override", "--", "-c", os.Args[0]+" -test.run=^TestRootUsageDropped$ -test.v")
+	cmd.Env = append(os.Environ(), "FOLDERFIX_USAGE_ROOT="+root)
+	b, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(b), "USAGE-DROPPED failed=1 partial=failed") {
+		t.Errorf("without the capabilities: %v\n%s", err, b)
+	}
+}
+
+// TestRootUsageDropped is TestRootUsageMatchesDu's child (under capsh).
+func TestRootUsageDropped(t *testing.T) {
+	root := os.Getenv("FOLDERFIX_USAGE_ROOT")
+	if root == "" {
+		t.Skip("run by TestRootUsageMatchesDu")
+	}
+	var out, errb bytes.Buffer
+	if code := Main([]string{"usage", "--root=" + root}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	var r Report
+	json.Unmarshal(out.Bytes(), &r)
+	fmt.Printf("USAGE-DROPPED failed=%d partial=%s\n", r.Failed.N, r.PartialReason)
+}

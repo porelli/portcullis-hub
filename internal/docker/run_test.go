@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/portcullis/hub/internal/runtime"
 )
 
 // fakeRun is a Docker API fake for one started helper "f1".
@@ -264,6 +267,12 @@ func TestRunHelperRefusesBadSpec(t *testing.T) {
 		"cap all":       func(s *RunSpec) { s.CapAdd = []string{"ALL"} },
 		"cap admin":     func(s *RunSpec) { s.CapAdd = []string{"SYS_ADMIN"} },
 		"cap lower":     func(s *RunSpec) { s.CapAdd = []string{"chown"} },
+		"volume on bind": func(s *RunSpec) {
+			s.Volumes = []runtime.VolumeMount{{Name: "portcullis-x_data", Target: "/folder"}}
+		},
+		"volume no name": func(s *RunSpec) { s.Volumes = []runtime.VolumeMount{{Target: "/vol"}} },
+		"volume root":    func(s *RunSpec) { s.Volumes = []runtime.VolumeMount{{Name: "portcullis-x_data", Target: "/"}} },
+		"volume path":    func(s *RunSpec) { s.Volumes = []runtime.VolumeMount{{Name: "/srv/x", Target: "/vol"}} },
 	} {
 		s := fixerSpec()
 		s.Cmd = slices.Clone(s.Cmd)
@@ -402,5 +411,70 @@ func TestRemappedIDs(t *testing.T) {
 		if got := RemappedIDs(c.opts); got != c.want {
 			t.Errorf("RemappedIDs(%v) = %q, want %q", c.opts, got, c.want)
 		}
+	}
+}
+
+// A named volume in a started helper is mounted read-only, never copied
+// up, in the long form only (contract §6, the usage mode).
+func TestRunHelperVolumeMount(t *testing.T) {
+	f := &fakeRun{t: t, stdout: "{}\n"}
+	s := fixerSpec()
+	s.In, s.InPath, s.OutPath, s.Scratch, s.Binds = nil, "", "", nil, nil
+	s.Volumes = []runtime.VolumeMount{{Name: "portcullis-x_data", Target: "/vol"}}
+	if _, err := newTestClient(t, f).RunHelper(context.Background(), s, nil); err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		HostConfig struct {
+			Binds  []string
+			Mounts []struct {
+				Type, Source, Target string
+				ReadOnly             bool
+				VolumeOptions        *struct{ NoCopy bool }
+			}
+		}
+	}
+	if err := json.Unmarshal(f.create, &body); err != nil {
+		t.Fatal(err)
+	}
+	m := body.HostConfig.Mounts
+	if len(body.HostConfig.Binds) != 0 || len(m) != 1 || m[0].Type != "volume" || m[0].Source != "portcullis-x_data" ||
+		m[0].Target != "/vol" || !m[0].ReadOnly || m[0].VolumeOptions == nil || !m[0].VolumeOptions.NoCopy {
+		t.Errorf("mounts = %+v, binds %v", m, body.HostConfig.Binds)
+	}
+}
+
+// The inspect copies only the named fields: no Env reaches UnitInfo.
+func TestInspectCopiesNamedFieldsOnly(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/containers/c1/json" {
+			w.Write([]byte(`{"Id":"c1","Image":"sha256:i","RestartCount":4,
+				"State":{"Status":"running","OOMKilled":true,"StartedAt":"2026-11-15T09:00:00.5Z"},
+				"Config":{"Env":["DB_PASSWORD=s3cret"],"Labels":{"a":"b"}},
+				"HostConfig":{"NanoCpus":500000000,"CpuQuota":50000,"CpuPeriod":100000,"NetworkMode":"none","Memory":33554432,"PidsLimit":32},
+				"Mounts":[{"Type":"volume","Name":"portcullis-x_data","Source":"/var/lib/docker/volumes/portcullis-x_data/_data","Destination":"/data","RW":true},
+				          {"Type":"bind","Source":"/srv/media","Destination":"/media","RW":false}]}`))
+		}
+	}))
+	ci, err := c.InspectContainer(context.Background(), "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci.NanoCPUs != 5e8 || ci.CPUQuota != 50000 || ci.CPUPeriod != 100000 || ci.NetworkMode != "none" || !ci.OOMKilled || ci.RestartCount != 4 {
+		t.Errorf("limits = %+v", ci)
+	}
+	if want := time.Date(2026, 11, 15, 9, 0, 0, 5e8, time.UTC); !ci.StartedAt.Equal(want) {
+		t.Errorf("started = %v", ci.StartedAt)
+	}
+	want := []runtime.Mount{
+		{Type: "volume", Name: "portcullis-x_data", Source: "/var/lib/docker/volumes/portcullis-x_data/_data", Destination: "/data", RW: true},
+		{Type: "bind", Source: "/srv/media", Destination: "/media"},
+	}
+	if !slices.Equal(ci.Mounts, want) {
+		t.Errorf("mounts = %+v", ci.Mounts)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", ci), "s3cret") {
+		t.Error("the inspect kept the environment")
 	}
 }
