@@ -414,3 +414,23 @@ func (f *fakeRunner) callsMatching(op string) []string {
 	}
 	return out
 }
+
+// TestVoidListsDocumentAccounts (M16): with mail-last.json gone and no
+// rows (a first wiring of an imported store), the verification still
+// lists every account of the document about to be sent: a provider
+// whose void keeps a member's password fails it.
+func TestVoidListsDocumentAccounts(t *testing.T) {
+	f := voidFixture(t)
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.VoidKeeps, s.RevokeStatus = true, 500 })
+	os.Remove(f.h.mailLastPath())
+	f.h.mu.Lock()
+	f.h.st.MailCredentials = nil
+	f.h.mu.Unlock()
+	uuids, err := f.h.mailVoidUUIDs(context.Background())
+	if err != nil || len(uuids) == 0 {
+		t.Fatalf("%v %v", uuids, err)
+	}
+	if err := runVoidNow(t, f); err == nil {
+		t.Fatal("a void that kept a member's password passed")
+	}
+}

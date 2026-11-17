@@ -278,7 +278,7 @@ func (h *Hub) mailVoidFilesLocked(id string) error {
 
 // mailVoidUUIDs are the uuids the verification lists: every account of
 // mail-last.json and every uuid of a mail_credentials row.
-func (h *Hub) mailVoidUUIDs() []string {
+func (h *Hub) mailVoidUUIDs(ctx context.Context) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
 	add := func(u string) {
@@ -299,7 +299,21 @@ func (h *Hub) mailVoidUUIDs() []string {
 		}
 	}
 	h.mu.RUnlock()
-	return out
+	// The accounts of the document about to be sent (M16): a first
+	// wiring or a lost mail-last.json still lists everyone. A directory
+	// that can't be read fails the void (never a vacuous verification).
+	doc, err := h.mailBuild(ctx)
+	if err != nil {
+		if _, ok := err.(*StatusError); ok {
+			return nil, fmt.Errorf("the void can't list the mail accounts to verify: %v", err)
+		}
+	}
+	if doc != nil {
+		for _, a := range doc.Accounts {
+			add(a.UUID)
+		}
+	}
+	return out, nil
 }
 
 // verifyMailVoid (P8): lists ?uuid= for every uuid, revokes every
@@ -458,7 +472,11 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 	if err != nil {
 		return fmt.Errorf("the provider's void failed: %v", err)
 	}
-	if err := verifyMailVoid(ctx, api, h.mailVoidUUIDs()); err != nil {
+	uuids, err := h.mailVoidUUIDs(ctx)
+	if err != nil {
+		return err
+	}
+	if err := verifyMailVoid(ctx, api, uuids); err != nil {
 		return err
 	}
 	// Verified: open the gate, then clear the debt.

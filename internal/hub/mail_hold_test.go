@@ -451,3 +451,17 @@ func TestWiredEnvOverrideRefused(t *testing.T) {
 		t.Fatalf("clear: %v", err)
 	}
 }
+
+// TestMailNoCustomOverride (M15): a mail template takes no custom
+// override (no ports, binds or network changes past its review), and a
+// stored one refuses the up.
+func TestMailNoCustomOverride(t *testing.T) {
+	w := wiredFix(t)
+	if _, _, err := w.h.SaveUserOverride(mailProviderID, "services:\n  stalwart:\n    ports: [\"2525:10587\"]\n"); err == nil {
+		t.Fatal("a port override accepted")
+	}
+	writeFile(t, w.h.userOverridePath(mailProviderID), "services:\n  stalwart:\n    labels: {a: b}\n")
+	if err := w.h.composeUp(context.Background(), w.h.Template(mailProviderID)); statusOf(err) != 409 {
+		t.Fatalf("an up with a stored override: %v", err)
+	}
+}
