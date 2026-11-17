@@ -179,16 +179,6 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 		}
 		expected[o.Mount.Service][o.Mount.Path] = want{sub: sub}
 	}
-	// The wired mail provider's gate directory (contract §19.1): its
-	// gated services only, read-only, exactly <instance>/_mail.
-	if mode != mailUnwired {
-		for _, svc := range t.Manifest.Mail.Gated {
-			if expected[svc] == nil {
-				expected[svc] = map[string]want{}
-			}
-			expected[svc][MailSlotMount] = want{sub: mailSlotDirRel(t.ID)}
-		}
-	}
 	refuse := func(format string, args ...any) error {
 		return statusErr(http.StatusConflict, "%s was not started: %s (the Hub's secrets volume %s may only be mounted by a per-person password's service, read-only, at its own subpath)", t.ID, fmt.Sprintf(format, args...), vol)
 	}
@@ -301,10 +291,6 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	return nil
 }
 
-// MinSubpathPodman is the Podman version whose volume subpath mounts
-// the Hub relies on (core's floor, Ruling R-POD).
-const MinSubpathPodman = "5.4"
-
 // subpathRefusal is why the engine can't do volume subpath mounts (""
 // = it can). Under Podman its own version (/version's "Podman Engine"
 // component) decides, never the compat API version (always 1.41);
@@ -312,14 +298,14 @@ const MinSubpathPodman = "5.4"
 // the adapter's CheckLayout.
 func subpathRefusal(kind runtime.Kind, info runtime.Info) string {
 	if kind == runtime.KindPodman {
+		// Ruling R-POD2: Podman's compat API ignores compose `subpath`
+		// (live e2e: the files never reached the container), whatever
+		// its version; the version names the engine only.
 		v := info.EngineVersion
-		if !semver.IsValid("v"+v) || semver.Compare("v"+v, "v"+MinSubpathPodman) < 0 {
-			if v == "" {
-				v = "(unknown)"
-			}
-			return "Podman " + clip(v, 40) + " is too old for volume subpath mounts (per-person passwords, the mail slot): Podman " + MinSubpathPodman + " or newer is needed"
+		if v == "" {
+			v = "(version unknown)"
 		}
-		return ""
+		return "per-person passwords need Docker for now (rootless Podman " + clip(v, 40) + " doesn't apply compose volume subpaths)"
 	}
 	api := info.APIVersion
 	if !semver.IsValid("v"+api) || semver.Compare("v"+api, "v"+MinSubpathAPI) < 0 {
@@ -333,6 +319,21 @@ func subpathRefusal(kind runtime.Kind, info runtime.Info) string {
 // any key, is mounted only by the wired provider's tls services (mode
 // void or normal), read-only. Anything else refuses the up (409).
 func checkMailMounts(proj *types.Project, t *templates.Template, mode mailMode) error {
+	var tls, gated []string
+	if mode != mailUnwired && t.Manifest.Mail != nil {
+		tls, gated = t.Manifest.Mail.TLS, t.Manifest.Mail.Gated
+	}
+	if err := checkMailVolume(proj, t, mailTLSVolume, mailTLSVolumeKey, tls, "the mail certificate %s may only be mounted read-only by the wired mail provider's tls services"); err != nil {
+		return err
+	}
+	// The slot volume (R-POD2): whole, read-only, the gated services only.
+	return checkMailVolume(proj, t, mailProviderSlotVolume, mailProviderSlotVolumeKey, gated, "the mail provider's slot %s may only be mounted read-only and whole by the wired mail provider's gated services")
+}
+
+// checkMailVolume: a volume named vol (under any key, or key) is mounted
+// only by the services in allowed, read-only, never by a subpath, and no
+// other service takes their volumes.
+func checkMailVolume(proj *types.Project, t *templates.Template, vol, key string, allowed []string, why string) error {
 	keys := map[string]bool{}
 	for k, v := range proj.Volumes {
 		name := v.Name
@@ -342,16 +343,12 @@ func checkMailMounts(proj *types.Project, t *templates.Template, mode mailMode) 
 				name = proj.Name + "_" + k
 			}
 		}
-		if name == mailTLSVolume || k == mailTLSVolumeKey {
+		if name == vol || k == key {
 			keys[k] = true
 		}
 	}
 	if len(keys) == 0 {
 		return nil
-	}
-	var tls []string
-	if mode != mailUnwired && t.Manifest.Mail != nil {
-		tls = t.Manifest.Mail.TLS
 	}
 	all := map[string]types.ServiceConfig{}
 	for n, sv := range proj.Services {
@@ -368,7 +365,7 @@ func checkMailMounts(proj *types.Project, t *templates.Template, mode mailMode) 
 	}
 	sort.Strings(names)
 	refuse := func(format string, args ...any) error {
-		return statusErr(http.StatusConflict, "%s was not started: %s (the mail certificate %s may only be mounted read-only by the wired mail provider's tls services)", t.ID, fmt.Sprintf(format, args...), mailTLSVolume)
+		return statusErr(http.StatusConflict, "%s was not started: %s ("+why+")", t.ID, fmt.Sprintf(format, args...), vol)
 	}
 	for _, n := range names {
 		for _, m := range all[n].Volumes {
@@ -376,16 +373,18 @@ func checkMailMounts(proj *types.Project, t *templates.Template, mode mailMode) 
 				continue
 			}
 			switch {
-			case !slices.Contains(tls, n):
+			case !slices.Contains(allowed, n):
 				return refuse("service %s mounts it", n)
 			case !m.ReadOnly:
 				return refuse("service %s mounts it writable", n)
+			case m.Volume != nil && m.Volume.Subpath != "":
+				return refuse("service %s mounts it by a subpath", n)
 			}
 		}
 		for _, vf := range all[n].VolumesFrom {
 			src := strings.TrimPrefix(vf, "service:")
 			src, _, _ = strings.Cut(src, ":")
-			if slices.Contains(tls, src) && !slices.Contains(tls, n) {
+			if slices.Contains(allowed, src) && !slices.Contains(allowed, n) {
 				return refuse("service %s takes the volumes of %s (volumes_from)", n, vf)
 			}
 		}

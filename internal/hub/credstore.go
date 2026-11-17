@@ -523,6 +523,11 @@ func (h *Hub) reconcileSecretsLocked(why string) (counts map[string]int, mismatc
 		// epoch below.
 		if h.st.Mail.Provider != nil && h.mailOn() {
 			h.raiseVoidDebtLocked(state.MailVoidRestore)
+			// The gate closes with the epoch (R-POD2: the slot is its own
+			// volume now, so it is emptied here, as hub_secrets was).
+			if err := h.mailSlotEmpty(); err != nil {
+				log.Printf("mail: emptying the provider's slot after the epoch change: %v", err)
+			}
 			log.Printf("mail: the secrets epoch differs: a void of %s's mail passwords is owed", h.st.Mail.Provider.Instance)
 			defer h.kickMailVoid()
 		}

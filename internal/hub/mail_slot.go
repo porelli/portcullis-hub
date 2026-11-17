@@ -32,6 +32,10 @@ const (
 	// mailTLSVolumeKey / mailTLSVolume: the reserved override key and
 	// core's volume (portcullis_mail_tls) holding the mail certificate.
 	mailTLSVolumeKey = "portcullis-mail-tls"
+	// mailProviderSlotVolume / Key: core's mail_provider_slot volume,
+	// mounted whole and read-only into the gated services (R-POD2).
+	mailProviderSlotVolume    = "portcullis_mail_provider_slot"
+	mailProviderSlotVolumeKey = "portcullis-mail-provider-slot"
 	mailTLSVolume    = "portcullis_mail_tls"
 	// The provider's mount points (contract §19.4).
 	MailSlotMount = "/run/portcullis/mail/slot"
@@ -125,13 +129,14 @@ func (h *Hub) mailWiredLocked() (*templates.Template, *templates.Mail) {
 // mailSlotDirRel is <instance>/_mail under hub_secrets.
 func mailSlotDirRel(id string) string { return id + "/" + mailSlotSub }
 
-// mailSlotDir is instance id's gate directory as the Hub sees it ("" =
-// no secrets directory).
+// mailSlotDir is the wired provider's gate directory as the Hub sees
+// it: the mail_provider_slot volume's root (one provider at a time;
+// "" = no slot volume configured).
 func (h *Hub) mailSlotDir(id string) string {
-	if h.cfg.SecretsDir == "" || !templates.ValidID(id) {
+	if h.cfg.MailProviderSlotDir == "" || !templates.ValidID(id) {
 		return ""
 	}
-	return filepath.Join(h.cfg.SecretsDir, id, mailSlotSub)
+	return h.cfg.MailProviderSlotDir
 }
 
 // checkMailAPIURL refuses a HUB_MAIL_API_URL that isn't http://host[:port]

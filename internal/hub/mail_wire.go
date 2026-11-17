@@ -315,6 +315,11 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	// 2. gate: fresh API and metrics secrets, the relay password, the
 	// void files.
 	step(StepMailGate)
+	// The slot volume starts empty for this wiring (R-POD2): nothing of
+	// a former provider's files survives.
+	if err := h.mailSlotEmpty(); err != nil {
+		return p, fail(StepMailGate, err)
+	}
 	h.mu.Lock()
 	err := h.writeMailSecretLocked(id)
 	if err == nil {
@@ -428,6 +433,9 @@ func (h *Hub) undoWireMail(id string, recordGen int) {
 			h.st.Mail.VoidOwed = nil
 		}
 		h.saveLocked()
+	}
+	if err := h.mailSlotEmpty(); err != nil {
+		log.Printf("mail: undoing the wiring of %s: emptying the slot: %v", id, err)
 	}
 	// Every gate file, as the unwire (final review L3).
 	for _, f := range []string{mailGateAPISecret, mailGatePresent, mailGateMetricsSecret, mailGateRelayPassword, mailGateFileVoidSession, mailGateVoidPending} {

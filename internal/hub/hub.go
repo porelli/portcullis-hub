@@ -89,6 +89,10 @@ type Config struct {
 	// (the mail_slot volume, "" = /mail-slot).
 	MailAPIURL  string
 	MailSlotDir string
+	// MailProviderSlotDir is HUB_MAIL_PROVIDER_SLOT_DIR (the
+	// mail_provider_slot volume, rw in the Hub; "" = no slot): the wired
+	// provider's gate files at its root (Ruling R-POD2).
+	MailProviderSlotDir string
 	// MailGID is the mail gate's group (0 = 2000, CT_GID_MAIL_PROVIDER;
 	// tests use their own).
 	MailGID int
@@ -822,6 +826,9 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 	}
 	if err := checkMailAPIURL(cfg.MailAPIURL); err != nil {
 		return nil, err
+	}
+	if cfg.MailProviderSlotDir != "" && !filepath.IsAbs(cfg.MailProviderSlotDir) {
+		return nil, fmt.Errorf("HUB_MAIL_PROVIDER_SLOT_DIR %q must be an absolute path", cfg.MailProviderSlotDir)
 	}
 	if cfg.MailSlotDir != "" && !filepath.IsAbs(cfg.MailSlotDir) {
 		return nil, fmt.Errorf("HUB_MAIL_SLOT_DIR %q must be an absolute path", cfg.MailSlotDir)

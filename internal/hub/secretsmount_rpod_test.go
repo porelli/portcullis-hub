@@ -6,9 +6,9 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 )
 
-// TestSubpathByEngineVersion (Ruling R-POD): Podman is judged by its own
-// version (/version's "Podman Engine"), never the compat API (1.41);
-// Docker by the Engine API version.
+// TestSubpathByEngineVersion (Rulings R-POD, R-POD2): under Podman
+// subpath mounts are refused whatever its version (its compat API
+// ignores them), the version only named; Docker by the Engine API.
 func TestSubpathByEngineVersion(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -16,8 +16,8 @@ func TestSubpathByEngineVersion(t *testing.T) {
 		info runtime.Info
 		ok   bool
 	}{
-		{"podman 5.4", runtime.KindPodman, runtime.Info{APIVersion: "1.41", EngineVersion: "5.4.0"}, true},
-		{"podman 5.6", runtime.KindPodman, runtime.Info{APIVersion: "1.41", EngineVersion: "5.6.1"}, true},
+		{"podman 5.4", runtime.KindPodman, runtime.Info{APIVersion: "1.41", EngineVersion: "5.4.0"}, false},
+		{"podman 5.6", runtime.KindPodman, runtime.Info{APIVersion: "1.41", EngineVersion: "5.6.1"}, false},
 		{"podman 4.9", runtime.KindPodman, runtime.Info{APIVersion: "1.41", EngineVersion: "4.9.3"}, false},
 		{"podman unknown", runtime.KindPodman, runtime.Info{APIVersion: "1.45"}, false},
 		{"docker 1.44", runtime.KindDocker, runtime.Info{APIVersion: "1.44", EngineVersion: "25.0.5"}, false},
@@ -28,7 +28,7 @@ func TestSubpathByEngineVersion(t *testing.T) {
 			t.Errorf("%s: %q", c.name, why)
 		}
 	}
-	if why := subpathRefusal(runtime.KindPodman, runtime.Info{EngineVersion: "4.9.3"}); why == "" || !containsSub(why, "Podman 4.9.3") {
+	if why := subpathRefusal(runtime.KindPodman, runtime.Info{EngineVersion: "5.6.1"}); why == "" || !containsSub(why, "per-person passwords need Docker for now") || !containsSub(why, "Podman 5.6.1") {
 		t.Fatalf("%q", why)
 	}
 }

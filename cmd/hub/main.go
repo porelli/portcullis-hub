@@ -315,6 +315,9 @@ func main() {
 		// The mail slot (contract §19.1): "" = http://mail-api:<api.port>.
 		MailAPIURL:  os.Getenv("HUB_MAIL_API_URL"),
 		MailSlotDir: env("HUB_MAIL_SLOT_DIR", "/mail-slot"),
+		// Ruling R-POD2: the wired provider's gate files, the whole
+		// volume mounted into it (never a hub_secrets subpath).
+		MailProviderSlotDir: env("HUB_MAIL_PROVIDER_SLOT_DIR", "/mail-provider-slot"),
 		// The gate's age recipient (contract §15.4): readable = the core
 		// has an mcp-gate (Settings → AI gate_present).
 		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),

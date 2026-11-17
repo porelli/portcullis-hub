@@ -79,35 +79,24 @@ func mailRandString(n int) (string, error) {
 	return string(b), nil
 }
 
-// mailGateRoot opens hub_secrets and makes <id>/_mail (2750, group
-// 2000). The caller closes it.
+// mailGateRoot opens the mail_provider_slot volume (R-POD2) and makes
+// its root 2750, group 2000. The caller closes it; names are relative
+// to the root (dir ".").
 func (h *Hub) mailGateRoot(id string) (*os.Root, string, error) {
-	if h.mailSlotDir(id) == "" {
-		return nil, "", statusErr(http.StatusServiceUnavailable, "the Hub's secrets volume isn't available: the mail gate can't be written")
+	dir := h.mailSlotDir(id)
+	if dir == "" {
+		return nil, "", statusErr(http.StatusServiceUnavailable, "the mail provider's slot volume isn't available: the mail gate can't be written")
 	}
-	r, err := h.openSecrets()
+	r, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("the mail provider's slot volume: %w", err)
 	}
-	if err := r.Mkdir(id, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
-		r.Close()
-		return nil, "", err
-	}
-	dir := mailSlotDirRel(id)
-	if err := r.Mkdir(dir, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
-		r.Close()
-		return nil, "", err
-	}
-	d, err := r.Open(dir)
+	d, err := r.Open(".")
 	if err != nil {
 		r.Close()
 		return nil, "", err
 	}
 	defer d.Close()
-	if fi, err := d.Stat(); err != nil || !fi.IsDir() {
-		r.Close()
-		return nil, "", fmt.Errorf("%s isn't a directory", dir)
-	}
 	if err := d.Chown(-1, h.mailGID()); err != nil {
 		r.Close()
 		return nil, "", fmt.Errorf("the mail gate directory's group: %w", err)
@@ -116,7 +105,32 @@ func (h *Hub) mailGateRoot(id string) (*os.Root, string, error) {
 		r.Close()
 		return nil, "", err
 	}
-	return r, dir, nil
+	return r, ".", nil
+}
+
+// mailSlotEmpty removes every entry of the slot volume (an unwire, a
+// switch, a wiring's start: the next wiring writes its own files).
+func (h *Hub) mailSlotEmpty() error {
+	dir := h.cfg.MailProviderSlotDir
+	if dir == "" {
+		return nil
+	}
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("the mail provider's slot volume: %w", err)
+	}
+	defer r.Close()
+	es, err := fs.ReadDir(r.FS(), ".")
+	if err != nil {
+		return err
+	}
+	var first error
+	for _, e := range es {
+		if err := r.RemoveAll(e.Name()); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // writeInPlace writes data to name inside r: the same inode when it
@@ -154,7 +168,7 @@ func (h *Hub) mailGateWrite(id, name string, data []byte) error {
 		return err
 	}
 	defer r.Close()
-	if err := writeInPlace(r, dir+"/"+name, data, h.mailGID()); err != nil {
+	if err := writeInPlace(r, filepath.Join(dir, name), data, h.mailGID()); err != nil {
 		return fmt.Errorf("writing the mail gate's %s: %w", name, err)
 	}
 	return nil
@@ -162,12 +176,16 @@ func (h *Hub) mailGateWrite(id, name string, data []byte) error {
 
 // mailGateRemove removes one gate file (absent is fine).
 func (h *Hub) mailGateRemove(id, name string) error {
-	r, err := h.openSecrets()
+	dir := h.mailSlotDir(id)
+	if dir == "" {
+		return nil
+	}
+	r, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	if err := r.Remove(mailSlotDirRel(id) + "/" + name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := r.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("removing the mail gate's %s: %w", name, err)
 	}
 	return nil

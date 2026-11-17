@@ -62,6 +62,10 @@ func newMailSlotFixture(t *testing.T, wired bool, others ...string) *fixture {
 			t.Fatal(err)
 		}
 		c.MailGID = os.Getgid()
+		c.MailProviderSlotDir = filepath.Join(root, "mail-provider-slot")
+		if err := os.Mkdir(c.MailProviderSlotDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
 	})
 	if f.h.Template(mailProviderID) == nil {
 		t.Fatal("the mail template didn't load (see the log)")

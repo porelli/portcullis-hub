@@ -275,6 +275,10 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 			gateErr = err
 		}
 	}
+	// The whole slot emptied for the next wiring (R-POD2).
+	if err := h.mailSlotEmpty(); err != nil && gateErr == nil {
+		gateErr = err
+	}
 	h.mu.Lock()
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
 		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held = nil, nil, nil

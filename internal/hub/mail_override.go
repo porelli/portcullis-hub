@@ -33,7 +33,7 @@ type mailRender struct {
 	// topNetworks: network key → its top-level YAML body.
 	topNetworks map[string]string
 	// tlsVolume / secretsVolume: the top-level volumes to declare.
-	tlsVolume, secretsVolume bool
+	tlsVolume, secretsVolume, slotVolume bool
 }
 
 // services are every service the render touches, sorted.
@@ -218,10 +218,15 @@ func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailR
 			"        target: "+MailTLSMount+"\n"+
 			"        read_only: true")
 	}
+	// The whole slot volume, read-only, on every gated service — never
+	// a subpath (Ruling R-POD2: Podman's compat API ignores subpath).
 	for _, s := range b.Gated {
 		r.groups[s] = true
-		r.secretsVolume = true
-		r.mounts[s] = append(r.mounts[s], secretsMountEntry(MailSlotMount, mailSlotDirRel(t.ID)))
+		r.slotVolume = true
+		r.mounts[s] = append(r.mounts[s], "type: volume\n"+
+			"        source: "+mailProviderSlotVolumeKey+"\n"+
+			"        target: "+MailSlotMount+"\n"+
+			"        read_only: true")
 	}
 	// The API attachment, at the pinned address with the alias.
 	attach(b.API.Service, mailAPINetwork, "\n        ipv4_address: "+core.ProviderIP.String()+"\n        aliases:\n          - "+mailAPIAlias)

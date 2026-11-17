@@ -7,11 +7,9 @@ services:
         target: /run/portcullis/mail/tls
         read_only: true
       - type: volume
-        source: portcullis-hub-secrets
-        target: "/run/portcullis/mail/slot"
+        source: portcullis-mail-provider-slot
+        target: /run/portcullis/mail/slot
         read_only: true
-        volume:
-          subpath: "mailsrv/_mail"
     environment:
       PORTCULLIS_MAIL_API_SUBNET: "172.31.255.16/28"
       PORTCULLIS_MAIL_API_HUB_IP: "172.31.255.18"
@@ -47,11 +45,9 @@ services:
         target: /run/portcullis/mail/tls
         read_only: true
       - type: volume
-        source: portcullis-hub-secrets
-        target: "/run/portcullis/mail/slot"
+        source: portcullis-mail-provider-slot
+        target: /run/portcullis/mail/slot
         read_only: true
-        volume:
-          subpath: "mailsrv/_mail"
     environment:
       PORTCULLIS_MAIL_API_SUBNET: "172.31.255.16/28"
       PORTCULLIS_MAIL_API_HUB_IP: "172.31.255.18"
@@ -82,9 +78,9 @@ networks:
     external: true
     name: portcullis-proxy
 volumes:
-  portcullis-hub-secrets:
-    external: true
-    name: "portcullis_hub_secrets"
   portcullis-mail-tls:
     external: true
     name: portcullis_mail_tls
+  portcullis-mail-provider-slot:
+    external: true
+    name: portcullis_mail_provider_slot

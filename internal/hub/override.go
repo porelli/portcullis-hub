@@ -473,7 +473,7 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 			fmt.Fprintf(&b, "  %s:%s\n", yamlKey(n), topNets[n])
 		}
 	}
-	if multiVols || len(secretOpts) > 0 || mr.secretsVolume || mr.tlsVolume {
+	if multiVols || len(secretOpts) > 0 || mr.secretsVolume || mr.tlsVolume || mr.slotVolume {
 		b.WriteString("volumes:\n")
 	}
 	if vols := t.NamesFor(t.ID).Volumes; multiVols {
@@ -486,6 +486,9 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	}
 	if mr.tlsVolume {
 		fmt.Fprintf(&b, "  %s:\n    external: true\n    name: %s\n", mailTLSVolumeKey, mailTLSVolume)
+	}
+	if mr.slotVolume {
+		fmt.Fprintf(&b, "  %s:\n    external: true\n    name: %s\n", mailProviderSlotVolumeKey, mailProviderSlotVolume)
 	}
 	if len(names) == 0 && !multiVols {
 		return "", nil

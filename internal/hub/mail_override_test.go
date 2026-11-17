@@ -25,7 +25,7 @@ func mailOverrideFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := newMailSlotFixture(t, true)
 	f.h.SetMailCoreForTest(true, "mail.example.org")
-	writeFile(t, filepath.Join(f.h.cfg.SecretsDir, mailProviderID, "_mail", "void-session"), testVoidSession+"\n")
+	writeFile(t, filepath.Join(f.h.cfg.MailProviderSlotDir, "void-session"), testVoidSession+"\n")
 	return f
 }
 
@@ -176,7 +176,9 @@ func TestMailNormalOverride(t *testing.T) {
 			t.Errorf("network %s: %v", n, d.Networks[n])
 		}
 	}
-	if d.Volumes[mailTLSVolumeKey]["name"] != mailTLSVolume || d.Volumes[templates.SecretsVolumeKey]["external"] != true {
+	// R-POD2: the whole slot volume, never hub_secrets.
+	if d.Volumes[mailTLSVolumeKey]["name"] != mailTLSVolume || d.Volumes[mailProviderSlotVolumeKey]["name"] != mailProviderSlotVolume ||
+		d.Volumes[mailProviderSlotVolumeKey]["external"] != true || d.Volumes[templates.SecretsVolumeKey] != nil {
 		t.Fatalf("volumes %v", d.Volumes)
 	}
 }
@@ -284,12 +286,15 @@ func TestMailTLSMountedOnlyIntoTLSServices(t *testing.T) {
 		for name, sv := range d.Services {
 			m := mountsOf(t, sv.Volumes)
 			_, tls := m[mailTLSVolumeKey]
-			sec, gated := m[templates.SecretsVolumeKey]
+			sec, gated := m[mailProviderSlotVolumeKey]
+			if _, sub := m[templates.SecretsVolumeKey]; sub {
+				t.Errorf("%v %s: hub_secrets mounted (R-POD2: never a subpath for mail)", mode, name)
+			}
 			want := name == "stalwart" || name == "adapter"
 			if tls != want || gated != want {
 				t.Errorf("%v %s: tls %v gated %v", mode, name, tls, gated)
 			}
-			if gated && (sec.target != MailSlotMount || sec.sub != "mailsrv/_mail" || !sec.ro) {
+			if gated && (sec.target != MailSlotMount || sec.sub != "" || !sec.ro) {
 				t.Errorf("%v %s: gate mount %+v", mode, name, sec)
 			}
 		}
@@ -414,9 +419,9 @@ func TestHubSecretsMailSubpathOnlyGated(t *testing.T) {
 		return s
 	}
 	for name, ov := range map[string]string{
-		"gate on a non-gated service": mount("resolver", templates.SecretsVolumeKey, "/x", "mailsrv/_mail", true),
-		"another instance's gate":     mount("stalwart", templates.SecretsVolumeKey, "/y", "other/_mail", true),
-		"writable gate":               mount("adapter", templates.SecretsVolumeKey, MailSlotMount, "mailsrv/_mail", false),
+		"slot on a non-gated service": mount("resolver", mailProviderSlotVolumeKey, "/x", "", true),
+		"slot by a subpath":           mount("stalwart", mailProviderSlotVolumeKey, "/y", "x", true),
+		"writable slot":               mount("adapter", mailProviderSlotVolumeKey, MailSlotMount, "", false),
 		"certificate on the resolver": mount("resolver", mailTLSVolumeKey, "/tls", "", true),
 		"certificate writable":        mount("stalwart", mailTLSVolumeKey, MailTLSMount, "", false),
 	} {

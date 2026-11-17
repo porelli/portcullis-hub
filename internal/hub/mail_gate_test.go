@@ -24,7 +24,7 @@ import (
 // gateFile is one of mailsrv's gate files ("" = absent).
 func gateFile(t *testing.T, f *fixture, name string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(f.h.cfg.SecretsDir, mailProviderID, "_mail", name))
+	b, err := os.ReadFile(filepath.Join(f.h.cfg.MailProviderSlotDir, name))
 	if errors.Is(err, os.ErrNotExist) {
 		return ""
 	}
