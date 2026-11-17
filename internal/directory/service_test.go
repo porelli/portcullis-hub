@@ -498,7 +498,9 @@ var nonUserOps = map[string]bool{"Overview": true, "Membership": true, "Privileg
 	// The caller's own password (Sign-in page): no target but the caller
 	// (permSelf); the protected and reserved accounts are refused there
 	// (TestOwnPassword).
-	"SetOwnPassword": true, "RemoveOwnPassword": true}
+	"SetOwnPassword": true, "RemoveOwnPassword": true,
+	// SSH access (contract §18.12): a group check, read only.
+	"CheckSSHGrantGroup": true}
 
 func TestProtectedAccountsParity(t *testing.T) {
 	e := newEnv(t)

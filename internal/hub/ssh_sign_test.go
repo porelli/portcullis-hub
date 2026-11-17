@@ -352,7 +352,7 @@ func TestSignLimits(t *testing.T) {
 	if _, err := f.h.SignSSH(context.Background(), f.request(t, f.signer), "192.0.2.120"); sshStatusOf(err) != 429 {
 		t.Errorf("7th signing: %v", err)
 	}
-	f.now = f.now.Add(time.Minute)
+	f.advance(time.Minute)
 	if _, err := f.h.SignSSH(context.Background(), f.request(t, f.signer), "192.0.2.121"); err != nil {
 		t.Errorf("a minute later: %v", err)
 	}

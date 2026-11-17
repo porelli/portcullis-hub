@@ -96,14 +96,14 @@ func TestCompileMembershipUnavailableKeepsLast(t *testing.T) {
 func TestSerialBumpsOnBundleChangeOnly(t *testing.T) {
 	f := newSSHFixture(t)
 	f.compile(t)
-	s1 := f.h.st.SSH.Hosts["web-1"].Serial
+	s1 := f.h.sshHostForTest("web-1").Serial
 	if s1 == 0 || f.h.sshCompiled().Bundles["web-1"].Serial != s1 {
 		t.Fatalf("serial %d", s1)
 	}
 	ch := f.h.sshChanged()
-	f.now = f.now.Add(time.Minute)
+	f.advance(time.Minute)
 	f.compile(t)
-	if s := f.h.st.SSH.Hosts["web-1"].Serial; s != s1 {
+	if s := f.h.sshHostForTest("web-1").Serial; s != s1 {
 		t.Errorf("an unchanged bundle moved %d → %d", s1, s)
 	}
 	select {
@@ -113,7 +113,7 @@ func TestSerialBumpsOnBundleChangeOnly(t *testing.T) {
 	}
 	f.people.set(func(p *sshPeople) { delete(p.users["alice"], "ssh_admins") })
 	f.compile(t)
-	if s := f.h.st.SSH.Hosts["web-1"].Serial; s <= s1 {
+	if s := f.h.sshHostForTest("web-1").Serial; s <= s1 {
 		t.Errorf("a changed bundle kept serial %d", s)
 	}
 	select {
@@ -129,18 +129,18 @@ func TestHostCertRenewedAtOneThird(t *testing.T) {
 	if len(f.ssh.hostSigns) != 1 || f.ssh.hostSigns[0].HostID != "web-1" || strings.Join(f.ssh.hostSigns[0].Principals, ",") != "web-1.example.com,192.0.2.11" {
 		t.Fatalf("enrol-time host certificate %+v", f.ssh.hostSigns)
 	}
-	cert := f.h.st.SSH.Hosts["web-1"].HostCert
+	cert := f.h.sshHostForTest("web-1").HostCert
 	if f.h.sshCompiled().Bundles["web-1"].HostCertificate != cert || cert == "" {
 		t.Error("the bundle doesn't carry the host certificate")
 	}
-	f.now = f.now.Add(59 * 24 * time.Hour) // 31 days left of 90: more than a third
+	f.advance(59 * 24 * time.Hour) // 31 days left of 90: more than a third
 	f.compile(t)
 	if len(f.ssh.hostSigns) != 1 {
 		t.Error("renewed too early")
 	}
-	f.now = f.now.Add(2 * 24 * time.Hour) // 29 days left: ≤ ⅓
+	f.advance(2 * 24 * time.Hour) // 29 days left: ≤ ⅓
 	f.compile(t)
-	if len(f.ssh.hostSigns) != 2 || f.h.st.SSH.Hosts["web-1"].HostCert == cert {
+	if len(f.ssh.hostSigns) != 2 || f.h.sshHostForTest("web-1").HostCert == cert {
 		t.Error("not renewed at ⅓ remaining life")
 	}
 	if f.audit.lastOf("ssh.host_certificate.issue").Target != "web-1" {

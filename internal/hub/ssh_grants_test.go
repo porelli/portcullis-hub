@@ -298,14 +298,14 @@ func TestKeysKeptWhileRevoked(t *testing.T) {
 	}
 	fp := cliapi.Fingerprint(f.signer.PublicKey())
 	f.h.RevokeFingerprints("root", "lost", []string{fp}, "alice")
-	f.h.pruneKeys(f.now.Add(100 * 24 * time.Hour))
+	f.h.pruneKeys(f.clock().Add(100 * 24 * time.Hour))
 	if f.h.issuedKey(fp) == "" {
 		t.Error("a revoked key's record was pruned")
 	}
 	f.h.sshrev.mu.Lock()
 	f.h.saveRevokedLocked(nil)
 	f.h.sshrev.mu.Unlock()
-	f.h.pruneKeys(f.now.Add(100 * 24 * time.Hour))
+	f.h.pruneKeys(f.clock().Add(100 * 24 * time.Hour))
 	if f.h.issuedKey(fp) != "" {
 		t.Error("an old, unrevoked key's record kept")
 	}

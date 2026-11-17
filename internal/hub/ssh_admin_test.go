@@ -61,7 +61,7 @@ func TestUpdateHostNeedsFresh(t *testing.T) {
 	if err := f.h.UpdateHost(context.Background(), rootActor, "web-2", in, &freshauth.Proof{Code: "c"}); err != nil {
 		t.Errorf("with a fresh sign-in = %v", err)
 	}
-	if got := f.h.st.SSH.Hosts["web-2"].HostGroups; strings.Join(got, ",") != "db,web" {
+	if got := f.h.sshHostForTest("web-2").HostGroups; strings.Join(got, ",") != "db,web" {
 		t.Errorf("groups %v", got)
 	}
 	in.Names = []string{"other.example.com"}

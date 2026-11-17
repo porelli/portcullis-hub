@@ -177,7 +177,24 @@ type sshFixture struct {
 	people *sshPeople
 	ssh    *fakeSSH
 	audit  *fakeAudit
-	now    time.Time
+	clk    struct {
+		sync.Mutex
+		t time.Time
+	}
+}
+
+// clock is the fixture's time; advance moves it (both locked: the
+// background compiles read it).
+func (f *sshFixture) clock() time.Time {
+	f.clk.Lock()
+	defer f.clk.Unlock()
+	return f.clk.t
+}
+
+func (f *sshFixture) advance(d time.Duration) {
+	f.clk.Lock()
+	defer f.clk.Unlock()
+	f.clk.t = f.clk.t.Add(d)
 }
 
 var sshNow = time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
@@ -185,8 +202,9 @@ var sshNow = time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
 func newSSHFixture(t *testing.T) *sshFixture {
 	t.Helper()
 	h := newBareHub(t)
-	f := &sshFixture{h: h, ssh: newFakeSSH(t), audit: &fakeAudit{}, now: sshNow}
-	f.ssh.now = func() time.Time { return f.now }
+	f := &sshFixture{h: h, ssh: newFakeSSH(t), audit: &fakeAudit{}}
+	f.clk.t = sshNow
+	f.ssh.now = f.clock
 	f.people = &sshPeople{users: map[string]map[string]int{
 		"alice": {"ssh_web": 11, "ssh_admins": 12},
 		"bob":   {"ssh_web": 11, "ssh_deploy": 13},
@@ -194,7 +212,7 @@ func newSSHFixture(t *testing.T) *sshFixture {
 	h.SetPeople(f.people)
 	h.SetSSHActions(f.ssh)
 	h.SetAudit(f.audit)
-	h.sshrt.now = func() time.Time { return f.now }
+	h.sshrt.now = f.clock
 	key := hostKey(t)
 	h.mu.Lock()
 	h.st.SSH.Settings.Enabled = true
@@ -232,4 +250,18 @@ func newSigner(t *testing.T) (ed25519.PublicKey, ssh.Signer) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	s, _ := ssh.NewSignerFromKey(priv)
 	return pub, s
+}
+
+// sshHostForTest is a locked read of a host's state.
+func (h *Hub) sshHostForTest(id string) state.SSHHost {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.st.SSH.Hosts[id]
+}
+
+func (h *Hub) sshHostOKForTest(id string) (state.SSHHost, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	x, ok := h.st.SSH.Hosts[id]
+	return x, ok
 }

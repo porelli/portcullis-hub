@@ -87,7 +87,7 @@ func TestEnrolCodeSingleUse15Min(t *testing.T) {
 	if e := f.audit.lastOf("ssh.host.create"); strings.Contains(e.Detail, f.code.Secret) || e.Result != "ok" {
 		t.Errorf("audit %+v", e)
 	}
-	if strings.Contains(f.h.st.SSH.Hosts["web-2"].EnrolHash, f.code.Secret) || f.h.st.SSH.Hosts["web-2"].EnrolHash != secretHash(f.code.Secret) {
+	if strings.Contains(f.h.sshHostForTest("web-2").EnrolHash, f.code.Secret) || f.h.sshHostForTest("web-2").EnrolHash != secretHash(f.code.Secret) {
 		t.Error("the stored hash")
 	}
 	b := f.enrol(t)
@@ -100,7 +100,7 @@ func TestEnrolCodeSingleUse15Min(t *testing.T) {
 	}
 	// Expired: a new code 16 minutes later refuses.
 	f2 := newHostFixture(t)
-	f2.now = f2.now.Add(16 * time.Minute)
+	f2.advance(16 * time.Minute)
 	if _, err := f2.h.EnrolChallenge("web-2"); err == nil {
 		t.Error("an expired code opened a challenge")
 	}
@@ -120,7 +120,7 @@ func TestEnrolWrongSecret403(t *testing.T) {
 		t.Errorf("audit %+v", e)
 	}
 	// The code still works.
-	if f.h.st.SSH.Hosts["web-2"].EnrolHash == "" {
+	if f.h.sshHostForTest("web-2").EnrolHash == "" {
 		t.Error("a wrong secret used the code up")
 	}
 }
@@ -148,7 +148,7 @@ func TestEnrolProofOverChallenge(t *testing.T) {
 	f.h.mu.RLock()
 	f.code.Secret = "" // a new code's secret is unknown here: the challenge reuse is the point
 	f.h.mu.RUnlock()
-	if f.h.consumeChallenge("web-2", f.now, func(c string) bool { return c == ch }) {
+	if f.h.consumeChallenge("web-2", f.clock(), func(c string) bool { return c == ch }) {
 		t.Error("a used challenge is still live")
 	}
 }
@@ -156,7 +156,7 @@ func TestEnrolProofOverChallenge(t *testing.T) {
 func TestEnrolPinsHostKey(t *testing.T) {
 	f := newHostFixture(t)
 	f.enrol(t)
-	hst := f.h.st.SSH.Hosts["web-2"]
+	hst := f.h.sshHostForTest("web-2")
 	if hst.HostKey != cliapi.NormalAuthorizedKey(f.key.PublicKey()) || hst.KeyFP != cliapi.Fingerprint(f.key.PublicKey()) || hst.EnrolHash != "" || hst.Ceiling == nil {
 		t.Errorf("host %+v", hst)
 	}
@@ -203,36 +203,36 @@ func TestHostRequestSignature(t *testing.T) {
 	f.enrol(t)
 	body := []byte(`{"x":1}`)
 	n := newNonce()
-	r := signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.now, n)
+	r := signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.clock(), n)
 	if id, err := f.h.VerifyHostRequest(r, body); err != nil || id != "web-2" {
 		t.Fatalf("good: %v", err)
 	}
-	if _, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.now, n), body); err == nil {
+	if _, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.clock(), n), body); err == nil {
 		t.Error("nonce replay accepted")
 	}
 	for name, r := range map[string]*http.Request{
-		"+61 s": signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.now.Add(61*time.Second), newNonce()),
-		"-61 s": signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.now.Add(-61*time.Second), newNonce()),
+		"+61 s": signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.clock().Add(61*time.Second), newNonce()),
+		"-61 s": signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.clock().Add(-61*time.Second), newNonce()),
 	} {
 		if _, err := f.h.VerifyHostRequest(r, body); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	if _, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.now, newNonce()), []byte(`{"x":2}`)); err == nil {
+	if _, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "POST", "/api/cli/v1/hosts/report", body, f.clock(), newNonce()), []byte(`{"x":2}`)); err == nil {
 		t.Error("body hash mismatch accepted")
 	}
-	r = signedReq(t, f.key, "web-2", "GET", "/api/cli/v1/hosts/bundle?since=1", nil, f.now, newNonce())
+	r = signedReq(t, f.key, "web-2", "GET", "/api/cli/v1/hosts/bundle?since=1", nil, f.clock(), newNonce())
 	r.URL.RawQuery = "since=0"
 	if _, err := f.h.VerifyHostRequest(r, nil); err == nil {
 		t.Error("query change accepted")
 	}
 	// Unpinned host (web-1 in the fixture has a key, web-3 doesn't exist).
-	_, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-3", "GET", "/api/cli/v1/hosts/bundle?since=0", nil, f.now, newNonce()), nil)
+	_, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-3", "GET", "/api/cli/v1/hosts/bundle?since=0", nil, f.clock(), newNonce()), nil)
 	if code, text := SSHErrorStatus(err); code != 403 || text != TextRemoved {
 		t.Errorf("unknown host: %d %s", code, text)
 	}
 	// Another host's key.
-	if _, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-1", "GET", "/api/cli/v1/hosts/bundle?since=0", nil, f.now, newNonce()), nil); err == nil {
+	if _, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-1", "GET", "/api/cli/v1/hosts/bundle?since=0", nil, f.clock(), newNonce()), nil); err == nil {
 		t.Error("web-2's key accepted for web-1")
 	}
 }
@@ -310,7 +310,7 @@ func TestRemoveHostUnpins(t *testing.T) {
 	if err := f.h.RemoveHost(context.Background(), directory.Actor{User: "root"}, "web-2", freshauth.Proof{}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "GET", "/api/cli/v1/hosts/bundle?since=0", nil, f.now, newNonce()), nil)
+	_, err := f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "GET", "/api/cli/v1/hosts/bundle?since=0", nil, f.clock(), newNonce()), nil)
 	if code, text := SSHErrorStatus(err); code != 403 || text != TextRemoved {
 		t.Errorf("%d %s", code, text)
 	}
@@ -318,7 +318,10 @@ func TestRemoveHostUnpins(t *testing.T) {
 	if _, ok := f.h.sshCompiled().Bundles["web-2"]; ok {
 		t.Error("a removed host still compiled")
 	}
-	if got := revokedHostKeys(f.h.st.SSH); len(got) != 1 || got[0] != cliapi.NormalAuthorizedKey(f.key.PublicKey()) {
+	f.h.mu.RLock()
+	got := revokedHostKeys(f.h.st.SSH.Clone())
+	f.h.mu.RUnlock()
+	if len(got) != 1 || got[0] != cliapi.NormalAuthorizedKey(f.key.PublicKey()) {
 		t.Errorf("revoked host keys %v", got)
 	}
 	if f.audit.lastOf("ssh.host.remove").Result != "ok" {
@@ -343,7 +346,7 @@ func TestHostEndpointsOff503(t *testing.T) {
 	check("enrol", err)
 	_, err = f.h.HostBundle(context.Background(), "web-2", 0)
 	check("bundle", err)
-	_, err = f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "GET", "/x", nil, f.now, newNonce()), nil)
+	_, err = f.h.VerifyHostRequest(signedReq(t, f.key, "web-2", "GET", "/x", nil, f.clock(), newNonce()), nil)
 	check("signed request", err)
 	check("report", f.h.HostReport(context.Background(), "web-2", cliapi.Report{}))
 }
@@ -356,7 +359,7 @@ func TestCreateHostNeedsFresh(t *testing.T) {
 	if err == nil {
 		t.Fatal("created without a fresh sign-in")
 	}
-	if _, ok := f.h.st.SSH.Hosts["db-1"]; ok {
+	if _, ok := f.h.sshHostOKForTest("db-1"); ok {
 		t.Error("host created anyway")
 	}
 	_ = state.SSHHost{}
