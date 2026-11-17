@@ -222,6 +222,14 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 			return err
 		}
 	}
+	// A mail provider whose mode changes (normal ↔ void) goes down first,
+	// so its networks are recreated (Ruling T8-void).
+	var mm mailMode
+	if live.Manifest.Mail != nil {
+		if mm, err = h.mailModeBeforeUp(live); err != nil {
+			return err
+		}
+	}
 	// The project's volumes before the create (with a reporter): the ones
 	// the create adds are the operation's (Created) — a Stop removes only
 	// those. Not knowing them is a refusal: an undo must never guess.
@@ -367,6 +375,12 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	// written: each failure an operation warning).
 	if p != nil {
 		p.Start(StepSettings)
+	}
+	// The engine's networks match the mail mode, else it is stopped.
+	if live.Manifest.Mail != nil {
+		if err := h.mailModeAfterUp(ctx, live, mm); err != nil {
+			return err
+		}
 	}
 	failures := h.runStartHooks(context.Background(), live.ID)
 	// AI companions owing a revoke_all (switched while stopped): run it

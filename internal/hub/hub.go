@@ -377,7 +377,10 @@ type Hub struct {
 	mailModeForRender *mailMode
 	// mailVoid is the last void's outcome; mailBootstrapWait and
 	// mailPollEvery shorten the void's waits in tests.
-	mailVoid          mailVoidState
+	mailVoid mailVoidState
+	// mailUpModes: each mail instance's mode at its last up (Ruling
+	// T8-void).
+	mailUpModes       mailUpModes
 	mailBootstrapWait time.Duration
 	mailPollEvery     time.Duration
 	// mailVoidKick wakes RunMailVoidRetry (kickMailVoid).
@@ -869,6 +872,14 @@ func (h *Hub) Init() {
 		h.requeueOwed()
 	} else {
 		h.afterEngineVerified("settings: owed reloads and restarts", h.requeueOwed)
+	}
+	// The mail slot (contract §19.8, §19.9 "Resuming"): the targets
+	// file, then an owed void resumes in void mode, never normal first.
+	h.writeMailTargets()
+	if h.engineVerifiedNow() {
+		h.resumeMail()
+	} else {
+		h.afterEngineVerified("mail: resuming an owed void", h.resumeMail)
 	}
 	// VPN (I2): running labels the rendering narrowed (or that can't be
 	// read) restart the instance.

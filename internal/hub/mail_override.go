@@ -1,13 +1,17 @@
 package hub
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 
@@ -91,10 +95,17 @@ var voidSessionRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // topLevelNetworks are compose's top-level network keys in file order and
 // whether each is external.
 func topLevelNetworks(compose []byte) (names []string, external map[string]bool) {
-	external = map[string]bool{}
+	names, external, _ = topLevelNetworkFlags(compose)
+	return names, external
+}
+
+// topLevelNetworkFlags is topLevelNetworks with each network's internal
+// flag as declared.
+func topLevelNetworkFlags(compose []byte) (names []string, external, internal map[string]bool) {
+	external, internal = map[string]bool{}, map[string]bool{}
 	var doc yaml.Node
 	if yaml.Unmarshal(compose, &doc) != nil || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return nil, external
+		return nil, external, internal
 	}
 	top := doc.Content[0]
 	for i := 0; i+1 < len(top.Content); i += 2 {
@@ -110,10 +121,13 @@ func topLevelNetworks(compose []byte) (names []string, external map[string]bool)
 				if body.Content[k].Value == "external" && body.Content[k+1].Value != "false" {
 					external[n] = true
 				}
+				if body.Content[k].Value == "internal" && body.Content[k+1].Value == "true" {
+					internal[n] = true
+				}
 			}
 		}
 	}
-	return names, external
+	return names, external, internal
 }
 
 // mailRenderLocked is the mail part of t's override in mode (contract
@@ -277,4 +291,94 @@ func (h *Hub) mailRenderModeLocked(t *templates.Template) mailMode {
 		return *h.mailModeForRender
 	}
 	return h.mailModeLocked(t.ID)
+}
+
+// Ruling T8-void (coordinator): the Hub owns the void-mode network flip.
+// (1) Before an up that changes a mail provider's mode (normal ↔ void;
+// an unknown previous mode counts as a change) the project goes down,
+// volumes kept, so compose recreates its networks. (2) After the up every
+// template network's internal flag on the engine must match the mode
+// (void: all internal; normal: as the template declares): else the
+// instance is stopped and the error kept for the doctor.
+
+// mailUpModes are the modes each mail instance was last brought up in.
+type mailUpModes struct {
+	mu sync.Mutex
+	m  map[string]mailMode
+}
+
+// mailModeBeforeUp downs t's project when its mode changes; answers the
+// mode the up renders. Caller holds the app lock.
+func (h *Hub) mailModeBeforeUp(t *templates.Template) (mailMode, error) {
+	h.mu.RLock()
+	mode := h.mailRenderModeLocked(t)
+	h.mu.RUnlock()
+	h.mailUpModes.mu.Lock()
+	prev, known := h.mailUpModes.m[t.ID]
+	h.mailUpModes.mu.Unlock()
+	if known && prev == mode {
+		return mode, nil
+	}
+	if mode == mailUnwired && !known {
+		// An ordinary app's first up (never wired since this start):
+		// nothing to flip.
+		return mode, nil
+	}
+	if err := h.composeDown(t); err != nil {
+		return mode, fmt.Errorf("taking %s down before its mail mode changes to %s: %w", t.ID, mode, err)
+	}
+	return mode, nil
+}
+
+// mailModeAfterUp records mode and checks the engine's networks.
+func (h *Hub) mailModeAfterUp(ctx context.Context, t *templates.Template, mode mailMode) error {
+	err := h.mailCheckNetworks(ctx, t, mode)
+	h.mailUpModes.mu.Lock()
+	if h.mailUpModes.m == nil {
+		h.mailUpModes.m = map[string]mailMode{}
+	}
+	if err != nil {
+		delete(h.mailUpModes.m, t.ID)
+	} else {
+		h.mailUpModes.m[t.ID] = mode
+	}
+	h.mailUpModes.mu.Unlock()
+	if err == nil {
+		return nil
+	}
+	h.setMailVoidErr(err.Error())
+	log.Printf("mail: %s: %v: stopping it", t.ID, err)
+	if derr := h.composeDown(t); derr != nil {
+		log.Printf("mail: stopping %s: %v", t.ID, derr)
+	}
+	return statusErr(http.StatusConflict, "%s was stopped: %v", t.ID, err)
+}
+
+// mailCheckNetworks compares the project's networks on the engine with
+// the mode (unwired: nothing checked).
+func (h *Hub) mailCheckNetworks(ctx context.Context, t *templates.Template, mode mailMode) error {
+	if mode == mailUnwired || h.noEngine() {
+		return nil
+	}
+	info, err := h.rt.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("the engine's networks can't be read (%v): the mail mode can't be confirmed", err)
+	}
+	_, external, declared := topLevelNetworkFlags(t.ReadCompose())
+	project := projectName(t.ID)
+	for _, n := range info.Networks {
+		if n.Labels["com.docker.compose.project"] != project {
+			continue
+		}
+		key := n.Labels["com.docker.compose.network"]
+		if key == "" || external[key] {
+			continue
+		}
+		want := mode == mailVoid || declared[key]
+		if n.Internal != want {
+			return fmt.Errorf("the provider's network %s is %s, not %s, in %s mode", n.Name, map[bool]string{true: "internal", false: "not internal"}[n.Internal],
+				map[bool]string{true: "internal", false: "not internal"}[want], mode)
+		}
+	}
+	return nil
 }

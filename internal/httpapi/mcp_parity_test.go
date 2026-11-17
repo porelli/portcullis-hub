@@ -88,6 +88,8 @@ var mailNoToolRoutes = map[string]string{
 	"GET /api/directory/users/{username}/mail":                   "credentials: never through MCP",
 	"PUT /api/directory/users/{username}/mail":                   "admin UI only (the person's page)",
 	"DELETE /api/directory/users/{username}/mail/passwords/{id}": "credentials: never through MCP",
+	"GET /api/instances/{id}/mail-provider":                      "mail providers: never through MCP or AI (contract §19.9)",
+	"PUT /api/instances/{id}/mail-provider":                      "mail providers: never wired, switched or unwired through MCP or AI (contract §19.9)",
 }
 
 // adminVPN are the VPN tools (§15.10).

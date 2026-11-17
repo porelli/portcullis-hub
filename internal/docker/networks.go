@@ -21,7 +21,7 @@ func (c *Client) ListNetworks(ctx context.Context) ([]Network, error) {
 	}
 	out := make([]Network, 0, len(res.Items))
 	for _, n := range res.Items {
-		nw := Network{Name: n.Name}
+		nw := Network{Name: n.Name, Internal: n.Internal, Labels: n.Labels}
 		for _, cfg := range n.IPAM.Config {
 			if cfg.Subnet.IsValid() {
 				nw.Subnets = append(nw.Subnets, cfg.Subnet)

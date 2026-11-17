@@ -73,7 +73,41 @@ func HostHandler(h *hub.Hub) http.Handler {
 	mux.HandleFunc("GET /host/mail/domains", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.HostMailDomains())
 	})
+	// The mail provider (contract §19.10): its view with the warning,
+	// and the install-and-wire of `./portcullis mail enable` (the host
+	// operator's typed confirmation stands in for the fresh sign-in).
+	mux.HandleFunc("GET /host/mail/provider", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, h.HostMailProviderView(r.Context()))
+	})
+	mux.HandleFunc("POST /host/mail/install", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Template string `json:"template"`
+			Source   string `json:"source"`
+			Confirm  string `json:"confirm"`
+		}
+		if !hostBody(w, r, &b, `{"template", "source", "confirm"}`) {
+			return
+		}
+		op, err := h.HostMailInstall(r.Context(), b.Template, b.Source, b.Confirm)
+		if err != nil {
+			hostErr(w, err)
+			return
+		}
+		writeJSONStatus(w, http.StatusAccepted, mailWireAccepted{acceptedBody(op), hub.MailWarning})
+	})
 	return mux
+}
+
+// hostBody decodes a strict control body (≤ 8 KiB, unknown fields and
+// trailing data 400 with usage).
+func hostBody(w http.ResponseWriter, r *http.Request, v any, usage string) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, hostBodyMax))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil || dec.Decode(&struct{}{}) != io.EOF {
+		http.Error(w, "body must be "+usage, http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 func hostErr(w http.ResponseWriter, err error) {

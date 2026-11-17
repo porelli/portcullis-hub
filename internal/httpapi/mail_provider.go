@@ -1,0 +1,97 @@
+package httpapi
+
+import (
+	"net/http"
+
+	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/hub"
+)
+
+// The mail provider routes (contract §19.9): Hub listener, proxy-secret
+// and CSRF guards, strict bodies ≤ 64 KiB, full administrators only, and
+// never from MCP or AI (no tool, ever: mailNoToolRoutes).
+
+// registerMailProvider registers them (registerMailAdmin's listener).
+func (s *Server) registerMailProvider(mux routeMux) {
+	mux.HandleFunc("GET /api/instances/{id}/mail-provider", s.handleInstanceMailProvider)
+	mux.HandleFunc("PUT /api/instances/{id}/mail-provider", s.handleSetInstanceMailProvider)
+}
+
+// mailProviderGate: an AI or MCP actor is refused first (403), then a
+// non-admin (adminOnly).
+func (s *Server) mailProviderGate(w http.ResponseWriter, r *http.Request) bool {
+	if a := requestActor(r); a.Via != "" {
+		http.Error(w, "not allowed: mail providers are never wired, switched or unwired through MCP or AI", http.StatusForbidden)
+		return false
+	}
+	return s.adminOnly(w, r)
+}
+
+// handleInstanceMailProvider: GET /api/instances/{id}/mail-provider → the
+// instance's Mail tab (404 without a mail: block).
+func (s *Server) handleInstanceMailProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.mailProviderGate(w, r) {
+		return
+	}
+	v, err := s.Hub.InstanceMailProvider(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	noStore(w)
+	writeJSON(w, v)
+}
+
+// mailProviderBody is the PUT's body.
+type mailProviderBody struct {
+	Wired        *bool  `json:"wired"`
+	Confirm      string `json:"confirm"`
+	Code         string `json:"code"`
+	CodeVerifier string `json:"code_verifier"`
+	Nonce        string `json:"nonce"`
+	Drain        *bool  `json:"drain"`
+}
+
+// mailWireAccepted is the PUT and switch answers: the op and the warning.
+type mailWireAccepted struct {
+	OpStarted
+	Warning string `json:"warning"`
+}
+
+// handleSetInstanceMailProvider: PUT /api/instances/{id}/mail-provider
+// {wired: true, confirm, code, code_verifier, nonce} wires (or
+// re-confirms) → 202 {op…, warning}.
+func (s *Server) handleSetInstanceMailProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.mailProviderGate(w, r) {
+		return
+	}
+	var b mailProviderBody
+	if !readMailBody(w, r, &b, `{"wired": true, "confirm": "<instance id>", "code": "…", "code_verifier": "…", "nonce": "…"} or {"wired": false, "drain": true}`) {
+		return
+	}
+	if b.Wired == nil {
+		http.Error(w, "wired is required", http.StatusBadRequest)
+		return
+	}
+	id := r.PathValue("id")
+	if !*b.Wired {
+		drain := b.Drain == nil || *b.Drain
+		op, err := s.Hub.StartUnwireMail(id, drain, requestActor(r))
+		if err != nil {
+			writeErr(w, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSONStatus(w, http.StatusAccepted, mailWireAccepted{acceptedBody(op), hub.MailWarning})
+		return
+	}
+	in := hub.WireRequest{Confirm: b.Confirm, Listener: listenerOf(r)}
+	if b.Code != "" || b.CodeVerifier != "" || b.Nonce != "" {
+		in.Proof = &freshauth.Proof{Code: b.Code, CodeVerifier: b.CodeVerifier, Nonce: b.Nonce}
+	}
+	op, err := s.Hub.StartWireMail(r.Context(), id, in, requestActor(r))
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSONStatus(w, http.StatusAccepted, mailWireAccepted{acceptedBody(op), hub.MailWarning})
+}

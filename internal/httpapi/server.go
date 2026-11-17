@@ -142,6 +142,7 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerVPN(mux)
 	// Settings → Mail and the admin mail routes (§19.9; Hub listener only).
 	s.registerMailAdmin(mux)
+	s.registerMailProvider(mux)
 	return mux
 }
 
