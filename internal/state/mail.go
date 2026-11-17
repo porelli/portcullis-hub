@@ -2,7 +2,10 @@ package state
 
 import (
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // MailSettings is Settings → Mail (contract §19.9): the Hub's own mail
@@ -280,6 +283,18 @@ func DefaultMailSettings() MailSettings {
 // Check refuses settings the contract's ranges don't allow (a hand-edited
 // state.yaml): the Hub never sends them.
 func (m MailSettings) Check() error {
+	// restore_held is an instance id or empty (it was a bool before:
+	// no migration, so an old or odd value refuses the start instead of
+	// silently losing the hold).
+	if h := m.RestoreHeld; h != "" {
+		switch strings.ToLower(h) {
+		case "true", "false", "yes", "no", "on", "off", "y", "n":
+			return fmt.Errorf("restore_held %q is no instance id (an older bool form): fix it by hand", h)
+		}
+		if !templates.ValidID(h) {
+			return fmt.Errorf("restore_held %q is no instance id: fix it by hand", h)
+		}
+	}
 	if m.Generation < 0 {
 		return fmt.Errorf("generation %d is negative", m.Generation)
 	}
