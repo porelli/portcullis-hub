@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -352,4 +354,45 @@ func TestScheduleSkipsOfflineServer(t *testing.T) {
 		scheduleDue(state.BackupSchedule{Mode: "off", Hour: 3}, now) {
 		t.Error("scheduleDue")
 	}
+}
+
+// TestMovePolicyFollowsOutcome (seen live: after a move to the primary,
+// group-gate still denied the host — the restore inside the move had
+// published the policy while the instance was disabled, and nothing
+// published it again): after a move and its move back, the instance's
+// host carries its own access group, never the deny group.
+func TestMovePolicyFollowsOutcome(t *testing.T) {
+	p := newPlacedFixture(t)
+	enabledOnPrimary(t, p)
+	// Its host is routed throughout (the relays, then the app itself), as
+	// the reconcile sees it live.
+	p.h.driftMu.Lock()
+	p.h.runtimeHosts = map[string][]string{"plainapp": slices.Collect(maps.Values(p.h.Template("plainapp").Hosts))}
+	p.h.driftMu.Unlock()
+	check := func(where string) {
+		t.Helper()
+		var doc struct {
+			Groups map[string]string `json:"groups"`
+		}
+		if err := json.Unmarshal([]byte(readFile(t, filepath.Join(p.data, "group-gate-policy.json"))), &doc); err != nil {
+			t.Fatal(err)
+		}
+		hosts := p.h.Template("plainapp").Hosts
+		if len(hosts) == 0 {
+			t.Fatal("plainapp has no hosts")
+		}
+		for _, h := range hosts {
+			if g := doc.Groups[h]; g == policy.DenyGroup {
+				t.Errorf("after the move to %s, %s is %q in the policy", where, h, g)
+			}
+		}
+	}
+	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "nas", admin); err != nil {
+		t.Fatal(err)
+	}
+	check("nas")
+	if _, err := p.h.MoveInstance(context.Background(), "plainapp", "primary", admin); err != nil {
+		t.Fatal(err)
+	}
+	check("the primary")
 }

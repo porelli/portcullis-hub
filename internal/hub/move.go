@@ -198,6 +198,10 @@ func (h *Hub) moveInstance(ctx context.Context, id, to string, actor directory.A
 		return h.busyErr(id, err)
 	}
 	defer unlock()
+	// The policy follows the outcome (the restore inside published it while
+	// the instance was disabled: its host denied): republished at the end,
+	// moved, failed back or stopped alike.
+	defer h.writePolicyLogged()
 	defer h.ownMove(id)()
 	h.mu.Lock()
 	v := h.findLocked(id)
@@ -480,6 +484,7 @@ func (h *Hub) undoMove(ctx context.Context, id, confirm string, actor directory.
 		return h.busyErr(id, err)
 	}
 	defer unlock()
+	defer h.writePolicyLogged() // the policy follows the outcome (as a move's)
 	defer h.ownMove(id)()
 	h.mu.RLock()
 	in := h.st.Instances[id]
