@@ -484,6 +484,29 @@ func (h *Hub) markMovePush(id, server string, pushed bool) (prev bool) {
 // its volumes recorded as the target's leftover and its bundle (env
 // included) owed for removal (N2): never silently kept.
 func (h *Hub) downMoveTarget(ctx context.Context, id, to string, t *templates.Template) (gone bool, err error) {
+	// A target revoked or removed meanwhile can't be reached again (its
+	// identity is gone): what the move may have put there is recorded
+	// (log, audit) and dropped, as a kept copy there is (N3; verify-round2
+	// M-B) — the move ends instead of retrying a server that never answers.
+	if to != "" && h.serverGone(to) {
+		if err := h.relaysDown(ctx, id); err != nil {
+			return false, err
+		}
+		h.mu.RLock()
+		var vols []string
+		for _, n := range h.volumeNamesFor(t, id) {
+			vols = append(vols, n)
+		}
+		h.mu.RUnlock()
+		slices.Sort(vols)
+		what := "its bundle"
+		if len(vols) > 0 {
+			what += " and volumes " + strings.Join(vols, ", ")
+		}
+		log.Printf("%s: the move's target %s is revoked or removed: what the move put there (%s) is dropped from the record and stays on that machine", id, serverLabel(to), what)
+		h.auditOp(directory.Actor{}, "instance.copy_dropped", id, "on "+serverLabel(to)+" (revoked or removed, a move's target): "+what, nil)
+		return true, nil
+	}
 	err = h.downOn(ctx, to, t)
 	if to != "" && workerNotFound(err) {
 		return true, nil

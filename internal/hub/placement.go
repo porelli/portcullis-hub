@@ -510,10 +510,25 @@ func (h *Hub) checkWorkerClean(ctx context.Context, server, id string) error {
 	case workerNotFound(err):
 		return nil
 	case err == nil:
-		return statusErr(409, "%s still holds an earlier copy of %s (its bundle): wait for its removal (retried each minute) or remove it on the worker, then try again", serverLabel(server), id)
+		if h.bundleOwed(server, id) {
+			return statusErr(409, "%s still holds an earlier copy of %s (its bundle): its removal is owed (retried each minute) — wait for it, then try again", serverLabel(server), id)
+		}
+		return statusErr(409, "%s still holds an earlier copy of %s (its bundle), which the Hub has no record of: remove it on the worker (portcullis-%s), then try again", serverLabel(server), id, id)
 	default:
 		return statusErr(502, "%s: can't check for an earlier copy of %s: %s", serverLabel(server), id, untrusted(err.Error(), 200))
 	}
+}
+
+// bundleOwed: a removal of id's bundle from server is owed (OwedBundles).
+func (h *Hub) bundleOwed(server, id string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, o := range h.st.OwedBundles {
+		if o.Server == server && o.Instance == id {
+			return true
+		}
+	}
+	return false
 }
 
 // stopInvalidPlacement stops a placed instance whose template turned

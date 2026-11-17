@@ -276,8 +276,17 @@ func TestPushRacingRevokeCarriesNoRotatedSecret(t *testing.T) {
 	p.h.beginRevokeLocked("nas", false)
 	p.h.mu.Unlock()
 	revoked.Store(true)
-	// A push in flight at the revocation read its env before it: let it end.
-	time.Sleep(50 * time.Millisecond)
+	// The pushes run one after another: once one started after the
+	// revocation is refused, every push before it has ended (one in
+	// flight at the revocation read its env before it) — no sleep.
+	for refusedAfter.Load() < 1 {
+		if time.Now().After(deadline) {
+			close(stop)
+			wg.Wait()
+			t.Fatal("no push after the revocation was refused")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	settled := landed()
 	// What the rotation writes into the instance's env (a new client
 	// secret) from here on.

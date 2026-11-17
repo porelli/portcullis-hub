@@ -241,3 +241,121 @@ func TestDeleteDropsCopyOnRevokedServer(t *testing.T) {
 		t.Errorf("still recorded: %+v", in.MovedFrom)
 	}
 }
+
+// TestRevokeAndRemoveRefusedWhileMoving (verify-round2 M-B): a revocation
+// or removal of a server a move targets or sources is refused (409),
+// naming the instance; a stuck move doesn't hold it.
+func TestRevokeAndRemoveRefusedWhileMoving(t *testing.T) {
+	for _, dir := range []string{"to", "from"} {
+		t.Run(dir, func(t *testing.T) {
+			p := newPlacedFixture(t)
+			enabledOnPrimary(t, p)
+			p.h.mu.Lock()
+			in := p.h.st.Instances["plainapp"]
+			in.State = state.InstanceMoving
+			in.Move = &state.Move{From: "", To: "nas", Phase: MoveRestore, StartedAt: time.Now()}
+			if dir == "from" {
+				in.Server = "nas"
+				in.Move = &state.Move{From: "nas", To: "", Phase: MoveRestore, StartedAt: time.Now()}
+			}
+			p.h.st.Instances["plainapp"] = in
+			p.h.noteServersLocked()
+			p.h.mu.Unlock()
+			want := "instance plainapp is being moved " + dir + " server"
+			if err := p.h.RevokeServer(context.Background(), admin, "nas"); errStatus(err) != 409 || !strings.Contains(err.Error(), want) {
+				t.Errorf("revoke: %v", err)
+			}
+			if dir == "to" {
+				if err := p.h.RemoveServer(context.Background(), admin, "nas"); errStatus(err) != 409 || !strings.Contains(err.Error(), want) {
+					t.Errorf("remove: %v", err)
+				}
+			}
+			if p.h.serverGone("nas") {
+				t.Fatal("revoked anyway")
+			}
+			// Stuck: the revocation goes through (the move then ends).
+			p.h.mu.Lock()
+			p.h.st.Instances["plainapp"].Move.Phase = MoveStuck
+			p.h.mu.Unlock()
+			if err := p.h.RevokeServer(context.Background(), admin, "nas"); err != nil {
+				t.Errorf("revoke with a stuck move: %v", err)
+			}
+		})
+	}
+}
+
+// TestMoveTargetGoneEndsMove (verify-round2 M-B): a move whose target is
+// revoked while it runs (the poll's or an enrolment's revocation, not
+// the admin's) or before its recovery ends: what it put there is
+// recorded (log, audit) and dropped, never stuck.
+func TestMoveTargetGoneEndsMove(t *testing.T) {
+	t.Run("rollback", func(t *testing.T) {
+		p := newPlacedFixture(t)
+		if err := p.create(t, "filesapp", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.h.Enable("filesapp"); err != nil {
+			t.Fatal(err)
+		}
+		vol := p.h.volumeNamesFor(p.h.Template("filesapp"), "filesapp")["data"]
+		p.engine.addVolume(vol, "portcullis-filesapp", "data", 0, fakeFile{Name: "marker", Mode: 0o644, Body: "hi"})
+		p.h.testHookMove = func(ph string) error {
+			if ph == MoveSwitch {
+				p.h.mu.Lock()
+				p.h.beginRevokeLocked("nas", false)
+				p.h.mu.Unlock()
+				return context.Canceled
+			}
+			return nil
+		}
+		defer func() { p.h.testHookMove = nil }()
+		logs := captureLog(t)
+		_, err := p.h.MoveInstance(context.Background(), "filesapp", "nas", admin)
+		if err == nil || strings.Contains(err.Error(), "runs nowhere") {
+			t.Fatalf("move: %v", err)
+		}
+		in := p.instance("filesapp")
+		if in.Move != nil || in.State == state.InstanceMoving || in.Server != "" {
+			t.Fatalf("stuck: %+v", in)
+		}
+		if !strings.Contains(logs.String(), "dropped") || !strings.Contains(logs.String(), vol) {
+			t.Errorf("the dropped copy isn't recorded: %s", logs.String())
+		}
+	})
+	t.Run("recovery", func(t *testing.T) {
+		p := newPlacedFixture(t)
+		enabledOnPrimary(t, p)
+		p.h.mu.Lock()
+		in := p.h.st.Instances["plainapp"]
+		in.State = state.InstanceMoving
+		in.Move = &state.Move{From: "", To: "nas", Phase: MoveSwitch, StartedAt: time.Now(), Pushed: true}
+		p.h.st.Instances["plainapp"] = in
+		p.h.noteServersLocked()
+		p.h.beginRevokeLocked("nas", false)
+		p.h.saveLocked()
+		p.h.mu.Unlock()
+		p.h.RecoverMoves()
+		in = p.instance("plainapp")
+		if in.Move != nil || in.State == state.InstanceMoving || in.Server != "" {
+			t.Fatalf("stuck: %+v", in)
+		}
+	})
+}
+
+// TestWorkerCleanMessage (verify-round2 L-2): the create refusal says
+// "retried" only when the removal is really owed.
+func TestWorkerCleanMessage(t *testing.T) {
+	p := newPlacedFixture(t)
+	f, m := conformBundle("plainapp", "plainapp", true)
+	if err := p.w.Backend.PushBundle(context.Background(), "plainapp", f, m); err != nil {
+		t.Fatal(err)
+	}
+	err := p.h.checkWorkerClean(context.Background(), "nas", "plainapp")
+	if errStatus(err) != 409 || strings.Contains(err.Error(), "retried") || !strings.Contains(err.Error(), "no record") {
+		t.Errorf("unowed: %v", err)
+	}
+	p.h.oweBundle("nas", "plainapp")
+	if err := p.h.checkWorkerClean(context.Background(), "nas", "plainapp"); errStatus(err) != 409 || !strings.Contains(err.Error(), "retried") {
+		t.Errorf("owed: %v", err)
+	}
+}

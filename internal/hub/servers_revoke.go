@@ -54,6 +54,10 @@ func (h *Hub) RevokeServer(ctx context.Context, actor directory.Actor, id string
 		h.mu.Unlock()
 		return statusErr(409, "server %s is already revoked", id)
 	}
+	if err := h.movingOnLocked(id, s.Name); err != nil {
+		h.mu.Unlock()
+		return err
+	}
 	h.beginRevokeLocked(id, false)
 	h.mu.Unlock()
 	h.stopEnrol(id)
@@ -78,6 +82,10 @@ func (h *Hub) RemoveServer(ctx context.Context, actor directory.Actor, id string
 	s, ok := h.st.Servers[id]
 	placed := h.placedLocked(id)
 	if ok && len(placed) == 0 {
+		if err := h.movingOnLocked(id, s.Name); err != nil {
+			h.mu.Unlock()
+			return err
+		}
 		if h.removing == nil {
 			h.removing = map[string]bool{}
 		}
@@ -108,6 +116,10 @@ func (h *Hub) RemoveServer(ctx context.Context, actor directory.Actor, id string
 	if placed := h.placedLocked(id); len(placed) > 0 {
 		h.mu.Unlock()
 		return statusErr(409, "server %s still has %d instance(s): move, restore or forget them first", s.Name, len(placed))
+	}
+	if err := h.movingOnLocked(id, s.Name); err != nil {
+		h.mu.Unlock()
+		return err
 	}
 	h.beginRevokeLocked(id, true)
 	h.mu.Unlock()
@@ -604,4 +616,28 @@ func (h *Hub) placementInvalidLocked() map[string]string {
 		}
 	}
 	return out
+}
+
+// movingOnLocked refuses (409) a revocation or removal of server while
+// a move targets or sources it (verify-round2 M-B), naming the instance:
+// the move would lose the server it is writing to or rolling back onto.
+// A stuck move doesn't hold it (it may be stuck on this very server,
+// offline): revoked, its target's copy is recorded and dropped and the
+// move ends (downMoveTarget). Caller holds mu.
+func (h *Hub) movingOnLocked(server, name string) error {
+	if name == "" {
+		name = server
+	}
+	for _, iid := range slices.Sorted(maps.Keys(h.st.Instances)) {
+		mv := h.st.Instances[iid].Move
+		if mv == nil || mv.Phase == MoveStuck || (mv.From != server && mv.To != server) {
+			continue
+		}
+		dir := "to"
+		if mv.From == server {
+			dir = "from"
+		}
+		return statusErr(409, "instance %s is being moved %s server %s: wait for the move to end (or stop it), then try again", iid, dir, name)
+	}
+	return nil
 }
