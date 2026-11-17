@@ -72,6 +72,10 @@ type MailUnwiring struct {
 	Instance string    `json:"instance" yaml:"instance"`
 	Since    time.Time `json:"since" yaml:"since"`
 	By       string    `json:"by" yaml:"by"`
+	// Closing: the close started (saved before it voids anything) and
+	// its verified stop is still owed: resumed at start and by the retry
+	// loop until the instance is down (M4).
+	Closing bool `json:"closing,omitempty" yaml:"closing,omitempty"`
 }
 
 // MailSwitch is a switch in progress.

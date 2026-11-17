@@ -525,6 +525,7 @@ func (h *Hub) mailVoidRetryOnce(ctx context.Context) {
 	if held != nil && held.DownOwed {
 		h.mailRetryHeldStop()
 	}
+	h.mailResumeClosing()
 	if p == nil || owed == nil || held != nil {
 		return
 	}

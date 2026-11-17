@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,14 @@ func TestUnwireForceRemovesNow(t *testing.T) {
 // unwire finishes on its own.
 func TestUnwireDrainThenRemoveSets(t *testing.T) {
 	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.Domains[teamB] = state.MailDomain{Enabled: true}
+	w.h.mu.Unlock()
+	w.sync(t)
+	w.setDNS(teamB, goodSet(teamB, "reject"))
+	if err := w.writeSet(t, teamB); err != nil {
+		t.Fatal(err)
+	}
 	if err := w.unwire(t, true, rootActor()); err != nil {
 		t.Fatal(err)
 	}
@@ -121,9 +130,11 @@ func TestUnwireDrainThenRemoveSets(t *testing.T) {
 		s.StatusV.MTASTS = []mailprovider.StatusMTASTS{{Domain: "example.org", Mode: "off"}}
 	})
 	w.h.mu.Lock()
-	e := w.h.st.Mail.Domains["example.org"]
-	e.Draining = false
-	w.h.st.Mail.Domains["example.org"] = e
+	for _, d := range []string{"example.org", teamB} {
+		e := w.h.st.Mail.Domains[d]
+		e.Draining = false
+		w.h.st.Mail.Domains[d] = e
+	}
 	w.h.mu.Unlock()
 	w.h.mailFinishUnwireIfDrained()
 	w.h.Wait()
@@ -131,6 +142,72 @@ func TestUnwireDrainThenRemoveSets(t *testing.T) {
 	defer w.h.mu.RUnlock()
 	if w.h.st.Mail.Provider != nil || w.h.st.Mail.Unwiring != nil {
 		t.Fatalf("not finished: %+v %+v", w.h.st.Mail.Provider, w.h.st.Mail.Unwiring)
+	}
+	// M5: every added domain's set was removed.
+	w.dom.mu.Lock()
+	defer w.dom.mu.Unlock()
+	if _, ok := w.dom.mailSets[teamB]; ok || !slices.Contains(w.dom.mailCalls, "delete "+teamB) {
+		t.Fatalf("the added domain's set stayed: calls %v", w.dom.mailCalls)
+	}
+}
+
+// TestUnwireCrashMidCloseResumes (M4): a crash after the close started
+// (rows voided, still wired) is finished at the next start.
+func TestUnwireCrashMidCloseResumes(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.Unwiring = &state.MailUnwiring{Instance: mailProviderID, By: "root", Closing: true}
+	w.h.mu.Unlock()
+	w.h.resumeMail()
+	w.h.Wait()
+	w.h.mu.RLock()
+	defer w.h.mu.RUnlock()
+	if w.h.st.Mail.Provider != nil || w.h.st.Mail.Unwiring != nil || w.h.st.IsEnabled(mailProviderID) {
+		t.Fatalf("not finished: %+v %+v", w.h.st.Mail.Provider, w.h.st.Mail.Unwiring)
+	}
+}
+
+// TestUnwireFailedStopStaysOwed (M4, fault injection): a stop that
+// fails keeps the close owed (saved) until a retry verifies it.
+func TestUnwireFailedStopStaysOwed(t *testing.T) {
+	w := wiredFix(t)
+	w.runner.downErr, w.runner.byNameErr = errors.New("engine down"), errors.New("engine down")
+	if err := w.unwire(t, false, rootActor()); err == nil {
+		if lo := w.h.LastOp(mailProviderID); lo == nil || lo.OK {
+			t.Fatal("a failed stop answered ok")
+		}
+	}
+	st, _ := state.Load(w.h.statePath())
+	if st.Mail.Unwiring == nil || !st.Mail.Unwiring.Closing {
+		t.Fatalf("the owed close isn't saved: %+v", st.Mail.Unwiring)
+	}
+	w.runner.downErr, w.runner.byNameErr = nil, nil
+	w.h.mailVoidRetryOnce(context.Background())
+	w.h.mu.RLock()
+	defer w.h.mu.RUnlock()
+	if w.h.st.Mail.Unwiring != nil {
+		t.Fatalf("the retry didn't finish it: %+v", w.h.st.Mail.Unwiring)
+	}
+}
+
+// TestDrainedUnwireWaitsForSetDelete (M5, fault injection): a DELETE
+// that fails keeps the drained unwire for the next pass.
+func TestDrainedUnwireWaitsForSetDelete(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.Domains[teamB] = state.MailDomain{Enabled: false}
+	w.h.st.Mail.Unwiring = &state.MailUnwiring{Instance: mailProviderID, By: "root"}
+	w.h.mu.Unlock()
+	w.dom.mu.Lock()
+	w.dom.mailDeleteErr = errors.New("domains service down")
+	w.dom.mu.Unlock()
+	w.h.mailFinishUnwireIfDrained()
+	w.h.Wait()
+	w.h.mu.RLock()
+	p := w.h.st.Mail.Provider
+	w.h.mu.RUnlock()
+	if p == nil {
+		t.Fatal("finished with a set left")
 	}
 }
 

@@ -49,6 +49,8 @@ type fakeDomainsAPI struct {
 	// ("put <name>", "delete <name>").
 	mailSets  map[string][]domains.MailRecord
 	mailCalls []string
+	// mailDeleteErr: DeleteMailSet answers it.
+	mailDeleteErr error
 	// mailBodies: every SetMailSet body received.
 	mailBodies []domains.MailSet
 	// mailSetErr: SetMailSet fails with it (the call still counted).
@@ -149,6 +151,9 @@ func (f *fakeDomainsAPI) SetMailSet(_ context.Context, name string, set domains.
 func (f *fakeDomainsAPI) DeleteMailSet(_ context.Context, name string) (domains.Domain, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.mailDeleteErr != nil {
+		return domains.Domain{}, f.mailDeleteErr
+	}
 	d, ok := f.list[name]
 	if !ok {
 		return domains.Domain{}, &domains.APIError{Status: 404, Message: name + " is not enrolled"}

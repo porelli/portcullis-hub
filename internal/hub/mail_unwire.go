@@ -137,7 +137,9 @@ func (h *Hub) runUnwireMail(ctx context.Context, id string, drain bool, actor di
 		}
 	} else {
 		prog.planned(StepMailSets).Start(StepMailSets)
-		h.mailRemoveAllSets(ctx)
+		if err := h.mailRemoveAllSets(ctx); err != nil {
+			prog.planned(StepMailSets).Detail(StepMailSets, err.Error()+": remove it by hand in its DNS")
+		}
 		prog.planned(StepMailSets).Done(StepMailSets)
 	}
 	prog.planned(StepMailClose).Start(StepMailClose)
@@ -188,21 +190,27 @@ func (h *Hub) mailAllDrained() bool {
 
 // mailRemoveAllSets deletes every added domain's mail set now (drain
 // false: senders may bounce); the main domain's goes with the CLI timer.
-func (h *Hub) mailRemoveAllSets(ctx context.Context) {
+func (h *Hub) mailRemoveAllSets(ctx context.Context) error {
 	h.mu.RLock()
 	dapi := h.domainsAPI
 	h.mu.RUnlock()
 	if dapi == nil {
-		return
+		return nil
 	}
+	var first error
 	for _, d := range h.mailDNSDomains() {
 		dctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
 		if _, err := dapi.DeleteMailSet(dctx, d.name); err != nil && domainsStatus(err) != http.StatusNotFound {
 			log.Printf("mail: unwire: removing %s's mail set: %v", d.name, err)
+			if first == nil {
+				first = fmt.Errorf("removing %s's mail set: %w", d.name, err)
+			}
+		} else {
+			h.mailForgetDNSHash(d.name)
 		}
 		cancel()
-		h.mailForgetDNSHash(d.name)
 	}
+	return first
 }
 
 // closeMailProvider is the unwire's close step (contract §19.9): every
@@ -213,6 +221,26 @@ func (h *Hub) mailRemoveAllSets(ctx context.Context) {
 // closed. Caller holds the app lock.
 func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.Actor) error {
 	h.mu.Lock()
+	// An unwire's close is recorded first (M4): a crash or a failed stop
+	// from here on is resumed until the instance is verified down. A
+	// switch's own record (Switch) resumes its close.
+	if sw := h.st.Mail.Switch; sw == nil || sw.From != id {
+		u := h.st.Mail.Unwiring
+		if u == nil || u.Instance != id {
+			u = &state.MailUnwiring{Instance: id, Since: h.mailNow().UTC(), By: actor.User}
+		} else {
+			c := *u
+			u = &c
+		}
+		u.Closing = true
+		prevU := h.st.Mail.Unwiring
+		h.st.Mail.Unwiring = u
+		if err := h.saveStateLocked(); err != nil {
+			h.st.Mail.Unwiring = prevU
+			h.mu.Unlock()
+			return err
+		}
+	}
 	n := h.voidProviderRowsLocked(state.MailCredentialReasonProviderChanged, actor)
 	if n > 0 {
 		h.saveLocked()
@@ -237,7 +265,7 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 	}
 	h.mu.Lock()
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
-		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held, h.st.Mail.Unwiring = nil, nil, nil, nil
+		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held = nil, nil, nil
 	}
 	// A switch's close is recorded in the same save (its resume relies
 	// on it).
@@ -278,7 +306,47 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 			return err
 		}
 	}
+	// Verified down: the unwire is done.
+	h.mu.Lock()
+	if u := h.st.Mail.Unwiring; u != nil && u.Instance == id {
+		h.st.Mail.Unwiring = nil
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 	return nil
+}
+
+// mailResumeClosing finishes a close that crashed or whose stop failed
+// (M4): at start and from the retry loop.
+func (h *Hub) mailResumeClosing() {
+	h.mu.RLock()
+	u := h.st.Mail.Unwiring
+	h.mu.RUnlock()
+	if u == nil || !u.Closing {
+		return
+	}
+	unlockSlot, err := h.lockMailSlot()
+	if err != nil {
+		return
+	}
+	defer unlockSlot()
+	unlock, err := h.lockApp(u.Instance)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	h.mu.RLock()
+	still := h.st.Mail.Unwiring != nil && h.st.Mail.Unwiring.Closing && h.st.Mail.Unwiring.Instance == u.Instance
+	h.mu.RUnlock()
+	if !still {
+		return
+	}
+	actor := directory.Human(u.By)
+	err = h.closeMailProvider(context.Background(), u.Instance, actor)
+	if err != nil {
+		log.Printf("mail: finishing the unwire of %s (retrying): %v", u.Instance, err)
+	}
+	h.auditOp(actor, "mail.provider_unwired", u.Instance, "closing resumed", err)
 }
 
 // mailFinishUnwireIfDrained completes a draining unwire once every
@@ -308,6 +376,12 @@ func (h *Hub) mailFinishUnwireIfDrained() {
 			return
 		}
 		actor := directory.Human(u.By)
+		// Every added domain's set goes first (M5, spec §5.3); a DELETE
+		// that fails keeps the unwire for the next pass.
+		if err := h.mailRemoveAllSets(context.Background()); err != nil {
+			log.Printf("mail: the drained unwire of %s waits: %v", u.Instance, err)
+			return
+		}
 		err = h.closeMailProvider(context.Background(), u.Instance, actor)
 		h.auditOp(actor, "mail.provider_unwired", u.Instance, "drain=true (finished)", err)
 	})

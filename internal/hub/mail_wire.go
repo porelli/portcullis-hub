@@ -423,6 +423,7 @@ func (h *Hub) resumeMail() {
 	if held != nil && held.DownOwed {
 		h.goBackground(h.mailRetryHeldStop)
 	}
+	h.goBackground(h.mailResumeClosing)
 	if sw != nil {
 		h.goBackground(func() { h.resumeSwitchMail(sw) })
 		return
