@@ -10,6 +10,7 @@ import (
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
+	"github.com/portcullis/hub/internal/state"
 )
 
 func findKind(r *doctor.Report, kind string) *doctor.Finding {
@@ -83,8 +84,8 @@ func TestDmarcPromoteFixConfirms(t *testing.T) {
 	}
 }
 
-// TestDoctorMailUnavailable: mail on, mailctl down: no mail findings and
-// mail_unavailable; mail off: neither.
+// TestDoctorMailUnavailable: mail on, the provider down: no provider
+// findings and mail_unavailable; mail off: neither.
 func TestDoctorMailUnavailable(t *testing.T) {
 	f := newMailFixture(t)
 	f.mc.Close()
@@ -96,13 +97,67 @@ func TestDoctorMailUnavailable(t *testing.T) {
 		t.Fatal("no mail_unavailable")
 	}
 	for _, fd := range r.Findings {
-		if strings.HasPrefix(fd.Kind, "mail_") {
-			t.Fatalf("a mail finding while mailctl is down: %+v", fd)
+		if strings.HasPrefix(fd.Kind, "mail_") && fd.Kind != doctor.KindMailTimerMissing {
+			t.Fatalf("a mail finding before 10 min: %+v", fd)
 		}
 	}
 	setCoreMail(t, f.fixture, false)
 	if r, _ := f.h.Doctor(context.Background()); r.MailUnavailable {
 		t.Fatal("mail_unavailable with mail off")
+	}
+}
+
+// TestDoctorProviderUnreachable: unanswered since 10 min is the Problem;
+// answering again clears it.
+func TestDoctorProviderUnreachable(t *testing.T) {
+	w := wiredFix(t)
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.Down = true })
+	r, _ := w.h.Doctor(context.Background())
+	if findKind(r, doctor.KindMailProviderUnreach) != nil {
+		t.Fatal("unreachable at once")
+	}
+	w.advance(11 * time.Minute)
+	r, _ = w.h.Doctor(context.Background())
+	if fd := findKind(r, doctor.KindMailProviderUnreach); fd == nil || fd.Severity != doctor.Problem {
+		t.Fatalf("%+v", r.Findings)
+	}
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.Down = false })
+	r, _ = w.h.Doctor(context.Background())
+	if findKind(r, doctor.KindMailProviderUnreach) != nil {
+		t.Fatal("still unreachable")
+	}
+}
+
+// TestDoctorHubJudgedKinds: nothing wired, a failing owed void, a hold,
+// a refused set: each its kind, from the Hub's own state.
+func TestDoctorHubJudgedKinds(t *testing.T) {
+	f := newWireFix(t)
+	r, err := f.h.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findKind(r, doctor.KindMailProviderMissing) == nil {
+		t.Fatalf("missing: %+v", r.Findings)
+	}
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.Held = &state.MailHold{Reason: MailHoldText}
+	w.h.mu.Unlock()
+	w.h.mailDNSProb.mu.Lock()
+	w.h.mailDNSProb.sets = map[string]string{"team-b.example.net": "mail set: team-b.example.net A: A records are not allowed"}
+	w.h.mailDNSProb.mu.Unlock()
+	r, _ = w.h.Doctor(context.Background())
+	if findKind(r, doctor.KindMailProviderRefused) == nil || findKind(r, doctor.KindMailRecordsWrong) == nil {
+		t.Fatalf("refused/records: %+v", r.Findings)
+	}
+	w.h.mu.Lock()
+	w.h.st.Mail.Held = nil
+	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidRestore}
+	w.h.mu.Unlock()
+	w.h.setMailVoidErr("the provider's void failed: 500")
+	r, _ = w.h.Doctor(context.Background())
+	if fd := findKind(r, doctor.KindMailVoidPending); fd == nil || !strings.Contains(fd.Why, "void failed") {
+		t.Fatalf("void: %+v", r.Findings)
 	}
 }
 

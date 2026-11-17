@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"sort"
@@ -35,24 +36,57 @@ func init() {
 // doctorMailIn gathers the mail kinds' inputs (never under mu). plans are
 // the doctor's DNS plans already read (the added mail domains' are kept).
 func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.MailIn {
-	h.mu.RLock()
-	api := h.mailAPI
-	h.mu.RUnlock()
 	if !h.mailOn() {
 		return nil
 	}
 	core := h.mailCore()
 	in := &doctor.MailIn{Main: strings.ToLower(h.cfg.Domain), LANOnly: core.SubmissionLAN, Podman: h.cfg.Runtime == runtime.KindPodman,
-		// The timer's visits are recorded by POST /host/mail/tls (Task 13).
-		ClientIPRewritten: core.ClientIPRewritten}
+		ClientIPRewritten: core.ClientIPRewritten, TimerKnown: true}
 	if _, why := h.MailRestartFailed(); why != "" {
 		in.RestartFailed = why
 	}
 	in.SyncBlocked = h.MailSyncBlocked()
+	if at, who := h.MailLANOnlyBreach(); !at.IsZero() {
+		in.LANBreachUser = who
+	}
+	for _, p := range h.MailDNSProblems() {
+		in.SetProblems = append(in.SetProblems, doctor.MailSetProblem{Domain: p.Domain, Text: p.Reason})
+	}
+	now := h.mailNow()
+	// The doctor judges on the wall clock; the mail times are on
+	// mailNow's (the same outside tests): shifted onto the doctor's.
+	shift := time.Now().Sub(now)
+	onWall := func(t *time.Time) *time.Time {
+		if t == nil {
+			return nil
+		}
+		w := t.Add(shift)
+		return &w
+	}
+	defer func() {
+		in.UnreachableSince = onWall(in.UnreachableSince)
+	}()
 	h.mu.RLock()
-	if p := h.st.Mail.PendingRemoval; p != nil {
-		pi := &doctor.MailPendingIn{Since: p.Since, UUIDs: pendingUUIDs(p.Accounts), Confirmed: p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p)}
-		for _, a := range p.Accounts {
+	p := h.st.Mail.Provider
+	if p != nil {
+		in.Wired, in.Instance = true, p.Instance
+	}
+	in.VoidOwed = h.st.Mail.VoidOwed != nil
+	if hd := h.st.Mail.Held; hd != nil {
+		in.Refused = hd.Reason
+	}
+	in.TimerSeenAt = onWall(h.st.Mail.TLS.SeenAt)
+	in.CertNotAfter = h.st.Mail.TLS.NotAfter
+	// A switch's retiring DKIM past its 7 days still waits for the new
+	// provider's set of that domain.
+	for d, r := range h.st.Mail.RetiringDKIM {
+		if !now.Before(r.Until.Add(24 * time.Hour)) {
+			in.SetProblems = append(in.SetProblems, doctor.MailSetProblem{Domain: d, Text: "the retiring DKIM keys of the former mail provider still wait for the new provider's set"})
+		}
+	}
+	if pr := h.st.Mail.PendingRemoval; pr != nil {
+		pi := &doctor.MailPendingIn{Since: pr.Since, UUIDs: pendingUUIDs(pr.Accounts), Confirmed: pr.ConfirmedHash != "" && pr.ConfirmedHash == pendingHash(pr)}
+		for _, a := range pr.Accounts {
 			pi.Users = append(pi.Users, a.Username)
 			if !a.Revoked {
 				pi.Failed = append(pi.Failed, a.Username)
@@ -63,26 +97,63 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 		in.Pending = pi
 	}
 	h.mu.RUnlock()
-	if api == nil || api.Available() != nil {
-		// Read again at every doctor run: fixed in place, it clears.
-		in.HubSecretInvalid = true
+	sort.Slice(in.SetProblems, func(i, j int) bool { return in.SetProblems[i].Domain < in.SetProblems[j].Domain })
+	if in.VoidOwed {
+		in.VoidError, _ = h.MailVoidError()
+	}
+	in.StopError = h.MailHeldStopError()
+	if !in.Wired {
+		h.mailReach(true, "")
+		return in
+	}
+	if in.VoidOwed {
+		// Void mode: the provider's API is the void's (no checks); its
+		// own kind reports a failing void.
+		h.mailReach(true, "")
+		return in
+	}
+	api := h.mailClient()
+	if api == nil {
+		in.Unavailable = true
+		why := "its API secret is missing or too short"
+		if in.StopError != "" || in.Refused != "" {
+			why = "it is held and stopped"
+		}
+		in.UnreachableSince, in.UnreachableWhy = h.mailReach(false, why)
 		return in
 	}
 	ctx, cancel := context.WithTimeout(ctx, mailInputsTimeout)
 	defer cancel()
+	if info, err := api.Provider(ctx); errors.Is(err, mailprovider.ErrAPIVersion) {
+		in.Refused = "the mail provider speaks another provider API version (only 1)"
+	} else if err == nil && info.APIVersion != mailprovider.APIVersion {
+		in.Refused = "the mail provider speaks another provider API version (only 1)"
+	}
+	st, err := api.State(ctx)
+	if err != nil || !st.Bootstrap {
+		why := "bootstrap: false"
+		if err != nil {
+			why = err.Error()
+		}
+		log.Printf("doctor: mail provider checks skipped: %s", mailprovider.Shape(why, 300))
+		in.Unavailable = true
+		in.UnreachableSince, in.UnreachableWhy = h.mailReach(false, why)
+		return in
+	}
 	ch, err := api.Checks(ctx, false)
+	if err == nil {
+		var sts mailprovider.Status
+		if sts, err = api.Status(ctx); err == nil {
+			in.Checks, in.Status = ch.Checks, &sts
+		}
+	}
 	if err != nil {
-		log.Printf("doctor: mail checks skipped: %v", err)
+		log.Printf("doctor: mail provider checks skipped: %s", mailprovider.Shape(err.Error(), 300))
 		in.Unavailable = true
+		in.UnreachableSince, in.UnreachableWhy = h.mailReach(false, err.Error())
 		return in
 	}
-	st, err := api.Status(ctx)
-	if err != nil {
-		log.Printf("doctor: mail checks skipped: %v", err)
-		in.Unavailable = true
-		return in
-	}
-	in.Checks, in.Status = ch.Checks, &st
+	h.mailReach(true, "")
 	states := h.MailDomainStates()
 	for _, p := range plans {
 		if s := states[strings.ToLower(p.Name)]; s == mailprovider.MailOn || s == mailprovider.MailDraining {
@@ -90,6 +161,23 @@ func (h *Hub) doctorMailIn(ctx context.Context, plans []domains.Plan) *doctor.Ma
 		}
 	}
 	return in
+}
+
+// mailReach records whether the wired provider answered: since is when
+// it first didn't (nil: it answers), with the last why.
+func (h *Hub) mailReach(ok bool, why string) (*time.Time, string) {
+	h.mailUnreach.mu.Lock()
+	defer h.mailUnreach.mu.Unlock()
+	if ok {
+		h.mailUnreach.since = time.Time{}
+		return nil, ""
+	}
+	if h.mailUnreach.since.IsZero() {
+		h.mailUnreach.since = h.mailNow()
+	}
+	h.mailUnreach.why = why
+	t := h.mailUnreach.since
+	return &t, why
 }
 
 // mailActionFixer is the mail_dmarc_promote / mail_mtasts_enforce fix.

@@ -271,7 +271,8 @@ func TestPendingRevokeFailureShown(t *testing.T) {
 }
 
 // TestMailHubSecretInvalid: mail on with a missing or short hub secret:
-// doctor mail_hub_secret_invalid, the Settings banner, every mail write
+// the Settings banner (the doctor's mail_provider_unreachable after 10
+// min: TestDoctorProviderUnreachable), every mail write
 // 503 with the text; once the file is valid (in place, no restart) all
 // of it clears.
 func TestMailHubSecretInvalid(t *testing.T) {
@@ -280,12 +281,6 @@ func TestMailHubSecretInvalid(t *testing.T) {
 	os.WriteFile(secret, []byte("short\n"), 0600)
 	f.h.SetMailAPI(mailprovider.New(f.mc.URL(), secret))
 	ctx := context.Background()
-	r, _ := f.h.Doctor(ctx)
-	fd := findKind(r, doctor.KindMailHubSecretInvalid)
-	if fd == nil || fd.Severity != doctor.Problem || fd.FixKind != "" || fd.Steps[0] != "./portcullis up recreates the Hub with the mail secret" ||
-		fd.Title != "Mail can't be managed: the Hub's mail secret is missing or too short" {
-		t.Fatalf("finding %+v", fd)
-	}
 	if v := f.h.MailSettingsView(); v.Problem != MailSecretProblem {
 		t.Fatalf("view %q", v.Problem)
 	}
@@ -306,10 +301,6 @@ func TestMailHubSecretInvalid(t *testing.T) {
 	}
 	// Fixed in place: no restart needed.
 	os.WriteFile(secret, []byte(mailprovidertest.Secret+"\n"), 0600)
-	r, _ = f.h.Doctor(ctx)
-	if findKind(r, doctor.KindMailHubSecretInvalid) != nil {
-		t.Fatal("still raised")
-	}
 	if v := f.h.MailSettingsView(); v.Problem != "" {
 		t.Fatalf("view %q", v.Problem)
 	}

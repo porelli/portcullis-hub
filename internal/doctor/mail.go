@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"html"
 	"log"
 	"sort"
 	"strconv"
@@ -11,11 +12,14 @@ import (
 	"github.com/portcullis/hub/internal/mailprovider"
 )
 
-// Mail kinds (contract §14.5 "Mail"): sixteen kinds judged on mailctl's
-// checks and status and the added mail domains' plans (Inputs.Mail; nil =
-// PORTCULLIS_MAIL off: none fire). Unavailable (mailctl couldn't be read
-// while mail is on): no mail findings and Report.MailUnavailable. Every
-// finding about a domain carries Domains [<e>].
+// Mail kinds (contract §14.5 "Mail", mail provider): twenty-four kinds
+// judged on the wired provider's checks and status, the Hub's own state
+// (the slot, the void, the hold, the timer's visits, mail.tls) and the
+// added mail domains' plans (Inputs.Mail; nil = PORTCULLIS_MAIL off: none
+// fire). Unavailable (a wired provider couldn't be read): the
+// provider-check kinds don't fire and Report.MailUnavailable is set; the
+// Hub-judged kinds still do. Every finding about a domain carries Domains
+// [<e>].
 const (
 	KindMailPort25Blocked     = "mail_port25_blocked"
 	KindMailPTRMissing        = "mail_ptr_missing"
@@ -36,16 +40,19 @@ const (
 	KindMailLANOnlyUnenforced = "mail_lan_only_unenforced"
 	KindMailMassRemovalPend   = "mail_mass_removal_pending"
 	KindMailSyncBlocked       = "mail_sync_blocked"
-	KindMailHubSecretInvalid  = "mail_hub_secret_invalid"
-	KindMailSpamRulesMissing  = "mail_spam_rules_missing"
-	KindMailExternalLookupsOn = "mail_external_lookups_on"
+	KindMailProviderUnreach   = "mail_provider_unreachable"
+	KindMailProviderCheck     = "mail_provider_check"
+	KindMailProviderMissing   = "mail_provider_missing"
+	KindMailVoidPending       = "mail_void_pending"
+	KindMailProviderRefused   = "mail_provider_refused"
 )
 
-// MailKinds are the twenty-two mail kinds.
+// MailKinds are the twenty-four mail kinds, in contract order.
 var MailKinds = []string{KindMailPort25Blocked, KindMailPTRMissing, KindMailPTRMismatch, KindMailBlocklisted, KindMailRecordsWrong,
 	KindMailDKIMStuck, KindMailDKIMManual, KindMailCertExpiring, KindMailDMARCFailures, KindMailDMARCPromote, KindMailMTASTSEnforce,
-	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced, KindMailMassRemovalPend, KindMailSyncBlocked, KindMailHubSecretInvalid,
-	KindMailSpamRulesMissing, KindMailExternalLookupsOn}
+	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced,
+	KindMailMassRemovalPend, KindMailSyncBlocked, KindMailProviderUnreach, KindMailProviderCheck, KindMailProviderMissing,
+	KindMailVoidPending, KindMailProviderRefused}
 
 // Mail fix kinds (§14.6); mail_records_wrong on an added domain uses
 // dns_apply with sets=mail.
@@ -57,15 +64,22 @@ const (
 
 // Mail steps the explain-only findings end with.
 const (
-	MailMainRecordsStep    = "Run `./portcullis dns setup --only mail` on the server"
-	MailCertStep           = "Run `./portcullis mail cert` on the server"
-	MailTimerStep          = "Run `./portcullis mail schedule --systemd` on the server"
-	MailSessionsLine       = "mail sessions may still be open"
-	MailLANOnlyWhy         = "LAN-only needs the real client address; rootless Podman rewrites it"
-	MailLANOnlyStep        = "Turn LAN-only off: run `./portcullis mail enable --lan-only false` on the server"
-	MailExternalLookupsWhy = "The spam filter's external lookups may be on and couldn't be turned off, so the mail server may contact outside feeds. mailctl retries every minute; see mailctl's log ('external lookups')."
-	MailSpamRulesWhy       = "The mail server's spam filter has no rules yet, so it scores nothing (GTUBE and junk detection are off). mailctl asks for the import every minute; if this stays, see mailctl's log ('spam rules') and run ./portcullis up."
+	MailMainRecordsStep = "Run `./portcullis dns setup --only mail` on the server"
+	MailCertStep        = "Run `./portcullis mail cert` on the server"
+	MailTimerStep       = "Run `./portcullis mail schedule --systemd` on the server"
+	MailSessionsLine    = "mail sessions may still be open"
+	MailLANOnlyWhy      = "LAN-only needs the real client address; rootless Podman rewrites it"
+	MailLANOnlyStep     = "Turn LAN-only off: run `./portcullis mail enable --lan-only false` on the server"
+	MailUnreachTitle    = "Mail can't be managed: the mail provider doesn't answer"
+	MailUnreachStep     = "Check the instance on its Mail tab and its logs"
+	MailMissingStep     = "Wire a mail server (Settings → Mail) or run ./portcullis mail disable"
+	MailVoidStep        = "Retry on the Mail tab, or look at the provider's logs"
+	MailRefusedTitle    = "the mail provider's template changed: review and confirm on its Mail tab"
 )
+
+// mailUnreachAfter: the provider is reported unreachable once it hasn't
+// answered (or kept bootstrap: false) this long.
+const mailUnreachAfter = 10 * time.Minute
 
 // Mail timing (§14.5).
 const (
@@ -76,10 +90,34 @@ const (
 
 // MailIn is what the mail kinds judge.
 type MailIn struct {
-	// Unavailable: mailctl couldn't be read (no mail findings).
-	Unavailable bool
-	Checks      []mailprovider.Check
-	Status      *mailprovider.Status
+	// Wired: a provider is wired (Instance); nothing wired with the slot
+	// open is mail_provider_missing.
+	Wired    bool
+	Instance string
+	// Unavailable: the wired provider couldn't be read now (the
+	// provider-check kinds don't fire); UnreachableSince is when it
+	// started not answering (or answering bootstrap: false), with why.
+	Unavailable      bool
+	UnreachableSince *time.Time
+	UnreachableWhy   string
+	// VoidError: a void is owed and its last attempt failed ("" = none).
+	VoidOwed  bool
+	VoidError string
+	// Refused: why the wired provider is held or refused (the hold's
+	// reason, an unknown api_version); StopError the held stop's state.
+	Refused   string
+	StopError string
+	// CertNotAfter: the mail certificate's not_after the CLI reported
+	// (POST /host/mail/tls), nil: not reported.
+	CertNotAfter *time.Time
+	// SetProblems: the Hub's own mail record refusals (a provider set
+	// outside the rules, an MTA-STS policy, a retiring DKIM waiting).
+	SetProblems []MailSetProblem
+	// LANBreachUser: a credential beyond the Local networks the Hub
+	// revoked under LAN-only ("" = none).
+	LANBreachUser string
+	Checks        []mailprovider.Check
+	Status        *mailprovider.Status
 	// Plans are the added mail domains' DNS plans (their mail items).
 	Plans []domains.Plan
 	// Main is the main domain (its records are the CLI's: explain-only).
@@ -99,11 +137,13 @@ type MailIn struct {
 	// Pending: a mass removal mailctl refused, waiting for confirmation
 	// (nil: none).
 	Pending *MailPendingIn
-	// SyncBlocked: why the Hub sends mailctl nothing ("" = it does).
+	// SyncBlocked: why the Hub sends the provider nothing ("" = it does).
 	SyncBlocked string
-	// HubSecretInvalid: mail is on but the Hub's mail secret is missing
-	// or too short: only mail_hub_secret_invalid fires.
-	HubSecretInvalid bool
+}
+
+// MailSetProblem is one domain's mail record problem the Hub judged.
+type MailSetProblem struct {
+	Domain, Text string
 }
 
 // MailPendingIn is a pending mass removal.
@@ -147,17 +187,12 @@ func sevOf(s string) Severity {
 	return Info
 }
 
-// mailFindings judges in.Mail (none while it's nil or unavailable).
+// mailFindings judges in.Mail (none while it's nil). The Hub-judged
+// kinds always run; the provider-check kinds only while the provider
+// answered.
 func mailFindings(in *Inputs) []Finding {
 	m := in.Mail
-	if m != nil && m.HubSecretInvalid {
-		return []Finding{{Kind: KindMailHubSecretInvalid, Severity: Problem,
-			Title: "Mail can't be managed: the Hub's mail secret is missing or too short",
-			Why:   "Mail is on, but the Hub can't reach mailctl without its secret (secrets/mail/hub-secret, at least 32 characters): nobody's mailbox, address or mail password changes, and removals don't reach the mail server.",
-			Class: FixExplain, Steps: []string{"./portcullis up recreates the Hub with the mail secret"},
-			FP: Fingerprint(KindMailHubSecretInvalid), Inputs: Digest(KindMailHubSecretInvalid)}}
-	}
-	if m == nil || m.Unavailable {
+	if m == nil {
 		return nil
 	}
 	var out []Finding
@@ -173,21 +208,50 @@ func mailFindings(in *Inputs) []Finding {
 		out = append(out, f)
 		return &out[len(out)-1]
 	}
+	recWrong := map[string]bool{}
+	if !m.Unavailable {
+		mailProviderFindings(in, m, mk, recWrong)
+	}
+	mailHubFindings(in, m, mk, recWrong)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].FP < out[j].FP })
+	return out
+}
+
+type mailMk = func(kind string, sev Severity, title, why string, steps []string, inputs any, dom string, subjects ...string) *Finding
+
+// mailProviderFindings are the kinds judged on the provider's checks and
+// status (mapped from the check catalog, §19.8).
+func mailProviderFindings(in *Inputs, m *MailIn, mk mailMk, recWrong map[string]bool) {
 	byID := map[string]mailprovider.Check{}
 	for _, c := range m.Checks {
 		byID[c.ID] = c
 	}
 	bad := func(c mailprovider.Check) bool { return c.Severity != mailprovider.SeverityOK && c.Severity != "" }
-	recWrong := map[string]bool{}
 	for _, c := range m.Checks {
 		if !bad(c) {
 			continue
 		}
 		id, sub, _ := strings.Cut(c.ID, ":")
+		switch {
+		case strings.HasPrefix(c.ID, "x-"):
+			// A provider's own check: plain text only, at most a
+			// Problem, never a fix (§19.8).
+			sev := sevOf(c.Severity)
+			title := plainText(c.Title, 80)
+			if title == "" {
+				title = c.ID
+			}
+			var steps []string
+			for _, st := range c.Steps {
+				steps = append(steps, plainText(st, 200))
+			}
+			mk(KindMailProviderCheck, sev, title, plainText(c.Detail, 500), steps, c, "", c.ID)
+			continue
+		}
 		switch id {
 		case "port25":
 			title := "Outbound mail on port 25 looks blocked"
-			why := "Every delivery of the last 24 hours failed to connect to the receivers' port 25: the provider blocks it. Ask them to unblock port 25, or set a relay (MAIL_RELAY_HOST)."
+			why := "Every delivery of the last 24 hours failed to connect to the receivers' port 25: the provider blocks it. Ask them to unblock port 25, or set a relay (Settings → Mail)."
 			if c.Severity == mailprovider.SeverityInfo {
 				title, why = "No outbound delivery yet: not known whether port 25 is open", "Nothing has been sent yet, so Portcullis can't tell whether the provider blocks port 25 (it never probes)."
 			}
@@ -208,10 +272,17 @@ func mailFindings(in *Inputs) []Finding {
 			}
 			mk(KindMailBlocklisted, sev, "The mail server's address is on a blocklist (or the lookup was refused)",
 				"Receivers that use the blocklist refuse its mail. "+c.Detail, c.Steps, c, "")
-		case "dkim_selftest":
+		case "dkim_selftest", "records":
+			if recWrong[sub] {
+				continue
+			}
 			recWrong[sub] = true
-			f := mk(KindMailRecordsWrong, Problem, "The DKIM key of "+sub+" in DNS isn't the one mail signs with",
-				"Receivers fail the DKIM check of mail from "+sub+" while the published key differs. "+c.Detail, c.Steps, c, sub)
+			title := "The DKIM key of " + sub + " in DNS isn't the one mail signs with"
+			why := "Receivers fail the DKIM check of mail from " + sub + " while the published key differs. "
+			if id == "records" {
+				title, why = "The mail records of "+sub+" aren't right", "Mail to or from "+sub+" fails or is refused until its mail records are as wanted. "
+			}
+			f := mk(KindMailRecordsWrong, Problem, title, why+c.Detail, c.Steps, c, sub)
 			mailRecordsFix(f, sub, m.Main)
 		case "dkim_stuck":
 			mk(KindMailDKIMStuck, Warning, "The new DKIM key of "+sub+" has waited over a day for DNS",
@@ -229,51 +300,16 @@ func mailFindings(in *Inputs) []Finding {
 			mk(KindMailClientIPRewritten, Warning, "The mail server sees rewritten client addresses",
 				"Under rootless Podman SPF, iprev and the IP blocklists are off and DMARC never rejects. "+c.Detail, c.Steps, c, "")
 		case "rate_held":
-			mailRateHeld(mk, m, byID, sub, c)
-		case "spam_rules":
-			// Only a problem (no rules imported): explain-only, no fix.
-			if c.Severity == mailprovider.SeverityProblem {
-				mk(KindMailSpamRulesMissing, Problem, "The mail server's spam filter has no rules yet",
-					MailSpamRulesWhy, c.Steps, c, "")
-			}
-		case "external_lookups":
-			if c.Severity == mailprovider.SeverityProblem {
-				mk(KindMailExternalLookupsOn, Problem, "The spam filter's external lookups may be on",
-					MailExternalLookupsWhy, c.Steps, c, "")
-			}
+			mailRateHeld(mk, m, sub, c)
 		case "dane":
-			// A Problem while DANE is off (mailctl's check says problem);
-			// Info otherwise (invalid verdicts counted, nothing definite).
+			// A Problem while DANE is off (the check says problem); Info
+			// otherwise (invalid verdicts counted, nothing definite).
 			sev := Info
 			if c.Severity == mailprovider.SeverityProblem {
 				sev = Problem
 			}
 			mk(KindMailDANEOff, sev, "DANE is off: the resolver can't validate DNSSEC",
-				"Outbound mail doesn't verify remote domains' DANE records because mail-resolver can't validate DNSSEC from this host; check that it reaches the root servers over port 53. "+c.Detail, c.Steps, c, "")
-		}
-	}
-	// The general mail_rate_held: sessions or a failed restart without a
-	// held account.
-	held := false
-	for _, f := range out {
-		held = held || f.Kind == KindMailRateHeld
-	}
-	if !held {
-		var lines []string
-		sev := Info
-		if c, ok := byID["sessions_open"]; ok && bad(c) {
-			lines, sev = append(lines, c.Detail), Warning
-		}
-		if m.RestartFailed != "" {
-			lines, sev = append(lines, MailSessionsLine+": "+m.RestartFailed), Warning
-		}
-		for _, c := range m.Checks {
-			if strings.HasPrefix(c.ID, "auth_failures:") && bad(c) {
-				lines = append(lines, c.Detail)
-			}
-		}
-		if len(lines) > 0 {
-			mk(KindMailRateHeld, sev, "Mail sessions or logins need a look", strings.Join(lines, " "), nil, lines, "")
+				"Outbound mail doesn't verify remote domains' DANE records because the provider's resolver can't validate DNSSEC from this host; check that it reaches the root servers over port 53. "+c.Detail, c.Steps, c, "")
 		}
 	}
 	// Added domains' plans: mail items missing or wrong.
@@ -287,10 +323,74 @@ func mailFindings(in *Inputs) []Finding {
 		if len(items) == 0 || recWrong[p.Name] {
 			continue
 		}
+		recWrong[p.Name] = true
 		f := mk(KindMailRecordsWrong, Problem, "The mail records of "+p.Name+" aren't right",
 			"Mail to or from "+p.Name+" fails or is refused until its MX, SPF, DKIM, DMARC and the other mail records are as wanted.",
 			stepsOf(items), liveOf(items), p.Name)
 		mailRecordsFix(f, p.Name, m.Main)
+	}
+	if st := m.Status; st != nil {
+		for _, d := range st.DMARC {
+			if d.Proposed != nil && *d.Proposed != "" {
+				f := mk(KindMailDMARCPromote, Info, d.Domain+": DMARC can move to p="+*d.Proposed,
+					"14 days of aggregate reports show no source failing both SPF and DKIM alignment.", nil,
+					struct{ Domain, Policy, Proposed string }{d.Domain, d.Policy, *d.Proposed}, d.Domain)
+				f.Class, f.FixKind = FixOneClick, FixMailDMARCPromote
+			}
+		}
+		for _, x := range st.MTASTS {
+			if x.EnforceReady {
+				f := mk(KindMailMTASTSEnforce, Info, x.Domain+": MTA-STS can move to enforce",
+					"7 days of testing with a valid certificate and no TLS report failure: senders may then refuse to deliver without TLS.", nil,
+					struct{ Domain, Mode string }{x.Domain, x.Mode}, x.Domain)
+				f.Class, f.FixKind = FixOneClick, FixMailMTASTSEnforce
+			}
+		}
+	}
+}
+
+// mailHubFindings are the kinds the Hub judges on its own state: they
+// fire whether or not the provider answers.
+func mailHubFindings(in *Inputs, m *MailIn, mk mailMk, recWrong map[string]bool) {
+	if !m.Wired {
+		mk(KindMailProviderMissing, Warning, "Mail is on, but no mail server is wired",
+			"The slot is open (PORTCULLIS_MAIL=on) and no app is this server's mail provider: nobody has a mailbox and no mail is sent or received.",
+			[]string{MailMissingStep}, "missing", "")
+	}
+	if m.Wired && m.UnreachableSince != nil && in.Now.Sub(*m.UnreachableSince) >= mailUnreachAfter {
+		why := "The wired mail provider " + m.Instance + " hasn't answered (or kept reporting bootstrap: false) since " + m.UnreachableSince.UTC().Format(time.RFC3339) +
+			": nobody's mailbox, address or mail password changes, and removals don't reach it."
+		if m.UnreachableWhy != "" {
+			why += " " + plainText(m.UnreachableWhy, 300)
+		}
+		mk(KindMailProviderUnreach, Problem, MailUnreachTitle, why, []string{MailUnreachStep}, m.Instance, "")
+	}
+	if m.VoidOwed && m.VoidError != "" {
+		mk(KindMailVoidPending, Problem, "Mail passwords couldn't be voided: the mail provider stays stopped",
+			"A void of every mail password is owed (a wiring, a switch or a restore) and its last attempt failed: "+plainText(m.VoidError, 300)+". The provider stays stopped and the Hub retries every 5 min.",
+			[]string{MailVoidStep}, m.VoidError, "")
+	}
+	if m.Refused != "" || m.StopError != "" {
+		why := plainText(m.Refused, 300)
+		if why == "" {
+			why = MailRefusedTitle
+		}
+		why += ". The running provider keeps serving and taking revocations until an administrator confirms; nothing of the changed template starts."
+		if m.StopError != "" {
+			why += " " + plainText(m.StopError, 300) + ": the held provider may still serve."
+		}
+		mk(KindMailProviderRefused, Problem, MailRefusedTitle, why, []string{"Review the change and confirm on the instance's Mail tab"},
+			struct{ Refused, Stop string }{m.Refused, m.StopError}, "")
+	}
+	for _, p := range m.SetProblems {
+		d := strings.ToLower(p.Domain)
+		if recWrong[d] {
+			continue
+		}
+		recWrong[d] = true
+		f := mk(KindMailRecordsWrong, Problem, "The mail records of "+d+" aren't right",
+			"The Hub refused what the mail provider wants published: "+plainText(p.Text, 500)+". The last good records stay published.", nil, p, d)
+		mailRecordsFix(f, d, m.Main)
 	}
 	if p := m.Pending; p != nil {
 		revokedLine := "Their mail passwords are revoked and they can't sign in to mail."
@@ -318,37 +418,28 @@ func mailFindings(in *Inputs) []Finding {
 		mk(KindMailLANOnlyUnenforced, Problem, "LAN-only mail can't be enforced here",
 			MailLANOnlyWhy+": mail passwords can't be limited to the local networks, so they work from anywhere.",
 			[]string{MailLANOnlyStep}, struct{ LANOnly, Podman bool }{m.LANOnly, m.Podman}, "")
+	} else if m.LANOnly && m.LANBreachUser != "" {
+		mk(KindMailLANOnlyUnenforced, Problem, "A mail password of "+m.LANBreachUser+" worked beyond the local networks",
+			"Under LAN-only the mail provider created or kept a mail password of "+m.LANBreachUser+" not limited to the Local networks; the Hub revoked it. The provider doesn't enforce LAN-only as it must.",
+			[]string{"Check the mail provider's LAN-only support (its app page), or turn LAN-only off"}, m.LANBreachUser, "", m.LANBreachUser)
 	}
-	if st := m.Status; st != nil {
-		if na := st.Cert.NotAfter; na != nil {
-			left := na.Sub(in.Now)
-			if left <= mailCertWarn {
-				sev := Warning
-				if left <= mailCertProb {
-					sev = Problem
-				}
-				why := "The mail certificate expires on " + na.UTC().Format("2006-01-02") + ": clients and other servers then refuse TLS."
-				if c, ok := byID["cert"]; ok && c.Detail != "" {
-					why += " " + c.Detail
-				}
-				mk(KindMailCertExpiring, sev, "The mail certificate expires soon", why, []string{MailCertStep}, na.UTC(), "")
+	// The certificate: the CLI's not_after and the provider's, the
+	// earlier one decides.
+	var na *time.Time
+	if m.CertNotAfter != nil {
+		na = m.CertNotAfter
+	}
+	if !m.Unavailable && m.Status != nil && m.Status.Cert.NotAfter != nil && (na == nil || m.Status.Cert.NotAfter.Before(*na)) {
+		na = m.Status.Cert.NotAfter
+	}
+	if na != nil {
+		if left := na.Sub(in.Now); left <= mailCertWarn {
+			sev := Warning
+			if left <= mailCertProb {
+				sev = Problem
 			}
-		}
-		for _, d := range st.DMARC {
-			if d.Proposed != nil && *d.Proposed != "" {
-				f := mk(KindMailDMARCPromote, Info, d.Domain+": DMARC can move to p="+*d.Proposed,
-					"14 days of aggregate reports show no source failing both SPF and DKIM alignment.", nil,
-					struct{ Domain, Policy, Proposed string }{d.Domain, d.Policy, *d.Proposed}, d.Domain)
-				f.Class, f.FixKind = FixOneClick, FixMailDMARCPromote
-			}
-		}
-		for _, x := range st.MTASTS {
-			if x.EnforceReady {
-				f := mk(KindMailMTASTSEnforce, Info, x.Domain+": MTA-STS can move to enforce",
-					"7 days of testing with a valid certificate and no TLS report failure: senders may then refuse to deliver without TLS.", nil,
-					struct{ Domain, Mode string }{x.Domain, x.Mode}, x.Domain)
-				f.Class, f.FixKind = FixOneClick, FixMailMTASTSEnforce
-			}
+			mk(KindMailCertExpiring, sev, "The mail certificate expires soon",
+				"The mail certificate expires on "+na.UTC().Format("2006-01-02")+": clients and other servers then refuse TLS.", []string{MailCertStep}, na.UTC(), "")
 		}
 	}
 	if m.TimerKnown && (m.TimerSeenAt == nil || in.Now.Sub(*m.TimerSeenAt) > mailTimerOld) {
@@ -360,8 +451,22 @@ func mailFindings(in *Inputs) []Finding {
 			"Without it the mail certificate isn't renewed and the main domain's DKIM doesn't rotate (last run: "+last+").",
 			[]string{MailTimerStep}, last, "")
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].FP < out[j].FP })
-	return out
+	// A failed restart alone (no held account): mail_rate_held.
+	held := false
+	if !m.Unavailable {
+		for _, c := range m.Checks {
+			held = held || (strings.HasPrefix(c.ID, "rate_held:") && c.Severity != mailprovider.SeverityOK && c.Severity != "")
+		}
+	}
+	if !held && m.RestartFailed != "" {
+		mk(KindMailRateHeld, Warning, "Mail sessions or logins need a look", MailSessionsLine+": "+m.RestartFailed, nil, m.RestartFailed, "")
+	}
+}
+
+// plainText is provider-derived text for the report: one line, clipped,
+// HTML-escaped (no markup, no links: §19.8).
+func plainText(s string, n int) string {
+	return html.EscapeString(mailprovider.Shape(s, n))
 }
 
 // mailRecordsFix: on an added domain dns_apply (sets=mail); on the main
@@ -377,14 +482,8 @@ func mailRecordsFix(f *Finding, dom, main string) {
 
 // mailRateHeld is one held account's mail_rate_held, with the
 // auth_failures, sessions_open and restart lines.
-func mailRateHeld(mk func(string, Severity, string, string, []string, any, string, ...string) *Finding, m *MailIn, byID map[string]mailprovider.Check, user string, c mailprovider.Check) {
+func mailRateHeld(mk mailMk, m *MailIn, user string, c mailprovider.Check) {
 	why := user + "'s outgoing mail is held by the sending limit. " + c.Detail
-	if a, ok := byID["auth_failures:"+user]; ok && a.Severity != mailprovider.SeverityOK {
-		why += " " + a.Detail
-	}
-	if s, ok := byID["sessions_open"]; ok && s.Severity != mailprovider.SeverityOK {
-		why += " " + s.Detail
-	}
 	if m.RestartFailed != "" {
 		why += " " + MailSessionsLine + ": " + m.RestartFailed
 	}
