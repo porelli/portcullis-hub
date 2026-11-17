@@ -27,11 +27,39 @@ type fakeSys struct {
 	goos    string
 	sshdT   error
 	reloads int
+	// owners: path → uid / mode for Owner (default root, 0755).
+	owners map[string]ownerOf
+	links  map[string]string
+}
+
+type ownerOf struct {
+	uid  int
+	mode fs.FileMode
+}
+
+func (f *fakeSys) EvalSymlinks(p string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.links[p]; ok {
+		return t, nil
+	}
+	return p, nil
+}
+
+func (f *fakeSys) Owner(p string) (int, fs.FileMode, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if o, ok := f.owners[p]; ok {
+		return o.uid, o.mode, nil
+	}
+	return 0, 0o755, nil
 }
 
 func newFakeSys(t *testing.T) *fakeSys {
 	t.Helper()
+	notef = func(string, ...any) {}
 	f := &fakeSys{files: map[string][]byte{}, modes: map[string]fs.FileMode{}, dirs: map[string]bool{}, handler: map[string]func([]string) ([]byte, error){},
+		owners: map[string]ownerOf{}, links: map[string]string{},
 		version: "OpenSSH_9.6p1 Ubuntu", goos: "linux"}
 	f.files[MainConfig] = []byte("Include /etc/ssh/sshd_config.d/*.conf\nKbdInteractiveAuthentication no\nUsePAM yes\nSubsystem sftp /usr/lib/openssh/sftp-server\n")
 	f.files["/etc/passwd"] = []byte("root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\nbreakglass:x:1001:1001::/home/breakglass:/bin/bash\nops:x:1002:1002::/home/ops:/bin/bash\n")

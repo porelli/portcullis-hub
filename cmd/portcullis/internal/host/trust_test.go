@@ -175,7 +175,7 @@ func TestTrustRevokedKeysTimer(t *testing.T) {
 	if err := Trust(context.Background(), sys, o); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(sys.files[revokedTimer]), "OnUnitActiveSec=5min") || !strings.Contains(string(sys.files[revokedService]), "ExecStart=/usr/local/bin/portcullis host revoked-keys") {
+	if !strings.Contains(string(sys.files[revokedTimer]), "OnUnitActiveSec=5min") || !strings.Contains(string(sys.files[revokedService]), `ExecStart="/usr/local/bin/portcullis" host revoked-keys`) {
 		t.Errorf("units %q %q", sys.files[revokedTimer], sys.files[revokedService])
 	}
 	if !sys.ran("systemctl enable --now portcullis-revoked-keys.timer") {
@@ -246,5 +246,45 @@ func TestOpenSSHFloor8_2(t *testing.T) {
 	sys.goos = "windows"
 	if err := Trust(context.Background(), sys, trustOpts(t)); err == nil || !strings.Contains(err.Error(), "Windows hosts") {
 		t.Errorf("windows: %v", err)
+	}
+}
+
+func TestRevokedTimerRefusesUnsafeBinary(t *testing.T) {
+	for name, edit := range map[string]func(*fakeSys){
+		"user-owned binary":   func(s *fakeSys) { s.owners["/home/ops/Downloads/portcullis"] = ownerOf{1002, 0o755} },
+		"group-writable dir":  func(s *fakeSys) { s.owners["/home/ops/Downloads"] = ownerOf{0, 0o775} },
+		"world-writable /tmp": func(s *fakeSys) { s.owners["/home"] = ownerOf{0, 0o1777} },
+		"link to a user file": func(s *fakeSys) {
+			s.links["/home/ops/Downloads/portcullis"] = "/home/ops/bin/p"
+			s.owners["/home/ops/bin/p"] = ownerOf{1002, 0o755}
+		},
+	} {
+		sys := newFakeSys(t)
+		edit(sys)
+		before := sys.snapshot()
+		o := trustOpts(t)
+		o.RevokedKeys, o.Self = true, "/home/ops/Downloads/portcullis"
+		o.Fetch = func(context.Context, string) ([]byte, error) { return nil, errors.New("no") }
+		err := Trust(context.Background(), sys, o)
+		if err == nil || !strings.Contains(err.Error(), "root") {
+			t.Errorf("%s: %v", name, err)
+		}
+		if !reflect.DeepEqual(sys.snapshot(), before) {
+			t.Errorf("%s: files written", name)
+		}
+	}
+	// A root-owned path with a space and a %: quoted.
+	sys := newFakeSys(t)
+	o := trustOpts(t)
+	o.RevokedKeys, o.Self = true, "/opt/port cullis/100%/portcullis"
+	o.Fetch = func(context.Context, string) ([]byte, error) { return []byte{}, nil }
+	if err := Trust(context.Background(), sys, o); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sys.files[revokedService]), `ExecStart="/opt/port cullis/100%%/portcullis" host revoked-keys`) {
+		t.Errorf("unit %s", sys.files[revokedService])
+	}
+	if got := xmlEscape(`/a&b<c>`); got != "/a&amp;b&lt;c&gt;" {
+		t.Errorf("xml %q", got)
 	}
 }

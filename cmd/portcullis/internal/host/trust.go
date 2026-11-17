@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -59,6 +60,12 @@ func Trust(ctx context.Context, sys System, o TrustOptions) (err error) {
 	if err := CheckBreakglass(sys, o.Breakglass, o.NoBreakglass); err != nil {
 		return err
 	}
+	if o.RevokedKeys {
+		// Before anything is written: the root timer runs this binary.
+		if _, err := CheckRootExecutable(sys, o.Self); err != nil {
+			return err
+		}
+	}
 	ca, err := trustCAKey(ctx, o)
 	if err != nil {
 		return err
@@ -72,7 +79,7 @@ func Trust(ctx context.Context, sys System, o TrustOptions) (err error) {
 			return fmt.Errorf("%s is the break-glass account: Portcullis must never manage it", a)
 		}
 		if _, ok := users[a]; !ok {
-			fmt.Printf("note: the account %s doesn't exist on this host yet: create it, then certificates for it work\n", a)
+			notef("note: the account %s doesn't exist on this host yet: create it, then certificates for it work", a)
 		}
 	}
 	tx := NewTransaction(sys)
@@ -149,7 +156,7 @@ func Trust(ctx context.Context, sys System, o TrustOptions) (err error) {
 			return fmt.Errorf("the files are in place, but the revoked-keys timer didn't start: %v", err)
 		}
 		if err := FetchRevokedKeys(ctx, sys, o.Fetch); err != nil {
-			fmt.Println("note: the first revoked-keys fetch failed (" + err.Error() + "); the timer tries again every 5 minutes")
+			notef("note: the first revoked-keys fetch failed (%v); the timer tries again every 5 minutes", err)
 		}
 	}
 	return nil
@@ -202,9 +209,9 @@ const (
 )
 
 func stageRevokedTimer(tx *Transaction, sys System, o TrustOptions) error {
-	self := o.Self
-	if self == "" {
-		self = "/usr/local/bin/portcullis"
+	self, err := CheckRootExecutable(sys, o.Self)
+	if err != nil {
+		return err
 	}
 	if err := tx.Stage(revokedDomain, []byte(o.Domain+"\n"), 0o644); err != nil {
 		return err
@@ -214,7 +221,7 @@ func stageRevokedTimer(tx *Transaction, sys System, o TrustOptions) error {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>eu.portcullis.revoked-keys</string>
-<key>ProgramArguments</key><array><string>`+self+`</string><string>host</string><string>revoked-keys</string></array>
+<key>ProgramArguments</key><array><string>`+xmlEscape(self)+`</string><string>host</string><string>revoked-keys</string></array>
 <key>StartInterval</key><integer>300</integer>
 <key>RunAtLoad</key><true/>
 </dict></plist>
@@ -230,7 +237,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=`+self+` host revoked-keys
+ExecStart=`+systemdQuote(self)+` host revoked-keys
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
@@ -321,3 +328,6 @@ func RevokedDomain(sys System) (string, string, error) {
 	}
 	return lines[0], ca, nil
 }
+
+// notef prints a note on stderr (a var for tests).
+var notef = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }

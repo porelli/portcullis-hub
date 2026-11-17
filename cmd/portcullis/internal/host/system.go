@@ -35,6 +35,10 @@ type System interface {
 	// LookPath finds a command ("" when absent).
 	LookPath(name string) string
 	GOOS() string
+	// EvalSymlinks resolves path; Owner answers path's owner uid and mode
+	// (the link itself, not its target).
+	EvalSymlinks(path string) (string, error)
+	Owner(path string) (uid int, mode fs.FileMode, err error)
 }
 
 // OS is the real system; Root prefixes every path (tests: a directory).
@@ -105,6 +109,29 @@ func (s OS) LookPath(name string) string {
 }
 
 func (s OS) GOOS() string { return goos }
+
+func (s OS) EvalSymlinks(path string) (string, error) {
+	p, err := filepath.EvalSymlinks(s.p(path))
+	if err != nil {
+		return "", err
+	}
+	if s.Root != "" {
+		p = strings.TrimPrefix(p, s.Root)
+	}
+	return p, nil
+}
+
+func (s OS) Owner(path string) (int, fs.FileMode, error) {
+	st, err := os.Lstat(s.p(path))
+	if err != nil {
+		return 0, 0, err
+	}
+	uid, ok := fileUID(st)
+	if !ok {
+		return 0, 0, errors.New("owner unknown")
+	}
+	return uid, st.Mode(), nil
+}
 
 // exists reports a path's presence.
 func exists(sys System, p string) bool {
