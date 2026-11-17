@@ -439,3 +439,41 @@ func TestHubMailSubcommand(t *testing.T) {
 		t.Fatalf("requests %v", got)
 	}
 }
+
+// TestHubSSHSubcommand: `hub ssh status` GETs /host/ssh/status, the answer
+// on stdout; usage 2; no socket 1.
+func TestHubSSHSubcommand(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	var stdout, stderr bytes.Buffer
+	if code := sshMain([]string{"status"}, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "the Hub isn't running") {
+		t.Fatalf("no socket: %d %q", code, stderr.String())
+	}
+	for _, bad := range [][]string{nil, {"nope"}, {"status", "x"}} {
+		if code := sshMain(bad, &stdout, &stderr, sock); code != 2 {
+			t.Errorf("%v: %d", bad, code)
+		}
+	}
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path)
+		w.Write([]byte(`{"enabled":true}`))
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+	stdout.Reset()
+	if code := sshMain([]string{"status"}, &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), `"enabled":true`) {
+		t.Fatalf("status: %d %q %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Join(got, ",") != "GET /host/ssh/status" {
+		t.Fatalf("requests %v", got)
+	}
+}

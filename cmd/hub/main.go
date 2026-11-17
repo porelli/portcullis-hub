@@ -276,6 +276,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mail" {
 		os.Exit(mailMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
 	}
+	// `hub ssh status` (contract §18): `./portcullis status`'s SSH block.
+	if len(os.Args) > 1 && os.Args[1] == "ssh" {
+		os.Exit(sshMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
+	}
 	// `hub signin reset-core`: the CLI's lockout recovery (contract §8.1),
 	// run against the data directory while the Hub is stopped. Before the
 	// Hub's configuration is read: only the data directory is needed.

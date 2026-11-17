@@ -778,3 +778,45 @@ func (h *Hub) ImportBreakglass() (imported, malformed int) {
 	}
 	return imported, malformed
 }
+
+// HostSSHHost is one managed host in `hub ssh status`.
+type HostSSHHost struct {
+	ID       string     `json:"id"`
+	State    string     `json:"state"`
+	LastSync *time.Time `json:"last_sync"`
+	// SyncAgeSeconds: seconds since the last sync (-1: never).
+	SyncAgeSeconds int64 `json:"sync_age_s"`
+	Findings       int   `json:"findings"`
+}
+
+// HostSSHStatus is `hub ssh status` (the host control socket): on/off,
+// the CA fingerprints, enroll's §18.7 problems and the managed hosts.
+type HostSSHStatus struct {
+	Enabled        bool          `json:"enabled"`
+	UserCAFP       string        `json:"user_ca_fp"`
+	HostCAFP       string        `json:"host_ca_fp"`
+	Problems       []string      `json:"problems"`
+	CLIClientReady bool          `json:"cli_client_ready"`
+	Hosts          []HostSSHHost `json:"hosts"`
+}
+
+// HostSSHStatus answers the SSH block of ./portcullis status.
+func (h *Hub) HostSSHStatus() HostSSHStatus {
+	s := h.SSHSettings()
+	out := HostSSHStatus{Enabled: s.Enabled, UserCAFP: s.UserCAFP, HostCAFP: s.HostCAFP, Problems: s.Problems, CLIClientReady: s.CLIClientReady, Hosts: []HostSSHHost{}}
+	if out.Problems == nil {
+		out.Problems = []string{}
+	}
+	now := h.sshrt.clock()
+	for _, v := range h.SSHHosts() {
+		if !v.Managed || v.Removed {
+			continue
+		}
+		age := int64(-1)
+		if v.LastSync != nil && !v.LastSync.IsZero() {
+			age = int64(now.Sub(*v.LastSync) / time.Second)
+		}
+		out.Hosts = append(out.Hosts, HostSSHHost{ID: v.ID, State: v.State, LastSync: v.LastSync, SyncAgeSeconds: age, Findings: len(v.Findings)})
+	}
+	return out
+}

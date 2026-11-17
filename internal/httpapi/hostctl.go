@@ -73,6 +73,10 @@ func HostHandler(h *hub.Hub) http.Handler {
 	mux.HandleFunc("GET /host/mail/domains", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.HostMailDomains())
 	})
+	// SSH (contract §18): `./portcullis status`'s SSH block (read-only).
+	mux.HandleFunc("GET /host/ssh/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, h.HostSSHStatus())
+	})
 	return mux
 }
 

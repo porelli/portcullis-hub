@@ -1,7 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -255,5 +261,46 @@ func TestSSHPageReads(t *testing.T) {
 	json.Unmarshal([]byte(mustDo(t, e.people, "root", "GET", "/api/directory/groups/hr_help/uses", "", 200)), &u)
 	if u.SSH == nil || len(u.SSH) != 0 {
 		t.Errorf("unused group ssh %v, want []", u.SSH)
+	}
+}
+
+// TestHostSSHStatus: GET /host/ssh/status on the control socket only
+// (./portcullis status's SSH block); never on a TCP listener.
+func TestHostSSHStatus(t *testing.T) {
+	e := sshPeopleEnv(t)
+	for _, s := range []*httptest.Server{e.hub, e.people} {
+		if r, _ := doAs(t, s, "root", "GET", "/host/ssh/status", ""); r.StatusCode != 404 {
+			t.Errorf("/host/ssh/status on a TCP listener: %d", r.StatusCode)
+		}
+	}
+	dir, _ := os.MkdirTemp("", "hs")
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "h.sock")
+	l, err := ListenHost(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: HostHandler(e.s.Hub)}
+	go srv.Serve(l)
+	defer srv.Close()
+	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	}}}
+	resp, err := c.Get("http://hub/host/ssh/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var v map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("%d %v", resp.StatusCode, err)
+	}
+	for _, k := range []string{"enabled", "user_ca_fp", "host_ca_fp", "problems", "cli_client_ready", "hosts"} {
+		if _, ok := v[k]; !ok {
+			t.Errorf("no %s in %v", k, v)
+		}
+	}
+	if v["enabled"] != true {
+		t.Errorf("enabled %v", v["enabled"])
 	}
 }
