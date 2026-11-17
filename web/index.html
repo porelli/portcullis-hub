@@ -583,6 +583,29 @@
     .ln-bad { color: #fca5a5; }
     .ps-folder-pick { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.375rem; }
     .flash-target { outline: 2px solid #3b82f6; outline-offset: 2px; transition: outline-color 0.5s; }
+    /* Usage (web/usage.js) */
+    .usage-nav { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    .usage-strip { display: flex; gap: 1.25rem; flex-wrap: wrap; font-size: 0.8125rem; color: #cbd5e1; margin-bottom: 0.75rem; }
+    .usage-warn { background: #422006; color: #fde68a; border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.8125rem; margin-bottom: 0.75rem; }
+    .usage-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; margin-bottom: 1rem; }
+    .usage-table th, .usage-table td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #1e293b; vertical-align: top; }
+    .usage-sort, .usage-caret { background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 0; }
+    .usage-sub { color: #94a3b8; font-size: 0.75rem; }
+    .usage-nm { color: #64748b; font-style: italic; }
+    .usage-stale, .usage-dim { opacity: 0.55; }
+    .usage-indent { padding-left: 1.75rem !important; }
+    .usage-crow td { background: #0b1220; }
+    .usage-bar { width: 7rem; height: 0.4rem; background: #1e293b; border-radius: 3px; overflow: hidden; margin-bottom: 0.2rem; }
+    .usage-bar span { display: block; height: 100%; background: #22c55e; }
+    .usage-bar-warn span { background: #f59e0b; }
+    .usage-bar-bad span { background: #ef4444; }
+    .usage-bar-none span { background: #64748b; }
+    .usage-status { font-size: 0.75rem; }
+    .usage-status-ok { color: #4ade80; } .usage-status-warn { color: #fbbf24; } .usage-status-off { color: #94a3b8; } .usage-status-info { color: #93c5fd; }
+    .usage-spark { color: #60a5fa; vertical-align: middle; }
+    .usage-table a, .usage-strip a, .usage-nav a.usage-sub { color: #93c5fd; }
+    .usage-nav a.btn { text-decoration: none; }
+    .usage-filter { margin-bottom: 0.5rem; padding: 0.35rem 0.5rem; width: 18rem; max-width: 100%; }
   </style>
   <link rel="stylesheet" href="/static/directory.css">
 </head>
@@ -608,6 +631,7 @@
       <div class="tab" data-tab="marketplace">Marketplace</div>
       <div class="tab" data-tab="audit">Audit log</div>
       <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
+      <div class="tab" data-tab="usage">Usage</div>
       <div class="tab" data-tab="settings">Settings</div>
       <a class="tab" data-people-link href="#">People &#8599;</a>
     </div>
@@ -772,6 +796,16 @@
       <div id="doctor-root"></div>
     </div>
 
+    <!-- Usage Tab (web/usage.js) -->
+    <div class="tab-content" id="tab-usage">
+      <div class="category-title" style="margin-bottom: 1rem;">Usage</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        CPU, memory, network, disk IO and processes per app and per container, from the Hub's own sample every 15 seconds.
+        "not measured" means the Hub has no figure; "≥" marks a lower bound.
+      </p>
+      <div id="usage-root"></div>
+    </div>
+
     <!-- Audit log Tab (web/directory.js: PortcullisDirectory.renderAudit) -->
     <div class="tab-content" id="tab-audit">
       <p class="settings-empty" style="margin-bottom:1rem">
@@ -878,6 +912,7 @@
   <script src="/static/dns.js"></script>
   <script src="/static/mail.js"></script>
   <script src="/static/doctor.js"></script>
+  <script src="/static/usage.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
     // showTab(name): one of the top tabs (apps, marketplace, audit,
@@ -885,6 +920,8 @@
     // stays highlighted). The tab's content loads on every selection.
     // Leaving an instance page with unsaved work asks first: false = the
     // admin stayed (the page's hash is put back).
+    // usageView: the Usage tab's view (#usage/<view>).
+    let usageView = 'apps';
     function showTab(name, asked) {
       if (name !== 'instance' && pageCtx && !asked && !leavePageOK()) { history.replaceState(null, '', pageHash()); return false; }
       const top = name === 'instance' ? 'apps' : name;
@@ -898,6 +935,10 @@
         if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
       }
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
+      // The Usage tab polls while shown; leaving it (or an instance's
+      // Usage tab) stops the poll.
+      if (window.PortcullisUsage) PortcullisUsage.stop();
+      if (name === 'usage') PortcullisUsage.render(document.getElementById('usage-root'), usageView);
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
       if (name === 'apps') renderApps();
       if (name === 'marketplace') fillMarketplace();
@@ -972,6 +1013,9 @@
         if (box) flash(box);
         return;
       }
+      // #usage, #usage/apps, #usage/containers, #usage/storage.
+      const use = /^usage(?:\/(apps|containers|storage))?$/.exec(t);
+      if (use) { usageView = use[1] || 'apps'; showTab('usage'); return; }
       const sec = /^settings\/(domains|ai)\?(.*)$/.exec(t);
       if (sec) { openSettingsForm(sec[1], new URLSearchParams(sec[2])); return; }
       const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
@@ -3664,7 +3708,7 @@
     }
 
     // ── the instance page ────────────────────────────────
-    const PAGE_TABS = [['overview', 'Overview'], ['settings', 'Settings'], ['groups', 'Groups'], ['filesharing', 'File sharing'], ['logs', 'Logs'],
+    const PAGE_TABS = [['overview', 'Overview'], ['settings', 'Settings'], ['groups', 'Groups'], ['filesharing', 'File sharing'], ['logs', 'Logs'], ['usage', 'Usage'],
       ['backups', 'Backups'], ['ai', 'AI'], ['vpn', 'VPN'], ['expert', 'Expert'], ['delete', 'Delete']];
     function pageTabs(inst) {
       return PAGE_TABS.filter(([k]) => (k !== 'filesharing' || templateHasPersonSecret(inst.template)) && (k !== 'vpn' || templateHasVPN(inst.template)));
@@ -3744,6 +3788,7 @@
         t.setAttribute('aria-selected', String(t.dataset.ptab === k));
       });
       box.querySelectorAll('[data-ipane]').forEach(p => p.classList.toggle('active', p.dataset.ipane === k));
+      if (k !== 'usage' && window.PortcullisUsage) PortcullisUsage.stop();
       pageCtx.tab = k;
       loadPane(k, box.querySelector('[data-ipane="' + k + '"]'), opt || '');
     }
@@ -3765,6 +3810,7 @@
         case 'groups': renderGroupsTab(id, pane); break;
         case 'filesharing': loadFileSharing(id, pane); break;
         case 'logs': loadLogs(id, pane); break;
+        case 'usage': PortcullisUsage.renderInstance(pane, id); break;
         case 'backups': loadBackups(pane, id); break;
         case 'ai': loadAITab(id, pane); break;
         case 'vpn': renderVPNTab(id, pane); break;
