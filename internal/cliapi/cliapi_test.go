@@ -20,10 +20,14 @@ import (
 
 type vectors struct {
 	Principals []struct {
-		In, Account string
-		HostGroup   string `json:"host_group"`
-		OK          bool
+		In, Kind, Account string
+		HostGroup         string `json:"host_group"`
+		OK                bool
 	} `json:"principals"`
+	HostPatterns []struct {
+		In            string
+		Pattern, Name bool
+	} `json:"host_patterns"`
 	HostGroupIDs []struct {
 		In           string
 		OK, Reserved bool
@@ -85,22 +89,79 @@ func loadVectors(t *testing.T) vectors {
 }
 
 func TestPrincipalGrammar(t *testing.T) {
-	ok := []string{"alice@web", "a@portcullis-servers", "_x@all"}
-	bad := []string{"Alice@web", "alice@Web", "1x@web", "@web", "alice@", strings.Repeat("a", 33) + "@web"}
+	ok := []string{"u:alice@web", "u:a@portcullis-servers", "s:_x@all"}
+	bad := []string{"alice@web", "u:Alice@web", "u:alice@Web", "u:1x@web", "u:@web", "u:alice@", "u:" + strings.Repeat("a", 33) + "@web", "x:alice@web"}
 	for _, s := range ok {
-		if _, _, k := ValidPrincipal(s); !k {
+		if _, _, _, k := ParsePrincipal(s); !k {
 			t.Errorf("%q refused", s)
 		}
 	}
 	for _, s := range bad {
-		if _, _, k := ValidPrincipal(s); k {
+		if _, _, _, k := ParsePrincipal(s); k {
 			t.Errorf("%q accepted", s)
 		}
 	}
-	a, g, _ := ValidPrincipal("alice@web")
-	if a != "alice" || g != "web" {
-		t.Errorf("split = %q %q", a, g)
+	k, a, g, _ := ParsePrincipal(Principal(PrincipalShared, "deploy", "web"))
+	if k != "s" || a != "deploy" || g != "web" {
+		t.Errorf("split = %q %q %q", k, a, g)
 	}
+	// The namespaces never overlap: the same account and host group make
+	// two different principals.
+	if Principal(PrincipalPersonal, "deploy", "web") == Principal(PrincipalShared, "deploy", "web") {
+		t.Error("personal and shared principals collide")
+	}
+}
+
+func TestHostPatternGrammar(t *testing.T) {
+	for _, c := range loadVectors(t).HostPatterns {
+		if ValidHostPattern(c.In) != c.Pattern || ValidHostName(c.In) != c.Name {
+			t.Errorf("%q: pattern %v name %v", c.In, ValidHostPattern(c.In), ValidHostName(c.In))
+		}
+	}
+}
+
+func TestClientConfigRefusesInjection(t *testing.T) {
+	for _, bad := range []ClientGroup{
+		{HostGroup: "web", Hosts: []string{"web-1.example.com\nProxyCommand nc evil 22"}},
+		{HostGroup: "web", Hosts: []string{"a b"}},
+		{HostGroup: "web", Hosts: []string{"a,b"}},
+		{HostGroup: "web\nHost *", Hosts: []string{"a"}},
+	} {
+		if out, err := ClientConfig("example.com", []ClientGroup{bad}); err == nil || out != "" {
+			t.Errorf("%q rendered: %q", bad, out)
+		}
+		if out, err := KnownHosts("example.com", []ClientGroup{bad}, nil, nil); err == nil || out != "" {
+			t.Errorf("known_hosts %q rendered: %q", bad, out)
+		}
+	}
+	if _, err := ClientConfig("example.com\nHost *", nil); err == nil {
+		t.Error("a bad domain rendered")
+	}
+	if _, err := KnownHosts("example.com", nil, []string{"ssh-ed25519 AAAA\n@cert-authority * x"}, nil); err == nil {
+		t.Error("a bad host CA rendered")
+	}
+}
+
+// FuzzClientConfig: whatever the names, the output is either refused or
+// exactly the fixed lines with the names on the Match lines only.
+func FuzzClientConfig(f *testing.F) {
+	for _, s := range []string{"web-1.example.com", "*.lab.example.com", "a\nb", "a b", "192.0.2.1", "a,b", "!x"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, name string) {
+		out, err := ClientConfig("example.com", []ClientGroup{{HostGroup: "web", Hosts: []string{name}}})
+		if err != nil {
+			return
+		}
+		lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+		if len(lines) != 6 || lines[1] != "Match host "+name || strings.ContainsAny(name, " \t\r\n,\"'") {
+			t.Fatalf("name %q rendered as %q", name, out)
+		}
+		kh, err := KnownHosts("example.com", []ClientGroup{{HostGroup: "web", Hosts: []string{name}}}, nil, nil)
+		if err != nil || kh != "" {
+			t.Fatalf("known_hosts %q %v", kh, err)
+		}
+	})
 }
 
 func TestKeyIDRoundTrip(t *testing.T) {
@@ -313,9 +374,9 @@ func TestCeilingDefaultsAndValidate(t *testing.T) {
 func TestVectorsFile(t *testing.T) {
 	v := loadVectors(t)
 	for _, c := range v.Principals {
-		a, g, ok := ValidPrincipal(c.In)
-		if ok != c.OK || (ok && (a != c.Account || g != c.HostGroup)) {
-			t.Errorf("principal %q: %q %q %v", c.In, a, g, ok)
+		k, a, g, ok := ParsePrincipal(c.In)
+		if ok != c.OK || (ok && (k != c.Kind || a != c.Account || g != c.HostGroup || Principal(k, a, g) != c.In)) {
+			t.Errorf("principal %q: %q %q %q %v", c.In, k, a, g, ok)
 		}
 	}
 	for _, c := range v.HostGroupIDs {
@@ -388,10 +449,22 @@ func TestVectorsFile(t *testing.T) {
 }
 
 func TestKnownHostsScoped(t *testing.T) {
-	got := KnownHosts([]ClientGroup{{HostGroup: "web", Hosts: []string{"web-1.example.com", "*.lab.example.com"}}, {HostGroup: "db"}},
-		[]string{"ssh-ed25519 AAAAhost"}, []string{"ssh-ed25519 AAAAbad"})
-	want := "@cert-authority web-1.example.com,*.lab.example.com ssh-ed25519 AAAAhost\n@revoked * ssh-ed25519 AAAAbad\n"
+	ca := genKey(t)
+	bad := genKey(t)
+	got, err := KnownHosts("example.com", []ClientGroup{{HostGroup: "web", Hosts: []string{"web-1.example.com", "*.lab.example.com"}}, {HostGroup: "db"}},
+		[]string{ca + " a comment"}, []string{bad})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "@cert-authority web-1.example.com,*.lab.example.com " + ca + "\n@revoked * " + bad + "\n"
 	if got != want {
 		t.Errorf("got %q", got)
 	}
+}
+
+func genKey(t *testing.T) string {
+	t.Helper()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	k, _ := ssh.NewPublicKey(pub)
+	return NormalAuthorizedKey(k)
 }

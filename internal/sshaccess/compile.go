@@ -27,6 +27,7 @@ func Compile(in Input) (*Compiled, error) {
 		in: in, sudo: map[string]map[string][]string{}, where: map[string]map[string][]grantUse{},
 	}
 	uses := c.uses()
+	sortCollisions(c.Collisions)
 
 	// People's plans: per person and host group.
 	type acc struct {
@@ -35,7 +36,7 @@ func Compile(in Input) (*Compiled, error) {
 	}
 	plans := map[string]map[string]*acc{}
 	for _, u := range uses {
-		if _, _, ok := cliapi.ValidPrincipal(u.account + "@" + u.hg); !ok {
+		if !u.validPrincipal() {
 			continue
 		}
 		if plans[u.person] == nil {
@@ -46,7 +47,7 @@ func Compile(in Input) (*Compiled, error) {
 			a = &acc{p: map[string]bool{}, e: map[string]bool{}, g: map[string]bool{}, until: *u.until}
 			plans[u.person][u.hg] = a
 		}
-		a.p[u.account+"@"+u.hg] = true
+		a.p[u.principal()] = true
 		a.g[u.grant] = true
 		g := c.grant(u.grant)
 		for _, x := range cliapi.ExtensionList(g.PortForwarding, g.AgentForwarding) {
@@ -135,6 +136,8 @@ func (c *Compiled) uses() []grantUse {
 	grants := slices.Clone(st.Grants)
 	sort.Slice(grants, func(i, j int) bool { return grants[i].ID < grants[j].ID })
 	var out []grantUse
+	shared, protected := sharedAccounts(st), protectedAccounts(st)
+	c.Collisions = nil
 	for _, g := range grants {
 		priv, _ := Privileged(g)
 		ttl := time.Duration(GrantTTLHours(g, st.Settings)) * time.Hour
@@ -159,14 +162,18 @@ func (c *Compiled) uses() []grantUse {
 				}
 			}
 			for _, a := range g.Accounts {
-				acct := a
+				acct, kind := a, cliapi.PrincipalShared
 				if a == cliapi.UsernamePlaceholder {
-					acct = user
+					acct, kind = user, cliapi.PrincipalPersonal
+					if why := reservedFor(user, shared, protected); why != "" {
+						c.Collisions = append(c.Collisions, Collision{User: user, Grant: g.ID, Reason: why})
+						continue // never a principal for an account that isn't theirs
+					}
 				}
 				u := until
 				out = append(out, grantUse{grant: g.ID, group: g.Group, hg: g.HostGroup, person: user, account: acct,
 					until: &u, sudo: g.Sudo == state.SudoFull, priv: priv, root: acct == "root", end: end,
-					personal: a == cliapi.UsernamePlaceholder})
+					personal: kind == cliapi.PrincipalPersonal, kind: kind})
 			}
 		}
 	}
@@ -220,20 +227,26 @@ func (c *Compiled) bundle(id string, h state.SSHHost, uses []grantUse, need map[
 		if !slices.Contains(hgs, u.hg) {
 			continue
 		}
+		kind := cliapi.AccountShared
+		if u.personal {
+			kind = cliapi.AccountPerson
+		}
 		a := accts[u.account]
 		if a == nil {
-			a = &acc{kind: cliapi.AccountPerson, p: map[string]bool{}}
+			a = &acc{kind: kind, p: map[string]bool{}}
 			accts[u.account] = a
 		}
-		if !u.personal {
-			a.kind = cliapi.AccountShared // a shared account by that name wins: never a uid
+		if a.kind != kind {
+			// Never merge a person and a shared account (collisions are
+			// skipped in uses; this is the belt to those braces).
+			continue
 		}
 		c.where[id][u.account] = append(c.where[id][u.account], u)
-		if _, _, ok := cliapi.ValidPrincipal(u.account + "@" + u.hg); !ok {
+		if !u.validPrincipal() {
 			continue // the host reports ssh_host_account_invalid
 		}
 		a.valid = true
-		a.p[u.account+"@"+u.hg] = true
+		a.p[u.principal()] = true
 		if u.sudo {
 			a.sudo = true
 			c.sudo[id][u.account] = dedupSorted(append(c.sudo[id][u.account], u.grant))
@@ -297,8 +310,8 @@ func BundleHash(b *cliapi.Bundle) string {
 }
 
 // ClientConfig is the person's SSH client config for their plans (spec
-// §6, cliapi.ClientConfig).
-func ClientConfig(domain string, plans map[string]CertPlan, hosts map[string][]string) string {
+// §6, cliapi.ClientConfig: a value outside its grammar is an error).
+func ClientConfig(domain string, plans map[string]CertPlan, hosts map[string][]string) (string, error) {
 	var gs []cliapi.ClientGroup
 	for _, hg := range sortedKeys(plans) {
 		gs = append(gs, cliapi.ClientGroup{HostGroup: hg, Hosts: hosts[hg]})

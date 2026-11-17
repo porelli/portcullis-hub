@@ -1,18 +1,22 @@
 package cliapi
 
 import (
+	"net/netip"
 	"regexp"
 	"strings"
 )
 
 var (
-	principalRE  = regexp.MustCompile(`^([a-z_][a-z0-9._-]{0,31})@([a-z][a-z0-9-]{0,30})$`)
+	principalRE  = regexp.MustCompile(`^([us]):([a-z_][a-z0-9._-]{0,31})@([a-z][a-z0-9-]{0,30})$`)
 	hostGroupRE  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 	usernameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	accountRE    = regexp.MustCompile(`^[a-z_][a-z0-9._-]{0,31}$`)
 	hostIDRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	keyIDReqRE   = regexp.MustCompile(`^[0-9a-f]{16}$`)
 	breakglassRE = regexp.MustCompile(`^pc-breakglass:[A-Za-z0-9 ._:@/-]{1,128}$`)
+	// hostLabelRE is one host name label, with the ssh_config pattern
+	// characters * and ? allowed (contract §18.15).
+	hostLabelRE = regexp.MustCompile(`^[A-Za-z0-9*?]([A-Za-z0-9*?-]{0,61}[A-Za-z0-9*?])?$`)
 )
 
 // UsernamePlaceholder is the grant account that means "the person's own
@@ -25,14 +29,28 @@ const ReservedHostGroupPrefix = "portcullis-"
 // BuiltinAllHostGroup is the built-in host group of every managed host.
 const BuiltinAllHostGroup = "all"
 
-// ValidPrincipal reports whether s is `<account>@<host group>` (contract
-// §18.12). Reservation of `portcullis-*` host groups is sshaccess's check.
-func ValidPrincipal(s string) (account, hostGroup string, ok bool) {
+// Principal kinds: a person's own account and a shared account live in
+// separate namespaces, so a certificate for one can never be accepted for
+// the other even when the names collide (contract §18.12).
+const (
+	PrincipalPersonal = "u"
+	PrincipalShared   = "s"
+)
+
+// Principal is `<kind>:<account>@<host group>`.
+func Principal(kind, account, hostGroup string) string {
+	return kind + ":" + account + "@" + hostGroup
+}
+
+// ParsePrincipal reports whether s is `<u|s>:<account>@<host group>`
+// (contract §18.12). Reservation of `portcullis-*` host groups is
+// sshaccess's check.
+func ParsePrincipal(s string) (kind, account, hostGroup string, ok bool) {
 	m := principalRE.FindStringSubmatch(s)
 	if m == nil {
-		return "", "", false
+		return "", "", "", false
 	}
-	return m[1], m[2], true
+	return m[1], m[2], m[3], true
 }
 
 // ValidHostGroupID is the host group id grammar (without the reservation).
@@ -127,4 +145,41 @@ func RoundRoleTTL(seconds int) (int, bool) {
 	}
 	h := (seconds + 3599) / 3600 * 3600
 	return h, h >= MinRoleTTLSeconds && h <= MaxRoleTTLSeconds
+}
+
+// ValidHostPattern is a name clients may match a host by (ssh_config
+// `Match host`, known_hosts): an IPv4 or IPv6 address without a zone, or
+// dot-separated host name labels where * and ? are the only pattern
+// characters, optionally preceded by one ! (negation). No whitespace,
+// commas, quotes or control characters can pass, so a value can never
+// add an ssh_config keyword or a known_hosts field.
+func ValidHostPattern(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		return a.Zone() == ""
+	}
+	s = strings.TrimPrefix(s, "!")
+	for _, l := range strings.Split(s, ".") {
+		if !hostLabelRE.MatchString(l) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidHostName is ValidHostPattern without pattern characters: a host's
+// own name or address (an admin entry, a host certificate principal).
+func ValidHostName(s string) bool {
+	return ValidHostPattern(s) && !strings.ContainsAny(s, "*?!")
+}
+
+// ValidDomain is a DNS name with at least two labels and no pattern
+// characters.
+func ValidDomain(s string) bool {
+	if _, err := netip.ParseAddr(s); err == nil {
+		return false
+	}
+	return ValidHostName(s) && strings.Contains(s, ".")
 }

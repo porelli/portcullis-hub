@@ -1,6 +1,8 @@
 package cliapi
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -19,10 +21,40 @@ func ClientDir(domain string) string { return "~/.ssh/portcullis/" + domain }
 // IncludeLine is the one line `ssh-config --install` adds to ~/.ssh/config.
 const IncludeLine = "Include ~/.ssh/portcullis/*/config"
 
+// checkGroups refuses any value that isn't in its strict grammar: the
+// renderers never write one (the Hub's answer is untrusted on the CLI).
+func checkGroups(domain string, groups []ClientGroup) error {
+	if !ValidDomain(domain) {
+		return errors.New("the domain is not a valid DNS name")
+	}
+	for _, g := range groups {
+		if !ValidHostGroupID(g.HostGroup) {
+			return fmt.Errorf("host group %q is not a valid id", clipQ(g.HostGroup))
+		}
+		for _, h := range g.Hosts {
+			if !ValidHostPattern(h) {
+				return fmt.Errorf("host group %s: %q is not a host name, address or pattern", g.HostGroup, clipQ(h))
+			}
+		}
+	}
+	return nil
+}
+
+func clipQ(s string) string {
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
 // ClientConfig is ~/.ssh/portcullis/<domain>/config (spec §6): one Match
 // block per host group with names, sorted by host group. A group without
-// names gets no block (ssh still tries every agent identity).
-func ClientConfig(domain string, groups []ClientGroup) string {
+// names gets no block (ssh still tries every agent identity). Any value
+// outside its grammar is an error and nothing is rendered.
+func ClientConfig(domain string, groups []ClientGroup) (string, error) {
+	if err := checkGroups(domain, groups); err != nil {
+		return "", err
+	}
 	gs := append([]ClientGroup(nil), groups...)
 	sort.Slice(gs, func(i, j int) bool { return gs[i].HostGroup < gs[j].HostGroup })
 	dir := ClientDir(domain)
@@ -38,13 +70,38 @@ func ClientConfig(domain string, groups []ClientGroup) string {
 		b.WriteString("  IdentitiesOnly yes\n")
 		b.WriteString("  UserKnownHostsFile ~/.ssh/known_hosts " + dir + "/known_hosts\n")
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // KnownHosts is ~/.ssh/portcullis/<domain>/known_hosts (spec §8.10): an
 // @cert-authority line per host group scoped to its names, and an
-// @revoked line per revoked host key.
-func KnownHosts(groups []ClientGroup, hostCAs, revokedHostKeys []string) string {
+// @revoked line per revoked host key. Names must pass ValidHostPattern and
+// keys must be single public keys (ParseAuthorizedKey); they are written
+// in their normal form. Anything else is an error, nothing is rendered.
+func KnownHosts(domain string, groups []ClientGroup, hostCAs, revokedHostKeys []string) (string, error) {
+	if err := checkGroups(domain, groups); err != nil {
+		return "", err
+	}
+	norm := func(keys []string) ([]string, error) {
+		out := make([]string, 0, len(keys))
+		for _, k := range keys {
+			_, n, err := ParseAuthorizedKey(k)
+			if err != nil {
+				return nil, errors.New("a host CA or revoked host key is not a public key")
+			}
+			out = append(out, n)
+		}
+		return out, nil
+	}
+	cas, err := norm(hostCAs)
+	if err != nil {
+		return "", err
+	}
+	revoked, err := norm(revokedHostKeys)
+	if err != nil {
+		return "", err
+	}
+	hostCAs, revokedHostKeys = cas, revoked
 	gs := append([]ClientGroup(nil), groups...)
 	sort.Slice(gs, func(i, j int) bool { return gs[i].HostGroup < gs[j].HostGroup })
 	var b strings.Builder
@@ -59,5 +116,5 @@ func KnownHosts(groups []ClientGroup, hostCAs, revokedHostKeys []string) string 
 	for _, k := range revokedHostKeys {
 		b.WriteString("@revoked * " + k + "\n")
 	}
-	return b.String()
+	return b.String(), nil
 }

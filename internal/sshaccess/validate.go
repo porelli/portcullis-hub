@@ -10,24 +10,14 @@ import (
 	"github.com/portcullis/hub/internal/state"
 )
 
-var (
-	dnsNameRE = regexp.MustCompile(`^(?i)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	patternRE = regexp.MustCompile(`^(?i)(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	grantIDRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-)
+var grantIDRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
-// ValidHostName is a DNS name or an IP address (a host's names, a host
-// certificate's principals).
-func ValidHostName(s string) bool {
-	if _, err := netip.ParseAddr(s); err == nil {
-		return true
-	}
-	return len(s) <= 253 && dnsNameRE.MatchString(s)
-}
+// ValidHostName is a host's own name or address (cliapi.ValidHostName:
+// no pattern characters, no zone).
+func ValidHostName(s string) bool { return cliapi.ValidHostName(s) }
 
-// ValidPattern is an unmanaged host name pattern: a DNS name, optionally
-// starting with "*." (ssh_config Match host syntax).
-func ValidPattern(s string) bool { return len(s) <= 253 && patternRE.MatchString(s) }
+// ValidPattern is an unmanaged host name pattern (cliapi.ValidHostPattern).
+func ValidPattern(s string) bool { return cliapi.ValidHostPattern(s) }
 
 // ValidGrantAccount is "{username}" or a local account name.
 func ValidGrantAccount(a string) bool {
@@ -86,7 +76,7 @@ func Validate(s state.SSHState) error {
 			}
 		}
 		for _, a := range h.Addrs {
-			if _, err := netip.ParseAddr(a); err != nil {
+			if ip, err := netip.ParseAddr(a); err != nil || ip.Zone() != "" {
 				return fmt.Errorf("host %q: %q is not an IP address", id, a)
 			}
 		}

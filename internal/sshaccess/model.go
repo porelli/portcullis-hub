@@ -48,6 +48,9 @@ type Compiled struct {
 	Hosts map[string][]string
 	// Hints: host group → the `--account` lines for `host trust`.
 	Hints map[string][]string
+	// Collisions: personal grants skipped because the username is an
+	// account that isn't the person's (ssh_username_collision).
+	Collisions []Collision
 
 	in    Input
 	sudo  map[string]map[string][]string // host → account → grant ids giving sudo
@@ -85,6 +88,17 @@ type grantUse struct {
 	priv     bool
 	root     bool
 	personal bool
+	kind     string
+}
+
+// principal is the use's `<kind>:<account>@<hg>`.
+func (u grantUse) principal() string { return cliapi.Principal(u.kind, u.account, u.hg) }
+
+// validPrincipal: the principal passes the grammar (a username that can't
+// be a local account doesn't).
+func (u grantUse) validPrincipal() bool {
+	_, _, _, ok := cliapi.ParsePrincipal(u.principal())
+	return ok
 }
 
 // PreviewRow is one line of an access preview (spec §9.8).
@@ -104,6 +118,8 @@ const (
 	StatusOK          = "ok"
 	StatusUnmanaged   = "accounts and sudo unknown (unmanaged)"
 	StatusInvalidName = "the username can't be a local account"
+	// StatusCollision prefixes a skipped personal grant's reason.
+	StatusCollision = "skipped: "
 )
 
 type stateGrant = state.SSHGrant

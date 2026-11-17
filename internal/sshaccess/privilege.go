@@ -1,6 +1,7 @@
 package sshaccess
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/portcullis/hub/internal/cliapi"
@@ -60,18 +61,50 @@ func GrantTTLHours(g state.SSHGrant, s state.SSHSettings) int {
 	return h
 }
 
-// Widens reports whether after grants more than before (the check for a
-// delegate's edit and an admin's typed confirmation): any privileged
-// condition after that before lacks.
-func Widens(before *state.SSHGrant, after state.SSHGrant) bool {
-	pa, _ := Privileged(after)
-	if !pa {
-		return false
-	}
+// WideningReasons lists how an edit (before → after) widens a grant,
+// whether or not either side is privileged (security review ruling):
+// accounts added, a longer effective TTL, forwarding newly allowed, sudo
+// or privilege added, another host group or group. A widening edit needs
+// the same guard as creating a privileged grant (an administrator, a
+// fresh sign-in, the audit). A new grant (before nil) is judged by
+// Privileged instead: nil here.
+func WideningReasons(before *state.SSHGrant, after state.SSHGrant, s state.SSHSettings) []string {
 	if before == nil {
-		return true
+		return nil
 	}
-	pb, wb := Privileged(*before)
-	_, wa := Privileged(after)
-	return !pb || wa != wb || before.HostGroup != after.HostGroup || before.Group != after.Group
+	var why []string
+	for _, a := range after.Accounts {
+		if !slices.Contains(before.Accounts, a) {
+			why = append(why, "adds the account "+a)
+		}
+	}
+	if GrantTTLHours(after, s) > GrantTTLHours(*before, s) {
+		why = append(why, "longer certificates")
+	}
+	if after.PortForwarding && !before.PortForwarding {
+		why = append(why, "allows port forwarding")
+	}
+	if after.AgentForwarding && !before.AgentForwarding {
+		why = append(why, "allows agent forwarding")
+	}
+	if after.Sudo == state.SudoFull && before.Sudo != state.SudoFull {
+		why = append(why, "adds sudo")
+	}
+	pb, _ := Privileged(*before)
+	pa, _ := Privileged(after)
+	if pa && !pb {
+		why = append(why, "becomes privileged")
+	}
+	if after.HostGroup != before.HostGroup {
+		why = append(why, "another host group")
+	}
+	if after.Group != before.Group || after.GroupID != before.GroupID {
+		why = append(why, "another group")
+	}
+	return why
+}
+
+// Widens is WideningReasons != nil.
+func Widens(before *state.SSHGrant, after state.SSHGrant, s state.SSHSettings) bool {
+	return len(WideningReasons(before, after, s)) > 0
 }

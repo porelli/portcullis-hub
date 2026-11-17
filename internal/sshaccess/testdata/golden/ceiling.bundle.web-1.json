@@ -13,8 +13,8 @@
       "kind": "person",
       "uid": 20001,
       "principals": [
-        "alice@all",
-        "alice@web"
+        "u:alice@all",
+        "u:alice@web"
       ],
       "sudo": true
     },
@@ -23,7 +23,7 @@
       "kind": "person",
       "uid": 20002,
       "principals": [
-        "bob@web"
+        "u:bob@web"
       ],
       "sudo": false
     },
@@ -31,7 +31,7 @@
       "name": "deploy",
       "kind": "shared",
       "principals": [
-        "deploy@web"
+        "s:deploy@web"
       ],
       "sudo": false
     },
@@ -39,7 +39,7 @@
       "name": "root",
       "kind": "shared",
       "principals": [
-        "root@web"
+        "s:root@web"
       ],
       "sudo": false
     }

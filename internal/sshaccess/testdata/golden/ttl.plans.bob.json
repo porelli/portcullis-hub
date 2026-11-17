@@ -2,8 +2,8 @@
   "HostGroups": {
     "web": {
       "Principals": [
-        "bob@web",
-        "deploy@web"
+        "s:deploy@web",
+        "u:bob@web"
       ],
       "Extensions": [
         "permit-pty"

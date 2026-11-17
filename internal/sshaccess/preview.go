@@ -35,12 +35,28 @@ func (c *Compiled) Preview(hostID string, rootOnly bool) []PreviewRow {
 		if !managed {
 			return false, StatusUnmanaged
 		}
-		if _, _, ok := cliapi.ValidPrincipal(u.account + "@" + u.hg); !ok {
+		if !u.validPrincipal() {
 			return false, StatusInvalidName
 		}
 		return len(c.sudo[hostID][u.account]) > 0, StatusOK
 	})
+	rows = append(rows, c.collisionRows(func(hg string) bool {
+		return slices.Contains(h.HostGroups, hg) || (managed && hg == cliapi.BuiltinAllHostGroup)
+	})...)
 	return filterRoot(rows, rootOnly)
+}
+
+// collisionRows are the skipped personal grants on the host groups inside.
+func (c *Compiled) collisionRows(inside func(hg string) bool) []PreviewRow {
+	out := []PreviewRow{}
+	for _, col := range c.Collisions {
+		g := c.grant(col.Grant)
+		if !inside(g.HostGroup) {
+			continue
+		}
+		out = append(out, PreviewRow{Person: col.User, Account: col.User, Via: []string{g.Group + " → " + g.HostGroup}, Status: StatusCollision + col.Reason})
+	}
+	return out
 }
 
 // PreviewHostGroup is the preview for every host of a host group: one row
@@ -53,11 +69,12 @@ func (c *Compiled) PreviewHostGroup(hg string, rootOnly bool) []PreviewRow {
 		}
 	}
 	rows := c.rows(uses, func(u grantUse) (bool, string) {
-		if _, _, ok := cliapi.ValidPrincipal(u.account + "@" + u.hg); !ok {
+		if !u.validPrincipal() {
 			return false, StatusInvalidName
 		}
 		return u.sudo, StatusOK
 	})
+	rows = append(rows, c.collisionRows(func(x string) bool { return x == hg })...)
 	return filterRoot(rows, rootOnly)
 }
 

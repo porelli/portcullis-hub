@@ -84,11 +84,11 @@ func js(v any) []byte {
 func TestCompileExampleGolden(t *testing.T) {
 	c := mustCompile(t, example())
 	web := c.Roles["web"]
-	if strings.Join(web.Principals, ",") != "alice@web,bob@web,deploy@web" || web.Extensions != "permit-pty" || web.MaxTTLSeconds != 8*3600 {
+	if strings.Join(web.Principals, ",") != "s:deploy@web,u:alice@web,u:bob@web" || web.Extensions != "permit-pty" || web.MaxTTLSeconds != 8*3600 {
 		t.Errorf("hg-web %+v", web)
 	}
 	all := c.Roles["all"]
-	if strings.Join(all.Principals, ",") != "alice@all" || all.MaxTTLSeconds != 4*3600 {
+	if strings.Join(all.Principals, ",") != "u:alice@all" || all.MaxTTLSeconds != 4*3600 {
 		t.Errorf("hg-all %+v", all)
 	}
 	b := c.Bundles["web-1"]
@@ -96,7 +96,7 @@ func TestCompileExampleGolden(t *testing.T) {
 		t.Fatalf("web-1 accounts %+v", b.Accounts)
 	}
 	a := b.Accounts[0]
-	if a.Name != "alice" || !a.Sudo || a.UID != 20001 || strings.Join(a.Principals, ",") != "alice@all,alice@web" {
+	if a.Name != "alice" || !a.Sudo || a.UID != 20001 || strings.Join(a.Principals, ",") != "u:alice@all,u:alice@web" {
 		t.Errorf("alice %+v", a)
 	}
 	if b.Accounts[1].Name != "bob" || b.Accounts[1].Sudo || b.Accounts[2].Name != "deploy" || b.Accounts[2].Kind != "shared" || b.Accounts[2].UID != 0 {
@@ -104,7 +104,11 @@ func TestCompileExampleGolden(t *testing.T) {
 	}
 	golden(t, "example.roles.json", js(c.Roles))
 	golden(t, "example.bundle.web-1.json", js(b))
-	golden(t, "example.client.alice.txt", []byte(ClientConfig("example.com", c.People["alice"].HostGroups, c.Hosts)))
+	cfg, err := ClientConfig("example.com", c.People["alice"].HostGroups, c.Hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "example.client.alice.txt", []byte(cfg))
 	golden(t, "example.preview.web-1.json", js(c.Preview("web-1", false)))
 	// Deterministic.
 	c2 := mustCompile(t, example())
@@ -169,7 +173,7 @@ func TestExpiredMembershipGivesNothing(t *testing.T) {
 	if _, ok := c.Roles["all"]; ok {
 		t.Error("a role without principals is kept")
 	}
-	if slices.Contains(c.People["bob"].HostGroups["web"].Principals, "bob@web") {
+	if slices.Contains(c.People["bob"].HostGroups["web"].Principals, "u:bob@web") {
 		t.Error("a membership whose end has passed still grants")
 	}
 }
@@ -276,10 +280,10 @@ func TestUsernameNotLocalAccountStillPrincipal(t *testing.T) {
 	in := example()
 	in.Members["1alice"] = map[string]int{"ssh_web": 11, "ssh_deploy": 13}
 	c := mustCompile(t, in)
-	if slices.Contains(c.Roles["web"].Principals, "1alice@web") {
+	if slices.Contains(c.Roles["web"].Principals, "u:1alice@web") {
 		t.Error("an invalid principal reached the role")
 	}
-	if !slices.Contains(c.People["1alice"].HostGroups["web"].Principals, "deploy@web") {
+	if !slices.Contains(c.People["1alice"].HostGroups["web"].Principals, "s:deploy@web") {
 		t.Error("the shared account was lost too")
 	}
 	var acct *cliapi.Account
@@ -373,8 +377,11 @@ Match host web-1.example.com,web-2.example.com,10.20.0.11,10.20.0.12
   IdentitiesOnly yes
   UserKnownHostsFile ~/.ssh/known_hosts ~/.ssh/portcullis/example.com/known_hosts
 `
-	got := ClientConfig("example.com", map[string]CertPlan{"web": {}, "empty": {}},
+	got, err := ClientConfig("example.com", map[string]CertPlan{"web": {}, "empty": {}},
 		map[string][]string{"web": {"web-1.example.com", "web-2.example.com", "10.20.0.11", "10.20.0.12"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
@@ -471,5 +478,130 @@ func TestNeedUIDs(t *testing.T) {
 		if a.Name == "bob" {
 			t.Error("bob's account without a uid")
 		}
+	}
+}
+
+func TestUsernameCollidesWithSharedAccount(t *testing.T) {
+	in := example()
+	// A person whose username is the shared account deploy, in ssh_web.
+	in.Members["deploy"] = map[string]int{"ssh_web": 11}
+	c := mustCompile(t, in)
+	if p, ok := c.People["deploy"].HostGroups["web"]; ok {
+		t.Errorf("the person deploy got %v", p.Principals)
+	}
+	if slices.Contains(c.Roles["web"].Principals, "u:deploy@web") {
+		t.Error("u:deploy@web reached the role")
+	}
+	if len(c.Collisions) != 1 || c.Collisions[0].User != "deploy" || c.Collisions[0].Grant != "g-web" {
+		t.Errorf("collisions %+v", c.Collisions)
+	}
+	for _, a := range c.Bundles["web-1"].Accounts {
+		if a.Name == "deploy" && (a.Kind != "shared" || a.UID != 0 || !slices.Equal(a.Principals, []string{"s:deploy@web"})) {
+			t.Errorf("deploy merged: %+v", a)
+		}
+	}
+	var shown bool
+	for _, r := range c.Preview("web-1", false) {
+		if r.Person == "deploy" && strings.HasPrefix(r.Status, StatusCollision) {
+			shown = true
+		}
+	}
+	if !shown {
+		t.Error("the preview doesn't show the skipped grant")
+	}
+}
+
+func TestUsernameRootAndSystemSkipped(t *testing.T) {
+	in := example()
+	c := cliapi.DefaultCeiling()
+	c.BreakglassAccount, c.ProtectedAccounts = "rescue", []string{"rescue", "ops"}
+	h := in.State.Hosts["web-1"]
+	h.Ceiling = &c
+	in.State.Hosts["web-1"] = h
+	for _, u := range []string{"root", "daemon", "www-data", "systemd-network", "_spotlight", "rescue", "ops", "admin", "portcullis-x"} {
+		in.Members[u] = map[string]int{"ssh_web": 11}
+	}
+	got := mustCompile(t, in)
+	for _, u := range []string{"root", "daemon", "www-data", "systemd-network", "rescue", "ops", "admin"} {
+		if _, ok := got.People[u]; ok {
+			t.Errorf("%s got a personal principal", u)
+		}
+	}
+	if len(got.Collisions) < 7 {
+		t.Errorf("collisions %+v", got.Collisions)
+	}
+}
+
+func TestPrincipalNamespacesNeverOverlap(t *testing.T) {
+	c := mustCompile(t, example())
+	for hg, r := range c.Roles {
+		for _, p := range r.Principals {
+			kind, acct, g, ok := cliapi.ParsePrincipal(p)
+			if !ok || g != hg {
+				t.Errorf("%s: %q", hg, p)
+			}
+			if acct == "deploy" && kind != cliapi.PrincipalShared || acct != "deploy" && kind != cliapi.PrincipalPersonal {
+				t.Errorf("%q in the wrong namespace", p)
+			}
+		}
+	}
+	for _, b := range c.Bundles {
+		for _, a := range b.Accounts {
+			want := cliapi.PrincipalPersonal
+			if a.Kind == cliapi.AccountShared {
+				want = cliapi.PrincipalShared
+			}
+			for _, p := range a.Principals {
+				if k, acct, _, _ := cliapi.ParsePrincipal(p); k != want || acct != a.Name {
+					t.Errorf("account %s carries %q", a.Name, p)
+				}
+			}
+		}
+	}
+}
+
+func TestSharedAccountEqualToUsernameRefused(t *testing.T) {
+	g := state.SSHGrant{ID: "g", Group: "x", HostGroup: "web", Accounts: []string{"{username}", "alice"}, Sudo: "none"}
+	if err := CheckSharedAgainstUsers(g, map[string]bool{"alice": true}); err == nil {
+		t.Error("shared account alice accepted while alice is a person")
+	}
+	if err := CheckSharedAgainstUsers(g, map[string]bool{"bob": true}); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestWideningReasons(t *testing.T) {
+	s := state.SSHSettings{}
+	base := state.SSHGrant{ID: "g", Group: "ssh_web", GroupID: 11, HostGroup: "web", Accounts: []string{"{username}", "deploy"}, Sudo: "none", TTLHours: 4}
+	for name, tc := range map[string]struct {
+		edit  func(*state.SSHGrant)
+		widen bool
+	}{
+		"unchanged":        {func(*state.SSHGrant) {}, false},
+		"fewer accounts":   {func(g *state.SSHGrant) { g.Accounts = []string{"deploy"} }, false},
+		"shorter ttl":      {func(g *state.SSHGrant) { g.TTLHours = 2 }, false},
+		"new account":      {func(g *state.SSHGrant) { g.Accounts = append(g.Accounts, "backup") }, true},
+		"swap account":     {func(g *state.SSHGrant) { g.Accounts = []string{"{username}", "backup"} }, true},
+		"longer ttl":       {func(g *state.SSHGrant) { g.TTLHours = 6 }, true},
+		"ttl to default":   {func(g *state.SSHGrant) { g.TTLHours = 0 }, true}, // 8 h > 4 h
+		"port forwarding":  {func(g *state.SSHGrant) { g.PortForwarding = true }, true},
+		"agent forwarding": {func(g *state.SSHGrant) { g.AgentForwarding = true }, true},
+		"sudo":             {func(g *state.SSHGrant) { g.Sudo = "full" }, true},
+		"root":             {func(g *state.SSHGrant) { g.Accounts = append(g.Accounts, "root") }, true},
+		"host group":       {func(g *state.SSHGrant) { g.HostGroup = "db" }, true},
+		"to all":           {func(g *state.SSHGrant) { g.HostGroup = "all" }, true},
+		"group":            {func(g *state.SSHGrant) { g.Group = "ssh_other" }, true},
+		"group id":         {func(g *state.SSHGrant) { g.GroupID = 12 }, true},
+	} {
+		after := base
+		after.Accounts = slices.Clone(base.Accounts)
+		tc.edit(&after)
+		b := base
+		if got := Widens(&b, after, s); got != tc.widen {
+			t.Errorf("%s: widens %v (%v)", name, got, WideningReasons(&b, after, s))
+		}
+	}
+	if Widens(nil, base, s) {
+		t.Error("a new grant is judged by Privileged, not Widens")
 	}
 }
