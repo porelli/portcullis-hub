@@ -279,3 +279,78 @@ func TestHostRestoreArchiveChecked(t *testing.T) {
 		t.Fatalf("a missing archive of its own: %v", err)
 	}
 }
+
+// TestHostTLSOnlyServedIsSuccess (core interface fix round 1, item 2):
+// the answer is a success only when the provider serves a posted SPKI.
+func TestHostTLSOnlyServedIsSuccess(t *testing.T) {
+	w := wiredFix(t)
+	spki := strings.Repeat("ab", 32)
+	na := w.now.Add(60 * 24 * time.Hour)
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.ServingSPKI = strings.Repeat("cd", 32) })
+	if _, err := w.h.HostMailTLS(context.Background(), []string{spki}, na); statusOf(err) != 502 {
+		t.Fatalf("another served SPKI: %v", err)
+	}
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.ServingSPKI = "" })
+	w.h.mu.Lock()
+	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidRestore}
+	w.h.mu.Unlock()
+	if _, err := w.h.HostMailTLS(context.Background(), []string{spki}, na); statusOf(err) != 503 {
+		t.Fatalf("nothing serving: %v", err)
+	}
+	w.h.mu.RLock()
+	rec := w.h.st.Mail.TLS.SPKISHA256
+	w.h.mu.RUnlock()
+	if len(rec) != 1 || rec[0] != spki {
+		t.Fatalf("not recorded: %v", rec)
+	}
+}
+
+// TestHostStatusNullOrObject (item 4): void_owed and held are null or an
+// object, never false.
+func TestHostStatusNullOrObject(t *testing.T) {
+	w := wiredFix(t)
+	b, _ := json.Marshal(w.h.HostMailStatus(context.Background()))
+	if !strings.Contains(string(b), `"void_owed":null`) || !strings.Contains(string(b), `"held":null`) {
+		t.Fatalf("%s", b)
+	}
+	w.h.mu.Lock()
+	w.h.st.Mail.VoidOwed = &state.MailVoid{Reason: state.MailVoidRestore}
+	w.h.st.Mail.Held = &state.MailHold{Reason: MailHoldText}
+	w.h.mu.Unlock()
+	b, _ = json.Marshal(w.h.HostMailStatus(context.Background()))
+	var v map[string]json.RawMessage
+	json.Unmarshal(b, &v)
+	if !strings.HasPrefix(string(v["void_owed"]), `{"reason":"restore"`) || !strings.HasPrefix(string(v["held"]), `{"reason":`) {
+		t.Fatalf("%s", b)
+	}
+}
+
+// TestRestorePendingNamesTheArchive (item 5): the pending file is the
+// archive's name and a newline; a restore of another archive, or a
+// malformed file, is refused and the hold stays.
+func TestRestorePendingNamesTheArchive(t *testing.T) {
+	w := wiredFix(t)
+	archive, err := w.h.HostMailBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(w.h.cfg.DataDir, mailRestorePendingFile)
+	for _, body := range []string{mailProviderID + "/20200101T000000Z.tar\n", archive, archive + "\n\n", "../x\n"} {
+		writeFile(t, pending, body)
+		if _, err := w.h.HostMailRestore(archive); statusOf(err) != 409 {
+			t.Errorf("%q: %v", body, err)
+		}
+		if _, err := os.Stat(pending); err != nil {
+			t.Fatalf("%q: the hold went: %v", body, err)
+		}
+	}
+	writeFile(t, pending, archive+"\n")
+	op, err := w.h.HostMailRestore(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	if v := w.h.HostMailOp(op.Instance, op.OpID); v == nil || !v.OK {
+		t.Fatalf("op %+v", v)
+	}
+}

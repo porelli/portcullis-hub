@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -87,11 +89,11 @@ type HostMailStatusView struct {
 	Provider          *mailprovider.StatusProvider `json:"provider"`
 	Generation        int                          `json:"generation"`
 	AppliedGeneration int                          `json:"applied_generation"`
-	VoidOwed          bool                         `json:"void_owed"`
-	VoidError         string                       `json:"void_error"`
-	Held              bool                         `json:"held"`
-	HeldReason        string                       `json:"held_reason"`
-	Checks            *mailprovider.Checks         `json:"checks"`
+	// VoidOwed and Held are null or an object, never false (core
+	// interface fix round 1, item 4).
+	VoidOwed *MailVoidView   `json:"void_owed"`
+	Held     *state.MailHold `json:"held"`
+	Checks   *mailprovider.Checks `json:"checks"`
 }
 
 // HostMailStatus is the host status view (the provider read with a
@@ -107,14 +109,12 @@ func (h *Hub) HostMailStatus(ctx context.Context) HostMailStatusView {
 		v.Mode = h.mailModeTextLocked(p.Instance)
 	}
 	v.Generation = h.st.Mail.Generation
-	v.VoidOwed = h.st.Mail.VoidOwed != nil
+	v.VoidOwed = h.mailVoidViewLocked()
 	if hd := h.st.Mail.Held; hd != nil {
-		v.Held, v.HeldReason = true, hd.Reason
+		c := *hd
+		v.Held = &c
 	}
 	h.mu.RUnlock()
-	if v.VoidOwed {
-		v.VoidError, _ = h.MailVoidError()
-	}
 	api := h.mailClient()
 	if api == nil {
 		return v
@@ -168,9 +168,13 @@ func (h *Hub) HostMailTLS(ctx context.Context, spki []string, notAfter time.Time
 	}
 	h.mu.Unlock()
 	h.TriggerMailSync() // MailState v2 carries the SPKIs
+	// A success only when the provider serves one of the posted SPKIs
+	// (core interface fix round 1, item 2: core drops a TLSA record only
+	// on it): not running, a failed reload or another SPKI is a failure
+	// (the certificate stays recorded).
 	api := h.mailClient()
 	if api == nil {
-		return "", nil
+		return "", statusErr(http.StatusServiceUnavailable, "the certificate is recorded, but no mail provider is serving: nothing reloaded")
 	}
 	rctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
 	defer cancel()
@@ -179,7 +183,8 @@ func (h *Hub) HostMailTLS(ctx context.Context, spki []string, notAfter time.Time
 		return "", statusErr(http.StatusServiceUnavailable, "the mail provider didn't reload its certificate: %v", err)
 	}
 	if !slices.Contains(spki, serving) {
-		log.Printf("mail: the provider serves SPKI %s, not one of the mail certificate's", serving)
+		log.Printf("mail: the provider serves SPKI %q, not one of the mail certificate's", mailprovider.Shape(serving, 80))
+		return "", statusErr(http.StatusBadGateway, "the mail provider serves another certificate (SPKI %q), not one of the posted ones", mailprovider.Shape(serving, 80))
 	}
 	return serving, nil
 }
@@ -249,6 +254,33 @@ func (h *Hub) mailRestorePending() bool {
 	return err == nil || !os.IsNotExist(err)
 }
 
+// mailRestorePendingArchive is the archive the pending core restore
+// names (the file is the archive's name and a newline; core interface
+// fix round 1, item 5). ok false: no file. An unreadable or malformed
+// file is an error (the hold stays).
+func (h *Hub) mailRestorePendingArchive() (name string, ok bool, err error) {
+	if h.cfg.DataDir == "" {
+		return "", false, nil
+	}
+	f, err := os.OpenInRoot(h.cfg.DataDir, mailRestorePendingFile)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", true, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 257))
+	if err != nil {
+		return "", true, err
+	}
+	s, cut := strings.CutSuffix(string(b), "\n")
+	if !cut || !archiveRe.MatchString(s) {
+		return "", true, fmt.Errorf("%s isn't an archive name and a newline", mailRestorePendingFile)
+	}
+	return s, true, nil
+}
+
 // HostMailRestore is POST /host/mail/restore {archive}: the wired
 // provider restored from that archive in the background (a void is owed
 // before its volumes are replaced; restoreSteps). The C1 hold is removed
@@ -265,6 +297,12 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 	// traversal, no existence oracle), and only the provider's own.
 	if mm := archiveRe.FindStringSubmatch(archive); mm == nil || mm[1] != id {
 		return nil, statusErr(http.StatusBadRequest, "archive must be %s/<YYYYMMDDTHHMMSSZ>.tar (an archive of the wired provider)", id)
+	}
+	// A pending core restore restores exactly the archive it names.
+	if want, pending, err := h.mailRestorePendingArchive(); err != nil {
+		return nil, statusErr(http.StatusConflict, "the pending core restore can't be read (%v): the provider stays stopped", err)
+	} else if pending && want != archive {
+		return nil, statusErr(http.StatusConflict, "the pending core restore names %s, not %s", want, archive)
 	}
 	if err := h.archiveExists(archive); err != nil {
 		return nil, err

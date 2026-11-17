@@ -279,7 +279,7 @@ func (c *Client) fetch(ctx context.Context, method, path string, body any) (int,
 		}
 		// Redact first, then clip: clipping first could cut a secret so
 		// that its prefix escapes redaction.
-		return resp.StatusCode, raw, &APIError{Status: resp.StatusCode, Msg: clip(redact(e.Error, sec), 500), Kind: clip(e.Kind, 64), Removed: e.Removed}
+		return resp.StatusCode, raw, &APIError{Status: resp.StatusCode, Msg: clipText(redact(e.Error, sec), 500), Kind: clip(e.Kind, 64), Removed: e.Removed}
 	}
 	return resp.StatusCode, raw, nil
 }
@@ -451,21 +451,29 @@ func validCheckListID(id string) bool {
 	return ValidCheckID(id)
 }
 
-// oneLine: 1–n runes, no control character.
+// unprintable: a control, format (bidi overrides, zero-width), line or
+// paragraph separator, or private-use/unassigned rune: never shown as
+// provider text (M9, L10).
+func unprintable(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Co, unicode.Cs) || !unicode.IsPrint(r) && r != ' '
+}
+
+// oneLine: 1–n runes, every one printable.
 func oneLine(s string, n int) bool {
 	if s == "" || utf8.RuneCountInString(s) > n || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) {
+		if unprintable(r) {
 			return false
 		}
 	}
 	return true
 }
 
-// clipText is s with control characters (newlines included) made spaces,
-// invalid UTF-8 dropped and at most n runes (plain text only, §19.8).
+// clipText is s with every unprintable rune (newlines, ANSI escapes,
+// bidi and zero-width characters included) made a space, invalid UTF-8
+// dropped and at most n runes (plain text only, §19.8).
 func clipText(s string, n int) string {
 	var b strings.Builder
 	k := 0
@@ -474,7 +482,7 @@ func clipText(s string, n int) string {
 			b.WriteString("…")
 			break
 		}
-		if unicode.IsControl(r) {
+		if unprintable(r) {
 			r = ' '
 		}
 		b.WriteRune(r)
@@ -482,6 +490,10 @@ func clipText(s string, n int) string {
 	}
 	return b.String()
 }
+
+// Shape is provider-derived text made safe for a log line, the UI, the
+// host CLI and the AI (M9): one line, printable, at most n runes.
+func Shape(s string, n int) string { return clipText(s, n) }
 
 // removedShaped: every removed account has a username and a uuid.
 func removedShaped(rs []Removed) bool {
