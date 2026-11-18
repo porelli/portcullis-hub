@@ -49,6 +49,7 @@
 <script src="/static/myai.js"></script>
 <script src="/static/myapps.js"></script>
 <script src="/static/mysignin.js"></script>
+<script src="/static/myssh.js"></script>
 <script>
   if (window.portcullisFreshAuthCallback) {
     // The popup handed its result to My apps; close() may be refused.
@@ -67,7 +68,10 @@
       // The configured main domain (the server injects it): links into
       // the Hub go to https://hub.<domain>/, never the browser's host.
       domain: {{.Domain}},
-      extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render }],
+      // SSH access: ssh_access holders' grants (myssh.js; the button is
+      // hidden unless the caller may use it).
+      extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render },
+        { id: 'ssh', label: 'SSH access', render: PortcullisMySSH.renderDelegate }],
       onUser: function (name, admin) {
         document.getElementById('who-name').textContent = name;
         document.getElementById('who').hidden = !name;
@@ -76,6 +80,7 @@
         PortcullisNav.render(document.getElementById('site-nav'), navOpts);
       },
     });
+    PortcullisMySSH.probeDelegate(document.getElementById('pd-tab-ssh'));
     if (inv) {
       // Only these keys, nothing else of the link is ever pre-filled.
       // groups ticks only groups the server says don't guard

@@ -46,7 +46,9 @@ type Server struct {
 	// MCPSecret is HUB_MCP_GATE_SECRET (the MCP listener, MCPHandler;
 	// "" = no MCP listener).
 	MCPSecret string
-	Web       fs.FS // contains index.html
+	// CLI configures the CLI listener (cli_listener.go, contract §18.3).
+	CLI CLIOptions
+	Web fs.FS // contains index.html
 	// Docs holds docs/*.md, the docs pages the Portcullis MCP serves as
 	// resources (web.Docs; nil = none).
 	Docs fs.FS
@@ -145,6 +147,8 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerServers(mux)
 	// Settings → Mail and the admin mail routes (§19.9; Hub listener only).
 	s.registerMailAdmin(mux)
+	// SSH access (contract §18; Hub listener only).
+	s.registerSSHAdmin(mux)
 	return mux
 }
 
@@ -195,6 +199,8 @@ func (s *Server) peopleMux() *recordingMux {
 	// The VPN page and People → person's VPN devices (contract §5.1,
 	// §9.7): people listener only.
 	s.registerVPNPeople(mux)
+	// SSH access on people.<d> (contract §18, spec §9.11).
+	s.registerSSHPeople(mux)
 	return mux
 }
 
@@ -433,7 +439,7 @@ func (s *Server) handlePeoplePage(w http.ResponseWriter, r *http.Request) {
 // peopleStatic are the assets people.html and the confirmation page
 // load, plus the logo and favicon set: the people listener serves these
 // only (never the Hub's index.html or settings.js).
-var peopleStatic = map[string]bool{"directory.js": true, "impersonation.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true,
+var peopleStatic = map[string]bool{"directory.js": true, "impersonation.js": true, "directory.css": true, "myapps.js": true, "myai.js": true, "mysignin.js": true, "myssh.js": true, "confirm.js": true, "freshauth.js": true, "freshauth-callback.js": true,
 	"favicon.svg": true, "favicon.ico": true, "apple-touch-icon.png": true, "icon-192.png": true, "icon-512.png": true, "maskable-512.png": true, "site.webmanifest": true, "mark.svg": true}
 
 // handlePeopleStatic serves only peopleStatic on the people listener.

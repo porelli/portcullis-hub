@@ -1,0 +1,20 @@
+{
+  "all": {
+    "principals": [
+      "up:alice@all"
+    ],
+    "extensions": "permit-pty",
+    "source_address": [],
+    "max_ttl_s": 14400
+  },
+  "web": {
+    "principals": [
+      "s:deploy@web",
+      "u:alice@web",
+      "u:bob@web"
+    ],
+    "extensions": "permit-pty",
+    "source_address": [],
+    "max_ttl_s": 28800
+  }
+}

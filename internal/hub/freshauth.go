@@ -122,10 +122,14 @@ func (h *Hub) FreshAuthAccepted() []string { return h.freshAuthAccepted() }
 type freshGov struct {
 	instance string
 	core     string
+	// template names a template directly: an SSH host group's governing
+	// template (contract §18.5; plan C42).
+	template string
 }
 
 func govInstance(id string) freshGov { return freshGov{instance: id} }
 func govCore(key string) freshGov    { return freshGov{core: key} }
+func govTemplate(id string) freshGov { return freshGov{template: id} }
 
 // governingLocked resolves g: the template id and its compiled rule (D2),
 // with the switches as they are now; false (with a reason for the audit)
@@ -133,13 +137,15 @@ func govCore(key string) freshGov    { return freshGov{core: key} }
 // unknown, disabled or unmeetable. Caller holds mu (read).
 func (h *Hub) governingLocked(g freshGov) (id string, rule signin.Node, why string) {
 	switch {
-	case g.instance != "" && g.core == "":
+	case g.template != "" && g.instance == "" && g.core == "":
+		id = g.template
+	case g.instance != "" && g.core == "" && g.template == "":
 		t := h.findLocked(g.instance)
 		if t == nil {
 			return "", signin.Node{}, "no governing template: the instance is gone"
 		}
 		id = h.templateForInstanceLocked(t)
-	case g.core != "" && g.instance == "":
+	case g.core != "" && g.instance == "" && g.template == "":
 		if !slices.Contains(state.CoreSignInKeys, g.core) {
 			return "", signin.Node{}, "no governing template: unknown core page"
 		}

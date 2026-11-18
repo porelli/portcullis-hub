@@ -24,6 +24,9 @@ const (
 	// revocation of a person's certificate (CheckHelp). Never a password,
 	// never a new certificate.
 	PermSignInHelp = "sign_in_help"
+	// PermSSHAccess: non-privileged SSH grants on delegable host groups
+	// (contract §18.12, §9.6), checked by the Hub on a fresh snapshot.
+	PermSSHAccess = "ssh_access"
 	// permAdmin marks an operation as admins only; it is never granted
 	// through Config.Permissions.
 	permAdmin = "admin"
@@ -34,7 +37,7 @@ const (
 )
 
 // delegatedPerms are the only permissions Config.Permissions can grant.
-var delegatedPerms = []string{PermEditDetails, PermInvite, PermRemove, PermSignInHelp}
+var delegatedPerms = []string{PermEditDetails, PermInvite, PermRemove, PermSignInHelp, PermSSHAccess}
 
 // Caller is who is making a request, resolved once per request by
 // CallerFor. Admin: member of lldap_admin. Perms: the delegated
@@ -325,6 +328,16 @@ func (s *Service) checkDelegateTarget(c *Caller, target string, sn *snapshot, cf
 	for _, g := range cfg.Permissions {
 		if g != "" && memberOf(sn.groups[g], target) {
 			return forbidden("not allowed: %s holds a delegated permission (member of %s; admins only)", target, g)
+		}
+	}
+	// Members of a group with a privileged SSH grant (sudo, root,
+	// forwarding, every host) are protected targets (contract §9.6): a
+	// setup link to one would hand over that access.
+	if s.SSHGroups != nil {
+		for _, g := range s.SSHGroups().Privileged {
+			if memberOf(sn.groups[g], target) {
+				return forbidden("not allowed: %s has privileged SSH access (member of %s; admins only)", target, g)
+			}
 		}
 	}
 	return nil

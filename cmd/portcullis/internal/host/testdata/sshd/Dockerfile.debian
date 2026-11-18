@@ -1,0 +1,11 @@
+# The host agent's real-sshd test (host_sshd_test.go, build tag sshd).
+FROM debian@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+RUN apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends openssh-server sudo passwd procps ca-certificates >/dev/null \
+ && rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd && ssh-keygen -A && useradd -m -s /bin/bash breakglass && mkdir -p /home/breakglass/.ssh \
+ && chown breakglass: /home/breakglass/.ssh && chmod 700 /home/breakglass/.ssh \
+ && printf 'PerSourcePenalties no\n' > /etc/ssh/sshd_config.d/00-test-no-penalties.conf
+# Test only: OpenSSH 9.8+ penalises a source address after refused logins,
+# and every login of the test comes from one address (refusals then the
+# break-glass account's login).
+# sshd -D writes no pid file: the shell records its pid, then becomes sshd.
+CMD ["/bin/sh", "-c", "echo $$ > /run/sshd.pid; exec /usr/sbin/sshd -D -e"]

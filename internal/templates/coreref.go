@@ -865,10 +865,12 @@ var (
 			"core-vpn-required", "dashboard-vpn", "grafana-metrics-vpn", "hub-vpn", "keycloak-admin-vpn", "keycloak-admin-vpn-required",
 			"people-vpn", "people-vpn-enrol-vpn", "portal-vpn",
 			// Mail (contract §5): mailctl's well-known router.
-			"mail-wellknown"),
-		"middlewares": set("vpn-required-path", "portcullis-groups-vpn", "portcullis-public-guard-vpn", "portal-vpn-path", "directory-redirect", "hub-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
+			"mail-wellknown",
+			// SSH access (contract §18.3): the CLI's router.
+			"people-cli"),
+		"middlewares": set("vpn-required-path", "portcullis-groups-vpn", "portcullis-public-guard-vpn", "portal-vpn-path", "directory-redirect", "hub-proxy-secret", "hub-cli-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
 			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
-		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "keycloak", "lldap", "mcp-gate",
+		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "hub-cli", "keycloak", "lldap", "mcp-gate",
 			"mailctl", "mailctl-wellknown"),
 	}
 	// routerAttrRe: no tls.certresolver / tls.domains (certificates are
@@ -1040,6 +1042,9 @@ func checkComposeKeys(doc map[string]interface{}) error {
 var (
 	appMiddlewares  = set("portcullis-auth", "portcullis-groups")
 	fileMiddlewares = set("client-headers", "client-cert-pem", "rate-limit", "rate-limit-auth", "security-headers", "strip-client-forwarded")
+	// coreOnlyFileMiddlewares are core @file middlewares no template may
+	// name: strip-identity is the CLI router's (contract §18.3).
+	coreOnlyFileMiddlewares = set("strip-identity")
 )
 
 // chainLabelRe: a chain middleware's member list (folded key).

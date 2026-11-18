@@ -676,6 +676,13 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/directory/users/erin/impersonation/stop", body: ``},
 		{tool: "turn_off_impersonation", args: map[string]any{},
 			method: "PUT", path: "/api/signin/impersonation", body: `{"allowed":false}`},
+		// SSH access (contract §18): a fingerprint that isn't one (nothing
+		// revoked either way), and a grant while the directory's SSH
+		// checks aren't wired (503 both ways, the same audit).
+		{tool: "revoke_ssh_certificates", args: map[string]any{"user": "erin", "fingerprints": []string{"not-a-fingerprint"}},
+			method: "POST", path: "/api/ssh/certificates/revoke", body: `{"user":"erin","fingerprints":["not-a-fingerprint"]}`},
+		{tool: "set_ssh_grant", args: map[string]any{"group": "staff", "host_group": "all", "accounts": []string{"deploy"}},
+			method: "POST", path: "/api/ssh/grants", body: `{"group":"staff","host_group":"all","accounts":["deploy"]}`},
 	}
 	covered := map[string]bool{}
 	for _, c := range cases {

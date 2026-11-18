@@ -690,6 +690,32 @@ The router is generated from the manifest, not shipped in `compose.yml`: only
 the Hub knows whether the exception is on, which shares are listed and which
 TLS tier the host gets, and a template can't open paths by itself.
 
+## SSH access
+
+**Hub → SSH access** (administrators; off until switched on in its
+Settings tab) holds the mapping described in [SSH Access](ssh-access.md):
+
+| Tab | What it holds |
+|---|---|
+| Hosts | managed hosts with their state, last sync, bundle serial, drift and host certificate expiry, *Access*, *Remove account*, *Remove host*; unmanaged entries with their patterns and the `host trust` command |
+| Host groups | members, governing template, source addresses (*Only through the Portcullis VPN*), host certificates, delegable, *Portcullis creates shared accounts*, the setup commands |
+| Grants | group → host group, accounts, sudo, TTL, forwarding; the preview of an unsaved change |
+| Access preview | who can reach a host, a host group or where a person can log in, with a "root or sudo only" filter |
+| Certificates | the issued certificates, *Revoke*, *Sign a host key*, the revoked-keys list |
+| Settings | on/off, default TTL (1–12 h, default 8 h), the CA fingerprints |
+
+*Add host*, privileged grants and *Sign a host key* ask for a fresh sign-in;
+privileged grants also ask for the group's name typed again. The enrolment
+code is shown once, with a *Copy* button and the command to run.
+
+On `people.<domain>`, each person's **Sign-in** page has an SSH access card
+(their host groups, accounts, sudo, hosts and certificates, *Revoke all my
+SSH certificates*, and how to start with the CLI). Administrators and
+`sign_in_help` holders see the same card on **People → person**, with
+*Revoke all SSH certificates*. `ssh_access` holders get an **SSH access**
+page with the grants and previews of delegable host groups, and group pages
+show lines such as "SSH: web (own account), all (own account, sudo)".
+
 ## App settings
 
 Templates declare their options under `settings:` in the manifest

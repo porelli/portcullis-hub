@@ -1581,6 +1581,8 @@ The Hub reads `DOCKER_HOST` for both the `docker compose` CLI (only `up`/`down`)
 
 - **`PORTCULLIS_PORTAL_URL` (NEW, sign-in part 3).** A Keycloak env that core sets to `https://${PORTCULLIS_DOMAIN}/`: where the impersonation start sends the browser (§8.1). Unset, or not an `http(s)` URL, means every start is refused.
 
+- **CLI client (NEW, SSH).** The Hub owns a second fresh-sign-in client, **`portcullis-cli`**, for `portcullis login`: public, PKCE S256, standard flow only, `use.refresh.tokens=false`, no web origins, redirect URIs exactly `http://127.0.0.1:{38917,38918,38919}/callback`, default scopes exactly `basic` and `acr`, mappers exactly `preferred_username` (ID token) and `portcullis-fresh`, owner tag `portcullis.hub.template` = `portcullis-cli`, a protected client id. Ensured in the directory sync loop like `portcullis-fresh-auth`; a foreign or untagged holder fails every CLI proof closed (`ssh_cli_client_conflict`). Details and the verifier: §18.2.
+
 ### 8.1 Sign-in methods — NEW (sign-in)
 
 Sign-in is governed by **methods** switched on or off for the whole server, and **templates**: named rules over those methods. One template is the default; each app instance and each core page may pick another. The Hub owns all of it (`state.yaml`, Settings → Sign-in), compiles each template against the switched-on methods and publishes the compiled rules to three readers: group-gate (policy file v6, §4), the Keycloak extension (`signin-keycloak.json`, below) and mcp-gate (gate file v2, §15.4). Every reader fails closed: an unknown method, rule shape or file version, or an unreadable file, denies, and a method or template that is switched off is never accepted.
@@ -2086,6 +2088,7 @@ Each person's sign-in history is merged at read time from four sources (**NEW, s
 ```
 
 - `kind` is one of `sign_in`, `step_up`, `failed`, `confirmed`, `opened`, `help`, `certificate`, `impersonation` (**NEW, sign-in part 3**, Source 4), `method` (**NEW, authenticator codes**: `signinhistory.KindMethod`, an authenticator app added, replaced or removed by the person, Source 1);
+- **NEW (SSH):** `kind` `ssh_certificate` (`signinhistory.KindSSHCertificate`) comes from Source 3: the person's `ssh.certificate.issue` (ok, one entry per host group, `detail` = the host group, principals and until) and `ssh.certificate.revoke` audit entries (§18.13). It never carries a key, only the fingerprint.
 - `methods` are method ids (`[]` when none), in the §8.1 table's order;
 - `score` = `signin.ScoreOfSet(methods)` (an `all` of the methods, §8.1 "Score") or `null` when there are none;
 - `browser` = `useragent.Parse(ua)`'s `Name` + `OS` (`github.com/mileusna/useragent`; "Firefox · macOS"), or `""` when unknown;
@@ -2175,6 +2178,8 @@ New users are onboarded **without a password**. The admin creates the user in th
     - **Never logged:** the `.p12`, its password, private keys and CSRs never reach a log, an error or an answer other than the one `201` (§8.1 "Browser certificates").
     - The certificate pages and routes of enroll's old site (`/`, `/users`, `/certs`, `/enroll/{u}`, `/api/sign`, `/api/users`, `/self`, `/api/self/renew`) don't exist: `/internal/yubikey-certificates` replaces `/api/sign` and `/internal/yubikey-certificates/renew` replaces `/api/self/renew`. enroll's public mux (`publicMux(srv, inv)`) serves only `/invite/*` and `/healthz`.
 
+- **SSH endpoints (NEW, SSH).** On the same listener, with the same bearer and the same strict JSON ≤ 64 KiB: `PUT /internal/ssh-roles/{hg}`, `DELETE /internal/ssh-roles/{hg}`, `GET /internal/ssh-roles`, `POST /internal/ssh-certificates`, `POST /internal/ssh-host-certificates` and `GET /internal/ssh-ca`, with the bodies, checks and answers of §18.8 and the Vault policy of §18.7. Protected names (`admin`, `portcullis-hub`, `portcullis-*`) and users not in LLDAP are `409` before Vault is called; keys are never logged.
+
 - **Semantics (core).**
     - The token is random (256 bit), stored only as a hash, single-use and expires after 72 h. Invites live in enroll's memory: restarting enroll invalidates pending ones (issue a new invite).
     - Creating an invite revokes the user's earlier unredeemed invites. A user who already has keys gets one more (core's login theme gives every new passkey a unique label); to replace lost keys, delete them first (the Hub's "Reset passkeys", or `./portcullis invite <user> --replace-keys`).
@@ -2213,6 +2218,8 @@ New users are onboarded **without a password**. The admin creates the user in th
     **NEW (AI support).** Two more keys, present only on entries made through the Portcullis MCP (§15.10): `"via": "ai"` and `"client": "<azp>"` (the AI client, e.g. `portcullis-ai-claude-code`). The Hub sets them **only** from the identity the gate sent on the MCP listener (§15.7); the Hub and people listeners never read them from a request, so a browser can't forge "via AI". Everything else is unchanged: `actor` is the person, `action` exactly the HTTP handler's action name (e.g. `instance.delete`, `group.rule`, `group.add_member`), `result` `ok` / `refused` / `error`, and refusals are audited too. `GET /api/directory/audit?via=ai` returns only such entries.
 
     New actions, with their HTTP and MCP twins: `ai.enable`, `ai.disable`, `ai.mode` (instance, companion, before → after), `ai.providers` (an AI page instance's provider selection), `ai.credential.mint`, `ai.credential.revoke` (instance, companion, person, app-side id or count; never a credential), `ai.connection.revoke` (person, client), `ai.confirm` (§15.6: `approved`, `declined`, `expired`, `refused`; the argument digest, never arguments), `settings.ai` (Hub Settings → AI; the changed keys), `ai.provider.add`, `ai.provider.update`, `ai.provider.secret` (which field was replaced, never the value), `ai.provider.delete`. These mutations are audited too, for parity with their tools: `instance.enable`, `instance.disable`, `instance.restart`, `instance.exec` (detail: the service and the exit code, never the command's output), `app.env`, `drift.resolve`, `source.add`, `source.remove`, `source.sync` (a source's detail is `scheme://host/path` only: never credentials, query or fragment); **NEW (sign-in):** `signin.method`, `signin.template`, `signin.template_enabled`, `signin.template_delete`, `signin.default`, `signin.core`, `signin.add_stronger`, `signin.reset_core` (§8.1); **NEW (sign-in part 2):** `signin.limits` (§8.1 "Limits"), `signin.password` (detail `self set` / `self removed`), `cert.create` (detail `browser <serial> until <date>` or `yubikey <serial> until <date>`), `cert.renew`, `cert.revoke` (§5.1, §9.7; detail `as sign_in_help` for a delegate, also on `user.invite` and `user.remove_passkeys`), and `domain.add` (§11.7); **NEW (DNS hardening):** `domain.dns_apply` (target the domain, detail `sets=<a,b>`, e.g. `sets=address,caa`) and `domain.dnssec_enable` (target the domain), §12.3. No `cert.*` or `signin.password` entry ever holds a `.p12`, a password, a CSR, a certificate or a proof. `ai.credential.*` (app credentials for AI) and file sharing's `credential.*` are distinct families. Actions on app companions are not Hub actions: they are in the gate's access log (§15.8).
+
+- **SSH actions (NEW, SSH).** `ssh.settings`, `ssh.hostgroup.create|update|delete`, `ssh.host.create|update|remove`, `ssh.host.enrol`, `ssh.grant.create|update|delete`, `ssh.account.remove`, `ssh.certificate.issue|revoke|breakglass`, `ssh.host_certificate.issue`, `ssh.host.drift` and `ssh.host.stale`, with the details of §18.13. Entries hold fingerprints, never keys, tokens, codes or enrolment secrets.
 
 ### 9.6 Custom fields and delegated permissions (NEW)
 
@@ -2300,12 +2307,13 @@ The Hub stores field definitions, rules, exceptions, expiries and permission gra
 
 #### Delegated permissions
 
-Four permissions can be granted to groups (manual or rule-based):
+Five permissions can be granted to groups (manual or rule-based; **NEW, SSH:** the fifth is `ssh_access`):
 
 1. **`edit_details`**: edit user fields, bulk import (CSV review + apply)
 2. **`invite`**: create new users via invite link (with no group memberships)
 3. **`remove`**: delete users
 4. **`sign_in_help`** (**NEW, sign-in part 2**): help people reset their sign-in — send a setup link, remove passkeys, revoke certificates (below)
+5. **`ssh_access`** (**NEW, SSH**): create, edit and delete non-privileged SSH grants on delegable host groups, and see their access previews (below)
 
 - **Grants.** Each permission is granted to an LLDAP group the admin picks. Members of that group (non-admins) get the permission. Admins always have all permissions.
 - **Scope.** Delegation is global for now (all users, subject to the constraints below). Scoped delegation (e.g., "HR Milan edits only Milan people") is a non-goal for this release.
@@ -2337,10 +2345,17 @@ Four permissions can be granted to groups (manual or rule-based):
         - They also refuse `admin`, `portcullis-hub` and every `portcullis-*` name for everyone (409 "this account's certificates are managed from the server: ./portcullis cert revoke <serial>"), as enroll does (§9.4).
     - **Audit:** actions keep their names (`user.invite`, `user.remove_passkeys`, `cert.revoke`; **NEW, authenticator codes:** `user.remove_authenticators`), with detail `as sign_in_help` for a delegate. These are the `help` entries in the person's history (§8.2).
     - **Residual risk (accepted):** a `sign_in_help` setup link hands the account to whoever holds it, so grant the permission only to people you'd trust with those accounts. Administrators can never be reached this way.
+- **SSH access: `ssh_access` (NEW, SSH).**
+    - **The permission:** `PermSSHAccess` joins `delegatedPerms`; granted to one group through `directory.yaml` `permissions` and `PUT /api/directory/permissions/ssh_access`.
+    - **Holders may** create, edit and delete **non-privileged** grants (§18.12) on host groups marked delegable, and see those host groups' access previews, on `people.<d>` (`/api/ssh/delegated/…`).
+    - **Holders may never:** create or widen a privileged grant (`403` "only administrators can grant sudo, root, forwarding or server access"); grant to a group they are in or a rule could put them in (`403` "you can't grant access to a group you're in"); grant to a permission group, a protected group (`lldap_admin`, `lldap_password_manager`, `INVITE_PROTECTED_GROUPS`, core-subdomain groups) or a group with a privileged grant (`403`); edit host groups, hosts, settings or the CA.
+    - **Protected targets:** members of a group with a privileged SSH grant are protected targets of `checkDelegateTarget` for every delegated permission (a `sign_in_help` setup link to one is `403`). Holding `ssh_access` makes its group a permission group.
+    - **Audit:** `ssh.grant.*` with detail `as ssh_access`. The checks run against a fresh snapshot inside `gate`.
     - **Routes:** §9.7 "Person's Sign-in routes".
 
 - **Security rules:**
     - **Reserved attribute prefix.** Custom field names may not start with `ps_` (LLDAP attribute `ps-…`). That prefix is reserved for Hub-managed setting claim attributes (§8, §13.6).
+    - **SSH grant groups (NEW, SSH)**: every LLDAP group used by an SSH grant (§18.12) is a **guarding group** ("an SSH access group"), with the same restrictions as app admin groups.
     - **App admin groups** (§13): groups that carry per-group values of a privileged option become **guarding groups** (exactly like `admin_<id>` today). They get the same restrictions: rules on admin-only fields only, no rule matching an empty person, the evaluator never adds `created_by` accounts. An admin-only field they use can't be turned off. The Hub computes these groups on the fly from the current settings (no `directory.yaml` field); removing the per-group row ends the guarding at once.
     - Rules of **protected groups** (`lldap_admin`, `lldap_password_manager`, `INVITE_PROTECTED_GROUPS`, core-subdomain groups), **permission groups**, and **path-admin groups** (`admin_group`, `path_groups` admin access) may only reference **admin-only** fields. A field used by such a rule cannot lose its admin-only flag.
     - **"Allow any profile field in this group's rule" (NEW, `allow_any_field`).** A per-group boolean in `directory.yaml` (`groups.<name>.allow_any_field`, absent = `false`, which keeps the rule above). With it on, the rule of an **app admin group** (`admin_<app>`, `path_groups` admin access) or a **privileged-value group** may use fields that aren't admin-only: rule validation (`PUT …/rule`, `convert`, `convert-preview`), re-evaluation (adds aren't blocked), privileged values (`PrivilegeProblem`) and a field losing admin-only all honour it. It never applies to **permission groups** or **administrator / built-in groups**: turning it on there is refused (409); a group with it on keeps the admin-only rule while it holds a permission, and `PUT /api/directory/permissions/{perm}` still refuses a group whose rule uses an editable field. Everything else stays: the rule must not match a person with no field values, and the evaluator never adds `created_by` accounts. The group still counts as guarding (`Membership.Guarding`, MCP confirmations).
@@ -4697,6 +4712,22 @@ Under a non-identity map, `apply`, `restore` and `childfix` refuse (exit `2`, no
     - `storage_measure_partial` (Info): a storage target was measured only in part in the last run; "the figure is a lower bound". The text follows `partial_reason`: `entries` / `time` (its cap; the next run measures it again), `failed` (entries it couldn't read: check their owners, it stays until they are readable), `hard_links` (more than it tracks: always a lower bound), `names` / `depth` (skipped past the limit). Fingerprint: the owner and the target.
 
 
+- **SSH (NEW, SSH)** registers these kinds (Hub `internal/doctor/ssh.go`, input `doctor.SSHIn`; explain-only, none fires while SSH access is off except `ssh_breakglass_cert`):
+    - `ssh_ca_missing` (Problem): enroll's `GET /internal/ssh-ca` `problems`, or a role whose read-back differs from §18.7;
+    - `ssh_cli_client_conflict` (Problem): `portcullis-cli` held by an untagged or foreign client, or its ensure failing;
+    - `ssh_privileged_grant` (Info): one per privileged grant;
+    - `ssh_host_stale`: a managed host without a sync for 15 minutes (Warning) or 24 hours (Problem);
+    - `ssh_host_drift`: a hand-edited file the agent fixed (Warning) or an override it can't fix (Problem: the keyword and the effective value);
+    - `ssh_host_account_conflict`, `ssh_host_account_missing`, `ssh_host_account_invalid` (Warning): per account, from the host's report;
+    - `ssh_host_ceiling` (Warning): a bundle entry the local ceiling refused;
+    - `ssh_host_authorized_keys_shared` (Info): shared accounts with `authorized_keys`;
+    - `ssh_host_cert_expiring` (Warning): a host certificate with ≤ 14 days left;
+    - `ssh_host_bundle_too_large` (Problem): a compiled bundle over 4 MiB, not served;
+    - `ssh_breakglass_used` (Warning): logins to a host's break-glass account (time and source);
+    - `ssh_breakglass_cert` (Warning): break-glass certificates imported from `breakglass.jsonl`;
+    - `ssh_hostgroup_unused` (Info): a host group with no grant or no host;
+    - `ssh_username_collision` (Problem): a personal grant skipped because the username is root, a shared, protected, reserved or system account (§18.12);
+    - `ssh_revocation_incomplete` (Warning): fingerprints revoked whose keys the Hub didn't know (§18.10).
 ### 14.6 Fix classes
 
 - **One-click** (preview → plan hash → Apply, `202`; `409` "the setup changed since the preview" on a mismatch; audited `doctor.fix` besides what the steps audit). **NEW (AI support):** the preview's `FixPlan` carries `touches_data`, true for the fixes that change data on disk or revoke access (the folder assignment and undo, `person_tree_owner`, `revoke_leaver`); the Portcullis MCP's `doctor_apply_fix` is class D (a confirmation, §15.6) when it is set, and (**NEW**, DNS hardening) for the `dnssec_sign` fix:
@@ -5565,6 +5596,8 @@ The only MCP server Portcullis writes: the Hub's, at `https://hub.<d>/mcp` (`/mc
 - **Resources and prompts.** `portcullis://docs/<name>` (both scopes), `portcullis://templates` and `portcullis://templates/{id}`, `portcullis://doctor/checks` and the prompts are admin-only. Long operations send no progress notifications (stateless: the twin's `202` body at once, then `wait_for_op`).
 - **Canonical JSON.** The Hub's `internal/mcpsdk/canon.go` is a copy of the gate's `internal/canon` (one can't import the other across repos); both keep the same vectors.
 
+- **New tools (NEW, SSH).** Admin (`/mcp/admin`): `list_ssh_access` (R, `GET /api/ssh/grants` + host groups), `ssh_access_preview` (R, `GET /api/ssh/hosts/{id}/access`), `list_ssh_certificates` (R, `GET /api/ssh/certificates`), `list_ssh_hosts` (R, `GET /api/ssh/hosts`, state and drift), `revoke_ssh_certificates` (D, `POST /api/ssh/certificates/revoke`) and `set_ssh_grant` (D, `POST|PUT /api/ssh/grants`, **non-privileged only**: a privileged grant is `403`). People (`/mcp/people`): `my_ssh_access` (R, `GET /api/me/ssh`) and `revoke_my_ssh_certificates` (W, `POST /api/me/ssh/revoke-all`). Never through MCP: signing user or host certificates, enrolment codes, privileged grants, `source-address`, settings and CA rotation.
+
 ### 15.11 Hub API, switches and audit
 
 Admin routes on the Hub listener only (`adminOnly`: no `X-Forwarded-User` `401`, delegates `403`), proxy-secret and CSRF guards, strict JSON bodies ≤ 64 KiB. Every answer shows secrets as `{set, updated_at}` only.
@@ -5919,9 +5952,418 @@ Optional history for the Usage page (§11.11) in core's Prometheus (compose prof
 - **Series** (gauges unless noted; labels `app` (the instance id or `core`), `service`, `number`; never `instance` or `job`, which Prometheus sets on scrape: `instance` stays the target `hub-metrics:9100`, and the job keeps `honor_labels` false): `portcullis_container_cpu_seconds_total` (counter), `portcullis_container_memory_working_set_bytes`, `portcullis_container_memory_limit_bytes`, `portcullis_container_pids`, `portcullis_container_network_receive_bytes_total` / `portcullis_container_network_transmit_bytes_total` (counters), `portcullis_container_blkio_read_bytes_total` / `portcullis_container_blkio_write_bytes_total` (counters), `portcullis_container_oom_killed`, `portcullis_storage_alloc_bytes{app, kind, target}`, `portcullis_storage_measured_timestamp_seconds{app, kind, target}`, `portcullis_filesystem_free_bytes{dev}` / `portcullis_filesystem_total_bytes{dev}`, `portcullis_usage_sampler_last_success_timestamp_seconds`. **Null values are omitted**, never exported as `0`. `target` is a volume name, a folder id, a service or an image, never a host path: binds are `bind:<n>`, numbered per instance in path order; a shared folder's series (`kind="folder"`, `target` its id) carry no `app` label; two running containers with one label set export only the first, and a scrape never fails for one bad series; a memory limit of `0` (none) is left out. At most about 2,600 series (the 256-container cap).
 - **Alerts** (core `alerts.yml`, the doctor's thresholds): `PortcullisAppMemoryNearLimit` (working set / limit > 0.9 for 10m), `PortcullisDiskNearlyFull` (the doctor's warning band: under 10 % or 5 GiB free for 30m), `PortcullisDiskAlmostFull` (critical, its problem band: under 3 % or 1 GiB free for 10m), `PortcullisUsageSamplerStale` (no successful sweep for 10m while the Hub is up), `PortcullisUsageSamplerNeverRan` (the Hub scraped for 15m with no successful sweep yet). CI scrapes the Hub with a real Prometheus and core's `prometheus.yml` and checks that `app` survives and `instance` is the target. Dashboard uid `portcullis-usage`.
 
-## 19. Mail — NEW (mail)
+## 18. SSH access and the CLI — NEW (SSH, CLI login)
 
-§17 is Servers (multiple servers, above); §18 (SSH, CLI login) is reserved for its own feature and not written yet.
+Part 1 of the CLI design (`portcullis-hub` `docs/superpowers/specs/2026-11-15-cli-login-ssh-design.md`, plan `2026-11-15-cli-login-ssh.md`): `portcullis login` gets Vault-signed SSH user certificates for a person's host groups; managed hosts are enrolled once and kept current by `portcullis host sync`; unmanaged hosts get a static setup from `portcullis host trust`. Device-code sign-in, CA rotation, `portcullis-servers` / `worker join` (part 2) and API tokens (part 3) are not part of this section yet. The spike's measured behaviour (Vault 2.2.1, Keycloak 26.8.1, OpenSSH 8.2–10.0) is `portcullis-hub` `docs/superpowers/spikes/2026-11-15-cli-ssh-results.md`; the values below already follow it.
+
+### 18.1 The pieces
+
+| Piece | Repo | What it is |
+|---|---|---|
+| The Portcullis CLI | Hub (`cmd/portcullis`) | one binary for people (`login`, `status`, `logout`, `ssh-config`, `open`, `version`) and hosts (`host enroll | trust | sync | status | remove | certify`); imports nothing from the Hub but `internal/cliapi` |
+| `internal/cliapi` | Hub | the wire types, grammars, canonical messages and the shared vectors `internal/cliapi/testdata/vectors.json` |
+| The CLI listener | Hub | `HUB_CLI_ADDR` (default `:8891`), serving only `/api/cli/v1/*` |
+| `people-cli` router, `strip-identity@file`, `hub-cli` service | core | the only route to `:8891` (§18.3) |
+| `ssh_user`, `ssh_host` mounts | core (Vault) | the user and host CAs (§18.7) |
+| enroll's five SSH endpoints | core | the only Vault signer (§18.8, §9.4) |
+| `portcullis-cli` | Hub (Keycloak client) | the loopback sign-in client (§18.2) |
+
+The server CLI (`./portcullis`, bash, in the core checkout) is "the server CLI"; `portcullis` (Go) is "the Portcullis CLI".
+
+### 18.2 The Keycloak client `portcullis-cli`
+
+The Hub owns it and ensures it in the directory sync loop next to `portcullis-fresh-auth` (`keycloak.EnsureCLIClient`), owner tag `portcullis.hub.template` = `portcullis-cli`. It is a protected client: templates may not use the id.
+
+- public, standard flow only, `pkce.code.challenge.method=S256`;
+- off: implicit flow, direct access grants, service accounts, the device grant (`oauth2.device.authorization.grant.enabled=false`), CIBA (`oidc.ciba.grant.enabled=false`) and standard token exchange (`standard.token.exchange.enabled=false`); `use.refresh.tokens=false`; no `offline_access`; consent not required; **no web origins**;
+- redirect URIs exactly `http://127.0.0.1:38917/callback`, `http://127.0.0.1:38918/callback`, `http://127.0.0.1:38919/callback` (Keycloak matches loopback URIs exactly, port included: `127.0.0.1:40000` and `localhost:38917` are refused);
+- default client scopes exactly `basic` and `acr`, no optional scopes;
+- protocol mappers exactly two: the username as `preferred_username` (ID token only) and the extension's `portcullis-fresh` (`pc_fresh`, ID token only); any other mapper is removed.
+
+An untagged or foreign-tagged client of that id, or a failed ensure, makes every CLI proof fail closed: `503` `{"error": "SSH sign-in isn't available right now"}` and the doctor's `ssh_cli_client_conflict` (Problem). The extension needs no change: `pc_method`, templates, `portcullis-fresh` and `portcullis-impersonation` work on any client.
+
+**freshauth for the CLI.** The Hub's fourth verifier (`hub.VerifierCLI`) is `freshauth.Config{ClientID: "portcullis-cli", RedirectURIs: <the three URLs>}`. The posted `redirect_uri` must be one of them (checked before the exchange; the exchange sends that exact URI). Every check of §8 "Fresh-auth client" applies with `portcullis-cli` in place of `portcullis-fresh-auth` (`aud`, `azp`, nonce, `auth_time` ≥ now − 300 s, `pc_fresh` switched on and accepted by the governing template), except that the username is **taken** from `preferred_username` (lowercased) instead of compared with a caller (`VerifyAnyUser`). An ID token with an `act` or `pc_imp` key, whatever its value, is impersonated (`Result.Impersonated`) and is refused (`403` "a session as someone else can't get SSH certificates").
+
+### 18.3 The router, the listener and the proxy secret
+
+| Setting | Value |
+|---|---|
+| Router | `people-cli` |
+| Rule | `` Host(`people.<d>`) && PathPrefix(`/api/cli/v1/`) `` |
+| Priority | 200 |
+| TLS options | `authaware@file` |
+| Middlewares, in order | `rate-limit-auth@file`, `strip-identity@file`, `security-headers@file`, `hub-cli-proxy-secret@docker` |
+| Service | `hub-cli` → the Hub's port 8891 |
+| Forward-auth | **none** (the proof is the authentication) |
+| Entrypoints | `${PORTCULLIS_EP_ENROL:-websecure,vpnsecure}` |
+
+- **`strip-identity@file`** (`traefik/dynamic/middlewares.yml`) sets these request headers to empty: `X-Forwarded-User`, `X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Auth-Request-User`, `X-Auth-Request-Email`, `X-Auth-Request-Groups`, `X-Auth-Request-Preferred-Username`, `X-Forwarded-Access-Token`, `Authorization`, `X-Forwarded-Impersonator`, `X-Forwarded-Impersonation` and `X-Portcullis-Proxy-Secret`.
+- **`HUB_CLI_PROXY_SECRET`** (`openssl rand -hex 32`, in `CORE_SECRETS` and `ROTATABLE_SECRETS`): the middleware `hub-cli-proxy-secret` sets `X-Portcullis-Proxy-Secret` to it. The CLI listener accepts only that value (constant-time; missing or the main `HUB_PROXY_SECRET` → `401`), and the Hub's other listeners never accept it, so neither listener accepts the other's secret. The Hub refuses to start without it.
+- **The listener** serves only `/api/cli/v1/*` (every other path `404`). It never reads an identity header: `X-Forwarded-User` and its siblings change nothing.
+- **The client address** is `X-Real-Ip`, which Traefik sets from the connection (no entrypoint trusts forwarded headers). Without it, the address is one shared `unknown` for the limits.
+- **Version header.** Every CLI request carries `Portcullis-CLI: <version>; api=1`. A missing header, another `api`, or a version below `HUB_CLI_MIN_VERSION` (optional; the config's `min_cli`; a non-semver version such as `dev` passes) answers `426` `{"error": "update the Portcullis CLI to <min>"}`. The CLI never updates itself.
+- **Bodies** are strict JSON (`DisallowUnknownFields`, one value, no trailing data): `400` on a schema error, `413` over the route's cap. Errors are `{"error": "<fixed text>"}`; reasons go to the log and the audit only.
+
+### 18.4 The API
+
+| Route | Who | Cap | Answer |
+|---|---|---|---|
+| `GET config` | anyone | — | `{"api": 1, "domain", "issuer", "authorize_url", "client_id": "portcullis-cli", "redirect_ports": [38917, 38918, 38919], "device": false, "min_cli"}` — no person or host data; answers while SSH access is off |
+| `POST ssh/certificates` | a fresh sign-in (§18.5) | 16 KiB | §18.5 |
+| `POST ssh/revocations` | a fresh sign-in, any switched-on method | 16 KiB | `{"revoked": n}` (§18.10) |
+| `POST ssh/host-certificates` | an administrator, `pc_fresh` `security_key` or `yubikey_cert` | 16 KiB | `{"certificate", "valid_before"}` (§18.9) |
+| `GET ssh/ca` | anyone | — | `{"user_cas": ["ssh-ed25519 …"], "host_cas": ["ssh-ed25519 …"]}` |
+| `GET ssh/revoked-keys` | anyone | — | `text/plain`, one public key (`authorized_keys` form, no comment) per line, the OpenSSH `RevokedKeys` format |
+| `POST hosts/enrol/challenge` | a host being enrolled | 4 KiB | `{"challenge"}` (§18.11) |
+| `POST hosts/enrol` | a host being enrolled | 64 KiB | the first bundle |
+| `GET hosts/bundle?since=<serial>` | a signed host request | — | the bundle, or `204` after 55 s |
+| `POST hosts/report` | a signed host request | 256 KiB | `204` |
+
+All under `https://people.<d>/api/cli/v1/`. **SSH access off** (`state.ssh.settings.enabled` false, the default): `config`, `ssh/ca` and `ssh/revoked-keys` still answer; `ssh/certificates`, `ssh/revocations` and `ssh/host-certificates` answer `409` "SSH access is off on this server"; enrolment (`hosts/enrol/challenge`, `hosts/enrol`) answers `503` "SSH access is off"; enrolled hosts keep syncing and reporting, and switching off **ends** access rather than freezing it: the compile runs with no grants, so every bundle locks every Portcullis account and every unexpired certificate is revoked on leave; no Vault role is written.
+
+### 18.5 Signing a person's certificates
+
+**Request** `POST ssh/certificates`:
+
+```json
+{"code": "…", "code_verifier": "…", "nonce": "…",
+ "redirect_uri": "http://127.0.0.1:38917/callback",
+ "public_key": "ssh-ed25519 AAAA…",
+ "key_proof": "-----BEGIN SSH SIGNATURE-----…",
+ "host_groups": [], "own_key": false}
+```
+
+`host_groups` empty = all the person's host groups. At most 16 certificates per login. `own_key` (optional) is `true` with `login --key`: the key is the person's own, not this login's ephemeral one, so its revocation never expires (§18.10).
+
+**The Hub's steps, in order:**
+
+1. exchange the code with the `portcullis-cli` verifier (§18.2);
+2. every freshauth check, then the impersonation check;
+3. the person is `preferred_username` (the LLDAP username), never the email;
+4. the key proof (§18.6) and the key type;
+5. the revoked-keys list (§18.10): a listed key is refused;
+6. the mapping (§18.12) against **one fresh** `Membership(ctx, now)` read per request (never the cached snapshot), plus Keycloak's `enabled` flag;
+7. each host group's Vault role is current (§18.12 "Delivery"); a role that can't be made current fails closed (`503`);
+8. enroll signs one certificate per host group (§18.8);
+9. the issued index, then the audit and history (§18.13): an index that can't be written means nothing is issued (`503` "SSH certificates can't be issued right now"; a certificate the index doesn't hold could never be revoked on leave);
+10. the answer.
+
+**Refused outright** (`409`, enroll never called): `admin`, `portcullis-hub`, every `portcullis-*` name, a disabled Keycloak user, a username not in LLDAP.
+
+**Strength.** A host group is issued only when `pc_fresh` is (a) accepted by the host group's governing template (§8 "Governing template", `freshGov` `template`) and (b) in `strongFreshMethods` (`passkey_synced`, `passkey_device`, `security_key`, `yubikey_cert`). `password`, `totp` and `browser_cert` never sign, whatever the template says. A group whose template the proof doesn't meet is listed in `refused` with `"<hg> needs <method words>: sign in with --method <id>"`, the words from `signin.InfoOf` (e.g. "web needs a YubiKey: sign in with --method security_key"); the other groups are issued. A template that no allowlisted method can meet can't be chosen for a host group (`409`).
+
+**Answer** (`200`):
+
+```json
+{"user": "alice",
+ "certificates": [{"host_group": "web", "certificate": "ssh-ed25519-cert-v01@openssh.com AAAA…",
+                   "principals": ["u:alice@web"], "serial": "1234567890",
+                   "valid_before": "2026-11-15T18:04:05Z",
+                   "hosts": ["web-1.example.com", "web-2.example.com"]}],
+ "refused": [{"host_group": "prod", "reason": "prod needs a YubiKey: sign in with --method security_key"}],
+ "host_cas": ["ssh-ed25519 AAAA…"], "revoked_host_keys": []}
+```
+
+Unknown or ungranted ids in `host_groups` are listed in `refused` as "not available to you"; the answer never reveals other host groups. All refused (no certificate) is still `200`: the CLI exits 3.
+
+**Fixed texts:** `403` "a fresh sign-in is required" (every proof or key-proof failure; the reason goes to the log and the audit); `403` "a session as someone else can't get SSH certificates"; `409` "SSH access is off on this server"; `400` "this key type can't be certified: use an ed25519 or ECDSA P-256 key (a FIDO sk- key works too)"; `403` "this key is revoked: use another key"; `409` "this account can't get SSH certificates" (protected names), "this account isn't in the directory", "this account is disabled"; `429` "too many attempts: wait a minute and try again"; `503` "SSH certificates can't be issued right now" (a role that can't be made current, enroll refusing, an answer that fails the Hub's check, the key that can't be recorded) and "SSH sign-in isn't available right now" (`portcullis-cli` not in place). Refused entries: "not available to you" (unknown or ungranted ids, the same text for both), "at most 16 certificates per sign-in", "your access ends in less than 5 minutes".
+
+**Checked before it's handed out:** enroll's answer must parse as a user certificate for exactly the posted key, the planned principals and key id, signed by a known user CA, valid no longer than planned (one minute of clock slack), with no extension outside the four. The key's fingerprint → key record (§18.10) is written **before** enroll is asked; if it can't be written, nothing is signed.
+
+**Limits** (`golang.org/x/time/rate`, idle limiters dropped after 10 minutes): refusals 10 a minute per address and per person (burst 10), successful signings 6 a minute per person (burst 6); over either, `429`. At most 64 host groups and 256 grants in the state.
+
+### 18.6 Keys and the key proof
+
+- **Key types accepted:** `ssh-ed25519`, `ecdsa-sha2-nistp256`, `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com` (spike S1: Vault 2.2.1 signs all four). **Refused:** RSA of any size, DSA, ECDSA P-384 and P-521, and every other type.
+- **Key proof:** an SSHSIG (`github.com/hiddeco/sshsig`) by the posted key, namespace `portcullis-ssh-certificate@v1`, hash SHA-512, over the canonical JSON
+
+    ```json
+    {"domain":"example.com","nonce":"<OIDC nonce>","code_sha256":"<hex SHA-256 of the code>","public_key":"<authorized_keys line, type and base64 only>"}
+    ```
+
+    Canonical = these four keys in this order, no whitespace, Go `encoding/json` string escaping (`cliapi.KeyProofMessage`). The Hub rebuilds it and verifies; the code is single-use, so a proof can't be replayed.
+
+- **Fingerprints** everywhere are `ssh.FingerprintSHA256` (`SHA256:<base64, no padding>`).
+
+### 18.7 Vault: mounts, roles and the policy
+
+Set up by `./portcullis vault init` / `pki setup` (`ssh_setup`, idempotent; an existing mount with another cap or CA key type is a `fail` naming it, never re-created):
+
+```
+vault secrets enable -path=ssh_user ssh
+vault secrets tune -max-lease-ttl=12h ssh_user
+vault write ssh_user/config/ca generate_signing_key=true key_type=ed25519
+vault secrets enable -path=ssh_host ssh
+vault secrets tune -max-lease-ttl=2160h ssh_host
+vault write ssh_host/config/ca generate_signing_key=true key_type=ed25519
+vault write ssh_host/roles/host key_type=ca allow_host_certificates=true \
+    allow_user_certificates=false allow_user_key_ids=true allowed_domains="*" allow_subdomains=true \
+    allow_bare_domains=true ttl=2160h max_ttl=2160h
+```
+
+`allow_user_key_ids=true` on the host role: without it Vault refuses the `key_id` `pc-host:<host id>` enroll sends ("setting key_id is not allowed by role", found by `TestLiveSSHVault`). `pki setup --force` never touches the SSH mounts or CAs.
+
+**One user role per host group, `ssh_user/roles/hg-<id>`**, written only by enroll from the Hub's compilation. Every field is sent as a **string** (spike S4: JSON booleans are refused by `allowed_parameters`):
+
+| Field | Value |
+|---|---|
+| `key_type` | `"ca"` |
+| `allow_user_certificates` / `allow_host_certificates` / `allow_user_key_ids` | `"true"` / `"false"` / `"true"` |
+| `allowed_users` | the exact principal list, comma-joined, sorted |
+| `allowed_extensions` | one of the four canonical strings `permit-pty`, `permit-pty,permit-port-forwarding`, `permit-pty,permit-agent-forwarding`, `permit-pty,permit-port-forwarding,permit-agent-forwarding` (this order only) |
+| `default_extensions` | `{}` |
+| `allowed_critical_options` | `""`, or `"source-address"` when the host group has CIDRs |
+| `default_critical_options` | `{}`, or `{"source-address": "<cidr>,<cidr>"}` |
+| `allowed_user_key_lengths` | `{"ssh-ed25519": [0], "ecdsa-sha2-nistp256": [256], "sk-ssh-ed25519@openssh.com": [0], "sk-ecdsa-sha2-nistp256@openssh.com": [256]}` |
+| `ttl`, `max_ttl` | the longest grant TTL, **whole hours as decimal seconds**, one of `"3600"`, `"7200"`, … `"43200"` (enroll rounds up to the hour) |
+
+**The 12 h cap is the policy's, not the mount's.** Spike S4c: a role with `max_ttl` above the mount's `max-lease-ttl` signs past it (the mount cap applies only when the role's `max_ttl` is 0). So the policy pins `ttl` and `max_ttl` to the twelve whole-hour values ≤ 12 h, and no role can ever be written with a TTL above 12 h.
+
+**`vault/policies/enroll.hcl` additions:**
+
+```hcl
+path "ssh_user/sign/hg-*" {
+  capabilities = ["update"]
+  denied_parameters = { "cert_type" = [], "critical_options" = [] }
+}
+path "ssh_user/roles/hg-*" {
+  capabilities = ["create", "update", "read", "delete"]
+  allowed_parameters = {
+    "key_type"                 = ["ca"]
+    "allow_user_certificates"  = ["true"]
+    "allow_host_certificates"  = ["false"]
+    "allow_user_key_ids"       = ["true"]
+    "allowed_users"            = ["s:*", "u:*"]
+    "allowed_extensions"       = ["permit-pty", "permit-pty,permit-port-forwarding",
+                                  "permit-pty,permit-agent-forwarding",
+                                  "permit-pty,permit-port-forwarding,permit-agent-forwarding"]
+    "default_extensions"       = [{}]
+    "allowed_critical_options" = ["", "source-address"]
+    "default_critical_options" = []
+    "allowed_user_key_lengths" = []
+    "ttl"                      = ["3600", "7200", "10800", "14400", "18000", "21600",
+                                  "25200", "28800", "32400", "36000", "39600", "43200"]
+    "max_ttl"                  = ["3600", "7200", "10800", "14400", "18000", "21600",
+                                  "25200", "28800", "32400", "36000", "39600", "43200"]
+  }
+}
+path "ssh_user/roles/" { capabilities = ["list"] }
+path "ssh_host/sign/host" {
+  capabilities = ["update"]
+  allowed_parameters = { "cert_type" = ["host"], "*" = [] }
+}
+path "ssh_user/config/ca"       { capabilities = ["read"] }
+path "ssh_host/config/ca"       { capabilities = ["read"] }
+path "sys/mounts/ssh_user/tune" { capabilities = ["read"] }
+path "sys/mounts/ssh_host/tune" { capabilities = ["read"] }
+path "ssh_host/roles/host"      { capabilities = ["read"] }
+```
+
+- **The user sign path** never takes `cert_type` or `critical_options` (any value is `403`): `source-address` comes from the role only. enroll always sends `extensions` as a **map** that includes `permit-pty` (`{"permit-pty": ""}`; an omitted map means the role's empty defaults, i.e. no extensions at all).
+- **The host sign path** (spike S4b): `denied_parameters = {"cert_type" = []}` makes host certificates impossible (Vault's default `cert_type` is `user`, which the host role refuses), so the path takes exactly `cert_type = "host"` and enroll always sends it, plus `key_id` `pc-host:<host id>` (else Vault writes `vault-approle-<hash>`).
+- **`list` on `ssh_user/roles/`** lets enroll find stale `hg-*` roles; **`read` on the two `config/ca`** paths gives the public CA keys; **`read` on the tunes and the host role** needs no `sudo` (spike S4d) and feeds `problems` (§18.8).
+- Even with this policy enroll can't make a role that issues host certificates, X11 / user-rc / port- or agent-forwarding beyond the four pinned extension sets, or certificates over 12 h. `default_critical_options` can't be pinned (the per-host-group `source-address`), so a stolen enroll token could write a role whose certificates carry `force-command` or `verify-required`: OpenSSH's critical options only restrict a certificate, never widen it; enroll itself writes only `source-address`, and refuses a signed certificate carrying any other critical option. No Vault audit device in part 1.
+- **What the policy can't pin** (security review; checked live by `TestLiveSSHVault`): `allowed_users` is **not** a fence for which principals: it is one comma-joined string and a policy glob sees only its start, so `s:*` / `u:*` refuse just the bare `*`; a stolen enroll token can write `u:a@x,root` and Vault then signs `root` (live). Entries are matched exactly (no glob, an embedded `*` entry is no wildcard) and `allowed_users_template` can't be set. The fence for bare principals is the host (§18.14): sshd reads `AuthorizedPrincipalsFile` for every account, root included (the effective check covers root), and the principals files hold only `u:` / `s:` names, so a certificate for `root` or a bare account name opens nothing (the Hub's real-sshd test, Debian / Ubuntu / Rocky). A narrower role-writing token can't help: a policy pins a path's parameters only to fixed values, and each host group's principal list changes with every grant. `default_extensions` is pinned to `{}` (Vault applies a role's defaults without checking `allowed_extensions`). `default_critical_options` can't be pinned (the per-host-group `source-address`); OpenSSH's critical options only restrict, so the worst a stolen enroll token does there is drop `source-address`. `allowed_user_key_lengths` can't be pinned (Vault never matches a policy's numbers against JSON numbers); enroll accepts only the four key types. enroll refuses a role whose read-back has default extensions, `allowed_users_template`, host certificates or a principal outside the grammar.
+
+### 18.8 enroll's SSH endpoints
+
+On enroll's internal listener (§9.4: `http://enroll:8444`, the same bearer, strict JSON ≤ 64 KiB, `certOpTimeout` 15 s). enroll logs what it signs (user, host group, principals, serial, key fingerprint), never keys.
+
+| Endpoint | Body → answer | enroll refuses (`400` unless noted) |
+|---|---|---|
+| `PUT /internal/ssh-roles/{hg}` | `{"principals": [], "extensions": "<canonical>", "source_address": [], "max_ttl_s": n}` → `200` the role as Vault reads it back, normalised to the same shape | an `{hg}` outside `^[a-z][a-z0-9-]{0,30}$` or `portcullis-*`; a principal outside the grammar or for another host group; a principal twice; > 4096 principals; an extension set outside the four; > 16 CIDRs or one that isn't canonical (`192.0.2.0/24`, never `192.0.2.1/24`); `max_ttl_s` outside 1–43200 (rounded up to the hour). Principals and CIDRs are kept in the order sent (the Hub sends them sorted); an empty principal list is a role that signs nothing (Vault refuses every sign on it, `TestLiveSSHVault`) |
+| `DELETE /internal/ssh-roles/{hg}` | → `204` | the id grammar |
+| `GET /internal/ssh-roles` | → `{"roles": ["hg-…"]}` | — |
+| `POST /internal/ssh-certificates` | `{"user", "host_group", "public_key", "principals", "valid_seconds", "extensions", "key_id"}` → `201 {"certificate", "serial", "valid_before"}` | `409` `admin`, `portcullis-hub`, `portcullis-*`; `409` a user not in LLDAP; a key type outside §18.6; a principal outside the grammar or not `<u|s>:<x>@<host_group>`; a `u:` principal naming another person than `user`; a principal twice; `valid_seconds` outside 300–43200; a `key_id` other than `pc:<user>:<host_group>:<16 hex>`; an extension outside the four |
+| `POST /internal/ssh-host-certificates` | `{"public_key", "principals", "host_group", "host_id"}` → `201 {"certificate", "serial", "valid_before"}` | a key that isn't `ssh-ed25519`; no principals or > 64; a principal that isn't a DNS name or an IP address |
+| `GET /internal/ssh-ca` | → `{"user_cas": [], "host_cas": [], "problems": []}` | — |
+
+enroll checks Vault's answer before handing it on: the certificate's type, key, key id, principals, extensions (exactly the map sent; no critical option but `source-address`) and lifetime (≤ `valid_seconds` + 60 s) must be what was asked, else `503`. `POST /internal/ssh-host-certificates` sends `cert_type=host`, `key_id` `pc-host:<host_id>` and no `ttl` (the host role's 2160h); `host_id` follows `^[a-z0-9][a-z0-9-]{0,62}$` (`unmanaged` for *Sign a host key*).
+
+`problems` names every §18.7 difference enroll can read: a missing mount or CA, a CA key type other than ed25519, `ssh_user` `max_lease_ttl` ≠ 12h, `ssh_host` ≠ 2160h, and the host role's `allow_host_certificates` / `allow_user_certificates` / `allow_user_key_ids` / `key_type`. `serial` is decimal. `GET /internal/ssh-roles` is used by the Hub's compile to delete roles that no longer have grants.
+
+### 18.9 Host certificates
+
+- **Managed hosts** get one at enrolment when the host group's "Host certificates" switch is on (default on): principals = the host's names and addresses as the admin entered them, 90 days (`ssh_host`). At every compile, a host whose certificate has ≤ ⅓ of its life left gets a new one from enroll in its next bundle (the Hub renews; the agent only writes it). Audit `ssh.host_certificate.issue`.
+- **Unmanaged hosts:** `POST ssh/host-certificates` `{code, code_verifier, nonce, redirect_uri, host_group, public_key, names}` (the `portcullis host certify` flow, or *Sign a host key* on the Hub page). The caller must be an administrator and `pc_fresh` must be `security_key` or `yubikey_cert` (`403` otherwise). Each name must match one of the host group's patterns and none of its `!` patterns, or be an unmanaged host's name or address in that host group; a managed host's name or address is never signed for another key (`409` otherwise). A key on `revoked_host_keys` is never signed again (`409`, audited). Each signed key is recorded in `state.ssh.host_keys` (fingerprint → key, host group, names, until; pruned once expired) so *Revoke* by its fingerprint works: it moves to `state.ssh.revoked_host_keys` (fingerprint → key, never pruned), audited `ssh.host_certificate.revoke`, and reaches clients as an `@revoked` line at their next login. → `{"certificate", "valid_before"}`.
+- **Clients** trust host certificates through `@cert-authority <the group's names> <host CA keys>` lines in `~/.ssh/portcullis/<d>/known_hosts`; revoked host keys become `@revoked` lines.
+
+### 18.10 Revocation
+
+- **The list** `hub_data/ssh/revoked.json` (0600, atomic write): `[{"key", "fp", "reason", "actor", "added", "until"}]`. The public list (`GET ssh/revoked-keys`) and the bundles carry the keys only.
+- **`until`** = the `valid_before` of the last certificate issued for that key + 24 h; entries are pruned daily after it. A bring-your-own key's (`own_key`) `until` is zero when the revocation was explicit (an administrator, the person, `logout --revoke`): revoked until an administrator takes it off, and the Hub won't sign it meanwhile. An automatic revocation (on leave, SSH access switched off; actor `-`) of such a key expires like the others, so a group change never burns a security key for good. **Un-revoke:** `POST /api/ssh/certificates/unrevoke` `{fingerprint, confirm, code, code_verifier, nonce}` — an administrator, `confirm` = the fingerprint typed again (`400` "type the key's fingerprint to confirm"), a fresh sign-in under the `hub` template, never through MCP; audited `ssh.certificate.unrevoke`; managed hosts get the shorter list with their next bundle.
+- **The signed keys** (Ruling C21-b): `hub_data/ssh/keys.json` (0600, atomic) maps each signed key's fingerprint to its public key, so a revocation by fingerprint (an admin's *Revoke*, revocation on leave) can put the key on the list. Only read for that; never in a log, the audit, the history or an answer. Kept 90 days, and as long as the fingerprint is on `revoked.json`. A revocation whose key isn't known still records the fingerprint (`key` empty: the Hub never signs it again; the accounts follow the mapping) and raises "revocation incomplete: key unknown <fp>" in the audit and the doctor (`ssh_revocation_incomplete`, Warning) — never a silent no-op.
+- **Entries are added** by *Revoke* (admin), *Revoke all SSH certificates* on a person (admin; a `sign_in_help` holder who may target the person; administrators' certificates by administrators only), *Revoke all my SSH certificates* (the person), `portcullis logout --revoke`, and **automatically on leave**: at every compile, any issued, unexpired certificate one of whose principals that person's host group no longer grants has its key revoked (actor `-`, reason `left <group>`): losing one account is enough. Revoking fingerprints named as one person's (`user` plus `fingerprints`) refuses, revoking nothing, unless every fingerprint is a key a certificate was issued to that person for (`400`).
+- **`POST ssh/revocations`** `{code, code_verifier, nonce, redirect_uri, public_keys}`: a proof that passes freshauth for `portcullis-cli` with any switched-on method; it revokes only the listed keys that the issued index shows were issued to that person → `{"revoked": n}`.
+- **Hosts:** managed hosts get the list in every bundle (seconds, long-poll). Unmanaged hosts with `--revoked-keys` pull `GET ssh/revoked-keys` every 5 minutes; a failed fetch keeps the last file. The file `/etc/ssh/portcullis/revoked_keys` always exists (created empty before sshd is told about it: an unreadable `RevokedKeys` refuses every key). A partitioned host keeps its stale list on purpose; the lag is bounded by the certificate TTL (≤ 12 h).
+
+### 18.11 Managed hosts: enrolment, signed requests, bundles and reports
+
+**Enrolment code** (shown once on the Hub page, never stored, never in a URL or the audit): `pcenrol1.` + base64url (no padding) of the strict JSON `{"d": "<domain>", "h": "<host id>", "g": ["<host group>", …], "ufp": "SHA256:…", "hfp": "SHA256:…", "s": "<32 random bytes, base64url>", "exp": "<RFC 3339>"}`. `ufp` / `hfp` are the user and host CA fingerprints. Valid 15 minutes, single use; the Hub stores only SHA-256(`s`). The host reads it on stdin (`sudo portcullis host enroll < code.txt`) or from a no-echo prompt (`-`); never from argv.
+
+**Enrolment proof:**
+
+1. `POST hosts/enrol/challenge` `{"host_id"}` → `{"challenge"}` (32 random bytes, base64url; 2 minutes; single use).
+2. `POST hosts/enrol` `{"host_id", "secret", "host_key", "proof", "sshd_version", "ceiling"}`. `host_key` is the host's ed25519 host public key; `proof` is an SSHSIG by it, namespace `portcullis-host-enrol@v1`, SHA-512, over the canonical JSON `{"domain","host_id","challenge"}`.
+3. The Hub compares SHA-256(`secret`) with the stored hash in constant time, checks the proof, then **pins** `host_key` and answers the first bundle. The first user CA key is checked against the code's `ufp` by the host before anything is written. Audit `ssh.host.enrol` (`ok`, `refused` or `error`, with the host key fingerprint).
+
+**Signed host requests** (every later request). Headers:
+
+- `Portcullis-Host-Id`;
+- `Portcullis-Host-Time` (RFC 3339);
+- `Portcullis-Host-Nonce` (16 random bytes, base64url);
+- `Portcullis-Host-Signature`: the SSHSIG armour by the pinned host key, its newlines encoded as the two characters `\n`, namespace `portcullis-host-request@v1`, SHA-512, over the canonical JSON `{"host_id","method","path","query","time","nonce","body_sha256"}` (`body_sha256` = hex SHA-256 of the body, of the empty string for a `GET`).
+
+Time within ±60 s; a nonce is refused for 5 minutes after its first use; an unknown, removed or unpinned host gets `403` `{"error": "removed"}`, on which the agent removes the Portcullis trust (§12.4 of the design: removing a host): the accounts are locked, the CA, principals, drop-in and sudoers file removed and sshd reloaded first (a failing `sshd -t` or reload never restores the trust: the CA, the principals files and the drop-in are removed again outside the transaction, the accounts stay locked, the failure is reported and the next sync retries); only then does the agent disable and stop its own unit (`systemctl disable`, then `systemctl stop --no-block`), so the stop can't cut the removal short. A bundle's `revoked_keys` entry that isn't a single public key is dropped and reported (never written: sshd refuses to start on an unparseable `RevokedKeys` file); the Hub never puts a fingerprint-only revocation in a bundle.
+
+**Bundle** (strict JSON, ≤ 4 MiB, `version` 1; the Hub refuses to serve a larger one and raises `ssh_host_bundle_too_large`):
+
+```json
+{"version": 1, "host_id": "web-1", "serial": 42, "generated": "2026-11-15T09:00:00Z",
+ "user_cas": ["ssh-ed25519 AAAA… portcullis-user-ca"],
+ "host_certificate": "ssh-ed25519-cert-v01@openssh.com AAAA…",
+ "accounts": [
+   {"name": "alice", "kind": "person", "uid": 20001, "principals": ["up:alice@all"], "sudo": true},
+   {"name": "deploy", "kind": "shared", "principals": ["s:deploy@web"], "sudo": false}],
+ "locked": ["carol"],
+ "remove": [],
+ "revoked_keys": ["ssh-ed25519 AAAA…"],
+ "options": {"create_shared_accounts": false}}
+```
+
+- `remove` lists accounts an admin chose *Remove account* for: the agent moves the home to `/home/.portcullis-removed/<name>-<yyyymmdd>`, runs `userdel`, then reports; the name stays in `locked` until the report confirms.
+- **Serials:** one Hub-wide counter `state.ssh.serial`, bumped when any compiled bundle's content hash changes; each host keeps the serial of its last change.
+- **Long-poll** `GET hosts/bundle?since=<serial>`: returns as soon as the host's serial is greater than `since`, else `204` after 55 s. When a proxy cuts held connections (or `404`), the agent falls back to a 60 s pull.
+
+**Report** `POST hosts/report` (strict JSON ≤ 256 KiB; untrusted: schema-checked, never executed, never used as a path; stored as the last report per host in `hub_data/ssh/hosts/<id>.json`, 0600; findings derived at read time):
+
+```json
+{"version": 1, "host_id": "web-1", "serial": 42, "time": "…", "sshd_version": "OpenSSH_9.6p1",
+ "applied": true, "error": "",
+ "files": {"/etc/ssh/portcullis/user_ca.pub": "<sha256 hex>"},
+ "effective": {"global": {"trustedusercakeys": "…"}, "portcullis": {"authorizedkeysfile": "none"}, "breakglass": {}},
+ "accounts": {"present": ["alice"], "missing": ["deploy"], "locked": ["carol"], "removed": [], "sudo_capable": ["alice"], "sudo_checked": true},
+ "findings": [{"kind": "ssh_host_drift", "severity": "warning", "subject": "principals/alice", "detail": "fixed"}],
+ "authorized_keys_shared": 0,
+ "logins": {"portcullis": 12, "breakglass": 0, "breakglass_last": {"time": "", "from": ""}}}
+```
+
+`accounts.sudo_capable` lists every local account with uid ≥ 1000 that can reach root on the host (the same checks as the ceiling's, below), whatever the ceiling, in every report; `sudo_checked` false (more than 256 such accounts, the accounts unreadable) means unknown. For an account with sudo on the host — from Portcullis (`sudo: true`), as the host reports it in `sudo_capable`, or, for a shared account, a managed host that hasn't reported yet — a bundle's `principals` carries only the approved ones (`up:` / `sp:`, below). `effective` has one block per account checked (`portcullis`, `breakglass`, `root`) plus `global`, and holds the six keywords `trustedusercakeys`, `authorizedprincipalsfile`, `revokedkeys`, `pubkeyauthentication`, `authorizedkeysfile`, `hostcertificate` (plus `passwordauthentication` and `kbdinteractiveauthentication` for the two users). Finding kinds: `ssh_host_drift` (`fixed` Warning, `problem` Problem), `ssh_host_account_conflict`, `ssh_host_account_missing`, `ssh_host_account_invalid`, `ssh_host_ceiling`, `ssh_host_authorized_keys_shared`, `ssh_breakglass_used`. Strings are ≤ 256 characters; counts only, never log lines.
+
+**The local ceiling** `/etc/portcullis/host.json` (written by the operator at `host enroll` / `host trust`, never by a bundle):
+
+```json
+{"allow_sudo": true, "allow_root_login": false, "uid_range": [20000, 59999],
+ "protected_accounts": ["breakglass"], "breakglass_account": "breakglass", "max_accounts": 500}
+```
+
+Every account with a uid below 1000 is protected whatever `protected_accounts` says; the break-glass account is always in it. With `--no-breakglass-i-have-console-access`, `breakglass_account` is `""`. Bundle entries over the ceiling are skipped and reported `ssh_host_ceiling`; the rest applies. **Sudo by other means.** Before the checks, Portcullis's own `/etc/sudoers.d/portcullis` loses every rule the bundle no longer gives (with `allow_sudo: false` the file goes). Then every bundle account (Portcullis-made or not) is asked how it could reach root — the system is asked, sudoers is never parsed: uid 0; `env LC_ALL=C id -Gn -- <name>` (the primary group included) naming `sudo`, `wheel`, `admin` or a root-equivalent group (`docker`, `lxd`, `incus`, `libvirt`, `disk`); a `permit` rule in `/etc/doas.conf` (or `/usr/local/etc/doas.conf`) naming the account or `:<one of its groups>` (an unreadable file counts); `env LC_ALL=C sudo -n -l -U <name>` saying it "may run the following commands" (aliases, `#includedir`, `%#gid` all resolved by sudo itself; checked before "is not allowed"). `sudo` is resolved as `env` runs it (the agent's `PATH`); none found means no sudoers rule only when there's no `/etc/sudoers`, `/etc/sudoers.d` or `/usr/local/etc/sudoers` either — otherwise the account counts as sudo. A command that fails, times out or answers anything else counts as sudo (fail closed). Such an account gets no principals under `allow_sudo: false` (`ssh_host_ceiling` "has sudo on this host (…) and this host's ceiling doesn't allow sudo"), and under `allow_sudo: true` only its `up:` / `sp:` principals — the same for an account Portcullis gives sudo (none: "…and no privileged grant gives this account"; some left out: reported too).
+
+**The agent's config** `/etc/portcullis/agent.json` (0600) pins the user CA fingerprint the enrolment code named (`user_ca_fps`); a bundle whose `user_cas` isn't exactly that set is refused whole. `--ca-file` (enroll, trust's revoked-keys timer, and the agent at every start) must be an absolute path owned by root and writable only by root, with every directory above it.
+
+### 18.12 The mapping and its compilation
+
+State (`state.yaml` `ssh:`): `settings {enabled, default_ttl_hours}` (0 = 8, 1–12), `host_groups`, `hosts`, `grants`, `uids`, `uid_owners`, `uids_used`, `serial`, `host_keys`, `revoked_host_keys`.
+
+- **Host group** id `^[a-z][a-z0-9-]{0,30}$`; `portcullis-*` reserved; the built-in `all` (every managed host, plus unmanaged hosts set up with `--host-group all`); at most 64. Fields: label, description, governing template (default `strong`), patterns (unmanaged names), source CIDRs (≤ 16) or "Only through the Portcullis VPN", host certificates (default on), delegable (default off), create shared accounts (default off).
+- **Grant** `{id, group, group_id, host_group, accounts: ["{username}", "deploy"], sudo: "none"|"full", ttl_hours, port_forwarding, agent_forwarding}`; at most 256. `group_id` is the LLDAP group id at creation: a group re-created with a new id grants nothing.
+- **Grammars:** principal `^([us])p?:([a-z_][a-z0-9._-]{0,31})@([a-z][a-z0-9-]{0,30})$`; LLDAP usernames `^[a-z0-9][a-z0-9._-]{0,63}$`; key id `pc:<user>:<hg>:<16 lowercase hex>`; break-glass key id `pc-breakglass:<operator note>`.
+- **Two principal namespaces** (security review): a person's own account is `u:<username>@<hg>`, a shared account `s:<account>@<hg>`. A host's principals file for a person account lists only `u:` principals of that name, a shared account's only `s:` principals, so a certificate for one can never log in as the other even if the names collide; the host agent refuses a bundle entry whose principals don't match its account's kind and name.
+- **Approval travels in the certificate** (Ruling RR3): a grant that went through the privileged path (privileged by its own fields, or saved with `privileged_save`) issues `up:<username>@<hg>` / `sp:<account>@<hg>` instead of `u:` / `s:`; a plain grant never does. For an account that has sudo on a host by any means — Portcullis's own sudoers, another source (the checks below), or unknown — the host's principals file lists only `up:` / `sp:` entries and Portcullis's sudo line is written only while one remains, so a plain grant's certificate, outstanding or new, never opens it. A host sees an account's new local sudo at its next apply: a new bundle, or at the latest the re-apply of the cached bundle every report (5 minutes). `host trust` (unmanaged) runs the same sudo check for each account its operator names: one with sudo, or whose check is uncertain (it doesn't exist yet, a command fails), gets only the approved form, the others both; `--approved-only` gives every account only the approved form; it prints which form each account got. An unmanaged host isn't watched afterwards: after a sudo change there, run `host trust` again. An account a managed host's apply creates is checked right after `useradd`; a name missing from the host's account list counts as sudo. `./portcullis ssh breakglass-cert --approved` signs the approved form.
+- **Collisions.** A person's `{username}` grant is **skipped** (no principal, no account) when the username is `root`, a shared account of any grant, a host's break-glass or protected account (from its reported ceiling), a reserved name (`admin`, `portcullis-hub`, `portcullis-*`) or a system account name (`sshaccess.SystemAccounts`, names below uid 1000 on common distributions; `_*`, `systemd-*`). Each skip is the doctor's `ssh_username_collision` (Problem) and a "skipped" row in the previews. Saving a grant whose shared account equals a current directory username is refused (`409`). A person and a shared account are never merged.
+- **Other access-changing writes** need a fresh sign-in under the `hub` template too, and are never made through MCP: switching SSH access on or raising the default lifetime; a host group edit that changes anything but its label or description (template, patterns, source addresses, VPN, host certificates, delegable, shared accounts); a host edit that changes its names, addresses or host groups. Add host and a new enrolment code, Remove host and *Sign a host key* always do. Through MCP a grant never allows port forwarding.
+- **A new grant** is judged against the merged live grants (the current group id) of its group on its host group, as an edit of them would be (stale grants of a re-created group don't count).
+- **Widening edits** need what creating a privileged grant needs (an administrator, a fresh sign-in under the `hub` template, the audit), privileged or not: an account added, a longer effective TTL, port or agent forwarding newly allowed, sudo or privilege added, another host group, another group (`sshaccess.WideningReasons`). `ssh_access` holders may only narrow or keep a grant.
+- **Names clients see** (host names, addresses, patterns) pass a strict grammar where they enter (the admin API, `sshaccess.Validate`) and again where they are rendered (`cliapi.ClientConfig`, `cliapi.KnownHosts`, which refuse rather than write): an IPv4 or IPv6 address without a zone id, or dot-separated labels of letters, digits and `-` where `*` and `?` are the only pattern characters, optionally after one `!`. No whitespace, commas, quotes or control characters. A pattern with `*` or `?` must keep a literal suffix longer than its public suffix (the Public Suffix List; an unlisted top-level name counts as one): `*.lab.example.org` passes, `*`, `!*`, `*.org`, `*.co.uk`, `*.lab` and `web-?.org` don't — every member's ssh would use only the Portcullis key there (`IdentitiesOnly`) and trust the Portcullis host CA for those names. A name without pattern characters is one host and always passes.
+- **Privileged** grants: `sudo: full`, the account `root`, agent forwarding, a shared account with sudo, the host group `all`, a cloud image's default account (`ubuntu`, `ec2-user`, …, `sshaccess.CloudDefaultAccounts`), or a shared account that a managed host of the grant's host group reports in `sudo_capable` — or any shared account while one of those hosts hasn't reported yet (unknown = privileged; `sshaccess.PrivilegedIn`; unmanaged hosts don't count, their principals are their operator's). A grant saved through the privileged path records `privileged_save`; only such a grant (or one privileged by its own fields) issues the approved `up:` / `sp:` principals, so a grant that becomes privileged later from a report gives a sudo-capable account nothing until an administrator saves it again, typed name and fresh sign-in included. They need an administrator, a fresh sign-in under the `hub` template and the group's name typed again; default to a 4 h TTL; raise `ssh_privileged_grant` (Info); make the group's members protected targets (§9.6); are never created through MCP.
+- **Merge** (one person, one host group): principals = the union of `u:<username>@<hg>` and `s:<shared account>@<hg>`; extensions = the union (always `permit-pty`; never X11, user-rc or `force-command`); `valid_before` = now + the **earliest** of the grants' TTLs, the setting's maximum and the earliest end of a temporary membership the set depends on. On a host, an account has sudo if any grant that applies to this host and account gives it.
+- **uids** 20000–59999 per person, the lowest unused, never reused (`uids_used` never shrinks), primary group of the same number; exhaustion → `503` "no uid left in 20000–59999". `uid_owners` records the LLDAP uuid each uid was given to. A person deleted keeps their uid (the host accounts stay locked). A new person under a former person's username (another uuid) never inherits it: the old uid is retired (audited `ssh.uid.retire`), every managed host gets *Remove account* for the name (the old account is locked, its home moved under the removed homes, `userdel`), the bundles name no account of that name until the host reported it removed, then the new person gets a fresh uid and a fresh account. A host never unlocks an account whose uid isn't the bundle's (`ssh_host_account_conflict`).
+- **Delivery.** Every relevant change (grant, host group, membership, rule evaluation, expiry, settings) triggers a coalesced compile: put every changed role through enroll, delete `hg-*` roles without grants, bump serials, renew host certificates, revoke on leave. Before each signing, the role's read-back must equal the compiled spec; a difference that a put doesn't fix fails closed. An unreadable directory leaves every role as it was.
+- **Golden vectors.** `internal/cliapi/testdata/vectors.json` (grammar cases, role JSON, key-proof messages) is byte-copied to core's `enroll/testdata/ssh_vectors.json`; core's `unit-tests` compares the two. `internal/sshaccess/testdata/golden/` pins state → roles, bundles and client config.
+
+### 18.13 Audit, issued index and history
+
+**Audit actions** (`audit.jsonl`, §9.5; refusals included; `via=ai` for MCP; never a key, token or code — fingerprints only):
+
+- mapping: `ssh.settings`, `ssh.hostgroup.create|update|delete`, `ssh.host.create|update|remove`, `ssh.host.enrol`, `ssh.grant.create|update|delete` (before → after, `privileged=true`, `as ssh_access` for a delegate), `ssh.account.remove`;
+- certificates: `ssh.certificate.issue` (one entry per host group issued or refused: principals, key type + fingerprint, serial, until, `flow=loopback`, method, address; actor = the person, or `-` when the proof failed first), `ssh.certificate.revoke`, `ssh.certificate.unrevoke`, `ssh.certificate.breakglass`, `ssh.host_certificate.issue`, `ssh.host_certificate.revoke`; `ssh.uid.retire`; `ssh.host.sudo_account` (a host reports a shared account with sudo);
+- hosts: `ssh.host.drift`, `ssh.host.stale`.
+
+**Issued index** `hub_data/ssh/issued.jsonl` (0600, 90 days): `{"time", "user", "host_group", "serial", "key_fp", "principals", "valid_before", "flow", "addr"}`.
+
+**History** kind `ssh_certificate` (§8.2): from the person's `ssh.certificate.issue` (ok) and `ssh.certificate.revoke` audit entries.
+
+**Break-glass record** `secrets/ssh/breakglass.jsonl` (written by core's `./portcullis ssh breakglass-cert`, 0600, mounted read-only into the Hub at `/run/portcullis/ssh/`, `HUB_SSH_BREAKGLASS_FILE=/run/portcullis/ssh/breakglass.jsonl`): one JSON object per line, `{"time", "user", "host_group", "principals", "key_fp", "serial", "valid_before", "note", "public_key"}`; the Hub records `public_key` in `keys.json` (when it matches `key_fp`), and gives a fingerprint-only revocation of it its key, so revoking a break-glass certificate reaches the hosts. The Hub appends each line it hasn't imported yet (by `serial`) to the audit as `ssh.certificate.breakglass` at its start and raises `ssh_breakglass_cert` (Warning); malformed lines are skipped and counted.
+
+### 18.14 Host files
+
+| Path | Mode | Written by |
+|---|---|---|
+| `/etc/ssh/portcullis/user_ca.pub` | 0644 | enroll / sync / trust |
+| `/etc/ssh/portcullis/principals/<account>` | 0644 (directory 0755 root) | enroll / sync / trust |
+| `/etc/ssh/portcullis/revoked_keys` | 0644, always exists, created empty first | enroll / sync / trust |
+| `/etc/ssh/sshd_config.d/50-portcullis.conf` | 0644 | enroll / sync / trust |
+| `/etc/sudoers.d/portcullis` | 0440, one `<name> ALL=(ALL:ALL) NOPASSWD: ALL` line per sudo account | sync |
+| `/etc/ssh/ssh_host_ed25519_key-cert.pub` | 0644 | sync |
+| `/etc/portcullis/host.json` | 0644 | enroll / trust |
+| `/etc/portcullis/state.json` | 0600 | sync (the last applied serial and file hashes) |
+
+**The drop-in** (spike S3: on OpenSSH 8.2–10.0 a `Match` block ends at the end of its included file, so no `Match all` is needed; `KbdInteractiveAuthentication` is always written, because 8.2 refuses `ChallengeResponseAuthentication` inside `Match`):
+
+```
+# Written by portcullis host sync (example.com, host web-1). Do not edit.
+TrustedUserCAKeys /etc/ssh/portcullis/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/portcullis/principals/%u
+RevokedKeys /etc/ssh/portcullis/revoked_keys
+HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub
+Match Group portcullis-users
+    AuthorizedKeysFile none
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+```
+
+`host trust` writes the first line as `# Written by portcullis host trust (<domain>, host group <hg>). Do not edit.` and leaves out `HostCertificate` unless a host certificate exists.
+
+**Apply.** Every apply writes all files atomically, validates `visudo -cf` and `sshd -t`, then runs `sshd -T -C user=<u>,host=localhost,addr=127.0.0.1` for a Portcullis account, for the break-glass account and for `root`: the four global keywords must show the Portcullis paths for each (so every account, root included, takes certificates only through its principals file, which holds only `u:` / `s:` (`up:` / `sp:`) principals of that account — a bundle with any other principal is refused whole), the `Match` values (`authorizedkeysfile none`, `passwordauthentication no`, `kbdinteractiveauthentication no`) must apply to the Portcullis account and **not** to the break-glass account. Any failure restores every file byte for byte and never reloads sshd — then narrows anyway: the bundle's revoked keys are added to `revoked_keys` (only when that file exists, so sshd keeps starting) and principals files are cut to what the bundle still grants and `/etc/sudoers.d/portcullis` keeps only the rules the bundle still gives (old ∩ new), so a failed apply never keeps access the Hub took away. `visudo -cf` refusing the candidate removes `/etc/sudoers.d/portcullis` (nobody keeps Portcullis sudo on a file that can't be updated; `ssh_host_drift` Problem). A shared account that doesn't exist and isn't created gets no principals file. `authorized_keys` of accounts the agent inspects is read without following symlinks or opening FIFOs, at most 1 MiB. sshd is reloaded only when a file changed (`systemctl reload ssh` when `ssh.service` exists, else `sshd`; macOS `launchctl kickstart -k system/com.openssh.sshd`; otherwise or under `--service none`, SIGHUP to `/run/sshd.pid`; none works → refuse). A main config without `Include /etc/ssh/sshd_config.d/*.conf`, or one that sets these keywords before it, is refused with the lines to add (enroll, trust) or reported `ssh_host_drift` Problem (sync). The tools never edit the main `sshd_config` and never touch `authorized_keys` of accounts they don't manage.
+
+**Accounts.** `useradd -u <uid> -U -G portcullis-users -m -s /bin/bash -c "portcullis <username>" <name>` (`/bin/sh` when bash is absent; a comment can't hold `:`, the passwd field separator); an account is Portcullis's only with **both** the `portcullis <username>` comment and `portcullis-users` membership: one without either is a conflict, never adopted, never changed. Losing access: `usermod -L -e 1 -s /usr/sbin/nologin`, the principals file removed, sessions ended (`loginctl terminate-user`, then `pkill -KILL -u`).
+
+**The service.** systemd `/etc/systemd/system/portcullis-host-sync.service` (`Restart=always`, `RestartSec=10`, `ProtectSystem=true` — `/usr` and `/boot` read-only; `/etc` stays writable because shadow-utils rewrites `/etc/passwd`, `/etc/group` and `/etc/shadow` through lock files and a rename in `/etc` —, `NoNewPrivileges`, `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `RestrictRealtime`, `LockPersonality`), launchd `/Library/LaunchDaemons/eu.portcullis.host-sync.plist`. `ExecStart` is the quoted absolute path of the running binary, and every service writer (enroll, trust's revoked-keys timer) refuses unless that binary and each directory above it are owned by root and not group- or world-writable. `--service none` installs nothing (containers). Windows hosts are by hand (the docs).
+
+**The bundle cache.** The last applied bundle is kept in `/etc/portcullis/bundle.json` (`0600`). When a report is due and nothing new came, the agent re-applies it — only when its serial is the one applied and it still verifies (signature, host id, schema, size): hand-edited managed files are rewritten and reported fixed. Anything else is ignored, never applied.
+
+**Test overrides.** Only a CLI built with `-tags sshtest` (the container tests) has `host enroll --people-url` and honours `people_url` in `/etc/portcullis/agent.json`; a release binary has no such flag and refuses an `agent.json` that sets it.
+
+### 18.15 The CLI on the person's machine
+
+- **Loopback:** `127.0.0.1:38917`, then `38918`, then `38919` — never `0.0.0.0` or `localhost`. Exactly one `GET /callback` with the right `state`; anything else `404`; the page says "You can close this tab", `Cache-Control: no-store`, no script; 5 minutes. A callback with `error=` ends the login with that error.
+- **Authorize parameters:** `client_id=portcullis-cli`, `response_type=code`, `scope=openid`, `redirect_uri`, random `state` and `nonce`, S256 `code_challenge`, `prompt=login`, `max_age=0`, and `pc_method=<id>` only with `--method`. The CLI never calls Keycloak's token endpoint. `--no-browser` prints the URL on stderr instead of opening it (whole, never cut; controls and bidi characters replaced). `logout --revoke` lists the fingerprints first: revocation is for good, a `--key` key of your own is never certified again.
+- **Files:** `os.UserConfigDir()/portcullis/config.json` (0600, no secrets); `~/.ssh/portcullis/<domain>/` (0700) with `id.pub`, `<hg>-cert.pub`, `known_hosts`, `config`, and `id` (0600) only with `--write-files` (then `config`'s `IdentityFile` names `id`, so ssh works without an agent; otherwise `id.pub`, which selects the agent's key); the include line `Include ~/.ssh/portcullis/*/config`, added to `~/.ssh/config` only after a y/N question.
+- **Agent:** the CLI speaks the agent protocol itself (`SSH_AUTH_SOCK`; Windows `\\.\pipe\openssh-ssh-agent`), never runs `ssh-add` or `ssh-keygen` with key material. Comment `portcullis <domain> <host group>`, `LifetimeSecs` = until the certificate expires; the plain key too, once (`portcullis <domain> (key)`, until the last certificate expires), because the written config pairs `IdentityFile id.pub` with each `CertificateFile` and ssh signs with the plain key (it opens nothing by itself); a login replaces that domain's previous Portcullis keys.
+- **Exit codes:** 0 ok · 1 error · 2 usage · 3 signed in, but no certificate was issued · 4 refused · 5 Portcullis unreachable.
+- **TLS:** the system pool, plus `--ca-file <pem>` / `PORTCULLIS_CA_FILE` for a staging root. No `--insecure`, no TLS skip. No telemetry, no update check: the CLI talks only to `auth.<d>`, `people.<d>` and its own loopback.
+- **Release:** the Hub repo's `v*` tags build `darwin`, `linux`, `windows` × `amd64`, `arm64` with `-trimpath -buildvcs=true`, `SHA256SUMS`, a cosign keyless bundle per archive (identity `^https://github.com/porelli/portcullis-hub/`) and SLSA provenance. The Hub image carries the Linux binary at `/usr/local/bin/portcullis`.
+
+### 18.16 The Hub's SSH routes
+
+**Hub listener** (administrators; every mutation audited with its §18.13 action):
+
+| Route | Notes |
+|---|---|
+| `GET` / `PUT /api/ssh/settings` | `{enabled, default_ttl_hours}` (+ proof to switch on or raise) → the settings with the CA keys, fingerprints and `problems` |
+| `GET` / `POST /api/ssh/hostgroups`, `PUT` / `DELETE /api/ssh/hostgroups/{id}` | `409` for a template no phishing-resistant method can meet; delete only when unused, never `all` |
+| `GET /api/ssh/hostgroups/{id}/access`, `GET /api/ssh/hosts/{id}/access?root=1`, `GET /api/ssh/people/{u}/access` | the previews (§9.8 of the design) |
+| `GET` / `POST /api/ssh/hosts`, `PUT` / `DELETE /api/ssh/hosts/{id}`, `POST /api/ssh/hosts/{id}/code` | `POST` and `/code` answer `{id, code}` once (fresh sign-in); `DELETE` takes the proof |
+| `POST /api/ssh/hosts/{id}/accounts/{name}/remove` | the bundle's `remove` |
+| `GET` / `POST /api/ssh/grants`, `PUT` / `DELETE /api/ssh/grants/{id}`, `POST /api/ssh/grants/preview` | `{…grant, confirm, code, code_verifier, nonce}`; `confirm` is the group's name typed again |
+| `GET /api/ssh/certificates[?user=]`, `POST /api/ssh/certificates/revoke` | `{user, fingerprints}` (none listed: all of the person's unexpired) |
+| `POST /api/ssh/host-certificates` | *Sign a host key*: `{host_group, public_key, names, code, code_verifier, nonce}`, `pc_fresh` `security_key` or `yubikey_cert` |
+
+**People listener:** `GET /api/me/ssh` (the card), `POST /api/me/ssh/revoke-all`; `GET /api/directory/users/{u}/ssh` and `POST …/ssh/revoke-all` (administrators; `sign_in_help` holders who may target the person — administrators' certificates by administrators only); `GET|POST /api/ssh/delegated/grants`, `PUT|DELETE /api/ssh/delegated/grants/{id}`, `POST /api/ssh/delegated/grants/preview`, `GET /api/ssh/delegated/hostgroups/{id}/access` (`ssh_access` holders; delegable host groups only).
+
+**MCP** (§15.10): `revoke_ssh_certificates` and `set_ssh_grant` are class D with every effective argument in the confirmation (`id` "Replaces grant …", accounts, port forwarding, lifetime); `revoke_my_ssh_certificates` is W.
+
+## 19. Mail — NEW (mail)
 
 Portcullis runs a full mail server for the main domain and for every added domain (§12) an admin turns mail on for: sending and receiving with a built-in spam filter, SPF / DKIM / DMARC that pass and align, MTA-STS, TLS-RPT, DANE when the main zone is DNSSEC `secure`, LLDAP people as mailboxes, aliases and group lists, and per-device mail passwords. It is the core compose profile **`mail`**, not a template. Mail runs on Docker (rootful) and rootless Podman only (§19.12).
 

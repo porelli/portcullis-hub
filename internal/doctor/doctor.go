@@ -281,6 +281,8 @@ type Inputs struct {
 	// none fire; Unavailable: mailctl couldn't be read, no mail findings
 	// and Report.MailUnavailable).
 	Mail *MailIn
+	// SSH: the SSH access kinds' inputs (ssh.go; nil = none fire).
+	SSH *SSHIn
 	// Usage / Storage: the usage kinds' inputs (usage.go; nil = none
 	// fire).
 	Usage   *UsageIn

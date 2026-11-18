@@ -1,0 +1,6 @@
+# Written by portcullis login for example.com. Do not edit.
+Match host web-1.example.com,web-2.example.com,10.20.0.11,10.20.0.12
+  IdentityFile ~/.ssh/portcullis/example.com/id.pub
+  CertificateFile ~/.ssh/portcullis/example.com/web-cert.pub
+  IdentitiesOnly yes
+  UserKnownHostsFile ~/.ssh/known_hosts ~/.ssh/portcullis/example.com/known_hosts

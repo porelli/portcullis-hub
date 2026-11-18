@@ -1,0 +1,9 @@
+# Written by portcullis host sync (example.com, host web-1). Do not edit.
+TrustedUserCAKeys /etc/ssh/portcullis/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/portcullis/principals/%u
+RevokedKeys /etc/ssh/portcullis/revoked_keys
+HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub
+Match Group portcullis-users
+    AuthorizedKeysFile none
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no

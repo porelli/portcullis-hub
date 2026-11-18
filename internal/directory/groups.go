@@ -92,6 +92,13 @@ func (s *Service) guardingGroups(cfg *Config) map[string]string {
 			}
 		}
 	}
+	if s.SSHGroups != nil {
+		for _, g := range s.SSHGroups().Granting {
+			if _, ok := out[g]; !ok && g != "" {
+				out[g] = "an SSH access group"
+			}
+		}
+	}
 	perms := make([]string, 0, len(cfg.Permissions))
 	for p := range cfg.Permissions {
 		perms = append(perms, p)

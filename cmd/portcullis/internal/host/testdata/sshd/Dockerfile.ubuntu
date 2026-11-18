@@ -1,0 +1,7 @@
+# The host agent's real-sshd test (host_sshd_test.go, build tag sshd).
+FROM ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+RUN apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends openssh-server sudo passwd procps ca-certificates >/dev/null \
+ && rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd && ssh-keygen -A && useradd -m -s /bin/bash breakglass && mkdir -p /home/breakglass/.ssh \
+ && chown breakglass: /home/breakglass/.ssh && chmod 700 /home/breakglass/.ssh
+# sshd -D writes no pid file: the shell records its pid, then becomes sshd.
+CMD ["/bin/sh", "-c", "echo $$ > /run/sshd.pid; exec /usr/sbin/sshd -D -e"]

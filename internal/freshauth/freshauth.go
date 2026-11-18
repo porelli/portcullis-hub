@@ -84,6 +84,14 @@ type Config struct {
 	JWKSURL      string // http://keycloak:8080/realms/portcullis/protocol/openid-connect/certs
 	AuthorizeURL string // <public>/realms/portcullis/protocol/openid-connect/auth
 	RedirectURI  string // https://people.<domain>/
+	// ClientID is the Keycloak client the proofs come from; "" is ClientID
+	// (portcullis-fresh-auth), so existing callers don't change. The CLI's
+	// verifier sets "portcullis-cli" (contract §18.2).
+	ClientID string
+	// RedirectURIs, when set, replaces RedirectURI: the proof's own
+	// Proof.RedirectURI must be exactly one of them, and the code is
+	// exchanged with it (the CLI's three loopback URLs).
+	RedirectURIs []string
 	HTTP         *http.Client
 	Now          func() time.Time
 	// Accepted returns the fresh methods (FreshMethods) switched on right
@@ -92,8 +100,9 @@ type Config struct {
 	Accepted func() []string
 }
 
-// Proof is what the browser posts.
-type Proof struct{ Code, CodeVerifier, Nonce string }
+// Proof is what the browser posts. RedirectURI is read only by a
+// Verifier with Config.RedirectURIs.
+type Proof struct{ Code, CodeVerifier, Nonce, RedirectURI string }
 
 // Result is an accepted proof.
 type Result struct {
@@ -105,6 +114,10 @@ type Result struct {
 	// SID is the ID token's sid, the Keycloak session the sign-in ran in
 	// ("" when the token has none, or it isn't a string).
 	SID string
+	// Impersonated is set when the ID token carries an act or pc_imp key,
+	// whatever its value (a session as someone else). Verify doesn't
+	// refuse it; callers that must (SSH certificates) do.
+	Impersonated bool
 }
 
 // ReasonUnreachable: the token endpoint or the realm's keys (JWKS)
@@ -140,18 +153,21 @@ func New(cfg Config) *Verifier {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.ClientID == "" {
+		cfg.ClientID = ClientID
+	}
 	v := &Verifier{cfg: cfg}
-	if cfg.Issuer == "" || cfg.TokenURL == "" || cfg.JWKSURL == "" || cfg.RedirectURI == "" {
+	if cfg.Issuer == "" || cfg.TokenURL == "" || cfg.JWKSURL == "" || (cfg.RedirectURI == "" && len(cfg.RedirectURIs) == 0) {
 		return v
 	}
 	v.oauth = &oauth2.Config{
-		ClientID:    ClientID,
+		ClientID:    cfg.ClientID,
 		Endpoint:    oauth2.Endpoint{AuthURL: cfg.AuthorizeURL, TokenURL: cfg.TokenURL, AuthStyle: oauth2.AuthStyleInParams},
 		RedirectURL: cfg.RedirectURI,
 	}
 	keys := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), cfg.HTTP), cfg.JWKSURL)
 	v.verifier = oidc.NewVerifier(cfg.Issuer, keys, &oidc.Config{
-		ClientID:             ClientID,
+		ClientID:             cfg.ClientID,
 		SupportedSigningAlgs: supportedAlgs,
 		Now:                  cfg.Now,
 	})
@@ -175,7 +191,7 @@ type AuthorizeInfo struct {
 
 // Info returns the authorize endpoint, client id and redirect URI.
 func (v *Verifier) Info() AuthorizeInfo {
-	return AuthorizeInfo{AuthorizeURL: v.cfg.AuthorizeURL, ClientID: ClientID, RedirectURI: v.cfg.RedirectURI}
+	return AuthorizeInfo{AuthorizeURL: v.cfg.AuthorizeURL, ClientID: v.cfg.ClientID, RedirectURI: v.cfg.RedirectURI}
 }
 
 // claims are the ID token claims checked here (go-oidc checks iss, aud,
@@ -197,13 +213,35 @@ type claims struct {
 // Verify exchanges p.Code (with the PKCE verifier) and checks the ID token
 // for user (compared lowercased). Any failure is an *Error.
 func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, error) {
+	user = strings.ToLower(user)
+	if user == "" {
+		return nil, refuse("no caller")
+	}
+	return v.verify(ctx, p, user)
+}
+
+// VerifyAnyUser is Verify without a caller to compare: every other check
+// runs, and Result.User is the ID token's preferred_username, lowercased
+// (the CLI, which has no session: contract §18.2).
+func (v *Verifier) VerifyAnyUser(ctx context.Context, p Proof) (*Result, error) {
+	return v.verify(ctx, p, "")
+}
+
+// verify checks a proof; user "" takes the username from the token.
+func (v *Verifier) verify(ctx context.Context, p Proof, user string) (*Result, error) {
 	if v.oauth == nil || v.verifier == nil {
 		return nil, refuse("fresh auth is not configured")
 	}
-	user = strings.ToLower(user)
+	oc := v.oauth
+	if len(v.cfg.RedirectURIs) > 0 {
+		if !slices.Contains(v.cfg.RedirectURIs, p.RedirectURI) {
+			return nil, refuse("redirect uri is not one of the client's")
+		}
+		cp := *v.oauth
+		cp.RedirectURL = p.RedirectURI
+		oc = &cp
+	}
 	switch {
-	case user == "":
-		return nil, refuse("no caller")
 	case p.Code == "" || len(p.Code) > maxCode:
 		return nil, refuse("missing or oversized code")
 	case !codeVerifierRe.MatchString(p.CodeVerifier):
@@ -213,7 +251,7 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	}
 	now := v.cfg.Now()
 
-	tok, err := v.oauth.Exchange(oidc.ClientContext(ctx, v.cfg.HTTP), p.Code, oauth2.VerifierOption(p.CodeVerifier))
+	tok, err := oc.Exchange(oidc.ClientContext(ctx, v.cfg.HTTP), p.Code, oauth2.VerifierOption(p.CodeVerifier))
 	if err != nil {
 		var re *oauth2.RetrieveError
 		if errors.As(err, &re) {
@@ -239,7 +277,7 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 
 	// aud contains the client (go-oidc); azp, when present, is the client;
 	// several audiences need azp.
-	if c.AZP != nil && *c.AZP != ClientID {
+	if c.AZP != nil && *c.AZP != v.cfg.ClientID {
 		return nil, refuse("azp is another client")
 	}
 	if c.AZP == nil && len(idt.Audience) != 1 {
@@ -287,10 +325,19 @@ func (v *Verifier) Verify(ctx context.Context, p Proof, user string) (*Result, e
 	if c.Username == nil || *c.Username == "" {
 		return nil, refuse("missing preferred_username")
 	}
-	if strings.ToLower(*c.Username) != user {
+	got := strings.ToLower(*c.Username)
+	if user == "" {
+		user = got
+	} else if got != user {
 		return nil, refuse("signed in as another person")
 	}
-	return &Result{User: user, AuthTime: authTime, Method: method, SID: sidOf(c.SID)}, nil
+	var all map[string]json.RawMessage
+	if err := idt.Claims(&all); err != nil {
+		return nil, refuse("malformed id token claims")
+	}
+	_, act := all["act"]
+	_, imp := all["pc_imp"]
+	return &Result{User: user, AuthTime: authTime, Method: method, SID: sidOf(c.SID), Impersonated: act || imp}, nil
 }
 
 // primaryInAMR reports whether raw (the amr claim) is an array of strings

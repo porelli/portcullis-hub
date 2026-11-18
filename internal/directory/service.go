@@ -164,6 +164,10 @@ type Service struct {
 	Invites Inviter
 	Audit   *AuditLog
 	Apps    func() []App
+	// SSHGroups, if set, reports the LLDAP groups SSH grants use (contract
+	// §18.12): every one is a guarding group, and the members of those
+	// with a privileged grant are protected targets. Read outside s.mu.
+	SSHGroups func() SSHGroups
 	// AdminGroups returns the groups whose members are administrators:
 	// core refuses to invite them (§9.4) and the Hub asks for a typed
 	// confirmation before handing over their sign-in. nil: lldap_admin and
@@ -226,6 +230,11 @@ type Service struct {
 	// switched on (P12): a setup link that also sets up an authenticator
 	// app is refused (409) while it is off, and while it is unset.
 	AuthenticatorMethodOn func() bool
+	// SSHSharedAccount, if set, reports whether name is a shared account
+	// of an SSH grant (contract §18.12 "Collisions"): CreateUser refuses
+	// such a username (409), so a person can never be created with the
+	// name of a shared SSH account. Read outside s.mu.
+	SSHSharedAccount func(name string) bool
 
 	mu sync.Mutex
 	// ruleState: each rule group's membership (lowercase) after the last
@@ -1265,6 +1274,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 	}
 	// Read outside s.mu (the Hub's lock is never taken under it).
 	passwordOff := req.Onboarding == OnboardPassword && s.PasswordMethodOn != nil && !s.PasswordMethodOn()
+	sshShared := s.SSHSharedAccount != nil && s.SSHSharedAccount(strings.ToLower(req.Username))
 	passwordSet, passwordUUID := false, ""
 	err := s.run(ctx, c, PermInvite, "user.create", req.Username, &detail, func() error {
 		switch {
@@ -1272,6 +1282,8 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 			return invalid("invalid username: use 1-64 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit")
 		case s.reservedName(req.Username):
 			return invalid("%s", reservedMsg(req.Username))
+		case sshShared:
+			return refuse("%s is a shared SSH account name; pick another username", req.Username)
 		case !lldap.ValidEmail(req.Email):
 			return invalid("invalid email address")
 		case !lldap.ValidDisplayName(req.DisplayName):
@@ -2512,4 +2524,12 @@ func callerName(c *Caller) string {
 		return ""
 	}
 	return strings.ToLower(c.User)
+}
+
+// SSHGroups are the groups SSH access uses (Service.SSHGroups).
+type SSHGroups struct {
+	// Granting: every group used by a grant.
+	Granting []string
+	// Privileged: the groups of privileged grants.
+	Privileged []string
 }

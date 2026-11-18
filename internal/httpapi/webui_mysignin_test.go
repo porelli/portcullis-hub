@@ -312,7 +312,8 @@ func TestPersonSignInTabActions(t *testing.T) {
 }
 
 // TestPermissionsTableListsSignInHelp: Setup → Permissions lists
-// sign_in_help with its words, after edit_details, invite and remove.
+// sign_in_help with its words, after edit_details, invite and remove;
+// then ssh_access (contract §9.6).
 func TestPermissionsTableListsSignInHelp(t *testing.T) {
 	js := webAsset(t, "directory.js")
 	i := strings.Index(js, "  const PERMS = [")
@@ -326,12 +327,15 @@ func TestPermissionsTableListsSignInHelp(t *testing.T) {
 	for _, p := range perms {
 		ids = append(ids, p[0])
 	}
-	if strings.Join(ids, ",") != "edit_details,invite,remove,sign_in_help" {
+	if strings.Join(ids, ",") != "edit_details,invite,remove,sign_in_help,ssh_access" {
 		t.Errorf("permissions = %v", ids)
 	}
-	last := perms[len(perms)-1]
-	if last[1]+" ("+last[2]+")" != "Help with sign-in (setup link, remove passkeys, revoke certificates)" {
-		t.Errorf("sign_in_help = %v", last)
+	help := perms[3]
+	if help[1]+" ("+help[2]+")" != "Help with sign-in (setup link, remove passkeys, revoke certificates)" {
+		t.Errorf("sign_in_help = %v", help)
+	}
+	if last := perms[len(perms)-1]; last[1] != "SSH access" {
+		t.Errorf("ssh_access = %v", last)
 	}
 }
 

@@ -39,10 +39,13 @@
     <div class="user-badge" id="who" hidden>Signed in as <strong id="who-name"></strong></div>
   </header>
   <main id="signin-root" class="pd-card msi-page"><noscript>This page needs JavaScript.</noscript></main>
+  <!-- The person's SSH access card (web/myssh.js; hidden while SSH is off). -->
+  <section id="myssh-root" class="pd-card msi-page" hidden></section>
 </div>
 <script src="/static/directory.js"></script>
 <script src="/static/freshauth.js"></script>
 <script src="/static/mysignin.js"></script>
+<script src="/static/myssh.js"></script>
 <script>
   if (window.portcullisFreshAuthCallback) {
     // The popup handed its result to the opener; close() may be refused.
@@ -52,6 +55,7 @@
     // the Hub's and the people page's URLs (the harness only).
     const navOpts = { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: {{.PeopleURL}}, current: 'signin', admin: false };
     PortcullisNav.render(document.getElementById('site-nav'), navOpts);
+    PortcullisMySSH.mountSelf(document.getElementById('myssh-root'));
     PortcullisMySignIn.mount(document.getElementById('signin-root'), {
       mode: 'self',
       onView: function (v) {
