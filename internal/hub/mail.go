@@ -44,6 +44,9 @@ const (
 type mailSync struct {
 	// pass serialises sync passes (RunMailSync and direct calls).
 	pass sync.Mutex
+	// passSeq is the wiring the running pass's client talks to (set at
+	// its start, under pass): what an accepted document is bound to.
+	passSeq int
 
 	mu sync.Mutex
 	// last is the last document mailctl accepted (nil: none since start).
@@ -129,21 +132,37 @@ func (h *Hub) loadMailLast() (*mailprovider.MailState, bool) {
 
 // saveMailLast persists an accepted document (a failure is logged: the
 // next start then treats its first document as a removal).
-func (h *Hub) saveMailLast(d *mailprovider.MailState) {
-	// The wiring that accepted it (a switch's new provider has none).
-	h.mu.Lock()
-	if p := h.st.Mail.Provider; p != nil && h.st.Mail.LastDocSeq != p.Seq {
-		h.st.Mail.LastDocSeq = p.Seq
-		h.saveLocked()
+func (h *Hub) saveMailLast(d *mailprovider.MailState, seq int) {
+	// The wiring that accepted it (seq: the pass's client's). A switch
+	// since the send: discarded, so the new wiring's next pass is blind
+	// (it never accepted this document).
+	current := func() bool {
+		p := h.st.Mail.Provider
+		return p != nil && p.Seq == seq
 	}
-	h.mu.Unlock()
+	h.mu.RLock()
+	ok := current()
+	h.mu.RUnlock()
+	if !ok {
+		log.Printf("mail: the provider changed after the document was accepted: it isn't kept as the new provider's baseline")
+		return
+	}
 	b, err := json.Marshal(d)
 	if err == nil {
 		err = fsutil.WriteFileAtomic(h.mailLastPath(), b, 0600)
 	}
 	if err != nil {
 		log.Printf("mail: saving %s: %v", mailLastFile, err)
+		return
 	}
+	// The binding after the file: a crash between the two leaves the
+	// pass blind (a resend), never another wiring's document trusted.
+	h.mu.Lock()
+	if current() && h.st.Mail.LastDocSeq != seq {
+		h.st.Mail.LastDocSeq = seq
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 }
 
 // hubRemoval is one recorded admin removal.
@@ -310,10 +329,11 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	s := &h.mailState
 	s.pass.Lock()
 	defer s.pass.Unlock()
-	api := h.mailClient()
+	api, passSeq := h.mailClientSeq()
 	if api == nil {
 		return mailIdle
 	}
+	s.passSeq = passSeq
 	// After every pass (so a slow mailctl never delays what it sent), in
 	// the background without the sync lock: the start-time reconcile and
 	// the restore check (a restore of mail voids every mail password,
@@ -344,13 +364,10 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	// starts without a baseline (blind: the first document counts as a
 	// removal, judged by the Hub's own row baseline).
 	h.mu.RLock()
-	wiredSeq, lastSeq := -1, h.st.Mail.LastDocSeq
-	if p := h.st.Mail.Provider; p != nil {
-		wiredSeq = p.Seq
-	}
+	lastSeq := h.st.Mail.LastDocSeq
 	h.mu.RUnlock()
 	s.mu.Lock()
-	if s.last != nil && wiredSeq != lastSeq {
+	if s.last != nil && passSeq != lastSeq {
 		s.last, s.blind = nil, true
 	}
 	last := s.last
@@ -503,7 +520,7 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		s.reconAll = true
 	}
 	s.mu.Unlock()
-	h.saveMailLast(&sent)
+	h.saveMailLast(&sent, s.passSeq)
 	h.mailSetBlocked("")
 	settleErr := h.mailPendingSettled()
 	if d.removal {

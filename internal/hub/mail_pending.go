@@ -96,7 +96,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailp
 	s.mu.Lock()
 	s.last, s.blind = &sent, false
 	s.mu.Unlock()
-	h.saveMailLast(&sent)
+	h.saveMailLast(&sent, s.passSeq)
 	if d2.removal {
 		h.mailWaitApplied(ctx, api, gen)
 		h.mailRestart(ctx, "a removal")

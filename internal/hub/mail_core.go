@@ -271,13 +271,22 @@ func (h *Hub) SetMailAPI(api MailAPI) {
 // provider wired and in normal mode (no void owed, not held), and its
 // secret readable; else nil (the mail routes answer 503).
 func (h *Hub) mailClient() MailAPI {
+	api, _ := h.mailClientSeq()
+	return api
+}
+
+// mailClientSeq is mailClient with the wiring (MailProvider.Seq) it
+// talks to, read together.
+func (h *Hub) mailClientSeq() (MailAPI, int) {
 	if !h.mailOn() {
-		return nil
+		return nil, 0
 	}
 	h.mu.RLock()
 	var api MailAPI
 	held := false
+	seq := 0
 	if p := h.st.Mail.Provider; p != nil && h.mailModeLocked(p.Instance) == mailNormal {
+		seq = p.Seq
 		if hd := h.st.Mail.Held; hd == nil || hd.Stopped == nil {
 			api = h.mailProviderAPILocked()
 			held = hd != nil
@@ -285,12 +294,12 @@ func (h *Hub) mailClient() MailAPI {
 	}
 	h.mu.RUnlock()
 	if api == nil || api.Available() != nil {
-		return nil
+		return nil, 0
 	}
 	if held {
-		return &heldMailAPI{MailAPI: api, h: h}
+		return &heldMailAPI{MailAPI: api, h: h}, seq
 	}
-	return api
+	return api, seq
 }
 
 // heldMailAPI is the held provider's client (Ruling R-HH1): the running,

@@ -748,3 +748,57 @@ func TestSwitchNewProviderGetsDocument(t *testing.T) {
 		t.Fatalf("recorded %v", got)
 	}
 }
+
+// putThenRewireAPI accepts a document, then a new wiring takes over
+// before the pass saves it (a switch between the send and the save).
+type putThenRewireAPI struct {
+	MailAPI
+	h    *Hub
+	once bool
+}
+
+func (a *putThenRewireAPI) PutState(ctx context.Context, st *mailprovider.MailState) (int, error) {
+	n, err := a.MailAPI.PutState(ctx, st)
+	if err == nil && !a.once {
+		a.once = true
+		a.h.mu.Lock()
+		a.h.st.Mail.WireSeq++
+		a.h.st.Mail.Provider.Seq = a.h.st.Mail.WireSeq
+		a.h.mu.Unlock()
+	}
+	return n, err
+}
+
+// TestSwitchBetweenSendAndSave (security review of d450a82): a document
+// accepted by the old wiring is never recorded as the new wiring's
+// baseline; the new wiring's next pass sends it again.
+func TestSwitchBetweenSendAndSave(t *testing.T) {
+	w := wiredFix(t)
+	// A document is due (no baseline in memory).
+	w.h.mailState.mu.Lock()
+	w.h.mailState.last = nil
+	w.h.mailState.mu.Unlock()
+	api := &putThenRewireAPI{MailAPI: w.mc.Client(), h: w.h}
+	w.h.SetMailAPI(api)
+	w.h.mailSyncOnce(context.Background())
+	if !api.once {
+		t.Fatal("no document was sent")
+	}
+	w.h.mu.RLock()
+	newSeq, lastSeq := w.h.st.Mail.Provider.Seq, w.h.st.Mail.LastDocSeq
+	w.h.mu.RUnlock()
+	if lastSeq == newSeq {
+		t.Fatalf("the new wiring (%d) recorded as having the old one's document", newSeq)
+	}
+	puts := w.mc.Puts()
+	w.h.mailSyncOnce(context.Background())
+	if w.mc.Puts() == puts {
+		t.Fatal("the new wiring's pass sent nothing")
+	}
+	w.h.mu.RLock()
+	lastSeq = w.h.st.Mail.LastDocSeq
+	w.h.mu.RUnlock()
+	if lastSeq != newSeq {
+		t.Fatalf("after the new wiring's own send: last_doc_seq %d, want %d", lastSeq, newSeq)
+	}
+}
