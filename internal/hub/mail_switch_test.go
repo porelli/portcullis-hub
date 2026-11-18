@@ -706,3 +706,45 @@ func TestUnwireOfUnwiredAudited(t *testing.T) {
 		t.Fatalf("audit %+v", e)
 	}
 }
+
+// TestSwitchNewProviderGetsDocument (core e2e-mail 11/12): after a
+// switch the new provider, which has no document, gets one, though the
+// directory didn't change since the old provider's last document.
+func TestSwitchNewProviderGetsDocument(t *testing.T) {
+	w := switchFix(t)
+	w.h.mailSyncOnce(context.Background())
+	if w.mc.Doc == nil {
+		t.Fatal("the first provider got no document")
+	}
+	mc2 := mailprovidertest.New(t)
+	w.h.SetMailAPI(mc2.Client())
+	doSwitch(t, w)
+	for i := 0; i < 3; i++ {
+		w.h.mailSyncOnce(context.Background())
+	}
+	mc2.Lock(func(s *mailprovidertest.Server) {
+		if s.Doc == nil {
+			t.Fatalf("the new provider got no document (requests %v)", s.Requests)
+		}
+		if len(s.Doc.TLS.SPKISHA256) == 0 {
+			t.Fatal("the document carries no certificate key")
+		}
+	})
+	// `./portcullis mail rotate` after the switch: the key is recorded
+	// and the NEW provider reloads it.
+	k := strings.Repeat("cd", 32)
+	if _, err := w.h.HostMailTLS(context.Background(), []string{k}, time.Now().Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	mc2.Lock(func(s *mailprovidertest.Server) {
+		if len(s.Reloads) != 1 || s.Reloads[0][0] != k {
+			t.Fatalf("new provider reloads %v", s.Reloads)
+		}
+	})
+	w.h.mu.RLock()
+	got := w.h.st.Mail.TLS.SPKISHA256
+	w.h.mu.RUnlock()
+	if len(got) != 1 || got[0] != k {
+		t.Fatalf("recorded %v", got)
+	}
+}

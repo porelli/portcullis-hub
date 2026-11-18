@@ -88,6 +88,11 @@ type MailSettings struct {
 	// running networks matching it needs no down before the next up.
 	UpMode         string `json:"up_mode,omitempty" yaml:"up_mode,omitempty"`
 	UpModeInstance string `json:"up_mode_instance,omitempty" yaml:"up_mode_instance,omitempty"`
+	// LastDocSeq is the wiring (MailProvider.Seq) that accepted
+	// mail-last.json's document: another wiring (a switch, a re-wire)
+	// has none of it yet, so the next document is sent whatever it
+	// holds.
+	LastDocSeq int `json:"last_doc_seq,omitempty" yaml:"last_doc_seq,omitempty"`
 	// WireSeq numbers the wirings (monotonic): MailProvider.Seq.
 	WireSeq int `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries

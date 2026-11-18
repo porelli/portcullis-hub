@@ -130,6 +130,13 @@ func (h *Hub) loadMailLast() (*mailprovider.MailState, bool) {
 // saveMailLast persists an accepted document (a failure is logged: the
 // next start then treats its first document as a removal).
 func (h *Hub) saveMailLast(d *mailprovider.MailState) {
+	// The wiring that accepted it (a switch's new provider has none).
+	h.mu.Lock()
+	if p := h.st.Mail.Provider; p != nil && h.st.Mail.LastDocSeq != p.Seq {
+		h.st.Mail.LastDocSeq = p.Seq
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 	b, err := json.Marshal(d)
 	if err == nil {
 		err = fsutil.WriteFileAtomic(h.mailLastPath(), b, 0600)
@@ -331,7 +338,21 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		return mailRetry
 	}
 	now := h.mailNow()
+	// The last document is the current wiring's only: after a switch or
+	// a re-wire the provider has none of it (core e2e-mail 11/12: the
+	// unchanged directory sent nothing to the new provider), so the pass
+	// starts without a baseline (blind: the first document counts as a
+	// removal, judged by the Hub's own row baseline).
+	h.mu.RLock()
+	wiredSeq, lastSeq := -1, h.st.Mail.LastDocSeq
+	if p := h.st.Mail.Provider; p != nil {
+		wiredSeq = p.Seq
+	}
+	h.mu.RUnlock()
 	s.mu.Lock()
+	if s.last != nil && wiredSeq != lastSeq {
+		s.last, s.blind = nil, true
+	}
 	last := s.last
 	d := diffMail(last, doc)
 	// No baseline (a first start, a lost mail-last.json): whoever left
