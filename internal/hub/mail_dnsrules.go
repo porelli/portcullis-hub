@@ -233,3 +233,23 @@ func mailMergeRetiring(c mailprovider.RuleContext, set []mailprovider.Record, re
 	}
 	return out
 }
+
+// HostMailDNSMainWithRules is GET /host/mail/dns/main: the main set and
+// the rule context it was validated under, one consistent pair (final
+// cross review L10): a rule change (a drain starting) during the read
+// reads both again, at most three times, else 409.
+func (h *Hub) HostMailDNSMainWithRules(ctx context.Context) ([]mailprovider.Record, MailRulesView, error) {
+	for range 3 {
+		before := h.HostMailDNSRules()
+		recs, err := h.HostMailDNSMain(ctx)
+		after := h.HostMailDNSRules()
+		if after != before {
+			continue // the set was judged under rules that changed meanwhile
+		}
+		if err != nil {
+			return nil, MailRulesView{}, err
+		}
+		return recs, after, nil
+	}
+	return nil, MailRulesView{}, statusErr(http.StatusConflict, "the main domain's mail rules kept changing during the read: try again")
+}

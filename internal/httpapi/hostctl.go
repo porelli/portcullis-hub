@@ -157,12 +157,12 @@ func HostHandler(h *hub.Hub) http.Handler {
 		writeJSON(w, rec)
 	})
 	mux.HandleFunc("GET /host/mail/dns/main", func(w http.ResponseWriter, r *http.Request) {
-		recs, err := h.HostMailDNSMain(r.Context())
+		recs, rules, err := h.HostMailDNSMainWithRules(r.Context())
 		if err != nil {
 			hostErr(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"records": recs, "rules": h.HostMailDNSRules()})
+		writeJSON(w, map[string]any{"records": recs, "rules": rules})
 	})
 	mux.HandleFunc("POST /host/mail/unwire", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {

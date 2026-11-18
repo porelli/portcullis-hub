@@ -222,8 +222,7 @@ func TestMarketplaceMailBadge(t *testing.T) {
 	}
 }
 
-// TestCoreNamesIncludeMailSlot (P9): the slot's core names are reserved;
-// the removed mail core names stay reserved until core has merged.
+// TestCoreNamesIncludeMailSlot (P9): the slot's core names are reserved.
 func TestCoreNamesIncludeMailSlot(t *testing.T) {
 	if !coreVolumes["mail_slot"] {
 		t.Error("volume mail_slot not reserved")
@@ -233,7 +232,7 @@ func TestCoreNamesIncludeMailSlot(t *testing.T) {
 			t.Errorf("alias %s not reserved", a)
 		}
 	}
-	for _, s := range []string{"mail", "mailctl", "mail-resolver", "mail-cert"} {
+	for _, s := range []string{"mail-cert"} {
 		if !coreServices[s] {
 			t.Errorf("service %s no longer reserved", s)
 		}

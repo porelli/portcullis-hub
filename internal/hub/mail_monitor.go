@@ -422,10 +422,10 @@ func (h *Hub) HostMailRestore(archive string) (*AsyncOp, error) {
 	return op, err
 }
 
-// hostLockWaitDefault is how long a host mail op waits for the
+// HostLockWait is how long a host mail op waits for the
 // instance's app lock (another short operation: a delivery, a queued
 // restart) before it is refused.
-const hostLockWaitDefault = 2 * time.Minute
+const HostLockWait = 2 * time.Minute
 
 // hostWaitFree runs start, again while the instance's app lock is held
 // by another operation (ErrBusy, before anything was accepted), up to
@@ -434,7 +434,7 @@ const hostLockWaitDefault = 2 * time.Minute
 func (h *Hub) hostWaitFree(id string, start func() error) error {
 	wait := h.hostLockWait
 	if wait <= 0 {
-		wait = hostLockWaitDefault
+		wait = HostLockWait
 	}
 	deadline := time.Now().Add(wait)
 	for {

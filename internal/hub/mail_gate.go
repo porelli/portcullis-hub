@@ -23,7 +23,8 @@ import (
 )
 
 // The gate and the void (contract §19.1, §19.4, §19.11). The Hub's files
-// on hub_secrets <instance>/_mail/ (directory 2750, files 0640, group
+// at the root of the mail_provider_slot volume (HUB_MAIL_PROVIDER_SLOT_DIR;
+// directory 2750, files 0640, group
 // 2000, written in place: O_TRUNC on the same inode, then fsync; never a
 // rename over a mounted file, never on argv, in a log, an op record or
 // the audit). Every gated service starts only when void-pending is
@@ -506,7 +507,7 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 		case <-time.After(h.mailPoll()):
 		}
 	}
-	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	vctx, cancel := context.WithTimeout(ctx, mailprovider.VoidTimeout)
 	_, err = api.Void(vctx, reason)
 	cancel()
 	if err != nil {

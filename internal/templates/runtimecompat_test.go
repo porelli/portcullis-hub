@@ -29,6 +29,8 @@ type runtimeVector struct {
 	Settings map[string]string `json:"settings"`
 	// PersonSecrets are person_secret option keys (Ruling R-POD2).
 	PersonSecrets []string `json:"person_secrets,omitempty"`
+	// Mail: the manifest has a mail: block (a mail provider).
+	Mail      bool `json:"mail,omitempty"`
 	PortStart     int      `json:"port_start"`
 	Want          Compat   `json:"want"`
 }
@@ -68,6 +70,9 @@ func vectorVerdict(v runtimeVector) Compat {
 			m.Settings = &SettingsSpec{}
 		}
 		m.Settings.Options = append(m.Settings.Options, Option{Key: k, Type: TypePersonSecret})
+	}
+	if v.Mail {
+		m.Mail = &Mail{}
 	}
 	return RuntimeCompat(v.Runtime, []byte(v.Compose), m, env, v.PortStart)
 }

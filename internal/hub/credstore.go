@@ -615,17 +615,6 @@ func (h *Hub) reconcileOrphansLocked(r *os.Root, now time.Time) (bool, map[strin
 		for _, ke := range keys {
 			key := ke.Name()
 			kdir := inst + "/" + key
-			// The wired mail provider's gate (§19.1) isn't a credential:
-			// kept; any other instance's is removed.
-			if key == mailSlotSub {
-				if ke.IsDir() && h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == inst {
-					continue
-				}
-				if err := remove(kdir); err != nil {
-					return false, nil, err
-				}
-				continue
-			}
 			if !ke.IsDir() || !secretNameRe.MatchString(key) {
 				if err := remove(kdir); err != nil {
 					return false, nil, err

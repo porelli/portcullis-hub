@@ -40,8 +40,6 @@ const (
 	// The provider's mount points (contract §19.4).
 	MailSlotMount = "/run/portcullis/mail/slot"
 	MailTLSMount  = "/run/portcullis/mail/tls"
-	// mailSlotSub is the gate's directory under hub_secrets/<instance>/.
-	mailSlotSub = "_mail"
 	// MailWellknownRouter is the Hub's well-known router and service.
 	MailWellknownRouter = "portcullis-mail-wellknown"
 	// The provider's environment (contract §19.4).
@@ -126,9 +124,6 @@ func (h *Hub) mailWiredLocked() (*templates.Template, *templates.Mail) {
 	return t, t.Manifest.Mail
 }
 
-// mailSlotDirRel is <instance>/_mail under hub_secrets.
-func mailSlotDirRel(id string) string { return id + "/" + mailSlotSub }
-
 // mailSlotDir is the wired provider's gate directory as the Hub sees
 // it: the mail_provider_slot volume's root (one provider at a time;
 // "" = no slot volume configured).
@@ -164,7 +159,7 @@ var errMailNotWired = errors.New("no mail provider is wired")
 
 // mailProviderAPILocked is the wired provider's client: the test seam
 // (SetMailAPI) when set, else a client on HUB_MAIL_API_URL (default
-// http://mail-api:<api.port>) with the instance's _mail/api-secret. nil
+// http://mail-api:<api.port>) with the slot's api-secret. nil
 // when nothing usable is wired. Caller must hold mu (read).
 func (h *Hub) mailProviderAPILocked() MailAPI {
 	if h.mailAPI != nil {

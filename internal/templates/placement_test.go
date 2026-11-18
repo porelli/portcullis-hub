@@ -184,7 +184,7 @@ func TestLinkNamesReserved(t *testing.T) {
 // TestPlacementMailCoreNames (merge with mail): mail is primary-only;
 // a template naming a mail core volume is never placeable on a worker.
 func TestPlacementMailCoreNames(t *testing.T) {
-	for _, v := range []string{"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data"} {
+	for _, v := range []string{"mail_tls", "mail_acme", "mail_slot", "mail_provider_slot"} {
 		compose := "services:\n  web:\n    image: x:1\n    volumes:\n      - m:/m\nvolumes:\n  m:\n    name: portcullis_" + v + "\n    external: true\n"
 		po, reasons := Placement([]byte(compose), Manifest{}, nil, []string{"/srv"})
 		if !po || !strings.Contains(strings.Join(reasons, ";"), "mounts the core volume "+v) {

@@ -415,3 +415,67 @@ func TestAPIErrorShaped(t *testing.T) {
 		t.Fatalf("%q", err)
 	}
 }
+
+// TestClientRefusesDuplicateKeys (final cross review L2): a key twice
+// in one object refuses the answer (strict both ways); the same key in
+// sibling or nested objects doesn't.
+func TestClientRefusesDuplicateKeys(t *testing.T) {
+	body := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	type inner struct {
+		A int `json:"a"`
+	}
+	for _, tc := range []struct {
+		body string
+		ok   bool
+	}{
+		{`{"a":1,"b":{"a":2},"l":[{"a":1},{"a":1}]}`, true},
+		{`{"a":1,"a":2}`, false},
+		{`{"a":1,"b":{"a":2,"a":3}}`, false},
+		{`{"a":1,"l":[{"a":1,"a":1}]}`, false},
+	} {
+		body = tc.body
+		var out struct {
+			A int     `json:"a"`
+			B inner   `json:"b"`
+			L []inner `json:"l"`
+		}
+		_, err := c.do(context.Background(), http.MethodGet, "/x", nil, &out)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: %v", tc.body, err)
+		}
+	}
+}
+
+// TestClientCallLimits (final cross review M6): an ordinary call is cut
+// at CallTimeout; the void and the checks run under their own longer
+// bounds.
+func TestClientCallLimits(t *testing.T) {
+	saved := [3]time.Duration{CallTimeout, VoidTimeout, ChecksTimeout}
+	defer func() { CallTimeout, VoidTimeout, ChecksTimeout = saved[0], saved[1], saved[2] }()
+	CallTimeout, VoidTimeout, ChecksTimeout = 50*time.Millisecond, 2*time.Second, 2*time.Second
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		switch r.URL.Path {
+		case "/v1/void":
+			io.WriteString(w, `{"voided":0,"restored_at":"2026-11-17T00:00:00Z"}`)
+		case "/v1/checks":
+			io.WriteString(w, `{"checks":[]}`)
+		default:
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	if _, err := c.State(context.Background()); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("a slow ordinary call: %v", err)
+	}
+	if _, err := c.Void(context.Background(), VoidRestore); errors.Is(err, ErrUnreachable) {
+		t.Fatalf("the void was cut at the ordinary bound: %v", err)
+	}
+	if _, err := c.Checks(context.Background(), true); errors.Is(err, ErrUnreachable) {
+		t.Fatalf("the checks were cut at the ordinary bound: %v", err)
+	}
+}

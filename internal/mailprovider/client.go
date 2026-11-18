@@ -97,12 +97,30 @@ type Client struct {
 }
 
 // New returns a client for baseURL; secretFile holds the bearer (the
-// wired instance's _mail/api-secret). Every call is bounded at 30 s.
+// mail provider slot's api-secret). A call is bounded at CallTimeout
+// (the void at VoidTimeout, the checks at ChecksTimeout) unless its
+// context ends sooner.
 func New(baseURL, secretFile string) *Client {
 	// Redirects are never followed (M11): the Hub would replay its calls
 	// from its own network position; a 3xx is an error answer.
-	return &Client{APIURL: strings.TrimSuffix(baseURL, "/"), SecretFile: secretFile, HTTP: &http.Client{Timeout: 30 * time.Second,
+	return &Client{APIURL: strings.TrimSuffix(baseURL, "/"), SecretFile: secretFile, HTTP: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+}
+
+// The Hub's deadlines on provider calls (contract §19.5; final cross
+// review M6): a void may take minutes on a large store, a checks run
+// (uncached or refresh) up to 100 s.
+var (
+	CallTimeout   = 30 * time.Second
+	VoidTimeout   = 6 * time.Minute
+	ChecksTimeout = 2 * time.Minute
+)
+
+// callLimitKey carries a call's own bound (fetch: CallTimeout without).
+type callLimitKey struct{}
+
+func withCallLimit(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, callLimitKey{}, d)
 }
 
 // minSecret is the shortest bearer accepted (the Hub writes 48).
@@ -170,6 +188,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) (in
 	if err != nil || out == nil {
 		return status, err
 	}
+	if err := noDuplicateKeys(raw); err != nil {
+		return status, fmt.Errorf("mail provider: unexpected answer (HTTP %d): %v", status, err)
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
@@ -234,6 +255,12 @@ var rawHook func([]byte)
 // buffer the caller wipes); a non-2xx is an *APIError. The bearer
 // secret never reaches an error.
 func (c *Client) fetch(ctx context.Context, method, path string, body any) (int, []byte, error) {
+	limit := CallTimeout
+	if d, ok := ctx.Value(callLimitKey{}).(time.Duration); ok {
+		limit = d
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
 	sec, err := c.secret()
 	if err != nil {
 		return 0, nil, err
@@ -376,7 +403,7 @@ func (c *Client) Checks(ctx context.Context, refresh bool) (Checks, error) {
 		p += "?refresh=1"
 	}
 	var out Checks
-	if _, err := c.do(ctx, http.MethodGet, p, nil, &out); err != nil {
+	if _, err := c.do(withCallLimit(ctx, ChecksTimeout), http.MethodGet, p, nil, &out); err != nil {
 		return Checks{}, err
 	}
 	if out.Checks == nil || len(out.Checks) > maxList {
@@ -738,7 +765,7 @@ func (c *Client) Void(ctx context.Context, reason string) (VoidResult, error) {
 		return VoidResult{}, fmt.Errorf("mail provider: void reason %q", reason)
 	}
 	var out VoidResult
-	if _, err := c.do(ctx, http.MethodPost, "/v1/void", struct {
+	if _, err := c.do(withCallLimit(ctx, VoidTimeout), http.MethodPost, "/v1/void", struct {
 		Reason string `json:"reason"`
 	}{reason}, &out); err != nil {
 		return VoidResult{}, err
@@ -802,4 +829,54 @@ func (c *Client) Action(ctx context.Context, name, domain string) error {
 		Domain string `json:"domain"`
 	}{domain}, nil)
 	return err
+}
+
+// noDuplicateKeys refuses an answer with a key twice in one object
+// (contract §19.5: strict both ways; encoding/json would keep the last).
+// The key is never quoted (an answer may hold a password).
+func noDuplicateKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	type frame struct {
+		obj     bool
+		wantKey bool
+		keys    map[string]bool
+	}
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return nil // the strict decode reports it
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		if top != nil && top.obj && top.wantKey {
+			if k, ok := tok.(string); ok {
+				if top.keys[k] {
+					return errors.New("a duplicate key")
+				}
+				top.keys[k] = true
+				top.wantKey = false
+				continue
+			}
+		}
+		switch tok {
+		case json.Delim('{'):
+			stack = append(stack, &frame{obj: true, wantKey: true, keys: map[string]bool{}})
+			continue
+		case json.Delim('['):
+			stack = append(stack, &frame{})
+			continue
+		case json.Delim('}'), json.Delim(']'):
+			stack = stack[:len(stack)-1]
+		}
+		// A value ended: an object's next token is a key again.
+		if len(stack) > 0 && stack[len(stack)-1].obj {
+			stack[len(stack)-1].wantKey = true
+		}
+	}
 }

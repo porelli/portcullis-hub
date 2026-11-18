@@ -278,7 +278,7 @@ func (f mailActionFixer) Apply(h *Hub, fd doctor.Finding, params map[string]stri
 
 // mailConfirmRemovalFixer is mail_mass_removal_pending's fix: the
 // administrator's confirmation of exactly the pending removal. It parks
-// the mailboxes (deleted after MAIL_FORMER_RETENTION): TouchesData, and
+// the mailboxes (deleted after the former retention): TouchesData, and
 // always confirmed through the AI.
 type mailConfirmRemovalFixer struct{}
 
@@ -306,7 +306,7 @@ func (h *Hub) confirmRemovalPlan(params map[string]string) (string, string, []st
 	}
 	sort.Strings(users)
 	ids := pendingUUIDs(p.Accounts)
-	return "removes the mailboxes of " + strings.Join(users, ", ") + " (parked, deleted after MAIL_FORMER_RETENTION)", doctor.Digest(ids), ids, nil
+	return "removes the mailboxes of " + strings.Join(users, ", ") + " (parked, deleted after the former retention)", doctor.Digest(ids), ids, nil
 }
 
 func (mailConfirmRemovalFixer) Preview(_ context.Context, h *Hub, _ doctor.Finding, params map[string]string) (*FixPlan, error) {

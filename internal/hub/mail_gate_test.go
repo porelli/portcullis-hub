@@ -335,8 +335,10 @@ func TestEpochMismatchOwesVoid(t *testing.T) {
 	if gateFile(t, f.fixture, mailGatePresent) == "" {
 		t.Fatal("the wired provider's gate was removed as an orphan")
 	}
-	if _, err := os.Stat(filepath.Join(f.h.cfg.SecretsDir, "grafana", "_mail")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("another instance's gate kept")
+	// A stale hub_secrets gate (the old _mail subpath) is no credential:
+	// its files go.
+	if _, err := os.Stat(filepath.Join(f.h.cfg.SecretsDir, "grafana", "_mail", ".present")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a stale gate file kept")
 	}
 	writeFile(t, filepath.Join(f.h.cfg.SecretsDir, epochFile), "0000")
 	if _, err := f.h.reconcileSecrets("test"); err != nil {

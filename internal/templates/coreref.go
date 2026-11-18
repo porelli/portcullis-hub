@@ -56,21 +56,20 @@ var (
 		"forward-auth", "forward-auth-ext", "group-gate", "hub", "enroll", "domains", "dns-tool", "prometheus", "alertmanager", "blackbox",
 		"textfile-exporter", "grafana", "mcp-gate", "sessions", "wg",
 		// Mail (contract §3 "Mail core names").
-		"mail", "mailctl", "mail-resolver", "mail-cert")
+		"mail-cert")
 	coreVolumes = set("postgres_data", "vault_data", "lldap_data", "hub_data", "traefik_acme", "domains_data",
 		"prometheus_data", "alertmanager_data", "grafana_data", "hub_secrets", "mcp_gate_data",
 		"group_gate_data", "wg_data", "vpn_doc", "link_doc",
-		"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data",
-		// The mail slot (mail provider plan P9; the removed mail names
-		// above stay until core has merged).
+		"mail_tls", "mail_acme",
+		// The mail slot (mail provider plan P9).
 		"mail_slot",
 		// The provider's slot volume (Ruling R-POD2: the whole volume is
 		// mounted into the provider, never a hub_secrets subpath).
 		"mail_provider_slot")
 	// coreAliases are core's network aliases that aren't service names
-	// (wg's metrics address on portcullis, mail's and mailctl's on
-	// portcullis-metrics-mail): reserved DNS names too.
-	coreAliases = set("wg-metrics", "mail-metrics", "mailctl-metrics", "hub-metrics",
+	// (wg's metrics address on portcullis, the Hub's on
+	// portcullis-metrics-hub): reserved DNS names too.
+	coreAliases = set("wg-metrics", "hub-metrics",
 		// The wired mail provider's aliases on portcullis-mail-api and
 		// portcullis-metrics-mail (the Hub's override sets them).
 		"mail-api", "mail-provider-metrics", "mail-provider-server-metrics")

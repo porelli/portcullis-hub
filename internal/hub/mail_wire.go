@@ -493,6 +493,11 @@ func (h *Hub) resumeMail() {
 	}
 	h.goBackground(h.mailResumeClosing)
 	h.mailNoteRestorePending()
+	if p != nil && h.mailRestoreHolds(p.Instance) {
+		// Synchronous: before the host socket serves `hub mail restore`
+		// (no race with the restore's own start).
+		h.mailStopRestoreHeld(p.Instance)
+	}
 	if sw != nil {
 		h.goBackground(func() { h.resumeSwitchMail(sw) })
 		return
@@ -709,5 +714,41 @@ func (h *Hub) lockMailSlot() (func(), error) {
 func (h *Hub) mailSlotLocked(op string) {
 	if h.testHookMailSlotLocked != nil {
 		h.testHookMailSlotLocked(op)
+	}
+}
+
+// mailStopRestoreHeld (Hub start; final cross review H2, defence in
+// depth): a provider still running while a core restore holds it serves
+// the pre-restore store and passwords the Hub can no longer void or
+// revoke: it is taken down. Running unknown (the engine unreadable): down
+// anyway (fail closed).
+func (h *Hub) mailStopRestoreHeld(id string) {
+	if running, err := h.projectRunning(context.Background(), id); err == nil && !running {
+		return
+	}
+	unlock, err := h.lockApp(id)
+	if err != nil {
+		log.Printf("mail: %s runs while a core restore holds it, but it is busy: not stopped (%v)", id, err)
+		return
+	}
+	defer unlock()
+	// `hub mail restore`'s op runs until its hold file is gone: never a
+	// down between its start and that removal.
+	if r := h.LastOp(id); r != nil && r.Running {
+		return
+	}
+	h.mu.RLock()
+	var live *templates.Template
+	if t := h.findLocked(id); t != nil {
+		c := *t
+		live = &c
+	}
+	h.mu.RUnlock()
+	if live == nil || !h.mailRestoreHolds(id) {
+		return
+	}
+	log.Printf("mail: %s runs while a core restore holds it: stopping it", id)
+	if err := h.composeDown(live); err != nil {
+		log.Printf("mail: stopping %s under the restore hold: %v", id, err)
 	}
 }

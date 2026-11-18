@@ -592,3 +592,14 @@ func TestHubSSHSubcommand(t *testing.T) {
 		t.Fatalf("requests %v", got)
 	}
 }
+
+// TestMailClientOutwaitsTheLock (final cross review M4): the host ops
+// that wait for the instance's app lock outwait it on the client side
+// (else core reports a failure while the Hub starts the op later).
+func TestMailClientOutwaitsTheLock(t *testing.T) {
+	for _, c := range []string{"restore", "backup"} {
+		if mailCommands[c].timeout <= hub.HostLockWait+time.Minute {
+			t.Errorf("%s: client timeout %v, the lock wait %v", c, mailCommands[c].timeout, hub.HostLockWait)
+		}
+	}
+}

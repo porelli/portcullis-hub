@@ -515,7 +515,8 @@ func countOf(l []string, s string) int {
 var mailCoreNetworks = map[string]bool{"portcullis": true, "portcullis-proxy": true, "portcullis-auth": true, "socket-proxy-traefik": true,
 	"socket-proxy-hub": true, "monitoring": true, "alerting": true, "portcullis-domains": true, "portcullis-certs": true, "domains-egress": true,
 	"portcullis-mcp": true, "portcullis-sessions": true, "portcullis-vpn": true, "portcullis-vpn-edge": true, "wg-egress": true,
-	"portcullis-metrics-wg": true, "portcullis-link": true, "portcullis-link-data": true, "portcullis-mail-api": true, "portcullis-metrics-mail": true}
+	"portcullis-metrics-wg": true, "portcullis-link": true, "portcullis-link-data": true, "portcullis-mail-api": true, "portcullis-metrics-mail": true,
+	"portcullis-metrics-hub": true}
 
 // mailNetworkText ends the refusal of a network key outside the
 // allowlist (parity with templates' validate.py).

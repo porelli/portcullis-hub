@@ -721,6 +721,14 @@ func offsiteRestart(t *testing.T) (*wireFix, *Hub, string, string) {
 	w.engine.containers = nil
 	w.engine.networks = nil
 	w.engine.mu.Unlock()
+	return w, restartedHub(t, w), archive, pending
+}
+
+// restartedHub is a new Hub on w's configuration (a Hub restart), Init
+// run.
+func restartedHub(t *testing.T, w *wireFix) *Hub {
+	t.Helper()
+	cfg := w.h.cfg
 	h, err := newTestHub(cfg, w.runner, w.engine, w.idp)
 	if err != nil {
 		t.Fatal(err)
@@ -737,5 +745,43 @@ func offsiteRestart(t *testing.T) (*wireFix, *Hub, string, string) {
 	h.mailBootstrapWait, h.mailPollEvery = 500*time.Millisecond, time.Millisecond
 	h.Init()
 	h.Wait()
-	return w, h, archive, pending
+	return h
+}
+
+// TestBootStopsRestoreHeldProvider (final cross review H2, defence in
+// depth): a Hub start that finds the wired provider running while a
+// core restore holds it takes it down; not held, or not running, nothing.
+func TestBootStopsRestoreHeldProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		hold, running bool
+		want          bool
+	}{
+		{"held and running", true, true, true},
+		{"held, stopped", true, false, false},
+		{"running, no hold", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := wiredFix(t)
+			if tc.hold {
+				archive, err := w.h.HostMailBackup()
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(w.h.cfg.DataDir, mailRestorePendingFile), archive+"\n")
+			}
+			w.h.Wait()
+			w.engine.mu.Lock()
+			w.engine.containers = nil
+			if tc.running {
+				w.engine.containers = append(w.engine.containers, container("prov-stalwart", "portcullis-"+mailProviderID, "stalwart", "running"))
+			}
+			w.engine.mu.Unlock()
+			before := providerDowns(w)
+			restartedHub(t, w)
+			if got := providerDowns(w) > before; got != tc.want {
+				t.Fatalf("down at the start: %v, want %v (%v)", got, tc.want, w.runner.Calls())
+			}
+		})
+	}
 }

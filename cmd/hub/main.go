@@ -273,8 +273,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vpn" {
 		os.Exit(vpnMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
-	// `hub mail drain|domains` (contract §19.10): `./portcullis mail
-	// disable`'s clients.
+	// `hub mail <command>` (contract §19.10: provider, install, unwire,
+	// op, status, dns-main, tls, test, backup, restore, action, drain,
+	// domains): `./portcullis mail …`'s clients.
 	if len(os.Args) > 1 && os.Args[1] == "mail" {
 		os.Exit(mailMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}

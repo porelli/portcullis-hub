@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -294,5 +295,47 @@ func TestMailSetBodyCarriesRules(t *testing.T) {
 	w.dom.mu.Unlock()
 	if b.MailHostname != "mail.example.org" || b.RelayInclude != "_spf.relay.example.net" || b.DMARCFloor != "reject" || b.Draining || len(b.Records) != 3 {
 		t.Fatalf("%+v", b)
+	}
+}
+
+// dnsFlipAPI changes the main domain's rule context during its DNS
+// read (a relay include set mid-read), the first flips times.
+type dnsFlipAPI struct {
+	MailAPI
+	h     *Hub
+	flips int
+	n     int
+}
+
+func (a *dnsFlipAPI) DNS(ctx context.Context, d string, wc bool) (mailprovider.DNSSet, error) {
+	if a.n < a.flips {
+		a.n++
+		a.h.mu.Lock()
+		a.h.st.Mail.Relay = nil
+		if a.n%2 == 1 {
+			a.h.st.Mail.Relay = &state.MailRelay{SPFInclude: fmt.Sprintf("spf%d.relay.example.net", a.n)}
+		}
+		a.h.mu.Unlock()
+	}
+	return a.MailAPI.DNS(ctx, d, wc)
+}
+
+// TestMainDNSRulesOneSnapshot (final cross review L10): the main set and
+// its rules are one consistent pair: a rule change during the read reads
+// both again; one that never settles is a 409, never a mismatched pair.
+func TestMainDNSRulesOneSnapshot(t *testing.T) {
+	w := wiredFix(t)
+	w.setDNS("example.org", goodSet("example.org", "reject"))
+	// A relay include set during the first read, gone during the second:
+	// the third read's pair is consistent (and valid: no relay).
+	api := &dnsFlipAPI{MailAPI: w.mc.Client(), h: w.h, flips: 2}
+	w.h.SetMailAPI(api)
+	recs, rules, err := w.h.HostMailDNSMainWithRules(context.Background())
+	if err != nil || len(recs) != 3 || rules.RelayInclude != "" || rules != w.h.HostMailDNSRules() {
+		t.Fatalf("%v %d %+v", err, len(recs), rules)
+	}
+	api.flips, api.n = 10, 0
+	if _, _, err := w.h.HostMailDNSMainWithRules(context.Background()); statusOf(err) != 409 {
+		t.Fatalf("never settling: %v", err)
 	}
 }

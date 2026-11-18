@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/httpapi"
+	"github.com/portcullis/hub/internal/hub"
 )
 
 // `hub vpn …` (contract §16): the host control socket's only clients,
@@ -62,7 +63,7 @@ var mailCommands = map[string]struct {
 	"tls":      {http.MethodPost, "/host/mail/tls", true, time.Minute},
 	"test":     {http.MethodPost, "/host/mail/test", true, time.Minute},
 	"backup":   {http.MethodPost, "/host/mail/backup", false, 2 * time.Hour},
-	"restore":  {http.MethodPost, "/host/mail/restore", true, time.Minute},
+	"restore":  {http.MethodPost, "/host/mail/restore", true, hub.HostLockWait + 3*time.Minute},
 	"action":   {http.MethodPost, "/host/mail/action", true, time.Minute},
 	"drain":    {http.MethodPost, "/host/mail/drain", false, time.Minute},
 	"domains":  {http.MethodGet, "/host/mail/domains", false, time.Minute},
