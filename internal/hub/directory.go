@@ -288,6 +288,8 @@ func (h *Hub) runAttrSync(ctx context.Context, kick <-chan struct{}) {
 				lastFreshErr = ""
 			}
 		}
+		// The CLI client portcullis-cli (contract §18.2), next to it.
+		h.ensureCLIClient(sctx)
 		// Keycloak's events config (contract §8, the sign-in history's
 		// source): re-asserted with history_days on every sync.
 		eerr := h.ensureEvents(sctx)

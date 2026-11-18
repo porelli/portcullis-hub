@@ -479,3 +479,16 @@ func (b *Backend) PushBundle(ctx context.Context, id string, files fs.FS, m agen
 func (b *Backend) RestartService(context.Context, string, string, time.Duration) error {
 	return runtime.ErrUnsupported
 }
+
+// notMeasuredWorker: the agent API has no usage routes (contract §17.4):
+// a worker's containers aren't measured, never guessed (fail closed).
+var notMeasuredWorker = &runtime.NotMeasuredError{Why: "not measured on a worker server yet"}
+
+// Stats, LayerSize and ImageSize are answered here: no agent route.
+func (b *Backend) Stats(context.Context, string) (runtime.UnitStats, error) {
+	return runtime.UnitStats{}, notMeasuredWorker
+}
+
+func (b *Backend) LayerSize(context.Context, string) (int64, error) { return 0, notMeasuredWorker }
+
+func (b *Backend) ImageSize(context.Context, string) (int64, error) { return 0, notMeasuredWorker }

@@ -41,10 +41,11 @@ const OwnerAttr = "portcullis.hub.template"
 const maxBody = 16 << 20
 
 // protectedClients are core/built-in clients no template may touch, and
-// the Hub's own fresh-auth client (EnsureFreshAuthClient alone manages it:
+// the Hub's own fresh-auth and CLI clients (EnsureFreshAuthClient /
+// EnsureCLIClient alone manage them:
 // no template takes it over, no attribute scope is attached to it).
 var protectedClients = map[string]bool{
-	"portcullis-forward-auth": true, freshauth.ClientID: true, "admin-cli": true, "account": true, "account-console": true,
+	"portcullis-forward-auth": true, freshauth.ClientID: true, CLIClientID: true, "admin-cli": true, "account": true, "account-console": true,
 	"broker": true, "realm-management": true, "security-admin-console": true,
 }
 

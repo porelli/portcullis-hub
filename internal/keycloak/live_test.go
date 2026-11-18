@@ -853,3 +853,81 @@ func fmtConns(cs []keycloak.AIConnection) string {
 	}
 	return b.String()
 }
+
+// TestLiveCLIObjects (contract §18.2): portcullis-cli on a real Keycloak
+// (the portcullis-keycloak image: its portcullis-fresh mapper): ensured
+// twice, a browser-less PKCE sign-in on 127.0.0.1:38917, no refresh
+// token, the exact-port loopback match (40000 and localhost refused) and
+// the device grant refused.
+func TestLiveCLIObjects(t *testing.T) {
+	ctx := context.Background()
+	e, c := liveSetup(t)
+	for round := 0; round < 2; round++ {
+		if err := c.EnsureCLIClient(ctx); err != nil {
+			t.Fatalf("ensure %d: %v", round, err)
+		}
+	}
+	cl, err := e.g.GetClient(ctx, e.tok, keycloak.Realm, e.clientUUID(t, keycloak.CLIClientID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !*cl.PublicClient || !*cl.StandardFlowEnabled || *cl.DirectAccessGrantsEnabled || *cl.ImplicitFlowEnabled || *cl.ServiceAccountsEnabled {
+		t.Errorf("flows: public %v standard %v direct %v implicit %v sa %v", *cl.PublicClient, *cl.StandardFlowEnabled, *cl.DirectAccessGrantsEnabled, *cl.ImplicitFlowEnabled, *cl.ServiceAccountsEnabled)
+	}
+	if got := sorted(cl.RedirectURIs); strings.Join(got, ",") != "http://127.0.0.1:38917/callback,http://127.0.0.1:38918/callback,http://127.0.0.1:38919/callback" {
+		t.Errorf("redirect URIs %v", got)
+	}
+	if len(cl.WebOrigins) != 0 {
+		t.Errorf("web origins %v", cl.WebOrigins)
+	}
+	if got := sorted(cl.DefaultClientScopes); strings.Join(got, ",") != "acr,basic" {
+		t.Errorf("default scopes %v", got)
+	}
+	if len(cl.OptionalClientScopes) != 0 {
+		t.Errorf("optional scopes %v", cl.OptionalClientScopes)
+	}
+
+	id := keycloak.CLIClientID
+	cb := "http://127.0.0.1:38917/callback"
+	jar, _ := cookiejar.New(nil)
+	r := e.aiAuthorize(t, jar, id, cb, "openid", "S256")
+	if r.code == "" {
+		t.Fatalf("loopback sign-in: %+v", r)
+	}
+	tok := e.aiToken(t, id, cb, r)
+	if rt := tok["refresh_token"]; rt != "" && rt != "<nil>" {
+		t.Error("portcullis-cli issued a refresh token")
+	}
+	idt := jwtClaims(t, tok["id_token"])
+	if idt["preferred_username"] != "alice" || idt["azp"] != id {
+		t.Errorf("ID token preferred_username %v azp %v", idt["preferred_username"], idt["azp"])
+	}
+	for _, bad := range []string{"http://127.0.0.1:40000/callback", "http://localhost:38917/callback"} {
+		r := e.aiAuthorize(t, nil, id, bad, "openid", "S256")
+		if r.code != "" {
+			t.Errorf("redirect %s: Keycloak issued a code", bad)
+		}
+		if !strings.Contains(strings.ToLower(r.page), "redirect") && r.errCode == "" {
+			t.Errorf("redirect %s: no refusal (%+v)", bad, r)
+		}
+	}
+	// PKCE is required.
+	if r := e.aiAuthorize(t, jar, id, cb, "openid", ""); r.code != "" {
+		t.Error("a sign-in without PKCE got a code")
+	}
+	// The device grant is off.
+	resp, err := http.PostForm(e.base+"/realms/"+keycloak.Realm+"/protocol/openid-connect/auth/device", url.Values{"client_id": {id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode < 400 || strings.Contains(string(body), "user_code") {
+		t.Errorf("device authorization answered %d %s", resp.StatusCode, body)
+	}
+	// Direct grant (password) is off.
+	pw := e.tokenCall(t, url.Values{"grant_type": {"password"}, "client_id": {id}, "username": {"alice"}, "password": {"alice-pw"}, "scope": {"openid"}})
+	if pw["access_token"] != "" && pw["access_token"] != "<nil>" {
+		t.Error("password grant issued a token")
+	}
+}

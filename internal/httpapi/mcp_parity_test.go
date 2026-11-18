@@ -107,6 +107,45 @@ var mailNoToolRoutes = map[string]string{
 	"POST /api/mail/provider/retry-void":                         "mail providers: the void is retried from the Mail tab only (contract §19.11)",
 }
 
+// sshNoToolRoutes are the SSH admin routes no tool mirrors (contract
+// §15.10, spec §9.12): settings, host groups, hosts, enrolment codes,
+// source addresses, host-key signing and anything that needs a fresh
+// sign-in are the Hub page's only.
+var sshNoToolRoutes = map[string]string{
+	"GET /api/ssh/settings":                           "admin UI only (Settings tab; list_ssh_access carries the host groups)",
+	"PUT /api/ssh/settings":                           "settings: never through MCP",
+	"GET /api/ssh/hostgroups":                         "admin UI only (list_ssh_access carries the host groups)",
+	"POST /api/ssh/hostgroups":                        "host groups and source addresses: never through MCP",
+	"PUT /api/ssh/hostgroups/{id}":                    "host groups and source addresses: never through MCP",
+	"DELETE /api/ssh/hostgroups/{id}":                 "host groups: never through MCP",
+	"GET /api/ssh/hostgroups/{id}/access":             "admin UI only (ssh_access_preview is per host)",
+	"POST /api/ssh/hosts":                             "returns an enrolment code (a secret in a transcript): never through MCP",
+	"PUT /api/ssh/hosts/{id}":                         "needs a fresh sign-in: admin UI only",
+	"DELETE /api/ssh/hosts/{id}":                      "needs a fresh sign-in: admin UI only",
+	"POST /api/ssh/hosts/{id}/code":                   "an enrolment code (a secret in a transcript): never through MCP",
+	"POST /api/ssh/hosts/{id}/accounts/{name}/remove": "removes a local account on a host: admin UI only",
+	"GET /api/ssh/people/{u}/access":                  "admin UI only (ssh_access_preview is per host)",
+	"PUT /api/ssh/grants/{id}":                        "set_ssh_grant takes an id (it mirrors POST /api/ssh/grants)",
+	"DELETE /api/ssh/grants/{id}":                     "admin UI only",
+	"POST /api/ssh/grants/preview":                    "admin UI only (the grant editor)",
+	"POST /api/ssh/host-certificates":                 "signing a host key: never through MCP",
+	"POST /api/ssh/certificates/unrevoke":             "taking a key off the revoked list: a fresh sign-in, never through MCP (RR-M5)",
+}
+
+// usageNoToolRoutes are the usage routes no tool mirrors (contract §15.10
+// "Usage routes without a tool", U11).
+var usageNoToolRoutes = map[string]string{
+	"GET /api/usage/export.csv":       "a file download; usage_overview and usage_storage answer the same data",
+	"POST /api/usage/storage/op/stop": "stops a read-only measurement in the admin UI's progress panel; the figures measured so far are kept",
+}
+
+// adminUsage are the usage tools (§15.10); the storage ones come with the
+// storage measurer.
+var adminUsage = []string{"usage_overview", "usage_instance", "usage_storage", "usage_storage_measure", "usage_storage_op"}
+
+// adminUsageRegistered are the ones registered (all of them).
+var adminUsageRegistered = adminUsage
+
 // adminVPN are the VPN tools (§15.10).
 var adminVPN = []string{"get_vpn", "list_vpn_devices", "remove_vpn_device", "set_vpn_provider", "assign_vpn_address", "set_instance_reach", "mail_status"}
 
@@ -171,6 +210,8 @@ var destructiveTwins = map[string]string{
 	"POST /api/doctor/findings/{fp}/apply": "a one-click fix: D when its plan touches data (a folder apply or undo, an ownership change, a revocation; G45)",
 	// VPN (§15.10).
 	"DELETE /api/vpn/devices/{id}": "revokes a person's VPN device",
+	// SSH (§15.10).
+	"POST /api/ssh/certificates/revoke": "revokes a person's SSH certificate keys",
 	// Servers (§15.10, Task 12).
 	"POST /api/instances/{id}/move": "moves an instance between servers: down for the move, typed on the instance id",
 }
@@ -230,6 +271,7 @@ var widensAlways = map[string]string{
 	"add_source":         "a source decides what apps can run (G37)",
 	"add_model_provider": "what people send on the AI page goes to it, and its secrets (Task 17b ruling)",
 	"set_permission":     "a delegated permission lets a group manage people (G37)",
+	"set_ssh_grant":      "a grant lets a group log into hosts (spec §9.12)",
 }
 
 func TestToolParity(t *testing.T) {
@@ -259,8 +301,10 @@ func TestToolParity(t *testing.T) {
 		_, vpnNo := vpnNoToolRoutes[r]
 		_, guardNo := fieldGuardNoToolRoutes[r]
 		_, mailNo := mailNoToolRoutes[r]
+		_, sshNo := sshNoToolRoutes[r]
+		_, usageNo := usageNoToolRoutes[r]
 		_, serverNo := serverNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo || serverNo
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -291,7 +335,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -414,7 +458,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// The tools of every part are all there.
-	for _, n := range append(append(append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...), adminSignIn...), adminVPN...) {
+	for _, n := range append(append(append(append(append(append(slices.Clone(admin17a), admin17b...), admin18...), admin20...), adminSignIn...), adminVPN...), adminUsageRegistered...) {
 		if _, ok := byName[n]; !ok {
 			t.Errorf("tool %s is not registered", n)
 		}

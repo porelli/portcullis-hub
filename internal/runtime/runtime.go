@@ -147,4 +147,11 @@ type Instances interface {
 
 	RunFixer(ctx context.Context, s FixerSpec, out func(tar io.Reader) error) (*RunResult, error)
 	EnsureImage(ctx context.Context, ref string) error
+
+	// Stats is one usage sample of a unit (contract §6 "Resource
+	// usage"); LayerSize its writable layer's size and ImageSize an
+	// image's. A *NotMeasuredError: the runtime can't tell.
+	Stats(ctx context.Context, id string) (UnitStats, error)
+	LayerSize(ctx context.Context, id string) (int64, error)
+	ImageSize(ctx context.Context, ref string) (int64, error)
 }

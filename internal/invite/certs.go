@@ -115,6 +115,11 @@ func (c *Client) actionURL(path string) (string, error) {
 // 409, never the request body. The answer is bounded to maxActionBody;
 // the caller zeroes it after use. The request buffer is zeroed here.
 func (c *Client) post(ctx context.Context, path string, body any, want int) ([]byte, error) {
+	return c.send(ctx, http.MethodPost, path, body, want)
+}
+
+// send is post with any method; a nil body sends none (GET, DELETE).
+func (c *Client) send(ctx context.Context, method, path string, body any, want int) ([]byte, error) {
 	if c.HTTP == nil {
 		return nil, errors.New("certificates API: no HTTP client")
 	}
@@ -126,20 +131,29 @@ func (c *Client) post(ctx context.Context, path string, body any, want int) ([]b
 	if err != nil {
 		return nil, err
 	}
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, errors.New("certificates API: request can't be encoded")
+	var buf []byte
+	if body != nil {
+		buf, err = json.Marshal(body)
+		if err != nil {
+			return nil, errors.New("certificates API: request can't be encoded")
+		}
 	}
 	defer clear(buf)
 	if len(buf) > maxActionRequest {
 		return nil, &APIError{Status: http.StatusRequestEntityTooLarge, Message: "request too large"}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(buf))
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, rd)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+sec)
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.noRedirect().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("certificates API: %w", redactURLError(err))

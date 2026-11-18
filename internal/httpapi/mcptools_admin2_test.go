@@ -693,6 +693,18 @@ var adminToolFixtures = []struct {
 	{"list_ops", nil},
 	{"get_runtime", nil},
 	{"mail_status", nil},
+	// SSH access (contract §15.10).
+	{"list_ssh_access", nil},
+	{"ssh_access_preview", map[string]any{"host": "web-1"}},
+	{"list_ssh_certificates", map[string]any{"user": "erin"}},
+	{"list_ssh_hosts", nil},
+	{"revoke_ssh_certificates", map[string]any{"user": "erin", "fingerprints": []string{"not-a-fingerprint"}}},
+	{"set_ssh_grant", map[string]any{"group": "staff", "host_group": "all", "accounts": []string{"deploy"}}},
+	{"usage_overview", nil},
+	{"usage_instance", map[string]any{"id": "secretapp"}},
+	{"usage_storage", nil},
+	{"usage_storage_op", nil},
+	{"usage_storage_measure", map[string]any{"instance": "secretapp"}},
 	{"wait_for_op", map[string]any{"id": "secretapp"}},
 	{"get_logs", map[string]any{"id": "smbfixture"}},
 	// Task 6: sign-in methods and templates.

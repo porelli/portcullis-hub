@@ -190,9 +190,10 @@ func TestPeopleVerifierRedirect(t *testing.T) {
 	}
 }
 
-type fakeDirHub struct{ syncs, checks, stale, vpn int }
+type fakeDirHub struct{ syncs, checks, stale, vpn, ssh int }
 
 func (f *fakeDirHub) TriggerVPNPublish() { f.vpn++ }
+func (f *fakeDirHub) TriggerSSHCompile() { f.ssh++ }
 
 func (f *fakeDirHub) TriggerDirectorySync()   { f.syncs++ }
 func (f *fakeDirHub) TriggerCredentialCheck() { f.checks++ }
@@ -208,12 +209,12 @@ func TestWireDirectoryHooks(t *testing.T) {
 		t.Fatal("hooks not set")
 	}
 	dir.OnChange()
-	if h.syncs != 1 || h.checks != 1 || h.stale != 1 || h.vpn != 1 {
-		t.Errorf("OnChange: syncs %d checks %d stale %d vpn %d", h.syncs, h.checks, h.stale, h.vpn)
+	if h.syncs != 1 || h.checks != 1 || h.stale != 1 || h.vpn != 1 || h.ssh != 1 {
+		t.Errorf("OnChange: syncs %d checks %d stale %d vpn %d ssh %d", h.syncs, h.checks, h.stale, h.vpn, h.ssh)
 	}
 	dir.OnEvaluated()
-	if h.syncs != 1 || h.checks != 2 || h.stale != 1 {
-		t.Errorf("OnEvaluated: syncs %d checks %d", h.syncs, h.checks)
+	if h.syncs != 1 || h.checks != 2 || h.stale != 1 || h.ssh != 2 {
+		t.Errorf("OnEvaluated: syncs %d checks %d ssh %d", h.syncs, h.checks, h.ssh)
 	}
 }
 
@@ -551,5 +552,43 @@ func TestHubMailCLIExitCodes(t *testing.T) {
 	all := strings.Join(bodies, "\n")
 	if !strings.Contains(all, `POST /host/mail/install {"template":"stalwart"`) || !strings.Contains(all, "GET /host/mail/op?instance=stalwart&op_id=o1 ") {
 		t.Fatalf("bodies %q", bodies)
+	}
+}
+
+// TestHubSSHSubcommand: `hub ssh status` GETs /host/ssh/status, the answer
+// on stdout; usage 2; no socket 1.
+func TestHubSSHSubcommand(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	var stdout, stderr bytes.Buffer
+	if code := sshMain([]string{"status"}, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "the Hub isn't running") {
+		t.Fatalf("no socket: %d %q", code, stderr.String())
+	}
+	for _, bad := range [][]string{nil, {"nope"}, {"status", "x"}} {
+		if code := sshMain(bad, &stdout, &stderr, sock); code != 2 {
+			t.Errorf("%v: %d", bad, code)
+		}
+	}
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.Path)
+		w.Write([]byte(`{"enabled":true}`))
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+	stdout.Reset()
+	if code := sshMain([]string{"status"}, &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), `"enabled":true`) {
+		t.Fatalf("status: %d %q %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Join(got, ",") != "GET /host/ssh/status" {
+		t.Fatalf("requests %v", got)
 	}
 }

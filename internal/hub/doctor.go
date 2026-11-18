@@ -104,6 +104,11 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	totpIn := h.doctorTOTPIn(ctx)
 	// The mail kinds' inputs (mailctl, 10 s): never under mu.
 	mailIn := h.doctorMailIn(ctx, dnsPlans)
+	// The SSH access kinds' inputs (memory and local files).
+	sshIn := h.doctorSSHIn()
+	// The usage kinds' inputs: the sampler's cache, never the engine.
+	usageIn := h.usageDoctorIn()
+	storageIn := h.storageDoctorIn()
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -114,7 +119,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
 		LocalNetworks: h.localNetworksLocked(), ServerLocalNetworks: h.serverLocalNetworksLocked(), ServerBindRoots: h.serverBindRootsLocked(), NotLocal: h.tunnelRangesLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn,
-		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), SignInTOTP: totpIn, Mail: mailIn, Servers: h.serversDoctorInLocked(backups)}
+		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), SignInTOTP: totpIn, Mail: mailIn, SSH: sshIn, Servers: h.serversDoctorInLocked(backups), Usage: usageIn, Storage: storageIn}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}

@@ -22,6 +22,10 @@ func historyAction(action string) (string, bool) {
 		return "passkeys removed", true
 	case "user.remove_authenticators":
 		return "authenticator apps removed", true
+	case "ssh.certificate.issue":
+		return "SSH certificate issued", true
+	case "ssh.certificate.revoke":
+		return "SSH certificate revoked", true
 	}
 	switch {
 	case action == "cert.create":
@@ -37,7 +41,7 @@ func historyAction(action string) (string, bool) {
 }
 
 // FromAudit maps one of user's audit entries (§8.2, D28): only the
-// actions cert.*, signin.password, user.password, user.invite,
+// actions cert.*, ssh.certificate.issue / .revoke, signin.password, user.password, user.invite,
 // user.remove_passkeys and user.remove_authenticators, and only those that happened (result ok). An
 // entry whose actor isn't user is help (By the actor); one by user is
 // certificate for cert.*, and dropped for anything else. Detail is what
@@ -48,7 +52,12 @@ func FromAudit(e directory.AuditEntry, user string) (Entry, bool) {
 		return Entry{}, false
 	}
 	out := Entry{Time: e.Time.UTC()}
+	ssh := strings.HasPrefix(e.Action, "ssh.certificate.")
 	switch {
+	case ssh && (strings.TrimSpace(e.Actor) == "-" || strings.EqualFold(strings.TrimSpace(e.Actor), strings.TrimSpace(user))):
+		// The person's own signings and revocations, and the automatic
+		// revocation on leave (actor "-").
+		out.Kind = KindSSHCertificate
 	case !strings.EqualFold(strings.TrimSpace(e.Actor), strings.TrimSpace(user)):
 		out.Kind, out.By = KindHelp, Clean(e.Actor, maxBy)
 	case strings.HasPrefix(e.Action, "cert."):

@@ -1,0 +1,7 @@
+{"read":"2026-11-15T10:00:15.123456789Z","preread":"0001-01-01T00:00:00Z","pids_stats":{"current":12,"limit":256},
+ "blkio_stats":{"io_service_bytes_recursive":[{"major":8,"minor":0,"op":"read","value":4096},{"major":8,"minor":16,"op":"read","value":1024},{"major":8,"minor":0,"op":"write","value":8192}]},
+ "cpu_stats":{"cpu_usage":{"total_usage":123456789000,"usage_in_kernelmode":1,"usage_in_usermode":2},"system_cpu_usage":999,"online_cpus":8},
+ "precpu_stats":{"cpu_usage":{"total_usage":0}},
+ "memory_stats":{"usage":104857600,"stats":{"inactive_file":31457280,"active_file":100,"anon":5},"limit":536870912},
+ "name":"/portcullis-app-web-1","id":"c1",
+ "networks":{"eth0":{"rx_bytes":1000,"tx_bytes":2000},"eth1":{"rx_bytes":500,"tx_bytes":50}}}

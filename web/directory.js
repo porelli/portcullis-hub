@@ -27,6 +27,7 @@
     ['invite', 'Invite people', 'create accounts (no groups) and re-invite the ones they created'],
     ['remove', 'Remove people', 'delete accounts'],
     ['sign_in_help', 'Help with sign-in', 'setup link, remove passkeys, revoke certificates'],
+    ['ssh_access', 'SSH access', 'grants without sudo, root or forwarding on delegable host groups'],
   ];
 
   // api answers the parsed JSON body, or throws an Error with .status and,
@@ -998,6 +999,9 @@
     // someone else). Filled by loadPersonMail; hidden when unavailable.
     if (admin || tabbed) {
       h += '<section class="pd-card pd-pp-card" aria-labelledby="pd-pp-mail-h" data-pp-mail="' + esc(u.username) + '" hidden><h3 class="pd-h3" id="pd-pp-mail-h">Mail</h3><div data-pp-mail-body></div></section>';
+      // SSH access (myssh.js: the person's card and Revoke all; hidden
+      // while SSH is off or the caller may not see it).
+      h += '<section class="pd-card pd-pp-card" data-pp-ssh="' + esc(u.username) + '" hidden></section>';
     }
     // History (admins)
     if (admin) {
@@ -1074,6 +1078,8 @@
     box.innerHTML = personPage ? personPageHtml(personPage) : '';
     if (personPage) renderExtras();
     if (personPage) loadPersonMail(box);
+    const ssh = box.querySelector('[data-pp-ssh]');
+    if (ssh && window.PortcullisMySSH) window.PortcullisMySSH.mountPerson(ssh, ssh.dataset.ppSsh);
     const sb = box.querySelector('[data-msi-person]');
     if (sb && window.PortcullisMySignIn) {
       const who = sb.dataset.msiPerson, fb = box.querySelector('[data-pp-sign-fallback]');
@@ -2358,9 +2364,9 @@
     if (!g) return '';
     let h = '';
     if (err) h += '<p class="pd-muted">Can\'t load what uses ' + esc(g.name) + ': ' + esc(err) + '</p>';
-    const apps = (u && u.apps) || [], sets = (u && u.settings) || [], perms = (u && u.permissions) || [];
+    const apps = (u && u.apps) || [], sets = (u && u.settings) || [], perms = (u && u.permissions) || [], ssh = (u && u.ssh) || [];
     if (u) {
-      if (!apps.length && !sets.length && !perms.length) h += '<p class="pd-muted">Nothing uses this group.</p>';
+      if (!apps.length && !sets.length && !perms.length && !ssh.length) h += '<p class="pd-muted">Nothing uses this group.</p>';
       else {
         h += '<ul class="pd-uses">';
         for (const a of apps) h += '<li>' + hubLink(appFrag(a.instance), a.name || a.instance) + ' <span class="pd-muted">' + esc(ROLE_TEXT[a.role] || a.role) + '</span></li>';
@@ -2372,6 +2378,8 @@
           const def = PERMS.find(x => x[0] === p);
           h += '<li><button type="button" class="pd-link pd-a" data-act="goto-setup">' + esc(def ? def[1] : p) + '</button> <span class="pd-muted">delegated permission</span></li>';
         }
+        // SSH: web (own account), all (own account, sudo)
+        if (ssh.length) h += '<li data-gp-ssh>SSH: ' + esc(ssh.join(', ')) + '</li>';
         h += '</ul>';
       }
     }
@@ -2390,6 +2398,7 @@
       if (u.settings.length) parts.push(plural(u.settings.length, 'app setting row') + ' naming it');
       if (u.permissions.length) parts.push('the ' + u.permissions.map(p => (PERMS.find(x => x[0] === p) || [p, p])[1]).join(', ') + ' permission' + (u.permissions.length > 1 ? 's' : '') + ' (nobody holds it then)');
       if (u.apps.length) parts.push('access through it to ' + Array.from(new Set(u.apps.map(a => a.name || a.instance))).join(', '));
+      if ((u.ssh || []).length) parts.push('SSH access through it (' + u.ssh.join(', ') + '; its grants then grant nothing)');
     } else {
       parts.push('every app setting row and permission naming it');
     }

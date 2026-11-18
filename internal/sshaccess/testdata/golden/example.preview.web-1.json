@@ -1,0 +1,33 @@
+[
+  {
+    "person": "alice",
+    "account": "alice",
+    "root": false,
+    "sudo": true,
+    "via": [
+      "ssh_admins → all (privileged)",
+      "ssh_web → web"
+    ],
+    "status": "ok"
+  },
+  {
+    "person": "bob",
+    "account": "bob",
+    "root": false,
+    "sudo": false,
+    "via": [
+      "ssh_web → web"
+    ],
+    "status": "ok"
+  },
+  {
+    "person": "bob",
+    "account": "deploy",
+    "root": false,
+    "sudo": false,
+    "via": [
+      "ssh_deploy → web (privileged)"
+    ],
+    "status": "ok"
+  }
+]

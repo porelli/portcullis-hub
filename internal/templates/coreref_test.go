@@ -743,7 +743,7 @@ func TestCoreFileMiddlewaresComplete(t *testing.T) {
 		t.Fatal("core's middlewares.yml defines no middlewares")
 	}
 	for name := range doc.HTTP.Middlewares {
-		if !fileMiddlewares[name] {
+		if !fileMiddlewares[name] && !coreOnlyFileMiddlewares[name] {
 			t.Errorf("core @file middleware %s missing from fileMiddlewares", name)
 		}
 	}

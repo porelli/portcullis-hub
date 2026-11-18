@@ -168,6 +168,9 @@ type Config struct {
 	// group (shared only with wg and group-gate).
 	VPNDocDir string
 	VPNDocGID int
+	// SSHBreakglassFile is HUB_SSH_BREAKGLASS_FILE, core's break-glass
+	// record (mounted read-only; "" = none; contract §18.13).
+	SSHBreakglassFile string
 	// LinkDocDir is HUB_LINK_DOC_DIR, the link_doc volume link.json is
 	// written to ("" = Servers off, contract §17.2); LinkDocGID its
 	// group (HUB_LINK_DOC_GID). LinkProxy is HUB_LINK_PROXY, link's
@@ -650,6 +653,20 @@ type Hub struct {
 	// freshAuthEnsure re-asserts the fresh-auth Keycloak client in the
 	// directory sync loop (freshauth.go); under policyWriteMu like attrSync.
 	freshAuthEnsure func(ctx context.Context) error
+	// cli is the CLI Keycloak client's verifier and readiness (ssh_cli.go,
+	// contract §18.2).
+	cli cliClient
+	// sshrt is SSH access's derived state (ssh.go; own lock).
+	sshrt sshRuntime
+	// sshrev guards hub_data/ssh/revoked.json (ssh_revoked.go).
+	sshrev revokedStore
+	// sshlim are the CLI signing routes' rate limits (ssh_limits.go).
+	sshlim sshLimits
+	// sshiss guards hub_data/ssh/issued.jsonl (ssh_issued.go).
+	sshiss issuedIndex
+	// sshhosts are the managed hosts' challenges, nonces and syncs
+	// (ssh_hosts.go).
+	sshhosts hostRuntime
 	// eventsEnsure re-asserts Keycloak's events config with history_days
 	// (signin_limits.go: the sync loop and every limits change); under
 	// policyWriteMu like attrSync.
@@ -743,6 +760,8 @@ type Hub struct {
 	testOverrideWriteErr func(path string) error
 	// vpnrt is the VPN providers' memory (vpn_providers.go; own mutex).
 	vpnrt *vpnRuntime
+	// usage is the usage sampler's cache (usage.go; its own lock).
+	usage *usageState
 	// aiReapply: per instance, the companions whose last change failed
 	// after its state save (under aiErrMu); aiApplying: instances an
 	// UpdateInstanceAI is applying (startUp leaves the owed hooks to it).
@@ -844,6 +863,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 	}
 	h := &Hub{
 		vpnrt:                newVPNRuntime(),
+		usage:                newUsageState(),
 		kinds:                settings.NewRegistry(),
 		bindRoots:            roots,
 		cfg:                  cfg,
@@ -905,6 +925,11 @@ func (h *Hub) Init() {
 	// The sign-in defaults (D1 / D11 / D12) of a state that lacks them,
 	// before anything reads them.
 	h.ensureSignIn()
+	// Break-glass SSH certificates signed while the Hub was down
+	// (contract §18.13): into the audit, once.
+	if n, bad := h.ImportBreakglass(); n > 0 || bad > 0 {
+		log.Printf("ssh: imported %d break-glass certificate record(s), %d malformed line(s) skipped", n, bad)
+	}
 	// Before anything can start a backup or restore.
 	h.SweepBackupLeftovers()
 	// The secrets epoch (§11.6) before anything can start or deliver: a

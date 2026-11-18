@@ -152,7 +152,7 @@ func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
 	dir := &recordingMux{ServeMux: http.NewServeMux()}
 	e.s.registerDirectory(dir)
 	want := map[string]bool{"/healthz": true, "/": true, "/static/": true}
-	for _, p := range append(append(append([]string{}, dir.patterns...), peopleAppRoutes...), peopleVPNRoutes...) {
+	for _, p := range append(append(append(append([]string{}, dir.patterns...), peopleAppRoutes...), peopleVPNRoutes...), peopleSSHRoutes...) {
 		want[p] = true
 	}
 	got := map[string]bool{}
@@ -237,7 +237,7 @@ func TestPeopleListenerReadForEveryone(t *testing.T) {
 		t.Errorf("me = %s", b)
 	}
 	b = mustDo(t, e.people, "root", "GET", "/api/directory/me", "", 200)
-	if !strings.Contains(b, `"admin":true`) || !strings.Contains(b, `"perms":["edit_details","invite","remove","sign_in_help"]`) {
+	if !strings.Contains(b, `"admin":true`) || !strings.Contains(b, `"perms":["edit_details","invite","remove","sign_in_help","ssh_access"]`) {
 		t.Errorf("root me = %s", b)
 	}
 
@@ -703,8 +703,12 @@ func TestSettingsAssetHubOnly(t *testing.T) {
 		}
 	}
 	sort.Strings(allow)
-	if strings.Join(allow, ",") != "apple-touch-icon.png,confirm.js,directory.css,directory.js,favicon.ico,favicon.svg,freshauth-callback.js,freshauth.js,icon-192.png,icon-512.png,impersonation.js,mark.svg,maskable-512.png,myai.js,myapps.js,mysignin.js,site.webmanifest" {
+	if strings.Join(allow, ",") != "apple-touch-icon.png,confirm.js,directory.css,directory.js,favicon.ico,favicon.svg,freshauth-callback.js,freshauth.js,icon-192.png,icon-512.png,impersonation.js,mark.svg,maskable-512.png,myai.js,myapps.js,mysignin.js,myssh.js,site.webmanifest" {
 		t.Errorf("peopleStatic = %v, want exactly the people pages' scripts and styles plus the eight logo and favicon files", allow)
+	}
+	// The Hub's SSH access tab never on the people listener (myssh.js is).
+	if r, _ := doAs(t, e.people, "bob", "GET", "/static/ssh.js", ""); r.StatusCode != 404 {
+		t.Errorf("people ssh.js = %d", r.StatusCode)
 	}
 	if r, b := doAs(t, e.hub, "root", "GET", "/static/settings.js", ""); r.StatusCode != 200 || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") || !strings.Contains(b, "PortcullisSettings") {
 		t.Errorf("hub settings.js = %d %q", r.StatusCode, r.Header.Get("Content-Type"))

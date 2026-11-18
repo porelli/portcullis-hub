@@ -299,7 +299,7 @@ func mwName(instance, name string) string { return joinName(instance, "m-"+name,
 // refusal when an app names one; with FileMiddlewares, FileServices and
 // the template's own names they're the only references a refusal quotes
 // (any other value may come from the instance's settings).
-var coreNames = []string{"hub", "keycloak", "hub-proxy-secret", "portcullis-auth-console", "strip-forwarded", "api", "noop",
+var coreNames = []string{"hub", "keycloak", "hub-proxy-secret", "hub-cli-proxy-secret", "portcullis-auth-console", "strip-forwarded", "api", "noop",
 	"group-gate", "forward-auth-ext", "mcp-gate", "dashboard"}
 
 // shownRef: ref (<name>[@<provider>]) may be quoted: a known provider and

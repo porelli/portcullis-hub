@@ -203,6 +203,25 @@ func TestRoleExact(t *testing.T) {
 			s.NonResourceRules = append(s.NonResourceRules, authv1.NonResourceRule{Verbs: []string{"get"}, NonResourceURLs: []string{"/metrics"}})
 		},
 		"incomplete": func(s *authv1.SubjectRulesReviewStatus) { s.Incomplete = true },
+		"list nodes/stats": func(s *authv1.SubjectRulesReviewStatus) {
+			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"list"}, APIGroups: []string{""}, Resources: []string{"nodes/stats"}})
+		},
+		"pod metrics get only": func(s *authv1.SubjectRulesReviewStatus) {
+			var rs []authv1.ResourceRule
+			for _, r := range s.ResourceRules {
+				if len(r.APIGroups) == 1 && r.APIGroups[0] == "metrics.k8s.io" {
+					r.Verbs = []string{"get"}
+				}
+				rs = append(rs, r)
+			}
+			s.ResourceRules = rs
+		},
+		"watch pod metrics": func(s *authv1.SubjectRulesReviewStatus) {
+			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"watch"}, APIGroups: []string{"metrics.k8s.io"}, Resources: []string{"pods"}})
+		},
+		"node metrics": func(s *authv1.SubjectRulesReviewStatus) {
+			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"get", "list"}, APIGroups: []string{"metrics.k8s.io"}, Resources: []string{"nodes"}})
+		},
 	} {
 		s := *ok.DeepCopy()
 		mod(&s)

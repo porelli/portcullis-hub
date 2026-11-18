@@ -422,3 +422,19 @@ func TestCreateVolumeRefusalIs409(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// The usage verbs have no agent route: a worker's containers are not
+// measured, never a guessed figure.
+func TestUsageVerbsNotMeasured(t *testing.T) {
+	var b *agentrt.Backend
+	var nm *runtime.NotMeasuredError
+	if _, err := b.Stats(context.Background(), "c"); !errors.As(err, &nm) || nm.Why != "not measured on a worker server yet" {
+		t.Errorf("Stats: %v", err)
+	}
+	if _, err := b.LayerSize(context.Background(), "c"); !errors.As(err, &nm) {
+		t.Errorf("LayerSize: %v", err)
+	}
+	if _, err := b.ImageSize(context.Background(), "x"); !errors.As(err, &nm) {
+		t.Errorf("ImageSize: %v", err)
+	}
+}

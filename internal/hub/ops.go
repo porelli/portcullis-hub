@@ -352,7 +352,7 @@ func validOpKey(k string) bool {
 	if sid, ok := strings.CutPrefix(k, serverOpPrefix); ok {
 		return servers.ValidID(sid) == nil
 	}
-	return k == opKeyDoctor || k == opKeyMail || validDomainOpKey(k) || templates.ValidID(k)
+	return k == opKeyDoctor || k == opKeyMail || k == opKeyUsage || validDomainOpKey(k) || templates.ValidID(k)
 }
 
 // LastOp returns an app's last recorded operation (nil: none).

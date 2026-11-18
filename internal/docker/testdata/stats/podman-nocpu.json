@@ -1,0 +1,4 @@
+{"read":"2026-11-15T10:00:15Z","pids_stats":{"current":0},
+ "blkio_stats":{"io_service_bytes_recursive":[]},
+ "cpu_stats":{"cpu_usage":{}},
+ "memory_stats":{"usage":0,"stats":{}}}

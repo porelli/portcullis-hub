@@ -22,6 +22,7 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 	dockerrt "github.com/portcullis/hub/internal/runtime/docker"
 
+	"github.com/portcullis/hub/internal/cliapi"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
@@ -38,6 +39,7 @@ import (
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signinreset"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/usage"
 	"github.com/portcullis/hub/web"
 )
 
@@ -243,6 +245,17 @@ func (fa freshAuthSetup) verifierConfigs(httpc *http.Client, accepted func() []s
 	return out
 }
 
+// cliVerifierConfig is the CLI verifier's config (hub's VerifierCLI,
+// contract §18.2): client portcullis-cli, redirect URIs exactly the three
+// loopback URLs, the same realm and switched-on methods.
+func (fa freshAuthSetup) cliVerifierConfig(httpc *http.Client, accepted func() []string) freshauth.Config {
+	return freshauth.Config{
+		Issuer: fa.Issuer, TokenURL: fa.TokenURL, JWKSURL: fa.JWKSURL,
+		AuthorizeURL: fa.AuthorizeURL, ClientID: keycloak.CLIClientID,
+		RedirectURIs: cliapi.RedirectURIs(), HTTP: httpc, Accepted: accepted,
+	}
+}
+
 func main() {
 	// `hub folderfix …`: the shared-folder fixer, run by the Hub in a helper
 	// container (contract §6). First, before any Hub configuration is read.
@@ -265,6 +278,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mail" {
 		os.Exit(mailMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
+	// `hub ssh status` (contract §18): `./portcullis status`'s SSH block.
+	if len(os.Args) > 1 && os.Args[1] == "ssh" {
+		os.Exit(sshMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
+	}
 	// `hub signin reset-core`: the CLI's lockout recovery (contract §8.1),
 	// run against the data directory while the Hub is stopped. Before the
 	// Hub's configuration is read: only the data directory is needed.
@@ -279,6 +296,15 @@ func main() {
 	secret := os.Getenv("HUB_PROXY_SECRET")
 	if err := httpapi.CheckSecret(secret); err != nil {
 		log.Fatalf("refusing to start: %v", err)
+	}
+	// The CLI listener's own proxy secret (contract §18.3, plan C7):
+	// required, and never the Hub's other secret. Never logged.
+	cliSecret := os.Getenv("HUB_CLI_PROXY_SECRET")
+	if err := httpapi.CheckCLISecret(cliSecret); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
+	if cliSecret == secret {
+		log.Fatalf("refusing to start: HUB_CLI_PROXY_SECRET must differ from HUB_PROXY_SECRET")
 	}
 
 	// The MCP listener's secret (contract §15.7): read once, here. A
@@ -331,6 +357,8 @@ func main() {
 		// vpn.json goes to the vpn_doc volume (never hub_data), group
 		// shared only with wg and group-gate (contract §4, §16).
 		VPNDocDir: env("HUB_VPN_DOC_DIR", hub.DefaultVPNDocDir),
+		// The break-glass SSH record core writes (contract §18.13).
+		SSHBreakglassFile: env("HUB_SSH_BREAKGLASS_FILE", "/run/portcullis/ssh/breakglass.jsonl"),
 	}
 	if cfg.VPNDocGID, err = vpnDocGIDFromEnv(os.Getenv); err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -517,6 +545,13 @@ func main() {
 	// The Sign-in page's own certificates (enroll, §9.4) and own
 	// password (the directory, §5.1).
 	h.SetCertActions(invites)
+	// SSH access (contract §18): enroll's SSH endpoints, on the same
+	// listener and bearer; and no username may equal a shared SSH account.
+	h.SetSSHActions(invites)
+	h.SetSSHKeycloak(kc)
+	dir.SSHSharedAccount = h.SSHSharedAccount
+	dir.SSHGroups = h.SSHGroupsForDirectory
+	h.SetSSHDirectory(dir)
 	// Node certificates (§17.5) through enroll's internal listener, the
 	// invites' host and bearer: the Hub never holds a Vault token.
 	if nodes, err := hub.NewEnrollNodes(inviteURL, inviteSecret); err != nil {
@@ -562,6 +597,11 @@ func main() {
 	h.SetFreshAuthClient(func(ctx context.Context) error {
 		return kc.EnsureFreshAuthClient(ctx, fa.redirectURIs(), fa.webOrigins())
 	})
+	// The CLI's loopback sign-in (contract §18.2): its own Hub-owned client
+	// and verifier (the three 127.0.0.1 redirect URIs; the username comes
+	// from the token), ensured in the same loop.
+	h.SetCLIVerifier(freshauth.New(fa.cliVerifierConfig(faHTTP, h.FreshAuthAccepted)))
+	h.SetCLIClient(kc.EnsureCLIClient)
 	// Keycloak's events config (contract §8): the sign-in history's
 	// source, kept history_days; re-asserted in the directory sync loop
 	// and on every limits change.
@@ -584,8 +624,10 @@ func main() {
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
 		MCPSecret:  mcp.secret,
-		Web:        web.FS,
-		Docs:       web.Docs,
+		CLI: httpapi.CLIOptions{Secret: cliSecret, Issuer: fa.Issuer, AuthorizeURL: fa.AuthorizeURL,
+			MinCLI: os.Getenv("HUB_CLI_MIN_VERSION")},
+		Web:  web.FS,
+		Docs: web.Docs,
 		// The Portcullis MCP redacts every result with these too (G40).
 		RedactFiles:    []string{invites.SecretFile, dom.SecretFile, filepath.Join(ll.CredentialsDir, "password")},
 		RedactLiterals: []string{os.Getenv("KEYCLOAK_ADMIN_PASSWORD")},
@@ -619,6 +661,10 @@ func main() {
 	// The doctor's disk checks: daily (and on demand, after every folder
 	// apply); cached in <data>/doctor/scans.json.
 	go h.RunDoctorScans(ctx, 24*time.Hour)
+	go h.RunUsageSampler(ctx, usage.Interval)
+	go h.RunUsageStorage(ctx, 24*time.Hour)
+	// The usage metrics (contract §16.2): unset = no listener.
+	serveMetrics(ctx, os.Getenv("HUB_METRICS_ADDR"), h)
 	// The FIDO metadata (contract §8.1): the cached BLOB, then a daily
 	// refresh (and at its nextUpdate) into signin-keycloak.json.
 	go h.RunMDS(ctx, 24*time.Hour)
@@ -634,6 +680,9 @@ func main() {
 	go h.RunMailPolicyCheck(ctx, hub.MailPolicyEvery)
 	// VPN providers: identity and dns hooks when due, vpn.json (§16).
 	go h.RunVPNMaps(ctx, 5*time.Second)
+	// SSH access: a compile every minute (temporary memberships ending,
+	// host certificates to renew) on top of the change triggers.
+	go h.RunSSH(ctx, time.Minute)
 	// Servers: link.json, enrolments, polls, renewals, revocations.
 	go h.RunServers(ctx, 30*time.Second)
 	// Scheduled backups (per server, the Hub's TZ), every minute.
@@ -673,6 +722,15 @@ func main() {
 	addr := env("HUB_LISTEN_ADDR", ":8888")
 	peopleAddr := env("HUB_PEOPLE_ADDR", ":8889")
 	servers := []*http.Server{newHTTPServer(addr, handler), newHTTPServer(peopleAddr, peopleHandler)}
+	// The CLI listener (contract §18.3): /api/cli/v1/* only, behind core's
+	// people-cli router and its own proxy secret.
+	cliHandler, err := srv.CLIHandler()
+	if err != nil {
+		log.Fatalf("cli listener: %v", err)
+	}
+	cliAddr := env("HUB_CLI_ADDR", ":8891")
+	servers = append(servers, newHTTPServer(cliAddr, cliHandler))
+	log.Printf("CLI listener on %s", cliAddr)
 	// The MCP listener (mcp-gate only, contract §15.7): only with its
 	// secret. It listens on every Hub network; the secret protects it
 	// and no Traefik router targets it (G36).
@@ -820,6 +878,7 @@ type directoryHub interface {
 	TriggerCredentialCheck()
 	MarkInventoryStale()
 	TriggerVPNPublish()
+	TriggerSSHCompile()
 }
 
 // wireDirectoryHooks sets dir's OnChange and OnEvaluated (both
@@ -840,8 +899,14 @@ func wireDirectoryHooks(dir *directory.Service, h directoryHub) {
 		// A person left, was disabled or re-created: their devices drop
 		// out of vpn.json (contract §16).
 		h.TriggerVPNPublish()
+		// Membership drives SSH principals, accounts and revocation on
+		// leave (contract §18.12).
+		h.TriggerSSHCompile()
 	}
-	dir.OnEvaluated = h.TriggerCredentialCheck
+	dir.OnEvaluated = func() {
+		h.TriggerCredentialCheck()
+		h.TriggerSSHCompile()
+	}
 }
 
 // vpnDocGIDFromEnv is HUB_VPN_DOC_GID (default hub.DefaultVPNDocGID):

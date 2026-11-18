@@ -40,6 +40,7 @@ var modeFlags = map[string][]string{
 	"apply":    {"root", "expect-dev", "expect-ino", "expect-mount-root", "expect-digest", "gid", "files", "owner", "expect", "mkdir"},
 	"restore":  {"root", "expect-dev", "expect-ino", "expect-mount-root", "gid", "in", "dry-run", "expect-snapshot-root"},
 	"childfix": {"root", "rel", "child", "expect-uid", "expect-dev", "expect-ino", "expect-mount-root"},
+	"usage":    {"root", "max-entries", "max-time"},
 }
 
 // Args is the argv (after "hub folderfix") for a run: the only form the Hub
@@ -55,6 +56,14 @@ func Args(mode string, o Options, x ArgsExtra) []string {
 		}
 		if x.Create {
 			a = append(a, "--create")
+		}
+		return a
+	case "usage":
+		if o.MaxEntries > 0 {
+			add("max-entries", strconv.FormatInt(o.MaxEntries, 10))
+		}
+		if o.MaxTime > 0 {
+			add("max-time", o.MaxTime.String())
 		}
 		return a
 	case "childfix":
@@ -186,7 +195,7 @@ func parseArgs(args []string) (string, Options, ArgsExtra, error) {
 	var o Options
 	var x ArgsExtra
 	if len(args) == 0 {
-		return "", o, x, errors.New("usage: folderfix probe|scan|snapshot|apply|restore|childfix --root=… [flags]")
+		return "", o, x, errors.New("usage: folderfix probe|scan|snapshot|apply|restore|childfix|usage --root=… [flags]")
 	}
 	mode := args[0]
 	allowed, ok := modeFlags[mode]
@@ -415,6 +424,12 @@ func Main(args []string, stdout, stderr io.Writer) (code int) {
 		rep = p
 	case "scan":
 		r, err = Scan(o)
+	case "usage":
+		// Exit 0 with partial: true when entries couldn't be read; 2 is a
+		// refusal, 1 a crash (contract §6).
+		if err = usageOptions(o); err == nil {
+			r, err = Usage(o)
+		}
 	case "snapshot":
 		r, err = runSnapshot(o, x)
 	case "apply":

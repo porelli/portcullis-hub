@@ -48,6 +48,9 @@ type idp struct {
 	token   string // the id_token the next exchange returns
 	posted  []map[string]string
 	noToken bool
+	// client and redirectURI override what the token endpoint expects
+	// ("" = freshauth.ClientID and redirect).
+	client, redirectURI string
 }
 
 func newIDP(t *testing.T) *idp {
@@ -89,8 +92,15 @@ func (p *idp) serveToken(w http.ResponseWriter, r *http.Request) {
 	p.posted = append(p.posted, got)
 	w.Header().Set("Content-Type", "application/json")
 	c := r.PostForm.Get("code")
-	if r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("client_id") != freshauth.ClientID ||
-		r.PostForm.Get("redirect_uri") != redirect || r.PostForm.Get("code_verifier") != verifier || p.used[c] || c == "" {
+	wantClient, wantRedirect := freshauth.ClientID, redirect
+	if p.client != "" {
+		wantClient = p.client
+	}
+	if p.redirectURI != "" {
+		wantRedirect = p.redirectURI
+	}
+	if r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("client_id") != wantClient ||
+		r.PostForm.Get("redirect_uri") != wantRedirect || r.PostForm.Get("code_verifier") != verifier || p.used[c] || c == "" {
 		w.WriteHeader(400)
 		w.Write([]byte(`{"error":"invalid_grant","error_description":"Code not valid"}`))
 		return
@@ -581,4 +591,150 @@ func TestJWKSUnreachableIsUnreachable(t *testing.T) {
 	if !errors.As(err, &fe) || fe.Reason != freshauth.ReasonUnreachable {
 		t.Fatalf("JWKS unreachable = %v (%+v), want reason %q", err, fe, freshauth.ReasonUnreachable)
 	}
+}
+
+// cliVerifier is the CLI's verifier: client portcullis-cli, the three
+// loopback redirect URIs (contract §18.2).
+func (p *idp) cliVerifier() *freshauth.Verifier {
+	base := p.srv.URL + "/realms/portcullis/protocol/openid-connect"
+	p.client = "portcullis-cli"
+	return freshauth.New(freshauth.Config{
+		Issuer:       issuer,
+		TokenURL:     base + "/token",
+		JWKSURL:      base + "/certs",
+		AuthorizeURL: "https://auth.example.org/realms/portcullis/protocol/openid-connect/auth",
+		ClientID:     "portcullis-cli",
+		RedirectURIs: []string{"http://127.0.0.1:38917/callback", "http://127.0.0.1:38918/callback", "http://127.0.0.1:38919/callback"},
+		HTTP:         p.srv.Client(),
+		Now:          func() time.Time { return now },
+		Accepted:     func() []string { return allFresh },
+	})
+}
+
+func cliClaims() map[string]any {
+	c := claims()
+	c["aud"] = "portcullis-cli"
+	c["azp"] = "portcullis-cli"
+	c["preferred_username"] = "Bob"
+	return c
+}
+
+func TestVerifyAnyUserTakesUsernameFromToken(t *testing.T) {
+	p := newIDP(t)
+	p.redirectURI = "http://127.0.0.1:38918/callback"
+	v := p.cliVerifier()
+	p.token = p.rs256(cliClaims())
+	pr := proof()
+	pr.RedirectURI = "http://127.0.0.1:38918/callback"
+	res, err := v.VerifyAnyUser(context.Background(), pr)
+	if err != nil {
+		t.Fatalf("VerifyAnyUser: %v (%s)", err, reasonOf(err))
+	}
+	if res.User != "bob" || res.Method != "security_key" || res.Impersonated {
+		t.Errorf("result %+v", res)
+	}
+	if got := p.posted[0]["client_id"]; got != "portcullis-cli" {
+		t.Errorf("exchange client_id %q", got)
+	}
+	// A token for the fresh-auth client is refused by the CLI verifier.
+	p2 := newIDP(t)
+	p2.redirectURI = pr.RedirectURI
+	v2 := p2.cliVerifier()
+	p2.token = p2.rs256(claims())
+	if _, err := v2.VerifyAnyUser(context.Background(), pr); err == nil {
+		t.Error("a portcullis-fresh-auth token accepted by the CLI verifier")
+	}
+	// Every other check still runs: a stale sign-in is refused.
+	p3 := newIDP(t)
+	p3.redirectURI = pr.RedirectURI
+	v3 := p3.cliVerifier()
+	c := cliClaims()
+	c["auth_time"] = now.Add(-6 * time.Minute).Unix()
+	p3.token = p3.rs256(c)
+	if _, err := v3.VerifyAnyUser(context.Background(), pr); err == nil {
+		t.Error("a 6-minute-old sign-in accepted")
+	}
+}
+
+func TestRedirectURIMustBeListed(t *testing.T) {
+	for _, bad := range []string{"http://127.0.0.1:40000/callback", "http://localhost:38917/callback", "", "http://127.0.0.1:38917/callback/"} {
+		p := newIDP(t)
+		v := p.cliVerifier()
+		p.token = p.rs256(cliClaims())
+		pr := proof()
+		pr.RedirectURI = bad
+		_, err := v.VerifyAnyUser(context.Background(), pr)
+		if err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+		if len(p.posted) != 0 {
+			t.Errorf("%q: the code was exchanged before the redirect check", bad)
+		}
+	}
+	// The exchange's redirect_uri is the proof's.
+	p := newIDP(t)
+	p.redirectURI = "http://127.0.0.1:38919/callback"
+	v := p.cliVerifier()
+	p.token = p.rs256(cliClaims())
+	pr := proof()
+	pr.RedirectURI = "http://127.0.0.1:38919/callback"
+	if _, err := v.VerifyAnyUser(context.Background(), pr); err != nil {
+		t.Fatalf("38919: %v (%s)", err, reasonOf(err))
+	}
+	if got := p.posted[0]["redirect_uri"]; got != pr.RedirectURI {
+		t.Errorf("exchange redirect_uri %q", got)
+	}
+}
+
+func TestImpersonatedFlag(t *testing.T) {
+	for name, tc := range map[string]struct {
+		edit func(map[string]any)
+		want bool
+	}{
+		"act":         {func(c map[string]any) { c["act"] = map[string]any{"sub": "root"} }, true},
+		"pc_imp null": {func(c map[string]any) { c["pc_imp"] = nil }, true},
+		"pc_imp":      {func(c map[string]any) { c["pc_imp"] = "imp-1" }, true},
+		"neither":     {func(map[string]any) {}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newIDP(t)
+			p.redirectURI = "http://127.0.0.1:38917/callback"
+			v := p.cliVerifier()
+			c := cliClaims()
+			tc.edit(c)
+			p.token = p.rs256(c)
+			pr := proof()
+			pr.RedirectURI = "http://127.0.0.1:38917/callback"
+			res, err := v.VerifyAnyUser(context.Background(), pr)
+			if err != nil {
+				t.Fatalf("%v (%s)", err, reasonOf(err))
+			}
+			if res.Impersonated != tc.want {
+				t.Errorf("Impersonated = %v", res.Impersonated)
+			}
+		})
+	}
+}
+
+func TestClientIDDefaults(t *testing.T) {
+	p := newIDP(t)
+	v := p.verifier()
+	if got := v.Info().ClientID; got != freshauth.ClientID {
+		t.Errorf("Info().ClientID = %q", got)
+	}
+	p.token = p.rs256(claims())
+	if _, err := v.Verify(context.Background(), proof(), "alice"); err != nil {
+		t.Fatalf("default verifier: %v (%s)", err, reasonOf(err))
+	}
+	if got := p.posted[0]["client_id"]; got != freshauth.ClientID {
+		t.Errorf("exchange client_id %q", got)
+	}
+}
+
+func reasonOf(err error) string {
+	var e *freshauth.Error
+	if errors.As(err, &e) {
+		return e.Reason
+	}
+	return ""
 }

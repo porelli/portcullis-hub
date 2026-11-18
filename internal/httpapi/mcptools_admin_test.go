@@ -328,6 +328,8 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "DELETE", path: "/api/folders/media", body: ``},
 		{tool: "doctor_scan", args: map[string]any{},
 			method: "POST", path: "/api/doctor/scan", body: ``, instance: "_doctor"},
+		{tool: "usage_storage_measure", args: map[string]any{},
+			method: "POST", path: "/api/usage/storage/measure", body: `{}`, instance: "_usage"},
 		{tool: "doctor_mute", args: map[string]any{"fp": "{{fp}}", "reason": "behind the router", "finding_token": "{{token}}"},
 			method: "POST", path: "/api/doctor/findings/{{fp}}/mute", body: `{"reason":"behind the router","token":"{{token}}"}`,
 			vars: fixVars(doctor.KindLANOnlyExposed, nil)},
@@ -674,6 +676,13 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "POST", path: "/api/directory/users/erin/impersonation/stop", body: ``},
 		{tool: "turn_off_impersonation", args: map[string]any{},
 			method: "PUT", path: "/api/signin/impersonation", body: `{"allowed":false}`},
+		// SSH access (contract §18): a fingerprint that isn't one (nothing
+		// revoked either way), and a grant while the directory's SSH
+		// checks aren't wired (503 both ways, the same audit).
+		{tool: "revoke_ssh_certificates", args: map[string]any{"user": "erin", "fingerprints": []string{"not-a-fingerprint"}},
+			method: "POST", path: "/api/ssh/certificates/revoke", body: `{"user":"erin","fingerprints":["not-a-fingerprint"]}`},
+		{tool: "set_ssh_grant", args: map[string]any{"group": "staff", "host_group": "all", "accounts": []string{"deploy"}},
+			method: "POST", path: "/api/ssh/grants", body: `{"group":"staff","host_group":"all","accounts":["deploy"]}`},
 	}
 	covered := map[string]bool{}
 	for _, c := range cases {

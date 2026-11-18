@@ -195,6 +195,10 @@ func HostHandler(h *hub.Hub) http.Handler {
 		}
 		writeJSONStatus(w, http.StatusAccepted, mailWireAccepted{acceptedBody(op), hub.MailWarning})
 	})
+	// SSH (contract §18): `./portcullis status`'s SSH block (read-only).
+	mux.HandleFunc("GET /host/ssh/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, h.HostSSHStatus())
+	})
 	return mux
 }
 

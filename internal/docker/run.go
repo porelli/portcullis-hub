@@ -78,6 +78,12 @@ func checkRunSpec(s RunSpec) error {
 		}
 		targets[b.Target] = true
 	}
+	for _, v := range s.Volumes {
+		if v.Name == "" || strings.ContainsAny(v.Name, "/\x00") || !cleanAbsPath(v.Target) || v.Target == "/" || targets[v.Target] {
+			return fmt.Errorf("helper volume %q → %q: want a volume name and an absolute, clean, distinct path", v.Name, v.Target)
+		}
+		targets[v.Target] = true
+	}
 	for _, t := range s.Scratch {
 		if !cleanAbsPath(t) || t == "/" || targets[t] {
 			return fmt.Errorf("helper scratch volume %q: want an absolute, clean, distinct path", t)
@@ -102,9 +108,14 @@ func (c *Client) RunHelper(ctx context.Context, s RunSpec, out func(tar io.Reade
 	if err := checkRunSpec(s); err != nil {
 		return nil, err
 	}
-	mounts := make([]mount.Mount, 0, len(s.Binds)+len(s.Scratch))
+	mounts := make([]mount.Mount, 0, len(s.Binds)+len(s.Volumes)+len(s.Scratch))
 	for _, b := range s.Binds {
 		mounts = append(mounts, mount.Mount{Type: mount.TypeBind, Source: b.Source, Target: b.Target, ReadOnly: b.ReadOnly})
+	}
+	for _, v := range s.Volumes {
+		// A named volume in a started helper is always read-only and never
+		// copied up from the image (contract §6, the usage mode).
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: v.Name, Target: v.Target, ReadOnly: true, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
 	}
 	for _, t := range s.Scratch {
 		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Target: t, VolumeOptions: &mount.VolumeOptions{NoCopy: true}})
@@ -276,7 +287,18 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo
 	if err != nil {
 		return ContainerInfo{}, err
 	}
-	ci := ContainerInfo{ID: res.Container.ID, Image: res.Container.Image}
+	// Copied field by field: nothing else of the answer (Config.Env
+	// above all) is kept (contract §6 "Resource usage").
+	ci := ContainerInfo{ID: res.Container.ID, Image: res.Container.Image, RestartCount: res.Container.RestartCount}
+	if st := res.Container.State; st != nil {
+		ci.OOMKilled = st.OOMKilled
+		if t, err := time.Parse(time.RFC3339Nano, st.StartedAt); err == nil && t.Year() > 1 {
+			ci.StartedAt = t
+		}
+	}
+	for _, m := range res.Container.Mounts {
+		ci.Mounts = append(ci.Mounts, runtime.Mount{Type: string(m.Type), Name: m.Name, Source: m.Source, Destination: m.Destination, RW: m.RW})
+	}
 	if res.Container.Config != nil {
 		ci.Labels = res.Container.Config.Labels
 	}
@@ -286,14 +308,15 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (ContainerInfo
 		if p := res.Container.HostConfig.PidsLimit; p != nil && *p > 0 {
 			ci.PidsLimit = *p
 		}
+		ci.NanoCPUs = res.Container.HostConfig.NanoCPUs
+		ci.CPUQuota = res.Container.HostConfig.CPUQuota
+		ci.CPUPeriod = res.Container.HostConfig.CPUPeriod
+		ci.NetworkMode = string(res.Container.HostConfig.NetworkMode)
 		ci.Privileged = res.Container.HostConfig.Privileged
 		ci.CapAdd = append([]string(nil), res.Container.HostConfig.CapAdd...)
 		for _, d := range res.Container.HostConfig.Devices {
 			ci.Devices = append(ci.Devices, d.PathOnHost)
 		}
-	}
-	for _, m := range res.Container.Mounts {
-		ci.Mounts = append(ci.Mounts, runtime.Mount{Type: string(m.Type), Source: m.Source, Destination: m.Destination, RW: m.RW})
 	}
 	return ci, nil
 }

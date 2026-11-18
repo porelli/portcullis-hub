@@ -223,6 +223,9 @@ type GroupUsesView struct {
 	Apps        []GroupApp     `json:"apps"`
 	Settings    []GroupSetting `json:"settings"`
 	Permissions []string       `json:"permissions"`
+	// SSH: the group's SSH grants in words ("web (own account)",
+	// "all (own account, sudo)"), the group page's SSH line.
+	SSH []string `json:"ssh"`
 }
 
 // GroupUses is what uses group (its exact LLDAP name): the instances
@@ -244,7 +247,7 @@ func (h *Hub) GroupUses(ctx context.Context, group string) (*GroupUsesView, erro
 	if !ok {
 		return nil, statusErr(404, "no such group %s", group)
 	}
-	v := &GroupUsesView{Apps: []GroupApp{}, Settings: []GroupSetting{}, Permissions: []string{}}
+	v := &GroupUsesView{Apps: []GroupApp{}, Settings: []GroupSetting{}, Permissions: []string{}, SSH: []string{}}
 	for _, p := range slices.Sorted(maps.Keys(m.Permissions)) {
 		if m.Permissions[p] == group {
 			v.Permissions = append(v.Permissions, p)
@@ -253,6 +256,7 @@ func (h *Hub) GroupUses(ctx context.Context, group string) (*GroupUsesView, erro
 	names := namesGroup(group, mg.ID)
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	v.SSH = sshGroupLinesLocked(h.st.SSH, group, mg.ID)
 	for i := range h.instances {
 		t := &h.instances[i]
 		name := instanceName(t)

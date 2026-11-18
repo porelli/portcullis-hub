@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "host_id": "web-1",
+  "serial": 0,
+  "generated": "0001-01-01T00:00:00Z",
+  "user_cas": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFXf2yZXNFwHqiadxQBruvDLwOZYX4l4+MUIDqyknOMZ portcullis-user-ca"
+  ],
+  "host_certificate": "",
+  "accounts": [
+    {
+      "name": "alice",
+      "kind": "person",
+      "uid": 20001,
+      "principals": [
+        "up:alice@all"
+      ],
+      "sudo": true
+    },
+    {
+      "name": "bob",
+      "kind": "person",
+      "uid": 20002,
+      "principals": [
+        "u:bob@web"
+      ],
+      "sudo": false
+    },
+    {
+      "name": "deploy",
+      "kind": "shared",
+      "principals": [
+        "s:deploy@web"
+      ],
+      "sudo": false
+    },
+    {
+      "name": "root",
+      "kind": "shared",
+      "principals": [
+        "sp:root@web"
+      ],
+      "sudo": false
+    }
+  ],
+  "locked": [],
+  "remove": [],
+  "revoked_keys": [],
+  "options": {
+    "create_shared_accounts": false
+  }
+}
