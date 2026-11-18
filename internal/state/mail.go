@@ -96,6 +96,11 @@ type MailSettings struct {
 	// LastDocInstance is that wiring's instance (Ruling R-SWITCH-BASE: a
 	// pass for another instance starts from an empty baseline).
 	LastDocInstance string `json:"last_doc_instance,omitempty" yaml:"last_doc_instance,omitempty"`
+	// FreshInstance is set by a wiring once its own void completed (every
+	// mail password revoked): only it grants that instance's first pass
+	// an empty baseline (Ruling R-SWITCH-BASE-2). Cleared once its first
+	// document is accepted, and by every new wiring's record.
+	FreshInstance string `json:"fresh_instance,omitempty" yaml:"fresh_instance,omitempty"`
 	// WireSeq numbers the wirings (monotonic): MailProvider.Seq.
 	WireSeq int `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries

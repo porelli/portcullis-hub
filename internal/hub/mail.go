@@ -159,8 +159,12 @@ func (h *Hub) saveMailLast(d *mailprovider.MailState, wr mailWiring) {
 	// file bound to the wiring before (a resend), never another
 	// wiring's document trusted.
 	h.mu.Lock()
-	if current() && (h.st.Mail.LastDocSeq != wr.seq || h.st.Mail.LastDocInstance != wr.instance) {
+	if current() && (h.st.Mail.LastDocSeq != wr.seq || h.st.Mail.LastDocInstance != wr.instance || h.st.Mail.FreshInstance != "") {
 		h.st.Mail.LastDocSeq, h.st.Mail.LastDocInstance = wr.seq, wr.instance
+		// Its first document is accepted: the empty baseline is spent.
+		if h.st.Mail.FreshInstance == wr.instance {
+			h.st.Mail.FreshInstance = ""
+		}
 		h.saveLocked()
 	}
 	h.mu.Unlock()
@@ -372,23 +376,25 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	// accounts, still applies). The same instance re-wired keeps its
 	// store: the last document stays the baseline, and one is sent. The
 	// R-L8 row baseline is only for a lost mail-last.json.
+	//
+	// Ruling R-SWITCH-BASE-2: only the explicit mark (FreshInstance, set
+	// once the wiring's own void completed) grants the empty baseline;
+	// any other mismatch (an unknown or empty binding, a failed void) is
+	// blind: the R-L8 row baseline judges the first document (fail
+	// closed).
 	h.mu.RLock()
 	lastWiring := mailWiring{h.st.Mail.LastDocSeq, h.st.Mail.LastDocInstance}
+	freshProvider := passWiring.instance != "" && h.st.Mail.FreshInstance == passWiring.instance
 	h.mu.RUnlock()
-	freshProvider, rewired := false, false
 	s.mu.Lock()
-	if s.last != nil && passWiring != lastWiring {
-		if passWiring.instance != lastWiring.instance {
-			s.last, s.blind, freshProvider = nil, false, true
-		} else {
-			rewired = true
-		}
+	switch {
+	case freshProvider:
+		s.last, s.blind = nil, false
+	case s.last != nil && passWiring != lastWiring:
+		s.last, s.blind = nil, true
 	}
 	last := s.last
 	d := diffMail(last, doc)
-	if rewired {
-		d.other = true
-	}
 	// No baseline (a first start, a lost mail-last.json): whoever left
 	// meanwhile is unknown, so the first document counts as a removal.
 	blind := s.blind && last == nil

@@ -840,6 +840,63 @@ func TestSwitchFirstDocumentIgnoresOldRows(t *testing.T) {
 	if pr != nil || inst != otherMailID {
 		t.Fatalf("pending %+v, last doc instance %q", pr, inst)
 	}
+	w.h.mu.RLock()
+	fresh := w.h.st.Mail.FreshInstance
+	w.h.mu.RUnlock()
+	if fresh != "" {
+		t.Fatalf("the fresh mark %q outlived the first accepted document", fresh)
+	}
+}
+
+// TestUnknownBindingStaysHeld (Ruling R-SWITCH-BASE-2): a binding that
+// doesn't match without the explicit fresh mark (here an empty
+// last_doc_instance) is blind: an unconfirmed pending removal still
+// holds every document omitting its accounts.
+func TestUnknownBindingStaysHeld(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mailSyncOnce(context.Background())
+	const gone = "0b0b0b0b-0000-4000-8000-000000000003"
+	leftRow(w, "alice", gone)
+	w.h.mu.Lock()
+	w.h.st.Mail.LastDocInstance, w.h.st.Mail.FreshInstance = "", ""
+	w.h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Accounts: []state.MailPendingAccount{{Username: "bob", UUID: gone}}}
+	w.h.mu.Unlock()
+	puts := w.mc.Puts()
+	w.h.mailSyncOnce(context.Background())
+	w.h.mu.RLock()
+	pr := w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if w.mc.Puts() != puts || pr == nil {
+		t.Fatalf("sent %d → %d, pending %+v", puts, w.mc.Puts(), pr)
+	}
+}
+
+// TestSwitchFailedVoidNoFreshMark (R-SWITCH-BASE-2): a switch whose void
+// failed leaves no fresh mark: nothing reaches the new provider and the
+// pending removal stays.
+func TestSwitchFailedVoidNoFreshMark(t *testing.T) {
+	w := switchFix(t)
+	w.h.mailSyncOnce(context.Background())
+	const gone = "0b0b0b0b-0000-4000-8000-000000000004"
+	leftRow(w, "alice", gone)
+	w.h.mu.Lock()
+	w.h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Accounts: []state.MailPendingAccount{{Username: "bob", UUID: gone}}}
+	w.h.mu.Unlock()
+	mc2 := mailprovidertest.New(t)
+	mc2.Lock(func(s *mailprovidertest.Server) { s.VoidStatus = 500 })
+	w.h.SetMailAPI(mc2.Client())
+	in := SwitchRequest{Confirm: otherMailID, ConfirmEmpty: "3 mailboxes start empty", Proof: &wireProof}
+	_ = w.switchTo(t, otherMailID, in, rootActor())
+	if lo := w.h.LastOp(otherMailID); lo == nil || lo.OK {
+		t.Fatalf("the switch with a failed void succeeded: %+v", lo)
+	}
+	w.h.mailSyncOnce(context.Background())
+	w.h.mu.RLock()
+	fresh, pr := w.h.st.Mail.FreshInstance, w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if fresh != "" || pr == nil || mc2.Puts() != 0 {
+		t.Fatalf("fresh %q pending %+v puts %d", fresh, pr, mc2.Puts())
+	}
 }
 
 // TestLostLastDocSameWiringKeepsRowBaseline (R-L8 kept): a lost

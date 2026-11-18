@@ -300,8 +300,10 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	h.st.Mail.WireSeq++
 	p.Seq = h.st.Mail.WireSeq
 	h.st.Mail.Provider = p
-	// A new wiring has no confirmed applied mode yet.
+	// A new wiring has no confirmed applied mode yet, and no empty
+	// baseline until its own void completed.
 	h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
+	h.st.Mail.FreshInstance = ""
 	h.raiseVoidDebtLocked(voidReason)
 	// The undo clears only a debt this record started (not an older one
 	// it joined) and only while nothing was raised since.
@@ -379,6 +381,18 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 		}
 		return p, fail(StepMailVoid, err)
 	}
+	// The void completed (every mail password revoked): the first pass
+	// may start from an empty baseline (R-SWITCH-BASE-2).
+	h.mu.Lock()
+	if cur := h.st.Mail.Provider; cur != nil && cur.Instance == id && cur.Seq == p.Seq {
+		h.st.Mail.FreshInstance = id
+		if err := h.saveStateLocked(); err != nil {
+			h.st.Mail.FreshInstance = ""
+			h.mu.Unlock()
+			return p, fail(StepMailVoid, err)
+		}
+	}
+	h.mu.Unlock()
 	done(StepMailVoid)
 	if stopped() {
 		return p, undo()
