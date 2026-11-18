@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -800,5 +801,67 @@ func TestSwitchBetweenSendAndSave(t *testing.T) {
 	w.h.mu.RUnlock()
 	if lastSeq != newSeq {
 		t.Fatalf("after the new wiring's own send: last_doc_seq %d, want %d", lastSeq, newSeq)
+	}
+}
+
+// leftRow gives user an ended row for a uuid no document lists (a person
+// who left and was re-created: scenario 7's bob).
+func leftRow(w *wireFix, user, uuid string) {
+	at := time.Now().UTC()
+	w.h.mu.Lock()
+	w.h.st.MailCredentials[user] = append(w.h.st.MailCredentials[user], state.MailCredential{ID: "old-" + uuid, UUID: uuid,
+		CreatedAt: at.Add(-time.Hour), RevokedAt: &at, Reason: state.MailCredentialReasonRevokeLeave})
+	w.h.mu.Unlock()
+}
+
+// TestSwitchFirstDocumentIgnoresOldRows (Ruling R-SWITCH-BASE): a switch
+// to another instance starts from an empty baseline: a revoked row of a
+// re-created person and a pending removal of the old provider's
+// mailboxes hold nothing; the new provider gets its first document at
+// once.
+func TestSwitchFirstDocumentIgnoresOldRows(t *testing.T) {
+	w := switchFix(t)
+	w.h.mailSyncOnce(context.Background())
+	leftRow(w, "alice", "0b0b0b0b-0000-4000-8000-000000000001")
+	w.h.mu.Lock()
+	w.h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Accounts: []state.MailPendingAccount{{Username: "bob", UUID: "0b0b0b0b-0000-4000-8000-000000000001"}}}
+	w.h.mu.Unlock()
+	mc2 := mailprovidertest.New(t)
+	w.h.SetMailAPI(mc2.Client())
+	doSwitch(t, w)
+	w.h.mailSyncOnce(context.Background())
+	if mc2.Puts() == 0 {
+		t.Fatalf("the new provider got no document; blocked: %q", w.h.mailState.blocked)
+	}
+	w.h.mu.RLock()
+	pr := w.h.st.Mail.PendingRemoval
+	inst := w.h.st.Mail.LastDocInstance
+	w.h.mu.RUnlock()
+	if pr != nil || inst != otherMailID {
+		t.Fatalf("pending %+v, last doc instance %q", pr, inst)
+	}
+}
+
+// TestLostLastDocSameWiringKeepsRowBaseline (R-L8 kept): a lost
+// mail-last.json on the same wiring still judges the first document
+// against the Hub's rows: a row's uuid the document omits holds it.
+func TestLostLastDocSameWiringKeepsRowBaseline(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mailSyncOnce(context.Background())
+	leftRow(w, "alice", "0b0b0b0b-0000-4000-8000-000000000002")
+	os.Remove(w.h.mailLastPath())
+	w.h.mailState.mu.Lock()
+	w.h.mailState.loaded, w.h.mailState.last = false, nil
+	w.h.mailState.mu.Unlock()
+	puts := w.mc.Puts()
+	w.h.mailSyncOnce(context.Background())
+	if w.mc.Puts() != puts {
+		t.Fatal("a document omitting a row's uuid was sent without a baseline")
+	}
+	w.h.mu.RLock()
+	pr := w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if pr == nil || len(pr.Accounts) != 1 || pr.Accounts[0].UUID != "0b0b0b0b-0000-4000-8000-000000000002" {
+		t.Fatalf("pending %+v", pr)
 	}
 }

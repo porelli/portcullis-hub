@@ -93,6 +93,9 @@ type MailSettings struct {
 	// has none of it yet, so the next document is sent whatever it
 	// holds.
 	LastDocSeq int `json:"last_doc_seq,omitempty" yaml:"last_doc_seq,omitempty"`
+	// LastDocInstance is that wiring's instance (Ruling R-SWITCH-BASE: a
+	// pass for another instance starts from an empty baseline).
+	LastDocInstance string `json:"last_doc_instance,omitempty" yaml:"last_doc_instance,omitempty"`
 	// WireSeq numbers the wirings (monotonic): MailProvider.Seq.
 	WireSeq int `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries

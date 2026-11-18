@@ -51,7 +51,16 @@ func mailMassRemoval(next, last *mailprovider.MailState) (removed []mailprovider
 // (mailMassRefused handles both).
 func errHubMassRemoval(removed []mailprovider.Removed) error {
 	return &mailprovider.APIError{Status: http.StatusConflict, Kind: mailprovider.ErrorKindMassRemoval, Removed: removed,
-		Msg: "the Hub refused a mass removal: more than half the mailboxes would go at once"}
+		Msg: hubMassRemovalText}
+}
+
+const hubMassRemovalText = "the Hub refused a mass removal: more than half the mailboxes would go at once"
+
+// isHubMassRemoval: err is the Hub's own guard (errHubMassRemoval), not
+// the provider's refusal.
+func isHubMassRemoval(err error) bool {
+	var ae *mailprovider.APIError
+	return errors.As(err, &ae) && ae.Msg == hubMassRemovalText && ae.Status == http.StatusConflict
 }
 
 // mailLANOnly is the LAN-only verification's state (doctor

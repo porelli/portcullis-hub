@@ -57,7 +57,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailp
 		}
 	}
 	if len(gone) == 0 {
-		h.mailSetBlocked("mailctl refused a mass removal and the Hub can't tell whose mailboxes it would remove (no baseline, and mailctl named none): nothing is sent until it can")
+		h.mailSetBlocked("the mail provider refused a mass removal and the Hub can't tell whose mailboxes it would remove (no baseline, and the provider named none): nothing is sent until it can")
 		return mailRetry
 	}
 	sort.Slice(gone, func(i, j int) bool { return gone[i].Username < gone[j].Username })
@@ -65,7 +65,11 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailp
 		h.mailLogOnce("mail: the pending removal couldn't be saved (nothing done, retrying): " + err.Error())
 		return mailRetry
 	}
-	h.mailLogOnce(fmt.Sprintf("mail: mailctl refused removing %d mailboxes at once: waiting for an administrator's confirmation (their mail passwords are revoked meanwhile)", len(gone)))
+	who := "the mail provider refused"
+	if isHubMassRemoval(refusal) {
+		who = "the Hub held"
+	}
+	h.mailLogOnce(fmt.Sprintf("mail: %s removing %d mailboxes at once: waiting for an administrator's confirmation (their mail passwords are revoked meanwhile)", who, len(gone)))
 	if !h.mailRevokePending(ctx, api) {
 		return mailRetry
 	}
@@ -96,7 +100,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailp
 	s.mu.Lock()
 	s.last, s.blind = &sent, false
 	s.mu.Unlock()
-	h.saveMailLast(&sent, s.passSeq)
+	h.saveMailLast(&sent, s.passWiring)
 	if d2.removal {
 		h.mailWaitApplied(ctx, api, gen)
 		h.mailRestart(ctx, "a removal")

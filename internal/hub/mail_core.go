@@ -275,18 +275,24 @@ func (h *Hub) mailClient() MailAPI {
 	return api
 }
 
-// mailClientSeq is mailClient with the wiring (MailProvider.Seq) it
-// talks to, read together.
-func (h *Hub) mailClientSeq() (MailAPI, int) {
+// mailWiring is one wiring: its MailProvider.Seq and instance.
+type mailWiring struct {
+	seq      int
+	instance string
+}
+
+// mailClientSeq is mailClient with the wiring it talks to, read
+// together.
+func (h *Hub) mailClientSeq() (MailAPI, mailWiring) {
 	if !h.mailOn() {
-		return nil, 0
+		return nil, mailWiring{}
 	}
 	h.mu.RLock()
 	var api MailAPI
 	held := false
-	seq := 0
+	var wr mailWiring
 	if p := h.st.Mail.Provider; p != nil && h.mailModeLocked(p.Instance) == mailNormal {
-		seq = p.Seq
+		wr = mailWiring{p.Seq, p.Instance}
 		if hd := h.st.Mail.Held; hd == nil || hd.Stopped == nil {
 			api = h.mailProviderAPILocked()
 			held = hd != nil
@@ -294,12 +300,12 @@ func (h *Hub) mailClientSeq() (MailAPI, int) {
 	}
 	h.mu.RUnlock()
 	if api == nil || api.Available() != nil {
-		return nil, 0
+		return nil, mailWiring{}
 	}
 	if held {
-		return &heldMailAPI{MailAPI: api, h: h}, seq
+		return &heldMailAPI{MailAPI: api, h: h}, wr
 	}
-	return api, seq
+	return api, wr
 }
 
 // heldMailAPI is the held provider's client (Ruling R-HH1): the running,
