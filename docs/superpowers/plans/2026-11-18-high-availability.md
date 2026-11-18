@@ -1,21 +1,29 @@
-# High availability on Kubernetes (phases 0 + 1) Implementation Plan
+# High availability on Kubernetes (phases 0 + 1, plus DNS failover across sites) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A Portcullis Kubernetes install of 3 or more nodes at one site survives the loss of any one node. Sign-in keeps working, no committed data is lost and nothing ever has two writers. Nodes are added from the Hub or the CLI with a join code, and Portcullis installs k3s, the storage, the operators and the fencing itself. Docker single-server doesn't change at all.
+**Goal:** A Portcullis Kubernetes install of 3 or more nodes at one site survives the loss of any one node. Sign-in keeps working, no committed data is lost and nothing ever has two writers.
+
+The cluster may also span **several sites**: nodes at other locations, behind NAT or not, join the same cluster over the node mesh. The public front door then fails over **across sites** by DNS.
+
+Nodes are added from the Hub or the CLI with a join code, and Portcullis installs k3s, the storage, the operators and the fencing itself. Docker single-server doesn't change at all.
 
 **Architecture:**
-- **One k3s cluster with embedded etcd**, joined over a kernel WireGuard node mesh `pcmesh`.
+- **One k3s cluster with embedded etcd**, joined over a kernel WireGuard node mesh `pcmesh`. The mesh spans sites and NAT: a node behind NAT reaches other sites through reachable nodes, and NATed pairs at different sites go through one site gateway.
 - **Core** gains:
   - `nodeadm`, the only holder of the k3s token and the only cluster-scoped actor besides the CLI;
-  - an HA mode of the chart (replicas, PDBs, spreading, PriorityClasses, CloudNativePG, Valkey Sentinel, Vault raft ×3, Traefik DaemonSet);
-  - the **front-door** role of the domains service (DNS failover plus main-domain certificates);
+  - an HA mode of the chart (replicas, PDBs, spreading, PriorityClasses, CloudNativePG, Valkey Sentinel, Vault raft ×3, a Traefik DaemonSet on ingress nodes at every site). Data and sign-in pieces stay at the primary site;
+  - the **front-door** role of the domains service: DNS failover with probes from every site, plus main-domain certificates;
   - `./portcullis ha enable`, which converts a cluster as one resumable operation.
-- **The Hub** becomes a Lease-fenced single writer on a replicated volume. It publishes its documents for other services as named ConfigMaps and Secrets instead of files on a shared `hub-data`. It adds cluster nodes through `nodeadm` and computes the N−1 check.
-- **`portcullis-nodeagent`** (Hub repo) is the small fixed-function host service on every node: enrolment, mesh peers, host checks and the public ingress probes.
+- **The Hub**:
+  - is a Lease-fenced single writer on a replicated volume;
+  - publishes its documents for other services as named ConfigMaps and Secrets instead of files on a shared `hub-data`;
+  - adds cluster nodes through `nodeadm`;
+  - computes the N−1 check, the site-aware server layout and the mesh peer plan.
+- **`portcullis-nodeagent`** (Hub repo) is the small fixed-function host service on every node: enrolment, mesh peers (across NAT and sites), RTT, host checks and the public ingress probes.
 
 **Tech Stack:**
-- **Hub:** Go 1.27, `k8s.io/client-go` v0.37.2 (now also `tools/leaderelection`), `sigs.k8s.io/controller-runtime/pkg/envtest` (tests only), cel-go v0.29.2, vanilla JS.
+- **Hub:** Go 1.27, `k8s.io/client-go` v0.37.2 (now also `tools/leaderelection`), `sigs.k8s.io/controller-runtime/pkg/envtest` (tests only), cel-go v0.29.2, `golang.zx2c4.com/wireguard/wgctrl`, vanilla JS.
 - **Core:**
   - bash 3.2 + jq 1.8, `kubectl`, `helm`;
   - k3s with `--cluster-init`;
@@ -27,7 +35,18 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-16-high-availability-design.md` in portcullis-hub (Revision 2, binding). Its user rulings (§2, §20) are restated in Global Constraints. User rulings in memory: `ha_kubernetes.md`.
 
-**Scope: phases 0 and 1 of spec §19.1 only** (the spikes, plus core HA and replicated storage on 3 nodes at one site). Phases 2–4 are listed at the end of this plan as out of scope. Each one gets its own plan, because each produces software that works and can be tested on its own (writing-plans "Scope Check"). See Decision D1.
+**Scope (user, D1):** phases 0 and 1 of spec §19.1, plus the **DNS-failover-across-sites slice of phase 4**:
+- multi-site membership;
+- the mesh across NAT (§16.2);
+- the tie-breaker at a third location, for quorum;
+- per-site probes and the multi-site front door (§11.1);
+- their tests.
+
+What the slice gives:
+- the front door keeps answering when one site's ingress fails (its uplink's inbound path, its port forwarding, its Traefik nodes, or the whole site when the site holding sign-in survives);
+- an ingress-only site needs no data of its own.
+
+What it doesn't give: sign-in and the data stay at the **primary site** (`main`). Surviving the loss of the primary site needs cross-site data replication and site promotion (spec §11.5: CNPG replica cluster, Longhorn DR volumes, the sync heartbeat, user ruling Q2). That is the rest of phase 4, a later plan, together with phases 2 and 3.
 
 **Size, from the code (not from memory).**
 - **The base this plan starts from:**
@@ -36,103 +55,76 @@
   - Node addresses and API endpoints are frozen into chart values and admission params by the CLI (D10).
   - The Hub's `RulesExact` rejects `resourceNames` rules and requires defaults only in the core namespace.
   - The Hub has no single write funnel: 78 `saveLocked` callers, 23 direct `Save`s and 59 `WriteFileAtomic` sites.
-- **The work:** 32 tasks.
+  - Nothing site-aware exists. The link role is a star through the primary, with no NAT traversal between workers.
+- **The work:** 36 tasks.
   - Stream A: 4, Tasks 1–4 (contract, vectors, 2 spikes).
-  - Stream H: 10, Tasks 5–14.
-  - Stream C: 15, Tasks 15–29.
-  - Stream T: 1, Task 30.
-  - Stream D: 1, Task 31.
-  - Final: 1, Task 32.
-- **Effort:** about **8–12 working days** of the build loop (plan → build → review → CI → test cluster).
+  - Stream H: 12, Tasks 5–16.
+  - Stream C: 17, Tasks 17–33.
+  - Stream T: 1, Task 34.
+  - Stream D: 1, Task 35.
+  - Final: 1, Task 36.
+
+  The cross-site slice adds 4 tasks:
+  - Task 10, the mesh across sites and NAT;
+  - Task 11, sites and the server layout;
+  - Task 20, primary-site pinning;
+  - Task 28, the front door across sites.
+
+  It also widens Tasks 1–3, 8, 9, 15–17, 21, 27, 32, 33, 35 and 36.
+- **Effort:** about **11–16 working days** of the build loop (plan → build → review → CI → test cluster).
   - The calibration is the last four plans of 19–29 tasks, each of which took 1.5–2.5 days.
-  - This plan is slower: the spikes need real VMs (1.5–2 days, blocked on D9), it pulls in four third-party operators, and its chaos tests can only be checked on real machines.
-  - The spec's own figure for phases 0 + 1 is 22–31 days. It is an upper bound from the design, and the spec says to treat the upper end as realistic. Above 12 days, look first at the VM spikes and the Longhorn/SNR behaviour on arm64.
+  - This plan is slower:
+    - the spikes need the VMs (1.5–2 days);
+    - it pulls in four third-party operators;
+    - its chaos tests run only on real machines;
+    - the cross-site slice adds about 3–4 days: NAT relaying, the cross-region spike and the site scenarios.
+  - The spec's own figures are 22–31 days for phases 0 + 1, plus part of phase 4's 18–25. They are upper bounds from the design. Above 16 days, look first at the VM spikes, Longhorn/SNR on arm64, and flannel inside `pcmesh` across regions.
 
-## Decisions for the user (before Task 1)
+## Decisions (resolved)
 
-The spec leaves each of these open, or contradicts itself on them, and each one changes what gets built. The plan is written assuming the **recommendation** each line gives. The tasks a different answer would change are named in brackets.
+**Answered by the user (2026-11-17, through the coordinator):**
+- **D1. Scope.** A bigger first slice: phases 0 + 1 plus DNS failover across sites, with everything it needs (multi-site membership, the mesh across NAT, per-site probes, the multi-site front door, its tests). Phases 2, 3 and the rest of phase 4 are later plans.
+- **D2. Delivery of published documents: about 10 s.**
+  - k3s `--kubelet-arg=sync-frequency=10s` on every node.
+  - After every publish, the Hub confirms the new `.rev` on every reader pod through the existing `hub rev` exec. It raises `published_doc_stale` after 120 s.
+  - The Hub's core Role gains `pods/exec` `create` and `pods` `list` there.
 
-- **D1. Scope of this plan.** Phases 0 + 1 only, with phases 2 (app HA, tiers, NFS, snapshots), 3 (Docker assisted recovery, migration paths 1/3, `ha recover`) and 4 (multi-site, Hub hot standby, mail) as later plans. *Recommend: yes.* [all]
-- **D2. How fast published documents reach readers.**
-  - Today the policy file, `signin-keycloak.json`, `impersonation.json` and the rest are instant on a shared PVC. As ConfigMaps or Secrets (§7.2), the kubelet delivers them in up to about 60–90 s.
-  - The spec says "the Hub bumps a pod annotation". That needs `patch` on pods in the core namespace, which can't be limited by name and which §17 doesn't grant.
-  - Options:
-    - (a) accept ≤ 90 s for group removals and impersonation stops in HA;
-    - (b) k3s `--kubelet-arg=sync-frequency=10s` on every node, at some kubelet CPU cost;
-    - (c) give the Hub pod `patch` in the core namespace.
-  - *Recommend (b), with readers' `.rev` confirmed by the Hub through the existing `hub rev` exec (Hub Role: `pods/exec create` on core pods, by label).* [6, 15, 17]
-- **D3. Where the Hub's Lease lives, and the Role delta for it.**
-  - §17 lists what the Hub gains and has no Lease. *Recommend:*
-    - Leases `portcullis-hub`, `portcullis-frontdoor` and `portcullis-nodeadm` in the core namespace, pre-created by the chart;
-    - the Hub's Role there: `coordination.k8s.io/leases` `get`/`update` on `resourceNames: [portcullis-hub]`.
+  [6, 17, 19, 21]
+- **D8. The HA shape always.**
+  - Every Kubernetes install runs k3s `--cluster-init` on `pcmesh`, CloudNativePG (1 instance), LLDAP on Postgres, Vault as a StatefulSet and the published documents.
+  - `ha enable` only installs Longhorn and fencing, moves volumes and scales out.
+  - Migration path 2 isn't built (no back-compat).
+  - The LLDAP SQLite → Postgres conversion exists only as a restore step for Docker or old backups.
 
-  [5, 6, 17]
-- **D4. Cluster-scoped reads and writes.**
-  - The N−1 check, the HA page, node labels and taints, cordon/drain and etcd member removal all need cluster-scoped access (nodes, pods in every namespace, CRs). The spec keeps the Hub with "no cluster-scoped verb".
-  - *Recommend: `nodeadm` does all of it.* It serves a read-only cluster snapshot and five fixed write operations to the Hub's `hub.control` certificate. This makes `nodeadm` broader than §6.2 says ("only the token holder"). [8, 10, 13, 18]
-- **D5. "Make Portcullis highly available" from the Hub.**
-  - The Hub can't run Helm or install operators, and §6.3 has the button run the whole conversion.
-  - *Recommend for phase 1:*
-    - the conversion is CLI-only (`./portcullis ha enable`);
-    - the Hub's HA page shows the checklist, the live state, and the command to run;
-    - the alternative, an in-cluster executor with cluster-admin rights, is parked.
+  [4, 17, 23, 26, 31]
+- **D9. Machines.**
+  - Four Lightsail VMs, created only when the HA build starts (Task 3) and deleted at the end (Task 36).
+  - Never name the account, the profile or the VM names in any repo, commit or doc.
+  - Layout (assistant's call):
+    - site `main` in one region: `vm1`, `vm2` (amd64, servers, storage, ingress) and `vm3` (arm64, class `small`, the third server and the third Vault voter);
+    - site `edge` in another region: `vm4` (amd64, agent, ingress).
 
-  [13, 27]
-- **D6. The shared volumes that §7.2 doesn't cover.**
-  - The volumes:
-    - `group-gate-data` holds the opened log. The Hub mounts it read-write and reads it for the sign-in history and for the impersonation "apps opened" audit.
-    - `mcp-gate-data` holds the AI access log, which the Hub reads.
-    - `wg-data` holds `status.json`, which the Hub reads.
+    That is the "two sites, majority at `main`" case. The three-site tie-breaker case is tested in k3d (Task 33).
+  - The VMs are reused across runs, reset by `k3s-uninstall.sh` and a wipe of the test disks, never recreated per run. The builder host itself is never used as a node.
 
-    With 2 gate replicas on different nodes, one RWO volume can't serve them.
-  - *Recommend:*
-    - each gate replica keeps its log on its own `emptyDir`-backed local PVC (a StatefulSet, one PVC per replica) and serves it on a new internal read-only port that only the Hub may reach (NetworkPolicy);
-    - the Hub merges the replicas' logs;
-    - a replica that can't be read marks the history "incomplete", as today's read failure does;
-    - `wg` publishes `status.json` the same way.
-  - Alternatives: pin the gates to the Hub's node, which kills gate HA, or put an RWX Longhorn volume in the sign-in path, which the spec rejects in §7.2. [7, 19]
-- **D7. A host-side agent in phase 1.**
-  - Joining, the `pcmesh` peer list (every node holds all peers and must learn each new one), host checks and the public probes (§11.1) all need a host process. §19.1 puts `portcullis-nodeagent` in phase 2.
-  - *Recommend: a minimal `portcullis-nodeagent` in phase 1* (enrol, mesh, checks, probes). NFS, ZFS and the fixer stay in phase 2. [9]
-- **D8. What a fresh Kubernetes install looks like, and whether migration path 2 is built.**
-  - *Recommend the HA shape from day one, on every Kubernetes install:*
-    - k3s `--cluster-init` on `pcmesh`;
-    - CloudNativePG with 1 instance;
-    - LLDAP on Postgres;
-    - Vault as a 1-voter StatefulSet;
-    - published documents as ConfigMaps/Secrets.
+  [3, 33, 36]
 
-    `ha enable` then installs Longhorn and the fencing pieces, moves volumes and scales out. It needs no data conversion.
-  - *Recommend also:* following the no-back-compat rule, **don't build migration path 2**. Existing experimental single-node installs re-install through `backup` → `init` → `restore`, which is the kube spec's path. LLDAP's SQLite → Postgres conversion is still needed for that restore of a Docker or old-Kubernetes backup into the new shape, so Task 4 spikes it and Task 23 builds it as a restore step, not as a migration. [4, 15, 20, 23, 27]
-- **D9. Real machines.**
-  - The spikes (Task 3), the builder chaos job `e2e-ha-vm` (Task 29) and the 3-VM test cluster (Task 32) need 3–4 VMs, one of them arm64 and small.
-  - The builder (Lightsail) has no nested virtualisation. The plan never creates cloud resources by itself.
-  - *Recommend:* the user approves creating 4 Lightsail instances (3 × 2 vCPU/4 GB amd64 plus one arm64 small-class stand-in, about $60/mo) with the existing profile, deleted after Task 32. They are reused across runs, never recreated per run (spec §19.2 asks for a fresh VM per run). Alternatively the user provides their own machines, a Pi included. [3, 29, 32]
-- **D10. Node addresses, API endpoints and the pod CIDR when nodes join.**
-  - Today the CLI freezes them into `.env`, chart values and the admission params. They are used by `PORTCULLIS_KUBE_NODE_ADDRESSES`, `apiEndpoints`, the netpol egress denies and the `nodeAddresses` param. `kube_runtime_check` refuses any drift.
-  - A Hub-driven join changes all three. *Recommend:*
-    - `nodeadm` keeps a ConfigMap `portcullis-cluster-addresses` (mesh, LAN and public address per node, and the API endpoints);
-    - the admission params and the chart read **the mesh subnet `10.215.0.0/24` plus that list**;
-    - a join finishes only after `nodeadm` has rewritten the params generation through the same create-before-delete binding swap the CLI uses.
+**Ruled by the coordinator, as recommended:**
+- **D3.** Leases `portcullis-hub`, `portcullis-frontdoor` and `portcullis-nodeadm` in the core namespace, pre-created by the chart. The Hub's core Role has `leases` `get`/`update` on `portcullis-hub` only. [5, 6, 19]
+- **D4.** `nodeadm` does every cluster-scoped read and write (snapshot, labels, taints, cordon/drain, etcd members) for the Hub's `hub.control` certificate. The Hub keeps no cluster-scoped verb. [8, 12, 15, 21]
+- **D5.** The HA conversion is CLI-only (`./portcullis ha enable`). The Hub's HA page shows the checklist, the live state and the command. [15, 31]
+- **D6.** group-gate, mcp-gate and wg serve their logs/status on read-only ports that only the Hub may reach, with one local PVC per gate replica. The Hub merges them, and an unreadable replica means "incomplete". [7, 22]
+- **D7.** A minimal `portcullis-nodeagent` in this plan: enrol, mesh (now across sites and NAT), RTT, host checks, probes. NFS, ZFS and the fixer stay in phase 2. [9, 10]
+- **D10.** `nodeadm` keeps `portcullis-cluster-addresses` and rewrites the admission params generation after each join or removal, with the CLI's create-before-delete swap. `PORTCULLIS_POD_CIDR` becomes the cluster CIDR. [17, 21]
+- **D11.** Per-instance priority and *Runs on* ship here. HA mode, replicas, tiers and schedules stay in phase 2. [13, 14, 18]
+- **D12.**
+  - Without hairpin NAT, same-site probes don't count.
+  - With another site present, that site's probers are the outside vantage.
+  - A single-site cluster without hairpin uses in-cluster health only, with doctor `frontdoor_probes_internal_only` (Warning).
 
-    That gives `nodeadm` write access to the admission params and bindings (the alternative is "run `./portcullis ha sync` on the main machine after each join").
-  - `PORTCULLIS_POD_CIDR` becomes the cluster CIDR (`10.42.0.0/16`), no longer the first node's `/24`. [15, 18]
-- **D11. Per-instance priority and *Runs on* in phase 1.**
-  - §19.1 puts the Availability tab in phase 2, but the admission rules and the N−1 check in phase 1. Without an admin priority, N−1 judges only core.
-  - *Recommend:* phase 1 ships priority and *Runs on*. HA mode, replicas, tiers and snapshot schedules stay in phase 2. [11, 12, 16]
-- **D12. Public probes from a home site without hairpin NAT.**
-  - Probing a node's public address from the other nodes at the same site needs the router to support hairpin NAT, and many home routers don't.
-  - *Recommend:*
-    - Task 3 tests it on the user's network;
-    - a cluster whose probes can't reach a public address from inside counts an ingress node healthy on in-cluster health alone (node Ready + Traefik Ready);
-    - the HA page and the doctor (`frontdoor_probes_internal_only`, Warning) say that broken port forwarding won't be detected without an off-site node.
-
-  [3, 9, 14, 24]
-- **D13. Label.** HA ships **EXPERIMENTAL**, like Kubernetes support: the docs, the HA page banner and `ha enable`'s confirmation say so. *Recommend: yes.* [13, 31]
-
-- **D14. The backup destination in phase 1.**
-  - §19.1 puts the backup destination in phase 2. But turning HA on requires it (user ruling with Q1, §6.3 checklist), and CNPG's WAL archive needs it (§7.4).
-  - *Recommend:* phase 1 builds the destination for **core only**: CNPG WAL and base backups, the core `backup` archive and Longhorn backups of the core volumes. Instance backups move from `hub-data` to a replicated `hub-backups` PVC and go to the destination in phase 2. [23, 27]
+  [3, 9, 16, 27, 28]
+- **D13.** HA ships **EXPERIMENTAL**: the docs, the HA page banner and `ha enable`'s confirmation say so. [15, 35]
+- **D14.** The backup destination is built for core only: CNPG WAL and base backups, the core `backup` archive and Longhorn backups of the core volumes. Instance backups move to a replicated `hub-backups` PVC. [26, 31]
 
 ## Global Constraints
 
@@ -157,19 +149,21 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
     - no Lease → no write [5];
     - a Lease lost → writes stop within 10 s [5];
     - a published document over the object limit → the last good one kept and a doctor Problem [6];
-    - fencing unconfirmed → no stateful failover [21];
-    - quorum lost → nothing promoted, moved or flipped [24, 27];
-    - every probe failing → no DNS change (fail static) [24];
-    - a join without a verified HMAC proof and certificate → no k3s material [18];
-    - an `ha enable` checklist item red → nothing changed [27];
-    - unparseable cluster addresses → no params rewrite [18].
-  - **Identity = the LLDAP username.** Leases, audit actors and op records name usernames. The LLDAP conversion (Task 23) keeps every user's username **and uuid** (Keycloak's federation links depend on it).
+    - fencing unconfirmed → no stateful failover [24];
+    - quorum lost → nothing promoted, moved or flipped [27, 31];
+    - every probe failing → no DNS change (fail static) [27];
+    - a join without a verified HMAC proof and certificate → no k3s material [21];
+    - an `ha enable` checklist item red → nothing changed [31];
+    - unparseable cluster addresses → no params rewrite [21];
+    - a node at a site with no reachable node, or a server more than 100 ms away → no k3s material [10, 11, 21];
+    - a blind prober, or one site's failures alone when ≥ 2 sites can probe → no DNS change [28].
+  - **Identity = the LLDAP username.** Leases, audit actors and op records name usernames. The LLDAP conversion (Task 26) keeps every user's username **and uuid** (Keycloak's federation links depend on it).
   - **Prefer mature libraries.**
     - Leader election uses client-go `leaderelection`.
     - Storage, Postgres and fencing use their operators.
     - DNS and ACME go through the domains service's existing lego/libdns providers.
     - No hand-rolled YAML, CEL, WireGuard or Raft.
-  - **Main-only merges.** See Final, Task 32.
+  - **Main-only merges.** See Final, Task 36.
   - **No private identifiers in public repos.** No cloud profile, account id, VM name, test-server hostname or private repo name in code, docs or commits.
   - **ACME staging on the test server.** The test cluster always runs `ACME_STAGING=true`: `config apply` + `up` after `init`. The front-door account is a staging account there. The public would-issue check runs before every CAA flip.
   - **Never touch the LLDAP `admin` user.**
@@ -178,7 +172,7 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
     - every namespace is default-deny;
     - the admission policies judge every identity except the CLI;
     - etcd, the kubelet and the API server listen only on mesh addresses.
-- **Single-server stays the same.** A Docker install gains no prompt, dependency, flag, service or `.env` key. `tests/test_cli.sh` keeps `test_docker_init_unchanged`, which diffs the Docker `init` transcript and `.env` key set against a fixture committed in Task 15.
+- **Single-server stays the same.** A Docker install gains no prompt, dependency, flag, service or `.env` key. `tests/test_cli.sh` keeps `test_docker_init_unchanged`, which diffs the Docker `init` transcript and `.env` key set against a fixture committed in Task 17.
 - **Core lints stay green:** `NBINDS`, `lint_healthchecks.sh`, `lint_images.sh` (now also over `kube/ha/**`), the Podman overlays, `tests/lint_ci_size.sh` (`ci.yml` ≤ 450 000 bytes), and `tests/lint_builder_cache.sh`. A new CI step longer than 20 lines goes in `.github/ci/<job>-<step>.sh`. A compose change needs its chart change in the same commit. This plan adds no compose service.
 - **TDD everywhere.** Write the failing test, see it fail, implement, see it pass, commit. Gates:
   - **Core:**
@@ -208,6 +202,8 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
   | `joincode_v2_vectors.json` | Hub `internal/servers/testdata/` | core `nodeadm/testdata/`, Hub `internal/nodeagent/testdata/` |
   | `frontdoor_vectors.json` | core `domains/testdata/` | Hub `internal/hub/testdata/` (HA page worst-case texts) |
   | `nminus1_vectors.json` | Hub `internal/nminus1/testdata/` | none |
+  | `meshplan_vectors.json` | Hub `internal/meshplan/testdata/` | none (nodeagent is in the same repo) |
+  | `site_roles_vectors.json` | Hub `internal/servers/testdata/` | none |
   | `nodeclass_vectors.json` | Hub `internal/nodeagent/testdata/` | none |
   | `core_names.txt` additions (`nodeadm`, `frontdoor`, `sessions-sentinel`, `portcullis-pg`) | core | templates `tests/` (`TestCoreNamesComplete`) |
 
@@ -287,7 +283,13 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
     - HA requires the offsite backup destination.
   - **Ingress:** Traefik is a DaemonSet on `ingress` nodes. ServiceLB is on nodes labelled `svccontroller.k3s.cattle.io/enablelb=true` (set with `portcullis.io/ingress`), with `externalTrafficPolicy: Local`.
   - **VPN:** `wg-people` is a LoadBalancer on ingress nodes with `externalTrafficPolicy: Cluster`. The docs state the reconnect caveat.
-  - **Mesh:** `pcmesh` kernel WireGuard, `10.215.0.0/24` fixed (checked against link `10.214.0.0/24` and the people VPN), full static peer list, k3s `--node-ip` on the mesh address, `--flannel-backend=wireguard-native`.
+  - **Mesh:** `pcmesh` kernel WireGuard, `10.215.0.0/24` fixed (checked against link `10.214.0.0/24` and the people VPN), full static peer list, k3s `--node-ip` on the mesh address, `--flannel-backend=wireguard-native`. **Across sites (§16.2, phase 4 slice):** every site needs at least one node that is reachable (a cloud node, or one forwarded UDP port), and peers behind NAT keep their tunnel up with a 25 s keepalive.
+  - **Sites and quorum (§4, §11.5):**
+    - etcd across sites works with tuned heartbeat and election timeouts, up to about 100 ms RTT;
+    - with 2 sites, the site holding 2 of the 3 voters is the only one that survives on its own;
+    - real site tolerance needs a tie-breaker at a third location (a small cloud VM, or a Pi at a friend's house);
+    - zero-loss replicas stay within one site.
+  - **Probes across sites (§11.1):** with 2 sites, probers from at least 2 sites.
   - **Join codes:** single use, 15 min, carrying the enrol endpoint + server addresses, the server id, the `pki_node` CA fingerprint and a 256-bit secret (hash stored), never a k3s token. The one-liner is `curl -fsSL https://<d>/node/join.sh | sh -s -- <code>` (script sha256 inside the code). `pki_node` role `node-cluster`.
   - **Adding a node:** fresh sign-in, audited `server.add`, `server_enrol` op with steps enrolled → k3s joined → node Ready → storage ready → done. A server join is "cluster-admin on that machine", stated in the dialog. Never over MCP.
   - **Removing a node:** cordon → drain (respects PDBs, refuses below a quorum or replica minimum) → Longhorn evicts → etcd member removal → certificate revocation → `k3s-uninstall.sh`. **Revoke now**: node object deleted, etcd member removed, certificate and mesh peer revoked, server token rotated.
@@ -353,6 +355,27 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
     - `node-cluster`: CN `<id>.cluster.portcullis.internal`, 720 h;
     - `node-frontdoor`: CN `frontdoor.control`, 720 h, signed by enroll for `nodeadm`'s request only.
   - **`pcmesh`:** UDP **51830**, interface `pcmesh`, `PersistentKeepalive = 25`, keys generated on the node (the private key never leaves it), the first node `10.215.0.1`.
+  - **The mesh peer plan** (`internal/meshplan`, Task 10; vectors `meshplan_vectors.json`):
+    - *reachable* = a public UDP endpoint answering on 51830;
+    - two nodes peer **directly** when either is reachable or both are at the same site (the LAN endpoint);
+    - a NATed pair at different sites goes **through the target's site gateway**: the lowest-id reachable node of that site, with the target's `/32` added to that peer's AllowedIPs;
+    - only gateways forward, and only `pcmesh` ↔ `pcmesh` (iptables `-i pcmesh -o pcmesh -j ACCEPT`; everything else to and from `pcmesh` stays dropped);
+    - keepalive 25 only on NATed nodes;
+    - the refusal text: `site <s> needs one node reachable on UDP 51830 first (a cloud node, or one forwarded port)`.
+  - **Sites (assistant's calls):**
+    - the **primary site is `main`**, the first node's site, which can't be changed in this plan;
+    - CNPG, Vault, Sentinel and sessions, the Hub, domains, Keycloak, the gates, enroll, mcp-gate, wg and Longhorn disks are pinned to it (required `portcullis.io/site In [main]`);
+    - unpinned: the Traefik DaemonSet (ingress nodes at every site), `frontdoor` (any site: it must be able to write DNS when the primary's uplink is down) and `nodeadm` (any server);
+    - storage nodes only at `main`: the label `node.longhorn.io/create-default-disk=true` is set by `nodeadm` only on `main` storage nodes, and the Hub refuses `storage` elsewhere with "storage nodes must be at the primary site (main) in this version".
+  - **etcd timing:** `--etcd-arg=heartbeat-interval=200 --etcd-arg=election-timeout=2000` on **every** server from `init` on, single site included, so a second site needs no rolling restart.
+  - **RTT limits** (measured over `pcmesh` by nodeagent, p95 of 20 pings):
+    - a server needs ≤ **100 ms** to every server: `too far for one cluster: <n> ms (servers need 100 ms or less)`;
+    - an agent needs ≤ **250 ms**;
+    - doctor `mesh_rtt_high` at 80 % of the limit.
+  - **Server layout across sites** (vectors `site_roles_vectors.json`):
+    - one site: the first 3 nodes are servers;
+    - with 3 or more sites, a new server is suggested only where it keeps **no site at a majority** of servers;
+    - with exactly 2 sites, servers stay at `main`, and the HA page and doctor `ha_two_sites_no_tiebreaker` (Warning) say "Only main can survive on its own: add a tie-breaker at a third location (a small cloud VM or a Pi elsewhere)."
   - **`portcullis-nodeagent`:**
     - systemd unit `portcullis-nodeagent.service`, uid 0 (it manages `pcmesh` and runs host checks), listening only on its mesh address `:7443`;
     - mTLS clients `hub.control` (every operation) and `frontdoor.control` (`GET /v1/probes` only);
@@ -370,7 +393,11 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
     - `frontdoor_probes_internal_only` (Warning, D12);
     - `published_doc_too_large` (Problem);
     - `published_doc_stale` (Problem: a reader's `.rev` is behind for more than 120 s);
-    - `ha_lease_lost` (Problem).
+    - `ha_lease_lost` (Problem);
+    - `mesh_site_no_gateway` (Problem: a site whose only reachable node is gone);
+    - `mesh_peer_stale` (Warning: a nodeagent missed the last peer plan for more than 5 min);
+    - `mesh_rtt_high` (Warning);
+    - `ha_two_sites_no_tiebreaker` (Warning).
   - **Op keys:** `_ha` (the HA page's refreshes) and `server_enrol` (reused); `node_remove`.
 
 ## Plan rulings (assistant's calls; spec gaps and defects)
@@ -389,14 +416,25 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
 - **R7.** `nodeadm` exports the cluster gauges Prometheus needs: `portcullis_node_ready{node}`, `portcullis_quorum_voters{system,state}`, `portcullis_volume_robustness{volume}`, `portcullis_pg_sync_standbys`, `portcullis_fencing_ready{node}` and `portcullis_failover_total{kind}`. There is no kube-state-metrics, so Prometheus gets no cluster-scoped rights.
 - **R8.** `kube.sh` is not grown. The new CLI code goes in `scripts/lib/kube_install.sh`, `ha.sh` and `node.sh` (the parked kube.sh split, started here).
 - **R9.** On Kubernetes the `servers` feature changes meaning. `serversOn()` answers true with kind `cluster-node` only, and Docker workers stay refused there (spec non-goal: no mixing).
+- **R10.** A **blind prober**, one that fails every target at every site in a round (its own uplink is down), is discarded for that round. Otherwise one site's broken uplink would look like every other site failing. An address is removed only when:
+  - a majority of the non-blind, eligible probers fail it for 3 rounds; and
+  - with ≥ 2 sites holding eligible probers, the failing probers span ≥ 2 sites.
+
+  When only one site can probe a target (2 sites, no hairpin), that site's probers alone decide, and only while they aren't blind.
+- **R11.** A site with no ingress node Ready (the whole site down) loses all its addresses through the same rule, one name at a time, at most one change per name per 60 s. The last address overall is never removed.
+- **R12.** flannel `wireguard-native` runs inside `pcmesh` (WireGuard in WireGuard). The MTU and the cross-region throughput are spiked in Task 3. If they fail, the plan stops for a user decision; it never switches the flannel backend quietly.
 
 ## Review Focus
 
 1. **The Hub on a node that a partition isolates.** Its pod keeps running until SNR reboots the node, and background ops, op records and audit appends are in flight. Every write must stop within 10 s of the last renewal, including those already running, and the new Hub on the majority side must never see a write from the old one land after its own first write. Pinned by `TestLeaseLostStopsInflightWrites` and `TestNoFileWritesOutsideFsutil` (Task 5).
 2. **A published document grows past the object limit** (a big `user-attributes.json`, many apps in the policy file). The Hub must keep the last good document, never truncate it, never publish an empty one, and raise `published_doc_too_large`. Readers keep enforcing the old document. Pinned by `TestPublishTooLargeKeepsLast` (Task 6).
-3. **Restoring a Docker backup into the HA shape converts LLDAP from SQLite to Postgres.** Every user's username, uuid, groups and password hash must survive, otherwise Keycloak's federation links break and people lose their passkeys. Any difference in counts or uuids aborts the restore with nothing switched. Pinned by `test_lldap_convert_keeps_uuids` (Task 23).
-4. **`ha enable` interrupted** by Stop, a CLI crash or a node lost half-way. A re-run resumes from the recorded step. Two Postgres writers or two Hubs must never be up at once: the old single Postgres stays scaled to 0 once CNPG has the data, and the old Hub stays scaled to 0 before the new volume attaches. Pinned by `test_ha_enable_resumes_each_step` and `test_ha_enable_never_two_writers` (Task 27).
-5. **The DNS provider fails half-way through a change**: the new address is appended, then the delete of the stale one fails, or the API rate-limits. The set must never drop to zero addresses, retries must stay within one change per name per 60 s, and `PortcullisDNSFailoverStuck` must fire after 5 min. Pinned by `TestFrontDoorPartialWriteNeverEmpty` (Task 24).
+3. **Restoring a Docker backup into the HA shape converts LLDAP from SQLite to Postgres.** Every user's username, uuid, groups and password hash must survive, otherwise Keycloak's federation links break and people lose their passkeys. Any difference in counts or uuids aborts the restore with nothing switched. Pinned by `test_lldap_convert_keeps_uuids` (Task 26).
+4. **`ha enable` interrupted** by Stop, a CLI crash or a node lost half-way. A re-run resumes from the recorded step. Two Postgres writers or two Hubs must never be up at once: the old single Postgres stays scaled to 0 once CNPG has the data, and the old Hub stays scaled to 0 before the new volume attaches. Pinned by `test_ha_enable_resumes_each_step` and `test_ha_enable_never_two_writers` (Task 31).
+5. **One site's uplink fails** while the front door runs at that site or elsewhere. That site's probers see every target fail, and its nodes stay Ready inside the cluster.
+   - The other sites' addresses must stay published.
+   - The front door must keep its Lease only on the quorum side.
+   - A front door at the cut-off site must not be able to write DNS, and must stop trying once the Lease lapses.
+   - Pinned by `TestOneSiteUplinkDownNoRemovalElsewhere` and `TestBlindProberDiscarded` (Task 28) and the VM scenario `ha_vm_site_uplink_down` (Task 33). (The provider's half-written change is pinned in Task 27 by `TestFrontDoorPartialWriteNeverEmpty`.)
 
 ---
 
@@ -432,6 +470,8 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
 | `internal/runtime/kube/{translate.go,names.go}` + `testdata/translate/ha-*` | priority, tolerations, affinity, requests |
 | `internal/state/availability.go` (new), `internal/hub/availability.go` (new), `internal/httpapi/availability.go` (new), `web/availability.js` (new) | priority + *Runs on* |
 | `internal/nodeadm/` (new client), `internal/nminus1/` (new) | cluster snapshot, N−1 |
+| `internal/meshplan/` (new), `internal/hub/servers_mesh.go` (new) | mesh peer plan across sites and NAT, pushed to nodeagents |
+| `internal/servers/siteroles.go` (new), `internal/hub/sites.go` (new) | sites, site-aware server layout, RTT limits |
 | `internal/servers/joincode.go`, `internal/hub/{servers.go,servers_enrol.go,servers_revoke.go,servers_cluster.go (new)}`, `internal/httpapi/servers.go`, `web/servers.js` | cluster nodes |
 | `internal/hub/ha.go` (new), `internal/httpapi/ha.go` (new), `web/ha.js` (new) | HA page |
 | `internal/doctor/ha.go` (new), `internal/hub/doctor_ha.go` (new), `internal/httpapi/mcptools_ha.go` (new) | kinds, MCP read tools |
@@ -451,7 +491,8 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
 | `charts/portcullis/templates/*.yaml`, `_helpers.tpl`, `values.yaml` | the HA chart |
 | `charts/portcullis/templates/{postgres-cnpg,sessions,vault,published}.yaml` | CNPG, Sentinel, raft, documents |
 | `group-gate/group-gate.py`, `mcp-gate/`, `wg/` | log ports (D6) |
-| `domains/frontdoor/` (new package), `domains/traefik.go`, `domains/main.go` | front door |
+| `domains/frontdoor/` (new package, incl. `sites.go`), `domains/traefik.go`, `domains/main.go` | front door, across sites |
+| `charts/portcullis/templates/_helpers.tpl` (`portcullis.sitePin`), `values.yaml` (`ha.primarySite`) | primary-site pinning |
 | `scripts/lib/{backup.sh,config.sh,dns.sh}` | destination, CNPG backups, CAA flip in HA |
 | `scripts/lib/node.sh` (new) | `node …` |
 | `monitoring/prometheus/{alerts.yml,prometheus.yml,tests/alerts_test.yml}`, `monitoring/grafana/dashboards/cluster.json` (new) | alerts, dashboard |
@@ -504,13 +545,22 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
 
     Each comes with strict JSON shapes, the error kinds `quorum_minimum`, `replica_minimum`, `unknown_node`, `code_expired`, `code_used`, `proof_invalid` and `not_leader`, and status codes.
   - **20.3 Join code v2** (the shape in Global Constraints).
-  - **20.4 nodeagent API:** `GET /v1/health`, `GET /v1/checks`, `PUT /v1/mesh/peers` (the full list, idempotent), `GET /v1/probes`, `POST /v1/k3s/uninstall`.
+  - **20.4 nodeagent API:** `GET /v1/health`, `GET /v1/checks`, `PUT /v1/mesh/peers` (the full list, idempotent), `GET /v1/probes`, `POST /v1/k3s/uninstall`, and `GET /v1/mesh/rtt` (`{<peer-id>: p95_ms}`). `PUT /v1/mesh/peers` carries `{peers:[{id, pub, endpoint|null, allowed_ips:[…], keepalive}], forward: bool}`.
   - **20.5 Leases and the write fence.**
   - **20.6 Priority and *Runs on*:** state, API and the affinity each choice renders.
-  - **20.7 N−1:** the input snapshot and the algorithm, as in Task 10.
-  - **20.8 Front door:** health inputs, hysteresis, fail static, the `frontdoor-status` document `{v:1, names:{<name>:{addresses:[…], ttl, worst_case_s, last_change, pending}}, probes:{<node>:{ok, internal_only}}}`.
+  - **20.7 N−1:** the input snapshot and the algorithm, as in Task 12.
+  - **20.8 Front door:** health inputs, hysteresis, fail static, the `frontdoor-status` document `{v:1, names:{<name>:{addresses:[…], ttl, worst_case_s, last_change, pending}}, probes:{<node>:{ok, internal_only, blind}}, sites:{<site>:{healthy, ingress:[…]}}}`. The multi-site rules: R10 and R11 (blind probers, the 2-site span, whole-site removal).
   - **20.9 Cluster addresses document** `portcullis-cluster-addresses` `{v:1, mesh_cidr, cluster_cidr, service_cidr, api:[…], nodes:{<id>:{mesh, lan:[…], public:[…]}}}`.
   - **20.10 Per-replica logs** (D6): ports `group-gate :8091` and `mcp-gate :8092`, `GET /v1/log?from=<ts>&limit=` (JSONL, ≤ 4 MiB per answer), and `wg :8093` `GET /v1/status`, each admitted only from the Hub pod.
+  - **20.11 Sites and the mesh across sites:**
+    - the primary site `main` and the pinned/unpinned component list;
+    - the mesh peer plan rules and refusal text;
+    - the RTT limits and refusal texts;
+    - the server layout across sites, with the 2-site warning text;
+    - storage only at `main`;
+    - the `etcd` timing flags.
+
+    Every value is copied from Global Constraints.
 
 - [ ] **Step 1:** Write the sections above in the docs worktree. Every refusal text appears exactly once in the contract, together with the vector file that carries it.
 - [ ] **Step 2:** Run the docs gates. Expected: all pass, `zensical build --strict` clean.
@@ -520,7 +570,7 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
 ### Task 2: Shared vectors (Hub authors the Hub-owned ones, core the core-owned ones)
 
 **Files:**
-- Create (Hub): `internal/publish/testdata/published_docs.json`, `internal/servers/testdata/joincode_v2_vectors.json`, `internal/nminus1/testdata/nminus1_vectors.json`, `internal/nodeagent/testdata/nodeclass_vectors.json`.
+- Create (Hub): `internal/publish/testdata/published_docs.json`, `internal/servers/testdata/joincode_v2_vectors.json`, `internal/nminus1/testdata/nminus1_vectors.json`, `internal/nodeagent/testdata/nodeclass_vectors.json`, `internal/meshplan/testdata/meshplan_vectors.json`, `internal/servers/testdata/site_roles_vectors.json`.
 - Create (core): `nodeadm/testdata/nodeadm_api_vectors.json`, `domains/testdata/frontdoor_vectors.json`; copies `tests/published_docs.json`, `nodeadm/testdata/joincode_v2_vectors.json`.
 - Modify (Hub): `internal/runtime/kube/testdata/admission_vectors.json` (≥ 24 new cases tagged `"ha": true`).
 - Copy (Hub): `internal/nodeadm/testdata/nodeadm_api_vectors.json`, `internal/hub/testdata/frontdoor_vectors.json`.
@@ -544,18 +594,37 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
   - last address kept;
   - 2-site majority;
   - Porkbun 600 s text;
-  - internal-only (D12).
+  - internal-only (D12);
+  - **across sites** (R10, R11): a blind prober discarded; the 2-site span required; one site's uplink down leaves the other sites' addresses; a whole site down removes its addresses one name per 60 s and keeps the last address overall; a front door without the Lease changes nothing.
 - **`nminus1_vectors.json`:** `[{name, snapshot, want:[{node, level, unplaced, evicted}]}]`, ≥ 12 cases: taints, the `small` taint, required affinity, anti-affinity/spread, preemption of normal/low only, `preemptionPolicy: Never` on low, DaemonSet pods ignored, a node already NotReady.
+- **`meshplan_vectors.json`:** `[{name, nodes:[{id, site, mesh_ip, lan, public|null, pub}], want:{<id>:{peers:[{id, endpoint|null, allowed_ips, keepalive}], forward}} | want_error}]`, ≥ 14 cases:
+  - one site, all on the LAN;
+  - one site, one node public;
+  - two sites, both with gateways;
+  - a NATed node per site (relayed through the target's gateway);
+  - two gateways at one site (the lowest id wins);
+  - a site with no reachable node (`want_error` with the refusal text);
+  - a duplicate mesh ip;
+  - an ip outside `10.215.0.0/24`;
+  - a gateway removed (the next lowest id takes over).
+- **`site_roles_vectors.json`:** `[{name, cluster:[{id, site, role, healthy}], new:{site, rtt_ms:{<server>:ms}}, want:{role, warnings} | want_error}]`, covering:
+  - one site, servers 1–3, then agents;
+  - an even-count warning;
+  - 2 sites (servers stay at `main`, plus the tie-breaker warning);
+  - 3 sites (no site at a majority: `main` 2, `edge` 2, `tb` 1);
+  - a server at 101 ms (refused with the exact text);
+  - an agent at 251 ms (refused);
+  - 80 % warnings.
 - **`nodeclass_vectors.json`:** `[{mem_bytes, cpu, model, public_answers, want}]`, covering < 4 GB → small, "Raspberry Pi" → small, public → cloud, else home.
 
 - [ ] **Step 1: Write the failing loaders.**
-  - Hub: `TestPublishedDocsVectorsShape`, `TestJoinCodeV2VectorsShape`, `TestNMinus1VectorsShape`, `TestNodeClassVectorsShape` (each asserts its file parses strictly and has its minimum case count).
+  - Hub: `TestPublishedDocsVectorsShape`, `TestJoinCodeV2VectorsShape`, `TestNMinus1VectorsShape`, `TestNodeClassVectorsShape`, `TestMeshPlanVectorsShape`, `TestSiteRolesVectorsShape` (each asserts its file parses strictly and has its minimum case count).
   - Core: `nodeadm` `TestAPIVectorsShape` and `domains` `TestFrontdoorVectorsShape`.
   - Byte-copy checks: Hub `TestNodeadmVectorsCopy` and `TestFrontdoorVectorsCopy` (`PORTCULLIS_CORE_DIR`); core `unit-tests-kube-static.sh` compares `tests/published_docs.json` and `joincode_v2_vectors.json` against the Hub's same-named branch.
 - [ ] **Step 2:** Run them. Expected: FAIL (files missing).
 - [ ] **Step 3:** Write the vector files, values from Task 1. The new admission cases: each of the four refusal texts, and the accepted forms (`portcullis-low` with no toleration; small toleration + the class term; hostname spread).
-- [ ] **Step 4:** Run them. Expected: PASS. The envtest admission cases tagged `ha` stay **skipped** until Task 16 (`t.Skip("ha admission lands in Task 16")` keyed on the tag, removed there).
-- [ ] **Step 5:** Commit in each repo (`vectors: HA (published docs, join code v2, nodeadm API, front door, N−1, node class)`).
+- [ ] **Step 4:** Run them. Expected: PASS. The envtest admission cases tagged `ha` stay **skipped** until Task 18 (`t.Skip("ha admission lands in Task 18")` keyed on the tag, removed there).
+- [ ] **Step 5:** Commit in each repo (`vectors: HA (published docs, join code v2, nodeadm API, front door, N−1, node class, mesh plan, site roles)`).
 
 ### Task 3: Spike — cluster, storage, fencing on real machines (builder + VMs, D9)
 
@@ -563,7 +632,7 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
 
 **Interfaces — Produces:** pins (version + sha256/digest) for k3s, Longhorn, external-snapshotter, CNPG + barman-cloud plugin, SNR, NHC and k3d. They are written into this plan's Global Constraints as an amendment commit, as the kube plan's Task 0 did. Each answer below is recorded as **works / works with X / doesn't**.
 
-- [ ] **Step 1:** Three amd64 VMs and one arm64 small VM, linked by a hand-made `pcmesh` (spike only). Bring up k3s `--cluster-init` on `10.215.0.1`, join 2 servers + 1 agent over `pcmesh` with `--flannel-backend=wireguard-native`, then remove one server (etcd member removal). Record: works, and the steps that worked.
+- [ ] **Step 1:** The four VMs in the D9 layout (`vm1`–`vm3` at `main`, `vm4` at `edge`), linked by a hand-made `pcmesh` (spike only). Bring up k3s `--cluster-init` on `vm1` at `10.215.0.1`, join `vm2`/`vm3` as servers and `vm4` as an agent over `pcmesh` with `--flannel-backend=wireguard-native`, then remove one server (etcd member removal). Record: works, and the steps that worked.
 - [ ] **Step 2:** Longhorn v1 on the arm64 node with a USB SSD (or a separate block device), plus on a node whose root is ZFS or btrfs. Record whether Longhorn needs a separate disk.
 - [ ] **Step 3:** SNR + NHC, with `softdog` on cloud VMs.
   - Partition one node (`iptables -I INPUT -j DROP` on mesh + API) and record `T_fence` to reboot.
@@ -573,7 +642,13 @@ The spec leaves each of these open, or contradicts itself on them, and each one 
 - [ ] **Step 5:** ServiceLB with `enablelb` labels and `externalTrafficPolicy: Local` on 2 ingress nodes: the client IP is kept and both answer.
 - [ ] **Step 6:** Hairpin probe (D12): from each node, `curl --resolve auth.<d>:443:<public ip of another node>`. Record per network.
 - [ ] **Step 7:** Multi-value A records through the domains providers: Porkbun (our v3 client) and Cloudflare. Append a second A, delete one by id, and confirm what the public resolvers serve.
-- [ ] **Step 8:** Commit the report and the pins amendment (`plan: HA spike 1 results and pins`). **Any "doesn't" answer stops the plan for a user decision.**
+- [ ] **Step 8: Across sites** (D9 layout: `vm4` in a second region as site `edge`).
+  - Measure the `pcmesh` RTT p95 `vm4` ↔ `main`.
+  - Join `vm4` as an agent with the etcd timings of Global Constraints on the servers, and record that a server leader election under the cross-region link stays ≤ 3 s.
+  - flannel `wireguard-native` inside `pcmesh` (R12): record the working MTU, and `iperf3` pod-to-pod `main` ↔ `edge`.
+  - Block inbound UDP 51830 on `vm2` (NATed at `main`, while `vm1` stays the gateway), and record that `vm2` ↔ `vm4` traffic relays through `vm1` with forwarding limited to `pcmesh`.
+  - Cross-site probes: `vm4` probing `main`'s public addresses and back, and a blind prober (`vm4`'s egress dropped).
+- [ ] **Step 9:** Commit the report and the pins amendment (`plan: HA spike 1 results and pins`). **Any "doesn't" answer stops the plan for a user decision.**
 
 ### Task 4: Spike — the components inside the cluster (builder, k3d + one VM run)
 
@@ -713,7 +788,7 @@ func TestWGStatusFromHTTP(t *testing.T)               // status JSON via http so
 ```
 
 - [ ] **Step 2:** Run them. Expected: FAIL.
-- [ ] **Step 3:** Implement. The pruning to `history_days` (today a write to `group-gate-data`) is now each gate's own job (Task 19). The Hub no longer writes there on Kubernetes.
+- [ ] **Step 3:** Implement. The pruning to `history_days` (today a write to `group-gate-data`) is now each gate's own job (Task 22). The Hub no longer writes there on Kubernetes.
 - [ ] **Step 4:** Run them. Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: per-replica gate logs and wg status over the core namespace (HA)`).
 
@@ -738,7 +813,7 @@ func TestWGStatusFromHTTP(t *testing.T)               // status JSON via http so
     - `Remove(ctx, id string, mode RemoveMode) error`;
     - `type APIError{Kind string}`.
   - `Hub.AddClusterNode(ctx, actor, AddClusterNodeRequest{ID, Role, Class, Site, Labels}) (op OpRef, code string, err error)`: role suggestion = server while there are < 3 healthy servers; refused on Docker.
-  - The `server_enrol` steps are `enrolled`, `k3s_joined`, `node_ready`, `storage_ready` and `done`, each read from `Cluster()`.
+  - The `server_enrol` steps are `enrolled`, `mesh_ready` (Task 10), `k3s_joined`, `node_ready`, `storage_ready` and `done`, each read from `Cluster()` and the nodeagent.
   - `Hub.RemoveClusterNode(ctx, actor, id, typed, mode)`.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -751,7 +826,7 @@ func TestAddClusterNodeSuggestsRole(t *testing.T)   // 1 server → server; 3 he
 func TestAddClusterNodeNeedsFreshSignIn(t *testing.T) // POST /api/servers kind cluster-node without fresh auth → 401 fresh_auth_required; audit server.add only on success
 func TestServerJoinDialogText(t *testing.T)         // the answer for role server carries "Joining as a server gives this machine full control of the cluster (cluster-admin)."
 func TestClusterNodeRoutesNeverOverMCP(t *testing.T) // POST /api/servers, DELETE, revoke in serverNoToolRoutes; TestToolParity passes
-func TestEnrolStepsFromSnapshot(t *testing.T)       // snapshots in order → op steps enrolled→k3s_joined→node_ready→storage_ready→done; Stop during → op stopped, nodeadm Remove(cooperative) called
+func TestEnrolStepsFromSnapshot(t *testing.T)       // snapshots in order → op steps enrolled→mesh_ready→k3s_joined→node_ready→storage_ready→done; Stop during → op stopped, nodeadm Remove(cooperative) called
 func TestRemoveRefusedBelowQuorum(t *testing.T)     // nodeadm 409 quorum_minimum → 409 "removing <id> would leave fewer than 3 servers"
 func TestWorkersRefusedOnKube(t *testing.T)         // kind worker on kube → 409 "Docker workers can't join a Kubernetes cluster: add it as a cluster node"
 ```
@@ -765,7 +840,7 @@ func TestWorkersRefusedOnKube(t *testing.T)         // kind worker on kube → 4
 
 **Files:**
 - Create: `cmd/portcullis-nodeagent/main.go`, `internal/nodeagent/{server.go,mesh.go,checks.go,probes.go,class.go,enrol.go}` + tests, `Dockerfile.nodeagent`.
-- Modify: `.github/workflows/build.yml`: the matrix gains `nodeagent`, which also uploads `nodeagent-linux-{amd64,arm64}` with their sha256 as release and `edge` artifacts. The `nodeadm` image (Task 18) copies them from `ghcr.io/porelli/portcullis-nodeagent@sha256:…`.
+- Modify: `.github/workflows/build.yml`: the matrix gains `nodeagent`, which also uploads `nodeagent-linux-{amd64,arm64}` with their sha256 as release and `edge` artifacts. The `nodeadm` image (Task 21) copies them from `ghcr.io/porelli/portcullis-nodeagent@sha256:…`.
 
 **Interfaces:**
 - Consumes: §20.4 and the join code v2 (Tasks 1, 2); the mTLS peer checks of `internal/agent/server.go` (shared through a new `internal/pkinode` package extracted from it).
@@ -774,7 +849,7 @@ func TestWorkersRefusedOnKube(t *testing.T)         // kind worker on kube → 4
   - `serve`;
   - `checks`.
 
-  The API is §20.4. Probes run every 10 s against each other ingress node's public address with SNI `auth.<d>`, and `GET /v1/probes` answers the last 3 rounds. `class.Suggest(mem, cpu, model, publicAnswers) string`.
+  The API is §20.4. Probes run every 10 s against each other ingress node's public address with SNI `auth.<d>`, and `GET /v1/probes` answers the last 3 rounds, each round `{prober, site, reached_any, results:{<target>:{ok, class}}}` (the blind bit of R10 is `reached_any == false`). `join` sends the mesh RTT to every server (`GET /v1/mesh/rtt` on itself, Task 10) in the `/node/v1/join` request after `mesh_ready`. `class.Suggest(mem, cpu, model, publicAnswers) string`.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -790,11 +865,81 @@ func TestProbeHairpinFallback(t *testing.T)       // all public probes fail with
 ```
 
 - [ ] **Step 2:** Run them. Expected: FAIL.
-- [ ] **Step 3:** Implement. WireGuard goes through `golang.zx2c4.com/wireguard/wgctrl` (a mature library). k3s is installed from the pinned script and binary (sha256 checked) with the flags in Task 15, and the `--token-file` comes from the channel (never argv, never logged).
+- [ ] **Step 3:** Implement. WireGuard goes through `golang.zx2c4.com/wireguard/wgctrl` (a mature library). k3s is installed from the pinned script and binary (sha256 checked) with the flags in Task 17, and the `--token-file` comes from the channel (never argv, never logged).
 - [ ] **Step 4:** Run them. Expected: PASS. Build both arches.
 - [ ] **Step 5:** Commit (`nodeagent: host agent for cluster nodes (enrol, mesh, checks, probes)`).
 
-### Task 10: The N−1 simulator (Hub)
+### Task 10: The mesh across sites and NAT — `internal/meshplan`, the nodeagent's side, the Hub's push (Hub)
+
+**Files:**
+- Create: `internal/meshplan/{plan.go,plan_test.go}`, `internal/hub/servers_mesh.go`, `internal/hub/servers_mesh_test.go`, `internal/nodeagent/netns_test.go` (`//go:build netns`).
+- Modify: `internal/nodeagent/mesh.go` (endpoints, keepalive, gateway forwarding, RTT), `internal/hub/servers_poll.go` (a node that missed the plan gets it at its next poll), `.github/workflows/build.yml` (step "mesh netns (root)": `sudo -E go test -tags netns ./internal/nodeagent/ -run TestMeshNetns`).
+
+**Interfaces:**
+- Consumes: `meshplan_vectors.json` (Task 2); the nodeagent API (Task 9); §20.11 (Task 1).
+- Produces:
+  - `package meshplan`:
+    - `type Node struct{ ID, Site string; MeshIP netip.Addr; LAN netip.AddrPort; Public netip.AddrPort /* zero = behind NAT */; Pub string }`;
+    - `type Peer struct{ ID, Pub string; Endpoint netip.AddrPort /* zero = none */; AllowedIPs []netip.Prefix; Keepalive int }`;
+    - `type NodePlan struct{ Peers []Peer; Forward bool }`;
+    - `func Plan(nodes []Node) (map[string]NodePlan, error)`;
+    - `func Gateway(nodes []Node, site string) (string, bool)`.
+  - `Hub.pushMesh(ctx context.Context) error`: computes `Plan` from the servers state plus the snapshot, then `PUT /v1/mesh/peers` on every nodeagent. It runs on every join, removal and public-endpoint change. One unreachable agent doesn't block the others; that node gets `mesh_peer_stale` after 5 min.
+  - In the nodeagent:
+    - `mesh.Apply(plan NodePlan) error` uses wgctrl, plus the iptables rules from Global Constraints when `Forward`;
+    - `GET /v1/mesh/rtt` answers the p95 of 20 ICMP-less UDP echo rounds to each peer's mesh address on `:7444` (the nodeagent's own echo listener, mesh-only).
+
+- [ ] **Step 1: Write the failing tests.**
+
+```go
+func TestMeshPlanVectors(t *testing.T)            // every vector: Plan(nodes) == want, or the exact want_error
+func TestNATedPairRelaysViaGateway(t *testing.T)  // a@main NAT, b@edge NAT, gw(edge)=e1: a's peer e1 AllowedIPs ⊇ b/32; b's peer gw(main) ⊇ a/32; a has no direct peer b
+func TestForwardOnlyOnGateways(t *testing.T)      // Forward true exactly for each site's gateway when that site has a NATed node and another site exists
+func TestKeepaliveOnlyBehindNAT(t *testing.T)     // Keepalive 25 iff the node itself has no public endpoint
+func TestPushMeshOnJoin(t *testing.T)             // join completes → every fake nodeagent got the new plan; the new node's plan first
+func TestPushMeshPartialFailure(t *testing.T)     // one agent down → others updated, op not failed; after 5 min doctor mesh_peer_stale names it
+func TestForwardRulesPcmeshOnly(t *testing.T)     // the rule set applied with Forward == exactly ["-A FORWARD -i pcmesh -o pcmesh -j ACCEPT"] plus the chain's default DROP for pcmesh; removed when Forward false
+func TestRTTEndpoint(t *testing.T)                // echo peer with 30 ms injected delay → p95 within [30, 40] ms
+// netns (root, builder and Hub CI):
+func TestMeshNetns(t *testing.T)                  // 4 netns as nodes, 2 "sites", NAT by nftables masquerade; Apply each plan; ping every mesh ip from every node; a NATed↔NATed cross-site pair answers through the gateway; dropping the gateway's forward rule breaks exactly that pair
+```
+
+- [ ] **Step 2:** Run `go test ./internal/meshplan/ ./internal/hub/ ./internal/nodeagent/ -run 'MeshPlan|NATed|Forward|Keepalive|PushMesh|RTT'`. Expected: FAIL.
+- [ ] **Step 3:** Implement `Plan`. Peers are sorted by id, so the output is deterministic. Pick the gateway with `Gateway` (the lowest id among reachable nodes of the site). The Hub's enrol op (Task 8) gains the step `mesh_ready` between `enrolled` and `k3s_joined`: the new node's plan is applied, and so is every existing node's plan with the new peer.
+- [ ] **Step 4:** Run them again, plus the netns test on the builder (`sudo`). Expected: PASS.
+- [ ] **Step 5:** Commit (`hub, nodeagent: the node mesh across sites and NAT`).
+
+### Task 11: Sites, the server layout across sites, RTT limits (Hub)
+
+**Files:**
+- Create: `internal/servers/siteroles.go`, `internal/servers/siteroles_test.go`, `internal/hub/sites.go`, `internal/hub/sites_test.go`.
+- Modify: `internal/hub/servers_cluster.go` (the role suggestion goes through `SuggestRole`; storage outside `main` refused), `internal/httpapi/servers.go` (site in the add request, already there; the answer gains `warnings`), `web/servers.js` (site field with existing sites offered; the warnings shown).
+
+**Interfaces:**
+- Consumes: `site_roles_vectors.json` (Task 2); the RTT from the joining node's nodeagent (Task 10), reported in the enrol op before `k3s_joined`; `nodeadm.Snapshot` (Task 8).
+- Produces:
+  - `servers.SuggestRole(cluster []ClusterNode, new NewNode) (role string, warnings []string, err error)`, with `ClusterNode{ID, Site, Role string; Healthy bool}` and `NewNode{Site string; RTTms map[string]int; Override string}`;
+  - `servers.CheckRTT(role string, rttms map[string]int) error`, with the exact texts of Global Constraints;
+  - `Hub.Sites(ctx) ([]SiteView, error)`, with `SiteView{Name string; Primary bool; Nodes, Servers []string; Gateway string; Ingress []string; RTTms map[string]int}`;
+  - the enrol op refuses a node whose RTT fails `CheckRTT` **after** `mesh_ready` and **before** `k3s_joined`, then removes its peer from every plan.
+
+- [ ] **Step 1: Write the failing tests.**
+
+```go
+func TestSiteRolesVectors(t *testing.T)          // every vector → want role + warnings, or the exact error
+func TestTwoSitesWarnTiebreaker(t *testing.T)    // second site's first node → agent + "Only main can survive on its own: add a tie-breaker at a third location (a small cloud VM or a Pi elsewhere)."
+func TestThreeSitesNoMajority(t *testing.T)      // main 2, edge 1, tb 0 servers; new at tb → server; new at main → agent
+func TestServerTooFarRefusedBeforeJoin(t *testing.T) // RTT 120 ms → op failed "too far for one cluster: 120 ms (servers need 100 ms or less)"; nodeadm never asked for join material; peer removed from plans
+func TestStorageOnlyAtPrimary(t *testing.T)      // labels storage=true at site edge → 400 "storage nodes must be at the primary site (main) in this version"
+func TestSitesView(t *testing.T)                 // snapshot + plans → SiteView per site, gateway named, primary only main
+```
+
+- [ ] **Step 2:** Run them. Expected: FAIL.
+- [ ] **Step 3:** Implement. `SuggestRole` keeps the one-site behaviour of Task 8 (`TestAddClusterNodeSuggestsRole` still passes unchanged).
+- [ ] **Step 4:** Run them, plus Task 8's tests. Expected: PASS.
+- [ ] **Step 5:** Commit (`hub: sites, server layout across sites, RTT limits`).
+
+### Task 12: The N−1 simulator (Hub)
 
 **Files:** Create `internal/nminus1/{nminus1.go,nminus1_test.go}`.
 
@@ -814,14 +959,14 @@ The algorithm the tests don't fully fix:
 - [ ] **Step 4:** Run it. Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: N−1 simulator`).
 
-### Task 11: Translator — priority, tolerations, *Runs on*, requests (Hub)
+### Task 13: Translator — priority, tolerations, *Runs on*, requests (Hub)
 
 **Files:**
 - Modify: `internal/runtime/kube/translate.go` (`workload()`, the container resources around :1163), `names.go` (priority class names), `internal/runtime/types.go` (`Input.Availability`).
 - Create: `testdata/translate/ha-priority/`, `ha-runs-on-only-small/`, `ha-no-memlimit/`.
 
 **Interfaces:**
-- Consumes: `state.Availability` (Task 12).
+- Consumes: `state.Availability` (Task 14).
 - Produces:
   - `runtime.Availability{Priority string /*critical|high|normal|low*/; RunsOn RunsOn{Mode "anywhere"|"prefer"|"only"; Class, Site string; Nodes []string}; HA bool}`;
   - priority class `portcullis-<priority>`;
@@ -836,15 +981,15 @@ The algorithm the tests don't fully fix:
 - [ ] **Step 1:** Write the goldens: the three new cases' `case.json`, with the expected `want.yaml` written by hand from the rules above. Also `TestTranslateNoCPULimit` and `TestTranslateDefaultMemory`.
 - [ ] **Step 2:** Run `go test ./internal/runtime/kube/ -run 'TranslateGoldens|NoCPULimit|DefaultMemory'`. Expected: FAIL.
 - [ ] **Step 3:** Implement. Existing goldens change only by `priorityClassName: portcullis-normal`, the class `NotIn [small]` term and the CPU request: re-generate with `-update` and review the diff line by line.
-- [ ] **Step 4:** Run the test again, plus `-tags envtest -run TranslatedObjectsAdmitted` (it passes after Task 16's policies are copied; until then it runs against the current copy and must still pass, because the current policies don't refuse these fields). Expected: PASS.
+- [ ] **Step 4:** Run the test again, plus `-tags envtest -run TranslatedObjectsAdmitted` (it passes after Task 18's policies are copied; until then it runs against the current copy and must still pass, because the current policies don't refuse these fields). Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: translator renders priority, HA tolerations, Runs on, CPU/memory requests`).
 
-### Task 12: Instance availability — priority and *Runs on* (Hub, D11)
+### Task 14: Instance availability — priority and *Runs on* (Hub, D11)
 
 **Files:** Create `internal/state/availability.go`, `internal/hub/availability.go`, `internal/httpapi/availability.go`, `internal/httpapi/mcptools_availability.go`, `web/availability.js` (add to `//go:embed`). Modify `web/index.html` (Instance → Manage → Availability) and the setup form (priority only).
 
 **Interfaces:**
-- Consumes: `nminus1.Check` / `Explain` (Task 10), `nodeadm.Client.Cluster` (Task 8).
+- Consumes: `nminus1.Check` / `Explain` (Task 12), `nodeadm.Client.Cluster` (Task 8).
 - Produces:
   - `state.Instance.Availability *Availability` (nil = defaults);
   - `GET /api/instances/{id}/availability` → `{priority, runs_on, nodes:[{name, class, site, small}], n_minus_1:[…]}`;
@@ -866,7 +1011,7 @@ func TestAvailabilityAPIStrict(t *testing.T)           // unknown key, priority 
 - [ ] **Step 4:** Run them, plus `TestToolParity`. Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: instance priority and Runs on (Kubernetes)`).
 
-### Task 13: The HA page (Hub, D4, D5, D13)
+### Task 15: The HA page (Hub, D4, D5, D13)
 
 **Files:** Create `internal/hub/ha.go`, `internal/httpapi/ha.go`, `internal/httpapi/mcptools_ha.go`, `web/ha.js`. Modify `web/index.html` (Settings → High availability).
 
@@ -878,8 +1023,8 @@ func TestAvailabilityAPIStrict(t *testing.T)           // unknown key, priority 
   - the backup destination state (`state.BackupDestination`, read from `core.env`'s `PORTCULLIS_BACKUP_S3_URL` presence — never the credentials);
   - `frontdoor_vectors.json` worst-case texts.
 - Produces:
-  - `GET /api/ha` → `{experimental: true, enabled, checklist:[{id, ok, text}], guarantee, nodes:[{name, role, class, site, ready, fencing, n_minus_1}], quorum:{etcd, vault, sentinel}, dns:[{name, addresses, worst_case_text}], credentials_note, command:"./portcullis ha enable"}`;
-  - the checklist ids `nodes`, `servers`, `storage`, `ingress`, `backup_destination`, `n_minus_1`, `watchdog`;
+  - `GET /api/ha` → `{experimental: true, enabled, checklist:[{id, ok, text}], guarantee, nodes:[{name, role, class, site, ready, fencing, n_minus_1}], quorum:{etcd, vault, sentinel}, sites:[SiteView…] (Task 11), dns:[{name, addresses, worst_case_text, per_site:[{site, healthy}]}], credentials_note, command:"./portcullis ha enable"}`;
+  - the checklist ids `nodes`, `servers`, `storage`, `ingress`, `backup_destination`, `n_minus_1`, `watchdog`, plus with ≥ 2 sites `site_gateway` (every site has a reachable node) and `site_rtt` (every server within 100 ms). The 2-site tie-breaker warning is shown, but it isn't a blocker;
   - the guarantee texts from the spec (verbatim);
   - for Porkbun, `credentials_note` = "Porkbun API keys can change every domain in the account: Portcullis can't narrow them";
   - MCP `ha_status` (R).
@@ -887,7 +1032,7 @@ func TestAvailabilityAPIStrict(t *testing.T)           // unknown key, priority 
 - [ ] **Step 1: Write the failing tests.**
 
 ```go
-func TestHAChecklistFromSnapshot(t *testing.T)  // 2 nodes → nodes false "at least 3 nodes"; no destination → backup_destination false "set an offsite backup destination first"
+func TestHAChecklistFromSnapshot(t *testing.T)  // 2 nodes → nodes false "at least 3 nodes"; a site without a gateway → site_gateway false "site <s> needs one node reachable on UDP 51830"; no destination → backup_destination false "set an offsite backup destination first"
 func TestGuaranteeText(t *testing.T)            // 2 instances + preferred + 1 sync standby → "Zero loss on one failure"; 0 sync standbys → "Degraded: one more failure may lose the last writes"
 func TestWorstCaseTextVectors(t *testing.T)     // frontdoor_vectors.json want_worst_case_text
 func TestHAPageNeverShowsCredentials(t *testing.T) // response JSON has no key or value from frontdoor-env / backup-destination fixtures
@@ -899,13 +1044,13 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
 - [ ] **Step 4:** Run them, plus `TestToolParity`. Expected: PASS.
 - [ ] **Step 5:** Commit (`hub: Settings → High availability page`).
 
-### Task 14: Doctor kinds and MCP read tools (Hub)
+### Task 16: Doctor kinds and MCP read tools (Hub)
 
 **Files:** Create `internal/doctor/ha.go`, `internal/hub/doctor_ha.go`, `internal/doctor/ha_test.go`. Modify `internal/hub/doctor_runtime.go`.
 
 **Interfaces:**
-- Consumes: Tasks 6, 8, 10, 13.
-- Produces: `doctor.HAKinds` = `node_down`, `ha_quorum_at_risk`, `volume_degraded`, `pg_not_synchronous`, `ha_fencing_unavailable`, `ha_n_minus_1_insufficient`, `backup_stale`, `template_no_memory_limit`, `frontdoor_probes_internal_only`, `published_doc_too_large`, `published_doc_stale`, `ha_lease_lost`, each with the severity of Global Constraints. The input `HAIn{Snapshot, FrontdoorStatus, Published, LastBackup, Lease}`. The existing `kube_api_public` is checked for **every** node's public address from the snapshot (spec §17), with `TestKubeAPIPublicPerNode` (one exposed node of three → the kind names that node).
+- Consumes: Tasks 6, 8, 12, 15.
+- Produces: `doctor.HAKinds` = `node_down`, `ha_quorum_at_risk`, `volume_degraded`, `pg_not_synchronous`, `ha_fencing_unavailable`, `ha_n_minus_1_insufficient`, `backup_stale`, `template_no_memory_limit`, `frontdoor_probes_internal_only`, `published_doc_too_large`, `published_doc_stale`, `ha_lease_lost`, `mesh_site_no_gateway`, `mesh_peer_stale`, `mesh_rtt_high`, `ha_two_sites_no_tiebreaker`, each with the severity of Global Constraints. The input `HAIn{Snapshot, FrontdoorStatus, Published, LastBackup, Lease}`. The existing `kube_api_public` is checked for **every** node's public address from the snapshot (spec §17), with `TestKubeAPIPublicPerNode` (one exposed node of three → the kind names that node).
 
 - [ ] **Step 1:** Write the failing `TestHAKinds` (every kind registered once, severities exact) and one `TestHAKind_<kind>` per kind (the input that raises it, and the one that clears it; `node_down` only after > 1 min NotReady; `volume_degraded` only after > 10 min; `backup_stale` after 26 h).
 - [ ] **Step 2:** Run them. Expected: FAIL.
@@ -917,7 +1062,7 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
 
 ## Stream C — Core
 
-### Task 15: `init --runtime kubernetes` installs k3s on `pcmesh` (core, D8, R3)
+### Task 17: `init --runtime kubernetes` installs k3s on `pcmesh` (core, D8, R3)
 
 **Files:**
 - Create: `scripts/lib/kube_install.sh`.
@@ -939,6 +1084,7 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
     - `--advertise-address=10.215.0.1`;
     - `--node-label` for class/site/ingress/storage plus `svccontroller.k3s.cattle.io/enablelb=true`;
     - `--etcd-arg=listen-client-urls=https://10.215.0.1:2379,https://127.0.0.1:2379`;
+    - `--etcd-arg=heartbeat-interval=200`, `--etcd-arg=election-timeout=2000`;
     - `--kubelet-arg=address=10.215.0.1`.
   - It runs only when no `PORTCULLIS_KUBE_CONTEXT` cluster answers.
   - `kube_install_mesh` writes `/etc/wireguard/pcmesh.conf` (private key generated on the host, mode 0600) and enables `wg-quick@pcmesh`.
@@ -946,7 +1092,7 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
 
 - [ ] **Step 1: Write the failing shell tests** (`expect_eq` style, a fake `curl`/`sha256sum`/`systemctl` on PATH).
   - "kube_install_k3s: refuses a script whose sha256 differs" (rc=1, nothing executed).
-  - "kube_install_k3s: flags exactly" (the recorded argv of the fake installer equals the list above, sorted).
+  - "kube_install_k3s: flags exactly" (the recorded argv of the fake installer equals `tests/fixtures/k3s-server-flags.txt`, the list above, sorted; nodeadm's `TestJoinFlagsEqualInitFlags` reads the same fixture).
   - "kube_install_k3s: token never on argv" (grep the recorded argv and the log for the fixture token: none).
   - "kube_install_mesh: private key mode 0600 and never printed".
   - "kube_detect_cidrs: three nodes accepted, cluster CIDR 10.42.0.0/16".
@@ -957,7 +1103,7 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
 - [ ] **Step 4:** Run them again, plus shellcheck. Expected: PASS. Then `gh workflow run ci.yml --ref ha -f jobs=unit-tests,e2e-k3s` (e2e-k3s now installs through `kube_install_k3s`).
 - [ ] **Step 5:** Commit (`cli: init installs pinned k3s with embedded etcd on the pcmesh node mesh`).
 
-### Task 16: PriorityClasses and the admission additions (core; Hub byte copies)
+### Task 18: PriorityClasses and the admission additions (core; Hub byte copies)
 
 **Files:**
 - Create: `charts/portcullis/templates/priorityclasses.yaml`, `kube/admission/nodeadm-tokens.yaml` (a VAP + binding for `nodeadm`'s ServiceAccount on `kube-system` Secrets).
@@ -979,7 +1125,7 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
 - [ ] **Step 4:** Run the Hub `-tags envtest`, `TestAdmissionCELCompiles` and core `unit-tests-kube-static.sh` (byte copies equal). Expected: PASS. Then `gh workflow run ci.yml --ref ha -f jobs=unit-tests,e2e-k3s`.
 - [ ] **Step 5:** Commit both repos (`admission: priorities, small-node toleration, nodeName, placement keys, nodeadm token guard`).
 
-### Task 17: The chart's HA mode and the published documents (core)
+### Task 19: The chart's HA mode and the published documents (core)
 
 **Files:**
 - Modify: `charts/portcullis/templates/_helpers.tpl` (`portcullis.deployment` gains `replicas`, `strategy`, `spread`, `pdb`, `tolerations`, `priorityClass`; a `portcullis.statefulset` helper), `values.yaml` (`ha.enabled`, `ha.replicas.*`), `keycloak.yaml`, `forward-auth*.yaml`, `group-gate.yaml`, `enroll.yaml`, `mcp-gate.yaml`, `hub.yaml`, `traefik.yaml` (DaemonSet when `ha.enabled`), `monitoring.yaml` (Alertmanager ×2 meshed, `--cluster.peer`), `services.yaml`, `netpol-networks.yaml` (Keycloak 7800/57800 between Keycloak pods; Alertmanager 9094; the D6 log ports from the Hub only).
@@ -1010,7 +1156,30 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
 - [ ] **Step 4:** Run the gates again. Expected: PASS. Then `-f jobs=unit-tests,e2e-k3s`: single node, `ha.enabled=false`, the published documents in use.
 - [ ] **Step 5:** Commit (`chart: HA mode (replicas, PDBs, spread, priorities, Traefik DaemonSet) and published documents`).
 
-### Task 18: `nodeadm` (core, D4, D10)
+### Task 20: Primary-site pinning and storage at `main` (core)
+
+**Files:** Modify `charts/portcullis/templates/_helpers.tpl` (new `portcullis.sitePin`; the deployment and statefulset helpers include it when `pin: true`), `values.yaml` (`ha.primarySite: main`), every core template listed as pinned in Global Constraints, `postgres-cnpg.yaml` (`affinity.nodeSelector`), `kube/storage/storageclass-replicated.yaml` (Longhorn creates disks only where `node.longhorn.io/create-default-disk=true`), `tests/k8s_parity.py`, `tests/k8s_hardening.py`, `tests/k8s-ci-values-ha.yaml` (+ `tests/k8s-ci-values-ha-sites.yaml`).
+
+**Interfaces:**
+- Consumes: Task 19's helpers; §20.11.
+- Produces:
+  - `portcullis.sitePin` renders a required node affinity term `portcullis.io/site In [<ha.primarySite>]`, merged with the class term of R2 (never replacing it);
+  - the pinned set exactly as in Global Constraints;
+  - `frontdoor`, `nodeadm` and the Traefik DaemonSet carry no site term;
+  - the values key `ha.primarySite` is fixed to `main` by `kube_render_values` (no CLI option).
+
+- [ ] **Step 1: Write the failing tests:**
+  - `k8s_parity.py` "sites: every pinned component requires portcullis.io/site In [main]";
+  - "sites: frontdoor, nodeadm, traefik carry no site term";
+  - "sites: CNPG instances pinned to main and NotIn small";
+  - `k8s_hardening.py` "sites: no pod but the pinned set's may mount portcullis-core-replicated";
+  - shell "kube_render_values: ha.primarySite is main".
+- [ ] **Step 2:** Run the core kube static gates. Expected: FAIL.
+- [ ] **Step 3:** Implement.
+- [ ] **Step 4:** Run the gates again. Expected: PASS.
+- [ ] **Step 5:** Commit (`chart: pin sign-in and data to the primary site; storage only at main`).
+
+### Task 21: `nodeadm` (core, D4, D10)
 
 **Files:**
 - Create: `nodeadm/{go.mod,main.go,api.go,enrol.go,tokens.go,nodes.go,snapshot.go,addresses.go,params.go,metrics.go,join.sh,Dockerfile}` + `*_test.go`, `nodeadm/testdata/`.
@@ -1025,7 +1194,9 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
   - `Snapshot` exactly as the Hub's `nodeadm.Snapshot` (Task 8 type, same JSON);
   - ConfigMap `portcullis-cluster-addresses` (§20.9);
   - after each join or removal, a params generation rewrite: create `portcullis-admission-params-<gen>` → new bindings → admission probe → delete old (the CLI's algorithm ported, CLI and `nodeadm` share the generation function through vector `params_generation_vectors.json`, added here to `kube/admission/` and tested by both);
-  - the R7 metrics.
+  - the R7 metrics;
+  - the `/node/v1/join` answer `{role, server_url, token_file, flags:[…]}`, whose `flags` equal Task 17's list for a server (minus `--cluster-init`, plus `--server https://<server-mesh-ip>:6443`, and the node's own `--node-ip`/labels/taints) or the agent subset. It refuses with `CheckRTT`'s text when the request's RTT report fails (Task 11), and with the site-gateway text when the node's site has no reachable node;
+  - the label `node.longhorn.io/create-default-disk=true` only on `main` storage nodes (Task 20).
 - `nodeadm`'s **ClusterRole** is exactly:
 
   | Resources | Verbs |
@@ -1036,13 +1207,15 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
   | CNPG/Longhorn/SNR status CRs | `get`, `list` |
   | `validatingadmissionpolicybindings` | `create`, `delete` (label `portcullis.io/admission`) |
 
-  Its Roles are `secrets` `create` in `kube-system` (type bootstrap only, VAP Task 16), `get` on `nodeadm-k3s-token`, `configmaps` `create`/`delete` on `portcullis-admission-params-*` and `update` on `portcullis-cluster-addresses`, and `leases` `get`/`update` on `portcullis-nodeadm`. etcd member removal goes through the k3s server's etcd client using the node's etcd client certificate mounted read-only (hostPath `/var/lib/rancher/k3s/server/tls/etcd/` on server nodes, in its own namespace `portcullis-nodeadm`, PSA privileged). **This is a security delta for `hardening.md`**: `nodeadm` is privileged.
+  Its Roles are `secrets` `create` in `kube-system` (type bootstrap only, VAP Task 18), `get` on `nodeadm-k3s-token`, `configmaps` `create`/`delete` on `portcullis-admission-params-*` and `update` on `portcullis-cluster-addresses`, and `leases` `get`/`update` on `portcullis-nodeadm`. etcd member removal goes through the k3s server's etcd client using the node's etcd client certificate mounted read-only (hostPath `/var/lib/rancher/k3s/server/tls/etcd/` on server nodes, in its own namespace `portcullis-nodeadm`, PSA privileged). **This is a security delta for `hardening.md`**: `nodeadm` is privileged.
 
 - [ ] **Step 1: Write the failing tests** (Go, envtest for the Kubernetes parts, fake etcd).
 
 ```go
 func TestAPIVectors(t *testing.T)                  // every vector request → vector response
 func TestEnrolNeedsProofThenCert(t *testing.T)     // join without prior enrol → 403; wrong HMAC → proof_invalid; replay of a used code → code_used; > 15 min → code_expired
+func TestJoinFlagsEqualInitFlags(t *testing.T)     // server join flags == kube_install_k3s's list (shared fixture tests/fixtures/k3s-server-flags.txt) with the documented substitutions; etcd timing flags present
+func TestJoinRefusesFarServer(t *testing.T)        // RTT report 101 ms for role server → 409 "too far for one cluster: 101 ms (servers need 100 ms or less)"; no token minted
 func TestJoinMaterialOnlyOverMTLS(t *testing.T)    // /node/v1/join without the node-cluster client cert → 403; with → agent role gets a bootstrap token (TTL ≤ 15 min), server role gets the server token
 func TestTokenNeverLogged(t *testing.T)            // logs/errors over the whole flow contain neither token
 func TestDrainRefusesBelowMinimum(t *testing.T)    // removing a server with 3 servers → quorum_minimum; a PDB-blocked eviction → replica_minimum
@@ -1059,7 +1232,7 @@ func TestUnparseableAddressesNoRewrite(t *testing.T) // a node with no mesh addr
 - [ ] **Step 4:** Run them, plus the nodeadm Go gate and the chart gates. Expected: PASS.
 - [ ] **Step 5:** Commit (`nodeadm: cluster enrolment, bootstrap tokens, node operations, cluster snapshot, addresses and params`).
 
-### Task 19: Gates and wg serve their logs; group-gate prunes its own (core, D6)
+### Task 22: Gates and wg serve their logs; group-gate prunes its own (core, D6)
 
 **Files:** Modify `group-gate/group-gate.py` (log port `:8091`, `GATE_OPENED_PRUNE_DAYS`), `tests/test_group_gate.py`, `mcp-gate/main.go` + `internal/…` (`:8092`), `wg/main.go` (`:8093` `GET /v1/status`), the chart's StatefulSets for group-gate and mcp-gate in HA (one local PVC each per replica).
 
@@ -1069,19 +1242,19 @@ func TestUnparseableAddressesNoRewrite(t *testing.T) // a node with no mesh addr
   - binds its own port;
   - refuses every method but GET;
   - answers ≤ 4 MiB JSONL with `from` / `limit`;
-  - has no auth beyond the NetworkPolicy (Hub pod only, Task 17), as with every other internal port bound to how traffic arrived.
+  - has no auth beyond the NetworkPolicy (Hub pod only, Task 19), as with every other internal port bound to how traffic arrived.
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_group_gate.py` `test_log_endpoint_get_only`, `test_log_endpoint_from_limit` and `test_prune_days` (entries older than N days removed at start and daily);
   - mcp-gate `TestAccessLogEndpoint`;
   - wg `TestStatusEndpoint`;
-  - `k8s_netpol_matrix.py` rows (already in Task 17).
+  - `k8s_netpol_matrix.py` rows (already in Task 19).
 - [ ] **Step 2:** Run them. Expected: FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run them. Expected: PASS.
 - [ ] **Step 5:** Commit (`gates, wg: read-only log and status ports for the Hub (HA)`).
 
-### Task 20: Postgres on CloudNativePG, LLDAP on Postgres (core, D8)
+### Task 23: Postgres on CloudNativePG, LLDAP on Postgres (core, D8)
 
 **Files:**
 - Create: `kube/ha/cnpg/` (operator manifests at the Task 3 pin, plus the barman-cloud plugin), `charts/portcullis/templates/postgres-cnpg.yaml` (the `Cluster`, `ObjectStore` when a destination is set).
@@ -1105,7 +1278,7 @@ func TestUnparseableAddressesNoRewrite(t *testing.T) // a node with no mesh addr
 - [ ] **Step 4:** Run the static gates, then `-f jobs=e2e-k3s`. Expected: PASS.
 - [ ] **Step 5:** Commit (`chart: Postgres on CloudNativePG, LLDAP on Postgres (Kubernetes)`).
 
-### Task 21: Longhorn, external-snapshotter, fencing (core)
+### Task 24: Longhorn, external-snapshotter, fencing (core)
 
 **Files:**
 - Create: `kube/ha/{longhorn,snapshotter,fencing}/` (pinned manifests), `kube/storage/storageclass-replicated.yaml`.
@@ -1126,10 +1299,10 @@ func TestUnparseableAddressesNoRewrite(t *testing.T) // a node with no mesh addr
   - "longhorn settings: node-down-pod-deletion-policy do-nothing".
 - [ ] **Step 2:** Run them. Expected: FAIL.
 - [ ] **Step 3:** Implement.
-- [ ] **Step 4:** Run them. Expected: PASS. (Live behaviour is checked in Task 29.)
+- [ ] **Step 4:** Run them. Expected: PASS. (Live behaviour is checked in Task 33.)
 - [ ] **Step 5:** Commit (`ha: Longhorn, snapshotter and medik8s fencing installs (pinned)`).
 
-### Task 22: Valkey Sentinel and Vault raft ×3 (core)
+### Task 25: Valkey Sentinel and Vault raft ×3 (core)
 
 **Files:** Modify `charts/portcullis/templates/sessions.yaml` (StatefulSet `sessions` ×2 + StatefulSet `sessions-sentinel` ×3 in HA), `forward-auth*.yaml` (sentinel flags in HA), `vault.yaml` (StatefulSet `vault` ×1/×3, headless `vault-internal`, Service `vault-active` by the `vault-active=true` label), `vault/vault.hcl` → `vault/vault.hcl.tmpl` (`node_id` = the pod name, `retry_join` for each peer), `vault/entrypoint.sh`, `scripts/lib/kube.sh` (`_backup_vault_snapshot` via `vault-active`), `tests/k8s_parity*.{py,yaml}`.
 
@@ -1149,7 +1322,7 @@ func TestUnparseableAddressesNoRewrite(t *testing.T) // a node with no mesh addr
 - [ ] **Step 4:** Run the gates again. Expected: PASS. Then e2e-k3s (single node, `vault-0`).
 - [ ] **Step 5:** Commit (`chart: Valkey Sentinel and Vault raft voters (HA)`).
 
-### Task 23: The backup destination, CNPG archives, and the LLDAP conversion on restore (core, D8, R5)
+### Task 26: The backup destination, CNPG archives, and the LLDAP conversion on restore (core, D8, R5)
 
 **Files:** Modify `scripts/lib/backup.sh` (`cmd_backup destination set|show|test`; restic repository = the destination when set; Longhorn backup target = the destination), `scripts/lib/kube.sh` (sync `secrets/backup-destination.env` → Secret `backup-destination`), `charts/portcullis/templates/postgres-cnpg.yaml` (`ObjectStore` + plugin), and the restore path (`_backup_restore_kube`: an archive with `lldap_data` → `lldap_convert_sqlite_to_pg`). Create `scripts/lib/lldap_convert.sh` and `tests/fixtures/lldap/users.db` (3 users, 2 groups, generated by LLDAP itself in the test).
 
@@ -1169,7 +1342,7 @@ func TestUnparseableAddressesNoRewrite(t *testing.T) // a node with no mesh addr
 - [ ] **Step 4:** Run them. Expected: PASS.
 - [ ] **Step 5:** Commit (`backup: offsite destination, CNPG WAL/base backups, LLDAP SQLite→Postgres on restore`).
 
-### Task 24: The front-door role — DNS failover (core `domains/`)
+### Task 27: The front-door role — DNS failover (core `domains/`)
 
 **Files:** Create `domains/frontdoor/{engine.go,health.go,writer.go,status.go,engine_test.go}`, `charts/portcullis/templates/frontdoor.yaml` (Deployment, Secret `frontdoor-env` mount, Role, NetworkPolicy: egress to the DNS provider API and nodeagents' `:7443` only). Modify `domains/main.go` (`domains frontdoor` subcommand).
 
@@ -1177,13 +1350,14 @@ func TestUnparseableAddressesNoRewrite(t *testing.T) // a node with no mesh addr
 - Consumes:
   - `frontdoor_vectors.json`;
   - the existing providers (`provider_porkbun.go`, `provider_byid.go`, libdns) and their by-id deletes;
-  - nodeagent `/v1/probes` (client cert `frontdoor.control`, Task 18);
+  - nodeagent `/v1/probes` (client cert `frontdoor.control`, Task 21);
   - the node and Traefik readiness from `nodeadm`'s snapshot (`GET /v1/cluster`; `frontdoor.control` gets read-only access to that one route, added to §20.2 by Task 1).
 - Produces:
   - `frontdoor.Engine.Step(now time.Time, in Inputs) []Change` (pure, vector-tested);
   - `Writer.Apply(ctx, Change) error` (append, then delete the exact stale value by id);
   - the `frontdoor-status` ConfigMap;
   - metrics `portcullis_frontdoor_addresses{name}` and `portcullis_frontdoor_unhealthy_published_seconds{name,address}`.
+  - The cross-site cases of `frontdoor_vectors.json` are skipped here (`t.Skip("cross-site rules land in Task 28")`) and run from Task 28.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1201,7 +1375,43 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 - [ ] **Step 4:** Run them (`go test -race ./...` and `-tags testprovider`). Expected: PASS.
 - [ ] **Step 5:** Commit (`domains: front-door role — DNS failover with hysteresis and fail-static`).
 
-### Task 25: The front-door role — HA certificates and the CAA flip (core)
+### Task 28: The front door across sites (core `domains/`)
+
+**Files:** Create `domains/frontdoor/sites.go`, `domains/frontdoor/sites_test.go`. Modify `domains/frontdoor/{engine.go,health.go,status.go}`, `charts/portcullis/templates/frontdoor.yaml` (no site term, Task 20; `topologySpreadConstraints` none; tolerates nothing small), `domains/testdata/frontdoor_vectors.json` (the cross-site cases already written in Task 2 now run, no longer skipped).
+
+**Interfaces:**
+- Consumes:
+  - Task 27's `Engine`;
+  - the per-node site from `nodeadm`'s snapshot;
+  - the nodeagent probes, now including each prober's own site and its "reached any target" bit;
+  - R10, R11 and D12.
+- Produces:
+  - `frontdoor.Eligible(prober, target Site, hairpin bool) bool`;
+  - `frontdoor.Blind(round ProbeRound) bool`;
+  - `frontdoor.Unhealthy(target string, rounds []ProbeRound, sites SiteSet) bool`;
+  - `frontdoor-status.sites` (§20.8);
+  - metrics `portcullis_frontdoor_site_healthy{site}` and `portcullis_frontdoor_blind_probers{site}`.
+
+  The HA page's worst-case text per name now names the site ("if site <s> fails: worst case ~<n> min on <provider>").
+
+- [ ] **Step 1: Write the failing tests.**
+
+```go
+func TestBlindProberDiscarded(t *testing.T)               // prober at edge fails every target at every site → its results ignored for that round; main's addresses unchanged
+func TestOneSiteUplinkDownNoRemovalElsewhere(t *testing.T) // edge's uplink down: edge's probers blind, main's probers fail edge's addresses → only edge's addresses removed after 3 rounds; main's never
+func TestTwoSiteSpanRequired(t *testing.T)                // 3 sites with probers; failures for target t only from one site → no removal
+func TestOnlyOneSiteCanProbe(t *testing.T)                // 2 sites, no hairpin at main: edge's non-blind probers alone decide main's addresses
+func TestWholeSiteDownOneNamePer60s(t *testing.T)         // site edge NotReady + Traefik not Ready → its addresses removed, one change per name per 60 s, last address overall kept
+func TestFrontdoorCrossSiteVectors(t *testing.T)          // the cross-site cases of frontdoor_vectors.json
+func TestCutOffSiteFrontdoorStops(t *testing.T)           // Lease renew fails → Apply never called after RenewDeadline; status shows "standing by"
+```
+
+- [ ] **Step 2:** Run `go test ./frontdoor/ -run 'Blind|Uplink|Span|OnlyOneSite|WholeSite|CrossSite|CutOff'` in `domains/`. Expected: FAIL.
+- [ ] **Step 3:** Implement R10/R11 as pure functions that Task 27's `Engine.Step` calls. Don't touch its single-site rules: the single-site vectors still pass.
+- [ ] **Step 4:** Run all of `domains`' tests (`-race`, `-tags testprovider`). Expected: PASS.
+- [ ] **Step 5:** Commit (`domains: front door across sites (blind probers, two-site span, whole-site removal)`).
+
+### Task 29: The front-door role — HA certificates and the CAA flip (core)
 
 **Files:** Modify `domains/frontdoor/` (+ `cert.go`), `domains/traefik.go` (`servable()`: with `PORTCULLIS_HA=on`, the main domain + `*.<main>` from the front door's store are servable), `domains/acme.go` (a second account, store key `frontdoor`), `charts/portcullis/templates/traefik.yaml` (no resolver, no `traefik-acme` in HA), `scripts/lib/dns.sh` (`dns_flip_main_account <uri>`: relax → settle → issue → re-pin, reusing `_dns_relax_file` / `settlePoint`), `scripts/lib/config.sh` (`ACME_STAGING` flips in HA go through it).
 
@@ -1223,7 +1433,7 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 - [ ] **Step 4:** Run them. Expected: PASS.
 - [ ] **Step 5:** Commit (`domains: main-domain certificates from the front door in HA; CAA account flip`).
 
-### Task 26: `./portcullis node …` (core)
+### Task 30: `./portcullis node …` (core)
 
 **Files:** Create `scripts/lib/node.sh`. Modify `portcullis` (dispatcher whitelist, `help_main`), `tests/test_cli.sh`, `tests/test_shell_libs.sh`. Hub: `cmd/hub` gains `hub servers add-cluster-node` (reads its JSON request on stdin, prints the code to stdout only; audited `server.add` with actor `cli`).
 
@@ -1245,12 +1455,12 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 - [ ] **Step 4:** Run them. Expected: PASS.
 - [ ] **Step 5:** Commit core + Hub (`cli: node add|list|remove|revoke`).
 
-### Task 27: `./portcullis ha status|enable` (core, D5)
+### Task 31: `./portcullis ha status|enable` (core, D5)
 
 **Files:** Modify `scripts/lib/ha.sh` (`cmd_ha`, `ha_enable_step_<n>`, state file `secrets/kube/ha-enable.json`), `scripts/lib/kube.sh` (render `ha.enabled` from `PORTCULLIS_HA`), `tests/test_shell_libs.sh`, `tests/test_cli.sh`.
 
 **Interfaces:**
-- Consumes: Tasks 17–25; `GET /api/ha` checklist via `kubectl exec hub -- hub ha checklist`.
+- Consumes: Tasks 19–29; `GET /api/ha` checklist via `kubectl exec hub -- hub ha checklist`.
 - Produces: the resumable steps, each recorded in `ha-enable.json` after success (commit only after success):
   1. checklist (all green or refuse, naming each red item);
   2. one confirmation, naming the sign-in downtime, "experimental" and the CAA wait;
@@ -1276,11 +1486,11 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 - [ ] **Step 4:** Run them. Expected: PASS.
 - [ ] **Step 5:** Commit (`cli: ha status and ha enable (resumable conversion)`).
 
-### Task 28: Monitoring — alerts and the cluster dashboard (core, R7)
+### Task 32: Monitoring — alerts and the cluster dashboard (core, R7)
 
 **Files:** Modify `monitoring/prometheus/prometheus.yml` (the `nodeadm` and `frontdoor` jobs), `alerts.yml`, `tests/alerts_test.yml`, `charts/portcullis/templates/monitoring.yaml`. Create `monitoring/grafana/dashboards/cluster.json`. Modify `alertmanager` config (`watchdog_url` opt-in, empty by default).
 
-**Interfaces:** the alert names of Global Constraints, over the R7 gauges and the front-door metrics.
+**Interfaces:** the alert names of Global Constraints, over the R7 gauges and the front-door metrics. Plus `portcullis_mesh_rtt_ms{from,to}` (nodeadm, from the nodeagents' RTT) for the dashboard; there is no new alert for sites, the doctor kinds of Task 16 cover them.
 - `PortcullisNodeDown`: `portcullis_node_ready == 0` for 1m.
 - `PortcullisQuorumAtRisk`: `portcullis_quorum_voters{state="up"} == floor(total/2)+1`.
 - `PortcullisQuorumLost`: below the majority, or `up{job="nodeadm"} == 0` for 2m.
@@ -1290,11 +1500,11 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 
 - [ ] **Step 1:** Write the failing promtool unit tests in `tests/alerts_test.yml`, one per alert: the firing series and the not-yet-firing boundary (59 s, 9 m 59 s, 4 m 59 s, 25 h 59 m).
 - [ ] **Step 2:** Run `promtool test rules tests/alerts_test.yml`. Expected: FAIL.
-- [ ] **Step 3:** Implement. The dashboard covers nodes, quorum, failovers, volume health and replication lag.
+- [ ] **Step 3:** Implement. The dashboard covers nodes, quorum, failovers, volume health, replication lag, and a **Sites** row (healthy per site, blind probers, mesh RTT).
 - [ ] **Step 4:** Run promtool again, plus `lint_images.sh`. Expected: PASS.
 - [ ] **Step 5:** Commit (`monitoring: HA alerts and cluster dashboard`).
 
-### Task 29: CI — `e2e-ha-k3d` and `e2e-ha-vm` (core, D9)
+### Task 33: CI — `e2e-ha-k3d` and `e2e-ha-vm` (core, D9)
 
 **Files:** Modify `.github/workflows/ci.yml` (two jobs; `e2e-ha-k3d` on `ubuntu-26.04`; `e2e-ha-vm` only with `-f runner=builder`, `workflow_dispatch` only). Create `.github/ci/e2e-ha-k3d-{install,phases,chaos}.sh`, `.github/ci/e2e-ha-k3d-local.sh`, `.github/ci/e2e-ha-vm-{setup,chaos,collect}.sh` and `tests/e2e/e2e_ha.py` (scenarios with `scenarios.skip`).
 
@@ -1307,13 +1517,21 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
   - `ha_hub_lease_handover`: a second Hub pod never writes; the handover is within LeaseDuration + start;
   - `ha_dns_failover`: `testprovider` + Pebble; a dead ingress node's address is removed after ~30 s and the last one is never removed;
   - `ha_n_minus_1`: the N−1 page agrees with the scheduler: cordon + drain the node, every pod marked placeable starts;
-  - `ha_published_docs`: a group removal reaches group-gate within 20 s with `sync-frequency=10s`.
+  - `ha_published_docs`: a group removal reaches group-gate within 20 s with `sync-frequency=10s`;
+  - `ha_dns_failover_sites`: k3d nodes labelled across 3 sites (`main` ×2 + agent, `edge` ×1, `tb` ×1 server `small`), with `portcullis-nodeagent serve --probes-only` as a test-only DaemonSet (`tests/e2e/ha/nodeagent-probes.yaml`).
+    - `iptables` drops on a site's node containers simulate an uplink loss: only that site's addresses go, and the others stay.
+    - A blind site changes nothing.
+    - Stopping the `tb` server keeps quorum.
+    - Stopping `edge` + `tb` loses quorum, and nothing is changed.
 - `e2e-ha-vm` (the D9 VMs, reused, reset by `k3s-uninstall.sh` + wipe of the test disks, **never the builder host**):
   - `ha_vm_partition`: the minority self-fences within `T_fence`; a writer on it fails; a test app's data checksums equal the majority's afterwards;
   - `ha_vm_power_off`: the stateful app runs elsewhere within 4 min;
   - `ha_vm_disk_kill`, `ha_vm_disk_full`;
   - `ha_vm_lose_small`;
-  - `ha_vm_rolling_upgrade`: a rolling upgrade under the sign-in loop.
+  - `ha_vm_rolling_upgrade`: a rolling upgrade under the sign-in loop;
+  - `ha_vm_site_uplink_down`: drop `vm4`'s public ingress (443 inbound) while its mesh stays up. Its address leaves the set after about 30 s, and `main` keeps serving. Then drop `main`'s ingress nodes' 443: their addresses go and `vm4` serves sign-in through Traefik → `main` over `pcmesh`;
+  - `ha_vm_site_down`: power `vm4` off. Quorum holds (servers at `main`), and `edge`'s address is removed but never the last one;
+  - `ha_vm_nat_relay`: block inbound UDP 51830 on `vm2`. `vm2` ↔ `vm4` traffic keeps working through `vm1`, and sign-in is unaffected.
 
 - [ ] **Step 1:** Write `tests/e2e/e2e_ha.py` with every scenario, plus the `tests/test_e2e_scenarios.py` cases (each scenario starts with its `skip` gate).
 - [ ] **Step 2:** Run `python3 tests/test_e2e_scenarios.py`. Expected: FAIL until the jobs exist and are listed.
@@ -1325,7 +1543,7 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 
 ## Stream T — Templates
 
-### Task 30: Reserved core names (templates)
+### Task 34: Reserved core names (templates)
 
 **Files:** Modify `tests/core_names.txt` (`nodeadm`, `frontdoor`, `sessions-sentinel`, `portcullis-pg`, `portcullis-pg-rw`, `portcullis-pg-ro`, `vault-internal`, `vault-active`), `tests/validate.py` (reserved-name check reads the file), `tests/test_validate.py` (`TestCoreNamesComplete` against core's same-named branch).
 
@@ -1339,7 +1557,7 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 
 ## Stream D — Docs pages
 
-### Task 31: Docs pages (docs)
+### Task 35: Docs pages (docs)
 
 **Files:**
 - Create: `docs/operations/high-availability.md`, covering:
@@ -1355,6 +1573,14 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
   - limits (one site, no 2-node HA, no `ha disable`, phases 2–4).
 - Modify:
   - `kubernetes.md` (k3s installed by `init`, `pcmesh`, multi-node);
+  - in `high-availability.md`, a **Sites** section:
+    - what the cross-site slice does and doesn't do (the front door survives one site's ingress failure; sign-in and data stay at `main`);
+    - a reachable node per site (one forwarded UDP port);
+    - the RTT limits;
+    - the 2-site rule and the tie-breaker;
+    - storage only at `main`;
+    - the worst case per provider;
+    - the blind-prober rule in plain words;
   - `servers.md` (cluster nodes);
   - `hardening.md` (`nodeadm` privileged; the Hub's core Role; front-door credentials; the mesh-only listeners; the new namespaces);
   - `backups.md` (the destination, CNPG archives, the LLDAP conversion on restore);
@@ -1375,7 +1601,7 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 
 ## Final
 
-### Task 32: Full CI, reviews, merges, the test cluster, cleanup (all repos)
+### Task 36: Full CI, reviews, merges, the test cluster, cleanup (all repos)
 
 - [ ] **Step 1:** Run full CI on `ha` in every repo:
   - core: `ci.yml`, all jobs, plus `e2e-ha-vm` on the builder;
@@ -1389,13 +1615,13 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
 - [ ] **Step 4: The test cluster** (the D9 VMs, `ACME_STAGING=true`).
   - Run `init --runtime kubernetes` on VM1, then `config apply` + `up`.
   - Restore a backup of the Docker test server (the LLDAP conversion runs, and Keycloak sign-in works for real accounts).
-  - Add VM2/VM3 (servers) and VM4 (agent, small) from the Hub, then run `ha enable`.
-  - Do one live failover per component: a node power-off, the CNPG primary, the Valkey primary, the Vault leader, the Hub node, an ingress node (DNS).
+  - Add `vm2`/`vm3` (servers at `main`, `vm3` class `small`) and `vm4` (agent, ingress, site `edge`, another region) from the Hub, then run `ha enable`.
+  - Do one live failover per component: a node power-off, the CNPG primary, the Valkey primary, the Vault leader, the Hub node, an ingress node (DNS), `edge`'s ingress (DNS across sites), `main`'s ingress while `edge` serves, the NAT relay.
   - Record each outcome in the ledger.
 - [ ] **Step 5:** Write the user's laptop check as steps (sign in during a power-off; the HA page; a node add) for the user to run.
 - [ ] **Step 6: Cleanup** (memory: branches mainlined).
   - Delete every `ha` branch (local and remote) in the four repos, every `wt-ha/*` worktree, `/tmp/merge-*`, `/tmp/pk-ha-*` and `/tmp/ha-read`.
-  - Delete the D9 VMs unless the user says otherwise.
+  - Delete the four D9 VMs (user ruling: deleted at the end).
   - Update memory: a `ha_phase1` note with the rulings, gotchas and parked items.
 
 ---
@@ -1415,4 +1641,4 @@ func TestFrontDoorCredentialsNeverLogged(t *testing.T)
   - instance backups to the destination;
   - the numeric-user follow-up for ~46 templates (the prerequisite of app HA).
 - **Phase 3:** migration paths 1 and 3 as guided operations, Docker assisted recovery (Recovery card, superseded/diverged guard, agent snapshots, ZFS replication), `ha recover`.
-- **Phase 4:** the mesh across NAT, a tie-breaker at a third location, the CNPG replica cluster, Longhorn DR volumes, the sync heartbeat and site promotion (user ruling Q2), the NFS second copy, Hub state in Postgres + hot standby, mail on Kubernetes.
+- **The rest of phase 4:** the CNPG replica cluster, Longhorn DR volumes, the sync heartbeat and site promotion (user ruling Q2), the NFS second copy, Hub state in Postgres + hot standby, mail on Kubernetes, storage nodes outside `main`, and changing the primary site.
