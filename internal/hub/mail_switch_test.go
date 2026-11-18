@@ -922,3 +922,61 @@ func TestLostLastDocSameWiringKeepsRowBaseline(t *testing.T) {
 		t.Fatalf("pending %+v", pr)
 	}
 }
+
+// TestSameInstanceRewireNoFreshMark (R-SWITCH-BASE-2): re-wiring the
+// instance the last document went to gets no fresh mark (its store keeps
+// the mailboxes): a removal is still judged by the Hub.
+func TestSameInstanceRewireNoFreshMark(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mailSyncOnce(context.Background())
+	if err := w.unwire(t, false, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	const gone = "0b0b0b0b-0000-4000-8000-000000000005"
+	leftRow(w, "alice", gone)
+	w.h.mu.Lock()
+	w.h.st.Mail.LastDocInstance = mailProviderID
+	w.h.mu.Unlock()
+	puts := w.mc.Puts()
+	if _, err := w.wire(t, WireRequest{Confirm: mailProviderID, Proof: &wireProof}, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	w.h.mu.RLock()
+	fresh, pr := w.h.st.Mail.FreshInstance, w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if fresh != "" {
+		t.Fatalf("a same-instance re-wire got the fresh mark %q", fresh)
+	}
+	if w.mc.Puts() != puts || pr == nil || len(pr.Accounts) != 1 || pr.Accounts[0].UUID != gone {
+		t.Fatalf("the removal wasn't judged: puts %d → %d, pending %+v", puts, w.mc.Puts(), pr)
+	}
+}
+
+// TestFreshMarkClearedByUndoAndUnwire (R-SWITCH-BASE-2): a mark never
+// outlives its wiring.
+func TestFreshMarkClearedByUndoAndUnwire(t *testing.T) {
+	w := wiredFix(t)
+	w.h.mu.Lock()
+	w.h.st.Mail.FreshInstance = mailProviderID
+	w.h.mu.Unlock()
+	if err := w.unwire(t, false, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	w.h.mu.RLock()
+	fresh := w.h.st.Mail.FreshInstance
+	w.h.mu.RUnlock()
+	if fresh != "" {
+		t.Fatalf("unwire kept the mark %q", fresh)
+	}
+	w2 := wiredFix(t)
+	w2.h.mu.Lock()
+	w2.h.st.Mail.FreshInstance = mailProviderID
+	w2.h.mu.Unlock()
+	w2.h.undoWireMail(mailProviderID, -1)
+	w2.h.mu.RLock()
+	fresh = w2.h.st.Mail.FreshInstance
+	w2.h.mu.RUnlock()
+	if fresh != "" {
+		t.Fatalf("undo kept the mark %q", fresh)
+	}
+}

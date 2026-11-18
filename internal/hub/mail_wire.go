@@ -382,9 +382,13 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 		return p, fail(StepMailVoid, err)
 	}
 	// The void completed (every mail password revoked): the first pass
-	// may start from an empty baseline (R-SWITCH-BASE-2).
+	// of ANOTHER instance than the last document's (known) may start from
+	// an empty baseline (R-SWITCH-BASE-2). The same instance keeps its
+	// mailboxes (a void revokes passwords, not mailboxes); an unknown
+	// last instance gets no mark: both take the blind / R-L8 path.
 	h.mu.Lock()
-	if cur := h.st.Mail.Provider; cur != nil && cur.Instance == id && cur.Seq == p.Seq {
+	if cur := h.st.Mail.Provider; cur != nil && cur.Instance == id && cur.Seq == p.Seq &&
+		h.st.Mail.LastDocInstance != "" && h.st.Mail.LastDocInstance != id {
 		h.st.Mail.FreshInstance = id
 		if err := h.saveStateLocked(); err != nil {
 			h.st.Mail.FreshInstance = ""
@@ -450,6 +454,7 @@ func (h *Hub) undoWireMail(id string, recordGen int) {
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
 		h.st.Mail.Provider = nil
 		h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
+		h.st.Mail.FreshInstance = ""
 		// Only the record's own debt: one raised since (a restore, the
 		// secrets epoch) stays owed.
 		if h.st.Mail.VoidOwed != nil && h.st.Mail.VoidGen == recordGen {
