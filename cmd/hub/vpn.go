@@ -56,17 +56,20 @@ var mailCommands = map[string]struct {
 }{
 	"provider": {http.MethodGet, "/host/mail/provider", false, time.Minute},
 	"install":  {http.MethodPost, "/host/mail/install", true, time.Minute},
-	"unwire":   {http.MethodPost, "/host/mail/unwire", true, time.Minute},
-	"op":       {http.MethodGet, "/host/mail/op", true, time.Minute},
-	"status":   {http.MethodGet, "/host/mail/status", false, 2 * time.Minute},
-	"dns-main": {http.MethodGet, "/host/mail/dns/main", false, time.Minute},
-	"tls":      {http.MethodPost, "/host/mail/tls", true, time.Minute},
-	"test":     {http.MethodPost, "/host/mail/test", true, time.Minute},
-	"backup":   {http.MethodPost, "/host/mail/backup", false, 2 * time.Hour},
-	"restore":  {http.MethodPost, "/host/mail/restore", true, hub.HostLockWait + 3*time.Minute},
-	"action":   {http.MethodPost, "/host/mail/action", true, time.Minute},
-	"drain":    {http.MethodPost, "/host/mail/drain", false, time.Minute},
-	"domains":  {http.MethodGet, "/host/mail/domains", false, time.Minute},
+	// install-preview {template, source}: the instance install would wire
+	// ({instance, creates}; L3).
+	"install-preview": {http.MethodPost, "/host/mail/install/preview", true, time.Minute},
+	"unwire":          {http.MethodPost, "/host/mail/unwire", true, time.Minute},
+	"op":              {http.MethodGet, "/host/mail/op", true, time.Minute},
+	"status":          {http.MethodGet, "/host/mail/status", false, 2 * time.Minute},
+	"dns-main":        {http.MethodGet, "/host/mail/dns/main", false, time.Minute},
+	"tls":             {http.MethodPost, "/host/mail/tls", true, time.Minute},
+	"test":            {http.MethodPost, "/host/mail/test", true, time.Minute},
+	"backup":          {http.MethodPost, "/host/mail/backup", false, 2 * time.Hour},
+	"restore":         {http.MethodPost, "/host/mail/restore", true, hub.HostLockWait + 3*time.Minute},
+	"action":          {http.MethodPost, "/host/mail/action", true, time.Minute},
+	"drain":           {http.MethodPost, "/host/mail/drain", false, time.Minute},
+	"domains":         {http.MethodGet, "/host/mail/domains", false, time.Minute},
 }
 
 // mailMain runs `hub mail <args>` against the socket at sock (contract

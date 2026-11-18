@@ -32,6 +32,10 @@ const (
 	VarMailAPISubnet     = "PORTCULLIS_MAIL_API_SUBNET"
 	VarMailAPIHubIP      = "PORTCULLIS_MAIL_API_HUB_IP"
 	VarMailAPIProviderIP = "PORTCULLIS_MAIL_API_PROVIDER_IP"
+	// The server's public addresses (empty: unknown), passed to the
+	// provider for its PTR / FCrDNS and blocklist checks (§19.4, §19.8).
+	VarMailPublicIPv4 = "PORTCULLIS_MAIL_PUBLIC_IPV4"
+	VarMailPublicIPv6 = "PORTCULLIS_MAIL_PUBLIC_IPV6"
 )
 
 // The portcullis-mail-api defaults (contract §19.1).
@@ -65,6 +69,9 @@ type mailCoreEnv struct {
 	// when unset).
 	APISubnet         netip.Prefix
 	HubIP, ProviderIP netip.Addr
+	// PublicIPv4, PublicIPv6: the server's public addresses as core
+	// detected them ("" = unknown).
+	PublicIPv4, PublicIPv6 string
 	// Err: a mail key holds a value the contract doesn't allow; the slot
 	// then counts as closed (fail closed) and the doctor says why.
 	Err string
@@ -153,6 +160,22 @@ func parseMailCore(core map[string]string, domain string) mailCoreEnv {
 		if !slices.Contains(bad, a.key) && !slices.Contains(bad, VarMailAPISubnet) && !hostIn(m.APISubnet, a.ip) {
 			bad = append(bad, a.key)
 		}
+	}
+	for _, a := range []struct {
+		key string
+		v6  bool
+		dst *string
+	}{{VarMailPublicIPv4, false, &m.PublicIPv4}, {VarMailPublicIPv6, true, &m.PublicIPv6}} {
+		v, _ := get(a.key)
+		if v == "" {
+			continue
+		}
+		ip, err := netip.ParseAddr(v)
+		if err != nil || ip.Zone() != "" || ip.Is4() == a.v6 || (a.v6 && ip.Is4In6()) {
+			bad = append(bad, a.key)
+			continue
+		}
+		*a.dst = ip.String()
 	}
 	if m.HubIP == m.ProviderIP && !slices.Contains(bad, VarMailAPIProviderIP) {
 		bad = append(bad, VarMailAPIProviderIP)

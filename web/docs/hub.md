@@ -1778,7 +1778,7 @@ Administrators only (Hub listener). The top of the page shows the slot:
   the Marketplace** (the Marketplace filtered on mail servers, which carry a
   "Mail server" badge).
 - **Wired**: the provider's label and version, the instance (a link to its
-  Mail tab), its mode (`normal`, `void`, `held`), **Switch…** and
+  Mail tab), its mode (`normal`, `void`, or `stopped` for a held provider the Hub had to stop; "· held" while held), **Switch…** and
   **Unwire…** (draining), and while a void is owed "A void of every mail
   password is owed (&lt;reason&gt;)" with the last error and **Retry**. See
   [Mail operations](mail.md#switching-providers).
@@ -1855,7 +1855,7 @@ Every instance of a mail template has a **Mail** tab (`#apps/<id>/mail`):
   mail passwords of every person in mail_users, sends mail to the internet
   (outbound SMTP), and can read every mailbox.";
 - **Mail server**: "not this server's mail server", or the mode (`void`,
-  `normal`); **Provider**: what the provider itself reports (its name,
+  `normal`, `stopped`); **Provider**: what the provider itself reports (its name,
   version and checks), or "—";
 - the void owed ("A void of every mail password is owed (&lt;reason&gt;,
   since &lt;time&gt;)" and its error) with **Retry**, and the hold (its

@@ -143,6 +143,7 @@ func (h *Hub) mailWireRefusalsLocked(t *templates.Template, except string) []str
 	} else if t.Manifest.Mail.APIVersion != 1 {
 		out = append(out, "mail.api_version: only 1")
 	}
+	out = append(out, h.mailSubnetRefusals(t)...)
 	return out
 }
 
@@ -648,6 +649,61 @@ func (h *Hub) HostMailProviderView(ctx context.Context) HostMailProvider {
 // the template's default instance (created when no instance of it
 // exists, else the existing one), then the wiring as §19.9 with actor
 // host (the operator's typed confirmation, no proof).
+// mailInstallTarget is the instance `hub mail install` wires for template
+// from source: an existing one (the default first, else the first id),
+// "" when none exists (its default instance is created); label the
+// template's name; found false: no such template from that source.
+func (h *Hub) mailInstallTarget(template, source string) (id, label string, found bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ct := h.catalogLocked(template)
+	if ct == nil || ct.Source != source {
+		return "", "", false
+	}
+	var ids []string
+	for iid, e := range h.st.Instances {
+		if e.Template == template {
+			ids = append(ids, iid)
+		}
+	}
+	slices.Sort(ids)
+	// The default instance exists implicitly once enabled (§11.1).
+	if slices.Contains(ids, template) || h.st.IsEnabled(template) {
+		id = template
+	} else if len(ids) > 0 {
+		id = ids[0]
+	}
+	return id, ct.Manifest.Name, true
+}
+
+// MailInstallPreview is POST /host/mail/install/preview (final cross
+// review L3): the instance `hub mail install` would wire, whose id the
+// typed confirmation must be; Creates: none exists yet (its default
+// instance, id = the template's, is created first).
+type MailInstallPreview struct {
+	Instance string `json:"instance"`
+	Creates  bool   `json:"creates"`
+}
+
+// HostMailInstallPreview answers install's pick for template from source
+// (changes nothing).
+func (h *Hub) HostMailInstallPreview(template, source string) (MailInstallPreview, error) {
+	if !templates.ValidID(template) {
+		return MailInstallPreview{}, statusErr(http.StatusBadRequest, "invalid template id")
+	}
+	if source == "" {
+		return MailInstallPreview{}, statusErr(http.StatusBadRequest, "source is required")
+	}
+	id, _, found := h.mailInstallTarget(template, source)
+	if !found {
+		return MailInstallPreview{}, statusErr(http.StatusNotFound, "no template %s from source %s", template, strconv.Quote(source))
+	}
+	if id == "" {
+		return MailInstallPreview{Instance: template, Creates: true}, nil
+	}
+	return MailInstallPreview{Instance: id}, nil
+}
+
 func (h *Hub) HostMailInstall(ctx context.Context, template, source, confirm string) (*AsyncOp, error) {
 	actor := directory.Human(HostActor)
 	if !templates.ValidID(template) {
@@ -658,31 +714,7 @@ func (h *Hub) HostMailInstall(ctx context.Context, template, source, confirm str
 	if source == "" {
 		return nil, statusErr(http.StatusBadRequest, "source is required")
 	}
-	h.mu.RLock()
-	ct := h.catalogLocked(template)
-	found := ct != nil && ct.Source == source
-	label := ""
-	if found {
-		label = ct.Manifest.Name
-	}
-	// An instance of it that exists (created): the default one first.
-	id := ""
-	if found {
-		var ids []string
-		for iid, e := range h.st.Instances {
-			if e.Template == template {
-				ids = append(ids, iid)
-			}
-		}
-		slices.Sort(ids)
-		// The default instance exists implicitly once enabled (§11.1).
-		if slices.Contains(ids, template) || h.st.IsEnabled(template) {
-			id = template
-		} else if len(ids) > 0 {
-			id = ids[0]
-		}
-	}
-	h.mu.RUnlock()
+	id, label, found := h.mailInstallTarget(template, source)
 	if !found {
 		return nil, statusErr(http.StatusNotFound, "no template %s from source %s", template, strconv.Quote(source))
 	}

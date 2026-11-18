@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -471,5 +472,92 @@ func TestRenderRefusesTemplateCoreNetwork(t *testing.T) {
 	f.h.mu.Unlock()
 	if err == nil || !strings.Contains(err.Error(), "core network") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// TestMailPublicIPsPassed (final cross review M2): core.env's
+// PORTCULLIS_MAIL_PUBLIC_IPV4/IPV6 reach every service the block names
+// (empty when unknown); no other public-address key of core's does; a
+// malformed one closes the slot like any mail key.
+func TestMailPublicIPsPassed(t *testing.T) {
+	f := mailOverrideFixture(t)
+	m := parseMailCore(map[string]string{VarMail: "on", VarMailPublicIPv4: "203.0.113.10", VarMailPublicIPv6: "2001:db8::10",
+		"PORTCULLIS_PUBLIC_IPV4": "198.51.100.1"}, "example.org")
+	if m.Err != "" || m.PublicIPv4 != "203.0.113.10" || m.PublicIPv6 != "2001:db8::10" {
+		t.Fatalf("%+v", m)
+	}
+	f.h.mailCoreForTest.Store(&m)
+	ov := renderMail(t, f, mailNormal)
+	if strings.Count(ov, VarMailPublicIPv4+`: "203.0.113.10"`) == 0 || strings.Count(ov, VarMailPublicIPv6+`: "2001:db8::10"`) == 0 {
+		t.Fatalf("public addresses not passed:\n%s", ov)
+	}
+	if strings.Contains(ov, "198.51.100.1") || strings.Contains(ov, "PORTCULLIS_PUBLIC_IPV4") {
+		t.Fatal("another core public-address key passed")
+	}
+	for k, v := range map[string]string{VarMailPublicIPv4: "2001:db8::1", VarMailPublicIPv6: "203.0.113.1"} {
+		bad := map[string]string{VarMail: "on", k: v}
+		if m := parseMailCore(bad, "example.org"); m.On || !strings.Contains(m.Err, k) {
+			t.Errorf("%s=%s: %+v", k, v, m)
+		}
+	}
+	for _, v := range []string{"not-an-ip", "fe80::1%eth0", "::ffff:203.0.113.1"} {
+		if m := parseMailCore(map[string]string{VarMail: "on", VarMailPublicIPv6: v}, "example.org"); m.On {
+			t.Errorf("IPv6 %q accepted", v)
+		}
+	}
+}
+
+// TestMailSubnetOverlapRefused (final cross review L9): a provider
+// network whose ipam subnet overlaps a range core reserves is refused at
+// wiring and at render (409, naming the subnet); Docker's default pools
+// aren't a conflict; an unreadable reserved list refuses (fail closed).
+func TestMailSubnetOverlapRefused(t *testing.T) {
+	f := mailOverrideFixture(t)
+	tp := f.h.Template(mailProviderID)
+	c := strings.Replace(string(tp.ReadCompose()), "  internal: {internal: true}\n",
+		"  internal:\n    internal: true\n    ipam:\n      config:\n        - subnet: 172.31.255.0/28\n", 1)
+	if !strings.Contains(c, "172.31.255.0/28") {
+		t.Fatal("fixture compose changed")
+	}
+	writeFile(t, tp.ComposePath(), c)
+	core := filepath.Join(f.h.cfg.ProjectDir, ".env")
+	refusal := func() []string {
+		f.h.mu.Lock()
+		defer f.h.mu.Unlock()
+		return f.h.mailSubnetRefusals(f.h.findLocked(mailProviderID))
+	}
+	// Core's reserved list as core writes it: the broad pools and core's
+	// subnets, none of them the template's.
+	writeFile(t, core, "PORTCULLIS_VPN_RESERVED_RANGES=172.16.0.0/12 192.168.0.0/16 10.214.0.0/24 172.31.250.0/24 172.31.255.16/28\n")
+	if r := refusal(); len(r) != 0 {
+		t.Fatalf("clear subnet refused: %v", r)
+	}
+	renderMail(t, f, mailNormal)
+	// A VPN pool moved onto the template's subnet.
+	writeFile(t, core, "PORTCULLIS_VPN_RESERVED_RANGES=172.16.0.0/12 192.168.0.0/16 172.31.255.8/29\n")
+	want := "the provider's network internal has subnet 172.31.255.0/28, which overlaps core's reserved range 172.31.255.8/29: pick another subnet in the template"
+	if r := refusal(); len(r) != 1 || r[0] != want {
+		t.Fatalf("refusal %q", r)
+	}
+	f.h.mu.Lock()
+	_, err := f.h.mailRenderLocked(f.h.findLocked(mailProviderID), mailNormal)
+	wire := f.h.mailWireRefusalsLocked(f.h.findLocked(mailProviderID), "")
+	f.h.mu.Unlock()
+	if statusOf(err) != 409 || err.Error() != want {
+		t.Fatalf("render: %v", err)
+	}
+	if !slices.Contains(wire, want) {
+		t.Fatalf("wiring refusals %q", wire)
+	}
+	// The mail API subnet moved there (core.env).
+	writeFile(t, core, "PORTCULLIS_MAIL_API_SUBNET=172.31.255.0/28\nPORTCULLIS_VPN_RESERVED_RANGES=172.16.0.0/12\n")
+	f.h.mailCoreForTest.Store(nil)
+	if r := refusal(); len(r) != 1 || !strings.Contains(r[0], "overlaps core's reserved range 172.31.255.0/28") {
+		t.Fatalf("API subnet: %q", r)
+	}
+	// Unreadable: refused.
+	writeFile(t, core, "PORTCULLIS_VPN_RESERVED_RANGES=not-a-cidr\n")
+	if r := refusal(); len(r) != 1 || !strings.Contains(r[0], "can't be read") {
+		t.Fatalf("unreadable: %q", r)
 	}
 }

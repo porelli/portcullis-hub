@@ -179,6 +179,21 @@ func HostHandler(h *hub.Hub) http.Handler {
 		}
 		writeJSONStatus(w, http.StatusAccepted, acceptedBody(op))
 	})
+	mux.HandleFunc("POST /host/mail/install/preview", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Template string `json:"template"`
+			Source   string `json:"source"`
+		}
+		if !hostBody(w, r, &b, `{"template", "source"}`) {
+			return
+		}
+		pv, err := h.HostMailInstallPreview(b.Template, b.Source)
+		if err != nil {
+			hostErr(w, err)
+			return
+		}
+		writeJSON(w, pv)
+	})
 	mux.HandleFunc("POST /host/mail/install", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
 			Template string `json:"template"`

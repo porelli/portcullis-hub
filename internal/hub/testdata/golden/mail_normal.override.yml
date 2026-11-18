@@ -16,6 +16,8 @@ services:
       PORTCULLIS_MAIL_SLOT_DIR: "/run/portcullis/mail/slot"
       PORTCULLIS_MAIL_TLS_DIR: "/run/portcullis/mail/tls"
       PORTCULLIS_MAIL_WELLKNOWN_ENTRYPOINTS: "websecure,vpnsecure"
+      PORTCULLIS_MAIL_PUBLIC_IPV4: ""
+      PORTCULLIS_MAIL_PUBLIC_IPV6: ""
     group_add:
       - "2000"
     networks:
@@ -54,6 +56,8 @@ services:
       PORTCULLIS_MAIL_SLOT_DIR: "/run/portcullis/mail/slot"
       PORTCULLIS_MAIL_TLS_DIR: "/run/portcullis/mail/tls"
       PORTCULLIS_MAIL_WELLKNOWN_ENTRYPOINTS: "websecure,vpnsecure"
+      PORTCULLIS_MAIL_PUBLIC_IPV4: ""
+      PORTCULLIS_MAIL_PUBLIC_IPV6: ""
     group_add:
       - "2000"
     ports:

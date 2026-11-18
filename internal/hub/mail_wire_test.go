@@ -483,3 +483,39 @@ func TestWireRefusedOnWorker(t *testing.T) {
 		t.Fatalf("move: %v", err)
 	}
 }
+
+// TestHostInstallPreview (final cross review L3): the preview answers the
+// instance install would wire (the default one, else the first existing
+// id; none: the template id, created), changing nothing.
+func TestHostInstallPreview(t *testing.T) {
+	w := newWireFix(t)
+	w.h.mu.Lock()
+	delete(w.h.st.Instances, mailProviderID)
+	w.h.st.SetEnabled(mailProviderID, false)
+	w.h.mu.Unlock()
+	if pv, err := w.h.HostMailInstallPreview(mailProviderID, "local"); err != nil || pv != (MailInstallPreview{Instance: mailProviderID, Creates: true}) {
+		t.Fatalf("none: %+v %v", pv, err)
+	}
+	w.h.mu.Lock()
+	_, created := w.h.st.Instances[mailProviderID]
+	w.h.st.Instances["mailsrv-b"] = state.Instance{ID: "mailsrv-b", Template: mailProviderID}
+	w.h.mu.Unlock()
+	if created {
+		t.Fatal("the preview created an instance")
+	}
+	if pv, err := w.h.HostMailInstallPreview(mailProviderID, "local"); err != nil || pv != (MailInstallPreview{Instance: "mailsrv-b"}) {
+		t.Fatalf("another instance: %+v %v", pv, err)
+	}
+	w.h.mu.Lock()
+	w.h.st.SetEnabled(mailProviderID, true)
+	w.h.mu.Unlock()
+	if pv, err := w.h.HostMailInstallPreview(mailProviderID, "local"); err != nil || pv != (MailInstallPreview{Instance: mailProviderID}) {
+		t.Fatalf("default: %+v %v", pv, err)
+	}
+	if _, err := w.h.HostMailInstallPreview(mailProviderID, "elsewhere"); statusOf(err) != 404 {
+		t.Fatalf("other source: %v", err)
+	}
+	if _, err := w.h.HostMailInstallPreview(mailProviderID, ""); statusOf(err) != 400 {
+		t.Fatalf("no source: %v", err)
+	}
+}

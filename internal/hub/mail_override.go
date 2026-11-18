@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -151,7 +152,92 @@ func (h *Hub) mailRenderLocked(t *templates.Template, mode mailMode) (*mailRende
 			}
 		}
 	}
+	// The template's own subnets clear of core's (L9).
+	if why := h.mailSubnetRefusals(t); len(why) > 0 {
+		return nil, statusErr(http.StatusConflict, "%s", why[0])
+	}
 	return r, nil
+}
+
+// mailSubnetRefusals (final cross review L9): a mail template picks its
+// own ipam subnets; one overlapping a range core reserves (core.env's
+// PORTCULLIS_VPN_RESERVED_RANGES: core's fixed networks, the link subnet,
+// the VPN and Podman pools; plus portcullis-mail-api and portcullis-vpn as
+// core.env sets them) is refused, naming the subnet. Docker's default
+// pools 172.16.0.0/12 and 192.168.0.0/16 are where every app network
+// lives: not a conflict. An unreadable reserved list refuses (fail
+// closed).
+func (h *Hub) mailSubnetRefusals(t *templates.Template) []string {
+	subnets := templateSubnets(t.ReadCompose())
+	if len(subnets) == 0 {
+		return nil
+	}
+	vc := h.vpnCoreEnv()
+	if vc.ReservedBad {
+		return []string{"core.env's " + VarVPNReserved + " can't be read: the mail provider's own subnets can't be checked"}
+	}
+	reserved := []netip.Prefix{h.mailCore().APISubnet, vc.Net}
+	for _, p := range vc.Reserved {
+		if p == mailDockerPool172 || p == mailDockerPool192 {
+			continue
+		}
+		reserved = append(reserved, p)
+	}
+	var out []string
+	for _, s := range subnets {
+		for _, r := range reserved {
+			if r.IsValid() && s.prefix.Overlaps(r) {
+				out = append(out, fmt.Sprintf("the provider's network %s has subnet %s, which overlaps core's reserved range %s: pick another subnet in the template", s.network, s.prefix, r))
+				break
+			}
+		}
+	}
+	return out
+}
+
+var (
+	mailDockerPool172 = netip.MustParsePrefix("172.16.0.0/12")
+	mailDockerPool192 = netip.MustParsePrefix("192.168.0.0/16")
+)
+
+type templateSubnet struct {
+	network string
+	prefix  netip.Prefix
+}
+
+// templateSubnets are compose's non-external top-level networks' ipam
+// subnets in file order (an unparsable one is ValidateMail's refusal).
+func templateSubnets(compose []byte) []templateSubnet {
+	var doc struct {
+		Networks yaml.Node `yaml:"networks"`
+	}
+	if yaml.Unmarshal(compose, &doc) != nil || doc.Networks.Kind != yaml.MappingNode {
+		return nil
+	}
+	var out []templateSubnet
+	for j := 0; j+1 < len(doc.Networks.Content); j += 2 {
+		key := doc.Networks.Content[j].Value
+		var n struct {
+			External any `yaml:"external"`
+			IPAM     struct {
+				Config []struct {
+					Subnet string `yaml:"subnet"`
+				} `yaml:"config"`
+			} `yaml:"ipam"`
+		}
+		if doc.Networks.Content[j+1].Decode(&n) != nil {
+			continue
+		}
+		if b, ok := n.External.(bool); (ok && b) || (!ok && n.External != nil) {
+			continue
+		}
+		for _, c := range n.IPAM.Config {
+			if p, err := netip.ParsePrefix(strings.TrimSpace(c.Subnet)); err == nil {
+				out = append(out, templateSubnet{key, p.Masked()})
+			}
+		}
+	}
+	return out
 }
 
 func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailRender, error) {
@@ -198,6 +284,9 @@ func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailR
 		VarMailSlotDir + ": " + yamlQuote(MailSlotMount),
 		VarMailTLSDir + ": " + yamlQuote(MailTLSMount),
 		VarMailWellknownEntrypoints + ": " + yamlQuote(h.mailEntrypointsLocked()),
+		// The public addresses (M2): only these two of core's.
+		VarMailPublicIPv4 + ": " + yamlQuote(core.PublicIPv4),
+		VarMailPublicIPv6 + ": " + yamlQuote(core.PublicIPv6),
 	}
 	if mode == mailVoid {
 		if nonce := h.mailVoidSession(t.ID); nonce != "" {
