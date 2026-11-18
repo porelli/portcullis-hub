@@ -30,9 +30,9 @@ type runtimeVector struct {
 	// PersonSecrets are person_secret option keys (Ruling R-POD2).
 	PersonSecrets []string `json:"person_secrets,omitempty"`
 	// Mail: the manifest has a mail: block (a mail provider).
-	Mail      bool `json:"mail,omitempty"`
-	PortStart     int      `json:"port_start"`
-	Want          Compat   `json:"want"`
+	Mail      bool   `json:"mail,omitempty"`
+	PortStart int    `json:"port_start"`
+	Want      Compat `json:"want"`
 }
 
 func loadRuntimeVectors(t *testing.T) []runtimeVector {
