@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -223,7 +222,7 @@ func TestUsageInspectEvery5Min(t *testing.T) {
 }
 
 func TestUsageNeverKeepsEnv(t *testing.T) {
-	var logs bytes.Buffer
+	var logs syncBuffer
 	prev := log.Writer()
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(prev) })
@@ -371,7 +370,7 @@ func TestUsageStoppedAppShowsStopped(t *testing.T) {
 }
 
 func TestUsageSweepBudget(t *testing.T) {
-	var logs bytes.Buffer
+	var logs syncBuffer
 	prev := log.Writer()
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(prev) })
