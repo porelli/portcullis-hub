@@ -97,10 +97,14 @@ var mailNoToolRoutes = map[string]string{
 	"PUT /api/mail/domains/{name}":                               "admin UI only (Settings → Mail)",
 	"PUT /api/directory/groups/{group}/mail-list":                "admin UI only (the group's page)",
 	"POST /api/mail/actions/{action}":                            "admin UI only (the doctor's mail fixes go through doctor_apply_fix)",
-	"POST /api/mail/confirm-removal":                             "admin UI only (the doctor's mail_confirm_removal goes through doctor_apply_fix, class D)",
+	"POST /api/mail/confirm-removal":                             "admin UI only: a fresh sign-in and the typed phrase (R-CONFIRM-REMOVAL; the doctor fix points to Settings → Mail)",
 	"GET /api/directory/users/{username}/mail":                   "credentials: never through MCP",
 	"PUT /api/directory/users/{username}/mail":                   "admin UI only (the person's page)",
 	"DELETE /api/directory/users/{username}/mail/passwords/{id}": "credentials: never through MCP",
+	"GET /api/instances/{id}/mail-provider":                      "mail providers: never through MCP or AI (contract §19.9)",
+	"PUT /api/instances/{id}/mail-provider":                      "mail providers: never wired, switched or unwired through MCP or AI (contract §19.9)",
+	"POST /api/mail/provider/switch":                             "mail providers: never switched through MCP or AI (contract §19.9)",
+	"POST /api/mail/provider/retry-void":                         "mail providers: the void is retried from the Mail tab only (contract §19.11)",
 }
 
 // sshNoToolRoutes are the SSH admin routes no tool mirrors (contract

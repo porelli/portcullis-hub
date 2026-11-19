@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/hub"
 )
 
 // mailSection renders mysignin.js's mailHtml(view) under node (skipped
@@ -102,10 +104,10 @@ func TestSettingsMailPanel(t *testing.T) {
 			map[string]any{"name": "team-b.example.net", "enabled": false, "state": "draining", "groups": []string{"team_b<x>"}}},
 		"spam":   map[string]any{"reject_score": 15, "junk_score": 5, "dnsbl": map[string]any{"spamhaus": true, "spamcop": false, "barracuda": true}, "allow": []string{"a.example"}, "block": []string{}},
 		"limits": map[string]any{"recipients_per_hour": 300, "recipients_per_day": 1000}, "quotas": []any{map[string]any{"group": "team_b", "bytes": 21474836480}},
-		"relay": "off", "submission_lan_only": false, "former_retention": "720h", "dqs_key": "not set"}
+		"relay": nil, "submission_lan_only": false, "dkim_rotate": "4320h", "former_retention": "720h"}
 	h := render(view, map[string]any{"mail": "on", "reachable": true})
 	for _, want := range []string{"mail.example.org", `data-mail-domain="team-b.example.net"`, "draining", `data-mail-act="domain-on"`, `data-mail-act="domain-off"`,
-		"team_b&lt;x&gt;", "up to 7 days", "MAIL_SPAMHAUS_DQS_KEY", "team_b = 20", "reachable", `data-mail-dnsbl="spamcop">`} {
+		"team_b&lt;x&gt;", "up to 7 days", "none (direct delivery)", "4320h", "team_b = 20", "reachable", `data-mail-dnsbl="spamcop">`} {
 		if !strings.Contains(h, want) {
 			t.Errorf("panel lacks %q:\n%s", want, h)
 		}
@@ -120,14 +122,14 @@ func TestSettingsMailPanel(t *testing.T) {
 	if h := render(view, nil); !strings.Contains(h, "data-mail-lan-refusal") || !strings.Contains(h, "rootless Podman rewrites it") {
 		t.Errorf("podman refusal: %s", h)
 	}
-	view["pending_removal"] = map[string]any{"since": "2026-11-15T09:00:00Z", "confirmed": false,
+	view["pending_removal"] = map[string]any{"since": "2026-11-15T09:00:00Z", "confirmed": false, "confirm_phrase": "remove 2 mailboxes",
 		"accounts": []any{map[string]any{"username": "alice", "uuid": "u-1", "revoked": true}, map[string]any{"username": "bob<x>", "uuid": "u-2", "revoked": false}}}
 	if h := render(view, nil); !strings.Contains(h, "data-mail-pending") || !strings.Contains(h, `data-mail-uuids="u-1,u-2"`) || !strings.Contains(h, "bob&lt;x&gt; (revoking failed: retrying)") ||
-		!strings.Contains(h, "alice (mail passwords revoked)") {
+		!strings.Contains(h, "alice (mail passwords revoked)") || !strings.Contains(h, "data-mail-removal-phrase") || !strings.Contains(h, `data-mail-phrase="remove 2 mailboxes"`) {
 		t.Errorf("pending removal: %s", h)
 	}
 	view["problem"] = "Mail can't be managed: the Hub's mail secret is missing or too short"
-	if h := render(view, nil); !strings.Contains(h, "data-mail-problem") || !strings.Contains(h, "./portcullis up") {
+	if h := render(view, nil); !strings.Contains(h, "data-mail-problem") || !strings.Contains(h, `data-mail-act="retry-void"`) {
 		t.Errorf("secret problem: %s", h)
 	}
 	view["problem"] = nil
@@ -173,5 +175,115 @@ func TestDirectoryMailSections(t *testing.T) {
 	if !strings.Contains(g, "data-gp-mail-current") || !strings.Contains(g, "team_b@b.example") || !strings.Contains(g, "anyone may post") ||
 		!strings.Contains(g, `<option value="b.example" selected>`) || !strings.Contains(g, "Save the list") || !strings.Contains(g, "mail-list-off") {
 		t.Errorf("current list:\n%s", g)
+	}
+}
+
+// TestWebMailStates (T15): Settings → Mail's three slot states by id
+// (closed, none with the Marketplace link and the installed mail
+// instances, wired with Switch…, Unwire… and Retry), the Mail tab's
+// warning node filled with exactly hub.MailWarning, and no provider text
+// ever put into innerHTML.
+func TestWebMailStates(t *testing.T) {
+	view := map[string]any{"mail": "on", "kubernetes": false, "hostname": "mail.example.org", "domains": []any{}, "spam": map[string]any{}, "limits": map[string]any{}}
+	state := func(v, st, insts any) string {
+		vb, _ := json.Marshal(v)
+		sb, _ := json.Marshal(st)
+		ib, _ := json.Marshal(insts)
+		return nodeEval(t, "global.window = {};\n"+webAsset(t, "mail.js")+"\nprocess.stdout.write(window.PortcullisMail.stateHtml("+string(vb)+","+string(sb)+","+string(ib)+"));\n")
+	}
+	if h := state(map[string]any{"mail": "off"}, nil, nil); !strings.Contains(h, `data-mail-state="closed"`) {
+		t.Errorf("closed: %s", h)
+	}
+	h := state(view, map[string]any{"mail": "on", "provider": nil}, []any{map[string]any{"id": "stalwart", "label": "Mail<x>"}})
+	if !strings.Contains(h, `data-mail-state="none"`) || !strings.Contains(h, `href="#marketplace?filter=mail"`) || !strings.Contains(h, `href="#apps/stalwart/mail"`) || strings.Contains(h, "Mail<x>") {
+		t.Errorf("none: %s", h)
+	}
+	prov := map[string]any{"instance": "stalwart", "template": "stalwart", "label": "<img src=x onerror=alert(1)>", "version": "<b>1</b>", "mode": "void",
+		"void": map[string]any{"reason": "restore", "since": "2026-11-17T00:00:00Z", "error": "<script>"}}
+	h = state(view, map[string]any{"mail": "on", "provider": prov}, nil)
+	for _, want := range []string{`data-mail-state="wired"`, `data-mail-act="switch"`, `data-mail-act="unwire"`, `data-mail-act="retry-void"`, `href="#apps/stalwart/mail"`} {
+		if !strings.Contains(h, want) {
+			t.Errorf("wired lacks %q: %s", want, h)
+		}
+	}
+	if strings.Contains(h, "<img") || strings.Contains(h, "<b>1") || strings.Contains(h, "<script>") {
+		t.Errorf("provider text in the markup: %s", h)
+	}
+	// The Mail tab: provider text never in the skeleton; the warning
+	// node gets exactly MailWarning (by textContent, under a fake DOM).
+	tv := map[string]any{"wired": true, "mode": "normal", "warning": hub.MailWarning, "provider": map[string]any{"name": "<i>S</i>", "version": "1", "checks": []string{}},
+		"refused_because": []string{"<u>no</u>"}, "held": map[string]any{"reason": "<em>held</em>"}, "hold_warning": "w", "void": nil}
+	tb, _ := json.Marshal(tv)
+	out := nodeEval(t, `
+const nodes = {};
+function node(sel) { return nodes[sel] || (nodes[sel] = { textContent: '', children: [], appendChild(c) { this.children.push(c); } }); }
+global.document = { createElement() { return { textContent: '' }; } };
+global.window = {};
+`+webAsset(t, "mailprovider.js")+`
+const v = `+string(tb)+`;
+const skel = window.PortcullisMailProvider.tabSkeleton(v);
+window.PortcullisMailProvider.fillTab({ querySelector: node }, v);
+process.stdout.write(JSON.stringify({ skel, warning: node('[data-mail-warning]').textContent, refused: node('[data-mail-refused]').children.map(c => c.textContent), info: node('[data-mail-provider-info]').textContent }));
+`)
+	var got struct {
+		Skel, Warning, Info string
+		Refused             []string
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if got.Warning != hub.MailWarning || len(got.Refused) != 1 || got.Refused[0] != "<u>no</u>" || !strings.Contains(got.Info, "<i>S</i>") {
+		t.Fatalf("%+v", got)
+	}
+	for _, bad := range []string{"<i>S", "<u>no", "<em>held", hub.MailWarning} {
+		if strings.Contains(got.Skel, bad) {
+			t.Errorf("%q in the skeleton's markup", bad)
+		}
+	}
+	// No innerHTML assignment in mailprovider.js carries a view field.
+	src := webAsset(t, "mailprovider.js")
+	for _, ln := range strings.Split(src, "\n") {
+		if strings.Contains(ln, "innerHTML") && (strings.Contains(ln, "v.provider") || strings.Contains(ln, "v.warning") || strings.Contains(ln, "refused_because") || strings.Contains(ln, "e.message")) {
+			t.Errorf("provider text into innerHTML: %s", ln)
+		}
+	}
+	// The Mail tab and the Marketplace filter are wired into the page.
+	idx := webAsset(t, "index.html")
+	for _, want := range []string{"['mail', 'Mail']", "templateIsMailProvider", "/static/mailprovider.js", "data-mail-badge", "filterMarketplace("} {
+		if !strings.Contains(idx, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+}
+
+// TestWebMailSensitiveAndFormer (T28 gaps 1–3): the relay, DKIM rotation
+// and former retention form (password write-only, a fresh sign-in on
+// save), the former accounts read-only with the export hint, the
+// provider pill and the secret banner's Retry.
+func TestWebMailSensitiveAndFormer(t *testing.T) {
+	render := func(v, st any) string {
+		vb, _ := json.Marshal(v)
+		sb, _ := json.Marshal(st)
+		return nodeEval(t, "global.window = {};\n"+webAsset(t, "mail.js")+"\nprocess.stdout.write(window.PortcullisMail.settingsHtml("+string(vb)+","+string(sb)+",[]));\n")
+	}
+	view := map[string]any{"mail": "on", "hostname": "mail.example.org", "domains": []any{}, "spam": map[string]any{}, "limits": map[string]any{},
+		"relay":       map[string]any{"host": "smtp.relay.example.net", "port": 587, "username": "u", "spf_include": "", "password_set": true},
+		"dkim_rotate": "4320h", "former_retention": "720h", "problem": "Mail can't be managed: x"}
+	st := map[string]any{"mail": "on", "reachable": false, "provider": nil,
+		"status": map[string]any{"former": []any{map[string]any{"id": "f1", "username": "bob<x>", "since": "2026-11-01T00:00:00Z"}}}}
+	h := render(view, st)
+	for _, want := range []string{`data-mail-sensitive`, `data-mail-act="sensitive-save"`, `type="password"`, `placeholder="unchanged (set)"`, `value="4320h"`,
+		`data-mail-former-list`, `bob&lt;x&gt;`, `./portcullis mail export &lt;id&gt;`, "mail provider unreachable", `data-mail-act="retry-void"`, "A fresh sign-in"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"mailctl unreachable", "./portcullis up", "bob<x>"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("has %q", bad)
+		}
+	}
+	if !strings.Contains(webAsset(t, "mail.js"), "PortcullisFreshAuth.start(fa") {
+		t.Error("the sensitive save doesn't run the fresh sign-in")
 	}
 }

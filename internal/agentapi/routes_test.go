@@ -10,7 +10,7 @@ import (
 )
 
 // TestRoutesCoverInstances: one route per runtime.Instances method but
-// Kind, Env and RestartCoreService (the backend answers them: core never
+// Kind, Env and RestartService (the backend answers them: core never
 // runs on a worker) and the usage verbs Stats, LayerSize and ImageSize
 // (not measured on a worker), no route for anything else, every pattern unique and
 // valid for http.ServeMux (with the extra routes).
@@ -25,7 +25,7 @@ func TestRoutesCoverInstances(t *testing.T) {
 	}
 	for m := range methods {
 		_, ok := Routes[m]
-		if m == "Kind" || m == "Env" || m == "RestartCoreService" || m == "Stats" || m == "LayerSize" || m == "ImageSize" {
+		if m == "Kind" || m == "Env" || m == "RestartService" || m == "Stats" || m == "LayerSize" || m == "ImageSize" {
 			if ok {
 				t.Errorf("%s has a route (the backend answers it)", m)
 			}

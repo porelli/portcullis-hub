@@ -17,7 +17,7 @@ import (
 	"github.com/portcullis/hub/internal/state"
 )
 
-var rootActor = directory.Actor{User: "root"}
+var sshRootActor = directory.Actor{User: "root"}
 
 func TestHostGroupTemplateUnusable409(t *testing.T) {
 	f := newHostFixture(t)
@@ -25,11 +25,11 @@ func TestHostGroupTemplateUnusable409(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.SignIn.Templates["pwonly"] = state.SignInTemplate{Name: "Password", Rule: signin.Node{Leaf: "password"}, Enabled: true}
 	f.h.mu.Unlock()
-	err := f.h.SaveHostGroup(context.Background(), rootActor, "db", state.SSHHostGroup{Template: "pwonly"}, true, nil)
+	err := f.h.SaveHostGroup(context.Background(), sshRootActor, "db", state.SSHHostGroup{Template: "pwonly"}, true, nil)
 	if sshStatusOf(err) != 409 && !strings.Contains(errText(err), "can't be met") {
 		t.Errorf("unusable template = %v", err)
 	}
-	if err := f.h.SaveHostGroup(context.Background(), rootActor, "db", state.SSHHostGroup{Template: "strong"}, true, nil); err != nil {
+	if err := f.h.SaveHostGroup(context.Background(), sshRootActor, "db", state.SSHHostGroup{Template: "strong"}, true, nil); err != nil {
 		t.Errorf("strong = %v", err)
 	}
 	if err := f.h.SaveHostGroup(context.Background(), directory.Actor{User: "root", Via: directory.ViaAI}, "db2", state.SSHHostGroup{}, true, nil); err == nil {
@@ -51,24 +51,24 @@ func TestUpdateHostNeedsFresh(t *testing.T) {
 	f.h.mu.Unlock()
 	in := HostInput{Names: []string{"web-2.example.com"}, HostGroups: []string{"web"}}
 	// Unchanged: no proof needed.
-	if err := f.h.UpdateHost(context.Background(), rootActor, "web-2", in, nil); err != nil {
+	if err := f.h.UpdateHost(context.Background(), sshRootActor, "web-2", in, nil); err != nil {
 		t.Errorf("unchanged = %v", err)
 	}
 	in.HostGroups = []string{"web", "db"}
-	if err := f.h.UpdateHost(context.Background(), rootActor, "web-2", in, nil); err == nil {
+	if err := f.h.UpdateHost(context.Background(), sshRootActor, "web-2", in, nil); err == nil {
 		t.Error("a host group added without a fresh sign-in")
 	}
 	if err := f.h.UpdateHost(context.Background(), directory.Actor{User: "root", Via: directory.ViaAI}, "web-2", in, &freshauth.Proof{Code: "c"}); err == nil {
 		t.Error("a host changed via AI")
 	}
-	if err := f.h.UpdateHost(context.Background(), rootActor, "web-2", in, &freshauth.Proof{Code: "c"}); err != nil {
+	if err := f.h.UpdateHost(context.Background(), sshRootActor, "web-2", in, &freshauth.Proof{Code: "c"}); err != nil {
 		t.Errorf("with a fresh sign-in = %v", err)
 	}
 	if got := f.h.sshHostForTest("web-2").HostGroups; strings.Join(got, ",") != "db,web" {
 		t.Errorf("groups %v", got)
 	}
 	in.Names = []string{"other.example.com"}
-	if err := f.h.UpdateHost(context.Background(), rootActor, "web-2", in, nil); err == nil {
+	if err := f.h.UpdateHost(context.Background(), sshRootActor, "web-2", in, nil); err == nil {
 		t.Error("names changed without a fresh sign-in")
 	}
 }
@@ -83,20 +83,20 @@ func TestHostCertificateNeedsSecurityKeyAdmin(t *testing.T) {
 	key := hostKey(t)
 	req := HostKeyRequest{HostGroup: "web", PublicKey: key, Names: []string{"web-9.lab.example.com"}}
 	f.h.SetFreshAuth(ListenerHub, fakeFresh{method: "passkey_device"})
-	if _, err := f.h.SignHostKey(context.Background(), rootActor, req, freshauth.Proof{}); err == nil || sshStatusOf(err) != 403 && !strings.Contains(err.Error(), "security key") {
+	if _, err := f.h.SignHostKey(context.Background(), sshRootActor, req, freshauth.Proof{}); err == nil || sshStatusOf(err) != 403 && !strings.Contains(err.Error(), "security key") {
 		t.Errorf("passkey_device = %v", err)
 	}
 	f.h.SetFreshAuth(ListenerHub, fakeFresh{method: "security_key"})
-	ans, err := f.h.SignHostKey(context.Background(), rootActor, req, freshauth.Proof{})
+	ans, err := f.h.SignHostKey(context.Background(), sshRootActor, req, freshauth.Proof{})
 	if err != nil || ans.Certificate == "" {
 		t.Fatalf("security_key = %+v %v", ans, err)
 	}
 	req.Names = []string{"evil.example.org"}
-	if _, err := f.h.SignHostKey(context.Background(), rootActor, req, freshauth.Proof{}); sshStatusOf(err) != 409 {
+	if _, err := f.h.SignHostKey(context.Background(), sshRootActor, req, freshauth.Proof{}); sshStatusOf(err) != 409 {
 		t.Errorf("a name outside the patterns = %v", err)
 	}
 	req.Names = []string{"web-1.example.com"} // a managed host of web: its own key's certificate only (L-A1)
-	if _, err := f.h.SignHostKey(context.Background(), rootActor, req, freshauth.Proof{}); sshStatusOf(err) != 409 {
+	if _, err := f.h.SignHostKey(context.Background(), sshRootActor, req, freshauth.Proof{}); sshStatusOf(err) != 409 {
 		t.Errorf("a managed host's name = %v", err)
 	}
 	req.Names = []string{"web-9.lab.example.com"}
@@ -144,7 +144,7 @@ func TestPersonSSHAccess(t *testing.T) {
 	if len(v.Certificates) != 2 {
 		t.Errorf("certificates %+v", v.Certificates)
 	}
-	n, err := f.h.RevokeAllSSH(rootActor, "alice", "test")
+	n, err := f.h.RevokeAllSSH(sshRootActor, "alice", "test")
 	if err != nil || n != 1 {
 		t.Errorf("revoke all = %d %v", n, err)
 	}
@@ -188,7 +188,7 @@ func TestUnmanagedHostKeyRevocable(t *testing.T) {
 	f.h.mu.Unlock()
 	key := hostKey(t)
 	f.h.SetFreshAuth(ListenerHub, fakeFresh{method: "security_key"})
-	if _, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: key, Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{}); err != nil {
+	if _, err := f.h.SignHostKey(context.Background(), sshRootActor, HostKeyRequest{HostGroup: "web", PublicKey: key, Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{}); err != nil {
 		t.Fatal(err)
 	}
 	k, _, _ := cliapi.ParseAuthorizedKey(key)
@@ -203,7 +203,7 @@ func TestUnmanagedHostKeyRevocable(t *testing.T) {
 	if slices.Contains(before, key) {
 		t.Fatal("revoked before revocation")
 	}
-	if n, err := f.h.RevokeSSHCertificates(rootActor, []string{fp}, ""); err != nil || n != 1 {
+	if n, err := f.h.RevokeSSHCertificates(sshRootActor, []string{fp}, ""); err != nil || n != 1 {
 		t.Fatalf("revoke %d %v", n, err)
 	}
 	f.h.mu.RLock()
@@ -217,7 +217,7 @@ func TestUnmanagedHostKeyRevocable(t *testing.T) {
 	}
 	// Signing the revoked key again is refused (409, audited) and the key
 	// stays revoked, even after its record is pruned.
-	_, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: key, Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{})
+	_, err := f.h.SignHostKey(context.Background(), sshRootActor, HostKeyRequest{HostGroup: "web", PublicKey: key, Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{})
 	if sshStatusOf(err) != 409 {
 		t.Errorf("re-signing a revoked host key = %v", err)
 	}
@@ -248,12 +248,12 @@ func TestHostKeyNamesNegationAndManaged(t *testing.T) {
 	f.h.mu.Unlock()
 	f.h.SetFreshAuth(ListenerHub, fakeFresh{method: "security_key"})
 	for _, name := range []string{"vault.lab.example.com", "web-1.example.com"} {
-		_, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: hostKey(t), Names: []string{name}}, freshauth.Proof{})
+		_, err := f.h.SignHostKey(context.Background(), sshRootActor, HostKeyRequest{HostGroup: "web", PublicKey: hostKey(t), Names: []string{name}}, freshauth.Proof{})
 		if err == nil {
 			t.Errorf("%s signed", name)
 		}
 	}
-	if _, err := f.h.SignHostKey(context.Background(), rootActor, HostKeyRequest{HostGroup: "web", PublicKey: hostKey(t), Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{}); err != nil {
+	if _, err := f.h.SignHostKey(context.Background(), sshRootActor, HostKeyRequest{HostGroup: "web", PublicKey: hostKey(t), Names: []string{"lab-1.lab.example.com"}}, freshauth.Proof{}); err != nil {
 		t.Errorf("a matching name: %v", err)
 	}
 }

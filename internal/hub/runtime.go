@@ -2,12 +2,15 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/portcullis/hub/internal/runtime"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -208,6 +211,19 @@ func (h *Hub) Logs(ctx context.Context, id, service string, lines int) ([]byte, 
 type ExecResult struct {
 	Output   string `json:"output"`
 	ExitCode int    `json:"exitCode"`
+}
+
+// errMailExecRefused: Ruling R-L23's refusal.
+var errMailExecRefused = errors.New("not allowed: an AI or MCP client never runs commands in a mail provider's containers")
+
+// ExecAs is Exec for actor: an AI or MCP actor never execs into any mail
+// provider instance — wired, switched away or a restored copy (Ruling
+// R-L23, final review M4: an API secret, every mailbox): 403.
+func (h *Hub) ExecAs(ctx context.Context, a directory.Actor, id, service, command string) (*ExecResult, error) {
+	if a.Via != "" && h.IsMailInstance(id) {
+		return nil, &StatusError{Status: http.StatusForbidden, Err: errMailExecRefused}
+	}
+	return h.Exec(ctx, id, service, command)
 }
 
 // Exec runs `/bin/sh -c command` in a running container of service.

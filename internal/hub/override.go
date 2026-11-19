@@ -268,6 +268,53 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	for svc := range companionSvcs {
 		services[svc] = true
 	}
+	// A mail template's instance (contract §19.1): unwired = nothing,
+	// void = the API attachment, mounts and env with every network
+	// internal, normal = everything.
+	rmode := h.mailRenderModeLocked(t)
+	if h.mailModeForRender == nil && t.Manifest.Mail != nil {
+		h.mailRendered.mu.Lock()
+		if h.mailRendered.m == nil {
+			h.mailRendered.m = map[string]mailMode{}
+		}
+		h.mailRendered.m[t.ID] = rmode
+		h.mailRendered.mu.Unlock()
+	}
+	mr, err := h.mailRenderLocked(t, rmode)
+	if err != nil {
+		return "", err
+	}
+	for svc, m := range mr.mounts {
+		serviceMounts[svc] = append(serviceMounts[svc], m...)
+	}
+	if serviceEnv == nil && len(mr.env) > 0 {
+		serviceEnv = map[string][]string{}
+	}
+	for svc, e := range mr.env {
+		serviceEnv[svc] = append(serviceEnv[svc], e...)
+	}
+	for svc := range mr.groups {
+		if !slices.Contains(serviceGroups[svc], MailProviderGID) {
+			serviceGroups[svc] = append(serviceGroups[svc], MailProviderGID)
+		}
+	}
+	for svc, ps := range mr.ports {
+		servicePorts[svc] = append(servicePorts[svc], ps...)
+	}
+	for _, svc := range mr.services() {
+		services[svc] = true
+		if _, ok := mr.networks[svc]; ok && svc == vpnGW.ingress {
+			return "", fmt.Errorf("service %s: a mail provider's service can't also be a VPN gateway", svc)
+		}
+	}
+	if replaced != nil {
+		for svc, l := range mr.labels {
+			if replaced[svc] == nil {
+				replaced[svc] = map[string]string{}
+			}
+			maps.Copy(replaced[svc], l)
+		}
+	}
 	// Rootless Podman (contract §11.10): podman-restart.service starts
 	// only `always` containers at boot.
 	restartAlways := h.podmanRestartAlways(t)
@@ -315,6 +362,15 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 		if restartAlways[svc] {
 			b.WriteString("    restart: always\n")
 		}
+		if nets, ok := mr.networks[svc]; ok {
+			if cs, ok := companionSvcs[svc]; ok && len(cs.aliases) > 0 {
+				return "", fmt.Errorf("service %s: a mail provider's service can't be an AI companion", svc)
+			}
+			b.WriteString("    networks:\n")
+			for _, n := range slices.Sorted(maps.Keys(nets)) {
+				fmt.Fprintf(&b, "      %s:%s\n", yamlKey(n), nets[n])
+			}
+		}
 		if cs, ok := companionSvcs[svc]; ok {
 			if cs.scale != nil {
 				fmt.Fprintf(&b, "    scale: %d\n", *cs.scale)
@@ -356,7 +412,8 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 		signIn := svc == rl.signInService && len(rl.signInLabels) > 0
 		mcp := svc == rl.mcpService && len(rl.mcpLabels) > 0
 		vpnL := svc == rl.vpnService && len(rl.vpnLabels) > 0
-		if len(routers) > 0 || public || signIn || mcp || vpnL {
+		mailL := len(mr.labels[svc]) > 0
+		if len(routers) > 0 || public || signIn || mcp || vpnL || mailL {
 			b.WriteString("    labels:\n")
 			for _, r := range routers {
 				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, tier)
@@ -392,16 +449,31 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 					fmt.Fprintf(&b, "      %s: %s\n", yamlQuote(k), yamlQuote(rl.vpnLabels[k]))
 				}
 			}
+			if mailL {
+				for _, k := range slices.Sorted(maps.Keys(mr.labels[svc])) {
+					fmt.Fprintf(&b, "      %s: %s\n", yamlQuote(k), yamlQuote(mr.labels[svc][k]))
+				}
+			}
 		}
 	}
 	// Volume names (§11.2), multi templates only (they declare none): the
 	// default instance gets portcullis_<key>, others portcullis_<id>-<key>.
 	// A single template's volumes stay exactly as compose names them.
 	multiVols := t.Manifest.Multi() && len(t.Volumes) > 0
-	if vpnGW.ingress != "" {
-		fmt.Fprintf(&b, "networks:\n  %s:\n    external: true\n    name: %s\n", vpnNetwork, vpnNetwork)
+	topNets := maps.Clone(mr.topNetworks)
+	if topNets == nil {
+		topNets = map[string]string{}
 	}
-	if multiVols || len(secretOpts) > 0 {
+	if vpnGW.ingress != "" {
+		topNets[vpnNetwork] = "\n    external: true\n    name: " + vpnNetwork
+	}
+	if len(topNets) > 0 {
+		b.WriteString("networks:\n")
+		for _, n := range slices.Sorted(maps.Keys(topNets)) {
+			fmt.Fprintf(&b, "  %s:%s\n", yamlKey(n), topNets[n])
+		}
+	}
+	if multiVols || len(secretOpts) > 0 || mr.secretsVolume || mr.tlsVolume || mr.slotVolume {
 		b.WriteString("volumes:\n")
 	}
 	if vols := t.NamesFor(t.ID).Volumes; multiVols {
@@ -409,8 +481,14 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 			fmt.Fprintf(&b, "  %s:\n    name: %s\n", yamlQuote(k), yamlQuote(vols[k]))
 		}
 	}
-	if len(secretOpts) > 0 {
+	if len(secretOpts) > 0 || mr.secretsVolume {
 		fmt.Fprintf(&b, "  %s:\n    external: true\n    name: %s\n", templates.SecretsVolumeKey, yamlQuote(h.cfg.SecretsVolume))
+	}
+	if mr.tlsVolume {
+		fmt.Fprintf(&b, "  %s:\n    external: true\n    name: %s\n", mailTLSVolumeKey, mailTLSVolume)
+	}
+	if mr.slotVolume {
+		fmt.Fprintf(&b, "  %s:\n    external: true\n    name: %s\n", mailProviderSlotVolumeKey, mailProviderSlotVolume)
 	}
 	if len(names) == 0 && !multiVols {
 		return "", nil
@@ -433,6 +511,18 @@ func secretsMountEntry(target, sub string) string {
 // must hold mu.
 func (h *Hub) renderOverrideLocked(t *templates.Template, s state.InstanceSettings) (string, error) {
 	return h.renderOverrideIn(h.liveView(), t, s)
+}
+
+// plainKeyRe is a mapping key YAML reads as itself, unquoted.
+var plainKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// yamlKey renders s as a mapping key: plain when it is a simple name,
+// else double-quoted.
+func yamlKey(s string) string {
+	if plainKeyRe.MatchString(s) && s != "true" && s != "false" && s != "null" && s != "yes" && s != "no" {
+		return s
+	}
+	return yamlQuote(s)
 }
 
 // yamlQuote renders s as a YAML double-quoted scalar (a JSON string).
@@ -816,6 +906,21 @@ func (h *Hub) desiredRouteLabelsLocked(t *templates.Template) (map[string]map[st
 			m[k] = expandComposeValue(v, h.cfg.Domain, t.InstanceEnv)
 		}
 		out[svc] = m
+	}
+	// A mail provider's well-known router is the Hub's mail override's,
+	// not the template's routes: its labels are wanted too, or every Hub
+	// start would find them "unexpected" and restart a running provider.
+	if t.Manifest.Mail != nil {
+		if mr, err := h.mailRenderLocked(t, h.mailRenderModeLocked(t)); err == nil {
+			for svc, l := range mr.labels {
+				if out[svc] == nil {
+					out[svc] = map[string]string{}
+				}
+				for k, v := range l {
+					out[svc][k] = v
+				}
+			}
+		}
 	}
 	return out, nil
 }

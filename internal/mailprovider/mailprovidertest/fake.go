@@ -1,10 +1,11 @@
-// Package mailctltest is an in-memory mailctl API (contract §19.5) for
-// the Hub's tests: a real HTTP server the real mailctl.Client talks to,
-// built from the contract (not from core's code): bearer check, strict
-// bodies, generation and mass-removal refusals, state.Parse's refusals,
-// the 5-password limit and Stalwart's per-account id reuse (the next id
-// is the highest + 1).
-package mailctltest
+// Package mailprovidertest is an in-memory mail provider API v1
+// (contract §19.5) for the Hub's tests: a real HTTP server the real
+// mailprovider.Client talks to, built from the contract (not from any
+// provider's code): bearer check, strict bodies, generation and
+// mass-removal refusals, MailState v2's refusals, the 5-password limit,
+// credentials by uuid with allowed_ips, the void and the TLS reload, and
+// per-account id reuse (the next id is the highest + 1).
+package mailprovidertest
 
 import (
 	"bytes"
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,13 +25,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 )
 
 // Secret is the fake's bearer secret.
-const Secret = "mailctltest-hub-secret-0123456789abcdefghij"
+const Secret = "mailprovidertest-hub-secret-0123456789abcdefghij"
 
-// Server is the fake mailctl.
+// Server is the fake provider.
 type Server struct {
 	t   *testing.T
 	srv *httptest.Server
@@ -38,8 +40,8 @@ type Server struct {
 	// Doc is the last accepted document (nil: none yet); Applied its
 	// applied generation. HoldApply: accepted documents aren't applied
 	// (GET /v1/state keeps the old applied_generation).
-	Doc       *mailctl.MailState
-	Docs      []mailctl.MailState // every accepted document, in order
+	Doc       *mailprovider.MailState
+	Docs      []mailprovider.MailState // every accepted document, in order
 	Applied   int
 	HoldApply bool
 	Bootstrap bool
@@ -49,9 +51,9 @@ type Server struct {
 	PutStatus int
 	PutMsg    string
 	// DNSSets: domain → its wanted records (default: one MX).
-	DNSSets  map[string]mailctl.DNSSet
-	ChecksV  mailctl.Checks
-	StatusV  mailctl.Status
+	DNSSets  map[string]mailprovider.DNSSet
+	ChecksV  mailprovider.Checks
+	StatusV  mailprovider.Status
 	ActionV  map[string]int // action name → status (default 202)
 	Actions  []string       // "<name> <domain>"
 	Requests []string       // "<METHOD> <path>"
@@ -70,19 +72,42 @@ type Server struct {
 	OmitRemoved bool
 	// RevokeOK: DELETE answers 200 instead of 204 (a non-204 success).
 	RevokeOK bool
+	// ProviderV is GET /v1/provider's answer.
+	ProviderV mailprovider.ProviderInfo
+	// VoidStatus: POST /v1/void answers it instead (0: 200). VoidKeeps:
+	// the void answers 200 but destroys nothing (a hostile provider).
+	VoidStatus int
+	VoidKeeps  bool
+	// Voids: every POST /v1/void reason, in order.
+	Voids []string
+	// Reloads: every POST /v1/tls/reload's SPKIs; ServingSPKI the
+	// answer (default: the first one asked for).
+	Reloads     [][]string
+	ServingSPKI string
+	// Tests: every POST /v1/actions/test recipient.
+	Tests []string
+	// AllowedIPs, when set, replaces every credential row's allowed_ips
+	// (a provider that doesn't enforce LAN-only).
+	AllowedIPs []netip.Prefix
+	// NoMassGuard: the provider has no mass-removal guard (a hostile or
+	// buggy one): every document is accepted.
+	NoMassGuard bool
 }
 
 type fakeCred struct {
-	mailctl.Credential
+	mailprovider.Credential
 }
 
 // New starts a fake (closed with t's cleanup).
 func New(t *testing.T) *Server {
-	s := &Server{t: t, Bootstrap: true, DNSSets: map[string]mailctl.DNSSet{}, ActionV: map[string]int{}, creds: map[string][]fakeCred{},
+	s := &Server{t: t, Bootstrap: true, DNSSets: map[string]mailprovider.DNSSet{}, ActionV: map[string]int{}, creds: map[string][]fakeCred{},
 		Now: func() time.Time { return time.Now().UTC().Truncate(time.Second) }}
-	s.ChecksV = mailctl.Checks{CheckedAt: time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC), Checks: []mailctl.Check{}}
-	s.StatusV = mailctl.Status{Bootstrap: true, StalwartVersion: "1.1.0", DKIM: []mailctl.StatusDKIM{}, MTASTS: []mailctl.StatusMTASTS{},
-		DMARC: []mailctl.StatusDMARC{}, ClientIP: "preserved", Former: []mailctl.StatusFormer{}, Cert: mailctl.StatusCert{SANs: []string{}}}
+	s.ProviderV = mailprovider.ProviderInfo{Name: "Fake", Version: "1.0", APIVersion: 1,
+		Checks:  []string{"port25", "fcrdns_v4", "cert", "records:", "dkim_stuck:"},
+		Actions: []string{mailprovider.ActionDKIMRotate, mailprovider.ActionDMARCPromote, mailprovider.ActionMTASTSEnforce, mailprovider.ActionTest}}
+	s.ChecksV = mailprovider.Checks{CheckedAt: time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC), Checks: []mailprovider.Check{}}
+	s.StatusV = mailprovider.Status{Bootstrap: true, Provider: mailprovider.StatusProvider{Name: "Fake", Version: "1.0"}, DKIM: []mailprovider.StatusDKIM{},
+		MTASTS: []mailprovider.StatusMTASTS{}, DMARC: []mailprovider.StatusDMARC{}, Former: []mailprovider.StatusFormer{}, Cert: mailprovider.StatusCert{SANs: []string{}}}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.srv.Close)
 	return s
@@ -100,8 +125,8 @@ func (s *Server) SecretFile() string {
 	return f
 }
 
-// Client is a real mailctl.Client on the fake.
-func (s *Server) Client() *mailctl.Client { return mailctl.New(s.URL(), s.SecretFile()) }
+// Client is a real mailprovider.Client on the fake.
+func (s *Server) Client() *mailprovider.Client { return mailprovider.New(s.URL(), s.SecretFile()) }
 
 // Close stops the server (connections then fail: unreachable).
 func (s *Server) Close() { s.srv.Close() }
@@ -121,7 +146,7 @@ func (s *Server) Puts() int {
 }
 
 // Last is a copy of the last accepted document (nil: none).
-func (s *Server) Last() *mailctl.MailState {
+func (s *Server) Last() *mailprovider.MailState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.Doc == nil {
@@ -132,10 +157,10 @@ func (s *Server) Last() *mailctl.MailState {
 }
 
 // Creds are user's live passwords.
-func (s *Server) Creds(user string) []mailctl.Credential {
+func (s *Server) Creds(user string) []mailprovider.Credential {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []mailctl.Credential
+	var out []mailprovider.Credential
 	for _, c := range s.creds[user] {
 		out = append(out, c.Credential)
 	}
@@ -188,7 +213,43 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 503, "mail server unreachable")
 		return
 	}
+	if !s.Bootstrap && r.URL.Path != "/v1/provider" && r.URL.Path != "/v1/state" {
+		errJSON(w, 503, "the mail server isn't ready")
+		return
+	}
 	switch p := r.URL.Path; {
+	case p == "/v1/provider" && r.Method == http.MethodGet:
+		writeJSON(w, 200, s.ProviderV)
+	case p == "/v1/void" && r.Method == http.MethodPost:
+		s.void(w, r)
+	case p == "/v1/tls/reload" && r.Method == http.MethodPost:
+		var body struct {
+			SPKI []string `json:"spki_sha256"`
+		}
+		if err := strict(r, &body); err != nil || len(body.SPKI) < 1 || len(body.SPKI) > 2 {
+			errJSON(w, 400, "bad body")
+			return
+		}
+		s.Reloads = append(s.Reloads, body.SPKI)
+		serving := s.ServingSPKI
+		if serving == "" {
+			serving = body.SPKI[0]
+		}
+		writeJSON(w, 200, map[string]string{"serving_spki_sha256": serving})
+	case p == "/v1/actions/test" && r.Method == http.MethodPost:
+		var body struct {
+			To string `json:"to"`
+		}
+		if err := strict(r, &body); err != nil || !strings.Contains(body.To, "@") {
+			errJSON(w, 400, "to isn't one address")
+			return
+		}
+		if s.Doc == nil || len(s.Doc.Postmaster) == 0 {
+			errJSON(w, 409, "no postmaster account")
+			return
+		}
+		s.Tests = append(s.Tests, body.To)
+		writeJSON(w, 202, map[string]string{"queue_id": fmt.Sprintf("q%d", len(s.Tests))})
 	case p == "/v1/state" && r.Method == http.MethodPut:
 		s.putState(w, r)
 	case p == "/v1/state" && r.Method == http.MethodGet:
@@ -196,7 +257,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		if s.Doc != nil {
 			gen = s.Doc.Generation
 		}
-		writeJSON(w, 200, mailctl.StateStatus{Generation: gen, AppliedGeneration: s.Applied, Bootstrap: s.Bootstrap, Errors: []string{}})
+		writeJSON(w, 200, mailprovider.StateStatus{Generation: gen, AppliedGeneration: s.Applied, Bootstrap: s.Bootstrap, Errors: []string{}})
 	case strings.HasPrefix(p, "/v1/dns/") && r.Method == http.MethodGet:
 		d := strings.TrimPrefix(p, "/v1/dns/")
 		wc := r.URL.Query().Get("wildcard")
@@ -213,8 +274,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		set, ok := s.DNSSets[d]
+		if !ok && s.draining(d) {
+			// A draining domain's set: only its _mta-sts record (§19.7).
+			set, ok = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: "_mta-sts." + d, Type: "TXT", TTL: 3600, Value: "v=STSv1; id=fakedrain1"}}}, true
+		}
 		if !ok {
-			set = mailctl.DNSSet{Domain: d, Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}, DKIM: "auto", TLSA: "withheld: dnssec unsigned"}
+			set = mailprovider.DNSSet{Domain: d, Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."},
+				{Name: "_dmarc." + d, Type: "TXT", TTL: 3600, Value: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d}}, DKIM: "auto"}
 		}
 		writeJSON(w, 200, set)
 	case p == "/v1/checks" && r.Method == http.MethodGet:
@@ -222,14 +288,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case p == "/v1/status" && r.Method == http.MethodGet:
 		writeJSON(w, 200, s.StatusV)
 	case p == "/v1/credentials" && r.Method == http.MethodGet:
-		u := r.URL.Query().Get("user")
-		if !s.account(u) {
-			errJSON(w, 404, "no such account")
+		q := r.URL.Query()
+		if len(q) != 1 || q.Get("uuid") == "" {
+			errJSON(w, 400, "the query must be exactly ?uuid=")
 			return
 		}
-		out := []mailctl.Credential{}
+		u := s.userOfUUID(q.Get("uuid"))
+		if u == "" {
+			errJSON(w, 404, "no account with that uuid")
+			return
+		}
+		out := []mailprovider.Credential{}
 		for _, c := range s.creds[u] {
-			out = append(out, c.Credential)
+			out = append(out, s.row(c.Credential))
 		}
 		writeJSON(w, 200, out)
 	case p == "/v1/credentials" && r.Method == http.MethodPost:
@@ -287,6 +358,65 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// row is c as GET /v1/credentials answers it: allowed_ips is the Local
+// networks under LAN-only, else [] (AllowedIPs overrides).
+func (s *Server) row(c mailprovider.Credential) mailprovider.Credential {
+	c.AllowedIPs = []netip.Prefix{}
+	if s.AllowedIPs != nil {
+		c.AllowedIPs = append(c.AllowedIPs, s.AllowedIPs...)
+	} else if s.Doc != nil && s.Doc.SubmissionLANOnly {
+		for _, n := range s.Doc.LocalNetworks {
+			if p, err := netip.ParsePrefix(n); err == nil {
+				c.AllowedIPs = append(c.AllowedIPs, p.Masked())
+			}
+		}
+		if len(c.AllowedIPs) == 0 {
+			c.AllowedIPs = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32"), netip.MustParsePrefix("::1/128")}
+		}
+	}
+	return c
+}
+
+// void is POST /v1/void: every credential of every account destroyed
+// (unless VoidKeeps), restored_at recorded.
+func (s *Server) void(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := strict(r, &body); err != nil || (body.Reason != mailprovider.VoidWire && body.Reason != mailprovider.VoidRestore) {
+		errJSON(w, 400, "bad body")
+		return
+	}
+	s.Voids = append(s.Voids, body.Reason)
+	if s.VoidStatus != 0 {
+		errJSON(w, s.VoidStatus, "void failed")
+		return
+	}
+	n := 0
+	for _, cs := range s.creds {
+		n += len(cs)
+	}
+	if !s.VoidKeeps {
+		s.creds = map[string][]fakeCred{}
+	}
+	now := s.Now()
+	s.StatusV.RestoredAt = &now
+	writeJSON(w, 200, map[string]any{"voided": n, "restored_at": now})
+}
+
+// draining: d is draining in the applied document.
+func (s *Server) draining(d string) bool {
+	if s.Doc == nil {
+		return false
+	}
+	for _, x := range s.Doc.Domains {
+		if x.Name == d {
+			return x.Mail == mailprovider.MailDraining
+		}
+	}
+	return false
+}
+
 func (s *Server) mailDomain(d string) bool {
 	if s.Doc == nil {
 		return false
@@ -340,20 +470,43 @@ func (s *Server) account(u string) bool {
 var (
 	usernameRe = regexp.MustCompile(`^[a-z0-9_.@-]{1,64}$`)
 	uuidRe     = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	spkiRe     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // parse is state.Parse's refusals (contract §19.5).
-func parse(d *mailctl.MailState) error {
-	if d.Version != 1 {
+func parse(d *mailprovider.MailState) error {
+	if d.Version != mailprovider.StateVersion {
 		return fmt.Errorf("version %d", d.Version)
+	}
+	if d.MailHostname == "" || (d.ClientIP != mailprovider.ClientIPPreserved && d.ClientIP != mailprovider.ClientIPRewritten) {
+		return fmt.Errorf("mail_hostname or client_ip")
+	}
+	for _, v := range []string{d.DKIMRotate, d.FormerRetention} {
+		if dur, err := time.ParseDuration(v); err != nil || dur < 24*time.Hour || dur > 8760*time.Hour {
+			return fmt.Errorf("duration %q", v)
+		}
+	}
+	if r := d.Relay; r != nil && (r.Host == "" || r.Port < 1 || r.Port > 65535) {
+		return fmt.Errorf("relay")
+	}
+	if d.TLS.SPKISHA256 == nil || len(d.TLS.SPKISHA256) > 2 {
+		return fmt.Errorf("tls.spki_sha256")
+	}
+	for _, k := range d.TLS.SPKISHA256 {
+		if !spkiRe.MatchString(k) {
+			return fmt.Errorf("spki %q", k)
+		}
 	}
 	doms := map[string]bool{}
 	for _, x := range d.Domains {
-		if x.Mail != mailctl.MailOn && x.Mail != mailctl.MailOff && x.Mail != mailctl.MailDraining {
+		if x.Mail != mailprovider.MailOn && x.Mail != mailprovider.MailOff && x.Mail != mailprovider.MailDraining {
 			return fmt.Errorf("domain %s: mail %q", x.Name, x.Mail)
 		}
 		if x.DMARCStart != "reject" && x.DMARCStart != "none" {
 			return fmt.Errorf("domain %s: dmarc_start %q", x.Name, x.DMARCStart)
+		}
+		if x.DMARCFloor != "none" && x.DMARCFloor != "quarantine" && x.DMARCFloor != "reject" {
+			return fmt.Errorf("domain %s: dmarc_floor %q", x.Name, x.DMARCFloor)
 		}
 		doms[x.Name] = true
 	}
@@ -366,7 +519,7 @@ func parse(d *mailctl.MailState) error {
 		if !ok || !doms[dom] {
 			return fmt.Errorf("address %s is not on a mail domain", addr)
 		}
-		for _, r := range mailctl.ReservedLocalParts {
+		for _, r := range mailprovider.ReservedLocalParts {
 			if local == r {
 				return fmt.Errorf("address %s is reserved", addr)
 			}
@@ -439,13 +592,13 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, "not JSON")
 		return
 	}
-	for _, k := range []string{"version", "generation", "primary_domain", "confirm_mass_removal", "domains", "accounts", "aliases", "lists", "postmaster", "limits", "spam", "local_networks"} {
+	for _, k := range []string{"version", "generation", "primary_domain", "mail_hostname", "client_ip", "submission_lan_only", "dkim_rotate", "former_retention", "relay", "tls", "confirm_mass_removal", "domains", "accounts", "aliases", "lists", "postmaster", "limits", "spam", "local_networks"} {
 		if _, ok := raw[k]; !ok {
 			errJSON(w, 400, "missing key %s", k)
 			return
 		}
 	}
-	var d mailctl.MailState
+	var d mailprovider.MailState
 	dec := json.NewDecoder(bytes.NewReader(body.Bytes()))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
@@ -464,7 +617,7 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 409, "generation %d is not greater than %d", d.Generation, s.Doc.Generation)
 		return
 	}
-	if s.Doc != nil && len(s.Doc.Accounts) > 0 {
+	if s.Doc != nil && len(s.Doc.Accounts) > 0 && !s.NoMassGuard {
 		now := map[string]bool{}
 		for _, a := range d.Accounts {
 			now[a.UUID] = true
@@ -542,11 +695,11 @@ func (s *Server) createCred(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cs := s.creds[body.Username]
-	if len(cs) >= mailctl.MaxActivePasswords {
+	if len(cs) >= mailprovider.MaxActivePasswords {
 		errJSON(w, 409, "5 active mail passwords")
 		return
 	}
-	// Stalwart: the next id is the highest + 1 (reused once the highest
+	// Ids are reused: the next id is the highest + 1 (reused once the highest
 	// is destroyed).
 	next := 1
 	for _, c := range cs {
@@ -555,7 +708,7 @@ func (s *Server) createCred(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sec := fmt.Sprintf("mailpw-%s-%d-%d", body.Username, next, now.UnixNano())
-	c := fakeCred{mailctl.Credential{ID: strconv.Itoa(next), Label: body.Label, CreatedAt: now, ExpiresAt: body.ExpiresAt}}
+	c := fakeCred{mailprovider.Credential{ID: strconv.Itoa(next), UUID: body.UUID, Label: body.Label, CreatedAt: now, ExpiresAt: body.ExpiresAt}}
 	s.creds[body.Username] = append(cs, c)
 	sort.Slice(s.creds[body.Username], func(i, j int) bool { return s.creds[body.Username][i].ID < s.creds[body.Username][j].ID })
 	s.Created = append(s.Created, sec)

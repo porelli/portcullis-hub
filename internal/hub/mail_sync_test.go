@@ -11,8 +11,8 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -61,7 +61,7 @@ func (p *mailPeople) setMembers(group string, users ...string) {
 
 type mailFixture struct {
 	*fixture
-	mc     *mailctltest.Server
+	mc     *mailprovidertest.Server
 	people *mailPeople
 	dom    *fakeDomainsAPI
 	now    time.Time
@@ -74,11 +74,12 @@ func (f *mailFixture) advance(d time.Duration) {
 	f.nowMu.Unlock()
 }
 
-// newMailFixture: core mail on, the fake mailctl wired, a directory with
-// alice, bob, root (admin) in mail_users, the main domain example.org.
-func newMailFixture(t *testing.T) *mailFixture {
+// newMailFixture: the slot open, mailsrv wired with the fake provider as
+// its API, a directory with alice, bob, root (admin) in mail_users, the
+// main domain example.org.
+func newMailFixture(t *testing.T, others ...string) *mailFixture {
 	t.Helper()
-	f := &mailFixture{fixture: newFixture(t), mc: mailctltest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
+	f := &mailFixture{fixture: newMailSlotFixture(t, true, others...), mc: mailprovidertest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
 	setCoreMail(t, f.fixture, true)
 	m := mailMembership()
 	f.people = &mailPeople{m: m}
@@ -94,9 +95,11 @@ func newMailFixture(t *testing.T) *mailFixture {
 	}
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains = map[string]state.MailDomain{}
+	// A posted certificate key (nothing is sent before one, T28 gap 5).
+	f.h.st.Mail.TLS = state.MailTLS{SPKISHA256: []string{strings.Repeat("ab", 32)}}
 	f.h.mu.Unlock()
 	f.engine.mu.Lock()
-	f.engine.containers = append(f.engine.containers, coreMailContainer("core-mail-1"))
+	f.engine.containers = append(f.engine.containers, providerContainer("prov-mail-1"))
 	f.engine.mu.Unlock()
 	// As if a baseline existed (no blind first document): the restart
 	// tests below set it up themselves.
@@ -146,7 +149,7 @@ func TestRemovalSentImmediately(t *testing.T) {
 	if f.mc.Puts() != 2 || len(f.mc.Last().Accounts) != 2 {
 		t.Fatalf("puts %d, %+v", f.mc.Puts(), f.mc.Last())
 	}
-	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "core-mail-1:2s" {
+	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "prov-mail-1:2s" {
 		t.Errorf("restarts %v", r)
 	}
 	if lo := f.h.LastOp(opKeyMail); lo == nil || !lo.OK || lo.Op != OpMailRestart {
@@ -241,47 +244,50 @@ func TestMassRemovalFlagOnlyForHubRemovals(t *testing.T) {
 	}
 }
 
-// coreMailContainer is core's mail container as compose labels it.
-func coreMailContainer(id string) docker.Container {
-	return docker.Container{ID: id, Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mail",
-		"com.docker.compose.project.working_dir": "/host/project", "com.docker.compose.oneoff": "False"}}
-}
-
-// TestMailRestartOnlyTargetsCoreMail: exactly the one container of core's
-// project (service mail, not a one-off, in core's directory); another
-// project's mail, a one-off and another working directory are ignored;
-// two candidates refuse; none refuses; a failed restart is recorded.
-func TestMailRestartOnlyTargetsCoreMail(t *testing.T) {
+// TestMailRestartTargetsWiredProvider: exactly the one container of the
+// wired provider's project and sessions.restart service (not a one-off);
+// another service, another project and core's are ignored; two
+// candidates refuse; none refuses; nothing wired refuses.
+func TestMailRestartTargetsWiredProvider(t *testing.T) {
 	f := newMailFixture(t)
-	oneoff := coreMailContainer("core-mail-run")
+	oneoff := providerContainer("prov-run")
 	oneoff.Labels["com.docker.compose.oneoff"] = "True"
-	elsewhere := coreMailContainer("other-checkout")
-	elsewhere.Labels["com.docker.compose.project.working_dir"] = "/srv/other"
 	f.engine.mu.Lock()
 	f.engine.containers = append(f.engine.containers,
-		docker.Container{ID: "app-mail", Labels: map[string]string{docker.LabelProject: "portcullis-mailapp", docker.LabelService: "mail"}},
-		docker.Container{ID: "core-mailctl", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "mailctl"}},
-		oneoff, elsewhere)
+		docker.Container{ID: "other-stalwart", Labels: map[string]string{docker.LabelProject: "portcullis-mailapp", docker.LabelService: "stalwart"}},
+		docker.Container{ID: "prov-adapter", Labels: map[string]string{docker.LabelProject: "portcullis-mailsrv", docker.LabelService: "adapter"}},
+		docker.Container{ID: "core-mail", Labels: map[string]string{docker.LabelProject: "portcullis", docker.LabelService: "stalwart"}},
+		oneoff)
 	f.engine.mu.Unlock()
 	ctx := context.Background()
-	if err := f.h.restartCoreMail(ctx); err != nil {
+	if err := f.h.restartMailProvider(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "core-mail-1:2s" {
+	if r := f.engine.Restarts(); len(r) != 1 || r[0] != "prov-mail-1:2s" {
 		t.Fatalf("restarts %v", r)
 	}
 	f.engine.mu.Lock()
-	f.engine.containers = append(f.engine.containers, coreMailContainer("core-mail-2"))
+	f.engine.containers = append(f.engine.containers, providerContainer("prov-mail-2"))
 	f.engine.mu.Unlock()
-	if err := f.h.restartCoreMail(ctx); err == nil || !strings.Contains(err.Error(), "2 containers") {
+	if err := f.h.restartMailProvider(ctx); err == nil || !strings.Contains(err.Error(), "2 containers") {
 		t.Fatalf("two candidates: %v", err)
 	}
 	f.engine.mu.Lock()
-	f.engine.containers = []docker.Container{oneoff, elsewhere}
+	f.engine.containers = []docker.Container{oneoff}
 	f.engine.mu.Unlock()
-	if err := f.h.restartCoreMail(ctx); err == nil || !strings.Contains(err.Error(), "not found") {
+	if err := f.h.restartMailProvider(ctx); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("none: %v", err)
 	}
+	f.h.mu.Lock()
+	wired := f.h.st.Mail.Provider
+	f.h.st.Mail.Provider = nil
+	f.h.mu.Unlock()
+	if err := f.h.restartMailProvider(ctx); !errors.Is(err, errMailNotWired) {
+		t.Fatalf("nothing wired: %v", err)
+	}
+	f.h.mu.Lock()
+	f.h.st.Mail.Provider = wired
+	f.h.mu.Unlock()
 	if r := f.engine.Restarts(); len(r) != 1 {
 		t.Fatalf("refused restarts ran: %v", r)
 	}
@@ -298,7 +304,7 @@ func TestMailRestartOnlyTargetsCoreMail(t *testing.T) {
 func TestKubeNeverRestartsMail(t *testing.T) {
 	f := newFixture(t)
 	f.h.rt = kubeKindRuntime{f.h.rt}
-	if err := f.h.restartCoreMail(context.Background()); !errors.Is(err, runtime.ErrUnsupported) {
+	if err := f.h.restartMailProvider(context.Background()); !errors.Is(err, runtime.ErrUnsupported) {
 		t.Fatalf("kube: %v", err)
 	}
 	if len(f.engine.Restarts()) != 0 {
@@ -315,7 +321,7 @@ func (kubeKindRuntime) Kind() runtime.Kind { return runtime.KindKubernetes }
 func TestRestartWhenApplyTimesOut(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
-	f.mc.Lock(func(s *mailctltest.Server) { s.HoldApply = true })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.HoldApply = true })
 	f.people.setMembers("mail_users", "alice", "root")
 	start := time.Now()
 	f.sync(t)
@@ -384,21 +390,21 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains["team-b.example.net"] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets["team-b.example.net"] = mailctl.DNSSet{Domain: "team-b.example.net", DKIM: "auto", TLSA: "withheld: dnssec unsigned",
-			Records: []mailctl.Record{{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets["team-b.example.net"] = mailprovider.DNSSet{Domain: "team-b.example.net", DKIM: "auto",
+			Records: []mailprovider.Record{{Name: "team-b.example.net", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec("team-b.example.net")}}
 	})
 	f.sync(t)
 	f.dom.mu.Lock()
 	calls := strings.Join(f.dom.mailCalls, ",")
 	recs := f.dom.mailSets["team-b.example.net"]
 	f.dom.mu.Unlock()
-	if calls != "put team-b.example.net" || len(recs) != 1 || recs[0].Value != "10 mail.example.org." {
+	if calls != "put team-b.example.net" || len(recs) != 2 || recs[0].Value != "10 mail.example.org." {
 		t.Fatalf("calls %q recs %+v", calls, recs)
 	}
 	// No *.<e> address record in the plan: ?wildcard=false; with one, true.
 	var wc string
-	f.mc.Lock(func(s *mailctltest.Server) { wc = s.Wildcards["team-b.example.net"] })
+	f.mc.Lock(func(s *mailprovidertest.Server) { wc = s.Wildcards["team-b.example.net"] })
 	if wc != "false" {
 		t.Fatalf("wildcard %q", wc)
 	}
@@ -407,7 +413,7 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	f.dom.mu.Unlock()
 	f.advance(mailDNSEvery)
 	f.sync(t)
-	f.mc.Lock(func(s *mailctltest.Server) { wc = s.Wildcards["team-b.example.net"] })
+	f.mc.Lock(func(s *mailprovidertest.Server) { wc = s.Wildcards["team-b.example.net"] })
 	if wc != "true" {
 		t.Fatalf("wildcard with *.<e>: %q", wc)
 	}
@@ -415,15 +421,15 @@ func TestSyncMailDNSSetsAndDeletes(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains["team-b.example.net"] = state.MailDomain{Draining: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.StatusV.MTASTS = []mailctl.StatusMTASTS{{Domain: "team-b.example.net", Mode: "none"}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.StatusV.MTASTS = []mailprovider.StatusMTASTS{{Domain: "team-b.example.net", Mode: "none"}}
 	})
 	f.sync(t)
 	if d := f.mc.Last().Domains; d[1].Mail != "draining" {
 		t.Fatalf("draining doc %+v", d)
 	}
 	// mailctl reports it off: the Hub turns it off, sends off, deletes.
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.MTASTS[0].Mode = "off" })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.MTASTS[0].Mode = "off" })
 	f.advance(mailDNSEvery)
 	f.sync(t) // the DNS pass sees off
 	f.sync(t) // sends off, then deletes the set
@@ -536,13 +542,13 @@ func TestMailDNSByHash(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec(d)}}
 		s.StatusV.DNS = map[string]string{d: "h1", "example.org": "m1"}
 	})
 	f.sync(t) // the full pass: written, h1 recorded
 	counts := func() (gets, puts int) {
-		f.mc.Lock(func(s *mailctltest.Server) {
+		f.mc.Lock(func(s *mailprovidertest.Server) {
 			for _, r := range s.Requests {
 				if strings.HasPrefix(r, "GET /v1/dns/") {
 					gets++
@@ -565,8 +571,8 @@ func TestMailDNSByHash(t *testing.T) {
 		t.Fatalf("unchanged: gets %d puts %d", g, p)
 	}
 	// Changed: exactly one refetch and PUT, then nothing again.
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail2.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "20 mail.example.org."}, dmarcRec(d)}}
 		s.StatusV.DNS = map[string]string{d: "h2", "example.org": "m2"}
 	})
 	f.sync(t) // not due yet: nothing
@@ -578,7 +584,7 @@ func TestMailDNSByHash(t *testing.T) {
 	f.dom.mu.Lock()
 	recs := f.dom.mailSets[d]
 	f.dom.mu.Unlock()
-	if g, p := counts(); g != g0+1 || p != p0+1 || len(recs) != 1 || recs[0].Value != "10 mail2.example.org." {
+	if g, p := counts(); g != g0+1 || p != p0+1 || len(recs) != 2 || recs[0].Value != "20 mail.example.org." {
 		t.Fatalf("changed: gets %d puts %d recs %+v", g, p, recs)
 	}
 	f.advance(mailDNSHashEvery)
@@ -587,7 +593,7 @@ func TestMailDNSByHash(t *testing.T) {
 		t.Fatalf("after the write: gets %d puts %d", g, p)
 	}
 	// A failed PUT: retried on the next tick, then recorded.
-	f.mc.Lock(func(s *mailctltest.Server) { s.StatusV.DNS = map[string]string{d: "h3"} })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.StatusV.DNS = map[string]string{d: "h3"} })
 	f.dom.mu.Lock()
 	f.dom.mailSetErr = errors.New("domains service down")
 	f.dom.mu.Unlock()
@@ -621,8 +627,8 @@ func TestMailDNSHashForgottenOnFailure(t *testing.T) {
 	f.h.mu.Lock()
 	f.h.st.Mail.Domains[d] = state.MailDomain{Enabled: true, Groups: []string{"team_b"}}
 	f.h.mu.Unlock()
-	f.mc.Lock(func(s *mailctltest.Server) {
-		s.DNSSets[d] = mailctl.DNSSet{Domain: d, DKIM: "auto", Records: []mailctl.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}}
+	f.mc.Lock(func(s *mailprovidertest.Server) {
+		s.DNSSets[d] = mailprovider.DNSSet{Domain: d, DKIM: "auto", Records: []mailprovider.Record{{Name: d, Type: "MX", TTL: 3600, Value: "10 mail.example.org."}, dmarcRec(d)}}
 		s.StatusV.DNS = map[string]string{"Team-B.Example.NET": "h1"}
 	})
 	f.sync(t) // written, h1 recorded (the key read lowercase)
@@ -661,5 +667,30 @@ func TestMailDNSHashForgottenOnFailure(t *testing.T) {
 	f.h.mailState.mu.Unlock()
 	if kept {
 		t.Fatal("the hash of a removed set was kept")
+	}
+}
+
+// dmarcRec is a valid _dmarc record for d (p=reject: every floor).
+func dmarcRec(d string) mailprovider.Record {
+	return mailprovider.Record{Name: "_dmarc." + d, Type: "TXT", TTL: 3600, Value: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d}
+}
+
+// TestNoDocumentWithoutCertKey (T28 gap 5, core): with no certificate
+// key posted, nothing is sent; once one is, the document goes.
+func TestNoDocumentWithoutCertKey(t *testing.T) {
+	f := newMailFixture(t)
+	f.h.mu.Lock()
+	f.h.st.Mail.TLS = state.MailTLS{}
+	f.h.mu.Unlock()
+	f.sync(t)
+	if f.mc.Puts() != 0 {
+		t.Fatalf("%d documents without a key", f.mc.Puts())
+	}
+	if _, err := f.h.HostMailTLS(context.Background(), []string{strings.Repeat("cd", 32)}, f.now.Add(60*24*time.Hour)); err != nil {
+		t.Logf("tls: %v", err) // the reload may fail before a first document; the key is recorded
+	}
+	f.sync(t)
+	if f.mc.Puts() != 1 || len(f.mc.Last().TLS.SPKISHA256) != 1 {
+		t.Fatalf("puts %d", f.mc.Puts())
 	}
 }

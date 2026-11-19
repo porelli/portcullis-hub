@@ -29,17 +29,19 @@ import (
 // fakeRunner records compose calls and checks that no two operations on the
 // same project ever overlap.
 type fakeRunner struct {
-	mu         sync.Mutex
-	calls      []string
-	projects   []compose.Project
-	active     map[string]int
-	overlap    []string
-	upErr      error
-	downErr    error
-	byNameErr  error
-	creates    []string
-	createHook func(project string)
-	upHook     func(project string) // runs inside Up (after begin)
+	mu        sync.Mutex
+	calls     []string
+	projects  []compose.Project
+	active    map[string]int
+	overlap   []string
+	upErr     error
+	downErr   error
+	byNameErr error
+	// byNameBlock: DownByName waits for its context (a down that hangs).
+	byNameBlock bool
+	creates     []string
+	createHook  func(project string)
+	upHook      func(project string) // runs inside Up (after begin)
 	// upCtxHook runs inside Up before upHook with Up's context (a killed
 	// up — its context cancelled meanwhile — returns its error).
 	upCtxHook func(ctx context.Context)
@@ -141,6 +143,10 @@ func (f *fakeRunner) Env() []string { return compose.Environ("") }
 func (f *fakeRunner) DownByName(ctx context.Context, name string) error {
 	f.begin("downbyname", name, compose.Project{Name: name})
 	defer f.end(name)
+	if f.byNameBlock {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if f.byNameErr == nil && f.onDown != nil {
 		f.onDown(name)
 	}
@@ -860,6 +866,13 @@ func writeFile(t *testing.T, path, content string) {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureExtra(t, nil, nil)
+}
+
+// newFixtureExtra is newFixture with extra templates in the source
+// (id → path under the template dir → content).
+func newFixtureExtra(t *testing.T, extra map[string]map[string]string, cfg func(root string, c *Config)) *fixture {
+	t.Helper()
 	root := t.TempDir()
 	f := &fixture{
 		runner:  newFakeRunner(),
@@ -875,6 +888,11 @@ func newFixture(t *testing.T) *fixture {
 	writeFile(t, filepath.Join(f.src, "grafana", "conf", "grafana.ini"), "[x]\n")
 	writeFile(t, filepath.Join(f.src, "other", "manifest.yaml"), otherManifest)
 	writeFile(t, filepath.Join(f.src, "other", "compose.yml"), otherCompose)
+	for id, files := range extra {
+		for name, content := range files {
+			writeFile(t, filepath.Join(f.src, id, name), content)
+		}
+	}
 
 	st := state.New()
 	st.Sources = []state.Source{{Name: "local", Path: f.src}}
@@ -882,7 +900,11 @@ func newFixture(t *testing.T) *fixture {
 	if err := st.Save(filepath.Join(f.data, "state.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	h, err := newTestHub(Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}, f.runner, f.engine, f.idp)
+	c := Config{ProjectDir: f.project, ProjectHostDir: "/host/project", DataDir: f.data, Domain: "example.org", ClientCertTTL: 720 * time.Hour}
+	if cfg != nil {
+		cfg(root, &c)
+	}
+	h, err := newTestHub(c, f.runner, f.engine, f.idp)
 	if err != nil {
 		t.Fatal(err)
 	}

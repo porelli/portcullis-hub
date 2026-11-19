@@ -131,6 +131,12 @@ func Placement(compose []byte, m Manifest, env map[string]string, bindRoots []st
 	if m.VPN != nil {
 		out = append(out, "is a VPN provider (vpn: block)")
 	}
+	// The Hub's override mounts core volumes into it (hub_secrets,
+	// mail_tls) and joins core networks; its listeners are MAIL_HOSTNAME's
+	// (final review M2).
+	if m.Mail != nil {
+		out = append(out, "is a mail provider (mail: block)")
+	}
 	out = append(out, r.hostGateway...)
 	out = append(out, r.device...)
 	out = append(out, r.capability...)

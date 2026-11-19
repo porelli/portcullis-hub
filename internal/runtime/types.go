@@ -138,6 +138,10 @@ type Volume struct {
 type Network struct {
 	Name    string
 	Subnets []netip.Prefix
+	// Internal: the network has no external connectivity; Labels its
+	// labels (compose's project and network keys).
+	Internal bool
+	Labels   map[string]string
 }
 
 // BindMount is one host directory bound into a started helper (always the

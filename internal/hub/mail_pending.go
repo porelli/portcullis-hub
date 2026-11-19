@@ -13,7 +13,8 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -34,7 +35,19 @@ import (
 // people's passwords (each until it succeeds) and restarts mail, then
 // sends the fallback document. Anything it can't do safely blocks the
 // sync (mail_sync_blocked) and sends nothing. It returns the next sleep.
-func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailctl.MailState, d mailDiff, refusal error) time.Duration {
+func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailprovider.MailState, d mailDiff, refusal error) time.Duration {
+	// The provider's own guard refused (Ruling R-SWITCH-BASE-3): the fresh
+	// mark only ever skipped the Hub's judgement. It is spent now, so the
+	// refusal stays a normal pending removal (a full administrator
+	// confirms exactly the provider's list) and the sync waits on it.
+	if !isHubMassRemoval(refusal) {
+		h.mu.Lock()
+		if h.st.Mail.FreshInstance != "" {
+			h.st.Mail.FreshInstance = ""
+			h.saveLocked()
+		}
+		h.mu.Unlock()
+	}
 	var gone []state.MailPendingAccount
 	if last != nil {
 		for _, a := range last.Accounts {
@@ -47,7 +60,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailc
 	} else {
 		// No baseline: mailctl's own list of the accounts it refused to
 		// remove is the only safe source.
-		var ae *mailctl.APIError
+		var ae *mailprovider.APIError
 		if errors.As(refusal, &ae) {
 			for _, r := range ae.Removed {
 				if r.UUID != "" && r.Username != "" {
@@ -57,15 +70,26 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailc
 		}
 	}
 	if len(gone) == 0 {
-		h.mailSetBlocked("mailctl refused a mass removal and the Hub can't tell whose mailboxes it would remove (no baseline, and mailctl named none): nothing is sent until it can")
+		h.mailSetBlocked("the mail provider refused a mass removal and the Hub can't tell whose mailboxes it would remove (no baseline, and the provider named none): nothing is sent until it can")
 		return mailRetry
 	}
 	sort.Slice(gone, func(i, j int) bool { return gone[i].Username < gone[j].Username })
-	if err := h.mailRecordPending(gone); err != nil {
+	var refusalDoc []state.MailPendingAccount
+	fromProvider := last == nil && !isHubMassRemoval(refusal)
+	if fromProvider && doc != nil {
+		for _, a := range doc.Accounts {
+			refusalDoc = append(refusalDoc, state.MailPendingAccount{Username: a.Username, UUID: a.UUID})
+		}
+	}
+	if err := h.mailRecordPending(gone, fromProvider, refusalDoc); err != nil {
 		h.mailLogOnce("mail: the pending removal couldn't be saved (nothing done, retrying): " + err.Error())
 		return mailRetry
 	}
-	h.mailLogOnce(fmt.Sprintf("mail: mailctl refused removing %d mailboxes at once: waiting for an administrator's confirmation (their mail passwords are revoked meanwhile)", len(gone)))
+	who := "the mail provider refused"
+	if isHubMassRemoval(refusal) {
+		who = "the Hub held"
+	}
+	h.mailLogOnce(fmt.Sprintf("mail: %s removing %d mailboxes at once: waiting for an administrator's confirmation (their mail passwords are revoked meanwhile)", who, len(gone)))
 	if !h.mailRevokePending(ctx, api) {
 		return mailRetry
 	}
@@ -96,7 +120,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailc
 	s.mu.Lock()
 	s.last, s.blind = &sent, false
 	s.mu.Unlock()
-	h.saveMailLast(&sent)
+	h.saveMailLast(&sent, s.passWiring)
 	if d2.removal {
 		h.mailWaitApplied(ctx, api, gen)
 		h.mailRestart(ctx, "a removal")
@@ -124,8 +148,8 @@ func (h *Hub) mailRevokePending(ctx context.Context, api MailAPI) bool {
 	h.mu.RUnlock()
 	revoked := map[string]string{}
 	for _, a := range todo {
-		live, err := api.Credentials(ctx, a.Username)
-		if err != nil && mailctl.StatusOf(err) != http.StatusNotFound {
+		live, err := api.Credentials(ctx, a.UUID)
+		if err != nil && mailprovider.StatusOf(err) != http.StatusNotFound {
 			log.Printf("mail: revoking %s's mail passwords (pending removal): %v", a.Username, err)
 			continue
 		}
@@ -189,13 +213,13 @@ func (h *Hub) MailSyncBlocked() string {
 // mailFallback is doc with the accounts removed (by uuid) put back as last
 // had them: their addresses that are still on a live domain of doc and
 // unused there; nil when one can't keep its primary address.
-func mailFallback(last, doc *mailctl.MailState, removed map[string]string) *mailctl.MailState {
+func mailFallback(last, doc *mailprovider.MailState, removed map[string]string) *mailprovider.MailState {
 	fb := *doc
-	fb.Accounts = append([]mailctl.Account(nil), doc.Accounts...)
+	fb.Accounts = append([]mailprovider.Account(nil), doc.Accounts...)
 	fb.ConfirmMassRemoval = false
 	live := map[string]bool{}
 	for _, dm := range doc.Domains {
-		if dm.Mail != mailctl.MailOff {
+		if dm.Mail != mailprovider.MailOff {
 			live[dm.Name] = true
 		}
 	}
@@ -219,7 +243,7 @@ func mailFallback(last, doc *mailctl.MailState, removed map[string]string) *mail
 		if !ids[a.UUID] {
 			continue
 		}
-		if slices.ContainsFunc(fb.Accounts, func(x mailctl.Account) bool { return x.Username == a.Username }) {
+		if slices.ContainsFunc(fb.Accounts, func(x mailprovider.Account) bool { return x.Username == a.Username }) {
 			// The username is someone else's now: their old mailbox can
 			// only wait for the confirmation.
 			return nil
@@ -247,14 +271,23 @@ func mailFallback(last, doc *mailctl.MailState, removed map[string]string) *mail
 // what is recorded (revoked flags, a confirmation); a different set is a
 // new pending removal (a new Since, no confirmation). A save failure
 // leaves the old state and is returned (the pass fails).
-func (h *Hub) mailRecordPending(gone []state.MailPendingAccount) error {
+func (h *Hub) mailRecordPending(gone []state.MailPendingAccount, fromProvider bool, refusalDoc []state.MailPendingAccount) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval
-	if p != nil && slices.Equal(pendingUUIDs(p.Accounts), pendingUUIDs(gone)) {
+	listed := pendingUUIDs(gone)
+	if p != nil && slices.Equal(pendingUUIDs(p.Accounts), listed) {
+		if fromProvider && (!p.FromProvider || !slices.Equal(p.ProviderListed, listed)) {
+			p.FromProvider, p.ProviderListed, p.RefusalDoc = true, listed, refusalDoc
+			return h.saveStateLocked()
+		}
 		return nil
 	}
-	h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: h.mailNow(), Accounts: gone}
+	np := &state.MailPendingRemoval{Since: h.mailNow(), Accounts: gone}
+	if fromProvider {
+		np.FromProvider, np.ProviderListed, np.RefusalDoc = true, listed, refusalDoc
+	}
+	h.st.Mail.PendingRemoval = np
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail.PendingRemoval = p
 		return err
@@ -300,7 +333,7 @@ func (h *Hub) mailPendingConfirmed(removed map[string]string) bool {
 // mail_users (in doc); an emptied set clears the pending removal, any
 // change voids a confirmation. Their passwords stay revoked (they make
 // new ones). A save failure is returned (the pass fails).
-func (h *Hub) mailPendingReconcile(doc *mailctl.MailState) error {
+func (h *Hub) mailPendingReconcile(doc *mailprovider.MailState) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval
@@ -359,6 +392,26 @@ type MailPendingView struct {
 	// false: revoking failed, retrying).
 	Accounts  []state.MailPendingAccount `json:"accounts"`
 	Confirmed bool                       `json:"confirmed"`
+	// ConfirmPhrase is what POST /api/mail/confirm-removal's confirm
+	// must be (Ruling R-CONFIRM-REMOVAL).
+	ConfirmPhrase string `json:"confirm_phrase"`
+}
+
+// mailRemovalPhrase is the typed confirmation for removing n mailboxes.
+func mailRemovalPhrase(n int) string {
+	if n == 1 {
+		return "remove 1 mailbox"
+	}
+	return fmt.Sprintf("remove %d mailboxes", n)
+}
+
+// ConfirmRemovalInput is POST /api/mail/confirm-removal's body: the
+// pending accounts (exactly), the typed phrase and the fresh sign-in.
+type ConfirmRemovalInput struct {
+	Accounts []string
+	Confirm  string
+	Proof    *freshauth.Proof
+	Listener string
 }
 
 // mailPendingView is the pending removal (nil: none). Caller holds mu.
@@ -367,31 +420,72 @@ func (h *Hub) mailPendingViewLocked() *MailPendingView {
 	if p == nil {
 		return nil
 	}
-	return &MailPendingView{Since: p.Since, Accounts: append([]state.MailPendingAccount{}, p.Accounts...), Confirmed: p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p)}
+	return &MailPendingView{Since: p.Since, Accounts: append([]state.MailPendingAccount{}, p.Accounts...), Confirmed: p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p),
+		ConfirmPhrase: mailRemovalPhrase(len(p.Accounts))}
 }
 
-// ConfirmMailRemoval confirms the pending mass removal: uuids must be
-// exactly its accounts (409 otherwise: it changed since it was shown).
-// The next document carries confirm_mass_removal for exactly them.
-// Audited mail.confirm_removal.
-func (h *Hub) ConfirmMailRemoval(ctx context.Context, uuids []string, actor directory.Actor) (err error) {
+// ConfirmMailRemoval confirms the pending mass removal (Ruling
+// R-CONFIRM-REMOVAL: destructive and irreversible): a full administrator
+// in the browser, never AI or MCP (403), with a fresh sign-in (403
+// without one or with a stale one) and the typed phrase (400 naming it);
+// the accounts must be exactly the pending ones (409 otherwise). The
+// next document carries confirm_mass_removal for exactly them. Audited
+// mail.confirm_removal with the list.
+func (h *Hub) ConfirmMailRemoval(ctx context.Context, in ConfirmRemovalInput, actor directory.Actor) (err error) {
 	if err := h.mailWriteGuard(); err != nil {
 		return err
 	}
-	defer func() { h.auditOp(actor, "mail.confirm_removal", "mail", fmt.Sprintf("count=%d", len(uuids)), err) }()
+	defer func() {
+		ids := slices.Clone(in.Accounts)
+		sort.Strings(ids)
+		h.auditOp(actor, "mail.confirm_removal", "mail", fmt.Sprintf("count=%d accounts=%s", len(ids), strings.Join(ids, ",")), err)
+	}()
 	if strings.TrimSpace(actor.User) == "" {
 		return statusErr(http.StatusBadRequest, "no signed-in user to audit the change as")
 	}
-	if err := aiUnconfirmed(actor, "confirming a mass removal of mailboxes"); err != nil {
-		return err
+	// Full administrators only (lldap_admin, one predicate): never a
+	// delegate, whatever route called it.
+	if !h.isGlobalAdmin(ctx, actor.User) {
+		return statusErr(http.StatusForbidden, "%s", mailNotAdminText)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	if actor.Via != "" {
+		return statusErr(http.StatusForbidden, "confirming a removal of mailboxes happens only in the browser, never through MCP or AI")
+	}
+	h.mu.RLock()
 	p := h.st.Mail.PendingRemoval
+	n := 0
+	if p != nil {
+		n = len(p.Accounts)
+	}
+	h.mu.RUnlock()
 	if p == nil {
 		return statusErr(http.StatusConflict, "no mass removal is waiting")
 	}
-	want := slices.Clone(uuids)
+	if in.Proof == nil {
+		return statusErr(http.StatusForbidden, "confirming a removal of mailboxes needs a fresh sign-in")
+	}
+	// The phrase before the proof is spent (a typo costs no sign-in).
+	if phrase := mailRemovalPhrase(n); strings.TrimSpace(in.Confirm) != phrase {
+		return statusErr(http.StatusBadRequest, "type %q to confirm", phrase)
+	}
+	listener := in.Listener
+	if listener == "" {
+		listener = ListenerHub
+	}
+	if _, err := h.verifyTouch(ctx, listener, *in.Proof, actor.User); err != nil {
+		var tr *touchRefused
+		if errors.As(err, &tr) {
+			return tr.err
+		}
+		return errFreshAuth
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p = h.st.Mail.PendingRemoval
+	if p == nil {
+		return statusErr(http.StatusConflict, "no mass removal is waiting")
+	}
+	want := slices.Clone(in.Accounts)
 	sort.Strings(want)
 	if !slices.Equal(want, pendingUUIDs(p.Accounts)) {
 		return statusErr(http.StatusConflict, "the pending removal changed since it was shown: look again")
@@ -437,4 +531,67 @@ func (h *Hub) isGlobalAdmin(ctx context.Context, user string) bool {
 	}
 	m, err := h.membership(ctx)
 	return err == nil && isLLDAPAdmin(m, strings.ToLower(user))
+}
+
+// mailProviderPendingExtra (R-SWITCH-BASE-4b): with the provider's own
+// refusal in play, doc's removals are every account the provider then
+// held (its refusal's list and the refused document's accounts, and any
+// of the Hub's rows among them) that doc no longer has; those outside
+// the pending set. Caller holds mu (read).
+func (h *Hub) mailProviderPendingExtraLocked(p *state.MailPendingRemoval, doc *mailprovider.MailState, rows map[string]string) []state.MailPendingAccount {
+	in := map[string]bool{}
+	for _, a := range doc.Accounts {
+		in[a.UUID] = true
+	}
+	pending := pendingUUIDs(p.Accounts)
+	held := map[string]string{}
+	for _, u := range p.ProviderListed {
+		held[u] = ""
+	}
+	for _, a := range p.RefusalDoc {
+		held[a.UUID] = a.Username
+	}
+	var extra []state.MailPendingAccount
+	for u, name := range held {
+		if in[u] || slices.Contains(pending, u) {
+			continue
+		}
+		if name == "" {
+			name = rows[u]
+		}
+		extra = append(extra, state.MailPendingAccount{Username: name, UUID: u})
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i].UUID < extra[j].UUID })
+	return extra
+}
+
+// mailExtendPending adds extra to the provider-refusal pending removal:
+// a new set (its confirmation void), the provider's lists kept.
+func (h *Hub) mailExtendPending(extra []state.MailPendingAccount) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := h.st.Mail.PendingRemoval
+	if p == nil {
+		return nil
+	}
+	prev := *p
+	np := prev
+	np.Accounts = append(slices.Clone(prev.Accounts), extra...)
+	sort.Slice(np.Accounts, func(i, j int) bool { return np.Accounts[i].Username < np.Accounts[j].Username })
+	np.Since, np.ConfirmedHash = h.mailNow(), ""
+	h.st.Mail.PendingRemoval = &np
+	if err := h.saveStateLocked(); err != nil {
+		h.st.Mail.PendingRemoval = p
+		return err
+	}
+	return nil
+}
+
+// mailClearProviderRefusalLocked drops the provider-refusal binding of a
+// pending removal (any wiring or instance change): what remains is
+// judged by the Hub's own rules again. Caller holds mu.
+func (h *Hub) mailClearProviderRefusalLocked() {
+	if p := h.st.Mail.PendingRemoval; p != nil && (p.FromProvider || p.ProviderListed != nil || p.RefusalDoc != nil) {
+		p.FromProvider, p.ProviderListed, p.RefusalDoc = false, nil, nil
+	}
 }

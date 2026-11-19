@@ -84,6 +84,21 @@ type Config struct {
 	// "" = DefaultSecretsVolume), mounted into apps by subpath.
 	SecretsDir    string
 	SecretsVolume string
+	// MailAPIURL is HUB_MAIL_API_URL ("" = http://mail-api:<api.port>
+	// of the wired block, contract §19.1); MailSlotDir HUB_MAIL_SLOT_DIR
+	// (the mail_slot volume, "" = /mail-slot).
+	MailAPIURL  string
+	MailSlotDir string
+	// MailProviderSlotDir is HUB_MAIL_PROVIDER_SLOT_DIR (the
+	// mail_provider_slot volume, rw in the Hub; "" = no slot): the wired
+	// provider's gate files at its root (Ruling R-POD2).
+	MailProviderSlotDir string
+	// MailGID is the mail gate's group (0 = 2000, CT_GID_MAIL_PROVIDER;
+	// tests use their own).
+	MailGID int
+	// MailPolicyAddr is where the MTA-STS policy check dials Traefik's
+	// websecure ("" = traefik:443 on portcullis-proxy; tests).
+	MailPolicyAddr string
 	// MCPGateRecipientFile is HUB_MCP_GATE_RECIPIENT_FILE, the gate's age
 	// recipient (contract §15.4; "" or unreadable = no gate: Settings → AI
 	// shows gate_present false).
@@ -419,8 +434,48 @@ type Hub struct {
 	domainsAPI DomainsAPI
 	// mailAPI is core's mailctl (mail_core.go; nil = not connected:
 	// mail is off for the Hub, contract §19.1).
-	mailAPI          MailAPI
-	domainsReachable bool
+	mailAPI MailAPI
+	// mailClients caches the wired provider's client (mail_slot.go);
+	// mailModeForRender forces a render's mail mode (mailOverrideLocked,
+	// under mu).
+	mailClients       mailClients
+	mailModeForRender *mailMode
+	// mailRendered is each mail instance's mode at its last override
+	// render: startUp refuses an up whose mode changed since.
+	mailRendered mailUpModes
+	// mailVoid is the last void's outcome; mailBootstrapWait and
+	// mailPollEvery shorten the void's waits in tests.
+	mailVoid mailVoidState
+	// mailUpModes: each mail instance's mode at its last up (Ruling
+	// T8-void).
+	mailUpModes       mailUpModes
+	mailBootstrapWait time.Duration
+	// mailUnreach: since when the wired provider hasn't answered the
+	// doctor (mail_provider_unreachable after 10 min).
+	mailUnreach struct {
+		mu    sync.Mutex
+		since time.Time
+		why   string
+	}
+	// testHookDeleteBeforeLock runs between a delete's first mail check
+	// and its instance lock (tests).
+	testHookDeleteBeforeLock func(id string)
+	// mailStopWait bounds one owed down of a held provider (0: 2 min).
+	mailStopWait  time.Duration
+	mailPollEvery time.Duration
+	// mailVoidKick wakes RunMailVoidRetry (kickMailVoid).
+	mailVoidKick chan struct{}
+	// mailSlotOp serialises every mail wire, unwire, switch and
+	// re-confirm (lockMailSlot: a second one is refused 409);
+	// testHookMailSlotLocked runs once an op holds its locks, before its
+	// re-check (tests).
+	mailSlotOp sync.Mutex
+	// mailDNSProb: refused mail sets and MTA-STS policies per domain.
+	mailDNSProb mailDNSProblems
+	// mailLAN: the LAN-only verification's last breach.
+	mailLAN                mailLANOnly
+	testHookMailSlotLocked func(op string)
+	domainsReachable       bool
 	// domainsDeleting: names a DeleteDomain is removing (not assignable
 	// meanwhile); domainsGen changes with every domain operation's commit,
 	// so a RefreshDomains that started before it drops its stale list.
@@ -476,6 +531,9 @@ type Hub struct {
 	// op record; the restart stays owed).
 	lockPoll    time.Duration
 	restartWait time.Duration
+	// hostLockWait is how long a host mail op (`hub mail backup` /
+	// `restore`) waits for the instance's app lock (0: HostLockWait).
+	hostLockWait time.Duration
 	// owed: per instance, the strongest effect (reload, restart) a
 	// committed change still owes, mirrored in delivered.json "owed"
 	// (Init re-queues it); owedSeq counts its updates. Under owedMu,
@@ -788,6 +846,15 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 	if cfg.FixerImage != "" && (!strings.Contains(cfg.FixerImage, "@sha256:") || !docker.PinnedImage(cfg.FixerImage)) {
 		return nil, fmt.Errorf("HUB_FIXER_IMAGE %q must be pinned by digest (name@sha256:<64 hex>)", cfg.FixerImage)
 	}
+	if err := checkMailAPIURL(cfg.MailAPIURL); err != nil {
+		return nil, err
+	}
+	if cfg.MailProviderSlotDir != "" && !filepath.IsAbs(cfg.MailProviderSlotDir) {
+		return nil, fmt.Errorf("HUB_MAIL_PROVIDER_SLOT_DIR %q must be an absolute path", cfg.MailProviderSlotDir)
+	}
+	if cfg.MailSlotDir != "" && !filepath.IsAbs(cfg.MailSlotDir) {
+		return nil, fmt.Errorf("HUB_MAIL_SLOT_DIR %q must be an absolute path", cfg.MailSlotDir)
+	}
 	if cfg.SecretsVolume == "" {
 		cfg.SecretsVolume = DefaultSecretsVolume
 	}
@@ -811,6 +878,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		invKick:              make(chan struct{}, 1),
 		aiReconKick:          make(chan struct{}, 1),
 		credKick:             make(chan struct{}, 1),
+		mailVoidKick:         make(chan struct{}, 1),
 		mailKick:             make(chan struct{}, 1),
 		driftKey:             map[string]string{},
 		afterFunc:            realAfterFunc,
@@ -923,6 +991,16 @@ func (h *Hub) Init() {
 		h.requeueOwed()
 	} else {
 		h.afterEngineVerified("settings: owed reloads and restarts", h.requeueOwed)
+	}
+	// The mail slot (contract §19.8, §19.9 "Resuming"): a template that
+	// changed while the Hub was down holds the provider, the targets
+	// file, then an owed void resumes in void mode, never normal first.
+	h.checkMailHold()
+	h.writeMailTargets()
+	if h.engineVerifiedNow() {
+		h.resumeMail()
+	} else {
+		h.afterEngineVerified("mail: resuming an owed void", h.resumeMail)
 	}
 	// VPN (I2): running labels the rendering narrowed (or that can't be
 	// read) restart the instance.

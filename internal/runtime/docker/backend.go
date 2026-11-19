@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -91,7 +90,7 @@ type Options struct {
 	HelperImage string
 	// CoreDir is core's checkout on the host (PROJECT_HOST_DIR): the
 	// compose working directory of core's own containers
-	// (RestartCoreService; empty: refused).
+	// (RestartService; empty: refused).
 	CoreDir string
 }
 
@@ -145,6 +144,21 @@ func (b *Backend) Info(ctx context.Context) (runtime.Info, error) {
 	i.ForbiddenRoots = []string{root}
 	if i.APIVersion, err = b.engine.APIVersion(ctx); err != nil {
 		return i, fmt.Errorf("the API version: %w", err)
+	}
+	// The engine's own version from /version's Components (Ruling R-POD:
+	// Podman's compat API always says 1.41; its own version decides).
+	if vr, ok := b.engine.(engine.VersionReader); ok {
+		if cs, cerr := vr.Components(ctx); cerr == nil {
+			want := engine.ComponentDocker
+			if b.opt.Kind == runtime.KindPodman {
+				want = engine.ComponentPodman
+			}
+			for _, c := range cs {
+				if c.Name == want {
+					i.EngineVersion = c.Version
+				}
+			}
+		}
 	}
 	if i.Networks, err = b.engine.ListNetworks(ctx); err != nil {
 		return i, fmt.Errorf("the networks: %w", err)
@@ -255,42 +269,36 @@ func (b *Backend) Signal(ctx context.Context, id, sig string) error {
 	return b.engine.ContainerKill(ctx, id, sig)
 }
 
-// restartableCore are the core services RestartCoreService may restart.
-var restartableCore = map[string]bool{"mail": true}
+// labelOneOff marks compose's one-off containers (run, never restarted).
+const labelOneOff = "com.docker.compose.oneoff"
 
-// Core's compose labels besides project and service.
-const (
-	labelOneOff     = "com.docker.compose.oneoff"
-	labelWorkingDir = "com.docker.compose.project.working_dir"
-	coreProjectName = "portcullis"
-)
-
-func (b *Backend) RestartCoreService(ctx context.Context, service string, timeout time.Duration) error {
-	if !restartableCore[service] {
-		return fmt.Errorf("restart: %q is not a core service the Hub may restart", service)
+func (b *Backend) RestartService(ctx context.Context, project, service string, timeout time.Duration) error {
+	if project == "" || service == "" || project == "portcullis" {
+		return fmt.Errorf("restart: %q / %q is no instance service the Hub may restart", project, service)
 	}
-	if b.opt.CoreDir == "" {
-		return errors.New("restart: core's directory is not known: nothing was restarted")
-	}
-	cs, err := b.engine.ListContainers(ctx, engine.Filters{"label": []string{engine.LabelProject + "=" + coreProjectName, engine.LabelService + "=" + service}})
+	cs, err := b.engine.ListContainers(ctx, engine.Filters{"label": []string{engine.LabelProject + "=" + project, engine.LabelService + "=" + service}})
 	if err != nil {
 		return fmt.Errorf("listing containers: %w", err)
 	}
 	var ids []string
 	for _, c := range cs {
-		if c.Labels[engine.LabelProject] != coreProjectName || c.Labels[engine.LabelService] != service ||
-			strings.EqualFold(c.Labels[labelOneOff], "true") || filepath.Clean(c.Labels[labelWorkingDir]) != filepath.Clean(b.opt.CoreDir) {
+		if c.Labels[engine.LabelProject] != project || c.Labels[engine.LabelService] != service || strings.EqualFold(c.Labels[labelOneOff], "true") {
+			continue
+		}
+		// An exited leftover isn't the serving container (L20): only a
+		// live one counts.
+		if c.State == "exited" || c.State == "dead" || c.State == "created" {
 			continue
 		}
 		ids = append(ids, c.ID)
 	}
 	switch len(ids) {
 	case 0:
-		return fmt.Errorf("core's %s container was not found", service)
+		return fmt.Errorf("%s's %s container was not found", project, service)
 	case 1:
 		return b.engine.ContainerRestart(ctx, ids[0], timeout)
 	}
-	return fmt.Errorf("%d containers are core's %s: none was restarted", len(ids), service)
+	return fmt.Errorf("%d containers are %s's %s: none was restarted", len(ids), project, service)
 }
 
 func (b *Backend) State(ctx context.Context, id string) (runtime.State, error) {

@@ -21,7 +21,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -55,24 +55,31 @@ func IsMailUnavailable(err error) bool {
 	return errors.Is(err, errMailDown) || errors.Is(err, errMailNotReady) || errors.Is(err, errMailSecret)
 }
 
-// MailSecretProblem is the doctor's and Settings → Mail's text when mail
-// is on but the Hub's mail secret is missing or too short.
-const MailSecretProblem = "Mail can't be managed: the Hub's mail secret is missing or too short"
+// MailSecretProblem is the doctor's and Settings → Mail's text when a
+// provider is wired but the Hub has no usable API secret for it.
+const MailSecretProblem = "Mail can't be managed: the Hub's secret for the wired mail provider is missing or too short"
 
 // errMailSecret: every mail write answers it while the secret is bad.
 var errMailSecret = &StatusError{Status: http.StatusServiceUnavailable, Err: errors.New(MailSecretProblem)}
 
-// mailSecretInvalid: PORTCULLIS_MAIL=on but mailctl isn't configured
-// (the secret file missing, unreadable or under 32 characters), read
-// again at every call (a fixed file clears it without a restart).
+// mailSecretInvalid: the slot is open and a provider is wired in normal
+// mode, but its API client has no usable secret (the file missing,
+// unreadable or under 32 characters), read again at every call. Nothing
+// wired, a void owed or a hold are other states (the routes answer 503
+// "mail isn't running right now"; the settings stay editable).
 func (h *Hub) mailSecretInvalid() bool {
 	if !h.mailOn() {
 		return false
 	}
 	h.mu.RLock()
-	api := h.mailAPI
+	var api MailAPI
+	wired := false
+	if p := h.st.Mail.Provider; p != nil && h.mailModeLocked(p.Instance) == mailNormal {
+		wired = true
+		api = h.mailProviderAPILocked()
+	}
 	h.mu.RUnlock()
-	return api == nil || api.Available() != nil
+	return wired && (api == nil || api.Available() != nil)
 }
 
 // mailWriteGuard refuses a mail write while the secret is bad (503).
@@ -91,10 +98,12 @@ type MailPasswordView struct {
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	LastUsed  *time.Time `json:"last_used"`
-	// Status: active | voided (reset by a restore) | unconfirmed (an
-	// administrator's view while mailctl can't be read: never shown as
-	// active).
+	// Status: active | voided (reset by a restore, or the mail server
+	// changed) | unconfirmed (an administrator's view while the provider
+	// can't be read: never shown as active).
 	Status string `json:"status"`
+	// VoidedReason says why a voided password ended (contract §19.9).
+	VoidedReason string `json:"voided_reason,omitempty"`
 }
 
 // MyMailView is GET /api/me/mail.
@@ -132,7 +141,7 @@ func (c *CreatedMailPassword) Zero() {
 
 // mailAccount is the caller's account in the document the directory
 // builds now (nil, errNoMail: not in mail_users or mail off).
-func (h *Hub) mailAccount(ctx context.Context, user string) (*mailctl.Account, *mailctl.MailState, error) {
+func (h *Hub) mailAccount(ctx context.Context, user string) (*mailprovider.Account, *mailprovider.MailState, error) {
 	if h.mailClient() == nil {
 		return nil, nil, errNoMail
 	}
@@ -199,16 +208,22 @@ func (h *Hub) MailPasswords(user, uuid string) []MailPasswordView {
 		if uuid == "" || c.UUID != uuid {
 			continue
 		}
-		status := ""
+		status, why := "", ""
 		switch {
 		case c.Active():
 			status = "active"
 		case c.Reason == state.MailCredentialReasonVoidRestore:
-			status = "voided"
+			status, why = "voided", "reset by a restore"
+		case c.Reason == state.MailCredentialReasonProviderChanged:
+			on := ""
+			if c.RevokedAt != nil {
+				on = c.RevokedAt.UTC().Format("2006-01-02")
+			}
+			status, why = "voided", "the mail server changed on "+on+": create a new mail password"
 		default:
 			continue
 		}
-		out = append(out, MailPasswordView{ID: c.ID, Label: c.Label, CreatedAt: c.CreatedAt, ExpiresAt: c.ExpiresAt, Status: status})
+		out = append(out, MailPasswordView{ID: c.ID, Label: c.Label, CreatedAt: c.CreatedAt, ExpiresAt: c.ExpiresAt, Status: status, VoidedReason: why})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
@@ -299,7 +314,7 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 		if err := h.reconcileMailPasswords(ctx, api, user, uuid); err != nil {
 			return nil, err
 		}
-		if n := len(h.activeMailRowsOf(user, uuid)); n >= mailctl.MaxActivePasswords {
+		if n := len(h.activeMailRowsOf(user, uuid)); n >= mailprovider.MaxActivePasswords {
 			return nil, statusErr(http.StatusConflict, "at most 5 mail passwords: revoke one first")
 		}
 	}
@@ -344,15 +359,15 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 	if h.mailStillRemoving(user, uuid) {
 		return nil, errMailStillRemoving(user)
 	}
-	// 8. mailctl.
+	// 8. mailprovider.
 	created, err := api.CreateCredential(ctx, user, uuid, label, expires)
 	if err != nil {
 		created.Secret.Zero()
-		var ae *mailctl.APIError
-		if errors.As(err, &ae) && ae.Kind == mailctl.ErrorKindAccountMismatch {
+		var ae *mailprovider.APIError
+		if errors.As(err, &ae) && ae.Kind == mailprovider.ErrorKindAccountMismatch {
 			return nil, errMailStillRemoving(user)
 		}
-		switch mailctl.StatusOf(err) {
+		switch mailprovider.StatusOf(err) {
 		case http.StatusConflict:
 			return nil, statusErr(http.StatusConflict, "at most 5 mail passwords: revoke one first")
 		case http.StatusBadRequest:
@@ -386,6 +401,37 @@ func (h *Hub) createMailPassword(ctx context.Context, user, label, expiry string
 		}
 		created.Secret.Zero()
 		return nil, saveErr
+	}
+	// LAN-only (contract §19.6): the new credential must be limited to
+	// exactly the Local networks, else it is taken back and refused.
+	if h.mailCore().SubmissionLAN {
+		lctx, cancel := context.WithTimeout(ctx, mailCallTimeout)
+		live, lerr := api.Credentials(lctx, uuid)
+		cancel()
+		var mine []mailprovider.Credential
+		for _, c := range live {
+			if c.ID == created.ID && c.CreatedAt.Equal(created.CreatedAt) {
+				mine = append(mine, c)
+			}
+		}
+		// R-HH2: the password is never returned unless the new
+		// credential is verified limited; a take-back the provider
+		// doesn't confirm keeps the row and voids the provider.
+		refused := lerr != nil || len(mine) != 1
+		if refused {
+			if rerr := h.mailRevokeBounded(ctx, api, uuid, created.ID); rerr != nil {
+				log.Printf("mail: taking back %s's unverified mail password %s failed: %v", user, created.ID, rerr)
+				h.mailFailClosed(user + "'s unverified mail password can't be taken back")
+			} else {
+				h.mailEndRowsOf(user, uuid, mailprovider.Credential{ID: created.ID, CreatedAt: created.CreatedAt}, "lan-only")
+			}
+		} else if wider, _ := h.checkAllowedIPs(ctx, api, user, uuid, mine); wider > 0 {
+			refused = true
+		}
+		if refused {
+			created.Secret.Zero()
+			return nil, statusErr(http.StatusServiceUnavailable, "mail passwords can't be limited to the local networks right now: try again later")
+		}
 	}
 	h.auditOp(directory.Human(user), "mail_credential.create", user, fmt.Sprintf("id=%s label_length=%d", row.ID, utf8.RuneCountInString(label)), nil)
 	pw := []byte(created.Secret)
@@ -424,7 +470,7 @@ func (h *Hub) activeMailRows(user string) []state.MailCredential {
 // matchLive is the live password row c stands for: the same Stalwart id
 // and created_at, under the uuid the row was created with (a reused id
 // never revives a row).
-func matchLive(c state.MailCredential, uuid string, live []mailctl.Credential) bool {
+func matchLive(c state.MailCredential, uuid string, live []mailprovider.Credential) bool {
 	if c.UUID != uuid {
 		return false
 	}
@@ -458,7 +504,7 @@ func (h *Hub) reconcileMailPasswords(ctx context.Context, api MailAPI, user, uui
 
 // reconcileMailPasswordsWith is reconcileMailPasswords with mailctl's
 // status already read (nil: read when needed).
-func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user, uuid string, st *mailctl.Status) error {
+func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user, uuid string, st *mailprovider.Status) error {
 	unlock := h.mailPersonLock(user)
 	defer unlock()
 	rows0 := h.activeMailRows(user)
@@ -469,15 +515,25 @@ func (h *Hub) reconcileMailPasswordsWith(ctx context.Context, api MailAPI, user,
 	for _, c := range rows0 {
 		before[c.ID] = true
 	}
-	var live []mailctl.Credential
+	var live []mailprovider.Credential
 	if uuid != "" {
 		var err error
-		live, err = api.Credentials(ctx, user)
-		if mailctl.StatusOf(err) == http.StatusNotFound {
+		live, err = api.Credentials(ctx, uuid)
+		if mailprovider.StatusOf(err) == http.StatusNotFound {
 			live, err = nil, nil
 		}
 		if err != nil {
 			return errMailDown
+		}
+		// LAN-only (contract §19.6): a credential wider than the Local
+		// networks is revoked now; its row has ended.
+		if _, ids := h.checkAllowedIPs(ctx, api, user, uuid, live); len(ids) > 0 {
+			live = slices.DeleteFunc(live, func(c mailprovider.Credential) bool { return slices.Contains(ids, c.ID) })
+			rows0 = h.activeMailRows(user)
+			before = map[string]bool{}
+			for _, c := range rows0 {
+				before[c.ID] = true
+			}
 		}
 	}
 	if h.mailReconcileHook != nil {
@@ -573,7 +629,7 @@ func (h *Hub) mailFormerGone(ctx context.Context, api MailAPI, user string, c st
 	if last == nil {
 		last, _ = h.loadMailLast()
 	}
-	if last == nil || slices.ContainsFunc(last.Accounts, func(a mailctl.Account) bool { return a.UUID == c.UUID }) {
+	if last == nil || slices.ContainsFunc(last.Accounts, func(a mailprovider.Account) bool { return a.UUID == c.UUID }) {
 		return false
 	}
 	if err := api.RevokeCredential(ctx, c.UUID, c.StalwartID); err != nil {
@@ -704,7 +760,7 @@ func (h *Hub) mailRestoreReconcile(ctx context.Context, api MailAPI) {
 // most mailReconcileConcurrency at once, each under their own lock), with
 // mailctl's status st read once (nil: each reads it when needed): true
 // when every person reconciled.
-func (h *Hub) reconcileAllMailPasswords(ctx context.Context, api MailAPI, st *mailctl.Status) bool {
+func (h *Hub) reconcileAllMailPasswords(ctx context.Context, api MailAPI, st *mailprovider.Status) bool {
 	m, err := h.membership(ctx)
 	if err != nil {
 		log.Printf("mail: reconciling the mail passwords: the directory can't be read: %v", err)
@@ -836,8 +892,8 @@ func (h *Hub) revokeMailPassword(ctx context.Context, user, id string, actor dir
 	}
 	// Delete only the password this row stands for: a reused Stalwart id
 	// may name a newer password now.
-	live, lerr := api.Credentials(ctx, user)
-	if lerr != nil && mailctl.StatusOf(lerr) != http.StatusNotFound {
+	live, lerr := api.Credentials(ctx, cur)
+	if lerr != nil && mailprovider.StatusOf(lerr) != http.StatusNotFound {
 		return errMailDown
 	}
 	if matchLive(*row, cur, live) {

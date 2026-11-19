@@ -9,13 +9,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
 
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // Mail sync timing (contract §19.6).
@@ -42,10 +45,21 @@ const (
 type mailSync struct {
 	// pass serialises sync passes (RunMailSync and direct calls).
 	pass sync.Mutex
+	// passWiring is the wiring the running pass's client talks to (set
+	// at its start, under pass): what an accepted document is bound to.
+	passWiring mailWiring
 
 	mu sync.Mutex
 	// last is the last document mailctl accepted (nil: none since start).
-	last *mailctl.MailState
+	last *mailprovider.MailState
+	// blindListed: without a baseline, the uuids (sorted) the provider's
+	// own mass-removal refusal named: a confirmation of exactly that set
+	// is the only one that sends confirm_mass_removal (R-L8).
+	blindListed []string
+	// blindDoc: the accounts of the document that refusal answered; the
+	// flag is sent only for a document keeping every one of them (M1:
+	// nobody else rides on the confirmation).
+	blindDoc []string
 	// addSince: when the pending additions were first seen (zero: none).
 	addSince time.Time
 	// hubRemoved: the accounts (by uuid) an admin took out of mail_users
@@ -101,7 +115,7 @@ func (h *Hub) mailLastPath() string { return filepath.Join(h.cfg.DataDir, mailLa
 
 // loadMailLast reads the persisted last accepted document (nil, true:
 // none or unreadable: the first document is treated as removing).
-func (h *Hub) loadMailLast() (*mailctl.MailState, bool) {
+func (h *Hub) loadMailLast() (*mailprovider.MailState, bool) {
 	b, err := os.ReadFile(h.mailLastPath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -109,8 +123,8 @@ func (h *Hub) loadMailLast() (*mailctl.MailState, bool) {
 		}
 		return nil, true
 	}
-	var d mailctl.MailState
-	if err := json.Unmarshal(b, &d); err != nil || d.Version != mailctl.StateVersion {
+	var d mailprovider.MailState
+	if err := json.Unmarshal(b, &d); err != nil || d.Version != mailprovider.StateVersion {
 		log.Printf("mail: %s is corrupt: the first document is treated as a removal", mailLastFile)
 		return nil, true
 	}
@@ -119,14 +133,42 @@ func (h *Hub) loadMailLast() (*mailctl.MailState, bool) {
 
 // saveMailLast persists an accepted document (a failure is logged: the
 // next start then treats its first document as a removal).
-func (h *Hub) saveMailLast(d *mailctl.MailState) {
+func (h *Hub) saveMailLast(d *mailprovider.MailState, wr mailWiring) {
+	// The wiring that accepted it (the pass's client's). A switch since
+	// the send: discarded, so the new wiring's next pass starts as a new
+	// wiring (it never accepted this document).
+	current := func() bool {
+		p := h.st.Mail.Provider
+		return p != nil && p.Seq == wr.seq && p.Instance == wr.instance
+	}
+	h.mu.RLock()
+	ok := current()
+	h.mu.RUnlock()
+	if !ok {
+		log.Printf("mail: the provider changed after the document was accepted: it isn't kept as the new provider's baseline")
+		return
+	}
 	b, err := json.Marshal(d)
 	if err == nil {
 		err = fsutil.WriteFileAtomic(h.mailLastPath(), b, 0600)
 	}
 	if err != nil {
 		log.Printf("mail: saving %s: %v", mailLastFile, err)
+		return
 	}
+	// The binding after the file: a crash between the two leaves the
+	// file bound to the wiring before (a resend), never another
+	// wiring's document trusted.
+	h.mu.Lock()
+	if current() && (h.st.Mail.LastDocSeq != wr.seq || h.st.Mail.LastDocInstance != wr.instance || h.st.Mail.FreshInstance != "") {
+		h.st.Mail.LastDocSeq, h.st.Mail.LastDocInstance = wr.seq, wr.instance
+		// Its first document is accepted: the empty baseline is spent.
+		if h.st.Mail.FreshInstance == wr.instance {
+			h.st.Mail.FreshInstance = ""
+		}
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 }
 
 // hubRemoval is one recorded admin removal.
@@ -229,16 +271,18 @@ func (h *Hub) mailLogOnce(msg string) {
 
 // mailBuild reads the directory and builds the document (nil: nothing
 // to send, with why).
-func (h *Hub) mailBuild(ctx context.Context) (*mailctl.MailState, error) {
+func (h *Hub) mailBuild(ctx context.Context) (*mailprovider.MailState, error) {
 	m, err := h.membership(ctx)
 	if err != nil {
 		// A directory error sends nothing (contract §19.5).
 		return nil, err
 	}
 	dnssec := h.mailDNSSEC(ctx)
+	core := h.mailCore()
 	h.mu.RLock()
 	in := MailBuildInput{Membership: m, Settings: h.st.Mail, MainDomain: h.cfg.Domain, CoreOn: true, DNSSEC: dnssec,
-		LocalNetworks: prefixStrings(h.localNetworksLocked()), Generation: h.st.Mail.Generation}
+		LocalNetworks: prefixStrings(h.localNetworksLocked()), Generation: h.st.Mail.Generation,
+		MailHostname: core.Hostname, ClientIPRewritten: core.ClientIPRewritten, SubmissionLANOnly: core.SubmissionLAN}
 	doc, notes := BuildMailState(in)
 	h.mu.RUnlock()
 	s := &h.mailState
@@ -291,15 +335,18 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	s := &h.mailState
 	s.pass.Lock()
 	defer s.pass.Unlock()
-	api := h.mailClient()
+	api, passWiring := h.mailClientSeq()
 	if api == nil {
 		return mailIdle
 	}
+	s.passWiring = passWiring
 	// After every pass (so a slow mailctl never delays what it sent), in
 	// the background without the sync lock: the start-time reconcile and
 	// the restore check (a restore of mail voids every mail password,
 	// also one the Hub outlived), at least every 60 s.
 	defer func() { next = min(next, h.mailReconcileSoon(api)) }()
+	// A draining unwire finishes once every domain is off.
+	defer h.mailFinishUnwireIfDrained()
 	s.mu.Lock()
 	first := !s.loaded
 	if first {
@@ -317,7 +364,36 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		return mailRetry
 	}
 	now := h.mailNow()
+	// The last document is the current wiring's only: after a switch or
+	// a re-wire the provider has none of it (core e2e-mail 11/12: the
+	// unchanged directory sent nothing to the new provider), so the pass
+	// starts without a baseline (blind: the first document counts as a
+	// removal, judged by the Hub's own row baseline).
+	//
+	// Ruling R-SWITCH-BASE: another instance (a switch, a re-wire to a
+	// different instance) starts empty and its wiring's void revoked
+	// every credential: an EMPTY baseline, no removal computed, the first
+	// document sent at once (the provider's own guard, against its live
+	// accounts, still applies). The same instance re-wired keeps its
+	// store: the last document stays the baseline, and one is sent. The
+	// R-L8 row baseline is only for a lost mail-last.json.
+	//
+	// Ruling R-SWITCH-BASE-2: only the explicit mark (FreshInstance, set
+	// once the wiring's own void completed) grants the empty baseline;
+	// any other mismatch (an unknown or empty binding, a failed void) is
+	// blind: the R-L8 row baseline judges the first document (fail
+	// closed).
+	h.mu.RLock()
+	lastWiring := mailWiring{h.st.Mail.LastDocSeq, h.st.Mail.LastDocInstance}
+	freshProvider := passWiring.instance != "" && h.st.Mail.FreshInstance == passWiring.instance
+	h.mu.RUnlock()
 	s.mu.Lock()
+	switch {
+	case freshProvider:
+		s.last, s.blind = nil, false
+	case s.last != nil && passWiring != lastWiring:
+		s.last, s.blind = nil, true
+	}
 	last := s.last
 	d := diffMail(last, doc)
 	// No baseline (a first start, a lost mail-last.json): whoever left
@@ -327,6 +403,9 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		d.removal = true
 	}
 	s.mu.Unlock()
+	// (The old provider's pending removal was dropped once, by the
+	// wiring's void that set the fresh mark: a pending removal seen now
+	// is the new provider's own refusal, kept (R-SWITCH-BASE-3).)
 	// People back in mail_users leave the pending removal on every pass
 	// (an emptied set clears it, a changed one voids its confirmation).
 	if err := h.mailPendingReconcile(doc); err != nil {
@@ -359,10 +438,96 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	}
 	s.mu.Unlock()
 	confirm = confirm || (d.removedAccounts > 0 && h.mailPendingConfirmed(d.removedUUIDs))
+	// The Hub's own guard first (contract §19.5): a document removing
+	// more than half of the last accepted one's accounts is never sent
+	// unconfirmed, whatever the provider would do.
+	if removed, needs := mailMassRemoval(doc, last); needs && !confirm {
+		return h.mailMassRefused(ctx, api, last, doc, d, errHubMassRemoval(removed))
+	}
+	// No baseline (mail-last.json lost; Ruling R-L8): the provider API
+	// has no account list, so the Hub's own record of accounts that
+	// exist there (every person with an active mail password) is the
+	// baseline, and a document removing any of them waits for an
+	// administrator's confirmation.
+	// A confirmation then sends confirm_mass_removal only when it is of
+	// exactly the set the provider's own refusal named; otherwise the
+	// provider's guard judges the rest (a guardless one gets only what
+	// an administrator confirmed the Hub knows of).
+	if last == nil && !freshProvider {
+		h.mu.RLock()
+		pr := h.st.Mail.PendingRemoval
+		confirmed := pr != nil && pr.ConfirmedHash != "" && pr.ConfirmedHash == pendingHash(pr)
+		var pending []string
+		if pr != nil {
+			pending = pendingUUIDs(pr.Accounts)
+		}
+		// The provider's own refusal is in play (R-SWITCH-BASE-4/4b): its
+		// lists are authoritative (an old revoke_leave row the provider
+		// no longer held isn't a removal), and every removal of this
+		// document among what the provider then held must be inside the
+		// pending set: one more is a new pending removal, held.
+		fromProvider := pr != nil && pr.FromProvider
+		var extra []state.MailPendingAccount
+		if fromProvider {
+			extra = h.mailProviderPendingExtraLocked(pr, doc, h.mailRowBaselineLocked())
+		}
+		h.mu.RUnlock()
+		if len(extra) > 0 {
+			if err := h.mailExtendPending(extra); err != nil {
+				h.mailLogOnce("mail: the pending removal couldn't be saved (nothing done, retrying): " + err.Error())
+				return mailRetry
+			}
+			h.mailLogOnce(fmt.Sprintf("mail: %d more mailboxes would go since the provider's refusal: the pending removal waits for a new confirmation", len(extra)))
+			h.mailRevokePending(ctx, api)
+			h.mailSetBlocked("the pending removal changed: it waits for an administrator's confirmation")
+			return mailRetry
+		}
+		if !fromProvider {
+			if removed := mailRemovedFromRows(h.mailRowBaseline(), doc); len(removed) > 0 {
+				covered := confirmed
+				for _, r := range removed {
+					covered = covered && slices.Contains(pending, r.UUID)
+				}
+				if !covered {
+					return h.mailMassRefused(ctx, api, nil, doc, d, errHubMassRemoval(removed))
+				}
+			}
+		}
+		s.mu.Lock()
+		listed := s.blindListed
+		s.mu.Unlock()
+		kept := true
+		s.mu.Lock()
+		for _, u := range s.blindDoc {
+			kept = kept && slices.ContainsFunc(doc.Accounts, func(a mailprovider.Account) bool { return a.UUID == u })
+		}
+		s.mu.Unlock()
+		// A provider refusal's removals were judged above against its
+		// persisted lists (kept is that check's in-memory form).
+		confirm = confirmed && (fromProvider || (len(listed) > 0 && slices.Equal(listed, pending) && kept))
+	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
+	if errors.Is(err, errMailPendingHold) || errors.Is(err, errMailNoTLS) {
+		return mailRetry
+	}
 	if err != nil {
 		if isMassRemoval(err) {
+			var ae *mailprovider.APIError
+			if last == nil && errors.As(err, &ae) {
+				ids := make([]string, 0, len(ae.Removed))
+				for _, r := range ae.Removed {
+					ids = append(ids, r.UUID)
+				}
+				sort.Strings(ids)
+				docIDs := make([]string, 0, len(doc.Accounts))
+				for _, a := range doc.Accounts {
+					docIDs = append(docIDs, a.UUID)
+				}
+				s.mu.Lock()
+				s.blindListed, s.blindDoc = ids, docIDs
+				s.mu.Unlock()
+			}
 			return h.mailMassRefused(ctx, api, last, doc, d, err)
 		}
 		wait := mailRetry
@@ -406,7 +571,7 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		s.reconAll = true
 	}
 	s.mu.Unlock()
-	h.saveMailLast(&sent)
+	h.saveMailLast(&sent, s.passWiring)
 	h.mailSetBlocked("")
 	settleErr := h.mailPendingSettled()
 	if d.removal {
@@ -431,7 +596,27 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 // mailSend saves the next generation, then PUTs the document. A 409
 // "generation not greater" (state.yaml older than mailctl's) moves the
 // generation past mailctl's and tries once more.
-func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailctl.MailState, confirm bool) (int, error) {
+// errMailNoTLS: no certificate key posted yet; nothing is sent.
+var errMailNoTLS = errors.New("no mail certificate key posted yet")
+
+func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailprovider.MailState, confirm bool) (int, error) {
+	// An unconfirmed pending removal holds every document that still
+	// omits one of its accounts (security review of R-L8): only an
+	// administrator's confirmation of exactly that set releases it.
+	// (A document confirmed by the Hub's own removal records, confirm,
+	// is the reviewed second path: every account that goes was taken out
+	// by an administrator through the Hub.)
+	// No certificate key posted yet (core: the provider refuses a
+	// document whose tls.spki_sha256 isn't 1–2 keys): nothing is sent
+	// until `./portcullis mail rotate` posts one (POST /host/mail/tls).
+	if len(doc.TLS.SPKISHA256) == 0 {
+		h.mailLogOnce("mail: no state sent yet: the mail certificate's key isn't posted (./portcullis mail rotate on the host posts it)")
+		return 0, errMailNoTLS
+	}
+	if who := h.mailPendingOmitted(doc); who != "" && !confirm {
+		h.mailSetBlocked("the pending removal of " + who + " waits for an administrator's confirmation: nothing that removes them is sent")
+		return 0, errMailPendingHold
+	}
 	for try := 0; try < 2; try++ {
 		h.mu.Lock()
 		h.st.Mail.Generation++
@@ -447,7 +632,7 @@ func (h *Hub) mailSend(ctx context.Context, api MailAPI, doc *mailctl.MailState,
 		if err == nil {
 			return gen, nil
 		}
-		if mailctl.StatusOf(err) != 409 || try > 0 || isMassRemoval(err) {
+		if mailprovider.StatusOf(err) != 409 || try > 0 || isMassRemoval(err) {
 			return 0, err
 		}
 		st, serr := api.State(ctx)
@@ -494,16 +679,16 @@ func (h *Hub) mailWaitApplied(ctx context.Context, api MailAPI, gen int) bool {
 // the accounts, by its error_kind "mass_removal" only (never the text;
 // any other 409 is the generation's).
 func isMassRemoval(err error) bool {
-	var ae *mailctl.APIError
-	return errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == mailctl.ErrorKindMassRemoval
+	var ae *mailprovider.APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == mailprovider.ErrorKindMassRemoval
 }
 
 // mailRetireMainLocked: the main domain turned off is no longer sent once
 // a document with it off was accepted (the CLI owns its DNS).
-func (h *Hub) mailRetireMainLocked(doc *mailctl.MailState) {
+func (h *Hub) mailRetireMainLocked(doc *mailprovider.MailState) {
 	main := strings.ToLower(h.cfg.Domain)
 	for _, d := range doc.Domains {
-		if d.Name != main || d.Mail != mailctl.MailOff {
+		if d.Name != main || d.Mail != mailprovider.MailOff {
 			continue
 		}
 		h.mu.Lock()

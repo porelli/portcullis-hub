@@ -436,22 +436,20 @@ func (e *coreListEngine) ListContainers(_ context.Context, f engine.Filters) ([]
 	return out, nil
 }
 
-// TestRestartCoreServiceNarrow: only "mail"; only core's project, not a
-// one-off, in core's directory; 0 or several matches restart nothing;
-// no CoreDir refuses.
-func TestRestartCoreServiceNarrow(t *testing.T) {
+// TestRestartServiceNarrow: only the named instance project and
+// service, never a one-off; 0 or several matches restart nothing; core's
+// project is refused.
+func TestRestartServiceNarrow(t *testing.T) {
 	ctx := context.Background()
-	core := func(id string) engine.Container {
-		return engine.Container{ID: id, Labels: map[string]string{engine.LabelProject: "portcullis", engine.LabelService: "mail",
-			labelWorkingDir: "/host/core", labelOneOff: "False"}}
+	svc := func(id, project, service string) engine.Container {
+		return engine.Container{ID: id, Labels: map[string]string{engine.LabelProject: project, engine.LabelService: service, labelOneOff: "False"}}
 	}
-	oneoff, other := core("run1"), core("other")
+	oneoff := svc("run1", "portcullis-mailsrv", "stalwart")
 	oneoff.Labels[labelOneOff] = "True"
-	other.Labels[labelWorkingDir] = "/srv/x"
-	e := &coreListEngine{recorder: &recorder{}, cs: []engine.Container{core("m1"), oneoff, other,
-		{ID: "app", Labels: map[string]string{engine.LabelProject: "portcullis-app", engine.LabelService: "mail"}}}}
-	b := New(e.recorder, e, Options{Kind: runtime.KindDocker, CoreDir: "/host/core/"})
-	if err := b.RestartCoreService(ctx, "mail", 2*time.Second); err != nil {
+	e := &coreListEngine{recorder: &recorder{}, cs: []engine.Container{svc("s1", "portcullis-mailsrv", "stalwart"), oneoff,
+		svc("a1", "portcullis-mailsrv", "adapter"), svc("o1", "portcullis-other", "stalwart"), svc("core", "portcullis", "stalwart")}}
+	b := New(e.recorder, e, Options{Kind: runtime.KindDocker})
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	restarts := func() (n int, last string) {
@@ -462,27 +460,66 @@ func TestRestartCoreServiceNarrow(t *testing.T) {
 		}
 		return
 	}
-	if n, last := restarts(); n != 1 || last != "restart m1 2s" {
+	if n, last := restarts(); n != 1 || last != "restart s1 2s" {
 		t.Fatalf("restarts %d %q", n, last)
 	}
-	for _, svc := range []string{"mailctl", "hub", "traefik", ""} {
-		if err := b.RestartCoreService(ctx, svc, time.Second); err == nil {
-			t.Errorf("service %q restarted", svc)
+	for _, c := range [][2]string{{"portcullis", "stalwart"}, {"", "stalwart"}, {"portcullis-mailsrv", ""}, {"portcullis-mailsrv", "nope"}} {
+		if err := b.RestartService(ctx, c[0], c[1], time.Second); err == nil {
+			t.Errorf("%q restarted", c)
 		}
 	}
-	e.cs = append(e.cs, core("m2"))
-	if err := b.RestartCoreService(ctx, "mail", time.Second); err == nil || !strings.Contains(err.Error(), "2 containers") {
+	// An exited leftover of the service doesn't count (L20).
+	left := svc("s0", "portcullis-mailsrv", "stalwart")
+	left.State = "exited"
+	e.cs = append(e.cs, left)
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err != nil {
+		t.Fatalf("an exited leftover blocked the restart: %v", err)
+	}
+	if n, last := restarts(); n != 2 || last != "restart s1 1s" {
+		t.Fatalf("restarts %d %q", n, last)
+	}
+	e.cs = append(e.cs, svc("s2", "portcullis-mailsrv", "stalwart"))
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err == nil || !strings.Contains(err.Error(), "2 containers") {
 		t.Fatalf("two: %v", err)
 	}
-	e.cs = []engine.Container{oneoff, other}
-	if err := b.RestartCoreService(ctx, "mail", time.Second); err == nil {
-		t.Fatal("restarted a one-off or another checkout")
+	e.cs = []engine.Container{oneoff}
+	if err := b.RestartService(ctx, "portcullis-mailsrv", "stalwart", time.Second); err == nil {
+		t.Fatal("restarted a one-off")
 	}
-	if err := New(e.recorder, e, Options{Kind: runtime.KindDocker}).RestartCoreService(ctx, "mail", time.Second); err == nil {
-		t.Fatal("no CoreDir: restarted")
-	}
-	if n, _ := restarts(); n != 1 {
+	if n, _ := restarts(); n != 2 {
 		t.Fatalf("refused restarts ran: %d", n)
+	}
+}
+
+// versionEngine answers /version's Components (Ruling R-POD).
+type versionEngine struct {
+	*recorder
+	cs []engine.Component
+}
+
+func (v *versionEngine) Components(context.Context) ([]engine.Component, error) { return v.cs, nil }
+
+// TestInfoEngineVersionFromComponents (R-POD): Info's EngineVersion is
+// the runtime's own component version: "Podman Engine" under Podman,
+// "Engine" under Docker; the compat API version never stands in.
+func TestInfoEngineVersionFromComponents(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		kind runtime.Kind
+		cs   []engine.Component
+		want string
+	}{
+		{runtime.KindPodman, []engine.Component{{Name: "Podman Engine", Version: "5.4.0"}}, "5.4.0"},
+		{runtime.KindPodman, []engine.Component{{Name: "Podman Engine", Version: "4.9.3"}}, "4.9.3"},
+		{runtime.KindDocker, []engine.Component{{Name: "Engine", Version: "26.0.0"}, {Name: "containerd", Version: "1.7"}}, "26.0.0"},
+	} {
+		r := &recorder{}
+		e := &versionEngine{recorder: r, cs: c.cs}
+		b := New(r, e, Options{Kind: c.kind, HelperImage: testHelper})
+		info, err := b.Info(ctx)
+		if err != nil || info.EngineVersion != c.want {
+			t.Errorf("%s %v: %q %v", c.kind, c.cs, info.EngineVersion, err)
+		}
 	}
 }
 

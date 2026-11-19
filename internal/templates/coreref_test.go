@@ -756,26 +756,58 @@ func TestCoreFileMiddlewaresComplete(t *testing.T) {
 
 // TestCoreNamesIncludeMail: the mail core names of contract §3 are
 // reserved (services, volumes, aliases; networks and routers are the
-// templates validator's).
+// templates validator's); the old core mail profile's are free (P9).
 func TestCoreNamesIncludeMail(t *testing.T) {
-	for _, s := range []string{"mail", "mailctl", "mail-resolver", "mail-cert"} {
+	for _, s := range []string{"mail-cert"} {
 		if !coreServices[s] || !reservedDNSName(s) || !reservedDNSName("portcullis-"+s+"-1") || !reservedDNSName(s+".portcullis") {
 			t.Errorf("service %s not reserved", s)
 		}
 	}
-	for _, v := range []string{"mail_data", "mail_etc", "mail_tls", "mail_acme", "mailctl_data"} {
+	for _, v := range []string{"mail_tls", "mail_acme", "mail_slot", "mail_provider_slot"} {
 		if !coreVolumes[v] {
 			t.Errorf("volume %s not reserved", v)
 		}
 	}
-	for _, a := range []string{"mail-metrics", "mailctl-metrics", "MAIL-METRICS."} {
-		if !reservedDNSName(a) {
-			t.Errorf("alias %s not reserved", a)
+	for _, v := range []string{"mail_data", "mail_etc", "mailctl_data"} {
+		if coreVolumes[v] {
+			t.Errorf("old volume %s still reserved", v)
 		}
 	}
-	for _, ok := range []string{"webmail", "mailer", "mail-relay"} {
+	for _, ok := range []string{"webmail", "mailer", "mail-relay", "mail", "mailctl", "mail-resolver", "mail-metrics", "mailctl-metrics"} {
 		if reservedDNSName(ok) {
 			t.Errorf("%s reserved, but isn't a core name", ok)
+		}
+	}
+}
+
+// TestMailCoreNetworksComplete (final cross review L8): every network
+// key and name of core's docker-compose.yml is in mailCoreNetworks (a
+// mail template may declare none of them; parity with validate.py).
+func TestMailCoreNetworksComplete(t *testing.T) {
+	core := os.Getenv("PORTCULLIS_CORE_DIR")
+	if core == "" {
+		core = filepath.Join("..", "..", "..", "portcullis")
+	}
+	b, err := os.ReadFile(filepath.Join(core, "docker-compose.yml"))
+	if err != nil {
+		t.Skipf("no core checkout: %v", err)
+	}
+	var doc struct {
+		Networks map[string]struct {
+			Name string `yaml:"name"`
+		} `yaml:"networks"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Networks) == 0 {
+		t.Fatal("core compose has no networks")
+	}
+	for k, n := range doc.Networks {
+		for _, name := range []string{k, n.Name} {
+			if name != "" && !mailCoreNetworks[strings.ToLower(name)] {
+				t.Errorf("core network %s missing from mailCoreNetworks", name)
+			}
 		}
 	}
 }

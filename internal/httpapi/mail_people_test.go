@@ -7,19 +7,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 )
 
 // mailEnv: signInEnv with alice and bob in mail_users, core mail on, the
 // fake mailctl wired and the first document accepted.
-func mailEnv(t *testing.T) (*toolEnv, *mailctltest.Server) {
+func mailEnv(t *testing.T) (*toolEnv, *mailprovidertest.Server) {
 	t.Helper()
 	e, _ := signInEnv(t)
 	e.ll.AddGroup("mail_users", "alice", "bob")
-	mc := mailctltest.New(t)
+	mc := mailprovidertest.New(t)
 	h := e.s.Hub
 	h.SetMailAPI(mc.Client())
 	h.SetMailCoreForTest(true, "mail.example.org")
+	h.WireMailForTest("mailsrv")
 	h.SyncMailForTest(context.Background())
 	if mc.Puts() != 1 {
 		t.Fatalf("no first document: %v", mc.Requests)
@@ -114,7 +115,8 @@ func TestNoAdminCreateRoute(t *testing.T) {
 	for _, mux := range [][]string{e.s.hubMux().patterns, e.s.peopleMux().patterns} {
 		for _, p := range mux {
 			method, path, _ := strings.Cut(p, " ")
-			if method == "POST" && strings.Contains(path, "mail") && path != "/api/me/mail/passwords" && !strings.HasPrefix(path, "/api/mail/actions/") && path != "/api/mail/confirm-removal" {
+			if method == "POST" && strings.Contains(path, "mail") && path != "/api/me/mail/passwords" && !strings.HasPrefix(path, "/api/mail/actions/") && path != "/api/mail/confirm-removal" &&
+				path != "/api/mail/provider/switch" && path != "/api/mail/provider/retry-void" {
 				t.Errorf("a POST route creates mail credentials: %s", p)
 			}
 			if strings.Contains(path, "/mail/passwords") && method == "POST" && strings.Contains(path, "{") {

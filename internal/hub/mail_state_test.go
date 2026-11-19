@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -43,7 +43,8 @@ func mailInput(m *directory.Membership) MailBuildInput {
 	st := state.DefaultMailSettings()
 	st.Domains = map[string]state.MailDomain{"team-b.example.org": {Enabled: true, Groups: []string{"team_b"}, HadMailRecords: true}}
 	return MailBuildInput{Membership: m, Settings: st, MainDomain: "example.com", CoreOn: true,
-		DNSSEC: map[string]string{"example.com": "secure", "team-b.example.org": "unsigned"}, LocalNetworks: []string{"10.0.0.0/8"}, Generation: 12}
+		DNSSEC: map[string]string{"example.com": "secure", "team-b.example.org": "unsigned"}, LocalNetworks: []string{"10.0.0.0/8"}, Generation: 12,
+		MailHostname: "mail.example.com"}
 }
 
 // TestBuildMailStateAddresses: primary first, then one address per added
@@ -64,18 +65,20 @@ func TestBuildMailStateAddresses(t *testing.T) {
 	if got == nil {
 		t.Fatalf("no document: %v", notes)
 	}
-	want := mailctl.MailState{Version: 1, Generation: 12, PrimaryDomain: "example.com",
-		Domains: []mailctl.Domain{{Name: "example.com", DMARCStart: "reject", Mail: "on", DNSSEC: "secure"}, {Name: "team-b.example.org", DMARCStart: "none", Mail: "on", DNSSEC: "unsigned"}},
-		Accounts: []mailctl.Account{
+	want := mailprovider.MailState{Version: 2, Generation: 12, PrimaryDomain: "example.com", MailHostname: "mail.example.com",
+		ClientIP: "preserved", DKIMRotate: "4320h", FormerRetention: "720h", TLS: mailprovider.StateTLS{SPKISHA256: []string{}},
+		Domains: []mailprovider.Domain{{Name: "example.com", DMARCStart: "reject", DMARCFloor: "reject", Mail: "on", DNSSEC: "secure"},
+			{Name: "team-b.example.org", DMARCStart: "none", DMARCFloor: "none", Mail: "on", DNSSEC: "unsigned"}},
+		Accounts: []mailprovider.Account{
 			{Username: "alice", UUID: uuidAlice, DisplayName: "Alice A.", Addresses: []string{"alice@example.com", "alice@team-b.example.org"}, QuotaBytes: 10 << 30},
 			{Username: "bob", UUID: uuidBob, DisplayName: "Bob B.", Addresses: []string{"bob@example.com"}, QuotaBytes: 10 << 30},
 			{Username: "root", UUID: uuidRoot, DisplayName: "Root", Addresses: []string{"root@example.com"}, QuotaBytes: 10 << 30},
 		},
-		Aliases:       []mailctl.Alias{{Address: "sales@example.com", Username: "alice"}},
-		Lists:         []mailctl.List{{Address: "team@example.com", Members: []string{"alice", "bob"}, Posting: "members"}},
+		Aliases:       []mailprovider.Alias{{Address: "sales@example.com", Username: "alice"}},
+		Lists:         []mailprovider.List{{Address: "team@example.com", Members: []string{"alice", "bob"}, Posting: "members"}},
 		Postmaster:    []string{"root"},
-		Limits:        mailctl.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000},
-		Spam:          mailctl.Spam{RejectScore: 15, JunkScore: 5, DNSBL: mailctl.DNSBL{Spamhaus: true, Spamcop: true, Barracuda: true}, Allow: []string{"example.org"}, Block: []string{"spam@example.net"}},
+		Limits:        mailprovider.Limits{RecipientsPerHour: 300, RecipientsPerDay: 1000},
+		Spam:          mailprovider.Spam{RejectScore: 15, JunkScore: 5, DNSBL: mailprovider.DNSBL{Spamhaus: true, Spamcop: true, Barracuda: true}, Allow: []string{"example.org"}, Block: []string{"spam@example.net"}},
 		LocalNetworks: []string{"10.0.0.0/8"},
 	}
 	if !reflect.DeepEqual(*got, want) {
@@ -151,7 +154,7 @@ func TestBuildMailStateConflictsLeftOut(t *testing.T) {
 			t.Error("a reserved username became an account")
 		}
 	}
-	if !reflect.DeepEqual(got.Aliases, []mailctl.Alias{{Address: "ok@team-b.example.org", Username: "alice"}}) {
+	if !reflect.DeepEqual(got.Aliases, []mailprovider.Alias{{Address: "ok@team-b.example.org", Username: "alice"}}) {
 		t.Errorf("aliases %+v", got.Aliases)
 	}
 	if len(got.Lists) != 0 {

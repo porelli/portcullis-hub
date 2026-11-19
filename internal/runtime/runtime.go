@@ -124,12 +124,12 @@ type Instances interface {
 	ExecSplit(ctx context.Context, id string, in ExecInput) (*ExecSplitResult, error)
 	ExecRunning(ctx context.Context, execID string) (bool, error)
 	Signal(ctx context.Context, id, sig string) error
-	// RestartCoreService restarts core's own service (only "mail": the
-	// Hub's one engine action on a core container, contract §6): exactly
-	// the one non-one-off container of core's compose project in core's
-	// working directory; zero or several matches restart nothing.
-	// Kubernetes answers ErrUnsupported.
-	RestartCoreService(ctx context.Context, service string, timeout time.Duration) error
+	// RestartService restarts one service of an instance's compose
+	// project (the mail provider's sessions.restart, contract §19.6):
+	// exactly the one non-one-off container labelled with that project
+	// and service; zero or several matches restart nothing. The Hub
+	// restarts no core container. Kubernetes answers ErrUnsupported.
+	RestartService(ctx context.Context, project, service string, timeout time.Duration) error
 	State(ctx context.Context, id string) (State, error)
 	Events(ctx context.Context, f Filter, fn func(Event)) error
 

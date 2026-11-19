@@ -97,6 +97,7 @@ func (h *Hub) AddSource(name, repoURL string) error {
 	h.mu.Unlock()
 
 	h.Discover()
+	h.checkMailHold() // a wired provider's template from the new tree (M7)
 	h.writePolicyLogged()
 	return nil
 }
@@ -120,9 +121,19 @@ func (h *Hub) RemoveSource(name string) error {
 			running = append(running, id)
 		}
 	}
+	// The wired mail provider's source stays until it is unwired (M7).
+	wiredHere := ""
+	if p := h.st.Mail.Provider; p != nil {
+		if t := h.findLocked(p.Instance); (t != nil && t.Source == name) || p.Source == name {
+			wiredHere = p.Instance
+		}
+	}
 	h.mu.RUnlock()
 	if src == nil {
 		return statusErr(400, "source not found: %s", name)
+	}
+	if wiredHere != "" {
+		return statusErr(409, "%s is this server's mail provider: unwire it first (Settings → Mail)", wiredHere)
 	}
 	// Stop apps while their compose files still exist — deleting the repo
 	// first would orphan the containers.
@@ -329,6 +340,9 @@ func (h *Hub) syncSources(trigger string, timeout time.Duration) SourceSyncStatu
 	if reverted {
 		h.Discover()
 	}
+	// The wired mail provider's template changed (or no longer
+	// validates): held, no up (contract §19.9, P4).
+	h.checkMailHold()
 	// Only after the final Discover (a rolled-back update drops nothing).
 	h.pruneSettings()
 	// AI companions the templates dropped or changed (G33).

@@ -61,7 +61,52 @@ func (h *Hub) toolRedactionIDs() []string {
 // (redactionSetErr). err: some set exists but can't be read whole — the
 // caller then hides the result (fail closed).
 func (h *Hub) ToolRedactionSet() ([]string, error) {
-	return h.redactionSets(h.toolRedactionIDs()...)
+	set, err := h.redactionSets(h.toolRedactionIDs()...)
+	mail, merr := h.mailRedactionSecrets()
+	if err == nil {
+		err = merr
+	}
+	return append(set, mail...), err
+}
+
+// mailRedactionFiles are the mail secrets the AI never sees (final
+// review L6): every instance's gate secrets and the relay password.
+func (h *Hub) mailRedactionFiles() []string {
+	out := []string{filepath.Join(h.cfg.DataDir, mailRelayPasswordFile)}
+	if h.cfg.MailSlotDir != "" {
+		out = append(out, filepath.Join(h.cfg.MailSlotDir, mailGateMetricsSecret))
+	}
+	for _, id := range h.toolRedactionIDs() {
+		if dir := h.mailSlotDir(id); dir != "" {
+			for _, f := range []string{mailGateAPISecret, mailGateMetricsSecret, mailGateRelayPassword} {
+				out = append(out, filepath.Join(dir, f))
+			}
+		}
+	}
+	return out
+}
+
+// mailRedactionSecrets are those files' values (absent ones skipped);
+// any other read error is an error: the caller then hides the result
+// (re-review N-L3: fail closed, never unredacted).
+func (h *Hub) mailRedactionSecrets() ([]string, error) {
+	var out []string
+	var first error
+	for _, p := range h.mailRedactionFiles() {
+		b, err := os.ReadFile(p)
+		switch {
+		case err == nil:
+			if v := strings.TrimSpace(string(b)); len(v) >= 4 {
+				out = append(out, v)
+			}
+		case errors.Is(err, fs.ErrNotExist):
+		default:
+			if first == nil {
+				first = fmt.Errorf("reading a mail secret for redaction: %w", err)
+			}
+		}
+	}
+	return out, first
 }
 
 // ToolRedactionKey changes whenever ToolRedactionSet may: it names every
@@ -87,6 +132,9 @@ func (h *Hub) ToolRedactionKey() string {
 	}
 	stat(filepath.Join(h.cfg.ProjectDir, ".env"))
 	stat(h.providerSecretsPath())
+	for _, p := range h.mailRedactionFiles() {
+		stat(p)
+	}
 	if h.secretsErr != nil {
 		fmt.Fprintf(&b, "secrets-volume:%v\n", h.secretsErr)
 	}

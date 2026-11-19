@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -36,7 +36,7 @@ func TestPendingClearsWhenPeopleReturn(t *testing.T) {
 	if p == nil || len(p.Accounts) != 2 {
 		t.Fatalf("pending %+v", p)
 	}
-	if err := f.h.ConfirmMailRemoval(context.Background(), pendingUUIDs(p.Accounts), mailAdmin); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, pendingUUIDs(p.Accounts)), mailAdmin); err != nil {
 		t.Fatal(err)
 	}
 	// The outage recovers before the next pass.
@@ -72,7 +72,7 @@ func TestPendingPartialReturnVoidsConfirm(t *testing.T) {
 	f.h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: time.Now(), Accounts: []state.MailPendingAccount{
 		{Username: "alice", UUID: uuidAlice, Revoked: true}, {Username: "bob", UUID: uuidBob, Revoked: true}}}
 	f.h.mu.Unlock()
-	if err := f.h.ConfirmMailRemoval(context.Background(), []string{uuidAlice, uuidBob}, mailAdmin); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, []string{uuidAlice, uuidBob}), mailAdmin); err != nil {
 		t.Fatal(err)
 	}
 	if !f.h.mailPendingConfirmed(map[string]string{"alice": uuidAlice, "bob": uuidBob}) {
@@ -111,8 +111,10 @@ func TestBlindMassRefusal(t *testing.T) {
 	f.people.setMembers("mail_users", "root")
 	puts := f.mc.Puts()
 	f.sync(t)
+	// The Hub's own baseline (R-L8: alice has a mail password) refuses
+	// first, naming whom it knows of.
 	p := f.pending()
-	if p == nil || len(p.Accounts) != 2 {
+	if p == nil || len(p.Accounts) != 1 || p.Accounts[0].Username != "alice" {
 		t.Fatalf("pending %+v", p)
 	}
 	if len(f.mc.Creds("alice")) != 0 {
@@ -136,7 +138,7 @@ func TestBlindMassRefusal(t *testing.T) {
 	g.sync(t)
 	os.Remove(g.h.mailLastPath())
 	g.h.mailState = mailSync{applyWait: 400 * time.Millisecond, applyPoll: 20 * time.Millisecond}
-	g.mc.Lock(func(s *mailctltest.Server) { s.OmitRemoved = true })
+	g.mc.Lock(func(s *mailprovidertest.Server) { s.OmitRemoved = true })
 	g.people.setMembers("mail_users", "root")
 	puts = g.mc.Puts()
 	g.sync(t)
@@ -192,7 +194,7 @@ func TestRevokeOnly204(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
 	c := f.create(t, "alice", "phone")
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeOK = true })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeOK = true })
 	if err := f.h.RevokeOwnMailPassword(context.Background(), "alice", c.ID); statusOf(err) != 503 {
 		t.Fatalf("200: %v", err)
 	}
@@ -241,7 +243,7 @@ func TestPendingRevokeFailureShown(t *testing.T) {
 	f := newMailFixture(t)
 	f.sync(t)
 	f.create(t, "alice", "phone")
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 503 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 503 })
 	f.people.setMembers("mail_users", "root")
 	f.sync(t)
 	v := f.h.MailSettingsView().PendingRemoval
@@ -260,7 +262,7 @@ func TestPendingRevokeFailureShown(t *testing.T) {
 	if fd := findKind(r, doctor.KindMailMassRemovalPend); fd == nil || !strings.Contains(fd.Why, "failed for alice") {
 		t.Fatalf("finding %+v", fd)
 	}
-	f.mc.Lock(func(s *mailctltest.Server) { s.RevokeStatus = 0 })
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.RevokeStatus = 0 })
 	f.advance(time.Minute)
 	f.sync(t)
 	for _, a := range f.pending().Accounts {
@@ -271,21 +273,16 @@ func TestPendingRevokeFailureShown(t *testing.T) {
 }
 
 // TestMailHubSecretInvalid: mail on with a missing or short hub secret:
-// doctor mail_hub_secret_invalid, the Settings banner, every mail write
+// the Settings banner (the doctor's mail_provider_unreachable after 10
+// min: TestDoctorProviderUnreachable), every mail write
 // 503 with the text; once the file is valid (in place, no restart) all
 // of it clears.
 func TestMailHubSecretInvalid(t *testing.T) {
 	f := newMailFixture(t)
 	secret := f.data + "/hub-secret-test"
 	os.WriteFile(secret, []byte("short\n"), 0600)
-	f.h.SetMailAPI(mailctl.New(f.mc.URL(), secret))
+	f.h.SetMailAPI(mailprovider.New(f.mc.URL(), secret))
 	ctx := context.Background()
-	r, _ := f.h.Doctor(ctx)
-	fd := findKind(r, doctor.KindMailHubSecretInvalid)
-	if fd == nil || fd.Severity != doctor.Problem || fd.FixKind != "" || fd.Steps[0] != "./portcullis up recreates the Hub with the mail secret" ||
-		fd.Title != "Mail can't be managed: the Hub's mail secret is missing or too short" {
-		t.Fatalf("finding %+v", fd)
-	}
 	if v := f.h.MailSettingsView(); v.Problem != MailSecretProblem {
 		t.Fatalf("view %q", v.Problem)
 	}
@@ -295,7 +292,7 @@ func TestMailHubSecretInvalid(t *testing.T) {
 		"aliases":  f.h.SetUserAliases(ctx, "alice", nil, mailAdmin),
 		"list":     f.h.SetGroupList(ctx, "team_b", false, "", "", mailAdmin),
 		"action":   f.h.MailAction(ctx, "dkim-rotate", "example.org", mailAdmin),
-		"confirm":  f.h.ConfirmMailRemoval(ctx, nil, mailAdmin),
+		"confirm":  f.h.ConfirmMailRemoval(ctx, confirmIn(f.h, nil), mailAdmin),
 	}
 	_, cerr := f.h.CreateMailPassword(ctx, "alice", "x", "none", testProof)
 	writes["create"] = cerr
@@ -305,11 +302,7 @@ func TestMailHubSecretInvalid(t *testing.T) {
 		}
 	}
 	// Fixed in place: no restart needed.
-	os.WriteFile(secret, []byte(mailctltest.Secret+"\n"), 0600)
-	r, _ = f.h.Doctor(ctx)
-	if findKind(r, doctor.KindMailHubSecretInvalid) != nil {
-		t.Fatal("still raised")
-	}
+	os.WriteFile(secret, []byte(mailprovidertest.Secret+"\n"), 0600)
 	if v := f.h.MailSettingsView(); v.Problem != "" {
 		t.Fatalf("view %q", v.Problem)
 	}

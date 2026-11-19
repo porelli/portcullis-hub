@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,5 +127,22 @@ func TestVPNAssetsAllowlist(t *testing.T) {
 	resp, body = doAs(t, e.people, "alice", "GET", "/vpn/api/devices", "")
 	if resp.StatusCode != 200 || !strings.Contains(body, `"devices":[]`) {
 		t.Fatalf("devices %d %s", resp.StatusCode, body)
+	}
+}
+
+// TestHostRoutesNotOnTCP (mail-provider T13): every /host/mail/ route is
+// on the control socket only (404 on the Hub and people listeners).
+func TestHostRoutesNotOnTCP(t *testing.T) {
+	e := newPeopleEnv(t)
+	routes := []struct{ m, p string }{{"POST", "/host/mail/drain"}, {"GET", "/host/mail/domains"}, {"GET", "/host/mail/provider"},
+		{"GET", "/host/mail/status"}, {"POST", "/host/mail/tls"}, {"POST", "/host/mail/test"}, {"POST", "/host/mail/backup"},
+		{"POST", "/host/mail/restore"}, {"POST", "/host/mail/action"}, {"GET", "/host/mail/op?instance=mailsrv"},
+		{"GET", "/host/mail/dns/main"}, {"POST", "/host/mail/unwire"}, {"POST", "/host/mail/install"}}
+	for name, s := range map[string]*httptest.Server{"hub": e.hub, "people": e.people} {
+		for _, r := range routes {
+			if resp, _ := doAs(t, s, "root", r.m, r.p, `{}`); resp.StatusCode != 404 {
+				t.Errorf("%s %s %s = %d", name, r.m, r.p, resp.StatusCode)
+			}
+		}
 	}
 }
