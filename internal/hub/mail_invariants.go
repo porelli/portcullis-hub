@@ -247,6 +247,11 @@ func (h *Hub) mailEndRowsOf(user, uuid string, c mailprovider.Credential, by str
 func (h *Hub) mailRowBaseline() map[string]string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	return h.mailRowBaselineLocked()
+}
+
+// mailRowBaselineLocked is mailRowBaseline; caller holds mu.
+func (h *Hub) mailRowBaselineLocked() map[string]string {
 	out := map[string]string{}
 	for user, rows := range h.st.MailCredentials {
 		for _, r := range rows {

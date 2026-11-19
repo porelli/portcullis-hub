@@ -74,7 +74,14 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailp
 		return mailRetry
 	}
 	sort.Slice(gone, func(i, j int) bool { return gone[i].Username < gone[j].Username })
-	if err := h.mailRecordPending(gone, last == nil && !isHubMassRemoval(refusal)); err != nil {
+	var refusalDoc []state.MailPendingAccount
+	fromProvider := last == nil && !isHubMassRemoval(refusal)
+	if fromProvider && doc != nil {
+		for _, a := range doc.Accounts {
+			refusalDoc = append(refusalDoc, state.MailPendingAccount{Username: a.Username, UUID: a.UUID})
+		}
+	}
+	if err := h.mailRecordPending(gone, fromProvider, refusalDoc); err != nil {
 		h.mailLogOnce("mail: the pending removal couldn't be saved (nothing done, retrying): " + err.Error())
 		return mailRetry
 	}
@@ -264,18 +271,23 @@ func mailFallback(last, doc *mailprovider.MailState, removed map[string]string) 
 // what is recorded (revoked flags, a confirmation); a different set is a
 // new pending removal (a new Since, no confirmation). A save failure
 // leaves the old state and is returned (the pass fails).
-func (h *Hub) mailRecordPending(gone []state.MailPendingAccount, fromProvider bool) error {
+func (h *Hub) mailRecordPending(gone []state.MailPendingAccount, fromProvider bool, refusalDoc []state.MailPendingAccount) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval
-	if p != nil && slices.Equal(pendingUUIDs(p.Accounts), pendingUUIDs(gone)) {
-		if fromProvider && !p.FromProvider {
-			p.FromProvider = true
+	listed := pendingUUIDs(gone)
+	if p != nil && slices.Equal(pendingUUIDs(p.Accounts), listed) {
+		if fromProvider && (!p.FromProvider || !slices.Equal(p.ProviderListed, listed)) {
+			p.FromProvider, p.ProviderListed, p.RefusalDoc = true, listed, refusalDoc
 			return h.saveStateLocked()
 		}
 		return nil
 	}
-	h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: h.mailNow(), Accounts: gone, FromProvider: fromProvider}
+	np := &state.MailPendingRemoval{Since: h.mailNow(), Accounts: gone}
+	if fromProvider {
+		np.FromProvider, np.ProviderListed, np.RefusalDoc = true, listed, refusalDoc
+	}
+	h.st.Mail.PendingRemoval = np
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail.PendingRemoval = p
 		return err
@@ -519,4 +531,67 @@ func (h *Hub) isGlobalAdmin(ctx context.Context, user string) bool {
 	}
 	m, err := h.membership(ctx)
 	return err == nil && isLLDAPAdmin(m, strings.ToLower(user))
+}
+
+// mailProviderPendingExtra (R-SWITCH-BASE-4b): with the provider's own
+// refusal in play, doc's removals are every account the provider then
+// held (its refusal's list and the refused document's accounts, and any
+// of the Hub's rows among them) that doc no longer has; those outside
+// the pending set. Caller holds mu (read).
+func (h *Hub) mailProviderPendingExtraLocked(p *state.MailPendingRemoval, doc *mailprovider.MailState, rows map[string]string) []state.MailPendingAccount {
+	in := map[string]bool{}
+	for _, a := range doc.Accounts {
+		in[a.UUID] = true
+	}
+	pending := pendingUUIDs(p.Accounts)
+	held := map[string]string{}
+	for _, u := range p.ProviderListed {
+		held[u] = ""
+	}
+	for _, a := range p.RefusalDoc {
+		held[a.UUID] = a.Username
+	}
+	var extra []state.MailPendingAccount
+	for u, name := range held {
+		if in[u] || slices.Contains(pending, u) {
+			continue
+		}
+		if name == "" {
+			name = rows[u]
+		}
+		extra = append(extra, state.MailPendingAccount{Username: name, UUID: u})
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i].UUID < extra[j].UUID })
+	return extra
+}
+
+// mailExtendPending adds extra to the provider-refusal pending removal:
+// a new set (its confirmation void), the provider's lists kept.
+func (h *Hub) mailExtendPending(extra []state.MailPendingAccount) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := h.st.Mail.PendingRemoval
+	if p == nil {
+		return nil
+	}
+	prev := *p
+	np := prev
+	np.Accounts = append(slices.Clone(prev.Accounts), extra...)
+	sort.Slice(np.Accounts, func(i, j int) bool { return np.Accounts[i].Username < np.Accounts[j].Username })
+	np.Since, np.ConfirmedHash = h.mailNow(), ""
+	h.st.Mail.PendingRemoval = &np
+	if err := h.saveStateLocked(); err != nil {
+		h.st.Mail.PendingRemoval = p
+		return err
+	}
+	return nil
+}
+
+// mailClearProviderRefusalLocked drops the provider-refusal binding of a
+// pending removal (any wiring or instance change): what remains is
+// judged by the Hub's own rules again. Caller holds mu.
+func (h *Hub) mailClearProviderRefusalLocked() {
+	if p := h.st.Mail.PendingRemoval; p != nil && (p.FromProvider || p.ProviderListed != nil || p.RefusalDoc != nil) {
+		p.FromProvider, p.ProviderListed, p.RefusalDoc = false, nil, nil
+	}
 }

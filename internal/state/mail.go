@@ -234,6 +234,13 @@ type MailPendingRemoval struct {
 	// with no baseline document (Ruling R-SWITCH-BASE-4): authoritative;
 	// the Hub's row baseline never stacks on it.
 	FromProvider bool `json:"from_provider,omitempty" yaml:"from_provider,omitempty"`
+	// ProviderListed is the refusal's removed list and RefusalDoc the
+	// accounts the refused document kept (R-SWITCH-BASE-4b): every
+	// account the provider then held. A later document's removals are
+	// judged against them; cleared with FromProvider on any wiring
+	// change.
+	ProviderListed []string             `json:"provider_listed,omitempty" yaml:"provider_listed,omitempty"`
+	RefusalDoc     []MailPendingAccount `json:"refusal_doc,omitempty" yaml:"refusal_doc,omitempty"`
 }
 
 // MailPendingAccount is one account a pending mass removal would remove.

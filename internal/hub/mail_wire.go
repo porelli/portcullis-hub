@@ -312,6 +312,7 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 		prevInst = sw.From
 	}
 	h.st.Mail.FreshInstance, h.st.Mail.FreshPending = "", ""
+	h.mailClearProviderRefusalLocked()
 	if prevInst != "" && prevInst != id {
 		h.st.Mail.FreshPending = id
 	}
@@ -451,6 +452,7 @@ func (h *Hub) undoWireMail(id string, recordGen int) {
 		h.st.Mail.Provider = nil
 		h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
 		h.st.Mail.FreshInstance, h.st.Mail.FreshPending = "", ""
+		h.mailClearProviderRefusalLocked()
 		// Only the record's own debt: one raised since (a restore, the
 		// secrets epoch) stays owed.
 		if h.st.Mail.VoidOwed != nil && h.st.Mail.VoidGen == recordGen {

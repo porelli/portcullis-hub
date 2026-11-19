@@ -1035,6 +1035,90 @@ func putStates(mc *mailprovidertest.Server) int {
 // stays a pending removal (the fresh mark is spent), no pass resends it;
 // a full administrator's confirmation of exactly its list converges.
 func TestRewireOntoProviderWithExtraAccounts(t *testing.T) {
+	w, mc2, ids := rewireExtraFix(t)
+	if err := w.h.ConfirmMailRemoval(context.Background(), confirmIn(w.h, ids), directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	w.h.mailSyncOnce(context.Background())
+	w.h.mu.RLock()
+	pr, inst := w.h.st.Mail.PendingRemoval, w.h.st.Mail.LastDocInstance
+	w.h.mu.RUnlock()
+	var accepted bool
+	mc2.Lock(func(s *mailprovidertest.Server) {
+		accepted = s.Doc != nil && s.Doc.ConfirmMassRemoval && s.Doc.Generation > 1
+	})
+	if !accepted || pr != nil || inst != otherMailID {
+		t.Fatalf("accepted %v pending %+v last doc instance %q", accepted, pr, inst)
+	}
+}
+
+// TestProviderRefusalLeaverAfterConfirm (R-SWITCH-BASE-4b): one more
+// person leaves after the administrator confirmed the provider's list:
+// no confirm_mass_removal goes; the pending removal grows (its
+// confirmation void) and holds; confirming the new set converges.
+func TestProviderRefusalLeaverAfterConfirm(t *testing.T) {
+	w, mc2, ids := rewireExtraFix(t)
+	if err := w.h.ConfirmMailRemoval(context.Background(), confirmIn(w.h, ids), directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	w.people.setMembers("mail_users", "admin", "alice", "carol", "root") // bob leaves
+	// A Hub restart since: the in-memory record of the refused document
+	// is gone; only the persisted lists judge.
+	w.h.mailState.mu.Lock()
+	w.h.mailState.blindDoc, w.h.mailState.blindListed = nil, nil
+	w.h.mailState.mu.Unlock()
+	puts := putStates(mc2)
+	w.h.mailSyncOnce(context.Background())
+	w.h.mu.RLock()
+	pr := w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if putStates(mc2) != puts {
+		t.Fatal("a document went under the old confirmation")
+	}
+	if pr == nil || len(pr.Accounts) != 3 || pr.ConfirmedHash != "" || !slices.ContainsFunc(pr.Accounts, func(a state.MailPendingAccount) bool { return a.UUID == uuidBob }) {
+		t.Fatalf("pending %+v", pr)
+	}
+	var all []string
+	for _, a := range pr.Accounts {
+		all = append(all, a.UUID)
+	}
+	if err := w.h.ConfirmMailRemoval(context.Background(), confirmIn(w.h, all), directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	w.h.mailSyncOnce(context.Background())
+	var accepted bool
+	mc2.Lock(func(s *mailprovidertest.Server) {
+		accepted = s.Doc != nil && s.Doc.ConfirmMassRemoval && s.Doc.Generation > 1
+	})
+	w.h.mu.RLock()
+	pr = w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if !accepted || pr != nil {
+		t.Fatalf("accepted %v pending %+v", accepted, pr)
+	}
+}
+
+// TestWiringClearsProviderRefusal (R-SWITCH-BASE-4b): a wiring change
+// drops the provider-refusal binding of a pending removal.
+func TestWiringClearsProviderRefusal(t *testing.T) {
+	w, _, _ := rewireExtraFix(t)
+	if _, err := w.h.StartUnwireMail(otherMailID, false, rootActor()); err != nil {
+		t.Fatal(err)
+	}
+	w.h.Wait()
+	w.h.mu.RLock()
+	pr := w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if pr != nil && (pr.FromProvider || pr.ProviderListed != nil || pr.RefusalDoc != nil) {
+		t.Fatalf("pending %+v", pr)
+	}
+}
+
+// rewireExtraFix: a switch onto a provider holding 2 accounts the Hub
+// no longer sends; its refusal recorded (the provider's lists kept), no
+// resend loop; answers the pending uuids.
+func rewireExtraFix(t *testing.T) (*wireFix, *mailprovidertest.Server, []string) {
+	t.Helper()
 	w := switchFix(t)
 	w.h.mailSyncOnce(context.Background())
 	// Someone removed long ago (scenario 6): an ended revoke_leave row
@@ -1065,22 +1149,12 @@ func TestRewireOntoProviderWithExtraAccounts(t *testing.T) {
 	if putStates(mc2) != refusedPuts || pr == nil || len(pr.Accounts) != 2 {
 		t.Fatalf("the refusal loops or went: PUTs %d → %d, pending %+v", refusedPuts, putStates(mc2), pr)
 	}
+	if !pr.FromProvider || len(pr.ProviderListed) != 2 || len(pr.RefusalDoc) == 0 {
+		t.Fatalf("the provider's lists weren't kept: %+v", pr)
+	}
 	var ids []string
 	for _, a := range pr.Accounts {
 		ids = append(ids, a.UUID)
 	}
-	if err := w.h.ConfirmMailRemoval(context.Background(), confirmIn(w.h, ids), directory.Human("root")); err != nil {
-		t.Fatal(err)
-	}
-	w.h.mailSyncOnce(context.Background())
-	w.h.mu.RLock()
-	pr, inst := w.h.st.Mail.PendingRemoval, w.h.st.Mail.LastDocInstance
-	w.h.mu.RUnlock()
-	var accepted bool
-	mc2.Lock(func(s *mailprovidertest.Server) {
-		accepted = s.Doc != nil && s.Doc.ConfirmMassRemoval && s.Doc.Generation > 1
-	})
-	if !accepted || pr != nil || inst != otherMailID {
-		t.Fatalf("accepted %v pending %+v last doc instance %q", accepted, pr, inst)
-	}
+	return w, mc2, ids
 }

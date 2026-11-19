@@ -18,6 +18,7 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 
 	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // Mail sync timing (contract §19.6).
@@ -460,12 +461,27 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		if pr != nil {
 			pending = pendingUUIDs(pr.Accounts)
 		}
-		// The provider's own refusal is in play (R-SWITCH-BASE-4): its
-		// removed list is authoritative; the row baseline never stacks
-		// on it (an old revoke_leave row the provider already took would
-		// add a removal no confirmation could cover).
+		// The provider's own refusal is in play (R-SWITCH-BASE-4/4b): its
+		// lists are authoritative (an old revoke_leave row the provider
+		// no longer held isn't a removal), and every removal of this
+		// document among what the provider then held must be inside the
+		// pending set: one more is a new pending removal, held.
 		fromProvider := pr != nil && pr.FromProvider
+		var extra []state.MailPendingAccount
+		if fromProvider {
+			extra = h.mailProviderPendingExtraLocked(pr, doc, h.mailRowBaselineLocked())
+		}
 		h.mu.RUnlock()
+		if len(extra) > 0 {
+			if err := h.mailExtendPending(extra); err != nil {
+				h.mailLogOnce("mail: the pending removal couldn't be saved (nothing done, retrying): " + err.Error())
+				return mailRetry
+			}
+			h.mailLogOnce(fmt.Sprintf("mail: %d more mailboxes would go since the provider's refusal: the pending removal waits for a new confirmation", len(extra)))
+			h.mailRevokePending(ctx, api)
+			h.mailSetBlocked("the pending removal changed: it waits for an administrator's confirmation")
+			return mailRetry
+		}
 		if !fromProvider {
 			if removed := mailRemovedFromRows(h.mailRowBaseline(), doc); len(removed) > 0 {
 				covered := confirmed
@@ -486,7 +502,9 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 			kept = kept && slices.ContainsFunc(doc.Accounts, func(a mailprovider.Account) bool { return a.UUID == u })
 		}
 		s.mu.Unlock()
-		confirm = confirmed && (fromProvider || (len(listed) > 0 && slices.Equal(listed, pending))) && kept
+		// A provider refusal's removals were judged above against its
+		// persisted lists (kept is that check's in-memory form).
+		confirm = confirmed && (fromProvider || (len(listed) > 0 && slices.Equal(listed, pending) && kept))
 	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)
