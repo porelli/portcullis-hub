@@ -2052,7 +2052,7 @@ means and what to do:
 | `mail_client_ip_rewritten` | Warning | Explain |
 | `mail_lan_only_unenforced` | Problem | Explain ("Turn LAN-only off: run `./portcullis mail enable --lan-only false` on the server") |
 | `mail_rate_held` | Warning | Explain |
-| `mail_mass_removal_pending` | Problem | One click (full administrators): "removes the mailboxes of &lt;users&gt; (parked, deleted after the former retention)" |
+| `mail_mass_removal_pending` | Problem | On Settings → Mail only (full administrators, in the browser): a fresh sign-in and the typed phrase `remove <n> mailboxes` (`remove 1 mailbox`); the fix answers "confirm the removal on Settings → Mail: it needs a fresh sign-in and the typed phrase". A provider's own refusal (also after a switch) is held here; it is never dropped on its own |
 | `mail_sync_blocked` | Problem | Explain |
 | `mail_provider_unreachable` | Problem | Explain ("Check the instance on its Mail tab and its logs") |
 | `mail_provider_check` | up to Problem | Explain: the provider's own `x-` check, its title, detail and steps as plain text; never a fix |
