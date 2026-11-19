@@ -980,3 +980,38 @@ func TestFreshMarkClearedByUndoAndUnwire(t *testing.T) {
 		t.Fatalf("undo kept the mark %q", fresh)
 	}
 }
+
+// TestSwitchOldVoidFailedFirstPassSends (core e2e run 44431369482): the
+// old provider has a revoke_leave row, its void answers 503, and the
+// last document's binding lags (it names the instance switched TO, as
+// after an earlier round trip): the switch still marks the new wiring
+// (another instance than the switch's from), its own void promotes the
+// mark in the save that opens it, and its first pass sends with no hold.
+func TestSwitchOldVoidFailedFirstPassSends(t *testing.T) {
+	w := switchFix(t)
+	w.h.mailSyncOnce(context.Background())
+	leftRow(w, "alice", "0b0b0b0b-0000-4000-8000-000000000006")
+	w.h.mu.Lock()
+	w.h.st.Mail.LastDocInstance = otherMailID
+	w.h.mu.Unlock()
+	w.mc.Lock(func(s *mailprovidertest.Server) { s.VoidStatus = 503 })
+	newUp := false
+	prevHook := w.runner.upHook
+	w.runner.upHook = func(project string) {
+		if prevHook != nil {
+			prevHook(project)
+		}
+		if project == "portcullis-"+otherMailID && !newUp {
+			newUp = true // the new provider's void answers
+			w.mc.Lock(func(s *mailprovidertest.Server) { s.VoidStatus = 0 })
+		}
+	}
+	puts := w.mc.Puts()
+	doSwitch(t, w)
+	w.h.mu.RLock()
+	pr, fresh, inst := w.h.st.Mail.PendingRemoval, w.h.st.Mail.FreshInstance, w.h.st.Mail.LastDocInstance
+	w.h.mu.RUnlock()
+	if w.mc.Puts() == puts || pr != nil || inst != otherMailID || fresh != "" {
+		t.Fatalf("puts %d → %d, pending %+v, last doc instance %q, fresh %q, blocked %q", puts, w.mc.Puts(), pr, inst, fresh, w.h.mailState.blocked)
+	}
+}

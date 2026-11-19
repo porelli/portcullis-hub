@@ -539,8 +539,20 @@ func (h *Hub) runVoidLocked(ctx context.Context, id, reason string) error {
 	}
 	prev := h.st.Mail.VoidOwed
 	h.st.Mail.VoidOwed = nil
+	// A wiring of another instance: its void completed, in the same save
+	// that opens it to the sync (R-SWITCH-BASE-2): the first pass starts
+	// from an empty baseline, the old provider's pending removal gone.
+	prevFresh, prevPendingFresh, prevPR := h.st.Mail.FreshInstance, h.st.Mail.FreshPending, h.st.Mail.PendingRemoval
+	if h.st.Mail.FreshPending == id {
+		h.st.Mail.FreshInstance, h.st.Mail.FreshPending = id, ""
+		if pr := h.st.Mail.PendingRemoval; pr != nil {
+			h.st.Mail.PendingRemoval = nil
+			log.Printf("mail: the pending removal of %d mailboxes was the previous provider's: dropped (the new provider starts empty)", len(pr.Accounts))
+		}
+	}
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail.VoidOwed = prev
+		h.st.Mail.FreshInstance, h.st.Mail.FreshPending, h.st.Mail.PendingRemoval = prevFresh, prevPendingFresh, prevPR
 		return err
 	}
 	return nil

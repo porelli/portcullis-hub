@@ -284,7 +284,7 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
 		h.st.Mail.Provider, h.st.Mail.VoidOwed, h.st.Mail.Held = nil, nil, nil
 		h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
-		h.st.Mail.FreshInstance = ""
+		h.st.Mail.FreshInstance, h.st.Mail.FreshPending = "", ""
 	}
 	// A switch's close is recorded in the same save (its resume relies
 	// on it).

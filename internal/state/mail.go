@@ -101,6 +101,11 @@ type MailSettings struct {
 	// an empty baseline (Ruling R-SWITCH-BASE-2). Cleared once its first
 	// document is accepted, and by every new wiring's record.
 	FreshInstance string `json:"fresh_instance,omitempty" yaml:"fresh_instance,omitempty"`
+	// FreshPending is a wiring of another instance than the previous
+	// provider's, recorded with the wiring: its own void promotes it to
+	// FreshInstance in the save that clears the debt (no pass can run
+	// between the two).
+	FreshPending string `json:"fresh_pending,omitempty" yaml:"fresh_pending,omitempty"`
 	// WireSeq numbers the wirings (monotonic): MailProvider.Seq.
 	WireSeq int `json:"wire_seq,omitempty" yaml:"wire_seq,omitempty"`
 	// MTASTSPublished: the mail domains whose last published set carries

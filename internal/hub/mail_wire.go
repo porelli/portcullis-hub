@@ -303,7 +303,18 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 	// A new wiring has no confirmed applied mode yet, and no empty
 	// baseline until its own void completed.
 	h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
-	h.st.Mail.FreshInstance = ""
+	// Another instance than the previous provider's (a switch's from, else
+	// the last document's, when known): its first pass may start empty
+	// once its own void completed (R-SWITCH-BASE-2). Never the same
+	// instance (its store keeps the mailboxes), never on an unknown one.
+	prevInst := h.st.Mail.LastDocInstance
+	if sw := h.st.Mail.Switch; sw != nil && sw.To == id && sw.From != "" {
+		prevInst = sw.From
+	}
+	h.st.Mail.FreshInstance, h.st.Mail.FreshPending = "", ""
+	if prevInst != "" && prevInst != id {
+		h.st.Mail.FreshPending = id
+	}
 	h.raiseVoidDebtLocked(voidReason)
 	// The undo clears only a debt this record started (not an older one
 	// it joined) and only while nothing was raised since.
@@ -381,22 +392,7 @@ func (h *Hub) runWireMail(ctx context.Context, t *templates.Template, actor dire
 		}
 		return p, fail(StepMailVoid, err)
 	}
-	// The void completed (every mail password revoked): the first pass
-	// of ANOTHER instance than the last document's (known) may start from
-	// an empty baseline (R-SWITCH-BASE-2). The same instance keeps its
-	// mailboxes (a void revokes passwords, not mailboxes); an unknown
-	// last instance gets no mark: both take the blind / R-L8 path.
-	h.mu.Lock()
-	if cur := h.st.Mail.Provider; cur != nil && cur.Instance == id && cur.Seq == p.Seq &&
-		h.st.Mail.LastDocInstance != "" && h.st.Mail.LastDocInstance != id {
-		h.st.Mail.FreshInstance = id
-		if err := h.saveStateLocked(); err != nil {
-			h.st.Mail.FreshInstance = ""
-			h.mu.Unlock()
-			return p, fail(StepMailVoid, err)
-		}
-	}
-	h.mu.Unlock()
+	// (The void's own save promoted FreshPending to FreshInstance.)
 	done(StepMailVoid)
 	if stopped() {
 		return p, undo()
@@ -454,7 +450,7 @@ func (h *Hub) undoWireMail(id string, recordGen int) {
 	if p := h.st.Mail.Provider; p != nil && p.Instance == id {
 		h.st.Mail.Provider = nil
 		h.st.Mail.UpMode, h.st.Mail.UpModeInstance = "", ""
-		h.st.Mail.FreshInstance = ""
+		h.st.Mail.FreshInstance, h.st.Mail.FreshPending = "", ""
 		// Only the record's own debt: one raised since (a restore, the
 		// secrets epoch) stays owed.
 		if h.st.Mail.VoidOwed != nil && h.st.Mail.VoidGen == recordGen {
