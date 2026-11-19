@@ -460,14 +460,21 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		if pr != nil {
 			pending = pendingUUIDs(pr.Accounts)
 		}
+		// The provider's own refusal is in play (R-SWITCH-BASE-4): its
+		// removed list is authoritative; the row baseline never stacks
+		// on it (an old revoke_leave row the provider already took would
+		// add a removal no confirmation could cover).
+		fromProvider := pr != nil && pr.FromProvider
 		h.mu.RUnlock()
-		if removed := mailRemovedFromRows(h.mailRowBaseline(), doc); len(removed) > 0 {
-			covered := confirmed
-			for _, r := range removed {
-				covered = covered && slices.Contains(pending, r.UUID)
-			}
-			if !covered {
-				return h.mailMassRefused(ctx, api, nil, doc, d, errHubMassRemoval(removed))
+		if !fromProvider {
+			if removed := mailRemovedFromRows(h.mailRowBaseline(), doc); len(removed) > 0 {
+				covered := confirmed
+				for _, r := range removed {
+					covered = covered && slices.Contains(pending, r.UUID)
+				}
+				if !covered {
+					return h.mailMassRefused(ctx, api, nil, doc, d, errHubMassRemoval(removed))
+				}
 			}
 		}
 		s.mu.Lock()
@@ -479,7 +486,7 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 			kept = kept && slices.ContainsFunc(doc.Accounts, func(a mailprovider.Account) bool { return a.UUID == u })
 		}
 		s.mu.Unlock()
-		confirm = confirmed && len(listed) > 0 && slices.Equal(listed, pending) && kept
+		confirm = confirmed && (fromProvider || (len(listed) > 0 && slices.Equal(listed, pending))) && kept
 	}
 
 	gen, err := h.mailSend(ctx, api, doc, confirm)

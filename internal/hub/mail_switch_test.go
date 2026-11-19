@@ -1037,6 +1037,10 @@ func putStates(mc *mailprovidertest.Server) int {
 func TestRewireOntoProviderWithExtraAccounts(t *testing.T) {
 	w := switchFix(t)
 	w.h.mailSyncOnce(context.Background())
+	// Someone removed long ago (scenario 6): an ended revoke_leave row
+	// for an account no provider holds any more (R-SWITCH-BASE-4: it
+	// never stacks on the provider's refusal).
+	leftRow(w, "alice", "0b0b0b0b-0000-4000-8000-0000000000c9")
 	mc2 := mailprovidertest.New(t)
 	const c1, c2 = "c0f0a000-0000-4000-8000-000000000001", "c0f0a000-0000-4000-8000-000000000002"
 	mc2.Lock(func(s *mailprovidertest.Server) {

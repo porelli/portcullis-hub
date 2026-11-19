@@ -74,7 +74,7 @@ func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailp
 		return mailRetry
 	}
 	sort.Slice(gone, func(i, j int) bool { return gone[i].Username < gone[j].Username })
-	if err := h.mailRecordPending(gone); err != nil {
+	if err := h.mailRecordPending(gone, last == nil && !isHubMassRemoval(refusal)); err != nil {
 		h.mailLogOnce("mail: the pending removal couldn't be saved (nothing done, retrying): " + err.Error())
 		return mailRetry
 	}
@@ -264,14 +264,18 @@ func mailFallback(last, doc *mailprovider.MailState, removed map[string]string) 
 // what is recorded (revoked flags, a confirmation); a different set is a
 // new pending removal (a new Since, no confirmation). A save failure
 // leaves the old state and is returned (the pass fails).
-func (h *Hub) mailRecordPending(gone []state.MailPendingAccount) error {
+func (h *Hub) mailRecordPending(gone []state.MailPendingAccount, fromProvider bool) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.st.Mail.PendingRemoval
 	if p != nil && slices.Equal(pendingUUIDs(p.Accounts), pendingUUIDs(gone)) {
+		if fromProvider && !p.FromProvider {
+			p.FromProvider = true
+			return h.saveStateLocked()
+		}
 		return nil
 	}
-	h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: h.mailNow(), Accounts: gone}
+	h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: h.mailNow(), Accounts: gone, FromProvider: fromProvider}
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail.PendingRemoval = p
 		return err

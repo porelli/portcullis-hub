@@ -230,6 +230,10 @@ type MailPendingRemoval struct {
 	// ConfirmedHash: an administrator's confirmation, bound to the hash
 	// of exactly this set and Since; any change to the set voids it.
 	ConfirmedHash string `json:"confirmed_hash,omitempty" yaml:"confirmed_hash,omitempty"`
+	// FromProvider: the set is the provider's own refusal's removed list
+	// with no baseline document (Ruling R-SWITCH-BASE-4): authoritative;
+	// the Hub's row baseline never stacks on it.
+	FromProvider bool `json:"from_provider,omitempty" yaml:"from_provider,omitempty"`
 }
 
 // MailPendingAccount is one account a pending mass removal would remove.
