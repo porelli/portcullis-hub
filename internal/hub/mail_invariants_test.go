@@ -58,10 +58,10 @@ func TestMassRemovalConfirmBoundToSet(t *testing.T) {
 		uuids = append(uuids, a.UUID)
 	}
 	f.h.mu.RUnlock()
-	if err := f.h.ConfirmMailRemoval(context.Background(), uuids[:1], directory.Human("root")); statusOf(err) != 409 {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, uuids[:1]), directory.Human("root")); statusOf(err) != 409 {
 		t.Fatalf("a partial confirmation: %v", err)
 	}
-	if err := f.h.ConfirmMailRemoval(context.Background(), uuids, directory.Human("root")); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, uuids), directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.sync(t)
@@ -82,7 +82,7 @@ func TestDelegateNeverConfirms(t *testing.T) {
 		uuids = append(uuids, a.UUID)
 	}
 	f.h.mu.RUnlock()
-	if err := f.h.ConfirmMailRemoval(context.Background(), uuids, directory.Human("alice")); statusOf(err) != 403 {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, uuids), directory.Human("alice")); statusOf(err) != 403 {
 		t.Fatalf("a delegate confirmed: %v", err)
 	}
 }
@@ -428,7 +428,7 @@ func TestNoBaselineRemovalWaits(t *testing.T) {
 	if f.mc.Puts() != puts {
 		t.Fatal("a later pass sent the removal without a confirmation")
 	}
-	if err := f.h.ConfirmMailRemoval(context.Background(), []string{p.Accounts[0].UUID}, directory.Human("root")); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, []string{p.Accounts[0].UUID}), directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	f.sync(t)
@@ -457,7 +457,7 @@ func TestNoBaselineProviderListConfirms(t *testing.T) {
 			ids = append(ids, a.UUID)
 		}
 		f.h.mu.RUnlock()
-		if err := f.h.ConfirmMailRemoval(context.Background(), ids, directory.Human("root")); err != nil {
+		if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, ids), directory.Human("root")); err != nil {
 			t.Fatal(err)
 		}
 	}

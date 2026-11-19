@@ -37,12 +37,20 @@ func (s *Server) handleConfirmMailRemoval(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var b struct {
-		Accounts []string `json:"accounts"`
+		Accounts     []string `json:"accounts"`
+		Confirm      string   `json:"confirm"`
+		Code         string   `json:"code"`
+		CodeVerifier string   `json:"code_verifier"`
+		Nonce        string   `json:"nonce"`
 	}
-	if !readMailBody(w, r, &b, `{"accounts": ["<uuid>", …]}`) {
+	if !readMailBody(w, r, &b, `{"accounts": ["<uuid>", …], "confirm": "<the pending removal's confirm_phrase>", "code", "code_verifier", "nonce"}`) {
 		return
 	}
-	if err := s.Hub.ConfirmMailRemoval(r.Context(), b.Accounts, requestActor(r)); err != nil {
+	in := hub.ConfirmRemovalInput{Accounts: b.Accounts, Confirm: b.Confirm, Listener: listenerOf(r)}
+	if b.Code != "" || b.CodeVerifier != "" || b.Nonce != "" {
+		in.Proof = &freshauth.Proof{Code: b.Code, CodeVerifier: b.CodeVerifier, Nonce: b.Nonce}
+	}
+	if err := s.Hub.ConfirmMailRemoval(r.Context(), in, requestActor(r)); err != nil {
 		mailErr(w, "confirming a mail removal", err)
 		return
 	}

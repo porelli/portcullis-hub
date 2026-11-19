@@ -13,6 +13,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -35,6 +36,18 @@ import (
 // sends the fallback document. Anything it can't do safely blocks the
 // sync (mail_sync_blocked) and sends nothing. It returns the next sleep.
 func (h *Hub) mailMassRefused(ctx context.Context, api MailAPI, last, doc *mailprovider.MailState, d mailDiff, refusal error) time.Duration {
+	// The provider's own guard refused (Ruling R-SWITCH-BASE-3): the fresh
+	// mark only ever skipped the Hub's judgement. It is spent now, so the
+	// refusal stays a normal pending removal (a full administrator
+	// confirms exactly the provider's list) and the sync waits on it.
+	if !isHubMassRemoval(refusal) {
+		h.mu.Lock()
+		if h.st.Mail.FreshInstance != "" {
+			h.st.Mail.FreshInstance = ""
+			h.saveLocked()
+		}
+		h.mu.Unlock()
+	}
 	var gone []state.MailPendingAccount
 	if last != nil {
 		for _, a := range last.Accounts {
@@ -363,6 +376,26 @@ type MailPendingView struct {
 	// false: revoking failed, retrying).
 	Accounts  []state.MailPendingAccount `json:"accounts"`
 	Confirmed bool                       `json:"confirmed"`
+	// ConfirmPhrase is what POST /api/mail/confirm-removal's confirm
+	// must be (Ruling R-CONFIRM-REMOVAL).
+	ConfirmPhrase string `json:"confirm_phrase"`
+}
+
+// mailRemovalPhrase is the typed confirmation for removing n mailboxes.
+func mailRemovalPhrase(n int) string {
+	if n == 1 {
+		return "remove 1 mailbox"
+	}
+	return fmt.Sprintf("remove %d mailboxes", n)
+}
+
+// ConfirmRemovalInput is POST /api/mail/confirm-removal's body: the
+// pending accounts (exactly), the typed phrase and the fresh sign-in.
+type ConfirmRemovalInput struct {
+	Accounts []string
+	Confirm  string
+	Proof    *freshauth.Proof
+	Listener string
 }
 
 // mailPendingView is the pending removal (nil: none). Caller holds mu.
@@ -371,36 +404,72 @@ func (h *Hub) mailPendingViewLocked() *MailPendingView {
 	if p == nil {
 		return nil
 	}
-	return &MailPendingView{Since: p.Since, Accounts: append([]state.MailPendingAccount{}, p.Accounts...), Confirmed: p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p)}
+	return &MailPendingView{Since: p.Since, Accounts: append([]state.MailPendingAccount{}, p.Accounts...), Confirmed: p.ConfirmedHash != "" && p.ConfirmedHash == pendingHash(p),
+		ConfirmPhrase: mailRemovalPhrase(len(p.Accounts))}
 }
 
-// ConfirmMailRemoval confirms the pending mass removal: uuids must be
-// exactly its accounts (409 otherwise: it changed since it was shown).
-// The next document carries confirm_mass_removal for exactly them.
-// Audited mail.confirm_removal.
-func (h *Hub) ConfirmMailRemoval(ctx context.Context, uuids []string, actor directory.Actor) (err error) {
+// ConfirmMailRemoval confirms the pending mass removal (Ruling
+// R-CONFIRM-REMOVAL: destructive and irreversible): a full administrator
+// in the browser, never AI or MCP (403), with a fresh sign-in (403
+// without one or with a stale one) and the typed phrase (400 naming it);
+// the accounts must be exactly the pending ones (409 otherwise). The
+// next document carries confirm_mass_removal for exactly them. Audited
+// mail.confirm_removal with the list.
+func (h *Hub) ConfirmMailRemoval(ctx context.Context, in ConfirmRemovalInput, actor directory.Actor) (err error) {
 	if err := h.mailWriteGuard(); err != nil {
 		return err
 	}
-	defer func() { h.auditOp(actor, "mail.confirm_removal", "mail", fmt.Sprintf("count=%d", len(uuids)), err) }()
+	defer func() {
+		ids := slices.Clone(in.Accounts)
+		sort.Strings(ids)
+		h.auditOp(actor, "mail.confirm_removal", "mail", fmt.Sprintf("count=%d accounts=%s", len(ids), strings.Join(ids, ",")), err)
+	}()
 	if strings.TrimSpace(actor.User) == "" {
 		return statusErr(http.StatusBadRequest, "no signed-in user to audit the change as")
 	}
-	if err := aiUnconfirmed(actor, "confirming a mass removal of mailboxes"); err != nil {
-		return err
-	}
 	// Full administrators only (lldap_admin, one predicate): never a
-	// delegate, whatever route or fix called it.
+	// delegate, whatever route called it.
 	if !h.isGlobalAdmin(ctx, actor.User) {
 		return statusErr(http.StatusForbidden, "%s", mailNotAdminText)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	if actor.Via != "" {
+		return statusErr(http.StatusForbidden, "confirming a removal of mailboxes happens only in the browser, never through MCP or AI")
+	}
+	h.mu.RLock()
 	p := h.st.Mail.PendingRemoval
+	n := 0
+	if p != nil {
+		n = len(p.Accounts)
+	}
+	h.mu.RUnlock()
 	if p == nil {
 		return statusErr(http.StatusConflict, "no mass removal is waiting")
 	}
-	want := slices.Clone(uuids)
+	if in.Proof == nil {
+		return statusErr(http.StatusForbidden, "confirming a removal of mailboxes needs a fresh sign-in")
+	}
+	// The phrase before the proof is spent (a typo costs no sign-in).
+	if phrase := mailRemovalPhrase(n); strings.TrimSpace(in.Confirm) != phrase {
+		return statusErr(http.StatusBadRequest, "type %q to confirm", phrase)
+	}
+	listener := in.Listener
+	if listener == "" {
+		listener = ListenerHub
+	}
+	if _, err := h.verifyTouch(ctx, listener, *in.Proof, actor.User); err != nil {
+		var tr *touchRefused
+		if errors.As(err, &tr) {
+			return tr.err
+		}
+		return errFreshAuth
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p = h.st.Mail.PendingRemoval
+	if p == nil {
+		return statusErr(http.StatusConflict, "no mass removal is waiting")
+	}
+	want := slices.Clone(in.Accounts)
 	sort.Strings(want)
 	if !slices.Equal(want, pendingUUIDs(p.Accounts)) {
 		return statusErr(http.StatusConflict, "the pending removal changed since it was shown: look again")

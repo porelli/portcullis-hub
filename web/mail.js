@@ -78,7 +78,9 @@
       h += '<div class="public-warn" data-mail-pending>Removing ' + esc(accts.length) + ' mailboxes at once waits for your confirmation: ' + who.join(', ') +
         '. Their mailboxes stay until you confirm. If they shouldn\'t have left mail_users, add them back instead.' +
         (pr.confirmed ? ' <strong>Confirmed: the removal goes with the next update.</strong>'
-          : ' <button type="button" class="btn btn-sm btn-danger" data-mail-act="confirm-removal" data-mail-uuids="' + esc((pr.accounts || []).map(a => a.uuid).join(',')) + '">Confirm removal</button>') + '</div>';
+          : ' <span data-mail-removal>Type <code>' + esc(pr.confirm_phrase) + '</code> to confirm (then a fresh sign-in): ' +
+            '<input type="text" class="form-control form-control-sm" data-mail-removal-phrase autocomplete="off" aria-label="Confirmation phrase" placeholder="' + esc(pr.confirm_phrase) + '"> ' +
+            '<button type="button" class="btn btn-sm btn-danger" data-mail-act="confirm-removal" data-mail-phrase="' + esc(pr.confirm_phrase) + '" data-mail-uuids="' + esc((pr.accounts || []).map(a => a.uuid).join(',')) + '">Remove the mailboxes</button></span>') + '</div>';
     }
     const reach = status && status.mail === 'on' ? (status.reachable ? pill('ok', 'reachable') : pill('warn', 'mail provider unreachable')) : '';
     h += '<dl class="inst-facts"><dt>Mail server</dt><dd><code>' + esc(v.hostname) + '</code> ' + reach + '</dd>' +
@@ -238,12 +240,28 @@
           window.showToast('Mail for ' + row.dataset.mailDomain + ' is draining.', 'success');
           break;
         case 'confirm-removal': {
+          // Destructive (Ruling R-CONFIRM-REMOVAL): the typed phrase, then
+          // a fresh sign-in opened from the click (no await before it).
           const uuids = String(b.dataset.mailUuids || '').split(',').filter(Boolean);
-          if (!confirm('Remove ' + uuids.length + ' mailboxes? They are parked and deleted after the retention period.')) return;
-          b.dataset.busy = '1';
-          await window.apiCall('/api/mail/confirm-removal', 'POST', { accounts: uuids });
-          window.showToast('Confirmed.', 'success');
-          break;
+          const want = b.dataset.mailPhrase || '';
+          const typed = ((b.closest('[data-mail-removal]') || root).querySelector('[data-mail-removal-phrase]') || {}).value || '';
+          if (typed.trim() !== want) { window.showToast('Type "' + want + '" to confirm.', 'error'); return; }
+          const fa = root.mailView && root.mailView.fresh_auth;
+          if (!fa || !window.PortcullisFreshAuth) { window.showToast('A fresh sign-in isn\'t available: try again in a moment.', 'error'); return; }
+          window.PortcullisFreshAuth.start(fa, {
+            ctx: { mail_confirm_removal: true },
+            status: (t, warn) => { if (warn) window.showToast(t, 'error'); },
+            busy: () => {},
+            end: () => {},
+            proof: async p => {
+              try {
+                await window.apiCall('/api/mail/confirm-removal', 'POST', { accounts: uuids, confirm: want, code: p.code, code_verifier: p.code_verifier, nonce: p.nonce });
+                window.showToast('Confirmed: the mailboxes are removed with the next update.', 'success');
+              } catch (err) { window.showToast(err.message || 'Confirming failed', 'error'); }
+              render(root);
+            },
+          });
+          return;
         }
         case 'switch':
           if (window.PortcullisMailProvider) window.PortcullisMailProvider.switchDialog(b.dataset.mailFrom, (root.mailInsts || []).map(i => i.id));

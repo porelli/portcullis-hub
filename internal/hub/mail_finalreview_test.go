@@ -336,7 +336,7 @@ func TestFinalReviewBlindConfirmStaleSet(t *testing.T) {
 		ids = append(ids, a.UUID)
 		t.Logf("pending %s", a.Username)
 	}
-	if err := f.h.ConfirmMailRemoval(context.Background(), ids, directory.Human("root")); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, ids), directory.Human("root")); err != nil {
 		t.Fatal(err)
 	}
 	// root leaves too before the next pass.

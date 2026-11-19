@@ -100,10 +100,10 @@ func TestMassRemovalPendingKeepsAccessClosed(t *testing.T) {
 		t.Fatalf("preview %+v %v", p, err)
 	}
 	// A stale list is refused; the exact one confirms.
-	if err := f.h.ConfirmMailRemoval(context.Background(), []string{uuidAlice}, mailAdmin); statusOf(err) != 409 {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, []string{uuidAlice}), mailAdmin); statusOf(err) != 409 {
 		t.Fatalf("partial confirm: %v", err)
 	}
-	if err := f.h.ConfirmMailRemoval(context.Background(), []string{uuidBob, uuidAlice}, mailAdmin); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, []string{uuidBob, uuidAlice}), mailAdmin); err != nil {
 		t.Fatal(err)
 	}
 	f.sync(t)

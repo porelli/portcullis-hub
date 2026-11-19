@@ -402,17 +402,9 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		d.removal = true
 	}
 	s.mu.Unlock()
-	// A pending removal is of the old provider's mailboxes: the new one
-	// has none of them (R-SWITCH-BASE).
-	if freshProvider {
-		h.mu.Lock()
-		if pr := h.st.Mail.PendingRemoval; pr != nil {
-			h.st.Mail.PendingRemoval = nil
-			h.saveLocked()
-			log.Printf("mail: the pending removal of %d mailboxes was the previous provider's: dropped (the new provider starts empty)", len(pr.Accounts))
-		}
-		h.mu.Unlock()
-	}
+	// (The old provider's pending removal was dropped once, by the
+	// wiring's void that set the fresh mark: a pending removal seen now
+	// is the new provider's own refusal, kept (R-SWITCH-BASE-3).)
 	// People back in mail_users leave the pending removal on every pass
 	// (an emptied set clears it, a changed one voids its confirmation).
 	if err := h.mailPendingReconcile(doc); err != nil {

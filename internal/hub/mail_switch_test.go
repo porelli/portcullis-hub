@@ -1015,3 +1015,68 @@ func TestSwitchOldVoidFailedFirstPassSends(t *testing.T) {
 		t.Fatalf("puts %d → %d, pending %+v, last doc instance %q, fresh %q, blocked %q", puts, w.mc.Puts(), pr, inst, fresh, w.h.mailState.blocked)
 	}
 }
+
+// putStates counts the PUT /v1/state requests mc saw.
+func putStates(mc *mailprovidertest.Server) int {
+	n := 0
+	mc.Lock(func(s *mailprovidertest.Server) {
+		for _, r := range s.Requests {
+			if r == "PUT /v1/state" {
+				n++
+			}
+		}
+	})
+	return n
+}
+
+// TestRewireOntoProviderWithExtraAccounts (Ruling R-SWITCH-BASE-3): a
+// switch onto a provider whose store still holds accounts the Hub no
+// longer sends: its own guard refuses the first document; the refusal
+// stays a pending removal (the fresh mark is spent), no pass resends it;
+// a full administrator's confirmation of exactly its list converges.
+func TestRewireOntoProviderWithExtraAccounts(t *testing.T) {
+	w := switchFix(t)
+	w.h.mailSyncOnce(context.Background())
+	mc2 := mailprovidertest.New(t)
+	const c1, c2 = "c0f0a000-0000-4000-8000-000000000001", "c0f0a000-0000-4000-8000-000000000002"
+	mc2.Lock(func(s *mailprovidertest.Server) {
+		s.Doc = &mailprovider.MailState{Version: mailprovider.StateVersion, Generation: 1, Accounts: []mailprovider.Account{
+			{UUID: c1, Username: "conf-a"}, {UUID: c2, Username: "conf-b"}}}
+	})
+	w.h.SetMailAPI(mc2.Client())
+	doSwitch(t, w)
+	w.h.mu.RLock()
+	pr, fresh := w.h.st.Mail.PendingRemoval, w.h.st.Mail.FreshInstance
+	w.h.mu.RUnlock()
+	if pr == nil || len(pr.Accounts) != 2 || fresh != "" {
+		t.Fatalf("pending %+v, fresh %q", pr, fresh)
+	}
+	refusedPuts := putStates(mc2)
+	for i := 0; i < 3; i++ {
+		w.h.mailSyncOnce(context.Background())
+	}
+	w.h.mu.RLock()
+	pr = w.h.st.Mail.PendingRemoval
+	w.h.mu.RUnlock()
+	if putStates(mc2) != refusedPuts || pr == nil || len(pr.Accounts) != 2 {
+		t.Fatalf("the refusal loops or went: PUTs %d → %d, pending %+v", refusedPuts, putStates(mc2), pr)
+	}
+	var ids []string
+	for _, a := range pr.Accounts {
+		ids = append(ids, a.UUID)
+	}
+	if err := w.h.ConfirmMailRemoval(context.Background(), confirmIn(w.h, ids), directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	w.h.mailSyncOnce(context.Background())
+	w.h.mu.RLock()
+	pr, inst := w.h.st.Mail.PendingRemoval, w.h.st.Mail.LastDocInstance
+	w.h.mu.RUnlock()
+	var accepted bool
+	mc2.Lock(func(s *mailprovidertest.Server) {
+		accepted = s.Doc != nil && s.Doc.ConfirmMassRemoval && s.Doc.Generation > 1
+	})
+	if !accepted || pr != nil || inst != otherMailID {
+		t.Fatalf("accepted %v pending %+v last doc instance %q", accepted, pr, inst)
+	}
+}

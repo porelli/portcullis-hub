@@ -36,7 +36,7 @@ func TestPendingClearsWhenPeopleReturn(t *testing.T) {
 	if p == nil || len(p.Accounts) != 2 {
 		t.Fatalf("pending %+v", p)
 	}
-	if err := f.h.ConfirmMailRemoval(context.Background(), pendingUUIDs(p.Accounts), mailAdmin); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, pendingUUIDs(p.Accounts)), mailAdmin); err != nil {
 		t.Fatal(err)
 	}
 	// The outage recovers before the next pass.
@@ -72,7 +72,7 @@ func TestPendingPartialReturnVoidsConfirm(t *testing.T) {
 	f.h.st.Mail.PendingRemoval = &state.MailPendingRemoval{Since: time.Now(), Accounts: []state.MailPendingAccount{
 		{Username: "alice", UUID: uuidAlice, Revoked: true}, {Username: "bob", UUID: uuidBob, Revoked: true}}}
 	f.h.mu.Unlock()
-	if err := f.h.ConfirmMailRemoval(context.Background(), []string{uuidAlice, uuidBob}, mailAdmin); err != nil {
+	if err := f.h.ConfirmMailRemoval(context.Background(), confirmIn(f.h, []string{uuidAlice, uuidBob}), mailAdmin); err != nil {
 		t.Fatal(err)
 	}
 	if !f.h.mailPendingConfirmed(map[string]string{"alice": uuidAlice, "bob": uuidBob}) {
@@ -292,7 +292,7 @@ func TestMailHubSecretInvalid(t *testing.T) {
 		"aliases":  f.h.SetUserAliases(ctx, "alice", nil, mailAdmin),
 		"list":     f.h.SetGroupList(ctx, "team_b", false, "", "", mailAdmin),
 		"action":   f.h.MailAction(ctx, "dkim-rotate", "example.org", mailAdmin),
-		"confirm":  f.h.ConfirmMailRemoval(ctx, nil, mailAdmin),
+		"confirm":  f.h.ConfirmMailRemoval(ctx, confirmIn(f.h, nil), mailAdmin),
 	}
 	_, cerr := f.h.CreateMailPassword(ctx, "alice", "x", "none", testProof)
 	writes["create"] = cerr

@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -325,11 +324,13 @@ func (mailConfirmRemovalFixer) Apply(h *Hub, _ doctor.Finding, params map[string
 	if planHash == "" || hash != planHash {
 		return nil, statusErr(http.StatusConflict, "the setup changed since the preview")
 	}
-	return h.startAsync(opKeyDomain(strings.ToLower(h.cfg.Domain)), doctor.FixMailConfirmRemoval, actor, nil, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		ready()
-		if err := h.ConfirmMailRemoval(ctx, ids, actor); err != nil {
-			return nil, nil, err
-		}
-		return map[string]string{"accounts": strconv.Itoa(len(ids))}, nil, nil
-	})
+	_ = ids
+	// Ruling R-CONFIRM-REMOVAL: the removal is confirmed only on Settings
+	// → Mail, with a fresh sign-in and the typed phrase (never a doctor
+	// fix, never AI or MCP).
+	return nil, statusErr(http.StatusConflict, "%s", MailConfirmRemovalElsewhereText)
 }
+
+// MailConfirmRemovalElsewhereText is the doctor fix's answer: where the
+// removal is confirmed.
+const MailConfirmRemovalElsewhereText = "confirm the removal on Settings → Mail: it needs a fresh sign-in and the typed phrase"
