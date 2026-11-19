@@ -37,7 +37,6 @@ import (
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
-	"github.com/portcullis/hub/internal/mailctl"
 	"github.com/portcullis/hub/internal/signinreset"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/usage"
@@ -274,10 +273,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vpn" {
 		os.Exit(vpnMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
-	// `hub mail drain|domains` (contract §19.10): `./portcullis mail
-	// disable`'s clients.
+	// `hub mail <command>` (contract §19.10: provider, install, unwire,
+	// op, status, dns-main, tls, test, backup, restore, action, drain,
+	// domains): `./portcullis mail …`'s clients.
 	if len(os.Args) > 1 && os.Args[1] == "mail" {
-		os.Exit(mailMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
+		os.Exit(mailMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
 	// `hub ssh status` (contract §18): `./portcullis status`'s SSH block.
 	if len(os.Args) > 1 && os.Args[1] == "ssh" {
@@ -339,6 +339,12 @@ func main() {
 		// Hub's uid, 0700); unusable = those apps refuse to start.
 		SecretsDir:    env("HUB_SECRETS_DIR", "/secrets"),
 		SecretsVolume: env("HUB_SECRETS_VOLUME", hub.DefaultSecretsVolume),
+		// The mail slot (contract §19.1): "" = http://mail-api:<api.port>.
+		MailAPIURL:  os.Getenv("HUB_MAIL_API_URL"),
+		MailSlotDir: env("HUB_MAIL_SLOT_DIR", "/mail-slot"),
+		// Ruling R-POD2: the wired provider's gate files, the whole
+		// volume mounted into it (never a hub_secrets subpath).
+		MailProviderSlotDir: env("HUB_MAIL_PROVIDER_SLOT_DIR", "/mail-provider-slot"),
 		// The gate's age recipient (contract §15.4): readable = the core
 		// has an mcp-gate (Settings → AI gate_present).
 		MCPGateRecipientFile: env("HUB_MCP_GATE_RECIPIENT_FILE", "/run/portcullis/mcp-gate/age.pub"),
@@ -496,13 +502,6 @@ func main() {
 		log.Printf("domains disabled: %v", err)
 	}
 	h.SetDomainsAPI(dom)
-	// Mail (contract §19.1): core's mailctl, bearer secret from a file.
-	// Without it (or with PORTCULLIS_MAIL=off) mail is off for the Hub.
-	mc := mailctl.New(env("HUB_MAILCTL_API_URL", mailctl.DefaultAPIURL), env("HUB_MAILCTL_SECRET_FILE", mailctl.DefaultSecretFile))
-	if err := mc.Available(); err != nil {
-		log.Printf("mail disabled: %v", err)
-	}
-	h.SetMailAPI(mc)
 	dirStore, err := openDirectoryStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
@@ -675,6 +674,11 @@ func main() {
 	go h.RunHistoryPrune(ctx, 24*time.Hour)
 	// Impersonations: expiry, not used, the file every minute (D41, D37).
 	go h.RunImpersonationExpiry(ctx, 5*time.Second)
+	// An owed mail void (a wiring, a restore) is retried every 5 min
+	// (contract §19.11) and at once when owed.
+	go h.RunMailVoidRetry(ctx, hub.MailVoidRetryEvery)
+	// Each mail domain's MTA-STS policy, through Traefik, every 6 h (P12).
+	go h.RunMailPolicyCheck(ctx, hub.MailPolicyEvery)
 	// VPN providers: identity and dns hooks when due, vpn.json (§16).
 	go h.RunVPNMaps(ctx, 5*time.Second)
 	// SSH access: a compile every minute (temporary memberships ending,

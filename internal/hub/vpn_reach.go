@@ -251,6 +251,12 @@ func (h *Hub) vpnRoutesLocked(t *templates.Template, rl *routeLabels) error {
 	if !vpnOnly {
 		return nil
 	}
+	// A router-less instance (file sharing, a mail provider: its only
+	// router is the Hub's well-known router, which follows
+	// PORTCULLIS_EP_CORE) has nothing on Traefik to restrict.
+	if len(rl.routes.Info) == 0 && len(rl.signInLabels) == 0 && len(rl.mcpLabels) == 0 {
+		return nil
+	}
 	// The sign-in and MCP routers of a VPN-only instance go VPN-only too.
 	for k := range rl.signInLabels {
 		if strings.HasSuffix(k, ".entrypoints") {

@@ -67,6 +67,11 @@ func kubeCompat(compose []byte, m Manifest, env map[string]string) Compat {
 	if err != nil {
 		return Compat{Status: CompatRefused, Reasons: []string{"compose.yml can't be read: " + err.Error()}}
 	}
+	// The mail slot is Docker / Podman only (contract §19.12; core
+	// refuses it on Kubernetes): a mail provider is refused, first.
+	if m.Mail != nil {
+		c.refuse("%s", KubeMailRefusal)
+	}
 	roots := DefaultKubeBindRoots
 	if v, ok := env[EnvBindRoots]; ok {
 		roots = strings.Split(v, ":")
@@ -679,3 +684,7 @@ func publishedHostIPs(ports *yaml.Node, env map[string]string) [][2]string {
 	}
 	return out
 }
+
+// KubeMailRefusal is a mail template's Kubernetes refusal (shared runtime
+// vectors; templates' validate.py has the same text).
+const KubeMailRefusal = "the template is a mail provider: mail isn't available on Kubernetes yet"

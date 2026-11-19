@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"golang.org/x/mod/semver"
 
+	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -155,6 +157,15 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 	if err := h.dockerRootMounts(ctx, t, proj); err != nil {
 		return err
 	}
+	h.mu.RLock()
+	mode := h.mailRenderModeLocked(t)
+	h.mu.RUnlock()
+	if err := checkMailMounts(proj, t, mode); err != nil {
+		return err
+	}
+	if err := checkMailNetworkAttachments(proj, t, mode, h.mailCore().ProviderIP.String()); err != nil {
+		return err
+	}
 	vol := h.cfg.SecretsVolume
 	type want struct{ sub string }
 	expected := map[string]map[string]want{} // service → target → subpath
@@ -271,12 +282,196 @@ func (h *Hub) checkSecretsMounts(ctx context.Context, t *templates.Template) err
 		return statusErr(http.StatusServiceUnavailable, "%s was not started: per-person passwords need the Docker Engine API", t.ID)
 	}
 	info, err := h.rt.Info(ctx)
-	api := info.APIVersion
 	if err != nil {
-		return statusErr(http.StatusServiceUnavailable, "%s was not started: can't read the Docker Engine API version: %v", t.ID, err)
+		return statusErr(http.StatusServiceUnavailable, "%s was not started: can't read the container engine's version: %v", t.ID, err)
 	}
+	if why := subpathRefusal(h.cfg.Runtime, info); why != "" {
+		return statusErr(http.StatusConflict, "%s was not started: %s", t.ID, why)
+	}
+	return nil
+}
+
+// subpathRefusal is why the engine can't do volume subpath mounts (""
+// = it can). Under Podman its own version (/version's "Podman Engine"
+// component) decides, never the compat API version (always 1.41);
+// under Docker the Engine API version (1.45). The runtime fence stays
+// the adapter's CheckLayout.
+func subpathRefusal(kind runtime.Kind, info runtime.Info) string {
+	if kind == runtime.KindPodman {
+		// Ruling R-POD2: Podman's compat API ignores compose `subpath`
+		// (live e2e: the files never reached the container), whatever
+		// its version; the version names the engine only.
+		v := info.EngineVersion
+		if v == "" {
+			v = "(version unknown)"
+		}
+		return "per-person passwords need Docker for now (rootless Podman " + clip(v, 40) + " doesn't apply compose volume subpaths)"
+	}
+	api := info.APIVersion
 	if !semver.IsValid("v"+api) || semver.Compare("v"+api, "v"+MinSubpathAPI) < 0 {
-		return statusErr(http.StatusConflict, "%s was not started: Docker Engine API %s is too old for per-person passwords (volume subpath mounts need API %s, Docker Engine 26.0 or newer)", t.ID, clip(api, 40), MinSubpathAPI)
+		return "Docker Engine API " + clip(api, 40) + " is too old for per-person passwords (volume subpath mounts need API " + MinSubpathAPI + ", Docker Engine 26.0 or newer)"
+	}
+	return ""
+}
+
+// checkMailMounts is contract §19.1's mail_tls check on t's rendered
+// project: a volume whose resolved name is portcullis_mail_tls, under
+// any key, is mounted only by the wired provider's tls services (mode
+// void or normal), read-only. Anything else refuses the up (409).
+func checkMailMounts(proj *types.Project, t *templates.Template, mode mailMode) error {
+	var tls, gated []string
+	if mode != mailUnwired && t.Manifest.Mail != nil {
+		tls, gated = t.Manifest.Mail.TLS, t.Manifest.Mail.Gated
+	}
+	if err := checkMailVolume(proj, t, mailTLSVolume, mailTLSVolumeKey, tls, "the mail certificate %s may only be mounted read-only by the wired mail provider's tls services"); err != nil {
+		return err
+	}
+	// The slot volume (R-POD2): whole, read-only, the gated services only.
+	return checkMailVolume(proj, t, mailProviderSlotVolume, mailProviderSlotVolumeKey, gated, "the mail provider's slot %s may only be mounted read-only and whole by the wired mail provider's gated services")
+}
+
+// checkMailVolume: a volume named vol (under any key, or key) is mounted
+// only by the services in allowed, read-only, never by a subpath, and no
+// other service takes their volumes.
+func checkMailVolume(proj *types.Project, t *templates.Template, vol, key string, allowed []string, why string) error {
+	keys := map[string]bool{}
+	for k, v := range proj.Volumes {
+		name := v.Name
+		if name == "" {
+			name = k
+			if !bool(v.External) {
+				name = proj.Name + "_" + k
+			}
+		}
+		if name == vol || k == key {
+			keys[k] = true
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	all := map[string]types.ServiceConfig{}
+	for n, sv := range proj.Services {
+		all[n] = sv
+	}
+	for n, sv := range proj.DisabledServices {
+		if _, dup := all[n]; !dup {
+			all[n] = sv
+		}
+	}
+	names := make([]string, 0, len(all))
+	for n := range all {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	refuse := func(format string, args ...any) error {
+		return statusErr(http.StatusConflict, "%s was not started: %s ("+why+")", t.ID, fmt.Sprintf(format, args...), vol)
+	}
+	for _, n := range names {
+		for _, m := range all[n].Volumes {
+			if m.Type != types.VolumeTypeVolume || !keys[m.Source] {
+				continue
+			}
+			switch {
+			case !slices.Contains(allowed, n):
+				return refuse("service %s mounts it", n)
+			case !m.ReadOnly:
+				return refuse("service %s mounts it writable", n)
+			case m.Volume != nil && m.Volume.Subpath != "":
+				return refuse("service %s mounts it by a subpath", n)
+			}
+		}
+		for _, vf := range all[n].VolumesFrom {
+			src := strings.TrimPrefix(vf, "service:")
+			src, _, _ = strings.Cut(src, ":")
+			if slices.Contains(allowed, src) && !slices.Contains(allowed, n) {
+				return refuse("service %s takes the volumes of %s (volumes_from)", n, vf)
+			}
+		}
+	}
+	return nil
+}
+
+// mailAttach is one attachment the Hub's override makes on a core
+// network: the service, its address ("" none) and aliases (sorted).
+type mailAttach struct {
+	ip      string
+	aliases []string
+}
+
+// checkMailNetworkAttachments is Ruling RR2-H1 (c) on a mail template's
+// rendered project: on every external network only the Hub's own
+// attachments exist — the API service on portcullis-mail-api at the
+// provider address with its alias; in normal mode the metrics services
+// on portcullis-metrics-mail with theirs and the well-known service on
+// portcullis-proxy (no address, no alias). Any other service, address
+// or alias there refuses the up (409).
+func checkMailNetworkAttachments(proj *types.Project, t *templates.Template, mode mailMode, providerIP string) error {
+	b := t.Manifest.Mail
+	if b == nil {
+		return nil
+	}
+	want := map[string]map[string]mailAttach{} // network → service → attachment
+	add := func(n, s, ip string, aliases ...string) {
+		if want[n] == nil {
+			want[n] = map[string]mailAttach{}
+		}
+		a := want[n][s]
+		if ip != "" {
+			a.ip = ip
+		}
+		a.aliases = append(a.aliases, aliases...)
+		slices.Sort(a.aliases)
+		want[n][s] = a
+	}
+	if mode != mailUnwired {
+		add(mailAPINetwork, b.API.Service, providerIP, mailAPIAlias)
+	}
+	if mode == mailNormal {
+		add(mailMetricsNetwork, b.Metrics.Service, "", mailMetricsAlias)
+		if sm := b.ServerMetrics; sm != nil {
+			add(mailMetricsNetwork, sm.Service, "", mailServerMetricsAlias)
+		}
+		add(mailProxyNetwork, b.Wellknown.Service, "")
+	}
+	refuse := func(f string, a ...any) error {
+		return statusErr(http.StatusConflict, "%s was not started: "+f, append([]any{t.ID}, a...)...)
+	}
+	for key, n := range proj.Networks {
+		if !bool(n.External) {
+			continue
+		}
+		name := n.Name
+		if name == "" {
+			name = key
+		}
+		allowed := want[name]
+		for sname, svc := range proj.Services {
+			c, on := svc.Networks[key]
+			if !on {
+				continue
+			}
+			w, ok := allowed[sname]
+			if !ok {
+				return refuse("service %s is on the core network %s: only the Hub's own attachments are (RR2-H1)", sname, name)
+			}
+			ip, aliases := "", []string{}
+			if c != nil {
+				ip = c.Ipv4Address
+				if c.Ipv6Address != "" || len(c.LinkLocalIPs) > 0 {
+					return refuse("service %s has an IPv6 or link-local address on %s", sname, name)
+				}
+				aliases = append(aliases, c.Aliases...)
+			}
+			slices.Sort(aliases)
+			wa := w.aliases
+			if wa == nil {
+				wa = []string{}
+			}
+			if ip != w.ip || !slices.Equal(aliases, wa) {
+				return refuse("service %s's attachment to %s isn't the Hub's (address %q, aliases %v)", sname, name, ip, aliases)
+			}
+		}
 	}
 	return nil
 }

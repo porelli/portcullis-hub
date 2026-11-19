@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
 )
 
@@ -36,12 +37,20 @@ func (s *Server) handleConfirmMailRemoval(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var b struct {
-		Accounts []string `json:"accounts"`
+		Accounts     []string `json:"accounts"`
+		Confirm      string   `json:"confirm"`
+		Code         string   `json:"code"`
+		CodeVerifier string   `json:"code_verifier"`
+		Nonce        string   `json:"nonce"`
 	}
-	if !readMailBody(w, r, &b, `{"accounts": ["<uuid>", …]}`) {
+	if !readMailBody(w, r, &b, `{"accounts": ["<uuid>", …], "confirm": "<the pending removal's confirm_phrase>", "code", "code_verifier", "nonce"}`) {
 		return
 	}
-	if err := s.Hub.ConfirmMailRemoval(r.Context(), b.Accounts, requestActor(r)); err != nil {
+	in := hub.ConfirmRemovalInput{Accounts: b.Accounts, Confirm: b.Confirm, Listener: listenerOf(r)}
+	if b.Code != "" || b.CodeVerifier != "" || b.Nonce != "" {
+		in.Proof = &freshauth.Proof{Code: b.Code, CodeVerifier: b.CodeVerifier, Nonce: b.Nonce}
+	}
+	if err := s.Hub.ConfirmMailRemoval(r.Context(), in, requestActor(r)); err != nil {
 		mailErr(w, "confirming a mail removal", err)
 		return
 	}
@@ -82,16 +91,31 @@ func (s *Server) handleMailSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
-	writeJSON(w, s.Hub.MailSettingsView())
+	// The Hub listener's fresh sign-in parameters (the relay, DKIM
+	// rotation and former retention forms).
+	writeJSON(w, struct {
+		hub.MailSettingsView
+		FreshAuth *freshauth.AuthorizeInfo `json:"fresh_auth"`
+	}{s.Hub.MailSettingsView(), s.Hub.AdminFreshAuthInfo()})
 }
 
 func (s *Server) handleSetMailSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
 	}
-	var in hub.MailSettingsInput
-	if !readMailBody(w, r, &in, `{"primary_domain", "spam", "limits", "quotas"}`) {
+	var b struct {
+		hub.MailSettingsInput
+		Code         string `json:"code"`
+		CodeVerifier string `json:"code_verifier"`
+		Nonce        string `json:"nonce"`
+	}
+	if !readMailBody(w, r, &b, `{"primary_domain", "spam", "limits", "quotas", "relay"?, "dkim_rotate"?, "former_retention"?, "code"?, "code_verifier"?, "nonce"?}`) {
 		return
+	}
+	in := b.MailSettingsInput
+	in.Listener = listenerOf(r)
+	if b.Code != "" || b.CodeVerifier != "" || b.Nonce != "" {
+		in.Proof = &freshauth.Proof{Code: b.Code, CodeVerifier: b.CodeVerifier, Nonce: b.Nonce}
 	}
 	if err := s.Hub.SetMailSettings(r.Context(), in, requestActor(r)); err != nil {
 		mailErr(w, "saving the mail settings", err)

@@ -556,6 +556,14 @@ func (h *Hub) changeEnvOverride(id, name string, value *string, actor directory.
 	if t == nil {
 		return nil, statusErr(404, "instance not found: %s", id)
 	}
+	// The wired mail provider's env changes only with its template (M14:
+	// an override could swap what its confirmed tree runs).
+	h.mu.RLock()
+	wiredMail := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
+	h.mu.RUnlock()
+	if wiredMail {
+		return nil, statusErr(409, "%s is this server's mail provider: its environment changes only with its template (unwire it first)", id)
+	}
 	// The rules read the secrets stores: before mu.
 	rules, err := h.envRulesFor(t)
 	if err != nil {

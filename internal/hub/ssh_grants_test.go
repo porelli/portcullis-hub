@@ -562,10 +562,10 @@ func TestOwnKeyAutoRevocationExpires(t *testing.T) {
 	if err := f.h.UnrevokeSSHKey(context.Background(), directory.Actor{User: "root", Via: directory.ViaAI}, fp, fp, p); err == nil {
 		t.Error("un-revoked through the AI")
 	}
-	if err := f.h.UnrevokeSSHKey(context.Background(), rootActor, fp, "SHA256:other", p); err == nil || err.Error() != TextUnrevokeConfirm {
+	if err := f.h.UnrevokeSSHKey(context.Background(), sshRootActor, fp, "SHA256:other", p); err == nil || err.Error() != TextUnrevokeConfirm {
 		t.Errorf("a wrong typed fingerprint = %v", err)
 	}
-	if err := f.h.UnrevokeSSHKey(context.Background(), rootActor, fp, fp, p); err != nil {
+	if err := f.h.UnrevokeSSHKey(context.Background(), sshRootActor, fp, fp, p); err != nil {
 		t.Fatal(err)
 	}
 	if l, _ := f.h.sshRevokedList(); len(l) != 0 {

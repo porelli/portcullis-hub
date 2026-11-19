@@ -1055,7 +1055,7 @@
     if (!pw.length) h += '<p class="pd-muted">None.</p>';
     for (const p of pw) {
       h += '<div class="pd-row-inline"><strong>' + esc(p.label) + '</strong> <span class="pd-muted">created ' + esc(fmtDate(p.created_at)) + '</span> ' +
-        (p.status === 'voided' ? '<span class="pd-pill bad">reset by a restore</span>'
+        (p.status === 'voided' ? '<span class="pd-pill bad">' + esc(p.voided_reason || 'reset by a restore') + '</span>'
           : (p.status === 'unconfirmed' ? '<span class="pd-pill warn">not confirmed: the mail server can\'t be read</span> ' : '') +
           '<button type="button" class="pd-btn danger xs" data-act="mail-pw-revoke" data-user="' + esc(user) + '" data-id="' + esc(p.id) + '" data-label="' + esc(p.label) + '">Revoke</button>') + '</div>';
     }

@@ -12,14 +12,14 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 )
 
-// Restarting core mail (contract §6): the Hub's one engine action on a
-// core container. Stalwart checks a session's credential only at AUTH, so
-// after every removal and every revoked mail password the Hub restarts
-// mail; removals within one restart's time share one restart.
+// The session reset (contract §19.6): a server may keep authenticated
+// sessions alive through a revocation, so after every removal and every
+// revoked mail password the Hub restarts the wired provider's declared
+// sessions.restart service (one service of its own project; the Hub
+// restarts no core container); requests within one restart's time share
+// one restart.
 
 const (
-	// coreMailService is core's Stalwart service.
-	coreMailService = "mail"
 	// mailRestartGrace is the stop timeout (POST …/restart?t=2).
 	mailRestartGrace = 2 * time.Second
 	// mailRestartTimeout bounds one restart.
@@ -30,18 +30,36 @@ const (
 	opKeyMail = "_mail"
 )
 
-// restartCoreMail restarts core's mail container through the runtime's
-// narrow verb (exactly the one container of core's project, service mail,
-// not a one-off, in core's directory; zero or several matches restart
-// nothing). Never under Kubernetes.
-func (h *Hub) restartCoreMail(ctx context.Context) error {
+// restartMailProvider restarts the wired provider's sessions.restart
+// service through the runtime's narrow verb (exactly one container of
+// project portcullis-<instance> and that service, not a one-off; zero or
+// several matches restart nothing). Never under Kubernetes.
+func (h *Hub) restartMailProvider(ctx context.Context) error {
 	if h.rt == nil {
 		return errors.New("no container runtime")
 	}
 	if h.rt.Kind() == runtime.KindKubernetes {
 		return runtime.ErrUnsupported
 	}
-	return h.rt.RestartCoreService(ctx, coreMailService, mailRestartGrace)
+	h.mu.Lock()
+	t, m := h.mailWiredLocked()
+	var project, service string
+	var holdErr error
+	if t != nil {
+		project, service = projectName(t.ID), m.Sessions.Restart
+		// A held provider (or one whose tree changed on disk) is never
+		// restarted in place (R-HH3): its sessions end by stopping it.
+		holdErr = h.mailHoldGateLocked(t)
+	}
+	h.mu.Unlock()
+	if t == nil {
+		return errMailNotWired
+	}
+	if holdErr != nil {
+		h.mailStopHeld("a session reset (no restart in place while held)")
+		return nil
+	}
+	return h.rt.RestartService(ctx, project, service, mailRestartGrace)
 }
 
 // sharedRestart runs restarts one at a time: a request while one runs
@@ -95,14 +113,25 @@ func (s *sharedRestart) loop(r *restartRun, run func() error) {
 	}
 }
 
-// mailRestart restarts core mail (shared), records the outcome (op
+// mailRestart restarts the provider's sessions (shared), records the outcome (op
 // mail_restart) and logs a failure. why names the cause (never a secret).
 func (h *Hub) mailRestart(ctx context.Context, why string) error {
 	err := h.mailRestarts.do(ctx, func() error {
 		rctx, cancel := context.WithTimeout(context.Background(), mailRestartTimeout)
 		defer cancel()
-		return h.restartCoreMail(rctx)
+		return h.restartMailProvider(rctx)
 	})
+	if err != nil {
+		h.mu.RLock()
+		held := h.st.Mail.Held != nil
+		h.mu.RUnlock()
+		if held {
+			h.mailStopHeld("a session reset: " + err.Error()) // R-HH1
+		}
+	}
+	if err == nil && h.MailHeldStopError() != "" {
+		err = errors.New("the held provider's stop failed: mail sessions may still be open")
+	}
 	rec := OpRecord{Op: OpMailRestart, At: h.mailNow(), OK: err == nil}
 	if err != nil {
 		rec.Error = "restarting mail after " + why + " failed: " + err.Error() + ": mail sessions may still be open"

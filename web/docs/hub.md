@@ -1758,34 +1758,65 @@ The doctor's file-sharing findings
 
 ## Mail
 
-With the [mail server](../setup/mail.md) on, the Hub manages who gets a
+With the [mail slot](../setup/mail.md) open, the Hub manages who gets a
 mailbox, the mail domains, the spam settings, aliases, lists and mail
-passwords; mailctl applies them to Stalwart. Mail itself is turned on and off
-on the server (`./portcullis mail enable` / `disable`): until then Settings →
+passwords, and sends them to the wired **mail provider** (an app instance
+whose template has a `mail:` block). The slot itself is opened and closed on
+the server (`./portcullis mail enable` / `disable`): until then Settings →
 Mail says "Mail is off: run ./portcullis mail enable on the host", and on
 Kubernetes "Mail isn't available on Kubernetes yet (Docker or rootless Podman
-only)". Interfaces: [contracts §19.9](../guides/integration-contracts.md#199-hub-api-and-audit).
+only)". Wiring, switching and unwiring are full administrators' only
+(`lldap_admin`, never a delegate) and never available to an AI or MCP
+client. Interfaces: [contracts §19.9](../guides/integration-contracts.md#199-hub-api-and-audit).
 
 ### Settings → Mail
 
-Administrators only (Hub listener):
+Administrators only (Hub listener). The top of the page shows the slot:
 
-- **Facts** (read-only, from the server): the mail server's name with
-  "reachable" / "mailctl unreachable", the relay (on / off, set in `.env`),
-  submission ("from anywhere" or "local networks only"; under rootless Podman
-  why LAN-only isn't possible), how long former accounts are kept
-  (`MAIL_FORMER_RETENTION`) and whether a Spamhaus DQS key is set (with a
-  hint when it isn't).
+- **Nothing wired**: "No mail server is wired", the installed mail apps
+  (each links to its Mail tab, where you wire it) and **Find a mail server in
+  the Marketplace** (the Marketplace filtered on mail servers, which carry a
+  "Mail server" badge).
+- **Wired**: the provider's label and version, the instance (a link to its
+  Mail tab), its mode (`normal`, `void`, or `stopped` for a held provider the Hub had to stop; "· held" while held), **Switch…** and
+  **Unwire…** (draining), and while a void is owed "A void of every mail
+  password is owed (&lt;reason&gt;)" with the last error and **Retry**. See
+  [Mail operations](mail.md#switching-providers).
+
+Then, editable whether or not a provider is wired (they are Hub settings,
+sent once one is):
+
+- **Facts** (read-only): the mail server's name with "reachable" /
+  "mail provider unreachable", the relay ("none (direct delivery)", or its host,
+  port, user and "(password set)"), submission ("from anywhere" or "local
+  networks only (MAIL_SUBMISSION_LAN_ONLY)"; under rootless Podman why
+  LAN-only isn't possible), how often DKIM keys rotate and how long former
+  accounts are kept.
+- **Former accounts**: the parked former mailboxes (username, id, since
+  when), read-only, or "No former accounts.", with "Export one with
+  `./portcullis mail export <id>` on the host; they are deleted after the
+  retention above."
+- **Relay, DKIM rotation and former accounts**: *No relay (direct
+  delivery)*, or the relay's host, port (default 587), user, SPF include
+  (optional) and password (write-only: "unchanged (set)" when one is set;
+  "The password is never shown again; leave it empty to keep it."), how
+  often DKIM keys rotate and how long former accounts are kept (24h–8760h
+  each). **Save** asks for a fresh sign-in with your security key first: a
+  change here is refused without one ("changing the relay, DKIM rotation or
+  former retention needs a fresh sign-in") and is never possible through MCP
+  or AI ("the relay, DKIM rotation and former retention change only in the
+  browser, never through MCP or AI"). The other settings save without it.
 - **Domains**: one row per mail-capable domain (the main domain and every
   added domain) with its state (on, draining, off), **Turn on** / **Turn
-  off** and the **groups** whose members get an address there (empty: every
-  mailbox on the main domain, nobody on an added domain). Turning off warns
-  first: "Turning mail off removes the MX after the MTA-STS max_age (up to 7
-  days); mail sent meanwhile is still received." An added domain with mail
-  on or draining can't be deleted until it is off. Turning mail on is
-  refused while an instance uses `mail.`, `mta-sts.`, `autoconfig.` or
-  `autodiscover.` of that domain, naming the instance; and no instance may
-  take those names, or `MAIL_HOSTNAME` itself, while mail is on.
+  off** / **Save groups** and the **groups** whose members get an address
+  there (empty: every mailbox on the main domain, nobody on an added
+  domain). Turning off warns first: "Turning mail off removes the MX after
+  the MTA-STS max_age (up to 7 days); mail sent meanwhile is still
+  received." An added domain with mail on or draining can't be deleted until
+  it is off. Turning mail on is refused while an instance uses `mail.`,
+  `mta-sts.`, `autoconfig.` or `autodiscover.` of that domain, naming the
+  instance; and no instance may take those names, or `MAIL_HOSTNAME` itself,
+  while mail is on.
 - **Primary domain**: every login and first address (`<username>@<primary>`).
 - **Spam**: **Junk at score** (5), **Reject at score** (15), the three
   blocklists, **Always accept** and **Always refuse** (one domain or address
@@ -1795,19 +1826,56 @@ Administrators only (Hub listener):
   several rows gets the largest; 10 GiB otherwise (at most 1 TiB).
 - **Pending removal**: when more than half the mailboxes would go at once,
   a banner lists the people, each with "mail passwords revoked" or "revoking
-  failed: retrying", and **Confirm removal** (full administrators only,
-  `lldap_admin`; it asks first: "Remove N mailboxes? They are parked and
-  deleted after the retention period."). See
-  [Mass removals](mail.md#mass-removals).
-- A banner when mail can't be managed (the Hub's mail secret missing or too
-  short): run `./portcullis up` on the server.
+  failed: retrying", and **Confirm removal** (full administrators only; it
+  asks first: "Remove N mailboxes? They are parked and deleted after the
+  retention period."). See [Mass removals](mail.md#mass-removals).
+- A banner when the wired provider can't be managed: "Mail can't be
+  managed: the Hub's secret for the wired mail provider is missing or too
+  short. **Retry** voids every mail password and writes a fresh secret for
+  the wired provider (or unwire it and wire it again)." with **Retry**.
+  Retry owes a void, and the void writes a fresh secret
+  ([The void](mail.md#the-void)); `./portcullis up` doesn't fix it. The
+  doctor's `mail_provider_unreachable` names the missing secret meanwhile.
 
 Saved with `PUT /api/mail/settings` and `PUT /api/mail/domains/{name}`,
 audited `mail.settings` and `mail.domain`; added domains' DNS follows within
-about a minute. The policy steps (DMARC, MTA-STS) are
-[doctor fixes](#mail-checks); DKIM rotates on its own (or with
-`./portcullis mail dkim rotate <domain>`). The Portcullis MCP has one read-only tool,
-`mail_status`; nothing about mail passwords is ever a tool.
+about a minute. The policy steps (DMARC,
+MTA-STS) are [doctor fixes](#mail-checks); DKIM rotates on its own (or with
+`./portcullis mail dkim rotate <domain>`). The Portcullis MCP has one
+read-only tool, `mail_status`; nothing about mail passwords or the provider
+is ever a tool.
+
+### An instance's Mail tab
+
+Every instance of a mail template has a **Mail** tab (`#apps/<id>/mail`):
+
+- the warning, word for word: "This app becomes the mail server for every
+  person and every mail domain. It gets public ports 25, 465, 587 and 993,
+  writes the mail DNS records of every mail domain, creates and checks the
+  mail passwords of every person in mail_users, sends mail to the internet
+  (outbound SMTP), and can read every mailbox.";
+- **Mail server**: "not this server's mail server", or the mode (`void`,
+  `normal`, `stopped`); **Provider**: what the provider itself reports (its name,
+  version and checks), or "—";
+- the void owed ("A void of every mail password is owed (&lt;reason&gt;,
+  since &lt;time&gt;)" and its error) with **Retry**, and the hold (its
+  reason and "The template changed since you wired it. Confirming keeps
+  every mail password and mailbox: the updated app gets them as they
+  are.");
+- why wiring is refused right now, one line per reason;
+- while it can be wired or confirmed: **Type the instance id to confirm**
+  and **Make this the mail server** (or **Confirm the updated template**);
+  "A fresh sign-in with your security key follows.";
+- while it is wired: *drain first (senders keep delivering until every
+  domain is off)* and **Unwire…**, which asks "Unwire &lt;id&gt; as the mail
+  server? Every mail domain drains first; the provider stops once they are
+  all off. Every mail password is voided." (unticked: "Mail stops now:
+  senders may bounce.").
+
+Provider text (its name, checks, errors) is shown as plain text only. What
+each step does: [Mail operations → Wiring a provider](mail.md#wiring-a-provider).
+**Switch…** on Settings → Mail asks for the new mail server, its instance id
+and the phrase "&lt;n&gt; mailboxes start empty", then a fresh sign-in.
 
 ### A person's mail
 
@@ -1821,7 +1889,9 @@ addresses or "No mailbox: &lt;name&gt; isn't in mail_users", and:
   username: they go when the person is deleted.
 - **Mail passwords**: label, created, expiry and status, each with
   **Revoke** (administrators, and holders of `sign_in_help` for the people
-  they may help). A password reset by a restore shows "reset by a restore";
+  they may help). A password reset by a restore shows "reset by a restore",
+  one voided by a wiring or a switch "the mail server changed on &lt;date&gt;:
+  create a new mail password";
   while the mail server can't be read, active ones show "not confirmed: the
   mail server can't be read". "Only &lt;name&gt; can create a mail password,
   on their Sign-in page": nobody creates one for someone else.
@@ -1845,7 +1915,9 @@ shows only for people in `mail_users`. It shows:
   (IMAP) `MAIL_HOSTNAME` port 993 SSL/TLS, outgoing (SMTP) port 465 SSL/TLS
   or 587 STARTTLS, and their addresses;
 - their mail passwords: label, created, expiry ("no expiry"), **Revoke**
-  ("Mail apps using it stop at once"), or "reset by a restore";
+  ("Mail apps using it stop at once"), or why it was voided ("reset by a
+  restore", or "the mail server changed on &lt;date&gt;: create a new mail
+  password");
 - **+ New mail password**: a label for the device or app (1–64 characters)
   and an expiry (never, 90 days, 1 year), then a fresh sign-in in a small
   window. At most **5** active: "At most 5 mail passwords: revoke one first."
@@ -1854,7 +1926,7 @@ The new password is **shown once**, in a dialog with **Copy**, the settings,
 and **Download for iPhone, iPad or Mac** (a `.mobileconfig` profile that sets
 up the account with that password). Closing the dialog drops the password
 from the page; it is never shown again and Portcullis doesn't keep it
-(Stalwart stores only its hash). A mail password works for mail only: never
+(the mail provider stores only its hash). A mail password works for mail only: never
 to sign in to Portcullis. Revoking one, or leaving `mail_users`, stops it
 within 8 seconds, open sessions included. While an administrator is signed
 in as the person, the section is read-only.
@@ -1954,10 +2026,12 @@ They never fire under Docker or Podman, and none has a one-click fix:
 
 ### Mail checks
 
-With the [mail server](../setup/mail.md) on, the doctor adds twenty-two
-checks, from mailctl's checks and status and from the added mail domains' DNS
-plans. While mailctl can't be read there are no mail findings and the tab
-says so. What each one means and what to do:
+With the [mail slot](../setup/mail.md) open, the doctor adds twenty-four
+checks, from the wired provider's checks and status, the Hub's own state
+(the slot, the void, the hold, the timer's visits) and the added mail
+domains' DNS plans. While the provider can't be read, the checks that come
+from it don't fire and the tab says so; the Hub's own still do. What each one
+means and what to do:
 [Mail operations → Troubleshooting](mail.md#troubleshooting).
 
 | Kind | Severity | Fix |
@@ -1976,13 +2050,15 @@ says so. What each one means and what to do:
 | `mail_mtasts_enforce` | Info | One click: `<domain>: MTA-STS testing → enforce (max_age 604800)` |
 | `mail_dane_off` | Problem | Explain |
 | `mail_client_ip_rewritten` | Warning | Explain |
-| `mail_lan_only_unenforced` | Problem | Explain |
+| `mail_lan_only_unenforced` | Problem | Explain ("Turn LAN-only off: run `./portcullis mail enable --lan-only false` on the server") |
 | `mail_rate_held` | Warning | Explain |
-| `mail_mass_removal_pending` | Problem | One click (full administrators): "removes the mailboxes of &lt;users&gt; (parked, deleted after MAIL_FORMER_RETENTION)" |
+| `mail_mass_removal_pending` | Problem | On Settings → Mail only (full administrators, in the browser): a fresh sign-in and the typed phrase `remove <n> mailboxes` (`remove 1 mailbox`); the fix answers "confirm the removal on Settings → Mail: it needs a fresh sign-in and the typed phrase". A provider's own refusal (also after a switch) is held here; it is never dropped on its own |
 | `mail_sync_blocked` | Problem | Explain |
-| `mail_hub_secret_invalid` | Problem | Explain ("./portcullis up recreates the Hub with the mail secret"); while it fires it is the only mail finding |
-| `mail_spam_rules_missing` | Problem | Explain |
-| `mail_external_lookups_on` | Problem | Explain |
+| `mail_provider_unreachable` | Problem | Explain ("Check the instance on its Mail tab and its logs") |
+| `mail_provider_check` | up to Problem | Explain: the provider's own `x-` check, its title, detail and steps as plain text; never a fix |
+| `mail_provider_missing` | Warning | Explain ("Wire a mail server (Settings → Mail) or run ./portcullis mail disable") |
+| `mail_void_pending` | Problem | Explain ("Retry on the Mail tab, or look at the provider's logs") |
+| `mail_provider_refused` | Problem | Explain ("Review the change and confirm on the instance's Mail tab") |
 
 The promotions and the removal confirmation always ask an AI tool for a
 confirmation in your browser.

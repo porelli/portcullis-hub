@@ -517,6 +517,20 @@ func (h *Hub) reconcileSecretsLocked(why string) (counts map[string]int, mismatc
 		for inst := range h.st.Credentials {
 			counts[inst] += h.voidActiveLocked(inst, state.CredentialReasonRestore, now)
 		}
+		// A core restore emptied hub_secrets, the mail gate with it: with
+		// the slot open and a provider wired, its mail passwords are
+		// voided before any mail port listens (§19.11), saved with the
+		// epoch below.
+		if h.st.Mail.Provider != nil && h.mailOn() {
+			h.raiseVoidDebtLocked(state.MailVoidRestore)
+			// The gate closes with the epoch (R-POD2: the slot is its own
+			// volume now, so it is emptied here, as hub_secrets was).
+			if err := h.mailSlotEmpty(); err != nil {
+				log.Printf("mail: emptying the provider's slot after the epoch change: %v", err)
+			}
+			log.Printf("mail: the secrets epoch differs: a void of %s's mail passwords is owed", h.st.Mail.Provider.Instance)
+			defer h.kickMailVoid()
+		}
 		// F8 / A3: every person-id pool advances before any allocation,
 		// in memory now and saved with the epoch rotation below (one
 		// save: a matching epoch can never hide a lost advance). Kept in

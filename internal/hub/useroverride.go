@@ -183,6 +183,12 @@ func (h *Hub) parseUserOverride(t *templates.Template, data []byte) (*parsedOver
 	if len(root.Content) == 0 || (root.Content[0].Kind == yaml.ScalarNode && root.Content[0].Tag == "!!null") {
 		return nil, nil
 	}
+	// A mail provider runs exactly its reviewed template (M15: an
+	// override could publish ports, bind host paths or reach out in void
+	// mode): it has no custom override.
+	if t.Manifest.Mail != nil {
+		return nil, fmt.Errorf("a mail provider template has no custom override: it runs exactly its reviewed template")
+	}
 	if err := checkTags(&root); err != nil {
 		return nil, err
 	}

@@ -461,11 +461,11 @@ func TestHubMailSubcommand(t *testing.T) {
 	defer os.RemoveAll(dir)
 	sock := filepath.Join(dir, "s.sock")
 	var stdout, stderr bytes.Buffer
-	if code := mailMain([]string{"domains"}, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "the Hub isn't running") {
+	if code := mailMain([]string{"domains"}, nil, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "the Hub isn't running") {
 		t.Fatalf("no socket: %d %q", code, stderr.String())
 	}
 	for _, bad := range [][]string{nil, {"nope"}, {"drain", "x"}} {
-		if code := mailMain(bad, &stdout, &stderr, sock); code != 2 {
+		if code := mailMain(bad, nil, &stdout, &stderr, sock); code != 2 {
 			t.Errorf("%v: %d", bad, code)
 		}
 	}
@@ -481,14 +481,77 @@ func TestHubMailSubcommand(t *testing.T) {
 	go srv.Serve(l)
 	defer srv.Close()
 	stdout.Reset()
-	if code := mailMain([]string{"drain"}, &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), "draining") {
+	if code := mailMain([]string{"drain"}, nil, &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), "draining") {
 		t.Fatalf("drain: %d %q %q", code, stdout.String(), stderr.String())
 	}
-	if code := mailMain([]string{"domains"}, &stdout, &stderr, sock); code != 0 {
+	if code := mailMain([]string{"domains"}, nil, &stdout, &stderr, sock); code != 0 {
 		t.Fatalf("domains: %d", code)
 	}
 	if strings.Join(got, ",") != "POST /host/mail/drain,GET /host/mail/domains" {
 		t.Fatalf("requests %v", got)
+	}
+}
+
+// TestHubMailCLIExitCodes (contract §19.10, core interface items 2 and
+// H6): a body is one JSON object on stdin (else 2); a 2xx prints the JSON
+// and exits 0, a refusal 1 with the text on stderr; install answers the
+// op at once and `op` reads {instance, op_id}.
+func TestHubMailCLIExitCodes(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hmc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bodies []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, r.Method+" "+r.URL.RequestURI()+" "+string(b))
+		switch r.URL.Path {
+		case "/host/mail/install":
+			w.WriteHeader(202)
+			w.Write([]byte(`{"op_id":"o1","op":"mail_wire","instance":"stalwart","poll":"p","warning":"w"}`))
+		case "/host/mail/op":
+			w.Write([]byte(`{"op":"mail_wire","op_id":"o1","instance":"stalwart","running":false,"ok":true,"error":"","status":0}`))
+		case "/host/mail/test":
+			http.Error(w, "no postmaster account", 409)
+		default:
+			w.Write([]byte(`{"slot":"open"}`))
+		}
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+	var stdout, stderr bytes.Buffer
+	for _, bad := range []string{"not json", "[]", "null"} {
+		if code := mailMain([]string{"install"}, strings.NewReader(bad), &stdout, &stderr, sock); code != 2 {
+			t.Fatalf("bad body %q: %d", bad, code)
+		}
+	}
+	if code := mailMain([]string{"op"}, strings.NewReader(`{"instance":"stalwart"}`), &stdout, &stderr, sock); code != 2 {
+		t.Fatalf("op without op_id: %d", code)
+	}
+	if code := mailMain([]string{"install"}, strings.NewReader(`{"template":"stalwart","source":"","confirm":"stalwart"}`), &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), `"op_id":"o1"`) {
+		t.Fatalf("install: %d %q %q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	if code := mailMain([]string{"op"}, strings.NewReader(`{"instance":"stalwart","op_id":"o1"}`), &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), `"running":false`) {
+		t.Fatalf("op: %d %q", code, stdout.String())
+	}
+	stderr.Reset()
+	if code := mailMain([]string{"test"}, strings.NewReader(`{"to":"a@example.org"}`), &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "no postmaster account") {
+		t.Fatalf("refusal: %d %q", code, stderr.String())
+	}
+	stdout.Reset()
+	if code := mailMain([]string{"status"}, nil, &stdout, &stderr, sock); code != 0 || !strings.Contains(stdout.String(), `"slot":"open"`) {
+		t.Fatalf("status: %d %q", code, stdout.String())
+	}
+	all := strings.Join(bodies, "\n")
+	if !strings.Contains(all, `POST /host/mail/install {"template":"stalwart"`) || !strings.Contains(all, "GET /host/mail/op?instance=stalwart&op_id=o1 ") {
+		t.Fatalf("bodies %q", bodies)
 	}
 }
 
@@ -527,5 +590,16 @@ func TestHubSSHSubcommand(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "GET /host/ssh/status" {
 		t.Fatalf("requests %v", got)
+	}
+}
+
+// TestMailClientOutwaitsTheLock (final cross review M4): the host ops
+// that wait for the instance's app lock outwait it on the client side
+// (else core reports a failure while the Hub starts the op later).
+func TestMailClientOutwaitsTheLock(t *testing.T) {
+	for _, c := range []string{"restore", "backup"} {
+		if mailCommands[c].timeout <= hub.HostLockWait+time.Minute {
+			t.Errorf("%s: client timeout %v, the lock wait %v", c, mailCommands[c].timeout, hub.HostLockWait)
+		}
 	}
 }

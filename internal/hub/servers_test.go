@@ -1552,6 +1552,12 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+func (s *syncBuffer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b.Reset()
+}
+
 // TestHandshakeAfterSecondGranularity: link's status has whole seconds; a
 // handshake in the same second as the switch counts once that second has
 // passed it (never only at the next rekey).

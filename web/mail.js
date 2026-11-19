@@ -29,13 +29,48 @@
   function pill(cls, t) { return '<span class="pill ' + cls + '">' + esc(t) + '</span>'; }
   function stateOf(s) { return s === 'on' ? pill('ok', 'on') : s === 'draining' ? pill('warn', 'draining') : pill('', 'off'); }
 
-  // settingsHtml is the panel for GET /api/mail/settings (view) and GET
-  // /api/mail/status (status, may be null).
-  function settingsHtml(v, status) {
+  // stateHtml is the slot's state (spec §8): closed; open with nothing
+  // wired (the installed mail instances, a Marketplace link); wired (the
+  // provider's row, Switch…, Unwire…, the void). Provider text (label,
+  // version, the void's error) is filled by fillState with textContent.
+  // insts: the installed instances of mail templates [{id, label}].
+  function stateHtml(v, status, insts) {
+    if (v.mail !== 'on') return '<div class="inst-section" data-mail-state="closed"><p class="settings-empty" data-mail-off>' + esc(OFF_TEXT) + '</p></div>';
+    const p = status && status.provider;
+    if (!p) {
+      const list = (insts || []).map(i => '<li><a href="#apps/' + enc(i.id) + '/mail">' + esc(i.label || i.id) + '</a></li>').join('');
+      return '<div class="inst-section" data-mail-state="none"><h4>No mail server is wired</h4>' +
+        (list ? '<p>Installed mail servers (open one\'s Mail tab to wire it):</p><ul data-mail-instances>' + list + '</ul>' : '<p>No mail server app is installed.</p>') +
+        '<p><a href="#marketplace?filter=mail" data-mail-marketplace>Find a mail server in the Marketplace</a></p></div>';
+    }
+    return '<div class="inst-section" data-mail-state="wired"><div class="inst-row">' +
+      '<strong data-mail-label></strong> <span data-mail-version></span> · <a href="#apps/' + enc(p.instance) + '/mail" data-mail-instance>' + esc(p.instance) + '</a> ' +
+      '<span class="pill" data-mail-mode></span> ' +
+      '<button type="button" class="btn btn-sm" data-mail-act="switch" data-mail-from="' + esc(p.instance) + '">Switch…</button> ' +
+      '<button type="button" class="btn btn-sm btn-danger" data-mail-act="unwire" data-mail-from="' + esc(p.instance) + '">Unwire…</button></div>' +
+      (p.void ? '<div class="public-warn" data-mail-void><span data-mail-void-text></span> <button type="button" class="btn btn-sm" data-mail-act="retry-void">Retry</button></div>' : '') +
+      '</div>';
+  }
+
+  // fillState sets the wired provider's texts with textContent.
+  function fillState(root, status) {
+    const p = status && status.provider;
+    if (!p) return;
+    const set = (sel, t) => { const el = root.querySelector(sel); if (el) el.textContent = t; };
+    set('[data-mail-label]', p.label || p.template);
+    set('[data-mail-version]', p.version || '');
+    set('[data-mail-mode]', p.held ? p.mode + ' · held' : p.mode);
+    if (p.void) set('[data-mail-void-text]', 'A void of every mail password is owed (' + p.void.reason + ')' + (p.void.error ? ': ' + p.void.error : '') + '.');
+  }
+
+  // settingsHtml is the panel for GET /api/mail/settings (view), GET
+  // /api/mail/status (status, may be null) and the installed mail
+  // instances (insts).
+  function settingsHtml(v, status, insts) {
     if (v.kubernetes) return '<p class="settings-empty" data-mail-kube>' + esc(KUBE_TEXT) + '</p>';
-    let h = '';
-    if (v.mail !== 'on') h += '<p class="settings-empty" data-mail-off>' + esc(OFF_TEXT) + '</p>';
-    if (v.problem) h += '<div class="public-warn" data-mail-problem>' + esc(v.problem) + '. Run <code>./portcullis up</code> on the server: it recreates the Hub with the mail secret.</div>';
+    let h = stateHtml(v, status, insts);
+    if (v.problem) h += '<div class="public-warn" data-mail-problem>' + esc(v.problem) + '. <strong>Retry</strong> voids every mail password and writes a fresh secret for the wired provider (or unwire it and wire it again). ' +
+      '<button type="button" class="btn btn-sm" data-mail-act="retry-void">Retry</button></div>';
     const pr = v.pending_removal;
     if (pr) {
       const accts = pr.accounts || [];
@@ -43,16 +78,20 @@
       h += '<div class="public-warn" data-mail-pending>Removing ' + esc(accts.length) + ' mailboxes at once waits for your confirmation: ' + who.join(', ') +
         '. Their mailboxes stay until you confirm. If they shouldn\'t have left mail_users, add them back instead.' +
         (pr.confirmed ? ' <strong>Confirmed: the removal goes with the next update.</strong>'
-          : ' <button type="button" class="btn btn-sm btn-danger" data-mail-act="confirm-removal" data-mail-uuids="' + esc((pr.accounts || []).map(a => a.uuid).join(',')) + '">Confirm removal</button>') + '</div>';
+          : ' <span data-mail-removal>Type <code>' + esc(pr.confirm_phrase) + '</code> to confirm (then a fresh sign-in): ' +
+            '<input type="text" class="form-control form-control-sm" data-mail-removal-phrase autocomplete="off" aria-label="Confirmation phrase" placeholder="' + esc(pr.confirm_phrase) + '"> ' +
+            '<button type="button" class="btn btn-sm btn-danger" data-mail-act="confirm-removal" data-mail-phrase="' + esc(pr.confirm_phrase) + '" data-mail-uuids="' + esc((pr.accounts || []).map(a => a.uuid).join(',')) + '">Remove the mailboxes</button></span>') + '</div>';
     }
-    const reach = status && status.mail === 'on' ? (status.reachable ? pill('ok', 'reachable') : pill('warn', 'mailctl unreachable')) : '';
+    const reach = status && status.mail === 'on' ? (status.reachable ? pill('ok', 'reachable') : pill('warn', 'mail provider unreachable')) : '';
     h += '<dl class="inst-facts"><dt>Mail server</dt><dd><code>' + esc(v.hostname) + '</code> ' + reach + '</dd>' +
-      '<dt>Relay</dt><dd>' + esc(v.relay === 'on' ? 'on (set in .env)' : 'off') + '</dd>' +
+      '<dt>Relay</dt><dd data-mail-relay>' + (v.relay ? '<code>' + esc(v.relay.host) + ':' + esc(String(v.relay.port)) + '</code>' +
+        (v.relay.username ? ' as <code>' + esc(v.relay.username) + '</code>' : '') + (v.relay.password_set ? ' (password set)' : '') : 'none (direct delivery)') + '</dd>' +
       '<dt>Submission</dt><dd>' + esc(v.submission_lan_only ? 'local networks only (MAIL_SUBMISSION_LAN_ONLY)' : 'from anywhere') +
         (v.submission_lan_only_refusal ? ' <small data-mail-lan-refusal>(LAN-only isn\'t possible here: ' + esc(v.submission_lan_only_refusal) + ')</small>' : '') + '</dd>' +
-      '<dt>Former accounts kept</dt><dd>' + esc(v.former_retention) + ' <small>(MAIL_FORMER_RETENTION in .env)</small></dd>' +
-      '<dt>Spamhaus DQS key</dt><dd data-mail-dqs>' + esc(v.dqs_key) + (v.dqs_key === 'not set'
-        ? ' <small>(the free public Spamhaus mirrors refuse queries from many cloud resolvers: set MAIL_SPAMHAUS_DQS_KEY in .env)</small>' : '') + '</dd></dl>';
+      '<dt>DKIM keys rotate every</dt><dd data-mail-dkim-rotate>' + esc(v.dkim_rotate) + '</dd>' +
+      '<dt>Former accounts kept</dt><dd data-mail-former>' + esc(v.former_retention) + '</dd></dl>';
+    h += formerHtml(status);
+    h += sensitiveHtml(v);
     // Domains: on / off and groups.
     h += '<table class="inst-table" data-mail-domains><thead><tr><th>Domain</th><th>Mail</th><th>Groups (who gets an address there)</th><th></th></tr></thead><tbody>';
     for (const d of v.domains || []) {
@@ -80,6 +119,56 @@
       '<textarea id="mail-quotas" rows="3" data-mail-quotas>' + esc((v.quotas || []).map(q => q.group + ' = ' + (q.bytes / GiB)).join('\n')) + '</textarea>' +
       '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-mail-act="settings-save">Save</button></div><div data-mail-result></div></div>';
     return h;
+  }
+
+  // formerHtml lists the parked former accounts (GET /api/mail/status
+  // status.former), read-only, with the export hint.
+  function formerHtml(status) {
+    const former = (status && status.status && status.status.former) || [];
+    if (!former.length) return '<p class="settings-hint" data-mail-former-list><small>No former accounts.</small></p>';
+    return '<div class="inst-section" data-mail-former-list><h4>Former accounts</h4><ul>' +
+      former.map(f => '<li><code>' + esc(f.username) + '</code> <small>(id <code>' + esc(f.id) + '</code>, since ' + esc(String(f.since || '').slice(0, 10)) + ')</small></li>').join('') +
+      '</ul><p class="settings-hint"><small>Export one with <code>./portcullis mail export &lt;id&gt;</code> on the host; they are deleted after the retention above.</small></p></div>';
+  }
+
+  // sensitiveHtml is the relay, DKIM rotation and former retention form:
+  // saving it needs a fresh sign-in (the relay password is write-only).
+  function sensitiveHtml(v) {
+    const r = v.relay || {};
+    return '<div class="inst-form" data-mail-sensitive><h4>Relay, DKIM rotation and former accounts</h4>' +
+      '<label><input type="checkbox" data-mail-relay-none' + (v.relay ? '' : ' checked') + '> No relay (direct delivery)</label>' +
+      '<label class="block" for="mail-relay-host">Relay host</label><input id="mail-relay-host" data-mail-relay-host value="' + esc(r.host || '') + '">' +
+      '<label class="block" for="mail-relay-port">Relay port</label><input id="mail-relay-port" type="number" min="1" max="65535" data-mail-relay-port value="' + esc(r.port || 587) + '">' +
+      '<label class="block" for="mail-relay-user">Relay user</label><input id="mail-relay-user" data-mail-relay-user value="' + esc(r.username || '') + '">' +
+      '<label class="block" for="mail-relay-spf">SPF include (optional)</label><input id="mail-relay-spf" data-mail-relay-spf value="' + esc(r.spf_include || '') + '">' +
+      '<label class="block" for="mail-relay-pw">Relay password</label><input id="mail-relay-pw" type="password" autocomplete="new-password" data-mail-relay-pw placeholder="' +
+        esc(r.password_set ? 'unchanged (set)' : 'none') + '">' +
+      '<label class="block" for="mail-dkim-rotate">DKIM keys rotate every (24h–8760h)</label><input id="mail-dkim-rotate" data-mail-dkim-rotate-in value="' + esc(v.dkim_rotate) + '">' +
+      '<label class="block" for="mail-former-retention">Former accounts kept for (24h–8760h)</label><input id="mail-former-retention" data-mail-former-retention-in value="' + esc(v.former_retention) + '">' +
+      '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-mail-act="sensitive-save">Save</button></div>' +
+      '<p class="settings-hint"><small>A fresh sign-in with your security key follows. The password is never shown again; leave it empty to keep it.</small></p></div>';
+  }
+
+  // readSensitive reads that form (relay null for none; the password only
+  // when typed).
+  function readSensitive(f) {
+    const out = {
+      dkim_rotate: f.querySelector('[data-mail-dkim-rotate-in]').value.trim(),
+      former_retention: f.querySelector('[data-mail-former-retention-in]').value.trim(),
+    };
+    if (f.querySelector('[data-mail-relay-none]').checked) {
+      out.relay = null;
+    } else {
+      out.relay = {
+        host: f.querySelector('[data-mail-relay-host]').value.trim(),
+        port: parseInt(f.querySelector('[data-mail-relay-port]').value, 10),
+        username: f.querySelector('[data-mail-relay-user]').value.trim(),
+        spf_include: f.querySelector('[data-mail-relay-spf]').value.trim(),
+      };
+      const pw = f.querySelector('[data-mail-relay-pw]').value;
+      if (pw) out.relay.password = pw;
+    }
+    return out;
   }
 
   function lines(t) { return String(t || '').split(/\n/).map(x => x.trim()).filter(Boolean); }
@@ -111,7 +200,16 @@
       v = await window.apiGet('/api/mail/settings');
     } catch (e) { root.innerHTML = '<div class="public-warn">' + esc(e.message) + '</div>'; return; }
     try { st = await window.apiGet('/api/mail/status'); } catch (_) { st = null; }
-    root.innerHTML = settingsHtml(v, st);
+    let insts = [];
+    try {
+      const [list, tpls] = await Promise.all([window.apiGet('/api/instances'), window.apiGet('/api/templates')]);
+      const mailT = new Set((tpls || []).filter(t => t.mail_provider).map(t => t.id));
+      insts = (list || []).filter(i => mailT.has(i.template)).map(i => ({ id: i.id, label: i.label }));
+    } catch (_) { insts = []; }
+    root.mailInsts = insts;
+    root.mailView = v;
+    root.innerHTML = settingsHtml(v, st, insts);
+    fillState(root, st);
     if (!root.dataset.mailWired) {
       root.dataset.mailWired = '1';
       root.addEventListener('click', e => act(root, e));
@@ -142,12 +240,61 @@
           window.showToast('Mail for ' + row.dataset.mailDomain + ' is draining.', 'success');
           break;
         case 'confirm-removal': {
+          // Destructive (Ruling R-CONFIRM-REMOVAL): the typed phrase, then
+          // a fresh sign-in opened from the click (no await before it).
           const uuids = String(b.dataset.mailUuids || '').split(',').filter(Boolean);
-          if (!confirm('Remove ' + uuids.length + ' mailboxes? They are parked and deleted after the retention period.')) return;
+          const want = b.dataset.mailPhrase || '';
+          const typed = ((b.closest('[data-mail-removal]') || root).querySelector('[data-mail-removal-phrase]') || {}).value || '';
+          if (typed.trim() !== want) { window.showToast('Type "' + want + '" to confirm.', 'error'); return; }
+          const fa = root.mailView && root.mailView.fresh_auth;
+          if (!fa || !window.PortcullisFreshAuth) { window.showToast('A fresh sign-in isn\'t available: try again in a moment.', 'error'); return; }
+          window.PortcullisFreshAuth.start(fa, {
+            ctx: { mail_confirm_removal: true },
+            status: (t, warn) => { if (warn) window.showToast(t, 'error'); },
+            busy: () => {},
+            end: () => {},
+            proof: async p => {
+              try {
+                await window.apiCall('/api/mail/confirm-removal', 'POST', { accounts: uuids, confirm: want, code: p.code, code_verifier: p.code_verifier, nonce: p.nonce });
+                window.showToast('Confirmed: the mailboxes are removed with the next update.', 'success');
+              } catch (err) { window.showToast(err.message || 'Confirming failed', 'error'); }
+              render(root);
+            },
+          });
+          return;
+        }
+        case 'switch':
+          if (window.PortcullisMailProvider) window.PortcullisMailProvider.switchDialog(b.dataset.mailFrom, (root.mailInsts || []).map(i => i.id));
+          return;
+        case 'unwire':
+          // Draining (the Mail tab offers stopping at once).
           b.dataset.busy = '1';
-          await window.apiCall('/api/mail/confirm-removal', 'POST', { accounts: uuids });
-          window.showToast('Confirmed.', 'success');
+          await window.PortcullisMailProvider.unwire(b.dataset.mailFrom, true);
           break;
+        case 'retry-void':
+          b.dataset.busy = '1';
+          await window.PortcullisMailProvider.retryVoid();
+          break;
+        case 'sensitive-save': {
+          // The fresh sign-in opens from the click (no await before it).
+          const fa = root.mailView && root.mailView.fresh_auth;
+          if (!fa || !window.PortcullisFreshAuth) { window.showToast('A fresh sign-in isn\'t available: try again in a moment.', 'error'); return; }
+          const main = root.querySelector('[data-mail-settings]');
+          const body = Object.assign(readSettings(main), readSensitive(b.closest('[data-mail-sensitive]')));
+          window.PortcullisFreshAuth.start(fa, {
+            ctx: { mail_settings: true },
+            status: (t, warn) => { if (warn) window.showToast(t, 'error'); },
+            busy: () => {},
+            end: () => {},
+            proof: async p => {
+              try {
+                await window.apiPut('/api/mail/settings', Object.assign(body, { code: p.code, code_verifier: p.code_verifier, nonce: p.nonce }));
+                window.showToast('Mail settings saved.', 'success');
+              } catch (err) { window.showToast(err.message || 'Saving failed', 'error'); }
+              render(root);
+            },
+          });
+          return;
         }
         case 'settings-save': {
           const f = b.closest('[data-mail-settings]');
@@ -166,5 +313,5 @@
     render(root);
   }
 
-  window.PortcullisMail = { render, settingsHtml, readSettings, OFF_TEXT, DRAIN_WARNING };
+  window.PortcullisMail = { render, settingsHtml, stateHtml, fillState, readSettings, readSensitive, sensitiveHtml, formerHtml, OFF_TEXT, DRAIN_WARNING };
 })();

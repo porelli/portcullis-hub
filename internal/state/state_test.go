@@ -371,3 +371,29 @@ func TestEnsureSignInTOTPOff(t *testing.T) {
 		}
 	}
 }
+
+// TestRestoreHeldRefusesNonInstance: mail.restore_held is an instance id
+// or empty; an older bool (true), a bool word or garbage refuses the load
+// (the Hub won't start, naming the field), a valid id loads.
+func TestRestoreHeldRefusesNonInstance(t *testing.T) {
+	for v, ok := range map[string]bool{"true": false, "false": false, `"yes"`: false, `"not an id!"`: false, "mailsrv": true} {
+		p := filepath.Join(t.TempDir(), "state.yaml")
+		if err := New().Save(p); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(p)
+		s := string(b)
+		if !strings.Contains(s, "\nmail:\n") {
+			t.Fatalf("no mail block:\n%s", s)
+		}
+		s = strings.Replace(s, "\nmail:\n", "\nmail:\n    restore_held: "+v+"\n", 1)
+		os.WriteFile(p, []byte(s), 0o600)
+		_, err := Load(p)
+		if (err == nil) != ok {
+			t.Errorf("%s: %v", v, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "restore_held") && !strings.Contains(err.Error(), "bool") {
+			t.Errorf("%s: the field isn't named: %v", v, err)
+		}
+	}
+}

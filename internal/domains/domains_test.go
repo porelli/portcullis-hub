@@ -217,21 +217,22 @@ func TestMailSet(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "s")
 	os.WriteFile(f, []byte(secret), 0600)
 	c := New(srv.URL, f)
-	if _, err := c.SetMailSet(context.Background(), "team-b.test", []MailRecord{{Name: "team-b.test", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}}); err != nil {
+	if _, err := c.SetMailSet(context.Background(), "team-b.test", MailSet{Records: []MailRecord{{Name: "team-b.test", Type: "MX", TTL: 3600, Value: "10 mail.example.org."}},
+		MailHostname: "mail.example.org", RelayInclude: "", DMARCFloor: "reject", Wildcard: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.SetMailSet(context.Background(), "team-b.test", nil); err != nil {
+	if _, err := c.SetMailSet(context.Background(), "team-b.test", MailSet{MailHostname: "mail.example.org", DMARCFloor: "none", Draining: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.DeleteMailSet(context.Background(), "team-b.test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.SetMailSet(context.Background(), "team-b.test", make([]MailRecord, MaxMailRecords+1)); err == nil {
+	if _, err := c.SetMailSet(context.Background(), "team-b.test", MailSet{Records: make([]MailRecord, MaxMailRecords+1)}); err == nil {
 		t.Fatal("201 records sent")
 	}
 	want := []string{
-		`PUT /domains/team-b.test/sets/mail {"records":[{"name":"team-b.test","type":"MX","ttl":3600,"value":"10 mail.example.org."}]}`,
-		`PUT /domains/team-b.test/sets/mail {"records":[]}`,
+		`PUT /domains/team-b.test/sets/mail {"records":[{"name":"team-b.test","type":"MX","ttl":3600,"value":"10 mail.example.org."}],"mail_hostname":"mail.example.org","relay_include":"","dmarc_floor":"reject","wildcard":true,"draining":false}`,
+		`PUT /domains/team-b.test/sets/mail {"records":[],"mail_hostname":"mail.example.org","relay_include":"","dmarc_floor":"none","wildcard":false,"draining":true}`,
 		`DELETE /domains/team-b.test/sets/mail `,
 	}
 	if !reflect.DeepEqual(got, want) {

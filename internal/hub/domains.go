@@ -54,7 +54,7 @@ type DomainsAPI interface {
 	ApplySets(ctx context.Context, name string, sets []string) (domains.Domain, error)
 	EnableDNSSEC(ctx context.Context, name string) (domains.Domain, error)
 	// Mail (§12.2 sets/mail): an added domain's wanted mail records.
-	SetMailSet(ctx context.Context, name string, recs []domains.MailRecord) (domains.Domain, error)
+	SetMailSet(ctx context.Context, name string, set domains.MailSet) (domains.Domain, error)
 	DeleteMailSet(ctx context.Context, name string) (domains.Domain, error)
 }
 

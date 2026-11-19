@@ -11,25 +11,25 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/hub"
-	"github.com/portcullis/hub/internal/mailctl"
-	"github.com/portcullis/hub/internal/mailctl/mailctltest"
+	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
 )
 
 // mailHelpEnv: newHelpEnv (bob holds sign_in_help, ann and root are
 // administrators) with alice and bob in mail_users, core mail on and the
 // fake mailctl wired; alice has one mail password.
-func mailHelpEnv(t *testing.T) (*helpEnv, *mailctltest.Server, string) {
+func mailHelpEnv(t *testing.T) (*helpEnv, *mailprovidertest.Server, string) {
 	t.Helper()
 	e := newHelpEnv(t)
 	e.ll.AddGroup("mail_users", "alice", "bob")
-	mc := mailctltest.New(t)
+	mc := mailprovidertest.New(t)
 	h := e.s.Hub
 	h.SetMailAPI(mc.Client())
 	h.SetMailCoreForTest(true, "mail.example.org")
+	h.WireMailForTest("mailsrv")
 	h.SyncMailForTest(context.Background())
 	r, b := doAs(t, e.people, "alice", "POST", "/api/me/mail/passwords", `{"label":"phone","expiry":"none","code":"c","code_verifier":"v","nonce":"n"}`)
 	if r.StatusCode != 201 {
@@ -217,10 +217,8 @@ func TestNoMailCredentialTool(t *testing.T) {
 func TestMainDomainMailFixOpPoll(t *testing.T) {
 	e, mc, _ := mailHelpEnv(t)
 	q := "quarantine"
-	seen := time.Now().UTC()
-	mc.Lock(func(s *mailctltest.Server) {
-		s.StatusV.DMARC = []mailctl.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
-		s.StatusV.TimerSeenAt = &seen
+	mc.Lock(func(s *mailprovidertest.Server) {
+		s.StatusV.DMARC = []mailprovider.StatusDMARC{{Domain: "example.org", Policy: "none", Proposed: &q}}
 	})
 	fp := doctor.Fingerprint(doctor.KindMailDMARCPromote, "example.org")
 	r, b := doAs(t, e.hub, "ann", "POST", "/api/doctor/findings/"+fp+"/preview", `{}`)

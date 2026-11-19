@@ -1,21 +1,29 @@
-package mailctl
+package mailprovider
 
 import (
 	"errors"
+	"net/netip"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
 
-// The types mirror the mailctl API of contract §19.5 exactly (snake_case
-// JSON, every key always present): TestTypesMatchContractVector decodes
-// the contract's MailState vector strictly and encodes it back.
+// The types mirror the provider API v1 of contract §19.5 exactly
+// (snake_case JSON, every key always present): TestMailStateV2Vector
+// decodes the contract's MailState v2 vector strictly and encodes it back.
 
-// MailState is the desired-state document (PUT /v1/state, version 1).
+// MailState is the desired-state document (PUT /v1/state, version 2).
 type MailState struct {
 	Version            int       `json:"version"`
 	Generation         int       `json:"generation"`
 	PrimaryDomain      string    `json:"primary_domain"`
+	MailHostname       string    `json:"mail_hostname"`
+	ClientIP           string    `json:"client_ip"` // preserved | rewritten
+	SubmissionLANOnly  bool      `json:"submission_lan_only"`
+	DKIMRotate         string    `json:"dkim_rotate"`      // a Go duration, 24h–8760h
+	FormerRetention    string    `json:"former_retention"` // a Go duration, 24h–8760h
+	Relay              *Relay    `json:"relay"`            // nil: deliver directly
+	TLS                StateTLS  `json:"tls"`
 	ConfirmMassRemoval bool      `json:"confirm_mass_removal"`
 	Domains            []Domain  `json:"domains"`
 	Accounts           []Account `json:"accounts"`
@@ -28,14 +36,38 @@ type MailState struct {
 }
 
 // StateVersion is the only MailState version.
-const StateVersion = 1
+const StateVersion = 2
+
+// Client address modes (MailState.ClientIP, core.env
+// PORTCULLIS_MAIL_CLIENT_IP).
+const (
+	ClientIPPreserved = "preserved"
+	ClientIPRewritten = "rewritten"
+)
+
+// Relay is the outbound relay (MailState.Relay). Its password is the
+// relay-password file of the slot directory, never in the document.
+type Relay struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Username   string `json:"username"`
+	SPFInclude string `json:"spf_include"`
+}
+
+// StateTLS is the mail certificate's current and next SPKI (§19.3).
+type StateTLS struct {
+	SPKISHA256 []string `json:"spki_sha256"`
+}
 
 // Domain is one mail domain of the document.
 type Domain struct {
 	Name       string `json:"name"`
 	DMARCStart string `json:"dmarc_start"` // reject | none
-	Mail       string `json:"mail"`        // on | off | draining
-	DNSSEC     string `json:"dnssec"`      // secure, unsigned, …, unknown
+	// DMARCFloor is the lowest DMARC p= the provider may publish (none,
+	// quarantine, reject; §19.7).
+	DMARCFloor string `json:"dmarc_floor"`
+	Mail       string `json:"mail"`   // on | off | draining
+	DNSSEC     string `json:"dnssec"` // secure, unsigned, …, unknown
 }
 
 // Domain mail states (Domain.Mail, contract §19.5).
@@ -110,15 +142,16 @@ type DNSSet struct {
 	Domain  string   `json:"domain"`
 	Records []Record `json:"records"`
 	DKIM    string   `json:"dkim"` // auto | manual
-	TLSA    string   `json:"tlsa"` // published | withheld: <why>
 }
 
 // Check is one check result.
 type Check struct {
-	ID       string   `json:"id"`
-	Severity string   `json:"severity"` // ok | info | warning | problem
-	Detail   string   `json:"detail"`
-	Steps    []string `json:"steps"`
+	ID       string `json:"id"`
+	Severity string `json:"severity"` // ok | info | warning | problem
+	// Title: x- checks only (≤ 80 characters, clipped).
+	Title  string   `json:"title,omitempty"`
+	Detail string   `json:"detail"`
+	Steps  []string `json:"steps"`
 	// Reason (fcrdns_v4 / fcrdns_v6 only): "missing" (no PTR) or
 	// "mismatch" (the PTR's name doesn't resolve back); absent elsewhere.
 	Reason string `json:"reason,omitempty"`
@@ -147,10 +180,14 @@ type Checks struct {
 // Credential is one mail password's metadata (GET /v1/credentials).
 type Credential struct {
 	ID        string     `json:"id"`
+	UUID      string     `json:"uuid"`
 	Label     string     `json:"label"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	LastUsed  *time.Time `json:"last_used"`
+	// AllowedIPs: [] = anywhere; else the prefixes it may authenticate
+	// from (the Hub verifies them under LAN-only, §19.6).
+	AllowedIPs []netip.Prefix `json:"allowed_ips"`
 }
 
 // Created is POST /v1/credentials' answer. Secret is the password: the
@@ -289,26 +326,31 @@ func (s Secret) Zero() {
 
 // Status is GET /v1/status (MailStatus).
 type Status struct {
-	Bootstrap       bool           `json:"bootstrap"`
-	StalwartVersion string         `json:"stalwart_version"`
-	Cert            StatusCert     `json:"cert"`
-	DKIM            []StatusDKIM   `json:"dkim"`
-	MTASTS          []StatusMTASTS `json:"mtasts"`
-	DMARC           []StatusDMARC  `json:"dmarc"`
-	Queue           StatusQueue    `json:"queue"`
-	ClientIP        string         `json:"client_ip"`
-	RestoredAt      *time.Time     `json:"restored_at"`
-	TimerSeenAt     *time.Time     `json:"timer_seen_at"`
-	Former          []StatusFormer `json:"former"`
-	// DNS: mail domain → sha256 of its wanted mail set (absent from an
-	// older mailctl); a changed hash means the set must be written again.
+	Bootstrap  bool           `json:"bootstrap"`
+	Provider   StatusProvider `json:"provider"`
+	Cert       StatusCert     `json:"cert"`
+	DKIM       []StatusDKIM   `json:"dkim"`
+	MTASTS     []StatusMTASTS `json:"mtasts"`
+	DMARC      []StatusDMARC  `json:"dmarc"`
+	Queue      StatusQueue    `json:"queue"`
+	RestoredAt *time.Time     `json:"restored_at"`
+	Former     []StatusFormer `json:"former"`
+	// DNS: mail domain → sha256 of its wanted mail set; a changed hash
+	// means the set must be written again.
 	DNS map[string]string `json:"dns"`
 }
 
-// StatusCert is the mail certificate.
+// StatusProvider repeats GET /v1/provider's name and version.
+type StatusProvider struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// StatusCert is the certificate the listeners serve.
 type StatusCert struct {
-	NotAfter *time.Time `json:"not_after"`
-	SANs     []string   `json:"sans"`
+	NotAfter   *time.Time `json:"not_after"`
+	SANs       []string   `json:"sans"`
+	SPKISHA256 string     `json:"spki_sha256"`
 }
 
 // StatusDKIM is one DKIM key.
@@ -349,14 +391,40 @@ type StatusFormer struct {
 	Since    time.Time `json:"since"`
 }
 
-// Actions (POST /v1/actions/<name>).
+// Actions (POST /v1/actions/<name>; ActionTest is POST /v1/actions/test).
 const (
 	ActionDKIMRotate    = "dkim-rotate"
 	ActionDMARCPromote  = "dmarc-promote"
 	ActionMTASTSEnforce = "mtasts-enforce"
+	ActionTest          = "test"
 )
 
-// ParkingDomain is Stalwart's domain of parked (former) accounts: never a
+// ProviderInfo is GET /v1/provider.
+type ProviderInfo struct {
+	Name       string   `json:"name"`
+	Version    string   `json:"version"`
+	APIVersion int      `json:"api_version"`
+	Checks     []string `json:"checks"`
+	Actions    []string `json:"actions"`
+	Export     bool     `json:"export"`
+}
+
+// APIVersion is the only provider API version the Hub speaks.
+const APIVersion = 1
+
+// VoidResult is POST /v1/void's answer.
+type VoidResult struct {
+	Voided     int       `json:"voided"`
+	RestoredAt time.Time `json:"restored_at"`
+}
+
+// Void reasons (POST /v1/void).
+const (
+	VoidWire    = "wire"
+	VoidRestore = "restore"
+)
+
+// ParkingDomain is the provider's domain of parked (former) accounts: never a
 // mail domain, every address on it reserved (contract §19.6).
 const ParkingDomain = "portcullis-former.internal"
 

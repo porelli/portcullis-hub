@@ -260,6 +260,11 @@ func (h *Hub) restoreInstance(ctx context.Context, id, archive string, actor dir
 	if mm := archiveRe.FindStringSubmatch(archive); mm == nil || mm[1] != id {
 		return res, statusErr(400, "archive must be %s/<YYYYMMDDTHHMMSSZ>.tar (an archive of this instance)", id)
 	}
+	// While a core restore is pending, the wired mail provider is
+	// restored only by `hub mail restore` with the archive it names.
+	if err := h.mailRestoreGate(ctx, id, archive); err != nil {
+		return res, err
+	}
 	unlock, err := h.lockApp(id)
 	if err != nil {
 		return res, h.busyErr(id, err)
@@ -372,7 +377,7 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		if !p.CloseStop() {
 			return context.Canceled // the Stop's undo starts it again
 		}
-		if wasEnabled {
+		if wasEnabled && !h.mailRestoreHolds(id) {
 			if rerr := h.startAgain(view); rerr != nil {
 				log.Printf("instance %s: starting again after a refused restore: %v", id, rerr)
 			}
@@ -380,6 +385,22 @@ func (h *Hub) restoreSteps(ctx context.Context, p *Progress, id, archive string,
 		return statusErr(500, "recording the restore failed — nothing was restored: %v", err)
 	}
 	p.Before(beforeRestoring, "true")
+	// The wired mail provider (contract §19.11): a void is owed before
+	// its volumes are replaced, so it comes back in void mode and every
+	// restored mail password is voided before any mail port listens.
+	h.mu.Lock()
+	wiredMail := h.st.Mail.Provider != nil && h.st.Mail.Provider.Instance == id
+	var voidErr error
+	if wiredMail {
+		voidErr = h.markVoidOwedLocked(state.MailVoidRestore)
+	}
+	h.mu.Unlock()
+	if voidErr != nil {
+		return statusErr(500, "owing the mail void failed — nothing was restored: %v", voidErr)
+	}
+	if wiredMail {
+		defer h.kickMailVoid()
+	}
 	// A never-enabled instance is "created" again afterwards.
 	keep := ""
 	if e.State == state.InstanceCreated {
@@ -951,11 +972,25 @@ func (h *Hub) applyRestore(ctx context.Context, id string, sb *staged, plan []vo
 	if err := ctx.Err(); err != nil {
 		return air, err
 	}
+	// A rollback or a recovery of the wired mail provider while a core
+	// restore holds it leaves it stopped (FH-H3): only the restore's own
+	// final start (its commit token) starts it.
+	if wasEnabled && !(void && mailHostRestoreOf(ctx) == id) && h.mailRestoreHolds(id) {
+		h.writePolicyLogged()
+		return air, nil
+	}
 	if wasEnabled {
 		rep.Start(StepStart)
 		// The enable reports nothing into the restore's record (its own
 		// commit gate is not the restore's) but stops with it.
-		if _, err := h.enableInner(withProgress(ctx, nil), id, true); err != nil {
+		// The archive's volumes are back: in `hub mail restore`'s op
+		// only (its marker in ctx; never a rollback's, void false) this
+		// start passes the mail provider's restore-pending hold.
+		sctx := withProgress(ctx, nil)
+		if void && mailHostRestoreOf(ctx) == id {
+			sctx = withMailRestoreCommit(sctx, id)
+		}
+		if _, err := h.enableInner(sctx, id, true); err != nil {
 			return air, err
 		}
 		rep.Done(StepStart)

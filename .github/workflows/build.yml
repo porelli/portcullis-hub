@@ -76,7 +76,7 @@ jobs:
         run: command -v setfacl || { sudo apt-get update -q && sudo apt-get install -y -q acl; }
 
       - name: go test -race
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout 25m ./...
 
       # Core's e2e hooks (internal/e2etest) exist only in -tags e2etest
       # builds: their tests run with the tag, and the default binaries

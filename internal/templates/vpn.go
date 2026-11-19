@@ -717,6 +717,13 @@ func vpnYAMLIndirection(compose []byte) bool {
 // on any top-level volume (sorted by key): a driver_opts bind is a
 // disguised host bind.
 func vpnPlainVolumeIdentity(compose []byte) error {
+	return plainVolumeIdentity(compose, "vpn", "a VPN template's", vpnLetterText)
+}
+
+// plainVolumeIdentity is vpnPlainVolumeIdentity's check with a block's
+// words (prefix "vpn" / "mail", whose "a VPN template's" / "a mail
+// template's", the one-letter text).
+func plainVolumeIdentity(compose []byte, prefix, whose, letter string) error {
 	var doc struct {
 		Volumes map[string]interface{} `yaml:"volumes"`
 	}
@@ -725,12 +732,12 @@ func vpnPlainVolumeIdentity(compose []byte) error {
 	}
 	for _, k := range slices.Sorted(maps.Keys(doc.Volumes)) {
 		if len(k) == 1 {
-			return fmt.Errorf("vpn: volume %s: %s", k, vpnLetterText)
+			return fmt.Errorf("%s: volume %s: %s", prefix, k, letter)
 		}
 		mm, _ := doc.Volumes[k].(map[string]interface{})
 		for _, key := range []string{"name", "external", "driver", "driver_opts"} {
 			if _, ok := mm[key]; ok {
-				return fmt.Errorf("vpn: volume %s sets %s: a VPN template's volumes are plain <project>_<key> volumes", k, key)
+				return fmt.Errorf("%s: volume %s sets %s: %s volumes are plain <project>_<key> volumes", prefix, k, key, whose)
 			}
 		}
 	}
@@ -787,6 +794,11 @@ func vpnNetworkAliases(compose []byte) map[string][]vpnNetAlias {
 // symlinks followed, inside the template's own directory. SyncFiles
 // refuses such links too; this names them when the template loads.
 func vpnBindEscapes(dir, tid string, compose []byte) error {
+	return bindEscapes(dir, tid, compose, "vpn.ingress.service: ")
+}
+
+// bindEscapes is vpnBindEscapes with the refusal's location (loc).
+func bindEscapes(dir, tid string, compose []byte, loc string) error {
 	if dir == "" {
 		return nil
 	}
@@ -802,7 +814,7 @@ func vpnBindEscapes(dir, tid string, compose []byte) error {
 			rest := strings.TrimLeft(strings.TrimPrefix(norm, "templates/"+tid), "/")
 			real := realPath(filepath.Join(dir, filepath.FromSlash(rest)))
 			if real != base && !strings.HasPrefix(real, base+string(filepath.Separator)) {
-				return fmt.Errorf("vpn.ingress.service: %s mounts %s: it resolves outside templates/%s/ (a symlink)", n, mm.entry, tid)
+				return fmt.Errorf("%s%s mounts %s: it resolves outside templates/%s/ (a symlink)", loc, n, mm.entry, tid)
 			}
 		}
 	}
@@ -856,20 +868,29 @@ func realPathN(p string, depth int) string {
 // gateway's address on portcullis-vpn. Same order and texts as
 // templates' validate.py.
 func vpnNamespaceCaps(n string, info composeServiceInfo) error {
+	return namespaceCaps(n, info, capWords{"vpn.ingress.service: ", "a VPN gateway", "a VPN gateway runs userspace (no devices)"})
+}
+
+// capWords are a block's privilege texts: the refusal's location, who
+// may add only NET_BIND_SERVICE, and the devices refusal.
+type capWords struct{ loc, who, devices string }
+
+// namespaceCaps is vpnNamespaceCaps' allowlist with a block's words.
+func namespaceCaps(n string, info composeServiceInfo, w capWords) error {
 	capName := func(c string) string { return strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(c)), "CAP_") }
 	if info.privileged {
-		return fmt.Errorf("vpn.ingress.service: %s is privileged", n)
+		return fmt.Errorf("%s%s is privileged", w.loc, n)
 	}
 	if !slices.ContainsFunc(info.capDrop, func(c string) bool { return capName(c) == "ALL" }) {
-		return fmt.Errorf("vpn.ingress.service: %s must set cap_drop: [ALL]", n)
+		return fmt.Errorf("%s%s must set cap_drop: [ALL]", w.loc, n)
 	}
 	for _, c := range info.capAdd {
 		if capName(c) != "NET_BIND_SERVICE" {
-			return fmt.Errorf("vpn.ingress.service: %s adds %s: a VPN gateway may add only NET_BIND_SERVICE", n, strings.TrimSpace(c))
+			return fmt.Errorf("%s%s adds %s: %s may add only NET_BIND_SERVICE", w.loc, n, strings.TrimSpace(c), w.who)
 		}
 	}
 	if info.deviceKey != "" {
-		return fmt.Errorf("vpn.ingress.service: %s has %s: a VPN gateway runs userspace (no devices)", n, info.deviceKey)
+		return fmt.Errorf("%s%s has %s: %s", w.loc, n, info.deviceKey, w.devices)
 	}
 	return nil
 }

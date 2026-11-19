@@ -2,16 +2,24 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/domains"
-	"github.com/portcullis/hub/internal/mailctl"
+	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -31,11 +39,11 @@ type MailDomainView struct {
 
 // MailSpamView is the spam settings on the wire.
 type MailSpamView struct {
-	RejectScore int           `json:"reject_score"`
-	JunkScore   int           `json:"junk_score"`
-	DNSBL       mailctl.DNSBL `json:"dnsbl"`
-	Allow       []string      `json:"allow"`
-	Block       []string      `json:"block"`
+	RejectScore int                `json:"reject_score"`
+	JunkScore   int                `json:"junk_score"`
+	DNSBL       mailprovider.DNSBL `json:"dnsbl"`
+	Allow       []string           `json:"allow"`
+	Block       []string           `json:"block"`
 }
 
 // MailSettingsView is GET /api/mail/settings.
@@ -46,14 +54,16 @@ type MailSettingsView struct {
 	PrimaryDomain string               `json:"primary_domain"`
 	Domains       []MailDomainView     `json:"domains"`
 	Spam          MailSpamView         `json:"spam"`
-	Limits        mailctl.Limits       `json:"limits"`
+	Limits        mailprovider.Limits  `json:"limits"`
 	Quotas        []state.MailQuotaRow `json:"quotas"`
 	// Lists are the groups made lists, by group (controller ruling).
-	Lists             []MailListView `json:"lists"`
-	Relay             string         `json:"relay"`
+	Lists []MailListView `json:"lists"`
+	// Relay is the outbound relay (null: deliver directly); its password
+	// is never returned (password_set).
+	Relay             *MailRelayView `json:"relay"`
 	SubmissionLANOnly bool           `json:"submission_lan_only"`
+	DKIMRotate        string         `json:"dkim_rotate"`
 	FormerRetention   string         `json:"former_retention"`
-	DQSKey            string         `json:"dqs_key"`
 	// SubmissionLANOnlyRefusal (rootless Podman only): why LAN-only can't
 	// be turned on here (controller ruling; the CLI refuses it).
 	SubmissionLANOnlyRefusal string `json:"submission_lan_only_refusal,omitempty"`
@@ -78,19 +88,46 @@ type MailListView struct {
 	Posting string `json:"posting"`
 }
 
-// MailSettingsInput is PUT /api/mail/settings.
-type MailSettingsInput struct {
-	PrimaryDomain string               `json:"primary_domain"`
-	Spam          MailSpamView         `json:"spam"`
-	Limits        mailctl.Limits       `json:"limits"`
-	Quotas        []state.MailQuotaRow `json:"quotas"`
+// MailRelayView is Settings → Mail's relay (never its password).
+type MailRelayView struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	SPFInclude  string `json:"spf_include"`
+	PasswordSet bool   `json:"password_set"`
 }
 
-// core.env keys Settings → Mail shows read-only (contract §19.9 lists the
-// facts; core writes these two when it has them).
+// MailSettingsInput is PUT /api/mail/settings. Relay, DKIMRotate and
+// FormerRetention absent keep what is saved; relay null clears it.
+type MailSettingsInput struct {
+	PrimaryDomain   string               `json:"primary_domain"`
+	Spam            MailSpamView         `json:"spam"`
+	Limits          mailprovider.Limits  `json:"limits"`
+	Quotas          []state.MailQuotaRow `json:"quotas"`
+	Relay           json.RawMessage      `json:"relay,omitempty"`
+	DKIMRotate      *string              `json:"dkim_rotate,omitempty"`
+	FormerRetention *string              `json:"former_retention,omitempty"`
+	// Proof is the fresh sign-in a change of the relay, the DKIM
+	// rotation or the former retention needs (T28 gap 1); Listener the
+	// request's (set by the route).
+	Proof    *freshauth.Proof `json:"-"`
+	Listener string           `json:"-"`
+}
+
+// mailRelayInput is the relay in PUT /api/mail/settings; Password
+// absent keeps the saved one, "" clears it (write-only).
+type mailRelayInput struct {
+	Host       string  `json:"host"`
+	Port       int     `json:"port"`
+	Username   string  `json:"username"`
+	SPFInclude string  `json:"spf_include"`
+	Password   *string `json:"password"`
+}
+
+// The durations' range (contract §19.5).
 const (
-	VarMailFormerRetention = "PORTCULLIS_MAIL_FORMER_RETENTION"
-	VarMailDQS             = "PORTCULLIS_MAIL_DQS"
+	mailDurationMin = 24 * time.Hour
+	mailDurationMax = 8760 * time.Hour
 )
 
 // mailDomainNames are the main domain and every added domain the Hub
@@ -120,30 +157,27 @@ func (h *Hub) MailSettingsView() MailSettingsView {
 		problem = MailSecretProblem
 	}
 	core := h.mailCore()
-	env := readEnvRaw(h.coreEnvPath())
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	st := h.st.Mail
 	v := MailSettingsView{Mail: map[bool]string{true: "on", false: "off"}[core.On], Kubernetes: h.kubeOn(), Hostname: core.Hostname,
 		PrimaryDomain: mailPrimary(st, h.cfg.Domain), Domains: []MailDomainView{},
 		Spam: MailSpamView{RejectScore: st.Spam.RejectScore, JunkScore: st.Spam.JunkScore,
-			DNSBL: mailctl.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
+			DNSBL: mailprovider.DNSBL{Spamhaus: st.Spam.Spamhaus, Spamcop: st.Spam.Spamcop, Barracuda: st.Spam.Barracuda},
 			Allow: nonNil(st.Spam.Allow), Block: nonNil(st.Spam.Block)},
-		Limits: mailctl.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
-		Quotas: append([]state.MailQuotaRow{}, st.Quotas...), Relay: map[bool]string{true: "on", false: "off"}[core.Relay],
-		SubmissionLANOnly: core.SubmissionLAN, FormerRetention: "720h", DQSKey: "not set"}
-	if r := strings.TrimSpace(env[VarMailFormerRetention]); r != "" {
-		v.FormerRetention = r
-	}
-	if strings.TrimSpace(env[VarMailDQS]) == "on" {
-		v.DQSKey = "set in .env"
+		Limits:            mailprovider.Limits{RecipientsPerHour: st.Limits.RecipientsPerHour, RecipientsPerDay: st.Limits.RecipientsPerDay},
+		Quotas:            append([]state.MailQuotaRow{}, st.Quotas...),
+		SubmissionLANOnly: core.SubmissionLAN, DKIMRotate: mailDuration(st.DKIMRotate, defaultDKIMRotate),
+		FormerRetention: mailDuration(st.FormerRetention, defaultFormerRetention)}
+	if r := st.Relay; r != nil {
+		v.Relay = &MailRelayView{Host: r.Host, Port: r.Port, Username: r.Username, SPFInclude: r.SPFInclude, PasswordSet: h.mailRelayPasswordSet()}
 	}
 	if h.cfg.Runtime == runtime.KindPodman {
 		v.SubmissionLANOnlyRefusal = MailLANOnlyPodmanRefusal
 	}
 	for _, n := range h.mailDomainNamesLocked() {
 		s := h.mailDomainStateLocked(n, core.On)
-		v.Domains = append(v.Domains, MailDomainView{Name: n, Enabled: s == mailctl.MailOn, State: s, Groups: nonNil(st.Domains[n].Groups)})
+		v.Domains = append(v.Domains, MailDomainView{Name: n, Enabled: s == mailprovider.MailOn, State: s, Groups: nonNil(st.Domains[n].Groups)})
 	}
 	v.PendingRemoval = h.mailPendingViewLocked()
 	v.Problem = problem
@@ -238,6 +272,55 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 			return statusErr(http.StatusBadRequest, "quota row %s: the size must be more than 0 and at most 1 TiB", q.Group)
 		}
 	}
+	relay, relaySet, password, err := parseMailRelay(in.Relay)
+	if err != nil {
+		return err
+	}
+	for _, d := range []*string{in.DKIMRotate, in.FormerRetention} {
+		if d == nil {
+			continue
+		}
+		v, perr := time.ParseDuration(*d)
+		if perr != nil || v < mailDurationMin || v > mailDurationMax {
+			return statusErr(http.StatusBadRequest, "dkim_rotate and former_retention must be durations from 24h to 8760h")
+		}
+	}
+	// A change of the relay (its password included), the DKIM rotation
+	// or the former retention: never from AI or MCP, and only with a
+	// fresh sign-in (the relay carries a secret; the other two decide
+	// key and mailbox lifetimes).
+	h.mu.RLock()
+	cur := h.st.Mail
+	h.mu.RUnlock()
+	sensitive := password != nil || (in.DKIMRotate != nil && *in.DKIMRotate != mailDuration(cur.DKIMRotate, defaultDKIMRotate)) ||
+		(in.FormerRetention != nil && *in.FormerRetention != mailDuration(cur.FormerRetention, defaultFormerRetention))
+	if relaySet {
+		switch {
+		case (relay == nil) != (cur.Relay == nil):
+			sensitive = true
+		case relay != nil && *relay != *cur.Relay:
+			sensitive = true
+		}
+	}
+	if sensitive {
+		if actor.Via != "" {
+			return statusErr(http.StatusForbidden, "the relay, DKIM rotation and former retention change only in the browser, never through MCP or AI")
+		}
+		if in.Proof == nil {
+			return statusErr(http.StatusForbidden, "changing the relay, DKIM rotation or former retention needs a fresh sign-in")
+		}
+		listener := in.Listener
+		if listener == "" {
+			listener = ListenerHub
+		}
+		if _, err := h.verifyTouch(ctx, listener, *in.Proof, actor.User); err != nil {
+			var tr *touchRefused
+			if errors.As(err, &tr) {
+				return tr.err
+			}
+			return errFreshAuth
+		}
+	}
 	primary := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(in.PrimaryDomain), "."))
 	main := strings.ToLower(h.cfg.Domain)
 	coreOn := h.mailOn()
@@ -254,7 +337,7 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 	}
 	// Every login is on the primary domain: it must be one mail is on for
 	// (else no document could be sent, removals included).
-	if mailDomainState(h.st.Mail, h.cfg.Domain, coreOn || primary == main, primary) != mailctl.MailOn {
+	if mailDomainState(h.st.Mail, h.cfg.Domain, coreOn || primary == main, primary) != mailprovider.MailOn {
 		return statusErr(http.StatusBadRequest, "turn mail on for %s first", primary)
 	}
 	old := h.st.Mail
@@ -267,17 +350,120 @@ func (h *Hub) SetMailSettings(ctx context.Context, in MailSettingsInput, actor d
 		Barracuda: s.DNSBL.Barracuda, Allow: allow, Block: block}
 	h.st.Mail.Limits = state.MailLimits{RecipientsPerHour: l.RecipientsPerHour, RecipientsPerDay: l.RecipientsPerDay}
 	h.st.Mail.Quotas = append([]state.MailQuotaRow(nil), in.Quotas...)
+	if relaySet {
+		h.st.Mail.Relay = relay
+	}
+	if in.DKIMRotate != nil {
+		h.st.Mail.DKIMRotate = *in.DKIMRotate
+	}
+	if in.FormerRetention != nil {
+		h.st.Mail.FormerRetention = *in.FormerRetention
+	}
+	// The relay password first (write-only, never in state.yaml): a
+	// cleared relay clears it.
+	if relaySet && relay == nil {
+		empty := ""
+		password = &empty
+	}
+	// L5: a save that fails puts the previous password back too.
+	prevPw, _ := os.ReadFile(filepath.Join(h.cfg.DataDir, mailRelayPasswordFile))
+	defer clear(prevPw)
+	if password != nil {
+		if err := h.writeMailRelayPasswordLocked(*password); err != nil {
+			h.st.Mail = old
+			return err
+		}
+	}
 	if err := h.saveStateLocked(); err != nil {
 		h.st.Mail = old
+		if password != nil {
+			if rerr := h.writeMailRelayPasswordLocked(string(prevPw)); rerr != nil {
+				log.Printf("mail: putting the previous relay password back: %v", rerr)
+			}
+		}
 		return err
 	}
 	h.TriggerMailSync()
 	return nil
 }
 
+// parseMailRelay is the input's relay: absent (set false: keep), null
+// (nil, set: clear) or a relay (password: nil keeps the saved one).
+func parseMailRelay(raw json.RawMessage) (r *state.MailRelay, set bool, password *string, err error) {
+	if len(raw) == 0 {
+		return nil, false, nil, nil
+	}
+	if string(raw) == "null" {
+		return nil, true, nil, nil
+	}
+	var in mailRelayInput
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&in) != nil {
+		return nil, false, nil, statusErr(http.StatusBadRequest, `relay must be null or {"host", "port", "username", "spf_include", "password"?}`)
+	}
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(in.Host), "."))
+	inc := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(in.SPFInclude), "."))
+	switch {
+	case !templates.ValidHostname(host):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "relay host %q isn't a host name", clipText(in.Host))
+	case in.Port < 1 || in.Port > 65535:
+		return nil, false, nil, statusErr(http.StatusBadRequest, "relay port must be 1 to 65535")
+	case len(in.Username) > 255 || strings.ContainsAny(in.Username, "\x00\r\n\t"):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "the relay username must be one line of at most 255 characters")
+	case inc != "" && (!spfIncludeRe.MatchString(inc) || len(inc) > 253):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "relay spf_include %q isn't a host name", clipText(in.SPFInclude))
+	case in.Password != nil && (len(*in.Password) > 1024 || strings.ContainsAny(*in.Password, "\x00\r\n")):
+		return nil, false, nil, statusErr(http.StatusBadRequest, "the relay password must be one line of at most 1024 bytes")
+	}
+	return &state.MailRelay{Host: host, Port: in.Port, Username: in.Username, SPFInclude: inc}, true, in.Password, nil
+}
+
+// spfIncludeRe is an SPF include: a DNS name whose labels may carry _.
+var spfIncludeRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)+$`)
+
+// mailRelayPasswordSet: hub_data/mail-relay-password holds a password.
+func (h *Hub) mailRelayPasswordSet() bool {
+	fi, err := os.Stat(filepath.Join(h.cfg.DataDir, mailRelayPasswordFile))
+	return err == nil && fi.Size() > 0
+}
+
+// writeMailRelayPasswordLocked writes the Hub's copy (0600; "" removes
+// it) and, with a provider wired, its gate copy (in place). Never logged.
+// Caller must hold mu (write).
+func (h *Hub) writeMailRelayPasswordLocked(pw string) error {
+	f := filepath.Join(h.cfg.DataDir, mailRelayPasswordFile)
+	if pw == "" {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return statusErr(http.StatusInternalServerError, "removing the relay password failed")
+		}
+	} else if err := fsutil.WriteFileAtomic(f, []byte(pw), 0o600); err != nil {
+		return statusErr(http.StatusInternalServerError, "saving the relay password failed")
+	}
+	if p := h.st.Mail.Provider; p != nil && h.mailSlotDir(p.Instance) != "" {
+		if err := h.writeRelayPasswordLocked(p.Instance); err != nil {
+			log.Printf("mail: delivering the relay password to %s: %v", p.Instance, err)
+		}
+	}
+	return nil
+}
+
 func mailSettingsDetail(in MailSettingsInput) string {
-	return fmt.Sprintf("primary=%s reject=%d junk=%d limits=%d/%d quotas=%d", in.PrimaryDomain, in.Spam.RejectScore, in.Spam.JunkScore,
+	d := fmt.Sprintf("primary=%s reject=%d junk=%d limits=%d/%d quotas=%d", in.PrimaryDomain, in.Spam.RejectScore, in.Spam.JunkScore,
 		in.Limits.RecipientsPerHour, in.Limits.RecipientsPerDay, len(in.Quotas))
+	switch {
+	case string(in.Relay) == "null":
+		d += " relay=none"
+	case len(in.Relay) > 0:
+		d += " relay=set" // never the password
+	}
+	if in.DKIMRotate != nil {
+		d += " dkim_rotate=" + clipText(*in.DKIMRotate)
+	}
+	if in.FormerRetention != nil {
+		d += " former_retention=" + clipText(*in.FormerRetention)
+	}
+	return d
 }
 
 // clipText is s, at most 64 bytes of it (refusal texts).
@@ -388,20 +574,20 @@ func (h *Hub) SetMailDomain(ctx context.Context, name string, enabled bool, grou
 	cur := h.mailDomainStateLocked(name, coreOn)
 	e := h.st.Mail.Domains[name]
 	if enabled {
-		if cur != mailctl.MailOn {
+		if cur != mailprovider.MailOn {
 			if id, host := h.mailReservedUserLocked(name); id != "" {
 				return statusErr(http.StatusConflict, "instance %s uses %s, which mail reserves on %s: move it first", id, host, name)
 			}
 		}
-		if cur == mailctl.MailOff {
+		if cur == mailprovider.MailOff {
 			e.HadMailRecords = had
 		}
 		e.Enabled, e.Draining, e.Retired = true, false, false
 	} else {
-		if name == mailPrimary(h.st.Mail, h.cfg.Domain) && cur != mailctl.MailOff {
+		if name == mailPrimary(h.st.Mail, h.cfg.Domain) && cur != mailprovider.MailOff {
 			return statusErr(http.StatusConflict, "%s is the primary mail domain: pick another one first", name)
 		}
-		if cur == mailctl.MailOn {
+		if cur == mailprovider.MailOn {
 			e.Draining = true
 		}
 		e.Enabled = false
@@ -464,9 +650,9 @@ func (h *Hub) mailReservedUserLocked(e string) (string, string) {
 // mailAddressOwner is who uses addr in the document the directory builds
 // now (an account, someone's alias, a list) or a reserved local part;
 // "" = free. exceptUUID: the person whose aliases are being replaced.
-func mailAddressOwner(doc *mailctl.MailState, st state.MailSettings, addr, exceptUUID string) string {
+func mailAddressOwner(doc *mailprovider.MailState, st state.MailSettings, addr, exceptUUID string) string {
 	local, _, _ := strings.Cut(addr, "@")
-	if slices.Contains(mailctl.ReservedLocalParts, local) {
+	if slices.Contains(mailprovider.ReservedLocalParts, local) {
 		return "reserved for mail"
 	}
 	for _, a := range doc.Accounts {
@@ -490,7 +676,7 @@ func mailAddressOwner(doc *mailctl.MailState, st state.MailSettings, addr, excep
 // mailAddrOnMail: addr is an address on a domain mail is on or draining.
 func (h *Hub) mailAddrOnMailLocked(addr string, coreOn bool) bool {
 	local, dom, ok := strings.Cut(addr, "@")
-	return ok && local != "" && localPartRe.MatchString(local) && h.mailDomainStateLocked(dom, coreOn) != mailctl.MailOff
+	return ok && local != "" && localPartRe.MatchString(local) && h.mailDomainStateLocked(dom, coreOn) != mailprovider.MailOff
 }
 
 // SetUserAliases replaces user's aliases (contract §19.9): each an
@@ -515,7 +701,7 @@ func (h *Hub) SetUserAliases(ctx context.Context, user string, addrs []string, a
 		}
 		return statusErr(http.StatusConflict, "mail isn't on for the primary domain: no aliases can be set")
 	}
-	i := slices.IndexFunc(doc.Accounts, func(a mailctl.Account) bool { return a.Username == user })
+	i := slices.IndexFunc(doc.Accounts, func(a mailprovider.Account) bool { return a.Username == user })
 	if i < 0 {
 		return statusErr(http.StatusNotFound, "%s has no mailbox (not in %s)", user, MailUsersGroup)
 	}
@@ -615,7 +801,7 @@ func (h *Hub) SetGroupList(ctx context.Context, group string, enabled bool, doma
 	coreOn := h.mailOn()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.mailDomainStateLocked(domain, coreOn) != mailctl.MailOn {
+	if h.mailDomainStateLocked(domain, coreOn) != mailprovider.MailOn {
 		return statusErr(http.StatusBadRequest, "mail isn't on for %s", domain)
 	}
 	cur, had := h.st.Mail.Lists[group]
@@ -652,8 +838,22 @@ func (h *Hub) SetGroupList(ctx context.Context, group string, enabled bool, doma
 type MailStatusView struct {
 	Mail      string               `json:"mail"`
 	Reachable bool                 `json:"reachable"`
-	Status    *mailctl.Status      `json:"status"`
+	Status    *mailprovider.Status `json:"status"`
 	Domains   []MailDomainStateRow `json:"domains"`
+	// Provider is the wired provider (nil: nothing wired).
+	Provider *MailProviderSummary `json:"provider"`
+}
+
+// MailProviderSummary is the wired provider as Settings → Mail and the
+// mail_status tool show it (never a secret).
+type MailProviderSummary struct {
+	Instance string        `json:"instance"`
+	Template string        `json:"template"`
+	Label    string        `json:"label"`
+	Version  string        `json:"version"`
+	Mode     string        `json:"mode"`
+	Void     *MailVoidView `json:"void"`
+	Held     bool          `json:"held"`
 }
 
 // MailDomainStateRow is one domain's mail state (also the host routes').
@@ -680,11 +880,27 @@ func (h *Hub) mailDomainRows() []MailDomainStateRow {
 // MailStatus is GET /api/mail/status: never a credential.
 func (h *Hub) MailStatus(ctx context.Context) MailStatusView {
 	v := MailStatusView{Mail: "off", Domains: h.mailDomainRows()}
+	if h.mailOn() {
+		h.mu.RLock()
+		if p := h.st.Mail.Provider; p != nil {
+			ps := &MailProviderSummary{Instance: p.Instance, Template: p.Template, Mode: h.mailModeTextLocked(p.Instance), Void: h.mailVoidViewLocked(), Held: h.st.Mail.Held != nil}
+			if _, m := h.mailWiredLocked(); m != nil {
+				ps.Label = m.Label
+			}
+			v.Provider = ps
+		}
+		h.mu.RUnlock()
+	}
 	api := h.mailClient()
 	if api == nil {
 		return v
 	}
 	v.Mail = "on"
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if info, err := api.Provider(pctx); err == nil && v.Provider != nil {
+		v.Provider.Version = info.Version
+	}
+	cancel()
 	if st, err := api.Status(ctx); err == nil {
 		v.Reachable, v.Status = true, &st
 	}
@@ -692,7 +908,7 @@ func (h *Hub) MailStatus(ctx context.Context) MailStatusView {
 }
 
 // MailChecks is mailctl's GET /v1/checks (503 while mail isn't running).
-func (h *Hub) MailChecks(ctx context.Context, refresh bool) (*mailctl.Checks, error) {
+func (h *Hub) MailChecks(ctx context.Context, refresh bool) (*mailprovider.Checks, error) {
 	api, err := h.mailUp(ctx)
 	if err != nil {
 		return nil, err
@@ -708,7 +924,7 @@ func (h *Hub) MailChecks(ctx context.Context, refresh bool) (*mailctl.Checks, er
 // 202; 404 not a mail domain; 409 nothing to do. Audited mail.<action>.
 func (h *Hub) MailAction(ctx context.Context, action, domain string, actor directory.Actor) (err error) {
 	domain = NormalizeHost(domain)
-	audit := map[string]string{mailctl.ActionDKIMRotate: "mail.dkim_rotate", mailctl.ActionDMARCPromote: "mail.dmarc_promote", mailctl.ActionMTASTSEnforce: "mail.mtasts_enforce"}[action]
+	audit := map[string]string{mailprovider.ActionDKIMRotate: "mail.dkim_rotate", mailprovider.ActionDMARCPromote: "mail.dmarc_promote", mailprovider.ActionMTASTSEnforce: "mail.mtasts_enforce"}[action]
 	if audit == "" {
 		return statusErr(http.StatusNotFound, "no mail action %q", clipText(action))
 	}
@@ -718,7 +934,7 @@ func (h *Hub) MailAction(ctx context.Context, action, domain string, actor direc
 		return err
 	}
 	if err := api.Action(ctx, action, domain); err != nil {
-		var ae *mailctl.APIError
+		var ae *mailprovider.APIError
 		if asAPIError(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusConflict || ae.Status == http.StatusBadRequest) {
 			return statusErr(ae.Status, "%s", ae.Msg)
 		}
@@ -727,8 +943,8 @@ func (h *Hub) MailAction(ctx context.Context, action, domain string, actor direc
 	return nil
 }
 
-func asAPIError(err error, out **mailctl.APIError) bool {
-	ae, ok := err.(*mailctl.APIError)
+func asAPIError(err error, out **mailprovider.APIError) bool {
+	ae, ok := err.(*mailprovider.APIError)
 	if ok {
 		*out = ae
 	}
@@ -814,7 +1030,7 @@ func (h *Hub) HostMailDrain(ctx context.Context) []MailDomainStateRow {
 	h.mu.Lock()
 	var changed []string
 	for _, n := range h.mailDomainNamesLocked() {
-		if h.mailDomainStateLocked(n, coreOn) != mailctl.MailOn {
+		if h.mailDomainStateLocked(n, coreOn) != mailprovider.MailOn {
 			continue
 		}
 		if h.st.Mail.Domains == nil {
@@ -846,13 +1062,13 @@ func (h *Hub) HostMailDomains() []MailDomainStateRow {
 	for _, n := range h.mailDomainNamesLocked() {
 		_, entry := h.st.Mail.Domains[n]
 		s := h.mailDomainStateLocked(n, coreOn)
-		if s == mailctl.MailOff && !entry {
+		if s == mailprovider.MailOff && !entry {
 			continue
 		}
 		// Off but its mail set not removed yet: still draining for the
 		// CLI (mail disable waits for every domain off).
-		if e := h.st.Mail.Domains[n]; s == mailctl.MailOff && entry && !e.Retired && n != strings.ToLower(h.cfg.Domain) {
-			s = mailctl.MailDraining
+		if e := h.st.Mail.Domains[n]; s == mailprovider.MailOff && entry && !e.Retired && n != strings.ToLower(h.cfg.Domain) {
+			s = mailprovider.MailDraining
 		}
 		out = append(out, MailDomainStateRow{Name: n, State: s})
 	}

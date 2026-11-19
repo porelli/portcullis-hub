@@ -147,6 +147,7 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerServers(mux)
 	// Settings → Mail and the admin mail routes (§19.9; Hub listener only).
 	s.registerMailAdmin(mux)
+	s.registerMailProvider(mux)
 	// SSH access (contract §18; Hub listener only).
 	s.registerSSHAdmin(mux)
 	return mux
@@ -889,7 +890,7 @@ func (s *Server) handleTemplateExec(w http.ResponseWriter, r *http.Request) {
 // its output may hold anything.
 func (s *Server) execInstance(ctx context.Context, a directory.Actor, id, service, command string) (*hub.ExecResult, error) {
 	s.rec("Exec", id, service, command)
-	res, err := s.Hub.Exec(ctx, id, service, command)
+	res, err := s.Hub.ExecAs(ctx, a, id, service, command)
 	detail := "service=" + clipMessage(service, 64)
 	if res != nil {
 		detail += " exit=" + strconv.Itoa(res.ExitCode)

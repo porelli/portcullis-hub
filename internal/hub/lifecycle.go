@@ -92,6 +92,12 @@ func (h *Hub) composeUp(ctx context.Context, t *templates.Template) error {
 	if _, owner := h.moveOwners.Load(t.ID); moving && !owner {
 		return statusErr(409, "instance %s is being moved: wait for the move (or its recovery) to end", t.ID)
 	}
+	// A core restore's hold refuses before anything is written or
+	// delivered (no override, no env, no data files into volumes the
+	// restore brings back): only the restore's own commit passes.
+	if !mailRestoreCommitted(ctx, t.ID) && h.mailRestoreHolds(t.ID) {
+		return errMailRestorePending
+	}
 	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUpCtx(ctx, t)
 	if err != nil {
@@ -154,9 +160,13 @@ func (h *Hub) prepareUpCtx(ctx context.Context, t *templates.Template) (*templat
 		c := *l
 		live = &c
 	}
-	// The secrets volume's hash directories first (F14: unusable =
-	// refused, 503).
-	err := h.ensureSecretDirsLocked(live)
+	// A held mail provider's changed tree never starts (R-HH3).
+	err := h.mailHoldGateLocked(live)
+	if err == nil {
+		// The secrets volume's hash directories first (F14: unusable =
+		// refused, 503).
+		err = h.ensureSecretDirsLocked(live)
+	}
 	if err == nil {
 		// A locked setup choice the template no longer fits: never
 		// started on other data (§13.18).
@@ -286,6 +296,14 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 			if p != nil && isFolderChanged(err) {
 				h.recordFolderChange(live.ID, p, detail)
 			}
+			return err
+		}
+	}
+	// A mail provider whose mode changes (normal ↔ void) goes down first,
+	// so its networks are recreated (Ruling T8-void).
+	var mm mailMode
+	if live.Manifest.Mail != nil {
+		if mm, err = h.mailModeBeforeUp(opCtx, live); err != nil {
 			return err
 		}
 	}
@@ -434,6 +452,12 @@ func (h *Hub) startUp(opCtx context.Context, live *templates.Template) error {
 	// written: each failure an operation warning).
 	if p != nil {
 		p.Start(StepSettings)
+	}
+	// The engine's networks match the mail mode, else it is stopped.
+	if live.Manifest.Mail != nil {
+		if err := h.mailModeAfterUp(ctx, live, mm); err != nil {
+			return err
+		}
 	}
 	failures := h.runStartHooks(context.Background(), live.ID)
 	// AI companions owing a revoke_all (switched while stopped): run it
@@ -1179,6 +1203,9 @@ func (h *Hub) restartSteps(ctx context.Context, t *templates.Template) (stopped 
 	// refusal there leaves the app running as it was.
 	if _, err := os.Stat(t.ComposePath()); err != nil {
 		return false, nil, nil
+	}
+	if !mailRestoreCommitted(ctx, t.ID) && h.mailRestoreHolds(t.ID) {
+		return false, nil, errMailRestorePending // as composeUp
 	}
 	seq := h.owedSeqOf(t.ID)
 	live, err := h.prepareUpCtx(ctx, t)

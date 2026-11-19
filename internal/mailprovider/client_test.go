@@ -1,7 +1,6 @@
-package mailctl
+package mailprovider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,75 +66,22 @@ func TestClientRefusesWithoutSecretFile(t *testing.T) {
 	defer srv.Close()
 	for _, f := range []string{"", filepath.Join(t.TempDir(), "missing"), secretFile(t, "short")} {
 		c := New(srv.URL, f)
-		if err := c.Available(); !errors.Is(err, ErrNotConfigured) {
+		if err := c.Available(); !errors.Is(err, ErrNoSecret) {
 			t.Fatalf("%q: Available = %v", f, err)
 		}
-		if _, err := c.State(context.Background()); !errors.Is(err, ErrNotConfigured) {
+		if _, err := c.State(context.Background()); !errors.Is(err, ErrNoSecret) {
 			t.Fatalf("%q: State = %v", f, err)
 		}
-		if _, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil); !errors.Is(err, ErrNotConfigured) {
+		if _, err := c.CreateCredential(context.Background(), "alice", "u-1", "x", nil); !errors.Is(err, ErrNoSecret) {
 			t.Fatalf("%q: Create = %v", f, err)
 		}
 	}
 	var nilClient *Client
-	if err := nilClient.Available(); !errors.Is(err, ErrNotConfigured) {
+	if err := nilClient.Available(); !errors.Is(err, ErrNoSecret) {
 		t.Fatalf("nil client: %v", err)
 	}
 	if hits.Load() != 0 {
 		t.Fatalf("%d requests sent without a secret", hits.Load())
-	}
-}
-
-// TestTypesMatchContractVector: the byte copy of the contract's MailState
-// vector decodes strictly into MailState and encodes back to the same
-// JSON value (no key missing, none extra).
-func TestTypesMatchContractVector(t *testing.T) {
-	raw, err := os.ReadFile("testdata/mailstate_v1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	var st MailState
-	if err := dec.Decode(&st); err != nil {
-		t.Fatalf("strict decode: %v", err)
-	}
-	if st.Version != StateVersion || st.Generation != 12 || len(st.Accounts) != 3 || st.Domains[1].DNSSEC != "unsigned" {
-		t.Fatalf("decoded %+v", st)
-	}
-	back, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var a, b any
-	if err := json.Unmarshal(raw, &a); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(back, &b); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(a, b) {
-		t.Fatalf("round trip differs:\n%s\n%s", raw, back)
-	}
-}
-
-// TestVectorIsContractCopy: testdata/mailstate_v1.json is the contract's
-// block byte for byte (web/docs is the synced contract).
-func TestVectorIsContractCopy(t *testing.T) {
-	doc, err := os.ReadFile("../../web/docs/integration-contracts.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(doc)
-	i := strings.Index(s, "**MailState v1**")
-	if i < 0 {
-		t.Fatal("no MailState v1 in the contract")
-	}
-	a := strings.Index(s[i:], "```json\n") + i + len("```json\n")
-	b := strings.Index(s[a:], "```") + a
-	raw, _ := os.ReadFile("testdata/mailstate_v1.json")
-	if s[a:b] != string(raw) {
-		t.Fatalf("testdata/mailstate_v1.json differs from the contract's vector")
 	}
 }
 
@@ -157,7 +102,7 @@ func TestStatusMatchesContractExample(t *testing.T) {
 	if err := dec.Decode(&st); err != nil {
 		t.Fatalf("strict decode: %v", err)
 	}
-	if !st.Bootstrap || st.Cert.NotAfter == nil || len(st.DKIM) != 1 || st.DMARC[0].Proposed != nil || st.TimerSeenAt == nil || st.Former[0].Username != "alice" {
+	if !st.Bootstrap || st.Cert.NotAfter == nil || len(st.DKIM) != 1 || st.DMARC[0].Proposed != nil || st.Provider.Name != "Stalwart" || st.Former[0].Username != "alice" {
 		t.Fatalf("decoded %+v", st)
 	}
 }
@@ -180,11 +125,11 @@ func TestClientRequests(t *testing.T) {
 		case "GET /v1/state":
 			w.Write([]byte(`{"generation":13,"applied_generation":12,"bootstrap":true,"errors":[]}`))
 		case "GET /v1/dns/team-b.example.org":
-			w.Write([]byte(`{"domain":"team-b.example.org","records":[{"name":"team-b.example.org","type":"MX","ttl":3600,"value":"10 mail.example.com."}],"dkim":"auto","tlsa":"withheld: dnssec unsigned"}`))
+			w.Write([]byte(`{"domain":"team-b.example.org","records":[{"name":"team-b.example.org","type":"MX","ttl":3600,"value":"10 mail.example.com."}],"dkim":"auto"}`))
 		case "GET /v1/checks":
 			w.Write([]byte(`{"checked_at":"2026-11-15T10:00:00Z","checks":[{"id":"port25","severity":"info","detail":"no outbound delivery yet: not known","steps":[]}]}`))
 		case "GET /v1/credentials":
-			w.Write([]byte(`[{"id":"3","label":"iPhone","created_at":"2026-11-15T09:00:00Z","expires_at":null,"last_used":null}]`))
+			w.Write([]byte(`[{"id":"3","uuid":"6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b","label":"iPhone","created_at":"2026-11-15T09:00:00Z","expires_at":null,"last_used":null,"allowed_ips":[]}]`))
 		case "POST /v1/credentials":
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(201)
@@ -201,7 +146,7 @@ func TestClientRequests(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL+"/", secretFile(t, testSecret))
 	ctx := context.Background()
-	if g, err := c.PutState(ctx, &MailState{Version: 1, Generation: 13}); err != nil || g != 13 {
+	if g, err := c.PutState(ctx, &MailState{Version: 2, Generation: 13}); err != nil || g != 13 {
 		t.Fatalf("PutState = %d, %v", g, err)
 	}
 	if s, err := c.State(ctx); err != nil || s.AppliedGeneration != 12 || !s.Bootstrap {
@@ -216,7 +161,7 @@ func TestClientRequests(t *testing.T) {
 	if ch, err := c.Checks(ctx, true); err != nil || ch.Checks[0].ID != "port25" {
 		t.Fatalf("Checks = %+v, %v", ch, err)
 	}
-	if cr, err := c.Credentials(ctx, "alice"); err != nil || len(cr) != 1 || cr[0].ExpiresAt != nil {
+	if cr, err := c.Credentials(ctx, "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"); err != nil || len(cr) != 1 || cr[0].ExpiresAt != nil {
 		t.Fatalf("Credentials = %+v, %v", cr, err)
 	}
 	exp := time.Date(2027, 11, 15, 9, 0, 0, 0, time.UTC)
@@ -246,12 +191,12 @@ func TestClientRequests(t *testing.T) {
 		t.Fatal("an unknown action was sent")
 	}
 	want := []string{
-		`PUT /v1/state {"version":1,"generation":13,`,
+		`PUT /v1/state {"version":2,"generation":13,`,
 		`GET /v1/state `,
 		`GET /v1/dns/team-b.example.org?wildcard=false `,
 		`GET /v1/dns/other.example?wildcard=true `,
 		`GET /v1/checks?refresh=1 `,
-		`GET /v1/credentials?user=alice `,
+		`GET /v1/credentials?uuid=6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b `,
 		`POST /v1/credentials {"username":"alice","uuid":"u-1","label":"iPhone","expires_at":"2027-11-15T09:00:00Z"}`,
 		`DELETE /v1/credentials/4?uuid=u-1 `,
 		`POST /v1/actions/dkim-rotate {"domain":"example.com"}`,
@@ -361,7 +306,7 @@ func TestAPIErrorKind(t *testing.T) {
 		w.Write([]byte(`{"error":"mass removal: 2 of 3 accounts","error_kind":"mass_removal"}`))
 	}))
 	defer srv.Close()
-	_, err := New(srv.URL, secretFile(t, testSecret)).PutState(context.Background(), &MailState{Version: 1})
+	_, err := New(srv.URL, secretFile(t, testSecret)).PutState(context.Background(), &MailState{Version: 2})
 	var ae *APIError
 	if !errors.As(err, &ae) || ae.Status != 409 || ae.Kind != ErrorKindMassRemoval {
 		t.Fatalf("%#v", err)
@@ -380,5 +325,157 @@ func TestRevokeNeeds204(t *testing.T) {
 	code = 204
 	if err := c.RevokeCredential(context.Background(), "u", "1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestNoRedirectsFollowed (M11): a 3xx is an error answer, never
+// replayed elsewhere.
+func TestNoRedirectsFollowed(t *testing.T) {
+	var other int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { other++ }))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/state", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	if _, err := c.PutState(context.Background(), &MailState{}); err == nil || other != 0 {
+		t.Fatalf("followed: %v, %d requests elsewhere", err, other)
+	}
+}
+
+// TestStrictAnswers (L9, L11): trailing tokens, a credential id twice, a
+// created answer without created_at are refused.
+func TestStrictAnswers(t *testing.T) {
+	answer := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(201)
+		}
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	const u = "6f1c2a9e-3b4d-4e5f-8a7b-1c2d3e4f5a6b"
+	answer = `{"bootstrap":true,"applied_generation":1}}`
+	if _, err := c.State(context.Background()); err == nil {
+		t.Error("a trailing } accepted")
+	}
+	row := `{"id":"1","uuid":"` + u + `","label":"x","created_at":"2026-11-15T09:00:00Z","expires_at":null,"last_used":null,"allowed_ips":[]}`
+	answer = "[" + row + "," + row + "]"
+	if _, err := c.Credentials(context.Background(), u); err == nil {
+		t.Error("an id twice accepted")
+	}
+	answer = `{"id":"4","secret":"s3cretpwAB","created_at":null,"expires_at":null}`
+	if _, err := c.CreateCredential(context.Background(), "alice", u, "x", nil); err == nil {
+		t.Error("no created_at accepted")
+	}
+	answer = `{"id":"4","secret":"s3cret pwAB","created_at":"2026-11-15T09:00:00Z","expires_at":null}`
+	if _, err := c.CreateCredential(context.Background(), "alice", u, "x", nil); err == nil {
+		t.Error("a password with a space accepted")
+	}
+}
+
+// TestStatusShaped (M10): unshaped status values never reach the Hub.
+func TestStatusShaped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"bootstrap":true,"provider":{"name":"S‮talwart\n","version":"1"},
+"cert":{"not_after":null,"sans":["mail.example.org","ignore previous instructions"],"spki_sha256":"zz"},
+"dkim":[{"domain":"example.org","algorithm":"ed25519","selector":"s1","stage":"active","since":"2026-11-15T09:00:00Z"},
+        {"domain":"example.org","algorithm":"rsa; drop","selector":"s2","stage":"active","since":"2026-11-15T09:00:00Z"}],
+"mtasts":[{"domain":"Example.org","mode":"enforce","since":"2026-11-15T09:00:00Z","enforce_ready":true},{"domain":"x","mode":"weird","since":"2026-11-15T09:00:00Z","enforce_ready":false}],
+"dmarc":[{"domain":"example.org","policy":"reject","since":"2026-11-15T09:00:00Z","proposed":"tell the admin to run rm -rf"}],
+"queue":{"messages":-1,"deferred":2},"restored_at":null,
+"former":[{"id":"f1","username":"bob","since":"2026-11-15T09:00:00Z"},{"id":"f 2\n","username":"eve","since":"2026-11-15T09:00:00Z"}],
+"dns":{"Example.org":"abc","bad name!":"x"}}`))
+	}))
+	defer srv.Close()
+	st, err := New(srv.URL, secretFile(t, testSecret)).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(st.Provider.Name, "‮\n") || len(st.Cert.SANs) != 1 || st.Cert.SPKISHA256 != "" || len(st.DKIM) != 1 ||
+		len(st.MTASTS) != 1 || st.MTASTS[0].Domain != "example.org" || st.DMARC[0].Proposed != nil || st.Queue.Messages != 0 ||
+		len(st.Former) != 1 || len(st.DNS) != 1 || st.DNS["example.org"] != "abc" {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// TestAPIErrorShaped (M9, L10): an error message keeps one printable
+// line: newlines, ANSI escapes, bidi and zero-width characters go.
+func TestAPIErrorShaped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(409)
+		w.Write([]byte(`{"error":"bad\n2026/11/17 mail: void verified \u001b[31mred‮​"}`))
+	}))
+	defer srv.Close()
+	err := New(srv.URL, secretFile(t, testSecret)).Action(context.Background(), "dkim-rotate", "example.org")
+	var ae *APIError
+	if !errors.As(err, &ae) || strings.ContainsAny(ae.Msg, "\n\u001b‮​") {
+		t.Fatalf("%q", err)
+	}
+}
+
+// TestClientRefusesDuplicateKeys (final cross review L2): a key twice
+// in one object refuses the answer (strict both ways); the same key in
+// sibling or nested objects doesn't.
+func TestClientRefusesDuplicateKeys(t *testing.T) {
+	body := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	type inner struct {
+		A int `json:"a"`
+	}
+	for _, tc := range []struct {
+		body string
+		ok   bool
+	}{
+		{`{"a":1,"b":{"a":2},"l":[{"a":1},{"a":1}]}`, true},
+		{`{"a":1,"a":2}`, false},
+		{`{"a":1,"b":{"a":2,"a":3}}`, false},
+		{`{"a":1,"l":[{"a":1,"a":1}]}`, false},
+	} {
+		body = tc.body
+		var out struct {
+			A int     `json:"a"`
+			B inner   `json:"b"`
+			L []inner `json:"l"`
+		}
+		_, err := c.do(context.Background(), http.MethodGet, "/x", nil, &out)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: %v", tc.body, err)
+		}
+	}
+}
+
+// TestClientCallLimits (final cross review M6): an ordinary call is cut
+// at CallTimeout; the void and the checks run under their own longer
+// bounds.
+func TestClientCallLimits(t *testing.T) {
+	saved := [3]time.Duration{CallTimeout, VoidTimeout, ChecksTimeout}
+	defer func() { CallTimeout, VoidTimeout, ChecksTimeout = saved[0], saved[1], saved[2] }()
+	CallTimeout, VoidTimeout, ChecksTimeout = 50*time.Millisecond, 2*time.Second, 2*time.Second
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		switch r.URL.Path {
+		case "/v1/void":
+			io.WriteString(w, `{"voided":0,"restored_at":"2026-11-17T00:00:00Z"}`)
+		case "/v1/checks":
+			io.WriteString(w, `{"checks":[]}`)
+		default:
+			io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, secretFile(t, testSecret))
+	if _, err := c.State(context.Background()); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("a slow ordinary call: %v", err)
+	}
+	if _, err := c.Void(context.Background(), VoidRestore); errors.Is(err, ErrUnreachable) {
+		t.Fatalf("the void was cut at the ordinary bound: %v", err)
+	}
+	if _, err := c.Checks(context.Background(), true); errors.Is(err, ErrUnreachable) {
+		t.Fatalf("the checks were cut at the ordinary bound: %v", err)
 	}
 }

@@ -702,10 +702,11 @@
         <div class="category-title">{{$category}}</div>
         <div class="apps">
           {{range $apps}}
-          <div class="app-card" data-id="{{.ID}}">
+          <div class="app-card" data-id="{{.ID}}" data-mail="{{if .MailProvider}}1{{end}}">
             <div class="app-header">
               <span class="app-icon">{{.Manifest.Icon}}</span>
               <span class="app-name">{{.Manifest.Name}}</span>
+              {{if .MailProvider}}<span class="pill" data-mail-badge>mail server</span>{{end}}
               <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
             </div>
             <div class="app-desc">{{.Manifest.Description}}</div>
@@ -933,6 +934,7 @@
   <script src="/static/folders.js"></script>
   <script src="/static/dns.js"></script>
   <script src="/static/mail.js"></script>
+  <script src="/static/mailprovider.js"></script>
   <script src="/static/freshauth.js"></script>
   <script src="/static/servers.js"></script>
   <script src="/static/doctor.js"></script>
@@ -968,7 +970,7 @@
       if (name === 'usage') PortcullisUsage.render(document.getElementById('usage-root'), usageView);
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
       if (name === 'apps') { renderApps(); if (window.PortcullisServers) PortcullisServers.load().catch(() => {}); }
-      if (name === 'marketplace') fillMarketplace();
+      if (name === 'marketplace') { fillMarketplace(); if (!/[?]filter=/.test(location.hash)) filterMarketplace(''); }
       // Leaving an instance's page drops it (its drafts too).
       if (name !== 'instance' && pageCtx) { pageCtx = null; document.getElementById('instance-page').innerHTML = ''; }
       return true;
@@ -1040,6 +1042,9 @@
         if (box) flash(box);
         return;
       }
+      // #marketplace?filter=mail: only the mail server templates.
+      const mkt = /^marketplace\?filter=(mail)$/.exec(t);
+      if (mkt) { showTab('marketplace'); filterMarketplace(mkt[1]); return; }
       // #usage, #usage/apps, #usage/containers, #usage/storage.
       const use = /^usage(?:\/(apps|containers|storage))?$/.exec(t);
       if (use) { usageView = use[1] || 'apps'; showTab('usage'); return; }
@@ -3722,6 +3727,23 @@
       if (h !== appsHtml || !box.querySelector('.apps-head')) { box.innerHTML = h; appsHtml = h; }
     }
 
+    // filterMarketplace: only the templates of kind (mail) shown, with a
+    // way back to all; '' shows all.
+    function filterMarketplace(kind) {
+      const box = document.getElementById('tab-marketplace');
+      if (!box) return;
+      box.querySelectorAll('.app-card').forEach(c => { c.hidden = kind === 'mail' && c.dataset.mail !== '1'; });
+      box.querySelectorAll('.category').forEach(cat => { cat.hidden = !cat.querySelector('.app-card:not([hidden])'); });
+      let bar = box.querySelector('[data-mkt-filter]');
+      if (kind && !bar) {
+        bar = document.createElement('div');
+        bar.className = 'settings-hint';
+        bar.setAttribute('data-mkt-filter', '');
+        bar.innerHTML = 'Showing mail servers only · <a href="#marketplace">Show all</a>';
+        box.prepend(bar);
+      }
+      if (bar) bar.hidden = !kind;
+    }
     function fillMarketplace() {
       document.querySelectorAll('[data-mkt-use]').forEach(el => {
         const tid = el.dataset.mktUse;
@@ -3756,9 +3778,15 @@
 
     // ── the instance page ────────────────────────────────
     const PAGE_TABS = [['overview', 'Overview'], ['settings', 'Settings'], ['groups', 'Groups'], ['filesharing', 'File sharing'], ['logs', 'Logs'], ['usage', 'Usage'],
-      ['backups', 'Backups'], ['ai', 'AI'], ['vpn', 'VPN'], ['expert', 'Expert'], ['delete', 'Delete']];
+      ['backups', 'Backups'], ['ai', 'AI'], ['vpn', 'VPN'], ['mail', 'Mail'], ['expert', 'Expert'], ['delete', 'Delete']];
     function pageTabs(inst) {
-      return PAGE_TABS.filter(([k]) => (k !== 'filesharing' || templateHasPersonSecret(inst.template)) && (k !== 'vpn' || templateHasVPN(inst.template)));
+      return PAGE_TABS.filter(([k]) => (k !== 'filesharing' || templateHasPersonSecret(inst.template)) && (k !== 'vpn' || templateHasVPN(inst.template)) &&
+        (k !== 'mail' || templateIsMailProvider(inst.template)));
+    }
+    // templateIsMailProvider: tid has a valid mail: block (contract §3.5).
+    function templateIsMailProvider(tid) {
+      const t = catalogCache && catalogCache[tid];
+      return !!(t && t.mail_provider);
     }
     async function openInstancePage(id, tab, opt) {
       if (pageCtx && pageCtx.id !== id && !leavePageOK()) { history.replaceState(null, '', pageHash()); return; }
@@ -3861,6 +3889,7 @@
         case 'backups': loadBackups(pane, id); break;
         case 'ai': loadAITab(id, pane); break;
         case 'vpn': renderVPNTab(id, pane); break;
+        case 'mail': if (window.PortcullisMailProvider) PortcullisMailProvider.renderTab(id, pane); break;
         case 'expert':
           ctx.loading = k;
           await loadExpert(id, pane);

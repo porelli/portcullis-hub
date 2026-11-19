@@ -570,7 +570,7 @@
     for (const p of pw) {
       h += '<div class="pd-row" data-msi-mailpw="' + esc(p.id) + '"><span><strong>' + esc(p.label) + '</strong> <span class="pd-muted">created ' + esc(fmtDay(p.created_at)) +
         (p.expires_at ? ' · expires ' + esc(fmtDay(p.expires_at)) : ' · no expiry') + '</span></span> ';
-      if (p.status === 'voided') h += pill('bad', 'reset by a restore');
+      if (p.status === 'voided') h += pill('bad', p.voided_reason || 'reset by a restore');
       else if (!readOnly) h += button('danger', ' data-msi-act="mail-revoke" data-mail-id="' + esc(p.id) + '" data-mail-label="' + esc(p.label) + '"', 'Revoke');
       h += '</div>';
     }
