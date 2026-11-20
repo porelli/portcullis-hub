@@ -33,6 +33,7 @@ type meshNodePlan struct {
 
 type meshPlanVector struct {
 	Name      string                                       `json:"name"`
+	Bootstrap string                                       `json:"bootstrap,omitempty"`
 	Nodes     []meshNode                                   `json:"nodes"`
 	Want      jsonstrict.Nullable[map[string]meshNodePlan] `json:"want,omitempty"`
 	WantError string                                       `json:"want_error,omitempty"`
@@ -76,6 +77,7 @@ func simulatePaths(t *testing.T, v meshPlanVector) {
 		}
 		return meshPeer{}, false
 	}
+	relays := map[string]bool{}
 	link := func(a, b string) bool {
 		ab, ok1 := entry(a, b)
 		ba, ok2 := entry(b, a)
@@ -96,6 +98,7 @@ func simulatePaths(t *testing.T, v meshPlanVector) {
 				t.Errorf("%s: %s → %s: no tunnel to %s", v.Name, x.ID, y.ID, hop)
 			}
 			if hop != y.ID {
+				relays[hop] = true
 				if !plans[hop].Forward {
 					t.Errorf("%s: %s → %s relays through %s, which doesn't forward", v.Name, x.ID, y.ID, hop)
 				}
@@ -113,6 +116,42 @@ func simulatePaths(t *testing.T, v meshPlanVector) {
 			if p, ok := holder(y.ID, x.ID); !ok || p.ID != from {
 				t.Errorf("%s: %s → %s arrives from %s, but %s takes %s only from %q", v.Name, x.ID, y.ID, from, y.ID, x.ID, p.ID)
 			}
+		}
+	}
+	// forward exactly on a node that relays at least one pair (N5).
+	for _, n := range v.Nodes {
+		if plans[n.ID].Forward && !relays[n.ID] {
+			t.Errorf("%s: %s forwards but relays no pair", v.Name, n.ID)
+		}
+	}
+}
+
+// checkBootstrap: a bootstrap case (§20.2, §20.11) wants only the joining
+// node's plan, computed as if it were NATed: no forward, keepalive 25 on
+// every peer, and an endpoint on every peer (a NATed node must start each
+// handshake itself).
+func checkBootstrap(t *testing.T, v meshPlanVector) {
+	t.Helper()
+	p, ok := v.Want.V[v.Bootstrap]
+	if len(v.Want.V) != 1 || !ok {
+		t.Errorf("%s: a bootstrap case wants exactly the plan of %s", v.Name, v.Bootstrap)
+		return
+	}
+	reported := false
+	for _, n := range v.Nodes {
+		if n.ID == v.Bootstrap {
+			reported = n.Public.Valid
+		}
+	}
+	if !reported {
+		t.Errorf("%s: the joining node %s must report a public endpoint (else the case pins nothing)", v.Name, v.Bootstrap)
+	}
+	if p.Forward || len(p.Peers) == 0 {
+		t.Errorf("%s: bootstrap plan %+v", v.Name, p)
+	}
+	for _, peer := range p.Peers {
+		if peer.Keepalive != 25 || !peer.Endpoint.Valid {
+			t.Errorf("%s: bootstrap peer %+v: want keepalive 25 and an endpoint", v.Name, peer)
 		}
 	}
 }
@@ -134,7 +173,7 @@ func TestMeshPlanVectorsShape(t *testing.T) {
 		t.Fatalf("%d vectors", len(vs))
 	}
 	mesh := netip.MustParsePrefix("10.215.0.0/24")
-	errs := 0
+	errs, boots := 0, 0
 	for _, v := range vs {
 		if v.Want.Valid == (v.WantError != "") {
 			t.Errorf("%s: exactly one of want and want_error", v.Name)
@@ -147,12 +186,20 @@ func TestMeshPlanVectorsShape(t *testing.T) {
 			}
 			continue
 		}
-		simulatePaths(t, v)
-		if len(v.Want.V) != len(v.Nodes) {
+		if v.Bootstrap != "" {
+			boots++
+			checkBootstrap(t, v)
+		} else {
+			simulatePaths(t, v)
+		}
+		if v.Bootstrap == "" && len(v.Want.V) != len(v.Nodes) {
 			t.Errorf("%s: %d plans for %d nodes", v.Name, len(v.Want.V), len(v.Nodes))
 		}
 		for _, n := range v.Nodes {
 			p, ok := v.Want.V[n.ID]
+			if !ok && v.Bootstrap != "" {
+				continue
+			}
 			if !ok {
 				t.Errorf("%s: no plan for %s", v.Name, n.ID)
 				continue
@@ -173,6 +220,9 @@ func TestMeshPlanVectorsShape(t *testing.T) {
 				t.Errorf("%s: %s's peers %v not sorted by id", v.Name, n.ID, ids)
 			}
 		}
+	}
+	if boots < 2 {
+		t.Errorf("%d bootstrap cases, want ≥ 2 (as if NATed; a new site without a gateway yet)", boots)
 	}
 	if errs < 3 {
 		t.Errorf("%d want_error cases, want ≥ 3 (no gateway, duplicate ip, outside the mesh)", errs)

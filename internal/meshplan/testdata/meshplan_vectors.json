@@ -1715,6 +1715,160 @@
   }
  },
  {
+  "name": "bootstrap: a joining node is planned as if NATed (e9 reports a public endpoint, not yet reached: it goes through its site's gateway e1 to n2, keepalive 25)",
+  "bootstrap": "e9",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e9",
+    "site": "edge",
+    "mesh_ip": "10.215.0.8",
+    "lan": "198.18.0.8:51830",
+    "public": "203.0.113.8:51830",
+    "pub": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
+   }
+  ],
+  "want": {
+   "e9": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.2/32",
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "bootstrap: the first node of a new site isn't refused (it may be the site's gateway); as if NATed it reaches main's NATed node through main's gateway",
+  "bootstrap": "t1",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "t1",
+    "site": "tb",
+    "mesh_ip": "10.215.0.9",
+    "lan": "198.18.1.9:51830",
+    "public": "203.0.113.9:51830",
+    "pub": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+   }
+  ],
+  "want": {
+   "t1": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "bootstrap: a new site that sorts first has no gateway yet: the pair goes through the other site's gateway",
+  "bootstrap": "a1",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "a1",
+    "site": "alpha",
+    "mesh_ip": "10.215.0.11",
+    "lan": "198.18.2.11:51830",
+    "public": "203.0.113.11:51830",
+    "pub": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws="
+   }
+  ],
+  "want": {
+   "a1": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
   "name": "the relay site is the pair's site whose name sorts first (edge before main, main before tb)",
   "nodes": [
    {
