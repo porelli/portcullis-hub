@@ -129,9 +129,18 @@ type nminus1Vector struct {
 	} `json:"want"`
 }
 
+// shownName is how the results name a pod.
+func shownName(p snapPod) string {
+	if p.Namespace == "portcullis" {
+		return p.Name
+	}
+	return p.Namespace + "/" + p.Name
+}
+
 // TestNMinus1VectorsShape: nminus1_vectors.json (contract §20.7) decodes
 // strictly; each case wants one result per snapshot node, the levels are
-// green / yellow / red, and every pod named exists in the snapshot.
+// green / yellow / red, and every pod named exists in the snapshot (named
+// bare in the core namespace, else "<namespace>/<name>", Task 12 review M3).
 func TestNMinus1VectorsShape(t *testing.T) {
 	b, err := os.ReadFile("testdata/nminus1_vectors.json")
 	if err != nil {
@@ -155,10 +164,10 @@ func TestNMinus1VectorsShape(t *testing.T) {
 			nodes[n.Name] = true
 		}
 		for _, p := range v.Snapshot.Pods {
-			if !nodes[p.Node] || pods[p.Name] {
+			if !nodes[p.Node] || pods[shownName(p)] {
 				t.Errorf("%s: pod %s on unknown node %s or repeated", v.Name, p.Name, p.Node)
 			}
-			pods[p.Name] = true
+			pods[shownName(p)] = true
 		}
 		if len(v.Want) != len(v.Snapshot.Nodes) {
 			t.Errorf("%s: %d results for %d nodes", v.Name, len(v.Want), len(v.Snapshot.Nodes))
@@ -175,7 +184,7 @@ func TestNMinus1VectorsShape(t *testing.T) {
 			}
 			for _, u := range w.Unplaced {
 				for _, p := range v.Snapshot.Pods {
-					highYellow = highYellow || (p.Name == u && p.PriorityClass == "portcullis-high" && w.Level == "yellow")
+					highYellow = highYellow || (shownName(p) == u && p.PriorityClass == "portcullis-high" && w.Level == "yellow")
 				}
 			}
 			for _, p := range append(append([]string{}, w.Unplaced...), w.Evicted...) {
