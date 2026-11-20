@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
@@ -41,11 +42,16 @@ const joinRTTWait = 3 * time.Minute
 // rttMaxMs: a figure above this (10 min) is nonsense and dropped.
 const rttMaxMs = 600_000
 
+// rttCallWait bounds one nodeagent's RTT read of the cluster tick.
+const rttCallWait = 10 * time.Second
+
 // meshRTT is the last round trips read per node (from → to → ms).
 type meshRTT struct {
-	mu sync.Mutex
-	v  map[string]map[string]int
-	at map[string]time.Time
+	// busy: a collection runs (one at a time, beside the cluster tick).
+	busy atomic.Bool
+	mu   sync.Mutex
+	v    map[string]map[string]int
+	at   map[string]time.Time
 }
 
 func (r *meshRTT) set(from string, v map[string]int, at time.Time) {
@@ -80,11 +86,12 @@ func (r *meshRTT) snapshot(now time.Time, keep map[string]bool) map[string]map[s
 
 // cleanRTT keeps a nodeagent's answer's figures for the known nodes only
 // (a node's words are never a label or a key the Hub didn't know), never
-// its own, never negative or absurd.
-func cleanRTT(from string, raw map[string]int, known map[string]bool) map[string]int {
+// its own, never negative; an absurd one (over rttMaxMs) is dropped
+// unless keepHigh (the join: it is "too far", never "no answer").
+func cleanRTT(from string, raw map[string]int, known map[string]bool, keepHigh bool) map[string]int {
 	out := map[string]int{}
 	for to, ms := range raw {
-		if to == from || !known[to] || ms < 0 || ms > rttMaxMs {
+		if to == from || !known[to] || ms < 0 || (ms > rttMaxMs && !keepHigh) {
 			continue
 		}
 		out[to] = ms
@@ -116,6 +123,18 @@ func (h *Hub) rttNodes(snap nodeadm.Snapshot) (known map[string]bool, mesh map[s
 	return known, mesh
 }
 
+// startCollectRTT runs collectRTT in its own goroutine, one at a time: the
+// cluster tick (revokes, watches) never waits on a nodeagent's RTT.
+func (h *Hub) startCollectRTT(ctx context.Context, snap nodeadm.Snapshot) {
+	if !h.cl.rtt.busy.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer h.cl.rtt.busy.Store(false)
+		h.collectRTT(ctx, snap)
+	}()
+}
+
 // collectRTT reads every Ready node's round trips (in parallel, each call
 // bounded; one silent nodeagent never holds the others).
 func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot) {
@@ -133,7 +152,7 @@ func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot) {
 			if err != nil {
 				return
 			}
-			c, cancel := context.WithTimeout(ctx, clusterCallWait)
+			c, cancel := context.WithTimeout(ctx, rttCallWait)
 			raw, err := ag.RTT(c)
 			cancel()
 			if err != nil {
@@ -142,7 +161,7 @@ func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot) {
 				}
 				return
 			}
-			h.cl.rtt.set(id, cleanRTT(id, raw, known), h.now())
+			h.cl.rtt.set(id, cleanRTT(id, raw, known, false), h.now())
 		}()
 	}
 	wg.Wait()
@@ -176,9 +195,10 @@ func healthyServers(snap nodeadm.Snapshot, id string) []string {
 
 // joinRTT is the enrolment's RTT check (after mesh_ready, before
 // k3s_joined): the joining node's round trips to every healthy server
-// within its role's limit. done false: not every server answered yet
-// (asked again at the next poll, until since+joinRTTWait); a refusal is
-// err with the §20.11 text. The 80 % warnings go to the op.
+// within its role's limit. done false: not every server answered yet, or
+// no server is healthy to measure against (asked again at the next poll,
+// until since+joinRTTWait); a refusal is err with the §20.11 text. The
+// 80 % warnings go to the op.
 func (h *Hub) joinRTT(ctx context.Context, id, role, meshIP string, snap nodeadm.Snapshot, since time.Time, p *Progress) (done bool, err error) {
 	hs := healthyServers(snap, id)
 	late := h.now().After(since.Add(joinRTTWait))
@@ -203,8 +223,16 @@ func (h *Hub) joinRTT(ctx context.Context, id, role, meshIP string, snap nodeadm
 	for _, n := range snap.Nodes {
 		known[n.Name] = true
 	}
-	rtt := cleanRTT(id, raw, known)
-	h.cl.rtt.set(id, rtt, h.now())
+	rtt := cleanRTT(id, raw, known, true)
+	h.cl.rtt.set(id, cleanRTT(id, raw, known, false), h.now())
+	if len(hs) == 0 {
+		// Nothing to measure against is never a pass (review I1).
+		if late {
+			return false, statusErr(http.StatusConflict, "%s", ErrNoHealthyServer)
+		}
+		p.DetailThrottled(StepK3sJoined, "waiting for a healthy server to measure the round trip against")
+		return false, nil
+	}
 	for _, s := range hs {
 		if _, ok := rtt[s]; !ok && !late {
 			p.DetailThrottled(StepK3sJoined, "waiting for the node's round trip to "+s)
@@ -221,6 +249,10 @@ func (h *Hub) joinRTT(ctx context.Context, id, role, meshIP string, snap nodeadm
 	p.Detail(StepK3sJoined, "")
 	return true, nil
 }
+
+// ErrNoHealthyServer is the join's refusal when no server was healthy to
+// measure the round trip against for joinRTTWait.
+const ErrNoHealthyServer = "no healthy server to measure the round trip against: the node can't join"
 
 // SiteView is one site of the HA page (GET /api/ha "sites", §20.1): its
 // nodes, servers and ingress nodes (ids, sorted), its mesh gateway (the
@@ -277,29 +309,40 @@ func (h *Hub) Sites(ctx context.Context) ([]SiteView, error) {
 	return h.sitesOf(snap), nil
 }
 
-// nodeSites is each managed node's site (see Sites).
-func (h *Hub) nodeSites(snap nodeadm.Snapshot) map[string]string {
+// nodeSites is each managed node's site from the Hub's records (its
+// entry, else the mesh's pin of a node of init) and whether it is an
+// ingress node (its entry's labels; a node of init: its Node's). A node
+// the Hub has no record of is never placed by its own labels (a kubelet
+// may set them, review M2): it is unrecorded, left out of the view and
+// flagged.
+func (h *Hub) nodeSites(snap nodeadm.Snapshot) (site map[string]string, ingress map[string]bool, unrecorded []string) {
 	known, _ := h.rttNodes(snap)
-	out := map[string]string{}
+	site, ingress = map[string]string{}, map[string]bool{}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, n := range snap.Nodes {
 		if !known[n.Name] {
 			continue
 		}
-		site := siteOf(n.Labels)
 		if s, ok := h.st.Servers[n.Name]; ok && s.ClusterNode() {
-			site = nonEmpty(s.Site, servers.PrimarySite)
+			site[n.Name] = nonEmpty(s.Site, servers.PrimarySite)
+			ingress[n.Name] = s.Labels != nil && s.Labels.Ingress
 		} else if r, ok := h.st.Mesh[n.Name]; ok && r.Site != "" {
-			site = r.Site
+			site[n.Name] = r.Site
+			ingress[n.Name] = n.Labels[nodeadm.LabelIngress] == "true"
+		} else {
+			unrecorded = append(unrecorded, n.Name)
 		}
-		out[n.Name] = site
 	}
-	return out
+	sort.Strings(unrecorded)
+	return site, ingress, unrecorded
 }
 
+// unrecordedText is an unrecorded node's flag (doctor mesh_peer_stale).
+const unrecordedText = "the Hub has no record of its site: left out of the sites view"
+
 func (h *Hub) sitesOf(snap nodeadm.Snapshot) []SiteView {
-	siteOfID := h.nodeSites(snap)
+	siteOfID, ingress, _ := h.nodeSites(snap)
 	est, _ := sanitizeEstablished(h.meshInputsOf(snap))
 	known := map[string]bool{}
 	for id := range siteOfID {
@@ -322,7 +365,7 @@ func (h *Hub) sitesOf(snap nodeadm.Snapshot) []SiteView {
 		if n.Role == "server" {
 			v.Servers = append(v.Servers, n.Name)
 		}
-		if n.Labels[nodeadm.LabelIngress] == "true" {
+		if ingress[n.Name] {
 			v.Ingress = append(v.Ingress, n.Name)
 		}
 		for _, s := range hs {
@@ -358,7 +401,15 @@ func (h *Hub) doctorSitesIn(in *doctor.MeshIn) {
 	if snap == nil {
 		return
 	}
-	siteOfID := h.nodeSites(*snap)
+	siteOfID, _, unrecorded := h.nodeSites(*snap)
+	for _, id := range unrecorded {
+		if in.Stale == nil {
+			in.Stale = map[string]string{}
+		}
+		if _, ok := in.Stale[id]; !ok {
+			in.Stale[id] = unrecordedText
+		}
+	}
 	set := map[string]bool{}
 	for _, s := range siteOfID {
 		set[s] = true
@@ -371,13 +422,17 @@ func (h *Hub) doctorSitesIn(in *doctor.MeshIn) {
 	for _, n := range snap.Nodes {
 		role[n.Name] = n.Role
 	}
+	healthy := map[string]bool{}
+	for _, s := range healthyServers(*snap, "") {
+		healthy[s] = true
+	}
 	known := map[string]bool{}
 	for id := range siteOfID {
 		known[id] = true
 	}
 	for from, m := range h.cl.rtt.snapshot(h.now(), known) {
 		for to, ms := range m {
-			if role[to] == "server" {
+			if healthy[to] { // the limits are the healthy servers' (§20.11)
 				in.RTT = append(in.RTT, doctor.MeshRTT{From: from, To: to, FromServer: role[from] == "server", Ms: ms})
 			}
 		}

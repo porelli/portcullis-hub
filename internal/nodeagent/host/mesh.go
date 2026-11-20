@@ -424,13 +424,30 @@ func (a *Agent) ServeEcho(ctx context.Context, pc net.PacketConn) error {
 	}
 }
 
-// RTT settings: 20 rounds per address, a peer needs 10 answers.
+// RTT settings: 20 rounds per address; a lost round counts as the
+// round timeout in the p95, and a peer with more than 2 lost rounds gets
+// no figure (no mesh answer).
 var (
 	rttRounds  = 20
-	rttMin     = 10
+	rttMaxLost = 2
 	rttTimeout = time.Second
 	rttGap     = 50 * time.Millisecond
 )
+
+// rttFigure is the p95 (ms) of rounds echo rounds of which answered
+// came back: each lost one counts as rttTimeout; false with more than
+// rttMaxLost lost.
+func rttFigure(answered []time.Duration, rounds int) (int, bool) {
+	lost := rounds - len(answered)
+	if lost > rttMaxLost || len(answered) == 0 {
+		return 0, false
+	}
+	s := slices.Clone(answered)
+	for i := 0; i < lost; i++ {
+		s = append(s, rttTimeout)
+	}
+	return p95ms(s), true
+}
 
 // echoAddrs are the mesh addresses to measure: every /32 of the plan's
 // peers (a gateway's entry lists the nodes it relays too), the node's own
@@ -457,8 +474,9 @@ func echoAddrs(p na.MeshPlan, own string) []string {
 }
 
 // RTT is GET /v1/mesh/rtt: the p95 (ms, rounded up) of 20 echo rounds to
-// every mesh address of the plan, keyed by the id each answer names; an
-// id with fewer than 10 answers is left out.
+// every mesh address of the plan, keyed by the id each answer names; a
+// lost round counts as the round timeout, and an id with more than 2 lost
+// rounds is left out.
 func (a *Agent) RTT(ctx context.Context) map[string]int {
 	a.mu.Lock()
 	var p na.MeshPlan
@@ -486,6 +504,7 @@ func (a *Agent) measure(ctx context.Context, addrs []string) map[string]int {
 	}
 	var mu sync.Mutex
 	samples := map[string][]time.Duration{}
+	rounds := map[string]int{}
 	var wg sync.WaitGroup
 	for _, addr := range addrs {
 		wg.Add(1)
@@ -500,16 +519,16 @@ func (a *Agent) measure(ctx context.Context, addrs []string) map[string]int {
 			}
 			mu.Lock()
 			samples[id] = append(samples[id], s...)
+			rounds[id] += rttRounds
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 	out := map[string]int{}
 	for id, s := range samples {
-		if len(s) < rttMin {
-			continue
+		if v, ok := rttFigure(s, rounds[id]); ok {
+			out[id] = v
 		}
-		out[id] = p95ms(s)
 	}
 	return out
 }

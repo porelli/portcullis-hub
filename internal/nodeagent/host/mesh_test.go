@@ -397,3 +397,27 @@ func mustKey(t *testing.T, s string) wgtypes.Key {
 	}
 	return k
 }
+
+// TestRTTLostRounds (review M6): a lost round counts as the round
+// timeout in the p95; more than 2 lost of 20 is no figure.
+func TestRTTLostRounds(t *testing.T) {
+	var s []time.Duration
+	for i := 0; i < 20; i++ {
+		s = append(s, 30*time.Millisecond)
+	}
+	if v, ok := rttFigure(s, 20); !ok || v != 30 {
+		t.Errorf("none lost: %d %t", v, ok)
+	}
+	if v, ok := rttFigure(s[:19], 20); !ok || v != 30 {
+		t.Errorf("1 lost (the p95 is the 19th of 20): %d %t", v, ok)
+	}
+	if v, ok := rttFigure(s[:18], 20); !ok || v != int(rttTimeout/time.Millisecond) {
+		t.Errorf("2 lost: %d %t, want the timeout", v, ok)
+	}
+	if _, ok := rttFigure(s[:17], 20); ok {
+		t.Error("3 lost gave a figure")
+	}
+	if _, ok := rttFigure(s[:10], 20); ok {
+		t.Error("half lost gave a figure")
+	}
+}

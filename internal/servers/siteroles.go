@@ -146,8 +146,9 @@ func SuggestRole(cluster []ClusterNode, n NewNode) (role string, warnings []stri
 	return role, warnings, nil
 }
 
-// CheckRTT: every healthy server answered, a server within 100 ms of
-// each, an agent within 250 ms; 80 % of the limit or more warns.
+// CheckRTT: every healthy server answered (a negative figure is none),
+// a server within 100 ms of each, an agent within 250 ms; 80 % of the
+// limit or more warns.
 func CheckRTT(role string, servers []string, rtt map[string]int) (warnings []string, err error) {
 	limit := RTTLimit(role)
 	what := "agents"
@@ -158,7 +159,7 @@ func CheckRTT(role string, servers []string, rtt map[string]int) (warnings []str
 	worst := -1
 	for _, s := range servers {
 		v, ok := rtt[s]
-		if !ok {
+		if !ok || v < 0 { // a negative figure is no answer (as nodeadm)
 			return nil, fmt.Errorf("no mesh answer from %s: the node can't join", s)
 		}
 		worst = max(worst, v)

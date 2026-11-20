@@ -1228,7 +1228,7 @@ func (h *Hub) settleClusterNodes(ctx context.Context) {
 	// removal, an endpoint) gets it now.
 	h.meshTick(ctx, snap)
 	// The round trips (the gauge, mesh_rtt_high, the sites view).
-	h.collectRTT(ctx, snap)
+	h.startCollectRTT(ctx, snap)
 }
 
 // settleRevoked watches a revoked entry (security review round 3):

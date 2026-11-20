@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/servers"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // TestTwoSitesWarnTiebreaker: with main holding the 3 servers, the first
@@ -154,6 +156,44 @@ func TestServerTooFarRefusedBeforeJoin(t *testing.T) {
 	}
 }
 
+// untilK3sJoined waits until node id's enrolment is at k3s_joined, then
+// checks it is still running a moment later (the gate waits).
+func untilK3sJoined(t *testing.T, cf *clusterFixture, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if r := cf.h.LastOp(serverOpKey(id)); r != nil && opStepState(*r, StepK3sJoined) == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("never reached k3s_joined: %+v", cf.h.LastOp(serverOpKey(id)))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if r := cf.h.LastOp(serverOpKey(id)); r == nil || !r.Running {
+		t.Fatalf("refused before the wait: %+v", r)
+	}
+}
+
+// assertRevokedOut: node id's enrolment was revoked (never only voided),
+// nothing past the gate, its peer in no plan of others.
+func assertRevokedOut(t *testing.T, cf *clusterFixture, id string, others ...string) {
+	t.Helper()
+	c := cf.na.Calls()
+	if !slices.Contains(c, "remove:"+id+":revoke") || slices.Contains(c, "labels:"+id) {
+		t.Errorf("calls %v: want %s revoked, nothing past the gate", c, id)
+	}
+	for _, o := range others {
+		p, _ := cf.na.meshOf(o)
+		for _, q := range p.Peers {
+			if q.ID == id {
+				t.Errorf("%s still peers with %s: %+v", o, id, p)
+			}
+		}
+	}
+}
+
 // TestJoinRTTMissingServer: a healthy server the node never answers for
 // holds the join until joinRTTWait, then refuses with the §20.11 text.
 func TestJoinRTTMissingServer(t *testing.T) {
@@ -165,24 +205,129 @@ func TestJoinRTTMissingServer(t *testing.T) {
 	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n3"}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if r := cf.h.LastOp(serverOpKey("n3")); r != nil && opStepState(*r, StepK3sJoined) == "running" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("never reached k3s_joined: %+v", cf.h.LastOp(serverOpKey("n3")))
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	time.Sleep(30 * time.Millisecond)
-	if r := cf.h.LastOp(serverOpKey("n3")); r == nil || !r.Running {
-		t.Fatalf("refused before the wait: %+v", r)
-	}
+	untilK3sJoined(t, cf, "n3")
 	step(joinRTTWait + time.Second)
 	r := waitServerOp(t, cf.h, serverOpKey("n3"))
 	if r.OK || r.Error != "no mesh answer from n2: the node can't join" {
 		t.Errorf("op %+v", r)
+	}
+	assertRevokedOut(t, cf, "n3", "n1", "n2")
+}
+
+// TestJoinRTTNodeagentSilent (review I2): a joining node whose nodeagent
+// doesn't answer GET /v1/mesh/rtt waits, then is refused (fail closed),
+// revoked, its peer out of every plan.
+func TestJoinRTTNodeagentSilent(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	cf.h.settleClusterNodes(context.Background())
+	step := fakeClockHub(cf)
+	cf.na.refuse["rtt:n4"] = errors.New("connection refused")
+	joinFor(cf, "n4", "agent", "10.215.0.4")
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n4"}); err != nil {
+		t.Fatal(err)
+	}
+	untilK3sJoined(t, cf, "n4")
+	step(joinRTTWait + time.Second)
+	r := waitServerOp(t, cf.h, serverOpKey("n4"))
+	if r.OK || r.Error != "no mesh round trips from n4: its nodeagent doesn't answer GET /v1/mesh/rtt (connection refused): the node can't join" {
+		t.Errorf("op %+v", r)
+	}
+	assertRevokedOut(t, cf, "n4", "n1", "n2", "n3")
+}
+
+// TestJoinRTTNoHealthyServer (review I1): no healthy server to measure
+// against is never a pass: the gate waits, and checks the servers once
+// they are back (a far node is then refused); none for joinRTTWait is
+// refused with ErrNoHealthyServer.
+func TestJoinRTTNoHealthyServer(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", false))
+	cf.h.settleClusterNodes(context.Background())
+	step := fakeClockHub(cf)
+	cf.na.rtt = map[string]map[string]int{"n2": {"n1": 2}}
+	joinFor(cf, "n2", "server", "10.215.0.2")
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	untilK3sJoined(t, cf, "n2")
+	step(joinRTTWait + time.Second)
+	r := waitServerOp(t, cf.h, serverOpKey("n2"))
+	if r.OK || r.Error != ErrNoHealthyServer || ErrNoHealthyServer != "no healthy server to measure the round trip against: the node can't join" {
+		t.Errorf("op %+v", r)
+	}
+	assertRevokedOut(t, cf, "n2")
+
+	// The server comes back while the gate waits: it is measured then.
+	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", false))
+	cf.h.settleClusterNodes(context.Background())
+	cf.na.rtt = map[string]map[string]int{"n2": {"n1": 120}}
+	joinFor(cf, "n2", "server", "10.215.0.2")
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	untilK3sJoined(t, cf, "n2")
+	cf.na.mu.Lock()
+	cf.na.snap.Node("n1").Ready = true
+	cf.na.mu.Unlock()
+	r = waitServerOp(t, cf.h, serverOpKey("n2"))
+	if r.OK || r.Error != "too far for one cluster: 120 ms (servers need 100 ms or less)" {
+		t.Errorf("back: op %+v", r)
+	}
+}
+
+// TestJoinRTTAbsurdIsTooFar (review M1): a figure past rttMaxMs is "too
+// far" at once, never "no answer" after the wait.
+func TestJoinRTTAbsurdIsTooFar(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	cf.h.settleClusterNodes(context.Background())
+	cf.na.rtt = map[string]map[string]int{"n2": {"n1": 700_000}}
+	joinFor(cf, "n2", "server", "10.215.0.2")
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	r := waitServerOp(t, cf.h, serverOpKey("n2"))
+	if r.OK || r.Error != "too far for one cluster: 700000 ms (servers need 100 ms or less)" {
+		t.Errorf("op %+v", r)
+	}
+}
+
+// TestRTTCollectionBesideTheTick (review M4): a hung nodeagent's RTT
+// never holds the cluster tick, and one collection runs at a time.
+func TestRTTCollectionBesideTheTick(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true))
+	block := make(chan struct{})
+	cf.na.mu.Lock()
+	cf.na.rttBlock = block
+	cf.na.mu.Unlock()
+	start := time.Now()
+	cf.h.settleClusterNodes(context.Background())
+	cf.h.settleClusterNodes(context.Background())
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("the tick waited %s on the RTT", d)
+	}
+	if !cf.h.cl.rtt.busy.Load() {
+		t.Error("no collection running")
+	}
+	close(block)
+	deadline := time.Now().Add(5 * time.Second)
+	for cf.h.cl.rtt.busy.Load() || len(cf.h.MeshRTT()) != 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("collection never finished: %v", cf.h.MeshRTT())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestDoctorRTTHealthyOnly (review M3): mesh_rtt_high judges the round
+// trips to healthy servers only.
+func TestDoctorRTTHealthyOnly(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", false))
+	cf.na.rtt = map[string]map[string]int{"n1": {"n2": 2, "n3": 95}, "n2": {"n1": 90, "n3": 99}}
+	cf.h.settleClusterNodes(context.Background())
+	snap, _ := cf.na.Cluster(context.Background())
+	cf.h.collectRTT(context.Background(), snap)
+	in := cf.h.doctorMeshIn()
+	if in == nil || len(in.RTT) != 2 || in.RTT[0].To != "n2" || in.RTT[1].To != "n1" {
+		t.Errorf("doctor input %+v", in)
 	}
 }
 
@@ -231,7 +376,14 @@ func TestSitesView(t *testing.T) {
 		"e2": {"n1": 60, "n2": 61, "e1": 1},
 		"t1": {},
 	}
+	// x1: no mesh address, so no record of its site: its label is never
+	// believed (review M2).
+	x1 := siteNode("x1", "agent", "evil", "", "198.18.2.1", "")
+	cf.na.snap.Nodes = append(cf.na.snap.Nodes, x1)
+	cf.na.rtt["x1"] = map[string]int{}
 	cf.h.settleClusterNodes(context.Background())
+	snap, _ := cf.na.Cluster(context.Background())
+	cf.h.collectRTT(context.Background(), snap) // the tick's runs beside it
 	sites, err := cf.h.Sites(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -275,7 +427,7 @@ func TestSitesView(t *testing.T) {
 	// The doctor: e1 (a server) 85 ms from n2 is high; e2 (an agent) 61 ms
 	// isn't; 3 sites: no tie-breaker finding.
 	in := cf.h.doctorMeshIn()
-	if in == nil || !slices.Equal(in.Sites, []string{"edge", "main", "tb"}) {
+	if in == nil || !slices.Equal(in.Sites, []string{"edge", "main", "tb"}) || in.Stale["x1"] == "" {
 		t.Fatalf("doctor input %+v", in)
 	}
 	var kinds []string
@@ -299,8 +451,29 @@ func TestSitesView(t *testing.T) {
 // own id, an unknown or a malformed one), and sane figures.
 func TestCleanRTT(t *testing.T) {
 	got := cleanRTT("n1", map[string]int{"n1": 1, "n2": 5, "n9": 3, "x\"}": 2, "n3": -1, "n4": rttMaxMs + 1, "n5": 0},
-		map[string]bool{"n1": true, "n2": true, "n3": true, "n4": true, "n5": true})
+		map[string]bool{"n1": true, "n2": true, "n3": true, "n4": true, "n5": true}, false)
 	if len(got) != 2 || got["n2"] != 5 || got["n5"] != 0 {
 		t.Errorf("%v", got)
+	}
+}
+
+// TestSitesFromHubRecords (review M2): a node the Hub added is placed by
+// its entry (site, ingress), never by its Node's labels; n1 (no entry, not
+// pinned yet) is left out.
+func TestSitesFromHubRecords(t *testing.T) {
+	n2 := siteNode("n2", "server", "edge", "10.215.0.2", "192.0.2.2", "")
+	n2.Labels[nodeadm.LabelIngress] = "true"
+	n3 := siteNode("n3", "agent", "main", "10.215.0.3", "192.0.2.3", "")
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), n2, n3)
+	cf.h.mu.Lock()
+	cf.h.st.Servers = map[string]state.Server{
+		"n2": {Kind: state.KindClusterNode, State: ServerReady, Role: "server", Site: "main", MeshIP: "10.215.0.2", Labels: &state.NodeLabels{}},
+		"n3": {Kind: state.KindClusterNode, State: ServerReady, Role: "agent", Site: "main", MeshIP: "10.215.0.3", Labels: &state.NodeLabels{Ingress: true}},
+	}
+	cf.h.mu.Unlock()
+	snap, _ := cf.na.Cluster(context.Background())
+	v := cf.h.sitesOf(snap)
+	if len(v) != 1 || v[0].Name != "main" || !slices.Equal(v[0].Nodes, []string{"n2", "n3"}) || !slices.Equal(v[0].Ingress, []string{"n3"}) {
+		t.Errorf("%+v", v)
 	}
 }

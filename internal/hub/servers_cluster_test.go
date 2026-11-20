@@ -50,6 +50,8 @@ type fakeNodeadm struct {
 	// rtt: a node's GET /v1/mesh/rtt answer (unset: 2 ms to every other
 	// node of the snapshot).
 	rtt map[string]map[string]int
+	// rttBlock: set, every RTT read waits for it to close (or its ctx).
+	rttBlock chan struct{}
 }
 
 const testSecret = "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"
@@ -178,7 +180,17 @@ func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
 }
 
 // RTT answers the node's round trips (not in calls).
-func (a fakeNodeagent) RTT(context.Context) (map[string]int, error) {
+func (a fakeNodeagent) RTT(ctx context.Context) (map[string]int, error) {
+	a.f.mu.Lock()
+	block := a.f.rttBlock
+	a.f.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	a.f.mu.Lock()
 	defer a.f.mu.Unlock()
 	if err := a.f.refuse["rtt:"+a.id]; err != nil {
