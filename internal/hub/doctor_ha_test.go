@@ -206,14 +206,17 @@ func TestDoctorHADoesNotWaitOnNodeadm(t *testing.T) {
 	if in == nil || in.Snapshot != nil || in.SnapshotErr != "nodeadm didn't answer within 300ms" || api != nil {
 		t.Fatalf("input %+v %+v", in, api)
 	}
+	// The real wait: the doctor answers after doctorHAWait (5 s), not
+	// the shared read's 20 s.
 	cf.h.SetPeople(newFakePeople())
+	cf.h.ha.doctorWait = 0
 	start = time.Now()
 	r, err := cf.h.Doctor(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := time.Since(start); d > 6*time.Second {
-		t.Errorf("Doctor took %s", d)
+	if d := time.Since(start); d < 4500*time.Millisecond || d > 6*time.Second {
+		t.Errorf("Doctor took %s, want about 5 s", d)
 	}
 	n := 0
 	for _, f := range r.Findings {
