@@ -8098,6 +8098,397 @@
   "ha": true
  },
  {
+  "name": "ha: a Hub shell in a keycloak pod is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "keycloak-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/bin/sh",
+    "-c",
+    "env"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec of kcadm in a keycloak pod is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "keycloak-1",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/opt/keycloak/bin/kcadm.sh",
+    "get",
+    "users"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec in a frontdoor pod is refused (the main-domain DNS credentials)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "frontdoor-5d8f9-xk2lp",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec of cat in a frontdoor pod is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "frontdoor-5d8f9-xk2lp",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "cat",
+    "/run/secrets/frontdoor-env"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec in a vault pod with a vault command is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "vault-1",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "vault",
+    "operator",
+    "raft",
+    "list-peers"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec in a domains pod is refused (not a reader)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "domains-7c9d8-abcde",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec in the hub's own pod is refused (not a reader)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "hub-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec in a pod named group-gate without the dash is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gatex-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: hub rev through another binary path is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: hub rev with a path-traversing document is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "../secrets/x"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: hub rev with only the directory is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec with no command is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: an intruder shell in a frontdoor pod is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "frontdoor-5d8f9-xk2lp",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/bin/sh"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "intruder",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: the exec probe of this params generation is refused with the probe text",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-probe",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "probe-0123456789abcdef"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "admission probe: params generation 0123456789abcdef in effect",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: another params generation's exec probe is let by",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-probe",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "probe-fedcba9876543210"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "op": "exec",
+  "ha": true
+ },
+ {
   "name": "ha: nodeadm's bootstrap token in the canonical form",
   "object": {
    "apiVersion": "v1",
@@ -8332,10 +8723,10 @@
    "apiVersion": "admissionregistration.k8s.io/v1",
    "kind": "ValidatingAdmissionPolicyBinding",
    "metadata": {
-    "name": "portcullis-apps-guard-pods-0123456789abcdef",
+    "name": "portcullis-apps-guard-pods-fedcba9876543210",
     "labels": {
      "portcullis.io/binding": "portcullis-apps-guard-pods",
-     "portcullis.io/params-generation": "0123456789abcdef"
+     "portcullis.io/params-generation": "fedcba9876543210"
     }
    },
    "spec": {
@@ -8344,7 +8735,7 @@
      "Deny"
     ],
     "paramRef": {
-     "name": "portcullis-admission-params-0123456789abcdef",
+     "name": "portcullis-admission-params-fedcba9876543210",
      "namespace": "portcullis",
      "parameterNotFoundAction": "Deny"
     },
@@ -8676,11 +9067,11 @@
    "apiVersion": "v1",
    "kind": "ConfigMap",
    "metadata": {
-    "name": "portcullis-admission-params-0123456789abcdef",
+    "name": "portcullis-admission-params-fedcba9876543210",
     "namespace": "portcullis"
    },
    "data": {
-    "generation": "0123456789abcdef"
+    "generation": "fedcba9876543210"
    }
   },
   "as": "nodeadm",
@@ -8707,16 +9098,16 @@
   "ha": true
  },
  {
-  "name": "ha: a params ConfigMap with upper-case hex is refused",
+  "name": "ha: a params ConfigMap with a non-hex digit is refused",
   "object": {
    "apiVersion": "v1",
    "kind": "ConfigMap",
    "metadata": {
-    "name": "portcullis-admission-params-0123456789ABCDEF",
+    "name": "portcullis-admission-params-0123456789abcdeg",
     "namespace": "portcullis"
    },
    "data": {
-    "generation": "0123456789ABCDEF"
+    "generation": "0123456789abcdeg"
    }
   },
   "as": "nodeadm",
@@ -8964,7 +9355,6 @@
       "securityContext": {
        "runAsNonRoot": true,
        "runAsUser": 65532,
-       "allowPrivilegeEscalation": false,
        "readOnlyRootFilesystem": true,
        "capabilities": {
         "drop": [
@@ -9014,11 +9404,11 @@
       "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "ports": [
        {
-        "containerPort": 8443,
+        "containerPort": 443,
         "hostPort": 443
        },
        {
-        "containerPort": 8000,
+        "containerPort": 80,
         "hostPort": 80
        }
       ],
@@ -9759,6 +10149,480 @@
    }
   },
   "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a Traefik pod without the app.kubernetes.io/name label is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a Traefik pod with a second container is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     },
+     {
+      "name": "sidecar",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a Traefik pod with an init container is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ],
+    "initContainers": [
+     {
+      "name": "init",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod owned by another DaemonSet in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik-evil",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: another identity's hostPath pod in portcullis-ingress is refused (every identity is judged)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/"
+      }
+     }
+    ]
+   }
+  },
+  "as": "intruder",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: another identity's pod without the owner reference in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    }
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "intruder",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: the ingress probe pod of this params generation is refused with the probe text",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "portcullis-admission-probe",
+    "namespace": "portcullis-ingress",
+    "annotations": {
+     "portcullis.io/params-generation": "0123456789abcdef"
+    }
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "intruder",
+  "want": "deny",
+  "reason_contains": "admission probe: params generation 0123456789abcdef in effect",
+  "ha": true
+ },
+ {
+  "name": "ha: another params generation's ingress probe pod (a dry run) is let by",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "portcullis-admission-probe",
+    "namespace": "portcullis-ingress",
+    "annotations": {
+     "portcullis.io/params-generation": "fedcba9876543210"
+    }
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "intruder",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: an ingress pod annotated with a non-generation value is judged",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "portcullis-admission-probe",
+    "namespace": "portcullis-ingress",
+    "annotations": {
+     "portcullis.io/params-generation": "x"
+    }
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ]
+   }
+  },
+  "as": "intruder",
   "want": "deny",
   "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
   "ha": true

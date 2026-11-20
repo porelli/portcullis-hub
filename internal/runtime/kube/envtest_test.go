@@ -14,12 +14,14 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	authnv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +30,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
@@ -36,6 +39,9 @@ import (
 )
 
 const hubSA = "system:serviceaccount:portcullis:portcullis-hub"
+
+// nodeadmSA is params nodeadmServiceAccount (contract §20.2).
+const nodeadmSA = "system:serviceaccount:portcullis-nodeadm:nodeadm"
 
 // traefikCRDs: minimal IngressRoute and Middleware CRDs (schemaless: the
 // policies read the fields).
@@ -113,13 +119,143 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: portcullis-hub-
 subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 `
 
+// haSetupObjects (NEW, HA; contract §6, §20.2): the ingress namespace (PSA
+// privileged: portcullis-ingress-pods is its only pod guard) with
+// Traefik's ServiceAccount, nodeadm's namespace, and the five
+// PriorityClasses as core's chart renders them
+// (charts/portcullis/templates/priorityclasses.yaml; globalDefault only on
+// portcullis-normal). RBAC wider than the real Roles, on purpose, so every
+// HA vector reaches admission: the policies are what is tested here (RBAC
+// is the Roles' own tests): nodeadm may create Secrets in kube-system,
+// get and create ConfigMaps in the core namespace (a binding's creator
+// needs get on its paramRef), and create, update and delete
+// admission policies and bindings; the intruder may exec in the core
+// namespace and create pods and DaemonSets in portcullis-ingress.
+const haSetupObjects = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: portcullis-ingress
+  labels: {pod-security.kubernetes.io/enforce: privileged}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portcullis-nodeadm
+  labels: {pod-security.kubernetes.io/enforce: restricted}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: traefik, namespace: portcullis-ingress}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: nodeadm, namespace: portcullis-nodeadm}
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: portcullis-core}
+value: 1000000
+preemptionPolicy: PreemptLowerPriority
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: portcullis-critical}
+value: 100000
+preemptionPolicy: PreemptLowerPriority
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: portcullis-high}
+value: 10000
+preemptionPolicy: PreemptLowerPriority
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: portcullis-normal}
+value: 1000
+globalDefault: true
+preemptionPolicy: PreemptLowerPriority
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: portcullis-low}
+value: 100
+preemptionPolicy: Never
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: test-nodeadm, namespace: kube-system}
+rules: [{apiGroups: [""], resources: [secrets], verbs: [create, update]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: test-nodeadm, namespace: kube-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: test-nodeadm}
+subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: test-nodeadm, namespace: portcullis}
+rules: [{apiGroups: [""], resources: [configmaps], verbs: [create, get]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: test-nodeadm, namespace: portcullis}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: test-nodeadm}
+subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: test-nodeadm-admission}
+rules: [{apiGroups: [admissionregistration.k8s.io], resources: [validatingadmissionpolicies, validatingadmissionpolicybindings], verbs: [create, update, delete]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: test-nodeadm-admission}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: test-nodeadm-admission}
+subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: test-intruder, namespace: portcullis}
+rules: [{apiGroups: [""], resources: [pods/exec], verbs: [create]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: test-intruder, namespace: portcullis}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: test-intruder}
+subjects: [{kind: ServiceAccount, name: intruder, namespace: portcullis}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: test-intruder, namespace: portcullis-ingress}
+rules: [{apiGroups: [""], resources: [pods], verbs: [create]}, {apiGroups: [apps], resources: [daemonsets], verbs: [create]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: test-intruder, namespace: portcullis-ingress}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: test-intruder}
+subjects: [{kind: ServiceAccount, name: intruder, namespace: portcullis}]
+`
+
+// admissionPolicyFiles are core's kube/admission/ policy files (byte
+// copies): the ten ValidatingAdmissionPolicies.
+var admissionPolicyFiles = []string{"testdata/admission/policies.yaml", "testdata/admission/nodeadm-tokens.yaml", "testdata/admission/nodeadm-admission.yaml"}
+
+// admissionPolicies are their names (each with one binding).
+var admissionPolicies = []string{"portcullis-apps-pods", "portcullis-apps-workloads", "portcullis-apps-services", "portcullis-apps-traefik",
+	"portcullis-apps-netpol", "portcullis-edge-routes", "portcullis-core-exec", "portcullis-ingress-pods", "portcullis-nodeadm-tokens",
+	"portcullis-nodeadm-admission"}
+
 // testGeneration is params.yaml's generation (core names the params
 // ConfigMap and every binding after it).
 const testGeneration = "0123456789abcdef"
 
 var (
 	paramsRef   = regexp.MustCompile(`(?m)^(\s+name: portcullis-admission-params)$`)
-	bindingName = regexp.MustCompile(`(?m)^(  name: portcullis-(?:apps|edge)-guard-[a-z-]+)$`)
+	bindingName = regexp.MustCompile(`(?m)^(  name: portcullis-(?:apps|edge|core|nodeadm|ingress)-guard-[a-z-]+)$`)
+	// nowPlus is a bootstrap token's ${NOW+<n>m} (admission_vectors.json).
+	nowPlus = regexp.MustCompile(`\$\{NOW\+([0-9]+)m\}`)
 )
 
 type env struct {
@@ -128,6 +264,10 @@ type env struct {
 	hub      dynamic.Interface
 	hubK     kubernetes.Interface
 	intruder dynamic.Interface
+	// NEW (HA): the intruder's typed client (exec), nodeadm's
+	// ServiceAccount.
+	intruderK kubernetes.Interface
+	nodeadm   dynamic.Interface
 }
 
 var shared *env
@@ -144,6 +284,8 @@ func gvrOf(o *unstructured.Unstructured) schema.GroupVersionResource {
 		res = "validatingadmissionpolicybindings"
 	case "CustomResourceDefinition":
 		res = "customresourcedefinitions"
+	case "PriorityClass":
+		res = "priorityclasses"
 	}
 	return gv.WithResource(res)
 }
@@ -195,6 +337,7 @@ func startEnv(t *testing.T) *env {
 	admin := dynamic.NewForConfigOrDie(cfg)
 	applyYAML(t, admin, []byte(traefikCRDs))
 	applyYAML(t, admin, []byte(setupObjects))
+	applyYAML(t, admin, []byte(haSetupObjects))
 	applyYAML(t, admin, file(t, "testdata/role.yaml"))
 	applyYAML(t, admin, file(t, "testdata/role-edge.yaml"))
 	applyYAML(t, admin, file(t, "testdata/role-core.yaml"))
@@ -218,14 +361,19 @@ func startEnv(t *testing.T) *env {
 	// <name>-<generation> on it.
 	params := strings.Replace(string(file(t, "testdata/admission/params.yaml")), "cliUsername: system:admin", "cliUsername: "+whoami.Status.UserInfo.Username, 1)
 	applyYAML(t, admin, []byte(paramsRef.ReplaceAllString(params, "${1}-"+testGeneration)))
-	applyYAML(t, admin, file(t, "testdata/admission/policies.yaml"))
+	for _, f := range admissionPolicyFiles {
+		applyYAML(t, admin, file(t, f))
+	}
 	bindings := bindingName.ReplaceAllString(string(file(t, "testdata/admission/bindings.yaml")), "${1}-"+testGeneration)
 	applyYAML(t, admin, []byte(paramsRef.ReplaceAllString(bindings, "${1}-"+testGeneration)))
 	hc := rest.CopyConfig(cfg)
 	hc.Impersonate = rest.ImpersonationConfig{UserName: hubSA, Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis", "system:authenticated"}}
 	ic := rest.CopyConfig(cfg)
 	ic.Impersonate = rest.ImpersonationConfig{UserName: "system:serviceaccount:portcullis:intruder", Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis", "system:authenticated"}}
-	e := &env{cfg: cfg, admin: admin, hub: dynamic.NewForConfigOrDie(hc), hubK: kubernetes.NewForConfigOrDie(hc), intruder: dynamic.NewForConfigOrDie(ic)}
+	nc := rest.CopyConfig(cfg)
+	nc.Impersonate = rest.ImpersonationConfig{UserName: nodeadmSA, Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis-nodeadm", "system:authenticated"}}
+	e := &env{cfg: cfg, admin: admin, hub: dynamic.NewForConfigOrDie(hc), hubK: kubernetes.NewForConfigOrDie(hc), intruder: dynamic.NewForConfigOrDie(ic),
+		intruderK: kubernetes.NewForConfigOrDie(ic), nodeadm: dynamic.NewForConfigOrDie(nc)}
 	// The policies take effect asynchronously: wait for the self-test's
 	// Pod to be denied by its binding.
 	deadline := time.Now().Add(60 * time.Second)
@@ -241,7 +389,7 @@ func startEnv(t *testing.T) *env {
 		time.Sleep(500 * time.Millisecond)
 	}
 	// The policies type-check clean.
-	for _, p := range []string{"portcullis-apps-pods", "portcullis-apps-workloads", "portcullis-apps-services", "portcullis-apps-traefik", "portcullis-apps-netpol", "portcullis-edge-routes"} {
+	for _, p := range admissionPolicies {
 		o, err := admin.Resource(schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}).Get(context.Background(), p, metav1.GetOptions{})
 		if err != nil {
 			t.Fatal(err)
@@ -258,17 +406,62 @@ func startEnv(t *testing.T) *env {
 type vector struct {
 	Name           string         `json:"name"`
 	Object         map[string]any `json:"object"`
-	As             string         `json:"as"` // hub | intruder
+	As             string         `json:"as"` // hub | intruder | nodeadm | cli
 	Want           string         `json:"want"`
 	ReasonContains string         `json:"reason_contains"`
 	// Existing (optional) is created as the CLI first; Op update dry-runs
-	// Object as an update of it, delete its deletion.
+	// Object as an update of it, delete its deletion; Op exec (NEW, HA)
+	// connects Object, a PodExecOptions naming its pod, to pods/exec.
 	Existing map[string]any `json:"existing,omitempty"`
 	Op       string         `json:"op,omitempty"`
-	// HA marks the high-availability cases (contract §6, the placement,
-	// core exec, nodeadm tokens and nodeadm admission rules), skipped
-	// until their policies are copied in (Task 18).
+	// HA marks the high-availability cases (contract §6: placement, core
+	// exec, nodeadm tokens, nodeadm admission writes, ingress pods).
 	HA bool `json:"ha,omitempty"`
+}
+
+// notJudgeable are vectors no admission policy can decide: the API server
+// never runs API-defined ValidatingAdmissionPolicies on admission policies
+// or bindings (TestAdmissionPolicyObjectsNotJudged), so the contract's
+// "nodeadm admission writes" binding rules can't be enforced by a VAP
+// (Task 18 report: needs a ruling; nodeadm's ClusterRole, create only, is
+// what refuses an update or delete). Every other ha vector runs.
+func notJudgeable(v vector) bool {
+	return v.HA && v.Object["kind"] == "ValidatingAdmissionPolicyBinding" && v.Want == "deny"
+}
+
+// withNow replaces ${NOW+<n>m} with now + n minutes (RFC 3339 UTC).
+func withNow(t *testing.T, o map[string]any) map[string]any {
+	b, err := json.Marshal(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = nowPlus.ReplaceAllFunc(b, func(m []byte) []byte {
+		n, _ := strconv.Atoi(string(nowPlus.FindSubmatch(m)[1]))
+		return []byte(time.Now().UTC().Add(time.Duration(n) * time.Minute).Format(time.RFC3339))
+	})
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// execAs connects a PodExecOptions to pods/exec of its pod (envtest has
+// no pod: past admission the answer is NotFound).
+func execAs(ctx context.Context, k kubernetes.Interface, o map[string]any) error {
+	b, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	var opts corev1.PodExecOptions
+	if err := json.Unmarshal(b, &opts); err != nil {
+		return err
+	}
+	md, _ := o["metadata"].(map[string]any)
+	name, _ := md["name"].(string)
+	namespace, _ := md["namespace"].(string)
+	return k.CoreV1().RESTClient().Post().Namespace(namespace).Resource("pods").Name(name).SubResource("exec").
+		VersionedParams(&opts, scheme.ParameterCodec).Do(ctx).Error()
 }
 
 // TestAdmissionVectors: every vector dry-run as the Hub's ServiceAccount;
@@ -286,18 +479,40 @@ func TestAdmissionVectors(t *testing.T) {
 	dry := []string{metav1.DryRunAll}
 	for _, v := range vs {
 		t.Run(v.Name, func(t *testing.T) {
-			if v.HA {
-				t.Skip("ha admission lands in Task 18")
+			if notJudgeable(v) {
+				t.Skip("no admission policy judges a ValidatingAdmissionPolicyBinding (TestAdmissionPolicyObjectsNotJudged)")
 			}
-			o := &unstructured.Unstructured{Object: v.Object}
-			client := e.hub
-			if v.As == "intruder" {
-				client = e.intruder
+			o := &unstructured.Unstructured{Object: withNow(t, v.Object)}
+			client, typed := e.hub, e.hubK
+			switch v.As {
+			case "intruder":
+				client, typed = e.intruder, e.intruderK
+			case "nodeadm":
+				client = e.nodeadm
+			case "cli":
+				client = e.admin
 			}
 			res := client.Resource(gvrOf(o)).Namespace(o.GetNamespace())
 			var err error
-			if v.Existing != nil {
+			if v.Op == "exec" {
+				err = execAs(ctx, typed, o.Object)
+				if v.Want == "allow" && apierrors.IsNotFound(err) {
+					err = nil // past RBAC and admission: no such pod in envtest
+				}
+			} else if v.Existing != nil {
 				ex := &unstructured.Unstructured{Object: v.Existing}
+				// A binding's params generation exists (a copy of the test
+				// params): a binding without its params denies everything.
+				if ref, ok, _ := unstructured.NestedString(ex.Object, "spec", "paramRef", "name"); ok && ex.GetKind() == "ValidatingAdmissionPolicyBinding" {
+					cm, gerr := e.admin.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace("portcullis").Get(ctx, "portcullis-admission-params-"+testGeneration, metav1.GetOptions{})
+					if gerr != nil {
+						t.Fatal(gerr)
+					}
+					cp := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": ref, "namespace": "portcullis"}, "data": cm.Object["data"]}}
+					if _, cerr := e.admin.Resource(gvrOf(cp)).Namespace("portcullis").Create(ctx, cp, metav1.CreateOptions{}); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
+						t.Fatal(cerr)
+					}
+				}
 				cur, cerr := e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Create(ctx, ex, metav1.CreateOptions{})
 				if cerr != nil {
 					t.Fatalf("%s: creating the existing object: %v", v.Name, cerr)
