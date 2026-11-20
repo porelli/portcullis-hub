@@ -604,13 +604,21 @@ func TestCopyAheadRepublishedAtStart(t *testing.T) {
 	}
 }
 
-// TestInitRepublishesFirst: Init starts with RepublishFromCopies.
+// TestInitRepublishesFirst: Init starts with RepublishFromCopies, then
+// kicks the cluster guard (it leads by then: the first check doesn't
+// wait the minute).
 func TestInitRepublishesFirst(t *testing.T) {
 	f := newFixture(t)
 	s, _ := kubePublish(f)
 	os.WriteFile(filepath.Join(f.data, "mcp-credentials.json"), []byte("copy\n"), 0o640)
+	// The guard kick (main's hook) runs right after the republish, once.
+	kicks, seen := 0, ""
+	f.h.SetAfterStartPublish(func() { kicks++; seen = string(s.data[publish.MCPCredentials]) })
 	f.h.Init()
 	if string(s.data[publish.MCPCredentials]) != "copy\n" {
 		t.Errorf("Init didn't publish the copy: %q", s.data[publish.MCPCredentials])
+	}
+	if kicks != 1 || seen != "copy\n" {
+		t.Errorf("the guard kick: %d calls, object then %q (want once, after the republish)", kicks, seen)
 	}
 }

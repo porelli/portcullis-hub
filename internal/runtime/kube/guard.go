@@ -124,6 +124,8 @@ type Guard struct {
 	once     sync.Once
 	ran      bool
 	version  string
+	// kick asks Run for a check now (Kick).
+	kick chan struct{}
 }
 
 // Version is the API server's gitVersion as last read.
@@ -156,7 +158,7 @@ func NewGuard(cfg GuardConfig) *Guard {
 			}
 		}
 	}
-	return &Guard{cfg: cfg, err: &UnverifiedError{Why: "not checked yet"}, admit: AdmissionUnknown, netpol: NetpolUnproven, verified: make(chan struct{})}
+	return &Guard{cfg: cfg, err: &UnverifiedError{Why: "not checked yet"}, admit: AdmissionUnknown, netpol: NetpolUnproven, verified: make(chan struct{}), kick: make(chan struct{}, 1)}
 }
 
 // Err is nil while every check holds.
@@ -196,9 +198,30 @@ func (g *Guard) set(err error) {
 func (g *Guard) Run(ctx context.Context, every time.Duration) {
 	for {
 		g.Check(ctx)
-		if err := g.cfg.Sleep(ctx, every); err != nil {
+		sctx, cancel := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-g.kick:
+				cancel()
+			case <-sctx.Done():
+			}
+		}()
+		g.cfg.Sleep(sctx, every)
+		cancel()
+		if ctx.Err() != nil {
 			return
 		}
+	}
+}
+
+// Kick makes Run check now instead of at the end of its interval (the
+// Hub, once leading: the checks before it could only fail, the
+// NetworkPolicy probe being a write the fence refuses); then the regular
+// interval goes on.
+func (g *Guard) Kick() {
+	select {
+	case g.kick <- struct{}{}:
+	default:
 	}
 }
 

@@ -231,6 +231,11 @@ func (h *Hub) retryUnsynced() {
 	}
 }
 
+// SetAfterStartPublish installs fn, run by Init right after the
+// start-time republish (the Hub leads by then): main kicks the cluster
+// guard there, whose checks before leading could only fail.
+func (h *Hub) SetAfterStartPublish(fn func()) { h.afterStartPublish = fn }
+
 // RepublishFromCopies makes every published document's object equal to
 // the Hub's own copy (Kubernetes; a no-op elsewhere): at start, once
 // leading and before serving writes. A copy written before a stand-by,

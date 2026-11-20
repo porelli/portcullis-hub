@@ -87,7 +87,7 @@ func cm(d Doc, mount string, readers ...string) DocSpec {
 
 var specs = map[Doc]DocSpec{
 	GroupGatePolicy: cm(GroupGatePolicy, "/hub-data", "group-gate"),
-	UserAttributes:  cm(UserAttributes, "/hub-data", "group-gate"),
+	UserAttributes:  cm(UserAttributes, "/hub-data", "group-gate", "mcp-gate"),
 	PortalApps:      cm(PortalApps, "/hub-data", "group-gate"),
 	SignInKeycloak:  cm(SignInKeycloak, "/hub-data", "keycloak"),
 	Impersonation:   cm(Impersonation, "/hub-data", "group-gate", "keycloak"),

@@ -309,3 +309,29 @@ func lagPods(ls []publish.Lag) string {
 	}
 	return strings.Join(out, ",")
 }
+
+// TestUserAttributesReadByMCPGate: user-attributes.json's readers are
+// group-gate and mcp-gate (contract §4, §15.5): both are asked.
+func TestUserAttributesReadByMCPGate(t *testing.T) {
+	c := newPubCluster(t)
+	s := c.sink(t)
+	ctx := context.Background()
+	rev, err := s.Publish(ctx, publish.UserAttributes, []byte("{}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.mounted["group-gate-5f-a1 /hub-data user-attributes"] = rev
+	c.mounted["group-gate-5f-b2 /hub-data user-attributes"] = rev
+	c.mu.Unlock()
+	behind, err := s.(publish.Laggards).Behind(ctx, publish.UserAttributes, rev)
+	if err != nil || lagPods(behind) != "mcp-gate-7d-c3" {
+		t.Fatalf("behind %+v %v", behind, err)
+	}
+	c.mu.Lock()
+	c.mounted["mcp-gate-7d-c3 /hub-data user-attributes"] = rev
+	c.mu.Unlock()
+	if ok, err := s.Confirmed(ctx, publish.UserAttributes, rev); !ok || err != nil {
+		t.Errorf("confirmed %v %v", ok, err)
+	}
+}

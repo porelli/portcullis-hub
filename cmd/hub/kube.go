@@ -103,12 +103,12 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	if err != nil {
 		return nil, nil, err
 	}
+	// Not waited for here: before the Hub leads, the NetworkPolicy probe
+	// (a write) is refused by the fence, so the first check can't pass.
+	// The Hub kicks the guard once leading (after its start-time
+	// republish, Hub.SetAfterStartPublish); until it verifies, runtime
+	// operations answer 503.
 	go guard.Run(ctx, time.Minute)
-	select {
-	case <-guard.Verified():
-	case <-time.After(engineStartWait):
-		log.Printf("kubernetes: the cluster isn't verified after %s: starting anyway, runtime operations answer 503 until it is (%v)", engineStartWait, guard.Err())
-	}
 	return b, fence, nil
 }
 

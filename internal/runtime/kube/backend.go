@@ -163,6 +163,13 @@ func (b *Backend) deployGate(ctx context.Context) error {
 
 func (b *Backend) Kind() runtime.Kind { return runtime.KindKubernetes }
 
+// KickGuard asks the cluster guard for a check now (no-op without one).
+func (b *Backend) KickGuard() {
+	if k, ok := b.cfg.Guard.(interface{ Kick() }); ok {
+		k.Kick()
+	}
+}
+
 // Env is empty: no Hub variable reaches a template's interpolation.
 func (b *Backend) Env() []string { return []string{} }
 

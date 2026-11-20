@@ -648,6 +648,13 @@ func main() {
 	// audit and the kept records (F22: never the live function).
 	h.SetImpersonationApps(h.ImpersonationAppsFunc(kc))
 	h.AddHistorySource(hub.HistoryImpersonation, h.ImpersonationHistorySource(dir.RecentMatchingScan))
+	// Kubernetes: the cluster guard's checks before the Hub led could
+	// only fail (its NetworkPolicy probe is a write the fence refuses):
+	// check again right after the start-time republish, not a minute
+	// later.
+	if k, ok := rt.(interface{ KickGuard() }); ok {
+		h.SetAfterStartPublish(k.KickGuard)
+	}
 	h.Init()
 
 	srv := &httpapi.Server{

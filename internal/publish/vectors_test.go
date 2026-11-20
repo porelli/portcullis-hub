@@ -40,7 +40,7 @@ func TestPublishedDocsVectorsShape(t *testing.T) {
 	}
 	want := map[string]struct{ object, kind, mount, readers string }{
 		"group-gate-policy.json": {"pub-group-gate-policy", "configmap", "/hub-data", "group-gate"},
-		"user-attributes.json":   {"pub-user-attributes", "configmap", "/hub-data", "group-gate"},
+		"user-attributes.json":   {"pub-user-attributes", "configmap", "/hub-data", "group-gate mcp-gate"},
 		"portal-apps.json":       {"pub-portal-apps", "configmap", "/hub-data", "group-gate"},
 		"signin-keycloak.json":   {"pub-signin-keycloak", "configmap", "/hub-data", "keycloak"},
 		"impersonation.json":     {"pub-impersonation", "configmap", "/hub-data", "group-gate keycloak"},

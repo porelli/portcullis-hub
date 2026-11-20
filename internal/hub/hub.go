@@ -574,6 +574,8 @@ type Hub struct {
 	pub       *publish.Tracker
 	pubMirror *publish.FileSink
 	pubSync   pubSync
+	// afterStartPublish runs after Init's start-time republish.
+	afterStartPublish func()
 	// gatePolicy: the group-gate policy document last written (nil: none
 	// yet). My apps and the portal decide from it what group-gate lets
 	// a person open (gateOpenLocked, gateDenies).
@@ -948,6 +950,9 @@ func (h *Hub) Init() {
 	// before anything is served or written (contract §4; a copy written
 	// before a stand-by or a crash cut its object update).
 	h.RepublishFromCopies()
+	if h.afterStartPublish != nil {
+		h.afterStartPublish()
+	}
 	// The sign-in defaults (D1 / D11 / D12) of a state that lacks them,
 	// before anything reads them.
 	h.ensureSignIn()

@@ -419,3 +419,40 @@ func TestRoleExactCore(t *testing.T) {
 		t.Errorf("core Role names %v %v, vector %v", cms, secrets, objs)
 	}
 }
+
+// TestGuardKickChecksNow: a check that failed before the Hub led (its
+// NetworkPolicy probe refused by the write fence) is run again the
+// moment it is kicked, not an interval later; the interval then goes on.
+func TestGuardKickChecksNow(t *testing.T) {
+	r, _ := newGuardRig(t)
+	g := NewGuard(GuardConfig{Client: r.c.typed, Dynamic: r.c.dyn, AppsNamespace: ns, CoreNamespace: "portcullis", ClusterCheckDir: r.dir, HubImage: hubImage,
+		Clock: func() time.Time { return time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC) },
+		Probe: func(context.Context) error {
+			r.probes++
+			if r.probes == 1 {
+				return errors.New("this Hub is standing by: another Hub is the active writer")
+			}
+			return nil
+		},
+		// The interval never ends by itself: only a kick (or the end).
+		Sleep: func(ctx context.Context, d time.Duration) error { <-ctx.Done(); return ctx.Err() }})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { g.Run(ctx, time.Hour); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(5 * time.Second)
+	for g.Err() == nil || !strings.Contains(g.Err().Error(), "standing by") {
+		if time.Now().After(deadline) {
+			t.Fatalf("first check: %v", g.Err())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	g.Kick()
+	select {
+	case <-g.Verified():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the kick didn't check now: %v", g.Err())
+	}
+	b := &Backend{cfg: Config{Guard: g}}
+	b.KickGuard() // the backend's handle: no panic, a check queued
+}
