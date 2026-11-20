@@ -323,7 +323,7 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 	if err != nil {
 		return errors.New("the enrolment answer's certificate is unreadable")
 	}
-	if err := checkNodeLeaf(leaf, ca, cn, csr.RawSubjectPublicKeyInfo, a.cfg.Now()); err != nil {
+	if err := checkNodeLeafSkew(leaf, ca, cn, csr.RawSubjectPublicKeyInfo, a.cfg.Now()); err != nil {
 		return errors.New("the enrolment answer's certificate isn't this node's, from the cluster's CA")
 	}
 	if err := validatePlan(er.Mesh, meshKey.PublicKey().String()); err != nil {
@@ -463,7 +463,7 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 	if err := checkServerURL(answer.ServerURL, st.Servers); err != nil {
 		return err
 	}
-	if err := checkFlags(answer.Flags, answer.ServerURL, st); err != nil {
+	if err := checkFlags(answer.Flags, answer.ServerURL, st, answer.ClusterCIDR); err != nil {
 		return err
 	}
 
@@ -554,7 +554,7 @@ var siteValRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 // shared fixture k3s-server-flags.txt): each flag's name and value shape,
 // never a token on argv, the node's own identity and mesh address, the
 // answer's server. A refusal names the flag, never its value.
-func checkFlags(flags []string, serverURL string, st State) error {
+func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) error {
 	ip := st.MeshIP
 	exact := map[string]bool{
 		"--server=" + serverURL: true, "--token-file=" + K3sTokenFile: true, "--node-name=" + st.ID: true,
@@ -570,6 +570,8 @@ func checkFlags(flags []string, serverURL string, st State) error {
 		"--etcd-arg=listen-client-urls=https://" + ip + ":2379,https://127.0.0.1:2379": true,
 		"--etcd-arg=heartbeat-interval=200":                                            true, "--etcd-arg=election-timeout=2000": true,
 		"--agent-token-file=" + K3sAgentToken: true,
+		// The answer's cluster_cidr, the same one flannel's net-conf gets.
+		"--cluster-cidr=" + clusterCIDR: clusterCIDR != "",
 	}
 	if len(flags) == 0 || len(flags) > 64 {
 		return errors.New("the join answer has no k3s flags: nothing was installed")

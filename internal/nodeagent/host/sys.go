@@ -148,6 +148,15 @@ func (f fsys) write(path string, data []byte, mode, dirMode os.FileMode) error {
 		return fmt.Errorf("writing %s: %w", path, unwrapPath(err))
 	}
 	ok = true
+	// The rename itself durable (a token or node.pem never falls back to
+	// the old one on power loss).
+	if d, err := os.Open(dir); err == nil {
+		serr := d.Sync()
+		d.Close()
+		if serr != nil {
+			return fmt.Errorf("writing %s: syncing its directory: %w", path, serr)
+		}
+	}
 	return nil
 }
 

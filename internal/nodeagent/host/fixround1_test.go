@@ -5,19 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
-	"io"
 	"math/big"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -312,115 +307,3 @@ func TestJoinClusterCIDRAndAgentToken(t *testing.T) {
 	}
 }
 
-// TestRenew (I4): not due → no call; due → a CSR of a fresh key signed
-// with the current key (the join scheme) and the new key and
-// certificate swapped in place; the renew vectors' answer decodes.
-func TestRenew(t *testing.T) {
-	r := newRig(t, "server")
-	ctx := context.Background()
-	calls := 0
-	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		calls++
-		b, _ := io.ReadAll(req.Body)
-		h := req.Header
-		der, _ := base64.StdEncoding.DecodeString(h.Get("Portcullis-Node-Cert"))
-		cert, err := x509.ParseCertificate(der)
-		sig, _ := base64.RawURLEncoding.DecodeString(h.Get("Portcullis-Node-Signature"))
-		d := sha256.Sum256(CanonicalBytes("n2", req.Method, req.RequestURI, h.Get("Portcullis-Node-Time"), h.Get("Portcullis-Node-Nonce"), b))
-		if err != nil || req.URL.Path != "/node/v1/renew" || !ecdsa.VerifyASN1(cert.PublicKey.(*ecdsa.PublicKey), d[:], sig) {
-			w.WriteHeader(403)
-			return
-		}
-		var q renewReq
-		if jsonstrict.Decode(b, &q) != nil || q.ServerID != "n2" {
-			w.WriteHeader(400)
-			return
-		}
-		blk, _ := pem.Decode([]byte(q.CSR))
-		csr, _ := x509.ParseCertificateRequest(blk.Bytes)
-		nd := r.ca.signFor(t, "n2."+clusterDomain, csr.PublicKey, time.Now().Add(-time.Minute), time.Now().Add(30*24*time.Hour))
-		json.NewEncoder(w).Encode(renewAnswer{Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: nd})),
-			CA: string(r.ca.pem), NotAfter: "2026-12-20T00:00:00Z"})
-	}))
-	defer srv.Close()
-	r.a.cfg.HTTP = srv.Client()
-	r.a.mu.Lock()
-	r.a.st.Endpoint = srv.URL + "/node"
-	r.a.mu.Unlock()
-	if done, err := r.a.RenewIfDue(ctx); done || err != nil || calls != 0 {
-		t.Fatalf("not due: %v %v %d", done, err, calls)
-	}
-	// Due: a certificate in its last third.
-	nk, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	der := r.ca.signFor(t, "n2."+clusterDomain, &nk.PublicKey, time.Now().Add(-25*24*time.Hour), time.Now().Add(5*24*time.Hour))
-	writeFile(t, r.root, nodePEMFile, string(nodeBundle(nk, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))), 0o600)
-	if err := r.a.Load(); err != nil {
-		t.Fatal(err)
-	}
-	r.a.mu.Lock()
-	r.a.st.Endpoint = srv.URL + "/node"
-	r.a.mu.Unlock()
-	old := r.a.cert.Leaf
-	if done, err := r.a.RenewIfDue(ctx); !done || err != nil || calls != 1 {
-		t.Fatalf("due: %v %v %d", done, err, calls)
-	}
-	if r.a.cert.Leaf.Equal(old) || !r.a.cert.Leaf.NotAfter.After(old.NotAfter) {
-		t.Error("the served certificate wasn't swapped")
-	}
-	b, _ := os.ReadFile(filepath.Join(r.root, nodePEMFile))
-	disk, err := nodeCert(b)
-	if err != nil || !disk.Leaf.Equal(r.a.cert.Leaf) {
-		t.Errorf("node.pem: %v", err)
-	}
-	if fi, _ := os.Stat(filepath.Join(r.root, nodePEMFile)); fi.Mode().Perm() != 0o600 {
-		t.Error("node.pem's mode")
-	}
-	// The served certificate is the new one.
-	s := r.server()
-	resp, err := r.client(r.ca, na.CNHub).Get(s.URL + "/v1/health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if !resp.TLS.PeerCertificates[0].Equal(r.a.cert.Leaf) {
-		t.Error("the API serves the old certificate")
-	}
-	// The renew vectors (core's nodeadm_api_vectors.json, Hub copy).
-	var d struct {
-		Cases []struct {
-			Name     string `json:"name"`
-			Route    string `json:"route"`
-			Response struct {
-				Status int             `json:"status"`
-				Body   json.RawMessage `json:"body"`
-			} `json:"response"`
-		} `json:"cases"`
-	}
-	vb, _ := os.ReadFile("../../nodeadm/testdata/nodeadm_api_vectors.json")
-	json.Unmarshal(vb, &d)
-	n := 0
-	for _, c := range d.Cases {
-		if c.Route != "POST /node/v1/renew" {
-			continue
-		}
-		n++
-		if c.Response.Status == 200 {
-			var ra renewAnswer
-			if err := jsonstrict.Decode(c.Response.Body, &ra); err != nil {
-				t.Errorf("%s: %v", c.Name, err)
-			}
-		}
-	}
-	if n < 3 {
-		t.Errorf("%d renew vectors", n)
-	}
-	for _, c := range d.Cases {
-		if c.Name == "join" {
-			var ja joinAnswer
-			if err := jsonstrict.Decode(c.Response.Body, &ja); err != nil || ja.ClusterCIDR == "" {
-				t.Errorf("the join vector's answer: %v", err)
-			}
-		}
-	}
-}

@@ -318,22 +318,33 @@ func TestJoinFlagsRefused(t *testing.T) {
 	srv := "https://10.215.0.1:6443"
 	ok := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4",
 		"--node-taint=portcullis.io/small=true:NoSchedule", "--etcd-arg=listen-client-urls=https://10.215.0.4:2379,https://127.0.0.1:2379"}
-	if err := checkFlags(ok, srv, st); err != nil {
+	if err := checkFlags(ok, srv, st, "10.42.0.0/16"); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{"--token=K10abc::server:x", "--agent-token=x", "--token-file=/tmp/t", "--node-name=n5",
 		"--node-ip=10.215.0.5", "--server=https://10.215.0.9:6443", "--data-dir=/", "--kubelet-arg=x y", "-t", "--node-label=$(id)",
 		"--write-kubeconfig-mode=0644", "--kube-apiserver-arg=anonymous-auth=true", "--kubelet-arg=read-only-port=10255", "--config=/tmp/c",
 		"--node-label=portcullis.io/class=huge", "--node-ip=10.215.0.4"} {
-		err := checkFlags(append(append([]string{}, ok...), bad), srv, st)
+		err := checkFlags(append(append([]string{}, ok...), bad), srv, st, "10.42.0.0/16")
 		if err == nil {
 			t.Errorf("accepted %q", bad)
 		} else if _, v, cut := strings.Cut(bad, "="); cut && len(v) > 3 && strings.Contains(err.Error(), v) {
 			t.Errorf("the refusal echoes the value: %v", err)
 		}
 	}
+	// --cluster-cidr: the answer's cluster_cidr only, on a server only.
+	if err := checkFlags(append(append([]string{}, ok...), "--cluster-cidr=10.42.0.0/16"), srv, st, "10.42.0.0/16"); err != nil {
+		t.Errorf("--cluster-cidr: %v", err)
+	}
+	if checkFlags(append(append([]string{}, ok...), "--cluster-cidr=10.99.0.0/16"), srv, st, "10.42.0.0/16") == nil {
+		t.Error("another --cluster-cidr accepted")
+	}
+	if checkFlags([]string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4", "--cluster-cidr=10.42.0.0/16"}, srv,
+		State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}, "10.42.0.0/16") == nil {
+		t.Error("an agent took --cluster-cidr")
+	}
 	// An agent doesn't take a server's flags.
-	if err := checkFlags(append(append([]string{}, ok...), "--secrets-encryption"), srv, State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}); err == nil {
+	if err := checkFlags(append(append([]string{}, ok...), "--secrets-encryption"), srv, State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}, "10.42.0.0/16"); err == nil {
 		t.Error("an agent took --secrets-encryption")
 	}
 	for _, u := range []string{"http://10.215.0.1:6443", "https://198.51.100.1:6443", "https://10.215.0.1:6444", "https://10.215.0.1:6443/x"} {
