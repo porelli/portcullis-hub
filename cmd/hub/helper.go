@@ -23,6 +23,7 @@ import (
 //	hub volcopy out <dir>           <dir> as a tar on stdout ("data/…" entries)
 //	hub volcopy in <dir>            extract a tar from stdin into <dir>
 //	hub seed <src> <dst>            copy src/. into dst when dst is empty (K4)
+//	hub seed-self <dir>             copy only this binary to <dir>/hub (0555, atomic)
 //	hub rev <dir>                   print <dir>/.rev (exit 1 when missing)
 //	hub rev <dir> <doc>             print <dir>/.rev-<doc> (a published document, contract §4)
 func helperMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -42,6 +43,8 @@ func helperMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = volcopy.Out(args[2], stdout)
 	case args[0] == "volcopy" && len(args) == 3 && args[1] == "in":
 		err = volcopy.In(args[2], stdin)
+	case args[0] == "seed-self" && len(args) == 2:
+		err = volcopy.SeedSelf(args[1])
 	case args[0] == "seed" && len(args) == 3:
 		err = volcopy.Seed(args[1], args[2])
 	case args[0] == "rev" && len(args) == 2:
@@ -71,7 +74,7 @@ func isHelperCommand(args []string) bool {
 		return false
 	}
 	switch args[1] {
-	case "helper", "volcopy", "seed", "rev":
+	case "helper", "volcopy", "seed", "seed-self", "rev":
 		return true
 	}
 	return false

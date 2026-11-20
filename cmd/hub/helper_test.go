@@ -109,6 +109,39 @@ func TestRevPrintsMountedRev(t *testing.T) {
 	}
 }
 
+// TestSeedSelf: hub seed-self <dir> copies only the running binary to
+// <dir>/hub, mode 0555, nothing else (no temp file left); it replaces
+// an earlier copy; a missing dir fails.
+func TestSeedSelf(t *testing.T) {
+	d := t.TempDir()
+	if out, code := run(t, nil, "seed-self", d); code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	self, _ := os.Executable()
+	want, _ := os.ReadFile(self)
+	got, err := os.ReadFile(filepath.Join(d, "hub"))
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("not this binary (%d bytes, %v)", len(got), err)
+	}
+	fi, _ := os.Stat(filepath.Join(d, "hub"))
+	if fi.Mode().Perm() != 0o555 {
+		t.Errorf("mode %o", fi.Mode().Perm())
+	}
+	es, _ := os.ReadDir(d)
+	if len(es) != 1 {
+		t.Errorf("entries %v", es)
+	}
+	if _, code := run(t, nil, "seed-self", d); code != 0 {
+		t.Error("a second copy failed")
+	}
+	if _, code := run(t, nil, "seed-self", filepath.Join(d, "missing")); code != 1 {
+		t.Errorf("missing dir: exit %d", code)
+	}
+	if !isHelperCommand([]string{"hub", "seed-self", d}) {
+		t.Error("seed-self isn't dispatched before the environment")
+	}
+}
+
 // TestRevOfDocument: hub rev <dir> <doc> prints <dir>/.rev-<doc> (one
 // per published document in a shared projected directory, contract §4),
 // exit 1 when missing; a doc that isn't a plain name is refused.

@@ -251,8 +251,7 @@ spec:
       initContainers:
       - command:
         - /usr/local/bin/hub
-        - seed
-        - /usr/local/bin
+        - seed-self
         - /portcullis-bin
         image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
         imagePullPolicy: IfNotPresent

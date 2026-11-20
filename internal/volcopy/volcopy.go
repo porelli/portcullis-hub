@@ -281,6 +281,47 @@ func setBits(m int64) fs.FileMode {
 // Seed copies src/. into dst when dst has no entries but lost+found
 // (modes and symlinks kept), writing .portcullis-seeded last; a dst
 // that already has it is left alone.
+// SeedSelf copies the running binary, and nothing else, to <dst>/hub
+// (the portcullis-bin init containers, contract §3.4 / §4): through a
+// temp file in dst, mode 0555, renamed into place, so a reader never
+// sees a partial binary.
+func SeedSelf(dst string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return seedFile(self, dst)
+}
+
+func seedFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(dst, ".hub.tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op after the rename
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o555); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), filepath.Join(dst, "hub"))
+}
+
 func Seed(src, dst string) error {
 	marker := filepath.Join(dst, ".portcullis-seeded")
 	if _, err := os.Lstat(marker); err == nil {

@@ -1539,7 +1539,7 @@ func (p *podSpec) finish() corev1.PodSpec {
 			Name:            "portcullis-bin",
 			Image:           t.in.HubImage,
 			ImagePullPolicy: corev1.PullIfNotPresent,
-			Command:         []string{"/usr/local/bin/hub", "seed", "/usr/local/bin", "/portcullis-bin"},
+			Command:         []string{"/usr/local/bin/hub", "seed-self", "/portcullis-bin"},
 			SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: &esc, ReadOnlyRootFilesystem: &ro, Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}},
 			VolumeMounts:    []corev1.VolumeMount{{Name: "portcullis-bin", MountPath: "/portcullis-bin"}},
 		}
