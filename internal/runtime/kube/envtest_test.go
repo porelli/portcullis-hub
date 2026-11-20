@@ -132,7 +132,8 @@ subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 // none on admission objects); the intruder may exec, attach and
 // port-forward in the core namespace and create pods (ephemeral
 // containers too) and DaemonSets in portcullis-ingress; kubelets (group
-// system:nodes) and nodeadm may create and update Nodes (R-NODELABELS).
+// system:nodes) and nodeadm may create, update and delete Nodes
+// (R-NODELABELS).
 const haSetupObjects = `apiVersion: v1
 kind: Namespace
 metadata:
@@ -167,7 +168,7 @@ subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata: {name: test-nodes}
-rules: [{apiGroups: [""], resources: [nodes, nodes/status], verbs: [create, update]}]
+rules: [{apiGroups: [""], resources: [nodes, nodes/status], verbs: [create, update, delete]}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
