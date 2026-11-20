@@ -284,6 +284,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "servers" {
 		os.Exit(serversMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
+	// `hub ha checklist` (contract §20.1): `./portcullis ha status|enable`.
+	if len(os.Args) > 1 && os.Args[1] == "ha" {
+		os.Exit(haMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
+	}
 	// `hub ssh status` (contract §18): `./portcullis status`'s SSH block.
 	if len(os.Args) > 1 && os.Args[1] == "ssh" {
 		os.Exit(sshMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))

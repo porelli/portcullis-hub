@@ -97,6 +97,8 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 		APIAddresses: apiAddresses(coreEnv["PORTCULLIS_KUBE_API_ENDPOINTS"]),
 		HA:           haFromEnv(getenv),
 	}
+	cfg.HA = settings.HA
+	cfg.BackupDestination = getenv("HUB_BACKUP_DESTINATION") == "set"
 	if settings.TraefikPeer, err = traefikPeerFromEnv(getenv, settings.HA, core); err != nil {
 		return nil, nil, err
 	}

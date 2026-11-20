@@ -293,6 +293,17 @@ func hostClusterNodes(mux *http.ServeMux, h *hub.Hub) {
 		}
 		writeRevoked(w, id, parked)
 	})
+	// `hub ha checklist` (`./portcullis ha status|enable`): the GET
+	// /api/ha answer (contract §20.1 "The CLI twins").
+	mux.HandleFunc("GET /host/ha", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		v, err := h.HA(r.Context())
+		if err != nil {
+			hostErr(w, err)
+			return
+		}
+		writeJSON(w, v)
+	})
 	mux.HandleFunc("GET /host/servers/{id}/op", func(w http.ResponseWriter, r *http.Request) {
 		noStore(w)
 		rec := h.ServerOp(r.PathValue("id"), r.URL.Query().Get("op_id"))

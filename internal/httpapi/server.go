@@ -151,6 +151,8 @@ func (s *Server) hubMux() *recordingMux {
 	s.registerServers(mux)
 	// Instance availability (§20.6; Kubernetes only).
 	s.registerAvailability(mux)
+	// The HA page (§20.1; Kubernetes only, read-only).
+	s.registerHA(mux)
 	// Settings → Mail and the admin mail routes (§19.9; Hub listener only).
 	s.registerMailAdmin(mux)
 	s.registerMailProvider(mux)

@@ -898,6 +898,16 @@
       </p>
       <div id="servers-root"></div>
 
+      <!-- Settings → High availability (web/ha.js; Kubernetes only) -->
+      <div id="ha-section" hidden>
+        <div class="category-title" style="margin: 2rem 0 1rem;">High availability</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          With 3 or more nodes, Portcullis survives the loss of any one of them: sign-in keeps working and no saved data is lost.
+          This page shows what's still missing and the cluster's live state; turning HA on is done on the server with <code>./portcullis ha enable</code>.
+        </p>
+        <div id="ha-root"></div>
+      </div>
+
     </div>
   </div>
 
@@ -938,6 +948,7 @@
   <script src="/static/availability.js"></script>
   <script src="/static/freshauth.js"></script>
   <script src="/static/servers.js"></script>
+  <script src="/static/ha.js"></script>
   <script src="/static/doctor.js"></script>
   <script src="/static/ssh.js"></script>
   <script src="/static/usage.js"></script>
@@ -962,6 +973,10 @@
         loadVPNSettings(document.getElementById('vpn-settings-root'));
         if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
         if (window.PortcullisServers) PortcullisServers.render(document.getElementById('servers-root'));
+        // High availability: Kubernetes only (Docker and Podman don't change).
+        const haSec = document.getElementById('ha-section');
+        haSec.hidden = !runtimeIsKube();
+        if (window.PortcullisHA && runtimeIsKube()) PortcullisHA.render(document.getElementById('ha-root'));
       }
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
       if (name === 'ssh' && window.PortcullisSSH) PortcullisSSH.render(document.getElementById('ssh-root'));
@@ -3569,6 +3584,11 @@
           b.hidden = false;
         }
         if (document.getElementById('tab-marketplace').classList.contains('active')) fillMarketplace();
+        // Settings opened before the runtime was known: High availability.
+        if (document.getElementById('tab-settings').classList.contains('active') && runtimeIsKube() && window.PortcullisHA) {
+          document.getElementById('ha-section').hidden = false;
+          PortcullisHA.render(document.getElementById('ha-root'));
+        }
       }).catch(() => { runtimeInfo = null; });
     }
     window.addEventListener('load', loadRuntime);

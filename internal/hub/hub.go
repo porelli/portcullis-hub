@@ -195,6 +195,13 @@ type Config struct {
 	// namespaces (HUB_APPS_NAMESPACE, the ServiceAccount's), the N−1
 	// check's (contract §20.7; "" = the chart's defaults).
 	AppsNamespace, CoreNamespace string
+	// HA is HUB_HA=on (contract §20.1 "HA mode": core's chart sets it
+	// with ha.enabled): GET /api/ha's enabled.
+	HA bool
+	// BackupDestination is HUB_BACKUP_DESTINATION=set (core's chart, when
+	// PORTCULLIS_BACKUP_S3_URL is set): the offsite destination's presence
+	// only, never its credentials (HA checklist backup_destination).
+	BackupDestination bool
 	// ClockOffset reads HUB_DEV_CLOCK_OFFSET_FILE's duration (core's e2e,
 	// e2etest builds only: internal/e2etest), added to h.now(); nil
 	// otherwise.
@@ -336,6 +343,8 @@ type Hub struct {
 	srvT      serverTimings
 	// cl is the cluster-node wiring (servers_cluster.go).
 	cl clusterNodes
+	// ha is the HA page's reads (ha.go).
+	ha haPage
 	// revokeLocks: per server, the *sync.Mutex advanceRevoke holds.
 	revokeLocks sync.Map
 	// inflight: owed serials whose sign → send → pin op still runs
