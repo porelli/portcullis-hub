@@ -91,7 +91,7 @@ func TestPushMeshOnJoin(t *testing.T) {
 	cf := newClusterFixture(t, twoSites()...)
 	// The cluster tick reads the init nodes' keys (their health) first.
 	cf.h.settleClusterNodes(context.Background())
-	enrolAt(cf, "e2", "edge", "10.215.0.4", "198.18.0.4", "", 1<<30)
+	enrolAt(cf, "e2", "edge", "10.215.0.3", "198.18.0.4", "", 1<<30)
 	cf.stopEnrol(t, "e2")
 	out, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "e2", Site: "edge", Role: "agent"})
 	if err != nil {
@@ -105,7 +105,7 @@ func TestPushMeshOnJoin(t *testing.T) {
 		meshNodeOf("n2", "main", "10.215.0.2", "192.0.2.2", ""),
 		meshNodeOf("e1", "edge", "10.215.0.5", "198.18.0.5", "203.0.113.5"),
 	}
-	boot, err := meshplan.Bootstrap(est, meshplan.Node{ID: "e2", Site: "edge", MeshIP: netip.MustParseAddr("10.215.0.4")})
+	boot, err := meshplan.Bootstrap(est, meshplan.Node{ID: "e2", Site: "edge", MeshIP: netip.MustParseAddr("10.215.0.3")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestPushMeshOnJoin(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	all := append(slices.Clone(est), meshNodeOf("e2", "edge", "10.215.0.4", "198.18.0.4", ""))
+	all := append(slices.Clone(est), meshNodeOf("e2", "edge", "10.215.0.3", "198.18.0.4", ""))
 	want, err := meshplan.Plan(all)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestPushMeshOnJoin(t *testing.T) {
 			t.Errorf("%s got %+v\nwant %+v", n.ID, got, nodeagent.WirePlan(want[n.ID]))
 		}
 	}
-	if p, _ := cf.na.meshOf("n2"); !peerAllows(p, "e1", "10.215.0.4/32") {
+	if p, _ := cf.na.meshOf("n2"); !peerAllows(p, "e1", "10.215.0.3/32") {
 		t.Errorf("n2 doesn't reach e2 through e1: %+v", p)
 	}
 	if p, _ := cf.na.meshOf("e1"); !p.Forward {
@@ -220,7 +220,7 @@ func TestPushMeshPartialFailure(t *testing.T) {
 		t.Errorf("stale after 6 min: %v", st.Stale)
 	}
 	// A join while n2 is stale isn't held up by it.
-	enrolAt(cf, "e2", "edge", "10.215.0.4", "198.18.0.4", "", 8)
+	enrolAt(cf, "e2", "edge", "10.215.0.3", "198.18.0.4", "", 8)
 	cf.na.mu.Lock()
 	cf.na.reads = 0
 	cf.na.mu.Unlock()
@@ -237,7 +237,7 @@ func TestPushMeshPartialFailure(t *testing.T) {
 	if st := cf.h.MeshStatus(); len(st.Stale) != 0 {
 		t.Errorf("still stale: %v", st.Stale)
 	}
-	if p, ok := cf.na.meshOf("n2"); !ok || !peerAllows(p, "e1", "10.215.0.4/32") {
+	if p, ok := cf.na.meshOf("n2"); !ok || !peerAllows(p, "e1", "10.215.0.3/32") {
 		t.Errorf("n2's plan after it came back: %+v", p)
 	}
 }
@@ -350,10 +350,10 @@ func TestMeshReadyWaitsForPeers(t *testing.T) {
 	if cf.h.st.Servers == nil {
 		cf.h.st.Servers = map[string]state.Server{}
 	}
-	cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.4"}
+	cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.3"}
 	cf.h.mu.Unlock()
 	cf.na.mu.Lock()
-	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.4",
+	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.3",
 		Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("e2"), LAN: jsonstrict.Some("198.18.0.4:51830")}}}
 	cf.na.mu.Unlock()
 	ctx := context.Background()
@@ -373,15 +373,21 @@ func TestMeshReadyWaitsForPeers(t *testing.T) {
 	if cf.h.st.Servers == nil {
 		cf.h.st.Servers = map[string]state.Server{}
 	}
-	cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.4"}
+	cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.3"}
 	cf.h.mu.Unlock()
 	cf.na.mu.Lock()
-	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.4",
+	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.3",
 		Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("e2"), LAN: jsonstrict.Some("198.18.0.4:51830")}}}
 	cf.na.snap.Node("n2").Ready = false
 	cf.na.mu.Unlock()
 	cf.na.setRefuse("mesh:n2", errors.New("timeout"))
-	if ok, err := cf.h.meshReadyOf(ctx, "e2"); !ok || err != nil {
+	// The first round pushes the plans; the next one sees the handshakes
+	// that confirm the public endpoints.
+	ok, err := false, error(nil)
+	for i := 0; i < 3 && !ok && err == nil; i++ {
+		ok, err = cf.h.meshReadyOf(ctx, "e2")
+	}
+	if !ok || err != nil {
 		t.Errorf("held up by a NotReady node: %v %v", ok, err)
 	}
 	// The joining node itself must have taken its plan.
@@ -406,10 +412,10 @@ func TestMeshJoinerKeyRefused(t *testing.T) {
 		if cf.h.st.Servers == nil {
 			cf.h.st.Servers = map[string]state.Server{}
 		}
-		cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.4"}
+		cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.3"}
 		cf.h.mu.Unlock()
 		cf.na.mu.Lock()
-		cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.4",
+		cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.3",
 			Mesh: nodeadm.MeshReport{Pub: key, LAN: jsonstrict.Some("198.18.0.4:51830")}}}
 		cf.na.mu.Unlock()
 		ok, err := cf.h.meshReadyOf(ctx, "e2")
@@ -448,7 +454,7 @@ func enrollingE2(cf *clusterFixture, key, step string) {
 	if cf.h.st.Servers == nil {
 		cf.h.st.Servers = map[string]state.Server{}
 	}
-	cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.4",
+	cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.3",
 		Enrol: &state.Enrol{Step: step}}
 	cf.h.mu.Unlock()
 	setReport(cf, key)
@@ -456,7 +462,7 @@ func enrollingE2(cf *clusterFixture, key, step string) {
 
 func setReport(cf *clusterFixture, key string) {
 	cf.na.mu.Lock()
-	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.4",
+	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.3",
 		Mesh: nodeadm.MeshReport{Pub: key, LAN: jsonstrict.Some("198.18.0.4:51830")}}}
 	cf.na.mu.Unlock()
 }
@@ -527,7 +533,7 @@ func TestMeshKeyRecordedOnceValid(t *testing.T) {
 	if p, _ := cf.na.meshOf("e1"); peerKeyOf(p, "e2") != fakeMeshKey("e2") {
 		t.Errorf("e1's peer e2 key %q", peerKeyOf(p, "e2"))
 	}
-	if why := cf.h.MeshStatus().Stale["e2"]; !strings.Contains(why, "changed its pcmesh key after mesh_ready") {
+	if why := cf.h.MeshStatus().Stale["e2"]; !strings.Contains(why, "changed its pcmesh key after its plan was pushed") {
 		t.Errorf("flag %q", why)
 	}
 }
@@ -578,18 +584,311 @@ func TestDedupeByKeyBytes(t *testing.T) {
 		established: []meshplan.Node{
 			meshNodeOf("a", "main", "10.215.0.3", "192.0.2.3", ""), meshNodeOf("b", "main", "10.215.0.4", "192.0.2.4", ""),
 			meshNodeOf("c", "main", "10.215.0.5", "192.0.2.5", "")}}
-	in.established[0].Pub, in.established[1].Pub, in.established[2].Pub = k, altKey(k), fakeMeshKey("c")
-	keep, dupes := dedupeEstablished(in)
+	in.established[0].Pub, in.established[1].Pub, in.established[2].Pub = k, k, fakeMeshKey("c")
+	keep, dupes := sanitizeEstablished(in)
 	if len(keep) != 2 || keep[0].ID != "b" || keep[1].ID != "c" || !strings.Contains(dupes["a"], "node b's") {
 		t.Errorf("keep %v dupes %v", keep, dupes)
 	}
 	in.keyAt = map[string]time.Time{"a": time.Unix(200, 0)} // b: a node of init
-	in.established[0].Pub, in.established[1].Pub = altKey(k), k
-	if _, dupes := dedupeEstablished(in); !strings.Contains(dupes["a"], "node b's") {
+	if _, dupes := sanitizeEstablished(in); !strings.Contains(dupes["a"], "node b's") {
 		t.Errorf("init node lost: %v", dupes)
 	}
+	// Another spelling of b's key is no WireGuard key (the nodeagent's
+	// rule): left out, and never mistaken for a different key.
+	in.established[0].Pub = altKey(k)
+	if _, dupes := sanitizeEstablished(in); !strings.Contains(dupes["a"], "isn't a WireGuard key") {
+		t.Errorf("non-canonical spelling: %v", dupes)
+	}
+	in.established[0].Pub = k
 	plans, _, _, dupes, err := planMesh(in)
 	if err != nil || len(plans) != 2 || dupes["a"] == "" {
 		t.Errorf("planMesh %v %v %v", plans, dupes, err)
+	}
+}
+
+// fakeClockHub sets a movable clock on the Hub.
+func fakeClockHub(cf *clusterFixture) func(time.Duration) {
+	var mu sync.Mutex
+	now := time.Now().UTC()
+	cf.h.srvT.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	return func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+}
+
+func (cf *clusterFixture) meshRecord(id string) state.MeshNode {
+	cf.h.mu.RLock()
+	defer cf.h.mu.RUnlock()
+	return cf.h.st.Mesh[id]
+}
+
+func (cf *clusterFixture) closeEndpoint(ep string) {
+	cf.na.mu.Lock()
+	if cf.na.closed == nil {
+		cf.na.closed = map[string]bool{}
+	}
+	cf.na.closed[ep] = true
+	cf.na.mu.Unlock()
+}
+
+// TestMeshHomeMainForwardsOnlyWeb (S-I1): a home main whose router
+// forwards only 80/443: its node's ingress address is offered on 51830,
+// no node at edge ever holds a handshake from it, so after 2 min it is
+// unreachable, main has no gateway, and the cloud node joining edge is
+// refused at mesh_ready with the §20.11 text (revoked, no k3s material)
+// instead of hanging at mesh_pending.
+func TestMeshHomeMainForwardsOnlyWeb(t *testing.T) {
+	cf := newClusterFixture(t,
+		siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1"),
+		siteNode("n2", "server", "main", "10.215.0.2", "192.0.2.2", ""))
+	advance := fakeClockHub(cf)
+	cf.stopEnrol(t, "e1") // a failure never leaves the op running
+	cf.closeEndpoint("203.0.113.1:51830")
+	cf.h.settleClusterNodes(context.Background())
+	enrolAt(cf, "e1", "edge", "10.215.0.3", "198.18.0.3", "203.0.113.5", 1<<30)
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "e1", Site: "edge", Role: "agent", Class: "cloud"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for cf.meshRecord("n1").Reach != state.ReachOffered {
+		if time.Now().After(deadline) {
+			t.Fatalf("n1 never offered: %+v", cf.meshRecord("n1"))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r := cf.h.LastOp(serverOpKey("e1")); r == nil || !r.Running {
+		t.Fatalf("the join didn't wait for the confirmation: %+v", r)
+	}
+	advance(MeshConfirmWait + time.Second)
+	r := waitServerOp(t, cf.h, serverOpKey("e1"))
+	want := "site main needs one node reachable on UDP 51830 first (a cloud node, or one forwarded port)"
+	if r.OK || !strings.Contains(r.Error, want) || meshStep(&r, StepMeshReady) != StepFailed {
+		t.Fatalf("op %+v", r)
+	}
+	if rec := cf.meshRecord("n1"); rec.Reach != state.ReachUnreachable || rec.Public != "203.0.113.1:51830" {
+		t.Errorf("n1's record %+v", rec)
+	}
+	if rec := cf.meshRecord("e1"); rec.Reach != state.ReachReachable {
+		t.Errorf("e1's record %+v (n1 holds a handshake from it)", rec)
+	}
+	if c := cf.na.Calls(); !slices.Contains(c, "remove:e1:revoke") {
+		t.Errorf("e1 wasn't revoked: %v", c)
+	}
+	if st := cf.h.MeshStatus(); !slices.Contains(st.NoGateway, "main") {
+		t.Errorf("no gateway %v", st.NoGateway)
+	}
+	for _, id := range []string{"n1", "n2"} {
+		if p, _ := cf.na.meshOf(id); peerKeyOf(p, "e1") != "" {
+			t.Errorf("%s kept the refused e1", id)
+		}
+	}
+}
+
+// TestMeshEndpointBecomesReachable: an offered public endpoint with a
+// fresh handshake from another site, on that endpoint, is reachable (and
+// stays so past the 2 min); the node is a gateway. The record survives a
+// restart (state.Mesh).
+func TestMeshEndpointBecomesReachable(t *testing.T) {
+	cf := newClusterFixture(t, twoSites()...)
+	advance := fakeClockHub(cf)
+	ctx := context.Background()
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rec := cf.meshRecord("n1"); rec.Reach != state.ReachOffered {
+		t.Fatalf("first push: %+v", rec)
+	}
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"n1", "e1"} {
+		if rec := cf.meshRecord(id); rec.Reach != state.ReachReachable {
+			t.Errorf("%s: %+v", id, rec)
+		}
+	}
+	advance(10 * time.Minute)
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rec := cf.meshRecord("n1"); rec.Reach != state.ReachReachable {
+		t.Errorf("n1 after 10 min: %+v", rec)
+	}
+	if p, _ := cf.na.meshOf("e1"); peerKeyOf(p, "n1") == "" || p.Peers[0].ID != "n1" || p.Peers[0].Endpoint.V != "203.0.113.1:51830" {
+		t.Errorf("e1's plan %+v", p)
+	}
+	if st := cf.h.MeshStatus(); len(st.NoGateway) != 0 {
+		t.Errorf("no gateway %v", st.NoGateway)
+	}
+}
+
+// TestMeshRestartWithInitNodeDown (Q-I1, Q-M4): the init nodes' keys
+// and a removal are persisted; after a restart (the in-memory state gone)
+// with n2 down, the removal of e3 is still pushed (n2 planned with its
+// last-known key, named as missing its plan) and a removed init node
+// doesn't come back.
+func TestMeshRestartWithInitNodeDown(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, append(twoSites(), siteNode("e3", "agent", "edge", "10.215.0.7", "198.18.0.7", ""))...)
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rec := cf.meshRecord("n2"); rec.Pub != fakeMeshKey("n2") || rec.MeshIP != "10.215.0.2" || rec.Site != "main" {
+		t.Fatalf("n2's record %+v", rec)
+	}
+	cf.h.cl.ms = meshState{allowDoc: true} // a restart
+	cf.na.setRefuse("health:n2", errors.New("down"))
+	cf.na.setRefuse("mesh:n2", errors.New("down"))
+	err := cf.h.meshRemove(ctx, "e3")
+	if err == nil || !strings.Contains(err.Error(), "didn't reach n2 ") {
+		t.Fatalf("remove e3 with n2 down: %v", err)
+	}
+	for _, id := range []string{"n1", "e1"} {
+		p, _ := cf.na.meshOf(id)
+		if peerKeyOf(p, "e3") != "" || peerKeyOf(p, "n2") != fakeMeshKey("n2") {
+			t.Errorf("%s's plan %+v", id, p)
+		}
+	}
+	cf.h.cl.ms = meshState{allowDoc: true} // another restart: e3 still listed
+	if err := cf.h.pushMesh(ctx); err == nil || strings.Contains(err.Error(), "pcmesh key") {
+		t.Errorf("push: %v", err)
+	}
+	if p, _ := cf.na.meshOf("n1"); peerKeyOf(p, "e3") != "" {
+		t.Error("the removed e3 came back after a restart")
+	}
+}
+
+// TestMeshNodeObjectDisagrees (Q-I2): the Hub's records are the truth. A
+// Node object claiming another node's mesh ip, or another site, is left
+// out alone and flagged; every other node still gets its plan.
+func TestMeshNodeObjectDisagrees(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, append(twoSites(), siteNode("e3", "agent", "edge", "10.215.0.7", "198.18.0.7", ""))...)
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// e3 (a node of init) now claims n2's mesh ip; e1 relabels itself.
+	cf.na.mu.Lock()
+	cf.na.snap.Node("e3").Addresses.Mesh = "10.215.0.2"
+	cf.na.snap.Node("e1").Labels[nodeadm.LabelSite] = "main"
+	cf.na.mu.Unlock()
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatalf("one node's lie stopped the push: %v", err)
+	}
+	st := cf.h.MeshStatus()
+	if !strings.Contains(st.Stale["e3"], "mesh ip 10.215.0.2, the Hub's record 10.215.0.7") || !strings.Contains(st.Stale["e1"], "site main, the Hub's record edge") {
+		t.Errorf("flags %v", st.Stale)
+	}
+	p, _ := cf.na.meshOf("n1")
+	if peerKeyOf(p, "e3") != "" || peerKeyOf(p, "e1") != "" || peerKeyOf(p, "n2") != fakeMeshKey("n2") {
+		t.Errorf("n1's plan %+v", p)
+	}
+	// A Hub-added node: its entry's site and mesh ip win the same way.
+	cf.h.mu.Lock()
+	if cf.h.st.Servers == nil {
+		cf.h.st.Servers = map[string]state.Server{}
+	}
+	cf.h.st.Servers["e3"] = state.Server{Kind: state.KindClusterNode, State: ServerReady, Site: "edge", MeshIP: "10.215.0.7",
+		MeshPub: fakeMeshKey("e3"), MeshLAN: "198.18.0.7:51830", MeshKeyAt: time.Now()}
+	cf.h.mu.Unlock()
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cf.h.MeshStatus().Stale["e3"], "the Hub's record 10.215.0.7") {
+		t.Errorf("listed e3: %v", cf.h.MeshStatus().Stale)
+	}
+}
+
+// TestMeshEndpointRules (Q-I3): a public endpoint must be an address the
+// front door would publish; a LAN endpoint may be private but not
+// loopback, link-local, multicast or the cluster's networks. A bad one is
+// dropped (the node planned without it) and flagged.
+func TestMeshEndpointRules(t *testing.T) {
+	ex := []netip.Prefix{meshplan.Prefix, linkCIDR, netip.MustParsePrefix("10.42.0.0/16"), netip.MustParsePrefix("10.43.0.0/16")}
+	for ep, ok := range map[string]bool{
+		"8.8.8.8:51830": true, "8.8.8.8:40000": true, "203.0.113.1:51830": false, "10.0.0.1:51830": false, "192.168.1.1:51830": false,
+		"100.64.1.1:51830": false, "127.0.0.1:51830": false, "169.254.1.1:51830": false, "0.0.0.0:51830": false, "224.0.0.1:51830": false,
+		"198.18.0.1:51830": false, "240.0.0.1:51830": false, "10.215.0.9:51830": false, "8.8.8.8:0": false, "[2001:4860::1]:51830": false,
+	} {
+		if err := publicEndpointOK(netip.MustParseAddrPort(ep), false, ex); (err == nil) != ok {
+			t.Errorf("public %s: %v", ep, err)
+		}
+	}
+	for ep, ok := range map[string]bool{
+		"192.168.1.5:51830": true, "10.0.0.5:51830": true, "172.16.0.5:51830": true, "192.168.1.5:40000": false, "127.0.0.1:51830": false,
+		"169.254.1.1:51830": false, "224.0.0.1:51830": false, "0.0.0.0:51830": false, "10.215.0.9:51830": false, "10.214.0.9:51830": false,
+		"10.42.1.1:51830": false, "10.43.0.10:51830": false, "255.255.255.255:51830": false,
+	} {
+		if err := lanEndpointOK(netip.MustParseAddrPort(ep), ex); (err == nil) != ok {
+			t.Errorf("lan %s: %v", ep, err)
+		}
+	}
+	// A node of init whose public address is a mesh address, and a LAN on
+	// loopback: both dropped and flagged, the node planned NATed.
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	cf.na.mu.Lock()
+	cf.na.snap.Node("n1").Addresses = nodeadm.NodeAddresses{Mesh: "10.215.0.1", LAN: []string{"127.0.0.1"}, Public: []string{"10.215.0.9"}}
+	cf.na.snap.Nodes = append(cf.na.snap.Nodes, siteNode("n3", "server", "main", "10.215.0.4", "192.0.2.4", "203.0.113.4"))
+	cf.na.mu.Unlock()
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if why := cf.h.MeshStatus().Stale["n1"]; !strings.Contains(why, "LAN endpoint 127.0.0.1 can't be a LAN endpoint") || !strings.Contains(why, "public endpoint 10.215.0.9 isn't a public address") {
+		t.Errorf("flag %q", why)
+	}
+	p, _ := cf.na.meshOf("e1")
+	for _, q := range p.Peers {
+		if q.ID == "n1" && q.Endpoint.Valid {
+			t.Errorf("e1 reaches n1 on %s", q.Endpoint.V)
+		}
+	}
+}
+
+// TestMeshJoinerKeyEarlierWins (Q-M1, Q-M3): a second joiner reporting the
+// key the first one recorded is refused, the first one isn't; a key is
+// frozen once its plan was pushed, before the step moves on.
+func TestMeshJoinerKeyEarlierWins(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	cf.h.settleClusterNodes(ctx)
+	enrollingE2(cf, fakeMeshKey("e2"), StepMeshReady)
+	for i := 0; i < 3; i++ {
+		cf.h.meshReadyOf(ctx, "e2")
+	}
+	cf.h.mu.Lock()
+	cf.h.st.Servers["e4"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.8", Enrol: &state.Enrol{Step: StepMeshReady}}
+	cf.h.mu.Unlock()
+	cf.na.mu.Lock()
+	cf.na.snap.Enrolling = append(cf.na.snap.Enrolling, nodeadm.Enrolling{ID: "e4", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.8",
+		Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("e2"), LAN: jsonstrict.Some("198.18.0.8:51830")}})
+	cf.na.mu.Unlock()
+	if ok, err := cf.h.meshReadyOf(ctx, "e2"); !ok || err != nil {
+		t.Errorf("the first joiner: %v %v", ok, err)
+	}
+	if _, err := cf.h.meshReadyOf(ctx, "e4"); err == nil || !strings.Contains(err.Error(), "is used by another node") {
+		t.Errorf("the second joiner: %v", err)
+	}
+	// e2's plan was pushed: a new key is ignored though its step is still
+	// mesh_ready.
+	cf.na.mu.Lock()
+	cf.na.snap.Enrolling[0].Mesh.Pub = fakeMeshKey("e2b")
+	cf.na.mu.Unlock()
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := cf.h.serverEntry("e2"); s.MeshPub != fakeMeshKey("e2") {
+		t.Errorf("e2's key moved to %q", s.MeshPub)
+	}
+	// Q-M2: once neither joiner is listed, their flags go.
+	cf.na.mu.Lock()
+	cf.na.snap.Enrolling = nil
+	cf.na.mu.Unlock()
+	cf.h.mu.Lock()
+	delete(cf.h.st.Servers, "e2")
+	delete(cf.h.st.Servers, "e4")
+	cf.h.mu.Unlock()
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := cf.h.MeshStatus(); st.Stale["e2"] != "" || st.Stale["e4"] != "" {
+		t.Errorf("stale flags kept: %v", st.Stale)
 	}
 }

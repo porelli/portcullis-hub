@@ -97,6 +97,27 @@ func Gateway(nodes []Node, site string) (string, bool) {
 	return best, ok
 }
 
+// MissingGateways are the sites (sorted) of a multi-site mesh without a
+// reachable node; nothing is validated (a joining node's key may be
+// unknown yet).
+func MissingGateways(nodes []Node) []string {
+	set := map[string]bool{}
+	for _, n := range nodes {
+		set[n.Site] = true
+	}
+	if len(set) < 2 {
+		return nil
+	}
+	var out []string
+	for s := range set {
+		if _, ok := Gateway(nodes, s); !ok {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Plan is every node's plan, keyed by id. With two or more sites every
 // site needs a reachable node, else the refusal for the first such site by
 // name (*SiteError).
@@ -127,17 +148,18 @@ func Bootstrap(nodes []Node, joining Node) (NodePlan, error) {
 		}
 	}
 	all = append(all, j)
-	plans, _, err := Degraded(all)
+	plans, _, err := degraded(all, j.ID)
 	if err != nil {
 		return NodePlan{}, err
 	}
 	return plans[j.ID], nil
 }
 
-// validate: unique ids, every mesh address inside 10.215.0.0/24 (not its
+// validate (keyless: the one node whose key may be unknown, a joining
+// node's bootstrap plan): every key a WireGuard key, unique ids, every mesh address inside 10.215.0.0/24 (not its
 // network or broadcast address) and used once, every pcmesh key used
 // once (a repeated key would let one node take another's traffic).
-func validate(nodes []Node) error {
+func validate(nodes []Node, keyless string) error {
 	ids := map[string]bool{}
 	byIP := map[netip.Addr]string{}
 	byKey := map[string]string{}
@@ -155,11 +177,14 @@ func validate(nodes []Node) error {
 		}
 		byIP[a] = n.ID
 		if n.Pub != "" {
-			k := KeyID(n.Pub)
+			k := KeyID(n.Pub) // by its bytes: every spelling is one key
 			if o, ok := byKey[k]; ok {
 				return fmt.Errorf("the pcmesh key of %s is already used by %s", n.ID, o)
 			}
 			byKey[k] = n.ID
+		}
+		if n.ID != keyless && !ValidKey(n.Pub) {
+			return fmt.Errorf("node %s: its pcmesh key isn't a WireGuard key", n.ID)
 		}
 	}
 	return nil
@@ -172,7 +197,11 @@ func validate(nodes []Node) error {
 // The Hub uses it to keep removing peers while a site has lost its
 // gateway (doctor mesh_site_no_gateway); a validation fault is still err.
 func Degraded(nodes []Node) (map[string]NodePlan, []string, error) {
-	if err := validate(nodes); err != nil {
+	return degraded(nodes, "")
+}
+
+func degraded(nodes []Node, keyless string) (map[string]NodePlan, []string, error) {
+	if err := validate(nodes, keyless); err != nil {
 		return nil, nil, err
 	}
 	siteSet := map[string]bool{}

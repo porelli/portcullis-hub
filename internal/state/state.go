@@ -215,8 +215,10 @@ type AppState struct {
 	Instances map[string]Instance `json:"instances,omitempty" yaml:"instances,omitempty"`
 	// Servers are the worker servers by id (contract §17.3);
 	// PrimaryBackups the primary's scheduled backups (§11.5).
-	Servers        map[string]Server `json:"servers,omitempty" yaml:"servers,omitempty"`
-	PrimaryBackups BackupSchedule    `json:"primary_backups" yaml:"primary_backups"`
+	Servers map[string]Server `json:"servers,omitempty" yaml:"servers,omitempty"`
+	// Mesh is the node mesh's record per node id (MeshNode).
+	Mesh           map[string]MeshNode `json:"mesh,omitempty" yaml:"mesh,omitempty"`
+	PrimaryBackups BackupSchedule      `json:"primary_backups" yaml:"primary_backups"`
 	// Quarantined: tunnel address → until when it stays unallocated (a
 	// revoked server's, kept after the server is removed; §17.3).
 	Quarantined map[string]time.Time `json:"quarantined,omitempty" yaml:"quarantined,omitempty"`

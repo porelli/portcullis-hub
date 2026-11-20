@@ -37,6 +37,17 @@ type Health struct {
 	MeshPub string `json:"mesh_pub"`
 	K3s     string `json:"k3s"`
 	Time    string `json:"time"`
+	// Peers is each plan peer's WireGuard state (by peer id): its latest
+	// handshake (RFC 3339 UTC, null: none yet) and the endpoint the device
+	// uses for it (null: none). The Hub confirms a public endpoint as
+	// reachable from it (contract §20.11).
+	Peers map[string]PeerStatus `json:"peers"`
+}
+
+// PeerStatus is one peer's state in GET /v1/health.
+type PeerStatus struct {
+	LatestHandshake jsonstrict.Nullable[string] `json:"latest_handshake"`
+	Endpoint        jsonstrict.Nullable[string] `json:"endpoint"`
 }
 
 // Client is one node's nodeagent: BaseURL (https://<mesh ip>:7443) and

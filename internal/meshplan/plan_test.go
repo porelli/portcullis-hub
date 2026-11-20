@@ -1,6 +1,7 @@
 package meshplan
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -103,11 +104,18 @@ func TestMeshPlanVectors(t *testing.T) {
 
 func n(id, site string, ip int, public bool) Node {
 	nd := Node{ID: id, Site: site, MeshIP: netip.AddrFrom4([4]byte{10, 215, 0, byte(ip)}),
-		LAN: netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 168, byte(len(site)), byte(ip)}), Port), Pub: "k-" + id}
+		LAN: netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 168, byte(len(site)), byte(ip)}), Port), Pub: testKey(id)}
 	if public {
 		nd.Public = netip.AddrPortFrom(netip.AddrFrom4([4]byte{203, 0, 113, byte(ip)}), Port)
 	}
 	return nd
+}
+
+// testKey is a WireGuard key made from id.
+func testKey(id string) string {
+	b := make([]byte, 32)
+	copy(b, "key:"+id)
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 func peerOf(p NodePlan, id string) (Peer, bool) {
@@ -316,5 +324,25 @@ func TestValidKeyAndKeyID(t *testing.T) {
 	}
 	if KeyID("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=") == KeyID(k) {
 		t.Error("two keys collide")
+	}
+}
+
+// TestPlanRefusesBadKeys: the package checks keys itself (Q-M5): a
+// missing or non-WireGuard key is refused by Plan; only Bootstrap's
+// joining node may lack one.
+func TestPlanRefusesBadKeys(t *testing.T) {
+	a, b := n("n1", "main", 1, true), n("n2", "main", 2, false)
+	for _, k := range []string{"", "k-n2", altSpelling(testKey("n2")), base64.StdEncoding.EncodeToString(make([]byte, 32))} {
+		b.Pub = k
+		if _, err := Plan([]Node{a, b}); err == nil || err.Error() != "node n2: its pcmesh key isn't a WireGuard key" {
+			t.Errorf("%q: %v", k, err)
+		}
+	}
+	if _, err := Bootstrap([]Node{a}, Node{ID: "j", Site: "main", MeshIP: netip.MustParseAddr("10.215.0.9")}); err != nil {
+		t.Errorf("a keyless joiner: %v", err)
+	}
+	a.Pub = ""
+	if _, err := Bootstrap([]Node{a}, Node{ID: "j", Site: "main", MeshIP: netip.MustParseAddr("10.215.0.9")}); err == nil {
+		t.Error("a keyless existing node passed")
 	}
 }

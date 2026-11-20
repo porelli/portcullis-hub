@@ -268,6 +268,19 @@ func TestMeshNetns(t *testing.T) {
 		}
 		t.FailNow()
 	}
+	// GET /v1/health's peers: n2 (NATed) holds a fresh handshake with the
+	// gateway e1 on e1's public endpoint, the Hub's proof that it answers.
+	for _, n := range nodes {
+		if n.node.ID != "n2" {
+			continue
+		}
+		hl := n.agent.Health(ctx)
+		ps := hl.Peers["e1"]
+		at, err := time.Parse(time.RFC3339, ps.LatestHandshake.V)
+		if !ps.LatestHandshake.Valid || err != nil || time.Since(at) > 3*time.Minute || ps.Endpoint.V != "203.0.113.5:51830" {
+			t.Errorf("n2's view of e1: %+v", ps)
+		}
+	}
 	// The pair n2 ↔ e2 goes through e1: without e1's relay rule exactly
 	// that pair breaks.
 	off := plans["e1"]

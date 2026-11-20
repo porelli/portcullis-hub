@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
 	"github.com/portcullis/hub/internal/jsonstrict"
 	"github.com/portcullis/hub/internal/meshplan"
 	na "github.com/portcullis/hub/internal/nodeagent"
@@ -246,8 +248,8 @@ func (c *fakeClock) add(d time.Duration) {
 }
 
 // TestRTTEndpoint: an echo peer that answers after an injected 30 ms
-// delay (on the agent's clock) → GET /v1/mesh/rtt answers its p95 within
-// [30, 45) ms (X4); a peer that doesn't answer is left out; the answer
+// delay (on the agent's clock) → GET /v1/mesh/rtt answers its p95, 33 ms
+// exactly, within [30, 40] (X4); a peer that doesn't answer is left out; the answer
 // is cached.
 func TestRTTEndpoint(t *testing.T) {
 	r := newRig(t, "agent")
@@ -319,8 +321,10 @@ func TestRTTEndpoint(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
 	}
-	if v, ok := got["n1"]; !ok || v < 30 || v >= 45 || len(got) != 1 {
-		t.Errorf("rtt %v: want n1 in [30, 45) ms and n3 left out", got)
+	// 18 rounds at 30 ms, 2 at 33 ms: the p95 (19th of 20) is 33, exactly
+	// (the clock is injected), within T10's [30, 40].
+	if v, ok := got["n1"]; !ok || v != 33 || len(got) != 1 {
+		t.Errorf("rtt %v: want n1 = 33 ms and n3 left out", got)
 	}
 	if dials["10.215.0.2>10.215.0.1"] != 1 || dials["10.215.0.2>10.215.0.3"] != 1 {
 		t.Errorf("echo sockets %v: want one from the mesh address to each peer", dials)
@@ -349,4 +353,47 @@ func TestKeyCheckParity(t *testing.T) {
 			t.Errorf("%q: nodeagent %v, Hub %v", s, validWGKey(s), meshplan.ValidKey(s))
 		}
 	}
+}
+
+// TestHealthPeerStatus: GET /v1/health names each plan peer's latest
+// handshake and endpoint (null when none), keyed by the plan's ids; a
+// device peer the plan doesn't name is left out.
+func TestHealthPeerStatus(t *testing.T) {
+	r := newRig(t, "agent")
+	ctx := context.Background()
+	k1, k3 := peerKey(t), peerKey(t)
+	plan := na.MeshPlan{Peers: []na.MeshPeer{
+		{ID: "n1", Pub: k1, Endpoint: ep("192.0.2.1:51830"), AllowedIPs: []string{"10.215.0.1/32"}, Keepalive: 25},
+		{ID: "n3", Pub: k3, AllowedIPs: []string{"10.215.0.3/32"}, Keepalive: 25},
+	}}
+	if err := r.a.ApplyMesh(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 20, 10, 0, 5, 0, time.UTC)
+	r.wg.mu.Lock()
+	for i := range r.wg.dev.Peers {
+		if r.wg.dev.Peers[i].PublicKey.String() == k1 {
+			r.wg.dev.Peers[i].LastHandshakeTime = at
+			r.wg.dev.Peers[i].Endpoint = &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 51830}
+		}
+	}
+	r.wg.dev.Peers = append(r.wg.dev.Peers, wgtypes.Peer{PublicKey: mustKey(t, peerKey(t))})
+	r.wg.mu.Unlock()
+	code, body := do(t, r.client(r.ca, na.CNHub), "GET", r.server().URL+"/v1/health", "")
+	var h na.Health
+	if code != 200 || jsonstrict.Decode([]byte(body), &h) != nil {
+		t.Fatalf("%d %s", code, body)
+	}
+	if len(h.Peers) != 2 || h.Peers["n1"].LatestHandshake.V != "2026-11-20T10:00:05Z" || h.Peers["n1"].Endpoint.V != "192.0.2.1:51830" ||
+		h.Peers["n3"].LatestHandshake.Valid || h.Peers["n3"].Endpoint.Valid {
+		t.Errorf("peers %+v", h.Peers)
+	}
+}
+
+func mustKey(t *testing.T, s string) wgtypes.Key {
+	k, err := wgtypes.ParseKey(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }

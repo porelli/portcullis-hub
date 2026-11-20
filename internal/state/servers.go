@@ -130,3 +130,27 @@ type OwedSerial struct {
 	Serial string    `json:"serial" yaml:"serial"`
 	Since  time.Time `json:"since" yaml:"since"`
 }
+
+// MeshNode is the Hub's record of a node's place in the pcmesh peer plan
+// (contract §20.11), persisted so a Hub restart plans with what it knew:
+// for a node of init (no Server entry) its key, mesh address and site,
+// pinned at first sight; for every node the state of its public endpoint
+// (offered until a peer at another site holds a handshake from it, then
+// reachable, or unreachable after 2 min without one) and whether it was
+// taken out of every plan.
+type MeshNode struct {
+	Pub       string    `json:"pub,omitempty" yaml:"pub,omitempty"`
+	MeshIP    string    `json:"mesh_ip,omitempty" yaml:"mesh_ip,omitempty"`
+	Site      string    `json:"site,omitempty" yaml:"site,omitempty"`
+	Public    string    `json:"public,omitempty" yaml:"public,omitempty"`
+	Reach     string    `json:"reach,omitempty" yaml:"reach,omitempty"`
+	OfferedAt time.Time `json:"offered_at,omitempty" yaml:"offered_at,omitempty"`
+	Removed   bool      `json:"removed,omitempty" yaml:"removed,omitempty"`
+}
+
+// The public endpoint states of a MeshNode.
+const (
+	ReachOffered     = "offered"
+	ReachReachable   = "reachable"
+	ReachUnreachable = "unreachable"
+)

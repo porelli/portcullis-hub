@@ -2322,5 +2322,27 @@
    }
   ],
   "want_error": "the pcmesh key of n2 is already used by n1"
+ },
+ {
+  "name": "a pcmesh key that isn't canonical WireGuard base64 is refused (the nodeagent would refuse it)",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgJ="
+   }
+  ],
+  "want_error": "node n2: its pcmesh key isn't a WireGuard key"
  }
 ]

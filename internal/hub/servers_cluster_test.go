@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/jsonstrict"
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/nodeagent"
 	"github.com/portcullis/hub/internal/runtime"
@@ -37,6 +38,8 @@ type fakeNodeadm struct {
 	meshOrder []string
 	// codeMesh: each code's bootstrap plan.
 	codeMesh []nodeadm.MeshPlan
+	// closed: endpoints ("<ip:port>") nothing answers on (no handshake).
+	closed map[string]bool
 }
 
 const testSecret = "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"
@@ -131,7 +134,21 @@ func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
 	if err != nil {
 		return nodeagent.Health{}, err
 	}
-	return nodeagent.Health{ID: a.id, MeshPub: fakeMeshKey(a.id), K3s: "running"}, nil
+	// Each plan peer with an endpoint that isn't closed has a fresh
+	// handshake on it (a reachable endpoint answers).
+	now := time.Now().UTC()
+	peers := map[string]nodeagent.PeerStatus{}
+	a.f.mu.Lock()
+	for _, q := range a.f.mesh[a.id].Peers {
+		ps := nodeagent.PeerStatus{}
+		if q.Endpoint.Valid && !a.f.closed[q.Endpoint.V] {
+			ps.LatestHandshake = jsonstrict.Some(now.Add(-10 * time.Second).Format(time.RFC3339))
+			ps.Endpoint = q.Endpoint
+		}
+		peers[q.ID] = ps
+	}
+	a.f.mu.Unlock()
+	return nodeagent.Health{ID: a.id, MeshPub: fakeMeshKey(a.id), K3s: "running", Time: now.Format(time.RFC3339), Peers: peers}, nil
 }
 
 // PutMeshPeers records the plan (not in calls: the removal and enrolment
@@ -171,6 +188,7 @@ func newClusterFixture(t *testing.T, nodes ...nodeadm.Node) *clusterFixture {
 	na := &fakeNodeadm{snap: nodeadm.Snapshot{V: 1, Nodes: nodes}, refuse: map[string]error{}, ca: caSHA256(nca.cert)}
 	f.h.SetNodeadm(na)
 	f.h.cl.poll = 2 * time.Millisecond
+	f.h.cl.ms.allowDoc = true // the tests' public addresses are TEST-NET
 	f.h.cl.agentFor = func(id, _ string) NodeagentAPI { return fakeNodeagent{na, id} }
 	a := &fakeAudit{}
 	f.h.SetAudit(a)

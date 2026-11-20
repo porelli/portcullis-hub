@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -255,5 +256,42 @@ func (a *Agent) serve(ctx context.Context, w http.ResponseWriter, r *http.Reques
 func (a *Agent) Health(ctx context.Context) na.Health {
 	st := a.state()
 	return na.Health{ID: st.ID, Version: a.cfg.Version, MeshIP: st.MeshIP, MeshPub: a.meshPub(),
-		K3s: a.k3sState(ctx), Time: a.cfg.Now().UTC().Format(time.RFC3339)}
+		K3s: a.k3sState(ctx), Time: a.cfg.Now().UTC().Format(time.RFC3339), Peers: a.peerStatus()}
+}
+
+// peerStatus is every plan peer's latest handshake and endpoint, read
+// from pcmesh (an unreadable device: no entries).
+func (a *Agent) peerStatus() map[string]na.PeerStatus {
+	out := map[string]na.PeerStatus{}
+	a.mu.Lock()
+	var plan na.MeshPlan
+	if a.plan != nil {
+		plan = a.plan.plan
+	}
+	a.mu.Unlock()
+	if a.cfg.WG == nil {
+		return out
+	}
+	dev, err := a.cfg.WG.Device(na.MeshIface)
+	if err != nil {
+		return out
+	}
+	byKey := map[string]na.PeerStatus{}
+	for _, p := range dev.Peers {
+		var ps na.PeerStatus
+		if !p.LastHandshakeTime.IsZero() {
+			ps.LatestHandshake = jsonstrict.Some(p.LastHandshakeTime.UTC().Format(time.RFC3339))
+		}
+		if p.Endpoint != nil {
+			ap := p.Endpoint.AddrPort()
+			ps.Endpoint = jsonstrict.Some(netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()).String())
+		}
+		byKey[p.PublicKey.String()] = ps
+	}
+	for _, q := range plan.Peers {
+		if ps, ok := byKey[q.Pub]; ok {
+			out[q.ID] = ps
+		}
+	}
+	return out
 }
