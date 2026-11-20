@@ -292,3 +292,24 @@ func TestExplainNamesRedOnly(t *testing.T) {
 		t.Errorf("%q", got)
 	}
 }
+
+// TestEmptySetNameIsNoSet: a set with an empty name is no set: its pods
+// are singletons, matched with nothing (not with each other, not with the
+// pods without a set).
+func TestEmptySetNameIsNoSet(t *testing.T) {
+	a := pod("a", "portcullis", "n1", "portcullis-core", 1000000, 500)
+	b := pod("b", "portcullis", "n2", "portcullis-core", 1000000, 500)
+	a.AntiAffinityHost, b.AntiAffinityHost = true, true
+	a.Set = jsonstrict.Some(nodeadm.PodSet{Name: "", Min: 1})
+	b.Set = a.Set
+	c := pod("c", "portcullis", "n3", "portcullis-core", 1000000, 500)
+	s := nodeadm.Snapshot{Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000)}, Pods: []nodeadm.Pod{a, b}}
+	if r := Check(s)[0]; r.Level != Green || len(r.Unplaced) != 0 {
+		t.Errorf("empty name: %+v", r)
+	}
+	s.Nodes, s.Pods = append(s.Nodes, node("n3", 4000)), []nodeadm.Pod{a, c}
+	s.Nodes[1].Unschedulable = true
+	if r := Check(s)[0]; r.Level != Green || len(r.Unplaced) != 0 {
+		t.Errorf("beside a pod without a set: %+v", r)
+	}
+}

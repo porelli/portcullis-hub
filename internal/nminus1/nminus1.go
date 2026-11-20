@@ -322,10 +322,10 @@ func (m *sim) passes(pi, ni int) bool {
 	if n.Unschedulable || !tolerates(p.Tolerations, n.Taints) || !affinityMatches(p.RequiredAffinity, n) {
 		return false
 	}
-	if !p.Set.Valid {
+	set := setOf(p)
+	if set == (setKey{}) {
 		return true
 	}
-	set := setOf(p)
 	if p.AntiAffinityHost && m.membersOn(set, ni) > 0 {
 		return false
 	}
