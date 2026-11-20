@@ -69,6 +69,7 @@ var externalWriters = map[string]string{
 	"cmd/hub/vpn.go:vpnMain":                            "`hub vpn …`, its own process: a client of the host control socket (LeaderGate)",
 	"cmd/hub/vpn.go:mailMain":                           "`hub mail …`, its own process: a client of the host control socket (LeaderGate)",
 	"cmd/hub/servers.go:serversMain":                    "`hub servers …`, its own process: a client of the host control socket (LeaderGate)",
+	"cmd/hub/ha.go:haMain":                              "`hub ha checklist`, its own process: a client of the host control socket (LeaderGate)",
 }
 
 // externalFuncs are the os/exec and net functions that start a writer
