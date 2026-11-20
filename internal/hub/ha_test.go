@@ -9,7 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/portcullis/hub/internal/nminus1"
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -144,6 +146,13 @@ func TestHAChecklistFromSnapshot(t *testing.T) {
 		haLabels(siteNode("n2", "server", "main", "10.215.0.2", "192.0.2.2", ""), true, false),
 		haLabels(siteNode("n3", "server", "main", "10.215.0.3", "192.0.2.3", ""), false, false),
 		haLabels(siteNode("e1", "agent", "edge", "10.215.0.5", "198.18.0.5", ""), false, false))
+	// No figures: any collection the settle started is done, then dropped.
+	for sites.h.cl.rtt.busy.Load() {
+		time.Sleep(time.Millisecond)
+	}
+	sites.h.cl.rtt.mu.Lock()
+	sites.h.cl.rtt.v, sites.h.cl.rtt.at = nil, nil
+	sites.h.cl.rtt.mu.Unlock()
 	v, err = sites.h.HA(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +183,24 @@ func TestHAChecklistFromSnapshot(t *testing.T) {
 	sites.h.collectRTT(ctx, snap, sites.h.now())
 	if v, _ = sites.h.HA(ctx); !haItem(t, v, "site_rtt").OK {
 		t.Errorf("site_rtt within the limit %+v", haItem(t, v, "site_rtt"))
+	}
+}
+
+// TestHAChecklistNMinus1Yellow: only an all-green N−1 result is green:
+// yellow (degraded) isn't, nor no result at all.
+func TestHAChecklistNMinus1Yellow(t *testing.T) {
+	snap := nodeadm.Snapshot{Nodes: []nodeadm.Node{{Name: "n1", Ready: true}}}
+	for _, n1 := range [][]nminus1.Result{{{Node: "n1", Level: nminus1.Yellow}}, nil} {
+		items := haChecklist(snap, map[string]haPlace{}, n1, "", nil, nil, false, nminus1.DefaultNamespaces)
+		for _, it := range items {
+			if it.ID == "n_minus_1" && (it.OK || it.Text != "the N−1 check isn't green") {
+				t.Errorf("%v: %+v", n1, it)
+			}
+		}
+	}
+	items := haChecklist(snap, map[string]haPlace{}, []nminus1.Result{{Node: "n1", Level: nminus1.Green}}, "", nil, nil, false, nminus1.DefaultNamespaces)
+	if items[5].ID != "n_minus_1" || !items[5].OK {
+		t.Errorf("green: %+v", items[5])
 	}
 }
 

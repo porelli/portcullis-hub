@@ -25,7 +25,7 @@ const v = { experimental: true, enabled: false,
   sites: [{ name: 'main', primary: true, nodes: ['n1'], servers: ['n1'], gateway: null, ingress: [], rtt_ms: null }],
   dns: [], credentials_note: 'Porkbun API keys can change every domain in the account: Portcullis can\'t narrow them',
   command: './portcullis ha enable', frontdoor: { state: '', error: '' }, volumes: [{ name: 'hub-state-r', robustness: 'degraded', degraded_since: null }],
-  warnings: ['node gone: revoked; waiting for quorum to remove its etcd member'], known_gaps: ['Device enrolment (enroll) runs as one copy'] };
+  warnings: ['node gone: revoked; waiting for quorum to remove its etcd member', '<b>w</b>'], known_gaps: ['Device enrolment (enroll) runs as one copy <i>g</i>'] };
 const on = Object.assign({}, v, { enabled: true, guarantee: 'Zero loss on one failure',
   frontdoor: { state: 'standing by', error: '' },
   dns: [{ name: 'example.org', addresses: ['198.51.100.7'], worst_case_text: 'worst case ~10 min for clients that hit the dead address first, on Porkbun',
