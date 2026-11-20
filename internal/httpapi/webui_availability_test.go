@@ -135,3 +135,23 @@ const tick = () => new Promise(r => setTimeout(r, 10));
 		t.Errorf("cancel: %q", got.Cancel)
 	}
 }
+
+// TestWebAvailabilityDisabledNodeNotSent (fix M2): a small node left
+// checked from Only, disabled under Prefer, is never read into the draft.
+func TestWebAvailabilityDisabledNodeNotSent(t *testing.T) {
+	out := nodeEval(t, `
+global.window = {};
+`+webAsset(t, "availability.js")+`
+const boxes = [{ value: 'n1', checked: true, disabled: false }, { value: 'pi', checked: true, disabled: true }, { value: 'n2', checked: false, disabled: false }];
+const one = { '[data-avail-priority]': { value: 'normal' }, '[data-avail-mode]:checked': { value: 'prefer' }, '[data-avail-prefer-kind]:checked': { value: 'nodes' }, '[data-avail-nodes]': {} };
+const pane = {
+  querySelector: sel => one[sel] || null,
+  querySelectorAll: sel => boxes.filter(b => (!sel.includes(':checked') || b.checked) && (!sel.includes(':not(:disabled)') || !b.disabled)),
+};
+const d = window.PortcullisAvailability.readDraft(pane, { priority: 'normal', mode: 'only', prefer: 'class', cls: 'home', site: '', nodes: [] });
+process.stdout.write(JSON.stringify(window.PortcullisAvailability.bodyOf(d)));
+`)
+	if out != `{"priority":"normal","runs_on":{"mode":"prefer","nodes":["n1"]}}` {
+		t.Errorf("body = %s", out)
+	}
+}

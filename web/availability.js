@@ -8,6 +8,7 @@
 //   window.PortcullisAvailability.bodyOf(draft)              (pure; tests)
 //   window.PortcullisAvailability.n1Html(results)            (pure; tests)
 //   window.PortcullisAvailability.notChanged(view)           (pure; tests)
+//   window.PortcullisAvailability.readDraft(pane, draft)     (tests)
 //
 // GET /api/instances/{id}/availability   {priority, runs_on, nodes, n_minus_1}
 // PUT /api/instances/{id}/availability   {priority, runs_on, confirm_n_minus_1?}
@@ -239,7 +240,7 @@
     }
   }
 
-  const api = { renderTab, setPriority, tabHtml, bodyOf, n1Html, draftOf, priorityOptions, notChanged };
+  const api = { renderTab, setPriority, tabHtml, bodyOf, n1Html, draftOf, priorityOptions, notChanged, readDraft };
   if (typeof window !== 'undefined') window.PortcullisAvailability = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();
