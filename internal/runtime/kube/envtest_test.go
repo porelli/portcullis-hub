@@ -338,6 +338,22 @@ func startEnv(t *testing.T) *env {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+	// And nodeadm's token binding (its matchConditions-only policy can take
+	// effect later than the pods one): a 16-minute token refused by it.
+	secrets := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	for {
+		tok := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Secret",
+			"metadata": map[string]any{"name": "bootstrap-token-wait00", "namespace": "kube-system"}, "type": "bootstrap.kubernetes.io/token",
+			"stringData": map[string]any{"expiration": time.Now().UTC().Add(16 * time.Minute).Format(time.RFC3339)}}}
+		_, err := e.nodeadm.Resource(secrets).Namespace("kube-system").Create(context.Background(), tok, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+		if err != nil && strings.Contains(err.Error(), "with binding 'portcullis-nodeadm-guard-tokens-") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the token binding never took effect: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	// The policies type-check clean.
 	for _, p := range admissionPolicies {
 		o, err := admin.Resource(schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}).Get(context.Background(), p, metav1.GetOptions{})
@@ -366,6 +382,11 @@ type vector struct {
 	Existing    map[string]any `json:"existing,omitempty"`
 	Op          string         `json:"op,omitempty"`
 	Subresource string         `json:"subresource,omitempty"`
+	// Params (NEW, HA; core Task 19 review C1) replaces params keys for
+	// this case (only a create of an apps NetworkPolicy): it is judged by
+	// its own binding of portcullis-apps-netpol on those params, in a
+	// namespace of its own (paramsNamespace).
+	Params map[string]string `json:"params,omitempty"`
 	// HA marks the high-availability cases (contract §6: placement, core
 	// exec, nodeadm tokens, nodeadm admission writes, ingress pods).
 	HA bool `json:"ha,omitempty"`
@@ -440,6 +461,12 @@ func TestAdmissionVectors(t *testing.T) {
 				client = e.admin
 			case "daemonset-controller":
 				client = e.dsc
+			}
+			if v.Params != nil {
+				if o.GetKind() != "NetworkPolicy" || o.GetNamespace() != "portcullis-apps" || v.Existing != nil || v.Op != "" {
+					t.Fatalf("%s: a params case must be a create of an apps NetworkPolicy", v.Name)
+				}
+				o.SetNamespace(e.paramsNamespace(t, v.Params))
 			}
 			res := client.Resource(gvrOf(o)).Namespace(o.GetNamespace())
 			var err error
@@ -676,4 +703,60 @@ func TestRoleIsEnough(t *testing.T) {
 	if err := g.rulesReview(ctx); err != nil {
 		t.Errorf("rules review: %v", err)
 	}
+}
+
+var paramsSets = map[string]string{}
+
+// paramsNamespace: the namespace judged by portcullis-apps-netpol under
+// params.yaml with <over> replaced (its own ConfigMap and binding, made
+// once per distinct set), once the binding is in effect.
+func (e *env) paramsNamespace(t *testing.T, over map[string]string) string {
+	t.Helper()
+	key := string(mustJSON(over))
+	if ns, ok := paramsSets[key]; ok {
+		return ns
+	}
+	n := strconv.Itoa(len(paramsSets))
+	ns, cm, b := "portcullis-apps-p"+n, "portcullis-admission-params-p"+n, "portcullis-apps-guard-netpol-p"+n
+	var base struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := utilyaml.Unmarshal(file(t, "testdata/admission/params.yaml"), &base); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range over {
+		base.Data[k] = v
+	}
+	cmo := map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": cm, "namespace": "portcullis"}, "data": base.Data}
+	nso := map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": ns}}
+	bo := map[string]any{"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding", "metadata": map[string]any{"name": b},
+		"spec": map[string]any{"policyName": "portcullis-apps-netpol", "validationActions": []any{"Deny"},
+			"paramRef":       map[string]any{"name": cm, "namespace": "portcullis", "parameterNotFoundAction": "Deny"},
+			"matchResources": map[string]any{"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": ns}}}}}
+	// The Hub's create on NetworkPolicies there (its apps Role's rule).
+	ro := map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": map[string]any{"name": "hub-netpol", "namespace": ns},
+		"rules": []any{map[string]any{"apiGroups": []any{"networking.k8s.io"}, "resources": []any{"networkpolicies"}, "verbs": []any{"create"}}}}
+	rbo := map[string]any{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": map[string]any{"name": "hub-netpol", "namespace": ns},
+		"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "hub-netpol"},
+		"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": "portcullis-hub", "namespace": "portcullis"}}}
+	for _, o := range []map[string]any{nso, cmo, bo, ro, rbo} {
+		applyYAML(t, e.admin, mustJSON(o))
+	}
+	probe := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+		"metadata": map[string]any{"name": "wait", "namespace": ns, "labels": map[string]any{"portcullis.io/instance": "app"}},
+		"spec": map[string]any{"podSelector": map[string]any{"matchLabels": map[string]any{"portcullis.io/instance": "app", "portcullis.io/service": "web"}},
+			"policyTypes": []any{"Ingress"}, "ingress": []any{map[string]any{"from": []any{map[string]any{"ipBlock": map[string]any{"cidr": "0.0.0.0/0"}}}}}}}}
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		_, err := e.hub.Resource(gvrOf(probe)).Namespace(ns).Create(context.Background(), probe, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+		if err != nil && strings.Contains(err.Error(), "binding '"+b+"'") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the binding %s never took effect: %v", b, err)
+		}
+		time.Sleep(time.Second)
+	}
+	paramsSets[key] = ns
+	return ns
 }

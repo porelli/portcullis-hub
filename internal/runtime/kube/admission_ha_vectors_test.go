@@ -39,15 +39,16 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	var vs []struct {
-		Name           string         `json:"name"`
-		Object         map[string]any `json:"object"`
-		As             string         `json:"as"`
-		Want           string         `json:"want"`
-		ReasonContains string         `json:"reason_contains"`
-		Existing       map[string]any `json:"existing,omitempty"`
-		Op             string         `json:"op,omitempty"`
-		Subresource    string         `json:"subresource,omitempty"`
-		HA             bool           `json:"ha,omitempty"`
+		Name           string            `json:"name"`
+		Object         map[string]any    `json:"object"`
+		As             string            `json:"as"`
+		Want           string            `json:"want"`
+		ReasonContains string            `json:"reason_contains"`
+		Existing       map[string]any    `json:"existing,omitempty"`
+		Op             string            `json:"op,omitempty"`
+		Subresource    string            `json:"subresource,omitempty"`
+		HA             bool              `json:"ha,omitempty"`
+		Params         map[string]string `json:"params,omitempty"`
 	}
 	dec := json.NewDecoder(strings.NewReader(string(b)))
 	dec.DisallowUnknownFields()
