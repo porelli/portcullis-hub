@@ -19,14 +19,33 @@ func TestHAAndTraefikPeerFromEnv(t *testing.T) {
 	}{
 		{"", false, "pc:portcullis.io/component=traefik"},
 		{"", true, "portcullis-ingress:app.kubernetes.io/name=traefik"},
-		{"ingress2:app.kubernetes.io/name=traefik", true, "ingress2:app.kubernetes.io/name=traefik"},
+		{"portcullis-ingress:app.kubernetes.io/name=traefik", true, "portcullis-ingress:app.kubernetes.io/name=traefik"},
+		{"pc:portcullis.io/component=traefik", false, "pc:portcullis.io/component=traefik"},
 	} {
 		p, err := traefikPeerFromEnv(env(map[string]string{"HUB_TRAEFIK_PEER": c.val}), c.ha, "pc")
 		if err != nil || p.String() != c.want {
 			t.Errorf("%q ha %v: %s %v, want %s", c.val, c.ha, p, err, c.want)
 		}
 	}
-	if _, err := traefikPeerFromEnv(env(map[string]string{"HUB_TRAEFIK_PEER": "portcullis-ingress"}), true, "pc"); err == nil {
-		t.Error("a malformed peer was taken")
+	// Exactly the two values core writes; the HA one in either mode (the
+	// chart sets both together with HUB_HA).
+	if p, err := traefikPeerFromEnv(env(map[string]string{"HUB_TRAEFIK_PEER": "portcullis-ingress:app.kubernetes.io/name=traefik"}), false, "pc"); err != nil || p.Namespace != "portcullis-ingress" {
+		t.Errorf("the HA value: %s %v", p, err)
+	}
+	for _, bad := range []string{
+		"portcullis-ingress",
+		"ingress2:app.kubernetes.io/name=traefik",            // another namespace
+		"portcullis:portcullis.io/component=traefik",         // not the Hub's own core namespace (pc)
+		"portcullis-apps:portcullis.io/instance=evil",        // an app's pods
+		"kube-system:k8s-app=kube-dns",                       // another system pod
+		"portcullis-edge:app.kubernetes.io/name=traefik",     // the edge namespace
+		"pc:portcullis.io/component=mcp-gate",                // another core component
+		"pc:app.kubernetes.io/name=traefik",                  // the HA selector in the core namespace
+		"portcullis-ingress:portcullis.io/component=traefik", // the core selector in the ingress namespace
+		" portcullis-ingress:app.kubernetes.io/name=traefik", // not exact
+	} {
+		if p, err := traefikPeerFromEnv(env(map[string]string{"HUB_TRAEFIK_PEER": bad}), true, "pc"); err == nil {
+			t.Errorf("%q taken as %s", bad, p)
+		}
 	}
 }

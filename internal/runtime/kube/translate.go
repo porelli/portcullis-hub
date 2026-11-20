@@ -1943,9 +1943,12 @@ func place(in Input) (placement, error) {
 		if r.Class != "" || r.Site != "" {
 			return pl, refused("runs_on only takes nodes, and no class or site")
 		}
+		if len(r.Nodes) == 0 {
+			return pl, refused("runs_on only takes nodes, and no class or site")
+		}
 		nodes, err := runsOnNodes(r.Nodes)
 		if err != nil {
-			return pl, refused("runs_on only takes nodes, and no class or site")
+			return pl, err
 		}
 		var big, sm []string
 		for _, n := range nodes {

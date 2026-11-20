@@ -598,6 +598,31 @@ func TestHATraefikPeerOnlyUnderHAParams(t *testing.T) {
 	}
 }
 
+// TestHelperAndProbePodsAdmitted (HA Task 13 ruling 3): the helper pods
+// (volume, fixer) and the NetworkPolicy probe pods, at portcullis-low,
+// pass the pods policy as the Hub's ServiceAccount.
+func TestHelperAndProbePodsAdmitted(t *testing.T) {
+	e := startEnv(t)
+	img := "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("1", 64)
+	b := &Backend{cfg: Config{Namespace: ns, HubImage: img}}
+	pods := map[string]*corev1.Pod{
+		"volume": b.helperPod(HelperVolume, "app", "app--data", true, nil),
+		"fixer": b.helperPod(HelperFixer, "", "", false, &runtime.FixerSpec{Image: img, User: "0:0", CapAdd: []string{"DAC_READ_SEARCH"},
+			Binds: []runtime.BindMount{{Source: "/srv/photos", Target: "/root", ReadOnly: true}}, Scratch: []string{"/out"}, Memory: 64 << 20}),
+	}
+	for _, role := range []string{"deny", "allow", "client"} {
+		pods["probe-"+role] = probePod(ns, img, role, role != "client")
+	}
+	for name, p := range pods {
+		if p.Spec.PriorityClassName != "portcullis-low" {
+			t.Fatalf("%s: class %q", name, p.Spec.PriorityClassName)
+		}
+		if _, err := e.hubK.CoreV1().Pods(ns).Create(context.Background(), p, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}); err != nil {
+			t.Errorf("%s denied: %v", name, err)
+		}
+	}
+}
+
 // TestSelfTestRequiresPolicyRejection: with the policies the self-test
 // passes; without a binding it reports the guard missing (an accepted
 // object), and a deny-all webhook's rejection doesn't count either.

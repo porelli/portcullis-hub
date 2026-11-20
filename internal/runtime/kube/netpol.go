@@ -12,7 +12,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // CoreNamespace is the core namespace's name label value (the API
@@ -33,18 +32,6 @@ type Peer struct{ Namespace, Key, Value string }
 
 // String is p in the params' form.
 func (p Peer) String() string { return p.Namespace + ":" + p.Key + "=" + p.Value }
-
-// ParsePeer parses the params' <namespace>:<label>=<value> form (a DNS
-// label namespace, a qualified label key, a label value).
-func ParsePeer(s string) (Peer, error) {
-	ns, sel, ok := strings.Cut(strings.TrimSpace(s), ":")
-	k, v, ok2 := strings.Cut(sel, "=")
-	p := Peer{Namespace: ns, Key: k, Value: v}
-	if !ok || !ok2 || len(validation.IsDNS1123Label(ns)) > 0 || len(validation.IsQualifiedName(k)) > 0 || v == "" || len(validation.IsValidLabelValue(v)) > 0 {
-		return Peer{}, fmt.Errorf("a peer is <namespace>:<label>=<value>, got %q", s)
-	}
-	return p, nil
-}
 
 // DefaultTraefikPeer is Traefik's peer as the admission params name it
 // (core's kube_traefik_peer): in HA the DaemonSet's pods in

@@ -98,9 +98,12 @@ func (b *Backend) helperPod(kind, instance string, claim string, readOnly bool, 
 			AutomountServiceAccountToken: &f,
 			EnableServiceLinks:           &f,
 			RestartPolicy:                corev1.RestartPolicyNever,
-			Containers:                   []corev1.Container{c},
-			Volumes:                      vols,
-			SecurityContext:              &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
+			// portcullis-low (preemptionPolicy Never): a helper never
+			// preempts an app (HA Task 13 ruling 3).
+			PriorityClassName: PriorityClassName(runtime.PriorityLow),
+			Containers:        []corev1.Container{c},
+			Volumes:           vols,
+			SecurityContext:   &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 		},
 	}
 }

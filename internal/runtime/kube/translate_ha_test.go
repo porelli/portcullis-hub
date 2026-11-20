@@ -242,7 +242,9 @@ func TestTranslateAvailabilityRefused(t *testing.T) {
 		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "prefer", Nodes: many}}, "runs_on names 17 nodes (1–16)"},
 		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "only"}}, "runs_on only takes nodes, and no class or site"},
 		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "only", Nodes: []string{"vm1"}, Site: "x"}}, "runs_on only takes nodes, and no class or site"},
-		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "only", Nodes: []string{"Bad_Node"}}}, "runs_on only takes nodes, and no class or site"},
+		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "only", Nodes: []string{"Bad_Node"}}}, "runs_on names a node that isn't a node name"},
+		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "only", Nodes: []string{"vm1", "vm1"}}}, "runs_on names a node twice"},
+		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "only", Nodes: many}}, "runs_on names 17 nodes (1–16)"},
 		{runtime.Availability{RunsOn: runtime.RunsOn{Mode: "only", Nodes: []string{"vm1"}, Small: []string{"vm3"}}}, "runs_on only: a small node isn't one of the chosen nodes"},
 	} {
 		in := inputOf(t, placementCompose, "pl")
@@ -326,18 +328,6 @@ func TestPolicyPeersFollowHA(t *testing.T) {
 	}
 }
 
-func TestParsePeer(t *testing.T) {
-	p, err := ParsePeer(" portcullis-ingress:app.kubernetes.io/name=traefik ")
-	if err != nil || p != (Peer{"portcullis-ingress", "app.kubernetes.io/name", "traefik"}) || p.String() != "portcullis-ingress:app.kubernetes.io/name=traefik" {
-		t.Fatalf("%+v %v", p, err)
-	}
-	for _, bad := range []string{"", "portcullis", "portcullis:x", "Portcullis:a=b", ":a=b", "ns:=b", "ns:a=", "ns:a=b c", "ns:a b=c"} {
-		if _, err := ParsePeer(bad); err == nil {
-			t.Errorf("%q parsed", bad)
-		}
-	}
-}
-
 // --- X5: the regenerated goldens differ from the pre-HA ones by the HA
 // fields only.
 
@@ -404,6 +394,9 @@ func stripHA(t *testing.T, new, old map[string]any, ha bool) (removed []string) 
 				}
 				req, _ := res["requests"].(map[string]any)
 				oreq, _ := ores["requests"].(map[string]any)
+				if req["cpu"] != "50m" || res["limits"] != nil && res["limits"].(map[string]any)["cpu"] != nil {
+					t.Errorf("%s %v: container %s: requests.cpu %v, want 50m and no CPU limit", kind, dig(new, "metadata")["name"], c.(map[string]any)["name"], req["cpu"])
+				}
 				if req["cpu"] == "50m" && oreq["cpu"] == nil {
 					delete(req, "cpu")
 					removed = append(removed, "requests.cpu")
@@ -464,17 +457,21 @@ func asSlice(v any) []any { s, _ := v.([]any); return s }
 // HA mode may differ by those plus the HA tolerations and the Traefik
 // peer (portcullis-ingress, app.kubernetes.io/name=traefik) only.
 func TestGoldenDiffOnlyHAFields(t *testing.T) {
-	olds, _ := filepath.Glob("testdata/translate-pre-ha/*.yaml")
-	if len(olds) < 8 {
-		t.Fatalf("%d pre-HA goldens", len(olds))
-	}
-	for _, of := range olds {
-		c := strings.TrimSuffix(filepath.Base(of), ".yaml")
-		dir := filepath.Join("testdata/translate", c)
-		ob, err := os.ReadFile(of)
-		if err != nil {
-			t.Fatal(err)
+	// Every golden but the HA ones (new with Task 13) needs its pre-HA
+	// copy: a later golden without one isn't silently skipped.
+	cases, _ := filepath.Glob("testdata/translate/*")
+	checked := 0
+	for _, dir := range cases {
+		c := filepath.Base(dir)
+		if strings.HasPrefix(c, "ha-") {
+			continue
 		}
+		ob, err := os.ReadFile(filepath.Join("testdata/translate-pre-ha", c+".yaml"))
+		if err != nil {
+			t.Errorf("%s: no pre-HA copy in testdata/translate-pre-ha/ (%v)", c, err)
+			continue
+		}
+		checked++
 		for _, ha := range []bool{false, true} {
 			var nb []byte
 			if !ha {
@@ -522,5 +519,36 @@ func TestGoldenDiffOnlyHAFields(t *testing.T) {
 				t.Errorf("%s: no pod compared", c)
 			}
 		}
+	}
+	if checked < 8 {
+		t.Fatalf("%d goldens checked", checked)
+	}
+}
+
+// TestHelperAndProbePodsLow (HA Task 13 ruling 3): every helper (volume,
+// fixer) and NetworkPolicy probe pod runs at portcullis-low
+// (preemptionPolicy Never): never portcullis-core (I5), never unset.
+func TestHelperAndProbePodsLow(t *testing.T) {
+	b := &Backend{cfg: Config{Namespace: "portcullis-apps", HubImage: hubImage}}
+	pods := map[string]*corev1.Pod{
+		"volume": b.helperPod(HelperVolume, "app", "app--data", true, nil),
+		"fixer":  b.helperPod(HelperFixer, "", "", false, &runtime.FixerSpec{Image: hubImage, User: "0:0", Binds: []runtime.BindMount{{Source: "/srv/x", Target: "/root"}}}),
+	}
+	for _, role := range []string{"deny", "allow", "client"} {
+		pods["probe-"+role] = probePod("portcullis-apps", hubImage, role, role != "client")
+	}
+	for name, p := range pods {
+		if p.Spec.PriorityClassName != "portcullis-low" {
+			t.Errorf("%s: priorityClassName %q, want portcullis-low", name, p.Spec.PriorityClassName)
+		}
+	}
+}
+
+func TestPeerString(t *testing.T) {
+	if s := DefaultTraefikPeer(true, "x").String(); s != "portcullis-ingress:app.kubernetes.io/name=traefik" {
+		t.Error(s)
+	}
+	if s := DefaultTraefikPeer(false, "").String(); s != "portcullis:portcullis.io/component=traefik" {
+		t.Error(s)
 	}
 }

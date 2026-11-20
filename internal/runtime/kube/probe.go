@@ -14,6 +14,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/portcullis/hub/internal/runtime"
 )
 
 // probeReady bounds the wait for the probe pods.
@@ -34,7 +36,10 @@ func probePod(ns, image, role string, listen bool) *corev1.Pod {
 			Labels: map[string]string{LabelProbe: role, LabelInstance: ProbeInstance}},
 		Spec: corev1.PodSpec{
 			AutomountServiceAccountToken: &f, EnableServiceLinks: &f, RestartPolicy: corev1.RestartPolicyNever,
-			SecurityContext: &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
+			// portcullis-low (preemptionPolicy Never): the probe never
+			// preempts an app (HA Task 13 ruling 3).
+			PriorityClassName: PriorityClassName(runtime.PriorityLow),
+			SecurityContext:   &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 			Containers: []corev1.Container{{Name: "probe", Image: image, ImagePullPolicy: corev1.PullIfNotPresent, Command: cmd,
 				SecurityContext: &corev1.SecurityContext{RunAsNonRoot: &t, RunAsUser: &uid, AllowPrivilegeEscalation: &f, ReadOnlyRootFilesystem: &t,
 					Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}},

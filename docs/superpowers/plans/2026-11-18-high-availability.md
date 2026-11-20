@@ -1049,7 +1049,7 @@ func TestHAEnableIsNotAnAPI(t *testing.T)       // POST /api/ha/enable → 404 (
 **Files:** Create `internal/doctor/ha.go`, `internal/hub/doctor_ha.go`, `internal/doctor/ha_test.go`. Modify `internal/hub/doctor_runtime.go`.
 
 **Interfaces:**
-- Consumes: Tasks 6, 8, 12, 15.
+- Consumes: Tasks 6, 8, 12, 13, 15. (Task 13 review M4: `template_no_memory_limit` calls `kube.NoMemoryLimit(model *types.Project) []string`, the services without a memory limit, once per enabled instance; Task 13's brief named `templateNoMemoryLimit(id) bool`, which does not exist.)
 - Produces: `doctor.HAKinds` = `node_down`, `ha_quorum_at_risk`, `volume_degraded`, `pg_not_synchronous`, `ha_fencing_unavailable`, `ha_n_minus_1_insufficient`, `backup_stale`, `template_no_memory_limit`, `frontdoor_probes_internal_only`, `published_doc_too_large`, `published_doc_stale`, `ha_lease_lost`, `mesh_site_no_gateway`, `mesh_peer_stale`, `mesh_rtt_high`, `ha_two_sites_no_tiebreaker`, each with the severity of Global Constraints. The input `HAIn{Snapshot, FrontdoorStatus, Published, LastBackup, Lease}`. The existing `kube_api_public` is checked for **every** node's public address from the snapshot (spec §17), with `TestKubeAPIPublicPerNode` (one exposed node of three → the kind names that node).
 
 - [ ] **Step 1:** Write the failing `TestHAKinds` (every kind registered once, severities exact) and one `TestHAKind_<kind>` per kind (the input that raises it, and the one that clears it; `node_down` only after > 1 min NotReady; `volume_degraded` only after > 10 min; `backup_stale` after 26 h).

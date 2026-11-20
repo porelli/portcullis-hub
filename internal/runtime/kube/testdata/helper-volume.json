@@ -62,5 +62,6 @@
       "type": "RuntimeDefault"
     }
   },
+  "priorityClassName": "portcullis-low",
   "enableServiceLinks": false
 }

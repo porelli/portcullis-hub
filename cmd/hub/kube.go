@@ -121,22 +121,26 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 func haFromEnv(getenv func(string) string) bool { return getenv("HUB_HA") == "on" }
 
 // traefikPeerFromEnv is HUB_TRAEFIK_PEER, Traefik as the routed ports'
-// NetworkPolicy peer in the admission params' form
-// <namespace>:<label>=<value> (core's chart passes the params' traefik
-// value); unset = the params' default for the mode (in HA
-// portcullis-ingress:app.kubernetes.io/name=traefik, else
-// <core namespace>:portcullis.io/component=traefik). A malformed value
-// refuses the start.
+// NetworkPolicy peer in the admission params' form (core's chart passes
+// the params' traefik value, kube_traefik_peer). Only the two values
+// core writes are taken (HA Task 13 review I2): the HA DaemonSet's
+// portcullis-ingress:app.kubernetes.io/name=traefik, or
+// <core namespace>:portcullis.io/component=traefik (the Hub's own
+// namespace); anything else refuses the start, so no value can make
+// another namespace's or an app's pods a peer of every routed port.
+// Unset = the value for the mode.
 func traefikPeerFromEnv(getenv func(string) string, ha bool, core string) (kube.Peer, error) {
-	v := strings.TrimSpace(getenv("HUB_TRAEFIK_PEER"))
+	v := getenv("HUB_TRAEFIK_PEER")
 	if v == "" {
 		return kube.DefaultTraefikPeer(ha, core), nil
 	}
-	p, err := kube.ParsePeer(v)
-	if err != nil {
-		return kube.Peer{}, fmt.Errorf("HUB_TRAEFIK_PEER: %v", err)
+	for _, known := range []kube.Peer{kube.DefaultTraefikPeer(true, core), kube.DefaultTraefikPeer(false, core)} {
+		if v == known.String() {
+			return known, nil
+		}
 	}
-	return p, nil
+	return kube.Peer{}, fmt.Errorf("HUB_TRAEFIK_PEER must be %s (HA) or %s (the core namespace %s), got %q",
+		kube.DefaultTraefikPeer(true, core), kube.DefaultTraefikPeer(false, core), core, v)
 }
 
 // gateLogSourcesFromEnv is HUB_GATE_LOG_SOURCES (contract §20.10): unset
