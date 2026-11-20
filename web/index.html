@@ -935,6 +935,7 @@
   <script src="/static/dns.js"></script>
   <script src="/static/mail.js"></script>
   <script src="/static/mailprovider.js"></script>
+  <script src="/static/availability.js"></script>
   <script src="/static/freshauth.js"></script>
   <script src="/static/servers.js"></script>
   <script src="/static/doctor.js"></script>
@@ -3780,11 +3781,14 @@
 
     // ── the instance page ────────────────────────────────
     const PAGE_TABS = [['overview', 'Overview'], ['settings', 'Settings'], ['groups', 'Groups'], ['filesharing', 'File sharing'], ['logs', 'Logs'], ['usage', 'Usage'],
-      ['backups', 'Backups'], ['ai', 'AI'], ['vpn', 'VPN'], ['mail', 'Mail'], ['expert', 'Expert'], ['delete', 'Delete']];
+      ['backups', 'Backups'], ['ai', 'AI'], ['vpn', 'VPN'], ['mail', 'Mail'], ['availability', 'Availability'], ['expert', 'Expert'], ['delete', 'Delete']];
     function pageTabs(inst) {
       return PAGE_TABS.filter(([k]) => (k !== 'filesharing' || templateHasPersonSecret(inst.template)) && (k !== 'vpn' || templateHasVPN(inst.template)) &&
-        (k !== 'mail' || templateIsMailProvider(inst.template)));
+        (k !== 'mail' || templateIsMailProvider(inst.template)) && (k !== 'availability' || runtimeIsKube()));
     }
+    // runtimeIsKube: the Hub runs apps on Kubernetes (availability, §20.6,
+    // is Kubernetes only: hidden elsewhere).
+    function runtimeIsKube() { return !!(runtimeInfo && runtimeInfo.runtime === 'kubernetes'); }
     // templateIsMailProvider: tid has a valid mail: block (contract §3.5).
     function templateIsMailProvider(tid) {
       const t = catalogCache && catalogCache[tid];
@@ -3892,6 +3896,7 @@
         case 'ai': loadAITab(id, pane); break;
         case 'vpn': renderVPNTab(id, pane); break;
         case 'mail': if (window.PortcullisMailProvider) PortcullisMailProvider.renderTab(id, pane); break;
+        case 'availability': if (window.PortcullisAvailability) PortcullisAvailability.renderTab(id, pane); break;
         case 'expert':
           ctx.loading = k;
           await loadExpert(id, pane);
@@ -4237,6 +4242,9 @@
         '<small>' + (ctx.first ? '🔒 The first instance of ' + escapeHtml(app) + ' keeps the app\'s id.'
           : 'Derived from the label; edit it now if you like: it can\'t change once the instance exists (it names the compose project, the volumes and the Keycloak client).') + '</small></div>' +
         '<div class="inst-section"><h4>Address</h4><div data-setup-hosts><p class="settings-empty">Loading…</p></div>' + err('hosts') + '</div>' +
+        (typeof window !== 'undefined' && window.PortcullisAvailability && runtimeIsKube() ? '<div class="inst-section"><h4>Priority</h4>' +
+          '<label class="block" for="setup-priority">Priority</label><select id="setup-priority" data-setup-priority>' + PortcullisAvailability.priorityOptions('normal') + '</select>' +
+          '<small>Kubernetes: which apps keep running first when the cluster is short of room. Change it, and where it runs, later under Availability.</small></div>' : '') +
         (typeof window !== 'undefined' && window.PortcullisServers && PortcullisServers.serverSelect('') ? '<div class="inst-section"><h4>Server</h4>' + PortcullisServers.serverSelect('') + err('server') + '</div>' : '');
       if (ctx.access || ctx.admin) {
         const g = setupGroupNames(ctx, ctx.first ? ctx.tid : '');
@@ -4374,6 +4382,8 @@
       form.querySelectorAll('[data-setup-sub]').forEach(i => { v.subs[i.dataset.setupSub] = i.value; });
       const mode = q('[data-setup-groups-mode]:checked');
       if (mode) v.mode = mode.value;
+      const pri = q('[data-setup-priority]');
+      if (pri) v.priority = pri.value;
       const u = q('[data-setup-group="users"]'), a = q('[data-setup-group="admins"]');
       if (u) v.users = u.value.trim();
       if (a) v.admins = a.value.trim();
@@ -4516,6 +4526,10 @@
       const next = setupAfterCreate(start, d.isOpen());
       d.close();
       d.page(next.notice, warnings);
+      // The setup form's priority (Kubernetes): set before anything starts;
+      // a refused one starts nothing.
+      const why = d.priority ? await d.priority() : '';
+      if (why) { d.notice({ notice: 'Created, not started: priority ' + why, warnings }); return 'priority refused'; }
       if (!next.enable) return 'created';
       if (!(await d.confirmLan())) { d.notice(setupEnableNotice(warnings, null, null, true)); return 'not started'; }
       let res = null, failed = null;
@@ -4557,6 +4571,7 @@
         close: () => { ctx.busy = false; if (instCtx === ctx) closeInstModal(); },
         page: (notice, warnings) => { pageFlash = { id, notice, warnings }; navInstance(id, 'overview', ''); },
         confirmLan: () => confirmLanOnly(id),
+        priority: v.priority && v.priority !== 'normal' && window.PortcullisAvailability ? () => PortcullisAvailability.setPriority(id, v.priority) : null,
         enable: () => runInstanceOp('/api/templates/enable', 'POST', { id }, id),
         notice: f => pageNotice(id, f),
       });

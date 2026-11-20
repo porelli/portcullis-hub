@@ -66,6 +66,7 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	if b, err := os.ReadFile(saNamespaceFile); err == nil && strings.TrimSpace(string(b)) != "" {
 		core = strings.TrimSpace(string(b))
 	}
+	cfg.AppsNamespace, cfg.CoreNamespace = apps, core
 	restCfg, icErr := rest.InClusterConfig()
 	if icErr != nil {
 		log.Printf("kubernetes: %v: every runtime operation answers 503", icErr)

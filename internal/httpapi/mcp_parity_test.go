@@ -90,6 +90,13 @@ var serverNoToolRoutes = map[string]string{
 	"POST /api/instances/{id}/quarantine/lift": "admin UI only (a fresh sign-in): lifting a worker's start refusal",
 }
 
+// availabilityNoToolRoutes: changing an instance's availability (a raise
+// to critical or high, past an N−1 warning) stays an admin's action in
+// the Hub (Task 14 ruling); its read is instance_availability_get.
+var availabilityNoToolRoutes = map[string]string{
+	"PUT /api/instances/{id}/availability": "admin UI only: raising an instance's priority has no MCP write path",
+}
+
 var mailNoToolRoutes = map[string]string{
 	"GET /api/mail/settings":                                     "admin UI only (Settings → Mail)",
 	"PUT /api/mail/settings":                                     "admin UI only (Settings → Mail)",
@@ -304,7 +311,8 @@ func TestToolParity(t *testing.T) {
 		_, sshNo := sshNoToolRoutes[r]
 		_, usageNo := usageNoToolRoutes[r]
 		_, serverNo := serverNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo
+		_, availNo := availabilityNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo || availNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -335,7 +343,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes, availabilityNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -452,7 +460,9 @@ func TestToolParity(t *testing.T) {
 		// VPN (§15.10).
 		"get_vpn", "list_vpn_devices",
 		// Mail (§15.10).
-		"mail_status"} {
+		"mail_status",
+		// Availability (§20.6).
+		"instance_availability_get"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}

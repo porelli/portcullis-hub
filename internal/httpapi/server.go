@@ -149,6 +149,8 @@ func (s *Server) hubMux() *recordingMux {
 	// VPN admin (contract §11; Hub listener only).
 	s.registerVPN(mux)
 	s.registerServers(mux)
+	// Instance availability (§20.6; Kubernetes only).
+	s.registerAvailability(mux)
 	// Settings → Mail and the admin mail routes (§19.9; Hub listener only).
 	s.registerMailAdmin(mux)
 	s.registerMailProvider(mux)

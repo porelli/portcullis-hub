@@ -1,0 +1,337 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/nodeadm"
+	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/runtimetest"
+	"github.com/portcullis/hub/internal/state"
+)
+
+// availNodeadm is nodeadm for the availability tests: a fixed snapshot.
+type availNodeadm struct {
+	clusterNodeadm
+	mu   sync.Mutex
+	snap nodeadm.Snapshot
+	err  error
+}
+
+func (f *availNodeadm) Cluster(context.Context) (nodeadm.Snapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snap, f.err
+}
+
+func availNode(name, class string) nodeadm.Node {
+	n := nodeadm.Node{Name: name, Role: "server", Ready: true, Labels: map[string]string{nodeadm.LabelClass: class, nodeadm.LabelSite: "main"},
+		Allocatable: nodeadm.Resources{CPUm: 1000, MemBytes: 1 << 30}}
+	if class == "small" {
+		n.Taints = []nodeadm.Taint{{Key: "portcullis.io/small", Value: "true", Effect: "NoSchedule"}}
+	}
+	return n
+}
+
+// fullSnapshot: n1 runs grafana's pod (normal), n2 is full of a core
+// pod. Raising grafana to critical makes n1 red (a critical singleton
+// with no room); at normal it is green.
+func fullSnapshot() nodeadm.Snapshot {
+	notSmall := [][]nodeadm.Expr{{{Key: "portcullis.io/class", Operator: "NotIn", Values: []string{"small"}}}}
+	return nodeadm.Snapshot{V: 1, Nodes: []nodeadm.Node{availNode("n1", "home"), availNode("n2", "home"), availNode("pi", "small")},
+		Pods: []nodeadm.Pod{
+			{Name: "grafana--grafana-7c9d-x1", Namespace: "portcullis-apps", Node: "n1", Priority: 1000, PriorityClass: "portcullis-normal",
+				PreemptionPolicy: "PreemptLowerPriority", Requests: nodeadm.Resources{CPUm: 500, MemBytes: 512 << 20}, RequiredAffinity: notSmall},
+			{Name: "vault-0", Namespace: "portcullis", Node: "n2", Priority: 1000000, PriorityClass: "portcullis-core",
+				PreemptionPolicy: "PreemptLowerPriority", Requests: nodeadm.Resources{CPUm: 1000, MemBytes: 1 << 30}},
+		}}
+}
+
+type availEnv struct {
+	*instEnv
+	na   *availNodeadm
+	root string
+}
+
+func newAvailEnv(t *testing.T, kubeOn bool, seed func(*state.AppState)) *availEnv {
+	t.Helper()
+	o := instEnvOpts{seed: func(st *state.AppState) {
+		st.Instances["grafana"] = state.Instance{ID: "grafana", Template: "grafana", State: state.InstanceCreated}
+		if seed != nil {
+			seed(st)
+		}
+	}}
+	if kubeOn {
+		o.cfg = func(c *hub.Config) {
+			c.Runtime = runtime.KindKubernetes
+			os.MkdirAll(c.ProjectDir, 0o755)
+			os.WriteFile(filepath.Join(c.ProjectDir, ".env"), []byte("PORTCULLIS_KUBE_CONTEXT=default\n"), 0o644)
+		}
+		o.rt = &runtimetest.Fake{K: runtime.KindKubernetes, InfoVal: runtime.Info{Verified: true}}
+	}
+	root := t.TempDir()
+	e := newInstEnvOpts(t, root, o)
+	na := &availNodeadm{snap: fullSnapshot()}
+	e.s.Hub.SetNodeadm(na)
+	return &availEnv{instEnv: e, na: na, root: root}
+}
+
+func (e *availEnv) stored(t *testing.T) *state.Availability {
+	t.Helper()
+	st, err := state.Load(filepath.Join(e.root, "data", "state.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Instances["grafana"].Availability
+}
+
+const availPath = "/api/instances/grafana/availability"
+
+// TestAvailabilityDefaults: an instance without a stored availability
+// reads normal / anywhere, with the cluster's nodes and N−1 per node.
+func TestAvailabilityDefaults(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	code, body := e.do(t, "root", "GET", availPath, "")
+	if code != 200 {
+		t.Fatalf("GET: %d %s", code, body)
+	}
+	var v struct {
+		Priority string          `json:"priority"`
+		RunsOn   json.RawMessage `json:"runs_on"`
+		Nodes    []struct {
+			Name, Class, Site string
+			Small             bool
+		} `json:"nodes"`
+		NMinus1 []struct{ Node, Level string } `json:"n_minus_1"`
+	}
+	if err := json.Unmarshal([]byte(body), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Priority != "normal" || string(v.RunsOn) != `{"mode":"anywhere"}` {
+		t.Errorf("defaults: %s", body)
+	}
+	if len(v.Nodes) != 3 || v.Nodes[2].Name != "pi" || !v.Nodes[2].Small || v.Nodes[0].Small || v.Nodes[0].Class != "home" || v.Nodes[0].Site != "main" {
+		t.Errorf("nodes: %+v", v.Nodes)
+	}
+	if len(v.NMinus1) != 3 || v.NMinus1[0].Level != "green" {
+		t.Errorf("n_minus_1: %+v", v.NMinus1)
+	}
+	// nil maps to the translator's nil (the defaults).
+	if a := e.stored(t); a != nil {
+		t.Errorf("stored %+v", a)
+	}
+	// A dirty snapshot: every node unknown, never green.
+	e.na.mu.Lock()
+	e.na.snap.Pods = append(e.na.snap.Pods, e.na.snap.Pods[0])
+	e.na.mu.Unlock()
+	_, body = e.do(t, "root", "GET", availPath, "")
+	json.Unmarshal([]byte(body), &v)
+	for _, r := range v.NMinus1 {
+		if r.Level != "unknown" {
+			t.Errorf("malformed snapshot: %s", body)
+		}
+	}
+}
+
+// TestRaiseToCriticalRunsNMinus1First: a raise N−1 judges red is 409
+// with the exact sentence and the results, nothing saved, audited as
+// refused; with confirm_n_minus_1 it is saved and audited.
+func TestRaiseToCriticalRunsNMinus1First(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"anywhere"}}`)
+	if code != 409 {
+		t.Fatalf("raise: %d %s", code, body)
+	}
+	var r struct {
+		Error   string `json:"error"`
+		NMinus1 []struct {
+			Node, Level string
+			Unplaced    []string
+		} `json:"n_minus_1"`
+	}
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Error != "if n1 fails, portcullis-apps/grafana--grafana-7c9d-x1 won't have room" {
+		t.Errorf("error = %q", r.Error)
+	}
+	if len(r.NMinus1) != 3 || r.NMinus1[0].Level != "red" {
+		t.Errorf("n_minus_1: %s", body)
+	}
+	if a := e.stored(t); a != nil {
+		t.Errorf("saved %+v on a refusal", a)
+	}
+	if got := e.auditActions(t, "instance.availability"); len(got) != 1 || !strings.HasPrefix(got[0], "instance.availability:refused:root:grafana") {
+		t.Errorf("audit: %v", got)
+	}
+	// Normal → low: no N−1, saved.
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"low","runs_on":{"mode":"anywhere"}}`); code != 200 {
+		t.Fatalf("lower: %d %s", code, body)
+	}
+	// Confirmed: saved and audited ok.
+	code, body = e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"only","nodes":["pi","n1"]},"confirm_n_minus_1":true}`)
+	if code != 200 {
+		t.Fatalf("confirmed: %d %s", code, body)
+	}
+	a := e.stored(t)
+	if a == nil || a.Priority != "critical" || a.RunsOn.Mode != "only" || strings.Join(a.RunsOn.Nodes, ",") != "n1,pi" {
+		t.Errorf("stored %+v", a)
+	}
+	got := e.auditActions(t, "instance.availability")
+	if len(got) != 3 || !strings.HasPrefix(got[2], "instance.availability:ok:root:grafana") {
+		t.Errorf("audit: %v", got)
+	}
+	// Staying at critical isn't a raise: no N−1.
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"anywhere"}}`); code != 200 {
+		t.Errorf("not a raise: %d %s", code, body)
+	}
+	// The translator's input: the only choice's small node from the snapshot.
+	e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"only","nodes":["n1","pi"]}}`)
+	ra, err := e.s.Hub.KubeAvailabilityForTest(context.Background(), "grafana")
+	if err != nil || ra == nil || ra.Priority != "critical" || strings.Join(ra.RunsOn.Small, ",") != "pi" || len(ra.RunsOn.Nodes) != 2 {
+		t.Errorf("runtime availability %+v %v", ra, err)
+	}
+}
+
+// TestRaiseYellowNeedsConfirm: a yellow result refuses a raise too, and
+// an unjudgeable (unknown) snapshot as red.
+func TestRaiseYellowNeedsConfirm(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	e.na.mu.Lock()
+	e.na.snap.Pods = append(e.na.snap.Pods, e.na.snap.Pods[1])
+	e.na.mu.Unlock()
+	code, body := e.do(t, "root", "PUT", availPath, `{"priority":"high","runs_on":{"mode":"anywhere"}}`)
+	if code != 409 || !strings.Contains(body, "the N−1 check can't judge the cluster") || !strings.Contains(body, `"level":"unknown"`) {
+		t.Errorf("unknown: %d %s", code, body)
+	}
+	// n2 is full of another app's normal pod: high grafana fits on n2 only
+	// by evicting it (yellow).
+	e.na.mu.Lock()
+	e.na.snap = fullSnapshot()
+	e.na.snap.Pods[1] = nodeadm.Pod{Name: "other--web-1", Namespace: "portcullis-apps", Node: "n2", Priority: 1000, PriorityClass: "portcullis-normal",
+		PreemptionPolicy: "PreemptLowerPriority", Requests: nodeadm.Resources{CPUm: 1000, MemBytes: 1 << 30}}
+	e.na.mu.Unlock()
+	code, body = e.do(t, "root", "PUT", availPath, `{"priority":"high","runs_on":{"mode":"anywhere"}}`)
+	if code != 409 || !strings.Contains(body, `"level":"yellow"`) || !strings.Contains(body, "if n1 fails, portcullis-apps/grafana--grafana-7c9d-x1 won't have room") {
+		t.Errorf("yellow: %d %s", code, body)
+	}
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"high","runs_on":{"mode":"anywhere"},"confirm_n_minus_1":true}`); code != 200 {
+		t.Errorf("confirmed: %d %s", code, body)
+	}
+}
+
+// TestOnlySmallNodeNeedsSmallNode (amended by Task 1's finding 10: only
+// takes any known node, small or not): an only choice of a non-small
+// node is fine, of a small one too; an unknown node is 400 "unknown node
+// <name>"; prefer naming a small node or class small is refused.
+func TestOnlySmallNodeNeedsSmallNode(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	for body, want := range map[string]string{
+		`{"priority":"normal","runs_on":{"mode":"only","nodes":["n2"]}}`:           "",
+		`{"priority":"normal","runs_on":{"mode":"only","nodes":["pi"]}}`:           "",
+		`{"priority":"normal","runs_on":{"mode":"only","nodes":["ghost"]}}`:        "unknown node ghost",
+		`{"priority":"normal","runs_on":{"mode":"prefer","nodes":["pi","n1"]}}`:    "small nodes take only instances pinned to them: use Only",
+		`{"priority":"normal","runs_on":{"mode":"prefer","class":"small"}}`:        "small nodes take only instances pinned to them: use Only",
+		`{"priority":"normal","runs_on":{"mode":"prefer","nodes":["n1","ghost"]}}`: "unknown node ghost",
+	} {
+		code, got := e.do(t, "root", "PUT", availPath, body)
+		if want == "" {
+			if code != 200 {
+				t.Errorf("%s: %d %s", body, code, got)
+			}
+			continue
+		}
+		if code != 400 || strings.TrimSpace(got) != want {
+			t.Errorf("%s: %d %q, want 400 %q", body, code, got, want)
+		}
+	}
+}
+
+// TestAvailabilityRefusedOnDocker: off Kubernetes both routes are 409
+// "availability needs Kubernetes" (before the body is read).
+func TestAvailabilityRefusedOnDocker(t *testing.T) {
+	e := newAvailEnv(t, false, nil)
+	for _, c := range [][2]string{{"GET", ""}, {"PUT", `{"priority":"high","runs_on":{"mode":"anywhere"}}`}, {"PUT", `{"bogus":1}`}} {
+		code, body := e.do(t, "root", c[0], availPath, c[1])
+		if code != 409 || strings.TrimSpace(body) != "availability needs Kubernetes" {
+			t.Errorf("%s %s: %d %s", c[0], c[1], code, body)
+		}
+	}
+	if a := e.stored(t); a != nil {
+		t.Errorf("stored %+v", a)
+	}
+}
+
+// TestAvailabilityAPIStrict: unknown keys, priority core and an unknown
+// mode are 400; a non-admin is refused; an unknown instance is 404.
+func TestAvailabilityAPIStrict(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	for _, body := range []string{
+		`{"priority":"normal","runs_on":{"mode":"anywhere"},"extra":1}`,
+		`{"priority":"normal","runs_on":{"mode":"anywhere","weight":3}}`,
+		`{"priority":"core","runs_on":{"mode":"anywhere"}}`,
+		`{"priority":"urgent","runs_on":{"mode":"anywhere"}}`,
+		`{"runs_on":{"mode":"anywhere"}}`,
+		`{"priority":"normal","runs_on":{"mode":"everywhere"}}`,
+		`{"priority":"normal"}`,
+		`{"priority":"normal","runs_on":{"mode":"anywhere"}} {}`,
+	} {
+		if code, got := e.do(t, "root", "PUT", availPath, body); code != 400 {
+			t.Errorf("%s: %d %s", body, code, got)
+		}
+	}
+	if code, _ := e.do(t, "dana", "GET", availPath, ""); code != 403 {
+		t.Errorf("non-admin GET: %d", code)
+	}
+	if code, _ := e.do(t, "dana", "PUT", availPath, `{"priority":"low","runs_on":{"mode":"anywhere"}}`); code != 403 {
+		t.Errorf("non-admin PUT: %d", code)
+	}
+	if code, body := e.do(t, "root", "GET", "/api/instances/nosuch/availability", ""); code != 404 {
+		t.Errorf("unknown instance: %d %s", code, body)
+	}
+}
+
+// TestAvailabilityRefusals pins every text of §20.6.
+func TestAvailabilityRefusals(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	for body, want := range map[string]string{
+		`{"priority":"core","runs_on":{"mode":"anywhere"}}`:                              "priority must be critical, high, normal or low",
+		`{"priority":"normal","runs_on":{"mode":"sometimes"}}`:                           "runs_on mode must be anywhere, prefer or only",
+		`{"priority":"normal","runs_on":{"mode":"anywhere","site":"main"}}`:              "runs_on anywhere takes no class, site or nodes",
+		`{"priority":"normal","runs_on":{"mode":"anywhere","nodes":[]}}`:                 "runs_on anywhere takes no class, site or nodes",
+		`{"priority":"normal","runs_on":{"mode":"prefer"}}`:                              "runs_on prefer takes exactly one of class, site or nodes",
+		`{"priority":"normal","runs_on":{"mode":"prefer","class":"home","site":"main"}}`: "runs_on prefer takes exactly one of class, site or nodes",
+		`{"priority":"normal","runs_on":{"mode":"prefer","class":"moon"}}`:               "runs_on prefer takes exactly one of class, site or nodes",
+		`{"priority":"normal","runs_on":{"mode":"prefer","nodes":["n1","n1"]}}`:          "runs_on prefer takes exactly one of class, site or nodes",
+		`{"priority":"normal","runs_on":{"mode":"prefer","class":"small"}}`:              "small nodes take only instances pinned to them: use Only",
+		`{"priority":"normal","runs_on":{"mode":"only"}}`:                                "runs_on only takes nodes, and no class or site",
+		`{"priority":"normal","runs_on":{"mode":"only","nodes":["n1"],"site":"main"}}`:   "runs_on only takes nodes, and no class or site",
+		`{"priority":"normal","runs_on":{"mode":"only","nodes":["N1!"]}}`:                "runs_on only takes nodes, and no class or site",
+		`{"priority":"normal","runs_on":{"mode":"only","nodes":["n9"]}}`:                 "unknown node n9",
+	} {
+		if code, got := e.do(t, "root", "PUT", availPath, body); code != 400 || strings.TrimSpace(got) != want {
+			t.Errorf("%s: %d %q, want %q", body, code, got, want)
+		}
+	}
+	nodes := `"n1","n2","n3","n4","n5","n6","n7","n8","n9","n10","n11","n12","n13","n14","n15","n16","n17"`
+	if code, got := e.do(t, "root", "PUT", availPath, `{"priority":"normal","runs_on":{"mode":"only","nodes":[`+nodes+`]}}`); code != 400 ||
+		strings.TrimSpace(got) != "runs_on only takes nodes, and no class or site" {
+		t.Errorf("17 nodes: %d %s", code, got)
+	}
+	// Prefer class home and site are fine (no node check).
+	for _, body := range []string{`{"priority":"normal","runs_on":{"mode":"prefer","class":"cloud"}}`, `{"priority":"normal","runs_on":{"mode":"prefer","site":"main"}}`} {
+		if code, got := e.do(t, "root", "PUT", availPath, body); code != 200 {
+			t.Errorf("%s: %d %s", body, code, got)
+		}
+	}
+	// A stored availability state.Load refuses is a corrupt state file.
+	if err := (state.Availability{Priority: "core", RunsOn: state.RunsOn{Mode: "anywhere"}}).Check(); err == nil {
+		t.Error("state accepts priority core")
+	}
+}

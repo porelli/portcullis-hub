@@ -191,6 +191,10 @@ type Config struct {
 	// §20.2; main: nodeadm.DefaultURL on Kubernetes, "" elsewhere = no
 	// cluster nodes).
 	NodeadmURL string
+	// AppsNamespace / CoreNamespace are the Kubernetes apps and core
+	// namespaces (HUB_APPS_NAMESPACE, the ServiceAccount's), the N−1
+	// check's (contract §20.7; "" = the chart's defaults).
+	AppsNamespace, CoreNamespace string
 	// ClockOffset reads HUB_DEV_CLOCK_OFFSET_FILE's duration (core's e2e,
 	// e2etest builds only: internal/e2etest), added to h.now(); nil
 	// otherwise.

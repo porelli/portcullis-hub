@@ -52,6 +52,9 @@ func (h *Hub) upProject(ctx context.Context, t *templates.Template) (runtime.Pro
 	if err != nil {
 		return p, err
 	}
+	if in.Availability, err = h.kubeAvailability(ctx, t.ID); err != nil {
+		return p, err
+	}
 	p.Inputs = in
 	return p, nil
 }

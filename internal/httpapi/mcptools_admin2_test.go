@@ -566,6 +566,7 @@ var adminToolFixtures = []struct {
 	// Servers (§15.10).
 	{"list_servers", nil},
 	{"get_server", map[string]any{"id": "primary"}},
+	{"instance_availability_get", map[string]any{"id": "secretapp"}}, // Docker: 409
 	{"move_instance", map[string]any{"id": "cloud", "server": "nope"}},
 	{"set_backup_schedule", map[string]any{"server": "primary", "mode": "off", "hour": 0}},
 	{"set_vpn_provider", map[string]any{"id": "cloud", "wired": false}},

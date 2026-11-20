@@ -149,13 +149,16 @@ type Instance struct {
 	// SignInTemplate is the instance's sign-in template pick (§8.1 "Per
 	// app"; "" = the default template).
 	SignInTemplate string `json:"sign_in_template,omitempty" yaml:"sign_in_template,omitempty"`
+	// Availability is the instance's priority and Runs on choice
+	// (contract §20.6, Kubernetes only; nil = normal / anywhere).
+	Availability *Availability `json:"availability,omitempty" yaml:"availability,omitempty"`
 }
 
 // HoldsIdentity reports whether the entry stores a label, a group
 // binding, env overrides or a sign-in template pick: a default
 // instance's entry that does is never dropped as "needs no entry".
 func (e Instance) HoldsIdentity() bool {
-	return e.Label != "" || e.UsersGroup != "" || e.AdminsGroup != "" || len(e.EnvOverrides) > 0 || e.SignInTemplate != ""
+	return e.Label != "" || e.UsersGroup != "" || e.AdminsGroup != "" || len(e.EnvOverrides) > 0 || e.SignInTemplate != "" || e.Availability != nil
 }
 
 // Bound reports whether the instance is bound to existing groups.
@@ -793,6 +796,9 @@ func Load(path string) (*AppState, error) {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
 	if err := s.checkPersonIDs(); err != nil {
+		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
+	}
+	if err := s.checkAvailability(); err != nil {
 		return nil, fmt.Errorf("corrupt %s (%v) — fix or move it aside, then restart", path, err)
 	}
 	if s.LocalNetworks != nil {
