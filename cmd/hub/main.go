@@ -455,7 +455,7 @@ func main() {
 			log.Fatalf("refusing to start: %v", err)
 		}
 		if httpLogs {
-			if err := wireGateLogs(&cfg, rt); err != nil {
+			if err := wireGateLogs(&cfg, rt, os.Getenv); err != nil {
 				log.Fatalf("refusing to start: %v", err)
 			}
 		}

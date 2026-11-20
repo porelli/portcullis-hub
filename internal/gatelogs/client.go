@@ -4,8 +4,8 @@
 // paged with the exclusive cursor and merged by time, then replica; wg's
 // status document from :8093. A replica that can't be read marks the
 // result incomplete (*Incomplete, returned with what was read). On Docker
-// and Podman nothing here is used: the Hub reads the files (HUB_GATE_LOG_SOURCES
-// unset).
+// and Podman nothing here is used: the Hub reads the files
+// (HUB_GATE_LOG_SOURCES unset).
 //
 // Every request is a GET through fsutil.Do (the write fence's transport:
 // reads pass while the Hub stands by, contract §20.5).
@@ -14,6 +14,7 @@ package gatelogs
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
@@ -45,15 +48,23 @@ const (
 
 // Defaults of one read.
 const (
-	// DefaultMaxPages bounds the pages one read takes per replica (64 ×
-	// 4 MiB at most); past it the replica's part is incomplete.
+	// DefaultMaxPages bounds the pages one read takes per replica; past
+	// it the replica's part is incomplete.
 	DefaultMaxPages = 64
+	// DefaultBudget is the bytes one read fetches over all its replicas
+	// (the Docker path's OpenedTotalScan, 64 MiB) when the query names no
+	// Budget of its own.
+	DefaultBudget = 64 << 20
 	// Skew is how far past a window's end a line's time may be before the
 	// read of that replica stops early (lines are in time order up to a
 	// few seconds' skew, §20.10).
 	Skew = 5 * time.Minute
-	// maxRestarts bounds the 410 cursor_expired restarts per replica and
-	// read.
+	// RestartBack is how far before the last line's time a 410
+	// cursor_expired restart begins (the gates' queued writes may put a
+	// line after the cursor with an earlier time); the lines served again
+	// are dropped.
+	RestartBack = 10 * time.Second
+	// maxRestarts bounds the 410 restarts per replica and read.
 	maxRestarts = 3
 	// requestTimeout bounds one request (the servers' own deadline is
 	// 30 s per connection).
@@ -61,8 +72,8 @@ const (
 )
 
 // Replica is one pod of a gate: its name (the merge's tie-break and the
-// key of its state) and address (its pod IP; "" = not running, so
-// unreadable).
+// key of its state) and address (its pod IP; "" = not readable now: not
+// running, terminating, failed, or an expected ordinal with no pod).
 type Replica struct {
 	Name string
 	Addr string
@@ -84,28 +95,52 @@ type Replicas struct {
 	MaxPages int
 }
 
-// Source is a merged log: the lines with from <= time (to zero = no end;
-// with to set the read stops once a replica's lines pass to + Skew) that
-// keep accepts (nil: all), merged by time then replica. A *Incomplete
-// error comes with the lines that could be read; any other error with
-// none.
-type Source interface {
-	Read(ctx context.Context, from, to time.Time, keep func(line []byte) bool) ([]byte, error)
+// Query is one read: the lines with From <= time (To zero = no end;
+// with To set a replica's read stops once its lines pass To + Skew, and
+// lines past it are dropped) that Keep accepts (nil: all). Budget bounds
+// the bytes fetched (nil: a fresh DefaultBudget); share one across reads
+// to bound them together.
+type Query struct {
+	From, To time.Time
+	Keep     func(line []byte) bool
+	Budget   *Budget
 }
+
+// Source is a merged log: Query's lines from every replica, merged by
+// time then replica. A *Incomplete error comes with the lines that could
+// be read; any other error with none.
+type Source interface {
+	Read(ctx context.Context, q Query) ([]byte, error)
+}
+
+// Budget is a byte budget over the answers fetched (every replica's,
+// every page's): past Max, reads stop (*Incomplete with OverBudget).
+type Budget struct {
+	max  int64
+	used atomic.Int64
+}
+
+// NewBudget is a budget of max bytes.
+func NewBudget(max int64) *Budget { return &Budget{max: max} }
+
+// take counts n fetched bytes: false once the budget is spent.
+func (b *Budget) take(n int) bool { return b.used.Add(int64(n)) <= b.max }
+
+// Spent: nothing more may be fetched.
+func (b *Budget) Spent() bool { return b.used.Load() >= b.max }
 
 // Incomplete is the error of a read that missed at least one replica (or
-// found none): the lines returned with it are what the others answered.
-// Unread names the replicas (pod names) that couldn't be read, Listed
-// how many were listed (0: none, or the list failed).
+// found none), or stopped at its budget: the lines returned with it are
+// what was read. Unread names the replicas (pod names) that couldn't be
+// read, Listed how many were listed (0: none, or the list failed),
+// OverBudget whether the byte budget stopped a replica's read.
 type Incomplete struct {
-	Service string
-	Unread  []string
-	Listed  int
-	Why     string
+	Service    string
+	Unread     []string
+	Listed     int
+	OverBudget bool
+	Why        string
 }
-
-// NoneRead: not one replica was read.
-func (e *Incomplete) NoneRead() bool { return len(e.Unread) >= e.Listed }
 
 func (e *Incomplete) Error() string {
 	if len(e.Unread) == 0 {
@@ -113,6 +148,9 @@ func (e *Incomplete) Error() string {
 	}
 	return fmt.Sprintf("%s: incomplete: %s unreadable: %s", e.Service, strings.Join(e.Unread, ", "), e.Why)
 }
+
+// NoneRead: not one replica was read.
+func (e *Incomplete) NoneRead() bool { return e.Listed == 0 || len(e.Unread) >= e.Listed }
 
 // IsIncomplete reports whether err is (or wraps) an *Incomplete.
 func IsIncomplete(err error) bool {
@@ -123,7 +161,10 @@ func IsIncomplete(err error) bool {
 var _ Source = Replicas{}
 
 // plainClient: no proxy (in-cluster pod addresses), no keep-alive (the
-// servers answer one request per connection).
+// servers answer one request per connection), no redirect. Its dial has
+// no timeout of its own (a custom dialer would be an unlisted external
+// writer to fsutil's scan): a SYN to a dead pod address is bounded by
+// Client.Timeout and the caller's context (5–30 s).
 var plainClient = &http.Client{Transport: &http.Transport{
 	Proxy:                  nil,
 	DisableKeepAlives:      true,
@@ -154,12 +195,16 @@ func (r Replicas) list(ctx context.Context) ([]Replica, error) {
 	if err != nil {
 		return nil, err
 	}
+	reps = append([]Replica(nil), reps...)
 	sort.Slice(reps, func(i, j int) bool { return reps[i].Name < reps[j].Name })
 	return reps, nil
 }
 
 // Read is Source.Read over every replica, concurrently.
-func (r Replicas) Read(ctx context.Context, from, to time.Time, keep func(line []byte) bool) ([]byte, error) {
+func (r Replicas) Read(ctx context.Context, q Query) ([]byte, error) {
+	if q.Budget == nil {
+		q.Budget = NewBudget(DefaultBudget)
+	}
 	reps, err := r.list(ctx)
 	if err != nil {
 		return nil, &Incomplete{Service: r.Service, Why: "its replicas can't be listed: " + err.Error()}
@@ -169,35 +214,50 @@ func (r Replicas) Read(ctx context.Context, from, to time.Time, keep func(line [
 	}
 	parts := make([][]byte, len(reps))
 	errs := make([]error, len(reps))
-	done := make(chan struct{}, len(reps))
+	var wg sync.WaitGroup
 	for i, rep := range reps {
+		wg.Add(1)
 		go func() {
-			defer func() { done <- struct{}{} }()
-			parts[i], errs[i] = r.scan(ctx, rep, from, to, keep)
+			defer wg.Done()
+			parts[i], errs[i] = r.scan(ctx, rep, q)
 		}()
 	}
-	for range reps {
-		<-done
-	}
+	wg.Wait()
+	return Merge(parts), r.incomplete(reps, errs)
+}
+
+// incomplete is the read's *Incomplete (nil when every replica was read
+// whole): the replicas that failed are Unread; a budget stop only sets
+// OverBudget.
+func (r Replicas) incomplete(reps []Replica, errs []error) error {
 	var unread, whys []string
+	over := false
 	for i, e := range errs {
-		if e != nil {
+		switch {
+		case e == nil:
+		case errors.Is(e, errBudget):
+			over = true
+			whys = append(whys, reps[i].Name+": "+e.Error())
+		default:
 			unread = append(unread, reps[i].Name)
 			whys = append(whys, e.Error())
 		}
 	}
-	out := Merge(parts)
-	if len(unread) > 0 {
-		return out, &Incomplete{Service: r.Service, Unread: unread, Listed: len(reps), Why: strings.Join(whys, "; ")}
+	if len(unread) == 0 && !over {
+		return nil
 	}
-	return out, nil
+	return &Incomplete{Service: r.Service, Unread: unread, Listed: len(reps), OverBudget: over, Why: strings.Join(whys, "; ")}
 }
 
 // cursorRe is a cursor as the Hub accepts it back (opaque, URL-safe).
 var cursorRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
-// errExpired is a 410 cursor_expired.
-var errExpired = errors.New("cursor_expired")
+// errExpired is a 410 cursor_expired; errBudget a read stopped at its
+// byte budget.
+var (
+	errExpired = errors.New("cursor_expired")
+	errBudget  = errors.New("the read's byte budget ran out")
+)
 
 // page is one /v1/log answer.
 type page struct {
@@ -208,10 +268,15 @@ type page struct {
 
 // fetch asks rep for one page: at cursor when it is set, else from (zero:
 // the start of the log). 410 is errExpired; 503 busy, 500 and anything
-// else unexpected are errors (the replica is unreadable this time).
-func (r Replicas) fetch(ctx context.Context, rep Replica, cursor string, from time.Time) (page, error) {
+// else unexpected are errors (the replica is unreadable this time). The
+// answer's bytes count against b: past it, the page is returned with
+// errBudget.
+func (r Replicas) fetch(ctx context.Context, rep Replica, cursor string, from time.Time, b *Budget) (page, error) {
 	if rep.Addr == "" {
-		return page{}, errors.New("not running")
+		return page{}, errors.New("not readable (no running pod)")
+	}
+	if b != nil && b.Spent() {
+		return page{}, errBudget
 	}
 	q := url.Values{}
 	if cursor != "" {
@@ -241,7 +306,11 @@ func (r Replicas) fetch(ctx context.Context, rep Replica, cursor string, from ti
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		return page{}, errors.New("an answer that doesn't end with a whole line")
 	}
-	return page{body: body, next: next, truncated: truncated}, nil
+	pg := page{body: body, next: next, truncated: truncated}
+	if b != nil && !b.take(len(body)) {
+		return pg, errBudget
+	}
+	return pg, nil
 }
 
 // statusError is a non-200 answer.
@@ -257,8 +326,8 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("answered %d", e.code)
 }
 
-// get is one GET (through the write fence's transport): the body of a
-// 200, at most MaxAnswer bytes (a longer answer is an error).
+// get is one GET (through the write fence's transport, fsutil.Do): the
+// body of a 200, at most MaxAnswer bytes (a longer answer is an error).
 func (r Replicas) get(ctx context.Context, u string) ([]byte, http.Header, error) {
 	rctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -313,46 +382,88 @@ func lineTime(line []byte) time.Time {
 	return t.UTC()
 }
 
-// scan reads rep's lines from from on, page by page with the cursor until
-// an answer isn't truncated (or, with to set, a page's last line is past
-// to + Skew): the lines keep accepts with from <= time (and time <= to +
-// Skew), in file order. A 410 restarts at the last line's time (the
-// cursor's) with from; Merge drops the lines served twice.
-func (r Replicas) scan(ctx context.Context, rep Replica, from, to time.Time, keep func([]byte) bool) ([]byte, error) {
+// lineKey is a line's dedupe key (a hash: no copy of the line is held).
+type lineKey [sha256.Size]byte
+
+func keyOf(l []byte) lineKey { return sha256.Sum256(l) }
+
+// again counts the lines a 410 restart may serve a second time: those
+// in kept whose time is at or after from (its whole second). Each is
+// dropped once when it comes again.
+func again(kept [][]byte, from time.Time) map[lineKey]int {
+	m := map[lineKey]int{}
+	from = from.Truncate(time.Second)
+	for _, l := range kept {
+		if !lineTime(l).Before(from) {
+			m[keyOf(l)]++
+		}
+	}
+	return m
+}
+
+// restartFrom is where a 410 restart begins: RestartBack before the last
+// line's time, never before the read's own from.
+func restartFrom(last, from time.Time) time.Time {
+	t := last.Add(-RestartBack)
+	if t.Before(from) {
+		return from
+	}
+	return t
+}
+
+// scan reads rep's lines from q.From on, page by page with the cursor
+// until an answer isn't truncated (or, with q.To set, a page's last line
+// is past To + Skew): the lines q.Keep accepts with From <= time (and
+// time <= To + Skew), in file order. A 410 restarts RestartBack before
+// the last line's time with from; the lines it serves a second time are
+// dropped (counted: the gate's own identical lines stay).
+func (r Replicas) scan(ctx context.Context, rep Replica, q Query) ([]byte, error) {
 	var out [][]byte
-	cursor, last := "", from
+	cursor, last := "", q.From
+	from := q.From // the next fetch's from, when there is no cursor
 	restarts := 0
+	var dup map[lineKey]int
 	for pages := 0; ; pages++ {
 		if pages == r.maxPages() {
-			return join(out), errors.New("its log is longer than the read budget")
+			return join(out), errors.New("its log is longer than the read's page budget")
 		}
-		pg, err := r.fetch(ctx, rep, cursor, last)
+		pg, err := r.fetch(ctx, rep, cursor, from, q.Budget)
 		if errors.Is(err, errExpired) && cursor != "" {
 			if restarts++; restarts > maxRestarts {
 				return join(out), errors.New("its cursor kept expiring")
 			}
-			cursor = "" // the lines served again are dropped by Merge
+			from = restartFrom(last, q.From)
+			cursor, dup = "", again(out, from)
 			continue
 		}
-		if err != nil {
+		if err != nil && (!errors.Is(err, errBudget) || pg.next == "") {
 			return join(out), err
 		}
 		lines := splitLines(pg.body)
 		for _, l := range lines {
-			if keep != nil && !keep(l) {
+			if q.Keep != nil && !q.Keep(l) {
 				continue
 			}
 			t := lineTime(l)
-			if t.Before(from) || !to.IsZero() && t.After(to.Add(Skew)) {
+			if t.Before(q.From) || !q.To.IsZero() && t.After(q.To.Add(Skew)) {
 				continue
 			}
+			if dup != nil {
+				if k := keyOf(l); dup[k] > 0 {
+					dup[k]--
+					continue
+				}
+			}
 			out = append(out, append([]byte(nil), l...))
+		}
+		if err != nil { // the budget: this page is in, nothing more
+			return join(out), err
 		}
 		if n := len(lines); n > 0 {
 			if t := lineTime(lines[n-1]); !t.IsZero() {
 				last = t
 			}
-			if !to.IsZero() && last.After(to.Add(Skew)) {
+			if !q.To.IsZero() && last.After(q.To.Add(Skew)) {
 				return join(out), nil
 			}
 		}
@@ -403,24 +514,35 @@ type StatusSource interface {
 var _ StatusSource = Replicas{}
 
 // Status is the status of wg's replica (with several, during a rollout,
-// the one whose document was written last). An error when none answers.
+// the one whose document was written last), asked concurrently. An error
+// when none answers.
 func (r Replicas) Status(ctx context.Context) ([]byte, error) {
 	reps, err := r.list(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%s: its replicas can't be listed: %w", r.Service, err)
 	}
-	var best []byte
-	var bestAt time.Time
-	var errs []string
-	for _, rep := range reps {
+	bodies := make([][]byte, len(reps))
+	errs := make([]error, len(reps))
+	var wg sync.WaitGroup
+	for i, rep := range reps {
 		if rep.Addr == "" {
-			errs = append(errs, rep.Name+": not running")
+			errs[i] = errors.New("not readable (no running pod)")
 			continue
 		}
-		u := url.URL{Scheme: "http", Host: net.JoinHostPort(rep.Addr, strconv.Itoa(r.Port)), Path: "/v1/status"}
-		b, _, err := r.get(ctx, u.String())
-		if err != nil {
-			errs = append(errs, rep.Name+": "+err.Error())
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			u := url.URL{Scheme: "http", Host: net.JoinHostPort(rep.Addr, strconv.Itoa(r.Port)), Path: "/v1/status"}
+			bodies[i], _, errs[i] = r.get(ctx, u.String())
+		}()
+	}
+	wg.Wait()
+	var best []byte
+	var bestAt time.Time
+	var msgs []string
+	for i, b := range bodies {
+		if errs[i] != nil {
+			msgs = append(msgs, reps[i].Name+": "+errs[i].Error())
 			continue
 		}
 		var v struct {
@@ -434,8 +556,8 @@ func (r Replicas) Status(ctx context.Context) ([]byte, error) {
 	if best != nil {
 		return best, nil
 	}
-	if len(errs) == 0 {
+	if len(msgs) == 0 {
 		return nil, fmt.Errorf("%s: no replica is running", r.Service)
 	}
-	return nil, fmt.Errorf("%s: %s", r.Service, strings.Join(errs, "; "))
+	return nil, fmt.Errorf("%s: %s", r.Service, strings.Join(msgs, "; "))
 }

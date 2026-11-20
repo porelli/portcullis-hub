@@ -2777,11 +2777,17 @@
       head.textContent = auditFilter === 'access' ? 'Audit log via AI and AI requests (last 100 of each)'
         : auditFilter === 'ai' ? 'Audit log: changes made via AI (last 100)' : 'Audit log (last 100 changes)';
     }
-    let note = '';
+    let note = '', incNote = '';
     try {
       let items;
       try {
-        items = await api('GET', url);
+        // The access lines' incomplete marker is a header (the items stay
+        // a list): some lines may be missing (a gate replica unread).
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (res.ok && res.headers.get('X-Portcullis-Incomplete') === 'access') {
+          incNote = '<p class="pd-muted" data-audit-incomplete>Some AI requests may be missing: a gate replica\'s access log couldn\'t all be read right now.</p>';
+        }
+        items = await finish(res);
       } catch (err) {
         // The gate's access log can't be read (no gate data directory,
         // 503): the audit entries alone, said so.
@@ -2790,12 +2796,12 @@
         items = await api('GET', '/api/directory/audit?via=ai');
       }
       if (!items.length) {
-        box.innerHTML = note + '<p class="pd-muted">' + (auditFilter ? 'Nothing made via AI yet.' : 'No changes yet.') + '</p>';
+        box.innerHTML = note + incNote + '<p class="pd-muted">' + (auditFilter ? 'Nothing made via AI yet.' : 'No changes yet.') + '</p>';
         return;
       }
       const cols = auditFilter === 'access' && !note ? ['Time', 'Who (client)', 'Action or AI request', 'Target or resource', 'Result or decision']
         : ['Time', 'Who', 'Action', 'Target', 'Result'];
-      let h = note + '<table class="pd-table"><thead><tr>' + cols.map(c => '<th scope="col">' + esc(c) + '</th>').join('') + '</tr></thead><tbody>';
+      let h = note + incNote + '<table class="pd-table"><thead><tr>' + cols.map(c => '<th scope="col">' + esc(c) + '</th>').join('') + '</tr></thead><tbody>';
       for (const it of items) {
         if (it.source === 'access') h += it.line ? auditAccessRow(it.line) : '';
         else h += auditEntryRow(it.source === 'audit' ? (it.entry || {}) : it);

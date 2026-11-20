@@ -14,7 +14,12 @@ import (
 	"testing"
 	"time"
 
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/runtime/kube"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fidomds"
@@ -632,7 +637,31 @@ func TestGateLogSourcesFromEnv(t *testing.T) {
 		}
 	}
 	cfg := hub.Config{GroupGateDataDir: "/group-gate-data", MCPGateDataDir: "/mcp-gate-data", VPNStatusFile: "/wg-data/status.json"}
-	if err := wireGateLogs(&cfg, nil); err == nil || cfg.GateLogs != nil {
+	none := func(string) string { return "" }
+	if err := wireGateLogs(&cfg, nil, none); err == nil || cfg.GateLogs != nil {
 		t.Errorf("no kube runtime: %v %+v", err, cfg.GateLogs)
+	}
+	// With the kube backend: the three sources, and the file settings
+	// cleared (the Hub neither reads nor prunes group-gate-data on HA).
+	b, err := kube.New(kube.Config{Client: fake.NewSimpleClientset(), Dynamic: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()), Namespace: "portcullis-apps", CoreNamespace: "portcullis"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wireGateLogs(&cfg, b, none); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GroupGateDataDir != "" || cfg.MCPGateDataDir != "" || cfg.VPNStatusFile != "" || cfg.GateLogs == nil ||
+		cfg.GateLogs.Opened == nil || cfg.GateLogs.Access == nil || cfg.GateLogs.WGStatus == nil {
+		t.Errorf("wired: %+v", cfg)
+	}
+	for _, v := range []string{"0", "17", "02", "x"} {
+		if err := wireGateLogs(&cfg, b, func(k string) string {
+			if k == "HUB_GATE_REPLICAS" {
+				return v
+			}
+			return ""
+		}); err == nil {
+			t.Errorf("HUB_GATE_REPLICAS=%q accepted", v)
+		}
 	}
 }

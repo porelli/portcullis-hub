@@ -345,23 +345,24 @@ func (s *Server) handleAIActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	lines, err := s.aiActivity(q.Get("instance"), q.Get("user"), n)
+	lines, incomplete, err := s.aiActivity(q.Get("instance"), q.Get("user"), n)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
 	}
 	noStore(w)
-	writeJSON(w, map[string]any{"lines": lines})
+	writeJSON(w, map[string]any{"lines": lines, "incomplete": incomplete})
 }
 
 // aiActivity is the access log read (route and ai_activity): n 0 = the
 // default, else 1–200; instance / user "" = any (user lowercased).
-func (s *Server) aiActivity(instance, user string, n int) ([]hub.AccessLine, error) {
+// incomplete: some lines may be missing (HA: a gate replica unread).
+func (s *Server) aiActivity(instance, user string, n int) ([]hub.AccessLine, bool, error) {
 	if n == 0 {
 		n = defActivity
 	}
 	if n < 1 || n > maxActivity {
-		return nil, badArg(fmt.Sprintf("n must be 1-%d", maxActivity))
+		return nil, false, badArg(fmt.Sprintf("n must be 1-%d", maxActivity))
 	}
 	user = strings.ToLower(user)
 	return s.Hub.AccessLog(func(l hub.AccessLine) bool {

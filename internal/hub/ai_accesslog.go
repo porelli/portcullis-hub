@@ -101,19 +101,27 @@ var errAccessLog = statusErr(http.StatusServiceUnavailable, "AI activity can't b
 // read: a partial first line there and a torn last line (no newline yet:
 // the gate is mid-write) are skipped, and so is any line that doesn't
 // decode (counted in the log). No log yet = none; no data dir or an
-// unreadable file = 503.
-func (h *Hub) AccessLog(filter func(AccessLine) bool, n int) ([]AccessLine, error) {
-	out := []AccessLine{}
+// unreadable file = 503. incomplete: read from mcp-gate's replicas (HA),
+// some lines may be missing (a replica unread, or still catching up):
+// every view says so.
+func (h *Hub) AccessLog(filter func(AccessLine) bool, n int) (lines []AccessLine, incomplete bool, err error) {
 	if n <= 0 {
-		return out, nil
+		return []AccessLine{}, false, nil
 	}
 	if t := h.accessTail(); t != nil {
-		buf, err := h.accessTailBytes(t)
+		buf, incomplete, err := h.accessTailBytes(t)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return accessLines(buf, filter, n), nil
+		return accessLines(buf, filter, n), incomplete, nil
 	}
+	lines, err = h.accessLogFile(filter, n)
+	return lines, false, err
+}
+
+// accessLogFile is AccessLog from HUB_MCP_GATE_DATA_DIR/access.jsonl.
+func (h *Hub) accessLogFile(filter func(AccessLine) bool, n int) ([]AccessLine, error) {
+	out := []AccessLine{}
 	if h.cfg.MCPGateDataDir == "" {
 		return nil, errAccessLog
 	}
@@ -166,22 +174,24 @@ const accessTailTimeout = 10 * time.Second
 
 // accessTailBytes is the access log's tail from mcp-gate's replicas
 // (HUB_GATE_LOG_SOURCES=http, contract §20.10): each replica's newest
-// 4 MiB, merged by time. A replica that can't be read leaves out its new
-// lines and is logged (this view has no "incomplete" of its own); when
-// none can be read the answer is the 503 of an unreadable file.
-func (h *Hub) accessTailBytes(t *gatelogs.Tail) ([]byte, error) {
+// 4 MiB, merged by time. A replica that can't be read (or is still
+// catching up) leaves the answer incomplete; when none was read and
+// nothing is held the answer is the 503 of an unreadable file.
+func (h *Hub) accessTailBytes(t *gatelogs.Tail) ([]byte, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), accessTailTimeout)
 	defer cancel()
 	buf, err := t.Read(ctx)
 	var inc *gatelogs.Incomplete
 	switch {
-	case errors.As(err, &inc) && !inc.NoneRead():
-		log.Printf("ai: the access log: %v (shown without it)", err)
-	case err != nil:
+	case err == nil:
+		return buf, false, nil
+	case errors.As(err, &inc) && (!inc.NoneRead() || len(buf) > 0):
+		log.Printf("ai: the access log: %v (shown, marked incomplete)", err)
+		return buf, true, nil
+	default:
 		log.Printf("ai: the access log: %v", err)
-		return nil, errAccessLog
+		return nil, false, errAccessLog
 	}
-	return buf, nil
 }
 
 // accessLines are buf's whole lines that filter accepts (nil = all),
@@ -254,6 +264,9 @@ type MyAIConnection struct {
 type MyAIView struct {
 	Connections []MyAIConnection `json:"connections"`
 	Activity    []AccessLine     `json:"activity"`
+	// ActivityIncomplete: some of the activity may be missing (HA: a
+	// gate replica couldn't be read, or is still being read back).
+	ActivityIncomplete bool `json:"activity_incomplete"`
 }
 
 // aiClientLabel is the Hub's name for an AI client.
@@ -305,11 +318,11 @@ func (h *Hub) MyAI(ctx context.Context, user string) (*MyAIView, error) {
 		log.Printf("ai: %s's AI connections: %v", u, err)
 		return nil, statusErr(http.StatusServiceUnavailable, "AI connections can't be read right now")
 	}
-	activity, err := h.AccessLog(func(l AccessLine) bool { return l.User == u }, myAILines)
+	activity, incomplete, err := h.AccessLog(func(l AccessLine) bool { return l.User == u }, myAILines)
 	if err != nil {
 		return nil, err
 	}
-	v := &MyAIView{Connections: []MyAIConnection{}, Activity: activity}
+	v := &MyAIView{Connections: []MyAIConnection{}, Activity: activity, ActivityIncomplete: incomplete}
 	for _, c := range conns {
 		v.Connections = append(v.Connections, MyAIConnection{Client: c.Client, Label: h.aiClientLabel(c.Client),
 			ConsentedAt: c.Consented, LastUsedAt: c.LastUsed, ExpiresAt: c.Expires})

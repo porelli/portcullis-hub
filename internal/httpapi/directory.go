@@ -222,10 +222,15 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, entries)
 		return
 	}
-	lines, err := s.Hub.AccessLog(nil, auditShown)
+	lines, incomplete, err := s.Hub.AccessLog(nil, auditShown)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
+	}
+	if incomplete {
+		// The items stay a list: the marker is a header (HA: a gate
+		// replica's access log couldn't be read, some lines may be missing).
+		w.Header().Set("X-Portcullis-Incomplete", "access")
 	}
 	items := make([]auditItem, 0, len(entries)+len(lines))
 	for i := range entries {

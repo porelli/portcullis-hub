@@ -442,11 +442,11 @@ func (s *Server) registerAdminTools2() {
 			}},
 		admin("ai_activity", "The gate's access log, newest first (who used which AI resource and tool, the decision; never arguments or results), filtered by instance and person.",
 			ClassRead, "GET /api/ai/activity", "", func(_ context.Context, _ directory.Actor, in activityArgs) (any, error) {
-				lines, err := s.aiActivity(in.Instance, in.User, in.N)
+				lines, incomplete, err := s.aiActivity(in.Instance, in.User, in.N)
 				if err != nil {
 					return nil, err
 				}
-				return map[string]any{"lines": lines}, nil
+				return map[string]any{"lines": lines, "incomplete": incomplete}, nil
 			}),
 		admin("list_model_providers", "The model providers of the AI page: definition, each secret field only as {set, updated_at}, and the instances using it.",
 			ClassRead, "GET /api/ai/providers", "", func(ctx context.Context, _ directory.Actor, _ noArgs) (any, error) {

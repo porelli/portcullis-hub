@@ -770,8 +770,8 @@ func TestRoleExactCore(t *testing.T)               // core ns review == role-cor
 **Interfaces:**
 - Consumes: §20.10 (Task 1).
 - Produces:
-  - `gatelogs.Source interface{ Read(ctx, from time.Time, limit int) ([]byte, error) }`;
-  - `gatelogs.Replicas{Service string; Port int; Lister func(ctx) ([]string, error)}`, where the lister uses the Hub's `pods list` in the core namespace (Task 6 Role);
+  - `gatelogs.Source interface{ Read(ctx, gatelogs.Query{From, To time.Time; Keep func([]byte) bool; Budget *gatelogs.Budget}) ([]byte, error) }` (as shipped: a time window, a line filter and one byte budget, 64 MiB, over every replica; the opened log reads it day by day, newest first, answering `*Partial` when the budget runs out);
+  - `gatelogs.Replicas{Service string; Port int; Lister func(ctx) ([]gatelogs.Replica{Name, Addr}, error); Client; MaxPages}`, where the lister is kube `(*Backend).CoreReplicas(component, ReplicaOptions{StatefulSet, Expected})`: the Hub's `pods list` in the core namespace (Task 6 Role), pods owned by the component's own controller; pending, terminating, failed pods and expected ordinals without a pod are listed without an address (unread → incomplete). `gatelogs.Tail` follows mcp-gate's access log (newest 4 MiB per replica, first fill from 1 h back widened ×4, incomplete until caught up);
   - `gatelogs.Merge(parts [][]byte) []byte` (stable by timestamp, then replica);
   - an unreadable replica → `Incomplete = true`.
 

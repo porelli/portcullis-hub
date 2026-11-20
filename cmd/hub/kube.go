@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -131,23 +132,44 @@ func gateLogSourcesFromEnv(getenv func(string) string, kind runtime.Kind) (bool,
 
 // coreReplicas is the kube backend's lister of a core component's pods.
 type coreReplicas interface {
-	CoreReplicas(component string) gatelogs.Lister
+	CoreReplicas(component string, o kube.ReplicaOptions) gatelogs.Lister
+}
+
+// gateReplicasFromEnv is HUB_GATE_REPLICAS: the gates' replica count the
+// chart runs (ha.gateReplicas), 1–16; unset = unknown (missing replicas
+// are then inferred from the ordinals seen). Anything else refuses the
+// start.
+func gateReplicasFromEnv(getenv func(string) string) (int, error) {
+	v := getenv("HUB_GATE_REPLICAS")
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 16 || strconv.Itoa(n) != v {
+		return 0, fmt.Errorf("HUB_GATE_REPLICAS must be an integer 1-16, got %q", v)
+	}
+	return n, nil
 }
 
 // wireGateLogs points the opened log, the access log and wg's status at
 // the replicas' ports (HUB_GATE_LOG_SOURCES=http): the chart mounts none
 // of their volumes then, so the file settings are cleared (the Hub
 // neither reads nor prunes group-gate-data: each gate prunes its own).
-func wireGateLogs(cfg *hub.Config, rt runtime.Instances) error {
+func wireGateLogs(cfg *hub.Config, rt runtime.Instances, getenv func(string) string) error {
 	b, ok := rt.(coreReplicas)
 	if !ok {
 		return fmt.Errorf("HUB_GATE_LOG_SOURCES=http: the runtime can't list the core pods")
 	}
+	n, err := gateReplicasFromEnv(getenv)
+	if err != nil {
+		return err
+	}
+	gate := kube.ReplicaOptions{StatefulSet: true, Expected: n}
 	cfg.GroupGateDataDir, cfg.MCPGateDataDir, cfg.VPNStatusFile = "", "", ""
 	cfg.GateLogs = &hub.GateLogSources{
-		Opened:   gatelogs.Replicas{Service: "group-gate", Port: gatelogs.GroupGatePort, Lister: b.CoreReplicas("group-gate")},
-		Access:   &gatelogs.Tail{R: gatelogs.Replicas{Service: "mcp-gate", Port: gatelogs.MCPGatePort, Lister: b.CoreReplicas("mcp-gate")}},
-		WGStatus: gatelogs.Replicas{Service: "wg", Port: gatelogs.WGStatusPort, Lister: b.CoreReplicas("wg")},
+		Opened:   gatelogs.Replicas{Service: "group-gate", Port: gatelogs.GroupGatePort, Lister: b.CoreReplicas("group-gate", gate)},
+		Access:   &gatelogs.Tail{R: gatelogs.Replicas{Service: "mcp-gate", Port: gatelogs.MCPGatePort, Lister: b.CoreReplicas("mcp-gate", gate)}},
+		WGStatus: gatelogs.Replicas{Service: "wg", Port: gatelogs.WGStatusPort, Lister: b.CoreReplicas("wg", kube.ReplicaOptions{})},
 	}
 	log.Printf("gate logs: read from the replicas' ports (group-gate :%d, mcp-gate :%d, wg :%d)", gatelogs.GroupGatePort, gatelogs.MCPGatePort, gatelogs.WGStatusPort)
 	return nil

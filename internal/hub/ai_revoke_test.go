@@ -1160,7 +1160,7 @@ func TestAccessLogReader(t *testing.T) {
 	// too (it may still grow).
 	torn := strings.Replace(accessLine("alice", 200), `"tool":"t200"`, `"tool":"torn"`, 1)
 	writeAccessLog(t, a, lines, torn)
-	got, err := a.h.AccessLog(nil, 1000)
+	got, _, err := a.h.AccessLog(nil, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1227,11 +1227,11 @@ func TestAccessLogReader(t *testing.T) {
 		t.Errorf("keycloak down = %v", err)
 	}
 	a.h.cfg.MCPGateDataDir = ""
-	if _, err := a.h.AccessLog(nil, 10); statusOf(err) != 503 {
+	if _, _, err := a.h.AccessLog(nil, 10); statusOf(err) != 503 {
 		t.Errorf("no data dir = %v", err)
 	}
 	a.h.cfg.MCPGateDataDir = t.TempDir()
-	if l, err := a.h.AccessLog(nil, 10); err != nil || len(l) != 0 {
+	if l, _, err := a.h.AccessLog(nil, 10); err != nil || len(l) != 0 {
 		t.Errorf("no log = %v %v", l, err)
 	}
 }
@@ -1248,7 +1248,7 @@ func TestAccessLogTail(t *testing.T) {
 	}
 	lines = append(lines, accessLine("alice", 1))
 	writeAccessLog(t, a, lines, "")
-	got, err := a.h.AccessLog(nil, 1<<20)
+	got, _, err := a.h.AccessLog(nil, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}

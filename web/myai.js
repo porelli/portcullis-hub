@@ -199,6 +199,7 @@
     h += '<p class="pd-muted mai-note">Disconnect ends all your Claude connectors at once. ' +
       'It stops new sign-ins and token refreshes for that client at once; requests already signed in can keep working for up to 5 minutes.</p>';
     h += '<div class="mai-activity"><span class="mai-act-title">Recent AI activity</span>';
+    if (v.activity_incomplete) h += ' <span class="pd-muted" data-mai-incomplete>(some may be missing right now)</span>';
     if (!act.length) return h + ' <span class="pd-muted">none yet</span></div>';
     h += '<ul class="mai-lines">' + act.slice(0, RECENT).map(lineHtml).join('') + '</ul>';
     if (act.length > RECENT) {

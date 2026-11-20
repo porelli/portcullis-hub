@@ -29,7 +29,8 @@ type fileSource struct {
 	err error
 }
 
-func (s fileSource) Read(_ context.Context, from, to time.Time, keep func([]byte) bool) ([]byte, error) {
+func (s fileSource) Read(_ context.Context, q gatelogs.Query) ([]byte, error) {
+	keep := q.Keep
 	var out bytes.Buffer
 	ents, _ := os.ReadDir(filepath.Join(s.dir, signinhistory.OpenedDirName))
 	for _, e := range ents {
@@ -154,8 +155,8 @@ func TestAccessLogFromReplicas(t *testing.T) {
 		all = append(all, even[i], odd[i])
 	}
 	writeAccessLog(t, a, all, "")
-	want, err := a.h.AccessLog(nil, 50)
-	if err != nil || len(want) != 20 {
+	want, inc, err := a.h.AccessLog(nil, 50)
+	if err != nil || len(want) != 20 || inc {
 		t.Fatalf("file: %d %v", len(want), err)
 	}
 	var mu sync.Mutex
@@ -190,21 +191,33 @@ func TestAccessLogFromReplicas(t *testing.T) {
 		Lister: func(context.Context) ([]gatelogs.Replica, error) {
 			return []gatelogs.Replica{{Name: "mcp-gate-0", Addr: "10.0.0.1"}, {Name: "mcp-gate-1", Addr: "10.0.0.2"}}, nil
 		}}
+	now := func() time.Time { return time.Date(2026, 11, 5, 11, 0, 0, 0, time.UTC) }
+	tail := func() *gatelogs.Tail { return &gatelogs.Tail{R: r, Now: now} }
 	a.h.cfg.MCPGateDataDir = ""
-	a.h.cfg.GateLogs = &GateLogSources{Access: &gatelogs.Tail{R: r}}
-	got, err := a.h.AccessLog(nil, 50)
-	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Errorf("replicas: %d lines (%v), want the file's %d", len(got), err, len(want))
+	a.h.cfg.GateLogs = &GateLogSources{Access: tail()}
+	got, inc, err := a.h.AccessLog(nil, 50)
+	if err != nil || !reflect.DeepEqual(got, want) || inc {
+		t.Errorf("replicas: %d lines (%v, incomplete %v), want the file's %d", len(got), err, inc, len(want))
 	}
-	// One down: the other's lines (and what was read of it before).
-	a.h.cfg.GateLogs = &GateLogSources{Access: &gatelogs.Tail{R: r}}
+	// One down: the other's lines, marked incomplete — in every view
+	// (MyAI's activity_incomplete; the routes: internal/httpapi).
+	a.h.cfg.GateLogs = &GateLogSources{Access: tail()}
 	setDown("mcp-gate-1")
-	got, err = a.h.AccessLog(func(l AccessLine) bool { return l.User == "alice" }, 50)
-	if err != nil || len(got) != 10 {
-		t.Errorf("one down: %d %v", len(got), err)
+	got, inc, err = a.h.AccessLog(func(l AccessLine) bool { return l.User == "alice" }, 50)
+	if err != nil || len(got) != 10 || !inc {
+		t.Errorf("one down: %d %v incomplete %v", len(got), err, inc)
 	}
+	if v, err := a.h.MyAI(context.Background(), "alice"); err != nil || !v.ActivityIncomplete || len(v.Activity) != 10 {
+		t.Errorf("MyAI one down: %+v %v", v, err)
+	}
+	// Both down, nothing held: the 503 of an unreadable file; with lines
+	// held from before: those, incomplete.
 	setDown("mcp-gate-0")
-	if _, err := a.h.AccessLog(nil, 50); !errors.Is(err, errAccessLog) {
+	if _, inc, err := a.h.AccessLog(nil, 50); err != nil || !inc {
+		t.Errorf("both down, lines held: %v %v", inc, err)
+	}
+	a.h.cfg.GateLogs = &GateLogSources{Access: tail()}
+	if _, _, err := a.h.AccessLog(nil, 50); !errors.Is(err, errAccessLog) {
 		t.Errorf("none readable: %v", err)
 	}
 }

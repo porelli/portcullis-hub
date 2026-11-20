@@ -204,13 +204,14 @@ func (l OpenedLog) ActAppsContext(ctx context.Context, user, act string, from, t
 		if user == "" || act == "" || to.Before(from) {
 			return out, nil
 		}
-		lines, err := l.srcLines(ctx, user, from, to)
+		lines, err := l.srcLines(ctx, user, from, to, gatelogs.NewBudget(l.maxScan()))
 		if err != nil && !gatelogs.IsIncomplete(err) {
 			return nil, err
 		}
 		out = actApps(lines, user, act, from, to)
 		if err != nil {
-			return out, &Incomplete{Why: "a group-gate replica's opened log couldn't be read"}
+			// A replica missed, or the budget cut the read: some may be missing.
+			return out, &Incomplete{Why: "the opened log couldn't all be read from group-gate's replicas"}
 		}
 		return out, nil
 	}
@@ -261,46 +262,71 @@ func actApps(lines []openedLine, user, act string, from, to time.Time) []string 
 }
 
 // srcLines are Src's lines holding user (as readDay: matched on the raw
-// line first, unparsable ones skipped) with from <= time <= to; an
-// *gatelogs.Incomplete error comes with the lines the others answered.
-func (l OpenedLog) srcLines(ctx context.Context, user string, from, to time.Time) ([]openedLine, error) {
+// line first, then on the parsed user exactly; unparsable ones skipped)
+// with from <= time <= to, read within budget; an *gatelogs.Incomplete
+// error comes with the lines that were read.
+func (l OpenedLog) srcLines(ctx context.Context, user string, from, to time.Time, budget *gatelogs.Budget) ([]openedLine, error) {
 	needle := []byte(user)
-	b, err := l.Src.Read(ctx, from, to, func(raw []byte) bool { return bytes.Contains(raw, needle) })
+	b, err := l.Src.Read(ctx, gatelogs.Query{From: from, To: to, Budget: budget,
+		Keep: func(raw []byte) bool { return bytes.Contains(raw, needle) }})
 	if err != nil && !gatelogs.IsIncomplete(err) {
 		return nil, err
 	}
 	var lines []openedLine
 	for _, raw := range bytes.Split(b, []byte("\n")) {
 		var ln openedLine
-		if len(raw) > 0 && json.Unmarshal(raw, &ln) == nil && !ln.Time.Before(from) && !ln.Time.After(to) {
+		if len(raw) > 0 && json.Unmarshal(raw, &ln) == nil && ln.User == user && !ln.Time.Before(from) && !ln.Time.After(to) {
 			lines = append(lines, ln)
 		}
 	}
 	return lines, err
 }
 
-// srcEntries is Entries from Src: the same per-day dedupe (the gate's day
-// files are UTC days), newest day first. A replica that couldn't be read
-// answers *Incomplete with the entries the others gave.
+// srcStopMargin: a history read from Src starts no new day with less
+// than this left before its deadline (it answers *Partial instead).
+const srcStopMargin = 2 * time.Second
+
+// srcEntries is Entries from Src, as the files are read: day by day (the
+// gate's day files are UTC days), newest first, each day's lines deduped
+// on (session, host), until limit entries; one byte budget (MaxScan)
+// over every day and replica. When the budget, or the read's deadline,
+// stops it before a day, the answer is *Partial{Through: the end of that
+// day} (every newer day was read whole); a replica that couldn't be read
+// makes it *Incomplete (with every entry that was read).
 func (l OpenedLog) srcEntries(ctx context.Context, user string, since, before time.Time, limit int) ([]Entry, error) {
 	out := []Entry{}
 	user = strings.ToLower(strings.TrimSpace(user))
 	if user == "" || limit < 1 || !since.Before(before) {
 		return out, nil
 	}
-	lines, err := l.srcLines(ctx, user, since, before)
-	if err != nil && !gatelogs.IsIncomplete(err) {
-		return nil, err
-	}
-	byDay := map[time.Time][]openedLine{}
-	for _, ln := range lines {
-		d := ln.Time.UTC().Truncate(24 * time.Hour)
-		byDay[d] = append(byDay[d], ln)
-	}
+	budget := gatelogs.NewBudget(l.maxScan())
+	incomplete := false
 	first := since.UTC().Truncate(24 * time.Hour)
-	for day := before.UTC().Truncate(24 * time.Hour); !day.Before(first) && len(out) < limit; day = day.AddDate(0, 0, -1) {
+	newest := before.UTC().Truncate(24 * time.Hour)
+	for day := newest; !day.Before(first) && len(out) < limit; day = day.AddDate(0, 0, -1) {
+		partial := &Partial{Through: day.Add(24*time.Hour - time.Nanosecond), Why: "the opened log's read budget ran out"}
+		if day.Before(newest) {
+			if dl, ok := ctx.Deadline(); budget.Spent() || ctx.Err() != nil || ok && time.Until(dl) < srcStopMargin {
+				return out, l.srcEnd(partial, incomplete)
+			}
+		}
+		from, to := maxTime(day, since), minTime(day.Add(24*time.Hour-time.Nanosecond), before)
+		lines, err := l.srcLines(ctx, user, from, to, budget)
+		var inc *gatelogs.Incomplete
+		switch {
+		case err == nil:
+		case errors.As(err, &inc) && inc.OverBudget && len(inc.Unread) == 0:
+			// This day was cut: it isn't claimed (the page ends after it).
+			return out, l.srcEnd(partial, incomplete)
+		case errors.As(err, &inc):
+			incomplete = true
+		case day.Before(newest) && ctx.Err() != nil:
+			return out, l.srcEnd(partial, incomplete)
+		default:
+			return nil, err
+		}
 		var es []Entry
-		for _, ln := range dedupe(byDay[day], user) {
+		for _, ln := range dedupe(lines, user) {
 			if ln.Time.Before(since) || !ln.Time.Before(before) {
 				continue
 			}
@@ -309,10 +335,36 @@ func (l OpenedLog) srcEntries(ctx context.Context, user string, since, before ti
 		slices.SortStableFunc(es, func(a, b Entry) int { return b.Time.Compare(a.Time) })
 		out = append(out, es[:min(len(es), limit-len(out))]...)
 	}
-	if err != nil {
-		return out, &Incomplete{Why: "a group-gate replica's opened log couldn't be read"}
+	if incomplete {
+		return out, srcIncomplete
 	}
 	return out, nil
+}
+
+// srcIncomplete: a group-gate replica couldn't be read.
+var srcIncomplete = &Incomplete{Why: "a group-gate replica's opened log couldn't be read"}
+
+// srcEnd is a cut read's error: *Partial, or *Incomplete when a replica
+// was also missed (the history then names the source unknown).
+func (l OpenedLog) srcEnd(p *Partial, incomplete bool) error {
+	if incomplete {
+		return srcIncomplete
+	}
+	return p
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 // readDay reads day's file: its newest OpenedScan bytes (n, the bytes
