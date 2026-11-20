@@ -221,9 +221,16 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 		if site == "" {
 			site = s.Site
 		}
-		if n, ok := node(e.ID, nonEmpty(site, servers.PrimarySite), nonEmpty(e.MeshIP, s.MeshIP), e.Mesh.Pub, lan, public); ok {
-			in.joining = append(in.joining, n)
+		// A joining node's key is only its enrolment report's (never read
+		// from its nodeagent, never a reason to hold the others' plans).
+		mesh := nonEmpty(e.MeshIP, s.MeshIP)
+		a, err := netip.ParseAddr(mesh)
+		if err != nil {
+			continue
 		}
+		in.meshIP[e.ID] = mesh
+		in.joining = append(in.joining, meshplan.Node{ID: e.ID, Site: nonEmpty(site, servers.PrimarySite), MeshIP: a,
+			LAN: endpoint(lan), Public: endpoint(public), Pub: e.Mesh.Pub})
 	}
 	sort.Slice(in.joining, func(i, j int) bool { return in.joining[i].ID < in.joining[j].ID })
 	return in
@@ -279,8 +286,27 @@ func planMesh(in meshInputs) (plans map[string]meshplan.NodePlan, noGateway []st
 		return nil, nil, nil, err
 	}
 	refused = map[string]string{}
+	// A joining node's key must be a WireGuard key used by no other node
+	// (established or joining): a repeated key is refused for every node
+	// that carries it, so a joiner can never take an established node's
+	// traffic nor keep the established plans (removals) from being pushed.
+	keys := map[string]int{}
+	for _, n := range in.established {
+		keys[n.Pub]++
+	}
+	for _, j := range in.joining {
+		keys[j.Pub]++
+	}
 	include := slices.Clone(in.established)
 	for _, j := range in.joining {
+		if !validMeshKey(j.Pub) {
+			refused[j.ID] = fmt.Sprintf("the pcmesh key node %s reported isn't a WireGuard key: it can't join", j.ID)
+			continue
+		}
+		if keys[j.Pub] > 1 {
+			refused[j.ID] = fmt.Sprintf("the pcmesh key node %s reported is used by another node: it can't join", j.ID)
+			continue
+		}
 		trial := append(slices.Clone(include), j)
 		_, m2, err := meshplan.Degraded(trial)
 		if err != nil {

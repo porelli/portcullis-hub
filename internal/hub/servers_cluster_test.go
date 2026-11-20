@@ -257,7 +257,7 @@ func TestEnrolStepsFromSnapshot(t *testing.T) {
 	cf.na.onCluster = func(n int, s *nodeadm.Snapshot) {
 		switch {
 		case n == 3:
-			s.Enrolling = []nodeadm.Enrolling{{ID: "n2", Role: "server", Class: "home", Site: "main", MeshIP: "10.215.0.2"}}
+			s.Enrolling = []nodeadm.Enrolling{{ID: "n2", Role: "server", Class: "home", Site: "main", MeshIP: "10.215.0.2", Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("n2")}}}
 		case n == 6:
 			s.Enrolling = nil
 			nd := serverNode("n2", "10.215.0.2", false)
@@ -681,7 +681,7 @@ func TestStopBetweenReleaseAndRegistration(t *testing.T) {
 		var once sync.Once
 		cf.na.onCluster = func(n int, s *nodeadm.Snapshot) {
 			if n == 2 {
-				s.Enrolling = []nodeadm.Enrolling{{ID: "n2", Role: "server", Class: "home", Site: "main", MeshIP: "10.215.0.2"}}
+				s.Enrolling = []nodeadm.Enrolling{{ID: "n2", Role: "server", Class: "home", Site: "main", MeshIP: "10.215.0.2", Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("n2")}}}
 			}
 			if n >= 4 {
 				once.Do(func() { close(inJoin) }) // waiting in k3s_joined

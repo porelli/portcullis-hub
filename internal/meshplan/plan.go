@@ -110,10 +110,12 @@ func Bootstrap(nodes []Node, joining Node) (NodePlan, error) {
 }
 
 // validate: unique ids, every mesh address inside 10.215.0.0/24 (not its
-// network or broadcast address) and used once.
+// network or broadcast address) and used once, every pcmesh key used
+// once (a repeated key would let one node take another's traffic).
 func validate(nodes []Node) error {
 	ids := map[string]bool{}
 	byIP := map[netip.Addr]string{}
+	byKey := map[string]string{}
 	for _, n := range nodes {
 		if n.ID == "" || ids[n.ID] {
 			return fmt.Errorf("node id %q is empty or repeated", n.ID)
@@ -127,6 +129,12 @@ func validate(nodes []Node) error {
 			return fmt.Errorf("mesh ip %s is used by both %s and %s", a, o, n.ID)
 		}
 		byIP[a] = n.ID
+		if n.Pub != "" {
+			if o, ok := byKey[n.Pub]; ok {
+				return fmt.Errorf("the pcmesh key of %s is already used by %s", n.ID, o)
+			}
+			byKey[n.Pub] = n.ID
+		}
 	}
 	return nil
 }

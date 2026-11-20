@@ -39,8 +39,8 @@ type meshPlanVector struct {
 	WantError string                                       `json:"want_error,omitempty"`
 }
 
-// The §20.11 refusal (verbatim) and the two validation texts.
-var refusalRe = regexp.MustCompile(`^(site [a-z][a-z0-9-]* needs one node reachable on UDP 51830 first \(a cloud node, or one forwarded port\)|mesh ip 10\.215\.0\.[0-9]+ is used by both [a-z0-9-]+ and [a-z0-9-]+|node [a-z0-9-]+: mesh ip [0-9.]+ outside 10\.215\.0\.0/24)$`)
+// The §20.11 refusal (verbatim) and the three validation texts.
+var refusalRe = regexp.MustCompile(`^(site [a-z][a-z0-9-]* needs one node reachable on UDP 51830 first \(a cloud node, or one forwarded port\)|mesh ip 10\.215\.0\.[0-9]+ is used by both [a-z0-9-]+ and [a-z0-9-]+|node [a-z0-9-]+: mesh ip [0-9.]+ outside 10\.215\.0\.0/24|the pcmesh key of [a-z0-9-]+ is already used by [a-z0-9-]+)$`)
 
 // simulatePaths follows every ordered pair x → y through the plans as
 // WireGuard routes it (C2): x sends to the peer whose allowed_ips hold y; a
@@ -224,7 +224,7 @@ func TestMeshPlanVectorsShape(t *testing.T) {
 	if boots < 2 {
 		t.Errorf("%d bootstrap cases, want ≥ 2 (as if NATed; a new site without a gateway yet)", boots)
 	}
-	if errs < 3 {
-		t.Errorf("%d want_error cases, want ≥ 3 (no gateway, duplicate ip, outside the mesh)", errs)
+	if errs < 4 {
+		t.Errorf("%d want_error cases, want ≥ 4 (no gateway, duplicate ip, outside the mesh, duplicate key)", errs)
 	}
 }

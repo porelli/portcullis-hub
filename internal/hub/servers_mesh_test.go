@@ -393,3 +393,46 @@ func TestMeshReadyWaitsForPeers(t *testing.T) {
 		t.Error("ready without the joining node's plan")
 	}
 }
+
+// TestMeshJoinerKeyRefused: a joining node whose reported key is another
+// node's, or isn't a WireGuard key, is refused at mesh_ready with a clear
+// error and never enters any plan; a removal is still pushed meanwhile.
+func TestMeshJoinerKeyRefused(t *testing.T) {
+	ctx := context.Background()
+	for name, key := range map[string]string{"e1's key": fakeMeshKey("e1"), "not a key": "x"} {
+		cf := newClusterFixture(t, append(twoSites(), siteNode("e3", "agent", "edge", "10.215.0.7", "198.18.0.7", ""))...)
+		cf.h.settleClusterNodes(ctx)
+		cf.h.mu.Lock()
+		if cf.h.st.Servers == nil {
+			cf.h.st.Servers = map[string]state.Server{}
+		}
+		cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.4"}
+		cf.h.mu.Unlock()
+		cf.na.mu.Lock()
+		cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.4",
+			Mesh: nodeadm.MeshReport{Pub: key, LAN: jsonstrict.Some("198.18.0.4:51830")}}}
+		cf.na.mu.Unlock()
+		ok, err := cf.h.meshReadyOf(ctx, "e2")
+		if ok || err == nil || !strings.Contains(err.Error(), "the pcmesh key node e2 reported") {
+			t.Errorf("%s: mesh_ready %v %v", name, ok, err)
+		}
+		// The removal of e3 is pushed; e2 is in no plan, e1 keeps its key.
+		if err := cf.h.meshRemove(ctx, "e3"); err != nil {
+			t.Errorf("%s: the removal wasn't pushed: %v", name, err)
+		}
+		for _, id := range []string{"n1", "n2", "e1"} {
+			p, _ := cf.na.meshOf(id)
+			for _, q := range p.Peers {
+				if q.ID == "e2" || q.ID == "e3" {
+					t.Errorf("%s: %s has peer %s", name, id, q.ID)
+				}
+				if q.ID == "e1" && q.Pub != fakeMeshKey("e1") {
+					t.Errorf("%s: %s's e1 key %q", name, id, q.Pub)
+				}
+			}
+		}
+		if _, ok := cf.na.meshOf("e2"); ok {
+			t.Errorf("%s: the refused joiner got a plan", name)
+		}
+	}
+}
