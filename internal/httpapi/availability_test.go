@@ -218,7 +218,8 @@ func TestRaiseYellowNeedsConfirm(t *testing.T) {
 		PreemptionPolicy: "PreemptLowerPriority", Requests: nodeadm.Resources{CPUm: 1000, MemBytes: 1 << 30}}
 	e.na.mu.Unlock()
 	code, body = e.do(t, "root", "PUT", availPath, `{"priority":"high","runs_on":{"mode":"anywhere"}}`)
-	if code != 409 || !strings.Contains(body, `"level":"yellow"`) || !strings.Contains(body, "if n1 fails, portcullis-apps/grafana--grafana-7c9d-x1 won't have room") {
+	// grafana's pod runs at high's value (10000): it evicts the normal pod.
+	if code != 409 || !strings.Contains(body, `{"node":"n1","level":"yellow","unplaced":[],"evicted":["portcullis-apps/other--web-1"]}`) || !strings.Contains(body, "if n1 fails, portcullis-apps/grafana--grafana-7c9d-x1 won't have room") {
 		t.Errorf("yellow: %d %s", code, body)
 	}
 	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"high","runs_on":{"mode":"anywhere"},"confirm_n_minus_1":true}`); code != 200 {
