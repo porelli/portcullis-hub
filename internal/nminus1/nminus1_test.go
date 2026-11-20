@@ -115,7 +115,7 @@ func TestValidate(t *testing.T) {
 	cases := map[string]func(s *nodeadm.Snapshot){
 		"no nodes":              func(s *nodeadm.Snapshot) { s.Nodes, s.Pods = nil, nil },
 		"node without a name":   func(s *nodeadm.Snapshot) { s.Nodes[1].Name = ""; s.Pods = s.Pods[:1] },
-		"repeated node":         func(s *nodeadm.Snapshot) { s.Nodes[1].Name = "n1" },
+		"repeated node":         func(s *nodeadm.Snapshot) { s.Nodes[1].Name = "n1"; s.Pods[1].Node = "n1" },
 		"negative allocatable":  func(s *nodeadm.Snapshot) { s.Nodes[0].Allocatable.MemBytes = -1 },
 		"negative cpu":          func(s *nodeadm.Snapshot) { s.Nodes[0].Allocatable.CPUm = -1 },
 		"unknown taint effect":  func(s *nodeadm.Snapshot) { s.Nodes[0].Taints = []nodeadm.Taint{{Key: "k", Effect: "Bogus"}} },
@@ -611,5 +611,61 @@ func TestCheckBounded(t *testing.T) {
 		if len(r) != 50 {
 			t.Fatalf("%d results", len(r))
 		}
+	}
+}
+
+// TestSetBelowMinimumCritical (M4): an apps critical set below its minimum
+// is red too; members disagreeing on the minimum take the strictest.
+func TestSetBelowMinimumCritical(t *testing.T) {
+	a := inSet(pod("db-0", apps, "n1", "portcullis-critical", 100000, 300), "db", 1)
+	b := inSet(pod("db-1", apps, "n2", "portcullis-critical", 100000, 300), "db", 2)
+	s := nodeadm.Snapshot{Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000), node("n3", 4000)}, Pods: []nodeadm.Pod{a, b}}
+	if r := check(t, s)[2]; r.Level != Green {
+		t.Errorf("two of two: %+v", r)
+	}
+	s.Pods[0].Set.V.Min = 3
+	if r := check(t, s)[2]; r.Level != Red || !slices.Equal(r.Lacking, []string{"portcullis-apps/db"}) {
+		t.Errorf("below the strictest minimum: %+v", r)
+	}
+}
+
+// TestLackingOnce: a pod and a set of one name are named once.
+func TestLackingOnce(t *testing.T) {
+	s := nodeadm.Snapshot{
+		Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 1000)},
+		Pods: []nodeadm.Pod{
+			pod("vault", "portcullis", "n1", "portcullis-core", 1000000, 2000),
+			inSet(pod("vault-0", "portcullis", "n2", "portcullis-core", 1000000, 300), "vault", 2),
+		},
+	}
+	if got := Explain(check(t, s)[0]); got != "if n1 fails, vault won't have room" {
+		t.Errorf("%q", got)
+	}
+}
+
+// TestDaemonSetNeverVictim: an apps DaemonSet pod is never evicted.
+func TestDaemonSetNeverVictim(t *testing.T) {
+	ds := pod("agent", apps, "n2", "portcullis-normal", 1000, 3000)
+	ds.DaemonSet = true
+	s := nodeadm.Snapshot{
+		Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000)},
+		Pods:  []nodeadm.Pod{pod("hub", "portcullis", "n1", "portcullis-core", 1000000, 2000), ds},
+	}
+	if r := check(t, s)[0]; r.Level != Red || len(r.Evicted) != 0 {
+		t.Errorf("%+v", r)
+	}
+}
+
+// TestLargestFirst: at one priority, the largest request is placed first.
+func TestLargestFirst(t *testing.T) {
+	s := nodeadm.Snapshot{
+		Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 2000), node("n3", 1000)},
+		Pods: []nodeadm.Pod{
+			pod("small", "portcullis", "n1", "portcullis-core", 1000000, 1000),
+			pod("large", "portcullis", "n1", "portcullis-core", 1000000, 2000),
+		},
+	}
+	if r := check(t, s)[0]; r.Level != Green {
+		t.Errorf("%+v", r)
 	}
 }
