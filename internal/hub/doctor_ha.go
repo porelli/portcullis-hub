@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"net"
+	"net/netip"
 	"slices"
 	"sort"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/runtime/kube"
+	"github.com/portcullis/hub/internal/servers"
 )
 
 // The doctor's HA inputs (contract §14.5 "High availability"): nil off
@@ -148,8 +150,46 @@ func (h *Hub) nodeCertIns() []doctor.NodeCertIn {
 	return out
 }
 
-// apiPublic dials the API and kubelet ports on every node's public
-// address in snap (in parallel, each bounded): node → what answered.
+// apiTargets are the public addresses kube_api_public may dial, per
+// snapshot node: only the one in the Hub's own records (the node's
+// enrolment report, else its mesh record; never the Node object, which
+// a node writes itself), and only when the front door would publish it
+// (publicEndpointOK: never private, loopback, link-local, CGNAT,
+// special-purpose, documentation, nor the mesh, link, pod or service
+// CIDRs). Anything else is skipped: a node can't aim the Hub's dials at
+// an internal target.
+func (h *Hub) apiTargets(snap nodeadm.Snapshot) map[string]netip.Addr {
+	excluded := h.meshExcluded()
+	h.cl.ms.mu.Lock()
+	allowDoc := h.cl.ms.allowDoc
+	h.cl.ms.mu.Unlock()
+	out := map[string]netip.Addr{}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, n := range snap.Nodes {
+		id := n.Name
+		if servers.ValidID(id) != nil || h.st.Mesh[id].Removed {
+			continue
+		}
+		rec := h.st.Mesh[id].Public
+		if s, listed := h.st.Servers[id]; listed {
+			if !s.ClusterNode() || s.State == ServerRevoked {
+				continue
+			}
+			rec = nonEmpty(s.MeshPublic, rec)
+		}
+		ap, ok := parseEndpoint(rec)
+		if !ok || publicEndpointOK(ap, allowDoc, excluded) != nil {
+			continue
+		}
+		out[id] = ap.Addr()
+	}
+	return out
+}
+
+// apiPublic dials the API and kubelet ports on each node's recorded
+// public address (apiTargets; in parallel, each bounded): node → what
+// answered.
 func (h *Hub) apiPublic(ctx context.Context, snap nodeadm.Snapshot) map[string][]string {
 	dial := h.ha.dialAPI
 	if dial == nil {
@@ -160,23 +200,18 @@ func (h *Hub) apiPublic(ctx context.Context, snap nodeadm.Snapshot) map[string][
 		wg  sync.WaitGroup
 		out = map[string][]string{}
 	)
-	for _, n := range snap.Nodes {
-		for _, ip := range n.Addresses.Public {
-			if net.ParseIP(ip) == nil {
-				continue
-			}
-			for _, port := range apiPorts {
-				addr := net.JoinHostPort(ip, port)
-				wg.Add(1)
-				go func(node, addr string) {
-					defer wg.Done()
-					if dial(ctx, addr) {
-						mu.Lock()
-						out[node] = append(out[node], addr)
-						mu.Unlock()
-					}
-				}(n.Name, addr)
-			}
+	for node, ip := range h.apiTargets(snap) {
+		for _, port := range apiPorts {
+			addr := net.JoinHostPort(ip.String(), port)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if dial(ctx, addr) {
+					mu.Lock()
+					out[node] = append(out[node], addr)
+					mu.Unlock()
+				}
+			}()
 		}
 	}
 	wg.Wait()

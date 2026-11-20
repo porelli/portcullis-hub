@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,9 +64,27 @@ func TestDoctorHAInputs(t *testing.T) {
 		haLabels(siteNode("n3", "server", "main", "10.215.0.3", "192.0.2.3", "203.0.113.3"), false, false))
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	cf.h.srvT.now = func() time.Time { return now }
-	cf.h.ha.dialAPI = func(_ context.Context, addr string) bool { return addr == "203.0.113.2:6443" }
+	// Only a public address on the Hub's own record is dialled: n1's
+	// record is loopback, n3's the mesh, and n1's Node object claims
+	// another public address (a node writes its own object).
+	cf.h.mu.Lock()
+	for id, pub := range map[string]string{"n1": "127.0.0.1:51830", "n2": "203.0.113.2:51830", "n3": "10.215.0.1:51830"} {
+		r := cf.h.st.Mesh[id]
+		r.Public = pub
+		cf.h.st.Mesh[id] = r
+	}
+	cf.h.mu.Unlock()
+	var dmu sync.Mutex
+	var dialed []string
+	cf.h.ha.dialAPI = func(_ context.Context, addr string) bool {
+		dmu.Lock()
+		dialed = append(dialed, addr)
+		dmu.Unlock()
+		return addr == "203.0.113.2:6443"
+	}
 	cf.h.ha.lease = func() error { return nil }
 	cf.na.mu.Lock()
+	cf.na.snap.Nodes[0].Addresses.Public = []string{"203.0.113.9", "127.0.0.1"}
 	cf.na.snap.Nodes[2].Ready = false
 	cf.na.snap.Nodes[2].NotReadySince = jsonstrict.Some(now.Add(-time.Minute).Format(time.RFC3339))
 	cf.na.mu.Unlock()
@@ -80,6 +99,12 @@ func TestDoctorHAInputs(t *testing.T) {
 	if len(pub) != 1 || !slices.Equal(pub["n2"], []string{"203.0.113.2:6443"}) {
 		t.Errorf("api public %v", pub)
 	}
+	dmu.Lock()
+	slices.Sort(dialed)
+	if !slices.Equal(dialed, []string{"203.0.113.2:10250", "203.0.113.2:6443"}) {
+		t.Errorf("dialled %v: only n2's recorded public address may be", dialed)
+	}
+	dmu.Unlock()
 	got := haKinds(t, cf.h)
 	if got[doctor.KindNodeDown] != 0 || got[doctor.KindKubeAPIPublic] != 1 || got[doctor.KindHALeaseLost] != 0 || got[doctor.KindBackupStale] != 0 {
 		t.Errorf("at 1 min: %v", got)
