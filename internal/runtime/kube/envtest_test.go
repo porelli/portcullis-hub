@@ -126,8 +126,8 @@ subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 // testdata/priorityclasses.yaml, a byte copy of core's
 // kube/priorityclasses.yaml). RBAC wider than the real Roles, on purpose,
 // so every HA vector reaches admission: the policies are what is tested
-// here (RBAC is the Roles' own tests): nodeadm may create and update
-// Secrets in kube-system (its only admission-judged right; ruling R-ADM:
+// here (RBAC is the Roles' own tests): nodeadm may create, update and
+// delete Secrets in kube-system (its only admission-judged right; ruling R-ADM:
 // none on admission objects); the intruder may exec, attach and
 // port-forward in the core namespace and create pods (ephemeral
 // containers too) and DaemonSets in portcullis-ingress.
@@ -154,7 +154,7 @@ metadata: {name: nodeadm, namespace: portcullis-nodeadm}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: test-nodeadm, namespace: kube-system}
-rules: [{apiGroups: [""], resources: [secrets], verbs: [create, update]}]
+rules: [{apiGroups: [""], resources: [secrets], verbs: [create, update, delete]}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -641,7 +641,7 @@ func TestRoleIsEnough(t *testing.T) {
 	// The gates' replicas (contract §20.10, Task 7): the backend's own
 	// lister, the Hub's identity.
 	for _, comp := range []string{"group-gate", "mcp-gate", "wg"} {
-		if _, err := b.CoreReplicas(comp)(ctx); err != nil {
+		if _, err := b.CoreReplicas(comp, ReplicaOptions{StatefulSet: comp != "wg"})(ctx); err != nil {
 			t.Errorf("core replicas %s: %v", comp, err)
 		}
 	}
