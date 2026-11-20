@@ -119,11 +119,6 @@ func (h *Hub) historyNow() time.Time {
 	return time.Now().UTC()
 }
 
-// openedLog is group-gate's opened log under HUB_GROUP_GATE_DATA_DIR.
-func (h *Hub) openedLog() signinhistory.OpenedLog {
-	return signinhistory.OpenedLog{Dir: h.cfg.GroupGateDataDir, Now: h.historyNow}
-}
-
 // historyClientNames are the published signin-keycloak.json's clients
 // (client id → name): an unreadable file names none (their SSO events
 // are then dropped, as for any unlisted client).
@@ -167,7 +162,7 @@ func (h *Hub) historySources() []namedSource {
 		au = signinhistory.AuditSource{Read: src.Audit}
 	}
 	var opened signinhistory.Source
-	if h.cfg.GroupGateDataDir != "" {
+	if h.openedLogOn() {
 		opened = h.openedLog()
 	}
 	return append([]namedSource{{HistoryKeycloak, kc}, {HistoryOpened, opened}, {HistoryAudit, au}}, extra...)

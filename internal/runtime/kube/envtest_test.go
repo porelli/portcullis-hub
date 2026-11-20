@@ -638,6 +638,13 @@ func TestRoleIsEnough(t *testing.T) {
 	if _, err := e.hubK.CoreV1().Pods("portcullis").List(ctx, metav1.ListOptions{LabelSelector: LabelComponent + " in (group-gate)"}); err != nil {
 		t.Errorf("list core pods: %v", err)
 	}
+	// The gates' replicas (contract §20.10, Task 7): the backend's own
+	// lister, the Hub's identity.
+	for _, comp := range []string{"group-gate", "mcp-gate", "wg"} {
+		if _, err := b.CoreReplicas(comp)(ctx); err != nil {
+			t.Errorf("core replicas %s: %v", comp, err)
+		}
+	}
 	for _, c := range []struct {
 		attr  authorizationv1.ResourceAttributes
 		allow bool

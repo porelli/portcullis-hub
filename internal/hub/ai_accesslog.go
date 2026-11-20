@@ -17,6 +17,7 @@ import (
 
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/gatelogs"
 	"github.com/portcullis/hub/internal/keycloak"
 )
 
@@ -106,6 +107,13 @@ func (h *Hub) AccessLog(filter func(AccessLine) bool, n int) ([]AccessLine, erro
 	if n <= 0 {
 		return out, nil
 	}
+	if t := h.accessTail(); t != nil {
+		buf, err := h.accessTailBytes(t)
+		if err != nil {
+			return nil, err
+		}
+		return accessLines(buf, filter, n), nil
+	}
 	if h.cfg.MCPGateDataDir == "" {
 		return nil, errAccessLog
 	}
@@ -150,6 +158,37 @@ func (h *Hub) AccessLog(filter func(AccessLine) bool, n int) ([]AccessLine, erro
 	} else {
 		buf = nil
 	}
+	return accessLines(buf, filter, n), nil
+}
+
+// accessTailTimeout bounds one read of mcp-gate's replicas (HA).
+const accessTailTimeout = 10 * time.Second
+
+// accessTailBytes is the access log's tail from mcp-gate's replicas
+// (HUB_GATE_LOG_SOURCES=http, contract §20.10): each replica's newest
+// 4 MiB, merged by time. A replica that can't be read leaves out its new
+// lines and is logged (this view has no "incomplete" of its own); when
+// none can be read the answer is the 503 of an unreadable file.
+func (h *Hub) accessTailBytes(t *gatelogs.Tail) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), accessTailTimeout)
+	defer cancel()
+	buf, err := t.Read(ctx)
+	var inc *gatelogs.Incomplete
+	switch {
+	case errors.As(err, &inc) && !inc.NoneRead():
+		log.Printf("ai: the access log: %v (shown without it)", err)
+	case err != nil:
+		log.Printf("ai: the access log: %v", err)
+		return nil, errAccessLog
+	}
+	return buf, nil
+}
+
+// accessLines are buf's whole lines that filter accepts (nil = all),
+// newest (last) first, at most n; lines that don't decode are skipped
+// and counted in the log.
+func accessLines(buf []byte, filter func(AccessLine) bool, n int) []AccessLine {
+	out := []AccessLine{}
 	lines := bytes.Split(bytes.TrimSuffix(buf, []byte("\n")), []byte("\n"))
 	bad := 0
 	for i := len(lines) - 1; i >= 0 && len(out) < n; i-- {
@@ -168,7 +207,7 @@ func (h *Hub) AccessLog(filter func(AccessLine) bool, n int) ([]AccessLine, erro
 	if bad > 0 {
 		log.Printf("ai: the access log: %d line(s) that don't decode skipped", bad)
 	}
-	return out, nil
+	return out
 }
 
 // ── connections ───────────────────────────────────────────

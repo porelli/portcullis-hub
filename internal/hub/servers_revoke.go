@@ -19,7 +19,6 @@ import (
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
-	"github.com/portcullis/hub/internal/vpn"
 )
 
 // Revocation and removal (contract §17.6). The server is revoked from
@@ -131,10 +130,10 @@ func (h *Hub) RemoveServer(ctx context.Context, actor directory.Actor, id string
 // linkListsPeer reads link's status: listed, it still names server id's
 // peer; known false when the status can't be read or has no link.
 func (h *Hub) linkListsPeer(id string) (listed, known bool) {
-	if h.cfg.VPNStatusFile == "" {
+	if !h.vpnStatusOn() {
 		return false, true // no link at all: nothing lists the peer
 	}
-	st, err := vpn.ReadStatus(h.cfg.VPNStatusFile, h.now())
+	st, err := h.readWGStatus(h.now())
 	if err != nil {
 		return false, false
 	}

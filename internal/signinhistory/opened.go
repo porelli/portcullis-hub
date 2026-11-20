@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/gatelogs"
 )
 
 // OpenedDirName is the opened log's directory in group_gate_data.
@@ -37,11 +38,16 @@ var dayFileRe = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2})\.jsonl$`)
 // OpenedLog is group-gate's opened log (§4 "Opened log"): Dir is the
 // mount of group_gate_data (the log is <Dir>/opened); Now is the clock
 // (nil: time.Now); MaxScan the bytes one read takes over all day files
-// (0: OpenedTotalScan).
+// (0: OpenedTotalScan). Src, when set (Kubernetes HA, contract §20.10),
+// is the log read from group-gate's replicas instead of Dir: the same
+// lines, the same per-day dedupe; a replica that can't be read makes the
+// answer *Incomplete (with the others' entries); the gates prune their
+// own logs (Prune does nothing).
 type OpenedLog struct {
 	Dir     string
 	Now     func() time.Time
 	MaxScan int64
+	Src     gatelogs.Source
 }
 
 // openedLine is one line of a day file.
@@ -105,6 +111,9 @@ func (l OpenedLog) usable() (bool, error) {
 // missing day file is an empty day. Past OpenedTotalScan bytes the read
 // stops before the next day with *Partial{Through: the end of that day}.
 func (l OpenedLog) Entries(ctx context.Context, user string, since, before time.Time, limit int) ([]Entry, error) {
+	if l.Src != nil {
+		return l.srcEntries(ctx, user, since, before, limit)
+	}
 	out := []Entry{}
 	ok, err := l.usable()
 	if err != nil || !ok {
@@ -181,13 +190,34 @@ func openedEntry(ln openedLine) Entry {
 // no apps. A day file longer than OpenedScan (its older lines unread)
 // answers the apps read with *Partial: the list may be missing some.
 func (l OpenedLog) ActApps(user, act string, from, to time.Time) ([]string, error) {
+	return l.ActAppsContext(context.Background(), user, act, from, to)
+}
+
+// ActAppsContext is ActApps within ctx (which bounds a read from Src;
+// the files ignore it). From Src, a replica that couldn't be read
+// answers the apps read with *Incomplete.
+func (l OpenedLog) ActAppsContext(ctx context.Context, user, act string, from, to time.Time) ([]string, error) {
 	out := []string{}
+	user = strings.ToLower(strings.TrimSpace(user))
+	act = strings.ToLower(strings.TrimSpace(act))
+	if l.Src != nil {
+		if user == "" || act == "" || to.Before(from) {
+			return out, nil
+		}
+		lines, err := l.srcLines(ctx, user, from, to)
+		if err != nil && !gatelogs.IsIncomplete(err) {
+			return nil, err
+		}
+		out = actApps(lines, user, act, from, to)
+		if err != nil {
+			return out, &Incomplete{Why: "a group-gate replica's opened log couldn't be read"}
+		}
+		return out, nil
+	}
 	ok, err := l.usable()
 	if err != nil || !ok {
 		return out, err
 	}
-	user = strings.ToLower(strings.TrimSpace(user))
-	act = strings.ToLower(strings.TrimSpace(act))
 	if user == "" || act == "" || to.Before(from) {
 		return out, nil
 	}
@@ -203,6 +233,17 @@ func (l OpenedLog) ActApps(user, act string, from, to time.Time) ([]string, erro
 		}
 		lines = append(lines, got...)
 	}
+	out = actApps(lines, user, act, from, to)
+	if partial != nil {
+		return out, partial
+	}
+	return out, nil
+}
+
+// actApps is ActApps' answer from the lines read: user's lines with act
+// between from and to, their apps once each, in time order.
+func actApps(lines []openedLine, user, act string, from, to time.Time) []string {
+	out := []string{}
 	slices.SortStableFunc(lines, func(a, b openedLine) int { return a.Time.Compare(b.Time) })
 	seen := map[string]bool{}
 	for _, ln := range lines {
@@ -216,8 +257,60 @@ func (l OpenedLog) ActApps(user, act string, from, to time.Time) ([]string, erro
 		seen[app] = true
 		out = append(out, app)
 	}
-	if partial != nil {
-		return out, partial
+	return out
+}
+
+// srcLines are Src's lines holding user (as readDay: matched on the raw
+// line first, unparsable ones skipped) with from <= time <= to; an
+// *gatelogs.Incomplete error comes with the lines the others answered.
+func (l OpenedLog) srcLines(ctx context.Context, user string, from, to time.Time) ([]openedLine, error) {
+	needle := []byte(user)
+	b, err := l.Src.Read(ctx, from, to, func(raw []byte) bool { return bytes.Contains(raw, needle) })
+	if err != nil && !gatelogs.IsIncomplete(err) {
+		return nil, err
+	}
+	var lines []openedLine
+	for _, raw := range bytes.Split(b, []byte("\n")) {
+		var ln openedLine
+		if len(raw) > 0 && json.Unmarshal(raw, &ln) == nil && !ln.Time.Before(from) && !ln.Time.After(to) {
+			lines = append(lines, ln)
+		}
+	}
+	return lines, err
+}
+
+// srcEntries is Entries from Src: the same per-day dedupe (the gate's day
+// files are UTC days), newest day first. A replica that couldn't be read
+// answers *Incomplete with the entries the others gave.
+func (l OpenedLog) srcEntries(ctx context.Context, user string, since, before time.Time, limit int) ([]Entry, error) {
+	out := []Entry{}
+	user = strings.ToLower(strings.TrimSpace(user))
+	if user == "" || limit < 1 || !since.Before(before) {
+		return out, nil
+	}
+	lines, err := l.srcLines(ctx, user, since, before)
+	if err != nil && !gatelogs.IsIncomplete(err) {
+		return nil, err
+	}
+	byDay := map[time.Time][]openedLine{}
+	for _, ln := range lines {
+		d := ln.Time.UTC().Truncate(24 * time.Hour)
+		byDay[d] = append(byDay[d], ln)
+	}
+	first := since.UTC().Truncate(24 * time.Hour)
+	for day := before.UTC().Truncate(24 * time.Hour); !day.Before(first) && len(out) < limit; day = day.AddDate(0, 0, -1) {
+		var es []Entry
+		for _, ln := range dedupe(byDay[day], user) {
+			if ln.Time.Before(since) || !ln.Time.Before(before) {
+				continue
+			}
+			es = append(es, openedEntry(ln))
+		}
+		slices.SortStableFunc(es, func(a, b Entry) int { return b.Time.Compare(a.Time) })
+		out = append(out, es[:min(len(es), limit-len(out))]...)
+	}
+	if err != nil {
+		return out, &Incomplete{Why: "a group-gate replica's opened log couldn't be read"}
 	}
 	return out, nil
 }
@@ -275,6 +368,9 @@ func (l OpenedLog) readDay(day time.Time, user string) (lines []openedLine, n in
 // days, UTC); today's file (and any later one) is never deleted, whatever
 // days is. Other names are left alone. A missing log prunes nothing.
 func (l OpenedLog) Prune(days int) (removed int, err error) {
+	if l.Src != nil {
+		return 0, nil // each gate prunes its own (contract §20.10)
+	}
 	ok, err := l.usable()
 	if err != nil || !ok {
 		return 0, err

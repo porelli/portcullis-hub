@@ -262,10 +262,7 @@ func (h *Hub) vpnCoreEnv() vpnCore {
 // wgStatus is wg's status.json (vpn.ReadStatus: stale or missing = wg
 // down).
 func (h *Hub) wgStatus() (*vpn.Status, error) {
-	if h.cfg.VPNStatusFile == "" {
-		return nil, errors.New("no VPN status file is configured")
-	}
-	s, err := vpn.ReadStatus(h.cfg.VPNStatusFile, h.vpnrt.now())
+	s, err := h.readWGStatus(h.vpnrt.now())
 	if err != nil {
 		return nil, err
 	}

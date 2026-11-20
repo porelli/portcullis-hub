@@ -20,7 +20,7 @@ import (
 // about the VPN is configured (no wg status file, nothing wired, no
 // VPN-only instance, mode apps): the kinds stay silent.
 func (h *Hub) doctorVPNIn(ctx context.Context, m *directory.Membership) *doctor.VPNIn {
-	if h.cfg.VPNStatusFile == "" && h.cfg.VPNDocDir == "" {
+	if !h.vpnStatusOn() && h.cfg.VPNDocDir == "" {
 		return nil
 	}
 	st, serr := h.wgStatus()

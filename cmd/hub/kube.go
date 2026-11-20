@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/gatelogs"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/leader"
 	"github.com/portcullis/hub/internal/runtime"
@@ -108,6 +109,48 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 		log.Printf("kubernetes: the cluster isn't verified after %s: starting anyway, runtime operations answer 503 until it is (%v)", engineStartWait, guard.Err())
 	}
 	return b, fence, nil
+}
+
+// gateLogSourcesFromEnv is HUB_GATE_LOG_SOURCES (contract §20.10): unset
+// or "files" = the gates' logs and wg's status from their mounted files;
+// "http" (set by core's chart in HA) = from each replica's read-only port,
+// Kubernetes only. Anything else refuses the start.
+func gateLogSourcesFromEnv(getenv func(string) string, kind runtime.Kind) (bool, error) {
+	switch v := getenv("HUB_GATE_LOG_SOURCES"); v {
+	case "", "files":
+		return false, nil
+	case "http":
+		if kind != runtime.KindKubernetes {
+			return false, fmt.Errorf("HUB_GATE_LOG_SOURCES=http needs HUB_CONTAINER_RUNTIME=kubernetes")
+		}
+		return true, nil
+	default:
+		return false, fmt.Errorf("HUB_GATE_LOG_SOURCES must be files or http, got %q", v)
+	}
+}
+
+// coreReplicas is the kube backend's lister of a core component's pods.
+type coreReplicas interface {
+	CoreReplicas(component string) gatelogs.Lister
+}
+
+// wireGateLogs points the opened log, the access log and wg's status at
+// the replicas' ports (HUB_GATE_LOG_SOURCES=http): the chart mounts none
+// of their volumes then, so the file settings are cleared (the Hub
+// neither reads nor prunes group-gate-data: each gate prunes its own).
+func wireGateLogs(cfg *hub.Config, rt runtime.Instances) error {
+	b, ok := rt.(coreReplicas)
+	if !ok {
+		return fmt.Errorf("HUB_GATE_LOG_SOURCES=http: the runtime can't list the core pods")
+	}
+	cfg.GroupGateDataDir, cfg.MCPGateDataDir, cfg.VPNStatusFile = "", "", ""
+	cfg.GateLogs = &hub.GateLogSources{
+		Opened:   gatelogs.Replicas{Service: "group-gate", Port: gatelogs.GroupGatePort, Lister: b.CoreReplicas("group-gate")},
+		Access:   &gatelogs.Tail{R: gatelogs.Replicas{Service: "mcp-gate", Port: gatelogs.MCPGatePort, Lister: b.CoreReplicas("mcp-gate")}},
+		WGStatus: gatelogs.Replicas{Service: "wg", Port: gatelogs.WGStatusPort, Lister: b.CoreReplicas("wg")},
+	}
+	log.Printf("gate logs: read from the replicas' ports (group-gate :%d, mcp-gate :%d, wg :%d)", gatelogs.GroupGatePort, gatelogs.MCPGatePort, gatelogs.WGStatusPort)
+	return nil
 }
 
 // leaseName is the Hub's Lease in the core namespace (contract §20.5).

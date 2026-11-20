@@ -45,6 +45,10 @@ const (
 	impLoginPages = 10
 )
 
+// impOpenedReadTimeout bounds the opened log's read from group-gate's
+// replicas (HA, contract §20.10).
+const impOpenedReadTimeout = 30 * time.Second
+
 // impSlack widens Keycloak's windows (its times are milliseconds, its
 // clock the host's).
 const impSlack = time.Second
@@ -116,10 +120,13 @@ func (a *impApps) run(ctx context.Context, rec state.Impersonation) ([]signinhis
 		apps = append(apps, signinhistory.OpenedApp{Name: name, OwnSession: own})
 	}
 	incomplete := false
-	if a.h.cfg.GroupGateDataDir != "" {
+	if a.h.openedLogOn() {
 		// group-gate writes whole seconds: the start's own second counts
-		// (review I3; over-reporting is the safe side).
-		names, err := a.h.openedLog().ActApps(rec.Target, rec.Admin, from.Truncate(time.Second), to)
+		// (review I3; over-reporting is the safe side). From group-gate's
+		// replicas (HA), one that can't be read is an error here too.
+		octx, cancel := context.WithTimeout(ctx, impOpenedReadTimeout)
+		names, err := a.h.openedLog().ActAppsContext(octx, rec.Target, rec.Admin, from.Truncate(time.Second), to)
+		cancel()
 		if err != nil {
 			incomplete = true
 			log.Printf("impersonation: %s: the opened log couldn't all be read: %v (apps marked incomplete)", rec.ID, err)

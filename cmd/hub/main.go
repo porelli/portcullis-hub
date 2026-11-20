@@ -416,6 +416,10 @@ func main() {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	cfg.Runtime = kind
+	httpLogs, err := gateLogSourcesFromEnv(os.Getenv, kind)
+	if err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	keycloakURL := env("KEYCLOAK_URL", "http://keycloak:8080")
 	kc := keycloak.New(keycloakURL, os.Getenv("KEYCLOAK_ADMIN"), os.Getenv("KEYCLOAK_ADMIN_PASSWORD"))
 	fa, err := freshAuthFromEnv(os.Getenv, cfg.Domain, keycloakURL)
@@ -449,6 +453,11 @@ func main() {
 		// operation answers 503 until its four checks hold), the Lease.
 		if rt, fence, err = kubeRuntime(guardCtx, &cfg, os.Getenv); err != nil {
 			log.Fatalf("refusing to start: %v", err)
+		}
+		if httpLogs {
+			if err := wireGateLogs(&cfg, rt); err != nil {
+				log.Fatalf("refusing to start: %v", err)
+			}
 		}
 	} else {
 		// The engine runtime guard (contract §6): nothing reaches the

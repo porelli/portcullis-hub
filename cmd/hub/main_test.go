@@ -603,3 +603,36 @@ func TestMailClientOutwaitsTheLock(t *testing.T) {
 		}
 	}
 }
+
+// TestGateLogSourcesFromEnv (contract §20.10): unset or files = the
+// files; http only under Kubernetes; anything else refuses the start.
+// wireGateLogs clears the file settings and needs the kube lister.
+func TestGateLogSourcesFromEnv(t *testing.T) {
+	for _, c := range []struct {
+		v    string
+		kind runtime.Kind
+		http bool
+		bad  bool
+	}{
+		{"", runtime.KindDocker, false, false},
+		{"files", runtime.KindKubernetes, false, false},
+		{"http", runtime.KindKubernetes, true, false},
+		{"http", runtime.KindDocker, false, true},
+		{"http", runtime.KindPodman, false, true},
+		{"HTTP", runtime.KindKubernetes, false, true},
+	} {
+		got, err := gateLogSourcesFromEnv(func(k string) string {
+			if k == "HUB_GATE_LOG_SOURCES" {
+				return c.v
+			}
+			return ""
+		}, c.kind)
+		if got != c.http || (err != nil) != c.bad {
+			t.Errorf("%q on %s = %v, %v", c.v, c.kind, got, err)
+		}
+	}
+	cfg := hub.Config{GroupGateDataDir: "/group-gate-data", MCPGateDataDir: "/mcp-gate-data", VPNStatusFile: "/wg-data/status.json"}
+	if err := wireGateLogs(&cfg, nil); err == nil || cfg.GateLogs != nil {
+		t.Errorf("no kube runtime: %v %+v", err, cfg.GateLogs)
+	}
+}

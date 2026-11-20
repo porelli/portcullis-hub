@@ -120,6 +120,12 @@ type Config struct {
 	// history_days (contract §8.2; "" = no opened log: that source is
 	// unknown).
 	GroupGateDataDir string
+	// GateLogs is HUB_GATE_LOG_SOURCES=http (Kubernetes HA, contract
+	// §20.10): the opened log, the access log and wg's status read from
+	// the replicas' read-only ports instead of GroupGateDataDir,
+	// MCPGateDataDir and VPNStatusFile (main leaves those ""). nil = the
+	// files (Docker, Podman, single-node Kubernetes).
+	GateLogs *GateLogSources
 	// FIDOMDSURL is HUB_FIDO_MDS_URL, the FIDO Alliance MDS BLOB (contract
 	// §8.1; "" = no fetching: no authenticators, passkeys register as
 	// synced). Cached at <DataDir>/signin/mds.jwt.

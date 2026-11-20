@@ -129,7 +129,7 @@ func (h *Hub) serversOn() (*vpn.LinkState, error) {
 	if h.kubeOn() {
 		return nil, statusErr(409, "servers need a Docker or Podman primary")
 	}
-	if h.cfg.LinkDocDir == "" || h.cfg.VPNStatusFile == "" {
+	if h.cfg.LinkDocDir == "" || !h.vpnStatusOn() {
 		return nil, errServersOff()
 	}
 	if fi, err := os.Stat(h.cfg.LinkDocDir); err != nil || !fi.IsDir() {
@@ -138,7 +138,7 @@ func (h *Hub) serversOn() (*vpn.LinkState, error) {
 	if !RelayImageOK(h.cfg.RelayImage) {
 		return nil, errNoRelayImage()
 	}
-	st, err := vpn.ReadStatus(h.cfg.VPNStatusFile, h.now())
+	st, err := h.readWGStatus(h.now())
 	if err != nil || st.Link == nil || !st.Link.OK || servers.ValidWGKey(st.Link.PublicKey) != nil || st.Link.Port < 1 || st.Link.Port > 65535 {
 		return nil, errServersOff()
 	}
@@ -148,10 +148,10 @@ func (h *Hub) serversOn() (*vpn.LinkState, error) {
 // linkHandshakes are link's last handshakes by server id (nil: link's
 // status is unreadable).
 func (h *Hub) linkHandshakes() map[string]time.Time {
-	if h.cfg.VPNStatusFile == "" {
+	if !h.vpnStatusOn() {
 		return nil
 	}
-	st, err := vpn.ReadStatus(h.cfg.VPNStatusFile, h.now())
+	st, err := h.readWGStatus(h.now())
 	if err != nil || st.Link == nil {
 		return nil
 	}
