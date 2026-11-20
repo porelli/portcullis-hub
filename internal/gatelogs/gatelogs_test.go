@@ -46,6 +46,8 @@ type fakeLog struct {
 	endless  bool // every answer is truncated, with one more new line
 	stall    bool // a cursor answers no line, the same cursor, truncated
 	bytes    int  // the bodies' bytes served
+	// failBefore: a from-request (no cursor) earlier than it answers 503.
+	failBefore time.Time
 }
 
 var fakeCursorRe = regexp.MustCompile(`^([a-z0-9]+)-([0-9]+)$`)
@@ -115,6 +117,10 @@ func (f *fakeLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		since, err := time.Parse(time.RFC3339, fr)
 		if err != nil {
 			http.Error(w, "from", 400)
+			return
+		}
+		if since.Before(f.failBefore) {
+			http.Error(w, "busy", 503)
 			return
 		}
 		start = len(f.lines)
@@ -727,5 +733,83 @@ func TestWGStatusFromReplicas(t *testing.T) {
 	reps = []gatelogs.Replica{{Name: "wg-c"}}
 	if _, err := r.Status(context.Background()); err == nil {
 		t.Error("no running wg answered a status")
+	}
+}
+
+// fromRequests are the requests' from= values, in order.
+func fromRequests(r []string) []string {
+	var out []string
+	for _, x := range r {
+		if i := strings.Index(x, "from="); i >= 0 {
+			out = append(out, x[i:])
+		}
+	}
+	return out
+}
+
+// TestTailBusyOldSegmentFinishes (fix round 2, the re-review's N1
+// probe): one quiet line in the last hour, 200 lines 3 h back, a page
+// of 10 and 5 pages a read: the backward segment can't be fetched in
+// one read. Each read keeps what it got and goes on after it (never the
+// same window twice in a row), and the fill ends complete within 10
+// reads, with every line.
+func TestTailBusyOldSegmentFinishes(t *testing.T) {
+	var ls []string
+	for i := 0; i < 200; i++ {
+		ls = append(ls, ln(-2*time.Hour+time.Duration(i)*time.Second, "a", strconv.Itoa(i)))
+	}
+	ls = append(ls, ln(30*time.Minute, "a", "quiet"))
+	f := &fakeLog{lines: ls, page: 10}
+	tail := tailOf(t, f)
+	tail.R.MaxPages = 5
+	var err error
+	var out []byte
+	reads := 0
+	for reads < 10 {
+		reads++
+		if out, err = tail.Read(context.Background()); err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "catching up") {
+			t.Fatalf("read %d: %v", reads, err)
+		}
+	}
+	if err != nil || !reflect.DeepEqual(lines(out), ls) || tail.OlderNotLoaded() {
+		t.Fatalf("after %d reads: %d lines, %v (older not loaded %v)", reads, len(lines(out)), err, tail.OlderNotLoaded())
+	}
+	fr := fromRequests(f.reqs())
+	for i := 1; i < len(fr); i++ {
+		if fr[i] == fr[i-1] {
+			t.Errorf("the same window twice in a row: %s (%q)", fr[i], fr)
+		}
+	}
+}
+
+// TestTailUnfetchableSegmentGivesUp: a backward segment that never
+// answers is halved each read (never the same window twice), and once
+// it is MinSegment or less and fails twice the fill is done, with
+// OlderNotLoaded set (not incomplete for good); the recent lines are all
+// there and the view complete.
+func TestTailUnfetchableSegmentGivesUp(t *testing.T) {
+	recent := []string{ln(20*time.Minute, "a", "1"), ln(40*time.Minute, "a", "2")}
+	f := &fakeLog{lines: recent, failBefore: t0}
+	tail := tailOf(t, f)
+	var err error
+	reads := 0
+	for reads < 20 {
+		reads++
+		if _, err = tail.Read(context.Background()); err == nil {
+			break
+		}
+	}
+	out, err2 := tail.Read(context.Background())
+	if err != nil || err2 != nil || !tail.OlderNotLoaded() || !reflect.DeepEqual(lines(out), recent) {
+		t.Fatalf("after %d reads: %v %v, older not loaded %v, %q", reads, err, err2, tail.OlderNotLoaded(), lines(out))
+	}
+	fr := fromRequests(f.reqs())
+	for i := 1; i < len(fr); i++ {
+		if fr[i] == fr[i-1] {
+			t.Errorf("the same window twice in a row: %s", fr[i])
+		}
 	}
 }

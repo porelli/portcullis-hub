@@ -3,9 +3,11 @@ package gatelogs
 import (
 	"context"
 	"errors"
+	"log"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,6 +56,9 @@ const (
 	// TailGrace is how long a replica's state is kept while it isn't
 	// listed (a pod between delete and re-create keeps its cursor).
 	TailGrace = time.Hour
+	// MinSegment: a backward segment this short that still fails without
+	// progress twice ends the fill (older activity not loaded).
+	MinSegment = time.Minute
 )
 
 // Tail follows each replica's log and keeps its newest Max bytes of
@@ -95,6 +100,17 @@ type tailState struct {
 	// serve again (dup), kept across reads until the scan reaches the end.
 	restart time.Time
 	dup     map[lineKey]int
+	// The backward segment in progress, [segFrom, anchor): seg its lines
+	// so far (from segFrom forward), segNext where its next fetch starts,
+	// minFails its failures without progress at MinSegment or less.
+	segFrom, segNext time.Time
+	seg              [][]byte
+	segSize          int
+	minFails         int
+	// olderMissing: some older activity was given up on (a segment that
+	// couldn't be fetched was narrowed, or abandoned): permanent, never
+	// "incomplete" (OlderNotLoaded).
+	olderMissing atomic.Bool
 }
 
 func (t *Tail) max() int {
@@ -240,27 +256,110 @@ func (t *Tail) follow(ctx context.Context, rep Replica, st *tailState, b *Budget
 			st.filled = true
 			break
 		}
+		if err := t.backward(ctx, rep, st, b); err != nil {
+			if st.filled {
+				return nil // given up: older activity not loaded
+			}
+			return errors.Join(errCatchingUp, err)
+		}
+	}
+	return nil
+}
+
+// backward reads the segment before st.anchor: [t0 − 4 × window, anchor)
+// (at most back to Retention), forward from its start. A read that can't
+// fetch it all (the budget, the page budget, the deadline, an error)
+// keeps what it got and starts the next one after it; one that got
+// nothing new halves what is left (the skipped part is older activity
+// not loaded) — so no read fetches the same window as the one before.
+// At MinSegment or less, a second failure without progress ends the fill
+// (olderMissing). A finished segment joins the lines and moves anchor.
+func (t *Tail) backward(ctx context.Context, rep Replica, st *tailState, b *Budget) error {
+	if st.segFrom.IsZero() {
 		older := st.t0.Add(-4 * st.window).Truncate(time.Second)
 		if st.t0.Sub(older) > t.retention() {
 			older = st.t0.Add(-t.retention()).Truncate(time.Second)
 		}
-		until := st.anchor
-		part, err := t.R.scan(ctx, rep, Query{From: older, To: until, Budget: b,
-			Keep: func(l []byte) bool { return lineTime(l).Before(until) }})
-		if err != nil {
-			return errors.Join(errCatchingUp, err)
-		}
-		ls := splitLines(part)
-		n := 0
-		for _, l := range ls {
-			n += len(l) + 1
-		}
-		st.lines = append(ls, st.lines...)
-		st.size += n
-		st.anchor, st.window = older, 4*st.window
-		t.trim(st)
+		st.segFrom, st.segNext, st.seg, st.segSize, st.minFails = older, older, nil, 0, 0
 	}
-	return nil
+	until := st.anchor
+	var dup map[lineKey]int
+	if len(st.seg) > 0 {
+		dup = again(st.seg, st.segNext) // the lines at segNext's second come again
+	}
+	part, err := t.R.scan(ctx, rep, Query{From: st.segNext, To: until, Budget: b,
+		Keep: func(l []byte) bool { return lineTime(l).Before(until) }})
+	added := 0
+	for _, l := range splitLines(part) {
+		if k := keyOf(l); dup[k] > 0 {
+			dup[k]--
+			continue
+		}
+		st.seg = append(st.seg, l)
+		st.segSize += len(l) + 1
+		added++
+	}
+	if err == nil {
+		st.lines = append(st.seg, st.lines...)
+		st.size += st.segSize
+		st.anchor, st.window = st.segFrom, st.t0.Sub(st.segFrom)
+		st.segFrom, st.segNext, st.seg, st.segSize = time.Time{}, time.Time{}, nil, 0
+		t.trim(st)
+		return nil
+	}
+	// Partly read, or not at all: never the same window next time.
+	if added > 0 {
+		if lt := lineTime(st.seg[len(st.seg)-1]); lt.After(st.segNext) {
+			st.segNext = lt
+		} else {
+			st.segNext = st.segNext.Add(time.Second) // a second full of lines: on past it
+			st.olderMissing.Store(true)
+		}
+		t.trimSeg(st)
+		return err
+	}
+	left := until.Sub(st.segNext)
+	if left <= MinSegment {
+		if st.minFails++; st.minFails >= 2 || left <= time.Second {
+			// Give up on what is older: the newer lines are all here.
+			st.olderMissing.Store(true)
+			st.filled = true
+			log.Printf("%s: %s: older access log activity not loaded (a segment before %s couldn't be fetched)", t.R.Service, rep.Name, until.Format(time.RFC3339))
+			st.segFrom, st.segNext, st.seg, st.segSize = time.Time{}, time.Time{}, nil, 0
+			return err
+		}
+	}
+	st.segNext = st.segNext.Add(left / 2).Truncate(time.Second)
+	st.olderMissing.Store(true)
+	return err
+}
+
+// trimSeg keeps the segment in progress within Max bytes (its oldest
+// lines dropped: the newest Max bytes are all a fill ever keeps).
+func (t *Tail) trimSeg(st *tailState) {
+	drop := 0
+	for st.segSize > t.max() && drop < len(st.seg) {
+		st.segSize -= len(st.seg[drop]) + 1
+		drop++
+	}
+	if drop > 0 {
+		st.seg = append([][]byte(nil), st.seg[drop:]...)
+	}
+}
+
+// OlderNotLoaded reports whether the first fill of any replica gave up
+// on some older activity (a backward segment that couldn't be fetched):
+// what is shown is complete for the newer part only. Permanent for that
+// replica's state; not an "incomplete" read.
+func (t *Tail) OlderNotLoaded() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, st := range t.per {
+		if st.olderMissing.Load() {
+			return true
+		}
+	}
+	return false
 }
 
 // forward pages st on from its cursor (from its anchor at first, or from
