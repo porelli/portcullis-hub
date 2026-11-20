@@ -46,8 +46,13 @@ type Server struct {
 	// k3s material; a Node that registers is removed for good.
 	// NodeGoneSince: since when the cluster lists no Node of the revoked
 	// entry's name (the entry goes 10 min later).
-	RevokeWatch   bool      `json:"revoke_watch,omitempty" yaml:"revoke_watch,omitempty"`
-	NodeGoneSince time.Time `json:"node_gone_since,omitempty" yaml:"node_gone_since,omitempty"`
+	// RevokeConfirmed: nodeadm answered the revoke done (204) or parked
+	// with its security steps done; RevokeVoidOnly: only an unused code
+	// was voided (a Node registering later is revoked).
+	RevokeWatch     bool      `json:"revoke_watch,omitempty" yaml:"revoke_watch,omitempty"`
+	RevokeConfirmed bool      `json:"revoke_confirmed,omitempty" yaml:"revoke_confirmed,omitempty"`
+	RevokeVoidOnly  bool      `json:"revoke_void_only,omitempty" yaml:"revoke_void_only,omitempty"`
+	NodeGoneSince   time.Time `json:"node_gone_since,omitempty" yaml:"node_gone_since,omitempty"`
 }
 
 // The server kinds.

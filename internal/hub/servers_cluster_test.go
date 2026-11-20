@@ -269,14 +269,14 @@ func TestEnrolStepsFromSnapshot(t *testing.T) {
 	if r.OK || r.StoppedBy != admin.User {
 		t.Errorf("op %+v, want stopped", r)
 	}
-	if c := cf.na.Calls(); !slices.Contains(c, "remove:n2:cooperative") || slices.Contains(c, "drain:n2") {
+	if c := cf.na.Calls(); !slices.Contains(c, "remove:n2:cooperative") || slices.Contains(c, "drain:n2") || slices.Contains(c, "remove:n2:revoke") {
 		t.Errorf("calls %v: want the code voided, no drain", c)
 	}
-	if _, ok := cf.serverEntry("n2"); ok {
-		t.Error("the entry is left")
+	if s, _ := cf.serverEntry("n2"); s.State != ServerRevoked {
+		t.Errorf("a voided entry is watched (revoked): %+v", s)
 	}
 
-	// A Stop once k3s joined: the node removed as a removal does.
+	// A Stop once k3s joined: revoked (never a cordon or drain).
 	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
 	joined := make(chan struct{})
 	var once sync.Once
@@ -298,11 +298,11 @@ func TestEnrolStepsFromSnapshot(t *testing.T) {
 	}
 	waitServerOp(t, cf.h, serverOpKey("n2"))
 	c := cf.na.Calls()
-	if i, j, k := slices.Index(c, "cordon:n2"), slices.Index(c, "drain:n2"), slices.Index(c, "remove:n2:cooperative"); i < 0 || j < i || k < j || !slices.Contains(c, "uninstall:n2") {
-		t.Errorf("calls %v: want cordon → drain → remove → uninstall", c)
+	if !slices.Contains(c, "remove:n2:revoke") || !slices.Contains(c, "uninstall:n2") || slices.Contains(c, "cordon:n2") || slices.Contains(c, "uncordon:n2") {
+		t.Errorf("calls %v: want nodeadm's revoke and the uninstall", c)
 	}
-	if _, ok := cf.serverEntry("n2"); ok {
-		t.Error("the entry is left")
+	if s, _ := cf.serverEntry("n2"); s.State != ServerRevoked {
+		t.Errorf("entry %+v", s)
 	}
 }
 
@@ -425,8 +425,11 @@ func TestSettleInterruptedClusterEnrol(t *testing.T) {
 	}
 	delete(cf.na.refuse, "remove:n2:cooperative")
 	cf.h.settleClusterNodes(context.Background())
-	if _, ok := cf.serverEntry("n2"); ok {
-		t.Fatal("still listed after the void")
+	if s, _ := cf.serverEntry("n2"); s.State != ServerRevoked {
+		t.Fatalf("after the void: %+v, want revoked (watched)", s)
+	}
+	if c := cf.na.Calls(); slices.Contains(c, "remove:n2:revoke") {
+		t.Errorf("a never-enrolled code was revoked: %v", c)
 	}
 }
 
@@ -485,8 +488,20 @@ func TestRevokeParkedIsAccepted(t *testing.T) {
 		}
 		clock.add(NodeGoneWait + time.Second)
 		cf.h.settleClusterNodes(context.Background())
-		if _, ok := cf.serverEntry("n3"); ok {
-			t.Error("kept 10 min after the cluster dropped it")
+		_, kept := cf.serverEntry("n3")
+		if refusal.Status == 409 && kept {
+			t.Error("a confirmed (parked) revocation kept 10 min after the cluster dropped it")
+		}
+		if refusal.Status == 503 {
+			// Unconfirmed: time alone never drops it; asked again.
+			if !kept {
+				t.Error("an unconfirmed revocation dropped on time alone")
+			}
+			delete(cf.na.refuse, "remove:n3:revoke") // nodeadm now answers done
+			cf.h.settleClusterNodes(context.Background())
+			if _, kept := cf.serverEntry("n3"); kept {
+				t.Error("kept after nodeadm confirmed and 10 min without a Node")
+			}
 		}
 	}
 }
@@ -496,9 +511,11 @@ func TestRevokeParkedIsAccepted(t *testing.T) {
 // Stop lands on → removed (cordon, drain, remove, uninstall); a restart
 // at step k3s_joined with the node listed → removed too.
 func TestEnrolEndNeverVoidsAJoinedNode(t *testing.T) {
-	removed := func(c []string) bool {
-		i, j, k := slices.Index(c, "cordon:n2"), slices.Index(c, "drain:n2"), slices.Index(c, "remove:n2:cooperative")
-		return i >= 0 && j > i && k > j && slices.Contains(c, "uninstall:n2")
+	// nodeadm's revoke and the uninstall; never a void, a cordon or an
+	// uncordon (security review round 3).
+	revoked := func(c []string) bool {
+		return slices.Contains(c, "remove:n2:revoke") && slices.Contains(c, "uninstall:n2") && !slices.Contains(c, "remove:n2:cooperative") &&
+			!slices.Contains(c, "cordon:n2") && !slices.Contains(c, "uncordon:n2")
 	}
 	// 1. Nothing joined: a void only.
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
@@ -530,11 +547,8 @@ func TestEnrolEndNeverVoidsAJoinedNode(t *testing.T) {
 	<-stopped
 	cf.h.StopServerEnrol("n2", admin, "")
 	waitServerOp(t, cf.h, serverOpKey("n2"))
-	if c := cf.na.Calls(); !removed(c) {
+	if c := cf.na.Calls(); !revoked(c) {
 		t.Errorf("joined in the last poll: %v", c)
-	}
-	if _, ok := cf.serverEntry("n2"); ok {
-		t.Error("the entry is left")
 	}
 
 	// 3. A restart at k3s_joined with the node listed.
@@ -543,7 +557,7 @@ func TestEnrolEndNeverVoidsAJoinedNode(t *testing.T) {
 	cf.h.st.Servers = map[string]state.Server{"n2": {Kind: "cluster-node", State: ServerEnrolling, MeshIP: "10.215.0.2", Enrol: &state.Enrol{Step: StepK3sJoined}}}
 	cf.h.mu.Unlock()
 	cf.h.settleClusterNodes(context.Background())
-	if c := cf.na.Calls(); !removed(c) {
+	if c := cf.na.Calls(); !revoked(c) {
 		t.Errorf("restart at k3s_joined: %v", c)
 	}
 }
@@ -662,15 +676,15 @@ func TestStopBetweenReleaseAndRegistration(t *testing.T) {
 	cf.na.calls = nil
 	cf.na.mu.Unlock()
 	cf.h.settleClusterNodes(context.Background())
-	if c := cf.na.Calls(); !slices.Equal(c, []string{"cordon:n2", "drain:n2", "remove:n2:cooperative", "uninstall:n2"}) {
-		t.Errorf("registered after the revoke: %v", c)
+	if c := cf.na.Calls(); !slices.Equal(c, []string{"remove:n2:revoke"}) {
+		t.Errorf("registered after the revoke: %v, want nodeadm's revoke again (never a cordon, a drain or an uncordon)", c)
 	}
-	if _, ok := cf.serverEntry("n2"); ok {
-		t.Error("the entry is left")
+	if s, _ := cf.serverEntry("n2"); s.State != ServerRevoked {
+		t.Errorf("entry %+v, want kept revoked", s)
 	}
 	for _, v := range cf.h.Servers(context.Background()) {
-		if v.ID == "n2" {
-			t.Errorf("listed again from the cached snapshot: %+v", v)
+		if v.ID == "n2" && v.State != ServerRevoked {
+			t.Errorf("listed as %s", v.State)
 		}
 	}
 
@@ -704,8 +718,108 @@ func TestRevokedNodeNotListedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, v := range cf.h.Servers(context.Background()) {
-		if v.ID == "n3" {
-			t.Errorf("n3 listed after its revoke: %+v", v)
+		if v.ID == "n3" && v.State != ServerRevoked {
+			t.Errorf("n3 listed as %s after its revoke: %+v", v.State, v)
 		}
+	}
+}
+
+// TestRevokedNodeAppearsIsRevokedAgain (round 3, ruling 1 and 4): a
+// watched, revoked entry whose Node is listed is revoked again through
+// nodeadm (never cordoned, drained or uncordoned, even when nodeadm
+// refuses), kept revoked, and dropped only after NodeGoneWait without a
+// Node.
+func TestRevokedNodeAppearsIsRevokedAgain(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true), serverNode("n4", "10.215.0.4", true))
+	clock := &offsetClock{}
+	cf.h.srvT.now = clock.now
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n4", "n4", nodeadm.Revoke); err != nil {
+		t.Fatal(err)
+	}
+	// nodeadm refuses the next revoke: still never an uncordon.
+	cf.na.refuse["remove:n4:revoke"] = &nodeadm.APIError{Status: 502, Text: "down"}
+	cf.h.settleClusterNodes(context.Background())
+	delete(cf.na.refuse, "remove:n4:revoke")
+	cf.h.settleClusterNodes(context.Background())
+	c := cf.na.Calls()
+	if n := len(slices.DeleteFunc(slices.Clone(c), func(x string) bool { return x != "remove:n4:revoke" })); n != 3 {
+		t.Errorf("calls %v: want three revokes", c)
+	}
+	for _, x := range c {
+		if strings.HasPrefix(x, "cordon:") || strings.HasPrefix(x, "uncordon:") || strings.HasPrefix(x, "drain:") || x == "remove:n4:cooperative" {
+			t.Errorf("a revoked node got %s", x)
+		}
+	}
+	cf.na.mu.Lock()
+	cf.na.snap.Nodes = cf.na.snap.Nodes[:3]
+	cf.na.mu.Unlock()
+	cf.h.settleClusterNodes(context.Background())
+	clock.add(NodeGoneWait - time.Second)
+	cf.h.settleClusterNodes(context.Background())
+	if _, ok := cf.serverEntry("n4"); !ok {
+		t.Fatal("dropped before 10 min without a Node")
+	}
+	clock.add(2 * time.Second)
+	cf.h.settleClusterNodes(context.Background())
+	if _, ok := cf.serverEntry("n4"); ok {
+		t.Error("kept past 10 min without a Node, confirmed")
+	}
+}
+
+// TestUnknownNodeIsNotProof (round 3, ruling 3): nodeadm's unknown_node
+// to a revoke never confirms it: with no Node listed for hours, the entry
+// stays until nodeadm answers the revoke done.
+func TestUnknownNodeIsNotProof(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	clock := &offsetClock{}
+	cf.h.srvT.now = clock.now
+	cf.h.mu.Lock()
+	cf.h.st.Servers = map[string]state.Server{"n2": {Kind: "cluster-node", State: ServerEnrolling, MeshIP: "10.215.0.2", Enrol: &state.Enrol{Step: StepK3sJoined}}}
+	cf.h.mu.Unlock()
+	cf.na.refuse["remove:n2:revoke"] = &nodeadm.APIError{Status: 404, Kind: nodeadm.KindUnknownNode, Text: "unknown node n2"}
+	for i := 0; i < 5; i++ {
+		cf.h.settleClusterNodes(context.Background())
+		clock.add(time.Hour)
+	}
+	if s, ok := cf.serverEntry("n2"); !ok || s.State != ServerRevoked {
+		t.Fatalf("entry %+v %v: unknown_node and time alone dropped it", s, ok)
+	}
+	delete(cf.na.refuse, "remove:n2:revoke")
+	cf.h.settleClusterNodes(context.Background()) // confirmed now; the gone clock runs on
+	clock.add(NodeGoneWait)
+	cf.h.settleClusterNodes(context.Background())
+	if _, ok := cf.serverEntry("n2"); ok {
+		t.Error("kept after nodeadm confirmed")
+	}
+}
+
+// TestVoidIsWatched (round 3, ruling 2): a code a fresh snapshot reports
+// unused is voided, never revoked; if its machine registers afterwards
+// (the read-to-void window), it is revoked with the uninstall.
+func TestVoidIsWatched(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	cf.h.mu.Lock()
+	cf.h.st.Servers = map[string]state.Server{"n2": {Kind: "cluster-node", State: ServerEnrolling, MeshIP: "10.215.0.2", Enrol: &state.Enrol{Step: StepEnrolled}}}
+	cf.h.mu.Unlock()
+	cf.h.settleClusterNodes(context.Background())
+	if c := cf.na.Calls(); !slices.Equal(c, []string{"remove:n2:cooperative"}) {
+		t.Fatalf("void: %v", c)
+	}
+	var view ServerView
+	for _, v := range cf.h.Servers(context.Background()) {
+		if v.ID == "n2" {
+			view = v
+		}
+	}
+	if view.State != ServerRevoked || view.Error != VoidedText {
+		t.Errorf("view %+v", view)
+	}
+	cf.na.mu.Lock()
+	cf.na.snap.Nodes = append(cf.na.snap.Nodes, serverNode("n2", "10.215.0.2", true))
+	cf.na.calls = nil
+	cf.na.mu.Unlock()
+	cf.h.settleClusterNodes(context.Background())
+	if c := cf.na.Calls(); !slices.Equal(c, []string{"remove:n2:revoke", "uninstall:n2"}) {
+		t.Errorf("registered after its void: %v", c)
 	}
 }
