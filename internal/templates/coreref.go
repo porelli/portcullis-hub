@@ -66,6 +66,14 @@ var (
 		// The provider's slot volume (Ruling R-POD2: the whole volume is
 		// mounted into the provider, never a hub_secrets subpath).
 		"mail_provider_slot")
+	// kubeHACoreNames are the HA-specific core names added on Kubernetes
+	// (Task 34): services, routers, and PVCs that templates must not use.
+	// Includes Kubernetes-only Services (like wg-people, traefik-metrics)
+	// that don't exist in Docker but could collide on k8s.
+	// Checked by TestCoreNamesComplete against core's chart templates.
+	kubeHACoreNames = set("nodeadm", "frontdoor", "cnpg-operator", "keycloak-pods", "keycloak-internal",
+		"alertmanager-peers", "portcullis-pg", "hub-state", "hub-backups", "portcullis-node",
+		"portcullis-hub", "traefik-metrics", "traefik-vpn", "wg-edge", "wg-metrics", "wg-people")
 	// coreAliases are core's network aliases that aren't service names
 	// (wg's metrics address on portcullis, the Hub's on
 	// portcullis-metrics-hub): reserved DNS names too.
@@ -81,12 +89,13 @@ var (
 // container_name, hostname, network alias) on a network it shares with a
 // core service could intercept that service's traffic — every core
 // service name (and its first DNS label, and compose's
-// portcullis-<service>-<n> container name) is reserved.
+// portcullis-<service>-<n> container name) is reserved. On Kubernetes,
+// HA-specific names (kubeHACoreNames) are also reserved.
 func reservedDNSName(name string) bool {
 	n := strings.TrimSuffix(FoldKey(strings.TrimSpace(name)), ".")
 	first, _, _ := strings.Cut(n, ".")
 	for _, c := range []string{n, first} {
-		if coreServices[c] || coreAliases[c] {
+		if coreServices[c] || coreAliases[c] || kubeHACoreNames[c] {
 			return true
 		}
 		if m := coreContainerRe.FindStringSubmatch(c); m != nil && coreServices[m[1]] {

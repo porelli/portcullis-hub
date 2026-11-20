@@ -716,6 +716,74 @@ func TestCoreNamesComplete(t *testing.T) {
 			t.Errorf("core volume %s missing from coreVolumes", k)
 		}
 	}
+
+	// Check Kubernetes HA core names against core's chart templates (Task 34).
+	chartDir := filepath.Join(core, "charts", "portcullis", "templates")
+	chartFiles, err := filepath.Glob(filepath.Join(chartDir, "*.yaml"))
+	if err != nil || len(chartFiles) == 0 {
+		t.Logf("no Kubernetes chart templates found, skipping HA names check")
+		return
+	}
+
+	// Extract Service/StatefulSet/Deployment/DaemonSet names from the chart.
+	// These are the objects that could collide with template service names.
+	chartNames := make(map[string]bool)
+	for _, f := range chartFiles {
+		content, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		// Simple extraction of metadata.name from Service/StatefulSet/Deployment objects.
+		// We look for "kind: Service" (or StatefulSet/Deployment) followed by "name:" in metadata.
+		lines := strings.Split(string(content), "\n")
+		inObject := false
+		objectKind := ""
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "kind: Service") || strings.HasPrefix(trimmed, "kind: StatefulSet") ||
+				strings.HasPrefix(trimmed, "kind: Deployment") || strings.HasPrefix(trimmed, "kind: DaemonSet") {
+				inObject = true
+				parts := strings.Fields(trimmed)
+				if len(parts) >= 2 {
+					objectKind = parts[1]
+				}
+			} else if inObject && strings.HasPrefix(trimmed, "name: ") && i > 0 {
+				// Check if we're in metadata (previous line or nearby should have "metadata:")
+				if strings.Contains(lines[i-1], "metadata:") || (i > 1 && strings.Contains(lines[i-2], "metadata:")) {
+					name := strings.TrimPrefix(trimmed, "name: ")
+					name = strings.TrimSpace(name)
+					// Remove template expressions like {{ .Release.Namespace }}
+					if !strings.Contains(name, "{{") && !strings.Contains(name, "}}") && name != "" {
+						chartNames[name] = true
+						_ = objectKind // for potential future use
+					}
+					inObject = false
+				}
+			}
+		}
+	}
+
+	// Check that HA-specific names in the chart are in kubeHACoreNames.
+	// We exclude names already in coreServices (e.g., keycloak, alertmanager).
+	for name := range chartNames {
+		if coreServices[name] || coreVolumes[name] {
+			// Already covered by Docker core names
+			continue
+		}
+		if !kubeHACoreNames[name] && !coreAliases[name] {
+			// This is a new HA-specific name that should be reserved
+			t.Errorf("Kubernetes chart object %s missing from kubeHACoreNames", name)
+		}
+	}
+
+	// Check that all kubeHACoreNames exist in the chart or are documented exceptions
+	for name := range kubeHACoreNames {
+		if !chartNames[name] && !coreServices[name] {
+			// It's OK if it's a PVC name (hub-state, hub-backups) or router name (portcullis-node)
+			// These won't appear as Service objects but still need to be reserved
+			t.Logf("kubeHACoreNames entry %s not found in chart (OK if it's a PVC/router name)", name)
+		}
+	}
 }
 
 // TestCoreFileMiddlewaresComplete: fileMiddlewares are exactly the
