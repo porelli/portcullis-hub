@@ -217,7 +217,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, creds ma
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := fsutil.Do(c.HTTP, req)
 	if err != nil {
 		// The URL holds no secret; still never echo transport details that
 		// could quote the request.

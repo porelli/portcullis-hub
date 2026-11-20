@@ -232,10 +232,17 @@ var errResponseTooLarge = errors.New("response too large")
 
 // limitDoer bounds every GraphQL response body to maxResponse (the library
 // reads bodies whole); reading past it fails with errResponseTooLarge.
-type limitDoer struct{ c *http.Client }
+type limitDoer struct {
+	c     *http.Client
+	write bool // a mutation: through the write fence (fsutil.Do)
+}
 
 func (d limitDoer) Do(req *http.Request) (*http.Response, error) {
-	resp, err := d.c.Do(req)
+	do := d.c.Do
+	if d.write {
+		do = func(r *http.Request) (*http.Response, error) { return fsutil.Do(d.c, r) }
+	}
+	resp, err := do(req)
 	if err == nil && resp.Body != nil {
 		resp.Body = &limitBody{rc: resp.Body, left: maxResponse}
 	}
@@ -285,7 +292,7 @@ func (c *Client) graphql(ctx context.Context, query string, vars map[string]inte
 		if err != nil {
 			return err
 		}
-		gc := graphql.NewClient(c.HTTPURL+"/api/graphql", limitDoer{c.HTTP}).
+		gc := graphql.NewClient(c.HTTPURL+"/api/graphql", limitDoer{c: c.HTTP, write: isMutation(query)}).
 			WithRequestModifier(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tok) })
 		data, err := gc.ExecRaw(ctx, query, vars)
 		if err != nil {
@@ -484,6 +491,10 @@ func (c *Client) SetPassword(ctx context.Context, user, password string) error {
 	if err := fsutil.CheckWrite(); err != nil {
 		return err
 	}
+	// The password modify runs on the fence: a stand-by closes the LDAP
+	// connection mid-flight.
+	ctx, cancel := fsutil.WriteContext(ctx)
+	defer cancel()
 	if !ValidUsername(user) {
 		return fmt.Errorf("invalid username")
 	}

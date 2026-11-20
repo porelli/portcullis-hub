@@ -358,7 +358,7 @@ func (c *client) do(ctx context.Context, method, p string, q url.Values, body io
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := fsutil.Do(c.http, req)
 	if err != nil {
 		cancel()
 		return nil, transportErr(err)

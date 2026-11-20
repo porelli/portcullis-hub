@@ -117,7 +117,7 @@ func (c *Client) Create(ctx context.Context, username string, o Options) (*Invit
 	}
 	req.Header.Set("Authorization", "Bearer "+sec)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.noRedirect().Do(req)
+	resp, err := fsutil.Do(c.noRedirect(), req)
 	if err != nil {
 		return nil, fmt.Errorf("invite API: %w", err)
 	}
@@ -210,7 +210,7 @@ func (c *Client) Certificates(ctx context.Context) ([]CertRecord, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+sec)
-	resp, err := c.noRedirect().Do(req)
+	resp, err := fsutil.Do(c.noRedirect(), req)
 	if err != nil {
 		return nil, fmt.Errorf("certificates API: %w", err)
 	}

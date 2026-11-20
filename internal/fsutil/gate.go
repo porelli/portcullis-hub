@@ -3,8 +3,10 @@ package fsutil
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -71,26 +73,110 @@ func WriteContext(parent context.Context) (context.Context, context.CancelFunc) 
 // (Keycloak, LLDAP, domains, enroll, the mail provider, a worker agent):
 // GET, HEAD and OPTIONS read; any other method asks the gate.
 func CheckRequest(method string) error {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	if readMethod(method) {
 		return nil
 	}
 	return CheckWrite()
 }
 
-// GateTransport wraps rt with CheckRequest (the engine's client).
-func GateTransport(rt http.RoundTripper) http.RoundTripper { return gatedRT{rt} }
+// readMethod: GET, HEAD and OPTIONS change nothing.
+func readMethod(m string) bool {
+	return m == http.MethodGet || m == http.MethodHead || m == http.MethodOptions
+}
 
-type gatedRT struct{ next http.RoundTripper }
+// GateTransport wraps rt so that every request but GET, HEAD and OPTIONS
+// asks the gate first and runs on WriteContext: the moment the Hub stands
+// by, a write still in flight is cancelled (the connection closed) and
+// the caller gets the gate's error. The response body holds the context
+// until it is closed. (What the server already applied stays applied:
+// contract §20.5.)
+func GateTransport(rt http.RoundTripper) http.RoundTripper { return GateTransportExcept(rt, nil) }
+
+// GateTransportExcept is GateTransport with reads also passing (a POST
+// that only signs in, say).
+func GateTransportExcept(rt http.RoundTripper, reads func(*http.Request) bool) http.RoundTripper {
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return gatedRT{next: rt, reads: reads}
+}
+
+type gatedRT struct {
+	next  http.RoundTripper
+	reads func(*http.Request) bool
+}
 
 func (g gatedRT) RoundTrip(r *http.Request) (*http.Response, error) {
-	if err := CheckRequest(r.Method); err != nil {
+	if readMethod(r.Method) || g.reads != nil && g.reads(r) {
+		return g.next.RoundTrip(r)
+	}
+	if err := CheckWrite(); err != nil {
 		if r.Body != nil {
 			r.Body.Close()
 		}
 		return nil, err
 	}
-	return g.next.RoundTrip(r)
+	ctx, cancel := WriteContext(r.Context())
+	resp, err := g.next.RoundTrip(r.WithContext(ctx))
+	if err != nil {
+		cancel()
+		return nil, standByOr(ctx, err)
+	}
+	resp.Body = &fencedBody{rc: resp.Body, ctx: ctx, cancel: cancel}
+	return resp, nil
+}
+
+// standByOr is the gate's error when ctx was cancelled by a stand-by,
+// else err.
+func standByOr(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		if gerr := CheckWrite(); gerr != nil {
+			return gerr
+		}
+	}
+	return err
+}
+
+// fencedBody is a gated write's response body: closing it ends its
+// WriteContext; a read cut by a stand-by answers the gate's error.
+type fencedBody struct {
+	rc     io.ReadCloser
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (b *fencedBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if err != nil && err != io.EOF {
+		err = standByOr(b.ctx, err)
+	}
+	return n, err
+}
+
+func (b *fencedBody) Close() error {
+	err := b.rc.Close()
+	b.cancel()
+	return err
+}
+
+// Do is c.Do(req) through GateTransport (c's own transport underneath):
+// each outbound client's one call for requests to another service.
+func Do(c *http.Client, req *http.Request) (*http.Response, error) {
+	if c == nil {
+		c = http.DefaultClient
+	}
+	gc := *c
+	gc.Transport = GateTransport(c.Transport)
+	resp, err := gc.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			if gerr := CheckWrite(); gerr != nil && errors.Is(ue.Err, gerr) {
+				return nil, gerr
+			}
+		}
+	}
+	return resp, err
 }
 
 // CheckWrite is the gate's answer: nil when a write may happen now, else
@@ -197,8 +283,11 @@ func Remove(name string) error {
 }
 
 // RemoveAll is os.RemoveAll with the gate asked before every unlink and
-// rmdir: a large tree stops at the entry where the Hub stands by.
-// Symlinks are removed, never followed; a missing name is nil.
+// rmdir: a large tree stops at the entry where the Hub stands by. The
+// walk runs inside an os.Root opened on name's parent, each directory
+// through its own root (checked to be the directory that was stat'ed):
+// a directory swapped for a symlink mid-walk is never followed. A missing
+// name is nil.
 func RemoveAll(name string) error {
 	if err := CheckWrite(); err != nil {
 		return err
@@ -206,36 +295,27 @@ func RemoveAll(name string) error {
 	if name == "" {
 		return nil
 	}
-	return removeTree(osTree{}, name)
+	base := filepath.Base(name)
+	if base == "." || base == ".." || base == string(filepath.Separator) {
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: errors.New("invalid argument")}
+	}
+	parent, err := os.OpenRoot(filepath.Dir(name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	return removeIn(parent, base)
 }
 
-// tree is the file system removeTree walks (os, or an os.Root).
-type tree interface {
-	Lstat(name string) (fs.FileInfo, error)
-	ReadDir(name string) ([]fs.DirEntry, error)
-	Remove(name string) error
-	Join(dir, name string) string
-}
-
-type osTree struct{}
-
-func (osTree) Lstat(n string) (fs.FileInfo, error)     { return os.Lstat(n) }
-func (osTree) ReadDir(n string) ([]fs.DirEntry, error) { return os.ReadDir(n) }
-func (osTree) Remove(n string) error                   { return os.Remove(n) }
-func (osTree) Join(d, n string) string                 { return filepath.Join(d, n) }
-
-type rootTree struct{ r *os.Root }
-
-func (t rootTree) Lstat(n string) (fs.FileInfo, error)     { return t.r.Lstat(n) }
-func (t rootTree) ReadDir(n string) ([]fs.DirEntry, error) { return fs.ReadDir(t.r.FS(), n) }
-func (t rootTree) Remove(n string) error                   { return t.r.Remove(n) }
-func (t rootTree) Join(d, n string) string                 { return path.Join(d, n) }
-
-// removeTree removes name and, for a directory, everything below it,
-// asking the gate before each removal. The gate's error stops it at once;
-// other errors are collected (the first returned) and the walk goes on.
-func removeTree(t tree, name string) error {
-	fi, err := t.Lstat(name)
+// removeIn removes name inside r and, for a directory, everything below
+// it, asking the gate before each removal. The gate's error stops it at
+// once; other errors are collected (the first returned) and the walk goes
+// on.
+func removeIn(r *os.Root, name string) error {
+	fi, err := r.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -244,26 +324,50 @@ func removeTree(t tree, name string) error {
 	}
 	var first error
 	if fi.IsDir() {
-		entries, err := t.ReadDir(name)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			first = err
-		}
-		for _, e := range entries {
-			if err := removeTree(t, t.Join(name, e.Name())); err != nil {
-				if gerr := CheckWrite(); gerr != nil {
-					return gerr
-				}
-				if first == nil {
-					first = err
-				}
-			}
+		first = removeChildren(r, name, fi)
+		if gerr := CheckWrite(); gerr != nil {
+			return gerr
 		}
 	}
 	if err := CheckWrite(); err != nil {
 		return err
 	}
-	if err := t.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
+	if err := r.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
 		first = err
+	}
+	return first
+}
+
+// removeChildren empties directory name of r (fi: its Lstat) through a
+// root of its own, refused when what opened isn't that directory.
+func removeChildren(r *os.Root, name string, fi fs.FileInfo) error {
+	sub, err := r.OpenRoot(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer sub.Close()
+	if st, err := sub.Stat("."); err != nil {
+		return err
+	} else if !os.SameFile(fi, st) {
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: errors.New("changed during the removal")}
+	}
+	entries, err := fs.ReadDir(sub.FS(), ".")
+	var first error
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		first = err
+	}
+	for _, e := range entries {
+		if err := removeIn(sub, e.Name()); err != nil {
+			if gerr := CheckWrite(); gerr != nil {
+				return gerr
+			}
+			if first == nil {
+				first = err
+			}
+		}
 	}
 	return first
 }
@@ -452,7 +556,11 @@ func (r *Root) RemoveAll(name string) error {
 	if err := CheckWrite(); err != nil {
 		return err
 	}
-	return removeTree(rootTree{r.r}, path.Clean(filepath.ToSlash(name)))
+	name = path.Clean(filepath.ToSlash(name))
+	if name == "." || name == ".." {
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: errors.New("invalid argument")}
+	}
+	return removeIn(r.r, name)
 }
 
 // Rename is os.Root.Rename behind the gate.

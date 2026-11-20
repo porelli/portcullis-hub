@@ -90,7 +90,7 @@ func (e *EnrollNodes) post(ctx context.Context, p string, body, out any) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(b)))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := e.HTTP.Do(req)
+	resp, err := fsutil.Do(e.HTTP, req)
 	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}

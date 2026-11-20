@@ -74,8 +74,11 @@ var externalWriters = map[string]string{
 // outside the Hub process or serve/dial a unix socket. net's are flagged
 // only for a unix network (a constant "unix…" or a non-constant one).
 var externalFuncs = map[string]map[string]bool{
-	"os/exec": set("Command", "CommandContext"),
-	"net":     set("Listen", "ListenPacket", "Dial", "DialTimeout", "ListenUnix", "ListenUnixgram", "DialUnix"),
+	"os/exec":               set("Command", "CommandContext"),
+	"os":                    set("StartProcess"),
+	"syscall":               set("ForkExec", "Exec", "StartProcess"),
+	"golang.org/x/sys/unix": set("Exec"),
+	"net":                   set("Listen", "ListenPacket", "Dial", "DialTimeout", "ListenUnix", "ListenUnixgram", "DialUnix"),
 }
 
 // netAlwaysUnix are the net functions that are unix sockets whatever
@@ -309,35 +312,60 @@ func scanExternal(fset *token.FileSet, root string, f *ast.File, info *types.Inf
 				}
 			}
 		}
+		// Calls by selector, to judge net's network argument.
+		calls := map[*ast.SelectorExpr]*ast.CallExpr{}
 		ast.Inspect(decl, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+			if c, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := ast.Unparen(c.Fun).(*ast.SelectorExpr); ok {
+					calls[sel] = c
+				}
 			}
-			sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			obj, ok := info.Uses[sel.Sel].(*types.Func)
-			if !ok || obj.Pkg() == nil {
-				return true
-			}
-			pkg, name := obj.Pkg().Path(), obj.Name()
-			sig := obj.Type().(*types.Signature)
+			return true
+		})
+		ast.Inspect(decl, func(n ast.Node) bool {
 			var what string
-			switch {
-			case sig.Recv() == nil && externalFuncs[pkg][name]:
-				if pkg == "net" && !netAlwaysUnix[name] && !unixNetwork(info, call) {
+			var at token.Pos
+			switch n := n.(type) {
+			case *ast.CompositeLit:
+				// An exec.Cmd built by hand (&exec.Cmd{Path: …}).
+				tv, ok := info.Types[n]
+				if !ok {
 					return true
 				}
-				what = pkg + "." + name
-			case pkg == "net" && sig.Recv() != nil && (name == "Dial" || name == "DialContext" || name == "Listen" || name == "ListenPacket"):
-				// (*net.Dialer).Dial*, (*net.ListenConfig).Listen*: the
-				// network is the first argument after any context.
-				if !unixNetwork(info, call) {
+				named, ok := tv.Type.(*types.Named)
+				if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "os/exec" || named.Obj().Name() != "Cmd" {
 					return true
 				}
-				what = "net." + recvName(sig) + "." + name
+				what, at = "exec.Cmd literal", n.Pos()
+			case *ast.SelectorExpr:
+				// Every use: a call, or the function as a value (f :=
+				// exec.Command), as the file scan does.
+				obj, ok := info.Uses[n.Sel].(*types.Func)
+				if !ok || obj.Pkg() == nil {
+					return true
+				}
+				pkg, name := obj.Pkg().Path(), obj.Name()
+				sig := obj.Type().(*types.Signature)
+				call := calls[n]
+				switch {
+				case sig.Recv() == nil && externalFuncs[pkg][name]:
+					if pkg == "net" && !netAlwaysUnix[name] && call != nil && !unixNetwork(info, call) {
+						return true
+					}
+					what = pkg + "." + name
+				case pkg == "net" && sig.Recv() != nil && (name == "Dial" || name == "DialContext" || name == "Listen" || name == "ListenPacket"):
+					// (*net.Dialer).Dial*, (*net.ListenConfig).Listen*.
+					if call != nil && !unixNetwork(info, call) {
+						return true
+					}
+					what = "net." + recvName(sig) + "." + name
+				default:
+					return true
+				}
+				if call == nil {
+					what += " (as a value)"
+				}
+				at = n.Pos()
 			default:
 				return true
 			}
@@ -346,7 +374,7 @@ func scanExternal(fset *token.FileSet, root string, f *ast.File, info *types.Inf
 				used[site] = true
 				return true
 			}
-			p := fset.Position(call.Pos())
+			p := fset.Position(at)
 			out = append(out, fmt.Sprintf("%s:%d: %s in %s (an external writer: gate it and list it in externalWriters)", rel, p.Line, what, fn))
 			return true
 		})

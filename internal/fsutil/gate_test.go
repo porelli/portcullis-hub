@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -310,5 +311,75 @@ func TestWriteContext(t *testing.T) {
 	defer cancel2()
 	if ctx2.Err() == nil {
 		t.Error("a WriteContext while standing by isn't cancelled")
+	}
+}
+
+// TestInFlightWriteCancelledAtStandBy: a write request to a slow server
+// is under way when the Hub stands by: the server sees its context
+// cancelled (the connection closed) and the client gets the gate's error,
+// through fsutil.Do and through GateTransport alike. A read is untouched.
+func TestInFlightWriteCancelledAtStandBy(t *testing.T) {
+	for _, via := range []string{"Do", "GateTransport"} {
+		t.Run(via, func(t *testing.T) {
+			arrived := make(chan struct{}, 1)
+			cancelled := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.ReadAll(r.Body) // the request read: a closed connection now cancels r's context
+				arrived <- struct{}{}
+				select {
+				case <-r.Context().Done():
+					cancelled <- struct{}{}
+				case <-time.After(10 * time.Second):
+					w.Write([]byte("applied late"))
+				}
+			}))
+			defer srv.Close()
+			var standBy atomic.Bool
+			lost := make(chan struct{})
+			fsutil.SetWriteGate(func() error {
+				if standBy.Load() {
+					return errStandingBy
+				}
+				return nil
+			})
+			fsutil.SetWriteGateLost(lost)
+			t.Cleanup(func() { fsutil.SetWriteGate(nil); fsutil.SetWriteGateLost(nil) })
+
+			done := make(chan error, 1)
+			go func() {
+				req, _ := http.NewRequest("POST", srv.URL, strings.NewReader(`{"a":1}`))
+				var resp *http.Response
+				var err error
+				if via == "Do" {
+					resp, err = fsutil.Do(&http.Client{Timeout: time.Minute}, req)
+				} else {
+					resp, err = (&http.Client{Transport: fsutil.GateTransport(nil)}).Do(req)
+				}
+				if resp != nil {
+					resp.Body.Close()
+				}
+				done <- err
+			}()
+			select {
+			case <-arrived:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the request never arrived")
+			}
+			standBy.Store(true) // mid-flight
+			close(lost)
+			select {
+			case err := <-done:
+				if !errors.Is(err, errStandingBy) {
+					t.Errorf("client = %v, want the gate's error", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the in-flight write wasn't cancelled")
+			}
+			select {
+			case <-cancelled:
+			case <-time.After(5 * time.Second):
+				t.Error("the server never saw the request cancelled")
+			}
+		})
 	}
 }

@@ -287,7 +287,7 @@ func (c *Client) fetch(ctx context.Context, method, path string, body any) (int,
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := fsutil.Do(c.HTTP, req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w (%s)", ErrUnreachable, clip(redact(err.Error(), sec), 300))
 	}

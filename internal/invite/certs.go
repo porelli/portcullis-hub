@@ -161,7 +161,7 @@ func (c *Client) send(ctx context.Context, method, path string, body any, want i
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.noRedirect().Do(req)
+	resp, err := fsutil.Do(c.noRedirect(), req)
 	if err != nil {
 		return nil, fmt.Errorf("certificates API: %w", redactURLError(err))
 	}
