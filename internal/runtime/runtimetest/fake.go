@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -27,6 +29,8 @@ func (notFoundErr) NotFound()     {}
 // nothing in it; set the exported fields before use (or under Lock).
 type Fake struct {
 	mu sync.Mutex
+	// docs: DocSink's documents.
+	docs memDocs
 
 	K        runtime.Kind
 	Environ  []string
@@ -423,3 +427,41 @@ func (f *Fake) EnsureImage(_ context.Context, ref string) error { return f.rec("
 // under running calls.
 func (f *Fake) Lock()   { f.mu.Lock() }
 func (f *Fake) Unlock() { f.mu.Unlock() }
+
+// DocSink is the fake's published documents (Kubernetes: the Hub
+// refuses a runtime without one): kept in memory, confirmed at once.
+func (f *Fake) DocSink() publish.Sink { return &f.docs }
+
+// Docs is what the Hub published through DocSink.
+func (f *Fake) Docs() map[publish.Doc][]byte {
+	f.docs.mu.Lock()
+	defer f.docs.mu.Unlock()
+	return maps.Clone(f.docs.m)
+}
+
+type memDocs struct {
+	mu sync.Mutex
+	m  map[publish.Doc][]byte
+}
+
+func (d *memDocs) Publish(_ context.Context, doc publish.Doc, data []byte) (string, error) {
+	if err := publish.Check(doc, data, publish.MaxDoc); err != nil {
+		return "", err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.m == nil {
+		d.m = map[publish.Doc][]byte{}
+	}
+	d.m[doc] = bytes.Clone(data)
+	return publish.Rev(data), nil
+}
+
+func (d *memDocs) Remove(_ context.Context, doc publish.Doc) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.m, doc)
+	return nil
+}
+
+func (d *memDocs) Confirmed(context.Context, publish.Doc, string) (bool, error) { return true, nil }

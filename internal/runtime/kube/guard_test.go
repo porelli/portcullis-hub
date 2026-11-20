@@ -385,6 +385,18 @@ func TestRoleExactCore(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	// Each publish is one get and one update: no patch, create, delete,
+	// list or watch on a named object.
+	for _, p := range r.Rules {
+		if len(p.ResourceNames) == 0 {
+			continue
+		}
+		for _, v := range p.Verbs {
+			if v != "get" && v != "update" {
+				t.Errorf("%v %v: verb %s", p.Resources, p.ResourceNames, v)
+			}
+		}
+	}
 	// The pub-* names are exactly published_docs.json's objects.
 	objs := vectorObjects(t)
 	var cms, secrets []string

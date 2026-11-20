@@ -97,19 +97,15 @@ func (h *Hub) vpnPublishError() string {
 	return h.vpnrt.pubErr
 }
 
-// publishVPN writes vpn.json (caller holds pubMu, not mu).
+// publishVPN writes vpn.json when it changed, or when the last write is
+// older than the shortest live refresh: built under mu (read), published
+// after it is released (a network call on Kubernetes). Caller holds
+// pubMu (publishes stay in order), not mu.
 func (h *Hub) publishVPN() error {
 	st, _ := h.wgStatus()
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.publishVPNLocked(st)
-}
-
-// publishVPNLocked builds and writes vpn.json when it changed, or when the
-// last write is older than the shortest live refresh. Caller holds mu
-// (read) and pubMu.
-func (h *Hub) publishVPNLocked(st *vpn.Status) error {
 	doc, minRefresh := h.vpnDocLocked(st)
+	h.mu.RUnlock()
 	b, err := json.Marshal(doc)
 	if err != nil {
 		return err

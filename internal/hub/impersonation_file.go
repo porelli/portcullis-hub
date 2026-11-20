@@ -8,6 +8,7 @@ package hub
 // (logged), which makes it not live — never a broken file.
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"maps"
@@ -224,26 +225,75 @@ func (h *Hub) impersonationFileLocked(now time.Time) impFile {
 	return doc
 }
 
-// writeImpersonationFileLocked writes the file atomically, mode 0644
-// (Keycloak and group-gate read it from a read-only mount as other
-// users). Caller holds mu (either lock: the file is built and renamed
-// under it, so an older snapshot never replaces a newer one). A failed
-// write is retried by RunImpersonationExpiry's next tick.
-func (h *Hub) writeImpersonationFileLocked() error {
-	h.imp.fileMu.Lock()
-	defer h.imp.fileMu.Unlock()
+// impSnap is impersonation.json as built under mu, numbered.
+type impSnap struct {
+	seq uint64
+	b   []byte
+	at  time.Time
+	err error
+}
+
+// impSnapLocked builds the file now. Caller holds mu (either lock); the
+// publish (publishImp) runs after mu is released: a network call never
+// holds mu (contract §4 on Kubernetes).
+func (h *Hub) impSnapLocked() impSnap {
 	now := h.impNow()
 	b, err := json.MarshalIndent(h.impersonationFileLocked(now), "", "  ")
-	if err == nil {
-		err = h.publish(publish.Impersonation, append(b, '\n'))
+	return impSnap{seq: h.imp.seq.Add(1), b: append(b, '\n'), at: now, err: err}
+}
+
+// publishImp publishes s (mode 0644 on Docker: Keycloak and group-gate
+// read it from a read-only mount as other users) unless a newer snapshot
+// was published already, so an older snapshot never replaces a newer
+// one; a newer snapshot cancels an older publish still in flight. Nil
+// when s, or a newer snapshot, is published. A failed write is retried
+// by RunImpersonationExpiry's next tick. Never under mu.
+func (h *Hub) publishImp(s impSnap) error {
+	if s.err != nil {
+		h.impFileResult(s, s.err)
+		return s.err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.imp.fileMu.Lock()
+	if h.imp.inflight.seq < s.seq && h.imp.inflight.cancel != nil {
+		h.imp.inflight.cancel()
+	}
+	h.imp.fileMu.Unlock()
+	h.imp.pubMu.Lock()
+	defer h.imp.pubMu.Unlock()
+	if s.seq <= h.imp.pubSeq || ctx.Err() != nil {
+		return nil // a newer snapshot is published, or publishes next
+	}
+	h.imp.fileMu.Lock()
+	h.imp.inflight.seq, h.imp.inflight.cancel = s.seq, cancel
+	h.imp.fileMu.Unlock()
+	err := h.publishWith(ctx, publish.Impersonation, s.b)
+	h.imp.fileMu.Lock()
+	if h.imp.inflight.seq == s.seq {
+		h.imp.inflight.cancel = nil
+	}
+	h.imp.fileMu.Unlock()
+	if err != nil && ctx.Err() != nil {
+		return nil // cancelled for a newer snapshot, which publishes next
+	}
+	if err == nil {
+		h.imp.pubSeq = s.seq
+	}
+	h.impFileResult(s, err)
+	return err
+}
+
+// impFileResult records a publish's outcome.
+func (h *Hub) impFileResult(s impSnap, err error) {
+	h.imp.fileMu.Lock()
+	defer h.imp.fileMu.Unlock()
 	if err != nil {
 		h.imp.fileFailed = true
 		log.Printf("impersonation: writing %s: %v (readers fail closed: nobody can start or stay signed in as someone else until it is written)", ImpersonationFileName, err)
-		return err
+		return
 	}
-	h.imp.fileFailed, h.imp.written = false, now
-	return nil
+	h.imp.fileFailed, h.imp.written = false, s.at
 }
 
 // impFileFailed: the last write failed. Takes the file lock.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -109,12 +110,16 @@ func (s docSink) Confirmed(ctx context.Context, d publish.Doc, rev string) (bool
 	return err == nil && len(behind) == 0, err
 }
 
+// revParallel bounds the hub rev execs of one Behind.
+const revParallel = 4
+
 // Behind runs `/portcullis-bin/hub rev <mount> <doc>` in every running
-// reader pod of d (label portcullis.io/component in the row's readers)
-// and names, sorted, those that don't print rev. A pod being deleted or
+// reader pod of d (label portcullis.io/component in the row's readers),
+// at most revParallel at once, and names, sorted, those that don't print
+// rev (with the exec's error when it failed). A pod being deleted or
 // not running yet isn't asked (it mounts the latest object when it
 // starts).
-func (s docSink) Behind(ctx context.Context, d publish.Doc, rev string) ([]string, error) {
+func (s docSink) Behind(ctx context.Context, d publish.Doc, rev string) ([]publish.Lag, error) {
 	if !publish.Known(d) {
 		return nil, fmt.Errorf("publish: unknown document %q", d)
 	}
@@ -127,16 +132,35 @@ func (s docSink) Behind(ctx context.Context, d publish.Doc, rev string) ([]strin
 	if err != nil {
 		return nil, err
 	}
-	var behind []string
+	var (
+		mu     sync.Mutex
+		wg     sync.WaitGroup
+		behind []publish.Lag
+		slots  = make(chan struct{}, revParallel)
+	)
 	for _, p := range pods.Items {
 		if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning || !isReader(p, sp.Readers) {
 			continue
 		}
-		if got, err := s.rev(ctx, p, sp, d); err != nil || got != rev {
-			behind = append(behind, p.Name)
-		}
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(p corev1.Pod) {
+			defer func() { <-slots; wg.Done() }()
+			got, err := s.rev(ctx, p, sp, d)
+			if err == nil && got == rev {
+				return
+			}
+			l := publish.Lag{Pod: p.Name}
+			if err != nil {
+				l.Err = clip(err.Error(), 200)
+			}
+			mu.Lock()
+			behind = append(behind, l)
+			mu.Unlock()
+		}(p)
 	}
-	sort.Strings(behind)
+	wg.Wait()
+	sort.Slice(behind, func(i, j int) bool { return behind[i].Pod < behind[j].Pod })
 	return behind, nil
 }
 

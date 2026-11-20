@@ -412,8 +412,9 @@ func TestStartImpersonationRecord(t *testing.T) {
 	// Pending drops out at 120 s; the session stays.
 	x.advance(121 * time.Second)
 	x.h.mu.RLock()
-	_ = x.h.writeImpersonationFileLocked()
+	snap := x.h.impSnapLocked()
 	x.h.mu.RUnlock()
+	_ = x.h.publishImp(snap)
 	if doc := x.file(t); len(doc.Pending) != 0 || len(doc.Sessions) != 1 {
 		t.Errorf("after 120 s = %+v", doc)
 	}

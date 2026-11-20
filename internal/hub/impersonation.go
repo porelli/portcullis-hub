@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -69,6 +70,17 @@ type impState struct {
 	fileMu     sync.Mutex
 	written    time.Time
 	fileFailed bool
+	// seq numbers the file's snapshots (taken under mu); pubMu
+	// serialises their publishes (never under mu), pubSeq is the last
+	// one published, and inflight cancels an older publish still running
+	// when a newer snapshot arrives (fileMu).
+	seq      atomic.Uint64
+	pubMu    sync.Mutex
+	pubSeq   uint64
+	inflight struct {
+		seq    uint64
+		cancel context.CancelFunc
+	}
 	// saveFailed: an end couldn't be saved; the loop saves again.
 	saveFailed bool
 	// noticeLogged: the ids whose failed notice action was logged once
@@ -296,8 +308,9 @@ func (h *Hub) SetImpersonationAllowed(ctx context.Context, allowed bool, actor d
 			h.imp.saveFailed = true
 		}
 	}
-	_ = h.writeImpersonationFileLocked()
+	snap := h.impSnapLocked()
 	h.mu.Unlock()
+	_ = h.publishImp(snap)
 	if saveErr != nil {
 		saveErr = statusErr(http.StatusInternalServerError, "signing in as someone else is switched off and every impersonation ended, but saving the Hub's state failed: it is saved again within seconds")
 	}
@@ -495,18 +508,24 @@ func (h *Hub) startImpersonation(ctx context.Context, in StartImpersonation, adm
 		h.mu.Unlock()
 		return nil, refuse(err)
 	}
-	if err := h.writeImpersonationFileLocked(); err != nil {
-		// Not published: the resource would refuse it. Taken back.
-		h.st.Impersonations = prev
+	// Published outside mu (a network call on Kubernetes); a newer
+	// snapshot taken meanwhile holds the record too.
+	snap := h.impSnapLocked()
+	h.mu.Unlock()
+	if err := h.publishImp(snap); err != nil {
+		// Not published: the resource would refuse it. Taken back (only
+		// this record: state may have moved on meanwhile).
+		h.mu.Lock()
+		h.st.Impersonations = slices.DeleteFunc(slices.Clone(h.st.Impersonations), func(r state.Impersonation) bool { return r.ID == id })
 		if serr := h.saveStateLocked(); serr != nil {
 			h.imp.saveFailed = true
 		}
-		_ = h.writeImpersonationFileLocked()
+		back := h.impSnapLocked()
 		h.mu.Unlock()
+		_ = h.publishImp(back)
 		why = "the file couldn't be written"
 		return nil, refuse(statusErr(http.StatusInternalServerError, "the impersonation couldn't be published: try again"))
 	}
-	h.mu.Unlock()
 	h.auditSignIn(actor, "impersonation.start", target, id+" · "+rec.Fresh+" · "+reason, nil)
 	return &StartedImpersonation{ID: id, Next: h.impNext(id), Until: rec.Until}, nil
 }
@@ -697,9 +716,10 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 			r.How = ImpExpired
 		}
 		h.saveImpLocked()
-		_ = h.writeImpersonationFileLocked()
+		snap := h.impSnapLocked()
 		rec = r.Clone()
 		h.mu.Unlock()
+		_ = h.publishImp(snap)
 		// Audited before Finished is saved: a crash in between audits it
 		// twice, never not at all.
 		h.auditSignIn(actor, "impersonation.end", rec.Target, impEndDetail(rec), nil)
@@ -719,11 +739,16 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 	// without it and complete the action silently. Written again here;
 	// still failing, it waits for the loop's next tick.
 	h.mu.Lock()
-	var werr error
+	var snap *impSnap
 	if h.impFileFailed() {
-		werr = h.writeImpersonationFileLocked()
+		s := h.impSnapLocked()
+		snap = &s
 	}
 	h.mu.Unlock()
+	var werr error
+	if snap != nil {
+		werr = h.publishImp(*snap)
+	}
 	if werr != nil {
 		return
 	}
@@ -874,8 +899,9 @@ func (h *Hub) StopImpersonation(ctx context.Context, target string, actor direct
 		h.mu.Unlock()
 		return errNoImpersonation
 	}
-	_ = h.writeImpersonationFileLocked()
+	snap := h.impSnapLocked()
 	h.mu.Unlock()
+	_ = h.publishImp(snap)
 	h.finishEnds(ctx, ids, actor)
 	return nil
 }
@@ -899,8 +925,9 @@ func (h *Hub) StopOwnImpersonation(ctx context.Context, id, person string) (stri
 		return "", errNoImpersonation
 	}
 	ids := h.endRunningLocked(func(r state.Impersonation) bool { return r.ID == id }, ImpStopped, admin)
-	_ = h.writeImpersonationFileLocked()
+	snap := h.impSnapLocked()
 	h.mu.Unlock()
+	_ = h.publishImp(snap)
 	h.finishEnds(ctx, ids, directory.Human(admin))
 	return h.impSignOut(), nil
 }
@@ -961,10 +988,15 @@ func (h *Hub) impersonationTick(ctx context.Context) {
 	if pruned || h.imp.saveFailed {
 		h.saveImpLocked()
 	}
+	var snap *impSnap
 	if len(ended) > 0 || pruned || h.impersonationFileDue(now) {
-		_ = h.writeImpersonationFileLocked()
+		s := h.impSnapLocked()
+		snap = &s
 	}
 	h.mu.Unlock()
+	if snap != nil {
+		_ = h.publishImp(*snap)
+	}
 	h.finishEnds(ctx, ended, directory.Human(impSystem))
 	for _, id := range slices.Sorted(maps.Keys(owed)) {
 		h.finishEnds(ctx, []string{id}, directory.Human(owed[id]))
@@ -978,6 +1010,7 @@ func (h *Hub) impersonationTick(ctx context.Context) {
 			continue
 		}
 		var ids []string
+		var snap *impSnap
 		if used {
 			// Known used (or unreadable: counted as used): it runs until
 			// until and is never asked again.
@@ -985,9 +1018,13 @@ func (h *Hub) impersonationTick(ctx context.Context) {
 			h.saveImpLocked()
 		} else {
 			ids = h.endRunningLocked(func(r state.Impersonation) bool { return r.ID == rec.ID }, ImpNotUsed, impSystem)
-			_ = h.writeImpersonationFileLocked()
+			s := h.impSnapLocked()
+			snap = &s
 		}
 		h.mu.Unlock()
+		if snap != nil {
+			_ = h.publishImp(*snap)
+		}
 		// The answer just given is the end's (never asked twice, M3).
 		h.finishEndsKnown(ctx, ids, directory.Human(impSystem), map[string]impAnswer{rec.ID: {apps: apps, used: used}})
 	}

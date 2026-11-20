@@ -1,0 +1,25 @@
+{
+  "version": 7,
+  "methods": [],
+  "templates": {},
+  "default": "x",
+  "hosts": {},
+  "core": {},
+  "people": {},
+  "add_stronger": false,
+  "extra_domains": [
+    "a.example",
+    "b.example"
+  ],
+  "groups": {},
+  "path_groups": {},
+  "public_paths": {},
+  "expiring": [],
+  "vpn": {
+    "hosts": {},
+    "server_mode": false,
+    "admin_only": false,
+    "public_enrol": true,
+    "devices_file": "vpn.json"
+  }
+}

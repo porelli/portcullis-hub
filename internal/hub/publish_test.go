@@ -13,6 +13,7 @@ import (
 
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/publish"
+	"github.com/portcullis/hub/internal/runtime"
 )
 
 // objSink is a kube-like sink: the objects in memory, the reader pods
@@ -22,11 +23,12 @@ type objSink struct {
 	data    map[publish.Doc][]byte
 	rev     map[publish.Doc]string
 	behind  map[publish.Doc][]string
+	refuse  map[publish.Doc]error
 	updates int
 }
 
 func newObjSink() *objSink {
-	return &objSink{data: map[publish.Doc][]byte{}, rev: map[publish.Doc]string{}, behind: map[publish.Doc][]string{}}
+	return &objSink{data: map[publish.Doc][]byte{}, rev: map[publish.Doc]string{}, behind: map[publish.Doc][]string{}, refuse: map[publish.Doc]error{}}
 }
 
 func (s *objSink) Publish(_ context.Context, d publish.Doc, b []byte) (string, error) {
@@ -35,6 +37,9 @@ func (s *objSink) Publish(_ context.Context, d publish.Doc, b []byte) (string, e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refuse[d]; err != nil {
+		return "", err
+	}
 	s.updates++
 	s.data[d], s.rev[d] = bytes.Clone(b), publish.Rev(b)
 	return s.rev[d], nil
@@ -53,10 +58,14 @@ func (s *objSink) Confirmed(ctx context.Context, d publish.Doc, rev string) (boo
 	return len(b) == 0, err
 }
 
-func (s *objSink) Behind(_ context.Context, d publish.Doc, _ string) ([]string, error) {
+func (s *objSink) Behind(_ context.Context, d publish.Doc, _ string) ([]publish.Lag, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]string(nil), s.behind[d]...), nil
+	var out []publish.Lag
+	for _, p := range s.behind[d] {
+		out = append(out, publish.Lag{Pod: p})
+	}
+	return out, nil
 }
 
 // kubePublish puts f's Hub on an object sink as initPublish does under
@@ -193,5 +202,133 @@ func TestPublishDockerFiles(t *testing.T) {
 		if err != nil || fi.Mode().Perm() != 0644 {
 			t.Errorf("%s: %v %v", n, fi, err)
 		}
+	}
+}
+
+// blockSink blocks every publish until release is closed.
+type blockSink struct {
+	entered chan publish.Doc
+	release chan struct{}
+}
+
+func (b *blockSink) Publish(ctx context.Context, d publish.Doc, data []byte) (string, error) {
+	b.entered <- d
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return publish.Rev(data), nil
+}
+
+func (b *blockSink) Confirmed(context.Context, publish.Doc, string) (bool, error) { return true, nil }
+
+// TestPublishNeverUnderMu: while a publish blocks (a stalled API
+// server), h.mu can still be taken within 100 ms: the policy pass and
+// the impersonation loop publish after releasing it.
+func TestPublishNeverUnderMu(t *testing.T) {
+	f := newFixture(t)
+	for name, run := range map[string]func(){
+		"writePolicy":        func() { f.h.WritePolicy() },
+		"impersonation tick": func() { f.h.impersonationTick(context.Background()) },
+	} {
+		b := &blockSink{entered: make(chan publish.Doc, 32), release: make(chan struct{})}
+		f.h.pub, f.h.pubMirror = publish.NewTracker(b), nil
+		f.h.imp.fileMu.Lock()
+		f.h.imp.fileFailed = true // the tick publishes
+		f.h.imp.fileMu.Unlock()
+		finished := make(chan struct{})
+		go func() { run(); close(finished) }()
+		select {
+		case <-b.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: nothing published", name)
+		}
+		locked := make(chan struct{})
+		go func() { f.h.mu.Lock(); f.h.mu.Unlock(); close(locked) }()
+		select {
+		case <-locked:
+		case <-time.After(100 * time.Millisecond):
+			t.Errorf("%s: h.mu blocked while a publish is in flight", name)
+		}
+		close(b.release)
+		<-locked
+		<-finished
+	}
+}
+
+// TestImpersonationNewerSnapshotWins: an older snapshot never replaces
+// a newer published one.
+func TestImpersonationNewerSnapshotWins(t *testing.T) {
+	f := newFixture(t)
+	s, _ := kubePublish(f)
+	f.h.mu.RLock()
+	old := f.h.impSnapLocked()
+	f.h.mu.RUnlock()
+	f.h.mu.RLock()
+	newer := f.h.impSnapLocked()
+	f.h.mu.RUnlock()
+	newer.b = []byte(`{"newer":true}` + "\n")
+	if err := f.h.publishImp(newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.publishImp(old); err != nil {
+		t.Fatal(err)
+	}
+	if string(s.data[publish.Impersonation]) != string(newer.b) {
+		t.Errorf("the older snapshot replaced the newer: %s", s.data[publish.Impersonation])
+	}
+}
+
+// TestTooLargePolicyStillPublishesTheRest: a policy file refused for
+// its size (persistent) doesn't hold back the other documents.
+func TestTooLargePolicyStillPublishesTheRest(t *testing.T) {
+	f := newFixture(t)
+	s, _ := kubePublish(f)
+	s.refuse[publish.GroupGatePolicy] = publish.ErrTooLarge
+	before := f.h.gatePolicy.Load()
+	err := f.h.WritePolicy()
+	if !errors.Is(err, publish.ErrTooLarge) {
+		t.Fatalf("err %v", err)
+	}
+	for _, d := range []publish.Doc{publish.SignInKeycloak, publish.Impersonation, publish.PortalApps} {
+		if len(s.data[d]) == 0 {
+			t.Errorf("%s not published", d)
+		}
+	}
+	if f.h.gatePolicy.Load() != before {
+		t.Error("the refused policy is kept as published")
+	}
+}
+
+// TestHubCopyFailureIsPublished: the object is the authority; a failed
+// Hub-side copy is no publish error, and the doctor input names it.
+func TestHubCopyFailureIsPublished(t *testing.T) {
+	f := newFixture(t)
+	s, _ := kubePublish(f)
+	f.h.pubMirror.Dirs[publish.PortalApps] = filepath.Join(f.data, "missing", "dir")
+	if err := f.h.publish(publish.PortalApps, []byte("{}\n")); err != nil {
+		t.Fatalf("a copy failure failed the publish: %v", err)
+	}
+	if string(s.data[publish.PortalApps]) != "{}\n" {
+		t.Error("not published")
+	}
+	in := f.h.doctorPublishedIn()
+	if in == nil || len(in.CopyFailed) != 1 || in.CopyFailed[0].Doc != "portal-apps" {
+		t.Fatalf("doctor input %+v", in)
+	}
+	f.h.pubMirror.Dirs[publish.PortalApps] = f.data
+	f.h.publish(publish.PortalApps, []byte("{}\n"))
+	if in := f.h.doctorPublishedIn(); in != nil {
+		t.Errorf("not cleared: %+v", in)
+	}
+}
+
+// TestKubeRuntimeWithoutDocSinkRefused: under Kubernetes a runtime that
+// can't publish refuses the start.
+func TestKubeRuntimeWithoutDocSinkRefused(t *testing.T) {
+	h := &Hub{cfg: Config{Runtime: runtime.KindKubernetes, DataDir: t.TempDir()}}
+	if err := h.initPublish(); err == nil || !strings.Contains(err.Error(), "can't publish") {
+		t.Errorf("err %v", err)
 	}
 }

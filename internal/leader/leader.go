@@ -37,8 +37,9 @@ type Config struct {
 	Client                                    kubernetes.Interface
 	Namespace, Name, Identity                 string
 	LeaseDuration, RenewDeadline, RetryPeriod time.Duration
-	// Clock measures the renewals' age (tests: a fake clock).
-	Clock clock.Clock
+	// Clock measures the renewals' age and ticks the watchdog (tests: a
+	// fake clock).
+	Clock clock.WithTicker
 }
 
 // Fence tells whether this process may write now.
@@ -152,12 +153,17 @@ func (f *Fence) Run(ctx context.Context) {
 	defer f.stop()
 	// The watchdog: the deadline is enforced even when nothing asks
 	// Check (Lost closes, the elector is cancelled, at renewal + 10 s).
+	// One ticker, made before the elector can lead: it is never between
+	// two timers when the clock moves on (a fresh After per tick missed
+	// a fake clock's step taken in that gap).
+	tick := f.cfg.Clock.NewTicker(watchEvery)
 	go func() {
+		defer tick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-f.cfg.Clock.After(watchEvery):
+			case <-tick.C():
 				f.Check()
 			}
 		}

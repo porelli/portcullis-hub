@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,7 +69,10 @@ type DocSpec struct {
 	// Secret is readable through (0: none, the ConfigMaps).
 	Mode    string
 	FSGroup int
-	doc     Doc
+	// Optional: the reader projects the items optional: true (an absent
+	// key, as created or withdrawn, is a missing file; contract §4).
+	Optional bool
+	doc      Doc
 }
 
 // RevKey is the item path the object's .rev projects to.
@@ -78,7 +82,7 @@ func (s DocSpec) RevKey() string { return ".rev-" + string(s.doc) }
 func (s DocSpec) RevPath() string { return s.Mount + "/" + s.RevKey() }
 
 func cm(d Doc, mount string, readers ...string) DocSpec {
-	return DocSpec{Object: "pub-" + string(d), Kind: ConfigMap, Key: string(d) + ".json", Mount: mount, Readers: readers, Mode: "0444", doc: d}
+	return DocSpec{Object: "pub-" + string(d), Kind: ConfigMap, Key: string(d) + ".json", Mount: mount, Readers: readers, Mode: "0444", Optional: true, doc: d}
 }
 
 var specs = map[Doc]DocSpec{
@@ -89,7 +93,7 @@ var specs = map[Doc]DocSpec{
 	Impersonation:   cm(Impersonation, "/hub-data", "group-gate", "keycloak"),
 	MCPGate:         cm(MCPGate, "/hub-data", "mcp-gate"),
 	MCPCredentials: {Object: "pub-mcp-credentials", Kind: Secret, Key: "mcp-credentials.json", Mount: "/hub-data", Readers: []string{"mcp-gate"},
-		Mode: "0440", FSGroup: 10001, doc: MCPCredentials},
+		Mode: "0440", FSGroup: 10001, Optional: true, doc: MCPCredentials},
 	VPN: cm(VPN, "/vpn-doc", "group-gate", "wg"),
 }
 
@@ -137,9 +141,16 @@ type Remover interface {
 }
 
 // Laggards is a Sink whose readers confirm later (Kubernetes): Behind
-// names the reader pods that don't see rev yet.
+// names the reader pods that don't see rev yet (Err: why the pod
+// couldn't be asked, "" = it answered another revision).
 type Laggards interface {
-	Behind(ctx context.Context, d Doc, rev string) ([]string, error)
+	Behind(ctx context.Context, d Doc, rev string) ([]Lag, error)
+}
+
+// Lag is one reader pod behind.
+type Lag struct {
+	Pod string
+	Err string
 }
 
 // StaleAfter: a reader behind for longer raises published_doc_stale.
@@ -157,10 +168,21 @@ type Stale struct {
 	Rev   string
 	Since time.Time
 	Pods  []string
-	// Err is the last confirmation error ("" = none).
+	// Err is the last confirmation error, and each pod's that couldn't
+	// be asked ("" = none).
 	Err string
 }
 
+// CopyFailed is a document published to its readers whose Hub-side
+// copy (Kubernetes: the Hub's own volume) couldn't be written.
+type CopyFailed struct {
+	Doc Doc
+	Err string
+}
+
+// pending is a document not confirmed yet: at is the oldest unconfirmed
+// publish (kept across republishes, reset only on confirmation), rev
+// the latest.
 type pending struct {
 	rev  string
 	at   time.Time
@@ -183,11 +205,12 @@ type Tracker struct {
 	mu       sync.Mutex
 	tooLarge map[Doc]int
 	pending  map[Doc]*pending
+	copyErr  map[Doc]string
 }
 
 // NewTracker returns a Tracker on s.
 func NewTracker(s Sink) *Tracker {
-	t := &Tracker{Sink: s, tooLarge: map[Doc]int{}, pending: map[Doc]*pending{}}
+	t := &Tracker{Sink: s, tooLarge: map[Doc]int{}, pending: map[Doc]*pending{}, copyErr: map[Doc]string{}}
 	if _, ok := s.(Laggards); ok {
 		t.Max = MaxDoc
 	}
@@ -246,9 +269,41 @@ func (t *Tracker) published(d Doc, rev string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.tooLarge, d)
-	if _, later := t.Sink.(Laggards); later {
-		t.pending[d] = &pending{rev: rev, at: t.now()}
+	if _, later := t.Sink.(Laggards); !later {
+		return
 	}
+	if p := t.pending[d]; p != nil {
+		// Still unconfirmed: the reader is behind since the oldest
+		// publish it hasn't confirmed (a document rewritten every minute
+		// must still go stale).
+		p.rev = rev
+		return
+	}
+	t.pending[d] = &pending{rev: rev, at: t.now()}
+}
+
+// CopyResult records whether the Hub-side copy of d was written (err
+// nil clears it).
+func (t *Tracker) CopyResult(d Doc, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err == nil {
+		delete(t.copyErr, d)
+		return
+	}
+	t.copyErr[d] = err.Error()
+}
+
+// CopyProblems are the documents whose Hub-side copy failed, sorted.
+func (t *Tracker) CopyProblems() []CopyFailed {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []CopyFailed
+	for d, e := range t.copyErr {
+		out = append(out, CopyFailed{Doc: d, Err: e})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Doc < out[j].Doc })
+	return out
 }
 
 // Pending: some document isn't confirmed yet.
@@ -278,17 +333,27 @@ func (t *Tracker) Check(ctx context.Context) {
 	t.mu.Unlock()
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].d < jobs[j].d })
 	for _, j := range jobs {
-		pods, err := lag.Behind(ctx, j.d, j.rev)
+		lags, err := lag.Behind(ctx, j.d, j.rev)
 		t.mu.Lock()
 		p := t.pending[j.d]
 		if p != nil && p.rev == j.rev {
 			switch {
 			case err != nil:
 				p.err = err.Error()
-			case len(pods) == 0:
+			case len(lags) == 0:
 				delete(t.pending, j.d)
 			default:
-				p.pods, p.err = slices.Sorted(slices.Values(pods)), ""
+				p.pods, p.err = nil, ""
+				var errs []string
+				for _, l := range lags {
+					p.pods = append(p.pods, l.Pod)
+					if l.Err != "" {
+						errs = append(errs, l.Pod+": "+l.Err)
+					}
+				}
+				slices.Sort(p.pods)
+				slices.Sort(errs)
+				p.err = strings.Join(errs, "; ")
 			}
 		}
 		t.mu.Unlock()

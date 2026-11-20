@@ -22,6 +22,9 @@ type publishedDoc struct {
 	Mode    string                   `json:"mode"`
 	FSGroup jsonstrict.Nullable[int] `json:"fs_group"`
 	RevPath string                   `json:"rev_path"`
+	// Optional: the reader projects the object's items optional: true
+	// (an absent key, as created or withdrawn, is a missing file).
+	Optional bool `json:"optional"`
 }
 
 // TestPublishedDocsVectorsShape: the file decodes strictly and holds
@@ -64,6 +67,9 @@ func TestPublishedDocsVectorsShape(t *testing.T) {
 		}
 		if r.Doc != strings.TrimSuffix(r.Key, ".json") || r.RevPath != r.Mount+"/.rev-"+r.Doc {
 			t.Errorf("%s: doc %q, rev_path %q", r.Key, r.Doc, r.RevPath)
+		}
+		if !r.Optional {
+			t.Errorf("%s: every source projects optional: true", r.Key)
 		}
 		switch r.Kind {
 		case "configmap":

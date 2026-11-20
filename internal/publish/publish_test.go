@@ -48,7 +48,7 @@ func TestPublishedDocsVectorsMatchCode(t *testing.T) {
 			fs = r.FSGroup.V
 		}
 		if s.Object != r.Object || string(s.Kind) != r.Kind || s.Key != r.Key || s.Mount != r.Mount ||
-			strings.Join(s.Readers, " ") != strings.Join(r.Readers, " ") || s.Mode != r.Mode || s.FSGroup != fs || s.RevPath() != r.RevPath {
+			strings.Join(s.Readers, " ") != strings.Join(r.Readers, " ") || s.Mode != r.Mode || s.FSGroup != fs || s.RevPath() != r.RevPath || s.Optional != r.Optional {
 			t.Errorf("%s: code %+v, vector %+v", d, s, r)
 		}
 		if s.RevKey() != ".rev-"+r.Doc {
@@ -167,6 +167,7 @@ type memSink struct {
 	data    map[Doc][]byte
 	rev     map[Doc]string
 	behind  map[Doc][]string
+	errs    map[string]string
 	publish int
 }
 
@@ -183,12 +184,16 @@ func (m *memSink) Confirmed(_ context.Context, d Doc, rev string) (bool, error) 
 	return len(m.behind[d]) == 0, nil
 }
 
-func (m *memSink) Behind(_ context.Context, d Doc, rev string) ([]string, error) {
-	return m.behind[d], nil
+func (m *memSink) Behind(_ context.Context, d Doc, rev string) ([]Lag, error) {
+	var out []Lag
+	for _, p := range m.behind[d] {
+		out = append(out, Lag{Pod: p, Err: m.errs[p]})
+	}
+	return out, nil
 }
 
 func newMem() *memSink {
-	return &memSink{data: map[Doc][]byte{}, rev: map[Doc]string{}, behind: map[Doc][]string{}}
+	return &memSink{data: map[Doc][]byte{}, rev: map[Doc]string{}, behind: map[Doc][]string{}, errs: map[string]string{}}
 }
 
 // TestTrackerTooLargeKeepsLast: a document of 1 000 001 bytes is never
@@ -255,5 +260,51 @@ func TestTrackerStale(t *testing.T) {
 	tr.Check(ctx)
 	if _, st := tr.Problems(); len(st) != 0 || tr.Pending() {
 		t.Errorf("not cleared: %+v", st)
+	}
+}
+
+// TestTrackerStaleAcrossRepublish: a document republished every 60 s
+// (impersonation.json's rewrite) with a reader that never refreshes is
+// stale at 120 s: the age counts from the oldest unconfirmed publish,
+// and resets only on confirmation.
+func TestTrackerStaleAcrossRepublish(t *testing.T) {
+	m := newMem()
+	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	tr := NewTracker(m)
+	tr.Now = func() time.Time { return now }
+	m.behind[Impersonation] = []string{"keycloak-0"}
+	m.errs["keycloak-0"] = "exec: container not running"
+	ctx := context.Background()
+	for i := 0; i <= 2; i++ { // publishes at 0, 60 and 120 s
+		if _, err := tr.Publish(ctx, Impersonation, []byte(`{"written":`+string(rune('0'+i))+"}\n")); err != nil {
+			t.Fatal(err)
+		}
+		tr.Check(ctx)
+		if _, st := tr.Problems(); len(st) != 0 {
+			t.Fatalf("stale at %d s: %+v", i*60, st)
+		}
+		if i < 2 {
+			now = now.Add(60 * time.Second)
+		}
+	}
+	// 121 s after the first publish, 1 s after the last.
+	now = now.Add(time.Second)
+	tr.Check(ctx)
+	_, st := tr.Problems()
+	if len(st) != 1 || st[0].Doc != Impersonation || st[0].Pods[0] != "keycloak-0" || !strings.Contains(st[0].Err, "container not running") {
+		t.Fatalf("not stale across republishes: %+v", st)
+	}
+	if st[0].Rev != Rev([]byte(`{"written":2}`+"\n")) {
+		t.Errorf("rev %s is not the latest", st[0].Rev)
+	}
+	// Confirmed: cleared; the next publish counts from itself.
+	m.behind[Impersonation] = nil
+	tr.Check(ctx)
+	m.behind[Impersonation] = []string{"keycloak-0"}
+	tr.Publish(ctx, Impersonation, []byte("{}\n"))
+	now = now.Add(100 * time.Second)
+	tr.Check(ctx)
+	if _, st := tr.Problems(); len(st) != 0 {
+		t.Errorf("the age wasn't reset on confirmation: %+v", st)
 	}
 }

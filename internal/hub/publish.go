@@ -3,10 +3,12 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/publish"
 )
@@ -21,36 +23,58 @@ import (
 // Hub's own reads (the gate file's last resources, the attributes' hosts,
 // the credential store, the MDS serial).
 
-// publishTimeout bounds one publish (one object update).
-const publishTimeout = 30 * time.Second
+// publishTimeout bounds one publish (one object get and update): under
+// the Lease's 15 s, so a stalled API server never outlives a stand-by.
+const publishTimeout = 10 * time.Second
+
+// publishContext is a publish's context: the write fence's (cancelled
+// the moment the Hub stands by, contract §20.5) with publishTimeout.
+func publishContext(parent context.Context) (context.Context, context.CancelFunc) {
+	wctx, wcancel := fsutil.WriteContext(parent)
+	ctx, cancel := context.WithTimeout(wctx, publishTimeout)
+	return ctx, func() { cancel(); wcancel() }
+}
 
 // docSinker is a runtime that publishes documents itself (kube).
 type docSinker interface{ DocSink() publish.Sink }
 
-// initPublish picks the sink (caller: New).
-func (h *Hub) initPublish() {
+// initPublish picks the sink (caller: New). Under Kubernetes a runtime
+// without DocSink is refused: readers would never get a document.
+func (h *Hub) initPublish() error {
 	files := publish.FileSink{Dirs: map[publish.Doc]string{}, GID: map[publish.Doc]int{}}
 	for _, d := range publish.All {
 		if d != publish.VPN {
 			files.Dirs[d] = h.cfg.DataDir
 		}
 	}
-	if s, ok := h.rt.(docSinker); ok && h.kubeOn() {
+	if h.kubeOn() {
+		s, ok := h.rt.(docSinker)
+		if !ok {
+			return fmt.Errorf("HUB_CONTAINER_RUNTIME=kubernetes: the runtime (%T) can't publish documents", h.rt)
+		}
 		h.pub = publish.NewTracker(s.DocSink())
 		h.pubMirror = &files
-		return
+		return nil
 	}
 	if h.cfg.VPNDocDir != "" {
 		files.Dirs[publish.VPN] = h.cfg.VPNDocDir
 		files.GID[publish.VPN] = h.cfg.VPNDocGID
 	}
 	h.pub = publish.NewTracker(files)
+	return nil
 }
 
 // publish publishes d (never an empty one, never one over MaxDoc: the
 // last good document stays, published_doc_too_large names it).
+//
+// Never under h.mu: the publish is a network call on Kubernetes.
 func (h *Hub) publish(d publish.Doc, data []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
+	return h.publishWith(context.Background(), d, data)
+}
+
+// publishWith is publish within parent (a newer snapshot cancels it).
+func (h *Hub) publishWith(parent context.Context, d publish.Doc, data []byte) error {
+	ctx, cancel := publishContext(parent)
 	defer cancel()
 	if _, err := h.pub.Publish(ctx, d, data); err != nil {
 		if errors.Is(err, publish.ErrTooLarge) {
@@ -58,25 +82,34 @@ func (h *Hub) publish(d publish.Doc, data []byte) error {
 		}
 		return err
 	}
-	if h.pubMirror != nil && h.pubMirror.Has(d) {
-		if _, err := h.pubMirror.Publish(ctx, d, data); err != nil {
-			return errors.New("published, but the Hub's own copy failed: " + err.Error())
-		}
-	}
+	h.mirror(d, func() error { _, err := h.pubMirror.Publish(context.Background(), d, data); return err })
 	return nil
+}
+
+// mirror writes the Hub's own copy of a published document (Kubernetes).
+// The object is the authority: readers already have the document, so a
+// failed copy is logged and reported by the doctor, never the publish's
+// error (callers would take it back).
+func (h *Hub) mirror(d publish.Doc, write func() error) {
+	if h.pubMirror == nil || !h.pubMirror.Has(d) {
+		return
+	}
+	err := write()
+	if err != nil {
+		log.Printf("publish: %s is published, but the Hub's own copy failed: %v", d, err)
+	}
+	h.pub.CopyResult(d, err)
 }
 
 // unpublish withdraws d (Docker: the file removed; Kubernetes: the data
 // key dropped): readers see it missing.
 func (h *Hub) unpublish(d publish.Doc) error {
-	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
+	ctx, cancel := publishContext(context.Background())
 	defer cancel()
 	if err := h.pub.Remove(ctx, d); err != nil {
 		return err
 	}
-	if h.pubMirror != nil && h.pubMirror.Has(d) {
-		return h.pubMirror.Remove(ctx, d)
-	}
+	h.mirror(d, func() error { return h.pubMirror.Remove(context.Background(), d) })
 	return nil
 }
 
@@ -115,7 +148,8 @@ func (h *Hub) doctorPublishedIn() *doctor.PublishedIn {
 		return nil
 	}
 	tl, st := h.pub.Problems()
-	if len(tl) == 0 && len(st) == 0 {
+	cf := h.pub.CopyProblems()
+	if len(tl) == 0 && len(st) == 0 && len(cf) == 0 {
 		return nil
 	}
 	in := &doctor.PublishedIn{}
@@ -124,6 +158,9 @@ func (h *Hub) doctorPublishedIn() *doctor.PublishedIn {
 	}
 	for _, d := range st {
 		in.Stale = append(in.Stale, doctor.PublishedStaleIn{Doc: string(d.Doc), Rev: d.Rev, Since: d.Since, Pods: d.Pods, Err: d.Err})
+	}
+	for _, d := range cf {
+		in.CopyFailed = append(in.CopyFailed, doctor.PublishedCopyIn{Doc: string(d.Doc), Err: d.Err})
 	}
 	return in
 }

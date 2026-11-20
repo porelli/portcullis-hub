@@ -1,6 +1,6 @@
 # The Hub's Role in the core namespace (contract §6, the Role
 # portcullis-hub-core; NEW, HA): only the published documents of §4
-# (updated, never created, deleted or listed), the front door's status
+# (got and updated, never created, deleted, listed or patched), the front door's status
 # and the cluster addresses (read), its Lease (§20.5), the hub rev exec
 # on the reader pods (narrowed by the admission policy
 # portcullis-core-exec) and listing pods (the readers, the gates'
@@ -16,7 +16,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "update", "patch"]
+    verbs: ["get", "update"]
     resourceNames: ["pub-group-gate-policy", "pub-user-attributes", "pub-portal-apps", "pub-signin-keycloak", "pub-impersonation", "pub-mcp-gate", "pub-vpn"]
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -24,7 +24,7 @@ rules:
     resourceNames: ["frontdoor-status", "portcullis-cluster-addresses"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "update", "patch"]
+    verbs: ["get", "update"]
     resourceNames: ["pub-mcp-credentials"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]

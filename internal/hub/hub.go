@@ -894,7 +894,9 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		idRanges:             templates.PersonIDPools,
 	}
 	h.mds.fetcher = newMDSFetcher(cfg)
-	h.initPublish()
+	if err := h.initPublish(); err != nil {
+		return nil, err
+	}
 	// A create's holder re-check (F30) is the trigger RunCredentialChecks
 	// serves.
 	h.credentialCheck = h.TriggerCredentialCheck
@@ -1526,9 +1528,11 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// on the hosts their routers gate now.
 	hosts, suppress := h.publishedHostHeadersLocked()
 	// impersonation.json follows every instance or client change (D37,
-	// F30): written here, under mu, from the same clients.
-	impErr := h.writeImpersonationFileLocked()
+	// F30): built here, under mu, from the same clients; published after
+	// mu is released (a newer snapshot always wins).
+	impSnap := h.impSnapLocked()
 	h.mu.RUnlock()
+	impErr := h.publishImp(impSnap)
 	// The Keycloak extension's file first (contract §8.1): a sign-in
 	// change reaches the native-OIDC logins before group-gate's file. A
 	// failed write never skips group-gate's file: both are attempted and
@@ -1538,12 +1542,20 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	if err == nil {
 		err = h.publish(publish.GroupGatePolicy, pb)
 	}
-	if err != nil {
+	var policyErr error
+	switch {
+	case errors.Is(err, publish.ErrTooLarge):
+		// Persistent until the policy shrinks: the other documents still
+		// follow (group-gate keeps the last good policy, the doctor names
+		// it); nothing of this policy is kept as published.
+		policyErr = err
+	case err != nil:
 		return false, errors.Join(kcErr, err)
+	default:
+		h.gatePolicy.Store(&doc)
+		h.lastExpiring = expiring
 	}
-	h.gatePolicy.Store(&doc)
-	h.lastExpiring = expiring
-	errs := []error{kcErr, impErr}
+	errs := []error{kcErr, impErr, policyErr}
 	switch {
 	case keepAttrs:
 		// The directory's fields and users stay as published; the hosts

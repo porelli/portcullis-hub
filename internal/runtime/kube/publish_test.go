@@ -226,7 +226,7 @@ func TestDocSinkConfirmedReadsRev(t *testing.T) {
 		t.Fatalf("old rev confirmed: %v %v", ok, err)
 	}
 	behind, err := s.(publish.Laggards).Behind(ctx, publish.Impersonation, rev)
-	if err != nil || strings.Join(behind, ",") != "group-gate-5f-a1" {
+	if err != nil || lagPods(behind) != "group-gate-5f-a1" || behind[0].Err != "" {
 		t.Fatalf("behind %v %v", behind, err)
 	}
 	c.mu.Lock()
@@ -241,8 +241,8 @@ func TestDocSinkConfirmedReadsRev(t *testing.T) {
 	c.mounted["wg-6c-d4 /vpn-doc vpn"] = vrev
 	c.mu.Unlock()
 	behind, _ = s.(publish.Laggards).Behind(ctx, publish.VPN, vrev)
-	if strings.Join(behind, ",") != "group-gate-5f-a1,group-gate-5f-b2" {
-		t.Errorf("vpn behind %v", behind)
+	if lagPods(behind) != "group-gate-5f-a1,group-gate-5f-b2" || !strings.Contains(behind[0].Err, "missing") {
+		t.Errorf("vpn behind %+v", behind)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -300,4 +300,12 @@ func TestDocSinkFenced(t *testing.T) {
 	if strings.Join(seen, ",") != "GET /api/v1/namespaces/portcullis/configmaps/pub-vpn,PUT /api/v1/namespaces/portcullis/configmaps/pub-vpn" {
 		t.Errorf("requests %v", seen)
 	}
+}
+
+func lagPods(ls []publish.Lag) string {
+	var out []string
+	for _, l := range ls {
+		out = append(out, l.Pod)
+	}
+	return strings.Join(out, ",")
 }
