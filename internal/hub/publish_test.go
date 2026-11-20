@@ -6,14 +6,18 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/signinhistory"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // objSink is a kube-like sink: the objects in memory, the reader pods
@@ -301,26 +305,54 @@ func TestTooLargePolicyStillPublishesTheRest(t *testing.T) {
 	}
 }
 
-// TestHubCopyFailureIsPublished: the object is the authority; a failed
-// Hub-side copy is no publish error, and the doctor input names it.
-func TestHubCopyFailureIsPublished(t *testing.T) {
+// TestHubCopyFirst (S2): the Hub's own copy is written before the
+// object. A copy that can't be written publishes nothing (an error); an
+// object update that fails puts the copy back. The Hub's read-back and
+// what readers enforce never diverge.
+func TestHubCopyFirst(t *testing.T) {
 	f := newFixture(t)
 	s, _ := kubePublish(f)
-	f.h.pubMirror.Dirs[publish.PortalApps] = filepath.Join(f.data, "missing", "dir")
-	if err := f.h.publish(publish.PortalApps, []byte("{}\n")); err != nil {
-		t.Fatalf("a copy failure failed the publish: %v", err)
+	copyPath := filepath.Join(f.data, "mcp-credentials.json")
+	if err := f.h.publish(publish.MCPCredentials, []byte("v1\n")); err != nil {
+		t.Fatal(err)
 	}
-	if string(s.data[publish.PortalApps]) != "{}\n" {
-		t.Error("not published")
+	// The copy fails: nothing is published.
+	f.h.pubMirror.Dirs[publish.MCPCredentials] = filepath.Join(f.data, "missing", "dir")
+	if err := f.h.publish(publish.MCPCredentials, []byte("v2\n")); err == nil || !strings.Contains(err.Error(), "nothing published") {
+		t.Fatalf("a failed copy didn't fail the publish: %v", err)
 	}
-	in := f.h.doctorPublishedIn()
-	if in == nil || len(in.CopyFailed) != 1 || in.CopyFailed[0].Doc != "portal-apps" {
-		t.Fatalf("doctor input %+v", in)
+	if string(s.data[publish.MCPCredentials]) != "v1\n" {
+		t.Errorf("published despite the failed copy: %q", s.data[publish.MCPCredentials])
 	}
-	f.h.pubMirror.Dirs[publish.PortalApps] = f.data
-	f.h.publish(publish.PortalApps, []byte("{}\n"))
-	if in := f.h.doctorPublishedIn(); in != nil {
-		t.Errorf("not cleared: %+v", in)
+	f.h.pubMirror.Dirs[publish.MCPCredentials] = f.data
+	// The object update fails: the copy is put back.
+	s.refuse[publish.MCPCredentials] = errors.New("the API server is down")
+	if err := f.h.publish(publish.MCPCredentials, []byte("v3\n")); err == nil {
+		t.Fatal("a failed update passed")
+	}
+	if b, _ := os.ReadFile(copyPath); string(b) != "v1\n" || string(s.data[publish.MCPCredentials]) != "v1\n" {
+		t.Errorf("diverged: copy %q, object %q", b, s.data[publish.MCPCredentials])
+	}
+	// A first document whose update fails: the copy is removed again.
+	if err := f.h.publish(publish.MCPGate, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(f.data, "portal-apps.json"))
+	s.refuse[publish.PortalApps] = errors.New("down")
+	if f.h.publish(publish.PortalApps, []byte("{}\n")) == nil {
+		t.Fatal("passed")
+	}
+	if _, err := os.Stat(filepath.Join(f.data, "portal-apps.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a copy of an unpublished document stayed: %v", err)
+	}
+	// Withdrawn: a failed update keeps the copy.
+	delete(s.refuse, publish.MCPCredentials)
+	s.refuse[publish.MCPCredentials] = nil
+	if err := f.h.unpublish(publish.MCPCredentials); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(copyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("withdrawn, the copy stayed: %v", err)
 	}
 }
 
@@ -330,5 +362,150 @@ func TestKubeRuntimeWithoutDocSinkRefused(t *testing.T) {
 	h := &Hub{cfg: Config{Runtime: runtime.KindKubernetes, DataDir: t.TempDir()}}
 	if err := h.initPublish(); err == nil || !strings.Contains(err.Error(), "can't publish") {
 		t.Errorf("err %v", err)
+	}
+}
+
+// TestImpersonationOlderNeverAfterNewerFailed (N1, S1): the newer
+// snapshot fails; the older one, arriving late, is never published, the
+// caller gets the newer one's error and the file stays due.
+func TestImpersonationOlderNeverAfterNewerFailed(t *testing.T) {
+	f := newFixture(t)
+	s, _ := kubePublish(f)
+	before := bytes.Clone(s.data[publish.Impersonation])
+	f.h.mu.RLock()
+	old := f.h.impSnapLocked()
+	newer := f.h.impSnapLocked()
+	f.h.mu.RUnlock()
+	old.b, newer.b = []byte(`{"old":true}`+"\n"), []byte(`{"newer":true}`+"\n")
+	s.mu.Lock()
+	s.refuse[publish.Impersonation] = errors.New("the API server is down")
+	s.mu.Unlock()
+	if err := f.h.publishImp(newer); err == nil {
+		t.Fatal("the newer publish passed")
+	}
+	s.mu.Lock()
+	s.refuse[publish.Impersonation] = nil
+	s.mu.Unlock()
+	if err := f.h.publishImp(old); err == nil || !strings.Contains(err.Error(), "down") {
+		t.Errorf("the older call returned %v, want the newer one's error", err)
+	}
+	if !bytes.Equal(s.data[publish.Impersonation], before) {
+		t.Errorf("the older snapshot was published: %s", s.data[publish.Impersonation])
+	}
+	if !f.h.impFileFailed() || !f.h.impersonationFileDue(f.h.impNow()) {
+		t.Error("the failure was cleared: the newer state isn't retried")
+	}
+	// The next snapshot publishes and clears it.
+	f.h.mu.RLock()
+	next := f.h.impSnapLocked()
+	f.h.mu.RUnlock()
+	if err := f.h.publishImp(next); err != nil || f.h.impFileFailed() {
+		t.Errorf("next: %v, failed %v", err, f.h.impFileFailed())
+	}
+}
+
+// TestImpersonationSupersededWaitsForNewer (S1): an older publish in
+// flight, cancelled by a newer snapshot, returns the newer one's
+// outcome: its error when it fails, nil when it is published.
+func TestImpersonationSupersededWaitsForNewer(t *testing.T) {
+	for _, newerFails := range []bool{true, false} {
+		f := newFixture(t)
+		b := &blockSink{entered: make(chan publish.Doc, 4), release: make(chan struct{})}
+		gate := &switchSink{first: b, then: newObjSink()}
+		if newerFails {
+			gate.then.refuse[publish.Impersonation] = errors.New("refused")
+		}
+		f.h.pub, f.h.pubMirror = publish.NewTracker(gate), nil
+		f.h.mu.RLock()
+		old := f.h.impSnapLocked()
+		newer := f.h.impSnapLocked()
+		f.h.mu.RUnlock()
+		got := make(chan error, 1)
+		go func() { got <- f.h.publishImp(old) }()
+		<-b.entered // the older publish is in flight
+		gate.switchOver()
+		nerr := f.h.publishImp(newer)
+		oerr := <-got
+		if newerFails && (nerr == nil || oerr == nil || oerr.Error() != nerr.Error()) {
+			t.Errorf("newer fails: older %v, newer %v", oerr, nerr)
+		}
+		if !newerFails && (nerr != nil || oerr != nil) {
+			t.Errorf("newer published: older %v, newer %v", oerr, nerr)
+		}
+		if newerFails != f.h.impFileFailed() {
+			t.Errorf("newer fails %v: file failed %v", newerFails, f.h.impFileFailed())
+		}
+	}
+}
+
+// switchSink sends publishes to first until switchOver, then to then.
+type switchSink struct {
+	mu    sync.Mutex
+	first publish.Sink
+	then  *objSink
+	over  bool
+}
+
+func (s *switchSink) switchOver() { s.mu.Lock(); s.over = true; s.mu.Unlock() }
+
+func (s *switchSink) sink() publish.Sink {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.over {
+		return s.then
+	}
+	return s.first
+}
+
+func (s *switchSink) Publish(ctx context.Context, d publish.Doc, b []byte) (string, error) {
+	return s.sink().Publish(ctx, d, b)
+}
+
+func (s *switchSink) Confirmed(ctx context.Context, d publish.Doc, rev string) (bool, error) {
+	return s.sink().Confirmed(ctx, d, rev)
+}
+
+// TestNoticeActionOnlyAfterConfirmed (N2): the Keycloak notice action
+// is set only once the file holding the notice is published and its
+// readers confirm it: not while the publish fails, not while a reader
+// is behind.
+func TestNoticeActionOnlyAfterConfirmed(t *testing.T) {
+	x := newImpFixture(t)
+	x.h.SetImpersonationApps(func(context.Context, state.Impersonation) ([]signinhistory.OpenedApp, bool) { return nil, true })
+	x.mustStart(t, "root", "alice")
+	s, _ := kubePublish(x.f)
+	x.h.imp.fileMu.Lock()
+	x.h.imp.confirmWait = 50 * time.Millisecond
+	x.h.imp.fileMu.Unlock()
+	s.mu.Lock()
+	s.refuse[publish.Impersonation] = errors.New("the API server is down")
+	s.mu.Unlock()
+	if err := x.h.StopImpersonation(x.ctx, "alice", directory.Human("root")); err != nil {
+		t.Fatal(err)
+	}
+	if n := x.kc.noticed(); len(n) != 0 {
+		t.Fatalf("the action was set while the publish failed: %v", n)
+	}
+	s.mu.Lock()
+	s.refuse[publish.Impersonation] = nil
+	s.behind[publish.Impersonation] = []string{"keycloak-0"}
+	s.mu.Unlock()
+	x.h.impersonationTick(x.ctx)
+	if n := x.kc.noticed(); len(n) != 0 {
+		t.Fatalf("the action was set before the readers confirmed: %v", n)
+	}
+	s.mu.Lock()
+	s.behind[publish.Impersonation] = nil
+	s.mu.Unlock()
+	x.h.impersonationTick(x.ctx)
+	if n := x.kc.noticed(); !slices.Equal(n, []string{"alice"}) {
+		t.Fatalf("notices = %v", n)
+	}
+	s.mu.Lock()
+	pubd := bytes.Clone(s.data[publish.Impersonation])
+	s.mu.Unlock()
+	doc := checkImpFileStrict(t, pubd, x.clock())
+	if len(doc.Notices["alice"]) != 1 {
+		t.Errorf("the published file lacks the notice: %+v", doc)
 	}
 }

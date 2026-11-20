@@ -173,13 +173,6 @@ type Stale struct {
 	Err string
 }
 
-// CopyFailed is a document published to its readers whose Hub-side
-// copy (Kubernetes: the Hub's own volume) couldn't be written.
-type CopyFailed struct {
-	Doc Doc
-	Err string
-}
-
 // pending is a document not confirmed yet: at is the oldest unconfirmed
 // publish (kept across republishes, reset only on confirmation), rev
 // the latest.
@@ -205,12 +198,11 @@ type Tracker struct {
 	mu       sync.Mutex
 	tooLarge map[Doc]int
 	pending  map[Doc]*pending
-	copyErr  map[Doc]string
 }
 
 // NewTracker returns a Tracker on s.
 func NewTracker(s Sink) *Tracker {
-	t := &Tracker{Sink: s, tooLarge: map[Doc]int{}, pending: map[Doc]*pending{}, copyErr: map[Doc]string{}}
+	t := &Tracker{Sink: s, tooLarge: map[Doc]int{}, pending: map[Doc]*pending{}}
 	if _, ok := s.(Laggards); ok {
 		t.Max = MaxDoc
 	}
@@ -229,6 +221,19 @@ func (t *Tracker) staleAfter() time.Duration {
 		return t.StaleAfter
 	}
 	return StaleAfter
+}
+
+// Precheck is Publish's check alone (recording an oversized document):
+// a caller that writes something first (the Hub's own copy) asks it
+// before.
+func (t *Tracker) Precheck(d Doc, data []byte) error {
+	err := Check(d, data, t.Max)
+	if errors.Is(err, ErrTooLarge) {
+		t.mu.Lock()
+		t.tooLarge[d] = len(data)
+		t.mu.Unlock()
+	}
+	return err
 }
 
 // Publish checks data (never an empty or oversized document: the sink
@@ -280,30 +285,6 @@ func (t *Tracker) published(d Doc, rev string) {
 		return
 	}
 	t.pending[d] = &pending{rev: rev, at: t.now()}
-}
-
-// CopyResult records whether the Hub-side copy of d was written (err
-// nil clears it).
-func (t *Tracker) CopyResult(d Doc, err error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err == nil {
-		delete(t.copyErr, d)
-		return
-	}
-	t.copyErr[d] = err.Error()
-}
-
-// CopyProblems are the documents whose Hub-side copy failed, sorted.
-func (t *Tracker) CopyProblems() []CopyFailed {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	var out []CopyFailed
-	for d, e := range t.copyErr {
-		out = append(out, CopyFailed{Doc: d, Err: e})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Doc < out[j].Doc })
-	return out
 }
 
 // Pending: some document isn't confirmed yet.

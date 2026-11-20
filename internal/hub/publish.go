@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
@@ -73,43 +75,71 @@ func (h *Hub) publish(d publish.Doc, data []byte) error {
 }
 
 // publishWith is publish within parent (a newer snapshot cancels it).
+// Under Kubernetes the Hub's own copy is written first: a failed copy
+// publishes nothing, and a failed publish puts the copy back, so what
+// the Hub reads back and what readers enforce never diverge.
 func (h *Hub) publishWith(parent context.Context, d publish.Doc, data []byte) error {
 	ctx, cancel := publishContext(parent)
 	defer cancel()
-	if _, err := h.pub.Publish(ctx, d, data); err != nil {
+	if err := h.pub.Precheck(d, data); err != nil {
 		if errors.Is(err, publish.ErrTooLarge) {
 			log.Printf("publish: %s is %d bytes, over %d: not published, readers keep the last good one", d, len(data), publish.MaxDoc)
 		}
 		return err
 	}
-	h.mirror(d, func() error { _, err := h.pubMirror.Publish(context.Background(), d, data); return err })
+	restore, err := h.copyFirst(d, func() error { _, err := h.pubMirror.Publish(context.Background(), d, data); return err })
+	if err != nil {
+		return err
+	}
+	if _, err := h.pub.Publish(ctx, d, data); err != nil {
+		restore()
+		return err
+	}
 	return nil
 }
 
-// mirror writes the Hub's own copy of a published document (Kubernetes).
-// The object is the authority: readers already have the document, so a
-// failed copy is logged and reported by the doctor, never the publish's
-// error (callers would take it back).
-func (h *Hub) mirror(d publish.Doc, write func() error) {
+// copyFirst writes the Hub's own copy of d (Kubernetes; a no-op
+// elsewhere) and returns how to put the previous one back.
+func (h *Hub) copyFirst(d publish.Doc, write func() error) (restore func(), err error) {
 	if h.pubMirror == nil || !h.pubMirror.Has(d) {
-		return
+		return func() {}, nil
 	}
-	err := write()
-	if err != nil {
-		log.Printf("publish: %s is published, but the Hub's own copy failed: %v", d, err)
+	p := filepath.Join(h.pubMirror.Dirs[d], publish.Spec(d).Key)
+	prev, rerr := os.ReadFile(p)
+	absent := errors.Is(rerr, os.ErrNotExist)
+	if rerr != nil && !absent {
+		return nil, fmt.Errorf("%s: the Hub's own copy can't be read: %w", d, rerr)
 	}
-	h.pub.CopyResult(d, err)
+	if err := write(); err != nil {
+		return nil, fmt.Errorf("%s: the Hub's own copy can't be written (nothing published): %w", d, err)
+	}
+	return func() {
+		var err error
+		if absent {
+			err = h.pubMirror.Remove(context.Background(), d)
+		} else {
+			_, err = h.pubMirror.Publish(context.Background(), d, prev)
+		}
+		if err != nil {
+			log.Printf("publish: %s wasn't published and the Hub's own copy couldn't be put back: %v", d, err)
+		}
+	}, nil
 }
 
 // unpublish withdraws d (Docker: the file removed; Kubernetes: the data
-// key dropped): readers see it missing.
+// key dropped, the Hub's own copy removed first): readers see it
+// missing.
 func (h *Hub) unpublish(d publish.Doc) error {
 	ctx, cancel := publishContext(context.Background())
 	defer cancel()
-	if err := h.pub.Remove(ctx, d); err != nil {
+	restore, err := h.copyFirst(d, func() error { return h.pubMirror.Remove(context.Background(), d) })
+	if err != nil {
 		return err
 	}
-	h.mirror(d, func() error { return h.pubMirror.Remove(context.Background(), d) })
+	if err := h.pub.Remove(ctx, d); err != nil {
+		restore()
+		return err
+	}
 	return nil
 }
 
@@ -148,8 +178,7 @@ func (h *Hub) doctorPublishedIn() *doctor.PublishedIn {
 		return nil
 	}
 	tl, st := h.pub.Problems()
-	cf := h.pub.CopyProblems()
-	if len(tl) == 0 && len(st) == 0 && len(cf) == 0 {
+	if len(tl) == 0 && len(st) == 0 {
 		return nil
 	}
 	in := &doctor.PublishedIn{}
@@ -158,9 +187,6 @@ func (h *Hub) doctorPublishedIn() *doctor.PublishedIn {
 	}
 	for _, d := range st {
 		in.Stale = append(in.Stale, doctor.PublishedStaleIn{Doc: string(d.Doc), Rev: d.Rev, Since: d.Since, Pods: d.Pods, Err: d.Err})
-	}
-	for _, d := range cf {
-		in.CopyFailed = append(in.CopyFailed, doctor.PublishedCopyIn{Doc: string(d.Doc), Err: d.Err})
 	}
 	return in
 }

@@ -242,58 +242,86 @@ func (h *Hub) impSnapLocked() impSnap {
 	return impSnap{seq: h.imp.seq.Add(1), b: append(b, '\n'), at: now, err: err}
 }
 
+// impAttempt is one snapshot's publish: done is closed once err is its
+// outcome (a superseded attempt's outcome is its superseder's).
+type impAttempt struct {
+	seq    uint64
+	cancel context.CancelFunc
+	done   chan struct{}
+	err    error
+}
+
 // publishImp publishes s (mode 0644 on Docker: Keycloak and group-gate
-// read it from a read-only mount as other users) unless a newer snapshot
-// was published already, so an older snapshot never replaces a newer
-// one; a newer snapshot cancels an older publish still in flight. Nil
-// when s, or a newer snapshot, is published. A failed write is retried
-// by RunImpersonationExpiry's next tick. Never under mu.
+// read it from a read-only mount as other users), strictly in seq order:
+//
+//   - a snapshot not newer than the newest one already tried is never
+//     published: it waits for that one's outcome and returns it;
+//   - a newer snapshot cancels an older publish still in flight, and the
+//     older call returns the newer one's outcome;
+//   - only a success at a seq at least the last failure's clears the
+//     failure (impersonationFileDue retries within one tick).
+//
+// A failed write is retried by RunImpersonationExpiry's next tick.
+// Never under mu.
 func (h *Hub) publishImp(s impSnap) error {
-	if s.err != nil {
-		h.impFileResult(s, s.err)
-		return s.err
+	h.imp.fileMu.Lock()
+	if cur := h.imp.cur; cur != nil && s.seq <= cur.seq {
+		h.imp.fileMu.Unlock()
+		<-cur.done
+		return cur.err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h.imp.fileMu.Lock()
-	if h.imp.inflight.seq < s.seq && h.imp.inflight.cancel != nil {
-		h.imp.inflight.cancel()
+	a := &impAttempt{seq: s.seq, cancel: cancel, done: make(chan struct{})}
+	if prev := h.imp.cur; prev != nil {
+		prev.cancel() // superseded: its caller gets this outcome
 	}
+	h.imp.cur = a
 	h.imp.fileMu.Unlock()
-	h.imp.pubMu.Lock()
-	defer h.imp.pubMu.Unlock()
-	if s.seq <= h.imp.pubSeq || ctx.Err() != nil {
-		return nil // a newer snapshot is published, or publishes next
-	}
-	h.imp.fileMu.Lock()
-	h.imp.inflight.seq, h.imp.inflight.cancel = s.seq, cancel
-	h.imp.fileMu.Unlock()
-	err := h.publishWith(ctx, publish.Impersonation, s.b)
-	h.imp.fileMu.Lock()
-	if h.imp.inflight.seq == s.seq {
-		h.imp.inflight.cancel = nil
-	}
-	h.imp.fileMu.Unlock()
-	if err != nil && ctx.Err() != nil {
-		return nil // cancelled for a newer snapshot, which publishes next
-	}
+
+	err := s.err
 	if err == nil {
-		h.imp.pubSeq = s.seq
+		h.imp.pubMu.Lock() // the older publish, cancelled, ends first
+		if ctx.Err() == nil {
+			err = h.publishWith(ctx, publish.Impersonation, s.b)
+		}
+		h.imp.pubMu.Unlock()
 	}
-	h.impFileResult(s, err)
+	h.imp.fileMu.Lock()
+	newer := h.imp.cur
+	h.imp.fileMu.Unlock()
+	superseded := newer != a
+	if !superseded || ctx.Err() == nil {
+		// Its own outcome counts (a superseded one that still completed
+		// published before the newer one: the order holds).
+		h.impFileResult(s, err)
+	}
+	if superseded {
+		<-newer.done
+		err = newer.err
+	}
+	a.err = err
+	close(a.done)
 	return err
 }
 
-// impFileResult records a publish's outcome.
+// impFileResult records a publish's outcome: a failure at seq marks the
+// file failed until a success at that seq or later.
 func (h *Hub) impFileResult(s impSnap, err error) {
 	h.imp.fileMu.Lock()
 	defer h.imp.fileMu.Unlock()
 	if err != nil {
 		h.imp.fileFailed = true
+		h.imp.failSeq = max(h.imp.failSeq, s.seq)
 		log.Printf("impersonation: writing %s: %v (readers fail closed: nobody can start or stay signed in as someone else until it is written)", ImpersonationFileName, err)
 		return
 	}
-	h.imp.fileFailed, h.imp.written = false, s.at
+	if s.seq >= h.imp.okSeq {
+		h.imp.okSeq, h.imp.pubRev, h.imp.written = s.seq, publish.Rev(s.b), s.at
+	}
+	if s.seq >= h.imp.failSeq {
+		h.imp.fileFailed = false
+	}
 }
 
 // impFileFailed: the last write failed. Takes the file lock.

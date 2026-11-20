@@ -27,6 +27,7 @@ import (
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/signinhistory"
 	"github.com/portcullis/hub/internal/state"
@@ -71,16 +72,18 @@ type impState struct {
 	written    time.Time
 	fileFailed bool
 	// seq numbers the file's snapshots (taken under mu); pubMu
-	// serialises their publishes (never under mu), pubSeq is the last
-	// one published, and inflight cancels an older publish still running
-	// when a newer snapshot arrives (fileMu).
-	seq      atomic.Uint64
-	pubMu    sync.Mutex
-	pubSeq   uint64
-	inflight struct {
-		seq    uint64
-		cancel context.CancelFunc
-	}
+	// serialises their publishes (never under mu). Under fileMu: cur is
+	// the newest snapshot tried, failSeq the newest that failed, okSeq
+	// the newest published and pubRev its revision.
+	seq     atomic.Uint64
+	pubMu   sync.Mutex
+	cur     *impAttempt
+	failSeq uint64
+	okSeq   uint64
+	pubRev  string
+	// confirmWait bounds the wait for the readers to confirm a notice
+	// before its Keycloak action (0: impNoticeConfirmWait).
+	confirmWait time.Duration
 	// saveFailed: an end couldn't be saved; the loop saves again.
 	saveFailed bool
 	// noticeLogged: the ids whose failed notice action was logged once
@@ -738,18 +741,14 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 	// after a failed write, a sign-in would find the last good file
 	// without it and complete the action silently. Written again here;
 	// still failing, it waits for the loop's next tick.
-	h.mu.Lock()
-	var snap *impSnap
-	if h.impFileFailed() {
-		s := h.impSnapLocked()
-		snap = &s
-	}
-	h.mu.Unlock()
-	var werr error
-	if snap != nil {
-		werr = h.publishImp(*snap)
-	}
-	if werr != nil {
+	if err := h.impNoticePublished(ctx); err != nil {
+		if !h.imp.noticeLogged[id] {
+			log.Printf("impersonation: %s: the notice isn't published and confirmed yet (%v): its sign-in action waits (tried again every few seconds)", id, err)
+			if h.imp.noticeLogged == nil {
+				h.imp.noticeLogged = map[string]bool{}
+			}
+			h.imp.noticeLogged[id] = true
+		}
 		return
 	}
 	kc := h.impKC()
@@ -792,6 +791,46 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 		h.saveImpLocked()
 	}
 	h.mu.Unlock()
+}
+
+// impNoticeConfirmWait bounds the wait for the readers to confirm the
+// file that holds a notice (the kubelet syncs every 10 s).
+const impNoticeConfirmWait = 30 * time.Second
+
+// impNoticePublished publishes the file as it is now (it holds every
+// owed notice) and waits until its readers confirm the published
+// revision (Docker: at once): only then may the Keycloak action be set
+// (a sign-in must find the notice). An error: not published or not
+// confirmed yet; the action waits for the loop's next tick.
+func (h *Hub) impNoticePublished(ctx context.Context) error {
+	h.mu.RLock()
+	snap := h.impSnapLocked()
+	h.mu.RUnlock()
+	if err := h.publishImp(snap); err != nil {
+		return err
+	}
+	h.imp.fileMu.Lock()
+	rev, wait := h.imp.pubRev, h.imp.confirmWait
+	h.imp.fileMu.Unlock()
+	if wait <= 0 {
+		wait = impNoticeConfirmWait
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	for {
+		ok, err := h.pub.Sink.Confirmed(ctx, publish.Impersonation, rev)
+		if ok && err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			if err == nil {
+				err = errors.New("the readers haven't confirmed it")
+			}
+			return err
+		case <-time.After(min(wait/10, 2*time.Second)):
+		}
+	}
 }
 
 // impPersonGone: a directory snapshot (read now) doesn't know user. An

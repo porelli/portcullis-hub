@@ -21,16 +21,6 @@ var PublishedKinds = []string{KindPublishedDocTooLarge, KindPublishedDocStale}
 type PublishedIn struct {
 	TooLarge []PublishedTooLargeIn
 	Stale    []PublishedStaleIn
-	// CopyFailed: documents published to their readers whose Hub-side
-	// copy (Kubernetes: the Hub's own volume) failed; reported as
-	// published_doc_stale (the Hub's own reads are behind).
-	CopyFailed []PublishedCopyIn
-}
-
-// PublishedCopyIn is a document whose Hub-side copy failed.
-type PublishedCopyIn struct {
-	Doc string
-	Err string
 }
 
 // PublishedTooLargeIn is a document not published for its size.
@@ -88,14 +78,6 @@ func (c publishedCheck) Run(in *Inputs) []Finding {
 				Class:  FixExplain,
 				Steps:  []string{"Check the kubelet on the pods' nodes (core sets --kubelet-arg=sync-frequency=10s) and that the pods mount the published objects.", "Restart the named pods (kubectl -n <core namespace> delete pod <pod>): a new pod mounts the current document. The finding clears when every reader confirms or is gone."},
 				Inputs: Digest(d.Doc + " " + d.Rev + " " + pods + " " + d.Err)})
-		}
-		for _, d := range p.CopyFailed {
-			out = append(out, Finding{FP: Fingerprint(c.kind, d.Doc, "hub-copy"), Kind: c.kind, Severity: Problem,
-				Title:  fmt.Sprintf("The Hub's own copy of %s.json is behind.", d.Doc),
-				Why:    fmt.Sprintf("The document reached its readers, but the Hub couldn't write its own copy on its volume (%s): what the Hub reads back of it (and keeps after a restart) is older than what the readers enforce.", d.Err),
-				Class:  FixExplain,
-				Steps:  []string{"Check the Hub's volume (free space, permissions); the copy is written again with the next publish and the finding clears."},
-				Inputs: Digest(d.Doc + " " + d.Err)})
 		}
 	}
 	return out
