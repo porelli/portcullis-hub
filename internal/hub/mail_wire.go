@@ -12,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -470,7 +471,7 @@ func (h *Hub) undoWireMail(id string, recordGen int) {
 		}
 	}
 	if h.cfg.MailSlotDir != "" {
-		if r, err := os.OpenRoot(h.cfg.MailSlotDir); err == nil {
+		if r, err := fsutil.OpenRoot(h.cfg.MailSlotDir); err == nil {
 			if err := r.Remove(mailGateMetricsSecret); err != nil && !os.IsNotExist(err) {
 				log.Printf("mail: undoing the wiring of %s: mail_slot's metrics-secret: %v", id, err)
 			}

@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -310,7 +310,7 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 	h.writeMailTargets()
 	// mail_slot's copy of the metrics secret goes too (L22).
 	if h.cfg.MailSlotDir != "" {
-		if r, err := os.OpenRoot(h.cfg.MailSlotDir); err == nil {
+		if r, err := fsutil.OpenRoot(h.cfg.MailSlotDir); err == nil {
 			if err := r.Remove(mailGateMetricsSecret); err != nil && !errors.Is(err, fs.ErrNotExist) && gateErr == nil {
 				gateErr = fmt.Errorf("removing mail_slot's metrics-secret: %w", err)
 			}

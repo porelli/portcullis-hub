@@ -34,16 +34,16 @@ func SyncFiles(t *Template, root string) error {
 	if !ValidID(id) {
 		return os.ErrInvalid
 	}
-	if err := os.MkdirAll(root, 0755); err != nil {
+	if err := fsutil.MkdirAll(root, 0755); err != nil {
 		return err
 	}
 	dest := filepath.Join(root, id)
-	stage, err := os.MkdirTemp(root, "."+id+".stage-*")
+	stage, err := fsutil.MkdirTemp(root, "."+id+".stage-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stage)
-	if err := os.Chmod(stage, 0755); err != nil {
+	defer fsutil.RemoveAll(stage)
+	if err := fsutil.Chmod(stage, 0755); err != nil {
 		return err
 	}
 	base := realPath(t.Path)
@@ -64,7 +64,7 @@ func SyncFiles(t *Template, root string) error {
 		target := filepath.Join(stage, rel)
 		switch {
 		case d.IsDir():
-			return os.MkdirAll(target, 0755)
+			return fsutil.MkdirAll(target, 0755)
 		case d.Type().IsRegular():
 			info, err := d.Info()
 			if err != nil {
@@ -73,7 +73,7 @@ func SyncFiles(t *Template, root string) error {
 			if err := fsutil.CopyFile(path, target); err != nil {
 				return err
 			}
-			return os.Chmod(target, info.Mode().Perm())
+			return fsutil.Chmod(target, info.Mode().Perm())
 		case d.Type()&os.ModeSymlink != 0:
 			// Never copied or followed; one that resolves outside the
 			// template (a chain or a dangling target included) refuses the
@@ -90,17 +90,17 @@ func SyncFiles(t *Template, root string) error {
 		return err
 	}
 	old := dest + ".old"
-	os.RemoveAll(old)
+	fsutil.RemoveAll(old)
 	if _, err := os.Stat(dest); err == nil {
-		if err := os.Rename(dest, old); err != nil {
+		if err := fsutil.Rename(dest, old); err != nil {
 			return err
 		}
 	}
-	if err := os.Rename(stage, dest); err != nil {
-		os.Rename(old, dest) // best-effort rollback
+	if err := fsutil.Rename(stage, dest); err != nil {
+		fsutil.Rename(old, dest) // best-effort rollback
 		return err
 	}
-	return os.RemoveAll(old)
+	return fsutil.RemoveAll(old)
 }
 
 // SyncFilesIfChanged is SyncFiles for a dest sibling instances may be

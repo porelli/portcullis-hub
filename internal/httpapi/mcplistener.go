@@ -107,7 +107,8 @@ func MCPSecret(secret string, next http.Handler) http.Handler {
 	})
 }
 
-// MCPHandler is the MCP listener's chain: MCPSecret → routes. Its secret
+// MCPHandler is the MCP listener's chain: MCPSecret → 503 for writes
+// while standing by → routes. Its secret
 // is s.MCPSecret (HUB_MCP_GATE_SECRET; checked here too).
 func (s *Server) MCPHandler() (http.Handler, error) {
 	if err := CheckMCPSecret(s.MCPSecret); err != nil {
@@ -116,7 +117,7 @@ func (s *Server) MCPHandler() (http.Handler, error) {
 	if s.Hub == nil {
 		return nil, errors.New("the MCP listener needs the Hub")
 	}
-	return MCPSecret(s.MCPSecret, s.mcpMux().ServeMux), nil
+	return MCPSecret(s.MCPSecret, s.leaderGate(s.mcpMux().ServeMux)), nil
 }
 
 // mcpMux is the MCP listener's routes, recorded (TestMCPListenerSecret

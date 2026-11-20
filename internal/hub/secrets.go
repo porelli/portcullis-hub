@@ -161,7 +161,7 @@ func parseSecretStore(data []byte, keyRe *regexp.Regexp, keyDesc string) (map[st
 // zeroed. Errors are storeErr (storeRemove, storeDir, storeWrite).
 func writeSecretStore(dirs []string, path string, vals map[string]string) error {
 	if len(vals) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return &storeErr{stage: storeRemove, err: err}
 		}
 		return nil
@@ -187,10 +187,10 @@ func ensureStoreDirs(dirs []string) error {
 		if _, err := os.Stat(d); err == nil {
 			continue
 		}
-		if err := os.Mkdir(d, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := fsutil.Mkdir(d, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
 		}
-		if err := os.Chmod(d, 0700); err != nil {
+		if err := fsutil.Chmod(d, 0700); err != nil {
 			log.Printf("settings: chmod 0700 %s: %v", d, err)
 		}
 	}
@@ -203,7 +203,7 @@ func (h *Hub) removeSecrets(id string) error {
 	if !templates.ValidID(id) {
 		return nil
 	}
-	return os.RemoveAll(h.secretsDir(id))
+	return fsutil.RemoveAll(h.secretsDir(id))
 }
 
 // knownSecrets are instance id's stored secret values (for redaction:

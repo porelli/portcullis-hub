@@ -21,6 +21,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/e2etest"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/servers"
@@ -456,7 +457,7 @@ func (h *Hub) newRelayToken(id string) error {
 	}
 	env := readEnvRaw(h.relayEnvPath(id))
 	env[RelayTokenVar] = base64.RawURLEncoding.EncodeToString(b)
-	if err := os.MkdirAll(filepath.Dir(h.relayEnvPath(id)), 0o700); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(h.relayEnvPath(id)), 0o700); err != nil {
 		return err
 	}
 	return writeEnvMap(h.relayEnvPath(id), env)

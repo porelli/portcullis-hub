@@ -51,7 +51,7 @@ func (s *Server) CLIHandler() (http.Handler, error) {
 	if s.Hub == nil {
 		return nil, errors.New("the CLI listener needs the Hub")
 	}
-	return cliProxySecret(s.CLI.Secret, s.cliVersion(s.cliMux().ServeMux)), nil
+	return cliProxySecret(s.CLI.Secret, s.leaderGate(s.cliVersion(s.cliMux().ServeMux))), nil
 }
 
 // cliMux is the CLI listener's routes, recorded. "/" makes every other

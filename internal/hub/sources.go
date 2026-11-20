@@ -27,7 +27,28 @@ var sourceURLRe = regexp.MustCompile(`^(https?://[^\s]+|ssh://[^\s]+|[A-Za-z0-9.
 // with "-" (no option injection into git).
 func ValidSourceURL(u string) bool { return sourceURLRe.MatchString(u) }
 
+// gitReadOnly are the git commands that change nothing on disk; every
+// other one (clone, pull, reset) writes a checkout and asks the write
+// gate first (contract §20.5).
+var gitReadOnly = map[string]bool{"rev-parse": true}
+
+// gitSubcommand is args' git command (after any -C <dir>).
+func gitSubcommand(args []string) string {
+	for len(args) >= 2 && args[0] == "-C" {
+		args = args[2:]
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
 func runGit(timeout time.Duration, args ...string) ([]byte, error) {
+	if !gitReadOnly[gitSubcommand(args)] {
+		if err := fsutil.CheckWrite(); err != nil {
+			return nil, err
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -82,7 +103,7 @@ func (h *Hub) AddSource(name, repoURL string) error {
 	}
 	// Clone without holding mu. "--" stops a URL from being parsed as an option.
 	if out, err := runGit(gitTimeout, "clone", "--depth=1", "--", repoURL, repoDir); err != nil {
-		os.RemoveAll(repoDir)
+		fsutil.RemoveAll(repoDir)
 		log.Printf("git clone %s: %v: %s", name, err, strings.TrimSpace(string(out)))
 		return statusErr(400, "git clone failed: %v", err)
 	}
@@ -154,7 +175,7 @@ func (h *Hub) RemoveSource(name string) error {
 	h.mu.Unlock()
 
 	if src.Path != "" && fsutil.Within(filepath.Join(h.cfg.DataDir, "repos"), src.Path) {
-		os.RemoveAll(src.Path)
+		fsutil.RemoveAll(src.Path)
 	}
 	h.Discover()
 	return h.WritePolicy()

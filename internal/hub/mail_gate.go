@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -83,26 +84,20 @@ func mailRandString(n int) (string, error) {
 // mailGateRoot opens the mail_provider_slot volume (R-POD2) and makes
 // its root 2750, group 2000. The caller closes it; names are relative
 // to the root (dir ".").
-func (h *Hub) mailGateRoot(id string) (*os.Root, string, error) {
+func (h *Hub) mailGateRoot(id string) (*fsutil.Root, string, error) {
 	dir := h.mailSlotDir(id)
 	if dir == "" {
 		return nil, "", statusErr(http.StatusServiceUnavailable, "the mail provider's slot volume isn't available: the mail gate can't be written")
 	}
-	r, err := os.OpenRoot(dir)
+	r, err := fsutil.OpenRoot(dir)
 	if err != nil {
 		return nil, "", fmt.Errorf("the mail provider's slot volume: %w", err)
 	}
-	d, err := r.Open(".")
-	if err != nil {
-		r.Close()
-		return nil, "", err
-	}
-	defer d.Close()
-	if err := d.Chown(-1, h.mailGID()); err != nil {
+	if err := r.Chown(".", -1, h.mailGID()); err != nil {
 		r.Close()
 		return nil, "", fmt.Errorf("the mail gate directory's group: %w", err)
 	}
-	if err := d.Chmod(0o750 | fs.ModeSetgid); err != nil {
+	if err := r.Chmod(".", 0o750|fs.ModeSetgid); err != nil {
 		r.Close()
 		return nil, "", err
 	}
@@ -116,7 +111,7 @@ func (h *Hub) mailSlotEmpty() error {
 	if dir == "" {
 		return nil
 	}
-	r, err := os.OpenRoot(dir)
+	r, err := fsutil.OpenRoot(dir)
 	if err != nil {
 		return fmt.Errorf("the mail provider's slot volume: %w", err)
 	}
@@ -137,7 +132,7 @@ func (h *Hub) mailSlotEmpty() error {
 // writeInPlace writes data to name inside r: the same inode when it
 // exists (O_TRUNC, never a rename: a bound file stays bound), then
 // fsync; mode 0640, group gid (-1: unchanged).
-func writeInPlace(r *os.Root, name string, data []byte, gid int) error {
+func writeInPlace(r *fsutil.Root, name string, data []byte, gid int) error {
 	f, err := r.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
 	if err != nil {
 		return err
@@ -181,7 +176,7 @@ func (h *Hub) mailGateRemove(id, name string) error {
 	if dir == "" {
 		return nil
 	}
-	r, err := os.OpenRoot(dir)
+	r, err := fsutil.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
@@ -230,7 +225,7 @@ func (h *Hub) writeMailMetricsSecretLocked(id string) error {
 	if h.cfg.MailSlotDir == "" {
 		return nil
 	}
-	r, err := os.OpenRoot(h.cfg.MailSlotDir)
+	r, err := fsutil.OpenRoot(h.cfg.MailSlotDir)
 	if err != nil {
 		return fmt.Errorf("the mail_slot volume: %w", err)
 	}

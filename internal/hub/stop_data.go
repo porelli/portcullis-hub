@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -42,7 +43,7 @@ func (h *Hub) removePartialBackups(id string) error {
 	var errs []error
 	for _, e := range es {
 		if strings.HasPrefix(e.Name(), ".staging-") || strings.HasSuffix(e.Name(), ".tar.partial") {
-			if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			if err := fsutil.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
 				errs = append(errs, err)
 			}
 		}

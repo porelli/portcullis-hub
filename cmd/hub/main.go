@@ -36,6 +36,7 @@ import (
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/leader"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signinreset"
 	"github.com/portcullis/hub/internal/state"
@@ -424,7 +425,7 @@ func main() {
 	// The data directory's advisory lock, held while the Hub runs: `hub
 	// signin reset-core` refuses to edit state.yaml under a running Hub
 	// (and a second Hub on the same data refuses to start).
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+	if err := fsutil.MkdirAll(cfg.DataDir, 0755); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	releaseLock, err := fsutil.TryLock(filepath.Join(cfg.DataDir, state.LockFile))
@@ -435,11 +436,13 @@ func main() {
 	guardCtx, stopGuard := context.WithCancel(context.Background())
 	defer stopGuard()
 	var rt runtime.Instances
+	// The write fence (contract §20.5): Docker and Podman always lead.
+	fence := leader.Always()
 	if kind == runtime.KindKubernetes {
 		// Kubernetes (contract §6 "On Kubernetes"): the in-cluster
 		// ServiceAccount, the cluster guard (fail closed: every runtime
-		// operation answers 503 until its four checks hold).
-		if rt, err = kubeRuntime(guardCtx, &cfg, os.Getenv); err != nil {
+		// operation answers 503 until its four checks hold), the Lease.
+		if rt, fence, err = kubeRuntime(guardCtx, &cfg, os.Getenv); err != nil {
 			log.Fatalf("refusing to start: %v", err)
 		}
 	} else {
@@ -471,6 +474,14 @@ func main() {
 		}
 		rt = dockerrt.New(cli, engine, dockerrt.Options{Kind: kind, Guard: guard, HelperImage: hub.HelperImage, CoreDir: cfg.ProjectHostDir})
 	}
+	// Start order (contract §20.5): the data directory's lock (above),
+	// the write gate, waiting to lead, then hub.New and its start-time
+	// sweeps.
+	startFence(guardCtx, fence, func() {
+		log.Printf("leader: lost the Lease: standing by (every write answers 503); exiting in %s so a restart re-reads the state", fence.LeaseDuration())
+		time.Sleep(fence.LeaseDuration())
+		os.Exit(1)
+	})
 	cfg.AccountURL = fa.AccountURL
 	h, err := hub.New(cfg, rt, kc)
 	if err != nil {
@@ -624,6 +635,7 @@ func main() {
 		Audit:      dir.Audit,
 		PortalName: os.Getenv("PORTAL_DISPLAY_NAME"),
 		Secret:     secret,
+		Leader:     fence,
 		MCPSecret:  mcp.secret,
 		CLI: httpapi.CLIOptions{Secret: cliSecret, Issuer: fa.Issuer, AuthorizeURL: fa.AuthorizeURL,
 			MinCLI: os.Getenv("HUB_CLI_MIN_VERSION")},
@@ -749,7 +761,7 @@ func main() {
 	if hl, err := httpapi.ListenHost(hostSocket); err != nil {
 		log.Printf("host control socket not started: %v (./portcullis vpn add-device and friends won't work)", err)
 	} else {
-		hs := &http.Server{Handler: httpapi.HostHandler(h), ReadHeaderTimeout: 10 * time.Second}
+		hs := &http.Server{Handler: httpapi.LeaderGate(fence, httpapi.HostHandler(h)), ReadHeaderTimeout: 10 * time.Second}
 		go hs.Serve(hl)
 		go func() { <-ctx.Done(); hs.Close() }()
 	}
@@ -776,6 +788,25 @@ func main() {
 	// is marked interrupted at the next start.
 	if !h.WaitTimeout(shutdownWait) {
 		log.Printf("shutdown: background instance operations still running after %s — they are marked interrupted at the next start", shutdownWait)
+	}
+}
+
+// startFence installs f as the write gate, runs it and waits until it
+// leads (Always: at once). lost runs when f stops leading while ctx is
+// still live (never for Always).
+func startFence(ctx context.Context, f *leader.Fence, lost func()) {
+	fsutil.SetWriteGate(f.Check)
+	go func() {
+		f.Run(ctx)
+		if ctx.Err() == nil {
+			lost()
+		}
+	}()
+	if !f.Leading() {
+		log.Printf("leader: waiting for the Lease %s (another Hub may be the active writer)", leaseName)
+	}
+	if err := f.WaitLeading(ctx); err != nil {
+		log.Fatalf("leader: %v", err)
 	}
 }
 

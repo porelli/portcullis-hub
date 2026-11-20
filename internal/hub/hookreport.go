@@ -185,7 +185,7 @@ func (h *Hub) acceptHookReport(ctx context.Context, t *templates.Template, hk te
 	}
 	b, err := json.MarshalIndent(StoredHookReport{Hook: hk.Name, ReceivedAt: time.Now().UTC(), Report: kept}, "", "  ")
 	if err == nil {
-		if err = os.MkdirAll(h.secretsDir(t.ID), 0700); err == nil {
+		if err = fsutil.MkdirAll(h.secretsDir(t.ID), 0700); err == nil {
 			err = fsutil.WriteFileAtomic(h.hookReportPath(t.ID), append(b, '\n'), 0600)
 		}
 	}

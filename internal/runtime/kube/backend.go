@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -232,6 +233,10 @@ var downKinds = []string{"IngressRoute", "Middleware", "Deployment", "Job", "Ser
 // only over an object that carries instance's label: an existing object
 // without it is never touched (refused).
 func (b *Backend) apply(ctx context.Context, instance string, o *unstructured.Unstructured) error {
+	// The write fence (contract §20.5): a Hub standing by applies nothing.
+	if err := fsutil.CheckWrite(); err != nil {
+		return err
+	}
 	r, ok := gvr(o.GetKind())
 	if !ok {
 		return fmt.Errorf("kube: no resource for kind %s", o.GetKind())

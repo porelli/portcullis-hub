@@ -157,11 +157,11 @@ func (h *Hub) secretPath(instance, key, user string) (string, error) {
 
 // openSecrets opens SecretsDir as an os.Root: every access stays inside
 // it (no "..", no symlink out).
-func (h *Hub) openSecrets() (*os.Root, error) {
+func (h *Hub) openSecrets() (*fsutil.Root, error) {
 	if err := h.secretsBaseErr(); err != nil {
 		return nil, err
 	}
-	r, err := os.OpenRoot(h.cfg.SecretsDir)
+	r, err := fsutil.OpenRoot(h.cfg.SecretsDir)
 	if err != nil {
 		return nil, statusErr(http.StatusServiceUnavailable, "the Hub's secrets volume can't be opened: %v", err)
 	}
@@ -169,7 +169,7 @@ func (h *Hub) openSecrets() (*os.Root, error) {
 }
 
 // writeRootAtomic writes name in r (temp file, fsync, rename; 0600).
-func writeRootAtomic(r *os.Root, name string, data []byte) error {
+func writeRootAtomic(r *fsutil.Root, name string, data []byte) error {
 	var rnd [6]byte
 	rand.Read(rnd[:])
 	tmp := name + ".tmp-" + hex.EncodeToString(rnd[:])
@@ -198,7 +198,7 @@ func writeRootAtomic(r *os.Root, name string, data []byte) error {
 
 // mkdirSecrets makes rel (and its parents) 0700 directories in r, never
 // through a symlink.
-func mkdirSecrets(r *os.Root, rel string) error {
+func mkdirSecrets(r *fsutil.Root, rel string) error {
 	if err := r.MkdirAll(rel, 0700); err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func newEpoch() string {
 }
 
 // readEpoch is <secrets>/.epoch ("" = missing or unreadable).
-func readEpoch(r *os.Root) string {
+func readEpoch(r *fsutil.Root) string {
 	b, err := r.ReadFile(epochFile)
 	if err != nil {
 		return ""
@@ -243,7 +243,7 @@ func readEpoch(r *os.Root) string {
 // state.yaml save keeps the in-memory epoch equal to the volume's and
 // answers 500: the copy on disk differs, so the next start voids every
 // credential (F57, fail closed). Caller must hold mu (write).
-func (h *Hub) rotateEpochLocked(r *os.Root) error {
+func (h *Hub) rotateEpochLocked(r *fsutil.Root) error {
 	ep := newEpoch()
 	if err := writeRootAtomic(r, epochFile, []byte(ep)); err != nil {
 		log.Printf("ERROR: secrets: writing the epoch failed: %v", err)
@@ -582,7 +582,7 @@ func (h *Hub) reconcileSecretsLocked(why string) (counts map[string]int, mismatc
 // files, revoked or unknown people, unknown names) and voids active
 // metadata without a hash file. Returns whether anything changed and
 // the voids per instance. Caller must hold mu (write).
-func (h *Hub) reconcileOrphansLocked(r *os.Root, now time.Time) (bool, map[string]int, error) {
+func (h *Hub) reconcileOrphansLocked(r *fsutil.Root, now time.Time) (bool, map[string]int, error) {
 	changed := false
 	remove := func(name string) error {
 		changed = true

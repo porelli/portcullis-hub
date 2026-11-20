@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -65,7 +66,7 @@ func (h *Hub) writeMailTargets() {
 	if err != nil {
 		return
 	}
-	r, err := os.OpenRoot(h.cfg.MailSlotDir)
+	r, err := fsutil.OpenRoot(h.cfg.MailSlotDir)
 	if err != nil {
 		log.Printf("mail: the mail_slot volume: %v", err)
 		return
@@ -458,7 +459,7 @@ func (h *Hub) hostMailRestoreOp(id, archive string, actor directory.Actor) (*Asy
 		ctx = context.WithValue(ctx, mailHostRestoreKey{}, mailHostRestore{id: id, archive: archive})
 		res, err := h.restoreInstance(ctx, id, archive, actor, ready)
 		if err == nil {
-			if rerr := os.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); rerr != nil && !os.IsNotExist(rerr) {
+			if rerr := fsutil.Remove(filepath.Join(h.cfg.DataDir, mailRestorePendingFile)); rerr != nil && !os.IsNotExist(rerr) {
 				err = fmt.Errorf("the provider is restored, but removing %s failed: %w", mailRestorePendingFile, rerr)
 			} else {
 				h.mu.Lock()

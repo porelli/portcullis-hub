@@ -227,7 +227,7 @@ func (h *Hub) pruneScheduled(id string) error {
 		if !archiveRe.MatchString(e.Archive) || filepath.Dir(filepath.FromSlash(e.Archive)) != id {
 			continue
 		}
-		if err := os.Remove(filepath.Join(h.backupsDir(), filepath.FromSlash(e.Archive))); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := fsutil.Remove(filepath.Join(h.backupsDir(), filepath.FromSlash(e.Archive))); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		log.Printf("scheduled backups: %s pruned", e.Archive)

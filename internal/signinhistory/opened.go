@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // OpenedDirName is the opened log's directory in group_gate_data.
@@ -293,7 +295,7 @@ func (l OpenedLog) Prune(days int) (removed int, err error) {
 		if perr != nil || !day.Before(cutoff) || !day.Before(today) {
 			continue
 		}
-		if rerr := os.Remove(filepath.Join(l.dir(), de.Name())); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		if rerr := fsutil.Remove(filepath.Join(l.dir(), de.Name())); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 			errs = append(errs, rerr)
 			continue
 		}

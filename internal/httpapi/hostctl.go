@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/hub"
 )
 
@@ -250,7 +251,7 @@ func ListenHost(path string) (net.Listener, error) {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, errors.New(path + " exists and isn't a socket")
 		}
-		os.Remove(path)
+		fsutil.Remove(path)
 	}
 	old := syscall.Umask(0o177)
 	l, err := net.Listen("unix", path)
@@ -258,7 +259,7 @@ func ListenHost(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := fsutil.Chmod(path, 0o600); err != nil {
 		l.Close()
 		return nil, err
 	}

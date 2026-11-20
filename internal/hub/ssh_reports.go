@@ -107,7 +107,7 @@ func (h *Hub) HostReport(ctx context.Context, hostID string, r cliapi.Report) er
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(h.reportPath(hostID)), 0o700); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(h.reportPath(hostID)), 0o700); err != nil {
 		return err
 	}
 	if err := fsutil.WriteFileAtomic(h.reportPath(hostID), raw, 0o600); err != nil {

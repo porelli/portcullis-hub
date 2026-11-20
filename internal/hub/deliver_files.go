@@ -86,11 +86,11 @@ func (h *Hub) forgetDeliveries(id string) error {
 	delete(h.hookExecs, id)
 	delete(h.lastTrigger, id)
 	h.deliveryMu.Unlock()
-	if err := os.Remove(h.deliveredPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := fsutil.Remove(h.deliveredPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	h.forgetOwed(id)
-	return os.RemoveAll(h.appFilesDir(id))
+	return fsutil.RemoveAll(h.appFilesDir(id))
 }
 
 // dataFileMounts are t's data file directories as override volume
@@ -491,12 +491,12 @@ func (h *Hub) writeDataFile(id string, o fileOutput) error {
 		return fmt.Errorf("invalid instance id")
 	}
 	for _, d := range []string{h.cfg.AppFilesDir, h.appFilesDir(id), h.dataFileDir(id, o.file.Name)} {
-		if err := os.MkdirAll(d, appFilesDirMode); err != nil {
+		if err := fsutil.MkdirAll(d, appFilesDirMode); err != nil {
 			return fmt.Errorf("data file %s: %w", o.file.Name, err)
 		}
 	}
 	for _, d := range []string{h.appFilesDir(id), h.dataFileDir(id, o.file.Name)} {
-		if err := os.Chmod(d, appFilesDirMode); err != nil {
+		if err := fsutil.Chmod(d, appFilesDirMode); err != nil {
 			return fmt.Errorf("data file %s: %w", o.file.Name, err)
 		}
 	}
@@ -507,13 +507,13 @@ func (h *Hub) writeDataFile(id string, o fileOutput) error {
 		if err := fsutil.WriteFileAtomic(sp, o.secrets, secretsFileMode); err != nil {
 			return fmt.Errorf("writing the secrets file of %s failed", o.file.Name)
 		}
-	} else if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
+	} else if err := fsutil.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("removing the secrets file of %s: %w", o.file.Name, err)
 	}
 	if err := fsutil.WriteFileAtomic(h.dataFilePathOf(id, &o.file), o.data, dataFileMode); err != nil {
 		return fmt.Errorf("writing data file %s: %w", o.file.Name, err)
 	}
-	if err := os.Remove(h.otherFormatPath(id, &o.file)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := fsutil.Remove(h.otherFormatPath(id, &o.file)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("removing the old data file of %s: %w", o.file.Name, err)
 	}
 	return nil

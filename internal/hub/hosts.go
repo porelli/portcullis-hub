@@ -996,7 +996,7 @@ func backupFiles(paths ...string) func() error {
 					continue
 				}
 				errs = append(errs, fsutil.WriteFileAtomic(p, old[i].data, 0600))
-			} else if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			} else if err := fsutil.Remove(p); err != nil && !os.IsNotExist(err) {
 				errs = append(errs, err)
 			}
 		}

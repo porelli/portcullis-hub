@@ -241,7 +241,7 @@ func (h *Hub) controlCert(ctx context.Context) (tls.Certificate, *x509.Certifica
 		return tls.Certificate{}, nil, statusErr(502, "enroll answered with another pki_node CA than the pinned one")
 	}
 	der, _ := x509.MarshalPKCS8PrivateKey(k)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return tls.Certificate{}, nil, err
 	}
 	for name, b := range map[string][]byte{"control.key": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}),

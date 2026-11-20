@@ -23,6 +23,7 @@ import (
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/compose"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 	agentrt "github.com/portcullis/hub/internal/runtime/agent"
 	"github.com/portcullis/hub/internal/templates"
@@ -232,7 +233,7 @@ func (h *Hub) relaysUp(ctx context.Context, id string) error {
 		return h.relaysDown(ctx, id)
 	}
 	p := h.relayComposePath(id)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
 	if err := writeAtomic0600(p, b); err != nil {
@@ -306,10 +307,10 @@ func (h *Hub) relaysDown(ctx context.Context, id string) error {
 
 func writeAtomic0600(p string, b []byte) error {
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if err := fsutil.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	return fsutil.Rename(tmp, p)
 }
 
 // memFS is a read-only in-memory fs.FS of bundle files.

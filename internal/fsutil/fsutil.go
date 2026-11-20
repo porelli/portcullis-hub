@@ -23,6 +23,9 @@ func WriteFileAtomicGroup(path string, data []byte, perm os.FileMode, gid int) e
 }
 
 func writeAtomic(path string, data []byte, perm os.FileMode, gid int) error {
+	if err := CheckWrite(); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
@@ -50,6 +53,11 @@ func writeAtomic(path string, data []byte, perm os.FileMode, gid int) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	// Asked again before the rename, the one step readers see: a write
+	// whose fsync outlived the lead never lands.
+	if err := CheckWrite(); err != nil {
+		return err
+	}
 	return os.Rename(tmpName, path)
 }
 
@@ -62,14 +70,18 @@ func Within(base, p string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
-// CopyFile copies the contents of src to dest (created or truncated).
+// CopyFile copies the contents of src to dest (created or truncated),
+// behind the gate (every chunk asks it).
 func CopyFile(src, dest string) error {
+	if err := CheckWrite(); err != nil {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dest)
+	out, err := Create(dest)
 	if err != nil {
 		return err
 	}

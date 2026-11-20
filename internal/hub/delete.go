@@ -12,6 +12,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -658,14 +659,14 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 	// 6. Files, ops record, state; policy and portal.
 	p.Start(StepFiles)
 	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id), h.relayEnvPath(id), h.relayComposePath(id)} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}
 	}
 	// The op history goes with the record (the delete's own final record
 	// is kept there again when it ends).
 	h.opsMu.Lock()
-	herr := os.RemoveAll(h.opHistoryDir(id))
+	herr := fsutil.RemoveAll(h.opHistoryDir(id))
 	h.opsMu.Unlock()
 	if herr != nil {
 		return fmt.Errorf("removing %s: %w", h.opHistoryDir(id), herr)

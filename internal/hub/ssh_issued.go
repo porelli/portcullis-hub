@@ -93,7 +93,7 @@ func (h *Hub) rememberKey(fp, key string, now time.Time) error {
 		}
 	}
 	raw, _ := json.Marshal(m)
-	if err := os.MkdirAll(h.sshDir(), 0o700); err != nil {
+	if err := fsutil.MkdirAll(h.sshDir(), 0o700); err != nil {
 		return err
 	}
 	return fsutil.WriteFileAtomic(h.keysPath(), raw, 0o600)
@@ -114,30 +114,20 @@ func (h *Hub) issuedKey(fp string) string {
 func (h *Hub) appendIssued(recs []IssuedRecord, now time.Time) error {
 	h.sshiss.mu.Lock()
 	defer h.sshiss.mu.Unlock()
-	if err := os.MkdirAll(h.sshDir(), 0o700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(h.issuedPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
+	if err := fsutil.MkdirAll(h.sshDir(), 0o700); err != nil {
 		return err
 	}
 	var buf bytes.Buffer
 	for _, r := range recs {
 		b, err := json.Marshal(r)
 		if err != nil {
-			f.Close()
 			return err
 		}
 		buf.Write(b)
 		buf.WriteByte('\n')
 	}
-	_, werr := f.Write(buf.Bytes())
-	cerr := f.Close()
-	if werr != nil {
-		return werr
-	}
-	if cerr != nil {
-		return cerr
+	if err := fsutil.AppendFile(h.issuedPath(), buf.Bytes(), 0o600); err != nil {
+		return err
 	}
 	if now.Sub(h.sshiss.pruned) > 24*time.Hour {
 		h.sshiss.pruned = now

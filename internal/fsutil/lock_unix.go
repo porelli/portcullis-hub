@@ -14,7 +14,9 @@ var ErrLocked = errors.New("locked by another process")
 
 // TryLock takes an advisory, exclusive flock on path (created 0600 when
 // missing) without waiting: ErrLocked when another process holds it. The
-// lock lasts until release is called or the process ends.
+// lock lasts until release is called or the process ends. It is not
+// behind the write gate (contract §20.5 start order: the lock comes
+// first, the gate after it): the lock is the process guard, not data.
 func TryLock(path string) (release func(), err error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {

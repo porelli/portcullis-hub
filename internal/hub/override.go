@@ -34,7 +34,7 @@ func (h *Hub) generateOverrideLocked(t *templates.Template, s state.InstanceSett
 	}
 	key := h.vpnRenderKeyLocked(t)
 	if content == "" {
-		if err := os.Remove(h.overridePath(t.ID)); err != nil && !os.IsNotExist(err) {
+		if err := fsutil.Remove(h.overridePath(t.ID)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	} else if err := h.writeOverride(h.overridePath(t.ID), []byte(content)); err != nil {

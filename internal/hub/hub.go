@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime/kube"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -834,7 +835,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		return nil, fmt.Errorf("HUB_APPFILES_DIR and HUB_APPFILES_HOST_DIR must be set together (the data file directory as the Hub and as the Docker daemon see it); unset both for <PROJECT_DIR>/appfiles")
 	}
 	for _, d := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, "repos"), filepath.Join(cfg.DataDir, "env"), filepath.Join(cfg.DataDir, "overrides"), filepath.Join(cfg.DataDir, "ops")} {
-		if err := os.MkdirAll(d, 0755); err != nil {
+		if err := fsutil.MkdirAll(d, 0755); err != nil {
 			return nil, err
 		}
 	}
@@ -1546,7 +1547,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		}
 	case attrs == nil && len(hosts) == 0 && len(suppress) == 0:
 		attrsWritten = true
-		if err := os.Remove(h.attributesPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(h.attributesPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	default:

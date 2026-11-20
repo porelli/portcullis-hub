@@ -67,11 +67,11 @@ func (h *Hub) saveSnapshot(folder string, r io.Reader) (rel string, err error) {
 		return "", fmt.Errorf("folder id %q", folder)
 	}
 	dir := filepath.Join(h.snapshotsDir(), folder)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	os.Chmod(h.snapshotsDir(), 0o700)
-	os.Chmod(dir, 0o700)
+	fsutil.Chmod(h.snapshotsDir(), 0o700)
+	fsutil.Chmod(dir, 0o700)
 	avail, err := freeSpace(dir)
 	if err != nil {
 		return "", statusErr(http.StatusInternalServerError, "checking free space for the permissions snapshot: %v", err)
@@ -92,14 +92,14 @@ func (h *Hub) saveSnapshot(folder string, r io.Reader) (rel string, err error) {
 		}
 	}
 	name := ts.Format(snapshotTSFormat) + ".ndjson.gz"
-	tmp, err := os.CreateTemp(dir, ".partial-*")
+	tmp, err := fsutil.CreateTemp(dir, ".partial-*")
 	if err != nil {
 		return "", err
 	}
 	defer func() {
 		if tmp != nil {
 			tmp.Close()
-			os.Remove(tmp.Name())
+			fsutil.Remove(tmp.Name())
 		}
 	}()
 	if err := tmp.Chmod(0o600); err != nil {
@@ -123,13 +123,13 @@ func (h *Hub) saveSnapshot(folder string, r io.Reader) (rel string, err error) {
 		return "", err
 	}
 	final := filepath.Join(dir, name)
-	if err := os.Rename(tmp.Name(), final); err != nil {
+	if err := fsutil.Rename(tmp.Name(), final); err != nil {
 		return "", err
 	}
 	tmp = nil
 	digest := hex.EncodeToString(sum.Sum(nil))
 	if err := fsutil.WriteFileAtomic(final+".sha256", []byte(digest+"  "+name+"\n"), 0o600); err != nil {
-		os.Remove(final)
+		fsutil.Remove(final)
 		return "", err
 	}
 	rel = folder + "/" + name
@@ -159,7 +159,7 @@ func (h *Hub) pruneSnapshots(folder string) {
 			names = append(names, n)
 		case strings.HasSuffix(n, ".sha256") && snapshotNameRe.MatchString(strings.TrimSuffix(n, ".sha256")):
 			if _, err := os.Lstat(filepath.Join(dir, strings.TrimSuffix(n, ".sha256"))); errors.Is(err, os.ErrNotExist) {
-				os.Remove(filepath.Join(dir, n)) // a checksum without its data
+				fsutil.Remove(filepath.Join(dir, n)) // a checksum without its data
 			}
 		}
 	}
@@ -168,11 +168,11 @@ func (h *Hub) pruneSnapshots(folder string) {
 		if folder+"/"+names[i] == keep {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, names[i])); err != nil {
+		if err := fsutil.Remove(filepath.Join(dir, names[i])); err != nil {
 			log.Printf("shared folders: removing old snapshot %s/%s: %v", folder, names[i], err)
 			continue
 		}
-		os.Remove(filepath.Join(dir, names[i]+".sha256"))
+		fsutil.Remove(filepath.Join(dir, names[i]+".sha256"))
 	}
 }
 

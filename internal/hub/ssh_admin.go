@@ -24,6 +24,7 @@ import (
 	"github.com/portcullis/hub/internal/cliapi"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/invite"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/sshaccess"
@@ -894,7 +895,7 @@ func (h *Hub) ImportBreakglass() (imported, malformed int) {
 	}
 	sort.Strings(l)
 	b, _ := json.Marshal(l)
-	if err := os.MkdirAll(h.sshDir(), 0o700); err == nil {
+	if err := fsutil.MkdirAll(h.sshDir(), 0o700); err == nil {
 		_ = writeFile0600(h.breakglassImportedPath(), b)
 	}
 	return imported, malformed

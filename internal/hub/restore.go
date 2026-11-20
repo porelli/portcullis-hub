@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime/kube"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -685,7 +686,7 @@ func (h *Hub) removeUnfinishedRestoreAs(id, archive string) {
 		return
 	}
 	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id)} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("instance %s: removing %s: %v", id, p, err)
 		}
 	}
@@ -1552,7 +1553,7 @@ func (h *Hub) removeNewInstance(id string, prior *priorSettings) error {
 	}
 	var errs []error
 	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id)} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	}

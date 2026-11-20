@@ -789,7 +789,7 @@ func (h *Hub) SaveUserOverride(id, content string) (restart bool, detail string,
 		return false, "", statusErr(400, "%v", err)
 	}
 	if po == nil {
-		if err := os.Remove(h.userOverridePath(id)); err != nil && !os.IsNotExist(err) {
+		if err := fsutil.Remove(h.userOverridePath(id)); err != nil && !os.IsNotExist(err) {
 			return false, "", statusErr(500, "remove override: %v", err)
 		}
 		return t.Enabled, "removed", nil

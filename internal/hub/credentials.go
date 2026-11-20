@@ -12,12 +12,12 @@ import (
 	"log"
 	"maps"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 
 	"github.com/portcullis/hub/internal/credentials"
@@ -882,7 +882,7 @@ func (h *Hub) credentialHashes(id string, t *templates.Template) ([]string, erro
 	if h.secretsErr != nil {
 		return nil, fmt.Errorf("the secrets volume is not usable: %v", h.secretsErr)
 	}
-	r, err := os.OpenRoot(h.cfg.SecretsDir)
+	r, err := fsutil.OpenRoot(h.cfg.SecretsDir)
 	if err != nil {
 		return nil, fmt.Errorf("the secrets volume can't be opened: %v", err)
 	}

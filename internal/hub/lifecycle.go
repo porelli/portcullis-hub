@@ -913,7 +913,7 @@ func (h *Hub) copyConfigFiles(t *templates.Template) {
 			log.Printf("Warning: refusing config_files entry %s → %s for %s (outside allowed paths)", cf.Src, cf.Dest, t.ID)
 			continue
 		}
-		os.MkdirAll(filepath.Dir(dest), 0755)
+		fsutil.MkdirAll(filepath.Dir(dest), 0755)
 		if err := fsutil.CopyFile(src, dest); err != nil {
 			log.Printf("Warning: failed to copy %s → %s: %v", src, dest, err)
 		}

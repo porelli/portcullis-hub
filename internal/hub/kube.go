@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/portcullis/hub/internal/aigate"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/templates"
@@ -152,7 +153,7 @@ func (h *Hub) personSecretFiles(id, key string) (map[string][]byte, error) {
 	if err := h.secretsBaseErr(); err != nil {
 		return nil, err
 	}
-	r, err := os.OpenRoot(h.cfg.SecretsDir)
+	r, err := fsutil.OpenRoot(h.cfg.SecretsDir)
 	if err != nil {
 		return nil, fmt.Errorf("the secrets volume can't be opened: %v", err)
 	}

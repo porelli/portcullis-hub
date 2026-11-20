@@ -463,19 +463,19 @@ func (h *Hub) backupCtx(ctx context.Context, id, reason string, keepStopped bool
 	}
 
 	dir := filepath.Join(h.backupsDir(), id)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := fsutil.MkdirAll(dir, 0700); err != nil {
 		return nil, statusErr(500, "backup directory: %v", err)
 	}
-	os.Chmod(h.backupsDir(), 0700)
-	os.Chmod(dir, 0700)
+	fsutil.Chmod(h.backupsDir(), 0700)
+	fsutil.Chmod(dir, 0700)
 	if err := needFree(dir, 0, "the backup of "+id); err != nil {
 		return nil, err
 	}
-	stage, err := os.MkdirTemp(dir, ".staging-")
+	stage, err := fsutil.MkdirTemp(dir, ".staging-")
 	if err != nil {
 		return nil, statusErr(500, "backup staging: %v", err)
 	}
-	defer os.RemoveAll(stage)
+	defer fsutil.RemoveAll(stage)
 
 	m := &BackupManifest{Version: backupVersion, Instance: id, Template: tg.templateID, Reason: reason,
 		Volumes: map[string]string{}, Files: map[string]string{}}
@@ -488,10 +488,10 @@ func (h *Hub) backupCtx(ctx context.Context, id, reason string, keepStopped bool
 	}
 	add := func(member string, data []byte) error {
 		p := filepath.Join(stage, filepath.FromSlash(member))
-		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		if err := fsutil.MkdirAll(filepath.Dir(p), 0700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(p, data, 0600); err != nil {
+		if err := fsutil.WriteFile(p, data, 0600); err != nil {
 			return err
 		}
 		sum := sha256.Sum256(data)
@@ -644,7 +644,7 @@ func (h *Hub) writeBackup(ctx context.Context, p *Progress, id, dir, stage strin
 		key := StepVolumePrefix + k
 		member := "volumes/" + k + ".tar"
 		dst := filepath.Join(stage, "volumes", k+".tar")
-		os.MkdirAll(filepath.Dir(dst), 0700)
+		fsutil.MkdirAll(filepath.Dir(dst), 0700)
 		p.Start(key)
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -726,14 +726,14 @@ func assembleArchive(final, stage string, m *BackupManifest, commit func() bool)
 		return err
 	}
 	tmp := final + ".partial"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	f, err := fsutil.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err != nil {
 			f.Close()
-			os.Remove(tmp)
+			fsutil.Remove(tmp)
 		}
 	}()
 	tw := tar.NewWriter(f)
@@ -779,10 +779,10 @@ func assembleArchive(final, stage string, m *BackupManifest, commit func() bool)
 		return err
 	}
 	if commit != nil && !commit() {
-		os.Remove(tmp)
+		fsutil.Remove(tmp)
 		return errUncommitted
 	}
-	if err := os.Rename(tmp, final); err != nil {
+	if err := fsutil.Rename(tmp, final); err != nil {
 		return err
 	}
 	if d, derr := os.Open(filepath.Dir(final)); derr == nil {
@@ -806,7 +806,7 @@ func (h *Hub) copyVolumeOut(ctx context.Context, id, name, dst string, count fun
 			return err
 		}
 		defer rc.Close()
-		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		f, err := fsutil.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 		if err != nil {
 			return err
 		}
@@ -1048,7 +1048,7 @@ type staged struct {
 
 func (s *staged) cleanup() {
 	if s != nil && s.dir != "" {
-		os.RemoveAll(s.dir)
+		fsutil.RemoveAll(s.dir)
 	}
 }
 
@@ -1096,10 +1096,10 @@ func (h *Hub) stageArchiveCtx(ctx context.Context, archive string, report func(d
 		return nil, statusErr(409, "archive %s refused: its manifest names instance %s", archive, m.Instance)
 	}
 	root := filepath.Join(h.backupsDir(), ".staging")
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if err := fsutil.MkdirAll(root, 0700); err != nil {
 		return nil, statusErr(500, "staging: %v", err)
 	}
-	dir, err := os.MkdirTemp(root, "restore-")
+	dir, err := fsutil.MkdirTemp(root, "restore-")
 	if err != nil {
 		return nil, statusErr(500, "staging: %v", err)
 	}
@@ -1137,7 +1137,7 @@ func (s *staged) unpack(tr *tar.Reader) error {
 		}
 		seen[hdr.Name] = true
 		dst := filepath.Join(s.dir, fmt.Sprintf("m%d", len(seen)))
-		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		out, err := fsutil.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return err
 		}
@@ -1369,7 +1369,7 @@ func (h *Hub) SweepBackupLeftovers() {
 			h.afterEngineVerified("backups: leftover helper sweep", func() { h.sweepHelperContainers(before) })
 		}
 	}
-	os.RemoveAll(filepath.Join(h.backupsDir(), ".staging"))
+	fsutil.RemoveAll(filepath.Join(h.backupsDir(), ".staging"))
 	dirs, _ := os.ReadDir(h.backupsDir())
 	for _, d := range dirs {
 		if !d.IsDir() || !templates.ValidID(d.Name()) {
@@ -1379,7 +1379,7 @@ func (h *Hub) SweepBackupLeftovers() {
 		for _, f := range files {
 			if strings.HasPrefix(f.Name(), ".staging-") || strings.HasSuffix(f.Name(), ".tar.partial") {
 				p := filepath.Join(h.backupsDir(), d.Name(), f.Name())
-				if err := os.RemoveAll(p); err == nil {
+				if err := fsutil.RemoveAll(p); err == nil {
 					log.Printf("backups: removed leftover %s", p)
 				}
 			}
@@ -1418,7 +1418,7 @@ func plainVolume(v docker.Volume) bool {
 // writeOrRemove writes data to p (0600), or removes p when data is nil.
 func writeOrRemove(p string, data []byte) error {
 	if data == nil {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil

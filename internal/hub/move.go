@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/settings"
@@ -108,7 +108,7 @@ func (h *Hub) publishLink() error {
 
 func removeRelayFiles(h *Hub, id string) {
 	for _, p := range []string{h.relayComposePath(id), h.relayEnvPath(id)} {
-		os.Remove(p)
+		fsutil.Remove(p)
 	}
 }
 

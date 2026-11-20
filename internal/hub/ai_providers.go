@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -206,7 +207,7 @@ func ensurePrivateDir(dir string) error {
 		return fmt.Errorf("%s is not a directory", dir)
 	}
 	if st.Mode().Perm()&0077 != 0 {
-		if err := os.Chmod(dir, 0700); err != nil {
+		if err := fsutil.Chmod(dir, 0700); err != nil {
 			return err
 		}
 		if st, err = os.Lstat(dir); err != nil {

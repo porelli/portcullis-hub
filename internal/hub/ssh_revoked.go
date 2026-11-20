@@ -68,7 +68,7 @@ func (h *Hub) saveRevokedLocked(list []RevokedKey) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(h.sshDir(), 0o700); err != nil {
+	if err := fsutil.MkdirAll(h.sshDir(), 0o700); err != nil {
 		return err
 	}
 	return fsutil.WriteFileAtomic(h.revokedPath(), append(raw, '\n'), 0o600)

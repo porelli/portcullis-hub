@@ -20,6 +20,7 @@ import (
 
 	"github.com/portcullis/hub/internal/aigate"
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
@@ -587,7 +588,7 @@ func (h *Hub) writeGateFiles(m *directory.Membership, mErr error) error {
 		// Nothing valid can be built (the main domain): no gate file at
 		// all is "AI support is off".
 		log.Printf("mcp-gate: %v — removing %s", err, aigate.GateFileName)
-		if rerr := os.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		if rerr := fsutil.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 			err = errors.Join(err, rerr)
 		}
 		return err
@@ -598,7 +599,7 @@ func (h *Hub) writeGateFiles(m *directory.Membership, mErr error) error {
 		off.Enabled, off.Clients, off.AllowedOrigins, off.Resources = false, []string{}, []string{}, []aigate.Resource{}
 		if werr := aigate.WriteFile(h.gatePath(), &off); werr != nil {
 			log.Printf("mcp-gate: writing enabled: false failed too (%v) — removing %s", werr, aigate.GateFileName)
-			if rerr := os.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			if rerr := fsutil.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 				werr = errors.Join(werr, rerr)
 			}
 			return errors.Join(err, werr)
@@ -777,7 +778,7 @@ func (h *Hub) checkDataDirModes() {
 			want = 0o600
 		}
 		log.Printf("data dir check: %s had mode %04o — set to %04o (only the policy, portal, attribute and gate files may be read by other containers)", p, perm, want)
-		if err := os.Chmod(p, want); err != nil {
+		if err := fsutil.Chmod(p, want); err != nil {
 			log.Printf("data dir check: chmod %s: %v", p, err)
 		}
 		return nil

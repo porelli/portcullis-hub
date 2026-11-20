@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // AuditEntry is one line of the audit log. It never contains a password.
@@ -43,15 +45,7 @@ func (l *AuditLog) Append(e AuditEntry) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	f, err := os.OpenFile(l.Path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return fsutil.AppendFile(l.Path, append(b, '\n'), 0600)
 }
 
 // auditTail is how much of the file Recent reads.

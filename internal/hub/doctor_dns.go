@@ -13,6 +13,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/domains"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -60,7 +61,7 @@ func (h *Hub) dropDomainOp(name string) {
 		return
 	}
 	delete(h.ops, key)
-	if err := os.Remove(h.opPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := fsutil.Remove(h.opPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("ops: cannot remove the op record of domain %s: %v", name, err)
 	}
 }

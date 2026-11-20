@@ -353,7 +353,7 @@ func TestMCPListenerSecret(t *testing.T) {
 		t.Fatal("a refused request ran the mint hook")
 	}
 	// /healthz needs no secret.
-	if c, b := send(e.mcp, "GET", "/healthz", nil, ""); c != 200 || b != "ok\n" {
+	if c, b := send(e.mcp, "GET", "/healthz", nil, ""); c != 200 || b != "{\"leading\":true}\n" {
 		t.Errorf("healthz = %d %q", c, b)
 	}
 	// With the secret: the route table (§15.7) and nothing else.

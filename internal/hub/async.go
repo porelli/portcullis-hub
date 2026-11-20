@@ -222,7 +222,7 @@ func (h *Hub) recordOpLocked(id string, r OpRecord) {
 		return
 	}
 	if data, err := json.MarshalIndent(r, "", "  "); err == nil {
-		os.MkdirAll(filepath.Dir(h.opPath(id)), 0700)
+		fsutil.MkdirAll(filepath.Dir(h.opPath(id)), 0700)
 		if err := fsutil.WriteFileAtomic(h.opPath(id), data, 0600); err != nil {
 			log.Printf("ops: cannot record %s %s: %v", r.Op, id, err)
 		}

@@ -989,7 +989,7 @@ func (h *Hub) saveScanFileLocked(sf *scanFile) {
 		log.Printf("doctor: encoding the scan cache: %v", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(h.scanCachePath()), 0o700); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(h.scanCachePath()), 0o700); err != nil {
 		log.Printf("doctor: saving the scan cache: %v", err)
 		return
 	}

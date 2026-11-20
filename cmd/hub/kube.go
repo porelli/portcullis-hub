@@ -16,6 +16,7 @@ import (
 
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/leader"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/templates"
@@ -41,10 +42,14 @@ const saNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace
 // kubeRuntime builds the kube backend and its cluster guard (started at
 // once, then every minute, and before every deploy). A failing in-cluster
 // configuration doesn't stop the start: the guard fails closed (503).
-func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) string) (runtime.Instances, error) {
+func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) string) (runtime.Instances, *leader.Fence, error) {
 	self, err := selfImageFromEnv(getenv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	identity, err := podNameFromEnv(getenv, os.Hostname)
+	if err != nil {
+		return nil, nil, err
 	}
 	cfg.SelfImage = self
 	apps := strings.TrimSpace(getenv("HUB_APPS_NAMESPACE"))
@@ -64,13 +69,22 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 		log.Printf("kubernetes: %v: every runtime operation answers 503", icErr)
 		restCfg = &rest.Config{Host: "https://kubernetes.default.svc"}
 	}
+	// The Lease's own client is never gated (it is how this Hub comes to
+	// lead); every other request that changes the cluster asks the write
+	// gate first (contract §20.5).
+	leaseClient, err := kubernetes.NewForConfig(rest.CopyConfig(restCfg))
+	if err != nil {
+		return nil, nil, err
+	}
+	fence := leader.New(leader.Config{Client: leaseClient, Namespace: core, Name: leaseName, Identity: identity})
+	restCfg.Wrap(kube.GateWrites)
 	client, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	dyn, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	coreEnv := readCoreEnv(cfg.ProjectDir)
 	settings := kube.Settings{
@@ -85,7 +99,7 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	b, err := kube.New(kube.Config{Client: client, Dynamic: dyn, Namespace: apps, Settings: settings, HubImage: self, Resolver: kube.RegistryResolver{}, Exec: ex,
 		Guard: guard, Context: coreEnv["PORTCULLIS_KUBE_CONTEXT"], RuntimeRoots: strings.Fields(coreEnv["PORTCULLIS_RUNTIME_ROOTS"]), BindRoots: roots, EdgeNamespace: edge})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	go guard.Run(ctx, time.Minute)
 	select {
@@ -93,7 +107,22 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	case <-time.After(engineStartWait):
 		log.Printf("kubernetes: the cluster isn't verified after %s: starting anyway, runtime operations answer 503 until it is (%v)", engineStartWait, guard.Err())
 	}
-	return b, nil
+	return b, fence, nil
+}
+
+// leaseName is the Hub's Lease in the core namespace (contract §20.5).
+const leaseName = "portcullis-hub"
+
+// podNameFromEnv is the Lease identity: POD_NAME (the chart's downward
+// API), else the hostname (a pod's hostname is its name).
+func podNameFromEnv(getenv func(string) string, hostname func() (string, error)) (string, error) {
+	if v := strings.TrimSpace(getenv("POD_NAME")); v != "" {
+		return v, nil
+	}
+	if h, err := hostname(); err == nil && strings.TrimSpace(h) != "" {
+		return strings.TrimSpace(h), nil
+	}
+	return "", fmt.Errorf("POD_NAME is required under HUB_CONTAINER_RUNTIME=kubernetes (the Lease identity)")
 }
 
 // readCoreEnv is core's env subset (<ProjectDir>/.env: KEY=value lines;

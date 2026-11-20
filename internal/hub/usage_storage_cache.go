@@ -102,7 +102,7 @@ func (h *Hub) storageSaveLocked(sf *storageFile) error {
 	if len(b) > storageCacheMaxBytes {
 		return fmt.Errorf("%d bytes (at most %d)", len(b), storageCacheMaxBytes)
 	}
-	if err := os.MkdirAll(filepath.Dir(h.storagePath()), 0o700); err != nil {
+	if err := fsutil.MkdirAll(filepath.Dir(h.storagePath()), 0o700); err != nil {
 		return err
 	}
 	return fsutil.WriteFileAtomic(h.storagePath(), b, 0o600)

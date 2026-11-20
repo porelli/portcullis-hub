@@ -140,7 +140,7 @@ func (h *Hub) keepHistoryLocked(id string, r OpRecord) {
 		return
 	}
 	dir := h.opHistoryDir(id)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := fsutil.MkdirAll(dir, 0700); err != nil {
 		log.Printf("ops: cannot keep %s %s (%s): %v", r.Op, id, r.OpID, err)
 		return
 	}
@@ -186,7 +186,7 @@ func (h *Hub) pruneHistory(dir string) {
 		return all[i].name > all[j].name
 	})
 	for _, k := range all[opHistoryKept:] {
-		if err := os.Remove(filepath.Join(dir, k.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(filepath.Join(dir, k.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("ops: cannot prune %s: %v", filepath.Join(dir, k.name), err)
 		}
 	}

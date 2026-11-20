@@ -28,6 +28,12 @@ func (nopRunner) Env() []string                                       { return c
 
 func newServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return newServerWith(t, nil)
+}
+
+// newServerWith is newServer with set applied to the Server first.
+func newServerWith(t *testing.T, set func(*Server)) *httptest.Server {
+	t.Helper()
 	root := t.TempDir()
 	src := filepath.Join(root, "src", "demo")
 	os.MkdirAll(src, 0755)
@@ -45,6 +51,9 @@ func newServer(t *testing.T) *httptest.Server {
 	h.Init()
 	t.Cleanup(h.Wait)
 	s := &Server{Hub: h, Secret: testSecret, Web: web.FS}
+	if set != nil {
+		set(s)
+	}
 	handler, err := s.Handler()
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +83,7 @@ func do(t *testing.T, srv *httptest.Server, method, path, body string, secret bo
 
 func TestServerAuth(t *testing.T) {
 	srv := newServer(t)
-	if r, b := do(t, srv, "GET", "/healthz", "", false); r.StatusCode != 200 || b != "ok\n" {
+	if r, b := do(t, srv, "GET", "/healthz", "", false); r.StatusCode != 200 || b != "{\"leading\":true}\n" {
 		t.Errorf("healthz = %d %q", r.StatusCode, b)
 	}
 	for _, p := range []string{"/", "/api/templates", "/api/drift", "/api/settings", "/static/index.html"} {

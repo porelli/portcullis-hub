@@ -216,7 +216,7 @@ func (h *Hub) writeMarker(id string, m *applyMarker) error {
 			return err
 		}
 	}
-	if err := os.MkdirAll(h.foldersDir(), 0o700); err != nil {
+	if err := fsutil.MkdirAll(h.foldersDir(), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
@@ -227,7 +227,7 @@ func (h *Hub) writeMarker(id string, m *applyMarker) error {
 }
 
 func (h *Hub) removeMarker(id string) {
-	if err := os.Remove(h.markerPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := fsutil.Remove(h.markerPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Printf("shared folders: ERROR: %s: removing the apply marker: %v", id, err)
 	}
 }
@@ -1662,8 +1662,8 @@ func (h *Hub) dropSnapshot(rel string) {
 		return
 	}
 	p := filepath.Join(h.snapshotsDir(), filepath.FromSlash(rel))
-	os.Remove(p + ".sha256")
-	os.Remove(p)
+	fsutil.Remove(p + ".sha256")
+	fsutil.Remove(p)
 }
 
 // ── undo ────────────────────────────────────────────────

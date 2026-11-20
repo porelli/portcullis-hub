@@ -43,6 +43,10 @@ type Server struct {
 	// (its Hub listener's http://127.0.0.1:<port>/).
 	HubURL string
 	Secret string // HUB_PROXY_SECRET
+	// Leader is the write fence (contract §20.5): while it stands by
+	// every request but GET and HEAD answers 503 (nil: always leading,
+	// Docker and Podman).
+	Leader Leader
 	// MCPSecret is HUB_MCP_GATE_SECRET (the MCP listener, MCPHandler;
 	// "" = no MCP listener).
 	MCPSecret string
@@ -85,8 +89,8 @@ type Server struct {
 	confirmErr  error
 }
 
-// Handler returns the full handler chain: proxy secret → read-only while
-// impersonated → CSRF → routes.
+// Handler returns the full handler chain: proxy secret → 503 for writes
+// while standing by → read-only while impersonated → CSRF → routes.
 func (s *Server) Handler() (http.Handler, error) {
 	idx, err := template.ParseFS(s.Web, "index.html")
 	if err != nil {
@@ -95,7 +99,7 @@ func (s *Server) Handler() (http.Handler, error) {
 	s.index = idx
 	// No-referrer on every answer (G11): the confirmation page's popup
 	// lands on https://hub.<d>/?code=…&state=… too.
-	return noReferrer(ProxySecret(s.Secret, RefuseWhileImpersonated(CSRF(s.hubMux().ServeMux)))), nil
+	return noReferrer(ProxySecret(s.Secret, s.leaderGate(RefuseWhileImpersonated(CSRF(s.hubMux().ServeMux))))), nil
 }
 
 // hubMux is the Hub listener's routes, recorded
@@ -174,7 +178,7 @@ func (s *Server) PeopleHandler() (http.Handler, error) {
 	}
 	s.impStop = is
 	mux := s.peopleMux()
-	return noReferrer(ProxySecret(s.Secret, RefuseWhileImpersonated(CSRF(markPeople(mux.ServeMux))))), nil
+	return noReferrer(ProxySecret(s.Secret, s.leaderGate(RefuseWhileImpersonated(CSRF(markPeople(mux.ServeMux)))))), nil
 }
 
 // noReferrer sets Referrer-Policy: no-referrer on every answer of the
@@ -372,9 +376,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// {"leading": bool} (contract §20.5): 200 either way, a Hub standing
+	// by is alive.
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write([]byte("ok\n"))
+	writeJSONStatus(w, http.StatusOK, map[string]bool{"leading": s.leading()})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {

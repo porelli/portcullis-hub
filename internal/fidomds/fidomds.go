@@ -219,17 +219,17 @@ func (f *Fetcher) fetch(ctx context.Context) ([]byte, error) {
 // it exists), the file 0600, atomically. The file's time is FetchedAt.
 func (f *Fetcher) writeCache(raw []byte) error {
 	dir := filepath.Dir(f.CacheFile)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := fsutil.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("fido mds: cache: %w", err)
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := fsutil.Chmod(dir, 0700); err != nil {
 		return fmt.Errorf("fido mds: cache: %w", err)
 	}
 	if err := fsutil.WriteFileAtomic(f.CacheFile, raw, 0600); err != nil {
 		return fmt.Errorf("fido mds: cache: %w", err)
 	}
 	t := f.now()
-	_ = os.Chtimes(f.CacheFile, t, t)
+	_ = fsutil.Chtimes(f.CacheFile, t, t)
 	return nil
 }
 

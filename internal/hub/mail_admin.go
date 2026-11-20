@@ -434,7 +434,7 @@ func (h *Hub) mailRelayPasswordSet() bool {
 func (h *Hub) writeMailRelayPasswordLocked(pw string) error {
 	f := filepath.Join(h.cfg.DataDir, mailRelayPasswordFile)
 	if pw == "" {
-		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := fsutil.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return statusErr(http.StatusInternalServerError, "removing the relay password failed")
 		}
 	} else if err := fsutil.WriteFileAtomic(f, []byte(pw), 0o600); err != nil {
