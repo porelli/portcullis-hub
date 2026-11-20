@@ -1698,3 +1698,18 @@ Notes on the pins:
 - Image digests are manifest-list digests read from each registry's v2 API. Asset sha256s are GitHub release asset digests.
 - etcd inside k3s is 3.7.1. The spike used `etcdctl` v3.7.1 for checks only.
 
+
+## Amendment 2 (2026-11-19): spike 2 results and rulings
+
+Spike 2 (Task 4) ran in k3d; no "doesn't". Node-loss timings, real partitions and 3-server etcd are confirmed on the VMs by `e2e-ha-vm` (Task 33). These rulings bind the owning tasks:
+
+- **CNPG** (Task 23): measured promotion 2.6 s (pod), 67–73 s (node, mostly NotReady detection); an isolated primary shuts down before a promotion; `required` blocks writes with no standby. Pins: CloudNativePG v1.30.2 (Amendment 1).
+- **barman-cloud plugin needs cert-manager** (Task 26). Ruling: install cert-manager (pinned by the Task 24 implementer: version + manifest sha256 + image digests) in namespace `cert-manager`, default-deny plus its webhook flow, used only for the plugin's certificates. CNPG's in-tree barman object store is deprecated, so it is not used.
+- **Keycloak ×2** (Task 23): `KC_CACHE=ispn`, jdbc-ping, `-Djgroups.bind.address=<pod IP>` (downward API), NetworkPolicy flows 7800/57800 between Keycloak pods. Measured: session survives pod and node loss; 0/328 failures over a rolling restart.
+- **Endpoints after a node loss stay for ~40–50 s** (Tasks 19, 26). Traefik's Keycloak and Hub routes get `retry` (attempts 3) and a passive health check; the Vault raft snapshot in the backup retries (5 × 15 s) and asks every voter for the leader rather than trusting `vault-active` alone.
+- **LLDAP ×2 is safe** (Task 23) with: a `lldap create_schema` Job before the Deployment (no replica creates the schema), one server key as a Secret mounted on every replica (`LLDAP_SERVER_KEY_FILE`; the generated `/data/private_key` doesn't exist in the HA shape), `enableServiceLinks: false`. The key-file-from-Secret path is untested: Task 23 tests it first.
+- **LLDAP conversion** (Task 26): the measured steps in spike-components.md Step 4 (create_schema on the target with the full env and a writable cwd, then the documented data migration). The server key moves with the data into the Secret. uuid, password_hash, groups, memberships and attributes are diffed; any difference aborts.
+- **Valkey** (Task 25): measured 7.6 s promotion, 0/50 sessions lost on node loss. Without a guard, a primary that crash-restarts fast comes back empty as master and the replica copies the emptiness (48/48 lost; a `rollout restart` too). Ruling: the sessions chart ships the spike's init guard (never self-elect; when sentinel still names this pod as master, force a failover first) and its readiness probe; `TestSessionsSurviveRolloutRestart` in the e2e pins it.
+- **Vault raft** (Task 25): `retry_join { leader_api_addr = "http://vault-internal:8200" }` on the headless Service; auto-unseal from one Secret with core's entrypoint; election 1.4 s (pod), 16 s (node).
+- **Published documents** (D2, Tasks 6, 17, 19): measured p50 10.4 s / p99 14.4 s with `sync-frequency=10s` (default kubelet p50 72 s). D2 holds.
+- **Memory (user ruling 2026-11-19, Task 19):** core requests = the measured working sets in spike-cluster.md (test-server `docker stats`) and spike-components.md (`kubectl top`), peak × 1.25 rounded up to 16 Mi; limits unchanged.
