@@ -66,6 +66,11 @@ func TestHADegradesWithoutSnapshot(t *testing.T) {
 	if len(v.Warnings) != 1 || !strings.HasPrefix(v.Warnings[0], "nodeadm's snapshot isn't readable: ") {
 		t.Errorf("warnings %q", v.Warnings)
 	}
+	// No destination: judged as ever, never ok for want of a snapshot.
+	cf.h.cfg.BackupDestination = false
+	if v, _ = cf.h.HA(context.Background()); haItem(t, v, "backup_destination").OK || haItem(t, v, "backup_destination").Text != "set an offsite backup destination first" {
+		t.Errorf("degraded, no destination: %+v", haItem(t, v, "backup_destination"))
+	}
 	// nodeadm not configured at all: the same degraded page.
 	cf.h.SetNodeadm(nil)
 	cf.h.cfg.NodeadmURL = ""

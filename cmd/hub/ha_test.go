@@ -85,6 +85,7 @@ func TestHubHAChecklistCutAnswer(t *testing.T) {
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1000")
 		w.Write([]byte(`{"experimental":tr`))
+		w.(http.Flusher).Flush()    // the headers and part of the body are out
 		panic(http.ErrAbortHandler) // the connection drops mid-body
 	})}
 	go srv.Serve(l)

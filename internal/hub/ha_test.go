@@ -144,6 +144,24 @@ func TestHAChecklistFromSnapshot(t *testing.T) {
 	three.na.mu.Lock()
 	three.na.snap.Nodes[2].Labels[nodeadm.LabelClass] = "home"
 	three.na.mu.Unlock()
+	// Nor a node at another site (replicated pods are pinned to main).
+	three.h.mu.Lock()
+	r.Site = "edge"
+	three.h.st.Mesh["n3"] = r
+	three.h.mu.Unlock()
+	three.na.mu.Lock()
+	three.na.snap.Nodes[2].Labels[nodeadm.LabelSite] = "edge"
+	three.na.mu.Unlock()
+	if it := mustHA(t, three).watchdog(t); !it.OK {
+		t.Errorf("HA off, a node at edge: %+v", it)
+	}
+	three.h.mu.Lock()
+	r.Site = "main"
+	three.h.st.Mesh["n3"] = r
+	three.h.mu.Unlock()
+	three.na.mu.Lock()
+	three.na.snap.Nodes[2].Labels[nodeadm.LabelSite] = "main"
+	three.na.mu.Unlock()
 	// HA on: the nodes holding replicated-tier pods now: a core pod on n3
 	// is a finding, a DaemonSet's pod alone isn't.
 	three.h.cfg.HA = true
