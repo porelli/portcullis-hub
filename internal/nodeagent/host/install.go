@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -92,6 +93,9 @@ func fetch(ctx context.Context, c *http.Client, u, sum, path string, max int64) 
 // the unit ordering after the nodeagent (which brings pcmesh up), then
 // `sh install.sh <server|agent> <flags…>` (the token never on argv).
 func (a *Agent) installK3s(ctx context.Context, c *http.Client, out io.Writer, j K3sJoin) error {
+	if pf, err := netip.ParsePrefix(j.ClusterCIDR); err != nil || !pf.Addr().Is4() || pf.String() != j.ClusterCIDR {
+		return errors.New("no cluster network (the join answer's cluster_cidr): nothing was installed")
+	}
 	asset, sum, err := k3sAsset()
 	if err != nil {
 		return err
