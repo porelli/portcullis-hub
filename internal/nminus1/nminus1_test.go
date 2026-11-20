@@ -126,7 +126,7 @@ func TestNormalSetBelowMinimumIsGreen(t *testing.T) {
 	}
 }
 
-// TestNotExistsAndGt: the other node-selector operators.
+// TestSelectorOperators: the node-selector operators.
 func TestSelectorOperators(t *testing.T) {
 	n := map[string]string{"a": "x", "n": "5"}
 	cases := []struct {
@@ -135,6 +135,7 @@ func TestSelectorOperators(t *testing.T) {
 	}{
 		{nodeadm.Expr{Key: "a", Operator: "In", Values: []string{"x"}}, true},
 		{nodeadm.Expr{Key: "a", Operator: "NotIn", Values: []string{"x"}}, false},
+		{nodeadm.Expr{Key: "a", Operator: "NotIn", Values: []string{"y"}}, true},
 		{nodeadm.Expr{Key: "b", Operator: "NotIn", Values: []string{"x"}}, true},
 		{nodeadm.Expr{Key: "a", Operator: "Exists"}, true},
 		{nodeadm.Expr{Key: "b", Operator: "DoesNotExist"}, true},
@@ -177,6 +178,117 @@ func TestExplain(t *testing.T) {
 		},
 	}
 	if got := Explain(Check(s)[0]); got != "if n1 fails, app-high won't have room" {
+		t.Errorf("%q", got)
+	}
+}
+
+// TestPriorityOrder: the failed node's pods are placed highest priority
+// first, so a core pod takes the only room before a high one.
+func TestPriorityOrder(t *testing.T) {
+	s := nodeadm.Snapshot{
+		Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000)},
+		Pods: []nodeadm.Pod{
+			pod("app-high", DefaultAppsNamespace, "n1", "portcullis-high", 10000, 2000),
+			pod("hub", "portcullis", "n1", "portcullis-core", 1000000, 1500),
+			pod("fill", "portcullis", "n2", "portcullis-core", 1000000, 2000),
+		},
+	}
+	if r := Check(s)[0]; r.Level != Yellow || !slices.Equal(r.Unplaced, []string{"app-high"}) {
+		t.Errorf("%+v", r)
+	}
+}
+
+// TestPreemptionRules: who may evict whom (contract §20.7 step 3).
+func TestPreemptionRules(t *testing.T) {
+	run := func(mover, victim nodeadm.Pod) Result {
+		return Check(nodeadm.Snapshot{
+			Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000)},
+			Pods:  []nodeadm.Pod{mover, victim},
+		})[0]
+	}
+	norm := pod("norm", DefaultAppsNamespace, "n1", "portcullis-normal", 1000, 2000)
+	normNever := norm
+	normNever.PreemptionPolicy = "Never"
+	lowPreempting := pod("low", DefaultAppsNamespace, "n1", "portcullis-low", 100, 2000)
+	lowPreempting.PreemptionPolicy = "PreemptLowerPriority"
+	lowerLow := pod("lower", DefaultAppsNamespace, "n2", "portcullis-low", 50, 3000)
+	equalNorm := pod("peer", DefaultAppsNamespace, "n2", "portcullis-normal", 1000, 3000)
+	for name, c := range map[string]struct {
+		mover, victim nodeadm.Pod
+		evicts        bool
+	}{
+		"normal evicts a lower low":                   {norm, lowerLow, true},
+		"preemptionPolicy Never never evicts":         {normNever, lowerLow, false},
+		"a low pod never evicts, whatever its policy": {lowPreempting, lowerLow, false},
+		"never a victim at the pod's own priority":    {norm, equalNorm, false},
+	} {
+		r := run(c.mover, c.victim)
+		if got := len(r.Evicted) == 1; got != c.evicts {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+}
+
+// TestLowestVictimFirst: the lowest priority victim goes first, and only
+// as many as make room.
+func TestLowestVictimFirst(t *testing.T) {
+	s := nodeadm.Snapshot{
+		Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000)},
+		Pods: []nodeadm.Pod{
+			pod("hub", "portcullis", "n1", "portcullis-core", 1000000, 1500),
+			pod("norm", DefaultAppsNamespace, "n2", "portcullis-normal", 1000, 2000),
+			pod("low", DefaultAppsNamespace, "n2", "portcullis-low", 100, 1500),
+		},
+	}
+	if r := Check(s)[0]; r.Level != Green || !slices.Equal(r.Evicted, []string{"low"}) {
+		t.Errorf("%+v", r)
+	}
+}
+
+// TestTolerations: Kubernetes' toleration matching.
+func TestTolerations(t *testing.T) {
+	taint := nodeadm.Taint{Key: "k", Value: "v", Effect: "NoSchedule"}
+	cases := []struct {
+		tol  nodeadm.Toleration
+		want bool
+	}{
+		{nodeadm.Toleration{Key: "k", Operator: "Equal", Value: "v", Effect: "NoSchedule"}, true},
+		{nodeadm.Toleration{Key: "k", Operator: "", Value: "v"}, true},
+		{nodeadm.Toleration{Key: "k", Operator: "Equal", Value: "w", Effect: "NoSchedule"}, false},
+		{nodeadm.Toleration{Key: "k", Operator: "Exists", Effect: "NoExecute"}, false},
+		{nodeadm.Toleration{Key: "other", Operator: "Exists"}, false},
+		{nodeadm.Toleration{Operator: "Exists"}, true},
+		{nodeadm.Toleration{Key: "k", Operator: "Bogus", Value: "v"}, false},
+	}
+	for _, c := range cases {
+		if got := toleratesTaint(c.tol, taint); got != c.want {
+			t.Errorf("%+v: %v", c.tol, got)
+		}
+	}
+}
+
+// TestHostnameWithoutLabel: a hostname term matches the node's name when
+// the snapshot carries no hostname label.
+func TestHostnameWithoutLabel(t *testing.T) {
+	n := nodeadm.Node{Name: "n3", Labels: map[string]string{}}
+	terms := [][]nodeadm.Expr{{{Key: "kubernetes.io/hostname", Operator: "In", Values: []string{"n3"}}}}
+	if !affinityMatches(terms, &n) {
+		t.Error("no match")
+	}
+}
+
+// TestExplainNamesRedOnly: a red result names the core and critical pods,
+// not the yellow ones.
+func TestExplainNamesRedOnly(t *testing.T) {
+	s := nodeadm.Snapshot{
+		Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000)},
+		Pods: []nodeadm.Pod{
+			pod("hub", "portcullis", "n1", "portcullis-core", 1000000, 3000),
+			pod("app-high", DefaultAppsNamespace, "n1", "portcullis-high", 10000, 3000),
+			pod("fill", "portcullis", "n2", "portcullis-core", 1000000, 2000),
+		},
+	}
+	if got := Explain(Check(s)[0]); got != "if n1 fails, hub won't have room" {
 		t.Errorf("%q", got)
 	}
 }

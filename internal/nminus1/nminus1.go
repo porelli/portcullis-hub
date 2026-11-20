@@ -202,7 +202,7 @@ func simulate(s *nodeadm.Snapshot, failed int, apps string) Result {
 		p := &s.Pods[pi]
 		switch tierOf(p) {
 		case tierCore, tierCritical:
-			if p.Set.Valid && m.members(p.Set.V.Name) >= p.Set.V.Min {
+			if set := setOf(p); set != (setKey{}) && m.members(set) >= p.Set.V.Min {
 				yellow = append(yellow, pi) // runs degraded (P7)
 			} else {
 				red = append(red, pi)
@@ -325,7 +325,7 @@ func (m *sim) passes(pi, ni int) bool {
 	if !p.Set.Valid {
 		return true
 	}
-	set := p.Set.V.Name
+	set := setOf(p)
 	if p.AntiAffinityHost && m.membersOn(set, ni) > 0 {
 		return false
 	}
@@ -345,10 +345,26 @@ func (m *sim) passes(pi, ni int) bool {
 	return true
 }
 
-func (m *sim) membersOn(set string, ni int) int {
+// setKey names a set: its namespace and its name. A set named like a core
+// set in the apps namespace is another set, and never changes the core
+// set's members, anti-affinity, spread or minimum (Kubernetes' own
+// selectors are namespace-scoped too). The snapshot carries no controller
+// kind, so two controllers of one name in one namespace would be one set;
+// only the chart creates the core namespace's controllers.
+type setKey struct{ ns, name string }
+
+// setOf is the pod's set (the zero key: none; no set has an empty name).
+func setOf(p *nodeadm.Pod) setKey {
+	if !p.Set.Valid || p.Set.V.Name == "" {
+		return setKey{}
+	}
+	return setKey{p.Namespace, p.Set.V.Name}
+}
+
+func (m *sim) membersOn(set setKey, ni int) int {
 	c := 0
 	for pi, at := range m.at {
-		if at == ni && m.s.Pods[pi].Set.Valid && m.s.Pods[pi].Set.V.Name == set {
+		if at == ni && setOf(&m.s.Pods[pi]) == set {
 			c++
 		}
 	}
@@ -357,10 +373,10 @@ func (m *sim) membersOn(set string, ni int) int {
 
 // members counts the set's pods running after the loss (on the remaining
 // Ready nodes, placed ones included).
-func (m *sim) members(set string) int {
+func (m *sim) members(set setKey) int {
 	c := 0
 	for pi := range m.at {
-		if m.s.Pods[pi].Set.Valid && m.s.Pods[pi].Set.V.Name == set {
+		if setOf(&m.s.Pods[pi]) == set {
 			c++
 		}
 	}

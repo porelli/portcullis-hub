@@ -5962,5 +5962,362 @@
     "evicted": []
    }
   ]
+ },
+ {
+  "name": "an apps-namespace set named like a core set is another set: it neither keeps the core quorum nor blocks the core anti-affinity",
+  "snapshot": {
+   "v": 1,
+   "taken_at": "2026-11-18T10:00:00Z",
+   "nodes": [
+    {
+     "name": "n1",
+     "role": "server",
+     "ready": true,
+     "not_ready_since": null,
+     "unschedulable": false,
+     "allocatable": {
+      "cpu_m": 4000,
+      "mem_bytes": 4000000000
+     },
+     "labels": {
+      "kubernetes.io/hostname": "n1",
+      "portcullis.io/class": "home",
+      "portcullis.io/site": "main",
+      "topology.kubernetes.io/zone": "main"
+     },
+     "taints": [],
+     "addresses": {
+      "mesh": "10.215.0.1",
+      "lan": [
+       "192.0.2.11"
+      ],
+      "public": []
+     },
+     "traefik_ready": true,
+     "fencing_ready": true,
+     "etcd_member": true
+    },
+    {
+     "name": "n2",
+     "role": "server",
+     "ready": true,
+     "not_ready_since": null,
+     "unschedulable": false,
+     "allocatable": {
+      "cpu_m": 4000,
+      "mem_bytes": 4000000000
+     },
+     "labels": {
+      "kubernetes.io/hostname": "n2",
+      "portcullis.io/class": "home",
+      "portcullis.io/site": "main",
+      "topology.kubernetes.io/zone": "main"
+     },
+     "taints": [],
+     "addresses": {
+      "mesh": "10.215.0.2",
+      "lan": [
+       "192.0.2.12"
+      ],
+      "public": []
+     },
+     "traefik_ready": true,
+     "fencing_ready": true,
+     "etcd_member": true
+    },
+    {
+     "name": "n3",
+     "role": "server",
+     "ready": true,
+     "not_ready_since": null,
+     "unschedulable": false,
+     "allocatable": {
+      "cpu_m": 4000,
+      "mem_bytes": 4000000000
+     },
+     "labels": {
+      "kubernetes.io/hostname": "n3",
+      "portcullis.io/class": "home",
+      "portcullis.io/site": "edge",
+      "topology.kubernetes.io/zone": "edge"
+     },
+     "taints": [],
+     "addresses": {
+      "mesh": "10.215.0.3",
+      "lan": [
+       "192.0.2.13"
+      ],
+      "public": []
+     },
+     "traefik_ready": false,
+     "fencing_ready": true,
+     "etcd_member": true
+    },
+    {
+     "name": "n4",
+     "role": "agent",
+     "ready": false,
+     "not_ready_since": "2026-11-18T09:55:00Z",
+     "unschedulable": false,
+     "allocatable": {
+      "cpu_m": 4000,
+      "mem_bytes": 4000000000
+     },
+     "labels": {
+      "kubernetes.io/hostname": "n4",
+      "portcullis.io/class": "home",
+      "portcullis.io/site": "main",
+      "topology.kubernetes.io/zone": "main"
+     },
+     "taints": [],
+     "addresses": {
+      "mesh": "10.215.0.4",
+      "lan": [
+       "192.0.2.14"
+      ],
+      "public": []
+     },
+     "traefik_ready": false,
+     "fencing_ready": true,
+     "etcd_member": false
+    }
+   ],
+   "enrolling": [],
+   "pods": [
+    {
+     "name": "vault-0",
+     "namespace": "portcullis",
+     "node": "n1",
+     "priority": 1000000,
+     "priority_class": "portcullis-core",
+     "preemption_policy": "PreemptLowerPriority",
+     "requests": {
+      "cpu_m": 100,
+      "mem_bytes": 300000000
+     },
+     "tolerations": [
+      {
+       "key": "node.kubernetes.io/not-ready",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      },
+      {
+       "key": "node.kubernetes.io/unreachable",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      }
+     ],
+     "required_affinity": [
+      [
+       {
+        "key": "portcullis.io/site",
+        "operator": "In",
+        "values": [
+         "main"
+        ]
+       }
+      ]
+     ],
+     "anti_affinity_host": true,
+     "spread_host": false,
+     "daemonset": false,
+     "set": {
+      "name": "vault",
+      "min": 2
+     }
+    },
+    {
+     "name": "vault-1",
+     "namespace": "portcullis",
+     "node": "n2",
+     "priority": 1000000,
+     "priority_class": "portcullis-core",
+     "preemption_policy": "PreemptLowerPriority",
+     "requests": {
+      "cpu_m": 100,
+      "mem_bytes": 300000000
+     },
+     "tolerations": [
+      {
+       "key": "node.kubernetes.io/not-ready",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      },
+      {
+       "key": "node.kubernetes.io/unreachable",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      }
+     ],
+     "required_affinity": [
+      [
+       {
+        "key": "portcullis.io/site",
+        "operator": "In",
+        "values": [
+         "main"
+        ]
+       }
+      ]
+     ],
+     "anti_affinity_host": true,
+     "spread_host": false,
+     "daemonset": false,
+     "set": {
+      "name": "vault",
+      "min": 2
+     }
+    },
+    {
+     "name": "vault-2",
+     "namespace": "portcullis",
+     "node": "n4",
+     "priority": 1000000,
+     "priority_class": "portcullis-core",
+     "preemption_policy": "PreemptLowerPriority",
+     "requests": {
+      "cpu_m": 100,
+      "mem_bytes": 300000000
+     },
+     "tolerations": [
+      {
+       "key": "node.kubernetes.io/not-ready",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      },
+      {
+       "key": "node.kubernetes.io/unreachable",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      }
+     ],
+     "required_affinity": [
+      [
+       {
+        "key": "portcullis.io/site",
+        "operator": "In",
+        "values": [
+         "main"
+        ]
+       }
+      ]
+     ],
+     "anti_affinity_host": true,
+     "spread_host": false,
+     "daemonset": false,
+     "set": {
+      "name": "vault",
+      "min": 2
+     }
+    },
+    {
+     "name": "app-vault-0",
+     "namespace": "portcullis-apps",
+     "node": "n3",
+     "priority": 1000,
+     "priority_class": "portcullis-normal",
+     "preemption_policy": "PreemptLowerPriority",
+     "requests": {
+      "cpu_m": 100,
+      "mem_bytes": 300000000
+     },
+     "tolerations": [
+      {
+       "key": "node.kubernetes.io/not-ready",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      },
+      {
+       "key": "node.kubernetes.io/unreachable",
+       "operator": "Exists",
+       "value": "",
+       "effect": "NoExecute",
+       "seconds": 30
+      }
+     ],
+     "required_affinity": [],
+     "anti_affinity_host": true,
+     "spread_host": false,
+     "daemonset": false,
+     "set": {
+      "name": "vault",
+      "min": 1
+     }
+    }
+   ],
+   "quorum": {
+    "etcd": {
+     "voters": 3,
+     "healthy": 3
+    },
+    "vault": {
+     "voters": 3,
+     "healthy": 3
+    },
+    "sentinel": {
+     "voters": 3,
+     "healthy": 3
+    }
+   },
+   "postgres": {
+    "instances": 2,
+    "sync_standbys": 1,
+    "primary": "n1"
+   },
+   "volumes": [
+    {
+     "name": "hub-state-r",
+     "robustness": "healthy",
+     "degraded_since": null
+    }
+   ],
+   "errors": []
+  },
+  "want": [
+   {
+    "node": "n1",
+    "level": "red",
+    "unplaced": [
+     "vault-0"
+    ],
+    "evicted": []
+   },
+   {
+    "node": "n2",
+    "level": "red",
+    "unplaced": [
+     "vault-1"
+    ],
+    "evicted": []
+   },
+   {
+    "node": "n3",
+    "level": "green",
+    "unplaced": [],
+    "evicted": []
+   },
+   {
+    "node": "n4",
+    "level": "yellow",
+    "unplaced": [
+     "vault-2"
+    ],
+    "evicted": []
+   }
+  ]
  }
 ]
