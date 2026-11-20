@@ -653,6 +653,13 @@ func (h *Hub) Enable(id string) error {
 		return err
 	}
 	defer unlock()
+	// Drift adopt starts an instance too: the same N−1 gate as the
+	// enable's precheck (a critical or high instance, Kubernetes only).
+	if !h.IsEnabled(id) {
+		if err := h.enableN1Gate(context.Background(), id); err != nil {
+			return err
+		}
+	}
 	rolledBack, err := h.enableLocked(id)
 	return h.finishOp(id, OpEnable, err, rolledBack)
 }

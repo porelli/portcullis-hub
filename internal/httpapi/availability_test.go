@@ -534,3 +534,29 @@ func TestKubeAvailabilityStaleSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// TestDriftAdoptRunsNMinus1 (re-review N1): adopting a drifted critical
+// instance starts it, so it passes the same N−1 gate as an enable: red
+// on a full cluster is refused and it stays stopped.
+func TestDriftAdoptRunsNMinus1(t *testing.T) {
+	e := newAvailEnv(t, true, func(st *state.AppState) {
+		in := st.Instances["grafana"]
+		in.Availability = &state.Availability{Priority: "critical", RunsOn: state.RunsOn{Mode: "anywhere"}}
+		st.Instances["grafana"] = in
+	})
+	e.setSnap(dsFull())
+	e.rt.PodShapesFn = func(runtime.Project) ([]runtime.PodShape, error) {
+		return []runtime.PodShape{{Workload: "grafana--grafana", Replicas: 1, CPUm: 50, MemBytes: 512 << 20}}, nil
+	}
+	err := e.s.Hub.ResolveDrift("grafana", hub.ActionAdopt)
+	if n1 := hub.ErrorsAsN1(err); n1 == nil || !strings.Contains(n1.Msg, "grafana stays stopped") {
+		t.Fatalf("adopt: %v", err)
+	}
+	if e.s.Hub.IsEnabled("grafana") {
+		t.Error("adopted past the gate")
+	}
+	code, body := e.do(t, "root", "POST", "/api/drift/resolve", `{"id":"grafana","action":"adopt"}`)
+	if code != 409 || !strings.Contains(body, "won't have room") {
+		t.Errorf("route: %d %s", code, body)
+	}
+}
