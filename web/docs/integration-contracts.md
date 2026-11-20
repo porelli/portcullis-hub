@@ -7018,7 +7018,7 @@ A Portcullis install on Kubernetes (§6 "On Kubernetes") of **3 or more nodes** 
 ### 20.1 Model and roles
 
 - **One k3s cluster with embedded etcd.** Every Kubernetes install runs k3s with `--cluster-init` on the node mesh `pcmesh` (§20.11) from its first `init`, plus CloudNativePG (one instance), LLDAP on Postgres, Vault as a StatefulSet and the published documents (§4), so turning HA on reinstalls nothing. A node's Kubernetes name is its **server id** (§17.3: `^[a-z][a-z0-9-]{0,30}$`).
-- **Quorum and roles.** HA needs at least **3 nodes and 3 servers**; 2-node HA is refused. The first 3 nodes are k3s **servers** (etcd members and API servers), later nodes **agents**. The admin may override the role; the Hub warns about an even server count (`an even number of servers doesn't add failure tolerance`; vectors `site_roles_vectors.json`). Across sites the server layout follows §20.11.
+- **Quorum and roles.** HA needs at least **3 nodes and 3 servers**; 2-node HA is refused. The first 3 nodes are k3s **servers** (etcd members and API servers), later nodes **agents**, and never more than **5 servers** are suggested. The admin may override the role; the Hub warns about an even server count (`an even number of servers doesn't add failure tolerance`; vectors `site_roles_vectors.json`). Across sites the server layout follows §20.11.
 - **Node labels** (set only by `nodeadm` at join and through `PUT /v1/nodes/{id}/labels`, never by apps):
 
     | Label | Values |
@@ -7031,7 +7031,7 @@ A Portcullis install on Kubernetes (§6 "On Kubernetes") of **3 or more nodes** 
     | `portcullis.io/mail` | `true` (phase 4) |
     | `topology.kubernetes.io/zone` | = the site |
 
-    The class suggestion (nodeagent `class.Suggest`, vectors `nodeclass_vectors.json`): `small` below 4 GB RAM or on a Pi model string, else `cloud` when a public address answers, else `home`. A `small` node gets the taint **`portcullis.io/small=true:NoSchedule`**; the Sentinels and the third Vault voter tolerate it, nothing else in core does, and an app only through *Runs on: Only* (§20.6).
+    The class suggestion (nodeagent `class.Suggest`, vectors `nodeclass_vectors.json`): `small` below **3.5 GiB** of RAM (3 758 096 384 bytes, so a nominal 4 GB machine is `home`) or on a Pi model string (it contains `Raspberry Pi`), else `cloud` when a public address answers, else `home`. A `small` node gets the taint **`portcullis.io/small=true:NoSchedule`**; the Sentinels and the third Vault voter tolerate it, nothing else in core does, and an app only through *Runs on: Only* (§20.6).
 
 - **PriorityClasses** (core's chart; `globalDefault: true` only on `portcullis-normal`; the admission policy keeps `portcullis-core` off app pods, §6):
 
@@ -7182,9 +7182,13 @@ at most **4 KiB**. `servers` are the current servers' mesh addresses, `ca_sha256
 - `join code: too long`;
 - `join code: field <f> missing`;
 - `join code: role must be server or agent`;
-- `join code: mesh_ip outside 10.215.0.0/24`;
+- `join code: mesh_ip outside 10.215.0.0/24` (also for the network and broadcast addresses `.0` and `.255`);
+- `join code: ca_sha256 must be 64 hex`;
+- `join code: agent_sha256 must be 64 hex for amd64 and arm64`;
 - `join code: secret must be 32 bytes`;
-- `join code: script_sha256 must be 64 hex`.
+- `join code: script_sha256 must be 64 hex` (lower-case, like every sha256 of the code).
+
+Any other fault (another prefix, bad base64url, not a JSON object, a wrong type, `v` other than 2, `kind` other than `cluster`, an unknown or duplicate key) is `join code: not a pcj2 code`.
 
 The code is a secret: shown once in a `no-store` answer, never in an op record, the audit, a log line or an MCP transcript; `JoinCodeV2.String` redacts it. **The code is never on a command line** (ruling C6; it supersedes the spec's `sh -s -- <code>` form). The one-liner is **`curl -fsSL https://<d>/node/join.sh | sudo sh`**: `join.sh` reads the code from `/dev/tty` with echo off, or from a file given as `--code-file <path>` (refused unless it is a regular file of mode 0600 owned by root), then checks its own sha256 against the code's `script_sha256`, downloads `nodeagent-<arch>`, checks it against `agent_sha256`, and runs `nodeagent join` with the code on **stdin**. Those sha256 checks catch corruption only (whoever serves the script controls them); the trust root is TLS to `<d>` and the nodeagent's check of the enrol answer's CA against `ca_sha256` (§20.4).
 
@@ -7239,7 +7243,7 @@ The nodeagent serves **`https://<its mesh ip>:7443/v1`** only (no other listener
     1. For each node N, remove N.
     2. Sort N's pods that aren't DaemonSet pods by priority (descending), then by requests (descending).
     3. First-fit each pod onto the remaining **Ready** nodes that pass its taints and tolerations, its required affinity, and its set's hostname anti-affinity and `DoNotSchedule` spread. Free capacity there may come from evicting `normal` and `low` pods, lowest priority first, never a pod with a priority at or above the pod's own; a `low` pod (`preemptionPolicy: Never`) never evicts.
-    4. **Red** if a `core` or `critical` pod that is a singleton (`set` `null`) can't be placed, or if a set would drop below its `min` (quorum or replica minimum). **Yellow** if a `high` pod fits only by evicting a `normal` pod, or if an unplaceable pod belongs to a set whose other members survive and keep its `min` (it runs degraded). Else **green**.
+    4. **Red** if a `core` or `critical` pod that is a singleton (`set` `null`) can't be placed, or if a set would drop below its `min` (quorum or replica minimum). **Yellow** if a `high` pod can't be placed or fits only by evicting a `normal` pod, or if an unplaceable pod belongs to a set whose other members survive and keep its `min` (it runs degraded). Else **green**.
 - **Result** per node `{"node", "level": "green"|"yellow"|"red", "unplaced": [...], "evicted": [...]}`; `nminus1.Explain` gives the sentence of §20.6's `409`, which the dialog shows.
 - **When:** on every placement change, and before raising an instance to Critical or High (§20.6). Shown per node on the HA page; the doctor raises `ha_n_minus_1_insufficient` (§14.5).
 
@@ -7303,8 +7307,9 @@ Every other method is `405`. The Hub (with `HUB_GATE_LOG_SOURCES=http`, set by t
 - **The mesh peer plan** (Hub `internal/meshplan`; vectors `meshplan_vectors.json`, Hub `internal/meshplan/testdata/`):
     - *reachable* = a public UDP endpoint answering on 51830;
     - two nodes peer **directly** when either is reachable or both are at the same site (the LAN endpoint);
-    - a NATed pair at different sites goes **through the target's site gateway**: the lowest-id reachable node of that site, with the target's `/32` added to that peer's `allowed_ips`;
-    - only gateways forward (`forward: true`), and only `pcmesh` ↔ `pcmesh`. k3s's network-policy chain sits first in `FORWARD` and accepts pod traffic, so the gateway rule set is exactly: accept `-i pcmesh -o pcmesh`, then drop anything else arriving on `pcmesh` for forwarding (`-A FORWARD -i pcmesh -o pcmesh -j ACCEPT`, `-A FORWARD -i pcmesh -j DROP`); both removed when `forward` is false (spike: relaying verified, 206–447 Mbit/s across sites);
+    - with 2 or more sites, **every site needs a reachable node** (else the refusal below, for the first such site by name); a site's **gateway** is its lowest-id reachable node (ids compared as strings);
+    - a NATed pair at different sites goes, **in both directions, through one gateway**: the gateway of the pair's site whose name sorts first (WireGuard's cryptokey routing drops a packet whose source isn't on the peer it arrived from, so both directions must take the same hop). Each of the two lists the other's `/32` in the `allowed_ips` of its peer entry for that gateway; the far node reaches the gateway directly (the gateway is reachable; keepalive 25 from the NATed side);
+    - only gateways forward, and `forward: true` exactly on a gateway that relays at least one pair, and only `pcmesh` ↔ `pcmesh`. k3s's network-policy chain sits first in `FORWARD` and accepts pod traffic, so the gateway rule set is exactly: accept `-i pcmesh -o pcmesh`, then drop anything else arriving on `pcmesh` for forwarding (`-A FORWARD -i pcmesh -o pcmesh -j ACCEPT`, `-A FORWARD -i pcmesh -j DROP`); both removed when `forward` is false (spike: relaying verified, 206–447 Mbit/s across sites);
     - `keepalive` 25 only on NATed nodes; peers sorted by id;
     - a joining node's bootstrap plan (§20.2) is its plan computed as if it were NATed; the Hub pushes the real plan once it reaches the node;
     - the refusal: `site <s> needs one node reachable on UDP 51830 first (a cloud node, or one forwarded port)`.
@@ -7320,8 +7325,9 @@ Every other method is `405`. The Hub (with `HUB_GATE_LOG_SOURCES=http`, set by t
     A refused node gets no k3s material, and its peer is removed from every plan.
 
 - **Server layout across sites** (`servers.SuggestRole`; vectors `site_roles_vectors.json`):
-    - one site: the first 3 nodes are servers, then agents;
-    - with 3 or more sites, a new server is suggested only where it keeps **no site at a majority** of servers;
+    - one site: a server while fewer than 3 servers are healthy, then agents;
+    - **at most 5 servers** (etcd practice): with 5 servers a new node is suggested as an agent;
+    - with 3 or more sites (the new node's included), in this order: a server where it keeps **no site at a strict majority** of servers; else, when `main` already holds a majority, a server only at the site with the fewest servers (ties by name), and anywhere else an agent with the warning `main holds a majority of the servers: add the next server at <site>.`; else an agent with the warning `no site can take another server without holding a majority of them: this node joins as an agent.`;
     - with exactly 2 sites, servers stay at `main` (the site holding 2 of the 3 voters is the only one that survives on its own), and the HA page and doctor `ha_two_sites_no_tiebreaker` say: `Only main can survive on its own: add a tie-breaker at a third location (a small cloud VM or a Pi elsewhere).`
 - **etcd timing:** `--etcd-arg=heartbeat-interval=200 --etcd-arg=election-timeout=2000` on **every** server from `init` on, single site included, so a second site needs no rolling restart (etcd across sites works up to about 100 ms RTT; a leader election across sites measured 2–3 s, target ≤ 5 s).
 - **The server flags** (`kube_install_k3s` at `init`; the shared fixture `tests/fixtures/k3s-server-flags.txt`, which nodeadm's join answer follows, §20.2): `--cluster-init`, `--secrets-encryption`, `--disable=traefik`, `--kubelet-arg=pod-max-pids=1024`, `--kubelet-arg=sync-frequency=10s`, `--flannel-backend=wireguard-native` with `--flannel-conf=/etc/rancher/k3s/flannel-net-conf.json` on **every** node (no k3s flag sets flannel's WireGuard port; k3s uses the file verbatim, so it carries the cluster network too): `{"Network": "<cluster cidr>", "Backend": {"Type": "wireguard", "ListenPort": 51840, …}}`, the remaining backend keys as the Task 3 spike pinned them, literal in the fixture, `--node-ip=<mesh ip>`, `--advertise-address=<mesh ip>`, `--bind-address=<mesh ip>`, `--kubelet-arg=address=<mesh ip>`, `--etcd-arg=listen-client-urls=https://<mesh ip>:2379,https://127.0.0.1:2379`, the two etcd timing flags, and `--node-label` for class, site, ingress and storage plus `svccontroller.k3s.cattle.io/enablelb=true` on ingress nodes (for `wg-people` only). The k3s version is pinned (`PORTCULLIS_K3S_VERSION` = `v1.37.2+k3s1`, the binary checked against its sha256; `get.k3s.io` is unversioned, so the binary is what's pinned). etcd, the kubelet and the API server listen only on mesh addresses and loopback (`127.0.0.1:2379` for etcd's local clients; `kube_api_public` checks every node, §14.5). `init` writes the kubeconfig to `secrets/kube/kubeconfig` (server `https://10.215.0.1:6443`, context `portcullis`).
