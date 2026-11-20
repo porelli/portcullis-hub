@@ -306,4 +306,3 @@ func TestJoinClusterCIDRAndAgentToken(t *testing.T) {
 		t.Errorf("a cluster_cidr over the mesh: %v", err)
 	}
 }
-
