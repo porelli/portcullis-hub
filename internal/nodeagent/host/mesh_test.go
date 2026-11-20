@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/jsonstrict"
+	"github.com/portcullis/hub/internal/meshplan"
 	na "github.com/portcullis/hub/internal/nodeagent"
 )
 
@@ -332,5 +333,20 @@ func TestRTTEndpoint(t *testing.T) {
 	// A frontdoor caller may not read it.
 	if code, _ := do(t, r.client(r.ca, na.CNFrontdoor), "GET", s.URL+"/v1/mesh/rtt", ""); code != 403 {
 		t.Errorf("frontdoor.control: %d", code)
+	}
+}
+
+// TestKeyCheckParity: the Hub's key check (meshplan.ValidKey) is exactly
+// the nodeagent's (no parser differential between the plan and PUT
+// /v1/mesh/peers).
+func TestKeyCheckParity(t *testing.T) {
+	k := peerKey(t)
+	const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	alt := k[:42] + string(a[strings.IndexByte(a, k[42])^1]) + k[43:]
+	for _, s := range []string{k, alt, strings.TrimRight(k, "="), "", "x", strings.Repeat("A", 43) + "=", " " + k, k + "\n",
+		strings.Replace(k, "+", "-", -1), "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=="} {
+		if validWGKey(s) != meshplan.ValidKey(s) {
+			t.Errorf("%q: nodeagent %v, Hub %v", s, validWGKey(s), meshplan.ValidKey(s))
+		}
 	}
 }

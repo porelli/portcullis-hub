@@ -3,7 +3,6 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -61,6 +60,12 @@ type meshState struct {
 	removed map[string]bool
 	// refused: joining nodes the plan refuses (id → the refusal text).
 	refused map[string]string
+	// flagged: nodes whose key was refused or ignored, or that share an
+	// established node's key (left out of the plan): id → why (doctor
+	// mesh_peer_stale at once).
+	flagged map[string]string
+	// dupes: established nodes left out for a shared key (id → why).
+	dupes map[string]string
 	// noGateway: the sites without a reachable node (last computation).
 	noGateway []string
 }
@@ -69,6 +74,7 @@ func (m *meshState) init() {
 	if m.pubs == nil {
 		m.pubs, m.want, m.applied = map[string]string{}, map[string]string{}, map[string]string{}
 		m.failing, m.lastErr, m.removed, m.refused = map[string]time.Time{}, map[string]string{}, map[string]bool{}, map[string]string{}
+		m.flagged = map[string]string{}
 	}
 }
 
@@ -101,10 +107,9 @@ func firstEndpoint(l []string) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
-func validMeshKey(s string) bool {
-	b, err := base64.StdEncoding.Strict().DecodeString(s)
-	return err == nil && len(b) == 32
-}
+// validMeshKey is the nodeagent's own check (§20.4): canonical base64 of
+// 32 bytes, not all zero.
+func validMeshKey(s string) bool { return meshplan.ValidKey(s) }
 
 func siteOf(labels map[string]string) string {
 	if s := labels[nodeadm.LabelSite]; s != "" {
@@ -114,11 +119,29 @@ func siteOf(labels map[string]string) string {
 }
 
 // recordMeshReports keeps each enrolling node's pcmesh report in its
-// entry (the snapshot drops it once the node is a Kubernetes Node).
+// entry (the snapshot drops it once the node is a Kubernetes Node). A key
+// is recorded only when it is a WireGuard key no other node uses (keys
+// compared by their 32 bytes), and it is frozen once the node passed
+// mesh_ready: a later report with another key is ignored and flagged
+// (doctor mesh_peer_stale), never a plan change.
 func (h *Hub) recordMeshReports(snap nodeadm.Snapshot) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	ms := &h.cl.ms
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.init()
+	used := map[string]string{} // KeyID → the node holding it
+	for id, s := range h.st.Servers {
+		if s.ClusterNode() && s.MeshPub != "" && s.State != ServerRevoked {
+			used[meshplan.KeyID(s.MeshPub)] = id
+		}
+	}
+	for id, k := range ms.pubs {
+		used[meshplan.KeyID(k)] = id
+	}
 	changed := false
+	now := h.now().UTC()
 	for _, e := range snap.Enrolling {
 		s, ok := h.st.Servers[e.ID]
 		if !ok || !s.ClusterNode() || s.State != ServerEnrolling {
@@ -134,7 +157,29 @@ func (h *Hub) recordMeshReports(snap nodeadm.Snapshot) {
 		if s.MeshPub == e.Mesh.Pub && s.MeshLAN == lan && s.MeshPublic == pub {
 			continue
 		}
+		frozen := s.MeshPub != "" && (s.Enrol == nil || (s.Enrol.Step != StepEnrolled && s.Enrol.Step != StepMeshReady))
+		why := ""
+		switch {
+		case frozen && s.MeshPub != e.Mesh.Pub:
+			why = "its enrolment report changed its pcmesh key after mesh_ready: ignored"
+		case !meshplan.ValidKey(e.Mesh.Pub):
+			why = "its enrolment report's pcmesh key isn't a WireGuard key: not recorded"
+		case used[meshplan.KeyID(e.Mesh.Pub)] != "" && used[meshplan.KeyID(e.Mesh.Pub)] != e.ID:
+			why = fmt.Sprintf("its enrolment report's pcmesh key is node %s's: not recorded", used[meshplan.KeyID(e.Mesh.Pub)])
+		}
+		if why != "" {
+			if ms.flagged[e.ID] != why {
+				log.Printf("servers: node %s: %s", e.ID, why)
+			}
+			ms.flagged[e.ID] = why
+			continue
+		}
+		delete(ms.flagged, e.ID)
+		if s.MeshPub != e.Mesh.Pub {
+			s.MeshKeyAt = now
+		}
 		s.MeshPub, s.MeshLAN, s.MeshPublic = e.Mesh.Pub, lan, pub
+		used[meshplan.KeyID(s.MeshPub)] = e.ID
 		h.st.Servers[e.ID] = s
 		changed = true
 	}
@@ -152,10 +197,12 @@ type meshInputs struct {
 	meshIP               map[string]string
 	ready                map[string]bool
 	fetch                []string
+	// keyAt: when each established node's key was recorded (zero: init).
+	keyAt map[string]time.Time
 }
 
 func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
-	in := meshInputs{meshIP: map[string]string{}, ready: map[string]bool{}}
+	in := meshInputs{meshIP: map[string]string{}, ready: map[string]bool{}, keyAt: map[string]time.Time{}}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	h.cl.ms.mu.Lock()
@@ -203,6 +250,9 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 		if n, ok := node(sn.Name, siteOf(sn.Labels), mesh, s.MeshPub, lan, public); ok {
 			in.established = append(in.established, n)
 			in.ready[sn.Name] = sn.Ready
+			if listed && s.MeshPub != "" {
+				in.keyAt[sn.Name] = s.MeshKeyAt
+			}
 		}
 	}
 	for _, e := range snap.Enrolling {
@@ -229,8 +279,14 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 			continue
 		}
 		in.meshIP[e.ID] = mesh
+		// The recorded key wins (recordMeshReports admits a report's key
+		// only while it may change, and never a refused one).
+		pub := e.Mesh.Pub
+		if s.MeshPub != "" {
+			pub, lan, public = s.MeshPub, s.MeshLAN, s.MeshPublic
+		}
 		in.joining = append(in.joining, meshplan.Node{ID: e.ID, Site: nonEmpty(site, servers.PrimarySite), MeshIP: a,
-			LAN: endpoint(lan), Public: endpoint(public), Pub: e.Mesh.Pub})
+			LAN: endpoint(lan), Public: endpoint(public), Pub: pub})
 	}
 	sort.Slice(in.joining, func(i, j int) bool { return in.joining[i].ID < in.joining[j].ID })
 	return in
@@ -280,30 +336,32 @@ func (h *Hub) fetchPubs(ctx context.Context, in meshInputs) error {
 // joining node the plan admits; a joining node that leaves a site (its
 // own included) without a reachable node, or that fails validation, is
 // refused with the text.
-func planMesh(in meshInputs) (plans map[string]meshplan.NodePlan, noGateway []string, refused map[string]string, err error) {
-	_, missing, err := meshplan.Degraded(in.established)
+func planMesh(in meshInputs) (plans map[string]meshplan.NodePlan, noGateway []string, refused, dupes map[string]string, err error) {
+	est, dupes := dedupeEstablished(in)
+	_, missing, err := meshplan.Degraded(est)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	refused = map[string]string{}
-	// A joining node's key must be a WireGuard key used by no other node
-	// (established or joining): a repeated key is refused for every node
-	// that carries it, so a joiner can never take an established node's
+	// A joining node's key must be a WireGuard key (the nodeagent's own
+	// check) used by no other node, established or joining (keys compared
+	// by their 32 bytes): a repeated key is refused for every joiner that
+	// carries it, so a joiner can never take an established node's
 	// traffic nor keep the established plans (removals) from being pushed.
 	keys := map[string]int{}
 	for _, n := range in.established {
-		keys[n.Pub]++
+		keys[meshplan.KeyID(n.Pub)]++
 	}
 	for _, j := range in.joining {
-		keys[j.Pub]++
+		keys[meshplan.KeyID(j.Pub)]++
 	}
-	include := slices.Clone(in.established)
+	include := slices.Clone(est)
 	for _, j := range in.joining {
 		if !validMeshKey(j.Pub) {
 			refused[j.ID] = fmt.Sprintf("the pcmesh key node %s reported isn't a WireGuard key: it can't join", j.ID)
 			continue
 		}
-		if keys[j.Pub] > 1 {
+		if keys[meshplan.KeyID(j.Pub)] > 1 {
 			refused[j.ID] = fmt.Sprintf("the pcmesh key node %s reported is used by another node: it can't join", j.ID)
 			continue
 		}
@@ -327,7 +385,36 @@ func planMesh(in meshInputs) (plans map[string]meshplan.NodePlan, noGateway []st
 		include = trial
 	}
 	plans, noGateway, err = meshplan.Degraded(include)
-	return plans, noGateway, refused, err
+	return plans, noGateway, refused, dupes, err
+}
+
+// dedupeEstablished: established nodes sharing a key (by its 32 bytes)
+// keep only the one whose key was recorded first (a node of init first,
+// ties by id); the others are left out of the plan and flagged, so the
+// rest of the plan still goes out.
+func dedupeEstablished(in meshInputs) ([]meshplan.Node, map[string]string) {
+	order := slices.Clone(in.established)
+	sort.SliceStable(order, func(i, j int) bool {
+		a, b := in.keyAt[order[i].ID], in.keyAt[order[j].ID]
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return order[i].ID < order[j].ID
+	})
+	holder := map[string]string{}
+	dupes := map[string]string{}
+	var keep []meshplan.Node
+	for _, n := range order {
+		k := meshplan.KeyID(n.Pub)
+		if o, ok := holder[k]; ok {
+			dupes[n.ID] = fmt.Sprintf("its pcmesh key is node %s's too: left out of the mesh plan", o)
+			continue
+		}
+		holder[k] = n.ID
+		keep = append(keep, n)
+	}
+	sort.Slice(keep, func(i, j int) bool { return keep[i].ID < keep[j].ID })
+	return keep, dupes
 }
 
 func planHash(p nodeagent.MeshPlan) string {
@@ -370,7 +457,7 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 		}
 		in = h.meshInputsOf(snap)
 	}
-	plans, noGateway, refused, err := planMesh(in)
+	plans, noGateway, refused, dupes, err := planMesh(in)
 	if err != nil {
 		return fmt.Errorf("the mesh plan: %v", err)
 	}
@@ -383,6 +470,7 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 	ms.mu.Lock()
 	ms.noGateway = noGateway
 	ms.refused = refused
+	ms.dupes = dupes
 	wire := map[string]nodeagent.MeshPlan{}
 	for id, p := range plans {
 		wire[id] = nodeagent.WirePlan(p)
@@ -491,11 +579,12 @@ func (h *Hub) bootstrapMeshPlan(_ context.Context, id, site, meshIP string, snap
 		return nodeadm.MeshPlan{}, err
 	}
 	joining := meshplan.Node{ID: id, Site: site, MeshIP: a}
-	_, before, err := meshplan.Degraded(in.established)
+	est, _ := dedupeEstablished(in)
+	_, before, err := meshplan.Degraded(est)
 	if err != nil {
 		return nodeadm.MeshPlan{}, err
 	}
-	asNATed := append(slices.Clone(in.established), joining)
+	asNATed := append(slices.Clone(est), joining)
 	_, after, err := meshplan.Degraded(asNATed)
 	if err != nil {
 		return nodeadm.MeshPlan{}, err
@@ -505,7 +594,7 @@ func (h *Hub) bootstrapMeshPlan(_ context.Context, id, site, meshIP string, snap
 			return nodeadm.MeshPlan{}, statusErr(http.StatusConflict, "%s", meshplan.Refusal(s))
 		}
 	}
-	p, err := meshplan.Bootstrap(in.established, joining)
+	p, err := meshplan.Bootstrap(est, joining)
 	if err != nil {
 		return nodeadm.MeshPlan{}, err
 	}
@@ -590,6 +679,12 @@ func (h *Hub) MeshStatus() MeshStatus {
 		if now.Sub(t) > MeshStaleAfter {
 			out.Stale[id] = ms.lastErr[id]
 		}
+	}
+	for id, why := range ms.flagged {
+		out.Stale[id] = why
+	}
+	for id, why := range ms.dupes {
+		out.Stale[id] = why
 	}
 	return out
 }

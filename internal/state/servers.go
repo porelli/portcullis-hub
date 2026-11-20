@@ -45,6 +45,10 @@ type Server struct {
 	MeshPub    string `json:"mesh_pub,omitempty" yaml:"mesh_pub,omitempty"`
 	MeshLAN    string `json:"mesh_lan,omitempty" yaml:"mesh_lan,omitempty"`
 	MeshPublic string `json:"mesh_public,omitempty" yaml:"mesh_public,omitempty"`
+	// MeshKeyAt is when MeshPub was first recorded (of two nodes sharing
+	// a key, the later one is left out of the plan; zero: a node of init,
+	// the earliest).
+	MeshKeyAt time.Time `json:"mesh_key_at,omitempty" yaml:"mesh_key_at,omitempty"`
 	// RevokeParked is nodeadm's text of a parked revocation (its security
 	// steps done, the etcd member removed once quorum returns): the entry
 	// stays revoked until the cluster no longer lists the node.

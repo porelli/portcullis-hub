@@ -2300,5 +2300,27 @@
    }
   ],
   "want_error": "the pcmesh key of n2 is already used by n1"
+ },
+ {
+  "name": "a repeated pcmesh key in another spelling is refused (keys compare by their 32 bytes)",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQF="
+   }
+  ],
+  "want_error": "the pcmesh key of n2 is already used by n1"
  }
 ]

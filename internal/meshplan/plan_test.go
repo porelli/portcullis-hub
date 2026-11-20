@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/jsonstrict"
@@ -285,5 +286,35 @@ func TestPlanDeterministic(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatal(fmt.Sprint("order ", i, " changed the plan"))
 		}
+	}
+}
+
+// altSpelling is a non-canonical spelling of k (a 32-byte key): the last
+// character's two padding bits set, the same 32 bytes.
+func altSpelling(k string) string {
+	const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	i := strings.IndexByte(a, k[42])
+	return k[:42] + string(a[i^1]) + k[43:]
+}
+
+// TestValidKeyAndKeyID: ValidKey is the nodeagent's check (canonical
+// base64 of 32 bytes, not all zero); KeyID makes every spelling of one
+// key the same key.
+func TestValidKeyAndKeyID(t *testing.T) {
+	k := "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+	alt := altSpelling(k)
+	if alt == k || !ValidKey(k) || ValidKey(alt) {
+		t.Fatalf("canonical %v, alt %q %v", ValidKey(k), alt, ValidKey(alt))
+	}
+	if KeyID(k) != KeyID(alt) || KeyID(k) != KeyID(strings.TrimRight(k, "=")) {
+		t.Error("spellings of one key differ")
+	}
+	for _, bad := range []string{"", "x", strings.Repeat("A", 43) + "=", strings.TrimRight(k, "="), "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ==", " " + k} {
+		if ValidKey(bad) {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if KeyID("AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=") == KeyID(k) {
+		t.Error("two keys collide")
 	}
 }

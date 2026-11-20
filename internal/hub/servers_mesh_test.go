@@ -436,3 +436,160 @@ func TestMeshJoinerKeyRefused(t *testing.T) {
 		}
 	}
 }
+
+// altKey is a non-canonical spelling of the fake key k (same 32 bytes).
+func altKey(k string) string {
+	const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	return k[:42] + string(a[strings.IndexByte(a, k[42])^1]) + k[43:]
+}
+
+func enrollingE2(cf *clusterFixture, key, step string) {
+	cf.h.mu.Lock()
+	if cf.h.st.Servers == nil {
+		cf.h.st.Servers = map[string]state.Server{}
+	}
+	cf.h.st.Servers["e2"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.4",
+		Enrol: &state.Enrol{Step: step}}
+	cf.h.mu.Unlock()
+	setReport(cf, key)
+}
+
+func setReport(cf *clusterFixture, key string) {
+	cf.na.mu.Lock()
+	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "e2", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.4",
+		Mesh: nodeadm.MeshReport{Pub: key, LAN: jsonstrict.Some("198.18.0.4:51830")}}}
+	cf.na.mu.Unlock()
+}
+
+func peerKeyOf(p nodeagent.MeshPlan, id string) string {
+	for _, q := range p.Peers {
+		if q.ID == id {
+			return q.Pub
+		}
+	}
+	return ""
+}
+
+// TestMeshKeyRecordedOnceValid: a report's key is recorded only when it is
+// a canonical WireGuard key no other node uses (a non-canonical spelling
+// of e1's key is e1's key: refused, flagged); it is frozen once the node
+// passed mesh_ready: a later report with another key is ignored and
+// flagged, and the plans keep the recorded key.
+func TestMeshKeyRecordedOnceValid(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	cf.h.settleClusterNodes(ctx) // the init nodes' keys
+	enrollingE2(cf, fakeMeshKey("e1"), StepMeshReady)
+	if ok, err := cf.h.meshReadyOf(ctx, "e2"); ok || err == nil || !strings.Contains(err.Error(), "the pcmesh key node e2 reported is used by another node") {
+		t.Errorf("e1's key: %v %v", ok, err)
+	}
+	if s, _ := cf.h.serverEntry("e2"); s.MeshPub != "" {
+		t.Errorf("recorded %q", s.MeshPub)
+	}
+	if why := cf.h.MeshStatus().Stale["e2"]; !strings.Contains(why, "node e1's") {
+		t.Errorf("flag %q", why)
+	}
+	if p, _ := cf.na.meshOf("n1"); peerKeyOf(p, "e1") != fakeMeshKey("e1") || peerKeyOf(p, "e2") != "" {
+		t.Errorf("n1's plan %+v", p)
+	}
+	// A non-canonical spelling (of e1's key, or of a fresh one) is no
+	// WireGuard key: the nodeagent would refuse it too.
+	for _, k := range []string{altKey(fakeMeshKey("e1")), altKey(fakeMeshKey("e2"))} {
+		cf = newClusterFixture(t, twoSites()...)
+		cf.h.settleClusterNodes(ctx)
+		enrollingE2(cf, k, StepMeshReady)
+		if ok, err := cf.h.meshReadyOf(ctx, "e2"); ok || err == nil || !strings.Contains(err.Error(), "isn't a WireGuard key") {
+			t.Errorf("%q: %v %v", k, ok, err)
+		}
+		if why := cf.h.MeshStatus().Stale["e2"]; !strings.Contains(why, "isn't a WireGuard key") {
+			t.Errorf("flag %q", why)
+		}
+		if p, _ := cf.na.meshOf("e1"); peerKeyOf(p, "e2") != "" {
+			t.Errorf("e1 has the refused e2: %+v", p)
+		}
+	}
+	// Frozen after mesh_ready.
+	cf = newClusterFixture(t, twoSites()...)
+	cf.h.settleClusterNodes(ctx)
+	enrollingE2(cf, fakeMeshKey("e2"), StepMeshReady)
+	if ok, err := cf.h.meshReadyOf(ctx, "e2"); !ok || err != nil {
+		t.Fatalf("e2's own key: %v %v", ok, err)
+	}
+	cf.h.setEnrolStep("e2", StepK3sJoined)
+	other := fakeMeshKey("e2x")
+	setReport(cf, other)
+	if err := cf.h.pushMesh(ctx); err != nil { // not the tick: it would end the op-less enrolment
+		t.Fatal(err)
+	}
+	if s, _ := cf.h.serverEntry("e2"); s.MeshPub != fakeMeshKey("e2") {
+		t.Errorf("the frozen key changed to %q", s.MeshPub)
+	}
+	if p, _ := cf.na.meshOf("e1"); peerKeyOf(p, "e2") != fakeMeshKey("e2") {
+		t.Errorf("e1's peer e2 key %q", peerKeyOf(p, "e2"))
+	}
+	if why := cf.h.MeshStatus().Stale["e2"]; !strings.Contains(why, "changed its pcmesh key after mesh_ready") {
+		t.Errorf("flag %q", why)
+	}
+}
+
+// TestMeshEstablishedSharedKey: two established nodes sharing a key (by
+// its bytes): the one whose key was recorded later is left out of the
+// plan and flagged; the rest of the plan (a removal included) goes out.
+func TestMeshEstablishedSharedKey(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, append(twoSites(), siteNode("e3", "agent", "edge", "10.215.0.7", "198.18.0.7", ""))...)
+	cf.h.mu.Lock()
+	cf.h.st.Servers = map[string]state.Server{"e3": {Kind: state.KindClusterNode, State: ServerReady, Site: "edge", MeshIP: "10.215.0.7",
+		MeshPub: fakeMeshKey("n2"), MeshLAN: "198.18.0.7:51830", MeshKeyAt: time.Now()}}
+	cf.h.mu.Unlock()
+	err := cf.h.pushMesh(ctx)
+	if err != nil {
+		t.Fatalf("the plan didn't go out: %v", err)
+	}
+	for _, id := range []string{"n1", "n2", "e1"} {
+		p, ok := cf.na.meshOf(id)
+		if !ok || peerKeyOf(p, "e3") != "" {
+			t.Errorf("%s: %v %+v", id, ok, p)
+		}
+	}
+	if p, _ := cf.na.meshOf("n1"); peerKeyOf(p, "n2") != fakeMeshKey("n2") {
+		t.Errorf("n2 lost its place: %+v", p)
+	}
+	if _, ok := cf.na.meshOf("e3"); ok {
+		t.Error("the later node got a plan")
+	}
+	if why := cf.h.MeshStatus().Stale["e3"]; !strings.Contains(why, "node n2's too") {
+		t.Errorf("flag %q", why)
+	}
+	if err := cf.h.meshRemove(ctx, "e1"); err != nil {
+		t.Errorf("a removal with the shared key present: %v", err)
+	}
+	if p, _ := cf.na.meshOf("n1"); peerKeyOf(p, "e1") != "" {
+		t.Errorf("e1 still in n1's plan")
+	}
+}
+
+// TestDedupeByKeyBytes: established nodes compare keys by their 32 bytes
+// (two spellings of one key are one key); the later-recorded one is left
+// out, a node of init (zero time) wins, ties by id.
+func TestDedupeByKeyBytes(t *testing.T) {
+	k := fakeMeshKey("n2")
+	in := meshInputs{keyAt: map[string]time.Time{"a": time.Unix(200, 0), "b": time.Unix(100, 0)},
+		established: []meshplan.Node{
+			meshNodeOf("a", "main", "10.215.0.3", "192.0.2.3", ""), meshNodeOf("b", "main", "10.215.0.4", "192.0.2.4", ""),
+			meshNodeOf("c", "main", "10.215.0.5", "192.0.2.5", "")}}
+	in.established[0].Pub, in.established[1].Pub, in.established[2].Pub = k, altKey(k), fakeMeshKey("c")
+	keep, dupes := dedupeEstablished(in)
+	if len(keep) != 2 || keep[0].ID != "b" || keep[1].ID != "c" || !strings.Contains(dupes["a"], "node b's") {
+		t.Errorf("keep %v dupes %v", keep, dupes)
+	}
+	in.keyAt = map[string]time.Time{"a": time.Unix(200, 0)} // b: a node of init
+	in.established[0].Pub, in.established[1].Pub = altKey(k), k
+	if _, dupes := dedupeEstablished(in); !strings.Contains(dupes["a"], "node b's") {
+		t.Errorf("init node lost: %v", dupes)
+	}
+	plans, _, _, dupes, err := planMesh(in)
+	if err != nil || len(plans) != 2 || dupes["a"] == "" {
+		t.Errorf("planMesh %v %v %v", plans, dupes, err)
+	}
+}

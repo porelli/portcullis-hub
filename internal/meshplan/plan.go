@@ -6,6 +6,8 @@
 package meshplan
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -56,6 +58,29 @@ func (e *SiteError) Error() string { return Refusal(e.Site) }
 // Refusal is the §20.11 refusal text for site.
 func Refusal(site string) string {
 	return fmt.Sprintf("site %s needs one node reachable on UDP %d first (a cloud node, or one forwarded port)", site, Port)
+}
+
+// ValidKey: s is a WireGuard public key exactly as the nodeagent accepts
+// it (§20.4): canonical standard base64 (re-encoding gives s back) of 32
+// bytes, not all zero.
+func ValidKey(s string) bool {
+	b, err := base64.StdEncoding.Strict().DecodeString(s)
+	if err != nil || len(b) != 32 || base64.StdEncoding.EncodeToString(b) != s {
+		return false
+	}
+	return !bytes.Equal(b, make([]byte, 32))
+}
+
+// KeyID is the identity two keys are compared by: the decoded 32 bytes
+// (so non-canonical spellings of one key are the same key), else s itself.
+func KeyID(s string) string {
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) == 32 {
+		return string(b)
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil && len(b) == 32 {
+		return string(b)
+	}
+	return s
 }
 
 func reachable(n Node) bool { return n.Public.IsValid() }
@@ -130,10 +155,11 @@ func validate(nodes []Node) error {
 		}
 		byIP[a] = n.ID
 		if n.Pub != "" {
-			if o, ok := byKey[n.Pub]; ok {
+			k := KeyID(n.Pub)
+			if o, ok := byKey[k]; ok {
 				return fmt.Errorf("the pcmesh key of %s is already used by %s", n.ID, o)
 			}
-			byKey[n.Pub] = n.ID
+			byKey[k] = n.ID
 		}
 	}
 	return nil
