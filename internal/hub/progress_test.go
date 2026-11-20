@@ -134,7 +134,7 @@ func TestProgressPersisted(t *testing.T) {
 	// The final record keeps the steps and created; a reload keeps it.
 	p.finish(OpRecord{Op: OpEnable, OK: true, At: clk.now()}, nil)
 	p.Start("keycloak") // after the end: nothing written
-	f.h.loadOps()
+	reloadOps(f.h)
 	lo := f.h.LastOp("grafana")
 	if lo == nil || lo.Running || !lo.OK || lo.Interrupted || stepOf(*lo, "images").State != StepDone ||
 		stepOf(*lo, "keycloak").State != StepWaiting || !slices.Equal(lo.Created.Groups, []string{"users_grafana"}) || lo.Stoppable {
@@ -355,7 +355,7 @@ func TestInterruptedKeepsLedger(t *testing.T) {
 	f.h.recordOp("b-del", running(OpDelete, false))
 	f.h.recordOp("c-plain", OpRecord{Op: OpRebind, OpID: "x", At: t0, Running: true})
 	f.h.recordOp("d-backup", running(OpBackup, true)) // any op past its point of no return
-	f.h.loadOps()
+	reloadOps(f.h)
 	for _, r := range []OpRecord{*f.h.LastOp("grafana"), opFile(t, f.h, "grafana")} {
 		if r.Running || r.OK || !r.Interrupted || !r.Stoppable || r.Status != 500 || !strings.HasPrefix(r.Error, "interrupted:") || r.Actor != "alice" {
 			t.Fatalf("interrupted: %+v", r)

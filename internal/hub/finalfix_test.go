@@ -206,7 +206,7 @@ func TestInterruptedOpsAndRestoreAs(t *testing.T) {
 			t.Fatal("running op shows the instance as error")
 		}
 	}
-	f.h.loadOps()
+	reloadOps(f.h)
 	lo := f.h.LastOp("grafana")
 	if lo == nil || lo.Running || lo.OK || !strings.Contains(lo.Error, "interrupted") {
 		t.Fatalf("after reload: %+v", lo)
@@ -252,7 +252,7 @@ func TestSetHostsReapplyAfterOtherOp(t *testing.T) {
 	f.runner.upErr = nil
 	// Another operation (a backup's record) is now the last one.
 	f.h.recordOp("chat-b", OpRecord{Op: OpBackup, OK: true, At: time.Now()})
-	f.h.loadOps() // and it survives a restart
+	reloadOps(f.h) // and it survives a restart
 	calls := len(f.runner.Calls())
 	if err := f.h.SetHosts("chat-b", map[string]string{"chat": "talk.example.org"}, directory.Human("alice")); err != nil {
 		t.Fatal(err)

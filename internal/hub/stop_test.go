@@ -297,7 +297,7 @@ func TestStopInterruptedEnable(t *testing.T) {
 		Steps: []Step{done("groups"), done("keycloak"), done("images"), done("create"), {Key: "start", Label: "start", State: StepRunning, StartedAt: &t0},
 			{Key: "healthy", Label: "healthy", State: StepWaiting}, {Key: "settings", Label: "settings", State: StepWaiting}},
 		Created: &Created{Groups: []string{"users_other"}, KeycloakClients: []string{"other"}, Volumes: []string{madeVolume}}})
-	f.h.loadOps()
+	reloadOps(f.h)
 	if r := f.h.LastOp("other"); r == nil || !r.Interrupted || !r.Stoppable {
 		t.Fatalf("not interrupted: %+v", r)
 	}

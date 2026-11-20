@@ -766,7 +766,7 @@ func TestStopAIModeGoneFallsBack(t *testing.T) {
 	a.h.recordOp("aiapp", OpRecord{Op: OpAI, OpID: "crashed2", At: t0, Running: true, Actor: "root", Stoppable: true,
 		Steps:  []Step{{Key: StepRevoke, Label: "r", State: StepDone}, {Key: StepScopes, Label: "s", State: StepRunning}, {Key: StepRestart, Label: "x", State: StepWaiting}, {Key: StepHooks, Label: "h", State: StepWaiting}},
 		Before: map[string]string{aiBeforeKey + "tok": "off gone_mode"}})
-	a.h.loadOps()
+	reloadOps(a.h)
 	if _, err := a.h.StopOp("aiapp", directory.Human("bob")); err != nil {
 		t.Fatal(err)
 	}

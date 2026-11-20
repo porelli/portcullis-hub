@@ -138,7 +138,7 @@ func TestStopInterruptedBackup(t *testing.T) {
 		Steps: []Step{{Key: StepStop, Label: "s", State: StepDone}, {Key: "volume:grafana-data", Label: "v", State: StepRunning},
 			{Key: StepArchive, Label: "a", State: StepWaiting}, {Key: StepStart, Label: "st", State: StepWaiting}},
 		Created: &Created{}})
-	f.h.loadOps()
+	reloadOps(f.h)
 	if r := f.h.LastOp("grafana-b"); !r.Interrupted || !r.Stoppable {
 		t.Fatalf("interrupted %+v", r)
 	}
@@ -576,7 +576,7 @@ func TestStopInterruptedDeleteBeforeNoReturn(t *testing.T) {
 		Steps: []Step{{Key: StepBackup, Label: "b", State: StepDone}, {Key: StepStop, Label: "s", State: StepRunning},
 			{Key: StepVolumes, Label: "v", State: StepWaiting}},
 		Created: &Created{}})
-	f.h.loadOps()
+	reloadOps(f.h)
 	if r := f.h.LastOp("grafana-b"); !r.Stoppable {
 		t.Fatalf("not stoppable %+v", r)
 	}
@@ -645,10 +645,15 @@ func TestCommittedCreateNotStoppableAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := waitOp(t, f.h, "grafana-b", a.OpID)
+	// A restart: the op's goroutine is gone (its record ended before
+	// finishAsync's last reads), then the records are read again.
+	if !f.h.WaitTimeout(20 * time.Second) {
+		t.Fatal("the create's goroutine never ended")
+	}
 	// As written while it ran past its gate: running, stoppable false.
 	r.Running, r.OK = true, false
 	f.h.recordOp("grafana-b", r)
-	f.h.loadOps()
+	reloadOps(f.h)
 	if got := f.h.LastOp("grafana-b"); !got.Interrupted || got.Stoppable {
 		t.Fatalf("record %+v", got)
 	}

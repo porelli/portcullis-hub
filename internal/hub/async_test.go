@@ -23,6 +23,16 @@ func waitOp(t *testing.T, h *Hub, id, opID string) OpRecord {
 	return OpRecord{}
 }
 
+// reloadOps is a test's Hub restart of the op records (loadOps, which
+// New runs before any operation can start): under opsMu, as every other
+// reader and writer of the records, since an operation's goroutine may
+// still be finishing (finishAsync reads h.ops after its record ended).
+func reloadOps(h *Hub) {
+	h.opsMu.Lock()
+	defer h.opsMu.Unlock()
+	h.loadOps()
+}
+
 // TestAsyncInstanceOps: backup, restore, restore into a new id and delete
 // are accepted once validated and locked, run in the background holding
 // the instance's lock (a second request is 409 busy meanwhile), and end in

@@ -126,7 +126,7 @@ func TestOpHistoryOutlivesReplacedRecord(t *testing.T) {
 	if r := f.h.OpByID("grafana", "2222222222222222"); r == nil || !r.OK || r.Op != OpEnable {
 		t.Fatalf("the replaced enable: %+v", r)
 	}
-	f.h.loadOps()
+	reloadOps(f.h)
 	if r := f.h.OpByID("grafana", "1111111111111111"); r == nil || !r.Interrupted || r.Running {
 		t.Fatalf("the interrupted restart: %+v", r)
 	}
