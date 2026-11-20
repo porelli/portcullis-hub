@@ -1,0 +1,324 @@
+---
+# step 0 wait none
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: ha-no-memlimit
+    portcullis.io/owner: hub
+  name: ha-no-memlimit--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    portcullis.io/gid: "1000"
+    portcullis.io/mode: "0750"
+    portcullis.io/uid: "1000"
+  labels:
+    portcullis.io/instance: ha-no-memlimit
+    portcullis.io/owner: hub
+    portcullis.io/volume: data
+  name: ha-no-memlimit--data
+  namespace: portcullis-apps
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: portcullis-apps
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ha-no-memlimit
+    portcullis.io/owner: hub
+  name: ha-no-memlimit--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: ha-no-memlimit
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: ha-no-memlimit
+    portcullis.io/owner: hub
+  name: ha-no-memlimit--net-default
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-no-memlimit
+          portcullis.io/net-default: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-no-memlimit
+          portcullis.io/net-default: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: ha-no-memlimit
+      portcullis.io/net-default: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: ha-no-memlimit
+    portcullis.io/owner: hub
+  name: ha-no-memlimit--egress
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.42.0.0/16
+        - 10.43.0.0/16
+        - 169.254.0.0/16
+        - 192.0.2.10/32
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.0.2.10/32
+  podSelector:
+    matchLabels:
+      portcullis.io/egress: "true"
+      portcullis.io/instance: ha-no-memlimit
+  policyTypes:
+  - Egress
+---
+# step 1 wait complete
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    portcullis.io/instance: ha-no-memlimit
+    portcullis.io/service: migrate
+  name: ha-no-memlimit--migrate
+  namespace: portcullis-apps
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"migrate":"migrate"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: ha-no-memlimit
+        portcullis.io/net-default: "true"
+        portcullis.io/service: migrate
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
+      automountServiceAccountToken: false
+      containers:
+      - args:
+        - "true"
+        image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: migrate
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+        securityContext:
+          runAsGroup: 1000
+          runAsUser: 1000
+      dnsConfig:
+        searches:
+        - ha-no-memlimit--pods.portcullis-apps.svc.cluster.local
+      enableServiceLinks: false
+      hostname: migrate
+      priorityClassName: portcullis-normal
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      subdomain: ha-no-memlimit--pods
+      tolerations:
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 30
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 30
+---
+# step 2 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: ha-no-memlimit
+    portcullis.io/service: app
+  name: ha-no-memlimit--app
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: ha-no-memlimit
+      portcullis.io/service: app
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"app":"app"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: ha-no-memlimit
+        portcullis.io/net-default: "true"
+        portcullis.io/service: app
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
+      automountServiceAccountToken: false
+      containers:
+      - image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: app
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+        securityContext:
+          runAsGroup: 1000
+          runAsUser: 1000
+        volumeMounts:
+        - mountPath: /var/lib/app
+          name: vol-data
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+      dnsConfig:
+        searches:
+        - ha-no-memlimit--pods.portcullis-apps.svc.cluster.local
+      enableServiceLinks: false
+      hostname: app
+      initContainers:
+      - command:
+        - /usr/local/bin/hub
+        - seed-self
+        - /portcullis-bin
+        image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
+        imagePullPolicy: IfNotPresent
+        name: portcullis-bin
+        resources:
+          requests:
+            cpu: 50m
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 1000
+          runAsUser: 1000
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+      - command:
+        - /portcullis-bin/hub
+        - seed
+        - /var/lib/app
+        - /portcullis-seed
+        image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: portcullis-seed-1
+        resources:
+          requests:
+            cpu: 50m
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 1000
+          runAsUser: 1000
+        volumeMounts:
+        - mountPath: /portcullis-bin
+          name: portcullis-bin
+          readOnly: true
+        - mountPath: /portcullis-seed
+          name: vol-data
+      priorityClassName: portcullis-normal
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      subdomain: ha-no-memlimit--pods
+      tolerations:
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 30
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: portcullis-bin
+      - name: vol-data
+        persistentVolumeClaim:
+          claimName: ha-no-memlimit--data

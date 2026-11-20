@@ -1,0 +1,321 @@
+---
+# step 0 wait none
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: ha-priority
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+    portcullis.io/service: web
+  name: ha-priority--web
+  namespace: portcullis-apps
+spec:
+  ports:
+  - name: tcp-8080
+    port: 8080
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    portcullis.io/instance: ha-priority
+    portcullis.io/service: web
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--net-default
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-priority
+          portcullis.io/net-default: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-priority
+          portcullis.io/net-default: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: ha-priority
+      portcullis.io/net-default: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--net-portcullis-proxy
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-priority
+          portcullis.io/net-portcullis-proxy: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-priority
+          portcullis.io/net-portcullis-proxy: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: ha-priority
+      portcullis.io/net-portcullis-proxy: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--routed-web
+  namespace: portcullis-apps
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: portcullis-ingress
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: ha-priority
+      portcullis.io/service: web
+  policyTypes:
+  - Ingress
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--egress
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.42.0.0/16
+        - 10.43.0.0/16
+        - 169.254.0.0/16
+        - 192.0.2.10/32
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 192.0.2.10/32
+  podSelector:
+    matchLabels:
+      portcullis.io/egress: "true"
+      portcullis.io/instance: ha-priority
+  policyTypes:
+  - Egress
+---
+# step 0 wait none
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--r-echo
+  namespace: portcullis-edge
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`echo.example.org`)
+    middlewares:
+    - name: client-headers@file
+    - name: portcullis-auth@file
+    services:
+    - kind: Service
+      name: ha-priority--web
+      port: 8080
+  tls:
+    options:
+      name: authaware@file
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/owner: hub
+  name: ha-priority--web
+  namespace: portcullis-edge
+spec:
+  externalName: ha-priority--web.portcullis-apps.svc.cluster.local
+  ports:
+  - name: tcp-8080
+    port: 8080
+    protocol: TCP
+  type: ExternalName
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: ha-priority
+    portcullis.io/service: web
+  name: ha-priority--web
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: ha-priority
+      portcullis.io/service: web
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/compose-labels: '{"web":{"traefik.enable":"true","traefik.http.routers.echo.entrypoints":"websecure","traefik.http.routers.echo.middlewares":"client-headers@file,portcullis-auth@docker","traefik.http.routers.echo.rule":"Host(`echo.example.org`)","traefik.http.routers.echo.tls.options":"authaware@file","traefik.http.services.echo.loadbalancer.server.port":"8080"}}'
+        portcullis.io/services: '{"web":"web"}'
+      labels:
+        portcullis.io/egress: "true"
+        portcullis.io/instance: ha-priority
+        portcullis.io/net-default: "true"
+        portcullis.io/net-portcullis-proxy: "true"
+        portcullis.io/service: web
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: portcullis.io/site
+                operator: In
+                values:
+                - office
+            weight: 100
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
+      automountServiceAccountToken: false
+      containers:
+      - image: docker.io/ealen/echo-server:0.9.2@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: web
+        resources:
+          limits:
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        securityContext:
+          runAsGroup: 10001
+          runAsUser: 10001
+      dnsConfig:
+        searches:
+        - ha-priority--pods.portcullis-apps.svc.cluster.local
+      enableServiceLinks: false
+      hostname: web
+      priorityClassName: portcullis-high
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      subdomain: ha-priority--pods
+      tolerations:
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 30
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 30

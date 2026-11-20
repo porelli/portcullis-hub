@@ -94,6 +94,10 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 		TraefikServiceIP: coreEnv["PORTCULLIS_TRAEFIK_SERVICE_IP"], WGEdgeServiceIP: coreEnv["PORTCULLIS_WG_EDGE_SERVICE_IP"],
 		Domain: cfg.Domain, CorePorts: templates.KubeCorePorts(coreEnv), NodeAddresses: strings.Fields(strings.ReplaceAll(coreEnv["PORTCULLIS_KUBE_NODE_ADDRESSES"], ",", " ")),
 		APIAddresses: apiAddresses(coreEnv["PORTCULLIS_KUBE_API_ENDPOINTS"]),
+		HA:           haFromEnv(getenv),
+	}
+	if settings.TraefikPeer, err = traefikPeerFromEnv(getenv, settings.HA, core); err != nil {
+		return nil, nil, err
 	}
 	ex := kube.RemoteExec{Client: client, Config: restCfg}
 	guard := kube.NewGuard(kube.GuardConfig{Client: client, Dynamic: dyn, AppsNamespace: apps, CoreNamespace: core, EdgeNamespace: edge, InCluster: icErr, HubImage: self, Exec: ex})
@@ -110,6 +114,29 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	// operations answer 503.
 	go guard.Run(ctx, time.Minute)
 	return b, fence, nil
+}
+
+// haFromEnv is HUB_HA (contract §20.1 "HA mode"): only exactly "on"
+// turns HA on; core's chart sets it with ha.enabled.
+func haFromEnv(getenv func(string) string) bool { return getenv("HUB_HA") == "on" }
+
+// traefikPeerFromEnv is HUB_TRAEFIK_PEER, Traefik as the routed ports'
+// NetworkPolicy peer in the admission params' form
+// <namespace>:<label>=<value> (core's chart passes the params' traefik
+// value); unset = the params' default for the mode (in HA
+// portcullis-ingress:app.kubernetes.io/name=traefik, else
+// <core namespace>:portcullis.io/component=traefik). A malformed value
+// refuses the start.
+func traefikPeerFromEnv(getenv func(string) string, ha bool, core string) (kube.Peer, error) {
+	v := strings.TrimSpace(getenv("HUB_TRAEFIK_PEER"))
+	if v == "" {
+		return kube.DefaultTraefikPeer(ha, core), nil
+	}
+	p, err := kube.ParsePeer(v)
+	if err != nil {
+		return kube.Peer{}, fmt.Errorf("HUB_TRAEFIK_PEER: %v", err)
+	}
+	return p, nil
 }
 
 // gateLogSourcesFromEnv is HUB_GATE_LOG_SOURCES (contract §20.10): unset

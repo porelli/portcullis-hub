@@ -305,6 +305,7 @@ func (b *Backend) input(ctx context.Context, p runtime.Project) (Input, map[stri
 	if x := p.Inputs; x != nil {
 		in.Template, in.TemplateFiles, in.PersonSecrets, in.LanOnly, in.Jobs = x.Template, x.TemplateFiles, x.PersonSecrets, x.LanOnly, x.Jobs
 		in.VPNSlot, in.IngressService, in.VPNOnly = x.VPNSlot, x.IngressService, x.VPNOnly
+		in.Availability = x.Availability
 		for _, c := range x.Companions {
 			in.Companions = append(in.Companions, Companion{Service: c.Service, Alias: c.Alias, Port: c.Port})
 		}

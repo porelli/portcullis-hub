@@ -1,0 +1,10 @@
+services:
+  sensor:
+    image: docker.io/library/alpine:3.24.3
+    user: "1000:1000"
+    mem_limit: 64m
+    command: ["sleep", "infinity"]
+    networks: [lan]
+networks:
+  lan:
+    internal: true

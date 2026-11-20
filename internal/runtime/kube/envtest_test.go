@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -515,29 +516,83 @@ func TestAdmissionVectors(t *testing.T) {
 // service is refused by the translator itself.
 var knownRefused = map[string]string{}
 
-// TestTranslatedObjectsAdmitted: what the translator renders for the
-// golden cases passes the policies (the Hub never fights its guard).
+// haParams are the admission params of an HA cluster as they differ
+// from params.yaml (core's kube_traefik_peer in HA): Traefik in
+// portcullis-ingress, mcp-gate and wg in the core namespace.
+var haParams = map[string]string{"traefik": "portcullis-ingress:app.kubernetes.io/name=traefik"}
+
+// TestTranslatedObjectsAdmitted: what the translator renders for every
+// golden case passes the policies (the Hub never fights its guard), in
+// both modes: without HA under params.yaml, and in HA (HUB_HA=on: the
+// HA tolerations, Traefik's peer in portcullis-ingress) with the
+// NetworkPolicies judged by a binding on the HA params (haParams).
 func TestTranslatedObjectsAdmitted(t *testing.T) {
 	e := startEnv(t)
-	for _, c := range []string{"basic", "jobs", "sidecar", "ports", "vpn-gateway", "person-secret", "datafile"} {
-		in := baseInput(t, "testdata/translate/"+c, c)
-		in.HubImage = "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("1", 64)
-		in.Namespace = ns
-		// The params' cluster (params.yaml).
-		in.Settings.PodCIDR, in.Settings.ServiceCIDR = "10.42.0.0/24", "10.43.0.0/16"
-		in.Settings.NodeAddresses, in.Settings.APIAddresses = []string{"10.1.0.4"}, []string{"10.1.0.4"}
-		p, err := Translate(in)
-		if err != nil {
-			t.Fatalf("%s: %v", c, err)
+	cases, _ := filepath.Glob("testdata/translate/*")
+	n := 0
+	for _, dir := range cases {
+		c := filepath.Base(dir)
+		for _, ha := range []bool{false, true} {
+			in := baseInput(t, dir, c)
+			in.HubImage = "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("1", 64)
+			in.Namespace = ns
+			// The params' cluster (params.yaml).
+			in.Settings.PodCIDR, in.Settings.ServiceCIDR = "10.42.0.0/24", "10.43.0.0/16"
+			in.Settings.NodeAddresses, in.Settings.APIAddresses = []string{"10.1.0.4"}, []string{"10.1.0.4"}
+			in.Settings.HA = in.Settings.HA || ha
+			if !ha && in.Settings.HA {
+				continue // an HA golden: judged in the HA pass
+			}
+			p, err := Translate(in)
+			var r *ErrRefused
+			if errors.As(err, &r) && c == "refused-host" {
+				continue
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", c, err)
+			}
+			n++
+			for _, o := range p.Objects() {
+				target := o.GetNamespace()
+				if ha && o.GetKind() == "NetworkPolicy" {
+					o = o.DeepCopy()
+					o.SetNamespace(e.paramsNamespace(t, haParams))
+				}
+				_, err := e.hub.Resource(gvrOf(o)).Namespace(o.GetNamespace()).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+				want := knownRefused[c+"/"+o.GetKind()+"/"+o.GetName()]
+				switch {
+				case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
+					t.Errorf("%s (ha %v): %s %s: want the known refusal %q, got %v", c, ha, o.GetKind(), o.GetName(), want, err)
+				case want == "" && err != nil:
+					t.Errorf("%s (ha %v): %s %s (in %s) denied: %v", c, ha, o.GetKind(), o.GetName(), target, err)
+				}
+			}
 		}
-		for _, o := range p.Objects() {
+	}
+	if n < 16 {
+		t.Fatalf("%d translations judged", n)
+	}
+}
+
+// TestHATraefikPeerOnlyUnderHAParams: the routed policy is admitted
+// only under the params of its own mode (core's e2e runs both): the HA
+// peer is refused by the non-HA params and the core-namespace one by
+// the HA params.
+func TestHATraefikPeerOnlyUnderHAParams(t *testing.T) {
+	e := startEnv(t)
+	for _, ha := range []bool{false, true} {
+		pols, err := InstancePolicies(PolicyInput{Instance: "app", Namespace: ns, RoutedPorts: map[string][]int{"web": {8080}}, Settings: Settings{HA: ha}})
+		if err != nil || len(pols) != 1 {
+			t.Fatalf("%d policies, %v", len(pols), err)
+		}
+		for _, under := range []bool{false, true} {
+			o := pols[0].DeepCopy()
+			if under {
+				o.SetNamespace(e.paramsNamespace(t, haParams))
+			}
 			_, err := e.hub.Resource(gvrOf(o)).Namespace(o.GetNamespace()).Create(context.Background(), o, metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
-			want := knownRefused[c+"/"+o.GetKind()+"/"+o.GetName()]
-			switch {
-			case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
-				t.Errorf("%s: %s %s: want the known refusal %q, got %v", c, o.GetKind(), o.GetName(), want, err)
-			case want == "" && err != nil:
-				t.Errorf("%s: %s %s denied: %v", c, o.GetKind(), o.GetName(), err)
+			if (err == nil) != (ha == under) {
+				t.Errorf("rendered ha %v, params ha %v: %v", ha, under, err)
 			}
 		}
 	}

@@ -100,3 +100,30 @@ func DataSecretsName(instance, name string) string { return joinName(instance, n
 // with content hash sum (hex): <instance>--tpl-<sum[:10]>, owned by the
 // instance (never shared by two instances of one template).
 func TemplateFilesName(instance, sum string) string { return joinName(instance, "tpl-"+sum[:10], "") }
+
+// Placement (contract §3.4, §20.6): the node labels and taint the
+// translator names, and the app priority classes.
+const (
+	// LabelNodeClass is a node's class (home, cloud or small); a small
+	// node is tainted TaintSmall=true:NoSchedule.
+	LabelNodeClass = "portcullis.io/class"
+	LabelNodeSite  = "portcullis.io/site"
+	LabelHostname  = "kubernetes.io/hostname"
+	TaintSmall     = "portcullis.io/small"
+	ClassSmall     = "small"
+	// PriorityClassPrefix + an instance priority is its pods' class
+	// (portcullis-critical|high|normal|low; never portcullis-core).
+	PriorityClassPrefix = "portcullis-"
+	// HATolerationSeconds is how long an HA app pod stays bound to a
+	// not-ready or unreachable node (the cluster default is 300 s).
+	HATolerationSeconds = 30
+)
+
+// PriorityClassName is the priority class of an instance priority
+// (critical, high, normal or low; "" = normal).
+func PriorityClassName(priority string) string {
+	if priority == "" {
+		priority = "normal"
+	}
+	return PriorityClassPrefix + priority
+}

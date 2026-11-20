@@ -163,6 +163,15 @@ spec:
         portcullis.io/service: headscale
         portcullis.io/vpn-slot: "3"
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - env:
@@ -179,7 +188,12 @@ spec:
         image: docker.io/headscale/headscale:0.27.0@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: headscale
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext:
           runAsGroup: 10001
           runAsUser: 10001
@@ -192,13 +206,19 @@ spec:
         image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: derp
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext: {}
       dnsConfig:
         searches:
         - vpn-gateway--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: headscale
+      priorityClassName: portcullis-normal
       securityContext:
         fsGroup: 10001
         seccompProfile:

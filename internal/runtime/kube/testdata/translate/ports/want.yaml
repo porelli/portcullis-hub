@@ -240,18 +240,33 @@ spec:
         portcullis.io/net-default: "true"
         portcullis.io/service: dns
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - image: docker.io/pihole/pihole:2025.08.0@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: dns
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext: {}
       dnsConfig:
         searches:
         - ports--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: dns
+      priorityClassName: portcullis-normal
       securityContext:
         seccompProfile:
           type: RuntimeDefault

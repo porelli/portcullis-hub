@@ -39,6 +39,18 @@ var translatorOnly = map[string]string{
 	"service %s mounts the per-person secrets at %q, not its own": "the Hub's override",
 	"service %s publishes port %d for the local networks only, and no (IPv4) Local networks are set": "the Hub's Local networks setting",
 	"the services' depends_on form a cycle":                                                          "compose refuses the file first",
+	"priority must be critical, high, normal or low":                                                 "the instance's availability (state.yaml, §20.6)",
+	"runs_on mode must be anywhere, prefer or only":                                                  "the instance's availability (state.yaml, §20.6)",
+	"runs_on anywhere takes no class, site or nodes":                                                 "the instance's availability (state.yaml, §20.6)",
+	"runs_on prefer takes exactly one of class, site or nodes":                                       "the instance's availability (state.yaml, §20.6)",
+	"small nodes take only instances pinned to them: use Only":                                       "the instance's availability (state.yaml, §20.6)",
+	"runs_on prefer: class must be home or cloud":                                                    "the instance's availability (state.yaml, §20.6)",
+	"runs_on prefer names a site that isn't a site name":                                             "the instance's availability (state.yaml, §20.6)",
+	"runs_on names a node that isn't a node name":                                                    "the instance's availability (state.yaml, §20.6)",
+	"runs_on names a node twice":                                                                     "the instance's availability (state.yaml, §20.6)",
+	"runs_on names %d nodes (1–%d)":                                                                  "the instance's availability (state.yaml, §20.6)",
+	"runs_on only takes nodes, and no class or site":                                                 "the instance's availability (state.yaml, §20.6)",
+	"runs_on only: a small node isn't one of the chosen nodes":                                       "the instance's availability (state.yaml, §20.6)",
 }
 
 var verbRe = regexp.MustCompile(`%[sdqv]`)

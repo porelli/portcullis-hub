@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // CoreNamespace is the core namespace's name label value (the API
@@ -20,6 +21,44 @@ const CoreNamespace = "portcullis"
 
 // nsLabel is the API server's namespace name label.
 const nsLabel = "kubernetes.io/metadata.name"
+
+// IngressNamespace is Traefik's namespace in HA (plan Amendment 3; the
+// chart's ingressNamespace default).
+const IngressNamespace = "portcullis-ingress"
+
+// Peer is a NetworkPolicy peer as the admission params write one
+// (contract §6 "The params": <namespace>:<label>=<value>): the pods of
+// Namespace labelled Key=Value.
+type Peer struct{ Namespace, Key, Value string }
+
+// String is p in the params' form.
+func (p Peer) String() string { return p.Namespace + ":" + p.Key + "=" + p.Value }
+
+// ParsePeer parses the params' <namespace>:<label>=<value> form (a DNS
+// label namespace, a qualified label key, a label value).
+func ParsePeer(s string) (Peer, error) {
+	ns, sel, ok := strings.Cut(strings.TrimSpace(s), ":")
+	k, v, ok2 := strings.Cut(sel, "=")
+	p := Peer{Namespace: ns, Key: k, Value: v}
+	if !ok || !ok2 || len(validation.IsDNS1123Label(ns)) > 0 || len(validation.IsQualifiedName(k)) > 0 || v == "" || len(validation.IsValidLabelValue(v)) > 0 {
+		return Peer{}, fmt.Errorf("a peer is <namespace>:<label>=<value>, got %q", s)
+	}
+	return p, nil
+}
+
+// DefaultTraefikPeer is Traefik's peer as the admission params name it
+// (core's kube_traefik_peer): in HA the DaemonSet's pods in
+// portcullis-ingress by app.kubernetes.io/name, else its pod in the core
+// namespace by portcullis.io/component.
+func DefaultTraefikPeer(ha bool, core string) Peer {
+	if ha {
+		return Peer{Namespace: IngressNamespace, Key: "app.kubernetes.io/name", Value: "traefik"}
+	}
+	if core == "" {
+		core = CoreNamespace
+	}
+	return Peer{Namespace: core, Key: LabelComponent, Value: "traefik"}
+}
 
 // PolicyInput are the facts InstancePolicies needs beyond the plan.
 type PolicyInput struct {
@@ -90,10 +129,23 @@ func InstancePolicies(in PolicyInput) ([]*unstructured.Unstructured, error) {
 			return nil, err
 		}
 	}
+	// Each peer in its own namespace (core's admission judges each
+	// against its own params key): Traefik's from TraefikPeer (in HA
+	// portcullis-ingress), mcp-gate's and wg's the core namespace.
+	traefik := in.Settings.TraefikPeer
+	if traefik == (Peer{}) {
+		traefik = DefaultTraefikPeer(in.Settings.HA, core)
+	}
+	peers := map[string]Peer{
+		"traefik":  traefik,
+		"mcp-gate": {Namespace: core, Key: LabelComponent, Value: "mcp-gate"},
+		"wg":       {Namespace: core, Key: LabelComponent, Value: "wg"},
+	}
 	corePeer := func(component string) []networkingv1.NetworkPolicyPeer {
+		p := peers[component]
 		return []networkingv1.NetworkPolicyPeer{{
-			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{nsLabel: core}},
-			PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{LabelComponent: component}},
+			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{nsLabel: p.Namespace}},
+			PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{p.Key: p.Value}},
 		}}
 	}
 	portsOf := func(ps []int) []networkingv1.NetworkPolicyPort {
@@ -173,10 +225,7 @@ func InstancePolicies(in PolicyInput) ([]*unstructured.Unstructured, error) {
 		}
 		port := intstr.FromInt32(int32(9001 + *in.VPNSlot))
 		if err := add("vpn-edge", map[string]string{LabelVPNSlot: fmt.Sprint(*in.VPNSlot)}, egress, nil, []networkingv1.NetworkPolicyEgressRule{{
-			To: []networkingv1.NetworkPolicyPeer{{
-				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{nsLabel: core}},
-				PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{LabelComponent: "wg"}},
-			}},
+			To:    corePeer("wg"),
 			Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
 		}}); err != nil {
 			return nil, err

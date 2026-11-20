@@ -319,3 +319,61 @@ func SecurityOption(opts []string, name string) bool {
 	}
 	return false
 }
+
+// The instance priorities (contract §20.6); an app's pods run at the
+// priority class portcullis-<priority>. "core" is never an app's
+// (portcullis-core is core's only class, ruling I5).
+const (
+	PriorityCritical = "critical"
+	PriorityHigh     = "high"
+	PriorityNormal   = "normal"
+	PriorityLow      = "low"
+)
+
+// The Runs on modes (contract §20.6).
+const (
+	RunsOnAnywhere = "anywhere"
+	RunsOnPrefer   = "prefer"
+	RunsOnOnly     = "only"
+)
+
+// Availability is an instance's priority and Runs on choice as the
+// Kubernetes translator renders it (contract §3.4, §20.6). The zero
+// value is the default: normal, anywhere.
+type Availability struct {
+	// Priority is critical, high, normal or low ("" = normal).
+	Priority string
+	RunsOn   RunsOn
+}
+
+// RunsOn is where an instance's pods may run (contract §20.6): anywhere
+// (no field), prefer (exactly one of Class home|cloud, Site or Nodes)
+// or only (Nodes).
+type RunsOn struct {
+	// Mode is anywhere, prefer or only ("" = anywhere).
+	Mode        string
+	Class, Site string
+	// Nodes are the chosen nodes (1–16) of prefer and only.
+	Nodes []string
+	// Small are the chosen nodes that are small (portcullis.io/class
+	// small in the cluster snapshot): only an only choice may name one
+	// (R2: the pod then names the class itself and tolerates the small
+	// taint). Every entry is one of Nodes.
+	Small []string
+}
+
+// PriorityOrDefault is a's priority, normal when unset (a nil a too).
+func (a *Availability) PriorityOrDefault() string {
+	if a == nil || a.Priority == "" {
+		return PriorityNormal
+	}
+	return a.Priority
+}
+
+// ModeOrDefault is a's Runs on mode, anywhere when unset (a nil a too).
+func (a *Availability) ModeOrDefault() string {
+	if a == nil || a.RunsOn.Mode == "" {
+		return RunsOnAnywhere
+	}
+	return a.RunsOn.Mode
+}

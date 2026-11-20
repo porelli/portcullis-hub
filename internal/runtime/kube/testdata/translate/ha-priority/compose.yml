@@ -1,0 +1,16 @@
+services:
+  web:
+    image: docker.io/ealen/echo-server:0.9.2
+    user: "10001:10001"
+    mem_limit: 128m
+    networks: [default, portcullis-proxy]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.echo.rule: Host(`echo.example.org`)
+      traefik.http.routers.echo.entrypoints: websecure
+      traefik.http.routers.echo.tls.options: authaware@file
+      traefik.http.routers.echo.middlewares: client-headers@file,portcullis-auth@docker
+      traefik.http.services.echo.loadbalancer.server.port: "8080"
+networks:
+  portcullis-proxy:
+    external: true

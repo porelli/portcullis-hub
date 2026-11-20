@@ -1,0 +1,16 @@
+services:
+  app:
+    image: docker.io/library/nginx:1.29
+    user: "1000:1000"
+    volumes:
+      - data:/var/lib/app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  migrate:
+    image: docker.io/library/alpine:3.24.3
+    user: "1000:1000"
+    command: ["true"]
+    restart: "no"
+volumes:
+  data: {}

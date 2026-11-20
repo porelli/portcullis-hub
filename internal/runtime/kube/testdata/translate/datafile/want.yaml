@@ -156,12 +156,26 @@ spec:
         portcullis.io/net-default: "true"
         portcullis.io/service: app
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: app
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext:
           runAsGroup: 101
           runAsUser: 101
@@ -185,7 +199,9 @@ spec:
         image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
         imagePullPolicy: IfNotPresent
         name: portcullis-bin
-        resources: {}
+        resources:
+          requests:
+            cpu: 50m
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -197,6 +213,7 @@ spec:
         volumeMounts:
         - mountPath: /portcullis-bin
           name: portcullis-bin
+      priorityClassName: portcullis-normal
       securityContext:
         fsGroup: 101
         seccompProfile:

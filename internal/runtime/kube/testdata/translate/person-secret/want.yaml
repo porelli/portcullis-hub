@@ -144,12 +144,26 @@ spec:
         portcullis.io/net-default: "true"
         portcullis.io/service: samba
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - image: ghcr.io/porelli/portcullis-samba:4.22@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: samba
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext:
           runAsGroup: 10001
           runAsUser: 10001
@@ -173,7 +187,9 @@ spec:
         image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
         imagePullPolicy: IfNotPresent
         name: portcullis-bin
-        resources: {}
+        resources:
+          requests:
+            cpu: 50m
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -185,6 +201,7 @@ spec:
         volumeMounts:
         - mountPath: /portcullis-bin
           name: portcullis-bin
+      priorityClassName: portcullis-normal
       securityContext:
         fsGroup: 10001
         seccompProfile:

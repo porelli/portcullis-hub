@@ -1,0 +1,160 @@
+---
+# step 0 wait none
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    portcullis.io/instance: ha-runs-on-only-small
+    portcullis.io/owner: hub
+  name: ha-runs-on-only-small--env
+  namespace: portcullis-apps
+type: Opaque
+---
+# step 0 wait none
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    portcullis.io/instance: ha-runs-on-only-small
+    portcullis.io/owner: hub
+  name: ha-runs-on-only-small--pods
+  namespace: portcullis-apps
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    portcullis.io/instance: ha-runs-on-only-small
+status:
+  loadBalancer: {}
+---
+# step 0 wait none
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    portcullis.io/instance: ha-runs-on-only-small
+    portcullis.io/owner: hub
+  name: ha-runs-on-only-small--net-lan
+  namespace: portcullis-apps
+spec:
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-runs-on-only-small
+          portcullis.io/net-lan: "true"
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          portcullis.io/instance: ha-runs-on-only-small
+          portcullis.io/net-lan: "true"
+  podSelector:
+    matchLabels:
+      portcullis.io/instance: ha-runs-on-only-small
+      portcullis.io/net-lan: "true"
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# step 1 wait none
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    portcullis.io/instance: ha-runs-on-only-small
+    portcullis.io/service: sensor
+  name: ha-runs-on-only-small--sensor
+  namespace: portcullis-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      portcullis.io/instance: ha-runs-on-only-small
+      portcullis.io/service: sensor
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        portcullis.io/services: '{"sensor":"sensor"}'
+      labels:
+        portcullis.io/instance: ha-runs-on-only-small
+        portcullis.io/net-lan: "true"
+        portcullis.io/service: sensor
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - vm1
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - vm3
+              - key: portcullis.io/class
+                operator: In
+                values:
+                - small
+      automountServiceAccountToken: false
+      containers:
+      - args:
+        - sleep
+        - infinity
+        image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
+        imagePullPolicy: IfNotPresent
+        name: sensor
+        resources:
+          limits:
+            memory: 64Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          runAsGroup: 1000
+          runAsUser: 1000
+      dnsConfig:
+        searches:
+        - ha-runs-on-only-small--pods.portcullis-apps.svc.cluster.local
+      enableServiceLinks: false
+      hostname: sensor
+      priorityClassName: portcullis-low
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      subdomain: ha-runs-on-only-small--pods
+      tolerations:
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 30
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 30
+      - effect: NoSchedule
+        key: portcullis.io/small
+        operator: Equal
+        value: "true"

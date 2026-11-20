@@ -132,6 +132,15 @@ spec:
         portcullis.io/net-default: "true"
         portcullis.io/service: vpn
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - env:
@@ -143,20 +152,31 @@ spec:
         image: docker.io/tailscale/tailscale:v1.90.0@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: vpn
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext:
           runAsGroup: 1000
           runAsUser: 1000
       - image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: app
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext: {}
       dnsConfig:
         searches:
         - sidecar--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: vpn
+      priorityClassName: portcullis-normal
       securityContext:
         fsGroup: 1000
         seccompProfile:

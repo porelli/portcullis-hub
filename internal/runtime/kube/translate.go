@@ -28,7 +28,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -56,6 +58,13 @@ type Settings struct {
 	// (PORTCULLIS_KUBE_API_ENDPOINTS' addresses), excluded too.
 	NodeAddresses []string
 	APIAddresses  []string
+	// HA is HUB_HA=on (contract §20.1 "HA mode"): every app pod gets the
+	// not-ready and unreachable tolerations at HATolerationSeconds.
+	HA bool
+	// TraefikPeer is Traefik as a NetworkPolicy peer of the routed ports
+	// (the admission params' traefik value, HUB_TRAEFIK_PEER); the zero
+	// value is DefaultTraefikPeer(HA, core namespace).
+	TraefikPeer Peer
 }
 
 // AppFile is a data file (§13.7) bound into the instance: its name, the
@@ -111,6 +120,9 @@ type Input struct {
 	// portcullis.io/reach: vpn; the admission policy keeps them off
 	// websecure).
 	VPNOnly bool
+	// Availability is the instance's priority and Runs on choice
+	// (contract §20.6; nil = normal / anywhere).
+	Availability *runtime.Availability
 }
 
 // Companion is a rendered AI companion: its compose service, gate alias
@@ -202,6 +214,8 @@ type translator struct {
 	// rootPVCs: PVC → the root one-shot job mounting it (a root job
 	// never owns a volume: a non-root service must).
 	rootPVCs map[string]string
+	// place is the instance's priority, affinity and tolerations.
+	place placement
 }
 
 func (t *translator) claim(kind, name, from string) error {
@@ -235,6 +249,11 @@ func (t *translator) run() (Plan, error) {
 	if err := t.compat(); err != nil {
 		return Plan{}, err
 	}
+	pl, err := place(t.in)
+	if err != nil {
+		return Plan{}, err
+	}
+	t.place = pl
 	names := slices.Sorted(func(yield func(string) bool) {
 		for n := range m.Services {
 			if !yield(n) {
@@ -925,6 +944,7 @@ func (t *translator) workload(n string, members []string) (*unstructured.Unstruc
 		}
 	}
 	spec := ps.finish()
+	t.place.apply(&spec)
 	labels := t.labels(n)
 	podLabels := t.labels(n)
 	for _, net := range ps.networks {
@@ -1159,15 +1179,12 @@ func (p *podSpec) container(n string, s types.ServiceConfig, main bool) error {
 	if s.StopSignal != "" {
 		c.Lifecycle = &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"kill", "-s", strings.TrimPrefix(s.StopSignal, "SIG"), "1"}}}}
 	}
-	// Memory.
-	mem := s.MemLimit
-	if s.Deploy != nil && s.Deploy.Resources.Limits != nil && s.Deploy.Resources.Limits.MemoryBytes > 0 {
-		mem = s.Deploy.Resources.Limits.MemoryBytes
+	// Memory: the limit is the request; none = DefaultMemory (§3.4).
+	q := resource.MustParse(DefaultMemory)
+	if mem := serviceMemory(s); mem > 0 {
+		q = *resource.NewQuantity(mem, resource.BinarySI)
 	}
-	if mem > 0 {
-		q := *resource.NewQuantity(int64(mem), resource.BinarySI)
-		c.Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: q}, Requests: corev1.ResourceList{corev1.ResourceMemory: q}}
-	}
+	c.Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: q}, Requests: corev1.ResourceList{corev1.ResourceMemory: q.DeepCopy()}}
 	// Networks.
 	for _, net := range slices.Sorted(mapKeys(s.Networks)) {
 		if !slices.Contains(p.networks, net) {
@@ -1815,4 +1832,203 @@ func sanitizeLabel(s string) string {
 func isLoopback(ip string) bool {
 	a, err := netip.ParseAddr(ip)
 	return err == nil && a.IsLoopback()
+}
+
+// Placement and requests (contract §3.4, §20.6).
+
+// DefaultCPURequest is every app container's CPU request (no CPU limit:
+// compose cpus / cpu_shares aren't carried).
+const DefaultCPURequest = "50m"
+
+// DefaultMemory is the memory request and limit of a service without
+// mem_limit (the doctor's template_no_memory_limit names it).
+const DefaultMemory = "512Mi"
+
+// maxRunsOnNodes bounds a prefer or only choice's nodes (§20.6).
+const maxRunsOnNodes = 16
+
+// placement is an instance's rendered priority, node affinity and
+// tolerations, the same on every pod of it.
+type placement struct {
+	class       string
+	affinity    *corev1.Affinity
+	tolerations []corev1.Toleration
+}
+
+// classExpr is a portcullis.io/class requirement on the small class.
+func classExpr(op corev1.NodeSelectorOperator) corev1.NodeSelectorRequirement {
+	return corev1.NodeSelectorRequirement{Key: LabelNodeClass, Operator: op, Values: []string{ClassSmall}}
+}
+
+// runsOnNodes are a choice's nodes checked: 1–16 distinct node names
+// (label values: kubernetes.io/hostname is one), never echoed.
+func runsOnNodes(nodes []string) ([]string, error) {
+	if len(nodes) == 0 || len(nodes) > maxRunsOnNodes {
+		return nil, refused("runs_on names %d nodes (1–%d)", len(nodes), maxRunsOnNodes)
+	}
+	seen := map[string]bool{}
+	for _, n := range nodes {
+		if n == "" || len(validation.IsValidLabelValue(n)) > 0 || validation.IsDNS1123Subdomain(n) != nil {
+			return nil, refused("runs_on names a node that isn't a node name")
+		}
+		if seen[n] {
+			return nil, refused("runs_on names a node twice")
+		}
+		seen[n] = true
+	}
+	return slices.Sorted(slices.Values(nodes)), nil
+}
+
+// place renders in's Availability and HA mode (refused when the
+// availability isn't one §20.6 allows: the API refuses it first).
+func place(in Input) (placement, error) {
+	a := in.Availability
+	var pl placement
+	switch p := a.PriorityOrDefault(); p {
+	case runtime.PriorityCritical, runtime.PriorityHigh, runtime.PriorityNormal, runtime.PriorityLow:
+		pl.class = PriorityClassName(p)
+	default:
+		// portcullis-core is core's only (ruling I5); nothing else exists.
+		return pl, refused("priority must be critical, high, normal or low")
+	}
+	var r runtime.RunsOn
+	if a != nil {
+		r = a.RunsOn
+	}
+	notSmall := corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{classExpr(corev1.NodeSelectorOpNotIn)}}
+	var required []corev1.NodeSelectorTerm
+	var preferred []corev1.PreferredSchedulingTerm
+	small := false
+	switch a.ModeOrDefault() {
+	case runtime.RunsOnAnywhere:
+		if r.Class != "" || r.Site != "" || len(r.Nodes) > 0 || len(r.Small) > 0 {
+			return pl, refused("runs_on anywhere takes no class, site or nodes")
+		}
+		required = []corev1.NodeSelectorTerm{notSmall}
+	case runtime.RunsOnPrefer:
+		n := 0
+		for _, set := range []bool{r.Class != "", r.Site != "", len(r.Nodes) > 0} {
+			if set {
+				n++
+			}
+		}
+		if n != 1 {
+			return pl, refused("runs_on prefer takes exactly one of class, site or nodes")
+		}
+		if len(r.Small) > 0 || r.Class == ClassSmall {
+			return pl, refused("small nodes take only instances pinned to them: use Only")
+		}
+		var e corev1.NodeSelectorRequirement
+		switch {
+		case r.Class != "":
+			if r.Class != "home" && r.Class != "cloud" {
+				return pl, refused("runs_on prefer: class must be home or cloud")
+			}
+			e = corev1.NodeSelectorRequirement{Key: LabelNodeClass, Operator: corev1.NodeSelectorOpIn, Values: []string{r.Class}}
+		case r.Site != "":
+			if len(validation.IsValidLabelValue(r.Site)) > 0 {
+				return pl, refused("runs_on prefer names a site that isn't a site name")
+			}
+			e = corev1.NodeSelectorRequirement{Key: LabelNodeSite, Operator: corev1.NodeSelectorOpIn, Values: []string{r.Site}}
+		default:
+			nodes, err := runsOnNodes(r.Nodes)
+			if err != nil {
+				return pl, err
+			}
+			e = corev1.NodeSelectorRequirement{Key: LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: nodes}
+		}
+		required = []corev1.NodeSelectorTerm{notSmall}
+		preferred = []corev1.PreferredSchedulingTerm{{Weight: 100, Preference: corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{e}}}}
+	case runtime.RunsOnOnly:
+		if r.Class != "" || r.Site != "" {
+			return pl, refused("runs_on only takes nodes, and no class or site")
+		}
+		nodes, err := runsOnNodes(r.Nodes)
+		if err != nil {
+			return pl, refused("runs_on only takes nodes, and no class or site")
+		}
+		var big, sm []string
+		for _, n := range nodes {
+			if slices.Contains(r.Small, n) {
+				sm = append(sm, n)
+			} else {
+				big = append(big, n)
+			}
+		}
+		for _, n := range r.Small {
+			if !slices.Contains(nodes, n) {
+				return pl, refused("runs_on only: a small node isn't one of the chosen nodes")
+			}
+		}
+		if len(big) > 0 {
+			required = append(required, corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: big}, classExpr(corev1.NodeSelectorOpNotIn)}})
+		}
+		if len(sm) > 0 {
+			required = append(required, corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: sm}, classExpr(corev1.NodeSelectorOpIn)}})
+			small = true
+		}
+	default:
+		return pl, refused("runs_on mode must be anywhere, prefer or only")
+	}
+	pl.affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution:  &corev1.NodeSelector{NodeSelectorTerms: required},
+		PreferredDuringSchedulingIgnoredDuringExecution: preferred,
+	}}
+	if in.Settings.HA {
+		secs := int64(HATolerationSeconds)
+		for _, k := range []string{corev1.TaintNodeNotReady, corev1.TaintNodeUnreachable} {
+			pl.tolerations = append(pl.tolerations, corev1.Toleration{Key: k, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &secs})
+		}
+	}
+	if small {
+		pl.tolerations = append(pl.tolerations, corev1.Toleration{Key: TaintSmall, Operator: corev1.TolerationOpEqual, Value: "true", Effect: corev1.TaintEffectNoSchedule})
+	}
+	return pl, nil
+}
+
+// apply sets pl and the CPU request on spec (every container, the init
+// ones too; never a CPU limit).
+func (pl placement) apply(spec *corev1.PodSpec) {
+	spec.PriorityClassName = pl.class
+	spec.Affinity = pl.affinity.DeepCopy()
+	if len(pl.tolerations) > 0 {
+		spec.Tolerations = slices.Clone(pl.tolerations)
+	}
+	cpu := resource.MustParse(DefaultCPURequest)
+	for _, cs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
+		for i := range cs {
+			if cs[i].Resources.Requests == nil {
+				cs[i].Resources.Requests = corev1.ResourceList{}
+			}
+			cs[i].Resources.Requests[corev1.ResourceCPU] = cpu
+			delete(cs[i].Resources.Limits, corev1.ResourceCPU)
+		}
+	}
+}
+
+// NoMemoryLimit are the services of m without a memory limit (compose
+// mem_limit, or deploy's): each runs with DefaultMemory (§3.4), what the
+// doctor's template_no_memory_limit reports (Info, naming the instance).
+func NoMemoryLimit(m *types.Project) []string {
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, n := range slices.Sorted(mapKeys(m.Services)) {
+		if serviceMemory(m.Services[n]) == 0 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// serviceMemory is s's memory limit in bytes (0 = none).
+func serviceMemory(s types.ServiceConfig) int64 {
+	mem := int64(s.MemLimit)
+	if s.Deploy != nil && s.Deploy.Resources.Limits != nil && s.Deploy.Resources.Limits.MemoryBytes > 0 {
+		mem = int64(s.Deploy.Resources.Limits.MemoryBytes)
+	}
+	return mem
 }

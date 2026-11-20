@@ -195,6 +195,15 @@ spec:
         portcullis.io/net-backend: "true"
         portcullis.io/service: db
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - env:
@@ -224,7 +233,12 @@ spec:
           failureThreshold: 3
           periodSeconds: 10
           timeoutSeconds: 5
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext:
           runAsGroup: 70
           runAsUser: 70
@@ -256,7 +270,9 @@ spec:
         image: ghcr.io/porelli/portcullis-hub@sha256:1111111111111111111111111111111111111111111111111111111111111111
         imagePullPolicy: IfNotPresent
         name: portcullis-bin
-        resources: {}
+        resources:
+          requests:
+            cpu: 50m
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -276,7 +292,9 @@ spec:
         image: docker.io/library/postgres:17.6@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: portcullis-seed-1
-        resources: {}
+        resources:
+          requests:
+            cpu: 50m
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -291,6 +309,7 @@ spec:
           readOnly: true
         - mountPath: /portcullis-seed
           name: vol-db-data
+      priorityClassName: portcullis-normal
       securityContext:
         fsGroup: 70
         seccompProfile:
@@ -324,6 +343,15 @@ spec:
         portcullis.io/net-default: "true"
         portcullis.io/service: migrate
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - args:
@@ -333,7 +361,12 @@ spec:
         image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: migrate
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext:
           runAsUser: 10001
       dnsConfig:
@@ -341,6 +374,7 @@ spec:
         - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: migrate
+      priorityClassName: portcullis-normal
       restartPolicy: Never
       securityContext:
         fsGroup: 10001
@@ -370,6 +404,15 @@ spec:
         portcullis.io/one-shot: "true"
         portcullis.io/service: perms
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - args:
@@ -379,7 +422,12 @@ spec:
         image: docker.io/library/alpine:3.24.3@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: perms
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -397,6 +445,7 @@ spec:
         - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: perms
+      priorityClassName: portcullis-normal
       restartPolicy: Never
       securityContext:
         fsGroup: 10001
@@ -432,18 +481,33 @@ spec:
         portcullis.io/net-default: "true"
         portcullis.io/service: app
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: portcullis.io/class
+                operator: NotIn
+                values:
+                - small
       automountServiceAccountToken: false
       containers:
       - image: docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab
         imagePullPolicy: IfNotPresent
         name: app
-        resources: {}
+        resources:
+          limits:
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
         securityContext: {}
       dnsConfig:
         searches:
         - jobs--pods.portcullis-apps.svc.cluster.local
       enableServiceLinks: false
       hostname: app
+      priorityClassName: portcullis-normal
       securityContext:
         seccompProfile:
           type: RuntimeDefault

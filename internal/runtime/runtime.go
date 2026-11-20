@@ -55,6 +55,10 @@ type ProjectInputs struct {
 	VPNOnly bool
 	// Companions: the rendered AI companions mcp-gate calls.
 	Companions []CompanionInput
+	// Availability is the instance's priority and Runs on choice
+	// (contract §20.6; nil = the defaults normal / anywhere). The Hub
+	// maps state.yaml's instances.<id>.availability onto it.
+	Availability *Availability
 }
 
 // CompanionInput is a rendered AI companion: its compose service, gate
