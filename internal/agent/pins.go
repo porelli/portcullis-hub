@@ -1,13 +1,13 @@
 package agent
 
 import (
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/pkinode"
 	"github.com/portcullis/hub/internal/servers"
 )
 
@@ -32,39 +32,12 @@ var ErrClock = errors.New("the certificate isn't valid at the worker's clock (±
 // link.control. Anything else — another CA, a person's certificate, a
 // node certificate — is refused.
 func verifyControl(raw [][]byte, ca *x509.Certificate, now time.Time) (string, error) {
-	if len(raw) == 0 || ca == nil {
-		return "", errors.New("no client certificate")
+	leaf, err := pkinode.Verify(raw, ca, now, ClockTolerance, x509.ExtKeyUsageClientAuth)
+	if errors.Is(err, pkinode.ErrValidity) {
+		return "", fmt.Errorf("%w%s", ErrClock, strings.TrimPrefix(err.Error(), pkinode.ErrValidity.Error()))
 	}
-	leaf, err := x509.ParseCertificate(raw[0])
 	if err != nil {
-		return "", errors.New("client certificate unreadable")
-	}
-	roots := x509.NewCertPool()
-	roots.AddCert(ca)
-	inter := x509.NewCertPool()
-	for _, r := range raw[1:] {
-		if c, err := x509.ParseCertificate(r); err == nil && !c.Equal(ca) {
-			inter.AddCert(c)
-		}
-	}
-	opts := func(at time.Time) x509.VerifyOptions {
-		return x509.VerifyOptions{Roots: roots, Intermediates: inter, CurrentTime: at, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
-	}
-	ok := false
-	for _, at := range []time.Time{now, now.Add(-ClockTolerance), now.Add(ClockTolerance)} {
-		if _, err := leaf.Verify(opts(at)); err == nil {
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		// A clock problem only when the chain verifies inside the leaf's
-		// own validity window (the standard library checks validity first).
-		mid := leaf.NotBefore.Add(leaf.NotAfter.Sub(leaf.NotBefore) / 2)
-		if _, err := leaf.Verify(opts(mid)); err == nil {
-			return "", fmt.Errorf("%w (valid %s – %s)", ErrClock, leaf.NotBefore.UTC().Format(time.RFC3339), leaf.NotAfter.UTC().Format(time.RFC3339))
-		}
-		return "", errors.New("client certificate not issued by the pinned pki_node CA for client auth")
+		return "", err
 	}
 	switch cn := leaf.Subject.CommonName; cn {
 	case CNControl, CNLink:
@@ -81,18 +54,7 @@ func caFromChain(raw [][]byte, caSHA string) (*x509.Certificate, error) {
 	if !servers.ValidSHA256Hex(caSHA) {
 		return nil, errors.New("no CA pin")
 	}
-	for _, r := range raw[1:] {
-		sum := sha256.Sum256(r)
-		if hex.EncodeToString(sum[:]) != caSHA {
-			continue
-		}
-		c, err := x509.ParseCertificate(r)
-		if err != nil || !c.IsCA || c.CheckSignatureFrom(c) != nil {
-			return nil, errors.New("the pinned CA in the chain is not a self-signed CA certificate")
-		}
-		return c, nil
-	}
-	return nil, errors.New("the client chain has no certificate matching the join code's ca_sha256")
+	return pkinode.CAFromChain(raw, caSHA)
 }
 
 // spkiSHA is a certificate's SubjectPublicKeyInfo DER (the proof's input

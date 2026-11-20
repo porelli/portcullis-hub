@@ -1,0 +1,28 @@
+# portcullis-nodeagent (contract §20.4): the cluster node's host service.
+# Not a container to run: an image carrying the two static binaries
+# /nodeagent-linux-amd64 and /nodeagent-linux-arm64 (and their .sha256),
+# which core's nodeadm image copies (`COPY --from=nodeagent …`, pinned by
+# digest after the Hub merge, plan Task 36 / pre-flight P20) and serves on
+# /node/nodeagent-<arch>. Both are cross-compiled on the build platform
+# (pre-flight H4: built, never run on arm64 here).
+# golang:1.27-alpine
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
+ARG VERSION=0.0.0-dev
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -e; mkdir -p /out; \
+    for arch in amd64 arm64; do \
+      CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -buildvcs=false \
+        -ldflags="-s -w -X github.com/portcullis/hub/internal/version.Version=${VERSION}" \
+        -o /out/nodeagent-linux-$arch ./cmd/portcullis-nodeagent; \
+      (cd /out && sha256sum nodeagent-linux-$arch > nodeagent-linux-$arch.sha256); \
+    done
+
+FROM scratch
+COPY --from=build /out/ /
+LABEL io.portcullis.nodeagent="1"
