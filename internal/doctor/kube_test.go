@@ -30,7 +30,7 @@ func TestKubeKinds(t *testing.T) {
 	if got := runKube(&KubeIn{Admission: "ok", Netpol: "proven", Why: "the cluster check is missing"}); got[KindClusterUnverified] != 1 {
 		t.Errorf("unverified: %v", got)
 	}
-	if got := runKube(&KubeIn{Verified: true, Admission: "ok", Netpol: "proven", ReloadDegraded: []string{"b", "a"}, APIPublic: "203.0.113.7:6443"}); got[KindReloadDegraded] != 2 || got[KindKubeAPIPublic] != 1 {
+	if got := runKube(&KubeIn{Verified: true, Admission: "ok", Netpol: "proven", ReloadDegraded: []string{"b", "a"}, APIPublic: map[string][]string{"n1": {"203.0.113.7:6443"}}}); got[KindReloadDegraded] != 2 || got[KindKubeAPIPublic] != 1 {
 		t.Errorf("info/warning: %v", got)
 	}
 }

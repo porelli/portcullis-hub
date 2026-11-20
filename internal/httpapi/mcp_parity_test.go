@@ -457,8 +457,8 @@ func TestToolParity(t *testing.T) {
 		"mail_status",
 		// Availability (§20.6).
 		"instance_availability_get",
-		// The HA page (§20.1).
-		"ha_status"} {
+		// The HA page (§20.1) and the doctor's HA findings (§14.5).
+		"ha_status", "ha_findings"} {
 		if byName[n].Class != ClassRead {
 			t.Errorf("tool %s: class %q, want R", n, byName[n].Class)
 		}

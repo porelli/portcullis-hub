@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -21,15 +23,18 @@ var KubeKinds = []string{KindNetpolNotEnforced, KindAdmissionGuardMissing, KindC
 // KubeIn is the cluster guard's state (contract §6 "On Kubernetes"):
 // verified and its why, the admission self-test (ok|missing|unknown),
 // the NetworkPolicy probe (proven|unproven), the instances whose last
-// reload had to restart the pod (no kill in the image) and the API or
-// kubelet answering on the node's external address ("" = not seen).
+// reload had to restart the pod (no kill in the image) and the nodes
+// whose API or kubelet answers on their public address.
 type KubeIn struct {
 	Verified       bool
 	Why            string
 	Admission      string
 	Netpol         string
 	ReloadDegraded []string
-	APIPublic      string
+	// APIPublic: node → the "<public ip>:<port>" that answered (:6443
+	// the API, :10250 the kubelet), judged for every node's public
+	// address in the snapshot (§20.2).
+	APIPublic map[string][]string
 	// Gateways are the confirmed VPN gateway pods, "<provider> <ip>
 	// <pod uid>" (K5).
 	Gateways []string
@@ -94,15 +99,20 @@ func (c kubeCheck) Run(in *Inputs) []Finding {
 		}
 		return out
 	case KindKubeAPIPublic:
-		if k.APIPublic == "" {
-			return nil
+		var out []Finding
+		for _, node := range slices.Sorted(maps.Keys(k.APIPublic)) {
+			addrs := slices.Sorted(slices.Values(k.APIPublic[node]))
+			if len(addrs) == 0 {
+				continue
+			}
+			out = append(out, Finding{FP: Fingerprint(c.kind, node), Kind: c.kind, Severity: Warning,
+				Title:  "The Kubernetes API or the kubelet answers on node " + node + "'s public address.",
+				Why:    strings.Join(addrs, ", ") + " answers from outside the mesh: restrict it in the firewall (Portcullis never changes a firewall).",
+				Class:  FixExplain,
+				Steps:  []string{"Allow :6443 and :10250 on " + node + " only from the addresses that administer the cluster."},
+				Inputs: Digest([]any{node, addrs})})
 		}
-		return []Finding{{FP: Fingerprint(c.kind), Kind: c.kind, Severity: Warning,
-			Title:  "The Kubernetes API or the kubelet answers on the node's public address.",
-			Why:    k.APIPublic + " answers from outside: restrict it in the firewall (Portcullis never changes a firewall).",
-			Class:  FixExplain,
-			Steps:  []string{"Allow :6443 and :10250 only from the addresses that administer the cluster."},
-			Inputs: Digest(k.APIPublic)}}
+		return out
 	}
 	return nil
 }

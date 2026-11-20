@@ -109,6 +109,9 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	// The usage kinds' inputs: the sampler's cache, never the engine.
 	usageIn := h.usageDoctorIn()
 	storageIn := h.storageDoctorIn()
+	// The HA kinds' inputs (nodeadm, the front door, the models, the port
+	// dials): never under mu; nil off Kubernetes.
+	haIn, apiPublic := h.doctorHAIn(ctx)
 	addrs, derr := h.domainAddrs(ctx)
 	if derr != nil {
 		log.Printf("doctor: couldn't resolve %s (%v): exposure not checked against its addresses", h.cfg.Domain, derr)
@@ -119,7 +122,10 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
 		LocalNetworks: h.localNetworksLocked(), ServerLocalNetworks: h.serverLocalNetworksLocked(), ServerBindRoots: h.serverBindRootsLocked(), NotLocal: h.tunnelRangesLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn,
-		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), Mesh: h.doctorMeshIn(), Published: h.doctorPublishedIn(), SignInTOTP: totpIn, Mail: mailIn, SSH: sshIn, Servers: h.serversDoctorInLocked(backups), Usage: usageIn, Storage: storageIn}
+		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), Mesh: h.doctorMeshIn(), Published: h.doctorPublishedIn(), SignInTOTP: totpIn, Mail: mailIn, SSH: sshIn, Servers: h.serversDoctorInLocked(backups), Usage: usageIn, Storage: storageIn, HA: haIn}
+	if in.Kube != nil {
+		in.Kube.APIPublic = apiPublic
+	}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}

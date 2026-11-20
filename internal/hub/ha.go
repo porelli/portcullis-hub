@@ -151,6 +151,12 @@ type HAView struct {
 type haPage struct {
 	reads     singleflight.Group
 	frontdoor func(ctx context.Context) ([]byte, error)
+	// The doctor's HA inputs (doctor_ha.go; nil: the defaults): the last
+	// successful core backup, the write fence and the dial of a node's
+	// public API and kubelet ports.
+	lastBackup func(ctx context.Context) (*time.Time, error)
+	lease      func() error
+	dialAPI    func(ctx context.Context, addr string) bool
 }
 
 // haReadWait bounds one shared refresh (the snapshot and the status).
@@ -200,6 +206,16 @@ func (h *Hub) HA(ctx context.Context) (*HAView, error) {
 	if err := h.HAOn(); err != nil {
 		return nil, err
 	}
+	r, err := h.haShared(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return h.haView(r), nil
+}
+
+// haShared is one shared refresh's reads (the HA page's and the
+// doctor's: one snapshot read at a time).
+func (h *Hub) haShared(ctx context.Context) (*haRead, error) {
 	ch := h.ha.reads.DoChan(opKeyHA, func() (v any, err error) {
 		// singleflight re-panics in its own goroutine, out of net/http's
 		// recover: a panic here would end the Hub (the single writer).
@@ -218,8 +234,7 @@ func (h *Hub) HA(ctx context.Context) (*HAView, error) {
 		if res.Err != nil {
 			return nil, res.Err
 		}
-		r := res.Val.(*haRead)
-		return h.haView(r), nil
+		return res.Val.(*haRead), nil
 	}
 }
 
