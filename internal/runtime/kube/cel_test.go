@@ -19,7 +19,7 @@ import (
 // here, before it reaches a cluster (core applies these files byte for
 // byte).
 func TestAdmissionCELCompiles(t *testing.T) {
-	// The nine policies: policies.yaml and (NEW, HA) nodeadm-tokens.yaml.
+	// The ten policies: policies.yaml and (NEW, HA) nodeadm-tokens.yaml.
 	var b []byte
 	for _, f := range []string{"testdata/admission/policies.yaml", "testdata/admission/nodeadm-tokens.yaml"} {
 		f, err := os.ReadFile(f)
@@ -79,7 +79,7 @@ func TestAdmissionCELCompiles(t *testing.T) {
 			compile("matchCondition "+m.Name, m.Expression)
 		}
 	}
-	if policies != 9 || n < 120 {
+	if policies != 10 || n < 120 {
 		t.Fatalf("%d policies, %d expressions", policies, n)
 	}
 }

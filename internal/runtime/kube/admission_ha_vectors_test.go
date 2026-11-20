@@ -21,6 +21,7 @@ var haAdmissionTexts = []string{
 	"bootstrap tokens may carry only the group system:bootstrappers:k3s:default-node-token",
 	"only the CLI may attach to or port-forward a pod of the core namespace",
 	"nodeadm may delete only bootstrap token Secrets (bootstrap-token-<6 [a-z0-9]>) in kube-system",
+	"nodes can't set Portcullis placement labels or taints; nodeadm sets them",
 	"only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
 }
 
@@ -68,7 +69,7 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 		}
 		ha++
 		switch v.As {
-		case "hub", "intruder", "nodeadm", "cli", "daemonset-controller":
+		case "hub", "intruder", "nodeadm", "cli", "daemonset-controller", "node":
 		default:
 			t.Errorf("%s: as %q", v.Name, v.As)
 		}
