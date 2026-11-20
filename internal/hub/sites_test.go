@@ -324,7 +324,7 @@ func TestDoctorRTTHealthyOnly(t *testing.T) {
 	cf.na.rtt = map[string]map[string]int{"n1": {"n2": 2, "n3": 95}, "n2": {"n1": 90, "n3": 99}}
 	cf.h.settleClusterNodes(context.Background())
 	snap, _ := cf.na.Cluster(context.Background())
-	cf.h.collectRTT(context.Background(), snap)
+	cf.h.collectRTT(context.Background(), snap, cf.h.now())
 	in := cf.h.doctorMeshIn()
 	if in == nil || len(in.RTT) != 2 || in.RTT[0].To != "n2" || in.RTT[1].To != "n1" {
 		t.Errorf("doctor input %+v", in)
@@ -383,7 +383,7 @@ func TestSitesView(t *testing.T) {
 	cf.na.rtt["x1"] = map[string]int{}
 	cf.h.settleClusterNodes(context.Background())
 	snap, _ := cf.na.Cluster(context.Background())
-	cf.h.collectRTT(context.Background(), snap) // the tick's runs beside it
+	cf.h.collectRTT(context.Background(), snap, cf.h.now()) // the tick's runs beside it
 	sites, err := cf.h.Sites(context.Background())
 	if err != nil {
 		t.Fatal(err)

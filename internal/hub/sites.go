@@ -124,20 +124,24 @@ func (h *Hub) rttNodes(snap nodeadm.Snapshot) (known map[string]bool, mesh map[s
 }
 
 // startCollectRTT runs collectRTT in its own goroutine, one at a time: the
-// cluster tick (revokes, watches) never waits on a nodeagent's RTT.
+// cluster tick (revokes, watches) never waits on a nodeagent's RTT. The
+// clock is read here, on the tick's goroutine: the collection never reads
+// the Hub's clock (a test's injected one is set without a lock).
 func (h *Hub) startCollectRTT(ctx context.Context, snap nodeadm.Snapshot) {
 	if !h.cl.rtt.busy.CompareAndSwap(false, true) {
 		return
 	}
+	at := h.now()
 	go func() {
 		defer h.cl.rtt.busy.Store(false)
-		h.collectRTT(ctx, snap)
+		h.collectRTT(ctx, snap, at)
 	}()
 }
 
 // collectRTT reads every Ready node's round trips (in parallel, each call
-// bounded; one silent nodeagent never holds the others).
-func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot) {
+// bounded; one silent nodeagent never holds the others), recorded as read
+// at at.
+func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot, at time.Time) {
 	known, mesh := h.rttNodes(snap)
 	var wg sync.WaitGroup
 	for _, n := range snap.Nodes {
@@ -161,7 +165,7 @@ func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot) {
 				}
 				return
 			}
-			h.cl.rtt.set(id, cleanRTT(id, raw, known, false), h.now())
+			h.cl.rtt.set(id, cleanRTT(id, raw, known, false), at)
 		}()
 	}
 	wg.Wait()
