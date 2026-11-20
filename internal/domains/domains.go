@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // Defaults (contract §12.1).
@@ -191,6 +193,10 @@ func redact(msg string, creds map[string]string) string {
 
 // do sends one request; creds (if any) are redacted from every error.
 func (c *Client) do(ctx context.Context, method, path string, body any, creds map[string]string, out any) (int, error) {
+	// The write fence (contract §20.5): a Hub standing by changes nothing.
+	if err := fsutil.CheckRequest(method); err != nil {
+		return 0, err
+	}
 	sec, err := c.secret()
 	if err != nil {
 		return 0, err

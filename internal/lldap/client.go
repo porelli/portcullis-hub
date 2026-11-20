@@ -29,6 +29,8 @@ import (
 
 	"github.com/go-ldap/ldap/v3"
 	"github.com/hasura/go-graphql-client"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // DefaultCredentialsDir is where core mounts the service account (§9).
@@ -264,8 +266,20 @@ func (b *limitBody) Read(p []byte) (int, error) {
 
 func (b *limitBody) Close() error { return b.rc.Close() }
 
+// isMutation: query is a GraphQL mutation (an operation that writes).
+func isMutation(query string) bool {
+	return strings.HasPrefix(strings.TrimSpace(query), "mutation")
+}
+
 // graphql runs one query; a 401 triggers a single re-login and retry.
 func (c *Client) graphql(ctx context.Context, query string, vars map[string]interface{}, out interface{}) error {
+	// The write fence (contract §20.5): a Hub standing by changes nothing
+	// in LLDAP (queries still read).
+	if isMutation(query) {
+		if err := fsutil.CheckWrite(); err != nil {
+			return err
+		}
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		tok, err := c.currentToken(ctx, attempt > 0)
 		if err != nil {
@@ -467,6 +481,9 @@ func (c *Client) UserDN(user string) string {
 // SetPassword sets a user's password through the LDAP Password Modify
 // extended operation (RFC 3062), bound as the service account.
 func (c *Client) SetPassword(ctx context.Context, user, password string) error {
+	if err := fsutil.CheckWrite(); err != nil {
+		return err
+	}
 	if !ValidUsername(user) {
 		return fmt.Errorf("invalid username")
 	}

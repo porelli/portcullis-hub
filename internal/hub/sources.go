@@ -44,18 +44,31 @@ func gitSubcommand(args []string) string {
 }
 
 func runGit(timeout time.Duration, args ...string) ([]byte, error) {
+	parent := context.Background()
 	if !gitReadOnly[gitSubcommand(args)] {
 		if err := fsutil.CheckWrite(); err != nil {
 			return nil, err
 		}
+		// A writing git runs on the fence: the moment the Hub stands by
+		// its whole process group is killed (contract §20.5).
+		wctx, wcancel := fsutil.WriteContext(parent)
+		defer wcancel()
+		parent = wctx
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
+	killProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 	// Never prompt for credentials on a TTY-less server.
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	if err != nil && parent.Err() != nil {
+		if gerr := fsutil.CheckWrite(); gerr != nil {
+			return out, gerr
+		}
+	}
+	return out, err
 }
 
 func (h *Hub) autoLoadDefaultTemplates() {

@@ -16,6 +16,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/portcullis/hub/internal/fsutil"
@@ -30,6 +31,7 @@ type rig struct {
 	clock *clocktesting.FakeClock
 	f     *Fence
 	cut   atomic.Bool
+	done  chan struct{} // closed when Run returned
 }
 
 func newRig(t *testing.T) *rig {
@@ -55,6 +57,7 @@ func (r *rig) lead(t *testing.T) time.Time {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	r.done = done
 	go func() { r.f.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 	wctx, wcancel := context.WithTimeout(ctx, 10*time.Second)
@@ -211,5 +214,120 @@ func TestLeaseLostStopsInflightWrites(t *testing.T) {
 	}
 	if b2, _ := os.ReadFile(p); string(b2) != string(b) {
 		t.Errorf("file changed to %q", b2)
+	}
+}
+
+// TestStandByIsFinal: renewals cut, the clock past renewal + 10 s: the
+// fence stands by, Lost closes and Run returns (the elector cancelled).
+// A renewal that still succeeds afterwards never reopens it.
+func TestStandByIsFinal(t *testing.T) {
+	r := newRig(t)
+	t0 := r.lead(t)
+	select {
+	case <-r.f.Lost():
+		t.Fatal("Lost closed while leading")
+	default:
+	}
+	// Nobody calls Check: the watchdog alone stands the fence by.
+	r.clock.SetTime(t0.Add(10 * time.Second))
+	select {
+	case <-r.f.Lost():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Lost not closed at renewal + 10 s")
+	}
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run didn't return after the stand-by")
+	}
+	// Renewals restored; a late success (as client-go's retry window
+	// would allow) is recorded at the current time: still standing by.
+	r.cut.Store(false)
+	r.f.renewedAt(r.clock.Now())
+	if err := r.f.newLock().Update(context.Background(), resourcelock.LeaderElectionRecord{HolderIdentity: "portcullis-hub-0"}); err != nil {
+		t.Logf("late update: %v", err)
+	}
+	if err := r.f.Check(); !errors.Is(err, ErrStandingBy) {
+		t.Fatalf("Check after a late renewal = %v, want ErrStandingBy", err)
+	}
+}
+
+// TestDeadlineFromSendTime: a renewal whose request takes 3 s is timed
+// from when it was sent: the fence closes at send + 10 s, not at
+// completion + 10 s.
+func TestDeadlineFromSendTime(t *testing.T) {
+	r := newRig(t)
+	r.cs.PrependReactor("update", "leases", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		r.clock.Step(3 * time.Second) // the request in flight
+		return false, nil, nil
+	})
+	lock := r.f.newLock()
+	ctx := context.Background()
+	if _, _, err := lock.Get(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sent := r.clock.Now()
+	if err := lock.Update(ctx, resourcelock.LeaderElectionRecord{HolderIdentity: "portcullis-hub-0", LeaseDurationSeconds: 15}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.clock.Now().Sub(sent); got != 3*time.Second {
+		t.Fatalf("the update took %s of fake time", got)
+	}
+	r.clock.SetTime(sent.Add(9900 * time.Millisecond))
+	if err := r.f.Check(); err != nil {
+		t.Fatalf("Check at send + 9.9 s = %v", err)
+	}
+	r.clock.SetTime(sent.Add(10 * time.Second))
+	if err := r.f.Check(); !errors.Is(err, ErrStandingBy) {
+		t.Fatalf("Check at send + 10 s (completion + 7 s) = %v, want ErrStandingBy", err)
+	}
+}
+
+// TestRemoveAllStopsAtStandBy: a tree removal that starts while leading
+// stops at the entry where the fence stands by (each gate call moves the
+// fake clock 1 s; renewals cut at t0). Both RemoveAll and Root.RemoveAll.
+func TestRemoveAllStopsAtStandBy(t *testing.T) {
+	for _, viaRoot := range []bool{false, true} {
+		r := newRig(t)
+		r.lead(t)
+		dir := t.TempDir()
+		tree := filepath.Join(dir, "tree")
+		for i := range 30 {
+			sub := filepath.Join(tree, fmt.Sprintf("d%d", i%3))
+			if err := os.MkdirAll(sub, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("f%d", i)), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fsutil.SetWriteGate(func() error { r.clock.Step(time.Second); return r.f.Check() })
+		var err error
+		if viaRoot {
+			root, rerr := fsutil.OpenRoot(dir)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			err = root.RemoveAll("tree")
+			root.Close()
+		} else {
+			err = fsutil.RemoveAll(tree)
+		}
+		fsutil.SetWriteGate(nil)
+		if !errors.Is(err, ErrStandingBy) {
+			t.Fatalf("root=%v: RemoveAll = %v, want ErrStandingBy", viaRoot, err)
+		}
+		left := 0
+		filepath.WalkDir(tree, func(_ string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				left++
+			}
+			return nil
+		})
+		// 9 gate calls pass (t0+1 … t0+9 s): the entry check, then 8 files
+		// go; 22 stay.
+		if left != 22 {
+			t.Errorf("root=%v: %d of 30 files left, want 22", viaRoot, left)
+		}
 	}
 }

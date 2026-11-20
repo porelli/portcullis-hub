@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/signin"
 )
@@ -120,6 +121,13 @@ func (c *Client) api() *gocloak.GoCloak {
 		// proxy (or a test fake) leaves out the Content-Type.
 		rc.OnBeforeRequest(func(_ *resty.Client, r *resty.Request) error {
 			r.ForceContentType("application/json")
+			// The write fence (contract §20.5): a Hub standing by changes
+			// nothing in Keycloak (a token request only reads).
+			if !strings.HasSuffix(r.URL, "/protocol/openid-connect/token") {
+				if err := fsutil.CheckRequest(r.Method); err != nil {
+					return err
+				}
+			}
 			return nil
 		})
 		c.gc = gocloak.NewClient(c.BaseURL)

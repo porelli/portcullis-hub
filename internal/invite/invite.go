@@ -16,6 +16,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // Defaults (§9.4).
@@ -105,6 +107,10 @@ func (c *Client) Create(ctx context.Context, username string, o Options) (*Invit
 		Username      string `json:"username"`
 		Authenticator bool   `json:"authenticator"`
 	}{username, o.Authenticator})
+	// The write fence (contract §20.5): a Hub standing by mints nothing.
+	if err := fsutil.CheckWrite(); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.APIURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

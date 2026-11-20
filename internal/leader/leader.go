@@ -47,10 +47,13 @@ type Fence struct {
 	always bool
 
 	mu      sync.Mutex
-	renewed time.Time // when the last successful renewal was sent (zero: never)
-	lost    bool      // the elector ended: this process never leads again
-	leading chan struct{}
+	renewed time.Time          // when the last successful renewal was sent (zero: never)
+	lost    bool               // stood by after leading, or the elector ended: never leads again
+	cancel  context.CancelFunc // the elector's context (nil before Run)
+	leading chan struct{}      // closed at the first renewal
 	once    sync.Once
+	lostCh  chan struct{} // closed when lost is set
+	lostOne sync.Once
 }
 
 // New is a fence on cfg's Lease; it leads only once Run took the Lease.
@@ -67,31 +70,51 @@ func New(cfg Config) *Fence {
 	if cfg.Clock == nil {
 		cfg.Clock = clock.RealClock{}
 	}
-	return &Fence{cfg: cfg, leading: make(chan struct{})}
+	return &Fence{cfg: cfg, leading: make(chan struct{}), lostCh: make(chan struct{})}
 }
 
 // Always is the fence of a Hub with no Lease (Docker, Podman): it always
 // leads.
 func Always() *Fence {
-	f := &Fence{always: true, leading: make(chan struct{})}
+	f := &Fence{always: true, leading: make(chan struct{}), lostCh: make(chan struct{})}
 	close(f.leading)
 	return f
 }
 
 // Check is nil while this Hub may write, else ErrStandingBy: before the
-// Lease was taken, once the last successful renewal is RenewDeadline old,
-// and for good once the elector ended (the Hub's memory may be stale:
-// only a restart leads again).
+// Lease was taken, and for good from the moment the last successful
+// renewal is RenewDeadline old or the elector ended. Stand-by is final:
+// a renewal that still succeeds later never reopens the fence (the
+// Hub's memory may already disagree with its disk: only a restart leads
+// again), and the elector is cancelled so Run returns.
 func (f *Fence) Check() error {
 	if f.always {
 		return nil
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.lost || f.renewed.IsZero() || f.cfg.Clock.Since(f.renewed) >= f.cfg.RenewDeadline {
+	if f.lost || f.renewed.IsZero() {
+		return ErrStandingBy
+	}
+	if f.cfg.Clock.Since(f.renewed) >= f.cfg.RenewDeadline {
+		f.loseLocked()
 		return ErrStandingBy
 	}
 	return nil
+}
+
+// Lost is closed the moment the fence stands by after leading (or its
+// elector ended): the Hub cancels its background work and every long
+// writer on it. Never closed for Always.
+func (f *Fence) Lost() <-chan struct{} { return f.lostCh }
+
+// loseLocked makes stand-by final (f.mu held).
+func (f *Fence) loseLocked() {
+	f.lost = true
+	if f.cancel != nil {
+		f.cancel()
+	}
+	f.lostOne.Do(func() { close(f.lostCh) })
 }
 
 // Leading reports Check() == nil.
@@ -112,25 +135,35 @@ func (f *Fence) WaitLeading(ctx context.Context) error {
 // saw before it takes the Lease.
 func (f *Fence) LeaseDuration() time.Duration { return f.cfg.LeaseDuration }
 
-// Run takes the Lease and renews it until ctx ends or a renewal misses
-// the deadline; the fence then stands by for good. Always's Run waits
-// for ctx.
+// Run takes the Lease and renews it until ctx ends or the fence stands
+// by (a renewal RenewDeadline old: the elector is cancelled at once, the
+// Lease left to expire); the fence then stands by for good. Always's Run
+// waits for ctx.
 func (f *Fence) Run(ctx context.Context) {
 	if f.always {
 		<-ctx.Done()
 		return
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	f.mu.Lock()
+	f.cancel = cancel
+	f.mu.Unlock()
 	defer f.stop()
-	lock := &fenceLock{
-		LeaseLock: &resourcelock.LeaseLock{
-			LeaseMeta:  metav1.ObjectMeta{Namespace: f.cfg.Namespace, Name: f.cfg.Name},
-			Client:     f.cfg.Client.CoordinationV1(),
-			LockConfig: resourcelock.ResourceLockConfig{Identity: f.cfg.Identity},
-		},
-		f: f,
-	}
+	// The watchdog: the deadline is enforced even when nothing asks
+	// Check (Lost closes, the elector is cancelled, at renewal + 10 s).
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-f.cfg.Clock.After(watchEvery):
+				f.Check()
+			}
+		}
+	}()
 	le, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
-		Lock:          lock,
+		Lock:          f.newLock(),
 		LeaseDuration: f.cfg.LeaseDuration,
 		RenewDeadline: f.cfg.RenewDeadline,
 		RetryPeriod:   f.cfg.RetryPeriod,
@@ -152,10 +185,25 @@ func (f *Fence) Run(ctx context.Context) {
 	le.Run(ctx)
 }
 
+// watchEvery is how often the watchdog asks Check.
+const watchEvery = 100 * time.Millisecond
+
+// newLock is the Lease lock timing this fence's renewals.
+func (f *Fence) newLock() *fenceLock {
+	return &fenceLock{
+		LeaseLock: &resourcelock.LeaseLock{
+			LeaseMeta:  metav1.ObjectMeta{Namespace: f.cfg.Namespace, Name: f.cfg.Name},
+			Client:     f.cfg.Client.CoordinationV1(),
+			LockConfig: resourcelock.ResourceLockConfig{Identity: f.cfg.Identity},
+		},
+		f: f,
+	}
+}
+
 // stop: the elector ended; never lead again in this process.
 func (f *Fence) stop() {
 	f.mu.Lock()
-	f.lost = true
+	f.loseLocked()
 	f.mu.Unlock()
 }
 

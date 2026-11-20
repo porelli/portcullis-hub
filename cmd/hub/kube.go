@@ -47,7 +47,7 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	if err != nil {
 		return nil, nil, err
 	}
-	identity, err := podNameFromEnv(getenv, os.Hostname)
+	identity, err := podNameFromEnv(getenv)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -114,15 +114,14 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 const leaseName = "portcullis-hub"
 
 // podNameFromEnv is the Lease identity: POD_NAME (the chart's downward
-// API), else the hostname (a pod's hostname is its name).
-func podNameFromEnv(getenv func(string) string, hostname func() (string, error)) (string, error) {
+// API), required. Never the hostname: a spec.hostname override or a
+// hostNetwork pod could give two Hubs one identity, and both would take
+// the Lease as theirs.
+func podNameFromEnv(getenv func(string) string) (string, error) {
 	if v := strings.TrimSpace(getenv("POD_NAME")); v != "" {
 		return v, nil
 	}
-	if h, err := hostname(); err == nil && strings.TrimSpace(h) != "" {
-		return strings.TrimSpace(h), nil
-	}
-	return "", fmt.Errorf("POD_NAME is required under HUB_CONTAINER_RUNTIME=kubernetes (the Lease identity)")
+	return "", fmt.Errorf("POD_NAME is required under HUB_CONTAINER_RUNTIME=kubernetes (the Lease identity, contract §20.5)")
 }
 
 // readCoreEnv is core's env subset (<ProjectDir>/.env: KEY=value lines;

@@ -1,9 +1,12 @@
 package fsutil_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,4 +176,139 @@ func TestTryLockIgnoresGate(t *testing.T) {
 		t.Fatalf("TryLock with the gate closed = %v", err)
 	}
 	release()
+}
+
+// TestWriteFileAtomicRechecksBeforeRename: the gate open at the start and
+// closed by the rename (the write outlived the lead): the error, the old
+// file intact, no temp file left.
+func TestWriteFileAtomicRechecksBeforeRename(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f")
+	if err := os.WriteFile(p, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := digest(t, p)
+	calls := 0
+	fsutil.SetWriteGate(func() error {
+		if calls++; calls == 1 {
+			return nil
+		}
+		return errStandingBy
+	})
+	t.Cleanup(func() { fsutil.SetWriteGate(nil) })
+	if err := fsutil.WriteFileAtomic(p, []byte("after"), 0o600); !errors.Is(err, errStandingBy) {
+		t.Fatalf("WriteFileAtomic = %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("gate asked %d times, want 2", calls)
+	}
+	if digest(t, p) != before {
+		t.Error("the target changed")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("%d entries: a temp file was left", len(entries))
+	}
+}
+
+// TestRemoveAllLikeOS: the gated walk keeps os.RemoveAll's behaviour (a
+// missing name is nil, a file, a tree, a symlink removed not followed).
+func TestRemoveAllLikeOS(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside")
+	os.MkdirAll(outside, 0o700)
+	os.WriteFile(filepath.Join(outside, "keep"), []byte("x"), 0o600)
+	tree := filepath.Join(dir, "tree")
+	os.MkdirAll(filepath.Join(tree, "a", "b"), 0o700)
+	os.WriteFile(filepath.Join(tree, "a", "b", "f"), []byte("x"), 0o600)
+	os.Symlink(outside, filepath.Join(tree, "link"))
+	for _, n := range []string{"", filepath.Join(dir, "missing")} {
+		if err := fsutil.RemoveAll(n); err != nil {
+			t.Errorf("RemoveAll(%q) = %v", n, err)
+		}
+	}
+	if err := fsutil.RemoveAll(tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(tree); !os.IsNotExist(err) {
+		t.Errorf("tree still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "keep")); err != nil {
+		t.Errorf("the symlink was followed: %v", err)
+	}
+	f := filepath.Join(dir, "file")
+	os.WriteFile(f, []byte("x"), 0o600)
+	root, err := fsutil.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.RemoveAll("file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.RemoveAll("missing/x"); err != nil {
+		t.Errorf("Root.RemoveAll(missing) = %v", err)
+	}
+	if err := root.RemoveAll("../escape"); err == nil {
+		t.Error("Root.RemoveAll escaped the root")
+	}
+	if _, err := os.Stat(f); !os.IsNotExist(err) {
+		t.Errorf("file still there: %v", err)
+	}
+}
+
+// TestOutboundRequestsGated: CheckRequest and GateTransport let reads
+// through and refuse every other method while standing by.
+func TestOutboundRequestsGated(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	defer srv.Close()
+	hc := &http.Client{Transport: fsutil.GateTransport(http.DefaultTransport)}
+	closeGate(t)
+	for _, m := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+		if err := fsutil.CheckRequest(m); !errors.Is(err, errStandingBy) {
+			t.Errorf("CheckRequest(%s) = %v", m, err)
+		}
+		req, _ := http.NewRequest(m, srv.URL, strings.NewReader("x"))
+		if _, err := hc.Do(req); !errors.Is(err, errStandingBy) {
+			t.Errorf("%s through GateTransport = %v", m, err)
+		}
+	}
+	if hits != 0 {
+		t.Errorf("%d writes reached the server", hits)
+	}
+	for _, m := range []string{"GET", "HEAD", "OPTIONS"} {
+		if err := fsutil.CheckRequest(m); err != nil {
+			t.Errorf("CheckRequest(%s) = %v", m, err)
+		}
+	}
+	if resp, err := hc.Get(srv.URL); err != nil || hits != 1 {
+		t.Errorf("GET = %v, hits %d", err, hits)
+	} else {
+		resp.Body.Close()
+	}
+}
+
+// TestWriteContext: cancelled at once when the gate is closed, and the
+// moment the lost channel closes.
+func TestWriteContext(t *testing.T) {
+	lost := make(chan struct{})
+	fsutil.SetWriteGateLost(lost)
+	t.Cleanup(func() { fsutil.SetWriteGateLost(nil) })
+	ctx, cancel := fsutil.WriteContext(context.Background())
+	defer cancel()
+	if ctx.Err() != nil {
+		t.Fatal("cancelled while leading")
+	}
+	close(lost)
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("not cancelled when the gate was lost")
+	}
+	closeGate(t)
+	ctx2, cancel2 := fsutil.WriteContext(context.Background())
+	defer cancel2()
+	if ctx2.Err() == nil {
+		t.Error("a WriteContext while standing by isn't cancelled")
+	}
 }

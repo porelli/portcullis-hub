@@ -53,6 +53,35 @@ var bannedMethods = map[string]map[string]bool{
 		"Symlink", "Link", "Chmod", "Chown", "Lchown", "Chtimes", "OpenRoot"),
 }
 
+// External writers: a process the Hub runs, a unix socket it serves or
+// dials (the container engine, the host control socket). Each site is
+// listed with why its writes are fenced; a new one fails the test until
+// it is gated and listed. Keyed "<file>:<function>".
+var externalWriters = map[string]string{
+	"internal/compose/compose.go:CLI.run":               "docker/podman compose: Docker and Podman only, where the Hub always leads (no Lease)",
+	"internal/compose/compose.go:CLI.Config":            "docker/podman compose config: reads the project (Docker and Podman only)",
+	"internal/compose/compose.go:CLI.Version":           "docker/podman compose version: reads (Docker and Podman only)",
+	"internal/hub/sources.go:runGit":                    "git: every command but rev-parse asks the gate and runs on fsutil.WriteContext (killed with its process group at stand-by)",
+	"internal/httpapi/hostctl.go:ListenHost":            "the host control socket: created at start (before any request); its handler is behind LeaderGate",
+	"internal/docker/client.go:New":                     "the engine socket: every request goes through fsutil.GateTransport (Docker and Podman only)",
+	"internal/hub/mail_mtasts.go:Hub.fetchMTASTSPolicy": "an HTTPS GET of the MTA-STS policy through Traefik (the network is http.Transport's, tcp): a read",
+	"cmd/hub/ssh.go:sshMain":                            "`hub ssh status`, its own process: a client of the host control socket, whose handler is behind LeaderGate",
+	"cmd/hub/vpn.go:vpnMain":                            "`hub vpn …`, its own process: a client of the host control socket (LeaderGate)",
+	"cmd/hub/vpn.go:mailMain":                           "`hub mail …`, its own process: a client of the host control socket (LeaderGate)",
+}
+
+// externalFuncs are the os/exec and net functions that start a writer
+// outside the Hub process or serve/dial a unix socket. net's are flagged
+// only for a unix network (a constant "unix…" or a non-constant one).
+var externalFuncs = map[string]map[string]bool{
+	"os/exec": set("Command", "CommandContext"),
+	"net":     set("Listen", "ListenPacket", "Dial", "DialTimeout", "ListenUnix", "ListenUnixgram", "DialUnix"),
+}
+
+// netAlwaysUnix are the net functions that are unix sockets whatever
+// their arguments.
+var netAlwaysUnix = set("ListenUnix", "ListenUnixgram", "DialUnix")
+
 func set(names ...string) map[string]bool {
 	m := map[string]bool{}
 	for _, n := range names {
@@ -86,6 +115,9 @@ func TestNoFileWritesOutsideFsutil(t *testing.T) {
 	}
 	cmd := exec.Command("go", "list", "-deps", "-export", "-json=ImportPath,Dir,Export,GoFiles,CgoFiles,Standard", "./cmd/hub")
 	cmd.Dir = root
+	// The Hub runs on Linux: its files (fs_linux.go, …), wherever the
+	// test runs.
+	cmd.Env = append(os.Environ(), "GOOS=linux", "CGO_ENABLED=0")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -132,6 +164,7 @@ func TestNoFileWritesOutsideFsutil(t *testing.T) {
 		return os.Open(e)
 	})
 	var found []string
+	used := map[string]bool{}
 	for _, p := range ours {
 		if p.ImportPath == "github.com/portcullis/hub/internal/fsutil" || writeAllowlist[p.ImportPath] != "" {
 			continue
@@ -154,6 +187,12 @@ func TestNoFileWritesOutsideFsutil(t *testing.T) {
 		}
 		for _, f := range files {
 			found = append(found, scanWrites(fset, root, f, info)...)
+			found = append(found, scanExternal(fset, root, f, info, used)...)
+		}
+	}
+	for site := range externalWriters {
+		if !used[site] {
+			t.Errorf("listed external writer %s isn't there any more: drop it from externalWriters", site)
 		}
 	}
 	sort.Strings(found)
@@ -245,4 +284,102 @@ func isStdStream(info *types.Info, x ast.Expr) bool {
 	}
 	v, ok := info.Uses[sel.Sel].(*types.Var)
 	return ok && v.Pkg() != nil && v.Pkg().Path() == "os" && (v.Name() == "Stdout" || v.Name() == "Stderr")
+}
+
+// scanExternal returns the os/exec and unix-socket references in f that
+// aren't listed in externalWriters (marking the listed ones used).
+func scanExternal(fset *token.FileSet, root string, f *ast.File, info *types.Info, used map[string]bool) []string {
+	var out []string
+	pos := fset.Position(f.Pos())
+	rel, _ := filepath.Rel(root, pos.Filename)
+	for _, decl := range f.Decls {
+		fn := "<package>"
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			fn = fd.Name.Name
+			if fd.Recv != nil && len(fd.Recv.List) == 1 {
+				t := fd.Recv.List[0].Type
+				if st, ok := t.(*ast.StarExpr); ok {
+					t = st.X
+				}
+				if ix, ok := t.(*ast.IndexExpr); ok {
+					t = ix.X
+				}
+				if id, ok := t.(*ast.Ident); ok {
+					fn = id.Name + "." + fn
+				}
+			}
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			obj, ok := info.Uses[sel.Sel].(*types.Func)
+			if !ok || obj.Pkg() == nil {
+				return true
+			}
+			pkg, name := obj.Pkg().Path(), obj.Name()
+			sig := obj.Type().(*types.Signature)
+			var what string
+			switch {
+			case sig.Recv() == nil && externalFuncs[pkg][name]:
+				if pkg == "net" && !netAlwaysUnix[name] && !unixNetwork(info, call) {
+					return true
+				}
+				what = pkg + "." + name
+			case pkg == "net" && sig.Recv() != nil && (name == "Dial" || name == "DialContext" || name == "Listen" || name == "ListenPacket"):
+				// (*net.Dialer).Dial*, (*net.ListenConfig).Listen*: the
+				// network is the first argument after any context.
+				if !unixNetwork(info, call) {
+					return true
+				}
+				what = "net." + recvName(sig) + "." + name
+			default:
+				return true
+			}
+			site := rel + ":" + fn
+			if externalWriters[site] != "" {
+				used[site] = true
+				return true
+			}
+			p := fset.Position(call.Pos())
+			out = append(out, fmt.Sprintf("%s:%d: %s in %s (an external writer: gate it and list it in externalWriters)", rel, p.Line, what, fn))
+			return true
+		})
+	}
+	return out
+}
+
+func recvName(sig *types.Signature) string {
+	t := sig.Recv().Type()
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	if n, ok := t.(*types.Named); ok {
+		return n.Obj().Name()
+	}
+	return "?"
+}
+
+// unixNetwork: call's network argument (the first string argument) is a
+// constant "unix…", or not a constant at all.
+func unixNetwork(info *types.Info, call *ast.CallExpr) bool {
+	for _, a := range call.Args {
+		tv, ok := info.Types[a]
+		if !ok {
+			continue
+		}
+		if b, ok := tv.Type.Underlying().(*types.Basic); !ok || b.Kind() != types.String && b.Kind() != types.UntypedString {
+			continue
+		}
+		if tv.Value == nil {
+			return true
+		}
+		return strings.HasPrefix(constant.StringVal(tv.Value), "unix")
+	}
+	return false
 }

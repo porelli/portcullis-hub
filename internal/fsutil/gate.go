@@ -1,8 +1,13 @@
 package fsutil
 
 import (
+	"context"
+	"errors"
 	"io/fs"
+	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 )
@@ -23,6 +28,69 @@ func SetWriteGate(g func() error) {
 		return
 	}
 	writeGate.Store(&g)
+}
+
+// gateLost, when set, closes the moment the gate stands by for good (the
+// fence's Lost): WriteContext cancels on it.
+var gateLost atomic.Pointer[<-chan struct{}]
+
+// SetWriteGateLost installs the channel that closes when the gate closes
+// for good (nil: none).
+func SetWriteGateLost(ch <-chan struct{}) {
+	if ch == nil {
+		gateLost.Store(nil)
+		return
+	}
+	gateLost.Store(&ch)
+}
+
+// WriteContext is a context for a long writer outside this package (an
+// exec'd git): cancelled when parent ends or the moment the gate stands
+// by for good — already cancelled when the gate is closed now. The
+// caller calls cancel when done.
+func WriteContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	if CheckWrite() != nil {
+		cancel()
+		return ctx, cancel
+	}
+	if p := gateLost.Load(); p != nil {
+		lost := *p
+		go func() {
+			select {
+			case <-lost:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, cancel
+}
+
+// CheckRequest is the gate for an outbound request to another service
+// (Keycloak, LLDAP, domains, enroll, the mail provider, a worker agent):
+// GET, HEAD and OPTIONS read; any other method asks the gate.
+func CheckRequest(method string) error {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return nil
+	}
+	return CheckWrite()
+}
+
+// GateTransport wraps rt with CheckRequest (the engine's client).
+func GateTransport(rt http.RoundTripper) http.RoundTripper { return gatedRT{rt} }
+
+type gatedRT struct{ next http.RoundTripper }
+
+func (g gatedRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	if err := CheckRequest(r.Method); err != nil {
+		if r.Body != nil {
+			r.Body.Close()
+		}
+		return nil, err
+	}
+	return g.next.RoundTrip(r)
 }
 
 // CheckWrite is the gate's answer: nil when a write may happen now, else
@@ -128,12 +196,76 @@ func Remove(name string) error {
 	return os.Remove(name)
 }
 
-// RemoveAll is os.RemoveAll behind the gate.
+// RemoveAll is os.RemoveAll with the gate asked before every unlink and
+// rmdir: a large tree stops at the entry where the Hub stands by.
+// Symlinks are removed, never followed; a missing name is nil.
 func RemoveAll(name string) error {
 	if err := CheckWrite(); err != nil {
 		return err
 	}
-	return os.RemoveAll(name)
+	if name == "" {
+		return nil
+	}
+	return removeTree(osTree{}, name)
+}
+
+// tree is the file system removeTree walks (os, or an os.Root).
+type tree interface {
+	Lstat(name string) (fs.FileInfo, error)
+	ReadDir(name string) ([]fs.DirEntry, error)
+	Remove(name string) error
+	Join(dir, name string) string
+}
+
+type osTree struct{}
+
+func (osTree) Lstat(n string) (fs.FileInfo, error)     { return os.Lstat(n) }
+func (osTree) ReadDir(n string) ([]fs.DirEntry, error) { return os.ReadDir(n) }
+func (osTree) Remove(n string) error                   { return os.Remove(n) }
+func (osTree) Join(d, n string) string                 { return filepath.Join(d, n) }
+
+type rootTree struct{ r *os.Root }
+
+func (t rootTree) Lstat(n string) (fs.FileInfo, error)     { return t.r.Lstat(n) }
+func (t rootTree) ReadDir(n string) ([]fs.DirEntry, error) { return fs.ReadDir(t.r.FS(), n) }
+func (t rootTree) Remove(n string) error                   { return t.r.Remove(n) }
+func (t rootTree) Join(d, n string) string                 { return path.Join(d, n) }
+
+// removeTree removes name and, for a directory, everything below it,
+// asking the gate before each removal. The gate's error stops it at once;
+// other errors are collected (the first returned) and the walk goes on.
+func removeTree(t tree, name string) error {
+	fi, err := t.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var first error
+	if fi.IsDir() {
+		entries, err := t.ReadDir(name)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			first = err
+		}
+		for _, e := range entries {
+			if err := removeTree(t, t.Join(name, e.Name())); err != nil {
+				if gerr := CheckWrite(); gerr != nil {
+					return gerr
+				}
+				if first == nil {
+					first = err
+				}
+			}
+		}
+	}
+	if err := CheckWrite(); err != nil {
+		return err
+	}
+	if err := t.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
+		first = err
+	}
+	return first
 }
 
 // Rename is os.Rename behind the gate.
@@ -314,12 +446,13 @@ func (r *Root) Remove(name string) error {
 	return r.r.Remove(name)
 }
 
-// RemoveAll is os.Root.RemoveAll behind the gate.
+// RemoveAll is os.Root.RemoveAll with the gate asked before every
+// unlink and rmdir (RemoveAll's walk, inside the root).
 func (r *Root) RemoveAll(name string) error {
 	if err := CheckWrite(); err != nil {
 		return err
 	}
-	return r.r.RemoveAll(name)
+	return removeTree(rootTree{r.r}, path.Clean(filepath.ToSlash(name)))
 }
 
 // Rename is os.Root.Rename behind the gate.

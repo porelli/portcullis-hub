@@ -433,6 +433,11 @@ func main() {
 		log.Fatalf("refusing to start: the data directory is in use (another Hub, or signin reset-core running?): %v", err)
 	}
 	defer releaseLock()
+	if kind == runtime.KindKubernetes {
+		// Fail closed by construction (contract §20.5 start order: the
+		// lock, then the gate): nothing writes until the fence leads.
+		fsutil.SetWriteGate(func() error { return leader.ErrStandingBy })
+	}
 	guardCtx, stopGuard := context.WithCancel(context.Background())
 	defer stopGuard()
 	var rt runtime.Instances
@@ -658,53 +663,67 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go h.RunReconciler(ctx)
+	// The background loops (impersonation expiry, directory, domains,
+	// VPN, servers, mail, backups, …) write to Keycloak, LLDAP, the
+	// domains service and the files: they stop the moment the fence
+	// stands by (contract §20.5), not at the exit 15 s later. The
+	// listeners keep ctx (they answer 503 meanwhile).
+	loops, stopLoops := context.WithCancel(ctx)
+	defer stopLoops()
+	go func() {
+		select {
+		case <-fence.Lost():
+			stopLoops()
+		case <-loops.Done():
+		}
+	}()
+	go h.RunReconciler(loops)
 	// A guard verified after the start: reconcile at once (the first
 	// Reconcile ran against a refused engine).
 	go func() {
 		select {
 		case <-runtimeVerified(rt, cfg.Guard):
 			h.TriggerReconcile()
-		case <-ctx.Done():
+		case <-loops.Done():
 		}
 	}()
-	go h.RunDirectorySync(ctx)
-	go h.RunSettingsDelivery(ctx)
-	go h.RunDomainSync(ctx, 30*time.Second)
+	go h.RunDirectorySync(loops)
+	go h.RunSettingsDelivery(loops)
+	go h.RunDomainSync(loops, 30*time.Second)
 	// The doctor's disk checks: daily (and on demand, after every folder
 	// apply); cached in <data>/doctor/scans.json.
-	go h.RunDoctorScans(ctx, 24*time.Hour)
-	go h.RunUsageSampler(ctx, usage.Interval)
-	go h.RunUsageStorage(ctx, 24*time.Hour)
+	go h.RunDoctorScans(loops, 24*time.Hour)
+	go h.RunUsageSampler(loops, usage.Interval)
+	go h.RunUsageStorage(loops, 24*time.Hour)
 	// The usage metrics (contract §16.2): unset = no listener.
 	serveMetrics(ctx, os.Getenv("HUB_METRICS_ADDR"), h)
 	// The FIDO metadata (contract §8.1): the cached BLOB, then a daily
 	// refresh (and at its nextUpdate) into signin-keycloak.json.
-	go h.RunMDS(ctx, 24*time.Hour)
+	go h.RunMDS(loops, 24*time.Hour)
 	// The opened log's day files older than history_days: daily (and on
 	// every history_days change).
-	go h.RunHistoryPrune(ctx, 24*time.Hour)
+	go h.RunHistoryPrune(loops, 24*time.Hour)
 	// Impersonations: expiry, not used, the file every minute (D41, D37).
-	go h.RunImpersonationExpiry(ctx, 5*time.Second)
+	go h.RunImpersonationExpiry(loops, 5*time.Second)
 	// An owed mail void (a wiring, a restore) is retried every 5 min
 	// (contract §19.11) and at once when owed.
-	go h.RunMailVoidRetry(ctx, hub.MailVoidRetryEvery)
+	go h.RunMailVoidRetry(loops, hub.MailVoidRetryEvery)
 	// Each mail domain's MTA-STS policy, through Traefik, every 6 h (P12).
-	go h.RunMailPolicyCheck(ctx, hub.MailPolicyEvery)
+	go h.RunMailPolicyCheck(loops, hub.MailPolicyEvery)
 	// VPN providers: identity and dns hooks when due, vpn.json (§16).
-	go h.RunVPNMaps(ctx, 5*time.Second)
+	go h.RunVPNMaps(loops, 5*time.Second)
 	// SSH access: a compile every minute (temporary memberships ending,
 	// host certificates to renew) on top of the change triggers.
-	go h.RunSSH(ctx, time.Minute)
+	go h.RunSSH(loops, time.Minute)
 	// Servers: link.json, enrolments, polls, renewals, revocations.
-	go h.RunServers(ctx, 30*time.Second)
+	go h.RunServers(loops, 30*time.Second)
 	// Scheduled backups (per server, the Hub's TZ), every minute.
-	go h.RunBackupSchedules(ctx, time.Minute)
+	go h.RunBackupSchedules(loops, time.Minute)
 	// Kubernetes: the VPN gateway pods, watched (K5: vpn.json follows them
 	// at once; nothing published while the watch isn't confirmed).
-	go h.RunKubeGateways(ctx)
+	go h.RunKubeGateways(loops)
 	// Built-in VPN devices: expiry and revocation (V26).
-	go h.RunVPNExpiry(ctx, 10*time.Second)
+	go h.RunVPNExpiry(loops, 10*time.Second)
 	// Keycloak drops its copy of a user deleted straight in LLDAP only when
 	// the user is looked up (removeInvalidUsersEnabled; its periodic LDAP
 	// sync never removes users): list them all periodically. Keycloak
@@ -714,22 +733,22 @@ func main() {
 	// unreachable skip retries every minute until success or pause; a
 	// success or pause goes back to the normal 15-min interval.
 	h.SetUserSweep(ll, kc)
-	go runUserSweep(ctx, time.Minute, userRevalidateInterval, h)
+	go runUserSweep(loops, time.Minute, userRevalidateInterval, h)
 	// SIGHUP syncs the template sources (core's `./portcullis upgrade`
 	// sends it and reads the outcome from <data>/source-sync.json).
-	go runOnSignal(ctx, hup, func() {
+	go runOnSignal(loops, hup, func() {
 		st := h.SyncSourcesAs(hub.SyncSignal)
 		log.Printf("sources: sync on SIGHUP finished (ok=%t)", st.OK)
 	})
 	// File-sharing holder checks (revoke on leave), on each trigger.
-	go h.RunCredentialChecks(ctx)
-	go h.RunMailSync(ctx)
+	go h.RunCredentialChecks(loops)
+	go h.RunMailSync(loops)
 	if dir.Store != nil {
 		// Rule groups, exceptions and expiries -> LLDAP membership: every
 		// minute (expiries) and after each directory mutation. Started
 		// whatever LLDAP looks like at boot (F27): a run while it is
 		// unavailable does nothing but still drives the holder check.
-		go dir.RunEvaluator(ctx, time.Minute)
+		go dir.RunEvaluator(loops, time.Minute)
 	}
 
 	addr := env("HUB_LISTEN_ADDR", ":8888")
@@ -796,6 +815,7 @@ func main() {
 // still live (never for Always).
 func startFence(ctx context.Context, f *leader.Fence, lost func()) {
 	fsutil.SetWriteGate(f.Check)
+	fsutil.SetWriteGateLost(f.Lost())
 	go func() {
 		f.Run(ctx)
 		if ctx.Err() == nil {

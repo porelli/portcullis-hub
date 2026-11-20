@@ -23,6 +23,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 const (
@@ -120,6 +122,11 @@ func (c *Client) post(ctx context.Context, path string, body any, want int) ([]b
 
 // send is post with any method; a nil body sends none (GET, DELETE).
 func (c *Client) send(ctx context.Context, method, path string, body any, want int) ([]byte, error) {
+	// The write fence (contract §20.5): a Hub standing by changes nothing
+	// in enroll.
+	if err := fsutil.CheckRequest(method); err != nil {
+		return nil, err
+	}
 	if c.HTTP == nil {
 		return nil, errors.New("certificates API: no HTTP client")
 	}

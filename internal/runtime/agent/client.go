@@ -31,6 +31,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 
 	"github.com/portcullis/hub/internal/agentapi"
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/version"
@@ -312,6 +313,11 @@ func path(r agentapi.Route, vals ...string) string {
 // do sends one request; a non-2xx answer becomes *Error from the agent's
 // {"error"} (≤ MaxJSON read, strictly decoded, else a generic message).
 func (c *client) do(ctx context.Context, method, p string, q url.Values, body io.Reader, ctype string, hdr map[string]string) (*http.Response, error) {
+	// The write fence (contract §20.5): a Hub standing by changes nothing
+	// on a worker.
+	if err := fsutil.CheckRequest(method); err != nil {
+		return nil, err
+	}
 	if c.revoked.Load() {
 		return nil, c.revokedErr()
 	}

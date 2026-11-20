@@ -75,6 +75,10 @@ func NewEnrollNodes(inviteURL, secretFile string) (*EnrollNodes, error) {
 }
 
 func (e *EnrollNodes) post(ctx context.Context, p string, body, out any) error {
+	// The write fence (contract §20.5): a Hub standing by issues nothing.
+	if err := fsutil.CheckWrite(); err != nil {
+		return err
+	}
 	b, err := os.ReadFile(e.SecretFile)
 	if err != nil || len(strings.TrimSpace(string(b))) < 32 {
 		return errors.New("enroll: the invite secret is unavailable")

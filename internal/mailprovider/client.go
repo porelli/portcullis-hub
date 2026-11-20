@@ -25,6 +25,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/portcullis/hub/internal/fsutil"
 )
 
 // DefaultAPIURL is HUB_MAIL_API_URL's default for the stalwart block
@@ -183,6 +185,10 @@ func clip(s string, n int) string {
 // contract's exact shape: an unknown key is a contract mismatch, refused).
 // Errors never carry the bearer secret.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) (int, error) {
+	// The write fence (contract §20.5): a Hub standing by changes nothing.
+	if err := fsutil.CheckRequest(method); err != nil {
+		return 0, err
+	}
 	status, raw, err := c.fetch(ctx, method, path, body)
 	defer wipe(raw)
 	if err != nil || out == nil {

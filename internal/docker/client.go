@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/runtime"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -100,7 +101,7 @@ func New(host string, g *Guard) (*Client, error) {
 	}
 	api, err := client.New(
 		client.WithHost(sdkHost),
-		client.WithHTTPClient(&http.Client{Transport: tr, CheckRedirect: client.CheckRedirect}),
+		client.WithHTTPClient(&http.Client{Transport: fsutil.GateTransport(tr), CheckRedirect: client.CheckRedirect}),
 		client.WithHTTPRequestHook(guardHook(g)),
 	)
 	if err != nil {
