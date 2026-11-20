@@ -977,11 +977,12 @@ func (h *Hub) removeClusterNodeSteps(ctx context.Context, id string, meshIP *str
 // dropClusterNode removes node id's entry (gone from the cluster).
 func (h *Hub) dropClusterNode(id string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if s, ok := h.st.Servers[id]; ok && s.ClusterNode() {
 		delete(h.st.Servers, id)
 		h.saveLocked()
 	}
+	h.mu.Unlock()
+	h.forgetCached(id)
 }
 
 // endClusterEnrol ends node id's enrolment (a Stop, a failure, a Hub
@@ -1019,6 +1020,21 @@ func (h *Hub) endClusterEnrol(id string, actor directory.Actor, snap *nodeadm.Sn
 		h.auditOp(actor, "server.removed", id, "kind cluster-node, after its enrolment ended", nil)
 		return true
 	}
+	// No Node yet. Once the machine enrolled (nodeadm lists it enrolling,
+	// or the op saw it), nodeadm may have released its k3s material: a
+	// void would leave a machine that can still join (re-review N1). The
+	// snapshot doesn't say whether the material went out, so every
+	// enrolled machine is revoked; only one that never enrolled is voided.
+	h.mu.RLock()
+	s := h.st.Servers[id]
+	h.mu.RUnlock()
+	step := ""
+	if s.Enrol != nil {
+		step = s.Enrol.Step
+	}
+	if snap.EnrollingNode(id) != nil || (step != "" && step != StepEnrolled) {
+		return h.revokeEnrolled(id, actor, s.MeshIP)
+	}
 	if !h.voidCode(id) {
 		return false
 	}
@@ -1028,7 +1044,84 @@ func (h *Hub) endClusterEnrol(id string, actor directory.Actor, snap *nodeadm.Sn
 		h.saveLocked()
 	}
 	h.mu.Unlock()
+	h.forgetCached(id)
 	return true
+}
+
+// NodeGoneWait is how long a revoked node's entry stays once the cluster
+// lists no Node of its name (a machine still finishing its join would
+// register meanwhile: re-review N1).
+const NodeGoneWait = 10 * time.Minute
+
+// revokeEnrolled ends an enrolment whose machine may hold its k3s
+// material: nodeadm's revoke (the node marked removed, its certificate
+// revoked, its tokens deleted, the server and agent tokens rotated; a
+// parked answer is accepted), the nodeagent's k3s uninstall best effort,
+// the mesh peer, and the entry kept revoked and watched (settle: a Node
+// that registers is removed; none for NodeGoneWait drops the entry).
+// false: nodeadm couldn't be told (the entry stays enrolling for the next
+// tick).
+func (h *Hub) revokeEnrolled(id string, actor directory.Actor, meshIP string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	api, err := h.nodeadmAPI(ctx)
+	if err != nil {
+		return false
+	}
+	parked := ""
+	err = api.Remove(ctx, id, nodeadm.Revoke)
+	var ae *nodeadm.APIError
+	switch {
+	case err == nil, nodeadm.IsKind(err, nodeadm.KindUnknownNode):
+	case errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == nodeadm.KindQuorumMinimum,
+		errors.As(err, &ae) && ae.Status == http.StatusServiceUnavailable && strings.Contains(ae.Text, "goes on in the background"):
+		parked = ae.Text
+	default:
+		log.Printf("servers: revoking %s after its enrolment ended: %v (retried at the next tick)", id, err)
+		return false
+	}
+	if ag, err := h.nodeagentAPI(ctx, id, meshIP); err == nil {
+		c, cancel := context.WithTimeout(ctx, clusterCallWait)
+		if err := ag.Uninstall(c); err != nil {
+			log.Printf("servers: k3s wasn't uninstalled on %s (%v): the node stays watched", id, err)
+		}
+		cancel()
+	}
+	if err := h.meshRemovePeer(ctx, id); err != nil {
+		log.Printf("servers: the mesh peer of %s: %v", id, err)
+	}
+	h.keepClusterNode(id, nil, ServerRevoked, parked)
+	h.mu.Lock()
+	if s, ok := h.st.Servers[id]; ok && s.ClusterNode() {
+		s.RevokeWatch = true
+		h.st.Servers[id] = s
+		h.saveLocked()
+	}
+	h.mu.Unlock()
+	detail := "kind cluster-node, after its enrolment ended (its k3s material may have been released)"
+	if parked != "" {
+		detail += ", parked: " + parked
+	}
+	h.auditOp(actor, "server.revoked", id, detail, nil)
+	return true
+}
+
+// forgetCached takes node id out of the cached snapshot (re-review N2):
+// a node just revoked or removed is never listed again as an init node.
+func (h *Hub) forgetCached(id string) {
+	h.cl.mu.Lock()
+	defer h.cl.mu.Unlock()
+	if h.cl.last == nil {
+		return
+	}
+	c := *h.cl.last
+	c.Nodes = nil
+	for _, n := range h.cl.last.Nodes {
+		if n.Name != id {
+			c.Nodes = append(c.Nodes, n)
+		}
+	}
+	h.cl.last = &c
 }
 
 // settleClusterNodes runs at start and every tick (one snapshot):
@@ -1101,10 +1194,58 @@ func (h *Hub) settleClusterNodes(ctx context.Context) {
 			h.dropClusterNode(t.id)
 			h.auditOp(hubActor, "server.removed", t.id, "kind cluster-node, finished after a Hub restart", nil)
 		case ServerRevoked:
-			if n == nil {
-				h.dropClusterNode(t.id) // the parked revocation finished
-			}
+			h.settleRevoked(ctx, api, t.id, n)
 		}
+	}
+}
+
+// settleRevoked watches a revoked entry: while the cluster lists its
+// Node, a watched one (an enrolment revoked: re-review N1) whose
+// revocation isn't parked is removed for good (the full removal, else
+// nodeadm's revoke again); once no Node of its name is listed for
+// NodeGoneWait, the entry goes.
+func (h *Hub) settleRevoked(ctx context.Context, api NodeadmAPI, id string, n *nodeadm.Node) {
+	s, ok := h.serverEntry(id)
+	if !ok {
+		return
+	}
+	now := h.now().UTC()
+	if n != nil {
+		if !s.NodeGoneSince.IsZero() {
+			h.setNodeGone(id, time.Time{})
+		}
+		if s.RevokeWatch && s.RevokeParked == "" {
+			log.Printf("servers: %s registered after its revocation: removing it", id)
+			c, cancel := context.WithTimeout(ctx, 20*time.Minute)
+			mesh := n.Addresses.Mesh
+			err := h.removeClusterNodeSteps(c, id, &mesh)
+			if err != nil {
+				if rerr := api.Remove(c, id, nodeadm.Revoke); rerr != nil && !nodeadm.IsKind(rerr, nodeadm.KindUnknownNode) {
+					log.Printf("servers: removing %s again: %v; %v (retried at the next tick)", id, err, rerr)
+				}
+				// Kept (dropped by the removal on success): watched on.
+				h.keepClusterNode(id, nil, ServerRevoked, "")
+			}
+			cancel()
+			h.auditOp(directory.Human("hub"), "server.removed", id, "kind cluster-node, registered after its revocation", err)
+		}
+		return
+	}
+	switch {
+	case s.NodeGoneSince.IsZero():
+		h.setNodeGone(id, now)
+	case now.Sub(s.NodeGoneSince) >= NodeGoneWait:
+		h.dropClusterNode(id) // no Node for 10 min: the revocation finished
+	}
+}
+
+func (h *Hub) setNodeGone(id string, t time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s, ok := h.st.Servers[id]; ok && s.ClusterNode() {
+		s.NodeGoneSince = t
+		h.st.Servers[id] = s
+		h.saveLocked()
 	}
 }
 

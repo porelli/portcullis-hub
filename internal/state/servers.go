@@ -42,6 +42,12 @@ type Server struct {
 	// steps done, the etcd member removed once quorum returns): the entry
 	// stays revoked until the cluster no longer lists the node.
 	RevokeParked string `json:"revoke_parked,omitempty" yaml:"revoke_parked,omitempty"`
+	// RevokeWatch: an enrolment revoked because its machine may hold its
+	// k3s material; a Node that registers is removed for good.
+	// NodeGoneSince: since when the cluster lists no Node of the revoked
+	// entry's name (the entry goes 10 min later).
+	RevokeWatch   bool      `json:"revoke_watch,omitempty" yaml:"revoke_watch,omitempty"`
+	NodeGoneSince time.Time `json:"node_gone_since,omitempty" yaml:"node_gone_since,omitempty"`
 }
 
 // The server kinds.

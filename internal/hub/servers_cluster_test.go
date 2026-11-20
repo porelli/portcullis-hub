@@ -477,9 +477,16 @@ func TestRevokeParkedIsAccepted(t *testing.T) {
 		cf.na.mu.Lock()
 		cf.na.snap.Nodes = cf.na.snap.Nodes[:2]
 		cf.na.mu.Unlock()
+		clock := &offsetClock{}
+		cf.h.srvT.now = clock.now
+		cf.h.settleClusterNodes(context.Background())
+		if _, ok := cf.serverEntry("n3"); !ok {
+			t.Error("dropped at once: a Node may still register within 10 min")
+		}
+		clock.add(NodeGoneWait + time.Second)
 		cf.h.settleClusterNodes(context.Background())
 		if _, ok := cf.serverEntry("n3"); ok {
-			t.Error("kept after the cluster dropped it")
+			t.Error("kept 10 min after the cluster dropped it")
 		}
 	}
 }
@@ -604,5 +611,101 @@ func TestNodeadmStatusesMapped(t *testing.T) {
 	}
 	if err := nodeadmErr(&nodeadm.APIError{Status: 503, Kind: "not_leader", Text: "this nodeadm isn't the leader: retry"}); errStatus(err) != 503 || err.Error() != "nodeadm: this nodeadm isn't the leader: retry" {
 		t.Errorf("503: %v", err)
+	}
+}
+
+// TestStopBetweenReleaseAndRegistration (re-review N1): a Stop once the
+// machine enrolled (nodeadm may have released its k3s material) but
+// before its Node registers is a revoke, never a void: nodeadm's revoke,
+// the nodeagent's uninstall, the entry kept revoked and watched. A Node
+// that registers afterwards is removed for good; with none for 10 min
+// the entry goes, and the list never shows the node again.
+func TestStopBetweenReleaseAndRegistration(t *testing.T) {
+	start := func(t *testing.T) *clusterFixture {
+		cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+		inJoin := make(chan struct{})
+		var once sync.Once
+		cf.na.onCluster = func(n int, s *nodeadm.Snapshot) {
+			if n == 2 {
+				s.Enrolling = []nodeadm.Enrolling{{ID: "n2", Role: "server", Class: "home", Site: "main", MeshIP: "10.215.0.2"}}
+			}
+			if n >= 4 {
+				once.Do(func() { close(inJoin) }) // waiting in k3s_joined
+			}
+		}
+		if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
+			t.Fatal(err)
+		}
+		<-inJoin
+		if err := cf.h.StopServerEnrol("n2", admin, ""); err != nil {
+			t.Fatal(err)
+		}
+		if r := waitServerOp(t, cf.h, serverOpKey("n2")); r.OK {
+			t.Fatalf("op %+v", r)
+		}
+		c := cf.na.Calls()
+		if !slices.Contains(c, "remove:n2:revoke") || slices.Contains(c, "remove:n2:cooperative") || !slices.Contains(c, "uninstall:n2") {
+			t.Fatalf("calls %v: want a revoke and the uninstall, never a void", c)
+		}
+		if s, ok := cf.serverEntry("n2"); !ok || s.State != ServerRevoked {
+			t.Fatalf("entry %+v %v", s, ok)
+		}
+		return cf
+	}
+
+	// The Node registers afterwards: removed for good.
+	cf := start(t)
+	cf.na.mu.Lock()
+	cf.na.onCluster = nil
+	cf.na.snap.Enrolling = nil
+	cf.na.snap.Nodes = append(cf.na.snap.Nodes, serverNode("n2", "10.215.0.2", true))
+	cf.na.calls = nil
+	cf.na.mu.Unlock()
+	cf.h.settleClusterNodes(context.Background())
+	if c := cf.na.Calls(); !slices.Equal(c, []string{"cordon:n2", "drain:n2", "remove:n2:cooperative", "uninstall:n2"}) {
+		t.Errorf("registered after the revoke: %v", c)
+	}
+	if _, ok := cf.serverEntry("n2"); ok {
+		t.Error("the entry is left")
+	}
+	for _, v := range cf.h.Servers(context.Background()) {
+		if v.ID == "n2" {
+			t.Errorf("listed again from the cached snapshot: %+v", v)
+		}
+	}
+
+	// No Node for 10 min: the entry goes.
+	cf = start(t)
+	clock := &offsetClock{}
+	cf.h.srvT.now = clock.now
+	cf.na.mu.Lock()
+	cf.na.onCluster = nil
+	cf.na.snap.Enrolling = nil
+	cf.na.mu.Unlock()
+	cf.h.settleClusterNodes(context.Background())
+	clock.add(NodeGoneWait - time.Minute)
+	cf.h.settleClusterNodes(context.Background())
+	if _, ok := cf.serverEntry("n2"); !ok {
+		t.Error("dropped before 10 min without a Node")
+	}
+	clock.add(2 * time.Minute)
+	cf.h.settleClusterNodes(context.Background())
+	if _, ok := cf.serverEntry("n2"); ok {
+		t.Error("kept past 10 min without a Node")
+	}
+}
+
+// TestRevokedNodeNotListedAgain (re-review N2): after a revoke the cached
+// snapshot no longer lists the node.
+func TestRevokedNodeNotListedAgain(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	cf.h.settleClusterNodes(context.Background()) // caches the snapshot
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range cf.h.Servers(context.Background()) {
+		if v.ID == "n3" {
+			t.Errorf("n3 listed after its revoke: %+v", v)
+		}
 	}
 }
