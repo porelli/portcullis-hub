@@ -36,10 +36,23 @@ func (f *fakeEtcd) set(k string) {
 	f.keys[k] = true
 }
 
-func (f *fakeEtcd) Members(context.Context) ([]Member, error) { return f.members, nil }
+func (f *fakeEtcd) Members(context.Context) ([]Member, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Member(nil), f.members...), nil
+}
+
 func (f *fakeEtcd) Remove(_ context.Context, id uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
 	return nil
+}
+
+func (f *fakeEtcd) gone() []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint64(nil), f.removed...)
 }
 
 type fakeSup struct {
@@ -51,18 +64,34 @@ type fakeSup struct {
 	// block, when set, is awaited after it (the answer is late).
 	etcd  *fakeEtcd
 	block chan struct{}
+	// entered, when set, is closed once a call has begun (and re-keyed).
+	entered chan struct{}
+	mu      sync.Mutex
 }
 
 func (f *fakeSup) RotateServerToken(ctx context.Context, ip string, oldPass, newToken secret) error {
+	f.mu.Lock()
 	f.calls++
 	f.ip, f.oldPass, f.newT = ip, oldPass, newToken
+	err, block, entered := f.err, f.block, f.entered
+	f.entered = nil
+	f.mu.Unlock()
 	if f.etcd != nil {
 		f.etcd.set(bootstrapKey(passphrase(string(newToken), "server")))
 	}
-	if f.block != nil {
-		<-f.block
+	if entered != nil {
+		close(entered)
 	}
-	return f.err
+	if block != nil {
+		<-block
+	}
+	return err
+}
+
+func (f *fakeSup) n() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // testK3sCA is the test k3s server CA bundle; caHash its sha256 (what a

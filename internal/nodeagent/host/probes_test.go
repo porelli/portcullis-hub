@@ -82,7 +82,7 @@ func TestProbeClasses(t *testing.T) {
 	}
 	start := time.Now()
 	r.a.probe.Round(context.Background())
-	if time.Since(start) > 3*time.Second {
+	if time.Since(start) > 10*probeTimeout { // bounded by the timeout, not the slowest target
 		t.Error("a round took longer than its timeout")
 	}
 	p := r.a.probe.Rounds()

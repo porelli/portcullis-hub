@@ -39,26 +39,43 @@ func TestTokenRotateResumes(t *testing.T) {
 	r := newRig(t, "server")
 	etcd := &fakeEtcd{}
 	r.a.cfg.Etcd = etcd
-	sup := &fakeSup{etcd: etcd, block: make(chan struct{}), err: errors.New("the k3s supervisor answered 504 to the token rotation")}
+	sup := &fakeSup{etcd: etcd, block: make(chan struct{}), entered: make(chan struct{}),
+		err: errors.New("the k3s supervisor answered 504 to the token rotation")}
+	entered := sup.entered
 	r.a.cfg.Supervisor = sup
 	installK3s(t, r, "server", "rawinittoken0123")
 	s := r.server()
 	c := r.client(r.ca, na.CNNodeadm)
-	c.Timeout = 300 * time.Millisecond
 	body := `{"new_token":"` + newTok + `","step":"rotate"}`
-	if code, _ := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", body); code != 0 {
-		t.Fatalf("the first call answered %d before the supervisor did", code)
+	// The caller gives up once the supervisor has the call (re-keyed, its
+	// answer still pending): a cancelled request, no timer.
+	ctx, cancel := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, "POST", s.URL+"/v1/k3s/token-rotate", strings.NewReader(body))
+		resp, err := c.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			err = errors.New("answered " + resp.Status)
+		}
+		first <- err
+	}()
+	<-entered
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the first call: %v, want it cancelled before the supervisor answered", err)
 	}
 	if readTok(t, r, K3sTokenFile) != "rawinittoken0123" {
 		t.Error("the token file changed before the supervisor answered")
 	}
+	// The supervisor answers (an error, after the re-key); the step goes
+	// on without its caller; the retry waits for it and finds it done.
 	close(sup.block)
-	c.Timeout = 10 * time.Second
 	if code, out := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", body); code != 204 {
 		t.Fatalf("the retry: %d %s", code, out)
 	}
-	if readTok(t, r, K3sTokenFile) != newTok || sup.calls != 1 {
-		t.Errorf("after the retry: file %q, %d supervisor calls", readTok(t, r, K3sTokenFile), sup.calls)
+	if readTok(t, r, K3sTokenFile) != newTok || sup.n() != 1 {
+		t.Errorf("after the retry: file %q, %d supervisor calls", readTok(t, r, K3sTokenFile), sup.n())
 	}
 	if _, err := os.Stat(filepath.Join(r.root, intentFile)); err == nil {
 		t.Error("the intent stayed")
@@ -77,7 +94,7 @@ func TestTokenRotateResumes(t *testing.T) {
 	if err := r2.a.TokenStep(context.Background(), na.TokenRotate{NewToken: newTok, Step: "rotate"}); err != nil {
 		t.Fatal(err)
 	}
-	if sup2.calls != 0 || readTok(t, r2, K3sTokenFile) != newTok || r2.run.count("systemctl", "restart") != 1 {
+	if sup2.n() != 0 || readTok(t, r2, K3sTokenFile) != newTok || r2.run.count("systemctl", "restart") != 1 {
 		t.Errorf("resumed: %d calls, file %q, %d restarts", sup2.calls, readTok(t, r2, K3sTokenFile), r2.run.count("systemctl", "restart"))
 	}
 	// The file written but the restart cut short: the intent restarts again.
@@ -85,7 +102,7 @@ func TestTokenRotateResumes(t *testing.T) {
 	if err := r2.a.TokenStep(context.Background(), na.TokenRotate{NewToken: newTok, Step: "rotate"}); err != nil {
 		t.Fatal(err)
 	}
-	if r2.run.count("systemctl", "restart") != 2 || sup2.calls != 0 {
+	if r2.run.count("systemctl", "restart") != 2 || sup2.n() != 0 {
 		t.Error("a pending intent didn't restart k3s")
 	}
 

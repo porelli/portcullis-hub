@@ -153,8 +153,8 @@ func TestNodeagentCallVectors(t *testing.T) {
 			t.Errorf("%s: %d %s", v["name"], code, out)
 		}
 	}
-	if len(etcd.removed) != 1 || etcd.removed[0] != 3 {
-		t.Errorf("etcd removed %v", etcd.removed)
+	if g := etcd.gone(); len(g) != 1 || g[0] != 3 {
+		t.Errorf("etcd removed %v", g)
 	}
 	if sup.calls != 1 {
 		t.Errorf("supervisor calls %d", sup.calls)

@@ -101,6 +101,26 @@ func (f *fakeRenew) handler(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// st is a locked snapshot of the counters (the handler runs on the test
+// server's goroutines).
+func (f *fakeRenew) st() (renews, confirms int, revoked bool, issued int, signer []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.renews, f.confirms, f.revoked, len(f.issued), f.signer
+}
+
+func (f *fakeRenew) R() int    { r, _, _, _, _ := f.st(); return r }
+func (f *fakeRenew) C() int    { _, c, _, _, _ := f.st(); return c }
+func (f *fakeRenew) V() bool   { _, _, v, _, _ := f.st(); return v }
+func (f *fakeRenew) I() int    { _, _, _, i, _ := f.st(); return i }
+func (f *fakeRenew) S() []byte { _, _, _, _, s := f.st(); return s }
+
+func (f *fakeRenew) issuedFor(spki []byte) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.issued[string(spki)]
+}
+
 // renewRig: a server rig whose certificate is in its last third, and a
 // fake nodeadm.
 func renewRig(t *testing.T) (*rig, *fakeRenew) {
@@ -146,20 +166,20 @@ func TestRenew(t *testing.T) {
 	defer f0.srv.Close()
 	setEndpoint(t, r0, f0.srv.URL+"/node")
 	r0.a.cfg.HTTP = f0.srv.Client()
-	if done, err := r0.a.RenewIfDue(ctx); done || err != nil || f0.renews != 0 {
-		t.Fatalf("not due: %v %v %d", done, err, f0.renews)
+	if done, err := r0.a.RenewIfDue(ctx); done || err != nil || f0.R() != 0 {
+		t.Fatalf("not due: %v %v %d", done, err, f0.R())
 	}
 
 	r, f := renewRig(t)
 	old := r.leaf()
-	if done, err := r.a.RenewIfDue(ctx); !done || err != nil || f.renews != 1 || f.confirms != 1 || !f.revoked {
-		t.Fatalf("due: %v %v renews %d confirms %d", done, err, f.renews, f.confirms)
+	if done, err := r.a.RenewIfDue(ctx); !done || err != nil || f.R() != 1 || f.C() != 1 || !f.V() {
+		t.Fatalf("due: %v %v renews %d confirms %d", done, err, f.R(), f.C())
 	}
 	nw := r.leaf()
 	if nw.Equal(old) || !nw.NotAfter.After(old.NotAfter) {
 		t.Error("the served certificate wasn't swapped")
 	}
-	if c, _ := x509.ParseCertificate(f.signer); !c.Equal(nw) {
+	if c, _ := x509.ParseCertificate(f.S()); !c.Equal(nw) {
 		t.Error("the confirmation wasn't signed with the new certificate")
 	}
 	b, _ := os.ReadFile(filepath.Join(r.root, nodePEMFile))
@@ -181,7 +201,7 @@ func TestRenew(t *testing.T) {
 	if !resp.TLS.PeerCertificates[0].Equal(nw) {
 		t.Error("the API serves the old certificate")
 	}
-	if done, _ := r.a.RenewIfDue(ctx); done || f.renews != 1 {
+	if done, _ := r.a.RenewIfDue(ctx); done || f.R() != 1 {
 		t.Error("a renewed certificate renewed again")
 	}
 	// The core renew vectors (Hub copy of nodeadm_api_vectors.json).
@@ -239,13 +259,15 @@ func TestRenew(t *testing.T) {
 // certificate, installs it and confirms; nothing was revoked before.
 func TestRenewLostAnswer(t *testing.T) {
 	r, f := renewRig(t)
+	f.mu.Lock()
 	f.drop = 1
+	f.mu.Unlock()
 	old := r.leaf()
 	if _, err := r.a.RenewIfDue(context.Background()); err == nil {
 		t.Fatal("a lost answer succeeded")
 	}
-	if !r.leaf().Equal(old) || f.revoked || len(f.issued) != 1 {
-		t.Fatalf("after the lost answer: swapped %v revoked %v issued %d", !r.leaf().Equal(old), f.revoked, len(f.issued))
+	if !r.leaf().Equal(old) || f.V() || f.I() != 1 {
+		t.Fatalf("after the lost answer: swapped %v revoked %v issued %d", !r.leaf().Equal(old), f.V(), f.I())
 	}
 	fi, err := os.Stat(filepath.Join(r.root, pendingPEMFile))
 	if err != nil || fi.Mode().Perm() != 0o600 {
@@ -258,8 +280,8 @@ func TestRenewLostAnswer(t *testing.T) {
 	if done, err := r.a.RenewIfDue(context.Background()); !done || err != nil {
 		t.Fatalf("the retry: %v", err)
 	}
-	if len(f.issued) != 1 || f.renews != 2 || !f.revoked || r.leaf().Equal(old) {
-		t.Errorf("the retry: issued %d renews %d revoked %v", len(f.issued), f.renews, f.revoked)
+	if f.I() != 1 || f.R() != 2 || !f.V() || r.leaf().Equal(old) {
+		t.Errorf("the retry: issued %d renews %d revoked %v", f.I(), f.R(), f.V())
 	}
 	if want := f.issued[string(r.leaf().RawSubjectPublicKeyInfo)]; want == nil || !r.leaf().Equal(mustCert(want)) {
 		t.Error("the retry's certificate isn't the one issued for the same CSR")
@@ -280,12 +302,14 @@ func mustCert(der []byte) *x509.Certificate {
 // until it lands; the old one is revoked only then.
 func TestRenewCrashBeforeConfirm(t *testing.T) {
 	r, f := renewRig(t)
+	f.mu.Lock()
 	f.confirmF = 2
+	f.mu.Unlock()
 	old := r.leaf()
 	if _, err := r.a.RenewIfDue(context.Background()); err == nil {
 		t.Fatal("an unconfirmed renewal reported done")
 	}
-	if r.leaf().Equal(old) || f.revoked {
+	if r.leaf().Equal(old) || f.V() {
 		t.Fatal("not installed, or revoked before the confirmation")
 	}
 	// The crash: a new process from the files.
@@ -299,13 +323,13 @@ func TestRenewCrashBeforeConfirm(t *testing.T) {
 	if _, err := b.RenewIfDue(context.Background()); err == nil {
 		t.Fatal("the second confirmation was to fail")
 	}
-	if done, err := b.RenewIfDue(context.Background()); !done || err != nil || !f.revoked {
+	if done, err := b.RenewIfDue(context.Background()); !done || err != nil || !f.V() {
 		t.Fatalf("the confirmation retry: %v", err)
 	}
-	if f.renews != 1 || f.confirms != 3 {
-		t.Errorf("renews %d confirms %d", f.renews, f.confirms)
+	if f.R() != 1 || f.C() != 3 {
+		t.Errorf("renews %d confirms %d", f.R(), f.C())
 	}
-	if c, _ := x509.ParseCertificate(f.signer); !c.Equal(b.cert.Leaf) {
+	if c, _ := x509.ParseCertificate(f.S()); !c.Equal(b.cert.Leaf) {
 		t.Error("a confirmation not signed by the new certificate")
 	}
 	if _, err := os.Stat(filepath.Join(r.root, pendingPEMFile)); err == nil {
@@ -324,7 +348,9 @@ func TestRenewClockSkew(t *testing.T) {
 		r, f := renewRig(t)
 		// nodeadm's clock is skew ahead of the node's: the leaf's NotBefore
 		// (nodeadm now − 30 s) sits in the node's future when skew > 30 s.
+		f.mu.Lock()
 		f.skew = c.skew
+		f.mu.Unlock()
 		old := r.leaf()
 		_, err := r.a.RenewIfDue(context.Background())
 		if (err == nil) != c.ok || r.leaf().Equal(old) == c.ok {
