@@ -1182,8 +1182,8 @@ func TestMeshFailoverMidConfirmation(t *testing.T) {
 	cf.na.mu.Lock()
 	again := slices.Contains(cf.na.meshOrder, "n2")
 	cf.na.mu.Unlock()
-	if again && cf.meshRecord("n2").Applied == applied {
-		t.Error("n2's unchanged plan was pushed again after the takeover")
+	if !again || cf.meshRecord("n2").Applied != applied {
+		t.Errorf("the new leader didn't push n2's plan once (pushed %v, applied %q)", again, cf.meshRecord("n2").Applied)
 	}
 	advance(MeshConfirmWait + time.Second)
 	cf.h.meshReadyOf(ctx, "e2")
@@ -1267,5 +1267,54 @@ func TestMeshRefusedNodeIsNoGatewayCandidate(t *testing.T) {
 	}
 	if r := cf.meshRecord("e1"); r.Reach != state.ReachOffered {
 		t.Errorf("e1 %+v", r)
+	}
+}
+
+// TestMeshStaleAppliedIsNoProof: a persisted Applied hash is a record, not
+// proof. After a takeover, e1's record says it holds its plan, but it
+// never got it (its push now fails): it confirms nothing, even forging a
+// handshake on the endpoint that plan would dial. A node out of the plan
+// loses its record.
+func TestMeshStaleAppliedIsNoProof(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	advance := fakeClockHub(cf)
+	confirmAll(t, cf, "n1", "e1")
+	// n1 moves to a closed address: the plan e1 would hold dials it there.
+	cf.closeEndpoint("203.0.113.9:51830")
+	cf.na.mu.Lock()
+	cf.na.snap.Node("n1").Addresses.Public = []string{"203.0.113.9"}
+	cf.na.mu.Unlock()
+	cf.h.pushMesh(ctx) // n1 offered; e1's new plan (dialling it) computed and pushed
+	want := cf.meshRecord("e1").Applied
+	// The takeover: e1's record names that plan, but e1 is reset (it lost
+	// it) and every push to it fails from now on.
+	cf.h.cl.ms = meshState{allowDoc: true}
+	cf.na.setRefuse("mesh:e1", errors.New("timeout"))
+	cf.na.mu.Lock()
+	delete(cf.na.mesh, "e1")
+	cf.na.claims = map[string]map[string]string{"e1": {"n1": "203.0.113.9:51830"}}
+	cf.na.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		cf.h.pushMesh(ctx)
+	}
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered {
+		t.Fatalf("n1 confirmed by e1 on a stale record: %+v", r)
+	}
+	if got := cf.meshRecord("e1").Applied; got != want {
+		t.Errorf("e1's record moved without a push: %q", got)
+	}
+	advance(MeshConfirmWait + time.Second)
+	cf.h.pushMesh(ctx)
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachUnreachable {
+		t.Errorf("n1: %+v", r)
+	}
+	// Revoked: out of the plan, its record goes.
+	cf.na.setRefuse("mesh:e1", nil)
+	if _, _, err := cf.h.RemoveClusterNode(ctx, admin, "e1", "e1", nodeadm.Revoke); err != nil {
+		t.Fatal(err)
+	}
+	if got := cf.meshRecord("e1").Applied; got != "" {
+		t.Errorf("revoked e1 kept its record %q", got)
 	}
 }

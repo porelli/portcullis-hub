@@ -111,10 +111,12 @@ type meshState struct {
 	// wire: the plans of the last computation (applied == want: what the
 	// node holds); firstPush: when this Hub (a fresh start or a takeover)
 	// first reached the push stage, from which an offer's 2 min run at
-	// the earliest; loaded: applied was read from state.Mesh.
+	// the earliest. applied is only ever set by this Hub's own successful
+	// push: a persisted state.Mesh Applied is never proof that a node
+	// holds a plan, so a new leader pushes every plan once and no node
+	// confirms anything before its push landed.
 	wire      map[string]nodeagent.MeshPlan
 	firstPush time.Time
-	loaded    bool
 	// allowDoc admits the documentation ranges as public (tests only).
 	allowDoc bool
 }
@@ -936,7 +938,6 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 	h.cl.ms.run.Lock()
 	defer h.cl.ms.run.Unlock()
 	h.recordMeshReports(snap)
-	h.loadApplied()
 	in := h.meshInputsOf(snap)
 	var keyless map[string]string
 	if len(in.fetch) > 0 {
@@ -1083,6 +1084,13 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 		h.st.Mesh = map[string]state.MeshNode{}
 	}
 	saved := false
+	for id, r := range h.st.Mesh {
+		if _, planned := wire[id]; !planned && r.Applied != "" {
+			r.Applied = "" // out of the plan (removed, revoked, left out)
+			h.st.Mesh[id] = r
+			saved = true
+		}
+	}
 	for id, w := range wire {
 		hash := planHash(w)
 		if ms.applied[id] != hash {
@@ -1109,27 +1117,6 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 		return fmt.Errorf("the mesh plan didn't reach %s (retried every tick)", strings.Join(failed, ", "))
 	}
 	return nil
-}
-
-// loadApplied reads, once per Hub (a start or a takeover), the plan hash
-// each node last took from state.Mesh: an unchanged plan isn't pushed
-// again.
-func (h *Hub) loadApplied() {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	ms := &h.cl.ms
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	ms.init()
-	if ms.loaded {
-		return
-	}
-	ms.loaded = true
-	for id, r := range h.st.Mesh {
-		if r.Applied != "" && ms.applied[id] == "" {
-			ms.applied[id] = r.Applied
-		}
-	}
 }
 
 func siteSet(in meshInputs) map[string]bool {

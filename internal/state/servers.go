@@ -157,7 +157,9 @@ type MeshNode struct {
 	Changes   []time.Time `json:"changes,omitempty" yaml:"changes,omitempty"`
 	HoldUntil time.Time   `json:"hold_until,omitempty" yaml:"hold_until,omitempty"`
 	Removed   bool        `json:"removed,omitempty" yaml:"removed,omitempty"`
-	// Applied is the hash of the plan the node's nodeagent last took.
+	// Applied is the hash of the plan the node's nodeagent last took from
+	// a Hub (a record only: a new leader pushes every plan again and never
+	// counts it as proof; cleared once the node is out of the plan).
 	Applied string `json:"applied,omitempty" yaml:"applied,omitempty"`
 }
 

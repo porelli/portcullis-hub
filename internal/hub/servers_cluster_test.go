@@ -168,10 +168,10 @@ func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
 				}
 			}
 		}
-		if ep := a.f.claims[a.id][q.ID]; ep != "" { // a forged report
-			ps.LatestHandshake, ps.Endpoint = fresh, jsonstrict.Some(ep)
-		}
 		peers[q.ID] = ps
+	}
+	for peer, ep := range a.f.claims[a.id] { // forged reports, plan or not
+		peers[peer] = nodeagent.PeerStatus{LatestHandshake: fresh, Endpoint: jsonstrict.Some(ep)}
 	}
 	a.f.mu.Unlock()
 	return nodeagent.Health{ID: a.id, MeshPub: fakeMeshKey(a.id), K3s: "running", Time: now.Format(time.RFC3339), Peers: peers}, nil
