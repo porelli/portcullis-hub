@@ -75,12 +75,14 @@ type NodeadmAPI interface {
 }
 
 // NodeagentAPI is the part of a node's nodeagent the Hub uses: the k3s
-// uninstall of a removal, the health read (its pcmesh key) and the mesh
-// peer plan (*nodeagent.Client; tests substitute it).
+// uninstall of a removal, the health read (its pcmesh key), the mesh
+// peer plan and the round trips over pcmesh (*nodeagent.Client; tests
+// substitute it).
 type NodeagentAPI interface {
 	Uninstall(ctx context.Context) error
 	Health(ctx context.Context) (nodeagent.Health, error)
 	PutMeshPeers(ctx context.Context, p nodeagent.MeshPlan) error
+	RTT(ctx context.Context) (map[string]int, error)
 }
 
 // clusterNodes is the Hub's cluster-node wiring.
@@ -102,6 +104,8 @@ type clusterNodes struct {
 	meshRemove func(ctx context.Context, id string) error
 	// ms is the mesh's push state (servers_mesh.go).
 	ms meshState
+	// rtt: the nodes' last round trips over pcmesh (sites.go).
+	rtt meshRTT
 	// poll is how often the enrolment reads the snapshot (0: 5 s).
 	poll time.Duration
 	// adding: adds between their entry and their op (the settle tick
@@ -664,7 +668,18 @@ func (h *Hub) runClusterEnrol(ctx context.Context, id string, actor directory.Ac
 			return undo(StepMeshReady, ctx.Err())
 		}
 	}
+	// The RTT limits (P23): after mesh_ready, before k3s_joined; a refusal
+	// ends the enrolment as a revoke (its peer out of every plan), even
+	// if nodeadm released its material meanwhile.
+	rttOK, rttSince := false, h.now()
 	if err := wait(StepK3sJoined, enrolled.Add(clusterJoinWait), "the node didn't join the cluster within 45 minutes (is params-sync running on the install host?)", func(sn nodeadm.Snapshot) (bool, error) {
+		if !rttOK {
+			ok, err := h.joinRTT(ctx, id, s.Role, s.MeshIP, sn, rttSince, p)
+			if err != nil || !ok {
+				return false, err
+			}
+			rttOK = true
+		}
 		return sn.Node(id) != nil, nil
 	}); err != nil {
 		return undo(StepK3sJoined, err)
@@ -1212,6 +1227,8 @@ func (h *Hub) settleClusterNodes(ctx context.Context) {
 	// A node that missed its mesh plan (or whose plan changed: a join, a
 	// removal, an endpoint) gets it now.
 	h.meshTick(ctx, snap)
+	// The round trips (the gauge, mesh_rtt_high, the sites view).
+	h.collectRTT(ctx, snap)
 }
 
 // settleRevoked watches a revoked entry (security review round 3):

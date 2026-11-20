@@ -114,7 +114,7 @@
         '</td></tr><tr data-server-detail="' + esc(s.id) + '" hidden><td colspan="11"></td></tr>';
     }
     h += '</tbody></table>';
-    if (clusterMode(p)) return h + clusterAddHtml();
+    if (clusterMode(p)) return h + clusterAddHtml(siteNames(p));
     h += '<div class="inst-form" data-srv-add><label class="block" for="srv-add-id">Add a server</label>' +
       '<div class="inst-row" style="margin-top:0"><input id="srv-add-id" data-srv-add-id placeholder="id (e.g. nas)" maxlength="32" spellcheck="false">' +
       '<input data-srv-add-name placeholder="name (e.g. Attic NAS)" maxlength="64">' +
@@ -123,20 +123,30 @@
     return h;
   }
 
+  // siteNames are the sites of the listed cluster nodes (main first),
+  // offered in the add form's Site field.
+  function siteNames(p) {
+    const set = new Set(['main']);
+    for (const s of (p && p.servers) || []) if (s.kind === 'cluster-node' && s.site) set.add(String(s.site));
+    return ['main'].concat([...set].filter(n => n !== 'main').sort());
+  }
+
   // clusterAddHtml is the Add server form on Kubernetes: a cluster node
   // (Docker workers can't join a Kubernetes cluster). "" = the Hub's
-  // suggestion.
-  function clusterAddHtml() {
+  // suggestion; sites are the existing ones offered (a new name starts a
+  // site).
+  function clusterAddHtml(sites) {
     const opt = (v, t) => '<option value="' + esc(v) + '">' + esc(t) + '</option>';
     return '<div class="inst-form" data-srv-add data-srv-kind="cluster-node"><label class="block" for="srv-add-id">Add a cluster node</label>' +
       '<div class="inst-row" style="margin-top:0"><input id="srv-add-id" data-srv-add-id placeholder="id (e.g. n4)" maxlength="31" spellcheck="false">' +
       '<input data-srv-add-name placeholder="name (e.g. Attic NUC)" maxlength="64"></div>' +
       '<div class="inst-row"><label>Role <select data-srv-add-role>' + opt('', 'suggested') + opt('server', 'server') + opt('agent', 'agent') + '</select></label>' +
       ' <label>Class <select data-srv-add-class>' + opt('', 'home (default)') + opt('home', 'home') + opt('cloud', 'cloud') + opt('small', 'small') + '</select></label>' +
-      ' <label>Site <input data-srv-add-site placeholder="main" maxlength="31" spellcheck="false" style="width:8em"></label>' +
+      ' <label>Site <input data-srv-add-site list="srv-add-sites" placeholder="main" maxlength="31" spellcheck="false" style="width:8em"></label>' +
+      '<datalist id="srv-add-sites" data-srv-sites>' + (sites || ['main']).map(n => '<option value="' + esc(n) + '">').join('') + '</datalist>' +
       ' <label>Ingress <select data-srv-add-ingress>' + opt('', 'default') + opt('true', 'yes') + opt('false', 'no') + '</select></label>' +
       ' <label>Storage <select data-srv-add-storage>' + opt('', 'default') + opt('true', 'yes') + opt('false', 'no') + '</select></label></div>' +
-      '<p class="public-warn" data-srv-server-notice><small>' + esc(SERVER_NOTICE) + ' The Hub suggests a server while the cluster has fewer than 3 healthy servers.</small></p>' +
+      '<p class="public-warn" data-srv-server-notice><small>' + esc(SERVER_NOTICE) + ' The Hub suggests a server while the cluster has fewer than 3 healthy servers, at most 5, spread so no site holds a majority of them; storage nodes must be at the primary site (main) in this version.</small></p>' +
       '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-srv-act="add">+ Add node…</button></div>' +
       '<small>Needs a fresh sign-in. You get a one-line command to run on the new machine and a one-time join code it asks for; the code expires in 15 minutes. Docker workers can\'t join a Kubernetes cluster.</small></div>';
   }

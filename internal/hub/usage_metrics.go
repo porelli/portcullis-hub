@@ -42,6 +42,9 @@ var (
 	descFree        = prometheus.NewDesc("portcullis_filesystem_free_bytes", "Free bytes of a filesystem with Portcullis data.", []string{"dev"}, nil)
 	descTotal       = prometheus.NewDesc("portcullis_filesystem_total_bytes", "Size of a filesystem with Portcullis data.", []string{"dev"}, nil)
 	descLastOK      = prometheus.NewDesc("portcullis_usage_sampler_last_success_timestamp_seconds", "The usage sampler's last successful sweep (Unix seconds).", nil, nil)
+	// The node mesh (§20.11, pre-flight P47): the nodeagents' round trips
+	// as the Hub last read them (none older than 5 min).
+	descMeshRTT = prometheus.NewDesc("portcullis_mesh_rtt_ms", "Round trip over pcmesh from node from to node to (the nodeagent's p95 of 20 rounds, ms).", []string{"from", "to"}, nil)
 )
 
 type usageCollector struct{ h *Hub }
@@ -52,7 +55,7 @@ func (h *Hub) UsageCollector() prometheus.Collector { return usageCollector{h} }
 
 func (usageCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descCPU, descMem, descMemLimit, descPids, descNetRx, descNetTx, descBlkR, descBlkW, descOOM,
-		descAlloc, descMeasured, descFree, descTotal, descLastOK} {
+		descAlloc, descMeasured, descFree, descTotal, descLastOK, descMeshRTT} {
 		ch <- d
 	}
 }
@@ -74,6 +77,12 @@ func (c usageCollector) Collect(out chan<- prometheus.Metric) {
 		}
 		seen[k] = true
 		out <- m
+	}
+	rtt := h.MeshRTT()
+	for _, from := range slices.Sorted(maps.Keys(rtt)) {
+		for _, to := range slices.Sorted(maps.Keys(rtt[from])) {
+			send(descMeshRTT, prometheus.GaugeValue, float64(rtt[from][to]), from, to)
+		}
 	}
 	snap := h.usageSnapshot()
 	if !snap.LastSuccess.IsZero() {

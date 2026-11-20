@@ -149,10 +149,10 @@ func SuggestRole(cluster []ClusterNode, n NewNode) (role string, warnings []stri
 // CheckRTT: every healthy server answered, a server within 100 ms of
 // each, an agent within 250 ms; 80 % of the limit or more warns.
 func CheckRTT(role string, servers []string, rtt map[string]int) (warnings []string, err error) {
-	limit := 250
+	limit := RTTLimit(role)
 	what := "agents"
 	if role == "server" {
-		limit, what = 100, "servers"
+		what = "servers"
 	}
 	sort.Strings(servers)
 	worst := -1
@@ -167,9 +167,22 @@ func CheckRTT(role string, servers []string, rtt map[string]int) (warnings []str
 		return nil, fmt.Errorf("too far for one cluster: %d ms (%s need %d ms or less)", worst, what, limit)
 	}
 	for _, s := range servers {
-		if v := rtt[s]; v*5 >= limit*4 {
+		if v := rtt[s]; RTTHigh(v, limit) {
 			warnings = append(warnings, fmt.Sprintf("mesh round trip to %s is %d ms: near the %d ms limit", s, v, limit))
 		}
 	}
 	return warnings, nil
 }
+
+// RTTLimit is the most a node of role may be from every server over
+// pcmesh, in ms: 100 for a server (etcd across sites), 250 for an agent.
+func RTTLimit(role string) int {
+	if role == "server" {
+		return 100
+	}
+	return 250
+}
+
+// RTTHigh: v ms is at 80 % of limit or more (doctor mesh_rtt_high, the
+// join's warning).
+func RTTHigh(v, limit int) bool { return v*5 >= limit*4 }

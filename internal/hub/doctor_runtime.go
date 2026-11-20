@@ -47,5 +47,7 @@ func (h *Hub) doctorMeshIn() *doctor.MeshIn {
 		return nil
 	}
 	st := h.MeshStatus()
-	return &doctor.MeshIn{Stale: st.Stale, NoGateway: st.NoGateway}
+	in := &doctor.MeshIn{Stale: st.Stale, NoGateway: st.NoGateway}
+	h.doctorSitesIn(in)
+	return in
 }

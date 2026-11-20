@@ -94,6 +94,17 @@ func (a clusterAgent) Health(context.Context) (nodeagent.Health, error) {
 	return nodeagent.Health{ID: a.id, MeshPub: base64.StdEncoding.EncodeToString(k), K3s: "running"}, nil
 }
 func (a clusterAgent) PutMeshPeers(context.Context, nodeagent.MeshPlan) error { return nil }
+func (a clusterAgent) RTT(context.Context) (map[string]int, error) {
+	a.f.mu.Lock()
+	defer a.f.mu.Unlock()
+	out := map[string]int{}
+	for _, n := range a.f.nodes {
+		if n.Name != a.id {
+			out[n.Name] = 1
+		}
+	}
+	return out, nil
+}
 
 func clusterServer(name string) nodeadm.Node {
 	return nodeadm.Node{Name: name, Role: "server", Ready: true, Labels: map[string]string{}, Addresses: nodeadm.NodeAddresses{Mesh: "10.215.0." + name[1:]}}

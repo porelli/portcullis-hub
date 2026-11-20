@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -46,6 +47,9 @@ type fakeNodeadm struct {
 	// claims: forged handshakes a node reports (node → peer → endpoint).
 	outbound map[string]string
 	claims   map[string]map[string]string
+	// rtt: a node's GET /v1/mesh/rtt answer (unset: 2 ms to every other
+	// node of the snapshot).
+	rtt map[string]map[string]int
 }
 
 const testSecret = "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"
@@ -171,6 +175,25 @@ func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
 	}
 	a.f.mu.Unlock()
 	return nodeagent.Health{ID: a.id, MeshPub: fakeMeshKey(a.id), K3s: "running", Time: now.Format(time.RFC3339), Peers: peers}, nil
+}
+
+// RTT answers the node's round trips (not in calls).
+func (a fakeNodeagent) RTT(context.Context) (map[string]int, error) {
+	a.f.mu.Lock()
+	defer a.f.mu.Unlock()
+	if err := a.f.refuse["rtt:"+a.id]; err != nil {
+		return nil, err
+	}
+	if m, ok := a.f.rtt[a.id]; ok {
+		return maps.Clone(m), nil
+	}
+	out := map[string]int{}
+	for _, n := range a.f.snap.Nodes {
+		if n.Name != a.id {
+			out[n.Name] = 2
+		}
+	}
+	return out, nil
 }
 
 // PutMeshPeers records the plan (not in calls: the removal and enrolment
