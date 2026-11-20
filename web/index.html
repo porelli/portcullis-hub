@@ -2509,6 +2509,7 @@
       if (running && !greyed) h += aiNote('The app is running: switching AI support on or off, or changing its mode, restarts it' + (routed ? ' (its router labels change)' : '') + '.');
       for (const c of v.companions || []) h += aiCompanionHtml(id, v, c, greyed);
       h += '<div class="inst-section" data-ai-activity><h4>Recent AI activity</h4>';
+      if (act && act.older_not_loaded) h += '<p class="settings-empty" data-ai-older>Older activity isn\'t loaded.</p>';
       if (act && act.incomplete) h += '<p class="settings-empty" data-ai-incomplete>Some AI requests may be missing: a gate replica\'s access log couldn\'t all be read right now.</p>';
       if (act && act.error) h += '<p class="settings-empty">' + escapeHtml(act.error.message || 'AI activity can\'t be read right now') + '</p>';
       else if (!act || !(act.lines || []).length) h += '<p class="settings-empty">No AI requests yet.</p>';

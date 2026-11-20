@@ -446,7 +446,7 @@ func (s *Server) registerAdminTools2() {
 				if err != nil {
 					return nil, err
 				}
-				return map[string]any{"lines": lines, "incomplete": incomplete}, nil
+				return map[string]any{"lines": lines, "incomplete": incomplete, "older_not_loaded": s.Hub.AccessOlderNotLoaded()}, nil
 			}),
 		admin("list_model_providers", "The model providers of the AI page: definition, each secret field only as {set, updated_at}, and the instances using it.",
 			ClassRead, "GET /api/ai/providers", "", func(ctx context.Context, _ directory.Actor, _ noArgs) (any, error) {

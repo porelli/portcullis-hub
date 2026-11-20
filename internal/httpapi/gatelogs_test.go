@@ -27,6 +27,12 @@ func TestAIViewsIncomplete(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Portcullis-Next", "c1")
 		w.Header().Set("X-Portcullis-Truncated", "false")
+		// Anything older than the line can't be fetched: the backward
+		// fill gives up (older activity not loaded).
+		if f := r.URL.Query().Get("from"); f != "" && f < at.Format(time.RFC3339) {
+			http.Error(w, "busy", 503)
+			return
+		}
 		if r.URL.Query().Get("cursor") == "" {
 			w.Write(append(line, '\n'))
 		}
@@ -48,14 +54,34 @@ func TestAIViewsIncomplete(t *testing.T) {
 		c.GateLogs = &hub.GateLogSources{Access: tail}
 	}})
 	var act struct {
-		Lines      []hub.AccessLine `json:"lines"`
-		Incomplete bool             `json:"incomplete"`
+		Lines          []hub.AccessLine `json:"lines"`
+		Incomplete     bool             `json:"incomplete"`
+		OlderNotLoaded *bool            `json:"older_not_loaded"`
 	}
 	if err := json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/ai/activity", "", 200)), &act); err != nil {
 		t.Fatal(err)
 	}
-	if len(act.Lines) != 1 || !act.Incomplete {
+	if len(act.Lines) != 1 || !act.Incomplete || act.OlderNotLoaded == nil {
 		t.Errorf("activity = %+v", act)
+	}
+	// The older segment can't be fetched: each read halves it (the part
+	// skipped is older activity not loaded) until the fill gives up;
+	// older_not_loaded from then on (permanent).
+	for i := 0; i < 30 && !*act.OlderNotLoaded; i++ {
+		act.OlderNotLoaded = nil
+		json.Unmarshal([]byte(mustDo(t, e.hub, "root", "GET", "/api/ai/activity", "", 200)), &act)
+		if act.OlderNotLoaded == nil {
+			t.Fatal("no older_not_loaded field")
+		}
+	}
+	if !*act.OlderNotLoaded || len(act.Lines) != 1 {
+		t.Errorf("never older_not_loaded: %+v", act)
+	}
+	if txt, _, _ := e.tool(t, "ai_activity", nil); !strings.Contains(txt, `"older_not_loaded":true`) {
+		t.Errorf("ai_activity = %q", txt)
+	}
+	if !e.s.Hub.AccessOlderNotLoaded() {
+		t.Error("AccessOlderNotLoaded false")
 	}
 	txt, isErr, _ := e.tool(t, "ai_activity", nil)
 	if isErr || !strings.Contains(txt, `"incomplete":true`) || !strings.Contains(txt, "list_things") {

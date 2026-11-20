@@ -351,7 +351,7 @@ func (s *Server) handleAIActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
-	writeJSON(w, map[string]any{"lines": lines, "incomplete": incomplete})
+	writeJSON(w, map[string]any{"lines": lines, "incomplete": incomplete, "older_not_loaded": s.Hub.AccessOlderNotLoaded()})
 }
 
 // aiActivity is the access log read (route and ai_activity): n 0 = the

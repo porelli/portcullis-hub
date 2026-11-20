@@ -169,6 +169,15 @@ func (h *Hub) accessLogFile(filter func(AccessLine) bool, n int) ([]AccessLine, 
 	return accessLines(buf, filter, n), nil
 }
 
+// AccessOlderNotLoaded: the access log is read from mcp-gate's replicas
+// (HA) and a replica's first fill gave up on some older activity (a
+// segment that couldn't be fetched): what is shown is the newer part.
+// Permanent for that replica; not "incomplete".
+func (h *Hub) AccessOlderNotLoaded() bool {
+	t := h.accessTail()
+	return t != nil && t.OlderNotLoaded()
+}
+
 // accessTailTimeout bounds one read of mcp-gate's replicas (HA).
 const accessTailTimeout = 10 * time.Second
 
@@ -267,6 +276,9 @@ type MyAIView struct {
 	// ActivityIncomplete: some of the activity may be missing (HA: a
 	// gate replica couldn't be read, or is still being read back).
 	ActivityIncomplete bool `json:"activity_incomplete"`
+	// ActivityOlderNotLoaded: older activity isn't loaded (HA: a gate
+	// replica's older access log couldn't be fetched; AccessOlderNotLoaded).
+	ActivityOlderNotLoaded bool `json:"activity_older_not_loaded"`
 }
 
 // aiClientLabel is the Hub's name for an AI client.
@@ -322,7 +334,8 @@ func (h *Hub) MyAI(ctx context.Context, user string) (*MyAIView, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &MyAIView{Connections: []MyAIConnection{}, Activity: activity, ActivityIncomplete: incomplete}
+	v := &MyAIView{Connections: []MyAIConnection{}, Activity: activity, ActivityIncomplete: incomplete,
+		ActivityOlderNotLoaded: h.AccessOlderNotLoaded()}
 	for _, c := range conns {
 		v.Connections = append(v.Connections, MyAIConnection{Client: c.Client, Label: h.aiClientLabel(c.Client),
 			ConsentedAt: c.Consented, LastUsedAt: c.LastUsed, ExpiresAt: c.Expires})

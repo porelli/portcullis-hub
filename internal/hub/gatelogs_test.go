@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -209,6 +210,14 @@ func TestAccessLogFromReplicas(t *testing.T) {
 	}
 	if v, err := a.h.MyAI(context.Background(), "alice"); err != nil || !v.ActivityIncomplete || len(v.Activity) != 10 {
 		t.Errorf("MyAI one down: %+v %v", v, err)
+	}
+	// activity_older_not_loaded: false while nothing older was given up
+	// (the httpapi TestAIViewsIncomplete drives a fill that gives up).
+	if b, _ := json.Marshal(MyAIView{}); !strings.Contains(string(b), `"activity_older_not_loaded":false`) {
+		t.Errorf("MyAIView JSON = %s", b)
+	}
+	if a.h.AccessOlderNotLoaded() {
+		t.Error("older not loaded with nothing given up")
 	}
 	// Both down, nothing held: the 503 of an unreadable file; with lines
 	// held from before: those, incomplete.
