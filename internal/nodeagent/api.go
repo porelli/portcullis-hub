@@ -1,5 +1,7 @@
 package nodeagent
 
+import "github.com/portcullis/hub/internal/jsonstrict"
+
 // The nodeagent API's wire types (contract §20.4), shared by the Hub's
 // client and the host service (internal/nodeagent/host). Pure types: the
 // Hub binary imports this package, and nothing here touches the host.
@@ -24,13 +26,14 @@ const (
 	CNNodeadm   = "nodeadm.control"
 )
 
-// MeshPeer is one entry of PUT /v1/mesh/peers.
+// MeshPeer is one entry of PUT /v1/mesh/peers (endpoint "<ip:port>" or
+// null).
 type MeshPeer struct {
-	ID         string   `json:"id"`
-	Pub        string   `json:"pub"`
-	Endpoint   *string  `json:"endpoint"`
-	AllowedIPs []string `json:"allowed_ips"`
-	Keepalive  int      `json:"keepalive"`
+	ID         string                      `json:"id"`
+	Pub        string                      `json:"pub"`
+	Endpoint   jsonstrict.Nullable[string] `json:"endpoint"`
+	AllowedIPs []string                    `json:"allowed_ips"`
+	Keepalive  int                         `json:"keepalive"`
 }
 
 // MeshPlan is PUT /v1/mesh/peers (and a join code's bootstrap plan).

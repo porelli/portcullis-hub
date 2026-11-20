@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portcullis/hub/internal/jsonstrict"
 	na "github.com/portcullis/hub/internal/nodeagent"
 )
 
-func ep(s string) *string { return &s }
+func ep(s string) jsonstrict.Nullable[string] { return jsonstrict.Some(s) }
 
 // TestPeersIdempotent: the same list twice → one wgctrl peer change; a
 // peer missing from the list is removed; the node's own key, an
@@ -23,7 +24,7 @@ func TestPeersIdempotent(t *testing.T) {
 	k1, k3 := peerKey(t), peerKey(t)
 	plan := na.MeshPlan{Peers: []na.MeshPeer{
 		{ID: "n1", Pub: k1, Endpoint: ep("192.0.2.1:51830"), AllowedIPs: []string{"10.215.0.1/32"}, Keepalive: 25},
-		{ID: "n3", Pub: k3, Endpoint: nil, AllowedIPs: []string{"10.215.0.3/32", "10.215.0.5/32"}, Keepalive: 0},
+		{ID: "n3", Pub: k3, AllowedIPs: []string{"10.215.0.3/32", "10.215.0.5/32"}, Keepalive: 0},
 	}}
 	base := r.wg.peerConfigures()
 	if err := r.a.ApplyMesh(ctx, plan); err != nil {
@@ -82,6 +83,11 @@ func TestPeersIdempotent(t *testing.T) {
 	b, _ := json.Marshal(bad["own key"])
 	if code, _ := do(t, c, "PUT", s.URL+"/v1/mesh/peers", string(b)); code != 400 {
 		t.Errorf("own key over the API: %d", code)
+	}
+	// A null endpoint (a NATed peer) decodes.
+	nullEP := `{"peers":[{"id":"n1","pub":"` + k1 + `","endpoint":null,"allowed_ips":["10.215.0.1/32"],"keepalive":25}],"forward":false}`
+	if code, body := do(t, c, "PUT", s.URL+"/v1/mesh/peers", nullEP); code != 204 {
+		t.Errorf("a null endpoint: %d %s", code, body)
 	}
 	b, _ = json.Marshal(plan)
 	if code, body := do(t, c, "PUT", s.URL+"/v1/mesh/peers", string(b)); code != 204 {

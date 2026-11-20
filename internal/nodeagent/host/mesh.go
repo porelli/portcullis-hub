@@ -77,8 +77,8 @@ func validatePlan(p na.MeshPlan, ownPub string) error {
 		if pr.Pub == ownPub {
 			return errStatus(400, "peer %s has this node's own key", pr.ID)
 		}
-		if pr.Endpoint != nil {
-			ap, err := netip.ParseAddrPort(*pr.Endpoint)
+		if pr.Endpoint.Valid {
+			ap, err := netip.ParseAddrPort(pr.Endpoint.V)
 			if err != nil || !ap.Addr().Is4() || ap.Port() == 0 {
 				return errStatus(400, "peer %s: its endpoint isn't <ipv4:port>", pr.ID)
 			}
@@ -107,8 +107,8 @@ func peerConfigs(p na.MeshPlan) ([]wgtypes.PeerConfig, error) {
 			return nil, errStatus(400, "peer %s: its key is malformed", pr.ID)
 		}
 		pc := wgtypes.PeerConfig{PublicKey: k, ReplaceAllowedIPs: true}
-		if pr.Endpoint != nil {
-			ap := netip.MustParseAddrPort(*pr.Endpoint)
+		if pr.Endpoint.Valid {
+			ap := netip.MustParseAddrPort(pr.Endpoint.V)
 			pc.Endpoint = net.UDPAddrFromAddrPort(ap)
 		}
 		ka := time.Duration(pr.Keepalive) * time.Second
