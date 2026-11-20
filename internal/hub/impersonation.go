@@ -81,9 +81,6 @@ type impState struct {
 	failSeq uint64
 	okSeq   uint64
 	pubRev  string
-	// confirmWait bounds the wait for the readers to confirm a notice
-	// before its Keycloak action (0: impNoticeConfirmWait).
-	confirmWait time.Duration
 	// saveFailed: an end couldn't be saved; the loop saves again.
 	saveFailed bool
 	// noticeLogged: the ids whose failed notice action was logged once
@@ -793,44 +790,38 @@ func (h *Hub) finishEnd(ctx context.Context, id string, actor directory.Actor, k
 	h.mu.Unlock()
 }
 
-// impNoticeConfirmWait bounds the wait for the readers to confirm the
-// file that holds a notice (the kubelet syncs every 10 s).
-const impNoticeConfirmWait = 30 * time.Second
-
-// impNoticePublished publishes the file as it is now (it holds every
-// owed notice) and waits until its readers confirm the published
-// revision (Docker: at once): only then may the Keycloak action be set
-// (a sign-in must find the notice). An error: not published or not
-// confirmed yet; the action waits for the loop's next tick.
+// impNoticePublished: the file the readers enforce holds every owed
+// notice, so the Keycloak action may be set (a sign-in must find the
+// notice). The file is published again first when the last write
+// failed; then one check, never a wait, that the readers confirm the
+// newest published revision (Docker: at once). An error: not published
+// or not confirmed yet; the action waits for the loop's next tick (the
+// 5 s loop never blocks on a reader).
 func (h *Hub) impNoticePublished(ctx context.Context) error {
-	h.mu.RLock()
-	snap := h.impSnapLocked()
-	h.mu.RUnlock()
-	if err := h.publishImp(snap); err != nil {
-		return err
+	if h.impFileFailed() {
+		h.mu.RLock()
+		snap := h.impSnapLocked()
+		h.mu.RUnlock()
+		if err := h.publishImp(snap); err != nil {
+			return err
+		}
 	}
 	h.imp.fileMu.Lock()
-	rev, wait := h.imp.pubRev, h.imp.confirmWait
+	rev := h.imp.pubRev
 	h.imp.fileMu.Unlock()
-	if wait <= 0 {
-		wait = impNoticeConfirmWait
+	if rev == "" {
+		return errors.New("not published yet")
 	}
-	ctx, cancel := context.WithTimeout(ctx, wait)
+	ctx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
-	for {
-		ok, err := h.pub.Sink.Confirmed(ctx, publish.Impersonation, rev)
-		if ok && err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			if err == nil {
-				err = errors.New("the readers haven't confirmed it")
-			}
-			return err
-		case <-time.After(min(wait/10, 2*time.Second)):
-		}
+	ok, err := h.pub.Sink.Confirmed(ctx, publish.Impersonation, rev)
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		return errors.New("the readers haven't confirmed it yet")
 	}
+	return nil
 }
 
 // impPersonGone: a directory snapshot (read now) doesn't know user. An

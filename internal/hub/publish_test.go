@@ -14,6 +14,8 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/leader"
 	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/signinhistory"
@@ -52,6 +54,9 @@ func (s *objSink) Publish(_ context.Context, d publish.Doc, b []byte) (string, e
 func (s *objSink) Remove(_ context.Context, d publish.Doc) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refuse[d]; err != nil {
+		return err
+	}
 	delete(s.data, d)
 	s.rev[d] = publish.Rev(nil)
 	return nil
@@ -345,8 +350,15 @@ func TestHubCopyFirst(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.data, "portal-apps.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a copy of an unpublished document stayed: %v", err)
 	}
-	// Withdrawn: a failed update keeps the copy.
-	delete(s.refuse, publish.MCPCredentials)
+	// A failed withdraw puts the copy back: both keep v1.
+	s.refuse[publish.MCPCredentials] = errors.New("the API server is down")
+	if f.h.unpublish(publish.MCPCredentials) == nil {
+		t.Fatal("a failed withdraw passed")
+	}
+	if b, _ := os.ReadFile(copyPath); string(b) != "v1\n" || string(s.data[publish.MCPCredentials]) != "v1\n" {
+		t.Errorf("withdraw diverged: copy %q, object %q", b, s.data[publish.MCPCredentials])
+	}
+	// Withdrawn: the copy goes with the object.
 	s.refuse[publish.MCPCredentials] = nil
 	if err := f.h.unpublish(publish.MCPCredentials); err != nil {
 		t.Fatal(err)
@@ -474,9 +486,6 @@ func TestNoticeActionOnlyAfterConfirmed(t *testing.T) {
 	x.h.SetImpersonationApps(func(context.Context, state.Impersonation) ([]signinhistory.OpenedApp, bool) { return nil, true })
 	x.mustStart(t, "root", "alice")
 	s, _ := kubePublish(x.f)
-	x.h.imp.fileMu.Lock()
-	x.h.imp.confirmWait = 50 * time.Millisecond
-	x.h.imp.fileMu.Unlock()
 	s.mu.Lock()
 	s.refuse[publish.Impersonation] = errors.New("the API server is down")
 	s.mu.Unlock()
@@ -507,5 +516,101 @@ func TestNoticeActionOnlyAfterConfirmed(t *testing.T) {
 	doc := checkImpFileStrict(t, pubd, x.clock())
 	if len(doc.Notices["alice"]) != 1 {
 		t.Errorf("the published file lacks the notice: %+v", doc)
+	}
+}
+
+// standBySink closes the write gate in the middle of d's object update
+// (the stand-by cuts it) and fails it; other documents go to objSink.
+type standBySink struct {
+	*objSink
+	d publish.Doc
+}
+
+func (s standBySink) Publish(ctx context.Context, d publish.Doc, b []byte) (string, error) {
+	if d == s.d {
+		fsutil.SetWriteGate(func() error { return leader.ErrStandingBy })
+		return "", leader.ErrStandingBy
+	}
+	return s.objSink.Publish(ctx, d, b)
+}
+
+// TestCopyAheadRepublishedAtStart (N3, the mcp-credentials revoking
+// case): the copy is written, the object update is cut by a stand-by,
+// putting the copy back is refused by the gate. The divergence is a
+// Problem; in the same process the restore is retried once writes are
+// possible again; and a new Hub on the same data publishes its copy
+// first thing, so the object equals what it reads back.
+func TestCopyAheadRepublishedAtStart(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		f := newFixture(t)
+		s, _ := kubePublish(f)
+		t.Cleanup(func() { fsutil.SetWriteGate(nil) })
+		copyPath := filepath.Join(f.data, "mcp-credentials.json")
+		if err := f.h.publish(publish.MCPCredentials, []byte("v1 active\n")); err != nil {
+			t.Fatal(err)
+		}
+		tr := f.h.pub
+		f.h.pub = publish.NewTracker(standBySink{s, publish.MCPCredentials})
+		f.h.pub.Now = tr.Now
+		if err := f.h.publish(publish.MCPCredentials, []byte("v2 revoking\n")); !errors.Is(err, leader.ErrStandingBy) {
+			t.Fatalf("err %v", err)
+		}
+		if b, _ := os.ReadFile(copyPath); string(b) != "v2 revoking\n" || string(s.data[publish.MCPCredentials]) != "v1 active\n" {
+			t.Fatalf("setup: copy %q object %q", b, s.data[publish.MCPCredentials])
+		}
+		in := f.h.doctorPublishedIn()
+		if in == nil || len(in.Stale) != 1 || in.Stale[0].Doc != "mcp-credentials" || !strings.Contains(in.Stale[0].Err, "differ from the Hub's own copy") {
+			t.Fatalf("the divergence isn't a Problem: %+v", in)
+		}
+		fsutil.SetWriteGate(nil)
+		if !restart {
+			// The same Hub, writing again: the restore is retried.
+			f.h.pub.Sink = s
+			f.h.retryUnsynced()
+			if b, _ := os.ReadFile(copyPath); string(b) != "v1 active\n" || f.h.doctorPublishedIn() != nil {
+				t.Errorf("in process: copy %q, doctor %+v", b, f.h.doctorPublishedIn())
+			}
+			continue
+		}
+		// A new Hub on the same data directory, as Init runs it.
+		h2, err := newTestHub(f.h.cfg, f.runner, f.engine, f.idp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h2.pub = publish.NewTracker(s)
+		h2.pubMirror = f.h.pubMirror
+		h2.RepublishFromCopies()
+		if string(s.data[publish.MCPCredentials]) != "v2 revoking\n" {
+			t.Errorf("after the start the object is %q, the copy v2", s.data[publish.MCPCredentials])
+		}
+		// A missing copy withdraws its object at start.
+		os.Remove(filepath.Join(f.data, "portal-apps.json"))
+		s.data[publish.PortalApps] = []byte("stale\n")
+		h2.RepublishFromCopies()
+		if _, ok := s.data[publish.PortalApps]; ok {
+			t.Error("a missing copy left its object")
+		}
+		// A failed republish is a Problem and retried.
+		s.refuse[publish.MCPCredentials] = errors.New("down")
+		h2.RepublishFromCopies()
+		if in := h2.doctorPublishedIn(); in == nil || len(in.Stale) != 1 {
+			t.Errorf("a failed republish isn't reported: %+v", in)
+		}
+		s.refuse[publish.MCPCredentials] = nil
+		h2.retryUnsynced()
+		if in := h2.doctorPublishedIn(); in != nil {
+			t.Errorf("not cleared by the retry: %+v", in)
+		}
+	}
+}
+
+// TestInitRepublishesFirst: Init starts with RepublishFromCopies.
+func TestInitRepublishesFirst(t *testing.T) {
+	f := newFixture(t)
+	s, _ := kubePublish(f)
+	os.WriteFile(filepath.Join(f.data, "mcp-credentials.json"), []byte("copy\n"), 0o640)
+	f.h.Init()
+	if string(s.data[publish.MCPCredentials]) != "copy\n" {
+		t.Errorf("Init didn't publish the copy: %q", s.data[publish.MCPCredentials])
 	}
 }

@@ -69,7 +69,10 @@ func (c publishedCheck) Run(in *Inputs) []Finding {
 		for _, d := range p.Stale {
 			pods := strings.Join(d.Pods, ", ")
 			why := fmt.Sprintf("The Hub published %s.json (revision %s) at %s, and these reader pods still don't see it after 120 s: %s. They keep enforcing the previous document.", d.Doc, d.Rev, d.Since.UTC().Format(time.RFC3339), pods)
-			if pods == "" {
+			switch {
+			case pods == "" && d.Rev == "":
+				why = fmt.Sprintf("Since %s, %s. The Hub publishes it again from its own copy every few seconds; until then the readers may enforce another version.", d.Since.UTC().Format(time.RFC3339), d.Err)
+			case pods == "":
 				why = fmt.Sprintf("The Hub published %s.json (revision %s) at %s and can't confirm that its readers see it: %s.", d.Doc, d.Rev, d.Since.UTC().Format(time.RFC3339), d.Err)
 			}
 			out = append(out, Finding{FP: Fingerprint(c.kind, d.Doc), Kind: c.kind, Severity: Problem,

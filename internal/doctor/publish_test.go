@@ -25,4 +25,8 @@ func TestPublishedKinds(t *testing.T) {
 		f[1].Kind != KindPublishedDocStale || !strings.Contains(f[1].Why, "wg-1") || f[0].Severity != Problem || f[1].Severity != Problem {
 		t.Errorf("%+v", f)
 	}
+	f = run(&PublishedIn{Stale: []PublishedStaleIn{{Doc: "mcp-credentials", Since: time.Unix(0, 0), Err: "the published object may differ from the Hub's own copy: standing by"}}})
+	if len(f) != 1 || !strings.Contains(f[0].Why, "again from its own copy") {
+		t.Errorf("unsynced: %+v", f)
+	}
 }

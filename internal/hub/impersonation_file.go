@@ -291,9 +291,9 @@ func (h *Hub) publishImp(s impSnap) error {
 	newer := h.imp.cur
 	h.imp.fileMu.Unlock()
 	superseded := newer != a
-	if !superseded || ctx.Err() == nil {
-		// Its own outcome counts (a superseded one that still completed
-		// published before the newer one: the order holds).
+	if !superseded {
+		// Only the newest attempt's outcome is recorded: a superseded one
+		// (its ctx cancelled) takes its superseder's.
 		h.impFileResult(s, err)
 	}
 	if superseded {

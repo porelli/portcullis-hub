@@ -561,6 +561,7 @@ type Hub struct {
 	// pubMirror is the Hub's own copy under Kubernetes (nil elsewhere).
 	pub       *publish.Tracker
 	pubMirror *publish.FileSink
+	pubSync   pubSync
 	// gatePolicy: the group-gate policy document last written (nil: none
 	// yet). My apps and the portal decide from it what group-gate lets
 	// a person open (gateOpenLocked, gateDenies).
@@ -931,6 +932,10 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 // interrupted restores in the background (RecoverRestores) and seeds the
 // group-gate policy file.
 func (h *Hub) Init() {
+	// Kubernetes: every published object equals the Hub's own copy
+	// before anything is served or written (contract §4; a copy written
+	// before a stand-by or a crash cut its object update).
+	h.RepublishFromCopies()
 	// The sign-in defaults (D1 / D11 / D12) of a state that lacks them,
 	// before anything reads them.
 	h.ensureSignIn()

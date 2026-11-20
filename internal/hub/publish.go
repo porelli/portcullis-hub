@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
@@ -81,6 +83,9 @@ func (h *Hub) publish(d publish.Doc, data []byte) error {
 func (h *Hub) publishWith(parent context.Context, d publish.Doc, data []byte) error {
 	ctx, cancel := publishContext(parent)
 	defer cancel()
+	mu := h.docLock(d)
+	mu.Lock()
+	defer mu.Unlock()
 	if err := h.pub.Precheck(d, data); err != nil {
 		if errors.Is(err, publish.ErrTooLarge) {
 			log.Printf("publish: %s is %d bytes, over %d: not published, readers keep the last good one", d, len(data), publish.MaxDoc)
@@ -95,6 +100,7 @@ func (h *Hub) publishWith(parent context.Context, d publish.Doc, data []byte) er
 		restore()
 		return err
 	}
+	h.synced(d)
 	return nil
 }
 
@@ -121,7 +127,14 @@ func (h *Hub) copyFirst(d publish.Doc, write func() error) (restore func(), err 
 			_, err = h.pubMirror.Publish(context.Background(), d, prev)
 		}
 		if err != nil {
-			log.Printf("publish: %s wasn't published and the Hub's own copy couldn't be put back: %v", d, err)
+			log.Printf("publish: %s wasn't published and the Hub's own copy couldn't be put back: %v (retried)", d, err)
+			h.unsynced(d, err, func() error {
+				if absent {
+					return h.pubMirror.Remove(context.Background(), d)
+				}
+				_, err := h.pubMirror.Publish(context.Background(), d, prev)
+				return err
+			})
 		}
 	}, nil
 }
@@ -130,6 +143,9 @@ func (h *Hub) copyFirst(d publish.Doc, write func() error) (restore func(), err 
 // key dropped, the Hub's own copy removed first): readers see it
 // missing.
 func (h *Hub) unpublish(d publish.Doc) error {
+	mu := h.docLock(d)
+	mu.Lock()
+	defer mu.Unlock()
 	ctx, cancel := publishContext(context.Background())
 	defer cancel()
 	restore, err := h.copyFirst(d, func() error { return h.pubMirror.Remove(context.Background(), d) })
@@ -140,7 +156,120 @@ func (h *Hub) unpublish(d publish.Doc) error {
 		restore()
 		return err
 	}
+	h.synced(d)
 	return nil
+}
+
+// pubSync is what keeps each document's object equal to the Hub's own
+// copy (Kubernetes): a lock per document (a publish, a withdraw and a
+// retry of d never interleave) and the retries owed.
+type pubSync struct {
+	mu    sync.Mutex
+	locks map[publish.Doc]*sync.Mutex
+	owed  map[publish.Doc]func() error
+}
+
+func (h *Hub) docLock(d publish.Doc) *sync.Mutex {
+	h.pubSync.mu.Lock()
+	defer h.pubSync.mu.Unlock()
+	if h.pubSync.locks == nil {
+		h.pubSync.locks = map[publish.Doc]*sync.Mutex{}
+	}
+	m := h.pubSync.locks[d]
+	if m == nil {
+		m = &sync.Mutex{}
+		h.pubSync.locks[d] = m
+	}
+	return m
+}
+
+// unsynced records that d's object and the Hub's copy may differ, and
+// the retry that makes them equal (run under d's lock by
+// RunPublishConfirm); the doctor reports published_doc_stale.
+func (h *Hub) unsynced(d publish.Doc, err error, retry func() error) {
+	h.pubSync.mu.Lock()
+	if h.pubSync.owed == nil {
+		h.pubSync.owed = map[publish.Doc]func() error{}
+	}
+	h.pubSync.owed[d] = retry
+	h.pubSync.mu.Unlock()
+	h.pub.MarkUnsynced(d, err)
+}
+
+// synced: d's object and copy are equal (a publish or withdraw of d
+// succeeded). Caller holds d's lock.
+func (h *Hub) synced(d publish.Doc) {
+	h.pubSync.mu.Lock()
+	delete(h.pubSync.owed, d)
+	h.pubSync.mu.Unlock()
+	h.pub.ClearUnsynced(d)
+}
+
+// retryUnsynced runs every owed retry once.
+func (h *Hub) retryUnsynced() {
+	h.pubSync.mu.Lock()
+	var docs []publish.Doc
+	for d := range h.pubSync.owed {
+		docs = append(docs, d)
+	}
+	h.pubSync.mu.Unlock()
+	slices.Sort(docs)
+	for _, d := range docs {
+		mu := h.docLock(d)
+		mu.Lock()
+		h.pubSync.mu.Lock()
+		retry := h.pubSync.owed[d]
+		h.pubSync.mu.Unlock()
+		if retry != nil {
+			if err := retry(); err != nil {
+				h.pub.MarkUnsynced(d, err)
+			} else {
+				h.synced(d)
+			}
+		}
+		mu.Unlock()
+	}
+}
+
+// RepublishFromCopies makes every published document's object equal to
+// the Hub's own copy (Kubernetes; a no-op elsewhere): at start, once
+// leading and before serving writes. A copy written before a stand-by,
+// a crash or a failed restore cut its object update is what this Hub
+// reads back (the credential store, the gate file): its readers get the
+// same. A missing copy withdraws the document. One that fails is
+// reported (published_doc_stale) and retried by RunPublishConfirm; the
+// readers' confirmation follows as for any publish.
+func (h *Hub) RepublishFromCopies() {
+	if h.pubMirror == nil {
+		return
+	}
+	for _, d := range publish.All {
+		if !h.pubMirror.Has(d) {
+			continue
+		}
+		op := func() error {
+			ctx, cancel := publishContext(context.Background())
+			defer cancel()
+			b, err := os.ReadFile(filepath.Join(h.pubMirror.Dirs[d], publish.Spec(d).Key))
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				return h.pub.Remove(ctx, d)
+			case err != nil:
+				return err
+			}
+			_, err = h.pub.Publish(ctx, d, b)
+			return err
+		}
+		mu := h.docLock(d)
+		mu.Lock()
+		if err := op(); err != nil {
+			log.Printf("publish: %s: publishing the Hub's own copy at start failed: %v (retried)", d, err)
+			h.unsynced(d, err, op)
+		} else {
+			h.synced(d)
+		}
+		mu.Unlock()
+	}
 }
 
 // RunPublishConfirm asks the readers about every unconfirmed document
@@ -157,6 +286,7 @@ func (h *Hub) RunPublishConfirm(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 		}
+		h.retryUnsynced()
 		if h.pub.Pending() {
 			h.pub.Check(ctx)
 		}

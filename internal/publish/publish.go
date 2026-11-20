@@ -198,11 +198,19 @@ type Tracker struct {
 	mu       sync.Mutex
 	tooLarge map[Doc]int
 	pending  map[Doc]*pending
+	// unsynced: documents whose object may differ from the Hub's own
+	// copy (a restore or a start-time republish failed): when, and why.
+	unsynced map[Doc]unsynced
+}
+
+type unsynced struct {
+	since time.Time
+	err   string
 }
 
 // NewTracker returns a Tracker on s.
 func NewTracker(s Sink) *Tracker {
-	t := &Tracker{Sink: s, tooLarge: map[Doc]int{}, pending: map[Doc]*pending{}}
+	t := &Tracker{Sink: s, tooLarge: map[Doc]int{}, pending: map[Doc]*pending{}, unsynced: map[Doc]unsynced{}}
 	if _, ok := s.(Laggards); ok {
 		t.Max = MaxDoc
 	}
@@ -270,10 +278,32 @@ func (t *Tracker) Remove(ctx context.Context, d Doc) error {
 	return nil
 }
 
+// MarkUnsynced records that d's object may differ from the Hub's own
+// copy (err: why); reported at once as stale, cleared by the next
+// publish of d or ClearUnsynced.
+func (t *Tracker) MarkUnsynced(d Doc, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	u, ok := t.unsynced[d]
+	if !ok {
+		u.since = t.now()
+	}
+	u.err = err.Error()
+	t.unsynced[d] = u
+}
+
+// ClearUnsynced: d's object equals the Hub's copy again.
+func (t *Tracker) ClearUnsynced(d Doc) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.unsynced, d)
+}
+
 func (t *Tracker) published(d Doc, rev string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.tooLarge, d)
+	delete(t.unsynced, d)
 	if _, later := t.Sink.(Laggards); !later {
 		return
 	}
@@ -351,13 +381,30 @@ func (t *Tracker) Problems() ([]TooLarge, []Stale) {
 		tl = append(tl, TooLarge{Doc: d, Size: n})
 	}
 	sort.Slice(tl, func(i, j int) bool { return tl[i].Doc < tl[j].Doc })
-	var st []Stale
+	byDoc := map[Doc]Stale{}
 	now := t.now()
 	for d, p := range t.pending {
 		if now.Sub(p.at) <= t.staleAfter() || (len(p.pods) == 0 && p.err == "") {
 			continue
 		}
-		st = append(st, Stale{Doc: d, Rev: p.rev, Since: p.at, Pods: slices.Clone(p.pods), Err: p.err})
+		byDoc[d] = Stale{Doc: d, Rev: p.rev, Since: p.at, Pods: slices.Clone(p.pods), Err: p.err}
+	}
+	for d, u := range t.unsynced {
+		// One finding per document: the divergence first.
+		why := "the published object may differ from the Hub's own copy: " + u.err
+		if s, ok := byDoc[d]; ok {
+			if s.Err != "" {
+				why += "; " + s.Err
+			}
+			s.Err = why
+			byDoc[d] = s
+			continue
+		}
+		byDoc[d] = Stale{Doc: d, Since: u.since, Err: why}
+	}
+	var st []Stale
+	for _, s := range byDoc {
+		st = append(st, s)
 	}
 	sort.Slice(st, func(i, j int) bool { return st[i].Doc < st[j].Doc })
 	return tl, st
