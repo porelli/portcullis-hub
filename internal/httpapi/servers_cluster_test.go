@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/nodeadm"
+	"github.com/portcullis/hub/internal/nodeagent"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/runtimetest"
 	"github.com/portcullis/hub/internal/servers"
@@ -78,6 +80,21 @@ func (f *clusterNodeadm) Remove(_ context.Context, id string, m nodeadm.RemoveMo
 	return f.refuse["remove:"+id+":"+string(m)]
 }
 
+// clusterAgent is a node's nodeagent for the route tests: it answers,
+// with a key from its id, and takes any mesh plan.
+type clusterAgent struct {
+	f  *clusterNodeadm
+	id string
+}
+
+func (a clusterAgent) Uninstall(context.Context) error { return nil }
+func (a clusterAgent) Health(context.Context) (nodeagent.Health, error) {
+	k := make([]byte, 32)
+	copy(k, a.id)
+	return nodeagent.Health{ID: a.id, MeshPub: base64.StdEncoding.EncodeToString(k), K3s: "running"}, nil
+}
+func (a clusterAgent) PutMeshPeers(context.Context, nodeagent.MeshPlan) error { return nil }
+
 func clusterServer(name string) nodeadm.Node {
 	return nodeadm.Node{Name: name, Role: "server", Ready: true, Labels: map[string]string{}, Addresses: nodeadm.NodeAddresses{Mesh: "10.215.0." + name[1:]}}
 }
@@ -105,6 +122,7 @@ func newClusterEnv(t *testing.T) *clusterEnv {
 	na := &clusterNodeadm{nodes: []nodeadm.Node{clusterServer("n1"), clusterServer("n2"), clusterServer("n3")}, ca: hex.EncodeToString(sum[:]),
 		refuse: map[string]error{}}
 	e.s.Hub.SetNodeadm(na)
+	e.s.Hub.SetNodeagents(func(id, _ string) hub.NodeagentAPI { return clusterAgent{na, id} })
 	fa := &fakeFreshAuth{}
 	e.s.Hub.SetFreshAuth(hub.ListenerHub, fa)
 	e.s.Hub.SetFreshAuthReadyForTest(true)

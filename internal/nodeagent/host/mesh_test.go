@@ -6,6 +6,8 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,5 +173,164 @@ func TestEchoAndP95(t *testing.T) {
 	c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	if n, err := c.Read(make([]byte, 64)); err == nil {
 		t.Errorf("a non-mesh source got %d bytes", n)
+	}
+}
+
+// TestForwardRulesPcmeshOnly: with forward the rule set is exactly the
+// chain's conntrack rule, the one relay rule "-i pcmesh -o pcmesh -j
+// ACCEPT" and the chain's DROP for pcmesh (no rule names another
+// interface); forward false removes exactly the relay rule.
+func TestForwardRulesPcmeshOnly(t *testing.T) {
+	r := newRig(t, "agent")
+	ctx := context.Background()
+	p := na.MeshPlan{Peers: []na.MeshPeer{}, Forward: true}
+	if err := r.a.ApplyMesh(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"-A PORTCULLIS-MESH -i pcmesh -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"-A PORTCULLIS-MESH -i pcmesh -o pcmesh -j ACCEPT",
+		"-A PORTCULLIS-MESH -i pcmesh -j DROP",
+	}
+	if !slices.Equal(r.run.rules, want) {
+		t.Fatalf("forward rules %q", r.run.rules)
+	}
+	relay := 0
+	for _, l := range r.run.rules {
+		f := strings.Fields(l)
+		for i, w := range f {
+			if (w == "-i" || w == "-o") && (i+1 >= len(f) || f[i+1] != "pcmesh") {
+				t.Errorf("a rule names another interface: %q", l)
+			}
+		}
+		if strings.Contains(l, "-o ") {
+			relay++
+		}
+	}
+	if relay != 1 || !r.run.jump {
+		t.Errorf("%d relay rules, jump %v", relay, r.run.jump)
+	}
+	// Only the FORWARD jump touches the built-in chain.
+	for _, c := range r.run.cmds {
+		if c.Name == "iptables" && slices.Contains(c.Args, "FORWARD") && !slices.Contains(c.Args, meshChain) {
+			t.Errorf("a FORWARD change that isn't the jump: %v", c.Args)
+		}
+	}
+	p.Forward = false
+	if err := r.a.ApplyMesh(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.run.rules, []string{want[0], want[2]}) {
+		t.Errorf("forward off: %q", r.run.rules)
+	}
+}
+
+// fakeClock is the agent's clock: the echo peer moves it by its delay
+// (X4: no wall-clock assertion).
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) add(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// TestRTTEndpoint: an echo peer that answers after an injected 30 ms
+// delay (on the agent's clock) → GET /v1/mesh/rtt answers its p95 within
+// [30, 45) ms (X4); a peer that doesn't answer is left out; the answer
+// is cached.
+func TestRTTEndpoint(t *testing.T) {
+	r := newRig(t, "agent")
+	ctx := context.Background()
+	clk := &fakeClock{t: time.Now()} // the TLS checks read the same clock
+	r.a.cfg.Now = clk.Now
+	defer func(g time.Duration) { rttGap = g }(rttGap)
+	rttGap = 0
+	defer func(d time.Duration) { rttTimeout = d }(rttTimeout)
+	rttTimeout = 50 * time.Millisecond
+
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	var rounds atomic.Int32
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n != len(echoReq)+echoBody || string(buf[:4]) != echoReq {
+				continue
+			}
+			k := rounds.Add(1)
+			d := 30 * time.Millisecond
+			if k%10 == 0 {
+				d = 33 * time.Millisecond // jitter on 2 of 20 rounds
+			}
+			clk.add(d)
+			pc.WriteTo(append(append([]byte(echoReply), buf[4:n]...), "n1"...), from)
+		}
+	}()
+	dials := map[string]int{}
+	var dmu sync.Mutex
+	r.a.cfg.EchoDial = func(_ context.Context, own, addr string) (net.Conn, error) {
+		dmu.Lock()
+		dials[own+">"+addr]++
+		dmu.Unlock()
+		if addr == "10.215.0.1" {
+			return net.Dial("udp4", pc.LocalAddr().String())
+		}
+		// A silent peer: nothing listens there.
+		silent, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		t.Cleanup(func() { silent.Close() })
+		return net.Dial("udp4", silent.LocalAddr().String())
+	}
+	k1, k3 := peerKey(t), peerKey(t)
+	plan := na.MeshPlan{Peers: []na.MeshPeer{
+		{ID: "n1", Pub: k1, Endpoint: ep("192.0.2.1:51830"), AllowedIPs: []string{"10.215.0.1/32"}, Keepalive: 25},
+		{ID: "n3", Pub: k3, AllowedIPs: []string{"10.215.0.3/32"}, Keepalive: 25},
+	}}
+	if err := r.a.ApplyMesh(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	s := r.server()
+	c := r.client(r.ca, na.CNHub)
+	code, body := do(t, c, "GET", s.URL+"/v1/mesh/rtt", "")
+	if code != 200 {
+		t.Fatalf("GET /v1/mesh/rtt: %d %s", code, body)
+	}
+	var got map[string]int
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got["n1"]; !ok || v < 30 || v >= 45 || len(got) != 1 {
+		t.Errorf("rtt %v: want n1 in [30, 45) ms and n3 left out", got)
+	}
+	if dials["10.215.0.2>10.215.0.1"] != 1 || dials["10.215.0.2>10.215.0.3"] != 1 {
+		t.Errorf("echo sockets %v: want one from the mesh address to each peer", dials)
+	}
+	// Under a minute old: answered from the cache (no new round).
+	before := rounds.Load()
+	if code, _ := do(t, c, "GET", s.URL+"/v1/mesh/rtt", ""); code != 200 || rounds.Load() != before {
+		t.Errorf("a second read measured again (%d rounds)", rounds.Load()-before)
+	}
+	// A frontdoor caller may not read it.
+	if code, _ := do(t, r.client(r.ca, na.CNFrontdoor), "GET", s.URL+"/v1/mesh/rtt", ""); code != 403 {
+		t.Errorf("frontdoor.control: %d", code)
 	}
 }

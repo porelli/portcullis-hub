@@ -38,6 +38,13 @@ type Server struct {
 	Site   string      `json:"site,omitempty" yaml:"site,omitempty"`
 	MeshIP string      `json:"mesh_ip,omitempty" yaml:"mesh_ip,omitempty"`
 	Labels *NodeLabels `json:"labels,omitempty" yaml:"labels,omitempty"`
+	// MeshPub, MeshLAN and MeshPublic are the node's pcmesh report at
+	// enrolment (its WireGuard key, its LAN and public "<ip:port>"; "":
+	// none), kept from nodeadm's enrolling entry for the peer plan
+	// (contract §20.11) once the node is a Kubernetes Node.
+	MeshPub    string `json:"mesh_pub,omitempty" yaml:"mesh_pub,omitempty"`
+	MeshLAN    string `json:"mesh_lan,omitempty" yaml:"mesh_lan,omitempty"`
+	MeshPublic string `json:"mesh_public,omitempty" yaml:"mesh_public,omitempty"`
 	// RevokeParked is nodeadm's text of a parked revocation (its security
 	// steps done, the etcd member removed once quorum returns): the entry
 	// stays revoked until the cluster no longer lists the node.

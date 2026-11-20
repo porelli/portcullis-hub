@@ -39,3 +39,13 @@ func (h *Hub) doctorKubeIn(ctx context.Context) *doctor.KubeIn {
 	slices.Sort(in.Gateways)
 	return in
 }
+
+// doctorMeshIn is the doctor's mesh input (nil unless cluster nodes are
+// managed: a Kubernetes primary with nodeadm).
+func (h *Hub) doctorMeshIn() *doctor.MeshIn {
+	if h.clusterNodesOn() != nil {
+		return nil
+	}
+	st := h.MeshStatus()
+	return &doctor.MeshIn{Stale: st.Stale, NoGateway: st.NoGateway}
+}

@@ -119,7 +119,7 @@ func (h *Hub) doctorInputs(ctx context.Context) (*doctor.Inputs, error) {
 	in := &doctor.Inputs{Now: time.Now().UTC(), BindRoots: slices.Clone(h.bindRoots),
 		Domain: h.cfg.Domain, DomainAddrs: addrs, DomainErr: derr != nil,
 		LocalNetworks: h.localNetworksLocked(), ServerLocalNetworks: h.serverLocalNetworksLocked(), ServerBindRoots: h.serverBindRootsLocked(), NotLocal: h.tunnelRangesLocked(), Ports: h.portInsLocked(), AI: aiIns, SignInMDS: mdsIn,
-		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), Published: h.doctorPublishedIn(), SignInTOTP: totpIn, Mail: mailIn, SSH: sshIn, Servers: h.serversDoctorInLocked(backups), Usage: usageIn, Storage: storageIn}
+		DNS: dnsPlans, DNSMain: dnsMain, Engine: engIn, VPN: vpnIn, Kube: h.doctorKubeIn(ctx), Mesh: h.doctorMeshIn(), Published: h.doctorPublishedIn(), SignInTOTP: totpIn, Mail: mailIn, SSH: sshIn, Servers: h.serversDoctorInLocked(backups), Usage: usageIn, Storage: storageIn}
 	for _, u := range h.pathUsagesLocked() {
 		in.Paths = append(in.Paths, pathIn(u))
 	}

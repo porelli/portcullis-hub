@@ -74,9 +74,13 @@ type NodeadmAPI interface {
 	Remove(ctx context.Context, id string, mode nodeadm.RemoveMode) error
 }
 
-// NodeagentAPI is the part of a node's nodeagent the removal uses.
+// NodeagentAPI is the part of a node's nodeagent the Hub uses: the k3s
+// uninstall of a removal, the health read (its pcmesh key) and the mesh
+// peer plan (*nodeagent.Client; tests substitute it).
 type NodeagentAPI interface {
 	Uninstall(ctx context.Context) error
+	Health(ctx context.Context) (nodeagent.Health, error)
+	PutMeshPeers(ctx context.Context, p nodeagent.MeshPlan) error
 }
 
 // clusterNodes is the Hub's cluster-node wiring.
@@ -90,12 +94,14 @@ type clusterNodes struct {
 	realCert []byte
 	// agentFor replaces the nodeagent client (tests).
 	agentFor func(id, meshIP string) NodeagentAPI
-	// The mesh (Task 10 fills them): the bootstrap peer plan of a new
-	// node, whether its plan is applied (mesh_ready), and its peer out of
-	// every plan.
+	// The mesh hooks' substitutes (tests; nil: servers_mesh.go): the
+	// bootstrap peer plan of a new node, whether its plan is applied
+	// (mesh_ready), and its peer out of every plan.
 	meshPlan   func(ctx context.Context, id, site string, snap nodeadm.Snapshot) (nodeadm.MeshPlan, error)
 	meshReady  func(ctx context.Context, id string) (bool, error)
 	meshRemove func(ctx context.Context, id string) error
+	// ms is the mesh's push state (servers_mesh.go).
+	ms meshState
 	// poll is how often the enrolment reads the snapshot (0: 5 s).
 	poll time.Duration
 	// adding: adds between their entry and their op (the settle tick
@@ -129,6 +135,14 @@ func (h *Hub) isAdding(id string) bool {
 func (h *Hub) SetNodeadm(api NodeadmAPI) {
 	h.cl.mu.Lock()
 	h.cl.api = api
+	h.cl.mu.Unlock()
+}
+
+// SetNodeagents replaces the nodeagent clients (tests; nil: the real
+// ones over pcmesh).
+func (h *Hub) SetNodeagents(f func(id, meshIP string) NodeagentAPI) {
+	h.cl.mu.Lock()
+	h.cl.agentFor = f
 	h.cl.mu.Unlock()
 }
 
@@ -216,22 +230,22 @@ func (h *Hub) meshPlanFor(ctx context.Context, id, site string, snap nodeadm.Sna
 	if f := h.cl.meshPlan; f != nil {
 		return f(ctx, id, site, snap)
 	}
-	// Until the mesh planner (Task 10): no bootstrap peers.
-	return nodeadm.MeshPlan{Peers: []nodeadm.MeshPeer{}, Forward: false}, nil
+	s, _ := h.serverEntry(id)
+	return h.bootstrapMeshPlan(ctx, id, site, s.MeshIP, snap)
 }
 
 func (h *Hub) meshReady(ctx context.Context, id string) (bool, error) {
 	if f := h.cl.meshReady; f != nil {
 		return f(ctx, id)
 	}
-	return true, nil // Task 10 fills it (pre-flight P17)
+	return h.meshReadyOf(ctx, id)
 }
 
 func (h *Hub) meshRemovePeer(ctx context.Context, id string) error {
 	if f := h.cl.meshRemove; f != nil {
 		return f(ctx, id)
 	}
-	return nil
+	return h.meshRemove(ctx, id)
 }
 
 // nodeadmErr is a nodeadm refusal as the Hub answers it: its status (a 4xx
@@ -454,6 +468,10 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 	plan, err := h.meshPlanFor(ctx, r.ID, site, snap)
 	if err != nil {
 		forget()
+		var se *StatusError
+		if errors.As(err, &se) {
+			return out, "", err // the §20.11 refusal, verbatim
+		}
 		return out, "", statusErr(http.StatusConflict, "the node's mesh plan: %v", err)
 	}
 	ans, err := api.IssueCode(ctx, nodeadm.CodeRequest{ServerID: r.ID, Role: role, Class: class, Site: site, MeshIP: meshIP,
@@ -1191,6 +1209,9 @@ func (h *Hub) settleClusterNodes(ctx context.Context) {
 			h.settleRevoked(ctx, api, t.id, n)
 		}
 	}
+	// A node that missed its mesh plan (or whose plan changed: a join, a
+	// removal, an endpoint) gets it now.
+	h.meshTick(ctx, snap)
 }
 
 // settleRevoked watches a revoked entry (security review round 3):

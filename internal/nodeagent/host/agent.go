@@ -77,6 +77,9 @@ type Config struct {
 	Interfaces func() ([]Iface, error)
 	// FSType names the file system holding a path (zfs, btrfs, ext4, …).
 	FSType func(path string) (string, error)
+	// EchoDial opens the RTT echo's socket from the node's mesh address
+	// (own) to a peer's addr:7444 (nil: UDP from own).
+	EchoDial func(ctx context.Context, own, addr string) (net.Conn, error)
 	// Dial is the probes' and the egress check's dialer.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// EgressRoots verifies the egress host (nil: the system's).

@@ -491,7 +491,7 @@ func (a *Agent) measure(ctx context.Context, addrs []string) map[string]int {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			id, s := echoRounds(ctx, own, addr)
+			id, s := a.echoRounds(ctx, own, addr)
 			if id == "" {
 				return
 			}
@@ -556,7 +556,7 @@ func (a *Agent) CachedRTT(ctx context.Context) map[string]int {
 	a.rtt.mu.Lock()
 	v, at := a.rtt.v, a.rtt.at
 	a.rtt.mu.Unlock()
-	if v != nil && time.Since(at) < rttMaxAge {
+	if v != nil && a.cfg.Now().Sub(at) < rttMaxAge {
 		return v
 	}
 	return a.refreshRTT(ctx)
@@ -565,7 +565,7 @@ func (a *Agent) CachedRTT(ctx context.Context) map[string]int {
 func (a *Agent) refreshRTT(ctx context.Context) map[string]int {
 	v := a.RTT(ctx)
 	a.rtt.mu.Lock()
-	a.rtt.v, a.rtt.at = v, time.Now()
+	a.rtt.v, a.rtt.at = v, a.cfg.Now()
 	a.rtt.mu.Unlock()
 	return v
 }
@@ -593,30 +593,42 @@ func p95ms(s []time.Duration) int {
 	return int(math.Ceil(float64(s[i]) / float64(time.Millisecond)))
 }
 
-// echoRounds: rttRounds sequential echoes to addr:7444 from the mesh
-// address; the id the answers name and the round trips.
-func echoRounds(ctx context.Context, own, addr string) (string, []time.Duration) {
+// dialEcho is the echo's UDP socket from the node's mesh address to
+// addr:7444 (Config.EchoDial replaces it: tests).
+func (a *Agent) dialEcho(ctx context.Context, own, addr string) (net.Conn, error) {
+	if a.cfg.EchoDial != nil {
+		return a.cfg.EchoDial(ctx, own, addr)
+	}
 	var laddr *net.UDPAddr
 	if own != "" {
 		laddr = &net.UDPAddr{IP: net.ParseIP(own)}
 	}
-	c, err := net.DialUDP("udp4", laddr, &net.UDPAddr{IP: net.ParseIP(addr), Port: na.EchoPort})
+	return net.DialUDP("udp4", laddr, &net.UDPAddr{IP: net.ParseIP(addr), Port: na.EchoPort})
+}
+
+// echoRounds: rttRounds sequential echoes to addr:7444 from the mesh
+// address; the id the answers name and the round trips (timed with the
+// agent's clock, Config.Now).
+func (a *Agent) echoRounds(ctx context.Context, own, addr string) (string, []time.Duration) {
+	c, err := a.dialEcho(ctx, own, addr)
 	if err != nil {
 		return "", nil
 	}
 	defer c.Close()
+	now := a.cfg.Now
 	id := ""
 	var out []time.Duration
 	buf := make([]byte, 128)
 	for i := 0; i < rttRounds && ctx.Err() == nil; i++ {
 		body := make([]byte, echoBody)
 		rand.Read(body)
-		start := time.Now()
+		start := now()
 		if _, err := c.Write(append([]byte(echoReq), body...)); err != nil {
 			time.Sleep(rttGap)
 			continue
 		}
-		deadline := start.Add(rttTimeout)
+		// The read deadline is the socket's own (real time).
+		deadline := time.Now().Add(rttTimeout)
 		for {
 			c.SetReadDeadline(deadline)
 			n, err := c.Read(buf)
@@ -631,7 +643,7 @@ func echoRounds(ctx context.Context, own, addr string) (string, []time.Duration)
 				break
 			}
 			id = rid
-			out = append(out, time.Since(start))
+			out = append(out, now().Sub(start))
 			break
 		}
 		time.Sleep(rttGap)

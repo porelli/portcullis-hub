@@ -142,6 +142,18 @@ jobs:
           go build -o /dev/null ./cmd/portcullis-relay
           go build -o /dev/null ./cmd/portcullis-nodeagent
 
+      # The node mesh in network namespaces (contract §20.11): 4 nodes at
+      # 2 sites, NAT by nftables masquerade, real kernel WireGuard and
+      # iptables; the NATed cross-site pair relayed by the gateway. Root:
+      # the test binary is built as the runner user and run with sudo.
+      - name: mesh netns (root)
+        run: |
+          command -v nft >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q nftables; }
+          sudo modprobe wireguard
+          go vet -tags netns ./internal/nodeagent/host/
+          go test -c -tags netns -o /tmp/meshnetns.test ./internal/nodeagent/host/
+          sudo -E /tmp/meshnetns.test -test.run TestMeshNetns -test.count=1 -test.v
+
       # The nodeagent (contract §20.4) for both arches: cross-compiled, and
       # the arm64 one run under qemu-user (pre-flight H4: never on arm64
       # hardware here): --version and checks --dry-run.

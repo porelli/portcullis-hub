@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/nodeadm"
+	"github.com/portcullis/hub/internal/nodeagent"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
@@ -31,6 +32,11 @@ type fakeNodeadm struct {
 	// onCluster runs on each snapshot read (the test's clock of the node).
 	onCluster func(n int, s *nodeadm.Snapshot)
 	reads     int
+	// mesh: each nodeagent's last PUT /v1/mesh/peers; meshOrder the PUTs.
+	mesh      map[string]nodeagent.MeshPlan
+	meshOrder []string
+	// codeMesh: each code's bootstrap plan.
+	codeMesh []nodeadm.MeshPlan
 }
 
 const testSecret = "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"
@@ -61,6 +67,7 @@ func (f *fakeNodeadm) IssueCode(_ context.Context, r nodeadm.CodeRequest) (nodea
 		MeshIP: r.MeshIP, Secret: testSecret}.EncodeV2()
 	f.mu.Lock()
 	f.codes = append(f.codes, c)
+	f.codeMesh = append(f.codeMesh, r.Mesh)
 	f.mu.Unlock()
 	return nodeadm.CodeAnswer{Code: servers.JoinCodeSecret(c), ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}, nil
 }
@@ -109,6 +116,39 @@ type fakeNodeagent struct {
 }
 
 func (a fakeNodeagent) Uninstall(context.Context) error { return a.f.record("uninstall:" + a.id) }
+
+// fakeMeshKey is node id's pcmesh key in the fakes.
+func fakeMeshKey(id string) string {
+	b := make([]byte, 32)
+	copy(b, id)
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
+	a.f.mu.Lock()
+	err := a.f.refuse["health:"+a.id]
+	a.f.mu.Unlock()
+	if err != nil {
+		return nodeagent.Health{}, err
+	}
+	return nodeagent.Health{ID: a.id, MeshPub: fakeMeshKey(a.id), K3s: "running"}, nil
+}
+
+// PutMeshPeers records the plan (not in calls: the removal and enrolment
+// tests assert those exactly).
+func (a fakeNodeagent) PutMeshPeers(_ context.Context, p nodeagent.MeshPlan) error {
+	a.f.mu.Lock()
+	defer a.f.mu.Unlock()
+	if err := a.f.refuse["mesh:"+a.id]; err != nil {
+		return err
+	}
+	if a.f.mesh == nil {
+		a.f.mesh = map[string]nodeagent.MeshPlan{}
+	}
+	a.f.mesh[a.id] = p
+	a.f.meshOrder = append(a.f.meshOrder, a.id)
+	return nil
+}
 
 func serverNode(name, mesh string, ready bool) nodeadm.Node {
 	return nodeadm.Node{Name: name, Role: "server", Ready: ready, Labels: map[string]string{nodeadm.LabelClass: "home", nodeadm.LabelSite: "main"},

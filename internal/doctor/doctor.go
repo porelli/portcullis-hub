@@ -270,6 +270,8 @@ type Inputs struct {
 	Engine *EngineIn
 	// Kube is the cluster guard's state (nil: not Kubernetes).
 	Kube *KubeIn
+	// Mesh: the node mesh's push state (mesh.go; nil: not Kubernetes).
+	Mesh *MeshIn
 	// Published: the published documents' problems (publish.go; nil:
 	// none fire).
 	Published *PublishedIn
