@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -186,8 +187,11 @@ func TestRenew(t *testing.T) {
 	// The core renew vectors (Hub copy of nodeadm_api_vectors.json).
 	var d struct {
 		Cases []struct {
-			Name     string `json:"name"`
-			Route    string `json:"route"`
+			Name    string `json:"name"`
+			Route   string `json:"route"`
+			Request struct {
+				BodyText *string `json:"body_text"`
+			} `json:"request"`
 			Response struct {
 				Status int             `json:"status"`
 				Body   json.RawMessage `json:"body"`
@@ -207,6 +211,15 @@ func TestRenew(t *testing.T) {
 					t.Errorf("%s: %v", c.Name, err)
 				}
 			}
+		case "POST /node/v1/renew/confirm":
+			n++
+			var q renewConfirmReq
+			if c.Request.BodyText == nil || jsonstrict.Decode([]byte(*c.Request.BodyText), &q) != nil {
+				t.Errorf("%s: the request body", c.Name)
+			}
+			if c.Response.Status == 409 && !strings.Contains(string(c.Response.Body), errNothingPending) {
+				t.Errorf("%s: %s", c.Name, c.Response.Body)
+			}
 		case "POST /node/v1/join":
 			if c.Name == "join" {
 				var ja joinAnswer
@@ -216,7 +229,7 @@ func TestRenew(t *testing.T) {
 			}
 		}
 	}
-	if n < 3 {
+	if n < 6 {
 		t.Errorf("%d renew vectors", n)
 	}
 }

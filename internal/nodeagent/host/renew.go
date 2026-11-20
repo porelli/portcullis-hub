@@ -52,6 +52,10 @@ type renewReq struct {
 	CSR      string `json:"csr"`
 }
 
+// errNothingPending is nodeadm's confirm refusal when no renewal of the
+// signing certificate is pending (core fa8d345, nodeadm_api_vectors.json).
+const errNothingPending = "no renewal of this certificate is pending"
+
 type renewConfirmReq struct {
 	ServerID string `json:"server_id"`
 }
@@ -220,7 +224,13 @@ func (a *Agent) confirmRenewal(ctx context.Context, cur *tls.Certificate, st *St
 	if err != nil {
 		return fmt.Errorf("the renewal isn't confirmed yet: %v", err)
 	}
-	if ans.status/100 != 2 {
+	switch {
+	case ans.status/100 == 2:
+	case ans.status == http.StatusConflict && ans.text == errNothingPending:
+		// Signed with the new certificate: nodeadm holds no pending
+		// renewal for it (already confirmed): nothing is left to do.
+		a.log.Info("the renewal was confirmed already")
+	default:
 		return fmt.Errorf("the renewal isn't confirmed yet (%d): %s", ans.status, ans.text)
 	}
 	if err := a.fs.remove(pendingPEMFile); err != nil {
