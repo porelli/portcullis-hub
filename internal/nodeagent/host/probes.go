@@ -71,10 +71,12 @@ func validTargets(t na.ProbeTargets) error {
 		if !idRe.MatchString(x.Node) || !idRe.MatchString(x.Site) {
 			return errStatus(400, "a target's node or site is malformed")
 		}
-		if _, err := netip.ParseAddr(x.Address); err != nil {
-			if _, err := netip.ParseAddrPort(x.Address); err != nil {
-				return errStatus(400, "target %s: its address isn't an IP address", x.Node)
-			}
+		// Public IPv4 only, port 443 always (§20.4 "public addresses",
+		// §20.9 strict IPv4): never loopback, link-local, private, CGNAT,
+		// the mesh, IPv6 or a port of the caller's choosing.
+		ad, err := netip.ParseAddr(x.Address)
+		if err != nil || !ad.Is4() || ad.String() != x.Address || !isPublic(ad) {
+			return errStatus(400, "target %s: its address isn't a public IPv4 address", x.Node)
 		}
 	}
 	return nil
@@ -177,12 +179,7 @@ func (p *prober) Round(ctx context.Context) {
 	p.mu.Unlock()
 }
 
-func target443(addr string) string {
-	if ap, err := netip.ParseAddrPort(addr); err == nil {
-		return ap.String()
-	}
-	return net.JoinHostPort(addr, "443")
-}
+func target443(addr string) string { return net.JoinHostPort(addr, "443") }
 
 // probe classifies one GET https://auth.<domain>/healthz at addr.
 func (p *prober) probe(ctx context.Context, domain, addr string) string {

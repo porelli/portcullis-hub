@@ -262,6 +262,8 @@ func (a *Agent) hasAddr(ip string) bool {
 // list changes nothing: no wgctrl call), missing peers removed, then the
 // PORTCULLIS-MESH rules for forward.
 func (a *Agent) ApplyMesh(ctx context.Context, p na.MeshPlan) error {
+	a.meshMu.Lock()
+	defer a.meshMu.Unlock()
 	if err := validatePlan(p, a.meshPub()); err != nil {
 		return err
 	}
@@ -471,6 +473,17 @@ func (a *Agent) measure(ctx context.Context, addrs []string) map[string]int {
 	a.rttMu.Lock()
 	defer a.rttMu.Unlock()
 	own := a.state().MeshIP
+	a.mu.Lock()
+	var plan na.MeshPlan
+	if a.plan != nil {
+		plan = a.plan.plan
+	}
+	a.mu.Unlock()
+	bound := boundIDs(plan)
+	boundTo := map[string]string{} // id → its address
+	for ad, id := range bound {
+		boundTo[id] = ad
+	}
 	var mu sync.Mutex
 	samples := map[string][]time.Duration{}
 	var wg sync.WaitGroup
@@ -480,6 +493,9 @@ func (a *Agent) measure(ctx context.Context, addrs []string) map[string]int {
 			defer wg.Done()
 			id, s := echoRounds(ctx, own, addr)
 			if id == "" {
+				return
+			}
+			if !echoAccepted(addr, id, bound, boundTo) {
 				return
 			}
 			mu.Lock()
@@ -496,6 +512,76 @@ func (a *Agent) measure(ctx context.Context, addrs []string) map[string]int {
 		out[id] = p95ms(s)
 	}
 	return out
+}
+
+// boundIDs: the address of each peer entry with a single /32 (a direct
+// peer's own address) → its id.
+func boundIDs(p na.MeshPlan) map[string]string {
+	out := map[string]string{}
+	for _, pr := range p.Peers {
+		if len(pr.AllowedIPs) != 1 {
+			continue
+		}
+		if pf, err := netip.ParsePrefix(pr.AllowedIPs[0]); err == nil && pf.Bits() == 32 {
+			out[pf.Addr().String()] = pr.ID
+		}
+	}
+	return out
+}
+
+// echoAccepted: an answer names its id; a direct peer's address only its
+// own, any other address no direct peer's (a node can't answer as
+// another).
+func echoAccepted(addr, id string, bound, boundTo map[string]string) bool {
+	if want, ok := bound[addr]; ok {
+		return id == want
+	}
+	return boundTo[id] == ""
+}
+
+// rttCache is the last RTT measurement (GET /v1/mesh/rtt answers it; the
+// serve loop refreshes it).
+type rttCache struct {
+	mu sync.Mutex
+	at time.Time
+	v  map[string]int
+}
+
+// rttMaxAge: an older (or no) measurement is taken again on a read.
+const rttMaxAge = time.Minute
+
+// CachedRTT is GET /v1/mesh/rtt: the last measurement when it is under a
+// minute old, else a fresh one.
+func (a *Agent) CachedRTT(ctx context.Context) map[string]int {
+	a.rtt.mu.Lock()
+	v, at := a.rtt.v, a.rtt.at
+	a.rtt.mu.Unlock()
+	if v != nil && time.Since(at) < rttMaxAge {
+		return v
+	}
+	return a.refreshRTT(ctx)
+}
+
+func (a *Agent) refreshRTT(ctx context.Context) map[string]int {
+	v := a.RTT(ctx)
+	a.rtt.mu.Lock()
+	a.rtt.v, a.rtt.at = v, time.Now()
+	a.rtt.mu.Unlock()
+	return v
+}
+
+// RunRTT measures every 30 s until ctx ends.
+func (a *Agent) RunRTT(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		a.refreshRTT(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 func p95ms(s []time.Duration) int {

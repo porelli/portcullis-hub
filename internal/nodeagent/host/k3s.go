@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,10 +22,12 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/portcullis/hub/internal/jsonstrict"
 	na "github.com/portcullis/hub/internal/nodeagent"
 )
 
@@ -180,25 +183,85 @@ func tokenUser(tok string) string {
 	return ""
 }
 
-// TokenStep is POST /v1/k3s/token-rotate (nodeadm.control).
-//   - rotate (a server): the supervisor call with the old server token
-//     (this node's token file), then the new one in the token file and
-//     k3s restarted (the running server keeps the old token until it
+// tokenStepTimeout bounds a token step (it runs on its own context, not
+// the request's).
+const tokenStepTimeout = 50 * time.Second
+
+// tokenIntent is the 0600 intent file of a token step in progress: the
+// step and the new token's sha256 (never the token).
+type tokenIntent struct {
+	Step      string `json:"step"`
+	NewSHA256 string `json:"new_sha256"`
+}
+
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// bootstrapKey is k3s's etcd key of the bootstrap data under a server
+// token's passphrase: /bootstrap/<first 12 hex of its sha256> (k3s
+// pkg/cluster/storage.go storageKey, util.ShortHash).
+func bootstrapKey(pass string) string { return "/bootstrap/" + sha256Hex(pass)[:12] }
+
+// usesAgentTokenFile: this server's k3s reads --agent-token-file (the
+// unit install.sh wrote, or k3s's config.yaml).
+func (a *Agent) usesAgentTokenFile() bool {
+	unit := string(must0(a.fs.read("/etc/systemd/system/k3s.service")))
+	if strings.Contains(unit, "--agent-token-file="+K3sAgentToken) || strings.Contains(unit, "'--agent-token-file' '"+K3sAgentToken+"'") {
+		return true
+	}
+	for _, l := range strings.Split(string(must0(a.fs.read("/etc/rancher/k3s/config.yaml"))), "\n") {
+		k, v, ok := strings.Cut(l, ":")
+		if ok && strings.TrimSpace(k) == "agent-token-file" && strings.Trim(strings.TrimSpace(v), `"'`) == K3sAgentToken {
+			return true
+		}
+	}
+	return false
+}
+
+func must0(b []byte, _ error) []byte { return b }
+
+// k3sCAHash is sha256 of this node's k3s server CA bundle (what /cacerts
+// serves and a K10 token pins), "" when unreadable.
+func (a *Agent) k3sCAHash(role string) string {
+	f := "/var/lib/rancher/k3s/agent/server-ca.crt"
+	if role == "server" {
+		f = "/var/lib/rancher/k3s/server/tls/server-ca.crt"
+	}
+	b, err := a.fs.read(f)
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	return sha256Hex(string(b))
+}
+
+// TokenStep is POST /v1/k3s/token-rotate (nodeadm.control), on its own
+// context, one at a time, resumable:
+//   - rotate (a server): an intent file (the step and the new token's
+//     sha256), then the supervisor call with the old server token (this
+//     node's token file) unless etcd already holds the bootstrap under the
+//     new token (a call whose answer was lost); a failed call counts as
+//     done when etcd then holds it. Then the new token into the token file
+//     and k3s restarted (the running server keeps the old token until it
 //     restarts, and a server whose token file differs from the rotated
-//     bootstrap can't start: spike-cluster.md);
-//   - rotate-agent (a server): the agent token takes effect from
-//     --agent-token-file when a server restarts (k3s's /v1-k3s/token
-//     rotates only the server token), so: the file, then a restart;
+//     bootstrap can't start: spike-cluster.md); the intent goes last, so
+//     a step cut short between the write and the restart restarts again;
+//   - rotate-agent / apply-agent (a server whose k3s reads
+//     --agent-token-file, else 409 agent_token_file_missing): the agent
+//     token takes effect from that file when the server restarts (k3s's
+//     /v1-k3s/token rotates only the server token): the file, a restart;
 //   - apply: the server token into a server's token file, the agent token
-//     into an agent's, then a restart;
-//   - apply-agent (a server): the agent token file, then a restart.
+//     into an agent's, then a restart.
 //
-// Servers get the server token, agents the agent token (409 otherwise).
+// Servers get the server token, agents the agent token, and the token
+// must pin this node's k3s CA (409 otherwise).
 func (a *Agent) TokenStep(ctx context.Context, req na.TokenRotate) error {
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
 	st := a.state()
-	if !K10Re.MatchString(req.NewToken) {
+	m := K10Re.FindStringSubmatch(req.NewToken)
+	if m == nil {
 		return errStatus(400, "new_token isn't in k3s's CA-pinned form K10<hash>::<credentials>")
 	}
 	user := tokenUser(req.NewToken)
@@ -225,38 +288,67 @@ func (a *Agent) TokenStep(ctx context.Context, req na.TokenRotate) error {
 	if a.k3sState(ctx) == "absent" {
 		return errStatus(409, "k3s isn't installed on this node")
 	}
+	agentFile := wantUser == "node" && server
+	if agentFile && !a.usesAgentTokenFile() {
+		return errKind(409, "agent_token_file_missing", "this server's k3s doesn't use --agent-token-file")
+	}
+	if h := a.k3sCAHash(st.Role); h == "" || h != m[1] {
+		return errStatus(409, "the token doesn't pin this node's k3s CA (another cluster's token, or the CA is unreadable)")
+	}
 	newTok, cleanup, err := a.stageToken(req.NewToken)
 	defer cleanup()
 	if err != nil {
 		return err
 	}
 	file := K3sTokenFile
-	if wantUser == "node" && server {
+	if agentFile {
 		file = K3sAgentToken
 	}
-	if req.Step == "rotate" {
-		old, err := a.tokenFile(K3sTokenFile)
-		if err != nil {
-			return err
-		}
-		if old != newTok {
-			if err := a.cfg.Supervisor.RotateServerToken(ctx, st.MeshIP, secret(passphrase(string(old), "server")), newTok); err != nil {
-				return err
-			}
-			a.log.Info("k3s server token rotated through the supervisor")
-		}
-	}
+	want := tokenIntent{Step: req.Step, NewSHA256: sha256Hex(string(newTok))}
+	var have tokenIntent
+	pending := json.Unmarshal(must0(a.fs.read(intentFile)), &have) == nil && have == want
 	cur, _ := a.tokenFile(file)
-	if cur == newTok {
+	if cur == newTok && !pending {
 		a.log.Info("k3s token already in place", "step", req.Step)
 		return nil
 	}
-	if err := a.fs.write(file, []byte(string(newTok)+"\n"), 0o600, 0o700); err != nil {
+	ib, _ := json.Marshal(want)
+	if err := a.fs.write(intentFile, ib, 0o600, 0o700); err != nil {
 		return err
+	}
+	if req.Step == "rotate" && cur != newTok {
+		newPass := passphrase(string(newTok), "server")
+		done, herr := a.cfg.Etcd.HasKey(ctx, bootstrapKey(newPass))
+		if herr != nil || !done {
+			old, err := a.tokenFile(K3sTokenFile)
+			if err != nil {
+				return err
+			}
+			perr := a.cfg.Supervisor.RotateServerToken(ctx, st.MeshIP, secret(passphrase(string(old), "server")), newTok)
+			if perr != nil {
+				// The answer may have been lost after the re-key.
+				if ok, _ := a.cfg.Etcd.HasKey(ctx, bootstrapKey(newPass)); !ok {
+					return perr
+				}
+				a.log.Info("k3s server token rotation found in effect after a failed call")
+			} else {
+				a.log.Info("k3s server token rotated through the supervisor")
+			}
+		} else {
+			a.log.Info("k3s server token rotation already in effect (resumed)")
+		}
+	}
+	if cur != newTok {
+		if err := a.fs.write(file, []byte(string(newTok)+"\n"), 0o600, 0o700); err != nil {
+			return err
+		}
 	}
 	unit := k3sUnit(st.Role)
 	if _, err := a.cfg.Run.Run(ctx, Cmd{Name: "systemctl", Args: []string{"restart", "--no-block", unit}}); err != nil {
 		return fmt.Errorf("restarting %s: %v", unit, err)
+	}
+	if err := a.fs.remove(intentFile); err != nil {
+		a.log.Warn("the token intent file stays", "err", err.Error())
 	}
 	a.log.Info("k3s token written, k3s restarting", "step", req.Step, "unit", unit)
 	return nil
@@ -275,6 +367,8 @@ type Member struct {
 type Etcd interface {
 	Members(ctx context.Context) ([]Member, error)
 	Remove(ctx context.Context, id uint64) error
+	// HasKey: the key exists (a count only: no value is read).
+	HasKey(ctx context.Context, key string) (bool, error)
 }
 
 // etcdGateway is etcd's v3 JSON gateway on https://127.0.0.1:2379 with
@@ -343,6 +437,17 @@ func (e *etcdGateway) Members(ctx context.Context) ([]Member, error) {
 	return ms, nil
 }
 
+func (e *etcdGateway) HasKey(ctx context.Context, key string) (bool, error) {
+	var out struct {
+		Count string `json:"count"`
+	}
+	if err := e.post(ctx, "/v3/kv/range", map[string]any{"key": base64.StdEncoding.EncodeToString([]byte(key)), "count_only": true}, &out); err != nil {
+		return false, err
+	}
+	n, _ := strconv.ParseInt(out.Count, 10, 64)
+	return n > 0, nil
+}
+
 func (e *etcdGateway) Remove(ctx context.Context, id uint64) error {
 	return e.post(ctx, "/v3/cluster/member/remove", map[string]string{"ID": strconv.FormatUint(id, 10)}, nil)
 }
@@ -381,6 +486,14 @@ func (a *Agent) RemoveMember(ctx context.Context, req na.EtcdRemove) error {
 	if !ok || n.State != "removed" || n.Mesh != req.MeshIP {
 		return errStatus(409, "node %s isn't listed removed with mesh address %s in portcullis-cluster-addresses", req.Node, req.MeshIP)
 	}
+	// Independent of the document's writer: the Node object is gone (its
+	// deletion comes before the member's removal).
+	if exists, err := a.cfg.NodeExists(ctx, req.Node); err != nil || exists {
+		if err != nil {
+			return errStatus(409, "the Node %s can't be looked up through this node's k3s", req.Node)
+		}
+		return errStatus(409, "the Node %s still exists: its etcd member stays", req.Node)
+	}
 	ms, err := a.cfg.Etcd.Members(ctx)
 	if err != nil {
 		return err
@@ -388,6 +501,16 @@ func (a *Agent) RemoveMember(ctx context.Context, req na.EtcdRemove) error {
 	removed := 0
 	for _, m := range ms {
 		hit, own := false, false
+		if !strings.HasPrefix(m.Name, req.Node+"-") {
+			// k3s names a member <node name>-<suffix>: another node's
+			// member (or a foreign one) at that address is never removed.
+			for _, u := range m.PeerURLs {
+				if peerHost(u) == req.MeshIP {
+					return errStatus(409, "the etcd member at %s isn't node %s's", req.MeshIP, req.Node)
+				}
+			}
+			continue
+		}
 		for _, u := range m.PeerURLs {
 			switch peerHost(u) {
 			case req.MeshIP:
@@ -414,17 +537,9 @@ func (a *Agent) RemoveMember(ctx context.Context, req na.EtcdRemove) error {
 // k3sAddresses reads portcullis-cluster-addresses with the node's k3s
 // admin kubeconfig (servers only), at this server's mesh address.
 func (a *Agent) k3sAddresses(ctx context.Context) (map[string]DocNode, error) {
-	rc, err := clientcmd.BuildConfigFromFlags("", a.fs.p(K3sKubeconfig))
-	if err != nil {
-		return nil, errors.New("no k3s kubeconfig on this node")
-	}
-	rc.Timeout = 10 * time.Second
 	// The API server binds the mesh address only (--bind-address), which
-	// its certificate names; k3s.yaml says 127.0.0.1.
-	if ip := a.state().MeshIP; meshAddrOK(ip) {
-		rc.Host = "https://" + net.JoinHostPort(ip, "6443")
-	}
-	c, err := corev1.NewForConfig(rc)
+	// its certificate names; k3s.yaml says 127.0.0.1 (k3sClient).
+	c, err := a.k3sClient()
 	if err != nil {
 		return nil, err
 	}
@@ -432,13 +547,50 @@ func (a *Agent) k3sAddresses(ctx context.Context) (map[string]DocNode, error) {
 	if err != nil {
 		return nil, errors.New("the ConfigMap portcullis-cluster-addresses isn't readable")
 	}
-	var doc struct {
-		Nodes map[string]DocNode `json:"nodes"`
-	}
-	if err := json.Unmarshal([]byte(cm.Data["addresses.json"]), &doc); err != nil || doc.Nodes == nil {
+	var doc addressesDoc
+	if err := jsonstrict.Decode([]byte(cm.Data["addresses.json"]), &doc); err != nil || doc.V != 1 {
 		return nil, errors.New("portcullis-cluster-addresses holds no readable document")
 	}
 	return doc.Nodes, nil
+}
+
+// addressesDoc is portcullis-cluster-addresses' addresses.json (§20.9),
+// decoded strictly.
+type addressesDoc struct {
+	V           int                `json:"v"`
+	MeshCIDR    string             `json:"mesh_cidr"`
+	ClusterCIDR string             `json:"cluster_cidr"`
+	ServiceCIDR string             `json:"service_cidr"`
+	API         []string           `json:"api"`
+	Nodes       map[string]DocNode `json:"nodes"`
+}
+
+func (a *Agent) k3sClient() (*corev1.CoreV1Client, error) {
+	rc, err := clientcmd.BuildConfigFromFlags("", a.fs.p(K3sKubeconfig))
+	if err != nil {
+		return nil, errors.New("no k3s kubeconfig on this node")
+	}
+	rc.Timeout = 10 * time.Second
+	if ip := a.state().MeshIP; meshAddrOK(ip) {
+		rc.Host = "https://" + net.JoinHostPort(ip, "6443")
+	}
+	return corev1.NewForConfig(rc)
+}
+
+// k3sNodeExists: a Node of that name, through the node's k3s.
+func (a *Agent) k3sNodeExists(ctx context.Context, name string) (bool, error) {
+	c, err := a.k3sClient()
+	if err != nil {
+		return false, err
+	}
+	_, err = c.Nodes().Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, errors.New("the Node can't be read")
+	}
+	return true, nil
 }
 
 // ── the uninstall ──

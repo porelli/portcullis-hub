@@ -39,6 +39,7 @@ type fakeNodeadm struct {
 	proofOK bool // false: every enrol is 403 proof_invalid
 	token   string
 	pending int // mesh_pending answers before the material
+	cidr    string
 	mu      sync.Mutex
 	nonces  map[string]bool
 	bodies  bytes.Buffer // every request body and header seen
@@ -127,10 +128,14 @@ func (f *fakeNodeadm) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		srv := "https://10.215.0.1:6443"
-		json.NewEncoder(w).Encode(map[string]any{"role": "agent", "server_url": srv, "token": f.token, "flags": []string{
+		ans := map[string]any{"role": "agent", "server_url": srv, "token": f.token, "cluster_cidr": f.cidr, "flags": []string{
 			"--flannel-conf=" + FlannelConf, "--flannel-iface=pcmesh", "--kubelet-arg=address=10.215.0.4", "--kubelet-arg=pod-max-pids=1024",
 			"--node-ip=10.215.0.4", "--node-label=portcullis.io/class=cloud", "--node-label=portcullis.io/site=edge",
-			"--node-name=n4", "--server=" + srv, "--token-file=" + K3sTokenFile}})
+			"--node-name=n4", "--server=" + srv, "--token-file=" + K3sTokenFile}}
+		if f.cidr == "" {
+			delete(ans, "cluster_cidr")
+		}
+		json.NewEncoder(w).Encode(ans)
 	default:
 		w.WriteHeader(404)
 	}
@@ -154,7 +159,7 @@ func newJoinRig(t *testing.T, proofOK bool) *joinRig {
 	lb := &logBuf{}
 	writeFile(t, root, "/sys/module/wireguard/version", "1.0.0", 0o644)
 	writeFile(t, root, "/proc/net/route", "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\neth0\t00000000\t0100000A\t0003\t0\t0\t0\t00000000\n", 0o644)
-	fn := &fakeNodeadm{t: t, ca: ca, id: "n4", proofOK: proofOK, nonces: map[string]bool{}, pending: 1,
+	fn := &fakeNodeadm{t: t, ca: ca, id: "n4", proofOK: proofOK, nonces: map[string]bool{}, pending: 1, cidr: "10.60.0.0/16",
 		token: "K10" + caHash + "::abcdef.0123456789abcdef"}
 	fn.secret = make([]byte, 32)
 	for i := range fn.secret {
@@ -224,7 +229,8 @@ func TestJoinNeverLogsSecrets(t *testing.T) {
 	if err := j.join(); err != nil {
 		t.Fatalf("join: %v\n%s", err, j.out.String())
 	}
-	if len(j.install) != 1 || string(j.install[0].Token) != j.nodeadm.token || j.install[0].Role != "agent" || j.nodeadm.joins != 2 {
+	if len(j.install) != 1 || string(j.install[0].Token) != j.nodeadm.token || j.install[0].Role != "agent" || j.nodeadm.joins != 2 ||
+		j.install[0].ClusterCIDR != "10.60.0.0/16" || j.install[0].AgentToken != "" {
 		t.Fatalf("install %+v, joins %d", j.install, j.nodeadm.joins)
 	}
 	meshPriv := strings.TrimSpace(string(must(os.ReadFile(filepath.Join(j.root, MeshKeyFile)))))
@@ -232,8 +238,11 @@ func TestJoinNeverLogsSecrets(t *testing.T) {
 	if err != nil || k.PublicKey().String() != j.nodeadm.pub {
 		t.Error("the enrolled mesh key isn't the node's")
 	}
-	nodeKey := string(must(os.ReadFile(filepath.Join(j.root, nodeKeyFile))))
+	nodeKey := string(must(os.ReadFile(filepath.Join(j.root, nodePEMFile))))
 	keyBody := strings.Split(nodeKey, "\n")[1]
+	if !strings.HasPrefix(nodeKey, "-----BEGIN PRIVATE KEY-----") {
+		t.Fatal("node.pem doesn't start with the key")
+	}
 	secretHex := hex.EncodeToString(j.nodeadm.secret)
 	keySHA := sha256.Sum256(j.nodeadm.secret)
 	leaks := map[string]string{"the code's secret": j.secret, "the secret (hex)": secretHex, "the secret's sha256": hex.EncodeToString(keySHA[:]),
@@ -253,7 +262,7 @@ func TestJoinNeverLogsSecrets(t *testing.T) {
 			}
 		}
 	}
-	for _, f := range []string{nodeKeyFile, MeshKeyFile, stateFile, caFile, nodeCertFile} {
+	for _, f := range []string{nodePEMFile, MeshKeyFile, stateFile, caFile} {
 		fi, err := os.Stat(filepath.Join(j.root, f))
 		if err != nil || fi.Mode().Perm() != 0o600 {
 			t.Errorf("%s: %v %v", f, err, fi)
@@ -305,7 +314,7 @@ func must(b []byte, err error) []byte {
 // TestJoinFlagsRefused: a token on argv or another node's identity in the
 // join answer's flags is refused.
 func TestJoinFlagsRefused(t *testing.T) {
-	st := State{ID: "n4", MeshIP: "10.215.0.4"}
+	st := State{ID: "n4", MeshIP: "10.215.0.4", Role: "server"}
 	srv := "https://10.215.0.1:6443"
 	ok := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4",
 		"--node-taint=portcullis.io/small=true:NoSchedule", "--etcd-arg=listen-client-urls=https://10.215.0.4:2379,https://127.0.0.1:2379"}
@@ -313,10 +322,19 @@ func TestJoinFlagsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{"--token=K10abc::server:x", "--agent-token=x", "--token-file=/tmp/t", "--node-name=n5",
-		"--node-ip=10.215.0.5", "--server=https://10.215.0.9:6443", "--data-dir=/", "--kubelet-arg=x y", "-t", "--node-label=$(id)"} {
-		if err := checkFlags(append(append([]string{}, ok...), bad), srv, st); err == nil {
+		"--node-ip=10.215.0.5", "--server=https://10.215.0.9:6443", "--data-dir=/", "--kubelet-arg=x y", "-t", "--node-label=$(id)",
+		"--write-kubeconfig-mode=0644", "--kube-apiserver-arg=anonymous-auth=true", "--kubelet-arg=read-only-port=10255", "--config=/tmp/c",
+		"--node-label=portcullis.io/class=huge", "--node-ip=10.215.0.4"} {
+		err := checkFlags(append(append([]string{}, ok...), bad), srv, st)
+		if err == nil {
 			t.Errorf("accepted %q", bad)
+		} else if _, v, cut := strings.Cut(bad, "="); cut && len(v) > 3 && strings.Contains(err.Error(), v) {
+			t.Errorf("the refusal echoes the value: %v", err)
 		}
+	}
+	// An agent doesn't take a server's flags.
+	if err := checkFlags(append(append([]string{}, ok...), "--secrets-encryption"), srv, State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}); err == nil {
+		t.Error("an agent took --secrets-encryption")
 	}
 	for _, u := range []string{"http://10.215.0.1:6443", "https://198.51.100.1:6443", "https://10.215.0.1:6444", "https://10.215.0.1:6443/x"} {
 		if checkServerURL(u, nil) == nil {
@@ -345,7 +363,8 @@ func TestInstallK3s(t *testing.T) {
 	k3sPins.scriptURL, k3sPins.scriptSHA256, k3sPins.releaseBase = srv.URL+"/install.sh", sum(script), srv.URL+"/rel/"
 	k3sPins.sha256 = map[string]string{"amd64": sum(bin), "arm64": sum(bin)}
 	tok := secret("K10" + caHash + "::abcdef.0123456789abcdef")
-	j := K3sJoin{Role: "agent", ServerURL: "https://10.215.0.1:6443", Token: tok, Flags: []string{"--server=https://10.215.0.1:6443", "--token-file=" + K3sTokenFile}}
+	j := K3sJoin{Role: "agent", ServerURL: "https://10.215.0.1:6443", Token: tok, ClusterCIDR: "10.60.0.0/16",
+		Flags: []string{"--server=https://10.215.0.1:6443", "--token-file=" + K3sTokenFile}}
 	var out bytes.Buffer
 	if err := r.a.installK3s(context.Background(), srv.Client(), &out, j); err != nil {
 		t.Fatal(err)
@@ -356,7 +375,7 @@ func TestInstallK3s(t *testing.T) {
 	if fi, _ := os.Stat(filepath.Join(r.root, K3sTokenFile)); fi.Mode().Perm() != 0o600 {
 		t.Error("the token file's mode")
 	}
-	if b, _ := os.ReadFile(filepath.Join(r.root, FlannelConf)); string(b) != `{"Network":"10.42.0.0/16","EnableIPv4":true,"EnableIPv6":false,"Backend":{"Type":"wireguard","ListenPort":51840,"PersistentKeepaliveInterval":25,"Mode":"separate"}}`+"\n" {
+	if b, _ := os.ReadFile(filepath.Join(r.root, FlannelConf)); string(b) != `{"Network":"10.60.0.0/16","EnableIPv4":true,"EnableIPv6":false,"Backend":{"Type":"wireguard","ListenPort":51840,"PersistentKeepaliveInterval":25,"Mode":"separate"}}`+"\n" {
 		t.Errorf("flannel conf %s", b)
 	}
 	var sh *Cmd
@@ -370,6 +389,24 @@ func TestInstallK3s(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(append(sh.Args, sh.Env...), " "), "0123456789abcdef") {
 		t.Error("the token on argv or in the environment")
+	}
+	// A server's agent token: its 0600 file.
+	rs := newRig(t, "server")
+	js := j
+	js.Role, js.AgentToken = "server", secret("K10"+caHash+"::node:agentpass0123")
+	if err := rs.a.installK3s(context.Background(), srv.Client(), &out, js); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(rs.root, K3sAgentToken)); strings.TrimSpace(string(b)) != string(js.AgentToken) {
+		t.Error("the agent token file")
+	}
+	if fi, _ := os.Stat(filepath.Join(rs.root, K3sAgentToken)); fi.Mode().Perm() != 0o600 {
+		t.Error("the agent token file's mode")
+	}
+	for _, c := range rs.run.cmds {
+		if strings.Contains(strings.Join(append(c.Args, c.Env...), " "), "agentpass") {
+			t.Error("the agent token on argv or in the environment")
+		}
 	}
 	// A wrong sha256: nothing installed.
 	k3sPins.sha256 = map[string]string{"amd64": strings.Repeat("0", 64), "arm64": strings.Repeat("0", 64)}

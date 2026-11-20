@@ -186,6 +186,8 @@ func serve(ctx context.Context, a *host.Agent, log *slog.Logger) error {
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug)}
 	go a.ServeEcho(ctx, pc)
 	go a.RunProbes(ctx)
+	go a.RunRTT(ctx)
+	go a.RunRenewal(ctx)
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()

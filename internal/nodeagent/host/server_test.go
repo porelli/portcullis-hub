@@ -121,7 +121,7 @@ func TestNodeagentCallVectors(t *testing.T) {
 	r.a.cfg.Addresses = func(ctx2 ctxT) (map[string]DocNode, error) {
 		return map[string]DocNode{"n3": {Mesh: "10.215.0.3", State: "removed"}}, nil
 	}
-	etcd := &fakeEtcd{members: []Member{{ID: 1, PeerURLs: []string{"https://10.215.0.2:2380"}}, {ID: 3, PeerURLs: []string{"https://10.215.0.3:2380"}}}}
+	etcd := &fakeEtcd{members: []Member{{ID: 1, Name: "n2-1a2b3c4d", PeerURLs: []string{"https://10.215.0.2:2380"}}, {ID: 3, Name: "n3-5e6f7a8b", PeerURLs: []string{"https://10.215.0.3:2380"}}}}
 	r.a.cfg.Etcd = etcd
 	sup := &fakeSup{}
 	r.a.cfg.Supervisor = sup
@@ -144,6 +144,9 @@ func TestNodeagentCallVectors(t *testing.T) {
 			if err := decode([]byte(body), &q); err != nil || q.Step != "rotate" || !K10Re.MatchString(q.NewToken) {
 				t.Errorf("%s: %v", v["name"], err)
 			}
+			// The vector's token pins the vectors' CA: this node's CA here.
+			m := K10Re.FindStringSubmatch(q.NewToken)
+			body = strings.Replace(body, m[1], caHash, 1)
 		}
 		code, out := do(t, c, v["method"].(string), s.URL+path, body)
 		if code/100 != 2 {

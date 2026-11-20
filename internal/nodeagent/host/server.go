@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,6 +22,8 @@ import (
 // verified against the pki_node CA. Only the fixed operations of Routes
 // answer (any other method or path 404); each names the clients that may
 // call it (anyone else 403).
+
+var oidCN = asn1.ObjectIdentifier{2, 5, 4, 3}
 
 // ClockTolerance: a client certificate valid at now ± 5 min is accepted.
 const ClockTolerance = 5 * time.Minute
@@ -75,11 +78,22 @@ func (a *Agent) verifyClient(raw [][]byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Exactly one CN attribute (Go keeps the last of several).
+	n := 0
+	for _, at := range leaf.Subject.Names {
+		if at.Type.Equal(oidCN) {
+			n++
+		}
+	}
+	if n != 1 {
+		return "", errors.New("the client certificate must name exactly one CN")
+	}
 	return leaf.Subject.CommonName, nil
 }
 
 type apiErr struct {
 	Error string `json:"error"`
+	Kind  string `json:"kind,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -92,15 +106,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func writeErr(w http.ResponseWriter, err error) {
-	code, msg := http.StatusInternalServerError, err.Error()
+	code, msg, kind := http.StatusInternalServerError, err.Error(), ""
 	var he *httpError
 	if errors.As(err, &he) {
-		code = he.code
+		code, kind = he.code, he.kind
 	}
 	if len(msg) > 200 {
 		msg = msg[:200]
 	}
-	writeJSON(w, code, apiErr{msg})
+	writeJSON(w, code, apiErr{msg, kind})
 }
 
 // Handler is the API.
@@ -108,12 +122,12 @@ func (a *Agent) Handler(ctx context.Context) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		i := slices.IndexFunc(Routes, func(rt Route) bool { return rt.Method == r.Method && rt.Path == r.URL.Path })
 		if i < 0 || r.URL.RawQuery != "" {
-			writeJSON(w, http.StatusNotFound, apiErr{"not found"})
+			writeJSON(w, http.StatusNotFound, apiErr{Error: "not found"})
 			return
 		}
 		rt := Routes[i]
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			writeJSON(w, http.StatusForbidden, apiErr{"a client certificate is required"})
+			writeJSON(w, http.StatusForbidden, apiErr{Error: "a client certificate is required"})
 			return
 		}
 		raw := make([][]byte, len(r.TLS.PeerCertificates))
@@ -122,11 +136,11 @@ func (a *Agent) Handler(ctx context.Context) http.Handler {
 		}
 		cn, err := a.verifyClient(raw)
 		if err != nil {
-			writeJSON(w, http.StatusForbidden, apiErr{err.Error()})
+			writeJSON(w, http.StatusForbidden, apiErr{Error: err.Error()})
 			return
 		}
 		if !slices.Contains(rt.Clients, cn) {
-			writeJSON(w, http.StatusForbidden, apiErr{"this client may not call " + rt.Method + " " + rt.Path})
+			writeJSON(w, http.StatusForbidden, apiErr{Error: "this client may not call " + rt.Method + " " + rt.Path})
 			return
 		}
 		var body []byte
@@ -137,7 +151,7 @@ func (a *Agent) Handler(ctx context.Context) http.Handler {
 				return
 			}
 			if len(body) > na.MaxBody {
-				writeJSON(w, http.StatusRequestEntityTooLarge, apiErr{"the body is over 1 MiB"})
+				writeJSON(w, http.StatusRequestEntityTooLarge, apiErr{Error: "the body is over 1 MiB"})
 				return
 			}
 		}
@@ -170,7 +184,7 @@ func (a *Agent) serve(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case "/v1/mesh/rtt":
-		writeJSON(w, http.StatusOK, a.RTT(r.Context()))
+		writeJSON(w, http.StatusOK, a.CachedRTT(r.Context()))
 	case "/v1/probes":
 		writeJSON(w, http.StatusOK, a.probe.Rounds())
 	case "/v1/probes/targets":
@@ -203,11 +217,23 @@ func (a *Agent) serve(ctx context.Context, w http.ResponseWriter, r *http.Reques
 			writeErr(w, errBadRequest)
 			return
 		}
-		if err := a.TokenStep(r.Context(), q); err != nil {
-			writeErr(w, err)
-			return
+		// The step runs on its own context (a closed request doesn't stop
+		// it halfway); the answer waits for it or the request's end.
+		done := make(chan error, 1)
+		go func() {
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), tokenStepTimeout)
+			defer cancel()
+			done <- a.TokenStep(sctx, q)
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case <-r.Context().Done():
 		}
-		w.WriteHeader(http.StatusNoContent)
 	case "/v1/k3s/uninstall":
 		var q struct{}
 		if err := decode(body, &q); err != nil {

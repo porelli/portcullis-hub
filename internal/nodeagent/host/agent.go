@@ -21,10 +21,12 @@ import (
 
 // Host paths (under Config.Root in tests).
 const (
-	StateDir      = "/var/lib/portcullis/nodeagent"
-	stateFile     = StateDir + "/state.json"
-	nodeKeyFile   = StateDir + "/node.key"
-	nodeCertFile  = StateDir + "/node.crt"
+	StateDir  = "/var/lib/portcullis/nodeagent"
+	stateFile = StateDir + "/state.json"
+	// nodePEMFile holds the node-cluster key and certificate together, so
+	// a renewal swaps both with one rename.
+	nodePEMFile   = StateDir + "/node.pem"
+	intentFile    = StateDir + "/token-intent.json"
 	caFile        = StateDir + "/ca.crt"
 	planFile      = StateDir + "/plan.json"
 	targetsFile   = StateDir + "/targets.json"
@@ -81,6 +83,12 @@ type Config struct {
 	EgressRoots *x509.CertPool
 	// Addresses reads portcullis-cluster-addresses through the node's k3s.
 	Addresses func(ctx context.Context) (map[string]DocNode, error)
+	// NodeExists says whether a Kubernetes Node of that name exists
+	// (through the node's k3s).
+	NodeExists func(ctx context.Context, name string) (bool, error)
+	// HTTP reaches nodeadm's public /node paths (the certificate renewal;
+	// nil: the system roots).
+	HTTP *http.Client
 	// Etcd is this server's etcd (its own client credentials).
 	Etcd Etcd
 	// Supervisor is the k3s supervisor's token API.
@@ -117,7 +125,9 @@ type Agent struct {
 	probe *prober
 
 	rttMu  sync.Mutex
+	meshMu sync.Mutex // ApplyMesh, one at a time
 	opMu   sync.Mutex // the k3s steps, one at a time
+	rtt    rttCache
 	uninst sync.Once
 }
 
@@ -147,6 +157,12 @@ func New(cfg Config) *Agent {
 	a := &Agent{cfg: cfg, fs: fsys{cfg.Root}, log: cfg.Log}
 	if cfg.Addresses == nil {
 		a.cfg.Addresses = a.k3sAddresses
+	}
+	if cfg.NodeExists == nil {
+		a.cfg.NodeExists = a.k3sNodeExists
+	}
+	if cfg.HTTP == nil {
+		a.cfg.HTTP = &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, TLSHandshakeTimeout: 15 * time.Second}}
 	}
 	if cfg.Etcd == nil {
 		a.cfg.Etcd = &etcdGateway{fs: a.fs}
@@ -179,22 +195,16 @@ func (a *Agent) Load() error {
 	if err != nil {
 		return fmt.Errorf("the pki_node CA: %w", err)
 	}
-	certPEM, err1 := a.fs.read(nodeCertFile)
-	keyPEM, err2 := a.fs.read(nodeKeyFile)
-	if err1 != nil || err2 != nil {
+	bundle, err := a.fs.read(nodePEMFile)
+	if err != nil {
 		return errors.New("the nodeagent has no node-cluster certificate")
 	}
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	cert, err := nodeCert(bundle)
 	if err != nil {
-		return errors.New("the node-cluster certificate and key don't match")
+		return err
 	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
-	if err != nil {
-		return errors.New("the node-cluster certificate is unreadable")
-	}
-	cert.Leaf = leaf
 	a.mu.Lock()
-	a.st, a.ca, a.cert = &st, ca, &cert
+	a.st, a.ca, a.cert = &st, ca, cert
 	a.mu.Unlock()
 	a.loadPlan()
 	a.probe.load()
@@ -209,6 +219,25 @@ func (a *Agent) state() State {
 	}
 	s := *a.st
 	return s
+}
+
+// nodeCert is the node-cluster key pair of a node.pem bundle.
+func nodeCert(bundle []byte) (*tls.Certificate, error) {
+	cert, err := tls.X509KeyPair(bundle, bundle)
+	if err != nil {
+		return nil, errors.New("the node-cluster certificate and key don't match")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return nil, errors.New("the node-cluster certificate is unreadable")
+	}
+	cert.Leaf = leaf
+	return &cert, nil
+}
+
+// nodeBundle is node.pem: the key, then the certificate.
+func nodeBundle(k *ecdsa.PrivateKey, certPEM []byte) []byte {
+	return append(keyPEM(k), certPEM...)
 }
 
 func parseCertPEM(b []byte) (*x509.Certificate, error) {
@@ -227,16 +256,21 @@ func keyPEM(k *ecdsa.PrivateKey) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 }
 
-// httpError is an answer's status and text (no secret ever).
+// httpError is an answer's status, text (no secret ever) and kind.
 type httpError struct {
 	code int
 	msg  string
+	kind string
 }
 
 func (e *httpError) Error() string { return e.msg }
 
 func errStatus(code int, format string, args ...any) error {
 	return &httpError{code: code, msg: fmt.Sprintf(format, args...)}
+}
+
+func errKind(code int, kind, format string, args ...any) error {
+	return &httpError{code: code, msg: fmt.Sprintf(format, args...), kind: kind}
 }
 
 var errBadRequest = errStatus(http.StatusBadRequest, "malformed request")

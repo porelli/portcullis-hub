@@ -482,9 +482,24 @@ func (a *Agent) reportAddrs() (lan, public *string) {
 	return lan, public
 }
 
+// nonPublic are the IPv4 ranges never public: CGNAT, the IETF and
+// documentation-free special ranges, benchmarking, 240/4 (beside what
+// netip's IsGlobalUnicast and IsPrivate already exclude).
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 func isPublic(ip netip.Addr) bool {
-	cgnat := netip.MustParsePrefix("100.64.0.0/10")
-	return ip.Is4() && ip.IsGlobalUnicast() && !ip.IsPrivate() && !cgnat.Contains(ip) && !meshPrefix.Contains(ip)
+	if !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() || meshPrefix.Contains(ip) {
+		return false
+	}
+	for _, p := range nonPublic {
+		if p.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 // defaultSource: the source address of the IPv4 default route's

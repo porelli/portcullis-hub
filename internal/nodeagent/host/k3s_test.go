@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	na "github.com/portcullis/hub/internal/nodeagent"
@@ -14,8 +15,25 @@ import (
 type ctxT = context.Context
 
 type fakeEtcd struct {
+	mu      sync.Mutex
 	members []Member
 	removed []uint64
+	keys    map[string]bool
+}
+
+func (f *fakeEtcd) HasKey(_ context.Context, k string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.keys[k], nil
+}
+
+func (f *fakeEtcd) set(k string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.keys == nil {
+		f.keys = map[string]bool{}
+	}
+	f.keys[k] = true
 }
 
 func (f *fakeEtcd) Members(context.Context) ([]Member, error) { return f.members, nil }
@@ -29,25 +47,46 @@ type fakeSup struct {
 	ip            string
 	oldPass, newT secret
 	err           error
+	// etcd, when set, gets the new bootstrap key (the re-key happened);
+	// block, when set, is awaited after it (the answer is late).
+	etcd  *fakeEtcd
+	block chan struct{}
 }
 
-func (f *fakeSup) RotateServerToken(_ context.Context, ip string, oldPass, newToken secret) error {
+func (f *fakeSup) RotateServerToken(ctx context.Context, ip string, oldPass, newToken secret) error {
 	f.calls++
 	f.ip, f.oldPass, f.newT = ip, oldPass, newToken
+	if f.etcd != nil {
+		f.etcd.set(bootstrapKey(passphrase(string(newToken), "server")))
+	}
+	if f.block != nil {
+		<-f.block
+	}
 	return f.err
 }
 
-// installK3s: k3s present and running, its token file holding tok.
+// testK3sCA is the test k3s server CA bundle; caHash its sha256 (what a
+// K10 token for this cluster pins).
+const testK3sCA = "-----BEGIN CERTIFICATE-----\ntest k3s CA\n-----END CERTIFICATE-----\n"
+
+var caHash = sha256Hex(testK3sCA)
+
+// installK3s: k3s present and running (a server's unit reading
+// --agent-token-file), its CA, its token file holding tok.
 func installK3s(t *testing.T, r *rig, role, tok string) {
 	writeFile(t, r.root, K3sBinary, "k3s", 0o755)
 	writeFile(t, r.root, K3sTokenFile, tok+"\n", 0o600)
+	if role == "server" {
+		writeFile(t, r.root, "/var/lib/rancher/k3s/server/tls/server-ca.crt", testK3sCA, 0o644)
+		writeFile(t, r.root, "/etc/systemd/system/k3s.service", "ExecStart=/usr/local/bin/k3s \\\n    server \\\n\t'--agent-token-file=/etc/rancher/k3s/agent-token' \\\n", 0o644)
+	} else {
+		writeFile(t, r.root, "/var/lib/rancher/k3s/agent/server-ca.crt", testK3sCA, 0o644)
+	}
 	if r.run.active == nil {
 		r.run.active = map[string]bool{}
 	}
 	r.run.active[k3sUnit(role)] = true
 }
-
-const caHash = "b7335c14c0febed58f896145ef153d44a59bd0dfa5065771f18cc99c514c0edb"
 
 func TestTokenSteps(t *testing.T) {
 	ctx := context.Background()

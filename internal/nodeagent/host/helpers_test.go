@@ -56,9 +56,13 @@ func newCA(t testing.TB) *testCA {
 
 // sign issues a certificate for pub with cn (and cn as DNS SAN).
 func (ca *testCA) sign(t testing.TB, cn string, pub any) []byte {
+	return ca.signFor(t, cn, pub, time.Now().Add(-time.Hour), time.Now().Add(12*time.Hour))
+}
+
+func (ca *testCA) signFor(t testing.TB, cn string, pub any, nb, na time.Time) []byte {
 	serial++
 	tpl := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: cn}, DNSNames: []string{cn},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(12 * time.Hour),
+		NotBefore: nb, NotAfter: na,
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, ca.cert, pub, ca.key)
 	if err != nil {
@@ -272,12 +276,12 @@ func newRig(t *testing.T, role string) *rig {
 	writeFile(t, root, caFile, string(ca.pem), 0o600)
 	nk, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	der := ca.sign(t, "n2."+clusterDomain, &nk.PublicKey)
-	writeFile(t, root, nodeCertFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), 0o600)
-	writeFile(t, root, nodeKeyFile, string(keyPEM(nk)), 0o600)
+	writeFile(t, root, nodePEMFile, string(nodeBundle(nk, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))), 0o600)
 	r.a = New(Config{Root: root, Version: "0.0.0-test", Run: run, WG: wg,
 		Log:        slog.New(slog.NewTextHandler(lb, nil)),
 		Interfaces: func() ([]Iface, error) { return []Iface{{Name: "eth0", Addrs: []string{"192.0.2.12/24"}}}, nil },
 		FSType:     func(string) (string, error) { return "ext4", nil },
+		NodeExists: func(context.Context, string) (bool, error) { return false, nil },
 		Exit:       func() {}})
 	if err := r.a.Load(); err != nil {
 		t.Fatal(err)

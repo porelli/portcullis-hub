@@ -27,6 +27,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/portcullis/hub/internal/jsonstrict"
 	na "github.com/portcullis/hub/internal/nodeagent"
 	"github.com/portcullis/hub/internal/pkinode"
 	"github.com/portcullis/hub/internal/servers"
@@ -65,12 +66,40 @@ type JoinDeps struct {
 	Retry, MeshPendingFor, AdmissionFor, ServersFor time.Duration
 }
 
-// K3sJoin is what the k3s install gets: the token is a secret.
+// K3sJoin is what the k3s install gets: the tokens are secrets.
 type K3sJoin struct {
-	Role      string
-	ServerURL string
-	Token     secret
-	Flags     []string
+	Role        string
+	ServerURL   string
+	Token       secret
+	AgentToken  secret // a server's --agent-token-file, when its flags name it
+	Flags       []string
+	ClusterCIDR string
+}
+
+// joinAnswer is /node/v1/join's 200 (§20.2), decoded strictly.
+// agent_token comes with a server's --agent-token-file only.
+type joinAnswer struct {
+	Role        string   `json:"role"`
+	ServerURL   string   `json:"server_url"`
+	Token       string   `json:"token"`
+	AgentToken  string   `json:"agent_token,omitempty"`
+	Flags       []string `json:"flags"`
+	ClusterCIDR string   `json:"cluster_cidr"`
+}
+
+// checkNodeLeaf: a node-cluster certificate from ca for cn (its only SAN,
+// a DNS name), for server and client auth, of the key spki.
+func checkNodeLeaf(leaf, ca *x509.Certificate, cn string, spki []byte, now time.Time) error {
+	for _, u := range []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth} {
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: poolOf(ca), CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{u}}); err != nil {
+			return err
+		}
+	}
+	if leaf.Subject.CommonName != cn || len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != cn ||
+		len(leaf.IPAddresses)+len(leaf.URIs)+len(leaf.EmailAddresses) != 0 || !bytes.Equal(leaf.RawSubjectPublicKeyInfo, spki) {
+		return errors.New("another certificate")
+	}
+	return nil
 }
 
 // ProofFor is the §20.2 enrol proof: HMAC-SHA256(key = sha256(secret),
@@ -245,7 +274,7 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 	var nr struct {
 		Nonce string `json:"nonce"`
 	}
-	if err := json.Unmarshal(ans.body, &nr); err != nil {
+	if err := jsonstrict.Decode(ans.body, &nr); err != nil {
 		return errors.New("the cluster's nonce answer is unreadable")
 	}
 	nonce, err := base64.RawURLEncoding.DecodeString(nr.Nonce)
@@ -283,7 +312,7 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 		NotAfter    string      `json:"not_after"`
 		Mesh        na.MeshPlan `json:"mesh"`
 	}
-	if err := json.Unmarshal(ans.body, &er); err != nil {
+	if err := jsonstrict.Decode(ans.body, &er); err != nil {
 		return errors.New("the enrolment answer is unreadable")
 	}
 	ca, err := parseCertPEM([]byte(er.CA))
@@ -294,8 +323,7 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 	if err != nil {
 		return errors.New("the enrolment answer's certificate is unreadable")
 	}
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: poolOf(ca), CurrentTime: a.cfg.Now(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil ||
-		leaf.Subject.CommonName != cn || !bytes.Equal(leaf.RawSubjectPublicKeyInfo, csr.RawSubjectPublicKeyInfo) {
+	if err := checkNodeLeaf(leaf, ca, cn, csr.RawSubjectPublicKeyInfo, a.cfg.Now()); err != nil {
 		return errors.New("the enrolment answer's certificate isn't this node's, from the cluster's CA")
 	}
 	if err := validatePlan(er.Mesh, meshKey.PublicKey().String()); err != nil {
@@ -311,8 +339,7 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 		data []byte
 		mode uint32
 	}{
-		{nodeKeyFile, keyPEM(nodeKey), 0o600},
-		{nodeCertFile, []byte(er.Certificate), 0o600},
+		{nodePEMFile, nodeBundle(nodeKey, []byte(er.Certificate)), 0o600},
 		{caFile, []byte(er.CA), 0o600},
 		{MeshKeyFile, []byte(meshKey.String() + "\n"), 0o600},
 		{stateFile, sb, 0o600},
@@ -338,15 +365,20 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 		return err
 	}
 	say("The nodeagent service runs (%s).", UnitName)
+	// From here a failed join stops the service and takes pcmesh down (the
+	// next join removes the rest).
+	installed := false
+	defer func() {
+		if !installed {
+			cctx := context.WithoutCancel(ctx)
+			a.cfg.Run.Run(cctx, Cmd{Name: "systemctl", Args: []string{"disable", "--now", UnitName}})
+			a.removeMesh(cctx)
+		}
+	}()
 
 	// 6. The RTT to every server, then the signed join, retried.
 	signer := joinSigner{key: nodeKey, cert: leaf.Raw, id: st.ID, now: a.cfg.Now}
-	var answer struct {
-		Role      string   `json:"role"`
-		ServerURL string   `json:"server_url"`
-		Token     string   `json:"token"`
-		Flags     []string `json:"flags"`
-	}
+	var answer joinAnswer
 	rtt, err := a.serverRTT(ctx, d, st.Servers, say)
 	if err != nil {
 		return err
@@ -363,8 +395,11 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 		}
 		ans, err = a.call(ctx, d, http.MethodPost, ep+"/v1/join", body, hdr)
 		if err == nil && ans.status == http.StatusOK {
-			if err := json.Unmarshal(ans.body, &answer); err != nil {
-				return errors.New("the join answer is unreadable")
+			if err := jsonstrict.Decode(ans.body, &answer); err != nil {
+				if strings.Contains(err.Error(), `"cluster_cidr"`) {
+					return errors.New("the join answer has no cluster_cidr: nothing was installed")
+				}
+				return errors.New("the join answer is unreadable: nothing was installed")
 			}
 			break
 		}
@@ -404,10 +439,23 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 			}
 		}
 	}
-	tok := secret(answer.Token)
-	answer.Token = ""
+	tok, agentTok := secret(answer.Token), secret(answer.AgentToken)
+	answer.Token, answer.AgentToken = "", ""
 	if !K10Re.MatchString(string(tok)) {
 		return errors.New("the join answer's token isn't in k3s's CA-pinned form (K10…): nothing was installed")
+	}
+	cidr, err := netip.ParsePrefix(answer.ClusterCIDR)
+	if err != nil || !cidr.Addr().Is4() || cidr.Masked() != cidr || cidr.String() != answer.ClusterCIDR || cidr.Bits() < 8 || cidr.Bits() > 24 || cidr.Overlaps(meshPrefix) {
+		return errors.New("the join answer's cluster_cidr isn't an IPv4 network: nothing was installed")
+	}
+	wantsAgentFile := slices.Contains(answer.Flags, "--agent-token-file="+K3sAgentToken)
+	switch {
+	case wantsAgentFile && st.Role != "server":
+		return errors.New("the join answer gives an agent --agent-token-file: nothing was installed")
+	case wantsAgentFile && (!K10Re.MatchString(string(agentTok)) || tokenUser(string(agentTok)) != "node"):
+		return errors.New("the join answer names --agent-token-file without an agent token: nothing was installed")
+	case !wantsAgentFile && agentTok != "":
+		return errors.New("the join answer carries an agent token without --agent-token-file: nothing was installed")
 	}
 	if answer.Role != st.Role {
 		return errors.New("the join answer's role isn't the join code's: nothing was installed")
@@ -421,9 +469,11 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 
 	// 7. k3s.
 	say("Installing k3s %s as a%s %s...", K3sVersion, map[bool]string{true: "", false: "n"}[st.Role == "server"], st.Role)
-	if err := d.Install(ctx, K3sJoin{Role: st.Role, ServerURL: answer.ServerURL, Token: tok, Flags: answer.Flags}); err != nil {
+	if err := d.Install(ctx, K3sJoin{Role: st.Role, ServerURL: answer.ServerURL, Token: tok, AgentToken: agentTok,
+		Flags: answer.Flags, ClusterCIDR: answer.ClusterCIDR}); err != nil {
 		return err
 	}
+	installed = true
 	say("k3s is installed: the Hub shows the node's progress.")
 	a.log.Info("joined", "id", st.ID, "role", st.Role)
 	return nil
@@ -498,59 +548,55 @@ func checkServerURL(u string, srv []string) error {
 	return nil
 }
 
-var flagRe = regexp.MustCompile(`^--[a-z][a-z0-9-]*(=[A-Za-z0-9._:/,=@+-]*)?$`)
+var siteValRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
 
-// checkFlags: k3s flags only, never a token on argv: no --token= or
-// --agent-token=, the token file the one written here, the server the
-// answer's, the node's own name and mesh address.
+// checkFlags is an allowlist (core's join flags, nodeadm/flags.go and the
+// shared fixture k3s-server-flags.txt): each flag's name and value shape,
+// never a token on argv, the node's own identity and mesh address, the
+// answer's server. A refusal names the flag, never its value.
 func checkFlags(flags []string, serverURL string, st State) error {
-	bad := func(f string) error {
-		return fmt.Errorf("the join answer's k3s flag %.60q is refused: nothing was installed", f)
+	ip := st.MeshIP
+	exact := map[string]bool{
+		"--server=" + serverURL: true, "--token-file=" + K3sTokenFile: true, "--node-name=" + st.ID: true,
+		"--node-ip=" + ip: true, "--kubelet-arg=address=" + ip: true, "--kubelet-arg=pod-max-pids=1024": true,
+		"--kubelet-arg=sync-frequency=10s": true, "--flannel-conf=" + FlannelConf: true, "--flannel-iface=pcmesh": true,
+		"--node-label=portcullis.io/ingress=true": true, "--node-label=svccontroller.k3s.cattle.io/enablelb=true": true,
+		"--node-label=portcullis.io/storage=true": true, "--node-label=node.longhorn.io/create-default-disk=true": true,
+		"--node-taint=portcullis.io/small=true:NoSchedule": true,
 	}
-	if len(flags) == 0 || len(flags) > 128 {
+	serverOnly := map[string]bool{
+		"--secrets-encryption": true, "--disable=traefik": true, "--write-kubeconfig-mode=0600": true,
+		"--flannel-backend=wireguard-native": true, "--advertise-address=" + ip: true, "--bind-address=" + ip: true,
+		"--etcd-arg=listen-client-urls=https://" + ip + ":2379,https://127.0.0.1:2379": true,
+		"--etcd-arg=heartbeat-interval=200":                                            true, "--etcd-arg=election-timeout=2000": true,
+		"--agent-token-file=" + K3sAgentToken: true,
+	}
+	if len(flags) == 0 || len(flags) > 64 {
 		return errors.New("the join answer has no k3s flags: nothing was installed")
 	}
+	seen := map[string]bool{}
 	for _, f := range flags {
-		if !flagRe.MatchString(f) {
-			return bad(f)
-		}
 		name, val, _ := strings.Cut(f, "=")
-		switch name {
-		case "--token", "--agent-token", "-t", "--datastore-endpoint", "--data-dir", "--private-registry":
-			return bad(name)
-		case "--token-file":
-			if val != K3sTokenFile {
-				return bad(f)
-			}
-		case "--agent-token-file":
-			if val != K3sAgentToken {
-				return bad(f)
-			}
-		case "--server":
-			if val != serverURL {
-				return bad(f)
-			}
-		case "--node-name":
-			if val != st.ID {
-				return bad(f)
-			}
-		case "--node-ip", "--advertise-address", "--bind-address":
-			if val != st.MeshIP {
-				return bad(f)
-			}
-		case "--flannel-conf":
-			if val != FlannelConf {
-				return bad(f)
+		ok := exact[f] || (st.Role == "server" && serverOnly[f])
+		if !ok && name == "--node-label" {
+			k, v, _ := strings.Cut(val, "=")
+			switch k {
+			case "portcullis.io/class":
+				ok = v == "small" || v == "home" || v == "cloud"
+			case "portcullis.io/site", "topology.kubernetes.io/zone":
+				ok = siteValRe.MatchString(v)
 			}
 		}
-	}
-	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + st.MeshIP} {
-		if !slices.Contains(flags, need) {
-			return fmt.Errorf("the join answer's k3s flags lack %s: nothing was installed", need)
+		if !ok || seen[f] {
+			return fmt.Errorf("the join answer's k3s flag %s is refused: nothing was installed", clip(name, 40))
 		}
+		seen[f] = true
 	}
-	if _, err := netip.ParseAddr(st.MeshIP); err != nil {
-		return errors.New("the node's mesh address is malformed")
+	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + ip, "--node-name=" + st.ID} {
+		if !seen[need] {
+			name, _, _ := strings.Cut(need, "=")
+			return fmt.Errorf("the join answer's k3s flags lack %s: nothing was installed", name)
+		}
 	}
 	return nil
 }

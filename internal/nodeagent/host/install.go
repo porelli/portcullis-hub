@@ -19,7 +19,6 @@ import (
 // release tag, and the binary is checked on its own.
 const (
 	K3sVersion       = "v1.37.2+k3s1"
-	ClusterCIDR      = "10.42.0.0/16"
 	maxK3sBinary     = 512 << 20
 	maxInstallScript = 1 << 20
 )
@@ -38,11 +37,12 @@ var k3sPins = struct {
 	},
 }
 
-// FlannelNetConf is flannel's net-conf, used verbatim by k3s (core's
+// FlannelNetConf is flannel's net-conf for the cluster network cidr (the
+// join answer's cluster_cidr), used verbatim by k3s (core's
 // kube_flannel_conf, fixture tests/fixtures/k3s-flannel-net-conf.json).
-func FlannelNetConf() string {
+func FlannelNetConf(cidr string) string {
 	return fmt.Sprintf(`{"Network":"%s","EnableIPv4":true,"EnableIPv6":false,"Backend":{"Type":"wireguard","ListenPort":%d,"PersistentKeepaliveInterval":25,"Mode":"separate"}}`+"\n",
-		ClusterCIDR, 51840)
+		cidr, 51840)
 }
 
 func k3sAsset() (name, sum string, err error) {
@@ -114,7 +114,12 @@ func (a *Agent) installK3s(ctx context.Context, c *http.Client, out io.Writer, j
 	if err := a.fs.write(K3sTokenFile, []byte(string(j.Token)+"\n"), 0o600, 0o700); err != nil {
 		return err
 	}
-	if err := a.fs.write(FlannelConf, []byte(FlannelNetConf()), 0o644, 0o700); err != nil {
+	if j.AgentToken != "" {
+		if err := a.fs.write(K3sAgentToken, []byte(string(j.AgentToken)+"\n"), 0o600, 0o700); err != nil {
+			return err
+		}
+	}
+	if err := a.fs.write(FlannelConf, []byte(FlannelNetConf(j.ClusterCIDR)), 0o644, 0o700); err != nil {
 		return err
 	}
 	unit := k3sUnit(j.Role)
@@ -129,7 +134,8 @@ func (a *Agent) installK3s(ctx context.Context, c *http.Client, out io.Writer, j
 	if err := a.fs.write(K3sBinary, b, 0o755, 0o755); err != nil {
 		return err
 	}
-	env := []string{"INSTALL_K3S_SKIP_DOWNLOAD=true", "INSTALL_K3S_VERSION=" + K3sVersion, "K3S_TOKEN_FILE=" + K3sTokenFile}
+	// No unpinned k3s-selinux RPM from install.sh (RHEL family).
+	env := []string{"INSTALL_K3S_SKIP_DOWNLOAD=true", "INSTALL_K3S_SKIP_SELINUX_RPM=true", "INSTALL_K3S_VERSION=" + K3sVersion, "K3S_TOKEN_FILE=" + K3sTokenFile}
 	if j.Role != "server" {
 		env = append(env, "K3S_URL="+j.ServerURL)
 	}
@@ -155,6 +161,10 @@ func UnitText() string {
 		"ExecStart=" + AgentBinary + " serve",
 		"Restart=on-failure",
 		"RestartSec=5",
+		// It writes /etc, /var/lib and /usr/local (k3s, pcmesh, its state).
+		"NoNewPrivileges=yes",
+		"ProtectHome=yes",
+		"PrivateTmp=yes",
 		"",
 		"[Install]",
 		"WantedBy=multi-user.target",
