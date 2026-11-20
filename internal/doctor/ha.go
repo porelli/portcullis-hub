@@ -60,6 +60,9 @@ type HAIn struct {
 	// says why when nodeadm is configured but its snapshot unreadable).
 	Snapshot    *nodeadm.Snapshot
 	SnapshotErr string
+	// LastNodes: the node count of the last snapshot the Hub read (0:
+	// none), so an unreadable one judges the redundancy gate.
+	LastNodes int
 	// Namespaces name the pods (bare in the core namespace).
 	Namespaces nminus1.Namespaces
 	// NMinus1 is the check's result per node; NMinus1Err its refusal
@@ -174,6 +177,8 @@ func (c haCheck) Run(in *Inputs) []Finding {
 		return h.nodeCertExpiring()
 	case KindHANMinus1Insufficient:
 		return h.nMinus1()
+	case KindFrontdoorProbesInternalOnly:
+		return h.frontdoorInternalOnly()
 	}
 	if h.Snapshot == nil {
 		return nil
@@ -189,8 +194,6 @@ func (c haCheck) Run(in *Inputs) []Finding {
 		return h.pgNotSynchronous()
 	case KindHAFencingUnavailable:
 		return h.fencingUnavailable()
-	case KindFrontdoorProbesInternalOnly:
-		return h.frontdoorInternalOnly()
 	}
 	return nil
 }
@@ -297,7 +300,7 @@ func (h *HAIn) pgNotSynchronous() []Finding {
 	}
 	return []Finding{{FP: Fingerprint(KindPGNotSynchronous), Kind: KindPGNotSynchronous, Severity: Warning,
 		Title:  "Postgres has no synchronous standby.",
-		Why:    fmt.Sprintf("Of its %d instances none confirms the writes before they are acknowledged: one more failure may lose the last writes (Degraded: one more failure may lose the last writes).", pg.Instances),
+		Why:    fmt.Sprintf("Of its %d instances none confirms the writes before they are acknowledged (the guarantee is Degraded): one more failure may lose the last writes.", pg.Instances),
 		Class:  FixExplain,
 		Steps:  []string{"Check that the standby's node is up and its pod Ready; CloudNativePG resumes synchronous replication by itself once it is."},
 		Inputs: Digest([]any{pg.Instances, pg.SyncStandbys})}}
@@ -329,7 +332,9 @@ func (h *HAIn) fencingUnavailable() []Finding {
 
 func (h *HAIn) nMinus1() []Finding {
 	if h.Snapshot == nil {
-		if h.SnapshotErr == "" {
+		// The redundancy gate on the last snapshot read: a single-node
+		// cluster without HA stays quiet through a nodeadm blip.
+		if h.SnapshotErr == "" || !(h.Enabled || h.LastNodes > 1) {
 			return nil
 		}
 		return []Finding{h.n1Unknown("nodeadm's snapshot isn't readable: " + h.SnapshotErr)}
@@ -429,31 +434,42 @@ func (h *HAIn) frontdoorInternalOnly() []Finding {
 		return nil
 	}
 	var nodes []string
-	if len(h.FrontdoorStatus) > 0 {
+	unreadable := h.FrontdoorErr
+	if unreadable == "" && len(h.FrontdoorStatus) > 0 {
 		var d frontdoorProbes
-		if json.Unmarshal(h.FrontdoorStatus, &d) == nil {
-			for n, p := range d.Probes {
-				if p.InternalOnly && p.Verdict != "none" {
-					nodes = append(nodes, n)
-				}
+		if err := json.Unmarshal(h.FrontdoorStatus, &d); err != nil {
+			unreadable = "status.json doesn't decode"
+		}
+		for n, p := range d.Probes {
+			if p.InternalOnly && p.Verdict != "none" {
+				nodes = append(nodes, n)
 			}
 		}
+	}
+	var out []Finding
+	if unreadable != "" {
+		out = append(out, Finding{FP: Fingerprint(KindFrontdoorProbesInternalOnly, "unreadable"), Kind: KindFrontdoorProbesInternalOnly, Severity: Warning,
+			Title:  "The front door's probes can't be read.",
+			Why:    "frontdoor-status isn't readable (" + unreadable + "): whether the front door judges the ingress nodes from outside isn't known.",
+			Class:  FixExplain,
+			Steps:  []string{"Check the domains frontdoor pod and its ConfigMap frontdoor-status (./portcullis status)."},
+			Inputs: Digest(unreadable)})
 	}
 	sort.Strings(nodes)
 	single := len(h.Sites) == 1
 	if !single && len(nodes) == 0 {
-		return nil
+		return out
 	}
-	why := "The cluster's nodes are all at one site (" + strings.Join(h.Sites, "") + "): a probe from the same site never takes the public path, so the front door judges the ingress nodes by node and Traefik readiness only. A broken uplink or router at that site isn't seen."
+	why := "The cluster's nodes are all at one site (" + h.Sites[0] + "): a probe from the same site never takes the public path, so the front door judges the ingress nodes by node and Traefik readiness only. A broken uplink or router at that site isn't seen."
 	if !single {
 		why = "No prober at another site judged " + nameList(nodes) + ": the front door judges them by node and Traefik readiness only, so a broken uplink there isn't seen."
 	}
-	return []Finding{{FP: Fingerprint(KindFrontdoorProbesInternalOnly), Kind: KindFrontdoorProbesInternalOnly, Severity: Warning,
+	return append(out, Finding{FP: Fingerprint(KindFrontdoorProbesInternalOnly), Kind: KindFrontdoorProbesInternalOnly, Severity: Warning,
 		Title:  "The front door can't probe the public addresses from outside.",
 		Why:    why,
 		Class:  FixExplain,
 		Steps:  []string{"Add a node at another site (a small cloud VM is enough): its nodeagent probes the other sites' public addresses."},
-		Inputs: Digest([]any{h.Sites, nodes})}}
+		Inputs: Digest([]any{h.Sites, nodes})})
 }
 
 func (h *HAIn) leaseLost() []Finding {

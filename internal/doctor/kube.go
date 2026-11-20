@@ -35,6 +35,9 @@ type KubeIn struct {
 	// the API, :10250 the kubelet), judged for every node's public
 	// address in the snapshot (§20.2).
 	APIPublic map[string][]string
+	// APIUnchecked: the nodes of a single-site cluster with no public
+	// address on the Hub's record (nothing was dialled for them).
+	APIUnchecked []string
 	// Gateways are the confirmed VPN gateway pods, "<provider> <ip>
 	// <pod uid>" (K5).
 	Gateways []string
@@ -111,6 +114,14 @@ func (c kubeCheck) Run(in *Inputs) []Finding {
 				Class:  FixExplain,
 				Steps:  []string{"Allow :6443 and :10250 on " + node + " only from the addresses that administer the cluster."},
 				Inputs: Digest([]any{node, addrs})})
+		}
+		for _, node := range slices.Sorted(slices.Values(k.APIUnchecked)) {
+			out = append(out, Finding{FP: Fingerprint(c.kind, "unchecked", node), Kind: c.kind, Severity: Info,
+				Title:  "Node " + node + "'s API and kubelet ports: not checked: no public address on record.",
+				Why:    "The Hub dials :6443 and :10250 only on a public address it recorded itself (the node's enrolment report, or an endpoint another site confirmed), never one the node wrote into its Node object. " + node + " has none, so whether its API or kubelet answers from outside isn't known.",
+				Class:  FixExplain,
+				Steps:  []string{"Check from outside the cluster that " + node + "'s public address doesn't answer on :6443 or :10250, and restrict them in the firewall if it does."},
+				Inputs: Digest([]any{"unchecked", node})})
 		}
 		return out
 	}

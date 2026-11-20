@@ -15,6 +15,7 @@ import (
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/servers"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // The doctor's HA inputs (contract §14.5 "High availability"): nil off
@@ -37,13 +38,99 @@ type lastCoreBackupReader interface {
 	LastCoreBackup(ctx context.Context) (*time.Time, error)
 }
 
-// doctorHAIn is the HA kinds' input and, per node, the public addresses
-// whose API or kubelet answers (kube_api_public). Never under mu.
-func (h *Hub) doctorHAIn(ctx context.Context) (*doctor.HAIn, map[string][]string) {
+// doctorHAWait bounds the doctor's own wait on the shared HA read (the
+// read itself keeps running for the HA page, up to haReadWait).
+const doctorHAWait = 5 * time.Second
+
+// apiCacheFor: how long the API-port dials' result is reused.
+const apiCacheFor = 5 * time.Minute
+
+// apiCache is the last kube_api_public dial: its targets and what
+// answered, at at (the injected clock).
+type apiCache struct {
+	mu      sync.Mutex
+	at      time.Time
+	targets map[string]netip.Addr
+	public  map[string][]string
+}
+
+// apiResult is kube_api_public's input: what answered per node, and the
+// nodes not checked (no public address on record).
+type apiResult struct {
+	public    map[string][]string
+	unchecked []string
+}
+
+// doctorHAIn is the HA kinds' input and kube_api_public's. Never under
+// mu. nodeadm's snapshot comes from the HA page's shared read, waited
+// for at most doctorHAWait (then SnapshotErr: the N−1 kind's "can't
+// judge" Problem, never a pass); the API-port dials run alongside the
+// other inputs.
+func (h *Hub) doctorHAIn(ctx context.Context) (*doctor.HAIn, *apiResult) {
 	if !h.kubeOn() {
 		return nil, nil
 	}
 	in := &doctor.HAIn{Now: h.now().UTC(), Enabled: h.cfg.HA, Namespaces: h.nminusNamespaces()}
+	if last := h.lastSnapshot(); last != nil {
+		in.LastNodes = len(last.Nodes)
+	}
+	var (
+		api  *apiResult
+		done = make(chan struct{})
+		snap *nodeadm.Snapshot
+	)
+	close(done)
+	// nodeadm configured: its snapshot (shared with the HA page), else
+	// nothing cluster-wide is judged (no cluster nodes are managed).
+	if h.clusterNodesOn() == nil {
+		wait := h.ha.doctorWait
+		if wait <= 0 {
+			wait = doctorHAWait
+		}
+		r, err := h.haSharedWait(ctx, wait)
+		switch {
+		case err != nil:
+			in.SnapshotErr = clipRunes(err.Error(), 300)
+		case r.snapErr != nil:
+			in.SnapshotErr = clipRunes(r.snapErr.Error(), 300)
+		default:
+			s := r.snap
+			snap = &s
+		}
+		if err == nil && h.cfg.HA {
+			if r.statusErr != nil {
+				in.FrontdoorErr = clipRunes(r.statusErr.Error(), 200)
+			} else {
+				in.FrontdoorStatus = r.status
+			}
+		}
+	}
+	if snap != nil {
+		in.Snapshot = snap
+		in.NMinus1, in.NMinus1Err = h.checkN1(*snap)
+		place := h.haPlacement(*snap)
+		in.MustFence = slices.Sorted(maps.Keys(fencingRequired(*snap, place, h.cfg.HA, in.Namespaces)))
+		set := map[string]bool{}
+		for _, p := range place {
+			set[p.site] = true
+		}
+		in.Sites = slices.Sorted(maps.Keys(set))
+		targets := h.apiTargets(*snap)
+		api = &apiResult{}
+		if len(in.Sites) <= 1 {
+			for _, n := range snap.Nodes {
+				if _, ok := targets[n.Name]; !ok {
+					api.unchecked = append(api.unchecked, n.Name)
+				}
+			}
+			sort.Strings(api.unchecked)
+		}
+		done = make(chan struct{})
+		go func() {
+			defer close(done)
+			api.public = h.apiPublic(ctx, targets)
+		}()
+	}
 	lease := h.ha.lease
 	if lease == nil {
 		lease = fsutil.CheckWrite
@@ -54,39 +141,8 @@ func (h *Hub) doctorHAIn(ctx context.Context) (*doctor.HAIn, map[string][]string
 	in.LastBackup, in.BackupErr = h.lastCoreBackup(ctx)
 	in.NoMemoryLimit = h.noMemoryLimitIns(ctx)
 	in.NodeCerts = h.nodeCertIns()
-	var public map[string][]string
-	// nodeadm configured: its snapshot (shared with the HA page), else
-	// nothing cluster-wide is judged (no cluster nodes are managed).
-	if h.clusterNodesOn() == nil {
-		r, err := h.haShared(ctx)
-		switch {
-		case err != nil:
-			in.SnapshotErr = clipRunes(err.Error(), 300)
-		case r.snapErr != nil:
-			in.SnapshotErr = clipRunes(r.snapErr.Error(), 300)
-		default:
-			snap := r.snap
-			in.Snapshot = &snap
-			n1, n1Err := h.checkN1(snap)
-			in.NMinus1, in.NMinus1Err = n1, n1Err
-			place := h.haPlacement(snap)
-			in.MustFence = slices.Sorted(maps.Keys(fencingRequired(snap, place, h.cfg.HA, in.Namespaces)))
-			set := map[string]bool{}
-			for _, p := range place {
-				set[p.site] = true
-			}
-			in.Sites = slices.Sorted(maps.Keys(set))
-			public = h.apiPublic(ctx, snap)
-		}
-		if err == nil && h.cfg.HA {
-			if r.statusErr != nil {
-				in.FrontdoorErr = clipRunes(r.statusErr.Error(), 200)
-			} else {
-				in.FrontdoorStatus = r.status
-			}
-		}
-	}
-	return in, public
+	<-done
+	return in, api
 }
 
 // lastCoreBackup is the last successful core backup to the destination:
@@ -111,6 +167,8 @@ func (h *Hub) lastCoreBackup(ctx context.Context) (*time.Time, string) {
 // noMemoryLimitIns: each enabled instance's services without a memory
 // limit, judged on the model the translator gets (kube.NoMemoryLimit); an
 // instance whose model doesn't load is skipped (its own errors say why).
+// Each run loads every enabled instance's model (local files, no
+// network): accepted, as the doctor's other config checks read theirs.
 func (h *Hub) noMemoryLimitIns(ctx context.Context) []doctor.NoMemoryLimitIn {
 	var out []doctor.NoMemoryLimitIn
 	for _, t := range h.Templates() {
@@ -151,13 +209,16 @@ func (h *Hub) nodeCertIns() []doctor.NodeCertIn {
 }
 
 // apiTargets are the public addresses kube_api_public may dial, per
-// snapshot node: only the one in the Hub's own records (the node's
-// enrolment report, else its mesh record; never the Node object, which
-// a node writes itself), and only when the front door would publish it
+// snapshot node: only a Hub-persisted endpoint that never came from the
+// Node object — the node's enrolment report (MeshPublic), else its mesh
+// record's endpoint once another site confirmed it by a handshake
+// (ReachReachable; the mesh plan may have copied an unconfirmed one
+// from the Node object) — and only when the front door would publish it
 // (publicEndpointOK: never private, loopback, link-local, CGNAT,
 // special-purpose, documentation, nor the mesh, link, pod or service
 // CIDRs). Anything else is skipped: a node can't aim the Hub's dials at
-// an internal target.
+// an internal target. A node left without one isn't checked (with one
+// site, the finding says so).
 func (h *Hub) apiTargets(snap nodeadm.Snapshot) map[string]netip.Addr {
 	excluded := h.meshExcluded()
 	h.cl.ms.mu.Lock()
@@ -171,7 +232,10 @@ func (h *Hub) apiTargets(snap nodeadm.Snapshot) map[string]netip.Addr {
 		if servers.ValidID(id) != nil || h.st.Mesh[id].Removed {
 			continue
 		}
-		rec := h.st.Mesh[id].Public
+		rec := ""
+		if m := h.st.Mesh[id]; m.Reach == state.ReachReachable {
+			rec = m.Public
+		}
 		if s, listed := h.st.Servers[id]; listed {
 			if !s.ClusterNode() || s.State == ServerRevoked {
 				continue
@@ -187,10 +251,19 @@ func (h *Hub) apiTargets(snap nodeadm.Snapshot) map[string]netip.Addr {
 	return out
 }
 
-// apiPublic dials the API and kubelet ports on each node's recorded
-// public address (apiTargets; in parallel, each bounded): node → what
-// answered.
-func (h *Hub) apiPublic(ctx context.Context, snap nodeadm.Snapshot) map[string][]string {
+// apiPublic dials the API and kubelet ports on targets (apiTargets; in
+// parallel, each bounded by apiDialWait): node → what answered. The
+// result is reused for apiCacheFor while the targets are the same.
+func (h *Hub) apiPublic(ctx context.Context, targets map[string]netip.Addr) map[string][]string {
+	now := h.now()
+	c := &h.ha.api
+	c.mu.Lock()
+	if c.public != nil && maps.Equal(c.targets, targets) && now.Sub(c.at) < apiCacheFor && !now.Before(c.at) {
+		out := maps.Clone(c.public)
+		c.mu.Unlock()
+		return out
+	}
+	c.mu.Unlock()
 	dial := h.ha.dialAPI
 	if dial == nil {
 		dial = dialAPIPort
@@ -200,7 +273,7 @@ func (h *Hub) apiPublic(ctx context.Context, snap nodeadm.Snapshot) map[string][
 		wg  sync.WaitGroup
 		out = map[string][]string{}
 	)
-	for node, ip := range h.apiTargets(snap) {
+	for node, ip := range targets {
 		for _, port := range apiPorts {
 			addr := net.JoinHostPort(ip.String(), port)
 			wg.Add(1)
@@ -215,6 +288,12 @@ func (h *Hub) apiPublic(ctx context.Context, snap nodeadm.Snapshot) map[string][
 		}
 	}
 	wg.Wait()
+	for n := range out {
+		sort.Strings(out[n])
+	}
+	c.mu.Lock()
+	c.at, c.targets, c.public = now, maps.Clone(targets), maps.Clone(out)
+	c.mu.Unlock()
 	return out
 }
 
@@ -263,4 +342,19 @@ func (h *Hub) DoctorHA(ctx context.Context) (*HAFindings, error) {
 		}
 	}
 	return out, nil
+}
+
+// SetHADoctorForTest replaces the doctor's HA hooks (tests in other
+// packages): the write fence, the last core backup and the API-port dial
+// (nil: keep the current one).
+func (h *Hub) SetHADoctorForTest(lease func() error, lastBackup func(context.Context) (*time.Time, error), dial func(context.Context, string) bool) {
+	if lease != nil {
+		h.ha.lease = lease
+	}
+	if lastBackup != nil {
+		h.ha.lastBackup = lastBackup
+	}
+	if dial != nil {
+		h.ha.dialAPI = dial
+	}
 }

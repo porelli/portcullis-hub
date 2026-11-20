@@ -157,6 +157,10 @@ type haPage struct {
 	lastBackup func(ctx context.Context) (*time.Time, error)
 	lease      func() error
 	dialAPI    func(ctx context.Context, addr string) bool
+	// doctorWait: the doctor's wait on the shared read (0: doctorHAWait).
+	doctorWait time.Duration
+	// api caches the API-port dials (doctor_ha.go).
+	api apiCache
 }
 
 // haReadWait bounds one shared refresh (the snapshot and the status).
@@ -216,6 +220,19 @@ func (h *Hub) HA(ctx context.Context) (*HAView, error) {
 // haShared is one shared refresh's reads (the HA page's and the
 // doctor's: one snapshot read at a time).
 func (h *Hub) haShared(ctx context.Context) (*haRead, error) {
+	return h.haSharedWait(ctx, 0)
+}
+
+// haSharedWait is haShared waiting at most wait (0: until the read ends,
+// itself bounded by haReadWait); on a timeout the read goes on for the
+// other waiters.
+func (h *Hub) haSharedWait(ctx context.Context, wait time.Duration) (*haRead, error) {
+	var timeout <-chan time.Time
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		timeout = t.C
+	}
 	ch := h.ha.reads.DoChan(opKeyHA, func() (v any, err error) {
 		// singleflight re-panics in its own goroutine, out of net/http's
 		// recover: a panic here would end the Hub (the single writer).
@@ -230,6 +247,8 @@ func (h *Hub) haShared(ctx context.Context) (*haRead, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-timeout:
+		return nil, fmt.Errorf("nodeadm didn't answer within %s", wait)
 	case res := <-ch:
 		if res.Err != nil {
 			return nil, res.Err

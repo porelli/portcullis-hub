@@ -151,6 +151,11 @@ func TestHAKinds_RaiseAndClear(t *testing.T) {
 		}, name: "malformed snapshot"},
 		{kind: KindHANMinus1Insufficient + "/no snapshot", raise: func(in *Inputs) { in.HA.Snapshot, in.HA.SnapshotErr = nil, "nodeadm: 503" },
 			clear: func(in *Inputs) { in.HA.Snapshot = nil }, name: "nodeadm: 503"},
+		{kind: KindHANMinus1Insufficient + "/no snapshot, HA off, last 2 nodes", raise: func(in *Inputs) {
+			in.HA.Snapshot, in.HA.SnapshotErr, in.HA.Enabled, in.HA.LastNodes = nil, "nodeadm: 503", false, 2
+		}, clear: func(in *Inputs) {
+			in.HA.Snapshot, in.HA.SnapshotErr, in.HA.Enabled, in.HA.LastNodes = nil, "nodeadm: 503", false, 1
+		}, name: "nodeadm: 503"},
 		{kind: KindBackupStale, raise: backupAt(BackupStaleAfter + time.Second), clear: backupAt(BackupStaleAfter), name: "26 h"},
 		{kind: KindBackupStale + "/none", raise: func(in *Inputs) { in.HA.LastBackup = nil },
 			clear: func(in *Inputs) { in.HA.LastBackup, in.HA.Enabled = nil, false }, name: "no successful core backup"},
@@ -162,6 +167,12 @@ func TestHAKinds_RaiseAndClear(t *testing.T) {
 		{kind: KindFrontdoorProbesInternalOnly + "/probes", raise: func(in *Inputs) {
 			in.HA.FrontdoorStatus = []byte(`{"v":1,"probes":{"n1":{"verdict":"healthy","internal_only":true},"n9":{"verdict":"none","internal_only":true}}}`)
 		}, name: "judged n1:"},
+		{kind: KindFrontdoorProbesInternalOnly + "/unreadable", raise: func(in *Inputs) { in.HA.FrontdoorErr = "configmaps forbidden" },
+			clear: func(in *Inputs) { in.HA.FrontdoorErr, in.HA.Enabled = "configmaps forbidden", false }, name: "configmaps forbidden"},
+		{kind: KindFrontdoorProbesInternalOnly + "/undecodable", raise: func(in *Inputs) { in.HA.FrontdoorStatus = []byte("{") }, name: "doesn't decode"},
+		{kind: KindFrontdoorProbesInternalOnly + "/no snapshot", raise: func(in *Inputs) {
+			in.HA.Snapshot, in.HA.SnapshotErr, in.HA.FrontdoorErr = nil, "nodeadm: 503", "timeout"
+		}, name: "timeout"},
 		{kind: KindPublishedDocTooLarge, raise: func(in *Inputs) {
 			in.Published.TooLarge = []PublishedTooLargeIn{{Doc: "portal-apps", Size: 1000001}}
 		}, name: "portal-apps"},
@@ -261,5 +272,11 @@ func TestKubeAPIPublicPerNode(t *testing.T) {
 	}
 	if f := (kubeCheck{kind: KindKubeAPIPublic}).Run(&Inputs{Kube: &KubeIn{}}); len(f) != 0 {
 		t.Errorf("none exposed: %+v", f)
+	}
+	// A node with no public address on record (one site): an Info that
+	// says it wasn't checked.
+	f = kubeCheck{kind: KindKubeAPIPublic}.Run(&Inputs{Kube: &KubeIn{APIUnchecked: []string{"n1"}}})
+	if len(f) != 1 || f[0].Severity != Info || !strings.Contains(f[0].Title, "not checked: no public address on record") || f[0].FP != Fingerprint(KindKubeAPIPublic, "unchecked", "n1") {
+		t.Errorf("unchecked %+v", f)
 	}
 }

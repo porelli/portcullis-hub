@@ -12,6 +12,7 @@ import (
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/jsonstrict"
 	"github.com/portcullis/hub/internal/nodeadm"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // haKinds counts the report's HA findings by kind.
@@ -65,12 +66,12 @@ func TestDoctorHAInputs(t *testing.T) {
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	cf.h.srvT.now = func() time.Time { return now }
 	// Only a public address on the Hub's own record is dialled: n1's
-	// record is loopback, n3's the mesh, and n1's Node object claims
-	// another public address (a node writes its own object).
+	// confirmed record is loopback, n3's the mesh, and n1's Node object
+	// claims another public address (a node writes its own object).
 	cf.h.mu.Lock()
 	for id, pub := range map[string]string{"n1": "127.0.0.1:51830", "n2": "203.0.113.2:51830", "n3": "10.215.0.1:51830"} {
 		r := cf.h.st.Mesh[id]
-		r.Public = pub
+		r.Public, r.Reach = pub, state.ReachReachable
 		cf.h.st.Mesh[id] = r
 	}
 	cf.h.mu.Unlock()
@@ -96,8 +97,8 @@ func TestDoctorHAInputs(t *testing.T) {
 	if !slices.Equal(in.Sites, []string{"main"}) || len(in.MustFence) == 0 {
 		t.Errorf("sites %v must fence %v", in.Sites, in.MustFence)
 	}
-	if len(pub) != 1 || !slices.Equal(pub["n2"], []string{"203.0.113.2:6443"}) {
-		t.Errorf("api public %v", pub)
+	if pub == nil || len(pub.public) != 1 || !slices.Equal(pub.public["n2"], []string{"203.0.113.2:6443"}) || !slices.Equal(pub.unchecked, []string{"n1", "n3"}) {
+		t.Errorf("api public %+v", pub)
 	}
 	dmu.Lock()
 	slices.Sort(dialed)
@@ -106,7 +107,8 @@ func TestDoctorHAInputs(t *testing.T) {
 	}
 	dmu.Unlock()
 	got := haKinds(t, cf.h)
-	if got[doctor.KindNodeDown] != 0 || got[doctor.KindKubeAPIPublic] != 1 || got[doctor.KindHALeaseLost] != 0 || got[doctor.KindBackupStale] != 0 {
+	// kube_api_public: n2 exposed, n1 and n3 not checked (one site).
+	if got[doctor.KindNodeDown] != 0 || got[doctor.KindKubeAPIPublic] != 3 || got[doctor.KindHALeaseLost] != 0 || got[doctor.KindBackupStale] != 0 {
 		t.Errorf("at 1 min: %v", got)
 	}
 	now = now.Add(time.Second)
@@ -142,7 +144,9 @@ func TestDoctorHAInputs(t *testing.T) {
 }
 
 // TestDoctorHASnapshotUnreadable: nodeadm configured but its snapshot
-// unreadable → the N−1 kind's Problem with the reason (never a pass).
+// unreadable → the N−1 kind's Problem with the reason (never a pass),
+// once the cluster can fail over (HA on, or the last snapshot had more
+// than one node: Q-M4); a single-node cluster without HA stays quiet.
 func TestDoctorHASnapshotUnreadable(t *testing.T) {
 	cf := haFixture(t, haLabels(siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", ""), true, true))
 	cf.h.ha.lease = func() error { return nil }
@@ -151,7 +155,144 @@ func TestDoctorHASnapshotUnreadable(t *testing.T) {
 	if in == nil || in.Snapshot != nil || in.SnapshotErr == "" {
 		t.Fatalf("input %+v", in)
 	}
+	if got := haKinds(t, cf.h); got[doctor.KindHANMinus1Insufficient] != 0 {
+		t.Errorf("one node, HA off: %v", got)
+	}
+	cf.h.cl.mu.Lock()
+	cf.h.cl.last = &nodeadm.Snapshot{V: 1, Nodes: []nodeadm.Node{{Name: "n1"}, {Name: "n2"}}}
+	cf.h.cl.mu.Unlock()
 	if got := haKinds(t, cf.h); got[doctor.KindHANMinus1Insufficient] != 1 {
-		t.Errorf("%v", got)
+		t.Errorf("last snapshot 2 nodes: %v", got)
+	}
+	cf.h.cl.mu.Lock()
+	cf.h.cl.last = nil
+	cf.h.cl.mu.Unlock()
+	cf.h.cfg.HA = true
+	if got := haKinds(t, cf.h); got[doctor.KindHANMinus1Insufficient] != 1 {
+		t.Errorf("HA on: %v", got)
+	}
+}
+
+// blockingNodeadm's snapshot read waits until release closes.
+type blockingNodeadm struct {
+	*fakeNodeadm
+	release chan struct{}
+}
+
+func (b blockingNodeadm) Cluster(ctx context.Context) (nodeadm.Snapshot, error) {
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
+	return nodeadm.Snapshot{}, errors.New("released")
+}
+
+// TestDoctorHADoesNotWaitOnNodeadm (Q-I1): a nodeadm that never answers
+// costs the doctor its own wait, not the shared read's 20 s: the N−1
+// kind then raises "can't judge" (HA on), never a pass.
+func TestDoctorHADoesNotWaitOnNodeadm(t *testing.T) {
+	cf := haFixture(t, haLabels(siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", ""), true, true))
+	cf.h.ha.lease = func() error { return nil }
+	cf.h.cfg.HA = true
+	b := blockingNodeadm{cf.na, make(chan struct{})}
+	t.Cleanup(func() { close(b.release) })
+	cf.h.SetNodeadm(b)
+	cf.h.ha.doctorWait = 300 * time.Millisecond
+	start := time.Now()
+	in, api := cf.h.doctorHAIn(context.Background())
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("the doctor waited %s", d)
+	}
+	if in == nil || in.Snapshot != nil || in.SnapshotErr != "nodeadm didn't answer within 300ms" || api != nil {
+		t.Fatalf("input %+v %+v", in, api)
+	}
+	cf.h.SetPeople(newFakePeople())
+	start = time.Now()
+	r, err := cf.h.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 6*time.Second {
+		t.Errorf("Doctor took %s", d)
+	}
+	n := 0
+	for _, f := range r.Findings {
+		if f.Kind == doctor.KindHANMinus1Insufficient && f.Severity == doctor.Problem && strings.Contains(f.Why, "didn't answer") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("N−1 can't judge: %d findings in %+v", n, r.Findings)
+	}
+	if doctorHAWait != 5*time.Second {
+		t.Errorf("doctorHAWait = %s, want 5 s", doctorHAWait)
+	}
+}
+
+// TestAPITargetsRecordsOnly: kube_api_public dials only the enrolment
+// report's public endpoint or a mesh record's confirmed one, never an
+// address copied from the Node object nor an unconfirmed (offered)
+// mesh endpoint; the dials are reused for 5 min (the injected clock).
+func TestAPITargetsRecordsOnly(t *testing.T) {
+	cf := haFixture(t,
+		siteNode("a", "server", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1"),
+		siteNode("b", "server", "main", "10.215.0.2", "192.0.2.2", "203.0.113.2"),
+		siteNode("c", "server", "main", "10.215.0.3", "192.0.2.3", "203.0.113.3"),
+		siteNode("d", "agent", "main", "10.215.0.4", "192.0.2.4", "203.0.113.4"))
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	cf.h.srvT.now = func() time.Time { return now }
+	cf.h.mu.Lock()
+	ra := cf.h.st.Mesh["a"]
+	ra.Public, ra.Reach = "", ""
+	cf.h.st.Mesh["a"] = ra // a: only its Node object names a public address
+	rb := cf.h.st.Mesh["b"]
+	rb.Public, rb.Reach = "203.0.113.2:51830", state.ReachOffered
+	cf.h.st.Mesh["b"] = rb
+	rc := cf.h.st.Mesh["c"]
+	rc.Public, rc.Reach = "203.0.113.3:51830", state.ReachReachable
+	cf.h.st.Mesh["c"] = rc
+	rd := cf.h.st.Mesh["d"]
+	rd.Public, rd.Reach = "", ""
+	cf.h.st.Mesh["d"] = rd
+	if cf.h.st.Servers == nil {
+		cf.h.st.Servers = map[string]state.Server{}
+	}
+	cf.h.st.Servers["d"] = state.Server{Kind: state.KindClusterNode, State: ServerReady, Site: "main", MeshIP: "10.215.0.4", MeshPublic: "203.0.113.4:51830"}
+	cf.h.mu.Unlock()
+	snap := cf.na.snap
+	got := cf.h.apiTargets(snap)
+	if len(got) != 2 || got["c"].String() != "203.0.113.3" || got["d"].String() != "203.0.113.4" {
+		t.Errorf("targets %v", got)
+	}
+	var dmu sync.Mutex
+	dials := 0
+	cf.h.ha.dialAPI = func(context.Context, string) bool { dmu.Lock(); dials++; dmu.Unlock(); return false }
+	cf.h.apiPublic(context.Background(), got)
+	cf.h.apiPublic(context.Background(), got)
+	now = now.Add(apiCacheFor - time.Second)
+	cf.h.apiPublic(context.Background(), got)
+	if dials != 4 {
+		t.Errorf("within 5 min: %d dials, want 4 (cached)", dials)
+	}
+	now = now.Add(time.Second)
+	cf.h.apiPublic(context.Background(), got)
+	if dials != 8 {
+		t.Errorf("after 5 min: %d dials, want 8", dials)
+	}
+	delete(got, "d")
+	cf.h.apiPublic(context.Background(), got)
+	if dials != 10 {
+		t.Errorf("other targets: %d dials, want 10", dials)
+	}
+}
+
+// TestPublishedStaleUsesHubClock (Q-M2): the publish tracker judges the
+// Hub's injected clock.
+func TestPublishedStaleUsesHubClock(t *testing.T) {
+	f := newFixture(t)
+	at := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	f.h.srvT.now = func() time.Time { return at }
+	if f.h.pub == nil || f.h.pub.Now == nil || !f.h.pub.Now().Equal(at) {
+		t.Errorf("tracker clock not the Hub's")
 	}
 }

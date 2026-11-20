@@ -57,6 +57,7 @@ func (h *Hub) initPublish() error {
 			return fmt.Errorf("HUB_CONTAINER_RUNTIME=kubernetes: the runtime (%T) can't publish documents", h.rt)
 		}
 		h.pub = publish.NewTracker(s.DocSink())
+		h.pub.Now = h.now // published_doc_stale judges the injected clock
 		h.pubMirror = &files
 		return nil
 	}
@@ -65,6 +66,7 @@ func (h *Hub) initPublish() error {
 		files.GID[publish.VPN] = h.cfg.VPNDocGID
 	}
 	h.pub = publish.NewTracker(files)
+	h.pub.Now = h.now
 	return nil
 }
 
