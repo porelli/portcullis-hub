@@ -147,8 +147,17 @@ jobs:
       # hardware here): --version and checks --dry-run.
       - name: nodeagent cross-build and arm64 smoke (qemu-user)
         run: |
-          command -v qemu-aarch64-static || command -v qemu-aarch64 || { sudo apt-get update -q && sudo apt-get install -y -q qemu-user-static; }
-          q="$(command -v qemu-aarch64-static || command -v qemu-aarch64)"
+          # qemu-aarch64 run directly (no binfmt needed). Ubuntu split the
+          # packages: qemu-user (qemu-aarch64) on newer releases,
+          # qemu-user-static (qemu-aarch64-static) on older ones.
+          find_q() { command -v qemu-aarch64 || command -v qemu-aarch64-static; }
+          if ! find_q >/dev/null; then
+            sudo apt-get update -q
+            for p in qemu-user qemu-user-static; do
+              if apt-cache show "$p" >/dev/null 2>&1 && sudo apt-get install -y -q "$p"; then break; fi
+            done
+          fi
+          q="$(find_q)" || { echo "::error::no qemu-aarch64 on the runner (qemu-user / qemu-user-static)"; exit 1; }
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags="-s -w" -o "/tmp/nodeagent-$arch" ./cmd/portcullis-nodeagent
           done
