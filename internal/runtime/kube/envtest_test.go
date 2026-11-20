@@ -248,6 +248,10 @@ type vector struct {
 	// Object as an update of it, delete its deletion.
 	Existing map[string]any `json:"existing,omitempty"`
 	Op       string         `json:"op,omitempty"`
+	// HA marks the high-availability cases (contract §6, the placement,
+	// core exec, nodeadm tokens and nodeadm admission rules), skipped
+	// until their policies are copied in (Task 18).
+	HA bool `json:"ha,omitempty"`
 }
 
 // TestAdmissionVectors: every vector dry-run as the Hub's ServiceAccount;
@@ -264,40 +268,45 @@ func TestAdmissionVectors(t *testing.T) {
 	ctx := context.Background()
 	dry := []string{metav1.DryRunAll}
 	for _, v := range vs {
-		o := &unstructured.Unstructured{Object: v.Object}
-		client := e.hub
-		if v.As == "intruder" {
-			client = e.intruder
-		}
-		res := client.Resource(gvrOf(o)).Namespace(o.GetNamespace())
-		var err error
-		if v.Existing != nil {
-			ex := &unstructured.Unstructured{Object: v.Existing}
-			cur, cerr := e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Create(ctx, ex, metav1.CreateOptions{})
-			if cerr != nil {
-				t.Fatalf("%s: creating the existing object: %v", v.Name, cerr)
+		t.Run(v.Name, func(t *testing.T) {
+			if v.HA {
+				t.Skip("ha admission lands in Task 18")
 			}
-			if v.Op == "delete" {
-				err = res.Delete(ctx, ex.GetName(), metav1.DeleteOptions{DryRun: dry})
+			o := &unstructured.Unstructured{Object: v.Object}
+			client := e.hub
+			if v.As == "intruder" {
+				client = e.intruder
+			}
+			res := client.Resource(gvrOf(o)).Namespace(o.GetNamespace())
+			var err error
+			if v.Existing != nil {
+				ex := &unstructured.Unstructured{Object: v.Existing}
+				cur, cerr := e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Create(ctx, ex, metav1.CreateOptions{})
+				if cerr != nil {
+					t.Fatalf("%s: creating the existing object: %v", v.Name, cerr)
+				}
+				if v.Op == "delete" {
+					err = res.Delete(ctx, ex.GetName(), metav1.DeleteOptions{DryRun: dry})
+				} else {
+					o.SetResourceVersion(cur.GetResourceVersion())
+					_, err = res.Update(ctx, o, metav1.UpdateOptions{DryRun: dry})
+				}
+				e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Delete(ctx, ex.GetName(), metav1.DeleteOptions{})
 			} else {
-				o.SetResourceVersion(cur.GetResourceVersion())
-				_, err = res.Update(ctx, o, metav1.UpdateOptions{DryRun: dry})
+				_, err = res.Create(ctx, o, metav1.CreateOptions{DryRun: dry})
 			}
-			e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Delete(ctx, ex.GetName(), metav1.DeleteOptions{})
-		} else {
-			_, err = res.Create(ctx, o, metav1.CreateOptions{DryRun: dry})
-		}
-		switch v.Want {
-		case "allow":
-			if err != nil {
-				t.Errorf("%s: denied: %v", v.Name, err)
+			switch v.Want {
+			case "allow":
+				if err != nil {
+					t.Errorf("%s: denied: %v", v.Name, err)
+				}
+			case "deny":
+				var st apierrors.APIStatus
+				if !errors.As(err, &st) || !strings.Contains(st.Status().Message, "with binding 'portcullis-") || !strings.Contains(st.Status().Message, v.ReasonContains) {
+					t.Errorf("%s: want a denial with %q, got %v", v.Name, v.ReasonContains, err)
+				}
 			}
-		case "deny":
-			var st apierrors.APIStatus
-			if !errors.As(err, &st) || !strings.Contains(st.Status().Message, "with binding 'portcullis-") || !strings.Contains(st.Status().Message, v.ReasonContains) {
-				t.Errorf("%s: want a denial with %q, got %v", v.Name, v.ReasonContains, err)
-			}
-		}
+		})
 	}
 }
 

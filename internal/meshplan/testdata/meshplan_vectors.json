@@ -1,0 +1,1885 @@
+[
+ {
+  "name": "a single node has no peers",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": null,
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   }
+  ],
+  "want": {
+   "n1": {
+    "peers": [],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "one site, every node on the LAN (behind NAT)",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": null,
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "n3",
+    "site": "main",
+    "mesh_ip": "10.215.0.3",
+    "lan": "192.0.2.3:51830",
+    "public": null,
+    "pub": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+   }
+  ],
+  "want": {
+   "n1": {
+    "peers": [
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n3",
+      "endpoint": "192.0.2.3:51830",
+      "allowed_ips": [
+       "10.215.0.3/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n3",
+      "endpoint": "192.0.2.3:51830",
+      "allowed_ips": [
+       "10.215.0.3/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n3": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "one site, one node public: still the LAN endpoints",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "n3",
+    "site": "main",
+    "mesh_ip": "10.215.0.3",
+    "lan": "192.0.2.3:51830",
+    "public": null,
+    "pub": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+   }
+  ],
+  "want": {
+   "n1": {
+    "peers": [
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n3",
+      "endpoint": "192.0.2.3:51830",
+      "allowed_ips": [
+       "10.215.0.3/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n3",
+      "endpoint": "192.0.2.3:51830",
+      "allowed_ips": [
+       "10.215.0.3/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n3": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "two sites, every node public",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": "203.0.113.2:51830",
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   }
+  ],
+  "want": {
+   "e1": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "203.0.113.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "two sites, both with gateways and a NATed node each: relayed through the target's gateway",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": null,
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   }
+  ],
+  "want": {
+   "e1": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "e2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32",
+       "10.215.0.6/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "two sites, two NATed nodes at edge relayed through one gateway",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "n3",
+    "site": "main",
+    "mesh_ip": "10.215.0.3",
+    "lan": "192.0.2.3:51830",
+    "public": null,
+    "pub": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": null,
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   },
+   {
+    "id": "e3",
+    "site": "edge",
+    "mesh_ip": "10.215.0.7",
+    "lan": "198.18.0.7:51830",
+    "public": null,
+    "pub": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+   }
+  ],
+  "want": {
+   "e1": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": "198.18.0.7:51830",
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n3",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.3/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "e2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "e3",
+      "endpoint": "198.18.0.7:51830",
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32",
+       "10.215.0.3/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "e3": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32",
+       "10.215.0.3/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n3",
+      "endpoint": "192.0.2.3:51830",
+      "allowed_ips": [
+       "10.215.0.3/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32",
+       "10.215.0.6/32",
+       "10.215.0.7/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n3",
+      "endpoint": "192.0.2.3:51830",
+      "allowed_ips": [
+       "10.215.0.3/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n3": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32",
+       "10.215.0.6/32",
+       "10.215.0.7/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "two gateways at one site: the lowest id wins",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": "203.0.113.6:51830",
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   },
+   {
+    "id": "e3",
+    "site": "edge",
+    "mesh_ip": "10.215.0.7",
+    "lan": "198.18.0.7:51830",
+    "public": null,
+    "pub": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+   }
+  ],
+  "want": {
+   "e1": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": "198.18.0.7:51830",
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "e2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": "198.18.0.7:51830",
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   },
+   "e3": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e2",
+      "endpoint": "203.0.113.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32",
+       "10.215.0.7/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "e2",
+      "endpoint": "203.0.113.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "the gateway removed: the next lowest id takes over",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": "203.0.113.6:51830",
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   },
+   {
+    "id": "e3",
+    "site": "edge",
+    "mesh_ip": "10.215.0.7",
+    "lan": "198.18.0.7:51830",
+    "public": null,
+    "pub": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+   }
+  ],
+  "want": {
+   "e2": {
+    "peers": [
+     {
+      "id": "e3",
+      "endpoint": "198.18.0.7:51830",
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "e3": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "203.0.113.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "203.0.113.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32",
+       "10.215.0.7/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "the lowest id is by string order (e10 before e9)",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e10",
+    "site": "edge",
+    "mesh_ip": "10.215.0.8",
+    "lan": "198.18.0.8:51830",
+    "public": "203.0.113.8:51830",
+    "pub": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
+   },
+   {
+    "id": "e9",
+    "site": "edge",
+    "mesh_ip": "10.215.0.9",
+    "lan": "198.18.0.9:51830",
+    "public": "203.0.113.9:51830",
+    "pub": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+   },
+   {
+    "id": "e3",
+    "site": "edge",
+    "mesh_ip": "10.215.0.7",
+    "lan": "198.18.0.7:51830",
+    "public": null,
+    "pub": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+   }
+  ],
+  "want": {
+   "e10": {
+    "peers": [
+     {
+      "id": "e3",
+      "endpoint": "198.18.0.7:51830",
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e9",
+      "endpoint": "198.18.0.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "e3": {
+    "peers": [
+     {
+      "id": "e10",
+      "endpoint": "198.18.0.8:51830",
+      "allowed_ips": [
+       "10.215.0.8/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "e9",
+      "endpoint": "198.18.0.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "e9": {
+    "peers": [
+     {
+      "id": "e10",
+      "endpoint": "198.18.0.8:51830",
+      "allowed_ips": [
+       "10.215.0.8/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": "198.18.0.7:51830",
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e10",
+      "endpoint": "203.0.113.8:51830",
+      "allowed_ips": [
+       "10.215.0.8/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e3",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.7/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e9",
+      "endpoint": "203.0.113.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e10",
+      "endpoint": "203.0.113.8:51830",
+      "allowed_ips": [
+       "10.215.0.7/32",
+       "10.215.0.8/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "e9",
+      "endpoint": "203.0.113.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "three sites, a gateway at each",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": null,
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   },
+   {
+    "id": "t1",
+    "site": "tb",
+    "mesh_ip": "10.215.0.9",
+    "lan": "198.18.1.9:51830",
+    "public": "203.0.113.9:51830",
+    "pub": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+   }
+  ],
+  "want": {
+   "e1": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "t1",
+      "endpoint": "203.0.113.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "e2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32",
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "t1",
+      "endpoint": "203.0.113.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "t1",
+      "endpoint": "203.0.113.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": true
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32",
+       "10.215.0.6/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "t1",
+      "endpoint": "203.0.113.9:51830",
+      "allowed_ips": [
+       "10.215.0.9/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "t1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "a NATed site needs no gateway when every other node is public",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": "203.0.113.2:51830",
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": null,
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": null,
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   }
+  ],
+  "want": {
+   "e1": {
+    "peers": [
+     {
+      "id": "e2",
+      "endpoint": "198.18.0.6:51830",
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n2",
+      "endpoint": "203.0.113.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "e2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "198.18.0.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "203.0.113.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n2",
+      "endpoint": "203.0.113.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "e2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.6/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "a NATed main and one public node at edge: no relay needed",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": null,
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   }
+  ],
+  "want": {
+   "e1": {
+    "peers": [
+     {
+      "id": "n1",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 0
+     },
+     {
+      "id": "n2",
+      "endpoint": null,
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 0
+     }
+    ],
+    "forward": false
+   },
+   "n1": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n2",
+      "endpoint": "192.0.2.2:51830",
+      "allowed_ips": [
+       "10.215.0.2/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   },
+   "n2": {
+    "peers": [
+     {
+      "id": "e1",
+      "endpoint": "203.0.113.5:51830",
+      "allowed_ips": [
+       "10.215.0.5/32"
+      ],
+      "keepalive": 25
+     },
+     {
+      "id": "n1",
+      "endpoint": "192.0.2.1:51830",
+      "allowed_ips": [
+       "10.215.0.1/32"
+      ],
+      "keepalive": 25
+     }
+    ],
+    "forward": false
+   }
+  }
+ },
+ {
+  "name": "a site with no reachable node is refused",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": "203.0.113.1:51830",
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": null,
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": null,
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   }
+  ],
+  "want_error": "site edge needs one node reachable on UDP 51830 first (a cloud node, or one forwarded port)"
+ },
+ {
+  "name": "the primary site without a reachable node is refused",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": null,
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "e1",
+    "site": "edge",
+    "mesh_ip": "10.215.0.5",
+    "lan": "198.18.0.5:51830",
+    "public": "203.0.113.5:51830",
+    "pub": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU="
+   },
+   {
+    "id": "e2",
+    "site": "edge",
+    "mesh_ip": "10.215.0.6",
+    "lan": "198.18.0.6:51830",
+    "public": null,
+    "pub": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY="
+   }
+  ],
+  "want_error": "site main needs one node reachable on UDP 51830 first (a cloud node, or one forwarded port)"
+ },
+ {
+  "name": "a duplicate mesh ip is refused",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": null,
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   },
+   {
+    "id": "n3",
+    "site": "main",
+    "mesh_ip": "10.215.0.2",
+    "lan": "192.0.2.3:51830",
+    "public": null,
+    "pub": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+   }
+  ],
+  "want_error": "mesh ip 10.215.0.2 is used by both n2 and n3"
+ },
+ {
+  "name": "a mesh ip outside 10.215.0.0/24 is refused",
+  "nodes": [
+   {
+    "id": "n1",
+    "site": "main",
+    "mesh_ip": "10.215.0.1",
+    "lan": "192.0.2.1:51830",
+    "public": null,
+    "pub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+   },
+   {
+    "id": "n2",
+    "site": "main",
+    "mesh_ip": "10.214.0.2",
+    "lan": "192.0.2.2:51830",
+    "public": null,
+    "pub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+   }
+  ],
+  "want_error": "node n2: mesh ip 10.214.0.2 outside 10.215.0.0/24"
+ }
+]

@@ -1,0 +1,72 @@
+[
+ {
+  "mem_bytes": 2000000000,
+  "cpu": 2,
+  "model": "",
+  "public_answers": false,
+  "want": "small"
+ },
+ {
+  "mem_bytes": 3999999999,
+  "cpu": 4,
+  "model": "",
+  "public_answers": false,
+  "want": "small"
+ },
+ {
+  "mem_bytes": 1000000000,
+  "cpu": 2,
+  "model": "",
+  "public_answers": true,
+  "want": "small"
+ },
+ {
+  "mem_bytes": 8000000000,
+  "cpu": 4,
+  "model": "Raspberry Pi 5 Model B Rev 1.0",
+  "public_answers": false,
+  "want": "small"
+ },
+ {
+  "mem_bytes": 8000000000,
+  "cpu": 4,
+  "model": "Raspberry Pi 4 Model B Rev 1.5",
+  "public_answers": true,
+  "want": "small"
+ },
+ {
+  "mem_bytes": 4000000000,
+  "cpu": 2,
+  "model": "",
+  "public_answers": false,
+  "want": "home"
+ },
+ {
+  "mem_bytes": 16000000000,
+  "cpu": 1,
+  "model": "",
+  "public_answers": false,
+  "want": "home"
+ },
+ {
+  "mem_bytes": 32000000000,
+  "cpu": 8,
+  "model": "Intel(R) Core(TM) i5-8500T CPU @ 2.10GHz",
+  "public_answers": false,
+  "want": "home"
+ },
+ {
+  "mem_bytes": 4000000000,
+  "cpu": 2,
+  "model": "",
+  "public_answers": true,
+  "want": "cloud"
+ },
+ {
+  "mem_bytes": 16000000000,
+  "cpu": 4,
+  "model": "AMD EPYC 7571",
+  "public_answers": true,
+  "want": "cloud"
+ }
+]

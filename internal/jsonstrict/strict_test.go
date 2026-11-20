@@ -1,6 +1,7 @@
 package jsonstrict
 
 import (
+	"encoding/json"
 	"net/netip"
 	"strings"
 	"testing"
@@ -62,6 +63,34 @@ func TestDecode(t *testing.T) {
 		}
 		if err != nil && strings.Contains(err.Error(), "s3cret") {
 			t.Errorf("%s: the error echoes a value: %v", name, err)
+		}
+	}
+}
+
+func TestNullable(t *testing.T) {
+	type doc struct {
+		P Nullable[string] `json:"p"`
+		I Nullable[inner]  `json:"i"`
+	}
+	var d doc
+	if err := Decode([]byte(`{"p":null,"i":{"a":"1"}}`), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.P.Valid || !d.I.Valid || d.I.V.A != "1" {
+		t.Errorf("decoded %+v", d)
+	}
+	if b, _ := json.Marshal(d); string(b) != `{"p":null,"i":{"a":"1"}}` {
+		t.Errorf("encoded %s", b)
+	}
+	for name, c := range map[string]struct{ doc, want string }{
+		"missing":       {`{"i":null}`, `missing field "p"`},
+		"inner unknown": {`{"p":"x","i":{"a":"1","z":1}}`, `unknown field "z"`},
+		"inner missing": {`{"p":"x","i":{}}`, `missing field "a"`},
+		"wrong type":    {`{"p":1,"i":null}`, `wrong type`},
+	} {
+		var d doc
+		if err := Decode([]byte(c.doc), &d); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err %v, want %q", name, err, c.want)
 		}
 	}
 }

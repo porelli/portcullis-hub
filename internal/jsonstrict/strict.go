@@ -16,6 +16,7 @@ import (
 var (
 	unmarshalerType     = reflect.TypeFor[json.Unmarshaler]()
 	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+	nullableType        = reflect.TypeFor[interface{ nullable() reflect.Type }]()
 )
 
 func typeOf(v any) reflect.Type { return reflect.TypeOf(v).Elem() }
@@ -27,6 +28,13 @@ func typeOf(v any) reflect.Type { return reflect.TypeOf(v).Elem() }
 // duplicate keys and silently leaves missing fields at their zero value.
 // Errors carry JSON paths, never values.
 func checkShape(raw []byte, t reflect.Type, path string) error {
+	if reflect.PointerTo(t).Implements(nullableType) {
+		// Nullable: null, or the shape of T.
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil
+		}
+		return checkShape(raw, reflect.New(t).Interface().(interface{ nullable() reflect.Type }).nullable(), path)
+	}
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return fmt.Errorf("%s: null", path)
 	}
@@ -154,3 +162,40 @@ func Decode(b []byte, v any) error {
 	}
 	return nil
 }
+
+// Nullable is a value that may be JSON null (the HA documents' `null`
+// fields, contract §20: `public|null`, `set: null`, `not_ready_since`).
+// Decode refuses null everywhere else; a Nullable leaf takes it, and a
+// non-null value is checked as T.
+type Nullable[T any] struct {
+	Valid bool
+	V     T
+}
+
+// Some is a non-null Nullable.
+func Some[T any](v T) Nullable[T] { return Nullable[T]{Valid: true, V: v} }
+
+// UnmarshalJSON: null → !Valid, else V. Strict only through Decode, which
+// checks the shape of T first (checkShape).
+func (n *Nullable[T]) UnmarshalJSON(b []byte) error {
+	if bytes.Equal(bytes.TrimSpace(b), []byte("null")) {
+		*n = Nullable[T]{}
+		return nil
+	}
+	var v T
+	if err := json.Unmarshal(b, &v); err != nil { // the shape was checked by Decode
+		return err
+	}
+	*n = Nullable[T]{Valid: true, V: v}
+	return nil
+}
+
+// MarshalJSON: null when !Valid, else V.
+func (n Nullable[T]) MarshalJSON() ([]byte, error) {
+	if !n.Valid {
+		return []byte("null"), nil
+	}
+	return json.Marshal(n.V)
+}
+
+func (*Nullable[T]) nullable() reflect.Type { return reflect.TypeFor[T]() }

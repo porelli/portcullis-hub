@@ -6556,5 +6556,2144 @@
   "as": "hub",
   "want": "deny",
   "reason_contains": "supplementalGroupsPolicy Strict"
+ },
+ {
+  "name": "ha: a pod at portcullis-low with no toleration",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "low",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "priorityClassName": "portcullis-low"
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod at portcullis-critical",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "crit",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "priorityClassName": "portcullis-critical"
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod at portcullis-core is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "core",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "priorityClassName": "portcullis-core"
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "app pods may use only portcullis-critical|high|normal|low",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod at system-cluster-critical is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "sys",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "priorityClassName": "system-cluster-critical"
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "app pods may use only portcullis-critical|high|normal|low",
+  "ha": true
+ },
+ {
+  "name": "ha: a Deployment template at portcullis-core is refused",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "app--core",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+       }
+      ],
+      "priorityClassName": "portcullis-core"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "app pods may use only portcullis-critical|high|normal|low",
+  "ha": true
+ },
+ {
+  "name": "ha: a Deployment template without a priority class is admitted",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "app--nopri",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a Deployment template at portcullis-high",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "app--high",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+       }
+      ],
+      "priorityClassName": "portcullis-high"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: the small toleration without a node affinity is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "tol",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "tolerations": [
+     {
+      "key": "portcullis.io/small",
+      "operator": "Equal",
+      "value": "true",
+      "effect": "NoSchedule"
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the portcullis.io/small toleration needs a required node affinity on portcullis.io/class In [small]",
+  "ha": true
+ },
+ {
+  "name": "ha: the small toleration with only class NotIn [small] is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "tolnotin",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "tolerations": [
+     {
+      "key": "portcullis.io/small",
+      "operator": "Equal",
+      "value": "true",
+      "effect": "NoSchedule"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "kubernetes.io/hostname",
+           "operator": "In",
+           "values": [
+            "pi"
+           ]
+          },
+          {
+           "key": "portcullis.io/class",
+           "operator": "NotIn",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the portcullis.io/small toleration needs a required node affinity on portcullis.io/class In [small]",
+  "ha": true
+ },
+ {
+  "name": "ha: the small toleration with a term lacking a class expression is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "tolmix",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "tolerations": [
+     {
+      "key": "portcullis.io/small",
+      "operator": "Equal",
+      "value": "true",
+      "effect": "NoSchedule"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "kubernetes.io/hostname",
+           "operator": "In",
+           "values": [
+            "pi"
+           ]
+          },
+          {
+           "key": "portcullis.io/class",
+           "operator": "In",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        },
+        {
+         "matchExpressions": [
+          {
+           "key": "kubernetes.io/hostname",
+           "operator": "In",
+           "values": [
+            "n1"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the portcullis.io/small toleration needs a required node affinity on portcullis.io/class In [small]",
+  "ha": true
+ },
+ {
+  "name": "ha: the small toleration with a preferred (not required) class term is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "tolpref",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "tolerations": [
+     {
+      "key": "portcullis.io/small",
+      "operator": "Equal",
+      "value": "true",
+      "effect": "NoSchedule"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "preferredDuringSchedulingIgnoredDuringExecution": [
+       {
+        "weight": 100,
+        "preference": {
+         "matchExpressions": [
+          {
+           "key": "portcullis.io/class",
+           "operator": "In",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the portcullis.io/small toleration needs a required node affinity on portcullis.io/class In [small]",
+  "ha": true
+ },
+ {
+  "name": "ha: the small toleration with the class term (Runs on: Only a small node)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "tolok",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "tolerations": [
+     {
+      "key": "portcullis.io/small",
+      "operator": "Equal",
+      "value": "true",
+      "effect": "NoSchedule"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "kubernetes.io/hostname",
+           "operator": "In",
+           "values": [
+            "pi"
+           ]
+          },
+          {
+           "key": "portcullis.io/class",
+           "operator": "In",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: Runs on Only small and non-small nodes (two terms, each with a class expression)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "tolonly",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "tolerations": [
+     {
+      "key": "portcullis.io/small",
+      "operator": "Equal",
+      "value": "true",
+      "effect": "NoSchedule"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "kubernetes.io/hostname",
+           "operator": "In",
+           "values": [
+            "n1",
+            "n2"
+           ]
+          },
+          {
+           "key": "portcullis.io/class",
+           "operator": "NotIn",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        },
+        {
+         "matchExpressions": [
+          {
+           "key": "kubernetes.io/hostname",
+           "operator": "In",
+           "values": [
+            "pi"
+           ]
+          },
+          {
+           "key": "portcullis.io/class",
+           "operator": "In",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a Job template with the small toleration and no affinity is refused",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--tol",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+       }
+      ],
+      "restartPolicy": "Never",
+      "tolerations": [
+       {
+        "key": "portcullis.io/small",
+        "operator": "Equal",
+        "value": "true",
+        "effect": "NoSchedule"
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the portcullis.io/small toleration needs a required node affinity on portcullis.io/class In [small]",
+  "ha": true
+ },
+ {
+  "name": "ha: the default rendering (class NotIn [small], no toleration)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "anywhere",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "portcullis.io/class",
+           "operator": "NotIn",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod with nodeName is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "nn",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "nodeName": "n1"
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "nodeName is refused",
+  "ha": true
+ },
+ {
+  "name": "ha: a Deployment template with nodeName is refused",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "app--nn",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "replicas": 1,
+    "selector": {
+     "matchLabels": {
+      "portcullis.io/instance": "app"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+       }
+      ],
+      "nodeName": "n1"
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "nodeName is refused",
+  "ha": true
+ },
+ {
+  "name": "ha: a hostname spread",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "spread",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "topologySpreadConstraints": [
+     {
+      "maxSkew": 1,
+      "topologyKey": "kubernetes.io/hostname",
+      "whenUnsatisfiable": "DoNotSchedule",
+      "labelSelector": {
+       "matchLabels": {
+        "app.example/any": "x"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a zone spread is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "zspread",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "topologySpreadConstraints": [
+     {
+      "maxSkew": 1,
+      "topologyKey": "topology.kubernetes.io/zone",
+      "whenUnsatisfiable": "DoNotSchedule",
+      "labelSelector": {
+       "matchLabels": {
+        "portcullis.io/instance": "app"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "topologySpreadConstraints and affinity may use only portcullis.io/* and kubernetes.io/hostname keys",
+  "ha": true
+ },
+ {
+  "name": "ha: a node affinity on another key is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "zaff",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "topology.kubernetes.io/zone",
+           "operator": "In",
+           "values": [
+            "main"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "topologySpreadConstraints and affinity may use only portcullis.io/* and kubernetes.io/hostname keys",
+  "ha": true
+ },
+ {
+  "name": "ha: a preferred node affinity on another key is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "zpref",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "preferredDuringSchedulingIgnoredDuringExecution": [
+       {
+        "weight": 10,
+        "preference": {
+         "matchExpressions": [
+          {
+           "key": "node-role.kubernetes.io/control-plane",
+           "operator": "Exists"
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "topologySpreadConstraints and affinity may use only portcullis.io/* and kubernetes.io/hostname keys",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod anti-affinity on a region topology is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "zanti",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "affinity": {
+     "podAntiAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": [
+       {
+        "topologyKey": "topology.kubernetes.io/region",
+        "labelSelector": {
+         "matchLabels": {
+          "portcullis.io/instance": "app"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "topologySpreadConstraints and affinity may use only portcullis.io/* and kubernetes.io/hostname keys",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod anti-affinity on the hostname",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "hanti",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "affinity": {
+     "podAntiAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": [
+       {
+        "topologyKey": "kubernetes.io/hostname",
+        "labelSelector": {
+         "matchLabels": {
+          "portcullis.io/instance": "app"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a nodeSelector on another key is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "nsel",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "nodeSelector": {
+     "node-role.kubernetes.io/worker": "true"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "topologySpreadConstraints and affinity may use only portcullis.io/* and kubernetes.io/hostname keys",
+  "ha": true
+ },
+ {
+  "name": "ha: a nodeSelector on portcullis.io/site",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "nsite",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "nodeSelector": {
+     "portcullis.io/site": "main"
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: Runs on Prefer a site (a preferred portcullis.io/site term)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "prefer",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+     {
+      "name": "c",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "portcullis.io/class",
+           "operator": "NotIn",
+           "values": [
+            "small"
+           ]
+          }
+         ]
+        }
+       ]
+      },
+      "preferredDuringSchedulingIgnoredDuringExecution": [
+       {
+        "weight": 100,
+        "preference": {
+         "matchExpressions": [
+          {
+           "key": "portcullis.io/site",
+           "operator": "In",
+           "values": [
+            "edge"
+           ]
+          }
+         ]
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a Job template with a zone spread is refused",
+  "object": {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "app--zspread",
+    "namespace": "portcullis-apps",
+    "labels": {
+     "portcullis.io/instance": "app"
+    }
+   },
+   "spec": {
+    "backoffLimit": 0,
+    "template": {
+     "metadata": {
+      "labels": {
+       "portcullis.io/instance": "app"
+      }
+     },
+     "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+       {
+        "name": "c",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab"
+       }
+      ],
+      "restartPolicy": "Never",
+      "topologySpreadConstraints": [
+       {
+        "maxSkew": 1,
+        "topologyKey": "topology.kubernetes.io/zone",
+        "whenUnsatisfiable": "DoNotSchedule",
+        "labelSelector": {
+         "matchLabels": {
+          "portcullis.io/instance": "app"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "topologySpreadConstraints and affinity may use only portcullis.io/* and kubernetes.io/hostname keys",
+  "ha": true
+ },
+ {
+  "name": "ha: the Hub's hub rev in a group-gate pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-7c9d8-abcde",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: the Hub's hub rev of vpn in a wg pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "wg-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/vpn-doc",
+    "vpn"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: the Hub's hub rev of mcp-credentials in an mcp-gate pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "mcp-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "mcp-credentials"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: the Hub's hub rev in a keycloak pod",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "keycloak-1",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "signin-keycloak"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "allow",
+  "reason_contains": "",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec in a vault pod is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "vault-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec of a shell is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/bin/sh",
+    "-c",
+    "cat /hub-data/group-gate-policy.json"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: hub rev of vpn under /hub-data is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "vpn"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: hub rev of a /hub-data document under /vpn-doc is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "wg-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/vpn-doc",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: hub rev with an extra argument is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "wg-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/vpn-doc",
+    "vpn",
+    "x"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: hub rev of an unknown document is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "state"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec with stdin is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": true,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: a Hub exec with a tty is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": true
+  },
+  "as": "hub",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: another identity's hub rev in a reader pod is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "PodExecOptions",
+   "metadata": {
+    "name": "group-gate-0",
+    "namespace": "portcullis"
+   },
+   "container": "c",
+   "command": [
+    "/portcullis-bin/hub",
+    "rev",
+    "/hub-data",
+    "group-gate-policy"
+   ],
+   "stdin": false,
+   "stdout": true,
+   "stderr": true,
+   "tty": false
+  },
+  "as": "intruder",
+  "want": "deny",
+  "reason_contains": "the Hub may exec only hub rev <dir> <doc> in a reader pod of the core namespace",
+  "op": "exec",
+  "ha": true
+ },
+ {
+  "name": "ha: nodeadm's bootstrap token in the canonical form",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
+    "usage-bootstrap-authentication": "dHJ1ZQ==",
+    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   }
+  },
+  "as": "nodeadm",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: nodeadm's Opaque Secret in kube-system is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "k3s-serving",
+    "namespace": "kube-system"
+   },
+   "type": "Opaque",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
+    "usage-bootstrap-authentication": "dHJ1ZQ==",
+    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only bootstrap token Secrets in kube-system",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token without an expiration is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "usage-bootstrap-authentication": "dHJ1ZQ==",
+    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "bootstrap tokens must expire within 15 minutes",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token expiring in 2099 is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expiration": "MjA5OS0wMS0wMVQwMDowMDowMFo=",
+    "usage-bootstrap-authentication": "dHJ1ZQ==",
+    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "bootstrap tokens must expire within 15 minutes",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token usable for signing is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
+    "usage-bootstrap-authentication": "dHJ1ZQ==",
+    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg==",
+    "usage-bootstrap-signing": "dHJ1ZQ=="
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "bootstrap tokens may be used for authentication only",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token without authentication usage is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
+    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "bootstrap tokens may be used for authentication only",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token for system:masters is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
+    "usage-bootstrap-authentication": "dHJ1ZQ==",
+    "auth-extra-groups": "c3lzdGVtOm1hc3RlcnM="
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "bootstrap tokens may carry only the group system:bootstrappers:k3s:default-node-token",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token with a second group is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "data": {
+    "token-id": "YWJjZGVm",
+    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
+    "usage-bootstrap-authentication": "dHJ1ZQ==",
+    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbixzeXN0ZW06bWFzdGVycw=="
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "bootstrap tokens may carry only the group system:bootstrappers:k3s:default-node-token",
+  "ha": true
+ },
+ {
+  "name": "ha: nodeadm's binding in its canonical form",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-0123456789abcdef",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "0123456789abcdef"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-0123456789abcdef",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: a binding with the right label and an empty namespaceSelector is refused",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-0123456789abcdef",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "0123456789abcdef"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-0123456789abcdef",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {}
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only a binding in its canonical form on a params generation",
+  "ha": true
+ },
+ {
+  "name": "ha: a binding whose label and paramRef generations differ is refused",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-0123456789abcdef",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "fedcba9876543210"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-0123456789abcdef",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only a binding in its canonical form on a params generation",
+  "ha": true
+ },
+ {
+  "name": "ha: a binding that only warns is refused",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-0123456789abcdef",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "0123456789abcdef"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Warn"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-0123456789abcdef",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only a binding in its canonical form on a params generation",
+  "ha": true
+ },
+ {
+  "name": "ha: a binding on another policy is refused",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-0123456789abcdef",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "0123456789abcdef"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-services",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-0123456789abcdef",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only a binding in its canonical form on a params generation",
+  "ha": true
+ },
+ {
+  "name": "ha: a binding named off its generation is refused",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "0123456789abcdef"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-0123456789abcdef",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only a binding in its canonical form on a params generation",
+  "ha": true
+ },
+ {
+  "name": "ha: nodeadm updating a Portcullis binding is refused",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-00000000000000aa",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "00000000000000aa"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Audit"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-00000000000000aa",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may never change or delete a Portcullis admission policy or binding",
+  "existing": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-00000000000000aa",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "00000000000000aa"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-00000000000000aa",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "op": "update",
+  "ha": true
+ },
+ {
+  "name": "ha: nodeadm deleting a Portcullis binding is refused",
+  "object": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-00000000000000bb",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "00000000000000bb"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-00000000000000bb",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may never change or delete a Portcullis admission policy or binding",
+  "existing": {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "portcullis-apps-guard-pods-00000000000000bb",
+    "labels": {
+     "portcullis.io/binding": "portcullis-apps-guard-pods",
+     "portcullis.io/params-generation": "00000000000000bb"
+    }
+   },
+   "spec": {
+    "policyName": "portcullis-apps-pods",
+    "validationActions": [
+     "Deny"
+    ],
+    "paramRef": {
+     "name": "portcullis-admission-params-00000000000000bb",
+     "namespace": "portcullis",
+     "parameterNotFoundAction": "Deny"
+    },
+    "matchResources": {
+     "namespaceSelector": {
+      "matchLabels": {
+       "kubernetes.io/metadata.name": "portcullis-apps"
+      }
+     }
+    }
+   }
+  },
+  "op": "delete",
+  "ha": true
+ },
+ {
+  "name": "ha: nodeadm's params generation ConfigMap",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "ConfigMap",
+   "metadata": {
+    "name": "portcullis-admission-params-0123456789abcdef",
+    "namespace": "portcullis"
+   },
+   "data": {
+    "generation": "0123456789abcdef"
+   }
+  },
+  "as": "nodeadm",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: nodeadm's ConfigMap of another name is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "ConfigMap",
+   "metadata": {
+    "name": "frontdoor-status",
+    "namespace": "portcullis"
+   },
+   "data": {
+    "generation": "frontdoor-status"
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only portcullis-admission-params-<16 hex> ConfigMaps",
+  "ha": true
+ },
+ {
+  "name": "ha: a params ConfigMap with upper-case hex is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "ConfigMap",
+   "metadata": {
+    "name": "portcullis-admission-params-0123456789ABCDEF",
+    "namespace": "portcullis"
+   },
+   "data": {
+    "generation": "0123456789ABCDEF"
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only portcullis-admission-params-<16 hex> ConfigMaps",
+  "ha": true
+ },
+ {
+  "name": "ha: a params ConfigMap with 15 hex digits is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "ConfigMap",
+   "metadata": {
+    "name": "portcullis-admission-params-0123456789abcde",
+    "namespace": "portcullis"
+   },
+   "data": {
+    "generation": "-0123456789abcde"
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "nodeadm may create only portcullis-admission-params-<16 hex> ConfigMaps",
+  "ha": true
  }
 ]
