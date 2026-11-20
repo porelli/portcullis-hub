@@ -317,7 +317,10 @@ type Hub struct {
 	testHookManageDefined func()
 	// rt is the primary's runtime (nil: unit tests without one); srv the
 	// worker servers' runtimes and which instance runs where (rtfor.go).
-	rt      runtime.Instances
+	rt runtime.Instances
+	// avail serialises the availability gate's check and save, and the
+	// enable gate (availability.go; taken after an instance's lock).
+	avail   sync.Mutex
 	srv     *serverRegistry
 	srvOnce sync.Once
 	// Worker servers (servers*.go): srvMu (a leaf lock, never held with

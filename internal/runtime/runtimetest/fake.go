@@ -5,6 +5,7 @@ package runtimetest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -64,11 +65,25 @@ type Fake struct {
 	// DownRemovesUnits: Down / DownByName drop the project's Units (as a
 	// compose down does; the real-agent harness sets it).
 	DownRemovesUnits bool
+	// PodShapesFn answers PodShapes (nil: an error, as a runtime that
+	// can't render pods).
+	PodShapesFn func(p runtime.Project) ([]runtime.PodShape, error)
 
 	calls []string
 }
 
 var _ runtime.Instances = (*Fake)(nil)
+
+// PodShapes answers PodShapesFn (runtime.PodShaper).
+func (f *Fake) PodShapes(_ context.Context, p runtime.Project) ([]runtime.PodShape, error) {
+	f.mu.Lock()
+	fn := f.PodShapesFn
+	f.mu.Unlock()
+	if fn == nil {
+		return nil, errors.New("pod shapes: not set")
+	}
+	return fn(p)
+}
 
 func (f *Fake) rec(format string, a ...any) error {
 	f.mu.Lock()

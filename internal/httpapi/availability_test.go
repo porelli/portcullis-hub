@@ -3,13 +3,17 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
+	sdk "github.com/portcullis/hub/internal/mcpsdk"
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/runtimetest"
@@ -56,6 +60,7 @@ func fullSnapshot() nodeadm.Snapshot {
 type availEnv struct {
 	*instEnv
 	na   *availNodeadm
+	rt   *runtimetest.Fake
 	root string
 }
 
@@ -75,11 +80,12 @@ func newAvailEnv(t *testing.T, kubeOn bool, seed func(*state.AppState)) *availEn
 		}
 		o.rt = &runtimetest.Fake{K: runtime.KindKubernetes, InfoVal: runtime.Info{Verified: true}}
 	}
+	fake, _ := o.rt.(*runtimetest.Fake)
 	root := t.TempDir()
 	e := newInstEnvOpts(t, root, o)
 	na := &availNodeadm{snap: fullSnapshot()}
 	e.s.Hub.SetNodeadm(na)
-	return &availEnv{instEnv: e, na: na, root: root}
+	return &availEnv{instEnv: e, na: na, rt: fake, root: root}
 }
 
 func (e *availEnv) stored(t *testing.T) *state.Availability {
@@ -187,12 +193,11 @@ func TestRaiseToCriticalRunsNMinus1First(t *testing.T) {
 	if len(got) != 3 || !strings.HasPrefix(got[2], "instance.availability:ok:root:grafana") {
 		t.Errorf("audit: %v", got)
 	}
-	// Staying at critical isn't a raise: no N−1.
-	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"anywhere"}}`); code != 200 {
-		t.Errorf("not a raise: %d %s", code, body)
+	// The same choice again: nothing changes, no N−1.
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"only","nodes":["n1","pi"]}}`); code != 200 {
+		t.Errorf("unchanged: %d %s", code, body)
 	}
 	// The translator's input: the only choice's small node from the snapshot.
-	e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"only","nodes":["n1","pi"]}}`)
 	ra, err := e.s.Hub.KubeAvailabilityForTest(context.Background(), "grafana")
 	if err != nil || ra == nil || ra.Priority != "critical" || strings.Join(ra.RunsOn.Small, ",") != "pi" || len(ra.RunsOn.Nodes) != 2 {
 		t.Errorf("runtime availability %+v %v", ra, err)
@@ -315,6 +320,8 @@ func TestAvailabilityRefusals(t *testing.T) {
 		`{"priority":"normal","runs_on":{"mode":"only","nodes":["n1"],"site":"main"}}`:   "runs_on only takes nodes, and no class or site",
 		`{"priority":"normal","runs_on":{"mode":"only","nodes":["N1!"]}}`:                "runs_on only takes nodes, and no class or site",
 		`{"priority":"normal","runs_on":{"mode":"only","nodes":["n9"]}}`:                 "unknown node n9",
+		`{"priority":"normal","runs_on":{"mode":"prefer","site":"nowhere"}}`:             "no node is at site nowhere",
+		`{"priority":"normal","runs_on":{"mode":"only","nodes":["a..b"]}}`:               "runs_on only takes nodes, and no class or site",
 	} {
 		if code, got := e.do(t, "root", "PUT", availPath, body); code != 400 || strings.TrimSpace(got) != want {
 			t.Errorf("%s: %d %q, want %q", body, code, got, want)
@@ -334,5 +341,196 @@ func TestAvailabilityRefusals(t *testing.T) {
 	// A stored availability state.Load refuses is a corrupt state file.
 	if err := (state.Availability{Priority: "core", RunsOn: state.RunsOn{Mode: "anywhere"}}).Check(); err == nil {
 		t.Error("state accepts priority core")
+	}
+}
+
+func (e *availEnv) setSnap(s nodeadm.Snapshot) {
+	e.na.mu.Lock()
+	e.na.snap = s
+	e.na.mu.Unlock()
+}
+
+var notSmallAffinity = [][]nodeadm.Expr{{{Key: "portcullis.io/class", Operator: "NotIn", Values: []string{"small"}}}}
+
+func appPod(name, node string, cpu int64) nodeadm.Pod {
+	return nodeadm.Pod{Name: name, Namespace: "portcullis-apps", Node: node, Priority: 1000, PriorityClass: "portcullis-normal",
+		PreemptionPolicy: "PreemptLowerPriority", Requests: nodeadm.Resources{CPUm: cpu, MemBytes: 64 << 20}, RequiredAffinity: notSmallAffinity}
+}
+
+// dsFull: every node full of DaemonSet pods (they never move: green
+// alone), so a new pod has no room anywhere.
+func dsFull() nodeadm.Snapshot {
+	s := nodeadm.Snapshot{V: 1, Nodes: []nodeadm.Node{availNode("n1", "home"), availNode("n2", "home"), availNode("pi", "small")}}
+	for _, n := range s.Nodes {
+		s.Pods = append(s.Pods, nodeadm.Pod{Name: "agent-" + n.Name, Namespace: "kube-system", Node: n.Name, Priority: 1000000, PriorityClass: "portcullis-core",
+			PreemptionPolicy: "PreemptLowerPriority", DaemonSet: true, Requests: nodeadm.Resources{CPUm: 1000, MemBytes: 1 << 30}})
+	}
+	return s
+}
+
+// TestPlacementChangeAtCriticalRunsNMinus1 (fix I2): critical anywhere is
+// green; moving it to only [n1] at the same priority is judged and red.
+func TestPlacementChangeAtCriticalRunsNMinus1(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	e.setSnap(nodeadm.Snapshot{V: 1, Nodes: []nodeadm.Node{availNode("n1", "home"), availNode("n2", "home")},
+		Pods: []nodeadm.Pod{appPod("grafana--grafana-1", "n1", 500)}})
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"anywhere"}}`); code != 200 {
+		t.Fatalf("critical anywhere: %d %s", code, body)
+	}
+	code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"only","nodes":["n1"]}}`)
+	if code != 409 || !strings.Contains(body, `"error":"if n1 fails, portcullis-apps/grafana--grafana-1 won't have room"`) {
+		t.Fatalf("critical only [n1]: %d %s", code, body)
+	}
+	if a := e.stored(t); a == nil || a.RunsOn.Mode != "anywhere" {
+		t.Errorf("stored %+v", a)
+	}
+	// A lower priority isn't gated (low only [n1] is saved).
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"low","runs_on":{"mode":"only","nodes":["n1"]}}`); code != 200 {
+		t.Errorf("low: %d %s", code, body)
+	}
+}
+
+// TestRaiseJudgesOtherInstances (fix I1): grafana was raised to critical
+// (saved, its pod not restarted yet: the snapshot still says normal);
+// raising home then is judged with grafana at critical: red.
+func TestRaiseJudgesOtherInstances(t *testing.T) {
+	e := newAvailEnv(t, true, func(st *state.AppState) {
+		st.Instances["home"] = state.Instance{ID: "home", Template: "home", State: state.InstanceCreated}
+	})
+	e.setSnap(nodeadm.Snapshot{V: 1, Nodes: []nodeadm.Node{availNode("n1", "home"), availNode("n2", "home")},
+		Pods: []nodeadm.Pod{appPod("grafana--grafana-1", "n1", 500), appPod("home--web-1", "n2", 600)}})
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"anywhere"}}`); code != 200 {
+		t.Fatalf("grafana alone: %d %s", code, body)
+	}
+	code, body := e.do(t, "root", "PUT", "/api/instances/home/availability", `{"priority":"critical","runs_on":{"mode":"anywhere"}}`)
+	if code != 409 || !strings.Contains(body, `{"node":"n1","level":"red"`) {
+		t.Fatalf("home after grafana: %d %s", code, body)
+	}
+	// Alone (grafana back at normal), home's raise is green.
+	e.do(t, "root", "PUT", availPath, `{"priority":"normal","runs_on":{"mode":"anywhere"}}`)
+	if code, body := e.do(t, "root", "PUT", "/api/instances/home/availability", `{"priority":"critical","runs_on":{"mode":"anywhere"}}`); code != 200 {
+		t.Errorf("home alone: %d %s", code, body)
+	}
+}
+
+// TestRaisePodlessInstance (fix I3): an instance with no live pods is
+// modelled from the translator's pods: on a cluster with no room the
+// raise is red (the modelling node's result isn't shown); the model's
+// failure is unknown; enabling a stored critical instance re-runs the
+// gate and leaves it stopped.
+func TestRaisePodlessInstance(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	e.setSnap(dsFull())
+	var asked []string
+	e.rt.PodShapesFn = func(p runtime.Project) ([]runtime.PodShape, error) {
+		asked = append(asked, p.Instance)
+		return []runtime.PodShape{{Workload: "grafana--grafana", Replicas: 1, CPUm: 50, MemBytes: 512 << 20}}, nil
+	}
+	code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"anywhere"}}`)
+	if code != 409 || !strings.Contains(body, "if n1 fails, portcullis-apps/grafana--grafana-unstarted-0 won't have room") || strings.Contains(body, "portcullis-n1-unstarted") {
+		t.Fatalf("pod-less raise: %d %s", code, body)
+	}
+	if strings.Join(asked, ",") != "grafana" {
+		t.Errorf("rendered %v", asked)
+	}
+	e.rt.PodShapesFn = func(runtime.Project) ([]runtime.PodShape, error) { return nil, errors.New("no model") }
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"high","runs_on":{"mode":"anywhere"}}`); code != 409 || !strings.Contains(body, `"level":"unknown"`) {
+		t.Errorf("no model: %d %s", code, body)
+	}
+	// Confirmed in the browser: saved; enabling then refuses (409, stays stopped).
+	e.rt.PodShapesFn = func(runtime.Project) ([]runtime.PodShape, error) {
+		return []runtime.PodShape{{Workload: "grafana--grafana", Replicas: 1, CPUm: 50, MemBytes: 512 << 20}}, nil
+	}
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"critical","runs_on":{"mode":"anywhere"},"confirm_n_minus_1":true}`); code != 200 {
+		t.Fatalf("confirmed: %d %s", code, body)
+	}
+	_, err := e.s.Hub.StartEnable("grafana", directory.Human("root"))
+	if n1 := hub.ErrorsAsN1(err); n1 == nil || !strings.Contains(n1.Msg, "won't have room: grafana stays stopped") {
+		t.Fatalf("enable: %v", err)
+	}
+	if e.s.Hub.IsEnabled("grafana") {
+		t.Error("enabled past the gate")
+	}
+	// With room, it starts past the gate.
+	e.setSnap(nodeadm.Snapshot{V: 1, Nodes: []nodeadm.Node{availNode("n1", "home"), availNode("n2", "home")}})
+	if _, err := e.s.Hub.StartEnable("grafana", directory.Human("root")); hub.ErrorsAsN1(err) != nil {
+		t.Errorf("enable with room: %v", err)
+	}
+	waitIdle(t, e.s.Hub, "grafana")
+}
+
+// TestAvailabilityToolAIRules (fix S1): set_instance_availability is W
+// without confirm_n_minus_1, D with it; over MCP a red result is the 409
+// {error, n_minus_1} even confirmed, nothing saved; a yellow one goes
+// ahead confirmed.
+func TestAvailabilityToolAIRules(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	e.s.registerMCPTools()
+	var tool *Tool
+	for _, tl := range e.s.tools(ScopeAdmin) {
+		if tl.Name == "set_instance_availability" {
+			tl := tl
+			tool = &tl
+		}
+	}
+	if tool == nil {
+		t.Fatal("set_instance_availability isn't registered")
+	}
+	args := func(confirm bool) json.RawMessage {
+		b, _ := json.Marshal(map[string]any{"id": "grafana", "priority": "critical", "runs_on": map[string]any{"mode": "anywhere"}, "confirm_n_minus_1": confirm})
+		return b
+	}
+	if tool.ClassFor(context.Background(), args(false)) != ClassWrite || tool.ClassFor(context.Background(), args(true)) != ClassDestructive {
+		t.Error("ClassFor: want W without the confirmation, D with it")
+	}
+	ai := &directory.Caller{User: "root", Via: directory.ViaAI, Client: "portcullis-ai-claude"}
+	for _, confirm := range []bool{false, true} {
+		_, err := tool.Run(context.Background(), ai, args(confirm))
+		txt := sdk.TextOf(toolError(err, func(s string) string { return s }))
+		if !strings.HasPrefix(txt, `409: {"error":"if n1 fails, portcullis-apps/grafana--grafana-7c9d-x1 won't have room","n_minus_1":[`) {
+			t.Errorf("AI red (confirm %v): %s", confirm, txt)
+		}
+	}
+	if a := e.stored(t); a != nil {
+		t.Errorf("saved %+v", a)
+	}
+	// Yellow (an evicted normal pod): confirmed over MCP, saved.
+	s := fullSnapshot()
+	s.Pods[1] = appPod("other--web-1", "n2", 1000)
+	e.setSnap(s)
+	hi := json.RawMessage(`{"id":"grafana","priority":"high","runs_on":{"mode":"anywhere"},"confirm_n_minus_1":true}`)
+	if _, err := tool.Run(context.Background(), ai, hi); err != nil {
+		t.Fatalf("AI yellow confirmed: %v", err)
+	}
+	if a := e.stored(t); a == nil || a.Priority != "high" {
+		t.Errorf("stored %+v", a)
+	}
+}
+
+// TestKubeAvailabilityStaleSnapshot (fix M3): with nodeadm down, an up
+// uses the last snapshot only when it is at most 10 minutes old.
+func TestKubeAvailabilityStaleSnapshot(t *testing.T) {
+	e := newAvailEnv(t, true, nil)
+	if code, body := e.do(t, "root", "PUT", availPath, `{"priority":"normal","runs_on":{"mode":"only","nodes":["n1","pi"]}}`); code != 200 {
+		t.Fatalf("PUT: %d %s", code, body)
+	}
+	for _, c := range []struct {
+		at string
+		ok bool
+	}{{"", false}, {time.Now().Add(-11 * time.Minute).UTC().Format(time.RFC3339), false}, {time.Now().UTC().Format(time.RFC3339), true}} {
+		s := fullSnapshot()
+		s.TakenAt = c.at
+		e.setSnap(s)
+		e.na.mu.Lock()
+		e.na.err = nil
+		e.na.mu.Unlock()
+		e.do(t, "root", "GET", availPath, "") // the last snapshot read
+		e.na.mu.Lock()
+		e.na.err = errors.New("nodeadm down")
+		e.na.mu.Unlock()
+		ra, err := e.s.Hub.KubeAvailabilityForTest(context.Background(), "grafana")
+		if c.ok != (err == nil) || c.ok && strings.Join(ra.RunsOn.Small, ",") != "pi" {
+			t.Errorf("taken at %q: %+v %v", c.at, ra, err)
+		}
 	}
 }

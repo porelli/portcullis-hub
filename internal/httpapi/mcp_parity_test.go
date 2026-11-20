@@ -90,13 +90,6 @@ var serverNoToolRoutes = map[string]string{
 	"POST /api/instances/{id}/quarantine/lift": "admin UI only (a fresh sign-in): lifting a worker's start refusal",
 }
 
-// availabilityNoToolRoutes: changing an instance's availability (a raise
-// to critical or high, past an N−1 warning) stays an admin's action in
-// the Hub (Task 14 ruling); its read is instance_availability_get.
-var availabilityNoToolRoutes = map[string]string{
-	"PUT /api/instances/{id}/availability": "admin UI only: raising an instance's priority has no MCP write path",
-}
-
 var mailNoToolRoutes = map[string]string{
 	"GET /api/mail/settings":                                     "admin UI only (Settings → Mail)",
 	"PUT /api/mail/settings":                                     "admin UI only (Settings → Mail)",
@@ -258,7 +251,9 @@ var accessWidening = map[string]string{
 	"add_exception":     "D on a guarding group (deviation: an included exception is a membership)",
 	"remove_exception":  "D on a guarding group (deviation: dropping a kept-out exception lets the rule add them)",
 	"set_details":       "D when it sets a field a guarding group's rule uses (deviation)",
-	"import_apply":      "D when a row creates or deletes a person, or sets a field a guarding group's rule uses",
+	// Availability (§20.6, Task 14 fix round 1).
+	"set_instance_availability": "D with confirm_n_minus_1 (past a yellow N−1 result; never red or unknown), else W",
+	"import_apply":              "D when a row creates or deletes a person, or sets a field a guarding group's rule uses",
 	// Task 20.
 	"folder_apply":         "D unless the plan only removes uses and leaves the disk alone (AssignPlan.WidensAccess)",
 	"folder_recheck_apply": "D when it accepts a different directory (confirm_different_directory)",
@@ -311,8 +306,7 @@ func TestToolParity(t *testing.T) {
 		_, sshNo := sshNoToolRoutes[r]
 		_, usageNo := usageNoToolRoutes[r]
 		_, serverNo := serverNoToolRoutes[r]
-		_, availNo := availabilityNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo || availNo
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -343,7 +337,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes, availabilityNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)
@@ -439,7 +433,7 @@ func TestToolParity(t *testing.T) {
 		}
 	}
 	// doctor_apply_fix and folder_apply decide per call (G45; Task 20).
-	for _, n := range []string{"doctor_apply_fix", "folder_apply", "folder_recheck_apply", "doctor_mute"} {
+	for _, n := range []string{"doctor_apply_fix", "folder_apply", "folder_recheck_apply", "doctor_mute", "set_instance_availability"} {
 		if byName[n].ClassFor == nil {
 			t.Errorf("tool %s has no ClassFor", n)
 		}

@@ -180,7 +180,8 @@ func (h *Hub) enablePrecheck(ctx context.Context, id string, actor directory.Act
 	tmpl := *t
 	groups := h.instanceGroupsListLocked(t)
 	err = h.pendingLocked(id)
-	if err == nil && !h.st.IsEnabled(id) {
+	starting := !h.st.IsEnabled(id)
+	if err == nil && starting {
 		if err = h.checkPortCollisionsLocked(&tmpl); err == nil {
 			err = h.checkSubdomainCollisionsLocked(&tmpl)
 		}
@@ -188,6 +189,13 @@ func (h *Hub) enablePrecheck(ctx context.Context, id string, actor directory.Act
 	h.mu.RUnlock()
 	if err != nil {
 		return nil, nil, err
+	}
+	// A critical or high instance starts only past the N−1 gate (§20.6,
+	// §20.7; Kubernetes only).
+	if starting {
+		if err := h.enableN1Gate(ctx, id); err != nil {
+			return nil, nil, err
+		}
 	}
 	if len(groups) > 0 {
 		return h.planGroups(ctx, id, groups, actor)

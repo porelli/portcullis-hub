@@ -3,7 +3,8 @@ package state
 import (
 	"errors"
 	"fmt"
-	"regexp"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/portcullis/hub/internal/runtime"
 )
@@ -38,17 +39,19 @@ const (
 	ErrTextSmallPrefer  = "small nodes take only instances pinned to them: use Only"
 	ErrTextNeedsKube    = "availability needs Kubernetes"
 	ErrTextUnknownNodeF = "unknown node %s"
+	ErrTextUnknownSiteF = "no node is at site %s"
 )
 
-// nodeNameRe is a node name as kubernetes.io/hostname carries it: a
-// DNS-1123 subdomain that is also a label value (≤ 63).
-var nodeNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$`)
+// ValidNodeName reports whether n can be a node name as
+// kubernetes.io/hostname carries it: a DNS-1123 subdomain that is also a
+// label value (≤ 63).
+func ValidNodeName(n string) bool {
+	return n != "" && len(validation.IsDNS1123Subdomain(n)) == 0 && len(validation.IsValidLabelValue(n)) == 0
+}
 
-// siteRe is a site name (a portcullis.io/site label value).
-var siteRe = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$`)
-
-// ValidNodeName reports whether n can be a node name.
-func ValidNodeName(n string) bool { return nodeNameRe.MatchString(n) }
+// validSite reports whether s can be a site (a portcullis.io/site label
+// value).
+func validSite(s string) bool { return s != "" && len(validation.IsValidLabelValue(s)) == 0 }
 
 // PriorityOrDefault is a's priority, normal for nil.
 func (a *Availability) PriorityOrDefault() string {
@@ -118,7 +121,7 @@ func (a Availability) Check() error {
 				return errors.New(ErrTextPrefer)
 			}
 		case r.Site != "":
-			if !siteRe.MatchString(r.Site) {
+			if !validSite(r.Site) {
 				return errors.New(ErrTextPrefer)
 			}
 		default:

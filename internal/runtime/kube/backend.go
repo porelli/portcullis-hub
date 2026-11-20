@@ -298,6 +298,16 @@ func (b *Backend) objectNamespace(o *unstructured.Unstructured) (string, bool) {
 // input is p's translation input with the digests resolved (cached
 // ones first; the new ones returned apart, committed after success).
 func (b *Backend) input(ctx context.Context, p runtime.Project) (Input, map[string]string, error) {
+	return b.inputWith(ctx, p, false)
+}
+
+// placeholderDigest stands for an image not resolved yet when only the
+// pods' shapes are wanted (PodShapes: nothing is applied).
+const placeholderDigest = "@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+// inputWith is input; placeholder: an image not cached yet takes a
+// placeholder digest instead of the resolver's (PodShapes only).
+func (b *Backend) inputWith(ctx context.Context, p runtime.Project, placeholder bool) (Input, map[string]string, error) {
 	if p.Model == nil {
 		return Input{}, nil, fmt.Errorf("%s: the project's model isn't loaded", p.Instance)
 	}
@@ -332,6 +342,10 @@ func (b *Backend) input(ctx context.Context, p runtime.Project) (Input, map[stri
 			in.Digests[s.Image] = d
 			continue
 		}
+		if placeholder {
+			in.Digests[s.Image] = s.Image + placeholderDigest
+			continue
+		}
 		if b.cfg.Resolver == nil {
 			return Input{}, nil, fmt.Errorf("image %s: no digest resolver", s.Image)
 		}
@@ -353,6 +367,21 @@ func (b *Backend) CachedDigests(instance string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// PodShapes are p's long-running pods as the translator renders them,
+// without resolving images or applying anything (the N−1 model of an
+// instance with no live pods, §20.7).
+func (b *Backend) PodShapes(ctx context.Context, p runtime.Project) ([]runtime.PodShape, error) {
+	in, _, err := b.inputWith(ctx, p, true)
+	if err != nil {
+		return nil, err
+	}
+	pl, err := Translate(in)
+	if err != nil {
+		return nil, err
+	}
+	return PodShapesOf(pl)
 }
 
 func (b *Backend) plan(ctx context.Context, p runtime.Project) (Plan, map[string]string, error) {

@@ -759,6 +759,12 @@ func toolError(err error, redact func(string) string) *sdk.CallToolResult {
 		b, _ := json.Marshal(rec)
 		return sdk.TextResult(prefix+clipResult(redact(string(b))), true)
 	}
+	if n1 := hub.ErrorsAsN1(err); n1 != nil {
+		// A refused availability change (§20.6): its sentence and the
+		// per-node results, as the route's 409 body.
+		b, _ := json.Marshal(map[string]any{"error": n1.Msg, "n_minus_1": n1.Results})
+		return sdk.TextResult(prefix+clipResult(redact(string(b))), true)
+	}
 	var oe *hub.OpError
 	if errors.As(err, &oe) {
 		b, _ := json.Marshal(map[string]any{"error": oe.Record.Error, "op": oe.Record.Op, "output": oe.Record.Output,

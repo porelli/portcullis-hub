@@ -1,18 +1,20 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
 )
 
 // Instance availability (contract §20.6): Hub listener, administrators
 // (the instance-settings rule), Kubernetes only (409 "availability needs
-// Kubernetes" before the body is read). The GET has its MCP tool
-// instance_availability_get (R); the PUT has none and refuses an MCP or
-// AI actor (raising an instance's priority stays an admin's action in
-// the Hub: availabilityNoToolRoutes).
+// Kubernetes" whatever the body). The GET's MCP tool is
+// instance_availability_get (R), the PUT's set_instance_availability (W;
+// with confirm_n_minus_1 it asks the person in the browser, and an AI
+// never overrides a red or unknown N−1 result: the Hub's rule).
 
 func (s *Server) registerAvailability(mux routeMux) {
 	mux.HandleFunc("GET /api/instances/{id}/availability", s.handleInstanceAvailability)
@@ -54,24 +56,23 @@ func (s *Server) handleSetInstanceAvailability(w http.ResponseWriter, r *http.Re
 		return
 	}
 	noStore(w)
-	if requestActor(r).Via != "" {
-		http.Error(w, "not allowed: an instance's availability is changed in the Hub only, never through MCP or AI", http.StatusForbidden)
-		return
-	}
-	if err := s.Hub.AvailabilityOn(); err != nil {
+	// Off Kubernetes any body is the 409 (a valid one goes the tool's
+	// way, through the Hub, which answers it too).
+	var b availabilityBody
+	ok = strictBody(w, r, &b)
+	if err := s.Hub.AvailabilityOn(); err != nil && !ok {
 		writeErr(w, err, http.StatusConflict)
 		return
 	}
-	var b availabilityBody
-	if !decodeStrict(w, r, &b, availabilityUsage) {
+	if !ok {
+		http.Error(w, "body must be "+availabilityUsage, http.StatusBadRequest)
 		return
 	}
 	a := state.Availability{Priority: b.Priority}
 	if b.RunsOn != nil {
 		a.RunsOn = *b.RunsOn
 	}
-	s.rec("SetAvailability", id, a, b.ConfirmNMinus1)
-	v, err := s.Hub.SetAvailability(r.Context(), id, a, b.ConfirmNMinus1, requestActor(r))
+	v, err := s.setAvailability(r.Context(), requestActor(r), id, a, b.ConfirmNMinus1)
 	if err != nil {
 		if n1 := hub.ErrorsAsN1(err); n1 != nil {
 			writeJSONStatus(w, http.StatusConflict, map[string]any{"error": n1.Msg, "n_minus_1": n1.Results})
@@ -81,4 +82,11 @@ func (s *Server) handleSetInstanceAvailability(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, v)
+}
+
+// setAvailability is the change's work (route and
+// set_instance_availability).
+func (s *Server) setAvailability(ctx context.Context, actor directory.Actor, id string, a state.Availability, confirm bool) (*hub.AvailabilityView, error) {
+	s.rec("SetAvailability", id, a, confirm)
+	return s.Hub.SetAvailability(ctx, id, a, confirm, actor)
 }

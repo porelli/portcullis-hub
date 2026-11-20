@@ -68,3 +68,70 @@ process.stdout.write(JSON.stringify({ html, prefer, bodies }));
 		}
 	}
 }
+
+// TestWebAvailabilityRefusal (fix I4, M1): a refused raise puts the form
+// back to the saved choice and says "Not changed: still High."; Raise
+// anyway resends exactly the refused body with confirm_n_minus_1, not the
+// form as edited since; Cancel says "Not changed" too.
+func TestWebAvailabilityRefusal(t *testing.T) {
+	out := nodeEval(t, `
+global.window = {};
+`+webAsset(t, "availability.js")+`
+const v = { priority: 'high', runs_on: { mode: 'anywhere' }, nodes: [{ name: 'n1', class: 'home', site: 'main', small: false }], n_minus_1: [] };
+window.apiGet = async () => v;
+const sent = [];
+global.fetch = async (url, o) => {
+  sent.push(JSON.parse(o.body));
+  return { ok: false, status: 409, headers: { get: () => 'application/json' },
+    json: async () => ({ error: 'if n1 fails, <b>x</b> won\'t have room', n_minus_1: [{ node: 'n1', level: 'red', unplaced: ['x'], evicted: [] }] }) };
+};
+const nodes = {};
+const node = sel => nodes[sel] || (nodes[sel] = { value: '', textContent: '', className: '', innerHTML: '', hidden: true });
+node('[data-avail-priority]').value = 'critical';
+node('[data-avail-mode]:checked').value = 'anywhere';
+let html = '';
+const pane = {
+  set innerHTML(h) { html = h; nodes['[data-avail-confirm]'] = { innerHTML: '', hidden: true }; },
+  get innerHTML() { return html; },
+  querySelector: sel => (sel === '[data-avail-prefer-kind]:checked' || sel === '[data-avail-class]' || sel === '[data-avail-site]' || sel === '[data-avail-nodes]') ? null : node(sel),
+  querySelectorAll: () => [],
+  contains: () => true,
+};
+const click = act => pane.onclick({ target: { closest: () => ({ dataset: { availAct: act } }) } });
+const tick = () => new Promise(r => setTimeout(r, 10));
+(async () => {
+  await window.PortcullisAvailability.renderTab('grafana', pane);
+  click('save'); await tick();
+  const afterRefusal = { html, status: node('[data-avail-status]').textContent, box: nodes['[data-avail-confirm]'].innerHTML, hidden: nodes['[data-avail-confirm]'].hidden };
+  node('[data-avail-priority]').value = 'low'; // edited while the dialog is open
+  click('confirm'); await tick();
+  click('cancel');
+  process.stdout.write(JSON.stringify({ afterRefusal, sent, cancel: node('[data-avail-status]').textContent }));
+})();
+`)
+	var got struct {
+		AfterRefusal struct {
+			HTML, Status, Box string
+			Hidden            bool
+		}
+		Sent   []json.RawMessage
+		Cancel string
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	r := got.AfterRefusal
+	if !strings.Contains(r.HTML, `value="high" selected`) || strings.Contains(r.HTML, `value="critical" selected`) {
+		t.Errorf("the form wasn't reset to the saved choice: %s", r.HTML)
+	}
+	if r.Status != "Not changed: still High." || r.Hidden || !strings.Contains(r.Box, "&lt;b&gt;x&lt;/b&gt;") || !strings.Contains(r.Box, `data-avail-act="confirm"`) {
+		t.Errorf("after the refusal: %+v", r)
+	}
+	if len(got.Sent) != 2 || string(got.Sent[0]) != `{"priority":"critical","runs_on":{"mode":"anywhere"}}` ||
+		string(got.Sent[1]) != `{"priority":"critical","runs_on":{"mode":"anywhere"},"confirm_n_minus_1":true}` {
+		t.Errorf("sent %s", got.Sent)
+	}
+	if got.Cancel != "Not changed: still High." {
+		t.Errorf("cancel: %q", got.Cancel)
+	}
+}

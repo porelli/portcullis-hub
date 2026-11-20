@@ -430,6 +430,12 @@ func TestAdminToolsSameAsHTTP(t *testing.T) {
 			method: "DELETE", path: "/api/instances/cloud/vpn-static/10.8.0.5", body: ``},
 		{tool: "set_instance_reach", args: map[string]any{"id": "cloud", "mode": "vpn", "via": []string{"*"}},
 			method: "PUT", path: "/api/instances/cloud/reach", body: `{"mode":"vpn","via":["*"]}`},
+		// Availability (§20.6): Docker refuses both ways (409 "availability
+		// needs Kubernetes"); W without the confirmation, D with it.
+		{tool: "set_instance_availability", args: map[string]any{"id": "cloud", "priority": "high", "runs_on": map[string]any{"mode": "anywhere"}},
+			method: "PUT", path: "/api/instances/cloud/availability", body: `{"priority":"high","runs_on":{"mode":"anywhere"}}`},
+		{tool: "set_instance_availability", args: map[string]any{"id": "cloud", "priority": "high", "runs_on": map[string]any{"mode": "anywhere"}, "confirm_n_minus_1": true},
+			method: "PUT", path: "/api/instances/cloud/availability", body: `{"priority":"high","runs_on":{"mode":"anywhere"},"confirm_n_minus_1":true}`},
 		{tool: "set_instance_reach", args: map[string]any{"id": "cloud", "mode": "internet", "public_links": true},
 			method: "PUT", path: "/api/instances/cloud/reach", body: `{"mode":"internet","public_links":true}`},
 		{tool: "set_public_access", args: map[string]any{"id": "cloud", "access": "on"},

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"io"
 	"net/netip"
 	"strings"
@@ -376,4 +377,21 @@ func (a *Availability) ModeOrDefault() string {
 		return RunsOnAnywhere
 	}
 	return a.RunsOn.Mode
+}
+
+// PodShape is one workload's pods as the translator renders them (the
+// N−1 model of an instance that has no live pods, contract §20.7): its
+// object name, replicas and each pod's requests (the containers' sum,
+// at least any init container's).
+type PodShape struct {
+	Workload string
+	Replicas int
+	CPUm     int64
+	MemBytes int64
+}
+
+// PodShaper is a runtime that can render a project's pods without
+// starting them (Kubernetes).
+type PodShaper interface {
+	PodShapes(ctx context.Context, p Project) ([]PodShape, error)
 }

@@ -3,10 +3,13 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"maps"
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/nminus1"
@@ -98,11 +101,7 @@ func isSmall(n *nodeadm.Node) bool { return n.Labels[nodeadm.LabelClass] == kube
 func (h *Hub) checkN1(s nodeadm.Snapshot) ([]nminus1.Result, string) {
 	res, err := nminus1.CheckIn(s, h.nminusNamespaces())
 	if err != nil {
-		res = make([]nminus1.Result, 0, len(s.Nodes))
-		for _, n := range s.Nodes {
-			res = append(res, nminus1.Result{Node: n.Name, Level: nminus1.Unknown})
-		}
-		return wireResults(res), "the N−1 check can't judge the cluster: " + clipRunes(err.Error(), 300)
+		return unknownResults(s), "the N−1 check can't judge the cluster: " + clipRunes(err.Error(), 300)
 	}
 	return wireResults(res), ""
 }
@@ -195,6 +194,19 @@ func (h *Hub) SetAvailability(ctx context.Context, id string, want state.Availab
 	if want.RunsOn.Nodes != nil {
 		want.RunsOn.Nodes = slices.Sorted(slices.Values(want.RunsOn.Nodes))
 	}
+	if _, ok := h.availabilityOf(id); !ok {
+		return nil, statusErr(404, "instance not found: %s", id)
+	}
+	unlock, err := h.lockApp(id)
+	if err != nil {
+		return nil, h.busyErr(id, err)
+	}
+	defer unlock()
+	// One Hub-wide lock around the check and the save (after the
+	// instance's: lockApp is always taken first): two raises are never
+	// judged without each other.
+	h.avail.Lock()
+	defer h.avail.Unlock()
 	old, ok := h.availabilityOf(id)
 	if !ok {
 		return nil, statusErr(404, "instance not found: %s", id)
@@ -203,32 +215,35 @@ func (h *Hub) SetAvailability(ctx context.Context, id string, want state.Availab
 	if err != nil {
 		return nil, err
 	}
-	small, err := runsOnSmall(want.RunsOn, snap)
-	if err != nil {
+	if _, err := runsOnSmall(want.RunsOn, snap); err != nil {
 		return nil, err
 	}
-	// A raise to critical or high: N−1 first, on the snapshot with the
-	// instance's pods as the change would run them.
-	raise := (want.Priority == runtime.PriorityCritical || want.Priority == runtime.PriorityHigh) &&
-		state.PriorityRank(want.Priority) > state.PriorityRank(old.PriorityOrDefault())
+	// The gate: the result is critical or high and the priority or the
+	// placement changes. N−1 runs first, on the snapshot with every
+	// instance's pods as state says they run, this one as want.
 	n1Note := ""
 	var n1 []nminus1.Result
-	if raise {
+	if n1Gated(old, want) {
+		sim, serr := h.simulateCluster(ctx, snap, id, want)
 		var why string
-		n1, why = h.checkN1(h.simulateAvailability(snap, id, want, small))
+		if serr != nil {
+			n1, why = unknownResults(snap), "the N−1 check can't model the cluster: "+clipRunes(serr.Error(), 300)
+		} else {
+			n1, why = h.checkN1(sim)
+			n1 = dropUnstarted(n1)
+		}
 		if msg, level := n1Verdict(n1, why); msg != "" {
-			if !confirm {
+			// An AI never overrides a red or unknown result; a yellow
+			// one only with confirm_n_minus_1 (the tool asks the person
+			// in the browser then).
+			overridable := confirm && (actor.Via == "" || level == string(nminus1.Yellow))
+			if !overridable {
 				detail = "priority=" + want.Priority + " n_minus_1=" + level
 				return nil, &NMinus1Refusal{Msg: msg, Results: n1}
 			}
 			n1Note = " n_minus_1=" + level + " confirmed"
 		}
 	}
-	unlock, err := h.lockApp(id)
-	if err != nil {
-		return nil, h.busyErr(id, err)
-	}
-	defer unlock()
 	h.mu.Lock()
 	live := h.findLocked(id)
 	if live == nil {
@@ -240,10 +255,6 @@ func (h *Hub) SetAvailability(ctx context.Context, id string, want state.Availab
 		return nil, err
 	}
 	e, had := h.st.Instances[id]
-	if state.PriorityRank(e.Availability.PriorityOrDefault()) != state.PriorityRank(old.PriorityOrDefault()) {
-		h.mu.Unlock()
-		return nil, statusErr(409, "instance %s's availability changed meanwhile: retry", id)
-	}
 	if _, serr := os.Stat(h.envPath(id)); !had && !h.st.IsEnabled(id) && serr != nil {
 		h.mu.Unlock()
 		return nil, statusErr(404, "instance %s doesn't exist yet: create the instance first", id)
@@ -338,6 +349,9 @@ func availabilityDetail(a state.Availability) string {
 // unknown node <name>), no small node in a prefer choice; it answers the
 // small nodes an only choice names.
 func runsOnSmall(r state.RunsOn, snap nodeadm.Snapshot) ([]string, error) {
+	if r.Mode == runtime.RunsOnPrefer && r.Site != "" && !slices.ContainsFunc(snap.Nodes, func(n nodeadm.Node) bool { return n.Labels[nodeadm.LabelSite] == r.Site }) {
+		return nil, statusErr(400, state.ErrTextUnknownSiteF, r.Site)
+	}
 	var small []string
 	for _, name := range r.Nodes {
 		n := snap.Node(name)
@@ -369,49 +383,153 @@ func instancePod(p *nodeadm.Pod, apps, id string, ids []string) bool {
 	return true
 }
 
-// simulateAvailability is snap with instance id's pods as a change to a
-// would run them: its priority class, value and preemption, the Runs on
-// required affinity (§20.6) and the small toleration.
-func (h *Hub) simulateAvailability(snap nodeadm.Snapshot, id string, a state.Availability, small []string) nodeadm.Snapshot {
+// unstartedNode holds the modelled pods of instances that have no live
+// pods (a NotReady node: the check's baseline places them first, so a
+// pod with no room even now is unplaced in every node's result). Its own
+// result is dropped.
+const unstartedNode = "portcullis-n1-unstarted"
+
+// n1Gated: the change is judged by N−1 — the resulting priority is
+// critical or high and the priority or the placement changes.
+func n1Gated(old *state.Availability, want state.Availability) bool {
+	if want.Priority != runtime.PriorityCritical && want.Priority != runtime.PriorityHigh {
+		return false
+	}
+	if old.PriorityOrDefault() != want.Priority || old.ModeOrDefault() != want.RunsOn.Mode {
+		return true
+	}
+	if old == nil {
+		return want.RunsOn.Class != "" || want.RunsOn.Site != "" || len(want.RunsOn.Nodes) > 0
+	}
+	return old.RunsOn.Class != want.RunsOn.Class || old.RunsOn.Site != want.RunsOn.Site || !slices.Equal(old.RunsOn.Nodes, want.RunsOn.Nodes)
+}
+
+// unknownResults: every node at the level unknown.
+func unknownResults(s nodeadm.Snapshot) []nminus1.Result {
+	res := make([]nminus1.Result, 0, len(s.Nodes))
+	for _, n := range s.Nodes {
+		if n.Name != unstartedNode {
+			res = append(res, nminus1.Result{Node: n.Name, Level: nminus1.Unknown})
+		}
+	}
+	return wireResults(res)
+}
+
+// dropUnstarted removes the modelling node's own result.
+func dropUnstarted(res []nminus1.Result) []nminus1.Result {
+	return slices.DeleteFunc(res, func(r nminus1.Result) bool { return r.Node == unstartedNode })
+}
+
+// placement is an availability's required node affinity and whether its
+// pods tolerate the small taint (§20.6, as the translator renders it).
+func placementOf(a *state.Availability, snap nodeadm.Snapshot) ([][]nodeadm.Expr, bool) {
+	notSmall := nodeadm.Expr{Key: kube.LabelNodeClass, Operator: "NotIn", Values: []string{kube.ClassSmall}}
+	if a.ModeOrDefault() != runtime.RunsOnOnly {
+		return [][]nodeadm.Expr{{notSmall}}, false
+	}
+	var big, small []string
+	for _, name := range a.RunsOn.Nodes {
+		if n := snap.Node(name); n != nil && isSmall(n) {
+			small = append(small, name)
+		} else {
+			big = append(big, name)
+		}
+	}
+	var terms [][]nodeadm.Expr
+	if len(big) > 0 {
+		terms = append(terms, []nodeadm.Expr{{Key: kube.LabelHostname, Operator: "In", Values: big}, notSmall})
+	}
+	if len(small) > 0 {
+		terms = append(terms, []nodeadm.Expr{{Key: kube.LabelHostname, Operator: "In", Values: small},
+			{Key: kube.LabelNodeClass, Operator: "In", Values: []string{kube.ClassSmall}}})
+	}
+	return terms, len(small) > 0
+}
+
+// simInstance is one instance as the model runs it.
+type simInstance struct {
+	id      string
+	a       *state.Availability
+	enabled bool
+}
+
+// simulateCluster is snap as state says the apps run, with id at want:
+// every instance's live pods re-classed to its stored availability (its
+// priority class, value, preemption, Runs on affinity and the small
+// toleration); id's pods, and those of an enabled critical or high
+// instance, modelled from the translator's output when none is live
+// (on unstartedNode).
+func (h *Hub) simulateCluster(ctx context.Context, snap nodeadm.Snapshot, id string, want state.Availability) (nodeadm.Snapshot, error) {
 	h.mu.RLock()
-	ids := make([]string, 0, len(h.st.Instances))
-	for k := range h.st.Instances {
-		ids = append(ids, k)
+	insts := map[string]*simInstance{}
+	for k, e := range h.st.Instances {
+		insts[k] = &simInstance{id: k, a: e.Availability, enabled: h.st.IsEnabled(k)}
+	}
+	for _, k := range h.st.Enabled {
+		if insts[k] == nil {
+			insts[k] = &simInstance{id: k, enabled: true}
+		}
 	}
 	h.mu.RUnlock()
-	apps := h.nminusNamespaces().Apps
-	notSmall := nodeadm.Expr{Key: kube.LabelNodeClass, Operator: "NotIn", Values: []string{kube.ClassSmall}}
-	var terms [][]nodeadm.Expr
-	if a.RunsOn.Mode == runtime.RunsOnOnly {
-		var big []string
-		for _, n := range a.RunsOn.Nodes {
-			if !slices.Contains(small, n) {
-				big = append(big, n)
-			}
-		}
-		if len(big) > 0 {
-			terms = append(terms, []nodeadm.Expr{{Key: kube.LabelHostname, Operator: "In", Values: big}, notSmall})
-		}
-		if len(small) > 0 {
-			terms = append(terms, []nodeadm.Expr{{Key: kube.LabelHostname, Operator: "In", Values: small},
-				{Key: kube.LabelNodeClass, Operator: "In", Values: []string{kube.ClassSmall}}})
-		}
-	} else {
-		terms = [][]nodeadm.Expr{{notSmall}}
+	w := want
+	if insts[id] == nil {
+		insts[id] = &simInstance{id: id}
 	}
+	insts[id].a = &w
+	ids := slices.Sorted(maps.Keys(insts))
+	apps := h.nminusNamespaces().Apps
 	out := snap
+	out.Nodes = slices.Clone(snap.Nodes)
 	out.Pods = slices.Clone(snap.Pods)
-	for i := range out.Pods {
-		p := &out.Pods[i]
-		if p.DaemonSet || !instancePod(p, apps, id, ids) {
+	// Instances without a live pod: the translator's pods.
+	var modelled []nodeadm.Pod
+	for _, k := range ids {
+		in := insts[k]
+		pr := in.a.PriorityOrDefault()
+		if k != id && !(in.enabled && (pr == runtime.PriorityCritical || pr == runtime.PriorityHigh)) {
 			continue
 		}
-		p.PriorityClass = kube.PriorityClassName(a.Priority)
-		p.Priority = priorityValues[a.Priority]
+		if slices.ContainsFunc(snap.Pods, func(p nodeadm.Pod) bool { return instancePod(&p, apps, k, ids) }) {
+			continue
+		}
+		shapes, err := h.instancePodShapes(ctx, k)
+		if err != nil {
+			return out, fmt.Errorf("%s's pods: %w", k, err)
+		}
+		for _, sh := range shapes {
+			for i := range sh.Replicas {
+				modelled = append(modelled, nodeadm.Pod{Name: fmt.Sprintf("%s-unstarted-%d", sh.Workload, i), Namespace: apps, Node: unstartedNode,
+					Requests: nodeadm.Resources{CPUm: sh.CPUm, MemBytes: sh.MemBytes}})
+			}
+		}
+	}
+	if len(modelled) > 0 {
+		out.Nodes = append(out.Nodes, nodeadm.Node{Name: unstartedNode, Ready: false, Labels: map[string]string{}})
+		out.Pods = append(out.Pods, modelled...)
+	}
+	for i := range out.Pods {
+		p := &out.Pods[i]
+		if p.DaemonSet || p.Namespace != apps {
+			continue
+		}
+		var in *simInstance
+		for _, k := range ids {
+			if instancePod(p, apps, k, ids) {
+				in = insts[k]
+				break
+			}
+		}
+		if in == nil {
+			continue
+		}
+		pr := in.a.PriorityOrDefault()
+		p.PriorityClass = kube.PriorityClassName(pr)
+		p.Priority = priorityValues[pr]
 		p.PreemptionPolicy = "PreemptLowerPriority"
-		if a.Priority == runtime.PriorityLow {
+		if pr == runtime.PriorityLow {
 			p.PreemptionPolicy = "Never"
 		}
+		terms, tolerate := placementOf(in.a, snap)
 		p.RequiredAffinity = terms
 		var tol []nodeadm.Toleration
 		for _, t := range p.Tolerations {
@@ -419,13 +537,67 @@ func (h *Hub) simulateAvailability(snap nodeadm.Snapshot, id string, a state.Ava
 				tol = append(tol, t)
 			}
 		}
-		if len(small) > 0 {
+		if tolerate {
 			tol = append(tol, nodeadm.Toleration{Key: kube.TaintSmall, Operator: "Equal", Value: "true", Effect: "NoSchedule"})
 		}
 		p.Tolerations = tol
 	}
-	return out
+	return out, nil
 }
+
+// instancePodShapes are id's pods as the translator renders them.
+func (h *Hub) instancePodShapes(ctx context.Context, id string) ([]runtime.PodShape, error) {
+	ps, ok := h.rt.(runtime.PodShaper)
+	if !ok {
+		return nil, errors.New("this runtime can't render an instance's pods")
+	}
+	t := h.Template(id)
+	if t == nil {
+		return nil, fmt.Errorf("instance %s not found", id)
+	}
+	p, err := h.upProject(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	return ps.PodShapes(ctx, p)
+}
+
+// enableN1Gate is the N−1 gate at enable (I3): a critical or high
+// instance starts only if the cluster keeps room for it when any one node
+// fails; otherwise the 409 of the PUT, and it stays stopped. Caller holds
+// id's lock.
+func (h *Hub) enableN1Gate(ctx context.Context, id string) error {
+	if !h.kubeOn() {
+		return nil
+	}
+	a, _ := h.availabilityOf(id)
+	if pr := a.PriorityOrDefault(); pr != runtime.PriorityCritical && pr != runtime.PriorityHigh {
+		return nil
+	}
+	h.avail.Lock()
+	defer h.avail.Unlock()
+	var n1 []nminus1.Result
+	var why string
+	snap, err := h.availabilitySnapshot(ctx)
+	if err == nil {
+		var sim nodeadm.Snapshot
+		if sim, err = h.simulateCluster(ctx, snap, id, *a); err == nil {
+			n1, why = h.checkN1(sim)
+			n1 = dropUnstarted(n1)
+		}
+	}
+	if err != nil {
+		n1, why = unknownResults(snap), "the N−1 check can't model the cluster: "+clipRunes(err.Error(), 300)
+	}
+	if msg, _ := n1Verdict(n1, why); msg != "" {
+		return &NMinus1Refusal{Msg: msg + ": " + id + " stays stopped (lower its priority under Availability)", Results: n1}
+	}
+	return nil
+}
+
+// maxSnapshotAge bounds the last snapshot an up may use for *Only*'s
+// small nodes when nodeadm doesn't answer.
+const maxSnapshotAge = 10 * time.Minute
 
 // kubeAvailability is id's availability as the translator takes it
 // (nil = the defaults), its only choice's small nodes from the cluster
@@ -443,6 +615,11 @@ func (h *Hub) kubeAvailability(ctx context.Context, id string) (*runtime.Availab
 	snap, err := h.availabilitySnapshot(ctx)
 	if err != nil {
 		last := h.lastSnapshot()
+		if last != nil {
+			if at, perr := time.Parse(time.RFC3339, last.TakenAt); perr != nil || h.now().Sub(at) > maxSnapshotAge {
+				last = nil
+			}
+		}
 		if last == nil {
 			return nil, statusErr(503, "%s was not started: its Runs on needs the cluster's nodes, and nodeadm doesn't answer: %v", id, err)
 		}

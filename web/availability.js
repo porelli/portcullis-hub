@@ -7,6 +7,7 @@
 //   window.PortcullisAvailability.tabHtml(view, draft)       (pure; tests)
 //   window.PortcullisAvailability.bodyOf(draft)              (pure; tests)
 //   window.PortcullisAvailability.n1Html(results)            (pure; tests)
+//   window.PortcullisAvailability.notChanged(view)           (pure; tests)
 //
 // GET /api/instances/{id}/availability   {priority, runs_on, nodes, n_minus_1}
 // PUT /api/instances/{id}/availability   {priority, runs_on, confirm_n_minus_1?}
@@ -121,7 +122,8 @@
     if (k) d.prefer = k.value;
     if (q('[data-avail-class]')) d.cls = q('[data-avail-class]').value;
     if (q('[data-avail-site]')) d.site = q('[data-avail-site]').value;
-    if (q('[data-avail-nodes]')) d.nodes = [...pane.querySelectorAll('[data-avail-node]:checked')].map(c => c.value);
+    // A disabled box (a small node under Prefer) is never sent.
+    if (q('[data-avail-nodes]')) d.nodes = [...pane.querySelectorAll('[data-avail-node]:checked:not(:disabled)')].map(c => c.value);
     return d;
   }
 
@@ -143,6 +145,13 @@
     if (!el) return;
     el.className = warn ? 'public-warn' : 'inst-ok';
     el.textContent = t;
+  }
+
+  // notChanged: the status after a refused (or cancelled) change: the
+  // saved choice stays, and the form shows it again.
+  function notChanged(v) {
+    const p = PRIORITIES.find(x => x[0] === v.priority);
+    return 'Not changed: still ' + (p ? p[1] : v.priority) + '.';
   }
 
   // confirmHtml: the N−1 dialog for a refused raise.
@@ -170,18 +179,28 @@
       readDraft(pane, d);
       if (e.target.matches('[data-avail-mode], [data-avail-prefer-kind], [data-avail-priority]')) draw();
     };
-    const save = async confirm => {
-      readDraft(pane, d);
+    // refused: the body the N−1 check refused; "Raise anyway" resends
+    // exactly it (never the form as edited since).
+    let refused = null;
+    const showRefusal = j => {
+      Object.assign(d, draftOf(v));
+      draw();
+      setStatus(pane, notChanged(v), true);
+      const box = pane.querySelector('[data-avail-confirm]');
+      box.innerHTML = confirmHtml(j);
+      box.hidden = false;
+    };
+    const send = async body => {
       setStatus(pane, 'Saving…', false);
       try {
-        const r = await put(id, bodyOf(d, confirm));
+        const r = await put(id, body);
         if (r.refused) {
-          setStatus(pane, '', false);
-          const box = pane.querySelector('[data-avail-confirm]');
-          box.innerHTML = confirmHtml(r.refused);
-          box.hidden = false;
+          refused = Object.assign({}, body);
+          delete refused.confirm_n_minus_1;
+          showRefusal(r.refused);
           return;
         }
+        refused = null;
         v = r.view;
         Object.assign(d, draftOf(v));
         draw();
@@ -194,9 +213,9 @@
       const b = e.target.closest && e.target.closest('[data-avail-act]');
       if (!b || !pane.contains(b)) return;
       switch (b.dataset.availAct) {
-        case 'save': save(false); break;
-        case 'confirm': save(true); break;
-        case 'cancel': { const box = pane.querySelector('[data-avail-confirm]'); box.hidden = true; box.innerHTML = ''; break; }
+        case 'save': readDraft(pane, d); send(bodyOf(d, false)); break;
+        case 'confirm': if (refused) send(Object.assign({}, refused, { confirm_n_minus_1: true })); break;
+        case 'cancel': refused = null; Object.assign(d, draftOf(v)); draw(); setStatus(pane, notChanged(v), false); break;
       }
     };
   }
@@ -220,7 +239,7 @@
     }
   }
 
-  const api = { renderTab, setPriority, tabHtml, bodyOf, n1Html, draftOf, priorityOptions };
+  const api = { renderTab, setPriority, tabHtml, bodyOf, n1Html, draftOf, priorityOptions, notChanged };
   if (typeof window !== 'undefined') window.PortcullisAvailability = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();
