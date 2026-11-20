@@ -106,6 +106,10 @@ func (h *Hub) RunServers(ctx context.Context, every time.Duration) {
 		if h.waitEngine() {
 			h.RecoverMoves()
 		}
+		if h.kubeOn() {
+			// Cluster nodes (§20.1): interrupted enrolments and removals.
+			h.runClusterNodes(ctx, every)
+		}
 		return
 	}
 	h.startServers(ctx)

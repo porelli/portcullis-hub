@@ -280,6 +280,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mail" {
 		os.Exit(mailMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
 	}
+	// `hub servers …` (contract §20.1): `./portcullis node …`'s clients.
+	if len(os.Args) > 1 && os.Args[1] == "servers" {
+		os.Exit(serversMain(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, hostSocket))
+	}
 	// `hub ssh status` (contract §18): `./portcullis status`'s SSH block.
 	if len(os.Args) > 1 && os.Args[1] == "ssh" {
 		os.Exit(sshMain(os.Args[2:], os.Stdout, os.Stderr, hostSocket))
@@ -452,6 +456,9 @@ func main() {
 		// ServiceAccount, the cluster guard (fail closed: every runtime
 		// operation answers 503 until its four checks hold), the Lease.
 		if rt, fence, err = kubeRuntime(guardCtx, &cfg, os.Getenv); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+		if cfg.NodeadmURL, err = nodeadmURLFromEnv(os.Getenv); err != nil {
 			log.Fatalf("refusing to start: %v", err)
 		}
 		if httpLogs {

@@ -180,6 +180,15 @@ type ServerView struct {
 	CertNotAfter time.Time `json:"cert_not_after,omitzero"`
 	TunnelIP     string    `json:"tunnel_ip,omitempty"`
 	BindRoots    []string  `json:"bind_roots,omitempty"`
+	// A cluster node's (kind cluster-node, §20.1): role, class, site, mesh
+	// address and placement labels.
+	Kind    string `json:"kind,omitempty"`
+	Role    string `json:"role,omitempty"`
+	Class   string `json:"class,omitempty"`
+	Site    string `json:"site,omitempty"`
+	MeshIP  string `json:"mesh_ip,omitempty"`
+	Ingress bool   `json:"ingress,omitempty"`
+	Storage bool   `json:"storage,omitempty"`
 }
 
 // Servers lists every server, the primary first.
@@ -206,6 +215,7 @@ func (h *Hub) serversLocked() []ServerView {
 		s := h.st.Servers[id]
 		v := ServerView{ID: id, Name: s.Name, State: s.State, LastContact: s.LastContact, AgentVersion: untrusted(s.AgentVersion, 40),
 			CertNotAfter: s.CertNotAfter, TunnelIP: s.TunnelIP, Instances: []string{}}
+		clusterViewFields(&v, s)
 		out = append(out, v)
 	}
 	for _, iid := range byServer[""] {
@@ -276,6 +286,10 @@ func (h *Hub) AddServerOp(ctx context.Context, actor directory.Actor, id, name s
 	}
 	if name, err = validServerName(id, name); err != nil {
 		return "", time.Time{}, "", err
+	}
+	if h.kubeOn() {
+		// R9: on Kubernetes, Servers manages cluster nodes only.
+		return "", time.Time{}, "", statusErr(409, errWorkersOnKube)
 	}
 	link, err := h.serversOn()
 	if err != nil {

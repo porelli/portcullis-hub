@@ -187,6 +187,10 @@ type Config struct {
 	LinkDocGID int
 	LinkProxy  string
 	RelayImage string
+	// NodeadmURL is HUB_NODEADM_URL, nodeadm's internal API (contract
+	// §20.2; main: nodeadm.DefaultURL on Kubernetes, "" elsewhere = no
+	// cluster nodes).
+	NodeadmURL string
 	// ClockOffset reads HUB_DEV_CLOCK_OFFSET_FILE's duration (core's e2e,
 	// e2etest builds only: internal/e2etest), added to h.now(); nil
 	// otherwise.
@@ -323,6 +327,8 @@ type Hub struct {
 	ctlSerial string
 	nodeMu    sync.Mutex
 	srvT      serverTimings
+	// cl is the cluster-node wiring (servers_cluster.go).
+	cl clusterNodes
 	// revokeLocks: per server, the *sync.Mutex advanceRevoke holds.
 	revokeLocks sync.Map
 	// inflight: owed serials whose sign → send → pin op still runs

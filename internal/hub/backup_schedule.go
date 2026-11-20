@@ -68,7 +68,7 @@ func (h *Hub) backupSchedulesTick(ctx context.Context, now time.Time) {
 	h.mu.RLock()
 	scheds := map[string]state.BackupSchedule{"": h.st.PrimaryBackups}
 	for id, s := range h.st.Servers {
-		if s.State != ServerRevoked && s.Revoke == nil {
+		if s.State != ServerRevoked && s.Revoke == nil && !s.ClusterNode() {
 			scheds[id] = s.BackupSchedule
 		}
 	}

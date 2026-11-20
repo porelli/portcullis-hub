@@ -9,6 +9,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/freshauth"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -84,6 +85,16 @@ func serverIDOf(w http.ResponseWriter, r *http.Request, primaryOK bool) (string,
 type serversPage struct {
 	Servers   []hub.ServerView         `json:"servers"`
 	FreshAuth *freshauth.AuthorizeInfo `json:"fresh_auth"`
+	// AddKind is what Add server adds here: "cluster-node" on Kubernetes
+	// (R9), else "worker".
+	AddKind string `json:"add_kind"`
+}
+
+func (s *Server) addKind() string {
+	if s.Hub.ClusterNodesMode() {
+		return state.KindClusterNode
+	}
+	return state.KindWorker
 }
 
 func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +103,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
-	writeJSON(w, serversPage{Servers: s.listServers(r.Context()), FreshAuth: s.Hub.AdminFreshAuthInfo()})
+	writeJSON(w, serversPage{Servers: s.listServers(r.Context()), FreshAuth: s.Hub.AdminFreshAuthInfo(), AddKind: s.addKind()})
 }
 
 // listServers is the list's work (route and list_servers).
@@ -125,6 +136,25 @@ func (s *Server) serverDetail(ctx context.Context, id string) (*hub.ServerDetail
 	return s.Hub.ServerDetailOf(ctx, id)
 }
 
+// addClusterNode is POST /api/servers with kind cluster-node (fresh
+// sign-in, audited server.add; never over MCP).
+func (s *Server) addClusterNode(w http.ResponseWriter, r *http.Request, b addServerBody) {
+	if err := hub.CheckClusterNodeInput(b.clusterRequest()); err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	if !s.fresh(w, r, "server.add", b.ID, b.freshBody) {
+		return
+	}
+	s.rec("AddClusterNode", b.ID, b.Name)
+	out, code, err := s.Hub.AddClusterNode(r.Context(), requestActor(r), b.clusterRequest())
+	if err != nil {
+		writeAPIErr(w, err)
+		return
+	}
+	writeJSONStatus(w, http.StatusCreated, addedClusterNode{Code: code, ClusterNodeAdded: out})
+}
+
 // addedServer is POST /api/servers' 201: the code once, its expiry and
 // the enrolment op to poll.
 type addedServer struct {
@@ -135,20 +165,57 @@ type addedServer struct {
 	Poll      string    `json:"poll"`
 }
 
+// addedClusterNode is POST /api/servers' 201 for a cluster node (contract
+// §20.1): §17.3's answer plus the role, the warnings, the server
+// sentence and the one-liner.
+type addedClusterNode struct {
+	Code string `json:"code"`
+	hub.ClusterNodeAdded
+}
+
+// addServerBody is POST /api/servers (kind: "worker" by default;
+// "cluster-node" with its role, class, site and labels, each optional).
+type addServerBody struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Role    string `json:"role"`
+	Class   string `json:"class"`
+	Site    string `json:"site"`
+	Ingress *bool  `json:"ingress"`
+	Storage *bool  `json:"storage"`
+	freshBody
+}
+
+const addServerUsage = `{"id": "<server id>", "name": "<name>", "kind"?: "worker"|"cluster-node", "role"?: "server"|"agent", "class"?: "small"|"home"|"cloud", "site"?, "ingress"?: bool, "storage"?: bool, ` + freshUsage + `}`
+
+func (b addServerBody) clusterRequest() hub.AddClusterNodeRequest {
+	return hub.AddClusterNodeRequest{ID: b.ID, Name: b.Name, Role: b.Role, Class: b.Class, Site: b.Site, Ingress: b.Ingress, Storage: b.Storage}
+}
+
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	noStore(w) // every answer, refusals included (I5)
 	if !s.adminOnly(w, r) {
 		return
 	}
-	var b struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		freshBody
-	}
-	if !decodeStrict(w, r, &b, `{"id": "<server id>", "name": "<name>", `+freshUsage+`}`) {
+	var b addServerBody
+	if !decodeStrict(w, r, &b, addServerUsage) {
 		return
 	}
 	noStore(w)
+	switch b.Kind {
+	case "", state.KindWorker:
+		if b.Role != "" || b.Class != "" || b.Site != "" || b.Ingress != nil || b.Storage != nil {
+			http.Error(w, "role, class, site, ingress and storage are a cluster node's (kind cluster-node)", http.StatusBadRequest)
+			return
+		}
+	case state.KindClusterNode:
+		s.addClusterNode(w, r, b)
+		return
+	default:
+		http.Error(w, "kind must be worker or cluster-node", http.StatusBadRequest)
+		return
+	}
 	// Cheap checks first: a bad id never spends the proof, and only a
 	// valid id is ever an audit target (L4).
 	if err := hub.CheckServerInput(b.ID, b.Name); err != nil {
@@ -309,6 +376,15 @@ func (s *Server) handleRevokeServer(w http.ResponseWriter, r *http.Request) {
 	if !s.fresh(w, r, "server.revoked", id, b.freshBody) {
 		return
 	}
+	if s.Hub.ClusterNodesMode() {
+		s.rec("RevokeClusterNode", id)
+		if _, err := s.Hub.RemoveClusterNode(r.Context(), requestActor(r), id, b.Confirm, nodeadm.Revoke); err != nil {
+			writeAPIErr(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "revoked", "server": id})
+		return
+	}
 	s.rec("RevokeServer", id)
 	if err := s.Hub.RevokeServer(r.Context(), requestActor(r), id); err != nil {
 		writeAPIErr(w, err)
@@ -336,6 +412,17 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.fresh(w, r, "server.removed", id, b.freshBody) {
+		return
+	}
+	if s.Hub.ClusterNodesMode() {
+		s.rec("RemoveClusterNode", id)
+		op, err := s.Hub.RemoveClusterNode(r.Context(), requestActor(r), id, b.Confirm, nodeadm.Cooperative)
+		if err != nil {
+			writeAPIErr(w, err)
+			return
+		}
+		writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "removing", "server": id, "op_id": op.OpID, "op": op.Op,
+			"poll": "/api/servers/" + id + "/op?op_id=" + op.OpID})
 		return
 	}
 	s.rec("RemoveServer", id)

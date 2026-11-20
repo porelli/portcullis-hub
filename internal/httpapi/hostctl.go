@@ -14,6 +14,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/nodeadm"
 )
 
 // The host control socket (contract §16): HTTP on a Unix socket in the
@@ -215,7 +216,88 @@ func HostHandler(h *hub.Hub) http.Handler {
 	mux.HandleFunc("GET /host/ssh/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.HostSSHStatus())
 	})
+	hostClusterNodes(mux, h)
 	return mux
+}
+
+// CLIActor is the audit actor of the cluster-node twins (contract §20.1
+// "The CLI twins"): `./portcullis node …` through `hub servers …`.
+const CLIActor = "cli"
+
+// hostClusterNodes are the cluster-node twins (contract §20.1; pre-flight
+// P19): the running Hub does the work, so its ops, audit and Lease apply
+// once. The host operator's typed confirmation stands in for the fresh
+// sign-in. The code is answered once (no-store) and is never on a
+// command line.
+func hostClusterNodes(mux *http.ServeMux, h *hub.Hub) {
+	cli := directory.Human(CLIActor)
+	mux.HandleFunc("POST /host/servers/cluster-node", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		var b struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Role    string `json:"role"`
+			Class   string `json:"class"`
+			Site    string `json:"site"`
+			Ingress *bool  `json:"ingress"`
+			Storage *bool  `json:"storage"`
+		}
+		if !hostBody(w, r, &b, `{"id", "name"?, "role"?, "class"?, "site"?, "ingress"?, "storage"?}`) {
+			return
+		}
+		out, code, err := h.AddClusterNode(r.Context(), cli, hub.AddClusterNodeRequest{ID: b.ID, Name: b.Name, Role: b.Role, Class: b.Class,
+			Site: b.Site, Ingress: b.Ingress, Storage: b.Storage})
+		if err != nil {
+			hostErr(w, err)
+			return
+		}
+		writeJSONStatus(w, http.StatusCreated, addedClusterNode{Code: code, ClusterNodeAdded: out})
+	})
+	mux.HandleFunc("GET /host/servers", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		writeJSON(w, map[string]any{"servers": h.Servers(r.Context())})
+	})
+	confirmed := func(w http.ResponseWriter, r *http.Request) (string, string, bool) {
+		var b struct {
+			Confirm string `json:"confirm"`
+		}
+		if !hostBody(w, r, &b, `{"confirm": "<id>"}`) {
+			return "", "", false
+		}
+		return r.PathValue("id"), b.Confirm, true
+	}
+	mux.HandleFunc("POST /host/servers/{id}/remove", func(w http.ResponseWriter, r *http.Request) {
+		id, typed, ok := confirmed(w, r)
+		if !ok {
+			return
+		}
+		op, err := h.RemoveClusterNode(r.Context(), cli, id, typed, nodeadm.Cooperative)
+		if err != nil {
+			hostErr(w, err)
+			return
+		}
+		writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "removing", "server": id, "op_id": op.OpID, "op": op.Op})
+	})
+	mux.HandleFunc("POST /host/servers/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		id, typed, ok := confirmed(w, r)
+		if !ok {
+			return
+		}
+		if _, err := h.RemoveClusterNode(r.Context(), cli, id, typed, nodeadm.Revoke); err != nil {
+			hostErr(w, err)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "revoked", "server": id})
+	})
+	mux.HandleFunc("GET /host/servers/{id}/op", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		rec := h.ServerOp(r.PathValue("id"), r.URL.Query().Get("op_id"))
+		if rec == nil {
+			http.Error(w, "no operation recorded for "+r.PathValue("id"), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, rec)
+	})
 }
 
 // hostBody decodes a strict control body (≤ 8 KiB, unknown fields and

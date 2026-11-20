@@ -61,6 +61,9 @@ func (h *Hub) serverKindsInLocked(in *doctor.ServersIn, backups map[string]time.
 	h.srvMu.Lock()
 	for _, id := range slices.Sorted(maps.Keys(h.st.Servers)) {
 		s := h.st.Servers[id]
+		if s.ClusterNode() {
+			continue // a Kubernetes node: no agent, certificate or tunnel to judge (§20)
+		}
 		sv := doctor.ServerIn{ID: id, Name: s.Name, State: s.State, CertNotAfter: s.CertNotAfter, AgentVersion: s.AgentVersion, Instances: byServer[id]}
 		if ps := h.polls[id]; ps != nil {
 			sv.Reason = untrusted(ps.reason, 300)
@@ -143,6 +146,9 @@ func (h *Hub) newestBackups() map[string]time.Time {
 func (h *Hub) serverLocalNetworksLocked() map[string][]netip.Prefix {
 	out := map[string][]netip.Prefix{}
 	for id, s := range h.st.Servers {
+		if s.ClusterNode() {
+			continue
+		}
 		out[id] = h.localNetworksOfLocked(id, s)
 	}
 	return out

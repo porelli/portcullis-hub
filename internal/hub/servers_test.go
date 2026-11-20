@@ -1192,13 +1192,14 @@ func TestServersOffWithoutLinkDoc(t *testing.T) {
 	}
 }
 
-// TestKubernetesPrimaryRefusesServers: a Kubernetes primary has Servers
-// off: 409 "servers need a Docker or Podman primary".
+// TestKubernetesPrimaryRefusesServers: a Kubernetes primary refuses a
+// Docker worker (R9, contract §17): 409 "Docker workers can't join a
+// Kubernetes cluster: add it as a cluster node".
 func TestKubernetesPrimaryRefusesServers(t *testing.T) {
 	sf := newServersFixture(t)
 	sf.h.cfg.Runtime = runtime.KindKubernetes
 	_, _, err := sf.h.AddServer(context.Background(), admin, "nas", "")
-	if errStatus(err) != 409 || err.Error() != "servers need a Docker or Podman primary" {
+	if errStatus(err) != 409 || err.Error() != "Docker workers can't join a Kubernetes cluster: add it as a cluster node" {
 		t.Errorf("%v", err)
 	}
 	if _, ok := sf.server("nas"); ok {

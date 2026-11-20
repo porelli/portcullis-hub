@@ -28,6 +28,32 @@ type Server struct {
 	QuarantinedUntil time.Time `json:"quarantined_until,omitempty" yaml:"quarantined_until,omitempty"`
 	// Revoke is the revocation's progress (each step retried until done).
 	Revoke *RevokeSteps `json:"revoke,omitempty" yaml:"revoke,omitempty"`
+	// Kind is "" or "worker" (a Docker or Podman worker, contract §17) or
+	// "cluster-node" (a node of the Kubernetes cluster, §20.1, added
+	// through nodeadm; no tunnel, agent or pins). A cluster node keeps its
+	// role, class, site, mesh address and labels here.
+	Kind   string      `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Role   string      `json:"role,omitempty" yaml:"role,omitempty"`
+	Class  string      `json:"class,omitempty" yaml:"class,omitempty"`
+	Site   string      `json:"site,omitempty" yaml:"site,omitempty"`
+	MeshIP string      `json:"mesh_ip,omitempty" yaml:"mesh_ip,omitempty"`
+	Labels *NodeLabels `json:"labels,omitempty" yaml:"labels,omitempty"`
+}
+
+// The server kinds.
+const (
+	KindWorker      = "worker"
+	KindClusterNode = "cluster-node"
+)
+
+// ClusterNode: s is a node of the Kubernetes cluster.
+func (s Server) ClusterNode() bool { return s.Kind == KindClusterNode }
+
+// NodeLabels are a cluster node's boolean placement labels (contract
+// §20.1: portcullis.io/ingress, portcullis.io/storage).
+type NodeLabels struct {
+	Ingress bool `json:"ingress" yaml:"ingress"`
+	Storage bool `json:"storage" yaml:"storage"`
 }
 
 // Enrol is an enrolment in progress: the join code secret's sha256, the
