@@ -245,13 +245,28 @@ func (h *Hub) controlCert(ctx context.Context) (tls.Certificate, *x509.Certifica
 		return tls.Certificate{}, nil, statusErr(502, "enroll answered with another pki_node CA than the pinned one")
 	}
 	der, _ := x509.MarshalPKCS8PrivateKey(k)
-	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
-		return tls.Certificate{}, nil, err
+	// A renewal whose files can't be written (the fence closed meanwhile,
+	// a full disk) keeps the old certificate while it is still valid: a
+	// read (the HA page, the cluster tick) never fails for it.
+	keepOld := func(werr error) (tls.Certificate, *x509.Certificate, error) {
+		if err == nil && cert.Leaf != nil && h.now().Before(cert.Leaf.NotAfter) {
+			log.Printf("servers: the renewed control certificate couldn't be saved (%v): the current one stays in use", werr)
+			return cert, ca, nil
+		}
+		return tls.Certificate{}, nil, werr
 	}
-	for name, b := range map[string][]byte{"control.key": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}),
-		"control.crt": []byte(nc.Certificate), "ca.crt": []byte(nc.CA)} {
-		if err := fsutil.WriteFileAtomic(filepath.Join(dir, name), b, 0o600); err != nil {
-			return tls.Certificate{}, nil, err
+	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
+		return keepOld(err)
+	}
+	// The CA is the pinned one (checked above); the key goes last. A write
+	// failing between control.crt and control.key leaves a pair
+	// loadControl refuses: the next call issues a new certificate.
+	for _, f := range []struct {
+		name string
+		b    []byte
+	}{{"ca.crt", []byte(nc.CA)}, {"control.crt", []byte(nc.Certificate)}, {"control.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})}} {
+		if err := fsutil.WriteFileAtomic(filepath.Join(dir, f.name), f.b, 0o600); err != nil {
+			return keepOld(err)
 		}
 	}
 	// The control certificate it replaces is owed: the tick revokes it

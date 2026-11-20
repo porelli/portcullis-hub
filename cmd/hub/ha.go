@@ -20,6 +20,10 @@ import (
 
 const haUsage = `usage: hub ha checklist`
 
+// haAnswerMax bounds the answer (a longer one is cut: never printed in
+// part, a parser would read half a JSON). A variable: tests.
+var haAnswerMax = 4 << 20
+
 // haTimeout bounds the call (2 min, as the other twins).
 var haTimeout = 2 * time.Minute
 
@@ -51,7 +55,15 @@ func haMain(args []string, stdout, stderr io.Writer, sock string) int {
 		return 1
 	}
 	defer res.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	out, err := io.ReadAll(io.LimitReader(res.Body, int64(haAnswerMax)+1))
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "the Hub's answer was cut: %v\n", err)
+		return 1
+	case len(out) > haAnswerMax:
+		fmt.Fprintf(stderr, "the Hub's answer was cut: over %d bytes\n", haAnswerMax)
+		return 1
+	}
 	if res.StatusCode >= 300 {
 		fmt.Fprintln(stderr, strings.TrimSpace(string(out)))
 		return 1

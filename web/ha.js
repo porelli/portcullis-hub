@@ -8,6 +8,7 @@
 //
 //   window.PortcullisHA.render(root)   load GET /api/ha and draw it
 //   window.PortcullisHA.pageHtml(view) (pure; tests)
+//   window.PortcullisHA.errorHtml(msg) (pure; tests: the answer failed)
 //
 // GET /api/ha  {experimental, enabled, checklist:[{id, ok, text}], guarantee,
 //   nodes:[{name, role, class, site, ready, fencing, n_minus_1}],
@@ -103,10 +104,22 @@
     return '<ul class="policy-notes" ' + attr + '>' + list.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul>';
   }
 
+  // bannerHtml: the EXPERIMENTAL banner (D13), drawn whatever happens.
+  function bannerHtml() {
+    return '<div class="public-warn" data-ha-banner><strong>' + esc(BANNER) + '.</strong> Try it on a test install first; leaving HA means a backup, a fresh <code>init</code> and a restore.</div>';
+  }
+
+  // errorHtml: the page when GET /api/ha itself fails: the banner, the
+  // error and the command (the Hub degrades a nodeadm failure itself).
+  function errorHtml(msg) {
+    return bannerHtml() + '<div class="public-warn" data-ha-error>' + esc(msg) + '</div>' +
+      '<p class="settings-empty">HA is turned on from the server\'s command line: <code>./portcullis ha enable</code>.</p>';
+  }
+
   // pageHtml: the page for view v.
   function pageHtml(v) {
     const allOK = (v.checklist || []).length > 0 && v.checklist.every(it => it.ok);
-    let h = '<div class="public-warn" data-ha-banner><strong>' + esc(BANNER) + '.</strong> Try it on a test install first; leaving HA means a backup, a fresh <code>init</code> and a restore.</div>';
+    let h = bannerHtml();
     h += '<p data-ha-enabled>' + (v.enabled ? pill('ok', 'HA is on') : pill('info', 'HA is off')) + ' ' +
       pill(v.guarantee === 'Zero loss on one failure' ? 'ok' : 'warn', v.guarantee) + '</p>';
     h += '<h4>Checklist</h4>' + checklistHtml(v.checklist);
@@ -129,9 +142,9 @@
   async function render(root) {
     if (!root) return;
     let v;
-    try { v = await window.apiGet('/api/ha'); } catch (e) { root.innerHTML = '<div class="public-warn">' + esc(e.message) + '</div>'; return; }
+    try { v = await window.apiGet('/api/ha'); } catch (e) { root.innerHTML = errorHtml(e.message); return; }
     root.innerHTML = pageHtml(v);
   }
 
-  window.PortcullisHA = { render, pageHtml };
+  window.PortcullisHA = { render, pageHtml, errorHtml };
 })();

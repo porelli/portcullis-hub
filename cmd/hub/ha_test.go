@@ -55,7 +55,42 @@ func TestHubHAChecklist(t *testing.T) {
 	if code := haMain([]string{"checklist"}, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "needs Kubernetes") || stdout.Len() != 0 {
 		t.Errorf("refused: %d %q", code, stderr.String())
 	}
-	if strings.Join(paths, "|") != "GET /host/ha|GET /host/ha" {
+	// Q8: an answer cut mid-stream, or over the bound: 1, nothing printed.
+	refuse = false
+	haAnswerMax = 10
+	stdout.Reset()
+	stderr.Reset()
+	if code := haMain([]string{"checklist"}, &stdout, &stderr, sock); code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "the Hub's answer was cut: over 10 bytes") {
+		t.Errorf("over the bound: %d %q %q", code, stdout.String(), stderr.String())
+	}
+	haAnswerMax = 4 << 20
+	if strings.Join(paths, "|") != "GET /host/ha|GET /host/ha|GET /host/ha" {
 		t.Errorf("requests %q", paths)
+	}
+}
+
+// TestHubHAChecklistCutAnswer (Q8): a body cut mid-stream (the
+// connection closed before Content-Length) is 1, nothing printed.
+func TestHubHAChecklistCutAnswer(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.Write([]byte(`{"experimental":tr`))
+		panic(http.ErrAbortHandler) // the connection drops mid-body
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+	var stdout, stderr bytes.Buffer
+	if code := haMain([]string{"checklist"}, &stdout, &stderr, sock); code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "the Hub's answer was cut") {
+		t.Errorf("cut: %d %q %q", code, stdout.String(), stderr.String())
 	}
 }

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestHAAndTraefikPeerFromEnv: HUB_HA is on only for exactly "on";
 // HUB_TRAEFIK_PEER (the params' traefik value) wins, else the mode's
@@ -46,6 +49,18 @@ func TestHAAndTraefikPeerFromEnv(t *testing.T) {
 	} {
 		if p, err := traefikPeerFromEnv(env(map[string]string{"HUB_TRAEFIK_PEER": bad}), true, "pc"); err == nil {
 			t.Errorf("%q taken as %s", bad, p)
+		}
+	}
+}
+
+// TestDNSProviderFromEnv (HA review S1): HUB_DNS_PROVIDER is a provider
+// id or nothing (then core.env's, else unknown); never anything else.
+func TestDNSProviderFromEnv(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	for v, want := range map[string]string{"": "", "porkbun": "porkbun", " hetzner-cloud ": "hetzner-cloud", "Porkbun": "", "a b": "", "<b>": "",
+		strings.Repeat("a", 33): ""} {
+		if got := dnsProviderFromEnv(env(map[string]string{"HUB_DNS_PROVIDER": v})); got != want {
+			t.Errorf("%q: %q, want %q", v, got, want)
 		}
 	}
 }

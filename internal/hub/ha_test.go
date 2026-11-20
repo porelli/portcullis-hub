@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,20 @@ func haIDs(v *HAView) []string {
 	}
 	return out
 }
+
+// haPage is a view under test.
+type haPageT struct{ *HAView }
+
+func mustHA(t *testing.T, cf *clusterFixture) haPageT {
+	t.Helper()
+	v, err := cf.h.HA(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return haPageT{v}
+}
+
+func (p haPageT) watchdog(t *testing.T) HAItem { t.Helper(); return haItem(t, p.HAView, "watchdog") }
 
 // haLabels marks n storage and ingress (Node labels: a node of init).
 func haLabels(n nodeadm.Node, storage, ingress bool) nodeadm.Node {
@@ -85,12 +100,17 @@ func TestHAChecklistFromSnapshot(t *testing.T) {
 		}
 	}
 
-	// 3 nodes: all green with the destination set (core .env).
+	// 3 nodes: all green with the destination set (the chart's
+	// HUB_BACKUP_DESTINATION=set; core.env is never read for it).
 	three := haFixture(t,
 		haLabels(siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1"), true, true),
 		haLabels(siteNode("n2", "server", "main", "10.215.0.2", "192.0.2.2", ""), true, false),
 		haLabels(siteNode("n3", "server", "main", "10.215.0.3", "192.0.2.3", ""), false, false))
-	writeFile(t, filepath.Join(three.project, ".env"), "PORTCULLIS_BACKUP_S3_URL=s3://bucket/core\n")
+	writeFile(t, filepath.Join(three.project, ".env"), "PORTCULLIS_BACKUP_S3_URL=s3://bucket/core\n") // reserved: never reaches core.env, never read
+	if v, _ = three.h.HA(ctx); haItem(t, v, "backup_destination").OK {
+		t.Error("core.env's PORTCULLIS_BACKUP_S3_URL counted")
+	}
+	three.h.cfg.BackupDestination = true
 	v, err = three.h.HA(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -100,31 +120,51 @@ func TestHAChecklistFromSnapshot(t *testing.T) {
 			t.Errorf("3 nodes: %+v not ok", it)
 		}
 	}
-	// The chart's presence flag counts the same.
-	writeFile(t, filepath.Join(three.project, ".env"), "")
-	three.h.cfg.BackupDestination = true
-	if v, _ = three.h.HA(ctx); !haItem(t, v, "backup_destination").OK {
-		t.Error("HUB_BACKUP_DESTINATION=set isn't a destination")
-	}
 	three.h.cfg.BackupDestination = false
 
-	// A core pod on n3 (no watchdog there): fencing can't be confirmed.
+	// HA off (Q4): n3, a non-small node at main without a watchdog, holds
+	// the replicated pods after enable even though nothing runs there yet.
+	wdText := "node n3 has no watchdog: fencing can't be confirmed"
 	three.na.mu.Lock()
 	three.na.snap.Nodes[2].FencingReady = false
+	three.na.mu.Unlock()
+	if it := mustHA(t, three).watchdog(t); it.OK || it.Text != wdText {
+		t.Errorf("HA off, no pods: watchdog %+v", it)
+	}
+	// A small node isn't one of them (nothing replicated is pinned there).
+	three.h.mu.Lock()
+	r := three.h.st.Mesh["n3"]
+	three.h.mu.Unlock()
+	three.na.mu.Lock()
+	three.na.snap.Nodes[2].Labels[nodeadm.LabelClass] = "small"
+	three.na.mu.Unlock()
+	if it := mustHA(t, three).watchdog(t); !it.OK {
+		t.Errorf("HA off, a small node: %+v (mesh %+v)", it, r)
+	}
+	three.na.mu.Lock()
+	three.na.snap.Nodes[2].Labels[nodeadm.LabelClass] = "home"
+	three.na.mu.Unlock()
+	// HA on: the nodes holding replicated-tier pods now: a core pod on n3
+	// is a finding, a DaemonSet's pod alone isn't.
+	three.h.cfg.HA = true
+	three.h.SetFrontdoorStatus(func(context.Context) ([]byte, error) { return nil, errors.New("not here") })
+	if it := mustHA(t, three).watchdog(t); !it.OK {
+		t.Errorf("HA on, no pods on n3: %+v", it)
+	}
+	three.na.mu.Lock()
 	three.na.snap.Pods = []nodeadm.Pod{{Name: "vault-0", Namespace: "portcullis", Node: "n3", PriorityClass: "portcullis-core"},
 		{Name: "traefik-x", Namespace: "portcullis", Node: "n3", PriorityClass: "portcullis-core", DaemonSet: true}}
 	three.na.mu.Unlock()
-	v, _ = three.h.HA(ctx)
-	if it := haItem(t, v, "watchdog"); it.OK || it.Text != "node n3 has no watchdog: fencing can't be confirmed" {
-		t.Errorf("watchdog %+v", it)
+	if it := mustHA(t, three).watchdog(t); it.OK || it.Text != wdText {
+		t.Errorf("HA on, a core pod: watchdog %+v", it)
 	}
-	// Only a DaemonSet's pod there: no replicated-tier pod, no finding.
 	three.na.mu.Lock()
 	three.na.snap.Pods = three.na.snap.Pods[1:]
 	three.na.mu.Unlock()
-	if v, _ = three.h.HA(ctx); !haItem(t, v, "watchdog").OK {
-		t.Error("a DaemonSet pod asked for a watchdog")
+	if it := mustHA(t, three).watchdog(t); !it.OK {
+		t.Error("HA on: a DaemonSet pod asked for a watchdog")
 	}
+	three.h.cfg.HA = false
 	// An N−1 refusal (a malformed snapshot): unknown, never green.
 	three.na.mu.Lock()
 	three.na.snap.Pods = []nodeadm.Pod{{Name: "x", Namespace: "portcullis", Node: "nowhere"}}
@@ -167,8 +207,46 @@ func TestHAChecklistFromSnapshot(t *testing.T) {
 	if it := haItem(t, v, "site_rtt"); it.OK || !strings.HasPrefix(it.Text, "no mesh answer from ") {
 		t.Errorf("site_rtt unmeasured %+v", it)
 	}
-	if len(v.Warnings) != 1 || v.Warnings[0] != "Only main can survive on its own: add a tie-breaker at a third location (a small cloud VM or a Pi elsewhere)." {
+	// main's n1 is only offered so far (no record of its reach yet).
+	if len(v.Warnings) != 2 || v.Warnings[0] != "Only main can survive on its own: add a tie-breaker at a third location (a small cloud VM or a Pi elsewhere)." ||
+		v.Warnings[1] != "site main: its endpoint isn't confirmed yet" {
 		t.Errorf("warnings %q", v.Warnings)
+	}
+	// Q1: e1 offers a public endpoint, never confirmed: still the refusal
+	// (planned as reachable, unproven), and a warning says so; main's n1
+	// is confirmed.
+	sites.na.mu.Lock()
+	sites.na.snap.Nodes[3].Addresses.Public = []string{"203.0.113.5"}
+	sites.na.mu.Unlock()
+	snap0, _ := sites.na.Cluster(ctx)
+	pub := sites.h.meshInputsOf(snap0).public
+	sites.h.mu.Lock()
+	for _, id := range []string{"n1", "e1"} {
+		m := sites.h.st.Mesh[id]
+		m.Public, m.Reach = pub[id].String(), state.ReachOffered
+		if id == "n1" {
+			m.Reach = state.ReachReachable
+		}
+		sites.h.st.Mesh[id] = m
+	}
+	sites.h.mu.Unlock()
+	v, _ = sites.h.HA(ctx)
+	if g := sites.h.sitesOf(snap0); g[1].Gateway != "e1" {
+		t.Fatalf("the plan's gateway at edge: %+v", g)
+	}
+	if it := haItem(t, v, "site_gateway"); it.OK || it.Text != "site edge needs one node reachable on UDP 51830 first (a cloud node, or one forwarded port)" {
+		t.Errorf("offered only: site_gateway %+v", it)
+	}
+	if !slices.Contains(v.Warnings, "site edge: its endpoint isn't confirmed yet") {
+		t.Errorf("offered only: warnings %q", v.Warnings)
+	}
+	sites.h.mu.Lock()
+	m := sites.h.st.Mesh["e1"]
+	m.Reach = state.ReachReachable
+	sites.h.st.Mesh["e1"] = m
+	sites.h.mu.Unlock()
+	if v, _ = sites.h.HA(ctx); !haItem(t, v, "site_gateway").OK || slices.Contains(v.Warnings, "site edge: its endpoint isn't confirmed yet") {
+		t.Errorf("confirmed: %+v %q", haItem(t, v, "site_gateway"), v.Warnings)
 	}
 	// A server 120 ms from another: the server refusal, verbatim.
 	sites.na.setRTT(map[string]map[string]int{"n1": {"n2": 2, "n3": 120}, "n2": {"n1": 2, "n3": 3}, "n3": {"n1": 120, "n2": 3}, "e1": {}})
@@ -191,14 +269,14 @@ func TestHAChecklistFromSnapshot(t *testing.T) {
 func TestHAChecklistNMinus1Yellow(t *testing.T) {
 	snap := nodeadm.Snapshot{Nodes: []nodeadm.Node{{Name: "n1", Ready: true}}}
 	for _, n1 := range [][]nminus1.Result{{{Node: "n1", Level: nminus1.Yellow}}, nil} {
-		items := haChecklist(snap, map[string]haPlace{}, n1, "", nil, nil, false, nminus1.DefaultNamespaces)
+		items := haChecklist(haIn{snap: snap, place: map[string]haPlace{}, n1: n1, ns: nminus1.DefaultNamespaces})
 		for _, it := range items {
 			if it.ID == "n_minus_1" && (it.OK || it.Text != "the N−1 check isn't green") {
 				t.Errorf("%v: %+v", n1, it)
 			}
 		}
 	}
-	items := haChecklist(snap, map[string]haPlace{}, []nminus1.Result{{Node: "n1", Level: nminus1.Green}}, "", nil, nil, false, nminus1.DefaultNamespaces)
+	items := haChecklist(haIn{snap: snap, place: map[string]haPlace{}, n1: []nminus1.Result{{Node: "n1", Level: nminus1.Green}}, ns: nminus1.DefaultNamespaces})
 	if items[5].ID != "n_minus_1" || !items[5].OK {
 		t.Errorf("green: %+v", items[5])
 	}
@@ -320,11 +398,17 @@ func TestHAPageNeverShowsCredentials(t *testing.T) {
 		haLabels(siteNode("n3", "server", "main", "10.215.0.3", "192.0.2.3", ""), false, false))
 	cf.h.cfg.HA = true
 	secrets := []string{"pk1_SECRETporkbunkey", "sk1_SECRETporkbunsecret", "AKIASECRETBACKUPKEY", "SECRETbackupPassword", "secret-bucket-name", "PORKBUN_API_KEY", "AWS_SECRET_ACCESS_KEY", "credentials.json"}
-	writeFile(t, filepath.Join(cf.project, ".env"), "DNS_PROVIDER=porkbun\nPORKBUN_API_KEY=pk1_SECRETporkbunkey\nPORKBUN_SECRET_API_KEY=sk1_SECRETporkbunsecret\n"+
-		"PORTCULLIS_BACKUP_S3_URL=s3://AKIASECRETBACKUPKEY:SECRETbackupPassword@s3.example.org/secret-bucket-name\n")
-	writeFile(t, filepath.Join(cf.project, "secrets", "backup-destination.env"), "AWS_ACCESS_KEY_ID=AKIASECRETBACKUPKEY\nAWS_SECRET_ACCESS_KEY=SECRETbackupPassword\n")
-	// frontdoor-env's credentials.json holds the PORKBUN_* values above:
-	// the Hub's reader is only ever asked for frontdoor-status.
+	// core.env as core writes it (HUB_ENV_VARS keys only; its
+	// DNS_PROVIDER is a template variable, never the page's source).
+	writeFile(t, filepath.Join(cf.project, ".env"), "PORTCULLIS_DOMAIN=example.org\nPORTAL_DISPLAY_NAME=Home\nDNS_PROVIDER=cloudflare\n")
+	// The secrets where they really live: frontdoor-env's credentials.json
+	// and the backup destination's env file (the Hub reads neither).
+	writeFile(t, filepath.Join(cf.project, "secrets", "backup-destination.env"), "PORTCULLIS_BACKUP_S3_URL=s3://AKIASECRETBACKUPKEY:SECRETbackupPassword@s3.example.org/secret-bucket-name\n"+
+		"AWS_ACCESS_KEY_ID=AKIASECRETBACKUPKEY\nAWS_SECRET_ACCESS_KEY=SECRETbackupPassword\n")
+	writeFile(t, filepath.Join(cf.project, "secrets", "frontdoor-env", "credentials.json"),
+		`{"provider":"porkbun","credentials":{"PORKBUN_API_KEY":"pk1_SECRETporkbunkey","PORKBUN_SECRET_API_KEY":"sk1_SECRETporkbunsecret"}}`)
+	// The chart's non-secret facts.
+	cf.h.cfg.DNSProvider, cf.h.cfg.BackupDestination = "porkbun", true
 	var mu sync.Mutex
 	reads := 0
 	cf.h.SetFrontdoorStatus(func(context.Context) ([]byte, error) {

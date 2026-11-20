@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -16,6 +19,7 @@ import (
 	"github.com/portcullis/hub/internal/nminus1"
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/servers"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // The HA page (contract §20.1 "The HA page", D4, D5, D13): Settings →
@@ -29,8 +33,13 @@ import (
 // by) and frontdoor-status (a ConfigMap get, also a read), shared by
 // concurrent refreshes under the key opKeyHA. The Hub never sees the
 // front door's DNS credentials nor the backup destination's: the
-// destination is presence only (PORTCULLIS_BACKUP_S3_URL set in core's
-// .env, or HUB_BACKUP_DESTINATION=set from the chart, pre-flight P43).
+// destination is presence only (HUB_BACKUP_DESTINATION=set from core's
+// chart, contract §2, pre-flight P43), and the main domain's DNS
+// provider is its id only (HUB_DNS_PROVIDER from core's chart, else
+// core.env's DNS_PROVIDER, both ^[a-z0-9-]{1,32}$; else unknown). The
+// destination is never read from core.env. A nodeadm
+// failure degrades the page: every snapshot item is red with the reason,
+// and the banner, the command and the other items are still answered.
 
 // opKeyHA keys the HA page's refreshes (one snapshot read at a time,
 // shared by every caller waiting on it). It is never an op record.
@@ -67,11 +76,13 @@ const (
 	haTextFrontdoorF = "the front door's status isn't readable: %s"
 )
 
-// The core.env keys the page reads (presence or a provider id only).
-const (
-	VarBackupS3URL = "PORTCULLIS_BACKUP_S3_URL"
-	VarDNSProvider = "DNS_PROVIDER"
-)
+// haTextSnapshotF: every snapshot item while nodeadm's snapshot can't be
+// read (fail closed: never green without it).
+const haTextSnapshotF = "nodeadm's snapshot isn't readable: %s"
+
+// haTextUnconfirmedF: a site whose only reachable candidate is offered,
+// not confirmed by another site's dial-in (§20.11).
+const haTextUnconfirmedF = "site %s: its endpoint isn't confirmed yet"
 
 // HAItem is one checklist item.
 type HAItem struct {
@@ -178,6 +189,7 @@ func (h *Hub) HAOn() error {
 // haRead is one refresh's reads.
 type haRead struct {
 	snap      nodeadm.Snapshot
+	snapErr   error
 	status    []byte
 	statusErr error
 }
@@ -188,24 +200,16 @@ func (h *Hub) HA(ctx context.Context) (*HAView, error) {
 	if err := h.HAOn(); err != nil {
 		return nil, err
 	}
-	ch := h.ha.reads.DoChan(opKeyHA, func() (any, error) {
-		// The shared read outlives one caller's cancel (another may wait
-		// on it), never haReadWait.
-		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), haReadWait)
-		defer cancel()
-		api, err := h.nodeadmAPI(c)
-		if err != nil {
-			return nil, err
-		}
-		snap, err := h.clusterSnapshot(c, api)
-		if err != nil {
-			return nil, nodeadmErr(err)
-		}
-		r := &haRead{snap: snap}
-		if h.cfg.HA {
-			r.status, r.statusErr = h.readFrontdoorStatus(c)
-		}
-		return r, nil
+	ch := h.ha.reads.DoChan(opKeyHA, func() (v any, err error) {
+		// singleflight re-panics in its own goroutine, out of net/http's
+		// recover: a panic here would end the Hub (the single writer).
+		defer func() {
+			if p := recover(); p != nil {
+				log.Printf("ha: the HA read panicked: %v", p)
+				v, err = nil, fmt.Errorf("the HA read failed: %v", p)
+			}
+		}()
+		return h.haReadOnce(ctx), nil
 	})
 	select {
 	case <-ctx.Done():
@@ -215,8 +219,26 @@ func (h *Hub) HA(ctx context.Context) (*HAView, error) {
 			return nil, res.Err
 		}
 		r := res.Val.(*haRead)
-		return h.haView(r.snap, r.status, r.statusErr), nil
+		return h.haView(r), nil
 	}
+}
+
+// haReadOnce is the shared read: the snapshot (its error kept: the page
+// degrades) and, in HA, frontdoor-status. It outlives one caller's
+// cancel (another may wait on it), never haReadWait.
+func (h *Hub) haReadOnce(ctx context.Context) *haRead {
+	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), haReadWait)
+	defer cancel()
+	r := &haRead{}
+	if api, err := h.nodeadmAPI(c); err != nil {
+		r.snapErr = err
+	} else if r.snap, err = h.clusterSnapshot(c, api); err != nil {
+		r.snapErr = nodeadmErr(err)
+	}
+	if h.cfg.HA {
+		r.status, r.statusErr = h.readFrontdoorStatus(c)
+	}
+	return r
 }
 
 // haPlace is a managed node's placement from the Hub's records.
@@ -275,13 +297,72 @@ func Guarantee(pg nodeadm.Postgres) string {
 	return GuaranteeDegraded
 }
 
-// haChecklist judges the items of §20.1 over snap (place: the Hub's
-// placement; n1: the N−1 results, n1Err the check's refusal; sites the
-// sites view; rtt the round trips; backup the destination's presence).
-func haChecklist(snap nodeadm.Snapshot, place map[string]haPlace, n1 []nminus1.Result, n1Err string, sites []SiteView, rtt map[string]map[string]int, backup bool, ns nminus1.Namespaces) []HAItem {
+// haIn is what the checklist judges: the snapshot, the Hub's placement,
+// the N−1 results (n1Err: the check's refusal), the sites view, the sites
+// with a confirmed reachable node, the round trips, the backup
+// destination's presence and whether HA is on.
+type haIn struct {
+	snap      nodeadm.Snapshot
+	place     map[string]haPlace
+	n1        []nminus1.Result
+	n1Err     string
+	sites     []SiteView
+	confirmed map[string]bool
+	rtt       map[string]map[string]int
+	backup    bool
+	enabled   bool
+	ns        nminus1.Namespaces
+}
+
+// fencingRequired are the nodes that must fence (a watchdog) before
+// their replicated-tier pods may move (contract §20.1 "Fencing"): every
+// node holding such a pod now and, while HA is off, every non-small node
+// of the Hub's records at the primary site, which holds them after ha
+// enable (the pinning set of §20.11). The doctor's ha_fencing_unavailable
+// (Task 16) uses the same rule.
+func fencingRequired(snap nodeadm.Snapshot, place map[string]haPlace, enabled bool, ns nminus1.Namespaces) map[string]bool {
+	out := map[string]bool{}
+	for i := range snap.Pods {
+		if replicatedTier(&snap.Pods[i], ns) {
+			out[snap.Pods[i].Node] = true
+		}
+	}
+	if !enabled {
+		for id, p := range place {
+			if p.site == servers.PrimarySite && p.class != "small" {
+				out[id] = true
+			}
+		}
+	}
+	return out
+}
+
+// snapshotItems are the checklist items judged from the snapshot.
+var snapshotItems = []string{"nodes", "servers", "storage", "ingress", "n_minus_1", "watchdog"}
+
+// haChecklistDegraded is the checklist without a snapshot: every
+// snapshot item red with why, backup_destination judged (fail closed:
+// `ha enable` gates on all ok).
+func haChecklistDegraded(why string, backup bool) []HAItem {
+	text := fmt.Sprintf(haTextSnapshotF, why)
+	out := []HAItem{}
+	for _, id := range snapshotItems {
+		out = append(out, HAItem{ID: id, Text: text})
+	}
+	b := HAItem{ID: "backup_destination", OK: backup}
+	if !backup {
+		b.Text = haTextBackup
+	}
+	// The contract's order: backup_destination after ingress.
+	return slices.Insert(out, 4, b)
+}
+
+// haChecklist judges the items of §20.1 over in.
+func haChecklist(in haIn) []HAItem {
+	snap := in.snap
 	var nodes, srv, storage, ingress int
 	for _, n := range snap.Nodes {
-		p, ok := place[n.Name]
+		p, ok := in.place[n.Name]
 		if !ok || !n.Ready {
 			continue
 		}
@@ -302,8 +383,8 @@ func haChecklist(snap nodeadm.Snapshot, place map[string]haPlace, n1 []nminus1.R
 		}
 		return HAItem{ID: id, OK: ok, Text: text}
 	}
-	green := n1Err == "" && len(n1) > 0
-	for _, r := range n1 {
+	green := in.n1Err == "" && len(in.n1) > 0
+	for _, r := range in.n1 {
 		green = green && r.Level == nminus1.Green
 	}
 	out := []HAItem{
@@ -311,39 +392,34 @@ func haChecklist(snap nodeadm.Snapshot, place map[string]haPlace, n1 []nminus1.R
 		item("servers", srv >= 3, haTextServers),
 		item("storage", storage >= 2, haTextStorage),
 		item("ingress", ingress >= 1, haTextIngress),
-		item("backup_destination", backup, haTextBackup),
+		item("backup_destination", in.backup, haTextBackup),
 		item("n_minus_1", green, haTextNMinus1),
 	}
-	// watchdog: every node holding replicated-tier pods fences (by name).
-	holds := map[string]bool{}
-	for i := range snap.Pods {
-		if replicatedTier(&snap.Pods[i], ns) {
-			holds[snap.Pods[i].Node] = true
-		}
+	// watchdog: every node that must fence has one (the first by name).
+	must := fencingRequired(snap, in.place, in.enabled, in.ns)
+	ready := map[string]bool{}
+	for _, n := range snap.Nodes {
+		ready[n.Name] = n.FencingReady
 	}
 	wd := HAItem{ID: "watchdog", OK: true}
-	names := make([]string, 0, len(snap.Nodes))
-	for _, n := range snap.Nodes {
-		names = append(names, n.Name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if n := snap.Node(name); holds[name] && !n.FencingReady {
+	for _, name := range slices.Sorted(maps.Keys(must)) {
+		if !ready[name] {
 			wd = HAItem{ID: "watchdog", Text: fmt.Sprintf(haTextWatchdogF, name)}
 			break
 		}
 	}
 	out = append(out, wd)
-	if len(sites) < 2 {
+	if len(in.sites) < 2 {
 		return out
 	}
 	// site_gateway: the mesh refusal for the first site by name without a
-	// reachable node (§20.11, verbatim).
-	byName := slices.Clone(sites)
+	// node whose reach is confirmed (an offered endpoint is planned as
+	// reachable but unproven: never a pass; §20.11, verbatim).
+	byName := slices.Clone(in.sites)
 	sort.Slice(byName, func(i, j int) bool { return byName[i].Name < byName[j].Name })
 	gw := HAItem{ID: "site_gateway", OK: true}
 	for _, s := range byName {
-		if s.Gateway == "" {
+		if !in.confirmed[s.Name] {
 			gw = HAItem{ID: "site_gateway", Text: meshplan.Refusal(s.Name)}
 			break
 		}
@@ -355,12 +431,39 @@ func haChecklist(snap nodeadm.Snapshot, place map[string]haPlace, n1 []nminus1.R
 	rt := HAItem{ID: "site_rtt", OK: true}
 	for _, s := range hs {
 		others := slices.DeleteFunc(slices.Clone(hs), func(o string) bool { return o == s })
-		if _, err := servers.CheckRTT("server", others, rtt[s]); err != nil {
+		if _, err := servers.CheckRTT("server", others, in.rtt[s]); err != nil {
 			rt = HAItem{ID: "site_rtt", Text: err.Error()}
 			break
 		}
 	}
 	return append(out, rt)
+}
+
+// siteReach: the sites with a planned node whose public endpoint is
+// confirmed reachable, and those whose only candidates are offered.
+func (h *Hub) siteReach(snap nodeadm.Snapshot) (confirmed map[string]bool, offered []string) {
+	in := h.meshInputsOf(snap)
+	est, _ := sanitizeEstablished(in)
+	confirmed = map[string]bool{}
+	off := map[string]bool{}
+	for _, n := range est {
+		if !n.Public.IsValid() {
+			continue
+		}
+		switch in.reach[n.ID] {
+		case state.ReachReachable:
+			confirmed[n.Site] = true
+		case state.ReachOffered:
+			off[n.Site] = true
+		}
+	}
+	for s := range off {
+		if !confirmed[s] {
+			offered = append(offered, s)
+		}
+	}
+	sort.Strings(offered)
+	return confirmed, offered
 }
 
 // frontdoorDoc is the part of frontdoor-status' status.json the page
@@ -398,14 +501,24 @@ func ProviderDisplayName(id string) string {
 
 func worstMinutes(worstS int) int { return max(1, worstS/60) }
 
+// worstUnknown: a status without a worst case (none, or not positive)
+// is never shown as a short one.
+const worstUnknown = "worst case unknown (the front door didn't report it)"
+
 // WorstCaseText is a name's worst case (§20.8): worst_case_s / 60
 // floored, at least 1.
 func WorstCaseText(worstS int, provider string) string {
+	if worstS <= 0 {
+		return worstUnknown
+	}
 	return fmt.Sprintf("worst case ~%d min for clients that hit the dead address first, on %s", worstMinutes(worstS), provider)
 }
 
 // SiteWorstCaseText is a site's worst case (§20.8).
 func SiteWorstCaseText(site string, worstS int, provider string) string {
+	if worstS <= 0 {
+		return "if site " + site + " fails: " + worstUnknown
+	}
 	return fmt.Sprintf("if site %s fails: worst case ~%d min on %s", site, worstMinutes(worstS), provider)
 }
 
@@ -455,14 +568,63 @@ func haDNS(doc []byte, provider string) (HAFrontdoor, []HADNS, error) {
 	return fd, out, nil
 }
 
-// backupDestinationSet: the offsite destination is configured (presence
-// only: the Hub never reads its credentials).
-func (h *Hub) backupDestinationSet() bool {
-	return h.kubeCoreValue(VarBackupS3URL) != "" || h.cfg.BackupDestination
+// ProviderID is a DNS provider id as core passes it (^[a-z0-9-]{1,32}$),
+// else "" (unknown).
+func ProviderID(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || len(v) > 32 || strings.Trim(v, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
+		return ""
+	}
+	return v
 }
 
-// haView is the page over one refresh's reads.
-func (h *Hub) haView(snap nodeadm.Snapshot, status []byte, statusErr error) *HAView {
+// dnsProvider is the main domain's DNS provider id: HUB_DNS_PROVIDER
+// (core's chart, Kubernetes), else core.env's DNS_PROVIDER (Docker, a
+// HUB_ENV_VARS key), each checked as an id; "" = unknown (the generic
+// text, no note).
+func (h *Hub) dnsProvider() string {
+	if p := ProviderID(h.cfg.DNSProvider); p != "" {
+		return p
+	}
+	return ProviderID(h.kubeCoreValue("DNS_PROVIDER"))
+}
+
+// haView is the page over one refresh's reads. Without a snapshot it
+// degrades: every snapshot item red with the reason, the rest answered.
+func (h *Hub) haView(r *haRead) *HAView {
+	provider := h.dnsProvider()
+	v := &HAView{Experimental: true, Enabled: h.cfg.HA, Guarantee: GuaranteeDegraded, Nodes: []HANode{}, Sites: []SiteView{},
+		DNS: []HADNS{}, Command: HACommand, Volumes: []nodeadm.Volume{}, Warnings: []string{}, KnownGaps: []string{EnrollKnownGap}}
+	if provider == "porkbun" {
+		v.CredentialsNote = PorkbunCredentialsNote
+	}
+	if r.snapErr != nil {
+		why := clipRunes(r.snapErr.Error(), 300)
+		v.Checklist = haChecklistDegraded(why, h.cfg.BackupDestination)
+		v.Warnings = append(v.Warnings, fmt.Sprintf(haTextSnapshotF, why))
+	} else {
+		h.haSnapshotView(v, r.snap)
+	}
+	if h.cfg.HA {
+		switch {
+		case r.statusErr != nil:
+			v.Frontdoor.Error = fmt.Sprintf(haTextFrontdoorF, clipRunes(r.statusErr.Error(), 200))
+		default:
+			fd, dns, err := haDNS(r.status, ProviderDisplayName(provider))
+			if err != nil {
+				v.Frontdoor.Error = fmt.Sprintf(haTextFrontdoorF, err.Error())
+			} else {
+				v.Frontdoor, v.DNS = fd, dns
+			}
+		}
+	}
+	v.Warnings = append(v.Warnings, h.parkedRevokes()...)
+	return v
+}
+
+// haSnapshotView fills v from snap: the checklist, guarantee, nodes,
+// quorum, sites, volumes and the snapshot's warnings.
+func (h *Hub) haSnapshotView(v *HAView, snap nodeadm.Snapshot) {
 	ns := h.nminusNamespaces()
 	n1, n1Err := h.checkN1(snap)
 	place := h.haPlacement(snap)
@@ -471,22 +633,20 @@ func (h *Hub) haView(snap nodeadm.Snapshot, status []byte, statusErr error) *HAV
 	for id := range place {
 		known[id] = true
 	}
-	rtt := h.cl.rtt.snapshot(h.now(), known)
-	provider := h.kubeCoreValue(VarDNSProvider)
-	v := &HAView{Experimental: true, Enabled: h.cfg.HA, Guarantee: Guarantee(snap.Postgres), Quorum: snap.Quorum, Sites: sites,
-		DNS: []HADNS{}, Command: HACommand, Volumes: slices.Clone(snap.Volumes), Warnings: []string{}, KnownGaps: []string{EnrollKnownGap}}
-	if v.Sites == nil {
-		v.Sites = []SiteView{}
+	confirmed, offered := h.siteReach(snap)
+	v.Guarantee, v.Quorum = Guarantee(snap.Postgres), snap.Quorum
+	if sites != nil {
+		v.Sites = sites
 	}
-	if v.Volumes == nil {
-		v.Volumes = []nodeadm.Volume{}
+	if snap.Volumes != nil {
+		v.Volumes = slices.Clone(snap.Volumes)
 	}
-	v.Checklist = haChecklist(snap, place, n1, n1Err, sites, rtt, h.backupDestinationSet(), ns)
+	v.Checklist = haChecklist(haIn{snap: snap, place: place, n1: n1, n1Err: n1Err, sites: sites, confirmed: confirmed,
+		rtt: h.cl.rtt.snapshot(h.now(), known), backup: h.cfg.BackupDestination, enabled: h.cfg.HA, ns: ns})
 	level := map[string]nminus1.Level{}
 	for _, r := range n1 {
 		level[r.Node] = r.Level
 	}
-	v.Nodes = []HANode{}
 	for _, n := range snap.Nodes {
 		p := place[n.Name]
 		lv, ok := level[n.Name]
@@ -497,30 +657,17 @@ func (h *Hub) haView(snap nodeadm.Snapshot, status []byte, statusErr error) *HAV
 			Ready: n.Ready, Fencing: n.FencingReady, NMinus1: lv})
 	}
 	sort.Slice(v.Nodes, func(i, j int) bool { return v.Nodes[i].Name < v.Nodes[j].Name })
-	if provider == "porkbun" {
-		v.CredentialsNote = PorkbunCredentialsNote
-	}
-	if h.cfg.HA {
-		switch {
-		case statusErr != nil:
-			v.Frontdoor.Error = fmt.Sprintf(haTextFrontdoorF, clipRunes(statusErr.Error(), 200))
-		default:
-			fd, dns, err := haDNS(status, ProviderDisplayName(provider))
-			if err != nil {
-				v.Frontdoor.Error = fmt.Sprintf(haTextFrontdoorF, err.Error())
-			} else {
-				v.Frontdoor, v.DNS = fd, dns
-			}
-		}
-	}
 	if len(sites) == 2 {
 		v.Warnings = append(v.Warnings, servers.WarnTieBreaker)
+	}
+	if len(sites) >= 2 {
+		for _, s := range offered {
+			v.Warnings = append(v.Warnings, fmt.Sprintf(haTextUnconfirmedF, s))
+		}
 	}
 	if n1Err != "" {
 		v.Warnings = append(v.Warnings, n1Err)
 	}
-	v.Warnings = append(v.Warnings, h.parkedRevokes()...)
-	return v
 }
 
 // parkedRevokes: one line per revoked server whose etcd member waits for

@@ -31,13 +31,14 @@ const on = Object.assign({}, v, { enabled: true, guarantee: 'Zero loss on one fa
   dns: [{ name: 'example.org', addresses: ['198.51.100.7'], worst_case_text: 'worst case ~10 min for clients that hit the dead address first, on Porkbun',
           per_site: [{ site: 'main', healthy: true, worst_case_text: 'if site main fails: worst case ~10 min on Porkbun' }] }] });
 const broken = Object.assign({}, on, { frontdoor: { state: '', error: 'the front door\'s status isn\'t readable: <script>' }, dns: [] });
-process.stdout.write(JSON.stringify({ off: H.pageHtml(v), on: H.pageHtml(on), broken: H.pageHtml(broken) }));
+const degraded = Object.assign({}, v, { nodes: [], sites: [], checklist: [{ id: 'nodes', ok: false, text: 'nodeadm\'s snapshot isn\'t readable: <x>' }, { id: 'backup_destination', ok: true, text: '' }] });
+process.stdout.write(JSON.stringify({ off: H.pageHtml(v), on: H.pageHtml(on), broken: H.pageHtml(broken), degraded: H.pageHtml(degraded), failed: H.errorHtml('<b>502</b>') }));
 `)
-	var got struct{ Off, On, Broken string }
+	var got struct{ Off, On, Broken, Degraded, Failed string }
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	for name, h := range map[string]string{"off": got.Off, "on": got.On, "broken": got.Broken} {
+	for name, h := range map[string]string{"off": got.Off, "on": got.On, "broken": got.Broken, "degraded": got.Degraded, "failed": got.Failed} {
 		for _, bad := range []string{"<b>", "<i>", "<u>", "<x>", "<script>"} {
 			if strings.Contains(h, bad) {
 				t.Errorf("%s: unescaped %s", name, bad)
@@ -65,6 +66,13 @@ process.stdout.write(JSON.stringify({ off: H.pageHtml(v), on: H.pageHtml(on), br
 	}
 	if !strings.Contains(got.Broken, "the front door&#39;s status isn&#39;t readable: &lt;script&gt;") {
 		t.Errorf("broken: %s", got.Broken)
+	}
+	// Q2: a degraded answer and a failed one keep the banner and the command.
+	if !strings.Contains(got.Degraded, "nodeadm&#39;s snapshot isn&#39;t readable: &lt;x&gt;") || !strings.Contains(got.Degraded, "<code>./portcullis ha enable</code>") {
+		t.Errorf("degraded: %s", got.Degraded)
+	}
+	if !strings.Contains(got.Failed, "&lt;b&gt;502&lt;/b&gt;") || !strings.Contains(got.Failed, "<code>./portcullis ha enable</code>") {
+		t.Errorf("failed: %s", got.Failed)
 	}
 	idx := webAsset(t, "index.html")
 	for _, w := range []string{`<div id="ha-section" hidden>`, "High availability</div>", `<div id="ha-root"></div>`, "/static/ha.js", "haSec.hidden = !runtimeIsKube();",

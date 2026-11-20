@@ -99,6 +99,7 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	}
 	cfg.HA = settings.HA
 	cfg.BackupDestination = getenv("HUB_BACKUP_DESTINATION") == "set"
+	cfg.DNSProvider = dnsProviderFromEnv(getenv)
 	if settings.TraefikPeer, err = traefikPeerFromEnv(getenv, settings.HA, core); err != nil {
 		return nil, nil, err
 	}
@@ -117,6 +118,13 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	// operations answer 503.
 	go guard.Run(ctx, time.Minute)
 	return b, fence, nil
+}
+
+// dnsProviderFromEnv is HUB_DNS_PROVIDER (core's chart, contract §2): a
+// provider id (^[a-z0-9-]{1,32}$), else "" (core.env's DNS_PROVIDER, or
+// an unknown provider).
+func dnsProviderFromEnv(getenv func(string) string) string {
+	return hub.ProviderID(getenv("HUB_DNS_PROVIDER"))
 }
 
 // haFromEnv is HUB_HA (contract §20.1 "HA mode"): only exactly "on"

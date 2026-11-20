@@ -202,6 +202,10 @@ type Config struct {
 	// PORTCULLIS_BACKUP_S3_URL is set): the offsite destination's presence
 	// only, never its credentials (HA checklist backup_destination).
 	BackupDestination bool
+	// DNSProvider is HUB_DNS_PROVIDER (core's chart, Kubernetes): the main
+	// domain's DNS provider id, not a secret ("" = core.env's DNS_PROVIDER,
+	// else unknown). The HA page's provider name and Porkbun's note.
+	DNSProvider string
 	// ClockOffset reads HUB_DEV_CLOCK_OFFSET_FILE's duration (core's e2e,
 	// e2etest builds only: internal/e2etest), added to h.now(); nil
 	// otherwise.
