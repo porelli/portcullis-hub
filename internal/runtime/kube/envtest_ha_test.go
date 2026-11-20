@@ -71,24 +71,35 @@ func TestNodeadmTokenPolicy(t *testing.T) {
 	}
 }
 
-// TestAdmissionPolicyObjectsNotJudged pins why the contract's "nodeadm
-// admission writes" binding rules aren't in portcullis-nodeadm-admission:
-// the API server never evaluates API-defined ValidatingAdmissionPolicies
-// on validatingadmissionpolicies or validatingadmissionpolicybindings
+// TestAdmissionPolicyObjectsNotJudged pins ruling R-ADM's premise: the API
+// server never evaluates API-defined ValidatingAdmissionPolicies on
+// validatingadmissionpolicies or validatingadmissionpolicybindings
 // (k8s.io/apiserver admission/plugin/policy/generic: admission
 // configuration resources are excluded from API-based hooks). A policy
 // that refuses everything, live (it refuses a ConfigMap of its control
-// namespace), still lets nodeadm create, update and delete a binding.
-// Only RBAC (nodeadm's ClusterRole: create, never update or delete)
-// stands there. If this test ever fails, the binding rules can move into
-// the policy (Task 18 report).
+// namespace), still lets an identity with RBAC rights create and delete a
+// binding. Hence nodeadm has no right on any admission object and the CLI
+// identity is their only writer (contract §6, §20.9 params-sync). The
+// rights are granted here, to this test only.
 func TestAdmissionPolicyObjectsNotJudged(t *testing.T) {
 	e := startEnv(t)
 	ctx := context.Background()
 	vap := schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicies"}
 	vapb := schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}
 	cms := schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
-	applyYAML(t, e.admin, []byte(`apiVersion: v1
+	applyYAML(t, e.admin, []byte(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: test-admission-objects}
+rules: [{apiGroups: [admissionregistration.k8s.io], resources: [validatingadmissionpolicies, validatingadmissionpolicybindings], verbs: [create, update, delete]},
+  {apiGroups: [""], resources: [configmaps], verbs: [get]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: test-admission-objects}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: test-admission-objects}
+subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
+---
+apiVersion: v1
 kind: Namespace
 metadata: {name: test-vap-control}
 ---
@@ -114,6 +125,9 @@ spec:
     namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: test-vap-control}}
 `))
 	defer func() {
+		rbac := "rbac.authorization.k8s.io"
+		e.admin.Resource(schema.GroupVersionResource{Group: rbac, Version: "v1", Resource: "clusterrolebindings"}).Delete(ctx, "test-admission-objects", metav1.DeleteOptions{})
+		e.admin.Resource(schema.GroupVersionResource{Group: rbac, Version: "v1", Resource: "clusterroles"}).Delete(ctx, "test-admission-objects", metav1.DeleteOptions{})
 		e.admin.Resource(vapb).Delete(ctx, "test-refuse-all", metav1.DeleteOptions{})
 		e.admin.Resource(vap).Delete(ctx, "test-refuse-all", metav1.DeleteOptions{})
 	}()

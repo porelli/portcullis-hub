@@ -19,17 +19,17 @@ var haAdmissionTexts = []string{
 	"bootstrap tokens must expire within 15 minutes",
 	"bootstrap tokens may be used for authentication only",
 	"bootstrap tokens may carry only the group system:bootstrappers:k3s:default-node-token",
-	"nodeadm may create only a binding in its canonical form on a params generation",
-	"nodeadm may never change or delete a Portcullis admission policy or binding",
-	"nodeadm may create only portcullis-admission-params-<16 hex> ConfigMaps",
+	"only the CLI may attach to or port-forward a pod of the core namespace",
 	"only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
 }
 
 // TestAdmissionHAVectorsShape (no envtest): admission_vectors.json holds
 // ≥ 24 cases tagged "ha", every HA text has a denial and the accepted
-// forms are there; an HA case runs as hub, intruder, nodeadm or cli (the
-// CLI's own identity: portcullis-ingress-pods judges every identity), an
-// exec case (op "exec") is a PodExecOptions naming its pod, and a
+// forms are there; an HA case runs as hub, intruder, nodeadm, cli (the
+// CLI's own identity: portcullis-ingress-pods judges every identity) or
+// daemonset-controller, an exec / attach / portforward case is the
+// matching Pod*Options naming its pod, no case is an admission object
+// (ruling R-ADM: the API server applies no policy to them), and a
 // bootstrap token's expiration may be ${NOW+<n>m}, which the envtest
 // harness replaces with now + n minutes (RFC 3339) before the request.
 func TestAdmissionHAVectorsShape(t *testing.T) {
@@ -45,6 +45,7 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 		ReasonContains string         `json:"reason_contains"`
 		Existing       map[string]any `json:"existing,omitempty"`
 		Op             string         `json:"op,omitempty"`
+		Subresource    string         `json:"subresource,omitempty"`
 		HA             bool           `json:"ha,omitempty"`
 	}
 	dec := json.NewDecoder(strings.NewReader(string(b)))
@@ -65,7 +66,7 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 		}
 		ha++
 		switch v.As {
-		case "hub", "intruder", "nodeadm", "cli":
+		case "hub", "intruder", "nodeadm", "cli", "daemonset-controller":
 		default:
 			t.Errorf("%s: as %q", v.Name, v.As)
 		}
@@ -80,8 +81,12 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 		default:
 			t.Errorf("%s: want %q", v.Name, v.Want)
 		}
-		if v.Op == "exec" && v.Object["kind"] != "PodExecOptions" {
-			t.Errorf("%s: an exec case is a PodExecOptions", v.Name)
+		want := map[string]string{"exec": "PodExecOptions", "attach": "PodAttachOptions", "portforward": "PodPortForwardOptions"}[v.Op]
+		if want != "" && v.Object["kind"] != want {
+			t.Errorf("%s: an %s case is a %s", v.Name, v.Op, want)
+		}
+		if strings.Contains(string(mustJSON(v.Object)), "ValidatingAdmissionPolicy") {
+			t.Errorf("%s: no admission policy judges admission objects (ruling R-ADM)", v.Name)
 		}
 	}
 	if ha < 24 || allow < 6 {
@@ -92,4 +97,9 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 			t.Errorf("no ha denial carries %q", text)
 		}
 	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }

@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/dynamic"
@@ -121,16 +122,15 @@ subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 
 // haSetupObjects (NEW, HA; contract §6, §20.2): the ingress namespace (PSA
 // privileged: portcullis-ingress-pods is its only pod guard) with
-// Traefik's ServiceAccount, nodeadm's namespace, and the five
-// PriorityClasses as core's chart renders them
-// (charts/portcullis/templates/priorityclasses.yaml; globalDefault only on
-// portcullis-normal). RBAC wider than the real Roles, on purpose, so every
-// HA vector reaches admission: the policies are what is tested here (RBAC
-// is the Roles' own tests): nodeadm may create Secrets in kube-system,
-// get and create ConfigMaps in the core namespace (a binding's creator
-// needs get on its paramRef), and create, update and delete
-// admission policies and bindings; the intruder may exec in the core
-// namespace and create pods and DaemonSets in portcullis-ingress.
+// Traefik's ServiceAccount and nodeadm's namespace (the PriorityClasses:
+// testdata/priorityclasses.yaml, a byte copy of core's
+// kube/priorityclasses.yaml). RBAC wider than the real Roles, on purpose,
+// so every HA vector reaches admission: the policies are what is tested
+// here (RBAC is the Roles' own tests): nodeadm may create and update
+// Secrets in kube-system (its only admission-judged right; ruling R-ADM:
+// none on admission objects); the intruder may exec, attach and
+// port-forward in the core namespace and create pods (ephemeral
+// containers too) and DaemonSets in portcullis-ingress.
 const haSetupObjects = `apiVersion: v1
 kind: Namespace
 metadata:
@@ -151,37 +151,6 @@ apiVersion: v1
 kind: ServiceAccount
 metadata: {name: nodeadm, namespace: portcullis-nodeadm}
 ---
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata: {name: portcullis-core}
-value: 1000000
-preemptionPolicy: PreemptLowerPriority
----
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata: {name: portcullis-critical}
-value: 100000
-preemptionPolicy: PreemptLowerPriority
----
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata: {name: portcullis-high}
-value: 10000
-preemptionPolicy: PreemptLowerPriority
----
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata: {name: portcullis-normal}
-value: 1000
-globalDefault: true
-preemptionPolicy: PreemptLowerPriority
----
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata: {name: portcullis-low}
-value: 100
-preemptionPolicy: Never
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: test-nodeadm, namespace: kube-system}
@@ -195,30 +164,8 @@ subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: {name: test-nodeadm, namespace: portcullis}
-rules: [{apiGroups: [""], resources: [configmaps], verbs: [create, get]}]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata: {name: test-nodeadm, namespace: portcullis}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: test-nodeadm}
-subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata: {name: test-nodeadm-admission}
-rules: [{apiGroups: [admissionregistration.k8s.io], resources: [validatingadmissionpolicies, validatingadmissionpolicybindings], verbs: [create, update, delete]}]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: {name: test-nodeadm-admission}
-roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: test-nodeadm-admission}
-subjects: [{kind: ServiceAccount, name: nodeadm, namespace: portcullis-nodeadm}]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
 metadata: {name: test-intruder, namespace: portcullis}
-rules: [{apiGroups: [""], resources: [pods/exec], verbs: [create]}]
+rules: [{apiGroups: [""], resources: [pods/exec, pods/attach, pods/portforward], verbs: [create]}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -229,7 +176,7 @@ subjects: [{kind: ServiceAccount, name: intruder, namespace: portcullis}]
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: test-intruder, namespace: portcullis-ingress}
-rules: [{apiGroups: [""], resources: [pods], verbs: [create]}, {apiGroups: [apps], resources: [daemonsets], verbs: [create]}]
+rules: [{apiGroups: [""], resources: [pods, pods/ephemeralcontainers], verbs: [create, update]}, {apiGroups: [apps], resources: [daemonsets], verbs: [create]}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -239,13 +186,12 @@ subjects: [{kind: ServiceAccount, name: intruder, namespace: portcullis}]
 `
 
 // admissionPolicyFiles are core's kube/admission/ policy files (byte
-// copies): the ten ValidatingAdmissionPolicies.
-var admissionPolicyFiles = []string{"testdata/admission/policies.yaml", "testdata/admission/nodeadm-tokens.yaml", "testdata/admission/nodeadm-admission.yaml"}
+// copies): the nine ValidatingAdmissionPolicies.
+var admissionPolicyFiles = []string{"testdata/admission/policies.yaml", "testdata/admission/nodeadm-tokens.yaml"}
 
 // admissionPolicies are their names (each with one binding).
 var admissionPolicies = []string{"portcullis-apps-pods", "portcullis-apps-workloads", "portcullis-apps-services", "portcullis-apps-traefik",
-	"portcullis-apps-netpol", "portcullis-edge-routes", "portcullis-core-exec", "portcullis-ingress-pods", "portcullis-nodeadm-tokens",
-	"portcullis-nodeadm-admission"}
+	"portcullis-apps-netpol", "portcullis-edge-routes", "portcullis-core-exec", "portcullis-ingress-pods", "portcullis-nodeadm-tokens"}
 
 // testGeneration is params.yaml's generation (core names the params
 // ConfigMap and every binding after it).
@@ -265,9 +211,10 @@ type env struct {
 	hubK     kubernetes.Interface
 	intruder dynamic.Interface
 	// NEW (HA): the intruder's typed client (exec), nodeadm's
-	// ServiceAccount.
+	// ServiceAccount, the DaemonSet controller's.
 	intruderK kubernetes.Interface
 	nodeadm   dynamic.Interface
+	dsc       dynamic.Interface
 }
 
 var shared *env
@@ -338,6 +285,7 @@ func startEnv(t *testing.T) *env {
 	applyYAML(t, admin, []byte(traefikCRDs))
 	applyYAML(t, admin, []byte(setupObjects))
 	applyYAML(t, admin, []byte(haSetupObjects))
+	applyYAML(t, admin, file(t, "testdata/priorityclasses.yaml"))
 	applyYAML(t, admin, file(t, "testdata/role.yaml"))
 	applyYAML(t, admin, file(t, "testdata/role-edge.yaml"))
 	applyYAML(t, admin, file(t, "testdata/role-core.yaml"))
@@ -372,8 +320,10 @@ func startEnv(t *testing.T) *env {
 	ic.Impersonate = rest.ImpersonationConfig{UserName: "system:serviceaccount:portcullis:intruder", Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis", "system:authenticated"}}
 	nc := rest.CopyConfig(cfg)
 	nc.Impersonate = rest.ImpersonationConfig{UserName: nodeadmSA, Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis-nodeadm", "system:authenticated"}}
+	dc := rest.CopyConfig(cfg)
+	dc.Impersonate = rest.ImpersonationConfig{UserName: "system:serviceaccount:kube-system:daemon-set-controller", Groups: []string{"system:serviceaccounts", "system:serviceaccounts:kube-system", "system:authenticated"}}
 	e := &env{cfg: cfg, admin: admin, hub: dynamic.NewForConfigOrDie(hc), hubK: kubernetes.NewForConfigOrDie(hc), intruder: dynamic.NewForConfigOrDie(ic),
-		intruderK: kubernetes.NewForConfigOrDie(ic), nodeadm: dynamic.NewForConfigOrDie(nc)}
+		intruderK: kubernetes.NewForConfigOrDie(ic), nodeadm: dynamic.NewForConfigOrDie(nc), dsc: dynamic.NewForConfigOrDie(dc)}
 	// The policies take effect asynchronously: wait for the self-test's
 	// Pod to be denied by its binding.
 	deadline := time.Now().Add(60 * time.Second)
@@ -406,27 +356,19 @@ func startEnv(t *testing.T) *env {
 type vector struct {
 	Name           string         `json:"name"`
 	Object         map[string]any `json:"object"`
-	As             string         `json:"as"` // hub | intruder | nodeadm | cli
+	As             string         `json:"as"` // hub | intruder | nodeadm | cli | daemonset-controller
 	Want           string         `json:"want"`
 	ReasonContains string         `json:"reason_contains"`
 	// Existing (optional) is created as the CLI first; Op update dry-runs
-	// Object as an update of it, delete its deletion; Op exec (NEW, HA)
-	// connects Object, a PodExecOptions naming its pod, to pods/exec.
-	Existing map[string]any `json:"existing,omitempty"`
-	Op       string         `json:"op,omitempty"`
+	// Object as an update of it (of Subresource when set), delete its
+	// deletion; Op exec / attach / portforward (NEW, HA) connects Object,
+	// a Pod*Options naming its pod, to that subresource.
+	Existing    map[string]any `json:"existing,omitempty"`
+	Op          string         `json:"op,omitempty"`
+	Subresource string         `json:"subresource,omitempty"`
 	// HA marks the high-availability cases (contract §6: placement, core
 	// exec, nodeadm tokens, nodeadm admission writes, ingress pods).
 	HA bool `json:"ha,omitempty"`
-}
-
-// notJudgeable are vectors no admission policy can decide: the API server
-// never runs API-defined ValidatingAdmissionPolicies on admission policies
-// or bindings (TestAdmissionPolicyObjectsNotJudged), so the contract's
-// "nodeadm admission writes" binding rules can't be enforced by a VAP
-// (Task 18 report: needs a ruling; nodeadm's ClusterRole, create only, is
-// what refuses an update or delete). Every other ha vector runs.
-func notJudgeable(v vector) bool {
-	return v.HA && v.Object["kind"] == "ValidatingAdmissionPolicyBinding" && v.Want == "deny"
 }
 
 // withNow replaces ${NOW+<n>m} with now + n minutes (RFC 3339 UTC).
@@ -446,22 +388,30 @@ func withNow(t *testing.T, o map[string]any) map[string]any {
 	return out
 }
 
-// execAs connects a PodExecOptions to pods/exec of its pod (envtest has
-// no pod: past admission the answer is NotFound).
-func execAs(ctx context.Context, k kubernetes.Interface, o map[string]any) error {
+// connectAs connects a Pod{Exec,Attach,PortForward}Options to pods/<op>
+// of its pod (envtest has no pod: past admission the answer is NotFound).
+func connectAs(ctx context.Context, k kubernetes.Interface, op string, o map[string]any) error {
 	b, err := json.Marshal(o)
 	if err != nil {
 		return err
 	}
-	var opts corev1.PodExecOptions
-	if err := json.Unmarshal(b, &opts); err != nil {
+	var opts kruntime.Object
+	switch op {
+	case "exec":
+		opts = &corev1.PodExecOptions{}
+	case "attach":
+		opts = &corev1.PodAttachOptions{}
+	default:
+		opts = &corev1.PodPortForwardOptions{}
+	}
+	if err := json.Unmarshal(b, opts); err != nil {
 		return err
 	}
 	md, _ := o["metadata"].(map[string]any)
 	name, _ := md["name"].(string)
 	namespace, _ := md["namespace"].(string)
-	return k.CoreV1().RESTClient().Post().Namespace(namespace).Resource("pods").Name(name).SubResource("exec").
-		VersionedParams(&opts, scheme.ParameterCodec).Do(ctx).Error()
+	return k.CoreV1().RESTClient().Post().Namespace(namespace).Resource("pods").Name(name).SubResource(op).
+		VersionedParams(opts, scheme.ParameterCodec).Do(ctx).Error()
 }
 
 // TestAdmissionVectors: every vector dry-run as the Hub's ServiceAccount;
@@ -479,9 +429,6 @@ func TestAdmissionVectors(t *testing.T) {
 	dry := []string{metav1.DryRunAll}
 	for _, v := range vs {
 		t.Run(v.Name, func(t *testing.T) {
-			if notJudgeable(v) {
-				t.Skip("no admission policy judges a ValidatingAdmissionPolicyBinding (TestAdmissionPolicyObjectsNotJudged)")
-			}
 			o := &unstructured.Unstructured{Object: withNow(t, v.Object)}
 			client, typed := e.hub, e.hubK
 			switch v.As {
@@ -491,28 +438,18 @@ func TestAdmissionVectors(t *testing.T) {
 				client = e.nodeadm
 			case "cli":
 				client = e.admin
+			case "daemonset-controller":
+				client = e.dsc
 			}
 			res := client.Resource(gvrOf(o)).Namespace(o.GetNamespace())
 			var err error
-			if v.Op == "exec" {
-				err = execAs(ctx, typed, o.Object)
+			if v.Op == "exec" || v.Op == "attach" || v.Op == "portforward" {
+				err = connectAs(ctx, typed, v.Op, o.Object)
 				if v.Want == "allow" && apierrors.IsNotFound(err) {
 					err = nil // past RBAC and admission: no such pod in envtest
 				}
 			} else if v.Existing != nil {
 				ex := &unstructured.Unstructured{Object: v.Existing}
-				// A binding's params generation exists (a copy of the test
-				// params): a binding without its params denies everything.
-				if ref, ok, _ := unstructured.NestedString(ex.Object, "spec", "paramRef", "name"); ok && ex.GetKind() == "ValidatingAdmissionPolicyBinding" {
-					cm, gerr := e.admin.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace("portcullis").Get(ctx, "portcullis-admission-params-"+testGeneration, metav1.GetOptions{})
-					if gerr != nil {
-						t.Fatal(gerr)
-					}
-					cp := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": ref, "namespace": "portcullis"}, "data": cm.Object["data"]}}
-					if _, cerr := e.admin.Resource(gvrOf(cp)).Namespace("portcullis").Create(ctx, cp, metav1.CreateOptions{}); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
-						t.Fatal(cerr)
-					}
-				}
 				cur, cerr := e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Create(ctx, ex, metav1.CreateOptions{})
 				if cerr != nil {
 					t.Fatalf("%s: creating the existing object: %v", v.Name, cerr)
@@ -521,7 +458,11 @@ func TestAdmissionVectors(t *testing.T) {
 					err = res.Delete(ctx, ex.GetName(), metav1.DeleteOptions{DryRun: dry})
 				} else {
 					o.SetResourceVersion(cur.GetResourceVersion())
-					_, err = res.Update(ctx, o, metav1.UpdateOptions{DryRun: dry})
+					if v.Subresource != "" {
+						_, err = res.Update(ctx, o, metav1.UpdateOptions{DryRun: dry}, v.Subresource)
+					} else {
+						_, err = res.Update(ctx, o, metav1.UpdateOptions{DryRun: dry})
+					}
 				}
 				e.admin.Resource(gvrOf(ex)).Namespace(ex.GetNamespace()).Delete(ctx, ex.GetName(), metav1.DeleteOptions{})
 			} else {
