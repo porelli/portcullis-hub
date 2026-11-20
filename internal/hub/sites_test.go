@@ -98,7 +98,7 @@ func TestServerTooFarRefusedBeforeJoin(t *testing.T) {
 	}
 	cf := newClusterFixture(t, three()...)
 	cf.h.settleClusterNodes(context.Background())
-	cf.na.rtt = map[string]map[string]int{"n4": {"n1": 2, "n2": 3, "n3": 120}}
+	cf.na.setRTT(map[string]map[string]int{"n4": {"n1": 2, "n2": 3, "n3": 120}})
 	joinFor(cf, "n4", "server", "10.215.0.4")
 	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n4", Role: "server"}); err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestServerTooFarRefusedBeforeJoin(t *testing.T) {
 	nodes[2].Ready = false
 	cf = newClusterFixture(t, nodes...)
 	cf.h.settleClusterNodes(context.Background())
-	cf.na.rtt = map[string]map[string]int{"a1": {"n1": 2, "n2": 240, "n3": 900}}
+	cf.na.setRTT(map[string]map[string]int{"a1": {"n1": 2, "n2": 240, "n3": 900}})
 	cf.na.onCluster = func(n int, s *nodeadm.Snapshot) {
 		switch n {
 		case 3:
@@ -200,7 +200,7 @@ func TestJoinRTTMissingServer(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true))
 	cf.h.settleClusterNodes(context.Background())
 	step := fakeClockHub(cf)
-	cf.na.rtt = map[string]map[string]int{"n3": {"n1": 2}}
+	cf.na.setRTT(map[string]map[string]int{"n3": {"n1": 2}})
 	joinFor(cf, "n3", "server", "10.215.0.3")
 	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n3"}); err != nil {
 		t.Fatal(err)
@@ -221,7 +221,7 @@ func TestJoinRTTNodeagentSilent(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
 	cf.h.settleClusterNodes(context.Background())
 	step := fakeClockHub(cf)
-	cf.na.refuse["rtt:n4"] = errors.New("connection refused")
+	cf.na.setRefuse("rtt:n4", errors.New("connection refused"))
 	joinFor(cf, "n4", "agent", "10.215.0.4")
 	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n4"}); err != nil {
 		t.Fatal(err)
@@ -243,7 +243,7 @@ func TestJoinRTTNoHealthyServer(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", false))
 	cf.h.settleClusterNodes(context.Background())
 	step := fakeClockHub(cf)
-	cf.na.rtt = map[string]map[string]int{"n2": {"n1": 2}}
+	cf.na.setRTT(map[string]map[string]int{"n2": {"n1": 2}})
 	joinFor(cf, "n2", "server", "10.215.0.2")
 	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestJoinRTTNoHealthyServer(t *testing.T) {
 	// The server comes back while the gate waits: it is measured then.
 	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", false))
 	cf.h.settleClusterNodes(context.Background())
-	cf.na.rtt = map[string]map[string]int{"n2": {"n1": 120}}
+	cf.na.setRTT(map[string]map[string]int{"n2": {"n1": 120}})
 	joinFor(cf, "n2", "server", "10.215.0.2")
 	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestJoinRTTNoHealthyServer(t *testing.T) {
 func TestJoinRTTAbsurdIsTooFar(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
 	cf.h.settleClusterNodes(context.Background())
-	cf.na.rtt = map[string]map[string]int{"n2": {"n1": 700_000}}
+	cf.na.setRTT(map[string]map[string]int{"n2": {"n1": 700_000}})
 	joinFor(cf, "n2", "server", "10.215.0.2")
 	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
 		t.Fatal(err)
@@ -321,7 +321,7 @@ func TestRTTCollectionBesideTheTick(t *testing.T) {
 // trips to healthy servers only.
 func TestDoctorRTTHealthyOnly(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", false))
-	cf.na.rtt = map[string]map[string]int{"n1": {"n2": 2, "n3": 95}, "n2": {"n1": 90, "n3": 99}}
+	cf.na.setRTT(map[string]map[string]int{"n1": {"n2": 2, "n3": 95}, "n2": {"n1": 90, "n3": 99}})
 	cf.h.settleClusterNodes(context.Background())
 	snap, _ := cf.na.Cluster(context.Background())
 	cf.h.collectRTT(context.Background(), snap, cf.h.now())
@@ -369,18 +369,20 @@ func TestSitesView(t *testing.T) {
 		ing(siteNode("e1", "server", "edge", "10.215.0.5", "198.18.0.5", "203.0.113.5")),
 		siteNode("e2", "agent", "edge", "10.215.0.6", "198.18.0.6", ""),
 		siteNode("t1", "agent", "tb", "10.215.0.7", "198.18.1.7", ""))
-	cf.na.rtt = map[string]map[string]int{
+	cf.na.setRTT(map[string]map[string]int{
 		"n1": {"n2": 2, "e1": 40},
 		"n2": {"n1": 3, "e1": 41, "bogus": 1, "e2": -4},
 		"e1": {"n1": 40, "n2": 85},
 		"e2": {"n1": 60, "n2": 61, "e1": 1},
 		"t1": {},
-	}
+	})
 	// x1: no mesh address, so no record of its site: its label is never
 	// believed (review M2).
 	x1 := siteNode("x1", "agent", "evil", "", "198.18.2.1", "")
 	cf.na.snap.Nodes = append(cf.na.snap.Nodes, x1)
+	cf.na.mu.Lock()
 	cf.na.rtt["x1"] = map[string]int{}
+	cf.na.mu.Unlock()
 	cf.h.settleClusterNodes(context.Background())
 	snap, _ := cf.na.Cluster(context.Background())
 	cf.h.collectRTT(context.Background(), snap, cf.h.now()) // the tick's runs beside it

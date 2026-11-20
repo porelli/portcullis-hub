@@ -528,7 +528,9 @@ func waitServerOp(t *testing.T, h *Hub, key string) OpRecord {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if r := h.LastOp(key); r != nil && !r.Running {
+		// Ended, and its goroutine unregistered too (the tick leaves a
+		// server alone while its op is registered).
+		if r := h.LastOp(key); r != nil && !r.Running && !h.opRunOf(key) {
 			return *r
 		}
 		time.Sleep(5 * time.Millisecond)

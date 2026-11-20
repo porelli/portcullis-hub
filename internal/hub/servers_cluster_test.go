@@ -179,6 +179,14 @@ func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
 	return nodeagent.Health{ID: a.id, MeshPub: fakeMeshKey(a.id), K3s: "running", Time: now.Format(time.RFC3339), Peers: peers}, nil
 }
 
+// setRTT sets the nodes' RTT answers (under the fake's lock: the Hub's
+// collector may be reading them).
+func (f *fakeNodeadm) setRTT(m map[string]map[string]int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rtt = m
+}
+
 // RTT answers the node's round trips (not in calls).
 func (a fakeNodeagent) RTT(ctx context.Context) (map[string]int, error) {
 	a.f.mu.Lock()
@@ -463,7 +471,7 @@ func TestRemoveRefusedBelowQuorum(t *testing.T) {
 	}
 
 	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true), serverNode("n4", "10.215.0.4", true))
-	cf.na.refuse["drain:n4"] = &nodeadm.APIError{Status: 409, Kind: nodeadm.KindQuorumMinimum, Text: "removing n4 would leave fewer than 3 servers"}
+	cf.na.setRefuse("drain:n4", &nodeadm.APIError{Status: 409, Kind: nodeadm.KindQuorumMinimum, Text: "removing n4 would leave fewer than 3 servers"})
 	a, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n4", "n4", nodeadm.Cooperative)
 	if err != nil || a == nil || a.Op != OpNodeRemove {
 		t.Fatalf("%+v %v", a, err)
@@ -530,7 +538,7 @@ func TestWorkersRefusedOnKube(t *testing.T) {
 // before k3s joined voids the code and drops the entry.
 func TestSettleInterruptedClusterEnrol(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
-	cf.na.refuse["remove:n2:cooperative"] = errors.New("nodeadm down")
+	cf.na.setRefuse("remove:n2:cooperative", errors.New("nodeadm down"))
 	cf.h.mu.Lock()
 	cf.h.st.Servers = map[string]state.Server{"n2": {Kind: "cluster-node", State: ServerEnrolling, Enrol: &state.Enrol{Step: StepEnrolled}}}
 	cf.h.mu.Unlock()
@@ -538,7 +546,7 @@ func TestSettleInterruptedClusterEnrol(t *testing.T) {
 	if _, ok := cf.serverEntry("n2"); !ok {
 		t.Fatal("dropped although nodeadm didn't take the void")
 	}
-	delete(cf.na.refuse, "remove:n2:cooperative")
+	cf.na.setRefuse("remove:n2:cooperative", nil)
 	cf.h.settleClusterNodes(context.Background())
 	if s, _ := cf.serverEntry("n2"); s.State != ServerRevoked {
 		t.Fatalf("after the void: %+v, want revoked (watched)", s)
@@ -562,7 +570,7 @@ func TestRevokeParkedIsAccepted(t *testing.T) {
 		cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", false), serverNode("n3", "10.215.0.3", false))
 		var meshGone []string
 		cf.h.cl.meshRemove = func(_ context.Context, id string) error { meshGone = append(meshGone, id); return nil }
-		cf.na.refuse["remove:n3:revoke"] = refusal
+		cf.na.setRefuse("remove:n3:revoke", refusal)
 		_, parked, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke)
 		if err != nil || parked != refusal.Text {
 			t.Fatalf("%d: %q %v", refusal.Status, parked, err)
@@ -612,7 +620,7 @@ func TestRevokeParkedIsAccepted(t *testing.T) {
 			if !kept {
 				t.Error("an unconfirmed revocation dropped on time alone")
 			}
-			delete(cf.na.refuse, "remove:n3:revoke") // nodeadm now answers done
+			cf.na.setRefuse("remove:n3:revoke", nil) // nodeadm now answers done
 			cf.h.settleClusterNodes(context.Background())
 			if _, kept := cf.serverEntry("n3"); kept {
 				t.Error("kept after nodeadm confirmed and 10 min without a Node")
@@ -852,9 +860,9 @@ func TestRevokedNodeAppearsIsRevokedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	// nodeadm refuses the next revoke: still never an uncordon.
-	cf.na.refuse["remove:n4:revoke"] = &nodeadm.APIError{Status: 502, Text: "down"}
+	cf.na.setRefuse("remove:n4:revoke", &nodeadm.APIError{Status: 502, Text: "down"})
 	cf.h.settleClusterNodes(context.Background())
-	delete(cf.na.refuse, "remove:n4:revoke")
+	cf.na.setRefuse("remove:n4:revoke", nil)
 	cf.h.settleClusterNodes(context.Background())
 	c := cf.na.Calls()
 	if n := len(slices.DeleteFunc(slices.Clone(c), func(x string) bool { return x != "remove:n4:revoke" })); n != 3 {
@@ -891,7 +899,7 @@ func TestUnknownNodeIsNotProof(t *testing.T) {
 	cf.h.mu.Lock()
 	cf.h.st.Servers = map[string]state.Server{"n2": {Kind: "cluster-node", State: ServerEnrolling, MeshIP: "10.215.0.2", Enrol: &state.Enrol{Step: StepK3sJoined}}}
 	cf.h.mu.Unlock()
-	cf.na.refuse["remove:n2:revoke"] = &nodeadm.APIError{Status: 404, Kind: nodeadm.KindUnknownNode, Text: "unknown node n2"}
+	cf.na.setRefuse("remove:n2:revoke", &nodeadm.APIError{Status: 404, Kind: nodeadm.KindUnknownNode, Text: "unknown node n2"})
 	for i := 0; i < 5; i++ {
 		cf.h.settleClusterNodes(context.Background())
 		clock.add(time.Hour)
@@ -899,7 +907,7 @@ func TestUnknownNodeIsNotProof(t *testing.T) {
 	if s, ok := cf.serverEntry("n2"); !ok || s.State != ServerRevoked {
 		t.Fatalf("entry %+v %v: unknown_node and time alone dropped it", s, ok)
 	}
-	delete(cf.na.refuse, "remove:n2:revoke")
+	cf.na.setRefuse("remove:n2:revoke", nil)
 	cf.h.settleClusterNodes(context.Background()) // confirmed now; the gone clock runs on
 	clock.add(NodeGoneWait)
 	cf.h.settleClusterNodes(context.Background())
