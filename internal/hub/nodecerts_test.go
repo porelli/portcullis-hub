@@ -79,7 +79,7 @@ func TestControlCertIssuedOnceAndRenewed(t *testing.T) {
 	if _, _, err := sf.h.controlCert(context.Background()); err != nil || len(sf.ca.signs) != 1 {
 		t.Errorf("signed again: %v %v", sf.ca.signs, err)
 	}
-	if fi, err := os.Stat(filepath.Join(sf.data, "nodes", "control.key")); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(filepath.Join(sf.data, "nodes", controlPair)); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("key %v %v", fi, err)
 	}
 	now := time.Now()

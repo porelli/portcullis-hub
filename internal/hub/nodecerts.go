@@ -30,7 +30,8 @@ import (
 )
 
 // Node certificates (contract §17.5): the Hub's hub.control certificate
-// (its key at <data>/nodes/control.key, 0600, never leaves the Hub) and
+// (with its key in <data>/nodes/control.pem, 0600, never leaves the Hub;
+// the last good pair in control.prev.pem) and
 // the workers' node-worker certificates, signed by core's enroll
 // (POST /internal/nodes/sign|revoke, the invite bearer). The Hub never
 // holds a Vault token.
@@ -258,16 +259,23 @@ func (h *Hub) controlCert(ctx context.Context) (tls.Certificate, *x509.Certifica
 	if err := fsutil.MkdirAll(dir, 0o700); err != nil {
 		return keepOld(err)
 	}
-	// The CA is the pinned one (checked above); the key goes last. A write
-	// failing between control.crt and control.key leaves a pair
-	// loadControl refuses: the next call issues a new certificate.
-	for _, f := range []struct {
-		name string
-		b    []byte
-	}{{"ca.crt", []byte(nc.CA)}, {"control.crt", []byte(nc.Certificate)}, {"control.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})}} {
-		if err := fsutil.WriteFileAtomic(filepath.Join(dir, f.name), f.b, 0o600); err != nil {
-			return keepOld(err)
+	// The CA is the pinned one (checked above). The certificate and its
+	// key are one file, control.pem, written by one atomic write: a
+	// mismatched pair is never on disk. The current pair is kept first as
+	// control.prev.pem, the last good one loadControl falls back to.
+	if err == nil {
+		if cur, rerr := os.ReadFile(filepath.Join(dir, controlPair)); rerr == nil {
+			if werr := fsutil.WriteFileAtomic(filepath.Join(dir, controlPrev), cur, 0o600); werr != nil {
+				return keepOld(werr)
+			}
 		}
+	}
+	if werr := fsutil.WriteFileAtomic(filepath.Join(dir, "ca.crt"), []byte(nc.CA), 0o600); werr != nil {
+		return keepOld(werr)
+	}
+	pair := append([]byte(strings.TrimSpace(nc.Certificate)+"\n"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})...)
+	if werr := fsutil.WriteFileAtomic(filepath.Join(dir, controlPair), pair, 0o600); werr != nil {
+		return keepOld(werr)
 	}
 	// The control certificate it replaces is owed: the tick revokes it
 	// (B-L5, as ruling 50 for the workers').
@@ -281,16 +289,39 @@ func (h *Hub) controlCert(ctx context.Context) (tls.Certificate, *x509.Certifica
 	return loadControl(dir)
 }
 
+// controlPair / controlPrev are the control certificate and its key in
+// one PEM file (one atomic write), and the last good pair before it.
+const (
+	controlPair = "control.pem"
+	controlPrev = "control.prev.pem"
+)
+
+// loadControl is the control pair (control.pem, else the last good one,
+// control.prev.pem: a pair that doesn't load or match is never used)
+// with the pinned CA.
 func loadControl(dir string) (tls.Certificate, *x509.Certificate, error) {
-	crt, err1 := os.ReadFile(filepath.Join(dir, "control.crt"))
-	key, err2 := os.ReadFile(filepath.Join(dir, "control.key"))
-	caB, err3 := os.ReadFile(filepath.Join(dir, "ca.crt"))
-	if err1 != nil || err2 != nil || err3 != nil {
+	caB, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
 		return tls.Certificate{}, nil, errors.New("no control certificate yet")
 	}
-	c, err := tls.X509KeyPair(crt, key)
-	if err != nil {
-		return tls.Certificate{}, nil, err
+	var c tls.Certificate
+	var perr error = errors.New("no control certificate yet")
+	for _, name := range []string{controlPair, controlPrev} {
+		b, rerr := os.ReadFile(filepath.Join(dir, name))
+		if rerr != nil {
+			continue
+		}
+		if c, err = tls.X509KeyPair(b, b); err == nil {
+			perr = nil
+			if name == controlPrev {
+				log.Printf("servers: %s doesn't load: using the last good control certificate", controlPair)
+			}
+			break
+		}
+		perr = fmt.Errorf("%s: %w", name, err)
+	}
+	if perr != nil {
+		return tls.Certificate{}, nil, perr
 	}
 	ca, err := parseOnePEMCert(string(caB))
 	if err != nil {

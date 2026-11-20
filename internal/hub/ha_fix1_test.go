@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -155,8 +156,7 @@ func TestControlCertKeptWhenRenewalCantBeSaved(t *testing.T) {
 	der, _ := x509.CreateCertificate(rand.Reader, tpl, sf.ca.cert, &k.PublicKey, sf.ca.key)
 	kd, _ := x509.MarshalPKCS8PrivateKey(k)
 	dir := filepath.Join(sf.data, "nodes")
-	os.WriteFile(filepath.Join(dir, "control.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
-	os.WriteFile(filepath.Join(dir, "control.key"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}), 0o600)
+	os.WriteFile(filepath.Join(dir, controlPair), append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd})...), 0o600)
 	fsutil.SetWriteGate(func() error { return leader.ErrStandingBy })
 	t.Cleanup(func() { fsutil.SetWriteGate(nil) })
 	c, _, err := sf.h.controlCert(context.Background())
@@ -166,5 +166,80 @@ func TestControlCertKeptWhenRenewalCantBeSaved(t *testing.T) {
 	fsutil.SetWriteGate(nil)
 	if c, _, err = sf.h.controlCert(context.Background()); err != nil || c.Leaf.SerialNumber.Cmp(big.NewInt(4343)) == 0 {
 		t.Errorf("renewed once writable: %v", err)
+	}
+}
+
+// TestControlPairNeverTorn (round 2): the certificate and key are one
+// file written by one atomic write, the current pair kept first as the
+// last good one. A renewal cut after the last-good copy (the fence closes
+// before the pair is written) leaves the old pair loading; a pair on disk
+// that doesn't match (or doesn't load) is never used: the last good one
+// is.
+func TestControlPairNeverTorn(t *testing.T) {
+	sf := newServersFixture(t)
+	c1, _, err := sf.h.controlCert(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(sf.data, "nodes")
+	for _, old := range []string{"control.crt", "control.key"} {
+		if _, err := os.Stat(filepath.Join(dir, old)); err == nil {
+			t.Errorf("%s written: the pair is split", old)
+		}
+	}
+	// Make c1 due, then cut the renewal right after its first write.
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(4444), Subject: pkix.Name{CommonName: ControlCN}, NotBefore: time.Now().Add(-29 * 24 * time.Hour),
+		NotAfter: time.Now().Add(24 * time.Hour), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
+	der, _ := x509.CreateCertificate(rand.Reader, tpl, sf.ca.cert, &k.PublicKey, sf.ca.key)
+	kd, _ := x509.MarshalPKCS8PrivateKey(k)
+	due := append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd})...)
+	os.WriteFile(filepath.Join(dir, controlPair), due, 0o600)
+	var writes atomic.Int32
+	fsutil.SetWriteGate(func() error {
+		if writes.Add(1) > 1 {
+			return leader.ErrStandingBy
+		}
+		return nil
+	})
+	t.Cleanup(func() { fsutil.SetWriteGate(nil) })
+	c, _, err := sf.h.controlCert(context.Background())
+	if err != nil || c.Leaf.SerialNumber.Cmp(big.NewInt(4444)) != 0 {
+		t.Fatalf("cut renewal: %v", err)
+	}
+	fsutil.SetWriteGate(nil)
+	if b, _ := os.ReadFile(filepath.Join(dir, controlPair)); string(b) != string(due) {
+		t.Error("the pair changed although its write was refused")
+	}
+	if c, _, err = loadControl(dir); err != nil || c.Leaf.SerialNumber.Cmp(big.NewInt(4444)) != 0 {
+		t.Errorf("after the cut: %v", err)
+	}
+	// A pair that doesn't match (another key): the last good one loads.
+	os.WriteFile(filepath.Join(dir, controlPrev), due, 0o600)
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	od, _ := x509.MarshalPKCS8PrivateKey(other)
+	torn := append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c1.Leaf.Raw}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: od})...)
+	os.WriteFile(filepath.Join(dir, controlPair), torn, 0o600)
+	if c, _, err = loadControl(dir); err != nil || c.Leaf.SerialNumber.Cmp(big.NewInt(4444)) != 0 {
+		t.Errorf("mismatched pair: %v", err)
+	}
+	// Half a file: the same.
+	os.WriteFile(filepath.Join(dir, controlPair), due[:len(due)/2], 0o600)
+	if c, _, err = loadControl(dir); err != nil || c.Leaf.SerialNumber.Cmp(big.NewInt(4444)) != 0 {
+		t.Errorf("half a pair: %v", err)
+	}
+	// Neither loads: an error, never a mismatched pair.
+	os.WriteFile(filepath.Join(dir, controlPrev), torn, 0o600)
+	if _, _, err = loadControl(dir); err == nil {
+		t.Error("a mismatched pair loaded")
+	}
+	// A completed renewal keeps the pair it replaced as the last good one.
+	os.WriteFile(filepath.Join(dir, controlPair), due, 0o600)
+	os.Remove(filepath.Join(dir, controlPrev))
+	if c, _, err = sf.h.controlCert(context.Background()); err != nil || c.Leaf.SerialNumber.Cmp(big.NewInt(4444)) == 0 {
+		t.Fatalf("renewal: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, controlPrev)); string(b) != string(due) {
+		t.Error("the replaced pair isn't the last good one")
 	}
 }

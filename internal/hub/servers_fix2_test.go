@@ -243,8 +243,7 @@ func TestControlCertRenewalHygiene(t *testing.T) {
 	der, _ := x509.CreateCertificate(rand.Reader, tpl, sf.ca.cert, &k.PublicKey, sf.ca.key)
 	kd, _ := x509.MarshalPKCS8PrivateKey(k)
 	dir := filepath.Join(sf.data, "nodes")
-	os.WriteFile(filepath.Join(dir, "control.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
-	os.WriteFile(filepath.Join(dir, "control.key"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}), 0o600)
+	os.WriteFile(filepath.Join(dir, controlPair), append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd})...), 0o600)
 	c2, _, err := sf.h.controlCert(context.Background())
 	if err != nil || c2.Leaf.SerialNumber.Cmp(big.NewInt(4242)) == 0 || c2.Leaf.SerialNumber.Cmp(c1.Leaf.SerialNumber) == 0 {
 		t.Fatalf("renewal: %v", err)
