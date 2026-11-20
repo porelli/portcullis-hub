@@ -55,6 +55,22 @@ const MeshStaleAfter = 5 * time.Minute
 // handshake from another site before it counts as unreachable.
 const MeshConfirmWait = 2 * time.Minute
 
+// MeshReachableStale: a reachable endpoint without a confirming
+// handshake for this long is offered again (confirmed anew, or found
+// unreachable).
+const MeshReachableStale = 5 * time.Minute
+
+// MeshRetryUnreachable: an unreachable endpoint is offered again this
+// long after it was found so (a port forward can come back).
+const MeshRetryUnreachable = 30 * time.Minute
+
+// Flapping: an endpoint that changes more than meshFlapChanges times in
+// meshFlapWindow is unreachable for MeshRetryUnreachable.
+const (
+	meshFlapChanges = 3
+	meshFlapWindow  = 10 * time.Minute
+)
+
 // handshakeFresh: a handshake at most this old (by the reporting node's
 // own clock) confirms an endpoint.
 const handshakeFresh = 3 * time.Minute
@@ -300,6 +316,8 @@ func (h *Hub) recordMeshReports(snap nodeadm.Snapshot) {
 		switch {
 		case frozen && s.MeshPub != e.Mesh.Pub:
 			why = "its enrolment report changed its pcmesh key after its plan was pushed: ignored"
+		case frozen:
+			why = "its enrolment report changed its endpoints after its plan was pushed: ignored (enrol it again to change them)"
 		case !meshplan.ValidKey(e.Mesh.Pub):
 			why = "its enrolment report's pcmesh key isn't a WireGuard key: not recorded"
 		case holder != "" && holder != e.ID:
@@ -476,10 +494,10 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 
 // fetchPubs reads the pcmesh key of the nodes the Hub never saw from their
 // nodeagent's GET /v1/health (its id must answer) and persists it.
-func (h *Hub) fetchPubs(ctx context.Context, in meshInputs) error {
+func (h *Hub) fetchPubs(ctx context.Context, in meshInputs) (map[string]string, error) {
 	var mu sync.Mutex
 	var errs []string
-	got := map[string]string{}
+	got, failed := map[string]string{}, map[string]string{}
 	var wg sync.WaitGroup
 	for _, id := range in.fetch {
 		wg.Add(1)
@@ -499,6 +517,7 @@ func (h *Hub) fetchPubs(ctx context.Context, in meshInputs) error {
 			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("%s: %v", id, clipRunes(err.Error(), 160)))
+				failed[id] = clipRunes(err.Error(), 160)
 			} else {
 				got[id] = hl.MeshPub
 			}
@@ -520,17 +539,22 @@ func (h *Hub) fetchPubs(ctx context.Context, in meshInputs) error {
 	}
 	if len(errs) > 0 {
 		sort.Strings(errs)
-		return fmt.Errorf("the pcmesh key of %s", strings.Join(errs, "; "))
+		return failed, fmt.Errorf("the pcmesh key of %s", strings.Join(errs, "; "))
 	}
-	return nil
+	return failed, nil
 }
 
 // ── reachability ──
 
-// updateReach moves each offered public endpoint of a multi-site mesh to
-// reachable (a node at another site reports a fresh handshake with it, on
-// that endpoint) or, after MeshConfirmWait without one, to unreachable;
-// an endpoint that changed is offered again. Persisted in state.Mesh.
+// updateReach keeps each public endpoint's state in a multi-site mesh
+// (persisted in state.Mesh):
+//   - a new or changed endpoint is offered;
+//   - an offered one is reachable once a node at another site reports a
+//     fresh handshake with it on that endpoint, else unreachable after
+//     MeshConfirmWait;
+//   - a reachable one without such a handshake for MeshReachableStale is
+//     offered again;
+//   - an unreachable one is offered again after MeshRetryUnreachable.
 func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	all := append(slices.Clone(in.established), in.joining...)
 	siteOfID := map[string]string{}
@@ -547,38 +571,78 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	if h.st.Mesh == nil {
 		h.st.Mesh = map[string]state.MeshNode{}
 	}
-	var pending []string
+	var watch []string // offered or reachable: their handshakes are read
 	changed := false
 	for id, p := range in.public {
 		if _, ok := siteOfID[id]; !ok {
 			continue
 		}
 		r := h.st.Mesh[id]
-		if r.Public != p.String() || r.Reach == "" {
-			r.Public, r.Reach, r.OfferedAt = p.String(), state.ReachOffered, now
-			h.st.Mesh[id] = r
-			changed = true
+		switch {
+		case r.Reach == "":
+			r.Public, r.Reach, r.OfferedAt, r.CheckedAt = p.String(), state.ReachOffered, now, time.Time{}
+		case r.Public != p.String():
+			// A change: offered again, but an offer's clock keeps running
+			// (OfferedAt isn't reset); a flapping endpoint is held
+			// unreachable.
+			var recent []time.Time
+			for _, t := range r.Changes {
+				if now.Sub(t) < meshFlapWindow {
+					recent = append(recent, t)
+				}
+			}
+			r.Changes = append(recent, now)
+			r.Public = p.String()
+			switch {
+			case len(r.Changes) > meshFlapChanges:
+				r.Reach, r.CheckedAt, r.HoldUntil = state.ReachUnreachable, now, now.Add(MeshRetryUnreachable)
+				log.Printf("servers: the node mesh: %s's public endpoint changed %d times in %s: unreachable for %s", id, len(r.Changes), meshFlapWindow, MeshRetryUnreachable)
+			case now.Before(r.HoldUntil):
+				r.Reach = state.ReachUnreachable
+			case r.Reach == state.ReachOffered && !r.OfferedAt.IsZero():
+				// still the same offer
+			default:
+				r.Reach, r.OfferedAt = state.ReachOffered, now
+			}
+		case r.Reach == state.ReachUnreachable && now.Sub(r.CheckedAt) >= MeshRetryUnreachable && !now.Before(r.HoldUntil):
+			r.Reach, r.OfferedAt = state.ReachOffered, now
+			log.Printf("servers: the node mesh: offering %s's public endpoint %s again", id, r.Public)
+		default:
+			if r.Reach != state.ReachUnreachable {
+				watch = append(watch, id)
+			}
+			continue
 		}
-		if r.Reach == state.ReachOffered {
-			pending = append(pending, id)
+		h.st.Mesh[id] = r
+		changed = true
+		if r.Reach != state.ReachUnreachable {
+			watch = append(watch, id)
 		}
 	}
 	if changed {
 		h.saveLocked()
 	}
 	h.mu.Unlock()
-	if len(pending) == 0 {
+	if len(watch) == 0 {
 		return
 	}
-	// Every node's view of its peers (parallel; a silent one confirms
-	// nothing).
+	// The confirmers' views of their peers: only established nodes the
+	// plan kept (sanitizeEstablished) that hold their pushed plan; a
+	// joining, refused or flagged node's report never counts. Parallel; a
+	// silent one confirms nothing.
+	est, _ := sanitizeEstablished(in)
+	h.cl.ms.mu.Lock()
+	var confirmers []meshplan.Node
+	for _, n := range est {
+		if a := h.cl.ms.applied[n.ID]; a != "" && a == h.cl.ms.want[n.ID] && in.flags[n.ID] == "" {
+			confirmers = append(confirmers, n)
+		}
+	}
+	h.cl.ms.mu.Unlock()
 	var mu sync.Mutex
 	views := map[string]nodeagent.Health{}
 	var wg sync.WaitGroup
-	for _, n := range all {
-		if !validMeshKey(n.Pub) {
-			continue
-		}
+	for _, n := range confirmers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -599,25 +663,28 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	wg.Wait()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, x := range pending {
+	changed = false
+	for _, x := range watch {
 		r := h.st.Mesh[x]
 		confirmed := ""
 		for y, hl := range views {
-			if siteOfID[y] == siteOfID[x] {
-				continue
-			}
-			if handshakeConfirms(hl, x, r.Public) {
+			if siteOfID[y] != siteOfID[x] && handshakeConfirms(hl, x, r.Public) {
 				confirmed = y
 				break
 			}
 		}
 		switch {
 		case confirmed != "":
-			r.Reach = state.ReachReachable
-			log.Printf("servers: the node mesh: %s's public endpoint %s answers (a handshake from %s)", x, r.Public, confirmed)
-		case now.Sub(r.OfferedAt) >= MeshConfirmWait:
-			r.Reach = state.ReachUnreachable
+			if r.Reach != state.ReachReachable {
+				log.Printf("servers: the node mesh: %s's public endpoint %s answers (a handshake from %s)", x, r.Public, confirmed)
+			}
+			r.Reach, r.CheckedAt = state.ReachReachable, now
+		case r.Reach == state.ReachOffered && now.Sub(r.OfferedAt) >= MeshConfirmWait:
+			r.Reach, r.CheckedAt = state.ReachUnreachable, now
 			log.Printf("servers: the node mesh: no handshake with %s on %s within %s: it is planned as behind NAT", x, r.Public, MeshConfirmWait)
+		case r.Reach == state.ReachReachable && now.Sub(r.CheckedAt) > MeshReachableStale:
+			r.Reach, r.OfferedAt = state.ReachOffered, now
+			log.Printf("servers: the node mesh: no fresh handshake with %s on %s for %s: offered again", x, r.Public, MeshReachableStale)
 		default:
 			continue
 		}
@@ -797,17 +864,22 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 	defer h.cl.ms.run.Unlock()
 	h.recordMeshReports(snap)
 	in := h.meshInputsOf(snap)
+	var keyless map[string]string
 	if len(in.fetch) > 0 {
-		if err := h.fetchPubs(ctx, in); err != nil {
-			// Fail static: a node never seen would drop out of every plan;
-			// the current plans stay until its key is read (a node seen
-			// once is planned with its last-known key).
-			return err
+		var err error
+		if keyless, err = h.fetchPubs(ctx, in); err != nil {
+			// A node never seen whose key can't be read is left out and
+			// flagged; it never holds up the others (a node seen once is
+			// planned with its last-known key).
+			log.Printf("servers: %v", err)
 		}
-		in = h.meshInputsOf(snap)
 	}
+	in = h.meshInputsOf(snap)
 	h.updateReach(ctx, in)
 	in = h.meshInputsOf(snap)
+	for id, why := range keyless {
+		in.flags[id] = "its nodeagent didn't give its pcmesh key (" + why + "): left out of the mesh plan until it does"
+	}
 	plans, noGateway, refused, dropped, err := planMesh(in)
 	if err != nil {
 		return fmt.Errorf("the mesh plan: %v", err)
@@ -850,10 +922,10 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 	ms.refused = refused
 	ms.offered = offered
 	ms.inputFlags = map[string]string{}
-	for id, why := range in.flags {
+	for id, why := range dropped {
 		ms.inputFlags[id] = why
 	}
-	for id, why := range dropped {
+	for id, why := range in.flags {
 		ms.inputFlags[id] = why
 	}
 	wire := map[string]nodeagent.MeshPlan{}
@@ -966,7 +1038,7 @@ func (h *Hub) bootstrapMeshPlan(ctx context.Context, id, site, meshIP string, sn
 	h.recordMeshReports(snap)
 	in := h.meshInputsOf(snap)
 	if len(in.fetch) > 0 {
-		if err := h.fetchPubs(ctx, in); err != nil {
+		if _, err := h.fetchPubs(ctx, in); err != nil {
 			log.Printf("servers: the bootstrap plan of %s: %v (left out)", id, err)
 		}
 		in = h.meshInputsOf(snap)
@@ -1024,8 +1096,8 @@ func (h *Hub) meshReadyOf(ctx context.Context, id string) (bool, error) {
 	if why, ok := ms.refused[id]; ok {
 		return false, statusErr(http.StatusConflict, "%s", why)
 	}
-	if len(ms.offered) > 0 {
-		return false, nil // the reachability of an endpoint is still unknown
+	if meshWaitsOn(in, id, ms.offered) {
+		return false, nil // an endpoint its plan depends on is still unproven
 	}
 	want, ok := ms.want[id]
 	if !ok || ms.applied[id] != want {
@@ -1040,6 +1112,25 @@ func (h *Hub) meshReadyOf(ctx context.Context, id string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// meshWaitsOn: joiner id's plan depends on an offered endpoint: its own,
+// or the gateway candidate (the node Gateway picks with the offered
+// endpoints counted) of any site, its own included.
+func meshWaitsOn(in meshInputs, id string, offered []string) bool {
+	if len(offered) == 0 {
+		return false
+	}
+	if slices.Contains(offered, id) {
+		return true
+	}
+	all := append(slices.Clone(in.established), in.joining...)
+	for s := range siteSet(in) {
+		if g, ok := meshplan.Gateway(all, s); ok && slices.Contains(offered, g) {
+			return true
+		}
+	}
+	return false
 }
 
 // meshRemove takes node id out of every plan (persisted, until the

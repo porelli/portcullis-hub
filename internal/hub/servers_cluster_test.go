@@ -38,8 +38,10 @@ type fakeNodeadm struct {
 	meshOrder []string
 	// codeMesh: each code's bootstrap plan.
 	codeMesh []nodeadm.MeshPlan
-	// closed: endpoints ("<ip:port>") nothing answers on (no handshake).
+	// closed: endpoints ("<ip:port>") nothing answers on (no handshake);
+	// liar: nodes whose health claims a handshake on every endpoint.
 	closed map[string]bool
+	liar   map[string]bool
 }
 
 const testSecret = "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"
@@ -141,7 +143,7 @@ func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
 	a.f.mu.Lock()
 	for _, q := range a.f.mesh[a.id].Peers {
 		ps := nodeagent.PeerStatus{}
-		if q.Endpoint.Valid && !a.f.closed[q.Endpoint.V] {
+		if q.Endpoint.Valid && (!a.f.closed[q.Endpoint.V] || a.f.liar[a.id]) {
 			ps.LatestHandshake = jsonstrict.Some(now.Add(-10 * time.Second).Format(time.RFC3339))
 			ps.Endpoint = q.Endpoint
 		}

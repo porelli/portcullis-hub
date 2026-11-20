@@ -145,7 +145,15 @@ type MeshNode struct {
 	Public    string    `json:"public,omitempty" yaml:"public,omitempty"`
 	Reach     string    `json:"reach,omitempty" yaml:"reach,omitempty"`
 	OfferedAt time.Time `json:"offered_at,omitempty" yaml:"offered_at,omitempty"`
-	Removed   bool      `json:"removed,omitempty" yaml:"removed,omitempty"`
+	// CheckedAt: the last handshake that confirmed a reachable endpoint,
+	// or when it was found unreachable.
+	CheckedAt time.Time `json:"checked_at,omitempty" yaml:"checked_at,omitempty"`
+	// Changes: when Public changed lately (the last 10 min); HoldUntil: a
+	// flapping endpoint (more than 3 changes in 10 min) is unreachable
+	// until then.
+	Changes   []time.Time `json:"changes,omitempty" yaml:"changes,omitempty"`
+	HoldUntil time.Time   `json:"hold_until,omitempty" yaml:"hold_until,omitempty"`
+	Removed   bool        `json:"removed,omitempty" yaml:"removed,omitempty"`
 }
 
 // The public endpoint states of a MeshNode.
