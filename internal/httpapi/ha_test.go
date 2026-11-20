@@ -24,6 +24,16 @@ func TestHAEnableIsNotAnAPI(t *testing.T) {
 	if code, _ := e.do(t, "root", "POST", "/api/ha", `{}`); code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /api/ha: %d", code)
 	}
+	// Administrators only, never on the people listener.
+	mustDo(t, e.hub, "root", "PUT", "/api/directory/permissions/invite", `{"group":"helpers"}`, 200)
+	for _, user := range []string{"dana", "nobody", ""} {
+		if code, b := e.do(t, user, "GET", "/api/ha", ""); code != 403 {
+			t.Errorf("%q GET /api/ha = %d %s, want 403", user, code, b)
+		}
+	}
+	if resp, _ := doAs(t, e.ppl, "root", "GET", "/api/ha", ""); resp.StatusCode != 404 {
+		t.Errorf("people listener: %d", resp.StatusCode)
+	}
 	code, body := e.do(t, "root", "GET", "/api/ha", "")
 	if code != 200 {
 		t.Fatalf("GET /api/ha: %d %s", code, body)
