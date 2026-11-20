@@ -525,7 +525,7 @@ func TestMeshKeyRecordedOnceValid(t *testing.T) {
 	cf = newClusterFixture(t, twoSites()...)
 	cf.h.settleClusterNodes(ctx)
 	enrollingE2(cf, fakeMeshKey("e2"), StepMeshReady)
-	if ok, err := cf.h.meshReadyOf(ctx, "e2"); !ok || err != nil {
+	if ok, err := readyWithin(cf, "e2", 6); !ok || err != nil {
 		t.Fatalf("e2's own key: %v %v", ok, err)
 	}
 	cf.h.setEnrolStep("e2", StepK3sJoined)
@@ -703,17 +703,30 @@ func TestMeshEndpointBecomesReachable(t *testing.T) {
 	if rec := cf.meshRecord("n1"); rec.Reach != state.ReachOffered {
 		t.Fatalf("first push: %+v", rec)
 	}
-	if err := cf.h.pushMesh(ctx); err != nil {
-		t.Fatal(err)
+	// Both offered: the lower id (e1) waits and is dialled first, then
+	// n1 waits for the now reachable e1.
+	for i := 0; i < 3; i++ {
+		if err := cf.h.pushMesh(ctx); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, id := range []string{"n1", "e1"} {
 		if rec := cf.meshRecord(id); rec.Reach != state.ReachReachable {
 			t.Errorf("%s: %+v", id, rec)
 		}
 	}
+	// 10 min later: two reachable nodes can't prove each other with a
+	// session either may have started (N1), so a stale one is offered
+	// again, waits to be dialled and is confirmed again within a few
+	// ticks; it is never found unreachable while it answers.
 	advance(10 * time.Minute)
-	if err := cf.h.pushMesh(ctx); err != nil {
-		t.Fatal(err)
+	for i := 0; i < 4; i++ {
+		if err := cf.h.pushMesh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if rec := cf.meshRecord("n1"); rec.Reach == state.ReachUnreachable {
+			t.Fatalf("n1 unreachable while it answers: %+v", rec)
+		}
 	}
 	if rec := cf.meshRecord("n1"); rec.Reach != state.ReachReachable {
 		t.Errorf("n1 after 10 min: %+v", rec)
@@ -914,8 +927,9 @@ func TestMeshReachabilityRechecked(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	push()
-	push()
+	for i := 0; i < 4; i++ {
+		push()
+	}
 	if r := cf.meshRecord("n1"); r.Reach != state.ReachReachable {
 		t.Fatalf("n1 %+v", r)
 	}
@@ -988,36 +1002,6 @@ func TestMeshJoinerCantConfirm(t *testing.T) {
 	}
 }
 
-// TestMeshUnpushedNodeCantConfirm: an established node that doesn't hold
-// its current plan (its last push failed) confirms nothing, even if it
-// claims a handshake.
-func TestMeshUnpushedNodeCantConfirm(t *testing.T) {
-	ctx := context.Background()
-	cf := newClusterFixture(t, twoSites()...)
-	advance := fakeClockHub(cf)
-	cf.closeEndpoint("203.0.113.1:51830")
-	if err := cf.h.pushMesh(ctx); err != nil { // e1 holds its plan
-		t.Fatal(err)
-	}
-	cf.na.setRefuse("mesh:e1", errors.New("timeout"))
-	cf.na.mu.Lock()
-	cf.na.snap.Nodes = append(cf.na.snap.Nodes, siteNode("e3", "agent", "edge", "10.215.0.7", "198.18.0.7", ""))
-	cf.na.mu.Unlock()
-	cf.h.pushMesh(ctx) // a new plan for e1, which doesn't take it
-	cf.na.mu.Lock()
-	cf.na.liar = map[string]bool{"e1": true}
-	cf.na.mu.Unlock()
-	cf.h.pushMesh(ctx)
-	if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered {
-		t.Fatalf("n1 confirmed by e1 without its plan: %+v", r)
-	}
-	advance(MeshConfirmWait + time.Second)
-	cf.h.pushMesh(ctx)
-	if r := cf.meshRecord("n1"); r.Reach != state.ReachUnreachable {
-		t.Errorf("n1: %+v", r)
-	}
-}
-
 // TestMeshFlappingNodeDoesntBlockJoin: n3's public endpoint changes on
 // every snapshot. It isn't a gateway candidate (n1 is main's), so a join
 // at edge isn't held up by it; after more than 3 changes in 10 min it is
@@ -1071,7 +1055,7 @@ func TestMeshFlappingNodeDoesntBlockJoin(t *testing.T) {
 		t.Errorf("n3 offered again while held: %+v", r)
 	}
 	// A flapping gateway candidate does hold a join up: its own endpoint.
-	if !meshWaitsOn(meshInputs{established: []meshplan.Node{meshNodeOf("n1", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1")}}, "e9", []string{"n1"}) {
+	if !meshWaitsOn([]meshplan.Node{meshNodeOf("n1", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1")}, "e9", []string{"n1"}) {
 		t.Error("a join didn't wait on an offered gateway candidate")
 	}
 }
@@ -1097,5 +1081,191 @@ func TestMeshEndpointsFrozenAfterPush(t *testing.T) {
 	}
 	if why := cf.h.MeshStatus().Stale["e2"]; !strings.Contains(why, "changed its endpoints after its plan was pushed") {
 		t.Errorf("flag %q", why)
+	}
+}
+
+// readyWithin runs mesh_ready up to n rounds.
+func readyWithin(cf *clusterFixture, id string, n int) (bool, error) {
+	for i := 0; i < n; i++ {
+		ok, err := cf.h.meshReadyOf(context.Background(), id)
+		if ok || err != nil {
+			return ok, err
+		}
+	}
+	return false, nil
+}
+
+// TestMeshOutboundHandshakeProvesNothing (N1): a home n1 whose router
+// forwards only 443 but keeps the source port: its outbound session to the
+// reachable e1 shows e1 the peer n1 at exactly n1's offered endpoint. That
+// proves nothing (n1 dialled), so n1 stays offered, waits to be dialled
+// (no endpoint for its peers elsewhere) and is unreachable after 2 min;
+// a NATed node joining tb is then refused with the §20.11 text.
+func TestMeshOutboundHandshakeProvesNothing(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t,
+		siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1"),
+		siteNode("e1", "server", "edge", "10.215.0.5", "198.18.0.5", "203.0.113.5"))
+	advance := fakeClockHub(cf)
+	cf.closeEndpoint("203.0.113.1:51830")
+	cf.na.mu.Lock()
+	cf.na.outbound = map[string]string{"n1": "203.0.113.1:51830"} // port-preserving NAT
+	cf.na.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		if err := cf.h.pushMesh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered {
+			t.Fatalf("round %d: n1 %+v", i, r)
+		}
+	}
+	if p, _ := cf.na.meshOf("n1"); p.Peers[0].ID != "e1" || p.Peers[0].Endpoint.Valid {
+		t.Errorf("offered n1 doesn't wait to be dialled: %+v", p)
+	}
+	advance(MeshConfirmWait + time.Second)
+	if err := cf.h.pushMesh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachUnreachable {
+		t.Fatalf("n1 after 2 min: %+v", r)
+	}
+	cf.h.mu.Lock()
+	if cf.h.st.Servers == nil {
+		cf.h.st.Servers = map[string]state.Server{}
+	}
+	cf.h.st.Servers["t1"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "tb", MeshIP: "10.215.0.9", Enrol: &state.Enrol{Step: StepMeshReady}}
+	cf.h.mu.Unlock()
+	cf.na.mu.Lock()
+	cf.na.snap.Enrolling = []nodeadm.Enrolling{{ID: "t1", Role: "agent", Class: "home", Site: "tb", MeshIP: "10.215.0.9",
+		Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("t1"), LAN: jsonstrict.Some("198.18.1.9:51830")}}}
+	cf.na.mu.Unlock()
+	_, err := readyWithin(cf, "t1", 3)
+	if err == nil || !strings.Contains(err.Error(), "site tb needs one node reachable on UDP 51830 first") {
+		t.Errorf("the NATed tb joiner: %v", err)
+	}
+}
+
+// TestMeshFailoverMidConfirmation (N3): a Hub takeover in the middle of an
+// offer: the new Hub loads what the nodes hold and the freeze from state,
+// and an offered endpoint is never found unreachable before a full 2 min
+// after the new Hub's first push; a frozen joiner stays frozen.
+func TestMeshFailoverMidConfirmation(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	advance := fakeClockHub(cf)
+	cf.closeEndpoint("203.0.113.1:51830")
+	cf.h.settleClusterNodes(ctx)
+	enrollingE2(cf, fakeMeshKey("e2"), StepMeshReady)
+	cf.h.meshReadyOf(ctx, "e2")
+	if s, _ := cf.h.serverEntry("e2"); s.MeshPlanPushedAt.IsZero() {
+		t.Fatal("e2's first push wasn't recorded")
+	}
+	applied := cf.meshRecord("n2").Applied
+	if applied == "" {
+		t.Fatal("n2's applied plan wasn't persisted")
+	}
+	advance(90 * time.Second)
+	cf.h.cl.ms = meshState{allowDoc: true} // the takeover: memory gone
+	advance(60 * time.Second)              // 2.5 min since n1 was offered
+	cf.na.mu.Lock()
+	cf.na.meshOrder = nil
+	cf.na.snap.Enrolling[0].Mesh.Pub = fakeMeshKey("e2x")
+	cf.na.mu.Unlock()
+	cf.h.meshReadyOf(ctx, "e2")
+	cf.h.meshReadyOf(ctx, "e2") // the new Hub has pushed: its clock runs from here
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered {
+		t.Errorf("n1 judged right after the takeover: %+v", r)
+	}
+	if s, _ := cf.h.serverEntry("e2"); s.MeshPub != fakeMeshKey("e2") {
+		t.Errorf("e2 unfrozen by the takeover: %q", s.MeshPub)
+	}
+	cf.na.mu.Lock()
+	again := slices.Contains(cf.na.meshOrder, "n2")
+	cf.na.mu.Unlock()
+	if again && cf.meshRecord("n2").Applied == applied {
+		t.Error("n2's unchanged plan was pushed again after the takeover")
+	}
+	advance(MeshConfirmWait + time.Second)
+	cf.h.meshReadyOf(ctx, "e2")
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachUnreachable {
+		t.Errorf("n1 2 min after the new Hub's first push: %+v", r)
+	}
+}
+
+// confirmAll pushes until every public endpoint of the fixture is
+// reachable (both offered at first: one round each way).
+func confirmAll(t *testing.T, cf *clusterFixture, ids ...string) {
+	t.Helper()
+	for i := 0; i < 4; i++ {
+		if err := cf.h.pushMesh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range ids {
+		if r := cf.meshRecord(id); r.Reach != state.ReachReachable {
+			t.Fatalf("%s not confirmed: %+v", id, r)
+		}
+	}
+}
+
+// TestMeshUnpushedNodeCantConfirm: an established node that doesn't hold
+// its current plan (its push failed) confirms nothing, even claiming a
+// handshake on exactly the endpoint the plan it didn't take would dial.
+func TestMeshUnpushedNodeCantConfirm(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	advance := fakeClockHub(cf)
+	confirmAll(t, cf, "n1", "e1")
+	// n1's address changes to one nothing answers on; e1 can't take the
+	// plan that dials it, and lies.
+	cf.closeEndpoint("203.0.113.9:51830")
+	cf.na.setRefuse("mesh:e1", errors.New("timeout"))
+	cf.na.mu.Lock()
+	cf.na.snap.Node("n1").Addresses.Public = []string{"203.0.113.9"}
+	cf.na.claims = map[string]map[string]string{"e1": {"n1": "203.0.113.9:51830"}}
+	cf.na.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		cf.h.pushMesh(ctx)
+	}
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered {
+		t.Fatalf("n1 confirmed by e1 without its plan: %+v", r)
+	}
+	advance(MeshConfirmWait + time.Second)
+	cf.h.pushMesh(ctx)
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachUnreachable {
+		t.Errorf("n1: %+v", r)
+	}
+}
+
+// TestMeshRefusedNodeIsNoGatewayCandidate (N2): a refused joiner with a
+// public address and a lower id than edge's real gateway candidate never
+// stands in for it: e2 still waits while e1's (new) endpoint is unproven.
+func TestMeshRefusedNodeIsNoGatewayCandidate(t *testing.T) {
+	cf := newClusterFixture(t, twoSites()...)
+	fakeClockHub(cf)
+	confirmAll(t, cf, "n1", "e1")
+	cf.closeEndpoint("203.0.113.6:51830")
+	cf.na.mu.Lock()
+	cf.na.snap.Node("e1").Addresses.Public = []string{"203.0.113.6"} // offered again, never answers
+	cf.na.mu.Unlock()
+	enrollingE2(cf, fakeMeshKey("e2"), StepMeshReady)
+	cf.h.mu.Lock()
+	cf.h.st.Servers["e0"] = state.Server{Kind: state.KindClusterNode, State: ServerEnrolling, Site: "edge", MeshIP: "10.215.0.8", Enrol: &state.Enrol{Step: StepMeshReady}}
+	cf.h.mu.Unlock()
+	cf.na.mu.Lock()
+	cf.na.snap.Enrolling = append(cf.na.snap.Enrolling, nodeadm.Enrolling{ID: "e0", Role: "agent", Class: "home", Site: "edge", MeshIP: "10.215.0.8",
+		Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("n1"), LAN: jsonstrict.Some("198.18.0.8:51830"), Public: jsonstrict.Some("203.0.113.8:51830")}})
+	cf.na.mu.Unlock()
+	if _, err := readyWithin(cf, "e0", 2); err == nil || !strings.Contains(err.Error(), "used by another node") {
+		t.Fatalf("e0: %v", err)
+	}
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachReachable {
+		t.Fatalf("main's gateway n1 %+v", r)
+	}
+	if ok, err := readyWithin(cf, "e2", 4); ok || err != nil {
+		t.Errorf("e2 passed while edge's gateway candidate e1 is unproven: %v %v", ok, err)
+	}
+	if r := cf.meshRecord("e1"); r.Reach != state.ReachOffered {
+		t.Errorf("e1 %+v", r)
 	}
 }

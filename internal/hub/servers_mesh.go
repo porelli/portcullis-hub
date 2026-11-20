@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portcullis/hub/internal/jsonstrict"
 	"github.com/portcullis/hub/internal/meshplan"
 	"github.com/portcullis/hub/internal/nodeadm"
 	"github.com/portcullis/hub/internal/nodeagent"
@@ -107,6 +108,13 @@ type meshState struct {
 	refusedSites map[string]bool
 	// offered: nodes whose public endpoint awaits its confirmation.
 	offered []string
+	// wire: the plans of the last computation (applied == want: what the
+	// node holds); firstPush: when this Hub (a fresh start or a takeover)
+	// first reached the push stage, from which an offer's 2 min run at
+	// the earliest; loaded: applied was read from state.Mesh.
+	wire      map[string]nodeagent.MeshPlan
+	firstPush time.Time
+	loaded    bool
 	// allowDoc admits the documentation ranges as public (tests only).
 	allowDoc bool
 }
@@ -309,7 +317,7 @@ func (h *Hub) recordMeshReports(snap nodeadm.Snapshot) {
 		if s.MeshPub == e.Mesh.Pub && s.MeshLAN == lan && s.MeshPublic == pub {
 			continue
 		}
-		pushed := ms.applied[e.ID] != ""
+		pushed := !s.MeshPlanPushedAt.IsZero()
 		frozen := s.MeshPub != "" && (pushed || s.Enrol == nil || (s.Enrol.Step != StepEnrolled && s.Enrol.Step != StepMeshReady))
 		holder := used[meshplan.KeyID(e.Mesh.Pub)]
 		why := ""
@@ -633,11 +641,18 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	est, _ := sanitizeEstablished(in)
 	h.cl.ms.mu.Lock()
 	var confirmers []meshplan.Node
+	held := map[string]nodeagent.MeshPlan{} // the plans nodes hold now
+	for id, w := range h.cl.ms.wire {
+		if a := h.cl.ms.applied[id]; a != "" && a == h.cl.ms.want[id] {
+			held[id] = w
+		}
+	}
 	for _, n := range est {
-		if a := h.cl.ms.applied[n.ID]; a != "" && a == h.cl.ms.want[n.ID] && in.flags[n.ID] == "" {
+		if _, ok := held[n.ID]; ok && in.flags[n.ID] == "" {
 			confirmers = append(confirmers, n)
 		}
 	}
+	firstPush := h.cl.ms.firstPush
 	h.cl.ms.mu.Unlock()
 	var mu sync.Mutex
 	views := map[string]nodeagent.Health{}
@@ -668,7 +683,7 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 		r := h.st.Mesh[x]
 		confirmed := ""
 		for y, hl := range views {
-			if siteOfID[y] != siteOfID[x] && handshakeConfirms(hl, x, r.Public) {
+			if siteOfID[y] != siteOfID[x] && dialledIn(held, y, x, r.Public) && handshakeConfirms(hl, x, r.Public) {
 				confirmed = y
 				break
 			}
@@ -679,7 +694,7 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 				log.Printf("servers: the node mesh: %s's public endpoint %s answers (a handshake from %s)", x, r.Public, confirmed)
 			}
 			r.Reach, r.CheckedAt = state.ReachReachable, now
-		case r.Reach == state.ReachOffered && now.Sub(r.OfferedAt) >= MeshConfirmWait:
+		case r.Reach == state.ReachOffered && !firstPush.IsZero() && now.Sub(laterOf(r.OfferedAt, firstPush)) >= MeshConfirmWait:
 			r.Reach, r.CheckedAt = state.ReachUnreachable, now
 			log.Printf("servers: the node mesh: no handshake with %s on %s within %s: it is planned as behind NAT", x, r.Public, MeshConfirmWait)
 		case r.Reach == state.ReachReachable && now.Sub(r.CheckedAt) > MeshReachableStale:
@@ -693,6 +708,64 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	}
 	if changed {
 		h.saveLocked()
+	}
+}
+
+// dialledIn: confirmer y's handshake with x proves x answers on ep only
+// when y dialled x: the plan y holds lists x on ep, and the plan x holds
+// lists y with no endpoint (x waits to be dialled: it can't have started
+// the session, so a port-preserving NAT's outbound mapping proves
+// nothing).
+func dialledIn(held map[string]nodeagent.MeshPlan, y, x, ep string) bool {
+	yp, ok1 := held[y]
+	xp, ok2 := held[x]
+	if !ok1 || !ok2 {
+		return false
+	}
+	var toX, toY *nodeagent.MeshPeer
+	for i := range yp.Peers {
+		if yp.Peers[i].ID == x {
+			toX = &yp.Peers[i]
+		}
+	}
+	for i := range xp.Peers {
+		if xp.Peers[i].ID == y {
+			toY = &xp.Peers[i]
+		}
+	}
+	return toX != nil && toY != nil && toX.Endpoint.Valid && toX.Endpoint.V == ep && !toY.Endpoint.Valid
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// waitToBeDialled: while x's public endpoint is offered, x waits to be
+// dialled by its peers at other sites (their entries in x's plan lose
+// their endpoint), so a handshake proves the endpoint answers. Of two
+// offered nodes the lower id waits and the higher one dials (the lower is
+// confirmed first, then the other way round).
+func waitToBeDialled(wire map[string]nodeagent.MeshPlan, siteOfID map[string]string, offered []string) {
+	isOffered := map[string]bool{}
+	for _, id := range offered {
+		isOffered[id] = true
+	}
+	for _, x := range offered {
+		p, ok := wire[x]
+		if !ok {
+			continue
+		}
+		peers := slices.Clone(p.Peers)
+		for i, q := range peers {
+			if siteOfID[q.ID] != siteOfID[x] && (!isOffered[q.ID] || x < q.ID) {
+				peers[i].Endpoint = jsonstrict.Nullable[string]{}
+			}
+		}
+		p.Peers = peers
+		wire[x] = p
 	}
 }
 
@@ -863,6 +936,7 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 	h.cl.ms.run.Lock()
 	defer h.cl.ms.run.Unlock()
 	h.recordMeshReports(snap)
+	h.loadApplied()
 	in := h.meshInputsOf(snap)
 	var keyless map[string]string
 	if len(in.fetch) > 0 {
@@ -931,7 +1005,18 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 	wire := map[string]nodeagent.MeshPlan{}
 	for id, p := range plans {
 		wire[id] = nodeagent.WirePlan(p)
+	}
+	siteOfID := map[string]string{}
+	for _, n := range append(slices.Clone(in.established), in.joining...) {
+		siteOfID[n.ID] = n.Site
+	}
+	waitToBeDialled(wire, siteOfID, offered)
+	for id := range wire {
 		ms.want[id] = planHash(wire[id])
+	}
+	ms.wire = wire
+	if ms.firstPush.IsZero() {
+		ms.firstPush = now
 	}
 	for id := range ms.want {
 		if _, ok := plans[id]; !ok {
@@ -990,11 +1075,61 @@ func (h *Hub) syncMesh(ctx context.Context, snap nodeadm.Snapshot, force bool) e
 		return failed
 	}
 	failed := append(push(first), push(last)...)
+	// Persisted: what each node holds, and a joiner's first push (its key
+	// and endpoints frozen from then on).
+	h.mu.Lock()
+	ms.mu.Lock()
+	if h.st.Mesh == nil {
+		h.st.Mesh = map[string]state.MeshNode{}
+	}
+	saved := false
+	for id, w := range wire {
+		hash := planHash(w)
+		if ms.applied[id] != hash {
+			continue
+		}
+		if r := h.st.Mesh[id]; r.Applied != hash {
+			r.Applied = hash
+			h.st.Mesh[id] = r
+			saved = true
+		}
+		if s, ok := h.st.Servers[id]; ok && s.ClusterNode() && s.MeshPlanPushedAt.IsZero() {
+			s.MeshPlanPushedAt = now.UTC()
+			h.st.Servers[id] = s
+			saved = true
+		}
+	}
+	ms.mu.Unlock()
+	if saved {
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 	if len(failed) > 0 {
 		sort.Strings(failed)
 		return fmt.Errorf("the mesh plan didn't reach %s (retried every tick)", strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// loadApplied reads, once per Hub (a start or a takeover), the plan hash
+// each node last took from state.Mesh: an unchanged plan isn't pushed
+// again.
+func (h *Hub) loadApplied() {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ms := &h.cl.ms
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.init()
+	if ms.loaded {
+		return
+	}
+	ms.loaded = true
+	for id, r := range h.st.Mesh {
+		if r.Applied != "" && ms.applied[id] == "" {
+			ms.applied[id] = r.Applied
+		}
+	}
 }
 
 func siteSet(in meshInputs) map[string]bool {
@@ -1096,7 +1231,14 @@ func (h *Hub) meshReadyOf(ctx context.Context, id string) (bool, error) {
 	if why, ok := ms.refused[id]; ok {
 		return false, statusErr(http.StatusConflict, "%s", why)
 	}
-	if meshWaitsOn(in, id, ms.offered) {
+	est, _ := sanitizeEstablished(in)
+	candidates := slices.Clone(est)
+	for _, j := range in.joining {
+		if _, refused := ms.refused[j.ID]; !refused {
+			candidates = append(candidates, j)
+		}
+	}
+	if meshWaitsOn(candidates, id, ms.offered) {
 		return false, nil // an endpoint its plan depends on is still unproven
 	}
 	want, ok := ms.want[id]
@@ -1116,17 +1258,22 @@ func (h *Hub) meshReadyOf(ctx context.Context, id string) (bool, error) {
 
 // meshWaitsOn: joiner id's plan depends on an offered endpoint: its own,
 // or the gateway candidate (the node Gateway picks with the offered
-// endpoints counted) of any site, its own included.
-func meshWaitsOn(in meshInputs, id string, offered []string) bool {
+// endpoints counted) of any site, its own included. nodes are the nodes
+// the plan takes: the sanitised established ones and the admitted
+// joiners (a left-out or refused node is never a candidate).
+func meshWaitsOn(nodes []meshplan.Node, id string, offered []string) bool {
 	if len(offered) == 0 {
 		return false
 	}
 	if slices.Contains(offered, id) {
 		return true
 	}
-	all := append(slices.Clone(in.established), in.joining...)
-	for s := range siteSet(in) {
-		if g, ok := meshplan.Gateway(all, s); ok && slices.Contains(offered, g) {
+	sites := map[string]bool{}
+	for _, n := range nodes {
+		sites[n.Site] = true
+	}
+	for s := range sites {
+		if g, ok := meshplan.Gateway(nodes, s); ok && slices.Contains(offered, g) {
 			return true
 		}
 	}

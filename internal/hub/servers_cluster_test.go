@@ -42,6 +42,10 @@ type fakeNodeadm struct {
 	// liar: nodes whose health claims a handshake on every endpoint.
 	closed map[string]bool
 	liar   map[string]bool
+	// outbound: a node's source address as its peers see it when it dials;
+	// claims: forged handshakes a node reports (node → peer → endpoint).
+	outbound map[string]string
+	claims   map[string]map[string]string
 }
 
 const testSecret = "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"
@@ -136,16 +140,32 @@ func (a fakeNodeagent) Health(context.Context) (nodeagent.Health, error) {
 	if err != nil {
 		return nodeagent.Health{}, err
 	}
-	// Each plan peer with an endpoint that isn't closed has a fresh
-	// handshake on it (a reachable endpoint answers).
+	// A handshake with peer q when this node dialled it (its plan has an
+	// endpoint for q nothing closed), or when q dialled this node (q's
+	// plan has an endpoint for it): then the device holds q's source,
+	// outbound[q] (a port-preserving NAT's mapping) when set. A liar claims
+	// one on every endpoint its plan names.
 	now := time.Now().UTC()
+	fresh := jsonstrict.Some(now.Add(-10 * time.Second).Format(time.RFC3339))
 	peers := map[string]nodeagent.PeerStatus{}
 	a.f.mu.Lock()
 	for _, q := range a.f.mesh[a.id].Peers {
 		ps := nodeagent.PeerStatus{}
-		if q.Endpoint.Valid && (!a.f.closed[q.Endpoint.V] || a.f.liar[a.id]) {
-			ps.LatestHandshake = jsonstrict.Some(now.Add(-10 * time.Second).Format(time.RFC3339))
-			ps.Endpoint = q.Endpoint
+		switch {
+		case q.Endpoint.Valid && (!a.f.closed[q.Endpoint.V] || a.f.liar[a.id]):
+			ps.LatestHandshake, ps.Endpoint = fresh, q.Endpoint
+		default:
+			for _, back := range a.f.mesh[q.ID].Peers {
+				if back.ID == a.id && back.Endpoint.Valid && !a.f.closed[back.Endpoint.V] {
+					ps.LatestHandshake = fresh
+					if src := a.f.outbound[q.ID]; src != "" {
+						ps.Endpoint = jsonstrict.Some(src)
+					}
+				}
+			}
+		}
+		if ep := a.f.claims[a.id][q.ID]; ep != "" { // a forged report
+			ps.LatestHandshake, ps.Endpoint = fresh, jsonstrict.Some(ep)
 		}
 		peers[q.ID] = ps
 	}

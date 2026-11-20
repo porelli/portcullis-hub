@@ -49,6 +49,9 @@ type Server struct {
 	// a key, the later one is left out of the plan; zero: a node of init,
 	// the earliest).
 	MeshKeyAt time.Time `json:"mesh_key_at,omitempty" yaml:"mesh_key_at,omitempty"`
+	// MeshPlanPushedAt: when the node's own plan first reached its
+	// nodeagent; from then on its key and endpoints are frozen.
+	MeshPlanPushedAt time.Time `json:"mesh_plan_pushed_at,omitempty" yaml:"mesh_plan_pushed_at,omitempty"`
 	// RevokeParked is nodeadm's text of a parked revocation (its security
 	// steps done, the etcd member removed once quorum returns): the entry
 	// stays revoked until the cluster no longer lists the node.
@@ -154,6 +157,8 @@ type MeshNode struct {
 	Changes   []time.Time `json:"changes,omitempty" yaml:"changes,omitempty"`
 	HoldUntil time.Time   `json:"hold_until,omitempty" yaml:"hold_until,omitempty"`
 	Removed   bool        `json:"removed,omitempty" yaml:"removed,omitempty"`
+	// Applied is the hash of the plan the node's nodeagent last took.
+	Applied string `json:"applied,omitempty" yaml:"applied,omitempty"`
 }
 
 // The public endpoint states of a MeshNode.
