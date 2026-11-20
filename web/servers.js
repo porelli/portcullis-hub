@@ -167,6 +167,12 @@
 
   // detailHtml is one server's settings form (GET /api/servers/{id}).
   function detailHtml(d) {
+    if (d.kind === 'cluster-node') {
+      // A cluster node: its name only (no Local networks or backups).
+      return '<div class="inst-form" data-srv-settings="' + esc(d.id) + '" data-srv-cluster><label class="block">Name</label><input data-srv-name value="' + esc(d.name) + '" maxlength="64">' +
+        '<p><small>' + esc(d.role || '') + ' · ' + esc(d.class || '') + ' · site ' + esc(d.site || 'main') + (d.mesh_ip ? ' · mesh ' + esc(d.mesh_ip) : '') + '</small></p>' +
+        '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-srv-act="save">Save</button></div></div>';
+    }
     const prim = d.id === 'primary';
     const b = d.backup_schedule || { mode: 'off', hour: 0, weekday: 0 };
     let h = '<div class="inst-form" data-srv-settings="' + esc(d.id) + '">';
@@ -190,6 +196,7 @@
   }
 
   function readDetail(f, prim) {
+    if (f.hasAttribute && f.hasAttribute('data-srv-cluster')) return { name: f.querySelector('[data-srv-name]').value };
     const mode = f.querySelector('[data-srv-mode]').value;
     const body = { backup_schedule: { mode, hour: parseInt(f.querySelector('[data-srv-hour]').value, 10), weekday: mode === 'weekly' ? parseInt(f.querySelector('[data-srv-weekday]').value, 10) : 0 } };
     if (!prim) {
@@ -443,7 +450,8 @@
       try {
         const res = await window.apiCall('/api/servers/' + enc(id) + (verb === 'Revoke' ? '/revoke' : ''), verb === 'Revoke' ? 'POST' : 'DELETE', Object.assign({ confirm: typed }, proof));
         const ans = res && res.json ? await res.json().catch(() => ({})) : {};
-        window.showToast(verb === 'Revoke' ? 'Revoked.' : ans.op === 'node_remove' ? 'Removing: follow it on the node\'s row.' : 'Removed.', 'success');
+        window.showToast(verb === 'Revoke' ? (ans.parked ? 'Revoked; waiting for quorum to remove its etcd member. ' + (ans.warning || '') : 'Revoked.')
+          : ans.op === 'node_remove' ? 'Removing: follow it on the node\'s row.' : 'Removed.', ans.parked ? 'warning' : 'success');
         render(root);
       } catch (err) {
         if (btn) delete btn.dataset.busy;

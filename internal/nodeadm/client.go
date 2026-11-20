@@ -105,7 +105,7 @@ func (c *Client) IssueCode(ctx context.Context, r CodeRequest) (CodeAnswer, erro
 	if err != nil {
 		return CodeAnswer{}, err
 	}
-	if !strings.HasPrefix(a.Code, "pcj2.") {
+	if !strings.HasPrefix(a.Code.Reveal(), "pcj2.") {
 		return CodeAnswer{}, errors.New("nodeadm answered no join code")
 	}
 	return a, nil

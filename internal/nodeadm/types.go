@@ -5,7 +5,13 @@
 // vectors nodeadm_api_vectors.json (a byte copy of core's).
 package nodeadm
 
-import "github.com/portcullis/hub/internal/jsonstrict"
+import (
+	"encoding/json"
+	"log/slog"
+
+	"github.com/portcullis/hub/internal/jsonstrict"
+	"github.com/portcullis/hub/internal/servers"
+)
 
 // MeshPeer is one peer of a mesh plan (§20.4 PUT /v1/mesh/peers).
 type MeshPeer struct {
@@ -41,11 +47,12 @@ type CodeRequest struct {
 	Mesh     MeshPlan `json:"mesh"`
 }
 
-// CodeAnswer is POST /v1/codes' 201. Code is a secret (the join code v2):
-// String redacts it.
+// CodeAnswer is POST /v1/codes' 201. Code is a secret (the join code
+// v2): String, GoString, MarshalJSON and LogValue redact it (the code's
+// own type redacts it too).
 type CodeAnswer struct {
-	Code      string `json:"code"`
-	ExpiresAt string `json:"expires_at"`
+	Code      servers.JoinCodeSecret `json:"code"`
+	ExpiresAt string                 `json:"expires_at"`
 }
 
 // String redacts the code.
@@ -55,6 +62,14 @@ func (a CodeAnswer) String() string {
 
 // GoString redacts the code.
 func (a CodeAnswer) GoString() string { return a.String() }
+
+// MarshalJSON redacts the code.
+func (a CodeAnswer) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]string{"code": "<redacted>", "expires_at": a.ExpiresAt})
+}
+
+// LogValue redacts the code (log/slog).
+func (a CodeAnswer) LogValue() slog.Value { return slog.StringValue(a.String()) }
 
 // Labels is PUT /v1/nodes/{id}/labels (all four: a full replacement).
 type Labels struct {

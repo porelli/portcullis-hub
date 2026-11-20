@@ -218,6 +218,7 @@ func (h *Hub) serversLocked() []ServerView {
 		clusterViewFields(&v, s)
 		out = append(out, v)
 	}
+	out = append(out, h.initNodeViewsLocked()...)
 	for _, iid := range byServer[""] {
 		out[0].Instances = append(out[0].Instances, iid)
 	}

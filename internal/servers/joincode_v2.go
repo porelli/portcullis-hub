@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -287,3 +288,28 @@ func v2Strings(raw json.RawMessage, dst *[]string) bool {
 	*dst = out
 	return true
 }
+
+// JoinCodeSecret is a whole join code as it travels from nodeadm to the
+// one answer that shows it (review M1): String, GoString, MarshalJSON and
+// LogValue redact it, so a code printed, logged or serialised by
+// accident shows nothing; Reveal is called only by the writers of that
+// answer (the 201 of POST /api/servers and of the host socket's twin).
+type JoinCodeSecret string
+
+// Reveal is the code itself.
+func (c JoinCodeSecret) Reveal() string { return string(c) }
+
+// String redacts the code.
+func (c JoinCodeSecret) String() string { return "<join code>" }
+
+// GoString redacts the code.
+func (c JoinCodeSecret) GoString() string { return c.String() }
+
+// MarshalJSON redacts the code.
+func (c JoinCodeSecret) MarshalJSON() ([]byte, error) { return []byte(`"<redacted>"`), nil }
+
+// LogValue redacts the code (log/slog).
+func (c JoinCodeSecret) LogValue() slog.Value { return slog.StringValue("<join code>") }
+
+// LogValue redacts the secret (log/slog).
+func (c JoinCodeV2) LogValue() slog.Value { return slog.StringValue(c.String()) }

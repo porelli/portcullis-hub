@@ -152,7 +152,7 @@ func (s *Server) addClusterNode(w http.ResponseWriter, r *http.Request, b addSer
 		writeAPIErr(w, err)
 		return
 	}
-	writeJSONStatus(w, http.StatusCreated, addedClusterNode{Code: code, ClusterNodeAdded: out})
+	writeJSONStatus(w, http.StatusCreated, addedClusterNode{Code: code.Reveal(), ClusterNodeAdded: out})
 }
 
 // addedServer is POST /api/servers' 201: the code once, its expiry and
@@ -209,7 +209,16 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "role, class, site, ingress and storage are a cluster node's (kind cluster-node)", http.StatusBadRequest)
 			return
 		}
+		if s.Hub.ClusterNodesMode() {
+			// R9, before the proof is spent (review M2).
+			writeAPIErr(w, hub.ErrWorkersOnKube())
+			return
+		}
 	case state.KindClusterNode:
+		if !s.Hub.ClusterNodesMode() {
+			writeAPIErr(w, hub.ErrClusterOnDocker())
+			return
+		}
 		s.addClusterNode(w, r, b)
 		return
 	default:
@@ -378,11 +387,12 @@ func (s *Server) handleRevokeServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Hub.ClusterNodesMode() {
 		s.rec("RevokeClusterNode", id)
-		if _, err := s.Hub.RemoveClusterNode(r.Context(), requestActor(r), id, b.Confirm, nodeadm.Revoke); err != nil {
+		_, parked, err := s.Hub.RemoveClusterNode(r.Context(), requestActor(r), id, b.Confirm, nodeadm.Revoke)
+		if err != nil {
 			writeAPIErr(w, err)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "revoked", "server": id})
+		writeRevoked(w, id, parked)
 		return
 	}
 	s.rec("RevokeServer", id)
@@ -416,7 +426,7 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Hub.ClusterNodesMode() {
 		s.rec("RemoveClusterNode", id)
-		op, err := s.Hub.RemoveClusterNode(r.Context(), requestActor(r), id, b.Confirm, nodeadm.Cooperative)
+		op, _, err := s.Hub.RemoveClusterNode(r.Context(), requestActor(r), id, b.Confirm, nodeadm.Cooperative)
 		if err != nil {
 			writeAPIErr(w, err)
 			return
@@ -554,4 +564,16 @@ func (s *Server) handleLiftQuarantine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "lifted", "instance": id})
+}
+
+// writeRevoked answers a cluster node's revocation: 200, or 202 with
+// nodeadm's text when it is parked (its security steps done; the etcd
+// member goes once quorum returns: review I1).
+func writeRevoked(w http.ResponseWriter, id, parked string) {
+	if parked == "" {
+		writeJSON(w, map[string]string{"status": "revoked", "server": id})
+		return
+	}
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{"status": "revoked", "server": id, "parked": true, "warning": parked,
+		"detail": hub.ParkedRevokeText})
 }

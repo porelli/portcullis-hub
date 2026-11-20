@@ -38,6 +38,10 @@ type Server struct {
 	Site   string      `json:"site,omitempty" yaml:"site,omitempty"`
 	MeshIP string      `json:"mesh_ip,omitempty" yaml:"mesh_ip,omitempty"`
 	Labels *NodeLabels `json:"labels,omitempty" yaml:"labels,omitempty"`
+	// RevokeParked is nodeadm's text of a parked revocation (its security
+	// steps done, the etcd member removed once quorum returns): the entry
+	// stays revoked until the cluster no longer lists the node.
+	RevokeParked string `json:"revoke_parked,omitempty" yaml:"revoke_parked,omitempty"`
 }
 
 // The server kinds.

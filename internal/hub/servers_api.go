@@ -50,6 +50,9 @@ func (h *Hub) ServerDetailOf(ctx context.Context, id string) (*ServerDetail, err
 			}
 			d.BindRoots = slices.Clone(h.bindRoots)
 			d.BackupSchedule = h.st.PrimaryBackups
+		} else if v.Kind == state.KindClusterNode {
+			// A cluster node has neither (review M7): its name only.
+			d.LocalNetworks, d.BackupSchedule = []string{}, state.BackupSchedule{Mode: "off"}
 		} else {
 			s := h.st.Servers[id]
 			if s.LocalNetworks == nil {
@@ -164,6 +167,10 @@ func (h *Hub) SetServerSettings(ctx context.Context, actor directory.Actor, id s
 	if s.State == ServerRevoked {
 		h.mu.Unlock()
 		return statusErr(http.StatusConflict, "server %s is revoked: remove it", id)
+	}
+	if s.ClusterNode() && (in.LocalNetworks != nil || in.LocalNetworksDefault || in.BackupSchedule != nil) {
+		h.mu.Unlock()
+		return statusErr(http.StatusConflict, "a cluster node's settings here are its name only")
 	}
 	prev := s
 	prevEnv := map[string]string{}

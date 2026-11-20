@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -133,6 +135,10 @@ func TestNodeadmClientVectors(t *testing.T) {
 				t.Errorf("%s: %v", c.Name, err)
 				continue
 			}
+			if ca, ok := got.(CodeAnswer); ok {
+				// Its MarshalJSON redacts: the fields themselves.
+				got = map[string]string{"code": ca.Code.Reveal(), "expires_at": ca.ExpiresAt}
+			}
 			if got != nil {
 				b, _ := json.Marshal(got)
 				if !jsonEqual(b, c.Response.Body) {
@@ -199,7 +205,11 @@ func TestNodeadmClientFenced(t *testing.T) {
 // TestCodeAnswerRedacted: a code answer never prints its code.
 func TestCodeAnswerRedacted(t *testing.T) {
 	a := CodeAnswer{Code: "pcj2.SECRET", ExpiresAt: "2026-11-18T10:15:00Z"}
-	for _, s := range []string{a.String(), a.GoString()} {
+	js, _ := json.Marshal(a)
+	jsc, _ := json.Marshal(map[string]any{"c": a.Code})
+	var logged bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logged, nil)).Info("x", "answer", a, "code", a.Code)
+	for _, s := range []string{a.String(), a.GoString(), string(js), string(jsc), logged.String(), fmt.Sprintf("%v %+v %#v %s", a, a, a.Code, a.Code)} {
 		if strings.Contains(s, "SECRET") {
 			t.Errorf("%q carries the code", s)
 		}

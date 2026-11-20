@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,6 +101,9 @@ type clusterNodes struct {
 	// adding: adds between their entry and their op (the settle tick
 	// leaves them alone).
 	adding map[string]bool
+	// last is the last snapshot read (the list shows the nodes the Hub
+	// didn't add: the ones of init).
+	last *nodeadm.Snapshot
 }
 
 func (h *Hub) markAdding(id string, on bool) {
@@ -127,6 +131,11 @@ func (h *Hub) SetNodeadm(api NodeadmAPI) {
 	h.cl.api = api
 	h.cl.mu.Unlock()
 }
+
+// ErrWorkersOnKube / ErrClusterOnDocker are the R9 refusals (409), for
+// the routes' checks before a proof is spent.
+func ErrWorkersOnKube() error   { return statusErr(http.StatusConflict, errWorkersOnKube) }
+func ErrClusterOnDocker() error { return statusErr(http.StatusConflict, errClusterOnDocker) }
 
 // ClusterNodesMode: Servers manages cluster nodes (a Kubernetes primary,
 // R9), not Docker workers.
@@ -231,7 +240,15 @@ func nodeadmErr(err error) error {
 	var ae *nodeadm.APIError
 	if errors.As(err, &ae) {
 		code := ae.Status
-		if code < 400 || (code >= 500 && code != http.StatusServiceUnavailable) {
+		switch {
+		case code == http.StatusForbidden:
+			// Never a 403: on the † routes it means "a fresh sign-in is
+			// required".
+			return statusErr(http.StatusBadGateway, "nodeadm refused the Hub's certificate")
+		case code == http.StatusServiceUnavailable:
+			// Not the Hub's own "standing by".
+			return statusErr(code, "nodeadm: %s", ae.Error())
+		case code < 400 || code >= 500:
 			code = http.StatusBadGateway
 		}
 		return statusErr(code, "%s", ae.Error())
@@ -295,10 +312,10 @@ func CheckClusterNodeInput(r AddClusterNodeRequest) error {
 	return nil
 }
 
-// clusterSuggestInput: the snapshot's nodes plus the Hub's own nodes not
+// clusterSuggestInputLocked: the snapshot's nodes plus the Hub's own nodes not
 // in it yet (an enrolment in progress counts as a healthy node of its
-// role, so two adds don't both take the third server).
-func (h *Hub) clusterSuggestInput(snap nodeadm.Snapshot) []servers.ClusterNode {
+// role, so two adds don't both take the third server). Caller holds mu.
+func (h *Hub) clusterSuggestInputLocked(snap nodeadm.Snapshot) []servers.ClusterNode {
 	seen := map[string]bool{}
 	var out []servers.ClusterNode
 	for _, n := range snap.Nodes {
@@ -315,8 +332,6 @@ func (h *Hub) clusterSuggestInput(snap nodeadm.Snapshot) []servers.ClusterNode {
 			out = append(out, servers.ClusterNode{ID: e.ID, Site: e.Site, Role: e.Role, Healthy: true})
 		}
 	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
 	for id, s := range h.st.Servers {
 		if s.ClusterNode() && !seen[id] && s.State == ServerEnrolling {
 			out = append(out, servers.ClusterNode{ID: id, Site: s.Site, Role: s.Role, Healthy: true})
@@ -354,7 +369,7 @@ func (h *Hub) allocMeshIPLocked(snap nodeadm.Snapshot) (string, error) {
 // address, the code from nodeadm (shown once: in no state field, op
 // record, log line or audit entry), the audit server.add and the
 // server_enrol op. Refused on Docker and Podman.
-func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddClusterNodeRequest) (out ClusterNodeAdded, code string, err error) {
+func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddClusterNodeRequest) (out ClusterNodeAdded, code servers.JoinCodeSecret, err error) {
 	defer func() {
 		if err != nil {
 			h.auditOp(actor, "server.add", r.ID, "kind cluster-node", err)
@@ -371,20 +386,21 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 	if err != nil {
 		return out, "", err
 	}
-	snap, err := api.Cluster(ctx)
+	snap, err := h.clusterSnapshot(ctx, api)
 	if err != nil {
 		return out, "", nodeadmErr(err)
 	}
 	if snap.Node(r.ID) != nil || snap.EnrollingNode(r.ID) != nil {
 		return out, "", statusErr(http.StatusConflict, "server %s exists", r.ID)
 	}
+	// The pinned pki_node CA: the code's ca_sha256 must name it (M8).
+	_, ca, err := h.controlCert(ctx)
+	if err != nil {
+		return out, "", err
+	}
 	site := r.Site
 	if site == "" {
 		site = servers.PrimarySite
-	}
-	role, warnings, err := servers.SuggestRole(h.clusterSuggestInput(snap), servers.NewNode{Site: site, Override: r.Role})
-	if err != nil {
-		return out, "", statusErr(http.StatusConflict, "%v", err)
 	}
 	class := r.Class
 	if class == "" {
@@ -403,6 +419,13 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 	if _, ok := h.st.Servers[r.ID]; ok {
 		h.mu.Unlock()
 		return out, "", statusErr(http.StatusConflict, "server %s exists", r.ID)
+	}
+	// Under mu with the entry's save: two adds never both take the third
+	// server or pass the cap.
+	role, warnings, err := servers.SuggestRole(h.clusterSuggestInputLocked(snap), servers.NewNode{Site: site, Override: r.Role})
+	if err != nil {
+		h.mu.Unlock()
+		return out, "", statusErr(http.StatusConflict, "%v", err)
 	}
 	meshIP, err := h.allocMeshIPLocked(snap)
 	if err != nil {
@@ -441,9 +464,10 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 	}
 	// The code must be the one asked for (a strict decode; its errors
 	// never carry the code).
-	jc, derr := servers.DecodeJoinCodeV2(ans.Code)
+	jc, derr := servers.DecodeJoinCodeV2(ans.Code.Reveal())
 	expires, terr := time.Parse(time.RFC3339, ans.ExpiresAt)
-	if derr != nil || terr != nil || jc.ServerID != r.ID || jc.Role != role || jc.Class != class || jc.Site != site || jc.MeshIP != meshIP {
+	if derr != nil || terr != nil || jc.ServerID != r.ID || jc.Role != role || jc.Class != class || jc.Site != site || jc.MeshIP != meshIP ||
+		jc.CASHA256 != caSHA256(ca) || jc.Endpoint != "https://"+h.cfg.Domain+"/node" {
 		h.voidCode(r.ID)
 		forget()
 		why := "it doesn't match the request"
@@ -459,9 +483,10 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 		h.saveLocked()
 	}
 	h.mu.Unlock()
-	h.auditOp(actor, "server.add", r.ID, fmt.Sprintf("kind cluster-node, name %q, role %s, class %s, site %s, mesh address %s, ingress %t, storage %t",
-		name, role, class, site, meshIP, ingress, storage), nil)
 	a, _, err := h.startOp(serverOpKey(r.ID), OpServerEnrol, actor, clusterEnrolPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
+		// Audited ok only once the op is sure to start (ready can't fail).
+		h.auditOp(actor, "server.add", r.ID, fmt.Sprintf("kind cluster-node, name %q, role %s, class %s, site %s, mesh address %s, ingress %t, storage %t",
+			name, role, class, site, meshIP, ingress, storage), nil)
 		ready()
 		return nil, nil, h.runClusterEnrol(ctx, r.ID, actor)
 	})
@@ -476,6 +501,25 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 		out.Notice = ServerJoinNotice
 	}
 	return out, ans.Code, nil
+}
+
+// clusterSnapshot reads GET /v1/cluster and keeps it as the last
+// snapshot (the list's nodes from init, M5).
+func (h *Hub) clusterSnapshot(ctx context.Context, api NodeadmAPI) (nodeadm.Snapshot, error) {
+	snap, err := api.Cluster(ctx)
+	if err == nil {
+		h.cl.mu.Lock()
+		h.cl.last = &snap
+		h.cl.mu.Unlock()
+	}
+	return snap, err
+}
+
+// lastSnapshot is the last snapshot read (nil: none yet).
+func (h *Hub) lastSnapshot() *nodeadm.Snapshot {
+	h.cl.mu.Lock()
+	defer h.cl.mu.Unlock()
+	return h.cl.last
 }
 
 func clusterEnrolPlan() []Step {
@@ -526,28 +570,11 @@ func (h *Hub) voidCode(id string) bool {
 // as a removal does.
 func (h *Hub) runClusterEnrol(ctx context.Context, id string, actor directory.Actor) error {
 	p := progressFrom(ctx)
-	joined := false
 	undo := func(step string, cause error) error {
 		stopped := ctx.Err() != nil
-		if !joined {
-			if h.voidCode(id) {
-				h.mu.Lock()
-				if s, ok := h.st.Servers[id]; ok && s.ClusterNode() && s.State == ServerEnrolling {
-					delete(h.st.Servers, id)
-					h.saveLocked()
-				}
-				h.mu.Unlock()
-			}
-		} else {
-			// A fresh context: the op's own reporter would refuse the
-			// removal's commit once a Stop was accepted.
-			cctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-			if err := h.removeClusterNodeSteps(cctx, id, nil); err != nil {
-				log.Printf("servers: removing %s after its enrolment ended: %v", id, err)
-				h.setClusterState(id, ServerReady, "")
-			}
-			cancel()
-		}
+		// Never only a void once the node may have joined (I2): the
+		// snapshot decides, read now.
+		h.endClusterEnrol(id, actor, nil)
 		if stopped {
 			p.Undone(step)
 			return ErrStopped
@@ -624,7 +651,6 @@ func (h *Hub) runClusterEnrol(ctx context.Context, id string, actor directory.Ac
 	}); err != nil {
 		return undo(StepK3sJoined, err)
 	}
-	joined = true
 	if err := wait(StepNodeReady, h.now().Add(clusterReadyWait), "the node didn't become Ready within 10 minutes", func(sn nodeadm.Snapshot) (bool, error) {
 		n := sn.Node(id)
 		return n != nil && n.Ready, nil
@@ -717,61 +743,85 @@ func quorumMinimumText(id string) string {
 // uninstall → its mesh peer out of every plan) or revokes (mode revoke:
 // DELETE …?mode=revoke and the mesh peer at once) cluster node id; typed
 // must be the id. A server whose removal would leave fewer than 3 healthy
-// servers is refused 409 with nodeadm's text. The op is nil for a revoke.
-func (h *Hub) RemoveClusterNode(ctx context.Context, actor directory.Actor, id, typed string, mode nodeadm.RemoveMode) (a *AsyncOp, err error) {
+// servers is refused 409 with nodeadm's text. The op is nil for a revoke;
+// parked is nodeadm's text when the revocation is parked (its security
+// steps done, the node's etcd member waiting for quorum: accepted, the
+// entry kept revoked until the cluster no longer lists the node).
+func (h *Hub) RemoveClusterNode(ctx context.Context, actor directory.Actor, id, typed string, mode nodeadm.RemoveMode) (a *AsyncOp, parked string, err error) {
 	action := "server.removed"
 	if mode == nodeadm.Revoke {
 		action = "server.revoked"
 	}
 	defer func() {
 		if err != nil || mode == nodeadm.Revoke {
-			h.auditOp(actor, action, id, "kind cluster-node", err)
+			detail := "kind cluster-node"
+			if parked != "" {
+				detail += ", parked: " + parked
+			}
+			h.auditOp(actor, action, id, detail, err)
 		}
 	}()
 	switch {
 	case actor.User == "":
-		return nil, statusErr(http.StatusUnauthorized, "no acting user")
+		return nil, "", statusErr(http.StatusUnauthorized, "no acting user")
 	case servers.ValidID(id) != nil:
-		return nil, statusErr(http.StatusBadRequest, "invalid server id")
+		return nil, "", statusErr(http.StatusBadRequest, "invalid server id")
 	case typed != id:
-		return nil, statusErr(http.StatusBadRequest, "type the server id (%s) to confirm", id)
+		return nil, "", statusErr(http.StatusBadRequest, "type the server id (%s) to confirm", id)
 	case mode != nodeadm.Cooperative && mode != nodeadm.Revoke:
-		return nil, statusErr(http.StatusBadRequest, "mode must be cooperative or revoke")
+		return nil, "", statusErr(http.StatusBadRequest, "mode must be cooperative or revoke")
 	}
 	api, err := h.nodeadmAPI(ctx)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	h.mu.RLock()
 	s, listed := h.st.Servers[id]
 	h.mu.RUnlock()
 	if listed && !s.ClusterNode() {
-		return nil, statusErr(http.StatusConflict, "server %s isn't a cluster node", id)
+		return nil, "", statusErr(http.StatusConflict, "server %s isn't a cluster node", id)
 	}
 	if listed && (s.State == ServerEnrolling || s.State == ServerRemoving) {
-		return nil, statusErr(http.StatusConflict, "server %s is %s: stop its operation first (a Stop of an enrolment voids its code)", id, s.State)
+		return nil, "", statusErr(http.StatusConflict, "server %s is %s: stop its operation first (a Stop of an enrolment voids its code)", id, s.State)
 	}
-	snap, err := api.Cluster(ctx)
+	if listed && s.State == ServerRevoked && mode == nodeadm.Cooperative {
+		return nil, "", statusErr(http.StatusConflict, "server %s is revoked: its removal finishes once quorum returns", id)
+	}
+	snap, err := h.clusterSnapshot(ctx, api)
 	if err != nil {
-		return nil, nodeadmErr(err)
+		return nil, "", nodeadmErr(err)
 	}
 	n := snap.Node(id)
 	if n == nil && !listed {
-		return nil, statusErr(http.StatusNotFound, "server %s not found", id)
+		return nil, "", statusErr(http.StatusNotFound, "server %s not found", id)
 	}
 	meshIP := s.MeshIP
 	if n != nil && n.Addresses.Mesh != "" {
 		meshIP = n.Addresses.Mesh
 	}
 	if mode == nodeadm.Revoke {
-		if err := api.Remove(ctx, id, nodeadm.Revoke); err != nil && !nodeadm.IsKind(err, nodeadm.KindUnknownNode) {
-			return nil, nodeadmErr(err)
+		err := api.Remove(ctx, id, nodeadm.Revoke)
+		var ae *nodeadm.APIError
+		switch {
+		case err == nil, nodeadm.IsKind(err, nodeadm.KindUnknownNode):
+		case errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == nodeadm.KindQuorumMinimum,
+			errors.As(err, &ae) && ae.Status == http.StatusServiceUnavailable && strings.Contains(ae.Text, "goes on in the background"):
+			// Accepted (§20.2): the security steps are done, or nodeadm
+			// carries on in the background.
+			parked = ae.Text
+		default:
+			return nil, "", nodeadmErr(err)
 		}
+		// The mesh peer at once, parked or not.
 		if err := h.meshRemovePeer(ctx, id); err != nil {
 			log.Printf("servers: the mesh peer of %s: %v", id, err)
 		}
-		h.dropClusterNode(id)
-		return nil, nil
+		if parked == "" {
+			h.dropClusterNode(id)
+			return nil, "", nil
+		}
+		h.keepClusterNode(id, n, ServerRevoked, parked)
+		return nil, parked, nil
 	}
 	if n != nil && n.Role == "server" && n.Ready {
 		healthy := 0
@@ -781,17 +831,17 @@ func (h *Hub) RemoveClusterNode(ctx context.Context, actor directory.Actor, id, 
 			}
 		}
 		if healthy <= 3 {
-			return nil, statusErr(http.StatusConflict, "%s", quorumMinimumText(id))
+			return nil, "", statusErr(http.StatusConflict, "%s", quorumMinimumText(id))
 		}
 	}
 	prev := s.State
 	a, _, err = h.startOp(serverOpKey(id), OpNodeRemove, actor, removePlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		if listed {
-			h.setClusterState(id, ServerRemoving, "")
-		}
+		// Recorded removing (an init node gets its entry now), so a Hub
+		// restart can settle it.
+		h.keepClusterNode(id, n, ServerRemoving, "")
 		ready()
 		err := h.removeClusterNodeSteps(ctx, id, &meshIP)
-		if err != nil && listed {
+		if err != nil {
 			if _, still := h.serverEntry(id); still {
 				h.setClusterState(id, nonEmpty(prev, ServerReady), "")
 			}
@@ -799,7 +849,37 @@ func (h *Hub) RemoveClusterNode(ctx context.Context, actor directory.Actor, id, 
 		h.auditOp(actor, "server.removed", id, "kind cluster-node", err)
 		return nil, nil, err
 	})
-	return a, err
+	return a, "", err
+}
+
+// ParkedRevokeText is a parked revocation's line in the list (I1).
+const ParkedRevokeText = "revoked; waiting for quorum to remove its etcd member"
+
+// keepClusterNode puts node id in state st (an init node, listed only by
+// the snapshot, gets its entry from n); parked is a parked revocation's
+// nodeadm text.
+func (h *Hub) keepClusterNode(id string, n *nodeadm.Node, st, parked string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.st.Servers[id]
+	if !ok {
+		if n == nil {
+			return
+		}
+		s = state.Server{Kind: state.KindClusterNode, Name: id, Role: n.Role, Class: n.Labels[nodeadm.LabelClass], Site: n.Labels[nodeadm.LabelSite],
+			MeshIP: n.Addresses.Mesh, BackupSchedule: state.BackupSchedule{Mode: "off"},
+			Labels: &state.NodeLabels{Ingress: n.Labels[nodeadm.LabelIngress] == "true", Storage: n.Labels[nodeadm.LabelStorage] == "true"}}
+	}
+	if !s.ClusterNode() {
+		return
+	}
+	s.State, s.Enrol = st, nil
+	s.RevokeParked = parked
+	if h.st.Servers == nil {
+		h.st.Servers = map[string]state.Server{}
+	}
+	h.st.Servers[id] = s
+	h.saveLocked()
 }
 
 func nonEmpty(s, def string) string {
@@ -904,53 +984,126 @@ func (h *Hub) dropClusterNode(id string) {
 	}
 }
 
-// settleClusterNodes: an enrolment or removal a Hub restart interrupted
-// ends as a Stop at its step would (§17.5): before k3s_joined the code is
-// voided and the entry goes; from it on the node is removed (the op
-// node_remove). An entry whose void nodeadm didn't take is retried at the
-// next tick.
+// endClusterEnrol ends node id's enrolment (a Stop, a failure, a Hub
+// restart): a node the cluster lists (it joined, however briefly) is
+// removed as a removal does, its k3s uninstalled; else its code is voided
+// and the entry goes. snap nil: read now. false: nodeadm couldn't be
+// asked (the entry stays enrolling; the next tick retries).
+func (h *Hub) endClusterEnrol(id string, actor directory.Actor, snap *nodeadm.Snapshot) bool {
+	if snap == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), clusterCallWait)
+		api, err := h.nodeadmAPI(ctx)
+		var sn nodeadm.Snapshot
+		if err == nil {
+			sn, err = h.clusterSnapshot(ctx, api)
+		}
+		cancel()
+		if err != nil {
+			log.Printf("servers: ending the enrolment of %s: the snapshot: %v (retried at the next tick)", id, err)
+			return false
+		}
+		snap = &sn
+	}
+	if n := snap.Node(id); n != nil {
+		// A fresh context without the op's reporter: it would refuse the
+		// removal's commit once a Stop was accepted.
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		mesh := n.Addresses.Mesh
+		if err := h.removeClusterNodeSteps(ctx, id, &mesh); err != nil {
+			log.Printf("servers: removing %s after its enrolment ended: %v", id, err)
+			h.setClusterState(id, ServerReady, "")
+			h.auditOp(actor, "server.removed", id, "kind cluster-node, after its enrolment ended", err)
+			return true
+		}
+		h.auditOp(actor, "server.removed", id, "kind cluster-node, after its enrolment ended", nil)
+		return true
+	}
+	if !h.voidCode(id) {
+		return false
+	}
+	h.mu.Lock()
+	if s, ok := h.st.Servers[id]; ok && s.ClusterNode() && s.State == ServerEnrolling {
+		delete(h.st.Servers, id)
+		h.saveLocked()
+	}
+	h.mu.Unlock()
+	return true
+}
+
+// settleClusterNodes runs at start and every tick (one snapshot):
+//   - an enrolment a Hub restart interrupted ends as a Stop would
+//     (endClusterEnrol: a listed node removed, else its code voided);
+//   - an interrupted removal is a Stop too: before its DELETE (the node
+//     still listed) it is uncordoned and back to ready; after it (no
+//     longer listed) the uninstall and the mesh peer are finished;
+//   - a parked revocation's entry goes once the cluster no longer lists
+//     the node.
 func (h *Hub) settleClusterNodes(ctx context.Context) {
+	api, err := h.nodeadmAPI(ctx)
+	if err != nil {
+		return
+	}
+	c, cancel := context.WithTimeout(ctx, clusterCallWait)
+	snap, err := h.clusterSnapshot(c, api)
+	cancel()
+	if err != nil {
+		log.Printf("servers: the cluster snapshot: %v", err)
+		return
+	}
+	type pending struct{ id, state, mesh string }
+	var todo []pending
 	h.mu.RLock()
-	var void, remove, back []string
 	for id, s := range h.st.Servers {
-		if !s.ClusterNode() {
+		if !s.ClusterNode() || h.opRunOf(serverOpKey(id)) || h.isAdding(id) {
 			continue
 		}
-		if h.opRunOf(serverOpKey(id)) || h.isAdding(id) {
-			continue
-		}
-		switch s.State {
-		case ServerEnrolling:
-			step := ""
-			if s.Enrol != nil {
-				step = s.Enrol.Step
-			}
-			if step == "" || step == StepEnrolled || step == StepMeshReady || step == StepK3sJoined {
-				void = append(void, id)
-			} else {
-				remove = append(remove, id)
-			}
-		case ServerRemoving:
-			back = append(back, id)
+		if s.State == ServerEnrolling || s.State == ServerRemoving || s.State == ServerRevoked {
+			todo = append(todo, pending{id, s.State, s.MeshIP})
 		}
 	}
 	h.mu.RUnlock()
-	for _, id := range void {
-		if h.voidCode(id) {
-			h.mu.Lock()
-			if s, ok := h.st.Servers[id]; ok && s.ClusterNode() && s.State == ServerEnrolling {
-				delete(h.st.Servers, id)
-				h.saveLocked()
+	sort.Slice(todo, func(i, j int) bool { return todo[i].id < todo[j].id })
+	hubActor := directory.Human("hub")
+	for _, t := range todo {
+		n := snap.Node(t.id)
+		switch t.state {
+		case ServerEnrolling:
+			if h.endClusterEnrol(t.id, hubActor, &snap) {
+				log.Printf("servers: the enrolment of %s was interrupted by a Hub stop: ended as a Stop", t.id)
+				h.auditOp(hubActor, "server.enrol_refused", t.id, "kind cluster-node", statusErr(http.StatusConflict, "the Hub restarted during the enrolment"))
 			}
-			h.mu.Unlock()
-			log.Printf("servers: the enrolment of %s was interrupted before it joined the cluster: its code is void", id)
-			h.auditOp(directory.Actor{}, "server.enrol_refused", id, "kind cluster-node", statusErr(http.StatusConflict, "the Hub restarted during the enrolment"))
-		}
-	}
-	for _, id := range append(remove, back...) {
-		h.setClusterState(id, ServerReady, "")
-		if _, err := h.RemoveClusterNode(ctx, directory.Human("hub"), id, id, nodeadm.Cooperative); err != nil {
-			log.Printf("servers: removing %s after an interrupted operation: %v", id, err)
+		case ServerRemoving:
+			if n != nil {
+				c, cancel := cleanupCtx(ctx)
+				err := api.Uncordon(c, t.id)
+				cancel()
+				if err != nil && !nodeadm.IsKind(err, nodeadm.KindUnknownNode) {
+					log.Printf("servers: uncordoning %s after an interrupted removal: %v (retried at the next tick)", t.id, err)
+					continue
+				}
+				h.setClusterState(t.id, ServerReady, "")
+				log.Printf("servers: the removal of %s was interrupted by a Hub stop: uncordoned, remove it again", t.id)
+				h.auditOp(hubActor, "server.removed", t.id, "kind cluster-node", statusErr(http.StatusConflict, "the Hub restarted during the removal: the node was uncordoned; remove it again"))
+				continue
+			}
+			// Its DELETE had committed: finish the machine and the mesh.
+			c, cancel := cleanupCtx(ctx)
+			if ag, err := h.nodeagentAPI(c, t.id, t.mesh); err == nil {
+				if err := ag.Uninstall(c); err != nil {
+					log.Printf("servers: k3s wasn't uninstalled on %s: %v (run k3s-uninstall.sh there)", t.id, err)
+				}
+			}
+			if err := h.meshRemovePeer(c, t.id); err != nil {
+				log.Printf("servers: the mesh peer of %s: %v", t.id, err)
+			}
+			cancel()
+			h.dropClusterNode(t.id)
+			h.auditOp(hubActor, "server.removed", t.id, "kind cluster-node, finished after a Hub restart", nil)
+		case ServerRevoked:
+			if n == nil {
+				h.dropClusterNode(t.id) // the parked revocation finished
+			}
 		}
 	}
 }
@@ -990,4 +1143,39 @@ func clusterViewFields(v *ServerView, s state.Server) {
 		v.Ingress, v.Storage = s.Labels.Ingress, s.Labels.Storage
 	}
 	v.Runtime = "kubernetes"
+	if s.State == ServerRevoked && s.RevokeParked != "" {
+		v.Error = ParkedRevokeText
+	}
+}
+
+// initNodeViewsLocked are the views of the cluster's nodes the Hub has no
+// entry for (the nodes of init), from the last snapshot (review M5), by
+// name. Caller holds mu.
+func (h *Hub) initNodeViewsLocked() []ServerView {
+	if !h.kubeOn() {
+		return nil
+	}
+	snap := h.lastSnapshot()
+	if snap == nil {
+		return nil
+	}
+	var out []ServerView
+	for _, n := range snap.Nodes {
+		if _, ok := h.st.Servers[n.Name]; ok || servers.ValidID(n.Name) != nil {
+			continue
+		}
+		st := ServerReady
+		if !n.Ready {
+			st = ServerOffline
+		}
+		site := n.Labels[nodeadm.LabelSite]
+		if site == "" {
+			site = servers.PrimarySite
+		}
+		out = append(out, ServerView{ID: n.Name, Name: n.Name, State: st, Runtime: "kubernetes", Instances: []string{}, Kind: state.KindClusterNode,
+			Role: n.Role, Class: n.Labels[nodeadm.LabelClass], Site: site, MeshIP: n.Addresses.Mesh,
+			Ingress: n.Labels[nodeadm.LabelIngress] == "true", Storage: n.Labels[nodeadm.LabelStorage] == "true"})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }

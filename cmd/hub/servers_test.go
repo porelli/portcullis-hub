@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestHubServersSubcommand: `hub servers …` is a thin client of the
@@ -85,5 +86,33 @@ func TestNodeadmURLFromEnv(t *testing.T) {
 		if _, err := nodeadmURLFromEnv(env(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// TestHubServersTimeoutIsNotDown: a call that outlives its timeout says
+// the Hub is still working (never "isn't running"); a revoke waits 20 min.
+func TestHubServersTimeoutIsNotDown(t *testing.T) {
+	if serversTimeout("revoke") < 16*time.Minute {
+		t.Errorf("revoke waits %v", serversTimeout("revoke"))
+	}
+	dir, _ := os.MkdirTemp("", "hs")
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release })}
+	go srv.Serve(l)
+	defer srv.Close()
+	defer close(release)
+	old := serversTimeout
+	serversTimeout = func(string) time.Duration { return 100 * time.Millisecond }
+	defer func() { serversTimeout = old }()
+	var stdout, stderr bytes.Buffer
+	if code := serversMain([]string{"revoke", "n3"}, strings.NewReader(`{"confirm":"n3"}`), &stdout, &stderr, sock); code != 1 ||
+		!strings.Contains(stderr.String(), "the Hub is still working: see `hub servers op n3`") {
+		t.Errorf("%d %q", code, stderr.String())
 	}
 }

@@ -216,7 +216,10 @@ func HostHandler(h *hub.Hub) http.Handler {
 	mux.HandleFunc("GET /host/ssh/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, h.HostSSHStatus())
 	})
-	hostClusterNodes(mux, h)
+	if h.ClusterNodesMode() {
+		// Kubernetes only (§20: nothing of it on Docker or Podman; M6).
+		hostClusterNodes(mux, h)
+	}
 	return mux
 }
 
@@ -251,7 +254,7 @@ func hostClusterNodes(mux *http.ServeMux, h *hub.Hub) {
 			hostErr(w, err)
 			return
 		}
-		writeJSONStatus(w, http.StatusCreated, addedClusterNode{Code: code, ClusterNodeAdded: out})
+		writeJSONStatus(w, http.StatusCreated, addedClusterNode{Code: code.Reveal(), ClusterNodeAdded: out})
 	})
 	mux.HandleFunc("GET /host/servers", func(w http.ResponseWriter, r *http.Request) {
 		noStore(w)
@@ -271,7 +274,7 @@ func hostClusterNodes(mux *http.ServeMux, h *hub.Hub) {
 		if !ok {
 			return
 		}
-		op, err := h.RemoveClusterNode(r.Context(), cli, id, typed, nodeadm.Cooperative)
+		op, _, err := h.RemoveClusterNode(r.Context(), cli, id, typed, nodeadm.Cooperative)
 		if err != nil {
 			hostErr(w, err)
 			return
@@ -283,11 +286,12 @@ func hostClusterNodes(mux *http.ServeMux, h *hub.Hub) {
 		if !ok {
 			return
 		}
-		if _, err := h.RemoveClusterNode(r.Context(), cli, id, typed, nodeadm.Revoke); err != nil {
+		_, parked, err := h.RemoveClusterNode(r.Context(), cli, id, typed, nodeadm.Revoke)
+		if err != nil {
 			hostErr(w, err)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "revoked", "server": id})
+		writeRevoked(w, id, parked)
 	})
 	mux.HandleFunc("GET /host/servers/{id}/op", func(w http.ResponseWriter, r *http.Request) {
 		noStore(w)

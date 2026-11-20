@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -24,9 +26,11 @@ import (
 // clusterNodeadm is nodeadm for the route tests: 3 healthy servers, codes
 // for whatever is asked, the calls recorded.
 type clusterNodeadm struct {
-	mu    sync.Mutex
-	calls []string
-	nodes []nodeadm.Node
+	mu     sync.Mutex
+	calls  []string
+	nodes  []nodeadm.Node
+	ca     string           // the pki_node CA's sha256 the codes name
+	refuse map[string]error // "remove:n3:revoke", …
 }
 
 func (f *clusterNodeadm) rec(c string) {
@@ -44,9 +48,9 @@ func (f *clusterNodeadm) Calls() []string {
 func (f *clusterNodeadm) IssueCode(_ context.Context, r nodeadm.CodeRequest) (nodeadm.CodeAnswer, error) {
 	f.rec("codes:" + r.ServerID + ":" + r.Role)
 	h := strings.Repeat("b", 64)
-	return nodeadm.CodeAnswer{Code: servers.JoinCodeV2{V: 2, Kind: "cluster", Endpoint: "https://example.org/node", Servers: []string{"10.215.0.1"},
-		ServerID: r.ServerID, Role: r.Role, Class: r.Class, Site: r.Site, CASHA256: h, ScriptSHA256: h, AgentSHA256: servers.AgentSHA256{AMD64: h, ARM64: h},
-		MeshIP: r.MeshIP, Secret: "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"}.EncodeV2(), ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}, nil
+	return nodeadm.CodeAnswer{Code: servers.JoinCodeSecret(servers.JoinCodeV2{V: 2, Kind: "cluster", Endpoint: "https://example.org/node", Servers: []string{"10.215.0.1"},
+		ServerID: r.ServerID, Role: r.Role, Class: r.Class, Site: r.Site, CASHA256: f.ca, ScriptSHA256: h, AgentSHA256: servers.AgentSHA256{AMD64: h, ARM64: h},
+		MeshIP: r.MeshIP, Secret: "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"}.EncodeV2()), ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}, nil
 }
 
 func (f *clusterNodeadm) Cluster(context.Context) (nodeadm.Snapshot, error) {
@@ -69,7 +73,9 @@ func (f *clusterNodeadm) Uncordon(_ context.Context, id string) error {
 func (f *clusterNodeadm) Drain(_ context.Context, id string) error { f.rec("drain:" + id); return nil }
 func (f *clusterNodeadm) Remove(_ context.Context, id string, m nodeadm.RemoveMode) error {
 	f.rec("remove:" + id + ":" + string(m))
-	return nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refuse["remove:"+id+":"+string(m)]
 }
 
 func clusterServer(name string) nodeadm.Node {
@@ -93,7 +99,11 @@ func newClusterEnv(t *testing.T) *clusterEnv {
 		},
 		rt: &runtimetest.Fake{K: runtime.KindKubernetes, InfoVal: runtime.Info{Verified: true}},
 	})
-	na := &clusterNodeadm{nodes: []nodeadm.Node{clusterServer("n1"), clusterServer("n2"), clusterServer("n3")}}
+	ca := newServersCA(t)
+	e.s.Hub.SetNodeSigner(ca)
+	sum := sha256.Sum256(ca.cert.Raw)
+	na := &clusterNodeadm{nodes: []nodeadm.Node{clusterServer("n1"), clusterServer("n2"), clusterServer("n3")}, ca: hex.EncodeToString(sum[:]),
+		refuse: map[string]error{}}
 	e.s.Hub.SetNodeadm(na)
 	fa := &fakeFreshAuth{}
 	e.s.Hub.SetFreshAuth(hub.ListenerHub, fa)
@@ -268,5 +278,66 @@ func TestHostClusterNodeTwins(t *testing.T) {
 	}
 	if code, body := post("/host/servers/n3/revoke", `{"confirm":"n2"}`); code != 400 {
 		t.Errorf("typed mismatch: %d %s", code, body)
+	}
+}
+
+// TestClusterRevokeParkedRoute (I1): a parked revoke answers 202 with
+// nodeadm's text and the list shows the node revoked, waiting for quorum.
+func TestClusterRevokeParkedRoute(t *testing.T) {
+	e := newClusterEnv(t)
+	parked := "removing n3 would leave etcd 1 healthy of 3 members: parked; security steps done; the server stays an etcd member until quorum returns; a compromised server needs rotate-ca"
+	e.na.refuse["remove:n3:revoke"] = &nodeadm.APIError{Status: 409, Kind: nodeadm.KindQuorumMinimum, Text: parked}
+	code, body := e.do(t, "root", "POST", "/api/servers/n3/revoke", `{"confirm":"n3",`+proofJSON+`}`)
+	if code != 202 || !strings.Contains(body, `"parked":true`) || !strings.Contains(body, "parked; security steps done") {
+		t.Fatalf("parked revoke: %d %s", code, body)
+	}
+	code, body = e.do(t, "root", "GET", "/api/servers", "")
+	if code != 200 || !strings.Contains(body, "revoked; waiting for quorum to remove its etcd member") {
+		t.Errorf("list %d %s", code, body)
+	}
+	if got := e.auditActions(t, "server.revoked"); len(got) == 0 || got[len(got)-1] != "server.revoked:ok:root:n3" {
+		t.Errorf("audit %v", got)
+	}
+}
+
+// TestClusterRefusalsSpareTheProof (M2): the R9 refusals answer 409
+// before the fresh sign-in proof is checked.
+func TestClusterRefusalsSpareTheProof(t *testing.T) {
+	e := newClusterEnv(t)
+	if code, body := e.do(t, "root", "POST", "/api/servers", `{"id":"nas",`+proofJSON+`}`); code != 409 || !strings.Contains(body, "Docker workers can't join") {
+		t.Errorf("worker on kube: %d %s", code, body)
+	}
+	d := newServersEnv(t)
+	if code, body := d.do(t, "root", "POST", "/api/servers", `{"id":"n4","kind":"cluster-node",`+proofJSON+`}`); code != 409 || !strings.Contains(body, "cluster nodes need a Kubernetes primary") {
+		t.Errorf("cluster node on docker: %d %s", code, body)
+	}
+	if e.fa.calls.Load() != 0 || d.fa.calls.Load() != 0 {
+		t.Errorf("a proof was spent: %d %d", e.fa.calls.Load(), d.fa.calls.Load())
+	}
+	// The host twins aren't there on Docker (M6).
+	srv := httptest.NewServer(HostHandler(d.s.Hub))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/host/servers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("GET /host/servers on docker: %d", resp.StatusCode)
+	}
+}
+
+// TestClusterNodeSettingsNameOnly (M7): a cluster node takes a name, not
+// Local networks or a backup schedule; its detail has neither.
+func TestClusterNodeSettingsNameOnly(t *testing.T) {
+	e := newClusterEnv(t)
+	if code, body := e.do(t, "root", "POST", "/api/servers", `{"id":"n4","kind":"cluster-node",`+proofJSON+`}`); code != 201 {
+		t.Fatalf("add %d %s", code, body)
+	}
+	if code, body := e.do(t, "root", "PUT", "/api/servers/n4/settings", `{"backup_schedule":{"mode":"daily","hour":3}}`); code != 409 || !strings.Contains(body, "name only") {
+		t.Errorf("schedule: %d %s", code, body)
+	}
+	if code, body := e.do(t, "root", "PUT", "/api/servers/n4/settings", `{"name":"Four"}`); code != 200 || !strings.Contains(body, `"local_networks":[]`) {
+		t.Errorf("name: %d %s", code, body)
 	}
 }

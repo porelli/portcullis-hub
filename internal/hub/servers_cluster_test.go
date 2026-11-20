@@ -26,6 +26,8 @@ type fakeNodeadm struct {
 	calls  []string
 	codes  []string
 	refuse map[string]error // "drain", "remove:cooperative", …
+	// ca is the pki_node CA's sha256 the codes name.
+	ca string
 	// onCluster runs on each snapshot read (the test's clock of the node).
 	onCluster func(n int, s *nodeadm.Snapshot)
 	reads     int
@@ -51,13 +53,16 @@ func (f *fakeNodeadm) IssueCode(_ context.Context, r nodeadm.CodeRequest) (nodea
 		return nodeadm.CodeAnswer{}, err
 	}
 	hex := strings.Repeat("a", 64)
+	f.mu.Lock()
+	ca := f.ca
+	f.mu.Unlock()
 	c := servers.JoinCodeV2{V: 2, Kind: "cluster", Endpoint: "https://example.org/node", Servers: []string{"10.215.0.1"}, ServerID: r.ServerID,
-		Role: r.Role, Class: r.Class, Site: r.Site, CASHA256: hex, ScriptSHA256: hex, AgentSHA256: servers.AgentSHA256{AMD64: hex, ARM64: hex},
+		Role: r.Role, Class: r.Class, Site: r.Site, CASHA256: ca, ScriptSHA256: hex, AgentSHA256: servers.AgentSHA256{AMD64: hex, ARM64: hex},
 		MeshIP: r.MeshIP, Secret: testSecret}.EncodeV2()
 	f.mu.Lock()
 	f.codes = append(f.codes, c)
 	f.mu.Unlock()
-	return nodeadm.CodeAnswer{Code: c, ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}, nil
+	return nodeadm.CodeAnswer{Code: servers.JoinCodeSecret(c), ExpiresAt: time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)}, nil
 }
 
 func (f *fakeNodeadm) Cluster(context.Context) (nodeadm.Snapshot, error) {
@@ -121,7 +126,9 @@ func newClusterFixture(t *testing.T, nodes ...nodeadm.Node) *clusterFixture {
 	f := newFixture(t)
 	f.h.cfg.Runtime = runtime.KindKubernetes
 	f.h.cfg.Domain = "example.org"
-	na := &fakeNodeadm{snap: nodeadm.Snapshot{V: 1, Nodes: nodes}, refuse: map[string]error{}}
+	nca := newTestNodeCA(t)
+	f.h.SetNodeSigner(nca)
+	na := &fakeNodeadm{snap: nodeadm.Snapshot{V: 1, Nodes: nodes}, refuse: map[string]error{}, ca: caSHA256(nca.cert)}
 	f.h.SetNodeadm(na)
 	f.h.cl.poll = 2 * time.Millisecond
 	f.h.cl.agentFor = func(id, _ string) NodeagentAPI { return fakeNodeagent{na, id} }
@@ -152,7 +159,7 @@ func TestAddClusterNodeSuggestsRole(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
 	cf.stopEnrol(t, "n2")
 	out, code, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"})
-	if err != nil || out.Role != "server" || out.Notice != ServerJoinNotice || !strings.HasPrefix(code, "pcj2.") || len(out.Warnings) != 0 {
+	if err != nil || out.Role != "server" || out.Notice != ServerJoinNotice || !strings.HasPrefix(code.Reveal(), "pcj2.") || len(out.Warnings) != 0 {
 		t.Fatalf("1 server: %+v %v", out, err)
 	}
 	if out.Site != "main" || out.Class != "home" || !out.Storage || out.Ingress || out.Command != "curl -fsSL https://example.org/node/join.sh | sudo sh" {
@@ -248,7 +255,7 @@ func TestEnrolStepsFromSnapshot(t *testing.T) {
 		t.Errorf("audit %v", a)
 	}
 	raw, _ := base64.RawURLEncoding.DecodeString(testSecret)
-	assertNoClusterSecret(t, cf, []string{code, testSecret, string(raw)})
+	assertNoClusterSecret(t, cf, []string{code.Reveal(), testSecret, string(raw)})
 
 	// A Stop before k3s_joined: the code voided, nothing left.
 	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
@@ -329,20 +336,20 @@ func assertNoClusterSecret(t *testing.T, cf *clusterFixture, secrets []string) {
 // uncordons the node.
 func TestRemoveRefusedBelowQuorum(t *testing.T) {
 	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
-	_, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Cooperative)
+	_, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Cooperative)
 	if errStatus(err) != 409 || err.Error() != "removing n3 would leave fewer than 3 servers" {
 		t.Fatalf("%d %v", errStatus(err), err)
 	}
 	if c := cf.na.Calls(); len(c) != 0 {
 		t.Errorf("nodeadm was asked %v", c)
 	}
-	if _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n2", nodeadm.Cooperative); errStatus(err) != 400 {
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n2", nodeadm.Cooperative); errStatus(err) != 400 {
 		t.Errorf("a wrong typed id: %v", err)
 	}
 
 	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true), serverNode("n4", "10.215.0.4", true))
 	cf.na.refuse["drain:n4"] = &nodeadm.APIError{Status: 409, Kind: nodeadm.KindQuorumMinimum, Text: "removing n4 would leave fewer than 3 servers"}
-	a, err := cf.h.RemoveClusterNode(context.Background(), admin, "n4", "n4", nodeadm.Cooperative)
+	a, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n4", "n4", nodeadm.Cooperative)
 	if err != nil || a == nil || a.Op != OpNodeRemove {
 		t.Fatalf("%+v %v", a, err)
 	}
@@ -364,7 +371,7 @@ func TestRemoveRefusedBelowQuorum(t *testing.T) {
 func TestRemoveAndRevokeClusterNode(t *testing.T) {
 	nodes := []nodeadm.Node{serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true), serverNode("n4", "10.215.0.4", true)}
 	cf := newClusterFixture(t, nodes...)
-	if _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n4", "n4", nodeadm.Cooperative); err != nil {
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n4", "n4", nodeadm.Cooperative); err != nil {
 		t.Fatal(err)
 	}
 	if r := waitServerOp(t, cf.h, serverOpKey("n4")); !r.OK {
@@ -374,7 +381,7 @@ func TestRemoveAndRevokeClusterNode(t *testing.T) {
 		t.Errorf("calls %v", c)
 	}
 	cf = newClusterFixture(t, nodes[:3]...)
-	if _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err != nil {
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err != nil {
 		t.Fatal(err)
 	}
 	if c := cf.na.Calls(); !slices.Equal(c, []string{"remove:n3:revoke"}) {
@@ -383,7 +390,7 @@ func TestRemoveAndRevokeClusterNode(t *testing.T) {
 	if a := cf.actions(); !slices.Equal(a, []string{"server.revoked:ok"}) {
 		t.Errorf("audit %v", a)
 	}
-	if _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n9", "n9", nodeadm.Revoke); errStatus(err) != 404 {
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n9", "n9", nodeadm.Revoke); errStatus(err) != 404 {
 		t.Errorf("an unknown node: %v", err)
 	}
 }
@@ -420,5 +427,182 @@ func TestSettleInterruptedClusterEnrol(t *testing.T) {
 	cf.h.settleClusterNodes(context.Background())
 	if _, ok := cf.serverEntry("n2"); ok {
 		t.Fatal("still listed after the void")
+	}
+}
+
+// TestRevokeParkedIsAccepted (I1): nodeadm's parked revoke (409
+// quorum_minimum, the vector "revoke: etcd without quorum") and its 503
+// "goes on in the background" are accepted: the mesh peer removed at
+// once, the entry kept revoked with the parked line, audited ok; the
+// entry goes once the cluster no longer lists the node.
+func TestRevokeParkedIsAccepted(t *testing.T) {
+	const parkedText = "removing n3 would leave etcd 1 healthy of 3 members: parked; security steps done; the server stays an etcd member until quorum returns; a compromised server needs rotate-ca"
+	for _, refusal := range []*nodeadm.APIError{
+		{Status: 409, Kind: nodeadm.KindQuorumMinimum, Text: parkedText},
+		{Status: 503, Text: "the revocation of n3 goes on in the background: retry to see it finish"},
+	} {
+		cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", false), serverNode("n3", "10.215.0.3", false))
+		var meshGone []string
+		cf.h.cl.meshRemove = func(_ context.Context, id string) error { meshGone = append(meshGone, id); return nil }
+		cf.na.refuse["remove:n3:revoke"] = refusal
+		_, parked, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke)
+		if err != nil || parked != refusal.Text {
+			t.Fatalf("%d: %q %v", refusal.Status, parked, err)
+		}
+		if !slices.Equal(meshGone, []string{"n3"}) {
+			t.Errorf("mesh peer removed %v", meshGone)
+		}
+		if s, ok := cf.serverEntry("n3"); !ok || s.State != ServerRevoked {
+			t.Errorf("entry %+v %v", s, ok)
+		}
+		var view ServerView
+		for _, v := range cf.h.Servers(context.Background()) {
+			if v.ID == "n3" {
+				view = v
+			}
+		}
+		if view.State != ServerRevoked || view.Error != "revoked; waiting for quorum to remove its etcd member" {
+			t.Errorf("view %+v", view)
+		}
+		cf.audit.mu.Lock()
+		last := cf.audit.entries[len(cf.audit.entries)-1]
+		cf.audit.mu.Unlock()
+		if last.Action != "server.revoked" || last.Result != "ok" || !strings.Contains(last.Detail, "parked") {
+			t.Errorf("audit %+v", last)
+		}
+		cf.h.settleClusterNodes(context.Background())
+		if _, ok := cf.serverEntry("n3"); !ok {
+			t.Error("dropped while the cluster still lists it")
+		}
+		cf.na.mu.Lock()
+		cf.na.snap.Nodes = cf.na.snap.Nodes[:2]
+		cf.na.mu.Unlock()
+		cf.h.settleClusterNodes(context.Background())
+		if _, ok := cf.serverEntry("n3"); ok {
+			t.Error("kept after the cluster dropped it")
+		}
+	}
+}
+
+// TestEnrolEndNeverVoidsAJoinedNode (I2): the three ends of an enrolment.
+// No node listed → only the code voided; a node listed in the poll the
+// Stop lands on → removed (cordon, drain, remove, uninstall); a restart
+// at step k3s_joined with the node listed → removed too.
+func TestEnrolEndNeverVoidsAJoinedNode(t *testing.T) {
+	removed := func(c []string) bool {
+		i, j, k := slices.Index(c, "cordon:n2"), slices.Index(c, "drain:n2"), slices.Index(c, "remove:n2:cooperative")
+		return i >= 0 && j > i && k > j && slices.Contains(c, "uninstall:n2")
+	}
+	// 1. Nothing joined: a void only.
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	cf.h.StopServerEnrol("n2", admin, "")
+	waitServerOp(t, cf.h, serverOpKey("n2"))
+	if c := cf.na.Calls(); !slices.Contains(c, "remove:n2:cooperative") || slices.Contains(c, "cordon:n2") || slices.Contains(c, "uninstall:n2") {
+		t.Errorf("void: %v", c)
+	}
+
+	// 2. The node registers in the poll the Stop lands on (the op never
+	// saw it): removed, never only voided.
+	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	stopped := make(chan struct{})
+	var once sync.Once
+	cf.na.onCluster = func(n int, s *nodeadm.Snapshot) {
+		if n >= 3 {
+			once.Do(func() {
+				s.Nodes = append(s.Nodes, serverNode("n2", "10.215.0.2", false))
+				close(stopped)
+			})
+		}
+	}
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"}); err != nil {
+		t.Fatal(err)
+	}
+	<-stopped
+	cf.h.StopServerEnrol("n2", admin, "")
+	waitServerOp(t, cf.h, serverOpKey("n2"))
+	if c := cf.na.Calls(); !removed(c) {
+		t.Errorf("joined in the last poll: %v", c)
+	}
+	if _, ok := cf.serverEntry("n2"); ok {
+		t.Error("the entry is left")
+	}
+
+	// 3. A restart at k3s_joined with the node listed.
+	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true))
+	cf.h.mu.Lock()
+	cf.h.st.Servers = map[string]state.Server{"n2": {Kind: "cluster-node", State: ServerEnrolling, MeshIP: "10.215.0.2", Enrol: &state.Enrol{Step: StepK3sJoined}}}
+	cf.h.mu.Unlock()
+	cf.h.settleClusterNodes(context.Background())
+	if c := cf.na.Calls(); !removed(c) {
+		t.Errorf("restart at k3s_joined: %v", c)
+	}
+}
+
+// TestSettleInterruptedRemoval (M9): an interrupted removal is a Stop:
+// before its DELETE (the node listed) the node is uncordoned and ready
+// again; after it the uninstall is finished and the entry goes.
+func TestSettleInterruptedRemoval(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n4", "10.215.0.4", true))
+	cf.h.mu.Lock()
+	cf.h.st.Servers = map[string]state.Server{"n4": {Kind: "cluster-node", State: ServerRemoving, MeshIP: "10.215.0.4"},
+		"n5": {Kind: "cluster-node", State: ServerRemoving, MeshIP: "10.215.0.5"}}
+	cf.h.mu.Unlock()
+	cf.h.settleClusterNodes(context.Background())
+	if s, _ := cf.serverEntry("n4"); s.State != ServerReady {
+		t.Errorf("n4 %+v", s)
+	}
+	if _, ok := cf.serverEntry("n5"); ok {
+		t.Error("n5 left")
+	}
+	if c := cf.na.Calls(); !slices.Equal(c, []string{"uncordon:n4", "uninstall:n5"}) {
+		t.Errorf("calls %v", c)
+	}
+}
+
+// TestAddClusterNodeChecksTheCode (M8): a code naming another CA or
+// endpoint is voided and nothing is added.
+func TestAddClusterNodeChecksTheCode(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	cf.na.ca = strings.Repeat("c", 64)
+	_, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2"})
+	if errStatus(err) != 502 {
+		t.Fatalf("%v", err)
+	}
+	if _, ok := cf.serverEntry("n2"); ok {
+		t.Error("added")
+	}
+	if c := cf.na.Calls(); !slices.Contains(c, "remove:n2:cooperative") {
+		t.Errorf("not voided: %v", c)
+	}
+	if a := cf.actions(); !slices.Equal(a, []string{"server.add:error"}) {
+		t.Errorf("audit %v", a)
+	}
+}
+
+// TestInitNodesListed (M5): the cluster's nodes the Hub didn't add are
+// listed from the last snapshot.
+func TestInitNodesListed(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	cf.h.settleClusterNodes(context.Background())
+	var ids []string
+	for _, v := range cf.h.Servers(context.Background()) {
+		ids = append(ids, v.ID+":"+v.Kind+":"+v.Role)
+	}
+	if !slices.Equal(ids, []string{"primary::", "n1:cluster-node:server"}) {
+		t.Errorf("list %v", ids)
+	}
+}
+
+// TestNodeadmStatusesMapped (M11): a nodeadm 403 is a 502 (never the
+// fresh sign-in's 403); its 503 names nodeadm.
+func TestNodeadmStatusesMapped(t *testing.T) {
+	if err := nodeadmErr(&nodeadm.APIError{Status: 403, Text: "this client may not call this route"}); errStatus(err) != 502 || err.Error() != "nodeadm refused the Hub's certificate" {
+		t.Errorf("403: %v", err)
+	}
+	if err := nodeadmErr(&nodeadm.APIError{Status: 503, Kind: "not_leader", Text: "this nodeadm isn't the leader: retry"}); errStatus(err) != 503 || err.Error() != "nodeadm: this nodeadm isn't the leader: retry" {
+		t.Errorf("503: %v", err)
 	}
 }

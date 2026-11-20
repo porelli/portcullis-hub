@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +30,15 @@ const serversUsage = `usage: hub servers add-cluster-node   < {"id", "name"?, "r
        hub servers remove <id>          < {"confirm": "<id>"}
        hub servers revoke <id>          < {"confirm": "<id>"}
        hub servers op <id> [<op_id>]`
+
+// serversTimeout bounds one subcommand's call: a revoke may wait for
+// nodeadm's rotations (up to 15 min, §20.2). A variable: tests.
+var serversTimeout = func(cmd string) time.Duration {
+	if cmd == "revoke" {
+		return 20 * time.Minute
+	}
+	return 2 * time.Minute
+}
 
 // serversMain runs `hub servers <args>` against the socket at sock: 0
 // done, 1 the Hub refused or isn't running (the text on stderr), 2 usage
@@ -85,7 +95,7 @@ func serversMain(args []string, stdin io.Reader, stdout, stderr io.Writer, sock 
 		fmt.Fprintln(stderr, "the Hub isn't running")
 		return 1
 	}
-	c := &http.Client{Timeout: 2 * time.Minute, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	c := &http.Client{Timeout: serversTimeout(args[0]), Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, "unix", sock)
 	}}}
@@ -99,7 +109,19 @@ func serversMain(args []string, stdin io.Reader, stdout, stderr io.Writer, sock 
 	}
 	res, err := c.Do(req)
 	if err != nil {
-		fmt.Fprintln(stderr, "the Hub isn't running")
+		var ue *url.Error
+		var oe *net.OpError
+		if errors.As(err, &oe) && oe.Op == "dial" {
+			fmt.Fprintln(stderr, "the Hub isn't running")
+		} else if errors.As(err, &ue) && ue.Timeout() {
+			id := "<id>"
+			if len(args) > 1 {
+				id = args[1]
+			}
+			fmt.Fprintf(stderr, "the Hub is still working: see `hub servers op %s`\n", id)
+		} else {
+			fmt.Fprintf(stderr, "the Hub's answer was cut: %v\n", err)
+		}
 		return 1
 	}
 	defer res.Body.Close()

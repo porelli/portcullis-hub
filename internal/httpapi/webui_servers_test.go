@@ -229,17 +229,22 @@ func TestClusterNodeAddDialog(t *testing.T) {
 	page := map[string]any{"add_kind": "cluster-node", "servers": []any{
 		map[string]any{"id": "primary", "name": "Primary", "state": "ready"},
 		map[string]any{"id": "n2", "name": "N2", "state": "ready", "kind": "cluster-node", "role": "server", "class": "home", "site": "main", "storage": true},
+		map[string]any{"id": "n3", "name": "N3", "state": "revoked", "kind": "cluster-node", "role": "server", "error": "revoked; waiting for quorum to remove its etcd member"},
 	}}
 	b, _ := json.Marshal(page)
 	h := serversJS(t, "process.stdout.write(window.PortcullisServers.listHtml("+string(b)+"));")
 	for _, want := range []string{`data-srv-kind="cluster-node"`, `data-srv-add-role`, `data-srv-add-class`, `data-srv-add-site`, `data-srv-add-storage`,
-		"Joining as a server gives this machine full control of the cluster (cluster-admin).", "server · home · main · storage", `data-srv-act="remove"`} {
+		"Joining as a server gives this machine full control of the cluster (cluster-admin).", "server · home · main · storage", `data-srv-act="remove"`, "revoked; waiting for quorum to remove its etcd member"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("panel lacks %q:\n%s", want, h)
 		}
 	}
 	if strings.Contains(h, "./portcullis worker join") {
 		t.Errorf("a worker command on Kubernetes:\n%s", h)
+	}
+	d := serversJS(t, `process.stdout.write(window.PortcullisServers.detailHtml({id: 'n2', name: 'N2', kind: 'cluster-node', role: 'server', site: 'main'}));`)
+	if !strings.Contains(d, "data-srv-cluster") || strings.Contains(d, "data-srv-nets") || strings.Contains(d, "data-srv-mode") {
+		t.Errorf("a cluster node's settings are its name only:\n%s", d)
 	}
 	script := `
 function el(tag) {
