@@ -16,8 +16,9 @@ type nodeClassVector struct {
 }
 
 // TestNodeClassVectorsShape: nodeclass_vectors.json (class.Suggest,
-// contract §20.1) decodes strictly and covers each rule: below 4 GB →
-// small, a Raspberry Pi → small, a public answer → cloud, else home.
+// contract §20.1) decodes strictly and covers each rule: below 3.5 GiB →
+// small (both sides of 3 758 096 384 bytes), a Raspberry Pi → small, a
+// public answer → cloud, else home.
 func TestNodeClassVectorsShape(t *testing.T) {
 	b, err := os.ReadFile("testdata/nodeclass_vectors.json")
 	if err != nil {
@@ -41,5 +42,19 @@ func TestNodeClassVectorsShape(t *testing.T) {
 	}
 	if n["small"] < 3 || n["home"] < 2 || n["cloud"] < 2 {
 		t.Errorf("coverage %v", n)
+	}
+	const limit = 3758096384
+	below, at := false, false
+	for _, v := range vs {
+		if v.Model == "" && !v.PublicAnswers {
+			below = below || (v.MemBytes == limit-1 && v.Want == "small")
+			at = at || (v.MemBytes == limit && v.Want == "home")
+		}
+		if v.Model == "" && v.MemBytes >= limit && v.Want == "small" {
+			t.Errorf("%d bytes is small: the limit is 3.5 GiB", v.MemBytes)
+		}
+	}
+	if !below || !at {
+		t.Error("the 3.5 GiB boundary isn't pinned on both sides")
 	}
 }

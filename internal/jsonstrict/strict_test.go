@@ -87,6 +87,31 @@ func TestNullable(t *testing.T) {
 		"inner unknown": {`{"p":"x","i":{"a":"1","z":1}}`, `unknown field "z"`},
 		"inner missing": {`{"p":"x","i":{}}`, `missing field "a"`},
 		"wrong type":    {`{"p":1,"i":null}`, `wrong type`},
+		"inner null":    {`{"p":"x","i":{"a":null}}`, `$.i.a: null`},
+	} {
+		var d doc
+		if err := Decode([]byte(c.doc), &d); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err %v, want %q", name, err, c.want)
+		}
+	}
+}
+
+func TestNullableInCollections(t *testing.T) {
+	type doc struct {
+		L []Nullable[string]         `json:"l"`
+		M map[string]Nullable[inner] `json:"m"`
+	}
+	var d doc
+	if err := Decode([]byte(`{"l":["a",null],"m":{"x":null,"y":{"a":"1"}}}`), &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.L) != 2 || !d.L[0].Valid || d.L[1].Valid || d.M["x"].Valid || d.M["y"].V.A != "1" {
+		t.Errorf("decoded %+v", d)
+	}
+	for name, c := range map[string]struct{ doc, want string }{
+		"list item unknown": {`{"l":[],"m":{"y":{"a":"1","z":1}}}`, `unknown field "z"`},
+		"list item type":    {`{"l":[1],"m":{}}`, `wrong type`},
+		"null list":         {`{"l":null,"m":{}}`, `$.l: null`},
 	} {
 		var d doc
 		if err := Decode([]byte(c.doc), &d); err == nil || !strings.Contains(err.Error(), c.want) {

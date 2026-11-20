@@ -22,12 +22,16 @@ var haAdmissionTexts = []string{
 	"nodeadm may create only a binding in its canonical form on a params generation",
 	"nodeadm may never change or delete a Portcullis admission policy or binding",
 	"nodeadm may create only portcullis-admission-params-<16 hex> ConfigMaps",
+	"only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
 }
 
 // TestAdmissionHAVectorsShape (no envtest): admission_vectors.json holds
 // ≥ 24 cases tagged "ha", every HA text has a denial and the accepted
-// forms are there; an HA case runs as hub, intruder or nodeadm, and an
-// exec case (op "exec") is a PodExecOptions naming its pod.
+// forms are there; an HA case runs as hub, intruder, nodeadm or cli (the
+// CLI's own identity: portcullis-ingress-pods judges every identity), an
+// exec case (op "exec") is a PodExecOptions naming its pod, and a
+// bootstrap token's expiration may be ${NOW+<n>m}, which the envtest
+// harness replaces with now + n minutes (RFC 3339) before the request.
 func TestAdmissionHAVectorsShape(t *testing.T) {
 	b, err := os.ReadFile("testdata/admission_vectors.json")
 	if err != nil {
@@ -61,7 +65,7 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 		}
 		ha++
 		switch v.As {
-		case "hub", "intruder", "nodeadm":
+		case "hub", "intruder", "nodeadm", "cli":
 		default:
 			t.Errorf("%s: as %q", v.Name, v.As)
 		}

@@ -11,7 +11,8 @@ import (
 // TestNodeadmVectorsCopy: testdata/nodeadm_api_vectors.json is a byte copy
 // of core's nodeadm/testdata/nodeadm_api_vectors.json (contract §20.2; the
 // core checkout from PORTCULLIS_CORE_DIR, else the sibling checkout;
-// the comparison is skipped without one, the copy itself must exist).
+// skipped without one, a failure when PORTCULLIS_CORE_DIR is set but
+// unreadable; the copy itself must exist).
 func TestNodeadmVectorsCopy(t *testing.T) {
 	own, err := os.ReadFile("testdata/nodeadm_api_vectors.json")
 	if err != nil {
@@ -20,12 +21,15 @@ func TestNodeadmVectorsCopy(t *testing.T) {
 	if !json.Valid(own) {
 		t.Fatal("the copy isn't valid JSON")
 	}
-	core := os.Getenv("PORTCULLIS_CORE_DIR")
-	if core == "" {
+	core, set := os.LookupEnv("PORTCULLIS_CORE_DIR")
+	if !set {
 		core = filepath.Join("..", "..", "..", "portcullis")
 	}
 	theirs, err := os.ReadFile(filepath.Join(core, "nodeadm", "testdata", "nodeadm_api_vectors.json"))
 	if err != nil {
+		if set { // CI's core checkout (build.yml): the copy must be compared
+			t.Fatalf("PORTCULLIS_CORE_DIR is set but core's file isn't readable: %v", err)
+		}
 		t.Skipf("no core checkout: %v", err)
 	}
 	if !bytes.Equal(own, theirs) {

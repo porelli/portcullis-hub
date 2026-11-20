@@ -141,10 +141,11 @@ func TestNMinus1VectorsShape(t *testing.T) {
 	if err := jsonstrict.Decode(b, &vs); err != nil {
 		t.Fatal(err)
 	}
-	if len(vs) < 15 {
-		t.Fatalf("%d vectors, want ≥ 15 (12 + the 3 degraded-set cases, P7)", len(vs))
+	if len(vs) < 21 {
+		t.Fatalf("%d vectors, want ≥ 21 (12 + the degraded-set cases of P7 + the unplaceable high pod)", len(vs))
 	}
 	levels := map[string]int{}
+	highYellow := false
 	for _, v := range vs {
 		if v.Snapshot.V != 1 {
 			t.Errorf("%s: snapshot v %d", v.Name, v.Snapshot.V)
@@ -172,12 +173,20 @@ func TestNMinus1VectorsShape(t *testing.T) {
 			default:
 				t.Errorf("%s: level %q", v.Name, w.Level)
 			}
+			for _, u := range w.Unplaced {
+				for _, p := range v.Snapshot.Pods {
+					highYellow = highYellow || (p.Name == u && p.PriorityClass == "portcullis-high" && w.Level == "yellow")
+				}
+			}
 			for _, p := range append(append([]string{}, w.Unplaced...), w.Evicted...) {
 				if !pods[p] {
 					t.Errorf("%s: %s names unknown pod %s", v.Name, w.Node, p)
 				}
 			}
 		}
+	}
+	if !highYellow {
+		t.Error("no case of an unplaceable high pod (Yellow, Task 2 ruling)")
 	}
 	if levels["green"] == 0 || levels["yellow"] == 0 || levels["red"] == 0 {
 		t.Errorf("levels %v: every level needs a case", levels)

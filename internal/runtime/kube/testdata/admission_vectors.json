@@ -8107,12 +8107,12 @@
     "namespace": "kube-system"
    },
    "type": "bootstrap.kubernetes.io/token",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
-    "usage-bootstrap-authentication": "dHJ1ZQ==",
-    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "${NOW+10m}",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token"
    }
   },
   "as": "nodeadm",
@@ -8130,12 +8130,12 @@
     "namespace": "kube-system"
    },
    "type": "Opaque",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
-    "usage-bootstrap-authentication": "dHJ1ZQ==",
-    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "${NOW+10m}",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token"
    }
   },
   "as": "nodeadm",
@@ -8153,16 +8153,62 @@
     "namespace": "kube-system"
    },
    "type": "bootstrap.kubernetes.io/token",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "usage-bootstrap-authentication": "dHJ1ZQ==",
-    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token"
    }
   },
   "as": "nodeadm",
   "want": "deny",
   "reason_contains": "bootstrap tokens must expire within 15 minutes",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token expiring in 16 minutes is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "${NOW+16m}",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token"
+   }
+  },
+  "as": "nodeadm",
+  "want": "deny",
+  "reason_contains": "bootstrap tokens must expire within 15 minutes",
+  "ha": true
+ },
+ {
+  "name": "ha: a bootstrap token already expired is admitted (within 15 minutes)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "bootstrap-token-abcdef",
+    "namespace": "kube-system"
+   },
+   "type": "bootstrap.kubernetes.io/token",
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "2026-01-01T00:00:00Z",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token"
+   }
+  },
+  "as": "nodeadm",
+  "want": "allow",
+  "reason_contains": "",
   "ha": true
  },
  {
@@ -8175,12 +8221,12 @@
     "namespace": "kube-system"
    },
    "type": "bootstrap.kubernetes.io/token",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "expiration": "MjA5OS0wMS0wMVQwMDowMDowMFo=",
-    "usage-bootstrap-authentication": "dHJ1ZQ==",
-    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "2099-01-01T00:00:00Z",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token"
    }
   },
   "as": "nodeadm",
@@ -8198,13 +8244,13 @@
     "namespace": "kube-system"
    },
    "type": "bootstrap.kubernetes.io/token",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
-    "usage-bootstrap-authentication": "dHJ1ZQ==",
-    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg==",
-    "usage-bootstrap-signing": "dHJ1ZQ=="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "${NOW+10m}",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token",
+    "usage-bootstrap-signing": "true"
    }
   },
   "as": "nodeadm",
@@ -8222,11 +8268,11 @@
     "namespace": "kube-system"
    },
    "type": "bootstrap.kubernetes.io/token",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
-    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbg=="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "${NOW+10m}",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token"
    }
   },
   "as": "nodeadm",
@@ -8244,12 +8290,12 @@
     "namespace": "kube-system"
    },
    "type": "bootstrap.kubernetes.io/token",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
-    "usage-bootstrap-authentication": "dHJ1ZQ==",
-    "auth-extra-groups": "c3lzdGVtOm1hc3RlcnM="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "${NOW+10m}",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:masters"
    }
   },
   "as": "nodeadm",
@@ -8267,12 +8313,12 @@
     "namespace": "kube-system"
    },
    "type": "bootstrap.kubernetes.io/token",
-   "data": {
-    "token-id": "YWJjZGVm",
-    "token-secret": "MDEyMzQ1Njc4OWFiY2RlZg==",
-    "expiration": "MjAyNi0wMS0wMVQwMDowMDowMFo=",
-    "usage-bootstrap-authentication": "dHJ1ZQ==",
-    "auth-extra-groups": "c3lzdGVtOmJvb3RzdHJhcHBlcnM6azNzOmRlZmF1bHQtbm9kZS10b2tlbixzeXN0ZW06bWFzdGVycw=="
+   "stringData": {
+    "token-id": "abcdef",
+    "token-secret": "0123456789abcdef",
+    "expiration": "${NOW+10m}",
+    "usage-bootstrap-authentication": "true",
+    "auth-extra-groups": "system:bootstrappers:k3s:default-node-token,system:masters"
    }
   },
   "as": "nodeadm",
@@ -8694,6 +8740,1027 @@
   "as": "nodeadm",
   "want": "deny",
   "reason_contains": "nodeadm may create only portcullis-admission-params-<16 hex> ConfigMaps",
+  "ha": true
+ },
+ {
+  "name": "ha: the Traefik DaemonSet's pod in portcullis-ingress (hostPort 80/443, restricted otherwise)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: the Traefik DaemonSet in portcullis-ingress",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "DaemonSet",
+   "metadata": {
+    "name": "traefik",
+    "namespace": "portcullis-ingress"
+   },
+   "spec": {
+    "selector": {
+     "matchLabels": {
+      "app.kubernetes.io/name": "traefik"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app.kubernetes.io/name": "traefik"
+      }
+     },
+     "spec": {
+      "serviceAccountName": "traefik",
+      "containers": [
+       {
+        "name": "traefik",
+        "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "ports": [
+         {
+          "containerPort": 8443,
+          "hostPort": 443
+         },
+         {
+          "containerPort": 8000,
+          "hostPort": 80
+         }
+        ],
+        "securityContext": {
+         "runAsNonRoot": true,
+         "runAsUser": 65532,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ]
+         },
+         "seccompProfile": {
+          "type": "RuntimeDefault"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "cli",
+  "want": "allow",
+  "reason_contains": "",
+  "ha": true
+ },
+ {
+  "name": "ha: another image in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a privileged Traefik pod is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       },
+       "privileged": true
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: hostNetwork in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ],
+    "hostNetwork": true
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: hostPID in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ],
+    "hostPID": true
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: hostIPC in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ],
+    "hostIPC": true
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a hostPath volume in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ],
+    "volumes": [
+     {
+      "name": "h",
+      "hostPath": {
+       "path": "/etc"
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: hostPort 8080 in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8080,
+        "hostPort": 8080
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: an added capability (NET_BIND_SERVICE) in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ],
+        "add": [
+         "NET_BIND_SERVICE"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: capabilities not dropped in portcullis-ingress are refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: privilege escalation in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": true,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: running as root in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": false,
+       "runAsUser": 0,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: an Unconfined seccomp profile in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "Unconfined"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: another ServiceAccount in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    },
+    "ownerReferences": [
+     {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "name": "traefik",
+      "uid": "00000000-0000-4000-8000-000000000001",
+      "controller": true
+     }
+    ]
+   },
+   "spec": {
+    "serviceAccountName": "default",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a pod without the DaemonSet's owner reference is refused (the CLI too)",
+  "object": {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "traefik-x7k2p",
+    "namespace": "portcullis-ingress",
+    "labels": {
+     "app.kubernetes.io/name": "traefik"
+    }
+   },
+   "spec": {
+    "serviceAccountName": "traefik",
+    "containers": [
+     {
+      "name": "traefik",
+      "image": "docker.io/library/traefik:v3.7.0@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "ports": [
+       {
+        "containerPort": 8443,
+        "hostPort": 443
+       },
+       {
+        "containerPort": 8000,
+        "hostPort": 80
+       }
+      ],
+      "securityContext": {
+       "runAsNonRoot": true,
+       "runAsUser": 65532,
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       },
+       "seccompProfile": {
+        "type": "RuntimeDefault"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
+  "ha": true
+ },
+ {
+  "name": "ha: a DaemonSet with another image in portcullis-ingress is refused",
+  "object": {
+   "apiVersion": "apps/v1",
+   "kind": "DaemonSet",
+   "metadata": {
+    "name": "traefik",
+    "namespace": "portcullis-ingress"
+   },
+   "spec": {
+    "selector": {
+     "matchLabels": {
+      "app.kubernetes.io/name": "traefik"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app.kubernetes.io/name": "traefik"
+      }
+     },
+     "spec": {
+      "serviceAccountName": "traefik",
+      "containers": [
+       {
+        "name": "traefik",
+        "image": "docker.io/library/nginx:1.29@sha256:abababababababababababababababababababababababababababababababab",
+        "ports": [
+         {
+          "containerPort": 8443,
+          "hostPort": 443
+         },
+         {
+          "containerPort": 8000,
+          "hostPort": 80
+         }
+        ],
+        "securityContext": {
+         "runAsNonRoot": true,
+         "runAsUser": 65532,
+         "allowPrivilegeEscalation": false,
+         "readOnlyRootFilesystem": true,
+         "capabilities": {
+          "drop": [
+           "ALL"
+          ]
+         },
+         "seccompProfile": {
+          "type": "RuntimeDefault"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  "as": "cli",
+  "want": "deny",
+  "reason_contains": "only the Traefik DaemonSet's pod shape may run in portcullis-ingress",
   "ha": true
  }
 ]

@@ -179,11 +179,11 @@ jobs:
             git clone --quiet --depth=1 --branch "$ref" "$url" "$RUNNER_TEMP/$repo"
           done
 
-      - name: Real templates and core names
+      - name: Real templates, core names and the core vector copies
         env:
           PORTCULLIS_TEMPLATES_DIR: ${{ runner.temp }}/portcullis-templates
           PORTCULLIS_CORE_DIR: ${{ runner.temp }}/portcullis
-        run: go test -count=1 -v -run 'TestRealTemplates|TestCore[A-Za-z]*Complete|TestHelperImagePinned' ./internal/... 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|\s+[a-z_]+_test\.go)' ; test "${PIPESTATUS[0]}" = 0
+        run: go test -count=1 -v -run 'TestRealTemplates|TestCore[A-Za-z]*Complete|TestHelperImagePinned|Test[A-Za-z]*VectorsCopy' ./internal/... 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|\s+[a-z_]+_test\.go)' ; test "${PIPESTATUS[0]}" = 0
 
   # The Portcullis CLI (cmd/portcullis) on the three systems people run
   # it on: its own packages only (the Hub's tests run in test).

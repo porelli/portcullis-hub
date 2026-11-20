@@ -23,7 +23,8 @@ func typeOf(v any) reflect.Type { return reflect.TypeOf(v).Elem() }
 
 // checkShape walks the JSON against the Go type: objects of struct types
 // have exactly the struct's json keys (case-sensitive; omitempty keys may
-// be absent), no object has a duplicate key, and nothing is null.
+// be absent), no object has a duplicate key, and nothing is null but a
+// Nullable (whose non-null value is checked as its T).
 // encoding/json alone matches keys case-insensitively, keeps the last of
 // duplicate keys and silently leaves missing fields at their zero value.
 // Errors carry JSON paths, never values.
@@ -145,7 +146,7 @@ func object(raw []byte, path string) ([]string, []json.RawMessage, error) {
 
 // Decode: valid JSON with no trailing data, exactly the struct's keys
 // (case-sensitive, no duplicates, none missing unless omitempty, no
-// null), then the typed decode. Errors carry JSON paths, never values.
+// null outside a Nullable), then the typed decode. Errors carry JSON paths, never values.
 func Decode(b []byte, v any) error {
 	if !json.Valid(b) {
 		// Never echo the content (the credentials file holds ciphertexts).
