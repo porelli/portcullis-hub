@@ -140,6 +140,19 @@ func Write(path string, d Doc, now time.Time) error { return WriteGroup(path, d,
 // WriteGroup is Write with the file's group: the one group shared only
 // with vpn.json's readers (wg and group-gate).
 func WriteGroup(path string, d Doc, gid int, now time.Time) error {
+	b, err := EncodeChecked(d, now)
+	if err != nil {
+		return err
+	}
+	// The group is set on the temp file before the rename: a reader never
+	// sees a vpn.json it can't read (which it would take for "deny all").
+	return fsutil.WriteFileAtomicGroup(path, b, 0o640, gid)
+}
+
+// EncodeChecked is vpn.json's bytes (indented, a trailing newline),
+// checked as a reader at now would first: what the Hub publishes (the
+// Hub never publishes a file its own reader refuses).
+func EncodeChecked(d Doc, now time.Time) ([]byte, error) {
 	if d.Providers == nil {
 		d.Providers = []Provider{}
 	}
@@ -148,14 +161,12 @@ func WriteGroup(path string, d Doc, gid int, now time.Time) error {
 	}
 	b, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := Parse(b, now); err != nil {
-		return fmt.Errorf("vpn.json: refusing to write an invalid document: %w", err)
+		return nil, fmt.Errorf("vpn.json: refusing to write an invalid document: %w", err)
 	}
-	// The group is set on the temp file before the rename: a reader never
-	// sees a vpn.json it can't read (which it would take for "deny all").
-	return fsutil.WriteFileAtomicGroup(path, append(b, '\n'), 0o640, gid)
+	return append(b, '\n'), nil
 }
 
 // strictJSON decodes b into v, refusing unknown keys and trailing data.

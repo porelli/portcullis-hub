@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,19 @@ func roleRules(t *testing.T) []authv1.ResourceRule {
 	return append(out, defaultRules.resources...)
 }
 
+// coreRules is the core Role as a rules review reports it.
+func coreRules(t *testing.T) []authv1.ResourceRule {
+	r, err := CoreRole()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []authv1.ResourceRule
+	for _, p := range r.Rules {
+		out = append(out, authv1.ResourceRule{Verbs: p.Verbs, APIGroups: p.APIGroups, Resources: p.Resources, ResourceNames: p.ResourceNames})
+	}
+	return append(out, defaultRules.resources...)
+}
+
 // guardRig: a fake cluster where every check passes until a test
 // breaks one.
 type guardRig struct {
@@ -50,7 +64,7 @@ type guardRig struct {
 func newGuardRig(t *testing.T) (*guardRig, *Guard) {
 	r := &guardRig{c: newCluster(t), dir: t.TempDir()}
 	r.apps = authv1.SubjectRulesReviewStatus{ResourceRules: roleRules(t), NonResourceRules: defaultRules.nonResources}
-	r.core = authv1.SubjectRulesReviewStatus{ResourceRules: defaultRules.resources, NonResourceRules: defaultRules.nonResources}
+	r.core = authv1.SubjectRulesReviewStatus{ResourceRules: coreRules(t), NonResourceRules: defaultRules.nonResources}
 	er, _ := EdgeRole()
 	var edgeRules []authv1.ResourceRule
 	for _, p := range er.Rules {
@@ -297,5 +311,99 @@ func TestDeployRunsTheGuard(t *testing.T) {
 	}
 	if len(r.c.Applied()) != 0 {
 		t.Error("applied without the guard")
+	}
+}
+
+// TestExpandResourceNames: a rule with resourceNames expands per name
+// (group/resource/verb/name); a wildcard name or verb is still refused.
+func TestExpandResourceNames(t *testing.T) {
+	g, err := expand([]authv1.ResourceRule{{Verbs: []string{"get", "update"}, APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{"a", "b"}},
+		{Verbs: []string{"list"}, APIGroups: []string{""}, Resources: []string{"pods"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []grant{{"", "configmaps", "get", "a"}, {"", "configmaps", "get", "b"}, {"", "configmaps", "update", "a"}, {"", "configmaps", "update", "b"}, {"", "pods", "list", ""}}
+	if len(g) != len(want) {
+		t.Fatalf("%v", g)
+	}
+	for _, w := range want {
+		if !g[w] {
+			t.Errorf("missing %v", w)
+		}
+	}
+	for _, bad := range [][]string{{"*"}, {"a", "*"}, {""}} {
+		if _, err := expand([]authv1.ResourceRule{{Verbs: []string{"get"}, APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: bad}}); err == nil {
+			t.Errorf("names %q accepted", bad)
+		}
+	}
+	if _, err := expand([]authv1.ResourceRule{{Verbs: []string{"*"}, APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{"a"}}}); err == nil {
+		t.Error("a wildcard verb on names accepted")
+	}
+}
+
+// TestRoleExactCore: the core namespace's review must equal
+// role-core.yaml name by name; one name more, a rule on all names where
+// the Role names some, or one name less is refused.
+func TestRoleExactCore(t *testing.T) {
+	r, err := CoreRole()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Name != "portcullis-hub-core" || r.Namespace != "portcullis" || r.Kind != "Role" {
+		t.Errorf("core role %s %s/%s", r.Kind, r.Namespace, r.Name)
+	}
+	ok := authv1.SubjectRulesReviewStatus{ResourceRules: coreRules(t), NonResourceRules: defaultRules.nonResources}
+	if err := RulesExact(ok, r.Rules); err != nil {
+		t.Fatalf("exact: %v", err)
+	}
+	for name, c := range map[string]struct {
+		mod  func(*authv1.SubjectRulesReviewStatus)
+		want string
+	}{
+		"one extra name": {func(s *authv1.SubjectRulesReviewStatus) {
+			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"get"}, APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{"frontdoor-env"}})
+		}, "more than its Role"},
+		"all names": {func(s *authv1.SubjectRulesReviewStatus) {
+			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"update"}, APIGroups: []string{""}, Resources: []string{"configmaps"}})
+		}, "more than its Role"},
+		"create pub": {func(s *authv1.SubjectRulesReviewStatus) {
+			s.ResourceRules = append(s.ResourceRules, authv1.ResourceRule{Verbs: []string{"create"}, APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{"pub-vpn"}})
+		}, "more than its Role"},
+		"one name less": {func(s *authv1.SubjectRulesReviewStatus) {
+			rs := []authv1.ResourceRule{}
+			for _, r := range s.ResourceRules {
+				r = *r.DeepCopy()
+				r.ResourceNames = slices.DeleteFunc(r.ResourceNames, func(n string) bool { return n == "pub-vpn" })
+				rs = append(rs, r)
+			}
+			s.ResourceRules = rs
+		}, "lacks"},
+	} {
+		s := *ok.DeepCopy()
+		c.mod(&s)
+		if err := RulesExact(s, r.Rules); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// The pub-* names are exactly published_docs.json's objects.
+	objs := vectorObjects(t)
+	var cms, secrets []string
+	for _, p := range r.Rules {
+		if slices.Contains(p.Verbs, "update") {
+			switch p.Resources[0] {
+			case "configmaps":
+				cms = append(cms, p.ResourceNames...)
+			case "secrets":
+				secrets = append(secrets, p.ResourceNames...)
+			}
+		}
+	}
+	for o, k := range objs {
+		if (k == "configmap" && !slices.Contains(cms, o)) || (k == "secret" && !slices.Contains(secrets, o)) {
+			t.Errorf("%s %s not in the core Role", k, o)
+		}
+	}
+	if len(cms)+len(secrets) != len(objs) {
+		t.Errorf("core Role names %v %v, vector %v", cms, secrets, objs)
 	}
 }

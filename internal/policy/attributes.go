@@ -224,9 +224,19 @@ func stripControlChars(s string) string {
 // WriteUserAttributes serializes doc and writes it atomically (temp file +
 // rename) with mode 0644, so group-gate can read it.
 func WriteUserAttributes(path string, doc UserAttributesDocument) error {
-	payload, err := json.MarshalIndent(doc, "", "  ")
+	b, err := EncodeUserAttributes(doc)
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(path, append(payload, '\n'), 0644)
+	return fsutil.WriteFileAtomic(path, b, 0644)
+}
+
+// EncodeUserAttributes is user-attributes.json's bytes (indented JSON, a
+// trailing newline): what the Hub publishes (contract §4.1).
+func EncodeUserAttributes(doc UserAttributesDocument) ([]byte, error) {
+	payload, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(payload, '\n'), nil
 }

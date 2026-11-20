@@ -97,7 +97,7 @@ func kubeRuntime(ctx context.Context, cfg *hub.Config, getenv func(string) strin
 	guard := kube.NewGuard(kube.GuardConfig{Client: client, Dynamic: dyn, AppsNamespace: apps, CoreNamespace: core, EdgeNamespace: edge, InCluster: icErr, HubImage: self, Exec: ex})
 	roots, _ := hub.ParseBindRoots(cfg.OverrideBindRoots, cfg.ProjectHostDir)
 	b, err := kube.New(kube.Config{Client: client, Dynamic: dyn, Namespace: apps, Settings: settings, HubImage: self, Resolver: kube.RegistryResolver{}, Exec: ex,
-		Guard: guard, Context: coreEnv["PORTCULLIS_KUBE_CONTEXT"], RuntimeRoots: strings.Fields(coreEnv["PORTCULLIS_RUNTIME_ROOTS"]), BindRoots: roots, EdgeNamespace: edge})
+		Guard: guard, Context: coreEnv["PORTCULLIS_KUBE_CONTEXT"], RuntimeRoots: strings.Fields(coreEnv["PORTCULLIS_RUNTIME_ROOTS"]), BindRoots: roots, EdgeNamespace: edge, CoreNamespace: core})
 	if err != nil {
 		return nil, nil, err
 	}

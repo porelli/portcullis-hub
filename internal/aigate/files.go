@@ -262,26 +262,48 @@ func WriteJSON(path string, v any) error {
 // encoded null — or any other value the gate refuses is never written;
 // the previous file stays).
 func WriteFile(path string, f *File) error {
-	b, err := f.Encode()
+	b, err := EncodeChecked(f)
 	if err != nil {
-		return fmt.Errorf("%s: %w", GateFileName, err)
-	}
-	if _, err := DecodeFile(b); err != nil {
-		return fmt.Errorf("%s: %w", GateFileName, err)
+		return err
 	}
 	return fsutil.WriteFileAtomic(path, b, FileMode)
+}
+
+// EncodeChecked is f's bytes, decoded back with the gate's strict
+// decoder and rules first: what the Hub publishes (a file the gate
+// refuses is an error, never bytes).
+func EncodeChecked(f *File) ([]byte, error) {
+	b, err := f.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", GateFileName, err)
+	}
+	if _, err := DecodeFile(b); err != nil {
+		return nil, fmt.Errorf("%s: %w", GateFileName, err)
+	}
+	return b, nil
 }
 
 // WriteCredFile is WriteFile for mcp-credentials.json. The encoded
 // buffer (ciphertexts only) is cleared after the write.
 func WriteCredFile(path string, c *CredFile) error {
-	b, err := c.Encode()
+	b, err := EncodeCredChecked(c)
 	if err != nil {
-		return fmt.Errorf("%s: %w", CredsFileName, err)
+		return err
 	}
 	defer clear(b)
-	if _, err := DecodeCredFile(b); err != nil {
-		return fmt.Errorf("%s: %w", CredsFileName, err)
-	}
 	return fsutil.WriteFileAtomic(path, b, FileMode)
+}
+
+// EncodeCredChecked is EncodeChecked for mcp-credentials.json (the
+// caller clears the bytes once published).
+func EncodeCredChecked(c *CredFile) ([]byte, error) {
+	b, err := c.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", CredsFileName, err)
+	}
+	if _, err := DecodeCredFile(b); err != nil {
+		clear(b)
+		return nil, fmt.Errorf("%s: %w", CredsFileName, err)
+	}
+	return b, nil
 }

@@ -109,6 +109,30 @@ func TestRevPrintsMountedRev(t *testing.T) {
 	}
 }
 
+// TestRevOfDocument: hub rev <dir> <doc> prints <dir>/.rev-<doc> (one
+// per published document in a shared projected directory, contract §4),
+// exit 1 when missing; a doc that isn't a plain name is refused.
+func TestRevOfDocument(t *testing.T) {
+	d := t.TempDir()
+	if _, code := run(t, nil, "rev", d, "group-gate-policy"); code != 1 {
+		t.Errorf("missing: exit %d", code)
+	}
+	os.WriteFile(filepath.Join(d, ".rev"), []byte("other\n"), 0o444)
+	os.WriteFile(filepath.Join(d, ".rev-group-gate-policy"), []byte("0123456789abcdef\n"), 0o444)
+	os.WriteFile(filepath.Join(d, ".rev-vpn"), []byte("fedcba9876543210\n"), 0o444)
+	if out, code := run(t, nil, "rev", d, "group-gate-policy"); code != 0 || out != "0123456789abcdef\n" {
+		t.Errorf("rev = %q %d", out, code)
+	}
+	if out, code := run(t, nil, "rev", d, "vpn"); code != 0 || out != "fedcba9876543210\n" {
+		t.Errorf("rev vpn = %q %d", out, code)
+	}
+	for _, bad := range []string{"../x", "a/b", "", "Group", ".rev"} {
+		if _, code := run(t, nil, "rev", d, bad); code == 0 {
+			t.Errorf("doc %q accepted", bad)
+		}
+	}
+}
+
 func TestHelperListenDial(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

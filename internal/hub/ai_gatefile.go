@@ -24,6 +24,7 @@ import (
 	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -94,6 +95,16 @@ func (h *Hub) prevResources() map[string]*aigate.Resource {
 		out[f.Resources[i].URL] = &f.Resources[i]
 	}
 	return out
+}
+
+// publishGateFile publishes mcp-gate.json, checked with the gate's own
+// rules first (a refused file is never published).
+func (h *Hub) publishGateFile(f *aigate.File) error {
+	b, err := aigate.EncodeChecked(f)
+	if err != nil {
+		return err
+	}
+	return h.publish(publish.MCPGate, b)
 }
 
 func (h *Hub) gatePath() string  { return filepath.Join(h.cfg.DataDir, aigate.GateFileName) }
@@ -588,18 +599,18 @@ func (h *Hub) writeGateFiles(m *directory.Membership, mErr error) error {
 		// Nothing valid can be built (the main domain): no gate file at
 		// all is "AI support is off".
 		log.Printf("mcp-gate: %v — removing %s", err, aigate.GateFileName)
-		if rerr := fsutil.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		if rerr := h.unpublish(publish.MCPGate); rerr != nil {
 			err = errors.Join(err, rerr)
 		}
 		return err
 	}
-	if err := aigate.WriteFile(h.gatePath(), f); err != nil {
+	if err := h.publishGateFile(f); err != nil {
 		log.Printf("mcp-gate: the gate would refuse the built file (%v) — writing enabled: false", err)
 		off := *f
 		off.Enabled, off.Clients, off.AllowedOrigins, off.Resources = false, []string{}, []string{}, []aigate.Resource{}
-		if werr := aigate.WriteFile(h.gatePath(), &off); werr != nil {
+		if werr := h.publishGateFile(&off); werr != nil {
 			log.Printf("mcp-gate: writing enabled: false failed too (%v) — removing %s", werr, aigate.GateFileName)
-			if rerr := fsutil.Remove(h.gatePath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			if rerr := h.unpublish(publish.MCPGate); rerr != nil {
 				werr = errors.Join(werr, rerr)
 			}
 			return errors.Join(err, werr)

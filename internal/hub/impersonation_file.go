@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"log"
 	"maps"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -20,8 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/freshauth"
-	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 )
@@ -225,10 +224,6 @@ func (h *Hub) impersonationFileLocked(now time.Time) impFile {
 	return doc
 }
 
-func (h *Hub) impersonationFilePath() string {
-	return filepath.Join(h.cfg.DataDir, ImpersonationFileName)
-}
-
 // writeImpersonationFileLocked writes the file atomically, mode 0644
 // (Keycloak and group-gate read it from a read-only mount as other
 // users). Caller holds mu (either lock: the file is built and renamed
@@ -240,7 +235,7 @@ func (h *Hub) writeImpersonationFileLocked() error {
 	now := h.impNow()
 	b, err := json.MarshalIndent(h.impersonationFileLocked(now), "", "  ")
 	if err == nil {
-		err = fsutil.WriteFileAtomic(h.impersonationFilePath(), append(b, '\n'), 0644)
+		err = h.publish(publish.Impersonation, append(b, '\n'))
 	}
 	if err != nil {
 		h.imp.fileFailed = true

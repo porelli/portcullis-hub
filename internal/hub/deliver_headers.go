@@ -458,7 +458,7 @@ func (h *Hub) replaceAttrHosts(hosts map[string]map[string]map[string]string, su
 		return true, nil
 	}
 	doc.Hosts = next
-	if err := policy.WriteUserAttributes(h.attributesPath(), doc); err != nil {
+	if err := h.publishUserAttributes(doc); err != nil {
 		return false, err
 	}
 	return true, nil

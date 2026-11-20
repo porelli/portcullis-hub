@@ -448,13 +448,25 @@ func stricterOf(tmpls map[string]signin.Node, collisions map[[2]string]string, a
 	return id, true
 }
 
+// Encode is the policy file's bytes (indented JSON, a trailing
+// newline): what the Hub publishes (contract §4; on Kubernetes the same
+// bytes go into pub-group-gate-policy).
+func Encode(doc Document) ([]byte, error) {
+	payload, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(payload, '\n'), nil
+}
+
 // Write serialises doc and writes it atomically (temp file + rename) so
 // group-gate never reads a partial document. 0644: group-gate reads it from
-// a read-only mount as another user.
+// a read-only mount as another user. (The Hub publishes through
+// internal/publish; this is for tests and tools.)
 func Write(path string, doc Document) error {
-	payload, err := json.MarshalIndent(doc, "", "  ")
+	b, err := Encode(doc)
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(path, append(payload, '\n'), 0644)
+	return fsutil.WriteFileAtomic(path, b, 0644)
 }

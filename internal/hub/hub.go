@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/runtime/kube"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -556,6 +557,10 @@ type Hub struct {
 	bg sync.WaitGroup
 
 	policyWriteMu sync.Mutex
+	// pub publishes the documents other services read (publish.go);
+	// pubMirror is the Hub's own copy under Kubernetes (nil elsewhere).
+	pub       *publish.Tracker
+	pubMirror *publish.FileSink
 	// gatePolicy: the group-gate policy document last written (nil: none
 	// yet). My apps and the portal decide from it what group-gate lets
 	// a person open (gateOpenLocked, gateDenies).
@@ -889,6 +894,7 @@ func New(cfg Config, rt runtime.Instances, idp IdP) (*Hub, error) {
 		idRanges:             templates.PersonIDPools,
 	}
 	h.mds.fetcher = newMDSFetcher(cfg)
+	h.initPublish()
 	// A create's holder re-check (F30) is the trigger RunCredentialChecks
 	// serves.
 	h.credentialCheck = h.TriggerCredentialCheck
@@ -1527,8 +1533,12 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// change reaches the native-OIDC logins before group-gate's file. A
 	// failed write never skips group-gate's file: both are attempted and
 	// their errors joined (each reader keeps failing closed on its own).
-	kcErr := writeKeycloakSignIn(h.signInKeycloakPath(), kcSignIn)
-	if err := policy.Write(h.policyPath(), doc); err != nil {
+	kcErr := h.publishKeycloakSignIn(kcSignIn)
+	pb, err := policy.Encode(doc)
+	if err == nil {
+		err = h.publish(publish.GroupGatePolicy, pb)
+	}
+	if err != nil {
 		return false, errors.Join(kcErr, err)
 	}
 	h.gatePolicy.Store(&doc)
@@ -1547,7 +1557,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		}
 	case attrs == nil && len(hosts) == 0 && len(suppress) == 0:
 		attrsWritten = true
-		if err := fsutil.Remove(h.attributesPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := h.unpublish(publish.UserAttributes); err != nil {
 			errs = append(errs, err)
 		}
 	default:
@@ -1557,7 +1567,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		}
 		out.Hosts = policy.BuildHosts(hosts)
 		policy.SuppressFieldHeaders(&out, suppress)
-		if err := policy.WriteUserAttributes(h.attributesPath(), out); err != nil {
+		if err := h.publishUserAttributes(out); err != nil {
 			errs = append(errs, err)
 		} else {
 			attrsWritten = true
@@ -1565,7 +1575,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	}
 	// The landing portal's app list (contract §10) changes exactly when
 	// the policy does: enable, disable, template sync.
-	errs = append(errs, writePortal(h.portalPath(), portal))
+	errs = append(errs, h.publishPortal(portal))
 	// The gate files follow in the same pass (contract §15.4).
 	errs = append(errs, h.writeGateFiles(dr.m, dr.mErr))
 	// Leavers' credentials are marked revoking in this same pass, from

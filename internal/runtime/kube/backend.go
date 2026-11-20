@@ -83,6 +83,9 @@ type Config struct {
 	BindRoots    []string
 	// EdgeNamespace holds the instance's routes ("" = portcullis-edge).
 	EdgeNamespace string
+	// CoreNamespace is the Hub's own namespace: the published documents
+	// and their readers (DocSink; "" = portcullis).
+	CoreNamespace string
 }
 
 // Backend serves runtime.Instances on Kubernetes.
@@ -111,6 +114,9 @@ func New(cfg Config) (*Backend, error) {
 	}
 	if cfg.EdgeNamespace == "" {
 		cfg.EdgeNamespace = EdgeNamespace
+	}
+	if cfg.CoreNamespace == "" {
+		cfg.CoreNamespace = "portcullis"
 	}
 	if cfg.Poll <= 0 {
 		cfg.Poll = 250 * time.Millisecond

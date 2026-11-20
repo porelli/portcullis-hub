@@ -270,6 +270,9 @@ type Inputs struct {
 	Engine *EngineIn
 	// Kube is the cluster guard's state (nil: not Kubernetes).
 	Kube *KubeIn
+	// Published: the published documents' problems (publish.go; nil:
+	// none fire).
+	Published *PublishedIn
 	// Servers: the worker servers' state (nil: nothing to report).
 	Servers *ServersIn
 	// VPN: the VPN kinds' inputs (vpn.go; nil = none fire).

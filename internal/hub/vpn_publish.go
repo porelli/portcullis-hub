@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/templates"
 	"github.com/portcullis/hub/internal/vpn"
 )
@@ -120,11 +121,15 @@ func (h *Hub) publishVPNLocked(st *vpn.Status) error {
 	if bytes.Equal(b, h.vpnrt.lastWritten) && now.Sub(h.vpnrt.lastWriteAt) < minRefresh {
 		return nil
 	}
-	write := vpn.WriteGroup
 	if h.vpnrt.testWrite != nil {
-		write = h.vpnrt.testWrite
+		err = h.vpnrt.testWrite(h.vpnJSONPath(), doc, h.cfg.VPNDocGID, now)
+	} else {
+		var out []byte
+		if out, err = vpn.EncodeChecked(doc, now); err == nil {
+			err = h.publish(publish.VPN, out)
+		}
 	}
-	if err := write(h.vpnJSONPath(), doc, h.cfg.VPNDocGID, now); err != nil {
+	if err != nil {
 		return err
 	}
 	h.vpnrt.lastWritten, h.vpnrt.lastWriteAt = b, now

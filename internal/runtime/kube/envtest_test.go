@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -103,6 +104,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata: {name: portcullis-hub, namespace: portcullis-apps}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: portcullis-hub}
+subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: portcullis-hub-core, namespace: portcullis}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: portcullis-hub-core}
 subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 `
 
@@ -190,6 +197,16 @@ func startEnv(t *testing.T) *env {
 	applyYAML(t, admin, []byte(setupObjects))
 	applyYAML(t, admin, file(t, "testdata/role.yaml"))
 	applyYAML(t, admin, file(t, "testdata/role-edge.yaml"))
+	applyYAML(t, admin, file(t, "testdata/role-core.yaml"))
+	// The published documents' objects, as core's chart creates them
+	// (empty).
+	for name, kind := range vectorObjects(t) {
+		k := "ConfigMap"
+		if kind == "secret" {
+			k = "Secret"
+		}
+		applyYAML(t, admin, []byte("apiVersion: v1\nkind: "+k+"\nmetadata: {name: "+name+", namespace: portcullis}\n"))
+	}
 	// The params as the CLI writes them, with this API server's admin as
 	// the CLI's identity (cliUsername).
 	whoami, err := kubernetes.NewForConfigOrDie(cfg).AuthenticationV1().SelfSubjectReviews().Create(context.Background(), &authnv1.SelfSubjectReview{}, metav1.CreateOptions{})
@@ -381,11 +398,12 @@ func TestSelfTestRequiresPolicyRejection(t *testing.T) {
 // TestRoleIsEnough: with exactly role.yaml the Hub creates an instance,
 // a helper pod and deletes them; exec and logs pass authorization (no
 // kubelet: any error but Forbidden). And it can't do more: no get on
-// pods/exec, nothing in the core namespace, no patch on pods.
+// pods/exec, nothing in the core namespace but portcullis-hub-core, no
+// patch on pods.
 func TestRoleIsEnough(t *testing.T) {
 	e := startEnv(t)
 	ctx := context.Background()
-	b, err := New(Config{Client: e.hubK, Dynamic: e.hub, Namespace: ns, HubImage: "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("1", 64),
+	b, err := New(Config{Client: e.hubK, Dynamic: e.hub, Namespace: ns, CoreNamespace: "portcullis", HubImage: "ghcr.io/porelli/portcullis-hub@sha256:" + strings.Repeat("1", 64),
 		Resolver: &fakeResolver{}, Exec: RemoteExec{Client: e.hubK, Config: rest.CopyConfig(e.cfg)}, BindRoots: []string{"/srv"},
 		Settings: Settings{PodCIDR: "10.42.0.0/24", ServiceCIDR: "10.43.0.0/16", NodeAddresses: []string{"10.1.0.4"}, APIAddresses: []string{"10.1.0.4"}}})
 	if err != nil {
@@ -447,6 +465,47 @@ func TestRoleIsEnough(t *testing.T) {
 			Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &a}}, metav1.CreateOptions{})
 		if err != nil || r.Status.Allowed != c.allow {
 			t.Errorf("can-i %s %s/%s %s in %q = %v (%v), want %v", a.Verb, a.Group, a.Resource, a.Subresource, a.Namespace, r != nil && r.Status.Allowed, err, c.allow)
+		}
+	}
+	// The core namespace (contract §6, portcullis-hub-core): every
+	// document published by update of its own object; no create, no
+	// other name, no list of ConfigMaps or Secrets; pods list allowed.
+	sink := b.DocSink()
+	for _, d := range publish.All {
+		if _, err := sink.Publish(ctx, d, []byte(`{"doc":"`+string(d)+`"}`+"\n")); err != nil {
+			t.Errorf("publish %s: %v", d, err)
+		}
+	}
+	if err := sink.(publish.Remover).Remove(ctx, publish.UserAttributes); err != nil {
+		t.Errorf("remove: %v", err)
+	}
+	if _, err := e.hubK.CoreV1().Pods("portcullis").List(ctx, metav1.ListOptions{LabelSelector: LabelComponent + " in (group-gate)"}); err != nil {
+		t.Errorf("list core pods: %v", err)
+	}
+	for _, c := range []struct {
+		attr  authorizationv1.ResourceAttributes
+		allow bool
+	}{
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Resource: "configmaps", Name: "pub-vpn"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Resource: "secrets", Name: "pub-mcp-credentials"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "get", Resource: "configmaps", Name: "frontdoor-status"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Resource: "configmaps", Name: "frontdoor-status"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "create", Resource: "configmaps", Name: "pub-vpn"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "delete", Resource: "configmaps", Name: "pub-vpn"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "list", Resource: "configmaps"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "get", Resource: "secrets", Name: "frontdoor-env"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Group: "coordination.k8s.io", Resource: "leases", Name: "portcullis-hub"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Group: "coordination.k8s.io", Resource: "leases", Name: "portcullis-frontdoor"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "create", Resource: "pods", Subresource: "exec", Name: "group-gate-1"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "get", Resource: "pods", Subresource: "exec", Name: "group-gate-1"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "list", Resource: "pods"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "get", Resource: "pods", Name: "group-gate-1"}, false},
+	} {
+		a := c.attr
+		r, err := e.hubK.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authorizationv1.SelfSubjectAccessReview{
+			Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &a}}, metav1.CreateOptions{})
+		if err != nil || r.Status.Allowed != c.allow {
+			t.Errorf("can-i %s %s/%s %s %s in %q = %v (%v), want %v", a.Verb, a.Group, a.Resource, a.Subresource, a.Name, a.Namespace, r != nil && r.Status.Allowed, err, c.allow)
 		}
 	}
 	// The rules review equals the Role.

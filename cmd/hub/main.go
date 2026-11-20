@@ -705,6 +705,9 @@ func main() {
 	go h.RunHistoryPrune(loops, 24*time.Hour)
 	// Impersonations: expiry, not used, the file every minute (D41, D37).
 	go h.RunImpersonationExpiry(loops, 5*time.Second)
+	// The readers' confirmation of every published document (contract §4
+	// "On Kubernetes"; a no-op on Docker and Podman).
+	go h.RunPublishConfirm(loops, 2*time.Second)
 	// An owed mail void (a wiring, a restore) is retried every 5 min
 	// (contract §19.11) and at once when owed.
 	go h.RunMailVoidRetry(loops, hub.MailVoidRetryEvery)

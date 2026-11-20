@@ -24,6 +24,7 @@ import (
 //	hub volcopy in <dir>            extract a tar from stdin into <dir>
 //	hub seed <src> <dst>            copy src/. into dst when dst is empty (K4)
 //	hub rev <dir>                   print <dir>/.rev (exit 1 when missing)
+//	hub rev <dir> <doc>             print <dir>/.rev-<doc> (a published document, contract §4)
 func helperMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: hub helper|volcopy|seed|rev …")
@@ -46,6 +47,11 @@ func helperMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case args[0] == "rev" && len(args) == 2:
 		var rev string
 		if rev, err = volcopy.Rev(args[1]); err == nil {
+			fmt.Fprintln(stdout, rev)
+		}
+	case args[0] == "rev" && len(args) == 3:
+		var rev string
+		if rev, err = volcopy.RevOf(args[1], args[2]); err == nil {
 			fmt.Fprintln(stdout, rev)
 		}
 	default:

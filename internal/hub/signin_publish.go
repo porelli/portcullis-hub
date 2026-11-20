@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/fidomds"
-	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/signin"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -188,14 +188,15 @@ func (doc *KeycloakSignIn) addClient(id, client, tmpl, name string) {
 	}
 }
 
-// writeKeycloakSignIn writes doc atomically, 0644 (Keycloak reads it from
-// a read-only mount as another user).
-func writeKeycloakSignIn(path string, doc KeycloakSignIn) error {
+// publishKeycloakSignIn publishes doc (contract §8.1; on Docker the file
+// atomically, 0644: Keycloak reads it from a read-only mount as another
+// user).
+func (h *Hub) publishKeycloakSignIn(doc KeycloakSignIn) error {
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0644)
+	return h.publish(publish.SignInKeycloak, append(b, '\n'))
 }
 
 // tierChangesLocked lists, sorted, the enabled instances whose routers'

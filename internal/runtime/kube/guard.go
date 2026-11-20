@@ -40,6 +40,12 @@ var roleYAML []byte
 //go:embed testdata/role-edge.yaml
 var roleEdgeYAML []byte
 
+// The Hub's Role in the core namespace, portcullis-hub-core (contract
+// §6; NEW, HA): the published documents, its Lease, the hub rev exec.
+//
+//go:embed testdata/role-core.yaml
+var roleCoreYAML []byte
+
 func parseRole(b []byte) (*rbacv1.Role, error) {
 	var r rbacv1.Role
 	if err := yaml.UnmarshalStrict(b, &r); err != nil {
@@ -54,6 +60,9 @@ func Role() (*rbacv1.Role, error) { return parseRole(roleYAML) }
 
 // EdgeRole is the Hub's Role in the edge namespace.
 func EdgeRole() (*rbacv1.Role, error) { return parseRole(roleEdgeYAML) }
+
+// CoreRole is the Hub's Role in the core namespace.
+func CoreRole() (*rbacv1.Role, error) { return parseRole(roleCoreYAML) }
 
 // podsGVR is pods (the self-test dry-runs a Pod).
 var podsGVR = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
@@ -304,14 +313,32 @@ var optionalDefaults = []authv1.ResourceRule{
 	{Verbs: []string{"get", "list", "watch"}, APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"clustertrustbundles"}},
 }
 
-// grant is one (group, resource, verb) triple.
-type grant struct{ group, resource, verb string }
+// grant is one (group, resource, verb, name) grant; name "" is every
+// name (a rule without resourceNames).
+type grant struct{ group, resource, verb, name string }
 
+func (g grant) String() string {
+	s := g.group + "/" + g.resource + " " + g.verb
+	if g.name != "" {
+		s += " " + g.name
+	}
+	return s
+}
+
+// expand lists every grant of rules, a rule with resourceNames once per
+// name. A wildcard group, resource, verb or name (or an empty name) is
+// refused.
 func expand(rules []authv1.ResourceRule) (map[grant]bool, error) {
 	out := map[grant]bool{}
 	for _, r := range rules {
-		if len(r.ResourceNames) > 0 {
-			return nil, fmt.Errorf("a rule limited to names %v", r.ResourceNames)
+		names := r.ResourceNames
+		for _, n := range names {
+			if n == "" || strings.Contains(n, "*") {
+				return nil, fmt.Errorf("a rule on the names %q", names)
+			}
+		}
+		if len(names) == 0 {
+			names = []string{""}
 		}
 		for _, g := range r.APIGroups {
 			for _, res := range r.Resources {
@@ -319,7 +346,9 @@ func expand(rules []authv1.ResourceRule) (map[grant]bool, error) {
 					if g == "*" || res == "*" || v == "*" {
 						return nil, fmt.Errorf("a wildcard rule (%s/%s %s)", g, res, v)
 					}
-					out[grant{g, res, v}] = true
+					for _, n := range names {
+						out[grant{g, res, v, n}] = true
+					}
 				}
 			}
 		}
@@ -335,7 +364,7 @@ func RulesExact(st authv1.SubjectRulesReviewStatus, want []rbacv1.PolicyRule) er
 	}
 	var w []authv1.ResourceRule
 	for _, r := range want {
-		w = append(w, authv1.ResourceRule{Verbs: r.Verbs, APIGroups: r.APIGroups, Resources: r.Resources})
+		w = append(w, authv1.ResourceRule{Verbs: r.Verbs, APIGroups: r.APIGroups, Resources: r.Resources, ResourceNames: r.ResourceNames})
 	}
 	w = append(w, defaultRules.resources...)
 	wantG, err := expand(w)
@@ -350,12 +379,12 @@ func RulesExact(st authv1.SubjectRulesReviewStatus, want []rbacv1.PolicyRule) er
 	var extra, missing []string
 	for g := range have {
 		if !wantG[g] && !optional[g] {
-			extra = append(extra, g.group+"/"+g.resource+" "+g.verb)
+			extra = append(extra, g.String())
 		}
 	}
 	for g := range wantG {
 		if !have[g] {
-			missing = append(missing, g.group+"/"+g.resource+" "+g.verb)
+			missing = append(missing, g.String())
 		}
 	}
 	slices.Sort(extra)
@@ -385,7 +414,8 @@ func RulesExact(st authv1.SubjectRulesReviewStatus, want []rbacv1.PolicyRule) er
 }
 
 // rulesReview: the apps namespace holds exactly the Role, the edge
-// namespace exactly the edge Role, the core namespace only the defaults.
+// namespace exactly the edge Role, the core namespace exactly the core
+// Role (name by name).
 func (g *Guard) rulesReview(ctx context.Context) error {
 	role, err := Role()
 	if err != nil {
@@ -395,10 +425,14 @@ func (g *Guard) rulesReview(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	core, err := CoreRole()
+	if err != nil {
+		return err
+	}
 	for _, c := range []struct {
 		ns   string
 		want []rbacv1.PolicyRule
-	}{{g.cfg.AppsNamespace, role.Rules}, {g.cfg.EdgeNamespace, edge.Rules}, {g.cfg.CoreNamespace, nil}} {
+	}{{g.cfg.AppsNamespace, role.Rules}, {g.cfg.EdgeNamespace, edge.Rules}, {g.cfg.CoreNamespace, core.Rules}} {
 		if c.ns == "" {
 			continue
 		}

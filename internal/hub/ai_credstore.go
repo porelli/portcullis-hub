@@ -12,6 +12,7 @@ import (
 	"filippo.io/age"
 
 	"github.com/portcullis/hub/internal/aigate"
+	"github.com/portcullis/hub/internal/publish"
 )
 
 // The AI credential store (contract §15.4 mcp-credentials.json; G70: not
@@ -30,6 +31,8 @@ type aiCredStore struct {
 	path      string
 	recipient func() (*age.X25519Recipient, error)
 	file      *aigate.CredFile // nil: not loaded yet
+	// put publishes the encoded file (h.publish; contract §4).
+	put func([]byte) error
 }
 
 // creds is the Hub's AI credential store (created on first use).
@@ -41,7 +44,7 @@ func (h *Hub) creds() *aiCredStore {
 				return nil, errors.New("no mcp-gate recipient (HUB_MCP_GATE_RECIPIENT_FILE): AI credentials can't be stored")
 			}
 			return r, nil
-		}}
+		}, put: func(b []byte) error { return h.publish(publish.MCPCredentials, b) }}
 	})
 	return h.aiCreds
 }
@@ -76,7 +79,12 @@ func (s *aiCredStore) commitLocked(next *aigate.CredFile) error {
 		return slices.Compare([]string{a.Instance, a.Companion, a.User}, []string{b.Instance, b.Companion, b.User})
 	})
 	slices.SortFunc(next.CallerSecrets, func(a, b aigate.CallerSecret) int { return strings.Compare(a.Ref, b.Ref) })
-	if err := aigate.WriteCredFile(s.path, next); err != nil {
+	b, err := aigate.EncodeCredChecked(next)
+	if err != nil {
+		return err
+	}
+	defer clear(b)
+	if err := s.put(b); err != nil {
 		return err
 	}
 	s.file = next

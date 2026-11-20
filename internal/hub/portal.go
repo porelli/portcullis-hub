@@ -10,8 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
-	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/policy"
+	"github.com/portcullis/hub/internal/publish"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -188,12 +188,13 @@ func (h *Hub) Portal() PortalDocument {
 
 func (h *Hub) portalPath() string { return filepath.Join(h.cfg.DataDir, "portal-apps.json") }
 
-func writePortal(path string, doc PortalDocument) error {
+// publishPortal publishes the landing portal's app list (contract §10).
+func (h *Hub) publishPortal(doc PortalDocument) error {
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0644)
+	return h.publish(publish.PortalApps, append(b, '\n'))
 }
 
 // portalNoteMax caps a router-less entry's note (runes).

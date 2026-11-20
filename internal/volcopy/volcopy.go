@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -21,6 +22,24 @@ import (
 // Rev is <dir>/.rev (trimmed); an error when it is missing.
 func Rev(dir string) (string, error) {
 	b, err := os.ReadFile(filepath.Join(dir, ".rev"))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// docName is a published document's name (contract §4: a key without
+// ".json").
+var docName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+// RevOf is <dir>/.rev-<doc> (trimmed): a published document's revision
+// in a projected directory several documents share (contract §4). An
+// error when it is missing or doc isn't a plain name.
+func RevOf(dir, doc string) (string, error) {
+	if !docName.MatchString(doc) {
+		return "", fmt.Errorf("%q is not a document name", doc)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, ".rev-"+doc))
 	if err != nil {
 		return "", err
 	}
