@@ -1642,3 +1642,59 @@ func TestCutOffSiteFrontdoorStops(t *testing.T)           // Lease renew fails �
   - the numeric-user follow-up for ~46 templates (the prerequisite of app HA).
 - **Phase 3:** migration paths 1 and 3 as guided operations, Docker assisted recovery (Recovery card, superseded/diverged guard, agent snapshots, ZFS replication), `ha recover`.
 - **The rest of phase 4:** the CNPG replica cluster, Longhorn DR volumes, the sync heartbeat and site promotion (user ruling Q2), the NFS second copy, Hub state in Postgres + hot standby, mail on Kubernetes, storage nodes outside `main`, and changing the primary site.
+
+## Amendment 1 (2026-11-19): spike 1 results, rulings and pins
+
+Spike 1 (Task 3) ran on the four test VMs (amd64 only: no arm64 cloud VMs, so every arm64 step is "not verified on hardware: arm64"; arm64 builds + a qemu smoke stay). These rulings amend Global Constraints and bind every later task:
+
+- **S5 Ingress (replaces ServiceLB for Traefik).** k3s ServiceLB (klipper-lb) masquerades, so the client IP is lost even with `externalTrafficPolicy: Local`. Traefik runs as a DaemonSet on `portcullis.io/ingress` nodes with `hostNetwork: true`, binding 80/443 on the node; no LoadBalancer Service for Traefik. It runs as uid 0 with `capabilities: drop ALL, add NET_BIND_SERVICE`, `allowPrivilegeEscalation: false`, read-only root. Because PodSecurity `baseline` refuses hostNetwork, Traefik moves to its own namespace `portcullis-ingress` (PSA `privileged`, default-deny plus its flows), and a ValidatingAdmissionPolicy admits in that namespace only the Traefik DaemonSet's pod shape (its image digest, its single capability, no other hostPath/hostPID/privileged). The core namespace stays `restricted`. `hardening.md` states the delta. The `svccontroller.k3s.cattle.io/enablelb` label is set only for `wg-people`.
+- **wg-people** stays a UDP LoadBalancer through ServiceLB, `externalTrafficPolicy: Cluster` (verified: handshake through another node).
+- **S6 Probes.** Same-site probes never count (in-cluster networking answers a node's own public address). Only probers at another site are the outside vantage. A single-site cluster is always internal-only (`frontdoor_probes_internal_only`). Verified: cross-site probes take the real public path; a blind prober fails every target including its own address (R10 holds).
+- **S3 Fencing.** SNR v0.13.0 refuses a safe time below 90 s (API check 10 s, timeout 5 s, 2 errors). Its watchdog timeout reads 0 (upstream bug), so `safeTimeToAssumeNodeRebootedSeconds` is set to **150** (90 + 60 s margin) and `T_fence` = 150 s. Power-off stateful failover measured 3.6 min at 90 s. The target becomes **≤ 5 min**. The SNR DaemonSet tolerates `portcullis.io/small`.
+- **S8 etcd.** Leader election across sites measured 2–3 s (worst case ~4 s from etcd's randomised timeout). The target is ≤ 5 s.
+- **S2 Longhorn** needs no separate disk (ext4 root, an ext4 loop file and btrfs all work). A ZFS dataset doesn't work; a zvol or a separate disk does. A ZFS dataset as the Longhorn path is refused by the node checks and doctor. Nodes need `open-iscsi` (iscsid running), the `iscsi_tcp` module, `nfs-common` and a multipathd blacklist for Longhorn devices; nodeagent's host checks report each.
+- **Mesh gateway rules.** k3s's network-policy chain sits first in FORWARD and accepts pod traffic, so the gateway rule set is: accept `-i pcmesh -o pcmesh`, then drop anything else arriving on `pcmesh` for forwarding. Relay verified (MTU 1420 on pcmesh, pods 1340, 206–447 Mbit/s across sites).
+- **flannel on 51840.** No k3s flag exists. Every node gets a `--flannel-conf` file (used verbatim, so it carries the cluster network too) with `"Backend": {"Type": "wireguard", "ListenPort": 51840, …}`.
+- **Token rotation without argv.** `k3s token rotate` takes the new token on argv only. nodeagent calls the same k3s supervisor rotation API itself, reading both tokens from 0600 files, then updates each node's token file and restarts the nodes one at a time (verified: old 401, new 200). Pinned to the k3s version below; an e2e step covers it.
+- **barman-cloud needs cert-manager.** Task 4 rules on it.
+
+**Pins** (from the spike):
+
+
+| Component | Version | Artifact | sha256 / digest |
+|---|---|---|---|
+| k3s | v1.37.2+k3s1 (stable channel) | `k3s` (amd64) | `265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda` |
+| k3s | v1.37.2+k3s1 | `k3s-arm64` | `a779ccf1e5e2e33a62f5a29c2f1c0bbf99431e100579d4c10f0aa0742a6aa84b` |
+| k3s | v1.37.2+k3s1 | `k3s-airgap-images-amd64.tar.zst` | `35a5af1e69b57b8b627a4f6b1c29ea104209b661067b8c97fd40dc3f860bfcd2` |
+| k3s (k3d node image) | v1.37.2-k3s1 | `docker.io/rancher/k3s:v1.37.2-k3s1` | `sha256:21ea6e0fac4e3930c2ce8aa40ddd41a8b18cb3e9a0222c030dc005e7e88c4332` |
+| Longhorn | v1.13.0 | chart `longhorn-1.13.0.tgz` (longhorn/charts release) | `e57f010d2a8bcf0da5b8b03ffecf49c5bc35ddc2663588ce8f22b7567b6133ed` |
+| Longhorn | v1.13.0 | `longhorn.yaml` (release asset) | `d0f99488e7b2789312d45b0127ce7388df71a971e6fca2085e88635303cc0a1f` |
+| Longhorn | v1.13.0 | `longhorn-images.txt` (release asset) | `2fa3f49f28a285c136fced55e9a510cb14f847fd7acc20f8baa5956cc5edd760` |
+| Longhorn | v1.13.0 | `longhornio/longhorn-manager:v1.13.0` | `sha256:7372f3c59239e9a67c0017b3af32fabdf08c4dcc0631140161da9a47e3b142f0` |
+| Longhorn | v1.13.0 | `longhornio/longhorn-engine:v1.13.0` | `sha256:b0cc5090889d57705acd69c5106492992e84560170ac3bec4a1cc8dd3fe83ca6` |
+| Longhorn | v1.13.0 | `longhornio/longhorn-instance-manager:v1.13.0` | `sha256:fc9e1c15e81988b04c146866ce7010b6df3a70f88302809bf53e19b27d1658a3` |
+| Longhorn | v1.13.0 | `longhornio/longhorn-share-manager:v1.13.0` | `sha256:53950f78b7af38b8a943c298cd3020622191a4661a13036f69d83c154cc8690d` |
+| Longhorn | v1.13.0 | `longhornio/longhorn-ui:v1.13.0` | `sha256:f22fb0254ae50195c1635ce428dfae26375956b3d7bd39640fae8fe33a236023` |
+| external-snapshotter | v8.7.0 | git tag commit (CRDs `client/config/crd`, `deploy/kubernetes/snapshot-controller`) | `9cc6050ab00a0c56d84ba0279e518a00367363e7` |
+| external-snapshotter | v8.7.0 | `kubectl kustomize client/config/crd` output | `9942127fab40ddd5b991745c3aa9127f883df96639b538e3103e51a227a463d5` |
+| external-snapshotter | v8.7.0 | `registry.k8s.io/sig-storage/snapshot-controller:v8.7.0` | `sha256:8511f417d0072efcd937aedd7cc79a937d5066e64ee17beb6097301c92742f19` |
+| CloudNativePG | v1.30.2 | `cnpg-1.30.2.yaml` (release asset) | `ea4cc355b394e10661d30c6b409cefb19029dd973bccb76b1ed8c789985bc68c` |
+| CloudNativePG | v1.30.2 | `ghcr.io/cloudnative-pg/cloudnative-pg:1.30.2` | `sha256:f96f6be3d81ec93819b443c665c575c609342fca840df90d4d87dae314a5b913` |
+| barman-cloud plugin | v0.16.0 | `manifest.yaml` (release asset; needs cert-manager) | `aee614683892dd4b44ff9f7afaca55254f1c28de17abbaa0552bf2e1228f7155` |
+| barman-cloud plugin | v0.16.0 | `ghcr.io/cloudnative-pg/plugin-barman-cloud:v0.16.0` | `sha256:6404a416718bd7aad943c67a25a7bb20d0558b43edfeab0bf167f013ca435882` |
+| barman-cloud plugin | v0.16.0 | `ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar:v0.16.0` | `sha256:c669259e20ed1e11fad821f735c396c19d929985aa05b9544b13ecc8b5a386d0` |
+| SNR | v0.13.0 | `bundle.tar.gz` (OLM bundle, release asset) | `c7d58af594390e5a544a4f0d51579e55462669bd8d5dfe37822dc833efd300c2` |
+| SNR | v0.13.0 | `quay.io/medik8s/self-node-remediation-operator:v0.13.0` (manager + agent DS) | `sha256:9ad002dca9ea183c72e350f72e47aff7020397fd476b4a3ac4ebc3627412a5b0` |
+| NHC | v0.12.0 | `bundle.tar.gz` (OLM bundle, release asset) | `b12c9eb3bcc22136b8527974700f72260c2f19b141122ea6fe2dfa170f495597` |
+| NHC | v0.12.0 | `quay.io/medik8s/node-healthcheck-operator:v0.12.0` | `sha256:5b048ad5d2b8578d2120989a5a822a041d65c985f9ac88d50b000427b32b5391` |
+| k3d | v5.9.0 | `k3d-linux-amd64` | `06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0` |
+| k3d | v5.9.0 | `k3d-linux-arm64` | `03cde5cf23e6e8e67de5a039ecf26e5b85aca82fba3e5d13dadf904cd218a250` |
+
+Notes on the pins:
+- **Tested on hardware**: k3s, Longhorn, external-snapshotter, SNR and NHC. **Pinned only, not exercised** (outside Steps 1–8): CNPG, barman-cloud and k3d.
+- kubernetes-csi's v8.7.0 snapshot-controller deploy manifest still references image v8.6.0. The pin overrides it with v8.7.0, which ran fine.
+- The k3s ServiceLB image in that release is `rancher/klipper-lb:v0.4.17` (STOP 1).
+- `get.k3s.io` is unversioned. The copy used had sha256 `c2a2643dd7c259121a876d16538844c60928de3d38ae98f22f7b95a7ffcfab9d`. Pin the binary instead (it is checked against `sha256sum-<arch>.txt`).
+- Image digests are manifest-list digests read from each registry's v2 API. Asset sha256s are GitHub release asset digests.
+- etcd inside k3s is 3.7.1. The spike used `etcdctl` v3.7.1 for checks only.
+
