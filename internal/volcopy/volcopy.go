@@ -5,6 +5,7 @@ package volcopy
 
 import (
 	"archive/tar"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -293,7 +294,31 @@ func SeedSelf(dst string) error {
 	return seedFile(self, dst)
 }
 
+// A retried init container (a killed attempt) leaves the emptyDir as it
+// was: stale temp files are removed first, an identical hub (size and
+// sha256) is kept as it is, and a different one is removed before the
+// new copy is written (never two binaries' worth of space).
 func seedFile(src, dst string) error {
+	stale, err := filepath.Glob(filepath.Join(dst, ".hub.tmp-*"))
+	if err != nil {
+		return err
+	}
+	for _, p := range stale {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	target := filepath.Join(dst, "hub")
+	same, err := sameFile(src, target)
+	if err != nil {
+		return err
+	}
+	if same {
+		return nil
+	}
+	if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -319,7 +344,49 @@ func seedFile(src, dst string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), filepath.Join(dst, "hub"))
+	return os.Rename(tmp.Name(), target)
+}
+
+// sameFile: b is a regular file with a's size and sha256 (missing: no).
+func sameFile(a, b string) (bool, error) {
+	bi, err := os.Lstat(b)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false, err
+	}
+	if !bi.Mode().IsRegular() || bi.Size() != ai.Size() {
+		return false, nil
+	}
+	ha, err := fileSum(a)
+	if err != nil {
+		return false, err
+	}
+	hb, err := fileSum(b)
+	if err != nil {
+		return false, err
+	}
+	return ha == hb, nil
+}
+
+func fileSum(p string) ([sha256.Size]byte, error) {
+	var out [sha256.Size]byte
+	f, err := os.Open(p)
+	if err != nil {
+		return out, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return out, err
+	}
+	copy(out[:], h.Sum(nil))
+	return out, nil
 }
 
 func Seed(src, dst string) error {

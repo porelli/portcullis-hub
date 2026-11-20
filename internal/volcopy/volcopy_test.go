@@ -124,3 +124,58 @@ func TestInCanonical(t *testing.T) {
 		t.Errorf("l = %q", l)
 	}
 }
+
+// TestSeedFileRetried: a retried seed-self (an attempt killed mid-copy)
+// removes the stale temp files first, keeps an identical hub as it is,
+// and replaces a different one (removed before the new copy), leaving
+// only hub behind.
+func TestSeedFileRetried(t *testing.T) {
+	srcDir, dst := t.TempDir(), t.TempDir()
+	src := filepath.Join(srcDir, "hub")
+	os.WriteFile(src, []byte("binary v2"), 0o755)
+	entries := func() []string {
+		es, _ := os.ReadDir(dst)
+		var out []string
+		for _, e := range es {
+			out = append(out, e.Name())
+		}
+		return out
+	}
+	// A killed attempt's temp files and an old binary.
+	os.WriteFile(filepath.Join(dst, ".hub.tmp-111"), []byte("partial"), 0o600)
+	os.WriteFile(filepath.Join(dst, ".hub.tmp-222"), []byte("partial"), 0o600)
+	os.WriteFile(filepath.Join(dst, "hub"), []byte("binary v1, longer"), 0o555)
+	if err := seedFile(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if got := entries(); len(got) != 1 || got[0] != "hub" {
+		t.Fatalf("entries %v", got)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, "hub")); string(b) != "binary v2" {
+		t.Fatalf("hub %q", b)
+	}
+	// Identical: kept as it is (the same file, not rewritten).
+	before, _ := os.Stat(filepath.Join(dst, "hub"))
+	os.WriteFile(filepath.Join(dst, ".hub.tmp-333"), nil, 0o600)
+	if err := seedFile(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(filepath.Join(dst, "hub"))
+	if !os.SameFile(before, after) {
+		t.Error("an identical hub was copied again")
+	}
+	if got := entries(); len(got) != 1 {
+		t.Errorf("entries %v", got)
+	}
+	// Same size, other bytes: replaced.
+	os.WriteFile(src, []byte("binary v3"), 0o755)
+	if err := seedFile(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, "hub")); string(b) != "binary v3" {
+		t.Errorf("same size, other bytes: hub %q", b)
+	}
+	if fi, _ := os.Stat(filepath.Join(dst, "hub")); fi.Mode().Perm() != 0o555 {
+		t.Errorf("mode %o", fi.Mode().Perm())
+	}
+}
