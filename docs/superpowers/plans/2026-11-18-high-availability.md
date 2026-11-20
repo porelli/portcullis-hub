@@ -1713,3 +1713,12 @@ Spike 2 (Task 4) ran in k3d; no "doesn't". Node-loss timings, real partitions an
 - **Vault raft** (Task 25): `retry_join { leader_api_addr = "http://vault-internal:8200" }` on the headless Service; auto-unseal from one Secret with core's entrypoint; election 1.4 s (pod), 16 s (node).
 - **Published documents** (D2, Tasks 6, 17, 19): measured p50 10.4 s / p99 14.4 s with `sync-frequency=10s` (default kubelet p50 72 s). D2 holds.
 - **Memory (user ruling 2026-11-19, Task 19):** core requests = the measured working sets in spike-cluster.md (test-server `docker stats`) and spike-components.md (`kubectl top`), peak × 1.25 rounded up to 16 Mi; limits unchanged.
+
+## Amendment 3 (2026-11-19): spike 1 round 3 — Traefik on hostPort, gateway rules
+
+Supersedes the hostNetwork part of Amendment 1 (S5):
+- **Traefik** is a DaemonSet on `portcullis.io/ingress` nodes **in the pod network** with `hostPort` 80/443 (k3s portmap). Measured: the real client IP is kept, it runs as non-root with every capability dropped (no `NET_BIND_SERVICE`), and NetworkPolicy peers `namespaceSelector: portcullis-ingress` + `podSelector app.kubernetes.io/name=traefik` match it under default-deny. hostNetwork is rejected: its traffic carries `cni0`/`flannel-wg` addresses that no selector matches, and kube-router admits same-node traffic from any hostNetwork pod.
+- Namespace `portcullis-ingress`: PSA `privileged` (baseline forbids hostPort). The admission policy `portcullis-ingress-pods` admits there only the Traefik pod shape: the `restricted` profile in every field except `hostPort` 80 and 443 on its one container, with no hostNetwork, hostPID, hostIPC, hostPath or added capability.
+- **App `ports:`** through ServiceLB keep `loadBalancerSourceRanges` for `lan_only`. Measured: klipper filters on the real client IP before it masquerades, and kube-proxy applies the same ranges inside the cluster. The app sees the svclb address, which is stated in the docs.
+- **Mesh gateway rules** (Task 10, nodeagent): its own chain `PORTCULLIS-MESH`, jumped from FORWARD, so kube-router's re-insertion can't reorder it:
+  `-i pcmesh -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`, then (gateways only) `-i pcmesh -o pcmesh -j ACCEPT`, then `-i pcmesh -j DROP`. Without the conntrack rule, replies to pods on the gateway break.
