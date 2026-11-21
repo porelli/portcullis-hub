@@ -8,7 +8,7 @@
 - **Contract first.** Docs get the changes before any code: the new manifest fields, the catalog routes, the usage JSON additions, the agent's new routes and the Hub's deep links.
 - **Data before UI.** Templates schema and validator, then the Hub's manifest parsing and serving. Then usage collection on the primary, then the agent and workers.
 - **Then the UI tasks**, each over an API that already exists by then: navigation, Settings, Marketplace, Usage Share.
-- **The UI stays vanilla JS.** Donuts are inline SVG built from numbers only. Logos are `<img>` elements pointing at a Hub route that serves sanitised SVG bytes with a strict Content-Type and a sandboxing CSP.
+- **The UI stays vanilla JS.** Donuts are inline SVG built from numbers only. Logos are `<img>` elements pointing at a Hub route that serves the SVG bytes it checked at template load with a strict Content-Type and a sandboxing CSP.
 
 **Tech Stack:**
 - Hub: Go and vanilla JS. New direct dependency `github.com/prometheus/procfs` (already indirect at v0.21.1). goldmark + bluemonday stay the Markdown pipeline. `encoding/xml` for the SVG allowlist. `image/png` and `image/jpeg` for screenshots.
@@ -60,7 +60,7 @@
   - XSS-safe everywhere: `escapeHtml` / `esc()` or `textContent`, `data-*` attributes with delegated listeners, no inline handlers, no `${` template interpolation in Hub scripts.
   - Docker, Podman and Kubernetes parity wherever the data exists. Where it doesn't, the figure is `null`, shown with its reason.
 - **SVG logos:**
-  - Sanitised by an allowlist at template load. The Hub serves the **re-serialised sanitised bytes**, never the file, from its own route with these headers:
+  - Checked by an allowlist lint at template load (not the security boundary: `<img>` plus the CSP below is). The Hub serves **the checked bytes from memory**, as read at load (never re-serialised, never the file again), from its own route with these headers:
     - `Content-Type: image/svg+xml`
     - `X-Content-Type-Options: nosniff`
     - `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`
@@ -96,7 +96,7 @@
 
 ## Review Focus
 
-1. **A hostile SVG logo** (`<script>`, `<foreignObject>`, `on*=`, `href="javascript:…"`, an external `href`, `<!DOCTYPE>` / `<!ENTITY>`, a `style` element or attribute with `url(http…)`, 10 MiB of nested `<g>`, a UTF-16 file). Expected: the validator and the Hub both refuse the template with the reason, and the Hub never serves bytes that weren't re-serialised from the allowlist. Pinned by Task 4 `TestSanitizeRefuses` and Task 5 `TestCatalogLogoHeaders`.
+1. **A hostile SVG logo** (`<script>`, `<foreignObject>`, `on*=`, `href="javascript:…"`, an external `href`, `<!DOCTYPE>` / `<!ENTITY>`, a `style` element or attribute with `url(http…)`, 10 MiB of nested `<g>`, a UTF-16 file). Expected: the validator and the Hub both refuse the template with the reason, and the Hub serves only bytes that passed the lint at load, from memory. Pinned by Task 4 `TestCheckRefuses` and Task 5 `TestCatalogLogoHeaders`.
 2. **Links the Hub itself emits after the move.** These must land on the right view and never fall back silently to Apps:
    - MCP hints (`#settings/ai?…`, `#settings/domains?…`, `#sources`);
    - `mail.js`'s `#marketplace?filter=mail`;
@@ -146,7 +146,7 @@
 
 **portcullis-hub**
 - Create:
-  - `internal/svgsafe/svgsafe.go`: `Sanitize([]byte) ([]byte, error)`, the allowlist.
+  - `internal/svgsafe/svgsafe.go`: `Check([]byte) error`, the allowlist lint.
   - `internal/templates/catalog.go`: categories, assets, `Resources`, `Screenshot`, `Links`.
   - `internal/httpapi/catalog.go`: the asset routes.
   - `internal/usage/host.go`: host counters through procfs.
@@ -281,7 +281,7 @@
 - [ ] **Step 5:** Run `python3 tests/validate.py && python3 -m pytest tests -q` → PASS. Check that `grep -L '^long_description:' */manifest.yaml` prints nothing.
 - [ ] **Step 6:** Commit path-only (`templates: long_description for all 52, resources and logo.svg where upstream documents them (ux3)`).
 
-### Task 4: Hub SVG sanitiser
+### Task 4: Hub SVG logo lint
 
 **Overlaps:** none.
 
@@ -289,22 +289,21 @@
 - Create: `internal/svgsafe/svgsafe.go`, `internal/svgsafe/svgsafe_test.go`, `internal/svgsafe/testdata/vectors.json` (a byte copy of templates `tests/svg_vectors.json`)
 
 **Interfaces:**
-- Produces: `func Sanitize(data []byte) ([]byte, error)`. It returns re-serialised bytes containing only allowlisted elements and attributes, or an error whose text is the vector's `reason`. `const MaxBytes = 64 << 10`.
+- Produces: `func Check(data []byte) error`: `nil` when the logo passes the contract §3 "Logo lint", else an error whose text is the vector's `reason`. It never rewrites the bytes: the Hub serves the checked bytes as read (controller ruling 2026-11-21, fix round 1). `const MaxBytes = 64 << 10`.
 
 - [ ] **Step 1: Write the failing tests:**
-  - `TestSanitizeVectors` iterates `testdata/vectors.json`: `ok` vectors pass; for `!ok`, the error text equals `reason`.
-  - `TestSanitizeRefuses` adds the Review Focus 1 inputs: a UTF-16 BOM, a `<!ENTITY` bomb, 10 000 nested `<g>` (depth cap 64), `xlink:href="data:…"`, `fill="url(https://x)"`.
-  - `TestSanitizeOutputReparses`: the output parses again to the same output (idempotent) and contains no `<script`, `on` attributes or `href` other than `#…`.
+  - `TestCheckVectors` iterates `testdata/vectors.json` (`svg`, or `svg_b64` decoded): `ok` vectors pass; for `!ok`, the error text equals `reason`.
+  - `TestCheckRefuses` adds the Review Focus 1 inputs: a UTF-16 BOM, a `<!ENTITY` bomb, 10 000 nested `<g>` (depth cap 64), `xlink:href="data:…"`, `fill="url(https://x)"`, a CSS-escaped `url(` (`\75 rl(`).
   - `TestVectorsInSync` (only when `PORTCULLIS_TEMPLATES_DIR` is set) compares the testdata copy with the templates repo's file.
 - [ ] **Step 2:** Run `go test ./internal/svgsafe/` → FAIL (package missing).
-- [ ] **Step 3:** Implement `Sanitize` with an `encoding/xml` `Decoder` (`Strict = true`, `CharsetReader` nil, so non-UTF-8 is refused) and an `Encoder` writing only the allowed tokens:
-  - refuse any `xml.Directive`, any `xml.ProcInst` other than the leading `xml` declaration, and any element or attribute outside the lists;
-  - cap the depth at 64;
-  - text is kept only inside `title` and `desc`.
+- [ ] **Step 3:** Implement `Check` with an `encoding/xml` `Decoder` (`Strict = true`, `CharsetReader` nil, so non-UTF-8 is refused), reading tokens only (no `Encoder`):
+  - the order and texts of `tests/svgsafe.py` (size, BOM / UTF-8, the declared encoding, `<!ENTITY`, DOCTYPE, CDATA, then the token walk);
+  - refuse any `xml.Directive`, any `xml.ProcInst` other than the leading `xml` declaration, any namespace other than SVG and XLink, and any element or attribute outside the lists; a backslash in any attribute value;
+  - cap the depth at 64; non-blank text only inside `title` and `desc`; comments ignored.
 
-  No suitable mature Go SVG sanitiser exists (bluemonday is HTML-only), so the allowlist is data in this file and in the shared vectors.
+  The allowlist is data in this file and in the shared vectors.
 - [ ] **Step 4:** Run `go test ./internal/svgsafe/ && PORTCULLIS_TEMPLATES_DIR=/Volumes/workspace/portcullis/wt-ux2/portcullis-templates go test ./internal/svgsafe/ -run TestVectorsInSync` → PASS.
-- [ ] **Step 5:** Commit path-only (`svgsafe: allowlist SVG sanitiser for template logos, shared vectors (contract §3, ux3)`).
+- [ ] **Step 5:** Commit path-only (`svgsafe: the logo lint for template logos, shared vectors (contract §3, ux3)`).
 
 ### Task 5: Hub manifest parsing and catalog serving
 
@@ -315,7 +314,7 @@
 - Modify: `internal/templates/manifest.go` (Manifest, Template), `internal/templates/discover.go` (`build`), `internal/templates/validate.go` (`ValidateManifest`), `internal/notes/notes.go` (`CheckField`), `internal/httpapi/server.go` (route registration)
 
 **Interfaces:**
-- Consumes: `svgsafe.Sanitize` (Task 4), `notes.Render` / `notes.Check`.
+- Consumes: `svgsafe.Check` (Task 4), `notes.Render` / `notes.Check`.
 - Produces:
   - Manifest fields:
     - `Links *Links` (`yaml:"links" json:"links,omitempty"`), where `Links{Website string; Source *string; SourceNote string}` (`json:"website"`, `"source"`, `"source_note,omitempty"`);
@@ -331,14 +330,14 @@
   - `TestCategoryOf`: `("home-automation")` → `("Home automation", 7)`; `("weird-thing")` → `("Weird thing", 1000)`.
   - `TestBuildLongDescription`: a manifest with `long_description` carrying a `<script>` line → the template is refused with "long_description: …raw HTML…". A clean one → `LongDescriptionHTML` contains `<p>` and links carry `rel="noopener noreferrer nofollow"`.
   - `TestBuildLogo`:
-    - a valid `logo.svg` → `LogoURL == "/api/catalog/<id>/logo.svg"`, and `LogoSVG()` equals `svgsafe.Sanitize(file)`;
+    - a valid `logo.svg` → `LogoURL == "/api/catalog/<id>/logo.svg"`, and `LogoSVG()` equals the file's bytes as read at load (checked by `svgsafe.Check`, not rewritten);
     - `logo: ../etc/passwd` → refused "logo: …";
     - a symlinked `logo.svg` → refused "logo: not a regular file" (`os.Lstat`);
     - a file over 64 KiB → refused.
   - `TestBuildScreenshots`: PNG and JPEG accepted with the right content types; a PNG named `.jpg` → refused; 7 entries → refused.
   - `TestTemplatesJSONFields`: `GET /api/templates` includes `category_label`, `category_rank`, `routerless`, `links`, `long_description_html`, and **never** the raw bytes.
   - `TestCatalogLogoHeaders`:
-    - `GET /api/catalog/<id>/logo.svg` → 200 with exactly the Global Constraints headers (plus `Cache-Control: no-cache`), and the body equals the sanitised bytes;
+    - `GET /api/catalog/<id>/logo.svg` → 200 with exactly the Global Constraints headers (plus `Cache-Control: no-cache`), and the body equals the checked bytes;
     - an unknown id, a template without a logo and `/api/catalog/<id>/logo.svg/x` → 404;
     - on the people listener → 404.
   - `TestCatalogScreenshot`: `n=0` → 200 `image/png`; `n=1` with one entry → 404; `n=-1` or `n=abc` → 404.
@@ -346,7 +345,7 @@
 - [ ] **Step 3: Implement:**
   - In `build`, after `ValidateManifest`:
     - render `long_description` like the notes;
-    - load the logo and screenshots with `os.Lstat` (regular file), size-capped reads and `svgsafe.Sanitize` / `image.DecodeConfig`;
+    - load the logo and screenshots with `os.Lstat` (regular file), size-capped reads (64 KiB logo, 512 KiB screenshot), `svgsafe.Check` for the logo and the leading bytes only for a screenshot (PNG / JPEG / WebP magic; no image decoder: pixel dimensions are the templates validator's, contract §3);
     - set the category label and rank, `Routerless` from `m.Routerless()`, and the URLs.
   - `ValidateManifest` checks the field shapes (the regexes and bounds from Global Constraints) before any file read.
   - `internal/httpapi/catalog.go` registers `GET /api/catalog/{id}/logo.svg` and `GET /api/catalog/{id}/screenshots/{n}` on the Hub mux only.
