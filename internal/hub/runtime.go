@@ -182,6 +182,11 @@ const StateMissing = "missing"
 func (h *Hub) statusSkips(t *templates.Template) (inactive, scaledOff map[string]bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	return h.statusSkipsLocked(t)
+}
+
+// statusSkipsLocked is statusSkips with h.mu held (read).
+func (h *Hub) statusSkipsLocked(t *templates.Template) (inactive, scaledOff map[string]bool) {
 	scaledOff = map[string]bool{}
 	for svc, cs := range h.companionServicesLocked(t) {
 		if cs.scale != nil && *cs.scale == 0 {

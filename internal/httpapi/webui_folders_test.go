@@ -22,8 +22,11 @@ func foldersJS(t *testing.T, body string) string {
 func TestFolderUsedByGroupsSlots(t *testing.T) {
 	out := foldersJS(t, `
 const slot = n => [
-  { key: 'share' + n + '_folder', label: 'Share ' + n + ' folder', type: 'path', section: 'Shared folders', folder: { access: 'write', runs_as: { uid_from: 'uid' } } },
+  { key: 'share' + n + '_folder', label: 'Share ' + n + ' folder', type: 'path', section: 'Shared folders', folder: { access: 'write', runs_as: { uid_from: 'uid' } },
+    requires_any: ['share' + n + '_readers', 'share' + n + '_writers'] },
   { key: 'share' + n + '_name', label: 'Share ' + n + ' name', type: 'string', section: 'Shared folders' },
+  { key: 'share' + n + '_readers', label: 'Share ' + n + ' readers', type: 'groups' },
+  { key: 'share' + n + '_writers', label: 'Share ' + n + ' writers', type: 'groups' },
 ];
 const samba = { manifest: { name: 'Samba', settings: { options: [
   { key: 'homes', label: 'Home folders', type: 'path', folder: { access: 'write', runs_as: { uid_from: 'uid', gid_from: 'uid' } } },
@@ -47,7 +50,8 @@ F.pathOptions().then(opts => {
   const before = { 'samba/share6_folder': { subpath: '', write: false } };
   const groups = F.usedByGroups(opts, used, before, 'mine').map(g => ({ instance: g.instance, app: g.app,
     rows: g.rows.map(r => ({ key: r.opt.key, label: r.label, next: !!r.next })) }));
-  process.stdout.write(JSON.stringify({ groups, reads }));
+  const next = F.usedByGroups(opts, used, before, 'mine').find(g => g.instance === 'samba').rows.find(r => r.next);
+  process.stdout.write(JSON.stringify({ groups, reads, needs: next.opt.needs }));
 });`)
 	var got struct {
 		Groups []struct {
@@ -58,6 +62,7 @@ F.pathOptions().then(opts => {
 			}
 		}
 		Reads []string
+		Needs []string
 	}
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("%v: %s", err, out)
@@ -89,6 +94,10 @@ F.pathOptions().then(opts => {
 		if g := strings.Join(rows[inst], "|"); g != w {
 			t.Errorf("%s rows:\n got %s\nwant %s", inst, g, w)
 		}
+	}
+	// The free slot says what it still needs in the app's Settings.
+	if strings.Join(got.Needs, "|") != "Share 2 name|Share 2 readers or Share 2 writers" {
+		t.Errorf("needs = %v", got.Needs)
 	}
 	// Only the instances with slots read their panel; no homes row (F34).
 	if strings.Join(got.Reads, ",") != "/api/instances,/api/instances/samba/settings,/api/instances/smb2/settings" {

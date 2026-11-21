@@ -146,8 +146,11 @@ type Container struct {
 	// Created is the creation time (Unix seconds).
 	Created int64 `json:"Created"`
 	// Networks: each network the container is attached to → the names
-	// it answers to there (its aliases and DNS names, deduplicated).
-	Networks map[string][]string `json:"-"`
+	// it answers to there (its aliases and DNS names, deduplicated; only
+	// from ListContainersNames on Docker). NamesUnread: they couldn't be
+	// read (ListContainersNames), only the summary's are there.
+	Networks    map[string][]string `json:"-"`
+	NamesUnread bool                `json:"-"`
 }
 
 // Name returns the primary container name without the leading "/".
@@ -167,36 +170,72 @@ func (c Container) Project() string { return c.Labels[LabelProject] }
 // Service returns the compose service label.
 func (c Container) Service() string { return c.Labels[LabelService] }
 
-// ListContainers lists containers (including stopped ones) matching f.
-// The list summary never carries an endpoint's aliases or DNS names, so a
-// live container attached to a network is inspected for them (cached per
-// container and endpoint, see nameCache).
+// ListContainers lists containers (including stopped ones) matching f,
+// from the list summary only: a network's names there are what the
+// daemon's summary carries (on Docker no aliases or DNS names: see
+// ListContainersNames). It never inspects, so no unrelated container can
+// fail it.
 func (c *Client) ListContainers(ctx context.Context, f Filters) ([]Container, error) {
-	lctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	res, err := c.api.ContainerList(lctx, client.ContainerListOptions{All: true, Filters: f.sdk()})
+	items, err := c.list(ctx, f)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Container, 0, len(res.Items))
-	for _, s := range res.Items {
-		ct := Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels, Created: s.Created}
-		if ct.Networks, err = c.containerNetworks(ctx, s.ID, string(s.State), s.NetworkSettings); err != nil {
-			return nil, err
-		}
+	out := make([]Container, 0, len(items))
+	for _, s := range items {
+		out = append(out, summaryContainer(s))
+	}
+	return out, nil
+}
+
+// ListContainersNames is ListContainers with each live container's
+// network names (aliases and DNS names) read from its inspect, since the
+// list summary never carries them: the alias checks' list (exposure
+// drift, checkAliasFree). Inspects are cached per container and endpoint
+// set (nameCache). A container whose names can't be read (an inspect
+// error other than not-found) keeps the summary's and is marked
+// NamesUnread — the caller treats it as unverified, never as clean.
+func (c *Client) ListContainersNames(ctx context.Context, f Filters) ([]Container, error) {
+	items, err := c.list(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	c.names.sweep(time.Now())
+	out := make([]Container, 0, len(items))
+	for _, s := range items {
+		ct := summaryContainer(s)
+		ct.Networks, ct.NamesUnread = c.containerNetworks(ctx, s.ID, string(s.State), s.NetworkSettings)
 		out = append(out, ct)
 	}
 	return out, nil
 }
 
+func (c *Client) list(ctx context.Context, f Filters) ([]container.Summary, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: f.sdk()})
+	if err != nil {
+		return nil, err
+	}
+	return res.Items, nil
+}
+
+func summaryContainer(s container.Summary) Container {
+	return Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels, Created: s.Created, Networks: networkNames(s.NetworkSettings)}
+}
+
 // nameTTL bounds how long an inspected container's network names are
-// reused for an unchanged set of endpoints (a backstop: an endpoint's
-// aliases can't change without a new endpoint). A var for tests.
+// reused for an unchanged set of endpoints. On Docker an endpoint's
+// aliases can't change without a new endpoint (a new EndpointID), so the
+// key alone catches a reconnect. An engine that leaves EndpointID empty
+// and keeps the address across a disconnect + connect (possibly Podman's
+// compat API) is caught only when the entry expires: a rogue alias added
+// that way can go unseen for up to nameTTL. A var for tests.
 var nameTTL = 2 * time.Minute
 
 // nameCache: container ID → the network names inspected for one set of
-// endpoints (endpointKey). Entries older than nameTTL are dropped on the
-// next list, so the cache holds only recently listed containers.
+// endpoints (endpointKey). Entries older than nameTTL are dropped once
+// per ListContainersNames, so the cache holds only recently listed
+// containers.
 type nameCache struct {
 	mu sync.Mutex
 	m  map[string]nameEntry
@@ -206,6 +245,17 @@ type nameEntry struct {
 	key   string
 	names map[string][]string
 	at    time.Time
+}
+
+// sweep drops the entries older than nameTTL.
+func (n *nameCache) sweep(now time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for k, e := range n.m {
+		if now.Sub(e.at) > nameTTL {
+			delete(n.m, k)
+		}
+	}
 }
 
 // endpointKey identifies a container's endpoints: network, endpoint ID
@@ -228,33 +278,27 @@ func endpointKey(ns *container.NetworkSettingsSummary) string {
 // is inspected, since the list summary has no aliases; anything else
 // keeps the summary's (its network names, usually without aliases). A
 // container gone between the list and the inspect keeps the summary's;
-// any other inspect error fails the list (fail closed: no names unseen).
-func (c *Client) containerNetworks(ctx context.Context, id, state string, ns *container.NetworkSettingsSummary) (map[string][]string, error) {
+// any other inspect error keeps them too, with unread set.
+func (c *Client) containerNetworks(ctx context.Context, id, state string, ns *container.NetworkSettingsSummary) (names map[string][]string, unread bool) {
 	out := networkNames(ns)
 	if out == nil || (state != "running" && state != "restarting" && state != "paused") {
-		return out, nil
+		return out, false
 	}
 	key := endpointKey(ns)
-	now := time.Now()
 	c.names.mu.Lock()
-	for k, e := range c.names.m {
-		if now.Sub(e.at) > nameTTL {
-			delete(c.names.m, k)
-		}
-	}
 	e, ok := c.names.m[id]
 	c.names.mu.Unlock()
 	if ok && e.key == key {
-		return cloneNames(e.names), nil
+		return cloneNames(e.names), false
 	}
 	ictx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	res, err := c.api.ContainerInspect(ictx, id, client.ContainerInspectOptions{})
 	if IsNotFound(err) {
-		return out, nil
+		return out, false
 	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect %s for its network names: %w", id, err)
+		return out, true
 	}
 	if res.Container.NetworkSettings != nil {
 		for name, ep := range res.Container.NetworkSettings.Networks {
@@ -269,9 +313,9 @@ func (c *Client) containerNetworks(ctx context.Context, id, state string, ns *co
 	if c.names.m == nil {
 		c.names.m = make(map[string]nameEntry)
 	}
-	c.names.m[id] = nameEntry{key: key, names: cloneNames(out), at: now}
+	c.names.m[id] = nameEntry{key: key, names: cloneNames(out), at: time.Now()}
 	c.names.mu.Unlock()
-	return out, nil
+	return out, false
 }
 
 func cloneNames(m map[string][]string) map[string][]string {

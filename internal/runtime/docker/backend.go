@@ -218,15 +218,25 @@ func filters(f runtime.Filter) engine.Filters {
 // unit converts a listed container.
 func unit(c engine.Container) runtime.Unit {
 	u := runtime.Unit{ID: c.ID, Name: c.Name(), Project: c.Project(), Service: c.Service(), Image: c.Image,
-		State: c.State, Status: c.Status, Labels: c.Labels, Created: c.Created, Networks: c.Networks}
+		State: c.State, Status: c.Status, Labels: c.Labels, Created: c.Created, Networks: c.Networks, NamesUnread: c.NamesUnread}
 	if len(u.Project) > len(runtime.ProjectPrefix) && u.Project[:len(runtime.ProjectPrefix)] == runtime.ProjectPrefix {
 		u.Instance = u.Project[len(runtime.ProjectPrefix):]
 	}
 	return u
 }
 
+// namesLister is the engine's alias-reading list (*docker.Client): a
+// fake without it lists its Networks as they are.
+type namesLister interface {
+	ListContainersNames(ctx context.Context, f engine.Filters) ([]engine.Container, error)
+}
+
 func (b *Backend) List(ctx context.Context, f runtime.Filter) ([]runtime.Unit, error) {
-	cs, err := b.engine.ListContainers(ctx, filters(f))
+	list := b.engine.ListContainers
+	if nl, ok := b.engine.(namesLister); ok && f.Names {
+		list = nl.ListContainersNames
+	}
+	cs, err := list(ctx, filters(f))
 	if err != nil {
 		return nil, err
 	}

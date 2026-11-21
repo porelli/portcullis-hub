@@ -595,9 +595,10 @@ func TestExecStdinSplit(t *testing.T) {
 	}
 }
 
-// ListContainers reads each network's aliases and DNS names from the
-// inspect: the list summary (as the daemon sends it) carries none.
-// Inspected once per container and endpoint set, again when it changes.
+// ListContainersNames reads each network's aliases and DNS names from
+// the inspect: the list summary (as the daemon sends it) carries none.
+// Inspected once per container and endpoint set, again when it changes;
+// ListContainers never inspects.
 func TestListContainersNetworks(t *testing.T) {
 	var mu sync.Mutex
 	inspects := map[string]int{}
@@ -625,9 +626,15 @@ func TestListContainersNetworks(t *testing.T) {
 			http.Error(w, `{"message":"unexpected"}`, http.StatusNotFound)
 		}
 	}))
+	plain, err := c.ListContainers(context.Background(), nil)
+	mu.Lock()
+	if err != nil || len(plain) != 3 || len(plain[0].Networks["portcullis-proxy"]) != 0 || inspects["abc"]+inspects["gone"] != 0 {
+		t.Errorf("ListContainers: %v %+v, inspects %v", err, plain, inspects)
+	}
+	mu.Unlock()
 	list := func() map[string]Container {
 		t.Helper()
-		cs, err := c.ListContainers(context.Background(), nil)
+		cs, err := c.ListContainersNames(context.Background(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -673,17 +680,30 @@ func TestListContainersNetworks(t *testing.T) {
 	}
 }
 
-// An inspect error other than not-found fails the list (fail closed).
+// An inspect error other than not-found never fails the list: that
+// container keeps the summary's names, marked NamesUnread (the alias
+// checks treat it as unverified); the others are read.
 func TestListContainersInspectError(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/containers/json" {
-			fmt.Fprint(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},"NetworkSettings":{"Networks":{"portcullis-proxy":{}}}}]`)
-			return
+		switch r.URL.Path {
+		case "/containers/json":
+			fmt.Fprint(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},"NetworkSettings":{"Networks":{"portcullis-proxy":{}}}},
+				{"Id":"ok","Names":["/y"],"State":"running","Labels":{},"NetworkSettings":{"Networks":{"portcullis-proxy":{}}}}]`)
+		case "/containers/ok/json":
+			fmt.Fprint(w, `{"Id":"ok","NetworkSettings":{"Networks":{"portcullis-proxy":{"Aliases":["y-alias"]}}}}`)
+		default:
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
 		}
-		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
 	}))
-	if _, err := c.ListContainers(context.Background(), nil); err == nil {
-		t.Error("an inspect error was ignored")
+	cs, err := c.ListContainersNames(context.Background(), nil)
+	if err != nil || len(cs) != 2 {
+		t.Fatalf("%v %+v", err, cs)
+	}
+	if !cs[0].NamesUnread || cs[1].NamesUnread || strings.Join(cs[1].Networks["portcullis-proxy"], ",") != "y-alias" {
+		t.Errorf("containers = %+v", cs)
+	}
+	if _, ok := cs[0].Networks["portcullis-proxy"]; !ok {
+		t.Errorf("the unread container lost its networks: %+v", cs[0])
 	}
 }
 

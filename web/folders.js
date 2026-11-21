@@ -298,6 +298,7 @@
       const t = cat[i.template];
       const opts = (t && t.manifest && t.manifest.settings && t.manifest.settings.options) || [];
       const keys = new Set(opts.map(o => o.key));
+      const labelOf = k => { const x = opts.find(y => y.key === k); return (x && x.label) || k; };
       const mine = [];
       for (const o of opts) {
         if (o.type !== 'path' || (o.scope && o.scope !== 'instance')) continue;
@@ -317,6 +318,12 @@
         o.slot = m[1];
         o.slotN = Number(m[2]);
         o.nameKey = keys.has(m[1] + m[2] + '_name') ? m[1] + m[2] + '_name' : '';
+        // What the slot still needs in the app's Settings to serve the
+        // folder: its name, and one of its requires_any partners.
+        const src = opts.find(y => y.key === o.key) || {};
+        o.needs = [];
+        if (o.nameKey) o.needs.push(labelOf(o.nameKey));
+        if ((src.requires_any || []).length) o.needs.push(src.requires_any.map(labelOf).join(' or '));
         slotted = true;
       }
       if (slotted) {
@@ -429,7 +436,8 @@
           (access ? ' <span class="settings-empty">(' + access + ')</span>' :
             ' <span class="settings-empty">(read-only unless you allow writing)</span> <label class="ps-check"><input type="checkbox" data-fd-write' + (cur && cur.write ? ' checked' : '') + (other ? ' disabled' : '') + '> allow writing</label>') +
           ' <input type="text" data-fd-sub placeholder="subfolder (optional)" spellcheck="false" value="' + esc(cur ? cur.subpath : '') + '"' + (other ? ' disabled' : '') + '>' +
-          (other ? ' <span class="public-warn">uses shared folder ' + esc(folderName(other.folder)) + ': unassign it there first</span>' : '') + '</div>';
+          (other ? ' <span class="public-warn">uses shared folder ' + esc(folderName(other.folder)) + ': unassign it there first</span>' : '') +
+          (row.next && (o.needs || []).length ? '<small class="fd-hint" data-fd-next-hint>It serves the folder only once you also set ' + esc(o.needs.join(' and ')) + ' in ' + esc(g.app) + '\'s Settings.</small>' : '') + '</div>';
       }
       h += '</div>';
     }

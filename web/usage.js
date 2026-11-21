@@ -120,10 +120,31 @@
       lines.map(ptsHtml => '<polyline fill="none" stroke="currentColor" stroke-width="1.5" points="' + ptsHtml.join(' ') + '"></polyline>').join('') + '</svg>';
   }
 
+  // STATUS_WORDS: a group's status in the app page's words (a failed job:
+  // "setup job failed", like the instance list).
+  const STATUS_WORDS = { job_failed: 'setup job failed', not_measured: 'not measured' };
+  // JOB_WORDS: a job container's state (the app page's JOB_WORDS).
+  const JOB_WORDS = { done: 'setup job done', failed: 'setup job failed', running: 'setup job running', pending: 'setup job pending' };
+
+  // jobsDoneText: "setup job done" / "3 setup jobs done" ('' for none).
+  function jobsDoneText(n) {
+    return !n ? '' : n === 1 ? JOB_WORDS.done : n + ' setup jobs done';
+  }
+
   function statusHtml(g) {
-    const cls = g.status === 'running' ? 'ok' : g.status === 'stopped' ? 'off' : g.status === 'not_measured' ? 'info' : 'warn';
+    const cls = g.status === 'running' ? 'ok' : g.status === 'stopped' ? 'off' : g.status === 'not_measured' ? 'info' : g.status === 'job_failed' ? 'bad' : 'warn';
     const whyHtml = g.why ? ' <span class="usage-sub">' + esc(g.why) + '</span>' : '';
-    return '<span class="usage-status usage-status-' + esc(cls) + '">' + esc(g.status.replace('_', ' ')) + '</span>' + whyHtml;
+    const doneHtml = g.jobs_done ? ' <span class="usage-sub">· ' + esc(jobsDoneText(g.jobs_done)) + '</span>' : '';
+    return '<span class="usage-status usage-status-' + esc(cls) + '">' + esc(STATUS_WORDS[g.status] || g.status) + '</span>' + doneHtml + whyHtml;
+  }
+
+  // stateText: a container's state word (a job's in JOB_WORDS); a done
+  // job's row is greyed out (usage-dim) (it ran and finished, as it should).
+  function stateText(c) {
+    return c.job && JOB_WORDS[c.job_state] ? JOB_WORDS[c.job_state] : c.state;
+  }
+  function doneJob(c) {
+    return !!c.job && c.job_state === 'done';
   }
 
   async function getJSON(url) {
@@ -240,7 +261,8 @@
       const errHtml = c.error ? ' <span class="usage-sub">' + esc(c.error) + '</span>' : '';
       const nameHtml = c.helper ? esc(c.service) + ' <span class="usage-sub">×' + fmtNum(c.number) + '</span>' : esc(c.service) + '<span class="usage-sub">.' + fmtNum(c.number) + '</span>';
       const oomHtml = c.oom_killed ? ' <span class="usage-status usage-status-warn">OOM killed</span>' : '';
-      return '<tr class="usage-crow">' + '<td class="' + esc(indent ? 'usage-indent' : '') + '">' + nameHtml + ' <span class="usage-sub">' + esc(c.state) + '</span>' + errHtml + oomHtml + '</td>' +
+      const rowCls = doneJob(c) ? 'usage-crow usage-dim' : 'usage-crow';
+      return '<tr class="' + esc(rowCls) + '"' + (c.job ? ' data-usage-job="' + esc(c.job_state || '') + '"' : '') + '>' + '<td class="' + esc(indent ? 'usage-indent' : '') + '">' + nameHtml + ' <span class="usage-sub">' + esc(stateText(c)) + '</span>' + errHtml + oomHtml + '</td>' +
         (c.state === 'running' ? '<td>' + cpuHtml(c.sample, host, false) + '</td><td>' + memBarHtml(c.sample, host, false) + '</td>' +
         '<td>' + netHtml(c.sample, false) + '</td><td>' + blkHtml(c.sample, false) + '</td><td>' + pidsHtml(c.sample, false) + '</td>' : offCellsHtml(5)) + '</tr>';
     }).join('');
@@ -288,7 +310,7 @@
       const l = ct.limits || {};
       const limitsHtml = 'mem ' + (l.mem_bytes > 0 ? fmtBytes(l.mem_bytes) : esc('no limit')) + ', cpu ' + (isNum(l.cpu_cores) ? fmtCores(l.cpu_cores) : esc('no limit')) +
         ', pids ' + (l.pids > 0 ? fmtNum(l.pids) : esc('no limit'));
-      html += '<tr><td>' + esc(app) + '</td><td>' + esc(ct.service) + '<span class="usage-sub">.' + fmtNum(ct.number) + ' ' + esc(ct.id12) + ' ' + esc(ct.state) + '</span>' +
+      html += '<tr' + (doneJob(ct) ? ' class="usage-dim"' : '') + (ct.job ? ' data-usage-job="' + esc(ct.job_state || '') + '"' : '') + '><td>' + esc(app) + '</td><td>' + esc(ct.service) + '<span class="usage-sub">.' + fmtNum(ct.number) + ' ' + esc(ct.id12) + ' ' + esc(stateText(ct)) + '</span>' +
         (ct.error ? ' <span class="usage-sub">' + esc(ct.error) + '</span>' : '') + '</td>' +
         (ct.state === 'running' ? '<td>' + cpuHtml(ct.sample, v.host, false) + '</td><td>' + memBarHtml(ct.sample, v.host, false) + '</td><td>' + netHtml(ct.sample, false) + '</td>' +
         '<td>' + blkHtml(ct.sample, false) + '</td><td>' + pidsHtml(ct.sample, false) + '</td>' : offCellsHtml(5)) + '<td class="usage-sub">' + limitsHtml + '</td></tr>';

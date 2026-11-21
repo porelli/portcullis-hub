@@ -402,25 +402,70 @@ func TestUsageRunningIgnoresDoneJobs(t *testing.T) {
 	if n := usageCalls(e.rt.Calls(), "state ") - before; n != 0 {
 		t.Errorf("an unchanged job's exit code was read again (%d)", n)
 	}
-	// A rerun that failed: read again, partly running.
+	if g := e.h.UsageOverview().Apps[0]; g.JobsDone != 2 || g.JobsFailed != 0 {
+		t.Errorf("jobs done %d failed %d", g.JobsDone, g.JobsFailed)
+	}
+	for _, c := range e.h.UsageOverview().Apps[0].Containers {
+		if want := map[string]string{"init": "done", "migrate": "done"}[c.Service]; c.JobState != want || c.Job != (want != "") {
+			t.Errorf("container %s: job %v %q", c.Service, c.Job, c.JobState)
+		}
+	}
+	// A rerun that failed: read again; "job_failed" (the app page's
+	// "setup job failed"), never "partly running".
 	set(1, exited("i1", "init", "Exited (1) 1 second ago"), exited("m1", "migrate", "Exited (0) 3 hours ago"))
-	if got := status(); got != "partly running" {
-		t.Errorf("a failed job: status = %q", got)
+	if g := e.h.UsageOverview().Apps[0]; g.Status != "job_failed" || g.JobsFailed != 1 || g.JobsDone != 1 {
+		t.Errorf("a failed job: %+v", g)
 	}
 	// A job never started is not up either.
 	set(0, uunit("i1", "portcullis-a", "init", 1, "created"))
 	if got := status(); got != "partly running" {
 		t.Errorf("a pending job: status = %q", got)
 	}
-	// A running leftover of a skipped service counts (it is running).
+	// A running leftover of a skipped service counts (it is running);
+	// a restarting one counts too (reconcile's inactiveRunning), not up.
 	set(0, uunit("x1", "portcullis-a", "extra", 1, "running"), exited("i1", "init", "Exited (0) 2 hours ago"))
 	if got := status(); got != "running" {
 		t.Errorf("a running leftover: status = %q", got)
+	}
+	set(0, uunit("x1", "portcullis-a", "extra", 1, "restarting"))
+	if got := status(); got != "partly running" {
+		t.Errorf("a restarting leftover: status = %q", got)
 	}
 	// A stopped service still makes it partly running.
 	set(0, uunit("d1", "portcullis-a", "db", 1, "exited"))
 	if got := status(); got != "partly running" {
 		t.Errorf("a stopped service: status = %q", got)
+	}
+}
+
+// The real instance list (usageInstances, no hook): a companion scaled to
+// 0 (its AI support off) expects no container, so its stopped leftover
+// never makes the app "partly running"; once switched on it counts.
+func TestUsageRealInstancesSkipScaledOffCompanion(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	a.h.usage.instances = nil
+	inst := a.h.usageInstances()["aiapp"]
+	if !inst.Skip["tok-mcp"] {
+		t.Fatalf("aiapp's usage instance = %+v", inst)
+	}
+	rt := &runtimetest.Fake{InfoVal: runtime.Info{Verified: true, CPUs: 8, MemoryBytes: 16 << 30}}
+	rt.Units = []runtime.Unit{uunit("c1", "portcullis-aiapp", "app", 1, "running"), uunit("c2", "portcullis-aiapp", "tok-mcp", 1, "exited")}
+	rt.SetStats("c1", runtime.UnitStats{Read: time.Now(), CPUUsageNS: pu(1), MemUsage: pu(1), Pids: pu(1)})
+	a.h.rt = rt
+	a.h.usageSweep(context.Background())
+	if g := a.h.UsageOverview().Apps; len(g) == 0 || g[0].Status != "running" {
+		t.Errorf("scaled-off leftover: %+v", g)
+	}
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if a.h.usageInstances()["aiapp"].Skip["tok-mcp"] {
+		t.Error("a switched-on companion is still skipped")
+	}
+	a.h.usageSweep(context.Background())
+	if g := a.h.UsageOverview().Apps; len(g) == 0 || g[0].Status != "partly running" {
+		t.Errorf("switched-on companion stopped: %+v", g)
 	}
 }
 

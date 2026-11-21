@@ -360,7 +360,9 @@
   // ── the instance page ────────────────────────────────
 
   // usable are the servers an instance can run on: the primary and the
-  // ready workers (serverSelect's list).
+  // ready workers (serverSelect's list). Only ready ones count on
+  // purpose: a Move needs a ready target, so an enrolling or unreachable
+  // worker alone shows nothing on a primary instance (ruled in, ux3).
   function usable() {
     return ((page && page.servers) || []).filter(s => s.id === 'primary' || s.state === 'ready');
   }

@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -180,19 +181,26 @@ func (h *Hub) usageInstances() map[string]usageInst {
 		}
 		return out
 	}
-	for _, v := range h.Instances() {
-		ui := usageInst{ID: v.ID, Template: v.Template, Name: v.Name}
-		if t := h.Template(v.ID); t != nil {
-			inactive, scaledOff := h.statusSkips(t)
-			ui.Jobs, ui.Skip = t.Jobs, map[string]bool{}
-			for svc := range inactive {
-				ui.Skip[svc] = true
-			}
-			for svc := range scaledOff {
-				ui.Skip[svc] = true
-			}
+	// The jobs and skipped services in one pass under mu (no template
+	// copied per instance: usageInstances also serves single lookups).
+	h.mu.RLock()
+	jobs := make(map[string]map[string]bool, len(h.instances))
+	skips := make(map[string]map[string]bool, len(h.instances))
+	for i := range h.instances {
+		t := &h.instances[i]
+		inactive, scaledOff := h.statusSkipsLocked(t)
+		skip := make(map[string]bool, len(inactive)+len(scaledOff))
+		for svc := range inactive {
+			skip[svc] = true
 		}
-		out[v.ID] = ui
+		for svc := range scaledOff {
+			skip[svc] = true
+		}
+		jobs[t.ID], skips[t.ID] = maps.Clone(t.Jobs), skip
+	}
+	h.mu.RUnlock()
+	for _, v := range h.Instances() {
+		out[v.ID] = usageInst{ID: v.ID, Template: v.Template, Name: v.Name, Jobs: jobs[v.ID], Skip: skips[v.ID]}
 	}
 	return out
 }
