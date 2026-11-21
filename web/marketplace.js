@@ -34,8 +34,16 @@
   const MAIL_TITLE = 'Mail is managed in Portcullis (Settings → Mail and the instance\'s Mail tab), so Portcullis\'s mail safeguards always apply. A full administrator can open the mail server\'s own admin screen read-only.';
   const NOWEB_TITLE = 'This app has no web page: people use it with its own client (see My apps)';
 
+  // OTHER: the category of a template that names none (last).
+  const OTHER = { slug: 'other', label: 'Other', rank: Number.MAX_SAFE_INTEGER };
+  // The keys a focused control is found again by after a redraw.
+  const FOCUS_KEYS = ['data-mkt-open', 'data-install', 'data-add-instance', 'data-apps-filter', 'data-mkt-close', 'data-mkt-clear'];
+
   const st = { q: '', raw: '', cat: '', filters: new Set() };
-  let root = null, parts = null, list = [], timer = null, opened = '', hostMem;
+  // gen: bumped by render, open and close; an async step whose
+  // generation is no longer current is dropped (the admin moved on).
+  // listGen: bumped when the catalog's template objects change.
+  let root = null, parts = null, list = [], timer = null, opened = '', hostMem, gen = 0, listGen = 0, drawerSig = '';
 
   // el(tag, props, ...children): props {class, text, on: {event: fn},
   // value, disabled, hidden, …attributes}; children: nodes or strings.
@@ -65,6 +73,11 @@
   }
   // safeHref: an https URL as given, else null (no link).
   const safeHref = u => (typeof u === 'string' && u.slice(0, 8).toLowerCase() === 'https://' ? u : null);
+  // norm: what the search compares (NFKC, lower case: a decomposed é
+  // matches a precomposed one).
+  const norm = v => str(v).normalize('NFKC').toLowerCase();
+  // shown: the Marketplace is on screen (Apps shows #mkt-root).
+  const shown = () => !!root && !root.hidden;
   const assetOK = u => typeof u === 'string' && u.slice(0, LOGO_PREFIX.length) === LOGO_PREFIX;
   function up(n, attr) {
     for (; n && n.getAttribute; n = n.parentNode) if (n.getAttribute(attr) != null) return n;
@@ -86,26 +99,31 @@
   };
   // matches: t passes the search, the filters and (unless anyCat) the
   // category chip.
+  function catOf(t) {
+    const slug = str(t.manifest.category);
+    return slug ? { slug, label: str(t.category_label || slug), rank: t.category_rank } : OTHER;
+  }
   function matches(t, anyCat) {
     const m = t.manifest || {};
-    if (!anyCat && st.cat && m.category !== st.cat) return false;
+    if (!anyCat && st.cat && catOf(t).slug !== st.cat) return false;
     if (st.q) {
-      const hay = [m.name, m.description].concat(m.tags || []).map(str).join(' ').toLowerCase();
+      const hay = norm([m.name, m.description].concat(m.tags || []).map(str).join(' '));
       if (hay.indexOf(st.q) < 0) return false;
     }
     for (const f of st.filters) if (!FILTER_TEST[f](t)) return false;
     return true;
   }
   function byOrder(a, b) {
-    return (a.category_rank - b.category_rank) || str(a.category_label).localeCompare(str(b.category_label)) ||
+    const ca = catOf(a), cb = catOf(b);
+    return (ca.rank - cb.rank) || ca.label.localeCompare(cb.label) ||
       str(a.manifest.name).toLowerCase().localeCompare(str(b.manifest.name).toLowerCase()) || a.id.localeCompare(b.id);
   }
   function categories() {
     const out = new Map();
     for (const t of list) {
-      const slug = str(t.manifest.category);
-      if (!out.has(slug)) out.set(slug, { slug, label: str(t.category_label || slug), rank: t.category_rank, count: 0 });
-      if (matches(t, true)) out.get(slug).count++;
+      const c = catOf(t);
+      if (!out.has(c.slug)) out.set(c.slug, { slug: c.slug, label: c.label, rank: c.rank, count: 0 });
+      if (matches(t, true)) out.get(c.slug).count++;
     }
     return [...out.values()].sort((a, b) => (a.rank - b.rank) || a.label.localeCompare(b.label));
   }
@@ -222,28 +240,80 @@
       fill(parts.toggles, parts.toggleBtns.map(x => x.b));
     }
     const withCompat = list.some(t => t.compat);
+    // A hidden "Works here" isn't left pressed.
+    if (!withCompat) st.filters.delete('works');
     for (const x of parts.toggleBtns) {
       x.b.setAttribute('aria-pressed', st.filters.has(x.f) ? 'true' : 'false');
       x.b.hidden = x.f === 'works' && !withCompat;
     }
-    const shown = list.filter(t => matches(t, false));
-    if (!shown.length) {
+    const hits = list.filter(t => matches(t, false));
+    // The cards are rebuilt only when what they show changed (the poll
+    // redraws every 15 s): focus and the screen reader's place survive.
+    const sig = listGen + '|' + st.raw + '|' + hits.map(cardSig).join(';');
+    if (parts.resultsSig === sig) return;
+    parts.resultsSig = sig;
+    const focus = focusKey(parts.results);
+    if (!hits.length) {
       fill(parts.results, el('div', { class: 'empty', 'data-mkt-empty': '' },
         el('p', { text: st.raw ? 'No app matches “' + st.raw + '” with these filters.' : 'No app matches these filters.' }),
         el('button', { type: 'button', class: 'btn btn-secondary btn-sm', 'data-mkt-clear': '', text: 'Clear filters', on: { click: clearAll } })));
-      return;
+    } else {
+      const groups = [];
+      for (const c of cats) {
+        const ts = hits.filter(t => catOf(t).slug === c.slug).sort(byOrder);
+        if (ts.length) groups.push(el('div', { class: 'category' }, el('div', { class: 'category-title', text: c.label }), el('div', { class: 'apps' }, ts.map(cachedCard))));
+      }
+      fill(parts.results, groups);
     }
-    const groups = [];
-    for (const c of cats) {
-      const ts = shown.filter(t => str(t.manifest.category) === c.slug).sort(byOrder);
-      if (ts.length) groups.push(el('div', { class: 'category' }, el('div', { class: 'category-title', text: c.label }), el('div', { class: 'apps' }, ts.map(card))));
+    restoreFocus(parts.results, focus);
+  }
+  // cachedCard: t's card, the same node while its signature holds (only
+  // a changed card is built again).
+  const cardCache = new Map();
+  function cachedCard(t) {
+    const sig = listGen + '|' + cardSig(t);
+    const hit = cardCache.get(t.id);
+    if (hit && hit.sig === sig) return hit.node;
+    const node = card(t);
+    cardCache.set(t.id, { sig, node });
+    return node;
+  }
+  // cardSig: what a card shows besides its template (instances, verdict).
+  function cardSig(t) {
+    const { info, refused } = compatOf(t);
+    return t.id + ':' + instCount(t.id) + ':' + (info ? info.cls + info.text : '') + ':' + refused;
+  }
+  // focusKey(box): the focused control in box as [attribute, value], or
+  // null; restoreFocus focuses its replacement after a redraw.
+  function focusKey(box) {
+    const a = document.activeElement;
+    if (!a || !a.getAttribute || !contains(box, a)) return null;
+    for (const k of FOCUS_KEYS) if (a.getAttribute(k) != null) return [k, a.getAttribute(k)];
+    return null;
+  }
+  function contains(box, n) {
+    for (; n; n = n.parentNode) if (n === box) return true;
+    return false;
+  }
+  function find(box, k, v) {
+    const want = n => n.getAttribute && n.getAttribute(k) === v;
+    const stack = [box];
+    while (stack.length) {
+      const n = stack.pop();
+      if (n !== box && want(n)) return n;
+      for (const c of Array.from(n.children || [])) stack.push(c);
     }
-    fill(parts.results, groups);
+    return null;
+  }
+  function restoreFocus(box, key) {
+    if (!key) return;
+    const n = find(box, key[0], key[1]);
+    if (n && n.focus) n.focus();
   }
 
   function setSearch(v) {
     st.raw = str(v).trim();
-    st.q = st.raw.toLowerCase();
+    st.q = norm(st.raw);
     draw();
   }
   function setChip(slug) { st.cat = slug; draw(); }
@@ -259,18 +329,28 @@
 
   async function load() {
     const cat = await loadCatalogInfo();
-    list = Object.values(cat || {}).sort(byOrder);
+    const next = Object.values(cat || {}).sort(byOrder);
+    if (next.length !== list.length || next.some((t, i) => t !== list[i])) listGen++;
+    list = next;
   }
 
   async function render(r, o) {
+    const g = ++gen;
     root = r;
     if (!parts || parts.root !== r) build(r);
     if (o && o.filter) st.cat = o.filter;
     try {
       await load();
     } catch (e) {
-      fill(parts.results, el('p', { class: 'public-warn', text: 'Couldn’t read the templates: ' + str(e && e.message) }));
+      if (g === gen) fill(parts.results, el('p', { class: 'public-warn', text: 'Couldn’t read the templates: ' + str(e && e.message) }));
       return;
+    }
+    if (g !== gen || !shown()) return;
+    // An unknown ?filter= category: all of them, said once.
+    if (st.cat && !list.some(t => catOf(t).slug === st.cat)) {
+      showToast('No category ' + st.cat, 'error');
+      st.cat = '';
+      if (String(location.hash).indexOf('#marketplace?') === 0) history.replaceState(null, '', '#marketplace');
     }
     draw();
     if (o && o.open) await open(o.open);
@@ -289,9 +369,16 @@
     d.addEventListener('click', e => {
       if (up(e.target, 'data-install') || up(e.target, 'data-add-instance') || up(e.target, 'data-apps-filter') || up(e.target, 'data-mkt-close')) close();
     }, true);
+    // Closed (Esc, ×, a create button, leaving): the hash back to the
+    // list, and focus back on the template's Details — only while the
+    // Marketplace is still shown.
     d.addEventListener('close', () => {
+      const was = d.getAttribute('data-mkt-for');
       opened = '';
+      drawerSig = '';
+      if (!shown()) return;
       if (String(location.hash).indexOf('#marketplace/') === 0) history.replaceState(null, '', '#marketplace');
+      if (was && parts) restoreFocus(parts.results, ['data-mkt-open', was]);
     });
   }
   async function loadHostMem() {
@@ -326,10 +413,11 @@
     const home = safeHref(links.website), src = safeHref(links.source);
     const head = el('div', { class: 'mkt-drawer-head' }, iconOf(t, 'mkt-drawer-icon'), el('h3', { id: 'mkt-drawer-title', text: m.name }),
       el('button', { type: 'button', class: 'btn btn-sm mkt-close', 'data-mkt-close': '', 'aria-label': 'Close', text: '×' }));
+    const linkAttrs = { target: '_blank', rel: 'noopener noreferrer' };
     const meta = el('p', { class: 'mkt-meta' },
-      home ? el('a', { href: safeHref(home), target: '_blank', rel: 'noopener noreferrer', text: 'Homepage ↗' }) : null,
+      home ? el('a', Object.assign({ href: home, text: 'Homepage ↗' }, linkAttrs)) : null,
       home && (src || links.source_note) ? ' · ' : null,
-      src ? el('a', { href: safeHref(src), target: '_blank', rel: 'noopener noreferrer', text: 'Source ↗' }) : (links.source_note ? el('span', { text: links.source_note }) : null),
+      src ? el('a', Object.assign({ href: src, text: 'Source ↗' }, linkAttrs)) : (links.source_note ? el('span', { text: links.source_note }) : null),
       ' · ', el('span', { text: t.category_label }), ' · from ', el('span', { text: t.source }));
     let about;
     if (m.long_description_html) {
@@ -375,8 +463,19 @@
       el('div', { class: 'app-footer mkt-drawer-foot', 'data-mkt-use': t.id }, footer(t))];
   }
 
+  function drawSig(t) { return listGen + '|' + cardSig(t) + '|' + hostMem; }
+  function fillDrawer(d, t) {
+    const focus = focusKey(d);
+    fill(d, el('div', { class: 'mkt-drawer-box' }, drawerBody(t)));
+    d.setAttribute('data-mkt-for', t.id);
+    drawerSig = drawSig(t);
+    restoreFocus(d, focus);
+  }
+
   async function open(id) {
+    const g = ++gen;
     if (!list.length) { try { await load(); } catch (_) { /* below: unknown */ } }
+    if (g !== gen || !shown()) return false;
     const t = list.find(x => x.id === id);
     if (!t) {
       showToast('No template ' + id, 'error');
@@ -384,27 +483,46 @@
       return false;
     }
     await loadHostMem();
+    if (g !== gen || !shown()) return false;
     const d = drawer();
     if (!d) return false;
     wireDrawer(d);
     d.setAttribute('aria-labelledby', 'mkt-drawer-title');
-    fill(d, el('div', { class: 'mkt-drawer-box' }, drawerBody(t)));
-    if (!d.open) d.showModal();
+    // The same template already open (a deep link to it again): kept.
+    if (!(d.open && opened === id && drawerSig === drawSig(t))) fillDrawer(d, t);
+    if (!d.open) {
+      d.showModal();
+      // Initial focus: the close button (the heading follows it for a
+      // screen reader through aria-labelledby).
+      const x = find(d, 'data-mkt-close', '');
+      if (x) x.focus();
+    }
     opened = id;
     history.replaceState(null, '', '#marketplace/' + encodeURIComponent(id));
     return true;
   }
   function close() {
+    ++gen;
     const d = drawer();
     if (d && d.open) d.close();
     opened = '';
   }
-  function refresh() {
-    draw();
-    if (opened) {
-      const t = list.find(x => x.id === opened), d = drawer();
-      if (t && d) fill(d, el('div', { class: 'mkt-drawer-box' }, drawerBody(t)));
+  // refresh({reload}): redraws what changed (the instances poll); reload
+  // reads the catalog again first (a template source changed) and closes
+  // the drawer when its template is gone.
+  async function refresh(o) {
+    if (o && o.reload) {
+      try {
+        if (typeof refreshCatalog === 'function') await refreshCatalog();
+        await load();
+      } catch (_) { return; }
     }
+    if (!shown()) return;
+    draw();
+    if (!opened) return;
+    const t = list.find(x => x.id === opened), d = drawer();
+    if (!t) { close(); return; }
+    if (d && d.open && drawerSig !== drawSig(t)) fillDrawer(d, t);
   }
 
   window.PortcullisMarketplace = {

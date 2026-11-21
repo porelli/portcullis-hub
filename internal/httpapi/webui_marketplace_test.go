@@ -35,10 +35,14 @@ func TestMarketplaceJSSafe(t *testing.T) {
 			md = append(md, m[1])
 		}
 		if strings.Contains(line, "setAttribute('href'") || strings.Contains(line, "href:") {
-			if !strings.Contains(line, "safeHref(") && !strings.Contains(line, "href: '#") {
+			// A fragment, or home / src (themselves safeHref's answers).
+			if !strings.Contains(line, "safeHref(") && !strings.Contains(line, "href: '#") && !strings.Contains(line, "{ href: home,") && !strings.Contains(line, "{ href: src,") {
 				t.Errorf("marketplace.js:%d an href not through safeHref: %s", i+1, strings.TrimSpace(line))
 			}
 		}
+	}
+	if !strings.Contains(js, "const home = safeHref(links.website), src = safeHref(links.source);") {
+		t.Error("the drawer's links aren't safeHref's answers")
 	}
 	if len(md) != 2 {
 		t.Errorf("innerHTML assignments: %v, want the two Markdown fields", md)
@@ -88,6 +92,7 @@ Node.prototype.appendChild = function (c) { this.kids.push(c); c.parent = this; 
 Node.prototype.append = function (...cs) { for (const c of cs) this.appendChild(typeof c === 'string' ? new Text(c) : c); };
 Node.prototype.replaceChildren = function (...cs) { this.kids = []; this._html = null; this.append(...cs); };
 Node.prototype.focus = function () { global.focused = this; };
+Object.defineProperty(Node.prototype, 'children', { get() { return this.kids.filter(k => k.tag); } });
 Node.prototype.showModal = function () { this.open = true; };
 Node.prototype.close = function () { this.open = false; (this.on.close || []).forEach(f => f({})); };
 Object.defineProperty(Node.prototype, 'innerHTML', { set(v) { this._html = String(v); this.kids = []; }, get() { return this._html; } });
@@ -112,7 +117,8 @@ function fire(n, ev, e) {
   return evt;
 }
 const drawer = new Node('dialog');
-global.document = { createElement: t => new Node(t), createTextNode: t => new Text(t), getElementById: id => id === 'mkt-drawer' ? drawer : null, addEventListener() {} };
+global.document = { createElement: t => new Node(t), createTextNode: t => new Text(t), getElementById: id => id === 'mkt-drawer' ? drawer : null, addEventListener() {},
+  get activeElement() { return global.focused || null; } };
 global.window = { addEventListener() {} };
 global.location = { hash: '#marketplace' };
 global.history = { replaceState: (a, b, h) => { location.hash = h; } };
@@ -432,6 +438,146 @@ func TestMarketplaceDeepLinksNode(t *testing.T) {
 	for k, w := range want {
 		if g := jsonOf(r[k]); g != w {
 			t.Errorf("%s = %s\nwant %s", k, g, w)
+		}
+	}
+}
+
+// TestMarketplaceRefreshKeepsNodes (I1): a poll with nothing changed
+// keeps every card and the open drawer (the same nodes: focus stays); a
+// changed instance count rebuilds them, focus restored on the control
+// with the same key; closing the drawer focuses the template's Details.
+func TestMarketplaceRefreshKeepsNodes(t *testing.T) {
+	r := mktEval(t, `
+  await M.render(root, { filter: '', open: '' });
+  const cardNode = id => findAll(root, n => n.attrs['data-mkt-card'] === id)[0];
+  const before = cardNode('stalwart');
+  fire(btn(root, 'data-mkt-open', 'immich'), 'click');
+  for (let i = 0; i < 4; i++) await tick();
+  r.initialFocus = global.focused && global.focused.attrs['data-mkt-close'] !== undefined;
+  const box = drawer.kids[0];
+  const show = findAll(drawer, n => n.attrs['data-apps-filter'] === 'immich')[0];
+  show.focus();
+  await M.refresh();
+  r.same = [cardNode('stalwart') === before, drawer.kids[0] === box, global.focused === show];
+  // One more immich instance: its card and the drawer change.
+  instancesCache.push({ id: 'immich-2', template: 'immich' });
+  await M.refresh();
+  r.changed = [cardNode('stalwart') === before, drawer.kids[0] === box, global.focused !== show && global.focused.attrs['data-apps-filter'] === 'immich', drawer.html().indexOf('in use · 2 instances') >= 0];
+  // Closing the drawer focuses the template's Details.
+  M.close();
+  r.backToDetails = !!global.focused && global.focused.attrs['data-mkt-open'] === 'immich';
+  // Focus on a card's control survives that card being rebuilt (the
+  // same key, a new node); the other cards stay the same nodes.
+  const showBtn = () => findAll(root, n => n.attrs['data-apps-filter'] === 'immich' && n.attrs['data-mkt-open'] === undefined)[0];
+  const old = showBtn();
+  old.focus();
+  instancesCache.push({ id: 'immich-3', template: 'immich' });
+  await M.refresh();
+  r.listFocus = [cardNode('stalwart') === before, showBtn() !== old, global.focused === showBtn()];
+`)
+	want := map[string]string{
+		"initialFocus":  `true`,
+		"same":          `[true,true,true]`,
+		"changed":       `[true,false,true,true]`,
+		"backToDetails": `true`,
+		"listFocus":     `[true,true,true]`,
+	}
+	for k, w := range want {
+		if g := jsonOf(r[k]); g != w {
+			t.Errorf("%s = %s, want %s", k, g, w)
+		}
+	}
+}
+
+// TestMarketplaceReloadNode (M1): refresh({reload: true}) reads the
+// catalog again (refreshCatalog); a template gone closes its drawer.
+func TestMarketplaceReloadNode(t *testing.T) {
+	r := mktEval(t, `
+  let reloads = 0;
+  global.refreshCatalog = async () => { reloads++; const i = CATALOG.findIndex(t => t.id === 'immich'); CATALOG.splice(i, 1); };
+  await M.render(root, { filter: '', open: '' });
+  await M.open('immich');
+  await M.refresh();
+  r.plain = [reloads, drawer.open, cards(root).indexOf('immich') >= 0];
+  await M.refresh({ reload: true });
+  r.reload = [reloads, drawer.open, cards(root).indexOf('immich') >= 0, location.hash];
+`)
+	if g := jsonOf(r["plain"]); g != `[0,true,true]` {
+		t.Errorf("plain refresh: %s", g)
+	}
+	if g := jsonOf(r["reload"]); g != `[1,false,false,"#marketplace"]` {
+		t.Errorf("reload: %s", g)
+	}
+}
+
+// TestMarketplaceStaleNode (M2): an open() still waiting for /api/usage
+// when the admin leaves (the Marketplace hidden) or closes it opens
+// nothing and leaves the hash alone; a newer open() wins.
+func TestMarketplaceStaleNode(t *testing.T) {
+	r := mktEval(t, `
+  let answer;
+  global.apiGet = () => new Promise(res => { answer = res; });
+  await M.render(root, { filter: '', open: '' });
+  location.hash = '#marketplace';
+  const p = M.open('nextcloud');
+  await tick();
+  root.hidden = true;
+  location.hash = '#doctor';
+  answer({ hosts: { primary: { memory_bytes: 1 } } });
+  r.left = [await p, !!drawer.open, location.hash];
+  root.hidden = false;
+  location.hash = '#marketplace';
+  r.again = [await M.open('nextcloud'), drawer.open, location.hash];
+  M.close();
+  // A render that's overtaken by another drops its draw.
+  let slow;
+  global.loadCatalogInfo = () => new Promise(res => { slow = res; });
+  const r1 = M.render(root, { filter: 'mail', open: '' });
+  global.loadCatalogInfo = async () => { const m = {}; for (const t of CATALOG) m[t.id] = t; return m; };
+  await M.render(root, { filter: '', open: 'stalwart' });
+  const m = {}; for (const t of CATALOG) m[t.id] = t; slow(m); await r1;
+  r.overtaken = [drawer.open, location.hash, MT.state().cat];
+`)
+	want := map[string]string{
+		"left":      `[false,false,"#doctor"]`,
+		"again":     `[true,true,"#marketplace/nextcloud"]`,
+		"overtaken": `[true,"#marketplace/stalwart","mail"]`,
+	}
+	for k, w := range want {
+		if g := jsonOf(r[k]); g != w {
+			t.Errorf("%s = %s, want %s", k, g, w)
+		}
+	}
+}
+
+// TestMarketplaceOtherCategoryNode (M3, nits 2–4): a template naming no
+// category is under "Other", last (never a second "All"); an unknown
+// ?filter= category falls back to all with a toast; a decomposed é
+// matches a precomposed one; a hidden "Works here" isn't left pressed.
+func TestMarketplaceOtherCategoryNode(t *testing.T) {
+	r := mktEval(t, `
+  CATALOG.push(T('nocat', { category_rank: 1000, category_label: '', manifest: { name: 'Caf\u00e9 board', description: 'no category', category: '' } }));
+  await M.render(root, { filter: '', open: '' });
+  r.chips = findAll(root, n => n.attrs['data-mkt-cat'] !== undefined).map(c => [c.attrs['data-mkt-cat'], c.textContent]);
+  MT.chip('other'); r.other = cards(root); MT.chip('');
+  MT.search('cafe\u0301'); r.nfd = cards(root); MT.search('');
+  await M.render(root, { filter: 'nosuch', open: '' });
+  r.nosuch = [MT.state().cat, toasts.slice(), cards(root).length];
+  MT.toggle('works');
+  for (const t of CATALOG) t.compat = null;
+  MT.chip('');
+  r.works = [MT.state().filters, btn(root, 'data-mkt-toggle', 'works').hidden];
+`)
+	want := map[string]string{
+		"chips":  `[["","All 7"],["mail","Mail 1"],["storage","Files & storage 2"],["media","Media 1"],["vpn","VPN 1"],["weird-thing","Weird thing 1"],["other","Other 1"]]`,
+		"other":  `["nocat"]`,
+		"nfd":    `["nocat"]`,
+		"nosuch": `["",[["No category nosuch","error"]],7]`,
+		"works":  `[[],true]`,
+	}
+	for k, w := range want {
+		if g := jsonOf(r[k]); g != w {
+			t.Errorf("%s = %s, want %s", k, g, w)
 		}
 	}
 }

@@ -4940,7 +4940,10 @@
     });
     loadCatalogInfo().catch(() => {});
     refreshInstances();
-    setInterval(() => { if (!instCtx) refreshInstances(); }, 15000);
+    // Every 15 s (PORTCULLIS_TEST_POLL_MS: the UI smoke check's shorter
+    // poll, at least 500 ms).
+    const INSTANCES_POLL_MS = window.PORTCULLIS_TEST_POLL_MS > 0 ? Math.max(500, Number(window.PORTCULLIS_TEST_POLL_MS)) : 15000;
+    setInterval(() => { if (!instCtx) refreshInstances(); }, INSTANCES_POLL_MS);
 
     // ── Sources ───────────────────────────────────────────
     // Settings → Template sources.
@@ -4963,8 +4966,8 @@
     // last sync and the catalog are read again (the Marketplace and the
     // instance pages use the new templates; no page reload).
     async function sourcesChanged() {
-      await Promise.all([loadSources(), loadSourceSync(), refreshCatalog().catch(() => null)]);
-      if (marketplaceShown()) PortcullisMarketplace.refresh();
+      await Promise.all([loadSources(), loadSourceSync(),
+        marketplaceShown() ? PortcullisMarketplace.refresh({ reload: true }) : refreshCatalog().catch(() => null)]);
     }
     async function addSource() {
       const name = document.getElementById('source-name').value.trim();
