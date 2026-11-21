@@ -223,9 +223,11 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		lcancel()
 		if err != nil {
 			if server != "" {
-				// A worker that fails its listing: its targets wait for
-				// the next run; the primary's still run.
-				log.Printf("usage: %s's volumes on server %s: %s", id, server, usageErrText(err))
+				// A worker that fails its listing: none of its instances
+				// is listed again this run (each would wait its deadline);
+				// their targets wait for the next run, the primary's run.
+				log.Printf("usage: %s's volumes on server %s: %s (its other instances skipped this run)", id, server, usageErrText(err))
+				ss.err = err
 				continue
 			}
 			return nil, nil, err

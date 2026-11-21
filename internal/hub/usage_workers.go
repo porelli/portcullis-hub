@@ -186,82 +186,132 @@ type usageHostReader interface {
 }
 
 // usageCap is the sweep's container cap: the primary takes its count
-// first (at most usage.MaxContainers), the rest is shared among the
-// workers that listed in time (fairShare). It decides once the primary
-// and every worker reported, or at its deadline (the list phase: three
-// calls of the stats timeout; a primary that hasn't reported counts as
-// its last sweep's count).
+// first (at most usage.MaxContainers); every ready worker then has an
+// equal share of the rest, at once, whatever another worker does. The
+// room a worker doesn't need is handed out only at a fixed early point
+// (one stats timeout after the sweep's start, at most half the budget),
+// and only to the workers
+// that reported by then (fairShare); a worker that reports later gets
+// its equal share at once, and keeps it. No worker's share ever waits
+// for another worker's answer.
 type usageCap struct {
-	primaryCh chan int
-	counts    chan usageCount
-	mu        sync.Mutex
-	shares    map[string]chan int
-	n         int
+	mu          sync.Mutex
+	primaryN    int // -1: not reported (its last sweep's count stands in)
+	lastPrimary int
+	n           int
+	counts      map[string]int
+	shares      map[string]chan int
+	decided     bool
+	early       time.Time
 }
 
-type usageCount struct {
-	server string
-	n      int
+func newUsageCap() *usageCap {
+	return &usageCap{primaryN: -1, counts: map[string]int{}, shares: map[string]chan int{}}
 }
 
-func newUsageCap(bctx context.Context, lastPrimary int, timeout time.Duration) *usageCap {
-	return &usageCap{primaryCh: make(chan int, 1), shares: map[string]chan int{}}
-}
-
-// start runs the coordinator for the workers in ws.
+// start readies the cap for the workers in ws and arms the early point.
 func (c *usageCap) start(bctx context.Context, ws []*usageWorkerSweep, lastPrimary int, timeout time.Duration) {
-	c.counts = make(chan usageCount, len(ws))
-	c.n = len(ws)
+	c.mu.Lock()
+	c.n, c.lastPrimary = len(ws), lastPrimary
 	for _, w := range ws {
 		c.shares[w.server] = make(chan int, 1)
 	}
-	deadline := time.Now().Add(3*timeout + 200*time.Millisecond)
-	if dl, ok := bctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
+	// One stats timeout after the start, and never past half the budget
+	// (a worker that reported must still have time to sample).
+	c.early = time.Now().Add(timeout)
+	if dl, ok := bctx.Deadline(); ok {
+		if half := time.Now().Add(time.Until(dl) / 2); half.Before(c.early) {
+			c.early = half
+		}
 	}
+	c.mu.Unlock()
 	go func() {
-		timer := time.NewTimer(time.Until(deadline))
-		defer timer.Stop()
-		primary, got := -1, map[string]int{}
-	collect:
-		for primary < 0 || len(got) < c.n {
-			select {
-			case p := <-c.primaryCh:
-				primary = p
-			case k := <-c.counts:
-				got[k.server] = k.n
-			case <-timer.C:
-				break collect
-			}
+		t := time.NewTimer(time.Until(c.early))
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-bctx.Done():
 		}
-		if primary < 0 {
-			primary = min(lastPrimary, usage.MaxContainers)
-		}
-		shares := fairShare(usage.MaxContainers-primary, got)
-		for server, ch := range c.shares {
-			ch <- shares[server] // 0 for a worker that didn't list in time
-		}
+		c.mu.Lock()
+		c.decideLocked()
+		c.mu.Unlock()
 	}()
+}
+
+// roomLocked is what the workers share; equalLocked one worker's equal
+// share. Caller holds c.mu.
+func (c *usageCap) roomLocked() int {
+	p := c.primaryN
+	if p < 0 {
+		p = c.lastPrimary
+	}
+	return max(usage.MaxContainers-min(p, usage.MaxContainers), 0)
+}
+
+func (c *usageCap) equalLocked() int {
+	if c.n == 0 {
+		return 0
+	}
+	return c.roomLocked() / c.n
+}
+
+// decideLocked hands the reported workers their shares: the room less
+// an equal share kept for each worker that hasn't reported, shared
+// fairly among them. Caller holds c.mu.
+func (c *usageCap) decideLocked() {
+	if c.decided {
+		return
+	}
+	c.decided = true
+	reserved := c.equalLocked() * (c.n - len(c.counts))
+	shares := fairShare(c.roomLocked()-reserved, c.counts)
+	for server := range c.counts {
+		c.shares[server] <- shares[server]
+	}
 }
 
 // primary reports the primary's sampled count.
 func (c *usageCap) primary(n int) {
-	select {
-	case c.primaryCh <- n:
-	default:
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.primaryN < 0 {
+		c.primaryN = n
+	}
+	if !c.decided && len(c.counts) == c.n {
+		c.decideLocked()
 	}
 }
 
-// worker reports server's count and waits for its share (0 when the
-// sweep's budget ends first).
-func (c *usageCap) worker(bctx context.Context, server string, n int) int {
-	c.counts <- usageCount{server, n}
-	select {
-	case s := <-c.shares[server]:
-		return s
-	case <-bctx.Done():
-		return 0
+// worker reports server's count and returns its share; ok false when
+// the sweep's budget ended first (timing, never the cap: the worker is
+// then unreachable).
+func (c *usageCap) worker(bctx context.Context, server string, n int) (int, bool) {
+	c.mu.Lock()
+	ch := c.shares[server]
+	switch {
+	case c.decided:
+		// After the early point: the equal share at once.
+		c.mu.Unlock()
+		return min(n, c.equalOrRoom()), true
+	default:
+		c.counts[server] = n
+		if c.primaryN >= 0 && len(c.counts) == c.n {
+			c.decideLocked()
+		}
+		c.mu.Unlock()
 	}
+	select {
+	case s := <-ch:
+		return s, true
+	case <-bctx.Done():
+		return 0, false
+	}
+}
+
+func (c *usageCap) equalOrRoom() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.equalLocked()
 }
 
 // fairShare splits room among counts (water-filling): every server gets
@@ -341,7 +391,6 @@ func (h *Hub) startWorkers(bctx context.Context, now time.Time, insts map[string
 			sw := *e
 			sw.appsWhy, sw.hostWhy = workerUnreachable(e.name), workerUnreachable(e.name)
 			b.final <- &sw
-			caps.counts <- usageCount{e.server, 0}
 			continue
 		}
 		go func(sw usageWorkerSweep) {
@@ -353,11 +402,15 @@ func (h *Hub) startWorkers(bctx context.Context, now time.Time, insts map[string
 			}()
 			defer func() { b.final <- out }()
 			if !h.workerList(bctx, now, out, insts, timeout) {
-				caps.counts <- usageCount{sw.server, -1}
 				return
 			}
 			b.interim <- &usageWorkerSweep{server: sw.server, info: out.info, host: out.host, hostWhy: out.hostWhy}
-			share := caps.worker(bctx, sw.server, len(out.in))
+			share, ok := caps.worker(bctx, sw.server, len(out.in))
+			if !ok {
+				// The budget ended before a share: timing, never the cap.
+				out.appsWhy = workerUnreachable(sw.name)
+				return
+			}
 			out.in, out.capped, out.excess = capGroups(out.in, share)
 			out.jobHealth = h.usageJobHealth(bctx, sw.rt, sw.server, out.in, insts, timeout)
 			out.jobs = s.usagePlan(sw.server, out.in, now)
@@ -367,6 +420,13 @@ func (h *Hub) startWorkers(bctx context.Context, now time.Time, insts map[string
 					// Not measured, nothing recorded (the view shows the
 					// reason only).
 					out.appsWhy = workerOlder(sw.name)
+					return
+				}
+				if r.skipped {
+					// The budget ran out mid-sample: unreachable, never
+					// the previous sample shown as current.
+					out.appsWhy = workerUnreachable(sw.name)
+					out.capped, out.excess = nil, 0
 					return
 				}
 			}
@@ -443,7 +503,7 @@ func (h *Hub) joinWorkers(b *usageWorkerBatch, now time.Time, insts map[string]u
 	s := h.usage
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	over := primaryOver
+	over, workerOver := primaryOver, 0
 	for _, w := range done {
 		if w.applied {
 			cpus := 0
@@ -454,8 +514,12 @@ func (h *Hub) joinWorkers(b *usageWorkerBatch, now time.Time, insts map[string]u
 			}
 			s.applyLocked(w.server, now, w.in, w.jobs, w.results, insts, w.jobHealth, cpus)
 		}
-		over += w.excess
+		if w.applied {
+			workerOver += w.excess
+		}
 	}
+	over += workerOver
+	s.workerOver = workerOver
 	s.noteWorkersLocked(done, now)
 	s.notReady = notReady
 	if s.verified {

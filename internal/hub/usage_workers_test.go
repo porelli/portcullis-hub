@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -34,9 +35,21 @@ type fakeWorkerRT struct {
 	// hangVolumes / hangFixer: ListVolumes or (through the fixer seam)
 	// a fixer run hangs until its context ends.
 	statsIgnore, hangVolumes, hangFixer bool
+	// slowInfo / slowHost: Info and HostUsage block until their
+	// context ends; listDelay: List answers after it.
+	slowInfo, slowHost bool
+	listDelay          time.Duration
+	listsVolumes       int
 }
 
-func (f *fakeWorkerRT) HostUsage(context.Context) (usage.HostCounters, error) {
+func (f *fakeWorkerRT) HostUsage(ctx context.Context) (usage.HostCounters, error) {
+	f.mu.Lock()
+	slow := f.slowHost
+	f.mu.Unlock()
+	if slow {
+		<-ctx.Done()
+		return usage.HostCounters{}, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.hostErr != nil {
@@ -46,10 +59,30 @@ func (f *fakeWorkerRT) HostUsage(context.Context) (usage.HostCounters, error) {
 	return usage.HostCounters{At: f.clock.Now(), CPUTotal: 1000 * f.hostN, CPUIdle: 250 * f.hostN, MemTotal: 8 << 30, MemAvailable: 6 << 30}, nil
 }
 
+// Info with slowInfo: blocks until its context ends (a slow worker,
+// within its per-call timeout).
+func (f *fakeWorkerRT) Info(ctx context.Context) (runtime.Info, error) {
+	f.mu.Lock()
+	slow := f.slowInfo
+	f.mu.Unlock()
+	if slow {
+		<-ctx.Done()
+		return runtime.Info{}, ctx.Err()
+	}
+	return f.Fake.Info(ctx)
+}
+
 func (f *fakeWorkerRT) List(ctx context.Context, flt runtime.Filter) ([]runtime.Unit, error) {
 	f.mu.Lock()
-	block, ignore, rel := f.block, f.ignoreCtx, f.release
+	block, ignore, rel, delay := f.block, f.ignoreCtx, f.release, f.listDelay
 	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if block {
 		if ignore {
 			<-rel
@@ -566,10 +599,185 @@ func TestWorkerStorageHang(t *testing.T) {
 func (f *fakeWorkerRT) ListVolumes(ctx context.Context, flt runtime.Filter) ([]runtime.Volume, error) {
 	f.mu.Lock()
 	hang := f.hangVolumes
+	f.listsVolumes++
 	f.mu.Unlock()
 	if hang {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 	return f.Fake.ListVolumes(ctx, flt)
+}
+
+// TestWorkerSweepSlowWorkerFair (Task 10 re-review New I1): a worker slow
+// within its per-call timeouts never decides another worker's share:
+// w2 is sampled fresh, nothing is "too many", over_limit stays 0.
+func TestWorkerSweepSlowWorkerFair(t *testing.T) {
+	for _, mode := range []string{"slow list phase", "list blocks"} {
+		t.Run(mode, func(t *testing.T) {
+			e := newUsageEnv(t)
+			// As the real 12 s and 5 s: 3 × timeout > budget. "list
+			// blocks": a list that ends only with the budget (a 5 s
+			// timeout, a 300 ms budget).
+			e.h.usage.budget, e.h.usage.statsTimeout = time.Second, 400*time.Millisecond
+			if mode == "list blocks" {
+				e.h.usage.budget, e.h.usage.statsTimeout = 300*time.Millisecond, 5*time.Second
+			}
+			e.placed(map[string]string{"a": "w1", "c": "w2"})
+			w1 := e.addWorker(t, "w1", "slow")
+			w2 := e.addWorker(t, "w2", "fast")
+			w1.Lock()
+			w1.Units = []runtime.Unit{uunit("a1", "portcullis-a", "web", 1, "running")}
+			w1.Unlock()
+			w2.Lock()
+			w2.Units = []runtime.Unit{uunit("c1", "portcullis-c", "web", 1, "running")}
+			w2.Unlock()
+			wstats(w1, e.clock, "a1", 0, 1)
+			wstats(w2, e.clock, "c1", 0, 1)
+			e.sweep()
+			e.clock.Add(usage.Interval)
+			wstats(w2, e.clock, "c1", 15e9, 1)
+			w1.mu.Lock()
+			if mode == "slow list phase" {
+				// Info and host each a whole timeout, the list just inside
+				// its own: the list phase ends after the budget.
+				w1.slowInfo, w1.slowHost, w1.listDelay = true, true, 350*time.Millisecond
+				e.h.usage.workers["w1"].infoAt = time.Time{}
+			} else {
+				w1.block = true
+			}
+			w1.mu.Unlock()
+			before := usageCalls(w2.Calls(), "stats c1")
+			e.sweep()
+			if usageCalls(w2.Calls(), "stats c1") != before+1 {
+				t.Error("w2's stats weren't taken")
+			}
+			v := e.h.UsageOverview("last")
+			if c := groupOf(v, "c"); c == nil || c.Status != "running" || c.Containers[0].Sample.CPUCores == nil || *c.Containers[0].Sample.CPUCores != 1 {
+				t.Errorf("c = %+v", c)
+			}
+			if v.OverLimit != 0 {
+				t.Errorf("over_limit = %d", v.OverLimit)
+			}
+			if a := groupOf(v, "a"); a == nil || a.Why == usageTooMany {
+				t.Errorf("the slow worker's app = %+v", a)
+			}
+			if mode == "list blocks" {
+				if a := groupOf(v, "a"); a.Why != "not measured: slow is unreachable" {
+					t.Errorf("a = %+v", a)
+				}
+			}
+		})
+	}
+}
+
+// TestWorkerSweepSampleOutOfBudget (New I1): a worker whose stats outlast
+// the sweep's budget is unreachable, never its stale sample shown as
+// current.
+func TestWorkerSweepSampleOutOfBudget(t *testing.T) {
+	e := newUsageEnv(t)
+	e.h.usage.budget = 300 * time.Millisecond
+	e.placed(map[string]string{"a": "w1"})
+	w := e.addWorker(t, "w1", "nas")
+	w.Lock()
+	w.Units = []runtime.Unit{uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "db", 1, "running")}
+	w.Unlock()
+	wstats(w, e.clock, "a1", 0, 1)
+	wstats(w, e.clock, "a2", 0, 1)
+	e.sweep()
+	if a := groupOf(e.h.UsageOverview("last"), "a"); a == nil || a.Status != "running" {
+		t.Fatalf("a = %+v", a)
+	}
+	w.Lock()
+	w.StatsDelay = time.Second
+	w.Unlock()
+	e.clock.Add(usage.Interval)
+	e.sweep()
+	if a := groupOf(e.h.UsageOverview("last"), "a"); a == nil || a.Status != "not_measured" || a.Why != "not measured: nas is unreachable" || len(a.Containers) != 0 {
+		t.Errorf("a = %+v", a)
+	}
+}
+
+// TestWorkerHostWhy (New M2 b): null host figures always say why.
+func TestWorkerHostWhy(t *testing.T) {
+	e := newUsageEnv(t)
+	if h := e.h.UsageOverview("last").Hosts["primary"]; h.Why != "not measured yet" {
+		t.Errorf("before any sweep: %+v", h)
+	}
+	e.h.usage.readHost = func() (usage.HostCounters, error) { return usage.HostCounters{}, errors.New("no /proc") }
+	e.placed(map[string]string{"a": "w1"})
+	w := e.addWorker(t, "w1", "nas")
+	w.mu.Lock()
+	w.hostErr = errors.New("boom")
+	w.mu.Unlock()
+	e.sweep()
+	v := e.h.UsageOverview("last")
+	if h := v.Hosts["primary"]; h.Why != "not measured: the host's counters can't be read" {
+		t.Errorf("primary = %+v", h)
+	}
+	if h := v.Hosts["w1"]; h.Why != "not measured: nas's host counters can't be read" || h.MemUsedBytes != nil {
+		t.Errorf("w1 = %+v", h)
+	}
+}
+
+// TestWorkerRevokedAndUnknown (New M2 d).
+func TestWorkerRevokedAndUnknown(t *testing.T) {
+	e := newUsageEnv(t)
+	e.placed(map[string]string{"a": "w1", "b": "ghost"})
+	e.h.setServer("w1", &serverRT{Name: "nas", State: ServerRevoked})
+	e.sweep()
+	v := e.h.UsageOverview("last")
+	if a := groupOf(v, "a"); a == nil || a.Why != "not measured: nas is revoked" {
+		t.Errorf("a = %+v", a)
+	}
+	if b := groupOf(v, "b"); b == nil || b.Status != "not_measured" || b.Why != "not measured: server ghost is unknown" {
+		t.Errorf("b = %+v", b)
+	}
+}
+
+// TestWorkerStorageClipAndOneListing (New M1, New M2 c): a worker's
+// partial reason is clipped; a worker whose listing failed is not listed
+// again for its other instances in the same run.
+func TestWorkerStorageClipAndOneListing(t *testing.T) {
+	old := storageWorkerCall
+	storageWorkerCall = 100 * time.Millisecond
+	t.Cleanup(func() { storageWorkerCall = old })
+	e := newUsageEnv(t)
+	e.placed(map[string]string{"a": "w1", "b": "w1", "c": "w1", "d": "w2"})
+	w1 := e.addWorker(t, "w1", "nas")
+	w1.mu.Lock()
+	w1.hangVolumes = true
+	w1.mu.Unlock()
+	w2 := e.addWorker(t, "w2", "pi")
+	w2.Lock()
+	w2.Volumes["portcullis-d_data"] = vol("portcullis-d_data", "portcullis-d")
+	w2.Unlock()
+	long := strings.Repeat("é", 500)
+	e.h.usage.fixer = func(_ context.Context, r fixerRun) (*folderfix.Report, error) {
+		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 1, Partial: true, PartialReason: long, Dev: 1, TotalBytes: 2, FreeBytes: 1}, nil
+	}
+	start := time.Now()
+	if _, _, err := e.h.measureStorage(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 2*storageWorkerCall+time.Second {
+		t.Errorf("the run took %v", d)
+	}
+	if n := usageCalls(w1.Calls(), "volumes "); n > 1 {
+		// (fakeWorkerRT.ListVolumes records nothing when it hangs: count
+		// through the Fake below.)
+		t.Errorf("w1 listed %d times", n)
+	}
+	if n := w1.volumeLists(); n != 1 {
+		t.Errorf("w1's volumes listed %d times in one run", n)
+	}
+	it := storageItems(e.h, "d")["volume:portcullis-d_data"]
+	if r := []rune(it.PartialReason); len(r) > 200 || len(r) == 0 {
+		t.Errorf("partial reason %d runes", len(r))
+	}
+}
+
+func (f *fakeWorkerRT) volumeLists() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listsVolumes
 }

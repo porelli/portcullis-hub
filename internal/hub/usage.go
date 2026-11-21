@@ -161,6 +161,8 @@ type usageState struct {
 	// over_limit (the last sweep's; the cap's estimate while the primary
 	// lists).
 	primaryN, primaryOver int
+	// workerOver: the workers' part of over_limit (the last join's).
+	workerOver int
 }
 
 func newUsageState() *usageState {
@@ -307,7 +309,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	if s.startedAt.IsZero() {
 		s.startedAt = now
 	}
-	budget, statsTimeout, lastPrimaryN := s.budget, s.statsTimeout, s.primaryN
+	budget, statsTimeout := s.budget, s.statsTimeout
 	s.mu.Unlock()
 	insts := h.usageInstances()
 	kind := string(h.rt.Kind())
@@ -316,7 +318,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 
 	// The workers run on their own from here; the cap's coordinator
 	// learns the primary's count below.
-	caps := newUsageCap(bctx, lastPrimaryN, statsTimeout)
+	caps := newUsageCap()
 	workers := h.startWorkers(bctx, now, insts, statsTimeout, caps)
 	notReady := h.usageNotReady()
 
@@ -392,7 +394,9 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	s.verified, s.why = true, ""
 	s.lastSuccess = now
 	s.notShown, s.primaryOver, s.primaryN = notShown, over, len(in)
-	s.overLimit = over
+	// The workers' part stays the last join's until they join again
+	// (their cut apps are shown until then).
+	s.overLimit = over + s.workerOver
 	// The primary's own engine is trusted: its rates bounded by
 	// MaxCPUCores only (cpus 0).
 	skipped, nSampled, notMeas := s.applyLocked("", now, in, jobs, results, insts, jobHealth, 0)
