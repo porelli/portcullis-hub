@@ -345,38 +345,32 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		servicesSeen[id][service] = true
 		isJob := jobs[id][service]
-		isRunning := c.State == "running" || c.State == "restarting"
-		// A done job (exited 0) counts as running; a failed job (jobState:
+		// unitHealth (the one definition of "running", shared with Status
+		// and the usage page): a restarting service counts as running; a
+		// done job (exited 0) counts as running; a failed job (jobState:
 		// exited non-zero, dead, paused, removing, ContainerState error)
 		// is drift (fail closed).
-		isDoneJob := false
-		if isJob {
-			st := docker.State{Running: isRunning, Status: c.State}
-			if !isRunning && c.State != "created" {
-				// The list has no exit code: inspected.
-				st = docker.State{Status: "dead"} // can't tell: failed
-				if s, ierr := unitRuntime(ci).State(ctx, c.ID); ierr == nil {
-					st = s
-				}
+		st := docker.State{Running: c.State == "running" || c.State == "restarting", Status: c.State}
+		if isJob && !st.Running && c.State != "created" {
+			// The list has no exit code: inspected.
+			st = docker.State{Status: "dead"} // can't tell: failed
+			if s, ierr := unitRuntime(ci).State(ctx, c.ID); ierr == nil {
+				st = s
 			}
-			switch jobState(st) {
-			case jobRunning:
-				isRunning = true
-			case jobDone:
-				isDoneJob, isRunning = true, true
-			case jobFailed:
-				if pc.failedJobCodes == nil {
-					pc.failedJobCodes = make(map[string]int)
-				}
-				pc.failedJobs = append(pc.failedJobs, service)
-				pc.failedJobCodes[service] = 0 // unknown exit code
-				if st.Status == "exited" {
-					pc.failedJobCodes[service] = st.ExitCode
-				}
-				pc.failedJobCount++
-			default: // pending: created, never started
-				isRunning = false
+		}
+		health := unitHealth(isJob, st)
+		isRunning := healthUp(health) || health == healthRestarting
+		isDoneJob := health == jobDone
+		if health == jobFailed {
+			if pc.failedJobCodes == nil {
+				pc.failedJobCodes = make(map[string]int)
 			}
+			pc.failedJobs = append(pc.failedJobs, service)
+			pc.failedJobCodes[service] = 0 // unknown exit code
+			if st.Status == "exited" {
+				pc.failedJobCodes[service] = st.ExitCode
+			}
+			pc.failedJobCount++
 		}
 		if isRunning && !isJob {
 			pc.servicesRunning++

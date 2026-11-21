@@ -52,6 +52,45 @@ func jobState(st docker.State) string {
 	return jobFailed
 }
 
+// Unit health words beyond the job states: a service container that is
+// restarting, or anything else (exited, created, paused, dead, …).
+const (
+	healthRestarting = "restarting"
+	healthStopped    = "stopped"
+)
+
+// unitHealth is a service container's health, the one definition of
+// "running" (Status rows, reconcile's counts, the usage page): a one-shot
+// job's jobState — done (exited 0) is as it should be, never "stopped" —
+// and for any other service running, restarting or stopped.
+func unitHealth(job bool, st docker.State) string {
+	if job {
+		return jobState(st)
+	}
+	switch st.Status {
+	case "running":
+		return jobRunning
+	case "restarting":
+		return healthRestarting
+	}
+	return healthStopped
+}
+
+// healthUp: the container is as it should be — running, or a done job.
+func healthUp(health string) bool { return health == jobRunning || health == jobDone }
+
+// listedJobState is a job container's state from the list alone (no exit
+// code there): an exited one reads its "Exited (n)" status text.
+func listedJobState(state, status string) string {
+	if state == "exited" {
+		if strings.HasPrefix(status, "Exited (0)") {
+			return jobDone
+		}
+		return jobFailed
+	}
+	return unitHealth(true, docker.State{Running: state == "running", Status: state})
+}
+
 // appContainers lists the app's project containers that belong to services
 // of its compose file (one-off `compose run` containers excluded).
 func (h *Hub) appContainers(ctx context.Context, t *templates.Template) ([]runtime.Unit, []string, error) {
@@ -121,24 +160,11 @@ func (h *Hub) Status(ctx context.Context, id string) ([]ContainerStatus, error) 
 		if t.Jobs[c.Service] {
 			status.Job = true
 			// Get detailed state to determine JobState (I1: never omit it).
-			st, err := h.rtOf(id).State(ctx, c.ID)
-			if err == nil {
-				status.JobState = jobState(st)
+			if st, err := h.rtOf(id).State(ctx, c.ID); err == nil {
+				status.JobState = unitHealth(true, st)
 			} else {
-				// Fallback to the list's state/status.
-				status.JobState = jobState(docker.State{
-					Running:  c.State == "running",
-					Status:   c.State,
-					ExitCode: 0, // unknown, but Status parsing below handles it
-				})
-				// Parse exit code from Status for exited containers (prefix check).
-				if c.State == "exited" {
-					if strings.HasPrefix(c.Status, "Exited (0)") {
-						status.JobState = "done"
-					} else {
-						status.JobState = "failed"
-					}
-				}
+				// Fallback to the list's state and status text.
+				status.JobState = listedJobState(c.State, c.Status)
 			}
 		}
 		out = append(out, status)

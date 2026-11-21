@@ -369,6 +369,88 @@ func TestUsageStoppedAppShowsStopped(t *testing.T) {
 	}
 }
 
+// One definition of "running" (unitHealth): a done one-shot job and a
+// stopped leftover of a skipped service never make an app "partly
+// running"; a failed or pending job, or a stopped service, does. The
+// exit code is read once per list state, not every sweep.
+func TestUsageRunningIgnoresDoneJobs(t *testing.T) {
+	e := newUsageEnv(t)
+	e.h.usage.instances = func() []usageInst {
+		return []usageInst{{ID: "a", Template: "tmpl", Name: "App a",
+			Jobs: map[string]bool{"init": true, "migrate": true}, Skip: map[string]bool{"extra": true}}}
+	}
+	exited := func(id, svc, status string) runtime.Unit {
+		u := uunit(id, "portcullis-a", svc, 1, "exited")
+		u.Status = status
+		return u
+	}
+	set := func(initCode int, us ...runtime.Unit) {
+		e.rt.Lock()
+		e.rt.States = map[string]runtime.State{"i1": {Status: "exited", ExitCode: initCode}, "m1": {Status: "exited"}}
+		e.rt.Unlock()
+		e.setUnits(append([]runtime.Unit{uunit("w1", "portcullis-a", "web", 1, "running")}, us...)...)
+		e.stats("w1", 1, 1)
+		e.sweep()
+	}
+	status := func() string { return e.h.UsageOverview().Apps[0].Status }
+	set(0, exited("i1", "init", "Exited (0) 2 hours ago"), exited("m1", "migrate", "Exited (0) 2 hours ago"), exited("x1", "extra", "Exited (0) 1 day ago"))
+	if got := status(); got != "running" {
+		t.Errorf("done jobs + a skipped leftover: status = %q", got)
+	}
+	before := usageCalls(e.rt.Calls(), "state ")
+	set(0, exited("i1", "init", "Exited (0) 3 hours ago"), exited("m1", "migrate", "Exited (0) 3 hours ago"), exited("x1", "extra", "Exited (0) 1 day ago"))
+	if n := usageCalls(e.rt.Calls(), "state ") - before; n != 0 {
+		t.Errorf("an unchanged job's exit code was read again (%d)", n)
+	}
+	// A rerun that failed: read again, partly running.
+	set(1, exited("i1", "init", "Exited (1) 1 second ago"), exited("m1", "migrate", "Exited (0) 3 hours ago"))
+	if got := status(); got != "partly running" {
+		t.Errorf("a failed job: status = %q", got)
+	}
+	// A job never started is not up either.
+	set(0, uunit("i1", "portcullis-a", "init", 1, "created"))
+	if got := status(); got != "partly running" {
+		t.Errorf("a pending job: status = %q", got)
+	}
+	// A running leftover of a skipped service counts (it is running).
+	set(0, uunit("x1", "portcullis-a", "extra", 1, "running"), exited("i1", "init", "Exited (0) 2 hours ago"))
+	if got := status(); got != "running" {
+		t.Errorf("a running leftover: status = %q", got)
+	}
+	// A stopped service still makes it partly running.
+	set(0, uunit("d1", "portcullis-a", "db", 1, "exited"))
+	if got := status(); got != "partly running" {
+		t.Errorf("a stopped service: status = %q", got)
+	}
+}
+
+// unitHealth is the one definition: a done job is up, a failed or
+// pending one isn't; a service is up only while running.
+func TestUnitHealth(t *testing.T) {
+	for _, tc := range []struct {
+		job    bool
+		st     docker.State
+		health string
+		up     bool
+	}{
+		{true, docker.State{Status: "exited"}, jobDone, true},
+		{true, docker.State{Status: "exited", ExitCode: 2}, jobFailed, false},
+		{true, docker.State{Status: "created"}, jobPending, false},
+		{true, docker.State{Status: "running", Running: true}, jobRunning, true},
+		{true, docker.State{Status: "paused"}, jobFailed, false},
+		{false, docker.State{Status: "running", Running: true}, jobRunning, true},
+		{false, docker.State{Status: "restarting"}, healthRestarting, false},
+		{false, docker.State{Status: "exited"}, healthStopped, false},
+	} {
+		if h := unitHealth(tc.job, tc.st); h != tc.health || healthUp(h) != tc.up {
+			t.Errorf("unitHealth(%v, %+v) = %q (up %v)", tc.job, tc.st, h, healthUp(h))
+		}
+	}
+	if listedJobState("exited", "Exited (0) 2 hours ago") != jobDone || listedJobState("exited", "Exited (137) now") != jobFailed || listedJobState("created", "Created") != jobPending {
+		t.Error("listedJobState")
+	}
+}
+
 func TestUsageSweepBudget(t *testing.T) {
 	var logs syncBuffer
 	prev := log.Writer()

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/usage"
 )
 
@@ -152,13 +153,27 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 		return cs[i].ID < cs[j].ID
 	})
 	var samples []usage.Sample
-	running, restarting, notMeas, measured := 0, 0, map[string]bool{}, 0
+	// unitHealth (shared with Status and reconcile): a done one-shot job
+	// is as it should be, and a stopped leftover of a service expected to
+	// have no container (an inactive profile, a scaled-off companion)
+	// isn't counted; anything else not up makes the group partly running.
+	running, restarting, counted, up, notMeas, measured := 0, 0, 0, 0, map[string]bool{}, 0
 	for _, c := range cs {
 		g.Containers = append(g.Containers, UsageContainer{
 			ID12: shortContainerID(c.ID), Service: c.Service, Number: c.Number, State: c.State,
 			Sample: c.Sample, Limits: UsageLimits{MemBytes: c.Limits.MemBytes, CPUCores: c.Limits.CPUCores, Pids: c.Limits.Pids},
 			OOMKilled: c.Limits.OOMKilled, Restarts: c.Limits.Restarts, Error: c.Err,
 		})
+		health := c.Health
+		if health == "" {
+			health = unitHealth(false, docker.State{Running: c.Running, Status: c.State})
+		}
+		if !c.Skip || c.Running {
+			counted++
+			if healthUp(health) {
+				up++
+			}
+		}
 		switch {
 		case c.Running:
 			running++
@@ -184,7 +199,8 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 	switch {
 	case len(cs) == 0 && len(helpers) == 0:
 		g.Status = "stopped"
-	case running == len(cs):
+	case up == counted && (running > 0 || len(cs) == 0):
+		// Everything up (helpers only: core's transient row).
 		g.Status = "running"
 	case running == 0 && restarting > 0:
 		g.Status = "restarting"
