@@ -26,7 +26,7 @@ func total(ss []Sample, excuse bool) (Sample, bool) {
 		n := 0
 		for _, s := range ss {
 			if v := get(s); v != nil {
-				sum += *v
+				sum = satAdd(sum, *v)
 				n++
 			}
 		}
@@ -65,7 +65,7 @@ func total(ss []Sample, excuse bool) (Sample, bool) {
 			case *v <= 0:
 				zeros++
 			default:
-				sum += *v
+				sum = satAdd(sum, *v)
 			}
 		}
 		switch zeros {
@@ -102,4 +102,16 @@ func total(ss []Sample, excuse bool) (Sample, bool) {
 	t.CPULimitCores = limF(func(s Sample) *float64 { return s.CPULimitCores })
 	t.PidsLimit = limI(func(s Sample) *int64 { return s.PidsLimit })
 	return t, partial
+}
+
+// satAdd is a + b, saturating at ±maxBytes (an untrusted worker's figures
+// never wrap a total).
+func satAdd(a, b int64) int64 {
+	switch {
+	case b > 0 && a > maxBytes-b:
+		return maxBytes
+	case b < 0 && a < -maxBytes-b:
+		return -maxBytes
+	}
+	return a + b
 }

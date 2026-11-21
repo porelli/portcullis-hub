@@ -125,6 +125,7 @@ func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 // (or out of order); the memory figure needs only cur.
 func DeriveHost(prev *HostCounters, cur HostCounters, cpus int) HostSample {
 	var s HostSample
+	cpus = min(cpus, MaxCPUCores)
 	if cur.MemTotal > 0 && cur.MemAvailable >= 0 && cur.MemAvailable <= cur.MemTotal {
 		v := cur.MemTotal - cur.MemAvailable
 		s.MemUsedBytes = &v

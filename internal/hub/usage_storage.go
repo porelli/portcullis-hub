@@ -218,7 +218,9 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 			log.Printf("usage: %s's targets on server %s: %s", id, server, usageErrText(ss.err))
 			continue
 		}
-		vols, err := ss.rt.ListVolumes(ctx, runtime.Filter{Instance: id})
+		lctx, lcancel := storageCallCtx(ctx, server, storageWorkerCall)
+		vols, err := ss.rt.ListVolumes(lctx, runtime.Filter{Instance: id})
+		lcancel()
 		if err != nil {
 			if server != "" {
 				// A worker that fails its listing: its targets wait for
@@ -283,6 +285,9 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 	for _, k := range order {
 		disk = append(disk, *byKey[k])
 	}
+	// The primary's targets first: a worker never pushes them out of the
+	// run's budget.
+	sort.SliceStable(disk, func(i, j int) bool { return disk[i].Server == "" && disk[j].Server != "" })
 	// Writable layers, then images (instances share images: listed, not
 	// in any total).
 	type imageKey struct{ server, ref string }
@@ -313,6 +318,7 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		sort.Strings(owners)
 		sizes = append(sizes, storageTarget{Key: storageKey(k.server, "image:"+k.ref), Kind: "image", Target: k.ref, Owners: owners, Server: k.server})
 	}
+	sort.SliceStable(sizes, func(i, j int) bool { return sizes[i].Server == "" && sizes[j].Server != "" })
 	return disk, sizes, nil
 }
 
@@ -329,8 +335,27 @@ func (h *Hub) storageVolumeLive(ctx context.Context, t storageTarget) bool {
 	if err != nil {
 		return false
 	}
-	_, err = rt.InspectVolume(ctx, t.Volume.Name)
+	cctx, cancel := storageCallCtx(ctx, t.Server, storageWorkerCall)
+	defer cancel()
+	_, err = rt.InspectVolume(cctx, t.Volume.Name)
 	return err == nil || !docker.IsNotFound(err)
+}
+
+// The Hub-side deadlines of a worker's storage calls (the agent client's
+// own default is hours): an inspect, remove, list or size like the
+// primary's engine calls; a fixer run its walk's cap and a margin.
+var (
+	storageWorkerCall  = 10 * time.Second
+	storageWorkerFixer = fixerspec.UsageMaxTime + time.Minute
+)
+
+// storageCallCtx bounds a call to a worker (the primary's engine client
+// bounds its own).
+func storageCallCtx(ctx context.Context, server string, d time.Duration) (context.Context, context.CancelFunc) {
+	if server == "" {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, d)
 }
 
 // storageRT is the engine a target is measured on: the primary's, or the
@@ -354,11 +379,13 @@ func (h *Hub) storageVolumeRecreated(ctx context.Context, t storageTarget) bool 
 	if err != nil || !t.Labelled || rt.Kind() == runtime.KindKubernetes {
 		return false
 	}
-	v, err := rt.InspectVolume(ctx, t.Volume.Name)
+	cctx, cancel := storageCallCtx(ctx, t.Server, storageWorkerCall)
+	defer cancel()
+	v, err := rt.InspectVolume(cctx, t.Volume.Name)
 	if err != nil || len(v.Labels) > 0 {
 		return false
 	}
-	if err := rt.RemoveVolume(ctx, t.Volume.Name); err != nil {
+	if err := rt.RemoveVolume(cctx, t.Volume.Name); err != nil {
 		log.Printf("usage: removing the volume %s the helper recreated: %s", clipRunes(t.Volume.Name, 120), usageErrText(err))
 	} else {
 		log.Printf("usage: removed the volume %s the helper recreated", clipRunes(t.Volume.Name, 120))
@@ -468,9 +495,19 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 		}
 		r := fixerRun{Mode: "usage", Volume: t.Volume, Source: t.Source, Server: t.Server, Opts: folderfix.Options{MaxEntries: storageMaxEntries, MaxTime: storageMaxTime}}
 		began := time.Now()
-		s.diskMu.Lock()
-		rep, err := h.usageFixerRun(runCtx, r)
-		s.diskMu.Unlock()
+		// diskMu guards the primary's disks (never two walks at once,
+		// U12); a worker's run walks the worker's disks and is never
+		// held under it (nor without its own deadline).
+		var rep *folderfix.Report
+		if t.Server == "" {
+			s.diskMu.Lock()
+			rep, err = h.usageFixerRun(runCtx, r)
+			s.diskMu.Unlock()
+		} else {
+			fctx, fcancel := context.WithTimeout(runCtx, storageWorkerFixer)
+			rep, err = h.usageFixerRun(fctx, r)
+			fcancel()
+		}
 		if t.Kind == "volume" && h.storageVolumeRecreated(runCtx, t) {
 			delete(owned, t.Key)
 			gone++
@@ -483,7 +520,7 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 			failed++
 		} else {
 			e.AllocBytes, e.ApparentBytes = i64p(rep.AllocBytes), i64p(rep.ApparentBytes)
-			e.Partial, e.PartialReason = rep.Partial, rep.PartialReason
+			e.Partial, e.PartialReason = rep.Partial, clipRunes(rep.PartialReason, 200)
 			e.Dev, e.Free, e.Total = rep.Dev, rep.FreeBytes, rep.TotalBytes
 			measured++
 		}
@@ -500,9 +537,13 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 		switch {
 		case err != nil:
 		case t.Kind == "layer":
-			size, err = rt.LayerSize(runCtx, t.Unit)
+			cctx, cancel := storageCallCtx(runCtx, t.Server, storageWorkerCall)
+			size, err = rt.LayerSize(cctx, t.Unit)
+			cancel()
 		default:
-			size, err = rt.ImageSize(runCtx, t.Target)
+			cctx, cancel := storageCallCtx(runCtx, t.Server, storageWorkerCall)
+			size, err = rt.ImageSize(cctx, t.Target)
+			cancel()
 		}
 		if err == nil && size < 0 {
 			err = errors.New("a negative size")

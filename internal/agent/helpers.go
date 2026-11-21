@@ -233,7 +233,15 @@ func (a *API) helperRun(w http.ResponseWriter, r *http.Request) {
 		engineError(w, err)
 		return
 	}
-	if a.usageVolumeGone(r.Context(), h.spec.Spec) {
+	gone, gerr := a.usageVolumeGone(r.Context(), h.spec.Spec)
+	if gerr != nil {
+		a.mu.Lock()
+		h.ran = true
+		a.mu.Unlock()
+		engineError(w, gerr)
+		return
+	}
+	if gone {
 		a.mu.Lock()
 		h.ran = true
 		a.mu.Unlock()

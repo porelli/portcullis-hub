@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/agentapi"
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/fixerspec"
 	"github.com/portcullis/hub/internal/usage"
 	"github.com/prometheus/procfs"
@@ -123,17 +124,23 @@ func (a *API) usageVolumeInScope(ctx context.Context, spec *agentapi.FixerSpec) 
 // re-check and the helper's create, so it has no labels now) is removed,
 // never forced, and the run fails "the volume is gone" (the Hub can't
 // see or remove an unlabelled volume through the agent's scope).
-func (a *API) usageVolumeGone(ctx context.Context, spec *agentapi.FixerSpec) bool {
+//
+// Only a not-found is "gone"; another inspect error fails the run as an
+// engine error (err), never as a gone volume.
+func (a *API) usageVolumeGone(ctx context.Context, spec *agentapi.FixerSpec) (bool, error) {
 	if spec == nil || len(spec.Volumes) != 1 || len(spec.Binds) != 0 {
-		return false
+		return false, nil
 	}
 	name := spec.Volumes[0].Name
 	v, err := a.cfg.Runtime.InspectVolume(ctx, name)
-	if err != nil {
-		return true
+	switch {
+	case err != nil && docker.IsNotFound(err):
+		return true, nil
+	case err != nil:
+		return false, err
 	}
 	if owner, ok := a.volumeOwner(v); ok && owner == spec.Volumes[0].Instance && v.Name == name {
-		return false
+		return false, nil
 	}
 	if len(v.Labels) == 0 {
 		if err := a.cfg.Runtime.RemoveVolume(ctx, name); err != nil {
@@ -142,7 +149,7 @@ func (a *API) usageVolumeGone(ctx context.Context, spec *agentapi.FixerSpec) boo
 			log.Printf("usage: removed the volume %s the helper recreated", clipMsg(name))
 		}
 	}
-	return true
+	return true, nil
 }
 
 // fixerBind is a folder_fix spec's one bind source (false: a usage run on

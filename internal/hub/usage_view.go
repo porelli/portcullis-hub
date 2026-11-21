@@ -199,13 +199,20 @@ func usageServerID(server string) string {
 // app with no container. Caller holds s.mu (read).
 func (s *usageState) appGroupLocked(inst usageInst, cs []*usageCont, since time.Time) (UsageGroup, bool) {
 	if inst.Server != "" {
-		w := s.workers[inst.Server]
-		if w == nil {
-			return UsageGroup{}, false
-		}
-		if w.appsWhy != "" {
-			return UsageGroup{Instance: inst.ID, Template: inst.Template, Name: inst.Name, Server: inst.Server, Status: "not_measured", Why: w.appsWhy,
+		notMeasured := func(why string) (UsageGroup, bool) {
+			return UsageGroup{Instance: inst.ID, Template: inst.Template, Name: inst.Name, Server: inst.Server, Status: "not_measured", Why: why,
 				Containers: []UsageContainer{}}, true
+		}
+		w := s.workers[inst.Server]
+		switch {
+		case w == nil && s.notReady[inst.Server] != "":
+			return notMeasured(s.notReady[inst.Server])
+		case w == nil:
+			return notMeasured("not measured: server " + inst.Server + " is unknown")
+		case w.appsWhy != "":
+			return notMeasured(w.appsWhy)
+		case w.capped[inst.ID]:
+			return notMeasured(usageTooMany)
 		}
 	}
 	if len(cs) == 0 {
@@ -240,7 +247,21 @@ func (w *usageWorker) hostLocked(since time.Time) UsageHost {
 		hs, _ = usage.MeanHost(w.hostRing.Since(since))
 	}
 	h.CPUUsedCores, h.MemUsedBytes, h.BlkReadBps, h.BlkWriteBps = hs.CPUUsedCores, hs.MemUsedBytes, hs.BlkReadBps, hs.BlkWriteBps
+	h.Why = hostNullWhy(h, w.hostRing, workerHostUnread(w.name))
 	return h
+}
+
+// hostNullWhy is the reason when every host figure is null (contract
+// §11.11: why explains null figures): unread when the newest point has
+// none, "not measured yet" before any point; "" when a figure is known.
+func hostNullWhy(h UsageHost, ring *usage.HostRing, unread string) string {
+	if h.CPUUsedCores != nil || h.MemUsedBytes != nil || h.BlkReadBps != nil || h.BlkWriteBps != nil {
+		return ""
+	}
+	if ring == nil || ring.Len() == 0 {
+		return usageNoHostYet
+	}
+	return unread
 }
 
 // primaryHostLocked is the primary's UsageHost: the engine's CPUs and
@@ -271,6 +292,7 @@ func (s *usageState) primaryHostLocked(runtimeKind string, since time.Time) Usag
 		}
 		h.CPUUsedCores, h.MemUsedBytes, h.BlkReadBps, h.BlkWriteBps = hs.CPUUsedCores, hs.MemUsedBytes, hs.BlkReadBps, hs.BlkWriteBps
 	}
+	h.Why = hostNullWhy(h, s.hostRing, "not measured: the host's counters can't be read")
 	return h
 }
 

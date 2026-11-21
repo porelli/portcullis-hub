@@ -185,3 +185,17 @@ func TestErrorBody(t *testing.T) {
 		t.Errorf("cap: %v", err)
 	}
 }
+
+// TestRuntimeInfoBounds (Task 10 review M1): an impossible CPU count or
+// memory from a worker is no figure.
+func TestRuntimeInfoBounds(t *testing.T) {
+	for _, i := range []Info{{Runtime: "docker", CPUs: MaxCPUCores + 1, MemBytes: 1}, {Runtime: "docker", CPUs: 4, MemBytes: -1}} {
+		ri, err := i.RuntimeInfo()
+		if err != nil || ri.CPUs != 0 || ri.MemoryBytes != 0 {
+			t.Errorf("%+v → %d %d %v", i, ri.CPUs, ri.MemoryBytes, err)
+		}
+	}
+	if ri, _ := (Info{Runtime: "docker", CPUs: 8, MemBytes: 1 << 30}).RuntimeInfo(); ri.CPUs != 8 || ri.MemoryBytes != 1<<30 {
+		t.Errorf("good info = %+v", ri)
+	}
+}

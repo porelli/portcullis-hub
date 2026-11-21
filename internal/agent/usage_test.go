@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -277,6 +278,26 @@ func TestAgentUsageFixRound1(t *testing.T) {
 	f.rt.FixerFn = nil
 	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: lbl}
 	f.rt.Unlock()
+	// A transient inspect error after the run is an engine failure, never
+	// "gone" (and nothing removed).
+	id = create(volSpec("portcullis-app_data", "app"))
+	f.rt.Lock()
+	f.rt.FixerFn = func(runtime.FixerSpec) (*runtime.RunResult, error) {
+		f.rt.Lock()
+		f.rt.ErrOn = map[string]error{"inspect-volume portcullis-app_data": errors.New("engine busy")}
+		f.rt.Unlock()
+		return &runtime.RunResult{}, nil
+	}
+	f.rt.Unlock()
+	if resp, b := f.req(t, "POST", "/v1/helpers/"+id+"/run", nil); resp.StatusCode < 500 || strings.Contains(string(b), "gone") {
+		t.Errorf("a transient inspect error: %d %s", resp.StatusCode, b)
+	}
+	f.rt.Lock()
+	f.rt.FixerFn, f.rt.ErrOn = nil, nil
+	f.rt.Unlock()
+	if usageCalls(f.rt.Calls(), "remove-volume portcullis-app_data") > 1 {
+		t.Error("a volume removed on a transient error")
+	}
 	// A labelled volume after the run: measured.
 	id = create(volSpec("portcullis-app_data", "app"))
 	if c := f.code(t, "POST", "/v1/helpers/"+id+"/run", nil); c != 200 {

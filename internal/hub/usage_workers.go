@@ -2,20 +2,23 @@ package hub
 
 // Workers in the usage sampler (contract §11.11 "Workers", §17.4): every
 // ready worker is swept in the same sweep through its agent — list,
-// stats, host/usage — one goroutine per server, each under the same
-// usage.Parallel limit and usage.StatsTimeout per call, all within the
-// sweep's budget. A worker's answers are untrusted (the agent backend
-// decodes them strictly and checks them); a worker that doesn't answer
-// in time, or whose agent is older than the Hub, makes its apps and host
-// "not measured" with the reason, never a guess, and never holds up the
-// primary: the sweep waits for a worker at most until its deadline
-// (the budget plus usageWorkerGrace) and drops a late answer.
+// stats, host/usage — one goroutine per server, end to end, each under
+// the same usage.Parallel limit and usage.StatsTimeout per call, all
+// within the sweep's budget. The primary never waits for a worker: the
+// workers join after the primary's sample is recorded, when they answer,
+// and at the latest at the deadline (the budget plus usageWorkerGrace),
+// after which a missing worker is "not measured: <name> is unreachable"
+// (a late answer is dropped). A worker's answers are untrusted: the agent
+// backend decodes and checks them; the Hub bounds what it derives (CPU
+// rates, sums) and shares the container cap fairly, so one worker can
+// neither hide another's apps nor make a figure wrong.
 
 import (
 	"context"
 	"errors"
 	"log"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -26,6 +29,25 @@ import (
 // usageWorkerGrace: how long after the sweep's budget a worker's answer
 // is still awaited (a backend that ignores its context).
 const usageWorkerGrace = 500 * time.Millisecond
+
+// The reasons of a worker's null figures (contract §11.11).
+func workerOlder(name string) string {
+	return "not measured: " + name + "'s agent is older than the Hub"
+}
+
+func workerUnreachable(name string) string {
+	return "not measured: " + name + " is unreachable"
+}
+
+func workerHostUnread(name string) string {
+	return "not measured: " + name + "'s host counters can't be read"
+}
+
+// usageTooMany: an app cut by the container cap (never silently dropped).
+const usageTooMany = "not measured: too many containers"
+
+// usageNoHostYet: the host figures before the first read.
+const usageNoHostYet = "not measured yet"
 
 // usageWorker is one worker's sampler state (usageState.workers).
 type usageWorker struct {
@@ -39,12 +61,13 @@ type usageWorker struct {
 	hostRing *usage.HostRing
 	hostErr  bool
 	// appsWhy / hostWhy: "" = measured; else the "not measured: …" text
-	// of its apps and of its host figures.
+	// of its apps and of its host figures. capped: its apps the cap cut.
 	appsWhy, hostWhy string
+	capped           map[string]bool
 }
 
-// usageWorkerSweep is one worker's part of a sweep (never shared between
-// goroutines: each is built by one, then handed over).
+// usageWorkerSweep is one worker's part of a sweep (built by its own
+// goroutine, then handed over; never shared).
 type usageWorkerSweep struct {
 	server, name string
 	rt           runtime.Instances
@@ -56,39 +79,48 @@ type usageWorkerSweep struct {
 	jobHealth    map[string]string
 	jobs         []usageJob
 	results      []usageResult
+	// capped: its apps the cap cut; excess: their containers (over_limit).
+	capped map[string]bool
+	excess int
 	// applied: the results are complete (the sample phase finished).
 	applied bool
 }
 
-func workerOlder(name string) string {
-	return "not measured: " + name + "'s agent is older than the Hub"
-}
-func workerUnreachable(name string) string {
-	return "not measured: " + name + " is unreachable"
-}
-
-// usageWorkerBatch is one phase's goroutines: their answers arrive on ch;
-// expected lists every server (so a missing answer is known by name).
+// usageWorkerBatch is the sweep's worker goroutines: each sends what it
+// listed (interim: its info and host, for a sample phase that is late)
+// and its final result.
 type usageWorkerBatch struct {
-	ch       chan *usageWorkerSweep
-	expected []*usageWorkerSweep
-	deadline time.Time
+	interim, final chan *usageWorkerSweep
+	expected       []*usageWorkerSweep
+	deadline       time.Time
 }
 
-// wait collects every answer until the deadline; a server whose answer
-// hasn't come is unreachable. The result is sorted by server id.
+// wait collects every final answer until the deadline. A server without
+// one is unreachable, keeping the info and host it listed in time (its
+// apps aren't recorded). Sorted by server id.
 func (b *usageWorkerBatch) wait() []*usageWorkerSweep {
-	got := map[string]*usageWorkerSweep{}
+	got, interim := map[string]*usageWorkerSweep{}, map[string]*usageWorkerSweep{}
 	timer := time.NewTimer(time.Until(b.deadline))
 	defer timer.Stop()
 collect:
 	for len(got) < len(b.expected) {
 		select {
-		case sw := <-b.ch:
+		case sw := <-b.final:
 			got[sw.server] = sw
+		case sw := <-b.interim:
+			interim[sw.server] = sw
 		case <-timer.C:
 			break collect
 		}
+	}
+	for {
+		select {
+		case sw := <-b.interim:
+			interim[sw.server] = sw
+			continue
+		default:
+		}
+		break
 	}
 	out := make([]*usageWorkerSweep, 0, len(b.expected))
 	for _, e := range b.expected {
@@ -98,6 +130,12 @@ collect:
 		}
 		late := &usageWorkerSweep{server: e.server, name: e.name, rt: e.rt}
 		late.appsWhy, late.hostWhy = workerUnreachable(e.name), workerUnreachable(e.name)
+		if it := interim[e.server]; it != nil {
+			late.info, late.host, late.hostWhy = it.info, it.host, it.hostWhy
+			if late.host == nil && late.hostWhy == "" {
+				late.hostWhy = workerHostUnread(e.name)
+			}
+		}
 		log.Printf("usage: server %s didn't answer within the sweep's budget", e.server)
 		out = append(out, late)
 	}
@@ -120,110 +158,310 @@ func (h *Hub) usageWorkerRTs() []*usageWorkerSweep {
 	return out
 }
 
+// usageNotReady: every registered server that isn't ready → the reason
+// its apps are not measured (ruling: they are listed, never hidden).
+func (h *Hub) usageNotReady() map[string]string {
+	r := h.reg()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := map[string]string{}
+	for id, s := range r.servers {
+		name := nameOr(s.Name, id)
+		switch {
+		case s.State == ServerReady && s.RT != nil:
+		case s.State == ServerRevoked:
+			out[id] = "not measured: " + name + " is revoked"
+		case s.State == ServerEnrolling:
+			out[id] = "not measured: " + name + " isn't ready yet"
+		default:
+			out[id] = "not measured: " + name + " is offline"
+		}
+	}
+	return out
+}
+
 // usageHostReader is a worker backend's host route (agentrt.Backend).
 type usageHostReader interface {
 	HostUsage(ctx context.Context) (usage.HostCounters, error)
 }
 
-// startWorkerLists lists every ready worker's containers in scope (its
-// apps' only: never another project, never a helper) and reads its info
-// (hourly) and host counters, each call under timeout, within bctx.
-func (h *Hub) startWorkerLists(bctx context.Context, now time.Time, insts map[string]usageInst, timeout time.Duration) *usageWorkerBatch {
+// usageCap is the sweep's container cap: the primary takes its count
+// first (at most usage.MaxContainers), the rest is shared among the
+// workers that listed in time (fairShare). It decides once the primary
+// and every worker reported, or at its deadline (the list phase: three
+// calls of the stats timeout; a primary that hasn't reported counts as
+// its last sweep's count).
+type usageCap struct {
+	primaryCh chan int
+	counts    chan usageCount
+	mu        sync.Mutex
+	shares    map[string]chan int
+	n         int
+}
+
+type usageCount struct {
+	server string
+	n      int
+}
+
+func newUsageCap(bctx context.Context, lastPrimary int, timeout time.Duration) *usageCap {
+	return &usageCap{primaryCh: make(chan int, 1), shares: map[string]chan int{}}
+}
+
+// start runs the coordinator for the workers in ws.
+func (c *usageCap) start(bctx context.Context, ws []*usageWorkerSweep, lastPrimary int, timeout time.Duration) {
+	c.counts = make(chan usageCount, len(ws))
+	c.n = len(ws)
+	for _, w := range ws {
+		c.shares[w.server] = make(chan int, 1)
+	}
+	deadline := time.Now().Add(3*timeout + 200*time.Millisecond)
+	if dl, ok := bctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	go func() {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		primary, got := -1, map[string]int{}
+	collect:
+		for primary < 0 || len(got) < c.n {
+			select {
+			case p := <-c.primaryCh:
+				primary = p
+			case k := <-c.counts:
+				got[k.server] = k.n
+			case <-timer.C:
+				break collect
+			}
+		}
+		if primary < 0 {
+			primary = min(lastPrimary, usage.MaxContainers)
+		}
+		shares := fairShare(usage.MaxContainers-primary, got)
+		for server, ch := range c.shares {
+			ch <- shares[server] // 0 for a worker that didn't list in time
+		}
+	}()
+}
+
+// primary reports the primary's sampled count.
+func (c *usageCap) primary(n int) {
+	select {
+	case c.primaryCh <- n:
+	default:
+	}
+}
+
+// worker reports server's count and waits for its share (0 when the
+// sweep's budget ends first).
+func (c *usageCap) worker(bctx context.Context, server string, n int) int {
+	c.counts <- usageCount{server, n}
+	select {
+	case s := <-c.shares[server]:
+		return s
+	case <-bctx.Done():
+		return 0
+	}
+}
+
+// fairShare splits room among counts (water-filling): every server gets
+// an equal share, the room a server doesn't need goes to the others.
+func fairShare(room int, counts map[string]int) map[string]int {
+	out := map[string]int{}
+	ids := make([]string, 0, len(counts))
+	for id := range counts {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if counts[ids[i]] != counts[ids[j]] {
+			return counts[ids[i]] < counts[ids[j]]
+		}
+		return ids[i] < ids[j]
+	})
+	room = max(room, 0)
+	for i, id := range ids {
+		give := min(max(counts[id], 0), room/(len(ids)-i))
+		out[id] = give
+		room -= give
+	}
+	return out
+}
+
+// capGroups keeps in's whole apps in order while they fit share; an app
+// that doesn't fit is cut whole (its containers in excess), never a
+// subset with a wrong total.
+func capGroups(in []usageUnit, share int) (kept []usageUnit, capped map[string]bool, excess int) {
+	var order []string
+	byGroup := map[string][]usageUnit{}
+	for _, u := range in {
+		if _, ok := byGroup[u.Group]; !ok {
+			order = append(order, u.Group)
+		}
+		byGroup[u.Group] = append(byGroup[u.Group], u)
+	}
+	for _, g := range order {
+		us := byGroup[g]
+		if len(us) <= share {
+			kept = append(kept, us...)
+			share -= len(us)
+			continue
+		}
+		if capped == nil {
+			capped = map[string]bool{}
+		}
+		capped[g] = true
+		excess += len(us)
+	}
+	return kept, capped, excess
+}
+
+// startWorkers runs every ready worker's sweep, one goroutine each:
+// info (hourly), list (its apps only: never a helper or another
+// project), host counters, its share of the cap, then its job states,
+// inspects and stats; each call under timeout, within bctx. A worker
+// whose previous goroutine still runs (a backend that ignored its
+// deadline) is skipped: unreachable.
+func (h *Hub) startWorkers(bctx context.Context, now time.Time, insts map[string]usageInst, timeout time.Duration, caps *usageCap) *usageWorkerBatch {
 	s := h.usage
 	ws := h.usageWorkerRTs()
 	dl, _ := bctx.Deadline()
-	b := &usageWorkerBatch{ch: make(chan *usageWorkerSweep, len(ws)), expected: ws, deadline: dl.Add(usageWorkerGrace)}
+	b := &usageWorkerBatch{interim: make(chan *usageWorkerSweep, len(ws)), final: make(chan *usageWorkerSweep, len(ws)), expected: ws, deadline: dl.Add(usageWorkerGrace)}
+	s.mu.RLock()
+	lastPrimary := s.primaryN
+	s.mu.RUnlock()
+	caps.start(bctx, ws, lastPrimary, timeout)
 	for _, e := range ws {
-		go func(e usageWorkerSweep) {
-			sw := &e
-			defer func() { b.ch <- sw }()
-			s.mu.RLock()
-			w := s.workers[sw.server]
-			needInfo := w == nil || w.infoAt.IsZero() || now.Sub(w.infoAt) >= usage.InfoEvery
-			s.mu.RUnlock()
-			if needInfo {
-				ictx, cancel := context.WithTimeout(bctx, timeout)
-				if i, err := sw.rt.Info(ictx); err == nil {
-					sw.info = &i
-				}
-				cancel()
-			}
-			lctx, cancel := context.WithTimeout(bctx, timeout)
-			units, err := sw.rt.List(lctx, runtime.Filter{})
-			cancel()
-			if err != nil {
-				why := workerUnreachable(sw.name)
-				if errors.Is(err, agentrt.ErrOlderAgent) {
-					why = workerOlder(sw.name)
-				}
-				sw.appsWhy, sw.hostWhy = why, why
-				return
-			}
-			mine := map[string]usageInst{}
-			for id, in := range insts {
-				if in.Server == sw.server {
-					mine[id] = in
-				}
-			}
-			in, _ := usageScope(units, mine)
-			for _, u := range in {
-				if u.Kind == usageApp {
-					sw.in = append(sw.in, u)
-				}
-			}
-			hr, ok := sw.rt.(usageHostReader)
-			if !ok {
-				sw.hostWhy = workerOlder(sw.name)
-				return
-			}
-			hctx, cancel := context.WithTimeout(bctx, timeout)
-			c, err := hr.HostUsage(hctx)
-			cancel()
-			switch {
-			case errors.Is(err, agentrt.ErrOlderAgent):
-				sw.hostWhy = workerOlder(sw.name)
-			case err != nil:
-				// Not measured this sweep (the rate's base is kept).
-			default:
-				// The Hub's clock, never the worker's, times the rate.
-				c.At = now
-				sw.host = &c
-			}
-		}(*e)
-	}
-	return b
-}
-
-// startWorkerSamples samples every listed worker's containers (its job
-// states, inspects and stats), one goroutine per server, within bctx;
-// a worker whose stats answer ErrOlderAgent is "older than the Hub". A
-// worker that already failed its listing passes through.
-func (h *Hub) startWorkerSamples(bctx context.Context, now time.Time, listed []*usageWorkerSweep, insts map[string]usageInst, timeout time.Duration, deadline time.Time) *usageWorkerBatch {
-	s := h.usage
-	b := &usageWorkerBatch{ch: make(chan *usageWorkerSweep, len(listed)), expected: listed, deadline: deadline}
-	for _, sw := range listed {
-		if sw.appsWhy != "" {
-			b.ch <- sw
+		s.busyMu.Lock()
+		busy := s.busy[e.server]
+		if !busy {
+			s.busy[e.server] = true
+		}
+		s.busyMu.Unlock()
+		if busy {
+			sw := *e
+			sw.appsWhy, sw.hostWhy = workerUnreachable(e.name), workerUnreachable(e.name)
+			b.final <- &sw
+			caps.counts <- usageCount{e.server, 0}
 			continue
 		}
 		go func(sw usageWorkerSweep) {
 			out := &sw
-			defer func() { b.ch <- out }()
-			out.jobHealth = h.usageJobHealth(bctx, sw.rt, sw.server, sw.in, insts, timeout)
-			out.jobs = s.usagePlan(sw.server, sw.in, now)
+			defer func() {
+				s.busyMu.Lock()
+				delete(s.busy, sw.server)
+				s.busyMu.Unlock()
+			}()
+			defer func() { b.final <- out }()
+			if !h.workerList(bctx, now, out, insts, timeout) {
+				caps.counts <- usageCount{sw.server, -1}
+				return
+			}
+			b.interim <- &usageWorkerSweep{server: sw.server, info: out.info, host: out.host, hostWhy: out.hostWhy}
+			share := caps.worker(bctx, sw.server, len(out.in))
+			out.in, out.capped, out.excess = capGroups(out.in, share)
+			out.jobHealth = h.usageJobHealth(bctx, sw.rt, sw.server, out.in, insts, timeout)
+			out.jobs = s.usagePlan(sw.server, out.in, now)
 			out.results, _ = usageSample(bctx, sw.rt, out.jobs, timeout)
 			for _, r := range out.results {
 				if errors.Is(r.err, agentrt.ErrOlderAgent) {
-					// Not measured, nothing recorded (its containers keep
-					// their state; the view shows the reason only).
+					// Not measured, nothing recorded (the view shows the
+					// reason only).
 					out.appsWhy = workerOlder(sw.name)
 					return
 				}
 			}
 			out.applied = true
-		}(*sw)
+		}(*e)
 	}
 	return b
+}
+
+// workerList is a worker's list phase (false: it failed, the reasons set).
+func (h *Hub) workerList(bctx context.Context, now time.Time, sw *usageWorkerSweep, insts map[string]usageInst, timeout time.Duration) bool {
+	s := h.usage
+	s.mu.RLock()
+	w := s.workers[sw.server]
+	needInfo := w == nil || w.infoAt.IsZero() || now.Sub(w.infoAt) >= usage.InfoEvery
+	s.mu.RUnlock()
+	if needInfo {
+		ictx, cancel := context.WithTimeout(bctx, timeout)
+		if i, err := sw.rt.Info(ictx); err == nil {
+			sw.info = &i
+		}
+		cancel()
+	}
+	lctx, cancel := context.WithTimeout(bctx, timeout)
+	units, err := sw.rt.List(lctx, runtime.Filter{})
+	cancel()
+	if err != nil {
+		why := workerUnreachable(sw.name)
+		if errors.Is(err, agentrt.ErrOlderAgent) {
+			why = workerOlder(sw.name)
+		}
+		sw.appsWhy, sw.hostWhy = why, why
+		return false
+	}
+	mine := map[string]usageInst{}
+	for id, in := range insts {
+		if in.Server == sw.server {
+			mine[id] = in
+		}
+	}
+	in, _ := usageScope(units, mine)
+	for _, u := range in {
+		if u.Kind == usageApp {
+			sw.in = append(sw.in, u)
+		}
+	}
+	hr, ok := sw.rt.(usageHostReader)
+	if !ok {
+		sw.hostWhy = workerOlder(sw.name)
+		return true
+	}
+	hctx, cancel := context.WithTimeout(bctx, timeout)
+	c, err := hr.HostUsage(hctx)
+	cancel()
+	switch {
+	case errors.Is(err, agentrt.ErrOlderAgent):
+		sw.hostWhy = workerOlder(sw.name)
+	case err != nil:
+		sw.hostWhy = workerHostUnread(sw.name)
+	default:
+		// The Hub's clock, never the worker's, times the rate.
+		c.At = now
+		sw.host = &c
+	}
+	return true
+}
+
+// joinWorkers waits for the workers (at most until their deadline) and
+// records them: their containers, reasons, hosts, the apps of servers
+// that aren't ready, and over_limit (primaryOver plus every worker's
+// cut).
+func (h *Hub) joinWorkers(b *usageWorkerBatch, now time.Time, insts map[string]usageInst, notReady map[string]string, primaryOver int) {
+	done := b.wait()
+	s := h.usage
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	over := primaryOver
+	for _, w := range done {
+		if w.applied {
+			cpus := 0
+			if w.info != nil {
+				cpus = w.info.CPUs
+			} else if cur := s.workers[w.server]; cur != nil {
+				cpus = cur.cpus
+			}
+			s.applyLocked(w.server, now, w.in, w.jobs, w.results, insts, w.jobHealth, cpus)
+		}
+		over += w.excess
+	}
+	s.noteWorkersLocked(done, now)
+	s.notReady = notReady
+	if s.verified {
+		s.overLimit = over
+	}
+	s.axesLocked(now, insts)
 }
 
 // noteWorkersLocked records each worker's info, host point and reasons,
@@ -242,9 +480,9 @@ func (s *usageState) noteWorkersLocked(done []*usageWorkerSweep, now time.Time) 
 		if sw.info != nil && sw.info.CPUs > 0 {
 			w.cpus, w.mem, w.infoAt = sw.info.CPUs, sw.info.MemoryBytes, now
 		}
-		w.appsWhy, w.hostWhy = sw.appsWhy, sw.hostWhy
+		w.appsWhy, w.hostWhy, w.capped = sw.appsWhy, sw.hostWhy, sw.capped
 		if sw.host == nil {
-			if sw.hostWhy == "" && !w.hostErr {
+			if sw.hostWhy == workerHostUnread(sw.name) && !w.hostErr {
 				log.Printf("usage: server %s: its host counters can't be read", sw.server)
 				w.hostErr = true
 			}

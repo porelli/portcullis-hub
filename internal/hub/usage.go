@@ -149,14 +149,24 @@ type usageState struct {
 	fixer     func(ctx context.Context, r fixerRun) (*folderfix.Report, error)
 	// scrapedAt: the metrics listener's last scrape (Unix ns; 0 = never).
 	scrapedAt atomic.Int64
-	// workers: each ready worker's sampler state (usage_workers.go).
-	workers map[string]*usageWorker
+	// workers: each ready worker's sampler state (usage_workers.go);
+	// notReady: an app's server that isn't ready → its reason; busy: a
+	// worker whose last sweep's goroutine still runs (its backend ignored
+	// the deadline: skipped until it returns; busyMu guards it).
+	workers  map[string]*usageWorker
+	notReady map[string]string
+	busyMu   sync.Mutex
+	busy     map[string]bool
+	// primaryN / primaryOver: the primary's sampled count and its part of
+	// over_limit (the last sweep's; the cap's estimate while the primary
+	// lists).
+	primaryN, primaryOver int
 }
 
 func newUsageState() *usageState {
 	return &usageState{now: func() time.Time { return time.Now().UTC() }, budget: usage.SweepBudget, statsTimeout: usage.StatsTimeout,
 		conts: map[string]*usageCont{}, rings: map[string]*usage.Ring{}, times: map[string]*usage.Ring{}, insts: map[string]usageInst{},
-		readHost: readProcHost, hostRing: usage.NewHostRing(usage.RingSize), workers: map[string]*usageWorker{}}
+		readHost: readProcHost, hostRing: usage.NewHostRing(usage.RingSize), workers: map[string]*usageWorker{}, notReady: map[string]string{}, busy: map[string]bool{}}
 }
 
 // readProcHost reads the host's counters from the Hub's own /proc.
@@ -280,8 +290,12 @@ type usageResult struct {
 
 // usageSweep is one sweep (RunUsageSampler; tests call it directly): the
 // primary's list and stats, and every ready worker's through its agent
-// (usage_workers.go), in parallel, all within the sweep's budget; the
-// 256-container cap counts every server together (primary first).
+// (usage_workers.go), in parallel, all within the sweep's budget. The
+// primary never waits for a worker: its sample is recorded as soon as it
+// is taken (its freshness is its own); the workers join when they answer,
+// or are "not measured" at the deadline. The 256-container cap counts
+// every server: the primary first, the rest shared fairly among the
+// workers (usageCap).
 func (h *Hub) usageSweep(ctx context.Context) {
 	s := h.usage
 	if !s.sweeping.TryLock() {
@@ -293,15 +307,18 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	if s.startedAt.IsZero() {
 		s.startedAt = now
 	}
-	budget, statsTimeout := s.budget, s.statsTimeout
+	budget, statsTimeout, lastPrimaryN := s.budget, s.statsTimeout, s.primaryN
 	s.mu.Unlock()
 	insts := h.usageInstances()
 	kind := string(h.rt.Kind())
 	bctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	// The workers list (and read their hosts) while the primary does.
-	workers := h.startWorkerLists(bctx, now, insts, statsTimeout)
+	// The workers run on their own from here; the cap's coordinator
+	// learns the primary's count below.
+	caps := newUsageCap(bctx, lastPrimaryN, statsTimeout)
+	workers := h.startWorkers(bctx, now, insts, statsTimeout, caps)
+	notReady := h.usageNotReady()
 
 	s.mu.RLock()
 	needInfo := s.infoAt.IsZero() || now.Sub(s.infoAt) >= usage.InfoEvery
@@ -322,20 +339,19 @@ func (h *Hub) usageSweep(ctx context.Context) {
 
 	units, err := h.rt.List(ctx, runtime.Filter{})
 	if err != nil {
-		listed := workers.wait()
+		caps.primary(0)
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		s.sweptAt, s.kind = now, kind
 		if info != nil {
 			s.cpus, s.mem, s.infoAt = info.CPUs, info.MemoryBytes, now
 		}
-		// The workers keep their previous figures (nothing sampled).
-		s.noteWorkersLocked(listed, now)
 		if usageRefused(err) {
 			s.verified, s.why = false, usageRefusal(err)
-			return
+		} else {
+			log.Printf("usage: listing containers: %v", err)
 		}
-		log.Printf("usage: listing containers: %v", err)
+		s.mu.Unlock()
+		h.joinWorkers(workers, now, insts, notReady, s.overLimitPrimary())
 		return
 	}
 	in, notShown := usageScope(units, insts)
@@ -351,54 +367,35 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		}
 		return false
 	})
-
-	// The cap: every server together, the primary's first.
-	listed := workers.wait()
-	over, room := 0, usage.MaxContainers
-	if len(in) > room {
-		over += len(in) - room
-		in = in[:room]
+	over := 0
+	if len(in) > usage.MaxContainers {
+		over = len(in) - usage.MaxContainers
+		in = in[:usage.MaxContainers]
 	}
-	room -= len(in)
-	for _, w := range listed {
-		if len(w.in) > room {
-			over += len(w.in) - room
-			w.in = w.in[:room]
-		}
-		room -= len(w.in)
-	}
-
-	// The workers sample while the primary does.
-	sampled := h.startWorkerSamples(bctx, now, listed, insts, statsTimeout, workers.deadline)
+	caps.primary(len(in))
 
 	jobHealth := h.usageJobHealth(ctx, h.rt, "", in, insts, statsTimeout)
 	jobs := s.usagePlan("", in, now)
 	results, refused := usageSample(bctx, h.rt, jobs, statsTimeout)
-	done := sampled.wait()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.sweptAt, s.kind, s.insts = now, kind, insts
 	if info != nil {
 		s.cpus, s.mem, s.infoAt = info.CPUs, info.MemoryBytes, now
 	}
-	skipped := 0
-	for _, w := range done {
-		if w.appsWhy == "" || w.applied {
-			n, _, _ := s.applyLocked(w.server, now, w.in, w.jobs, w.results, insts, w.jobHealth)
-			skipped += n
-		}
-	}
-	s.noteWorkersLocked(done, now)
 	if refused != nil {
 		s.verified, s.why = false, usageRefusal(refused)
+		s.mu.Unlock()
+		h.joinWorkers(workers, now, insts, notReady, s.overLimitPrimary())
 		return
 	}
 	s.verified, s.why = true, ""
 	s.lastSuccess = now
-	s.notShown, s.overLimit = notShown, over
-	n, nSampled, notMeas := s.applyLocked("", now, in, jobs, results, insts, jobHealth)
-	skipped += n
+	s.notShown, s.primaryOver, s.primaryN = notShown, over, len(in)
+	s.overLimit = over
+	// The primary's own engine is trusted: its rates bounded by
+	// MaxCPUCores only (cpus 0).
+	skipped, nSampled, notMeas := s.applyLocked("", now, in, jobs, results, insts, jobHealth, 0)
 	s.notMeasured = ""
 	if len(notMeas) == 1 && nSampled > 0 {
 		for why, n := range notMeas {
@@ -407,8 +404,26 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			}
 		}
 	}
-	// The groups' time axes, and rings of keys that are gone for an hour
-	// or whose instance is gone.
+	s.axesLocked(now, insts)
+	s.mu.Unlock()
+	if skipped > 0 {
+		log.Printf("usage: the sweep's %s budget is spent: budget_skipped %d containers kept their previous sample", budget, skipped)
+	}
+	h.joinWorkers(workers, now, insts, notReady, over)
+}
+
+// overLimitPrimary is the primary's part of over_limit (its last
+// sweep's).
+func (s *usageState) overLimitPrimary() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.primaryOver
+}
+
+// axesLocked adds now to every running group's time axis and drops the
+// rings and axes of keys gone for an hour or whose instance is gone (or
+// moved to another server). Caller holds s.mu.
+func (s *usageState) axesLocked(now time.Time, insts map[string]usageInst) {
 	groups := map[string]bool{}
 	for _, c := range s.conts {
 		if c.Running && (c.Kind == usageApp || c.Kind == usageCore) {
@@ -421,7 +436,9 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			tr = usage.NewRing(usage.RingSize)
 			s.times[g] = tr
 		}
-		tr.Add(usage.Point{T: now})
+		if last, ok := tr.Last(); !ok || !last.T.Equal(now) {
+			tr.Add(usage.Point{T: now})
+		}
 	}
 	keep := func(gk string) bool {
 		server, group := splitGroupKey(gk)
@@ -443,9 +460,6 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		if !keep(g) || now.Sub(last.T) > time.Duration(usage.RingSize)*usage.Interval {
 			delete(s.times, g)
 		}
-	}
-	if skipped > 0 {
-		log.Printf("usage: the sweep's %s budget is spent: budget_skipped %d containers kept their previous sample", budget, skipped)
 	}
 }
 
@@ -592,7 +606,11 @@ func usageSample(bctx context.Context, rt runtime.Instances, jobs []usageJob, ti
 // server's not listed is gone), each result, and the rings. Caller holds
 // s.mu. skipped: the budget ran out first; sampled: running containers
 // of this sweep; notMeas: the NotMeasuredError reasons by count.
-func (s *usageState) applyLocked(server string, now time.Time, in []usageUnit, jobs []usageJob, results []usageResult, insts map[string]usageInst, jobHealth map[string]string) (skipped, sampled int, notMeas map[string]int) {
+//
+// cpus: the server's CPU count (0: unknown); a derived CPU rate is never
+// above it, nor above usage.MaxCPUCores (a worker's counters and read
+// times are untrusted).
+func (s *usageState) applyLocked(server string, now time.Time, in []usageUnit, jobs []usageJob, results []usageResult, insts map[string]usageInst, jobHealth map[string]string, cpus int) (skipped, sampled int, notMeas map[string]int) {
 	live := map[string]bool{}
 	for _, u := range in {
 		k := contKey(server, u.ID)
@@ -656,6 +674,15 @@ func (s *usageState) applyLocked(server string, now time.Time, in []usageUnit, j
 		switch {
 		case r.stats != nil:
 			c.Sample = usage.Derive(c.Prev, c.PrevAt, *r.stats, c.Limits)
+			if v := c.Sample.CPUCores; v != nil {
+				lim := float64(usage.MaxCPUCores)
+				if cpus > 0 {
+					lim = min(lim, float64(cpus))
+				}
+				if *v > lim {
+					c.Sample.CPUCores = &lim
+				}
+			}
 			st := *r.stats
 			c.Prev, c.PrevAt, c.Sampled, c.Err, c.NotMeas = &st, c.Limits.StartedAt, true, "", ""
 		default:

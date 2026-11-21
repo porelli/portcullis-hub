@@ -23,6 +23,13 @@ const (
 	// MinInterval: two samples closer than this (by the engine's read
 	// time) give no rate.
 	MinInterval = time.Second
+	// MaxCPUCores bounds every CPU figure (a container's rate, a host's
+	// CPU count): no host has more cores; a worker's counters and read
+	// times are untrusted.
+	MaxCPUCores = 1 << 14
+	// maxBytes bounds every byte figure and sum (saturating: never a
+	// wrapped, negative total).
+	maxBytes = int64(1) << 62
 )
 
 // Sample is one container's (or a total's) figures. Every field is nil

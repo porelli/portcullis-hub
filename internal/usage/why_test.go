@@ -121,3 +121,18 @@ func TestTotalExcused(t *testing.T) {
 		t.Error("a gap was not partial")
 	}
 }
+
+// TestTotalSaturates (Task 10 review M1): untrusted figures never wrap a
+// total negative.
+func TestTotalSaturates(t *testing.T) {
+	big := Sample{MemBytes: pi(1 << 62), MemLimitBytes: pi(1 << 62)}
+	for _, f := range []func([]Sample) (Sample, bool){Total, TotalExcused} {
+		tot, _ := f([]Sample{big, big, big})
+		if *tot.MemBytes != 1<<62 || *tot.MemLimitBytes != 1<<62 {
+			t.Errorf("saturated = %d %d", *tot.MemBytes, *tot.MemLimitBytes)
+		}
+	}
+	if s := DeriveHost(&HostCounters{At: t0, CPUTotal: 100}, HostCounters{At: t0.Add(Interval), CPUTotal: 200}, 1<<30); s.CPUUsedCores == nil || *s.CPUUsedCores != MaxCPUCores {
+		t.Errorf("host cpus bounded: %v", s.CPUUsedCores)
+	}
+}

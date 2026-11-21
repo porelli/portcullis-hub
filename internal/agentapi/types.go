@@ -150,8 +150,8 @@ func (i Info) RuntimeInfo() (runtime.Info, error) {
 	out := runtime.Info{Kind: k, Verified: i.Verified, Why: i.Why, APIVersion: i.EngineAPI,
 		SecurityOptions: i.SecurityOptions, SELinux: i.SELinux, IDMapped: i.IDMapped, Remapped: i.Remapped,
 		EngineVersion: i.EngineVersion, CPUs: i.CPUs, MemoryBytes: i.MemBytes}
-	if out.CPUs < 0 || out.MemoryBytes < 0 {
-		// An untrusted answer: a negative size is no size.
+	if out.CPUs < 0 || out.CPUs > MaxCPUCores || out.MemoryBytes < 0 || out.MemoryBytes > 1<<62 {
+		// An untrusted answer: a size no host has is no size.
 		out.CPUs, out.MemoryBytes = 0, 0
 	}
 	if i.DockerRootDir != "" {
@@ -725,8 +725,9 @@ func (s UnitStats) Check() error {
 	return nil
 }
 
-// MaxCPUCores bounds a worker's CPU rate (no host has more cores).
-const MaxCPUCores = 1 << 14
+// MaxCPUCores bounds a worker's CPU rate and count (no host has more
+// cores; usage.MaxCPUCores).
+const MaxCPUCores = usage.MaxCPUCores
 
 // SizeBody is a size answer (GET /v1/containers/{cid}/size, GET
 // /v1/images/size, ux3): bytes, never negative.
