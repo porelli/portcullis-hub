@@ -429,6 +429,8 @@ type Unit struct {
 	Labels   map[string]string   `json:"labels,omitempty"`
 	Created  int64               `json:"created,omitempty"`
 	Networks map[string][]string `json:"networks,omitempty"`
+	// NamesUnread: the names were asked for (names=1) and couldn't be read.
+	NamesUnread bool `json:"names_unread,omitempty"`
 }
 
 // UnitOf / Runtime convert units. A network without aliases (a created,
@@ -446,12 +448,12 @@ func UnitOf(u runtime.Unit) Unit {
 		}
 	}
 	return Unit{ID: u.ID, Name: u.Name, Project: u.Project, Instance: u.Instance, Service: u.Service, Image: u.Image,
-		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: nets}
+		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: nets, NamesUnread: u.NamesUnread}
 }
 
 func (u Unit) Runtime() runtime.Unit {
 	return runtime.Unit{ID: u.ID, Name: u.Name, Project: u.Project, Instance: u.Instance, Service: u.Service, Image: u.Image,
-		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: u.Networks}
+		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: u.Networks, NamesUnread: u.NamesUnread}
 }
 
 // UnitInfo is runtime.UnitInfo on the wire.
@@ -535,6 +537,7 @@ const (
 	QueryService  = "service"
 	QueryHelper   = "helper"
 	QueryAll      = "all"
+	QueryNames    = "names"
 )
 
 // FilterQuery is f as query parameters (booleans as "1").
@@ -551,6 +554,9 @@ func FilterQuery(f runtime.Filter) map[string]string {
 	}
 	if f.All {
 		q[QueryAll] = "1"
+	}
+	if f.Names {
+		q[QueryNames] = "1"
 	}
 	return q
 }
@@ -570,14 +576,17 @@ func ParseFilter(q map[string][]string) (runtime.Filter, error) {
 			f.Instance = v
 		case QueryService:
 			f.Service = v
-		case QueryHelper, QueryAll:
+		case QueryHelper, QueryAll, QueryNames:
 			if v != "1" {
 				return f, fmt.Errorf("query parameter %s: only 1", k)
 			}
-			if k == QueryHelper {
+			switch k {
+			case QueryHelper:
 				f.Helper = true
-			} else {
+			case QueryAll:
 				f.All = true
+			default:
+				f.Names = true
 			}
 		default:
 			return f, fmt.Errorf("unknown query parameter %q", strings.ToValidUTF8(k, "?"))

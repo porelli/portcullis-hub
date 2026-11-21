@@ -287,3 +287,81 @@ func TestWebMailSensitiveAndFormer(t *testing.T) {
 		t.Error("the sensitive save doesn't run the fresh sign-in")
 	}
 }
+
+// TestWebMailAdminView (contract §19.13): with the admin view routed, the
+// Mail tab and Settings → Mail show the warning and the read-only link for
+// the provider's label, set by textContent (never in the markup); without
+// it, neither; a mail provider's app is "Managed by Portcullis", never "No
+// web page".
+func TestWebMailAdminView(t *testing.T) {
+	const warning = "Stalwart's own admin screen is read-only here. Make changes in Portcullis (Settings → Mail); changes made elsewhere would bypass Portcullis's mail safeguards."
+	dom := `
+const nodes = {};
+function node(sel) { return nodes[sel] || (nodes[sel] = { textContent: '', children: [], appendChild(c) { this.children.push(c); } }); }
+global.document = { createElement() { return { textContent: '' }; } };
+global.window = {};
+`
+	eval := func(js string) string {
+		return nodeEval(t, dom+webAsset(t, "mailprovider.js")+"\n"+webAsset(t, "mail.js")+"\n"+js)
+	}
+	out := eval(`const v = {wired: true, mode: "normal", admin_view: true, label: "Stalwart", warning: "w", provider: null, refused_because: []};
+const skel = window.PortcullisMailProvider.tabSkeleton(v);
+window.PortcullisMailProvider.fillTab({ querySelector: node }, v);
+process.stdout.write(JSON.stringify({ skel, warn: node('[data-mail-admin-view-warning]').textContent, link: node('[data-mail-admin-view-open]').textContent }));`)
+	var got struct{ Skel, Warn, Link string }
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if got.Warn != warning || got.Link != "Open Stalwart's admin (read-only)" || !strings.Contains(got.Skel, "data-mail-admin-view-open") || strings.Contains(got.Skel, "Stalwart") {
+		t.Errorf("Mail tab: %+v", got)
+	}
+	for _, v := range []string{`{wired: true, mode: "void", admin_view: false, label: "Stalwart"}`, `{wired: false, admin_view: true, label: "Stalwart"}`} {
+		if h := eval(`process.stdout.write(window.PortcullisMailProvider.tabSkeleton(` + v + `))`); strings.Contains(h, "data-mail-admin-view") {
+			t.Errorf("%s shows the admin view: %s", v, h)
+		}
+	}
+	out = eval(`const st = {mail: "on", provider: {instance: "stalwart", template: "stalwart", label: "<b>S</b>", mode: "normal", admin_view: true}};
+const h = window.PortcullisMail.stateHtml({mail: "on"}, st, []);
+window.PortcullisMail.fillState({ querySelector: node }, st);
+process.stdout.write(JSON.stringify({ skel: h, warn: node('[data-mail-admin-view-warning]').textContent, link: node('[data-mail-admin-view-open]').textContent }));`)
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if !strings.HasPrefix(got.Warn, "<b>S</b>'s own admin screen is read-only here.") || got.Link != "Open <b>S</b>'s admin (read-only)" || strings.Contains(got.Skel, "<b>S") || !strings.Contains(got.Skel, "data-mail-admin-view") {
+		t.Errorf("Settings → Mail: %+v", got)
+	}
+	if h := eval(`process.stdout.write(window.PortcullisMail.stateHtml({mail: "on"}, {mail: "on", provider: {instance: "stalwart", template: "stalwart", label: "S", mode: "normal", admin_view: false}}, []))`); strings.Contains(h, "data-mail-admin-view") {
+		t.Errorf("Settings → Mail without the view: %s", h)
+	}
+	src := webAsset(t, "mailprovider.js")
+	for _, want := range []string{"'/api/mail/admin-view', 'POST'", "w.opener = null", `\/portcullis\/open$/`, "form.method = 'POST'", "input.name = 't'"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("mailprovider.js lacks %q", want)
+		}
+	}
+	if strings.Contains(src, "?t=") {
+		t.Error("a ticket in a URL")
+	}
+	// A blocked tab (nit N-c): a clear message, and no ticket asked for.
+	out = eval(`let calls = 0, toast = null;
+window.open = () => null;
+window.apiCall = async () => { calls++; return { json: async () => ({}) }; };
+window.showToast = (m, k) => { toast = [m, k]; };
+window.PortcullisMailProvider.openAdminView().then(() => process.stdout.write(JSON.stringify({ calls, toast })));`)
+	var blocked struct {
+		Calls int
+		Toast []string
+	}
+	if err := json.Unmarshal([]byte(out), &blocked); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if blocked.Calls != 0 || len(blocked.Toast) != 2 || !strings.Contains(blocked.Toast[0], "blocked") || blocked.Toast[1] != "error" {
+		t.Errorf("blocked tab: %+v", blocked)
+	}
+	idx := webAsset(t, "index.html")
+	for _, want := range []string{"data-managed-by-portcullis", ">Managed by Portcullis</span>", "'managed by Portcullis'"} {
+		if !strings.Contains(idx, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+}

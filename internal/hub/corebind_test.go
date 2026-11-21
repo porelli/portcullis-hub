@@ -25,7 +25,7 @@ func TestTemplateBindNearCoreCheckoutRefused(t *testing.T) {
 		{`"${CORE_DIR:-/host/project}:/c"`, true},
 		{`"/host/projectx:/x"`, false},
 		{`"/srv/data:/d"`, false},
-		{`"./conf:/conf:ro"`, false},
+		{`"./templates/grafana/conf:/conf:ro"`, false},
 		{`"data:/data"`, false},
 	} {
 		f := newFixture(t)

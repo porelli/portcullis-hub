@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,7 +39,13 @@ const usageStatsUnavailable = "stats unavailable"
 const usageCoreProject = "portcullis"
 
 // usageInst is an instance as the sampler names it.
-type usageInst struct{ ID, Template, Name string }
+type usageInst struct {
+	ID, Template, Name string
+	// Jobs are the template's one-shot job services; Skip the services
+	// expected to have no container (statusSkips: an inactive profile, a
+	// companion scaled to 0). Both feed unitHealth's group status.
+	Jobs, Skip map[string]bool
+}
 
 // usageCont is one container the sampler knows (by container ID).
 type usageCont struct {
@@ -65,6 +72,10 @@ type usageCont struct {
 	// LastMem is the last measured working set, kept across a stop (M4:
 	// a restart right after it neared the limit is an OOM suspect).
 	LastMem *int64
+	// Job / Skip: from the instance (usageInst); Health its unitHealth
+	// and JobKey the list state the job's health was read for.
+	Job, Skip      bool
+	Health, JobKey string
 }
 
 const (
@@ -170,8 +181,26 @@ func (h *Hub) usageInstances() map[string]usageInst {
 		}
 		return out
 	}
+	// The jobs and skipped services in one pass under mu (no template
+	// copied per instance: usageInstances also serves single lookups).
+	h.mu.RLock()
+	jobs := make(map[string]map[string]bool, len(h.instances))
+	skips := make(map[string]map[string]bool, len(h.instances))
+	for i := range h.instances {
+		t := &h.instances[i]
+		inactive, scaledOff := h.statusSkipsLocked(t)
+		skip := make(map[string]bool, len(inactive)+len(scaledOff))
+		for svc := range inactive {
+			skip[svc] = true
+		}
+		for svc := range scaledOff {
+			skip[svc] = true
+		}
+		jobs[t.ID], skips[t.ID] = maps.Clone(t.Jobs), skip
+	}
+	h.mu.RUnlock()
 	for _, v := range h.Instances() {
-		out[v.ID] = usageInst{ID: v.ID, Template: v.Template, Name: v.Name}
+		out[v.ID] = usageInst{ID: v.ID, Template: v.Template, Name: v.Name, Jobs: jobs[v.ID], Skip: skips[v.ID]}
 	}
 	return out
 }
@@ -237,6 +266,35 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	if len(in) > usage.MaxContainers {
 		over = len(in) - usage.MaxContainers
 		in = in[:usage.MaxContainers]
+	}
+
+	// A stopped job container's health needs its exit code (the list
+	// has none): read once per list state (jobKey), not every sweep.
+	jobHealth := map[string]string{}
+	s.mu.RLock()
+	var jobUnits []usageUnit
+	for _, u := range in {
+		if u.Kind != usageApp || !insts[u.Group].Jobs[u.Service] {
+			continue
+		}
+		if c := s.conts[u.ID]; c != nil && c.Job && c.JobKey == jobKey(u.Unit) && c.Health != "" {
+			jobHealth[u.ID] = c.Health
+			continue
+		}
+		jobUnits = append(jobUnits, u)
+	}
+	statsTimeout0 := s.statsTimeout
+	s.mu.RUnlock()
+	for _, u := range jobUnits {
+		health := listedJobState(u.State, u.Status)
+		if u.State != "running" && u.State != "restarting" && u.State != "created" {
+			sctx, scancel := context.WithTimeout(ctx, statsTimeout0)
+			if st, err := h.rt.State(sctx, u.ID); err == nil {
+				health = unitHealth(true, st)
+			}
+			scancel()
+		}
+		jobHealth[u.ID] = health
 	}
 
 	// What each container needs, read under the sampler's lock only.
@@ -358,6 +416,14 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		}
 		c.Group, c.Kind, c.Service, c.Number, c.State, c.LastSeen, c.Image = u.Group, u.Kind, u.Service, u.Number, u.State, now, u.Image
 		c.Running = u.State == "running"
+		inst := insts[u.Group]
+		c.Job = u.Kind == usageApp && inst.Jobs[u.Service]
+		c.Skip = u.Kind == usageApp && inst.Skip[u.Service]
+		if c.Job {
+			c.Health, c.JobKey = jobHealth[u.ID], jobKey(u.Unit)
+		} else {
+			c.Health, c.JobKey = unitHealth(false, docker.State{Running: c.Running, Status: u.State}), ""
+		}
 		if !c.Running {
 			c.Sampled, c.Prev, c.Sample, c.Err, c.NotMeas = false, nil, usage.Sample{}, "", ""
 		}
@@ -504,4 +570,16 @@ func (h *Hub) SweepUsage(ctx context.Context) {
 	if !h.noEngine() {
 		h.usageSweep(ctx)
 	}
+}
+
+// jobKey is the list state a job container's health was read for: its
+// state and, when exited, the "Exited (n)" prefix of its status text (a
+// rerun with another exit code is read again).
+func jobKey(u runtime.Unit) string {
+	if u.State == "exited" {
+		if i := strings.IndexByte(u.Status, ')'); i >= 0 {
+			return u.State + "\x00" + u.Status[:i+1]
+		}
+	}
+	return u.State
 }

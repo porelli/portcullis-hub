@@ -359,8 +359,26 @@
 
   // ── the instance page ────────────────────────────────
 
-  // runsOn is the "Runs on" line of an instance's facts.
+  // usable are the servers an instance can run on: the primary and the
+  // ready workers (serverSelect's list). Only ready ones count on
+  // purpose: a Move needs a ready target, so an enrolling or unreachable
+  // worker alone shows nothing on a primary instance (ruled in, ux3).
+  function usable() {
+    return ((page && page.servers) || []).filter(s => s.id === 'primary' || s.state === 'ready');
+  }
+
+  // shown: the instance page shows the Server card and the "Runs on"
+  // line only with 2+ usable servers (serverSelect's rule), or when the
+  // instance is placed on a worker, was moved, or is orphaned, moving or
+  // unreachable. With the primary alone there is nothing to show.
+  function shown(inst) {
+    return usable().length >= 2 || !!inst.server || !!inst.moved_from ||
+      inst.state === 'orphaned' || inst.state === 'moving' || inst.state === 'unreachable';
+  }
+
+  // runsOn is the "Runs on" line of an instance's facts ('' unless shown).
   function runsOn(inst) {
+    if (!shown(inst)) return '';
     const s = inst.server || '';
     const st = inst.state === 'unreachable' ? ' ' + pill('warn', 'unreachable') : inst.state === 'orphaned' ? ' ' + pill('warn', 'orphaned') : inst.state === 'moving' ? ' ' + pill('info', 'moving') : '';
     return '<dt>Runs on</dt><dd data-runs-on>' + (s ? esc(serverName(s)) + ' <code>' + esc(s) + '</code>' : 'the primary') + st + '</dd>';
@@ -369,7 +387,7 @@
   // serverSelect is the setup form's server choice (free disk, memory,
   // runtime, architecture of each ready server).
   function serverSelect(selected) {
-    const list = ((page && page.servers) || []).filter(s => s.id === 'primary' || s.state === 'ready');
+    const list = usable();
     if (list.length < 2) return '';
     return '<label class="block" for="setup-server">Runs on</label><select id="setup-server" data-setup-server>' +
       list.map(s => '<option value="' + esc(s.id === 'primary' ? '' : s.id) + '"' + ((selected || '') === (s.id === 'primary' ? '' : s.id) ? ' selected' : '') + '>' +
@@ -385,8 +403,9 @@
 
   // instanceSection is the instance page's Servers section: Move…, the
   // undo banner while the source copy is kept, Lift quarantine on a
-  // worker.
+  // worker. '' unless shown (no empty card with the primary alone).
   function instanceSection(inst) {
+    if (!shown(inst)) return '';
     let h = '<div class="inst-section" data-srv-inst><h4>Server</h4>';
     if (inst.moved_from) {
       h += '<div class="public-warn" data-srv-undo>Moved from ' + esc(serverName(inst.moved_from.server)) + ' on ' + esc(when(inst.moved_from.at)) + '. ' +
@@ -485,5 +504,5 @@
   // cached is the last list (no request): folders.js's server choice.
   function cached() { return (page && page.servers) || []; }
 
-  window.PortcullisServers = { render, load, cached, confirmHtml, goConfirm, runListAction, runInstanceAction, listHtml, detailHtml, codeDialogHtml, openCodeDialog, runsOn, serverSelect, instanceSection, wire };
+  window.PortcullisServers = { render, load, cached, confirmHtml, goConfirm, runListAction, runInstanceAction, listHtml, detailHtml, codeDialogHtml, openCodeDialog, runsOn, shown, serverSelect, instanceSection, wire };
 })();

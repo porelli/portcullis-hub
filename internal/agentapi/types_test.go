@@ -155,7 +155,7 @@ func TestPreamble(t *testing.T) {
 }
 
 func TestFilterQuery(t *testing.T) {
-	for _, f := range []runtime.Filter{{}, {All: true}, {Helper: true}, {Instance: "x"}, {Instance: "x", Service: "web"}} {
+	for _, f := range []runtime.Filter{{}, {All: true}, {Helper: true}, {Instance: "x"}, {Instance: "x", Service: "web"}, {All: true, Names: true}} {
 		q := url.Values{}
 		for k, v := range FilterQuery(f) {
 			q.Set(k, v)
@@ -165,7 +165,7 @@ func TestFilterQuery(t *testing.T) {
 			t.Errorf("%+v → %+v %v", f, got, err)
 		}
 	}
-	for _, q := range []string{"all=true", "helper=0", "x=1", "instance=a&instance=b", "service=web"} {
+	for _, q := range []string{"all=true", "helper=0", "names=yes", "x=1", "instance=a&instance=b", "service=web"} {
 		v, _ := url.ParseQuery(q)
 		if _, err := ParseFilter(v); err == nil {
 			t.Errorf("%s accepted", q)

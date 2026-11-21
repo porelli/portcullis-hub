@@ -1,0 +1,1 @@
+{"domains":[{"name":"example.org","main":true,"state":"ready","provider":"porkbun"},{"name":"other.org","main":false,"state":"ready","provider":"porkbun"}]}

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/portcullis/hub/internal/notes"
 )
 
 var (
@@ -63,10 +65,36 @@ func HasHiddenText(s string) bool {
 	return !utf8.ValidString(s) || strings.ContainsFunc(s, HiddenRune)
 }
 
+// validateMarkdown bounds a Markdown field (auth.notes, long_description)
+// before anything renders it (contract §3): at most notes.MaxBytes,
+// nesting at most notes.MaxDepth, valid UTF-8 and no hidden character
+// (HiddenRune: control, bidi, zero-width, …) but newline and tab. Errors
+// name field (notes.FieldError).
+func validateMarkdown(field, s string) error {
+	if len(s) > notes.MaxBytes {
+		return notes.CheckField(field, s) // the size refusal, before any scan
+	}
+	if !utf8.ValidString(s) {
+		return notes.FieldError(field, "is not valid UTF-8")
+	}
+	for i, r := range s {
+		if r != '\n' && r != '\t' && HiddenRune(r) {
+			return notes.FieldError(field, "has the hidden character U+%04X at byte %d (control, bidi or zero-width characters are refused)", r, i)
+		}
+	}
+	return notes.CheckField(field, s)
+}
+
 // ValidateManifest rejects manifests whose keys/values would be unsafe to
 // splice into .env files, compose overrides, the group-gate policy file or
 // the UI's HTML.
 func ValidateManifest(m *Manifest) error {
+	if err := validateMarkdown("auth.notes", m.Auth.Notes); err != nil {
+		return err
+	}
+	if err := validateCatalog(m); err != nil {
+		return err
+	}
 	switch m.Instances {
 	case "", InstancesSingle, InstancesMulti:
 	default:

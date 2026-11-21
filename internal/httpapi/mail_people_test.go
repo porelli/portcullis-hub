@@ -116,7 +116,7 @@ func TestNoAdminCreateRoute(t *testing.T) {
 		for _, p := range mux {
 			method, path, _ := strings.Cut(p, " ")
 			if method == "POST" && strings.Contains(path, "mail") && path != "/api/me/mail/passwords" && !strings.HasPrefix(path, "/api/mail/actions/") && path != "/api/mail/confirm-removal" &&
-				path != "/api/mail/provider/switch" && path != "/api/mail/provider/retry-void" {
+				path != "/api/mail/provider/switch" && path != "/api/mail/provider/retry-void" && path != "/api/mail/admin-view" {
 				t.Errorf("a POST route creates mail credentials: %s", p)
 			}
 			if strings.Contains(path, "/mail/passwords") && method == "POST" && strings.Contains(path, "{") {

@@ -8,6 +8,8 @@ import (
 	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/portcullis/hub/internal/notes"
 )
 
 // Discover loads every valid template directly under dir. Invalid templates
@@ -79,6 +81,10 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := ValidateManifest(&m); err != nil {
 		return Template{}, err
 	}
+	// The notes are rendered here, once (ValidateManifest bounded them).
+	r := notes.Render(m.Auth.Notes)
+	m.Auth.NotesHTML, m.Auth.NoteText, m.Auth.NoteHTML = r.HTML, r.FirstText, r.FirstHTML
+	m.LongDescriptionHTML = notes.Render(m.LongDescription).HTML
 	if compose == nil {
 		return Template{}, fmt.Errorf("no compose.yml")
 	}
@@ -117,6 +123,7 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := checkCoreRefs(compose, routes.HostVars); err != nil {
 		return Template{}, err
 	}
+
 	if err := checkVolumeNames(compose, id, m.Multi()); err != nil {
 		return Template{}, err
 	}
@@ -146,6 +153,10 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		MailProvider: m.Mail != nil,
 		raw:          &raw,
 	}
+	// The logo and screenshots, read and checked once (contract §3).
+	if err := loadCatalog(&t); err != nil {
+		return Template{}, err
+	}
 	if err := ValidateSettingsSpec(&t, compose, routes, kinds); err != nil {
 		return Template{}, err
 	}
@@ -156,6 +167,11 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		return Template{}, err
 	}
 	if err := ValidateVPN(&t, compose, routes); err != nil {
+		return Template{}, err
+	}
+	// After the VPN and mail rules (their own texts first): every
+	// template's relative binds stay inside its own files.
+	if err := CheckRelativeBinds(path, id, compose); err != nil {
 		return Template{}, err
 	}
 	if t.GIDRefs, err = GIDRefs(&t.Manifest, compose); err != nil {

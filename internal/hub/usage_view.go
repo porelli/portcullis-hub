@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/usage"
 )
 
@@ -40,11 +41,16 @@ type UsageHost struct {
 
 // UsageGroup is one app instance, core, or an unknown project.
 type UsageGroup struct {
-	Instance   string           `json:"instance"`
-	Template   string           `json:"template"`
-	Name       string           `json:"name"`
-	Status     string           `json:"status"` // running | stopped | restarting | partly running | not_measured
-	Why        string           `json:"why,omitempty"`
+	Instance string `json:"instance"`
+	Template string `json:"template"`
+	Name     string `json:"name"`
+	Status   string `json:"status"` // running | stopped | restarting | partly running | job_failed | not_measured
+	Why      string `json:"why,omitempty"`
+	// JobsDone / JobsFailed: its one-shot setup jobs that finished (exit
+	// 0) or failed (unitHealth), reported apart from its services ("running
+	// · 3 setup jobs done"; a failed one makes the status job_failed).
+	JobsDone   int              `json:"jobs_done"`
+	JobsFailed int              `json:"jobs_failed"`
 	Totals     usage.Sample     `json:"totals"`
 	Partial    bool             `json:"partial"`
 	Containers []UsageContainer `json:"containers"`
@@ -65,6 +71,10 @@ type UsageContainer struct {
 	Restarts  int          `json:"restarts"`
 	Helper    bool         `json:"helper,omitempty"`
 	Error     string       `json:"error,omitempty"`
+	// Job / JobState: a one-shot setup job and its state (done | failed |
+	// running | pending, the app page's job_state).
+	Job      bool   `json:"job,omitempty"`
+	JobState string `json:"job_state,omitempty"`
 }
 
 // UsageLimits are a container's limits (MemBytes / Pids 0 = none,
@@ -152,13 +162,38 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 		return cs[i].ID < cs[j].ID
 	})
 	var samples []usage.Sample
-	running, restarting, notMeas, measured := 0, 0, map[string]bool{}, 0
+	// unitHealth (shared with Status and reconcile): a done one-shot job
+	// is as it should be, and a stopped leftover of a service expected to
+	// have no container (an inactive profile, a scaled-off companion)
+	// isn't counted (a running or restarting one is, like reconcile's
+	// inactiveRunning); a failed job makes it job_failed (never partly
+	// running); anything else not up makes the group partly running.
+	running, restarting, counted, up, notMeas, measured := 0, 0, 0, 0, map[string]bool{}, 0
 	for _, c := range cs {
 		g.Containers = append(g.Containers, UsageContainer{
 			ID12: shortContainerID(c.ID), Service: c.Service, Number: c.Number, State: c.State,
 			Sample: c.Sample, Limits: UsageLimits{MemBytes: c.Limits.MemBytes, CPUCores: c.Limits.CPUCores, Pids: c.Limits.Pids},
 			OOMKilled: c.Limits.OOMKilled, Restarts: c.Limits.Restarts, Error: c.Err,
 		})
+		health := c.Health
+		if health == "" {
+			health = unitHealth(false, docker.State{Running: c.Running, Status: c.State})
+		}
+		if c.Job {
+			g.Containers[len(g.Containers)-1].Job, g.Containers[len(g.Containers)-1].JobState = true, health
+		}
+		if !c.Skip || c.Running || c.State == "restarting" {
+			counted++
+			if healthUp(health) {
+				up++
+			}
+			if c.Job && health == jobDone {
+				g.JobsDone++
+			}
+			if c.Job && health == jobFailed {
+				g.JobsFailed++
+			}
+		}
 		switch {
 		case c.Running:
 			running++
@@ -184,7 +219,11 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 	switch {
 	case len(cs) == 0 && len(helpers) == 0:
 		g.Status = "stopped"
-	case running == len(cs):
+	case running > 0 && g.JobsFailed > 0:
+		// The app page's "setup job failed", never "partly running".
+		g.Status = "job_failed"
+	case up == counted && (running > 0 || len(cs) == 0):
+		// Everything up (helpers only: core's transient row).
 		g.Status = "running"
 	case running == 0 && restarting > 0:
 		g.Status = "restarting"
@@ -193,7 +232,7 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 	default:
 		g.Status = "partly running"
 	}
-	if running > 0 && measured == 0 && len(notMeas) == 1 {
+	if running > 0 && measured == 0 && len(notMeas) == 1 && g.Status != "job_failed" {
 		for why := range notMeas {
 			g.Status, g.Why = "not_measured", why
 		}

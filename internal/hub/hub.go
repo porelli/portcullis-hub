@@ -34,6 +34,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/idmap"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -482,6 +483,10 @@ type Hub struct {
 	domainsDeleting map[string]bool
 	domainsGen      uint64
 	domainOpMu      sync.Mutex
+
+	// discoverMu serializes Discover: it loads (and renders the notes of)
+	// the templates without mu, then swaps the catalog in under mu.
+	discoverMu sync.Mutex
 
 	// mu guards st and templates. Never hold it across docker/network calls.
 	mu        sync.RWMutex
@@ -1152,15 +1157,27 @@ func (h *Hub) coreCheckoutBindLocked(t *templates.Template) (templates.BindSourc
 }
 
 // Discover rebuilds the template catalog from the configured sources.
+//
+// Loading parses every manifest and compose file and renders each
+// template's notes (superlinear Markdown, bounded by ValidateManifest):
+// that runs without h.mu, from a snapshot of the sources, so a large
+// source never stalls the API. Discover calls are serialized
+// (discoverMu), so the catalog swapped in is always the latest load.
 func (h *Hub) Discover() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.discoverMu.Lock()
+	defer h.discoverMu.Unlock()
+	h.mu.RLock()
+	sources := append([]state.Source(nil), h.st.Sources...)
+	domain, kinds := h.cfg.Domain, h.kinds
+	h.mu.RUnlock()
 	var ts []templates.Template
-	for _, src := range h.st.Sources {
+	for _, src := range sources {
 		if src.Path != "" {
-			ts = append(ts, templates.Discover(src.Path, src.Name, h.cfg.Domain, h.kinds)...)
+			ts = append(ts, templates.Discover(src.Path, src.Name, domain, kinds)...)
 		}
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.allTemplates = append([]templates.Template(nil), ts...)
 	h.templateIDs = map[string]bool{}
 	for _, t := range ts {
@@ -1361,6 +1378,20 @@ func (h *Hub) Templates() []templates.Template {
 	return h.withCompat(ts)
 }
 
+// CatalogTemplate returns a copy of template id's catalog entry (its
+// default view, no runtime verdict) and whether it exists: the catalog
+// asset routes' lookup (contract §11.7).
+func (h *Hub) CatalogTemplate(id string) (templates.Template, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for i := range h.templates {
+		if h.templates[i].ID == id {
+			return h.templates[i], true
+		}
+	}
+	return templates.Template{}, false
+}
+
 // Sources returns a copy of the configured sources.
 func (h *Hub) Sources() []state.Source {
 	h.mu.RLock()
@@ -1435,6 +1466,14 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		// or template. They have no routers, so no hostnames, and get no
 		// Keycloak client or access role.
 		if t.Manifest.Routerless() {
+			// The wired mail provider's read-only admin view (contract
+			// §19.13): full administrators only, with the Hub's own
+			// sign-in template, while its router is rendered (normal mode).
+			if mb := t.Manifest.Mail; mb != nil && mb.AdminView != nil && h.mailModeLocked(t.ID) == mailNormal {
+				host := h.mailAdminHost()
+				apps = append(apps, policy.App{ID: t.ID, Enabled: true, Hosts: hostSet([]string{host}, coreHosts),
+					GroupAccess: true, AccessGroup: lldap.AdminGroup, Template: h.st.SignIn.Core["hub"]})
+			}
 			continue
 		}
 		users, admins := h.instanceGroupsLocked(t)

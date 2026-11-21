@@ -113,6 +113,19 @@
     .port-inputs .port-host { font-family: monospace; text-align: center; }
     .port-hint { display: block; margin-top: 0.25rem; color: #64748b; font-size: 0.7rem; }
     .auth-notes { color: #94a3b8; font-size: 0.8125rem; background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 3px solid #3b82f6; }
+    .auth-notes > :first-child { margin-top: 0; }
+    .auth-notes > :last-child { margin-bottom: 0; }
+    .auth-notes p, .auth-notes ul, .auth-notes ol, .auth-notes blockquote, .auth-notes pre, .auth-notes table { margin: 0 0 0.5rem; }
+    .auth-notes ul, .auth-notes ol { padding-left: 1.25rem; }
+    .auth-notes li { margin: 0.125rem 0; }
+    .auth-notes h1, .auth-notes h2, .auth-notes h3, .auth-notes h4, .auth-notes h5, .auth-notes h6 { font-size: 0.875rem; color: #cbd5e1; margin: 0.75rem 0 0.25rem; }
+    .auth-notes code { background: #1e293b; padding: 0.05rem 0.3rem; border-radius: 0.25rem; font-size: 0.75rem; overflow-wrap: anywhere; }
+    .auth-notes pre { background: #1e293b; padding: 0.5rem; border-radius: 0.25rem; overflow-x: auto; }
+    .auth-notes pre code { background: none; padding: 0; }
+    .auth-notes a { color: #60a5fa; }
+    .auth-notes blockquote { border-left: 2px solid #334155; padding-left: 0.75rem; }
+    .auth-notes table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
+    .auth-notes th, .auth-notes td { border: 1px solid #334155; padding: 0.25rem 0.5rem; }
 
     /* Sign-in / public / AI blocks */
     .policy-section { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; margin-bottom: 1rem; }
@@ -238,6 +251,28 @@
     .btn-secondary { background: #334155; color: #e2e8f0; }
     .btn-secondary:hover { background: #475569; }
     .btn-sm { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
+    /* Shared baseline for every module's controls (Settings sections, SSH
+       access, …). :where() keeps specificity 0: every section's own rule
+       still wins; this only replaces the browser's defaults (white
+       inputs, grey buttons, dark-blue links). */
+    :where(input:not([type]), input[type="text"], input[type="number"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="datetime-local"], textarea, select) {
+      padding: 0.375rem 0.625rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; font-family: inherit; color-scheme: dark; }
+    :where(input:not([type]), input[type="text"], input[type="number"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], textarea, select):focus { outline: none; border-color: #3b82f6; }
+    :where(input, textarea)::placeholder { color: #475569; }
+    :where(input, textarea, select):disabled { opacity: 0.6; cursor: not-allowed; }
+    :where(input[type="checkbox"], input[type="radio"]) { accent-color: #3b82f6; }
+    :where(.inst-form) :where(input:not([type]), input[type="number"], textarea) { width: 100%; padding: 0.5rem 0.75rem; font-size: 0.875rem; margin-bottom: 0.25rem; }
+    :where(.inst-table) :where(input:not([type]), input[type="text"]) { width: 100%; }
+    /* A .btn without a variant (btn btn-sm): the secondary look. */
+    :where(.btn:not(.btn-primary, .btn-secondary, .btn-danger, .btn-icon)) { background: #334155; color: #e2e8f0; }
+    :where(.btn:not(.btn-primary, .btn-secondary, .btn-danger, .btn-icon)):hover { background: #475569; }
+    :where(.btn:disabled) { opacity: 0.5; cursor: not-allowed; }
+    /* SSH access subtabs (ssh.js): a tab bar like .usage-nav. */
+    .ssh-sections { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #334155; }
+    /* Links: readable on the dark background everywhere. */
+    :where(.tab-content a:not(.btn)) { color: #93c5fd; }
+    /* A facts list outside a section card. */
+    :where(:not(.inst-section) > .inst-facts) { font-size: 0.8125rem; margin: 0.5rem 0 1rem; }
 
     .badge-builtin { color: #3b82f6; }
     .badge-community { color: #a855f7; }
@@ -577,6 +612,11 @@
     .fd-usedby { display: flex; flex-direction: column; gap: 0.375rem; max-height: 18rem; overflow-y: auto; }
     .fd-use { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.8125rem; }
     .fd-use input[type=text] { width: 12rem; padding: 0.25rem 0.5rem; }
+    .fd-inst { display: flex; flex-direction: column; gap: 0.25rem; }
+    .fd-inst + .fd-inst { border-top: 1px solid #334155; padding-top: 0.375rem; }
+    .fd-inst-head { font-size: 0.8125rem; font-weight: 600; }
+    .fd-inst .fd-use { padding-left: 1rem; }
+    .fd-hint { flex-basis: 100%; color: #64748b; font-size: 0.75rem; }
     .fd-check { margin-top: 0.5rem; font-size: 0.8125rem; }
     .fd-check-ok { color: #4ade80; } .fd-check-bad { color: #f59e0b; }
     .fd-advanced { margin-bottom: 1rem; } .fd-advanced summary { cursor: pointer; color: #94a3b8; font-size: 0.8125rem; }
@@ -601,7 +641,7 @@
     .usage-bar-bad span { background: #ef4444; }
     .usage-bar-none span { background: #64748b; }
     .usage-status { font-size: 0.75rem; }
-    .usage-status-ok { color: #4ade80; } .usage-status-warn { color: #fbbf24; } .usage-status-off { color: #94a3b8; } .usage-status-info { color: #93c5fd; }
+    .usage-status-ok { color: #4ade80; } .usage-status-warn { color: #fbbf24; } .usage-status-off { color: #94a3b8; } .usage-status-info { color: #93c5fd; } .usage-status-bad { color: #f87171; }
     .usage-spark { color: #60a5fa; vertical-align: middle; }
     .usage-table a, .usage-strip a, .usage-nav a.usage-sub { color: #93c5fd; }
     .usage-nav a.btn { text-decoration: none; }
@@ -717,7 +757,9 @@
                 {{else if eq (printf "%v" .Manifest.Auth.SSO) "partial"}}
                   <span class="auth-badge sso-partial" title="Partial SSO via proxy auth header">SSO*</span>
                 {{end}}
-                {{if .Manifest.Routerless}}
+                {{if .MailProvider}}
+                  <span class="auth-badge method" data-managed-by-portcullis="{{.ID}}" title="Mail is managed in Portcullis (Settings → Mail and the instance's Mail tab), so Portcullis's mail safeguards always apply. A full administrator can open the mail server's own admin screen read-only.">Managed by Portcullis</span>
+                {{else if .Manifest.Routerless}}
                   <span class="auth-badge method" data-no-web-page="{{.ID}}" title="This app has no web page: people use it with its own client (see My apps)">No web page</span>
                 {{end}}
                 {{if .Manifest.Auth.GroupAccess}}
@@ -729,7 +771,7 @@
                 {{if eq .Manifest.Auth.Method "public"}}
                   <span class="auth-badge public">Public</span>
                 {{else}}
-                  <span class="auth-badge method" title="{{.Manifest.Auth.Notes}}">{{.Manifest.Auth.Method}}</span>
+                  <span class="auth-badge method" title="{{.Manifest.Auth.NoteText}}">{{.Manifest.Auth.Method}}</span>
                 {{end}}
               {{end}}
             </div>
@@ -3681,7 +3723,7 @@
     function instLineHtml(i, dup) {
       const st = instStatus(i);
       const hosts = Object.keys(i.hosts || {}).sort().map(r => i.hosts[r]);
-      const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : 'no web page'];
+      const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : (templateIsMailProvider(i.template) ? 'managed by Portcullis' : 'no web page')];
       // Two instances of one app with the same name: their ids tell them apart.
       if (dup) sub.unshift('<code class="muted">' + escapeHtml(i.id) + '</code>');
       if (i.access_group) sub.push(PortcullisPeople.groupLink(i.access_group) + memberCountHtml(i.access_group));
@@ -3930,13 +3972,15 @@
     async function renderOverview(id, pane) {
       const inst = pageCtx.inst;
       const t = catalogCache && catalogCache[inst.template];
-      const notes = t && t.manifest.auth && t.manifest.auth.notes;
+      // notes_html: auth.notes (Markdown) rendered and sanitised by the
+      // Hub (internal/notes); the raw notes are never inserted as HTML.
+      const notesHtml = t && t.manifest.auth && t.manifest.auth.notes_html;
       const bound = inst.groups_mode === 'existing';
       let h = '';
       if (inst.error) h += '<div class="op-msg inst-error">' + escapeHtml(inst.error) + '</div>';
       if (inst.state === 'deleting') h += '<div class="public-warn">A delete stopped part-way: <button type="button" class="opp-link" data-page-tab-go="delete">open Delete</button> to finish it (the first backup is kept).</div>';
       if (inst.state === 'restoring') h += '<div class="public-warn">A restore didn\'t finish: restore it again from <button type="button" class="opp-link" data-page-tab-go="backups">Backups</button> (its pre-restore backup is put back first).</div>';
-      if (notes) h += '<div class="auth-notes">' + escapeHtml(notes) + '</div>';
+      if (notesHtml) h += '<div class="auth-notes">' + notesHtml + '</div>';
       // Runtime compatibility (contract §11.10): the instance's own verdict.
       const rlBadge = compatBadge(inst.compat);
       if (rlBadge) {
@@ -3956,7 +4000,7 @@
         '<dl class="inst-facts">' +
         '<dt>App</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
         '<dt>Instance id</dt><dd><code>' + escapeHtml(inst.id) + '</code></dd>' +
-        '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
+        '<dt>Compose project</dt><dd data-compose-project><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
         (window.PortcullisServers ? PortcullisServers.runsOn(inst) : '') +
         (inst.access_group ? '<dt>Users group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + ' <button type="button" class="opp-link" data-page-tab-go="groups">who is in it</button></dd>' : '') +
         (inst.admin_group ? '<dt>Admins group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + '</dd>' : '') +
@@ -3980,6 +4024,14 @@
           if (!sb) return;
           sb.innerHTML = PortcullisServers.instanceSection(inst);
           PortcullisServers.wire(sb, inst, () => openInstancePage(inst.id, 'overview'));
+          // Rendered before the list arrived (a deep link): add "Runs on"
+          // where the facts have it, after "Compose project".
+          const facts = pane.querySelector('dl.inst-facts');
+          if (facts && !facts.querySelector('[data-runs-on]')) {
+            const after = facts.querySelector('[data-compose-project]');
+            if (after) after.insertAdjacentHTML('afterend', PortcullisServers.runsOn(inst));
+            else facts.insertAdjacentHTML('beforeend', PortcullisServers.runsOn(inst));
+          }
         }).catch(() => {});
       }
       loadContainers(id, pane);
@@ -3991,7 +4043,12 @@
         pageCtx.domains = d.domains;
         pageCtx.routers = d.routers;
         if (d.legacy) { ed.innerHTML = '<p class="settings-empty">This template still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed.</p>' + hostRowsReadOnly(inst.hosts); return; }
-        if (!(d.routers || []).length) { ed.innerHTML = '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>'; return; }
+        if (!(d.routers || []).length) {
+          ed.innerHTML = templateIsMailProvider(inst.template)
+            ? '<p class="settings-empty" data-managed-by-portcullis>Managed by Portcullis: mail is managed in Settings → Mail and on the <a href="#apps/' + encodeURIComponent(inst.id) + '/mail">Mail tab</a>. A full administrator can open the mail server\'s own admin screen read-only from there.</p>'
+            : '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>';
+          return;
+        }
         const pending = inst.state === 'deleting' || inst.state === 'restoring';
         ed.innerHTML = hostRows(d.routers, inst.hosts || {}, true, inst.template) +
           '<div class="inst-row"><label class="settings-empty" for="inst-move-domain">Move to domain</label>' +
@@ -4307,7 +4364,12 @@
       ctx.routers = d.routers || [];
       if (!box.dataset.drawn) {
         box.dataset.drawn = '1';
-        if (!ctx.routers.length) { box.innerHTML = '<p class="settings-empty">No web page: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames.</p>'; return; }
+        if (!ctx.routers.length) {
+          box.innerHTML = templateIsMailProvider(ctx.tid)
+            ? '<p class="settings-empty" data-managed-by-portcullis>Managed by Portcullis: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames of its own; mail is managed in Settings → Mail.</p>'
+            : '<p class="settings-empty">No web page: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames.</p>';
+          return;
+        }
         const main = ctx.domains.find(x => x.main) || ctx.domains[0];
         box.innerHTML = '<div class="host-row"><label for="setup-domain">domain</label>' +
           '<select id="setup-domain" data-setup-domain>' + domainOptions(ctx.domains, main && main.name) + '</select>' +

@@ -687,11 +687,30 @@ func TestAutoServiceNameRefused(t *testing.T) {
 			t.Errorf("%q: %v", label, err)
 		}
 	}
-	for _, ok := range []string{"portcullis-auth", "portcullisapp", "my-portcullisx", "app"} {
+	for _, ok := range []string{"portcullisapp", "my-portcullisx", "app"} {
 		c := "services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.app" + rule +
 			"      traefik.http.services." + ok + ".loadbalancer.server.port: \"80\"\n"
 		if _, err := ParseRoutes([]byte(c)); err != nil {
 			t.Errorf("%s refused: %v", ok, err)
+		}
+	}
+}
+
+// TestPortcullisPrefixRefused: no template names a Traefik router, service
+// or middleware starting with portcullis- (core's and the Hub's, e.g.
+// portcullis-mail-admin), single or multi, in any case.
+func TestPortcullisPrefixRefused(t *testing.T) {
+	rule := ".rule: Host(`${PORTCULLIS_HOST_APP:-app.portcullis.local}`)\n"
+	for _, label := range []string{
+		"traefik.http.services.portcullis-auth.loadbalancer.server.port: \"80\"\n",
+		"traefik.http.routers.portcullis-mail-admin" + rule,
+		"traefik.http.middlewares.portcullis-mail-admin-key.headers.customrequestheaders.X-A: b\n",
+		"traefik.http.middlewares.Portcullis-Groups.headers.customrequestheaders.X-A: b\n",
+		"TRAEFIK.TCP.ROUTERS.portcullis-x.rule: HostSNI(`*`)\n",
+	} {
+		c := "services:\n  web:\n    image: x\n    labels:\n      traefik.http.routers.app" + rule + "      " + label
+		if _, err := ParseRoutes([]byte(c)); err == nil || !strings.Contains(err.Error(), "reserved for core and the Hub") {
+			t.Errorf("%q: %v", label, err)
 		}
 	}
 }

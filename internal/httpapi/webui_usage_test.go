@@ -180,3 +180,42 @@ console.log(JSON.stringify([
 		t.Errorf("got %q", got)
 	}
 }
+
+// The usage page's job words are the app page's: a failed job is "setup
+// job failed" (never "partly running"), done jobs are counted apart
+// ("· 3 setup jobs done", one: "setup job done"), and a done job's
+// container row reads "setup job done", greyed out.
+func TestUsageJSJobWords(t *testing.T) {
+	js := usageJS(t)
+	start := strings.Index(js, "  const STATUS_WORDS = {")
+	end := strings.Index(js, "  async function getJSON(")
+	if start < 0 || end < start {
+		t.Fatal("no STATUS_WORDS … getJSON block")
+	}
+	rows := jsBlock(t, js, "  function containerRowsHtml(g, host, indent) {", "\n  }\n")
+	script := nodeEsc + "const fmtNum = n => String(n);\nconst offCellsHtml = n => '<td></td>'.repeat(n);\n" + js[start:end] + rows + `
+const strip = h => h.replace(/<[^>]*>/g, '');
+console.log(JSON.stringify({
+  failed: strip(statusHtml({ status: 'job_failed', jobs_done: 0 })),
+  failedCls: statusHtml({ status: 'job_failed' }).includes('usage-status-bad'),
+  one: strip(statusHtml({ status: 'running', jobs_done: 1 })),
+  three: strip(statusHtml({ status: 'running', jobs_done: 3 })),
+  rows: containerRowsHtml({ containers: [
+    { service: 'init', number: 1, state: 'exited', job: true, job_state: 'done' },
+    { service: 'web', number: 1, state: 'exited' },
+  ] }, {}, true),
+}));
+`
+	var got struct {
+		Failed, One, Three, Rows string
+		FailedCls                bool
+	}
+	nodeJSON(t, script, &got)
+	if got.Failed != "setup job failed" || !got.FailedCls || got.One != "running · setup job done" || got.Three != "running · 3 setup jobs done" {
+		t.Errorf("words %+v", got)
+	}
+	if !strings.Contains(got.Rows, `<tr class="usage-crow usage-dim" data-usage-job="done">`) || !strings.Contains(got.Rows, "setup job done") ||
+		strings.Count(got.Rows, "usage-dim") != 1 {
+		t.Errorf("rows %s", got.Rows)
+	}
+}

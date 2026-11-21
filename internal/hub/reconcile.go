@@ -210,7 +210,12 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cs, err := h.rt.List(ctx, runtime.Filter{All: true})
+	// The primary's every container, each live one's network names read
+	// from its inspect (Names): the alias check must see a container
+	// outside any compose project, or of a disabled instance, answering a
+	// portcullis-mcp- alias on portcullis-proxy too. Kubernetes keeps its
+	// project units (no network aliases there).
+	cs, err := h.rt.List(ctx, runtime.Filter{All: h.kubeOn(), Names: !h.kubeOn()})
 	if err != nil {
 		rep.Error = err.Error()
 		return h.storeDrift(rep)
@@ -288,10 +293,21 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	type running struct {
 		id, service string
 		labels      map[string]string
-		// mcpAliases: its portcullis-mcp- names on portcullis-proxy.
-		mcpAliases []string
+		// mcpAliases: its portcullis-mcp- names on portcullis-proxy;
+		// namesUnread: its names couldn't be read (never clean).
+		mcpAliases  []string
+		namesUnread bool
 	}
 	var live []running
+	mcpNames := func(c runtime.Unit) []string {
+		var aliases []string
+		for _, n := range c.Networks[aiProxyNetwork] {
+			if strings.HasPrefix(strings.ToLower(n), templates.MCPNamePrefix) {
+				aliases = append(aliases, strings.ToLower(n))
+			}
+		}
+		return aliases
+	}
 	for ci, c := range cs {
 		p := c.Project
 		if !strings.HasPrefix(p, ProjectPrefix) || c.Labels[docker.LabelOneoff] == "True" {
@@ -328,7 +344,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 				if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
 					havePublic[id] = true
 				}
-				live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, nil})
+				live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, mcpNames(c), c.NamesUnread})
 			}
 			continue
 		}
@@ -345,38 +361,32 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		}
 		servicesSeen[id][service] = true
 		isJob := jobs[id][service]
-		isRunning := c.State == "running" || c.State == "restarting"
-		// A done job (exited 0) counts as running; a failed job (jobState:
+		// unitHealth (the one definition of "running", shared with Status
+		// and the usage page): a restarting service counts as running; a
+		// done job (exited 0) counts as running; a failed job (jobState:
 		// exited non-zero, dead, paused, removing, ContainerState error)
 		// is drift (fail closed).
-		isDoneJob := false
-		if isJob {
-			st := docker.State{Running: isRunning, Status: c.State}
-			if !isRunning && c.State != "created" {
-				// The list has no exit code: inspected.
-				st = docker.State{Status: "dead"} // can't tell: failed
-				if s, ierr := unitRuntime(ci).State(ctx, c.ID); ierr == nil {
-					st = s
-				}
+		st := docker.State{Running: c.State == "running" || c.State == "restarting", Status: c.State}
+		if isJob && !st.Running && c.State != "created" {
+			// The list has no exit code: inspected.
+			st = docker.State{Status: "dead"} // can't tell: failed
+			if s, ierr := unitRuntime(ci).State(ctx, c.ID); ierr == nil {
+				st = s
 			}
-			switch jobState(st) {
-			case jobRunning:
-				isRunning = true
-			case jobDone:
-				isDoneJob, isRunning = true, true
-			case jobFailed:
-				if pc.failedJobCodes == nil {
-					pc.failedJobCodes = make(map[string]int)
-				}
-				pc.failedJobs = append(pc.failedJobs, service)
-				pc.failedJobCodes[service] = 0 // unknown exit code
-				if st.Status == "exited" {
-					pc.failedJobCodes[service] = st.ExitCode
-				}
-				pc.failedJobCount++
-			default: // pending: created, never started
-				isRunning = false
+		}
+		health := unitHealth(isJob, st)
+		isRunning := healthUp(health) || health == healthRestarting
+		isDoneJob := health == jobDone
+		if health == jobFailed {
+			if pc.failedJobCodes == nil {
+				pc.failedJobCodes = make(map[string]int)
 			}
+			pc.failedJobs = append(pc.failedJobs, service)
+			pc.failedJobCodes[service] = 0 // unknown exit code
+			if st.Status == "exited" {
+				pc.failedJobCodes[service] = st.ExitCode
+			}
+			pc.failedJobCount++
 		}
 		if isRunning && !isJob {
 			pc.servicesRunning++
@@ -390,16 +400,10 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 					havePublic[id] = true
 				}
 			}
-			var aliases []string
-			for _, n := range c.Networks[aiProxyNetwork] {
-				if strings.HasPrefix(strings.ToLower(n), templates.MCPNamePrefix) {
-					aliases = append(aliases, strings.ToLower(n))
-				}
-			}
 			// A done job is not "live" for exposure drift (it serves
 			// nothing), nor a worker's unit (its relays are, above).
 			if !isDoneJob && unitRT[ci] == nil {
-				live = append(live, running{id, service, c.Labels, aliases})
+				live = append(live, running{id, service, c.Labels, mcpNames(c), c.NamesUnread})
 			}
 		}
 		if !uncounted {
@@ -505,6 +509,10 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		// A portcullis-mcp- alias the Hub doesn't render makes a container
 		// reachable as a companion (§5), and a rendered one missing on a
 		// running companion breaks the gate's path: both exposure drift.
+		if _, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" && !h.kubeOn() && c.namesUnread {
+			// Unverified is never clean.
+			exposureDiff[c.id] = c.service + ": can't read network names"
+		}
 		if want, ok := mcpAliases[c.id]; ok && exposureDiff[c.id] == "" && !h.kubeOn() {
 			var extra, missing []string
 			have := map[string]bool{}
@@ -532,6 +540,60 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		if keys, ok := expectedKeys[c.id]; ok && exposureDiff[c.id] == "" {
 			if extra := extraTraefikKeys(keys[c.service], c.labels); len(extra) > 0 {
 				exposureDiff[c.id] = c.service + ": Traefik labels from the image, not from compose: " + strings.Join(extra, ", ")
+			}
+		}
+	}
+	// Every live container on the primary's portcullis-proxy — the
+	// instance's own, another instance's, a disabled instance's, a
+	// one-off, one outside any compose project — is scanned: each
+	// portcullis-mcp-<id>-- alias belongs to the enabled instance it names
+	// and is accepted only when that instance renders it for exactly this
+	// container's project and service; anything else is drift of that
+	// instance (impersonating its companions). One whose names can't be
+	// read could carry any: drift of every enabled instance with
+	// companions on (fail closed).
+	if !h.kubeOn() {
+		ids := make([]string, 0, len(mcpAliases))
+		for id := range mcpAliases {
+			ids = append(ids, id)
+		}
+		// The longest id first: portcullis-mcp-a-b--x is a-b's, not a's.
+		sort.Slice(ids, func(i, j int) bool { return len(ids[i]) > len(ids[j]) || len(ids[i]) == len(ids[j]) && ids[i] < ids[j] })
+		for ci := 0; ci < len(unitRT) && ci < len(cs); ci++ {
+			c := cs[ci]
+			if unitRT[ci] != nil || (c.State != "running" && c.State != "restarting") {
+				continue
+			}
+			if _, on := c.Networks[aiProxyNetwork]; !on {
+				continue
+			}
+			name := clipRunes(c.Name, 80)
+			if c.NamesUnread {
+				for id, want := range mcpAliases {
+					if len(want) > 0 && exposureDiff[id] == "" {
+						exposureDiff[id] = "can't read the network names of container " + name + " on " + aiProxyNetwork
+					}
+				}
+				continue
+			}
+			for _, a := range mcpNames(c) {
+				for _, id := range ids {
+					if !strings.HasPrefix(a, templates.MCPNamePrefix+strings.ToLower(id)+"--") {
+						continue
+					}
+					own := c.Project == projectName(id) && c.Labels[docker.LabelOneoff] != "True"
+					if own && mcpAliases[id][c.Service][a] {
+						break // rendered for exactly this service
+					}
+					if exposureDiff[id] == "" {
+						if own {
+							exposureDiff[id] = c.Service + ": unexpected network alias " + a
+						} else {
+							exposureDiff[id] = "container " + name + " (not one of the instance's) answers network alias " + a
+						}
+					}
+					break
+				}
 			}
 		}
 	}

@@ -75,7 +75,22 @@ jobs:
       - name: install acl
         run: command -v setfacl || { sudo apt-get update -q && sudo apt-get install -y -q acl; }
 
+      # Playwright (pinned with its integrity in .github/uismoke's lockfile,
+      # npm ci without install scripts) and its pinned Chromium for the
+      # Settings + SSH access computed-style check (TestSettingsControlsStyled,
+      # internal/httpapi/webui_uismoke_test.go): PORTCULLIS_UI_SMOKE=require
+      # below makes a missing Playwright a failure, not a skip.
+      - name: install Playwright + Chromium
+        run: |
+          mkdir -p "$RUNNER_TEMP/uismoke"
+          cp .github/uismoke/package.json .github/uismoke/package-lock.json "$RUNNER_TEMP/uismoke/"
+          npm ci --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/uismoke"
+          "$RUNNER_TEMP/uismoke/node_modules/.bin/playwright" install --with-deps chromium
+
       - name: go test -race
+        env:
+          NODE_PATH: ${{ runner.temp }}/uismoke/node_modules
+          PORTCULLIS_UI_SMOKE: require
         run: go test -race -count=1 -timeout 25m ./...
 
       # Core's e2e hooks (internal/e2etest) exist only in -tags e2etest

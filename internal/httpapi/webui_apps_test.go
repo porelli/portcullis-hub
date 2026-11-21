@@ -313,3 +313,16 @@ func TestHubAppsPageCompat(t *testing.T) {
 		t.Errorf("kubernetes badge = %q", got[5])
 	}
 }
+
+// TestHubOverviewNotesSanitised: the Overview shows auth.notes only as the
+// Hub's server-side sanitised notes_html (internal/notes), never the raw
+// Markdown as HTML.
+func TestHubOverviewNotesSanitised(t *testing.T) {
+	fn := hubFunc(t, hubIndex(t), "renderOverview")
+	if !strings.Contains(fn, "t.manifest.auth.notes_html") || !strings.Contains(fn, `'<div class="auth-notes">' + notesHtml + '</div>'`) {
+		t.Error("renderOverview doesn't show notes_html")
+	}
+	if regexp.MustCompile(`\.auth\.notes\b[^_]`).MatchString(fn) {
+		t.Error("renderOverview reads the raw auth.notes")
+	}
+}

@@ -39,8 +39,18 @@ type Auth struct {
 	// access_group). Every client of an enforced app has direct access
 	// grants, implicit flow, service accounts, device/CIBA grants and
 	// standard token exchange switched off: only the browser flow signs in.
-	KeycloakAccessRole bool   `yaml:"keycloak_access_role" json:"keycloak_access_role,omitempty"`
-	Notes              string `yaml:"notes" json:"notes"`
+	KeycloakAccessRole bool `yaml:"keycloak_access_role" json:"keycloak_access_role,omitempty"`
+	// Notes is Markdown (contract §3: at most notes.MaxBytes, nesting at
+	// most notes.MaxDepth, no hidden characters). NotesHTML is it rendered
+	// and sanitised server-side (internal/notes), once, when the template
+	// is built (outside the Hub's lock); the UI inserts only NotesHTML,
+	// never Notes. NoteText / NoteHTML are its first paragraph (the portal
+	// note, §10; NoteText also the Marketplace tooltip), rendered then too.
+	// None is ever read from YAML.
+	Notes     string `yaml:"notes" json:"notes"`
+	NotesHTML string `yaml:"-" json:"notes_html,omitempty"`
+	NoteText  string `yaml:"-" json:"-"`
+	NoteHTML  string `yaml:"-" json:"-"`
 }
 
 // NativeLogin is auth.native_login (method custom only).
@@ -199,6 +209,19 @@ type Manifest struct {
 	Clients     []KeycloakClient `yaml:"keycloak_clients" json:"keycloak_clients"`
 	ConfigFiles []ConfigFile     `yaml:"config_files" json:"config_files"`
 	URLs        []AppURL         `yaml:"urls" json:"urls"`
+	// Catalog fields (contract §3 "Catalog fields"; catalog.go). Links is
+	// the project's homepage (website, what the Marketplace links) and
+	// source repository. LongDescription is Markdown with the auth.notes
+	// pipeline and limits; LongDescriptionHTML is it rendered once at load
+	// (never read from YAML). Logo and Screenshots name files in the
+	// template folder, read and checked once at load (Template.LogoSVG,
+	// Template.Screenshot).
+	Links               *Links       `yaml:"links" json:"links,omitempty"`
+	LongDescription     string       `yaml:"long_description" json:"long_description,omitempty"`
+	LongDescriptionHTML string       `yaml:"-" json:"long_description_html,omitempty"`
+	Logo                string       `yaml:"logo" json:"logo,omitempty"`
+	Resources           *Resources   `yaml:"resources" json:"resources,omitempty"`
+	Screenshots         []Screenshot `yaml:"screenshots" json:"screenshots,omitempty"`
 	// Hosts are per-host-router properties (contract §3.1).
 	Hosts *HostsSpec `yaml:"hosts" json:"hosts,omitempty"`
 	// Files, Hooks and Reload are what settings deliveries name (§13.7, §13.8).
@@ -341,6 +364,21 @@ type Template struct {
 	// variable it references nowhere but in environment: values may be
 	// env-overridden (§11.9).
 	ComposeVars *ComposeVarUse `json:"-"`
+	// CategoryLabel and CategoryRank are the category's label and its
+	// place in the Marketplace (CategoryOf); Routerless: no HTTP router
+	// (Manifest.Routerless). LogoURL and ScreenshotURLs are the catalog
+	// asset routes (contract §11.7), set only when the files passed their
+	// checks at load.
+	CategoryLabel  string   `json:"category_label"`
+	CategoryRank   int      `json:"category_rank"`
+	Routerless     bool     `json:"routerless"`
+	LogoURL        string   `json:"logo_url,omitempty"`
+	ScreenshotURLs []string `json:"screenshot_urls,omitempty"`
+	// logoSVG, shots and shotTypes are the checked bytes as read at load
+	// (shared, read-only, by every view; never in a view's JSON).
+	logoSVG   []byte
+	shots     [][]byte
+	shotTypes []string
 	// Compat is the runtime compatibility verdict (contract §11.10): set
 	// by the Hub under podman and kubernetes (absent under Docker).
 	Compat *Compat `json:"compat,omitempty"`
