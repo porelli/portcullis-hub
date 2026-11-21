@@ -15,6 +15,7 @@ import (
 	"github.com/portcullis/hub/internal/domains"
 	"github.com/portcullis/hub/internal/hub"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/templates"
 )
 
 // The Portcullis MCP's admin tools, part 2 (plan 4 Task 17b; contract
@@ -169,6 +170,18 @@ func (a providerArgs) model() state.ModelProvider {
 		Models: a.Models, Credentials: a.Credentials}
 }
 
+// addCatalogView adds the catalog fields of GET /api/templates (contract
+// §11.7 "Catalog views") to a template tool's answer; never the bytes.
+func addCatalogView(v map[string]any, t *templates.Template) {
+	v["category_label"], v["category_rank"], v["routerless"] = t.CategoryLabel, t.CategoryRank, t.Routerless
+	if t.LogoURL != "" {
+		v["logo_url"] = t.LogoURL
+	}
+	if len(t.ScreenshotURLs) > 0 {
+		v["screenshot_urls"] = t.ScreenshotURLs
+	}
+}
+
 // registerAdminTools2 registers part 2 of the admin tools.
 func (s *Server) registerAdminTools2() {
 	for _, t := range []Tool{
@@ -177,9 +190,11 @@ func (s *Server) registerAdminTools2() {
 			ClassRead, "/api/templates", "", func(context.Context, directory.Actor, noArgs) (any, error) {
 				out := []map[string]any{}
 				for _, t := range s.Hub.Templates() {
-					out = append(out, map[string]any{"id": t.ID, "name": t.Manifest.Name, "category": t.Manifest.Category,
+					v := map[string]any{"id": t.ID, "name": t.Manifest.Name, "category": t.Manifest.Category,
 						"instances_mode": t.Manifest.Instances, "source": t.Source, "enabled": t.Enabled, "instances": t.Instances,
-						"hosts": t.Hosts})
+						"hosts": t.Hosts}
+					addCatalogView(v, &t)
+					out = append(out, v)
 				}
 				return out, nil
 			}),
@@ -191,8 +206,10 @@ func (s *Server) registerAdminTools2() {
 						if err != nil {
 							return nil, err
 						}
-						return map[string]any{"id": t.ID, "source": t.Source, "enabled": t.Enabled, "manifest": m,
-							"host_routers": t.HostRouters, "hosts": t.Hosts, "instances": t.Instances}, nil
+						v := map[string]any{"id": t.ID, "source": t.Source, "enabled": t.Enabled, "manifest": m,
+							"host_routers": t.HostRouters, "hosts": t.Hosts, "instances": t.Instances}
+						addCatalogView(v, &t)
+						return v, nil
 					}
 				}
 				return nil, &hub.StatusError{Status: http.StatusNotFound, Err: errors.New("template not found: " + in.ID)}

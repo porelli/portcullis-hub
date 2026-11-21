@@ -35,7 +35,7 @@ import (
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/text"
+	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
@@ -86,7 +86,7 @@ func sanitizer() *bluemonday.Policy {
 // rest to open in a new tab without an opener or referrer.
 type transformer struct{}
 
-func (transformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+func (transformer) Transform(doc *ast.Document, reader gmtext.Reader, _ parser.Context) {
 	src := reader.Source()
 	var unwrap []ast.Node
 	var plain []*ast.AutoLink
@@ -159,22 +159,25 @@ const MaxBytes = 16 << 10
 // list items inside each other, contract §3).
 const MaxDepth = 16
 
-// Check refuses notes over MaxBytes or nested deeper than MaxDepth: the
-// size first, then a line scan of the leading container markers (> - * +
-// and 1. / 1)), then, on what is left (bounded), the parsed document's
-// nesting (which also catches nesting by indentation).
-func Check(notes string) error {
-	if len(notes) > MaxBytes {
-		return fmt.Errorf("auth.notes is %d bytes, at most %d allowed", len(notes), MaxBytes)
+// Check is CheckField for auth.notes.
+func Check(notes string) error { return CheckField("auth.notes", notes) }
+
+// CheckField refuses Markdown text over MaxBytes or nested deeper than
+// MaxDepth, its errors naming field (auth.notes, long_description;
+// contract §3): the size first, then a line scan of the leading container
+// markers (> - * + and 1. / 1)), then, on what is left (bounded), the
+// parsed document's nesting (which also catches nesting by indentation).
+func CheckField(field, text string) error {
+	if len(text) > MaxBytes {
+		return fmt.Errorf("%s is %d bytes, at most %d allowed", field, len(text), MaxBytes)
 	}
-	for _, line := range strings.Split(notes, "\n") {
+	for _, line := range strings.Split(text, "\n") {
 		if markerDepth(line) > MaxDepth {
-			return fmt.Errorf("auth.notes nests blocks deeper than %d", MaxDepth)
+			return fmt.Errorf("%s nests blocks deeper than %d", field, MaxDepth)
 		}
 	}
-	src := []byte(notes)
-	if d := blockDepth(md.Parser().Parse(text.NewReader(src)), 0); d > MaxDepth {
-		return fmt.Errorf("auth.notes nests blocks deeper than %d", MaxDepth)
+	if d := blockDepth(md.Parser().Parse(gmtext.NewReader([]byte(text))), 0); d > MaxDepth {
+		return fmt.Errorf("%s nests blocks deeper than %d", field, MaxDepth)
 	}
 	return nil
 }
@@ -238,7 +241,7 @@ func Render(notes string) Rendered {
 		return Rendered{}
 	}
 	src := []byte(notes)
-	doc := md.Parser().Parse(text.NewReader(src))
+	doc := md.Parser().Parse(gmtext.NewReader(src))
 	r := Rendered{HTML: render(src, doc)}
 	var para ast.Node
 	for c := doc.FirstChild(); c != nil; c = c.NextSibling() {

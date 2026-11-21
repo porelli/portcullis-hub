@@ -84,6 +84,7 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	// The notes are rendered here, once (ValidateManifest bounded them).
 	r := notes.Render(m.Auth.Notes)
 	m.Auth.NotesHTML, m.Auth.NoteText, m.Auth.NoteHTML = r.HTML, r.FirstText, r.FirstHTML
+	m.LongDescriptionHTML = notes.Render(m.LongDescription).HTML
 	if compose == nil {
 		return Template{}, fmt.Errorf("no compose.yml")
 	}
@@ -151,6 +152,10 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		Names:        routes.Names,
 		MailProvider: m.Mail != nil,
 		raw:          &raw,
+	}
+	// The logo and screenshots, read and checked once (contract §3).
+	if err := loadCatalog(&t); err != nil {
+		return Template{}, err
 	}
 	if err := ValidateSettingsSpec(&t, compose, routes, kinds); err != nil {
 		return Template{}, err

@@ -116,6 +116,8 @@ func (s *Server) hubMux() *recordingMux {
 	mux.HandleFunc("/api/templates/exec/", s.handleTemplateExec)
 	mux.HandleFunc("/api/templates/restart/", s.handleTemplateRestart)
 	mux.HandleFunc("/api/templates/lastop/", s.handleTemplateLastOp)
+	// Catalog assets (contract §11.7; Hub listener only).
+	s.registerCatalog(mux)
 	mux.HandleFunc("/api/sources", s.handleSources)
 	mux.HandleFunc("/api/sources/add", s.handleAddSource)
 	mux.HandleFunc("/api/sources/remove", s.handleRemoveSource)

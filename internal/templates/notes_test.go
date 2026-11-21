@@ -65,7 +65,7 @@ func TestNotesRefused(t *testing.T) {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
 	}
-	if err := validateNotes("Tabs\tand\nnewlines are fine → ✓"); err != nil {
+	if err := validateMarkdown("auth.notes", "Tabs\tand\nnewlines are fine → ✓"); err != nil {
 		t.Error(err)
 	}
 }

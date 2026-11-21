@@ -1378,6 +1378,20 @@ func (h *Hub) Templates() []templates.Template {
 	return h.withCompat(ts)
 }
 
+// CatalogTemplate returns a copy of template id's catalog entry (its
+// default view, no runtime verdict) and whether it exists: the catalog
+// asset routes' lookup (contract §11.7).
+func (h *Hub) CatalogTemplate(id string) (templates.Template, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for i := range h.templates {
+		if h.templates[i].ID == id {
+			return h.templates[i], true
+		}
+	}
+	return templates.Template{}, false
+}
+
 // Sources returns a copy of the configured sources.
 func (h *Hub) Sources() []state.Source {
 	h.mu.RLock()
