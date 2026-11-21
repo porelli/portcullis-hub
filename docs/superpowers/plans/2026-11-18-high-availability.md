@@ -1722,3 +1722,7 @@ Supersedes the hostNetwork part of Amendment 1 (S5):
 - **App `ports:`** through ServiceLB keep `loadBalancerSourceRanges` for `lan_only`. Measured: klipper filters on the real client IP before it masquerades, and kube-proxy applies the same ranges inside the cluster. The app sees the svclb address, which is stated in the docs.
 - **Mesh gateway rules** (Task 10, nodeagent): its own chain `PORTCULLIS-MESH`, jumped from FORWARD, so kube-router's re-insertion can't reorder it:
   `-i pcmesh -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT`, then (gateways only) `-i pcmesh -o pcmesh -j ACCEPT`, then `-i pcmesh -j DROP`. Without the conntrack rule, replies to pods on the gateway break.
+
+## Amendment 4 (2026-11-21, Task 24): fencing time
+
+T_fence is Self Node Remediation's safe time, 150 s (SNR v0.13.0 with our namespace-scoped patch; nodeadm replaces Node Healthcheck and opens a remediation after 30 s NotReady). Task 33's 5-minute failover budget is NotReady detection (≤ 40 s) + 30 s + T_fence 150 s + volume reattach and pod start. The live Task 24 run measured 3 min 02 s.
