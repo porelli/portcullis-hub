@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/usage"
@@ -31,7 +32,7 @@ func TestUsageHostsPrimary(t *testing.T) {
 	e.stats("a1", 1e9, 1<<20)
 	e.stats("hub", 1e9, 1<<20)
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	h, ok := v.Hosts["primary"]
 	if !ok || h.Name != "Primary" || h.CPUs == nil || *h.CPUs != 2 || h.MemoryBytes == nil {
 		t.Fatalf("hosts = %+v", v.Hosts)
@@ -42,7 +43,7 @@ func TestUsageHostsPrimary(t *testing.T) {
 	}
 	e.clock.Add(usage.Interval)
 	e.sweep()
-	v = e.h.UsageOverview()
+	v = e.h.UsageOverview("last")
 	h = v.Hosts["primary"]
 	if h.CPUUsedCores == nil || *h.CPUUsedCores != 1.0 || h.MemUsedBytes == nil || *h.MemUsedBytes != 6<<30 {
 		t.Errorf("cpu / mem = %v %v", h.CPUUsedCores, h.MemUsedBytes)
@@ -106,7 +107,7 @@ func TestUsageHostsReadFails(t *testing.T) {
 		e.clock.Add(usage.Interval)
 		e.sweep()
 	}
-	h := e.h.UsageOverview().Hosts["primary"]
+	h := e.h.UsageOverview("last").Hosts["primary"]
 	if h.CPUUsedCores != nil || h.MemUsedBytes != nil || h.BlkReadBps != nil {
 		t.Errorf("failed read = %+v", h)
 	}
@@ -116,7 +117,7 @@ func TestUsageHostsReadFails(t *testing.T) {
 	fail.Store(false)
 	e.clock.Add(usage.Interval)
 	e.sweep()
-	h = e.h.UsageOverview().Hosts["primary"]
+	h = e.h.UsageOverview("last").Hosts["primary"]
 	// 60 s over 3000 ticks, 1500 idle on 2 CPUs.
 	if h.CPUUsedCores == nil || *h.CPUUsedCores != 1.0 || h.MemUsedBytes == nil || *h.MemUsedBytes != 3<<30 {
 		t.Errorf("after = %+v", h)
@@ -132,7 +133,7 @@ func TestUsageHostsKubernetes(t *testing.T) {
 	e.sweep()
 	e.clock.Add(usage.Interval)
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	h, ok := v.Hosts["primary"]
 	if !ok || h.Name != "Primary" || h.Why != "not measured on Kubernetes" {
 		t.Fatalf("hosts = %+v", v.Hosts)
@@ -145,5 +146,70 @@ func TestUsageHostsKubernetes(t *testing.T) {
 	}
 	if len(v.Apps) != 1 || v.Apps[0].Server != "primary" {
 		t.Errorf("apps = %+v", v.Apps)
+	}
+}
+
+// TestUsageWindow1h: in window 1h each container's sample is the mean of
+// its hour (nulls skipped, the group partial then), the totals sum those
+// means, and hosts.primary is the host's mean; window last is unchanged.
+func TestUsageWindow1h(t *testing.T) {
+	e := newUsageEnv(t, "a")
+	e.fakeHost()
+	e.rt.InfoVal.CPUs = 2
+	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "db", 1, "running"))
+	cpu := []uint64{0, 15e9, 45e9, 90e9} // nil, 1, 2, 3 cores
+	for i := range 4 {
+		if i > 0 {
+			e.clock.Add(usage.Interval)
+		}
+		e.stats("a1", cpu[i], uint64(100*(i+1)))
+		e.stats("a2", 0, 100)
+		e.sweep()
+	}
+	v := e.h.UsageOverview("1h")
+	if v.Window != "1h" || len(v.Apps) != 1 {
+		t.Fatalf("window %q apps %+v", v.Window, v.Apps)
+	}
+	g := v.Apps[0]
+	byService := map[string]UsageContainer{}
+	for _, c := range g.Containers {
+		byService[c.Service] = c
+	}
+	web, db := byService["web"].Sample, byService["db"].Sample
+	if web.CPUCores == nil || *web.CPUCores != 2 || web.MemBytes == nil || *web.MemBytes != 250 {
+		t.Errorf("web = %v %v", web.CPUCores, web.MemBytes)
+	}
+	if db.CPUCores == nil || *db.CPUCores != 0 || db.MemBytes == nil || *db.MemBytes != 100 {
+		t.Errorf("db = %v %v", db.CPUCores, db.MemBytes)
+	}
+	if web.MemLimitBytes == nil || *web.MemLimitBytes != 0 {
+		t.Errorf("web limit = %v", web.MemLimitBytes)
+	}
+	if g.Totals.CPUCores == nil || *g.Totals.CPUCores != 2 || g.Totals.MemBytes == nil || *g.Totals.MemBytes != 350 || !g.Partial {
+		t.Errorf("totals = %v %v partial %v", g.Totals.CPUCores, g.Totals.MemBytes, g.Partial)
+	}
+	h := v.Hosts["primary"]
+	if h.CPUUsedCores == nil || *h.CPUUsedCores != 1.0 || h.MemUsedBytes == nil || *h.MemUsedBytes != 6<<30 || h.BlkReadBps == nil || *h.BlkReadBps != 4096 {
+		t.Errorf("host mean = %+v", h)
+	}
+
+	last := e.h.UsageOverview("last")
+	if last.Window != "last" {
+		t.Errorf("window = %q", last.Window)
+	}
+	for _, c := range last.Apps[0].Containers {
+		if c.Service == "web" && (c.Sample.CPUCores == nil || *c.Sample.CPUCores != 3 || *c.Sample.MemBytes != 400) {
+			t.Errorf("last web = %v %v", c.Sample.CPUCores, c.Sample.MemBytes)
+		}
+	}
+	// The points of more than an hour ago are out of the window.
+	e.clock.Add(time.Hour + usage.Interval)
+	e.stats("a1", 90e9+15e9*240, 1000)
+	e.stats("a2", 0, 100)
+	e.sweep()
+	for _, c := range e.h.UsageOverview("1h").Apps[0].Containers {
+		if c.Service == "web" && (c.Sample.MemBytes == nil || *c.Sample.MemBytes != 1000) {
+			t.Errorf("an hour later web mem = %v", c.Sample.MemBytes)
+		}
 	}
 }

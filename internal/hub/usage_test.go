@@ -103,7 +103,7 @@ func TestUsageGroupsAppsCoreUnknownOther(t *testing.T) {
 		e.stats(u.ID, 1e9, 1<<20)
 	}
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if len(v.Apps) != 1 || v.Apps[0].Instance != "a" || len(v.Apps[0].Containers) != 2 || v.Apps[0].Name != "App a" {
 		t.Errorf("apps = %+v", v.Apps)
 	}
@@ -128,7 +128,7 @@ func TestUsageGroupsAppsCoreUnknownOther(t *testing.T) {
 	// Running helpers are one row of the core group.
 	e.setUnits(append(us, runtime.Unit{ID: "h1", State: "running", Labels: map[string]string{docker.LabelHelper: "usage:x"}})...)
 	e.sweep()
-	v = e.h.UsageOverview()
+	v = e.h.UsageOverview("last")
 	last := v.Core.Containers[len(v.Core.Containers)-1]
 	if !last.Helper || last.Service != "Hub helpers (transient)" || last.Number != 1 {
 		t.Errorf("helpers row = %+v", last)
@@ -145,7 +145,7 @@ func TestUsageAggregatesAndPartial(t *testing.T) {
 	e.stats("a1", 1e9, 100)
 	e.rt.StatsErr = map[string]error{"a2": errors.New("boom SECRET=hunter2")}
 	e.sweep()
-	g := e.h.UsageOverview().Apps[0]
+	g := e.h.UsageOverview("last").Apps[0]
 	if g.Totals.MemBytes == nil || *g.Totals.MemBytes != 100 || !g.Partial {
 		t.Errorf("totals = %v partial %v", g.Totals.MemBytes, g.Partial)
 	}
@@ -158,7 +158,7 @@ func TestUsageAggregatesAndPartial(t *testing.T) {
 	if failed == nil || failed.Error != "stats unavailable" || failed.Sample.MemBytes != nil || failed.Sample.CPUCores != nil {
 		t.Errorf("failed = %+v", failed)
 	}
-	b, _ := json.Marshal(e.h.UsageOverview())
+	b, _ := json.Marshal(e.h.UsageOverview("last"))
 	if strings.Contains(string(b), "hunter2") {
 		t.Error("the engine error reached the view")
 	}
@@ -169,13 +169,13 @@ func TestUsageCPUOnSecondSweep(t *testing.T) {
 	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"))
 	e.stats("a1", 10e9, 100)
 	e.sweep()
-	if c := e.h.UsageOverview().Apps[0].Containers[0]; c.Sample.CPUCores != nil {
+	if c := e.h.UsageOverview("last").Apps[0].Containers[0]; c.Sample.CPUCores != nil {
 		t.Errorf("first sweep cpu = %v", *c.Sample.CPUCores)
 	}
 	e.clock.Add(15 * time.Second)
 	e.stats("a1", 13e9, 100)
 	e.sweep()
-	c := e.h.UsageOverview().Apps[0].Containers[0]
+	c := e.h.UsageOverview("last").Apps[0].Containers[0]
 	if c.Sample.CPUCores == nil || *c.Sample.CPUCores < 0.1999 || *c.Sample.CPUCores > 0.2001 {
 		t.Errorf("second sweep cpu = %v", c.Sample.CPUCores)
 	}
@@ -191,7 +191,7 @@ func TestUsageCapAt256(t *testing.T) {
 	}
 	e.setUnits(us...)
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if n := usageCalls(e.rt.Calls(), "stats "); n != 256 {
 		t.Errorf("sampled %d", n)
 	}
@@ -216,7 +216,7 @@ func TestUsageInspectEvery5Min(t *testing.T) {
 	if n := usageCalls(e.rt.Calls(), "inspect a1"); n != 2 {
 		t.Errorf("inspects after 5 min = %d", n)
 	}
-	if l := e.h.UsageOverview().Apps[0].Containers[0].Limits; l.MemBytes != 64<<20 || l.Pids != 32 {
+	if l := e.h.UsageOverview("last").Apps[0].Containers[0].Limits; l.MemBytes != 64<<20 || l.Pids != 32 {
 		t.Errorf("limits = %+v", l)
 	}
 }
@@ -241,7 +241,7 @@ func TestUsageNeverKeepsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, v := range map[string]any{"overview": e.h.UsageOverview(), "instance": g, "snapshot": e.h.usageSnapshot()} {
+	for name, v := range map[string]any{"overview": e.h.UsageOverview("last"), "instance": g, "snapshot": e.h.usageSnapshot()} {
 		b, err := json.Marshal(v)
 		if err != nil {
 			t.Fatal(err)
@@ -302,7 +302,7 @@ func TestUsageRefusedEngine(t *testing.T) {
 	e.rt.Unlock()
 	e.clock.Add(15 * time.Second)
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if v.Engine.Verified || v.Engine.Why != refusal.Message() {
 		t.Errorf("engine = %+v", v.Engine)
 	}
@@ -314,7 +314,7 @@ func TestUsageRefusedEngine(t *testing.T) {
 	}
 	e.clock.Add(15 * time.Second)
 	e.sweep()
-	if !e.h.UsageOverview().Stale {
+	if !e.h.UsageOverview("last").Stale {
 		t.Error("not stale after two intervals")
 	}
 }
@@ -354,7 +354,7 @@ func TestUsageStoppedAppShowsStopped(t *testing.T) {
 	e := newUsageEnv(t, "a")
 	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "exited"), uunit("a2", "portcullis-a", "db", 1, "exited"))
 	e.sweep()
-	g := e.h.UsageOverview().Apps[0]
+	g := e.h.UsageOverview("last").Apps[0]
 	if g.Status != "stopped" || g.Totals.MemBytes != nil || g.Totals.CPUCores != nil || g.Partial {
 		t.Errorf("stopped = %+v", g)
 	}
@@ -364,7 +364,7 @@ func TestUsageStoppedAppShowsStopped(t *testing.T) {
 	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "db", 1, "exited"))
 	e.stats("a1", 1, 1)
 	e.sweep()
-	if g := e.h.UsageOverview().Apps[0]; g.Status != "partly running" || g.Partial {
+	if g := e.h.UsageOverview("last").Apps[0]; g.Status != "partly running" || g.Partial {
 		t.Errorf("partly = %+v", g)
 	}
 }
@@ -392,7 +392,7 @@ func TestUsageRunningIgnoresDoneJobs(t *testing.T) {
 		e.stats("w1", 1, 1)
 		e.sweep()
 	}
-	status := func() string { return e.h.UsageOverview().Apps[0].Status }
+	status := func() string { return e.h.UsageOverview("last").Apps[0].Status }
 	set(0, exited("i1", "init", "Exited (0) 2 hours ago"), exited("m1", "migrate", "Exited (0) 2 hours ago"), exited("x1", "extra", "Exited (0) 1 day ago"))
 	if got := status(); got != "running" {
 		t.Errorf("done jobs + a skipped leftover: status = %q", got)
@@ -402,10 +402,10 @@ func TestUsageRunningIgnoresDoneJobs(t *testing.T) {
 	if n := usageCalls(e.rt.Calls(), "state ") - before; n != 0 {
 		t.Errorf("an unchanged job's exit code was read again (%d)", n)
 	}
-	if g := e.h.UsageOverview().Apps[0]; g.JobsDone != 2 || g.JobsFailed != 0 {
+	if g := e.h.UsageOverview("last").Apps[0]; g.JobsDone != 2 || g.JobsFailed != 0 {
 		t.Errorf("jobs done %d failed %d", g.JobsDone, g.JobsFailed)
 	}
-	for _, c := range e.h.UsageOverview().Apps[0].Containers {
+	for _, c := range e.h.UsageOverview("last").Apps[0].Containers {
 		if want := map[string]string{"init": "done", "migrate": "done"}[c.Service]; c.JobState != want || c.Job != (want != "") {
 			t.Errorf("container %s: job %v %q", c.Service, c.Job, c.JobState)
 		}
@@ -413,7 +413,7 @@ func TestUsageRunningIgnoresDoneJobs(t *testing.T) {
 	// A rerun that failed: read again; "job_failed" (the app page's
 	// "setup job failed"), never "partly running".
 	set(1, exited("i1", "init", "Exited (1) 1 second ago"), exited("m1", "migrate", "Exited (0) 3 hours ago"))
-	if g := e.h.UsageOverview().Apps[0]; g.Status != "job_failed" || g.JobsFailed != 1 || g.JobsDone != 1 {
+	if g := e.h.UsageOverview("last").Apps[0]; g.Status != "job_failed" || g.JobsFailed != 1 || g.JobsDone != 1 {
 		t.Errorf("a failed job: %+v", g)
 	}
 	// A job never started is not up either.
@@ -454,7 +454,7 @@ func TestUsageRealInstancesSkipScaledOffCompanion(t *testing.T) {
 	rt.SetStats("c1", runtime.UnitStats{Read: time.Now(), CPUUsageNS: pu(1), MemUsage: pu(1), Pids: pu(1)})
 	a.h.rt = rt
 	a.h.usageSweep(context.Background())
-	if g := a.h.UsageOverview().Apps; len(g) == 0 || g[0].Status != "running" {
+	if g := a.h.UsageOverview("last").Apps; len(g) == 0 || g[0].Status != "running" {
 		t.Errorf("scaled-off leftover: %+v", g)
 	}
 	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
@@ -464,7 +464,7 @@ func TestUsageRealInstancesSkipScaledOffCompanion(t *testing.T) {
 		t.Error("a switched-on companion is still skipped")
 	}
 	a.h.usageSweep(context.Background())
-	if g := a.h.UsageOverview().Apps; len(g) == 0 || g[0].Status != "partly running" {
+	if g := a.h.UsageOverview("last").Apps; len(g) == 0 || g[0].Status != "partly running" {
 		t.Errorf("switched-on companion stopped: %+v", g)
 	}
 }
@@ -525,7 +525,7 @@ func TestUsageSweepBudget(t *testing.T) {
 		t.Errorf("the sweep took %s", d)
 	}
 	kept, fresh := 0, 0
-	for _, c := range e.h.UsageOverview().Apps[0].Containers {
+	for _, c := range e.h.UsageOverview("last").Apps[0].Containers {
 		switch {
 		case c.Sample.MemBytes != nil && *c.Sample.MemBytes == 7:
 			kept++
@@ -574,7 +574,7 @@ func TestUsageKubeCoreNotMeasured(t *testing.T) {
 	e.setUnits(uunit("a--web-x/web", "portcullis-a", "web", 1, "running"), runtime.Unit{ID: "x/y", State: "running"})
 	e.rt.StatsErr = map[string]error{"a--web-x/web": &runtime.NotMeasuredError{Why: "the cluster has no metrics API (metrics-server)"}}
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if v.Core.Status != "not_measured" || v.Core.Why != "not measured on Kubernetes yet" || v.NotShown != 0 {
 		t.Errorf("core %q %q, not shown %d", v.Core.Status, v.Core.Why, v.NotShown)
 	}
@@ -645,7 +645,7 @@ func TestUsageInspectAfterRestartState(t *testing.T) {
 	if usageCalls(e.rt.Calls(), "inspect a1") != n+1 {
 		t.Error("not inspected when it ran again")
 	}
-	if c := e.h.UsageOverview().Apps[0].Containers[0]; c.Restarts != 1 {
+	if c := e.h.UsageOverview("last").Apps[0].Containers[0]; c.Restarts != 1 {
 		t.Errorf("restarts = %d", c.Restarts)
 	}
 }
@@ -659,7 +659,7 @@ func TestUsageFailedStatsKeepsGroupLimit(t *testing.T) {
 	e.stats("a1", 1e9, 100)
 	e.rt.StatsErr = map[string]error{"a2": errors.New("timeout")}
 	e.sweep()
-	g := e.h.UsageOverview().Apps[0]
+	g := e.h.UsageOverview("last").Apps[0]
 	if g.Totals.MemLimitBytes == nil || *g.Totals.MemLimitBytes != 96<<20 {
 		t.Errorf("group memory limit = %v, want 96 MiB", g.Totals.MemLimitBytes)
 	}

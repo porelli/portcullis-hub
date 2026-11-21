@@ -26,6 +26,8 @@ type UsageView struct {
 	NotShown        int                  `json:"not_shown"`
 	OverLimit       int                  `json:"over_limit"`
 	MetricsScraped  bool                 `json:"metrics_scraped"`
+	// Window echoes the request's window: "last" or "1h".
+	Window string `json:"window"`
 }
 
 // UsageEngine is the runtime and the guard's state.
@@ -114,13 +116,27 @@ const usageNotMeasuredKube = "not measured on Kubernetes yet"
 // usageHostNotMeasuredKube: the primary's host on Kubernetes.
 const usageHostNotMeasuredKube = "not measured on Kubernetes"
 
-// UsageOverview is the whole view.
-func (h *Hub) UsageOverview() UsageView {
+// The windows of GET /api/usage (contract §11.11).
+const (
+	UsageWindowLast = "last"
+	UsageWindow1h   = "1h"
+)
+
+// UsageOverview is the whole view in window ("last": the newest sample;
+// "1h": the means of the last hour's points; anything else is "last").
+func (h *Hub) UsageOverview(window string) UsageView {
+	if window != UsageWindow1h {
+		window = UsageWindowLast
+	}
 	s := h.usage
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v := UsageView{IntervalS: int(usage.Interval / time.Second), Apps: []UsageGroup{}, UnknownProjects: []UsageGroup{},
-		NotShown: s.notShown, OverLimit: s.overLimit, MetricsScraped: h.MetricsScrapedRecently()}
+		NotShown: s.notShown, OverLimit: s.overLimit, MetricsScraped: h.MetricsScrapedRecently(), Window: window}
+	var since time.Time // zero: the newest sample
+	if window == UsageWindow1h {
+		since = s.now().Add(-time.Hour)
+	}
 	v.Engine = UsageEngine{Runtime: s.kind, Verified: s.verified, Why: s.why}
 	if v.Engine.Runtime == "" && h.rt != nil {
 		v.Engine.Runtime = string(h.rt.Kind())
@@ -130,18 +146,18 @@ func (h *Hub) UsageOverview() UsageView {
 		v.SampledAt = &t
 	}
 	v.Stale = s.lastSuccess.IsZero() || s.now().Sub(s.lastSuccess) >= 2*usage.Interval
-	v.Hosts = map[string]UsageHost{servers.PrimaryID: s.primaryHostLocked(v.Engine.Runtime)}
+	v.Hosts = map[string]UsageHost{servers.PrimaryID: s.primaryHostLocked(v.Engine.Runtime, since)}
 	byGroup := map[string][]*usageCont{}
 	for _, c := range s.conts {
 		byGroup[c.Group+"\x00"+c.Kind] = append(byGroup[c.Group+"\x00"+c.Kind], c)
 	}
 	for id, inst := range s.insts {
 		if cs := byGroup[id+"\x00"+usageApp]; len(cs) > 0 {
-			v.Apps = append(v.Apps, s.groupLocked(inst.ID, inst.Template, inst.Name, cs, nil))
+			v.Apps = append(v.Apps, s.groupLocked(inst.ID, inst.Template, inst.Name, cs, nil, since))
 		}
 	}
 	sort.Slice(v.Apps, func(i, j int) bool { return v.Apps[i].Instance < v.Apps[j].Instance })
-	v.Core = s.groupLocked("core", "", "Core", byGroup[usageCoreProject+"\x00"+usageCore], byGroup[usageCoreProject+"\x00"+usageHelper])
+	v.Core = s.groupLocked("core", "", "Core", byGroup[usageCoreProject+"\x00"+usageCore], byGroup[usageCoreProject+"\x00"+usageHelper], since)
 	if v.Engine.Runtime == "kubernetes" {
 		v.Core.Status, v.Core.Why = "not_measured", usageNotMeasuredKube
 	}
@@ -153,15 +169,16 @@ func (h *Hub) UsageOverview() UsageView {
 	}
 	sort.Strings(unknown)
 	for _, p := range unknown {
-		v.UnknownProjects = append(v.UnknownProjects, s.groupLocked("", "", p, byGroup[p+"\x00"+usageUnknown], nil))
+		v.UnknownProjects = append(v.UnknownProjects, s.groupLocked("", "", p, byGroup[p+"\x00"+usageUnknown], nil, since))
 	}
 	return v
 }
 
 // primaryHostLocked is the primary's UsageHost: the engine's CPUs and
-// memory and the newest host point. On Kubernetes every figure is nil.
-// Caller holds s.mu (read).
-func (s *usageState) primaryHostLocked(runtimeKind string) UsageHost {
+// memory and the newest host point (since non-zero: the mean of the
+// points at or after it, nil points skipped). On Kubernetes every figure
+// is nil. Caller holds s.mu (read).
+func (s *usageState) primaryHostLocked(runtimeKind string, since time.Time) UsageHost {
 	h := UsageHost{Name: primaryServerName}
 	if runtimeKind == string(runtime.KindKubernetes) {
 		h.Why = usageHostNotMeasuredKube
@@ -176,15 +193,24 @@ func (s *usageState) primaryHostLocked(runtimeKind string) UsageHost {
 		h.MemoryBytes = &m
 	}
 	if s.hostRing != nil {
-		if p, ok := s.hostRing.Last(); ok {
-			h.CPUUsedCores, h.MemUsedBytes, h.BlkReadBps, h.BlkWriteBps = p.S.CPUUsedCores, p.S.MemUsedBytes, p.S.BlkReadBps, p.S.BlkWriteBps
+		var hs usage.HostSample
+		if since.IsZero() {
+			p, _ := s.hostRing.Last()
+			hs = p.S
+		} else {
+			hs, _ = usage.MeanHost(s.hostRing.Since(since))
 		}
+		h.CPUUsedCores, h.MemUsedBytes, h.BlkReadBps, h.BlkWriteBps = hs.CPUUsedCores, hs.MemUsedBytes, hs.BlkReadBps, hs.BlkWriteBps
 	}
 	return h
 }
 
-// groupLocked builds one group. Caller holds s.mu (read).
-func (s *usageState) groupLocked(instance, template, name string, cs, helpers []*usageCont) UsageGroup {
+// groupLocked builds one group. since non-zero (window 1h): each running
+// app or core container's sample is the mean of its key's points at or
+// after since (usage.Mean; a skipped nil point makes the group partial),
+// and the totals sum those means; helpers and unknown projects have no
+// ring and keep their newest sample. Caller holds s.mu (read).
+func (s *usageState) groupLocked(instance, template, name string, cs, helpers []*usageCont, since time.Time) UsageGroup {
 	g := UsageGroup{Instance: instance, Template: template, Name: name, Server: servers.PrimaryID, Containers: []UsageContainer{}}
 	sort.Slice(cs, func(i, j int) bool {
 		if cs[i].Service != cs[j].Service {
@@ -203,10 +229,21 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 	// inactiveRunning); a failed job makes it job_failed (never partly
 	// running); anything else not up makes the group partly running.
 	running, restarting, counted, up, notMeas, measured := 0, 0, 0, 0, map[string]bool{}, 0
+	meanPartial := false
 	for _, c := range cs {
+		sample := c.Sample
+		if !since.IsZero() && c.Running && (c.Kind == usageApp || c.Kind == usageCore) {
+			if rg := s.rings[c.Group+"\x00"+usageKey(c.Service, c.Number)]; rg != nil {
+				if ps := rg.Since(since); len(ps) > 0 {
+					var p bool
+					sample, p = usage.Mean(ps)
+					meanPartial = meanPartial || p
+				}
+			}
+		}
 		g.Containers = append(g.Containers, UsageContainer{
 			ID12: shortContainerID(c.ID), Service: c.Service, Number: c.Number, State: c.State,
-			Sample: c.Sample, Limits: UsageLimits{MemBytes: c.Limits.MemBytes, CPUCores: c.Limits.CPUCores, Pids: c.Limits.Pids},
+			Sample: sample, Limits: UsageLimits{MemBytes: c.Limits.MemBytes, CPUCores: c.Limits.CPUCores, Pids: c.Limits.Pids},
 			OOMKilled: c.Limits.OOMKilled, Restarts: c.Limits.Restarts, Error: c.Err,
 		})
 		health := c.Health
@@ -231,7 +268,7 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 		switch {
 		case c.Running:
 			running++
-			samples = append(samples, c.Sample)
+			samples = append(samples, sample)
 			if c.NotMeas != "" {
 				notMeas[c.NotMeas] = true
 			} else {
@@ -274,6 +311,7 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 	if len(samples) > 0 {
 		g.Totals, g.Partial = usage.Total(samples)
 	}
+	g.Partial = g.Partial || meanPartial
 	return g
 }
 
@@ -292,7 +330,7 @@ func (h *Hub) UsageInstance(id string) (*UsageGroup, error) {
 			cs = append(cs, c)
 		}
 	}
-	g := s.groupLocked(inst.ID, inst.Template, inst.Name, cs, nil)
+	g := s.groupLocked(inst.ID, inst.Template, inst.Name, cs, nil, time.Time{})
 	if len(cs) == 0 {
 		g.Status = "stopped"
 	}

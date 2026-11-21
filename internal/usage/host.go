@@ -200,6 +200,17 @@ func (r *HostRing) Points() []HostPoint {
 	return append(out, r.buf[:r.next]...)
 }
 
+// Since are the points at or after t, oldest first.
+func (r *HostRing) Since(t time.Time) []HostPoint {
+	ps := r.Points()
+	for i, p := range ps {
+		if !p.T.Before(t) {
+			return ps[i:]
+		}
+	}
+	return nil
+}
+
 // Last is the newest point (false when empty).
 func (r *HostRing) Last() (HostPoint, bool) {
 	if r.Len() == 0 {

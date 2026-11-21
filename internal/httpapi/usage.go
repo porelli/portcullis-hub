@@ -116,7 +116,20 @@ func (s *Server) handleUsageStorageStop(w http.ResponseWriter, r *http.Request) 
 }
 
 // usageOverview / usageInstance: the route's and the tool's work.
-func (s *Server) usageOverview() hub.UsageView { return s.Hub.UsageOverview() }
+func (s *Server) usageOverview(window string) hub.UsageView { return s.Hub.UsageOverview(window) }
+
+// usageWindow is GET /api/usage's window: absent = last; given once, last
+// or 1h; anything else, or given twice, is refused (false).
+func usageWindow(r *http.Request) (string, bool) {
+	vs, ok := r.URL.Query()["window"]
+	switch {
+	case !ok:
+		return hub.UsageWindowLast, true
+	case len(vs) == 1 && (vs[0] == hub.UsageWindowLast || vs[0] == hub.UsageWindow1h):
+		return vs[0], true
+	}
+	return "", false
+}
 
 func (s *Server) usageInstance(id string) (*hub.UsageGroup, error) { return s.Hub.UsageInstance(id) }
 
@@ -125,7 +138,12 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
-	writeJSON(w, s.usageOverview())
+	window, ok := usageWindow(r)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "window must be last or 1h")
+		return
+	}
+	writeJSON(w, s.usageOverview(window))
 }
 
 func (s *Server) handleUsageInstance(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +188,7 @@ func sampleCells(sm usage.Sample) []string {
 func (s *Server) usageCSV(view string) ([]string, [][]string, bool) {
 	switch view {
 	case "apps", "containers":
-		v := s.usageOverview()
+		v := s.usageOverview(hub.UsageWindowLast)
 		at := csvTime(v.SampledAt)
 		groups := append(append(append([]hub.UsageGroup{}, v.Apps...), v.Core), v.UnknownProjects...)
 		var rows [][]string

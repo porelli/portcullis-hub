@@ -154,6 +154,12 @@ func TestHostRing(t *testing.T) {
 	if last, ok := r.Last(); !ok || !last.T.Equal(t0.Add(4*Interval)) {
 		t.Errorf("last = %v", last)
 	}
+	if ps := r.Since(t0.Add(3 * Interval)); len(ps) != 2 || !ps[0].T.Equal(t0.Add(3*Interval)) {
+		t.Errorf("since = %v", ps)
+	}
+	if ps := r.Since(t0.Add(5 * Interval)); len(ps) != 0 {
+		t.Errorf("since after the last = %v", ps)
+	}
 	if NewHostRing(0).Cap() != RingSize {
 		t.Error("default size")
 	}

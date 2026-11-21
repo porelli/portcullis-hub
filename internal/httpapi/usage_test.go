@@ -173,7 +173,7 @@ func TestUsageCSV(t *testing.T) {
 func TestUsageCSVFormulaCell(t *testing.T) {
 	e, rt := usageEnv(t, "Team A")
 	_ = rt
-	u := e.s.Hub.UsageOverview()
+	u := e.s.Hub.UsageOverview("last")
 	if len(u.UnknownProjects) != 0 {
 		t.Fatalf("unknown = %+v", u.UnknownProjects)
 	}
@@ -311,5 +311,22 @@ func TestUsageCSVStorage(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no hub_files row: %q", recs)
+	}
+}
+
+func TestUsageWindowParam(t *testing.T) {
+	e, _ := usageEnv(t, "Team A")
+	for q, want := range map[string]string{"": "last", "?window=last": "last", "?window=1h": "1h"} {
+		resp, body := doAs(t, e.hub, "root", "GET", "/api/usage"+q, "")
+		var v map[string]any
+		if resp.StatusCode != 200 || json.Unmarshal([]byte(body), &v) != nil || v["window"] != want {
+			t.Errorf("GET /api/usage%s = %d %s", q, resp.StatusCode, body)
+		}
+	}
+	for _, q := range []string{"?window=5m", "?window=", "?window=1h&window=last", "?window=1h&window=1h", "?window=1H"} {
+		resp, body := doAs(t, e.hub, "root", "GET", "/api/usage"+q, "")
+		if resp.StatusCode != 400 || !strings.Contains(body, "window must be last or 1h") || resp.Header.Get("Cache-Control") != "no-store" {
+			t.Errorf("GET /api/usage%s = %d %s", q, resp.StatusCode, body)
+		}
 	}
 }
