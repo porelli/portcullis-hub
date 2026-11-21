@@ -74,3 +74,59 @@ func TestCheckRelativeBinds(t *testing.T) {
 		t.Errorf("long syntax: %v", err)
 	}
 }
+
+// Round 4: a source that isn't absolute is relative, "./" or not; "~" is
+// refused; the CA bundle only read-only; an entry the check can't read is
+// an error (fail closed); top-level volume drivers are refused.
+func TestCheckRelativeBindsRound4(t *testing.T) {
+	dir := t.TempDir()
+	run := func(vols string) error {
+		return CheckRelativeBinds(dir, "app", []byte("services:\n  web:\n    image: x\n    volumes:\n"+vols))
+	}
+	for _, c := range []struct{ vols, want string }{
+		{"      - {type: bind, source: appfiles/stalwart/mail-admin, target: /x, read_only: true}\n", "its own files"},
+		{"      - appfiles/x:/y:ro\n", "its own files"},
+		{"      - secrets/a:/y:ro\n", "its own files"},
+		{"      - {type: bind, source: templates/app/../other, target: /x}\n", "its own files"},
+		{"      - ~/x:/y:ro\n", "can't start with ~"},
+		{"      - {type: bind, source: ~/x, target: /y}\n", "can't start with ~"},
+		{"      - ./certs/ca-bundle.crt:/ca.crt\n", "must be bound read-only"},
+		{"      - {type: bind, source: ./certs/ca-bundle.crt, target: /ca.crt}\n", "must be bound read-only"},
+		{"      - ./certs/ca-bundle.crt:/ca.crt:rw\n", "must be bound read-only"},
+		{"      - ./certs/ca-bundle.crt:/ca.crt:ro,rw\n", "both ro and rw"},
+		{"      - ./certs/ca-bundle.crt:/ca.crt:rw,ro\n", "both ro and rw"},
+		{"      - ./templates/app/conf:/c:ro,rw\n", "both ro and rw"},
+		{"      - data:/d:rw,ro\n", "both ro and rw"},
+		{"      - {type: bind, source: ./certs/ca-bundle.crt, target: /ca.crt, read_only: \"true\"}\n", "must be bound read-only"},
+		{"      - {type: bind, source: ./certs/ca-bundle.crt, target: /ca.crt, read_only: yes}\n", "must be bound read-only"},
+		{"      - a:b:c:d\n", "not source:target"},
+		{"      - {type: npipe, source: x, target: /y}\n", "isn't supported"},
+		{"      - {type: bind, target: /y}\n", "needs a source"},
+		{"      - {type: volume, source: a/b, target: /y}\n", "volume name"},
+		{"      - 'bad name!:/y'\n", "neither a path nor a volume name"},
+		{"      - relative\n", "anonymous volume"},
+		{"      - 42\n", "string or a mapping"},
+	} {
+		if err := run(c.vols); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q: %v, want %q", c.vols, err, c.want)
+		}
+	}
+	for _, ok := range []string{
+		"      - templates/app/conf:/c:ro\n", "      - {type: bind, source: templates/app, target: /t, read_only: true}\n",
+		"      - ./certs/ca-bundle.crt:/ca.crt:ro\n", "      - {type: bind, source: ./certs/ca-bundle.crt, target: /ca.crt, read_only: true}\n",
+		"      - data:/data\n", "      - /data\n", "      - {type: tmpfs, target: /tmp}\n", "      - {type: volume, source: data, target: /d}\n",
+	} {
+		if err := run(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, d := range []string{"driver: local", "driver_opts: {type: none, o: bind, device: /etc}"} {
+		c := "services:\n  web:\n    image: x\n    volumes:\n      - data:/d\nvolumes:\n  data:\n    " + d + "\n"
+		if err := CheckRelativeBinds(dir, "app", []byte(c)); err == nil || !strings.Contains(err.Error(), "volume data sets driver") {
+			t.Errorf("%s: %v", d, err)
+		}
+	}
+	if err := CheckRelativeBinds(dir, "app", []byte("services:\n  web:\n    image: x\nvolumes:\n  data: {labels: {a: b}}\n  other:\n")); err != nil {
+		t.Errorf("plain volumes refused: %v", err)
+	}
+}

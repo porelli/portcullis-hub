@@ -821,18 +821,26 @@ func bindEscapes(dir, tid string, compose []byte, loc string) error {
 	return nil
 }
 
-// CheckRelativeBinds (every template, contract §3 "Limits"): a relative
-// bind source (compose resolves it against the core checkout) is only the
-// template's own files, ./templates/<id>/… — cleaned, no ".." out of it,
-// symlinks inside the template directory resolved — or the CA bundle
-// ./certs/ca-bundle.crt. Anything else (another instance's appfiles, the
-// Hub's mail-admin ticket directory, secrets/, certs/ …) is refused, as is
-// an interpolated relative source (it can't be judged).
+// CheckRelativeBinds (every template, contract §3 "Limits"): every bind
+// source that isn't absolute is relative (compose resolves it against the
+// core checkout, "./" or not) and is only the template's own files,
+// ./templates/<id>/… — cleaned, no ".." out of it, symlinks inside the
+// template directory resolved — or the CA bundle ./certs/ca-bundle.crt,
+// read-only. Anything else (another instance's appfiles, the Hub's
+// mail-admin ticket directory, secrets/, certs/ …) is refused, and so is a
+// "~" source, an interpolated mount, a mount the check can't read (fail
+// closed, ux2 round 4) and a top-level volume with driver / driver_opts (a
+// local driver with o=bind binds a host path).
 func CheckRelativeBinds(dir, tid string, compose []byte) error {
+	if err := checkVolumeDrivers(compose); err != nil {
+		return err
+	}
+	base := ""
+	if dir != "" {
+		base = realPath(dir)
+	}
 	infos := composeServiceInfos(compose)
 	for _, n := range slices.Sorted(maps.Keys(infos)) {
-		// Entry by entry: one unresolvable entry never hides the next.
-		var ms []vpnMount
 		var entries []interface{}
 		switch v := infos[n].volumes.(type) {
 		case []interface{}:
@@ -841,27 +849,142 @@ func CheckRelativeBinds(dir, tid string, compose []byte) error {
 		default:
 			entries = []interface{}{v}
 		}
+		// Entry by entry: one entry never hides the next.
 		for _, e := range entries {
 			if shown, bad := mountInterpolated(e); bad {
 				return fmt.Errorf("service %s mounts %s: a mount source can't be interpolated (no $ in a volume entry)", n, shown)
 			}
-			got, _ := vpnMounts([]interface{}{e})
-			ms = append(ms, got...)
-		}
-		for _, mm := range ms {
-			if !mm.bind || !strings.HasPrefix(mm.src, ".") {
+			m, err := templateMount(e)
+			if err != "" {
+				return fmt.Errorf("service %s mounts %s", n, err)
+			}
+			if !m.bind || m.abs {
 				continue
 			}
-			norm := path.Clean(mm.src)
+			if strings.HasPrefix(m.src, "~") {
+				return fmt.Errorf("service %s mounts %s: a bind source can't start with ~ (a home directory)", n, m.entry)
+			}
+			norm := path.Clean(m.src)
 			if norm == CABundlePath {
+				if !m.ro {
+					return fmt.Errorf("service %s mounts %s: ./%s must be bound read-only", n, m.entry, CABundlePath)
+				}
 				continue
 			}
 			if !(norm == "templates/"+tid || strings.HasPrefix(norm, "templates/"+tid+"/")) {
-				return fmt.Errorf("service %s mounts %s: a template binds only its own files (./templates/%s/…) or ./%s", n, mm.entry, tid, CABundlePath)
+				return fmt.Errorf("service %s mounts %s: a template binds only its own files (./templates/%s/…) or ./%s", n, m.entry, tid, CABundlePath)
+			}
+			if base != "" {
+				rest := strings.TrimLeft(strings.TrimPrefix(norm, "templates/"+tid), "/")
+				real := realPath(filepath.Join(dir, filepath.FromSlash(rest)))
+				if real != base && !strings.HasPrefix(real, base+string(filepath.Separator)) {
+					return fmt.Errorf("%s mounts %s: it resolves outside templates/%s/ (a symlink)", n, m.entry, tid)
+				}
 			}
 		}
 	}
-	return bindEscapes(dir, tid, compose, "")
+	return nil
+}
+
+// tplMount is one volume entry as CheckRelativeBinds reads it.
+type tplMount struct {
+	bind, abs, ro bool
+	src, entry    string
+}
+
+// templateMount reads one volume entry the way compose does; err (the
+// entry and why) when it can't be read — never skipped (fail closed).
+// Short syntax: a source with a "/" or starting with "." or "~" is a bind
+// (relative unless absolute), a bare name a named volume, no source an
+// anonymous volume. Long syntax: bind (source required), volume, tmpfs.
+func templateMount(e interface{}) (tplMount, string) {
+	if m, ok := e.(map[string]interface{}); ok {
+		typ := "volume"
+		if t, ok := m["type"]; ok && t != nil && t != "" {
+			typ = fmt.Sprint(t)
+		}
+		src := ""
+		if sv, ok := m["source"]; ok && sv != nil {
+			src = strings.TrimSpace(fmt.Sprint(sv))
+		}
+		shown := src
+		if shown == "" {
+			shown = pyJSON(m)
+		}
+		switch typ {
+		case "tmpfs":
+			return tplMount{}, ""
+		case "volume":
+			if src != "" && !vpnVolumeNameRe.MatchString(src) {
+				return tplMount{}, shown + ": a volume source must be a volume name"
+			}
+			return tplMount{}, ""
+		case "bind":
+			if src == "" {
+				return tplMount{}, shown + ": a bind needs a source"
+			}
+			ro := m["read_only"] == true // a real boolean only (ux2 round 4)
+			return tplMount{bind: true, abs: strings.HasPrefix(src, "/") || vpnDriveRe.MatchString(src), ro: ro, src: src, entry: src}, ""
+		}
+		return tplMount{}, shown + ": mount type " + typ + " isn't supported (bind, volume or tmpfs)"
+	}
+	s, ok := e.(string)
+	if !ok {
+		return tplMount{}, fmt.Sprint(e) + ": a volume entry is a string or a mapping"
+	}
+	entry := strings.TrimSpace(s)
+	if vpnDriveRe.MatchString(entry) {
+		return tplMount{bind: true, abs: true, src: entry, entry: entry}, ""
+	}
+	parts := strings.Split(entry, ":")
+	if len(parts) == 1 {
+		if entry == "" || !strings.HasPrefix(entry, "/") {
+			return tplMount{}, entry + ": an anonymous volume is an absolute container path"
+		}
+		return tplMount{}, "" // an anonymous volume
+	}
+	src := parts[0]
+	if len(parts) > 3 || src == "" || parts[1] == "" {
+		return tplMount{}, entry + ": not source:target[:options]"
+	}
+	var opts []string
+	if len(parts) == 3 {
+		opts = strings.Split(parts[2], ",")
+	}
+	ro := slices.Contains(opts, "ro")
+	if ro && slices.Contains(opts, "rw") {
+		// Compose takes the last one: never guess (ux2 round 4).
+		return tplMount{}, entry + ": the options carry both ro and rw"
+	}
+	if strings.HasPrefix(src, ".") || strings.HasPrefix(src, "/") || strings.HasPrefix(src, "~") || strings.Contains(src, "/") {
+		return tplMount{bind: true, abs: strings.HasPrefix(src, "/"), ro: ro, src: src, entry: entry}, ""
+	}
+	if !vpnVolumeNameRe.MatchString(src) {
+		return tplMount{}, entry + ": the source is neither a path nor a volume name"
+	}
+	return tplMount{}, ""
+}
+
+// checkVolumeDrivers refuses driver / driver_opts on a top-level volume
+// (every template, ux2 round 4): the local driver with o=bind and a device
+// mounts any host path, around the bind rules.
+func checkVolumeDrivers(compose []byte) error {
+	var doc struct {
+		Volumes map[string]interface{} `yaml:"volumes"`
+	}
+	if yaml.Unmarshal(compose, &doc) != nil {
+		return nil // the compose checks refuse a file that doesn't parse
+	}
+	for _, k := range slices.Sorted(maps.Keys(doc.Volumes)) {
+		if v, ok := doc.Volumes[k].(map[string]interface{}); ok {
+			for _, key := range []string{"driver", "driver_opts"} {
+				if _, set := v[key]; set {
+					return fmt.Errorf("volume %s sets %s: a template's volumes use the default driver (driver options can bind host paths)", k, key)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // mountInterpolated is the one interpolation check of every template's
