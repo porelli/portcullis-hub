@@ -167,11 +167,12 @@ func readProcHost() (usage.HostCounters, error) {
 }
 
 // sweepHost reads the host's counters and adds the derived figures at
-// now (cpus: the engine's NCPU). Never on Kubernetes: the Hub's pod is no
-// reliable view of a node. The error's text is procfs's (a path), never
-// an engine body.
-func (s *usageState) sweepHost(now time.Time, cpus int) {
-	if s.readHost == nil {
+// now (cpus: the engine's NCPU, 0: the cached one). Never on Kubernetes
+// (kind): the Hub's pod is no reliable view of a node, so procfs isn't
+// read at all. The error's text is procfs's (a path), never an engine
+// body.
+func (s *usageState) sweepHost(now time.Time, kind string, cpus int) {
+	if s.readHost == nil || kind == string(runtime.KindKubernetes) {
 		return
 	}
 	c, err := s.readHost()
@@ -299,13 +300,11 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		}
 	}
 
-	if kind != string(runtime.KindKubernetes) {
-		cpus := 0
-		if info != nil {
-			cpus = info.CPUs
-		}
-		s.sweepHost(now, cpus)
+	hostCPUs := 0
+	if info != nil {
+		hostCPUs = info.CPUs
 	}
+	s.sweepHost(now, kind, hostCPUs)
 
 	units, err := h.rt.List(ctx, runtime.Filter{})
 	if err != nil {

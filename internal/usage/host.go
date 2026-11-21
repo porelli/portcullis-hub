@@ -41,6 +41,8 @@ type HostSample struct {
 	BlkWriteBps  *float64
 }
 
+// ticks turns procfs's /proc/stat seconds back into USER_HZ ticks (the
+// kernel's own counts: seconds × userHZ, rounded).
 func ticks(sec float64) uint64 { return uint64(math.Round(sec * userHZ)) }
 
 // ReadHost reads the counters from fs (/proc/stat, /proc/meminfo) and bfs
@@ -58,7 +60,7 @@ func ReadHost(fs procfs.FS, bfs blockdevice.FS) (HostCounters, error) {
 		ticks(t.IRQ) + ticks(t.SoftIRQ) + ticks(t.Steal)
 	c.CPUIdle = ticks(t.Idle) + ticks(t.Iowait)
 	if c.CPUTotal == 0 {
-		return HostCounters{}, fmt.Errorf("reading the host's cpu ticks: no cpu line")
+		return HostCounters{}, fmt.Errorf("reading the host's cpu ticks: no cpu line in /proc/stat")
 	}
 	mi, err := fs.Meminfo()
 	if err != nil {
@@ -102,11 +104,13 @@ func wholeDisk(name string, all map[string]bool) bool {
 		}
 	}
 	for i := len(name) - 1; i > 0 && isDigit(name[i]); i-- {
-		disk := name[:i]
-		if strings.HasSuffix(disk, "p") && len(disk) > 1 && isDigit(disk[len(disk)-2]) && all[disk[:len(disk)-1]] {
+		// prefix: name without its trailing digits from i, a candidate
+		// <disk> (or <disk>p) of which name would be a partition.
+		prefix := name[:i]
+		if strings.HasSuffix(prefix, "p") && len(prefix) > 1 && isDigit(prefix[len(prefix)-2]) && all[prefix[:len(prefix)-1]] {
 			return false
 		}
-		if !isDigit(disk[len(disk)-1]) && all[disk] {
+		if !isDigit(prefix[len(prefix)-1]) && all[prefix] {
 			return false
 		}
 	}
