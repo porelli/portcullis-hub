@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	filippo.io/age v1.3.2
-	github.com/Microsoft/go-winio v0.6.2
+	github.com/Microsoft/go-winio v0.6.4
 	github.com/Nerzal/gocloak/v14 v14.0.4
 	github.com/alecthomas/participle/v2 v2.1.4
 	github.com/compose-spec/compose-go/v2 v2.16.2
@@ -46,7 +46,7 @@ require (
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 	golang.org/x/text v0.44.0
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee
 	gopkg.in/yaml.v3 v3.0.1
 	howett.net/plist v1.0.1
@@ -122,7 +122,7 @@ require (
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/segmentio/ksuid v1.0.4 // indirect
-	github.com/sirupsen/logrus v1.10.1 // indirect
+	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/vjeantet/goldap v0.0.0-20260720153039-a51461838017 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
