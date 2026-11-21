@@ -16,7 +16,7 @@
 //                                           {wired: false, drain}
 // POST /api/mail/provider/switch            {to, confirm, confirm_empty, code, code_verifier, nonce}
 // POST /api/mail/provider/retry-void
-// POST /api/mail/admin-view                 {} → {url, ticket} (audited)
+// POST /api/mail/admin-view                 {} → {url, ticket} (audited; the ticket goes to the view's start page over a MessageChannel)
 //
 // Rules: provider text (its name, version, checks, refusals, errors and
 // the warning) is set with textContent only, never into innerHTML; the
@@ -53,11 +53,15 @@
     if (b) b.textContent = 'Open ' + (label || 'the mail server') + '\'s admin (read-only)';
   }
 
-  // openAdminView asks the Hub for a ticket (audited) and posts it to
-  // the view in a new tab: the ticket travels in a form body, never a URL
-  // (no access log or history holds it). The tab opens from the click
-  // itself, without an opener; a blocked tab is a clear message, and no
-  // ticket is asked for.
+  // openAdminView asks the Hub for a ticket (audited) and hands it to the
+  // view in a new tab, never in a URL (no access log or history holds it):
+  // the tab is navigated with a GET to the view's start page (a browser
+  // retries a GET that a coalesced HTTP/2 connection answered 421
+  // Misdirected Request — a cross-host POST it doesn't), the start page
+  // answers a MessageChannel offered only to the view's origin, and posts
+  // the ticket it gets on that channel same-origin (contract §19.13). The
+  // tab opens from the click itself, without an opener; a blocked tab is a
+  // clear message, and no ticket is asked for.
   async function openAdminView() {
     const name = 'portcullis-mail-admin-' + Date.now();
     const w = window.open('about:blank', name);
@@ -71,23 +75,50 @@
       const r = await (await window.apiCall('/api/mail/admin-view', 'POST', {})).json();
       if (!r || typeof r.url !== 'string' || !/^https:\/\/[a-z0-9.-]+\/portcullis\/open$/.test(r.url) ||
         typeof r.ticket !== 'string' || !/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(r.ticket)) throw new Error('the Hub returned no admin view ticket');
-      const form = document.createElement('form');
-      form.method = 'POST';
-      form.action = r.url;
-      form.target = name;
-      form.rel = 'noopener';
-      const input = document.createElement('input');
-      input.type = 'hidden';
-      input.name = 't';
-      input.value = r.ticket;
-      form.appendChild(input);
-      document.body.appendChild(form);
-      form.submit();
-      form.remove();
+      const origin = new URL(r.url).origin;
+      w.location.href = r.url;
+      await handOverTicket(w, origin, r.ticket);
     } catch (e) {
-      w.close();
+      if (!w.closed) w.close();
       window.showToast(e.message, 'error');
     }
+  }
+
+  // handOverTicket offers the tab a MessageChannel every helloEveryMs,
+  // with targetOrigin = the view's origin (the browser drops the offer
+  // while the tab shows anything else: about:blank, a sign-in page), until
+  // the start page answers "ready" on one; then the ticket goes over that
+  // channel alone, once. It gives up when the tab is closed or after
+  // handOverMs (the ticket is valid for 60 s).
+  const helloEveryMs = 200;
+  const handOverMs = 55000;
+  function handOverTicket(w, origin, ticket) {
+    return new Promise(function (resolve, reject) {
+      const started = Date.now();
+      let done = false;
+      let timer = null;
+      function stop() { done = true; clearInterval(timer); }
+      function hello() {
+        if (done) return;
+        if (w.closed) { stop(); reject(new Error('the admin view\'s tab was closed')); return; }
+        if (Date.now() - started > handOverMs) { stop(); reject(new Error('the admin view didn\'t open in time: open it again')); return; }
+        const ch = new MessageChannel();
+        ch.port1.onmessage = function (m) {
+          if (done || !m.data || m.data.type !== 'portcullis-mail-admin-ready') return;
+          stop();
+          ch.port1.postMessage({ type: 'portcullis-mail-admin-ticket', ticket: ticket });
+          ch.port1.close();
+          resolve();
+        };
+        try {
+          w.postMessage({ type: 'portcullis-mail-admin-hello' }, origin, [ch.port2]);
+        } catch (_) {
+          ch.port1.close();
+        }
+      }
+      timer = setInterval(hello, helloEveryMs);
+      hello();
+    });
   }
 
   // tabSkeleton is the Mail tab's markup for view: ids and buttons only;
