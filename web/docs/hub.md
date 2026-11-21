@@ -55,6 +55,7 @@ The **Marketplace** page shows every template from every [template source](#temp
 | **Group Admin** | The app maps the `admin_<app>` group to its admin role (`auth.group_admin`) |
 | **Method** | `forward-auth`, `native-oidc`, `header-auth`, `mtls`, `custom` or `public` |
 | **No web page** | The template has no host routers (e.g., a background service) |
+| **Managed by Portcullis** | A mail provider: managed in Settings → Mail and on its Mail tab; a full administrator can open the mail server's own admin screen read-only ([Mail operations](mail.md#the-read-only-admin-view)) |
 | **Rootless: works / limited / not available** | Only under [rootless Podman](#rootless-podman): whether the app runs there, with the reasons in its tooltip |
 
 - tags (e.g., `productivity`, `media`)
@@ -79,7 +80,7 @@ The form has these sections:
 
 - **Domain picker**: choose the main domain or an added extra domain (domains not yet `ready` are disabled)
 - **Subdomain per host router**: shown as `[subdomain].<domain>`. An empty subdomain means the added domain itself. Pre-filled from defaults; edits are kept.
-- Templates with no web page show "No web page".
+- Templates with no web page show "No web page" (a mail provider: "Managed by Portcullis").
 
 ### Who can use it
 
