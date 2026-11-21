@@ -275,6 +275,11 @@
     .access-nav button { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 0.5rem 1rem; color: #94a3b8; font: inherit; font-size: 0.875rem; cursor: pointer; }
     .access-nav button[aria-selected="true"] { color: #e2e8f0; border-bottom-color: #3b82f6; }
     .access-nav button:hover { color: #e2e8f0; }
+    /* Settings subtabs (settingsnav.js): the same bar, wrapping on a narrow screen. */
+    .settings-nav { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 1.5rem; border-bottom: 1px solid #1e293b; }
+    .settings-nav button { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 0.5rem 1rem; color: #94a3b8; font: inherit; font-size: 0.875rem; cursor: pointer; }
+    .settings-nav button[aria-selected="true"] { color: #e2e8f0; border-bottom-color: #3b82f6; }
+    .settings-nav button:hover, .settings-nav button:focus-visible { color: #e2e8f0; }
     .access-pick { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
     /* Links: readable on the dark background everywhere. */
     :where(.tab-content a:not(.btn)) { color: #93c5fd; }
@@ -735,109 +740,67 @@
       <div class="drift" id="missing-groups"></div>
       <div class="drift" id="user-sweep"></div>
       <div id="apps-root"><p class="settings-empty">Loading…</p></div>
+
+      <!-- Marketplace: every template; in use or Install… (fillMarketplace);
+           shown in Apps at #marketplace (showMarketplace) -->
+      <div id="mkt-root" hidden>
+        <div class="page-crumbs"><a href="#apps" data-goto-tab="apps">Apps</a> › Marketplace</div>
+        {{range $category, $apps := .Categories}}
+        <div class="category">
+          <div class="category-title">{{$category}}</div>
+          <div class="apps">
+            {{range $apps}}
+            <div class="app-card" data-id="{{.ID}}" data-mail="{{if .MailProvider}}1{{end}}">
+              <div class="app-header">
+                <span class="app-icon">{{.Manifest.Icon}}</span>
+                <span class="app-name">{{.Manifest.Name}}</span>
+                {{if .MailProvider}}<span class="pill" data-mail-badge>mail server</span>{{end}}
+                <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
+              </div>
+              <div class="app-desc">{{.Manifest.Description}}</div>
+              <div class="app-auth">
+                {{if .Manifest.Auth.Method}}
+                  {{if eq (printf "%v" .Manifest.Auth.SSO) "true"}}
+                    <span class="auth-badge sso" title="Full Single Sign-On support">SSO</span>
+                  {{else if eq (printf "%v" .Manifest.Auth.SSO) "partial"}}
+                    <span class="auth-badge sso-partial" title="Partial SSO via proxy auth header">SSO*</span>
+                  {{end}}
+                  {{if .MailProvider}}
+                    <span class="auth-badge method" data-managed-by-portcullis="{{.ID}}" title="Mail is managed in Portcullis (Settings → Mail and the instance's Mail tab), so Portcullis's mail safeguards always apply. A full administrator can open the mail server's own admin screen read-only.">Managed by Portcullis</span>
+                  {{else if .Manifest.Routerless}}
+                    <span class="auth-badge method" data-no-web-page="{{.ID}}" title="This app has no web page: people use it with its own client (see My apps)">No web page</span>
+                  {{end}}
+                  {{if .Manifest.Auth.GroupAccess}}
+                    <span class="auth-badge group" title="Access restricted by LLDAP group">Group Access</span>
+                  {{end}}
+                  {{if .Manifest.Auth.GroupAdmin}}
+                    <span class="auth-badge group-admin" title="Admin role assigned by LLDAP group">Group Admin</span>
+                  {{end}}
+                  {{if eq .Manifest.Auth.Method "public"}}
+                    <span class="auth-badge public">Public</span>
+                  {{else}}
+                    <span class="auth-badge method" title="{{.Manifest.Auth.NoteText}}">{{.Manifest.Auth.Method}}</span>
+                  {{end}}
+                {{end}}
+              </div>
+              <div class="app-tags">
+                {{range .Manifest.Tags}}<span class="tag">{{.}}</span>{{end}}
+              </div>
+              <div class="app-footer" data-mkt-use="{{.ID}}" data-mkt-multi="{{if eq .Manifest.Instances "multi"}}1{{end}}" data-compat="{{if .Compat}}{{.Compat.Status}}{{end}}" data-compat-runtime="{{if .Compat}}{{.Compat.Runtime}}{{end}}" data-compat-reasons="{{if .Compat}}{{range $i, $r := .Compat.Reasons}}{{if $i}}; {{end}}{{$r}}{{end}}{{end}}"></div>
+            </div>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
+
+        {{if not .Templates}}
+        <div class="empty">No templates found. Add a template source in <a href="#settings/sources">Settings → Template sources</a> or check the templates/ directory.</div>
+        {{end}}
+      </div>
     </div>
 
     <!-- One page per instance, the default one included (#apps/<id>[/<tab>], renderInstancePage) -->
     <div class="tab-content" id="tab-instance"><div id="instance-page"></div></div>
-
-    <!-- Marketplace: every template; in use or Install… (fillMarketplace) -->
-    <div class="tab-content" id="tab-marketplace">
-      {{range $category, $apps := .Categories}}
-      <div class="category">
-        <div class="category-title">{{$category}}</div>
-        <div class="apps">
-          {{range $apps}}
-          <div class="app-card" data-id="{{.ID}}" data-mail="{{if .MailProvider}}1{{end}}">
-            <div class="app-header">
-              <span class="app-icon">{{.Manifest.Icon}}</span>
-              <span class="app-name">{{.Manifest.Name}}</span>
-              {{if .MailProvider}}<span class="pill" data-mail-badge>mail server</span>{{end}}
-              <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
-            </div>
-            <div class="app-desc">{{.Manifest.Description}}</div>
-            <div class="app-auth">
-              {{if .Manifest.Auth.Method}}
-                {{if eq (printf "%v" .Manifest.Auth.SSO) "true"}}
-                  <span class="auth-badge sso" title="Full Single Sign-On support">SSO</span>
-                {{else if eq (printf "%v" .Manifest.Auth.SSO) "partial"}}
-                  <span class="auth-badge sso-partial" title="Partial SSO via proxy auth header">SSO*</span>
-                {{end}}
-                {{if .MailProvider}}
-                  <span class="auth-badge method" data-managed-by-portcullis="{{.ID}}" title="Mail is managed in Portcullis (Settings → Mail and the instance's Mail tab), so Portcullis's mail safeguards always apply. A full administrator can open the mail server's own admin screen read-only.">Managed by Portcullis</span>
-                {{else if .Manifest.Routerless}}
-                  <span class="auth-badge method" data-no-web-page="{{.ID}}" title="This app has no web page: people use it with its own client (see My apps)">No web page</span>
-                {{end}}
-                {{if .Manifest.Auth.GroupAccess}}
-                  <span class="auth-badge group" title="Access restricted by LLDAP group">Group Access</span>
-                {{end}}
-                {{if .Manifest.Auth.GroupAdmin}}
-                  <span class="auth-badge group-admin" title="Admin role assigned by LLDAP group">Group Admin</span>
-                {{end}}
-                {{if eq .Manifest.Auth.Method "public"}}
-                  <span class="auth-badge public">Public</span>
-                {{else}}
-                  <span class="auth-badge method" title="{{.Manifest.Auth.NoteText}}">{{.Manifest.Auth.Method}}</span>
-                {{end}}
-              {{end}}
-            </div>
-            <div class="app-tags">
-              {{range .Manifest.Tags}}<span class="tag">{{.}}</span>{{end}}
-            </div>
-            <div class="app-footer" data-mkt-use="{{.ID}}" data-mkt-multi="{{if eq .Manifest.Instances "multi"}}1{{end}}" data-compat="{{if .Compat}}{{.Compat.Status}}{{end}}" data-compat-runtime="{{if .Compat}}{{.Compat.Runtime}}{{end}}" data-compat-reasons="{{if .Compat}}{{range $i, $r := .Compat.Reasons}}{{if $i}}; {{end}}{{$r}}{{end}}{{end}}"></div>
-          </div>
-          {{end}}
-        </div>
-      </div>
-      {{end}}
-
-      {{if not .Templates}}
-      <div class="empty">No templates found. Add a template source below or check the templates/ directory.</div>
-      {{end}}
-
-      <!-- Template sources: where the Marketplace's templates come from -->
-      <div class="category" id="mkt-sources" style="margin-top: 2.5rem;">
-        <div class="category-title">Template sources</div>
-        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-          The git repositories the Marketplace's templates come from.
-        </p>
-        <div class="sources-list" id="sources-list">
-          {{range .Sources}}
-          <div class="source-item" data-name="{{.Name}}">
-            <div class="source-info">
-              <div class="source-name">{{.Name}}{{if eq .Name "portcullis"}} <span style="font-size: 0.6875rem; color: #3b82f6; margin-left: 0.5rem;">default</span>{{end}}</div>
-              <div class="source-url">{{.URL}}</div>
-            </div>
-            <div class="source-actions">
-              {{if ne .Name "portcullis"}}
-              <button type="button" class="btn btn-danger" data-src-remove="{{.Name}}">Remove</button>
-              {{end}}
-            </div>
-          </div>
-          {{end}}
-          {{if not .Sources}}
-          <div class="empty" id="no-sources">No template sources configured.</div>
-          {{end}}
-        </div>
-
-        <div style="margin-top: 1.5rem;">
-          <div class="category-title">Add Template Repository</div>
-          <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-            Add a git repository containing template directories. Each template needs a <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">manifest.yaml</code> and <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">compose.yml</code>.
-          </p>
-          <div class="form-row">
-            <input type="text" id="source-name" placeholder="Name (e.g., my-templates)">
-            <input type="text" id="source-url" placeholder="Git URL (e.g., https://github.com/user/portcullis-templates.git)">
-            <button type="button" class="btn btn-primary" data-src-add>Add</button>
-          </div>
-        </div>
-
-        <div style="margin-top: 2rem;">
-          <button type="button" class="btn btn-secondary" data-src-sync>Sync All Sources</button>
-          <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories (the Hub also syncs at every start and on <code>./portcullis upgrade</code>)</span>
-          <div id="source-sync-status" style="margin-top: 0.75rem; font-size: 0.8125rem; color: #94a3b8;"></div>
-        </div>
-      </div>
-    </div>
 
     <!-- Doctor Tab (web/doctor.js) -->
     <div class="tab-content" id="tab-doctor">
@@ -880,74 +843,124 @@
     <!-- Settings → Sign-in and the instance sign-in pick -->
     <script src="/static/signin.js"></script>
 
-    <!-- Settings Tab -->
+    <!-- Settings Tab: 8 subtabs (web/settingsnav.js), each at
+         #settings/<section>; only the shown section loads. -->
     <div class="tab-content" id="tab-settings">
-      <div class="category-title" style="margin-bottom: 1rem;">Sign-in</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Which sign-in methods people may use on this server, and templates: named rules over those methods, each with a score out of 5.
-        One template is the default; each app picks the default or another enabled template in its Settings tab, and Portcullis's own pages are set below.
-        Wherever a template applies, the people who can't meet it yet are listed.
-      </p>
-      <div id="signin-root"></div>
+      <div class="settings-nav" role="tablist" aria-label="Settings sections">
+        <button type="button" role="tab" id="settings-tab-signin" aria-controls="settings-signin" aria-selected="true" tabindex="0" data-settings-tab="signin">Sign-in</button>
+        <button type="button" role="tab" id="settings-tab-network" aria-controls="settings-network" aria-selected="false" tabindex="-1" data-settings-tab="network">Network</button>
+        <button type="button" role="tab" id="settings-tab-storage" aria-controls="settings-storage" aria-selected="false" tabindex="-1" data-settings-tab="storage">Storage</button>
+        <button type="button" role="tab" id="settings-tab-mail" aria-controls="settings-mail" aria-selected="false" tabindex="-1" data-settings-tab="mail">Mail</button>
+        <button type="button" role="tab" id="settings-tab-ai" aria-controls="settings-ai" aria-selected="false" tabindex="-1" data-settings-tab="ai">AI</button>
+        <button type="button" role="tab" id="settings-tab-servers" aria-controls="settings-servers" aria-selected="false" tabindex="-1" data-settings-tab="servers">Servers</button>
+        <button type="button" role="tab" id="settings-tab-ssh" aria-controls="settings-ssh" aria-selected="false" tabindex="-1" data-settings-tab="ssh">SSH</button>
+        <button type="button" role="tab" id="settings-tab-sources" aria-controls="settings-sources" aria-selected="false" tabindex="-1" data-settings-tab="sources">Template sources</button>
+      </div>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">AI support</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        People's AI assistants (Claude, Claude Code, other MCP clients) can use their apps as them, through core's
-        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">mcp-gate</code>: each app's
-        <b>AI support</b> tab switches it on for that app. Model providers are where the AI page apps send what people type there.
-      </p>
-      <div id="ai-root"></div>
+      <section data-settings-section="signin" id="settings-signin" role="tabpanel" aria-labelledby="settings-tab-signin">
+        <div class="category-title" style="margin-bottom: 1rem;">Sign-in</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Which sign-in methods people may use on this server, and templates: named rules over those methods, each with a score out of 5.
+          One template is the default; each app picks the default or another enabled template in its Settings tab, and Portcullis's own pages are set below.
+          Wherever a template applies, the people who can't meet it yet are listed.
+        </p>
+        <div id="signin-root"></div>
+      </section>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">Domains</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
-        Portcullis points <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">&lt;domain&gt;</code> and
-        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">*.&lt;domain&gt;</code> at this server and obtains a wildcard website
-        certificate (HTTPS) with the DNS provider's API token. A domain receives hostnames once its records are OK and its website certificate is valid.
-        Tokens are write-only: they go to core's domains service (encrypted at rest) and are never shown again.
-      </p>
-      <div id="domains-root"></div>
+      <section data-settings-section="network" id="settings-network" role="tabpanel" aria-labelledby="settings-tab-network" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Domains</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
+          Portcullis points <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">&lt;domain&gt;</code> and
+          <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">*.&lt;domain&gt;</code> at this server and obtains a wildcard website
+          certificate (HTTPS) with the DNS provider's API token. A domain receives hostnames once its records are OK and its website certificate is valid.
+          Tokens are write-only: they go to core's domains service (encrypted at rest) and are never shown again.
+        </p>
+        <div id="domains-root"></div>
+        <div class="category-title" style="margin: 2rem 0 1rem;">Local networks</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Your LAN and VPN ranges. The doctor judges LAN-only ports (file sharing, discovery) against them, and "Rebind…" only accepts an address inside them.
+        </p>
+        <div id="localnets-root"></div>
+        <div class="category-title" style="margin: 2rem 0 1rem;">VPN</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Who may use Portcullis VPNs, how many built-in devices each person may have and for how long, and the VPN providers.
+        </p>
+        <div id="vpn-settings-root"></div>
+      </section>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">Shared folders</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Host folders several apps use. Each folder gets its own group: its files and folders are given that group, setgid and a default ACL,
-        so whatever one app writes the others can read (or write). Assigning apps is always previewed first, a permissions snapshot is saved
-        before anything changes, and the last apply can be undone. Removing a folder never deletes files.
-      </p>
-      <div id="folders-root"></div>
+      <section data-settings-section="storage" id="settings-storage" role="tabpanel" aria-labelledby="settings-tab-storage" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Shared folders</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Host folders several apps use. Each folder gets its own group: its files and folders are given that group, setgid and a default ACL,
+          so whatever one app writes the others can read (or write). Assigning apps is always previewed first, a permissions snapshot is saved
+          before anything changes, and the last apply can be undone. Removing a folder never deletes files.
+        </p>
+        <div id="folders-root"></div>
+      </section>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">Local networks</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Your LAN and VPN ranges. The doctor judges LAN-only ports (file sharing, discovery) against them, and "Rebind…" only accepts an address inside them.
-      </p>
-      <div id="localnets-root"></div>
+      <section data-settings-section="mail" id="settings-mail" role="tabpanel" aria-labelledby="settings-tab-mail" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Mail</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Mail for the main domain and the added domains you turn it on for: who gets an address where, the primary domain, the spam filter, sending limits and mailbox sizes.
+          Mailboxes go to the members of <code>mail_users</code>; people create their own mail passwords on their Sign-in page.
+        </p>
+        <div id="mail-settings-root"></div>
+      </section>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">VPN</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Who may use Portcullis VPNs, how many built-in devices each person may have and for how long, and the VPN providers.
-      </p>
-      <div id="vpn-settings-root"></div>
+      <section data-settings-section="ai" id="settings-ai" role="tabpanel" aria-labelledby="settings-tab-ai" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">AI support</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          People's AI assistants (Claude, Claude Code, other MCP clients) can use their apps as them, through core's
+          <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">mcp-gate</code>: each app's
+          <b>AI support</b> tab switches it on for that app. Model providers are where the AI page apps send what people type there.
+        </p>
+        <div id="ai-root"></div>
+      </section>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">Mail</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Mail for the main domain and the added domains you turn it on for: who gets an address where, the primary domain, the spam filter, sending limits and mailbox sizes.
-        Mailboxes go to the members of <code>mail_users</code>; people create their own mail passwords on their Sign-in page.
-      </p>
-      <div id="mail-settings-root"></div>
+      <section data-settings-section="servers" id="settings-servers" role="tabpanel" aria-labelledby="settings-tab-servers" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Servers</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          The primary and the worker servers your apps can run on: their state, free space and certificates, each one's Local networks and scheduled backups.
+          Adding, revoking and removing a server need a fresh sign-in.
+        </p>
+        <div id="servers-root"></div>
+      </section>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">Servers</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        The primary and the worker servers your apps can run on: their state, free space and certificates, each one's Local networks and scheduled backups.
-        Adding, revoking and removing a server need a fresh sign-in.
-      </p>
-      <div id="servers-root"></div>
+      <section data-settings-section="ssh" id="settings-ssh" role="tabpanel" aria-labelledby="settings-tab-ssh" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">SSH</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Whether SSH access is on, the certificates' default lifetime and the certificate authorities' public keys.
+        </p>
+        <div id="ssh-settings-root"></div>
 
-      <div class="category-title" style="margin: 2rem 0 1rem;">SSH</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Whether SSH access is on, the certificates' default lifetime and the certificate authorities' public keys.
-      </p>
-      <div id="ssh-settings-root"></div>
+      </section>
 
+      <section data-settings-section="sources" id="settings-sources" role="tabpanel" aria-labelledby="settings-tab-sources" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Template sources</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          The git repositories the Marketplace's templates come from.
+        </p>
+        <div class="sources-list" id="sources-list"><p class="settings-empty">Loading…</p></div>
+
+        <div style="margin-top: 1.5rem;">
+          <div class="category-title">Add a template repository</div>
+          <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+            Add a git repository containing template directories. Each template needs a <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">manifest.yaml</code> and <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">compose.yml</code>.
+          </p>
+          <div class="form-row">
+            <input type="text" id="source-name" placeholder="Name (e.g., my-templates)">
+            <input type="text" id="source-url" placeholder="Git URL (e.g., https://github.com/user/portcullis-templates.git)">
+            <button type="button" class="btn btn-primary" data-src-add>Add</button>
+          </div>
+        </div>
+
+        <div style="margin-top: 2rem;">
+          <button type="button" class="btn btn-secondary" data-src-sync>Sync all sources</button>
+          <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories (the Hub also syncs at every start and on <code>./portcullis upgrade</code>)</span>
+          <div id="source-sync-status" style="margin-top: 0.75rem; font-size: 0.8125rem; color: #94a3b8;"></div>
+        </div>
+      </section>
     </div>
   </div>
 
@@ -990,13 +1003,14 @@
   <script src="/static/doctor.js"></script>
   <script src="/static/ssh.js"></script>
   <script src="/static/access.js"></script>
+  <script src="/static/settingsnav.js"></script>
   <script src="/static/usage.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
     // showTab(name): one of the top tabs (apps, doctor, usage, access,
-    // settings, audit), "instance" (an instance's page) or "marketplace"
-    // (the Marketplace, until it moves into Apps): the Apps tab stays
-    // highlighted for both. The tab's content loads on every selection.
+    // settings, audit) or "instance" (an instance's page: the Apps tab
+    // stays highlighted). The tab's content loads on every selection
+    // (Settings: only its shown section, PortcullisSettingsNav).
     // Leaving an instance page with unsaved work asks first: false = the
     // admin stayed (the page's hash is put back).
     // usageView: the Usage tab's view (#usage/<view>); accessView: the
@@ -1007,18 +1021,10 @@
     let settingsView = { section: '' };
     function showTab(name, asked) {
       if (name !== 'instance' && pageCtx && !asked && !leavePageOK()) { history.replaceState(null, '', pageHash()); return false; }
-      const top = name === 'instance' || name === 'marketplace' ? 'apps' : name;
+      const top = name === 'instance' ? 'apps' : name;
       document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === top));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
-      if (name === 'settings') {
-        PortcullisSignIn.mount(document.getElementById('signin-root')); loadDomains(); loadAISettings();
-        PortcullisFolders.render(document.getElementById('folders-root'));
-        PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
-        loadVPNSettings(document.getElementById('vpn-settings-root'));
-        if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
-        if (window.PortcullisServers) PortcullisServers.render(document.getElementById('servers-root'));
-        if (window.PortcullisSSH) PortcullisSSH.renderSettings(document.getElementById('ssh-settings-root'));
-      }
+      if (name === 'settings') PortcullisSettingsNav.show(settingsView.section, '');
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
       if (name === 'access' && window.PortcullisAccess) PortcullisAccess.render(document.getElementById('access-root'), accessView.section, accessView);
       // The Usage tab polls while shown; leaving it (or an instance's
@@ -1026,8 +1032,8 @@
       if (window.PortcullisUsage) PortcullisUsage.stop();
       if (name === 'usage') PortcullisUsage.render(document.getElementById('usage-root'), usageView);
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
-      if (name === 'apps') { renderApps(); if (window.PortcullisServers) PortcullisServers.load().catch(() => {}); }
-      if (name === 'marketplace') { fillMarketplace(); if (!/[?]filter=/.test(location.hash)) filterMarketplace(''); }
+      // Apps shows its list; showMarketplace shows the Marketplace in its place.
+      if (name === 'apps') { setMarketplaceShown(false); renderApps(); if (window.PortcullisServers) PortcullisServers.load().catch(() => {}); }
       // Leaving an instance's page drops it (its drafts too).
       if (name !== 'instance' && pageCtx) { pageCtx = null; document.getElementById('instance-page').innerHTML = ''; }
       return true;
@@ -1035,8 +1041,10 @@
     document.querySelectorAll('.tab[data-tab]').forEach(tab => {
       tab.addEventListener('click', () => {
         if (tab.dataset.tab === 'access') accessView = { section: 'ssh', sub: '', user: '' };
+        if (tab.dataset.tab === 'settings') settingsView = { section: '' };
         if (!showTab(tab.dataset.tab)) return;
-        history.replaceState(null, '', tab.dataset.tab === 'apps' ? location.pathname : '#' + tab.dataset.tab);
+        // Settings names its section itself (#settings/<section>).
+        if (tab.dataset.tab !== 'settings') history.replaceState(null, '', tab.dataset.tab === 'apps' ? location.pathname : '#' + tab.dataset.tab);
       });
     });
     // Deep links (ROUTES below, routed at load and on a hash change):
@@ -1087,25 +1095,36 @@
       const ai = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
       return ai ? '#apps/' + ai[1] + '/ai' : null;
     }
-    // showMarketplace({filter, open}): the Marketplace — Apps' own once
-    // marketplace.js is there (PortcullisMarketplace), else its page.
+    // setMarketplaceShown(on): the Apps tab shows the Marketplace
+    // (#mkt-root) instead of its list (#apps-root).
+    function setMarketplaceShown(on) {
+      const list = document.getElementById('apps-root'), mkt = document.getElementById('mkt-root');
+      if (list) list.hidden = on;
+      if (mkt) mkt.hidden = !on;
+    }
+    function marketplaceShown() {
+      const mkt = document.getElementById('mkt-root');
+      return !!mkt && !mkt.hidden && document.getElementById('tab-apps').classList.contains('active');
+    }
+    // showMarketplace({filter, open}): the Marketplace in Apps — rendered
+    // by marketplace.js once it's there (PortcullisMarketplace).
     function showMarketplace(o) {
+      if (!showTab('apps')) return;
+      setMarketplaceShown(true);
       if (window.PortcullisMarketplace) {
-        if (!showTab('apps')) return;
         window.PortcullisMarketplace.render(document.getElementById('mkt-root'), o);
         return;
       }
-      if (!showTab('marketplace')) return;
+      fillMarketplace();
       filterMarketplace(o.filter);
       const card = o.open && document.querySelector('.app-card[data-id="' + CSS.escape(o.open) + '"]');
       if (card) { card.scrollIntoView({ block: 'center' }); flash(card); }
     }
-    // showSettings(section): the Settings tab at a section (the subtabs'
-    // own once settingsnav.js is there).
+    // showSettings(section): the Settings tab at a section (an unknown
+    // one: Sign-in; PortcullisSettingsNav).
     function showSettings(section) {
       settingsView = { section: section || '' };
-      if (window.PortcullisSettingsNav) { if (showTab('settings')) window.PortcullisSettingsNav.show(settingsView.section, ''); return; }
-      showTab('settings');
+      return showTab('settings');
     }
     // ROUTES: [regex over the hash without '#', handler(match)], the
     // first match wins. Kept to the regex subset Go shares (no
@@ -1787,7 +1806,7 @@
     // The Settings tab's forms the Portcullis MCP's U tools link to:
     // domains add / token, a model provider's secret.
     async function openSettingsForm(kind, q) {
-      document.querySelector('.tab[data-tab="settings"]').click();
+      if (!showSettings(kind)) return;
       if (kind === 'network' && q.get('add')) {
         const form = await waitFor('#domain-add-form');
         if (!form) return;
@@ -2778,7 +2797,7 @@
       if (t.closest('[data-ai-goto-settings]')) {
         e.preventDefault();
         if (document.getElementById('inst-modal').classList.contains('visible')) closeInstModal();
-        document.querySelector('.tab[data-tab="settings"]').click();
+        showSettings('ai');
         waitFor('#ai-settings-form').then(f => f && flash(f));
         return;
       }
@@ -3651,7 +3670,7 @@
           b.title = r.verified ? '' : 'Not verified: ' + (r.mismatch || 'not checked yet');
           b.hidden = false;
         }
-        if (document.getElementById('tab-marketplace').classList.contains('active')) fillMarketplace();
+        if (marketplaceShown()) fillMarketplace();
       }).catch(() => { runtimeInfo = null; });
     }
     window.addEventListener('load', loadRuntime);
@@ -3684,7 +3703,7 @@
     }
     function renderInstanceViews() {
       if (document.getElementById('tab-apps').classList.contains('active')) renderApps();
-      if (document.getElementById('tab-marketplace').classList.contains('active')) fillMarketplace();
+      if (marketplaceShown()) fillMarketplace();
       if (pageCtx) renderPageHead();
     }
     async function loadDirectory(force) {
@@ -3816,7 +3835,7 @@
     // filterMarketplace: only the templates of kind (mail) shown, with a
     // way back to all; '' shows all.
     function filterMarketplace(kind) {
-      const box = document.getElementById('tab-marketplace');
+      const box = document.getElementById('mkt-root');
       if (!box) return;
       box.querySelectorAll('.app-card').forEach(c => { c.hidden = kind === 'mail' && c.dataset.mail !== '1'; });
       box.querySelectorAll('.category').forEach(cat => { cat.hidden = !cat.querySelector('.app-card:not([hidden])'); });
@@ -3850,6 +3869,7 @@
     // goTab: a top tab, with a history entry (the page's links).
     function goTab(name) {
       if (pageCtx && !leavePageOK()) return;
+      if (name === 'marketplace') { history.pushState(null, '', '#marketplace'); showMarketplace({ filter: '', open: '' }); return; }
       history.pushState(null, '', name === 'apps' ? location.pathname : '#' + name);
       showTab(name, true);
     }
@@ -4969,21 +4989,39 @@
     setInterval(() => { if (!instCtx) refreshInstances(); }, 15000);
 
     // ── Sources ───────────────────────────────────────────
+    // Settings → Template sources.
+    // sourcesHtml(list): GET /api/sources's name and URL per source,
+    // escaped; the default source (portcullis) can't be removed.
+    function sourcesHtml(list) {
+      if (!(list || []).length) return '<div class="empty" id="no-sources">No template sources configured.</div>';
+      return list.map(src => '<div class="source-item" data-name="' + escapeHtml(src.name) + '"><div class="source-info">' +
+        '<div class="source-name">' + escapeHtml(src.name) + (src.name === 'portcullis' ? ' <span class="pill">default</span>' : '') + '</div>' +
+        '<div class="source-url">' + escapeHtml(src.url) + '</div></div><div class="source-actions">' +
+        (src.name !== 'portcullis' ? '<button type="button" class="btn btn-danger" data-src-remove="' + escapeHtml(src.name) + '">Remove</button>' : '') +
+        '</div></div>').join('');
+    }
+    async function loadSources() {
+      const box = document.getElementById('sources-list');
+      if (!box) return;
+      try { box.innerHTML = sourcesHtml(await apiGet('/api/sources')); } catch (e) { box.innerHTML = errorBox(e); }
+    }
+    // After a change the page reloads at #settings/sources: the
+    // Marketplace is rendered by the server from the synced templates.
     async function addSource() {
       const name = document.getElementById('source-name').value.trim();
       const url = document.getElementById('source-url').value.trim();
       if (!name || !url) { showToast('Name and URL are required', 'error'); return; }
       try {
         await apiPost('/api/sources/add', { name, url });
-        showToast(`Source "${name}" added`, 'success');
+        showToast('Source "' + name + '" added', 'success');
         setTimeout(() => location.reload(), 500);
       } catch (e) { showToast(e.message, 'error'); }
     }
     async function removeSource(name) {
-      if (!confirm(`Remove source "${name}"? Apps from this source will be disabled.`)) return;
+      if (!confirm('Remove source "' + name + '"? Apps from this source will be disabled.')) return;
       try {
         await apiPost('/api/sources/remove', { name });
-        showToast(`Source "${name}" removed`, 'success');
+        showToast('Source "' + name + '" removed', 'success');
         setTimeout(() => location.reload(), 500);
       } catch (e) { showToast(e.message, 'error'); }
     }
@@ -5016,7 +5054,6 @@
       }
       box.innerHTML = html;
     }
-    loadSourceSync();
 
 
     // ── VPN (contract §5, §11): an instance's Access (Reachable from /

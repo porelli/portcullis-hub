@@ -228,7 +228,7 @@ func TestHubAppsPageStatic(t *testing.T) {
 			t.Errorf("the hub index still has %q", gone)
 		}
 	}
-	for _, want := range []string{`id="tab-apps"`, `id="tab-instance"`, `id="tab-marketplace"`, `id="mkt-sources"`, `data-src-remove="`, `data-src-sync`,
+	for _, want := range []string{`id="tab-apps"`, `id="tab-instance"`, `id="mkt-root"`, `id="sources-list"`, `data-src-remove="`, `data-src-sync`,
 		`data-mkt-use="`, "'in use · ' + n + (n === 1 ? ' instance' : ' instances')", `data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>`,
 		`data-install="' + escapeHtml(tid) + '"' + off + '>Install…</button>`, "Manage on People &#8599;", "existing group", "'+ Add your own variable'",
 		`[/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],`, "function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }",

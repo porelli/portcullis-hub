@@ -225,6 +225,8 @@ function showTab(n) { calls.push(['showTab', n, n === 'access' ? accessView : n 
 function openInstancePage(id, tab, opt) { calls.push(['instance', id, tab, opt]); }
 function openSettingsForm(kind, q) { calls.push(['form', kind, q.toString()]); }
 function filterMarketplace(k) { calls.push(['filter', k]); }
+function fillMarketplace() {}
+function setMarketplaceShown(on) { calls.push(['mktShown', on]); }
 function flash() {}
 ` + hubFunc(t, src, "peopleRedirect") + hubFunc(t, src, "oldAppLink") + hubFunc(t, src, "showMarketplace") + hubFunc(t, src, "showSettings") + block + hubFunc(t, src, "routeTo") + hubFunc(t, src, "routeHash") + `
 const out = {};
@@ -247,23 +249,23 @@ process.stdout.write(JSON.stringify(out));
 		"#access/signins?user=alice":        `[["showTab","access",{"section":"signins","sub":"","user":"alice"}]]`,
 		"#ssh":                              `[["showTab","apps",null]]`,
 		"#sources":                          `[["showTab","apps",null]]`,
-		"#marketplace?filter=mail":          `[["showTab","marketplace",null],["filter","mail"]]`,
+		"#marketplace?filter=mail":          `[["showTab","apps",null],["mktShown",true],["filter","mail"]]`,
 		"#usage/storage":                    `[["showTab","usage",null]]`,
 		"#settings/network?add=example.org": `[["form","network","add=example.org"]]`,
 		"#settings/ssh":                     `[["showTab","settings",{"section":"ssh"}]]`,
 		"#bogus":                            `[["showTab","apps",null]]`,
 		"":                                  `[["showTab","apps",null]]`,
-		"mkt+":                              `[["showTab","apps",null],["mkt",{"filter":"mail","open":""}]]`,
-		"mkt/":                              `[["showTab","apps",null],["mkt",{"filter":"","open":"stalwart"}]]`,
+		"mkt+":                              `[["showTab","apps",null],["mktShown",true],["mkt",{"filter":"mail","open":""}]]`,
+		"mkt/":                              `[["showTab","apps",null],["mktShown",true],["mkt",{"filter":"","open":"stalwart"}]]`,
 	}
 	for k, want := range cases {
 		if g := str(k); g != want {
 			t.Errorf("%q → %s, want %s", k, g, want)
 		}
 	}
-	// The Marketplace (until it moves into Apps) and an instance page
-	// keep the Apps tab highlighted.
-	if !strings.Contains(src, "const top = name === 'instance' || name === 'marketplace' ? 'apps' : name;") {
-		t.Error("showTab doesn't highlight Apps for the Marketplace")
+	// The Marketplace is shown inside the Apps tab (#mkt-root), not a
+	// page of its own.
+	if strings.Contains(src, `id="tab-marketplace"`) || strings.Contains(src, "showTab('marketplace')") {
+		t.Error("the Marketplace is still a page of its own")
 	}
 }

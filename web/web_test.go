@@ -185,10 +185,13 @@ func TestSSHPagesEmbedded(t *testing.T) {
 		return string(b)
 	}
 	idx := read("index.html")
-	for _, want := range []string{`data-tab="access"`, `id="tab-access"`, `id="access-root"`, `id="ssh-settings-root"`, `PortcullisSSH.renderSettings(`} {
+	for _, want := range []string{`data-tab="access"`, `id="tab-access"`, `id="access-root"`, `id="ssh-settings-root"`, `<script src="/static/settingsnav.js"></script>`} {
 		if !strings.Contains(idx, want) {
 			t.Errorf("index.html lacks %s", want)
 		}
+	}
+	if !strings.Contains(read("settingsnav.js"), "PortcullisSSH.renderSettings(") {
+		t.Error("Settings → SSH doesn't mount PortcullisSSH.renderSettings")
 	}
 	fa, sj := strings.Index(idx, `src="/static/freshauth.js"`), strings.Index(idx, `src="/static/ssh.js"`)
 	if fa < 0 || sj < 0 || fa > sj {

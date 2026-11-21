@@ -405,7 +405,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"PortalName": name,
 		"Templates":  ts,
 		"Categories": categories,
-		"Sources":    s.Hub.Sources(),
 		"User":       user,
 		// The signed-in user is LLDAP's bootstrap admin (checkTarget
 		// refuses it in every group: it can't use the apps it installs).
