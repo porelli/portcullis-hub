@@ -46,6 +46,46 @@ async function marketplaceBehaviour(p, evil) {
   return bad;
 }
 
+// shareBehaviour: the Usage tab's Share view in a real browser — the
+// donuts and legend tables are there, an app name stays text, a slice
+// opens from the keyboard (focus on "← All apps"), back returns focus to
+// the app's name, the 1 h toggle asks for window=1h, and a server whose
+// host has a why shows it instead of donuts.
+async function shareBehaviour(p, base) {
+  const bad = [];
+  const say = (ok, what) => { if (!ok) bad.push('share behaviour: ' + what); };
+  const asked = [];
+  p.on('request', r => { if (r.url().indexOf('/api/usage?window=') >= 0) asked.push(r.url().replace(/^.*\?/, '')); });
+  await p.goto(base + '/#usage/share');
+  await p.waitForTimeout(1500);
+  const shape = await p.evaluate(() => [document.querySelectorAll('#usage-root svg.share-donut').length, document.querySelectorAll('#usage-root table.share-legend').length,
+    document.querySelectorAll('#usage-root .share b').length, (document.querySelector('#usage-root .share') || {}).textContent || '']);
+  say(shape[0] >= 5 && shape[1] >= 5 && shape[2] === 0 && shape[3].indexOf('Grafana <b>') >= 0, 'donuts/legends/escaping: ' + JSON.stringify(shape.slice(0, 3)));
+  const id = await p.$eval('#usage-root path[data-share-app]', e => e.getAttribute('data-share-app')).catch(() => '');
+  say(!!id, 'no focusable app slice');
+  if (id) {
+    await p.focus('#usage-root path[data-share-app="' + id + '"]');
+    await p.keyboard.press('Enter');
+    await p.waitForTimeout(300);
+    const drill = await p.evaluate(() => [!!document.querySelector('#usage-root [data-share-back]'), document.activeElement && document.activeElement.hasAttribute('data-share-back')]);
+    say(drill[0] && drill[1], 'Enter on a slice: ' + JSON.stringify(drill));
+    await p.keyboard.press('Enter');
+    await p.waitForTimeout(300);
+    say(await p.evaluate(i => !document.querySelector('#usage-root [data-share-back]') && document.activeElement && document.activeElement.getAttribute('data-share-app') === i, id), 'back: focus not on the app');
+  }
+  await p.click('#usage-root [data-share-window="1h"]');
+  await p.waitForTimeout(800);
+  say(asked.indexOf('window=1h') >= 0 && await p.$eval('#usage-root [data-share-window="1h"]', e => e.getAttribute('aria-pressed')) === 'true', '1 h toggle: ' + JSON.stringify(asked));
+  if (await p.$('#usage-root [data-share-server]')) {
+    await p.selectOption('#usage-root [data-share-server]', 'w1');
+    await p.waitForTimeout(300);
+    say(await p.evaluate(() => { const w = document.querySelector('#usage-root [data-share-why]'); return !!w && w.textContent.indexOf('unreachable') >= 0 && !document.querySelector('#usage-root svg.share-donut'); }), 'w1 without figures');
+    await p.selectOption('#usage-root [data-share-server]', 'primary');
+    await p.waitForTimeout(300);
+  } else say(false, 'no server picker');
+  return bad;
+}
+
 (async () => {
   const base = process.argv[2];
   const opts = process.env.PLAYWRIGHT_CHROMIUM ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM } : {};
@@ -117,6 +157,9 @@ async function marketplaceBehaviour(p, evil) {
     await p.waitForTimeout(300);
     all = all.concat(await marketplaceBehaviour(p, EVIL));
   }
+  // The Usage tab's Share view.
+  all = all.concat(await shareBehaviour(p, base));
+  all = all.concat(await audit('usage-share'));
   all = all.concat(errs.map(e => 'page error: ' + e));
   if (await p.evaluate(() => window.__xss)) all.push('marketplace: a manifest field ran script');
   process.stdout.write(JSON.stringify(all));

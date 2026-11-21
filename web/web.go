@@ -27,7 +27,7 @@ import "embed"
 // apple-touch-icon.png, icon-192.png, icon-512.png, maskable-512.png,
 // site.webmanifest and mark.svg (the dark mark in each page's <h1>).
 //
-//go:embed index.html people.html directory.js directory.css settings.js signin.js myapps.js myai.js folders.js doctor.js usage.js dns.js mail.js mailprovider.js servers.js access.js settingsnav.js marketplace.js confirm.html confirm.js mysignin.html mysignin.js ssh.js myssh.js impersonation-stop.html impersonation.js freshauth.js freshauth-callback.js vpn.html vpn.js vendor/qrcode.js favicon.svg favicon.ico apple-touch-icon.png icon-192.png icon-512.png maskable-512.png site.webmanifest mark.svg
+//go:embed index.html people.html directory.js directory.css settings.js signin.js myapps.js myai.js folders.js doctor.js usage.js donut.js share.js dns.js mail.js mailprovider.js servers.js access.js settingsnav.js marketplace.js confirm.html confirm.js mysignin.html mysignin.js ssh.js myssh.js impersonation-stop.html impersonation.js freshauth.js freshauth-callback.js vpn.html vpn.js vendor/qrcode.js favicon.svg favicon.ico apple-touch-icon.png icon-192.png icon-512.png maskable-512.png site.webmanifest mark.svg
 var FS embed.FS
 
 // Docs holds the docs pages the Hub ships as read-only MCP resources

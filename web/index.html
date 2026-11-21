@@ -684,6 +684,53 @@
     .usage-status { font-size: 0.75rem; }
     .usage-status-ok { color: #4ade80; } .usage-status-warn { color: #fbbf24; } .usage-status-off { color: #94a3b8; } .usage-status-info { color: #93c5fd; } .usage-status-bad { color: #f87171; }
     .usage-spark { color: #60a5fa; vertical-align: middle; }
+    /* The Share view (share.js, donut.js): the categorical colours are the
+       dataviz reference palette's dark steps (validated on #0f172a: all
+       checks pass), c0 Portcullis core, c1–c7 the apps (more: folded);
+       other / free / shared folders / images are neutral steps. Colour is
+       never the only cue: every slice is a legend row. */
+    .share-bar { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin: 0.25rem 0 1rem; }
+    .share-pick select { margin-left: 0.375rem; }
+    .share-wins { display: inline-flex; gap: 0; }
+    .share-win { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; padding: 0.25rem 0.75rem; font: inherit; font-size: 0.8125rem; cursor: pointer; }
+    .share-win:first-child { border-radius: 999px 0 0 999px; } .share-win:last-child { border-radius: 0 999px 999px 0; border-left: 0; }
+    .share-win[aria-pressed="true"] { background: #1d4ed8; border-color: #3b82f6; color: #fff; }
+    .share-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
+    .share-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 0.75rem; padding: 1rem; margin: 0; }
+    .share-title { font-weight: 600; font-size: 0.875rem; margin-bottom: 0.5rem; }
+    .share-h { margin: 0.5rem 0 0.75rem; font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; }
+    .share-app { font-size: 0.9375rem; }
+    .share-donut { display: block; margin: 0 auto 0.5rem; }
+    .share-track { fill: none; stroke: #1e293b; }
+    .share-slice { fill: none; }
+    .share-slice[data-share-app] { cursor: pointer; }
+    .share-slice[data-share-app]:focus-visible, .share-slice[data-share-app]:hover { stroke-opacity: 0.8; outline: none; }
+    .share-slice[data-share-app]:focus-visible { filter: drop-shadow(0 0 2px #e2e8f0); }
+    .share-center { fill: #e2e8f0; font-size: 0.875rem; font-weight: 600; }
+    .share-center-nm { fill: #94a3b8; font-weight: 400; font-style: italic; }
+    .share-cap { color: #94a3b8; font-size: 0.75rem; text-align: center; margin: 0 0 0.5rem; }
+    .share-legend { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+    .share-legend th, .share-legend td { text-align: left; padding: 0.2rem 0.375rem; border-bottom: 1px solid #1e293b; }
+    .share-legend th { color: #94a3b8; font-weight: 500; }
+    .share-legend td:nth-child(2), .share-legend td:nth-child(3), .share-legend th:nth-child(2), .share-legend th:nth-child(3) { text-align: right; white-space: nowrap; }
+    .share-nm td { color: #94a3b8; font-style: italic; }
+    .share-legend tr.share-nm td:nth-child(2) { white-space: normal; text-align: left; }
+    .share-link { background: none; border: 0; padding: 0; color: #93c5fd; font: inherit; cursor: pointer; text-decoration: underline; text-align: left; }
+    .share-swatch { display: inline-block; width: 0.625rem; height: 0.625rem; border-radius: 2px; margin-right: 0.375rem; vertical-align: -0.05rem; background: currentColor; }
+    .share-c0 { stroke: #3987e5; color: #3987e5; }
+    .share-c1 { stroke: #d95926; color: #d95926; }
+    .share-c2 { stroke: #199e70; color: #199e70; }
+    .share-c3 { stroke: #c98500; color: #c98500; }
+    .share-c4 { stroke: #d55181; color: #d55181; }
+    .share-c5 { stroke: #008300; color: #008300; }
+    .share-c6 { stroke: #9085e9; color: #9085e9; }
+    .share-c7 { stroke: #e66767; color: #e66767; }
+    .share-more { stroke: #a8b3c4; color: #a8b3c4; }
+    .share-folders { stroke: #cbd5e1; color: #cbd5e1; }
+    .share-images { stroke: #7d8aa0; color: #7d8aa0; }
+    .share-other { stroke: #55637a; color: #55637a; }
+    .share-free { stroke: #334155; color: #334155; }
+    .share-none { background: none; border: 1px dashed #64748b; }
     .usage-table a, .usage-strip a, .usage-nav a.usage-sub { color: #93c5fd; }
     .usage-nav a.btn { text-decoration: none; }
     .usage-disks { display: flex; flex-wrap: wrap; gap: 1rem 2rem; margin-bottom: 1rem; font-size: 0.8125rem; }
@@ -984,6 +1031,8 @@
   <script src="/static/access.js"></script>
   <script src="/static/settingsnav.js"></script>
   <script src="/static/marketplace.js"></script>
+  <script src="/static/donut.js"></script>
+  <script src="/static/share.js"></script>
   <script src="/static/usage.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
@@ -996,7 +1045,7 @@
     // usageView: the Usage tab's view (#usage/<view>); accessView: the
     // Access tab's {section, sub, user} (#access/…); settingsView: the
     // Settings section asked for ({section}, #settings/<section>).
-    let usageView = 'apps';
+    let usageView = 'share';
     let accessView = { section: 'ssh', sub: '', user: '' };
     let settingsView = { section: '' };
     function showTab(name, asked) {
@@ -1114,7 +1163,7 @@
       [/^marketplace(?:\?filter=([a-z0-9-]{1,63}))?$/, m => showMarketplace({ filter: m[1] || '', open: '' })],
       [/^marketplace\/([a-z0-9-]+)$/, m => showMarketplace({ filter: '', open: m[1] })],
       [/^doctor$/, () => showTab('doctor')],
-      [/^usage(?:\/(apps|containers|storage))?$/, m => { usageView = m[1] || 'apps'; showTab('usage'); }],
+      [/^usage(?:\/(share|apps|containers|storage))?$/, m => { usageView = m[1] || 'share'; showTab('usage'); }],
       [/^access(?:\/ssh(?:\/([a-z]+))?)?$/, m => { accessView = { section: 'ssh', sub: m[1] || '', user: '' }; showTab('access'); }],
       [/^access\/vpn$/, () => { accessView = { section: 'vpn', sub: '', user: '' }; showTab('access'); }],
       [/^access\/signins(?:\?user=([a-z0-9._-]{1,64}))?$/, m => { accessView = { section: 'signins', sub: '', user: m[1] || '' }; showTab('access'); }],

@@ -5,7 +5,8 @@
 //   window.PortcullisUsage.renderInstance(el, id)  an instance page's Usage tab
 //   window.PortcullisUsage.stop()              stops polling (leaving the tab)
 //
-// GET /api/usage                       the overview (the Hub's cache; polled every 15 s while visible)
+// GET /api/usage[?window=last|1h]      the overview (the Hub's cache; polled every 15 s while visible;
+//                                      the Share view reads its window, share.js)
 // GET /api/usage/instances/{id}        one instance with its last hour
 // GET /api/usage/export.csv?view=…     the CSV download
 // GET /api/usage/storage               the Storage view (the storage cache)
@@ -196,10 +197,10 @@
         if (current !== c) return;
         drawInstance(c, g, host);
       } else {
-        const v = await getJSON('/api/usage');
+        const v = await getJSON(c.view === 'share' ? '/api/usage?window=' + enc(c.window) : '/api/usage');
         if (current !== c) return;
         c.data = v;
-        if (c.view === 'storage') {
+        if (c.view === 'storage' || c.view === 'share') {
           try { c.storage = await getJSON('/api/usage/storage'); c.storageErr = ''; } catch (e) { c.storageErr = e.message; }
           if (current !== c) return;
         }
@@ -256,8 +257,8 @@
 
   function navHtml(view) {
     const btnHtml = (k, label) => '<button type="button" class="btn btn-sm ' + esc(view === k ? 'btn-primary' : '') + '" data-usage-view="' + esc(k) + '">' + esc(label) + '</button>';
-    return '<div class="usage-nav">' + btnHtml('apps', 'By app') + btnHtml('containers', 'By container') + btnHtml('storage', 'Storage') +
-      ' <a class="btn btn-secondary btn-sm" href="/api/usage/export.csv?view=' + esc(view) + '" download>CSV</a>' +
+    return '<div class="usage-nav">' + btnHtml('share', 'Share') + btnHtml('apps', 'By app') + btnHtml('containers', 'By container') + btnHtml('storage', 'Storage') +
+      ' <a class="btn btn-secondary btn-sm" href="/api/usage/export.csv?view=' + esc(view === 'share' ? 'apps' : view) + '" download>CSV</a>' +
       ' <a class="usage-sub" href="/api/usage/export.csv?view=apps" download>apps.csv</a> · <a class="usage-sub" href="/api/usage/export.csv?view=containers" download>containers.csv</a>' +
       ' · <a class="usage-sub" href="/api/usage/export.csv?view=storage" download>storage.csv</a></div>';
   }
@@ -325,7 +326,29 @@
     return html + '</tbody></table>';
   }
 
+  // drawShare: the Share view keeps its own markup (share.js replaces it
+  // only when it changed, focus kept): the nav and the header around it
+  // are written once per view switch, then only the header and the
+  // share's data change.
+  function drawShare(c) {
+    let host = c.el.querySelector('[data-usage-share]');
+    if (!host) {
+      c.el.innerHTML = navHtml(c.view) + '<div data-usage-head></div><div data-usage-share><p class="settings-empty">Loading…</p></div>';
+      host = c.el.querySelector('[data-usage-share]');
+      c.shareEl = null;
+    }
+    const head = c.el.querySelector('[data-usage-head]');
+    const headHtml = c.data ? headerHtml(c.data) : '';
+    if (head.innerHTML !== headHtml) head.innerHTML = headHtml;
+    if (!c.data) return;
+    if (c.shareEl !== host) {
+      c.shareEl = host;
+      window.PortcullisShare.render(host, { view: c.data, storage: c.storage || {}, window: c.window, onWindow: w => { c.window = w; refresh(); } });
+    } else window.PortcullisShare.update(c.data, c.storage || {});
+  }
+
   function draw(c) {
+    if (c.view === 'share') { drawShare(c); return; }
     if (!c.data && c.view !== 'storage') { c.el.innerHTML = '<p class="settings-empty">Loading…</p>'; return; }
     let bodyHtml;
     if (c.view === 'storage') bodyHtml = storageViewHtml(c);
@@ -348,7 +371,9 @@
       if (v) {
         c.view = v.dataset.usageView;
         history.replaceState(null, '', '#usage/' + enc(c.view));
+        c.shareEl = null;
         draw(c);
+        if (c.view === 'share') refresh();
         if (c.view === 'storage') loadStorage(c);
         return;
       }
@@ -377,7 +402,7 @@
   function render(el, view) {
     stop();
     hookVisibility();
-    current = { kind: 'tab', el, view: view === 'containers' || view === 'storage' ? view : 'apps', sort: 'name', dir: 'asc', filter: '', open: {}, data: null };
+    current = { kind: 'tab', el, view: ['share', 'containers', 'storage', 'apps'].indexOf(view) >= 0 ? view : 'share', window: 'last', sort: 'name', dir: 'asc', filter: '', open: {}, data: null };
     bind(el);
     draw(current);
     if (current.view === 'storage') loadStorage(current);
