@@ -150,31 +150,97 @@ func (h *Hub) UsageOverview(window string) UsageView {
 	}
 	v.Stale = s.lastSuccess.IsZero() || s.now().Sub(s.lastSuccess) >= 2*usage.Interval
 	v.Hosts = map[string]UsageHost{servers.PrimaryID: s.primaryHostLocked(v.Engine.Runtime, since)}
+	for id, w := range s.workers {
+		v.Hosts[id] = w.hostLocked(since)
+	}
+	// byGroup: "<server>\x00<group>\x00<kind>" (the primary's server "").
 	byGroup := map[string][]*usageCont{}
 	for _, c := range s.conts {
-		byGroup[c.Group+"\x00"+c.Kind] = append(byGroup[c.Group+"\x00"+c.Kind], c)
+		k := c.Server + "\x00" + c.Group + "\x00" + c.Kind
+		byGroup[k] = append(byGroup[k], c)
 	}
 	for id, inst := range s.insts {
-		if cs := byGroup[id+"\x00"+usageApp]; len(cs) > 0 {
-			v.Apps = append(v.Apps, s.groupLocked(inst.ID, inst.Template, inst.Name, cs, nil, since))
+		if g, ok := s.appGroupLocked(inst, byGroup[inst.Server+"\x00"+id+"\x00"+usageApp], since); ok {
+			v.Apps = append(v.Apps, g)
 		}
 	}
 	sort.Slice(v.Apps, func(i, j int) bool { return v.Apps[i].Instance < v.Apps[j].Instance })
-	v.Core = s.groupLocked("core", "", "Core", byGroup[usageCoreProject+"\x00"+usageCore], byGroup[usageCoreProject+"\x00"+usageHelper], since)
+	v.Core = s.groupLocked("", "core", "", "Core", byGroup["\x00"+usageCoreProject+"\x00"+usageCore], byGroup["\x00"+usageCoreProject+"\x00"+usageHelper], since)
 	if v.Engine.Runtime == "kubernetes" {
 		v.Core.Status, v.Core.Why = "not_measured", usageNotMeasuredKube
 	}
 	var unknown []string
 	for k := range byGroup {
-		if g, kind, _ := strings.Cut(k, "\x00"); kind == usageUnknown {
-			unknown = append(unknown, g)
+		if server, rest, _ := strings.Cut(k, "\x00"); server == "" {
+			if g, kind, _ := strings.Cut(rest, "\x00"); kind == usageUnknown {
+				unknown = append(unknown, g)
+			}
 		}
 	}
 	sort.Strings(unknown)
 	for _, p := range unknown {
-		v.UnknownProjects = append(v.UnknownProjects, s.groupLocked("", "", p, byGroup[p+"\x00"+usageUnknown], nil, since))
+		v.UnknownProjects = append(v.UnknownProjects, s.groupLocked("", "", "", p, byGroup["\x00"+p+"\x00"+usageUnknown], nil, since))
 	}
 	return v
+}
+
+// usageServerID is a server's id in the views ("" = the primary's).
+func usageServerID(server string) string {
+	if server == "" {
+		return servers.PrimaryID
+	}
+	return server
+}
+
+// appGroupLocked is inst's group from its containers cs on its server.
+// On a worker that isn't measured (an older agent, unreachable) it is
+// not_measured with the worker's reason, every figure nil (never stale
+// numbers); a worker no longer ready shows none (ok false), nor does an
+// app with no container. Caller holds s.mu (read).
+func (s *usageState) appGroupLocked(inst usageInst, cs []*usageCont, since time.Time) (UsageGroup, bool) {
+	if inst.Server != "" {
+		w := s.workers[inst.Server]
+		if w == nil {
+			return UsageGroup{}, false
+		}
+		if w.appsWhy != "" {
+			return UsageGroup{Instance: inst.ID, Template: inst.Template, Name: inst.Name, Server: inst.Server, Status: "not_measured", Why: w.appsWhy,
+				Containers: []UsageContainer{}}, true
+		}
+	}
+	if len(cs) == 0 {
+		return UsageGroup{}, false
+	}
+	return s.groupLocked(inst.Server, inst.ID, inst.Template, inst.Name, cs, nil, since), true
+}
+
+// hostLocked is a worker's UsageHost: its engine's CPUs and memory (its
+// /v1/info) and the newest host point (since: the mean of the points at
+// or after it); every figure nil with the reason when not measured.
+// Caller holds s.mu (read).
+func (w *usageWorker) hostLocked(since time.Time) UsageHost {
+	h := UsageHost{Name: w.name}
+	if w.hostWhy != "" {
+		h.Why = w.hostWhy
+		return h
+	}
+	if w.cpus > 0 {
+		n := w.cpus
+		h.CPUs = &n
+	}
+	if w.mem > 0 {
+		m := w.mem
+		h.MemoryBytes = &m
+	}
+	var hs usage.HostSample
+	if since.IsZero() {
+		p, _ := w.hostRing.Last()
+		hs = p.S
+	} else {
+		hs, _ = usage.MeanHost(w.hostRing.Since(since))
+	}
+	h.CPUUsedCores, h.MemUsedBytes, h.BlkReadBps, h.BlkWriteBps = hs.CPUUsedCores, hs.MemUsedBytes, hs.BlkReadBps, hs.BlkWriteBps
+	return h
 }
 
 // primaryHostLocked is the primary's UsageHost: the engine's CPUs and
@@ -213,8 +279,8 @@ func (s *usageState) primaryHostLocked(runtimeKind string, since time.Time) Usag
 // after since (usage.Mean; a skipped nil point makes the group partial),
 // and the totals sum those means; helpers and unknown projects have no
 // ring and keep their newest sample. Caller holds s.mu (read).
-func (s *usageState) groupLocked(instance, template, name string, cs, helpers []*usageCont, since time.Time) UsageGroup {
-	g := UsageGroup{Instance: instance, Template: template, Name: name, Server: servers.PrimaryID, Containers: []UsageContainer{}}
+func (s *usageState) groupLocked(server, instance, template, name string, cs, helpers []*usageCont, since time.Time) UsageGroup {
+	g := UsageGroup{Instance: instance, Template: template, Name: name, Server: usageServerID(server), Containers: []UsageContainer{}}
 	sort.Slice(cs, func(i, j int) bool {
 		if cs[i].Service != cs[j].Service {
 			return cs[i].Service < cs[j].Service
@@ -236,7 +302,7 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 	for _, c := range cs {
 		sample := c.Sample
 		if !since.IsZero() && c.Running && (c.Kind == usageApp || c.Kind == usageCore) {
-			if rg := s.rings[c.Group+"\x00"+usageKey(c.Service, c.Number)]; rg != nil {
+			if rg := s.rings[ringKey(server, c.Group, c.Service, c.Number)]; rg != nil {
 				if ps := rg.Since(since); len(ps) > 0 {
 					var p bool
 					sample, p = usage.Mean(ps)
@@ -343,22 +409,23 @@ func (h *Hub) UsageInstance(id string) (*UsageGroup, error) {
 	s.mu.RLock()
 	var cs []*usageCont
 	for _, c := range s.conts {
-		if c.Kind == usageApp && c.Group == id {
+		if c.Kind == usageApp && c.Group == id && c.Server == inst.Server {
 			cs = append(cs, c)
 		}
 	}
-	g := s.groupLocked(inst.ID, inst.Template, inst.Name, cs, nil, time.Time{})
-	if len(cs) == 0 {
+	g, ok := s.appGroupLocked(inst, cs, time.Time{})
+	if !ok {
+		g = s.groupLocked(inst.Server, inst.ID, inst.Template, inst.Name, nil, nil, time.Time{})
 		g.Status = "stopped"
 	}
-	g.History = s.historyLocked(id)
+	g.History = s.historyLocked(groupKey(inst.Server, id))
 	s.mu.RUnlock()
 	g.Storage = h.usageStorageGroup(id)
 	return &g, nil
 }
 
-// historyLocked is a group's last hour on its own time axis. Caller holds
-// s.mu (read).
+// historyLocked is a group's last hour on its own time axis (group: its
+// groupKey). Caller holds s.mu (read).
 func (s *usageState) historyLocked(group string) *UsageHistory {
 	hist := &UsageHistory{T: []time.Time{}, CPUCores: map[string][]*float64{}, MemBytes: map[string][]*int64{}}
 	tr := s.times[group]
@@ -437,7 +504,9 @@ func (h *Hub) usageSnapshot() usageSnap {
 	defer s.mu.RUnlock()
 	snap := usageSnap{Runtime: s.kind, Verified: s.verified, Why: s.why, Now: s.now(), LastSuccess: s.lastSuccess, Since: s.startedAt, NotMeasured: s.notMeasured}
 	for _, c := range s.conts {
-		if c.Kind != usageApp && c.Kind != usageCore {
+		// The doctor and the metrics listener: the primary's containers
+		// only (a worker's are on its own page and its agent's metrics).
+		if (c.Kind != usageApp && c.Kind != usageCore) || c.Server != "" {
 			continue
 		}
 		sc := usageSnapCont{Service: c.Service, Number: c.Number, ID: c.ID, Running: c.Running, Sampled: c.Sampled, Limits: c.Limits, Sample: c.Sample}

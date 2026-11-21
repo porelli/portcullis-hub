@@ -149,7 +149,11 @@ func (i Info) RuntimeInfo() (runtime.Info, error) {
 	}
 	out := runtime.Info{Kind: k, Verified: i.Verified, Why: i.Why, APIVersion: i.EngineAPI,
 		SecurityOptions: i.SecurityOptions, SELinux: i.SELinux, IDMapped: i.IDMapped, Remapped: i.Remapped,
-		EngineVersion: i.EngineVersion}
+		EngineVersion: i.EngineVersion, CPUs: i.CPUs, MemoryBytes: i.MemBytes}
+	if out.CPUs < 0 || out.MemoryBytes < 0 {
+		// An untrusted answer: a negative size is no size.
+		out.CPUs, out.MemoryBytes = 0, 0
+	}
 	if i.DockerRootDir != "" {
 		out.ForbiddenRoots = []string{i.DockerRootDir}
 	}

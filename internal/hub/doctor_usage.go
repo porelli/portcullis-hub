@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/doctor"
+	"github.com/portcullis/hub/internal/servers"
 )
 
 // usageDoctorIn is the usage kinds' input, from the sampler's snapshot
@@ -62,6 +63,10 @@ func (h *Hub) storageDoctorIn() *doctor.StorageIn {
 	insts := h.usageInstances()
 	in := &doctor.StorageIn{}
 	for _, d := range v.Disks {
+		// The primary's filesystems (a worker's dev and paths are its own).
+		if d.Server != servers.PrimaryID {
+			continue
+		}
 		f := doctor.FilesystemIn{Dev: d.Dev, Path: d.path, Free: d.FreeBytes, Total: d.TotalBytes}
 		for _, o := range d.Owners {
 			_, isInst := insts[o]

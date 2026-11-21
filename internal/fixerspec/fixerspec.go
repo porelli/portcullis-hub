@@ -229,8 +229,8 @@ func (r Run) validateUsage() error {
 	case !hasVol && (!strings.HasPrefix(r.Source, "/") || path.Clean(r.Source) != r.Source || r.Source == "/" ||
 		strings.ContainsFunc(r.Source, func(c rune) bool { return c < 0x20 || c == 0x7f })):
 		return fmt.Errorf("source %q: want an absolute, clean path below /", r.Source)
-	case r.Folder != "" || r.Unchecked || r.In != nil || r.Out != nil || r.Server != "":
-		return errors.New("usage takes no folder, transfer, identity check or server")
+	case r.Folder != "" || r.Unchecked || r.In != nil || r.Out != nil:
+		return errors.New("usage takes no folder, transfer or identity check")
 	case o.MaxEntries <= 0 || o.MaxTime <= 0:
 		return errors.New("usage needs --max-entries and --max-time")
 	case o.Target.GID != 0 || o.Target.OwnerUID != nil || len(o.Target.Mkdir) > 0 || len(o.Principals) > 0 || o.Children || o.TopOnly ||

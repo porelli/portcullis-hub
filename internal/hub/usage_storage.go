@@ -25,12 +25,13 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
-	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/usage"
 )
 
 // OpUsageMeasure is a storage measurement (op record key opKeyUsage).
@@ -51,7 +52,9 @@ const (
 
 const usageCoreOwner = "core"
 
-// storageTarget is one thing a run measures.
+// storageTarget is one thing a run measures, on Server ("" = the
+// primary; a worker's targets are measured on that worker, through its
+// agent, never by the primary's engine).
 type storageTarget struct {
 	Key, Kind, Target string // Kind volume | bind | layer | image
 	Owners            []string
@@ -60,12 +63,77 @@ type storageTarget struct {
 	Unit              string              // a layer's container id
 	Refused           string              // listed, not measured (why)
 	Labelled          bool                // a volume that had labels when listed (M3)
+	Server            string
+}
+
+// storageKey is a target's cache key: kind:target on the primary,
+// "<server>/kind:target" on a worker (the same path or name on two
+// servers is two targets).
+func storageKey(server, key string) string {
+	if server == "" {
+		return key
+	}
+	return server + "/" + key
+}
+
+// storageServer is one server's bind scope for a run: its bind roots and
+// its engine's data roots (rootsKnown false: binds refused, L1), its
+// folders' paths (a bind into one is the folder's, never a target).
+type storageServer struct {
+	rt               runtime.Instances
+	bindRoots, roots []string
+	rootsKnown       bool
+	folderPaths      []string
+	err              error
+}
+
+// storageServerOf is server's scope for a run. The primary's comes from
+// the caller (its engine's info) and the Hub's bind roots; a worker's
+// from its agent's /v1/info (bind roots, DockerRootDir).
+func (h *Hub) storageServerOf(ctx context.Context, server string, roots []string, rootsKnown bool) *storageServer {
+	ss := &storageServer{}
+	h.mu.RLock()
+	for _, f := range h.st.Folders {
+		if f.Server == server {
+			ss.folderPaths = append(ss.folderPaths, f.Path)
+		}
+	}
+	h.mu.RUnlock()
+	if server == "" {
+		ss.rt, ss.bindRoots, ss.roots, ss.rootsKnown = h.rt, slices.Clone(h.bindRoots), roots, rootsKnown
+		return ss
+	}
+	rt, err := h.rtForServer(server)
+	if err != nil {
+		ss.err = err
+		return ss
+	}
+	ss.rt = unwrapRT(rt)
+	ictx, cancel := context.WithTimeout(ctx, usage.StatsTimeout)
+	defer cancel()
+	if ai, ok := ss.rt.(interface {
+		AgentInfo(context.Context) (agentapi.Info, error)
+	}); ok {
+		if i, err := ai.AgentInfo(ictx); err == nil {
+			ss.bindRoots = slices.Clone(i.BindRoots)
+			if i.DockerRootDir != "" {
+				ss.roots = []string{i.DockerRootDir}
+			}
+			ss.rootsKnown = i.DockerRootDir != ""
+		}
+		return ss
+	}
+	if i, err := ss.rt.Info(ictx); err == nil {
+		ss.roots, ss.rootsKnown = i.ForbiddenRoots, true
+	}
+	return ss
 }
 
 // storageTargets lists instance's targets (all: "") in run order: apps
 // by id (volumes, then binds), then core's volumes; then the layers and
 // images. A bind or volume several instances use is one target with
-// every owner.
+// every owner (on one server). An app on a worker is listed on that
+// worker's engine (its agent); a worker that isn't ready lists nothing.
 //
 // rootsKnown false (the engine's info failed): every bind is refused,
 // since none can be checked against the engine's data root (L1).
@@ -77,17 +145,17 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 	}
 	// The sampler's cached mounts and images (never the engine here).
 	type cont struct {
-		id, group, service string
-		number             int
-		image              string
-		mounts             []runtime.Mount
+		id, server, group, service string
+		number                     int
+		image                      string
+		mounts                     []runtime.Mount
 	}
 	var conts []cont
 	s := h.usage
 	s.mu.RLock()
 	for _, c := range s.conts {
-		if c.Kind == usageApp {
-			conts = append(conts, cont{c.ID, c.Group, c.Service, c.Number, c.Image, slices.Clone(c.Mounts)})
+		if c.Kind == usageApp && c.Server == insts[c.Group].Server {
+			conts = append(conts, cont{c.ID, c.Server, c.Group, c.Service, c.Number, c.Image, slices.Clone(c.Mounts)})
 		}
 	}
 	s.mu.RUnlock()
@@ -100,9 +168,19 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		}
 		return conts[i].number < conts[j].number
 	})
+	scopes := map[string]*storageServer{}
+	scope := func(server string) *storageServer {
+		if ss := scopes[server]; ss != nil {
+			return ss
+		}
+		ss := h.storageServerOf(ctx, server, roots, rootsKnown)
+		scopes[server] = ss
+		return ss
+	}
 	byKey := map[string]*storageTarget{}
 	var order []string
 	add := func(t storageTarget, owner string) {
+		t.Key = storageKey(t.Server, t.Key)
 		if x := byKey[t.Key]; x != nil {
 			if !slices.Contains(x.Owners, owner) {
 				x.Owners = append(x.Owners, owner)
@@ -115,23 +193,38 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		order = append(order, t.Key)
 	}
 	// Binds are found on every instance (a path shared with another
-	// instance is listed on both), measured when the run covers one.
-	bindOwners := map[string][]string{}
-	h.mu.RLock()
+	// instance on the same server is listed on both), measured when the
+	// run covers one.
+	type bindKey struct{ server, src string }
+	bindOwners := map[bindKey][]string{}
 	for _, c := range conts {
+		ss := scope(c.server)
 		for _, m := range c.mounts {
-			if m.Type != "bind" || !h.underBindRoots(m.Source) || h.inFolderLocked(m.Source) {
+			if m.Type != "bind" || !slices.ContainsFunc(ss.bindRoots, func(r string) bool { return pathUnder(m.Source, r) }) ||
+				slices.ContainsFunc(ss.folderPaths, func(f string) bool { return pathUnder(m.Source, f) }) {
 				continue
 			}
-			if !slices.Contains(bindOwners[m.Source], c.group) {
-				bindOwners[m.Source] = append(bindOwners[m.Source], c.group)
+			k := bindKey{c.server, m.Source}
+			if !slices.Contains(bindOwners[k], c.group) {
+				bindOwners[k] = append(bindOwners[k], c.group)
 			}
 		}
 	}
-	h.mu.RUnlock()
 	for _, id := range ids {
-		vols, err := h.rt.ListVolumes(ctx, runtime.Filter{Instance: id})
+		server := insts[id].Server
+		ss := scope(server)
+		if ss.err != nil {
+			log.Printf("usage: %s's targets on server %s: %s", id, server, usageErrText(ss.err))
+			continue
+		}
+		vols, err := ss.rt.ListVolumes(ctx, runtime.Filter{Instance: id})
 		if err != nil {
+			if server != "" {
+				// A worker that fails its listing: its targets wait for
+				// the next run; the primary's still run.
+				log.Printf("usage: %s's volumes on server %s: %s", id, server, usageErrText(err))
+				continue
+			}
 			return nil, nil, err
 		}
 		names := make([]string, 0, len(vols))
@@ -142,26 +235,26 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			add(storageTarget{Key: "volume:" + n, Kind: "volume", Target: n, Volume: runtime.VolumeMount{Name: n, Instance: id}, Labelled: labelled[n]}, id)
+			add(storageTarget{Key: "volume:" + n, Kind: "volume", Target: n, Volume: runtime.VolumeMount{Name: n, Instance: id}, Labelled: labelled[n], Server: server}, id)
 		}
 		var binds []string
-		for src, owners := range bindOwners {
-			if slices.Contains(owners, id) {
-				binds = append(binds, src)
+		for k, owners := range bindOwners {
+			if k.server == server && slices.Contains(owners, id) {
+				binds = append(binds, k.src)
 			}
 		}
 		sort.Strings(binds)
 		for _, src := range binds {
-			t := storageTarget{Key: "bind:" + src, Kind: "bind", Target: src, Source: src}
-			if !rootsKnown {
+			t := storageTarget{Key: "bind:" + src, Kind: "bind", Target: src, Source: src, Server: server}
+			if !ss.rootsKnown {
 				t.Refused = "refused: the engine's data root is unknown"
 			}
-			for _, r := range roots {
+			for _, r := range ss.roots {
 				if pathUnder(src, r) {
 					t.Refused = "refused: under the engine's data root"
 				}
 			}
-			for _, o := range bindOwners[src] {
+			for _, o := range bindOwners[bindKey{server, src}] {
 				add(t, o)
 			}
 		}
@@ -191,7 +284,8 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 	}
 	// Writable layers, then images (instances share images: listed, not
 	// in any total).
-	images := map[string][]string{}
+	type imageKey struct{ server, ref string }
+	images := map[imageKey][]string{}
 	for _, c := range conts {
 		if instance != "" && c.group != instance {
 			continue
@@ -200,15 +294,23 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 			continue
 		}
 		key := c.group + "/" + usageKey(c.service, c.number)
-		sizes = append(sizes, storageTarget{Key: "layer:" + key, Kind: "layer", Target: usageKey(c.service, c.number), Owners: []string{c.group}, Unit: c.id})
-		if c.image != "" && !slices.Contains(images[c.image], c.group) {
-			images[c.image] = append(images[c.image], c.group)
+		sizes = append(sizes, storageTarget{Key: storageKey(c.server, "layer:"+key), Kind: "layer", Target: usageKey(c.service, c.number), Owners: []string{c.group}, Unit: c.id, Server: c.server})
+		k := imageKey{c.server, c.image}
+		if c.image != "" && !slices.Contains(images[k], c.group) {
+			images[k] = append(images[k], c.group)
 		}
 	}
-	for _, ref := range slices.Sorted(maps.Keys(images)) {
-		owners := images[ref]
+	ikeys := slices.Collect(maps.Keys(images))
+	sort.Slice(ikeys, func(i, j int) bool {
+		if ikeys[i].server != ikeys[j].server {
+			return ikeys[i].server < ikeys[j].server
+		}
+		return ikeys[i].ref < ikeys[j].ref
+	})
+	for _, k := range ikeys {
+		owners := images[k]
 		sort.Strings(owners)
-		sizes = append(sizes, storageTarget{Key: "image:" + ref, Kind: "image", Target: ref, Owners: owners})
+		sizes = append(sizes, storageTarget{Key: storageKey(k.server, "image:"+k.ref), Kind: "image", Target: k.ref, Owners: owners, Server: k.server})
 	}
 	return disk, sizes, nil
 }
@@ -218,26 +320,44 @@ func (h *Hub) storageTargets(ctx context.Context, instance string, roots []strin
 // the helper run reports the real failure.
 func (h *Hub) storageVolumeLive(ctx context.Context, t storageTarget) bool {
 	if id := t.Volume.Instance; id != "" {
-		if _, ok := h.usageInstances()[id]; !ok {
+		if in, ok := h.usageInstances()[id]; !ok || in.Server != t.Server {
 			return false
 		}
 	}
-	_, err := h.rt.InspectVolume(ctx, t.Volume.Name)
+	rt, err := h.storageRT(t.Server)
+	if err != nil {
+		return false
+	}
+	_, err = rt.InspectVolume(ctx, t.Volume.Name)
 	return err == nil || !docker.IsNotFound(err)
+}
+
+// storageRT is the engine a target is measured on: the primary's, or the
+// worker's agent backend while it is ready.
+func (h *Hub) storageRT(server string) (runtime.Instances, error) {
+	if server == "" {
+		return h.rt, nil
+	}
+	rt, err := h.rtForServer(server)
+	if err != nil {
+		return nil, err
+	}
+	return unwrapRT(rt), nil
 }
 
 // storageVolumeRecreated: the volume was deleted between the check and the
 // helper's create, so the engine made it anew, without labels (M3). The
 // new, empty volume is removed (never forced), and the target is gone.
 func (h *Hub) storageVolumeRecreated(ctx context.Context, t storageTarget) bool {
-	if !t.Labelled || h.rt.Kind() == runtime.KindKubernetes {
+	rt, err := h.storageRT(t.Server)
+	if err != nil || !t.Labelled || rt.Kind() == runtime.KindKubernetes {
 		return false
 	}
-	v, err := h.rt.InspectVolume(ctx, t.Volume.Name)
+	v, err := rt.InspectVolume(ctx, t.Volume.Name)
 	if err != nil || len(v.Labels) > 0 {
 		return false
 	}
-	if err := h.rt.RemoveVolume(ctx, t.Volume.Name); err != nil {
+	if err := rt.RemoveVolume(ctx, t.Volume.Name); err != nil {
 		log.Printf("usage: removing the volume %s the helper recreated: %s", clipRunes(t.Volume.Name, 120), usageErrText(err))
 	} else {
 		log.Printf("usage: removed the volume %s the helper recreated", clipRunes(t.Volume.Name, 120))
@@ -330,7 +450,7 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 		if !next(t) {
 			continue
 		}
-		e := storageEntry{Kind: t.Kind, Target: t.Target, Owners: t.Owners, MeasuredAt: s.now()}
+		e := storageEntry{Kind: t.Kind, Target: t.Target, Owners: t.Owners, MeasuredAt: s.now(), Server: t.Server}
 		if t.Refused != "" {
 			e.Error = t.Refused
 			got[t.Key] = e
@@ -345,7 +465,7 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 			gone++
 			continue
 		}
-		r := fixerRun{Mode: "usage", Volume: t.Volume, Source: t.Source, Opts: folderfix.Options{MaxEntries: storageMaxEntries, MaxTime: storageMaxTime}}
+		r := fixerRun{Mode: "usage", Volume: t.Volume, Source: t.Source, Server: t.Server, Opts: folderfix.Options{MaxEntries: storageMaxEntries, MaxTime: storageMaxTime}}
 		began := time.Now()
 		s.diskMu.Lock()
 		rep, err := h.usageFixerRun(runCtx, r)
@@ -372,14 +492,19 @@ func (h *Hub) measureStorage(ctx context.Context, instance string) (map[string]s
 		if !next(t) {
 			continue
 		}
-		e := storageEntry{Kind: t.Kind, Target: t.Target, Owners: t.Owners, MeasuredAt: s.now()}
+		e := storageEntry{Kind: t.Kind, Target: t.Target, Owners: t.Owners, MeasuredAt: s.now(), Server: t.Server}
 		began := time.Now()
 		var size int64
-		var err error
-		if t.Kind == "layer" {
-			size, err = h.rt.LayerSize(runCtx, t.Unit)
-		} else {
-			size, err = h.rt.ImageSize(runCtx, t.Target)
+		rt, err := h.storageRT(t.Server)
+		switch {
+		case err != nil:
+		case t.Kind == "layer":
+			size, err = rt.LayerSize(runCtx, t.Unit)
+		default:
+			size, err = rt.ImageSize(runCtx, t.Target)
+		}
+		if err == nil && size < 0 {
+			err = errors.New("a negative size")
 		}
 		e.DurationMS = time.Since(began).Milliseconds()
 		if err != nil {
@@ -656,6 +781,11 @@ func (h *Hub) storageModel() StorageView {
 		if c.Kind != usageApp && c.Kind != usageCore {
 			continue
 		}
+		// An app's containers on its own server only (a leftover on
+		// another server is not its storage's user).
+		if (c.Kind == usageApp && c.Server != insts[c.Group].Server) || (c.Kind == usageCore && c.Server != "") {
+			continue
+		}
 		owner := c.Group
 		if c.Kind == usageCore {
 			owner = usageCoreOwner
@@ -682,7 +812,7 @@ func (h *Hub) storageModel() StorageView {
 				continue
 			}
 			for id, f := range folders {
-				if pathUnder(m.Source, f.Path) && !slices.Contains(folderUsers[id], c.Group) {
+				if f.Server == c.Server && pathUnder(m.Source, f.Path) && !slices.Contains(folderUsers[id], c.Group) {
 					folderUsers[id] = append(folderUsers[id], c.Group)
 				}
 			}
@@ -705,15 +835,21 @@ func (h *Hub) storageModel() StorageView {
 		owners      map[string]int64
 		path        string
 	}
-	disks := map[uint64]*disk{}
-	addDisk := func(dev, free, total uint64, at time.Time, owner string, alloc *int64, path string) {
+	// diskKey: a filesystem is one server's (the same dev on two servers
+	// is two disks).
+	type diskKey struct {
+		server string
+		dev    uint64
+	}
+	disks := map[diskKey]*disk{}
+	addDisk := func(server string, dev, free, total uint64, at time.Time, owner string, alloc *int64, path string) {
 		if total == 0 {
 			return
 		}
-		d := disks[dev]
+		d := disks[diskKey{server, dev}]
 		if d == nil {
 			d = &disk{free: free, total: total, at: at, owners: map[string]int64{}, path: path}
-			disks[dev] = d
+			disks[diskKey{server, dev}] = d
 		} else if !at.Before(d.at) {
 			d.free, d.total, d.at = free, total, at
 		}
@@ -796,7 +932,7 @@ func (h *Hub) storageModel() StorageView {
 	for _, k := range keys {
 		e := sf.Entries[k]
 		for _, o := range e.Owners {
-			addDisk(e.Dev, e.Free, e.Total, e.MeasuredAt, o, e.AllocBytes, e.Target)
+			addDisk(e.Server, e.Dev, e.Free, e.Total, e.MeasuredAt, o, e.AllocBytes, e.Target)
 		}
 		if slices.Contains(e.Owners, usageCoreOwner) {
 			v.Core = append(v.Core, itemOf(e, usageCoreOwner))
@@ -806,18 +942,25 @@ func (h *Hub) storageModel() StorageView {
 		fs := h.folderStorage(fid, folders[fid], folderScan, folderUsers[fid])
 		v.Folders = append(v.Folders, fs)
 		if e, ok := folderScan[fid]; ok && e.Report != nil {
-			addDisk(e.Report.Dev, e.Report.FreeBytes, e.Report.TotalBytes, e.At, fid, fs.AllocBytes, folders[fid].Path)
+			addDisk(folders[fid].Server, e.Report.Dev, e.Report.FreeBytes, e.Report.TotalBytes, e.At, fid, fs.AllocBytes, folders[fid].Path)
 		}
 	}
 	// The Hub's data directory, once the measurer has run (before that
 	// nothing of the storage view is judged).
 	if sf.LastRun != nil || len(sf.Entries) > 0 {
 		if dev, free, total, err := statDir(h.cfg.DataDir); err == nil {
-			addDisk(dev, free, total, s.now(), usageCoreOwner, nil, h.cfg.DataDir)
+			addDisk("", dev, free, total, s.now(), usageCoreOwner, nil, h.cfg.DataDir)
 		}
 	}
-	for _, dev := range slices.Sorted(maps.Keys(disks)) {
-		d := disks[dev]
+	dkeys := slices.Collect(maps.Keys(disks))
+	sort.Slice(dkeys, func(i, j int) bool {
+		if dkeys[i].server != dkeys[j].server {
+			return dkeys[i].server < dkeys[j].server
+		}
+		return dkeys[i].dev < dkeys[j].dev
+	})
+	for _, dk := range dkeys {
+		d, dev := disks[dk], dk.dev
 		owners := slices.Collect(maps.Keys(d.owners))
 		sort.Slice(owners, func(i, j int) bool {
 			if d.owners[owners[i]] != d.owners[owners[j]] {
@@ -829,7 +972,7 @@ func (h *Hub) storageModel() StorageView {
 		if d.total > 0 {
 			used = 100 * float64(d.total-min(d.free, d.total)) / float64(d.total)
 		}
-		v.Disks = append(v.Disks, DiskView{Server: servers.PrimaryID, Dev: dev, FreeBytes: d.free, TotalBytes: d.total, UsedPercent: used, Owners: owners, path: d.path})
+		v.Disks = append(v.Disks, DiskView{Server: usageServerID(dk.server), Dev: dev, FreeBytes: d.free, TotalBytes: d.total, UsedPercent: used, Owners: owners, path: d.path})
 	}
 	return v
 }

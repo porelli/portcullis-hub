@@ -450,6 +450,10 @@ func TestBackendUsageRoutes(t *testing.T) {
 	if _, err := b.ImageSize(ctx, "docker.io/library/busybox:latest"); err == nil || errors.Is(err, agentrt.ErrOlderAgent) {
 		t.Errorf("ImageSize of an image in no bundle: %v", err)
 	}
+	// The worker's CPUs and memory (its /v1/info: the usage page's host).
+	if i, err := b.Info(ctx); err != nil || i.CPUs != 4 || i.MemoryBytes != 8<<30 {
+		t.Errorf("Info = %d CPUs %d bytes, %v", i.CPUs, i.MemoryBytes, err)
+	}
 	hc, err := b.HostUsage(ctx)
 	if err != nil || hc.CPUTotal != 6485 || hc.MemTotal != 16384000*1024 || hc.DiskRead != 3017*512 {
 		t.Errorf("HostUsage = %+v %v", hc, err)

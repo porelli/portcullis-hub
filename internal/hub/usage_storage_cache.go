@@ -43,6 +43,8 @@ type storageEntry struct {
 	MeasuredAt    time.Time `json:"measured_at"`
 	DurationMS    int64     `json:"duration_ms"`
 	Error         string    `json:"error,omitempty"`
+	// Server: the server it is on ("" = the primary; ux3 workers).
+	Server string `json:"server,omitempty"`
 	// Dev / Free / Total: the filesystem underneath (from the report).
 	Dev   uint64 `json:"dev,omitempty"`
 	Free  uint64 `json:"free_bytes,omitempty"`
