@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,5 +129,30 @@ func TestCheckRelativeBindsRound4(t *testing.T) {
 	}
 	if err := CheckRelativeBinds(dir, "app", []byte("services:\n  web:\n    image: x\nvolumes:\n  data: {labels: {a: b}}\n  other:\n")); err != nil {
 		t.Errorf("plain volumes refused: %v", err)
+	}
+}
+
+// TestRelBindVectors: the shared vectors (testdata/relbind_vectors.json,
+// byte-identical to the templates repo's tests/relbind_vectors.json):
+// whitespace and control characters (R3-I1), the CA bundle's options
+// (R3-M1), external volumes (N1), a service that isn't a mapping (N2),
+// a duplicate key by text (N6).
+func TestRelBindVectors(t *testing.T) {
+	raw, err := os.ReadFile("testdata/relbind_vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vs []struct{ Name, Compose, Want string }
+	if err := json.Unmarshal(raw, &vs); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vs {
+		err := CheckRelativeBinds("", "app", []byte(v.Compose))
+		switch {
+		case v.Want == "" && err != nil:
+			t.Errorf("%s: refused: %v", v.Name, err)
+		case v.Want != "" && (err == nil || !strings.Contains(err.Error(), v.Want)):
+			t.Errorf("%s: %v, want %q", v.Name, err, v.Want)
+		}
 	}
 }

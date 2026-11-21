@@ -139,19 +139,22 @@ func TestServiceLimits(t *testing.T) {
 	}
 }
 
-// I4: the docs template's ./docs bind is labelled too (core's overlay
-// covers only core's services); ./docs-other, ./secrets and the
-// checkout root never are.
+// I4 / ux2 N5: the template's own files are labelled, written
+// ./templates/… or templates/…; core's ./docs (no template may bind it
+// now), ./docs-other, ./secrets and the checkout root never are.
 func TestSELinuxRelabelsDocs(t *testing.T) {
-	got := selinuxRelabels([]byte("services:\n  docs:\n    image: x\n    volumes:\n      - ./docs:/docs/docs:ro\n      - ./templates/docs/mkdocs.yml:/docs/mkdocs.yml:ro\n      - ./docs-other:/o:ro\n      - ./secrets:/s:ro\n      - .:/project:ro\n"))
+	got := selinuxRelabels([]byte("services:\n  docs:\n    image: x\n    volumes:\n      - ./docs:/docs/docs:ro\n      - ./templates/docs/mkdocs.yml:/docs/mkdocs.yml:ro\n      - templates/docs/docs:/docs/pages:ro\n      - ./docs-other:/o:ro\n      - ./secrets:/s:ro\n      - .:/project:ro\n"))
 	if len(got["docs"]) != 2 {
 		t.Fatalf("relabels = %#v", got)
 	}
 	joined := strings.Join(got["docs"], "\n")
-	for _, want := range []string{`source: "./docs"`, `target: "/docs/docs"`, `source: "./templates/docs/mkdocs.yml"`} {
+	for _, want := range []string{`source: "templates/docs/docs"`, `target: "/docs/pages"`, `source: "./templates/docs/mkdocs.yml"`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("lacks %s:\n%s", want, joined)
 		}
+	}
+	if strings.Contains(joined, `source: "./docs"`) {
+		t.Errorf("relabelled core's ./docs:\n%s", joined)
 	}
 	for _, never := range []string{"docs-other", "secrets", `source: "."`} {
 		if strings.Contains(joined, never) {

@@ -123,7 +123,7 @@ keycloak_clients:
 	write(filepath.Join(dir, "hs", "compose.yml"), "services:\n  hs:\n    labels:\n"+
 		"      traefik.http.routers.headscale.rule: Host(`${PORTCULLIS_HOST_HEADSCALE:-vpn.portcullis.local}`)\n"+
 		"      traefik.http.routers.headplane.rule: Host(`${PORTCULLIS_HOST_HEADPLANE:-vpn-admin.portcullis.local}`)\n"+
-		"    volumes: [hs-data:/d, ext:/e]\nvolumes:\n  hs-data: {}\n  ext:\n    external: true\n")
+		"    volumes: [hs-data:/d]\nvolumes:\n  hs-data: {}\n")
 	ts := Discover(dir, "s", "example.org", nil)
 	if len(ts) != 1 {
 		t.Fatalf("discovered %d", len(ts))

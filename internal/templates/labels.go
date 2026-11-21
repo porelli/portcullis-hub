@@ -189,7 +189,9 @@ func AbsoluteBindSources(compose []byte) []BindSource {
 				}
 				src, _ = e["source"].(string)
 			}
-			src = varDefault(strings.TrimSpace(src))
+			// Never trimmed (R3-I1): compose reads " /x" as relative, so
+			// only a source that starts with "/" as written is absolute.
+			src = varDefault(src)
 			if strings.HasPrefix(src, "/") {
 				out = append(out, BindSource{n, src})
 			}

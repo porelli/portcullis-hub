@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -835,6 +837,14 @@ func CheckRelativeBinds(dir, tid string, compose []byte) error {
 	if err := checkVolumeDrivers(compose); err != nil {
 		return err
 	}
+	// Fail closed standalone (N2): a compose the typed decode refuses (a
+	// service that isn't a mapping) is an error, never "no mounts".
+	var shape struct {
+		Services map[string]map[string]interface{} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(compose, &shape); err != nil {
+		return fmt.Errorf("compose.yml: %v", err)
+	}
 	base := ""
 	if dir != "" {
 		base = realPath(dir)
@@ -869,6 +879,11 @@ func CheckRelativeBinds(dir, tid string, compose []byte) error {
 				if !m.ro {
 					return fmt.Errorf("service %s mounts %s: ./%s must be bound read-only", n, m.entry, CABundlePath)
 				}
+				if m.extra {
+					// No SELinux relabel (z / Z / bind.selinux) or other
+					// option on core's shared file (R3-M1).
+					return fmt.Errorf("service %s mounts %s: ./%s takes no option but read-only (it is core's shared file: no z, Z or bind.*)", n, m.entry, CABundlePath)
+				}
 				continue
 			}
 			if !(norm == "templates/"+tid || strings.HasPrefix(norm, "templates/"+tid+"/")) {
@@ -878,7 +893,7 @@ func CheckRelativeBinds(dir, tid string, compose []byte) error {
 				rest := strings.TrimLeft(strings.TrimPrefix(norm, "templates/"+tid), "/")
 				real := realPath(filepath.Join(dir, filepath.FromSlash(rest)))
 				if real != base && !strings.HasPrefix(real, base+string(filepath.Separator)) {
-					return fmt.Errorf("%s mounts %s: it resolves outside templates/%s/ (a symlink)", n, m.entry, tid)
+					return fmt.Errorf("service %s mounts %s: it resolves outside templates/%s/ (a symlink)", n, m.entry, tid)
 				}
 			}
 		}
@@ -889,8 +904,22 @@ func CheckRelativeBinds(dir, tid string, compose []byte) error {
 // tplMount is one volume entry as CheckRelativeBinds reads it.
 type tplMount struct {
 	bind, abs, ro bool
+	extra         bool // an option beyond read-only (short: not exactly ro; long: a key beyond type/source/target/read_only)
 	src, entry    string
 }
+
+// mountTextBad: a mount source or target compose would read differently
+// than a check that trims (R3-I1): leading or trailing whitespace, or a
+// control character anywhere. compose-go never trims: " /../secrets" is
+// relative to the project directory.
+func mountTextBad(s string) bool {
+	if s != strings.TrimFunc(s, unicode.IsSpace) {
+		return true
+	}
+	return strings.IndexFunc(s, unicode.IsControl) >= 0
+}
+
+const mountTextWhy = ": a mount source or target can't start or end with whitespace or hold a control character"
 
 // templateMount reads one volume entry the way compose does; err (the
 // entry and why) when it can't be read — never skipped (fail closed).
@@ -905,11 +934,18 @@ func templateMount(e interface{}) (tplMount, string) {
 		}
 		src := ""
 		if sv, ok := m["source"]; ok && sv != nil {
-			src = strings.TrimSpace(fmt.Sprint(sv))
+			src = fmt.Sprint(sv) // never trimmed (R3-I1)
 		}
 		shown := src
 		if shown == "" {
 			shown = pyJSON(m)
+		}
+		tgt := ""
+		if tv, ok := m["target"]; ok && tv != nil {
+			tgt = fmt.Sprint(tv)
+		}
+		if mountTextBad(src) || mountTextBad(tgt) || mountTextBad(typ) {
+			return tplMount{}, strconv.Quote(shown) + mountTextWhy
 		}
 		switch typ {
 		case "tmpfs":
@@ -924,7 +960,15 @@ func templateMount(e interface{}) (tplMount, string) {
 				return tplMount{}, shown + ": a bind needs a source"
 			}
 			ro := m["read_only"] == true // a real boolean only (ux2 round 4)
-			return tplMount{bind: true, abs: strings.HasPrefix(src, "/") || vpnDriveRe.MatchString(src), ro: ro, src: src, entry: src}, ""
+			extra := false
+			for k := range m {
+				switch k {
+				case "type", "source", "target", "read_only":
+				default:
+					extra = true
+				}
+			}
+			return tplMount{bind: true, abs: strings.HasPrefix(src, "/") || vpnDriveRe.MatchString(src), ro: ro, extra: extra, src: src, entry: src}, ""
 		}
 		return tplMount{}, shown + ": mount type " + typ + " isn't supported (bind, volume or tmpfs)"
 	}
@@ -932,7 +976,10 @@ func templateMount(e interface{}) (tplMount, string) {
 	if !ok {
 		return tplMount{}, fmt.Sprint(e) + ": a volume entry is a string or a mapping"
 	}
-	entry := strings.TrimSpace(s)
+	entry := s // never trimmed (R3-I1)
+	if strings.IndexFunc(entry, unicode.IsControl) >= 0 || entry != strings.TrimFunc(entry, unicode.IsSpace) {
+		return tplMount{}, strconv.Quote(entry) + mountTextWhy
+	}
 	if vpnDriveRe.MatchString(entry) {
 		return tplMount{bind: true, abs: true, src: entry, entry: entry}, ""
 	}
@@ -947,6 +994,9 @@ func templateMount(e interface{}) (tplMount, string) {
 	if len(parts) > 3 || src == "" || parts[1] == "" {
 		return tplMount{}, entry + ": not source:target[:options]"
 	}
+	if mountTextBad(src) || mountTextBad(parts[1]) {
+		return tplMount{}, strconv.Quote(entry) + mountTextWhy
+	}
 	var opts []string
 	if len(parts) == 3 {
 		opts = strings.Split(parts[2], ",")
@@ -956,8 +1006,9 @@ func templateMount(e interface{}) (tplMount, string) {
 		// Compose takes the last one: never guess (ux2 round 4).
 		return tplMount{}, entry + ": the options carry both ro and rw"
 	}
+	extra := len(opts) > 0 && !(len(opts) == 1 && opts[0] == "ro")
 	if strings.HasPrefix(src, ".") || strings.HasPrefix(src, "/") || strings.HasPrefix(src, "~") || strings.Contains(src, "/") {
-		return tplMount{bind: true, abs: strings.HasPrefix(src, "/"), ro: ro, src: src, entry: entry}, ""
+		return tplMount{bind: true, abs: strings.HasPrefix(src, "/"), ro: ro, extra: extra, src: src, entry: entry}, ""
 	}
 	if !vpnVolumeNameRe.MatchString(src) {
 		return tplMount{}, entry + ": the source is neither a path nor a volume name"
@@ -965,18 +1016,24 @@ func templateMount(e interface{}) (tplMount, string) {
 	return tplMount{}, ""
 }
 
-// checkVolumeDrivers refuses driver / driver_opts on a top-level volume
-// (every template, ux2 round 4): the local driver with o=bind and a device
+// checkVolumeDrivers refuses an external top-level volume (ux2 N1) and
+// driver / driver_opts on one (every template, ux2 round 4): the local driver with o=bind and a device
 // mounts any host path, around the bind rules.
 func checkVolumeDrivers(compose []byte) error {
 	var doc struct {
 		Volumes map[string]interface{} `yaml:"volumes"`
 	}
-	if yaml.Unmarshal(compose, &doc) != nil {
-		return nil // the compose checks refuse a file that doesn't parse
+	if err := yaml.Unmarshal(compose, &doc); err != nil {
+		return fmt.Errorf("compose.yml: %v", err) // fail closed standalone (N2)
 	}
 	for _, k := range slices.Sorted(maps.Keys(doc.Volumes)) {
 		if v, ok := doc.Volumes[k].(map[string]interface{}); ok {
+			// Every external volume is another workload's data on the
+			// same engine (ux2 N1; validate.py's rule; core's and other
+			// instances' names are refused earlier, checkCoreVolumes).
+			if e, set := v["external"]; set && e != nil && e != false {
+				return fmt.Errorf("volumes.%s: external volumes are not allowed in templates", k)
+			}
 			for _, key := range []string{"driver", "driver_opts"} {
 				if _, set := v[key]; set {
 					return fmt.Errorf("volume %s sets %s: a template's volumes use the default driver (driver options can bind host paths)", k, key)

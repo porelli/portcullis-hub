@@ -146,20 +146,17 @@ func relabelBindEntry(source, target string, readOnly bool) string {
 // core's checkout, the project directory).
 const templateBindPrefix = "./templates/"
 
-// docsBind: core's documentation tree (the docs template's ./docs bind):
-// read-only, public, never secrets — labelled like the template's own
-// files, since core's SELinux overlay covers only core's services.
-const docsBind = "./docs"
-
 // relabelSource: a bind source the Hub labels (P10, ruling I4): the
-// template's own files and core's docs tree.
+// template's own files, written ./templates/… or templates/… (ux2 N5: a
+// template binds nothing else of core's checkout, so core's ./docs is no
+// longer an exception).
 func relabelSource(src string) bool {
-	return strings.HasPrefix(src, templateBindPrefix) || src == docsBind || strings.HasPrefix(src, docsBind+"/")
+	return strings.HasPrefix(src, templateBindPrefix) || strings.HasPrefix(src, "templates/")
 }
 
 // selinuxRelabels are, per service of compose, its binds of the
-// template's own files (literal sources under ./templates/) and of core's
-// docs tree (./docs) re-declared
+// template's own files (literal sources under ./templates/ or templates/)
+// re-declared
 // with bind.selinux z (compose merges a service's volumes by target).
 // Binds that already set a label (z / Z, bind.selinux) and anything else
 // — shared folders, named volumes, other host paths — are left alone:
