@@ -150,7 +150,7 @@ func TestUsageHostsKubernetes(t *testing.T) {
 }
 
 // TestUsageWindow1h: in window 1h each container's sample is the mean of
-// its hour (nulls skipped, the group partial then), the totals sum those
+// its hour (nulls skipped), the totals sum those
 // means, and hosts.primary is the host's mean; window last is unchanged.
 func TestUsageWindow1h(t *testing.T) {
 	e := newUsageEnv(t, "a")
@@ -185,7 +185,8 @@ func TestUsageWindow1h(t *testing.T) {
 	if web.MemLimitBytes == nil || *web.MemLimitBytes != 0 {
 		t.Errorf("web limit = %v", web.MemLimitBytes)
 	}
-	if g.Totals.CPUCores == nil || *g.Totals.CPUCores != 2 || g.Totals.MemBytes == nil || *g.Totals.MemBytes != 350 || !g.Partial {
+	// The first sample's missing CPU rate is no gap (Task 7 ruling).
+	if g.Totals.CPUCores == nil || *g.Totals.CPUCores != 2 || g.Totals.MemBytes == nil || *g.Totals.MemBytes != 350 || g.Partial {
 		t.Errorf("totals = %v %v partial %v", g.Totals.CPUCores, g.Totals.MemBytes, g.Partial)
 	}
 	h := v.Hosts["primary"]
@@ -211,5 +212,82 @@ func TestUsageWindow1h(t *testing.T) {
 		if c.Service == "web" && (c.Sample.MemBytes == nil || *c.Sample.MemBytes != 1000) {
 			t.Errorf("an hour later web mem = %v", c.Sample.MemBytes)
 		}
+	}
+}
+
+// TestUsageWindow1hPartialOnlyOnGaps (contract §11.11, Task 7 ruling): in
+// window 1h a first sample and a network that can never be measured make
+// nothing partial, each such null carries its reason in not_measured,
+// and only a real gap mid-window makes the group partial.
+func TestUsageWindow1hPartialOnlyOnGaps(t *testing.T) {
+	e := newUsageEnv(t, "a")
+	e.rt.Lock()
+	e.rt.Infos = map[string]runtime.UnitInfo{"a1": {}, "a2": {NetworkMode: "host"}}
+	e.rt.Unlock()
+	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "agent", 1, "running"))
+	ns := uint64(0)
+	step := func() {
+		ns += 15e9
+		e.stats("a1", ns, 100)
+		e.stats("a2", ns, 100)
+		e.sweep()
+		e.clock.Add(usage.Interval)
+	}
+	byService := func(g UsageGroup) map[string]UsageContainer {
+		out := map[string]UsageContainer{}
+		for _, c := range g.Containers {
+			out[c.Service] = c
+		}
+		return out
+	}
+
+	// (The fake's stats have no block IO: "the engine gives no figure".)
+	// One sample: every rate not measured yet, with its reason; no gap.
+	step()
+	g := e.h.UsageOverview("1h").Apps[0]
+	web := byService(g)["web"]
+	if g.Partial || web.Sample.CPUCores != nil || web.NotMeasured["cpu_cores"] != "not measured yet: no earlier sample since the container started" {
+		t.Errorf("first: partial %v, web %v %v", g.Partial, web.Sample.CPUCores, web.NotMeasured)
+	}
+	agent := byService(g)["agent"]
+	if agent.NotMeasured["net_rx_bps"] != "not measured: the container uses the host's network" {
+		t.Errorf("first: agent %v", agent.NotMeasured)
+	}
+
+	step()
+	step()
+	v := e.h.UsageOverview("1h")
+	g = v.Apps[0]
+	web, agent = byService(g)["web"], byService(g)["agent"]
+	if g.Partial || web.Sample.CPUCores == nil || *web.Sample.CPUCores != 1 || web.NotMeasured["cpu_cores"] != "" || web.NotMeasured["net_rx_bps"] != "" {
+		t.Errorf("1h: partial %v, web %v %v", g.Partial, web.Sample.CPUCores, web.NotMeasured)
+	}
+	if agent.Sample.NetRxBps != nil || agent.NotMeasured["net_tx_bps"] != "not measured: the container uses the host's network" {
+		t.Errorf("1h: agent %v %v", agent.Sample.NetRxBps, agent.NotMeasured)
+	}
+	if g.Totals.NetRxBps == nil || g.Totals.CPUCores == nil || *g.Totals.CPUCores != 2 {
+		t.Errorf("1h totals = %+v", g.Totals)
+	}
+	b, _ := json.Marshal(v)
+	if !strings.Contains(string(b), `"net_rx_bps":"not measured: the container uses the host's network"`) {
+		t.Errorf("JSON has no not_measured: %s", b)
+	}
+	// Window last is unchanged: a total summing a null is a lower bound.
+	if last := e.h.UsageOverview("last").Apps[0]; !last.Partial {
+		t.Error("window last: the host network's null total is not partial")
+	}
+
+	// A real gap mid-window (a failed stats call): partial.
+	e.rt.Lock()
+	e.rt.StatsErr = map[string]error{"a1": errors.New("boom")}
+	e.rt.Unlock()
+	step()
+	e.rt.Lock()
+	e.rt.StatsErr = nil
+	e.rt.Unlock()
+	step()
+	step()
+	if g := e.h.UsageOverview("1h").Apps[0]; !g.Partial {
+		t.Error("a failed stats call mid-window is not partial")
 	}
 }

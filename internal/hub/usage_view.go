@@ -86,6 +86,9 @@ type UsageContainer struct {
 	Restarts  int          `json:"restarts"`
 	Helper    bool         `json:"helper,omitempty"`
 	Error     string       `json:"error,omitempty"`
+	// NotMeasured: each null sample field with a known reason → its
+	// fixed text (usage.Sample.NotMeasured; contract §11.11).
+	NotMeasured map[string]string `json:"not_measured,omitempty"`
 	// Job / JobState: a one-shot setup job and its state (done | failed |
 	// running | pending, the app page's job_state).
 	Job      bool   `json:"job,omitempty"`
@@ -243,7 +246,7 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 		}
 		g.Containers = append(g.Containers, UsageContainer{
 			ID12: shortContainerID(c.ID), Service: c.Service, Number: c.Number, State: c.State,
-			Sample: sample, Limits: UsageLimits{MemBytes: c.Limits.MemBytes, CPUCores: c.Limits.CPUCores, Pids: c.Limits.Pids},
+			Sample: sample, NotMeasured: runningNotMeasured(c, sample), Limits: UsageLimits{MemBytes: c.Limits.MemBytes, CPUCores: c.Limits.CPUCores, Pids: c.Limits.Pids},
 			OOMKilled: c.Limits.OOMKilled, Restarts: c.Limits.Restarts, Error: c.Err,
 		})
 		health := c.Health
@@ -309,10 +312,24 @@ func (s *usageState) groupLocked(instance, template, name string, cs, helpers []
 		}
 	}
 	if len(samples) > 0 {
-		g.Totals, g.Partial = usage.Total(samples)
+		if since.IsZero() {
+			g.Totals, g.Partial = usage.Total(samples)
+		} else {
+			// Window 1h: only a real gap is partial.
+			g.Totals, g.Partial = usage.TotalExcused(samples)
+		}
 	}
 	g.Partial = g.Partial || meanPartial
 	return g
+}
+
+// runningNotMeasured is a running container's not_measured (a stopped
+// one has no sample to explain).
+func runningNotMeasured(c *usageCont, s usage.Sample) map[string]string {
+	if !c.Running {
+		return nil
+	}
+	return s.NotMeasured()
 }
 
 // UsageInstance is one instance's group with its last hour (and, from

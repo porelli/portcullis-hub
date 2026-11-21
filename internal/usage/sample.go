@@ -5,7 +5,6 @@
 package usage
 
 import (
-	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -39,6 +38,9 @@ type Sample struct {
 	NetTxBps      *float64 `json:"net_tx_bps"`
 	BlkReadBps    *float64 `json:"blk_read_bps"`
 	BlkWriteBps   *float64 `json:"blk_write_bps"`
+	// Why: each nil field's known reason (WhyGap: none; Derive sets it,
+	// Mean and the views read it; never in the Sample's JSON).
+	Why [numFields]Why `json:"-"`
 }
 
 // Limits are a container's limits and start, from its inspect.
@@ -77,14 +79,7 @@ func LimitsOf(i runtime.UnitInfo) Limits {
 
 // OwnNetwork reports whether a container's network counters are its own:
 // host, none and a shared namespace (container:, service:) aren't.
-func OwnNetwork(mode string) bool {
-	switch {
-	case mode == "host", mode == "none",
-		strings.HasPrefix(mode, "container:"), strings.HasPrefix(mode, "service:"):
-		return false
-	}
-	return true
-}
+func OwnNetwork(mode string) bool { return netWhy(mode) == WhyGap }
 
 // WorkingSet is the docker CLI's working set: usage − inactive_file,
 // never below 0; the runtime's own figure when it gives one.
@@ -129,7 +124,8 @@ func rate(prev, cur *uint64, dt time.Duration) *float64 {
 // previous sample, taken at the start prevStart). Rates are nil on the
 // first sample, after a restart (StartedAt changed or a counter went
 // down) and when the engine's read times are less than MinInterval
-// apart or out of order.
+// apart or out of order. Each nil field gets its known reason in Why
+// (explain).
 func Derive(prev *runtime.UnitStats, prevStart time.Time, cur runtime.UnitStats, l Limits) Sample {
 	mem, pidsLimit := l.MemBytes, l.Pids
 	s := Sample{
@@ -147,10 +143,12 @@ func Derive(prev *runtime.UnitStats, prevStart time.Time, cur runtime.UnitStats,
 		s.CPUCores = &v
 	}
 	if prev == nil || !prevStart.Equal(l.StartedAt) {
+		s.explain(nil, cur, l)
 		return s
 	}
 	dt := cur.Read.Sub(prev.Read)
 	if dt < MinInterval {
+		s.explain(prev, cur, l)
 		return s
 	}
 	if s.CPUCores == nil && prev.CPUUsageNS != nil && cur.CPUUsageNS != nil && *cur.CPUUsageNS >= *prev.CPUUsageNS {
@@ -163,5 +161,56 @@ func Derive(prev *runtime.UnitStats, prevStart time.Time, cur runtime.UnitStats,
 	}
 	s.BlkReadBps = rate(prev.BlkRead, cur.BlkRead, dt)
 	s.BlkWriteBps = rate(prev.BlkWrite, cur.BlkWrite, dt)
+	s.explain(prev, cur, l)
 	return s
+}
+
+// explain sets the reason of each nil field (prev nil: no earlier sample
+// of this start). A rate is WhyStart without a comparable earlier counter
+// (none, or it went down: a restart), WhyEngine when the engine left the
+// counter out, the network's reason for a network that isn't its own;
+// anything else stays WhyGap.
+func (s *Sample) explain(prev *runtime.UnitStats, cur runtime.UnitStats, l Limits) {
+	rateWhy := func(p func(runtime.UnitStats) *uint64) Why {
+		c := p(cur)
+		switch {
+		case c == nil:
+			return WhyEngine
+		case prev == nil || p(*prev) == nil || *c < *p(*prev):
+			return WhyStart
+		}
+		return WhyGap
+	}
+	if s.CPUCores == nil {
+		if cur.CPUCores == nil && cur.CPUUsageNS == nil {
+			s.Why[FieldCPU] = WhyEngine
+		} else {
+			s.Why[FieldCPU] = rateWhy(func(u runtime.UnitStats) *uint64 { return u.CPUUsageNS })
+		}
+	}
+	if s.MemBytes == nil {
+		s.Why[FieldMem] = WhyEngine
+	}
+	if s.Pids == nil {
+		s.Why[FieldPids] = WhyEngine
+	}
+	net := netWhy(l.NetworkMode)
+	if s.NetRxBps == nil {
+		s.Why[FieldNetRx] = net
+		if net == WhyGap {
+			s.Why[FieldNetRx] = rateWhy(func(u runtime.UnitStats) *uint64 { return u.NetRx })
+		}
+	}
+	if s.NetTxBps == nil {
+		s.Why[FieldNetTx] = net
+		if net == WhyGap {
+			s.Why[FieldNetTx] = rateWhy(func(u runtime.UnitStats) *uint64 { return u.NetTx })
+		}
+	}
+	if s.BlkReadBps == nil {
+		s.Why[FieldBlkRead] = rateWhy(func(u runtime.UnitStats) *uint64 { return u.BlkRead })
+	}
+	if s.BlkWriteBps == nil {
+		s.Why[FieldBlkWrite] = rateWhy(func(u runtime.UnitStats) *uint64 { return u.BlkWrite })
+	}
 }

@@ -5,45 +5,61 @@ import "math"
 // Window 1h (contract §11.11): the means of the last hour's points.
 
 // Mean is the mean of ps, each usage field over the points where it
-// isn't nil (nil when none is); partial when a nil point was skipped.
-// The limits (MemLimitBytes, CPULimitCores, PidsLimit) are the newest
-// point's, never averaged. No point: an empty sample, not partial.
+// isn't nil (nil when none is). Only a real gap makes it partial: a nil
+// point whose Why is WhyGap. A nil point with a known reason (a first
+// sample, a network that can't be measured, a counter the engine leaves
+// out) is skipped silently; a field nil on every point takes the newest
+// point's reason. The limits (MemLimitBytes, CPULimitCores, PidsLimit)
+// are the newest point's, never averaged. No point: an empty sample, not
+// partial.
 func Mean(ps []Point) (Sample, bool) {
 	if len(ps) == 0 {
 		return Sample{}, false
 	}
 	partial := false
-	f := func(get func(Sample) *float64) *float64 {
+	last := ps[len(ps)-1].S
+	var m Sample
+	// gap notes field fd's nil points without a reason, and the newest
+	// point's reason when every point is nil.
+	gap := func(fd Field, isNil func(Sample) bool) {
+		all := true
+		for _, p := range ps {
+			if !isNil(p.S) {
+				all = false
+			} else if p.S.Why[fd] == WhyGap {
+				partial = true
+			}
+		}
+		if all {
+			m.Why[fd] = last.Why[fd]
+		}
+	}
+	f := func(fd Field, get func(Sample) *float64) *float64 {
 		vs := make([]*float64, len(ps))
 		for i, p := range ps {
 			vs[i] = get(p.S)
 		}
-		m, skipped := meanF(vs)
-		partial = partial || skipped
-		return m
+		v, _ := meanF(vs)
+		gap(fd, func(s Sample) bool { return get(s) == nil })
+		return v
 	}
-	n := func(get func(Sample) *int64) *int64 {
+	n := func(fd Field, get func(Sample) *int64) *int64 {
 		vs := make([]*int64, len(ps))
 		for i, p := range ps {
 			vs[i] = get(p.S)
 		}
-		m, skipped := meanI(vs)
-		partial = partial || skipped
-		return m
+		v, _ := meanI(vs)
+		gap(fd, func(s Sample) bool { return get(s) == nil })
+		return v
 	}
-	last := ps[len(ps)-1].S
-	m := Sample{
-		CPUCores:      f(func(s Sample) *float64 { return s.CPUCores }),
-		MemBytes:      n(func(s Sample) *int64 { return s.MemBytes }),
-		Pids:          n(func(s Sample) *int64 { return s.Pids }),
-		NetRxBps:      f(func(s Sample) *float64 { return s.NetRxBps }),
-		NetTxBps:      f(func(s Sample) *float64 { return s.NetTxBps }),
-		BlkReadBps:    f(func(s Sample) *float64 { return s.BlkReadBps }),
-		BlkWriteBps:   f(func(s Sample) *float64 { return s.BlkWriteBps }),
-		MemLimitBytes: copyI(last.MemLimitBytes),
-		CPULimitCores: copyF(last.CPULimitCores),
-		PidsLimit:     copyI(last.PidsLimit),
-	}
+	m.CPUCores = f(FieldCPU, func(s Sample) *float64 { return s.CPUCores })
+	m.MemBytes = n(FieldMem, func(s Sample) *int64 { return s.MemBytes })
+	m.Pids = n(FieldPids, func(s Sample) *int64 { return s.Pids })
+	m.NetRxBps = f(FieldNetRx, func(s Sample) *float64 { return s.NetRxBps })
+	m.NetTxBps = f(FieldNetTx, func(s Sample) *float64 { return s.NetTxBps })
+	m.BlkReadBps = f(FieldBlkRead, func(s Sample) *float64 { return s.BlkReadBps })
+	m.BlkWriteBps = f(FieldBlkWrite, func(s Sample) *float64 { return s.BlkWriteBps })
+	m.MemLimitBytes, m.CPULimitCores, m.PidsLimit = copyI(last.MemLimitBytes), copyF(last.CPULimitCores), copyI(last.PidsLimit)
 	return m, partial
 }
 
