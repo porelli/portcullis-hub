@@ -27,6 +27,11 @@ const MaxBytes = 64 << 10
 // MaxDepth caps element nesting.
 const MaxDepth = 64
 
+// MaxUses caps the use elements; a use whose target is or contains a use
+// is refused too (fix round 1): references never chain or fan out at
+// render time.
+const MaxUses = 32
+
 const (
 	svgNS   = "http://www.w3.org/2000/svg"
 	xlinkNS = "http://www.w3.org/1999/xlink"
@@ -51,10 +56,14 @@ var (
 	localRef = regexp.MustCompile(`^#[A-Za-z_][A-Za-z0-9_.:-]*$`)
 	urlOpen  = regexp.MustCompile(`(?i)url\(`)
 	localURL = regexp.MustCompile(`(?i)^url\(#[A-Za-z_][A-Za-z0-9_.:-]*\)`)
-	// The encoding pre-check: \s is Python's Unicode \s (str.isspace), as
-	// in tests/svgsafe.py.
-	xmlDecl = regexp.MustCompile(strings.ReplaceAll(`^<\?xml\s[^>]*?\bencoding\s*=\s*["']([^"']*)["']`,
-		`\s`, `[\t\n\v\f\r \x{1c}-\x{1f}\x{85}\p{Z}]`))
+	// The XML declaration pre-checks: \s is Python's Unicode \s, as in
+	// tests/svgsafe.py.
+	xmlDecl    = pyDeclRe("encoding")
+	xmlVersion = pyDeclRe("version")
+	// The CSS image functions other than url( (fix round 1; -webkit-
+	// forms match too): a presentation attribute such as mask takes an
+	// <image>.
+	imageFunc = regexp.MustCompile(`(?i)(image-set|src|cross-fade)\(`)
 )
 
 func set(words string) map[string]bool {
@@ -63,6 +72,16 @@ func set(words string) map[string]bool {
 		m[w] = true
 	}
 	return m
+}
+
+// pyS is Python's Unicode \s (str.isspace).
+const pyS = `[\t\n\v\f\r \x{1c}-\x{1f}\x{85}\p{Z}]`
+
+// pyDeclRe is tests/svgsafe.py's
+// <\?xml\s[^>]*?\b<key>\s*=\s*["']([^"']*)["'] with Python's Unicode \s
+// and \b (the character before <key> is no letter, digit or _).
+func pyDeclRe(key string) *regexp.Regexp {
+	return regexp.MustCompile(`^<\?xml` + pyS + `(?:[^>]*?[^\pL\pN_>])??` + key + pyS + `*=` + pyS + `*["']([^"']*)["']`)
 }
 
 var errNotWellFormed = errors.New("not well-formed XML")
@@ -174,6 +193,13 @@ func attrProblem(a xml.Attr) error {
 			return errors.New("url() must be a local #id reference")
 		}
 	}
+	// No allowed attribute needs a CSS string (fix round 1).
+	if strings.ContainsAny(value, `'"`) {
+		return errors.New("quote refused")
+	}
+	if m := imageFunc.FindStringSubmatch(value); m != nil {
+		return fmt.Errorf("%s() refused", strings.ToLower(m[1]))
+	}
 	return nil
 }
 
@@ -196,6 +222,8 @@ type frame struct {
 	local string
 	ns    map[string]string // prefix ("" = default) -> namespace in force
 	text  bool              // non-blank text directly inside
+	id    string            // its id attribute ("" = none)
+	use   bool              // it is or contains a use
 }
 
 // Check returns nil when data is an acceptable logo, else an error whose
@@ -212,6 +240,9 @@ func Check(data []byte) error {
 		if e := strings.ToLower(m[1]); e != "utf-8" && e != "utf8" {
 			return errors.New("encoding must be UTF-8")
 		}
+	}
+	if m := xmlVersion.FindStringSubmatch(text); m != nil && m[1] != "1.0" {
+		return errors.New("XML version must be 1.0")
 	}
 	// Before parsing: what the parser would otherwise act on or hide.
 	if strings.Contains(text, "<!ENTITY") {
@@ -237,6 +268,9 @@ func Check(data []byte) error {
 	}
 	var stack []frame
 	seenRoot, rootDone, first := false, false, true
+	uses := 0
+	var useTargets []string     // the ids use elements reference, in order
+	hasUse := map[string]bool{} // id -> that element is or contains a use
 	for {
 		start := d.InputOffset()
 		tok, err := d.RawToken()
@@ -291,6 +325,12 @@ func Check(data []byte) error {
 				return errNotWellFormed
 			}
 			stack = stack[:len(stack)-1]
+			if f.id != "" {
+				hasUse[f.id] = hasUse[f.id] || f.use
+			}
+			if f.use && len(stack) > 0 {
+				stack[len(stack)-1].use = true
+			}
 			if f.text && !textElements[f.local] {
 				return errors.New("text outside title and desc refused")
 			}
@@ -331,15 +371,38 @@ func Check(data []byte) error {
 			if len(stack) > MaxDepth {
 				return fmt.Errorf("nested deeper than %d", MaxDepth)
 			}
+			top := &stack[len(stack)-1]
 			for _, a := range attrs {
 				if err := attrProblem(a); err != nil {
 					return err
+				}
+				if a.Name.Space == "" && a.Name.Local == "id" {
+					top.id = a.Value
+				}
+			}
+			if el.Local == "use" {
+				top.use = true
+				if uses++; uses > MaxUses {
+					return fmt.Errorf("more than %d use elements", MaxUses)
+				}
+				// href before xlink:href, as tests/svgsafe.py.
+				for _, ns := range []string{"", xlinkNS} {
+					for _, a := range attrs {
+						if a.Name.Space == ns && a.Name.Local == "href" {
+							useTargets = append(useTargets, a.Value[1:])
+						}
+					}
 				}
 			}
 		}
 	}
 	if !seenRoot || len(stack) != 0 {
 		return errNotWellFormed
+	}
+	for _, id := range useTargets {
+		if hasUse[id] {
+			return fmt.Errorf("use target #%s contains a use", id)
+		}
 	}
 	return nil
 }
@@ -360,14 +423,37 @@ func hasAttr(attrs []xml.Attr, local string) bool {
 // tests/svgsafe.py's start-ns events. It returns the element's expanded
 // name, its other attributes with expanded names, and the tag's bindings.
 func resolve(t xml.StartElement, parent *frame) (xml.Name, []xml.Attr, map[string]string, error) {
-	bind := map[string]string{}
-	if parent != nil {
-		for k, v := range parent.ns {
-			bind[k] = v
-		}
-	}
 	for i := range t.Attr {
 		t.Attr[i].Value = normAttr(t.Attr[i].Value)
+	}
+	// The parent's bindings, copied only when the tag declares its own.
+	var bind map[string]string
+	if parent != nil {
+		bind = parent.ns
+	}
+	for _, a := range t.Attr {
+		if (a.Name.Space == "" && a.Name.Local == "xmlns") || a.Name.Space == "xmlns" {
+			own := make(map[string]string, len(bind)+1)
+			for k, v := range bind {
+				own[k] = v
+			}
+			bind = own
+			break
+		}
+	}
+	if bind == nil {
+		bind = map[string]string{}
+	}
+	// A duplicate declaration is malformed before any namespace is judged
+	// (expat).
+	decl := map[xml.Name]bool{}
+	for _, a := range t.Attr {
+		if (a.Name.Space == "" && a.Name.Local == "xmlns") || a.Name.Space == "xmlns" {
+			if decl[a.Name] {
+				return xml.Name{}, nil, nil, errNotWellFormed
+			}
+			decl[a.Name] = true
+		}
 	}
 	for _, a := range t.Attr {
 		var prefix string
@@ -381,6 +467,10 @@ func resolve(t xml.StartElement, parent *frame) (xml.Name, []xml.Attr, map[strin
 			}
 		default:
 			continue
+		}
+		// } is ElementTree's separator: expat refuses it in a namespace.
+		if strings.Contains(a.Value, "}") {
+			return xml.Name{}, nil, nil, errNotWellFormed
 		}
 		if !namespaces[a.Value] {
 			return xml.Name{}, nil, nil, fmt.Errorf("namespace %s refused", a.Value)

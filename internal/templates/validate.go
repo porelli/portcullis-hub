@@ -69,17 +69,17 @@ func HasHiddenText(s string) bool {
 // before anything renders it (contract §3): at most notes.MaxBytes,
 // nesting at most notes.MaxDepth, valid UTF-8 and no hidden character
 // (HiddenRune: control, bidi, zero-width, …) but newline and tab. Errors
-// name field.
+// name field (notes.FieldError).
 func validateMarkdown(field, s string) error {
 	if len(s) > notes.MaxBytes {
 		return notes.CheckField(field, s) // the size refusal, before any scan
 	}
 	if !utf8.ValidString(s) {
-		return fmt.Errorf("%s is not valid UTF-8", field)
+		return notes.FieldError(field, "is not valid UTF-8")
 	}
 	for i, r := range s {
 		if r != '\n' && r != '\t' && HiddenRune(r) {
-			return fmt.Errorf("%s has the hidden character U+%04X at byte %d (control, bidi or zero-width characters are refused)", field, r, i)
+			return notes.FieldError(field, "has the hidden character U+%04X at byte %d (control, bidi or zero-width characters are refused)", r, i)
 		}
 	}
 	return notes.CheckField(field, s)

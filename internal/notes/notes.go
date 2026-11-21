@@ -162,6 +162,17 @@ const MaxDepth = 16
 // Check is CheckField for auth.notes.
 func Check(notes string) error { return CheckField("auth.notes", notes) }
 
+// FieldError is an error about a Markdown field in the contract's form
+// (§3): "auth.notes <what>" for the notes, "<field>: <what>" for every
+// other field (long_description: is 16385 bytes, …).
+func FieldError(field, format string, args ...any) error {
+	sep := ": "
+	if field == "auth.notes" {
+		sep = " "
+	}
+	return fmt.Errorf("%s%s%s", field, sep, fmt.Sprintf(format, args...))
+}
+
 // CheckField refuses Markdown text over MaxBytes or nested deeper than
 // MaxDepth, its errors naming field (auth.notes, long_description;
 // contract §3): the size first, then a line scan of the leading container
@@ -169,15 +180,15 @@ func Check(notes string) error { return CheckField("auth.notes", notes) }
 // parsed document's nesting (which also catches nesting by indentation).
 func CheckField(field, text string) error {
 	if len(text) > MaxBytes {
-		return fmt.Errorf("%s is %d bytes, at most %d allowed", field, len(text), MaxBytes)
+		return FieldError(field, "is %d bytes, at most %d allowed", len(text), MaxBytes)
 	}
 	for _, line := range strings.Split(text, "\n") {
 		if markerDepth(line) > MaxDepth {
-			return fmt.Errorf("%s nests blocks deeper than %d", field, MaxDepth)
+			return FieldError(field, "nests blocks deeper than %d", MaxDepth)
 		}
 	}
 	if d := blockDepth(md.Parser().Parse(gmtext.NewReader([]byte(text))), 0); d > MaxDepth {
-		return fmt.Errorf("%s nests blocks deeper than %d", field, MaxDepth)
+		return FieldError(field, "nests blocks deeper than %d", MaxDepth)
 	}
 	return nil
 }

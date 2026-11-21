@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/svgsafe"
@@ -27,10 +28,11 @@ type Links struct {
 	SourceNote string  `yaml:"source_note" json:"source_note,omitempty"`
 }
 
-// Resources are the minimums the project documents (0 = not stated).
+// Resources are the minimums the project documents (nil = not stated; a
+// figure given is in range, 0 included in the refusal, contract §3).
 type Resources struct {
-	MinMemoryMiB int `yaml:"min_memory_mib" json:"min_memory_mib,omitempty"`
-	MinDiskGiB   int `yaml:"min_disk_gib" json:"min_disk_gib,omitempty"`
+	MinMemoryMiB *int `yaml:"min_memory_mib" json:"min_memory_mib,omitempty"`
+	MinDiskGiB   *int `yaml:"min_disk_gib" json:"min_disk_gib,omitempty"`
 }
 
 // Screenshot is one screenshots entry.
@@ -110,9 +112,6 @@ func checkHTTPSURL(field, u string) error {
 	return nil
 }
 
-// oneLine: no control or hidden character, valid UTF-8.
-func oneLine(s string) bool { return !HasHiddenText(s) }
-
 // validateCatalog checks the catalog fields' shapes (before any file is
 // read): ValidateManifest.
 func validateCatalog(m *Manifest) error {
@@ -128,7 +127,8 @@ func validateCatalog(m *Manifest) error {
 				return err
 			}
 		}
-		if l.SourceNote != "" && (!oneLine(l.SourceNote) || utf8.RuneCountInString(l.SourceNote) > maxSourceNote) {
+		// HasHiddenText also refuses a newline (a control character).
+		if l.SourceNote != "" && (HasHiddenText(l.SourceNote) || utf8.RuneCountInString(l.SourceNote) > maxSourceNote) {
 			return fmt.Errorf("links.source_note must be one line of at most %d characters", maxSourceNote)
 		}
 	}
@@ -136,11 +136,11 @@ func validateCatalog(m *Manifest) error {
 		return fmt.Errorf("logo: %q must be a file name in the template folder matching %s", m.Logo, logoNameRe)
 	}
 	if r := m.Resources; r != nil {
-		if r.MinMemoryMiB != 0 && (r.MinMemoryMiB < 16 || r.MinMemoryMiB > 1048576) {
-			return fmt.Errorf("resources.min_memory_mib %d must be 16–1048576", r.MinMemoryMiB)
+		if v := r.MinMemoryMiB; v != nil && (*v < 16 || *v > 1048576) {
+			return fmt.Errorf("resources.min_memory_mib %d must be 16–1048576 (leave it out when upstream states none)", *v)
 		}
-		if r.MinDiskGiB != 0 && (r.MinDiskGiB < 1 || r.MinDiskGiB > 65536) {
-			return fmt.Errorf("resources.min_disk_gib %d must be 1–65536", r.MinDiskGiB)
+		if v := r.MinDiskGiB; v != nil && (*v < 1 || *v > 65536) {
+			return fmt.Errorf("resources.min_disk_gib %d must be 1–65536 (leave it out when upstream states none)", *v)
 		}
 	}
 	if len(m.Screenshots) > MaxScreenshots {
@@ -150,7 +150,7 @@ func validateCatalog(m *Manifest) error {
 		if !shotNameRe.MatchString(s.File) {
 			return fmt.Errorf("screenshots[%d]: file %q must be a file name in the template folder matching %s", i, s.File, shotNameRe)
 		}
-		if s.Caption == "" || !oneLine(s.Caption) || utf8.RuneCountInString(s.Caption) > MaxCaptionRunes {
+		if s.Caption == "" || HasHiddenText(s.Caption) || utf8.RuneCountInString(s.Caption) > MaxCaptionRunes {
 			return fmt.Errorf("screenshots[%d]: caption must be one line of 1–%d characters", i, MaxCaptionRunes)
 		}
 	}
@@ -178,7 +178,9 @@ func readAsset(dir, name string, max int64) ([]byte, error) {
 	if fi.Size() > max {
 		return nil, fmt.Errorf("over %d KiB", max>>10)
 	}
-	f, err := os.Open(p)
+	// O_NONBLOCK: a FIFO swapped in after the Lstat can't block the open
+	// (SameFile then refuses it).
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%s: unreadable", name)
 	}

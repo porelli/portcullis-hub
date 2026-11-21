@@ -112,6 +112,13 @@ func TestCheckRefuses(t *testing.T) {
 		{"PI target with a colon", "not well-formed XML", []byte(`<?xm:l version="1.0"?>` + head + "</svg>")},
 		{"junk in the XML declaration", "not well-formed XML", []byte(`<?xml vers=sion="1.0"?>` + head + "</svg>")},
 		{"mismatched end tag", "not well-formed XML", []byte(head + `<g></G></svg>`)},
+		// Fix round 1 (as tests/svgsafe.py on expat 2.7).
+		{"duplicate default namespace", "not well-formed XML", []byte(`<svg xmlns="http://www.w3.org/2000/svg" xmlns="a" viewBox="0 0 1 1"/>`)},
+		{"} in a namespace", "not well-formed XML", []byte(`<svg xmlns="ht}tp://x" viewBox="0 0 1 1"/>`)},
+		{"version after a word character", "encoding must be UTF-8", []byte(`<?xml version="1.0" éencoding="x" encoding="ISO-8859-1"?>` + head + "</svg>")},
+		{"the first version counts", "not well-formed XML", []byte(`<?xml version="1.0"version="1.1"?>` + head + "</svg>")},
+		{"quote in a url(#id) value", "quote refused", []byte(head + `<path d="M0 0" fill="url(#a) '"/></svg>`)},
+		{"-webkit-image-set(", "image-set() refused", []byte(head + `<path d="M0 0" mask="-WEBKIT-IMAGE-SET(x)"/></svg>`)},
 		{"Latin-1 after a Unicode space", "encoding must be UTF-8", []byte("<?xml version=\"1.0\" encoding=\u00a0\"ISO-8859-1\"?>" + head + "</svg>")},
 	}
 	for _, c := range cases {

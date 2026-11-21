@@ -95,10 +95,10 @@ func TestBuildLongDescription(t *testing.T) {
 		t.Errorf("raw HTML passed through: %q", h)
 	}
 	for name, c := range map[string]struct{ ld, want string }{
-		"too big":     {strings.Repeat("a", 16<<10+1), "long_description is 16385 bytes"},
-		"too deep":    {strings.Repeat("> ", 17) + "x", "long_description nests blocks deeper than 16"},
-		"zero width":  {"a\u200bb", "long_description has the hidden character U+200B"},
-		"invalid utf": {"a\xffb", "long_description is not valid UTF-8"},
+		"too big":     {strings.Repeat("a", 16<<10+1), "long_description: is 16385 bytes, at most 16384 allowed"},
+		"too deep":    {strings.Repeat("> ", 17) + "x", "long_description: nests blocks deeper than 16"},
+		"zero width":  {"a\u200bb", "long_description: has the hidden character U+200B"},
+		"invalid utf": {"a\xffb", "long_description: is not valid UTF-8"},
 	} {
 		mm := &Manifest{Auth: Auth{Method: "custom"}, LongDescription: c.ld}
 		wantErr(t, name, ValidateManifest(mm), c.want)
@@ -242,8 +242,13 @@ func TestBuildCatalogFields(t *testing.T) {
 	if tm.CategoryLabel != "Home automation" || tm.CategoryRank != 7 || !tm.Routerless {
 		t.Errorf("category %q %d routerless %v", tm.CategoryLabel, tm.CategoryRank, tm.Routerless)
 	}
-	if r := tm.Manifest.Resources; r == nil || r.MinMemoryMiB != 512 || r.MinDiskGiB != 2 {
+	if r := tm.Manifest.Resources; r == nil || r.MinMemoryMiB == nil || *r.MinMemoryMiB != 512 || r.MinDiskGiB == nil || *r.MinDiskGiB != 2 {
 		t.Errorf("resources = %+v", r)
+	}
+	// A figure left out stays out of the view.
+	tm, err = buildDir(t, catHead+"resources: {min_memory_mib: 64}\n", nil)
+	if b, _ := json.Marshal(tm.Manifest.Resources); err != nil || string(b) != `{"min_memory_mib":64}` {
+		t.Errorf("resources JSON = %s %v", b, err)
 	}
 	if l := tm.Manifest.Links; l == nil || l.Website != "https://demo.example/" || l.Source == nil || *l.Source != "https://git.example/demo" {
 		t.Errorf("links = %+v", l)
@@ -264,6 +269,8 @@ func TestBuildCatalogFields(t *testing.T) {
 		"memory high":      {catHead + "resources: {min_memory_mib: 2000000}\n", "resources.min_memory_mib"},
 		"disk":             {catHead + "resources: {min_disk_gib: 70000}\n", "resources.min_disk_gib"},
 		"disk negative":    {catHead + "resources: {min_disk_gib: -1}\n", "resources.min_disk_gib"},
+		"memory 0":         {catHead + "resources: {min_memory_mib: 0}\n", "resources.min_memory_mib"},
+		"disk 0":           {catHead + "resources: {min_disk_gib: 0, min_memory_mib: 64}\n", "resources.min_disk_gib"},
 		"website http":     {strings.Replace(catHead, "https://demo.example/", "http://demo.example/", 1), "links.website"},
 		"website js":       {strings.Replace(catHead, "https://demo.example/", "\"javascript:alert(1)\"", 1), "links.website"},
 		"website userinfo": {strings.Replace(catHead, "https://demo.example/", "https://bank.example@evil.example/", 1), "links.website"},
