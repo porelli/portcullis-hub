@@ -15,6 +15,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/freshauth"
+	"github.com/portcullis/hub/internal/notes"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -369,7 +370,8 @@ func TestPortalNoteFirstParagraph(t *testing.T) {
 		{strings.Repeat("x", 301), "No web page."},
 		{strings.Repeat("é", 300) + "\n\nmore", strings.Repeat("é", 300)},
 	} {
-		if got, _ := portalNote(tc.notes); got != tc.want {
+		r := notes.Render(tc.notes)
+		if got, _ := portalNote(&templates.Auth{Notes: tc.notes, NoteText: r.FirstText, NoteHTML: r.FirstHTML}); got != tc.want {
 			t.Errorf("portalNote(%q) = %q, want %q", clip(tc.notes, 40), got, tc.want)
 		}
 	}

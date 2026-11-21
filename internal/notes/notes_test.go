@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -189,5 +190,62 @@ func TestGoldenTemplate(t *testing.T) {
 	}
 	if _, p := FirstParagraph(m.Auth.Notes); p == "" || len([]rune(p)) > 300 {
 		t.Errorf("stalwart's first paragraph %q: want 1–300 runes", p)
+	}
+}
+
+// I1: rendering is superlinear in the nesting depth, so Check bounds the
+// size and the depth, and refuses pathological input fast.
+func TestCheckRefusesFast(t *testing.T) {
+	for name, in := range map[string]string{
+		"120 KB nested list markers":  strings.Repeat("- ", 60000) + "x",
+		"120 KB nested quotes":        strings.Repeat(">", 120000) + " x",
+		"120 KB indented nested list": nestedIndented(400),
+		"16 KB nested list markers":   strings.Repeat("- ", 8000) + "x",
+		"16 KB nested quotes":         strings.Repeat(">", 16000) + " x",
+		"17 levels by markers":        strings.Repeat("- ", MaxDepth+1) + "x",
+		"17 levels mixed":             strings.Repeat("> - ", 9) + "x",
+		"17 levels by indentation":    nestedIndented(MaxDepth + 1),
+		"over 16 KiB of prose":        strings.Repeat("word ", MaxBytes/5+1),
+	} {
+		start := time.Now()
+		err := Check(in)
+		if took := time.Since(start); took > 250*time.Millisecond {
+			t.Errorf("%s: Check took %v", name, took)
+		}
+		if err == nil {
+			t.Errorf("%s (%d bytes): Check passed", name, len(in))
+		}
+	}
+	for name, in := range map[string]string{
+		"16 levels by markers":     strings.Repeat("- ", MaxDepth) + "x",
+		"16 levels by indentation": nestedIndented(MaxDepth),
+		"exactly 16 KiB":           strings.Repeat("x", MaxBytes),
+		"thematic break":           "---\n\n***",
+	} {
+		if err := Check(in); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// nestedIndented is a list nested n levels deep by indentation alone.
+func nestedIndented(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString(strings.Repeat("  ", i) + "- x\n")
+	}
+	return b.String()
+}
+
+// M3: a link with userinfo is a phishing shape: it stays text.
+func TestUserinfoLinksAreText(t *testing.T) {
+	for _, in := range []string{
+		"[x](https://bank.example@evil.example/)",
+		"[x](https://user:pw@evil.example/)",
+		"<https://bank.example@evil.example/>",
+	} {
+		if h := HTML(in); strings.Contains(h, "<a") {
+			t.Errorf("HTML(%q) = %q: a link", in, h)
+		}
 	}
 }

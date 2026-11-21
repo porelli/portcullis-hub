@@ -10,7 +10,6 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
-	"github.com/portcullis/hub/internal/notes"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -85,7 +84,7 @@ func (h *Hub) portalWithLocked(gate *policy.Document) PortalDocument {
 		// Router-less instances (contract §3, §10): URLs empty, note present.
 		if m.Routerless() {
 			a.URLs = []templates.AppURL{}
-			a.Note, a.NoteHTML = portalNote(m.Auth.Notes)
+			a.Note, a.NoteHTML = portalNote(&m.Auth)
 		} else {
 			a.URLs = append([]templates.AppURL{}, m.URLs...)
 		}
@@ -208,13 +207,13 @@ const portalNoNote = "No web page."
 // portalNote is a router-less entry's portal note (contract §10, B-M6 /
 // C-M4) and its HTML: the first Markdown paragraph of auth.notes as plain
 // text (inline markup removed, whitespace collapsed) and as sanitised
-// HTML (notes.FirstParagraph), when the text is at most portalNoteMax
+// HTML, both rendered once when the template was built (Auth.NoteText /
+// NoteHTML, never under h.mu), when the text is at most portalNoteMax
 // runes, else "No web page." — never empty (group-gate renders the card).
 // The rest of auth.notes is for operators.
-func portalNote(md string) (string, string) {
-	h, p := notes.FirstParagraph(md)
-	if p == "" || utf8.RuneCountInString(p) > portalNoteMax {
+func portalNote(a *templates.Auth) (string, string) {
+	if a.NoteText == "" || utf8.RuneCountInString(a.NoteText) > portalNoteMax {
 		return portalNoNote, "<p>" + portalNoNote + "</p>"
 	}
-	return p, h
+	return a.NoteText, a.NoteHTML
 }

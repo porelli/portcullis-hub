@@ -40,11 +40,17 @@ type Auth struct {
 	// grants, implicit flow, service accounts, device/CIBA grants and
 	// standard token exchange switched off: only the browser flow signs in.
 	KeycloakAccessRole bool `yaml:"keycloak_access_role" json:"keycloak_access_role,omitempty"`
-	// Notes is Markdown (contract §3); NotesHTML is it rendered and
-	// sanitised server-side (internal/notes) when the template is built.
-	// The UI inserts only NotesHTML, never Notes. Never read from YAML.
+	// Notes is Markdown (contract §3: at most notes.MaxBytes, nesting at
+	// most notes.MaxDepth, no hidden characters). NotesHTML is it rendered
+	// and sanitised server-side (internal/notes), once, when the template
+	// is built (outside the Hub's lock); the UI inserts only NotesHTML,
+	// never Notes. NoteText / NoteHTML are its first paragraph (the portal
+	// note, §10; NoteText also the Marketplace tooltip), rendered then too.
+	// None is ever read from YAML.
 	Notes     string `yaml:"notes" json:"notes"`
 	NotesHTML string `yaml:"-" json:"notes_html,omitempty"`
+	NoteText  string `yaml:"-" json:"-"`
+	NoteHTML  string `yaml:"-" json:"-"`
 }
 
 // NativeLogin is auth.native_login (method custom only).

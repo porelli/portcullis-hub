@@ -81,7 +81,9 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := ValidateManifest(&m); err != nil {
 		return Template{}, err
 	}
-	m.Auth.NotesHTML = notes.HTML(m.Auth.Notes)
+	// The notes are rendered here, once (ValidateManifest bounded them).
+	r := notes.Render(m.Auth.Notes)
+	m.Auth.NotesHTML, m.Auth.NoteText, m.Auth.NoteHTML = r.HTML, r.FirstText, r.FirstHTML
 	if compose == nil {
 		return Template{}, fmt.Errorf("no compose.yml")
 	}

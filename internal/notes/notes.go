@@ -5,18 +5,25 @@
 //
 //   - goldmark parses CommonMark plus the GFM table and autolink
 //     extensions. Raw HTML is never passed through (no html.WithUnsafe):
-//     an HTML block or inline tag becomes an "omitted" comment, and
-//     dangerous URLs (javascript:, vbscript:, file:, most data:) get an
-//     empty href. Images are turned into their alt text before rendering.
-//     Every link gets target="_blank" and rel="noopener noreferrer
+//     an HTML block or inline tag becomes an "omitted" comment. Before
+//     rendering, an AST transformer turns images into their alt text and
+//     every link or autolink whose URL isn't an absolute http/https URL
+//     with a host (and no userinfo) or a mailto URL into its text; every
+//     other link gets target="_blank" and rel="noopener noreferrer
 //     nofollow".
 //   - bluemonday then keeps only the elements and attributes that
 //     subset can produce, links with an http, https or mailto URL and no
 //     image at all; anything else is dropped (its text kept, escaped).
+//
+// Rendering is superlinear in the block nesting depth, so notes must pass
+// Check (at most MaxBytes, nesting at most MaxDepth) first; the Hub checks
+// them in templates.ValidateManifest and renders them once, with Render,
+// when a template is built.
 package notes
 
 import (
 	"bytes"
+	"fmt"
 	"html"
 	"net/url"
 	"regexp"
@@ -132,6 +139,9 @@ func allowedURL(raw string) bool {
 	if err != nil {
 		return false
 	}
+	if u.User != nil {
+		return false // https://bank.example@evil.example
+	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
 		return u.Host != ""
@@ -141,14 +151,116 @@ func allowedURL(raw string) bool {
 	return false
 }
 
-// HTML renders Markdown notes to sanitised HTML ("" for blank notes).
-func HTML(notes string) string {
-	if strings.TrimSpace(notes) == "" {
-		return ""
+// MaxBytes caps auth.notes (contract §3): the largest template's notes
+// are about 6 KB.
+const MaxBytes = 16 << 10
+
+// MaxDepth caps the block nesting depth of auth.notes (block quotes and
+// list items inside each other, contract §3).
+const MaxDepth = 16
+
+// Check refuses notes over MaxBytes or nested deeper than MaxDepth: the
+// size first, then a line scan of the leading container markers (> - * +
+// and 1. / 1)), then, on what is left (bounded), the parsed document's
+// nesting (which also catches nesting by indentation).
+func Check(notes string) error {
+	if len(notes) > MaxBytes {
+		return fmt.Errorf("auth.notes is %d bytes, at most %d allowed", len(notes), MaxBytes)
+	}
+	for _, line := range strings.Split(notes, "\n") {
+		if markerDepth(line) > MaxDepth {
+			return fmt.Errorf("auth.notes nests blocks deeper than %d", MaxDepth)
+		}
 	}
 	src := []byte(notes)
-	return render(src, md.Parser().Parse(text.NewReader(src)))
+	if d := blockDepth(md.Parser().Parse(text.NewReader(src)), 0); d > MaxDepth {
+		return fmt.Errorf("auth.notes nests blocks deeper than %d", MaxDepth)
+	}
+	return nil
 }
+
+// markerDepth counts the block quote and list markers a line opens with.
+func markerDepth(line string) int {
+	d := 0
+	s := line
+	for {
+		s = strings.TrimLeft(s, " \t")
+		switch {
+		case strings.HasPrefix(s, ">"):
+			s = s[1:]
+		case len(s) >= 2 && strings.ContainsRune("-*+", rune(s[0])) && (s[1] == ' ' || s[1] == '\t'):
+			s = s[2:]
+		default:
+			k := 0
+			for k < len(s) && k < 9 && s[k] >= '0' && s[k] <= '9' {
+				k++
+			}
+			if k == 0 || k+1 >= len(s) || (s[k] != '.' && s[k] != ')') || (s[k+1] != ' ' && s[k+1] != '\t') {
+				return d
+			}
+			s = s[k+2:]
+		}
+		d++
+		if d > MaxDepth {
+			return d
+		}
+	}
+}
+
+// blockDepth is the deepest nesting of block quotes and list items under n.
+func blockDepth(n ast.Node, here int) int {
+	if n.Kind() == ast.KindBlockquote || n.Kind() == ast.KindListItem {
+		here++
+	}
+	max := here
+	for c := n.FirstChild(); c != nil && max <= MaxDepth; c = c.NextSibling() {
+		if c.Type() != ast.TypeBlock && c.Type() != ast.TypeDocument {
+			continue
+		}
+		if d := blockDepth(c, here); d > max {
+			max = d
+		}
+	}
+	return max
+}
+
+// Rendered is a template's notes rendered once (templates.build): the
+// whole notes and the first paragraph, as sanitised HTML and as text.
+type Rendered struct {
+	HTML      string // the whole notes ("" for blank notes)
+	FirstHTML string // the first top-level paragraph ("" if none)
+	FirstText string // its plain text (Text)
+}
+
+// Render parses notes (which must pass Check) once and renders them.
+func Render(notes string) Rendered {
+	if strings.TrimSpace(notes) == "" {
+		return Rendered{}
+	}
+	src := []byte(notes)
+	doc := md.Parser().Parse(text.NewReader(src))
+	r := Rendered{HTML: render(src, doc)}
+	var para ast.Node
+	for c := doc.FirstChild(); c != nil; c = c.NextSibling() {
+		if c.Kind() == ast.KindParagraph {
+			para = c
+			break
+		}
+	}
+	if para == nil {
+		return r
+	}
+	// Render the paragraph alone: a document holding only it.
+	one := ast.NewDocument()
+	doc.RemoveChild(doc, para)
+	one.AppendChild(one, para)
+	r.FirstHTML = render(src, one)
+	r.FirstText = Text(r.FirstHTML)
+	return r
+}
+
+// HTML renders Markdown notes to sanitised HTML ("" for blank notes).
+func HTML(notes string) string { return Render(notes).HTML }
 
 func render(src []byte, n ast.Node) string {
 	var buf bytes.Buffer
@@ -163,24 +275,8 @@ func render(src []byte, n ast.Node) string {
 // text: the rendered paragraph's text with whitespace runs collapsed to
 // one space. Both are "" when the notes have no paragraph.
 func FirstParagraph(notes string) (htmlOut, plain string) {
-	src := []byte(notes)
-	doc := md.Parser().Parse(text.NewReader(src))
-	var para ast.Node
-	for c := doc.FirstChild(); c != nil; c = c.NextSibling() {
-		if c.Kind() == ast.KindParagraph {
-			para = c
-			break
-		}
-	}
-	if para == nil {
-		return "", ""
-	}
-	// Render the paragraph alone: a document holding only it.
-	one := ast.NewDocument()
-	doc.RemoveChild(doc, para)
-	one.AppendChild(one, para)
-	htmlOut = render(src, one)
-	return htmlOut, Text(htmlOut)
+	r := Render(notes)
+	return r.FirstHTML, r.FirstText
 }
 
 // textOnly strips every tag (the rendered HTML's text, still escaped).

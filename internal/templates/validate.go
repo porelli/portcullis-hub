@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/portcullis/hub/internal/notes"
 )
 
 var (
@@ -63,10 +65,32 @@ func HasHiddenText(s string) bool {
 	return !utf8.ValidString(s) || strings.ContainsFunc(s, HiddenRune)
 }
 
+// validateNotes bounds auth.notes before anything renders it (contract
+// §3): at most notes.MaxBytes, nesting at most notes.MaxDepth, valid
+// UTF-8 and no hidden character (HiddenRune: control, bidi, zero-width,
+// …) but newline and tab.
+func validateNotes(s string) error {
+	if len(s) > notes.MaxBytes {
+		return notes.Check(s) // the size refusal, before any scan
+	}
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("auth.notes is not valid UTF-8")
+	}
+	for i, r := range s {
+		if r != '\n' && r != '\t' && HiddenRune(r) {
+			return fmt.Errorf("auth.notes has the hidden character U+%04X at byte %d (control, bidi or zero-width characters are refused)", r, i)
+		}
+	}
+	return notes.Check(s)
+}
+
 // ValidateManifest rejects manifests whose keys/values would be unsafe to
 // splice into .env files, compose overrides, the group-gate policy file or
 // the UI's HTML.
 func ValidateManifest(m *Manifest) error {
+	if err := validateNotes(m.Auth.Notes); err != nil {
+		return err
+	}
 	switch m.Instances {
 	case "", InstancesSingle, InstancesMulti:
 	default:

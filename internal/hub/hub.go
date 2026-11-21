@@ -483,6 +483,10 @@ type Hub struct {
 	domainsGen      uint64
 	domainOpMu      sync.Mutex
 
+	// discoverMu serializes Discover: it loads (and renders the notes of)
+	// the templates without mu, then swaps the catalog in under mu.
+	discoverMu sync.Mutex
+
 	// mu guards st and templates. Never hold it across docker/network calls.
 	mu        sync.RWMutex
 	st        *state.AppState
@@ -1152,15 +1156,27 @@ func (h *Hub) coreCheckoutBindLocked(t *templates.Template) (templates.BindSourc
 }
 
 // Discover rebuilds the template catalog from the configured sources.
+//
+// Loading parses every manifest and compose file and renders each
+// template's notes (superlinear Markdown, bounded by ValidateManifest):
+// that runs without h.mu, from a snapshot of the sources, so a large
+// source never stalls the API. Discover calls are serialized
+// (discoverMu), so the catalog swapped in is always the latest load.
 func (h *Hub) Discover() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.discoverMu.Lock()
+	defer h.discoverMu.Unlock()
+	h.mu.RLock()
+	sources := append([]state.Source(nil), h.st.Sources...)
+	domain, kinds := h.cfg.Domain, h.kinds
+	h.mu.RUnlock()
 	var ts []templates.Template
-	for _, src := range h.st.Sources {
+	for _, src := range sources {
 		if src.Path != "" {
-			ts = append(ts, templates.Discover(src.Path, src.Name, h.cfg.Domain, h.kinds)...)
+			ts = append(ts, templates.Discover(src.Path, src.Name, domain, kinds)...)
 		}
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.allTemplates = append([]templates.Template(nil), ts...)
 	h.templateIDs = map[string]bool{}
 	for _, t := range ts {
