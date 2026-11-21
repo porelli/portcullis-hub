@@ -55,6 +55,8 @@ type usageWorker struct {
 	cpus   int
 	mem    int64
 	infoAt time.Time
+	// dataRoot: its engine's data root (its agent's DockerRootDir).
+	dataRoot string
 	// host: the last good host counters (the next rate's base); hostRing
 	// the derived points; hostErr: a read failure was logged.
 	host     *usage.HostCounters
@@ -558,7 +560,7 @@ func (s *usageState) noteWorkersLocked(done []*usageWorkerSweep, now time.Time) 
 		}
 		w.name = sw.name
 		if sw.info != nil && sw.info.CPUs > 0 {
-			w.cpus, w.mem, w.infoAt = sw.info.CPUs, sw.info.MemoryBytes, now
+			w.cpus, w.mem, w.infoAt, w.dataRoot = sw.info.CPUs, sw.info.MemoryBytes, now, firstRoot(sw.info)
 		}
 		w.appsWhy, w.hostWhy, w.capped = sw.appsWhy, sw.hostWhy, sw.capped
 		if sw.host == nil {

@@ -54,14 +54,16 @@
   // geHtml: "≥ " in front of a lower bound (a total with a null member).
   function geHtml(partial, innerHtml) { return partial && innerHtml !== NOT_MEASURED ? '≥ ' + innerHtml : innerHtml; }
 
-  function fmtAge(iso) {
+  // ageText: "12 s ago" (plain text); fmtAge: the same escaped.
+  function ageText(iso) {
     if (!iso) return 'never';
     const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-    if (s < 60) return esc(Number(s).toFixed(0) + ' s ago');
-    if (s < 3600) return esc(Number(s / 60).toFixed(0) + ' min ago');
-    if (s < 172800) return esc(Number(s / 3600).toFixed(0) + ' h ago');
-    return esc(Number(s / 86400).toFixed(0) + ' days ago');
+    if (s < 60) return Number(s).toFixed(0) + ' s ago';
+    if (s < 3600) return Number(s / 60).toFixed(0) + ' min ago';
+    if (s < 172800) return Number(s / 3600).toFixed(0) + ' h ago';
+    return Number(s / 86400).toFixed(0) + ' days ago';
   }
+  function fmtAge(iso) { return esc(ageText(iso)); }
 
   // hostOf: the host of the server g runs on (contract §11.11 hosts).
   function hostOf(v, g) {
@@ -197,13 +199,18 @@
         if (current !== c) return;
         drawInstance(c, g, host);
       } else {
-        const v = await getJSON(c.view === 'share' ? '/api/usage?window=' + enc(c.window) : '/api/usage');
-        if (current !== c) return;
-        c.data = v;
+        // Each read carries its window and a sequence number: a reply
+        // overtaken by a newer read (the window toggled, the view
+        // switched) is dropped; the newer one schedules the poll.
+        const seq = c.seq = (c.seq || 0) + 1;
+        const win = c.view === 'share' ? c.window : 'last';
+        const v = await getJSON('/api/usage?window=' + enc(win));
+        if (current !== c || seq !== c.seq) return;
         if (c.view === 'storage' || c.view === 'share') {
           try { c.storage = await getJSON('/api/usage/storage'); c.storageErr = ''; } catch (e) { c.storageErr = e.message; }
-          if (current !== c) return;
+          if (current !== c || seq !== c.seq) return;
         }
+        c.data = v;
         draw(c);
       }
     } catch (e) {
@@ -229,19 +236,25 @@
     return (g.name || g.instance || '').toLowerCase();
   }
 
-  function headerHtml(v) {
+  // headerHtml(v, server, ageSlot): the strip for server's host and apps
+  // (core: the primary's); ageSlot: an empty [data-usage-age] for the
+  // "sampled … ago" text (the Share view sets it as text, so the strip
+  // itself is written only when it changed).
+  function headerHtml(v, server, ageSlot) {
+    server = server || 'primary';
     let appsMem = null, appsCPU = null;
-    (v.apps || []).forEach(g => {
+    (v.apps || []).filter(g => (g.server || 'primary') === server).forEach(g => {
       if (isNum(g.totals.mem_bytes)) { appsMem = appsMem || 0; appsMem += g.totals.mem_bytes; }
       if (isNum(g.totals.cpu_cores)) { appsCPU = appsCPU || 0; appsCPU += g.totals.cpu_cores; }
     });
     const core = v.core && v.core.totals ? v.core.totals : {};
     let html = '<div class="usage-strip">';
-    const host = hostOf(v, null);
-    html += '<span>Host: ' + (host && isNum(host.cpus) ? fmtNum(host.cpus) + ' CPUs' : NOT_MEASURED) + ', ' + fmtBytes(host ? host.memory_bytes : null) + '</span>';
+    const host = hostOf(v, { server });
+    const nameHtml = server === 'primary' ? 'Host' : esc((host && host.name) || server);
+    html += '<span>' + nameHtml + ': ' + (host && isNum(host.cpus) ? fmtNum(host.cpus) + ' CPUs' : NOT_MEASURED) + ', ' + fmtBytes(host ? host.memory_bytes : null) + '</span>';
     html += '<span>Apps: ' + fmtCores(appsCPU) + ', ' + fmtBytes(appsMem) + '</span>';
-    html += '<span>Core: ' + fmtCores(core.cpu_cores) + ', ' + fmtBytes(core.mem_bytes) + '</span>';
-    html += '<span class="' + esc(v.stale ? 'usage-stale' : '') + '">sampled ' + fmtAge(v.sampled_at) + '</span>';
+    if (server === 'primary') html += '<span>Core: ' + fmtCores(core.cpu_cores) + ', ' + fmtBytes(core.mem_bytes) + '</span>';
+    html += ageSlot ? '<span class="' + esc(v.stale ? 'usage-stale' : '') + '" data-usage-age></span>' : '<span class="' + esc(v.stale ? 'usage-stale' : '') + '">sampled ' + fmtAge(v.sampled_at) + '</span>';
     if (v.not_shown > 0) html += '<span class="usage-sub">' + fmtNum(v.not_shown) + esc(v.not_shown === 1 ? ' other container on this engine is not shown' : ' other containers on this engine are not shown') + '</span>';
     if (v.over_limit > 0) html += '<span class="usage-sub">' + fmtNum(v.over_limit) + esc(' not measured: over the 256-container limit') + '</span>';
     if (v.metrics_scraped) html += '<a href="' + esc(grafanaURL()) + '" target="_blank" rel="noopener">History in Grafana ↗</a>';
@@ -337,14 +350,26 @@
       host = c.el.querySelector('[data-usage-share]');
       c.shareEl = null;
     }
-    const head = c.el.querySelector('[data-usage-head]');
-    const headHtml = c.data ? headerHtml(c.data) : '';
-    if (head.innerHTML !== headHtml) head.innerHTML = headHtml;
+    drawShareHead(c);
     if (!c.data) return;
     if (c.shareEl !== host) {
       c.shareEl = host;
-      window.PortcullisShare.render(host, { view: c.data, storage: c.storage || {}, window: c.window, onWindow: w => { c.window = w; refresh(); } });
+      window.PortcullisShare.render(host, {
+        view: c.data, storage: c.storage || {}, window: c.window, server: c.server || 'primary',
+        onWindow: w => { c.window = w; refresh(); },
+        onState: st => { c.server = st.server; drawShareHead(c); },
+      });
     } else window.PortcullisShare.update(c.data, c.storage || {});
+  }
+  // drawShareHead: the strip for the picked server, written only when it
+  // changed (focus on its link stays); its age is set as text.
+  function drawShareHead(c) {
+    const head = c.el.querySelector('[data-usage-head]');
+    if (!head) return;
+    const headHtml = c.data ? headerHtml(c.data, c.server || 'primary', true) : '';
+    if (c.headHtml !== headHtml || !head.firstChild) { head.innerHTML = headHtml; c.headHtml = headHtml; }
+    const age = head.querySelector('[data-usage-age]');
+    if (age && c.data) age.textContent = ['sampled', ageText(c.data.sampled_at)].join(' ');
   }
 
   function draw(c) {
@@ -369,11 +394,16 @@
       if (!c || c.el !== el) return;
       const v = ev.target.closest('[data-usage-view]');
       if (v) {
+        const from = c.view;
         c.view = v.dataset.usageView;
         history.replaceState(null, '', '#usage/' + enc(c.view));
         c.shareEl = null;
+        c.headHtml = null;
+        // Leaving Share on the 1 h average: the other views are the last
+        // sample, read again (never the hour's figures as live ones).
+        if (from === 'share' && c.view !== 'share' && c.window === '1h') c.data = null;
         draw(c);
-        if (c.view === 'share') refresh();
+        if (c.view === 'share' || !c.data) refresh();
         if (c.view === 'storage') loadStorage(c);
         return;
       }
@@ -402,7 +432,7 @@
   function render(el, view) {
     stop();
     hookVisibility();
-    current = { kind: 'tab', el, view: ['share', 'containers', 'storage', 'apps'].indexOf(view) >= 0 ? view : 'share', window: 'last', sort: 'name', dir: 'asc', filter: '', open: {}, data: null };
+    current = { kind: 'tab', el, view: ['share', 'containers', 'storage', 'apps'].indexOf(view) >= 0 ? view : 'apps', window: 'last', server: 'primary', sort: 'name', dir: 'asc', filter: '', open: {}, data: null };
     bind(el);
     draw(current);
     if (current.view === 'storage') loadStorage(current);

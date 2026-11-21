@@ -838,3 +838,57 @@ func TestStorageDisksServer(t *testing.T) {
 		t.Errorf("JSON: %s", b)
 	}
 }
+
+// TestStorageDiskRoles (contract §11.11 "Disk roles"): the disk a
+// measured volume is on is docker_data with the engine's data root as its
+// path; a shared folder's is folder_root with the folder's path; the
+// Hub's data directory alone is agent_data; every disk names its
+// major:minor.
+func TestStorageDiskRoles(t *testing.T) {
+	e := newStorageEnv(t)
+	h := e.h
+	h.usage.mu.Lock()
+	h.usage.dataRoot = "/var/lib/docker"
+	h.usage.mu.Unlock()
+	e.rep = func(r fixerRun) (*folderfix.Report, error) {
+		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10, Dev: 2049, FreeBytes: 50, TotalBytes: 100}, nil
+	}
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.st.Folders["media"] = state.Folder{Name: "Media", Path: "/srv/media"}
+	h.mu.Unlock()
+	h.scanCacheMu.Lock()
+	h.scanData = &scanFile{Version: scanCacheVersion, Scans: map[string]scanEntry{
+		"/srv/media": {Target: "/srv/media", Folder: "media", At: time.Now(), Report: &folderfix.Report{AllocBytes: 123, Entries: 5, Dev: 66305, TotalBytes: 1000, FreeBytes: 10}},
+	}}
+	h.scanCacheMu.Unlock()
+	roles := map[string][3]string{}
+	for _, d := range h.UsageStorage().Disks {
+		roles[d.Device] = [3]string{d.Role, d.Path, d.Server}
+	}
+	if r := roles["8:1"]; r != [3]string{DiskDockerData, "/var/lib/docker", "primary"} {
+		t.Errorf("8:1 = %v (all %v)", r, roles)
+	}
+	if r := roles["259:1"]; r != [3]string{DiskFolderRoot, "/srv/media", "primary"} {
+		t.Errorf("259:1 = %v (all %v)", r, roles)
+	}
+	agent := 0
+	for dev, r := range roles {
+		if r[0] == DiskAgentData {
+			agent++
+			if r[1] != "" {
+				t.Errorf("agent_data %s has a path %q", dev, r[1])
+			}
+		}
+	}
+	if agent != 1 {
+		t.Errorf("agent_data disks: %d (%v)", agent, roles)
+	}
+	for in, want := range map[uint64]string{2049: "8:1", 66305: "259:1", 0: "0:0", 1<<32 | 5<<8 | 3: "5:1048579", 1<<44 | 1<<8: "4097:0"} {
+		if g := linuxDevice(in); g != want {
+			t.Errorf("linuxDevice(%d) = %s, want %s", in, g, want)
+		}
+	}
+}

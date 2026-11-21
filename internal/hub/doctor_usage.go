@@ -67,7 +67,7 @@ func (h *Hub) storageDoctorIn() *doctor.StorageIn {
 		if d.Server != servers.PrimaryID {
 			continue
 		}
-		f := doctor.FilesystemIn{Dev: d.Dev, Path: d.path, Free: d.FreeBytes, Total: d.TotalBytes}
+		f := doctor.FilesystemIn{Dev: d.Dev, Path: d.fsPath, Free: d.FreeBytes, Total: d.TotalBytes}
 		for _, o := range d.Owners {
 			_, isInst := insts[o]
 			if folders[o] && !isInst {

@@ -73,13 +73,38 @@ async function shareBehaviour(p, base) {
     await p.waitForTimeout(300);
     say(await p.evaluate(i => !document.querySelector('#usage-root [data-share-back]') && document.activeElement && document.activeElement.getAttribute('data-share-app') === i, id), 'back: focus not on the app');
   }
+  // axe's aria-hidden-focus, by hand: nothing focusable under aria-hidden.
+  const hiddenFocus = await p.evaluate(() => [...document.querySelectorAll('#usage-root [aria-hidden="true"]')]
+    .flatMap(h => [h, ...h.querySelectorAll('*')]).filter(n => n.matches('a[href], button, input, select, textarea, [tabindex]') && n.getAttribute('tabindex') !== '-1').length);
+  say(hiddenFocus === 0, hiddenFocus + ' focusable element(s) under aria-hidden');
+  say(await p.$$eval('#usage-root path[data-share-app]', es => es.every(e => (e.getAttribute('aria-label') || '').length > 0)), 'a slice without an accessible name');
   await p.click('#usage-root [data-share-window="1h"]');
   await p.waitForTimeout(800);
   say(asked.indexOf('window=1h') >= 0 && await p.$eval('#usage-root [data-share-window="1h"]', e => e.getAttribute('aria-pressed')) === 'true', '1 h toggle: ' + JSON.stringify(asked));
+  // A reply that crosses the toggle is dropped: last (slow) then 1 h
+  // (fast) — the 1 h figures (7 CPUs here) stay, the slow last never
+  // lands on them.
+  await p.route('**/api/usage?window=*', async r => {
+    const w = new URL(r.request().url()).searchParams.get('window');
+    const res = await r.fetch();
+    const v = await res.json();
+    v.window = w;
+    if (w === '1h') v.hosts.primary.cpus = 7;
+    else await new Promise(ok => setTimeout(ok, 1200));
+    await r.fulfill({ response: res, json: v });
+  });
+  await p.click('#usage-root [data-share-window="last"]');
+  await p.waitForTimeout(100);
+  await p.click('#usage-root [data-share-window="1h"]');
+  await p.waitForTimeout(2500);
+  const crossed = await p.evaluate(() => [document.querySelector('#usage-root [data-share-window="1h"]').getAttribute('aria-pressed'), !!document.querySelector('#usage-root [data-share-wait]'),
+    (document.querySelector('#usage-root [data-usage-head]') || {}).textContent || '']);
+  say(crossed[0] === 'true' && !crossed[1] && crossed[2].indexOf('7 CPUs') >= 0, 'a crossed reply: ' + JSON.stringify(crossed));
+  await p.unroute('**/api/usage?window=*');
   if (await p.$('#usage-root [data-share-server]')) {
     await p.selectOption('#usage-root [data-share-server]', 'w1');
     await p.waitForTimeout(300);
-    say(await p.evaluate(() => { const w = document.querySelector('#usage-root [data-share-why]'); return !!w && w.textContent.indexOf('unreachable') >= 0 && !document.querySelector('#usage-root svg.share-donut'); }), 'w1 without figures');
+    say(await p.evaluate(() => { const w = document.querySelector('#usage-root [data-share-why]'); const caps = [...document.querySelectorAll('#usage-root .share-title')].map(x => x.textContent); return !!w && w.textContent.indexOf('unreachable') >= 0 && caps.indexOf('CPU') < 0 && caps.indexOf('Network') >= 0; }), 'w1 without figures: the reason, no host donuts, the network kept');
     await p.selectOption('#usage-root [data-share-server]', 'primary');
     await p.waitForTimeout(300);
   } else say(false, 'no server picker');

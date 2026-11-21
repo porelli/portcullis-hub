@@ -119,8 +119,11 @@ type usageState struct {
 	cpus        int
 	mem         int64
 	infoAt      time.Time
-	notShown    int
-	overLimit   int
+	// dataRoot: the engine's data root (the runtime info's first
+	// forbidden root, read with cpus), the docker_data disk's path.
+	dataRoot  string
+	notShown  int
+	overLimit int
 	// notMeasured: every sampled container answered the same
 	// NotMeasuredError (Kubernetes): its Why.
 	notMeasured string
@@ -345,7 +348,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		s.mu.Lock()
 		s.sweptAt, s.kind = now, kind
 		if info != nil {
-			s.cpus, s.mem, s.infoAt = info.CPUs, info.MemoryBytes, now
+			s.cpus, s.mem, s.infoAt, s.dataRoot = info.CPUs, info.MemoryBytes, now, firstRoot(info)
 		}
 		if usageRefused(err) {
 			s.verified, s.why = false, usageRefusal(err)
@@ -383,7 +386,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	s.mu.Lock()
 	s.sweptAt, s.kind, s.insts = now, kind, insts
 	if info != nil {
-		s.cpus, s.mem, s.infoAt = info.CPUs, info.MemoryBytes, now
+		s.cpus, s.mem, s.infoAt, s.dataRoot = info.CPUs, info.MemoryBytes, now, firstRoot(info)
 	}
 	if refused != nil {
 		s.verified, s.why = false, usageRefusal(refused)
@@ -803,4 +806,14 @@ func jobKey(u runtime.Unit) string {
 		}
 	}
 	return u.State
+}
+
+// firstRoot is info's engine data root (the first forbidden root: Docker's
+// DockerRootDir, a worker's from its agent); "" on Kubernetes (its roots
+// are the operator's runtime roots, not one data root).
+func firstRoot(info *runtime.Info) string {
+	if info == nil || info.Kind == runtime.KindKubernetes || len(info.ForbiddenRoots) == 0 {
+		return ""
+	}
+	return info.ForbiddenRoots[0]
 }

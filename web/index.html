@@ -704,8 +704,9 @@
     .share-track { fill: none; stroke: #1e293b; }
     .share-slice { fill: none; }
     .share-slice[data-share-app] { cursor: pointer; }
-    .share-slice[data-share-app]:focus-visible, .share-slice[data-share-app]:hover { stroke-opacity: 0.8; outline: none; }
-    .share-slice[data-share-app]:focus-visible { filter: drop-shadow(0 0 2px #e2e8f0); }
+    .share-slice[data-share-app]:hover { stroke-opacity: 0.85; }
+    /* A clear focus ring on a slice: an outline round its box and a glow. */
+    .share-slice[data-share-app]:focus-visible { outline: 2px solid #f8fafc; outline-offset: 2px; filter: drop-shadow(0 0 3px #f8fafc); }
     .share-center { fill: #e2e8f0; font-size: 0.875rem; font-weight: 600; }
     .share-center-nm { fill: #94a3b8; font-weight: 400; font-style: italic; }
     .share-cap { color: #94a3b8; font-size: 0.75rem; text-align: center; margin: 0 0 0.5rem; }
@@ -727,6 +728,9 @@
     .share-c7 { stroke: #e66767; color: #e66767; }
     .share-more { stroke: #a8b3c4; color: #a8b3c4; }
     .share-folders { stroke: #cbd5e1; color: #cbd5e1; }
+    .share-shared { stroke: #8f9cb3; color: #8f9cb3; }
+    .share-note { color: #fbbf24; }
+    .share-wait .share-grid { opacity: 0.55; }
     .share-images { stroke: #7d8aa0; color: #7d8aa0; }
     .share-other { stroke: #55637a; color: #55637a; }
     .share-free { stroke: #334155; color: #334155; }
@@ -1045,7 +1049,7 @@
     // usageView: the Usage tab's view (#usage/<view>); accessView: the
     // Access tab's {section, sub, user} (#access/…); settingsView: the
     // Settings section asked for ({section}, #settings/<section>).
-    let usageView = 'share';
+    let usageView = 'apps';
     let accessView = { section: 'ssh', sub: '', user: '' };
     let settingsView = { section: '' };
     function showTab(name, asked) {
@@ -1163,7 +1167,7 @@
       [/^marketplace(?:\?filter=([a-z0-9-]{1,63}))?$/, m => showMarketplace({ filter: m[1] || '', open: '' })],
       [/^marketplace\/([a-z0-9-]+)$/, m => showMarketplace({ filter: '', open: m[1] })],
       [/^doctor$/, () => showTab('doctor')],
-      [/^usage(?:\/(share|apps|containers|storage))?$/, m => { usageView = m[1] || 'share'; showTab('usage'); }],
+      [/^usage(?:\/(share|apps|containers|storage))?$/, m => { usageView = m[1] || 'apps'; showTab('usage'); }],
       [/^access(?:\/ssh(?:\/([a-z]+))?)?$/, m => { accessView = { section: 'ssh', sub: m[1] || '', user: '' }; showTab('access'); }],
       [/^access\/vpn$/, () => { accessView = { section: 'vpn', sub: '', user: '' }; showTab('access'); }],
       [/^access\/signins(?:\?user=([a-z0-9._-]{1,64}))?$/, m => { accessView = { section: 'signins', sub: '', user: m[1] || '' }; showTab('access'); }],

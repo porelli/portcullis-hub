@@ -787,14 +787,36 @@ type FolderStorage struct {
 // DiskView is one filesystem.
 type DiskView struct {
 	// Server: the server it is on ("primary"; workers: Task 10).
-	Server      string   `json:"server"`
-	Dev         uint64   `json:"dev"`
+	Server string `json:"server"`
+	Dev    uint64 `json:"dev"`
+	// Device is dev as "<major>:<minor>" (lsblk's form); Role what it
+	// holds (docker_data | folder_root | agent_data | other) and Path a
+	// host path on it ("": unknown), contract §11.11 "Disk roles".
+	Device      string   `json:"device"`
+	Role        string   `json:"role"`
+	Path        string   `json:"path,omitempty"`
 	FreeBytes   uint64   `json:"free_bytes"`
 	TotalBytes  uint64   `json:"total_bytes"`
 	UsedPercent float64  `json:"used_percent"`
 	Owners      []string `json:"owners"`
-	// path: a path on it (the doctor's fingerprint).
-	path string
+	// fsPath: a path on it (the doctor's fingerprint).
+	fsPath string
+}
+
+// The disk roles (contract §11.11 "Disk roles"), in precedence order.
+const (
+	DiskDockerData = "docker_data"
+	DiskFolderRoot = "folder_root"
+	DiskAgentData  = "agent_data"
+	DiskOther      = "other"
+)
+
+// linuxDevice is dev as "<major>:<minor>" in Linux's encoding (the dev
+// numbers come from Linux hosts' reports and statfs).
+func linuxDevice(dev uint64) string {
+	major := (dev>>8)&0xfff | (dev>>32)&0xfffff000
+	minor := dev&0xff | (dev>>12)&0xffffff00
+	return strconv.FormatUint(major, 10) + ":" + strconv.FormatUint(minor, 10)
 }
 
 const (
@@ -821,6 +843,12 @@ func (h *Hub) storageModel() StorageView {
 	mounters := map[string][]string{}
 	s := h.usage
 	s.mu.RLock()
+	// roots: each server's engine data root ("" the primary), the
+	// docker_data disk's path.
+	roots := map[string]string{"": s.dataRoot}
+	for id, w := range s.workers {
+		roots[id] = w.dataRoot
+	}
 	for _, c := range s.conts {
 		if c.Kind != usageApp && c.Kind != usageCore {
 			continue
@@ -873,11 +901,17 @@ func (h *Hub) storageModel() StorageView {
 	// disks: dev → owner → bytes. Free and total are the newest reading
 	// of the dev (M2): the live statfs of the data directory beats any
 	// cached run's, a newer folder scan beats an older cache entry.
+	// volume / dataDir: a measured volume (the engine's data root) or the
+	// Hub's data directory is on it; folders / binds: the shared-folder
+	// and bind paths on it.
 	type disk struct {
-		free, total uint64
-		at          time.Time
-		owners      map[string]int64
-		path        string
+		free, total    uint64
+		at             time.Time
+		owners         map[string]int64
+		path           string
+		volume         bool
+		dataDir        bool
+		folders, binds []string
 	}
 	// diskKey: a filesystem is one server's (the same dev on two servers
 	// is two disks).
@@ -886,10 +920,27 @@ func (h *Hub) storageModel() StorageView {
 		dev    uint64
 	}
 	disks := map[diskKey]*disk{}
-	addDisk := func(server string, dev, free, total uint64, at time.Time, owner string, alloc *int64, path string) {
+	addDisk := func(server string, dev, free, total uint64, at time.Time, owner string, alloc *int64, path, kind string) {
 		if total == 0 {
 			return
 		}
+		defer func() {
+			d := disks[diskKey{server, dev}]
+			switch kind {
+			case "volume":
+				d.volume = true
+			case "datadir":
+				d.dataDir = true
+			case "folder":
+				if !slices.Contains(d.folders, path) {
+					d.folders = append(d.folders, path)
+				}
+			case "bind":
+				if !slices.Contains(d.binds, path) {
+					d.binds = append(d.binds, path)
+				}
+			}
+		}()
 		d := disks[diskKey{server, dev}]
 		if d == nil {
 			d = &disk{free: free, total: total, at: at, owners: map[string]int64{}, path: path}
@@ -976,7 +1027,7 @@ func (h *Hub) storageModel() StorageView {
 	for _, k := range keys {
 		e := sf.Entries[k]
 		for _, o := range e.Owners {
-			addDisk(e.Server, e.Dev, e.Free, e.Total, e.MeasuredAt, o, e.AllocBytes, e.Target)
+			addDisk(e.Server, e.Dev, e.Free, e.Total, e.MeasuredAt, o, e.AllocBytes, e.Target, e.Kind)
 		}
 		if slices.Contains(e.Owners, usageCoreOwner) {
 			v.Core = append(v.Core, itemOf(e, usageCoreOwner))
@@ -986,14 +1037,14 @@ func (h *Hub) storageModel() StorageView {
 		fs := h.folderStorage(fid, folders[fid], folderScan, folderUsers[fid])
 		v.Folders = append(v.Folders, fs)
 		if e, ok := folderScan[fid]; ok && e.Report != nil {
-			addDisk(folders[fid].Server, e.Report.Dev, e.Report.FreeBytes, e.Report.TotalBytes, e.At, fid, fs.AllocBytes, folders[fid].Path)
+			addDisk(folders[fid].Server, e.Report.Dev, e.Report.FreeBytes, e.Report.TotalBytes, e.At, fid, fs.AllocBytes, folders[fid].Path, "folder")
 		}
 	}
 	// The Hub's data directory, once the measurer has run (before that
 	// nothing of the storage view is judged).
 	if sf.LastRun != nil || len(sf.Entries) > 0 {
 		if dev, free, total, err := statDir(h.cfg.DataDir); err == nil {
-			addDisk("", dev, free, total, s.now(), usageCoreOwner, nil, h.cfg.DataDir)
+			addDisk("", dev, free, total, s.now(), usageCoreOwner, nil, h.cfg.DataDir, "datadir")
 		}
 	}
 	dkeys := slices.Collect(maps.Keys(disks))
@@ -1016,7 +1067,19 @@ func (h *Hub) storageModel() StorageView {
 		if d.total > 0 {
 			used = 100 * float64(d.total-min(d.free, d.total)) / float64(d.total)
 		}
-		v.Disks = append(v.Disks, DiskView{Server: usageServerID(dk.server), Dev: dev, FreeBytes: d.free, TotalBytes: d.total, UsedPercent: used, Owners: owners, path: d.path})
+		role, path := DiskOther, ""
+		switch {
+		case d.volume:
+			role, path = DiskDockerData, roots[dk.server]
+		case len(d.folders) > 0:
+			role, path = DiskFolderRoot, slices.Min(d.folders)
+		case d.dataDir:
+			role = DiskAgentData
+		case len(d.binds) > 0:
+			path = slices.Min(d.binds)
+		}
+		v.Disks = append(v.Disks, DiskView{Server: usageServerID(dk.server), Dev: dev, Device: linuxDevice(dev), Role: role, Path: path,
+			FreeBytes: d.free, TotalBytes: d.total, UsedPercent: used, Owners: owners, fsPath: d.path})
 	}
 	return v
 }

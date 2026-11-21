@@ -64,11 +64,13 @@
     return h;
   }
   function legendHtml(d) {
-    const rowsHtml = d.slices.map(s => {
+    // Largest remainder: the Share column sums to exactly 100 %.
+    const pcts = D.shares(d.slices.map(s => s.value), d.total);
+    const rowsHtml = d.slices.map((s, i) => {
       const nameHtml = s.app ? '<button type="button" class="share-link" data-share-app="' + esc(s.app) + '">' + esc(s.label) + '</button>' : esc(s.label);
-      return '<tr><td><span class="share-swatch ' + esc(s.cls) + '" aria-hidden="true"></span>' + nameHtml + '</td><td>' + esc(fmtVal(s.value, d.unit)) + '</td><td>' + esc(fmtPct(s.value, d.total)) + '</td></tr>';
+      return '<tr><td><span class="share-swatch ' + esc(s.cls) + '" aria-hidden="true"></span>' + nameHtml + '</td><td>' + esc(fmtVal(s.value, d.unit)) + '</td><td>' + esc(pcts[i]) + '</td></tr>';
     });
-    for (const m of d.missing) rowsHtml.push('<tr class="share-nm"><td><span class="share-swatch share-none" aria-hidden="true"></span>' + esc(m.label) + '</td><td colspan="2">not measured: ' + esc(m.why) + '</td></tr>');
+    for (const m of d.missing) rowsHtml.push('<tr class="share-nm"><td><span class="share-swatch share-none" aria-hidden="true"></span>' + esc(m.label) + '</td><td colspan="2">' + esc(D.nm(m.why)) + '</td></tr>');
     if (!rowsHtml.length) return '';
     return '<table class="share-legend"><thead><tr><th>Who</th><th>Use</th><th>Share</th></tr></thead><tbody>' + rowsHtml.join('') + '</tbody></table>';
   }
@@ -77,38 +79,64 @@
     const used = d.slices.filter(s => s.key !== 'free').reduce((a, s) => a + s.value, 0);
     return d.slices.some(s => s.key === 'free') ? fmtPct(used, d.total) + ' used' : fmtVal(used, d.unit);
   }
-  function cardHtml(title, d, app) {
-    const whyHtml = d.why ? '<p class="share-cap usage-nm">not measured: ' + esc(d.why) + '</p>' : '';
-    return '<figure class="share-card" aria-label="' + esc(title) + '"><figcaption class="share-title">' + esc(title) + '</figcaption>' +
-      D.svg(d.slices, { size: 160, hole: 0.62, total: d.total, why: d.why, center: centerOf(d), app }) +
-      (d.caption ? '<p class="share-cap">' + esc(d.caption) + '</p>' : '') + whyHtml + legendHtml(d) + '</figure>';
+  // cardHtml: tab: the donut's app slices are in the tab order (the first
+  // donut only: the legend buttons are every donut's keyboard route).
+  function cardHtml(title, d, tab) {
+    const whyHtml = d.why ? '<p class="share-cap usage-nm">' + esc(D.nm(d.why)) + '</p>' : '';
+    const noteHtml = d.note ? '<p class="share-cap share-note">' + esc(d.note) + '</p>' : '';
+    return '<figure class="share-card"><figcaption class="share-title">' + esc(title) + '</figcaption>' +
+      D.svg(d.slices, { size: 160, hole: 0.62, total: d.total, why: d.why, center: centerOf(d), label: title + ' donut', tab: !!tab }) +
+      (d.caption ? '<p class="share-cap">' + esc(d.caption) + '</p>' : '') + whyHtml + noteHtml + legendHtml(d) + '</figure>';
+  }
+  // diskTitle: a disk by its role (contract §11.11 "Disk roles").
+  function diskTitle(k, view) {
+    const where = k.path ? ' (' + k.path + ')' : '';
+    let name;
+    switch (k.role) {
+      case 'docker_data':
+        name = st.server !== 'primary' ? 'Engine data' : (view.engine && view.engine.runtime === 'podman' ? 'Podman data' : 'Docker data');
+        break;
+      case 'folder_root': name = 'Shared folders'; break;
+      case 'agent_data': name = 'Portcullis data'; break;
+      default: name = 'Disk ' + (k.device || k.dev);
+    }
+    return name + where + ' · ' + fmtBytes(k.total_bytes);
+  }
+  function storageHtml(view, storage) {
+    const ds = D.disks(storage, st.server);
+    let h = '<h4 class="share-h">Storage</h4>';
+    if (!ds.length) return h + '<p class="usage-sub">Storage is not measured yet on this server (Storage → Measure now).</p>';
+    const disksHtml = ds.map(k => cardHtml(diskTitle(k, view), D.slices(view, 'storage', st.server, { storage, dev: k.dev }), false)).join('');
+    return h + '<div class="share-grid">' + disksHtml + '</div>';
   }
   function serverHtml(view, storage) {
     const host = (view.hosts || {})[st.server];
     if (!host) return '<p class="settings-empty">No figures for this server.</p>';
-    if (host.why) return '<p class="usage-warn" data-share-why>' + esc(host.why) + '</p><p class="usage-sub">The apps\' own figures are under By app and By container.</p>';
-    let h = '<div class="share-grid">' + METRICS.map(([m, label]) => cardHtml(label, D.slices(view, m, st.server, {}), '')).join('') + '</div>';
-    const ds = D.disks(storage, st.server);
-    h += '<h4 class="share-h">Storage</h4>';
-    if (!ds.length) h += '<p class="usage-sub">Storage is not measured yet on this server (Storage → Measure now).</p>';
-    else {
-      const disksHtml = ds.map(k => cardHtml(['Disk', k.dev, '·', fmtBytes(k.total_bytes)].join(' '), D.slices(view, 'storage', st.server, { storage, dev: k.dev }), '')).join('');
-      h += '<div class="share-grid">' + disksHtml + '</div>';
+    if (host.why) {
+      // No host figures (an unreachable worker, Kubernetes, the first
+      // sweep): the reason instead of the host donuts; the network and
+      // the disks don't need them.
+      return '<p class="usage-warn" data-share-why>' + esc(host.why) + '</p><p class="usage-sub">CPU, memory and disk IO shares need the host\'s figures; the apps\' own are under By app and By container.</p>' +
+        '<div class="share-grid">' + cardHtml('Network', D.slices(view, 'net', st.server, {}), true) + '</div>' + storageHtml(view, storage);
     }
-    return h;
+    const cardsHtml = METRICS.map(([m, label], i) => cardHtml(label, D.slices(view, m, st.server, {}), i === 0)).join('');
+    return '<div class="share-grid">' + cardsHtml + '</div>' + storageHtml(view, storage);
   }
   function appHtml(view, storage) {
     const g = (view.apps || []).find(x => x.instance === st.app);
     if (!g) return '<p class="settings-empty">This app has no figures any more.</p>';
     let h = '<div class="share-bar"><button type="button" class="btn btn-sm" data-share-back>← All apps</button> <strong class="share-app">' + esc(g.name || g.instance) + '</strong> <span class="usage-sub">by container</span></div>';
-    h += '<div class="share-grid">' + METRICS.map(([m, label]) => cardHtml(label, D.drill(view, st.app, m, {}), st.app)).join('') +
-      cardHtml('Storage', D.drill(view, st.app, 'storage', { storage }), st.app) + '</div>';
+    const cardsHtml = METRICS.map(([m, label]) => cardHtml(label, D.drill(view, st.app, m, {}), false)).join('') + cardHtml('Storage', D.drill(view, st.app, 'storage', { storage }), false);
+    h += '<div class="share-grid">' + cardsHtml + '</div>';
     return h;
   }
   function pageHtml() {
     const view = st.view || {}, storage = st.storage || {};
     if (!(view.hosts || {})[st.server]) st.server = 'primary';
-    return '<div class="share" data-share>' + controlsHtml(view) + (st.app ? appHtml(view, storage) : serverHtml(view, storage)) + '</div>';
+    // Another window asked for and not read yet: the old figures stay,
+    // dimmed, with the reason.
+    const waitHtml = st.wait ? '<p class="usage-sub" role="status" data-share-wait>Reading the ' + esc(st.window === '1h' ? '1 h average' : 'last sample') + '…</p>' : '';
+    return '<div class="share' + (st.wait ? ' share-wait' : '') + '" data-share>' + controlsHtml(view) + waitHtml + (st.app ? appHtml(view, storage) : serverHtml(view, storage)) + '</div>';
   }
 
   // ── drawing (only when the markup changed; focus kept) ─────
@@ -140,9 +168,11 @@
     else if (kind === 'server') { st.server = String(value || 'primary'); st.app = ''; }
     else if (kind === 'window' && (value === 'last' || value === '1h') && value !== st.window) {
       st.window = value;
+      st.wait = !!st.view && st.view.window !== value;
       if (st.onWindow) st.onWindow(value);
     }
     draw();
+    if (st.onState) st.onState({ server: st.server, window: st.window, app: st.app });
     // Keyboard users land on the next thing to do: "← All apps" in an
     // app, that app's name in the legend on the way back.
     if (st.el.querySelector) {
@@ -178,14 +208,18 @@
     const same = st && st.el === el;
     st = {
       el, view: o.view, storage: o.storage, server: o.server || (same ? st.server : 'primary'), window: o.window || 'last',
-      app: o.app != null ? o.app : (same ? st.app : ''), onWindow: o.onWindow, html: same ? st.html : null,
+      app: o.app != null ? o.app : (same ? st.app : ''), onWindow: o.onWindow, onState: o.onState, html: same ? st.html : null, wait: false,
     };
     if (el.dataset) bind(el);
     draw();
   }
+  // update: new data; a view of another window than the one picked (a
+  // reply that crossed the toggle) is dropped.
   function update(view, storage) {
     if (!st) return;
+    if (view && view.window && view.window !== st.window) return;
     st.view = view;
+    st.wait = false;
     if (storage !== undefined) st.storage = storage;
     draw();
   }
