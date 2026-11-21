@@ -334,7 +334,7 @@ process.stdout.write(JSON.stringify({ skel: h, warn: node('[data-mail-admin-view
 		t.Errorf("Settings → Mail without the view: %s", h)
 	}
 	src := webAsset(t, "mailprovider.js")
-	for _, want := range []string{"'/api/mail/admin-view', 'POST'", "w.opener = null", `\/portcullis\/open$/`, "form.method = 'POST'", "input.name = 't'"} {
+	for _, want := range []string{"'/api/mail/admin-view', 'POST'", "w.opener = null", `\/portcullis\/open$/`, "new MessageChannel()", "w.postMessage({ type: 'portcullis-mail-admin-hello' }, origin, [ch.port2])"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("mailprovider.js lacks %q", want)
 		}
@@ -357,6 +357,64 @@ window.PortcullisMailProvider.openAdminView().then(() => process.stdout.write(JS
 	}
 	if blocked.Calls != 0 || len(blocked.Toast) != 2 || !strings.Contains(blocked.Toast[0], "blocked") || blocked.Toast[1] != "error" {
 		t.Errorf("blocked tab: %+v", blocked)
+	}
+	if strings.Contains(src, "form.submit()") {
+		t.Error("the Hub page posts the ticket across hosts itself (421 on a coalesced HTTP/2 connection)")
+	}
+	// fix-mail-admin-421: the tab is navigated with a GET to the start
+	// page, the offer goes only to the view's origin, the ticket only over
+	// the channel the start page answered "ready" on; no form, no URL.
+	out = eval(`const sent = [], made = [];
+let tab = null, toast = null;
+document.createElement = (k) => { made.push(k); return { textContent: '' }; };
+window.showToast = (m, k) => { toast = [m, k]; };
+window.apiCall = async () => ({ json: async () => ({ url: 'https://mail-admin.example.org/portcullis/open', ticket: 'v1.abc.def' }) });
+window.open = (u, n) => {
+  tab = { closed: false, opener: {}, location: { href: u }, closed: false, close() { this.closed = true; },
+    postMessage(msg, origin, ports) {
+      sent.push({ msg, origin, href: this.location.href, ports: ports.length });
+      if (sent.length < 2) return; // the first offers reach nobody (still loading)
+      ports[0].onmessage = (m) => { tab.got = m.data; ports[0].close(); };
+      ports[0].postMessage({ type: 'portcullis-mail-admin-ready' });
+    } };
+  return tab;
+};
+window.PortcullisMailProvider.openAdminView().then(() => setTimeout(() => {
+  process.stdout.write(JSON.stringify({ sent, href: tab.location.href, opener: tab.opener, got: tab.got || null, made, toast }));
+  process.exit(0);
+}, 50));`)
+	var hand struct {
+		Sent []struct {
+			Msg    struct{ Type string }
+			Origin string
+			Href   string
+			Ports  int
+		}
+		Href   string
+		Opener any
+		Got    *struct{ Type, Ticket string }
+		Made   []string
+		Toast  []string
+	}
+	if err := json.Unmarshal([]byte(out), &hand); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if hand.Href != "https://mail-admin.example.org/portcullis/open" || hand.Opener != nil || len(hand.Sent) < 2 || hand.Got == nil ||
+		hand.Got.Ticket != "v1.abc.def" || hand.Got.Type != "portcullis-mail-admin-ticket" || len(hand.Made) != 0 || hand.Toast != nil {
+		t.Fatalf("hand-over: %+v", hand)
+	}
+	for _, m := range hand.Sent {
+		if m.Origin != "https://mail-admin.example.org" || m.Msg.Type != "portcullis-mail-admin-hello" || m.Ports != 1 || strings.Contains(m.Href, "v1.") {
+			t.Errorf("offer %+v", m)
+		}
+	}
+	// A tab closed before the start page answered: a message, no ticket.
+	out = eval(`let toast = null; window.showToast = (m, k) => { toast = [m, k]; };
+window.apiCall = async () => ({ json: async () => ({ url: 'https://mail-admin.example.org/portcullis/open', ticket: 'v1.abc.def' }) });
+window.open = () => ({ closed: false, opener: {}, location: {}, close() { this.closed = true; }, postMessage(msg, o, ports) { this.closed = true; } });
+window.PortcullisMailProvider.openAdminView().then(() => { process.stdout.write(JSON.stringify(toast)); process.exit(0); });`)
+	if !strings.Contains(out, "tab was closed") {
+		t.Errorf("closed tab: %s", out)
 	}
 	idx := webAsset(t, "index.html")
 	for _, want := range []string{"data-managed-by-portcullis", ">Managed by Portcullis</span>", "'managed by Portcullis'"} {
