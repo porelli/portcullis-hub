@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -594,18 +595,95 @@ func TestExecStdinSplit(t *testing.T) {
 	}
 }
 
-// ListContainers keeps each network's aliases and DNS names.
+// ListContainers reads each network's aliases and DNS names from the
+// inspect: the list summary (as the daemon sends it) carries none.
+// Inspected once per container and endpoint set, again when it changes.
 func TestListContainersNetworks(t *testing.T) {
+	var mu sync.Mutex
+	inspects := map[string]int{}
+	endpoint, aliases := "ep1", `["portcullis-mcp-a--b"]`
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},
-			"NetworkSettings":{"Networks":{"portcullis-proxy":{"Aliases":["portcullis-mcp-a--b"],"DNSNames":["x","abc","portcullis-mcp-a--b"]}}}}]`)
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/containers/json":
+			fmt.Fprintf(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},
+				"NetworkSettings":{"Networks":{"portcullis-proxy":{"EndpointID":%q,"Aliases":null,"DNSNames":null}}}},
+				{"Id":"old","Names":["/y"],"State":"exited","Labels":{},
+				"NetworkSettings":{"Networks":{"portcullis-proxy":{"Aliases":null}}}},
+				{"Id":"gone","Names":["/z"],"State":"running","Labels":{},
+				"NetworkSettings":{"Networks":{"portcullis-proxy":{"EndpointID":"ep9"}}}}]`, endpoint)
+		case "/containers/abc/json":
+			inspects["abc"]++
+			fmt.Fprintf(w, `{"Id":"abc","State":{"Running":true},"NetworkSettings":{"Networks":{"portcullis-proxy":{"EndpointID":%q,
+				"Aliases":%s,"DNSNames":["x","abc","portcullis-mcp-a--b"]}}}}`, endpoint, aliases)
+		case "/containers/gone/json":
+			inspects["gone"]++
+			http.Error(w, `{"message":"No such container: gone"}`, http.StatusNotFound)
+		default:
+			inspects[r.URL.Path]++
+			http.Error(w, `{"message":"unexpected"}`, http.StatusNotFound)
+		}
 	}))
-	cs, err := c.ListContainers(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
+	list := func() map[string]Container {
+		t.Helper()
+		cs, err := c.ListContainers(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]Container{}
+		for _, ct := range cs {
+			out[ct.ID] = ct
+		}
+		return out
 	}
-	if len(cs) != 1 || strings.Join(cs[0].Networks["portcullis-proxy"], ",") != "portcullis-mcp-a--b,x,abc" {
-		t.Errorf("networks = %v", cs)
+	cs := list()
+	if got := strings.Join(cs["abc"].Networks["portcullis-proxy"], ","); got != "portcullis-mcp-a--b,x,abc" {
+		t.Errorf("abc names = %q", got)
+	}
+	if n, ok := cs["old"].Networks["portcullis-proxy"]; !ok || len(n) != 0 {
+		t.Errorf("an exited container keeps the summary's networks: %v", cs["old"].Networks)
+	}
+	if _, ok := cs["gone"].Networks["portcullis-proxy"]; !ok {
+		t.Errorf("a container gone before its inspect keeps the summary's networks: %v", cs["gone"].Networks)
+	}
+	// Cached: the same endpoints are not inspected again.
+	list()
+	mu.Lock()
+	if inspects["abc"] != 1 {
+		t.Errorf("inspects = %v", inspects)
+	}
+	// A new endpoint (disconnect + connect with another alias) is
+	// inspected again: an unexpected alias is never hidden by the cache.
+	endpoint, aliases = "ep2", `["portcullis-mcp-rogue--x"]`
+	mu.Unlock()
+	cs = list()
+	if got := strings.Join(cs["abc"].Networks["portcullis-proxy"], ","); got != "portcullis-mcp-rogue--x,x,abc,portcullis-mcp-a--b" {
+		t.Errorf("after reconnect names = %q", got)
+	}
+	// Past the TTL the same endpoints are inspected again.
+	old := nameTTL
+	nameTTL = 0
+	t.Cleanup(func() { nameTTL = old })
+	list()
+	mu.Lock()
+	defer mu.Unlock()
+	if inspects["abc"] != 3 {
+		t.Errorf("inspects after TTL = %v", inspects)
+	}
+}
+
+// An inspect error other than not-found fails the list (fail closed).
+func TestListContainersInspectError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/containers/json" {
+			fmt.Fprint(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},"NetworkSettings":{"Networks":{"portcullis-proxy":{}}}}]`)
+			return
+		}
+		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+	}))
+	if _, err := c.ListContainers(context.Background(), nil); err == nil {
+		t.Error("an inspect error was ignored")
 	}
 }
 

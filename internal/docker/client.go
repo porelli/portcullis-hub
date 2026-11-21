@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/portcullis/hub/internal/runtime"
@@ -50,6 +51,9 @@ var requestTimeout = 30 * time.Second
 type Client struct {
 	api   *client.Client
 	guard *Guard
+	// names caches the network names inspected per container (see
+	// ListContainers); the zero value is ready.
+	names nameCache
 }
 
 // New parses a DOCKER_HOST value ("" means DefaultHost). Every request but
@@ -164,21 +168,132 @@ func (c Container) Project() string { return c.Labels[LabelProject] }
 func (c Container) Service() string { return c.Labels[LabelService] }
 
 // ListContainers lists containers (including stopped ones) matching f.
+// The list summary never carries an endpoint's aliases or DNS names, so a
+// live container attached to a network is inspected for them (cached per
+// container and endpoint, see nameCache).
 func (c *Client) ListContainers(ctx context.Context, f Filters) ([]Container, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	lctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	res, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: f.sdk()})
+	res, err := c.api.ContainerList(lctx, client.ContainerListOptions{All: true, Filters: f.sdk()})
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Container, 0, len(res.Items))
 	for _, s := range res.Items {
-		out = append(out, Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels, Created: s.Created, Networks: networkNames(s.NetworkSettings)})
+		ct := Container{ID: s.ID, Names: s.Names, Image: s.Image, State: string(s.State), Status: s.Status, Labels: s.Labels, Created: s.Created}
+		if ct.Networks, err = c.containerNetworks(ctx, s.ID, string(s.State), s.NetworkSettings); err != nil {
+			return nil, err
+		}
+		out = append(out, ct)
 	}
 	return out, nil
 }
 
-// networkNames: per network, the endpoint's aliases and DNS names.
+// nameTTL bounds how long an inspected container's network names are
+// reused for an unchanged set of endpoints (a backstop: an endpoint's
+// aliases can't change without a new endpoint). A var for tests.
+var nameTTL = 2 * time.Minute
+
+// nameCache: container ID → the network names inspected for one set of
+// endpoints (endpointKey). Entries older than nameTTL are dropped on the
+// next list, so the cache holds only recently listed containers.
+type nameCache struct {
+	mu sync.Mutex
+	m  map[string]nameEntry
+}
+
+type nameEntry struct {
+	key   string
+	names map[string][]string
+	at    time.Time
+}
+
+// endpointKey identifies a container's endpoints: network, endpoint ID
+// and address. A network connect or disconnect changes it.
+func endpointKey(ns *container.NetworkSettingsSummary) string {
+	var parts []string
+	for name, ep := range ns.Networks {
+		p := name
+		if ep != nil {
+			p += "\x00" + ep.EndpointID + "\x00" + ep.IPAddress.String()
+		}
+		parts = append(parts, p)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, "\x01")
+}
+
+// containerNetworks: per network, the names the container answers to.
+// A live container (running, restarting or paused) attached to a network
+// is inspected, since the list summary has no aliases; anything else
+// keeps the summary's (its network names, usually without aliases). A
+// container gone between the list and the inspect keeps the summary's;
+// any other inspect error fails the list (fail closed: no names unseen).
+func (c *Client) containerNetworks(ctx context.Context, id, state string, ns *container.NetworkSettingsSummary) (map[string][]string, error) {
+	out := networkNames(ns)
+	if out == nil || (state != "running" && state != "restarting" && state != "paused") {
+		return out, nil
+	}
+	key := endpointKey(ns)
+	now := time.Now()
+	c.names.mu.Lock()
+	for k, e := range c.names.m {
+		if now.Sub(e.at) > nameTTL {
+			delete(c.names.m, k)
+		}
+	}
+	e, ok := c.names.m[id]
+	c.names.mu.Unlock()
+	if ok && e.key == key {
+		return cloneNames(e.names), nil
+	}
+	ictx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	res, err := c.api.ContainerInspect(ictx, id, client.ContainerInspectOptions{})
+	if IsNotFound(err) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s for its network names: %w", id, err)
+	}
+	if res.Container.NetworkSettings != nil {
+		for name, ep := range res.Container.NetworkSettings.Networks {
+			if ep != nil {
+				out[name] = addNames(out[name], append(slices.Clone(ep.Aliases), ep.DNSNames...))
+			} else if _, ok := out[name]; !ok {
+				out[name] = nil
+			}
+		}
+	}
+	c.names.mu.Lock()
+	if c.names.m == nil {
+		c.names.m = make(map[string]nameEntry)
+	}
+	c.names.m[id] = nameEntry{key: key, names: cloneNames(out), at: now}
+	c.names.mu.Unlock()
+	return out, nil
+}
+
+func cloneNames(m map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(m))
+	for k, v := range m {
+		out[k] = slices.Clone(v)
+	}
+	return out
+}
+
+// addNames appends each non-empty name of add not yet in names.
+func addNames(names, add []string) []string {
+	for _, n := range add {
+		if n != "" && !slices.Contains(names, n) {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// networkNames: per network of the list summary, the endpoint's aliases
+// and DNS names (the summary carries none on Docker; inspected above).
 func networkNames(ns *container.NetworkSettingsSummary) map[string][]string {
 	if ns == nil || len(ns.Networks) == 0 {
 		return nil
@@ -187,11 +302,7 @@ func networkNames(ns *container.NetworkSettingsSummary) map[string][]string {
 	for name, ep := range ns.Networks {
 		var names []string
 		if ep != nil {
-			for _, n := range append(slices.Clone(ep.Aliases), ep.DNSNames...) {
-				if n != "" && !slices.Contains(names, n) {
-					names = append(names, n)
-				}
-			}
+			names = addNames(nil, append(slices.Clone(ep.Aliases), ep.DNSNames...))
 		}
 		out[name] = names
 	}

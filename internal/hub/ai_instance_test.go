@@ -1314,6 +1314,52 @@ func TestMCPAliasMissingIsDrift(t *testing.T) {
 	}
 }
 
+// mcpAliasDrift runs a reconcile with aiapp's app container (its rendered
+// labels) and its tok-mcp companion answering names on portcullis-proxy,
+// and returns aiapp's public-access drift message ("" = none).
+func mcpAliasDrift(t *testing.T, names ...string) string {
+	t.Helper()
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	a.h.mu.RLock()
+	want, _ := a.h.desiredRouteLabelsLocked(a.h.findLocked("aiapp"))
+	a.h.mu.RUnlock()
+	labels := map[string]string{docker.LabelProject: "portcullis-aiapp", docker.LabelService: "app", docker.LabelNumber: "1"}
+	for k, v := range want["app"] {
+		labels[k] = v
+	}
+	a.engine.mu.Lock()
+	a.engine.containers = []docker.Container{{ID: "c1", Names: []string{"/portcullis-aiapp-app-1"}, State: "running", Labels: labels},
+		{ID: "c2", Names: []string{"/portcullis-aiapp-tok-mcp-1"}, State: "running", Networks: map[string][]string{"portcullis-proxy": append([]string{"portcullis-aiapp-tok-mcp-1"}, names...)},
+			Labels: map[string]string{docker.LabelProject: "portcullis-aiapp", docker.LabelService: "tok-mcp", docker.LabelNumber: "1"}}}
+	a.engine.mu.Unlock()
+	for _, d := range a.h.Reconcile(context.Background()).Items {
+		if d.ID == "aiapp" && d.Kind == DriftPublicAccess {
+			return d.Message
+		}
+	}
+	return ""
+}
+
+// The companion answering exactly its rendered alias is no drift.
+func TestMCPAliasMatchNoDrift(t *testing.T) {
+	if msg := mcpAliasDrift(t, "tok-mcp", "portcullis-mcp-aiapp--tok"); msg != "" {
+		t.Errorf("drift = %q", msg)
+	}
+}
+
+// A portcullis-mcp- alias the Hub doesn't render (a rogue companion name)
+// is drift, even next to the rendered one (security check, fail closed).
+func TestMCPAliasUnexpectedIsDrift(t *testing.T) {
+	msg := mcpAliasDrift(t, "portcullis-mcp-aiapp--tok", "Portcullis-MCP-other--x")
+	if !strings.Contains(msg, "unexpected network alias portcullis-mcp-other--x") {
+		t.Errorf("drift = %q", msg)
+	}
+}
+
 // R1-9: a non-default instance renders its own router name and alias,
 // service mcp-gate@docker untouched by the instance renaming.
 func TestMCPRouterNonDefaultInstance(t *testing.T) {
