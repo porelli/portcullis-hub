@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -548,7 +547,12 @@ func checkServerURL(u string, srv []string) error {
 	return nil
 }
 
-var siteValRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
+// The join flags core added (nodeadm/flags.go, core 49b5697): exactly
+// these values.
+const (
+	UnlabelledTaintFlag = "--node-taint=nodeadm.portcullis/unlabelled=true:NoSchedule"
+	NoForceDetachFlag   = "--kube-controller-manager-arg=disable-force-detach-on-timeout=true"
+)
 
 // checkFlags is an allowlist (core's join flags, nodeadm/flags.go and the
 // shared fixture k3s-server-flags.txt): each flag's name and value shape,
@@ -560,9 +564,10 @@ func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) 
 		"--server=" + serverURL: true, "--token-file=" + K3sTokenFile: true, "--node-name=" + st.ID: true,
 		"--node-ip=" + ip: true, "--kubelet-arg=address=" + ip: true, "--kubelet-arg=pod-max-pids=1024": true,
 		"--kubelet-arg=sync-frequency=10s": true, "--flannel-conf=" + FlannelConf: true, "--flannel-iface=pcmesh": true,
-		"--node-label=portcullis.io/ingress=true": true, "--node-label=svccontroller.k3s.cattle.io/enablelb=true": true,
-		"--node-label=portcullis.io/storage=true": true, "--node-label=node.longhorn.io/create-default-disk=true": true,
-		"--node-taint=portcullis.io/small=true:NoSchedule": true,
+		// The registration taint (core ruling R-NODELABELS): no placement
+		// label and no portcullis.io/ taint on the join's flags; nodeadm
+		// labels the registered Node and lifts this taint.
+		UnlabelledTaintFlag: true,
 	}
 	serverOnly := map[string]bool{
 		"--secrets-encryption": true, "--disable=traefik": true, "--write-kubeconfig-mode=0600": true,
@@ -570,6 +575,9 @@ func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) 
 		"--etcd-arg=listen-client-urls=https://" + ip + ":2379,https://127.0.0.1:2379": true,
 		"--etcd-arg=heartbeat-interval=200":                                            true, "--etcd-arg=election-timeout=2000": true,
 		"--agent-token-file=" + K3sAgentToken: true,
+		// Fencing unconfirmed → no stateful failover (core plan Task 24): no
+		// volume leaves an unready node by timeout.
+		NoForceDetachFlag: true,
 		// The answer's cluster_cidr, the same one flannel's net-conf gets.
 		"--cluster-cidr=" + clusterCIDR: clusterCIDR != "",
 	}
@@ -578,23 +586,14 @@ func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) 
 	}
 	seen := map[string]bool{}
 	for _, f := range flags {
-		name, val, _ := strings.Cut(f, "=")
+		name, _, _ := strings.Cut(f, "=")
 		ok := exact[f] || (st.Role == "server" && serverOnly[f])
-		if !ok && name == "--node-label" {
-			k, v, _ := strings.Cut(val, "=")
-			switch k {
-			case "portcullis.io/class":
-				ok = v == "small" || v == "home" || v == "cloud"
-			case "portcullis.io/site", "topology.kubernetes.io/zone":
-				ok = siteValRe.MatchString(v)
-			}
-		}
 		if !ok || seen[f] {
 			return fmt.Errorf("the join answer's k3s flag %s is refused: nothing was installed", clip(name, 40))
 		}
 		seen[f] = true
 	}
-	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + ip, "--node-name=" + st.ID} {
+	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + ip, "--node-name=" + st.ID, UnlabelledTaintFlag} {
 		if !seen[need] {
 			name, _, _ := strings.Cut(need, "=")
 			return fmt.Errorf("the join answer's k3s flags lack %s: nothing was installed", name)

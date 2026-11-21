@@ -130,7 +130,7 @@ func (f *fakeNodeadm) handler(w http.ResponseWriter, r *http.Request) {
 		srv := "https://10.215.0.1:6443"
 		ans := map[string]any{"role": "agent", "server_url": srv, "token": f.token, "cluster_cidr": f.cidr, "flags": []string{
 			"--flannel-conf=" + FlannelConf, "--flannel-iface=pcmesh", "--kubelet-arg=address=10.215.0.4", "--kubelet-arg=pod-max-pids=1024",
-			"--node-ip=10.215.0.4", "--node-label=portcullis.io/class=cloud", "--node-label=portcullis.io/site=edge",
+			"--node-ip=10.215.0.4", UnlabelledTaintFlag,
 			"--node-name=n4", "--server=" + srv, "--token-file=" + K3sTokenFile}}
 		if f.cidr == "" {
 			delete(ans, "cluster_cidr")
@@ -317,14 +317,23 @@ func TestJoinFlagsRefused(t *testing.T) {
 	st := State{ID: "n4", MeshIP: "10.215.0.4", Role: "server"}
 	srv := "https://10.215.0.1:6443"
 	ok := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4",
-		"--node-taint=portcullis.io/small=true:NoSchedule", "--etcd-arg=listen-client-urls=https://10.215.0.4:2379,https://127.0.0.1:2379"}
+		UnlabelledTaintFlag, NoForceDetachFlag, "--etcd-arg=listen-client-urls=https://10.215.0.4:2379,https://127.0.0.1:2379"}
 	if err := checkFlags(ok, srv, st, "10.42.0.0/16"); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{"--token=K10abc::server:x", "--agent-token=x", "--token-file=/tmp/t", "--node-name=n5",
 		"--node-ip=10.215.0.5", "--server=https://10.215.0.9:6443", "--data-dir=/", "--kubelet-arg=x y", "-t", "--node-label=$(id)",
 		"--write-kubeconfig-mode=0644", "--kube-apiserver-arg=anonymous-auth=true", "--kubelet-arg=read-only-port=10255", "--config=/tmp/c",
-		"--node-label=portcullis.io/class=huge", "--node-ip=10.215.0.4"} {
+		"--node-label=portcullis.io/class=huge", "--node-ip=10.215.0.4",
+		// R-NODELABELS: no placement label or portcullis.io/ taint from the join.
+		"--node-label=portcullis.io/class=home", "--node-label=portcullis.io/site=main", "--node-label=topology.kubernetes.io/zone=main",
+		"--node-label=portcullis.io/ingress=true", "--node-label=portcullis.io/storage=true", "--node-taint=portcullis.io/small=true:NoSchedule",
+		// Near-misses of the two core 49b5697 flags.
+		"--node-taint=nodeadm.portcullis/unlabelled=true:NoExecute", "--node-taint=nodeadm.portcullis/unlabelled=false:NoSchedule",
+		"--node-taint=nodeadm.portcullis/unlabelled:NoSchedule", "--node-taint=nodeadm.portcullis/unlabeled=true:NoSchedule",
+		"--node-taint=nodeadm.portcullis/unlabelled=true:NoSchedule,x", "--kube-controller-manager-arg=disable-force-detach-on-timeout=false",
+		"--kube-controller-manager-arg=disable-force-detach-on-timeout", "--kube-controller-manager-arg=disable-force-detach-on-timeout=true,x=y",
+		"--kube-controller-manager-arg=terminated-pod-gc-threshold=1", "--kube-apiserver-arg=disable-force-detach-on-timeout=true"} {
 		err := checkFlags(append(append([]string{}, ok...), bad), srv, st, "10.42.0.0/16")
 		if err == nil {
 			t.Errorf("accepted %q", bad)
@@ -339,13 +348,24 @@ func TestJoinFlagsRefused(t *testing.T) {
 	if checkFlags(append(append([]string{}, ok...), "--cluster-cidr=10.99.0.0/16"), srv, st, "10.42.0.0/16") == nil {
 		t.Error("another --cluster-cidr accepted")
 	}
-	if checkFlags([]string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4", "--cluster-cidr=10.42.0.0/16"}, srv,
+	if checkFlags([]string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4", UnlabelledTaintFlag, "--cluster-cidr=10.42.0.0/16"}, srv,
 		State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}, "10.42.0.0/16") == nil {
 		t.Error("an agent took --cluster-cidr")
 	}
-	// An agent doesn't take a server's flags.
-	if err := checkFlags(append(append([]string{}, ok...), "--secrets-encryption"), srv, State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}, "10.42.0.0/16"); err == nil {
-		t.Error("an agent took --secrets-encryption")
+	// An agent doesn't take a server's flags (the force-detach one included);
+	// it does take the registration taint, which every join must carry.
+	agent := State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}
+	agentOK := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4", UnlabelledTaintFlag}
+	if err := checkFlags(agentOK, srv, agent, "10.42.0.0/16"); err != nil {
+		t.Errorf("an agent's flags: %v", err)
+	}
+	for _, f := range []string{"--secrets-encryption", NoForceDetachFlag} {
+		if checkFlags(append(append([]string{}, agentOK...), f), srv, agent, "10.42.0.0/16") == nil {
+			t.Errorf("an agent took %s", f)
+		}
+	}
+	if err := checkFlags(agentOK[:4], srv, agent, "10.42.0.0/16"); err == nil || !strings.Contains(err.Error(), "--node-taint") {
+		t.Errorf("a join without the registration taint: %v", err)
 	}
 	for _, u := range []string{"http://10.215.0.1:6443", "https://198.51.100.1:6443", "https://10.215.0.1:6444", "https://10.215.0.1:6443/x"} {
 		if checkServerURL(u, nil) == nil {
@@ -428,5 +448,38 @@ func TestInstallK3s(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r2.root, K3sTokenFile)); err == nil {
 		t.Error("the token was written before the downloads were checked")
+	}
+}
+
+// TestJoinFlagsCoreFixture: every server flag of core's shared fixture
+// (tests/fixtures/k3s-server-flags.txt, which nodeadm's join answer
+// follows) passes, with the join's substitutions (no --cluster-init, the
+// answer's --server).
+func TestJoinFlagsCoreFixture(t *testing.T) {
+	core, set := os.LookupEnv("PORTCULLIS_CORE_DIR")
+	if !set {
+		core = filepath.Join("..", "..", "..", "..", "portcullis")
+	}
+	b, err := os.ReadFile(filepath.Join(core, "tests", "fixtures", "k3s-server-flags.txt"))
+	if err != nil {
+		if set {
+			t.Fatalf("PORTCULLIS_CORE_DIR is set but the fixture isn't readable: %v", err)
+		}
+		t.Skipf("no core checkout: %v", err)
+	}
+	srv := "https://10.215.0.2:6443"
+	flags := []string{"--server=" + srv}
+	cidr := ""
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if l == "--cluster-init" {
+			continue
+		}
+		if v, ok := strings.CutPrefix(l, "--cluster-cidr="); ok {
+			cidr = v
+		}
+		flags = append(flags, l)
+	}
+	if err := checkFlags(flags, srv, State{ID: "node-1", MeshIP: "10.215.0.1", Role: "server"}, cidr); err != nil {
+		t.Errorf("core's server flags: %v", err)
 	}
 }
