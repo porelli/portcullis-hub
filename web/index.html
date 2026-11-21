@@ -275,6 +275,35 @@
     .access-nav button { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 0.5rem 1rem; color: #94a3b8; font: inherit; font-size: 0.875rem; cursor: pointer; }
     .access-nav button[aria-selected="true"] { color: #e2e8f0; border-bottom-color: #3b82f6; }
     .access-nav button:hover { color: #e2e8f0; }
+    /* The Marketplace (marketplace.js): in Apps, its banners hidden. */
+    #tab-apps.mkt-on > .drift, #tab-apps.mkt-on > .admin-hint { display: none; }
+    .mkt-bar { margin: 0.75rem 0 1rem; }
+    .mkt-search { width: 100%; max-width: 36rem; }
+    .mkt-chips, .mkt-toggles { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.75rem; }
+    .mkt-chip, .mkt-toggle { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; border-radius: 999px; padding: 0.25rem 0.75rem; font: inherit; font-size: 0.8125rem; cursor: pointer; }
+    .mkt-chip:hover, .mkt-toggle:hover { border-color: #64748b; color: #e2e8f0; }
+    .mkt-chip[aria-pressed="true"], .mkt-toggle[aria-pressed="true"] { background: #1d4ed8; border-color: #3b82f6; color: #fff; }
+    .mkt-count { color: #94a3b8; font-size: 0.75rem; }
+    .mkt-chip[aria-pressed="true"] .mkt-count { color: #dbeafe; }
+    .mkt-toggles { margin-bottom: 1.5rem; }
+    .app-icon-logo { width: 1.75rem; height: 1.75rem; object-fit: contain; }
+    .mkt-details { margin-left: auto; }
+    .mkt-drawer { margin: 0 0 0 auto; height: 100vh; max-height: 100vh; width: min(640px, 100vw); background: #1e293b; color: #e2e8f0; border: 0; border-left: 1px solid #334155; padding: 1.25rem 1.5rem; overflow-y: auto; font-size: 0.875rem; }
+    .mkt-drawer::backdrop { background: rgba(2, 6, 23, 0.6); }
+    .mkt-drawer-head { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .mkt-drawer-head h3 { font-size: 1.25rem; margin: 0; flex: 1; }
+    .mkt-drawer-icon { font-size: 2rem; }
+    .mkt-drawer-icon-logo { width: 2.5rem; height: 2.5rem; object-fit: contain; }
+    .mkt-drawer h4 { margin: 1.25rem 0 0.5rem; font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; }
+    .mkt-drawer ul { margin: 0 0 0 1.25rem; }
+    .mkt-meta { color: #94a3b8; margin-bottom: 1rem; }
+    .mkt-drawer a:not(.btn) { color: #93c5fd; }
+    .mkt-drawer .md p { margin: 0 0 0.75rem; }
+    .mkt-drawer .md ul, .mkt-drawer .md ol { margin: 0 0 0.75rem 1.25rem; }
+    .mkt-shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0.75rem; }
+    .mkt-shot { width: 100%; border-radius: 0.5rem; border: 1px solid #334155; }
+    .mkt-shots figcaption { color: #94a3b8; font-size: 0.75rem; margin-top: 0.25rem; }
+    .mkt-drawer-foot { margin-top: 1.5rem; }
     /* Settings subtabs (settingsnav.js): the same bar, wrapping on a narrow screen. */
     .settings-nav { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 1.5rem; border-bottom: 1px solid #1e293b; }
     .settings-nav button { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 0.5rem 1rem; color: #94a3b8; font: inherit; font-size: 0.875rem; cursor: pointer; }
@@ -679,7 +708,7 @@
       {{end}}
     </header>
 
-    <!-- Apps (what runs here; "+ Add an app" opens the Marketplace) ·
+    <!-- Apps (what runs here; "+ Add app" opens the Marketplace) ·
          Doctor · Usage · Access (SSH access, VPN devices, sign-in
          history) · Settings · Audit. People is the site bar's. -->
     <div class="tabs">
@@ -741,62 +770,9 @@
       <div class="drift" id="user-sweep"></div>
       <div id="apps-root"><p class="settings-empty">Loading…</p></div>
 
-      <!-- Marketplace: every template; in use or Install… (fillMarketplace);
-           shown in Apps at #marketplace (showMarketplace) -->
-      <div id="mkt-root" hidden>
-        <div class="page-crumbs"><a href="#apps" data-goto-tab="apps">Apps</a> › Marketplace</div>
-        {{range $category, $apps := .Categories}}
-        <div class="category">
-          <div class="category-title">{{$category}}</div>
-          <div class="apps">
-            {{range $apps}}
-            <div class="app-card" data-id="{{.ID}}" data-mail="{{if .MailProvider}}1{{end}}">
-              <div class="app-header">
-                <span class="app-icon">{{.Manifest.Icon}}</span>
-                <span class="app-name">{{.Manifest.Name}}</span>
-                {{if .MailProvider}}<span class="pill" data-mail-badge>mail server</span>{{end}}
-                <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
-              </div>
-              <div class="app-desc">{{.Manifest.Description}}</div>
-              <div class="app-auth">
-                {{if .Manifest.Auth.Method}}
-                  {{if eq (printf "%v" .Manifest.Auth.SSO) "true"}}
-                    <span class="auth-badge sso" title="Full Single Sign-On support">SSO</span>
-                  {{else if eq (printf "%v" .Manifest.Auth.SSO) "partial"}}
-                    <span class="auth-badge sso-partial" title="Partial SSO via proxy auth header">SSO*</span>
-                  {{end}}
-                  {{if .MailProvider}}
-                    <span class="auth-badge method" data-managed-by-portcullis="{{.ID}}" title="Mail is managed in Portcullis (Settings → Mail and the instance's Mail tab), so Portcullis's mail safeguards always apply. A full administrator can open the mail server's own admin screen read-only.">Managed by Portcullis</span>
-                  {{else if .Manifest.Routerless}}
-                    <span class="auth-badge method" data-no-web-page="{{.ID}}" title="This app has no web page: people use it with its own client (see My apps)">No web page</span>
-                  {{end}}
-                  {{if .Manifest.Auth.GroupAccess}}
-                    <span class="auth-badge group" title="Access restricted by LLDAP group">Group Access</span>
-                  {{end}}
-                  {{if .Manifest.Auth.GroupAdmin}}
-                    <span class="auth-badge group-admin" title="Admin role assigned by LLDAP group">Group Admin</span>
-                  {{end}}
-                  {{if eq .Manifest.Auth.Method "public"}}
-                    <span class="auth-badge public">Public</span>
-                  {{else}}
-                    <span class="auth-badge method" title="{{.Manifest.Auth.NoteText}}">{{.Manifest.Auth.Method}}</span>
-                  {{end}}
-                {{end}}
-              </div>
-              <div class="app-tags">
-                {{range .Manifest.Tags}}<span class="tag">{{.}}</span>{{end}}
-              </div>
-              <div class="app-footer" data-mkt-use="{{.ID}}" data-mkt-multi="{{if eq .Manifest.Instances "multi"}}1{{end}}" data-compat="{{if .Compat}}{{.Compat.Status}}{{end}}" data-compat-runtime="{{if .Compat}}{{.Compat.Runtime}}{{end}}" data-compat-reasons="{{if .Compat}}{{range $i, $r := .Compat.Reasons}}{{if $i}}; {{end}}{{$r}}{{end}}{{end}}"></div>
-            </div>
-            {{end}}
-          </div>
-        </div>
-        {{end}}
-
-        {{if not .Templates}}
-        <div class="empty">No templates found. Add a template source in <a href="#settings/sources">Settings → Template sources</a> or check the templates/ directory.</div>
-        {{end}}
-      </div>
+      <!-- Marketplace ("+ Add app", #marketplace…): web/marketplace.js,
+           client-rendered from GET /api/templates (showMarketplace) -->
+      <div id="mkt-root" hidden></div>
     </div>
 
     <!-- One page per instance, the default one included (#apps/<id>[/<tab>], renderInstancePage) -->
@@ -989,6 +965,9 @@
        operation, Stop and Close (renderOpPanel) -->
   <dialog class="opp" id="op-panel" aria-labelledby="opp-title"></dialog>
 
+  <!-- The Marketplace's detail drawer (marketplace.js: PortcullisMarketplace.open) -->
+  <dialog class="mkt-drawer" id="mkt-drawer"></dialog>
+
   <script src="/static/directory.js"></script>
   <script>
     // The shared navigation: this listener serves administrators only.
@@ -1004,6 +983,7 @@
   <script src="/static/ssh.js"></script>
   <script src="/static/access.js"></script>
   <script src="/static/settingsnav.js"></script>
+  <script src="/static/marketplace.js"></script>
   <script src="/static/usage.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
@@ -1051,7 +1031,8 @@
     //   #apps/<id>[/<tab>[/<option>]]  an instance's page at a tab
     //       (settings/<option> scrolled to an option); the old
     //       #app/<id>/settings[/<option>] and #app/<id>/ai are replaced by those;
-    //   #marketplace[?filter=mail], #marketplace/<template-id>  the Marketplace;
+    //   #marketplace[?filter=<category>], #marketplace/<template-id>  the Marketplace
+    //       (?filter=mail: the Mail chip);
     //   #doctor, #usage[/<view>], #audit;
     //   #access[/ssh[/<ssh-section>]], #access/vpn, #access/signins[?user=<name>];
     //   #settings[/<section>]; #settings/network?add=<name>[&provider=<p>]
@@ -1096,29 +1077,25 @@
       return ai ? '#apps/' + ai[1] + '/ai' : null;
     }
     // setMarketplaceShown(on): the Apps tab shows the Marketplace
-    // (#mkt-root) instead of its list (#apps-root).
+    // (#mkt-root) instead of its list (#apps-root) and the banners above
+    // it (.mkt-on).
     function setMarketplaceShown(on) {
       const list = document.getElementById('apps-root'), mkt = document.getElementById('mkt-root');
       if (list) list.hidden = on;
       if (mkt) mkt.hidden = !on;
+      document.getElementById('tab-apps').classList.toggle('mkt-on', on);
+      if (!on && window.PortcullisMarketplace) window.PortcullisMarketplace.close();
     }
     function marketplaceShown() {
       const mkt = document.getElementById('mkt-root');
       return !!mkt && !mkt.hidden && document.getElementById('tab-apps').classList.contains('active');
     }
-    // showMarketplace({filter, open}): the Marketplace in Apps — rendered
-    // by marketplace.js once it's there (PortcullisMarketplace).
+    // showMarketplace({filter, open}): the Marketplace in Apps
+    // (marketplace.js): filter a category chip, open a template's drawer.
     function showMarketplace(o) {
       if (!showTab('apps')) return;
       setMarketplaceShown(true);
-      if (window.PortcullisMarketplace) {
-        window.PortcullisMarketplace.render(document.getElementById('mkt-root'), o);
-        return;
-      }
-      fillMarketplace();
-      filterMarketplace(o.filter);
-      const card = o.open && document.querySelector('.app-card[data-id="' + CSS.escape(o.open) + '"]');
-      if (card) { card.scrollIntoView({ block: 'center' }); flash(card); }
+      window.PortcullisMarketplace.render(document.getElementById('mkt-root'), o);
     }
     // showSettings(section): the Settings tab at a section (an unknown
     // one: Sign-in; PortcullisSettingsNav).
@@ -1134,7 +1111,7 @@
       [/^(?:apps)?$/, () => showTab('apps')],
       [/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],
       [/^app\/([a-z0-9-]+)\/(?:settings(?:\/[A-Za-z0-9_.-]+)?|ai)$/, m => { const to = oldAppLink(m[0]); history.replaceState(null, '', to); routeTo(to.slice(1)); }],
-      [/^marketplace(?:\?filter=(mail))?$/, m => showMarketplace({ filter: m[1] || '', open: '' })],
+      [/^marketplace(?:\?filter=([a-z0-9-]{1,63}))?$/, m => showMarketplace({ filter: m[1] || '', open: '' })],
       [/^marketplace\/([a-z0-9-]+)$/, m => showMarketplace({ filter: '', open: m[1] })],
       [/^doctor$/, () => showTab('doctor')],
       [/^usage(?:\/(apps|containers|storage))?$/, m => { usageView = m[1] || 'apps'; showTab('usage'); }],
@@ -3555,6 +3532,9 @@
     let catalogCache = null;
     let instCtx = null; // the open dialog: { kind: 'setup'|'backups', … }
 
+    // refreshCatalog: the catalog read again (a template source added,
+    // removed or synced).
+    function refreshCatalog() { catalogCache = null; return loadCatalogInfo(); }
     async function loadCatalogInfo() {
       if (!catalogCache) {
         const list = await apiGet('/api/templates');
@@ -3670,7 +3650,7 @@
           b.title = r.verified ? '' : 'Not verified: ' + (r.mismatch || 'not checked yet');
           b.hidden = false;
         }
-        if (marketplaceShown()) fillMarketplace();
+        if (marketplaceShown()) PortcullisMarketplace.refresh();
       }).catch(() => { runtimeInfo = null; });
     }
     window.addEventListener('load', loadRuntime);
@@ -3681,11 +3661,18 @@
       podman: { ok: ['ok', 'Rootless: works'], degraded: ['warn', 'Rootless: limited'], refused: ['bad', 'Rootless: not available'] },
       kubernetes: { ok: ['ok', 'Kubernetes: works'], degraded: ['warn', 'Kubernetes: limited'], refused: ['bad', 'Kubernetes: not available'] },
     };
-    function compatBadge(c) {
-      if (!c || !runtimeInfo || c.runtime !== runtimeInfo.runtime || !COMPAT_TEXT[c.runtime] || !COMPAT_TEXT[c.runtime][c.status]) return '';
+    // compatInfo: the same as {cls, text}, or null (marketplace.js builds
+    // its badge from it).
+    function compatInfo(c) {
+      if (!c || !runtimeInfo || c.runtime !== runtimeInfo.runtime || !COMPAT_TEXT[c.runtime] || !COMPAT_TEXT[c.runtime][c.status]) return null;
       const [cls, text] = COMPAT_TEXT[c.runtime][c.status];
+      return { cls, text };
+    }
+    function compatBadge(c) {
+      const info = compatInfo(c);
+      if (!info) return '';
       const why = (c.reasons || []).join('; ');
-      return '<span class="pill ' + cls + '" data-compat-badge="' + escapeHtml(c.status) + '"' + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' + escapeHtml(text) + '</span>';
+      return '<span class="pill ' + info.cls + '" data-compat-badge="' + escapeHtml(c.status) + '"' + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' + escapeHtml(info.text) + '</span>';
     }
     // compatWhere: "under rootless Podman" / "on Kubernetes".
     function compatWhere(c) { return c && c.runtime === 'kubernetes' ? 'on Kubernetes' : 'under rootless Podman'; }
@@ -3703,7 +3690,7 @@
     }
     function renderInstanceViews() {
       if (document.getElementById('tab-apps').classList.contains('active')) renderApps();
-      if (marketplaceShown()) fillMarketplace();
+      if (marketplaceShown()) PortcullisMarketplace.refresh();
       if (pageCtx) renderPageHead();
     }
     async function loadDirectory(force) {
@@ -3814,10 +3801,10 @@
           '<button type="button" data-apps-filter-clear aria-label="Show every app" title="Show every app">&times;</button></span>';
       }
       h += '<button type="button" class="btn btn-secondary btn-sm" data-all-backups>All backups</button>' +
-        '<button type="button" class="btn btn-primary btn-sm" data-goto-tab="marketplace">+ Add an app</button></div>';
+        '<button type="button" class="btn btn-primary btn-sm" data-add-app>+ Add app</button></div>';
       if (!tids.length) {
         h += '<p class="settings-empty">' + (appsFilter ? escapeHtml(appName(appsFilter)) + ' has no instances any more.'
-          : 'No apps installed yet. “+ Add an app” opens the Marketplace.') + '</p>';
+          : 'No apps installed yet. “+ Add app” opens the Marketplace.') + '</p>';
       }
       for (const tid of tids) {
         const list = byT.get(tid).slice().sort((a, b) => instName(a).localeCompare(instName(b)) || a.id.localeCompare(b.id));
@@ -3830,40 +3817,6 @@
           '</div>' + list.map(i => instLineHtml(i, list.some(o => o !== i && instName(o) === instName(i)))).join('') + '</section>';
       }
       if (h !== appsHtml || !box.querySelector('.apps-head')) { box.innerHTML = h; appsHtml = h; }
-    }
-
-    // filterMarketplace: only the templates of kind (mail) shown, with a
-    // way back to all; '' shows all.
-    function filterMarketplace(kind) {
-      const box = document.getElementById('mkt-root');
-      if (!box) return;
-      box.querySelectorAll('.app-card').forEach(c => { c.hidden = kind === 'mail' && c.dataset.mail !== '1'; });
-      box.querySelectorAll('.category').forEach(cat => { cat.hidden = !cat.querySelector('.app-card:not([hidden])'); });
-      let bar = box.querySelector('[data-mkt-filter]');
-      if (kind && !bar) {
-        bar = document.createElement('div');
-        bar.className = 'settings-hint';
-        bar.setAttribute('data-mkt-filter', '');
-        bar.innerHTML = 'Showing mail servers only · <a href="#marketplace">Show all</a>';
-        box.prepend(bar);
-      }
-      if (bar) bar.hidden = !kind;
-    }
-    function fillMarketplace() {
-      document.querySelectorAll('[data-mkt-use]').forEach(el => {
-        const tid = el.dataset.mktUse;
-        const n = instancesCache.filter(i => i.template === tid).length;
-        // Podman / Kubernetes: a refused template can't be created (the
-        // Hub refuses it too: 409).
-        const rl = el.dataset.compat ? { runtime: el.dataset.compatRuntime, status: el.dataset.compat, reasons: el.dataset.compatReasons ? el.dataset.compatReasons.split('; ') : [] } : null;
-        const badge = compatBadge(rl);
-        const off = badge && rl.status === 'refused' ? ' disabled title="' + escapeHtml("Can't run " + compatWhere(rl) + ': ' + rl.reasons.join('; ')) + '"' : '';
-        const add = el.dataset.mktMulti === '1' ? '<button type="button" class="btn btn-secondary btn-sm" data-add-instance="' + escapeHtml(tid) + '"' + off + '>+ Add instance</button>' : '';
-        el.innerHTML = badge + (n
-          ? '<span class="pill ok">in use · ' + n + (n === 1 ? ' instance' : ' instances') + '</span>' +
-            '<button type="button" class="btn btn-secondary btn-sm" data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>' + add
-          : '<button type="button" class="btn btn-primary btn-sm" data-install="' + escapeHtml(tid) + '"' + off + '>Install…</button>');
-      });
     }
 
     // goTab: a top tab, with a history entry (the page's links).
@@ -4875,6 +4828,7 @@
       if ((el = t.closest('[data-apps-filter]'))) { e.preventDefault(); appsFilter = el.dataset.appsFilter; goTab('apps'); return; }
       if (t.closest('[data-apps-filter-clear]')) { appsFilter = ''; renderApps(); return; }
       if ((el = t.closest('[data-goto-tab]'))) { e.preventDefault(); goTab(el.dataset.gotoTab); return; }
+      if (t.closest('[data-add-app]')) { e.preventDefault(); goTab('marketplace'); return; }
       if ((el = t.closest('[data-open-ports]'))) { openAppSettings(el.dataset.openPorts); return; }
       if (t.id === 'op-modal' || t.closest('[data-op-error-close]')) { closeOpError(); return; }
       // The banners above Apps, and the policy block's listed shares.
@@ -5005,8 +4959,13 @@
       if (!box) return;
       try { box.innerHTML = sourcesHtml(await apiGet('/api/sources')); } catch (e) { box.innerHTML = errorBox(e); }
     }
-    // After a change the page reloads at #settings/sources: the
-    // Marketplace is rendered by the server from the synced templates.
+    // sourcesChanged: after an add, a remove or a sync, the list, the
+    // last sync and the catalog are read again (the Marketplace and the
+    // instance pages use the new templates; no page reload).
+    async function sourcesChanged() {
+      await Promise.all([loadSources(), loadSourceSync(), refreshCatalog().catch(() => null)]);
+      if (marketplaceShown()) PortcullisMarketplace.refresh();
+    }
     async function addSource() {
       const name = document.getElementById('source-name').value.trim();
       const url = document.getElementById('source-url').value.trim();
@@ -5014,7 +4973,9 @@
       try {
         await apiPost('/api/sources/add', { name, url });
         showToast('Source "' + name + '" added', 'success');
-        setTimeout(() => location.reload(), 500);
+        document.getElementById('source-name').value = '';
+        document.getElementById('source-url').value = '';
+        await sourcesChanged();
       } catch (e) { showToast(e.message, 'error'); }
     }
     async function removeSource(name) {
@@ -5022,15 +4983,15 @@
       try {
         await apiPost('/api/sources/remove', { name });
         showToast('Source "' + name + '" removed', 'success');
-        setTimeout(() => location.reload(), 500);
+        await sourcesChanged();
       } catch (e) { showToast(e.message, 'error'); }
     }
     async function syncSources() {
       try {
         await apiPost('/api/sources/sync', {});
         showToast('All sources synced', 'success');
-        setTimeout(() => location.reload(), 1000);
-      } catch (e) { showToast(e.message, 'error'); loadSourceSync(); }
+      } catch (e) { showToast(e.message, 'error'); }
+      await sourcesChanged();
     }
     // Last sync (start-up, upgrade's SIGHUP or the button): per source
     // ok / kept the previous version, and enabled apps still missing a

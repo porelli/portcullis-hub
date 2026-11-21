@@ -228,9 +228,16 @@ func TestHubAppsPageStatic(t *testing.T) {
 			t.Errorf("the hub index still has %q", gone)
 		}
 	}
+	// The Marketplace's cards and create buttons: marketplace.js.
+	mkt := webAsset(t, "marketplace.js")
+	for _, want := range []string{"'data-mkt-use': t.id", "'in use · ' + n + (n === 1 ? ' instance' : ' instances')", "'data-apps-filter': t.id, text: 'Show in Apps'",
+		"'data-install': t.id, disabled: refused, title: off, text: 'Install…'"} {
+		if !strings.Contains(mkt, want) {
+			t.Errorf("marketplace.js lacks %q", want)
+		}
+	}
 	for _, want := range []string{`id="tab-apps"`, `id="tab-instance"`, `id="mkt-root"`, `id="sources-list"`, `data-src-remove="`, `data-src-sync`,
-		`data-mkt-use="`, "'in use · ' + n + (n === 1 ? ' instance' : ' instances')", `data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>`,
-		`data-install="' + escapeHtml(tid) + '"' + off + '>Install…</button>`, "Manage on People &#8599;", "existing group", "'+ Add your own variable'",
+		"Manage on People &#8599;", "existing group", "'+ Add your own variable'",
 		`[/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],`, "function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }",
 		`<div class="drift" id="drift"></div>`, `<div class="drift" id="missing-groups"></div>`, `<script src="/static/settings.js"></script>`} {
 		if !strings.Contains(b, strings.Trim(want, "'")) {
@@ -270,7 +277,7 @@ func TestHubAppsPageStatic(t *testing.T) {
 // + Add instance are disabled, and the header names the runtime.
 func TestHubAppsPageCompat(t *testing.T) {
 	page := hubIndex(t)
-	for _, want := range []string{`data-compat="`, `data-compat-runtime="`, `data-compat-reasons="`, "function compatBadge(", "apiGet('/api/runtime')", `id="runtime-badge"`,
+	for _, want := range []string{"function compatInfo(", "function compatBadge(", "apiGet('/api/runtime')", `id="runtime-badge"`,
 		"const RUNTIME_NAME = { docker: 'Docker', podman: 'Podman', kubernetes: 'Kubernetes' };"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the hub index lacks %q", want)
@@ -279,11 +286,14 @@ func TestHubAppsPageCompat(t *testing.T) {
 	if strings.Contains(page, "rootlessBadge") || strings.Contains(page, "data-rootless") {
 		t.Error("the hub index still has the rootless names")
 	}
-	fill := hubFunc(t, page, "fillMarketplace")
-	if !strings.Contains(fill, "rl.status === 'refused' ? ' disabled") || strings.Count(fill, "+ off +") != 2 {
-		t.Errorf("fillMarketplace doesn't disable a refused template's create buttons:\n%s", fill)
+	// The Marketplace (marketplace.js) reads each template's verdict
+	// (t.compat) through compatInfo and disables a refused one's
+	// Install… / + Add instance.
+	mkt := webAsset(t, "marketplace.js")
+	if !strings.Contains(mkt, "compatInfo(c)") || !strings.Contains(mkt, "refused: !!(info && c.status === 'refused')") || strings.Count(mkt, "disabled: refused, title: off") != 2 {
+		t.Error("marketplace.js doesn't disable a refused template's create buttons")
 	}
-	fn := hubFunc(t, page, "compatBadge")
+	fn := hubFunc(t, page, "compatInfo") + hubFunc(t, page, "compatBadge")
 	start := strings.Index(page, "const COMPAT_TEXT = {")
 	end := strings.Index(page[start:], "};") + start + 2
 	script := "function escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\"/g, '&quot;'); }\n" +

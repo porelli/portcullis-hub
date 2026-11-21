@@ -95,9 +95,11 @@ func TestServerAuth(t *testing.T) {
 		t.Errorf("templates body = %s", b)
 	}
 
+	// The Marketplace is client-rendered (marketplace.js, text only:
+	// webui_marketplace_test.go): the index carries no template name.
 	r, b = do(t, srv, "GET", "/", "", true)
-	if r.StatusCode != 200 || !strings.Contains(b, "Demo &lt;b&gt;") || strings.Contains(b, "Demo <b>") {
-		t.Errorf("index = %d, escaped name missing", r.StatusCode)
+	if r.StatusCode != 200 || strings.Contains(b, "Demo <b>") || strings.Contains(b, "Demo &lt;b&gt;") {
+		t.Errorf("index = %d, a template name in the page", r.StatusCode)
 	}
 
 	// The badge shows X-Forwarded-User (the LLDAP username) as-is, escaped.

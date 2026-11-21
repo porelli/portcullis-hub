@@ -11,19 +11,22 @@ const { chromium } = require('playwright');
   const p = await b.newPage({ viewport: { width: 1400, height: 900 } });
   const errs = [];
   p.on('pageerror', e => errs.push(String(e)));
-  const audit = name => p.evaluate(name => {
+  // audit(name, scope): the visible controls under scope (default: the
+  // shown tab).
+  const audit = (name, scope) => p.evaluate(([name, scope]) => {
     const bad = [];
     const rgb = c => { const m = c.match(/[\d.]+/g); return m ? m.map(Number) : null; };
     const light = c => { const v = rgb(c); if (!v || (v.length === 4 && v[3] === 0)) return false; return (v[0] + v[1] + v[2]) / 3 > 180; };
     const dark = c => { const v = rgb(c); return v && (v[0] + v[1] + v[2]) / 3 < 110; };
-    for (const e of document.querySelectorAll('.tab-content.active input, .tab-content.active textarea, .tab-content.active select, .tab-content.active button, .tab-content.active a')) {
+    const sel = ['input', 'textarea', 'select', 'button', 'a'].map(t => scope + ' ' + t).join(', ');
+    for (const e of document.querySelectorAll(sel)) {
       if (e.offsetParent === null || ['checkbox', 'radio', 'hidden', 'file'].includes(e.type)) continue;
       const cs = getComputedStyle(e);
       const off = e.tagName === 'A' ? dark(cs.color) : light(cs.backgroundColor) || (e.tagName !== 'BUTTON' && dark(cs.color));
       if (off) bad.push(name + ': ' + e.tagName.toLowerCase() + '.' + e.className + ' "' + (e.textContent || e.placeholder || e.id || '').trim().slice(0, 30) + '" bg=' + cs.backgroundColor + ' color=' + cs.color);
     }
     return bad;
-  }, name);
+  }, [name, scope || '.tab-content.active']);
   let all = [];
   await p.goto(base + '/#settings');
   await p.waitForTimeout(1500);
@@ -42,6 +45,19 @@ const { chromium } = require('playwright');
     await p.click('#ssh-root [data-ssh-section="' + id + '"]');
     await p.waitForTimeout(800);
     all = all.concat(await audit('ssh-' + id));
+  }
+  // The Marketplace (Apps' + Add app) and a template's drawer.
+  await p.goto(base + '/#marketplace');
+  await p.waitForTimeout(1500);
+  if (!(await p.$('#mkt-root [data-mkt-card]'))) all.push('marketplace: no cards rendered');
+  else {
+    await p.click('#mkt-root [data-mkt-toggle="sso"]');
+    await p.waitForTimeout(300);
+    all = all.concat(await audit('marketplace'));
+    await p.click('#mkt-root [data-mkt-toggle="sso"]');
+    await p.click('#mkt-root [data-mkt-open]');
+    await p.waitForTimeout(800);
+    all = all.concat(await audit('mkt-drawer', '#mkt-drawer[open]'));
   }
   all = all.concat(errs.map(e => 'page error: ' + e));
   process.stdout.write(JSON.stringify(all));

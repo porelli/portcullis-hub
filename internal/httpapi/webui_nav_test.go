@@ -224,15 +224,13 @@ const PortcullisPeople = { href: f => 'https://people.example.org/' + (f || '') 
 function showTab(n) { calls.push(['showTab', n, n === 'access' ? accessView : n === 'settings' ? settingsView : null]); return true; }
 function openInstancePage(id, tab, opt) { calls.push(['instance', id, tab, opt]); }
 function openSettingsForm(kind, q) { calls.push(['form', kind, q.toString()]); }
-function filterMarketplace(k) { calls.push(['filter', k]); }
-function fillMarketplace() {}
 function setMarketplaceShown(on) { calls.push(['mktShown', on]); }
 function flash() {}
 ` + hubFunc(t, src, "peopleRedirect") + hubFunc(t, src, "oldAppLink") + hubFunc(t, src, "showMarketplace") + hubFunc(t, src, "showSettings") + block + hubFunc(t, src, "routeTo") + hubFunc(t, src, "routeHash") + `
+window.PortcullisMarketplace = { render: (root, o) => calls.push(['mkt', o]) };
 const out = {};
 function route(h) { calls.length = 0; location.hash = h; routeHash(); return JSON.parse(JSON.stringify(calls)); }
 for (const h of ['#access/vpn', '#access', '#access/ssh/grants', '#access/signins?user=alice', '#ssh', '#sources', '#marketplace?filter=mail', '#usage/storage', '#settings/network?add=example.org', '#settings/ssh', '#bogus', '']) out[h] = route(h);
-window.PortcullisMarketplace = { render: (root, o) => calls.push(['mkt', o]) };
 out['mkt+'] = route('#marketplace?filter=mail');
 out['mkt/'] = route('#marketplace/stalwart');
 process.stdout.write(JSON.stringify(out));
@@ -249,7 +247,7 @@ process.stdout.write(JSON.stringify(out));
 		"#access/signins?user=alice":        `[["showTab","access",{"section":"signins","sub":"","user":"alice"}]]`,
 		"#ssh":                              `[["showTab","apps",null]]`,
 		"#sources":                          `[["showTab","apps",null]]`,
-		"#marketplace?filter=mail":          `[["showTab","apps",null],["mktShown",true],["filter","mail"]]`,
+		"#marketplace?filter=mail":          `[["showTab","apps",null],["mktShown",true],["mkt",{"filter":"mail","open":""}]]`,
 		"#usage/storage":                    `[["showTab","usage",null]]`,
 		"#settings/network?add=example.org": `[["form","network","add=example.org"]]`,
 		"#settings/ssh":                     `[["showTab","settings",{"section":"ssh"}]]`,
