@@ -387,7 +387,7 @@ Each instance has its own page (`#apps/<id>`, or `#apps/<id>/<tab>` for a specif
 
 The File sharing tab appears only for templates with `person_secret` credentials (Samba, Time Machine), the VPN tab only for templates with a [`vpn:` block](../guides/manifest-reference.md#vpn) (Headscale).
 
-Every instance, including the default instance, gets the same page structure. Deep links from the old `#app/<id>/<tab>` format redirect to `#apps/<id>/<tab>`.
+Every instance, including the default instance, gets the same page structure, at `#apps/<id>/<tab>`.
 
 ### Settings
 
@@ -2052,7 +2052,16 @@ paths it concerns, and what a fix would do. Its buttons:
   that drifted), **Undo last fix…**, **Rebind…** (a LAN-only port, below);
 - **Explain**: the steps to do by hand, for anything risky (moving data,
   nested paths, custom-override mounts, hard links, host networking);
-- **Open setting**: the app's settings panel at the option;
+- **Open …**: a link to the page where the fix lives, opened in the Hub
+  (same tab). The label names it: **Open setting** (the app's Settings at
+  the option), **Open Mail tab**, **Open AI tab** or another tab of the
+  app, **Open app**, or a Hub page such as **Open Settings → Mail**,
+  **Open Settings → Storage**, **Open Access → SSH hosts** or **Open
+  Usage → Storage**. For example, "the mail provider's template changed"
+  links the wired mail provider's **Mail** tab, a DNS finding Settings →
+  Network, a shared-folder finding Settings → Storage and a worker server's
+  finding Settings → Servers. Findings about the host itself (the engine,
+  the Kubernetes cluster) or about one person have no link;
 - **Mute** with a reason. A muted finding moves to **Muted** and comes back
   by itself as soon as what it judged changes.
 
@@ -2271,10 +2280,11 @@ How to read the figures:
 - A host path or volume used by two apps is measured once and listed on
   both as shared, never counted twice.
 
-**Export:** each view has a CSV download (raw numbers; an empty cell when
-not measured). The same data is in the Portcullis MCP as `usage_overview`,
-`usage_instance`, `usage_storage`, `usage_storage_measure` and
-`usage_storage_op`.
+**Export:** each view has a CSV download, with a `server` column first
+(`primary` or a worker's id; raw numbers; an empty cell when
+not measured). The same data is in the Portcullis MCP as `usage_overview`
+(with `window`: `last`, the default, or `1h`), `usage_instance`,
+`usage_storage`, `usage_storage_measure` and `usage_storage_op`.
 
 ### Share
 
