@@ -109,7 +109,9 @@ func TestMCPAliasDaemonListShape(t *testing.T) {
 		rogue []string // app's aliases beyond its name
 		// unread: the companion's own inspect fails.
 		unread bool
-		want   string // "" = no drift
+		// other: oauthapp is enabled too, and the drift looked at is its.
+		other bool
+		want  string // "" = no drift
 	}{
 		{name: "match"},
 		{name: "unexpected on the app", rogue: []string{"portcullis-mcp-aiapp--evil"}, want: "app: unexpected network alias portcullis-mcp-aiapp--evil"},
@@ -120,10 +122,19 @@ func TestMCPAliasDaemonListShape(t *testing.T) {
 		{name: "names unread", extra: []daemonContainer{{id: "c7", name: "mystery", inspectErr: true}},
 			want: "can't read the network names of container mystery on portcullis-proxy"},
 		{name: "companion's names unread", unread: true, want: "tok-mcp: can't read network names"},
+		// Instance A's own container carrying instance B's alias: drift of B
+		// (A's own comparison is never what accepts or hides it).
+		{name: "A carries B's alias", other: true, rogue: []string{"portcullis-mcp-oauthapp--x"},
+			want: "container portcullis-aiapp-app-1 (not one of the instance's) answers network alias portcullis-mcp-oauthapp--x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newInstAIFixture(t, nil)
 			a.enable(t, "aiapp")
+			driftID := "aiapp"
+			if tc.other {
+				a.enable(t, "oauthapp")
+				driftID = "oauthapp"
+			}
 			if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
 				t.Fatal(err)
 			}
@@ -139,6 +150,16 @@ func TestMCPAliasDaemonListShape(t *testing.T) {
 				{id: "c2", name: "portcullis-aiapp-tok-mcp-1", aliases: []string{"tok-mcp", "portcullis-mcp-aiapp--tok"}, inspectErr: tc.unread,
 					labels: map[string]string{docker.LabelProject: "portcullis-aiapp", docker.LabelService: "tok-mcp", docker.LabelNumber: "1"}},
 			}
+			if tc.other {
+				a.h.mu.RLock()
+				ow, _ := a.h.desiredRouteLabelsLocked(a.h.findLocked("oauthapp"))
+				a.h.mu.RUnlock()
+				ol := map[string]string{docker.LabelProject: "portcullis-oauthapp", docker.LabelService: "web", docker.LabelNumber: "1"}
+				for k, v := range ow["web"] {
+					ol[k] = v
+				}
+				cs = append(cs, daemonContainer{id: "c5", name: "portcullis-oauthapp-web-1", labels: ol, aliases: []string{"web"}})
+			}
 			for _, x := range tc.extra {
 				x.labels = map[string]string{}
 				if x.project != "" {
@@ -149,7 +170,7 @@ func TestMCPAliasDaemonListShape(t *testing.T) {
 			useDaemonShape(t, a, cs)
 			var msg string
 			for _, d := range a.h.Reconcile(context.Background()).Items {
-				if d.ID == "aiapp" && d.Kind == DriftPublicAccess {
+				if d.ID == driftID && d.Kind == DriftPublicAccess {
 					msg = d.Message
 				}
 			}

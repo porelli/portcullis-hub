@@ -297,7 +297,6 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		// namesUnread: its names couldn't be read (never clean).
 		mcpAliases  []string
 		namesUnread bool
-		cid         string
 	}
 	var live []running
 	mcpNames := func(c runtime.Unit) []string {
@@ -345,7 +344,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 				if _, ok := c.Labels["traefik.http.routers."+PublicRouterName(id)+".rule"]; ok {
 					havePublic[id] = true
 				}
-				live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, mcpNames(c), c.NamesUnread, c.ID})
+				live = append(live, running{id, c.Labels[docker.LabelService], c.Labels, mcpNames(c), c.NamesUnread})
 			}
 			continue
 		}
@@ -404,7 +403,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			// A done job is not "live" for exposure drift (it serves
 			// nothing), nor a worker's unit (its relays are, above).
 			if !isDoneJob && unitRT[ci] == nil {
-				live = append(live, running{id, service, c.Labels, mcpNames(c), c.NamesUnread, c.ID})
+				live = append(live, running{id, service, c.Labels, mcpNames(c), c.NamesUnread})
 			}
 		}
 		if !uncounted {
@@ -499,14 +498,10 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	// generate now — a widened rule, a dropped exclusion, a missing
 	// middleware or a stale router all count.
 	exposureDiff := map[string]string{}
-	aliasChecked := map[string]bool{} // container id → its aliases compared below
 	for _, c := range live {
 		want, ok := desired[c.id]
 		if !ok {
 			continue
-		}
-		if _, ok := mcpAliases[c.id]; ok {
-			aliasChecked[c.cid] = true
 		}
 		if d := diffExposure(c.id, want[c.service], c.labels, signInSet[c.id]); d != "" && exposureDiff[c.id] == "" {
 			exposureDiff[c.id] = c.service + ": " + d
@@ -548,12 +543,15 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			}
 		}
 	}
-	// Any other live container on the primary's portcullis-proxy (outside
-	// a compose project, a disabled instance's, a one-off, one whose
-	// labels can't be rendered) answering an enabled instance's
-	// portcullis-mcp-<id>-- alias impersonates its companions: drift of
-	// that instance. One whose names can't be read could: drift of every
-	// enabled instance with companions on (fail closed).
+	// Every live container on the primary's portcullis-proxy — the
+	// instance's own, another instance's, a disabled instance's, a
+	// one-off, one outside any compose project — is scanned: each
+	// portcullis-mcp-<id>-- alias belongs to the enabled instance it names
+	// and is accepted only when that instance renders it for exactly this
+	// container's project and service; anything else is drift of that
+	// instance (impersonating its companions). One whose names can't be
+	// read could carry any: drift of every enabled instance with
+	// companions on (fail closed).
 	if !h.kubeOn() {
 		ids := make([]string, 0, len(mcpAliases))
 		for id := range mcpAliases {
@@ -563,7 +561,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		sort.Slice(ids, func(i, j int) bool { return len(ids[i]) > len(ids[j]) || len(ids[i]) == len(ids[j]) && ids[i] < ids[j] })
 		for ci := 0; ci < len(unitRT) && ci < len(cs); ci++ {
 			c := cs[ci]
-			if unitRT[ci] != nil || aliasChecked[c.ID] || (c.State != "running" && c.State != "restarting") {
+			if unitRT[ci] != nil || (c.State != "running" && c.State != "restarting") {
 				continue
 			}
 			if _, on := c.Networks[aiProxyNetwork]; !on {
@@ -580,12 +578,21 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 			}
 			for _, a := range mcpNames(c) {
 				for _, id := range ids {
-					if strings.HasPrefix(a, templates.MCPNamePrefix+strings.ToLower(id)+"--") {
-						if exposureDiff[id] == "" {
+					if !strings.HasPrefix(a, templates.MCPNamePrefix+strings.ToLower(id)+"--") {
+						continue
+					}
+					own := c.Project == projectName(id) && c.Labels[docker.LabelOneoff] != "True"
+					if own && mcpAliases[id][c.Service][a] {
+						break // rendered for exactly this service
+					}
+					if exposureDiff[id] == "" {
+						if own {
+							exposureDiff[id] = c.Service + ": unexpected network alias " + a
+						} else {
 							exposureDiff[id] = "container " + name + " (not one of the instance's) answers network alias " + a
 						}
-						break
 					}
+					break
 				}
 			}
 		}
