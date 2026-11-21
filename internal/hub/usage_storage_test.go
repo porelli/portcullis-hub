@@ -17,6 +17,7 @@ import (
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
+	"github.com/portcullis/hub/internal/usage"
 )
 
 type recAudit struct {
@@ -708,5 +709,132 @@ func TestStorageDiskUsesLiveFreeSpace(t *testing.T) {
 		if d.Dev == dev && (d.TotalBytes != total || d.FreeBytes == 1) {
 			t.Errorf("disk %d = free %d of %d, want the live statfs (total %d)", dev, d.FreeBytes, d.TotalBytes, total)
 		}
+	}
+}
+
+// storageItems are instance's items keyed "<kind>:<target>".
+func storageItems(h *Hub, instance string) map[string]StorageItem {
+	out := map[string]StorageItem{}
+	if g := h.usageStorageGroup(instance); g != nil {
+		for _, it := range g.Items {
+			out[it.Kind+":"+it.Target] = it
+		}
+	}
+	return out
+}
+
+// TestStorageItemServices (contract §11.11, ux3): volume and bind items
+// name the containers that mount them (sorted "<service>.<number>", the
+// owner's only, from the sampler's inspects); layers, images, folders and
+// Hub-managed files have none.
+func TestStorageItemServices(t *testing.T) {
+	e := newStorageEnv(t)
+	a1, a2, b1 := uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "worker", 1, "running"), uunit("b1", "portcullis-b", "web", 1, "running")
+	a1.Image, a2.Image, b1.Image = "img-a", "img-a", "img-shared"
+	core := uunit("pg", "portcullis", "postgres", 1, "running")
+	e.setUnits(a1, a2, b1, core)
+	e.rt.Lock()
+	e.rt.Infos = map[string]runtime.UnitInfo{
+		"a1": {ID: "a1", Mounts: []runtime.Mount{{Type: "volume", Name: "portcullis-a_data", Source: "/var/lib/docker/volumes/portcullis-a_data/_data", Destination: "/data"},
+			{Type: "bind", Source: "/srv/data/shared", Destination: "/s"}, {Type: "bind", Source: "/srv/media/a", Destination: "/m"}}},
+		"a2": {ID: "a2", Mounts: []runtime.Mount{{Type: "volume", Name: "portcullis-a_data", Destination: "/data"}}},
+		"b1": {ID: "b1", Mounts: []runtime.Mount{{Type: "bind", Source: "/srv/data/shared", Destination: "/s"}}},
+		"pg": {ID: "pg", Mounts: []runtime.Mount{{Type: "volume", Name: "portcullis_postgres_data", Destination: "/var/lib/postgresql/data"}}},
+	}
+	e.rt.Unlock()
+	for _, id := range []string{"a1", "a2", "b1", "pg"} {
+		e.stats(id, 1, 1)
+	}
+	e.clock.Add(usage.InspectEvery)
+	e.sweep()
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	items := storageItems(e.h, "a")
+	if got := items["volume:portcullis-a_data"].Services; !slices.Equal(got, []string{"web.1", "worker.1"}) {
+		t.Errorf("volume services = %q", got)
+	}
+	if got := items["bind:/srv/data/shared"].Services; !slices.Equal(got, []string{"web.1"}) {
+		t.Errorf("bind services = %q", got)
+	}
+	// Never-mounted volume: no services.
+	if got := items["volume:portcullis-a_cache"].Services; got != nil {
+		t.Errorf("unmounted volume services = %q", got)
+	}
+	for k, it := range items {
+		if (it.Kind == "layer" || it.Kind == "image" || it.Kind == "folder" || it.Kind == "hub_files") && it.Services != nil {
+			t.Errorf("%s has services %q", k, it.Services)
+		}
+	}
+	if l, ok := items["layer:web.1"]; !ok || l.Services != nil {
+		t.Errorf("layer = %+v", l)
+	}
+	// b's view of the shared bind names b's container only.
+	if got := storageItems(e.h, "b")["bind:/srv/data/shared"].Services; !slices.Equal(got, []string{"web.1"}) {
+		t.Errorf("b's bind services = %q", got)
+	}
+	// Core's items: core's containers.
+	v := e.h.UsageStorage()
+	for _, it := range v.Core {
+		if it.Target == "portcullis_postgres_data" && !slices.Equal(it.Services, []string{"postgres.1"}) {
+			t.Errorf("core volume services = %q", it.Services)
+		}
+	}
+	b, _ := json.Marshal(v)
+	if !strings.Contains(string(b), `"services":["web.1","worker.1"]`) {
+		t.Errorf("JSON has no services: %s", b)
+	}
+}
+
+// TestStorageItemDev: a measured item carries its report's dev; a
+// never-measured (or failed) one omits it.
+func TestStorageItemDev(t *testing.T) {
+	e := newStorageEnv(t)
+	e.rep = func(r fixerRun) (*folderfix.Report, error) {
+		if r.Volume.Name == "portcullis-a_cache" {
+			return nil, errors.New("boom")
+		}
+		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10, Dev: 7, FreeBytes: 50, TotalBytes: 100}, nil
+	}
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	items := storageItems(e.h, "a")
+	if d := items["volume:portcullis-a_data"].Dev; d == nil || *d != 7 {
+		t.Errorf("measured dev = %v", d)
+	}
+	if d := items["volume:portcullis-a_cache"].Dev; d != nil {
+		t.Errorf("failed dev = %v", *d)
+	}
+	for k, it := range items {
+		if (it.Kind == "layer" || it.Kind == "image" || it.Kind == "hub_files") && it.Dev != nil {
+			t.Errorf("%s has dev %d", k, *it.Dev)
+		}
+	}
+	b, _ := json.Marshal(e.h.usageStorageGroup("a"))
+	if !strings.Contains(string(b), `"dev":7`) || strings.Count(string(b), `"dev":`) != 2 {
+		t.Errorf("JSON dev: %s", b)
+	}
+}
+
+// TestStorageDisksServer: every disk names its server (the primary's
+// here; workers: Task 10).
+func TestStorageDisksServer(t *testing.T) {
+	e := newStorageEnv(t)
+	if _, _, err := e.measure(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	v := e.h.UsageStorage()
+	if len(v.Disks) == 0 {
+		t.Fatal("no disk")
+	}
+	for _, d := range v.Disks {
+		if d.Server != "primary" {
+			t.Errorf("disk %d server %q", d.Dev, d.Server)
+		}
+	}
+	b, _ := json.Marshal(v)
+	if !strings.Contains(string(b), `"server":"primary"`) {
+		t.Errorf("JSON: %s", b)
 	}
 }

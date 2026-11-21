@@ -29,6 +29,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -616,6 +617,8 @@ type FolderStorage struct {
 
 // DiskView is one filesystem.
 type DiskView struct {
+	// Server: the server it is on ("primary"; workers: Task 10).
+	Server      string   `json:"server"`
 	Dev         uint64   `json:"dev"`
 	FreeBytes   uint64   `json:"free_bytes"`
 	TotalBytes  uint64   `json:"total_bytes"`
@@ -644,9 +647,33 @@ func (h *Hub) storageModel() StorageView {
 	h.mu.RLock()
 	folders := maps.Clone(h.st.Folders)
 	h.mu.RUnlock()
+	// mounters: "<owner>\x00<kind>:<target>" → the owner's containers
+	// that mount it ("<service>.<number>"), for the items' services.
+	mounters := map[string][]string{}
 	s := h.usage
 	s.mu.RLock()
 	for _, c := range s.conts {
+		if c.Kind != usageApp && c.Kind != usageCore {
+			continue
+		}
+		owner := c.Group
+		if c.Kind == usageCore {
+			owner = usageCoreOwner
+		}
+		for _, m := range c.Mounts {
+			var k string
+			switch {
+			case m.Type == "volume" && m.Name != "":
+				k = owner + "\x00volume:" + m.Name
+			case m.Type == "bind" && m.Source != "":
+				k = owner + "\x00bind:" + m.Source
+			default:
+				continue
+			}
+			if svc := usageKey(c.Service, c.Number); !slices.Contains(mounters[k], svc) {
+				mounters[k] = append(mounters[k], svc)
+			}
+		}
 		if c.Kind != usageApp {
 			continue
 		}
@@ -699,7 +726,17 @@ func (h *Hub) storageModel() StorageView {
 	itemOf := func(e storageEntry, owner string) StorageItem {
 		t := e.MeasuredAt
 		it := StorageItem{Target: e.Target, Kind: e.Kind, Owner: owner, AllocBytes: e.AllocBytes, ApparentBytes: e.ApparentBytes,
-			Partial: e.Partial, PartialReason: e.PartialReason, MeasuredAt: &t, DurationMS: e.DurationMS, Error: e.Error, Dev: e.Dev}
+			Partial: e.Partial, PartialReason: e.PartialReason, MeasuredAt: &t, DurationMS: e.DurationMS, Error: e.Error}
+		if e.Kind == "volume" || e.Kind == "bind" {
+			// A report's dev: only a measured volume or bind has one.
+			if e.Error == "" && e.AllocBytes != nil && e.Total > 0 {
+				dev := e.Dev
+				it.Dev = &dev
+			}
+			if ss := mounters[owner+"\x00"+e.Kind+":"+e.Target]; len(ss) > 0 {
+				it.Services = slices.Sorted(slices.Values(ss))
+			}
+		}
 		if e.Kind == "bind" {
 			it.Path = e.Target
 		}
@@ -725,8 +762,14 @@ func (h *Hub) storageModel() StorageView {
 				continue
 			}
 			fs := h.folderStorage(fid, folders[fid], folderScan, folderUsers[fid])
-			g.Items = append(g.Items, StorageItem{Target: fid, Kind: "folder", Owner: id, AllocBytes: fs.AllocBytes, Partial: fs.Partial,
-				MeasuredAt: fs.MeasuredAt, InTotal: false, Shared: without(folderUsers[fid], id)})
+			it := StorageItem{Target: fid, Kind: "folder", Owner: id, AllocBytes: fs.AllocBytes, Partial: fs.Partial,
+				MeasuredAt: fs.MeasuredAt, InTotal: false, Shared: without(folderUsers[fid], id)}
+			// The doctor's scan report names the folder's filesystem.
+			if sc, ok := folderScan[fid]; ok && sc.Report != nil && sc.Report.TotalBytes > 0 {
+				dev := sc.Report.Dev
+				it.Dev = &dev
+			}
+			g.Items = append(g.Items, it)
 		}
 		g.Items = append(g.Items, StorageItem{Target: "Hub-managed files", Kind: "hub_files", Owner: id})
 		var sum int64
@@ -786,7 +829,7 @@ func (h *Hub) storageModel() StorageView {
 		if d.total > 0 {
 			used = 100 * float64(d.total-min(d.free, d.total)) / float64(d.total)
 		}
-		v.Disks = append(v.Disks, DiskView{Dev: dev, FreeBytes: d.free, TotalBytes: d.total, UsedPercent: used, Owners: owners, path: d.path})
+		v.Disks = append(v.Disks, DiskView{Server: servers.PrimaryID, Dev: dev, FreeBytes: d.free, TotalBytes: d.total, UsedPercent: used, Owners: owners, path: d.path})
 	}
 	return v
 }

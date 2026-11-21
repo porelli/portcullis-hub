@@ -482,18 +482,22 @@ type StorageGroup struct {
 
 // StorageItem is one measured (or listed) target.
 type StorageItem struct {
-	Target        string     `json:"target"`
-	Kind          string     `json:"kind"` // volume | bind | folder | layer | image | hub_files
-	Owner         string     `json:"owner"`
-	AllocBytes    *int64     `json:"alloc_bytes"`
-	ApparentBytes *int64     `json:"apparent_bytes"`
-	Partial       bool       `json:"partial"`
-	PartialReason string     `json:"partial_reason"`
-	InTotal       bool       `json:"in_total"`
-	Shared        []string   `json:"shared_with,omitempty"`
-	Dev           uint64     `json:"-"`
-	Path          string     `json:"-"`
-	MeasuredAt    *time.Time `json:"measured_at"`
-	DurationMS    int64      `json:"duration_ms"`
-	Error         string     `json:"error,omitempty"`
+	Target        string   `json:"target"`
+	Kind          string   `json:"kind"` // volume | bind | folder | layer | image | hub_files
+	Owner         string   `json:"owner"`
+	AllocBytes    *int64   `json:"alloc_bytes"`
+	ApparentBytes *int64   `json:"apparent_bytes"`
+	Partial       bool     `json:"partial"`
+	PartialReason string   `json:"partial_reason"`
+	InTotal       bool     `json:"in_total"`
+	Shared        []string `json:"shared_with,omitempty"`
+	// Dev: the filesystem its measurement's report named (nil: unknown,
+	// never measured); Services: the containers that mount it (volume
+	// and bind items only, sorted "<service>.<number>", the owner's).
+	Dev        *uint64    `json:"dev,omitempty"`
+	Services   []string   `json:"services,omitempty"`
+	Path       string     `json:"-"`
+	MeasuredAt *time.Time `json:"measured_at"`
+	DurationMS int64      `json:"duration_ms"`
+	Error      string     `json:"error,omitempty"`
 }
