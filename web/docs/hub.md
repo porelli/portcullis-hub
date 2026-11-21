@@ -384,7 +384,7 @@ Input validation:
 
 The **Overview** tab shows:
 
-- **Auth notes** (how the app enforces auth, from the template)
+- **Auth notes** (how the app enforces auth, from the template's `auth.notes`): Markdown the Hub renders and sanitises server-side, so lists, code and links show as such; raw HTML and images in the notes are never shown ([contract §3](../guides/integration-contracts.md))
 - **Addresses**: each hostname as a link, editable (see [Changing hostnames](#changing-hostnames) below)
 - **Access** ([VPN-only access](vpn.md#several-vpns-and-through)):
   **Reachable from** *the internet (default)* or *only Portcullis VPNs*;

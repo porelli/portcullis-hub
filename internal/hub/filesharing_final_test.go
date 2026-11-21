@@ -355,24 +355,28 @@ func TestRequiresAnyOnlyTouchedKeys(t *testing.T) {
 	settle(c.f)
 }
 
-// H12 (B-M6, C-M4): a router-less entry's note is the first paragraph
-// of auth.notes (≤ 300 runes), else "No web page."; always present.
+// H12 (B-M6, C-M4): a router-less entry's note is the first Markdown
+// paragraph of auth.notes as plain text (≤ 300 runes), else "No web
+// page."; always present. note_html is the same paragraph, sanitised.
 func TestPortalNoteFirstParagraph(t *testing.T) {
 	for _, tc := range []struct{ notes, want string }{
 		{"", "No web page."},
 		{"File sharing over SMB.\nConnect from Finder.\n\nOperators: cap_drop ALL, runit.", "File sharing over SMB. Connect from Finder."},
-		{"  \n\nSecond only.", "No web page."},
+		{"  \n\nSecond only.", "Second only."},
+		{"# Heading\n\nThe *real* `summary`.\n\nMore.", "The real summary."},
+		{"- a list\n- only", "No web page."},
+		{"<b>x</b> SMB.", "x SMB."},
 		{strings.Repeat("x", 301), "No web page."},
 		{strings.Repeat("é", 300) + "\n\nmore", strings.Repeat("é", 300)},
 	} {
-		if got := portalNote(tc.notes); got != tc.want {
+		if got, _ := portalNote(tc.notes); got != tc.want {
 			t.Errorf("portalNote(%q) = %q, want %q", clip(tc.notes, 40), got, tc.want)
 		}
 	}
 	c := credSvcFixture(t)
 	for _, a := range c.f.h.Portal().Apps {
-		if a.ID == smbID && a.Note != "No web page: file sharing over SMB." {
-			t.Errorf("portal note = %q", a.Note)
+		if a.ID == smbID && (a.Note != "No web page: file sharing over SMB." || a.NoteHTML != "<p>No web page: file sharing over SMB.</p>") {
+			t.Errorf("portal note = %q, note_html = %q", a.Note, a.NoteHTML)
 		}
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/portcullis/hub/internal/notes"
 )
 
 // Discover loads every valid template directly under dir. Invalid templates
@@ -79,6 +81,7 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := ValidateManifest(&m); err != nil {
 		return Template{}, err
 	}
+	m.Auth.NotesHTML = notes.HTML(m.Auth.Notes)
 	if compose == nil {
 		return Template{}, fmt.Errorf("no compose.yml")
 	}

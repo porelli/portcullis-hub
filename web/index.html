@@ -113,6 +113,19 @@
     .port-inputs .port-host { font-family: monospace; text-align: center; }
     .port-hint { display: block; margin-top: 0.25rem; color: #64748b; font-size: 0.7rem; }
     .auth-notes { color: #94a3b8; font-size: 0.8125rem; background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 3px solid #3b82f6; }
+    .auth-notes > :first-child { margin-top: 0; }
+    .auth-notes > :last-child { margin-bottom: 0; }
+    .auth-notes p, .auth-notes ul, .auth-notes ol, .auth-notes blockquote, .auth-notes pre, .auth-notes table { margin: 0 0 0.5rem; }
+    .auth-notes ul, .auth-notes ol { padding-left: 1.25rem; }
+    .auth-notes li { margin: 0.125rem 0; }
+    .auth-notes h1, .auth-notes h2, .auth-notes h3, .auth-notes h4, .auth-notes h5, .auth-notes h6 { font-size: 0.875rem; color: #cbd5e1; margin: 0.75rem 0 0.25rem; }
+    .auth-notes code { background: #1e293b; padding: 0.05rem 0.3rem; border-radius: 0.25rem; font-size: 0.75rem; overflow-wrap: anywhere; }
+    .auth-notes pre { background: #1e293b; padding: 0.5rem; border-radius: 0.25rem; overflow-x: auto; }
+    .auth-notes pre code { background: none; padding: 0; }
+    .auth-notes a { color: #60a5fa; }
+    .auth-notes blockquote { border-left: 2px solid #334155; padding-left: 0.75rem; }
+    .auth-notes table { border-collapse: collapse; }
+    .auth-notes th, .auth-notes td { border: 1px solid #334155; padding: 0.25rem 0.5rem; }
 
     /* Sign-in / public / AI blocks */
     .policy-section { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; margin-bottom: 1rem; }
@@ -3930,13 +3943,15 @@
     async function renderOverview(id, pane) {
       const inst = pageCtx.inst;
       const t = catalogCache && catalogCache[inst.template];
-      const notes = t && t.manifest.auth && t.manifest.auth.notes;
+      // notes_html: auth.notes (Markdown) rendered and sanitised by the
+      // Hub (internal/notes); the raw notes are never inserted as HTML.
+      const notesHtml = t && t.manifest.auth && t.manifest.auth.notes_html;
       const bound = inst.groups_mode === 'existing';
       let h = '';
       if (inst.error) h += '<div class="op-msg inst-error">' + escapeHtml(inst.error) + '</div>';
       if (inst.state === 'deleting') h += '<div class="public-warn">A delete stopped part-way: <button type="button" class="opp-link" data-page-tab-go="delete">open Delete</button> to finish it (the first backup is kept).</div>';
       if (inst.state === 'restoring') h += '<div class="public-warn">A restore didn\'t finish: restore it again from <button type="button" class="opp-link" data-page-tab-go="backups">Backups</button> (its pre-restore backup is put back first).</div>';
-      if (notes) h += '<div class="auth-notes">' + escapeHtml(notes) + '</div>';
+      if (notesHtml) h += '<div class="auth-notes">' + notesHtml + '</div>';
       // Runtime compatibility (contract §11.10): the instance's own verdict.
       const rlBadge = compatBadge(inst.compat);
       if (rlBadge) {

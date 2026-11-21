@@ -39,8 +39,12 @@ type Auth struct {
 	// access_group). Every client of an enforced app has direct access
 	// grants, implicit flow, service accounts, device/CIBA grants and
 	// standard token exchange switched off: only the browser flow signs in.
-	KeycloakAccessRole bool   `yaml:"keycloak_access_role" json:"keycloak_access_role,omitempty"`
-	Notes              string `yaml:"notes" json:"notes"`
+	KeycloakAccessRole bool `yaml:"keycloak_access_role" json:"keycloak_access_role,omitempty"`
+	// Notes is Markdown (contract §3); NotesHTML is it rendered and
+	// sanitised server-side (internal/notes) when the template is built.
+	// The UI inserts only NotesHTML, never Notes. Never read from YAML.
+	Notes     string `yaml:"notes" json:"notes"`
+	NotesHTML string `yaml:"-" json:"notes_html,omitempty"`
 }
 
 // NativeLogin is auth.native_login (method custom only).
