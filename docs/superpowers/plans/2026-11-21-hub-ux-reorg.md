@@ -713,3 +713,8 @@ Start after both land.
   All must pass.
 - [ ] **Step 5: Whole-UI Playwright pass.** Open every top tab and every subtab at 1400×900, plus three at 390 px. Check: no console errors; no element wider than the viewport; and keyboard navigation reaches the tab bar, the Settings subtabs, the Marketplace chips and the donut slices. Save the screenshots and send them with the final review.
 - [ ] **Step 6:** Commit each repo path-only (`docs: Hub reorganisation (ux3)`, `CLAUDE.md: …`). Request the whole-branch review (`superpowers:requesting-code-review`) with Review Focus 1–5 as its checklist.
+
+## Controller rulings (2026-11-21)
+
+- **Logos: no hand-rolled SVG sanitiser.** Logos (and screenshots) are only ever shown through `<img>` (never inline, never `<object>`/`<embed>`), served from `/api/catalog/{id}/…` with `Content-Type: image/svg+xml` (or png/webp for screenshots), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`, and `Content-Disposition: inline; filename=…`. Browsers never run script in an SVG loaded as an image; the CSP+sandbox covers direct navigation. The validators (Hub + `validate.py` with `defusedxml`) still refuse obvious script/event/foreign-object content and external references as a lint, and cap size (64 KiB logo, 512 KiB screenshot), but they are not the security boundary. Task 4 is rewritten accordingly.
+- Homepage = `links.website` ACCEPTED; screenshots built but empty ACCEPTED; host figures from `/proc` ACCEPTED; no host-wide network "other" ACCEPTED; `UsageView.hosts` replaces `host` (no back-compat) ACCEPTED; no redirects for `#ssh`/`#sources` but every internal link updated ACCEPTED.
