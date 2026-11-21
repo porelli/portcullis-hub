@@ -91,6 +91,9 @@ type APIConfig struct {
 	DiskFree func(ctx context.Context) (free int64, ok bool)
 	// Images records and sweeps preflight pulls (nil: neither).
 	Images Images
+	// ProcDir / SysDir: the procfs and sysfs GET /v1/host/usage reads
+	// ("": /proc and /sys, the agent container's own; tests).
+	ProcDir, SysDir string
 	// AppfilesGID is the group of the instances' data files and their
 	// directories (the primary's: the Hub's 10001, HubGID; apps read them
 	// through group_add). 0: none (tests); the agent's container has the
@@ -209,6 +212,10 @@ func (a *API) routes() {
 	h(R["ExecRunning"][0], a.execRunning)
 	h(R["Signal"][0], a.withContainer(a.signal))
 	h(R["Events"][0], a.events)
+	h(R["Stats"][0], a.withContainer(a.stats))
+	h(R["LayerSize"][0], a.withContainer(a.layerSize))
+	h(R["ImageSize"][0], a.imageSize)
+	h(X["HostUsage"], a.hostUsage)
 	h(R["ListVolumes"][0], a.listVolumes)
 	h(R["InspectVolume"][0], a.inspectVolume)
 	h(R["CreateVolume"][0], a.createVolume)
@@ -262,7 +269,7 @@ func (a *API) inScope(labels map[string]string) (string, bool) {
 		switch {
 		case b[v]:
 			return v, true // a volume helper for a bundled instance
-		case strings.HasPrefix(v, "folder:") || v == "path-check":
+		case strings.HasPrefix(v, "folder:") || strings.HasPrefix(v, "usage:") || v == "path-check":
 			return "", true // the agent's own fixer runs
 		}
 	}

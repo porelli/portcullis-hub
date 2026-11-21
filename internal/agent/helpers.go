@@ -57,13 +57,15 @@ func (a *API) createHelper(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "not a fixed helper: folder_fix takes its spec only")
 			return
 		}
-		if _, err := fixerspec.Rebuild(*req.Spec, AgentBinary, a.cfg.BindRoots, a.protected()...); err != nil {
+		if _, err := fixerspec.Rebuild(*req.Spec, AgentBinary, a.cfg.BindRoots, a.usageVolumeInScope(r.Context(), req.Spec), a.protected()...); err != nil {
 			writeError(w, http.StatusForbidden, clipMsg(err.Error()))
 			return
 		}
-		if err := walkNoSymlink(nil, a.cfg.BindRoots, req.Spec.Binds[0].Source); err != nil {
-			writeError(w, http.StatusForbidden, "not a fixed helper: "+clipMsg(err.Error()))
-			return
+		if src, ok := fixerBind(req.Spec); ok {
+			if err := walkNoSymlink(nil, a.cfg.BindRoots, src); err != nil {
+				writeError(w, http.StatusForbidden, "not a fixed helper: "+clipMsg(err.Error()))
+				return
+			}
 		}
 		if a.cfg.SelfImage == "" {
 			writeError(w, http.StatusServiceUnavailable, "the agent's own image is unknown: the fixer can't run")
@@ -197,9 +199,15 @@ func (a *API) helperRun(w http.ResponseWriter, r *http.Request) {
 		defer f.Close()
 		in = f
 	}
-	// The folder again, right before the run (C4).
-	if err := walkNoSymlink(nil, a.cfg.BindRoots, h.spec.Spec.Binds[0].Source); err != nil {
-		writeError(w, http.StatusConflict, clipMsg(err.Error()))
+	// The folder again, right before the run (C4); a usage volume's owner
+	// again too.
+	if src, ok := fixerBind(h.spec.Spec); ok {
+		if err := walkNoSymlink(nil, a.cfg.BindRoots, src); err != nil {
+			writeError(w, http.StatusConflict, clipMsg(err.Error()))
+			return
+		}
+	} else if v := h.spec.Spec.Volumes; len(v) != 1 || !a.usageVolumeInScope(r.Context(), h.spec.Spec)(v[0].Name) {
+		writeError(w, http.StatusConflict, "the volume is no longer a bundled project's")
 		return
 	}
 	spec := h.spec.Spec.Runtime(a.cfg.SelfImage, in)

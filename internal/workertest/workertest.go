@@ -103,6 +103,9 @@ type Opts struct {
 	Info func(context.Context) (agentapi.Info, error)
 	// HelperImage is the agent's pinned helper image.
 	HelperImage string
+	// ProcDir / SysDir: the agent's procfs and sysfs (GET /v1/host/usage;
+	// "": /proc and /sys).
+	ProcDir, SysDir string
 }
 
 // Worker is one in-process worker.
@@ -129,6 +132,7 @@ type fault struct {
 	msg    string
 	hook   func(r *http.Request)
 	drop   bool // the connection drops (no answer)
+	body   []byte
 }
 
 // DefaultHelperImage is the harness agent's helper image: the one the
@@ -179,7 +183,7 @@ func NewWorker(t testing.TB, o Opts) *Worker {
 	engine := &runtimetest.Fake{Infos: map[string]runtime.UnitInfo{}, Volumes: map[string]runtime.Volume{}, LogsVal: map[string][]byte{},
 		States: map[string]runtime.State{}, Contents: map[string][]byte{}, DownRemovesUnits: true}
 	api := wagent.NewAPI(wagent.APIConfig{DataDir: data, BindRoots: o.BindRoots, Runtime: engine, SelfImage: "sha256:agent", Config: agenttest.Config,
-		HelperImage: o.HelperImage})
+		HelperImage: o.HelperImage, ProcDir: o.ProcDir, SysDir: o.SysDir})
 	// The info cmd/portcullis-agent serves: the engine's part, plus the
 	// API's live quarantine (and its save error).
 	engineInfo := o.Info
@@ -234,7 +238,11 @@ func (w *Worker) middleware(next http.Handler) http.Handler {
 			if hit.status != 0 {
 				rw.Header().Set("Content-Type", "application/json")
 				rw.WriteHeader(hit.status)
-				rw.Write(agentapi.ErrorBody(hit.msg))
+				if hit.body != nil {
+					rw.Write(hit.body)
+				} else {
+					rw.Write(agentapi.ErrorBody(hit.msg))
+				}
 				return
 			}
 		}
@@ -249,6 +257,15 @@ func (w *Worker) Fail(pattern string, times, status int, msg string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.faults = append(w.faults, &fault{re: regexp.MustCompile(pattern), times: times, status: status, msg: msg})
+}
+
+// Respond answers the next times requests matching pattern with status
+// and body as is (an agent's untrusted answer), without reaching the
+// agent.
+func (w *Worker) Respond(pattern string, times, status int, body []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.faults = append(w.faults, &fault{re: regexp.MustCompile(pattern), times: times, status: status, body: body})
 }
 
 // Hook runs fn on the next times matching requests, then lets them through.

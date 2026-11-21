@@ -11,8 +11,8 @@ import (
 
 // TestRoutesCoverInstances: one route per runtime.Instances method but
 // Kind, Env and RestartService (the backend answers them: core never
-// runs on a worker) and the usage verbs Stats, LayerSize and ImageSize
-// (not measured on a worker), no route for anything else, every pattern unique and
+// runs on a worker; the usage verbs Stats, LayerSize and ImageSize have
+// routes since ux3), no route for anything else, every pattern unique and
 // valid for http.ServeMux (with the extra routes).
 func TestRoutesCoverInstances(t *testing.T) {
 	it := reflect.TypeFor[runtime.Instances]()
@@ -25,7 +25,7 @@ func TestRoutesCoverInstances(t *testing.T) {
 	}
 	for m := range methods {
 		_, ok := Routes[m]
-		if m == "Kind" || m == "Env" || m == "RestartService" || m == "Stats" || m == "LayerSize" || m == "ImageSize" {
+		if m == "Kind" || m == "Env" || m == "RestartService" {
 			if ok {
 				t.Errorf("%s has a route (the backend answers it)", m)
 			}
@@ -40,8 +40,17 @@ func TestRoutesCoverInstances(t *testing.T) {
 			t.Errorf("route %s names no runtime.Instances method", m)
 		}
 	}
-	if len(Routes) != 24 {
-		t.Errorf("%d methods with routes, want 24", len(Routes))
+	if len(Routes) != 27 {
+		t.Errorf("%d methods with routes, want 27", len(Routes))
+	}
+	// The usage routes (contract §17.4, ux3).
+	for m, want := range map[string]string{"Stats": "GET /v1/containers/{cid}/stats", "LayerSize": "GET /v1/containers/{cid}/size", "ImageSize": "GET /v1/images/size"} {
+		if rs := Routes[m]; len(rs) != 1 || rs[0].Pattern() != want || rs[0].Response != BodyJSON {
+			t.Errorf("%s routes = %+v", m, rs)
+		}
+	}
+	if r := ExtraRoutes["HostUsage"]; r.Pattern() != "GET /v1/host/usage" || r.Response != BodyJSON {
+		t.Errorf("HostUsage = %+v", r)
 	}
 	mux := http.NewServeMux()
 	seen := map[string]string{}

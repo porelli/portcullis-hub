@@ -423,18 +423,95 @@ func TestCreateVolumeRefusalIs409(t *testing.T) {
 	}
 }
 
-// The usage verbs have no agent route: a worker's containers are not
-// measured, never a guessed figure.
-func TestUsageVerbsNotMeasured(t *testing.T) {
-	var b *agentrt.Backend
-	var nm *runtime.NotMeasuredError
-	if _, err := b.Stats(context.Background(), "c"); !errors.As(err, &nm) || nm.Why != "not measured on a worker server yet" {
-		t.Errorf("Stats: %v", err)
+// TestBackendUsageRoutes: Stats, LayerSize, ImageSize and HostUsage reach
+// the worker through their routes (contract §17.4, ux3), end to end.
+func TestBackendUsageRoutes(t *testing.T) {
+	w := workertest.NewWorker(t, workertest.Opts{BindRoots: []string{"/srv"}, ProcDir: "../../usage/testdata/proc", SysDir: "../../usage/testdata/sys"})
+	b, _ := w.Backend(nil)
+	pushBundle(t, b)
+	lbl := map[string]string{docker.LabelProject: "portcullis-app", docker.LabelService: "web"}
+	w.Engine.Infos["c1"] = runtime.UnitInfo{ID: "c1", Labels: lbl}
+	cpu := uint64(7e9)
+	read := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	w.Engine.SetStats("c1", runtime.UnitStats{Read: read, CPUUsageNS: &cpu})
+	w.Engine.LayerSizes = map[string]int64{"c1": 4096}
+	w.Engine.ImageSizes = map[string]int64{"ghcr.io/example/app:1": 1 << 20}
+	ctx := context.Background()
+	st, err := b.Stats(ctx, "c1")
+	if err != nil || st.CPUUsageNS == nil || *st.CPUUsageNS != 7e9 || st.MemUsage != nil || !st.Read.Equal(read) {
+		t.Errorf("Stats = %+v %v", st, err)
 	}
-	if _, err := b.LayerSize(context.Background(), "c"); !errors.As(err, &nm) {
-		t.Errorf("LayerSize: %v", err)
+	if n, err := b.LayerSize(ctx, "c1"); err != nil || n != 4096 {
+		t.Errorf("LayerSize = %d %v", n, err)
 	}
-	if _, err := b.ImageSize(context.Background(), "x"); !errors.As(err, &nm) {
-		t.Errorf("ImageSize: %v", err)
+	if n, err := b.ImageSize(ctx, "ghcr.io/example/app:1"); err != nil || n != 1<<20 {
+		t.Errorf("ImageSize = %d %v", n, err)
+	}
+	if _, err := b.ImageSize(ctx, "docker.io/library/busybox:latest"); err == nil || errors.Is(err, agentrt.ErrOlderAgent) {
+		t.Errorf("ImageSize of an image in no bundle: %v", err)
+	}
+	hc, err := b.HostUsage(ctx)
+	if err != nil || hc.CPUTotal != 6485 || hc.MemTotal != 16384000*1024 || hc.DiskRead != 3017*512 {
+		t.Errorf("HostUsage = %+v %v", hc, err)
+	}
+	// A container that is gone is not an older agent.
+	if _, err := b.Stats(ctx, "c-gone"); err == nil || errors.Is(err, agentrt.ErrOlderAgent) {
+		t.Errorf("Stats of a gone container: %v", err)
+	}
+}
+
+// TestBackendStatsOldAgent: an agent without the usage routes answers its
+// catch-all 404: the worker's agent is older than the Hub (never a guess).
+func TestBackendStatsOldAgent(t *testing.T) {
+	w := newWorker(t)
+	b, _ := w.Backend(nil)
+	w.Fail(`/stats$|/size$|/images/size$|/host/usage$`, -1, http.StatusNotFound, "not found")
+	ctx := context.Background()
+	check := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, agentrt.ErrOlderAgent) || err.Error() != "the worker's agent is older than the Hub" {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	_, err := b.Stats(ctx, "c1")
+	check("Stats", err)
+	_, err = b.LayerSize(ctx, "c1")
+	check("LayerSize", err)
+	_, err = b.ImageSize(ctx, "ghcr.io/example/app:1")
+	check("ImageSize", err)
+	_, err = b.HostUsage(ctx)
+	check("HostUsage", err)
+}
+
+// TestAgentUsageStrictDecode: a worker's usage answers are untrusted: an
+// unknown field, a null, a negative size or a body over MaxJSON is an
+// error, never a partial figure.
+func TestAgentUsageStrictDecode(t *testing.T) {
+	w := newWorker(t)
+	b, _ := w.Backend(nil)
+	ctx := context.Background()
+	for name, c := range map[string]struct {
+		pattern string
+		body    []byte
+		call    func() error
+	}{
+		"stats unknown field": {`/stats$`, []byte(`{"read":"2026-11-21T10:00:00Z","cpu_usage_ns":1,"evil":1}`), func() error { _, err := b.Stats(ctx, "c1"); return err }},
+		"stats null":          {`/stats$`, []byte(`{"read":"2026-11-21T10:00:00Z","cpu_usage_ns":null}`), func() error { _, err := b.Stats(ctx, "c1"); return err }},
+		"stats no read":       {`/stats$`, []byte(`{"cpu_usage_ns":1}`), func() error { _, err := b.Stats(ctx, "c1"); return err }},
+		"size unknown field":  {`/size$`, []byte(`{"bytes":1,"x":2}`), func() error { _, err := b.LayerSize(ctx, "c1"); return err }},
+		"size negative":       {`/size$`, []byte(`{"bytes":-1}`), func() error { _, err := b.LayerSize(ctx, "c1"); return err }},
+		"image size string":   {`/images/size$`, []byte(`{"bytes":"1"}`), func() error { _, err := b.ImageSize(ctx, "x"); return err }},
+		"host unknown field": {`/host/usage$`, []byte(`{"at":"2026-11-21T10:00:00Z","cpu_total":1,"cpu_idle":0,"mem_total":1,"mem_available":0,"disk_read":0,"disk_write":0,"net":1}`),
+			func() error { _, err := b.HostUsage(ctx); return err }},
+		"host idle over total": {`/host/usage$`, []byte(`{"at":"2026-11-21T10:00:00Z","cpu_total":1,"cpu_idle":2,"mem_total":1,"mem_available":0,"disk_read":0,"disk_write":0}`),
+			func() error { _, err := b.HostUsage(ctx); return err }},
+		"host over the cap": {`/host/usage$`, append([]byte(`{"at":"2026-11-21T10:00:00Z","cpu_total":1,"cpu_idle":0,"mem_total":1,"mem_available":0,"disk_read":0,"disk_write":0}`), bytes.Repeat([]byte(" "), agentapi.MaxJSON)...),
+			func() error { _, err := b.HostUsage(ctx); return err }},
+	} {
+		w.ClearFaults()
+		w.Respond(c.pattern, 1, http.StatusOK, c.body)
+		if err := c.call(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

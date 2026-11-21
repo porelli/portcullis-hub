@@ -75,8 +75,9 @@ type Run struct {
 	// rules); runFixer only refuses what is malformed.
 	Source string
 	// Volume: usage only, a named volume mounted read-only at /vol in
-	// place of Source (exactly one of the two). A worker's agent never
-	// runs a usage helper (its label is refused).
+	// place of Source (exactly one of the two). A worker's agent runs a
+	// usage helper only on a bundled project's volume or a bind under its
+	// roots (Rebuild, ux3).
 	Volume runtime.VolumeMount
 	// Opts and Extra are the fixer's flags, rendered by folderfix.Args
 	// (ruling 38). Root and the /in, /out paths are set here.
