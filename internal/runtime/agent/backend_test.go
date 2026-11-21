@@ -502,6 +502,7 @@ func TestAgentUsageStrictDecode(t *testing.T) {
 		"stats unknown field": {`/stats$`, []byte(`{"read":"2026-11-21T10:00:00Z","cpu_usage_ns":1,"evil":1}`), func() error { _, err := b.Stats(ctx, "c1"); return err }},
 		"stats null":          {`/stats$`, []byte(`{"read":"2026-11-21T10:00:00Z","cpu_usage_ns":null}`), func() error { _, err := b.Stats(ctx, "c1"); return err }},
 		"stats no read":       {`/stats$`, []byte(`{"cpu_usage_ns":1}`), func() error { _, err := b.Stats(ctx, "c1"); return err }},
+		"stats huge cpu rate": {`/stats$`, []byte(`{"read":"2026-11-21T10:00:00Z","cpu_cores":1e300}`), func() error { _, err := b.Stats(ctx, "c1"); return err }},
 		"size unknown field":  {`/size$`, []byte(`{"bytes":1,"x":2}`), func() error { _, err := b.LayerSize(ctx, "c1"); return err }},
 		"size negative":       {`/size$`, []byte(`{"bytes":-1}`), func() error { _, err := b.LayerSize(ctx, "c1"); return err }},
 		"image size string":   {`/images/size$`, []byte(`{"bytes":"1"}`), func() error { _, err := b.ImageSize(ctx, "x"); return err }},

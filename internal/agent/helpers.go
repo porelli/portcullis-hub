@@ -233,6 +233,13 @@ func (a *API) helperRun(w http.ResponseWriter, r *http.Request) {
 		engineError(w, err)
 		return
 	}
+	if a.usageVolumeGone(r.Context(), h.spec.Spec) {
+		a.mu.Lock()
+		h.ran = true
+		a.mu.Unlock()
+		writeError(w, http.StatusConflict, "the volume is gone")
+		return
+	}
 	a.mu.Lock()
 	h.ran, h.result, h.out = true, res, outPath
 	a.mu.Unlock()

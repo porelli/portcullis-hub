@@ -28,6 +28,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/fixerspec"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
@@ -42,8 +43,8 @@ const (
 
 // The measurer's pinned values (contract §11.11).
 const (
-	storageMaxEntries = 2_000_000
-	storageMaxTime    = 2 * time.Minute
+	storageMaxEntries = fixerspec.UsageMaxEntries
+	storageMaxTime    = fixerspec.UsageMaxTime
 	storageRunBudget  = time.Hour
 	storageFirstDelay = 10 * time.Minute
 	storageEvery      = 24 * time.Hour

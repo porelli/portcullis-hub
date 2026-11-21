@@ -53,6 +53,10 @@ func Rebuild(s agentapi.FixerSpec, binary string, roots []string, volumeInScope 
 		}
 		if len(s.Volumes) == 1 {
 			v := s.Volumes[0]
+			// The name first: the scope hook asks the engine about it.
+			if !ValidVolumeName(v.Name) {
+				return refuse("usage: volume %q", clipName(v.Name))
+			}
 			if volumeInScope == nil || !volumeInScope(v.Name) {
 				return refuse("volume %s is not a bundled project's", clipName(v.Name))
 			}

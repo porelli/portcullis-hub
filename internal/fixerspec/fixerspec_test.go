@@ -180,3 +180,35 @@ func TestRebuildUsage(t *testing.T) {
 	vs.Volumes = []agentapi.VolumeMount{{Name: "portcullis-paperless_data", Target: UsageRoot}}
 	refused("a volume on a scan", vs, "volume", inScope)
 }
+
+// TestUsageCaps (Task 9 review nit 3): a usage run asks for at most the
+// primary's caps; the worker's agent refuses more.
+func TestUsageCaps(t *testing.T) {
+	base := Run{Mode: "usage", Source: "/srv/x", Opts: folderfix.Options{MaxEntries: UsageMaxEntries, MaxTime: UsageMaxTime}}
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	more := base
+	more.Opts.MaxEntries++
+	long := base
+	long.Opts.MaxTime = UsageMaxTime + time.Second
+	slow := base
+	slow.Timeout = UsageMaxTime + time.Minute
+	for name, r := range map[string]Run{"more entries": more, "a longer walk": long, "a longer timeout": slow} {
+		if err := r.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+		spec := agentapi.FixerSpecOf(r.Spec("", agentBinary))
+		if _, err := Rebuild(spec, agentBinary, []string{"/srv"}, nil); err == nil {
+			t.Errorf("%s: rebuilt", name)
+		}
+	}
+	// A volume name is checked before the scope hook ever sees it.
+	asked := 0
+	scope := func(string) bool { asked++; return true }
+	bad := agentapi.FixerSpecOf(Run{Mode: "usage", Volume: runtime.VolumeMount{Name: "ok"}, Opts: base.Opts}.Spec("", agentBinary))
+	bad.Volumes[0].Name = "a/../b"
+	if _, err := Rebuild(bad, agentBinary, []string{"/srv"}, scope); err == nil || asked != 0 {
+		t.Errorf("a bad volume name: %v, hook asked %d times", err, asked)
+	}
+}

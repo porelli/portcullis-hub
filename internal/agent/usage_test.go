@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -189,4 +190,155 @@ func TestAgentUsageFixer(t *testing.T) {
 			t.Errorf("%s: %d %s", name, code, msg)
 		}
 	}
+}
+
+// TestAgentUsageFixRound1 (Task 9 review): the stats deadline (M2), a
+// volume the engine recreated during the run (M1), a volume name checked
+// before the engine sees it (M3), the run-time re-check, the helper
+// image's size and a core volume (nit 5).
+func TestAgentUsageFixRound1(t *testing.T) {
+	f := usageFixture(t)
+	lbl := map[string]string{docker.LabelProject: "portcullis-app"}
+	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: lbl}
+	f.rt.Volumes["portcullis_postgres_data"] = runtime.Volume{Name: "portcullis_postgres_data", Labels: map[string]string{docker.LabelProject: "portcullis"}}
+	caps := folderfix.Options{MaxEntries: 2_000_000, MaxTime: 2 * time.Minute}
+	volSpec := func(name, inst string) []byte {
+		s := agentapi.FixerSpecOf(fixerspec.Run{Mode: "usage", Volume: runtime.VolumeMount{Name: name, Instance: inst}, Opts: caps}.Spec("", AgentBinary))
+		return mustJSON(agentapi.HelperSpec{Kind: agentapi.HelperFolderFix, Spec: &s})
+	}
+	create := func(body []byte) string {
+		t.Helper()
+		resp, b := f.req(t, "POST", "/v1/helpers", bytes.NewReader(body))
+		var hc agentapi.HelperCreated
+		json.Unmarshal(b, &hc)
+		if resp.StatusCode != 200 {
+			t.Fatalf("create: %d %s", resp.StatusCode, b)
+		}
+		return hc.ID
+	}
+
+	// M2: a stats call the engine never answers ends at the deadline.
+	old := statsTimeout
+	statsTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { statsTimeout = old })
+	block := make(chan struct{})
+	f.rt.Lock()
+	f.rt.StatsBlock = block
+	f.rt.Unlock()
+	start := time.Now()
+	if c := f.code(t, "GET", "/v1/containers/c-mine/stats", nil); c < 400 {
+		t.Errorf("a hung stats call: %d", c)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("the stats call took %v", d)
+	}
+	close(block)
+	f.rt.Lock()
+	f.rt.StatsBlock = nil
+	f.rt.Unlock()
+
+	// M1: the volume is removed during the run and the engine recreates
+	// it empty, unlabelled: removed again, the run fails.
+	id := create(volSpec("portcullis-app_data", "app"))
+	f.rt.Lock()
+	f.rt.FixerFn = func(runtime.FixerSpec) (*runtime.RunResult, error) {
+		f.rt.Lock()
+		f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data"}
+		f.rt.Unlock()
+		return &runtime.RunResult{}, nil
+	}
+	f.rt.Unlock()
+	resp, b := f.req(t, "POST", "/v1/helpers/"+id+"/run", nil)
+	if resp.StatusCode != 409 || !strings.Contains(string(b), "the volume is gone") {
+		t.Errorf("recreated volume: %d %s", resp.StatusCode, b)
+	}
+	f.rt.Lock()
+	_, still := f.rt.Volumes["portcullis-app_data"]
+	f.rt.FixerFn = nil
+	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: lbl}
+	f.rt.Unlock()
+	if still {
+		t.Error("the recreated volume stayed")
+	}
+	// A volume gone for good after the run: failed too, nothing removed.
+	id = create(volSpec("portcullis-app_data", "app"))
+	f.rt.Lock()
+	f.rt.FixerFn = func(runtime.FixerSpec) (*runtime.RunResult, error) {
+		f.rt.Lock()
+		delete(f.rt.Volumes, "portcullis-app_data")
+		f.rt.Unlock()
+		return &runtime.RunResult{}, nil
+	}
+	f.rt.Unlock()
+	if resp, b := f.req(t, "POST", "/v1/helpers/"+id+"/run", nil); resp.StatusCode != 409 || !strings.Contains(string(b), "the volume is gone") {
+		t.Errorf("deleted volume: %d %s", resp.StatusCode, b)
+	}
+	f.rt.Lock()
+	f.rt.FixerFn = nil
+	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: lbl}
+	f.rt.Unlock()
+	// A labelled volume after the run: measured.
+	id = create(volSpec("portcullis-app_data", "app"))
+	if c := f.code(t, "POST", "/v1/helpers/"+id+"/run", nil); c != 200 {
+		t.Errorf("a live volume's run: %d", c)
+	}
+
+	// The run-time re-check: the volume changed hands between create and run.
+	id = create(volSpec("portcullis-app_data", "app"))
+	f.rt.Lock()
+	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: map[string]string{docker.LabelProject: "portcullis-other"}}
+	f.rt.Unlock()
+	if resp, b := f.req(t, "POST", "/v1/helpers/"+id+"/run", nil); resp.StatusCode != 409 || !strings.Contains(string(b), "no longer a bundled project's") {
+		t.Errorf("re-check: %d %s", resp.StatusCode, b)
+	}
+	f.rt.Lock()
+	f.rt.Volumes["portcullis-app_data"] = runtime.Volume{Name: "portcullis-app_data", Labels: lbl}
+	f.rt.Unlock()
+
+	// M3: a bad name never reaches the engine; another volume's answer
+	// is not this volume.
+	n := usageCalls(f.rt.Calls(), "inspect-volume")
+	for _, bad := range []string{"a/b", "a\x01b"} {
+		if resp, b := f.req(t, "POST", "/v1/helpers", bytes.NewReader(volSpec(bad, "app"))); resp.StatusCode != 403 {
+			t.Errorf("volume %q: %d %s", bad, resp.StatusCode, b)
+		}
+	}
+	if c := f.code(t, "GET", "/v1/volumes/a%01b", nil); c != 400 {
+		t.Errorf("a control character in a volume path: %d", c)
+	}
+	if got := usageCalls(f.rt.Calls(), "inspect-volume"); got != n {
+		t.Errorf("the engine saw %d bad names", got-n)
+	}
+	f.rt.Lock()
+	f.rt.Volumes["alias"] = runtime.Volume{Name: "portcullis-app_data", Labels: lbl}
+	f.rt.Unlock()
+	if c := f.code(t, "GET", "/v1/volumes/alias", nil); c != 404 {
+		t.Errorf("another volume's answer: %d", c)
+	}
+	if resp, _ := f.req(t, "POST", "/v1/helpers", bytes.NewReader(volSpec("alias", "app"))); resp.StatusCode != 403 {
+		t.Errorf("usage on another volume's answer: %d", resp.StatusCode)
+	}
+
+	// nit 5: core's volume is no target; the helper image is sized.
+	if resp, b := f.req(t, "POST", "/v1/helpers", bytes.NewReader(volSpec("portcullis_postgres_data", ""))); resp.StatusCode != 403 {
+		t.Errorf("core volume: %d %s", resp.StatusCode, b)
+	}
+	f.rt.Lock()
+	f.rt.ImageSizes[f.api.cfg.HelperImage] = 7
+	f.rt.Unlock()
+	resp, b = f.req(t, "GET", "/v1/images/size?ref="+url.QueryEscape(f.api.cfg.HelperImage), nil)
+	var sz agentapi.SizeBody
+	if resp.StatusCode != 200 || json.Unmarshal(b, &sz) != nil || sz.Bytes != 7 {
+		t.Errorf("helper image size: %d %s", resp.StatusCode, b)
+	}
+}
+
+func usageCalls(calls []string, prefix string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
 }

@@ -719,11 +719,14 @@ func (s UnitStats) Check() error {
 	switch {
 	case s.Read.IsZero():
 		return errors.New("agent API: stats without a read time")
-	case s.CPUCores != nil && (*s.CPUCores < 0 || math.IsNaN(*s.CPUCores) || math.IsInf(*s.CPUCores, 0)):
+	case s.CPUCores != nil && (*s.CPUCores < 0 || *s.CPUCores > MaxCPUCores || math.IsNaN(*s.CPUCores) || math.IsInf(*s.CPUCores, 0)):
 		return errors.New("agent API: stats with a bad CPU rate")
 	}
 	return nil
 }
+
+// MaxCPUCores bounds a worker's CPU rate (no host has more cores).
+const MaxCPUCores = 1 << 14
 
 // SizeBody is a size answer (GET /v1/containers/{cid}/size, GET
 // /v1/images/size, ux3): bytes, never negative.

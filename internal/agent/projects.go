@@ -27,6 +27,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/fixerspec"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -270,7 +271,11 @@ func (a *API) inScope(labels map[string]string) (string, bool) {
 		case b[v]:
 			return v, true // a volume helper for a bundled instance
 		case strings.HasPrefix(v, "folder:") || strings.HasPrefix(v, "usage:") || v == "path-check":
-			return "", true // the agent's own fixer runs
+			// The agent's own fixer runs. A label-only trust, as for
+			// folder: and path-check: only someone on the worker's host
+			// can label a container so (a bundle can't: §3 reserved
+			// labels).
+			return "", true
 		}
 	}
 	return "", false
@@ -796,7 +801,16 @@ func (a *API) listVolumes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) scopedVolume(w http.ResponseWriter, r *http.Request, name string) (runtime.Volume, string, bool) {
+	// The name before the engine sees it, and the engine's answer must
+	// be that volume.
+	if !fixerspec.ValidVolumeName(name) {
+		writeError(w, http.StatusBadRequest, "not a volume name")
+		return runtime.Volume{}, "", false
+	}
 	v, err := a.cfg.Runtime.InspectVolume(r.Context(), name)
+	if err == nil && v.Name != name {
+		err = errors.New("another volume answered")
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "no such volume")
 		return v, "", false
