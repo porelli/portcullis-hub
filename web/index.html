@@ -4940,9 +4940,10 @@
     });
     loadCatalogInfo().catch(() => {});
     refreshInstances();
-    // Every 15 s (PORTCULLIS_TEST_POLL_MS: the UI smoke check's shorter
-    // poll, at least 500 ms).
-    const INSTANCES_POLL_MS = window.PORTCULLIS_TEST_POLL_MS > 0 ? Math.max(500, Number(window.PORTCULLIS_TEST_POLL_MS)) : 15000;
+    // Every 15 s. PORTCULLIS_TEST_POLL_MS (the UI smoke check) can only
+    // shorten it, to a finite 1000–15000 ms; anything else is ignored.
+    const testPoll = Number(window.PORTCULLIS_TEST_POLL_MS);
+    const INSTANCES_POLL_MS = Number.isFinite(testPoll) && testPoll >= 1000 && testPoll < 15000 ? testPoll : 15000;
     setInterval(() => { if (!instCtx) refreshInstances(); }, INSTANCES_POLL_MS);
 
     // ── Sources ───────────────────────────────────────────
