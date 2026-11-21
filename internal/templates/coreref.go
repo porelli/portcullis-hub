@@ -73,7 +73,10 @@ var (
 	// Checked by TestCoreNamesComplete against core's chart templates.
 	kubeHACoreNames = set("nodeadm", "frontdoor", "cnpg-operator", "keycloak-pods", "keycloak-internal",
 		"alertmanager-peers", "portcullis-pg", "hub-state", "hub-backups", "portcullis-node",
-		"portcullis-hub", "traefik-metrics", "traefik-vpn", "wg-edge", "wg-metrics", "wg-people")
+		"portcullis-hub", "traefik-metrics", "traefik-vpn", "wg-edge", "wg-metrics", "wg-people",
+		// Task 25: Vault's raft peers, the session store's pods and
+		// Sentinels, and our CoreDNS DaemonSet on the small nodes.
+		"vault-internal", "sessions-pods", "sessions-sentinel", "portcullis-dns-small")
 	// coreAliases are core's network aliases that aren't service names
 	// (wg's metrics address on portcullis, the Hub's on
 	// portcullis-metrics-hub): reserved DNS names too.
