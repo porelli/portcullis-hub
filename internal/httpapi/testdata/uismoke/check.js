@@ -1,4 +1,4 @@
-// The Settings + SSH access computed-style smoke check (ux3 item 5):
+// The Settings + Access → SSH access computed-style smoke check (ux3 item 5):
 // every visible input, textarea, select and button there must have a
 // dark background (no browser-default white or grey), and every link a
 // light colour. Run by TestSettingsControlsStyled with the Hub's URL;
@@ -28,7 +28,7 @@ const { chromium } = require('playwright');
   await p.goto(base + '/#settings');
   await p.waitForTimeout(2500);
   all = all.concat(await audit('settings'));
-  await p.goto(base + '/#ssh');
+  await p.goto(base + '/#access/ssh');
   await p.waitForTimeout(1500);
   const ids = await p.$$eval('#ssh-root [data-ssh-section]', es => es.map(e => e.dataset.sshSection));
   if (!ids.length) all.push('ssh: no subtabs rendered');

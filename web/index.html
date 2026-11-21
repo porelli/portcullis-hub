@@ -269,6 +269,13 @@
     :where(.btn:disabled) { opacity: 0.5; cursor: not-allowed; }
     /* SSH access subtabs (ssh.js): a tab bar like .usage-nav. */
     .ssh-sections { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #334155; }
+    .ssh-settings-link { margin-left: auto; font-size: 0.8125rem; }
+    /* Access subtabs (access.js): SSH access · VPN devices · Sign-in history. */
+    .access-nav { display: flex; gap: 0; margin-bottom: 1.25rem; border-bottom: 1px solid #1e293b; }
+    .access-nav button { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 0.5rem 1rem; color: #94a3b8; font: inherit; font-size: 0.875rem; cursor: pointer; }
+    .access-nav button[aria-selected="true"] { color: #e2e8f0; border-bottom-color: #3b82f6; }
+    .access-nav button:hover { color: #e2e8f0; }
+    .access-pick { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
     /* Links: readable on the dark background everywhere. */
     :where(.tab-content a:not(.btn)) { color: #93c5fd; }
     /* A facts list outside a section card. */
@@ -667,18 +674,16 @@
       {{end}}
     </header>
 
-    <!-- Apps (what runs here) · Marketplace (what can be added, and the
-         template sources it comes from) · SSH access · Audit log · Doctor · Settings ·
-         People ↗ (people.<domain>, href set below from PortcullisPeople). -->
+    <!-- Apps (what runs here; "+ Add an app" opens the Marketplace) ·
+         Doctor · Usage · Access (SSH access, VPN devices, sign-in
+         history) · Settings · Audit. People is the site bar's. -->
     <div class="tabs">
       <div class="tab active" data-tab="apps">Apps</div>
-      <div class="tab" data-tab="marketplace">Marketplace</div>
-      <div class="tab" data-tab="ssh">SSH access</div>
-      <div class="tab" data-tab="audit">Audit log</div>
       <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
       <div class="tab" data-tab="usage">Usage</div>
+      <div class="tab" data-tab="access">Access</div>
       <div class="tab" data-tab="settings">Settings</div>
-      <a class="tab" data-people-link href="#">People &#8599;</a>
+      <div class="tab" data-tab="audit">Audit</div>
     </div>
     <script>
       // People and groups live on people.<domain> only (the shared
@@ -844,14 +849,11 @@
       <div id="doctor-root"></div>
     </div>
 
-    <!-- SSH access Tab (web/ssh.js: PortcullisSSH.render; contract §18) -->
-    <div class="tab-content" id="tab-ssh">
-      <div class="category-title" style="margin-bottom: 1rem;">SSH access</div>
-      <p class="settings-empty" style="margin-bottom:1rem">
-        Short-lived SSH certificates for people's host groups, signed after a Portcullis sign-in (<code>portcullis login</code>).
-        Managed hosts are enrolled once and kept current; unmanaged hosts trust the CA with <code>portcullis host trust</code>.
-      </p>
-      <div id="ssh-root"></div>
+    <!-- Access Tab (web/access.js: PortcullisAccess.render): SSH access
+         (web/ssh.js, contract §18), VPN devices, sign-in history -->
+    <div class="tab-content" id="tab-access">
+      <div class="category-title" style="margin-bottom: 1rem;">Access</div>
+      <div id="access-root"></div>
     </div>
 
     <!-- Usage Tab (web/usage.js) -->
@@ -940,6 +942,12 @@
       </p>
       <div id="servers-root"></div>
 
+      <div class="category-title" style="margin: 2rem 0 1rem;">SSH</div>
+      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+        Whether SSH access is on, the certificates' default lifetime and the certificate authorities' public keys.
+      </p>
+      <div id="ssh-settings-root"></div>
+
     </div>
   </div>
 
@@ -981,19 +989,25 @@
   <script src="/static/servers.js"></script>
   <script src="/static/doctor.js"></script>
   <script src="/static/ssh.js"></script>
+  <script src="/static/access.js"></script>
   <script src="/static/usage.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
-    // showTab(name): one of the top tabs (apps, marketplace, ssh, audit,
-    // doctor, settings) or "instance" (an instance's page: the Apps tab
-    // stays highlighted). The tab's content loads on every selection.
+    // showTab(name): one of the top tabs (apps, doctor, usage, access,
+    // settings, audit), "instance" (an instance's page) or "marketplace"
+    // (the Marketplace, until it moves into Apps): the Apps tab stays
+    // highlighted for both. The tab's content loads on every selection.
     // Leaving an instance page with unsaved work asks first: false = the
     // admin stayed (the page's hash is put back).
-    // usageView: the Usage tab's view (#usage/<view>).
+    // usageView: the Usage tab's view (#usage/<view>); accessView: the
+    // Access tab's {section, sub, user} (#access/…); settingsView: the
+    // Settings section asked for ({section}, #settings/<section>).
     let usageView = 'apps';
+    let accessView = { section: 'ssh', sub: '', user: '' };
+    let settingsView = { section: '' };
     function showTab(name, asked) {
       if (name !== 'instance' && pageCtx && !asked && !leavePageOK()) { history.replaceState(null, '', pageHash()); return false; }
-      const top = name === 'instance' ? 'apps' : name;
+      const top = name === 'instance' || name === 'marketplace' ? 'apps' : name;
       document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === top));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
       if (name === 'settings') {
@@ -1003,9 +1017,10 @@
         loadVPNSettings(document.getElementById('vpn-settings-root'));
         if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
         if (window.PortcullisServers) PortcullisServers.render(document.getElementById('servers-root'));
+        if (window.PortcullisSSH) PortcullisSSH.renderSettings(document.getElementById('ssh-settings-root'));
       }
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
-      if (name === 'ssh' && window.PortcullisSSH) PortcullisSSH.render(document.getElementById('ssh-root'));
+      if (name === 'access' && window.PortcullisAccess) PortcullisAccess.render(document.getElementById('access-root'), accessView.section, accessView);
       // The Usage tab polls while shown; leaving it (or an instance's
       // Usage tab) stops the poll.
       if (window.PortcullisUsage) PortcullisUsage.stop();
@@ -1019,22 +1034,25 @@
     }
     document.querySelectorAll('.tab[data-tab]').forEach(tab => {
       tab.addEventListener('click', () => {
+        if (tab.dataset.tab === 'access') accessView = { section: 'ssh', sub: '', user: '' };
         if (!showTab(tab.dataset.tab)) return;
         history.replaceState(null, '', tab.dataset.tab === 'apps' ? location.pathname : '#' + tab.dataset.tab);
       });
     });
-    document.querySelector('[data-people-link]').href = PortcullisPeople.base;
-    // Deep links: #apps/<id>[/<tab>] an instance's page at a tab
-    // (#apps/<id>/settings/<option> scrolled to an option); the old
-    // #app/<id>/settings[/<option>] (the Portcullis MCP's
-    // set_secret_setting form, the people page's Used by) and
-    // #app/<id>/ai are replaced by those; #sources is the Marketplace's
-    // template sources; #audit the Audit log tab;
-    // #settings/domains?add=<name>[&provider=<p>] and ?token=<name>
-    // open the Domains forms (add_domain, replace_domain_token);
-    // #settings/ai?provider=<name>&field=<field> a provider secret's form
-    // (set_model_provider_secret). Secrets are typed here, never passed
-    // in. Routed at load and on a hash change.
+    // Deep links (ROUTES below, routed at load and on a hash change):
+    //   #apps/<id>[/<tab>[/<option>]]  an instance's page at a tab
+    //       (settings/<option> scrolled to an option); the old
+    //       #app/<id>/settings[/<option>] and #app/<id>/ai are replaced by those;
+    //   #marketplace[?filter=mail], #marketplace/<template-id>  the Marketplace;
+    //   #doctor, #usage[/<view>], #audit;
+    //   #access[/ssh[/<ssh-section>]], #access/vpn, #access/signins[?user=<name>];
+    //   #settings[/<section>]; #settings/network?add=<name>[&provider=<p>]
+    //       and ?token=<name> open the Domains forms (add_domain,
+    //       replace_domain_token); #settings/ai?provider=<name>&field=<field>
+    //       a provider secret's form (set_model_provider_secret). Secrets
+    //       are typed here, never passed in.
+    // Anything else (the removed #ssh, #sources: no redirects before a
+    // release) opens Apps.
     window.addEventListener('load', routeHash);
     window.addEventListener('hashchange', routeHash);
     // peopleRedirect: the old Users & Groups deep links, now on
@@ -1069,32 +1087,58 @@
       const ai = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
       return ai ? '#apps/' + ai[1] + '/ai' : null;
     }
-    function routeHash() {
-      let t = location.hash.slice(1);
-      const ppl = peopleRedirect(t);
-      if (ppl !== null) { location.replace(PortcullisPeople.href(ppl)); return; }
-      const moved = oldAppLink(t);
-      if (moved) { history.replaceState(null, '', moved); t = moved.slice(1); }
-      const page = /^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/.exec(t);
-      if (page) { openInstancePage(page[1], page[2] || 'overview', page[3] || ''); return; }
-      if (t === 'sources') {
-        history.replaceState(null, '', '#marketplace');
-        showTab('marketplace');
-        const box = document.getElementById('mkt-sources');
-        if (box) flash(box);
+    // showMarketplace({filter, open}): the Marketplace — Apps' own once
+    // marketplace.js is there (PortcullisMarketplace), else its page.
+    function showMarketplace(o) {
+      if (window.PortcullisMarketplace) {
+        if (!showTab('apps')) return;
+        window.PortcullisMarketplace.render(document.getElementById('mkt-root'), o);
         return;
       }
-      // #marketplace?filter=mail: only the mail server templates.
-      const mkt = /^marketplace\?filter=(mail)$/.exec(t);
-      if (mkt) { showTab('marketplace'); filterMarketplace(mkt[1]); return; }
-      // #usage, #usage/apps, #usage/containers, #usage/storage.
-      const use = /^usage(?:\/(apps|containers|storage))?$/.exec(t);
-      if (use) { usageView = use[1] || 'apps'; showTab('usage'); return; }
-      const sec = /^settings\/(domains|ai)\?(.*)$/.exec(t);
-      if (sec) { openSettingsForm(sec[1], new URLSearchParams(sec[2])); return; }
-      const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
-      if (tab) { showTab(t); return; }
-      if (!t || t === 'apps') showTab('apps');
+      if (!showTab('marketplace')) return;
+      filterMarketplace(o.filter);
+      const card = o.open && document.querySelector('.app-card[data-id="' + CSS.escape(o.open) + '"]');
+      if (card) { card.scrollIntoView({ block: 'center' }); flash(card); }
+    }
+    // showSettings(section): the Settings tab at a section (the subtabs'
+    // own once settingsnav.js is there).
+    function showSettings(section) {
+      settingsView = { section: section || '' };
+      if (window.PortcullisSettingsNav) { if (showTab('settings')) window.PortcullisSettingsNav.show(settingsView.section, ''); return; }
+      showTab('settings');
+    }
+    // ROUTES: [regex over the hash without '#', handler(match)], the
+    // first match wins. Kept to the regex subset Go shares (no
+    // lookarounds): webui_nav_test.go checks every hash the Hub emits
+    // against this table.
+    const ROUTES = [
+      [/^(?:apps)?$/, () => showTab('apps')],
+      [/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],
+      [/^app\/([a-z0-9-]+)\/(?:settings(?:\/[A-Za-z0-9_.-]+)?|ai)$/, m => { const to = oldAppLink(m[0]); history.replaceState(null, '', to); routeTo(to.slice(1)); }],
+      [/^marketplace(?:\?filter=(mail))?$/, m => showMarketplace({ filter: m[1] || '', open: '' })],
+      [/^marketplace\/([a-z0-9-]+)$/, m => showMarketplace({ filter: '', open: m[1] })],
+      [/^doctor$/, () => showTab('doctor')],
+      [/^usage(?:\/(apps|containers|storage))?$/, m => { usageView = m[1] || 'apps'; showTab('usage'); }],
+      [/^access(?:\/ssh(?:\/([a-z]+))?)?$/, m => { accessView = { section: 'ssh', sub: m[1] || '', user: '' }; showTab('access'); }],
+      [/^access\/vpn$/, () => { accessView = { section: 'vpn', sub: '', user: '' }; showTab('access'); }],
+      [/^access\/signins(?:\?user=([a-z0-9._-]{1,64}))?$/, m => { accessView = { section: 'signins', sub: '', user: m[1] || '' }; showTab('access'); }],
+      [/^settings\/(network|ai)\?(.+)$/, m => openSettingsForm(m[1], new URLSearchParams(m[2]))],
+      [/^settings(?:\/([a-z]+))?$/, m => showSettings(m[1])],
+      [/^audit$/, () => showTab('audit')],
+    ];
+    // routeTo(t): the first route matching t, else Apps.
+    function routeTo(t) {
+      for (const [re, fn] of ROUTES) {
+        const m = re.exec(t);
+        if (m) { fn(m); return; }
+      }
+      showTab('apps');
+    }
+    function routeHash() {
+      const t = location.hash.slice(1);
+      const ppl = peopleRedirect(t);
+      if (ppl !== null) { location.replace(PortcullisPeople.href(ppl)); return; }
+      routeTo(t);
     }
 
     // ── Toast ─────────────────────────────────────────────
@@ -1744,7 +1788,7 @@
     // domains add / token, a model provider's secret.
     async function openSettingsForm(kind, q) {
       document.querySelector('.tab[data-tab="settings"]').click();
-      if (kind === 'domains' && q.get('add')) {
+      if (kind === 'network' && q.get('add')) {
         const form = await waitFor('#domain-add-form');
         if (!form) return;
         document.getElementById('domain-name').value = q.get('add');
@@ -1758,7 +1802,7 @@
         form.querySelector('[data-cred]')?.focus();
         return;
       }
-      if (kind === 'domains' && q.get('token')) {
+      if (kind === 'network' && q.get('token')) {
         const btn = await waitFor('[data-domain-token="' + CSS.escape(q.get('token')) + '"]');
         if (!btn) { showToast('No added domain ' + q.get('token') + '.', 'error'); return; }
         btn.click();
@@ -2540,10 +2584,10 @@
         return h;
       }
       const greyed = v.master_off ? 'AI support is off on this Portcullis (Settings → AI).' : v.refused ? 'AI support can\'t be switched on: ' + v.refused : '';
-      if (v.master_off) h += '<div class="public-warn" data-ai-greyed>AI support is off on this Portcullis: the switches are greyed out. <a href="#settings" data-ai-goto-settings>Settings → AI</a></div>';
+      if (v.master_off) h += '<div class="public-warn" data-ai-greyed>AI support is off on this Portcullis: the switches are greyed out. <a href="#settings/ai" data-ai-goto-settings>Settings → AI</a></div>';
       else if (v.refused) {
         h += '<div class="public-warn" data-ai-greyed>AI support can\'t be switched on: ' + escapeHtml(v.refused) + '. ' +
-          '<a href="#app/' + encodeURIComponent(id) + '/settings">Open the app\'s settings</a> to change its access policy.</div>';
+          '<a href="#apps/' + encodeURIComponent(id) + '/settings">Open the app\'s settings</a> to change its access policy.</div>';
       }
       const running = aiInstanceEnabled(id);
       // app_oauth companions add no router (the gate isn't in the path).
@@ -2557,7 +2601,7 @@
         h += '<table class="inst-table"><thead><tr><th>Time</th><th>Person</th><th>Client</th><th>What</th><th>Decision</th></tr></thead><tbody>' +
           act.lines.map(l => '<tr><td style="white-space:nowrap">' + escapeHtml(fmtTime(l.time)) + '</td><td>' + escapeHtml(l.user || '(no valid token)') + '</td><td><code>' + escapeHtml(l.client) + '</code></td>' +
             '<td><code>' + escapeHtml(l.tool ? id + '__' + l.tool : l.method) + '</code>' + aiNote(escapeHtml(l.companion) + ' · ' + escapeHtml(l.via)) + '</td><td>' + aiDecision(l.decision) + '</td></tr>').join('') +
-          '</tbody></table>' + aiNote('The newest 20 requests from the gate\'s access log (never the arguments or results). All of them: the <a href="#audit">Audit log</a> tab, "via AI".');
+          '</tbody></table>' + aiNote('The newest 20 requests from the gate\'s access log (never the arguments or results). All of them: the <a href="#audit">Audit</a> tab, "via AI".');
       }
       h += '</div>';
       return h;
@@ -2576,7 +2620,7 @@
       const usable = all.filter(p => Object.prototype.hasOwnProperty.call(kinds, p.kind));
       if (!usable.length) {
         h += '<p class="settings-empty">No model provider of a kind this AI page supports (' + Object.keys(kinds).sort().map(k => escapeHtml(k)).join(', ') +
-          '). Add one in <a href="#settings" data-ai-goto-settings>Settings → AI</a>.</p>';
+          '). Add one in <a href="#settings/ai" data-ai-goto-settings>Settings → AI</a>.</p>';
       } else {
         for (const p of usable) {
           h += '<div><label class="policy-factor" style="margin:0"><input type="checkbox" data-ai-prov-sel value="' + escapeHtml(p.name) + '"' + (sel.has(p.name) ? ' checked' : '') + '> ' +
@@ -5124,7 +5168,8 @@
         ' <small>(set on the host: <code>./portcullis vpn mode apps|admin|server</code>)</small></dd>' +
         '<dt>VPN service</dt><dd>' + (v.wg && v.wg.up ? '<span class="pill ok">up</span>' : '<span class="pill warn">down</span> ' + escapeHtml((v.wg && v.wg.error) || '') + ' <small>(<code>./portcullis vpn init</code>)</small>') + '</dd>' +
         '<dt>Built-in VPN</dt><dd>' + (v.builtin ? escapeHtml(v.builtin.subnet) + ', port ' + escapeHtml(String(v.builtin.port)) + ', ' + escapeHtml(String(v.builtin.devices)) + ' devices' : 'off') + '</dd>' +
-        ((v.failed_closed || []).length ? '<dt>Stopped (fail closed)</dt><dd>' + escapeHtml(v.failed_closed.join(', ')) + '</dd>' : '') + '</dl>';
+        ((v.failed_closed || []).length ? '<dt>Stopped (fail closed)</dt><dd>' + escapeHtml(v.failed_closed.join(', ')) + '</dd>' : '') + '</dl>' +
+        '<p class="settings-empty">Everyone\'s devices: <a href="#access/vpn">Access → VPN devices</a>.</p>';
       h += '<div class="inst-form" data-vpn-settings>' +
         '<label class="block" for="vpn-users-group">VPN users group (empty: every person)</label><input id="vpn-users-group" data-vpn-users-group value="' + escapeHtml(s.users_group || '') + '">' +
         '<label class="block" for="vpn-dpp">Devices per person</label><input id="vpn-dpp" type="number" min="1" max="100" data-vpn-dpp value="' + escapeHtml(String(s.devices_per_person || 10)) + '">' +

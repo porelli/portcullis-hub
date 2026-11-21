@@ -185,7 +185,7 @@ func TestSSHPagesEmbedded(t *testing.T) {
 		return string(b)
 	}
 	idx := read("index.html")
-	for _, want := range []string{`data-tab="ssh"`, `id="tab-ssh"`, `id="ssh-root"`, `PortcullisSSH.render(`} {
+	for _, want := range []string{`data-tab="access"`, `id="tab-access"`, `id="access-root"`, `id="ssh-settings-root"`, `PortcullisSSH.renderSettings(`} {
 		if !strings.Contains(idx, want) {
 			t.Errorf("index.html lacks %s", want)
 		}

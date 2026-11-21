@@ -240,7 +240,7 @@ func (s *Server) registerAdminTools2() {
 			Run: func(ctx context.Context, c *directory.Caller, args json.RawMessage) (any, error) {
 				a, _ := decode[sourceArgs](args)
 				if urlHasCredentials(a.URL) {
-					return nil, badArg("the URL carries credentials: secrets never pass through the AI; add the source on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#sources)")
+					return nil, badArg("the URL carries credentials: secrets never pass through the AI; add the source on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#settings/sources)")
 				}
 				return s.addSource(toolActor(ctx, c), a.Name, a.URL)
 			}},
@@ -627,14 +627,14 @@ func sourceDisplay(raw string) string {
 }
 
 // domainForm is the Domains section's deep link with q
-// (#settings/domains?add=<name>[&provider=<p>] or ?token=<name>).
+// (#settings/network?add=<name>[&provider=<p>] or ?token=<name>).
 func (s *Server) domainForm(q url.Values) string {
 	for k, v := range q {
 		if len(v) == 0 || v[0] == "" {
 			delete(q, k)
 		}
 	}
-	return s.mcpScope(ScopeAdmin).home + "#settings/domains?" + q.Encode()
+	return s.mcpScope(ScopeAdmin).home + "#settings/network?" + q.Encode()
 }
 
 // domainCheck is the U domain tools' report: whether name is added
@@ -944,5 +944,5 @@ func hubSettingsConsequences(args json.RawMessage) []string {
 // adminMCPOnRefusal: the Portcullis admin MCP is turned on only on the
 // Hub's page (§15.10).
 func (s *Server) adminMCPOnRefusal() error {
-	return &hub.StatusError{Status: http.StatusForbidden, Err: errors.New("the Portcullis admin MCP can't be turned on through the AI: turn it on in Settings → AI on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#settings)")}
+	return &hub.StatusError{Status: http.StatusForbidden, Err: errors.New("the Portcullis admin MCP can't be turned on through the AI: turn it on in Settings → AI on the Hub's page (" + s.mcpScope(ScopeAdmin).home + "#settings/ai)")}
 }

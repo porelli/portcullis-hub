@@ -207,8 +207,8 @@ func TestHubInstLineEscapes(t *testing.T) {
 	}
 }
 
-// TestHubAppsPageStatic: the top tabs (Apps · Marketplace · SSH access · Audit log ·
-// Doctor · Usage · Settings · People ↗); the card's detail panel, the instance
+// TestHubAppsPageStatic: the top tabs (Apps · Doctor · Usage · Access ·
+// Settings · Audit; TestTopTabsOrder); the card's detail panel, the instance
 // dialog and the Template Sources tab are gone; the Marketplace carries
 // the sources; the Apps / Marketplace / instance page code and markup
 // use data-* attributes and delegated listeners, never inline handlers.
@@ -219,8 +219,7 @@ func TestHubAppsPageStatic(t *testing.T) {
 	for _, m := range tabs {
 		names = append(names, m[1])
 	}
-	if strings.Join(names, ",") != "apps,marketplace,ssh,audit,doctor,usage,settings" || !strings.Contains(b, `<a class="tab" data-people-link href="#">People &#8599;</a>`) ||
-		!strings.Contains(b, "document.querySelector('[data-people-link]').href = PortcullisPeople.base;") {
+	if strings.Join(names, ",") != "apps,doctor,usage,access,settings,audit" || strings.Contains(b, "data-people-link") {
 		t.Errorf("top tabs = %v", names)
 	}
 	for _, gone := range []string{`class="app-detail"`, "toggleDetail(", "openInstance(", "showInstTab(", `data-tab="catalog"`, `data-tab="sources"`, `id="tab-sources"`,
@@ -232,7 +231,7 @@ func TestHubAppsPageStatic(t *testing.T) {
 	for _, want := range []string{`id="tab-apps"`, `id="tab-instance"`, `id="tab-marketplace"`, `id="mkt-sources"`, `data-src-remove="`, `data-src-sync`,
 		`data-mkt-use="`, "'in use · ' + n + (n === 1 ? ' instance' : ' instances')", `data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>`,
 		`data-install="' + escapeHtml(tid) + '"' + off + '>Install…</button>`, "Manage on People &#8599;", "existing group", "'+ Add your own variable'",
-		`const page = /^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/.exec(t);`, "function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }",
+		`[/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],`, "function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }",
 		`<div class="drift" id="drift"></div>`, `<div class="drift" id="missing-groups"></div>`, `<script src="/static/settings.js"></script>`} {
 		if !strings.Contains(b, strings.Trim(want, "'")) {
 			t.Errorf("the hub index lacks %q", want)

@@ -1,10 +1,15 @@
 // Portcullis Hub — SSH access (contract §18, spec §9.11). Hub listener
 // only, administrators only.
 //
-//   window.PortcullisSSH.render(root)   the SSH access tab into root
+//   window.PortcullisSSH.render(root, section, onSection)
+//       Access → SSH into root, at section (a SECTIONS id; default
+//       hosts); onSection(id) is called when the admin picks another
+//   window.PortcullisSSH.renderSettings(box)
+//       Settings → SSH into box (on/off, lifetime, the CAs)
 //
 // Sections: Hosts, Host groups, Grants (with the hypothetical preview),
-// Access preview, Certificates, Settings. Routes: /api/ssh/* (§18.16).
+// Access preview, Certificates; the SSH settings are Settings → SSH
+// (#settings/ssh). Routes: /api/ssh/* (§18.16).
 //
 // Rules of this file:
 //   - no markup from strings: every node is built with el() and every
@@ -24,7 +29,7 @@
   const API = '/api/ssh';
   const enc = encodeURIComponent;
   const FRESH_TEXT = 'a fresh sign-in is required';
-  const SECTIONS = [['hosts', 'Hosts'], ['hostgroups', 'Host groups'], ['grants', 'Grants'], ['access', 'Access preview'], ['certs', 'Certificates'], ['settings', 'Settings']];
+  const SECTIONS = [['hosts', 'Hosts'], ['hostgroups', 'Host groups'], ['grants', 'Grants'], ['access', 'Access preview'], ['certs', 'Certificates']];
 
   // el(tag, props, ...children): props {class, text, on: {event: fn},
   // value, checked, type, …}; children: nodes or strings (text nodes).
@@ -471,8 +476,21 @@
   }
 
   // ── Settings ───────────────────────────────────────────────
-  function renderSettings(box) {
-    const v = view;
+  // renderSettings(box): its own read of the settings; Save redraws it.
+  async function renderSettings(box) {
+    let v;
+    try {
+      v = await call('GET', API + '/settings');
+    } catch (e) {
+      replaceKids(box, el('p', { class: 'public-warn', text: e.message }));
+      return;
+    }
+    view = v;
+    replaceKids(box);
+    const sbox = el('p', { class: 'settings-empty', role: 'status', 'aria-live': 'polite' });
+    // The status line is this box's while it's shown (Access → SSH, on
+    // another tab, sets its own when drawn).
+    statusBox = sbox;
     const on = el('input', { type: 'checkbox', checked: v.enabled, 'data-ssh-enabled': '' });
     const ttl = el('select', null, Array.from({ length: 12 }, (_, i) => el('option', { value: i + 1, text: (i + 1) + ' h', selected: (v.default_ttl_hours || 8) === i + 1 })));
     const out = el('div');
@@ -481,8 +499,8 @@
       field('Default certificate lifetime', ttl),
       el('div', null, btn('Save', () => {
         const b = { enabled: on.checked, default_ttl_hours: Number(ttl.value) };
-        write('settings', p => call('PUT', API + '/settings', Object.assign({}, b, p || {})), nv => { if (nv) view = nv; draw(); }, out);
-      }, 'btn-primary')), out),
+        write('settings', p => call('PUT', API + '/settings', Object.assign({}, b, p || {})), () => renderSettings(box).then(() => status('Saved.')), out);
+      }, 'btn-primary')), sbox, out),
     el('dl', { class: 'inst-facts' },
       el('dt', { text: 'User CA' }), el('dd', null, v.user_ca_fp ? code(v.user_ca_fp) : '—'),
       el('dt', { text: 'Host CA' }), el('dd', null, v.host_ca_fp ? code(v.host_ca_fp) : '—'),
@@ -492,7 +510,8 @@
   }
 
   // ── the tab ────────────────────────────────────────────────
-  const RENDER = { hosts: renderHosts, hostgroups: renderHostGroups, grants: renderGrants, access: renderAccess, certs: b => renderCerts(b, ''), settings: renderSettings };
+  const RENDER = { hosts: renderHosts, hostgroups: renderHostGroups, grants: renderGrants, access: renderAccess, certs: b => renderCerts(b, '') };
+  let onSection = null;
 
   async function draw() {
     if (!root) return;
@@ -502,24 +521,29 @@
       replaceKids(root, el('p', { class: 'public-warn', text: e.message }));
       return;
     }
-    if (!view.enabled) current = 'settings';
     const nav = el('div', { class: 'ssh-sections', role: 'tablist' }, SECTIONS.map(([id, label]) => el('button', {
       type: 'button', role: 'tab', class: 'btn btn-sm' + (id === current ? ' btn-primary' : ''), 'aria-selected': id === current ? 'true' : 'false',
-      'data-ssh-section': id, text: label, disabled: !view.enabled && id !== 'settings',
-      on: { click: () => { current = id; draw(); } },
-    })));
+      'data-ssh-section': id, text: label, disabled: !view.enabled,
+      on: { click: () => { current = id; if (onSection) onSection(id); draw(); } },
+    })), el('a', { class: 'ssh-settings-link', href: '#settings/ssh', 'data-ssh-settings-link': '', text: 'SSH settings \u2192' }));
     statusBox = el('p', { class: 'settings-empty', role: 'status', 'aria-live': 'polite' });
     bodyBox = el('div', { 'data-ssh-body': current });
     const problems = (view.problems || []).map(p => el('p', { class: 'public-warn', text: p }));
     replaceKids(root, nav, problems, statusBox, bodyBox);
-    if (!view.enabled) put(bodyBox, el('p', { class: 'settings-empty', text: 'SSH access is off. Switch it on to sign SSH certificates for people\'s host groups (a fresh sign-in is asked).' }));
+    if (!view.enabled) {
+      put(bodyBox, el('p', { class: 'settings-empty' }, 'SSH access is off. Switch it on in ', el('a', { href: '#settings/ssh', text: 'Settings \u2192 SSH' }),
+        ' to sign SSH certificates for people\'s host groups (a fresh sign-in is asked).'));
+      return;
+    }
     try { await RENDER[current](bodyBox); } catch (e) { status(e.message, true); }
   }
 
-  function render(el0) {
+  function render(el0, section, onSec) {
     root = el0;
+    if (section && RENDER[section]) current = section;
+    onSection = onSec || null;
     draw();
   }
 
-  window.PortcullisSSH = { render, _test: { looksPrivileged, hgBody, el } };
+  window.PortcullisSSH = { render, renderSettings, SECTIONS: SECTIONS.map(s => s[0]), _test: { looksPrivileged, hgBody, el } };
 })();
