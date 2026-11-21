@@ -408,6 +408,41 @@ window.PortcullisMailProvider.openAdminView().then(() => setTimeout(() => {
 			t.Errorf("offer %+v", m)
 		}
 	}
+	// Review M2 / nit3: a reply that isn't "ready" releases nothing (the
+	// ticket goes only on the port that answered ready), and once it went
+	// every other channel is closed.
+	out = eval(`const got = [];
+let n = 0, closed = 0, toast = null;
+window.showToast = (m, k) => { toast = [m, k]; };
+window.apiCall = async () => ({ json: async () => ({ url: 'https://mail-admin.example.org/portcullis/open', ticket: 'v1.abc.def' }) });
+window.open = () => ({ closed: false, opener: {}, location: {}, close() { this.closed = true; },
+  postMessage(msg, origin, ports) {
+    const i = ++n, p = ports[0];
+    p.on('close', () => { closed++; });
+    p.onmessage = (m) => { got.push([i, m.data]); };
+    if (i === 1) p.postMessage({ type: 'x' });
+    if (i === 2) p.postMessage({ type: 'portcullis-mail-admin-hello' });
+    if (i === 3) p.postMessage({ type: 'portcullis-mail-admin-ready' });
+  } });
+window.PortcullisMailProvider.openAdminView().then(() => setTimeout(() => {
+  process.stdout.write(JSON.stringify({ got, offers: n, closed, toast }));
+  process.exit(0);
+}, 100));`)
+	var only struct {
+		Got    [][]any
+		Offers int
+		Closed int
+		Toast  []string
+	}
+	if err := json.Unmarshal([]byte(out), &only); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if len(only.Got) != 1 || only.Got[0][0] != float64(3) || only.Toast != nil || only.Offers != 3 || only.Closed != 3 {
+		t.Fatalf("non-ready replies / closing: %+v", only)
+	}
+	if m, _ := only.Got[0][1].(map[string]any); m["ticket"] != "v1.abc.def" || m["type"] != "portcullis-mail-admin-ticket" {
+		t.Fatalf("the ticket message: %+v", only.Got)
+	}
 	// A tab closed before the start page answered: a message, no ticket.
 	out = eval(`let toast = null; window.showToast = (m, k) => { toast = [m, k]; };
 window.apiCall = async () => ({ json: async () => ({ url: 'https://mail-admin.example.org/portcullis/open', ticket: 'v1.abc.def' }) });
