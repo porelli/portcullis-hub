@@ -30,6 +30,8 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/usage"
+	"github.com/prometheus/procfs"
+	"github.com/prometheus/procfs/blockdevice"
 )
 
 // usageStatsUnavailable is the fixed text of a failed stats sample.
@@ -121,6 +123,16 @@ type usageState struct {
 	// sweeping: one sweep at a time.
 	sweeping sync.Mutex
 
+	// The host's figures (contract §6 "Host figures"): readHost reads
+	// the counters once per sweep (tests inject one; nil: not read),
+	// host is the last good read (the next rate's base), hostRing the
+	// derived figures of the last hour, hostErr the last read's failure
+	// (logged once, not every sweep).
+	readHost func() (usage.HostCounters, error)
+	host     *usage.HostCounters
+	hostRing *usage.HostRing
+	hostErr  bool
+
 	// The storage measurer (usage_storage.go): diskMu is held around each
 	// fixer run, by the doctor's scans too (U12: never two walks at
 	// once); measureMu = one run at a time (try-lock, 409); storeMu
@@ -137,7 +149,52 @@ type usageState struct {
 
 func newUsageState() *usageState {
 	return &usageState{now: func() time.Time { return time.Now().UTC() }, budget: usage.SweepBudget, statsTimeout: usage.StatsTimeout,
-		conts: map[string]*usageCont{}, rings: map[string]*usage.Ring{}, times: map[string]*usage.Ring{}, insts: map[string]usageInst{}}
+		conts: map[string]*usageCont{}, rings: map[string]*usage.Ring{}, times: map[string]*usage.Ring{}, insts: map[string]usageInst{},
+		readHost: readProcHost, hostRing: usage.NewHostRing(usage.RingSize)}
+}
+
+// readProcHost reads the host's counters from the Hub's own /proc.
+func readProcHost() (usage.HostCounters, error) {
+	fs, err := procfs.NewFS("/proc")
+	if err != nil {
+		return usage.HostCounters{}, err
+	}
+	bfs, err := blockdevice.NewFS("/proc", "/sys")
+	if err != nil {
+		return usage.HostCounters{}, err
+	}
+	return usage.ReadHost(fs, bfs)
+}
+
+// sweepHost reads the host's counters and adds the derived figures at
+// now (cpus: the engine's NCPU). Never on Kubernetes: the Hub's pod is no
+// reliable view of a node. The error's text is procfs's (a path), never
+// an engine body.
+func (s *usageState) sweepHost(now time.Time, cpus int) {
+	if s.readHost == nil {
+		return
+	}
+	c, err := s.readHost()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cpus <= 0 {
+		cpus = s.cpus
+	}
+	if err != nil {
+		if !s.hostErr {
+			log.Printf("usage: the host's counters: %v", err)
+		}
+		s.hostErr = true
+		s.hostRing.Add(usage.HostPoint{T: now})
+		return
+	}
+	if s.hostErr {
+		log.Printf("usage: the host's counters are read again")
+	}
+	s.hostErr = false
+	smp := usage.DeriveHost(s.host, c, cpus)
+	s.host = &c
+	s.hostRing.Add(usage.HostPoint{T: now, S: smp})
 }
 
 // RunUsageSampler sweeps every interval until ctx ends (main: usage.Interval).
@@ -240,6 +297,14 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		} else if !usageRefused(err) {
 			log.Printf("usage: the engine's info: %v", err)
 		}
+	}
+
+	if kind != string(runtime.KindKubernetes) {
+		cpus := 0
+		if info != nil {
+			cpus = info.CPUs
+		}
+		s.sweepHost(now, cpus)
 	}
 
 	units, err := h.rt.List(ctx, runtime.Filter{})

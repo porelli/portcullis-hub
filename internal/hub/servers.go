@@ -188,9 +188,13 @@ func (h *Hub) Servers(ctx context.Context) []ServerView {
 	return h.serversLocked()
 }
 
+// primaryServerName is the primary's name (the servers list, the usage
+// page's hosts).
+const primaryServerName = "Primary"
+
 // serversLocked is Servers with mu held (read); it takes srvMu.
 func (h *Hub) serversLocked() []ServerView {
-	prim := ServerView{ID: servers.PrimaryID, Name: "Primary", State: ServerReady, Runtime: string(h.cfg.Runtime), Rootless: h.rootlessOn(), Instances: []string{}}
+	prim := ServerView{ID: servers.PrimaryID, Name: primaryServerName, State: ServerReady, Runtime: string(h.cfg.Runtime), Rootless: h.rootlessOn(), Instances: []string{}}
 	ids := make([]string, 0, len(h.st.Servers))
 	byServer := map[string][]string{}
 	for iid, in := range h.st.Instances {

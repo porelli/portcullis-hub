@@ -62,6 +62,11 @@
     return esc(Number(s / 86400).toFixed(0) + ' days ago');
   }
 
+  // hostOf: the host of the server g runs on (contract §11.11 hosts).
+  function hostOf(v, g) {
+    return (v && v.hosts && v.hosts[(g && g.server) || 'primary']) || null;
+  }
+
   // cpuHtml: cores, with the share of the limit, else of the host's CPUs.
   function cpuHtml(sample, host, partial) {
     if (!isNum(sample.cpu_cores)) return NOT_MEASURED;
@@ -187,7 +192,7 @@
         const g = await getJSON('/api/usage/instances/' + enc(c.id));
         if (current !== c) return;
         let host = null;
-        try { host = (await getJSON('/api/usage')).host; } catch (_) { /* the bars show no host share */ }
+        try { host = hostOf(await getJSON('/api/usage'), g); } catch (_) { /* the bars show no host share */ }
         if (current !== c) return;
         drawInstance(c, g, host);
       } else {
@@ -231,7 +236,8 @@
     });
     const core = v.core && v.core.totals ? v.core.totals : {};
     let html = '<div class="usage-strip">';
-    html += '<span>Host: ' + (v.host && isNum(v.host.cpus) ? fmtNum(v.host.cpus) + ' CPUs' : NOT_MEASURED) + ', ' + fmtBytes(v.host ? v.host.memory_bytes : null) + '</span>';
+    const host = hostOf(v, null);
+    html += '<span>Host: ' + (host && isNum(host.cpus) ? fmtNum(host.cpus) + ' CPUs' : NOT_MEASURED) + ', ' + fmtBytes(host ? host.memory_bytes : null) + '</span>';
     html += '<span>Apps: ' + fmtCores(appsCPU) + ', ' + fmtBytes(appsMem) + '</span>';
     html += '<span>Core: ' + fmtCores(core.cpu_cores) + ', ' + fmtBytes(core.mem_bytes) + '</span>';
     html += '<span class="' + esc(v.stale ? 'usage-stale' : '') + '">sampled ' + fmtAge(v.sampled_at) + '</span>';
@@ -291,9 +297,9 @@
     let html = '<table class="usage-table"><thead><tr>' + APP_COLS.map(([k, label]) =>
       '<th><button type="button" class="usage-sort" data-usage-sort="' + esc(k) + '">' + esc(label) + esc(c.sort === k ? (c.dir === 'desc' ? ' ▼' : ' ▲') : '') + '</button></th>').join('') + '</tr></thead><tbody>';
     if (!apps.length) html += '<tr><td colspan="6" class="settings-empty">No app is running.</td></tr>';
-    apps.forEach(g => { const key = ['app', g.instance].join(':'); html += groupRowHtml(g, v.host, key, !!c.open[key]); });
-    (v.unknown_projects || []).forEach(g => { const key = ['unknown', g.name].join(':'); html += groupRowHtml(g, v.host, key, !!c.open[key]); });
-    if (v.core) html += groupRowHtml(v.core, v.host, 'core', !!c.open.core);
+    apps.forEach(g => { const key = ['app', g.instance].join(':'); html += groupRowHtml(g, hostOf(v, g), key, !!c.open[key]); });
+    (v.unknown_projects || []).forEach(g => { const key = ['unknown', g.name].join(':'); html += groupRowHtml(g, hostOf(v, g), key, !!c.open[key]); });
+    if (v.core) html += groupRowHtml(v.core, hostOf(v, v.core), 'core', !!c.open.core);
     return html + '</tbody></table>';
   }
 
@@ -312,7 +318,7 @@
         ', pids ' + (l.pids > 0 ? fmtNum(l.pids) : esc('no limit'));
       html += '<tr' + (doneJob(ct) ? ' class="usage-dim"' : '') + (ct.job ? ' data-usage-job="' + esc(ct.job_state || '') + '"' : '') + '><td>' + esc(app) + '</td><td>' + esc(ct.service) + '<span class="usage-sub">.' + fmtNum(ct.number) + ' ' + esc(ct.id12) + ' ' + esc(stateText(ct)) + '</span>' +
         (ct.error ? ' <span class="usage-sub">' + esc(ct.error) + '</span>' : '') + '</td>' +
-        (ct.state === 'running' ? '<td>' + cpuHtml(ct.sample, v.host, false) + '</td><td>' + memBarHtml(ct.sample, v.host, false) + '</td><td>' + netHtml(ct.sample, false) + '</td>' +
+        (ct.state === 'running' ? '<td>' + cpuHtml(ct.sample, hostOf(v, g), false) + '</td><td>' + memBarHtml(ct.sample, hostOf(v, g), false) + '</td><td>' + netHtml(ct.sample, false) + '</td>' +
         '<td>' + blkHtml(ct.sample, false) + '</td><td>' + pidsHtml(ct.sample, false) + '</td>' : offCellsHtml(5)) + '<td class="usage-sub">' + limitsHtml + '</td></tr>';
     }));
     if (!n) html += '<tr><td colspan="8" class="settings-empty">No container matches.</td></tr>';

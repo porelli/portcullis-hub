@@ -121,8 +121,8 @@ func TestUsageGroupsAppsCoreUnknownOther(t *testing.T) {
 			t.Errorf("another container reached: %s", c)
 		}
 	}
-	if v.Host.CPUs == nil || *v.Host.CPUs != 8 || v.Engine.Runtime != "docker" || !v.Engine.Verified || v.SampledAt == nil {
-		t.Errorf("header = %+v %+v %v", v.Host, v.Engine, v.SampledAt)
+	if h := v.Hosts["primary"]; h.CPUs == nil || *h.CPUs != 8 || v.Engine.Runtime != "docker" || !v.Engine.Verified || v.SampledAt == nil {
+		t.Errorf("header = %+v %+v %v", v.Hosts, v.Engine, v.SampledAt)
 	}
 
 	// Running helpers are one row of the core group.

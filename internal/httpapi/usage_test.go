@@ -76,7 +76,7 @@ func TestUsageOverviewJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &v); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"sampled_at", "interval_s", "stale", "engine", "host", "apps", "core", "unknown_projects", "not_shown", "over_limit"} {
+	for _, k := range []string{"sampled_at", "interval_s", "stale", "engine", "hosts", "apps", "core", "unknown_projects", "not_shown", "over_limit"} {
 		if _, ok := v[k]; !ok {
 			t.Errorf("no %q", k)
 		}
@@ -87,8 +87,11 @@ func TestUsageOverviewJSON(t *testing.T) {
 	if eng := v["engine"].(map[string]any); eng["runtime"] != "docker" || eng["verified"] != true {
 		t.Errorf("engine = %v", eng)
 	}
-	if host := v["host"].(map[string]any); host["cpus"] != 4.0 {
-		t.Errorf("host = %v", host)
+	if host := v["hosts"].(map[string]any)["primary"].(map[string]any); host["cpus"] != 4.0 || host["name"] != "Primary" {
+		t.Errorf("hosts.primary = %v", host)
+	}
+	if _, ok := v["host"]; ok {
+		t.Error("the old host field is still there")
 	}
 	apps := v["apps"].([]any)
 	if len(apps) != 1 {
@@ -96,7 +99,7 @@ func TestUsageOverviewJSON(t *testing.T) {
 	}
 	a := apps[0].(map[string]any)
 	tot := a["totals"].(map[string]any)
-	if tot["mem_bytes"] != float64(128<<20) || a["instance"] != "grafana-a" || a["name"] != "Grafana · Team A" {
+	if tot["mem_bytes"] != float64(128<<20) || a["instance"] != "grafana-a" || a["name"] != "Grafana · Team A" || a["server"] != "primary" {
 		t.Errorf("app = %v", a)
 	}
 	// Null stays null (first sample: no CPU rate); the key is there.

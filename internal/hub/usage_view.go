@@ -7,23 +7,25 @@ import (
 	"time"
 
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/usage"
 )
 
 // UsageView is GET /api/usage (contract §11.11): from the sampler's
-// cache only.
+// cache only. Hosts: server id → its host ("primary" always).
 type UsageView struct {
-	SampledAt       *time.Time   `json:"sampled_at"`
-	IntervalS       int          `json:"interval_s"`
-	Stale           bool         `json:"stale"`
-	Engine          UsageEngine  `json:"engine"`
-	Host            UsageHost    `json:"host"`
-	Apps            []UsageGroup `json:"apps"`
-	Core            UsageGroup   `json:"core"`
-	UnknownProjects []UsageGroup `json:"unknown_projects"`
-	NotShown        int          `json:"not_shown"`
-	OverLimit       int          `json:"over_limit"`
-	MetricsScraped  bool         `json:"metrics_scraped"`
+	SampledAt       *time.Time           `json:"sampled_at"`
+	IntervalS       int                  `json:"interval_s"`
+	Stale           bool                 `json:"stale"`
+	Engine          UsageEngine          `json:"engine"`
+	Hosts           map[string]UsageHost `json:"hosts"`
+	Apps            []UsageGroup         `json:"apps"`
+	Core            UsageGroup           `json:"core"`
+	UnknownProjects []UsageGroup         `json:"unknown_projects"`
+	NotShown        int                  `json:"not_shown"`
+	OverLimit       int                  `json:"over_limit"`
+	MetricsScraped  bool                 `json:"metrics_scraped"`
 }
 
 // UsageEngine is the runtime and the guard's state.
@@ -33,10 +35,18 @@ type UsageEngine struct {
 	Why      string `json:"why,omitempty"`
 }
 
-// UsageHost is the host's CPUs and memory (nil: unknown).
+// UsageHost is one server's host (contract §11.11): its CPUs and memory
+// (the engine's /info) and its host-wide figures from procfs (§6 "Host
+// figures"); every figure nil when not measured, Why the reason.
 type UsageHost struct {
-	CPUs        *int   `json:"cpus"`
-	MemoryBytes *int64 `json:"memory_bytes"`
+	Name         string   `json:"name"`
+	CPUs         *int     `json:"cpus"`
+	MemoryBytes  *int64   `json:"memory_bytes"`
+	CPUUsedCores *float64 `json:"cpu_used_cores"`
+	MemUsedBytes *int64   `json:"mem_used_bytes"`
+	BlkReadBps   *float64 `json:"blk_read_bps"`
+	BlkWriteBps  *float64 `json:"blk_write_bps"`
+	Why          string   `json:"why,omitempty"`
 }
 
 // UsageGroup is one app instance, core, or an unknown project.
@@ -46,6 +56,9 @@ type UsageGroup struct {
 	Name     string `json:"name"`
 	Status   string `json:"status"` // running | stopped | restarting | partly running | job_failed | not_measured
 	Why      string `json:"why,omitempty"`
+	// Server is the id of the server it runs on ("primary"; its host is
+	// UsageView.Hosts[Server]).
+	Server string `json:"server"`
 	// JobsDone / JobsFailed: its one-shot setup jobs that finished (exit
 	// 0) or failed (unitHealth), reported apart from its services ("running
 	// · 3 setup jobs done"; a failed one makes the status job_failed).
@@ -98,6 +111,9 @@ const usageHelpersName = "Hub helpers (transient)"
 // usageNotMeasuredKube: the core group on Kubernetes.
 const usageNotMeasuredKube = "not measured on Kubernetes yet"
 
+// usageHostNotMeasuredKube: the primary's host on Kubernetes.
+const usageHostNotMeasuredKube = "not measured on Kubernetes"
+
 // UsageOverview is the whole view.
 func (h *Hub) UsageOverview() UsageView {
 	s := h.usage
@@ -114,14 +130,7 @@ func (h *Hub) UsageOverview() UsageView {
 		v.SampledAt = &t
 	}
 	v.Stale = s.lastSuccess.IsZero() || s.now().Sub(s.lastSuccess) >= 2*usage.Interval
-	if s.cpus > 0 {
-		n := s.cpus
-		v.Host.CPUs = &n
-	}
-	if s.mem > 0 {
-		m := s.mem
-		v.Host.MemoryBytes = &m
-	}
+	v.Hosts = map[string]UsageHost{servers.PrimaryID: s.primaryHostLocked(v.Engine.Runtime)}
 	byGroup := map[string][]*usageCont{}
 	for _, c := range s.conts {
 		byGroup[c.Group+"\x00"+c.Kind] = append(byGroup[c.Group+"\x00"+c.Kind], c)
@@ -149,9 +158,34 @@ func (h *Hub) UsageOverview() UsageView {
 	return v
 }
 
+// primaryHostLocked is the primary's UsageHost: the engine's CPUs and
+// memory and the newest host point. On Kubernetes every figure is nil.
+// Caller holds s.mu (read).
+func (s *usageState) primaryHostLocked(runtimeKind string) UsageHost {
+	h := UsageHost{Name: primaryServerName}
+	if runtimeKind == string(runtime.KindKubernetes) {
+		h.Why = usageHostNotMeasuredKube
+		return h
+	}
+	if s.cpus > 0 {
+		n := s.cpus
+		h.CPUs = &n
+	}
+	if s.mem > 0 {
+		m := s.mem
+		h.MemoryBytes = &m
+	}
+	if s.hostRing != nil {
+		if p, ok := s.hostRing.Last(); ok {
+			h.CPUUsedCores, h.MemUsedBytes, h.BlkReadBps, h.BlkWriteBps = p.S.CPUUsedCores, p.S.MemUsedBytes, p.S.BlkReadBps, p.S.BlkWriteBps
+		}
+	}
+	return h
+}
+
 // groupLocked builds one group. Caller holds s.mu (read).
 func (s *usageState) groupLocked(instance, template, name string, cs, helpers []*usageCont) UsageGroup {
-	g := UsageGroup{Instance: instance, Template: template, Name: name, Containers: []UsageContainer{}}
+	g := UsageGroup{Instance: instance, Template: template, Name: name, Server: servers.PrimaryID, Containers: []UsageContainer{}}
 	sort.Slice(cs, func(i, j int) bool {
 		if cs[i].Service != cs[j].Service {
 			return cs[i].Service < cs[j].Service
