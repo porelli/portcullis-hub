@@ -95,9 +95,15 @@ func TestServerAuth(t *testing.T) {
 		t.Errorf("templates body = %s", b)
 	}
 
+	// The Marketplace is client-rendered since ux3 Task 13, so this
+	// assertion changed: it used to check the server escaped a template's
+	// name in the index; the index now carries no template name at all,
+	// escaped or not. Manifest text staying text is pinned by
+	// TestMarketplaceCardsNode / TestMarketplaceDrawerNode (node) and the
+	// UI smoke check's hostile template (a real browser).
 	r, b = do(t, srv, "GET", "/", "", true)
-	if r.StatusCode != 200 || !strings.Contains(b, "Demo &lt;b&gt;") || strings.Contains(b, "Demo <b>") {
-		t.Errorf("index = %d, escaped name missing", r.StatusCode)
+	if r.StatusCode != 200 || strings.Contains(b, "Demo <b>") || strings.Contains(b, "Demo &lt;b&gt;") {
+		t.Errorf("index = %d, a template name in the page", r.StatusCode)
 	}
 
 	// The badge shows X-Forwarded-User (the LLDAP username) as-is, escaped.

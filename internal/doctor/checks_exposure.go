@@ -190,7 +190,7 @@ func (lanOnlyExposedCheck) Run(in *Inputs) []Finding {
 			why = "outside"
 			f.Severity = Problem
 			f.Title = fmt.Sprintf("%s: LAN-only port %s is bound to %s, outside the local networks.", p.Instance, portName(p), a)
-			where := "Hub Settings → Local networks"
+			where := "Hub Settings → Network → Local networks"
 			if p.Server != "" {
 				where = "server " + p.Server + "'s Local networks, Settings → Servers"
 			}

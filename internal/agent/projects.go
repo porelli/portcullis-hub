@@ -27,6 +27,7 @@ import (
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/compose"
 	"github.com/portcullis/hub/internal/docker"
+	"github.com/portcullis/hub/internal/fixerspec"
 	"github.com/portcullis/hub/internal/runtime"
 )
 
@@ -91,6 +92,9 @@ type APIConfig struct {
 	DiskFree func(ctx context.Context) (free int64, ok bool)
 	// Images records and sweeps preflight pulls (nil: neither).
 	Images Images
+	// ProcDir / SysDir: the procfs and sysfs GET /v1/host/usage reads
+	// ("": /proc and /sys, the agent container's own; tests).
+	ProcDir, SysDir string
 	// AppfilesGID is the group of the instances' data files and their
 	// directories (the primary's: the Hub's 10001, HubGID; apps read them
 	// through group_add). 0: none (tests); the agent's container has the
@@ -209,6 +213,10 @@ func (a *API) routes() {
 	h(R["ExecRunning"][0], a.execRunning)
 	h(R["Signal"][0], a.withContainer(a.signal))
 	h(R["Events"][0], a.events)
+	h(R["Stats"][0], a.withContainer(a.stats))
+	h(R["LayerSize"][0], a.withContainer(a.layerSize))
+	h(R["ImageSize"][0], a.imageSize)
+	h(X["HostUsage"], a.hostUsage)
 	h(R["ListVolumes"][0], a.listVolumes)
 	h(R["InspectVolume"][0], a.inspectVolume)
 	h(R["CreateVolume"][0], a.createVolume)
@@ -262,8 +270,12 @@ func (a *API) inScope(labels map[string]string) (string, bool) {
 		switch {
 		case b[v]:
 			return v, true // a volume helper for a bundled instance
-		case strings.HasPrefix(v, "folder:") || v == "path-check":
-			return "", true // the agent's own fixer runs
+		case strings.HasPrefix(v, "folder:") || strings.HasPrefix(v, "usage:") || v == "path-check":
+			// The agent's own fixer runs. A label-only trust, as for
+			// folder: and path-check: only someone on the worker's host
+			// can label a container so (a bundle can't: §3 reserved
+			// labels).
+			return "", true
 		}
 	}
 	return "", false
@@ -789,7 +801,16 @@ func (a *API) listVolumes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) scopedVolume(w http.ResponseWriter, r *http.Request, name string) (runtime.Volume, string, bool) {
+	// The name before the engine sees it, and the engine's answer must
+	// be that volume.
+	if !fixerspec.ValidVolumeName(name) {
+		writeError(w, http.StatusBadRequest, "not a volume name")
+		return runtime.Volume{}, "", false
+	}
 	v, err := a.cfg.Runtime.InspectVolume(r.Context(), name)
+	if err == nil && v.Name != name {
+		err = errors.New("another volume answered")
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "no such volume")
 		return v, "", false

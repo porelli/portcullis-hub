@@ -159,9 +159,6 @@ const MaxBytes = 16 << 10
 // list items inside each other, contract §3).
 const MaxDepth = 16
 
-// Check is CheckField for auth.notes.
-func Check(notes string) error { return CheckField("auth.notes", notes) }
-
 // FieldError is an error about a Markdown field in the contract's form
 // (§3): "auth.notes <what>" for the notes, "<field>: <what>" for every
 // other field (long_description: is 16385 bytes, …).

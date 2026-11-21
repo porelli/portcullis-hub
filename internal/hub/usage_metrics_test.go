@@ -121,7 +121,7 @@ func TestMetricsScrapedRecently(t *testing.T) {
 		t.Error("scraped before any scrape")
 	}
 	e.h.NoteMetricsScrape()
-	if !e.h.MetricsScrapedRecently() || !e.h.UsageOverview().MetricsScraped || !e.h.UsageStorage().MetricsScraped {
+	if !e.h.MetricsScrapedRecently() || !e.h.UsageOverview("last").MetricsScraped || !e.h.UsageStorage().MetricsScraped {
 		t.Error("not scraped after a scrape")
 	}
 	e.clock.Add(6 * time.Minute)

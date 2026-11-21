@@ -76,7 +76,7 @@ func TestUsageOverviewJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &v); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"sampled_at", "interval_s", "stale", "engine", "host", "apps", "core", "unknown_projects", "not_shown", "over_limit"} {
+	for _, k := range []string{"sampled_at", "interval_s", "stale", "engine", "hosts", "apps", "core", "unknown_projects", "not_shown", "over_limit"} {
 		if _, ok := v[k]; !ok {
 			t.Errorf("no %q", k)
 		}
@@ -87,8 +87,11 @@ func TestUsageOverviewJSON(t *testing.T) {
 	if eng := v["engine"].(map[string]any); eng["runtime"] != "docker" || eng["verified"] != true {
 		t.Errorf("engine = %v", eng)
 	}
-	if host := v["host"].(map[string]any); host["cpus"] != 4.0 {
-		t.Errorf("host = %v", host)
+	if host := v["hosts"].(map[string]any)["primary"].(map[string]any); host["cpus"] != 4.0 || host["name"] != "Primary" {
+		t.Errorf("hosts.primary = %v", host)
+	}
+	if _, ok := v["host"]; ok {
+		t.Error("the old host field is still there")
 	}
 	apps := v["apps"].([]any)
 	if len(apps) != 1 {
@@ -96,7 +99,7 @@ func TestUsageOverviewJSON(t *testing.T) {
 	}
 	a := apps[0].(map[string]any)
 	tot := a["totals"].(map[string]any)
-	if tot["mem_bytes"] != float64(128<<20) || a["instance"] != "grafana-a" || a["name"] != "Grafana · Team A" {
+	if tot["mem_bytes"] != float64(128<<20) || a["instance"] != "grafana-a" || a["name"] != "Grafana · Team A" || a["server"] != "primary" {
 		t.Errorf("app = %v", a)
 	}
 	// Null stays null (first sample: no CPU rate); the key is there.
@@ -136,12 +139,12 @@ func TestUsageCSV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(recs[0], ","); got != "instance,template,name,status,cpu_cores,mem_bytes,mem_limit_bytes,cpu_limit_cores,pids,pids_limit,net_rx_bps,net_tx_bps,blk_read_bps,blk_write_bps,partial,measured_at" {
+	if got := strings.Join(recs[0], ","); got != "server,instance,template,name,status,cpu_cores,mem_bytes,mem_limit_bytes,cpu_limit_cores,pids,pids_limit,net_rx_bps,net_tx_bps,blk_read_bps,blk_write_bps,partial,measured_at" {
 		t.Errorf("header = %s", got)
 	}
 	var app, core []string
 	for _, r := range recs[1:] {
-		switch r[0] {
+		switch r[1] {
 		case "grafana-a":
 			app = r
 		case "core":
@@ -151,14 +154,18 @@ func TestUsageCSV(t *testing.T) {
 	if app == nil || core == nil {
 		t.Fatalf("rows = %q", recs)
 	}
-	if app[2] != "'Grafana · =HYPERLINK(x)" && !strings.HasPrefix(app[2], "Grafana · ") {
-		t.Errorf("name = %q", app[2])
+	// The server column (contract §11.11, ux3 final review M1).
+	if app[0] != "primary" || core[0] != "primary" {
+		t.Errorf("server = %q, %q", app[0], core[0])
 	}
-	if app[4] != "" || app[5] != fmt.Sprint(128<<20) {
-		t.Errorf("cpu %q (want empty), mem %q", app[4], app[5])
+	if app[3] != "'Grafana · =HYPERLINK(x)" && !strings.HasPrefix(app[3], "Grafana · ") {
+		t.Errorf("name = %q", app[3])
+	}
+	if app[5] != "" || app[6] != fmt.Sprint(128<<20) {
+		t.Errorf("cpu %q (want empty), mem %q", app[5], app[6])
 	}
 	resp, body = doAs(t, e.hub, "root", "GET", "/api/usage/export.csv?view=containers", "")
-	if resp.StatusCode != 200 || !strings.HasPrefix(body, "instance,service,number,id12,state,cpu_cores,mem_bytes,mem_limit_bytes,cpu_limit_cores,pids,pids_limit,net_rx_bps,net_tx_bps,blk_read_bps,blk_write_bps,oom_killed,restarts,measured_at\n") {
+	if resp.StatusCode != 200 || !strings.HasPrefix(body, "server,instance,service,number,id12,state,cpu_cores,mem_bytes,mem_limit_bytes,cpu_limit_cores,pids,pids_limit,net_rx_bps,net_tx_bps,blk_read_bps,blk_write_bps,oom_killed,restarts,measured_at\n") {
 		t.Errorf("containers = %d %s", resp.StatusCode, body)
 	}
 	if code, _ := e.do(t, "root", "GET", "/api/usage/export.csv?view=bogus", ""); code != 400 {
@@ -170,7 +177,7 @@ func TestUsageCSV(t *testing.T) {
 func TestUsageCSVFormulaCell(t *testing.T) {
 	e, rt := usageEnv(t, "Team A")
 	_ = rt
-	u := e.s.Hub.UsageOverview()
+	u := e.s.Hub.UsageOverview("last")
 	if len(u.UnknownProjects) != 0 {
 		t.Fatalf("unknown = %+v", u.UnknownProjects)
 	}
@@ -184,7 +191,7 @@ func TestUsageCSVFormulaCell(t *testing.T) {
 	recs, _ := csv.NewReader(strings.NewReader(body)).ReadAll()
 	found := false
 	for _, r := range recs {
-		if r[0] == "portcullis-=cmd" && r[1] == "'=svc" {
+		if r[0] == "primary" && r[1] == "portcullis-=cmd" && r[2] == "'=svc" {
 			found = true
 		}
 	}
@@ -293,20 +300,37 @@ func TestUsageCSVStorage(t *testing.T) {
 	mustDo(t, e.hub, "root", "POST", "/api/usage/storage/measure", "{}", 202)
 	waitUsageIdle(t, e)
 	resp, body := doAs(t, e.hub, "root", "GET", "/api/usage/export.csv?view=storage", "")
-	if resp.StatusCode != 200 || !strings.HasPrefix(body, "owner,kind,target,alloc_bytes,apparent_bytes,partial,in_total,shared_with,measured_at\n") {
+	if resp.StatusCode != 200 || !strings.HasPrefix(body, "server,owner,kind,target,alloc_bytes,apparent_bytes,partial,in_total,shared_with,measured_at\n") {
 		t.Fatalf("storage csv = %d %s", resp.StatusCode, body)
 	}
 	recs, _ := csv.NewReader(strings.NewReader(body)).ReadAll()
 	found := false
 	for _, r := range recs[1:] {
-		if r[1] == "hub_files" {
+		if r[2] == "hub_files" {
 			found = true
-			if r[3] != "" || r[4] != "" {
+			if r[0] != "primary" || r[4] != "" || r[5] != "" {
 				t.Errorf("null sizes = %q", r)
 			}
 		}
 	}
 	if !found {
 		t.Errorf("no hub_files row: %q", recs)
+	}
+}
+
+func TestUsageWindowParam(t *testing.T) {
+	e, _ := usageEnv(t, "Team A")
+	for q, want := range map[string]string{"": "last", "?window=last": "last", "?window=1h": "1h"} {
+		resp, body := doAs(t, e.hub, "root", "GET", "/api/usage"+q, "")
+		var v map[string]any
+		if resp.StatusCode != 200 || json.Unmarshal([]byte(body), &v) != nil || v["window"] != want {
+			t.Errorf("GET /api/usage%s = %d %s", q, resp.StatusCode, body)
+		}
+	}
+	for _, q := range []string{"?window=5m", "?window=", "?window=1h&window=last", "?window=1h&window=1h", "?window=1H"} {
+		resp, body := doAs(t, e.hub, "root", "GET", "/api/usage"+q, "")
+		if resp.StatusCode != 400 || !strings.Contains(body, "window must be last or 1h") || resp.Header.Get("Cache-Control") != "no-store" {
+			t.Errorf("GET /api/usage%s = %d %s", q, resp.StatusCode, body)
+		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/hub"
+	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/usage"
 )
 
@@ -116,7 +117,20 @@ func (s *Server) handleUsageStorageStop(w http.ResponseWriter, r *http.Request) 
 }
 
 // usageOverview / usageInstance: the route's and the tool's work.
-func (s *Server) usageOverview() hub.UsageView { return s.Hub.UsageOverview() }
+func (s *Server) usageOverview(window string) hub.UsageView { return s.Hub.UsageOverview(window) }
+
+// usageWindow is GET /api/usage's window: absent = last; given once, last
+// or 1h; anything else, or given twice, is refused (false).
+func usageWindow(r *http.Request) (string, bool) {
+	vs, ok := r.URL.Query()["window"]
+	switch {
+	case !ok:
+		return hub.UsageWindowLast, true
+	case len(vs) == 1 && (vs[0] == hub.UsageWindowLast || vs[0] == hub.UsageWindow1h):
+		return vs[0], true
+	}
+	return "", false
+}
 
 func (s *Server) usageInstance(id string) (*hub.UsageGroup, error) { return s.Hub.UsageInstance(id) }
 
@@ -125,7 +139,12 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noStore(w)
-	writeJSON(w, s.usageOverview())
+	window, ok := usageWindow(r)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "window must be last or 1h")
+		return
+	}
+	writeJSON(w, s.usageOverview(window))
 }
 
 func (s *Server) handleUsageInstance(w http.ResponseWriter, r *http.Request) {
@@ -143,10 +162,10 @@ func (s *Server) handleUsageInstance(w http.ResponseWriter, r *http.Request) {
 
 // The CSV headers (contract §11.11, U22).
 var (
-	usageCSVApps = []string{"instance", "template", "name", "status", "cpu_cores", "mem_bytes", "mem_limit_bytes", "cpu_limit_cores",
+	usageCSVApps = []string{"server", "instance", "template", "name", "status", "cpu_cores", "mem_bytes", "mem_limit_bytes", "cpu_limit_cores",
 		"pids", "pids_limit", "net_rx_bps", "net_tx_bps", "blk_read_bps", "blk_write_bps", "partial", "measured_at"}
-	usageCSVStorage    = []string{"owner", "kind", "target", "alloc_bytes", "apparent_bytes", "partial", "in_total", "shared_with", "measured_at"}
-	usageCSVContainers = []string{"instance", "service", "number", "id12", "state", "cpu_cores", "mem_bytes", "mem_limit_bytes", "cpu_limit_cores",
+	usageCSVStorage    = []string{"server", "owner", "kind", "target", "alloc_bytes", "apparent_bytes", "partial", "in_total", "shared_with", "measured_at"}
+	usageCSVContainers = []string{"server", "instance", "service", "number", "id12", "state", "cpu_cores", "mem_bytes", "mem_limit_bytes", "cpu_limit_cores",
 		"pids", "pids_limit", "net_rx_bps", "net_tx_bps", "blk_read_bps", "blk_write_bps", "oom_killed", "restarts", "measured_at"}
 )
 
@@ -170,7 +189,7 @@ func sampleCells(sm usage.Sample) []string {
 func (s *Server) usageCSV(view string) ([]string, [][]string, bool) {
 	switch view {
 	case "apps", "containers":
-		v := s.usageOverview()
+		v := s.usageOverview(hub.UsageWindowLast)
 		at := csvTime(v.SampledAt)
 		groups := append(append(append([]hub.UsageGroup{}, v.Apps...), v.Core), v.UnknownProjects...)
 		var rows [][]string
@@ -179,13 +198,17 @@ func (s *Server) usageCSV(view string) ([]string, [][]string, bool) {
 			if inst == "" {
 				inst = g.Name // an unknown project: its project name
 			}
+			server := g.Server
+			if server == "" {
+				server = servers.PrimaryID // core, unknown projects
+			}
 			if view == "apps" {
-				row := append([]string{inst, g.Template, g.Name, g.Status}, sampleCells(g.Totals)...)
+				row := append([]string{server, inst, g.Template, g.Name, g.Status}, sampleCells(g.Totals)...)
 				rows = append(rows, append(row, strconv.FormatBool(g.Partial), at))
 				continue
 			}
 			for _, c := range g.Containers {
-				row := append([]string{inst, c.Service, strconv.Itoa(c.Number), c.ID12, c.State}, sampleCells(c.Sample)...)
+				row := append([]string{server, inst, c.Service, strconv.Itoa(c.Number), c.ID12, c.State}, sampleCells(c.Sample)...)
 				rows = append(rows, append(row, strconv.FormatBool(c.OOMKilled), strconv.Itoa(c.Restarts), at))
 			}
 		}
@@ -225,21 +248,21 @@ func (s *Server) handleUsageCSV(w http.ResponseWriter, r *http.Request) {
 func (s *Server) usageStorageRows() [][]string {
 	v := s.Hub.UsageStorage()
 	var rows [][]string
-	add := func(it hub.StorageItem) {
-		rows = append(rows, []string{it.Owner, it.Kind, it.Target, usage.Int(it.AllocBytes), usage.Int(it.ApparentBytes),
+	add := func(server string, it hub.StorageItem) {
+		rows = append(rows, []string{server, it.Owner, it.Kind, it.Target, usage.Int(it.AllocBytes), usage.Int(it.ApparentBytes),
 			strconv.FormatBool(it.Partial), strconv.FormatBool(it.InTotal), strings.Join(it.Shared, ";"), csvTime(it.MeasuredAt)})
 	}
 	for _, g := range v.Apps {
 		for _, it := range g.Items {
-			add(it)
+			add(g.Server, it)
 		}
 	}
 	for _, f := range v.Folders {
-		rows = append(rows, []string{f.ID, "folder", f.ID, usage.Int(f.AllocBytes), "", strconv.FormatBool(f.Partial), "false",
+		rows = append(rows, []string{f.Server, f.ID, "folder", f.ID, usage.Int(f.AllocBytes), "", strconv.FormatBool(f.Partial), "false",
 			strings.Join(f.UsedBy, ";"), csvTime(f.MeasuredAt)})
 	}
 	for _, it := range v.Core {
-		add(it)
+		add(servers.PrimaryID, it)
 	}
 	return rows
 }

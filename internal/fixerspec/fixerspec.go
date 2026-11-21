@@ -31,7 +31,18 @@ const (
 	// UsageRoot: where a usage run mounts its volume or bind (never an
 	// image path: the Podman domains_data lesson).
 	UsageRoot = "/vol"
+	// UsageMaxEntries / UsageMaxTime: a usage run's caps (contract
+	// §11.11: 2,000,000 entries, 2 min); a run asking for more is refused
+	// (the worker's agent checks what the Hub sends again).
+	UsageMaxEntries = 2_000_000
+	UsageMaxTime    = 2 * time.Minute
 )
+
+// ValidVolumeName: a volume name a usage run may mount (non-empty, no
+// "/", NUL or control character): checked before any engine sees it.
+func ValidVolumeName(n string) bool {
+	return n != "" && !strings.ContainsAny(n, "/\x00") && !strings.ContainsFunc(n, func(c rune) bool { return c < 0x20 || c == 0x7f })
+}
 
 // Env keeps the Go runtime inside the helper's limits: pids 16 counts
 // threads, and GC workers on idle Ps could otherwise start one per CPU on a
@@ -75,8 +86,9 @@ type Run struct {
 	// rules); runFixer only refuses what is malformed.
 	Source string
 	// Volume: usage only, a named volume mounted read-only at /vol in
-	// place of Source (exactly one of the two). A worker's agent never
-	// runs a usage helper (its label is refused).
+	// place of Source (exactly one of the two). A worker's agent runs a
+	// usage helper only on a bundled project's volume or a bind under its
+	// roots (Rebuild, ux3).
 	Volume runtime.VolumeMount
 	// Opts and Extra are the fixer's flags, rendered by folderfix.Args
 	// (ruling 38). Root and the /in, /out paths are set here.
@@ -223,15 +235,19 @@ func (r Run) validateUsage() error {
 	switch {
 	case hasVol == (r.Source != ""):
 		return errors.New("usage measures exactly one volume or one bind")
-	case hasVol && (r.Volume.Name == "" || strings.ContainsAny(r.Volume.Name, "/\x00") || strings.ContainsFunc(r.Volume.Name, func(c rune) bool { return c < 0x20 || c == 0x7f })):
+	case hasVol && !ValidVolumeName(r.Volume.Name):
 		return fmt.Errorf("usage: volume %q", r.Volume.Name)
 	case !hasVol && (!strings.HasPrefix(r.Source, "/") || path.Clean(r.Source) != r.Source || r.Source == "/" ||
 		strings.ContainsFunc(r.Source, func(c rune) bool { return c < 0x20 || c == 0x7f })):
 		return fmt.Errorf("source %q: want an absolute, clean path below /", r.Source)
-	case r.Folder != "" || r.Unchecked || r.In != nil || r.Out != nil || r.Server != "":
-		return errors.New("usage takes no folder, transfer, identity check or server")
+	case r.Folder != "" || r.Unchecked || r.In != nil || r.Out != nil:
+		return errors.New("usage takes no folder, transfer or identity check")
 	case o.MaxEntries <= 0 || o.MaxTime <= 0:
 		return errors.New("usage needs --max-entries and --max-time")
+	case o.MaxEntries > UsageMaxEntries || o.MaxTime > UsageMaxTime:
+		return fmt.Errorf("usage: the caps are at most %d entries and %s", UsageMaxEntries, UsageMaxTime)
+	case r.Timeout > o.MaxTime+30*time.Second:
+		return fmt.Errorf("usage: a timeout over --max-time + 30s")
 	case o.Target.GID != 0 || o.Target.OwnerUID != nil || len(o.Target.Mkdir) > 0 || len(o.Principals) > 0 || o.Children || o.TopOnly ||
 		o.ExpectDev != 0 || o.ExpectIno != 0 || o.ExpectMountRoot != "" || o.ExpectDigest != "" || o.SnapshotRootDev != 0 || o.SnapshotRootIno != 0:
 		return errors.New("usage takes the caps only")

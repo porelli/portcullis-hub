@@ -249,9 +249,16 @@ process.stdout.write(JSON.stringify({ skel, warning: node('[data-mail-warning]')
 	}
 	// The Mail tab and the Marketplace filter are wired into the page.
 	idx := webAsset(t, "index.html")
-	for _, want := range []string{"['mail', 'Mail']", "templateIsMailProvider", "/static/mailprovider.js", "data-mail-badge", "filterMarketplace("} {
+	for _, want := range []string{"['mail', 'Mail']", "templateIsMailProvider", "/static/mailprovider.js", "[/^marketplace(?:\\?filter=([a-z0-9-]{1,63}))?$/"} {
 		if !strings.Contains(idx, want) {
 			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	// The Marketplace (marketplace.js): the mail badge, and the filter
+	// pre-selects a category chip.
+	for _, want := range []string{"'data-mail-badge'", "if (o && o.filter) st.cat = o.filter;"} {
+		if !strings.Contains(webAsset(t, "marketplace.js"), want) {
+			t.Errorf("marketplace.js lacks %q", want)
 		}
 	}
 }
@@ -452,9 +459,15 @@ window.PortcullisMailProvider.openAdminView().then(() => { process.stdout.write(
 		t.Errorf("closed tab: %s", out)
 	}
 	idx := webAsset(t, "index.html")
-	for _, want := range []string{"data-managed-by-portcullis", ">Managed by Portcullis</span>", "'managed by Portcullis'"} {
+	for _, want := range []string{"'managed by Portcullis'"} {
 		if !strings.Contains(idx, want) {
 			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	// The Marketplace card's badge (marketplace.js, rebuilt with el()).
+	for _, want := range []string{"'data-managed-by-portcullis'", "text: 'Managed by Portcullis'"} {
+		if !strings.Contains(webAsset(t, "marketplace.js"), want) {
+			t.Errorf("marketplace.js lacks %q", want)
 		}
 	}
 }

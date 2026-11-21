@@ -8,8 +8,8 @@ the Portcullis certificate authority instead of a pile of `authorized_keys`
 files.
 
 Who may log into which host, as which account, with or without sudo, is set
-on one page: **Hub → SSH access**. It is off until an administrator switches
-it on. Switching it off again ends access: enrolled hosts keep syncing, lock
+on one page: **Hub → Access → SSH access**. It is off until an administrator switches
+it on in **Hub → Settings → SSH**. Switching it off again ends access: enrolled hosts keep syncing, lock
 every Portcullis account and get every certificate revoked; nothing new is
 enrolled or signed. The interfaces are in
 [contracts §18](../guides/integration-contracts.md#18-ssh-access-and-the-cli-new-ssh-cli-login).
@@ -101,7 +101,7 @@ they stop and print the line to add.
 
 ### Enrolling a managed host
 
-1. **Hub → SSH access → Hosts → Add host**: a name, its addresses and its
+1. **Hub → Access → SSH access → Hosts → Add host**: a name, its addresses and its
    host groups. This needs a fresh sign-in. The Hub shows a **one-time
    enrolment code**, valid 15 minutes. Copy it into a file on the host; it
    is never shown again and never put in a URL.

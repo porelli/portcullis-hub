@@ -44,8 +44,8 @@ const (
 
 // Steps shared by several findings.
 const (
-	stepCustomOverride = "Remove the mount from the custom override (the app's Expert tab) and use the template's folder setting with a shared folder, where it has one (Settings → Shared folders)."
-	stepOneFolder      = "Define a shared folder at the outermost path and assign each app the subpath it needs (Settings → Shared folders), or point the settings at separate directories."
+	stepCustomOverride = "Remove the mount from the custom override (the app's Expert tab) and use the template's folder setting with a shared folder, where it has one (Settings → Storage)."
+	stepOneFolder      = "Define a shared folder at the outermost path and assign each app the subpath it needs (Settings → Storage), or point the settings at separate directories."
 )
 
 // under: p is at or below root (both clean).
@@ -282,7 +282,7 @@ func (sharedPathCheck) Run(in *Inputs) []Finding {
 			// A worker's paths: manage_as_folder probes the primary's host,
 			// so it isn't offered (L1); the step names the gated way.
 			f.Class = FixExplain
-			f.Steps = append(f.Steps, "Define a shared folder for `"+paths[0]+"` on server "+server+" (Settings → Shared folders, server "+server+"), then assign the apps to it.")
+			f.Steps = append(f.Steps, "Define a shared folder for `"+paths[0]+"` on server "+server+" (Settings → Storage, server "+server+"), then assign the apps to it.")
 		} else if len(paths) == 1 && inRoots && !custom {
 			f.Class, f.FixKind = FixOneClick, FixManageAsFolder
 			f.Fix = fmt.Sprintf("Manage `%s` as a shared folder: one group for every app that uses it, setgid directories and default ACLs, so new files stay readable and writable for all of them (previewed first).", paths[0])
@@ -416,7 +416,7 @@ func (primaryGIDConflictCheck) Run(in *Inputs) []Finding {
 			Title: fmt.Sprintf("%s: service %s's %s would need gids %s.", k.inst, k.service, k.env, joinAnd(gids)),
 			Why:   "A process has one primary gid, and " + k.env + " sets it for every path of the service: " + joinAnd(parts) + " can't all get theirs, so one of them can't write.",
 			Class: FixExplain,
-			Steps: []string{"Point these settings at the same shared folder (each with its own subpath), so one gid serves them all (Settings → Shared folders).",
+			Steps: []string{"Point these settings at the same shared folder (each with its own subpath), so one gid serves them all (Settings → Storage).",
 				"Or move the hand-typed directories' group to the same gid on the host."},
 			Instances: []string{k.inst}, Folders: uniq(folders...), Paths: pathsOf(us), Inputs: Digest(us),
 		})
@@ -639,7 +639,7 @@ func (gidCollisionCheck) Run(in *Inputs) []Finding {
 				Why:   fmt.Sprintf("Anything mounted with gid %d is reachable through that group: %s reaches shared folder %s's files without being assigned to it.", g, inst, f.Name),
 				Class: FixExplain,
 				Steps: []string{fmt.Sprintf("Change %s's group setting to another gid.", inst),
-					fmt.Sprintf("Or assign %s to shared folder %s (Settings → Shared folders), if it should use it.", inst, f.Name)},
+					fmt.Sprintf("Or assign %s to shared folder %s (Settings → Storage), if it should use it.", inst, f.Name)},
 				Instances: []string{inst}, Folders: []string{f.ID}, Paths: []string{f.Path},
 				Inputs: Digest([]any{g, f.ID, s.uses}),
 			})
@@ -775,7 +775,7 @@ func (folderReachableAboveCheck) Run(in *Inputs) []Finding {
 				Class: FixExplain,
 				Steps: []string{
 					fmt.Sprintf("Remove the mount of %s from %s, or point it at a directory outside the shared folder (Settings, or the custom override in the Expert tab).", joinAnd(names), u.Instance),
-					fmt.Sprintf("Or unassign %s from shared folder %s (Settings → Shared folders).", u.Instance, f.Name),
+					fmt.Sprintf("Or unassign %s from shared folder %s (Settings → Storage).", u.Instance, f.Name),
 				},
 				Instances: []string{u.Instance}, Folders: []string{f.ID}, Paths: uniq(paths...),
 				Inputs: Digest([]any{f.ID, f.Path, f.GID, all}),
@@ -792,15 +792,15 @@ func changedSteps(c ChangeIn, where string) []string {
 	switch {
 	case strings.HasPrefix(c.Detail, "the folder's device number changed"):
 		return []string{
-			"If the host rebooted (btrfs subvolumes, LVM), the folder is the same directory with a new device number: re-check its identity (Settings → Shared folders → Re-check identity), then enable " + c.Instance + " again.",
+			"If the host rebooted (btrfs subvolumes, LVM), the folder is the same directory with a new device number: re-check its identity (Settings → Storage → Re-check identity), then enable " + c.Instance + " again.",
 			"Otherwise check what is mounted at " + where + " on the host.",
 		}
 	case strings.HasPrefix(c.Detail, "the folder is another directory"):
 		return []string{
 			"The folder's root is a different directory now; if you didn't move it, someone may have swapped it: check on the host what is at " + where + " and who replaced it.",
-			"Put the real directory back. Only if you moved it on purpose, re-check its identity (Settings → Shared folders → Re-check identity: it asks for a second confirmation and forgets the last apply).",
+			"Put the real directory back. Only if you moved it on purpose, re-check its identity (Settings → Storage → Re-check identity: it asks for a second confirmation and forgets the last apply).",
 		}
 	}
 	return []string{"On the host, check what replaced " + where + " and put the real directory back (no symlink).",
-		"Re-apply the folder's assignment (Settings → Shared folders), then enable " + c.Instance + " again."}
+		"Re-apply the folder's assignment (Settings → Storage), then enable " + c.Instance + " again."}
 }

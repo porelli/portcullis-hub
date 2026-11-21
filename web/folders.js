@@ -1,4 +1,4 @@
-// Portcullis Hub — Settings → Shared folders and Local networks (contract
+// Portcullis Hub — Settings → Storage and Local networks (contract
 // §14, plan 2 Task 14). Hub listener only.
 //
 //   window.PortcullisFolders.render(el)               the Shared folders section
@@ -171,7 +171,7 @@
     return h;
   }
 
-  // ── Settings → Shared folders ──────────────────────────────────────
+  // ── Settings → Storage ──────────────────────────────────────
 
   function render(el) {
     sectionEl = el;
@@ -821,7 +821,7 @@
     });
   }
 
-  // ── Settings → Local networks ──────────────────────────────────────
+  // ── Settings → Network → Local networks ──────────────────────────────────────
 
   // cidrNote: a line's problem or warning (the Hub decides; this only
   // says it early).

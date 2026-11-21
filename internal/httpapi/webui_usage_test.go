@@ -111,7 +111,7 @@ func TestUsageTabPlacement(t *testing.T) {
 	if !strings.Contains(h, `['logs', 'Logs'], ['usage', 'Usage']`) {
 		t.Error("PAGE_TABS lacks usage after logs")
 	}
-	for _, want := range []string{`<script src="/static/usage.js"></script>`, `id="tab-usage"`, `id="usage-root"`, `^usage(?:\/(apps|containers|storage))?$`, "PortcullisUsage.stop()"} {
+	for _, want := range []string{`<script src="/static/usage.js"></script>`, `id="tab-usage"`, `id="usage-root"`, `^usage(?:\/(share|apps|containers|storage))?$`, "PortcullisUsage.stop()"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("index.html lacks %q", want)
 		}

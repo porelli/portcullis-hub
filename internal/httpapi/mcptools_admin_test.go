@@ -1094,7 +1094,7 @@ func TestSecretSettingForm(t *testing.T) {
 	args := map[string]any{"id": "secretapp", "option": "api_key"}
 	res := e.call(t, "/mcp/admin", "root", "2026-07-28", "set_secret_setting", args, urlElicit)
 	el := elicitation(t, res, secretFormInputKey)
-	if el["url"] != "https://hub.example.org/#app/secretapp/settings/api_key" {
+	if el["url"] != "https://hub.example.org/#apps/secretapp/settings/api_key" {
 		t.Errorf("form url %v", el["url"])
 	}
 	v := "s3cret-value-1"

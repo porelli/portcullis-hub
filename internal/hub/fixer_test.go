@@ -112,7 +112,7 @@ func TestFixerCapsByMode(t *testing.T) {
 			// The worker agent rebuilds the same spec byte for byte
 			// (multi-server Task 6: fixerspec.Rebuild).
 			sent := agentapi.FixerSpecOf(c.run.Spec("", "/usr/local/bin/portcullis-agent"))
-			if _, err := fixerspec.Rebuild(sent, "/usr/local/bin/portcullis-agent", []string{"/srv"}); err != nil {
+			if _, err := fixerspec.Rebuild(sent, "/usr/local/bin/portcullis-agent", []string{"/srv"}, nil); err != nil {
 				t.Errorf("agent rebuild: %v", err)
 			}
 			f := newFixerFixture(t)

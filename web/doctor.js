@@ -201,6 +201,32 @@
     return '<span class="pill ' + cls + '">' + esc(s) + '</span>';
   }
 
+  // The finding's link (contract §14.5 "Links"): where its fix lives on
+  // the Hub. The Hub builds link.hash from validated parts; the page shows
+  // it only when it matches LINK_RE (doctor.LinkHashPattern, the same
+  // text: TestDoctorLinkPattern), as an escaped same-tab <a href>; the
+  // hash route opens it. The label comes from the hash's shape only.
+  const LINK_RE = /^#(?:apps\/[a-z0-9]+(?:-[a-z0-9]+)*(?:\/(?:overview|settings|groups|filesharing|logs|usage|backups|ai|vpn|mail|expert)|\/settings\/[A-Za-z0-9_.-]{1,128})?|settings\/(?:signin|network|storage|mail|ai|servers|ssh|sources)|access\/(?:ssh(?:\/(?:hosts|hostgroups|grants|certs))?|vpn)|usage(?:\/storage)?)$/;
+  const TAB_LABEL = { settings: 'Settings', groups: 'Groups', filesharing: 'File sharing', logs: 'Logs', usage: 'Usage', backups: 'Backups', ai: 'AI', vpn: 'VPN', mail: 'Mail', expert: 'Expert' };
+  const PAGE_LABEL = {
+    'settings/signin': 'Settings → Sign-in', 'settings/network': 'Settings → Network', 'settings/storage': 'Settings → Storage',
+    'settings/mail': 'Settings → Mail', 'settings/ai': 'Settings → AI', 'settings/servers': 'Settings → Servers', 'settings/ssh': 'Settings → SSH',
+    'settings/sources': 'Settings → Template sources', 'access/ssh': 'Access → SSH access', 'access/ssh/hosts': 'Access → SSH hosts',
+    'access/ssh/hostgroups': 'Access → SSH host groups', 'access/ssh/grants': 'Access → SSH grants', 'access/ssh/certs': 'Access → SSH certificates',
+    'access/vpn': 'Access → VPN devices', 'usage': 'Usage', 'usage/storage': 'Usage → Storage',
+  };
+  function linkOf(f) {
+    const hash = f && f.link && typeof f.link.hash === 'string' ? f.link.hash : '';
+    if (!LINK_RE.test(hash)) return null;
+    const p = hash.slice(1).split('/');
+    let label;
+    if (p[0] !== 'apps') label = 'Open ' + (PAGE_LABEL[hash.slice(1)] || 'page');
+    else if (p.length === 4) label = 'Open setting';
+    else if (p.length === 3 && p[2] !== 'overview') label = 'Open ' + (TAB_LABEL[p[2]] || 'app') + ' tab';
+    else label = 'Open app';
+    return { hash, label };
+  }
+
   function card(f) {
     let h = '<div class="dr-card dr-' + esc(f.severity) + '" data-dr-fp="' + esc(f.fp) + '" data-dr-token="' + esc(f.token || '') + '">';
     h += '<div class="dr-title">' + sevPill(f.severity) + ' <span data-dr-title>' + md(f.title) + '</span></div>';
@@ -224,8 +250,8 @@
       h += '<button type="button" class="btn btn-danger btn-sm" data-dr-dismiss data-dr-dis-inst="' + esc(d.instance) + '" data-dr-dis-comp="' + esc(d.companion) +
         '" data-dr-dis-user="' + esc(d.user) + '">Dismiss ' + esc(d.user) + '</button>';
     });
-    if (f.link && f.link.instance && f.link.tab) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open-tab="' + esc(f.link.tab) + '" data-dr-open="' + esc(f.link.instance) + '">' + (f.link.tab === 'ai' ? 'Open AI tab' : 'Open app') + '</button>';
-    else if (f.link && f.link.instance) h += '<button type="button" class="btn btn-secondary btn-sm" data-dr-open="' + esc(f.link.instance) + '" data-dr-option="' + esc(f.link.option || '') + '">Open setting</button>';
+    const lk = linkOf(f);
+    if (lk) h += '<a class="btn btn-secondary btn-sm" data-dr-link href="' + esc(lk.hash) + '">' + esc(lk.label) + '</a>';
     h += f.muted ? '<button type="button" class="btn btn-secondary btn-sm" data-dr-unmute>Unmute</button>'
       : '<button type="button" class="btn btn-secondary btn-sm" data-dr-mute>Mute</button>';
     h += '</div>';
@@ -411,14 +437,6 @@
       if (t.closest('[data-dr-cancel]')) { if (!(fixes[fp] && fixes[fp].busy)) { delete fixes[fp]; c.querySelector('[data-dr-panel]').innerHTML = ''; } return; }
       if (t.closest('[data-dr-reload]')) { render(el); return; }
       if (t.closest('[data-dr-explain]')) { const s = c.querySelector('[data-dr-steps]'); s.hidden = !s.hidden; return; }
-      // A tab link (AI findings): the app's tab when the page has one
-      // (openAppTab, the AI tab's task), else the app itself.
-      if ((b = t.closest('[data-dr-open-tab]'))) {
-        if (typeof window.openAppTab === 'function') window.openAppTab(b.dataset.drOpen, b.dataset.drOpenTab);
-        else window.openSettingAt(b.dataset.drOpen, '');
-        return;
-      }
-      if ((b = t.closest('[data-dr-open]'))) { window.openSettingAt(b.dataset.drOpen, b.dataset.drOption); return; }
       if ((b = t.closest('[data-dr-dismiss]'))) { dismiss(c, b.dataset.drDisInst, b.dataset.drDisComp, b.dataset.drDisUser); return; }
       if (t.closest('[data-dr-mute]')) { openMute(fp); return; }
       if (t.closest('[data-dr-mute-go]')) { mute(fp, true); return; }

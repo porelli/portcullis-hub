@@ -462,10 +462,10 @@ func folderSaveCheck(t *templates.Template, cur state.InstanceSettings, folders 
 			if settings.PerPersonTree(o) {
 				return statusErr(http.StatusConflict, errPerPersonFolder, k)
 			}
-			return statusErr(http.StatusConflict, "setting %s: a shared folder value can't be set here: assign through Settings → Shared folders", k)
+			return statusErr(http.StatusConflict, "setting %s: a shared folder value can't be set here: assign through Settings → Storage", k)
 		}
 		if id, _, isRef, _ := folderRefOf(cur.Values[k]); isRef {
-			return statusErr(http.StatusConflict, "setting %s uses shared folder %s: assign through Settings → Shared folders", k, id)
+			return statusErr(http.StatusConflict, "setting %s uses shared folder %s: assign through Settings → Storage", k, id)
 		}
 	}
 	opts := t.Manifest.Options()
@@ -752,7 +752,7 @@ func (h *Hub) probeFolders(ctx context.Context, ps []folderProbe, after bool) (*
 			case !sp.Exists && after:
 				return p, p.sub + " is gone", errFolderChanged(p.name)
 			case !sp.Exists:
-				return p, p.sub + " doesn't exist", statusErr(http.StatusConflict, "shared folder %s: %s doesn't exist yet: apply the folder assignment (Settings → Shared folders)", p.name, p.sub)
+				return p, p.sub + " doesn't exist", statusErr(http.StatusConflict, "shared folder %s: %s doesn't exist yet: apply the folder assignment (Settings → Storage)", p.name, p.sub)
 			case after && (sp.Dev != p.subDev || sp.Ino != p.subIno):
 				return p, p.sub + " is another directory than at the start", errFolderChanged(p.name)
 			}

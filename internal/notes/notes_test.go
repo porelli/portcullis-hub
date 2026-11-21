@@ -208,7 +208,7 @@ func TestCheckRefusesFast(t *testing.T) {
 		"over 16 KiB of prose":        strings.Repeat("word ", MaxBytes/5+1),
 	} {
 		start := time.Now()
-		err := Check(in)
+		err := CheckField("auth.notes", in)
 		if took := time.Since(start); took > 250*time.Millisecond {
 			t.Errorf("%s: Check took %v", name, took)
 		}
@@ -222,7 +222,7 @@ func TestCheckRefusesFast(t *testing.T) {
 		"exactly 16 KiB":           strings.Repeat("x", MaxBytes),
 		"thematic break":           "---\n\n***",
 	} {
-		if err := Check(in); err != nil {
+		if err := CheckField("auth.notes", in); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}

@@ -603,7 +603,7 @@
       h += '<button type="button" class="btn btn-sm btn-secondary" data-action="folder-change" data-key="' + esc(o.key) + '">Change subfolder…</button></div>';
       h += '<div class="ps-hint">Uses shared folder <strong>' + esc(f ? f.name : ref.id) + '</strong>' +
         (f ? ': <code>' + esc(f.path + (ref.sub ? '/' + ref.sub : '')) + '</code>' : '') +
-        '. Changes go through Settings → Shared folders (a previewed assignment).</div>';
+        '. Changes go through Settings → Storage (a previewed assignment).</div>';
     } else {
       h += '</div>';
     }

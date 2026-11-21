@@ -64,7 +64,7 @@ var impersonationNoToolRoutes = map[string]string{
 // vpnNoToolRoutes are the VPN admin routes no tool mirrors (V9): Settings
 // → VPN and the manual DNS acknowledgement are the admin UI's only.
 var vpnNoToolRoutes = map[string]string{
-	"PUT /api/vpn/settings":                "admin UI only (Settings → VPN)",
+	"PUT /api/vpn/settings":                "admin UI only (Settings → Network → VPN)",
 	"POST /api/instances/{id}/vpn-dns/ack": "admin UI only (the instance's VPN tab, after configuring the records by hand)",
 }
 
