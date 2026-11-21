@@ -251,6 +251,28 @@
     .btn-secondary { background: #334155; color: #e2e8f0; }
     .btn-secondary:hover { background: #475569; }
     .btn-sm { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
+    /* Shared baseline for every module's controls (Settings sections, SSH
+       access, …). :where() keeps specificity 0: every section's own rule
+       still wins; this only replaces the browser's defaults (white
+       inputs, grey buttons, dark-blue links). */
+    :where(input:not([type]), input[type="text"], input[type="number"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="datetime-local"], textarea, select) {
+      padding: 0.375rem 0.625rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; font-family: inherit; color-scheme: dark; }
+    :where(input:not([type]), input[type="text"], input[type="number"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], textarea, select):focus { outline: none; border-color: #3b82f6; }
+    :where(input, textarea)::placeholder { color: #475569; }
+    :where(input, textarea, select):disabled { opacity: 0.6; cursor: not-allowed; }
+    :where(input[type="checkbox"], input[type="radio"]) { accent-color: #3b82f6; }
+    :where(.inst-form) :where(input:not([type]), input[type="number"], textarea) { width: 100%; padding: 0.5rem 0.75rem; font-size: 0.875rem; margin-bottom: 0.25rem; }
+    :where(.inst-table) :where(input:not([type]), input[type="text"]) { width: 100%; }
+    /* A .btn without a variant (btn btn-sm): the secondary look. */
+    :where(.btn:not(.btn-primary, .btn-secondary, .btn-danger, .btn-icon)) { background: #334155; color: #e2e8f0; }
+    :where(.btn:not(.btn-primary, .btn-secondary, .btn-danger, .btn-icon)):hover { background: #475569; }
+    :where(.btn:disabled) { opacity: 0.5; cursor: not-allowed; }
+    /* SSH access subtabs (ssh.js): a tab bar like .usage-nav. */
+    .ssh-sections { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #334155; }
+    /* Links: readable on the dark background everywhere. */
+    :where(.tab-content a:not(.btn)) { color: #93c5fd; }
+    /* A facts list outside a section card. */
+    :where(:not(.inst-section) > .inst-facts) { font-size: 0.8125rem; margin: 0.5rem 0 1rem; }
 
     .badge-builtin { color: #3b82f6; }
     .badge-community { color: #a855f7; }
@@ -590,6 +612,10 @@
     .fd-usedby { display: flex; flex-direction: column; gap: 0.375rem; max-height: 18rem; overflow-y: auto; }
     .fd-use { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.8125rem; }
     .fd-use input[type=text] { width: 12rem; padding: 0.25rem 0.5rem; }
+    .fd-inst { display: flex; flex-direction: column; gap: 0.25rem; }
+    .fd-inst + .fd-inst { border-top: 1px solid #334155; padding-top: 0.375rem; }
+    .fd-inst-head { font-size: 0.8125rem; font-weight: 600; }
+    .fd-inst .fd-use { padding-left: 1rem; }
     .fd-check { margin-top: 0.5rem; font-size: 0.8125rem; }
     .fd-check-ok { color: #4ade80; } .fd-check-bad { color: #f59e0b; }
     .fd-advanced { margin-bottom: 1rem; } .fd-advanced summary { cursor: pointer; color: #94a3b8; font-size: 0.8125rem; }
@@ -3997,6 +4023,9 @@
           if (!sb) return;
           sb.innerHTML = PortcullisServers.instanceSection(inst);
           PortcullisServers.wire(sb, inst, () => openInstancePage(inst.id, 'overview'));
+          // Rendered before the list arrived (a deep link): add "Runs on".
+          const facts = pane.querySelector('dl.inst-facts');
+          if (facts && !facts.querySelector('[data-runs-on]')) facts.insertAdjacentHTML('beforeend', PortcullisServers.runsOn(inst));
         }).catch(() => {});
       }
       loadContainers(id, pane);
