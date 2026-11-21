@@ -34,6 +34,7 @@ import (
 	"github.com/portcullis/hub/internal/docker"
 	"github.com/portcullis/hub/internal/idmap"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
@@ -1451,6 +1452,14 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 		// or template. They have no routers, so no hostnames, and get no
 		// Keycloak client or access role.
 		if t.Manifest.Routerless() {
+			// The wired mail provider's read-only admin view (contract
+			// §19.13): full administrators only, with the Hub's own
+			// sign-in template, while its router is rendered (normal mode).
+			if mb := t.Manifest.Mail; mb != nil && mb.AdminView != nil && h.mailModeLocked(t.ID) == mailNormal {
+				host := h.mailAdminHost()
+				apps = append(apps, policy.App{ID: t.ID, Enabled: true, Hosts: hostSet([]string{host}, coreHosts),
+					GroupAccess: true, AccessGroup: lldap.AdminGroup, Template: h.st.SignIn.Core["hub"]})
+			}
 			continue
 		}
 		users, admins := h.instanceGroupsLocked(t)

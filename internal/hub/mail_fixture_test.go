@@ -23,6 +23,12 @@ const (
 // vectors (internal/templates/testdata/mail_vectors.json) as files.
 func mailTemplateFiles(t *testing.T) map[string]string {
 	t.Helper()
+	return mailVectorFiles(t, "stalwart-shaped ok")
+}
+
+// mailVectorFiles is one ok vector of the shared mail vectors as files.
+func mailVectorFiles(t *testing.T, name string) map[string]string {
+	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "templates", "testdata", "mail_vectors.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -34,11 +40,11 @@ func mailTemplateFiles(t *testing.T) map[string]string {
 		t.Fatal(err)
 	}
 	for _, v := range vs {
-		if v.Name == "stalwart-shaped ok" {
+		if v.Name == name {
 			return map[string]string{"manifest.yaml": v.Manifest, "compose.yml": v.Compose, "gate.sh": "#!/bin/sh\n", "unbound.conf": "server:\n"}
 		}
 	}
-	t.Fatal("no stalwart-shaped vector")
+	t.Fatalf("no vector %q", name)
 	return nil
 }
 
@@ -46,7 +52,13 @@ func mailTemplateFiles(t *testing.T) map[string]string {
 // mailsrv; wired: it is the wired provider (normal mode).
 func newMailSlotFixture(t *testing.T, wired bool, others ...string) *fixture {
 	t.Helper()
-	extra := map[string]map[string]string{mailProviderID: mailTemplateFiles(t)}
+	return newMailSlotFixtureFrom(t, mailTemplateFiles(t), wired, others...)
+}
+
+// newMailSlotFixtureFrom is newMailSlotFixture with mailsrv's files.
+func newMailSlotFixtureFrom(t *testing.T, files map[string]string, wired bool, others ...string) *fixture {
+	t.Helper()
+	extra := map[string]map[string]string{mailProviderID: files}
 	for _, id := range others {
 		fs := mailTemplateFiles(t)
 		fs["compose.yml"] = strings.ReplaceAll(fs["compose.yml"], "templates/"+mailProviderID+"/", "templates/"+id+"/")

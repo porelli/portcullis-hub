@@ -433,6 +433,10 @@ func checkMailNetworkAttachments(proj *types.Project, t *templates.Template, mod
 			add(mailMetricsNetwork, sm.Service, "", mailServerMetricsAlias)
 		}
 		add(mailProxyNetwork, b.Wellknown.Service, "")
+		if b.AdminView != nil {
+			// The read-only admin view router (contract §19.13).
+			add(mailProxyNetwork, b.AdminView.Service, "")
+		}
 	}
 	refuse := func(f string, a ...any) error {
 		return statusErr(http.StatusConflict, "%s was not started: "+f, append([]any{t.ID}, a...)...)

@@ -105,6 +105,7 @@ var mailNoToolRoutes = map[string]string{
 	"PUT /api/instances/{id}/mail-provider":                      "mail providers: never wired, switched or unwired through MCP or AI (contract §19.9)",
 	"POST /api/mail/provider/switch":                             "mail providers: never switched through MCP or AI (contract §19.9)",
 	"POST /api/mail/provider/retry-void":                         "mail providers: the void is retried from the Mail tab only (contract §19.11)",
+	"POST /api/mail/admin-view":                                  "mail providers: the read-only admin view opens only in the browser, never through MCP or AI (contract §19.13)",
 }
 
 // sshNoToolRoutes are the SSH admin routes no tool mirrors (contract

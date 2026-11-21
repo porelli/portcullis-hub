@@ -287,3 +287,48 @@ func TestWebMailSensitiveAndFormer(t *testing.T) {
 		t.Error("the sensitive save doesn't run the fresh sign-in")
 	}
 }
+
+// TestWebMailAdminView (contract §19.13): with the admin view routed, the
+// Mail tab and Settings → Mail show the exact warning and the read-only
+// link (labels escaped); without it, neither; a mail provider's app is
+// "Managed by Portcullis", never "No web page".
+func TestWebMailAdminView(t *testing.T) {
+	const warning = "Stalwart's own admin screen is read-only here. Make changes in Portcullis (Settings → Mail); changes made elsewhere would bypass Portcullis's mail safeguards."
+	eval := func(js string) string {
+		return nodeEval(t, "global.window = {};\n"+webAsset(t, "mailprovider.js")+"\n"+webAsset(t, "mail.js")+"\n"+js)
+	}
+	tab := eval(`process.stdout.write(window.PortcullisMailProvider.tabSkeleton({wired: true, mode: "normal", admin_view: true, label: "Stalwart"}))`)
+	esc := strings.NewReplacer("'", "&#39;").Replace(warning)
+	if !strings.Contains(tab, esc) || !strings.Contains(tab, "data-mail-admin-view-open") || !strings.Contains(tab, "Open Stalwart's admin (read-only)") {
+		t.Errorf("Mail tab: %s", tab)
+	}
+	for _, v := range []string{`{wired: true, mode: "void", admin_view: false, label: "Stalwart"}`, `{wired: false, admin_view: true, label: "Stalwart"}`} {
+		if h := eval(`process.stdout.write(window.PortcullisMailProvider.tabSkeleton(` + v + `))`); strings.Contains(h, "data-mail-admin-view") {
+			t.Errorf("%s shows the admin view: %s", v, h)
+		}
+	}
+	st := eval(`process.stdout.write(window.PortcullisMail.stateHtml({mail: "on"}, {mail: "on", provider: {instance: "stalwart", template: "stalwart", label: "<b>S</b>", mode: "normal", admin_view: true}}, []))`)
+	if !strings.Contains(st, esc) || !strings.Contains(st, "Open &lt;b&gt;S&lt;/b&gt;'s admin (read-only)") || strings.Contains(st, "<b>S") {
+		t.Errorf("Settings → Mail: %s", st)
+	}
+	if h := eval(`process.stdout.write(window.PortcullisMail.stateHtml({mail: "on"}, {mail: "on", provider: {instance: "stalwart", template: "stalwart", label: "S", mode: "normal", admin_view: false}}, []))`); strings.Contains(h, "data-mail-admin-view") {
+		t.Errorf("Settings → Mail without the view: %s", h)
+	}
+	// The link comes from the audited route, opened as a new tab without an
+	// opener, and only to an https …/admin/ URL.
+	src := webAsset(t, "mailprovider.js")
+	for _, want := range []string{"'/api/mail/admin-view', 'POST'", "w.opener = null", `/^https:\/\/[a-z0-9.-]+\/admin\/$/`} {
+		if !strings.Contains(src, want) {
+			t.Errorf("mailprovider.js lacks %q", want)
+		}
+	}
+	idx := webAsset(t, "index.html")
+	for _, want := range []string{"data-managed-by-portcullis", ">Managed by Portcullis</span>", "'managed by Portcullis'"} {
+		if !strings.Contains(idx, want) {
+			t.Errorf("index.html lacks %q", want)
+		}
+	}
+	if !strings.Contains(idx, "{{if .MailProvider}}\n                  <span class=\"auth-badge method\" data-managed-by-portcullis") {
+		t.Error("the Marketplace badge isn't Managed by Portcullis for mail providers first")
+	}
+}

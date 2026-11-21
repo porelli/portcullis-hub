@@ -19,6 +19,33 @@ func (s *Server) registerMailProvider(mux routeMux) {
 	mux.HandleFunc("PUT /api/instances/{id}/mail-provider", s.handleSetInstanceMailProvider)
 	mux.HandleFunc("POST /api/mail/provider/switch", s.handleSwitchMailProvider)
 	mux.HandleFunc("POST /api/mail/provider/retry-void", s.handleRetryMailVoid)
+	mux.HandleFunc("POST /api/mail/admin-view", s.handleMailAdminView)
+}
+
+// handleMailAdminView: POST /api/mail/admin-view {} → 200 {url}, the
+// wired provider's read-only admin view (contract §19.13). Full
+// administrators in the browser only: an AI or MCP caller and a delegate
+// are refused first (403). Audited mail.admin_view_opened.
+func (s *Server) handleMailAdminView(w http.ResponseWriter, r *http.Request) {
+	a := requestActor(r)
+	if a.Via != "" {
+		http.Error(w, "not allowed: the mail admin view opens only in the browser, never through MCP or AI", http.StatusForbidden)
+		return
+	}
+	if !s.adminOnly(w, r) {
+		return
+	}
+	var b struct{}
+	if !readMailBody(w, r, &b, `{}`) {
+		return
+	}
+	u, err := s.Hub.MailAdminViewURL(a)
+	if err != nil {
+		writeErr(w, err, http.StatusInternalServerError)
+		return
+	}
+	noStore(w)
+	writeJSON(w, map[string]string{"url": u})
 }
 
 // handleSwitchMailProvider: POST /api/mail/provider/switch {to, confirm,

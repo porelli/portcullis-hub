@@ -854,6 +854,10 @@ type MailProviderSummary struct {
 	Mode     string        `json:"mode"`
 	Void     *MailVoidView `json:"void"`
 	Held     bool          `json:"held"`
+	// AdminView: the provider's read-only admin view is routed now
+	// (contract §19.13: its block has admin_view and it runs in normal
+	// mode). A flag only: the link comes from POST /api/mail/admin-view.
+	AdminView bool `json:"admin_view"`
 }
 
 // MailDomainStateRow is one domain's mail state (also the host routes').
@@ -886,6 +890,7 @@ func (h *Hub) MailStatus(ctx context.Context) MailStatusView {
 			ps := &MailProviderSummary{Instance: p.Instance, Template: p.Template, Mode: h.mailModeTextLocked(p.Instance), Void: h.mailVoidViewLocked(), Held: h.st.Mail.Held != nil}
 			if _, m := h.mailWiredLocked(); m != nil {
 				ps.Label = m.Label
+				ps.AdminView = m.AdminView != nil && h.mailModeLocked(p.Instance) == mailNormal
 			}
 			v.Provider = ps
 		}
@@ -1073,4 +1078,38 @@ func (h *Hub) HostMailDomains() []MailDomainStateRow {
 		out = append(out, MailDomainStateRow{Name: n, State: s})
 	}
 	return out
+}
+
+// MailAdminViewURL is POST /api/mail/admin-view (contract §19.13): the
+// wired provider's read-only admin view, for a full administrator in the
+// browser (the route refuses AI, MCP and delegates first). 503 while
+// nothing is wired or the provider isn't in normal mode, 409 when its
+// block has no admin view. Audited mail.admin_view_opened.
+func (h *Hub) MailAdminViewURL(actor directory.Actor) (url string, err error) {
+	h.mu.RLock()
+	p := h.st.Mail.Provider
+	var id string
+	var av bool
+	mode := mailUnwired
+	if p != nil && h.mailOn() {
+		id = p.Instance
+		mode = h.mailModeLocked(id)
+		if _, m := h.mailWiredLocked(); m != nil {
+			av = m.AdminView != nil
+		}
+	}
+	host := h.mailAdminHost()
+	h.mu.RUnlock()
+	defer func() {
+		if id != "" {
+			h.auditOp(actor, "mail.admin_view_opened", id, "read-only", err)
+		}
+	}()
+	switch {
+	case id == "" || mode != mailNormal:
+		return "", statusErr(http.StatusServiceUnavailable, "mail isn't running right now")
+	case !av:
+		return "", statusErr(http.StatusConflict, "the mail provider has no read-only admin view")
+	}
+	return "https://" + host + "/admin/", nil
 }

@@ -6,6 +6,8 @@
 //   window.PortcullisMailProvider.switchDialog(from)    Settings → Mail's Switch…
 //   window.PortcullisMailProvider.unwire(id)            Settings → Mail's Unwire…
 //   window.PortcullisMailProvider.retryVoid()           Retry an owed void
+//   window.PortcullisMailProvider.openAdminView()       the read-only admin view (§19.13)
+//   window.PortcullisMailProvider.adminViewHtml(label)  its warning and link (pure; tests)
 //   window.PortcullisMailProvider.tabSkeleton(view)     (pure; tests)
 //
 // GET  /api/instances/{id}/mail-provider    the tab's view (+ fresh_auth)
@@ -13,6 +15,7 @@
 //                                           {wired: false, drain}
 // POST /api/mail/provider/switch            {to, confirm, confirm_empty, code, code_verifier, nonce}
 // POST /api/mail/provider/retry-void
+// POST /api/mail/admin-view                 {} → {url} (audited)
 //
 // Rules: provider text (its name, version, checks, refusals, errors and
 // the warning) is set with textContent only, never into innerHTML; the
@@ -26,6 +29,33 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   const enc = encodeURIComponent;
+
+  // ADMIN_VIEW_WARNING is the read-only admin view's warning (contract
+  // §19.13), shown next to its link.
+  const ADMIN_VIEW_WARNING = 'Stalwart\'s own admin screen is read-only here. Make changes in Portcullis (Settings → Mail); changes made elsewhere would bypass Portcullis\'s mail safeguards.';
+
+  // adminViewHtml is the warning and the link for the provider label (the
+  // label is the template's, escaped; "Stalwart" in the warning is the
+  // contract's text).
+  function adminViewHtml(label) {
+    return '<div class="public-warn" data-mail-admin-view><p data-mail-admin-view-warning>' + esc(ADMIN_VIEW_WARNING) + '</p>' +
+      '<button type="button" class="btn btn-sm" data-mail-admin-view-open>Open ' + esc(label || 'the mail server') + '\'s admin (read-only)</button></div>';
+  }
+
+  // openAdminView asks the Hub for the link (audited) and opens it in a
+  // new tab, from the click itself (the tab opens first, then navigates).
+  async function openAdminView() {
+    const w = window.open('', '_blank');
+    if (w) w.opener = null;
+    try {
+      const r = await (await window.apiCall('/api/mail/admin-view', 'POST', {})).json();
+      if (!r || typeof r.url !== 'string' || !/^https:\/\/[a-z0-9.-]+\/admin\/$/.test(r.url)) throw new Error('the Hub returned no admin view link');
+      if (w) w.location.href = r.url; else window.location.href = r.url;
+    } catch (e) {
+      if (w) w.close();
+      window.showToast(e.message, 'error');
+    }
+  }
 
   // tabSkeleton is the Mail tab's markup for view: ids and buttons only;
   // every text that comes from the provider or the Hub's refusals is
@@ -52,6 +82,7 @@
         (v.held ? 'Confirm the updated template' : 'Make this the mail server') + '</button></div>' +
         '<p class="settings-hint"><small>A fresh sign-in with your security key follows.</small></p></div>';
     }
+    if (v.wired && v.admin_view) h += adminViewHtml(v.label);
     if (v.wired) {
       h += '<div class="inst-row"><label><input type="checkbox" data-mail-drain checked> drain first (senders keep delivering until every domain is off)</label> ' +
         '<button type="button" class="btn btn-danger btn-sm" data-mailp-act="unwire">Unwire…</button></div>';
@@ -112,6 +143,7 @@
     pane.innerHTML = tabSkeleton(v);
     fillTab(pane, v);
     pane.onclick = e => {
+      if (e.target.closest && e.target.closest('[data-mail-admin-view-open]')) { openAdminView(); return; }
       const b = e.target.closest && e.target.closest('[data-mailp-act]');
       if (!b || !pane.contains(b)) return;
       const st = (t, warn) => setStatus(pane, t, warn);
@@ -196,5 +228,5 @@
     dlg.showModal();
   }
 
-  window.PortcullisMailProvider = { renderTab, switchDialog, unwire, retryVoid, tabSkeleton, fillTab };
+  window.PortcullisMailProvider = { renderTab, switchDialog, unwire, retryVoid, tabSkeleton, fillTab, adminViewHtml, openAdminView, ADMIN_VIEW_WARNING };
 })();

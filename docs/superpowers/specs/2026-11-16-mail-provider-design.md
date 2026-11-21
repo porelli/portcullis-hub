@@ -163,7 +163,7 @@ mail:
 - `api_version`: exactly `1`. The Hub refuses a version it doesn't speak (`409` at wiring, doctor `mail_provider_refused`).
 - `api`, `wellknown`, `metrics`, `server_metrics`: a compose service of the template plus a port, 1024–65535.
   - Not a job, not an AI companion, no `network_mode`.
-  - **No Traefik router and no `traefik.*` label on any service of a mail template.** The only router is the Hub's well-known router (§6.8).
+  - **No Traefik router and no `traefik.*` label on any service of a mail template.** The only router is the Hub's well-known router (§6.8). **Exception (ux2, 2026-11-20, user ruling): the mail admin view is read-only and admin-only.** An optional `admin_view: {service, port}` gets the Hub's admin view router on `mail-admin.<main domain>` (full administrators only, never the portal, MCP or AI), and the provider MUST make the mail server itself refuse every write of the view's principal and mask every secret (contract §19.13). All management stays in the Hub, so every guard below still applies.
 - `listeners`: exactly the four keys, each a container port 1024–65535, all on one service. That service publishes no port itself: the template's compose has **no `ports:` on any service**, and the manifest has no `ports` list.
 - `tls`, `gated`: lists of services. Every service in `listeners` and `api` must be in both. A service that serves mail or holds credentials must honour the gate.
 - `sessions.restart`: one service, normally the listener service. **Required**: the Hub restarts it after every removal and every revoked mail password, whatever the server claims about sessions (§10, invariant 8).

@@ -730,7 +730,9 @@
                 {{else if eq (printf "%v" .Manifest.Auth.SSO) "partial"}}
                   <span class="auth-badge sso-partial" title="Partial SSO via proxy auth header">SSO*</span>
                 {{end}}
-                {{if .Manifest.Routerless}}
+                {{if .MailProvider}}
+                  <span class="auth-badge method" data-managed-by-portcullis="{{.ID}}" title="Mail is managed in Portcullis (Settings → Mail and the instance's Mail tab), so Portcullis's mail safeguards always apply. A full administrator can open the mail server's own admin screen read-only.">Managed by Portcullis</span>
+                {{else if .Manifest.Routerless}}
                   <span class="auth-badge method" data-no-web-page="{{.ID}}" title="This app has no web page: people use it with its own client (see My apps)">No web page</span>
                 {{end}}
                 {{if .Manifest.Auth.GroupAccess}}
@@ -3694,7 +3696,7 @@
     function instLineHtml(i, dup) {
       const st = instStatus(i);
       const hosts = Object.keys(i.hosts || {}).sort().map(r => i.hosts[r]);
-      const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : 'no web page'];
+      const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : (templateIsMailProvider(i.template) ? 'managed by Portcullis' : 'no web page')];
       // Two instances of one app with the same name: their ids tell them apart.
       if (dup) sub.unshift('<code class="muted">' + escapeHtml(i.id) + '</code>');
       if (i.access_group) sub.push(PortcullisPeople.groupLink(i.access_group) + memberCountHtml(i.access_group));
@@ -4006,7 +4008,12 @@
         pageCtx.domains = d.domains;
         pageCtx.routers = d.routers;
         if (d.legacy) { ed.innerHTML = '<p class="settings-empty">This template still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed.</p>' + hostRowsReadOnly(inst.hosts); return; }
-        if (!(d.routers || []).length) { ed.innerHTML = '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>'; return; }
+        if (!(d.routers || []).length) {
+          ed.innerHTML = templateIsMailProvider(inst.template)
+            ? '<p class="settings-empty" data-managed-by-portcullis>Managed by Portcullis: mail is managed in Settings → Mail and on the <a href="#apps/' + encodeURIComponent(inst.id) + '/mail">Mail tab</a>. A full administrator can open the mail server\'s own admin screen read-only from there.</p>'
+            : '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>';
+          return;
+        }
         const pending = inst.state === 'deleting' || inst.state === 'restoring';
         ed.innerHTML = hostRows(d.routers, inst.hosts || {}, true, inst.template) +
           '<div class="inst-row"><label class="settings-empty" for="inst-move-domain">Move to domain</label>' +
@@ -4322,7 +4329,12 @@
       ctx.routers = d.routers || [];
       if (!box.dataset.drawn) {
         box.dataset.drawn = '1';
-        if (!ctx.routers.length) { box.innerHTML = '<p class="settings-empty">No web page: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames.</p>'; return; }
+        if (!ctx.routers.length) {
+          box.innerHTML = templateIsMailProvider(ctx.tid)
+            ? '<p class="settings-empty" data-managed-by-portcullis>Managed by Portcullis: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames of its own; mail is managed in Settings → Mail.</p>'
+            : '<p class="settings-empty">No web page: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames.</p>';
+          return;
+        }
         const main = ctx.domains.find(x => x.main) || ctx.domains[0];
         box.innerHTML = '<div class="host-row"><label for="setup-domain">domain</label>' +
           '<select id="setup-domain" data-setup-domain>' + domainOptions(ctx.domains, main && main.name) + '</select>' +

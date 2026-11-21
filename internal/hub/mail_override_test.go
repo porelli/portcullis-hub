@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
 	"maps"
 	"os"
@@ -559,5 +560,157 @@ func TestMailSubnetOverlapRefused(t *testing.T) {
 	writeFile(t, core, "PORTCULLIS_VPN_RESERVED_RANGES=not-a-cidr\n")
 	if r := refusal(); len(r) != 1 || !strings.Contains(r[0], "can't be read") {
 		t.Fatalf("unreadable: %q", r)
+	}
+}
+
+// TestMailAdminViewOverride (contract §19.1, §19.13): a block with
+// admin_view gets, in normal mode, portcullis-proxy and the two admin
+// routers (the Hub's admin chain, authaware TLS) on that service, the
+// admin host on every named service and the pinned SPKIs on the view
+// only; the websecure router goes in the VPN modes admin and server;
+// void and unwired modes route nothing.
+func TestMailAdminViewOverride(t *testing.T) {
+	f := newMailSlotFixtureFrom(t, mailVectorFiles(t, "admin_view ok"), true)
+	f.h.SetMailCoreForTest(true, "mail.example.org")
+	f.h.mu.Lock()
+	f.h.st.Mail.TLS = state.MailTLS{SPKISHA256: []string{strings.Repeat("ab", 32), strings.Repeat("cd", 32)}}
+	f.h.mu.Unlock()
+	host := "mail-admin." + f.h.cfg.Domain
+	d := decodeOverride(t, renderMail(t, f, mailNormal))
+	av := d.Services["admin-view"]
+	if _, ok := av.Networks[mailProxyNetwork]; !ok {
+		t.Fatalf("admin-view not on %s: %v", mailProxyNetwork, av.Networks)
+	}
+	want := map[string]string{
+		"traefik.enable":         "true",
+		"traefik.docker.network": mailProxyNetwork,
+		"traefik.http.routers." + MailAdminRouter + ".rule":                      "Host(`" + host + "`)",
+		"traefik.http.routers." + MailAdminRouter + ".entrypoints":               "websecure",
+		"traefik.http.routers." + MailAdminRouter + ".middlewares":               mailAdminMiddlewares,
+		"traefik.http.routers." + MailAdminRouter + ".tls":                       "true",
+		"traefik.http.routers." + MailAdminRouter + ".tls.options":               "authaware@file",
+		"traefik.http.routers." + MailAdminRouter + ".service":                   MailAdminRouter,
+		"traefik.http.routers." + MailAdminRouter + "-vpn.rule":                  "Host(`" + host + "`)",
+		"traefik.http.routers." + MailAdminRouter + "-vpn.entrypoints":           "vpnsecure",
+		"traefik.http.routers." + MailAdminRouter + "-vpn.middlewares":           mailAdminMiddlewaresVPN,
+		"traefik.http.routers." + MailAdminRouter + "-vpn.tls":                   "true",
+		"traefik.http.routers." + MailAdminRouter + "-vpn.tls.options":           "authaware@file",
+		"traefik.http.routers." + MailAdminRouter + "-vpn.service":               MailAdminRouter,
+		"traefik.http.services." + MailAdminRouter + ".loadbalancer.server.port": "8090",
+	}
+	// The route key: one per install, set by the router after forward-auth
+	// and group-gate, and handed to the proxy with Traefik's address.
+	key := av.Environment[VarMailAdminRouteKey]
+	if len(key) != 48 || av.Labels["traefik.http.middlewares."+MailAdminKeyMiddleware+".headers.customrequestheaders."+MailAdminKeyHeader] != key {
+		t.Fatalf("route key %q / label %v", key, av.Labels)
+	}
+	want["traefik.http.middlewares."+MailAdminKeyMiddleware+".headers.customrequestheaders."+MailAdminKeyHeader] = key
+	if av.Environment[VarMailAdminTraefikIP] != "172.31.250.2" {
+		t.Fatalf("Traefik IP %q", av.Environment[VarMailAdminTraefikIP])
+	}
+	for _, chain := range []string{mailAdminMiddlewares, mailAdminMiddlewaresVPN} {
+		g := strings.Index(chain, "portcullis-groups")
+		k := strings.Index(chain, MailAdminKeyMiddleware+"@docker")
+		if g < 0 || k < g {
+			t.Errorf("the key is set before group-gate: %s", chain)
+		}
+	}
+	if again := decodeOverride(t, renderMail(t, f, mailNormal)).Services["admin-view"].Environment[VarMailAdminRouteKey]; again != key {
+		t.Fatal("the route key changed between renders")
+	}
+	for _, s := range []string{"stalwart", "adapter"} {
+		if strings.Contains(renderMail(t, f, mailNormal), "\n      "+VarMailAdminRouteKey) && d.Services[s].Environment[VarMailAdminRouteKey] != "" {
+			t.Errorf("%s got the route key", s)
+		}
+	}
+	if !reflect.DeepEqual(av.Labels, want) {
+		t.Fatalf("admin-view labels\n got %v\nwant %v", av.Labels, want)
+	}
+	if !strings.Contains(mailAdminMiddlewares, "portcullis-auth@docker,portcullis-groups@docker") || !strings.Contains(mailAdminMiddlewaresVPN, "portcullis-groups-vpn@docker") {
+		t.Fatal("the admin chain lost forward-auth or group-gate")
+	}
+	if av.Environment[VarMailTLSSPKI] != strings.Repeat("ab", 32)+","+strings.Repeat("cd", 32) || av.Environment[VarMailAdminHost] != host {
+		t.Fatalf("admin-view env %v", av.Environment)
+	}
+	for _, s := range []string{"stalwart", "adapter"} {
+		e := d.Services[s].Environment
+		if e[VarMailAdminHost] != host || e[VarMailTLSSPKI] != "" {
+			t.Errorf("%s env %v", s, e)
+		}
+	}
+	// The view gets no certificate, slot file, group 2000 or core network
+	// beyond portcullis-proxy.
+	if len(av.Volumes) != 0 || len(av.GroupAdd) != 0 || av.Networks[mailAPINetwork] != nil || av.Networks[mailMetricsNetwork] != nil {
+		t.Fatalf("admin-view got %v %v %v", av.Volumes, av.GroupAdd, av.Networks)
+	}
+	if len(d.Services["adapter"].Labels) == 0 || d.Services["adapter"].Labels["traefik.http.routers."+MailAdminRouter+".rule"] != "" {
+		t.Fatal("the admin router is on the adapter")
+	}
+	for _, m := range []string{VPNModeAdmin, VPNModeServer} {
+		writeFile(t, filepath.Join(f.project, ".env"), "CORE_VAR=core-value\n"+VarVPNMode+"="+m+"\n")
+		l := decodeOverride(t, renderMail(t, f, mailNormal)).Services["admin-view"].Labels
+		if l["traefik.http.routers."+MailAdminRouter+".rule"] != "" || l["traefik.http.routers."+MailAdminRouter+"-vpn.entrypoints"] != "vpnsecure" {
+			t.Errorf("VPN mode %s: %v", m, l)
+		}
+	}
+	for _, mode := range []mailMode{mailVoid, mailUnwired} {
+		ov := renderMail(t, f, mode)
+		if strings.Contains(ov, MailAdminRouter) || strings.Contains(ov, VarMailTLSSPKI) {
+			t.Errorf("%s routes the admin view:\n%s", mode, ov)
+		}
+	}
+	// The plain stalwart-shaped block has no admin view at all.
+	if ov := renderMail(t, mailOverrideFixture(t), mailNormal); strings.Contains(ov, MailAdminRouter) || strings.Contains(ov, VarMailAdminHost) {
+		t.Fatal("a block without admin_view rendered the admin view")
+	}
+}
+
+// TestMailAdminViewPolicy (contract §19.13): the wired provider's admin
+// view host is published with the group lldap_admin while it is routed
+// (normal mode) and never otherwise, and no app may take the host while
+// mail is on.
+func TestMailAdminViewPolicy(t *testing.T) {
+	f := newMailSlotFixtureFrom(t, mailVectorFiles(t, "admin_view ok"), true)
+	f.h.SetMailCoreForTest(true, "mail.example.org")
+	f.h.mu.Lock()
+	f.h.st.Enabled = append(f.h.st.Enabled, mailProviderID)
+	for i := range f.h.instances {
+		if f.h.instances[i].ID == mailProviderID {
+			f.h.instances[i].Enabled = true
+		}
+	}
+	f.h.mu.Unlock()
+	host := "mail-admin." + f.h.cfg.Domain
+	read := func() map[string]any {
+		if err := f.h.WritePolicy(); err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(readFile(t, f.h.policyPath())), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	doc := read()
+	groups, _ := doc["groups"].(map[string]any)
+	hosts, _ := doc["hosts"].(map[string]any)
+	if groups[host] != "lldap_admin" || hosts[host] == nil {
+		t.Fatalf("admin view host not published for admins: groups %v hosts %v", groups, hosts)
+	}
+	// Void mode: no router, nothing published.
+	f.h.mu.Lock()
+	f.h.st.Mail.VoidOwed = &state.MailVoid{Reason: "wire"}
+	f.h.mu.Unlock()
+	doc = read()
+	if g, _ := doc["groups"].(map[string]any); g[host] != nil {
+		t.Fatalf("published in void mode: %v", g)
+	}
+	for h, want := range map[string]bool{host: true, "x." + host: true, "mail-adminx." + f.h.cfg.Domain: false} {
+		if got := f.h.mailAdminReserved(h, true) != ""; got != want {
+			t.Errorf("%s reserved %v, want %v", h, got, want)
+		}
+	}
+	if f.h.mailAdminReserved(host, false) != "" {
+		t.Error("reserved with mail off")
 	}
 }

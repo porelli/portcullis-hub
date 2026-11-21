@@ -553,6 +553,10 @@ type MailProviderView struct {
 	// echoes it (M1).
 	BlockHash string              `json:"block_hash,omitempty"`
 	Wiring    *state.MailProvider `json:"-"`
+	// AdminView: the read-only admin view is routed now (contract
+	// §19.13); Label names the provider in its link.
+	AdminView bool   `json:"admin_view"`
+	Label     string `json:"label"`
 }
 
 // MailVoidView is an owed void with the last attempt's error.
@@ -581,7 +585,8 @@ func (h *Hub) InstanceMailProvider(ctx context.Context, id string) (*MailProvide
 		return nil, statusErr(http.StatusNotFound, "%s is no instance of a mail provider template", id)
 	}
 	mode := h.mailModeLocked(id)
-	v := &MailProviderView{Wired: mode != mailUnwired, Mode: h.mailModeTextLocked(id), Warning: MailWarning, RefusedBecause: []string{}}
+	v := &MailProviderView{Wired: mode != mailUnwired, Mode: h.mailModeTextLocked(id), Warning: MailWarning, RefusedBecause: []string{},
+		AdminView: t.Manifest.Mail.AdminView != nil && mode == mailNormal, Label: t.Manifest.Mail.Label}
 	except := ""
 	if v.Wired {
 		except = id
