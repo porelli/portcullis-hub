@@ -850,8 +850,18 @@ func TestStorageDiskRoles(t *testing.T) {
 	h.usage.mu.Lock()
 	h.usage.dataRoot = "/var/lib/docker"
 	h.usage.mu.Unlock()
+	// The fake volume and folder devs must not be the test machine's own
+	// data directory's (its real statfs joins the disks).
+	realDev, _, _, err := statDir(h.cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volDev, folderDev := uint64(2049), uint64(66305)
+	if realDev == volDev || realDev == folderDev {
+		volDev, folderDev = 2050, 66306
+	}
 	e.rep = func(r fixerRun) (*folderfix.Report, error) {
-		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10, Dev: 2049, FreeBytes: 50, TotalBytes: 100}, nil
+		return &folderfix.Report{Version: 1, Mode: "usage", AllocBytes: 10, Dev: volDev, FreeBytes: 50, TotalBytes: 100}, nil
 	}
 	if _, _, err := e.measure(t, ""); err != nil {
 		t.Fatal(err)
@@ -861,18 +871,18 @@ func TestStorageDiskRoles(t *testing.T) {
 	h.mu.Unlock()
 	h.scanCacheMu.Lock()
 	h.scanData = &scanFile{Version: scanCacheVersion, Scans: map[string]scanEntry{
-		"/srv/media": {Target: "/srv/media", Folder: "media", At: time.Now(), Report: &folderfix.Report{AllocBytes: 123, Entries: 5, Dev: 66305, TotalBytes: 1000, FreeBytes: 10}},
+		"/srv/media": {Target: "/srv/media", Folder: "media", At: time.Now(), Report: &folderfix.Report{AllocBytes: 123, Entries: 5, Dev: folderDev, TotalBytes: 1000, FreeBytes: 10}},
 	}}
 	h.scanCacheMu.Unlock()
 	roles := map[string][3]string{}
 	for _, d := range h.UsageStorage().Disks {
 		roles[d.Device] = [3]string{d.Role, d.Path, d.Server}
 	}
-	if r := roles["8:1"]; r != [3]string{DiskDockerData, "/var/lib/docker", "primary"} {
-		t.Errorf("8:1 = %v (all %v)", r, roles)
+	if r := roles[linuxDevice(volDev)]; r != [3]string{DiskDockerData, "/var/lib/docker", "primary"} {
+		t.Errorf("%s = %v (all %v)", linuxDevice(volDev), r, roles)
 	}
-	if r := roles["259:1"]; r != [3]string{DiskFolderRoot, "/srv/media", "primary"} {
-		t.Errorf("259:1 = %v (all %v)", r, roles)
+	if r := roles[linuxDevice(folderDev)]; r != [3]string{DiskFolderRoot, "/srv/media", "primary"} {
+		t.Errorf("%s = %v (all %v)", linuxDevice(folderDev), r, roles)
 	}
 	agent := 0
 	for dev, r := range roles {
