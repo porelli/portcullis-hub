@@ -103,11 +103,17 @@ type HANode struct {
 }
 
 // HADNSSite is one site of a name: whether one of its ingress nodes is
-// ok, and the worst case if it fails.
+// ok, and the worst case if it fails; its ingress nodes, which of the
+// name's published addresses are its (frontdoor-status sites.<s>.
+// addresses, plan Task 28) and how many of its probers were blind in the
+// front door's last round (its uplink lost).
 type HADNSSite struct {
-	Site          string `json:"site"`
-	Healthy       bool   `json:"healthy"`
-	WorstCaseText string `json:"worst_case_text"`
+	Site          string   `json:"site"`
+	Healthy       bool     `json:"healthy"`
+	WorstCaseText string   `json:"worst_case_text"`
+	Ingress       []string `json:"ingress"`
+	Addresses     []string `json:"addresses"`
+	BlindProbers  int      `json:"blind_probers"`
 }
 
 // HADNS is one name the front door publishes.
@@ -510,7 +516,10 @@ type frontdoorDoc struct {
 		WorstCaseS int      `json:"worst_case_s"`
 	} `json:"names"`
 	Sites map[string]struct {
-		Healthy bool `json:"healthy"`
+		Healthy      bool     `json:"healthy"`
+		Ingress      []string `json:"ingress"`
+		Addresses    []string `json:"addresses"`
+		BlindProbers int      `json:"blind_probers"`
 	} `json:"sites"`
 }
 
@@ -595,7 +604,18 @@ func haDNS(doc []byte, provider string) (HAFrontdoor, []HADNS, error) {
 			v.Addresses = []string{}
 		}
 		for _, s := range sites {
-			v.PerSite = append(v.PerSite, HADNSSite{Site: s, Healthy: d.Sites[s].Healthy, WorstCaseText: SiteWorstCaseText(s, ns.WorstCaseS, provider)})
+			st := d.Sites[s]
+			ps := HADNSSite{Site: s, Healthy: st.Healthy, WorstCaseText: SiteWorstCaseText(s, ns.WorstCaseS, provider),
+				Ingress: slices.Sorted(slices.Values(st.Ingress)), Addresses: []string{}, BlindProbers: max(0, st.BlindProbers)}
+			if ps.Ingress == nil {
+				ps.Ingress = []string{}
+			}
+			for _, a := range v.Addresses {
+				if slices.Contains(st.Addresses, a) {
+					ps.Addresses = append(ps.Addresses, a)
+				}
+			}
+			v.PerSite = append(v.PerSite, ps)
 		}
 		out = append(out, v)
 	}

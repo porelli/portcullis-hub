@@ -14,7 +14,8 @@
 //   nodes:[{name, role, class, site, ready, fencing, n_minus_1}],
 //   quorum:{etcd, vault, sentinel}, sites:[{name, primary, nodes, servers,
 //   gateway, ingress, rtt_ms}], dns:[{name, addresses, worst_case_text,
-//   per_site:[{site, healthy, worst_case_text}]}], credentials_note, command,
+//   per_site:[{site, healthy, worst_case_text, ingress, addresses,
+//   blind_probers}]}], credentials_note, command,
 //   frontdoor:{state, error}, volumes:[{name, robustness, degraded_since}],
 //   warnings:[...], known_gaps:[...]}
 //
@@ -88,7 +89,11 @@
     return h + '<ul class="policy-notes" data-ha-dns>' + v.dns.map(d =>
       '<li data-ha-name="' + esc(d.name) + '">' + code(d.name) + ' → ' + ((d.addresses || []).map(code).join(', ') || pill('bad', 'no address')) +
         ' — ' + esc(d.worst_case_text) + '<ul>' + (d.per_site || []).map(s =>
-          '<li data-ha-dns-site="' + esc(s.site) + '">' + pill(s.healthy ? 'ok' : 'bad', s.site) + ' ' + esc(s.worst_case_text) + '</li>').join('') +
+          '<li data-ha-dns-site="' + esc(s.site) + '">' + pill(s.healthy ? 'ok' : 'bad', s.site) + ' ' +
+            ((s.addresses || []).length ? 'publishes ' + s.addresses.map(code).join(', ') : 'publishes nothing') +
+            ' (' + (s.ingress || []).length + ' ingress node' + ((s.ingress || []).length === 1 ? '' : 's') +
+            (s.blind_probers ? ', ' + pill('warn', s.blind_probers + ' blind prober' + (s.blind_probers === 1 ? '' : 's')) : '') + ') — ' +
+            esc(s.worst_case_text) + '</li>').join('') +
         '</ul></li>').join('') + '</ul>';
   }
 

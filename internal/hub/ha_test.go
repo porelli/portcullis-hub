@@ -434,7 +434,7 @@ func TestHAPageNeverShowsCredentials(t *testing.T) {
 		reads++
 		mu.Unlock()
 		return []byte(`{"v":1,"state":"standing by","names":{"example.org":{"addresses":["198.51.100.7"],"ttl":600,"worst_case_s":630,"last_change":null,"pending":null}},` +
-			`"probes":{"n1":{"ok":true,"verdict":"healthy","internal_only":true,"blind":false}},"sites":{"main":{"healthy":true,"ingress":["n1"]}}}`), nil
+			`"probes":{"n1":{"ok":true,"verdict":"healthy","internal_only":true,"blind":false}},"sites":{"main":{"healthy":true,"ingress":["n1"],"addresses":["198.51.100.7"],"blind_probers":0}}}`), nil
 	})
 	v, err := cf.h.HA(context.Background())
 	if err != nil {
@@ -453,7 +453,7 @@ func TestHAPageNeverShowsCredentials(t *testing.T) {
 		t.Errorf("destination %+v, %d status reads", haItem(t, v, "backup_destination"), reads)
 	}
 	want := `[{"name":"example.org","addresses":["198.51.100.7"],"worst_case_text":"worst case ~10 min for clients that hit the dead address first, on Porkbun",` +
-		`"per_site":[{"site":"main","healthy":true,"worst_case_text":"if site main fails: worst case ~10 min on Porkbun"}]}]`
+		`"per_site":[{"site":"main","healthy":true,"worst_case_text":"if site main fails: worst case ~10 min on Porkbun","ingress":["n1"],"addresses":["198.51.100.7"],"blind_probers":0}]}]`
 	if d, _ := json.Marshal(v.DNS); string(d) != want || v.Frontdoor.State != "standing by" {
 		t.Errorf("dns %s, front door %+v", d, v.Frontdoor)
 	}
@@ -501,5 +501,30 @@ func TestHAOffKubernetes(t *testing.T) {
 	var se *StatusError
 	if !errors.As(err, &se) || se.Status != 409 || se.Error() != "high availability needs Kubernetes" {
 		t.Errorf("off Kubernetes: %v", err)
+	}
+}
+
+// TestHAPerSiteView (plan Task 28): each name's per-site view says which
+// of its published addresses are the site's, its ingress nodes and its
+// blind probers; main first; a published address of no site (a removed
+// node, still waiting for its change) is listed under the name only.
+func TestHAPerSiteView(t *testing.T) {
+	doc := `{"v":1,"state":"leading","names":{"example.org":{"addresses":["198.51.100.9","198.51.100.1","198.51.100.5"],"ttl":60,"worst_case_s":90}},` +
+		`"sites":{"edge":{"healthy":false,"ingress":["e1"],"addresses":["198.51.100.5"],"blind_probers":1},` +
+		`"main":{"healthy":true,"ingress":["n2","n1"],"addresses":["198.51.100.1","198.51.100.2"],"blind_probers":0}}}`
+	_, dns, err := haDNS([]byte(doc), "Porkbun")
+	if err != nil || len(dns) != 1 {
+		t.Fatalf("%+v %v", dns, err)
+	}
+	got, _ := json.Marshal(dns[0].PerSite)
+	want := `[{"site":"main","healthy":true,"worst_case_text":"if site main fails: worst case ~1 min on Porkbun","ingress":["n1","n2"],"addresses":["198.51.100.1"],"blind_probers":0},` +
+		`{"site":"edge","healthy":false,"worst_case_text":"if site edge fails: worst case ~1 min on Porkbun","ingress":["e1"],"addresses":["198.51.100.5"],"blind_probers":1}]`
+	if string(got) != want {
+		t.Errorf("per_site %s\nwant     %s", got, want)
+	}
+	// Sites without the optional lists: empty lists, never null.
+	_, dns, _ = haDNS([]byte(`{"v":1,"state":"leading","names":{"example.org":{"addresses":["198.51.100.1"],"worst_case_s":90}},"sites":{"main":{"healthy":true}}}`), "Porkbun")
+	if got, _ := json.Marshal(dns[0].PerSite); string(got) != `[{"site":"main","healthy":true,"worst_case_text":"if site main fails: worst case ~1 min on Porkbun","ingress":[],"addresses":[],"blind_probers":0}]` {
+		t.Errorf("per_site %s", got)
 	}
 }
