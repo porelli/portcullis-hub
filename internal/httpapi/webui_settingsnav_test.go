@@ -202,7 +202,7 @@ async function waitFor(s) { calls.push(['waitFor', s]); return form; }
 function flash() { calls.push(['flash']); }
 function showToast(m) { calls.push(['toast', m]); }
 function openProviderSecretAt(p, f) { calls.push(['secret', p, f]); }
-`+hubFunc(t, src, "peopleRedirect")+hubFunc(t, src, "oldAppLink")+hubFunc(t, src, "showSettings")+hubFunc(t, src, "openSettingsForm")+block+hubFunc(t, src, "routeTo")+hubFunc(t, src, "routeHash")+`
+`+hubFunc(t, src, "peopleRedirect")+hubFunc(t, src, "showSettings")+hubFunc(t, src, "openSettingsForm")+block+hubFunc(t, src, "routeTo")+hubFunc(t, src, "routeHash")+`
 (async () => {
   const r = {};
   const go = async h => { calls.length = 0; location.hash = h; routeHash(); await new Promise(res => setTimeout(res, 10)); return calls.filter(c => c[0] !== 'focus'); };

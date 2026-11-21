@@ -405,7 +405,10 @@
     if (t.mail_provider) out.push('Can be this server’s mail provider');
     if (m.instances === 'multi') out.push('Multi-instance');
     if (t.routerless) out.push('No web page (people use its own client)');
-    if (m.placement === 'primary_only') out.push('Runs on the primary server only');
+    // The Hub's computed reasons (contract §11.7 primary_only_reasons),
+    // which include placement: primary_only.
+    const po = Array.isArray(t.primary_only_reasons) ? t.primary_only_reasons : [];
+    if (po.length || m.placement === 'primary_only') out.push('Runs on the primary server only' + (po.length ? ' (' + po.map(str).join('; ') + ')' : ''));
     return out;
   }
   function drawerBody(t) {

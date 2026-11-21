@@ -374,6 +374,11 @@ type Template struct {
 	Routerless     bool     `json:"routerless"`
 	LogoURL        string   `json:"logo_url,omitempty"`
 	ScreenshotURLs []string `json:"screenshot_urls,omitempty"`
+	// PrimaryOnlyReasons: why the template can never run on a worker
+	// (Placement at load with the defaults and no folder roots, without
+	// the folder-root bind reasons, which depend on the server; contract
+	// §11.7 "Catalog views"). Nil when it may.
+	PrimaryOnlyReasons []string `json:"primary_only_reasons,omitempty"`
 	// logoSVG, shots and shotTypes are the checked bytes as read at load
 	// (shared, read-only, by every view; never in a view's JSON).
 	logoSVG   []byte

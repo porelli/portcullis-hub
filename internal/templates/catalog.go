@@ -249,6 +249,41 @@ func loadCatalog(t *Template) error {
 	return nil
 }
 
+// catalogPrimaryOnly is the catalog's primary_only_reasons: Placement
+// with the defaults and no folder roots, without the reasons about binds
+// outside a server's folder roots (they depend on the server; the setup
+// form judges them per server). Nil when none is left.
+func catalogPrimaryOnly(compose []byte, m Manifest) []string {
+	_, reasons := Placement(compose, m, nil, nil)
+	var out []string
+	for _, r := range reasons {
+		if strings.HasPrefix(r, "binds ") {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// maxSourceScreenshotBytes caps the screenshot bytes the Hub keeps in
+// memory per template source (contract §3): past it a template loads
+// without its screenshots. A var for tests.
+var maxSourceScreenshotBytes = 64 << 20
+
+// screenshotBytes is the screenshot bytes t holds.
+func (t *Template) screenshotBytes() int {
+	n := 0
+	for _, b := range t.shots {
+		n += len(b)
+	}
+	return n
+}
+
+// dropScreenshots forgets t's screenshots (the source's budget is spent).
+func (t *Template) dropScreenshots() {
+	t.shots, t.shotTypes, t.ScreenshotURLs = nil, nil, nil
+}
+
 // LogoSVG is the template's logo as read and checked at load (nil
 // without one). Shared: the caller must not modify it.
 func (t *Template) LogoSVG() []byte { return t.logoSVG }

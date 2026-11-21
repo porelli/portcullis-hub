@@ -31,6 +31,7 @@ import (
 	"github.com/portcullis/hub/internal/fixerspec"
 	"github.com/portcullis/hub/internal/folderfix"
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/usage"
 )
@@ -773,10 +774,21 @@ type StorageView struct {
 	Core           []StorageItem   `json:"core"`
 }
 
+// serverIDOf is a server's id in the views: "" (the primary's internal
+// form) is servers.PrimaryID.
+func serverIDOf(s string) string {
+	if s == "" {
+		return servers.PrimaryID
+	}
+	return s
+}
+
 // FolderStorage is one shared folder, from the doctor's scan.
 type FolderStorage struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Server: the server the folder is defined on ("primary", a worker).
+	Server     string     `json:"server"`
 	AllocBytes *int64     `json:"alloc_bytes"`
 	Partial    bool       `json:"partial"`
 	UsedBy     []string   `json:"used_by"`
@@ -981,7 +993,7 @@ func (h *Hub) storageModel() StorageView {
 	}
 	keys := slices.Sorted(maps.Keys(sf.Entries))
 	for _, id := range slices.Sorted(maps.Keys(insts)) {
-		g := StorageGroup{Instance: id, Name: insts[id].Name, Items: []StorageItem{}}
+		g := StorageGroup{Instance: id, Name: insts[id].Name, Server: serverIDOf(insts[id].Server), Items: []StorageItem{}}
 		for _, k := range keys {
 			e := sf.Entries[k]
 			if slices.Contains(e.Owners, id) {
@@ -1096,7 +1108,7 @@ func without(xs []string, x string) []string {
 
 // folderStorage is a shared folder's figure from its doctor scan.
 func (h *Hub) folderStorage(id string, f state.Folder, scans map[string]scanEntry, users []string) FolderStorage {
-	fs := FolderStorage{ID: id, Name: f.Name, UsedBy: slices.Clone(users)}
+	fs := FolderStorage{ID: id, Name: f.Name, Server: serverIDOf(f.Server), UsedBy: slices.Clone(users)}
 	if fs.UsedBy == nil {
 		fs.UsedBy = []string{}
 	}

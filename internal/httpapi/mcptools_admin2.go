@@ -180,6 +180,9 @@ func addCatalogView(v map[string]any, t *templates.Template) {
 	if len(t.ScreenshotURLs) > 0 {
 		v["screenshot_urls"] = t.ScreenshotURLs
 	}
+	if len(t.PrimaryOnlyReasons) > 0 {
+		v["primary_only_reasons"] = t.PrimaryOnlyReasons
+	}
 }
 
 // registerAdminTools2 registers part 2 of the admin tools.

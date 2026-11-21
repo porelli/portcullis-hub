@@ -184,7 +184,7 @@ func TestEmittedHashesRoute(t *testing.T) {
 			t.Errorf("no emitted #%s found (the scan missed it, or the link moved): %v", want, hashes)
 		}
 	}
-	for _, gone := range []string{"sources", "settings/domains?x", "ssh", "app/x/settings"} {
+	for _, gone := range []string{"sources", "settings/domains?x", "ssh", "app/x/settings", "app/x/ai"} {
 		if at, ok := hashes[gone]; ok {
 			t.Errorf("#%s is still emitted (%s)", gone, at)
 		}
@@ -226,11 +226,11 @@ function openInstancePage(id, tab, opt) { calls.push(['instance', id, tab, opt])
 function openSettingsForm(kind, q) { calls.push(['form', kind, q.toString()]); }
 function setMarketplaceShown(on) { calls.push(['mktShown', on]); }
 function flash() {}
-` + hubFunc(t, src, "peopleRedirect") + hubFunc(t, src, "oldAppLink") + hubFunc(t, src, "showMarketplace") + hubFunc(t, src, "showSettings") + block + hubFunc(t, src, "routeTo") + hubFunc(t, src, "routeHash") + `
+` + hubFunc(t, src, "peopleRedirect") + hubFunc(t, src, "showMarketplace") + hubFunc(t, src, "showSettings") + block + hubFunc(t, src, "routeTo") + hubFunc(t, src, "routeHash") + `
 window.PortcullisMarketplace = { render: (root, o) => calls.push(['mkt', o]) };
 const out = {};
 function route(h) { calls.length = 0; location.hash = h; routeHash(); return JSON.parse(JSON.stringify(calls)); }
-for (const h of ['#access/vpn', '#access', '#access/ssh/grants', '#access/signins?user=alice', '#ssh', '#sources', '#marketplace?filter=mail', '#usage/storage', '#settings/network?add=example.org', '#settings/ssh', '#bogus', '']) out[h] = route(h);
+for (const h of ['#access/vpn', '#access', '#access/ssh/grants', '#access/signins?user=alice', '#ssh', '#sources', '#marketplace?filter=mail', '#usage/storage', '#settings/network?add=example.org', '#settings/ssh', '#app/grafana/settings', '#app/aiapp/ai', '#bogus', '']) out[h] = route(h);
 out['mkt+'] = route('#marketplace?filter=mail');
 out['mkt/'] = route('#marketplace/stalwart');
 process.stdout.write(JSON.stringify(out));
@@ -251,6 +251,8 @@ process.stdout.write(JSON.stringify(out));
 		"#usage/storage":                    `[["showTab","usage",null]]`,
 		"#settings/network?add=example.org": `[["form","network","add=example.org"]]`,
 		"#settings/ssh":                     `[["showTab","settings",{"section":"ssh"}]]`,
+		"#app/grafana/settings":             `[["showTab","apps",null]]`,
+		"#app/aiapp/ai":                     `[["showTab","apps",null]]`,
 		"#bogus":                            `[["showTab","apps",null]]`,
 		"":                                  `[["showTab","apps",null]]`,
 		"mkt+":                              `[["showTab","apps",null],["mktShown",true],["mkt",{"filter":"mail","open":""}]]`,

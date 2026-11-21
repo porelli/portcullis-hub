@@ -58,6 +58,11 @@ type Link struct {
 	Instance string `json:"instance"`
 	Option   string `json:"option"`
 	Tab      string `json:"tab,omitempty"`
+	// Page: a Hub page off the instance pages (links.go's Page*; then
+	// Instance, Option and Tab are empty).
+	Page string `json:"page,omitempty"`
+	// Hash: the route, built by Run from the validated parts (Route).
+	Hash string `json:"hash"`
 }
 
 // Finding is one thing the doctor found.
@@ -418,6 +423,7 @@ func Run(in *Inputs, mutes map[string]Mute) Report {
 	r := Report{Findings: make([]Finding, 0, len(byFP)), Counts: map[Severity]int{Problem: 0, Warning: 0, Info: 0}, Scans: []ScanSummary{},
 		DNSUnavailable: in.DNS == nil || dnsPartial(in), MailUnavailable: in.Mail != nil && in.Mail.Unavailable}
 	for _, f := range byFP {
+		finishLink(&f)
 		f.Token = f.Inputs
 		if m, ok := mutes[f.FP]; ok && m.Inputs == f.Inputs {
 			m := m

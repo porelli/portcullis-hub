@@ -218,11 +218,6 @@
 
   // ── storage ────────────────────────────────────────────────
   function disks(storage, server) { return ((storage && storage.disks) || []).filter(k => (k.server || 'primary') === (server || 'primary')); }
-  function appServers(view) {
-    const m = {};
-    for (const g of view.apps || []) m[g.instance] = g.server || 'primary';
-    return m;
-  }
   // onDisk: an item's filesystem; writable layers and images carry none:
   // they are on the engine's data disk (role docker_data).
   function onDisk(it, disk) {
@@ -235,9 +230,10 @@
     const disk = disks(storage, server).find(k => k.dev === opts.dev);
     const d = { slices: [], total: null, unit: 'bytes', caption: '', missing: [], why: '', note: '' };
     if (!disk) { d.why = 'not measured yet'; return d; }
-    const srv = appServers(view);
     const col = colours(view, server);
-    const mine = g => (srv[g.instance] || 'primary') === server;
+    // The storage view names each app's server (contract §11.11): never
+    // guessed from the usage view, whose read may be older or newer.
+    const mine = g => (g.server || 'primary') === server;
     let more = 0, moreN = 0;
     const apps = [];
     for (const g of storage.apps || []) {
@@ -291,7 +287,7 @@
     }
     let folders = null;
     for (const f of storage.folders || []) {
-      if (folderDev[f.id] !== disk.dev) continue;
+      if ((f.server || 'primary') !== server || folderDev[f.id] !== disk.dev) continue;
       if (isNum(f.alloc_bytes)) folders = (folders || 0) + f.alloc_bytes;
       else d.missing.push({ label: 'Shared folder · ' + (f.name || f.id), why: f.note || 'not measured yet' });
     }

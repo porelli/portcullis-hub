@@ -407,6 +407,12 @@ func TestWorkerMeasureVolumes(t *testing.T) {
 	if !found {
 		t.Errorf("disks = %+v", v.Disks)
 	}
+	// The storage view names the app's server itself (ux3 final review M2).
+	for _, g := range v.Apps {
+		if g.Instance == "a" && g.Server != "w1" {
+			t.Errorf("storage group a's server = %q, want w1", g.Server)
+		}
+	}
 }
 
 // fakeWorkerRT.Stats with statsIgnore: a stats call that never honours its

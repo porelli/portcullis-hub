@@ -42,20 +42,20 @@ const STORAGE = {
     { server: 'primary', dev: 2065, device: '8:17', role: 'other', path: '/mnt/data', total_bytes: 100, free_bytes: 100 },
     { server: 'primary', dev: 2081, device: '8:33', role: 'agent_data', total_bytes: 100, free_bytes: 100 }],
   apps: [
-    { instance: 'a', name: 'Alpha <b>', items: [
+    { instance: 'a', name: 'Alpha <b>', server: 'primary', items: [
       { kind: 'volume', target: 'a_data', dev: 7, alloc_bytes: 100, in_total: true, services: ['web.1'] },
       { kind: 'volume', target: 'a_shared', dev: 7, alloc_bytes: 50, in_total: true, services: ['web.1', 'worker.1'] },
       { kind: 'layer', target: 'web.1', alloc_bytes: 10, in_total: true },
       { kind: 'image', target: 'img:1', alloc_bytes: 200, in_total: false },
       { kind: 'folder', target: 'media', dev: 9, alloc_bytes: 80, in_total: false },
       { kind: 'hub_files', target: 'Hub-managed files', alloc_bytes: null, in_total: false } ] },
-    { instance: 'b', name: 'Beta', items: [
+    { instance: 'b', name: 'Beta', server: 'primary', items: [
       { kind: 'volume', target: 'b_data', dev: 7, alloc_bytes: 40, in_total: true },
       { kind: 'image', target: 'img:1', alloc_bytes: 200, in_total: false },
       { kind: 'image', target: 'img:2', alloc_bytes: 30, in_total: false } ] },
-    { instance: 'c', name: 'Gamma', items: [{ kind: 'volume', target: 'c_data', dev: 7, alloc_bytes: 20, in_total: true }] },
+    { instance: 'c', name: 'Gamma', server: 'w1', items: [{ kind: 'volume', target: 'c_data', dev: 7, alloc_bytes: 20, in_total: true }] },
   ],
-  folders: [{ id: 'media', name: 'Media', alloc_bytes: 80 }],
+  folders: [{ id: 'media', name: 'Media', server: 'primary', alloc_bytes: 80 }],
   core: [{ kind: 'volume', target: 'hub_data', dev: 7, alloc_bytes: 60, in_total: true }, { kind: 'image', target: 'img:core', alloc_bytes: 70, in_total: false }],
 };
 `
@@ -171,6 +171,9 @@ r.w1io = D.slices(VIEW, 'io', 'w1');
 r.d7 = D.slices(VIEW, 'storage', 'primary', { storage: STORAGE, dev: 7 });
 r.d9 = D.slices(VIEW, 'storage', 'primary', { storage: STORAGE, dev: 9 });
 r.w1d7 = D.slices(VIEW, 'storage', 'w1', { storage: STORAGE, dev: 7 });
+const LAG = Object.assign({}, VIEW, { apps: (VIEW.apps || []).filter(g => g.instance !== 'c') });
+r.lagd7 = D.slices(LAG, 'storage', 'primary', { storage: STORAGE, dev: 7 });
+r.lagw1d7 = D.slices(LAG, 'storage', 'w1', { storage: STORAGE, dev: 7 });
 r.disks = D.disks(STORAGE, 'primary').map(d => d.dev);
 `)
 	get := func(k string) shareDonut {
@@ -193,6 +196,10 @@ r.disks = D.disks(STORAGE, 'primary').map(d => d.dev);
 		"d7":    "app:a=160 app:b=40 core=60 images=300 other=140 free=300",
 		"d9":    "folders=80 other=20 free=400",
 		"w1d7":  "app:c=20 other=30 free=50",
+		// ux3 final review M2: the storage view's own server decides.
+		"lagd7": "app:a=160 app:b=40 core=60 images=300 other=140 free=300",
+		// Not in the usage view yet: no colour, so "1 more app", on w1.
+		"lagw1d7": "more=20 other=30 free=50",
 	}
 	for k, w := range want {
 		if g := get(k).keyed(); g != w {
@@ -451,7 +458,7 @@ st.apps[1].items.push({ kind: 'volume', target: 'b_cache', dev: 7, alloc_bytes: 
 st.apps[2].items = [{ kind: 'volume', target: 'c_broken', dev: 7, alloc_bytes: null, in_total: true }];
 st.apps[0].items.push({ kind: 'volume', target: 'shared_media', dev: 7, alloc_bytes: 25, in_total: false, shared_with: ['b'] });
 st.apps[1].items.push({ kind: 'volume', target: 'shared_media', dev: 7, alloc_bytes: 25, in_total: false, shared_with: ['a'] });
-const v = JSON.parse(JSON.stringify(VIEW)); v.apps[2].server = 'primary';
+const v = JSON.parse(JSON.stringify(VIEW)); v.apps[2].server = 'primary'; st.apps[2].server = 'primary';
 const d = D.slices(v, 'storage', 'primary', { storage: st, dev: 7 });
 r.keys = d.slices.map(s => s.key + '=' + s.value).join(' ');
 r.missing = d.missing;

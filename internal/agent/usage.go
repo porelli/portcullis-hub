@@ -26,6 +26,11 @@ import (
 // and a proxy connection for the Hub's whole call timeout).
 const layerSizeTimeout = 10 * time.Second
 
+// imageSizeTimeout: the image inspect behind GET /v1/images/size (the
+// Hub's own deadline bounds it too; this frees the agent's goroutine and
+// proxy connection first; ux3 final review).
+const imageSizeTimeout = 10 * time.Second
+
 var statsTimeout = 20 * time.Second // a var for tests
 
 func (a *API) stats(w http.ResponseWriter, r *http.Request, cid string) {
@@ -62,7 +67,9 @@ func (a *API) imageSize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "the image is in no bundle")
 		return
 	}
-	n, err := a.cfg.Runtime.ImageSize(r.Context(), refs[0])
+	ctx, cancel := context.WithTimeout(r.Context(), imageSizeTimeout)
+	defer cancel()
+	n, err := a.cfg.Runtime.ImageSize(ctx, refs[0])
 	if err != nil {
 		engineError(w, err)
 		return

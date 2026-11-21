@@ -12,7 +12,7 @@ import (
 )
 
 // The VPN admin API (contract §11; Hub listener only, administrators):
-// the overview, Settings → VPN, wiring a provider, an instance's reach,
+// the overview, Settings → Network → VPN, wiring a provider, an instance's reach,
 // static assignments, the DNS acknowledgement and every person's
 // devices. Audited by the Hub (vpn.*, instance.reach); never key
 // material.

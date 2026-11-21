@@ -577,8 +577,11 @@ func (h *Hub) usageSnapshot() usageSnap {
 // StorageGroup is one instance's storage (contract §11.11; the storage
 // measurer fills it).
 type StorageGroup struct {
-	Instance   string        `json:"instance"`
-	Name       string        `json:"name"`
+	Instance string `json:"instance"`
+	Name     string `json:"name"`
+	// Server: the server the instance runs on (as UsageGroup.Server), so
+	// its items are matched against that server's disks only.
+	Server     string        `json:"server"`
 	Items      []StorageItem `json:"items"`
 	TotalAlloc *int64        `json:"total_alloc_bytes"`
 	Partial    bool          `json:"partial"`

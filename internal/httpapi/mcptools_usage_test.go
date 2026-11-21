@@ -84,6 +84,9 @@ func TestUsageToolsParity(t *testing.T) {
 		path string
 	}{
 		{"usage_overview", map[string]any{}, "/api/usage"},
+		// The window argument as the route's ?window= (ux3 final review).
+		{"usage_overview", map[string]any{"window": "last"}, "/api/usage?window=last"},
+		{"usage_overview", map[string]any{"window": "1h"}, "/api/usage?window=1h"},
 		{"usage_instance", map[string]any{"id": "grafana-a"}, "/api/usage/instances/grafana-a"},
 	} {
 		txt, isErr, _ := e.tool(t, c.tool, c.args)
@@ -109,6 +112,9 @@ func TestUsageToolsParity(t *testing.T) {
 		if isErr || strings.Contains(txt, usageRedactLiteral) {
 			t.Errorf("%s: redaction: %v %s", c.tool, isErr, txt)
 		}
+	}
+	if txt, isErr, _ := e.tool(t, "usage_overview", map[string]any{"window": "5m"}); !isErr || !strings.Contains(txt, "window must be last or 1h") {
+		t.Errorf("bad window = %v %s", isErr, txt)
 	}
 	if txt, isErr, _ := e.tool(t, "usage_instance", map[string]any{"id": "../x"}); !isErr || !strings.Contains(txt, "404") || !strings.Contains(txt, "app instance not found") {
 		t.Errorf("bad id = %v %s", isErr, txt)

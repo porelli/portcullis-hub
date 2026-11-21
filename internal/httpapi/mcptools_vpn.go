@@ -49,7 +49,7 @@ type (
 
 func (s *Server) registerVPNTools() {
 	for _, t := range []Tool{
-		admin("get_vpn", "The VPN overview: the mode and public enrolment (set on the host), whether the wg service is up, the built-in provider, every VPN-capable instance (wired or not, its ranges, devices, freshness, last error and the devices it left out) and Settings → VPN. No keys.",
+		admin("get_vpn", "The VPN overview: the mode and public enrolment (set on the host), whether the wg service is up, the built-in provider, every VPN-capable instance (wired or not, its ranges, devices, freshness, last error and the devices it left out) and Settings → Network → VPN. No keys.",
 			ClassRead, "GET /api/vpn", "", func(ctx context.Context, _ directory.Actor, _ noArgs) (any, error) {
 				return s.Hub.VPNOverview(ctx), nil
 			}),

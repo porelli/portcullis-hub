@@ -303,7 +303,7 @@ type AppState struct {
 	// Reach: instance id → Reachable from (contract §11; no entry =
 	// internet).
 	Reach map[string]Reach `json:"reach,omitempty" yaml:"reach,omitempty"`
-	// VPN is Settings → VPN, the wired providers, the built-in devices and
+	// VPN is Settings → Network → VPN, the wired providers, the built-in devices and
 	// static assignments (contract §11).
 	VPN VPNState `json:"vpn" yaml:"vpn"`
 	// Mail is Settings → Mail (contract §19.9). Load starts from

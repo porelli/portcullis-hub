@@ -33,37 +33,6 @@ func hubIndex(t *testing.T) string {
 	return b
 }
 
-// TestHubOldAppLinks: #app/<id>/settings[/<option>] and #app/<id>/ai
-// route to the instance page; anything else isn't an old app link.
-func TestHubOldAppLinks(t *testing.T) {
-	fn := hubFunc(t, hubIndex(t), "oldAppLink")
-	cases := map[string]any{
-		"app/grafana/settings":             "#apps/grafana/settings",
-		"app/grafana-team-a/settings/smtp": "#apps/grafana-team-a/settings/smtp",
-		"app/secretapp/settings/api_key":   "#apps/secretapp/settings/api_key",
-		"app/aiapp/ai":                     "#apps/aiapp/ai",
-		"app/aiapp/logs":                   nil,
-		"app/Bad/settings":                 nil,
-		"apps/grafana":                     nil,
-		"app/x/settings/a<b":               nil,
-		"settings":                         nil,
-	}
-	keys := make([]string, 0, len(cases))
-	for k := range cases {
-		keys = append(keys, k)
-	}
-	b, _ := json.Marshal(keys)
-	var got []any
-	if err := json.Unmarshal([]byte(runNode(t, fn+"process.stdout.write(JSON.stringify("+string(b)+".map(oldAppLink)));\n")), &got); err != nil || len(got) != len(keys) {
-		t.Fatalf("oldAppLink = %v (%v)", got, err)
-	}
-	for i, k := range keys {
-		if got[i] != cases[k] {
-			t.Errorf("#%s → %v, want %v", k, got[i], cases[k])
-		}
-	}
-}
-
 // TestHubStatusSummary: "n of m" by service (contract §11.9 "Fine"): a
 // done job counts, a failed / running / pending / missing one doesn't; a
 // service with no container (a "missing" row) is in m; two replicas of a
@@ -238,7 +207,7 @@ func TestHubAppsPageStatic(t *testing.T) {
 	}
 	for _, want := range []string{`id="tab-apps"`, `id="tab-instance"`, `id="mkt-root"`, `id="sources-list"`, `data-src-remove="`, `data-src-sync`,
 		"Manage on People &#8599;", "existing group", "'+ Add your own variable'",
-		`[/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],`, "function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }",
+		`[/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],`,
 		`<div class="drift" id="drift"></div>`, `<div class="drift" id="missing-groups"></div>`, `<script src="/static/settings.js"></script>`} {
 		if !strings.Contains(b, strings.Trim(want, "'")) {
 			t.Errorf("the hub index lacks %q", want)

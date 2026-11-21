@@ -216,6 +216,13 @@ func mailFindings(in *Inputs) []Finding {
 		mailProviderFindings(in, m, mk, recWrong)
 	}
 	mailHubFindings(in, m, mk, recWrong)
+	// The provider's own findings link its Mail tab (contract §14.5
+	// "Links"); without a wired instance, Settings → Mail.
+	for i := range out {
+		if mailProviderKinds[out[i].Kind] && m.Instance != "" {
+			out[i].Link = &Link{Instance: m.Instance, Tab: "mail"}
+		}
+	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].FP < out[j].FP })
 	return out
 }

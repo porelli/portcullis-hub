@@ -11,12 +11,12 @@ import (
 // pre-filled; the spec's exact texts (call 28's reachability note, the
 // data-egress note, "This core has no mcp-gate", "not vetted by
 // Portcullis"); a litellm provider's base_url is never posted back
-// (T9); window.openAppTab exists (the doctor's "Open AI tab", T20); and
+// (T9); and
 // no inline event handler anywhere in the AI block.
 func TestAdminAIUIStatic(t *testing.T) {
 	html := webAsset(t, "index.html")
 	start := strings.Index(html, "// ── Settings → AI (contract §15.11–15.12, plan 4 Task 22) ──")
-	end := strings.Index(html, "window.openAppTab = openAppTab;")
+	end := strings.Index(html, "// ── Users & groups (contract §9)")
 	if start < 0 || end < start {
 		t.Fatal("the AI block isn't in index.html")
 	}

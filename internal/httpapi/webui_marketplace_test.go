@@ -135,7 +135,7 @@ const T = (id, o) => {
   return t;
 };
 const CATALOG = [
-  T('nextcloud', { category_rank: 4, category_label: 'Files & storage', logo_url: '/api/catalog/nextcloud/logo.svg', screenshot_urls: ['/api/catalog/nextcloud/screenshots/0'],
+  T('nextcloud', { category_rank: 4, category_label: 'Files & storage', primary_only_reasons: ['is marked placement: primary_only', '<b>x</b>'], logo_url: '/api/catalog/nextcloud/logo.svg', screenshot_urls: ['/api/catalog/nextcloud/screenshots/0'],
     compat: { runtime: 'podman', status: 'refused', reasons: ['needs a privileged port', 'uses host networking'] },
     manifest: { name: 'Nextcloud', description: 'Files, calendars and contacts', icon: '☁', category: 'storage', tags: ['files', 'sync'], instances: 'multi',
       auth: { method: 'native-oidc', sso: true, group_access: true, notes: 'Sign in with Portcullis.\n\nMore.', notes_html: '<p>Sign in <b>with</b> Portcullis.</p>' },
@@ -332,7 +332,7 @@ func TestMarketplaceDrawerNode(t *testing.T) {
 		`href="https://nextcloud.com/"`, "Homepage ↗", `rel="noopener noreferrer"`, `target="_blank"`, `href="https://github.com/nextcloud/server"`, "Source ↗",
 		`class="md"><p>The <em>long</em> one.</p>`, "Sign-in notes", `class="md"><p>Sign in <b>with</b> Portcullis.</p>`,
 		"2 settings", "Required: Admin email",
-		"Single sign-on", "Multi-instance", "Runs on the primary server only",
+		"Single sign-on", "Multi-instance", "Runs on the primary server only (is marked placement: primary_only; &lt;b&gt;x&lt;/b&gt;)",
 		"needs ≥ 2 GiB RAM", "more than this server has", "needs ≥ 10 GiB disk",
 		"<li>needs a privileged port</li>", "<li>uses host networking</li>", "Rootless: not available",
 		`src="/api/catalog/nextcloud/screenshots/0" alt="The files view"`, "The files view",
@@ -421,7 +421,7 @@ func TestMarketplaceDeepLinksNode(t *testing.T) {
   const showTab = n => { calls.push(['showTab', n]); return true; };
   const setMarketplaceShown = on => calls.push(['shown', on]);
   document.getElementById = id => id === 'mkt-drawer' ? drawer : id === 'mkt-root' ? root : null;
-  `+hubFunc(t, src, "peopleRedirect")+hubFunc(t, src, "oldAppLink")+hubFunc(t, src, "showMarketplace")+block+hubFunc(t, src, "routeTo")+hubFunc(t, src, "routeHash")+`
+  `+hubFunc(t, src, "peopleRedirect")+hubFunc(t, src, "showMarketplace")+block+hubFunc(t, src, "routeTo")+hubFunc(t, src, "routeHash")+`
   const go = async h => { calls.length = 0; toasts.length = 0; location.hash = h; routeHash(); for (let i = 0; i < 5; i++) await tick(); return calls.slice(); };
   r.plain = [await go('#marketplace'), cards(root).length];
   r.mail = [await go('#marketplace?filter=mail'), findAll(root, n => n.attrs['data-mkt-cat'] === 'mail')[0].attrs['aria-pressed'], cards(root)];

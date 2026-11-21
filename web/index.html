@@ -644,6 +644,8 @@
     .dr-group { margin-bottom: 1.5rem; }
     .dr-group summary { cursor: pointer; }
     .dr-bad { color: #ef4444; } .dr-warn { color: #f59e0b; } .dr-info { color: #3b82f6; }
+    /* A finding's link (doctor.js linkOf) is an <a> styled as its buttons. */
+    a.btn[data-dr-link] { text-decoration: none; display: inline-block; }
     .dr-card { background: #1e293b; border: 1px solid #334155; border-left-width: 4px; border-radius: 0.5rem; padding: 0.875rem 1rem; margin-bottom: 0.75rem; font-size: 0.875rem; }
     .dr-card.dr-problem { border-left-color: #ef4444; } .dr-card.dr-warning { border-left-color: #f59e0b; } .dr-card.dr-info { border-left-color: #3b82f6; }
     .dr-title { font-weight: 600; margin-bottom: 0.375rem; }
@@ -1101,8 +1103,7 @@
     });
     // Deep links (ROUTES below, routed at load and on a hash change):
     //   #apps/<id>[/<tab>[/<option>]]  an instance's page at a tab
-    //       (settings/<option> scrolled to an option); the old
-    //       #app/<id>/settings[/<option>] and #app/<id>/ai are replaced by those;
+    //       (settings/<option> scrolled to an option);
     //   #marketplace[?filter=<category>], #marketplace/<template-id>  the Marketplace
     //       (?filter=mail: the Mail chip);
     //   #doctor, #usage[/<view>], #audit;
@@ -1141,13 +1142,6 @@
       if (/^groups(?:\/|$)|^people\//.test(t)) return '#' + t;
       return null;
     }
-    // oldAppLink: an old #app/… deep link's #apps/… replacement, or null.
-    function oldAppLink(t) {
-      const set = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
-      if (set) return '#apps/' + set[1] + '/settings' + (set[2] ? '/' + set[2] : '');
-      const ai = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
-      return ai ? '#apps/' + ai[1] + '/ai' : null;
-    }
     // setMarketplaceShown(on): the Apps tab shows the Marketplace
     // (#mkt-root) instead of its list (#apps-root) and the banners above
     // it (.mkt-on).
@@ -1182,7 +1176,6 @@
     const ROUTES = [
       [/^(?:apps)?$/, () => showTab('apps')],
       [/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],
-      [/^app\/([a-z0-9-]+)\/(?:settings(?:\/[A-Za-z0-9_.-]+)?|ai)$/, m => { const to = oldAppLink(m[0]); history.replaceState(null, '', to); routeTo(to.slice(1)); }],
       [/^marketplace(?:\?filter=([a-z0-9-]{1,63}))?$/, m => showMarketplace({ filter: m[1] || '', open: '' })],
       [/^marketplace\/([a-z0-9-]+)$/, m => showMarketplace({ filter: '', open: m[1] })],
       [/^doctor$/, () => showTab('doctor')],
@@ -1880,10 +1873,6 @@
       }
       if (kind === 'ai' && q.get('provider') && q.get('field')) openProviderSecretAt(q.get('provider'), q.get('field'));
     }
-
-    // openSettingAt: instance id's page at Settings, scrolled to option
-    // key (the doctor's "Open setting"; window.openSettingAt).
-    function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }
 
     // ── Settings ──────────────────────────────────────────
     // Sign-in of apps with their own login (auth.native_login).
@@ -2859,11 +2848,6 @@
       if (dis) { dismissAIUser(box, sec, dis.dataset.user); return; }
       if (t.closest('[data-ai-revoke]')) revokeAICompanion(box, sec);
     });
-
-    // openAppTab(id, tab): the instance page's tab (the doctor's "Open AI
-    // tab", #app/<id>/ai); any tab but "ai" opens its Settings.
-    function openAppTab(id, tab) { navInstance(id, tab === 'ai' ? 'ai' : 'settings', ''); }
-    window.openAppTab = openAppTab;
 
     // ── Users & groups (contract §9) ──────────────────────
     // On people.<domain> only (PortcullisPeople above); the Hub keeps the
@@ -5095,7 +5079,7 @@
 
     // ── VPN (contract §5, §11): an instance's Access (Reachable from /
     // Through / public links), a provider instance's VPN tab and
-    // Settings → VPN. Every value escaped; delegated listeners. ──
+    // Settings → Network → VPN. Every value escaped; delegated listeners. ──
     function templateHasVPN(tid) {
       const t = catalogCache && catalogCache[tid];
       return !!(t && t.manifest && t.manifest.vpn);
@@ -5130,7 +5114,7 @@
       if (v.mode === 'server') {
         h += '<label><input type="checkbox" data-reach-public-links' + (r.public_links ? ' checked' : '') + '> Public links stay on the internet (server mode)</label>';
       }
-      if (!ids.length) h += '<p class="settings-empty">No VPN is wired yet: wire a VPN first (Settings → VPN, or a VPN app\'s VPN tab).</p>';
+      if (!ids.length) h += '<p class="settings-empty">No VPN is wired yet: wire a VPN first (Settings → Network → VPN, or a VPN app\'s VPN tab).</p>';
       h += '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-reach-save="' + escapeHtml(id) + '">Save access</button></div>' +
         '<small>VPN-only apps answer only on the VPN entrypoint, behind sign-in and the device ↔ person binding. Switching back to the internet widens access.</small>' +
         '<div data-reach-result></div></div>';
@@ -5229,7 +5213,7 @@
       } catch (e) { if (out) out.innerHTML = errorBox(e); }
     }
 
-    // loadVPNSettings: Settings → VPN — the users group, devices per
+    // loadVPNSettings: Settings → Network → VPN — the users group, devices per
     // person, the expiry, the providers overview, and the mode and public
     // enrolment, read-only (set on the host).
     async function loadVPNSettings(root) {
