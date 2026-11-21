@@ -780,6 +780,8 @@ func TestRoleIsEnough(t *testing.T) {
 		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Resource: "secrets", Name: "pub-mcp-credentials"}, true},
 		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "get", Resource: "configmaps", Name: "frontdoor-status"}, true},
 		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Resource: "configmaps", Name: "frontdoor-status"}, false},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "get", Resource: "configmaps", Name: "portcullis-backup-status"}, true},
+		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "update", Resource: "configmaps", Name: "portcullis-backup-status"}, false},
 		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "create", Resource: "configmaps", Name: "pub-vpn"}, false},
 		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "delete", Resource: "configmaps", Name: "pub-vpn"}, false},
 		{authorizationv1.ResourceAttributes{Namespace: "portcullis", Verb: "list", Resource: "configmaps"}, false},
