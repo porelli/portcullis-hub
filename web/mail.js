@@ -49,7 +49,7 @@
       '<button type="button" class="btn btn-sm" data-mail-act="switch" data-mail-from="' + esc(p.instance) + '">Switch…</button> ' +
       '<button type="button" class="btn btn-sm btn-danger" data-mail-act="unwire" data-mail-from="' + esc(p.instance) + '">Unwire…</button></div>' +
       (p.void ? '<div class="public-warn" data-mail-void><span data-mail-void-text></span> <button type="button" class="btn btn-sm" data-mail-act="retry-void">Retry</button></div>' : '') +
-      (p.admin_view && window.PortcullisMailProvider ? window.PortcullisMailProvider.adminViewHtml(p.label || p.template) : '') +
+      (p.admin_view && window.PortcullisMailProvider ? window.PortcullisMailProvider.adminViewHtml() : '') +
       '</div>';
   }
 
@@ -57,6 +57,7 @@
   function fillState(root, status) {
     const p = status && status.provider;
     if (!p) return;
+    if (p.admin_view && window.PortcullisMailProvider) window.PortcullisMailProvider.fillAdminView(root, p.label || p.template);
     const set = (sel, t) => { const el = root.querySelector(sel); if (el) el.textContent = t; };
     set('[data-mail-label]', p.label || p.template);
     set('[data-mail-version]', p.version || '');

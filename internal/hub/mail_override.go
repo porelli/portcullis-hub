@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -413,7 +414,10 @@ func (h *Hub) mailAdminViewLocked(r *mailRender, av *templates.Endpoint, attach 
 		// The proxy's gate: Traefik's address and the route key its router
 		// sets once forward-auth admitted a full administrator.
 		VarMailAdminTraefikIP+": "+yamlQuote(np.TraefikIP.String()),
-		VarMailAdminRouteKey+": "+yamlQuote(key))
+		VarMailAdminRouteKey+": "+yamlQuote(key),
+		// The proxy's second identity check: forward-auth's groups header
+		// must hold the admin group (contract §19.13).
+		VarMailAdminGroup+": "+yamlQuote(lldap.AdminGroup))
 	rule := "Host(`" + h.mailAdminHost() + "`)"
 	labels := r.labels[s]
 	if labels == nil {

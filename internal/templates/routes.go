@@ -248,6 +248,12 @@ func ParseRoutes(compose []byte) (*Routes, error) {
 				}
 				r.Names[m[1]] = true
 			}
+			// The portcullis- prefix is core's and the Hub's (their routers,
+			// services and middlewares, e.g. portcullis-mail-admin): no
+			// template names one, single or multi, in any case.
+			if m := traefikNameRe.FindStringSubmatch(FoldKey(k)); m != nil && strings.HasPrefix(strings.ToLower(m[1]), "portcullis-") {
+				return nil, fmt.Errorf("service %s: Traefik name %s: names starting with portcullis- are reserved for core and the Hub", svc, m[1])
+			}
 			if m := routerServiceNameRe.FindStringSubmatch(FoldKey(k)); m != nil && autoServiceLike(m[1]) {
 				return nil, fmt.Errorf("service %s: Traefik name %s looks like an automatic service name (<compose service>-portcullis-<id>, which Traefik gives a container's routers without a service label) and would merge with it: names may not contain -portcullis- or end with -portcullis", svc, m[1])
 			}

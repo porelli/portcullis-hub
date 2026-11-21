@@ -1,19 +1,23 @@
 package hub
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -605,6 +609,9 @@ func TestMailAdminViewOverride(t *testing.T) {
 		t.Fatalf("route key %q / label %v", key, av.Labels)
 	}
 	want["traefik.http.middlewares."+MailAdminKeyMiddleware+".headers.customrequestheaders."+MailAdminKeyHeader] = key
+	if av.Environment[VarMailAdminGroup] != "lldap_admin" {
+		t.Fatalf("admin group %q", av.Environment[VarMailAdminGroup])
+	}
 	if av.Environment[VarMailAdminTraefikIP] != "172.31.250.2" {
 		t.Fatalf("Traefik IP %q", av.Environment[VarMailAdminTraefikIP])
 	}
@@ -712,5 +719,46 @@ func TestMailAdminViewPolicy(t *testing.T) {
 	}
 	if f.h.mailAdminReserved(host, false) != "" {
 		t.Error("reserved with mail off")
+	}
+}
+
+// The admin view's ticket format is mailctl's (viewer.MintTicket): the
+// shared vector of mailctl's ticket_vector_test.go.
+func TestMailAdminTicketVector(t *testing.T) {
+	got := MailAdminTicket(strings.Repeat("k", 40), "root", "nonce-1", time.Unix(1800000060, 0))
+	if got != "v1.eyJ1Ijoicm9vdCIsIm4iOiJub25jZS0xIiwiZSI6MTgwMDAwMDA2MH0.h2gtGNmy3A1GfbF6Moa38GqR-VZE79oSyYECzGzrUCs" {
+		t.Fatalf("ticket %s", got)
+	}
+}
+
+// TestMailAdminViewURL (contract §19.13): the Open action's link carries
+// a single-use ticket for the actor, MAC'd with the route key the view
+// gets, ≤ 60 s; every call a new one; audited with the nonce.
+func TestMailAdminViewURL(t *testing.T) {
+	f := newMailSlotFixtureFrom(t, mailVectorFiles(t, "admin_view ok"), true)
+	f.h.SetMailCoreForTest(true, "mail.example.org")
+	u1, err := f.h.MailAdminViewURL(directory.Actor{User: "root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, _ := f.h.MailAdminViewURL(directory.Actor{User: "root"})
+	pre := "https://mail-admin." + f.h.cfg.Domain + "/portcullis/open?t="
+	if !strings.HasPrefix(u1, pre) || u1 == u2 {
+		t.Fatalf("links %s %s", u1, u2)
+	}
+	key, _ := f.h.mailAdminRouteKey()
+	tk, _ := url.QueryUnescape(strings.TrimPrefix(u1, pre))
+	parts := strings.Split(tk, ".")
+	b, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	var body struct {
+		U, N string
+		E    int64
+	}
+	json.Unmarshal(b, &body)
+	if body.U != "root" || len(body.N) < 16 || time.Until(time.Unix(body.E, 0)) > MailAdminTicketTTL || MailAdminTicket(key, "root", body.N, time.Unix(body.E, 0)) != tk {
+		t.Fatalf("ticket %+v", body)
+	}
+	if _, err := f.h.MailAdminViewURL(directory.Actor{}); err == nil {
+		t.Fatal("a link without a user")
 	}
 }

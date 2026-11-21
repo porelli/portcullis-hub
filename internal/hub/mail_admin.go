@@ -2,11 +2,15 @@ package hub
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1082,10 +1086,12 @@ func (h *Hub) HostMailDomains() []MailDomainStateRow {
 
 // MailAdminViewURL is POST /api/mail/admin-view (contract §19.13): the
 // wired provider's read-only admin view, for a full administrator in the
-// browser (the route refuses AI, MCP and delegates first). 503 while
-// nothing is wired or the provider isn't in normal mode, 409 when its
-// block has no admin view. Audited mail.admin_view_opened.
-func (h *Hub) MailAdminViewURL(actor directory.Actor) (url string, err error) {
+// browser (the route refuses AI, MCP and delegates first). The link holds
+// a single-use ticket for the actor, valid MailAdminTicketTTL: the view
+// opens a session only from it (MailAdminTicket). 503 while nothing is
+// wired or the provider isn't in normal mode, 409 when its block has no
+// admin view. Audited mail.admin_view_opened with the ticket's nonce.
+func (h *Hub) MailAdminViewURL(actor directory.Actor) (link string, err error) {
 	h.mu.RLock()
 	p := h.st.Mail.Provider
 	var id string
@@ -1100,9 +1106,10 @@ func (h *Hub) MailAdminViewURL(actor directory.Actor) (url string, err error) {
 	}
 	host := h.mailAdminHost()
 	h.mu.RUnlock()
+	nonce := ""
 	defer func() {
 		if id != "" {
-			h.auditOp(actor, "mail.admin_view_opened", id, "read-only", err)
+			h.auditOp(actor, "mail.admin_view_opened", id, "read-only ticket="+nonce, err)
 		}
 	}()
 	switch {
@@ -1110,6 +1117,37 @@ func (h *Hub) MailAdminViewURL(actor directory.Actor) (url string, err error) {
 		return "", statusErr(http.StatusServiceUnavailable, "mail isn't running right now")
 	case !av:
 		return "", statusErr(http.StatusConflict, "the mail provider has no read-only admin view")
+	case strings.TrimSpace(actor.User) == "":
+		return "", statusErr(http.StatusBadRequest, "no signed-in user to open the view as")
 	}
-	return "https://" + host + "/admin/", nil
+	key, err := h.mailAdminRouteKey()
+	if err != nil {
+		return "", fmt.Errorf("the admin view's route key: %w", err)
+	}
+	if nonce, err = mailRandString(24); err != nil {
+		return "", err
+	}
+	t := MailAdminTicket(key, actor.User, nonce, h.now().Add(MailAdminTicketTTL))
+	return "https://" + host + "/portcullis/open?t=" + url.QueryEscape(t), nil
+}
+
+// MailAdminTicketTTL is a ticket's life (contract §19.13: ≤ 60 s).
+const MailAdminTicketTTL = 60 * time.Second
+
+// MailAdminTicket is the admin view's single-use ticket (contract §19.13;
+// mailctl's viewer.MintTicket is the same format): "v1.<b64url(json
+// {u, n, e})>.<b64url(HMAC-SHA256(k, the first two parts))>", k =
+// HMAC-SHA256(route key, "portcullis-mail-admin-ticket v1").
+func MailAdminTicket(routeKey, user, nonce string, exp time.Time) string {
+	km := hmac.New(sha256.New, []byte(routeKey))
+	km.Write([]byte("portcullis-mail-admin-ticket v1"))
+	b, _ := json.Marshal(struct {
+		User   string `json:"u"`
+		Nonce  string `json:"n"`
+		Expiry int64  `json:"e"`
+	}{user, nonce, exp.Unix()})
+	p := "v1." + base64.RawURLEncoding.EncodeToString(b)
+	m := hmac.New(sha256.New, km.Sum(nil))
+	m.Write([]byte(p))
+	return p + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }

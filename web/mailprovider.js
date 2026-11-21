@@ -7,7 +7,8 @@
 //   window.PortcullisMailProvider.unwire(id)            Settings → Mail's Unwire…
 //   window.PortcullisMailProvider.retryVoid()           Retry an owed void
 //   window.PortcullisMailProvider.openAdminView()       the read-only admin view (§19.13)
-//   window.PortcullisMailProvider.adminViewHtml(label)  its warning and link (pure; tests)
+//   window.PortcullisMailProvider.adminViewHtml()       its warning and link's skeleton (pure; tests)
+//   window.PortcullisMailProvider.fillAdminView(root, label)  their texts, by textContent
 //   window.PortcullisMailProvider.tabSkeleton(view)     (pure; tests)
 //
 // GET  /api/instances/{id}/mail-provider    the tab's view (+ fresh_auth)
@@ -30,16 +31,26 @@
   }
   const enc = encodeURIComponent;
 
-  // ADMIN_VIEW_WARNING is the read-only admin view's warning (contract
-  // §19.13), shown next to its link.
-  const ADMIN_VIEW_WARNING = 'Stalwart\'s own admin screen is read-only here. Make changes in Portcullis (Settings → Mail); changes made elsewhere would bypass Portcullis\'s mail safeguards.';
+  // adminViewWarning is the read-only admin view's warning for the
+  // provider's label (contract §19.13: "<label>'s own admin screen is
+  // read-only here. …").
+  function adminViewWarning(label) {
+    return (label || 'The mail server') + '\'s own admin screen is read-only here. Make changes in Portcullis (Settings → Mail); changes made elsewhere would bypass Portcullis\'s mail safeguards.';
+  }
 
-  // adminViewHtml is the warning and the link for the provider label (the
-  // label is the template's, escaped; "Stalwart" in the warning is the
-  // contract's text).
-  function adminViewHtml(label) {
-    return '<div class="public-warn" data-mail-admin-view><p data-mail-admin-view-warning>' + esc(ADMIN_VIEW_WARNING) + '</p>' +
-      '<button type="button" class="btn btn-sm" data-mail-admin-view-open>Open ' + esc(label || 'the mail server') + '\'s admin (read-only)</button></div>';
+  // adminViewHtml is the warning's and the link's skeleton: no provider
+  // text in it (fillAdminView sets both with textContent).
+  function adminViewHtml() {
+    return '<div class="public-warn" data-mail-admin-view><p data-mail-admin-view-warning></p>' +
+      '<button type="button" class="btn btn-sm" data-mail-admin-view-open></button></div>';
+  }
+
+  // fillAdminView sets the warning and the link's text for label.
+  function fillAdminView(root, label) {
+    const w = root.querySelector('[data-mail-admin-view-warning]');
+    if (w) w.textContent = adminViewWarning(label);
+    const b = root.querySelector('[data-mail-admin-view-open]');
+    if (b) b.textContent = 'Open ' + (label || 'the mail server') + '\'s admin (read-only)';
   }
 
   // openAdminView asks the Hub for the link (audited) and opens it in a
@@ -49,7 +60,7 @@
     if (w) w.opener = null;
     try {
       const r = await (await window.apiCall('/api/mail/admin-view', 'POST', {})).json();
-      if (!r || typeof r.url !== 'string' || !/^https:\/\/[a-z0-9.-]+\/admin\/$/.test(r.url)) throw new Error('the Hub returned no admin view link');
+      if (!r || typeof r.url !== 'string' || !/^https:\/\/[a-z0-9.-]+\/portcullis\/open\?t=[A-Za-z0-9._~%-]+$/.test(r.url)) throw new Error('the Hub returned no admin view link');
       if (w) w.location.href = r.url; else window.location.href = r.url;
     } catch (e) {
       if (w) w.close();
@@ -82,7 +93,7 @@
         (v.held ? 'Confirm the updated template' : 'Make this the mail server') + '</button></div>' +
         '<p class="settings-hint"><small>A fresh sign-in with your security key follows.</small></p></div>';
     }
-    if (v.wired && v.admin_view) h += adminViewHtml(v.label);
+    if (v.wired && v.admin_view) h += adminViewHtml();
     if (v.wired) {
       h += '<div class="inst-row"><label><input type="checkbox" data-mail-drain checked> drain first (senders keep delivering until every domain is off)</label> ' +
         '<button type="button" class="btn btn-danger btn-sm" data-mailp-act="unwire">Unwire…</button></div>';
@@ -93,6 +104,7 @@
   // fillTab sets every provider-derived text with textContent.
   function fillTab(pane, v) {
     const q = s => pane.querySelector(s);
+    if (v.wired && v.admin_view) fillAdminView(pane, v.label);
     q('[data-mail-warning]').textContent = v.warning || '';
     q('[data-mail-mode]').textContent = v.wired ? v.mode : 'not this server\'s mail server';
     const p = v.provider;
@@ -228,5 +240,5 @@
     dlg.showModal();
   }
 
-  window.PortcullisMailProvider = { renderTab, switchDialog, unwire, retryVoid, tabSkeleton, fillTab, adminViewHtml, openAdminView, ADMIN_VIEW_WARNING };
+  window.PortcullisMailProvider = { renderTab, switchDialog, unwire, retryVoid, tabSkeleton, fillTab, adminViewHtml, fillAdminView, adminViewWarning, openAdminView };
 })();

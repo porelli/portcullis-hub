@@ -54,6 +54,7 @@ const (
 	// the per-install route key the admin view router sets.
 	VarMailAdminTraefikIP  = "PORTCULLIS_MAIL_ADMIN_TRAEFIK_IP"
 	VarMailAdminRouteKey   = "PORTCULLIS_MAIL_ADMIN_ROUTE_KEY"
+	VarMailAdminGroup      = "PORTCULLIS_MAIL_ADMIN_GROUP"
 	MailAdminKeyMiddleware = "portcullis-mail-admin-key"
 	MailAdminKeyHeader     = "X-Portcullis-Mail-Admin-Key"
 	// The admin view routers' chains: the Hub's own (core's
