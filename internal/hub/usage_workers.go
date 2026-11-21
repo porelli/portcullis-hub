@@ -203,6 +203,8 @@ type usageCap struct {
 	shares      map[string]chan int
 	decided     bool
 	early       time.Time
+	// handed: the shares given so far (decideLocked's and the late ones).
+	handed int
 }
 
 func newUsageCap() *usageCap {
@@ -266,7 +268,16 @@ func (c *usageCap) decideLocked() {
 	reserved := c.equalLocked() * (c.n - len(c.counts))
 	shares := fairShare(c.roomLocked()-reserved, c.counts)
 	for server := range c.counts {
+		c.handed += shares[server]
 		c.shares[server] <- shares[server]
+	}
+}
+
+// completeLocked decides once the primary and every worker reported (no
+// worker waits for the early point then). Caller holds c.mu.
+func (c *usageCap) completeLocked() {
+	if !c.decided && c.primaryN >= 0 && len(c.counts) == c.n {
+		c.decideLocked()
 	}
 }
 
@@ -277,9 +288,22 @@ func (c *usageCap) primary(n int) {
 	if c.primaryN < 0 {
 		c.primaryN = n
 	}
-	if !c.decided && len(c.counts) == c.n {
-		c.decideLocked()
+	c.completeLocked()
+}
+
+// gone: server takes no share this sweep (busy, its list failed, an
+// older agent): it counts as reported with 0, so no other worker waits
+// for it.
+func (c *usageCap) gone(server string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.decided {
+		return
 	}
+	if _, ok := c.shares[server]; ok {
+		c.counts[server] = 0
+	}
+	c.completeLocked()
 }
 
 // worker reports server's count and returns its share; ok false when
@@ -288,30 +312,23 @@ func (c *usageCap) primary(n int) {
 func (c *usageCap) worker(bctx context.Context, server string, n int) (int, bool) {
 	c.mu.Lock()
 	ch := c.shares[server]
-	switch {
-	case c.decided:
-		// After the early point: the equal share at once.
+	if c.decided {
+		// After the early point: the equal share at once, never more than
+		// the room not yet handed out (the 256 bound is hard).
+		give := max(min(n, c.equalLocked(), c.roomLocked()-c.handed), 0)
+		c.handed += give
 		c.mu.Unlock()
-		return min(n, c.equalOrRoom()), true
-	default:
-		c.counts[server] = n
-		if c.primaryN >= 0 && len(c.counts) == c.n {
-			c.decideLocked()
-		}
-		c.mu.Unlock()
+		return give, true
 	}
+	c.counts[server] = n
+	c.completeLocked()
+	c.mu.Unlock()
 	select {
 	case s := <-ch:
 		return s, true
 	case <-bctx.Done():
 		return 0, false
 	}
-}
-
-func (c *usageCap) equalOrRoom() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.equalLocked()
 }
 
 // fairShare splits room among counts (water-filling): every server gets
@@ -391,6 +408,7 @@ func (h *Hub) startWorkers(bctx context.Context, now time.Time, insts map[string
 			sw := *e
 			sw.appsWhy, sw.hostWhy = workerUnreachable(e.name), workerUnreachable(e.name)
 			b.final <- &sw
+			caps.gone(e.server)
 			continue
 		}
 		go func(sw usageWorkerSweep) {
@@ -402,6 +420,7 @@ func (h *Hub) startWorkers(bctx context.Context, now time.Time, insts map[string
 			}()
 			defer func() { b.final <- out }()
 			if !h.workerList(bctx, now, out, insts, timeout) {
+				caps.gone(sw.server)
 				return
 			}
 			b.interim <- &usageWorkerSweep{server: sw.server, info: out.info, host: out.host, hostWhy: out.hostWhy}
@@ -422,14 +441,11 @@ func (h *Hub) startWorkers(bctx context.Context, now time.Time, insts map[string
 					out.appsWhy = workerOlder(sw.name)
 					return
 				}
-				if r.skipped {
-					// The budget ran out mid-sample: unreachable, never
-					// the previous sample shown as current.
-					out.appsWhy = workerUnreachable(sw.name)
-					out.capped, out.excess = nil, 0
-					return
-				}
 			}
+			// A job the budget skipped leaves only that container not
+			// measured ("unreachable", applyLocked's skipWhy); the
+			// worker's other fresh samples are kept (as the primary's
+			// budget_skipped).
 			out.applied = true
 		}(*e)
 	}
@@ -512,7 +528,7 @@ func (h *Hub) joinWorkers(b *usageWorkerBatch, now time.Time, insts map[string]u
 			} else if cur := s.workers[w.server]; cur != nil {
 				cpus = cur.cpus
 			}
-			s.applyLocked(w.server, now, w.in, w.jobs, w.results, insts, w.jobHealth, cpus)
+			s.applyLocked(w.server, now, w.in, w.jobs, w.results, insts, w.jobHealth, cpus, workerUnreachable(w.name))
 		}
 		if w.applied {
 			workerOver += w.excess

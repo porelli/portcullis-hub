@@ -40,6 +40,8 @@ type fakeWorkerRT struct {
 	slowInfo, slowHost bool
 	listDelay          time.Duration
 	listsVolumes       int
+	// slowStats: these containers' Stats wait until their context ends.
+	slowStats map[string]bool
 }
 
 func (f *fakeWorkerRT) HostUsage(ctx context.Context) (usage.HostCounters, error) {
@@ -416,6 +418,13 @@ func (f *fakeWorkerRT) Stats(ctx context.Context, id string) (runtime.UnitStats,
 	if ignore {
 		<-rel
 	}
+	f.mu.Lock()
+	slow := f.slowStats[id]
+	f.mu.Unlock()
+	if slow {
+		<-ctx.Done()
+		return runtime.UnitStats{}, ctx.Err()
+	}
 	return f.Fake.Stats(ctx, id)
 }
 
@@ -692,8 +701,185 @@ func TestWorkerSweepSampleOutOfBudget(t *testing.T) {
 	w.Unlock()
 	e.clock.Add(usage.Interval)
 	e.sweep()
-	if a := groupOf(e.h.UsageOverview("last"), "a"); a == nil || a.Status != "not_measured" || a.Why != "not measured: nas is unreachable" || len(a.Containers) != 0 {
-		t.Errorf("a = %+v", a)
+	// Every container cut by the budget: not measured with the reason,
+	// never the previous sample.
+	a := groupOf(e.h.UsageOverview("last"), "a")
+	if a == nil || a.Status != "not_measured" || a.Why != "not measured: nas is unreachable" || len(a.Containers) != 2 {
+		t.Fatalf("a = %+v", a)
+	}
+	for _, c := range a.Containers {
+		if c.Why != "not measured: nas is unreachable" || c.Sample.MemBytes != nil {
+			t.Errorf("container %s = %+v", c.Service, c)
+		}
+	}
+}
+
+// TestWorkerSweepSkippedKeepsOthers (re-review 2 ruling): a job the
+// budget cuts leaves only that container not measured; the worker's
+// other fresh samples are kept.
+func TestWorkerSweepSkippedKeepsOthers(t *testing.T) {
+	e := newUsageEnv(t)
+	e.h.usage.budget = 400 * time.Millisecond
+	e.placed(map[string]string{"a": "w1"})
+	w := e.addWorker(t, "w1", "nas")
+	w.Lock()
+	w.Units = []runtime.Unit{uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "db", 1, "running")}
+	w.Unlock()
+	wstats(w, e.clock, "a1", 0, 100)
+	wstats(w, e.clock, "a2", 0, 200)
+	e.sweep()
+	e.clock.Add(usage.Interval)
+	wstats(w, e.clock, "a1", 0, 111)
+	w.mu.Lock()
+	w.slowStats = map[string]bool{"a2": true}
+	w.mu.Unlock()
+	e.sweep()
+	a := groupOf(e.h.UsageOverview("last"), "a")
+	if a == nil || a.Status == "not_measured" || !a.Partial {
+		t.Fatalf("a = %+v", a)
+	}
+	for _, c := range a.Containers {
+		switch c.Service {
+		case "web":
+			if c.Why != "" || c.Sample.MemBytes == nil || *c.Sample.MemBytes != 111 {
+				t.Errorf("the fresh sample = %+v", c)
+			}
+		case "db":
+			if c.Why != "not measured: nas is unreachable" || c.Sample.MemBytes != nil {
+				t.Errorf("the cut one = %+v", c)
+			}
+		}
+	}
+}
+
+// TestWorkerSweepGoneDoesntHold (re-review 2 New I1): a worker whose list
+// fails at once, or that is busy, takes no share: w2 decides at once and
+// is sampled fresh within the budget, never at the early point.
+func TestWorkerSweepGoneDoesntHold(t *testing.T) {
+	for _, mode := range []string{"list fails", "busy"} {
+		t.Run(mode, func(t *testing.T) {
+			e := newUsageEnv(t)
+			// The reviewer's scale: early point 0.75 s, stats 0.8 s.
+			e.h.usage.budget, e.h.usage.statsTimeout = 1500*time.Millisecond, time.Second
+			e.placed(map[string]string{"a": "w1", "c": "w2"})
+			w1 := e.addWorker(t, "w1", "gone")
+			w2 := e.addWorker(t, "w2", "fast")
+			w2.Lock()
+			w2.Units = []runtime.Unit{uunit("c1", "portcullis-c", "web", 1, "running")}
+			w2.Unlock()
+			wstats(w2, e.clock, "c1", 0, 1)
+			e.sweep()
+			e.clock.Add(usage.Interval)
+			wstats(w2, e.clock, "c1", 15e9, 1)
+			w2.Lock()
+			w2.StatsDelay = 800 * time.Millisecond
+			w2.Unlock()
+			if mode == "list fails" {
+				w1.Lock()
+				w1.Err = errors.New("refused")
+				w1.Unlock()
+			} else {
+				e.h.usage.busyMu.Lock()
+				e.h.usage.busy["w1"] = true
+				e.h.usage.busyMu.Unlock()
+				t.Cleanup(func() {
+					e.h.usage.busyMu.Lock()
+					delete(e.h.usage.busy, "w1")
+					e.h.usage.busyMu.Unlock()
+				})
+			}
+			e.sweep()
+			v := e.h.UsageOverview("last")
+			c := groupOf(v, "c")
+			if c == nil || c.Status != "running" || c.Containers[0].Sample.CPUCores == nil || *c.Containers[0].Sample.CPUCores != 1 {
+				t.Errorf("c = %+v", c)
+			}
+			if a := groupOf(v, "a"); a == nil || a.Why != "not measured: gone is unreachable" {
+				t.Errorf("a = %+v", a)
+			}
+		})
+	}
+}
+
+// TestUsageCapPaths (re-review 2 New M1): the cap alone.
+func TestUsageCapPaths(t *testing.T) {
+	ws := func(ids ...string) []*usageWorkerSweep {
+		var out []*usageWorkerSweep
+		for _, id := range ids {
+			out = append(out, &usageWorkerSweep{server: id})
+		}
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// (a) the primary and every worker reported: shares at once.
+	c := newUsageCap()
+	c.start(ctx, ws("w1", "w2"), 0, 5*time.Second)
+	c.primary(56)
+	got := make(chan int, 2)
+	start := time.Now()
+	go func() { n, _ := c.worker(ctx, "w1", 10); got <- n }()
+	n2, ok := c.worker(ctx, "w2", 500)
+	n1 := <-got
+	if !ok || n1 != 10 || n2 != 190 || time.Since(start) > time.Second {
+		t.Errorf("(a) shares %d %d ok %v after %v", n1, n2, ok, time.Since(start))
+	}
+	// A worker that's gone counts as reported: no wait.
+	c = newUsageCap()
+	c.start(ctx, ws("w1", "w2"), 0, 5*time.Second)
+	c.primary(0)
+	c.gone("w1")
+	start = time.Now()
+	if n, ok := c.worker(ctx, "w2", 300); !ok || n != 256 || time.Since(start) > time.Second {
+		t.Errorf("gone: %d %v after %v", n, ok, time.Since(start))
+	}
+	// (b) a late reporter gets min(n, equal); the reserved room isn't
+	// handed to the early ones.
+	c = newUsageCap()
+	c.start(ctx, ws("w1", "w2"), 0, 50*time.Millisecond)
+	c.primary(0)
+	n1, _ = c.worker(ctx, "w1", 300) // decided at the early point
+	time.Sleep(10 * time.Millisecond)
+	n2, _ = c.worker(ctx, "w2", 300)
+	if n1 != 128 || n2 != 128 {
+		t.Errorf("(b) %d %d", n1, n2)
+	}
+	if n, _ := c.worker(ctx, "w2", 5); n > 128 {
+		t.Errorf("(b) small late = %d", n)
+	}
+	// (c) two floods reported, one worker unreported: within
+	// 256 − primary − equal.
+	c = newUsageCap()
+	c.start(ctx, ws("w1", "w2", "w3"), 0, 50*time.Millisecond)
+	c.primary(16)
+	go func() { n, _ := c.worker(ctx, "w1", 1000); got <- n }()
+	n2, _ = c.worker(ctx, "w2", 1000)
+	n1 = <-got
+	if equal := (256 - 16) / 3; n1+n2 > 256-16-equal || n1 != 80 || n2 != 80 {
+		t.Errorf("(c) %d %d", n1, n2)
+	}
+	// nit 1: a late share is at most the room not yet handed out. The
+	// primary reports after the early point with more than last sweep's
+	// (200 for 100): w1 had 78 (half of 156); w2, late, gets the 56 − 78
+	// left: none.
+	c = newUsageCap()
+	c.start(ctx, ws("w1", "w2"), 100, 30*time.Millisecond)
+	n1, _ = c.worker(ctx, "w1", 1000)
+	c.primary(200)
+	n2, _ = c.worker(ctx, "w2", 1000)
+	if n1 != 78 || n2 != 0 {
+		t.Errorf("nit 1: %d %d", n1, n2)
+	}
+	// Late shares together never exceed the room left.
+	c = newUsageCap()
+	c.start(ctx, ws("w1", "w2", "w3"), 0, 10*time.Millisecond)
+	c.primary(250)
+	time.Sleep(30 * time.Millisecond)
+	a, _ := c.worker(ctx, "w1", 10)
+	b, _ := c.worker(ctx, "w2", 10)
+	d, _ := c.worker(ctx, "w3", 10)
+	if a+b+d > 6 {
+		t.Errorf("late shares %d %d %d over the room 6", a, b, d)
 	}
 }
 

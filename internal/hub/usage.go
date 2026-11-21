@@ -399,7 +399,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	s.overLimit = over + s.workerOver
 	// The primary's own engine is trusted: its rates bounded by
 	// MaxCPUCores only (cpus 0).
-	skipped, nSampled, notMeas := s.applyLocked("", now, in, jobs, results, insts, jobHealth, 0)
+	skipped, nSampled, notMeas := s.applyLocked("", now, in, jobs, results, insts, jobHealth, 0, "")
 	s.notMeasured = ""
 	if len(notMeas) == 1 && nSampled > 0 {
 		for why, n := range notMeas {
@@ -614,7 +614,12 @@ func usageSample(bctx context.Context, rt runtime.Instances, jobs []usageJob, ti
 // cpus: the server's CPU count (0: unknown); a derived CPU rate is never
 // above it, nor above usage.MaxCPUCores (a worker's counters and read
 // times are untrusted).
-func (s *usageState) applyLocked(server string, now time.Time, in []usageUnit, jobs []usageJob, results []usageResult, insts map[string]usageInst, jobHealth map[string]string, cpus int) (skipped, sampled int, notMeas map[string]int) {
+//
+// skipWhy (a worker's): a job the budget skipped leaves that container
+// not measured with this reason (never its previous sample shown as
+// current); "" (the primary): it keeps its previous sample, logged
+// budget_skipped.
+func (s *usageState) applyLocked(server string, now time.Time, in []usageUnit, jobs []usageJob, results []usageResult, insts map[string]usageInst, jobHealth map[string]string, cpus int, skipWhy string) (skipped, sampled int, notMeas map[string]int) {
 	live := map[string]bool{}
 	for _, u := range in {
 		k := contKey(server, u.ID)
@@ -652,6 +657,12 @@ func (s *usageState) applyLocked(server string, now time.Time, in []usageUnit, j
 		}
 		if r.skipped {
 			skipped++
+			if skipWhy != "" && c.Running {
+				c.Sample, c.Sampled, c.Err, c.NotMeas = usage.Sample{}, false, "", skipWhy
+				if !c.Inspect.IsZero() {
+					c.Sample = usage.LimitsSample(c.Limits)
+				}
+			}
 			continue
 		}
 		// A restart: the counter went down, or a later inspect has more

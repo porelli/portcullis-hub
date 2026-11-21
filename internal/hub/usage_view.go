@@ -86,6 +86,10 @@ type UsageContainer struct {
 	Restarts  int          `json:"restarts"`
 	Helper    bool         `json:"helper,omitempty"`
 	Error     string       `json:"error,omitempty"`
+	// Why: a running container not measured this sweep, the reason (its
+	// worker unreachable within the budget, a runtime that can't measure
+	// it).
+	Why string `json:"why,omitempty"`
 	// NotMeasured: each null sample field with a known reason → its
 	// fixed text (usage.Sample.NotMeasured; contract §11.11).
 	NotMeasured map[string]string `json:"not_measured,omitempty"`
@@ -335,7 +339,7 @@ func (s *usageState) groupLocked(server, instance, template, name string, cs, he
 		g.Containers = append(g.Containers, UsageContainer{
 			ID12: shortContainerID(c.ID), Service: c.Service, Number: c.Number, State: c.State,
 			Sample: sample, NotMeasured: runningNotMeasured(c, sample), Limits: UsageLimits{MemBytes: c.Limits.MemBytes, CPUCores: c.Limits.CPUCores, Pids: c.Limits.Pids},
-			OOMKilled: c.Limits.OOMKilled, Restarts: c.Limits.Restarts, Error: c.Err,
+			OOMKilled: c.Limits.OOMKilled, Restarts: c.Limits.Restarts, Error: c.Err, Why: runningWhy(c),
 		})
 		health := c.Health
 		if health == "" {
@@ -409,6 +413,15 @@ func (s *usageState) groupLocked(server, instance, template, name string, cs, he
 	}
 	g.Partial = g.Partial || meanPartial
 	return g
+}
+
+// runningWhy is a running container's not-measured reason ("" when it
+// was measured).
+func runningWhy(c *usageCont) string {
+	if !c.Running {
+		return ""
+	}
+	return c.NotMeas
 }
 
 // runningNotMeasured is a running container's not_measured (a stopped
