@@ -53,15 +53,31 @@
     if (b) b.textContent = 'Open ' + (label || 'the mail server') + '\'s admin (read-only)';
   }
 
-  // openAdminView asks the Hub for the link (audited) and opens it in a
-  // new tab, from the click itself (the tab opens first, then navigates).
+  // openAdminView asks the Hub for a ticket (audited) and posts it to
+  // the view in a new tab: the ticket travels in a form body, never a URL
+  // (no access log or history holds it). The tab opens from the click
+  // itself, without an opener.
   async function openAdminView() {
-    const w = window.open('', '_blank');
+    const name = 'portcullis-mail-admin-' + Date.now();
+    const w = window.open('about:blank', name);
     if (w) w.opener = null;
     try {
       const r = await (await window.apiCall('/api/mail/admin-view', 'POST', {})).json();
-      if (!r || typeof r.url !== 'string' || !/^https:\/\/[a-z0-9.-]+\/portcullis\/open\?t=[A-Za-z0-9._~%-]+$/.test(r.url)) throw new Error('the Hub returned no admin view link');
-      if (w) w.location.href = r.url; else window.location.href = r.url;
+      if (!r || typeof r.url !== 'string' || !/^https:\/\/[a-z0-9.-]+\/portcullis\/open$/.test(r.url) ||
+        typeof r.ticket !== 'string' || !/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(r.ticket)) throw new Error('the Hub returned no admin view ticket');
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = r.url;
+      form.target = w ? name : '_blank';
+      form.rel = 'noopener';
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 't';
+      input.value = r.ticket;
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+      form.remove();
     } catch (e) {
       if (w) w.close();
       window.showToast(e.message, 'error');

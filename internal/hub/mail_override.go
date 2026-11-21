@@ -2,11 +2,13 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -16,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -32,6 +35,9 @@ type mailRender struct {
 	networks map[string]map[string]string // service → network → its YAML body (" {}" or "\n" and a mapping)
 	ports    map[string][]string
 	labels   map[string]map[string]string
+	// extraGroups are further groups per service (the admin view's 10001,
+	// the group of its ticket key file).
+	extraGroups map[string][]int
 	// topNetworks: network key → its top-level YAML body.
 	topNetworks map[string]string
 	// tlsVolume / secretsVolume: the top-level volumes to declare.
@@ -380,7 +386,7 @@ func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailR
 		}
 	}
 	if av := b.AdminView; av != nil {
-		if err := h.mailAdminViewLocked(r, av, attach); err != nil {
+		if err := h.mailAdminViewLocked(r, av, attach, t.ID); err != nil {
 			return nil, err
 		}
 	}
@@ -398,7 +404,7 @@ func (h *Hub) mailAdminHost() string {
 // and the Hub's admin chain — on websecure unless admin hosts are
 // VPN-only (VPN modes admin and server), always on vpnsecure. Caller
 // holds mu.
-func (h *Hub) mailAdminViewLocked(r *mailRender, av *templates.Endpoint, attach func(svc, net, body string)) error {
+func (h *Hub) mailAdminViewLocked(r *mailRender, av *templates.Endpoint, attach func(svc, net, body string), id string) error {
 	np, err := h.networkParams()
 	if err != nil {
 		return err
@@ -407,7 +413,24 @@ func (h *Hub) mailAdminViewLocked(r *mailRender, av *templates.Endpoint, attach 
 	if err != nil {
 		return fmt.Errorf("mail: the admin view's route key: %w", err)
 	}
+	// The ticket key (contract §19.13): its own per-install secret, a file
+	// the view reads through this read-only bind (group 10001, 0640) —
+	// never a label or an environment value Traefik or its API could show.
+	if _, err := h.mailAdminTicketKey(id); err != nil {
+		return fmt.Errorf("mail: the admin view's ticket key: %w", err)
+	}
 	s := av.Service
+	host := path.Join(h.appFilesHostFor(id), id, mailAdminTicketDir)
+	if h.relabelFor(id) {
+		r.mounts[s] = append(r.mounts[s], relabelBindEntry(host, MailAdminTicketMount, true))
+	} else {
+		b, _ := json.Marshal(composeLiteral(host) + ":" + composeLiteral(MailAdminTicketMount) + ":ro")
+		r.mounts[s] = append(r.mounts[s], string(b))
+	}
+	if r.extraGroups == nil {
+		r.extraGroups = map[string][]int{}
+	}
+	r.extraGroups[s] = append(r.extraGroups[s], hubGID)
 	attach(s, mailProxyNetwork, " {}")
 	r.topNetworks[mailProxyNetwork] = "\n    external: true\n    name: " + mailProxyNetwork
 	r.env[s] = append(r.env[s], VarMailTLSSPKI+": "+yamlQuote(strings.Join(h.st.Mail.TLS.SPKISHA256, ",")),
@@ -460,6 +483,45 @@ func (h *Hub) mailAdminRouteKey() (string, error) {
 		return "", err
 	}
 	if err := writeAtomic0600(p, []byte(k+"\n")); err != nil {
+		return "", err
+	}
+	return k, nil
+}
+
+// The admin view's ticket key: <appfiles>/<id>/mail-admin/ticket-key
+// (the Hub's side), mounted read-only at MailAdminTicketMount.
+const (
+	mailAdminTicketDir   = "mail-admin"
+	MailAdminTicketMount = "/run/portcullis/mail-admin"
+	hubGID               = 10001
+)
+
+// mailAdminTicketKey is instance id's ticket secret (48 characters
+// [A-Za-z0-9], made once; 0640 in a 0750 directory, group the Hub's).
+func (h *Hub) mailAdminTicketKey(id string) (string, error) {
+	if !templates.ValidID(id) {
+		return "", fmt.Errorf("invalid instance id")
+	}
+	dir := filepath.Join(h.appFilesDir(id), mailAdminTicketDir)
+	p := filepath.Join(dir, "ticket-key")
+	if b, err := os.ReadFile(p); err == nil {
+		if k := strings.TrimSpace(string(b)); len(k) >= 32 {
+			return k, nil
+		}
+	}
+	for _, d := range []string{h.cfg.AppFilesDir, h.appFilesDir(id), dir} {
+		if err := os.MkdirAll(d, appFilesDirMode); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Chmod(dir, appFilesDirMode); err != nil {
+		return "", err
+	}
+	k, err := mailRandString(mailSecretLen)
+	if err != nil {
+		return "", err
+	}
+	if err := fsutil.WriteFileAtomic(p, []byte(k+"\n"), dataFileMode); err != nil {
 		return "", err
 	}
 	return k, nil

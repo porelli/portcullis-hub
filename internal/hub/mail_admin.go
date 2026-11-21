@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1091,7 +1090,7 @@ func (h *Hub) HostMailDomains() []MailDomainStateRow {
 // opens a session only from it (MailAdminTicket). 503 while nothing is
 // wired or the provider isn't in normal mode, 409 when its block has no
 // admin view. Audited mail.admin_view_opened with the ticket's nonce.
-func (h *Hub) MailAdminViewURL(actor directory.Actor) (link string, err error) {
+func (h *Hub) MailAdminViewURL(actor directory.Actor) (link, ticket string, err error) {
 	h.mu.RLock()
 	p := h.st.Mail.Provider
 	var id string
@@ -1114,21 +1113,23 @@ func (h *Hub) MailAdminViewURL(actor directory.Actor) (link string, err error) {
 	}()
 	switch {
 	case id == "" || mode != mailNormal:
-		return "", statusErr(http.StatusServiceUnavailable, "mail isn't running right now")
+		return "", "", statusErr(http.StatusServiceUnavailable, "mail isn't running right now")
 	case !av:
-		return "", statusErr(http.StatusConflict, "the mail provider has no read-only admin view")
+		return "", "", statusErr(http.StatusConflict, "the mail provider has no read-only admin view")
 	case strings.TrimSpace(actor.User) == "":
-		return "", statusErr(http.StatusBadRequest, "no signed-in user to open the view as")
+		return "", "", statusErr(http.StatusBadRequest, "no signed-in user to open the view as")
 	}
-	key, err := h.mailAdminRouteKey()
+	// The ticket's own key (never the route key, which Traefik holds).
+	key, err := h.mailAdminTicketKey(id)
 	if err != nil {
-		return "", fmt.Errorf("the admin view's route key: %w", err)
+		return "", "", fmt.Errorf("the admin view's ticket key: %w", err)
 	}
 	if nonce, err = mailRandString(24); err != nil {
-		return "", err
+		return "", "", err
 	}
-	t := MailAdminTicket(key, actor.User, nonce, h.now().Add(MailAdminTicketTTL))
-	return "https://" + host + "/portcullis/open?t=" + url.QueryEscape(t), nil
+	// The ticket goes in a POST body (the page's form), never a URL:
+	// no access log or history holds it.
+	return "https://" + host + "/portcullis/open", MailAdminTicket(key, actor.User, nonce, h.now().Add(MailAdminTicketTTL)), nil
 }
 
 // MailAdminTicketTTL is a ticket's life (contract §19.13: ≤ 60 s).
@@ -1137,9 +1138,9 @@ const MailAdminTicketTTL = 60 * time.Second
 // MailAdminTicket is the admin view's single-use ticket (contract §19.13;
 // mailctl's viewer.MintTicket is the same format): "v1.<b64url(json
 // {u, n, e})>.<b64url(HMAC-SHA256(k, the first two parts))>", k =
-// HMAC-SHA256(route key, "portcullis-mail-admin-ticket v1").
-func MailAdminTicket(routeKey, user, nonce string, exp time.Time) string {
-	km := hmac.New(sha256.New, []byte(routeKey))
+// HMAC-SHA256(the ticket secret, "portcullis-mail-admin-ticket v1").
+func MailAdminTicket(secret, user, nonce string, exp time.Time) string {
+	km := hmac.New(sha256.New, []byte(secret))
 	km.Write([]byte("portcullis-mail-admin-ticket v1"))
 	b, _ := json.Marshal(struct {
 		User   string `json:"u"`

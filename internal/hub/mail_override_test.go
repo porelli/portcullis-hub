@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -646,8 +645,8 @@ func TestMailAdminViewOverride(t *testing.T) {
 		}
 	}
 	// The view gets no certificate, slot file, group 2000 or core network
-	// beyond portcullis-proxy.
-	if len(av.Volumes) != 0 || len(av.GroupAdd) != 0 || av.Networks[mailAPINetwork] != nil || av.Networks[mailMetricsNetwork] != nil {
+	// beyond portcullis-proxy: only its ticket key, read-only, group 10001.
+	if len(av.Volumes) != 1 || !slices.Equal(av.GroupAdd, []string{"10001"}) || av.Networks[mailAPINetwork] != nil || av.Networks[mailMetricsNetwork] != nil {
 		t.Fatalf("admin-view got %v %v %v", av.Volumes, av.GroupAdd, av.Networks)
 	}
 	if len(d.Services["adapter"].Labels) == 0 || d.Services["adapter"].Labels["traefik.http.routers."+MailAdminRouter+".rule"] != "" {
@@ -731,23 +730,26 @@ func TestMailAdminTicketVector(t *testing.T) {
 	}
 }
 
-// TestMailAdminViewURL (contract §19.13): the Open action's link carries
-// a single-use ticket for the actor, MAC'd with the route key the view
-// gets, ≤ 60 s; every call a new one; audited with the nonce.
+// TestMailAdminViewURL (contract §19.13): the Open action answers the
+// form target and a single-use ticket for the actor, MAC'd with the
+// instance's own ticket key (never the route key), ≤ 60 s; a new one each
+// call.
 func TestMailAdminViewURL(t *testing.T) {
 	f := newMailSlotFixtureFrom(t, mailVectorFiles(t, "admin_view ok"), true)
 	f.h.SetMailCoreForTest(true, "mail.example.org")
-	u1, err := f.h.MailAdminViewURL(directory.Actor{User: "root"})
+	u1, tk, err := f.h.MailAdminViewURL(directory.Actor{User: "root"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	u2, _ := f.h.MailAdminViewURL(directory.Actor{User: "root"})
-	pre := "https://mail-admin." + f.h.cfg.Domain + "/portcullis/open?t="
-	if !strings.HasPrefix(u1, pre) || u1 == u2 {
-		t.Fatalf("links %s %s", u1, u2)
+	_, tk2, _ := f.h.MailAdminViewURL(directory.Actor{User: "root"})
+	if u1 != "https://mail-admin."+f.h.cfg.Domain+"/portcullis/open" || tk == tk2 || strings.Contains(u1, "?") {
+		t.Fatalf("link %s / %s %s", u1, tk, tk2)
 	}
-	key, _ := f.h.mailAdminRouteKey()
-	tk, _ := url.QueryUnescape(strings.TrimPrefix(u1, pre))
+	key, _ := f.h.mailAdminTicketKey(mailProviderID)
+	rk, _ := f.h.mailAdminRouteKey()
+	if key == rk || len(key) < 32 {
+		t.Fatal("the ticket key is the route key")
+	}
 	parts := strings.Split(tk, ".")
 	b, _ := base64.RawURLEncoding.DecodeString(parts[1])
 	var body struct {
@@ -758,7 +760,42 @@ func TestMailAdminViewURL(t *testing.T) {
 	if body.U != "root" || len(body.N) < 16 || time.Until(time.Unix(body.E, 0)) > MailAdminTicketTTL || MailAdminTicket(key, "root", body.N, time.Unix(body.E, 0)) != tk {
 		t.Fatalf("ticket %+v", body)
 	}
-	if _, err := f.h.MailAdminViewURL(directory.Actor{}); err == nil {
+	if MailAdminTicket(rk, "root", body.N, time.Unix(body.E, 0)) == tk {
+		t.Fatal("the route key MACs the ticket")
+	}
+	if _, _, err := f.h.MailAdminViewURL(directory.Actor{}); err == nil {
 		t.Fatal("a link without a user")
+	}
+	// The ticket key reaches the view only as a read-only file: no label
+	// or environment value of the override holds it (N1).
+	ov := renderMail(t, f, mailNormal)
+	if strings.Contains(ov, key) {
+		t.Fatal("the ticket key is in the override")
+	}
+	d := decodeOverride(t, ov)
+	av := d.Services["admin-view"]
+	found := false
+	for _, n := range av.Volumes {
+		var v string
+		if n.Decode(&v) == nil && strings.HasSuffix(v, "/"+mailProviderID+"/mail-admin:"+MailAdminTicketMount+":ro") {
+			found = true
+		}
+	}
+	if !found || !slices.Contains(av.GroupAdd, "10001") {
+		t.Fatalf("admin-view volumes %v groups %v", av.Volumes, av.GroupAdd)
+	}
+	fi, err := os.Stat(filepath.Join(f.h.appFilesDir(mailProviderID), "mail-admin", "ticket-key"))
+	if err != nil || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("ticket key file %v %v", fi, err)
+	}
+	for _, s := range []string{"stalwart", "adapter"} {
+		if len(d.Services[s].Volumes) > 0 {
+			for _, n := range d.Services[s].Volumes {
+				var v string
+				if n.Decode(&v) == nil && strings.Contains(v, "mail-admin") {
+					t.Errorf("%s mounts the ticket key", s)
+				}
+			}
+		}
 	}
 }

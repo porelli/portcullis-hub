@@ -39,13 +39,14 @@ func (s *Server) handleMailAdminView(w http.ResponseWriter, r *http.Request) {
 	if !readMailBody(w, r, &b, `{}`) {
 		return
 	}
-	u, err := s.Hub.MailAdminViewURL(a)
+	u, ticket, err := s.Hub.MailAdminViewURL(a)
 	if err != nil {
 		writeErr(w, err, http.StatusInternalServerError)
 		return
 	}
 	noStore(w)
-	writeJSON(w, map[string]string{"url": u})
+	// The page posts the ticket to url (a form body, never a URL).
+	writeJSON(w, map[string]string{"url": u, "ticket": ticket})
 }
 
 // handleSwitchMailProvider: POST /api/mail/provider/switch {to, confirm,

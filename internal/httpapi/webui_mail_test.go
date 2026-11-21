@@ -334,10 +334,13 @@ process.stdout.write(JSON.stringify({ skel: h, warn: node('[data-mail-admin-view
 		t.Errorf("Settings → Mail without the view: %s", h)
 	}
 	src := webAsset(t, "mailprovider.js")
-	for _, want := range []string{"'/api/mail/admin-view', 'POST'", "w.opener = null", `\/portcullis\/open\?t=`} {
+	for _, want := range []string{"'/api/mail/admin-view', 'POST'", "w.opener = null", `\/portcullis\/open$/`, "form.method = 'POST'", "input.name = 't'"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("mailprovider.js lacks %q", want)
 		}
+	}
+	if strings.Contains(src, "?t=") {
+		t.Error("a ticket in a URL")
 	}
 	idx := webAsset(t, "index.html")
 	for _, want := range []string{"data-managed-by-portcullis", ">Managed by Portcullis</span>", "'managed by Portcullis'"} {
