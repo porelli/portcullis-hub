@@ -3419,7 +3419,7 @@ The Hub's **Usage** page and each instance's **Usage** tab show live CPU, memory
 ```json
 {
   "measured_at": "2026-11-15T03:10:00Z", "running_op": null, "metrics_scraped": false,
-  "disks": [{"server": "primary", "dev": 2049, "free_bytes": 0, "total_bytes": 0, "used_percent": 0, "owners": ["paperless", "core"]}],
+  "disks": [{"server": "primary", "dev": 2049, "device": "8:1", "role": "docker_data", "path": "/var/lib/docker", "free_bytes": 0, "total_bytes": 0, "used_percent": 0, "owners": ["paperless", "core"]}],
   "apps": [{"instance": "paperless", "name": "Paperless", "items": [StorageItem], "total_alloc_bytes": 0, "partial": false}],
   "folders": [{"id": "media", "name": "Media", "alloc_bytes": 0, "partial": false, "used_by": ["jellyfin"], "measured_at": "…", "note"?: "…"}],
   "core": [StorageItem]
@@ -3429,6 +3429,12 @@ The Hub's **Usage** page and each instance's **Usage** tab show live CPU, memory
 - `StorageItem` = `{"target", "kind", "owner", "alloc_bytes", "apparent_bytes", "partial", "partial_reason", "in_total", "shared_with"?, "measured_at", "duration_ms", "error"?}`. `kind` is `volume`, `bind`, `folder`, `layer`, `image` or `hub_files`. `target` is a volume name, a host path, a folder id, a service (`layer`) or an image reference. `error` is fixed text (`refused: under the engine's data root`, `timed out`, `not measured on Kubernetes yet`, …). **NEW (ux3):** `dev` (number) is the filesystem the measurement's report named (omitted when unknown, e.g. never measured); `services` (`["<service>.<number>"]`, sorted; `volume` and `bind` items only) are the containers that mount it, from the sampler's inspects.
 - **Totals.** `total_alloc_bytes` sums the items with `in_total: true`: volumes, binds and writable layers. Images are listed `in_total: false` ("shared, not in total"). A bind into a shared folder is a `folder` item with the folder's figure, `in_total: false`. A volume or host path used by several instances is measured once and listed on each with `shared_with` (the other instances) and `in_total: false`, so it is in no app total. `hub_files` (template support files and app files) has `null` sizes ("Hub-managed files"). An instance with nothing measured or listed yet but its `hub_files` row isn't in `apps`; the data directory's filesystem joins `disks` once a measurement has run. A run with targets that couldn't be measured ends ok with a warning naming how many.
 - **Disks.** One entry per server and filesystem (**NEW, ux3:** `server`, the server id, as for `hosts`; `dev`), from every measured report's `free_bytes` / `total_bytes` and a direct `statfs` of the Hub's data directory; `owners` are the instances (and `core`, folder ids) with data there, largest first.
+- **Disk roles (NEW, ux3 Task 14 review).** Each disk also carries `device` (`"<major>:<minor>"` of `dev`, as `lsblk` shows it), `role` and `path` (a host path on it, omitted when unknown):
+    - `docker_data`: the filesystem the engine keeps its volumes on, i.e. its data root (a measured `volume` item's report names it). `path` is the engine's data root (`DockerRootDir`, the first of the runtime's forbidden roots; a worker's from its agent's `/v1/info`), once the sampler's hourly info read has it. Images and writable layers, which carry no `dev` of their own, are on this disk.
+    - `folder_root`: holds a shared folder (the doctor's scan report names it); `path` is that folder's path (the first by path when several).
+    - `agent_data`: the Hub's own data directory (the primary's direct `statfs`) when it is on none of the above; no `path` (the Hub sees only its container's path).
+    - `other`: anything else (a bind's host path, then `path` is that bind's source).
+    The first matching role in that order wins. The Usage page titles a disk by its role ("Docker data (/var/lib/docker)", "Podman data …" on a Podman primary, "Shared folders (/srv/media)", "Portcullis data", or "Disk 8:1 (<path>)").
 - **Folders.** From the doctor's scans: `alloc_bytes` `null` with `note` "not measured yet" for a cached scan without it, and "not measured (checked at the top level only)" for a per-person tree.
 - A capped target shows "≥ 120 GiB (stopped after 2 min)"; every figure carries its age ("measured 3 h ago") and is dimmed past 48 h.
 
