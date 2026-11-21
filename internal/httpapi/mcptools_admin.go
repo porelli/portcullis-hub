@@ -1364,9 +1364,9 @@ func credentialsErr(what string, err error) error {
 }
 
 // secretSettingForm is the settings page of instance id at option (the
-// Hub page's deep link #app/<id>/settings[/<option>]).
+// Hub page's deep link #apps/<id>/settings[/<option>]).
 func (s *Server) secretSettingForm(id, option string) string {
-	u := s.mcpScope(ScopeAdmin).home + "#app/" + id + "/settings"
+	u := s.mcpScope(ScopeAdmin).home + "#apps/" + id + "/settings"
 	if option != "" {
 		u += "/" + option
 	}

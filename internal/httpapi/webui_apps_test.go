@@ -214,7 +214,7 @@ func TestHubInstLineEscapes(t *testing.T) {
 // use data-* attributes and delegated listeners, never inline handlers.
 func TestHubAppsPageStatic(t *testing.T) {
 	b := hubIndex(t)
-	tabs := regexp.MustCompile(`<div class="tab[^"]*" data-tab="([a-z]+)"`).FindAllStringSubmatch(b, -1)
+	tabs := regexp.MustCompile(`<button type="button" class="tab[^"]*" data-tab="([a-z]+)"`).FindAllStringSubmatch(b, -1)
 	var names []string
 	for _, m := range tabs {
 		names = append(names, m[1])

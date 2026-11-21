@@ -396,7 +396,7 @@ func TestNoEnrollWording(t *testing.T) {
 		t.Error("the Domains form isn't Add domain")
 	}
 	if !strings.Contains(hubPage, "Website certificate (HTTPS) valid until") {
-		t.Error("Settings → Domains doesn't name the website certificate")
+		t.Error("Settings → Network → Domains doesn't name the website certificate")
 	}
 }
 

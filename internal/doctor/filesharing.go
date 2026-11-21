@@ -404,7 +404,7 @@ func (localNetworksEmptyCheck) Run(in *Inputs) []Finding {
 		Title:     "Local networks is empty; file sharing is off.",
 		Why:       fmt.Sprintf("Local networks is saved empty (loopback only), so %s %s nobody on the LAN: a file-sharing app never allows everyone instead.", joinAnd(insts), plural(int64(len(insts)), "lets", "let")),
 		Class:     FixExplain,
-		Steps:     []string{"Open Settings → Local networks and add your LAN's networks (or go back to the defaults); the apps restart with the new list."},
+		Steps:     []string{"Open Settings → Network → Local networks and add your LAN's networks (or go back to the defaults); the apps restart with the new list."},
 		Instances: insts,
 		Inputs:    Digest(insts),
 	}}

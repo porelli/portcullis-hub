@@ -711,7 +711,7 @@ func (h *Hub) rebindAddress(ctx context.Context, server, s string) (netip.Addr, 
 		if server != "" {
 			return a, nil, statusErr(http.StatusBadRequest, "%s isn't in server %s's Local networks (Settings → Servers)", a, server)
 		}
-		return a, nil, statusErr(http.StatusBadRequest, "%s isn't in the local networks (Hub Settings → Local networks)", a)
+		return a, nil, statusErr(http.StatusBadRequest, "%s isn't in the local networks (Hub Settings → Network → Local networks)", a)
 	}
 	var warns []string
 	addrs, derr := h.domainAddrs(ctx)

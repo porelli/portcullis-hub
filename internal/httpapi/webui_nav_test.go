@@ -179,12 +179,12 @@ func itoa(n int) string {
 func TestEmittedHashesRoute(t *testing.T) {
 	_, routes := hubRoutes(t)
 	hashes := emittedHashes(t)
-	for _, want := range []string{"settings/ai?x", "settings/network?x", "settings/sources", "marketplace?filter=mail", "apps/x/mail", "usage/x", "doctor", "audit", "settings/ssh", "access/vpn"} {
+	for _, want := range []string{"settings/ai?x", "settings/network?x", "settings/sources", "marketplace?filter=mail", "apps/x/mail", "usage/x", "doctor", "audit", "settings/ssh", "access/vpn", "apps/x/settings"} {
 		if _, ok := hashes[want]; !ok {
 			t.Errorf("no emitted #%s found (the scan missed it, or the link moved): %v", want, hashes)
 		}
 	}
-	for _, gone := range []string{"sources", "settings/domains?x", "ssh"} {
+	for _, gone := range []string{"sources", "settings/domains?x", "ssh", "app/x/settings"} {
 		if at, ok := hashes[gone]; ok {
 			t.Errorf("#%s is still emitted (%s)", gone, at)
 		}

@@ -249,7 +249,7 @@ func TestHarness(t *testing.T) {
 	seedDirectory(e)
 	h.SetPeople(harnessPeople{e.s.Directory})
 	seedAI(h)
-	seedDomains(t, e) // DNS hardening: Settings → Domains' DNS panels
+	seedDomains(t, e) // DNS hardening: Settings → Network → Domains' DNS panels
 
 	// Seed: two extra instances, one enabled, with data; backups, one of
 	// a deleted instance.

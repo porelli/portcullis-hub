@@ -1892,7 +1892,7 @@
     return '<a class="pd-a" href="' + esc('https://hub.' + String(options.domain || '') + '/' + frag) + '" target="_blank" rel="noopener noreferrer" title="' +
       esc((title ? title + ' · ' : '') + 'opens the Hub') + '">' + esc(text) + ' <span aria-hidden="true">↗</span></a>';
   }
-  const appFrag = (id, key) => '#app/' + enc(id) + '/settings' + (key ? '/' + enc(key) : '');
+  const appFrag = (id, key) => '#apps/' + enc(id) + '/settings' + (key ? '/' + enc(key) : '');
 
   function groupKind(g) { return g.builtin ? 'built-in' : g.rule ? 'rule-based' : 'manual'; }
   function kindPill(g) {

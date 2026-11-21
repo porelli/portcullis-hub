@@ -114,7 +114,7 @@ func (h *Hub) SetServerSettings(ctx context.Context, actor directory.Actor, id s
 	}
 	if id == servers.PrimaryID {
 		if in.Name != nil || in.LocalNetworks != nil || in.LocalNetworksDefault {
-			return statusErr(http.StatusBadRequest, "the primary's settings here are its backup schedule only (Local networks: Settings → Local networks)")
+			return statusErr(http.StatusBadRequest, "the primary's settings here are its backup schedule only (Local networks: Settings → Network → Local networks)")
 		}
 		if in.BackupSchedule == nil {
 			return nil

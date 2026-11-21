@@ -25,9 +25,17 @@
     .user-badge strong { color: #3b82f6; }
 
     /* Tabs */
-    .tabs { display: flex; gap: 0; margin-bottom: 2rem; border-bottom: 2px solid #1e293b; }
-    .tab { padding: 0.75rem 1.5rem; cursor: pointer; color: #94a3b8; font-size: 0.875rem; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
-    .tab:hover { color: #e2e8f0; }
+    /* The top tabs scroll sideways when they don't fit (390 px phones):
+       never wider than the page. Buttons, so Tab reaches them. The rule
+       under them is an inset shadow: a border would be clipped by the
+       scroll box under the picked tab's underline. */
+    .tabs { position: relative; display: flex; gap: 0; margin-bottom: 2rem; box-shadow: inset 0 -2px #1e293b; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+    .tab { flex: none; white-space: nowrap; background: none; border: 0; font-family: inherit; padding: 0.75rem 1.5rem; cursor: pointer; color: #94a3b8; font-size: 0.875rem; font-weight: 500; border-bottom: 2px solid transparent; transition: all 0.2s; }
+    .tab:hover, .tab:focus-visible { color: #e2e8f0; }
+    .tab:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
+    @media (max-width: 640px) { .tab { padding: 0.75rem 0.875rem; } }
+    /* Settings → Network's domains table scrolls inside its box on a phone. */
+    #domains-root { overflow-x: auto; }
     .tab.active { color: #3b82f6; border-bottom-color: #3b82f6; }
     a.tab { text-decoration: none; }
     a.group-link { color: inherit; text-decoration: none; border-bottom: 1px dotted #64748b; }
@@ -763,12 +771,12 @@
          Doctor · Usage · Access (SSH access, VPN devices, sign-in
          history) · Settings · Audit. People is the site bar's. -->
     <div class="tabs">
-      <div class="tab active" data-tab="apps">Apps</div>
-      <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
-      <div class="tab" data-tab="usage">Usage</div>
-      <div class="tab" data-tab="access">Access</div>
-      <div class="tab" data-tab="settings">Settings</div>
-      <div class="tab" data-tab="audit">Audit</div>
+      <button type="button" class="tab active" data-tab="apps">Apps</button>
+      <button type="button" class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></button>
+      <button type="button" class="tab" data-tab="usage">Usage</button>
+      <button type="button" class="tab" data-tab="access">Access</button>
+      <button type="button" class="tab" data-tab="settings">Settings</button>
+      <button type="button" class="tab" data-tab="audit">Audit</button>
     </div>
     <script>
       // People and groups live on people.<domain> only (the shared
@@ -1055,7 +1063,18 @@
     function showTab(name, asked) {
       if (name !== 'instance' && pageCtx && !asked && !leavePageOK()) { history.replaceState(null, '', pageHash()); return false; }
       const top = name === 'instance' ? 'apps' : name;
-      document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === top));
+      document.querySelectorAll('.tab[data-tab]').forEach(t => {
+        const on = t.dataset.tab === top;
+        t.classList.toggle('active', on);
+        if (on) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
+        // A narrow screen scrolls the bar sideways: keep the picked tab in
+        // view (the bar only; the page itself never scrolls for it).
+        const bar = t.parentElement;
+        if (on && bar && bar.scrollWidth > bar.clientWidth) {
+          if (t.offsetLeft < bar.scrollLeft) bar.scrollLeft = t.offsetLeft;
+          else if (t.offsetLeft + t.offsetWidth > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = t.offsetLeft + t.offsetWidth - bar.clientWidth;
+        }
+      });
       document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
       if (name === 'settings') PortcullisSettingsNav.show(settingsView.section, '');
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
@@ -4443,7 +4462,7 @@
         const main = ctx.domains.find(x => x.main) || ctx.domains[0];
         box.innerHTML = '<div class="host-row"><label for="setup-domain">domain</label>' +
           '<select id="setup-domain" data-setup-domain>' + domainOptions(ctx.domains, main && main.name) + '</select>' +
-          '<small>The main domain or an added domain that is ready (Settings → Domains).</small></div>' +
+          '<small>The main domain or an added domain that is ready (Settings → Network → Domains).</small></div>' +
           ctx.routers.map(r => '<div class="host-row"><label for="setup-sub-' + escapeHtml(r.router) + '">' + escapeHtml(r.router) + (r.immutable ? ' 🔒' : '') + '</label>' +
             '<span class="setup-addr"><input type="text" id="setup-sub-' + escapeHtml(r.router) + '" data-setup-sub="' + escapeHtml(r.router) + '" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(r.subdomain) + '">' +
             '<span class="setup-domain-name" data-setup-domain-name></span></span>' +
