@@ -55,9 +55,10 @@
 
   // openAdminView asks the Hub for a ticket (audited) and hands it to the
   // view in a new tab, never in a URL (no access log or history holds it):
-  // the tab is navigated with a GET to the view's start page (a browser
-  // retries a GET that a coalesced HTTP/2 connection answered 421
-  // Misdirected Request — a cross-host POST it doesn't), the start page
+  // the tab is navigated with a GET to the view's start page (a GET that a
+  // coalesced HTTP/2 connection answered 421 Misdirected Request is one
+  // browsers do retry in practice on a fresh connection; they don't
+  // reliably retry a cross-host POST, though RFC 9110 allows it), the start page
   // answers a MessageChannel offered only to the view's origin, and posts
   // the ticket it gets on that channel same-origin (contract §19.13). The
   // tab opens from the click itself, without an opener; a blocked tab is a
@@ -97,15 +98,23 @@
       const started = Date.now();
       let done = false;
       let timer = null;
-      function stop() { done = true; clearInterval(timer); }
+      const offered = [];
+      // stop ends the offers and closes every channel but the one the
+      // ticket goes on (closed after the send).
+      function stop(keep) {
+        done = true;
+        clearInterval(timer);
+        offered.forEach(function (p) { if (p !== keep) p.close(); });
+      }
       function hello() {
         if (done) return;
         if (w.closed) { stop(); reject(new Error('the admin view\'s tab was closed')); return; }
         if (Date.now() - started > handOverMs) { stop(); reject(new Error('the admin view didn\'t open in time: open it again')); return; }
         const ch = new MessageChannel();
+        offered.push(ch.port1);
         ch.port1.onmessage = function (m) {
           if (done || !m.data || m.data.type !== 'portcullis-mail-admin-ready') return;
-          stop();
+          stop(ch.port1);
           ch.port1.postMessage({ type: 'portcullis-mail-admin-ticket', ticket: ticket });
           ch.port1.close();
           resolve();
