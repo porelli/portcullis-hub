@@ -821,6 +821,74 @@ func bindEscapes(dir, tid string, compose []byte, loc string) error {
 	return nil
 }
 
+// CheckRelativeBinds (every template, contract §3 "Limits"): a relative
+// bind source (compose resolves it against the core checkout) is only the
+// template's own files, ./templates/<id>/… — cleaned, no ".." out of it,
+// symlinks inside the template directory resolved — or the CA bundle
+// ./certs/ca-bundle.crt. Anything else (another instance's appfiles, the
+// Hub's mail-admin ticket directory, secrets/, certs/ …) is refused, as is
+// an interpolated relative source (it can't be judged).
+func CheckRelativeBinds(dir, tid string, compose []byte) error {
+	infos := composeServiceInfos(compose)
+	for _, n := range slices.Sorted(maps.Keys(infos)) {
+		// Entry by entry: one unresolvable entry never hides the next.
+		var ms []vpnMount
+		var entries []interface{}
+		switch v := infos[n].volumes.(type) {
+		case []interface{}:
+			entries = v
+		case nil:
+		default:
+			entries = []interface{}{v}
+		}
+		for _, e := range entries {
+			if shown, bad := mountInterpolated(e); bad {
+				return fmt.Errorf("service %s mounts %s: a mount source can't be interpolated (no $ in a volume entry)", n, shown)
+			}
+			got, _ := vpnMounts([]interface{}{e})
+			ms = append(ms, got...)
+		}
+		for _, mm := range ms {
+			if !mm.bind || !strings.HasPrefix(mm.src, ".") {
+				continue
+			}
+			norm := path.Clean(mm.src)
+			if norm == CABundlePath {
+				continue
+			}
+			if !(norm == "templates/"+tid || strings.HasPrefix(norm, "templates/"+tid+"/")) {
+				return fmt.Errorf("service %s mounts %s: a template binds only its own files (./templates/%s/…) or ./%s", n, mm.entry, tid, CABundlePath)
+			}
+		}
+	}
+	return bindEscapes(dir, tid, compose, "")
+}
+
+// mountInterpolated is the one interpolation check of every template's
+// mounts (ux2 ruling, R2-M2 follow-up): a volume entry that uses `$` in
+// any form ($X, ${X}, ${X:-default}, ${X-alt}, $$) is refused — short
+// syntax anywhere in the entry (its source can't be told from its
+// target), long syntax in source or type. Compose would resolve the
+// source after the Hub's checks (a default can name ./appfiles/<other>,
+// a variable can add ..). shown is the entry as the error shows it.
+func mountInterpolated(e interface{}) (shown string, bad bool) {
+	if m, ok := e.(map[string]interface{}); ok {
+		for _, k := range []string{"source", "type"} {
+			if v, ok := m[k]; ok && v != nil && strings.Contains(fmt.Sprint(v), "$") {
+				if src, ok := m["source"]; ok && src != nil {
+					if s := strings.TrimSpace(fmt.Sprint(src)); s != "" {
+						return s, true
+					}
+				}
+				return pyJSON(m), true
+			}
+		}
+		return "", false
+	}
+	s := strings.TrimSpace(fmt.Sprint(e))
+	return s, strings.Contains(s, "$")
+}
+
 // realPath is p with every symlink resolved, like Python's
 // os.path.realpath: a part that doesn't exist is kept as written.
 func realPath(p string) string {

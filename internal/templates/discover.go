@@ -122,6 +122,7 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := checkCoreRefs(compose, routes.HostVars); err != nil {
 		return Template{}, err
 	}
+
 	if err := checkVolumeNames(compose, id, m.Multi()); err != nil {
 		return Template{}, err
 	}
@@ -161,6 +162,11 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		return Template{}, err
 	}
 	if err := ValidateVPN(&t, compose, routes); err != nil {
+		return Template{}, err
+	}
+	// After the VPN and mail rules (their own texts first): every
+	// template's relative binds stay inside its own files.
+	if err := CheckRelativeBinds(path, id, compose); err != nil {
 		return Template{}, err
 	}
 	if t.GIDRefs, err = GIDRefs(&t.Manifest, compose); err != nil {

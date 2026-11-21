@@ -16,7 +16,7 @@
 //                                           {wired: false, drain}
 // POST /api/mail/provider/switch            {to, confirm, confirm_empty, code, code_verifier, nonce}
 // POST /api/mail/provider/retry-void
-// POST /api/mail/admin-view                 {} → {url} (audited)
+// POST /api/mail/admin-view                 {} → {url, ticket} (audited)
 //
 // Rules: provider text (its name, version, checks, refusals, errors and
 // the warning) is set with textContent only, never into innerHTML; the
@@ -56,11 +56,17 @@
   // openAdminView asks the Hub for a ticket (audited) and posts it to
   // the view in a new tab: the ticket travels in a form body, never a URL
   // (no access log or history holds it). The tab opens from the click
-  // itself, without an opener.
+  // itself, without an opener; a blocked tab is a clear message, and no
+  // ticket is asked for.
   async function openAdminView() {
     const name = 'portcullis-mail-admin-' + Date.now();
     const w = window.open('about:blank', name);
-    if (w) w.opener = null;
+    if (!w) {
+      // Blocked: say so, and ask for no ticket (none is minted or audited).
+      window.showToast('Your browser blocked the admin view\'s new tab. Allow pop-ups for this page, then click again.', 'error');
+      return;
+    }
+    w.opener = null;
     try {
       const r = await (await window.apiCall('/api/mail/admin-view', 'POST', {})).json();
       if (!r || typeof r.url !== 'string' || !/^https:\/\/[a-z0-9.-]+\/portcullis\/open$/.test(r.url) ||
@@ -68,7 +74,7 @@
       const form = document.createElement('form');
       form.method = 'POST';
       form.action = r.url;
-      form.target = w ? name : '_blank';
+      form.target = name;
       form.rel = 'noopener';
       const input = document.createElement('input');
       input.type = 'hidden';
@@ -79,7 +85,7 @@
       form.submit();
       form.remove();
     } catch (e) {
-      if (w) w.close();
+      w.close();
       window.showToast(e.message, 'error');
     }
   }

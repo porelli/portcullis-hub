@@ -342,6 +342,22 @@ process.stdout.write(JSON.stringify({ skel: h, warn: node('[data-mail-admin-view
 	if strings.Contains(src, "?t=") {
 		t.Error("a ticket in a URL")
 	}
+	// A blocked tab (nit N-c): a clear message, and no ticket asked for.
+	out = eval(`let calls = 0, toast = null;
+window.open = () => null;
+window.apiCall = async () => { calls++; return { json: async () => ({}) }; };
+window.showToast = (m, k) => { toast = [m, k]; };
+window.PortcullisMailProvider.openAdminView().then(() => process.stdout.write(JSON.stringify({ calls, toast })));`)
+	var blocked struct {
+		Calls int
+		Toast []string
+	}
+	if err := json.Unmarshal([]byte(out), &blocked); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if blocked.Calls != 0 || len(blocked.Toast) != 2 || !strings.Contains(blocked.Toast[0], "blocked") || blocked.Toast[1] != "error" {
+		t.Errorf("blocked tab: %+v", blocked)
+	}
 	idx := webAsset(t, "index.html")
 	for _, want := range []string{"data-managed-by-portcullis", ">Managed by Portcullis</span>", "'managed by Portcullis'"} {
 		if !strings.Contains(idx, want) {

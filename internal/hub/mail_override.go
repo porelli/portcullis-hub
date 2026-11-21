@@ -491,7 +491,7 @@ func (h *Hub) mailAdminRouteKey() (string, error) {
 // The admin view's ticket key: <appfiles>/<id>/mail-admin/ticket-key
 // (the Hub's side), mounted read-only at MailAdminTicketMount.
 const (
-	mailAdminTicketDir   = "mail-admin"
+	mailAdminTicketDir   = templates.MailAdminFile
 	MailAdminTicketMount = "/run/portcullis/mail-admin"
 	hubGID               = 10001
 )

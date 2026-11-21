@@ -59,7 +59,9 @@ func TestSELinuxRelabels(t *testing.T) {
 // re-declares the template's own binds with bind.selinux z; under Docker
 // on SELinux, or podman without it, the override is byte-identical.
 func TestOverrideSELinuxRelabel(t *testing.T) {
-	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"gate": {gateManifest, gateCompose}})
+	// The template's own files are ./templates/gate/… (a template binds
+	// only its own, ux2 R2-M2).
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"gate": {gateManifest, strings.ReplaceAll(gateCompose, "./templates/x/", "./templates/gate/")}})
 	if f.h.Template("gate") == nil {
 		t.Fatal("gate fixture not loaded (see the log)")
 	}
@@ -84,7 +86,7 @@ func TestOverrideSELinuxRelabel(t *testing.T) {
 		t.Errorf("podman without SELinux changed the override:\n%s", got)
 	}
 	got := render(runtime.KindPodman, true)
-	for _, want := range []string{`source: "./templates/x/gate.sh"`, `target: "/gate.sh"`, "selinux: z"} {
+	for _, want := range []string{`source: "./templates/gate/gate.sh"`, `target: "/gate.sh"`, "selinux: z"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("relabelled override lacks %q:\n%s", want, got)
 		}
