@@ -37,7 +37,10 @@ const meshChain = "PORTCULLIS-MESH"
 // supervisor (6443) and etcd (2379, 2380) listen on the mesh address only,
 // but under Linux's weak host model a LAN / VPC neighbour could still route
 // a packet to that address through the uplink. Only pcmesh, loopback and
-// the node's own pod networks (cni0, flannel's interfaces) may reach them.
+// the node's own pods (cni0) may reach them (another node's pods arrive
+// over pcmesh: flannel masquerades their traffic to the node's address;
+// no flannel interface either — k3s's network-policy controller rewrites
+// the filter table and drops a wildcard interface rule, found live).
 const meshInChain = "PORTCULLIS-MESH-IN"
 
 type meshPlanState struct {
@@ -349,15 +352,16 @@ func meshInRules(role, ip string) []string {
 		ports = "10250,6443,2379,2380"
 	}
 	r := []string{}
-	for _, in := range []string{"pcmesh", "lo", "cni0", "flannel+"} {
+	for _, in := range []string{"pcmesh", "lo", "cni0"} {
 		r = append(r, "-A "+meshInChain+" -i "+in+" -j RETURN")
 	}
 	return append(r, "-A "+meshInChain+" -d "+ip+"/32 -p tcp -m multiport --dports "+ports+" -j DROP")
 }
 
 // applyInput makes PORTCULLIS-MESH-IN exactly meshInRules (one atomic
-// iptables-restore --noflush when it differs) and INPUT's first rule a
-// jump to it.
+// iptables-restore --noflush when it differs) and INPUT's jump to it
+// (inserted first when missing; k3s's own INPUT chains, which accept only
+// marked pod traffic, NodePorts and load-balancer ports, go first later).
 func (a *Agent) applyInput(ctx context.Context) error {
 	st := a.state()
 	if st.MeshIP == "" {

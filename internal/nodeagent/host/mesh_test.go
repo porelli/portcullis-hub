@@ -425,10 +425,10 @@ func TestRTTLostRounds(t *testing.T) {
 }
 
 // TestMeshInputRules (core Task 28 fix round 2): PORTCULLIS-MESH-IN lets
-// pcmesh, loopback and the node's pod networks through and drops anything
+// pcmesh, loopback and the node's pods (cni0) through and drops anything
 // else addressed to the mesh address on the kubelet's port (an agent) or
-// also the API server's, k3s's supervisor's and etcd's (a server); INPUT's
-// first rule jumps to it once; an unchanged chain isn't rewritten; the
+// also the API server's, k3s's supervisor's and etcd's (a server); INPUT
+// jumps to it once; an unchanged chain isn't rewritten; the
 // uninstall removes it.
 func TestMeshInputRules(t *testing.T) {
 	for role, ports := range map[string]string{"agent": "10250", "server": "10250,6443,2379,2380"} {
@@ -436,7 +436,7 @@ func TestMeshInputRules(t *testing.T) {
 		ip := r.a.state().MeshIP
 		want := []string{
 			"-A PORTCULLIS-MESH-IN -i pcmesh -j RETURN", "-A PORTCULLIS-MESH-IN -i lo -j RETURN",
-			"-A PORTCULLIS-MESH-IN -i cni0 -j RETURN", "-A PORTCULLIS-MESH-IN -i flannel+ -j RETURN",
+			"-A PORTCULLIS-MESH-IN -i cni0 -j RETURN",
 			"-A PORTCULLIS-MESH-IN -d " + ip + "/32 -p tcp -m multiport --dports " + ports + " -j DROP",
 		}
 		if !slices.Equal(r.run.inRules, want) || !r.run.inJump {
