@@ -200,13 +200,13 @@ subjects: [{kind: ServiceAccount, name: intruder, namespace: portcullis}]
 `
 
 // admissionPolicyFiles are core's kube/admission/ policy files (byte
-// copies): the eleven ValidatingAdmissionPolicies.
+// copies): the twelve ValidatingAdmissionPolicies.
 var admissionPolicyFiles = []string{"testdata/admission/policies.yaml", "testdata/admission/nodeadm-tokens.yaml"}
 
 // admissionPolicies are their names (each with one binding).
 var admissionPolicies = []string{"portcullis-apps-pods", "portcullis-apps-workloads", "portcullis-apps-services", "portcullis-apps-traefik",
 	"portcullis-apps-netpol", "portcullis-edge-routes", "portcullis-core-exec", "portcullis-ingress-pods", "portcullis-nodeadm-tokens",
-	"portcullis-node-labels", "portcullis-frontdoor-status"}
+	"portcullis-node-labels", "portcullis-frontdoor-status", "portcullis-removed-nodes"}
 
 // testGeneration is params.yaml's generation (core names the params
 // ConfigMap and every binding after it).
