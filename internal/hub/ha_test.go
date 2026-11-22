@@ -338,13 +338,20 @@ func TestHAChecklistWatchdogBeforeFencing(t *testing.T) {
 	if it := mustHA(t, three).watchdog(t); !it.OK || it.Text != "" {
 		t.Errorf("every node's nodeagent finds a watchdog, HA off: %+v", it)
 	}
-	// Stale (over rttStale): never green on an old read.
+	// Stale (over rttStale): never green on an old read (n3's checks
+	// refused meanwhile, so no background collection refreshes it).
+	three.na.mu.Lock()
+	three.na.refuse["checks:n3"] = errors.New("unreachable")
+	three.na.mu.Unlock()
 	three.h.cl.wd.mu.Lock()
 	three.h.cl.wd.at["n3"] = three.h.now().Add(-rttStale - time.Second)
 	three.h.cl.wd.mu.Unlock()
 	if it := mustHA(t, three).watchdog(t); it.OK {
 		t.Errorf("a stale watchdog read counted: %+v", it)
 	}
+	three.na.mu.Lock()
+	delete(three.na.refuse, "checks:n3")
+	three.na.mu.Unlock()
 	collect()
 	// HA on: only a ready agent; a core pod on n3 needs n3 fenced.
 	three.h.cfg.HA = true
