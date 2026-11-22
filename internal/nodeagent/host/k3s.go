@@ -561,6 +561,10 @@ type addressesDoc struct {
 	ServiceCIDR string             `json:"service_cidr"`
 	API         []string           `json:"api"`
 	Nodes       map[string]DocNode `json:"nodes"`
+	// RemovedNames: every node name nodeadm removed (the admission params'
+	// removedNodes: a removed node's kubelet identity can't register its
+	// Node again; Task 30 fix round 1).
+	RemovedNames []string `json:"removed_names"`
 }
 
 func (a *Agent) k3sClient() (*corev1.CoreV1Client, error) {

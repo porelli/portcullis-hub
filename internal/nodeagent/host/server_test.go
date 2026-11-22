@@ -24,6 +24,7 @@ func TestOnlyFixedOperations(t *testing.T) {
 		{"POST", "/v1/etcd/remove-member", []string{na.CNNodeadm}},
 		{"POST", "/v1/k3s/uninstall", []string{na.CNHub}},
 		{"POST", "/v1/k3s/token-rotate", []string{na.CNNodeadm}},
+		{"POST", "/v1/agent/upgrade", []string{na.CNNodeadm}},
 	}
 	if len(Routes) != len(want) {
 		t.Fatalf("%d routes", len(Routes))
@@ -126,6 +127,8 @@ func TestNodeagentCallVectors(t *testing.T) {
 	sup := &fakeSup{}
 	r.a.cfg.Supervisor = sup
 	installK3s(t, r, "server", "K10"+strings.Repeat("a", 64)+"::server:old")
+	// The upgrade vector's sums are those of this binary: "current".
+	writeFile(t, r.root, AgentBinary, "nodeagent vector\n", 0o755)
 	s := r.server()
 	c := r.client(r.ca, na.CNNodeadm)
 	for _, v := range doc.Calls {
@@ -139,6 +142,11 @@ func TestNodeagentCallVectors(t *testing.T) {
 			// The vector removes n2 via n1; on this node (n2) the same
 			// shape for n3 is accepted.
 			body = `{"mesh_ip":"10.215.0.3","node":"n3"}`
+		case "agent_upgrade":
+			var q na.AgentUpgrade
+			if err := decode([]byte(body), &q); err != nil || q.AMD64 != v["amd64"] || q.ARM64 != v["arm64"] {
+				t.Errorf("%s: %v", v["name"], err)
+			}
 		case "token_rotate":
 			var q na.TokenRotate
 			if err := decode([]byte(body), &q); err != nil || q.Step != "rotate" || !K10Re.MatchString(q.NewToken) {

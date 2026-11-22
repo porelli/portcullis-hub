@@ -298,7 +298,7 @@ func TestRemoveMemberIndependentChecks(t *testing.T) {
 	}
 	// The document decodes strictly.
 	var doc addressesDoc
-	if jsonstrict.Decode([]byte(`{"v":1,"mesh_cidr":"10.215.0.0/24","cluster_cidr":"10.42.0.0/16","service_cidr":"10.43.0.0/16","api":[],"nodes":{"n3":{"mesh":"10.215.0.3","lan":[],"public":[],"state":"removed"}}}`), &doc) != nil {
+	if jsonstrict.Decode([]byte(`{"v":1,"mesh_cidr":"10.215.0.0/24","cluster_cidr":"10.42.0.0/16","service_cidr":"10.43.0.0/16","api":[],"nodes":{"n3":{"mesh":"10.215.0.3","lan":[],"public":[],"state":"removed"}},"removed_names":["n3"]}`), &doc) != nil {
 		t.Error("the document doesn't decode")
 	}
 	if jsonstrict.Decode([]byte(`{"v":1,"nodes":{}}`), &doc) == nil {

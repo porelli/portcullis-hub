@@ -47,6 +47,7 @@ var Routes = []Route{
 	{http.MethodPost, "/v1/etcd/remove-member", []string{na.CNNodeadm}},
 	{http.MethodPost, "/v1/k3s/uninstall", []string{na.CNHub}},
 	{http.MethodPost, "/v1/k3s/token-rotate", []string{na.CNNodeadm}},
+	{http.MethodPost, "/v1/agent/upgrade", []string{na.CNNodeadm}},
 }
 
 // TLSConfig serves the node-cluster certificate and requires a client
@@ -238,6 +239,27 @@ func (a *Agent) serve(ctx context.Context, w http.ResponseWriter, r *http.Reques
 			// handler returning silently answers 200, which a caller
 			// whose TLS close_notify the server saw first may still read.
 			writeErr(w, errStepGoesOn)
+		}
+	case "/v1/agent/upgrade":
+		var q na.AgentUpgrade
+		if err := decode(body, &q); err != nil {
+			writeErr(w, err)
+			return
+		}
+		state, err := a.UpgradeAgent(r.Context(), q)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, na.AgentUpgraded{State: state})
+		if state == "upgraded" {
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			go func() {
+				time.Sleep(500 * time.Millisecond) // the answer leaves first
+				a.restartSelf(context.WithoutCancel(ctx))
+			}()
 		}
 	case "/v1/k3s/uninstall":
 		var q struct{}

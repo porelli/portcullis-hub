@@ -93,6 +93,21 @@ type ProbeTargets struct {
 	EgressHost string        `json:"egress_host"`
 }
 
+// AgentUpgrade is POST /v1/agent/upgrade (keys in this order): the
+// sha256 of nodeadm's nodeagent binary per architecture (Task 30 fix
+// round 1: `./portcullis up` rolls nodeadm's image, and nodeadm has every
+// joined node take the nodeagent it serves).
+type AgentUpgrade struct {
+	AMD64 string `json:"amd64"`
+	ARM64 string `json:"arm64"`
+}
+
+// AgentUpgraded is its answer: "current" (already that binary) or
+// "upgraded" (installed; the unit restarts right after the answer).
+type AgentUpgraded struct {
+	State string `json:"state"`
+}
+
 // EtcdRemove is POST /v1/etcd/remove-member (keys in this order).
 type EtcdRemove struct {
 	MeshIP string `json:"mesh_ip"`
