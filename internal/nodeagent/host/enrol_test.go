@@ -232,7 +232,7 @@ func TestJoinNeverLogsSecrets(t *testing.T) {
 		t.Fatalf("join: %v\n%s", err, j.out.String())
 	}
 	if len(j.install) != 1 || string(j.install[0].Token) != j.nodeadm.token || j.install[0].Role != "agent" || j.nodeadm.joins != 2 ||
-		j.install[0].ClusterCIDR != "10.60.0.0/16" || j.install[0].AgentToken != "" {
+		j.install[0].ClusterCIDR != "10.60.0.0/16" {
 		t.Fatalf("install %+v, joins %d", j.install, j.nodeadm.joins)
 	}
 	meshPriv := strings.TrimSpace(string(must(os.ReadFile(filepath.Join(j.root, MeshKeyFile)))))
@@ -442,23 +442,16 @@ func TestInstallK3s(t *testing.T) {
 	if strings.Contains(strings.Join(append(sh.Args, sh.Env...), " "), "0123456789abcdef") {
 		t.Error("the token on argv or in the environment")
 	}
-	// A server's agent token: its 0600 file.
+	// A server: its token file only, never an agent token file (core
+	// agent-token fix).
 	rs := newRig(t, "server")
 	js := j
-	js.Role, js.AgentToken = "server", secret("K10"+caHash+"::node:agentpass0123")
+	js.Role = "server"
 	if err := rs.a.installK3s(context.Background(), srv.Client(), &out, js); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(rs.root, K3sAgentToken)); strings.TrimSpace(string(b)) != string(js.AgentToken) {
-		t.Error("the agent token file")
-	}
-	if fi, _ := os.Stat(filepath.Join(rs.root, K3sAgentToken)); fi.Mode().Perm() != 0o600 {
-		t.Error("the agent token file's mode")
-	}
-	for _, c := range rs.run.cmds {
-		if strings.Contains(strings.Join(append(c.Args, c.Env...), " "), "agentpass") {
-			t.Error("the agent token on argv or in the environment")
-		}
+	if _, err := os.Stat(filepath.Join(rs.root, K3sAgentToken)); err == nil {
+		t.Error("a server install wrote an agent token file")
 	}
 	// A wrong sha256: nothing installed.
 	k3sPins.sha256 = map[string]string{"amd64": strings.Repeat("0", 64), "arm64": strings.Repeat("0", 64)}

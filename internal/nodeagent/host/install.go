@@ -118,11 +118,6 @@ func (a *Agent) installK3s(ctx context.Context, c *http.Client, out io.Writer, j
 	if err := a.fs.write(K3sTokenFile, []byte(string(j.Token)+"\n"), 0o600, 0o700); err != nil {
 		return err
 	}
-	if j.AgentToken != "" {
-		if err := a.fs.write(K3sAgentToken, []byte(string(j.AgentToken)+"\n"), 0o600, 0o700); err != nil {
-			return err
-		}
-	}
 	if err := a.fs.write(FlannelConf, []byte(FlannelNetConf(j.ClusterCIDR)), 0o644, 0o700); err != nil {
 		return err
 	}

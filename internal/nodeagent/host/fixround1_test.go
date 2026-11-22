@@ -139,25 +139,44 @@ func TestTokenRotateResumes(t *testing.T) {
 	}
 }
 
-// TestAgentTokenFileMissing (I2) and the CA pin (M7).
-func TestAgentTokenFileMissing(t *testing.T) {
+// TestAgentTokenFilePresent (core agent-token fix, replacing I2) and the
+// CA pin (M7): a server whose k3s reads --agent-token-file (its unit or
+// config.yaml) is refused every token step, nothing written: k3s can't
+// rotate a separate agent token without a fatal restart, and the server
+// token's rotation wouldn't rotate it. The agent token steps are gone.
+func TestAgentTokenFilePresent(t *testing.T) {
+	srvTok := "K10" + caHash + "::server:newpass0123456789"
 	agtTok := "K10" + caHash + "::node:agentpass0123456789"
 	r := newRig(t, "server")
 	installK3s(t, r, "server", "K10"+caHash+"::server:old")
-	writeFile(t, r.root, "/etc/systemd/system/k3s.service", "ExecStart=/usr/local/bin/k3s server '--token-file=/etc/rancher/k3s/token'\n", 0o644)
 	s := r.server()
 	c := r.client(r.ca, na.CNNodeadm)
 	for _, step := range []string{"rotate-agent", "apply-agent"} {
-		code, out := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", `{"new_token":"`+agtTok+`","step":"`+step+`"}`)
-		if code != 409 || !strings.Contains(out, `"kind":"agent_token_file_missing"`) {
-			t.Errorf("%s: %d %s", step, code, out)
+		if code, out := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", `{"new_token":"`+agtTok+`","step":"`+step+`"}`); code != 400 {
+			t.Errorf("%s: %d %s (the agent token steps are gone)", step, code, out)
 		}
 	}
-	// k3s's config.yaml naming it is enough.
-	writeFile(t, r.root, "/etc/rancher/k3s/config.yaml", "agent-token-file: /etc/rancher/k3s/agent-token\n", 0o600)
-	if code, out := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", `{"new_token":"`+agtTok+`","step":"apply-agent"}`); code != 204 {
-		t.Errorf("with config.yaml: %d %s", code, out)
+	for i, setup := range []func(){
+		func() {
+			writeFile(t, r.root, "/etc/systemd/system/k3s.service", "ExecStart=/usr/local/bin/k3s \\\n    server \\\n\t'--agent-token-file=/etc/rancher/k3s/agent-token' \\\n", 0o644)
+		},
+		func() {
+			writeFile(t, r.root, "/etc/systemd/system/k3s.service", "ExecStart=/usr/local/bin/k3s server '--token-file=/etc/rancher/k3s/token'\n", 0o644)
+			writeFile(t, r.root, "/etc/rancher/k3s/config.yaml", "agent-token-file: /etc/rancher/k3s/agent-token\n", 0o600)
+		},
+	} {
+		setup()
+		for _, step := range []string{"rotate", "apply"} {
+			code, out := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", `{"new_token":"`+srvTok+`","step":"`+step+`"}`)
+			if code != 409 || !strings.Contains(out, `"kind":"agent_token_file_present"`) {
+				t.Errorf("case %d %s: %d %s", i, step, code, out)
+			}
+		}
+		if readTok(t, r, K3sTokenFile) != "K10"+caHash+"::server:old" || r.run.count("systemctl", "restart") != 0 {
+			t.Errorf("case %d: refused, yet the token file changed or k3s restarted", i)
+		}
 	}
+	os.Remove(filepath.Join(r.root, "/etc/rancher/k3s/config.yaml"))
 	// Another cluster's token (another CA hash): 409, nothing written.
 	other := "K10" + strings.Repeat("0", 64) + "::server:otherpass0123"
 	if code, _ := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", `{"new_token":"`+other+`","step":"apply"}`); code != 409 {
@@ -189,7 +208,7 @@ func TestTokenStepsNeverLeak(t *testing.T) {
 			s := r.server()
 			c := r.client(r.ca, na.CNNodeadm)
 			var answers strings.Builder
-			for _, step := range []string{"rotate", "rotate-agent", "apply", "apply-agent"} {
+			for _, step := range []string{"rotate", "apply", "rotate-agent", "apply-agent"} {
 				for _, user := range []string{"server", "node"} {
 					_, out := do(t, c, "POST", s.URL+"/v1/k3s/token-rotate", `{"new_token":"K10`+caHash+`::`+user+`:`+pass+`","step":"`+step+`"}`)
 					answers.WriteString(out)
@@ -307,10 +326,9 @@ func TestClientCNOnce(t *testing.T) {
 	}
 }
 
-// TestJoinClusterCIDRAndAgentToken (I1, I2): no cluster_cidr → nothing
-// installed; a server's agent_token with --agent-token-file reaches the
-// install; a failed join takes the unit and pcmesh down (M12).
-func TestJoinClusterCIDRAndAgentToken(t *testing.T) {
+// TestJoinClusterCIDR (I1): no cluster_cidr → nothing installed; a
+// failed join takes the unit and pcmesh down (M12).
+func TestJoinClusterCIDR(t *testing.T) {
 	j := newJoinRig(t, true)
 	j.nodeadm.cidr = ""
 	if err := j.join(); err == nil || err.Error() != "the join answer has no cluster_cidr: nothing was installed" {

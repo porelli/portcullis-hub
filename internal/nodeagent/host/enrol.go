@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -70,18 +69,17 @@ type K3sJoin struct {
 	Role        string
 	ServerURL   string
 	Token       secret
-	AgentToken  secret // a server's --agent-token-file, when its flags name it
 	Flags       []string
 	ClusterCIDR string
 }
 
-// joinAnswer is /node/v1/join's 200 (§20.2), decoded strictly.
-// agent_token comes with a server's --agent-token-file only.
+// joinAnswer is /node/v1/join's 200 (§20.2), decoded strictly: no
+// agent_token (core agent-token fix: no node gets a separate agent token;
+// an answer carrying one is refused as an unknown field).
 type joinAnswer struct {
 	Role        string   `json:"role"`
 	ServerURL   string   `json:"server_url"`
 	Token       string   `json:"token"`
-	AgentToken  string   `json:"agent_token,omitempty"`
 	Flags       []string `json:"flags"`
 	ClusterCIDR string   `json:"cluster_cidr"`
 }
@@ -438,23 +436,14 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 			}
 		}
 	}
-	tok, agentTok := secret(answer.Token), secret(answer.AgentToken)
-	answer.Token, answer.AgentToken = "", ""
+	tok := secret(answer.Token)
+	answer.Token = ""
 	if !K10Re.MatchString(string(tok)) {
 		return errors.New("the join answer's token isn't in k3s's CA-pinned form (K10…): nothing was installed")
 	}
 	cidr, err := netip.ParsePrefix(answer.ClusterCIDR)
 	if err != nil || !cidr.Addr().Is4() || cidr.Masked() != cidr || cidr.String() != answer.ClusterCIDR || cidr.Bits() < 8 || cidr.Bits() > 24 || cidr.Overlaps(meshPrefix) {
 		return errors.New("the join answer's cluster_cidr isn't an IPv4 network: nothing was installed")
-	}
-	wantsAgentFile := slices.Contains(answer.Flags, "--agent-token-file="+K3sAgentToken)
-	switch {
-	case wantsAgentFile && st.Role != "server":
-		return errors.New("the join answer gives an agent --agent-token-file: nothing was installed")
-	case wantsAgentFile && (!K10Re.MatchString(string(agentTok)) || tokenUser(string(agentTok)) != "node"):
-		return errors.New("the join answer names --agent-token-file without an agent token: nothing was installed")
-	case !wantsAgentFile && agentTok != "":
-		return errors.New("the join answer carries an agent token without --agent-token-file: nothing was installed")
 	}
 	if answer.Role != st.Role {
 		return errors.New("the join answer's role isn't the join code's: nothing was installed")
@@ -468,7 +457,7 @@ func (a *Agent) Join(ctx context.Context, stdin io.Reader, out io.Writer, d Join
 
 	// 7. k3s.
 	say("Installing k3s %s as a%s %s...", K3sVersion, map[bool]string{true: "", false: "n"}[st.Role == "server"], st.Role)
-	if err := d.Install(ctx, K3sJoin{Role: st.Role, ServerURL: answer.ServerURL, Token: tok, AgentToken: agentTok,
+	if err := d.Install(ctx, K3sJoin{Role: st.Role, ServerURL: answer.ServerURL, Token: tok,
 		Flags: answer.Flags, ClusterCIDR: answer.ClusterCIDR}); err != nil {
 		return err
 	}
@@ -619,7 +608,6 @@ func allowedFlags(serverURL string, st State, clusterCIDR string) map[string]boo
 		"--flannel-backend=wireguard-native": true, "--advertise-address=" + ip: true, "--kubelet-arg=address=" + ip: true,
 		"--etcd-arg=listen-client-urls=https://" + ip + ":2379,https://127.0.0.1:2379": true,
 		"--etcd-arg=heartbeat-interval=200":                                            true, "--etcd-arg=election-timeout=2000": true,
-		"--agent-token-file=" + K3sAgentToken: true,
 		// Fencing unconfirmed → no stateful failover (core plan Task 24): no
 		// volume leaves an unready node by timeout.
 		NoForceDetachFlag: true,

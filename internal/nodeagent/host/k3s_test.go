@@ -100,14 +100,14 @@ const testK3sCA = "-----BEGIN CERTIFICATE-----\ntest k3s CA\n-----END CERTIFICAT
 
 var caHash = sha256Hex(testK3sCA)
 
-// installK3s: k3s present and running (a server's unit reading
+// installK3s: k3s present and running (a server's unit without
 // --agent-token-file), its CA, its token file holding tok.
 func installK3s(t *testing.T, r *rig, role, tok string) {
 	writeFile(t, r.root, K3sBinary, "k3s", 0o755)
 	writeFile(t, r.root, K3sTokenFile, tok+"\n", 0o600)
 	if role == "server" {
 		writeFile(t, r.root, "/var/lib/rancher/k3s/server/tls/server-ca.crt", testK3sCA, 0o644)
-		writeFile(t, r.root, "/etc/systemd/system/k3s.service", "ExecStart=/usr/local/bin/k3s \\\n    server \\\n\t'--agent-token-file=/etc/rancher/k3s/agent-token' \\\n", 0o644)
+		writeFile(t, r.root, "/etc/systemd/system/k3s.service", "ExecStart=/usr/local/bin/k3s \\\n    server \\\n\t'--token-file=/etc/rancher/k3s/token' \\\n", 0o644)
 	} else {
 		writeFile(t, r.root, "/var/lib/rancher/k3s/agent/server-ca.crt", testK3sCA, 0o644)
 	}
@@ -151,15 +151,17 @@ func TestTokenSteps(t *testing.T) {
 	if sup.calls != 1 || r.run.count("systemctl", "restart") != 1 {
 		t.Errorf("a resumed rotate: %d calls, %d restarts", sup.calls, r.run.count("systemctl", "restart"))
 	}
-	// rotate-agent / apply-agent: the agent token file.
-	if err := r.a.TokenStep(ctx, na.TokenRotate{NewToken: agtTok, Step: "rotate-agent"}); err != nil {
+	// apply: the token file, a restart, no supervisor call; never an agent
+	// token file.
+	srvTok2 := "K10" + caHash + "::server:newpass9876543210"
+	if err := r.a.TokenStep(ctx, na.TokenRotate{NewToken: srvTok2, Step: "apply"}); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(r.root, K3sAgentToken)); strings.TrimSpace(string(b)) != agtTok {
-		t.Error("the agent token file isn't the new agent token")
+	if readTok(t, r, K3sTokenFile) != srvTok2 || sup.calls != 1 || r.run.count("systemctl", "restart") != 2 {
+		t.Errorf("apply: %d supervisor calls, %d restarts", sup.calls, r.run.count("systemctl", "restart"))
 	}
-	if sup.calls != 1 {
-		t.Error("rotate-agent called the server token API")
+	if _, err := os.Stat(filepath.Join(r.root, K3sAgentToken)); err == nil {
+		t.Error("an agent token file was written")
 	}
 	// The staging directories are gone.
 	ents, _ := os.ReadDir(filepath.Join(r.root, StateDir))
@@ -168,12 +170,12 @@ func TestTokenSteps(t *testing.T) {
 			t.Errorf("staging left: %s", e.Name())
 		}
 	}
-	// Servers get the server token, agents the agent token.
+	// Servers get the server token only; the agent token steps are gone.
 	for _, c := range []struct {
 		step, tok string
 		code      int
 	}{
-		{"rotate", agtTok, 409}, {"apply", agtTok, 409}, {"apply-agent", srvTok, 409}, {"rotate-agent", srvTok, 409},
+		{"rotate", agtTok, 409}, {"apply", agtTok, 409}, {"apply-agent", agtTok, 400}, {"rotate-agent", agtTok, 400},
 		{"bogus", srvTok, 400}, {"apply", "plain", 400}, {"apply", "K10" + caHash + "::", 400},
 	} {
 		err := r.a.TokenStep(ctx, na.TokenRotate{NewToken: c.tok, Step: c.step})
@@ -191,21 +193,18 @@ func TestTokenSteps(t *testing.T) {
 	for _, c := range []struct {
 		step, tok string
 		code      int
-	}{{"rotate", srvTok, 409}, {"rotate-agent", agtTok, 409}, {"apply-agent", agtTok, 409}, {"apply", srvTok, 409}} {
+	}{{"rotate", srvTok, 409}, {"apply", srvTok, 409}, {"apply", agtTok, 409}, {"rotate-agent", agtTok, 400}, {"apply-agent", agtTok, 400}} {
 		err := a.a.TokenStep(ctx, na.TokenRotate{NewToken: c.tok, Step: c.step})
 		var he *httpError
 		if !errors.As(err, &he) || he.code != c.code {
 			t.Errorf("agent %s: %v, want %d", c.step, err, c.code)
 		}
 	}
-	if err := a.a.TokenStep(ctx, na.TokenRotate{NewToken: agtTok, Step: "apply"}); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(filepath.Join(a.root, K3sTokenFile)); strings.TrimSpace(string(b)) != agtTok {
-		t.Error("the agent's token file isn't the agent token")
-	}
-	if a.run.count("systemctl", "restart", "--no-block", "k3s-agent") != 1 {
-		t.Error("k3s-agent wasn't restarted")
+	// An agent holds no shared token (core agent-token fix): its token file
+	// (its own bootstrap token) is never rewritten, k3s-agent never
+	// restarted by a token step.
+	if readTok(t, a, K3sTokenFile) != "K10"+caHash+"::abcdef.0123456789abcdef" || a.run.count("systemctl", "restart") != 0 {
+		t.Error("a token step changed an agent")
 	}
 	// No token on any argv, ever.
 	for _, rr := range []*rig{r, a} {
@@ -284,5 +283,13 @@ func TestUninstall(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(r.root, p)); err == nil {
 			t.Errorf("%s left", p)
 		}
+	}
+}
+
+// TestEtcdGatewayPort (found live): the JSON gateway is k3s's HTTP
+// listener 127.0.0.1:2382, never 2379 (gRPC only under k3s v1.37.2).
+func TestEtcdGatewayPort(t *testing.T) {
+	if etcdGatewayPort != "2382" {
+		t.Fatalf("etcd gateway port %s", etcdGatewayPort)
 	}
 }

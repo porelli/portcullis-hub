@@ -205,7 +205,7 @@ func sha256Hex(s string) string {
 func bootstrapKey(pass string) string { return "/bootstrap/" + sha256Hex(pass)[:12] }
 
 // usesAgentTokenFile: this server's k3s reads --agent-token-file (the
-// unit install.sh wrote, or k3s's config.yaml).
+// unit install.sh wrote, or k3s's config.yaml): refused by TokenStep.
 func (a *Agent) usesAgentTokenFile() bool {
 	unit := string(must0(a.fs.read("/etc/systemd/system/k3s.service")))
 	if strings.Contains(unit, "--agent-token-file="+K3sAgentToken) || strings.Contains(unit, "'--agent-token-file' '"+K3sAgentToken+"'") {
@@ -247,15 +247,20 @@ func (a *Agent) k3sCAHash(role string) string {
 //     restarts, and a server whose token file differs from the rotated
 //     bootstrap can't start: spike-cluster.md); the intent goes last, so
 //     a step cut short between the write and the restart restarts again;
-//   - rotate-agent / apply-agent (a server whose k3s reads
-//     --agent-token-file, else 409 agent_token_file_missing): the agent
-//     token takes effect from that file when the server restarts (k3s's
-//     /v1-k3s/token rotates only the server token): the file, a restart;
-//   - apply: the server token into a server's token file, the agent token
-//     into an agent's, then a restart.
+//   - apply (a server): the server token into its token file, then a
+//     restart; k3s takes the new cred/passwd from the datastore at that
+//     start.
 //
-// Servers get the server token, agents the agent token, and the token
-// must pin this node's k3s CA (409 otherwise).
+// Servers only, the server token only, pinning this node's k3s CA (409
+// otherwise). No agent token steps (core agent-token fix): k3s v1.37.2
+// can't rotate a separate --agent-token-file safely (genUsers rewrites
+// passwd's node line at start, after the bootstrap reconcile, and nothing
+// re-saves the datastore's copy: the next start of every server is fatal,
+// "cred/passwd newer than datastore"), so no server runs with one (a
+// server that does is refused: 409 agent_token_file_present) and the node
+// credential k3s derives from the server token rotates with it. An agent
+// holds no shared token (it restarts on its node identity): every step on
+// an agent is refused.
 func (a *Agent) TokenStep(ctx context.Context, req na.TokenRotate) error {
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
@@ -264,33 +269,22 @@ func (a *Agent) TokenStep(ctx context.Context, req na.TokenRotate) error {
 	if m == nil {
 		return errStatus(400, "new_token isn't in k3s's CA-pinned form K10<hash>::<credentials>")
 	}
-	user := tokenUser(req.NewToken)
-	server := st.Role == "server"
 	switch req.Step {
-	case "rotate", "rotate-agent", "apply-agent":
-		if !server {
-			return errStatus(409, "%s runs on a server: this node is an agent", req.Step)
+	case "rotate", "apply":
+		if st.Role != "server" {
+			return errStatus(409, "%s runs on a server: an agent holds no shared k3s token", req.Step)
 		}
-	case "apply":
 	default:
-		return errStatus(400, "step must be rotate, apply, rotate-agent or apply-agent")
+		return errStatus(400, "step must be rotate or apply")
 	}
-	wantUser := "node"
-	if req.Step == "rotate" || (req.Step == "apply" && server) {
-		wantUser = "server"
-	}
-	if user != wantUser {
-		if wantUser == "node" && user == "server" {
-			return errStatus(409, "%s takes the agent token, never the server token", req.Step)
-		}
-		return errStatus(409, "%s takes the %s token", req.Step, map[string]string{"server": "server", "node": "agent"}[wantUser])
+	if tokenUser(req.NewToken) != "server" {
+		return errStatus(409, "%s takes the server token", req.Step)
 	}
 	if a.k3sState(ctx) == "absent" {
 		return errStatus(409, "k3s isn't installed on this node")
 	}
-	agentFile := wantUser == "node" && server
-	if agentFile && !a.usesAgentTokenFile() {
-		return errKind(409, "agent_token_file_missing", "this server's k3s doesn't use --agent-token-file")
+	if a.usesAgentTokenFile() {
+		return errKind(409, "agent_token_file_present", "this server's k3s uses --agent-token-file: k3s can't rotate that token without a fatal restart")
 	}
 	if h := a.k3sCAHash(st.Role); h == "" || h != m[1] {
 		return errStatus(409, "the token doesn't pin this node's k3s CA (another cluster's token, or the CA is unreadable)")
@@ -301,9 +295,6 @@ func (a *Agent) TokenStep(ctx context.Context, req na.TokenRotate) error {
 		return err
 	}
 	file := K3sTokenFile
-	if agentFile {
-		file = K3sAgentToken
-	}
 	want := tokenIntent{Step: req.Step, NewSHA256: sha256Hex(string(newTok))}
 	var have tokenIntent
 	pending := json.Unmarshal(must0(a.fs.read(intentFile)), &have) == nil && have == want
@@ -371,11 +362,18 @@ type Etcd interface {
 	HasKey(ctx context.Context, key string) (bool, error)
 }
 
-// etcdGateway is etcd's v3 JSON gateway on https://127.0.0.1:2379 with
-// k3s's etcd client certificate.
+// etcdGateway is etcd's v3 JSON gateway with k3s's etcd client
+// certificate, on k3s's own HTTP listener https://127.0.0.1:2382 (k3s
+// v1.37.2 sets etcd's listen-client-http-urls to it, pkg/etcd/etcd.go
+// listenClientHTTPURLs; 2379 then serves gRPC only: a JSON call there gets
+// 415 over HTTP/2 and an empty reply over HTTP/1.1 — found live, every
+// server revoke stopped at etcd_removed).
 type etcdGateway struct{ fs fsys }
 
 const etcdTLS = "/var/lib/rancher/k3s/server/tls/etcd"
+
+// etcdGatewayPort is k3s's loopback etcd HTTP port (listen-client-http-urls).
+const etcdGatewayPort = "2382"
 
 func (e *etcdGateway) client() (*http.Client, error) {
 	cert, err := tls.LoadX509KeyPair(e.fs.p(etcdTLS+"/client.crt"), e.fs.p(etcdTLS+"/client.key"))
@@ -398,7 +396,7 @@ func (e *etcdGateway) post(ctx context.Context, path string, body, out any) erro
 		return err
 	}
 	b, _ := json.Marshal(body)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://127.0.0.1:2379"+path, bytes.NewReader(b))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://127.0.0.1:"+etcdGatewayPort+path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.Do(req)
 	if err != nil {
