@@ -29,16 +29,18 @@ const v = { experimental: true, enabled: false,
 const on = Object.assign({}, v, { enabled: true, guarantee: 'Zero loss on one failure',
   frontdoor: { state: 'standing by', error: '' },
   dns: [{ name: 'example.org', addresses: ['198.51.100.7'], worst_case_text: 'worst case ~10 min for clients that hit the dead address first, on Porkbun',
-          per_site: [{ site: 'main', healthy: true, worst_case_text: 'if site main fails: worst case ~10 min on Porkbun' }] }] });
+          per_site: [{ site: 'main', healthy: true, worst_case_text: 'if site main fails: worst case ~10 min on Porkbun', ingress: ['n1'], addresses: ['198.51.100.7'], blind_probers: 0 },
+                     { site: '<b>edge</b>', healthy: false, worst_case_text: 'if site <i>edge</i> fails', ingress: ['<u>e1</u>', 'e2'], addresses: ['<script>'], blind_probers: 2 }] }] });
+const stale = Object.assign({}, on, { frontdoor: { state: 'leading', error: '', snapshot_stale: true, snapshot_at: '<x>2026' } });
 const broken = Object.assign({}, on, { frontdoor: { state: '', error: 'the front door\'s status isn\'t readable: <script>' }, dns: [] });
 const degraded = Object.assign({}, v, { nodes: [], sites: [], checklist: [{ id: 'nodes', ok: false, text: 'nodeadm\'s snapshot isn\'t readable: <x>' }, { id: 'backup_destination', ok: true, text: '' }] });
-process.stdout.write(JSON.stringify({ off: H.pageHtml(v), on: H.pageHtml(on), broken: H.pageHtml(broken), degraded: H.pageHtml(degraded), failed: H.errorHtml('<b>502</b>') }));
+process.stdout.write(JSON.stringify({ off: H.pageHtml(v), on: H.pageHtml(on), broken: H.pageHtml(broken), degraded: H.pageHtml(degraded), failed: H.errorHtml('<b>502</b>'), stale: H.pageHtml(stale) }));
 `)
-	var got struct{ Off, On, Broken, Degraded, Failed string }
+	var got struct{ Off, On, Broken, Degraded, Failed, Stale string }
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	for name, h := range map[string]string{"off": got.Off, "on": got.On, "broken": got.Broken, "degraded": got.Degraded, "failed": got.Failed} {
+	for name, h := range map[string]string{"off": got.Off, "on": got.On, "broken": got.Broken, "degraded": got.Degraded, "failed": got.Failed, "stale": got.Stale} {
 		for _, bad := range []string{"<b>", "<i>", "<u>", "<x>", "<script>"} {
 			if strings.Contains(h, bad) {
 				t.Errorf("%s: unescaped %s", name, bad)
@@ -60,6 +62,16 @@ process.stdout.write(JSON.stringify({ off: H.pageHtml(v), on: H.pageHtml(on), br
 		if !strings.Contains(got.On, w) {
 			t.Errorf("on lacks %s", w)
 		}
+	}
+	// Core Task 28 fix round 1 (review nit4): the per-site view's new
+	// fields, hostile values escaped; a stale snapshot says so.
+	for _, w := range []string{"publishes <code>198.51.100.7</code> (1 ingress node)", "publishes <code>&lt;script&gt;</code> (2 ingress nodes, ", "2 blind probers"} {
+		if !strings.Contains(got.On, w) {
+			t.Errorf("on lacks %s: %s", w, got.On)
+		}
+	}
+	if !strings.Contains(got.Stale, "per-site view is from &lt;x&gt;2026") || strings.Contains(got.On, "data-ha-frontdoor-stale") {
+		t.Errorf("stale: %s", got.Stale)
 	}
 	if strings.Contains(got.On, "data-ha-command") {
 		t.Error("the command is offered once HA is on")

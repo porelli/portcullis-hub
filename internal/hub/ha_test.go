@@ -522,6 +522,15 @@ func TestHAPerSiteView(t *testing.T) {
 	if string(got) != want {
 		t.Errorf("per_site %s\nwant     %s", got, want)
 	}
+	// Core Task 28 fix round 1 (M8): a round without nodeadm's snapshot
+	// keeps the last sites; the page says the view is stale, and from when.
+	fd, _, _ := haDNS([]byte(`{"v":1,"state":"leading","snapshot_ok":false,"snapshot_at":"2026-11-18T10:00:00Z","names":{},"sites":{}}`), "Porkbun")
+	if !fd.SnapshotStale || fd.SnapshotAt != "2026-11-18T10:00:00Z" {
+		t.Errorf("stale snapshot: %+v", fd)
+	}
+	if fd, _, _ = haDNS([]byte(`{"v":1,"state":"leading","snapshot_ok":true,"names":{},"sites":{}}`), "Porkbun"); fd.SnapshotStale {
+		t.Errorf("a current snapshot shown stale: %+v", fd)
+	}
 	// Sites without the optional lists: empty lists, never null.
 	_, dns, _ = haDNS([]byte(`{"v":1,"state":"leading","names":{"example.org":{"addresses":["198.51.100.1"],"worst_case_s":90}},"sites":{"main":{"healthy":true}}}`), "Porkbun")
 	if got, _ := json.Marshal(dns[0].PerSite); string(got) != `[{"site":"main","healthy":true,"worst_case_text":"if site main fails: worst case ~1 min on Porkbun","ingress":[],"addresses":[],"blind_probers":0}]` {

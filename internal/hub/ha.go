@@ -130,6 +130,11 @@ type HADNS struct {
 type HAFrontdoor struct {
 	State string `json:"state"`
 	Error string `json:"error"`
+	// SnapshotStale: the front door's last round couldn't read nodeadm's
+	// snapshot, so the per-site view is the one of SnapshotAt (core Task
+	// 28 fix round 1: it keeps the last sites, never an empty view).
+	SnapshotStale bool   `json:"snapshot_stale"`
+	SnapshotAt    string `json:"snapshot_at"`
 }
 
 // HAView is GET /api/ha (and GET /host/ha). Frontdoor, Volumes,
@@ -509,8 +514,10 @@ func (h *Hub) siteReach(snap nodeadm.Snapshot) (confirmed map[string]bool, offer
 // frontdoorDoc is the part of frontdoor-status' status.json the page
 // reads (§20.8; other keys are ignored: the front door owns the shape).
 type frontdoorDoc struct {
-	V     int    `json:"v"`
-	State string `json:"state"`
+	V          int        `json:"v"`
+	State      string     `json:"state"`
+	SnapshotOK *bool      `json:"snapshot_ok"`
+	SnapshotAt *time.Time `json:"snapshot_at"`
 	Names map[string]struct {
 		Addresses  []string `json:"addresses"`
 		WorstCaseS int      `json:"worst_case_s"`
@@ -576,6 +583,13 @@ func haDNS(doc []byte, provider string) (HAFrontdoor, []HADNS, error) {
 		return HAFrontdoor{}, nil, fmt.Errorf("status.json is version %d, not 1", d.V)
 	}
 	fd := HAFrontdoor{}
+	// A status without snapshot_ok can't say its sites are current.
+	if d.SnapshotOK == nil || !*d.SnapshotOK {
+		fd.SnapshotStale = true
+		if d.SnapshotAt != nil {
+			fd.SnapshotAt = d.SnapshotAt.UTC().Format(time.RFC3339)
+		}
+	}
 	if d.State == "leading" || d.State == "standing by" {
 		fd.State = d.State
 	} else {

@@ -84,6 +84,8 @@
     let h = '';
     if (fd.error) h += '<div class="public-warn" data-ha-frontdoor-error>' + esc(fd.error) + '</div>';
     else if (fd.state) h += '<p data-ha-frontdoor>Front door: ' + pill(fd.state === 'leading' ? 'ok' : 'warn', fd.state) + '</p>';
+    if (!fd.error && fd.state && fd.snapshot_stale) h += '<div class="public-warn" data-ha-frontdoor-stale>The front door couldn\'t read the cluster at its last round: the per-site view is ' +
+      (fd.snapshot_at ? 'from ' + esc(fd.snapshot_at) : 'unknown') + '.</div>';
     if (!v.enabled) return h + '<p class="settings-empty">The front door runs once HA is on: it moves the main domain\'s addresses away from a failed ingress node.</p>';
     if (!(v.dns || []).length) return h;
     return h + '<ul class="policy-notes" data-ha-dns>' + v.dns.map(d =>
