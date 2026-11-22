@@ -69,7 +69,7 @@ func TestAdmissionHAVectorsShape(t *testing.T) {
 		}
 		ha++
 		switch v.As {
-		case "hub", "intruder", "nodeadm", "cli", "daemonset-controller", "node":
+		case "hub", "intruder", "nodeadm", "cli", "daemonset-controller", "node", "frontdoor":
 		default:
 			t.Errorf("%s: as %q", v.Name, v.As)
 		}

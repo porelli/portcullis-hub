@@ -133,7 +133,9 @@ subjects: [{kind: ServiceAccount, name: portcullis-hub, namespace: portcullis}]
 // port-forward in the core namespace and create pods (ephemeral
 // containers too) and DaemonSets in portcullis-ingress; kubelets (group
 // system:nodes) and nodeadm may create, update and delete Nodes
-// (R-NODELABELS).
+// (R-NODELABELS); the front door and the intruder may create, update and
+// delete Secrets in portcullis-ingress (traefik-default-cert, core Task 31
+// fix round 2).
 const haSetupObjects = `apiVersion: v1
 kind: Namespace
 metadata:
@@ -190,7 +192,18 @@ subjects: [{kind: ServiceAccount, name: intruder, namespace: portcullis}]
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: test-intruder, namespace: portcullis-ingress}
-rules: [{apiGroups: [""], resources: [pods, pods/ephemeralcontainers], verbs: [create, update]}, {apiGroups: [apps], resources: [daemonsets], verbs: [create]}]
+rules: [{apiGroups: [""], resources: [pods, pods/ephemeralcontainers], verbs: [create, update]}, {apiGroups: [apps], resources: [daemonsets], verbs: [create]}, {apiGroups: [""], resources: [secrets], verbs: [create, update, delete]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: test-frontdoor, namespace: portcullis-ingress}
+rules: [{apiGroups: [""], resources: [secrets], verbs: [create, update, delete]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: test-frontdoor, namespace: portcullis-ingress}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: test-frontdoor}
+subjects: [{kind: ServiceAccount, name: frontdoor, namespace: portcullis}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -200,13 +213,13 @@ subjects: [{kind: ServiceAccount, name: intruder, namespace: portcullis}]
 `
 
 // admissionPolicyFiles are core's kube/admission/ policy files (byte
-// copies): the twelve ValidatingAdmissionPolicies.
+// copies): the thirteen ValidatingAdmissionPolicies.
 var admissionPolicyFiles = []string{"testdata/admission/policies.yaml", "testdata/admission/nodeadm-tokens.yaml"}
 
 // admissionPolicies are their names (each with one binding).
 var admissionPolicies = []string{"portcullis-apps-pods", "portcullis-apps-workloads", "portcullis-apps-services", "portcullis-apps-traefik",
 	"portcullis-apps-netpol", "portcullis-edge-routes", "portcullis-core-exec", "portcullis-ingress-pods", "portcullis-nodeadm-tokens",
-	"portcullis-node-labels", "portcullis-frontdoor-status", "portcullis-removed-nodes"}
+	"portcullis-node-labels", "portcullis-frontdoor-status", "portcullis-ingress-default-cert", "portcullis-removed-nodes"}
 
 // testGeneration is params.yaml's generation (core names the params
 // ConfigMap and every binding after it).
@@ -232,6 +245,8 @@ type env struct {
 	dsc       dynamic.Interface
 	// node is a kubelet's identity (group system:nodes; R-NODELABELS).
 	node dynamic.Interface
+	// frontdoor is the front door's ServiceAccount (core Task 31 fix round 2).
+	frontdoor dynamic.Interface
 }
 
 var shared *env
@@ -344,8 +359,11 @@ func startEnv(t *testing.T) *env {
 	kc.Impersonate = rest.ImpersonationConfig{UserName: "system:node:pc-e2e-node", Groups: []string{"system:nodes", "system:authenticated"}}
 	dc := rest.CopyConfig(cfg)
 	dc.Impersonate = rest.ImpersonationConfig{UserName: "system:serviceaccount:kube-system:daemon-set-controller", Groups: []string{"system:serviceaccounts", "system:serviceaccounts:kube-system", "system:authenticated"}}
+	fc := rest.CopyConfig(cfg)
+	fc.Impersonate = rest.ImpersonationConfig{UserName: "system:serviceaccount:portcullis:frontdoor", Groups: []string{"system:serviceaccounts", "system:serviceaccounts:portcullis", "system:authenticated"}}
 	e := &env{cfg: cfg, admin: admin, hub: dynamic.NewForConfigOrDie(hc), hubK: kubernetes.NewForConfigOrDie(hc), intruder: dynamic.NewForConfigOrDie(ic),
-		intruderK: kubernetes.NewForConfigOrDie(ic), nodeadm: dynamic.NewForConfigOrDie(nc), dsc: dynamic.NewForConfigOrDie(dc), node: dynamic.NewForConfigOrDie(kc)}
+		intruderK: kubernetes.NewForConfigOrDie(ic), nodeadm: dynamic.NewForConfigOrDie(nc), dsc: dynamic.NewForConfigOrDie(dc), node: dynamic.NewForConfigOrDie(kc),
+		frontdoor: dynamic.NewForConfigOrDie(fc)}
 	// The policies take effect asynchronously: wait for the self-test's
 	// Pod to be denied by its binding.
 	deadline := time.Now().Add(60 * time.Second)
@@ -394,7 +412,7 @@ func startEnv(t *testing.T) *env {
 type vector struct {
 	Name           string         `json:"name"`
 	Object         map[string]any `json:"object"`
-	As             string         `json:"as"` // hub | intruder | nodeadm | cli | daemonset-controller | node
+	As             string         `json:"as"` // hub | intruder | nodeadm | cli | daemonset-controller | node | frontdoor
 	Want           string         `json:"want"`
 	ReasonContains string         `json:"reason_contains"`
 	// Existing (optional) is created as the CLI first; Op update dry-runs
@@ -485,6 +503,8 @@ func TestAdmissionVectors(t *testing.T) {
 				client = e.dsc
 			case "node":
 				client = e.node
+			case "frontdoor":
+				client = e.frontdoor
 			}
 			if v.Params != nil {
 				if o.GetKind() != "NetworkPolicy" || o.GetNamespace() != "portcullis-apps" || v.Existing != nil || v.Op != "" {

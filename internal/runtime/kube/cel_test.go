@@ -79,7 +79,7 @@ func TestAdmissionCELCompiles(t *testing.T) {
 			compile("matchCondition "+m.Name, m.Expression)
 		}
 	}
-	if policies != 12 || n < 120 {
+	if policies != 13 || n < 120 {
 		t.Fatalf("%d policies, %d expressions", policies, n)
 	}
 }
