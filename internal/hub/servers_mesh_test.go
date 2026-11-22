@@ -1448,3 +1448,35 @@ func TestMeshUnreachableRetryDueAtAdd(t *testing.T) {
 		t.Fatalf("after the retry is due: %v", err)
 	}
 }
+
+// TestForwardedEndpointUnique (Task 30 fix round 2, nit 1): a forwarded
+// endpoint another node already has — forwarded or reported — is refused
+// (409, naming it) before anything is recorded or any code issued.
+func TestForwardedEndpointUnique(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	cf.h.settleClusterNodes(ctx)
+	cf.stopEnrol(t, "t1")
+	if _, _, err := cf.h.AddClusterNode(ctx, admin, AddClusterNodeRequest{ID: "t1", Site: "tb", Role: "agent", PublicEndpoint: "203.0.113.9:40000"}); err != nil {
+		t.Fatal(err)
+	}
+	cf.h.mu.Lock()
+	e1 := cf.h.st.Servers["e1"]
+	e1.MeshPublic = "203.0.113.20:51830"
+	cf.h.st.Servers["e1"] = e1
+	cf.h.mu.Unlock()
+	calls := len(cf.na.Calls())
+	for ep, holder := range map[string]string{"203.0.113.9:40000": "t1", "203.0.113.20:51830": "e1"} {
+		_, _, err := cf.h.AddClusterNode(ctx, admin, AddClusterNodeRequest{ID: "t2", Site: "tb", Role: "agent", PublicEndpoint: ep})
+		var se *StatusError
+		if !errors.As(err, &se) || se.Status != 409 || !strings.Contains(err.Error(), "already "+holder+"'s") {
+			t.Errorf("%s (%s's): %v", ep, holder, err)
+		}
+		if _, ok := cf.h.serverEntry("t2"); ok {
+			t.Fatalf("%s: an entry was recorded", ep)
+		}
+	}
+	if c := cf.na.Calls()[calls:]; slices.ContainsFunc(c, func(s string) bool { return strings.HasPrefix(s, "codes:") }) {
+		t.Fatalf("a code was issued for a refused endpoint: %v", c)
+	}
+}

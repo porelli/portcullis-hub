@@ -461,6 +461,13 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 		h.mu.Unlock()
 		return out, "", statusErr(http.StatusConflict, "server %s exists", r.ID)
 	}
+	// Task 30 fix round 2 (nit 1): an endpoint another node already has,
+	// forwarded or reported, is a likely typo (its handshake would never
+	// confirm it here): refused, naming that node.
+	if other := h.endpointHolderLocked(forward, r.ID); other != "" {
+		h.mu.Unlock()
+		return out, "", statusErr(http.StatusConflict, "public_endpoint %s is already %s's", forward, other)
+	}
 	// Under mu with the entry's save: two adds never both take the third
 	// server or pass the cap.
 	role, warnings, err := servers.SuggestRole(h.clusterSuggestInputLocked(snap), servers.NewNode{Site: site, Override: r.Role})
@@ -1409,4 +1416,24 @@ func (h *Hub) initNodeViewsLocked() []ServerView {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// endpointHolderLocked: the other server whose forwarded or reported
+// public endpoint is ep ("" when none, or ep is ""). h.mu held.
+func (h *Hub) endpointHolderLocked(ep, self string) string {
+	if ep == "" {
+		return ""
+	}
+	ids := make([]string, 0, len(h.st.Servers))
+	for id := range h.st.Servers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		s := h.st.Servers[id]
+		if id != self && (s.MeshForward == ep || s.MeshPublic == ep) {
+			return id
+		}
+	}
+	return ""
 }
