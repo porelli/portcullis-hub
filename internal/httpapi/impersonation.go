@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -238,8 +239,22 @@ func (s *Server) handleStopOwnImpersonation(w http.ResponseWriter, r *http.Reque
 // impStopCSP: the Stop page loads only its own scripts (/static/) and
 // stylesheet, fetches only its own origin, can never be framed (a
 // clickjacked Stop) and has no base to redirect: confirmCSP's rules, with
-// form-action limited to its own origin (Task 6 review M1).
+// form-action limited to its own origin (Task 6 review M1) and, for
+// Stop's sign-out POST (contract §5 "Sign out"), oauth2-proxy's
+// https://auth.<domain> (impStopCSPFor).
 const impStopCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
+// impStopCSPFor is impStopCSP with https://auth.<domain> added to
+// form-action when domain is a hostname (else impStopCSP).
+func impStopCSPFor(domain string) string {
+	if !impDomainRe.MatchString(domain) {
+		return impStopCSP
+	}
+	return strings.Replace(impStopCSP, "form-action 'self'", "form-action 'self' https://auth."+domain, 1)
+}
+
+// impDomainRe: a lowercase DNS name (the configured main domain).
+var impDomainRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // handleImpersonationStopPage: GET /impersonation/stop, the Stop page
 // (web/impersonation-stop.html; its script, web/impersonation.js, asks
@@ -257,7 +272,7 @@ func (s *Server) handleImpersonationStopPage(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", impStopCSP)
+	w.Header().Set("Content-Security-Policy", impStopCSPFor(domain))
 	if err := s.impStop.Execute(w, map[string]any{"Domain": domain, "HubURL": s.HubURL, "PeopleURL": s.PeopleURL}); err != nil {
 		log.Printf("people: impersonation stop page: %v", err)
 	}

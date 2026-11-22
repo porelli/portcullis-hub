@@ -869,7 +869,7 @@ var (
 	// both, or merges them).
 	coreTraefikNames = map[string]map[string]bool{
 		"routers": set("dashboard", "enroll", "enroll-invite", "enroll-self", "grafana-metrics", "hub", "keycloak", "keycloak-admin",
-			"keycloak-resources", "lldap", "oauth2-callback", "people", "portal", "mcp", "hub-mcp", "people-mcp", "people-vpn-enrol",
+			"keycloak-resources", "lldap", "oauth2-callback", "oauth2-signout", "signed-out", "people", "portal", "mcp", "hub-mcp", "people-mcp", "people-vpn-enrol",
 			"core-vpn-required", "dashboard-vpn", "grafana-metrics-vpn", "hub-vpn", "keycloak-admin-vpn", "keycloak-admin-vpn-required",
 			"people-vpn", "people-vpn-enrol-vpn", "portal-vpn",
 			// Mail (contract §5): mailctl's well-known router.
@@ -877,7 +877,9 @@ var (
 			// SSH access (contract §18.3): the CLI's router.
 			"people-cli"),
 		"middlewares": set("vpn-required-path", "portcullis-groups-vpn", "portcullis-public-guard-vpn", "portal-vpn-path", "directory-redirect", "hub-proxy-secret", "hub-cli-proxy-secret", "portal-path", "portcullis-auth", "portcullis-auth-console",
-			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self"),
+			"portcullis-auth-ext", "portcullis-groups", "portcullis-public-guard", "portcullis-self",
+			// Sign out (contract §5 "Sign out"): the guard in front of /oauth2/sign_out.
+			"portcullis-signout-guard"),
 		"services": set("enroll", "forward-auth", "forward-auth-ext", "grafana-metrics", "group-gate", "hub", "hub-people", "hub-cli", "keycloak", "lldap", "mcp-gate",
 			"mailctl", "mailctl-wellknown"),
 	}

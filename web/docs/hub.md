@@ -11,7 +11,8 @@ membership of `lldap_admin`.
 ## Navigation
 
 The Hub has six tabs under the shared navigation (Portal · Hub · People ·
-Sign-in), in this order:
+Sign-in, with "Signed in as &lt;your username&gt;" and **Sign out** on the right;
+see [Signing out](#signing-out)), in this order:
 
 - **Apps**: installed apps and their instances; **+ Add app** opens the
   [Marketplace](#marketplace) in its place
@@ -44,6 +45,34 @@ opens it directly:
 
 Links the AI tools hand out use these addresses; secrets are always typed
 on the page, never passed in a link. Any other address opens Apps.
+
+### Signing out
+
+**Sign out** is at the right of the shared bar on every Portcullis page:
+the portal at `https://<domain>/`, the Hub, `people.<domain>` and the
+Sign-in page. It signs out everything in this browser:
+
+- your Portcullis sign-in (the Keycloak session), so the next app you open
+  asks you to sign in again;
+- the gateway session of every app on the main domain, at once;
+- apps on an [added domain](../setup/dns.md) within a minute: their
+  session checks Keycloak once a minute and then stops working.
+
+You land on a short **Signed out** page (the arch with the gate down). Its
+**Sign in again** button opens the sign-in page, where the gate drops.
+
+Apps with their own sign-in, such as Nextcloud or Gitea, keep you signed in
+until their own session ends or they check with Portcullis again. Sign out
+of those in the app itself.
+
+While you are [signed in as someone else](auth-policies.md#signing-in-as-someone-else), Sign out also
+ends that: on the people pages it stops it first, and on the portal it
+opens the Stop page.
+
+Sign out works only as the button on a Portcullis page. A link to
+`https://auth.<domain>/oauth2/sign_out` (from another site, an old
+bookmark) shows a page asking "Sign out of &lt;domain&gt; in this browser?"
+with the same button, and signs nobody out by itself.
 
 ## Apps
 

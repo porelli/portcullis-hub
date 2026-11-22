@@ -291,7 +291,7 @@ func TestStopOwnRoute(t *testing.T) {
 		t.Fatalf("stop = %d %s %v", r.StatusCode, b, r.Header)
 	}
 	var so map[string]string
-	if json.Unmarshal([]byte(b), &so) != nil || so["sign_out"] != "https://auth.example.org/oauth2/sign_out?rd=https%3A%2F%2Fexample.org%2F" {
+	if json.Unmarshal([]byte(b), &so) != nil || so["sign_out"] != "https://auth.example.org/oauth2/sign_out" {
 		t.Errorf("stop = %s", b)
 	}
 	if _, b := doH(t, e.people, "alice", "GET", "/api/me/impersonation", "", h); !strings.Contains(b, `"active":null`) {

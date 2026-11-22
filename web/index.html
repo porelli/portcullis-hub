@@ -758,15 +758,11 @@
 <body>
   <div class="container">
     <!-- The shared top navigation (directory.js PortcullisNav, also on
-         people.<domain>): Portal · Hub · People. -->
+         people.<domain>): Portal · Hub · People · Sign-in, then the
+         username and Sign out (contract §5 "Sign out"). -->
     <div class="pn-bar" id="site-nav"></div>
     <header>
       <h1><img class="brand-mark" src="/static/mark.svg" alt="" width="28" height="28"> {{.PortalName}} Hub <span class="pill" id="runtime-badge" hidden></span></h1>
-      {{if .User}}
-      <div class="user-badge">Authenticated as <strong>{{.User}}</strong></div>
-      {{else}}
-      <div class="user-badge">{{.Domain}}</div>
-      {{end}}
     </header>
 
     <!-- Apps (what runs here; "+ Add app" opens the Marketplace) ·
@@ -1032,7 +1028,7 @@
   <script src="/static/directory.js"></script>
   <script>
     // The shared navigation: this listener serves administrators only.
-    PortcullisNav.render(document.getElementById('site-nav'), { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: PortcullisPeople.base, current: 'hub', admin: true });
+    PortcullisNav.render(document.getElementById('site-nav'), { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: PortcullisPeople.base, current: 'hub', admin: true, user: {{.User}} });
   </script>
   <script src="/static/folders.js"></script>
   <script src="/static/dns.js"></script>

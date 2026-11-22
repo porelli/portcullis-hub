@@ -456,7 +456,10 @@ page and the sign-in pages) shows:
 
 Apps can't show this line. Stop is also at
 `https://people.<domain>/impersonation/stop`. When it ends, the next
-request shows "Your session as alice has ended." with a link to sign out.
+request shows "Your session as alice has ended." with **Sign out**
+(it asks once more, then signs out). **Sign out** in the site bar while you are signed in as someone
+else also ends it: on the people pages it stops the impersonation and
+signs you out, and on the portal it opens the Stop page.
 
 **What it can do.** You open the apps the person may open, as them. Your
 own sign-in counts, not theirs: an app opens only when **your** session's
@@ -577,6 +580,47 @@ A person who signed in with a security key opens an app on Standard. The
 Keycloak session already holds a method Standard accepts, so the app opens
 with no prompt. Keycloak remembers every method used in the session (for 10
 hours), so templates with *all of* can be met step by step.
+
+### The gate on the sign-in pages
+
+Every Portcullis sign-in page (the first sign-in, a step-up or a fresh
+sign-in, and the needs-stronger page) shows a large stone arch around the
+page with a brass portcullis inside it, behind the sign-in card. When the
+first sign-in page of a sign-in opens, the gate drops quickly into the arch;
+the pages after it in the same sign-in (the password form after "Try another
+way", a wrong password, the needs-stronger page) show it already down.
+Reloading a page plays the drop again (an error page stays down). The arch
+never moves.
+
+- **Let through.** After you sign in (with your YubiKey certificate, a
+  security key or passkey, a password, or a password and an authenticator
+  code), a short page says "Let through — opening &lt;app's host&gt;…" while the
+  gate rises and stays up, and about a second later you are on the app. The page is
+  the last step of Portcullis's sign-in in Keycloak, so it looks the same for
+  every app, whether it signs in with OIDC itself or behind forward-auth. An
+  app that signs in with OIDC itself shows the host Keycloak sends you back
+  to; for forward-auth, only a host the Hub knows is shown (one of your
+  apps' or core pages' hostnames), otherwise the page says "Let through —
+  opening your app…". It appears only after a sign-in
+  where you actually used a method: never when the app opens on your existing
+  session (single sign-on), never on an app's silent token refresh, and not
+  in the middle of an action such as adding or removing a sign-in method. It
+  comes after any other step Keycloak still has for you (registering a new
+  passkey after a setup link, the notice that an administrator signed in as
+  you). It only delays the continuation: you go on to exactly the place, with
+  exactly the sign-in, Keycloak would have sent you to without it. Without
+  JavaScript the page shows a **Continue** button instead.
+- **Refused.** A wrong password, a refused key or certificate, or a sign-in
+  that isn't strong enough keeps the gate down, and the usual error or
+  needs-stronger page shows.
+- **Signed out.** After **Sign out** (the shared bar of every Portcullis
+  page, [Hub → Signing out](hub.md#signing-out)) the **Signed out** page
+  shows the same arch with the gate down and still. Its **Sign in again**
+  opens the sign-in page, where the gate drops.
+- **Reduce motion.** With "reduce motion" turned on in your system
+  (`prefers-reduced-motion: reduce`), the gate is shown closed and still on
+  every page, and the "Let through" moment is skipped: you go on to the app
+  at once.
 
 ### Not in the app's groups
 
@@ -821,6 +865,18 @@ change) have no Level-of-Authentication steps any more:
   else. Keycloak's stock two-factor WebAuthn registration is disabled.
 - `portcullis-forward-auth` has no default acr: group-gate asks for a method
   with `pc_method`, never with `acr_values`.
+- **The "Let through" page** is the extension's `portcullis-let-through`
+  required action (enabled by `./portcullis keycloak configure`, last of all
+  required actions, never a default action). The extension adds it to an
+  authentication only when a sign-in method ran in it (never for the SSO
+  cookie alone, an application-initiated action or an email action link) and
+  only once; its form posts back to the required action, after which Keycloak
+  continues as it would have. Its host is the authorization request's
+  validated `redirect_uri` host; for the main forward-auth callback
+  (`auth.<domain>/oauth2/callback`) it is the app's host from
+  oauth2-proxy's `state` only when that is one of the hostnames the Hub
+  publishes in `signin-keycloak.json` (`app_hosts`), else none
+  ([contract §8.1](../guides/integration-contracts.md)).
 
 ## Identity
 

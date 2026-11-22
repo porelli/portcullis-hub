@@ -106,7 +106,8 @@ func TestServerAuth(t *testing.T) {
 		t.Errorf("index = %d, a template name in the page", r.StatusCode)
 	}
 
-	// The badge shows X-Forwarded-User (the LLDAP username) as-is, escaped.
+	// The site bar shows X-Forwarded-User (the LLDAP username) as-is,
+	// escaped for the script (PortcullisNav escapes it again for HTML).
 	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
 	req.Header.Set(ProxySecretHeader, testSecret)
 	req.Header.Set("X-Forwarded-User", "alice<x>")
@@ -117,8 +118,8 @@ func TestServerAuth(t *testing.T) {
 	}
 	page, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(page), "Authenticated as <strong>alice&lt;x&gt;</strong>") {
-		t.Error("username badge missing or unescaped")
+	if !strings.Contains(string(page), `current: 'hub', admin: true, user: "alice\u003cx\u003e" });`) || strings.Contains(string(page), "alice<x>") {
+		t.Error("the site bar's username missing or unescaped")
 	}
 }
 

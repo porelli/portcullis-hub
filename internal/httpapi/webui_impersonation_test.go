@@ -31,7 +31,11 @@ function dispatch(target, ev, extra) { for (let n = target; n; n = n.parent) for
 function byAttr(a) { return document.body.all().find(e => a in e.attrs) || null; }
 document.getElementById = id => document.body.all().find(e => e.attrs.id === id) || null;
 document.readyState = 'complete';
-document.addEventListener = () => {};
+const docLs = {};
+document.addEventListener = (ev, f) => { (docLs[ev] = docLs[ev] || []).push(f); };
+// A form's submit() is recorded as "<METHOD> <action> <enctype> <fields>"
+// in assigned (the page leaves there).
+El.prototype.submit = function () { assigned.push([(this.attrs.method || 'get').toUpperCase(), this.attrs.action, this.attrs.enctype || '', String(this.all().length)].join(' ')); };
 const routes = {}, calls = [];
 global.fetch = async (url, opts) => {
   const method = (opts && opts.method) || 'GET';
@@ -144,10 +148,11 @@ func TestBannerEscapes(t *testing.T) {
 }
 
 // TestBannerStop: Stop POSTs /api/me/impersonation/stop (JSON, so CSRF
-// passes) and then goes to the answer's sign_out; a 404 (already ended)
+// passes) and then submits the answer's sign_out as a POST form with no
+// fields (enctype text/plain: contract §5 "Sign out"); a 404 (already ended)
 // reloads; a sign_out that isn't https isn't followed.
 func TestBannerStop(t *testing.T) {
-	signOut := "https://auth.example.org/oauth2/sign_out?rd=https%3A%2F%2Fexample.org%2F"
+	signOut := "https://auth.example.org/oauth2/sign_out"
 	run := func(status int, body string) map[string]any {
 		return impJS(t, `routes['GET /api/me/impersonation'] = { status: 200, body: `+activeJSON("checking quota")+` };
 routes['POST /api/me/impersonation/stop'] = { status: `+jsonNum(status)+`, body: `+body+` };`, []string{"impersonation.js"}, `(async () => {
@@ -164,7 +169,7 @@ routes['POST /api/me/impersonation/stop'] = { status: `+jsonNum(status)+`, body:
 	if c, _ := json.Marshal(ok["calls"]); string(c) != `[["GET","/api/me/impersonation",null,""],["POST","/api/me/impersonation/stop",{},"application/json"]]` {
 		t.Errorf("calls = %s", c)
 	}
-	if a, _ := json.Marshal(ok["assigned"]); string(a) != `["`+signOut+`"]` {
+	if a, _ := json.Marshal(ok["assigned"]); string(a) != `["POST `+signOut+` text/plain 0"]` {
 		t.Errorf("went to %s, want sign_out", a)
 	}
 	if gone := run(404, `{"error":"not found"}`); gone["reloads"] != float64(1) || len(gone["assigned"].([]any)) != 0 {
@@ -179,6 +184,89 @@ routes['POST /api/me/impersonation/stop'] = { status: `+jsonNum(status)+`, body:
 }
 
 func jsonNum(n int) string { b, _ := json.Marshal(n); return string(b) }
+
+// TestNavSignOut (contract §5 "Sign out"): PortcullisNav's bar has the
+// escaped username and a POST form with no fields (enctype text/plain) to
+// https://auth.<domain>/oauth2/sign_out; submitting it switches the page
+// to Referrer-Policy strict-origin first, so the guard gets the page's
+// Origin instead of "null". impersonation.js does the same before its own
+// sign-out POST.
+func TestNavSignOut(t *testing.T) {
+	out := impJS(t, `document.head = document.createElement('head'); document.querySelector = s => document.head.querySelector(s.replace(/\[content="strict-origin"\]$/, ''));`,
+		[]string{"directory.js"}, `(async () => {
+  const N = window.PortcullisNav;
+  const html = N.html({ domain: 'example.org', current: 'people', user: 'a<b' });
+  const f = document.createElement('form'); f.setAttribute('data-pn-signout', '');
+  for (const h of docLs.submit || []) h({ target: f, preventDefault() {} });
+  const m = document.head.querySelector('[name]');
+  return { html, meta: m && [m.getAttribute('name'), m.getAttribute('content')], anon: N.html({ domain: 'example.org' }) };
+})()`).(map[string]any)
+	h := out["html"].(string)
+	for _, want := range []string{
+		`<span class="pn-user" id="who">Signed in as <strong id="who-name">a&lt;b</strong></span>`,
+		`<form class="pn-signout" method="post" action="https://auth.example.org/oauth2/sign_out" enctype="text/plain" data-pn-signout=""><button type="submit" class="pn-signout-btn" id="pn-sign-out">Sign out</button></form>`,
+		`data-site="signin" href="https://people.example.org/signin"`,
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("bar lacks %s:\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "<input") || strings.Contains(h, "a<b") {
+		t.Errorf("bar: %s", h)
+	}
+	if m, _ := json.Marshal(out["meta"]); string(m) != `["referrer","strict-origin"]` {
+		t.Errorf("submit set %s, want the strict-origin referrer meta", m)
+	}
+	if a := out["anon"].(string); strings.Contains(a, "Signed in as") || !strings.Contains(a, `id="pn-sign-out"`) {
+		t.Errorf("no user yet: %s", a)
+	}
+}
+
+// TestBarSignOut (contract §5 "Sign out"): the site bar's Sign out form
+// (PortcullisNav's form[data-pn-signout]) is held until the question is
+// answered; not impersonating, the form itself is submitted; while
+// impersonating, Stop runs first and its sign_out is posted; a Stop that
+// finds the impersonation already ended submits the form.
+func TestBarSignOut(t *testing.T) {
+	run := func(active, stopStatus string) map[string]any {
+		return impJS(t, `routes['GET /api/me/impersonation'] = { status: 200, body: `+active+` };
+routes['POST /api/me/impersonation/stop'] = `+stopStatus+`;
+const f = document.createElement('form');
+f.setAttribute('method', 'post'); f.setAttribute('action', 'https://auth.example.org/oauth2/sign_out');
+f.setAttribute('enctype', 'text/plain'); f.setAttribute('data-pn-signout', '');
+const b = document.createElement('button'); f.appendChild(b); document.body.appendChild(f);`, []string{"impersonation.js"}, `(async () => {
+  let prevented = 0;
+  for (const h of docLs.submit || []) h({ target: f, preventDefault() { prevented++; } });
+  await tick(); await tick();
+  const m = byAttr('data-imp-referrer');
+  return { prevented, calls: calls.map(c => c[0] + ' ' + c[1]), assigned, listeners: (docLs.submit || []).length, meta: m && m.getAttribute('content') };
+})()`).(map[string]any)
+	}
+	off := run(`{"active": null}`, `{ status: 500, body: {} }`)
+	if off["listeners"] != float64(1) || off["prevented"] != float64(1) {
+		t.Fatalf("listener: %v", off)
+	}
+	if c, _ := json.Marshal(off["calls"]); string(c) != `["GET /api/me/impersonation"]` {
+		t.Errorf("not impersonating: calls %s", c)
+	}
+	if a, _ := json.Marshal(off["assigned"]); string(a) != `["POST https://auth.example.org/oauth2/sign_out text/plain 1"]` {
+		t.Errorf("not impersonating: %s", a)
+	}
+	if off["meta"] != "strict-origin" {
+		t.Errorf("not impersonating: referrer meta %v before the submit", off["meta"])
+	}
+	on := run(activeJSON("checking quota"), `{ status: 200, body: {"sign_out": "https://auth.example.org/oauth2/sign_out"} }`)
+	if c, _ := json.Marshal(on["calls"]); string(c) != `["GET /api/me/impersonation","POST /api/me/impersonation/stop"]` {
+		t.Errorf("impersonating: calls %s", c)
+	}
+	if a, _ := json.Marshal(on["assigned"]); string(a) != `["POST https://auth.example.org/oauth2/sign_out text/plain 0"]` {
+		t.Errorf("impersonating: %s (want Stop's own form)", a)
+	}
+	gone := run(activeJSON("checking quota"), `{ status: 404, body: {"error": "no running impersonation"} }`)
+	if a, _ := json.Marshal(gone["assigned"]); string(a) != `["POST https://auth.example.org/oauth2/sign_out text/plain 1"]` || gone["reloads"] != nil {
+		t.Errorf("already ended: %s", a)
+	}
+}
 
 // TestNoBannerWhenNull: {"active": null}, or a failed question, shows
 // nothing.
@@ -209,14 +297,14 @@ const box = document.createElement('div'); box.setAttribute('data-imp-stop-body'
   return r;
 })()`
 	on := impJS(t, page+`routes['GET /api/me/impersonation'] = { status: 200, body: `+activeJSON("checking quota")+` };
-routes['POST /api/me/impersonation/stop'] = { status: 200, body: {"sign_out": "https://auth.example.org/oauth2/sign_out?rd=https%3A%2F%2Fexample.org%2F"} };`, []string{"impersonation.js"}, stopOut).(map[string]any)
+routes['POST /api/me/impersonation/stop'] = { status: 200, body: {"sign_out": "https://auth.example.org/oauth2/sign_out"} };`, []string{"impersonation.js"}, stopOut).(map[string]any)
 	if on["btn"] != "Stop signing in as alice" || !strings.Contains(on["text"].(string), "You are signed in as alice (by root)") {
 		t.Errorf("impersonating: %v", on)
 	}
 	if c, _ := json.Marshal(on["calls"]); string(c) != `["GET /api/me/impersonation","POST /api/me/impersonation/stop"]` {
 		t.Errorf("calls = %s (one question for the page and the banner)", c)
 	}
-	if a, _ := json.Marshal(on["assigned"]); !strings.Contains(string(a), "oauth2/sign_out") {
+	if a, _ := json.Marshal(on["assigned"]); string(a) != `["POST https://auth.example.org/oauth2/sign_out text/plain 0"]` {
 		t.Errorf("assigned = %s", a)
 	}
 	off := impJS(t, page+`routes['GET /api/me/impersonation'] = { status: 200, body: {"active": null} };`, []string{"impersonation.js"}, stopOut).(map[string]any)
@@ -236,7 +324,7 @@ routes['POST /api/me/impersonation/stop'] = { status: 200, body: {"sign_out": "h
 	r, b := doAs(t, e.people, "alice", "GET", "/impersonation/stop", "")
 	csp := r.Header.Get("Content-Security-Policy")
 	if r.StatusCode != http.StatusOK || r.Header.Get("X-Frame-Options") != "DENY" || !strings.Contains(csp, "frame-ancestors 'none'") ||
-		!strings.Contains(csp, "form-action 'self'") || !strings.Contains(csp, "script-src 'self';") || strings.Contains(csp, "unsafe-eval") {
+		!strings.Contains(csp, "form-action 'self' https://auth.example.org;") || !strings.Contains(csp, "script-src 'self';") || strings.Contains(csp, "unsafe-eval") {
 		t.Errorf("stop page headers: %d XFO %q CSP %q", r.StatusCode, r.Header.Get("X-Frame-Options"), csp)
 	}
 	if !strings.Contains(b, `<script src="/static/impersonation.js"></script>`) || strings.Contains(b, "<script>") {
