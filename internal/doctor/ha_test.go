@@ -135,6 +135,9 @@ func TestHAKinds_RaiseAndClear(t *testing.T) {
 		{kind: KindNodeDown + "/no since", raise: func(in *Inputs) { in.HA.Snapshot.Nodes[1].Ready = false }, name: "n2"},
 		{kind: KindHAQuorumAtRisk, raise: func(in *Inputs) { in.HA.Snapshot.Quorum.Vault.Healthy = 2 },
 			clear: func(in *Inputs) { in.HA.Snapshot.Quorum.Vault = nodeadm.Voters{Voters: 1, Healthy: 1} }, name: "Vault"},
+		// Task 31 fix round 2: no voter serving is said plainly.
+		{kind: KindHAQuorumAtRisk + "/no active Vault", raise: func(in *Inputs) { in.HA.Snapshot.Quorum.Vault.Healthy = 0 },
+			clear: func(in *Inputs) { in.HA.Snapshot.Quorum.Vault.Healthy = 3 }, name: "No active Vault: none of its 3 voters serves requests."},
 		{kind: KindVolumeDegraded, raise: degraded(VolumeDegradedAfter + time.Second), clear: degraded(VolumeDegradedAfter), name: "hub-state-r"},
 		{kind: KindPGNotSynchronous, raise: func(in *Inputs) { in.HA.Snapshot.Postgres.SyncStandbys = 0 },
 			clear: func(in *Inputs) { in.HA.Snapshot.Postgres = nodeadm.Postgres{Instances: 1} }, name: "standby"},

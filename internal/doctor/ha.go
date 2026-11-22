@@ -248,6 +248,23 @@ func (h *HAIn) quorumAtRisk() []Finding {
 		if s.v.Healthy < majority {
 			state = "it has lost its quorum"
 		}
+		// Vault with no voter serving (Task 31 fix round 2, found live: ~50
+		// min with no active node while every voter was unsealed). In HA a
+		// Vault voter is Ready only while it is the active node or a
+		// standby whose active node confirms it (core's vault/serving.sh),
+		// so 0 healthy is "no active Vault" — said plainly, not counted.
+		if s.name == "vault" && s.v.Healthy == 0 {
+			out = append(out, Finding{FP: Fingerprint(KindHAQuorumAtRisk, s.name), Kind: KindHAQuorumAtRisk, Severity: Problem,
+				Title: fmt.Sprintf("No active Vault: none of its %d voters serves requests.", s.v.Voters),
+				Why: "A Vault voter counts only while it is the active node or a standby whose active node answers. With none, Vault answers no request: " +
+					"no certificate is signed (nodeadm, enroll, the front door's control certificate) and new sign-in setups fail.",
+				Class: FixExplain,
+				Steps: []string{"Wait 3 minutes: each voter's liveness restarts a voter that can't reach an active node, and a restarted voter unseals itself.",
+					"If none becomes active: ./portcullis ha status, then the voters' logs (kubectl -n portcullis logs vault-0, vault-1, vault-2).",
+					"Losing two of three voters for good needs ./portcullis ha recover on the survivor."},
+				Inputs: Digest([]any{s.name, s.v.Voters, s.v.Healthy})})
+			continue
+		}
 		out = append(out, Finding{FP: Fingerprint(KindHAQuorumAtRisk, s.name), Kind: KindHAQuorumAtRisk, Severity: Problem,
 			Title: fmt.Sprintf("%s has %d of %d voters healthy: %s.", strings.ToUpper(s.what[:1])+s.what[1:], s.v.Healthy, s.v.Voters, state),
 			Why: fmt.Sprintf("%s needs a majority (%d of %d) of its voters to work. Without it, it stops answering writes, and everything that depends on it with it.",
