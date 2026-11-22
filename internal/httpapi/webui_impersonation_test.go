@@ -324,7 +324,7 @@ routes['POST /api/me/impersonation/stop'] = { status: 200, body: {"sign_out": "h
 	r, b := doAs(t, e.people, "alice", "GET", "/impersonation/stop", "")
 	csp := r.Header.Get("Content-Security-Policy")
 	if r.StatusCode != http.StatusOK || r.Header.Get("X-Frame-Options") != "DENY" || !strings.Contains(csp, "frame-ancestors 'none'") ||
-		!strings.Contains(csp, "form-action 'self' https://auth.example.org;") || !strings.Contains(csp, "script-src 'self';") || strings.Contains(csp, "unsafe-eval") {
+		!strings.Contains(csp, "form-action 'self' https://auth.example.org https://example.org;") || !strings.Contains(csp, "script-src 'self';") || strings.Contains(csp, "unsafe-eval") {
 		t.Errorf("stop page headers: %d XFO %q CSP %q", r.StatusCode, r.Header.Get("X-Frame-Options"), csp)
 	}
 	if !strings.Contains(b, `<script src="/static/impersonation.js"></script>`) || strings.Contains(b, "<script>") {

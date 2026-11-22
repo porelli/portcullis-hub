@@ -241,16 +241,19 @@ func (s *Server) handleStopOwnImpersonation(w http.ResponseWriter, r *http.Reque
 // clickjacked Stop) and has no base to redirect: confirmCSP's rules, with
 // form-action limited to its own origin (Task 6 review M1) and, for
 // Stop's sign-out POST (contract §5 "Sign out"), oauth2-proxy's
-// https://auth.<domain> (impStopCSPFor).
+// https://auth.<domain> and https://<domain>, where its 302 lands (the
+// Signed out page: browsers check form-action on a form's redirects too;
+// impStopCSPFor).
 const impStopCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
-// impStopCSPFor is impStopCSP with https://auth.<domain> added to
-// form-action when domain is a hostname (else impStopCSP).
+// impStopCSPFor is impStopCSP with https://auth.<domain> and
+// https://<domain> added to form-action when domain is a hostname (else
+// impStopCSP).
 func impStopCSPFor(domain string) string {
 	if !impDomainRe.MatchString(domain) {
 		return impStopCSP
 	}
-	return strings.Replace(impStopCSP, "form-action 'self'", "form-action 'self' https://auth."+domain, 1)
+	return strings.Replace(impStopCSP, "form-action 'self'", "form-action 'self' https://auth."+domain+" https://"+domain, 1)
 }
 
 // impDomainRe: a lowercase DNS name (the configured main domain).
