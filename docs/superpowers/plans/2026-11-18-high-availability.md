@@ -1480,7 +1480,8 @@ func TestCutOffSiteFrontdoorStops(t *testing.T)           // Lease renew fails �
   - `test_ha_enable_resumes_each_step` (a fault injected after step n → a re-run starts at n+1, steps 1..n not repeated);
   - `test_ha_enable_never_two_writers` (step 4: the Hub replicas are 0 before the copy and stay 0 until the copy checksums match; a fault in the copy → the old PVC is still bound to the scaled-0 Hub, never two PVCs attached);
   - "ha enable: Stop (SIGINT) between steps leaves a resumable record";
-  - "ha enable: refuses on docker: 'high availability needs Kubernetes'".
+  - "ha enable: refuses on docker: 'high availability needs Kubernetes'";
+  - carried from Task 30 (review M6): Task 30's "help lists node and ha" tests `node` only (a help line for a missing `ha` would fail the every-`--help` rule): add `ha` to that test here, with `ha`'s help line in `help_main`.
 - [ ] **Step 2:** Run them. Expected: FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run them. Expected: PASS.
