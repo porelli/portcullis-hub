@@ -326,6 +326,9 @@ func startEnv(t *testing.T) *env {
 	// <name>-<generation> on it.
 	params := strings.Replace(string(file(t, "testdata/admission/params.yaml")), "cliUsername: system:admin", "cliUsername: "+whoami.Status.UserInfo.Username, 1)
 	applyYAML(t, admin, []byte(paramsRef.ReplaceAllString(params, "${1}-"+testGeneration)))
+	// portcullis-removed-nodes' own params (core Task 30 fix round 2: its
+	// binding names portcullis-removed-nodes, never a params generation).
+	applyYAML(t, admin, file(t, "testdata/admission/removed-nodes.yaml"))
 	for _, f := range admissionPolicyFiles {
 		applyYAML(t, admin, file(t, f))
 	}
