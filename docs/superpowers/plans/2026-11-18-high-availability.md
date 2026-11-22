@@ -1532,6 +1532,12 @@ func TestCutOffSiteFrontdoorStops(t *testing.T)           // Lease renew fails �
   - `ha_vm_site_uplink_down`: drop `vm4`'s public ingress (443 inbound) while its mesh stays up. Its address leaves the set after about 30 s, and `main` keeps serving. Then drop `main`'s ingress nodes' 443: their addresses go and `vm4` serves sign-in through Traefik → `main` over `pcmesh`;
   - `ha_vm_site_down`: power `vm4` off. Quorum holds (servers at `main`), and `edge`'s address is removed but never the last one;
   - `ha_vm_nat_relay`: block inbound UDP 51830 on `vm2`. `vm2` ↔ `vm4` traffic keeps working through `vm1`, and sign-in is unaffected.
+  - `ha_vm_revoke_restarts` (the agent-token fix, 2026-11-22; replaces the bare "agent-token rotation" VM proof): three servers + one agent. Revoke the agent, then a server (two rotations). After each revoke:
+    - restart every surviving k3s server one at a time, then all together, then reboot one host: each comes back (no `cred/passwd newer than datastore`, no `encrypted with different token`) and the cluster is healthy (every Node Ready, etcd 3/3 or 2/2 healthy, core pods Running);
+    - on every server `/var/lib/rancher/k3s/server/cred/passwd` is byte-equal across servers, has `node` = `server`, and no server's unit or config names `--agent-token-file`;
+    - the old server token and the node credential derived from it answer 401 on `/v1-k3s/server-bootstrap` / `/v1-k3s/client-kube-proxy.crt` (credentials in a 0600 curl config, never argv), the new ones 200;
+    - the revoked agent can't come back with what it holds: `systemctl restart k3s-agent` there stays out (no Node re-registered, no `<id>.node-password.k3s` Secret re-created), and its bootstrap token, Node and node-password Secret are gone;
+    - a surviving agent restarts on its node identity (its bootstrap token long expired) and a new node joins with a fresh code.
 
 - [ ] **Step 1:** Write `tests/e2e/e2e_ha.py` with every scenario, plus the `tests/test_e2e_scenarios.py` cases (each scenario starts with its `skip` gate).
 - [ ] **Step 2:** Run `python3 tests/test_e2e_scenarios.py`. Expected: FAIL until the jobs exist and are listed.
