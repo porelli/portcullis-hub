@@ -485,18 +485,33 @@ func poolOf(c *x509.Certificate) *x509.CertPool {
 }
 
 // serverRTT waits until every server's echo answers (up to ServersFor)
-// and returns the RTT map keyed by server id.
+// without a lost round in its figure, and returns the RTT map keyed by
+// server id. A figure of the round timeout is lost rounds, not distance:
+// right after the bootstrap plan a server may not hold this node's peer
+// yet (the Hub pushes it), and its first echoes go unanswered (found
+// live, Task 30: "too far for one cluster: 1000 ms" over a 1 ms link, a
+// revoke). It is measured again; after ServersFor it is sent as it is.
 func (a *Agent) serverRTT(ctx context.Context, d JoinDeps, srv []string, say func(string, ...any)) (map[string]int, error) {
 	start := a.cfg.Now()
 	for {
 		rtt := d.RTT(ctx, srv)
-		if len(rtt) >= len(srv) {
+		clean := true
+		for _, v := range rtt {
+			if v >= int(rttTimeout/time.Millisecond) {
+				clean = false
+			}
+		}
+		if len(rtt) >= len(srv) && clean {
 			say("Mesh RTT to the servers: %v ms.", rtt)
 			return rtt, nil
 		}
 		if a.cfg.Now().Sub(start) > d.ServersFor {
-			// nodeadm names the missing server; send what answered.
-			say("Not every server answers over the mesh yet: %d of %d.", len(rtt), len(srv))
+			// nodeadm names the missing server or the figure; send them.
+			if len(rtt) >= len(srv) {
+				say("The mesh round trips still lose echoes: %v ms.", rtt)
+			} else {
+				say("Not every server answers over the mesh yet: %d of %d.", len(rtt), len(srv))
+			}
 			return rtt, nil
 		}
 		select {
@@ -559,6 +574,33 @@ const (
 // never a token on argv, the node's own identity and mesh address, the
 // answer's server. A refusal names the flag, never its value.
 func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) error {
+	allowed := allowedFlags(serverURL, st, clusterCIDR)
+	if len(flags) == 0 || len(flags) > 64 {
+		return errors.New("the join answer has no k3s flags: nothing was installed")
+	}
+	seen := map[string]bool{}
+	for _, f := range flags {
+		name, _, _ := strings.Cut(f, "=")
+		if !allowed[f] || seen[f] {
+			return fmt.Errorf("the join answer's k3s flag %s is refused: nothing was installed", clip(name, 40))
+		}
+		seen[f] = true
+	}
+	// --bind-address too (core Task 28 fix round 2): without it k3s binds the
+	// kubelet to 0.0.0.0, every interface, the public one included.
+	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + st.MeshIP, "--node-name=" + st.ID, UnlabelledTaintFlag, "--bind-address=" + st.MeshIP} {
+		if !seen[need] {
+			name, _, _ := strings.Cut(need, "=")
+			return fmt.Errorf("the join answer's k3s flags lack %s: nothing was installed", name)
+		}
+	}
+	return nil
+}
+
+// allowedFlags is the allowlist for a node of st's role: every flag
+// value it may take (core's join_flags_vectors.json holds nodeadm's list
+// equal to it, TestJoinFlagsVectorsExact).
+func allowedFlags(serverURL string, st State, clusterCIDR string) map[string]bool {
 	ip := st.MeshIP
 	exact := map[string]bool{
 		"--server=" + serverURL: true, "--token-file=" + K3sTokenFile: true, "--node-name=" + st.ID: true,
@@ -584,25 +626,18 @@ func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) 
 		// The answer's cluster_cidr, the same one flannel's net-conf gets.
 		"--cluster-cidr=" + clusterCIDR: clusterCIDR != "",
 	}
-	if len(flags) == 0 || len(flags) > 64 {
-		return errors.New("the join answer has no k3s flags: nothing was installed")
-	}
-	seen := map[string]bool{}
-	for _, f := range flags {
-		name, _, _ := strings.Cut(f, "=")
-		ok := exact[f] || (st.Role == "server" && serverOnly[f])
-		if !ok || seen[f] {
-			return fmt.Errorf("the join answer's k3s flag %s is refused: nothing was installed", clip(name, 40))
-		}
-		seen[f] = true
-	}
-	// --bind-address too (core Task 28 fix round 2): without it k3s binds the
-	// kubelet to 0.0.0.0, every interface, the public one included.
-	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + ip, "--node-name=" + st.ID, UnlabelledTaintFlag, "--bind-address=" + ip} {
-		if !seen[need] {
-			name, _, _ := strings.Cut(need, "=")
-			return fmt.Errorf("the join answer's k3s flags lack %s: nothing was installed", name)
+	out := map[string]bool{}
+	for f, ok := range exact {
+		if ok {
+			out[f] = true
 		}
 	}
-	return nil
+	if st.Role == "server" {
+		for f, ok := range serverOnly {
+			if ok {
+				out[f] = true
+			}
+		}
+	}
+	return out
 }

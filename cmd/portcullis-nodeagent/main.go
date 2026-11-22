@@ -3,6 +3,8 @@
 // /usr/local/lib/portcullis/nodeagent by join.sh:
 //
 //	nodeagent join             join the cluster; the join code on stdin (never an argument)
+//	nodeagent adopt-csr <id>   the first node (init's): a new key, its CSR on stdout
+//	nodeagent adopt            the first node: its CLI-signed certificate on stdin (JSON)
 //	nodeagent serve            the API on <mesh ip>:7443, the echo on :7444, the probes
 //	nodeagent mesh-up          bring pcmesh up with the stored plan (the unit's ExecStartPre)
 //	nodeagent checks [--json] [--dry-run]   the host checks
@@ -34,7 +36,7 @@ func main() {
 	os.Exit(Main(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-const usage = "usage: nodeagent join|serve|mesh-up|checks [--json] [--dry-run]|version"
+const usage = "usage: nodeagent join|adopt-csr <id>|adopt|serve|mesh-up|checks [--json] [--dry-run]|version"
 
 // Main is the command. Exit codes: 0 done, 1 failed, 2 usage.
 func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -57,6 +59,31 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return join(ctx, stdin, stdout, stderr, log)
+	case "adopt-csr", "adopt":
+		if (args[0] == "adopt-csr") != (len(args) == 2) || len(args) > 2 {
+			fmt.Fprintln(stderr, usage)
+			return 2
+		}
+		if os.Geteuid() != 0 {
+			fmt.Fprintln(stderr, "nodeagent "+args[0]+": run it as root")
+			return 1
+		}
+		a := host.New(host.Config{Version: version.Version, Log: log})
+		if args[0] == "adopt-csr" {
+			csr, err := a.AdoptCSR(ctx, args[1])
+			if err != nil {
+				fmt.Fprintln(stderr, "nodeagent adopt-csr:", err)
+				return 1
+			}
+			stdout.Write(csr)
+			return 0
+		}
+		if err := a.Adopt(ctx, stdin); err != nil {
+			fmt.Fprintln(stderr, "nodeagent adopt:", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "nodeagent adopted: "+host.UnitName+" runs")
+		return 0
 	case "mesh-up", "serve":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, usage)

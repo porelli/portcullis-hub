@@ -104,3 +104,29 @@ func TestNodeagentCallVectorsCopy(t *testing.T) {
 		t.Error("testdata/nodeagent_call_vectors.json differs from core's nodeadm/testdata/nodeagent_call_vectors.json: copy it byte for byte")
 	}
 }
+
+// TestJoinFlagsVectorsCopy: testdata/join_flags_vectors.json is core's
+// nodeadm/testdata/join_flags_vectors.json byte for byte.
+func TestJoinFlagsVectorsCopy(t *testing.T) {
+	own, err := os.ReadFile("testdata/join_flags_vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(own) {
+		t.Fatal("the copy isn't valid JSON")
+	}
+	core, set := os.LookupEnv("PORTCULLIS_CORE_DIR")
+	if !set {
+		core = filepath.Join("..", "..", "..", "portcullis")
+	}
+	theirs, err := os.ReadFile(filepath.Join(core, "nodeadm", "testdata", "join_flags_vectors.json"))
+	if err != nil {
+		if set {
+			t.Fatalf("PORTCULLIS_CORE_DIR is set but core's file isn't readable: %v", err)
+		}
+		t.Skipf("no core checkout: %v", err)
+	}
+	if !bytes.Equal(own, theirs) {
+		t.Error("testdata/join_flags_vectors.json differs from core's nodeadm/testdata/join_flags_vectors.json: copy it byte for byte")
+	}
+}

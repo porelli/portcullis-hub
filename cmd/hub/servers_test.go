@@ -116,3 +116,51 @@ func TestHubServersTimeoutIsNotDown(t *testing.T) {
 		t.Errorf("%d %q", code, stderr.String())
 	}
 }
+
+// TestCLIAddClusterNodeStdinOnly (plan Task 30): `./portcullis node add`'s
+// client takes nothing on argv but the subcommand — any argument is a
+// usage error before the socket is dialled — forwards the stdin request
+// byte for byte, and prints the join code alone on stdout (the rest of
+// the answer, never the code, on stderr). The audit (server.add, actor
+// cli) is the socket route's: internal/httpapi TestHostClusterNodeTwins.
+func TestCLIAddClusterNodeStdinOnly(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.String()+" "+string(b))
+		w.WriteHeader(201)
+		w.Write([]byte(`{"code":"pcj2.SECRETCODE","role":"agent","command":"curl -fsSL https://example.org/node/join.sh | sudo sh"}`))
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+	for _, argv := range [][]string{{"add-cluster-node", "n4"}, {"add-cluster-node", "--id", "n4"}, {"add-cluster-node", "-"}, {"add-cluster-node", `{"id":"n4"}`}} {
+		var o, e bytes.Buffer
+		if code := serversMain(argv, strings.NewReader(`{"id":"n4"}`), &o, &e, sock); code != 2 || o.Len() != 0 {
+			t.Errorf("%q: %d %q", argv, code, o.String())
+		}
+	}
+	if len(got) != 0 {
+		t.Fatalf("a refused argv reached the Hub: %q", got)
+	}
+	req := `{"id":"n4","role":"agent","class":"cloud","site":"edge"}`
+	var o, e bytes.Buffer
+	if code := serversMain([]string{"add-cluster-node"}, strings.NewReader(req), &o, &e, sock); code != 0 {
+		t.Fatalf("add: %d %q", code, e.String())
+	}
+	if len(got) != 1 || got[0] != "POST /host/servers/cluster-node "+req {
+		t.Errorf("requests %q", got)
+	}
+	if o.String() != "pcj2.SECRETCODE\n" || strings.Contains(e.String(), "SECRETCODE") || !strings.Contains(e.String(), "join.sh") {
+		t.Errorf("stdout %q stderr %q", o.String(), e.String())
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -477,5 +478,81 @@ func TestSitesFromHubRecords(t *testing.T) {
 	v := cf.h.sitesOf(snap)
 	if len(v) != 1 || v[0].Name != "main" || !slices.Equal(v[0].Nodes, []string{"n2", "n3"}) || !slices.Equal(v[0].Ingress, []string{"n3"}) {
 		t.Errorf("%+v", v)
+	}
+}
+
+// TestInitNodeIngressPinned (core Task 11 parked → Task 30): a node of
+// init is an ingress node by its mesh pin, taken from its Node's label at
+// first sight; a later Node label (a node could try to set it) changes
+// nothing, either way.
+func TestInitNodeIngressPinned(t *testing.T) {
+	n1 := serverNode("n1", "10.215.0.1", true)
+	n1.Labels[nodeadm.LabelIngress] = "true"
+	n4 := serverNode("n4", "10.215.0.4", true)
+	cf := newClusterFixture(t, n1, n4)
+	snap, _ := cf.na.Cluster(context.Background())
+	cf.h.recordMeshReports(snap)
+	cf.h.mu.RLock()
+	p1, p4 := cf.h.st.Mesh["n1"], cf.h.st.Mesh["n4"]
+	cf.h.mu.RUnlock()
+	if !p1.Ingress || p4.Ingress {
+		t.Fatalf("pins n1 %+v n4 %+v", p1, p4)
+	}
+	// The labels flip afterwards: the pins hold.
+	for i := range snap.Nodes {
+		switch snap.Nodes[i].Name {
+		case "n1":
+			delete(snap.Nodes[i].Labels, nodeadm.LabelIngress)
+		case "n4":
+			snap.Nodes[i].Labels[nodeadm.LabelIngress] = "true"
+		}
+	}
+	cf.h.recordMeshReports(snap)
+	v := cf.h.sitesOf(snap)
+	if len(v) != 1 || !slices.Equal(v[0].Ingress, []string{"n1"}) {
+		t.Errorf("%+v", v)
+	}
+}
+
+// TestJoinRTTLostRoundsWait (found live, Task 30): a figure of exactly
+// the round timeout (1000 ms: lost echoes while a server didn't hold the
+// joiner's peer yet) holds the gate; a clean figure then passes. Still
+// 1000 at joinRTTWait: judged (too far).
+func TestJoinRTTLostRoundsWait(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	cf.h.settleClusterNodes(context.Background())
+	cf.na.setRTT(map[string]map[string]int{"n2": {"n1": 1000}})
+	var clean atomic.Bool
+	cf.na.onCluster = func(n int, s *nodeadm.Snapshot) {
+		switch {
+		case n == 3:
+			s.Enrolling = []nodeadm.Enrolling{{ID: "n2", Role: "agent", Class: "home", Site: "main", MeshIP: "10.215.0.2", Mesh: nodeadm.MeshReport{Pub: fakeMeshKey("n2")}}}
+		case clean.Load() && s.Node("n2") == nil:
+			s.Enrolling = nil
+			s.Nodes = append(s.Nodes, nodeadm.Node{Name: "n2", Role: "agent", Ready: true, Labels: map[string]string{nodeadm.LabelClass: "home", nodeadm.LabelSite: "main"},
+				Addresses: nodeadm.NodeAddresses{Mesh: "10.215.0.2"}})
+		}
+	}
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n2", Role: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	untilK3sJoined(t, cf, "n2")
+	cf.na.setRTT(map[string]map[string]int{"n2": {"n1": 2}})
+	clean.Store(true)
+	if r := waitServerOp(t, cf.h, serverOpKey("n2")); !r.OK {
+		t.Errorf("after a clean figure: %+v", r)
+	}
+	cf = newClusterFixture(t, serverNode("n1", "10.215.0.1", true))
+	cf.h.settleClusterNodes(context.Background())
+	step := fakeClockHub(cf)
+	cf.na.setRTT(map[string]map[string]int{"n3": {"n1": 1000}})
+	joinFor(cf, "n3", "agent", "10.215.0.3")
+	if _, _, err := cf.h.AddClusterNode(context.Background(), admin, AddClusterNodeRequest{ID: "n3", Role: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	untilK3sJoined(t, cf, "n3")
+	step(joinRTTWait + time.Second)
+	if r := waitServerOp(t, cf.h, serverOpKey("n3")); r.OK || r.Error != "too far for one cluster: 1000 ms (agents need 250 ms or less)" {
+		t.Errorf("late: %+v", r)
 	}
 }

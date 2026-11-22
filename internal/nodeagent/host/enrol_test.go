@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -500,5 +502,76 @@ func TestJoinFlagsCoreFixture(t *testing.T) {
 	}
 	if err := checkFlags(flags, srv, State{ID: "node-1", MeshIP: "10.215.0.1", Role: "server"}, cidr); err != nil {
 		t.Errorf("core's server flags: %v", err)
+	}
+}
+
+// TestJoinFlagsVectorsExact (plan Task 30): core nodeadm's join flags
+// (the shared vectors) pass checkFlags, and the allowlist holds nothing
+// a vector of that role lacks — nodeadm's list and the allowlist are the
+// same set; one flag less or more on either side fails here or in core.
+func TestJoinFlagsVectorsExact(t *testing.T) {
+	b, err := os.ReadFile("../testdata/join_flags_vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vs struct {
+		Vectors []struct {
+			Name, ID, Role string
+			MeshIP         string   `json:"mesh_ip"`
+			ServerURL      string   `json:"server_url"`
+			ClusterCIDR    string   `json:"cluster_cidr"`
+			Flags          []string `json:"flags"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(b, &vs); err != nil || len(vs.Vectors) < 2 {
+		t.Fatalf("vectors: %v (%d)", err, len(vs.Vectors))
+	}
+	roles := map[string]bool{}
+	for _, v := range vs.Vectors {
+		roles[v.Role] = true
+		st := State{ID: v.ID, MeshIP: v.MeshIP, Role: v.Role}
+		if err := checkFlags(v.Flags, v.ServerURL, st, v.ClusterCIDR); err != nil {
+			t.Errorf("%s: %v", v.Name, err)
+		}
+		allowed := allowedFlags(v.ServerURL, st, v.ClusterCIDR)
+		for f := range allowed {
+			if !slices.Contains(v.Flags, f) {
+				t.Errorf("%s: the allowlist takes %s, nodeadm never sends it", v.Name, f)
+			}
+		}
+		if len(allowed) != len(v.Flags) {
+			t.Errorf("%s: %d allowed, %d sent", v.Name, len(allowed), len(v.Flags))
+		}
+	}
+	if !roles["server"] || !roles["agent"] {
+		t.Errorf("roles %v", roles)
+	}
+}
+
+// TestJoinRTTWaitsOutLostRounds (found live, Task 30): right after the
+// bootstrap plan a server may not hold the joiner's peer yet, so its
+// first echoes are lost and the figure is the round timeout (1000 ms):
+// measured again, never sent as distance while time is left; after
+// ServersFor the figure goes as it is (nodeadm decides).
+func TestJoinRTTWaitsOutLostRounds(t *testing.T) {
+	r := newRig(t, "agent")
+	calls := 0
+	seq := []map[string]int{{"node-1": 1000}, {}, {"node-1": 1000, "n5": 3}, {"node-1": 2, "n5": 3}}
+	d := JoinDeps{Retry: time.Millisecond, ServersFor: time.Hour, RTT: func(context.Context, []string) map[string]int {
+		m := seq[min(calls, len(seq)-1)]
+		calls++
+		return m
+	}}
+	got, err := r.a.serverRTT(context.Background(), d, []string{"node-1", "n5"}, func(string, ...any) {})
+	if err != nil || got["node-1"] != 2 || calls != 4 {
+		t.Fatalf("got %v after %d measurements: %v", got, calls, err)
+	}
+	calls = 0
+	d.ServersFor = -time.Second
+	d.RTT = func(context.Context, []string) map[string]int { calls++; return map[string]int{"node-1": 1000} }
+	var said []string
+	got, _ = r.a.serverRTT(context.Background(), d, []string{"node-1"}, func(f string, a ...any) { said = append(said, fmt.Sprintf(f, a...)) })
+	if got["node-1"] != 1000 || calls != 1 || len(said) != 1 || !strings.Contains(said[0], "still lose echoes") {
+		t.Errorf("after ServersFor: %v %d %q", got, calls, said)
 	}
 }

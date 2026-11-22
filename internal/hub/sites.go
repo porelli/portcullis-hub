@@ -242,6 +242,13 @@ func (h *Hub) joinRTT(ctx context.Context, id, role, meshIP string, snap nodeadm
 			p.DetailThrottled(StepK3sJoined, "waiting for the node's round trip to "+s)
 			return false, nil
 		}
+		// Exactly the round timeout is lost echoes, not distance (a server
+		// that got the joiner's peer only after its first rounds; found
+		// live, Task 30): measured again until joinRTTWait, then judged.
+		if v, ok := rtt[s]; ok && v == rttLostFigure && !late {
+			p.DetailThrottled(StepK3sJoined, "the node's round trip to "+s+" still loses echoes: measuring again")
+			return false, nil
+		}
 	}
 	warnings, err := servers.CheckRTT(role, hs, rtt)
 	if err != nil {
@@ -253,6 +260,10 @@ func (h *Hub) joinRTT(ctx context.Context, id, role, meshIP string, snap nodeadm
 	p.Detail(StepK3sJoined, "")
 	return true, nil
 }
+
+// rttLostFigure is the nodeagent's round timeout in ms (internal/nodeagent/
+// host rttTimeout): a p95 of exactly it means lost rounds.
+const rttLostFigure = 1000
 
 // ErrNoHealthyServer is the join's refusal when no server was healthy to
 // measure the round trip against for joinRTTWait.
@@ -315,7 +326,8 @@ func (h *Hub) Sites(ctx context.Context) ([]SiteView, error) {
 
 // nodeSites is each managed node's site from the Hub's records (its
 // entry, else the mesh's pin of a node of init) and whether it is an
-// ingress node (its entry's labels; a node of init: its Node's). A node
+// ingress node (its entry's labels; a node of init: the mesh's pin, its
+// Node's label at first sight). A node
 // the Hub has no record of is never placed by its own labels (a kubelet
 // may set them, review M2): it is unrecorded, left out of the view and
 // flagged.
@@ -333,7 +345,7 @@ func (h *Hub) nodeSites(snap nodeadm.Snapshot) (site map[string]string, ingress 
 			ingress[n.Name] = s.Labels != nil && s.Labels.Ingress
 		} else if r, ok := h.st.Mesh[n.Name]; ok && r.Site != "" {
 			site[n.Name] = r.Site
-			ingress[n.Name] = n.Labels[nodeadm.LabelIngress] == "true"
+			ingress[n.Name] = r.Ingress
 		} else {
 			unrecorded = append(unrecorded, n.Name)
 		}

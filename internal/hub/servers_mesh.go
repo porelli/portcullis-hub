@@ -252,7 +252,7 @@ func firstAddr(l []string) string {
 //     the earlier recorded key wins), and it is frozen once the node's
 //     plan was pushed or it passed mesh_ready: a later report with
 //     another key is ignored and flagged, never a plan change;
-//   - a node of init's mesh address and site, pinned at first sight;
+//   - a node of init's mesh address, site and ingress, pinned at first sight;
 //   - records of nodes the cluster no longer lists are dropped.
 func (h *Hub) recordMeshReports(snap nodeadm.Snapshot) {
 	h.mu.Lock()
@@ -273,7 +273,7 @@ func (h *Hub) recordMeshReports(snap nodeadm.Snapshot) {
 		}
 		r := h.st.Mesh[sn.Name]
 		if r.MeshIP == "" && sn.Addresses.Mesh != "" {
-			r.MeshIP, r.Site = sn.Addresses.Mesh, siteOf(sn.Labels)
+			r.MeshIP, r.Site, r.Ingress = sn.Addresses.Mesh, siteOf(sn.Labels), sn.Labels[nodeadm.LabelIngress] == "true"
 			h.st.Mesh[sn.Name] = r
 			changed = true
 		}

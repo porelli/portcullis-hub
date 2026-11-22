@@ -142,9 +142,13 @@ type OwedSerial struct {
 // reachable, or unreachable after 2 min without one) and whether it was
 // taken out of every plan.
 type MeshNode struct {
-	Pub       string    `json:"pub,omitempty" yaml:"pub,omitempty"`
-	MeshIP    string    `json:"mesh_ip,omitempty" yaml:"mesh_ip,omitempty"`
-	Site      string    `json:"site,omitempty" yaml:"site,omitempty"`
+	Pub    string `json:"pub,omitempty" yaml:"pub,omitempty"`
+	MeshIP string `json:"mesh_ip,omitempty" yaml:"mesh_ip,omitempty"`
+	Site   string `json:"site,omitempty" yaml:"site,omitempty"`
+	// Ingress: a node of init is an ingress node (its Node's
+	// portcullis.io/ingress label, pinned with its site at first sight:
+	// never re-read from a later Node, core Task 11 parked → Task 30).
+	Ingress   bool      `json:"ingress,omitempty" yaml:"ingress,omitempty"`
 	Public    string    `json:"public,omitempty" yaml:"public,omitempty"`
 	Reach     string    `json:"reach,omitempty" yaml:"reach,omitempty"`
 	OfferedAt time.Time `json:"offered_at,omitempty" yaml:"offered_at,omitempty"`

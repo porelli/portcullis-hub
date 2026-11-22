@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -78,8 +79,11 @@ type pendingRenewal struct {
 	csr    *x509.CertificateRequest
 }
 
-func (a *Agent) loadPending() (*pendingRenewal, error) {
-	b, err := a.fs.read(pendingPEMFile)
+func (a *Agent) loadPending() (*pendingRenewal, error) { return a.loadKeyCSR(pendingPEMFile) }
+
+// loadKeyCSR reads a key + CSR file (nil, nil when it is absent).
+func (a *Agent) loadKeyCSR(path string) (*pendingRenewal, error) {
+	b, err := a.fs.read(path)
 	if err != nil {
 		return nil, nil
 	}
@@ -103,15 +107,20 @@ func (a *Agent) loadPending() (*pendingRenewal, error) {
 		}
 	}
 	if p.key == nil || p.csr == nil || p.csr.CheckSignature() != nil {
-		return nil, errors.New("node.pending.pem is unreadable")
+		return nil, fmt.Errorf("%s is unreadable", filepath.Base(path))
 	}
 	if pub, ok := p.csr.PublicKey.(*ecdsa.PublicKey); !ok || !pub.Equal(&p.key.PublicKey) {
-		return nil, errors.New("node.pending.pem's CSR isn't its key's")
+		return nil, fmt.Errorf("%s's CSR isn't its key's", filepath.Base(path))
 	}
 	return p, nil
 }
 
 func (a *Agent) newPending(cn string) (*pendingRenewal, error) {
+	return a.newKeyCSR(pendingPEMFile, cn)
+}
+
+// newKeyCSR writes a new P-256 key and its CSR for cn into path (0600).
+func (a *Agent) newKeyCSR(path, cn string) (*pendingRenewal, error) {
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -122,7 +131,7 @@ func (a *Agent) newPending(cn string) (*pendingRenewal, error) {
 	}
 	csr, _ := x509.ParseCertificateRequest(der)
 	p := &pendingRenewal{key: k, csr: csr, csrPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})}
-	if err := a.fs.write(pendingPEMFile, append(keyPEM(k), p.csrPEM...), 0o600, 0o700); err != nil {
+	if err := a.fs.write(path, append(keyPEM(k), p.csrPEM...), 0o600, 0o700); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -244,6 +253,11 @@ func (a *Agent) confirmRenewal(ctx context.Context, cur *tls.Certificate, st *St
 // confirmation (or its answer), it retries with backoff (30 s doubling to
 // the hour).
 func (a *Agent) RunRenewal(ctx context.Context) {
+	if a.state().Adopted {
+		// The first node: the install host's CLI renews it (adopt.go).
+		a.log.Info("certificate renewal: by the install host's CLI (./portcullis up / kube check), not nodeadm")
+		return
+	}
 	backoff := 30 * time.Second
 	for {
 		wait := time.Hour
