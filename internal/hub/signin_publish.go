@@ -8,8 +8,11 @@ package hub
 import (
 	"encoding/json"
 	"log"
+	"maps"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/portcullis/hub/internal/fidomds"
@@ -40,6 +43,58 @@ type KeycloakSignIn struct {
 	Clients        map[string]KeycloakClientTemplate     `json:"clients"`
 	Authenticators map[string]fidomds.AuthenticatorTrust `json:"authenticators"`
 	MDS            KeycloakMDS                           `json:"mds"`
+	// AppHosts (contract §8.1 "Let through", sign-in gate): the hostnames
+	// the policy file of the same pass publishes (appHosts), the only app
+	// hosts the extension's "Let through" page names. A display list: it
+	// never admits anyone. Never null.
+	AppHosts []string `json:"app_hosts"`
+}
+
+// MaxAppHosts is the most app_hosts the extension accepts (contract §8.1):
+// more and it refuses the whole file, so the Hub publishes at most this many.
+const MaxAppHosts = 4096
+
+// appHostRE is a published app host as the extension accepts it: a
+// lowercase DNS name (labels [a-z0-9]([a-z0-9-]*[a-z0-9])?), at most 253
+// characters. A host that isn't one is left out (never the whole file).
+var appHostRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// appHosts is signin-keycloak.json app_hosts: the gated core pages' hosts
+// (the policy file's core) and every host of an enabled app the policy file
+// doesn't deny (never a drift deny entry, never a public-only host),
+// lowercase, valid, sorted, each once, at most MaxAppHosts (the first ones
+// in order; the rest are logged and left out: the page then says "your
+// app" for them).
+func appHosts(apps []policy.App, core map[string]string) []string {
+	set := map[string]bool{}
+	add := func(h string) {
+		h = strings.ToLower(h)
+		if len(h) > 253 || !appHostRE.MatchString(h) {
+			log.Printf("signin: %q isn't a plain lowercase hostname — not in signin-keycloak.json app_hosts", h)
+			return
+		}
+		set[h] = true
+	}
+	for h := range core {
+		add(h)
+	}
+	for _, a := range apps {
+		if !a.Enabled || a.Deny {
+			continue
+		}
+		for h := range a.Hosts {
+			add(h)
+		}
+	}
+	out := slices.Sorted(maps.Keys(set))
+	if len(out) > MaxAppHosts {
+		log.Printf("signin: %d app hosts, signin-keycloak.json lists the first %d (the Let through page says \"your app\" for the rest)", len(out), MaxAppHosts)
+		out = out[:MaxAppHosts]
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
 }
 
 // KeycloakMDS is the FIDO metadata BLOB the authenticators come from: its
@@ -119,6 +174,7 @@ func (h *Hub) keycloakSignInLocked() KeycloakSignIn {
 		Templates:      h.publishedTemplatesLocked(),
 		Clients:        map[string]KeycloakClientTemplate{},
 		Authenticators: map[string]fidomds.AuthenticatorTrust{},
+		AppHosts:       []string{},
 	}
 	for _, m := range h.methodsOnLocked() {
 		doc.Methods = append(doc.Methods, string(m))
