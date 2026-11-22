@@ -106,6 +106,9 @@ func (a clusterAgent) RTT(context.Context) (map[string]int, error) {
 	return out, nil
 }
 
+// Checks answers no host check (the HA checklist isn't under test here).
+func (clusterAgent) Checks(context.Context) (nodeagent.Checks, error) { return nodeagent.Checks{}, nil }
+
 func clusterServer(name string) nodeadm.Node {
 	return nodeadm.Node{Name: name, Role: "server", Ready: true, Labels: map[string]string{}, Addresses: nodeadm.NodeAddresses{Mesh: "10.215.0." + name[1:]}}
 }

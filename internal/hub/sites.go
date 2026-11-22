@@ -14,6 +14,7 @@ import (
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/meshplan"
 	"github.com/portcullis/hub/internal/nodeadm"
+	"github.com/portcullis/hub/internal/nodeagent"
 	"github.com/portcullis/hub/internal/servers"
 )
 
@@ -84,6 +85,50 @@ func (r *meshRTT) snapshot(now time.Time, keep map[string]bool) map[string]map[s
 	return out
 }
 
+// hostWatchdog is each node's last watchdog host check (nodeagent GET
+// /v1/checks, id watchdog: /dev/watchdog present), read while HA is off:
+// before `ha enable` installs fencing no node's Self Node Remediation
+// agent runs, so the checklist's watchdog item judges the device itself
+// (§20.1 "Fencing"; Task 31). Dropped after rttStale like the round trips.
+type hostWatchdog struct {
+	mu sync.Mutex
+	ok map[string]bool
+	at map[string]time.Time
+}
+
+func (w *hostWatchdog) set(id string, ok bool, at time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ok == nil {
+		w.ok, w.at = map[string]bool{}, map[string]time.Time{}
+	}
+	w.ok[id], w.at[id] = ok, at
+}
+
+// snapshot is the nodes whose last check, read since now−rttStale, found
+// a watchdog.
+func (w *hostWatchdog) snapshot(now time.Time) map[string]bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := map[string]bool{}
+	for id, ok := range w.ok {
+		if ok && now.Sub(w.at[id]) <= rttStale {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// watchdogOK: the checks hold a passing watchdog check.
+func watchdogOK(c nodeagent.Checks) bool {
+	for _, x := range c.Checks {
+		if x.ID == "watchdog" {
+			return x.OK
+		}
+	}
+	return false
+}
+
 // cleanRTT keeps a nodeagent's answer's figures for the known nodes only
 // (a node's words are never a label or a key the Hub didn't know), never
 // its own, never negative; an absurd one (over rttMaxMs) is dropped
@@ -140,7 +185,7 @@ func (h *Hub) startCollectRTT(ctx context.Context, snap nodeadm.Snapshot) {
 
 // collectRTT reads every Ready node's round trips (in parallel, each call
 // bounded; one silent nodeagent never holds the others), recorded as read
-// at at.
+// at at; while HA is off its watchdog host check too (hostWatchdog).
 func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot, at time.Time) {
 	known, mesh := h.rttNodes(snap)
 	var wg sync.WaitGroup
@@ -166,6 +211,19 @@ func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot, at time.Tim
 				return
 			}
 			h.cl.rtt.set(id, cleanRTT(id, raw, known, false), at)
+			if h.cfg.HA {
+				return
+			}
+			c, cancel = context.WithTimeout(ctx, rttCallWait)
+			chk, err := ag.Checks(c)
+			cancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Printf("servers: the host checks of %s: %v", id, err)
+				}
+				return
+			}
+			h.cl.wd.set(id, watchdogOK(chk), at)
 		}()
 	}
 	wg.Wait()

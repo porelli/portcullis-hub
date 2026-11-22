@@ -76,13 +76,14 @@ type NodeadmAPI interface {
 
 // NodeagentAPI is the part of a node's nodeagent the Hub uses: the k3s
 // uninstall of a removal, the health read (its pcmesh key), the mesh
-// peer plan and the round trips over pcmesh (*nodeagent.Client; tests
-// substitute it).
+// peer plan, the round trips over pcmesh and the host checks
+// (*nodeagent.Client; tests substitute it).
 type NodeagentAPI interface {
 	Uninstall(ctx context.Context) error
 	Health(ctx context.Context) (nodeagent.Health, error)
 	PutMeshPeers(ctx context.Context, p nodeagent.MeshPlan) error
 	RTT(ctx context.Context) (map[string]int, error)
+	Checks(ctx context.Context) (nodeagent.Checks, error)
 }
 
 // clusterNodes is the Hub's cluster-node wiring.
@@ -106,6 +107,9 @@ type clusterNodes struct {
 	ms meshState
 	// rtt: the nodes' last round trips over pcmesh (sites.go).
 	rtt meshRTT
+	// wd: the nodes' last watchdog host check, read with the round trips
+	// while HA is off (sites.go: the checklist's watchdog before fencing).
+	wd hostWatchdog
 	// poll is how often the enrolment reads the snapshot (0: 5 s).
 	poll time.Duration
 	// adding: adds between their entry and their op (the settle tick

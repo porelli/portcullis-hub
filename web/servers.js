@@ -457,6 +457,7 @@
   // sign-in popup first (synchronously), then the request.
   function runListAction(root, action, id, typed, btn) {
     const verb = action === 'revoke' ? 'Revoke' : 'Remove';
+    const listed = !!(page && (page.servers || []).some(x => x.id === id));
     fresh(action, async proof => {
       if (btn) btn.dataset.busy = '1';
       try {
@@ -467,9 +468,61 @@
         render(root);
       } catch (err) {
         if (btn) delete btn.dataset.busy;
+        // A revoke whose answer was lost (no HTTP status: the connection
+        // broke; 5xx: the Hub restarted or stands by — a server revoke
+        // rotates the cluster's tokens, the API servers restart and the Hub
+        // can lose its Lease): its outcome is asked of the Hub (Task 31).
+        if (verb === 'Revoke' && (!err.status || err.status >= 500)) {
+          window.showToast('The answer to the revoke of ' + serverName(id) + ' was lost (the Hub restarted?): checking its outcome…', 'warning');
+          const out = await revokeOutcome(id, listed);
+          window.showToast(out.text, out.tone);
+          render(root);
+          return;
+        }
         window.showToast(err.message || 'Failed', 'error');
       }
     });
+  }
+
+  // revokeOutcome polls GET /api/servers after a revoke whose answer was
+  // lost (as `./portcullis node revoke` does), every 3 s for at most 30
+  // min: revoked and confirmed (or parked) → done; gone (when it was listed
+  // before) → done; revoked but not confirmed, removing or enrolling, or
+  // the Hub not answering (restarting, standing by) → wait; listed as ready
+  // or offline for 2 min → the revoke wasn't recorded, revoke it again (a
+  // repeated revoke of a finished one answers done; it needs a new fresh
+  // sign-in, so the page asks). d (tests): {get, sleep, now}. Resolves
+  // {state, text, tone}.
+  async function revokeOutcome(id, listed, d) {
+    d = d || {};
+    const get = d.get || (() => window.apiGet('/api/servers'));
+    const sleep = d.sleep || (ms => new Promise(r => setTimeout(r, ms)));
+    const now = d.now || (() => Date.now());
+    const start = now();
+    let unrevoked = 0;
+    while (now() - start < 30 * 60 * 1000) {
+      let s = null, answered = false;
+      try {
+        const pg = await get();
+        answered = true;
+        s = ((pg && pg.servers) || []).find(x => x.id === id) || null;
+      } catch (e) { answered = false; }
+      if (answered) {
+        if (!s && listed) return { state: 'gone', text: 'Revoked: ' + serverName(id) + ' is no longer listed.', tone: 'success' };
+        if (s && s.state === 'revoked' && s.revoke_confirmed) {
+          return (s.error || '').indexOf('revoked; waiting for quorum') === 0 ? { state: 'parked', text: 'Revoked (parked): ' + s.error, tone: 'warning' }
+            : { state: 'revoked', text: 'Revoked.', tone: 'success' };
+        }
+        if (s && (s.state === 'ready' || s.state === 'offline')) {
+          if (!unrevoked) unrevoked = now();
+          if (now() - unrevoked >= 2 * 60 * 1000) {
+            return { state: 'unrevoked', text: 'The Hub lists ' + serverName(id) + ' as ' + s.state + ': its revoke wasn\'t recorded. Revoke it again (a finished revoke answers at once).', tone: 'error' };
+          }
+        } else { unrevoked = 0; }
+      }
+      await sleep(3000);
+    }
+    return { state: 'unknown', text: 'The outcome of the revoke of ' + serverName(id) + ' isn\'t known after 30 min: check this list again.', tone: 'error' };
   }
 
   // ── the instance page ────────────────────────────────
@@ -600,6 +653,6 @@
   // cached is the last list (no request): folders.js's server choice.
   function cached() { return (page && page.servers) || []; }
 
-  window.PortcullisServers = { render, load, cached, confirmHtml, goConfirm, runListAction, runInstanceAction, listHtml, detailHtml, codeDialogHtml, openCodeDialog,
+  window.PortcullisServers = { render, load, cached, confirmHtml, goConfirm, runListAction, revokeOutcome, runInstanceAction, listHtml, detailHtml, codeDialogHtml, openCodeDialog,
     addBody, stepsHtml, runsOn, serverSelect, instanceSection, wire };
 })();

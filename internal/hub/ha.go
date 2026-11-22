@@ -345,7 +345,8 @@ func Guarantee(pg nodeadm.Postgres) string {
 // haIn is what the checklist judges: the snapshot, the Hub's placement,
 // the N−1 results (n1Err: the check's refusal), the sites view, the sites
 // with a confirmed reachable node, the round trips, the backup
-// destination's presence and whether HA is on.
+// destination's presence, whether HA is on and (HA off) the nodes whose
+// nodeagent found a watchdog device.
 type haIn struct {
 	snap      nodeadm.Snapshot
 	place     map[string]haPlace
@@ -357,6 +358,7 @@ type haIn struct {
 	backup    bool
 	enabled   bool
 	ns        nminus1.Namespaces
+	watchdog  map[string]bool
 }
 
 // fencingRequired are the nodes that must fence (a watchdog) before
@@ -440,11 +442,15 @@ func haChecklist(in haIn) []HAItem {
 		item("backup_destination", in.backup, haTextBackup),
 		item("n_minus_1", green, haTextNMinus1),
 	}
-	// watchdog: every node that must fence has one (the first by name).
+	// watchdog: every node that must fence has one (the first by name):
+	// its Self Node Remediation agent ready, or, while HA is off (fencing
+	// isn't installed before `ha enable`, Task 31), its nodeagent's
+	// watchdog host check passing (`ha enable` installs fencing, which
+	// refuses without one, before anything stateful moves).
 	must := fencingRequired(snap, in.place, in.enabled, in.ns)
 	ready := map[string]bool{}
 	for _, n := range snap.Nodes {
-		ready[n.Name] = n.FencingReady
+		ready[n.Name] = n.FencingReady || (!in.enabled && in.watchdog[n.Name])
 	}
 	wd := HAItem{ID: "watchdog", OK: true}
 	for _, name := range slices.Sorted(maps.Keys(must)) {
@@ -710,7 +716,8 @@ func (h *Hub) haSnapshotView(v *HAView, snap nodeadm.Snapshot) {
 		v.Volumes = slices.Clone(snap.Volumes)
 	}
 	v.Checklist = haChecklist(haIn{snap: snap, place: place, n1: n1, n1Err: n1Err, sites: sites, confirmed: confirmed,
-		rtt: h.cl.rtt.snapshot(h.now(), known), backup: h.cfg.BackupDestination, enabled: h.cfg.HA, ns: ns})
+		rtt: h.cl.rtt.snapshot(h.now(), known), backup: h.cfg.BackupDestination, enabled: h.cfg.HA, ns: ns,
+		watchdog: h.cl.wd.snapshot(h.now())})
 	level := map[string]nminus1.Level{}
 	for _, r := range n1 {
 		level[r.Node] = r.Level

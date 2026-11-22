@@ -19,8 +19,8 @@ import (
 // The Hub's client of a node's nodeagent (contract §20.4), over pcmesh at
 // https://<mesh ip>:7443 with the hub.control certificate. Only the
 // routes the Hub's cluster-node operations use: the health read, the mesh
-// peer plan and its RTT, and the k3s uninstall after a cooperative
-// removal. Every request goes through
+// peer plan and its RTT, the host checks (the HA checklist's watchdog
+// before fencing runs) and the k3s uninstall after a cooperative removal. Every request goes through
 // fsutil.Do (the write fence, §20.5).
 
 // Port is the nodeagent API's port on the node's mesh address.
@@ -96,6 +96,13 @@ func (c *Client) PutMeshPeers(ctx context.Context, p MeshPlan) error {
 func (c *Client) RTT(ctx context.Context) (map[string]int, error) {
 	out := map[string]int{}
 	err := c.do(ctx, http.MethodGet, "/v1/mesh/rtt", nil, &out, http.StatusOK)
+	return out, err
+}
+
+// Checks is GET /v1/checks: the node's host checks.
+func (c *Client) Checks(ctx context.Context) (Checks, error) {
+	var out Checks
+	err := c.do(ctx, http.MethodGet, "/v1/checks", nil, &out, http.StatusOK)
 	return out, err
 }
 

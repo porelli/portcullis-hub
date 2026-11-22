@@ -304,3 +304,67 @@ setTimeout(() => {
 		t.Errorf("the code survives the close")
 	}
 }
+
+// TestRevokeOutcomePolls (Task 31): a revoke whose answer was lost (the
+// Hub restarted after a Lease loss) is followed on GET /api/servers until
+// the node is revoked and confirmed, parked or gone (listed before); a
+// Hub that doesn't answer is waited for; a node still listed ready for
+// 2 min is reported unrevoked (revoke again); 30 min without an outcome
+// is unknown. The revoke itself is never sent again by the page (it needs
+// a new fresh sign-in).
+func TestRevokeOutcomePolls(t *testing.T) {
+	run := func(seq string, listed bool) map[string]any {
+		t.Helper()
+		script := `
+const seq = ` + seq + `;
+let i = 0, clock = 0, calls = 0;
+const d = {
+  get: () => { calls++; const a = seq[Math.min(i++, seq.length - 1)]; return a === 'down' ? Promise.reject(new Error('502')) : Promise.resolve({ servers: a }); },
+  sleep: () => { clock += 3000; return Promise.resolve(); },
+  now: () => clock,
+};
+window.PortcullisServers.revokeOutcome('n3', ` + map[bool]string{true: "true", false: "false"}[listed] + `, d).then(o => process.stdout.write(JSON.stringify(Object.assign(o, { calls, clock }))));
+`
+		var got map[string]any
+		if err := json.Unmarshal([]byte(serversJS(t, script)), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	n3 := func(state string, confirmed bool, errText string) string {
+		b, _ := json.Marshal([]any{map[string]any{"id": "n3", "name": "n3", "state": state, "revoke_confirmed": confirmed, "error": errText}})
+		return string(b)
+	}
+	for _, c := range []struct {
+		name, seq string
+		listed    bool
+		state     string
+	}{
+		{"down, then revoked unconfirmed, then confirmed", "['down', 'down', " + n3("revoked", false, "") + ", " + n3("revoked", true, "") + "]", true, "revoked"},
+		{"parked", "[" + n3("revoked", true, "revoked; waiting for quorum to remove its etcd member") + "]", true, "parked"},
+		{"gone, listed before", "['down', []]", true, "gone"},
+		{"ready for 2 min", "[" + n3("ready", false, "") + "]", true, "unrevoked"},
+		{"removing, then gone", "[" + n3("removing", false, "") + ", []]", true, "gone"},
+		{"never answers", "['down']", true, "unknown"},
+	} {
+		got := run(c.seq, c.listed)
+		if got["state"] != c.state {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+	// Not listed before: gone is no outcome (waits, then unknown).
+	if got := run("[[]]", false); got["state"] != "unknown" || got["clock"].(float64) < 30*60*1000 {
+		t.Errorf("never listed: %v", got)
+	}
+	// Ready waits 2 min (40 polls of 3 s), not less.
+	if got := run("["+n3("ready", false, "")+"]", true); got["clock"].(float64) < 2*60*1000 || got["clock"].(float64) > 2*60*1000+3000 {
+		t.Errorf("unrevoked after %v ms", got["clock"])
+	}
+	// The page never resends the revoke: only GETs.
+	src := webAsset(t, "servers.js")
+	i := strings.Index(src, "async function revokeOutcome(")
+	j := strings.Index(src[i:], "\n  }\n")
+	if body := src[i : i+j]; strings.Contains(body, "POST") || strings.Contains(body, "apiCall") {
+		t.Errorf("revokeOutcome sends more than GETs:\n%s", body)
+	}
+}

@@ -300,6 +300,71 @@ func TestHAChecklistNMinus1Yellow(t *testing.T) {
 	}
 }
 
+// TestHAChecklistWatchdogBeforeFencing (Task 31): before `ha enable`
+// installs fencing no Self Node Remediation agent runs anywhere, so with
+// HA off a node's watchdog is its nodeagent's host check (read with the
+// round trips); with HA on only a ready agent counts. A node whose check
+// can't be read, or fails, stays red.
+func TestHAChecklistWatchdogBeforeFencing(t *testing.T) {
+	ctx := context.Background()
+	three := haFixture(t,
+		haLabels(siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1"), true, true),
+		haLabels(siteNode("n2", "server", "main", "10.215.0.2", "192.0.2.2", ""), true, false),
+		haLabels(siteNode("n3", "server", "main", "10.215.0.3", "192.0.2.3", ""), false, false))
+	three.na.mu.Lock()
+	for i := range three.na.snap.Nodes {
+		three.na.snap.Nodes[i].FencingReady = false
+	}
+	three.na.watchdog = map[string]bool{"n1": true, "n2": true}
+	three.na.refuse["checks:n3"] = errors.New("unreachable")
+	snap := three.na.snap
+	three.na.mu.Unlock()
+	collect := func() { three.h.collectRTT(ctx, snap, three.h.now()) }
+	collect()
+	if it := mustHA(t, three).watchdog(t); it.OK || it.Text != "node n3 has no watchdog: fencing can't be confirmed" {
+		t.Errorf("n3's checks unreadable: %+v", it)
+	}
+	three.na.mu.Lock()
+	delete(three.na.refuse, "checks:n3")
+	three.na.mu.Unlock()
+	collect()
+	if it := mustHA(t, three).watchdog(t); it.OK {
+		t.Errorf("n3 without a watchdog device: %+v", it)
+	}
+	three.na.mu.Lock()
+	three.na.watchdog["n3"] = true
+	three.na.mu.Unlock()
+	collect()
+	if it := mustHA(t, three).watchdog(t); !it.OK || it.Text != "" {
+		t.Errorf("every node's nodeagent finds a watchdog, HA off: %+v", it)
+	}
+	// Stale (over rttStale): never green on an old read.
+	three.h.cl.wd.mu.Lock()
+	three.h.cl.wd.at["n3"] = three.h.now().Add(-rttStale - time.Second)
+	three.h.cl.wd.mu.Unlock()
+	if it := mustHA(t, three).watchdog(t); it.OK {
+		t.Errorf("a stale watchdog read counted: %+v", it)
+	}
+	collect()
+	// HA on: only a ready agent; a core pod on n3 needs n3 fenced.
+	three.h.cfg.HA = true
+	three.h.SetFrontdoorStatus(func(context.Context) ([]byte, error) { return nil, errors.New("not here") })
+	three.na.mu.Lock()
+	three.na.snap.Pods = []nodeadm.Pod{{Name: "vault-0", Namespace: "portcullis", Node: "n3", PriorityClass: "portcullis-core"}}
+	three.na.mu.Unlock()
+	if it := mustHA(t, three).watchdog(t); it.OK {
+		t.Errorf("HA on: a host check stood in for fencing: %+v", it)
+	}
+	// HA on never reads the host checks.
+	three.h.cl.wd.mu.Lock()
+	three.h.cl.wd.ok, three.h.cl.wd.at = nil, nil
+	three.h.cl.wd.mu.Unlock()
+	collect()
+	if got := three.h.cl.wd.snapshot(three.h.now()); len(got) != 0 {
+		t.Errorf("HA on: host checks read: %v", got)
+	}
+}
+
 // TestGuaranteeText: zero loss only with a synchronous standby.
 func TestGuaranteeText(t *testing.T) {
 	for _, c := range []struct {

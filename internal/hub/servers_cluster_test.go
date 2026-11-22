@@ -52,6 +52,9 @@ type fakeNodeadm struct {
 	rtt map[string]map[string]int
 	// rttBlock: set, every RTT read waits for it to close (or its ctx).
 	rttBlock chan struct{}
+	// watchdog: the nodes whose host checks find a watchdog (none: no
+	// node has one).
+	watchdog map[string]bool
 	// removeHook: set, Remove runs it first with its context (a revoke
 	// that takes a while; the caller gone meanwhile).
 	removeHook func(ctx context.Context) error
@@ -228,6 +231,16 @@ func (a fakeNodeagent) RTT(ctx context.Context) (map[string]int, error) {
 		}
 	}
 	return out, nil
+}
+
+// Checks answers the node's host checks: its watchdog check only.
+func (a fakeNodeagent) Checks(context.Context) (nodeagent.Checks, error) {
+	a.f.mu.Lock()
+	defer a.f.mu.Unlock()
+	if err := a.f.refuse["checks:"+a.id]; err != nil {
+		return nodeagent.Checks{}, err
+	}
+	return nodeagent.Checks{Checks: []nodeagent.Check{{ID: "watchdog", OK: a.f.watchdog[a.id]}}}, nil
 }
 
 // PutMeshPeers records the plan (not in calls: the removal and enrolment
