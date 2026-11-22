@@ -234,6 +234,10 @@ func (a *Agent) serve(ctx context.Context, w http.ResponseWriter, r *http.Reques
 			}
 			w.WriteHeader(http.StatusNoContent)
 		case <-r.Context().Done():
+			// Never a success the step hasn't reached (fail closed): a
+			// handler returning silently answers 200, which a caller
+			// whose TLS close_notify the server saw first may still read.
+			writeErr(w, errStepGoesOn)
 		}
 	case "/v1/k3s/uninstall":
 		var q struct{}

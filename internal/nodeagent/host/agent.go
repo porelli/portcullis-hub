@@ -54,6 +54,9 @@ type State struct {
 	Class    string   `json:"class"`
 	Endpoint string   `json:"endpoint"`
 	Servers  []string `json:"servers"`
+	// Adopted: the cluster's first node (adopt.go), whose certificate the
+	// install host's CLI signs and renews (nodeadm holds no record of it).
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 // WG is the part of wgctrl's client the agent uses.
@@ -277,6 +280,10 @@ func errKind(code int, kind, format string, args ...any) error {
 }
 
 var errBadRequest = errStatus(http.StatusBadRequest, "malformed request")
+
+// errStepGoesOn answers a token step whose request ended before the step:
+// the step goes on (its own context); the caller calls again.
+var errStepGoesOn = errStatus(http.StatusServiceUnavailable, "the token step goes on: call again")
 
 // State is the node's joined state.
 func (a *Agent) State() State { return a.state() }

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,8 +63,12 @@ func TestTokenRotateResumes(t *testing.T) {
 	}()
 	<-entered
 	cancel()
-	if err := <-first; !errors.Is(err, context.Canceled) {
-		t.Fatalf("the first call: %v, want it cancelled before the supervisor answered", err)
+	// Either outcome of the cancel is legal, never a success: the client
+	// sees its cancellation, or — when the server saw the TLS
+	// close_notify first and answered before the socket closed — the
+	// handler's 503 (the race the flake hit; a silent handler answered 200).
+	if err := <-first; !errors.Is(err, context.Canceled) && err.Error() != "answered 503 Service Unavailable" {
+		t.Fatalf("the first call: %v, want it cancelled (or 503) before the supervisor answered", err)
 	}
 	if readTok(t, r, K3sTokenFile) != "rawinittoken0123" {
 		t.Error("the token file changed before the supervisor answered")
@@ -321,5 +326,36 @@ func TestJoinClusterCIDRAndAgentToken(t *testing.T) {
 	j2.nodeadm.cidr = "10.215.0.0/16"
 	if err := j2.join(); err == nil || len(j2.install) != 0 {
 		t.Errorf("a cluster_cidr over the mesh: %v", err)
+	}
+}
+
+// TestTokenRotateEndedRequestNeverSucceeds: a token-rotate request that
+// ends while its step runs is answered 503 "goes on" — never the silent
+// 200 a returning handler sends — and the step still finishes. Gated:
+// the request ends only once the supervisor has the call, and the
+// supervisor answers only after the handler returned.
+func TestTokenRotateEndedRequestNeverSucceeds(t *testing.T) {
+	newTok := "K10" + caHash + "::server:newpass0123456789"
+	r := newRig(t, "server")
+	etcd := &fakeEtcd{}
+	sup := &fakeSup{etcd: etcd, block: make(chan struct{}), entered: make(chan struct{})}
+	entered := sup.entered
+	r.a.cfg.Etcd, r.a.cfg.Supervisor = etcd, sup
+	installK3s(t, r, "server", "rawinittoken0123")
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequestWithContext(ctx, "POST", "/v1/k3s/token-rotate", nil)
+	w := httptest.NewRecorder()
+	go func() { <-entered; cancel() }()
+	r.a.serve(context.Background(), w, req, "/v1/k3s/token-rotate", []byte(`{"new_token":"`+newTok+`","step":"rotate"}`))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "the token step goes on: call again") {
+		t.Fatalf("an ended request: %d %s", w.Code, w.Body.String())
+	}
+	close(sup.block)
+	// The step goes on without its caller: a retry finds it done.
+	if err := r.a.TokenStep(context.Background(), na.TokenRotate{NewToken: newTok, Step: "rotate"}); err != nil {
+		t.Fatal(err)
+	}
+	if readTok(t, r, K3sTokenFile) != newTok || sup.n() != 1 {
+		t.Errorf("file %q, %d supervisor calls", readTok(t, r, K3sTokenFile), sup.n())
 	}
 }
