@@ -176,10 +176,10 @@ func (h *Hub) startCollectRTT(ctx context.Context, snap nodeadm.Snapshot) {
 	if !h.cl.rtt.busy.CompareAndSwap(false, true) {
 		return
 	}
-	at := h.now()
+	at, checks := h.now(), !h.cfg.HA
 	go func() {
 		defer h.cl.rtt.busy.Store(false)
-		h.collectRTT(ctx, snap, at)
+		h.collect(ctx, snap, at, checks)
 	}()
 }
 
@@ -187,6 +187,12 @@ func (h *Hub) startCollectRTT(ctx context.Context, snap nodeadm.Snapshot) {
 // bounded; one silent nodeagent never holds the others), recorded as read
 // at at; while HA is off its watchdog host check too (hostWatchdog).
 func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot, at time.Time) {
+	h.collect(ctx, snap, at, !h.cfg.HA)
+}
+
+// collect is collectRTT, the host checks only with checks (HA off, read
+// by the caller: the collection never reads the Hub's config).
+func (h *Hub) collect(ctx context.Context, snap nodeadm.Snapshot, at time.Time, checks bool) {
 	known, mesh := h.rttNodes(snap)
 	var wg sync.WaitGroup
 	for _, n := range snap.Nodes {
@@ -211,7 +217,7 @@ func (h *Hub) collectRTT(ctx context.Context, snap nodeadm.Snapshot, at time.Tim
 				return
 			}
 			h.cl.rtt.set(id, cleanRTT(id, raw, known, false), at)
-			if h.cfg.HA {
+			if !checks {
 				return
 			}
 			c, cancel = context.WithTimeout(ctx, rttCallWait)
