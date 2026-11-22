@@ -562,7 +562,10 @@ func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) 
 	ip := st.MeshIP
 	exact := map[string]bool{
 		"--server=" + serverURL: true, "--token-file=" + K3sTokenFile: true, "--node-name=" + st.ID: true,
-		"--node-ip=" + ip: true, "--kubelet-arg=address=" + ip: true, "--kubelet-arg=pod-max-pids=1024": true,
+		// The kubelet on the mesh address through k3s's --bind-address,
+		// the address its agent tunnel dials (core Task 28 fix round 1);
+		// --kubelet-arg=address= stays a server's (init's flags).
+		"--node-ip=" + ip: true, "--bind-address=" + ip: true, "--kubelet-arg=pod-max-pids=1024": true,
 		"--kubelet-arg=sync-frequency=10s": true, "--flannel-conf=" + FlannelConf: true, "--flannel-iface=pcmesh": true,
 		// The registration taint (core ruling R-NODELABELS): no placement
 		// label and no portcullis.io/ taint on the join's flags; nodeadm
@@ -571,7 +574,7 @@ func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) 
 	}
 	serverOnly := map[string]bool{
 		"--secrets-encryption": true, "--disable=traefik": true, "--write-kubeconfig-mode=0600": true,
-		"--flannel-backend=wireguard-native": true, "--advertise-address=" + ip: true, "--bind-address=" + ip: true,
+		"--flannel-backend=wireguard-native": true, "--advertise-address=" + ip: true, "--kubelet-arg=address=" + ip: true,
 		"--etcd-arg=listen-client-urls=https://" + ip + ":2379,https://127.0.0.1:2379": true,
 		"--etcd-arg=heartbeat-interval=200":                                            true, "--etcd-arg=election-timeout=2000": true,
 		"--agent-token-file=" + K3sAgentToken: true,

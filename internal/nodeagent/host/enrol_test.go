@@ -129,7 +129,7 @@ func (f *fakeNodeadm) handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		srv := "https://10.215.0.1:6443"
 		ans := map[string]any{"role": "agent", "server_url": srv, "token": f.token, "cluster_cidr": f.cidr, "flags": []string{
-			"--flannel-conf=" + FlannelConf, "--flannel-iface=pcmesh", "--kubelet-arg=address=10.215.0.4", "--kubelet-arg=pod-max-pids=1024",
+			"--flannel-conf=" + FlannelConf, "--flannel-iface=pcmesh", "--bind-address=10.215.0.4", "--kubelet-arg=pod-max-pids=1024",
 			"--node-ip=10.215.0.4", UnlabelledTaintFlag,
 			"--node-name=n4", "--server=" + srv, "--token-file=" + K3sTokenFile}}
 		if f.cidr == "" {
@@ -359,7 +359,13 @@ func TestJoinFlagsRefused(t *testing.T) {
 	if err := checkFlags(agentOK, srv, agent, "10.42.0.0/16"); err != nil {
 		t.Errorf("an agent's flags: %v", err)
 	}
-	for _, f := range []string{"--secrets-encryption", NoForceDetachFlag} {
+	// Core Task 28 fix round 1: an agent's kubelet listens through
+	// --bind-address=<its mesh ip> (the agent tunnel dials that address);
+	// --kubelet-arg=address= is a server's only, and never another address.
+	if err := checkFlags(append(append([]string{}, agentOK...), "--bind-address=10.215.0.4"), srv, agent, "10.42.0.0/16"); err != nil {
+		t.Errorf("an agent's --bind-address: %v", err)
+	}
+	for _, f := range []string{"--secrets-encryption", NoForceDetachFlag, "--kubelet-arg=address=10.215.0.4", "--bind-address=0.0.0.0", "--bind-address=10.215.0.5"} {
 		if checkFlags(append(append([]string{}, agentOK...), f), srv, agent, "10.42.0.0/16") == nil {
 			t.Errorf("an agent took %s", f)
 		}
