@@ -184,13 +184,16 @@ type addServerBody struct {
 	Site    string `json:"site"`
 	Ingress *bool  `json:"ingress"`
 	Storage *bool  `json:"storage"`
+	// PublicEndpoint: a cluster node's forwarded public UDP endpoint.
+	PublicEndpoint string `json:"public_endpoint"`
 	freshBody
 }
 
-const addServerUsage = `{"id": "<server id>", "name": "<name>", "kind"?: "worker"|"cluster-node", "role"?: "server"|"agent", "class"?: "small"|"home"|"cloud", "site"?, "ingress"?: bool, "storage"?: bool, ` + freshUsage + `}`
+const addServerUsage = `{"id": "<server id>", "name": "<name>", "kind"?: "worker"|"cluster-node", "role"?: "server"|"agent", "class"?: "small"|"home"|"cloud", "site"?, "ingress"?: bool, "storage"?: bool, "public_endpoint"?: "<ip:port>", ` + freshUsage + `}`
 
 func (b addServerBody) clusterRequest() hub.AddClusterNodeRequest {
-	return hub.AddClusterNodeRequest{ID: b.ID, Name: b.Name, Role: b.Role, Class: b.Class, Site: b.Site, Ingress: b.Ingress, Storage: b.Storage}
+	return hub.AddClusterNodeRequest{ID: b.ID, Name: b.Name, Role: b.Role, Class: b.Class, Site: b.Site, Ingress: b.Ingress, Storage: b.Storage,
+		PublicEndpoint: b.PublicEndpoint}
 }
 
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
@@ -205,8 +208,8 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	switch b.Kind {
 	case "", state.KindWorker:
-		if b.Role != "" || b.Class != "" || b.Site != "" || b.Ingress != nil || b.Storage != nil {
-			http.Error(w, "role, class, site, ingress and storage are a cluster node's (kind cluster-node)", http.StatusBadRequest)
+		if b.Role != "" || b.Class != "" || b.Site != "" || b.Ingress != nil || b.Storage != nil || b.PublicEndpoint != "" {
+			http.Error(w, "role, class, site, ingress, storage and public_endpoint are a cluster node's (kind cluster-node)", http.StatusBadRequest)
 			return
 		}
 		if s.Hub.ClusterNodesMode() {

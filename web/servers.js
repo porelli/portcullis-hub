@@ -19,7 +19,7 @@
 // GET    /api/servers                     {servers, fresh_auth}
 // GET    /api/servers/{id}                one server (+ Local networks, schedule)
 // POST   /api/servers †                   {id, name, proof} → {code, expires_at, op_id, poll}
-//                                          + kind cluster-node: {role?, class?, site?, ingress?, storage?}
+//                                          + kind cluster-node: {role?, class?, site?, ingress?, storage?, public_endpoint?}
 //                                          → + {role, class, site, warnings, notice, command}
 // GET    /api/servers/{id}/op             the enrolment op
 // POST   /api/servers/{id}/op/stop        stop the enrolment
@@ -146,6 +146,8 @@
       '<datalist id="srv-add-sites" data-srv-sites>' + (sites || ['main']).map(n => '<option value="' + esc(n) + '">').join('') + '</datalist>' +
       ' <label>Ingress <select data-srv-add-ingress>' + opt('', 'default') + opt('true', 'yes') + opt('false', 'no') + '</select></label>' +
       ' <label>Storage <select data-srv-add-storage>' + opt('', 'default') + opt('true', 'yes') + opt('false', 'no') + '</select></label></div>' +
+      '<div class="inst-row"><label>Forwarded endpoint <input data-srv-add-public placeholder="optional, e.g. 203.0.113.7:51830" maxlength="21" spellcheck="false" style="width:14em"></label>' +
+      ' <small>Behind NAT, the first node of a site needs one: the router\'s public address and the UDP port it forwards to this node\'s UDP 51830.</small></div>' +
       '<p class="public-warn" data-srv-server-notice><small>' + esc(SERVER_NOTICE) + ' The Hub suggests a server while the cluster has fewer than 3 healthy servers, at most 5, spread so no site holds a majority of them; storage nodes must be at the primary site (main) in this version.</small></p>' +
       '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-srv-act="add">+ Add node…</button></div>' +
       '<small>Needs a fresh sign-in. You get a one-line command to run on the new machine and a one-time join code it asks for; the code expires in 15 minutes. Docker workers can\'t join a Kubernetes cluster.</small></div>';
@@ -157,7 +159,7 @@
     const body = { id: v('[data-srv-add-id]'), name: v('[data-srv-add-name]') };
     if (kind !== 'cluster-node') return body;
     body.kind = 'cluster-node';
-    for (const [k, q] of [['role', '[data-srv-add-role]'], ['class', '[data-srv-add-class]'], ['site', '[data-srv-add-site]']]) {
+    for (const [k, q] of [['role', '[data-srv-add-role]'], ['class', '[data-srv-add-class]'], ['site', '[data-srv-add-site]'], ['public_endpoint', '[data-srv-add-public]']]) {
       if (v(q)) body[k] = v(q);
     }
     for (const [k, q] of [['ingress', '[data-srv-add-ingress]'], ['storage', '[data-srv-add-storage]']]) {

@@ -285,6 +285,10 @@ type AddClusterNodeRequest struct {
 	ID, Name          string
 	Role, Class, Site string
 	Ingress, Storage  *bool
+	// PublicEndpoint is the node's forwarded public UDP endpoint
+	// ("<ip:port>", optional): a NATed node at a site of its own reaches
+	// the other sites through it (contract §20.11).
+	PublicEndpoint string
 }
 
 // ClusterNodeAdded is the add's answer (the code apart): the enrolment
@@ -326,6 +330,11 @@ func CheckClusterNodeInput(r AddClusterNodeRequest) error {
 		return statusErr(http.StatusBadRequest, "site must match ^[a-z][a-z0-9-]{0,30}$")
 	case r.Storage != nil && *r.Storage && r.Site != "" && r.Site != servers.PrimarySite:
 		return statusErr(http.StatusBadRequest, "storage nodes must be at the primary site (main) in this version")
+	}
+	if r.PublicEndpoint != "" {
+		if _, ok := parseEndpoint(r.PublicEndpoint); !ok || len(r.PublicEndpoint) > 21 {
+			return statusErr(http.StatusBadRequest, "public_endpoint must be an IPv4 address and port (<ip>:<port>)")
+		}
 	}
 	return nil
 }
@@ -431,6 +440,20 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 	if r.Storage != nil {
 		storage = *r.Storage
 	}
+	forward := ""
+	if r.PublicEndpoint != "" {
+		// The front door's rule for a public endpoint (never a private,
+		// special-purpose or cluster address): checked before anything is
+		// recorded.
+		ap, _ := parseEndpoint(r.PublicEndpoint)
+		h.cl.ms.mu.Lock()
+		allowDoc := h.cl.ms.allowDoc
+		h.cl.ms.mu.Unlock()
+		if err := publicEndpointOK(ap, allowDoc, h.meshExcluded()); err != nil {
+			return out, "", statusErr(http.StatusBadRequest, "public_endpoint: %v", err)
+		}
+		forward = ap.String()
+	}
 	now := h.now().UTC()
 
 	h.mu.Lock()
@@ -456,7 +479,7 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 	h.markAdding(r.ID, true)
 	defer h.markAdding(r.ID, false)
 	h.st.Servers[r.ID] = state.Server{Kind: state.KindClusterNode, Name: name, State: ServerEnrolling, Role: role, Class: class, Site: site,
-		MeshIP: meshIP, Labels: &state.NodeLabels{Ingress: ingress, Storage: storage}, BackupSchedule: state.BackupSchedule{Mode: "off"},
+		MeshIP: meshIP, MeshForward: forward, Labels: &state.NodeLabels{Ingress: ingress, Storage: storage}, BackupSchedule: state.BackupSchedule{Mode: "off"},
 		Enrol: &state.Enrol{IssuedAt: now, ExpiresAt: now.Add(JoinCodeTTL), Step: StepEnrolled}}
 	h.saveLocked()
 	h.mu.Unlock()
@@ -479,7 +502,7 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 		return out, "", statusErr(http.StatusConflict, "the node's mesh plan: %v", err)
 	}
 	ans, err := api.IssueCode(ctx, nodeadm.CodeRequest{ServerID: r.ID, Role: role, Class: class, Site: site, MeshIP: meshIP,
-		Ingress: ingress, Storage: storage, Mesh: plan})
+		Ingress: ingress, Storage: storage, Mesh: plan, PublicEndpoint: forward})
 	if err != nil {
 		forget()
 		return out, "", nodeadmErr(err)
@@ -507,8 +530,12 @@ func (h *Hub) AddClusterNode(ctx context.Context, actor directory.Actor, r AddCl
 	h.mu.Unlock()
 	a, _, err := h.startOp(serverOpKey(r.ID), OpServerEnrol, actor, clusterEnrolPlan(), func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		// Audited ok only once the op is sure to start (ready can't fail).
-		h.auditOp(actor, "server.add", r.ID, fmt.Sprintf("kind cluster-node, name %q, role %s, class %s, site %s, mesh address %s, ingress %t, storage %t",
-			name, role, class, site, meshIP, ingress, storage), nil)
+		detail := fmt.Sprintf("kind cluster-node, name %q, role %s, class %s, site %s, mesh address %s, ingress %t, storage %t",
+			name, role, class, site, meshIP, ingress, storage)
+		if forward != "" {
+			detail += ", forwarded endpoint " + forward
+		}
+		h.auditOp(actor, "server.add", r.ID, detail, nil)
 		ready()
 		return nil, nil, h.runClusterEnrol(ctx, r.ID, actor)
 	})
@@ -835,7 +862,14 @@ func (h *Hub) RemoveClusterNode(ctx context.Context, actor directory.Actor, id, 
 	if mode == nodeadm.Revoke {
 		// Revoke now (a lost node): no uninstall (the machine is gone or
 		// not trusted); the entry kept revoked and watched (settleRevoked).
-		parked, _, err := h.revokeNode(ctx, api, id, n, meshIP, false)
+		// Never on the caller's context alone (Task 30 fix round 1): the
+		// CLI's exec into this pod breaks while the servers restart for
+		// the token rotation, and a cancelled call recorded nothing, so the
+		// node stayed listed ready while nodeadm finished the revocation.
+		// Bounded like settleRevoked's.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Minute)
+		defer cancel()
+		parked, _, err := h.revokeNode(rctx, api, id, n, meshIP, false)
 		if err != nil {
 			return nil, "", nodeadmErr(err)
 		}
@@ -1336,6 +1370,7 @@ func clusterViewFields(v *ServerView, s state.Server) {
 		v.Ingress, v.Storage = s.Labels.Ingress, s.Labels.Storage
 	}
 	v.Runtime = "kubernetes"
+	v.RevokeConfirmed = s.State == ServerRevoked && s.RevokeConfirmed
 	switch {
 	case s.State == ServerRevoked && s.RevokeVoidOnly:
 		v.Error = VoidedText

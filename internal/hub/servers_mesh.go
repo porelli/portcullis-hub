@@ -377,6 +377,7 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 	in := meshInputs{meshIP: map[string]string{}, ready: map[string]bool{}, keyAt: map[string]time.Time{},
 		public: map[string]netip.AddrPort{}, reach: map[string]string{}, flags: map[string]string{}}
 	excluded := h.meshExcluded()
+	now := h.now().UTC()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	h.cl.ms.mu.Lock()
@@ -415,6 +416,14 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 			if r.Public == p.String() && r.Reach != "" {
 				reach = r.Reach
 			}
+			// Its retry is due (MeshRetryUnreachable, no hold): offered,
+			// as updateReach offers it — which runs only in a multi-site
+			// mesh, so a single-site cluster whose gateway was found
+			// unreachable could never add a second site (found live,
+			// Task 30 fix round 1: the add's bootstrap plan was refused).
+			if reach == state.ReachUnreachable && now.Sub(r.CheckedAt) >= MeshRetryUnreachable && !now.Before(r.HoldUntil) {
+				reach = state.ReachOffered
+			}
 			in.reach[id] = reach
 			if reach == state.ReachUnreachable {
 				p = netip.AddrPort{} // planned as NATed
@@ -442,6 +451,8 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 				pub = h.st.Mesh[id].Pub
 				lan, public = firstAddr(sn.Addresses.LAN), firstAddr(sn.Addresses.Public)
 			}
+			// The operator's forwarded endpoint wins (a NATed node reports none).
+			public = nonEmpty(s.MeshForward, public)
 		} else {
 			r := h.st.Mesh[id]
 			mesh, site, pub = r.MeshIP, nonEmpty(r.Site, servers.PrimarySite), r.Pub
@@ -493,6 +504,7 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 				public = e.Mesh.Public.V
 			}
 		}
+		public = nonEmpty(s.MeshForward, public)
 		l, p := endpoints(e.ID, lan, public)
 		in.meshIP[e.ID] = s.MeshIP
 		in.keyAt[e.ID] = keyAt
@@ -565,6 +577,17 @@ func (h *Hub) fetchPubs(ctx context.Context, in meshInputs) (map[string]string, 
 //   - a reachable one without such a handshake for MeshReachableStale is
 //     offered again;
 //   - an unreachable one is offered again after MeshRetryUnreachable.
+//
+// The first node of a new site (Task 30 fix round 1, found live): no
+// established node at another site can confirm the first site's endpoints
+// yet, so those were found unreachable 2 min into that join and the
+// joiner refused for leaving the first site without a gateway — the first
+// node at a second site could never join. Only for an endpoint no
+// established node at another site can judge, a joining node at another
+// site holding its pushed plan judges it, by the same proof (its plan
+// dials that endpoint, and the node there waits to be dialled while
+// offered, so the handshake came in through it). Where an established
+// judge exists, a joiner never confirms (Task 10's rule).
 func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	all := append(slices.Clone(in.established), in.joining...)
 	siteOfID := map[string]string{}
@@ -656,6 +679,27 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	}
 	firstPush := h.cl.ms.firstPush
 	h.cl.ms.mu.Unlock()
+	trusted := slices.Clone(confirmers)
+	judged := func(x string) bool {
+		for _, n := range trusted {
+			if n.Site != siteOfID[x] {
+				return true
+			}
+		}
+		return false
+	}
+	boot := map[string]bool{} // joiners judging an otherwise unjudged endpoint
+	for _, x := range watch {
+		if judged(x) {
+			continue
+		}
+		for _, j := range in.joining {
+			if _, ok := held[j.ID]; ok && j.Site != siteOfID[x] && !boot[j.ID] {
+				boot[j.ID] = true
+				confirmers = append(confirmers, j)
+			}
+		}
+	}
 	var mu sync.Mutex
 	views := map[string]nodeagent.Health{}
 	var wg sync.WaitGroup
@@ -684,7 +728,11 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 	for _, x := range watch {
 		r := h.st.Mesh[x]
 		confirmed := ""
+		judge := judged(x)
 		for y, hl := range views {
+			if boot[y] && judge {
+				continue // an established judge exists: a joiner never confirms
+			}
 			if siteOfID[y] != siteOfID[x] && dialledIn(held, y, x, r.Public) && handshakeConfirms(hl, x, r.Public) {
 				confirmed = y
 				break

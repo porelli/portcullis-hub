@@ -189,6 +189,10 @@ type ServerView struct {
 	MeshIP  string `json:"mesh_ip,omitempty"`
 	Ingress bool   `json:"ingress,omitempty"`
 	Storage bool   `json:"storage,omitempty"`
+	// RevokeConfirmed: a revoked cluster node whose revocation nodeadm
+	// answered done or parked with its security steps done (false: it
+	// goes on, asked again every tick). `./portcullis node revoke` polls it.
+	RevokeConfirmed bool `json:"revoke_confirmed,omitempty"`
 }
 
 // Servers lists every server, the primary first.

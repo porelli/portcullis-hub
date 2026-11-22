@@ -244,12 +244,14 @@ func hostClusterNodes(mux *http.ServeMux, h *hub.Hub) {
 			Site    string `json:"site"`
 			Ingress *bool  `json:"ingress"`
 			Storage *bool  `json:"storage"`
+			// The forwarded public UDP endpoint (contract §20.11).
+			PublicEndpoint string `json:"public_endpoint"`
 		}
-		if !hostBody(w, r, &b, `{"id", "name"?, "role"?, "class"?, "site"?, "ingress"?, "storage"?}`) {
+		if !hostBody(w, r, &b, `{"id", "name"?, "role"?, "class"?, "site"?, "ingress"?, "storage"?, "public_endpoint"?}`) {
 			return
 		}
 		out, code, err := h.AddClusterNode(r.Context(), cli, hub.AddClusterNodeRequest{ID: b.ID, Name: b.Name, Role: b.Role, Class: b.Class,
-			Site: b.Site, Ingress: b.Ingress, Storage: b.Storage})
+			Site: b.Site, Ingress: b.Ingress, Storage: b.Storage, PublicEndpoint: b.PublicEndpoint})
 		if err != nil {
 			hostErr(w, err)
 			return

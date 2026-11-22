@@ -45,6 +45,8 @@ type CodeRequest struct {
 	Ingress  bool     `json:"ingress"`
 	Storage  bool     `json:"storage"`
 	Mesh     MeshPlan `json:"mesh"`
+	// PublicEndpoint: the forwarded public UDP endpoint (omitted when none).
+	PublicEndpoint string `json:"public_endpoint,omitempty"`
 }
 
 // CodeAnswer is POST /v1/codes' 201. Code is a secret (the join code

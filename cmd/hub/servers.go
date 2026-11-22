@@ -41,8 +41,13 @@ var serversTimeout = func(cmd string) time.Duration {
 }
 
 // serversMain runs `hub servers <args>` against the socket at sock: 0
-// done, 1 the Hub refused or isn't running (the text on stderr), 2 usage
-// or a bad body.
+// done, 1 the Hub refused (a 4xx; the text on stderr), 2 usage or a bad
+// body, 3 not answered — the Hub isn't running, its answer was cut or
+// timed out, or a 5xx (standing by, nodeadm unreachable): nothing is
+// known to have been refused, and `./portcullis node revoke` asks for the
+// outcome instead (Task 30 fix round 1).
+const serversUnanswered = 3
+
 func serversMain(args []string, stdin io.Reader, stdout, stderr io.Writer, sock string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, serversUsage)
@@ -93,7 +98,7 @@ func serversMain(args []string, stdin io.Reader, stdout, stderr io.Writer, sock 
 	}
 	if fi, err := os.Stat(sock); err != nil || fi.Mode()&os.ModeSocket == 0 {
 		fmt.Fprintln(stderr, "the Hub isn't running")
-		return 1
+		return serversUnanswered
 	}
 	c := &http.Client{Timeout: serversTimeout(args[0]), Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		var d net.Dialer
@@ -122,12 +127,15 @@ func serversMain(args []string, stdin io.Reader, stdout, stderr io.Writer, sock 
 		} else {
 			fmt.Fprintf(stderr, "the Hub's answer was cut: %v\n", err)
 		}
-		return 1
+		return serversUnanswered
 	}
 	defer res.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if res.StatusCode >= 300 {
 		fmt.Fprintln(stderr, strings.TrimSpace(string(out)))
+		if res.StatusCode >= 500 {
+			return serversUnanswered
+		}
 		return 1
 	}
 	if args[0] != "add-cluster-node" {

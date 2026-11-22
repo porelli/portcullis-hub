@@ -52,6 +52,9 @@ type fakeNodeadm struct {
 	rtt map[string]map[string]int
 	// rttBlock: set, every RTT read waits for it to close (or its ctx).
 	rttBlock chan struct{}
+	// removeHook: set, Remove runs it first with its context (a revoke
+	// that takes a while; the caller gone meanwhile).
+	removeHook func(ctx context.Context) error
 }
 
 const testSecret = "q5idMrnFv0N4pQ2KjXHAzmYEjbEkpmCaKEHY_moMciM"
@@ -72,6 +75,9 @@ func (f *fakeNodeadm) Calls() []string {
 func (f *fakeNodeadm) IssueCode(_ context.Context, r nodeadm.CodeRequest) (nodeadm.CodeAnswer, error) {
 	if err := f.record("codes:" + r.ServerID + ":" + r.Role + ":" + r.MeshIP); err != nil {
 		return nodeadm.CodeAnswer{}, err
+	}
+	if r.PublicEndpoint != "" {
+		f.record("forward:" + r.ServerID + ":" + r.PublicEndpoint)
 	}
 	hex := strings.Repeat("a", 64)
 	f.mu.Lock()
@@ -121,7 +127,15 @@ func (f *fakeNodeadm) SetLabels(_ context.Context, id string, l nodeadm.Labels) 
 func (f *fakeNodeadm) Cordon(_ context.Context, id string) error   { return f.record("cordon:" + id) }
 func (f *fakeNodeadm) Uncordon(_ context.Context, id string) error { return f.record("uncordon:" + id) }
 func (f *fakeNodeadm) Drain(_ context.Context, id string) error    { return f.record("drain:" + id) }
-func (f *fakeNodeadm) Remove(_ context.Context, id string, m nodeadm.RemoveMode) error {
+func (f *fakeNodeadm) Remove(ctx context.Context, id string, m nodeadm.RemoveMode) error {
+	f.mu.Lock()
+	hook := f.removeHook
+	f.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx); err != nil {
+			return err
+		}
+	}
 	return f.record("remove:" + id + ":" + string(m))
 }
 
@@ -944,5 +958,47 @@ func TestVoidIsWatched(t *testing.T) {
 	cf.h.settleClusterNodes(context.Background())
 	if c := cf.na.Calls(); !slices.Equal(c, []string{"remove:n2:revoke", "uninstall:n2"}) {
 		t.Errorf("registered after its void: %v", c)
+	}
+}
+
+// TestRevokeOutlivesItsCaller (Task 30 fix round 1): `./portcullis node
+// revoke`'s exec into the Hub breaks while the servers restart for the
+// token rotation. The revoke goes on without the caller: once nodeadm
+// answers, the entry is revoked (confirmed), audited, and listed so.
+func TestRevokeOutlivesItsCaller(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	caller, hangUp := context.WithCancel(context.Background())
+	answer := make(chan struct{})
+	cf.na.mu.Lock()
+	cf.na.removeHook = func(ctx context.Context) error {
+		hangUp() // the CLI's exec breaks mid-revoke
+		select {
+		case <-answer:
+			return ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	cf.na.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := cf.h.RemoveClusterNode(caller, admin, "n3", "n3", nodeadm.Revoke)
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(answer)
+	if err := <-done; err != nil {
+		t.Fatalf("the revoke died with its caller: %v", err)
+	}
+	if s, ok := cf.h.serverEntry("n3"); !ok || s.State != ServerRevoked || !s.RevokeConfirmed {
+		t.Fatalf("entry %+v %v", s, ok)
+	}
+	for _, v := range cf.h.Servers(context.Background()) {
+		if v.ID == "n3" && (v.State != ServerRevoked || !v.RevokeConfirmed) {
+			t.Errorf("listed %+v", v)
+		}
+	}
+	if a := cf.actions(); !slices.Equal(a, []string{"server.revoked:ok"}) {
+		t.Errorf("audit %v", a)
 	}
 }

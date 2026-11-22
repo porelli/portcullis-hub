@@ -1318,3 +1318,133 @@ func TestMeshStaleAppliedIsNoProof(t *testing.T) {
 		t.Errorf("revoked e1 kept its record %q", got)
 	}
 }
+
+// TestMeshForwardedEndpointJoinsNewSite (Task 30 fix round 1, the NAT
+// model of §20.11): a node behind NAT, the first at its site, reports no
+// public endpoint and was refused (TestMeshSiteWithoutGateway). With the
+// operator's forwarded endpoint given at the add it is that site's
+// gateway: offered, confirmed by a handshake from another site, and the
+// other sites dial it there. A bad endpoint is refused before anything is
+// recorded or any code issued.
+func TestMeshForwardedEndpointJoinsNewSite(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, twoSites()...)
+	cf.h.settleClusterNodes(ctx)
+	for _, bad := range []string{"192.168.1.9:40000", "10.215.0.9:51830", "203.0.113.9", "203.0.113.9:0", "[2001:db8::1]:51830"} {
+		_, _, err := cf.h.AddClusterNode(ctx, admin, AddClusterNodeRequest{ID: "t1", Site: "tb", Role: "agent", PublicEndpoint: bad})
+		var se *StatusError
+		if !errors.As(err, &se) || se.Status != 400 || !strings.Contains(err.Error(), "public_endpoint") {
+			t.Errorf("forwarded endpoint %q: %v", bad, err)
+		}
+		if _, ok := cf.h.serverEntry("t1"); ok {
+			t.Fatalf("forwarded endpoint %q: an entry was recorded", bad)
+		}
+	}
+	if c := cf.na.Calls(); slices.ContainsFunc(c, func(s string) bool { return strings.HasPrefix(s, "codes:") }) {
+		t.Fatalf("a code was issued for a refused endpoint: %v", c)
+	}
+	cf = newClusterFixture(t, twoSites()...)
+	cf.h.settleClusterNodes(ctx)
+	enrolAt(cf, "t1", "tb", "10.215.0.9", "198.18.1.9", "", 1<<30)
+	cf.stopEnrol(t, "t1")
+	if _, _, err := cf.h.AddClusterNode(ctx, admin, AddClusterNodeRequest{ID: "t1", Site: "tb", Role: "agent", PublicEndpoint: "203.0.113.9:40000"}); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := cf.h.serverEntry("t1"); s.MeshForward != "203.0.113.9:40000" {
+		t.Fatalf("the entry's forwarded endpoint %q", s.MeshForward)
+	}
+	// nodeadm's gateway rule needs it too (its join refuses a NATed site).
+	if c := cf.na.Calls(); !slices.Contains(c, "forward:t1:203.0.113.9:40000") {
+		t.Fatalf("the code request didn't name the forwarded endpoint: %v", c)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		r := cf.h.LastOp(serverOpKey("t1"))
+		if r != nil && meshStep(r, StepMeshReady) == StepDone {
+			break
+		}
+		if r != nil && !r.Running && !r.OK {
+			t.Fatalf("the join failed: %+v", r)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mesh_ready never passed: %+v", r)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for _, id := range []string{"n1", "e1"} {
+		p, _ := cf.na.meshOf(id)
+		i := slices.IndexFunc(p.Peers, func(q nodeagent.MeshPeer) bool { return q.ID == "t1" })
+		if i < 0 || p.Peers[i].Endpoint.V != "203.0.113.9:40000" {
+			t.Errorf("%s doesn't dial t1 at its forwarded endpoint: %+v", id, p)
+		}
+	}
+	if rec := cf.meshRecord("t1"); rec.Reach != state.ReachReachable || rec.Public != "203.0.113.9:40000" {
+		t.Errorf("t1's endpoint %+v", rec)
+	}
+	if st := cf.h.MeshStatus(); len(st.NoGateway) != 0 {
+		t.Errorf("no gateway %v", st.NoGateway)
+	}
+}
+
+// TestMeshFirstNodeOfNewSiteJudges (Task 30 fix round 1, found live): the
+// first node of a new site still joins, so no established node at another
+// site can confirm the first site's public endpoint; that node judges it
+// (its plan dials the endpoint, which waits to be dialled), so n1 is
+// reachable and the join isn't refused for leaving main without a
+// gateway. (Where an established judge exists a joiner never confirms:
+// TestMeshJoinerCantConfirm; a closed endpoint is still found unreachable:
+// TestMeshHomeMainForwardsOnlyWeb.)
+func TestMeshFirstNodeOfNewSiteJudges(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1"))
+	advance := fakeClockHub(cf)
+	cf.h.settleClusterNodes(ctx)
+	enrolAt(cf, "t1", "tb", "10.215.0.9", "198.18.1.9", "", 1<<30)
+	cf.stopEnrol(t, "t1")
+	if _, _, err := cf.h.AddClusterNode(ctx, admin, AddClusterNodeRequest{ID: "t1", Site: "tb", Role: "agent", PublicEndpoint: "203.0.113.9:40000"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		_ = cf.h.pushMesh(ctx)
+	}
+	advance(MeshConfirmWait + time.Minute)
+	for i := 0; i < 3; i++ {
+		_ = cf.h.pushMesh(ctx)
+	}
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachReachable {
+		t.Fatalf("n1 with only the joiner at another site: %+v", r)
+	}
+	if st := cf.h.MeshStatus(); slices.Contains(st.NoGateway, "main") {
+		t.Fatalf("main without a gateway: %v", st.NoGateway)
+	}
+	if r := cf.h.LastOp(serverOpKey("t1")); r != nil && !r.Running && !r.OK {
+		t.Fatalf("the join was refused: %+v", r)
+	}
+}
+
+// TestMeshUnreachableRetryDueAtAdd (Task 30 fix round 1, found live): a
+// single-site cluster's gateway found unreachable (an earlier failed join
+// at a new site) is offered again once its retry is due, also for the
+// add's bootstrap plan: updateReach runs only in a multi-site mesh, so
+// without it a second site could never be added again. Before the retry
+// is due the add is refused.
+func TestMeshUnreachableRetryDueAtAdd(t *testing.T) {
+	ctx := context.Background()
+	cf := newClusterFixture(t, siteNode("n1", "server", "main", "10.215.0.1", "192.0.2.1", "203.0.113.1"))
+	advance := fakeClockHub(cf)
+	cf.h.settleClusterNodes(ctx)
+	cf.h.mu.Lock()
+	r := cf.h.st.Mesh["n1"]
+	r.Public, r.Reach, r.CheckedAt = "203.0.113.1:51830", state.ReachUnreachable, cf.h.now().UTC()
+	cf.h.st.Mesh["n1"] = r
+	cf.h.mu.Unlock()
+	if _, _, err := cf.h.AddClusterNode(ctx, admin, AddClusterNodeRequest{ID: "t1", Site: "tb", Role: "agent", PublicEndpoint: "203.0.113.9:40000"}); err == nil ||
+		!strings.Contains(err.Error(), "site main needs one node reachable") {
+		t.Fatalf("before the retry: %v", err)
+	}
+	advance(MeshRetryUnreachable + time.Second)
+	cf.stopEnrol(t, "t1")
+	if _, _, err := cf.h.AddClusterNode(ctx, admin, AddClusterNodeRequest{ID: "t1", Site: "tb", Role: "agent", PublicEndpoint: "203.0.113.9:40000"}); err != nil {
+		t.Fatalf("after the retry is due: %v", err)
+	}
+}

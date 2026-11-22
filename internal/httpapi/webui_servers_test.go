@@ -233,7 +233,7 @@ func TestClusterNodeAddDialog(t *testing.T) {
 	}}
 	b, _ := json.Marshal(page)
 	h := serversJS(t, "process.stdout.write(window.PortcullisServers.listHtml("+string(b)+"));")
-	for _, want := range []string{`data-srv-kind="cluster-node"`, `data-srv-add-role`, `data-srv-add-class`, `data-srv-add-site`, `data-srv-add-storage`,
+	for _, want := range []string{`data-srv-kind="cluster-node"`, `data-srv-add-role`, `data-srv-add-class`, `data-srv-add-site`, `data-srv-add-storage`, `data-srv-add-public`,
 		"Joining as a server gives this machine full control of the cluster (cluster-admin).", "server · home · main · storage", `data-srv-act="remove"`, "revoked; waiting for quorum to remove its etcd member"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("panel lacks %q:\n%s", want, h)
@@ -267,7 +267,7 @@ const node = { role: 'server', notice: 'Joining as a server gives this machine f
 window.PortcullisServers.openCodeDialog(doc, CODE, '2026-11-16T10:15:00Z', null, node);
 const d = doc.body.children[0];
 const form = { querySelector: q => ({ '[data-srv-add-id]': { value: ' n4 ' }, '[data-srv-add-name]': { value: '' }, '[data-srv-add-role]': { value: 'server' },
-  '[data-srv-add-class]': { value: '' }, '[data-srv-add-site]': { value: '' }, '[data-srv-add-ingress]': { value: '' }, '[data-srv-add-storage]': { value: 'false' } })[q] };
+  '[data-srv-add-class]': { value: '' }, '[data-srv-add-site]': { value: '' }, '[data-srv-add-ingress]': { value: '' }, '[data-srv-add-storage]': { value: 'false' }, '[data-srv-add-public]': { value: ' 203.0.113.7:40000 ' } })[q] };
 const body = window.PortcullisServers.addBody(form, 'cluster-node');
 setTimeout(() => {
   const html = d.innerHTML, progress = d.progress.innerHTML;
@@ -297,7 +297,7 @@ setTimeout(() => {
 		t.Errorf("progress %q polled %v", got.Progress, got.Polled)
 	}
 	b2, _ := json.Marshal(got.Body)
-	if string(b2) != `{"id":"n4","kind":"cluster-node","name":"","role":"server","storage":false}` {
+	if string(b2) != `{"id":"n4","kind":"cluster-node","name":"","public_endpoint":"203.0.113.7:40000","role":"server","storage":false}` {
 		t.Errorf("body %s", b2)
 	}
 	if got.After != "" || got.Children != 0 {

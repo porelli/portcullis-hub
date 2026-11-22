@@ -24,7 +24,7 @@ func TestHubServersSubcommand(t *testing.T) {
 	defer os.RemoveAll(dir)
 	sock := filepath.Join(dir, "s.sock")
 	var stdout, stderr bytes.Buffer
-	if code := serversMain([]string{"list"}, nil, &stdout, &stderr, sock); code != 1 || !strings.Contains(stderr.String(), "the Hub isn't running") {
+	if code := serversMain([]string{"list"}, nil, &stdout, &stderr, sock); code != 3 || !strings.Contains(stderr.String(), "the Hub isn't running") {
 		t.Fatalf("no socket: %d %q", code, stderr.String())
 	}
 	for _, bad := range [][]string{nil, {"nope"}, {"add-cluster-node", "pcj2.x"}, {"remove"}, {"revoke", "Bad!"}} {
@@ -111,7 +111,7 @@ func TestHubServersTimeoutIsNotDown(t *testing.T) {
 	serversTimeout = func(string) time.Duration { return 100 * time.Millisecond }
 	defer func() { serversTimeout = old }()
 	var stdout, stderr bytes.Buffer
-	if code := serversMain([]string{"revoke", "n3"}, strings.NewReader(`{"confirm":"n3"}`), &stdout, &stderr, sock); code != 1 ||
+	if code := serversMain([]string{"revoke", "n3"}, strings.NewReader(`{"confirm":"n3"}`), &stdout, &stderr, sock); code != 3 ||
 		!strings.Contains(stderr.String(), "the Hub is still working: see `hub servers op n3`") {
 		t.Errorf("%d %q", code, stderr.String())
 	}
@@ -162,5 +162,29 @@ func TestCLIAddClusterNodeStdinOnly(t *testing.T) {
 	}
 	if o.String() != "pcj2.SECRETCODE\n" || strings.Contains(e.String(), "SECRETCODE") || !strings.Contains(e.String(), "join.sh") {
 		t.Errorf("stdout %q stderr %q", o.String(), e.String())
+	}
+}
+
+// TestServersUnansweredIsThree (Task 30 fix round 1): a 4xx is the Hub's
+// refusal (1); a 5xx — a Hub standing by, nodeadm unreachable — is not an
+// answer (3), so `./portcullis node revoke` asks for the outcome instead
+// of reporting a refusal.
+func TestServersUnansweredIsThree(t *testing.T) {
+	for status, want := range map[int]int{409: 1, 404: 1, 502: 3, 503: 3} {
+		dir := t.TempDir()
+		sock := filepath.Join(dir, "s.sock")
+		l, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"error":"this Hub is standing by: another Hub is the active writer"}`, status)
+		})}
+		go srv.Serve(l)
+		var stdout, stderr bytes.Buffer
+		if code := serversMain([]string{"revoke", "n3"}, strings.NewReader(`{"confirm":"n3"}`), &stdout, &stderr, sock); code != want {
+			t.Errorf("%d: exit %d, want %d", status, code, want)
+		}
+		srv.Close()
 	}
 }

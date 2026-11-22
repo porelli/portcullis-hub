@@ -45,6 +45,13 @@ type Server struct {
 	MeshPub    string `json:"mesh_pub,omitempty" yaml:"mesh_pub,omitempty"`
 	MeshLAN    string `json:"mesh_lan,omitempty" yaml:"mesh_lan,omitempty"`
 	MeshPublic string `json:"mesh_public,omitempty" yaml:"mesh_public,omitempty"`
+	// MeshForward is the forwarded public UDP endpoint the operator gave
+	// at the add ("<ip:port>": a port forwarded on the site's router to
+	// this node's UDP 51830; "": none). A node behind NAT reports no
+	// public endpoint, so this one is its public endpoint in the peer
+	// plan, ahead of any report, and is offered and confirmed by
+	// handshake like a reported one (contract §20.11).
+	MeshForward string `json:"mesh_forward,omitempty" yaml:"mesh_forward,omitempty"`
 	// MeshKeyAt is when MeshPub was first recorded (of two nodes sharing
 	// a key, the later one is left out of the plan; zero: a node of init,
 	// the earliest).
