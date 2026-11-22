@@ -1553,6 +1553,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	doc.VPN = h.vpnPolicyLocked()
 	kcSignIn := h.keycloakSignInLocked()
 	kcSignIn.Authenticators, kcSignIn.MDS = trust, mdsDoc
+	kcSignIn.AppHosts = appHosts(apps, doc.Core)
 	portal := h.portalWithLocked(&doc)
 	// The header deliveries (§4.1 hosts): enabled instances with a view,
 	// on the hosts their routers gate now.
