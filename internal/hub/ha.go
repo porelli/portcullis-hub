@@ -518,7 +518,7 @@ type frontdoorDoc struct {
 	State      string     `json:"state"`
 	SnapshotOK *bool      `json:"snapshot_ok"`
 	SnapshotAt *time.Time `json:"snapshot_at"`
-	Names map[string]struct {
+	Names      map[string]struct {
 		Addresses  []string `json:"addresses"`
 		WorstCaseS int      `json:"worst_case_s"`
 	} `json:"names"`
