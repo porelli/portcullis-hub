@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -129,7 +131,7 @@ func TestMeshRules(t *testing.T) {
 	if n := r.run.count("iptables-restore") - restores; n != 1 {
 		t.Errorf("%d restores for one change", n)
 	}
-	if n := r.run.count("iptables", "-w", "5", "-I"); n != 1 {
+	if n := r.run.count("iptables", "-w", "5", "-I", "FORWARD"); n != 1 {
 		t.Errorf("%d FORWARD inserts", n)
 	}
 	for _, c := range r.run.cmds {
@@ -419,5 +421,61 @@ func TestRTTLostRounds(t *testing.T) {
 	}
 	if _, ok := rttFigure(s[:10], 20); ok {
 		t.Error("half lost gave a figure")
+	}
+}
+
+// TestMeshInputRules (core Task 28 fix round 2): PORTCULLIS-MESH-IN lets
+// pcmesh, loopback and the node's pod networks through and drops anything
+// else addressed to the mesh address on the kubelet's port (an agent) or
+// also the API server's, k3s's supervisor's and etcd's (a server); INPUT's
+// first rule jumps to it once; an unchanged chain isn't rewritten; the
+// uninstall removes it.
+func TestMeshInputRules(t *testing.T) {
+	for role, ports := range map[string]string{"agent": "10250", "server": "10250,6443,2379,2380"} {
+		r := newRig(t, role)
+		ip := r.a.state().MeshIP
+		want := []string{
+			"-A PORTCULLIS-MESH-IN -i pcmesh -j RETURN", "-A PORTCULLIS-MESH-IN -i lo -j RETURN",
+			"-A PORTCULLIS-MESH-IN -i cni0 -j RETURN", "-A PORTCULLIS-MESH-IN -i flannel+ -j RETURN",
+			"-A PORTCULLIS-MESH-IN -d " + ip + "/32 -p tcp -m multiport --dports " + ports + " -j DROP",
+		}
+		if !slices.Equal(r.run.inRules, want) || !r.run.inJump {
+			t.Fatalf("%s: rules %q jump %v", role, r.run.inRules, r.run.inJump)
+		}
+		restores := r.run.count("iptables-restore")
+		if err := r.a.ApplyMesh(context.Background(), na.MeshPlan{Peers: []na.MeshPeer{}}); err != nil {
+			t.Fatal(err)
+		}
+		if n := r.run.count("iptables-restore") - restores; n != 0 {
+			t.Errorf("%s: %d restores for no change", role, n)
+		}
+		if n := r.run.count("iptables", "-w", "5", "-I", "INPUT", "1", "-j", meshInChain); n != 1 {
+			t.Errorf("%s: %d INPUT inserts", role, n)
+		}
+		r.a.removeMesh(context.Background())
+		if r.run.count("iptables", "-w", "5", "-D", "INPUT", "-j", meshInChain) != 1 || r.run.count("iptables", "-w", "5", "-X", meshInChain) != 1 {
+			t.Errorf("%s: the uninstall left the input chain", role)
+		}
+	}
+}
+
+// TestMeshInputRulesCoreFixture: the first node's chain, as core's
+// kube_install_mesh writes it (tests/fixtures/mesh-input-rules.txt), is
+// exactly meshInRules for that server, so the nodeagent takes it over
+// without a rewrite.
+func TestMeshInputRulesCoreFixture(t *testing.T) {
+	core, set := os.LookupEnv("PORTCULLIS_CORE_DIR")
+	if !set {
+		core = filepath.Join("..", "..", "..", "..", "portcullis")
+	}
+	b, err := os.ReadFile(filepath.Join(core, "tests", "fixtures", "mesh-input-rules.txt"))
+	if err != nil {
+		if set {
+			t.Fatalf("PORTCULLIS_CORE_DIR is set but the fixture isn't readable: %v", err)
+		}
+		t.Skipf("no core checkout: %v", err)
+	}
+	if got := strings.Split(strings.TrimSpace(string(b)), "\n"); !slices.Equal(got, meshInRules("server", "10.215.0.1")) {
+		t.Errorf("core's fixture %q, the nodeagent's %q", got, meshInRules("server", "10.215.0.1"))
 	}
 }

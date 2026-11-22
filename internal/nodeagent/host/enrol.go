@@ -596,7 +596,9 @@ func checkFlags(flags []string, serverURL string, st State, clusterCIDR string) 
 		}
 		seen[f] = true
 	}
-	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + ip, "--node-name=" + st.ID, UnlabelledTaintFlag} {
+	// --bind-address too (core Task 28 fix round 2): without it k3s binds the
+	// kubelet to 0.0.0.0, every interface, the public one included.
+	for _, need := range []string{"--server=" + serverURL, "--token-file=" + K3sTokenFile, "--node-ip=" + ip, "--node-name=" + st.ID, UnlabelledTaintFlag, "--bind-address=" + ip} {
 		if !seen[need] {
 			name, _, _ := strings.Cut(need, "=")
 			return fmt.Errorf("the join answer's k3s flags lack %s: nothing was installed", name)

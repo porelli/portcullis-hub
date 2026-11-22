@@ -316,7 +316,7 @@ func must(b []byte, err error) []byte {
 func TestJoinFlagsRefused(t *testing.T) {
 	st := State{ID: "n4", MeshIP: "10.215.0.4", Role: "server"}
 	srv := "https://10.215.0.1:6443"
-	ok := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4",
+	ok := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4", "--bind-address=10.215.0.4",
 		UnlabelledTaintFlag, NoForceDetachFlag, "--etcd-arg=listen-client-urls=https://10.215.0.4:2379,https://127.0.0.1:2379"}
 	if err := checkFlags(ok, srv, st, "10.42.0.0/16"); err != nil {
 		t.Fatal(err)
@@ -355,15 +355,28 @@ func TestJoinFlagsRefused(t *testing.T) {
 	// An agent doesn't take a server's flags (the force-detach one included);
 	// it does take the registration taint, which every join must carry.
 	agent := State{ID: "n4", MeshIP: "10.215.0.4", Role: "agent"}
-	agentOK := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4", UnlabelledTaintFlag}
+	agentOK := []string{"--server=" + srv, "--token-file=" + K3sTokenFile, "--node-ip=10.215.0.4", "--node-name=n4", UnlabelledTaintFlag, "--bind-address=10.215.0.4"}
 	if err := checkFlags(agentOK, srv, agent, "10.42.0.0/16"); err != nil {
 		t.Errorf("an agent's flags: %v", err)
 	}
-	// Core Task 28 fix round 1: an agent's kubelet listens through
-	// --bind-address=<its mesh ip> (the agent tunnel dials that address);
-	// --kubelet-arg=address= is a server's only, and never another address.
-	if err := checkFlags(append(append([]string{}, agentOK...), "--bind-address=10.215.0.4"), srv, agent, "10.42.0.0/16"); err != nil {
-		t.Errorf("an agent's --bind-address: %v", err)
+	// Core Task 28 fix round 1/2: a join's kubelet listens through
+	// --bind-address=<its mesh ip> (the agent tunnel dials that address),
+	// required: without it k3s binds 0.0.0.0; --kubelet-arg=address= is a
+	// server's only, and never another address.
+	for who, st := range map[string]State{"an agent": agent, "a server": st} {
+		var without []string
+		base := agentOK
+		if who == "a server" {
+			base = ok
+		}
+		for _, f := range base {
+			if f != "--bind-address=10.215.0.4" {
+				without = append(without, f)
+			}
+		}
+		if err := checkFlags(without, srv, st, "10.42.0.0/16"); err == nil || !strings.Contains(err.Error(), "lack --bind-address") {
+			t.Errorf("%s's join without --bind-address: %v", who, err)
+		}
 	}
 	for _, f := range []string{"--secrets-encryption", NoForceDetachFlag, "--kubelet-arg=address=10.215.0.4", "--bind-address=0.0.0.0", "--bind-address=10.215.0.5"} {
 		if checkFlags(append(append([]string{}, agentOK...), f), srv, agent, "10.42.0.0/16") == nil {

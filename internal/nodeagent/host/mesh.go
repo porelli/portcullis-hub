@@ -32,6 +32,14 @@ var meshPrefix = netip.MustParsePrefix(na.MeshCIDR)
 
 const meshChain = "PORTCULLIS-MESH"
 
+// meshInChain guards the node's mesh address on INPUT (core Task 28 fix
+// round 2): the kubelet (10250) and, on a server, the API server, k3s's
+// supervisor (6443) and etcd (2379, 2380) listen on the mesh address only,
+// but under Linux's weak host model a LAN / VPC neighbour could still route
+// a packet to that address through the uplink. Only pcmesh, loopback and
+// the node's own pod networks (cni0, flannel's interfaces) may reach them.
+const meshInChain = "PORTCULLIS-MESH-IN"
+
 type meshPlanState struct {
 	plan na.MeshPlan
 }
@@ -287,6 +295,9 @@ func (a *Agent) ApplyMesh(ctx context.Context, p na.MeshPlan) error {
 	if err := a.applyForward(ctx, p.Forward); err != nil {
 		return err
 	}
+	if err := a.applyInput(ctx); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	changed := a.plan == nil || !planEqual(a.plan.plan, p)
 	a.plan = &meshPlanState{plan: p}
@@ -327,6 +338,54 @@ func meshRules(forward bool) []string {
 		r = append(r, "-A "+meshChain+" -i pcmesh -o pcmesh -j ACCEPT")
 	}
 	return append(r, "-A "+meshChain+" -i pcmesh -j DROP")
+}
+
+// meshInRules are PORTCULLIS-MESH-IN's rules in order for a node of role
+// with mesh address ip (the same list core's kube_install_mesh writes on
+// the first node: tests/fixtures/mesh-input-rules.txt).
+func meshInRules(role, ip string) []string {
+	ports := "10250"
+	if role == "server" {
+		ports = "10250,6443,2379,2380"
+	}
+	r := []string{}
+	for _, in := range []string{"pcmesh", "lo", "cni0", "flannel+"} {
+		r = append(r, "-A "+meshInChain+" -i "+in+" -j RETURN")
+	}
+	return append(r, "-A "+meshInChain+" -d "+ip+"/32 -p tcp -m multiport --dports "+ports+" -j DROP")
+}
+
+// applyInput makes PORTCULLIS-MESH-IN exactly meshInRules (one atomic
+// iptables-restore --noflush when it differs) and INPUT's first rule a
+// jump to it.
+func (a *Agent) applyInput(ctx context.Context) error {
+	st := a.state()
+	if st.MeshIP == "" {
+		return nil
+	}
+	want := meshInRules(st.Role, st.MeshIP)
+	out, err := a.cfg.Run.Run(ctx, Cmd{Name: "iptables", Args: []string{"-w", "5", "-S", meshInChain}})
+	var have []string
+	if err == nil {
+		for _, l := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(l, "-A ") {
+				have = append(have, strings.TrimSpace(l))
+			}
+		}
+	}
+	if err != nil || !slices.Equal(have, want) {
+		in := "*filter\n:" + meshInChain + " - [0:0]\n" + strings.Join(want, "\n") + "\nCOMMIT\n"
+		if _, err := a.cfg.Run.Run(ctx, Cmd{Name: "iptables-restore", Args: []string{"-w", "5", "--noflush"}, Stdin: []byte(in)}); err != nil {
+			return fmt.Errorf("the %s rules: %v", meshInChain, err)
+		}
+		a.log.Info("mesh input rules applied", "role", st.Role)
+	}
+	if _, err := a.cfg.Run.Run(ctx, Cmd{Name: "iptables", Args: []string{"-w", "5", "-C", "INPUT", "-j", meshInChain}}); err != nil {
+		if _, err := a.cfg.Run.Run(ctx, Cmd{Name: "iptables", Args: []string{"-w", "5", "-I", "INPUT", "1", "-j", meshInChain}}); err != nil {
+			return fmt.Errorf("the INPUT jump to %s: %v", meshInChain, err)
+		}
+	}
+	return nil
 }
 
 // normRule: iptables -S prints the ctstate list in its own order.
@@ -378,6 +437,9 @@ func (a *Agent) removeMesh(ctx context.Context) {
 	run("iptables", "-w", "5", "-D", "FORWARD", "-j", meshChain)
 	run("iptables", "-w", "5", "-F", meshChain)
 	run("iptables", "-w", "5", "-X", meshChain)
+	run("iptables", "-w", "5", "-D", "INPUT", "-j", meshInChain)
+	run("iptables", "-w", "5", "-F", meshInChain)
+	run("iptables", "-w", "5", "-X", meshInChain)
 	run("systemctl", "disable", "--now", "wg-quick@"+na.MeshIface)
 	run("ip", "link", "del", "dev", na.MeshIface)
 }

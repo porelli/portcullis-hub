@@ -143,13 +143,16 @@ func (f *fakeWG) peerConfigures() int {
 }
 
 type fakeRun struct {
-	mu     sync.Mutex
-	wg     *fakeWG
-	cmds   []Cmd
-	rules  []string // PORTCULLIS-MESH
-	jump   bool
-	active map[string]bool
-	fail   map[string]error // by "name arg0"
+	mu    sync.Mutex
+	wg    *fakeWG
+	cmds  []Cmd
+	rules []string // PORTCULLIS-MESH
+	jump  bool
+	// inRules / inJump: PORTCULLIS-MESH-IN and INPUT's jump to it.
+	inRules []string
+	inJump  bool
+	active  map[string]bool
+	fail    map[string]error // by "name arg0"
 }
 
 func (f *fakeRun) Run(_ context.Context, c Cmd) ([]byte, error) {
@@ -171,27 +174,44 @@ func (f *fakeRun) Run(_ context.Context, c Cmd) ([]byte, error) {
 			f.wg.mu.Unlock()
 		}
 	case c.Name == "iptables-restore":
-		f.rules = nil
+		var rules []string
 		for _, l := range strings.Split(string(c.Stdin), "\n") {
 			if strings.HasPrefix(l, "-A ") {
-				f.rules = append(f.rules, l)
+				rules = append(rules, l)
 			}
 		}
-	case c.Name == "iptables" && len(c.Args) >= 3 && c.Args[2] == "-S":
-		if f.rules == nil {
+		if strings.Contains(string(c.Stdin), ":"+meshInChain+" ") {
+			f.inRules = rules
+		} else {
+			f.rules = rules
+		}
+	case c.Name == "iptables" && len(c.Args) >= 4 && c.Args[2] == "-S":
+		chain, rules := meshChain, f.rules
+		if c.Args[3] == meshInChain {
+			chain, rules = meshInChain, f.inRules
+		}
+		if rules == nil {
 			return nil, errors.New("iptables exited 1")
 		}
-		out := "-N " + meshChain + "\n"
-		for _, r := range f.rules {
+		out := "-N " + chain + "\n"
+		for _, r := range rules {
 			out += strings.Replace(r, "ESTABLISHED,RELATED", "RELATED,ESTABLISHED", 1) + "\n"
 		}
 		return []byte(out), nil
-	case c.Name == "iptables" && len(c.Args) >= 3 && c.Args[2] == "-C":
-		if !f.jump {
+	case c.Name == "iptables" && len(c.Args) >= 4 && c.Args[2] == "-C":
+		if c.Args[3] == "INPUT" {
+			if !f.inJump {
+				return nil, errors.New("iptables exited 1")
+			}
+		} else if !f.jump {
 			return nil, errors.New("iptables exited 1")
 		}
-	case c.Name == "iptables" && len(c.Args) >= 3 && c.Args[2] == "-I":
-		f.jump = true
+	case c.Name == "iptables" && len(c.Args) >= 4 && c.Args[2] == "-I":
+		if c.Args[3] == "INPUT" {
+			f.inJump = true
+		} else {
+			f.jump = true
+		}
 	case c.Name == "systemctl" && len(c.Args) >= 2 && c.Args[0] == "is-active":
 		if !f.active[c.Args[len(c.Args)-1]] {
 			return nil, errors.New("systemctl exited 3")
