@@ -295,8 +295,43 @@ func TestHAChecklistNMinus1Yellow(t *testing.T) {
 		}
 	}
 	items := haChecklist(haIn{snap: snap, place: map[string]haPlace{}, n1: []nminus1.Result{{Node: "n1", Level: nminus1.Green}}, ns: nminus1.DefaultNamespaces})
-	if items[5].ID != "n_minus_1" || !items[5].OK {
+	if items[5].ID != "n_minus_1" || !items[5].OK || items[5].Text != "" {
 		t.Errorf("green: %+v", items[5])
+	}
+}
+
+// TestHAChecklistNMinus1QuorumHeld (controller ruling on P7): yellow only
+// by P7 (QuorumHeld) passes and says so, naming the nodes; any other
+// yellow beside it, a red or an unknown still blocks.
+func TestHAChecklistNMinus1QuorumHeld(t *testing.T) {
+	snap := nodeadm.Snapshot{Nodes: []nodeadm.Node{{Name: "n1", Ready: true}, {Name: "n2", Ready: true}, {Name: "n3", Ready: true}, {Name: "e1", Ready: true}}}
+	held := func(n string) nminus1.Result { return nminus1.Result{Node: n, Level: nminus1.Yellow, QuorumHeld: true} }
+	n1Item := func(res []nminus1.Result) HAItem {
+		for _, it := range haChecklist(haIn{snap: snap, place: map[string]haPlace{}, n1: res, ns: nminus1.DefaultNamespaces}) {
+			if it.ID == "n_minus_1" {
+				return it
+			}
+		}
+		t.Fatal("no n_minus_1 item")
+		return HAItem{}
+	}
+	it := n1Item([]nminus1.Result{held("n3"), held("n1"), held("n2"), {Node: "e1", Level: nminus1.Green}})
+	want := "yellow on n1, n2 and n3 (P7), which passes: if one fails, every core set keeps its minimum (Vault, Postgres and the Sentinels a working majority); the members it ran wait for it to come back"
+	if !it.OK || it.Text != want {
+		t.Errorf("P7 yellow: %+v", it)
+	}
+	if it := n1Item([]nminus1.Result{held("n1")}); !it.OK || !strings.HasPrefix(it.Text, "yellow on n1 (P7)") {
+		t.Errorf("one node: %+v", it)
+	}
+	for name, res := range map[string][]nminus1.Result{
+		"another yellow":   {held("n1"), {Node: "n2", Level: nminus1.Yellow}},
+		"a red":            {held("n1"), {Node: "n2", Level: nminus1.Red}},
+		"an unknown":       {held("n1"), {Node: "n2", Level: nminus1.Unknown}},
+		"red held (never)": {{Node: "n1", Level: nminus1.Red, QuorumHeld: true}},
+	} {
+		if it := n1Item(res); it.OK || it.Text != "the N−1 check isn't green" {
+			t.Errorf("%s: %+v", name, it)
+		}
 	}
 }
 
@@ -607,5 +642,73 @@ func TestHAPerSiteView(t *testing.T) {
 	_, dns, _ = haDNS([]byte(`{"v":1,"state":"leading","names":{"example.org":{"addresses":["198.51.100.1"],"worst_case_s":90}},"sites":{"main":{"healthy":true}}}`), "Porkbun")
 	if got, _ := json.Marshal(dns[0].PerSite); string(got) != `[{"site":"main","healthy":true,"worst_case_text":"if site main fails: worst case ~1 min on Porkbun","ingress":[],"addresses":[],"blind_probers":0}]` {
 		t.Errorf("per_site %s", got)
+	}
+}
+
+// TestHASiteGatewayDuringRecheck (found live on the rebuilt HA VMs: the
+// item went red for ~30 s every 6 min): a reachable endpoint whose proof
+// goes stale is offered again only to be re-confirmed (ruling N1); while
+// that re-check runs its site still counts as reachable. A first offer
+// doesn't, and an endpoint that stops answering ends unreachable and red.
+func TestHASiteGatewayDuringRecheck(t *testing.T) {
+	ctx := context.Background()
+	cf := haFixture(t, twoSites()...)
+	advance := fakeClockHub(cf)
+	push := func() {
+		t.Helper()
+		if err := cf.h.pushMesh(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gw := func() HAItem {
+		t.Helper()
+		v, err := cf.h.HA(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return haItem(t, v, "site_gateway")
+	}
+	push()
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered || r.Recheck {
+		t.Fatalf("first push: %+v", r)
+	}
+	if it := gw(); it.OK {
+		t.Errorf("a first offer counted: %+v", it)
+	}
+	for i := 0; i < 3; i++ {
+		push()
+	}
+	if it := gw(); !it.OK {
+		t.Fatalf("both reachable: %+v", it)
+	}
+	advance(10 * time.Minute)
+	push() // both proofs stale: offered again, re-checking
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered || !r.Recheck {
+		t.Fatalf("after 10 min: %+v", r)
+	}
+	if it := gw(); !it.OK {
+		t.Errorf("re-checking a proven endpoint went red: %+v", it)
+	}
+	for i := 0; i < 3; i++ {
+		push()
+	}
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachReachable || r.Recheck {
+		t.Errorf("re-confirmed: %+v", r)
+	}
+	// It stops answering: re-checked, then unreachable after
+	// MeshConfirmWait, and the site is red again.
+	cf.closeEndpoint("203.0.113.1:51830")
+	advance(6 * time.Minute)
+	push()
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachOffered || !r.Recheck {
+		t.Fatalf("stale again: %+v", r)
+	}
+	advance(MeshConfirmWait + time.Second)
+	push()
+	if r := cf.meshRecord("n1"); r.Reach != state.ReachUnreachable || r.Recheck {
+		t.Fatalf("not answering: %+v", r)
+	}
+	if it := gw(); it.OK {
+		t.Errorf("an unreachable endpoint kept its site green: %+v", it)
 	}
 }

@@ -167,7 +167,13 @@ type MeshNode struct {
 	// until then.
 	Changes   []time.Time `json:"changes,omitempty" yaml:"changes,omitempty"`
 	HoldUntil time.Time   `json:"hold_until,omitempty" yaml:"hold_until,omitempty"`
-	Removed   bool        `json:"removed,omitempty" yaml:"removed,omitempty"`
+	// Recheck: offered again only because a reachable endpoint's proof
+	// went stale (ruling N1: two reachable nodes can't prove each other,
+	// so it waits to be dialled again); cleared by any other change. The
+	// HA checklist still counts its site as reachable while it is being
+	// re-confirmed (MeshConfirmWait).
+	Recheck bool `json:"recheck,omitempty" yaml:"recheck,omitempty"`
+	Removed bool `json:"removed,omitempty" yaml:"removed,omitempty"`
 	// Applied is the hash of the plan the node's nodeagent last took from
 	// a Hub (a record only: a new leader pushes every plan again and never
 	// counts it as proof; cleared once the node is out of the plan).

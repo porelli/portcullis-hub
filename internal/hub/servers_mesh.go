@@ -369,13 +369,16 @@ type meshInputs struct {
 	// is applied; reach: that endpoint's state.
 	public map[string]netip.AddrPort
 	reach  map[string]string
+	// recheck: offered nodes being re-confirmed after a stale reachable
+	// proof (state.MeshNode.Recheck, within MeshConfirmWait of the offer).
+	recheck map[string]bool
 	// flags: nodes left out, or whose endpoint was dropped (id → why).
 	flags map[string]string
 }
 
 func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 	in := meshInputs{meshIP: map[string]string{}, ready: map[string]bool{}, keyAt: map[string]time.Time{},
-		public: map[string]netip.AddrPort{}, reach: map[string]string{}, flags: map[string]string{}}
+		public: map[string]netip.AddrPort{}, reach: map[string]string{}, recheck: map[string]bool{}, flags: map[string]string{}}
 	excluded := h.meshExcluded()
 	now := h.now().UTC()
 	h.mu.RLock()
@@ -425,6 +428,9 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 				reach = state.ReachOffered
 			}
 			in.reach[id] = reach
+			if reach == state.ReachOffered && r.Recheck && r.Public == p.String() && now.Sub(r.OfferedAt) <= MeshConfirmWait {
+				in.recheck[id] = true
+			}
 			if reach == state.ReachUnreachable {
 				p = netip.AddrPort{} // planned as NATed
 			}
@@ -613,7 +619,7 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 		r := h.st.Mesh[id]
 		switch {
 		case r.Reach == "":
-			r.Public, r.Reach, r.OfferedAt, r.CheckedAt = p.String(), state.ReachOffered, now, time.Time{}
+			r.Public, r.Reach, r.OfferedAt, r.CheckedAt, r.Recheck = p.String(), state.ReachOffered, now, time.Time{}, false
 		case r.Public != p.String():
 			// A change: offered again, but an offer's clock keeps running
 			// (OfferedAt isn't reset); a flapping endpoint is held
@@ -625,7 +631,7 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 				}
 			}
 			r.Changes = append(recent, now)
-			r.Public = p.String()
+			r.Public, r.Recheck = p.String(), false
 			switch {
 			case len(r.Changes) > meshFlapChanges:
 				r.Reach, r.CheckedAt, r.HoldUntil = state.ReachUnreachable, now, now.Add(MeshRetryUnreachable)
@@ -638,7 +644,7 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 				r.Reach, r.OfferedAt = state.ReachOffered, now
 			}
 		case r.Reach == state.ReachUnreachable && now.Sub(r.CheckedAt) >= MeshRetryUnreachable && !now.Before(r.HoldUntil):
-			r.Reach, r.OfferedAt = state.ReachOffered, now
+			r.Reach, r.OfferedAt, r.Recheck = state.ReachOffered, now, false
 			log.Printf("servers: the node mesh: offering %s's public endpoint %s again", id, r.Public)
 		default:
 			if r.Reach != state.ReachUnreachable {
@@ -743,12 +749,12 @@ func (h *Hub) updateReach(ctx context.Context, in meshInputs) {
 			if r.Reach != state.ReachReachable {
 				log.Printf("servers: the node mesh: %s's public endpoint %s answers (a handshake from %s)", x, r.Public, confirmed)
 			}
-			r.Reach, r.CheckedAt = state.ReachReachable, now
+			r.Reach, r.CheckedAt, r.Recheck = state.ReachReachable, now, false
 		case r.Reach == state.ReachOffered && !firstPush.IsZero() && now.Sub(laterOf(r.OfferedAt, firstPush)) >= MeshConfirmWait:
-			r.Reach, r.CheckedAt = state.ReachUnreachable, now
+			r.Reach, r.CheckedAt, r.Recheck = state.ReachUnreachable, now, false
 			log.Printf("servers: the node mesh: no handshake with %s on %s within %s: it is planned as behind NAT", x, r.Public, MeshConfirmWait)
 		case r.Reach == state.ReachReachable && now.Sub(r.CheckedAt) > MeshReachableStale:
-			r.Reach, r.OfferedAt = state.ReachOffered, now
+			r.Reach, r.OfferedAt, r.Recheck = state.ReachOffered, now, true
 			log.Printf("servers: the node mesh: no fresh handshake with %s on %s for %s: offered again", x, r.Public, MeshReachableStale)
 		default:
 			continue

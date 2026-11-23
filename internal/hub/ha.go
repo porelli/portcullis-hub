@@ -430,9 +430,24 @@ func haChecklist(in haIn) []HAItem {
 		}
 		return HAItem{ID: id, OK: ok, Text: text}
 	}
+	// N−1 passes when every node is green, or yellow only by ruling P7
+	// (QuorumHeld: a quorum system's member has no room but its set keeps
+	// a working majority; with three main servers that is the expected
+	// state). Any other yellow, a red or an unknown still blocks.
 	green := in.n1Err == "" && len(in.n1) > 0
+	var held []string
 	for _, r := range in.n1 {
-		green = green && r.Level == nminus1.Green
+		switch {
+		case r.Level == nminus1.Green:
+		case r.Level == nminus1.Yellow && r.QuorumHeld:
+			held = append(held, r.Node)
+		default:
+			green = false
+		}
+	}
+	n1 := item("n_minus_1", green, haTextNMinus1)
+	if green && len(held) > 0 {
+		n1.Text = haNMinus1QuorumHeld(held)
 	}
 	out := []HAItem{
 		item("nodes", nodes >= 3, haTextNodes),
@@ -440,7 +455,7 @@ func haChecklist(in haIn) []HAItem {
 		item("storage", storage >= 2, haTextStorage),
 		item("ingress", ingress >= 1, haTextIngress),
 		item("backup_destination", in.backup, haTextBackup),
-		item("n_minus_1", green, haTextNMinus1),
+		n1,
 	}
 	// watchdog: every node that must fence has one (the first by name):
 	// its Self Node Remediation agent ready, or, while HA is off (fencing
@@ -505,7 +520,14 @@ func (h *Hub) siteReach(snap nodeadm.Snapshot) (confirmed map[string]bool, offer
 		case state.ReachReachable:
 			confirmed[n.Site] = true
 		case state.ReachOffered:
-			off[n.Site] = true
+			if in.recheck[n.ID] {
+				// Re-confirming a stale but proven endpoint (ruling N1):
+				// still the site's way in, not a new offer (found live:
+				// the item went red for ~30 s every 6 min).
+				confirmed[n.Site] = true
+			} else {
+				off[n.Site] = true
+			}
 		}
 	}
 	for s := range off {
@@ -515,6 +537,19 @@ func (h *Hub) siteReach(snap nodeadm.Snapshot) (confirmed map[string]bool, offer
 	}
 	sort.Strings(offered)
 	return confirmed, offered
+}
+
+// haNMinus1QuorumHeld is the passing N−1 item's sentence when some nodes
+// are yellow by P7 (sorted, "a, b and c").
+func haNMinus1QuorumHeld(nodes []string) string {
+	nodes = slices.Clone(nodes)
+	sort.Strings(nodes)
+	names := nodes[0]
+	if len(nodes) > 1 {
+		names = strings.Join(nodes[:len(nodes)-1], ", ") + " and " + nodes[len(nodes)-1]
+	}
+	return "yellow on " + names + " (P7), which passes: if one fails, every core set keeps its minimum " +
+		"(Vault, Postgres and the Sentinels a working majority); the members it ran wait for it to come back"
 }
 
 // frontdoorDoc is the part of frontdoor-status' status.json the page

@@ -94,6 +94,13 @@ type Result struct {
 	Unplaced []string `json:"unplaced"`
 	Evicted  []string `json:"evicted"`
 	Lacking  []string `json:"-"`
+	// QuorumHeld: a yellow result whose every reason is P7's: a core or
+	// critical set member with no room while its set keeps its minimum
+	// (Vault, Postgres and the Sentinels on three main servers: a working
+	// majority, the member re-placed only when its node is back). Never set
+	// on another yellow (a high pod unplaced, or placed only by evicting a
+	// normal one), nor on green or red. Not in the JSON (§20.7's shape).
+	QuorumHeld bool `json:"-"`
 }
 
 // Explain is the sentence of §20.6's 409 and the dialog: "if <node>
@@ -566,6 +573,7 @@ func (m *model) victims(st *state, pi, ni int) []int {
 func (m *model) result(st *state, node string) Result {
 	r := Result{Node: node, Level: Green, Unplaced: []string{}, Evicted: []string{}}
 	var red, yellow []string
+	other := false // a yellow reason that isn't P7's
 	redSet := make([]bool, len(m.setName))
 	for _, pi := range st.unplaced {
 		r.Unplaced = append(r.Unplaced, m.display[pi])
@@ -582,10 +590,12 @@ func (m *model) result(st *state, node string) Result {
 			}
 		case tierHigh:
 			yellow = append(yellow, m.display[pi]) // an unplaceable high pod (Task 2 ruling)
+			other = true
 		}
 	}
 	for _, pi := range st.yellow {
 		yellow = append(yellow, m.display[pi])
+		other = true
 	}
 	// Every core or critical set below its minimum, unplaced members or
 	// not (M4).
@@ -601,7 +611,7 @@ func (m *model) result(st *state, node string) Result {
 	case len(red) > 0:
 		r.Level, r.Lacking = Red, red
 	case len(yellow) > 0:
-		r.Level, r.Lacking = Yellow, yellow
+		r.Level, r.Lacking, r.QuorumHeld = Yellow, yellow, !other
 	}
 	slices.Sort(r.Unplaced)
 	slices.Sort(r.Evicted)

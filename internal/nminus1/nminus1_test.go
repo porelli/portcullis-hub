@@ -669,3 +669,55 @@ func TestLargestFirst(t *testing.T) {
 		t.Errorf("%+v", r)
 	}
 }
+
+// TestQuorumHeld (controller ruling on P7): over the shared vectors, a
+// yellow result is QuorumHeld exactly when its yellow is P7's (a core set
+// member with no room while the set keeps its minimum); a high pod placed
+// only by evicting a normal one, or one with no room, is another yellow;
+// green and red results are never QuorumHeld. TestHighSetMemberIsYellow's
+// shape (a high set member) is another yellow too.
+func TestQuorumHeld(t *testing.T) {
+	b, err := os.ReadFile("testdata/nminus1_vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vs []checkVector
+	if err := jsonstrict.Decode(b, &vs); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"hostname anti-affinity: a vault member with no free node runs degraded (yellow, P7)":                 true,
+		"the reference layout (two non-small main nodes and a small tie-breaker): degraded sets, yellow (P7)": true,
+		"a high pod that fits only by evicting a normal pod: yellow":                                          false,
+		"a high pod with no room even after evicting normal and low pods: yellow":                             false,
+	}
+	seen := 0
+	for _, v := range vs {
+		for _, r := range check(t, v.Snapshot) {
+			if r.Level != Yellow {
+				if r.QuorumHeld {
+					t.Errorf("%s: node %s %s is QuorumHeld", v.Name, r.Node, r.Level)
+				}
+				continue
+			}
+			w, ok := want[v.Name]
+			if !ok {
+				continue
+			}
+			seen++
+			if r.QuorumHeld != w {
+				t.Errorf("%s: node %s QuorumHeld %v, want %v (lacking %v)", v.Name, r.Node, r.QuorumHeld, w, r.Lacking)
+			}
+		}
+	}
+	if seen < 4 {
+		t.Fatalf("only %d yellow results judged: the vectors' names changed?", seen)
+	}
+	a := inSet(pod("a-0", apps, "n1", "portcullis-high", 10000, 3000), "a", 2)
+	c := inSet(pod("a-1", apps, "n2", "portcullis-high", 10000, 3000), "a", 2)
+	a.AntiAffinityHost, c.AntiAffinityHost = true, true
+	r := check(t, nodeadm.Snapshot{Nodes: []nodeadm.Node{node("n1", 4000), node("n2", 4000)}, Pods: []nodeadm.Pod{a, c}})
+	if r[0].Level != Yellow || r[0].QuorumHeld {
+		t.Errorf("a high set member: %+v", r[0])
+	}
+}
