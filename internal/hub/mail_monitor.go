@@ -18,6 +18,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 )
 
@@ -166,7 +167,26 @@ func (h *Hub) HostMailTLS(ctx context.Context, spki []string, notAfter time.Time
 		h.mu.Unlock()
 		return "", err
 	}
+	// The read-only admin view pins these SPKIs from its rendered
+	// environment (contract §19.13): a set it doesn't pin yet (the first
+	// key after the provider was wired, a new key) owes the wired
+	// provider a restart, which renders the override again. Queued after
+	// the reload below, whatever its outcome (the key is recorded).
+	restartID := ""
+	if !slices.Equal(prev.SPKISHA256, h.st.Mail.TLS.SPKISHA256) {
+		if t, m := h.mailWiredLocked(); t != nil && m.AdminView != nil {
+			restartID = t.ID
+		}
+	}
 	h.mu.Unlock()
+	if restartID != "" {
+		defer func() {
+			if h.IsEnabled(restartID) {
+				log.Printf("mail: %s: a new mail certificate key: restarting it so its read-only admin view pins it", restartID)
+				h.queueDelivery(restartID, TriggerSave, settings.EffectRestart, 0)
+			}
+		}()
+	}
 	h.TriggerMailSync() // MailState v2 carries the SPKIs
 	// A success only when the provider serves one of the posted SPKIs
 	// (core interface fix round 1, item 2: core drops a TLSA record only

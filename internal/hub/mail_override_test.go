@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -797,5 +798,48 @@ func TestMailAdminViewURL(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestHostTLSNewKeyRestartsTheAdminView (contract §19.13): the admin view
+// pins the mail certificate's SPKIs from its rendered environment, so a
+// posted key it doesn't pin yet (the first `mail rotate` after the
+// provider was wired, or a new key) owes the wired provider a restart,
+// which renders the override again; the same SPKIs again owe nothing,
+// and a provider without admin_view never restarts for it.
+func TestHostTLSNewKeyRestartsTheAdminView(t *testing.T) {
+	a, b := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	na := time.Now().Add(60 * 24 * time.Hour)
+	for _, c := range []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{{"admin_view", mailVectorFiles(t, "admin_view ok"), true}, {"no admin_view", mailTemplateFiles(t), false}} {
+		f := newMailSlotFixtureFrom(t, c.files, true)
+		f.h.SetMailCoreForTest(true, "mail.example.org")
+		f.h.mu.Lock()
+		f.h.st.Mail.TLS = state.MailTLS{}
+		f.h.st.Enabled = append(f.h.st.Enabled, mailProviderID)
+		for i := range f.h.instances {
+			if f.h.instances[i].ID == mailProviderID {
+				f.h.instances[i].Enabled = true
+			}
+		}
+		f.h.mu.Unlock()
+		seq := f.h.owedSeqOf(mailProviderID)
+		f.h.HostMailTLS(context.Background(), []string{a}, na) // no provider API here: 503 after recording
+		if got := f.h.owedSeqOf(mailProviderID) > seq; got != c.want {
+			t.Fatalf("%s: the first posted key owed a restart: %v, want %v", c.name, got, c.want)
+		}
+		seq = f.h.owedSeqOf(mailProviderID)
+		f.h.HostMailTLS(context.Background(), []string{a}, na)
+		if f.h.owedSeqOf(mailProviderID) != seq {
+			t.Fatalf("%s: the same SPKIs again owed a restart", c.name)
+		}
+		f.h.HostMailTLS(context.Background(), []string{b, a}, na)
+		if got := f.h.owedSeqOf(mailProviderID) > seq; got != c.want {
+			t.Fatalf("%s: a new key owed a restart: %v, want %v", c.name, got, c.want)
+		}
+		f.h.Wait()
 	}
 }
