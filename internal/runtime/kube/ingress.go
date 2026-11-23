@@ -37,9 +37,11 @@ const hostLabel = "[a-z0-9]([a-z0-9-]*[a-z0-9])?"
 var routeMatch = regexp.MustCompile("^\\(?Host\\(`" + hostLabel + "(\\." + hostLabel + ")+`\\)( \\|\\| Host\\(`" + hostLabel + "(\\." + hostLabel + ")+`\\))*\\)?" +
 	"( && \\(?(PathPrefix|Path)\\(`[^`()]*`\\)( \\|\\| (PathPrefix|Path)\\(`[^`()]*`\\))*\\)?)?$")
 
-// TLSOptions are the router TLS tiers (the only @file names tls.options
-// may hold).
-var TLSOptions = []string{"authaware@file", "public@file", "protected@file", "protected-any@file"}
+// TLSOptions are the router TLS tiers: Traefik's default (an IngressRoute
+// without tls.options: options named "default" there would mean a
+// TLSOption of the edge namespace) and the only @file names tls.options
+// may hold.
+var TLSOptions = []string{"default", "public@file", "protected@file", "protected-any@file"}
 
 // traefik.io CRD version the chart pins (K14).
 const traefikAPI = "traefik.io/v1alpha1"
@@ -216,7 +218,9 @@ func IngressObjects(instance, namespace, appsNamespace string, labels map[string
 				if !slices.Contains(TLSOptions, r.tlsOptions) {
 					return nil, refused("router %s: its tls.options isn't one of the tiers", name)
 				}
-				tls["options"] = map[string]any{"name": strings.TrimSuffix(r.tlsOptions, "@file") + "@file"}
+				if r.tlsOptions != "default" {
+					tls["options"] = map[string]any{"name": r.tlsOptions}
+				}
 			}
 			if r.tlsCertResolver != "" {
 				tls["certResolver"] = r.tlsCertResolver

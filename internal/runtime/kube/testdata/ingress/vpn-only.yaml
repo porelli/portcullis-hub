@@ -38,9 +38,7 @@ spec:
     - kind: Service
       name: app--web
       port: 80
-  tls:
-    options:
-      name: authaware@file
+  tls: {}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute

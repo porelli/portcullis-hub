@@ -729,13 +729,13 @@ and defines four options; the Hub picks one per app and writes it as a
 | An `mtls` app | `protected@file` | Always: a **YubiKey** certificate required at the TLS handshake |
 | Every alternative needs the YubiKey certificate (e.g. YubiKey + certificate) | `protected@file` | A **YubiKey** certificate required at the TLS handshake; a browser certificate never passes it |
 | Every alternative needs a certificate method that is on, and at least one accepts the browser certificate | `protected-any@file` | A YubiKey or browser certificate required at the TLS handshake |
-| Some alternative has one (e.g. Standard, Strong) | `authaware@file` | A certificate asked for, optional |
+| Some alternative has one (e.g. Standard, Strong) | `default` | A certificate asked for, optional |
 | None has one, or the app has no Portcullis sign-in | `public@file` | No certificate requested |
 
 `protected` trusts only the YubiKey certificate authority
-(`certs/ca-chain-yubikey.crt`); `protected-any` and `authaware` trust both
+(`certs/ca-chain-yubikey.crt`); `protected-any` and `default` trust both
 (`certs/ca-chain.crt`). Core pages (Keycloak, the Hub, people.&lt;domain&gt;,
-the portal, the consoles) always use `authaware@file`: they always offer an
+the portal, the consoles) always use `default`: they always offer an
 optional certificate (a browser without one shows nothing). Which method a
 certificate counts as is decided by its issuer
 ([certificate binding](#certificate-binding)). Switching a certificate
@@ -779,7 +779,7 @@ on, the Hub adds a router `portcullis-public-<app>` for those paths only:
 certificate in every alternative normally gives the host `protected@file` or
 `protected-any@file`.
 Anonymous visitors can't present a certificate, so while the public router
-exists the Hub uses `authaware@file` for **all** of the app's routers instead
+exists the Hub uses `default` for **all** of the app's routers instead
 (`policy.HostTier`). What still enforces the certificate:
 
 | App type | Gated paths after the downgrade |
@@ -789,7 +789,7 @@ exists the Hub uses `authaware@file` for **all** of the app's routers instead
 | any router without group-gate | loses the handshake check; the Hub lists such routers in the warning |
 
 In mode `listed` with no listed share there is no public router and no
-downgrade. Templates that already give `authaware@file` or `public@file` are
+downgrade. Templates that already give `default` or `public@file` are
 unchanged.
 
 ## Where templates are published

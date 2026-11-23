@@ -86,7 +86,7 @@ func TestEnable(t *testing.T) {
 
 	// Override: port binding + TLS tier label.
 	ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "grafana.override.yml"))
-	if !strings.Contains(string(ov), `"0.0.0.0:3300:3000/tcp"`) || !strings.Contains(string(ov), "traefik.http.routers.grafana.tls.options: authaware@file") {
+	if !strings.Contains(string(ov), `"0.0.0.0:3300:3000/tcp"`) || !strings.Contains(string(ov), "traefik.http.routers.grafana.tls.options: default") {
 		t.Errorf("override =\n%s", ov)
 	}
 
@@ -560,7 +560,7 @@ func TestInitialDefaultTemplate(t *testing.T) {
 	if err := f.h.Enable("other"); err != nil {
 		t.Fatal(err)
 	}
-	if ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "other.override.yml")); !strings.Contains(string(ov), "tls.options: authaware@file") {
+	if ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", "other.override.yml")); !strings.Contains(string(ov), "tls.options: default") {
 		t.Errorf("inherited default tier:\n%s", ov)
 	}
 }
@@ -603,7 +603,7 @@ func TestSignInChangeRewritesPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ch.Restarts) != 0 {
-		t.Errorf("strong keeps authaware: restarts %v", ch.Restarts)
+		t.Errorf("strong keeps default: restarts %v", ch.Restarts)
 	}
 	raw, _ := os.ReadFile(filepath.Join(f.data, "group-gate-policy.json"))
 	var doc map[string]any

@@ -138,7 +138,7 @@ func TestTierFollowsCertificateSwitch(t *testing.T) {
 	if err := f.h.Enable("grafana"); err != nil {
 		t.Fatal(err)
 	}
-	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: authaware@file") {
+	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: default") {
 		t.Fatalf("grafana on standard:\n%s", ov)
 	}
 	passkeys := TemplateInput{Name: "Standard", Rule: siLeaves("any", "family:passkey")}
@@ -158,14 +158,14 @@ func TestTierFollowsCertificateSwitch(t *testing.T) {
 	if owed != settings.EffectRestart && len(f.runner.Calls()) == calls {
 		t.Errorf("no restart queued: owed %q, runner calls unchanged", owed)
 	}
-	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: public@file") || strings.Contains(ov, "authaware") {
+	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: public@file") || strings.Contains(ov, "default") {
 		t.Errorf("grafana on passkeys only:\n%s", ov)
 	}
 	ch, err = f.h.SaveTemplate(ctx, "standard", TemplateInput{Name: "Standard", Rule: siLeaves("any", "family:passkey", "family:certificate")}, false, siAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(ch.Restarts, []string{"grafana"}) || !strings.Contains(readOverride(t, f, "grafana"), "tls.options: authaware@file") {
+	if !slices.Equal(ch.Restarts, []string{"grafana"}) || !strings.Contains(readOverride(t, f, "grafana"), "tls.options: default") {
 		t.Errorf("back to certificates: restarts %v\n%s", ch.Restarts, readOverride(t, f, "grafana"))
 	}
 	// Nothing needs the certificate: it can be switched off, and on

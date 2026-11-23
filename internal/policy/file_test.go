@@ -196,8 +196,8 @@ func TestTier(t *testing.T) {
 		want   string
 	}{
 		{"all cert+key", g("all", l("yubikey_cert"), l("security_key")), on, false, TierProtected},
-		{"strong", g("any", l("security_key"), l("yubikey_cert")), on, false, TierAuthAware},
-		{"protected + public", g("all", l("yubikey_cert"), l("security_key")), on, true, TierAuthAware},
+		{"strong", g("any", l("security_key"), l("yubikey_cert")), on, false, TierDefault},
+		{"protected + public", g("all", l("yubikey_cert"), l("security_key")), on, true, TierDefault},
 		{"nil", nil, on, false, TierPublic},
 		{"passkeys only", g("any", *g("any", l("passkey_synced"), l("passkey_device"), l("security_key"))), on, false, TierPublic},
 		{"cert switched off", g("any", l("yubikey_cert")), map[signin.Method]bool{}, false, TierPublic},

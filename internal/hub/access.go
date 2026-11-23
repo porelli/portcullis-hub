@@ -94,7 +94,7 @@ func (h *Hub) accessWith(t *templates.Template, si state.SignIn, pick, mode stri
 // tier per host", D18): an mtls app protected@file (the certificate is
 // its authentication); an app without Portcullis sign-in public@file; a
 // template that can't be published protected@file (fail closed; with
-// open public exceptions authaware@file, policy.HostTier, while every
+// open public exceptions default, policy.HostTier, while every
 // gated request is still denied); else policy.Tier of its compiled rule,
 // with publicActive's downgrade. Caller
 // holds mu.

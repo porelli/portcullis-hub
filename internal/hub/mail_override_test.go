@@ -568,7 +568,7 @@ func TestMailSubnetOverlapRefused(t *testing.T) {
 
 // TestMailAdminViewOverride (contract §19.1, §19.13): a block with
 // admin_view gets, in normal mode, portcullis-proxy and the two admin
-// routers (the Hub's admin chain, authaware TLS) on that service, the
+// routers (the Hub's admin chain, default TLS) on that service, the
 // admin host on every named service and the pinned SPKIs on the view
 // only; the websecure router goes in the VPN modes admin and server;
 // void and unwired modes route nothing.
@@ -591,13 +591,13 @@ func TestMailAdminViewOverride(t *testing.T) {
 		"traefik.http.routers." + MailAdminRouter + ".entrypoints":               "websecure",
 		"traefik.http.routers." + MailAdminRouter + ".middlewares":               mailAdminMiddlewares,
 		"traefik.http.routers." + MailAdminRouter + ".tls":                       "true",
-		"traefik.http.routers." + MailAdminRouter + ".tls.options":               "authaware@file",
+		"traefik.http.routers." + MailAdminRouter + ".tls.options":               "default",
 		"traefik.http.routers." + MailAdminRouter + ".service":                   MailAdminRouter,
 		"traefik.http.routers." + MailAdminRouter + "-vpn.rule":                  "Host(`" + host + "`)",
 		"traefik.http.routers." + MailAdminRouter + "-vpn.entrypoints":           "vpnsecure",
 		"traefik.http.routers." + MailAdminRouter + "-vpn.middlewares":           mailAdminMiddlewaresVPN,
 		"traefik.http.routers." + MailAdminRouter + "-vpn.tls":                   "true",
-		"traefik.http.routers." + MailAdminRouter + "-vpn.tls.options":           "authaware@file",
+		"traefik.http.routers." + MailAdminRouter + "-vpn.tls.options":           "default",
 		"traefik.http.routers." + MailAdminRouter + "-vpn.service":               MailAdminRouter,
 		"traefik.http.services." + MailAdminRouter + ".loadbalancer.server.port": "8090",
 	}

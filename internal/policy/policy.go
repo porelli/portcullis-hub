@@ -14,8 +14,14 @@ const (
 	// TierProtectedAny: RequireAndVerifyClientCert against both CAs
 	// (ca-chain.crt).
 	TierProtectedAny = "protected-any@file"
-	TierAuthAware    = "authaware@file" // VerifyClientCertIfGiven, both CAs
-	TierPublic       = "public@file"    // no client certificate requested
+	// TierDefault: VerifyClientCertIfGiven, both CAs. It is Traefik's
+	// default TLS options (bare "default", never "default@file"): a
+	// name without a router of its own gets them too, so a browser
+	// reusing one HTTP/2 connection across names never gets 421
+	// Misdirected Request between such a name, the core pages and these
+	// apps (Traefik compares the options' names, contract §5).
+	TierDefault = "default"
+	TierPublic  = "public@file" // no client certificate requested
 )
 
 // certMethod reports whether m is a certificate method (contract §5).
@@ -28,7 +34,7 @@ func certMethod(m signin.Method) bool {
 // switched-on certificate method: every alternative holds yubikey_cert →
 // protected@file; every alternative holds a certificate (so at least one
 // accepts only a browser certificate there) → protected-any@file; some
-// alternative does → authaware@file; none does, or rule is nil (the app
+// alternative does → default; none does, or rule is nil (the app
 // has no Portcullis sign-in) → public@file. A rule that isn't compiled,
 // or has no alternative at all, gets the strictest answer,
 // protected@file. An auth.method: mtls app is protected@file before any
@@ -62,7 +68,7 @@ func Tier(rule *signin.Node, on map[signin.Method]bool, publicExceptions bool) s
 		case allCert:
 			t = TierProtectedAny
 		case someCert:
-			t = TierAuthAware
+			t = TierDefault
 		default:
 			t = TierPublic
 		}
@@ -72,12 +78,12 @@ func Tier(rule *signin.Node, on map[signin.Method]bool, publicExceptions bool) s
 
 // HostTier is the option every router of an app's host gets: while its
 // public router exists (publicExceptions) protected@file and
-// protected-any@file become authaware@file (anonymous visitors complete
+// protected-any@file become default (anonymous visitors complete
 // the handshake without a certificate; group-gate's certificate binding
 // still applies per request on gated routers). Other options are kept.
 func HostTier(tier string, publicExceptions bool) string {
 	if publicExceptions && (tier == TierProtected || tier == TierProtectedAny) {
-		return TierAuthAware
+		return TierDefault
 	}
 	return tier
 }

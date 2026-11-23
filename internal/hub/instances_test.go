@@ -318,7 +318,7 @@ func TestTwoInstancesSeparate(t *testing.T) {
 	for _, want := range []string{
 		"    labels: !override\n",
 		`"traefik.http.routers.grafana-team-a_grafana.rule": "Host(` + "`${PORTCULLIS_HOST_GRAFANA:-grafana.portcullis.local}`" + `)"`,
-		`"traefik.http.routers.grafana-team-a_grafana.tls.options": "authaware@file"`,
+		`"traefik.http.routers.grafana-team-a_grafana.tls.options": "default"`,
 		`"traefik.http.routers.grafana-team-a_grafana.middlewares": "portcullis-auth@docker,portcullis-groups@docker,grafana-team-a_grafana-headers@docker,security-headers@file"`,
 		`"traefik.http.routers.grafana-team-a_grafana-api.service": "grafana-team-a_grafana"`,
 		`"traefik.http.middlewares.grafana-team-a_grafana-headers.headers.customresponseheaders.X-App": "grafana"`,

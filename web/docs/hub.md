@@ -738,7 +738,7 @@ block (bordered in amber):
   identity headers;
 - if the app's template requires a YubiKey or browser certificate at the TLS handshake
   (`protected@file` or `protected-any@file`), an amber warning that **all** of the app's routers use
-  `authaware@file` while a public path is open. For native-OIDC apps it adds
+  `default` while a public path is open. For native-OIDC apps it adds
   that the certificate is then only enforced at sign-in (Keycloak's template check); for forward-auth /
   header-auth apps that group-gate still checks the certificate on
   every gated request; and it lists routers without group-gate, which lose

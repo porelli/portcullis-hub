@@ -11,7 +11,7 @@ import (
 // the YubiKey CA, so it is kept for rules every alternative of which needs
 // a YubiKey certificate; protected-any@file for rules every alternative of
 // which needs some certificate; public exceptions turn both into
-// authaware@file. (An auth.method: mtls app is protected@file before any
+// default. (An auth.method: mtls app is protected@file before any
 // rule: the Hub's access.tier, TestMTLSAppAlwaysProtected.)
 func TestTierFourOptions(t *testing.T) {
 	on := defaultOn()
@@ -36,8 +36,8 @@ func TestTierFourOptions(t *testing.T) {
 		{"any[yubikey_cert, browser_cert]", g("any", l("yubikey_cert"), l("browser_cert")), TierProtectedAny},
 		{"any[family:certificate]", g("any", l("family:certificate")), TierProtectedAny},
 		{"all[browser_cert, security_key]", g("all", l("browser_cert"), l("security_key")), TierProtectedAny},
-		{"standard", standard, TierAuthAware},
-		{"any[security_key, browser_cert]", g("any", l("security_key"), l("browser_cert")), TierAuthAware},
+		{"standard", standard, TierDefault},
+		{"any[security_key, browser_cert]", g("any", l("security_key"), l("browser_cert")), TierDefault},
 		{"any[family:passkey]", g("any", l("family:passkey")), TierPublic},
 	} {
 		comp, err := signin.Compile(c.rule, on)
@@ -49,7 +49,7 @@ func TestTierFourOptions(t *testing.T) {
 		}
 		want := c.want
 		if want == TierProtected || want == TierProtectedAny {
-			want = TierAuthAware
+			want = TierDefault
 		}
 		if got := Tier(&comp, on, true); got != want {
 			t.Errorf("%s with public exceptions: Tier = %s, want %s", c.name, got, want)
@@ -64,7 +64,7 @@ func TestTierFourOptions(t *testing.T) {
 	if got := Tier(&comp, off, false); got != TierProtected {
 		t.Errorf("family:certificate, browser_cert off: %s", got)
 	}
-	for in, want := range map[string]string{TierProtected: TierAuthAware, TierProtectedAny: TierAuthAware, TierAuthAware: TierAuthAware, TierPublic: TierPublic} {
+	for in, want := range map[string]string{TierProtected: TierDefault, TierProtectedAny: TierDefault, TierDefault: TierDefault, TierPublic: TierPublic} {
 		if got := HostTier(in, true); got != want {
 			t.Errorf("HostTier(%s, true) = %s, want %s", in, got, want)
 		}

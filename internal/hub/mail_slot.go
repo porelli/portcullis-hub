@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -62,7 +63,7 @@ const (
 	// group-gate (the policy file's group for the host, contract §19.13).
 	mailAdminMiddlewares    = "rate-limit@file,client-headers@file,portcullis-auth@docker,portcullis-groups@docker," + MailAdminKeyMiddleware + "@docker,security-headers@file"
 	mailAdminMiddlewaresVPN = "rate-limit@file,client-headers@file,portcullis-auth@docker," + VPNGroupsMiddleware + "," + MailAdminKeyMiddleware + "@docker,security-headers@file"
-	mailAdminTLSOptions     = "authaware@file"
+	mailAdminTLSOptions     = policy.TierDefault
 	// The provider's environment (contract §19.4).
 	VarMailSlotDir              = "PORTCULLIS_MAIL_SLOT_DIR"
 	VarMailTLSDir               = "PORTCULLIS_MAIL_TLS_DIR"

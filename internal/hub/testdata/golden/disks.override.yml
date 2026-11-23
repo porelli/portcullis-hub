@@ -4,5 +4,5 @@ services:
     ports:
       - "0.0.0.0:8090:8080/tcp"
     labels:
-      traefik.http.routers.disks.tls.options: authaware@file
+      traefik.http.routers.disks.tls.options: default
       traefik.http.routers.disks.entrypoints: websecure,vpnsecure
