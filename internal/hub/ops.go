@@ -657,6 +657,9 @@ func SecretEnvNames(t *templates.Template) map[string]bool {
 	for n := range secretOptionEnvNames(t) {
 		out[n] = true
 	}
+	if t.Manifest.MailSender != nil {
+		out[templates.VarMailSenderPassword] = true
+	}
 	return out
 }
 

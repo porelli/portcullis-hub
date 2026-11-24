@@ -50,6 +50,9 @@ func TestMailStateV2Vector(t *testing.T) {
 	if st.Version != StateVersion || st.Relay == nil || st.Relay.Port != 465 || len(st.TLS.SPKISHA256) != 1 || st.Domains[1].DMARCFloor != "none" || st.ClientIP != ClientIPPreserved {
 		t.Fatalf("decoded %+v", st)
 	}
+	if st.Senders == nil || len(*st.Senders) != 2 || (*st.Senders)[0].Username != "portcullis-hub-mail" || (*st.Senders)[1].Address != "portcullis-app-firefox-sync-fxa@example.com" {
+		t.Fatalf("senders %+v", st.Senders)
+	}
 	back, err := json.Marshal(st)
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +63,29 @@ func TestMailStateV2Vector(t *testing.T) {
 	}
 	if !bytes.Equal(back, want.Bytes()) {
 		t.Fatalf("round trip differs:\n%s\n%s", want.Bytes(), back)
+	}
+}
+
+// TestMailStateSendersShape (§19.5, §19.14): senders absent (nil), present
+// and empty ([]), or a list; never null.
+func TestMailStateSendersShape(t *testing.T) {
+	enc := func(st MailState) string {
+		b, err := json.Marshal(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if s := enc(MailState{}); strings.Contains(s, `"senders"`) {
+		t.Errorf("absent senders encoded: %s", s)
+	}
+	empty := []Sender{}
+	if s := enc(MailState{Senders: &empty}); !strings.Contains(s, `"senders":[]`) || strings.Contains(s, "null,\"aliases") {
+		t.Errorf("empty senders encoded: %s", s)
+	}
+	var st MailState
+	if err := json.Unmarshal([]byte(`{"senders":[]}`), &st); err != nil || st.Senders == nil || len(*st.Senders) != 0 {
+		t.Errorf("present and empty read as %+v (%v)", st.Senders, err)
 	}
 }
 

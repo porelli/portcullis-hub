@@ -95,6 +95,9 @@ func ValidateManifest(m *Manifest) error {
 	if err := validateCatalog(m); err != nil {
 		return err
 	}
+	if err := validateMailSender(m); err != nil {
+		return err
+	}
 	switch m.Instances {
 	case "", InstancesSingle, InstancesMulti:
 	default:

@@ -11,7 +11,7 @@ import (
 	"github.com/portcullis/hub/internal/mailprovider"
 )
 
-// Mail kinds (contract §14.5 "Mail", mail provider): twenty-four kinds
+// Mail kinds (contract §14.5 "Mail", mail provider): twenty-five kinds
 // judged on the wired provider's checks and status, the Hub's own state
 // (the slot, the void, the hold, the timer's visits, mail.tls) and the
 // added mail domains' plans (Inputs.Mail; nil = PORTCULLIS_MAIL off: none
@@ -44,14 +44,15 @@ const (
 	KindMailProviderMissing   = "mail_provider_missing"
 	KindMailVoidPending       = "mail_void_pending"
 	KindMailProviderRefused   = "mail_provider_refused"
+	KindMailSenderUnwired     = "mail_sender_unwired"
 )
 
-// MailKinds are the twenty-four mail kinds, in contract order.
+// MailKinds are the twenty-five mail kinds, in contract order.
 var MailKinds = []string{KindMailPort25Blocked, KindMailPTRMissing, KindMailPTRMismatch, KindMailBlocklisted, KindMailRecordsWrong,
 	KindMailDKIMStuck, KindMailDKIMManual, KindMailCertExpiring, KindMailDMARCFailures, KindMailDMARCPromote, KindMailMTASTSEnforce,
 	KindMailIPv6PTR, KindMailClientIPRewritten, KindMailRateHeld, KindMailTimerMissing, KindMailDANEOff, KindMailLANOnlyUnenforced,
 	KindMailMassRemovalPend, KindMailSyncBlocked, KindMailProviderUnreach, KindMailProviderCheck, KindMailProviderMissing,
-	KindMailVoidPending, KindMailProviderRefused}
+	KindMailVoidPending, KindMailProviderRefused, KindMailSenderUnwired}
 
 // Mail fix kinds (§14.6); mail_records_wrong on an added domain uses
 // dns_apply with sets=mail.
@@ -194,11 +195,13 @@ func sevOf(s string) Severity {
 // kinds always run; the provider-check kinds only while the provider
 // answered.
 func mailFindings(in *Inputs) []Finding {
+	// mail_sender_unwired (§19.14) is judged on its own input: it fires
+	// exactly while mail is off or no provider is wired.
+	out := mailSenderFindings(in)
 	m := in.Mail
 	if m == nil {
-		return nil
+		return out
 	}
-	var out []Finding
 	mk := func(kind string, sev Severity, title, why string, steps []string, inputs any, dom string, subjects ...string) *Finding {
 		f := Finding{Kind: kind, Severity: sev, Title: title, Why: why, Class: FixExplain, Steps: steps,
 			FP: Fingerprint(kind, append([]string{dom}, subjects...)...), Inputs: Digest(inputs)}
@@ -224,6 +227,24 @@ func mailFindings(in *Inputs) []Finding {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].FP < out[j].FP })
+	return out
+}
+
+// MailSenderUnwiredStep is mail_sender_unwired's step.
+const MailSenderUnwiredStep = "Wire a mail provider (Settings → Mail) or disable the app's mail sending"
+
+// mailSenderFindings: one mail_sender_unwired Warning per instance whose
+// template has mail_sender while no provider is wired or mail is off
+// (its five PORTCULLIS_MAIL_SENDER_* values are empty).
+func mailSenderFindings(in *Inputs) []Finding {
+	var out []Finding
+	for _, id := range in.MailSendersUnwired {
+		out = append(out, Finding{Kind: KindMailSenderUnwired, Severity: Warning, Class: FixExplain,
+			Title: id + " can't send mail: no mail provider is wired",
+			Why:   "The template of " + id + " sends mail through Portcullis's mail provider, but no mail provider is wired or mail is off: its mail sender settings are empty, so it sends no mail (sign-up codes, notifications).",
+			Steps: []string{MailSenderUnwiredStep}, FP: Fingerprint(KindMailSenderUnwired, id), Inputs: Digest(id),
+			Link: &Link{Instance: id}})
+	}
 	return out
 }
 

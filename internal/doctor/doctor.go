@@ -286,6 +286,9 @@ type Inputs struct {
 	// none fire; Unavailable: mailctl couldn't be read, no mail findings
 	// and Report.MailUnavailable).
 	Mail *MailIn
+	// MailSendersUnwired: the enabled instances whose template has
+	// mail_sender while no provider is wired or mail is off (§19.14).
+	MailSendersUnwired []string
 	// SSH: the SSH access kinds' inputs (ssh.go; nil = none fire).
 	SSH *SSHIn
 	// Usage / Storage: the usage kinds' inputs (usage.go; nil = none

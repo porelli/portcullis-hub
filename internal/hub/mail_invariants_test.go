@@ -210,6 +210,10 @@ func TestBuildMailStateV2Vector(t *testing.T) {
 	in.Settings.Spam.Block = []string{"spam@example.net"}
 	in.Settings.Relay = &state.MailRelay{Host: "smtp.relay.example.net", Port: 465, Username: "portcullis", SPFInclude: "_spf.relay.example.net"}
 	in.Settings.TLS = state.MailTLS{SPKISHA256: []string{"99ad5d8130ef75b24fa9a72e9ca7d0db45cee16a25405bdaa9d317a6d9dac9c6"}}
+	// The senders (§19.14), as mailSendersLocked lists them (sorted by
+	// username; BuildMailState sets the addresses).
+	in.Senders = []mailprovider.Sender{{Username: "portcullis-hub-mail", UUID: "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"},
+		{Username: "portcullis-app-firefox-sync-fxa", UUID: "7b8c9d0e-1f2a-3b4c-5d6e-7f8a9b0c1d2e"}}
 	doc, notes := BuildMailState(in)
 	if doc == nil {
 		t.Fatalf("no document: %v", notes)

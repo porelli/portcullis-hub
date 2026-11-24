@@ -313,6 +313,10 @@ type AppState struct {
 	// MailCredentials: lowercase user → that person's mail passwords'
 	// metadata (contract §13.16 "Mail passwords"). Never a secret.
 	MailCredentials map[string][]MailCredential `json:"mail_credentials,omitempty" yaml:"mail_credentials,omitempty"`
+	// MailSenders: the app mail senders and Portcullis's own (contract
+	// §19.14), keyed by instance id or MailSenderHub. Never a password
+	// (those are on hub_secrets).
+	MailSenders map[string]MailSender `json:"mail_senders,omitempty" yaml:"mail_senders,omitempty"`
 	// SSH is Hub → SSH access (contract §18.12; off by default).
 	SSH SSHState `json:"ssh" yaml:"ssh"`
 
@@ -320,6 +324,18 @@ type AppState struct {
 	// was no file): the defaults EnsureSignIn filled are in memory only
 	// until the next Save.
 	signInMissing bool
+}
+
+// MailSenderHub is Portcullis's own sender's key (MailSenders).
+const MailSenderHub = "hub"
+
+// MailSender is one sender's Hub state (§19.14): its Hub-generated v4
+// uuid (kept across syncs, replaced only when the sender is voided) and
+// its current credential (the provider's id, "" = none yet).
+type MailSender struct {
+	UUID         string     `json:"uuid" yaml:"uuid"`
+	CredentialID string     `json:"credential_id,omitempty" yaml:"credential_id,omitempty"`
+	CreatedAt    *time.Time `json:"created_at,omitempty" yaml:"created_at,omitempty"`
 }
 
 // InstanceSettings are one instance's settings (contract §13). Values
@@ -736,6 +752,9 @@ func (s *AppState) init() {
 	}
 	if s.MailCredentials == nil {
 		s.MailCredentials = make(map[string][]MailCredential)
+	}
+	if s.MailSenders == nil {
+		s.MailSenders = make(map[string]MailSender)
 	}
 	if s.VPN.Providers == nil {
 		s.VPN.Providers = make(map[string]VPNProvider)

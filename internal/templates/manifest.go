@@ -237,6 +237,9 @@ type Manifest struct {
 	// Mail is the optional mail: block (contract §3.5): the template can
 	// be wired as the server's mail provider.
 	Mail *Mail `yaml:"mail" json:"mail,omitempty"`
+	// MailSender is the optional mail_sender: block (contract §19.14):
+	// the app gets a submission-only mail sender.
+	MailSender *MailSender `yaml:"mail_sender" json:"mail_sender,omitempty"`
 	// Jobs are compose services that run once and exit (contract §3
 	// "One-off jobs"); JobServices adds the service_completed_successfully
 	// dependencies.

@@ -599,7 +599,7 @@ func (h *Hub) reconcileOrphansLocked(r *os.Root, now time.Time) (bool, map[strin
 	}
 	for _, ie := range top {
 		inst := ie.Name()
-		if inst == epochFile && ie.Type().IsRegular() {
+		if (inst == epochFile || inst == senderStoreFile) && ie.Type().IsRegular() {
 			continue
 		}
 		if !ie.IsDir() || !secretNameRe.MatchString(inst) {

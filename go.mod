@@ -37,6 +37,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cobra v1.10.2
 	github.com/vjeantet/ldapserver v1.0.2-0.20260725103726-663e6b9910fb
+	github.com/wneessen/go-mail v0.8.2
 	github.com/xhit/go-str2duration/v2 v2.2.0
 	github.com/yuin/goldmark v1.8.7
 	golang.org/x/crypto v0.59.0

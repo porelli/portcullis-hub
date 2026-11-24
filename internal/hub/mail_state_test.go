@@ -69,6 +69,7 @@ func TestBuildMailStateAddresses(t *testing.T) {
 		ClientIP: "preserved", DKIMRotate: "4320h", FormerRetention: "720h", TLS: mailprovider.StateTLS{SPKISHA256: []string{}},
 		Domains: []mailprovider.Domain{{Name: "example.com", DMARCStart: "reject", DMARCFloor: "reject", Mail: "on", DNSSEC: "secure"},
 			{Name: "team-b.example.org", DMARCStart: "none", DMARCFloor: "none", Mail: "on", DNSSEC: "unsigned"}},
+		Senders: &[]mailprovider.Sender{},
 		Accounts: []mailprovider.Account{
 			{Username: "alice", UUID: uuidAlice, DisplayName: "Alice A.", Addresses: []string{"alice@example.com", "alice@team-b.example.org"}, QuotaBytes: 10 << 30},
 			{Username: "bob", UUID: uuidBob, DisplayName: "Bob B.", Addresses: []string{"bob@example.com"}, QuotaBytes: 10 << 30},

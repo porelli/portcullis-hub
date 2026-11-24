@@ -58,7 +58,7 @@ func TestMailStateV2VectorDecodesStrict(t *testing.T) {
 		}
 	})
 	want := []string{"accounts", "aliases", "client_ip", "confirm_mass_removal", "dkim_rotate", "domains", "former_retention",
-		"generation", "limits", "lists", "local_networks", "mail_hostname", "postmaster", "primary_domain", "relay", "spam",
+		"generation", "limits", "lists", "local_networks", "mail_hostname", "postmaster", "primary_domain", "relay", "senders", "spam",
 		"submission_lan_only", "tls", "version"}
 	if !slices.Equal(keys, want) {
 		t.Fatalf("keys %v, want %v", keys, want)

@@ -28,7 +28,7 @@ func okStatus() *mailprovider.Status {
 // TestMailKinds24: one fixture per kind (twenty-four), each producing
 // exactly that kind with its severity and fix class; a clean input none;
 // the kinds in contract order.
-func TestMailKinds24(t *testing.T) {
+func TestMailKinds25(t *testing.T) {
 	soon := mailNow.Add(2 * 24 * time.Hour)
 	inWeek := mailNow.Add(10 * 24 * time.Hour)
 	old := mailNow.Add(-37 * time.Hour)
@@ -125,8 +125,8 @@ func TestMailKinds24(t *testing.T) {
 		"mail_dkim_manual", "mail_cert_expiring", "mail_dmarc_failures", "mail_dmarc_promote", "mail_mtasts_enforce", "mail_ipv6_ptr",
 		"mail_client_ip_rewritten", "mail_rate_held", "mail_timer_missing", "mail_dane_off", "mail_lan_only_unenforced",
 		"mail_mass_removal_pending", "mail_sync_blocked", "mail_provider_unreachable", "mail_provider_check", "mail_provider_missing",
-		"mail_void_pending", "mail_provider_refused"}
-	if !slices.Equal(MailKinds, want) || len(seen) != 24 {
+		"mail_void_pending", "mail_provider_refused", "mail_sender_unwired"}
+	if !slices.Equal(MailKinds, want) || len(seen) != 25 {
 		t.Fatalf("mail kinds %v", MailKinds)
 	}
 	for _, k := range []string{"mail_hub_secret_invalid", "mail_spam_rules_missing", "mail_external_lookups_on"} {

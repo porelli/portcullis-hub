@@ -41,6 +41,9 @@ type MailBuildInput struct {
 	MailHostname      string
 	ClientIPRewritten bool
 	SubmissionLANOnly bool
+	// Senders are the app mail senders and Portcullis's own (§19.14;
+	// their addresses are set here, on the primary domain).
+	Senders []mailprovider.Sender
 }
 
 // MailState v2's duration defaults (Settings → Mail, contract §19.9).
@@ -188,6 +191,25 @@ func BuildMailState(in MailBuildInput) (*mailprovider.MailState, []string) {
 		accounts[u] = true
 		doc.Accounts = append(doc.Accounts, mailprovider.Account{Username: u, UUID: m.UUIDs[u], DisplayName: m.DisplayNames[u], Addresses: addrs, QuotaBytes: mailQuota(st, m, u)})
 	}
+	// Senders (§19.14): never a person's username, uuid or address (the
+	// person wins: the sender is left out). Always present, never null.
+	senders := []mailprovider.Sender{}
+	uuidUsed := map[string]bool{}
+	for _, a := range doc.Accounts {
+		uuidUsed[a.UUID] = true
+	}
+	for _, s := range in.Senders {
+		addr := s.Username + "@" + primary
+		switch {
+		case accounts[s.Username] || uuidUsed[s.UUID] || used[addr] != "":
+			note("mail: the sender %s collides with a person's mail account: left out", s.Username)
+			continue
+		}
+		uuidUsed[s.UUID] = true
+		used[addr] = "the sender " + s.Username
+		senders = append(senders, mailprovider.Sender{Username: s.Username, UUID: s.UUID, Address: addr})
+	}
+	doc.Senders = &senders
 	// addrOK: addr is on a live mail domain, not reserved and unused.
 	addrOK := func(addr, what string) bool {
 		local, dom, ok := strings.Cut(addr, "@")

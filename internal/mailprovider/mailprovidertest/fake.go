@@ -429,7 +429,16 @@ func (s *Server) mailDomain(d string) bool {
 	return false
 }
 
-// userOfUUID is the username of the account with uuid ("" = none).
+// senders are the applied document's senders (§19.14; none when absent).
+func (s *Server) senders() []mailprovider.Sender {
+	if s.Doc == nil || s.Doc.Senders == nil {
+		return nil
+	}
+	return *s.Doc.Senders
+}
+
+// userOfUUID is the username of the account (or sender) with uuid ("" =
+// none).
 func (s *Server) userOfUUID(uuid string) string {
 	if s.Doc == nil {
 		return ""
@@ -437,6 +446,11 @@ func (s *Server) userOfUUID(uuid string) string {
 	for _, a := range s.Doc.Accounts {
 		if a.UUID == uuid {
 			return a.Username
+		}
+	}
+	for _, x := range s.senders() {
+		if x.UUID == uuid {
+			return x.Username
 		}
 	}
 	return ""
@@ -452,6 +466,11 @@ func (s *Server) uuidOf(u string) string {
 			return a.UUID
 		}
 	}
+	for _, x := range s.senders() {
+		if x.Username == u {
+			return x.UUID
+		}
+	}
 	return ""
 }
 
@@ -464,6 +483,11 @@ func (s *Server) account(u string) bool {
 			return true
 		}
 	}
+	for _, x := range s.senders() {
+		if x.Username == u {
+			return true
+		}
+	}
 	return false
 }
 
@@ -471,6 +495,7 @@ var (
 	usernameRe = regexp.MustCompile(`^[a-z0-9_.@-]{1,64}$`)
 	uuidRe     = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	spkiRe     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	senderRe   = regexp.MustCompile(`^portcullis-(hub-mail|app-[a-z][a-z0-9-]{0,31})$`)
 )
 
 // parse is state.Parse's refusals (contract §19.5).
@@ -580,6 +605,26 @@ func parse(d *mailprovider.MailState) error {
 	if d.Aliases == nil || d.Lists == nil || d.Postmaster == nil || d.LocalNetworks == nil || d.Domains == nil || d.Accounts == nil || d.Spam.Allow == nil || d.Spam.Block == nil {
 		return fmt.Errorf("missing key")
 	}
+	// Senders (§19.14): optional, never null (checked on the raw body),
+	// each well-formed and colliding with no account or other sender.
+	if d.Senders != nil {
+		users, uuids, addrs := map[string]bool{}, map[string]bool{}, map[string]bool{}
+		for _, a := range d.Accounts {
+			users[a.Username], uuids[a.UUID] = true, true
+			for _, x := range a.Addresses {
+				addrs[x] = true
+			}
+		}
+		for _, x := range *d.Senders {
+			switch {
+			case !senderRe.MatchString(x.Username), !uuidRe.MatchString(x.UUID), x.Address != x.Username+"@"+d.PrimaryDomain:
+				return fmt.Errorf("a malformed sender")
+			case users[x.Username] || uuids[x.UUID] || addrs[x.Address]:
+				return fmt.Errorf("the sender %s collides with an account or another sender", x.Username)
+			}
+			users[x.Username], uuids[x.UUID], addrs[x.Address] = true, true, true
+		}
+	}
 	return nil
 }
 
@@ -590,6 +635,10 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 	body.ReadFrom(r.Body)
 	if err := json.Unmarshal(body.Bytes(), &raw); err != nil {
 		errJSON(w, 400, "not JSON")
+		return
+	}
+	if v, ok := raw["senders"]; ok && string(bytes.TrimSpace(v)) == "null" {
+		errJSON(w, 400, "senders is null")
 		return
 	}
 	for _, k := range []string{"version", "generation", "primary_domain", "mail_hostname", "client_ip", "submission_lan_only", "dkim_rotate", "former_retention", "relay", "tls", "confirm_mass_removal", "domains", "accounts", "aliases", "lists", "postmaster", "limits", "spam", "local_networks"} {
@@ -643,6 +692,20 @@ func (s *Server) putState(w http.ResponseWriter, r *http.Request) {
 	keep := map[string]bool{}
 	for _, a := range d.Accounts {
 		keep[a.Username] = true
+	}
+	// Senders: a present list is the complete one; an absent list keeps
+	// the senders (and their passwords).
+	if d.Senders != nil {
+		for _, x := range *d.Senders {
+			keep[x.Username] = true
+		}
+	} else {
+		for _, x := range s.senders() {
+			keep[x.Username] = true
+		}
+		if s.Doc != nil {
+			d.Senders = s.Doc.Senders
+		}
 	}
 	for u := range s.creds {
 		if !keep[u] {

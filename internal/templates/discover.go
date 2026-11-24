@@ -99,6 +99,9 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := CheckTags(&mnode); err != nil {
 		return Template{}, fmt.Errorf("manifest.yaml: %w", err)
 	}
+	if err := validateMailSenderNode(&mnode); err != nil {
+		return Template{}, err
+	}
 	var m Manifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
 		return Template{}, fmt.Errorf("bad manifest: %v", err)

@@ -735,7 +735,12 @@ func (h *Hub) mailRestoreReconcile(ctx context.Context, api MailAPI) {
 	if !all && !restore {
 		return
 	}
-	if !h.reconcileAllMailPasswords(ctx, api, &st) {
+	// The senders' passwords too (§19.14): a restored provider lost them.
+	serr := h.mailVerifySenders(ctx, api)
+	if serr != nil {
+		log.Printf("mail: checking the mail senders' passwords (retrying): %v", serr)
+	}
+	if !h.reconcileAllMailPasswords(ctx, api, &st) || serr != nil {
 		return
 	}
 	if all {

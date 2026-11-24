@@ -255,7 +255,8 @@ func (h *Hub) closeMailProvider(ctx context.Context, id string, actor directory.
 		}
 	}
 	n := h.voidProviderRowsLocked(state.MailCredentialReasonProviderChanged, actor)
-	if n > 0 {
+	// No provider: no sender (their five variables empty now, §19.14).
+	if h.voidSendersLocked() || n > 0 {
 		h.saveLocked()
 	}
 	api := h.mailProviderAPILocked()

@@ -79,7 +79,13 @@ func (f *mailFixture) advance(d time.Duration) {
 // main domain example.org.
 func newMailFixture(t *testing.T, others ...string) *mailFixture {
 	t.Helper()
-	f := &mailFixture{fixture: newMailSlotFixture(t, true, others...), mc: mailprovidertest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
+	return newMailFixtureApps(t, nil, others...)
+}
+
+// newMailFixtureApps is newMailFixture with app templates in the source.
+func newMailFixtureApps(t *testing.T, apps map[string]map[string]string, others ...string) *mailFixture {
+	t.Helper()
+	f := &mailFixture{fixture: newMailSlotFixtureApps(t, mailTemplateFiles(t), true, apps, others...), mc: mailprovidertest.New(t), now: time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)}
 	setCoreMail(t, f.fixture, true)
 	m := mailMembership()
 	f.people = &mailPeople{m: m}

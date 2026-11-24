@@ -58,7 +58,17 @@ func newMailSlotFixture(t *testing.T, wired bool, others ...string) *fixture {
 // newMailSlotFixtureFrom is newMailSlotFixture with mailsrv's files.
 func newMailSlotFixtureFrom(t *testing.T, files map[string]string, wired bool, others ...string) *fixture {
 	t.Helper()
+	return newMailSlotFixtureApps(t, files, wired, nil, others...)
+}
+
+// newMailSlotFixtureApps is newMailSlotFixtureFrom with more (app)
+// templates in the source: id → files.
+func newMailSlotFixtureApps(t *testing.T, files map[string]string, wired bool, apps map[string]map[string]string, others ...string) *fixture {
+	t.Helper()
 	extra := map[string]map[string]string{mailProviderID: files}
+	for id, fs := range apps {
+		extra[id] = fs
+	}
 	for _, id := range others {
 		fs := mailTemplateFiles(t)
 		fs["compose.yml"] = strings.ReplaceAll(fs["compose.yml"], "templates/"+mailProviderID+"/", "templates/"+id+"/")

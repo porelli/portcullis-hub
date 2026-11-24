@@ -9,7 +9,7 @@ import (
 )
 
 // The types mirror the provider API v1 of contract §19.5 exactly
-// (snake_case JSON, every key always present): TestMailStateV2Vector
+// (snake_case JSON, every key always present but senders): TestMailStateV2Vector
 // decodes the contract's MailState v2 vector strictly and encodes it back.
 
 // MailState is the desired-state document (PUT /v1/state, version 2).
@@ -27,12 +27,17 @@ type MailState struct {
 	ConfirmMassRemoval bool      `json:"confirm_mass_removal"`
 	Domains            []Domain  `json:"domains"`
 	Accounts           []Account `json:"accounts"`
-	Aliases            []Alias   `json:"aliases"`
-	Lists              []List    `json:"lists"`
-	Postmaster         []string  `json:"postmaster"`
-	Limits             Limits    `json:"limits"`
-	Spam               Spam      `json:"spam"`
-	LocalNetworks      []string  `json:"local_networks"`
+	// Senders are the app mail senders and Portcullis's own (§19.14):
+	// nil = absent (an older Hub: the provider leaves its senders
+	// untouched), a pointer to an empty list = remove every sender. The
+	// Hub always sends it; never null.
+	Senders       *[]Sender `json:"senders,omitempty"`
+	Aliases       []Alias   `json:"aliases"`
+	Lists         []List    `json:"lists"`
+	Postmaster    []string  `json:"postmaster"`
+	Limits        Limits    `json:"limits"`
+	Spam          Spam      `json:"spam"`
+	LocalNetworks []string  `json:"local_networks"`
 }
 
 // StateVersion is the only MailState version.
@@ -76,6 +81,15 @@ const (
 	MailOff      = "off"
 	MailDraining = "draining"
 )
+
+// Sender is one submission-only sender account (§19.14): username
+// portcullis-hub-mail or portcullis-app-<instance>, a Hub-generated v4
+// uuid, address <username>@<primary_domain>. It has no mailbox.
+type Sender struct {
+	Username string `json:"username"`
+	UUID     string `json:"uuid"`
+	Address  string `json:"address"`
+}
 
 // Account is one mailbox (a member of mail_users).
 type Account struct {

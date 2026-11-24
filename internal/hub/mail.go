@@ -279,8 +279,15 @@ func (h *Hub) mailBuild(ctx context.Context) (*mailprovider.MailState, error) {
 	}
 	dnssec := h.mailDNSSEC(ctx)
 	core := h.mailCore()
+	// The senders (§19.14): a uuid for every new one, saved before any
+	// document names it.
+	h.mu.Lock()
+	if h.mailEnsureSendersLocked() {
+		h.saveLocked()
+	}
+	h.mu.Unlock()
 	h.mu.RLock()
-	in := MailBuildInput{Membership: m, Settings: h.st.Mail, MainDomain: h.cfg.Domain, CoreOn: true, DNSSEC: dnssec,
+	in := MailBuildInput{Senders: h.mailSendersLocked(), Membership: m, Settings: h.st.Mail, MainDomain: h.cfg.Domain, CoreOn: true, DNSSEC: dnssec,
 		LocalNetworks: prefixStrings(h.localNetworksLocked()), Generation: h.st.Mail.Generation,
 		MailHostname: core.Hostname, ClientIPRewritten: core.ClientIPRewritten, SubmissionLANOnly: core.SubmissionLAN}
 	doc, notes := BuildMailState(in)
@@ -416,6 +423,11 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 	if !d.any() {
 		s.addSince = time.Time{}
 		s.mu.Unlock()
+		// A sender still without a password (a failed create) gets one.
+		if err := h.mailSyncSenders(ctx, api, doc, 0, false); err != nil {
+			h.mailLogOnce("mail: the mail senders' passwords (retrying): " + err.Error())
+			return min(mailRetry, h.mailDNSIfDue(ctx, api, now, false))
+		}
 		return h.mailDNSIfDue(ctx, api, now, false)
 	}
 	if !d.removal && !d.other {
@@ -590,6 +602,11 @@ func (h *Hub) mailSyncOnce(ctx context.Context) (next time.Duration) {
 		return mailRetry
 	}
 	h.mailRetireMainLocked(doc)
+	// The senders' credentials (§19.14), once the document is applied.
+	if err := h.mailSyncSenders(ctx, api, &sent, gen, true); err != nil {
+		h.mailLogOnce("mail: the mail senders' passwords (retrying): " + err.Error())
+		return min(mailRetry, h.mailDNSIfDue(ctx, api, now, true))
+	}
 	return h.mailDNSIfDue(ctx, api, now, true)
 }
 

@@ -51,7 +51,14 @@ func TestNoStoreHeader(t *testing.T) {
 		t.Fatalf("%v: %s", err, b)
 	}
 	prof, _ := base64.StdEncoding.DecodeString(v.MobileconfigB64)
-	if v.ID == "" || len(mc.Created) != 1 || v.Password != mc.Created[0] || !strings.Contains(string(prof), v.Password) || !strings.Contains(string(prof), "com.apple.mail.managed") {
+	// (The Hub's own mail sender has a password of its own, §19.14.)
+	var alices []string
+	for _, c := range mc.Created {
+		if strings.HasPrefix(c, "mailpw-alice-") {
+			alices = append(alices, c)
+		}
+	}
+	if v.ID == "" || len(alices) != 1 || v.Password != alices[0] || !strings.Contains(string(prof), v.Password) || !strings.Contains(string(prof), "com.apple.mail.managed") {
 		t.Fatalf("answer %+v", v)
 	}
 	if len(zeroed) < 2 {

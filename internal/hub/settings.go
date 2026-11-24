@@ -1546,7 +1546,7 @@ func (h *Hub) secretMask(t *templates.Template) (func(name, value string) bool, 
 	names := secretOptionEnvNames(t)
 	declared := declaredEnvNames(t)
 	return func(n, v string) bool {
-		return v != "" && (names[n] || strings.HasPrefix(n, ProviderVarPrefix) || providerStored[v] ||
+		return v != "" && (names[n] || n == templates.VarMailSenderPassword || strings.HasPrefix(n, ProviderVarPrefix) || providerStored[v] ||
 			stored[v] && !declared[n] && !templates.ReservedVar(n))
 	}, nil
 }

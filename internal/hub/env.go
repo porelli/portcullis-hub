@@ -74,6 +74,11 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	for k, v := range h.aiEnvLocked(t) {
 		vars[k] = v
 	}
+	// The mail sender variables (§19.14): derived, never kept.
+	sendEnv := h.senderEnvForLocked(t)
+	for k, v := range sendEnv {
+		vars[k] = v
+	}
 	// The model provider variables (§15.12, Task 23): exactly an AI page's
 	// selected, set secrets (single-quoted); never a stale or foreign one.
 	provEnv, err := h.providerEnvLocked(t)
@@ -114,7 +119,8 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	for _, k := range keys {
 		_, quoted := optEnv[k]
 		_, prov := provEnv[k]
-		lines = append(lines, envLine(k, vars[k], quoted || prov))
+		_, snd := sendEnv[k]
+		lines = append(lines, envLine(k, vars[k], quoted || prov || snd))
 	}
 	// The admin's env overrides last (§11.9): they win.
 	block, err := h.envOverrideBlockLocked(t)
@@ -662,6 +668,10 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 		if c, ok := cur[k]; ok && c == v {
 			delete(want, k)
 		}
+	}
+	// The mail sender variables (§19.14), single-quoted like the options.
+	for k, v := range h.senderEnvForLocked(t) {
+		opts[k] = v
 	}
 	for k, v := range opts {
 		if c, ok := cur[k]; ok && strings.TrimPrefix(envLine(k, v, true), k+"=") == c {

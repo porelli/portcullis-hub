@@ -283,6 +283,9 @@ func (h *Hub) markVoidOwedLocked(reason string) error {
 // keeps its start and becomes a restore when this one is. Every path
 // that owes a void goes through it. Caller must hold mu (write).
 func (h *Hub) raiseVoidDebtLocked(reason string) {
+	// Every sender is voided with the credentials (§19.14): new uuids
+	// and passwords at the next document.
+	h.voidSendersLocked()
 	h.st.Mail.VoidGen++
 	next := state.MailVoid{Reason: reason, Since: h.mailNow().UTC()}
 	if prev := h.st.Mail.VoidOwed; prev != nil {
