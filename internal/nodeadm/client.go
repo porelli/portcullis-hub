@@ -39,6 +39,13 @@ const (
 	longTimeout = 15 * time.Minute
 )
 
+// The HTTP/2 health check of the connection to nodeadm (variables:
+// tests shorten them).
+var (
+	h2SendPingTimeout = 10 * time.Second
+	h2PingTimeout     = 5 * time.Second
+)
+
 // The error kinds callers branch on (§20.2).
 const (
 	KindQuorumMinimum    = "quorum_minimum"
@@ -92,7 +99,13 @@ func (c *Client) client() *http.Client {
 			return
 		}
 		tr := &http.Transport{Proxy: nil, TLSClientConfig: c.TLS, ForceAttemptHTTP2: true, MaxIdleConns: 4, IdleConnTimeout: time.Minute,
-			TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: longTimeout}
+			TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: longTimeout,
+			// The HTTP/2 health check: a connection silent for
+			// h2SendPingTimeout is pinged and closed when the ping isn't
+			// answered within h2PingTimeout. Without it a connection to a
+			// nodeadm whose node was cut off (dead, never reset) stayed in
+			// the pool and every later call timed out on it.
+			HTTP2: &http.HTTP2Config{SendPingTimeout: h2SendPingTimeout, PingTimeout: h2PingTimeout}}
 		c.hc = &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	})
 	return c.hc
