@@ -86,11 +86,22 @@ process.stdout.write(JSON.stringify({ off: H.pageHtml(v), on: H.pageHtml(on), br
 	if !strings.Contains(got.Failed, "&lt;b&gt;502&lt;/b&gt;") || !strings.Contains(got.Failed, "<code>./portcullis ha enable</code>") {
 		t.Errorf("failed: %s", got.Failed)
 	}
+	// The panel sits in Settings → Servers; its loader (settingsnav.js)
+	// shows it on Kubernetes only.
 	idx := webAsset(t, "index.html")
-	for _, w := range []string{`<div id="ha-section" hidden>`, "High availability</div>", `<div id="ha-root"></div>`, "/static/ha.js", "haSec.hidden = !runtimeIsKube();",
+	for _, w := range []string{`<div id="ha-section" hidden>`, "High availability</div>", `<div id="ha-root"></div>`, "/static/ha.js",
 		"PortcullisHA.render(document.getElementById('ha-root'))"} {
 		if !strings.Contains(idx, w) {
 			t.Errorf("index.html lacks %q", w)
+		}
+	}
+	if i, j := strings.Index(idx, `id="settings-servers"`), strings.Index(idx, `<div id="ha-section" hidden>`); i < 0 || j < i || strings.Contains(idx[i:j], "</section>") {
+		t.Errorf("the HA panel isn't inside Settings → Servers")
+	}
+	nav := webAsset(t, "settingsnav.js")
+	for _, w := range []string{"byId('ha-section').hidden = !kube;", "window.PortcullisHA.render(byId('ha-root'))"} {
+		if !strings.Contains(nav, w) {
+			t.Errorf("settingsnav.js lacks %q", w)
 		}
 	}
 }

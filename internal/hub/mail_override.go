@@ -510,11 +510,11 @@ func (h *Hub) mailAdminTicketKey(id string) (string, error) {
 		}
 	}
 	for _, d := range []string{h.cfg.AppFilesDir, h.appFilesDir(id), dir} {
-		if err := os.MkdirAll(d, appFilesDirMode); err != nil {
+		if err := fsutil.MkdirAll(d, appFilesDirMode); err != nil {
 			return "", err
 		}
 	}
-	if err := os.Chmod(dir, appFilesDirMode); err != nil {
+	if err := fsutil.Chmod(dir, appFilesDirMode); err != nil {
 		return "", err
 	}
 	k, err := mailRandString(mailSecretLen)

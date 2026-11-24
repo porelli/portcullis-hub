@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -184,6 +185,13 @@ func defaultLink(f *Finding) *Link {
 	case strings.HasPrefix(k, "ai_"):
 		// The checks set the AI tab themselves; this is the fallback.
 		return tabOr(f, TabAI, "")
+	case k == KindTemplateNoMemoryLimit:
+		// HA: an instance without a memory limit (its Usage tab).
+		return tabOr(f, TabUsage, PageUsage)
+	case slices.Contains(HAKinds, k):
+		// High availability: its panel is under Settings → Servers
+		// (Kubernetes only).
+		return page(PageSettingsServers)
 	case k == KindMemoryNearLimit, k == KindOOMKilled, k == KindPidsNearLimit:
 		return tabOr(f, TabUsage, PageUsage)
 	case k == KindPersonOption:
