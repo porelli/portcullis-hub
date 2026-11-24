@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,6 +30,8 @@ import (
 	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/runtime/kube"
 	"github.com/portcullis/hub/internal/usage"
+	"github.com/prometheus/procfs"
+	"github.com/prometheus/procfs/blockdevice"
 )
 
 // usageStatsUnavailable is the fixed text of a failed stats sample.
@@ -38,11 +41,20 @@ const usageStatsUnavailable = "stats unavailable"
 const usageCoreProject = "portcullis"
 
 // usageInst is an instance as the sampler names it.
-type usageInst struct{ ID, Template, Name string }
+type usageInst struct {
+	ID, Template, Name string
+	// Jobs are the template's one-shot job services; Skip the services
+	// expected to have no container (statusSkips: an inactive profile, a
+	// companion scaled to 0). Both feed unitHealth's group status.
+	Jobs, Skip map[string]bool
+	// Server: the server it runs on ("" = the primary).
+	Server string
+}
 
 // usageCont is one container the sampler knows (by container ID).
 type usageCont struct {
 	ID       string
+	Server   string // "" = the primary; a worker's id
 	Group    string // instance id, "core", or the unknown project's name
 	Kind     string // usageApp | usageCore | usageUnknown | usageHelper
 	Service  string
@@ -65,6 +77,10 @@ type usageCont struct {
 	// LastMem is the last measured working set, kept across a stop (M4:
 	// a restart right after it neared the limit is an OOM suspect).
 	LastMem *int64
+	// Job / Skip: from the instance (usageInst); Health its unitHealth
+	// and JobKey the list state the job's health was read for.
+	Job, Skip      bool
+	Health, JobKey string
 }
 
 const (
@@ -86,8 +102,9 @@ type usageState struct {
 	instances func() []usageInst
 
 	conts map[string]*usageCont
-	// rings: "<group>\x00<service>.<number>" → that key's points (a
-	// recreated container continues its key); times: group → the sweep
+	// rings: "<group key>\x00<service>.<number>" → that key's points (a
+	// recreated container continues its key; groupKey: the group, or
+	// "<server>/<group>" on a worker); times: group key → the sweep
 	// times of the group (the history's time axis).
 	rings map[string]*usage.Ring
 	times map[string]*usage.Ring
@@ -102,13 +119,26 @@ type usageState struct {
 	cpus        int
 	mem         int64
 	infoAt      time.Time
-	notShown    int
-	overLimit   int
+	// dataRoot: the engine's data root (the runtime info's first
+	// forbidden root, read with cpus), the docker_data disk's path.
+	dataRoot  string
+	notShown  int
+	overLimit int
 	// notMeasured: every sampled container answered the same
 	// NotMeasuredError (Kubernetes): its Why.
 	notMeasured string
 	// sweeping: one sweep at a time.
 	sweeping sync.Mutex
+
+	// The host's figures (contract §6 "Host figures"): readHost reads
+	// the counters once per sweep (tests inject one; nil: not read),
+	// host is the last good read (the next rate's base), hostRing the
+	// derived figures of the last hour, hostErr the last read's failure
+	// (logged once, not every sweep).
+	readHost func() (usage.HostCounters, error)
+	host     *usage.HostCounters
+	hostRing *usage.HostRing
+	hostErr  bool
 
 	// The storage measurer (usage_storage.go): diskMu is held around each
 	// fixer run, by the doctor's scans too (U12: never two walks at
@@ -122,11 +152,71 @@ type usageState struct {
 	fixer     func(ctx context.Context, r fixerRun) (*folderfix.Report, error)
 	// scrapedAt: the metrics listener's last scrape (Unix ns; 0 = never).
 	scrapedAt atomic.Int64
+	// workers: each ready worker's sampler state (usage_workers.go);
+	// notReady: an app's server that isn't ready → its reason; busy: a
+	// worker whose last sweep's goroutine still runs (its backend ignored
+	// the deadline: skipped until it returns; busyMu guards it).
+	workers  map[string]*usageWorker
+	notReady map[string]string
+	busyMu   sync.Mutex
+	busy     map[string]bool
+	// primaryN / primaryOver: the primary's sampled count and its part of
+	// over_limit (the last sweep's; the cap's estimate while the primary
+	// lists).
+	primaryN, primaryOver int
+	// workerOver: the workers' part of over_limit (the last join's).
+	workerOver int
 }
 
 func newUsageState() *usageState {
 	return &usageState{now: func() time.Time { return time.Now().UTC() }, budget: usage.SweepBudget, statsTimeout: usage.StatsTimeout,
-		conts: map[string]*usageCont{}, rings: map[string]*usage.Ring{}, times: map[string]*usage.Ring{}, insts: map[string]usageInst{}}
+		conts: map[string]*usageCont{}, rings: map[string]*usage.Ring{}, times: map[string]*usage.Ring{}, insts: map[string]usageInst{},
+		readHost: readProcHost, hostRing: usage.NewHostRing(usage.RingSize), workers: map[string]*usageWorker{}, notReady: map[string]string{}, busy: map[string]bool{}}
+}
+
+// readProcHost reads the host's counters from the Hub's own /proc.
+func readProcHost() (usage.HostCounters, error) {
+	fs, err := procfs.NewFS("/proc")
+	if err != nil {
+		return usage.HostCounters{}, err
+	}
+	bfs, err := blockdevice.NewFS("/proc", "/sys")
+	if err != nil {
+		return usage.HostCounters{}, err
+	}
+	return usage.ReadHost(fs, bfs)
+}
+
+// sweepHost reads the host's counters and adds the derived figures at
+// now (cpus: the engine's NCPU, 0: the cached one). Never on Kubernetes
+// (kind): the Hub's pod is no reliable view of a node, so procfs isn't
+// read at all. The error's text is procfs's (a path), never an engine
+// body.
+func (s *usageState) sweepHost(now time.Time, kind string, cpus int) {
+	if s.readHost == nil || kind == string(runtime.KindKubernetes) {
+		return
+	}
+	c, err := s.readHost()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cpus <= 0 {
+		cpus = s.cpus
+	}
+	if err != nil {
+		if !s.hostErr {
+			log.Printf("usage: the host's counters: %v", err)
+		}
+		s.hostErr = true
+		s.hostRing.Add(usage.HostPoint{T: now})
+		return
+	}
+	if s.hostErr {
+		log.Printf("usage: the host's counters are read again")
+	}
+	s.hostErr = false
+	smp := usage.DeriveHost(s.host, c, cpus)
+	s.host = &c
+	s.hostRing.Add(usage.HostPoint{T: now, S: smp})
 }
 
 // RunUsageSampler sweeps every interval until ctx ends (main: usage.Interval).
@@ -170,8 +260,26 @@ func (h *Hub) usageInstances() map[string]usageInst {
 		}
 		return out
 	}
+	// The jobs and skipped services in one pass under mu (no template
+	// copied per instance: usageInstances also serves single lookups).
+	h.mu.RLock()
+	jobs := make(map[string]map[string]bool, len(h.instances))
+	skips := make(map[string]map[string]bool, len(h.instances))
+	for i := range h.instances {
+		t := &h.instances[i]
+		inactive, scaledOff := h.statusSkipsLocked(t)
+		skip := make(map[string]bool, len(inactive)+len(scaledOff))
+		for svc := range inactive {
+			skip[svc] = true
+		}
+		for svc := range scaledOff {
+			skip[svc] = true
+		}
+		jobs[t.ID], skips[t.ID] = maps.Clone(t.Jobs), skip
+	}
+	h.mu.RUnlock()
 	for _, v := range h.Instances() {
-		out[v.ID] = usageInst{ID: v.ID, Template: v.Template, Name: v.Name}
+		out[v.ID] = usageInst{ID: v.ID, Template: v.Template, Name: v.Name, Jobs: jobs[v.ID], Skip: skips[v.ID], Server: h.serverOf(v.ID)}
 	}
 	return out
 }
@@ -185,7 +293,14 @@ type usageResult struct {
 	skipped   bool // the sweep's budget ran out first
 }
 
-// usageSweep is one sweep (RunUsageSampler; tests call it directly).
+// usageSweep is one sweep (RunUsageSampler; tests call it directly): the
+// primary's list and stats, and every ready worker's through its agent
+// (usage_workers.go), in parallel, all within the sweep's budget. The
+// primary never waits for a worker: its sample is recorded as soon as it
+// is taken (its freshness is its own); the workers join when they answer,
+// or are "not measured" at the deadline. The 256-container cap counts
+// every server: the primary first, the rest shared fairly among the
+// workers (usageCap).
 func (h *Hub) usageSweep(ctx context.Context) {
 	s := h.usage
 	if !s.sweeping.TryLock() {
@@ -197,9 +312,18 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	if s.startedAt.IsZero() {
 		s.startedAt = now
 	}
+	budget, statsTimeout := s.budget, s.statsTimeout
 	s.mu.Unlock()
 	insts := h.usageInstances()
 	kind := string(h.rt.Kind())
+	bctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	// The workers run on their own from here; the cap's coordinator
+	// learns the primary's count below.
+	caps := newUsageCap()
+	workers := h.startWorkers(bctx, now, insts, statsTimeout, caps)
+	notReady := h.usageNotReady()
 
 	s.mu.RLock()
 	needInfo := s.infoAt.IsZero() || now.Sub(s.infoAt) >= usage.InfoEvery
@@ -212,20 +336,27 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			log.Printf("usage: the engine's info: %v", err)
 		}
 	}
+	hostCPUs := 0
+	if info != nil {
+		hostCPUs = info.CPUs
+	}
+	s.sweepHost(now, kind, hostCPUs)
 
 	units, err := h.rt.List(ctx, runtime.Filter{})
 	if err != nil {
+		caps.primary(0)
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		s.sweptAt, s.kind = now, kind
 		if info != nil {
-			s.cpus, s.mem, s.infoAt = info.CPUs, info.MemoryBytes, now
+			s.cpus, s.mem, s.infoAt, s.dataRoot = info.CPUs, info.MemoryBytes, now, firstRoot(info)
 		}
 		if usageRefused(err) {
 			s.verified, s.why = false, usageRefusal(err)
-			return
+		} else {
+			log.Printf("usage: listing containers: %v", err)
 		}
-		log.Printf("usage: listing containers: %v", err)
+		s.mu.Unlock()
+		h.joinWorkers(workers, now, insts, notReady, s.overLimitPrimary())
 		return
 	}
 	in, notShown := usageScope(units, insts)
@@ -233,41 +364,182 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		// The Hub sees only its apps namespace: nothing else to count.
 		notShown = 0
 	}
+	// An app placed on a worker: its leftovers here are only counted.
+	in = slices.DeleteFunc(in, func(u usageUnit) bool {
+		if u.Kind == usageApp && insts[u.Group].Server != "" {
+			notShown++
+			return true
+		}
+		return false
+	})
 	over := 0
 	if len(in) > usage.MaxContainers {
 		over = len(in) - usage.MaxContainers
 		in = in[:usage.MaxContainers]
 	}
+	caps.primary(len(in))
 
-	// What each container needs, read under the sampler's lock only.
-	// A container that started again since the last sweep (its state
-	// went back to running, or its CPU counter went down) is inspected at
-	// once: its restart count and OOM state are fresh (M4).
-	type job struct {
-		u       usageUnit
-		inspect bool
-		prevCPU *uint64
+	jobHealth := h.usageJobHealth(ctx, h.rt, "", in, insts, statsTimeout)
+	jobs := s.usagePlan("", in, now)
+	results, refused := usageSample(bctx, h.rt, jobs, statsTimeout)
+
+	s.mu.Lock()
+	s.sweptAt, s.kind, s.insts = now, kind, insts
+	if info != nil {
+		s.cpus, s.mem, s.infoAt, s.dataRoot = info.CPUs, info.MemoryBytes, now, firstRoot(info)
 	}
-	var jobs []job
+	if refused != nil {
+		s.verified, s.why = false, usageRefusal(refused)
+		s.mu.Unlock()
+		h.joinWorkers(workers, now, insts, notReady, s.overLimitPrimary())
+		return
+	}
+	s.verified, s.why = true, ""
+	s.lastSuccess = now
+	s.notShown, s.primaryOver, s.primaryN = notShown, over, len(in)
+	// The workers' part stays the last join's until they join again
+	// (their cut apps are shown until then).
+	s.overLimit = over + s.workerOver
+	// The primary's own engine is trusted: its rates bounded by
+	// MaxCPUCores only (cpus 0).
+	skipped, nSampled, notMeas := s.applyLocked("", now, in, jobs, results, insts, jobHealth, 0, "")
+	s.notMeasured = ""
+	if len(notMeas) == 1 && nSampled > 0 {
+		for why, n := range notMeas {
+			if n == nSampled {
+				s.notMeasured = why
+			}
+		}
+	}
+	s.axesLocked(now, insts)
+	s.mu.Unlock()
+	if skipped > 0 {
+		log.Printf("usage: the sweep's %s budget is spent: budget_skipped %d containers kept their previous sample", budget, skipped)
+	}
+	h.joinWorkers(workers, now, insts, notReady, over)
+}
+
+// overLimitPrimary is the primary's part of over_limit (its last
+// sweep's).
+func (s *usageState) overLimitPrimary() int {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.primaryOver
+}
+
+// axesLocked adds now to every running group's time axis and drops the
+// rings and axes of keys gone for an hour or whose instance is gone (or
+// moved to another server). Caller holds s.mu.
+func (s *usageState) axesLocked(now time.Time, insts map[string]usageInst) {
+	groups := map[string]bool{}
+	for _, c := range s.conts {
+		if c.Running && (c.Kind == usageApp || c.Kind == usageCore) {
+			groups[groupKey(c.Server, c.Group)] = true
+		}
+	}
+	for g := range groups {
+		tr := s.times[g]
+		if tr == nil {
+			tr = usage.NewRing(usage.RingSize)
+			s.times[g] = tr
+		}
+		if last, ok := tr.Last(); !ok || !last.T.Equal(now) {
+			tr.Add(usage.Point{T: now})
+		}
+	}
+	keep := func(gk string) bool {
+		server, group := splitGroupKey(gk)
+		inst, ok := insts[group]
+		if group == usageCoreProject && server == "" {
+			return true
+		}
+		return ok && inst.Server == server
+	}
+	for k, rg := range s.rings {
+		g, _, _ := strings.Cut(k, "\x00")
+		last, _ := rg.Last()
+		if !keep(g) || now.Sub(last.T) > time.Duration(usage.RingSize)*usage.Interval {
+			delete(s.rings, k)
+		}
+	}
+	for g, tr := range s.times {
+		last, _ := tr.Last()
+		if !keep(g) || now.Sub(last.T) > time.Duration(usage.RingSize)*usage.Interval {
+			delete(s.times, g)
+		}
+	}
+}
+
+// usageJob is one container's work in a sweep.
+type usageJob struct {
+	u       usageUnit
+	inspect bool
+	prevCPU *uint64
+}
+
+// usageJobHealth reads each stopped one-shot job container's health
+// (the list has no exit code) once per list state (jobKey), not every
+// sweep, on rt (server's).
+func (h *Hub) usageJobHealth(ctx context.Context, rt runtime.Instances, server string, in []usageUnit, insts map[string]usageInst, timeout time.Duration) map[string]string {
+	s := h.usage
+	jobHealth := map[string]string{}
+	s.mu.RLock()
+	var jobUnits []usageUnit
 	for _, u := range in {
-		c := s.conts[u.ID]
+		if u.Kind != usageApp || !insts[u.Group].Jobs[u.Service] {
+			continue
+		}
+		if c := s.conts[contKey(server, u.ID)]; c != nil && c.Job && c.JobKey == jobKey(u.Unit) && c.Health != "" {
+			jobHealth[u.ID] = c.Health
+			continue
+		}
+		jobUnits = append(jobUnits, u)
+	}
+	s.mu.RUnlock()
+	for _, u := range jobUnits {
+		health := listedJobState(u.State, u.Status)
+		if u.State != "running" && u.State != "restarting" && u.State != "created" {
+			sctx, scancel := context.WithTimeout(ctx, timeout)
+			if st, err := rt.State(sctx, u.ID); err == nil {
+				health = unitHealth(true, st)
+			}
+			scancel()
+		}
+		jobHealth[u.ID] = health
+	}
+	return jobHealth
+}
+
+// usagePlan is what each of server's containers needs, read under the
+// sampler's lock only. A container that started again since the last
+// sweep (its state went back to running, or its CPU counter went down)
+// is inspected at once: its restart count and OOM state are fresh (M4).
+func (s *usageState) usagePlan(server string, in []usageUnit, now time.Time) []usageJob {
+	var jobs []usageJob
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range in {
+		c := s.conts[contKey(server, u.ID)]
 		due := c == nil || c.Inspect.IsZero() || now.Sub(c.Inspect) >= usage.InspectEvery ||
 			(u.State == "running" && c.State != "running")
 		if u.State != "running" && !due {
 			continue
 		}
-		j := job{u: u, inspect: due}
+		j := usageJob{u: u, inspect: due}
 		if c != nil && c.Prev != nil {
 			j.prevCPU = c.Prev.CPUUsageNS
 		}
 		jobs = append(jobs, j)
 	}
-	budget, statsTimeout := s.budget, s.statsTimeout
-	s.mu.RUnlock()
+	return jobs
+}
 
+// usageSample runs jobs on rt, usage.Parallel at once, each call under
+// timeout, all within bctx (the sweep's budget). refused: the engine
+// guard refused a call (the sweep is then unverified).
+func usageSample(bctx context.Context, rt runtime.Instances, jobs []usageJob, timeout time.Duration) ([]usageResult, error) {
 	results := make([]usageResult, len(jobs))
-	bctx, cancel := context.WithTimeout(ctx, budget)
+	jctx, cancel := context.WithCancel(bctx)
 	defer cancel()
 	var refused error
 	var refusedMu sync.Mutex
@@ -279,14 +551,14 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			defer wg.Done()
 			for i := range work {
 				r := &results[i]
-				if bctx.Err() != nil {
+				if jctx.Err() != nil {
 					r.skipped = true
 					continue
 				}
 				j := jobs[i]
 				if j.inspect {
-					ictx, icancel := context.WithTimeout(bctx, statsTimeout)
-					ui, err := h.rt.Inspect(ictx, j.u.ID)
+					ictx, icancel := context.WithTimeout(jctx, timeout)
+					ui, err := rt.Inspect(ictx, j.u.ID)
 					icancel()
 					if err == nil {
 						r.inspected, r.info = true, ui
@@ -302,15 +574,15 @@ func (h *Hub) usageSweep(ctx context.Context) {
 				if j.u.State != "running" {
 					continue
 				}
-				sctx, scancel := context.WithTimeout(bctx, statsTimeout)
-				st, err := h.rt.Stats(sctx, j.u.ID)
+				sctx, scancel := context.WithTimeout(jctx, timeout)
+				st, err := rt.Stats(sctx, j.u.ID)
 				scancel()
 				switch {
 				case err == nil:
 					r.stats = &st
 					if !j.inspect && j.prevCPU != nil && st.CPUUsageNS != nil && *st.CPUUsageNS < *j.prevCPU {
-						ictx, icancel := context.WithTimeout(bctx, statsTimeout)
-						if ui, err := h.rt.Inspect(ictx, j.u.ID); err == nil {
+						ictx, icancel := context.WithTimeout(jctx, timeout)
+						if ui, err := rt.Inspect(ictx, j.u.ID); err == nil {
 							r.inspected, r.info = true, ui
 						}
 						icancel()
@@ -321,7 +593,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 					refusedMu.Unlock()
 					cancel()
 					r.skipped = true
-				case bctx.Err() != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded):
+				case jctx.Err() != nil && bctx.Err() != nil && errors.Is(err, context.DeadlineExceeded):
 					r.skipped = true
 				default:
 					r.err = err
@@ -334,45 +606,66 @@ func (h *Hub) usageSweep(ctx context.Context) {
 	}
 	close(work)
 	wg.Wait()
+	return results, refused
+}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sweptAt, s.kind, s.insts = now, kind, insts
-	if info != nil {
-		s.cpus, s.mem, s.infoAt = info.CPUs, info.MemoryBytes, now
-	}
-	if refused != nil {
-		s.verified, s.why = false, usageRefusal(refused)
-		return
-	}
-	s.verified, s.why = true, ""
-	s.lastSuccess = now
-	s.notShown, s.overLimit = notShown, over
+// applyLocked records one server's sweep: its containers (any of the
+// server's not listed is gone), each result, and the rings. Caller holds
+// s.mu. skipped: the budget ran out first; sampled: running containers
+// of this sweep; notMeas: the NotMeasuredError reasons by count.
+//
+// cpus: the server's CPU count (0: unknown); a derived CPU rate is never
+// above it, nor above usage.MaxCPUCores (a worker's counters and read
+// times are untrusted).
+//
+// skipWhy (a worker's): a job the budget skipped leaves that container
+// not measured with this reason (never its previous sample shown as
+// current); "" (the primary): it keeps its previous sample, logged
+// budget_skipped.
+func (s *usageState) applyLocked(server string, now time.Time, in []usageUnit, jobs []usageJob, results []usageResult, insts map[string]usageInst, jobHealth map[string]string, cpus int, skipWhy string) (skipped, sampled int, notMeas map[string]int) {
 	live := map[string]bool{}
 	for _, u := range in {
-		live[u.ID] = true
-		c := s.conts[u.ID]
+		k := contKey(server, u.ID)
+		live[k] = true
+		c := s.conts[k]
 		if c == nil {
-			c = &usageCont{ID: u.ID}
-			s.conts[u.ID] = c
+			c = &usageCont{ID: u.ID, Server: server}
+			s.conts[k] = c
 		}
 		c.Group, c.Kind, c.Service, c.Number, c.State, c.LastSeen, c.Image = u.Group, u.Kind, u.Service, u.Number, u.State, now, u.Image
 		c.Running = u.State == "running"
+		inst := insts[u.Group]
+		c.Job = u.Kind == usageApp && inst.Jobs[u.Service]
+		c.Skip = u.Kind == usageApp && inst.Skip[u.Service]
+		if c.Job {
+			c.Health, c.JobKey = jobHealth[u.ID], jobKey(u.Unit)
+		} else {
+			c.Health, c.JobKey = unitHealth(false, docker.State{Running: c.Running, Status: u.State}), ""
+		}
 		if !c.Running {
 			c.Sampled, c.Prev, c.Sample, c.Err, c.NotMeas = false, nil, usage.Sample{}, "", ""
 		}
 	}
-	for id := range s.conts {
-		if !live[id] {
-			delete(s.conts, id)
+	for k, c := range s.conts {
+		if c.Server == server && !live[k] {
+			delete(s.conts, k)
 		}
 	}
-	skipped, notMeas, sampled := 0, map[string]int{}, 0
+	notMeas = map[string]int{}
 	for i, j := range jobs {
 		r := results[i]
-		c := s.conts[j.u.ID]
+		c := s.conts[contKey(server, j.u.ID)]
+		if c == nil {
+			continue
+		}
 		if r.skipped {
 			skipped++
+			if skipWhy != "" && c.Running {
+				c.Sample, c.Sampled, c.Err, c.NotMeas = usage.Sample{}, false, "", skipWhy
+				if !c.Inspect.IsZero() {
+					c.Sample = usage.LimitsSample(c.Limits)
+				}
+			}
 			continue
 		}
 		// A restart: the counter went down, or a later inspect has more
@@ -399,6 +692,15 @@ func (h *Hub) usageSweep(ctx context.Context) {
 		switch {
 		case r.stats != nil:
 			c.Sample = usage.Derive(c.Prev, c.PrevAt, *r.stats, c.Limits)
+			if v := c.Sample.CPUCores; v != nil {
+				lim := float64(usage.MaxCPUCores)
+				if cpus > 0 {
+					lim = min(lim, float64(cpus))
+				}
+				if *v > lim {
+					c.Sample.CPUCores = &lim
+				}
+			}
 			st := *r.stats
 			c.Prev, c.PrevAt, c.Sampled, c.Err, c.NotMeas = &st, c.Limits.StartedAt, true, "", ""
 		default:
@@ -423,7 +725,7 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			c.LastMem = &m
 		}
 		if c.Kind == usageApp || c.Kind == usageCore {
-			key := c.Group + "\x00" + usageKey(c.Service, c.Number)
+			key := ringKey(server, c.Group, c.Service, c.Number)
 			rg := s.rings[key]
 			if rg == nil {
 				rg = usage.NewRing(usage.RingSize)
@@ -432,50 +734,38 @@ func (h *Hub) usageSweep(ctx context.Context) {
 			rg.Add(usage.Point{T: now, S: c.Sample, Restarts: c.Limits.Restarts, OOMKilled: c.Limits.OOMKilled || oomSuspect, ID: c.ID})
 		}
 	}
-	s.notMeasured = ""
-	if len(notMeas) == 1 && sampled > 0 {
-		for why, n := range notMeas {
-			if n == sampled {
-				s.notMeasured = why
-			}
-		}
+	return skipped, sampled, notMeas
+}
+
+// contKey is a container's key in usageState.conts: its id on the
+// primary, "<server>/<id>" on a worker (engines may reuse ids).
+func contKey(server, id string) string {
+	if server == "" {
+		return id
 	}
-	// The groups' time axes, and rings of keys that are gone for an hour
-	// or whose instance is gone.
-	groups := map[string]bool{}
-	for _, c := range s.conts {
-		if c.Running && (c.Kind == usageApp || c.Kind == usageCore) {
-			groups[c.Group] = true
-		}
+	return server + "/" + id
+}
+
+// groupKey is a group's key in the rings and time axes: the group on the
+// primary, "<server>/<group>" on a worker (contract §11.11: rings keyed
+// <server>/<group>/<service>.<number>; neither holds a "/").
+func groupKey(server, group string) string {
+	if server == "" {
+		return group
 	}
-	for g := range groups {
-		tr := s.times[g]
-		if tr == nil {
-			tr = usage.NewRing(usage.RingSize)
-			s.times[g] = tr
-		}
-		tr.Add(usage.Point{T: now})
+	return server + "/" + group
+}
+
+func splitGroupKey(k string) (server, group string) {
+	if s, g, ok := strings.Cut(k, "/"); ok {
+		return s, g
 	}
-	keep := func(group string) bool {
-		_, ok := insts[group]
-		return ok || group == usageCoreProject
-	}
-	for k, rg := range s.rings {
-		g, _, _ := strings.Cut(k, "\x00")
-		last, _ := rg.Last()
-		if !keep(g) || now.Sub(last.T) > time.Duration(usage.RingSize)*usage.Interval {
-			delete(s.rings, k)
-		}
-	}
-	for g, tr := range s.times {
-		last, _ := tr.Last()
-		if !keep(g) || now.Sub(last.T) > time.Duration(usage.RingSize)*usage.Interval {
-			delete(s.times, g)
-		}
-	}
-	if skipped > 0 {
-		log.Printf("usage: the sweep's %s budget is spent: budget_skipped %d containers kept their previous sample", budget, skipped)
-	}
+	return "", k
+}
+
+// ringKey is a container key's ring: "<group key>\x00<service>.<number>".
+func ringKey(server, group, service string, number int) string {
+	return groupKey(server, group) + "\x00" + usageKey(service, number)
 }
 
 func usageKey(service string, number int) string { return service + "." + strconv.Itoa(number) }
@@ -504,4 +794,26 @@ func (h *Hub) SweepUsage(ctx context.Context) {
 	if !h.noEngine() {
 		h.usageSweep(ctx)
 	}
+}
+
+// jobKey is the list state a job container's health was read for: its
+// state and, when exited, the "Exited (n)" prefix of its status text (a
+// rerun with another exit code is read again).
+func jobKey(u runtime.Unit) string {
+	if u.State == "exited" {
+		if i := strings.IndexByte(u.Status, ')'); i >= 0 {
+			return u.State + "\x00" + u.Status[:i+1]
+		}
+	}
+	return u.State
+}
+
+// firstRoot is info's engine data root (the first forbidden root: Docker's
+// DockerRootDir, a worker's from its agent); "" on Kubernetes (its roots
+// are the operator's runtime roots, not one data root).
+func firstRoot(info *runtime.Info) string {
+	if info == nil || info.Kind == runtime.KindKubernetes || len(info.ForbiddenRoots) == 0 {
+		return ""
+	}
+	return info.ForbiddenRoots[0]
 }

@@ -2,11 +2,13 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -16,6 +18,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/lldap"
 	"github.com/portcullis/hub/internal/templates"
 )
 
@@ -31,6 +35,9 @@ type mailRender struct {
 	networks map[string]map[string]string // service → network → its YAML body (" {}" or "\n" and a mapping)
 	ports    map[string][]string
 	labels   map[string]map[string]string
+	// extraGroups are further groups per service (the admin view's 10001,
+	// the group of its ticket key file).
+	extraGroups map[string][]int
 	// topNetworks: network key → its top-level YAML body.
 	topNetworks map[string]string
 	// tlsVolume / secretsVolume: the top-level volumes to declare.
@@ -278,6 +285,9 @@ func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailR
 	for _, s := range append(slices.Clone(b.TLS), b.Gated...) {
 		named[s] = true
 	}
+	if b.AdminView != nil {
+		named[b.AdminView.Service] = true
+	}
 	env := []string{
 		VarMailAPISubnet + ": " + yamlQuote(core.APISubnet.String()),
 		VarMailAPIHubIP + ": " + yamlQuote(core.HubIP.String()),
@@ -287,6 +297,11 @@ func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailR
 		// The public addresses (M2): only these two of core's.
 		VarMailPublicIPv4 + ": " + yamlQuote(core.PublicIPv4),
 		VarMailPublicIPv6 + ": " + yamlQuote(core.PublicIPv6),
+	}
+	if b.AdminView != nil {
+		// The read-only admin view's hostname (contract §19.13): Stalwart's
+		// trusted host and the proxy's.
+		env = append(env, VarMailAdminHost+": "+yamlQuote(h.mailAdminHost()))
 	}
 	if mode == mailVoid {
 		if nonce := h.mailVoidSession(t.ID); nonce != "" {
@@ -370,7 +385,146 @@ func (h *Hub) mailRenderBodyLocked(t *templates.Template, mode mailMode) (*mailR
 			"traefik.http.services." + MailWellknownRouter + ".loadbalancer.server.port": strconv.Itoa(b.Wellknown.Port),
 		}
 	}
+	if av := b.AdminView; av != nil {
+		if err := h.mailAdminViewLocked(r, av, attach, t.ID); err != nil {
+			return nil, err
+		}
+	}
 	return r, nil
+}
+
+// mailAdminHost is the read-only mail admin view's hostname (contract
+// §19.13): mail-admin.<main domain>.
+func (h *Hub) mailAdminHost() string {
+	return MailAdminLabel + "." + strings.ToLower(h.cfg.Domain)
+}
+
+// mailAdminViewLocked renders the admin view router (contract §19.1,
+// §19.13) on the admin_view service: portcullis-proxy, the pinned SPKIs
+// and the Hub's admin chain — on websecure unless admin hosts are
+// VPN-only (VPN modes admin and server), always on vpnsecure. Caller
+// holds mu.
+func (h *Hub) mailAdminViewLocked(r *mailRender, av *templates.Endpoint, attach func(svc, net, body string), id string) error {
+	np, err := h.networkParams()
+	if err != nil {
+		return err
+	}
+	key, err := h.mailAdminRouteKey()
+	if err != nil {
+		return fmt.Errorf("mail: the admin view's route key: %w", err)
+	}
+	// The ticket key (contract §19.13): its own per-install secret, a file
+	// the view reads through this read-only bind (group 10001, 0640) —
+	// never a label or an environment value Traefik or its API could show.
+	if _, err := h.mailAdminTicketKey(id); err != nil {
+		return fmt.Errorf("mail: the admin view's ticket key: %w", err)
+	}
+	s := av.Service
+	host := path.Join(h.appFilesHostFor(id), id, mailAdminTicketDir)
+	if h.relabelFor(id) {
+		r.mounts[s] = append(r.mounts[s], relabelBindEntry(host, MailAdminTicketMount, true))
+	} else {
+		b, _ := json.Marshal(composeLiteral(host) + ":" + composeLiteral(MailAdminTicketMount) + ":ro")
+		r.mounts[s] = append(r.mounts[s], string(b))
+	}
+	if r.extraGroups == nil {
+		r.extraGroups = map[string][]int{}
+	}
+	r.extraGroups[s] = append(r.extraGroups[s], hubGID)
+	attach(s, mailProxyNetwork, " {}")
+	r.topNetworks[mailProxyNetwork] = "\n    external: true\n    name: " + mailProxyNetwork
+	r.env[s] = append(r.env[s], VarMailTLSSPKI+": "+yamlQuote(strings.Join(h.st.Mail.TLS.SPKISHA256, ",")),
+		// The proxy's gate: Traefik's address and the route key its router
+		// sets once forward-auth admitted a full administrator.
+		VarMailAdminTraefikIP+": "+yamlQuote(np.TraefikIP.String()),
+		VarMailAdminRouteKey+": "+yamlQuote(key),
+		// The proxy's second identity check: forward-auth's groups header
+		// must hold the admin group (contract §19.13).
+		VarMailAdminGroup+": "+yamlQuote(lldap.AdminGroup))
+	rule := "Host(`" + h.mailAdminHost() + "`)"
+	labels := r.labels[s]
+	if labels == nil {
+		labels = map[string]string{}
+		r.labels[s] = labels
+	}
+	labels["traefik.enable"] = "true"
+	labels["traefik.docker.network"] = mailProxyNetwork
+	labels["traefik.http.services."+MailAdminRouter+".loadbalancer.server.port"] = strconv.Itoa(av.Port)
+	labels["traefik.http.middlewares."+MailAdminKeyMiddleware+".headers.customrequestheaders."+MailAdminKeyHeader] = key
+	router := func(name, ep, chain string) {
+		pre := "traefik.http.routers." + name
+		labels[pre+".rule"] = rule
+		labels[pre+".entrypoints"] = ep
+		labels[pre+".tls"] = "true"
+		labels[pre+".tls.options"] = mailAdminTLSOptions
+		labels[pre+".middlewares"] = chain
+		labels[pre+".service"] = MailAdminRouter
+	}
+	if m := h.vpnCoreEnv().Mode; m != VPNModeAdmin && m != VPNModeServer {
+		router(MailAdminRouter, "websecure", mailAdminMiddlewares)
+	}
+	router(MailAdminRouter+"-vpn", EntrypointsVPN, mailAdminMiddlewaresVPN)
+	return nil
+}
+
+// mailAdminRouteKey is the per-install key the admin view router sets
+// for the proxy (hub_data/mail-admin-route-key, 0600, 48 characters
+// [A-Za-z0-9], made once): only Traefik (the router's label) and the
+// admin-view service (its environment) hold it.
+func (h *Hub) mailAdminRouteKey() (string, error) {
+	p := filepath.Join(h.cfg.DataDir, "mail-admin-route-key")
+	if b, err := os.ReadFile(p); err == nil {
+		if k := strings.TrimSpace(string(b)); len(k) >= 32 {
+			return k, nil
+		}
+	}
+	k, err := mailRandString(mailSecretLen)
+	if err != nil {
+		return "", err
+	}
+	if err := writeAtomic0600(p, []byte(k+"\n")); err != nil {
+		return "", err
+	}
+	return k, nil
+}
+
+// The admin view's ticket key: <appfiles>/<id>/mail-admin/ticket-key
+// (the Hub's side), mounted read-only at MailAdminTicketMount.
+const (
+	mailAdminTicketDir   = templates.MailAdminFile
+	MailAdminTicketMount = "/run/portcullis/mail-admin"
+	hubGID               = 10001
+)
+
+// mailAdminTicketKey is instance id's ticket secret (48 characters
+// [A-Za-z0-9], made once; 0640 in a 0750 directory, group the Hub's).
+func (h *Hub) mailAdminTicketKey(id string) (string, error) {
+	if !templates.ValidID(id) {
+		return "", fmt.Errorf("invalid instance id")
+	}
+	dir := filepath.Join(h.appFilesDir(id), mailAdminTicketDir)
+	p := filepath.Join(dir, "ticket-key")
+	if b, err := os.ReadFile(p); err == nil {
+		if k := strings.TrimSpace(string(b)); len(k) >= 32 {
+			return k, nil
+		}
+	}
+	for _, d := range []string{h.cfg.AppFilesDir, h.appFilesDir(id), dir} {
+		if err := os.MkdirAll(d, appFilesDirMode); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Chmod(dir, appFilesDirMode); err != nil {
+		return "", err
+	}
+	k, err := mailRandString(mailSecretLen)
+	if err != nil {
+		return "", err
+	}
+	if err := fsutil.WriteFileAtomic(p, []byte(k+"\n"), dataFileMode); err != nil {
+		return "", err
+	}
+	return k, nil
 }
 
 // mailWellknownHostsLocked are mta-sts., autoconfig. and autodiscover.

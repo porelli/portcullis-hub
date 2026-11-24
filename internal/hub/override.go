@@ -298,6 +298,13 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 			serviceGroups[svc] = append(serviceGroups[svc], MailProviderGID)
 		}
 	}
+	for svc, gs := range mr.extraGroups {
+		for _, g := range gs {
+			if !slices.Contains(serviceGroups[svc], g) {
+				serviceGroups[svc] = append(serviceGroups[svc], g)
+			}
+		}
+	}
 	for svc, ps := range mr.ports {
 		servicePorts[svc] = append(servicePorts[svc], ps...)
 	}

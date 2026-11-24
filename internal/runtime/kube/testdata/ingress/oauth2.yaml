@@ -17,6 +17,4 @@ spec:
     services:
     - kind: TraefikService
       name: forward-auth-ext@file
-  tls:
-    options:
-      name: authaware@file
+  tls: {}

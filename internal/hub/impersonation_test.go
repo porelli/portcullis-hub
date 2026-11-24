@@ -586,7 +586,7 @@ func TestStopEnds(t *testing.T) {
 		}
 	}
 	out, err := x.h.StopOwnImpersonation(x.ctx, s.ID, "alice")
-	if err != nil || out != "https://auth.example.org/oauth2/sign_out?rd=https%3A%2F%2Fexample.org%2F" {
+	if err != nil || out != "https://auth.example.org/oauth2/sign_out" {
 		t.Errorf("sign_out = %q, %v", out, err)
 	}
 	if r := x.rec(s.ID); r.How != ImpStopped || r.EndedBy != "root" {

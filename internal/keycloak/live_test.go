@@ -57,7 +57,7 @@ type liveEnv struct {
 
 // liveSigninConfig is a minimal valid signin-keycloak.json: no methods on,
 // no templates, no clients listed (an unlisted client passes the template step).
-const liveSigninConfig = `{"version": 1, "methods": [], "add_stronger": false, "templates": {}, "clients": {}, "authenticators": {}, "mds": {"serial": 0, "next_update": "2099-01-01T00:00:00Z"}}`
+const liveSigninConfig = `{"version": 1, "methods": [], "add_stronger": false, "templates": {}, "clients": {}, "authenticators": {}, "mds": {"serial": 0, "next_update": "2099-01-01T00:00:00Z"}, "app_hosts": []}`
 
 // liveContainer is the Keycloak container the test may write /hub-data in.
 // It must be named explicitly: the test never picks a container on its own.

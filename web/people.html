@@ -40,7 +40,6 @@
   <div class="pn-bar" id="site-nav"></div>
   <header>
     <h1><img class="brand-mark" src="/static/mark.svg" alt="" width="28" height="28"> People</h1>
-    <div class="user-badge" id="who" hidden>Signed in as <strong id="who-name"></strong></div>
   </header>
   <main id="people"><noscript>This page needs JavaScript.</noscript></main>
 </div>
@@ -73,8 +72,7 @@
       extraTabs: [{ id: 'myapps', label: 'My apps', render: PortcullisMyApps.render },
         { id: 'ssh', label: 'SSH access', render: PortcullisMySSH.renderDelegate }],
       onUser: function (name, admin) {
-        document.getElementById('who-name').textContent = name;
-        document.getElementById('who').hidden = !name;
+        navOpts.user = name || '';
         // The Hub link for administrators only (the overview says so).
         navOpts.admin = !!admin;
         PortcullisNav.render(document.getElementById('site-nav'), navOpts);

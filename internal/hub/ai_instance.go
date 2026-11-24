@@ -971,13 +971,18 @@ func (h *Hub) checkAliasFree(ctx context.Context, t *templates.Template, ch aiCh
 	if h.noEngine() {
 		return nil
 	}
-	cs, err := h.rt.List(ctx, runtime.Filter{})
+	// Every container, its network names read from the inspect (the list
+	// summary has no aliases); one whose names can't be read refuses.
+	cs, err := h.rt.List(ctx, runtime.Filter{Names: true})
 	if err != nil {
 		return statusErr(http.StatusServiceUnavailable, "can't check whether another container answers %s: %v", ch.alias, err)
 	}
 	for _, c := range cs {
 		if c.Project == projectName(t.ID) && c.Service == ch.c.Service {
 			continue
+		}
+		if _, on := c.Networks[aiProxyNetwork]; on && c.NamesUnread {
+			return statusErr(http.StatusServiceUnavailable, "can't read the network names of container %s on %s: can't check whether it answers %s", c.Name, aiProxyNetwork, ch.alias)
 		}
 		taken := strings.EqualFold(c.Name, ch.alias)
 		for _, n := range c.Networks[aiProxyNetwork] {

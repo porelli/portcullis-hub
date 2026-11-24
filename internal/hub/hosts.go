@@ -361,6 +361,9 @@ func (h *Hub) checkInstanceHostsLocked(v *templates.Template, runtime map[string
 		if mc.On && mc.Hostname != "" && (host == mc.Hostname || strings.HasSuffix(host, "."+mc.Hostname)) {
 			return "hostname " + host + " is reserved for mail: it is the mail server's name"
 		}
+		if why := h.mailAdminReserved(host, mc.On); why != "" {
+			return why
+		}
 		return ""
 	}
 	for _, r := range routers {
@@ -1007,4 +1010,14 @@ func backupFiles(paths ...string) func() error {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// mailAdminReserved: while mail is on, the read-only mail admin view's
+// name (mail-admin.<main domain>) and every host under it are reserved
+// (contract §5, §19.13).
+func (h *Hub) mailAdminReserved(host string, mailOn bool) string {
+	if ah := h.mailAdminHost(); mailOn && (host == ah || strings.HasSuffix(host, "."+ah)) {
+		return "hostname " + host + " is reserved for mail: it is the mail admin view's name"
+	}
+	return ""
 }

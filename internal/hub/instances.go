@@ -74,6 +74,10 @@ type InstanceView struct {
 	Server    string         `json:"server"`
 	Move      *MoveView      `json:"move,omitempty"`
 	MovedFrom *MovedFromView `json:"moved_from,omitempty"`
+	// Bypass lists how the instance skips part of Portcullis's normal
+	// protection (bypassLocked: open hosts and routers, public paths, a
+	// weaker TLS tier); always an array (contract §11.7).
+	Bypass []Bypass `json:"bypass"`
 }
 
 // MoveView is a running move as the views show it.
@@ -308,7 +312,7 @@ func (h *Hub) Instances() []InstanceView {
 		out = append(out, InstanceView{ID: id, Template: tid, Default: id == tid, State: st, Error: reason,
 			Hosts: copyMap(e.Hosts), KeycloakClients: []string{}, Project: projectName(id),
 			AccessGroup: e.UsersGroup, AdminGroup: e.AdminsGroup,
-			Label: label, Name: displayName(app, label), GroupsMode: groupsMode(e), Setup: h.setupViewLocked(id)})
+			Label: label, Name: displayName(app, label), GroupsMode: groupsMode(e), Setup: h.setupViewLocked(id), Bypass: []Bypass{}})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -321,7 +325,8 @@ func (h *Hub) instanceViewLocked(t *templates.Template) InstanceView {
 	users, admins := h.instanceGroupsLocked(t)
 	v := InstanceView{ID: t.ID, Template: t.TemplateID, Default: t.IsDefault(), Hosts: copyMap(t.Hosts),
 		AccessGroup: users, AdminGroup: admins, KeycloakClients: append([]string{}, n.Clients...), Project: n.Project,
-		Label: instanceLabel(t), Name: instanceName(t), GroupsMode: groupsMode(h.st.Instances[t.ID]), Setup: h.setupViewLocked(t.ID)}
+		Label: instanceLabel(t), Name: instanceName(t), GroupsMode: groupsMode(h.st.Instances[t.ID]), Setup: h.setupViewLocked(t.ID),
+		Bypass: h.bypassLocked(t)}
 	if h.compatOn() {
 		c := h.instanceCompat(t, h.st.Settings[t.ID])
 		v.Compat = &c

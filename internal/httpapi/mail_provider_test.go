@@ -137,3 +137,33 @@ func TestMailProviderRefusalsAudited(t *testing.T) {
 	}
 	t.Fatal("the refusal isn't audited")
 }
+
+// TestMailAdminViewRoute (contract §19.13): full administrators only, in
+// the browser; the stalwart-shaped fixture has no admin_view (409), and
+// every answer to an admin is audited mail.admin_view_opened.
+func TestMailAdminViewRoute(t *testing.T) {
+	e, _ := mailEnv(t)
+	if r, _ := doAs(t, e.hub, "bob", "POST", "/api/mail/admin-view", `{}`); r.StatusCode != 403 {
+		t.Fatalf("bob: %d", r.StatusCode)
+	}
+	if r, b := doAs(t, e.hub, "root", "POST", "/api/mail/admin-view", `{"x": 1}`); r.StatusCode != 400 {
+		t.Fatalf("unknown field: %d %s", r.StatusCode, b)
+	}
+	if r, b := doAs(t, e.hub, "root", "POST", "/api/mail/admin-view", `{}`); r.StatusCode != 409 || !strings.Contains(b, "no read-only admin view") {
+		t.Fatalf("no admin_view: %d %s", r.StatusCode, b)
+	}
+	found := false
+	for _, ent := range readAudit(t, e.audit) {
+		if ent.Action == "mail.admin_view_opened" && ent.Actor == "root" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no mail.admin_view_opened audit entry")
+	}
+	for _, p := range e.s.peopleMux().patterns {
+		if strings.Contains(p, "admin-view") {
+			t.Fatalf("the people listener routes %s", p)
+		}
+	}
+}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/portcullis/hub/internal/agentapi"
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/usage"
 )
 
 // Backend is runtime.Instances over one worker's agent API, plus
@@ -482,13 +483,75 @@ func (b *Backend) RestartService(context.Context, string, string, time.Duration)
 
 // notMeasuredWorker: the agent API has no usage routes (contract §17.4):
 // a worker's containers aren't measured, never guessed (fail closed).
-var notMeasuredWorker = &runtime.NotMeasuredError{Why: "not measured on a worker server yet"}
+// ErrOlderAgent: a usage route answered the agent's catch-all 404 (an
+// agent built before the usage routes, contract §17.4): the worker is
+// "older than the Hub", its figures not measured, never guessed.
+var ErrOlderAgent = errors.New("the worker's agent is older than the Hub")
 
-// Stats, LayerSize and ImageSize are answered here: no agent route.
-func (b *Backend) Stats(context.Context, string) (runtime.UnitStats, error) {
-	return runtime.UnitStats{}, notMeasuredWorker
+// agentNotFound is the agent's catch-all answer to a route it doesn't
+// serve (internal/agent: the API's and the guard's "not found"); a route
+// it serves answers its own text ("no such container").
+const agentNotFound = "not found"
+
+// usageJSON is one usage call: a strict decode (≤ MaxJSON); the catch-all
+// 404 is ErrOlderAgent.
+func (b *Backend) usageJSON(ctx context.Context, p string, q url.Values, out any) error {
+	err := b.c.json(ctx, "GET", p, q, nil, out, agentapi.MaxJSON)
+	var ae *Error
+	if errors.As(err, &ae) && ae.AgentStatus == http.StatusNotFound && ae.Msg == agentNotFound {
+		return ErrOlderAgent
+	}
+	return err
 }
 
-func (b *Backend) LayerSize(context.Context, string) (int64, error) { return 0, notMeasuredWorker }
+// refusedAnswer is a worker's answer that decodes but no agent gives.
+func refusedAnswer(err error) error {
+	return &Error{Status: http.StatusBadGateway, Msg: "the agent's answer is refused: " + clip(err.Error()), err: err}
+}
 
-func (b *Backend) ImageSize(context.Context, string) (int64, error) { return 0, notMeasuredWorker }
+// Stats is GET /v1/containers/{cid}/stats: one sample (untrusted input:
+// strictly decoded and checked).
+func (b *Backend) Stats(ctx context.Context, id string) (runtime.UnitStats, error) {
+	var s agentapi.UnitStats
+	if err := b.usageJSON(ctx, path(R("Stats", 0), "cid", id), nil, &s); err != nil {
+		return runtime.UnitStats{}, err
+	}
+	if err := s.Check(); err != nil {
+		return runtime.UnitStats{}, refusedAnswer(err)
+	}
+	return s.Runtime(), nil
+}
+
+func (b *Backend) size(ctx context.Context, p string, q url.Values) (int64, error) {
+	var sz agentapi.SizeBody
+	if err := b.usageJSON(ctx, p, q, &sz); err != nil {
+		return 0, err
+	}
+	if sz.Bytes < 0 {
+		return 0, refusedAnswer(errors.New("a negative size"))
+	}
+	return sz.Bytes, nil
+}
+
+// LayerSize is GET /v1/containers/{cid}/size.
+func (b *Backend) LayerSize(ctx context.Context, id string) (int64, error) {
+	return b.size(ctx, path(R("LayerSize", 0), "cid", id), nil)
+}
+
+// ImageSize is GET /v1/images/size?ref=.
+func (b *Backend) ImageSize(ctx context.Context, ref string) (int64, error) {
+	return b.size(ctx, R("ImageSize", 0).Path, url.Values{agentapi.QueryRef: {ref}})
+}
+
+// HostUsage is GET /v1/host/usage: the worker's host counters from the
+// agent's own procfs (strictly decoded and checked).
+func (b *Backend) HostUsage(ctx context.Context) (usage.HostCounters, error) {
+	var c agentapi.HostCounters
+	if err := b.usageJSON(ctx, agentapi.ExtraRoutes["HostUsage"].Path, nil, &c); err != nil {
+		return usage.HostCounters{}, err
+	}
+	if err := c.Check(); err != nil {
+		return usage.HostCounters{}, refusedAnswer(err)
+	}
+	return c.Usage(), nil
+}

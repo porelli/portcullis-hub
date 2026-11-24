@@ -1,0 +1,1 @@
+{"mail":"on","reachable":true,"status":{"former":[{"username":"bob","id":"x1","since":"2026-11-01"}]},"domains":[{"name":"example.org","state":"on"}],"provider":{"instance":"stalwart","template":"stalwart","label":"Stalwart","version":"0.11","mode":"normal"}}

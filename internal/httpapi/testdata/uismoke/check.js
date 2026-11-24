@@ -1,0 +1,192 @@
+// The Settings subtabs + Access → SSH access computed-style smoke check (ux3 item 5):
+// every visible input, textarea, select and button there must have a
+// dark background (no browser-default white or grey), and every link a
+// light colour. Run by TestSettingsControlsStyled with the Hub's URL;
+// prints a JSON list of the offenders.
+const { chromium } = require('playwright');
+// marketplaceBehaviour: what the Marketplace must do in a real browser —
+// a search filters (the hostile template's name stays text), the drawer
+// opens with focus on its close button, focus survives polls, Esc closes
+// it and restores #marketplace with focus back on the card's Details.
+async function marketplaceBehaviour(p, evil) {
+  const bad = [];
+  const say = (ok, what) => { if (!ok) bad.push('marketplace behaviour: ' + what); };
+  const total = await p.$$eval('#mkt-root [data-mkt-card]', es => es.length);
+  await p.fill('#mkt-root [data-mkt-search]', 'evilapp');
+  await p.waitForTimeout(400);
+  const hits = await p.$$eval('#mkt-root [data-mkt-card]', es => es.map(e => [e.dataset.mktCard, e.querySelector('.app-name').textContent]));
+  say(hits.length === 1 && hits[0][0] === 'evilapp' && hits[0][1] === evil && total > 1, 'search "evilapp" shows ' + JSON.stringify(hits) + ' of ' + total);
+  say(await p.$$eval('#mkt-root img, #mkt-root script, #mkt-root b', es => es.length) === 0, 'markup from a manifest field in the list');
+  await p.fill('#mkt-root [data-mkt-search]', '');
+  await p.waitForTimeout(400);
+  say(await p.$$eval('#mkt-root [data-mkt-card]', es => es.length) === total, 'clearing the search doesn\'t show every card');
+  // Open from the keyboard.
+  const id = await p.$eval('#mkt-root [data-mkt-open]', e => e.dataset.mktOpen);
+  await p.focus('#mkt-root [data-mkt-open="' + id + '"]');
+  await p.keyboard.press('Enter');
+  await p.waitForTimeout(600);
+  const opened = await p.evaluate(() => [document.getElementById('mkt-drawer').open, location.hash, document.activeElement && document.activeElement.hasAttribute('data-mkt-close')]);
+  say(opened[0] && opened[1] === '#marketplace/' + id && opened[2], 'Enter on Details: ' + JSON.stringify(opened));
+  await p.evaluate(() => { window.__focusMark = document.activeElement; });
+  await p.waitForTimeout(2500);
+  say(await p.evaluate(() => document.activeElement === window.__focusMark && document.getElementById('mkt-drawer').open), 'focus in the drawer lost across polls');
+  await p.keyboard.press('Escape');
+  await p.waitForTimeout(400);
+  const closed = await p.evaluate(() => [document.getElementById('mkt-drawer').open, location.hash, document.activeElement && document.activeElement.getAttribute('data-mkt-open')]);
+  say(!closed[0] && closed[1] === '#marketplace' && closed[2] === id, 'Esc: ' + JSON.stringify(closed));
+  await p.evaluate(() => { window.__focusMark = document.activeElement; });
+  await p.waitForTimeout(2500);
+  say(await p.evaluate(() => document.activeElement === window.__focusMark), 'focus on Details lost across polls');
+  // The hostile template's drawer: text only, no unsafe link.
+  await p.goto(p.url().replace(/#.*$/, '') + '#marketplace/evilapp');
+  await p.waitForTimeout(800);
+  const d = await p.evaluate(() => { const x = document.getElementById('mkt-drawer'); return [x.open, x.querySelector('h3').textContent, x.querySelectorAll('a[href^="javascript"], a[href^="http:"], img, script, b').length]; });
+  say(d[0] && d[1] === evil && d[2] === 0, 'hostile drawer: ' + JSON.stringify(d));
+  await p.keyboard.press('Escape');
+  return bad;
+}
+
+// shareBehaviour: the Usage tab's Share view in a real browser — the
+// donuts and legend tables are there, an app name stays text, a slice
+// opens from the keyboard (focus on "← All apps"), back returns focus to
+// the app's name, the 1 h toggle asks for window=1h, and a server whose
+// host has a why shows it instead of donuts.
+async function shareBehaviour(p, base) {
+  const bad = [];
+  const say = (ok, what) => { if (!ok) bad.push('share behaviour: ' + what); };
+  const asked = [];
+  p.on('request', r => { if (r.url().indexOf('/api/usage?window=') >= 0) asked.push(r.url().replace(/^.*\?/, '')); });
+  await p.goto(base + '/#usage/share');
+  await p.waitForTimeout(1500);
+  const shape = await p.evaluate(() => [document.querySelectorAll('#usage-root svg.share-donut').length, document.querySelectorAll('#usage-root table.share-legend').length,
+    document.querySelectorAll('#usage-root .share b').length, (document.querySelector('#usage-root .share') || {}).textContent || '']);
+  say(shape[0] >= 5 && shape[1] >= 5 && shape[2] === 0 && shape[3].indexOf('Grafana <b>') >= 0, 'donuts/legends/escaping: ' + JSON.stringify(shape.slice(0, 3)));
+  const id = await p.$eval('#usage-root path[data-share-app]', e => e.getAttribute('data-share-app')).catch(() => '');
+  say(!!id, 'no focusable app slice');
+  if (id) {
+    await p.focus('#usage-root path[data-share-app="' + id + '"]');
+    await p.keyboard.press('Enter');
+    await p.waitForTimeout(300);
+    const drill = await p.evaluate(() => [!!document.querySelector('#usage-root [data-share-back]'), document.activeElement && document.activeElement.hasAttribute('data-share-back')]);
+    say(drill[0] && drill[1], 'Enter on a slice: ' + JSON.stringify(drill));
+    await p.keyboard.press('Enter');
+    await p.waitForTimeout(300);
+    say(await p.evaluate(i => !document.querySelector('#usage-root [data-share-back]') && document.activeElement && document.activeElement.getAttribute('data-share-app') === i, id), 'back: focus not on the app');
+  }
+  // axe's aria-hidden-focus, by hand: nothing focusable under aria-hidden.
+  const hiddenFocus = await p.evaluate(() => [...document.querySelectorAll('#usage-root [aria-hidden="true"]')]
+    .flatMap(h => [h, ...h.querySelectorAll('*')]).filter(n => n.matches('a[href], button, input, select, textarea, [tabindex]') && n.getAttribute('tabindex') !== '-1').length);
+  say(hiddenFocus === 0, hiddenFocus + ' focusable element(s) under aria-hidden');
+  say(await p.$$eval('#usage-root path[data-share-app]', es => es.every(e => (e.getAttribute('aria-label') || '').length > 0)), 'a slice without an accessible name');
+  await p.click('#usage-root [data-share-window="1h"]');
+  await p.waitForTimeout(800);
+  say(asked.indexOf('window=1h') >= 0 && await p.$eval('#usage-root [data-share-window="1h"]', e => e.getAttribute('aria-pressed')) === 'true', '1 h toggle: ' + JSON.stringify(asked));
+  // A reply that crosses the toggle is dropped: last (slow) then 1 h
+  // (fast) — the 1 h figures (7 CPUs here) stay, the slow last never
+  // lands on them.
+  await p.route('**/api/usage?window=*', async r => {
+    const w = new URL(r.request().url()).searchParams.get('window');
+    const res = await r.fetch();
+    const v = await res.json();
+    v.window = w;
+    if (w === '1h') v.hosts.primary.cpus = 7;
+    else await new Promise(ok => setTimeout(ok, 1200));
+    await r.fulfill({ response: res, json: v });
+  });
+  await p.click('#usage-root [data-share-window="last"]');
+  await p.waitForTimeout(100);
+  await p.click('#usage-root [data-share-window="1h"]');
+  await p.waitForTimeout(2500);
+  const crossed = await p.evaluate(() => [document.querySelector('#usage-root [data-share-window="1h"]').getAttribute('aria-pressed'), !!document.querySelector('#usage-root [data-share-wait]'),
+    (document.querySelector('#usage-root [data-usage-head]') || {}).textContent || '']);
+  say(crossed[0] === 'true' && !crossed[1] && crossed[2].indexOf('7 CPUs') >= 0, 'a crossed reply: ' + JSON.stringify(crossed));
+  await p.unroute('**/api/usage?window=*');
+  if (await p.$('#usage-root [data-share-server]')) {
+    await p.selectOption('#usage-root [data-share-server]', 'w1');
+    await p.waitForTimeout(300);
+    say(await p.evaluate(() => { const w = document.querySelector('#usage-root [data-share-why]'); const caps = [...document.querySelectorAll('#usage-root .share-title')].map(x => x.textContent); return !!w && w.textContent.indexOf('unreachable') >= 0 && caps.indexOf('CPU') < 0 && caps.indexOf('Network') >= 0; }), 'w1 without figures: the reason, no host donuts, the network kept');
+    await p.selectOption('#usage-root [data-share-server]', 'primary');
+    await p.waitForTimeout(300);
+  } else say(false, 'no server picker');
+  return bad;
+}
+
+(async () => {
+  const base = process.argv[2];
+  const opts = process.env.PLAYWRIGHT_CHROMIUM ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM } : {};
+  const b = await chromium.launch(opts);
+  const p = await b.newPage({ viewport: { width: 1400, height: 900 } });
+  // The instances poll every second (index.html's test hook; 15 s in
+  // use), so "focus survives a poll" below is a real poll.
+  await p.addInitScript(() => { window.PORTCULLIS_TEST_POLL_MS = 1000; });
+  // A hostile template added to the catalog: its fields must stay text.
+  const EVIL = '<img src=x onerror="window.__xss=1"> evilapp';
+  await p.route('**/api/templates', async r => {
+    const res = await r.fetch();
+    const list = await res.json();
+    list.push({ id: 'evilapp', template: 'evilapp', source: 'community', category_rank: 1000, category_label: '', routerless: false, mail_provider: false,
+      logo_url: 'https://evil.invalid/x.svg', manifest: { name: EVIL, description: '<b onmouseover="window.__xss=2">d</b>', icon: '<i>', category: '', tags: ['<script>window.__xss=3</script>'],
+        instances: 'single', auth: { method: '<b>m</b>', sso: false, notes: '"onx=1' }, links: { website: 'javascript:window.__xss=4', source: 'http://evil.invalid/' } } });
+    await r.fulfill({ response: res, json: list });
+  });
+  const errs = [];
+  p.on('pageerror', e => errs.push(String(e)));
+  // audit(name, scope): the visible controls under scope (default: the
+  // shown tab).
+  const audit = (name, scope) => p.evaluate(([name, scope]) => {
+    const bad = [];
+    const rgb = c => { const m = c.match(/[\d.]+/g); return m ? m.map(Number) : null; };
+    const light = c => { const v = rgb(c); if (!v || (v.length === 4 && v[3] === 0)) return false; return (v[0] + v[1] + v[2]) / 3 > 180; };
+    const dark = c => { const v = rgb(c); return v && (v[0] + v[1] + v[2]) / 3 < 110; };
+    const sel = ['input', 'textarea', 'select', 'button', 'a'].map(t => scope + ' ' + t).join(', ');
+    for (const e of document.querySelectorAll(sel)) {
+      if (e.offsetParent === null || ['checkbox', 'radio', 'hidden', 'file'].includes(e.type)) continue;
+      const cs = getComputedStyle(e);
+      const off = e.tagName === 'A' ? dark(cs.color) : light(cs.backgroundColor) || (e.tagName !== 'BUTTON' && dark(cs.color));
+      if (off) bad.push(name + ': ' + e.tagName.toLowerCase() + '.' + e.className + ' "' + (e.textContent || e.placeholder || e.id || '').trim().slice(0, 30) + '" bg=' + cs.backgroundColor + ' color=' + cs.color);
+    }
+    return bad;
+  }, [name, scope || '.tab-content.active']);
+  let all = [];
+  await p.goto(base + '/#settings');
+  await p.waitForTimeout(1500);
+  const secs = await p.$$eval('[data-settings-tab]', es => es.map(e => e.dataset.settingsTab));
+  if (secs.length !== 8) all.push('settings: ' + secs.length + ' subtabs rendered');
+  for (const id of secs) {
+    await p.click('[data-settings-tab="' + id + '"]');
+    await p.waitForTimeout(1500);
+    all = all.concat(await audit('settings-' + id));
+  }
+  await p.goto(base + '/#access/ssh');
+  await p.waitForTimeout(1500);
+  const ids = await p.$$eval('#ssh-root [data-ssh-section]', es => es.map(e => e.dataset.sshSection));
+  if (!ids.length) all.push('ssh: no subtabs rendered');
+  for (const id of ids) {
+    await p.click('#ssh-root [data-ssh-section="' + id + '"]');
+    await p.waitForTimeout(800);
+    all = all.concat(await audit('ssh-' + id));
+  }
+  // The Marketplace (Apps' + Add app) and a template's drawer.
+  await p.goto(base + '/#marketplace');
+  await p.waitForTimeout(1500);
+  if (!(await p.$('#mkt-root [data-mkt-card]'))) all.push('marketplace: no cards rendered');
+  else {
+    await p.click('#mkt-root [data-mkt-toggle="sso"]');
+    await p.waitForTimeout(300);
+    all = all.concat(await audit('marketplace'));
+    await p.click('#mkt-root [data-mkt-toggle="sso"]');
+    await p.click('#mkt-root [data-mkt-open]');
+    await p.waitForTimeout(800);
+    all = all.concat(await audit('mkt-drawer', '#mkt-drawer[open]'));
+    await p.keyboard.press('Escape');
+    await p.waitForTimeout(300);
+    all = all.concat(await marketplaceBehaviour(p, EVIL));
+  }
+  // The Usage tab's Share view.
+  all = all.concat(await shareBehaviour(p, base));
+  all = all.concat(await audit('usage-share'));
+  all = all.concat(errs.map(e => 'page error: ' + e));
+  if (await p.evaluate(() => window.__xss)) all.push('marketplace: a manifest field ran script');
+  process.stdout.write(JSON.stringify(all));
+  await b.close();
+})().catch(e => { process.stdout.write(JSON.stringify(['check failed: ' + e.message])); process.exit(0); });

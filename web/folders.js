@@ -1,4 +1,4 @@
-// Portcullis Hub — Settings → Shared folders and Local networks (contract
+// Portcullis Hub — Settings → Storage and Local networks (contract
 // §14, plan 2 Task 14). Hub listener only.
 //
 //   window.PortcullisFolders.render(el)               the Shared folders section
@@ -171,7 +171,7 @@
     return h;
   }
 
-  // ── Settings → Shared folders ──────────────────────────────────────
+  // ── Settings → Storage ──────────────────────────────────────
 
   function render(el) {
     sectionEl = el;
@@ -277,25 +277,106 @@
 
   // ── Add / Edit ─────────────────────────────────────────────────────
 
+  // SLOT_RE: a numbered slot's path option (share1_folder … share8_folder):
+  // its prefix and number. Two or more with one prefix in one instance are
+  // interchangeable slots; <prefix><n>_name, when the template has it, is
+  // the slot's name.
+  const SLOT_RE = /^(.*?[a-z_])(\d+)_folder$/;
+
   // pathOptions: every instance's path options (instance scope), from the
-  // catalog and the instances list.
+  // catalog and the instances list. A numbered slot carries its group
+  // (slot), its number and the instance's stored folder and name values
+  // (values: GET /api/instances/{id}/settings, best effort).
   async function pathOptions() {
     const cat = await window.loadCatalogInfo();
     let insts = [];
     try { insts = await window.apiGet('/api/instances'); } catch (e) { /* the catalog's default instances */ }
     if (!insts.length) insts = Object.keys(cat).map(id => ({ id, template: id, default: true }));
     const out = [];
+    const reads = [];
     for (const i of insts.slice().sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
       const t = cat[i.template];
       const opts = (t && t.manifest && t.manifest.settings && t.manifest.settings.options) || [];
+      const keys = new Set(opts.map(o => o.key));
+      const labelOf = k => { const x = opts.find(y => y.key === k); return (x && x.label) || k; };
+      const mine = [];
       for (const o of opts) {
         if (o.type !== 'path' || (o.scope && o.scope !== 'instance')) continue;
         // A per-person tree (runs_as gid_from) never uses a shared folder (F34).
         if (o.folder && o.folder.runs_as && o.folder.runs_as.gid_from) continue;
-        out.push({ instance: i.id, app: (t.manifest.name || i.template), key: o.key, label: o.label || o.key, folder: o.folder || null, state: i.state || '' });
+        mine.push({ instance: i.id, app: (t.manifest.name || i.template), key: o.key, label: o.label || o.key, description: o.description || '', folder: o.folder || null, state: i.state || '' });
       }
+      const prefixes = {};
+      for (const o of mine) {
+        const m = SLOT_RE.exec(o.key);
+        if (m) prefixes[m[1]] = (prefixes[m[1]] || 0) + 1;
+      }
+      let slotted = false;
+      for (const o of mine) {
+        const m = SLOT_RE.exec(o.key);
+        if (!m || prefixes[m[1]] < 2) continue;
+        o.slot = m[1];
+        o.slotN = Number(m[2]);
+        o.nameKey = keys.has(m[1] + m[2] + '_name') ? m[1] + m[2] + '_name' : '';
+        // What the slot still needs in the app's Settings to serve the
+        // folder: its name, and one of its requires_any partners.
+        const src = opts.find(y => y.key === o.key) || {};
+        o.needs = [];
+        if (o.nameKey) o.needs.push(labelOf(o.nameKey));
+        if ((src.requires_any || []).length) o.needs.push(src.requires_any.map(labelOf).join(' or '));
+        slotted = true;
+      }
+      if (slotted) {
+        reads.push(window.apiGet('/api/instances/' + enc(i.id) + '/settings').then(p => {
+          const v = (p && p.instance) || {};
+          for (const o of mine) {
+            if (!o.slot) continue;
+            o.value = typeof v[o.key] === 'string' ? v[o.key] : '';
+            o.name = o.nameKey && typeof v[o.nameKey] === 'string' ? v[o.nameKey] : '';
+          }
+        }).catch(() => { /* names unknown: every slot listed by number */ for (const o of mine) if (o.slot) o.unknown = true; }));
+      }
+      out.push(...mine);
     }
+    await Promise.all(reads);
     return out;
+  }
+
+  // usedByGroups: the "Used by" rows grouped by instance. A plain path
+  // option is one row (its label). Numbered slots: every slot in use (a
+  // folder value, a name, or bound to a folder) is a row labelled with its
+  // share name (or "unnamed"), then one "free slot" row per slot
+  // group (the lowest free one); the other free slots are left out. A slot
+  // this folder already uses is always a row. used and before as in
+  // openEdit; id the folder edited ('' for a new one).
+  function usedByGroups(opts, used, before, id) {
+    const groups = [];
+    const byInst = {};
+    for (const o of opts) {
+      let g = byInst[o.instance];
+      if (!g) { g = byInst[o.instance] = { instance: o.instance, app: o.app, rows: [] }; groups.push(g); }
+      if (!o.slot) { g.rows.push({ opt: o, label: o.label }); continue; }
+      const k = o.instance + '/' + o.key;
+      const inUse = !!before[k] || !!used[k] || !!o.value || !!o.name || o.unknown;
+      if (inUse) {
+        g.rows.push({ opt: o, label: o.unknown ? o.label : (o.name ? '“' + o.name + '”' : 'unnamed') + ' — ' + o.label, slot: true });
+        continue;
+      }
+      const free = g.free = g.free || {};
+      if (!free[o.slot] || o.slotN < free[o.slot].slotN) free[o.slot] = o;
+    }
+    for (const g of groups) {
+      for (const o of Object.values(g.free || {})) {
+        g.rows.push({ opt: o, label: 'free slot — ' + o.label + ' (the next free one)', slot: true, next: true });
+      }
+      g.rows.sort((a, b) => {
+        if (!a.slot !== !b.slot) return a.slot ? 1 : -1; // plain options first, in manifest order
+        if (!a.slot) return 0;
+        return a.opt.slotN - b.opt.slotN;
+      });
+      delete g.free;
+    }
+    return groups;
   }
 
   // usedBy: instance/key → {folder, subpath, write} over every folder.
@@ -342,17 +423,23 @@
     h += '<div class="form-group"><label>Used by</label><small>Ticking an app here doesn\'t change anything yet: Save opens the assignment preview, and only its Apply changes the apps and the disk.</small>';
     if (!opts.length) h += '<p class="settings-empty">No app has a path setting.</p>';
     h += '<div class="fd-usedby">';
-    for (const o of opts) {
-      const k = o.instance + '/' + o.key;
-      const cur = ctx.before[k];
-      const other = ctx.used[k] && ctx.used[k].folder !== id ? ctx.used[k] : null;
-      const access = o.folder ? (o.folder.access === 'write' ? 'writes' : 'reads') : null;
-      h += '<div class="fd-use" data-fd-use="' + esc(k) + '"><label class="ps-check"><input type="checkbox" data-fd-tick' + (cur ? ' checked' : '') + (other ? ' disabled' : '') + '> ' +
-        esc(o.app) + ' <code>' + esc(o.instance) + '</code> → ' + esc(o.label) + '</label>' +
-        (access ? ' <span class="settings-empty">(' + access + ')</span>' :
-          ' <span class="settings-empty">(read-only unless you allow writing)</span> <label class="ps-check"><input type="checkbox" data-fd-write' + (cur && cur.write ? ' checked' : '') + (other ? ' disabled' : '') + '> allow writing</label>') +
-        ' <input type="text" data-fd-sub placeholder="subfolder (optional)" spellcheck="false" value="' + esc(cur ? cur.subpath : '') + '"' + (other ? ' disabled' : '') + '>' +
-        (other ? ' <span class="public-warn">uses shared folder ' + esc(folderName(other.folder)) + ': unassign it there first</span>' : '') + '</div>';
+    for (const g of usedByGroups(opts, ctx.used, ctx.before, id)) {
+      h += '<div class="fd-inst" data-fd-inst="' + esc(g.instance) + '"><div class="fd-inst-head">' + esc(g.app) + ' <code>' + esc(g.instance) + '</code></div>';
+      for (const row of g.rows) {
+        const o = row.opt;
+        const k = o.instance + '/' + o.key;
+        const cur = ctx.before[k];
+        const other = ctx.used[k] && ctx.used[k].folder !== id ? ctx.used[k] : null;
+        const access = o.folder ? (o.folder.access === 'write' ? 'writes' : 'reads') : null;
+        h += '<div class="fd-use" data-fd-use="' + esc(k) + '"' + (row.next ? ' data-fd-next' : '') + (o.description ? ' title="' + esc(o.description) + '"' : '') + '><label class="ps-check"><input type="checkbox" data-fd-tick' + (cur ? ' checked' : '') + (other ? ' disabled' : '') + '> ' +
+          esc(row.label) + '</label>' +
+          (access ? ' <span class="settings-empty">(' + access + ')</span>' :
+            ' <span class="settings-empty">(read-only unless you allow writing)</span> <label class="ps-check"><input type="checkbox" data-fd-write' + (cur && cur.write ? ' checked' : '') + (other ? ' disabled' : '') + '> allow writing</label>') +
+          ' <input type="text" data-fd-sub placeholder="subfolder (optional)" spellcheck="false" value="' + esc(cur ? cur.subpath : '') + '"' + (other ? ' disabled' : '') + '>' +
+          (other ? ' <span class="public-warn">uses shared folder ' + esc(folderName(other.folder)) + ': unassign it there first</span>' : '') +
+          (row.next && (o.needs || []).length ? '<small class="fd-hint" data-fd-next-hint>It serves the folder only once you also set ' + esc(o.needs.join(' and ')) + ' in ' + esc(g.app) + '\'s Settings.</small>' : '') + '</div>';
+      }
+      h += '</div>';
     }
     h += '</div></div><div data-fd-save-result></div>';
     h += '<div class="op-modal-actions"><button type="button" class="btn btn-secondary btn-sm" data-fd-close>Cancel</button><button type="submit" class="btn btn-primary btn-sm" data-fd-save>Save</button></div></form>';
@@ -734,7 +821,7 @@
     });
   }
 
-  // ── Settings → Local networks ──────────────────────────────────────
+  // ── Settings → Network → Local networks ──────────────────────────────────────
 
   // cidrNote: a line's problem or warning (the Hub decides; this only
   // says it early).
@@ -805,5 +892,5 @@
     return window.apiGet('/api/settings/local-networks').then(v => drawNets(el, v)).catch(err => { el.innerHTML = window.errorBox(err); });
   }
 
-  window.PortcullisFolders = { render, renderLocalNetworks, openAssign, openUndo, list, planHtml, runOp, opResultHtml, md };
+  window.PortcullisFolders = { render, renderLocalNetworks, openAssign, openUndo, list, planHtml, runOp, opResultHtml, md, pathOptions, usedByGroups };
 })();

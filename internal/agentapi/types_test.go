@@ -155,7 +155,7 @@ func TestPreamble(t *testing.T) {
 }
 
 func TestFilterQuery(t *testing.T) {
-	for _, f := range []runtime.Filter{{}, {All: true}, {Helper: true}, {Instance: "x"}, {Instance: "x", Service: "web"}} {
+	for _, f := range []runtime.Filter{{}, {All: true}, {Helper: true}, {Instance: "x"}, {Instance: "x", Service: "web"}, {All: true, Names: true}} {
 		q := url.Values{}
 		for k, v := range FilterQuery(f) {
 			q.Set(k, v)
@@ -165,7 +165,7 @@ func TestFilterQuery(t *testing.T) {
 			t.Errorf("%+v → %+v %v", f, got, err)
 		}
 	}
-	for _, q := range []string{"all=true", "helper=0", "x=1", "instance=a&instance=b", "service=web"} {
+	for _, q := range []string{"all=true", "helper=0", "names=yes", "x=1", "instance=a&instance=b", "service=web"} {
 		v, _ := url.ParseQuery(q)
 		if _, err := ParseFilter(v); err == nil {
 			t.Errorf("%s accepted", q)
@@ -183,5 +183,19 @@ func TestErrorBody(t *testing.T) {
 	}
 	if _, err := ReadCapped(strings.NewReader(strings.Repeat("x", 11)), 10); err != ErrTooLarge {
 		t.Errorf("cap: %v", err)
+	}
+}
+
+// TestRuntimeInfoBounds (Task 10 review M1): an impossible CPU count or
+// memory from a worker is no figure.
+func TestRuntimeInfoBounds(t *testing.T) {
+	for _, i := range []Info{{Runtime: "docker", CPUs: MaxCPUCores + 1, MemBytes: 1}, {Runtime: "docker", CPUs: 4, MemBytes: -1}} {
+		ri, err := i.RuntimeInfo()
+		if err != nil || ri.CPUs != 0 || ri.MemoryBytes != 0 {
+			t.Errorf("%+v → %d %d %v", i, ri.CPUs, ri.MemoryBytes, err)
+		}
+	}
+	if ri, _ := (Info{Runtime: "docker", CPUs: 8, MemBytes: 1 << 30}).RuntimeInfo(); ri.CPUs != 8 || ri.MemoryBytes != 1<<30 {
+		t.Errorf("good info = %+v", ri)
 	}
 }

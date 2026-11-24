@@ -121,7 +121,7 @@ func TestNoKeyInMCPOutput(t *testing.T) {
 }
 
 // TestHubVPNUI (static): the instance page's Access, the VPN tab and
-// Settings → VPN; the unwire confirmation lists the instances whose
+// Settings → Network → VPN; the unwire confirmation lists the instances whose
 // Through names only that provider first.
 func TestHubVPNUI(t *testing.T) {
 	b, err := fs.ReadFile(web.FS, "index.html")

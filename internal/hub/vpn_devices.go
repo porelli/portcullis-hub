@@ -44,7 +44,7 @@ const (
 	AdminDeviceWindow = 10 * time.Minute
 	// HostActor is the audit actor of the host control socket.
 	HostActor = "host"
-	// vpnMaxDevicesPerPerson bounds Settings → VPN's devices per person.
+	// vpnMaxDevicesPerPerson bounds Settings → Network → VPN's devices per person.
 	vpnMaxDevicesPerPerson = 100
 )
 
@@ -82,7 +82,7 @@ type HostInfo struct {
 	AdminDeviceSeen bool     `json:"admin_device_seen"`
 }
 
-// vpnExpiryOf is Settings → VPN's expiry as a lifetime (0 = never).
+// vpnExpiryOf is Settings → Network → VPN's expiry as a lifetime (0 = never).
 func vpnExpiryOf(s string) (time.Duration, error) {
 	switch s {
 	case "", "1y":

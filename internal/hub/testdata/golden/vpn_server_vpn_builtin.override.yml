@@ -2,16 +2,16 @@
 services:
   cloud:
     labels:
-      traefik.http.routers.cloud.tls.options: authaware@file
+      traefik.http.routers.cloud.tls.options: default
       traefik.http.routers.cloud.entrypoints: vpnsecure
       traefik.http.routers.cloud.middlewares: portcullis-vpnallow-cloud@docker,portcullis-auth@docker,portcullis-groups-vpn@docker
-      traefik.http.routers.cloud-login.tls.options: authaware@file
+      traefik.http.routers.cloud-login.tls.options: default
       traefik.http.routers.cloud-login.entrypoints: vpnsecure
       traefik.http.routers.cloud-login.middlewares: portcullis-vpnallow-cloud@docker
       traefik.http.routers.portcullis-public-cloud.rule: "Host(`${PORTCULLIS_HOST_CLOUD:-cloud.portcullis.local}`) && (Path(`/s`) || PathPrefix(`/s/`))"
       traefik.http.routers.portcullis-public-cloud.entrypoints: vpnsecure
       traefik.http.routers.portcullis-public-cloud.tls: "true"
-      traefik.http.routers.portcullis-public-cloud.tls.options: authaware@file
+      traefik.http.routers.portcullis-public-cloud.tls.options: default
       traefik.http.routers.portcullis-public-cloud.priority: "310"
       traefik.http.routers.portcullis-public-cloud.middlewares: portcullis-vpnallow-cloud@docker,portcullis-public-guard-vpn@docker,portcullis-public-strip-cloud@docker,rate-limit@file,security-headers@file
       traefik.http.routers.portcullis-public-cloud.service: "cloud"
@@ -57,4 +57,4 @@ services:
       "traefik.http.routers.portcullis-vpnonly-cloud.priority": "1"
       "traefik.http.routers.portcullis-vpnonly-cloud.rule": "Host(`cloud.example.org`)"
       "traefik.http.routers.portcullis-vpnonly-cloud.service": "group-gate@docker"
-      "traefik.http.routers.portcullis-vpnonly-cloud.tls.options": "authaware@file"
+      "traefik.http.routers.portcullis-vpnonly-cloud.tls.options": "default"

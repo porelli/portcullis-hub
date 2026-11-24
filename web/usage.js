@@ -5,7 +5,8 @@
 //   window.PortcullisUsage.renderInstance(el, id)  an instance page's Usage tab
 //   window.PortcullisUsage.stop()              stops polling (leaving the tab)
 //
-// GET /api/usage                       the overview (the Hub's cache; polled every 15 s while visible)
+// GET /api/usage[?window=last|1h]      the overview (the Hub's cache; polled every 15 s while visible;
+//                                      the Share view reads its window, share.js)
 // GET /api/usage/instances/{id}        one instance with its last hour
 // GET /api/usage/export.csv?view=…     the CSV download
 // GET /api/usage/storage               the Storage view (the storage cache)
@@ -53,13 +54,20 @@
   // geHtml: "≥ " in front of a lower bound (a total with a null member).
   function geHtml(partial, innerHtml) { return partial && innerHtml !== NOT_MEASURED ? '≥ ' + innerHtml : innerHtml; }
 
-  function fmtAge(iso) {
+  // ageText: "12 s ago" (plain text); fmtAge: the same escaped.
+  function ageText(iso) {
     if (!iso) return 'never';
     const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-    if (s < 60) return esc(Number(s).toFixed(0) + ' s ago');
-    if (s < 3600) return esc(Number(s / 60).toFixed(0) + ' min ago');
-    if (s < 172800) return esc(Number(s / 3600).toFixed(0) + ' h ago');
-    return esc(Number(s / 86400).toFixed(0) + ' days ago');
+    if (s < 60) return Number(s).toFixed(0) + ' s ago';
+    if (s < 3600) return Number(s / 60).toFixed(0) + ' min ago';
+    if (s < 172800) return Number(s / 3600).toFixed(0) + ' h ago';
+    return Number(s / 86400).toFixed(0) + ' days ago';
+  }
+  function fmtAge(iso) { return esc(ageText(iso)); }
+
+  // hostOf: the host of the server g runs on (contract §11.11 hosts).
+  function hostOf(v, g) {
+    return (v && v.hosts && v.hosts[(g && g.server) || 'primary']) || null;
   }
 
   // cpuHtml: cores, with the share of the limit, else of the host's CPUs.
@@ -120,10 +128,31 @@
       lines.map(ptsHtml => '<polyline fill="none" stroke="currentColor" stroke-width="1.5" points="' + ptsHtml.join(' ') + '"></polyline>').join('') + '</svg>';
   }
 
+  // STATUS_WORDS: a group's status in the app page's words (a failed job:
+  // "setup job failed", like the instance list).
+  const STATUS_WORDS = { job_failed: 'setup job failed', not_measured: 'not measured' };
+  // JOB_WORDS: a job container's state (the app page's JOB_WORDS).
+  const JOB_WORDS = { done: 'setup job done', failed: 'setup job failed', running: 'setup job running', pending: 'setup job pending' };
+
+  // jobsDoneText: "setup job done" / "3 setup jobs done" ('' for none).
+  function jobsDoneText(n) {
+    return !n ? '' : n === 1 ? JOB_WORDS.done : n + ' setup jobs done';
+  }
+
   function statusHtml(g) {
-    const cls = g.status === 'running' ? 'ok' : g.status === 'stopped' ? 'off' : g.status === 'not_measured' ? 'info' : 'warn';
+    const cls = g.status === 'running' ? 'ok' : g.status === 'stopped' ? 'off' : g.status === 'not_measured' ? 'info' : g.status === 'job_failed' ? 'bad' : 'warn';
     const whyHtml = g.why ? ' <span class="usage-sub">' + esc(g.why) + '</span>' : '';
-    return '<span class="usage-status usage-status-' + esc(cls) + '">' + esc(g.status.replace('_', ' ')) + '</span>' + whyHtml;
+    const doneHtml = g.jobs_done ? ' <span class="usage-sub">· ' + esc(jobsDoneText(g.jobs_done)) + '</span>' : '';
+    return '<span class="usage-status usage-status-' + esc(cls) + '">' + esc(STATUS_WORDS[g.status] || g.status) + '</span>' + doneHtml + whyHtml;
+  }
+
+  // stateText: a container's state word (a job's in JOB_WORDS); a done
+  // job's row is greyed out (usage-dim) (it ran and finished, as it should).
+  function stateText(c) {
+    return c.job && JOB_WORDS[c.job_state] ? JOB_WORDS[c.job_state] : c.state;
+  }
+  function doneJob(c) {
+    return !!c.job && c.job_state === 'done';
   }
 
   async function getJSON(url) {
@@ -166,17 +195,22 @@
         const g = await getJSON('/api/usage/instances/' + enc(c.id));
         if (current !== c) return;
         let host = null;
-        try { host = (await getJSON('/api/usage')).host; } catch (_) { /* the bars show no host share */ }
+        try { host = hostOf(await getJSON('/api/usage'), g); } catch (_) { /* the bars show no host share */ }
         if (current !== c) return;
         drawInstance(c, g, host);
       } else {
-        const v = await getJSON('/api/usage');
-        if (current !== c) return;
-        c.data = v;
-        if (c.view === 'storage') {
+        // Each read carries its window and a sequence number: a reply
+        // overtaken by a newer read (the window toggled, the view
+        // switched) is dropped; the newer one schedules the poll.
+        const seq = c.seq = (c.seq || 0) + 1;
+        const win = c.view === 'share' ? c.window : 'last';
+        const v = await getJSON('/api/usage?window=' + enc(win));
+        if (current !== c || seq !== c.seq) return;
+        if (c.view === 'storage' || c.view === 'share') {
           try { c.storage = await getJSON('/api/usage/storage'); c.storageErr = ''; } catch (e) { c.storageErr = e.message; }
-          if (current !== c) return;
+          if (current !== c || seq !== c.seq) return;
         }
+        c.data = v;
         draw(c);
       }
     } catch (e) {
@@ -202,18 +236,25 @@
     return (g.name || g.instance || '').toLowerCase();
   }
 
-  function headerHtml(v) {
+  // headerHtml(v, server, ageSlot): the strip for server's host and apps
+  // (core: the primary's); ageSlot: an empty [data-usage-age] for the
+  // "sampled … ago" text (the Share view sets it as text, so the strip
+  // itself is written only when it changed).
+  function headerHtml(v, server, ageSlot) {
+    server = server || 'primary';
     let appsMem = null, appsCPU = null;
-    (v.apps || []).forEach(g => {
+    (v.apps || []).filter(g => (g.server || 'primary') === server).forEach(g => {
       if (isNum(g.totals.mem_bytes)) { appsMem = appsMem || 0; appsMem += g.totals.mem_bytes; }
       if (isNum(g.totals.cpu_cores)) { appsCPU = appsCPU || 0; appsCPU += g.totals.cpu_cores; }
     });
     const core = v.core && v.core.totals ? v.core.totals : {};
     let html = '<div class="usage-strip">';
-    html += '<span>Host: ' + (v.host && isNum(v.host.cpus) ? fmtNum(v.host.cpus) + ' CPUs' : NOT_MEASURED) + ', ' + fmtBytes(v.host ? v.host.memory_bytes : null) + '</span>';
+    const host = hostOf(v, { server });
+    const nameHtml = server === 'primary' ? 'Host' : esc((host && host.name) || server);
+    html += '<span>' + nameHtml + ': ' + (host && isNum(host.cpus) ? fmtNum(host.cpus) + ' CPUs' : NOT_MEASURED) + ', ' + fmtBytes(host ? host.memory_bytes : null) + '</span>';
     html += '<span>Apps: ' + fmtCores(appsCPU) + ', ' + fmtBytes(appsMem) + '</span>';
-    html += '<span>Core: ' + fmtCores(core.cpu_cores) + ', ' + fmtBytes(core.mem_bytes) + '</span>';
-    html += '<span class="' + esc(v.stale ? 'usage-stale' : '') + '">sampled ' + fmtAge(v.sampled_at) + '</span>';
+    if (server === 'primary') html += '<span>Core: ' + fmtCores(core.cpu_cores) + ', ' + fmtBytes(core.mem_bytes) + '</span>';
+    html += ageSlot ? '<span class="' + esc(v.stale ? 'usage-stale' : '') + '" data-usage-age></span>' : '<span class="' + esc(v.stale ? 'usage-stale' : '') + '">sampled ' + fmtAge(v.sampled_at) + '</span>';
     if (v.not_shown > 0) html += '<span class="usage-sub">' + fmtNum(v.not_shown) + esc(v.not_shown === 1 ? ' other container on this engine is not shown' : ' other containers on this engine are not shown') + '</span>';
     if (v.over_limit > 0) html += '<span class="usage-sub">' + fmtNum(v.over_limit) + esc(' not measured: over the 256-container limit') + '</span>';
     if (v.metrics_scraped) html += '<a href="' + esc(grafanaURL()) + '" target="_blank" rel="noopener">History in Grafana ↗</a>';
@@ -229,8 +270,8 @@
 
   function navHtml(view) {
     const btnHtml = (k, label) => '<button type="button" class="btn btn-sm ' + esc(view === k ? 'btn-primary' : '') + '" data-usage-view="' + esc(k) + '">' + esc(label) + '</button>';
-    return '<div class="usage-nav">' + btnHtml('apps', 'By app') + btnHtml('containers', 'By container') + btnHtml('storage', 'Storage') +
-      ' <a class="btn btn-secondary btn-sm" href="/api/usage/export.csv?view=' + esc(view) + '" download>CSV</a>' +
+    return '<div class="usage-nav">' + btnHtml('share', 'Share') + btnHtml('apps', 'By app') + btnHtml('containers', 'By container') + btnHtml('storage', 'Storage') +
+      ' <a class="btn btn-secondary btn-sm" href="/api/usage/export.csv?view=' + esc(view === 'share' ? 'apps' : view) + '" download>CSV</a>' +
       ' <a class="usage-sub" href="/api/usage/export.csv?view=apps" download>apps.csv</a> · <a class="usage-sub" href="/api/usage/export.csv?view=containers" download>containers.csv</a>' +
       ' · <a class="usage-sub" href="/api/usage/export.csv?view=storage" download>storage.csv</a></div>';
   }
@@ -240,7 +281,8 @@
       const errHtml = c.error ? ' <span class="usage-sub">' + esc(c.error) + '</span>' : '';
       const nameHtml = c.helper ? esc(c.service) + ' <span class="usage-sub">×' + fmtNum(c.number) + '</span>' : esc(c.service) + '<span class="usage-sub">.' + fmtNum(c.number) + '</span>';
       const oomHtml = c.oom_killed ? ' <span class="usage-status usage-status-warn">OOM killed</span>' : '';
-      return '<tr class="usage-crow">' + '<td class="' + esc(indent ? 'usage-indent' : '') + '">' + nameHtml + ' <span class="usage-sub">' + esc(c.state) + '</span>' + errHtml + oomHtml + '</td>' +
+      const rowCls = doneJob(c) ? 'usage-crow usage-dim' : 'usage-crow';
+      return '<tr class="' + esc(rowCls) + '"' + (c.job ? ' data-usage-job="' + esc(c.job_state || '') + '"' : '') + '>' + '<td class="' + esc(indent ? 'usage-indent' : '') + '">' + nameHtml + ' <span class="usage-sub">' + esc(stateText(c)) + '</span>' + errHtml + oomHtml + '</td>' +
         (c.state === 'running' ? '<td>' + cpuHtml(c.sample, host, false) + '</td><td>' + memBarHtml(c.sample, host, false) + '</td>' +
         '<td>' + netHtml(c.sample, false) + '</td><td>' + blkHtml(c.sample, false) + '</td><td>' + pidsHtml(c.sample, false) + '</td>' : offCellsHtml(5)) + '</tr>';
     }).join('');
@@ -269,9 +311,9 @@
     let html = '<table class="usage-table"><thead><tr>' + APP_COLS.map(([k, label]) =>
       '<th><button type="button" class="usage-sort" data-usage-sort="' + esc(k) + '">' + esc(label) + esc(c.sort === k ? (c.dir === 'desc' ? ' ▼' : ' ▲') : '') + '</button></th>').join('') + '</tr></thead><tbody>';
     if (!apps.length) html += '<tr><td colspan="6" class="settings-empty">No app is running.</td></tr>';
-    apps.forEach(g => { const key = ['app', g.instance].join(':'); html += groupRowHtml(g, v.host, key, !!c.open[key]); });
-    (v.unknown_projects || []).forEach(g => { const key = ['unknown', g.name].join(':'); html += groupRowHtml(g, v.host, key, !!c.open[key]); });
-    if (v.core) html += groupRowHtml(v.core, v.host, 'core', !!c.open.core);
+    apps.forEach(g => { const key = ['app', g.instance].join(':'); html += groupRowHtml(g, hostOf(v, g), key, !!c.open[key]); });
+    (v.unknown_projects || []).forEach(g => { const key = ['unknown', g.name].join(':'); html += groupRowHtml(g, hostOf(v, g), key, !!c.open[key]); });
+    if (v.core) html += groupRowHtml(v.core, hostOf(v, v.core), 'core', !!c.open.core);
     return html + '</tbody></table>';
   }
 
@@ -288,16 +330,50 @@
       const l = ct.limits || {};
       const limitsHtml = 'mem ' + (l.mem_bytes > 0 ? fmtBytes(l.mem_bytes) : esc('no limit')) + ', cpu ' + (isNum(l.cpu_cores) ? fmtCores(l.cpu_cores) : esc('no limit')) +
         ', pids ' + (l.pids > 0 ? fmtNum(l.pids) : esc('no limit'));
-      html += '<tr><td>' + esc(app) + '</td><td>' + esc(ct.service) + '<span class="usage-sub">.' + fmtNum(ct.number) + ' ' + esc(ct.id12) + ' ' + esc(ct.state) + '</span>' +
+      html += '<tr' + (doneJob(ct) ? ' class="usage-dim"' : '') + (ct.job ? ' data-usage-job="' + esc(ct.job_state || '') + '"' : '') + '><td>' + esc(app) + '</td><td>' + esc(ct.service) + '<span class="usage-sub">.' + fmtNum(ct.number) + ' ' + esc(ct.id12) + ' ' + esc(stateText(ct)) + '</span>' +
         (ct.error ? ' <span class="usage-sub">' + esc(ct.error) + '</span>' : '') + '</td>' +
-        (ct.state === 'running' ? '<td>' + cpuHtml(ct.sample, v.host, false) + '</td><td>' + memBarHtml(ct.sample, v.host, false) + '</td><td>' + netHtml(ct.sample, false) + '</td>' +
+        (ct.state === 'running' ? '<td>' + cpuHtml(ct.sample, hostOf(v, g), false) + '</td><td>' + memBarHtml(ct.sample, hostOf(v, g), false) + '</td><td>' + netHtml(ct.sample, false) + '</td>' +
         '<td>' + blkHtml(ct.sample, false) + '</td><td>' + pidsHtml(ct.sample, false) + '</td>' : offCellsHtml(5)) + '<td class="usage-sub">' + limitsHtml + '</td></tr>';
     }));
     if (!n) html += '<tr><td colspan="8" class="settings-empty">No container matches.</td></tr>';
     return html + '</tbody></table>';
   }
 
+  // drawShare: the Share view keeps its own markup (share.js replaces it
+  // only when it changed, focus kept): the nav and the header around it
+  // are written once per view switch, then only the header and the
+  // share's data change.
+  function drawShare(c) {
+    let host = c.el.querySelector('[data-usage-share]');
+    if (!host) {
+      c.el.innerHTML = navHtml(c.view) + '<div data-usage-head></div><div data-usage-share><p class="settings-empty">Loading…</p></div>';
+      host = c.el.querySelector('[data-usage-share]');
+      c.shareEl = null;
+    }
+    drawShareHead(c);
+    if (!c.data) return;
+    if (c.shareEl !== host) {
+      c.shareEl = host;
+      window.PortcullisShare.render(host, {
+        view: c.data, storage: c.storage || {}, window: c.window, server: c.server || 'primary',
+        onWindow: w => { c.window = w; refresh(); },
+        onState: st => { c.server = st.server; drawShareHead(c); },
+      });
+    } else window.PortcullisShare.update(c.data, c.storage || {});
+  }
+  // drawShareHead: the strip for the picked server, written only when it
+  // changed (focus on its link stays); its age is set as text.
+  function drawShareHead(c) {
+    const head = c.el.querySelector('[data-usage-head]');
+    if (!head) return;
+    const headHtml = c.data ? headerHtml(c.data, c.server || 'primary', true) : '';
+    if (c.headHtml !== headHtml || !head.firstChild) { head.innerHTML = headHtml; c.headHtml = headHtml; }
+    const age = head.querySelector('[data-usage-age]');
+    if (age && c.data) age.textContent = ['sampled', ageText(c.data.sampled_at)].join(' ');
+  }
+
   function draw(c) {
+    if (c.view === 'share') { drawShare(c); return; }
     if (!c.data && c.view !== 'storage') { c.el.innerHTML = '<p class="settings-empty">Loading…</p>'; return; }
     let bodyHtml;
     if (c.view === 'storage') bodyHtml = storageViewHtml(c);
@@ -318,9 +394,16 @@
       if (!c || c.el !== el) return;
       const v = ev.target.closest('[data-usage-view]');
       if (v) {
+        const from = c.view;
         c.view = v.dataset.usageView;
         history.replaceState(null, '', '#usage/' + enc(c.view));
+        c.shareEl = null;
+        c.headHtml = null;
+        // Leaving Share on the 1 h average: the other views are the last
+        // sample, read again (never the hour's figures as live ones).
+        if (from === 'share' && c.view !== 'share' && c.window === '1h') c.data = null;
         draw(c);
+        if (c.view === 'share' || !c.data) refresh();
         if (c.view === 'storage') loadStorage(c);
         return;
       }
@@ -349,7 +432,7 @@
   function render(el, view) {
     stop();
     hookVisibility();
-    current = { kind: 'tab', el, view: view === 'containers' || view === 'storage' ? view : 'apps', sort: 'name', dir: 'asc', filter: '', open: {}, data: null };
+    current = { kind: 'tab', el, view: ['share', 'containers', 'storage', 'apps'].indexOf(view) >= 0 ? view : 'apps', window: 'last', server: 'primary', sort: 'name', dir: 'asc', filter: '', open: {}, data: null };
     bind(el);
     draw(current);
     if (current.view === 'storage') loadStorage(current);

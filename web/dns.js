@@ -1,4 +1,4 @@
-// Portcullis Hub — Settings → Domains: the DNS panel (contract §12.3,
+// Portcullis Hub — Settings → Network → Domains: the DNS panel (contract §12.3,
 // DNS hardening Task 11). Hub listener only.
 //
 //   window.PortcullisDNS.mount(el, {name, main})

@@ -18,6 +18,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/portcullis/hub/internal/servers"
 	"github.com/portcullis/hub/internal/usage"
 )
 
@@ -184,6 +185,10 @@ func (c usageCollector) Collect(out chan<- prometheus.Metric) {
 	}
 	sort.Slice(v.Disks, func(i, j int) bool { return v.Disks[i].Dev < v.Disks[j].Dev })
 	for _, d := range v.Disks {
+		// The primary's filesystems (the series' dev label is the Hub's).
+		if d.Server != servers.PrimaryID {
+			continue
+		}
 		dev := strconv.FormatUint(d.Dev, 10)
 		send(descFree, prometheus.GaugeValue, float64(d.FreeBytes), dev)
 		send(descTotal, prometheus.GaugeValue, float64(d.TotalBytes), dev)

@@ -1,0 +1,1 @@
+{"enabled":true,"default_ttl_hours":8,"user_cas":["ssh-ed25519 AAAA user-ca"],"host_cas":["ssh-ed25519 AAAA host-ca"],"user_ca_fp":"SHA256:abc","host_ca_fp":"SHA256:def","problems":[],"cli_client_ready":true}

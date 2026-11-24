@@ -635,7 +635,7 @@ func TestSaveSettingsSignInTemplate(t *testing.T) {
 		t.Errorf("audit = %+v", e)
 	}
 	if res.Effect != settings.EffectNone {
-		t.Errorf("strong keeps authaware: effect %s", res.Effect)
+		t.Errorf("strong keeps default: effect %s", res.Effect)
 	}
 	enableTemplate(t, f, certOnlyTemplate)
 	if res, err = save(certOnlyTemplate); err != nil || res.Effect != settings.EffectRestart {
@@ -647,7 +647,7 @@ func TestSaveSettingsSignInTemplate(t *testing.T) {
 	if _, err := save(""); err != nil {
 		t.Fatal(err)
 	}
-	if v := view(t, f, "grafana"); v.SignInTemplate != "" || v.Template != "standard" || v.Tier != "authaware@file" {
+	if v := view(t, f, "grafana"); v.SignInTemplate != "" || v.Template != "standard" || v.Tier != "default" {
 		t.Errorf("inherit: %+v", v)
 	}
 	if e := audit.lastOf("settings.change"); e.Detail != "scope=sign_in_template: "+certOnlyTemplate+" -> default" {

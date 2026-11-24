@@ -386,6 +386,18 @@ renders the apps again.
   `PortcullisServerContainerUnhealthy` ([Monitoring](monitoring.md)).
 - The doctor's server checks are listed on
   [Hub → Server checks](hub.md#server-checks).
+- **Usage** on the Hub covers the workers too ([Hub → Usage](hub.md#usage)):
+  each ready worker's apps and containers are sampled in the primary's 15 s
+  sweep through its agent, its volumes measured with the rest of the
+  storage, and **Usage → Share** has a **Server** picker for each worker's
+  CPU, memory, disk IO, network and disks ([Share](hub.md#share)). A worker
+  that doesn't answer in time, or whose agent is older than the Hub, shows
+  its apps as "not measured" with that reason; the primary's figures are
+  never held up by a worker.
+- **Not yet for workers:** the doctor's usage checks (memory, OOM, process
+  limits, a nearly full disk) and the Hub's usage metrics in Grafana cover
+  the primary only. They carry no server label yet, so watch a worker's
+  apps on the Usage tab.
 
 ## Security
 

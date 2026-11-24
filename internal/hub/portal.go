@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/portcullis/hub/internal/directory"
@@ -34,10 +33,13 @@ type PortalApp struct {
 	// signed-in user); AdminGroup is informational.
 	AccessGroup string `json:"access_group"`
 	AdminGroup  string `json:"admin_group"`
-	// Note is the first paragraph of the template's auth.notes (≤ 300
-	// runes, else "No web page.") for router-less instances (contract
-	// §10); always present then, and only when URLs is empty.
-	Note string `json:"note,omitempty"`
+	// Note is the plain text of the first Markdown paragraph of the
+	// template's auth.notes (≤ 300 runes, else "No web page.") for
+	// router-less instances (contract §10); always present then, and only
+	// when URLs is empty. NoteHTML is that paragraph rendered and
+	// sanitised like the Hub's notes_html (internal/notes).
+	Note     string `json:"note,omitempty"`
+	NoteHTML string `json:"note_html,omitempty"`
 }
 
 // PortalDocument is portal-apps.json (contract §10).
@@ -82,7 +84,7 @@ func (h *Hub) portalWithLocked(gate *policy.Document) PortalDocument {
 		// Router-less instances (contract §3, §10): URLs empty, note present.
 		if m.Routerless() {
 			a.URLs = []templates.AppURL{}
-			a.Note = portalNote(m.Auth.Notes)
+			a.Note, a.NoteHTML = portalNote(&m.Auth)
 		} else {
 			a.URLs = append([]templates.AppURL{}, m.URLs...)
 		}
@@ -103,13 +105,14 @@ func (h *Hub) portalWithLocked(gate *policy.Document) PortalDocument {
 }
 
 // portalAccessGroupLocked is the access_group t's portal entry carries:
-// the LLDAP group group-gate requires ("" = any signed-in person). My
-// apps (MyApps) lists an app by the same check (portalOpensLocked).
-// Caller holds h.mu (read).
+// its access group (instanceGroupsLocked) whenever it has one — also when
+// group-gate doesn't enforce it (auth.group_access false, or the app's
+// own login only, e.g. Firefox Sync's open host), so only its members see
+// the tile, administrators included (contract §10); "" (any signed-in
+// person) only when the manifest has no access group. My apps (MyApps)
+// lists an app by the same group (gateOpenLocked). Display only: what
+// group-gate enforces is the policy file's. Caller holds h.mu (read).
 func (h *Hub) portalAccessGroupLocked(t *templates.Template) string {
-	if !h.accessLocked(t).groupAccess(t) {
-		return ""
-	}
 	users, _ := h.instanceGroupsLocked(t)
 	return users
 }
@@ -149,7 +152,8 @@ func gateDenies(gate *policy.Document, hosts []string) bool {
 // required group they aren't in or whose membership ended (expired:
 // group-gate denies it) — for every routed host. A routed instance with
 // no published host opens nowhere. A router-less instance (no routes,
-// contract §3) opens by its portal access group alone. vpnOnly: some host
+// contract §3) opens by its portal access group alone, and every app
+// needs that group too (portalAccessGroupLocked). vpnOnly: some host
 // is VPN-only (the policy's vpn.hosts): listed, with a badge. Caller
 // holds h.mu (read).
 func (h *Hub) gateOpenLocked(gate *policy.Document, t *templates.Template, m *directory.Membership, user string) (open, vpnOnly bool) {
@@ -161,8 +165,13 @@ func (h *Hub) gateOpenLocked(gate *policy.Document, t *templates.Template, m *di
 		_, in := groups[g]
 		return g == "" || (in && !m.Expired[user][g])
 	}
+	// The portal's group too (portalAccessGroupLocked): an app whose
+	// hosts group-gate leaves open is still listed only for its members.
+	if !member(h.portalAccessGroupLocked(t)) {
+		return false, false
+	}
 	if t.Manifest.Routerless() {
-		return member(h.portalAccessGroupLocked(t)), false
+		return true, false
 	}
 	hosts := h.routedHostsLocked(t)
 	if len(hosts) == 0 || gateDenies(gate, hosts) {
@@ -204,22 +213,15 @@ const portalNoteMax = 300
 const portalNoNote = "No web page."
 
 // portalNote is a router-less entry's portal note (contract §10, B-M6 /
-// C-M4): the first paragraph of auth.notes (up to the first blank line;
-// its lines trimmed and joined with spaces) when it is at most
-// portalNoteMax runes, else "No web page." — never empty (group-gate
-// renders the card). The rest of auth.notes is for operators.
-func portalNote(notes string) string {
-	var lines []string
-	for _, l := range strings.Split(notes, "\n") {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			break
-		}
-		lines = append(lines, l)
+// C-M4) and its HTML: the first Markdown paragraph of auth.notes as plain
+// text (inline markup removed, whitespace collapsed) and as sanitised
+// HTML, both rendered once when the template was built (Auth.NoteText /
+// NoteHTML, never under h.mu), when the text is at most portalNoteMax
+// runes, else "No web page." — never empty (group-gate renders the card).
+// The rest of auth.notes is for operators.
+func portalNote(a *templates.Auth) (string, string) {
+	if a.NoteText == "" || utf8.RuneCountInString(a.NoteText) > portalNoteMax {
+		return portalNoNote, "<p>" + portalNoNote + "</p>"
 	}
-	p := strings.Join(lines, " ")
-	if p == "" || utf8.RuneCountInString(p) > portalNoteMax {
-		return portalNoNote
-	}
-	return p
+	return a.NoteText, a.NoteHTML
 }

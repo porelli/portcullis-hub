@@ -1,0 +1,8 @@
+{
+  "name": "portcullis-hub-uismoke",
+  "private": true,
+  "description": "Playwright for TestSettingsControlsStyled (internal/httpapi/webui_uismoke_test.go), CI only",
+  "dependencies": {
+    "playwright": "1.65.1"
+  }
+}

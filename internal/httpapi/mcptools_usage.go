@@ -22,9 +22,15 @@ type usageIDArgs struct {
 // the Hub's caches, never the engine.
 func (s *Server) registerUsageTools() {
 	for _, t := range []Tool{
-		admin("usage_overview", "Every app's CPU, memory, network, disk IO and PIDs, aggregated per app with its containers, plus the core group. Live, from the Hub's last sample: each figure is a number or null (not measured, never 0), totals with a null member are lower bounds (partial).",
-			ClassRead, "GET /api/usage", "", func(context.Context, directory.Actor, noArgs) (any, error) {
-				return s.usageOverview(), nil
+		admin("usage_overview", "Every app's CPU, memory, network, disk IO and PIDs, aggregated per app with its containers, plus the core group. Live, from the Hub's last sample (window last, the default) or the mean of the last hour (window 1h): each figure is a number or null (not measured, never 0), totals with a null member are lower bounds (partial).",
+			ClassRead, "GET /api/usage", "", func(_ context.Context, _ directory.Actor, in usageOverviewArgs) (any, error) {
+				switch in.Window {
+				case "", hub.UsageWindowLast:
+					return s.usageOverview(hub.UsageWindowLast), nil
+				case hub.UsageWindow1h:
+					return s.usageOverview(hub.UsageWindow1h), nil
+				}
+				return nil, badArg("window must be last or 1h")
 			}),
 		admin("usage_instance", "One instance's containers, last hour and storage.",
 			ClassRead, "GET /api/usage/instances/{id}", "", func(_ context.Context, _ directory.Actor, in usageIDArgs) (any, error) {
@@ -59,6 +65,12 @@ func (s *Server) registerUsageTools() {
 }
 
 // usageMeasureArgs: one instance (optional; "" = everything).
+// usageOverviewArgs: usage_overview's window (contract §15.10, ux3
+// final review), as GET /api/usage's ?window=.
+type usageOverviewArgs struct {
+	Window string `json:"window,omitempty" jsonschema:"last (default): the last sample; 1h: the mean of the last hour"`
+}
+
 type usageMeasureArgs struct {
 	Instance string `json:"instance,omitempty" jsonschema:"the instance id whose storage to measure (default: everything)"`
 }

@@ -352,6 +352,14 @@ are read and written:
   never root, with the PVC read-only. It runs group-gate's image for the
   SQLite-aware copy and streams the archive over `exec`. A restore empties
   each PVC in place and unpacks the archive as its owner.
+- **The front door's Secrets** (high availability): `frontdoor-acme` (its
+  ACME accounts) and `frontdoor-cert` (the main domain's certificate) live
+  only in the cluster. The backup keeps them as `frontdoor.age`,
+  age-encrypted to `secrets/domains/age.key` like `store.age`, sealed in a
+  domains-image helper pod (the data never on disk in clear, never on
+  argv). A restore puts them back after the release, so a fresh cluster
+  serves the main certificate at once and still holds the account the CAA
+  pins. The step is skipped only when neither Secret exists; a backup that can't read them (an API error, one of the two missing) or can't seal them fails.
 - **The CLI's own Kubernetes state** (`secrets/kube/`: rendered values,
   digests, the setup record) isn't archived: the next `up` regenerates it.
 - **Restore order**: the Hub and every instance that mounts per-person

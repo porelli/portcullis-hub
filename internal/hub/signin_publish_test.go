@@ -3,6 +3,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/signin"
 )
@@ -135,7 +138,7 @@ func TestTierFollowsCertificateSwitch(t *testing.T) {
 	if err := f.h.Enable("grafana"); err != nil {
 		t.Fatal(err)
 	}
-	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: authaware@file") {
+	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: default") {
 		t.Fatalf("grafana on standard:\n%s", ov)
 	}
 	passkeys := TemplateInput{Name: "Standard", Rule: siLeaves("any", "family:passkey")}
@@ -155,14 +158,14 @@ func TestTierFollowsCertificateSwitch(t *testing.T) {
 	if owed != settings.EffectRestart && len(f.runner.Calls()) == calls {
 		t.Errorf("no restart queued: owed %q, runner calls unchanged", owed)
 	}
-	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: public@file") || strings.Contains(ov, "authaware") {
+	if ov := readOverride(t, f, "grafana"); !strings.Contains(ov, "tls.options: public@file") || strings.Contains(ov, "default") {
 		t.Errorf("grafana on passkeys only:\n%s", ov)
 	}
 	ch, err = f.h.SaveTemplate(ctx, "standard", TemplateInput{Name: "Standard", Rule: siLeaves("any", "family:passkey", "family:certificate")}, false, siAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(ch.Restarts, []string{"grafana"}) || !strings.Contains(readOverride(t, f, "grafana"), "tls.options: authaware@file") {
+	if !slices.Equal(ch.Restarts, []string{"grafana"}) || !strings.Contains(readOverride(t, f, "grafana"), "tls.options: default") {
 		t.Errorf("back to certificates: restarts %v\n%s", ch.Restarts, readOverride(t, f, "grafana"))
 	}
 	// Nothing needs the certificate: it can be switched off, and on
@@ -255,4 +258,92 @@ func TestSignInKeycloakWriteFailureStillWritesPolicy(t *testing.T) {
 		t.Errorf("WritePolicy after the fix: %v", err)
 	}
 	readKeycloakSignIn(t, f)
+}
+
+// app_hosts (contract §8.1 "Let through"): the gated core pages' hosts and
+// every host of an enabled instance, sorted; a disabled instance's hosts
+// leave; never null.
+func TestSignInKeycloakAppHostsArePublishedHosts(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	simulateCompose(f, 0)
+	if err := f.h.CreateInstance("chat", "chat-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"chat", "chat-b", "relay"} {
+		if err := f.h.Enable(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.h.Wait()
+	hostsOf := func(id string) []string {
+		f.h.mu.RLock()
+		defer f.h.mu.RUnlock()
+		return slices.Collect(maps.Values(f.h.findLocked(id).Hosts))
+	}
+	want := map[string]bool{}
+	for h := range f.h.gatePolicy.Load().Core {
+		want[h] = true
+	}
+	if len(want) == 0 {
+		t.Fatal("no core hosts in the policy file")
+	}
+	for _, id := range []string{"chat", "chat-b", "relay"} {
+		for _, h := range hostsOf(id) {
+			want[strings.ToLower(h)] = true
+		}
+	}
+	doc := readKeycloakSignIn(t, f)
+	if got, w := doc.AppHosts, slices.Sorted(maps.Keys(want)); !slices.Equal(got, w) {
+		t.Errorf("app_hosts = %v\nwant %v", got, w)
+	}
+	if err := f.h.Disable("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	doc = readKeycloakSignIn(t, f)
+	for _, h := range hostsOf("chat-b") {
+		if slices.Contains(doc.AppHosts, strings.ToLower(h)) && !slices.Contains(hostsOf("chat"), h) {
+			t.Errorf("a disabled instance's host %s still in app_hosts %v", h, doc.AppHosts)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(f.data, SignInKeycloakFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"app_hosts": [`) {
+		t.Errorf("app_hosts not a list in the file:\n%s", raw)
+	}
+}
+
+// appHosts: deny entries and disabled apps never, core always, lowercase,
+// invalid names left out (never the whole file), sorted and capped.
+func TestAppHostsRules(t *testing.T) {
+	set := func(hs ...string) map[string]string {
+		m := map[string]string{}
+		for _, h := range hs {
+			m[h] = h
+		}
+		return m
+	}
+	apps := []policy.App{
+		{ID: "a", Enabled: true, Hosts: set("cloud.example.com", "Files.Example.com")},
+		{ID: "b", Enabled: true, Hosts: set("tv.home.example.com", "bad_host.example.com", "x.example.com:443")},
+		{ID: "drift", Enabled: true, Deny: true, Hosts: set("old.example.com")},
+		{ID: "off", Enabled: false, Hosts: set("off.example.com")},
+	}
+	got := appHosts(apps, map[string]string{"example.com": "standard", "hub.example.com": "strong"})
+	want := []string{"cloud.example.com", "example.com", "files.example.com", "hub.example.com", "tv.home.example.com"}
+	if !slices.Equal(got, want) {
+		t.Errorf("appHosts = %v, want %v", got, want)
+	}
+	if got := appHosts(nil, nil); got == nil || len(got) != 0 {
+		t.Errorf("no hosts = %#v, want []", got)
+	}
+	many := map[string]string{}
+	for i := 0; i < MaxAppHosts+10; i++ {
+		h := fmt.Sprintf("h%05d.example.com", i)
+		many[h] = h
+	}
+	if got := appHosts([]policy.App{{ID: "m", Enabled: true, Hosts: many}}, nil); len(got) != MaxAppHosts || got[0] != "h00000.example.com" {
+		t.Errorf("capped: %d hosts, first %q", len(got), got[0])
+	}
 }

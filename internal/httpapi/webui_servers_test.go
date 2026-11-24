@@ -111,6 +111,42 @@ window.PortcullisServers.load().then(() => {
 	}
 }
 
+// TestInstanceServerSectionOnlyWhenUseful: with the primary alone (or
+// only revoked / enrolling workers), the instance page has no Server
+// card and no "Runs on" line; a placed, moved, orphaned, moving or
+// unreachable instance has them anyway, and so does any instance once a
+// second server is ready (serverSelect's rule).
+func TestInstanceServerSectionOnlyWhenUseful(t *testing.T) {
+	run := func(servers string, inst map[string]any) string {
+		b, _ := json.Marshal(inst)
+		return serversJS(t, `
+window.apiGet = async () => ({ servers: `+servers+` });
+window.PortcullisServers.load().then(() => {
+  const i = `+string(b)+`;
+  process.stdout.write(JSON.stringify([window.PortcullisServers.runsOn(i), window.PortcullisServers.instanceSection(i)]));
+});`)
+	}
+	alone := `[{ id: 'primary', name: 'Primary', state: 'ready' }, { id: 'old', name: 'Old', state: 'revoked' }, { id: 'new', name: 'New', state: 'enrolling' }]`
+	two := `[{ id: 'primary', name: 'Primary', state: 'ready' }, { id: 'nas', name: 'NAS', state: 'ready' }]`
+	if got := run(alone, map[string]any{"id": "notes", "state": "enabled"}); got != `["",""]` {
+		t.Errorf("primary alone: %s", got)
+	}
+	for _, inst := range []map[string]any{
+		{"id": "notes", "server": "old", "state": "enabled"},
+		{"id": "notes", "state": "enabled", "moved_from": map[string]any{"server": "old", "at": time.Now().UTC().Format(time.RFC3339)}},
+		{"id": "notes", "server": "old", "state": "orphaned"},
+		{"id": "notes", "state": "moving"},
+		{"id": "notes", "state": "unreachable"},
+	} {
+		if got := run(alone, inst); !strings.Contains(got, "Runs on") || !strings.Contains(got, "data-srv-inst") {
+			t.Errorf("%v: %s", inst, got)
+		}
+	}
+	if got := run(two, map[string]any{"id": "notes", "state": "enabled"}); !strings.Contains(got, "Runs on") || !strings.Contains(got, `data-srv-iact=\"move\"`) {
+		t.Errorf("two servers: %s", got)
+	}
+}
+
 // TestServersConfirmOpensPopupFromClick: typed confirmations are inline
 // rows (no prompt or confirm dialog anywhere in servers.js); Confirm
 // runs only when the typed id matches, and then opens the fresh sign-in

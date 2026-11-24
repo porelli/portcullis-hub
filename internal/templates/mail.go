@@ -37,6 +37,10 @@ type Mail struct {
 		Restart string `json:"restart"`
 	} `json:"sessions"`
 	Export *Export `json:"export,omitempty"`
+	// AdminView is the read-only mail admin view (contract §19.13): a
+	// service of its own the Hub routes mail-admin.<main domain> to,
+	// behind an admin-only router. nil = the provider has none.
+	AdminView *Endpoint `json:"admin_view,omitempty"`
 
 	// node is the block as written: ValidateMail judges it (unknown keys,
 	// shapes), so decoding the manifest never fails on it.
@@ -115,6 +119,9 @@ func (m *Mail) UnmarshalYAML(n *yaml.Node) error {
 		case "export":
 			argv, _ := stringList(mapValue(v, "argv"))
 			m.Export = &Export{Service: scalarString(mapValue(v, "service")), Argv: argv}
+		case "admin_view":
+			e := endpointOf(v)
+			m.AdminView = &e
 		}
 	}
 	return nil
@@ -172,12 +179,12 @@ func endpointOf(n *yaml.Node) Endpoint {
 
 // mailKeys are the block's keys, and each mapping field's own.
 var (
-	mailTopKeys   = []string{"label", "api_version", "api", "listeners", "wellknown", "metrics", "server_metrics", "tls", "gated", "sessions", "export"}
+	mailTopKeys   = []string{"label", "api_version", "api", "listeners", "wellknown", "metrics", "server_metrics", "tls", "gated", "sessions", "export", "admin_view"}
 	mailFieldKeys = map[string][]string{
 		"api": {"service", "port"}, "wellknown": {"service", "port"}, "metrics": {"service", "port"},
 		"server_metrics": {"service", "port", "path"},
 		"listeners":      {"service", "smtp", "submissions", "submission", "imaps"},
-		"sessions":       {"restart"}, "export": {"service", "argv"},
+		"sessions":       {"restart"}, "export": {"service", "argv"}, "admin_view": {"service", "port"},
 	}
 )
 
@@ -389,6 +396,24 @@ func ValidateMail(t *Template, compose []byte, routes *Routes) error {
 		}
 		if err := service("export", scalarString(mapValue(ex, "service")), 0, false); err != nil {
 			return err
+		}
+	}
+	if avn := mapValue(n, "admin_view"); avn != nil {
+		// The read-only admin view (contract §19.13): a service of its own,
+		// never handed the certificate or the slot files.
+		if err := endpoint("admin_view"); err != nil {
+			return err
+		}
+		av := scalarString(mapValue(avn, "service"))
+		own := []string{b.API.Service, ls.Value, b.Wellknown.Service, b.Metrics.Service}
+		if b.ServerMetrics != nil {
+			own = append(own, b.ServerMetrics.Service)
+		}
+		if slices.Contains(own, av) {
+			return fmt.Errorf("mail.admin_view: %s must be a service of its own (not api, listeners, wellknown or metrics)", av)
+		}
+		if slices.Contains(b.TLS, av) || slices.Contains(b.Gated, av) {
+			return fmt.Errorf("mail.admin_view: %s is in tls or gated: the admin view gets no mail certificate and no slot file", av)
 		}
 	}
 	// The manifest.

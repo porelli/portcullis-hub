@@ -16,7 +16,7 @@ import (
 	"github.com/portcullis/hub/internal/vpn"
 )
 
-// Settings → VPN and the admin overview (contract §11 GET /api/vpn, PUT
+// Settings → Network → VPN and the admin overview (contract §11 GET /api/vpn, PUT
 // /api/vpn/settings). Never key material.
 
 // VPNView is GET /api/vpn.
@@ -72,7 +72,7 @@ type VPNProviderView struct {
 	Refresh    string            `json:"refresh"`
 }
 
-// VPNSettingsView is Settings → VPN.
+// VPNSettingsView is Settings → Network → VPN.
 type VPNSettingsView struct {
 	UsersGroup       string `json:"users_group"`
 	DevicesPerPerson int    `json:"devices_per_person"`
@@ -180,7 +180,7 @@ func (h *Hub) VPNOverview(ctx context.Context) VPNView {
 	return out
 }
 
-// SetVPNSettings changes Settings → VPN (the set fields only): the users
+// SetVPNSettings changes Settings → Network → VPN (the set fields only): the users
 // group (an existing group, "" = every person), devices per person 1–100,
 // the expiry 30d, 90d, 1y, never or a duration of at least 30 days.
 // Audited vpn.settings.

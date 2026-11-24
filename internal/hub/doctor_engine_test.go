@@ -59,7 +59,9 @@ func TestSELinuxRelabels(t *testing.T) {
 // re-declares the template's own binds with bind.selinux z; under Docker
 // on SELinux, or podman without it, the override is byte-identical.
 func TestOverrideSELinuxRelabel(t *testing.T) {
-	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"gate": {gateManifest, gateCompose}})
+	// The template's own files are ./templates/gate/… (a template binds
+	// only its own, ux2 R2-M2).
+	f := newInstanceFixtureExtra(t, nil, nil, map[string][2]string{"gate": {gateManifest, strings.ReplaceAll(gateCompose, "./templates/x/", "./templates/gate/")}})
 	if f.h.Template("gate") == nil {
 		t.Fatal("gate fixture not loaded (see the log)")
 	}
@@ -84,7 +86,7 @@ func TestOverrideSELinuxRelabel(t *testing.T) {
 		t.Errorf("podman without SELinux changed the override:\n%s", got)
 	}
 	got := render(runtime.KindPodman, true)
-	for _, want := range []string{`source: "./templates/x/gate.sh"`, `target: "/gate.sh"`, "selinux: z"} {
+	for _, want := range []string{`source: "./templates/gate/gate.sh"`, `target: "/gate.sh"`, "selinux: z"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("relabelled override lacks %q:\n%s", want, got)
 		}
@@ -137,19 +139,22 @@ func TestServiceLimits(t *testing.T) {
 	}
 }
 
-// I4: the docs template's ./docs bind is labelled too (core's overlay
-// covers only core's services); ./docs-other, ./secrets and the
-// checkout root never are.
+// I4 / ux2 N5: the template's own files are labelled, written
+// ./templates/… or templates/…; core's ./docs (no template may bind it
+// now), ./docs-other, ./secrets and the checkout root never are.
 func TestSELinuxRelabelsDocs(t *testing.T) {
-	got := selinuxRelabels([]byte("services:\n  docs:\n    image: x\n    volumes:\n      - ./docs:/docs/docs:ro\n      - ./templates/docs/mkdocs.yml:/docs/mkdocs.yml:ro\n      - ./docs-other:/o:ro\n      - ./secrets:/s:ro\n      - .:/project:ro\n"))
+	got := selinuxRelabels([]byte("services:\n  docs:\n    image: x\n    volumes:\n      - ./docs:/docs/docs:ro\n      - ./templates/docs/mkdocs.yml:/docs/mkdocs.yml:ro\n      - templates/docs/docs:/docs/pages:ro\n      - ./docs-other:/o:ro\n      - ./secrets:/s:ro\n      - .:/project:ro\n"))
 	if len(got["docs"]) != 2 {
 		t.Fatalf("relabels = %#v", got)
 	}
 	joined := strings.Join(got["docs"], "\n")
-	for _, want := range []string{`source: "./docs"`, `target: "/docs/docs"`, `source: "./templates/docs/mkdocs.yml"`} {
+	for _, want := range []string{`source: "templates/docs/docs"`, `target: "/docs/pages"`, `source: "./templates/docs/mkdocs.yml"`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("lacks %s:\n%s", want, joined)
 		}
+	}
+	if strings.Contains(joined, `source: "./docs"`) {
+		t.Errorf("relabelled core's ./docs:\n%s", joined)
 	}
 	for _, never := range []string{"docs-other", "secrets", `source: "."`} {
 		if strings.Contains(joined, never) {

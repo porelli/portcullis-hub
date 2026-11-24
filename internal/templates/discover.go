@@ -8,6 +8,8 @@ import (
 	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/portcullis/hub/internal/notes"
 )
 
 // Discover loads every valid template directly under dir. Invalid templates
@@ -21,7 +23,13 @@ func Discover(dir, source, domain string, kinds Kinds) []Template {
 		return nil
 	}
 	var out []Template
+	shotBudget := maxSourceScreenshotBytes
 	for _, e := range entries {
+		// A symlinked template directory is refused, never followed.
+		if e.Type()&os.ModeSymlink != 0 {
+			log.Printf("Skipping template %s: %s is a symlink", e.Name(), e.Name())
+			continue
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -33,6 +41,13 @@ func Discover(dir, source, domain string, kinds Kinds) []Template {
 			log.Printf("Skipping template %s: %v", e.Name(), err)
 			continue
 		}
+		// The source's screenshot budget (contract §3), in directory order.
+		if n := t.screenshotBytes(); n > shotBudget {
+			log.Printf("Template %s: screenshots dropped: the source's %d MiB budget is spent", e.Name(), maxSourceScreenshotBytes>>20)
+			t.dropScreenshots()
+		} else {
+			shotBudget -= n
+		}
 		out = append(out, t)
 	}
 	return out
@@ -42,6 +57,18 @@ func Discover(dir, source, domain string, kinds Kinds) []Template {
 // and returns its catalog entry or why it is refused.
 func Load(dir, name, source, domain string, kinds Kinds) (Template, error) {
 	p := filepath.Join(dir, name)
+	// Nothing is read through a symlink (contract §3 "No symlinks"): the
+	// directory, the manifest and the compose file are the source's own.
+	if fi, err := os.Lstat(p); err != nil {
+		return Template{}, err
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		return Template{}, fmt.Errorf("%s is a symlink", name)
+	}
+	for _, f := range []string{"manifest.yaml", "compose.yml"} {
+		if fi, err := os.Lstat(filepath.Join(p, f)); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return Template{}, fmt.Errorf("%s is a symlink", f)
+		}
+	}
 	data, err := os.ReadFile(filepath.Join(p, "manifest.yaml"))
 	if err != nil {
 		return Template{}, err
@@ -79,6 +106,10 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := ValidateManifest(&m); err != nil {
 		return Template{}, err
 	}
+	// The notes are rendered here, once (ValidateManifest bounded them).
+	r := notes.Render(m.Auth.Notes)
+	m.Auth.NotesHTML, m.Auth.NoteText, m.Auth.NoteHTML = r.HTML, r.FirstText, r.FirstHTML
+	m.LongDescriptionHTML = notes.Render(m.LongDescription).HTML
 	if compose == nil {
 		return Template{}, fmt.Errorf("no compose.yml")
 	}
@@ -117,6 +148,7 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 	if err := checkCoreRefs(compose, routes.HostVars); err != nil {
 		return Template{}, err
 	}
+
 	if err := checkVolumeNames(compose, id, m.Multi()); err != nil {
 		return Template{}, err
 	}
@@ -146,6 +178,11 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		MailProvider: m.Mail != nil,
 		raw:          &raw,
 	}
+	// The logo and screenshots, read and checked once (contract §3).
+	if err := loadCatalog(&t); err != nil {
+		return Template{}, err
+	}
+	t.PrimaryOnlyReasons = catalogPrimaryOnly(compose, t.Manifest)
 	if err := ValidateSettingsSpec(&t, compose, routes, kinds); err != nil {
 		return Template{}, err
 	}
@@ -156,6 +193,11 @@ func build(id, source, path string, data, compose []byte, domain string, kinds K
 		return Template{}, err
 	}
 	if err := ValidateVPN(&t, compose, routes); err != nil {
+		return Template{}, err
+	}
+	// After the VPN and mail rules (their own texts first): every
+	// template's relative binds stay inside its own files.
+	if err := CheckRelativeBinds(path, id, compose); err != nil {
 		return Template{}, err
 	}
 	if t.GIDRefs, err = GIDRefs(&t.Manifest, compose); err != nil {

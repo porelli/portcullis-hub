@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/netip"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/portcullis/hub/internal/jsonstrict"
 	"github.com/portcullis/hub/internal/runtime"
+	"github.com/portcullis/hub/internal/usage"
 )
 
 // Version is the API version, the path prefix's segment (/v1).
@@ -147,7 +149,11 @@ func (i Info) RuntimeInfo() (runtime.Info, error) {
 	}
 	out := runtime.Info{Kind: k, Verified: i.Verified, Why: i.Why, APIVersion: i.EngineAPI,
 		SecurityOptions: i.SecurityOptions, SELinux: i.SELinux, IDMapped: i.IDMapped, Remapped: i.Remapped,
-		EngineVersion: i.EngineVersion}
+		EngineVersion: i.EngineVersion, CPUs: i.CPUs, MemoryBytes: i.MemBytes}
+	if out.CPUs < 0 || out.CPUs > MaxCPUCores || out.MemoryBytes < 0 || out.MemoryBytes > 1<<62 {
+		// An untrusted answer: a size no host has is no size.
+		out.CPUs, out.MemoryBytes = 0, 0
+	}
 	if i.DockerRootDir != "" {
 		out.ForbiddenRoots = []string{i.DockerRootDir}
 	}
@@ -218,22 +224,33 @@ type BindMount struct {
 	ReadOnly bool   `json:"read_only,omitempty"`
 }
 
+// VolumeMount is runtime.VolumeMount on the wire (a usage helper's one
+// named volume, ux3).
+type VolumeMount struct {
+	Name     string `json:"name"`
+	Target   string `json:"target"`
+	Instance string `json:"instance,omitempty"`
+}
+
 // FixerSpec is runtime.FixerSpec on the wire, without the image (the
 // agent's own, P7) and without the In reader (the stream after the
-// header). TimeoutMS is the timeout in milliseconds.
+// header). TimeoutMS is the timeout in milliseconds. Volumes: a usage
+// run's named volume (ux3; absent otherwise, so the other modes'
+// encodings are unchanged).
 type FixerSpec struct {
-	Cmd       []string    `json:"cmd"`
-	User      string      `json:"user"`
-	Env       []string    `json:"env,omitempty"`
-	Binds     []BindMount `json:"binds,omitempty"`
-	Scratch   []string    `json:"scratch,omitempty"`
-	CapAdd    []string    `json:"cap_add,omitempty"`
-	Label     string      `json:"label"`
-	Pids      int64       `json:"pids"`
-	Memory    int64       `json:"memory"`
-	TimeoutMS int64       `json:"timeout_ms"`
-	InPath    string      `json:"in_path,omitempty"`
-	OutPath   string      `json:"out_path,omitempty"`
+	Cmd       []string      `json:"cmd"`
+	User      string        `json:"user"`
+	Env       []string      `json:"env,omitempty"`
+	Binds     []BindMount   `json:"binds,omitempty"`
+	Volumes   []VolumeMount `json:"volumes,omitempty"`
+	Scratch   []string      `json:"scratch,omitempty"`
+	CapAdd    []string      `json:"cap_add,omitempty"`
+	Label     string        `json:"label"`
+	Pids      int64         `json:"pids"`
+	Memory    int64         `json:"memory"`
+	TimeoutMS int64         `json:"timeout_ms"`
+	InPath    string        `json:"in_path,omitempty"`
+	OutPath   string        `json:"out_path,omitempty"`
 }
 
 // FixerSpecOf is s on the wire (Image and In dropped).
@@ -242,6 +259,9 @@ func FixerSpecOf(s runtime.FixerSpec) FixerSpec {
 		Pids: s.Pids, Memory: s.Memory, TimeoutMS: s.Timeout.Milliseconds(), InPath: s.InPath, OutPath: s.OutPath}
 	for _, b := range s.Binds {
 		out.Binds = append(out.Binds, BindMount{Source: b.Source, Target: b.Target, ReadOnly: b.ReadOnly})
+	}
+	for _, v := range s.Volumes {
+		out.Volumes = append(out.Volumes, VolumeMount{Name: v.Name, Target: v.Target, Instance: v.Instance})
 	}
 	return out
 }
@@ -256,6 +276,9 @@ func (f FixerSpec) Runtime(image string, in io.Reader) runtime.FixerSpec {
 	}
 	for _, b := range f.Binds {
 		out.Binds = append(out.Binds, runtime.BindMount{Source: b.Source, Target: b.Target, ReadOnly: b.ReadOnly})
+	}
+	for _, v := range f.Volumes {
+		out.Volumes = append(out.Volumes, runtime.VolumeMount{Name: v.Name, Target: v.Target, Instance: v.Instance})
 	}
 	return out
 }
@@ -429,6 +452,8 @@ type Unit struct {
 	Labels   map[string]string   `json:"labels,omitempty"`
 	Created  int64               `json:"created,omitempty"`
 	Networks map[string][]string `json:"networks,omitempty"`
+	// NamesUnread: the names were asked for (names=1) and couldn't be read.
+	NamesUnread bool `json:"names_unread,omitempty"`
 }
 
 // UnitOf / Runtime convert units. A network without aliases (a created,
@@ -446,12 +471,12 @@ func UnitOf(u runtime.Unit) Unit {
 		}
 	}
 	return Unit{ID: u.ID, Name: u.Name, Project: u.Project, Instance: u.Instance, Service: u.Service, Image: u.Image,
-		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: nets}
+		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: nets, NamesUnread: u.NamesUnread}
 }
 
 func (u Unit) Runtime() runtime.Unit {
 	return runtime.Unit{ID: u.ID, Name: u.Name, Project: u.Project, Instance: u.Instance, Service: u.Service, Image: u.Image,
-		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: u.Networks}
+		State: u.State, Status: u.Status, Labels: u.Labels, Created: u.Created, Networks: u.Networks, NamesUnread: u.NamesUnread}
 }
 
 // UnitInfo is runtime.UnitInfo on the wire.
@@ -535,6 +560,7 @@ const (
 	QueryService  = "service"
 	QueryHelper   = "helper"
 	QueryAll      = "all"
+	QueryNames    = "names"
 )
 
 // FilterQuery is f as query parameters (booleans as "1").
@@ -551,6 +577,9 @@ func FilterQuery(f runtime.Filter) map[string]string {
 	}
 	if f.All {
 		q[QueryAll] = "1"
+	}
+	if f.Names {
+		q[QueryNames] = "1"
 	}
 	return q
 }
@@ -570,14 +599,17 @@ func ParseFilter(q map[string][]string) (runtime.Filter, error) {
 			f.Instance = v
 		case QueryService:
 			f.Service = v
-		case QueryHelper, QueryAll:
+		case QueryHelper, QueryAll, QueryNames:
 			if v != "1" {
 				return f, fmt.Errorf("query parameter %s: only 1", k)
 			}
-			if k == QueryHelper {
+			switch k {
+			case QueryHelper:
 				f.Helper = true
-			} else {
+			case QueryAll:
 				f.All = true
+			default:
+				f.Names = true
 			}
 		default:
 			return f, fmt.Errorf("unknown query parameter %q", strings.ToValidUTF8(k, "?"))
@@ -652,4 +684,88 @@ type NetworkParams struct {
 // keeps as its peer when it switches to its own WireGuard key.
 type IdentityWG struct {
 	LinkPub string `json:"link_pub"`
+}
+
+// UnitStats is runtime.UnitStats on the wire (GET
+// /v1/containers/{cid}/stats, ux3): every counter the engine left out is
+// absent (never null, never 0).
+type UnitStats struct {
+	Read            time.Time `json:"read"`
+	CPUUsageNS      *uint64   `json:"cpu_usage_ns,omitempty"`
+	CPUCores        *float64  `json:"cpu_cores,omitempty"`
+	MemUsage        *uint64   `json:"mem_usage,omitempty"`
+	MemInactiveFile *uint64   `json:"mem_inactive_file,omitempty"`
+	MemWorkingSet   *uint64   `json:"mem_working_set,omitempty"`
+	Pids            *uint64   `json:"pids,omitempty"`
+	NetRx           *uint64   `json:"net_rx,omitempty"`
+	NetTx           *uint64   `json:"net_tx,omitempty"`
+	BlkRead         *uint64   `json:"blk_read,omitempty"`
+	BlkWrite        *uint64   `json:"blk_write,omitempty"`
+}
+
+func UnitStatsOf(s runtime.UnitStats) UnitStats {
+	return UnitStats{Read: s.Read, CPUUsageNS: s.CPUUsageNS, CPUCores: s.CPUCores, MemUsage: s.MemUsage, MemInactiveFile: s.MemInactiveFile,
+		MemWorkingSet: s.MemWorkingSet, Pids: s.Pids, NetRx: s.NetRx, NetTx: s.NetTx, BlkRead: s.BlkRead, BlkWrite: s.BlkWrite}
+}
+
+func (s UnitStats) Runtime() runtime.UnitStats {
+	return runtime.UnitStats{Read: s.Read, CPUUsageNS: s.CPUUsageNS, CPUCores: s.CPUCores, MemUsage: s.MemUsage, MemInactiveFile: s.MemInactiveFile,
+		MemWorkingSet: s.MemWorkingSet, Pids: s.Pids, NetRx: s.NetRx, NetTx: s.NetTx, BlkRead: s.BlkRead, BlkWrite: s.BlkWrite}
+}
+
+// Check refuses a sample no engine gives (an untrusted worker's answer):
+// no read time, a negative or non-finite CPU rate.
+func (s UnitStats) Check() error {
+	switch {
+	case s.Read.IsZero():
+		return errors.New("agent API: stats without a read time")
+	case s.CPUCores != nil && (*s.CPUCores < 0 || *s.CPUCores > MaxCPUCores || math.IsNaN(*s.CPUCores) || math.IsInf(*s.CPUCores, 0)):
+		return errors.New("agent API: stats with a bad CPU rate")
+	}
+	return nil
+}
+
+// MaxCPUCores bounds a worker's CPU rate and count (no host has more
+// cores; usage.MaxCPUCores).
+const MaxCPUCores = usage.MaxCPUCores
+
+// SizeBody is a size answer (GET /v1/containers/{cid}/size, GET
+// /v1/images/size, ux3): bytes, never negative.
+type SizeBody struct {
+	Bytes int64 `json:"bytes"`
+}
+
+// HostCounters is usage.HostCounters on the wire (GET /v1/host/usage,
+// ux3): the worker's own procfs counters.
+type HostCounters struct {
+	At           time.Time `json:"at"`
+	CPUTotal     uint64    `json:"cpu_total"`
+	CPUIdle      uint64    `json:"cpu_idle"`
+	MemTotal     int64     `json:"mem_total"`
+	MemAvailable int64     `json:"mem_available"`
+	DiskRead     uint64    `json:"disk_read"`
+	DiskWrite    uint64    `json:"disk_write"`
+}
+
+func HostCountersOf(c usage.HostCounters) HostCounters {
+	return HostCounters{At: c.At, CPUTotal: c.CPUTotal, CPUIdle: c.CPUIdle, MemTotal: c.MemTotal, MemAvailable: c.MemAvailable, DiskRead: c.DiskRead, DiskWrite: c.DiskWrite}
+}
+
+func (c HostCounters) Usage() usage.HostCounters {
+	return usage.HostCounters{At: c.At, CPUTotal: c.CPUTotal, CPUIdle: c.CPUIdle, MemTotal: c.MemTotal, MemAvailable: c.MemAvailable, DiskRead: c.DiskRead, DiskWrite: c.DiskWrite}
+}
+
+// Check refuses counters no procfs gives (an untrusted worker's answer):
+// no time, no CPU ticks or more idle than total, memory out of range
+// (MemTotal 0 / MemAvailable −1: not read, as ReadHost leaves them).
+func (c HostCounters) Check() error {
+	switch {
+	case c.At.IsZero():
+		return errors.New("agent API: host counters without a time")
+	case c.CPUTotal == 0 || c.CPUIdle > c.CPUTotal:
+		return errors.New("agent API: host CPU ticks out of range")
+	case c.MemTotal < 0 || c.MemAvailable < -1 || (c.MemTotal > 0 && c.MemAvailable > c.MemTotal):
+		return errors.New("agent API: host memory out of range")
+	}
+	return nil
 }

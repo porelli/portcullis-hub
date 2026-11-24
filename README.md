@@ -65,7 +65,7 @@ The core Portcullis stack runs the Hub; you don't need to run it standalone.
 
 ### Default sign-in template
 
-Every app that doesn't pick its own sign-in template uses the default, the built-in **Standard** template at the start: any passkey kind or a YubiKey certificate. Its routers get `authaware@file` (certificate optional at the handshake). The Hub and people pages start on **Strong** (a security key passkey or a YubiKey certificate). Admins change methods, templates and the default under **Settings → Sign-in**; see [Sign-in methods](https://porelli.github.io/portcullis-docs/operations/auth-policies/).
+Every app that doesn't pick its own sign-in template uses the default, the built-in **Standard** template at the start: any passkey kind or a YubiKey certificate. Its routers get `default` (certificate optional at the handshake). The Hub and people pages start on **Strong** (a security key passkey or a YubiKey certificate). Admins change methods, templates and the default under **Settings → Sign-in**; see [Sign-in methods](https://porelli.github.io/portcullis-docs/operations/auth-policies/).
 
 ### Runtime user and permissions
 

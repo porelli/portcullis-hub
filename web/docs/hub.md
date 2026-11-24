@@ -10,15 +10,69 @@ membership of `lldap_admin`.
 
 ## Navigation
 
-The Hub has seven main tabs under the shared navigation (Portal · Hub · People):
+The Hub has six tabs under the shared navigation (Portal · Hub · People ·
+Sign-in, with "Signed in as &lt;your username&gt;" and **Sign out** on the right;
+see [Signing out](#signing-out)), in this order:
 
-- **Apps** — installed apps and their instances (one per app, showing all its instances)
-- **Marketplace** — all available templates from every [template source](#template-sources), with installation and template source management
-- **Audit log** — [operation and access audit](#audit-log)
-- **Doctor** — [system health checks and fixes](#doctor)
-- **Usage** — [CPU, memory and storage per app and per container](#usage)
-- **Settings** — [global server settings](#settings-tab-global) (shared folders, local networks, domains)
-- **People ↗** — opens the People subdomain (`people.<domain>`) in the same tab
+- **Apps**: installed apps and their instances; **+ Add app** opens the
+  [Marketplace](#marketplace) in its place
+- **Doctor**: [system health checks and fixes](#doctor)
+- **Usage**: [CPU, memory, network, disk IO and storage per app, per
+  container and per server](#usage), with the [Share](#share) donuts
+- **Access**: [SSH access, everyone's VPN devices and a person's sign-in
+  history](#access)
+- **Settings**: [server-wide settings](#server-settings), in eight sections
+- **Audit**: [operation and access audit](#audit-log)
+
+People and groups are on `people.<domain>`, through the shared navigation's
+**People** link. The tabs are buttons: <kbd>Tab</kbd> reaches them. On a
+narrow screen (a phone) the tab bar scrolls sideways and keeps the picked
+tab in view.
+
+**Deep links.** Every view has its own address, so a link or a bookmark
+opens it directly:
+
+| Address | Opens |
+|---------|-------|
+| `#apps/<id>[/<tab>[/<option>]]` | an [instance page](#instance-page) at a tab (`settings/<option>` scrolls to that option) |
+| `#marketplace`, `#marketplace?filter=<category>`, `#marketplace/<template>` | the Marketplace, at a category chip (`?filter=mail`: mail servers), or with a template's detail drawer open |
+| `#doctor`, `#audit` | those tabs |
+| `#usage[/<view>]` | Usage: `apps` (the default), `containers`, `storage` or `share` |
+| `#access[/ssh[/<section>]]`, `#access/vpn`, `#access/signins[?user=<name>]` | Access at SSH access (`hosts`, `hostgroups`, `grants`, `access`, `certs`), VPN devices, or a person's sign-in history |
+| `#settings[/<section>]` | Settings at `signin`, `network`, `storage`, `mail`, `ai`, `servers`, `ssh` or `sources` |
+| `#settings/network?add=<name>[&provider=<p>]`, `#settings/network?token=<name>` | the Domains forms to add a domain or replace its token (what the AI tools link to) |
+| `#settings/ai?provider=<name>&field=<field>` | a model provider's secret form |
+
+Links the AI tools hand out use these addresses; secrets are always typed
+on the page, never passed in a link. Any other address opens Apps.
+
+### Signing out
+
+**Sign out** is at the right of the shared bar on every Portcullis page:
+the portal at `https://<domain>/`, the Hub, `people.<domain>` and the
+Sign-in page. It signs out everything in this browser:
+
+- your Portcullis sign-in (the Keycloak session), so the next app you open
+  asks you to sign in again;
+- the gateway session of every app on the main domain, at once;
+- apps on an [added domain](../setup/dns.md) within a minute: their
+  session checks Keycloak once a minute and then stops working.
+
+You land on a short **Signed out** page (the arch with the gate down). Its
+**Sign in again** button opens the sign-in page, where the gate drops.
+
+Apps with their own sign-in, such as Nextcloud or Gitea, keep you signed in
+until their own session ends or they check with Portcullis again. Sign out
+of those in the app itself.
+
+While you are [signed in as someone else](auth-policies.md#signing-in-as-someone-else), Sign out also
+ends that: on the people pages it stops it first, and on the portal it
+opens the Stop page.
+
+Sign out works only as the button on a Portcullis page. A link to
+`https://auth.<domain>/oauth2/sign_out` (from another site, an old
+bookmark) shows a page asking "Sign out of &lt;domain&gt; in this browser?"
+with the same button, and signs nobody out by itself.
 
 ## Apps
 
@@ -27,7 +81,7 @@ The **Apps** page lists every installed app (an app with at least one instance: 
 - **Drift / missing-groups / LLDAP-sweep banners** at the top (see [Drift detection](#drift-detection), [Missing groups](#missing-groups))
 - **"Installed apps"** heading with:
     - **All backups** — list of every instance's backups across all apps
-    - **+ Add an app** — opens the Marketplace
+    - **+ Add app** — opens the [Marketplace](#marketplace) (`#marketplace`)
 - One **app block** per installed app, containing:
     - App icon, name, and "N instances" count
     - **+ Add instance** button (for `instances: multi` templates) — opens the [setup form](#setup-before-the-first-start)
@@ -37,16 +91,37 @@ The **Apps** page lists every installed app (an app with at least one instance: 
         - First hostname (or "no web page" for router-less apps)
         - Users group name (linking to `people.<domain>`) and member count in parentheses, or "missing" in red when the group doesn't exist
         - Status pill: "running · n of m", "not started yet", "last \<operation\> failed", or the current operation ("Enabling… show progress")
+        - **Bypass badges** (amber, one per way the instance skips part of Portcullis's normal protection): "Open to the internet: whole host" (an app with no Portcullis sign-in, e.g. Firefox Sync), "Open to the internet: /path/…" (a template router without sign-in), "Public path(s): /s/…" (the [public exception](#public-exceptions) is on) or "No certificate asked: public TLS" (the app's sign-in template asks for no certificate while the default one does). "Open on the VPN" replaces "Open to the internet" for a VPN-only instance. Clicking a badge opens the details: each open host and path, its TLS tier and why (the template's notes or the exception's description). The same badges are in the [instance page](#instance-page)'s header. They are display only and come from the routers the Hub renders.
         - **Enable** / **Disable** button
 
 For an instance with duplicate names (two instances of the same app with identical labels), the row shows its id first in muted text to distinguish them.
 
 ## Marketplace
 
-The **Marketplace** page shows every template from every [template source](#template-sources) as a card, whether installed or not:
+**Apps → + Add app** (`#marketplace`) replaces the Apps list with the
+Marketplace: every template from every [template source](#template-sources),
+installed or not. **← Apps** goes back.
 
-- icon, name and one-line description
-- auth badges:
+- **Search** matches the name, the one-line description and the tags: a
+  plain substring, ignoring case and the spaces around what you type.
+- **Category chips**, in a fixed order with their counts: **All**,
+  Productivity, Communication, Mail, Files & storage, Media, Creative tools,
+  Home automation, AI, Finance, Developer tools, Monitoring, Networking,
+  VPN, Remote access, Security, Public sites. A community template's own
+  category gets a chip named after it, after these; a template without one
+  is under **Other**.
+- **Filters**, each a toggle: **Works here** (hides apps this server's
+  runtime refuses, for example under [rootless Podman](#rootless-podman) or
+  [Kubernetes](#kubernetes)), **SSO**, **AI** (the app has AI
+  companions), **Multi-instance**, **No web page** and **Installed**.
+  **Works here** is shown only where the runtime limits apps.
+
+The search, the chip and the filters all apply together. With no match the
+page says so and offers **Clear filters**. The list is grouped by category
+and keeps your search and filters while it refreshes.
+
+Each **card** shows the app's logo (or its emoji icon), name, one-line
+description, its source, and badges:
 
 | Badge | Meaning |
 |-------|---------|
@@ -55,14 +130,34 @@ The **Marketplace** page shows every template from every [template source](#temp
 | **Group Admin** | The app maps the `admin_<app>` group to its admin role (`auth.group_admin`) |
 | **Method** | `forward-auth`, `native-oidc`, `header-auth`, `mtls`, `custom` or `public` |
 | **No web page** | The template has no host routers (e.g., a background service) |
-| **Rootless: works / limited / not available** | Only under [rootless Podman](#rootless-podman): whether the app runs there, with the reasons in its tooltip |
+| **Managed by Portcullis** | A mail provider: managed in Settings → Mail and on its Mail tab; a full administrator can open the mail server's own admin screen read-only ([Mail operations](mail.md#the-read-only-admin-view)) |
+| **Rootless: works / limited / not available**, **Kubernetes: works / limited / not available** | Only under [rootless Podman](#rootless-podman) or [Kubernetes](#kubernetes): whether the app runs here, with the reasons in its tooltip |
 
-- tags (e.g., `productivity`, `media`)
-- footer showing:
-    - For installed apps: **"in use · N instances"**, **Show in Apps** (filters the Apps page to that app), and **+ Add instance** (for multi templates)
-    - For not-yet-installed apps: **Install…**
+The card's footer has **Install…** (not installed yet), or **in use · N
+instances**, **Show in Apps** (the Apps page filtered to that app) and, for
+`instances: multi` templates, **+ Add instance**; and **Details**.
 
-Below the cards, the **Template sources** section (moved from the old Template sources section (at the bottom of the Marketplace)) shows each configured source with its URL, update interval, and management buttons.
+**Details** opens the app's **drawer** (`#marketplace/<template>`; Escape
+or **×** closes it):
+
+- **Homepage ↗** (the template's `links.website`), **Source ↗**, the
+  category and the template source;
+- the long description, and the template's sign-in notes;
+- **Settings**: how many settings there are and which are required;
+- **Capabilities**: single sign-on, AI support, VPN provider, mail
+  provider, multi-instance, no web page, primary server only;
+- **Resources**: the minimum RAM and disk the project documents, flagged
+  "more than this server has" when the server has less memory;
+- **On this server**: whether it works under this runtime, and why not;
+- **Screenshots**, when the template ships any;
+- the same buttons as the card.
+
+Logos and screenshots come from the template itself and are only ever shown
+as images, served by the Hub with a sandboxing Content Security Policy:
+they can't run script. What a template may ship is in the
+[Manifest Reference](../guides/manifest-reference.md#catalog-fields).
+
+Template sources are managed in [Settings → Template sources](#template-sources).
 
 ## Setup before the first start
 
@@ -79,7 +174,7 @@ The form has these sections:
 
 - **Domain picker**: choose the main domain or an added extra domain (domains not yet `ready` are disabled)
 - **Subdomain per host router**: shown as `[subdomain].<domain>`. An empty subdomain means the added domain itself. Pre-filled from defaults; edits are kept.
-- Templates with no web page show "No web page".
+- Templates with no web page show "No web page" (a mail provider: "Managed by Portcullis").
 
 ### Who can use it
 
@@ -322,7 +417,7 @@ Each instance has its own page (`#apps/<id>`, or `#apps/<id>/<tab>` for a specif
 
 The File sharing tab appears only for templates with `person_secret` credentials (Samba, Time Machine), the VPN tab only for templates with a [`vpn:` block](../guides/manifest-reference.md#vpn) (Headscale).
 
-Every instance, including the default instance, gets the same page structure. Deep links from the old `#app/<id>/<tab>` format redirect to `#apps/<id>/<tab>`.
+Every instance, including the default instance, gets the same page structure, at `#apps/<id>/<tab>`.
 
 ### Settings
 
@@ -384,7 +479,7 @@ Input validation:
 
 The **Overview** tab shows:
 
-- **Auth notes** (how the app enforces auth, from the template)
+- **Auth notes** (how the app enforces auth, from the template's `auth.notes`): Markdown the Hub renders and sanitises server-side, so lists, code and links show as such; raw HTML and images in the notes are never shown ([contract §3](../guides/integration-contracts.md))
 - **Addresses**: each hostname as a link, editable (see [Changing hostnames](#changing-hostnames) below)
 - **Access** ([VPN-only access](vpn.md#several-vpns-and-through)):
   **Reachable from** *the internet (default)* or *only Portcullis VPNs*;
@@ -644,7 +739,7 @@ block (bordered in amber):
   identity headers;
 - if the app's template requires a YubiKey or browser certificate at the TLS handshake
   (`protected@file` or `protected-any@file`), an amber warning that **all** of the app's routers use
-  `authaware@file` while a public path is open. For native-OIDC apps it adds
+  `default` while a public path is open. For native-OIDC apps it adds
   that the certificate is then only enforced at sign-in (Keycloak's template check); for forward-auth /
   header-auth apps that group-gate still checks the certificate on
   every gated request; and it lists routers without group-gate, which lose
@@ -690,10 +785,16 @@ The router is generated from the manifest, not shipped in `compose.yml`: only
 the Hub knows whether the exception is on, which shares are listed and which
 TLS tier the host gets, and a template can't open paths by itself.
 
-## SSH access
+## Access
 
-**Hub → SSH access** (administrators; off until switched on in its
-Settings tab) holds the mapping described in [SSH Access](ssh-access.md):
+**Access** gathers who can reach what, in three sections (`#access/ssh`,
+`#access/vpn`, `#access/signins`).
+
+### SSH access
+
+**Access → SSH access** (administrators; off until switched on in
+[Settings → SSH](#server-settings)) holds the mapping described in
+[SSH Access](ssh-access.md):
 
 | Tab | What it holds |
 |---|---|
@@ -702,7 +803,9 @@ Settings tab) holds the mapping described in [SSH Access](ssh-access.md):
 | Grants | group → host group, accounts, sudo, TTL, forwarding; the preview of an unsaved change |
 | Access preview | who can reach a host, a host group or where a person can log in, with a "root or sudo only" filter |
 | Certificates | the issued certificates, *Revoke*, *Sign a host key*, the revoked-keys list |
-| Settings | on/off, default TTL (1–12 h, default 8 h), the CA fingerprints |
+
+Its settings (on/off, default TTL 1–12 h, default 8 h, the CA fingerprints)
+are in **Settings → SSH**.
 
 *Add host*, privileged grants and *Sign a host key* ask for a fresh sign-in;
 privileged grants also ask for the group's name typed again. The enrolment
@@ -715,6 +818,24 @@ SSH certificates*, and how to start with the CLI). Administrators and
 *Revoke all SSH certificates*. `ssh_access` holders get an **SSH access**
 page with the grants and previews of delegable host groups, and group pages
 show lines such as "SSH: web (own account), all (own account, sudo)".
+
+### VPN devices (everyone's)
+
+**Access → VPN devices** lists every person's devices on every Portcullis
+VPN: the person, the device's name, the provider, its address, when it was
+last seen and when it expires. A built-in device can be
+**Removed** here; a VPN provider app's devices are managed in that app. Each
+person manages their own on their [VPN page](#vpn-devices); the VPN's
+settings are in [Settings → Network](#server-settings).
+
+### Sign-in history
+
+**Access → Sign-in history** shows one person's history: type a username
+(or follow a link with `?user=<name>`) and **Show**. It lists their
+sign-ins and failed sign-ins (with the method), apps opened, certificate
+events and help from an administrator, newest first, with **Older** for the
+next page. It is the same history as the person's own Sign-in page
+([Sign-in methods](auth-policies.md)); there is no server-wide feed.
 
 ## App settings
 
@@ -1092,7 +1213,7 @@ template's own chain middleware.
 
 ### Adding extra domains
 
-The **Settings → Domains** section (Hub admins only) lists added domains and
+The **Settings → Network → Domains** section (Hub admins only) lists added domains and
 their status. To add a domain:
 
 1. Click **+ Add domain** (the toasts say "Adding …" while it runs)
@@ -1153,7 +1274,7 @@ be protected like Vault's). See [Domains service](#domains-service) and
 
 ### The DNS panel
 
-Each domain in **Settings → Domains** has a **DNS** button that opens its
+Each domain in **Settings → Network → Domains** has a **DNS** button that opens its
 DNS panel, built from the domain's [DNS plan](../setup/dns.md#record-sets)
 (**Refresh** builds it again, at most once per 30 s per domain):
 
@@ -1380,7 +1501,26 @@ client deletion was skipped).
 
 Deleting the default instance deletes the template's deployment, just like
 disabling it did before instances existed.
-## Settings tab (global)
+## Settings { #server-settings }
+
+**Settings** has eight sections, each a subtab with its own address
+(`#settings/<section>`). Only the section shown is loaded, fresh on every
+visit. <kbd>Tab</kbd> reaches the subtabs; the arrow keys,
+<kbd>Home</kbd> and <kbd>End</kbd> move between them. `#settings` alone
+opens the section shown last (Sign-in at first).
+
+| Section | Address | What it holds |
+|---------|---------|---------------|
+| **Sign-in** | `#settings/signin` | Sign-in methods, templates, the default and core pages' templates, limits, signing in as someone else (below) |
+| **Network** | `#settings/network` | **Domains** ([Adding extra domains](#adding-extra-domains)), **Local networks** ([below](#local-networks)) and **VPN** (below) |
+| **Storage** | `#settings/storage` | **Shared folders** ([below](#shared-folders)) |
+| **Mail** | `#settings/mail` | [Mail](#mail) |
+| **AI** | `#settings/ai` | AI support: the master switch, AI clients, the Portcullis MCP, connection length, rate limits, allowed origins and the model providers ([AI support → Settings → AI](ai.md#settings-ai)) |
+| **Servers** | `#settings/servers` | The primary and the worker servers ([below](#servers)) |
+| **SSH** | `#settings/ssh` | Whether [SSH access](ssh-access.md) is on, the default certificate lifetime (1–12 h, 8 h at the start) and the certificate authorities' fingerprints; the mapping itself is under [Access → SSH access](#ssh-access) |
+| **Template sources** | `#settings/sources` | The git repositories the Marketplace's templates come from, their sync status, **Sync All Sources** and adding or removing one ([Template sources](#template-sources)) |
+
+### Sign-in section
 
 - **Sign-in** ([Sign-in methods and templates](auth-policies.md)):
     - **Methods**: the seven sign-in methods, each with its strength, how many
@@ -1438,7 +1578,9 @@ disabling it did before instances existed.
     instances. Changing a certificate method or a template restarts only the
     apps whose certificate request changes.
 
-**VPN** ([VPN-only access](vpn.md#settings-vpn)): the mode and public
+### Network → VPN
+
+**Network → VPN** ([VPN-only access](vpn.md#settings-vpn)): the mode and public
 enrolment (read-only, set on the host with `./portcullis vpn mode`), the VPN
 service up or down, the built-in VPN's subnet, port and devices (or off),
 instances stopped because a narrowing failed, the **VPN users group**
@@ -1446,15 +1588,8 @@ instances stopped because a narrowing failed, the **VPN users group**
 expiry** (`30d`, `90d`, `1y`, `never`), and every provider with its source,
 whether it is wired, its ranges, devices and map state, each linking to its
 VPN tab. Saved with `PUT /api/vpn/settings`, audited `vpn.settings` (no AI
-tool).
-
-The tab also has **AI support** (the master switch, AI clients, the
-Portcullis MCP, connection length, rate limits, allowed origins and the model
-providers: [AI support → Settings → AI](ai.md#settings-ai)),
-**Domains** ([Adding extra domains](#adding-extra-domains)),
-**Mail** ([below](#mail)),
-**Shared folders** ([below](#shared-folders)), **Servers**
-([below](#servers)) and **Local networks** ([below](#local-networks)).
+tool). Everyone's devices are listed under [Access → VPN
+devices](#vpn-devices-everyones).
 
 People and groups are managed on the people page: see [Users & Groups](#users-groups).
 
@@ -1546,7 +1681,7 @@ it creates files with:
 
 Nothing on disk changes except through a preview you applied, and every
 apply first saves a permissions snapshot that **Undo last fix** can put
-back. Find it under **Settings → Shared folders** (admins only; it needs
+back. Find it under **Settings → Storage** (admins only; it needs
 Users & Groups). The rules behind it are in
 [Integration Contracts §14](../guides/integration-contracts.md#14-shared-folders-and-the-doctor).
 
@@ -1947,7 +2082,16 @@ paths it concerns, and what a fix would do. Its buttons:
   that drifted), **Undo last fix…**, **Rebind…** (a LAN-only port, below);
 - **Explain**: the steps to do by hand, for anything risky (moving data,
   nested paths, custom-override mounts, hard links, host networking);
-- **Open setting**: the app's settings panel at the option;
+- **Open …**: a link to the page where the fix lives, opened in the Hub
+  (same tab). The label names it: **Open setting** (the app's Settings at
+  the option), **Open Mail tab**, **Open AI tab** or another tab of the
+  app, **Open app**, or a Hub page such as **Open Settings → Mail**,
+  **Open Settings → Storage**, **Open Access → SSH hosts** or **Open
+  Usage → Storage**. For example, "the mail provider's template changed"
+  links the wired mail provider's **Mail** tab, a DNS finding Settings →
+  Network, a shared-folder finding Settings → Storage and a worker server's
+  finding Settings → Servers. Findings about the host itself (the engine,
+  the Kubernetes cluster) or about one person have no link;
 - **Mute** with a reason. A muted finding moves to **Muted** and comes back
   by itself as soon as what it judged changes.
 
@@ -2121,7 +2265,8 @@ counts as local, whatever the list says.
 
 The **Usage** tab shows how much CPU, memory, network, disk IO and storage each
 app uses, aggregated per app and per container, with the core services as
-their own group. Only Hub administrators see it (it is on `hub.<domain>`
+their own group, on the primary and on every ready [worker
+server](servers.md). Only Hub administrators see it (it is on `hub.<domain>`
 only). Numbers come from the Hub's own sampler (every 15 s, through the
 existing socket proxy) and storage measurer (daily and on demand): opening
 the page never asks the engine anything, however many people look.
@@ -2145,6 +2290,8 @@ the page never asks the engine anything, however many people look.
   progress panel, and **Stop** ends it between targets: what was measured
   so far is kept. With the monitoring profile on, **History in Grafana ↗**
   opens the "Portcullis usage" dashboard.
+- **Share** (`#usage/share`): who uses how much of a server, as donuts.
+  See [Share](#share) below.
 
 The instance page has a **Usage** tab too: that instance's containers, 1 h
 CPU and memory sparklines, and its storage.
@@ -2163,10 +2310,78 @@ How to read the figures:
 - A host path or volume used by two apps is measured once and listed on
   both as shared, never counted twice.
 
-**Export:** each view has a CSV download (raw numbers; an empty cell when
-not measured). The same data is in the Portcullis MCP as `usage_overview`,
-`usage_instance`, `usage_storage`, `usage_storage_measure` and
-`usage_storage_op`.
+**Export:** each view has a CSV download, with a `server` column first
+(`primary` or a worker's id; raw numbers; an empty cell when
+not measured). The same data is in the Portcullis MCP as `usage_overview`
+(with `window`: `last`, the default, or `1h`), `usage_instance`,
+`usage_storage`, `usage_storage_measure` and `usage_storage_op`.
+
+### Share
+
+**Usage → Share** draws one donut per figure, each with a legend table
+(name, value, share) beside it, so colour is never the only cue:
+
+| Donut | Of | Slices |
+|-------|----|--------|
+| **CPU** | the server's CPUs | each app, Portcullis core (on the primary), **Other use on the host** (what the host uses beyond the listed apps), **Free** |
+| **Memory** | the server's RAM | the same |
+| **Disk IO** | the server's whole-disk reads and writes | each app, core, **Other disk IO on the host** |
+| **Network** | the apps' own measured traffic | each app and core: there is no host-wide network figure, so there is no "other" or "free" slice |
+| **Storage**, one per disk | that disk's size | each app, Portcullis core, **Shared between apps** (volumes and binds several apps use, counted once), **Shared folders**, **Shared images**, **Other used**, **Free** |
+
+- The seven largest apps get their own slice; the rest fold into
+  **N more apps**. Shares are rounded so a column sums to 100 %; a small
+  non-zero share reads "< 1 %", never "0 %".
+- **Last sample** / **1 h average** switches every donut between the latest
+  15 s sample and the mean over the last hour (`GET
+  /api/usage?window=1h`). While the average is read the cards are dimmed.
+- **Server** (with workers): picks the server the donuts and the header
+  describe. Each worker has its own CPUs, memory, disk IO, apps and disks.
+- **Click an app's slice** (or its name in the legend) for that app's
+  containers in the same donuts, each container in one colour throughout;
+  **← All apps** goes back. The slices and the legend names are reachable
+  with <kbd>Tab</kbd> and open with <kbd>Enter</kbd>.
+- When the apps read above the host's own figure (their samples are taken at
+  slightly different moments), "other" is 0 and the card says so; nothing
+  is ever drawn above 100 %.
+- A figure the Hub doesn't have is **not measured** with its reason, never a
+  0 slice. A server whose host figures are missing (Kubernetes, "not measured
+  on Kubernetes"; a worker that is unreachable or whose agent is older than
+  the Hub) shows that reason instead of its CPU, memory and disk IO donuts,
+  and keeps the Network and Storage ones.
+
+**Disk labels.** Each storage donut is titled by what the disk holds, with
+its path:
+
+| Title | The disk that holds |
+|-------|---------------------|
+| **Docker data (/var/lib/docker)** | the engine's data root: volumes, images and writable layers ("Podman data" under rootless Podman, "Engine data" on a worker) |
+| **Shared folders (/srv/media)** | a [shared folder](#shared-folders)'s root |
+| **Portcullis data** | only the Hub's own data directory |
+| **Disk 8:17 (/path)** | anything else: the device number and a bind's source path |
+
+A disk that holds more than one kind is titled by the first in this order.
+Images and writable layers always count on the engine's data disk.
+
+**Host figures** come from the Hub's own `/proc` (CPU ticks, `MemTotal` and
+`MemAvailable`, whole-disk sector counters), and on a worker from its agent's;
+time a CPU spends waiting for IO counts as idle, as in `top`. On Kubernetes
+there are none.
+
+**Workers.** The primary samples every ready worker in the same 15 s sweep
+through its agent and never waits for one: a worker that is slow or
+unreachable shows its apps as "not measured: <server> is unreachable", one
+whose agent is older than the Hub as "not measured: <server>'s agent is older
+than the Hub", and an offline one as "… is offline". At most 256 containers
+are sampled per sweep, the primary's first; an app that doesn't fit is "not
+measured: too many containers", never shown in part.
+
+**Known gap:** the doctor's [usage checks](#usage-checks) and the
+`portcullis-metrics-hub` metrics (Grafana) cover the primary's containers and
+disks only: they carry no server label yet. A worker's apps and disks don't
+raise `memory_near_limit`, `oom_killed`, `pids_near_limit` or
+`disk_nearly_full`, and aren't in the "Portcullis usage" dashboard; watch
+them on the Usage tab.
 
 ### Usage checks
 
@@ -2250,7 +2465,7 @@ nothing in the core namespace.
 
 ## Local networks
 
-**Settings → Local networks** lists the networks that count as local: one
+**Settings → Network → Local networks** lists the networks that count as local: one
 CIDR per line, at most 64. The defaults are `10.0.0.0/8`,
 `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` and `100.64.0.0/10`
 (private ranges, IPv6 unique-local and the tailnet). Loopback always counts.
@@ -2949,8 +3164,8 @@ Each source is a git repository with one directory per app (`manifest.yaml` +
       policy file (each pull bounded to a minute; group-gate keeps serving the
       previous policy meanwhile), and when it receives `SIGHUP` —
       `./portcullis upgrade` sends it and prints the result (see
-      [Upgrading](upgrading.md)). **Sync All Sources** in the Template Sources
-      tab does the same on demand. `HUB_SYNC_SOURCES_AT_START=false` turns the
+      [Upgrading](upgrading.md)). **Sync All Sources** in Settings → Template
+      sources does the same on demand. `HUB_SYNC_SOURCES_AT_START=false` turns the
       start-up sync off.
     - **Fail-safe.** A failed pull (remote unreachable, or local changes block the
       fast-forward) leaves the checkout as it was: the last good copy keeps
@@ -2960,11 +3175,11 @@ Each source is a git repository with one directory per app (`manifest.yaml` +
       kept". A sync never opens anything: an enabled app whose template is
       missing or rejected stays **denied** (fail closed) until a template it
       accepts is there.
-    - **Status.** The Template sources section (at the bottom of the Marketplace) shows the last sync (start-up, upgrade
+    - **Status.** **Settings → Template sources** shows the last sync (start-up, upgrade
       or button): each source up to date / updated to `<commit>` / not updated
       and why, and enabled apps still without a valid template. Also
       `GET /api/sources/sync` and `<data>/source-sync.json`.
-- **Community sources.** Add more repositories in the **Template Sources** tab.
+- **Community sources.** Add more repositories in **Settings → Template sources**.
     - Source names use lowercase letters, digits, `-` and `_`.
     - URLs must be `https://…`, `http://…`, `ssh://…` or `user@host:path`.
     - Removing a source first stops every enabled app from it.

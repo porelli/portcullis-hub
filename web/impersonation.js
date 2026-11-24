@@ -13,7 +13,12 @@
 //     n = ceil(remaining / 60 s), at least 1. It counts down once a minute
 //     and reloads the page when the time runs out;
 //   - Stop (the banner's, or the Stop page's button) POSTs
-//     /api/me/impersonation/stop and then goes to the answer's sign_out;
+//     /api/me/impersonation/stop and then submits the answer's sign_out
+//     as a POST form (enctype text/plain, no fields: contract §5 "Sign
+//     out"), which lands on the Signed out page;
+//   - the site bar's Sign out (PortcullisNav's form[data-pn-signout])
+//     waits for the question; while impersonating it does Stop instead,
+//     so signing out also ends the impersonation;
 //   - on the Stop page (<main id="imp-stop">) it shows "Stop signing in
 //     as <person>", or "Nothing to stop" when the browser isn't
 //     impersonating.
@@ -70,9 +75,10 @@
 
   // stop ends the impersonation and signs this browser out (oauth2-proxy
   // drops its session). status(text) shows a problem; busy(on) the
-  // buttons' state.
+  // buttons' state; gone() runs when the Hub says it has already ended
+  // (default: reload).
   let stopping = false;
-  async function stop(status, busy) {
+  async function stop(status, busy, gone) {
     if (stopping) return;
     stopping = true;
     busy(true);
@@ -92,7 +98,7 @@
       // Already ended (expired, stopped elsewhere, switched off).
       stopping = false;
       status('This session has already ended.');
-      location.reload();
+      if (gone) gone(); else location.reload();
       return;
     }
     if (!res.ok) {
@@ -102,8 +108,29 @@
       return;
     }
     const out = safeURL(j && j.sign_out);
-    if (out) location.assign(out);
+    if (out) signOut(out);
     else location.reload();
+  }
+
+  // signOut submits oauth2-proxy's sign-out the way the site bar does: a
+  // POST form with no fields (enctype text/plain), so the guard in front
+  // of it lets it through and nobody can pass an rd.
+  function signOut(url) {
+    const f = el('form', { method: 'post', action: url, enctype: 'text/plain', 'data-imp-signout': '' });
+    document.body.appendChild(f);
+    sendOrigin();
+    f.submit();
+  }
+
+  // sendOrigin: as PortcullisNav.sendOrigin (directory.js, which the Stop
+  // page doesn't load): this listener's pages are Referrer-Policy
+  // no-referrer, and core's sign-out guard refuses "Origin: null" from
+  // another host; strict-origin, set right before the POST, sends this
+  // page's origin (and only the origin as Referer).
+  function sendOrigin() {
+    const head = document.head || document.body;
+    if (!head || (head.querySelector && head.querySelector('[data-imp-referrer]'))) return;
+    head.appendChild(el('meta', { name: 'referrer', content: 'strict-origin', 'data-imp-referrer': '' }));
   }
 
   // ── the banner ──────────────────────────────────────────────────────
@@ -206,6 +233,24 @@
   // The question goes out at once; the page is drawn once the document
   // is parsed (this script runs first in <body>).
   const active = readActive();
+  // The site bar's Sign out: never before the question is answered; while
+  // impersonating, Stop (which signs out after), else the form as it is.
+  // A failed question submits the form: the sign-out still ends the
+  // session (the Hub's record then ends at its time limit).
+  function onSubmit(e) {
+    const f = e.target;
+    if (!f || !f.hasAttribute || !f.hasAttribute('data-pn-signout')) return;
+    e.preventDefault();
+    const btn = f.querySelector('button');
+    if (btn) btn.disabled = true;
+    active.then(a => a, () => null).then(a => {
+      if (!a) { sendOrigin(); f.submit(); return; }
+      // Problems show in the banner's status line.
+      const msg = t => { const m = document.body.querySelector('[data-imp-msg]'); if (m) m.textContent = t; };
+      stop(msg, on => { if (btn) btn.disabled = on; }, () => { sendOrigin(); f.submit(); });
+    });
+  }
+  document.addEventListener('submit', onSubmit, true);
   function init() {
     const main = document.getElementById('imp-stop');
     const page = main ? initStopPage(main, active) : Promise.resolve();

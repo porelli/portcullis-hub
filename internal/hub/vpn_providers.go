@@ -479,7 +479,7 @@ func (h *Hub) vpnChanged() {
 }
 
 // vpnUserOK: user is a Portcullis person (in the directory snapshot m)
-// and, when Settings → VPN names a users group, a current member of it.
+// and, when Settings → Network → VPN names a users group, a current member of it.
 func vpnUserOK(m *directory.Membership, group, user string) bool {
 	if m == nil {
 		return false

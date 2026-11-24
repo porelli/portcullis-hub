@@ -293,12 +293,20 @@ a.pd-link { text-decoration: none; }
 .pp-why { display: block; color: #f59e0b; font-size: 0.75rem; white-space: normal; }
 
 /* shared top navigation (PortcullisNav): the Hub page and people.<domain> */
-.pn-bar { margin: -1rem 0 1rem; }
+.pn-bar { margin: -1rem 0 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; justify-content: space-between; align-items: center; }
 .pn-nav { display: flex; gap: 0.25rem; flex-wrap: wrap; font-size: 0.8125rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 .pn-link { color: #94a3b8; text-decoration: none; padding: 0.25rem 0.75rem; border-radius: 9999px; border: 1px solid transparent; }
 .pn-link:hover { color: #e2e8f0; background: #1e293b; }
 .pn-link:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
 .pn-link.pn-current { color: #f1f5f9; background: #3b82f622; border-color: #3b82f655; font-weight: 600; }
+/* The bar's right side: the username and Sign out (a POST form). */
+.pn-account { display: flex; align-items: center; gap: 0.75rem; font-size: 0.8125rem; color: #94a3b8; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.pn-account strong { color: #60a5fa; }
+.pn-signout { display: inline; margin: 0; }
+.pn-signout-btn { font: inherit; color: #e2e8f0; background: #1e293b; border: 1px solid #334155; border-radius: 9999px; padding: 0.25rem 0.85rem; cursor: pointer; line-height: 1.6; }
+.pn-signout-btn:hover { background: #334155; }
+.pn-signout-btn:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
+.pn-signout-btn:disabled { opacity: 0.6; cursor: progress; }
 
 /* The Sign-in page and a person's Sign-in tab (mysignin.js). */
 .msi-page { padding: 1rem 1.25rem; }

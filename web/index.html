@@ -25,9 +25,17 @@
     .user-badge strong { color: #3b82f6; }
 
     /* Tabs */
-    .tabs { display: flex; gap: 0; margin-bottom: 2rem; border-bottom: 2px solid #1e293b; }
-    .tab { padding: 0.75rem 1.5rem; cursor: pointer; color: #94a3b8; font-size: 0.875rem; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
-    .tab:hover { color: #e2e8f0; }
+    /* The top tabs scroll sideways when they don't fit (390 px phones):
+       never wider than the page. Buttons, so Tab reaches them. The rule
+       under them is an inset shadow: a border would be clipped by the
+       scroll box under the picked tab's underline. */
+    .tabs { position: relative; display: flex; gap: 0; margin-bottom: 2rem; box-shadow: inset 0 -2px #1e293b; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+    .tab { flex: none; white-space: nowrap; background: none; border: 0; font-family: inherit; padding: 0.75rem 1.5rem; cursor: pointer; color: #94a3b8; font-size: 0.875rem; font-weight: 500; border-bottom: 2px solid transparent; transition: all 0.2s; }
+    .tab:hover, .tab:focus-visible { color: #e2e8f0; }
+    .tab:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
+    @media (max-width: 640px) { .tab { padding: 0.75rem 0.875rem; } }
+    /* Settings → Network's domains table scrolls inside its box on a phone. */
+    #domains-root { overflow-x: auto; }
     .tab.active { color: #3b82f6; border-bottom-color: #3b82f6; }
     a.tab { text-decoration: none; }
     a.group-link { color: inherit; text-decoration: none; border-bottom: 1px dotted #64748b; }
@@ -113,6 +121,19 @@
     .port-inputs .port-host { font-family: monospace; text-align: center; }
     .port-hint { display: block; margin-top: 0.25rem; color: #64748b; font-size: 0.7rem; }
     .auth-notes { color: #94a3b8; font-size: 0.8125rem; background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 3px solid #3b82f6; }
+    .auth-notes > :first-child { margin-top: 0; }
+    .auth-notes > :last-child { margin-bottom: 0; }
+    .auth-notes p, .auth-notes ul, .auth-notes ol, .auth-notes blockquote, .auth-notes pre, .auth-notes table { margin: 0 0 0.5rem; }
+    .auth-notes ul, .auth-notes ol { padding-left: 1.25rem; }
+    .auth-notes li { margin: 0.125rem 0; }
+    .auth-notes h1, .auth-notes h2, .auth-notes h3, .auth-notes h4, .auth-notes h5, .auth-notes h6 { font-size: 0.875rem; color: #cbd5e1; margin: 0.75rem 0 0.25rem; }
+    .auth-notes code { background: #1e293b; padding: 0.05rem 0.3rem; border-radius: 0.25rem; font-size: 0.75rem; overflow-wrap: anywhere; }
+    .auth-notes pre { background: #1e293b; padding: 0.5rem; border-radius: 0.25rem; overflow-x: auto; }
+    .auth-notes pre code { background: none; padding: 0; }
+    .auth-notes a { color: #60a5fa; }
+    .auth-notes blockquote { border-left: 2px solid #334155; padding-left: 0.75rem; }
+    .auth-notes table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
+    .auth-notes th, .auth-notes td { border: 1px solid #334155; padding: 0.25rem 0.5rem; }
 
     /* Sign-in / public / AI blocks */
     .policy-section { padding: 0.875rem 1rem; background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; margin-bottom: 1rem; }
@@ -238,6 +259,69 @@
     .btn-secondary { background: #334155; color: #e2e8f0; }
     .btn-secondary:hover { background: #475569; }
     .btn-sm { padding: 0.375rem 0.75rem; font-size: 0.8125rem; }
+    /* Shared baseline for every module's controls (Settings sections, SSH
+       access, …). :where() keeps specificity 0: every section's own rule
+       still wins; this only replaces the browser's defaults (white
+       inputs, grey buttons, dark-blue links). */
+    :where(input:not([type]), input[type="text"], input[type="number"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="datetime-local"], textarea, select) {
+      padding: 0.375rem 0.625rem; background: #1e293b; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.8125rem; font-family: inherit; color-scheme: dark; }
+    :where(input:not([type]), input[type="text"], input[type="number"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], textarea, select):focus { outline: none; border-color: #3b82f6; }
+    :where(input, textarea)::placeholder { color: #475569; }
+    :where(input, textarea, select):disabled { opacity: 0.6; cursor: not-allowed; }
+    :where(input[type="checkbox"], input[type="radio"]) { accent-color: #3b82f6; }
+    :where(.inst-form) :where(input:not([type]), input[type="number"], textarea) { width: 100%; padding: 0.5rem 0.75rem; font-size: 0.875rem; margin-bottom: 0.25rem; }
+    :where(.inst-table) :where(input:not([type]), input[type="text"]) { width: 100%; }
+    /* A .btn without a variant (btn btn-sm): the secondary look. */
+    :where(.btn:not(.btn-primary, .btn-secondary, .btn-danger, .btn-icon)) { background: #334155; color: #e2e8f0; }
+    :where(.btn:not(.btn-primary, .btn-secondary, .btn-danger, .btn-icon)):hover { background: #475569; }
+    :where(.btn:disabled) { opacity: 0.5; cursor: not-allowed; }
+    /* SSH access subtabs (ssh.js): a tab bar like .usage-nav. */
+    .ssh-sections { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #334155; }
+    .ssh-settings-link { margin-left: auto; font-size: 0.8125rem; }
+    /* Access subtabs (access.js): SSH access · VPN devices · Sign-in history. */
+    .access-nav { display: flex; gap: 0; margin-bottom: 1.25rem; border-bottom: 1px solid #1e293b; }
+    .access-nav button { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 0.5rem 1rem; color: #94a3b8; font: inherit; font-size: 0.875rem; cursor: pointer; }
+    .access-nav button[aria-selected="true"] { color: #e2e8f0; border-bottom-color: #3b82f6; }
+    .access-nav button:hover { color: #e2e8f0; }
+    /* The Marketplace (marketplace.js): in Apps, its banners hidden. */
+    #tab-apps.mkt-on > .drift, #tab-apps.mkt-on > .admin-hint { display: none; }
+    .mkt-bar { margin: 0.75rem 0 1rem; }
+    .mkt-search { width: 100%; max-width: 36rem; }
+    .mkt-chips, .mkt-toggles { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.75rem; }
+    .mkt-chip, .mkt-toggle { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; border-radius: 999px; padding: 0.25rem 0.75rem; font: inherit; font-size: 0.8125rem; cursor: pointer; }
+    .mkt-chip:hover, .mkt-toggle:hover { border-color: #64748b; color: #e2e8f0; }
+    .mkt-chip[aria-pressed="true"], .mkt-toggle[aria-pressed="true"] { background: #1d4ed8; border-color: #3b82f6; color: #fff; }
+    .mkt-count { color: #94a3b8; font-size: 0.75rem; }
+    .mkt-chip[aria-pressed="true"] .mkt-count { color: #dbeafe; }
+    .mkt-toggles { margin-bottom: 1.5rem; }
+    .app-icon-logo { width: 1.75rem; height: 1.75rem; object-fit: contain; }
+    .mkt-details { margin-left: auto; }
+    .mkt-drawer { margin: 0 0 0 auto; height: 100vh; max-height: 100vh; width: min(640px, 100vw); background: #1e293b; color: #e2e8f0; border: 0; border-left: 1px solid #334155; padding: 1.25rem 1.5rem; overflow-y: auto; font-size: 0.875rem; }
+    .mkt-drawer::backdrop { background: rgba(2, 6, 23, 0.6); }
+    .mkt-drawer-head { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .mkt-drawer-head h3 { font-size: 1.25rem; margin: 0; flex: 1; }
+    .mkt-drawer-icon { font-size: 2rem; }
+    .mkt-drawer-icon-logo { width: 2.5rem; height: 2.5rem; object-fit: contain; }
+    .mkt-drawer h4 { margin: 1.25rem 0 0.5rem; font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; }
+    .mkt-drawer ul { margin: 0 0 0 1.25rem; }
+    .mkt-meta { color: #94a3b8; margin-bottom: 1rem; }
+    .mkt-drawer a:not(.btn) { color: #93c5fd; }
+    .mkt-drawer .md p { margin: 0 0 0.75rem; }
+    .mkt-drawer .md ul, .mkt-drawer .md ol { margin: 0 0 0.75rem 1.25rem; }
+    .mkt-shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0.75rem; }
+    .mkt-shot { width: 100%; border-radius: 0.5rem; border: 1px solid #334155; }
+    .mkt-shots figcaption { color: #94a3b8; font-size: 0.75rem; margin-top: 0.25rem; }
+    .mkt-drawer-foot { margin-top: 1.5rem; }
+    /* Settings subtabs (settingsnav.js): the same bar, wrapping on a narrow screen. */
+    .settings-nav { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 1.5rem; border-bottom: 1px solid #1e293b; }
+    .settings-nav button { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 0.5rem 1rem; color: #94a3b8; font: inherit; font-size: 0.875rem; cursor: pointer; }
+    .settings-nav button[aria-selected="true"] { color: #e2e8f0; border-bottom-color: #3b82f6; }
+    .settings-nav button:hover, .settings-nav button:focus-visible { color: #e2e8f0; }
+    .access-pick { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
+    /* Links: readable on the dark background everywhere. */
+    :where(.tab-content a:not(.btn)) { color: #93c5fd; }
+    /* A facts list outside a section card. */
+    :where(:not(.inst-section) > .inst-facts) { font-size: 0.8125rem; margin: 0.5rem 0 1rem; }
 
     .badge-builtin { color: #3b82f6; }
     .badge-community { color: #a855f7; }
@@ -370,6 +454,19 @@
     .inst-line-sub { color: #94a3b8; font-size: 0.8125rem; margin-left: 0.5rem; }
     .inst-line-act { display: flex; gap: 0.5rem; align-items: center; }
     .toggle.toggle-sm { padding: 0.25rem 0.75rem; font-size: 0.8125rem; }
+    /* Bypass badges: what skips Portcullis's normal protection (§11.7 "bypass") */
+    .bypass-badges { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; align-items: center; }
+    button.pill.bypass-badge { cursor: pointer; font: inherit; font-size: 0.6875rem; margin: 0; }
+    button.pill.bypass-badge:hover, button.pill.bypass-badge:focus-visible { background: #f59e0b44; color: #fde68a; outline: none; }
+    button.pill.bypass-badge[aria-expanded="true"] { background: #f59e0b44; color: #fde68a; }
+    .bypass-details { flex-basis: 100%; background: #0f172a; border: 1px solid #f59e0b44; border-radius: 0.5rem; padding: 0.625rem 0.875rem; font-size: 0.8125rem; color: #cbd5e1; }
+    .bypass-details[hidden] { display: none; }
+    .bypass-item + .bypass-item { border-top: 1px solid #1e293b; margin-top: 0.5rem; padding-top: 0.5rem; }
+    .bypass-item h5 { font-size: 0.8125rem; font-weight: 600; color: #fbbf24; margin-bottom: 0.25rem; }
+    .bypass-item dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.125rem 0.75rem; }
+    .bypass-item dt { color: #64748b; }
+    .bypass-item dd code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
+    .bypass-item .bypass-note { color: #94a3b8; font-style: italic; }
     .muted { color: #64748b; }
     /* The instance page (one per instance, the default one included) */
     .page-crumbs { color: #64748b; font-size: 0.8125rem; margin-bottom: 0.25rem; }
@@ -560,6 +657,8 @@
     .dr-group { margin-bottom: 1.5rem; }
     .dr-group summary { cursor: pointer; }
     .dr-bad { color: #ef4444; } .dr-warn { color: #f59e0b; } .dr-info { color: #3b82f6; }
+    /* A finding's link (doctor.js linkOf) is an <a> styled as its buttons. */
+    a.btn[data-dr-link] { text-decoration: none; display: inline-block; }
     .dr-card { background: #1e293b; border: 1px solid #334155; border-left-width: 4px; border-radius: 0.5rem; padding: 0.875rem 1rem; margin-bottom: 0.75rem; font-size: 0.875rem; }
     .dr-card.dr-problem { border-left-color: #ef4444; } .dr-card.dr-warning { border-left-color: #f59e0b; } .dr-card.dr-info { border-left-color: #3b82f6; }
     .dr-title { font-weight: 600; margin-bottom: 0.375rem; }
@@ -577,6 +676,11 @@
     .fd-usedby { display: flex; flex-direction: column; gap: 0.375rem; max-height: 18rem; overflow-y: auto; }
     .fd-use { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.8125rem; }
     .fd-use input[type=text] { width: 12rem; padding: 0.25rem 0.5rem; }
+    .fd-inst { display: flex; flex-direction: column; gap: 0.25rem; }
+    .fd-inst + .fd-inst { border-top: 1px solid #334155; padding-top: 0.375rem; }
+    .fd-inst-head { font-size: 0.8125rem; font-weight: 600; }
+    .fd-inst .fd-use { padding-left: 1rem; }
+    .fd-hint { flex-basis: 100%; color: #64748b; font-size: 0.75rem; }
     .fd-check { margin-top: 0.5rem; font-size: 0.8125rem; }
     .fd-check-ok { color: #4ade80; } .fd-check-bad { color: #f59e0b; }
     .fd-advanced { margin-bottom: 1rem; } .fd-advanced summary { cursor: pointer; color: #94a3b8; font-size: 0.8125rem; }
@@ -601,8 +705,59 @@
     .usage-bar-bad span { background: #ef4444; }
     .usage-bar-none span { background: #64748b; }
     .usage-status { font-size: 0.75rem; }
-    .usage-status-ok { color: #4ade80; } .usage-status-warn { color: #fbbf24; } .usage-status-off { color: #94a3b8; } .usage-status-info { color: #93c5fd; }
+    .usage-status-ok { color: #4ade80; } .usage-status-warn { color: #fbbf24; } .usage-status-off { color: #94a3b8; } .usage-status-info { color: #93c5fd; } .usage-status-bad { color: #f87171; }
     .usage-spark { color: #60a5fa; vertical-align: middle; }
+    /* The Share view (share.js, donut.js): the categorical colours are the
+       dataviz reference palette's dark steps (validated on #0f172a: all
+       checks pass), c0 Portcullis core, c1–c7 the apps (more: folded);
+       other / free / shared folders / images are neutral steps. Colour is
+       never the only cue: every slice is a legend row. */
+    .share-bar { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin: 0.25rem 0 1rem; }
+    .share-pick select { margin-left: 0.375rem; }
+    .share-wins { display: inline-flex; gap: 0; }
+    .share-win { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; padding: 0.25rem 0.75rem; font: inherit; font-size: 0.8125rem; cursor: pointer; }
+    .share-win:first-child { border-radius: 999px 0 0 999px; } .share-win:last-child { border-radius: 0 999px 999px 0; border-left: 0; }
+    .share-win[aria-pressed="true"] { background: #1d4ed8; border-color: #3b82f6; color: #fff; }
+    .share-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
+    .share-card { background: #0f172a; border: 1px solid #1e293b; border-radius: 0.75rem; padding: 1rem; margin: 0; }
+    .share-title { font-weight: 600; font-size: 0.875rem; margin-bottom: 0.5rem; }
+    .share-h { margin: 0.5rem 0 0.75rem; font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; }
+    .share-app { font-size: 0.9375rem; }
+    .share-donut { display: block; margin: 0 auto 0.5rem; }
+    .share-track { fill: none; stroke: #1e293b; }
+    .share-slice { fill: none; }
+    .share-slice[data-share-app] { cursor: pointer; }
+    .share-slice[data-share-app]:hover { stroke-opacity: 0.85; }
+    /* A clear focus ring on a slice: an outline round its box and a glow. */
+    .share-slice[data-share-app]:focus-visible { outline: 2px solid #f8fafc; outline-offset: 2px; filter: drop-shadow(0 0 3px #f8fafc); }
+    .share-center { fill: #e2e8f0; font-size: 0.875rem; font-weight: 600; }
+    .share-center-nm { fill: #94a3b8; font-weight: 400; font-style: italic; }
+    .share-cap { color: #94a3b8; font-size: 0.75rem; text-align: center; margin: 0 0 0.5rem; }
+    .share-legend { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+    .share-legend th, .share-legend td { text-align: left; padding: 0.2rem 0.375rem; border-bottom: 1px solid #1e293b; }
+    .share-legend th { color: #94a3b8; font-weight: 500; }
+    .share-legend td:nth-child(2), .share-legend td:nth-child(3), .share-legend th:nth-child(2), .share-legend th:nth-child(3) { text-align: right; white-space: nowrap; }
+    .share-nm td { color: #94a3b8; font-style: italic; }
+    .share-legend tr.share-nm td:nth-child(2) { white-space: normal; text-align: left; }
+    .share-link { background: none; border: 0; padding: 0; color: #93c5fd; font: inherit; cursor: pointer; text-decoration: underline; text-align: left; }
+    .share-swatch { display: inline-block; width: 0.625rem; height: 0.625rem; border-radius: 2px; margin-right: 0.375rem; vertical-align: -0.05rem; background: currentColor; }
+    .share-c0 { stroke: #3987e5; color: #3987e5; }
+    .share-c1 { stroke: #d95926; color: #d95926; }
+    .share-c2 { stroke: #199e70; color: #199e70; }
+    .share-c3 { stroke: #c98500; color: #c98500; }
+    .share-c4 { stroke: #d55181; color: #d55181; }
+    .share-c5 { stroke: #008300; color: #008300; }
+    .share-c6 { stroke: #9085e9; color: #9085e9; }
+    .share-c7 { stroke: #e66767; color: #e66767; }
+    .share-more { stroke: #a8b3c4; color: #a8b3c4; }
+    .share-folders { stroke: #cbd5e1; color: #cbd5e1; }
+    .share-shared { stroke: #8f9cb3; color: #8f9cb3; }
+    .share-note { color: #fbbf24; }
+    .share-wait .share-grid { opacity: 0.55; }
+    .share-images { stroke: #7d8aa0; color: #7d8aa0; }
+    .share-other { stroke: #55637a; color: #55637a; }
+    .share-free { stroke: #334155; color: #334155; }
+    .share-none { background: none; border: 1px dashed #64748b; }
     .usage-table a, .usage-strip a, .usage-nav a.usage-sub { color: #93c5fd; }
     .usage-nav a.btn { text-decoration: none; }
     .usage-disks { display: flex; flex-wrap: wrap; gap: 1rem 2rem; margin-bottom: 1rem; font-size: 0.8125rem; }
@@ -616,29 +771,23 @@
 <body>
   <div class="container">
     <!-- The shared top navigation (directory.js PortcullisNav, also on
-         people.<domain>): Portal · Hub · People. -->
+         people.<domain>): Portal · Hub · People · Sign-in, then the
+         username and Sign out (contract §5 "Sign out"). -->
     <div class="pn-bar" id="site-nav"></div>
     <header>
       <h1><img class="brand-mark" src="/static/mark.svg" alt="" width="28" height="28"> {{.PortalName}} Hub <span class="pill" id="runtime-badge" hidden></span></h1>
-      {{if .User}}
-      <div class="user-badge">Authenticated as <strong>{{.User}}</strong></div>
-      {{else}}
-      <div class="user-badge">{{.Domain}}</div>
-      {{end}}
     </header>
 
-    <!-- Apps (what runs here) · Marketplace (what can be added, and the
-         template sources it comes from) · SSH access · Audit log · Doctor · Settings ·
-         People ↗ (people.<domain>, href set below from PortcullisPeople). -->
+    <!-- Apps (what runs here; "+ Add app" opens the Marketplace) ·
+         Doctor · Usage · Access (SSH access, VPN devices, sign-in
+         history) · Settings · Audit. People is the site bar's. -->
     <div class="tabs">
-      <div class="tab active" data-tab="apps">Apps</div>
-      <div class="tab" data-tab="marketplace">Marketplace</div>
-      <div class="tab" data-tab="ssh">SSH access</div>
-      <div class="tab" data-tab="audit">Audit log</div>
-      <div class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></div>
-      <div class="tab" data-tab="usage">Usage</div>
-      <div class="tab" data-tab="settings">Settings</div>
-      <a class="tab" data-people-link href="#">People &#8599;</a>
+      <button type="button" class="tab active" data-tab="apps">Apps</button>
+      <button type="button" class="tab" data-tab="doctor" id="doctor-tab">Doctor <span class="tab-badge" hidden></span></button>
+      <button type="button" class="tab" data-tab="usage">Usage</button>
+      <button type="button" class="tab" data-tab="access">Access</button>
+      <button type="button" class="tab" data-tab="settings">Settings</button>
+      <button type="button" class="tab" data-tab="audit">Audit</button>
     </div>
     <script>
       // People and groups live on people.<domain> only (the shared
@@ -690,107 +839,14 @@
       <div class="drift" id="missing-groups"></div>
       <div class="drift" id="user-sweep"></div>
       <div id="apps-root"><p class="settings-empty">Loading…</p></div>
+
+      <!-- Marketplace ("+ Add app", #marketplace…): web/marketplace.js,
+           client-rendered from GET /api/templates (showMarketplace) -->
+      <div id="mkt-root" hidden></div>
     </div>
 
     <!-- One page per instance, the default one included (#apps/<id>[/<tab>], renderInstancePage) -->
     <div class="tab-content" id="tab-instance"><div id="instance-page"></div></div>
-
-    <!-- Marketplace: every template; in use or Install… (fillMarketplace) -->
-    <div class="tab-content" id="tab-marketplace">
-      {{range $category, $apps := .Categories}}
-      <div class="category">
-        <div class="category-title">{{$category}}</div>
-        <div class="apps">
-          {{range $apps}}
-          <div class="app-card" data-id="{{.ID}}" data-mail="{{if .MailProvider}}1{{end}}">
-            <div class="app-header">
-              <span class="app-icon">{{.Manifest.Icon}}</span>
-              <span class="app-name">{{.Manifest.Name}}</span>
-              {{if .MailProvider}}<span class="pill" data-mail-badge>mail server</span>{{end}}
-              <span class="app-source {{if eq .Source "portcullis"}}badge-builtin{{else}}badge-community{{end}}">{{.Source}}</span>
-            </div>
-            <div class="app-desc">{{.Manifest.Description}}</div>
-            <div class="app-auth">
-              {{if .Manifest.Auth.Method}}
-                {{if eq (printf "%v" .Manifest.Auth.SSO) "true"}}
-                  <span class="auth-badge sso" title="Full Single Sign-On support">SSO</span>
-                {{else if eq (printf "%v" .Manifest.Auth.SSO) "partial"}}
-                  <span class="auth-badge sso-partial" title="Partial SSO via proxy auth header">SSO*</span>
-                {{end}}
-                {{if .Manifest.Routerless}}
-                  <span class="auth-badge method" data-no-web-page="{{.ID}}" title="This app has no web page: people use it with its own client (see My apps)">No web page</span>
-                {{end}}
-                {{if .Manifest.Auth.GroupAccess}}
-                  <span class="auth-badge group" title="Access restricted by LLDAP group">Group Access</span>
-                {{end}}
-                {{if .Manifest.Auth.GroupAdmin}}
-                  <span class="auth-badge group-admin" title="Admin role assigned by LLDAP group">Group Admin</span>
-                {{end}}
-                {{if eq .Manifest.Auth.Method "public"}}
-                  <span class="auth-badge public">Public</span>
-                {{else}}
-                  <span class="auth-badge method" title="{{.Manifest.Auth.Notes}}">{{.Manifest.Auth.Method}}</span>
-                {{end}}
-              {{end}}
-            </div>
-            <div class="app-tags">
-              {{range .Manifest.Tags}}<span class="tag">{{.}}</span>{{end}}
-            </div>
-            <div class="app-footer" data-mkt-use="{{.ID}}" data-mkt-multi="{{if eq .Manifest.Instances "multi"}}1{{end}}" data-compat="{{if .Compat}}{{.Compat.Status}}{{end}}" data-compat-runtime="{{if .Compat}}{{.Compat.Runtime}}{{end}}" data-compat-reasons="{{if .Compat}}{{range $i, $r := .Compat.Reasons}}{{if $i}}; {{end}}{{$r}}{{end}}{{end}}"></div>
-          </div>
-          {{end}}
-        </div>
-      </div>
-      {{end}}
-
-      {{if not .Templates}}
-      <div class="empty">No templates found. Add a template source below or check the templates/ directory.</div>
-      {{end}}
-
-      <!-- Template sources: where the Marketplace's templates come from -->
-      <div class="category" id="mkt-sources" style="margin-top: 2.5rem;">
-        <div class="category-title">Template sources</div>
-        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-          The git repositories the Marketplace's templates come from.
-        </p>
-        <div class="sources-list" id="sources-list">
-          {{range .Sources}}
-          <div class="source-item" data-name="{{.Name}}">
-            <div class="source-info">
-              <div class="source-name">{{.Name}}{{if eq .Name "portcullis"}} <span style="font-size: 0.6875rem; color: #3b82f6; margin-left: 0.5rem;">default</span>{{end}}</div>
-              <div class="source-url">{{.URL}}</div>
-            </div>
-            <div class="source-actions">
-              {{if ne .Name "portcullis"}}
-              <button type="button" class="btn btn-danger" data-src-remove="{{.Name}}">Remove</button>
-              {{end}}
-            </div>
-          </div>
-          {{end}}
-          {{if not .Sources}}
-          <div class="empty" id="no-sources">No template sources configured.</div>
-          {{end}}
-        </div>
-
-        <div style="margin-top: 1.5rem;">
-          <div class="category-title">Add Template Repository</div>
-          <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-            Add a git repository containing template directories. Each template needs a <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">manifest.yaml</code> and <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">compose.yml</code>.
-          </p>
-          <div class="form-row">
-            <input type="text" id="source-name" placeholder="Name (e.g., my-templates)">
-            <input type="text" id="source-url" placeholder="Git URL (e.g., https://github.com/user/portcullis-templates.git)">
-            <button type="button" class="btn btn-primary" data-src-add>Add</button>
-          </div>
-        </div>
-
-        <div style="margin-top: 2rem;">
-          <button type="button" class="btn btn-secondary" data-src-sync>Sync All Sources</button>
-          <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories (the Hub also syncs at every start and on <code>./portcullis upgrade</code>)</span>
-          <div id="source-sync-status" style="margin-top: 0.75rem; font-size: 0.8125rem; color: #94a3b8;"></div>
-        </div>
-      </div>
-    </div>
 
     <!-- Doctor Tab (web/doctor.js) -->
     <div class="tab-content" id="tab-doctor">
@@ -802,14 +858,11 @@
       <div id="doctor-root"></div>
     </div>
 
-    <!-- SSH access Tab (web/ssh.js: PortcullisSSH.render; contract §18) -->
-    <div class="tab-content" id="tab-ssh">
-      <div class="category-title" style="margin-bottom: 1rem;">SSH access</div>
-      <p class="settings-empty" style="margin-bottom:1rem">
-        Short-lived SSH certificates for people's host groups, signed after a Portcullis sign-in (<code>portcullis login</code>).
-        Managed hosts are enrolled once and kept current; unmanaged hosts trust the CA with <code>portcullis host trust</code>.
-      </p>
-      <div id="ssh-root"></div>
+    <!-- Access Tab (web/access.js: PortcullisAccess.render): SSH access
+         (web/ssh.js, contract §18), VPN devices, sign-in history -->
+    <div class="tab-content" id="tab-access">
+      <div class="category-title" style="margin-bottom: 1rem;">Access</div>
+      <div id="access-root"></div>
     </div>
 
     <!-- Usage Tab (web/usage.js) -->
@@ -836,78 +889,134 @@
     <!-- Settings → Sign-in and the instance sign-in pick -->
     <script src="/static/signin.js"></script>
 
-    <!-- Settings Tab -->
+    <!-- Settings Tab: 8 subtabs (web/settingsnav.js), each at
+         #settings/<section>; only the shown section loads. -->
     <div class="tab-content" id="tab-settings">
-      <div class="category-title" style="margin-bottom: 1rem;">Sign-in</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Which sign-in methods people may use on this server, and templates: named rules over those methods, each with a score out of 5.
-        One template is the default; each app picks the default or another enabled template in its Settings tab, and Portcullis's own pages are set below.
-        Wherever a template applies, the people who can't meet it yet are listed.
-      </p>
-      <div id="signin-root"></div>
-
-      <div class="category-title" style="margin: 2rem 0 1rem;">AI support</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        People's AI assistants (Claude, Claude Code, other MCP clients) can use their apps as them, through core's
-        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">mcp-gate</code>: each app's
-        <b>AI support</b> tab switches it on for that app. Model providers are where the AI page apps send what people type there.
-      </p>
-      <div id="ai-root"></div>
-
-      <div class="category-title" style="margin: 2rem 0 1rem;">Domains</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
-        Portcullis points <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">&lt;domain&gt;</code> and
-        <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">*.&lt;domain&gt;</code> at this server and obtains a wildcard website
-        certificate (HTTPS) with the DNS provider's API token. A domain receives hostnames once its records are OK and its website certificate is valid.
-        Tokens are write-only: they go to core's domains service (encrypted at rest) and are never shown again.
-      </p>
-      <div id="domains-root"></div>
-
-      <div class="category-title" style="margin: 2rem 0 1rem;">Shared folders</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Host folders several apps use. Each folder gets its own group: its files and folders are given that group, setgid and a default ACL,
-        so whatever one app writes the others can read (or write). Assigning apps is always previewed first, a permissions snapshot is saved
-        before anything changes, and the last apply can be undone. Removing a folder never deletes files.
-      </p>
-      <div id="folders-root"></div>
-
-      <div class="category-title" style="margin: 2rem 0 1rem;">Local networks</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Your LAN and VPN ranges. The doctor judges LAN-only ports (file sharing, discovery) against them, and "Rebind…" only accepts an address inside them.
-      </p>
-      <div id="localnets-root"></div>
-
-      <div class="category-title" style="margin: 2rem 0 1rem;">VPN</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Who may use Portcullis VPNs, how many built-in devices each person may have and for how long, and the VPN providers.
-      </p>
-      <div id="vpn-settings-root"></div>
-
-      <div class="category-title" style="margin: 2rem 0 1rem;">Mail</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        Mail for the main domain and the added domains you turn it on for: who gets an address where, the primary domain, the spam filter, sending limits and mailbox sizes.
-        Mailboxes go to the members of <code>mail_users</code>; people create their own mail passwords on their Sign-in page.
-      </p>
-      <div id="mail-settings-root"></div>
-
-      <div class="category-title" style="margin: 2rem 0 1rem;">Servers</div>
-      <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-        The primary and the worker servers your apps can run on: their state, free space and certificates, each one's Local networks and scheduled backups.
-        Adding, revoking and removing a server need a fresh sign-in.
-      </p>
-      <div id="servers-root"></div>
-
-      <!-- Settings → High availability (web/ha.js; Kubernetes only) -->
-      <div id="ha-section" hidden>
-        <div class="category-title" style="margin: 2rem 0 1rem;">High availability</div>
-        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
-          With 3 or more nodes, Portcullis survives the loss of any one of them: sign-in keeps working and no saved data is lost.
-          This page shows what's still missing and the cluster's live state; turning HA on is done on the server with <code>./portcullis ha enable</code>.
-        </p>
-        <div id="ha-root"></div>
+      <div class="settings-nav" role="tablist" aria-label="Settings sections">
+        <button type="button" role="tab" id="settings-tab-signin" aria-controls="settings-signin" aria-selected="true" tabindex="0" data-settings-tab="signin">Sign-in</button>
+        <button type="button" role="tab" id="settings-tab-network" aria-controls="settings-network" aria-selected="false" tabindex="-1" data-settings-tab="network">Network</button>
+        <button type="button" role="tab" id="settings-tab-storage" aria-controls="settings-storage" aria-selected="false" tabindex="-1" data-settings-tab="storage">Storage</button>
+        <button type="button" role="tab" id="settings-tab-mail" aria-controls="settings-mail" aria-selected="false" tabindex="-1" data-settings-tab="mail">Mail</button>
+        <button type="button" role="tab" id="settings-tab-ai" aria-controls="settings-ai" aria-selected="false" tabindex="-1" data-settings-tab="ai">AI</button>
+        <button type="button" role="tab" id="settings-tab-servers" aria-controls="settings-servers" aria-selected="false" tabindex="-1" data-settings-tab="servers">Servers</button>
+        <button type="button" role="tab" id="settings-tab-ssh" aria-controls="settings-ssh" aria-selected="false" tabindex="-1" data-settings-tab="ssh">SSH</button>
+        <button type="button" role="tab" id="settings-tab-sources" aria-controls="settings-sources" aria-selected="false" tabindex="-1" data-settings-tab="sources">Template sources</button>
       </div>
 
+      <section data-settings-section="signin" id="settings-signin" role="tabpanel" aria-labelledby="settings-tab-signin">
+        <div class="category-title" style="margin-bottom: 1rem;">Sign-in</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Which sign-in methods people may use on this server, and templates: named rules over those methods, each with a score out of 5.
+          One template is the default; each app picks the default or another enabled template in its Settings tab, and Portcullis's own pages are set below.
+          Wherever a template applies, the people who can't meet it yet are listed.
+        </p>
+        <div id="signin-root"></div>
+      </section>
+
+      <section data-settings-section="network" id="settings-network" role="tabpanel" aria-labelledby="settings-tab-network" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Domains</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Extra domains or subdomains for app instances (never for the portal, Hub, people or sign-in pages).
+          Portcullis points <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">&lt;domain&gt;</code> and
+          <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">*.&lt;domain&gt;</code> at this server and obtains a wildcard website
+          certificate (HTTPS) with the DNS provider's API token. A domain receives hostnames once its records are OK and its website certificate is valid.
+          Tokens are write-only: they go to core's domains service (encrypted at rest) and are never shown again.
+        </p>
+        <div id="domains-root"></div>
+        <div class="category-title" style="margin: 2rem 0 1rem;">Local networks</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Your LAN and VPN ranges. The doctor judges LAN-only ports (file sharing, discovery) against them, and "Rebind…" only accepts an address inside them.
+        </p>
+        <div id="localnets-root"></div>
+        <div class="category-title" style="margin: 2rem 0 1rem;">VPN</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Who may use Portcullis VPNs, how many built-in devices each person may have and for how long, and the VPN providers.
+        </p>
+        <div id="vpn-settings-root"></div>
+      </section>
+
+      <section data-settings-section="storage" id="settings-storage" role="tabpanel" aria-labelledby="settings-tab-storage" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Shared folders</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Host folders several apps use. Each folder gets its own group: its files and folders are given that group, setgid and a default ACL,
+          so whatever one app writes the others can read (or write). Assigning apps is always previewed first, a permissions snapshot is saved
+          before anything changes, and the last apply can be undone. Removing a folder never deletes files.
+        </p>
+        <div id="folders-root"></div>
+      </section>
+
+      <section data-settings-section="mail" id="settings-mail" role="tabpanel" aria-labelledby="settings-tab-mail" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Mail</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Mail for the main domain and the added domains you turn it on for: who gets an address where, the primary domain, the spam filter, sending limits and mailbox sizes.
+          Mailboxes go to the members of <code>mail_users</code>; people create their own mail passwords on their Sign-in page.
+        </p>
+        <div id="mail-settings-root"></div>
+      </section>
+
+      <section data-settings-section="ai" id="settings-ai" role="tabpanel" aria-labelledby="settings-tab-ai" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">AI support</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          People's AI assistants (Claude, Claude Code, other MCP clients) can use their apps as them, through core's
+          <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">mcp-gate</code>: each app's
+          <b>AI support</b> tab switches it on for that app. Model providers are where the AI page apps send what people type there.
+        </p>
+        <div id="ai-root"></div>
+      </section>
+
+      <section data-settings-section="servers" id="settings-servers" role="tabpanel" aria-labelledby="settings-tab-servers" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Servers</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          The primary and the worker servers your apps can run on: their state, free space and certificates, each one's Local networks and scheduled backups.
+          Adding, revoking and removing a server need a fresh sign-in.
+        </p>
+        <div id="servers-root"></div>
+
+        <!-- Settings → High availability (web/ha.js; Kubernetes only) -->
+        <div id="ha-section" hidden>
+          <div class="category-title" style="margin: 2rem 0 1rem;">High availability</div>
+          <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+            With 3 or more nodes, Portcullis survives the loss of any one of them: sign-in keeps working and no saved data is lost.
+            This page shows what's still missing and the cluster's live state; turning HA on is done on the server with <code>./portcullis ha enable</code>.
+          </p>
+          <div id="ha-root"></div>
+        </div>
+      </section>
+
+      <section data-settings-section="ssh" id="settings-ssh" role="tabpanel" aria-labelledby="settings-tab-ssh" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">SSH</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          Whether SSH access is on, the certificates' default lifetime and the certificate authorities' public keys.
+        </p>
+        <div id="ssh-settings-root"></div>
+
+      </section>
+
+      <section data-settings-section="sources" id="settings-sources" role="tabpanel" aria-labelledby="settings-tab-sources" hidden>
+        <div class="category-title" style="margin-bottom: 1rem;">Template sources</div>
+        <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+          The git repositories the Marketplace's templates come from.
+        </p>
+        <div class="sources-list" id="sources-list"><p class="settings-empty">Loading…</p></div>
+
+        <div style="margin-top: 1.5rem;">
+          <div class="category-title">Add a template repository</div>
+          <p style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem;">
+            Add a git repository containing template directories. Each template needs a <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">manifest.yaml</code> and <code style="background: #0f172a; padding: 0.125rem 0.375rem; border-radius: 0.25rem;">compose.yml</code>.
+          </p>
+          <div class="form-row">
+            <input type="text" id="source-name" placeholder="Name (e.g., my-templates)">
+            <input type="text" id="source-url" placeholder="Git URL (e.g., https://github.com/user/portcullis-templates.git)">
+            <button type="button" class="btn btn-primary" data-src-add>Add</button>
+          </div>
+        </div>
+
+        <div style="margin-top: 2rem;">
+          <button type="button" class="btn btn-secondary" data-src-sync>Sync all sources</button>
+          <span style="color: #64748b; font-size: 0.8125rem; margin-left: 0.75rem;">Pull latest from all repositories (the Hub also syncs at every start and on <code>./portcullis upgrade</code>)</span>
+          <div id="source-sync-status" style="margin-top: 0.75rem; font-size: 0.8125rem; color: #94a3b8;"></div>
+        </div>
+      </section>
     </div>
   </div>
 
@@ -936,10 +1045,13 @@
        operation, Stop and Close (renderOpPanel) -->
   <dialog class="opp" id="op-panel" aria-labelledby="opp-title"></dialog>
 
+  <!-- The Marketplace's detail drawer (marketplace.js: PortcullisMarketplace.open) -->
+  <dialog class="mkt-drawer" id="mkt-drawer"></dialog>
+
   <script src="/static/directory.js"></script>
   <script>
     // The shared navigation: this listener serves administrators only.
-    PortcullisNav.render(document.getElementById('site-nav'), { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: PortcullisPeople.base, current: 'hub', admin: true });
+    PortcullisNav.render(document.getElementById('site-nav'), { domain: {{.Domain}}, hubURL: {{.HubURL}}, peopleURL: PortcullisPeople.base, current: 'hub', admin: true, user: {{.User}} });
   </script>
   <script src="/static/folders.js"></script>
   <script src="/static/dns.js"></script>
@@ -951,64 +1063,79 @@
   <script src="/static/ha.js"></script>
   <script src="/static/doctor.js"></script>
   <script src="/static/ssh.js"></script>
+  <script src="/static/access.js"></script>
+  <script src="/static/settingsnav.js"></script>
+  <script src="/static/marketplace.js"></script>
+  <script src="/static/donut.js"></script>
+  <script src="/static/share.js"></script>
   <script src="/static/usage.js"></script>
   <script>
     // ── Tab switching ─────────────────────────────────────
-    // showTab(name): one of the top tabs (apps, marketplace, ssh, audit,
-    // doctor, settings) or "instance" (an instance's page: the Apps tab
-    // stays highlighted). The tab's content loads on every selection.
+    // showTab(name): one of the top tabs (apps, doctor, usage, access,
+    // settings, audit) or "instance" (an instance's page: the Apps tab
+    // stays highlighted). The tab's content loads on every selection
+    // (Settings: only its shown section, PortcullisSettingsNav).
     // Leaving an instance page with unsaved work asks first: false = the
     // admin stayed (the page's hash is put back).
-    // usageView: the Usage tab's view (#usage/<view>).
+    // usageView: the Usage tab's view (#usage/<view>); accessView: the
+    // Access tab's {section, sub, user} (#access/…); settingsView: the
+    // Settings section asked for ({section}, #settings/<section>).
     let usageView = 'apps';
+    let accessView = { section: 'ssh', sub: '', user: '' };
+    let settingsView = { section: '' };
     function showTab(name, asked) {
       if (name !== 'instance' && pageCtx && !asked && !leavePageOK()) { history.replaceState(null, '', pageHash()); return false; }
       const top = name === 'instance' ? 'apps' : name;
-      document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === top));
+      document.querySelectorAll('.tab[data-tab]').forEach(t => {
+        const on = t.dataset.tab === top;
+        t.classList.toggle('active', on);
+        if (on) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
+        // A narrow screen scrolls the bar sideways: keep the picked tab in
+        // view (the bar only; the page itself never scrolls for it).
+        const bar = t.parentElement;
+        if (on && bar && bar.scrollWidth > bar.clientWidth) {
+          if (t.offsetLeft < bar.scrollLeft) bar.scrollLeft = t.offsetLeft;
+          else if (t.offsetLeft + t.offsetWidth > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = t.offsetLeft + t.offsetWidth - bar.clientWidth;
+        }
+      });
       document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
-      if (name === 'settings') {
-        PortcullisSignIn.mount(document.getElementById('signin-root')); loadDomains(); loadAISettings();
-        PortcullisFolders.render(document.getElementById('folders-root'));
-        PortcullisFolders.renderLocalNetworks(document.getElementById('localnets-root'));
-        loadVPNSettings(document.getElementById('vpn-settings-root'));
-        if (window.PortcullisMail) PortcullisMail.render(document.getElementById('mail-settings-root'));
-        if (window.PortcullisServers) PortcullisServers.render(document.getElementById('servers-root'));
-        // High availability: Kubernetes only (Docker and Podman don't change).
-        const haSec = document.getElementById('ha-section');
-        haSec.hidden = !runtimeIsKube();
-        if (window.PortcullisHA && runtimeIsKube()) PortcullisHA.render(document.getElementById('ha-root'));
-      }
+      if (name === 'settings') PortcullisSettingsNav.show(settingsView.section, '');
       if (name === 'doctor') PortcullisDoctor.render(document.getElementById('doctor-root'));
-      if (name === 'ssh' && window.PortcullisSSH) PortcullisSSH.render(document.getElementById('ssh-root'));
+      if (name === 'access' && window.PortcullisAccess) PortcullisAccess.render(document.getElementById('access-root'), accessView.section, accessView);
       // The Usage tab polls while shown; leaving it (or an instance's
       // Usage tab) stops the poll.
       if (window.PortcullisUsage) PortcullisUsage.stop();
       if (name === 'usage') PortcullisUsage.render(document.getElementById('usage-root'), usageView);
       if (name === 'audit') PortcullisDirectory.renderAudit(document.getElementById('audit-root'));
-      if (name === 'apps') { renderApps(); if (window.PortcullisServers) PortcullisServers.load().catch(() => {}); }
-      if (name === 'marketplace') { fillMarketplace(); if (!/[?]filter=/.test(location.hash)) filterMarketplace(''); }
+      // Apps shows its list; showMarketplace shows the Marketplace in its place.
+      if (name === 'apps') { setMarketplaceShown(false); renderApps(); if (window.PortcullisServers) PortcullisServers.load().catch(() => {}); }
       // Leaving an instance's page drops it (its drafts too).
       if (name !== 'instance' && pageCtx) { pageCtx = null; document.getElementById('instance-page').innerHTML = ''; }
       return true;
     }
     document.querySelectorAll('.tab[data-tab]').forEach(tab => {
       tab.addEventListener('click', () => {
+        if (tab.dataset.tab === 'access') accessView = { section: 'ssh', sub: '', user: '' };
+        if (tab.dataset.tab === 'settings') settingsView = { section: '' };
         if (!showTab(tab.dataset.tab)) return;
-        history.replaceState(null, '', tab.dataset.tab === 'apps' ? location.pathname : '#' + tab.dataset.tab);
+        // Settings names its section itself (#settings/<section>).
+        if (tab.dataset.tab !== 'settings') history.replaceState(null, '', tab.dataset.tab === 'apps' ? location.pathname : '#' + tab.dataset.tab);
       });
     });
-    document.querySelector('[data-people-link]').href = PortcullisPeople.base;
-    // Deep links: #apps/<id>[/<tab>] an instance's page at a tab
-    // (#apps/<id>/settings/<option> scrolled to an option); the old
-    // #app/<id>/settings[/<option>] (the Portcullis MCP's
-    // set_secret_setting form, the people page's Used by) and
-    // #app/<id>/ai are replaced by those; #sources is the Marketplace's
-    // template sources; #audit the Audit log tab;
-    // #settings/domains?add=<name>[&provider=<p>] and ?token=<name>
-    // open the Domains forms (add_domain, replace_domain_token);
-    // #settings/ai?provider=<name>&field=<field> a provider secret's form
-    // (set_model_provider_secret). Secrets are typed here, never passed
-    // in. Routed at load and on a hash change.
+    // Deep links (ROUTES below, routed at load and on a hash change):
+    //   #apps/<id>[/<tab>[/<option>]]  an instance's page at a tab
+    //       (settings/<option> scrolled to an option);
+    //   #marketplace[?filter=<category>], #marketplace/<template-id>  the Marketplace
+    //       (?filter=mail: the Mail chip);
+    //   #doctor, #usage[/<view>], #audit;
+    //   #access[/ssh[/<ssh-section>]], #access/vpn, #access/signins[?user=<name>];
+    //   #settings[/<section>]; #settings/network?add=<name>[&provider=<p>]
+    //       and ?token=<name> open the Domains forms (add_domain,
+    //       replace_domain_token); #settings/ai?provider=<name>&field=<field>
+    //       a provider secret's form (set_model_provider_secret). Secrets
+    //       are typed here, never passed in.
+    // Anything else (the removed #ssh, #sources: no redirects before a
+    // release) opens Apps.
     window.addEventListener('load', routeHash);
     window.addEventListener('hashchange', routeHash);
     // peopleRedirect: the old Users & Groups deep links, now on
@@ -1036,39 +1163,64 @@
       if (/^groups(?:\/|$)|^people\//.test(t)) return '#' + t;
       return null;
     }
-    // oldAppLink: an old #app/… deep link's #apps/… replacement, or null.
-    function oldAppLink(t) {
-      const set = /^app\/([a-z0-9-]+)\/settings(?:\/([A-Za-z0-9_.-]+))?$/.exec(t);
-      if (set) return '#apps/' + set[1] + '/settings' + (set[2] ? '/' + set[2] : '');
-      const ai = /^app\/([a-z0-9-]+)\/ai$/.exec(t);
-      return ai ? '#apps/' + ai[1] + '/ai' : null;
+    // setMarketplaceShown(on): the Apps tab shows the Marketplace
+    // (#mkt-root) instead of its list (#apps-root) and the banners above
+    // it (.mkt-on).
+    function setMarketplaceShown(on) {
+      const list = document.getElementById('apps-root'), mkt = document.getElementById('mkt-root');
+      if (list) list.hidden = on;
+      if (mkt) mkt.hidden = !on;
+      document.getElementById('tab-apps').classList.toggle('mkt-on', on);
+      if (!on && window.PortcullisMarketplace) window.PortcullisMarketplace.close();
+    }
+    function marketplaceShown() {
+      const mkt = document.getElementById('mkt-root');
+      return !!mkt && !mkt.hidden && document.getElementById('tab-apps').classList.contains('active');
+    }
+    // showMarketplace({filter, open}): the Marketplace in Apps
+    // (marketplace.js): filter a category chip, open a template's drawer.
+    function showMarketplace(o) {
+      if (!showTab('apps')) return;
+      setMarketplaceShown(true);
+      window.PortcullisMarketplace.render(document.getElementById('mkt-root'), o);
+    }
+    // showSettings(section): the Settings tab at a section (an unknown
+    // one: Sign-in; PortcullisSettingsNav).
+    function showSettings(section) {
+      settingsView = { section: section || '' };
+      return showTab('settings');
+    }
+    // ROUTES: [regex over the hash without '#', handler(match)], the
+    // first match wins. Kept to the regex subset Go shares (no
+    // lookarounds): webui_nav_test.go checks every hash the Hub emits
+    // against this table.
+    const ROUTES = [
+      [/^(?:apps)?$/, () => showTab('apps')],
+      [/^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/, m => openInstancePage(m[1], m[2] || 'overview', m[3] || '')],
+      [/^marketplace(?:\?filter=([a-z0-9-]{1,63}))?$/, m => showMarketplace({ filter: m[1] || '', open: '' })],
+      [/^marketplace\/([a-z0-9-]+)$/, m => showMarketplace({ filter: '', open: m[1] })],
+      [/^doctor$/, () => showTab('doctor')],
+      [/^usage(?:\/(share|apps|containers|storage))?$/, m => { usageView = m[1] || 'apps'; showTab('usage'); }],
+      [/^access(?:\/ssh(?:\/([a-z]+))?)?$/, m => { accessView = { section: 'ssh', sub: m[1] || '', user: '' }; showTab('access'); }],
+      [/^access\/vpn$/, () => { accessView = { section: 'vpn', sub: '', user: '' }; showTab('access'); }],
+      [/^access\/signins(?:\?user=([a-z0-9._-]{1,64}))?$/, m => { accessView = { section: 'signins', sub: '', user: m[1] || '' }; showTab('access'); }],
+      [/^settings\/(network|ai)\?(.+)$/, m => openSettingsForm(m[1], new URLSearchParams(m[2]))],
+      [/^settings(?:\/([a-z]+))?$/, m => showSettings(m[1])],
+      [/^audit$/, () => showTab('audit')],
+    ];
+    // routeTo(t): the first route matching t, else Apps.
+    function routeTo(t) {
+      for (const [re, fn] of ROUTES) {
+        const m = re.exec(t);
+        if (m) { fn(m); return; }
+      }
+      showTab('apps');
     }
     function routeHash() {
-      let t = location.hash.slice(1);
+      const t = location.hash.slice(1);
       const ppl = peopleRedirect(t);
       if (ppl !== null) { location.replace(PortcullisPeople.href(ppl)); return; }
-      const moved = oldAppLink(t);
-      if (moved) { history.replaceState(null, '', moved); t = moved.slice(1); }
-      const page = /^apps\/([a-z0-9-]+)(?:\/([a-z]+)(?:\/([A-Za-z0-9_.-]+))?)?$/.exec(t);
-      if (page) { openInstancePage(page[1], page[2] || 'overview', page[3] || ''); return; }
-      if (t === 'sources') {
-        history.replaceState(null, '', '#marketplace');
-        showTab('marketplace');
-        const box = document.getElementById('mkt-sources');
-        if (box) flash(box);
-        return;
-      }
-      // #marketplace?filter=mail: only the mail server templates.
-      const mkt = /^marketplace\?filter=(mail)$/.exec(t);
-      if (mkt) { showTab('marketplace'); filterMarketplace(mkt[1]); return; }
-      // #usage, #usage/apps, #usage/containers, #usage/storage.
-      const use = /^usage(?:\/(apps|containers|storage))?$/.exec(t);
-      if (use) { usageView = use[1] || 'apps'; showTab('usage'); return; }
-      const sec = /^settings\/(domains|ai)\?(.*)$/.exec(t);
-      if (sec) { openSettingsForm(sec[1], new URLSearchParams(sec[2])); return; }
-      const tab = t && document.querySelector('.tab[data-tab="' + CSS.escape(t) + '"]');
-      if (tab) { showTab(t); return; }
-      if (!t || t === 'apps') showTab('apps');
+      routeTo(t);
     }
 
     // ── Toast ─────────────────────────────────────────────
@@ -1717,8 +1869,8 @@
     // The Settings tab's forms the Portcullis MCP's U tools link to:
     // domains add / token, a model provider's secret.
     async function openSettingsForm(kind, q) {
-      document.querySelector('.tab[data-tab="settings"]').click();
-      if (kind === 'domains' && q.get('add')) {
+      if (!showSettings(kind)) return;
+      if (kind === 'network' && q.get('add')) {
         const form = await waitFor('#domain-add-form');
         if (!form) return;
         document.getElementById('domain-name').value = q.get('add');
@@ -1732,7 +1884,7 @@
         form.querySelector('[data-cred]')?.focus();
         return;
       }
-      if (kind === 'domains' && q.get('token')) {
+      if (kind === 'network' && q.get('token')) {
         const btn = await waitFor('[data-domain-token="' + CSS.escape(q.get('token')) + '"]');
         if (!btn) { showToast('No added domain ' + q.get('token') + '.', 'error'); return; }
         btn.click();
@@ -1742,10 +1894,6 @@
       }
       if (kind === 'ai' && q.get('provider') && q.get('field')) openProviderSecretAt(q.get('provider'), q.get('field'));
     }
-
-    // openSettingAt: instance id's page at Settings, scrolled to option
-    // key (the doctor's "Open setting"; window.openSettingAt).
-    function openSettingAt(id, key) { navInstance(id, 'settings', key || ''); }
 
     // ── Settings ──────────────────────────────────────────
     // Sign-in of apps with their own login (auth.native_login).
@@ -2514,10 +2662,10 @@
         return h;
       }
       const greyed = v.master_off ? 'AI support is off on this Portcullis (Settings → AI).' : v.refused ? 'AI support can\'t be switched on: ' + v.refused : '';
-      if (v.master_off) h += '<div class="public-warn" data-ai-greyed>AI support is off on this Portcullis: the switches are greyed out. <a href="#settings" data-ai-goto-settings>Settings → AI</a></div>';
+      if (v.master_off) h += '<div class="public-warn" data-ai-greyed>AI support is off on this Portcullis: the switches are greyed out. <a href="#settings/ai" data-ai-goto-settings>Settings → AI</a></div>';
       else if (v.refused) {
         h += '<div class="public-warn" data-ai-greyed>AI support can\'t be switched on: ' + escapeHtml(v.refused) + '. ' +
-          '<a href="#app/' + encodeURIComponent(id) + '/settings">Open the app\'s settings</a> to change its access policy.</div>';
+          '<a href="#apps/' + encodeURIComponent(id) + '/settings">Open the app\'s settings</a> to change its access policy.</div>';
       }
       const running = aiInstanceEnabled(id);
       // app_oauth companions add no router (the gate isn't in the path).
@@ -2533,7 +2681,7 @@
         h += '<table class="inst-table"><thead><tr><th>Time</th><th>Person</th><th>Client</th><th>What</th><th>Decision</th></tr></thead><tbody>' +
           act.lines.map(l => '<tr><td style="white-space:nowrap">' + escapeHtml(fmtTime(l.time)) + '</td><td>' + escapeHtml(l.user || '(no valid token)') + '</td><td><code>' + escapeHtml(l.client) + '</code></td>' +
             '<td><code>' + escapeHtml(l.tool ? id + '__' + l.tool : l.method) + '</code>' + aiNote(escapeHtml(l.companion) + ' · ' + escapeHtml(l.via)) + '</td><td>' + aiDecision(l.decision) + '</td></tr>').join('') +
-          '</tbody></table>' + aiNote('The newest 20 requests from the gate\'s access log (never the arguments or results). All of them: the <a href="#audit">Audit log</a> tab, "via AI".');
+          '</tbody></table>' + aiNote('The newest 20 requests from the gate\'s access log (never the arguments or results). All of them: the <a href="#audit">Audit</a> tab, "via AI".');
       }
       h += '</div>';
       return h;
@@ -2552,7 +2700,7 @@
       const usable = all.filter(p => Object.prototype.hasOwnProperty.call(kinds, p.kind));
       if (!usable.length) {
         h += '<p class="settings-empty">No model provider of a kind this AI page supports (' + Object.keys(kinds).sort().map(k => escapeHtml(k)).join(', ') +
-          '). Add one in <a href="#settings" data-ai-goto-settings>Settings → AI</a>.</p>';
+          '). Add one in <a href="#settings/ai" data-ai-goto-settings>Settings → AI</a>.</p>';
       } else {
         for (const p of usable) {
           h += '<div><label class="policy-factor" style="margin:0"><input type="checkbox" data-ai-prov-sel value="' + escapeHtml(p.name) + '"' + (sel.has(p.name) ? ' checked' : '') + '> ' +
@@ -2710,7 +2858,7 @@
       if (t.closest('[data-ai-goto-settings]')) {
         e.preventDefault();
         if (document.getElementById('inst-modal').classList.contains('visible')) closeInstModal();
-        document.querySelector('.tab[data-tab="settings"]').click();
+        showSettings('ai');
         waitFor('#ai-settings-form').then(f => f && flash(f));
         return;
       }
@@ -2723,11 +2871,6 @@
       if (dis) { dismissAIUser(box, sec, dis.dataset.user); return; }
       if (t.closest('[data-ai-revoke]')) revokeAICompanion(box, sec);
     });
-
-    // openAppTab(id, tab): the instance page's tab (the doctor's "Open AI
-    // tab", #app/<id>/ai); any tab but "ai" opens its Settings.
-    function openAppTab(id, tab) { navInstance(id, tab === 'ai' ? 'ai' : 'settings', ''); }
-    window.openAppTab = openAppTab;
 
     // ── Users & groups (contract §9) ──────────────────────
     // On people.<domain> only (PortcullisPeople above); the Hub keeps the
@@ -2812,14 +2955,14 @@
         '<button type="button" class="btn btn-secondary btn-sm" data-drift-recheck>Re-check</button></div>';
       if (report.error) html += '<div class="drift-error">Docker unreachable: ' + escapeHtml(report.error) + '</div>';
       for (const d of items) {
-        html += '<div class="drift-item"><a class="drift-id group-link" href="#apps/' + encodeURIComponent(d.id) + '">' + escapeHtml(d.id) + '</a>';
+        html += '<div class="drift-item" data-drift-item="' + escapeHtml(d.id) + '"><a class="drift-id group-link" href="#apps/' + encodeURIComponent(d.id) + '">' + escapeHtml(d.id) + '</a>';
         html += '<span class="drift-msg">' + escapeHtml(d.message) + ' &middot; ' + d.running + '/' + d.total + ' running</span>';
         for (const a of (d.actions || [])) {
           const meta = DRIFT_ACTIONS[a];
           if (!meta) continue;
           html += '<button class="btn btn-sm ' + meta.cls + '" data-drift-id="' + escapeHtml(d.id) + '" data-drift-action="' + escapeHtml(a) + '">' + escapeHtml(meta.label) + '</button>';
         }
-        html += '</div>';
+        html += '<div class="drift-error" data-drift-error hidden></div></div>';
       }
       box.innerHTML = html;
       box.classList.add('visible');
@@ -2834,16 +2977,34 @@
     async function resolveDrift(btn) {
       const id = btn.dataset.driftId, action = btn.dataset.driftAction;
       const meta = DRIFT_ACTIONS[action];
+      const item = document.querySelector('[data-drift-item="' + CSS.escape(id) + '"]');
+      if (!item) return;
+      // Prevent double submit.
+      if (item.dataset.busy) return;
       if (meta.confirm && !confirm(meta.confirm.replace('%s', id))) return;
-      btn.classList.add('loading');
+      // Mark item as busy and disable all buttons in it.
+      item.dataset.busy = '1';
+      const buttons = item.querySelectorAll('[data-drift-action]');
+      const errBox = item.querySelector('[data-drift-error]');
+      buttons.forEach(b => { b.disabled = true; });
+      errBox.hidden = true;
+      errBox.textContent = '';
+      // Show busy state on the clicked button.
+      const origText = btn.textContent;
+      const busyText = action === 'apply' ? 'Applying…' : action === 'disable' || action === 'stop' ? 'Disabling…' : meta.label + '…';
+      btn.textContent = busyText;
       try {
         await apiPost('/api/drift/resolve', { id, action });
         showToast(id + ': ' + meta.label.toLowerCase() + ' done', 'success');
         loadDrift();
         refreshInstances();
       } catch (e) {
-        reportError(id, e);
-        btn.classList.remove('loading');
+        // On error: show inline error, re-enable buttons.
+        delete item.dataset.busy;
+        buttons.forEach(b => { b.disabled = false; });
+        btn.textContent = origText;
+        errBox.textContent = e.message || 'Error';
+        errBox.hidden = false;
       }
     }
     loadDrift();
@@ -3468,6 +3629,9 @@
     let catalogCache = null;
     let instCtx = null; // the open dialog: { kind: 'setup'|'backups', … }
 
+    // refreshCatalog: the catalog read again (a template source added,
+    // removed or synced).
+    function refreshCatalog() { catalogCache = null; return loadCatalogInfo(); }
     async function loadCatalogInfo() {
       if (!catalogCache) {
         const list = await apiGet('/api/templates');
@@ -3583,9 +3747,10 @@
           b.title = r.verified ? '' : 'Not verified: ' + (r.mismatch || 'not checked yet');
           b.hidden = false;
         }
-        if (document.getElementById('tab-marketplace').classList.contains('active')) fillMarketplace();
-        // Settings opened before the runtime was known: High availability.
-        if (document.getElementById('tab-settings').classList.contains('active') && runtimeIsKube() && window.PortcullisHA) {
+        if (marketplaceShown()) PortcullisMarketplace.refresh();
+        // Settings → Servers opened before the runtime was known: High availability.
+        if (document.getElementById('tab-settings').classList.contains('active') && PortcullisSettingsNav.current() === 'servers'
+            && runtimeIsKube() && window.PortcullisHA) {
           document.getElementById('ha-section').hidden = false;
           PortcullisHA.render(document.getElementById('ha-root'));
         }
@@ -3599,11 +3764,18 @@
       podman: { ok: ['ok', 'Rootless: works'], degraded: ['warn', 'Rootless: limited'], refused: ['bad', 'Rootless: not available'] },
       kubernetes: { ok: ['ok', 'Kubernetes: works'], degraded: ['warn', 'Kubernetes: limited'], refused: ['bad', 'Kubernetes: not available'] },
     };
-    function compatBadge(c) {
-      if (!c || !runtimeInfo || c.runtime !== runtimeInfo.runtime || !COMPAT_TEXT[c.runtime] || !COMPAT_TEXT[c.runtime][c.status]) return '';
+    // compatInfo: the same as {cls, text}, or null (marketplace.js builds
+    // its badge from it).
+    function compatInfo(c) {
+      if (!c || !runtimeInfo || c.runtime !== runtimeInfo.runtime || !COMPAT_TEXT[c.runtime] || !COMPAT_TEXT[c.runtime][c.status]) return null;
       const [cls, text] = COMPAT_TEXT[c.runtime][c.status];
+      return { cls, text };
+    }
+    function compatBadge(c) {
+      const info = compatInfo(c);
+      if (!info) return '';
       const why = (c.reasons || []).join('; ');
-      return '<span class="pill ' + cls + '" data-compat-badge="' + escapeHtml(c.status) + '"' + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' + escapeHtml(text) + '</span>';
+      return '<span class="pill ' + info.cls + '" data-compat-badge="' + escapeHtml(c.status) + '"' + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' + escapeHtml(info.text) + '</span>';
     }
     // compatWhere: "under rootless Podman" / "on Kubernetes".
     function compatWhere(c) { return c && c.runtime === 'kubernetes' ? 'on Kubernetes' : 'under rootless Podman'; }
@@ -3621,7 +3793,7 @@
     }
     function renderInstanceViews() {
       if (document.getElementById('tab-apps').classList.contains('active')) renderApps();
-      if (document.getElementById('tab-marketplace').classList.contains('active')) fillMarketplace();
+      if (marketplaceShown()) PortcullisMarketplace.refresh();
       if (pageCtx) renderPageHead();
     }
     async function loadDirectory(force) {
@@ -3701,18 +3873,89 @@
       if (grp === null) return ' <span class="pill bad">missing</span>';
       return ' (' + (grp.members || []).length + ')';
     }
+    // ── bypass badges (contract §11.7 "bypass"): what an instance skips
+    // of Portcullis's normal protection, from the Hub's own router model
+    // (inst.bypass). A click opens the details: each host and path, its
+    // TLS tier and why. Display only.
+    const bypassOpen = new Set();
+    const TIER_WORDS = {
+      'protected@file': 'protected — a YubiKey certificate required',
+      'protected-any@file': 'protected-any — a certificate required',
+      'default': 'default — a certificate if the browser has one',
+      'public@file': 'public — no certificate asked'
+    };
+    function tierWords(t) {
+      return TIER_WORDS[t] || t || 'unknown';
+    }
+    function bypassPathText(p) {
+      if (p.match === 'exact') return p.path;
+      const base = p.path.replace(/\/+$/, '');
+      return base + '/…' + (p.match === 'static' ? ' (static files)' : '');
+    }
+    // bypassLabel: a badge's plain words.
+    function bypassLabel(b) {
+      const where = b.vpn_only ? 'Open on the VPN' : 'Open to the internet';
+      const paths = b.paths || [];
+      const more = paths.length > 1 ? ' +' + (paths.length - 1) : '';
+      switch (b.kind) {
+        case 'open_host': return where + ': whole host';
+        case 'open_router': return where + ': ' + (paths.length ? bypassPathText(paths[0]) + more : b.rule ? 'router ' + b.router : 'whole host');
+        case 'public_paths': return (paths.length > 1 ? 'Public paths: ' : 'Public path: ') + (paths.length ? bypassPathText(paths[0]) + more : 'none');
+        case 'weak_tls': return 'No certificate asked: public TLS';
+      }
+      return b.kind;
+    }
+    function bypassKey(scope, id) {
+      return scope + ':' + id;
+    }
+    // bypassBadgesHtml: inst's badges (scope "line" on Apps, "page" on its
+    // page), each a button opening the details; "" when nothing is skipped.
+    function bypassBadgesHtml(inst, scope) {
+      const list = inst.bypass || [];
+      if (!list.length) return '';
+      const key = bypassKey(scope, inst.id), open = bypassOpen.has(key);
+      return '<span class="bypass-badges">' + list.map(b => '<button type="button" class="pill warn bypass-badge" data-bypass-toggle="' + escapeHtml(key) + '"' +
+        ' aria-expanded="' + open + '" aria-controls="bypass-' + escapeHtml(key.replace(':', '-')) + '" title="What skips Portcullis sign-in here, and why">' +
+        '⚠ ' + escapeHtml(bypassLabel(b)) + '</button>').join('') + '</span>';
+    }
+    function bypassDetailsHtml(inst, scope) {
+      const list = inst.bypass || [];
+      if (!list.length) return '';
+      const key = bypassKey(scope, inst.id);
+      return '<div class="bypass-details" id="bypass-' + escapeHtml(key.replace(':', '-')) + '" data-bypass-details="' + escapeHtml(key) + '"' + (bypassOpen.has(key) ? '' : ' hidden') + '>' +
+        list.map(b => {
+          const paths = b.paths || [];
+          return '<div class="bypass-item" data-bypass-kind="' + escapeHtml(b.kind) + '"><h5>' + escapeHtml(bypassLabel(b)) + '</h5><dl>' +
+            '<dt>' + ((b.hosts || []).length > 1 ? 'Hosts' : 'Host') + '</dt><dd>' + ((b.hosts || []).length ? b.hosts.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') : 'none yet') + '</dd>' +
+            '<dt>Paths</dt><dd>' + (paths.length ? paths.map(p => '<code>' + escapeHtml(bypassPathText(p)) + '</code>').join(', ') : b.rule ? 'rule <code>' + escapeHtml(b.rule) + '</code>' : 'the whole host') + '</dd>' +
+            (b.router ? '<dt>Router</dt><dd><code>' + escapeHtml(b.router) + '</code></dd>' : '') +
+            '<dt>TLS tier</dt><dd>' + escapeHtml(tierWords(b.tier)) + '</dd>' +
+            '<dt>Why</dt><dd>' + escapeHtml(b.reason || '') + (b.note ? '<div class="bypass-note">“' + escapeHtml(b.note) + '”</div>' : '') + '</dd>' +
+            '</dl></div>';
+        }).join('') + '</div>';
+    }
+    // toggleBypass: a badge opens or closes its instance's details (every
+    // badge of one card shares them); the open set survives re-renders.
+    function toggleBypass(el) {
+      const key = el.dataset.bypassToggle;
+      if (bypassOpen.has(key)) bypassOpen.delete(key); else bypassOpen.add(key);
+      const open = bypassOpen.has(key);
+      document.querySelectorAll('[data-bypass-toggle="' + CSS.escape(key) + '"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
+      const box = document.querySelector('[data-bypass-details="' + CSS.escape(key) + '"]');
+      if (box) box.hidden = !open;
+    }
     function instLineHtml(i, dup) {
       const st = instStatus(i);
       const hosts = Object.keys(i.hosts || {}).sort().map(r => i.hosts[r]);
-      const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : 'no web page'];
+      const sub = [hosts.length ? escapeHtml(hosts[0]) + (hosts.length > 1 ? ' +' + (hosts.length - 1) : '') : (templateIsMailProvider(i.template) ? 'managed by Portcullis' : 'no web page')];
       // Two instances of one app with the same name: their ids tell them apart.
       if (dup) sub.unshift('<code class="muted">' + escapeHtml(i.id) + '</code>');
       if (i.access_group) sub.push(PortcullisPeople.groupLink(i.access_group) + memberCountHtml(i.access_group));
       return '<div class="inst-line" data-inst-line="' + escapeHtml(i.id) + '"><span class="status-dot ' + st.dot + '" aria-hidden="true"></span>' +
         '<span class="inst-line-name"><a href="#apps/' + encodeURIComponent(i.id) + '">' + escapeHtml(instName(i)) + '</a>' +
         '<span class="inst-line-sub">' + sub.join(' · ') + '</span></span>' +
-        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' +
-        '<span class="inst-line-act" data-inst-act="' + escapeHtml(i.id) + '">' + instActionsHtml(i.id) + '</span></div>';
+        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' + bypassBadgesHtml(i, 'line') +
+        '<span class="inst-line-act" data-inst-act="' + escapeHtml(i.id) + '">' + instActionsHtml(i.id) + '</span>' + bypassDetailsHtml(i, 'line') + '</div>';
     }
 
     let appsHtml = '';
@@ -3732,10 +3975,10 @@
           '<button type="button" data-apps-filter-clear aria-label="Show every app" title="Show every app">&times;</button></span>';
       }
       h += '<button type="button" class="btn btn-secondary btn-sm" data-all-backups>All backups</button>' +
-        '<button type="button" class="btn btn-primary btn-sm" data-goto-tab="marketplace">+ Add an app</button></div>';
+        '<button type="button" class="btn btn-primary btn-sm" data-add-app>+ Add app</button></div>';
       if (!tids.length) {
         h += '<p class="settings-empty">' + (appsFilter ? escapeHtml(appName(appsFilter)) + ' has no instances any more.'
-          : 'No apps installed yet. “+ Add an app” opens the Marketplace.') + '</p>';
+          : 'No apps installed yet. “+ Add app” opens the Marketplace.') + '</p>';
       }
       for (const tid of tids) {
         const list = byT.get(tid).slice().sort((a, b) => instName(a).localeCompare(instName(b)) || a.id.localeCompare(b.id));
@@ -3750,43 +3993,10 @@
       if (h !== appsHtml || !box.querySelector('.apps-head')) { box.innerHTML = h; appsHtml = h; }
     }
 
-    // filterMarketplace: only the templates of kind (mail) shown, with a
-    // way back to all; '' shows all.
-    function filterMarketplace(kind) {
-      const box = document.getElementById('tab-marketplace');
-      if (!box) return;
-      box.querySelectorAll('.app-card').forEach(c => { c.hidden = kind === 'mail' && c.dataset.mail !== '1'; });
-      box.querySelectorAll('.category').forEach(cat => { cat.hidden = !cat.querySelector('.app-card:not([hidden])'); });
-      let bar = box.querySelector('[data-mkt-filter]');
-      if (kind && !bar) {
-        bar = document.createElement('div');
-        bar.className = 'settings-hint';
-        bar.setAttribute('data-mkt-filter', '');
-        bar.innerHTML = 'Showing mail servers only · <a href="#marketplace">Show all</a>';
-        box.prepend(bar);
-      }
-      if (bar) bar.hidden = !kind;
-    }
-    function fillMarketplace() {
-      document.querySelectorAll('[data-mkt-use]').forEach(el => {
-        const tid = el.dataset.mktUse;
-        const n = instancesCache.filter(i => i.template === tid).length;
-        // Podman / Kubernetes: a refused template can't be created (the
-        // Hub refuses it too: 409).
-        const rl = el.dataset.compat ? { runtime: el.dataset.compatRuntime, status: el.dataset.compat, reasons: el.dataset.compatReasons ? el.dataset.compatReasons.split('; ') : [] } : null;
-        const badge = compatBadge(rl);
-        const off = badge && rl.status === 'refused' ? ' disabled title="' + escapeHtml("Can't run " + compatWhere(rl) + ': ' + rl.reasons.join('; ')) + '"' : '';
-        const add = el.dataset.mktMulti === '1' ? '<button type="button" class="btn btn-secondary btn-sm" data-add-instance="' + escapeHtml(tid) + '"' + off + '>+ Add instance</button>' : '';
-        el.innerHTML = badge + (n
-          ? '<span class="pill ok">in use · ' + n + (n === 1 ? ' instance' : ' instances') + '</span>' +
-            '<button type="button" class="btn btn-secondary btn-sm" data-apps-filter="' + escapeHtml(tid) + '">Show in Apps</button>' + add
-          : '<button type="button" class="btn btn-primary btn-sm" data-install="' + escapeHtml(tid) + '"' + off + '>Install…</button>');
-      });
-    }
-
     // goTab: a top tab, with a history entry (the page's links).
     function goTab(name) {
       if (pageCtx && !leavePageOK()) return;
+      if (name === 'marketplace') { history.pushState(null, '', '#marketplace'); showMarketplace({ filter: '', open: '' }); return; }
       history.pushState(null, '', name === 'apps' ? location.pathname : '#' + name);
       showTab(name, true);
     }
@@ -3878,8 +4088,8 @@
       const inst = pageCtx.inst = instancesCache.find(i => i.id === pageCtx.id) || pageCtx.inst;
       const st = instStatus(inst);
       const h = '<span class="status-dot ' + st.dot + '" aria-hidden="true"></span><h2>' + escapeHtml(instName(inst)) + '</h2>' +
-        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' +
-        '<span class="page-act" data-inst-act="' + escapeHtml(inst.id) + '">' + instActionsHtml(inst.id) + '</span>';
+        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' + bypassBadgesHtml(inst, 'page') +
+        '<span class="page-act" data-inst-act="' + escapeHtml(inst.id) + '">' + instActionsHtml(inst.id) + '</span>' + bypassDetailsHtml(inst, 'page');
       if (el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; }
     }
     function showPageTab(k, opt) {
@@ -3957,13 +4167,15 @@
     async function renderOverview(id, pane) {
       const inst = pageCtx.inst;
       const t = catalogCache && catalogCache[inst.template];
-      const notes = t && t.manifest.auth && t.manifest.auth.notes;
+      // notes_html: auth.notes (Markdown) rendered and sanitised by the
+      // Hub (internal/notes); the raw notes are never inserted as HTML.
+      const notesHtml = t && t.manifest.auth && t.manifest.auth.notes_html;
       const bound = inst.groups_mode === 'existing';
       let h = '';
       if (inst.error) h += '<div class="op-msg inst-error">' + escapeHtml(inst.error) + '</div>';
       if (inst.state === 'deleting') h += '<div class="public-warn">A delete stopped part-way: <button type="button" class="opp-link" data-page-tab-go="delete">open Delete</button> to finish it (the first backup is kept).</div>';
       if (inst.state === 'restoring') h += '<div class="public-warn">A restore didn\'t finish: restore it again from <button type="button" class="opp-link" data-page-tab-go="backups">Backups</button> (its pre-restore backup is put back first).</div>';
-      if (notes) h += '<div class="auth-notes">' + escapeHtml(notes) + '</div>';
+      if (notesHtml) h += '<div class="auth-notes">' + notesHtml + '</div>';
       // Runtime compatibility (contract §11.10): the instance's own verdict.
       const rlBadge = compatBadge(inst.compat);
       if (rlBadge) {
@@ -3983,7 +4195,7 @@
         '<dl class="inst-facts">' +
         '<dt>App</dt><dd>' + escapeHtml(templateLabel(inst.template)) + ' <code>' + escapeHtml(inst.template) + '</code></dd>' +
         '<dt>Instance id</dt><dd><code>' + escapeHtml(inst.id) + '</code></dd>' +
-        '<dt>Compose project</dt><dd><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
+        '<dt>Compose project</dt><dd data-compose-project><code>' + escapeHtml(inst.project || '') + '</code></dd>' +
         (window.PortcullisServers ? PortcullisServers.runsOn(inst) : '') +
         (inst.access_group ? '<dt>Users group</dt><dd>' + PortcullisPeople.groupLink(inst.access_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + ' <button type="button" class="opp-link" data-page-tab-go="groups">who is in it</button></dd>' : '') +
         (inst.admin_group ? '<dt>Admins group</dt><dd>' + PortcullisPeople.groupLink(inst.admin_group, true, true) + (bound ? ' <span class="pill info">existing group</span>' : '') + '</dd>' : '') +
@@ -4007,6 +4219,14 @@
           if (!sb) return;
           sb.innerHTML = PortcullisServers.instanceSection(inst);
           PortcullisServers.wire(sb, inst, () => openInstancePage(inst.id, 'overview'));
+          // Rendered before the list arrived (a deep link): add "Runs on"
+          // where the facts have it, after "Compose project".
+          const facts = pane.querySelector('dl.inst-facts');
+          if (facts && !facts.querySelector('[data-runs-on]')) {
+            const after = facts.querySelector('[data-compose-project]');
+            if (after) after.insertAdjacentHTML('afterend', PortcullisServers.runsOn(inst));
+            else facts.insertAdjacentHTML('beforeend', PortcullisServers.runsOn(inst));
+          }
         }).catch(() => {});
       }
       loadContainers(id, pane);
@@ -4018,7 +4238,12 @@
         pageCtx.domains = d.domains;
         pageCtx.routers = d.routers;
         if (d.legacy) { ed.innerHTML = '<p class="settings-empty">This template still uses ${PORTCULLIS_DOMAIN} rules: its hostnames are fixed.</p>' + hostRowsReadOnly(inst.hosts); return; }
-        if (!(d.routers || []).length) { ed.innerHTML = '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>'; return; }
+        if (!(d.routers || []).length) {
+          ed.innerHTML = templateIsMailProvider(inst.template)
+            ? '<p class="settings-empty" data-managed-by-portcullis>Managed by Portcullis: mail is managed in Settings → Mail and on the <a href="#apps/' + encodeURIComponent(inst.id) + '/mail">Mail tab</a>. A full administrator can open the mail server\'s own admin screen read-only from there.</p>'
+            : '<p class="settings-empty">No web page: this app serves no hostnames (people use it with its own client).</p>';
+          return;
+        }
         const pending = inst.state === 'deleting' || inst.state === 'restoring';
         ed.innerHTML = hostRows(d.routers, inst.hosts || {}, true, inst.template) +
           '<div class="inst-row"><label class="settings-empty" for="inst-move-domain">Move to domain</label>' +
@@ -4337,11 +4562,16 @@
       ctx.routers = d.routers || [];
       if (!box.dataset.drawn) {
         box.dataset.drawn = '1';
-        if (!ctx.routers.length) { box.innerHTML = '<p class="settings-empty">No web page: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames.</p>'; return; }
+        if (!ctx.routers.length) {
+          box.innerHTML = templateIsMailProvider(ctx.tid)
+            ? '<p class="settings-empty" data-managed-by-portcullis>Managed by Portcullis: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames of its own; mail is managed in Settings → Mail.</p>'
+            : '<p class="settings-empty">No web page: ' + escapeHtml(appName(ctx.tid)) + ' serves no hostnames.</p>';
+          return;
+        }
         const main = ctx.domains.find(x => x.main) || ctx.domains[0];
         box.innerHTML = '<div class="host-row"><label for="setup-domain">domain</label>' +
           '<select id="setup-domain" data-setup-domain>' + domainOptions(ctx.domains, main && main.name) + '</select>' +
-          '<small>The main domain or an added domain that is ready (Settings → Domains).</small></div>' +
+          '<small>The main domain or an added domain that is ready (Settings → Network → Domains).</small></div>' +
           ctx.routers.map(r => '<div class="host-row"><label for="setup-sub-' + escapeHtml(r.router) + '">' + escapeHtml(r.router) + (r.immutable ? ' 🔒' : '') + '</label>' +
             '<span class="setup-addr"><input type="text" id="setup-sub-' + escapeHtml(r.router) + '" data-setup-sub="' + escapeHtml(r.router) + '" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(r.subdomain) + '">' +
             '<span class="setup-domain-name" data-setup-domain-name></span></span>' +
@@ -4781,11 +5011,13 @@
         navInstance(el.dataset.openInstance, 'overview', '');
         return;
       }
+      if ((el = t.closest('[data-bypass-toggle]'))) { toggleBypass(el); return; }
       if (t.closest('[data-all-backups]')) { openAllBackups(); return; }
       if ((el = t.closest('[data-inst-toggle]'))) { toggleInstance(el.dataset.instToggle, el.dataset.enable === '1', el); return; }
       if ((el = t.closest('[data-apps-filter]'))) { e.preventDefault(); appsFilter = el.dataset.appsFilter; goTab('apps'); return; }
       if (t.closest('[data-apps-filter-clear]')) { appsFilter = ''; renderApps(); return; }
       if ((el = t.closest('[data-goto-tab]'))) { e.preventDefault(); goTab(el.dataset.gotoTab); return; }
+      if (t.closest('[data-add-app]')) { e.preventDefault(); goTab('marketplace'); return; }
       if ((el = t.closest('[data-open-ports]'))) { openAppSettings(el.dataset.openPorts); return; }
       if (t.id === 'op-modal' || t.closest('[data-op-error-close]')) { closeOpError(); return; }
       // The banners above Apps, and the policy block's listed shares.
@@ -4897,33 +5129,62 @@
     });
     loadCatalogInfo().catch(() => {});
     refreshInstances();
-    setInterval(() => { if (!instCtx) refreshInstances(); }, 15000);
+    // Every 15 s. PORTCULLIS_TEST_POLL_MS (the UI smoke check) can only
+    // shorten it, to a finite 1000–15000 ms; anything else is ignored.
+    const testPoll = Number(window.PORTCULLIS_TEST_POLL_MS);
+    const INSTANCES_POLL_MS = Number.isFinite(testPoll) && testPoll >= 1000 && testPoll < 15000 ? testPoll : 15000;
+    setInterval(() => { if (!instCtx) refreshInstances(); }, INSTANCES_POLL_MS);
 
     // ── Sources ───────────────────────────────────────────
+    // Settings → Template sources.
+    // sourcesHtml(list): GET /api/sources's name and URL per source,
+    // escaped; the default source (portcullis) can't be removed.
+    function sourcesHtml(list) {
+      if (!(list || []).length) return '<div class="empty" id="no-sources">No template sources configured.</div>';
+      return list.map(src => '<div class="source-item" data-name="' + escapeHtml(src.name) + '"><div class="source-info">' +
+        '<div class="source-name">' + escapeHtml(src.name) + (src.name === 'portcullis' ? ' <span class="pill">default</span>' : '') + '</div>' +
+        '<div class="source-url">' + escapeHtml(src.url) + '</div></div><div class="source-actions">' +
+        (src.name !== 'portcullis' ? '<button type="button" class="btn btn-danger" data-src-remove="' + escapeHtml(src.name) + '">Remove</button>' : '') +
+        '</div></div>').join('');
+    }
+    async function loadSources() {
+      const box = document.getElementById('sources-list');
+      if (!box) return;
+      try { box.innerHTML = sourcesHtml(await apiGet('/api/sources')); } catch (e) { box.innerHTML = errorBox(e); }
+    }
+    // sourcesChanged: after an add, a remove or a sync, the list, the
+    // last sync and the catalog are read again (the Marketplace and the
+    // instance pages use the new templates; no page reload).
+    async function sourcesChanged() {
+      await Promise.all([loadSources(), loadSourceSync(),
+        marketplaceShown() ? PortcullisMarketplace.refresh({ reload: true }) : refreshCatalog().catch(() => null)]);
+    }
     async function addSource() {
       const name = document.getElementById('source-name').value.trim();
       const url = document.getElementById('source-url').value.trim();
       if (!name || !url) { showToast('Name and URL are required', 'error'); return; }
       try {
         await apiPost('/api/sources/add', { name, url });
-        showToast(`Source "${name}" added`, 'success');
-        setTimeout(() => location.reload(), 500);
+        showToast('Source "' + name + '" added', 'success');
+        document.getElementById('source-name').value = '';
+        document.getElementById('source-url').value = '';
+        await sourcesChanged();
       } catch (e) { showToast(e.message, 'error'); }
     }
     async function removeSource(name) {
-      if (!confirm(`Remove source "${name}"? Apps from this source will be disabled.`)) return;
+      if (!confirm('Remove source "' + name + '"? Apps from this source will be disabled.')) return;
       try {
         await apiPost('/api/sources/remove', { name });
-        showToast(`Source "${name}" removed`, 'success');
-        setTimeout(() => location.reload(), 500);
+        showToast('Source "' + name + '" removed', 'success');
+        await sourcesChanged();
       } catch (e) { showToast(e.message, 'error'); }
     }
     async function syncSources() {
       try {
         await apiPost('/api/sources/sync', {});
         showToast('All sources synced', 'success');
-        setTimeout(() => location.reload(), 1000);
-      } catch (e) { showToast(e.message, 'error'); loadSourceSync(); }
+      } catch (e) { showToast(e.message, 'error'); }
+      await sourcesChanged();
     }
     // Last sync (start-up, upgrade's SIGHUP or the button): per source
     // ok / kept the previous version, and enabled apps still missing a
@@ -4947,12 +5208,11 @@
       }
       box.innerHTML = html;
     }
-    loadSourceSync();
 
 
     // ── VPN (contract §5, §11): an instance's Access (Reachable from /
     // Through / public links), a provider instance's VPN tab and
-    // Settings → VPN. Every value escaped; delegated listeners. ──
+    // Settings → Network → VPN. Every value escaped; delegated listeners. ──
     function templateHasVPN(tid) {
       const t = catalogCache && catalogCache[tid];
       return !!(t && t.manifest && t.manifest.vpn);
@@ -4987,7 +5247,7 @@
       if (v.mode === 'server') {
         h += '<label><input type="checkbox" data-reach-public-links' + (r.public_links ? ' checked' : '') + '> Public links stay on the internet (server mode)</label>';
       }
-      if (!ids.length) h += '<p class="settings-empty">No VPN is wired yet: wire a VPN first (Settings → VPN, or a VPN app\'s VPN tab).</p>';
+      if (!ids.length) h += '<p class="settings-empty">No VPN is wired yet: wire a VPN first (Settings → Network → VPN, or a VPN app\'s VPN tab).</p>';
       h += '<div class="inst-row"><button type="button" class="btn btn-primary btn-sm" data-reach-save="' + escapeHtml(id) + '">Save access</button></div>' +
         '<small>VPN-only apps answer only on the VPN entrypoint, behind sign-in and the device ↔ person binding. Switching back to the internet widens access.</small>' +
         '<div data-reach-result></div></div>';
@@ -5086,7 +5346,7 @@
       } catch (e) { if (out) out.innerHTML = errorBox(e); }
     }
 
-    // loadVPNSettings: Settings → VPN — the users group, devices per
+    // loadVPNSettings: Settings → Network → VPN — the users group, devices per
     // person, the expiry, the providers overview, and the mode and public
     // enrolment, read-only (set on the host).
     async function loadVPNSettings(root) {
@@ -5099,7 +5359,8 @@
         ' <small>(set on the host: <code>./portcullis vpn mode apps|admin|server</code>)</small></dd>' +
         '<dt>VPN service</dt><dd>' + (v.wg && v.wg.up ? '<span class="pill ok">up</span>' : '<span class="pill warn">down</span> ' + escapeHtml((v.wg && v.wg.error) || '') + ' <small>(<code>./portcullis vpn init</code>)</small>') + '</dd>' +
         '<dt>Built-in VPN</dt><dd>' + (v.builtin ? escapeHtml(v.builtin.subnet) + ', port ' + escapeHtml(String(v.builtin.port)) + ', ' + escapeHtml(String(v.builtin.devices)) + ' devices' : 'off') + '</dd>' +
-        ((v.failed_closed || []).length ? '<dt>Stopped (fail closed)</dt><dd>' + escapeHtml(v.failed_closed.join(', ')) + '</dd>' : '') + '</dl>';
+        ((v.failed_closed || []).length ? '<dt>Stopped (fail closed)</dt><dd>' + escapeHtml(v.failed_closed.join(', ')) + '</dd>' : '') + '</dl>' +
+        '<p class="settings-empty">Everyone\'s devices: <a href="#access/vpn">Access → VPN devices</a>.</p>';
       h += '<div class="inst-form" data-vpn-settings>' +
         '<label class="block" for="vpn-users-group">VPN users group (empty: every person)</label><input id="vpn-users-group" data-vpn-users-group value="' + escapeHtml(s.users_group || '') + '">' +
         '<label class="block" for="vpn-dpp">Devices per person</label><input id="vpn-dpp" type="number" min="1" max="100" data-vpn-dpp value="' + escapeHtml(String(s.devices_per_person || 10)) + '">' +

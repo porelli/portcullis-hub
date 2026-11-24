@@ -64,7 +64,7 @@ var impersonationNoToolRoutes = map[string]string{
 // vpnNoToolRoutes are the VPN admin routes no tool mirrors (V9): Settings
 // → VPN and the manual DNS acknowledgement are the admin UI's only.
 var vpnNoToolRoutes = map[string]string{
-	"PUT /api/vpn/settings":                "admin UI only (Settings → VPN)",
+	"PUT /api/vpn/settings":                "admin UI only (Settings → Network → VPN)",
 	"POST /api/instances/{id}/vpn-dns/ack": "admin UI only (the instance's VPN tab, after configuring the records by hand)",
 }
 
@@ -105,6 +105,7 @@ var mailNoToolRoutes = map[string]string{
 	"PUT /api/instances/{id}/mail-provider":                      "mail providers: never wired, switched or unwired through MCP or AI (contract §19.9)",
 	"POST /api/mail/provider/switch":                             "mail providers: never switched through MCP or AI (contract §19.9)",
 	"POST /api/mail/provider/retry-void":                         "mail providers: the void is retried from the Mail tab only (contract §19.11)",
+	"POST /api/mail/admin-view":                                  "mail providers: the read-only admin view opens only in the browser, never through MCP or AI (contract §19.13)",
 }
 
 // sshNoToolRoutes are the SSH admin routes no tool mirrors (contract
@@ -137,6 +138,14 @@ var sshNoToolRoutes = map[string]string{
 var usageNoToolRoutes = map[string]string{
 	"GET /api/usage/export.csv":       "a file download; usage_overview and usage_storage answer the same data",
 	"POST /api/usage/storage/op/stop": "stops a read-only measurement in the admin UI's progress panel; the figures measured so far are kept",
+}
+
+// catalogNoToolRoutes are the catalog asset routes (contract §11.7
+// "Catalog assets"): images for the admin UI's <img src>; list_templates
+// and get_template carry their URLs, never the bytes.
+var catalogNoToolRoutes = map[string]string{
+	"GET /api/catalog/{id}/logo.svg":        "a template's logo image for the Marketplace's <img src>; the template tools give logo_url",
+	"GET /api/catalog/{id}/screenshots/{n}": "a template's screenshot image for the Marketplace's <img src>; the template tools give screenshot_urls",
 }
 
 // adminUsage are the usage tools (§15.10); the storage ones come with the
@@ -306,7 +315,8 @@ func TestToolParity(t *testing.T) {
 		_, sshNo := sshNoToolRoutes[r]
 		_, usageNo := usageNoToolRoutes[r]
 		_, serverNo := serverNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo
+		_, catalogNo := catalogNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo || catalogNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -337,7 +347,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes, catalogNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)

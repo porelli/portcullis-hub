@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/portcullis/hub/internal/mailprovider"
+	"github.com/portcullis/hub/internal/policy"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
 )
@@ -42,6 +43,27 @@ const (
 	MailTLSMount  = "/run/portcullis/mail/tls"
 	// MailWellknownRouter is the Hub's well-known router and service.
 	MailWellknownRouter = "portcullis-mail-wellknown"
+	// MailAdminRouter is the Hub's read-only mail admin view router and
+	// service (contract §19.13); its VPN twin adds "-vpn".
+	MailAdminRouter = "portcullis-mail-admin"
+	// MailAdminLabel: the admin view's hostname is mail-admin.<main domain>.
+	MailAdminLabel = "mail-admin"
+	// The admin view's environment (contract §19.4).
+	VarMailAdminHost = "PORTCULLIS_MAIL_ADMIN_HOST"
+	VarMailTLSSPKI   = "PORTCULLIS_MAIL_TLS_SPKI"
+	// The admin view proxy's gate (contract §19.13): Traefik's address and
+	// the per-install route key the admin view router sets.
+	VarMailAdminTraefikIP  = "PORTCULLIS_MAIL_ADMIN_TRAEFIK_IP"
+	VarMailAdminRouteKey   = "PORTCULLIS_MAIL_ADMIN_ROUTE_KEY"
+	VarMailAdminGroup      = "PORTCULLIS_MAIL_ADMIN_GROUP"
+	MailAdminKeyMiddleware = "portcullis-mail-admin-key"
+	MailAdminKeyHeader     = "X-Portcullis-Mail-Admin-Key"
+	// The admin view routers' chains: the Hub's own (core's
+	// docker-compose.yml hub router), full administrators only through
+	// group-gate (the policy file's group for the host, contract §19.13).
+	mailAdminMiddlewares    = "rate-limit@file,client-headers@file,portcullis-auth@docker,portcullis-groups@docker," + MailAdminKeyMiddleware + "@docker,security-headers@file"
+	mailAdminMiddlewaresVPN = "rate-limit@file,client-headers@file,portcullis-auth@docker," + VPNGroupsMiddleware + "," + MailAdminKeyMiddleware + "@docker,security-headers@file"
+	mailAdminTLSOptions     = policy.TierDefault
 	// The provider's environment (contract §19.4).
 	VarMailSlotDir              = "PORTCULLIS_MAIL_SLOT_DIR"
 	VarMailTLSDir               = "PORTCULLIS_MAIL_TLS_DIR"

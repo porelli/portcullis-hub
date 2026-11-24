@@ -49,6 +49,12 @@ var Routes = map[string][]Route{
 	"State":       {{"GET", Prefix + "/containers/{cid}/state", BodyNone, BodyJSON}},
 	"Events":      {{"GET", Prefix + "/events", BodyNone, BodyNDJSON}},
 
+	// The usage verbs (contract §17.4, ux3): the List row's scope for
+	// containers, the Pull row's for an image ref (?ref=).
+	"Stats":     {{"GET", Prefix + "/containers/{cid}/stats", BodyNone, BodyJSON}},
+	"LayerSize": {{"GET", Prefix + "/containers/{cid}/size", BodyNone, BodyJSON}},
+	"ImageSize": {{"GET", Prefix + "/images/size", BodyNone, BodyJSON}},
+
 	"ListVolumes":   {{"GET", Prefix + "/volumes", BodyNone, BodyJSON}},
 	"InspectVolume": {{"GET", Prefix + "/volumes/{name}", BodyNone, BodyJSON}},
 	"CreateVolume":  {{"POST", Prefix + "/volumes", BodyJSON, BodyNone}},
@@ -67,15 +73,18 @@ var (
 	helperDelete = Route{"DELETE", Prefix + "/helpers/{h}", BodyNone, BodyNone}
 )
 
-// Logs query parameters (GET /v1/containers/{cid}/logs?tail=&ts=1).
+// Logs query parameters (GET /v1/containers/{cid}/logs?tail=&ts=1);
+// QueryRef: GET /v1/images/size?ref=.
 const (
 	QueryTail = "tail"
 	QueryTS   = "ts"
+	QueryRef  = "ref"
 )
 
 // ExtraRoutes are the routes no runtime.Instances method maps to: the
 // bundle and data-file deliveries, the project's removal, Stop, metrics, identity and
-// enrolment, the network parameters and leave.
+// enrolment, the network parameters and leave; HostUsage is the worker's
+// host counters (ux3).
 var ExtraRoutes = map[string]Route{
 	"Bundle":        {"PUT", Prefix + "/projects/{id}/bundle", BodyTar, BodyNone},
 	"RemoveProject": {"DELETE", Prefix + "/projects/{id}", BodyNone, BodyNone},
@@ -85,6 +94,7 @@ var ExtraRoutes = map[string]Route{
 	"AppFile":      {"PUT", Prefix + "/projects/{id}/appfiles/{name}", BodyTar, BodyNone},
 	"StopOp":       {"DELETE", Prefix + "/ops/{op}", BodyNone, BodyNone},
 	"Metrics":      {"GET", Prefix + "/metrics", BodyNone, BodyText},
+	"HostUsage":    {"GET", Prefix + "/host/usage", BodyNone, BodyJSON},
 	"IdentityCSR":  {"POST", Prefix + "/identity/csr", BodyNone, BodyJSON},
 	"IdentityCert": {"PUT", Prefix + "/identity/cert", BodyJSON, BodyNone},
 	"IdentityWG":   {"PUT", Prefix + "/identity/wg", BodyJSON, BodyNone},

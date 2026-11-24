@@ -83,11 +83,11 @@ func TestSignInPerMethod(t *testing.T) {
 	cases := []struct {
 		id, method, enforcement, template, tier, note string
 	}{
-		{"grafana", "header-auth", policy.EnforcePerRequest, "standard", "authaware@file", "every request"},
-		{"other", "native-oidc", policy.EnforceAtLogin, "standard", "authaware@file", "Keycloak checks the template"},
+		{"grafana", "header-auth", policy.EnforcePerRequest, "standard", "default", "every request"},
+		{"other", "native-oidc", policy.EnforceAtLogin, "standard", "default", "Keycloak checks the template"},
 		{"vault", "mtls", policy.EnforceTLS, "", "protected@file", "takes no sign-in template"},
 		{"docs", "public", policy.EnforceNone, "", "public@file", "handles its own sign-in"},
-		{"plex", "forward-auth", policy.EnforcePerRequest, "standard", "authaware@file", "every request"},
+		{"plex", "forward-auth", policy.EnforcePerRequest, "standard", "default", "every request"},
 	}
 	for _, c := range cases {
 		v := view(t, f, c.id)
@@ -101,7 +101,7 @@ func TestSignInPerMethod(t *testing.T) {
 	}
 	// The overrides follow the template: the mTLS-only app keeps the
 	// protected tier, the public app public@file.
-	for id, tier := range map[string]string{"vault": "protected@file", "docs": "public@file", "grafana": "authaware@file"} {
+	for id, tier := range map[string]string{"vault": "protected@file", "docs": "public@file", "grafana": "default"} {
 		if err := f.h.Enable(id); err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +178,7 @@ func TestNativeLoginSignIn(t *testing.T) {
 	}
 	mw, tls := "traefik.http.routers.plex.middlewares", "traefik.http.routers.plex.tls.options"
 	ov := readOverride(t, f, "plex")
-	if !strings.Contains(ov, mw+": portcullis-auth@docker,portcullis-groups@docker,security-headers@file") || !strings.Contains(ov, tls+": authaware@file") {
+	if !strings.Contains(ov, mw+": portcullis-auth@docker,portcullis-groups@docker,security-headers@file") || !strings.Contains(ov, tls+": default") {
 		t.Errorf("gateway override:\n%s", ov)
 	}
 	if v := view(t, f, "plex"); v.SignIn == nil || v.SignIn.Mode != SignInGateway || v.SignIn.AccessGroup != "users_plex" || !v.SignIn.AllowWithoutGateway {
@@ -211,7 +211,8 @@ func TestNativeLoginSignIn(t *testing.T) {
 	if _, ok := readPolicy(t, f).Groups["plex.example.org"]; ok {
 		t.Error("native-only app still publishes a group")
 	}
-	if p := portalApp(t, f, "plex"); p.AccessGroup != "" {
+	// The portal still shows the tile to the access group only (§10).
+	if p := portalApp(t, f, "plex"); p.AccessGroup != "users_plex" {
 		t.Errorf("portal = %+v", p)
 	}
 	v := view(t, f, "plex")

@@ -103,7 +103,7 @@ func TestUsageGroupsAppsCoreUnknownOther(t *testing.T) {
 		e.stats(u.ID, 1e9, 1<<20)
 	}
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if len(v.Apps) != 1 || v.Apps[0].Instance != "a" || len(v.Apps[0].Containers) != 2 || v.Apps[0].Name != "App a" {
 		t.Errorf("apps = %+v", v.Apps)
 	}
@@ -121,14 +121,14 @@ func TestUsageGroupsAppsCoreUnknownOther(t *testing.T) {
 			t.Errorf("another container reached: %s", c)
 		}
 	}
-	if v.Host.CPUs == nil || *v.Host.CPUs != 8 || v.Engine.Runtime != "docker" || !v.Engine.Verified || v.SampledAt == nil {
-		t.Errorf("header = %+v %+v %v", v.Host, v.Engine, v.SampledAt)
+	if h := v.Hosts["primary"]; h.CPUs == nil || *h.CPUs != 8 || v.Engine.Runtime != "docker" || !v.Engine.Verified || v.SampledAt == nil {
+		t.Errorf("header = %+v %+v %v", v.Hosts, v.Engine, v.SampledAt)
 	}
 
 	// Running helpers are one row of the core group.
 	e.setUnits(append(us, runtime.Unit{ID: "h1", State: "running", Labels: map[string]string{docker.LabelHelper: "usage:x"}})...)
 	e.sweep()
-	v = e.h.UsageOverview()
+	v = e.h.UsageOverview("last")
 	last := v.Core.Containers[len(v.Core.Containers)-1]
 	if !last.Helper || last.Service != "Hub helpers (transient)" || last.Number != 1 {
 		t.Errorf("helpers row = %+v", last)
@@ -145,7 +145,7 @@ func TestUsageAggregatesAndPartial(t *testing.T) {
 	e.stats("a1", 1e9, 100)
 	e.rt.StatsErr = map[string]error{"a2": errors.New("boom SECRET=hunter2")}
 	e.sweep()
-	g := e.h.UsageOverview().Apps[0]
+	g := e.h.UsageOverview("last").Apps[0]
 	if g.Totals.MemBytes == nil || *g.Totals.MemBytes != 100 || !g.Partial {
 		t.Errorf("totals = %v partial %v", g.Totals.MemBytes, g.Partial)
 	}
@@ -158,7 +158,7 @@ func TestUsageAggregatesAndPartial(t *testing.T) {
 	if failed == nil || failed.Error != "stats unavailable" || failed.Sample.MemBytes != nil || failed.Sample.CPUCores != nil {
 		t.Errorf("failed = %+v", failed)
 	}
-	b, _ := json.Marshal(e.h.UsageOverview())
+	b, _ := json.Marshal(e.h.UsageOverview("last"))
 	if strings.Contains(string(b), "hunter2") {
 		t.Error("the engine error reached the view")
 	}
@@ -169,13 +169,13 @@ func TestUsageCPUOnSecondSweep(t *testing.T) {
 	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"))
 	e.stats("a1", 10e9, 100)
 	e.sweep()
-	if c := e.h.UsageOverview().Apps[0].Containers[0]; c.Sample.CPUCores != nil {
+	if c := e.h.UsageOverview("last").Apps[0].Containers[0]; c.Sample.CPUCores != nil {
 		t.Errorf("first sweep cpu = %v", *c.Sample.CPUCores)
 	}
 	e.clock.Add(15 * time.Second)
 	e.stats("a1", 13e9, 100)
 	e.sweep()
-	c := e.h.UsageOverview().Apps[0].Containers[0]
+	c := e.h.UsageOverview("last").Apps[0].Containers[0]
 	if c.Sample.CPUCores == nil || *c.Sample.CPUCores < 0.1999 || *c.Sample.CPUCores > 0.2001 {
 		t.Errorf("second sweep cpu = %v", c.Sample.CPUCores)
 	}
@@ -191,7 +191,7 @@ func TestUsageCapAt256(t *testing.T) {
 	}
 	e.setUnits(us...)
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if n := usageCalls(e.rt.Calls(), "stats "); n != 256 {
 		t.Errorf("sampled %d", n)
 	}
@@ -216,7 +216,7 @@ func TestUsageInspectEvery5Min(t *testing.T) {
 	if n := usageCalls(e.rt.Calls(), "inspect a1"); n != 2 {
 		t.Errorf("inspects after 5 min = %d", n)
 	}
-	if l := e.h.UsageOverview().Apps[0].Containers[0].Limits; l.MemBytes != 64<<20 || l.Pids != 32 {
+	if l := e.h.UsageOverview("last").Apps[0].Containers[0].Limits; l.MemBytes != 64<<20 || l.Pids != 32 {
 		t.Errorf("limits = %+v", l)
 	}
 }
@@ -241,7 +241,7 @@ func TestUsageNeverKeepsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, v := range map[string]any{"overview": e.h.UsageOverview(), "instance": g, "snapshot": e.h.usageSnapshot()} {
+	for name, v := range map[string]any{"overview": e.h.UsageOverview("last"), "instance": g, "snapshot": e.h.usageSnapshot()} {
 		b, err := json.Marshal(v)
 		if err != nil {
 			t.Fatal(err)
@@ -302,7 +302,7 @@ func TestUsageRefusedEngine(t *testing.T) {
 	e.rt.Unlock()
 	e.clock.Add(15 * time.Second)
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if v.Engine.Verified || v.Engine.Why != refusal.Message() {
 		t.Errorf("engine = %+v", v.Engine)
 	}
@@ -314,7 +314,7 @@ func TestUsageRefusedEngine(t *testing.T) {
 	}
 	e.clock.Add(15 * time.Second)
 	e.sweep()
-	if !e.h.UsageOverview().Stale {
+	if !e.h.UsageOverview("last").Stale {
 		t.Error("not stale after two intervals")
 	}
 }
@@ -354,7 +354,7 @@ func TestUsageStoppedAppShowsStopped(t *testing.T) {
 	e := newUsageEnv(t, "a")
 	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "exited"), uunit("a2", "portcullis-a", "db", 1, "exited"))
 	e.sweep()
-	g := e.h.UsageOverview().Apps[0]
+	g := e.h.UsageOverview("last").Apps[0]
 	if g.Status != "stopped" || g.Totals.MemBytes != nil || g.Totals.CPUCores != nil || g.Partial {
 		t.Errorf("stopped = %+v", g)
 	}
@@ -364,8 +364,135 @@ func TestUsageStoppedAppShowsStopped(t *testing.T) {
 	e.setUnits(uunit("a1", "portcullis-a", "web", 1, "running"), uunit("a2", "portcullis-a", "db", 1, "exited"))
 	e.stats("a1", 1, 1)
 	e.sweep()
-	if g := e.h.UsageOverview().Apps[0]; g.Status != "partly running" || g.Partial {
+	if g := e.h.UsageOverview("last").Apps[0]; g.Status != "partly running" || g.Partial {
 		t.Errorf("partly = %+v", g)
+	}
+}
+
+// One definition of "running" (unitHealth): a done one-shot job and a
+// stopped leftover of a skipped service never make an app "partly
+// running"; a failed or pending job, or a stopped service, does. The
+// exit code is read once per list state, not every sweep.
+func TestUsageRunningIgnoresDoneJobs(t *testing.T) {
+	e := newUsageEnv(t)
+	e.h.usage.instances = func() []usageInst {
+		return []usageInst{{ID: "a", Template: "tmpl", Name: "App a",
+			Jobs: map[string]bool{"init": true, "migrate": true}, Skip: map[string]bool{"extra": true}}}
+	}
+	exited := func(id, svc, status string) runtime.Unit {
+		u := uunit(id, "portcullis-a", svc, 1, "exited")
+		u.Status = status
+		return u
+	}
+	set := func(initCode int, us ...runtime.Unit) {
+		e.rt.Lock()
+		e.rt.States = map[string]runtime.State{"i1": {Status: "exited", ExitCode: initCode}, "m1": {Status: "exited"}}
+		e.rt.Unlock()
+		e.setUnits(append([]runtime.Unit{uunit("w1", "portcullis-a", "web", 1, "running")}, us...)...)
+		e.stats("w1", 1, 1)
+		e.sweep()
+	}
+	status := func() string { return e.h.UsageOverview("last").Apps[0].Status }
+	set(0, exited("i1", "init", "Exited (0) 2 hours ago"), exited("m1", "migrate", "Exited (0) 2 hours ago"), exited("x1", "extra", "Exited (0) 1 day ago"))
+	if got := status(); got != "running" {
+		t.Errorf("done jobs + a skipped leftover: status = %q", got)
+	}
+	before := usageCalls(e.rt.Calls(), "state ")
+	set(0, exited("i1", "init", "Exited (0) 3 hours ago"), exited("m1", "migrate", "Exited (0) 3 hours ago"), exited("x1", "extra", "Exited (0) 1 day ago"))
+	if n := usageCalls(e.rt.Calls(), "state ") - before; n != 0 {
+		t.Errorf("an unchanged job's exit code was read again (%d)", n)
+	}
+	if g := e.h.UsageOverview("last").Apps[0]; g.JobsDone != 2 || g.JobsFailed != 0 {
+		t.Errorf("jobs done %d failed %d", g.JobsDone, g.JobsFailed)
+	}
+	for _, c := range e.h.UsageOverview("last").Apps[0].Containers {
+		if want := map[string]string{"init": "done", "migrate": "done"}[c.Service]; c.JobState != want || c.Job != (want != "") {
+			t.Errorf("container %s: job %v %q", c.Service, c.Job, c.JobState)
+		}
+	}
+	// A rerun that failed: read again; "job_failed" (the app page's
+	// "setup job failed"), never "partly running".
+	set(1, exited("i1", "init", "Exited (1) 1 second ago"), exited("m1", "migrate", "Exited (0) 3 hours ago"))
+	if g := e.h.UsageOverview("last").Apps[0]; g.Status != "job_failed" || g.JobsFailed != 1 || g.JobsDone != 1 {
+		t.Errorf("a failed job: %+v", g)
+	}
+	// A job never started is not up either.
+	set(0, uunit("i1", "portcullis-a", "init", 1, "created"))
+	if got := status(); got != "partly running" {
+		t.Errorf("a pending job: status = %q", got)
+	}
+	// A running leftover of a skipped service counts (it is running);
+	// a restarting one counts too (reconcile's inactiveRunning), not up.
+	set(0, uunit("x1", "portcullis-a", "extra", 1, "running"), exited("i1", "init", "Exited (0) 2 hours ago"))
+	if got := status(); got != "running" {
+		t.Errorf("a running leftover: status = %q", got)
+	}
+	set(0, uunit("x1", "portcullis-a", "extra", 1, "restarting"))
+	if got := status(); got != "partly running" {
+		t.Errorf("a restarting leftover: status = %q", got)
+	}
+	// A stopped service still makes it partly running.
+	set(0, uunit("d1", "portcullis-a", "db", 1, "exited"))
+	if got := status(); got != "partly running" {
+		t.Errorf("a stopped service: status = %q", got)
+	}
+}
+
+// The real instance list (usageInstances, no hook): a companion scaled to
+// 0 (its AI support off) expects no container, so its stopped leftover
+// never makes the app "partly running"; once switched on it counts.
+func TestUsageRealInstancesSkipScaledOffCompanion(t *testing.T) {
+	a := newInstAIFixture(t, nil)
+	a.enable(t, "aiapp")
+	a.h.usage.instances = nil
+	inst := a.h.usageInstances()["aiapp"]
+	if !inst.Skip["tok-mcp"] {
+		t.Fatalf("aiapp's usage instance = %+v", inst)
+	}
+	rt := &runtimetest.Fake{InfoVal: runtime.Info{Verified: true, CPUs: 8, MemoryBytes: 16 << 30}}
+	rt.Units = []runtime.Unit{uunit("c1", "portcullis-aiapp", "app", 1, "running"), uunit("c2", "portcullis-aiapp", "tok-mcp", 1, "exited")}
+	rt.SetStats("c1", runtime.UnitStats{Read: time.Now(), CPUUsageNS: pu(1), MemUsage: pu(1), Pids: pu(1)})
+	a.h.rt = rt
+	a.h.usageSweep(context.Background())
+	if g := a.h.UsageOverview("last").Apps; len(g) == 0 || g[0].Status != "running" {
+		t.Errorf("scaled-off leftover: %+v", g)
+	}
+	if err := a.h.SetAISupport(context.Background(), "aiapp", "tok", true, root); err != nil {
+		t.Fatal(err)
+	}
+	if a.h.usageInstances()["aiapp"].Skip["tok-mcp"] {
+		t.Error("a switched-on companion is still skipped")
+	}
+	a.h.usageSweep(context.Background())
+	if g := a.h.UsageOverview("last").Apps; len(g) == 0 || g[0].Status != "partly running" {
+		t.Errorf("switched-on companion stopped: %+v", g)
+	}
+}
+
+// unitHealth is the one definition: a done job is up, a failed or
+// pending one isn't; a service is up only while running.
+func TestUnitHealth(t *testing.T) {
+	for _, tc := range []struct {
+		job    bool
+		st     docker.State
+		health string
+		up     bool
+	}{
+		{true, docker.State{Status: "exited"}, jobDone, true},
+		{true, docker.State{Status: "exited", ExitCode: 2}, jobFailed, false},
+		{true, docker.State{Status: "created"}, jobPending, false},
+		{true, docker.State{Status: "running", Running: true}, jobRunning, true},
+		{true, docker.State{Status: "paused"}, jobFailed, false},
+		{false, docker.State{Status: "running", Running: true}, jobRunning, true},
+		{false, docker.State{Status: "restarting"}, healthRestarting, false},
+		{false, docker.State{Status: "exited"}, healthStopped, false},
+	} {
+		if h := unitHealth(tc.job, tc.st); h != tc.health || healthUp(h) != tc.up {
+			t.Errorf("unitHealth(%v, %+v) = %q (up %v)", tc.job, tc.st, h, healthUp(h))
+		}
+	}
+	if listedJobState("exited", "Exited (0) 2 hours ago") != jobDone || listedJobState("exited", "Exited (137) now") != jobFailed || listedJobState("created", "Created") != jobPending {
+		t.Error("listedJobState")
 	}
 }
 
@@ -398,7 +525,7 @@ func TestUsageSweepBudget(t *testing.T) {
 		t.Errorf("the sweep took %s", d)
 	}
 	kept, fresh := 0, 0
-	for _, c := range e.h.UsageOverview().Apps[0].Containers {
+	for _, c := range e.h.UsageOverview("last").Apps[0].Containers {
 		switch {
 		case c.Sample.MemBytes != nil && *c.Sample.MemBytes == 7:
 			kept++
@@ -447,7 +574,7 @@ func TestUsageKubeCoreNotMeasured(t *testing.T) {
 	e.setUnits(uunit("a--web-x/web", "portcullis-a", "web", 1, "running"), runtime.Unit{ID: "x/y", State: "running"})
 	e.rt.StatsErr = map[string]error{"a--web-x/web": &runtime.NotMeasuredError{Why: "the cluster has no metrics API (metrics-server)"}}
 	e.sweep()
-	v := e.h.UsageOverview()
+	v := e.h.UsageOverview("last")
 	if v.Core.Status != "not_measured" || v.Core.Why != "not measured on Kubernetes yet" || v.NotShown != 0 {
 		t.Errorf("core %q %q, not shown %d", v.Core.Status, v.Core.Why, v.NotShown)
 	}
@@ -518,7 +645,7 @@ func TestUsageInspectAfterRestartState(t *testing.T) {
 	if usageCalls(e.rt.Calls(), "inspect a1") != n+1 {
 		t.Error("not inspected when it ran again")
 	}
-	if c := e.h.UsageOverview().Apps[0].Containers[0]; c.Restarts != 1 {
+	if c := e.h.UsageOverview("last").Apps[0].Containers[0]; c.Restarts != 1 {
 		t.Errorf("restarts = %d", c.Restarts)
 	}
 }
@@ -532,7 +659,7 @@ func TestUsageFailedStatsKeepsGroupLimit(t *testing.T) {
 	e.stats("a1", 1e9, 100)
 	e.rt.StatsErr = map[string]error{"a2": errors.New("timeout")}
 	e.sweep()
-	g := e.h.UsageOverview().Apps[0]
+	g := e.h.UsageOverview("last").Apps[0]
 	if g.Totals.MemLimitBytes == nil || *g.Totals.MemLimitBytes != 96<<20 {
 		t.Errorf("group memory limit = %v, want 96 MiB", g.Totals.MemLimitBytes)
 	}

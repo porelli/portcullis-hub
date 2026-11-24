@@ -20,6 +20,10 @@ import (
 // one-shot sample is a few KiB.
 const maxStatsBody = 1 << 20
 
+// StatsTimeout bounds one stats call (a hung engine never holds the
+// caller: the Hub's sampler has 5 s, the worker agent's route 20 s).
+const StatsTimeout = 20 * time.Second
+
 // sizeTimeout bounds one size=true inspect (the daemon walks the
 // writable layer).
 var sizeTimeout = 10 * time.Second
@@ -89,6 +93,8 @@ var errNotFound = cerrdefs.ErrNotFound.WithMessage("Not Found")
 // stream=false&one-shot=true: no 1 s wait, no precpu_stats), decoded field
 // by field.
 func (c *Client) ContainerStats(ctx context.Context, id string) (runtime.UnitStats, error) {
+	ctx, cancel := context.WithTimeout(ctx, StatsTimeout)
+	defer cancel()
 	res, err := c.api.ContainerStats(ctx, id, client.ContainerStatsOptions{Stream: false})
 	if err != nil {
 		return runtime.UnitStats{}, engineErr("stats", id, err)

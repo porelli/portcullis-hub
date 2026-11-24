@@ -186,7 +186,7 @@ func TestLocalNetworksEmptyProblem(t *testing.T) {
 	a.LocalNetworksEmpty, b.LocalNetworksEmpty = true, true
 	got := of(t, KindLocalNetworksEmpty, &Inputs{FileSharing: []FileSharingIn{a, b, {Instance: "other"}}})
 	if len(got) != 1 || got[0].Severity != Problem || got[0].Title != "Local networks is empty; file sharing is off." ||
-		strings.Join(got[0].Instances, ",") != "samba,timemachine" || !strings.Contains(strings.Join(got[0].Steps, " "), "Settings → Local networks") {
+		strings.Join(got[0].Instances, ",") != "samba,timemachine" || !strings.Contains(strings.Join(got[0].Steps, " "), "Settings → Network → Local networks") {
 		t.Errorf("local_networks_empty = %+v", got)
 	}
 	if got := of(t, KindLocalNetworksEmpty, &Inputs{FileSharing: []FileSharingIn{smbIn()}}); len(got) != 0 {

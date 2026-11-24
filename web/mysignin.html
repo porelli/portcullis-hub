@@ -36,7 +36,6 @@
   <div class="pn-bar" id="site-nav"></div>
   <header>
     <h1><img class="brand-mark" src="/static/mark.svg" alt="" width="28" height="28"> Sign-in methods</h1>
-    <div class="user-badge" id="who" hidden>Signed in as <strong id="who-name"></strong></div>
   </header>
   <main id="signin-root" class="pd-card msi-page"><noscript>This page needs JavaScript.</noscript></main>
   <!-- The person's SSH access card (web/myssh.js; hidden while SSH is off). -->
@@ -59,8 +58,7 @@
     PortcullisMySignIn.mount(document.getElementById('signin-root'), {
       mode: 'self',
       onView: function (v) {
-        document.getElementById('who-name').textContent = v.user || '';
-        document.getElementById('who').hidden = !v.user;
+        navOpts.user = v.user || '';
         // The Hub link for administrators only (the Hub is in their apps).
         navOpts.admin = (v.apps || []).some(function (a) { return a.kind === 'core' && a.id === 'hub'; });
         PortcullisNav.render(document.getElementById('site-nav'), navOpts);

@@ -75,7 +75,22 @@ jobs:
       - name: install acl
         run: command -v setfacl || { sudo apt-get update -q && sudo apt-get install -y -q acl; }
 
+      # Playwright (pinned with its integrity in .github/uismoke's lockfile,
+      # npm ci without install scripts) and its pinned Chromium for the
+      # Settings + SSH access computed-style check (TestSettingsControlsStyled,
+      # internal/httpapi/webui_uismoke_test.go): PORTCULLIS_UI_SMOKE=require
+      # below makes a missing Playwright a failure, not a skip.
+      - name: install Playwright + Chromium
+        run: |
+          mkdir -p "$RUNNER_TEMP/uismoke"
+          cp .github/uismoke/package.json .github/uismoke/package-lock.json "$RUNNER_TEMP/uismoke/"
+          npm ci --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/uismoke"
+          "$RUNNER_TEMP/uismoke/node_modules/.bin/playwright" install --with-deps chromium
+
       - name: go test -race
+        env:
+          NODE_PATH: ${{ runner.temp }}/uismoke/node_modules
+          PORTCULLIS_UI_SMOKE: require
         run: go test -race -count=1 -timeout 25m ./...
 
       # Core's e2e hooks (internal/e2etest) exist only in -tags e2etest
@@ -216,11 +231,12 @@ jobs:
             git clone --quiet --depth=1 --branch "$ref" "$url" "$RUNNER_TEMP/$repo"
           done
 
+      # TestVectorsInSync: the logo lint's vectors are the templates' tests/svg_vectors.json byte for byte.
       - name: Real templates, core names and the core vector copies
         env:
           PORTCULLIS_TEMPLATES_DIR: ${{ runner.temp }}/portcullis-templates
           PORTCULLIS_CORE_DIR: ${{ runner.temp }}/portcullis
-        run: go test -count=1 -v -run 'TestRealTemplates|TestCore[A-Za-z]*Complete|TestHelperImagePinned|Test[A-Za-z]*VectorsCopy' ./internal/... 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|\s+[a-z_]+_test\.go)' ; test "${PIPESTATUS[0]}" = 0
+        run: go test -count=1 -v -run 'TestRealTemplates|TestCore[A-Za-z]*Complete|TestHelperImagePinned|Test[A-Za-z]*VectorsCopy|TestVectorsInSync' ./internal/... 2>&1 | grep -E '^(=== RUN|--- |PASS|FAIL|ok|\s+[a-z_]+_test\.go)' ; test "${PIPESTATUS[0]}" = 0
 
   # The Portcullis CLI (cmd/portcullis) on the three systems people run
   # it on: its own packages only (the Hub's tests run in test).

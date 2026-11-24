@@ -16,7 +16,6 @@ import (
 	"log"
 	"maps"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -382,9 +381,11 @@ func (h *Hub) impNext(id string) string {
 	return "https://auth." + h.cfg.Domain + "/realms/portcullis/portcullis-impersonate/start?id=" + id
 }
 
-// impSignOut is oauth2-proxy's sign-out, back to the portal.
+// impSignOut is oauth2-proxy's sign-out (contract §5 "Sign out"): the page
+// POSTs it with no fields; core's guard names the landing page (the
+// Signed out page), so there is no rd.
 func (h *Hub) impSignOut() string {
-	return "https://auth." + h.cfg.Domain + "/oauth2/sign_out?rd=" + url.QueryEscape("https://"+h.cfg.Domain+"/")
+	return "https://auth." + h.cfg.Domain + "/oauth2/sign_out"
 }
 
 func newImpID() (string, error) {

@@ -429,7 +429,7 @@ func TestResolveRunsAs(t *testing.T) {
 func TestSaveSettingsRefusesFolderRefs(t *testing.T) {
 	f, _ := jellyfinFixture(t)
 	ctx := context.Background()
-	assign := "assign through Settings → Shared folders"
+	assign := "assign through Settings → Storage"
 	for _, u := range []SettingsUpdate{
 		{Values: vals("movies", "folder:media")},
 		{Values: vals("tv", "folder:media/tv")},

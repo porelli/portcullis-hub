@@ -26,7 +26,7 @@ File sharing needs [Users & Groups](../setup/quickstart.md#step-5-create-users):
 
 ### 2. Configure Local Networks
 
-File sharing should only be reachable from your LAN or VPN. Go to **Hub → Settings → Local networks** and list the CIDRs that count as local:
+File sharing should only be reachable from your LAN or VPN. Go to **Hub → Settings → Network → Local networks** and list the CIDRs that count as local:
 
 - **Default:** RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), IPv6 ULA (`fc00::/7`) and the Tailscale range (`100.64.0.0/10`).
 - **Empty list** (`[]`): loopback only. File sharing then refuses to start (the Hub writes `PORTCULLIS_LOCAL_NETWORKS` empty, and the templates fail closed).

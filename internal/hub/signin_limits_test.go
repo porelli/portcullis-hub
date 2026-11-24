@@ -211,14 +211,14 @@ func TestTierProtectedAnyOverride(t *testing.T) {
 
 // Review fix 3 (contract §5): an app whose template can't be published
 // is protected@file, but while its public router is open every router of
-// the host shares authaware@file (policy.HostTier) — and every gated
+// the host shares default (policy.HostTier) — and every gated
 // request is still denied (no published rule for the host).
 func TestUnusableTemplateWithPublicRouter(t *testing.T) {
 	a := access{Capability: policy.Capability{Templates: true, Enforcement: policy.EnforcePerRequest}, Unusable: true}
 	if got := a.tier(nil, false); got != policy.TierProtected {
 		t.Errorf("unusable, no public router: %s", got)
 	}
-	if got := a.tier(nil, true); got != policy.TierAuthAware {
+	if got := a.tier(nil, true); got != policy.TierDefault {
 		t.Errorf("unusable, public router open: %s", got)
 	}
 
@@ -243,7 +243,7 @@ func TestUnusableTemplateWithPublicRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 	ov := readOverride(t, f, "cloud")
-	if !strings.Contains(ov, "portcullis-public-cloud") || strings.Contains(ov, "protected") || !strings.Contains(ov, "tls.options: authaware@file") {
+	if !strings.Contains(ov, "portcullis-public-cloud") || strings.Contains(ov, "protected") || !strings.Contains(ov, "tls.options: default") {
 		t.Errorf("override:\n%s", ov)
 	}
 	doc := readPolicy(t, f)

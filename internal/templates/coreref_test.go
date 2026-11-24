@@ -363,7 +363,7 @@ func TestDiscoverRefusesBypasses(t *testing.T) {
 			"traefik.http.middlewares.i.ipallowlist.sourcerange: 10.0.0.0/8",
 			"traefik.http.middlewares.l.ratelimit.average: \"10\"",
 		}, "    volumes: [data:/data]\n    networks:\n      default:\n        aliases: [grafana-internal]\n      portcullis-proxy:\n        aliases: [grafana-web]\n",
-			"volumes:\n  data:\n    name: portcullis_control-attrs-data\n  cache:\n    name: portcullis_control-attrs\n  shared:\n    external: true\n    name: media-library\n"),
+			"volumes:\n  data:\n    name: portcullis_control-attrs-data\n  cache:\n    name: portcullis_control-attrs\n"),
 	}
 	for id, c := range controls {
 		writeTpl(t, dir, id, manifest, c)

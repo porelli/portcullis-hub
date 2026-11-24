@@ -120,6 +120,8 @@ func (s *Server) hubMux() *recordingMux {
 	mux.HandleFunc("/api/templates/exec/", s.handleTemplateExec)
 	mux.HandleFunc("/api/templates/restart/", s.handleTemplateRestart)
 	mux.HandleFunc("/api/templates/lastop/", s.handleTemplateLastOp)
+	// Catalog assets (contract §11.7; Hub listener only).
+	s.registerCatalog(mux)
 	mux.HandleFunc("/api/sources", s.handleSources)
 	mux.HandleFunc("/api/sources/add", s.handleAddSource)
 	mux.HandleFunc("/api/sources/remove", s.handleRemoveSource)
@@ -395,11 +397,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// (and the email in X-Forwarded-Email); the proxy secret guarantees
 	// the request came through Traefik. html/template escapes it.
 	user := r.Header.Get("X-Forwarded-User")
-	ts := s.Hub.Templates()
-	categories := make(map[string][]templates.Template)
-	for _, t := range ts {
-		categories[t.Manifest.Category] = append(categories[t.Manifest.Category], t)
-	}
 	name := s.PortalName
 	if name == "" {
 		name = "Portcullis"
@@ -410,9 +407,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"PeopleURL":  s.PeopleURL,
 		"HubURL":     s.HubURL,
 		"PortalName": name,
-		"Templates":  ts,
-		"Categories": categories,
-		"Sources":    s.Hub.Sources(),
 		"User":       user,
 		// The signed-in user is LLDAP's bootstrap admin (checkTarget
 		// refuses it in every group: it can't use the apps it installs).

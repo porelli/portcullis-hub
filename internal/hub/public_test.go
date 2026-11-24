@@ -93,7 +93,7 @@ func TestPublicListedNoTokensNoRouter(t *testing.T) {
 	}
 	v, _ := f.h.AppSettings("cloud")
 	if v.PublicAccess == nil || !v.PublicAccess.Enabled || v.PublicAccess.Explicit || v.PublicAccess.Mode != "listed" || v.PublicAccess.Active ||
-		v.PublicAccess.PolicyTier != "protected@file" || v.PublicAccess.TierWhenActive != "authaware@file" {
+		v.PublicAccess.PolicyTier != "protected@file" || v.PublicAccess.TierWhenActive != "default" {
 		t.Errorf("view = %+v", v.PublicAccess)
 	}
 }
@@ -132,8 +132,8 @@ func TestPublicListedTokens(t *testing.T) {
 		t.Errorf("listed mode opened a share-wide path or gated the public router:\n%s", ov)
 	}
 	// TLS tier rule: the mtls policy would be protected@file; with a public
-	// router every router of the host shares authaware@file.
-	if strings.Contains(ov, "protected@file") || strings.Count(ov, "tls.options: authaware@file") != 3 {
+	// router every router of the host shares default.
+	if strings.Contains(ov, "protected@file") || strings.Count(ov, "tls.options: default") != 3 {
 		t.Errorf("tier not downgraded for all routers:\n%s", ov)
 	}
 	m := priorityRe.FindStringSubmatch(ov)

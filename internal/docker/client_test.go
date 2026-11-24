@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -594,18 +595,115 @@ func TestExecStdinSplit(t *testing.T) {
 	}
 }
 
-// ListContainers keeps each network's aliases and DNS names.
+// ListContainersNames reads each network's aliases and DNS names from
+// the inspect: the list summary (as the daemon sends it) carries none.
+// Inspected once per container and endpoint set, again when it changes;
+// ListContainers never inspects.
 func TestListContainersNetworks(t *testing.T) {
+	var mu sync.Mutex
+	inspects := map[string]int{}
+	endpoint, aliases := "ep1", `["portcullis-mcp-a--b"]`
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},
-			"NetworkSettings":{"Networks":{"portcullis-proxy":{"Aliases":["portcullis-mcp-a--b"],"DNSNames":["x","abc","portcullis-mcp-a--b"]}}}}]`)
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/containers/json":
+			fmt.Fprintf(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},
+				"NetworkSettings":{"Networks":{"portcullis-proxy":{"EndpointID":%q,"Aliases":null,"DNSNames":null}}}},
+				{"Id":"old","Names":["/y"],"State":"exited","Labels":{},
+				"NetworkSettings":{"Networks":{"portcullis-proxy":{"Aliases":null}}}},
+				{"Id":"gone","Names":["/z"],"State":"running","Labels":{},
+				"NetworkSettings":{"Networks":{"portcullis-proxy":{"EndpointID":"ep9"}}}}]`, endpoint)
+		case "/containers/abc/json":
+			inspects["abc"]++
+			fmt.Fprintf(w, `{"Id":"abc","State":{"Running":true},"NetworkSettings":{"Networks":{"portcullis-proxy":{"EndpointID":%q,
+				"Aliases":%s,"DNSNames":["x","abc","portcullis-mcp-a--b"]}}}}`, endpoint, aliases)
+		case "/containers/gone/json":
+			inspects["gone"]++
+			http.Error(w, `{"message":"No such container: gone"}`, http.StatusNotFound)
+		default:
+			inspects[r.URL.Path]++
+			http.Error(w, `{"message":"unexpected"}`, http.StatusNotFound)
+		}
 	}))
-	cs, err := c.ListContainers(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
+	plain, err := c.ListContainers(context.Background(), nil)
+	mu.Lock()
+	if err != nil || len(plain) != 3 || len(plain[0].Networks["portcullis-proxy"]) != 0 || inspects["abc"]+inspects["gone"] != 0 {
+		t.Errorf("ListContainers: %v %+v, inspects %v", err, plain, inspects)
 	}
-	if len(cs) != 1 || strings.Join(cs[0].Networks["portcullis-proxy"], ",") != "portcullis-mcp-a--b,x,abc" {
-		t.Errorf("networks = %v", cs)
+	mu.Unlock()
+	list := func() map[string]Container {
+		t.Helper()
+		cs, err := c.ListContainersNames(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]Container{}
+		for _, ct := range cs {
+			out[ct.ID] = ct
+		}
+		return out
+	}
+	cs := list()
+	if got := strings.Join(cs["abc"].Networks["portcullis-proxy"], ","); got != "portcullis-mcp-a--b,x,abc" {
+		t.Errorf("abc names = %q", got)
+	}
+	if n, ok := cs["old"].Networks["portcullis-proxy"]; !ok || len(n) != 0 {
+		t.Errorf("an exited container keeps the summary's networks: %v", cs["old"].Networks)
+	}
+	if _, ok := cs["gone"].Networks["portcullis-proxy"]; !ok {
+		t.Errorf("a container gone before its inspect keeps the summary's networks: %v", cs["gone"].Networks)
+	}
+	// Cached: the same endpoints are not inspected again.
+	list()
+	mu.Lock()
+	if inspects["abc"] != 1 {
+		t.Errorf("inspects = %v", inspects)
+	}
+	// A new endpoint (disconnect + connect with another alias) is
+	// inspected again: an unexpected alias is never hidden by the cache.
+	endpoint, aliases = "ep2", `["portcullis-mcp-rogue--x"]`
+	mu.Unlock()
+	cs = list()
+	if got := strings.Join(cs["abc"].Networks["portcullis-proxy"], ","); got != "portcullis-mcp-rogue--x,x,abc,portcullis-mcp-a--b" {
+		t.Errorf("after reconnect names = %q", got)
+	}
+	// Past the TTL the same endpoints are inspected again.
+	old := nameTTL
+	nameTTL = 0
+	t.Cleanup(func() { nameTTL = old })
+	list()
+	mu.Lock()
+	defer mu.Unlock()
+	if inspects["abc"] != 3 {
+		t.Errorf("inspects after TTL = %v", inspects)
+	}
+}
+
+// An inspect error other than not-found never fails the list: that
+// container keeps the summary's names, marked NamesUnread (the alias
+// checks treat it as unverified); the others are read.
+func TestListContainersInspectError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/json":
+			fmt.Fprint(w, `[{"Id":"abc","Names":["/x"],"State":"running","Labels":{},"NetworkSettings":{"Networks":{"portcullis-proxy":{}}}},
+				{"Id":"ok","Names":["/y"],"State":"running","Labels":{},"NetworkSettings":{"Networks":{"portcullis-proxy":{}}}}]`)
+		case "/containers/ok/json":
+			fmt.Fprint(w, `{"Id":"ok","NetworkSettings":{"Networks":{"portcullis-proxy":{"Aliases":["y-alias"]}}}}`)
+		default:
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		}
+	}))
+	cs, err := c.ListContainersNames(context.Background(), nil)
+	if err != nil || len(cs) != 2 {
+		t.Fatalf("%v %+v", err, cs)
+	}
+	if !cs[0].NamesUnread || cs[1].NamesUnread || strings.Join(cs[1].Networks["portcullis-proxy"], ",") != "y-alias" {
+		t.Errorf("containers = %+v", cs)
+	}
+	if _, ok := cs[0].Networks["portcullis-proxy"]; !ok {
+		t.Errorf("the unread container lost its networks: %+v", cs[0])
 	}
 }
 

@@ -323,7 +323,7 @@ func (sharedPathDiskCheck) Run(in *Inputs) []Finding {
 				FP: Fingerprint(KindSharedPath, s.Target), Kind: KindSharedPath,
 				Title:     fmt.Sprintf("%s can't reach all of `%s`.", joinAnd(blockedInstances(bs)), s.Target),
 				Class:     FixExplain,
-				Steps:     []string{"Give the files to the uid and group the app runs as, or manage the directory as a shared folder (Settings → Shared folders): one group for every app that uses it."},
+				Steps:     []string{"Give the files to the uid and group the app runs as, or manage the directory as a shared folder (Settings → Storage): one group for every app that uses it."},
 				Instances: blockedInstances(bs), Paths: []string{s.Target},
 			}
 		} else {
@@ -622,7 +622,7 @@ func (runtimeGIDCheck) Run(in *Inputs) []Finding {
 				change = fmt.Sprintf("Change %s's group (its group or PGID setting, or the image's user) to a gid other than %d, which shared folder %s adopted.", h.inst, h.gid, fo.Name)
 			}
 			f.Steps = []string{change,
-				fmt.Sprintf("Or assign %s to shared folder %s (Settings → Shared folders), if it should use it.", h.inst, fo.Name)}
+				fmt.Sprintf("Or assign %s to shared folder %s (Settings → Storage), if it should use it.", h.inst, fo.Name)}
 		} else {
 			f.FP = Fingerprint(KindGIDCollision, h.inst, "gid:"+strconv.Itoa(h.gid))
 			f.Title = fmt.Sprintf("%s runs with gid %d, in the range reserved for shared folder groups.", h.inst, h.gid)

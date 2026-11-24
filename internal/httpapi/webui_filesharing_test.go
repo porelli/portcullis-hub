@@ -171,10 +171,16 @@ func TestIndexFileSharingTab(t *testing.T) {
 	if secret["grafana"] {
 		t.Error("grafana (no person_secret) gets a File sharing tab")
 	}
-	if !strings.Contains(b, `data-no-web-page="smbfixture"`) {
+	// The Marketplace's No web page badge (marketplace.js) is the
+	// catalog's routerless.
+	noWeb := map[string]bool{}
+	for _, c := range cat {
+		noWeb[c["id"].(string)] = c["routerless"] == true
+	}
+	if !noWeb["smbfixture"] || !strings.Contains(webAsset(t, "marketplace.js"), "else if (t.routerless) out.push(el('span', { class: 'auth-badge method', 'data-no-web-page': t.id,") {
 		t.Error("router-less smbfixture lacks the No web page badge")
 	}
-	if strings.Contains(b, `data-no-web-page="grafana"`) {
+	if noWeb["grafana"] {
 		t.Error("grafana shows No web page")
 	}
 	for _, want := range []string{

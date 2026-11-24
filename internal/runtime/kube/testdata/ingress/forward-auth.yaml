@@ -22,9 +22,7 @@ spec:
     - kind: Service
       name: app--web
       port: 8080
-  tls:
-    options:
-      name: authaware@file
+  tls: {}
 ---
 apiVersion: v1
 kind: Service

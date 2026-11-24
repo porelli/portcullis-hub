@@ -1,0 +1,1 @@
+{"mode": "apps", "public_enrol": true, "wg": {"up": false, "error": "no VPN status file is configured"}, "builtin": null, "providers": [{"instance": "wg-easy", "template": "wg-easy", "label": "WG", "url": "https://vpn.example.org", "state": "on"}], "settings": {"users_group": "", "devices_per_person": 10, "expiry": "1y"}, "failed_closed": [], "reach": {}}

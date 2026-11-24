@@ -40,7 +40,7 @@ var ingressCases = map[string]map[string]map[string]string{
 		"traefik.enable":                                     "true",
 		"traefik.http.routers.app.rule":                      "Host(`app.example.org`)",
 		"traefik.http.routers.app.entrypoints":               "websecure",
-		"traefik.http.routers.app.tls.options":               "authaware@file",
+		"traefik.http.routers.app.tls.options":               "default",
 		"traefik.http.routers.app.middlewares":               "client-headers@file,portcullis-auth@docker,portcullis-groups@docker,security-headers@file",
 		"traefik.http.services.app.loadbalancer.server.port": "8080",
 	}},
@@ -48,7 +48,7 @@ var ingressCases = map[string]map[string]map[string]string{
 		"traefik.http.routers.app-oauth.rule":        "Host(`app.example.org`) && PathPrefix(`/oauth2/`)",
 		"traefik.http.routers.app-oauth.priority":    "100",
 		"traefik.http.routers.app-oauth.service":     "forward-auth-ext@docker",
-		"traefik.http.routers.app-oauth.tls.options": "authaware@file",
+		"traefik.http.routers.app-oauth.tls.options": "default",
 	}},
 	"public-link": {"web": {
 		"traefik.http.routers.app-pub.rule":        "Host(`app.example.org`) && PathPrefix(`/s/`)",
@@ -67,14 +67,14 @@ var ingressCases = map[string]map[string]map[string]string{
 	"extra-domain": {"web": {
 		"traefik.http.routers.app.rule":                      "Host(`app.team-b.example.net`)",
 		"traefik.http.routers.app.middlewares":               "portcullis-auth-ext@docker,portcullis-groups@docker",
-		"traefik.http.routers.app.tls.options":               "authaware@file",
+		"traefik.http.routers.app.tls.options":               "default",
 		"traefik.http.services.app.loadbalancer.server.port": "80",
 	}},
 	"vpn-only": {"web": {
 		"traefik.http.routers.app.rule":                                                 "Host(`app.example.org`)",
 		"traefik.http.routers.app.entrypoints":                                          "vpnsecure",
 		"traefik.http.routers.app.middlewares":                                          "portcullis-vpnallow-app,client-headers@file,portcullis-auth@docker,portcullis-groups-vpn@docker",
-		"traefik.http.routers.app.tls.options":                                          "authaware@file",
+		"traefik.http.routers.app.tls.options":                                          "default",
 		"traefik.http.middlewares.portcullis-vpnallow-app.ipallowlist.sourcerange":      "100.64.0.0/10,10.213.0.0/22",
 		"traefik.http.middlewares.portcullis-vpnallow-app.ipallowlist.rejectstatuscode": "404",
 		"traefik.http.routers.app-vpnreq.rule":                                          "Host(`app.example.org`)",
@@ -477,5 +477,47 @@ func TestEdgeExternalNameServices(t *testing.T) {
 	}
 	if len(svcs) != 2 {
 		t.Errorf("edge Services %v", slices.Sorted(mapKeys(svcs)))
+	}
+}
+
+// Traefik's default TLS options (contract §5) are an IngressRoute with tls
+// and no tls.options: an IngressRoute's options name is a TLSOption of its
+// own namespace. The old authaware name and a qualified default@file are
+// refused; the named tiers stay @file references.
+func TestDefaultTierHasNoTLSOptions(t *testing.T) {
+	route := func(opt string) (map[string]any, error) {
+		objs, err := IngressObjects("app", EdgeNamespace, ns, map[string]map[string]string{"web": {
+			"traefik.http.routers.app.rule": "Host(`a.example.org`)", "traefik.http.routers.app.tls": "true",
+			"traefik.http.routers.app.tls.options":               opt,
+			"traefik.http.services.app.loadbalancer.server.port": "80"}})
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range objs {
+			j, _ := json.Marshal(o)
+			var m map[string]any
+			json.Unmarshal(j, &m)
+			if m["kind"] == "IngressRoute" {
+				return m["spec"].(map[string]any), nil
+			}
+		}
+		t.Fatalf("%s: no IngressRoute", opt)
+		return nil, nil
+	}
+	spec, err := route("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tls, ok := spec["tls"].(map[string]any); !ok || tls["options"] != nil {
+		t.Fatalf("default: tls %v, want tls without options", spec["tls"])
+	}
+	spec, err = route("public@file")
+	if err != nil || spec["tls"].(map[string]any)["options"].(map[string]any)["name"] != "public@file" {
+		t.Fatalf("public@file: %v %v", spec, err)
+	}
+	for _, bad := range []string{"authaware@file", "default@file", "authaware", "other@file"} {
+		if _, err := route(bad); refusedErr(err) == "" {
+			t.Errorf("%s: %v, want refused", bad, err)
+		}
 	}
 }

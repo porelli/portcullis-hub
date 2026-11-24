@@ -80,15 +80,15 @@ func TestAddDomainNoToken(t *testing.T) {
 	}
 	args := map[string]any{"name": "Team-C.example.net"}
 	el := elicitation(t, e.call(t, "/mcp/admin", "root", "2026-07-28", "add_domain", args, urlElicit), secretFormInputKey)
-	if el["url"] != "https://hub.example.org/#settings/domains?add=team-c.example.net" {
+	if el["url"] != "https://hub.example.org/#settings/network?add=team-c.example.net" {
 		t.Errorf("form url %v", el["url"])
 	}
 	el = elicitation(t, e.call(t, "/mcp/admin", "root", "2026-07-28", "add_domain", map[string]any{"name": "team-c.example.net", "provider": "hetzner"}, urlElicit), secretFormInputKey)
-	if el["url"] != "https://hub.example.org/#settings/domains?add=team-c.example.net&provider=hetzner" {
+	if el["url"] != "https://hub.example.org/#settings/network?add=team-c.example.net&provider=hetzner" {
 		t.Errorf("form url %v", el["url"])
 	}
 	// The text form on 2025-11-25.
-	if txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "add_domain", args, nil)); !strings.Contains(txt, "https://hub.example.org/#settings/domains?add=team-c.example.net") {
+	if txt, _ := resultText(e.call(t, "/mcp/admin", "root", "2025-11-25", "add_domain", args, nil)); !strings.Contains(txt, "https://hub.example.org/#settings/network?add=team-c.example.net") {
 		t.Errorf("text form = %q", txt)
 	}
 	// A token in the arguments: refused, pointing at the form; never forwarded.
@@ -97,7 +97,7 @@ func TestAddDomainNoToken(t *testing.T) {
 		{"name": "team-c.example.net", "credentials": map[string]string{"api_token": dnsToken}},
 	} {
 		txt, isErr := resultText(e.call(t, "/mcp/admin", "root", "2026-07-28", "add_domain", bad, urlElicit))
-		if !isErr || !strings.HasPrefix(txt, textSecretArgs+"https://hub.example.org/#settings/domains?add=team-c.example.net") || strings.Contains(txt, dnsToken) {
+		if !isErr || !strings.HasPrefix(txt, textSecretArgs+"https://hub.example.org/#settings/network?add=team-c.example.net") || strings.Contains(txt, dnsToken) {
 			t.Errorf("token argument = %q %v", txt, isErr)
 		}
 	}
@@ -116,7 +116,7 @@ func TestAddDomainNoToken(t *testing.T) {
 	}
 	// replace_domain_token: its form, then the last recorded replacement.
 	el = elicitation(t, e.call(t, "/mcp/admin", "root", "2026-07-28", "replace_domain_token", map[string]any{"name": "team-c.example.net"}, urlElicit), secretFormInputKey)
-	if el["url"] != "https://hub.example.org/#settings/domains?token=team-c.example.net" {
+	if el["url"] != "https://hub.example.org/#settings/network?token=team-c.example.net" {
 		t.Errorf("token form url %v", el["url"])
 	}
 	if txt, _ := e.accept(t, "replace_domain_token", map[string]any{"name": "team-c.example.net"}); strings.Contains(txt, "last_replaced") {

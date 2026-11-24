@@ -696,12 +696,13 @@ func TestEnvResetDropsEmptyEntry(t *testing.T) {
 }
 
 // mountAppCompose references variables in environment: only
-// (LOG_LEVEL), in environment: and volumes (BOTH_VAR) and outside it
-// (labels, image, privileged, a volume source; user: and a top-level
+// (LOG_LEVEL), in environment: and command (BOTH_VAR) and outside it
+// (labels, image, privileged, working_dir — a volume source is refused
+// outright since ux2, no mount is interpolated; user: and a top-level
 // secrets: block — whose variables Discover limits anyway — are
 // TestComposeVars').
 const mountAppCompose = "services:\n  web:\n    image: \"x:${IMAGE_TAG:-1}\"\n    privileged: ${PRIV:-false}\n" +
-	"    volumes:\n      - ${DATA_DIR:-./data}:/data\n      - \"${BOTH_VAR:-./both}:/both\"\n" +
+	"    working_dir: ${DATA_DIR:-./data}\n    command: [\"${BOTH_VAR:-./both}\"]\n" +
 	"    environment:\n      L: ${LOG_LEVEL}\n      B: ${BOTH_VAR}\n" +
 	"    labels:\n      com.example.note: \"${NOTE_LABEL:-x}\"\n      traefik.http.routers.mountapp.rule: Host(`mountapp.${PORTCULLIS_DOMAIN}`)\n"
 

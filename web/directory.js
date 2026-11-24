@@ -435,13 +435,17 @@
   })();
 
   // ── shared top navigation (window.PortcullisNav) ────────
-  // One bar on the Hub page, on people.<domain> and on its Sign-in page:
-  // Portal (https://<domain>/), Hub (https://hub.<domain>/, administrators
-  // only), People (https://people.<domain>/) and Sign-in
-  // (https://people.<domain>/signin), the current one marked. Every
-  // URL comes from the configured main domain, never the browser's host;
-  // hubURL / peopleURL override the Hub's and People's (the harness's
-  // listeners only).
+  // One bar on the Hub page, on people.<domain> and on its Sign-in page
+  // (group-gate's portal draws the same one, render_site_bar): Portal
+  // (https://<domain>/), Hub (https://hub.<domain>/, administrators only),
+  // People (https://people.<domain>/) and Sign-in
+  // (https://people.<domain>/signin), the current one marked; on the right
+  // "Signed in as <user>" (#who-name, once known) and Sign out — a POST form
+  // (enctype text/plain, no fields) to https://auth.<domain>/oauth2/sign_out
+  // (contract §5 "Sign out"; impersonation.js stops a running
+  // impersonation first). Every URL comes from the configured main domain,
+  // never the browser's host; hubURL / peopleURL override the Hub's and
+  // People's (the harness's listeners only).
   const PortcullisNav = (function () {
     function urls(o) {
       const d = String((o && o.domain) || '');
@@ -450,23 +454,51 @@
         hub: (o && o.hubURL) || 'https://hub.' + d + '/',
         people: (o && o.peopleURL) || 'https://people.' + d + '/',
         signin: ((o && o.peopleURL) || 'https://people.' + d + '/') + 'signin',
+        signOut: 'https://auth.' + d + '/oauth2/sign_out',
       };
     }
     // html: the bar (opts: domain, hubURL, peopleURL, current
-    // hub|people|signin, admin — the Hub link only for administrators).
+    // hub|people|signin, admin — the Hub link only for administrators —,
+    // user — the signed-in username, '' while unknown).
     function html(o) {
       const u = urls(o);
       const links = [['portal', 'Portal', u.portal]];
       if (o && o.admin) links.push(['hub', 'Hub', u.hub]);
       links.push(['people', 'People', u.people]);
       links.push(['signin', 'Sign-in', u.signin]);
+      const user = String((o && o.user) || '');
       return '<nav class="pn-nav" aria-label="Portcullis sites">' + links.map(([k, label, href]) => {
         const cur = o && o.current === k;
         return '<a class="pn-link' + (cur ? ' pn-current' : '') + '" data-site="' + esc(k) + '" href="' + esc(href) + '"' + (cur ? ' aria-current="page"' : '') + '>' + esc(label) + '</a>';
-      }).join('') + '</nav>';
+      }).join('') + '</nav><div class="pn-account">' +
+        (user ? '<span class="pn-user" id="who">Signed in as <strong id="who-name">' + esc(user) + '</strong></span>' : '') +
+        '<form class="pn-signout" method="post" action="' + esc(u.signOut) + '" enctype="text/plain" data-pn-signout="">' +
+        '<button type="submit" class="pn-signout-btn" id="pn-sign-out">Sign out</button></form></div>';
     }
     function render(el, o) { if (el) el.innerHTML = html(o); }
-    return { urls, html, render };
+    // sendOrigin: the people and Hub listeners answer Referrer-Policy
+    // no-referrer, so a cross-origin POST from their pages says "Origin:
+    // null", which core's sign-out guard refuses (it accepts only the core
+    // pages' exact origins). Right before Sign out submits, the page's
+    // policy becomes strict-origin (a <meta name="referrer">): the POST
+    // carries https://<this host>, the Referer only the origin, never a
+    // path or query. The page leaves at once.
+    function sendOrigin() {
+      if (document.querySelector('meta[name="referrer"][content="strict-origin"]')) return;
+      const m = document.createElement('meta');
+      m.setAttribute('name', 'referrer');
+      m.setAttribute('content', 'strict-origin');
+      (document.head || document.documentElement).appendChild(m);
+    }
+    // Every Sign out form of the bar (capture: before impersonation.js
+    // holds it; a form.submit() it makes later sets the policy itself).
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('submit', e => {
+        const f = e.target;
+        if (f && f.hasAttribute && f.hasAttribute('data-pn-signout')) sendOrigin();
+      }, true);
+    }
+    return { urls, html, render, sendOrigin };
   })();
 
   // ── state ───────────────────────────────────────────────
@@ -1892,7 +1924,7 @@
     return '<a class="pd-a" href="' + esc('https://hub.' + String(options.domain || '') + '/' + frag) + '" target="_blank" rel="noopener noreferrer" title="' +
       esc((title ? title + ' · ' : '') + 'opens the Hub') + '">' + esc(text) + ' <span aria-hidden="true">↗</span></a>';
   }
-  const appFrag = (id, key) => '#app/' + enc(id) + '/settings' + (key ? '/' + enc(key) : '');
+  const appFrag = (id, key) => '#apps/' + enc(id) + '/settings' + (key ? '/' + enc(key) : '');
 
   function groupKind(g) { return g.builtin ? 'built-in' : g.rule ? 'rule-based' : 'manual'; }
   function kindPill(g) {

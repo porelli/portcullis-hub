@@ -55,18 +55,28 @@ type Unit struct {
 	// Created is the creation time (Unix seconds).
 	Created int64
 	// Networks: each network the container is attached to → the names
-	// it answers to there (its aliases and DNS names, deduplicated).
-	Networks map[string][]string
+	// it answers to there (its aliases and DNS names, deduplicated). The
+	// aliases are there only when the list asked for them (Filter.Names):
+	// Docker's list summary has none. NamesUnread: asked for, but they
+	// couldn't be read (an inspect failed) — unverified, never clean.
+	Networks    map[string][]string
+	NamesUnread bool
 }
 
 // Filter selects units, volumes or events. The zero Filter selects
 // everything the runtime has; All selects every project's units (core's
 // and every instance's); Instance one instance's (and Service one service
 // of it); Helper the Hub's helpers.
+//
+// Names asks for each live unit's network names (aliases and DNS names)
+// from its inspect (the alias checks only: exposure drift and the
+// switch-on check); a unit whose names can't be read is NamesUnread. A
+// backend that lists them anyway (or has none) may ignore it.
 type Filter struct {
 	Instance, Service string
 	Helper            bool
 	All               bool
+	Names             bool
 }
 
 // State is a container's run state: running, and its healthcheck status

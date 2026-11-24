@@ -248,6 +248,7 @@ func TestChatRules(t *testing.T) {
 		{"AI name in a default", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      KEY: ${FOO:-PORTCULLIS_AI_PROVIDER_X_KEY}"}, "a default or alternate value"},
 		{"AI name in an alternate", chat, nil, []string{"OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}", "OPENID_CLIENT_ID: ${PORTCULLIS_OIDC_CLIENT_ID:-chat}\n      KEY: ${FOO:+portcullis_ai_x}"}, "a default or alternate value"},
 		{"ai-providers file", "companion", []string{"hooks:\n", "files:\n  - {name: ai-providers, service: app, mount: /data}\nhooks:\n"}, nil, "ai-providers"},
+		{"mail-admin file", "companion", []string{"hooks:\n", "files:\n  - {name: mail-admin, service: app, mount: /data}\nhooks:\n"}, nil, "reserved for the mail admin view"},
 	})
 }
 

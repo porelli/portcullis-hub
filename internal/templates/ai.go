@@ -162,6 +162,9 @@ const (
 	AIClientPrefix = "portcullis-ai-"
 	// AIProvidersFile is the reserved data file of an AI page.
 	AIProvidersFile = "ai-providers"
+	// MailAdminFile is the reserved data file directory of the mail admin
+	// view's ticket key (<appfiles>/<id>/mail-admin/, contract §19.13).
+	MailAdminFile = "mail-admin"
 	// DefaultMCPPath is path's and public_path's default.
 	DefaultMCPPath = "/mcp"
 	// MaxAliasLen: the alias is one DNS label.
@@ -284,6 +287,9 @@ func ValidateAI(t *Template, compose []byte, routes *Routes) error {
 	for _, f := range m.Files {
 		if f.Name == AIProvidersFile {
 			return fmt.Errorf("files[%s]: the data file name %s is reserved for the AI page (contract §3.2)", f.Name, AIProvidersFile)
+		}
+		if strings.EqualFold(f.Name, MailAdminFile) {
+			return fmt.Errorf("files[%s]: the data file name %s is reserved for the mail admin view's ticket key (contract §19.13)", f.Name, MailAdminFile)
 		}
 	}
 	core := policy.CoreSubdomains()
