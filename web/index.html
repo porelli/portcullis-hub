@@ -2928,14 +2928,14 @@
         '<button type="button" class="btn btn-secondary btn-sm" data-drift-recheck>Re-check</button></div>';
       if (report.error) html += '<div class="drift-error">Docker unreachable: ' + escapeHtml(report.error) + '</div>';
       for (const d of items) {
-        html += '<div class="drift-item"><a class="drift-id group-link" href="#apps/' + encodeURIComponent(d.id) + '">' + escapeHtml(d.id) + '</a>';
+        html += '<div class="drift-item" data-drift-item="' + escapeHtml(d.id) + '"><a class="drift-id group-link" href="#apps/' + encodeURIComponent(d.id) + '">' + escapeHtml(d.id) + '</a>';
         html += '<span class="drift-msg">' + escapeHtml(d.message) + ' &middot; ' + d.running + '/' + d.total + ' running</span>';
         for (const a of (d.actions || [])) {
           const meta = DRIFT_ACTIONS[a];
           if (!meta) continue;
           html += '<button class="btn btn-sm ' + meta.cls + '" data-drift-id="' + escapeHtml(d.id) + '" data-drift-action="' + escapeHtml(a) + '">' + escapeHtml(meta.label) + '</button>';
         }
-        html += '</div>';
+        html += '<div class="drift-error" data-drift-error hidden></div></div>';
       }
       box.innerHTML = html;
       box.classList.add('visible');
@@ -2950,16 +2950,34 @@
     async function resolveDrift(btn) {
       const id = btn.dataset.driftId, action = btn.dataset.driftAction;
       const meta = DRIFT_ACTIONS[action];
+      const item = document.querySelector('[data-drift-item="' + CSS.escape(id) + '"]');
+      if (!item) return;
+      // Prevent double submit.
+      if (item.dataset.busy) return;
       if (meta.confirm && !confirm(meta.confirm.replace('%s', id))) return;
-      btn.classList.add('loading');
+      // Mark item as busy and disable all buttons in it.
+      item.dataset.busy = '1';
+      const buttons = item.querySelectorAll('[data-drift-action]');
+      const errBox = item.querySelector('[data-drift-error]');
+      buttons.forEach(b => { b.disabled = true; });
+      errBox.hidden = true;
+      errBox.textContent = '';
+      // Show busy state on the clicked button.
+      const origText = btn.textContent;
+      const busyText = action === 'apply' ? 'Applying…' : action === 'disable' || action === 'stop' ? 'Disabling…' : meta.label + '…';
+      btn.textContent = busyText;
       try {
         await apiPost('/api/drift/resolve', { id, action });
         showToast(id + ': ' + meta.label.toLowerCase() + ' done', 'success');
         loadDrift();
         refreshInstances();
       } catch (e) {
-        reportError(id, e);
-        btn.classList.remove('loading');
+        // On error: show inline error, re-enable buttons.
+        delete item.dataset.busy;
+        buttons.forEach(b => { b.disabled = false; });
+        btn.textContent = origText;
+        errBox.textContent = e.message || 'Error';
+        errBox.hidden = false;
       }
     }
     loadDrift();
