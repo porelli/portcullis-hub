@@ -63,6 +63,12 @@ func senderUsername(key string) string {
 	return senderAppPrefix + key
 }
 
+// appSenderKey: id may key an app's sender — a template or instance id,
+// never the Hub's own key (defence in depth: ids can't take it).
+func appSenderKey(id string) bool {
+	return id != state.MailSenderHub && templates.ValidID(id) && templates.CheckIDShape(id) == nil
+}
+
 // storedSender is a sender with its password (senderEnv's input).
 type storedSender struct {
 	Username, Address, Password string
@@ -78,7 +84,7 @@ func (h *Hub) senderWantedLocked() map[string]string {
 	out[state.MailSenderHub] = senderHubLabel
 	for _, id := range h.st.Enabled {
 		t := h.findLocked(id)
-		if t == nil || t.Manifest.MailSender == nil || h.kubeOn() {
+		if t == nil || t.Manifest.MailSender == nil || h.kubeOn() || !appSenderKey(id) {
 			continue
 		}
 		if !senderUsernameRe.MatchString(senderUsername(id)) {
@@ -162,7 +168,7 @@ func (h *Hub) voidSendersLocked() bool {
 		log.Printf("mail: voiding the senders' passwords: %v", err)
 	}
 	for _, key := range keys {
-		if key == state.MailSenderHub {
+		if key == state.MailSenderHub || !appSenderKey(key) {
 			continue
 		}
 		if t := h.findLocked(key); t != nil {
@@ -245,6 +251,9 @@ func (h *Hub) dropSenderPasswordsLocked(keys ...string) error {
 // storedSenderLocked is key's sender with its password (nil: no entry,
 // no credential or no password). Caller holds mu.
 func (h *Hub) storedSenderLocked(key string) *storedSender {
+	if key != state.MailSenderHub && !appSenderKey(key) {
+		return nil
+	}
 	e, ok := h.st.MailSenders[key]
 	if !ok || e.CredentialID == "" || h.st.Mail.Provider == nil {
 		return nil
@@ -286,6 +295,10 @@ func senderEnv(key string, s *storedSender, mc mailCoreEnv, label string) map[st
 func (h *Hub) senderEnvForLocked(t *templates.Template) map[string]string {
 	if t == nil || t.Manifest.MailSender == nil || h.kubeOn() {
 		return nil
+	}
+	if !appSenderKey(t.ID) {
+		// Never the Hub's own sender: the five stay empty.
+		return senderEnv("", nil, mailCoreEnv{}, "")
 	}
 	return senderEnv(t.ID, h.storedSenderLocked(t.ID), h.mailCore(), t.Manifest.MailSender.Label)
 }
@@ -394,7 +407,7 @@ func (h *Hub) ensureSenderCredentialWith(ctx context.Context, api MailAPI, key s
 	if err := h.saveStateLocked(); err != nil {
 		log.Printf("mail: saving the sender %s: %v", username, err)
 	}
-	if key != state.MailSenderHub {
+	if key != state.MailSenderHub && appSenderKey(key) {
 		if t := h.findLocked(key); t != nil {
 			if err := h.writeSenderEnvLocked(t); err != nil {
 				log.Printf("mail: writing %s's mail sender variables: %v", key, err)
@@ -470,7 +483,7 @@ func (h *Hub) mailEnsureSenders(ctx context.Context, api MailAPI, todo []string)
 		if err != nil && first == nil {
 			first = err
 		}
-		if changed && key != state.MailSenderHub {
+		if changed && key != state.MailSenderHub && appSenderKey(key) {
 			restart = append(restart, key)
 		}
 	}

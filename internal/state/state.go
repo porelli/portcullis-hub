@@ -326,8 +326,10 @@ type AppState struct {
 	signInMissing bool
 }
 
-// MailSenderHub is Portcullis's own sender's key (MailSenders).
-const MailSenderHub = "hub"
+// MailSenderHub is Portcullis's own sender's key (MailSenders): a name
+// no template or instance id can take (ids start with a letter or digit),
+// so an app's sender can never be, read or overwrite the Hub's.
+const MailSenderHub = ":hub"
 
 // MailSender is one sender's Hub state (§19.14): its Hub-generated v4
 // uuid (kept across syncs, replaced only when the sender is voided) and

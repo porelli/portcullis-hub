@@ -3,6 +3,7 @@ package templates
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -17,6 +18,10 @@ import (
 // InstanceIDRe constrains the ids of instances other than the default one
 // (a DNS label, §11.1).
 var InstanceIDRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
+
+// ReservedIDs may never be a template or instance id: the Hub's own
+// names (its mail sender, §19.14, among them) and core's.
+var ReservedIDs = []string{"hub", "portcullis"}
 
 // ReservedInstancePrefix may not start an instance id (§11.1).
 const ReservedInstancePrefix = "portcullis"
@@ -35,6 +40,9 @@ func CheckIDShape(id string) error {
 		if strings.EqualFold(seg, "portcullis") {
 			return fmt.Errorf("id %q: portcullis may not be a segment of an id (Traefik's automatic names <service>-portcullis-<id> of two instances could collide)", id)
 		}
+	}
+	if slices.Contains(ReservedIDs, strings.ToLower(id)) {
+		return fmt.Errorf("id %q is reserved for core and the Hub", id)
 	}
 	if strings.Contains(id, "--") {
 		return fmt.Errorf("id %q may not contain \"--\": it separates an instance from its objects' names (<instance>--<object> on Kubernetes), so another instance's names could equal this one's", id)

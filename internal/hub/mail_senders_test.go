@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -405,5 +406,58 @@ func TestSendHubMailUnwired(t *testing.T) {
 	f.h.mu.Unlock()
 	if err := f.h.SendHubMail(context.Background(), "alice@example.org", "x", "y"); err != ErrNoHubSender {
 		t.Fatalf("unwired: %v", err)
+	}
+}
+
+// The Hub's own sender is never an app's (security review): its key is
+// no id, an id "hub" is refused, and nothing an app's id reaches reads or
+// writes it.
+func TestSenderHubKeyNotAnApp(t *testing.T) {
+	f := newSenderFixture(t)
+	f.sync(t)
+	if err := f.h.CreateInstance("fxapp", "hub", nil); err == nil {
+		t.Fatal("an instance named hub was created")
+	}
+	if templates.ValidID(state.MailSenderHub) || templates.InstanceIDRe.MatchString(state.MailSenderHub) {
+		t.Fatalf("the Hub's sender key %q is a valid id", state.MailSenderHub)
+	}
+	f.h.mu.Lock()
+	hub := f.h.storedSenderLocked(state.MailSenderHub)
+	if hub == nil || hub.Password == "" {
+		f.h.mu.Unlock()
+		t.Fatal("no Hub sender password")
+	}
+	// Defence in depth: an entry and a password under "hub" (a hand
+	// edit) and a view with id "hub" reach none of it.
+	f.h.st.MailSenders["hub"] = f.h.st.MailSenders[state.MailSenderHub]
+	vals, _ := f.h.senderPasswordsLocked()
+	vals["hub"] = hub.Password
+	if err := f.h.writeSenderPasswordsLocked(vals); err != nil {
+		f.h.mu.Unlock()
+		t.Fatal(err)
+	}
+	got := f.h.storedSenderLocked("hub")
+	view := templates.Template{ID: "hub", Manifest: templates.Manifest{MailSender: &templates.MailSender{Label: "X"}}}
+	env := f.h.senderEnvForLocked(&view)
+	_, wanted := f.h.senderWantedLocked()["hub"]
+	f.h.mu.Unlock()
+	if got != nil || wanted {
+		t.Fatalf("the id hub reached a sender: %+v (wanted %v)", got, wanted)
+	}
+	for _, k := range templates.MailSenderVars {
+		if v, ok := env[k]; !ok || v != "" {
+			t.Errorf("%s = %q for the id hub", k, v)
+		}
+	}
+	// No app .env ever holds the Hub sender's password.
+	es, err := os.ReadDir(filepath.Join(f.data, "env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range es {
+		b, _ := os.ReadFile(filepath.Join(f.data, "env", e.Name()))
+		if strings.Contains(string(b), hub.Password) {
+			t.Fatalf("%s holds the Hub sender's password", e.Name())
+		}
 	}
 }

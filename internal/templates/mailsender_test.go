@@ -48,3 +48,21 @@ func TestSenderVarsReserved(t *testing.T) {
 		t.Fatalf("MailSenderVars = %v", MailSenderVars)
 	}
 }
+
+// hub and portcullis are never a template or instance id (the Hub's mail
+// sender key among the reasons, §19.14).
+func TestReservedIDs(t *testing.T) {
+	for _, id := range []string{"hub", "portcullis", "HUB"} {
+		if CheckIDShape(id) == nil {
+			t.Errorf("%s accepted", id)
+		}
+	}
+	for _, id := range []string{"hubble", "my-hub", "hub2"} {
+		if err := CheckIDShape(id); err != nil {
+			t.Errorf("%s refused: %v", id, err)
+		}
+	}
+	if _, err := build("hub", "src", t.TempDir(), []byte(catHead), []byte(catCompose), "example.org", nil); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("a template named hub: %v", err)
+	}
+}
