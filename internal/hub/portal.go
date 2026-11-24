@@ -105,13 +105,14 @@ func (h *Hub) portalWithLocked(gate *policy.Document) PortalDocument {
 }
 
 // portalAccessGroupLocked is the access_group t's portal entry carries:
-// the LLDAP group group-gate requires ("" = any signed-in person). My
-// apps (MyApps) lists an app by the same check (portalOpensLocked).
-// Caller holds h.mu (read).
+// its access group (instanceGroupsLocked) whenever it has one — also when
+// group-gate doesn't enforce it (auth.group_access false, or the app's
+// own login only, e.g. Firefox Sync's open host), so only its members see
+// the tile, administrators included (contract §10); "" (any signed-in
+// person) only when the manifest has no access group. My apps (MyApps)
+// lists an app by the same group (gateOpenLocked). Display only: what
+// group-gate enforces is the policy file's. Caller holds h.mu (read).
 func (h *Hub) portalAccessGroupLocked(t *templates.Template) string {
-	if !h.accessLocked(t).groupAccess(t) {
-		return ""
-	}
 	users, _ := h.instanceGroupsLocked(t)
 	return users
 }
@@ -151,7 +152,8 @@ func gateDenies(gate *policy.Document, hosts []string) bool {
 // required group they aren't in or whose membership ended (expired:
 // group-gate denies it) — for every routed host. A routed instance with
 // no published host opens nowhere. A router-less instance (no routes,
-// contract §3) opens by its portal access group alone. vpnOnly: some host
+// contract §3) opens by its portal access group alone, and every app
+// needs that group too (portalAccessGroupLocked). vpnOnly: some host
 // is VPN-only (the policy's vpn.hosts): listed, with a badge. Caller
 // holds h.mu (read).
 func (h *Hub) gateOpenLocked(gate *policy.Document, t *templates.Template, m *directory.Membership, user string) (open, vpnOnly bool) {
@@ -163,8 +165,13 @@ func (h *Hub) gateOpenLocked(gate *policy.Document, t *templates.Template, m *di
 		_, in := groups[g]
 		return g == "" || (in && !m.Expired[user][g])
 	}
+	// The portal's group too (portalAccessGroupLocked): an app whose
+	// hosts group-gate leaves open is still listed only for its members.
+	if !member(h.portalAccessGroupLocked(t)) {
+		return false, false
+	}
 	if t.Manifest.Routerless() {
-		return member(h.portalAccessGroupLocked(t)), false
+		return true, false
 	}
 	hosts := h.routedHostsLocked(t)
 	if len(hosts) == 0 || gateDenies(gate, hosts) {

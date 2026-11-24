@@ -185,6 +185,9 @@ func TestHarness(t *testing.T) {
 	extra["nextcloud"] = [2]string{harnessNextcloudManifest, harnessNextcloudCompose}
 	// Settings → Sign-in (sign-in Task 9): an mtls app.
 	extra["vault"] = [2]string{harnessVaultManifest, harnessVaultCompose}
+	// Bypass badges: an open host and public paths.
+	extra["firefox-sync"] = [2]string{harnessSyncManifest, harnessSyncCompose}
+	extra["sharecloud"] = [2]string{harnessShareCloudManifest, harnessShareCloudCompose}
 	hrun := &harnessRunner{}
 	aiDir := t.TempDir()
 	aiRecipient, aiGateData := harnessAIFiles(t, aiDir)
@@ -241,7 +244,7 @@ func TestHarness(t *testing.T) {
 	// The shared navigation's Hub link goes to this Hub listener.
 	e.s.HubURL = "http://" + addr + "/"
 	h := e.s.Hub
-	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea", "guacamole", "nextcloud", "vault") {
+	for _, id := range append(slices.Clone(harnessFixtures), "photos", "samba", "smbfixture", "aiapp", "homeauto", "ai-chat", "plain", "gitea", "guacamole", "nextcloud", "vault", "firefox-sync", "sharecloud") {
 		if h.Template(id) == nil {
 			t.Fatalf("fixture %s not loaded (see the log)", id)
 		}
@@ -278,6 +281,7 @@ func TestHarness(t *testing.T) {
 	hfa := seedConfirmations(t, h, addr, paddr)
 	flaky := seedGroupPages(t, e)
 	seedApps(t, e, eng)
+	seedBypass(t, e)
 	seedUsage(t, e) // the Usage tab: the sampler over the running fixtures
 	seedSignIn(t, e)
 	impID := seedImpersonation(t, e, fa)

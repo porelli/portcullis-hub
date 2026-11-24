@@ -86,8 +86,20 @@ const PortcullisPeople = { groupLink: g => '<a class="group-link">' + escapeHtml
 	}
 	src.WriteString(page[i : i+strings.Index(page[i:], "\n")+1])
 	for _, fn := range []string{"escapeHtml", "statusSummary", "instStatus", "instActionsHtml", "opShowButton", "opCardText", "opWords", "memberCountHtml",
-		"dirGroup", "instLineHtml", "instName", "appName", "namesLine"} {
+		"dirGroup", "instLineHtml", "instName", "appName", "namesLine",
+		"tierWords", "bypassPathText", "bypassLabel", "bypassKey", "bypassBadgesHtml", "bypassDetailsHtml", "toggleBypass"} {
 		src.WriteString(hubFunc(t, page, fn))
+	}
+	for _, decl := range []string{"    const bypassOpen = ", "    const TIER_WORDS = {"} {
+		i := strings.Index(page, decl)
+		if i < 0 {
+			t.Fatalf("the hub index lacks %q", decl)
+		}
+		end := "\n"
+		if strings.HasSuffix(decl, "{") {
+			end = "\n    };\n"
+		}
+		src.WriteString(page[i : i+strings.Index(page[i:], end)+len(end)])
 	}
 	i = strings.Index(page, "    const OP_WORDS = {")
 	src.WriteString(page[i : i+strings.Index(page[i:], "\n    };\n")+len("\n    };\n")])

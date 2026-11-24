@@ -42,9 +42,11 @@ func runNode(t *testing.T, script string) string {
 	}
 	cmd := exec.Command(node, "-")
 	cmd.Stdin = strings.NewReader(script)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("node: %v", err)
+		t.Fatalf("node: %v\n%s", err, stderr.String())
 	}
 	return string(out)
 }

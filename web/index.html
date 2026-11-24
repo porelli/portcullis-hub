@@ -454,6 +454,19 @@
     .inst-line-sub { color: #94a3b8; font-size: 0.8125rem; margin-left: 0.5rem; }
     .inst-line-act { display: flex; gap: 0.5rem; align-items: center; }
     .toggle.toggle-sm { padding: 0.25rem 0.75rem; font-size: 0.8125rem; }
+    /* Bypass badges: what skips Portcullis's normal protection (§11.7 "bypass") */
+    .bypass-badges { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; align-items: center; }
+    button.pill.bypass-badge { cursor: pointer; font: inherit; font-size: 0.6875rem; margin: 0; }
+    button.pill.bypass-badge:hover, button.pill.bypass-badge:focus-visible { background: #f59e0b44; color: #fde68a; outline: none; }
+    button.pill.bypass-badge[aria-expanded="true"] { background: #f59e0b44; color: #fde68a; }
+    .bypass-details { flex-basis: 100%; background: #0f172a; border: 1px solid #f59e0b44; border-radius: 0.5rem; padding: 0.625rem 0.875rem; font-size: 0.8125rem; color: #cbd5e1; }
+    .bypass-details[hidden] { display: none; }
+    .bypass-item + .bypass-item { border-top: 1px solid #1e293b; margin-top: 0.5rem; padding-top: 0.5rem; }
+    .bypass-item h5 { font-size: 0.8125rem; font-weight: 600; color: #fbbf24; margin-bottom: 0.25rem; }
+    .bypass-item dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.125rem 0.75rem; }
+    .bypass-item dt { color: #64748b; }
+    .bypass-item dd code { font-family: 'SF Mono', 'Fira Code', monospace; color: #e2e8f0; }
+    .bypass-item .bypass-note { color: #94a3b8; font-style: italic; }
     .muted { color: #64748b; }
     /* The instance page (one per instance, the default one included) */
     .page-crumbs { color: #64748b; font-size: 0.8125rem; margin-bottom: 0.25rem; }
@@ -3840,6 +3853,77 @@
       if (grp === null) return ' <span class="pill bad">missing</span>';
       return ' (' + (grp.members || []).length + ')';
     }
+    // ── bypass badges (contract §11.7 "bypass"): what an instance skips
+    // of Portcullis's normal protection, from the Hub's own router model
+    // (inst.bypass). A click opens the details: each host and path, its
+    // TLS tier and why. Display only.
+    const bypassOpen = new Set();
+    const TIER_WORDS = {
+      'protected@file': 'protected — a YubiKey certificate required',
+      'protected-any@file': 'protected-any — a certificate required',
+      'default': 'default — a certificate if the browser has one',
+      'public@file': 'public — no certificate asked'
+    };
+    function tierWords(t) {
+      return TIER_WORDS[t] || t || 'unknown';
+    }
+    function bypassPathText(p) {
+      if (p.match === 'exact') return p.path;
+      const base = p.path.replace(/\/+$/, '');
+      return base + '/…' + (p.match === 'static' ? ' (static files)' : '');
+    }
+    // bypassLabel: a badge's plain words.
+    function bypassLabel(b) {
+      const where = b.vpn_only ? 'Open on the VPN' : 'Open to the internet';
+      const paths = b.paths || [];
+      const more = paths.length > 1 ? ' +' + (paths.length - 1) : '';
+      switch (b.kind) {
+        case 'open_host': return where + ': whole host';
+        case 'open_router': return where + ': ' + (paths.length ? bypassPathText(paths[0]) + more : b.rule ? 'router ' + b.router : 'whole host');
+        case 'public_paths': return (paths.length > 1 ? 'Public paths: ' : 'Public path: ') + (paths.length ? bypassPathText(paths[0]) + more : 'none');
+        case 'weak_tls': return 'No certificate asked: public TLS';
+      }
+      return b.kind;
+    }
+    function bypassKey(scope, id) {
+      return scope + ':' + id;
+    }
+    // bypassBadgesHtml: inst's badges (scope "line" on Apps, "page" on its
+    // page), each a button opening the details; "" when nothing is skipped.
+    function bypassBadgesHtml(inst, scope) {
+      const list = inst.bypass || [];
+      if (!list.length) return '';
+      const key = bypassKey(scope, inst.id), open = bypassOpen.has(key);
+      return '<span class="bypass-badges">' + list.map(b => '<button type="button" class="pill warn bypass-badge" data-bypass-toggle="' + escapeHtml(key) + '"' +
+        ' aria-expanded="' + open + '" aria-controls="bypass-' + escapeHtml(key.replace(':', '-')) + '" title="What skips Portcullis sign-in here, and why">' +
+        '⚠ ' + escapeHtml(bypassLabel(b)) + '</button>').join('') + '</span>';
+    }
+    function bypassDetailsHtml(inst, scope) {
+      const list = inst.bypass || [];
+      if (!list.length) return '';
+      const key = bypassKey(scope, inst.id);
+      return '<div class="bypass-details" id="bypass-' + escapeHtml(key.replace(':', '-')) + '" data-bypass-details="' + escapeHtml(key) + '"' + (bypassOpen.has(key) ? '' : ' hidden') + '>' +
+        list.map(b => {
+          const paths = b.paths || [];
+          return '<div class="bypass-item" data-bypass-kind="' + escapeHtml(b.kind) + '"><h5>' + escapeHtml(bypassLabel(b)) + '</h5><dl>' +
+            '<dt>' + ((b.hosts || []).length > 1 ? 'Hosts' : 'Host') + '</dt><dd>' + ((b.hosts || []).length ? b.hosts.map(x => '<code>' + escapeHtml(x) + '</code>').join(', ') : 'none yet') + '</dd>' +
+            '<dt>Paths</dt><dd>' + (paths.length ? paths.map(p => '<code>' + escapeHtml(bypassPathText(p)) + '</code>').join(', ') : b.rule ? 'rule <code>' + escapeHtml(b.rule) + '</code>' : 'the whole host') + '</dd>' +
+            (b.router ? '<dt>Router</dt><dd><code>' + escapeHtml(b.router) + '</code></dd>' : '') +
+            '<dt>TLS tier</dt><dd>' + escapeHtml(tierWords(b.tier)) + '</dd>' +
+            '<dt>Why</dt><dd>' + escapeHtml(b.reason || '') + (b.note ? '<div class="bypass-note">“' + escapeHtml(b.note) + '”</div>' : '') + '</dd>' +
+            '</dl></div>';
+        }).join('') + '</div>';
+    }
+    // toggleBypass: a badge opens or closes its instance's details (every
+    // badge of one card shares them); the open set survives re-renders.
+    function toggleBypass(el) {
+      const key = el.dataset.bypassToggle;
+      if (bypassOpen.has(key)) bypassOpen.delete(key); else bypassOpen.add(key);
+      const open = bypassOpen.has(key);
+      document.querySelectorAll('[data-bypass-toggle="' + CSS.escape(key) + '"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
+      const box = document.querySelector('[data-bypass-details="' + CSS.escape(key) + '"]');
+      if (box) box.hidden = !open;
+    }
     function instLineHtml(i, dup) {
       const st = instStatus(i);
       const hosts = Object.keys(i.hosts || {}).sort().map(r => i.hosts[r]);
@@ -3850,8 +3934,8 @@
       return '<div class="inst-line" data-inst-line="' + escapeHtml(i.id) + '"><span class="status-dot ' + st.dot + '" aria-hidden="true"></span>' +
         '<span class="inst-line-name"><a href="#apps/' + encodeURIComponent(i.id) + '">' + escapeHtml(instName(i)) + '</a>' +
         '<span class="inst-line-sub">' + sub.join(' · ') + '</span></span>' +
-        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' +
-        '<span class="inst-line-act" data-inst-act="' + escapeHtml(i.id) + '">' + instActionsHtml(i.id) + '</span></div>';
+        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' + bypassBadgesHtml(i, 'line') +
+        '<span class="inst-line-act" data-inst-act="' + escapeHtml(i.id) + '">' + instActionsHtml(i.id) + '</span>' + bypassDetailsHtml(i, 'line') + '</div>';
     }
 
     let appsHtml = '';
@@ -3981,8 +4065,8 @@
       const inst = pageCtx.inst = instancesCache.find(i => i.id === pageCtx.id) || pageCtx.inst;
       const st = instStatus(inst);
       const h = '<span class="status-dot ' + st.dot + '" aria-hidden="true"></span><h2>' + escapeHtml(instName(inst)) + '</h2>' +
-        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' +
-        '<span class="page-act" data-inst-act="' + escapeHtml(inst.id) + '">' + instActionsHtml(inst.id) + '</span>';
+        '<span class="pill ' + st.cls + '">' + escapeHtml(st.text) + '</span>' + bypassBadgesHtml(inst, 'page') +
+        '<span class="page-act" data-inst-act="' + escapeHtml(inst.id) + '">' + instActionsHtml(inst.id) + '</span>' + bypassDetailsHtml(inst, 'page');
       if (el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; }
     }
     function showPageTab(k, opt) {
@@ -4893,6 +4977,7 @@
         navInstance(el.dataset.openInstance, 'overview', '');
         return;
       }
+      if ((el = t.closest('[data-bypass-toggle]'))) { toggleBypass(el); return; }
       if (t.closest('[data-all-backups]')) { openAllBackups(); return; }
       if ((el = t.closest('[data-inst-toggle]'))) { toggleInstance(el.dataset.instToggle, el.dataset.enable === '1', el); return; }
       if ((el = t.closest('[data-apps-filter]'))) { e.preventDefault(); appsFilter = el.dataset.appsFilter; goTab('apps'); return; }

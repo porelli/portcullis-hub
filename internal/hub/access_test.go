@@ -211,7 +211,8 @@ func TestNativeLoginSignIn(t *testing.T) {
 	if _, ok := readPolicy(t, f).Groups["plex.example.org"]; ok {
 		t.Error("native-only app still publishes a group")
 	}
-	if p := portalApp(t, f, "plex"); p.AccessGroup != "" {
+	// The portal still shows the tile to the access group only (§10).
+	if p := portalApp(t, f, "plex"); p.AccessGroup != "users_plex" {
 		t.Errorf("portal = %+v", p)
 	}
 	v := view(t, f, "plex")

@@ -47,6 +47,84 @@ const harnessGuacCompose = "services:\n" +
 	"  guacd:\n    image: guacamole/guacd:1.6\n" +
 	"  init:\n    image: guacamole/guacamole:1.6\n    command: [\"/opt/guacamole/bin/initdb.sh\"]\n    restart: \"no\"\n"
 
+// Bypass badges (contract §11.7 "bypass"):
+//
+//   - firefox-sync (ENABLED): method custom, no Portcullis sign-in,
+//     group_access false with an access group — the whole host is open
+//     ("Open to the internet: whole host"), and the portal shows its tile
+//     to users_firefox-sync only.
+//   - sharecloud (ENABLED): forward-auth with a public exception in "all"
+//     mode ("Public paths: /s/… +1") and an ungated /status router.
+const harnessSyncManifest = `name: Firefox Sync
+category: productivity
+icon: "🦊"
+description: "Firefox Sync storage (the bypass fixture: an open host)"
+ai: {unsupported: "test fixture"}
+auth:
+  method: custom
+  sso: false
+  group_access: false
+  access_group: users_firefox-sync
+  notes: |
+    A self-hosted Firefox Sync server; the host is open to the internet, with no Portcullis sign-in, because Firefox can't pass one.
+
+    Only the Mozilla accounts on the allowlist can sync.
+`
+
+const harnessSyncCompose = "services:\n  firefox-sync:\n    image: x\n    labels:\n" +
+	"      traefik.enable: \"true\"\n" +
+	"      traefik.http.routers.firefox-sync.rule: Host(`${PORTCULLIS_HOST_FIREFOX_SYNC:-firefox-sync.portcullis.local}`)\n" +
+	"      traefik.http.routers.firefox-sync.tls.options: public@file\n" +
+	"      traefik.http.routers.firefox-sync.middlewares: rate-limit@file,security-headers@file\n" +
+	"      traefik.http.services.firefox-sync.loadbalancer.server.port: \"8000\"\n"
+
+const harnessShareCloudManifest = `name: Share Cloud
+category: storage
+icon: "📤"
+description: "Files with public share links (the bypass fixture: public paths)"
+ai: {unsupported: "test fixture"}
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_sharecloud
+  public_access:
+    enabled_by_default: true
+    description: Share links people send to outside guests
+    token_pattern: '^[A-Za-z0-9-]{1,32}$'
+    paths:
+      - prefix: "/s/{token}"
+        description: Share page
+      - prefix: /dist
+        description: Assets
+        supporting: true
+`
+
+const harnessShareCloudCompose = "services:\n  cloud:\n    image: nc\n    labels:\n" +
+	"      traefik.enable: \"true\"\n" +
+	"      traefik.http.routers.sharecloud.rule: Host(`${PORTCULLIS_HOST_SHARECLOUD:-sharecloud.portcullis.local}`)\n" +
+	"      traefik.http.routers.sharecloud.middlewares: portcullis-auth@docker,portcullis-groups@docker,security-headers@file\n" +
+	"      traefik.http.routers.sharecloud-status.rule: Host(`${PORTCULLIS_HOST_SHARECLOUD:-sharecloud.portcullis.local}`) && Path(`/status.php`)\n" +
+	"      traefik.http.routers.sharecloud-status.priority: \"100\"\n" +
+	"      traefik.http.services.sharecloud.loadbalancer.server.port: \"80\"\n"
+
+// seedBypass enables firefox-sync and sharecloud (public exception in
+// "all" mode).
+func seedBypass(t *testing.T, e *instEnv) {
+	t.Helper()
+	h := e.s.Hub
+	e.ll.AddGroup("users_firefox-sync", "alice")
+	e.ll.AddGroup("users_sharecloud", "alice", "bob")
+	all := "all"
+	if _, err := h.SaveSettings("sharecloud", hub.SettingsUpdate{PublicMode: &all}, directory.Human("root")); err != nil {
+		t.Fatalf("sharecloud public mode: %v", err)
+	}
+	for _, id := range []string{"firefox-sync", "sharecloud"} {
+		if err := h.Enable(id); err != nil {
+			t.Fatalf("enabling %s: %v", id, err)
+		}
+	}
+}
+
 // seedApps creates and enables the guacamole instances, their running
 // services and job exits, and the bound gitea-ops.
 func seedApps(t *testing.T, e *instEnv, eng *harnessEngine) {

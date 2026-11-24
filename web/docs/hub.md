@@ -91,6 +91,7 @@ The **Apps** page lists every installed app (an app with at least one instance: 
         - First hostname (or "no web page" for router-less apps)
         - Users group name (linking to `people.<domain>`) and member count in parentheses, or "missing" in red when the group doesn't exist
         - Status pill: "running · n of m", "not started yet", "last \<operation\> failed", or the current operation ("Enabling… show progress")
+        - **Bypass badges** (amber, one per way the instance skips part of Portcullis's normal protection): "Open to the internet: whole host" (an app with no Portcullis sign-in, e.g. Firefox Sync), "Open to the internet: /path/…" (a template router without sign-in), "Public path(s): /s/…" (the [public exception](#public-exceptions) is on) or "No certificate asked: public TLS" (the app's sign-in template asks for no certificate while the default one does). "Open on the VPN" replaces "Open to the internet" for a VPN-only instance. Clicking a badge opens the details: each open host and path, its TLS tier and why (the template's notes or the exception's description). The same badges are in the [instance page](#instance-page)'s header. They are display only and come from the routers the Hub renders.
         - **Enable** / **Disable** button
 
 For an instance with duplicate names (two instances of the same app with identical labels), the row shows its id first in muted text to distinguish them.
