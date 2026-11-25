@@ -429,3 +429,37 @@ func TestCodeExhaustedAudited(t *testing.T) {
 		}
 	}
 }
+
+// TestSendLimitsPlusTags (ruling): +tag variants and the bare address
+// share one per-address bucket; each code still goes to the exact address.
+func TestSendLimitsPlusTags(t *testing.T) {
+	c := newCodeFixture(t)
+	ctx := context.Background()
+	c.v.others = map[string]string{"bob": "Shared+one@example.org", "carol": " shared+two@EXAMPLE.org", "dave": "shared@example.org"}
+	for _, u := range []string{"bob", "carol", "dave"} {
+		if _, err := c.h.StartEmailVerification(ctx, u); err != nil {
+			t.Fatalf("%s: %v", u, err)
+		}
+	}
+	c.v.others["erin"] = "shared+three@example.org"
+	if _, err := c.h.StartEmailVerification(ctx, "erin"); statusOf(err) != 429 {
+		t.Errorf("a fourth variant within the hour = %v", err)
+	}
+	c.v.others["fay"] = "other+one@example.org"
+	if _, err := c.h.StartEmailVerification(ctx, "fay"); err != nil {
+		t.Errorf("another address = %v", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	want := []string{"Shared+one@example.org", " shared+two@EXAMPLE.org", "shared@example.org", "other+one@example.org"}
+	for i, m := range c.sent {
+		if i >= len(want) || m.to != want[i] {
+			t.Errorf("mail %d to %q, want %q", i, m.to, want[i])
+		}
+	}
+	for in, out := range map[string]string{"A+b+c@X.org": "a@x.org", "a@x.org": "a@x.org", " +x@y.org ": "@y.org", "noat": "noat"} {
+		if got := rateAddress(in); got != out {
+			t.Errorf("rateAddress(%q) = %q, want %q", in, got, out)
+		}
+	}
+}

@@ -133,6 +133,23 @@ func (ec *emailCodes) macLocked(uuid, email, code string) ([]byte, error) {
 // and "addr:<hex HMAC-SHA256 of the normalised address, keyed by
 // email_code_salt>" — never an address in plain text.
 
+// rateAddress is email as the per-address limit counts it: trimmed,
+// lowercased, a "+…" sub-address dropped from the local part
+// (alice+x@example.org → alice@example.org), so tag variants share one
+// bucket. Only the key: the code still goes to the address as given.
+func rateAddress(email string) string {
+	e := strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(e, "@")
+	if at < 0 {
+		return e
+	}
+	local, domain := e[:at], e[at:]
+	if i := strings.Index(local, "+"); i >= 0 {
+		local = local[:i]
+	}
+	return local + domain
+}
+
 // sendKeys are user's and email's keys in EmailCodeSends. Caller holds mu
 // (write: it may create the salt).
 func (h *Hub) sendKeysLocked(user, email string) ([2]string, error) {
@@ -144,7 +161,7 @@ func (h *Hub) sendKeysLocked(user, email string) ([2]string, error) {
 		h.st.EmailCodeSalt = hex.EncodeToString(b)
 	}
 	m := hmac.New(sha256.New, []byte(h.st.EmailCodeSalt))
-	m.Write([]byte(strings.ToLower(strings.TrimSpace(email))))
+	m.Write([]byte(rateAddress(email)))
 	return [2]string{"user:" + user, "addr:" + hex.EncodeToString(m.Sum(nil))}, nil
 }
 

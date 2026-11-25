@@ -2761,7 +2761,7 @@ Any change of the LLDAP email, through the Hub or LLDAP's own UI, makes it unver
 **Code rules (from Global Constraints):**
 
 - the code is 8 digits, valid **15 min**, with **5** wrong entries per code;
-- sends are limited to **3 per hour** and **10 per day** per person and, the same, per recipient address (trimmed, lowercased), checked together; both counts survive a Hub restart: `state.yaml` `email_code_sends` keeps the last 24 h of send times under `user:<username>` and `addr:<hex HMAC-SHA256 of the address, keyed by email_code_salt>`, never an address in plain text. A send refused with `409` isn't counted; a failed send is;
+- sends are limited to **3 per hour** and **10 per day** per person and, the same, per recipient address (trimmed, lowercased, and a `+…` sub-address dropped from the local part, so `alice+x@example.org`, `alice+y@example.org` and `alice@example.org` share one count — for the count only: the code goes to the address exactly as given), checked together; both counts survive a Hub restart: `state.yaml` `email_code_sends` keeps the last 24 h of send times under `user:<username>` and `addr:<hex HMAC-SHA256 of the address, keyed by email_code_salt>`, never an address in plain text. A send refused with `409` isn't counted; a failed send is;
 - only an HMAC-SHA256 hash of the code is kept, in memory;
 - the code is bound to the email it was sent to.
 
