@@ -581,3 +581,60 @@ func TestMarketplaceOtherCategoryNode(t *testing.T) {
 		}
 	}
 }
+
+// TestMarketplaceResourceWarningsNode: the marketplace card and drawer
+// show RAM and disk warnings when the host has less than the template's
+// min_memory_mib / min_disk_gib; warnings never block Install.
+func TestMarketplaceResourceWarningsNode(t *testing.T) {
+	// nextcloud needs 2048 MiB RAM and 10 GiB disk (mktFakeDOM fixture).
+	// First test: 1.5 GiB RAM, 8 GiB free → both warnings.
+	r := mktEval(t, `
+  const nc = CATALOG.find(t => t.id === 'nextcloud');
+  nc.compat = null;  // Clear compat issue so Install button isn't disabled for that reason.
+  global.apiGet = async u => {
+    if (u === '/api/usage') {
+      return { hosts: { primary: { memory_bytes: 1610612736, disk_free_bytes: 8589934592 } } };
+    }
+    return null;
+  };
+  await M.render(root, { filter: '', open: '' });
+  await M.open('nextcloud');
+  r.low = drawer.html();
+`)
+	h, _ := r["low"].(string)
+	for _, want := range []string{
+		"needs ≥ 2 GiB RAM", "more than this server has (1.5 GiB)",
+		"needs ≥ 10 GiB free disk", "more than this server has free (8 GiB)",
+		`data-install="nextcloud"`,
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("low resources drawer lacks %q", want)
+		}
+	}
+	if strings.Contains(h, `disabled=""`) {
+		t.Error("the Install button is disabled (should stay enabled)")
+	}
+
+	// Second test: 4 GiB RAM, 20 GiB free → no warnings.
+	r = mktEval(t, `
+  const nc = CATALOG.find(t => t.id === 'nextcloud');
+  nc.compat = null;
+  global.apiGet = async u => u === '/api/usage' ? { hosts: { primary: { memory_bytes: 4294967296, disk_free_bytes: 21474836480 } } } : null;
+  await M.render(root, { filter: '', open: '' });
+  await M.open('nextcloud');
+  r.ok = drawer.html();
+`)
+	h, _ = r["ok"].(string)
+	if !strings.Contains(h, "needs ≥ 2 GiB RAM") {
+		t.Error("the RAM line is missing")
+	}
+	if strings.Contains(h, "more than this server has (4 GiB)") {
+		t.Error("the RAM warning pill is shown when it shouldn't be")
+	}
+	if !strings.Contains(h, "needs ≥ 10 GiB free disk") {
+		t.Error("the disk line is missing")
+	}
+	if strings.Contains(h, "more than this server has free (20 GiB)") {
+		t.Error("the disk warning pill is shown when it shouldn't be")
+	}
+}

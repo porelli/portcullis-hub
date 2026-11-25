@@ -43,7 +43,7 @@
   // gen: bumped by render, open and close; an async step whose
   // generation is no longer current is dropped (the admin moved on).
   // listGen: bumped when the catalog's template objects change.
-  let root = null, parts = null, list = [], timer = null, opened = '', hostMem, gen = 0, listGen = 0, drawerSig = '';
+  let root = null, parts = null, list = [], timer = null, opened = '', hostMem, hostDiskFree, gen = 0, listGen = 0, drawerSig = '';
 
   // el(tag, props, ...children): props {class, text, on: {event: fn},
   // value, disabled, hidden, …attributes}; children: nodes or strings.
@@ -384,15 +384,21 @@
   async function loadHostMem() {
     if (hostMem !== undefined) return;
     hostMem = null;
+    hostDiskFree = null;
     try {
       const v = await apiGet('/api/usage');
       const p = v && v.hosts && v.hosts.primary;
       if (p && typeof p.memory_bytes === 'number') hostMem = p.memory_bytes;
+      if (p && typeof p.disk_free_bytes === 'number') hostDiskFree = p.disk_free_bytes;
     } catch (_) { /* no figure: no warning */ }
   }
   function fmtMiB(mib) {
     if (mib < 1024) return mib + ' MiB';
     const g = mib / 1024;
+    return (Number.isInteger(g) ? String(g) : g.toFixed(1)) + ' GiB';
+  }
+  function fmtGiB(bytes) {
+    const g = bytes / (1 << 30);
     return (Number.isInteger(g) ? String(g) : g.toFixed(1)) + ' GiB';
   }
   function capabilities(t) {
@@ -444,7 +450,11 @@
       res.push(el('li', null, 'needs ≥ ' + fmtMiB(r.min_memory_mib) + ' RAM',
         low ? [' ', el('span', { class: 'pill warn', text: 'more than this server has (' + fmtMiB(Math.round(hostMem / 1048576)) + ')' })] : null));
     }
-    if (typeof r.min_disk_gib === 'number') res.push(el('li', { text: 'needs ≥ ' + r.min_disk_gib + ' GiB disk' }));
+    if (typeof r.min_disk_gib === 'number') {
+      const low = typeof hostDiskFree === 'number' && hostDiskFree < r.min_disk_gib * (1 << 30);
+      res.push(el('li', null, 'needs ≥ ' + r.min_disk_gib + ' GiB free disk',
+        low ? [' ', el('span', { class: 'pill warn', text: 'more than this server has free (' + fmtGiB(hostDiskFree) + ')' })] : null));
+    }
     const { c, info } = compatOf(t);
     const shots = (t.screenshot_urls || []).map((u, i) => {
       if (!assetOK(u)) return null;

@@ -391,3 +391,80 @@ process.stdout.write(JSON.stringify([S.setupEditorHtml({key: "team", type: "grou
 		t.Errorf("size editor = %s", l[2])
 	}
 }
+
+// TestSetupResourceWarningsNode: the setup form shows RAM and disk
+// warnings when the host has less than the template's min_memory_mib /
+// min_disk_gib; warnings never block Install.
+func TestSetupResourceWarningsNode(t *testing.T) {
+	page := hubIndex(t)
+	// A template with resources.
+	catalog := `{"nextcloud": {` +
+		`"id": "nextcloud", "source": "portcullis",` +
+		`"manifest": {"name": "Nextcloud", "icon": "☁️", "instances": "multi",` +
+		`"auth": {"method": "native-oidc", "group_access": true, "group_admin": true},` +
+		`"resources": {"min_memory_mib": 4096, "min_disk_gib": 18}}}}`
+
+	// Low resources: 2 GiB RAM, 12 GiB free disk.
+	out := setupFormWithResources(t, page, catalog, 2<<30, 12<<30)
+	t.Logf("Setup form HTML length: %d", len(out))
+	t.Logf("Has 'This app needs': %v", strings.Contains(out, "This app needs"))
+	t.Logf("Has 'Start button': %v", strings.Contains(out, "data-setup-go"))
+	if !strings.Contains(out, "This app needs about 4 GiB of RAM; this server has 2 GiB") {
+		t.Error("the RAM warning is missing")
+	}
+	if !strings.Contains(out, "It may not start or may slow other apps.") {
+		t.Error("the RAM warning detail is missing")
+	}
+	if !strings.Contains(out, "This app needs about 18 GiB of free disk; this server has 12 GiB free.") {
+		t.Error("the disk warning is missing")
+	}
+	if !strings.Contains(out, `data-setup-go="start"`) {
+		t.Error("the Start button is missing")
+	}
+	if strings.Contains(out, "disabled") {
+		t.Error("the Start button is disabled (should stay enabled)")
+	}
+
+	// OK resources: 8 GiB RAM, 40 GiB free.
+	out = setupFormWithResources(t, page, catalog, 8<<30, 40<<30)
+	if strings.Contains(out, "This app needs about 4 GiB of RAM; this server has 8 GiB") {
+		t.Error("the RAM warning is shown when it shouldn't be")
+	}
+	if strings.Contains(out, "This app needs about 18 GiB of free disk; this server has 40 GiB free") {
+		t.Error("the disk warning is shown when it shouldn't be")
+	}
+}
+
+// setupFormWithResources renders the setup form with given host resources.
+func setupFormWithResources(t *testing.T, page, catalog string, memBytes, diskFreeBytes int64) string {
+	t.Helper()
+	src := fmt.Sprintf(`
+let catalogCache = JSON.parse(%s);
+// hostMem and hostDiskFree need to be accessible to setupFormHtml
+let hostMem = %d;
+let hostDiskFree = %d;
+`, jsonQ(catalog), memBytes, diskFreeBytes)
+	var sb strings.Builder
+	sb.WriteString(src)
+	// Add stub for PortcullisSettings.setupEditorHtml
+	sb.WriteString(`const PortcullisSettings = { setupEditorHtml: o => '<span data-ed data-key="' + (o.key || '') + '"></span>' };` + "\n")
+	for _, fn := range []string{"escapeHtml", "appName", "templateLabel", "modalHead", "setupGroupNames", "setupDerivedText", "setupFormHtml"} {
+		sb.WriteString(hubFunc(t, page, fn))
+	}
+	sb.WriteString(`
+try {
+  const ctx = { tid: 'nextcloud', first: true, access: true, admin: true, setup: [] };
+  const h = setupFormHtml(ctx);
+  process.stdout.write(h);
+} catch (e) {
+  process.stderr.write('Error: ' + String(e && e.stack || e));
+  process.exit(1);
+}
+`)
+	return runNode(t, sb.String())
+}
+
+func jsonQ(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}

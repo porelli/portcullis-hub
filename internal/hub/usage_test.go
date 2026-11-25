@@ -670,3 +670,43 @@ func TestUsageFailedStatsKeepsGroupLimit(t *testing.T) {
 		t.Errorf("figures %v partial %v", g.Totals.MemBytes, g.Partial)
 	}
 }
+
+// TestUsageHostDiskFree: a cached disk with 12 GiB free →
+// disk_free_bytes == 12<<30; no cache → null.
+func TestUsageHostDiskFree(t *testing.T) {
+	e := newUsageEnv(t)
+
+	// No cache: disk_free_bytes is null.
+	v := e.h.UsageOverview("last")
+	h := v.Hosts["primary"]
+	if h.DiskFreeBytes != nil {
+		t.Errorf("no cache: disk_free_bytes = %v, want nil", h.DiskFreeBytes)
+	}
+
+	// Cache with 12 GiB free on docker_data disk.
+	sf := storageFile{
+		Version: storageCacheVersion,
+		LastRun: &usageT0,
+		Entries: map[string]storageEntry{
+			"volume:test": {
+				Kind:       "volume",
+				Target:     "test",
+				MeasuredAt: usageT0,
+				Dev:        2049,     // some device
+				Free:       12 << 30, // 12 GiB
+				Total:      100 << 30,
+			},
+		},
+	}
+	e.h.usage.storeMu.Lock()
+	e.h.usage.store = &sf
+	e.h.usage.storeMu.Unlock()
+
+	v = e.h.UsageOverview("last")
+	h = v.Hosts["primary"]
+	if h.DiskFreeBytes == nil {
+		t.Errorf("with cache: disk_free_bytes = nil, want 12<<30")
+	} else if *h.DiskFreeBytes != 12<<30 {
+		t.Errorf("with cache: disk_free_bytes = %d, want %d", *h.DiskFreeBytes, 12<<30)
+	}
+}

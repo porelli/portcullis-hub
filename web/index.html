@@ -4490,6 +4490,18 @@
         }
         h += '</div>';
       }
+      // Resource warnings (contract §11.7): warn if the template needs more
+      // RAM or free disk than the host has; warnings never block.
+      const r = (catalogCache[ctx.tid] && catalogCache[ctx.tid].manifest && catalogCache[ctx.tid].manifest.resources) || {};
+      if (typeof r.min_memory_mib === 'number' && typeof hostMem === 'number' && hostMem < r.min_memory_mib * 1048576) {
+        const hostGiB = (hostMem / (1 << 30)).toFixed(hostMem % (1 << 30) === 0 ? 0 : 1);
+        const needGiB = (r.min_memory_mib / 1024).toFixed(r.min_memory_mib % 1024 === 0 ? 0 : 1);
+        h += '<div class="inst-section"><div class="setup-warn">This app needs about ' + needGiB + ' GiB of RAM; this server has ' + hostGiB + ' GiB. It may not start or may slow other apps.</div></div>';
+      }
+      if (typeof r.min_disk_gib === 'number' && typeof hostDiskFree === 'number' && hostDiskFree < r.min_disk_gib * (1 << 30)) {
+        const hostGiB = (hostDiskFree / (1 << 30)).toFixed(hostDiskFree % (1 << 30) === 0 ? 0 : 1);
+        h += '<div class="inst-section"><div class="setup-warn">This app needs about ' + r.min_disk_gib + ' GiB of free disk; this server has ' + hostGiB + ' GiB free.</div></div>';
+      }
       return h + err('general') +
         '<div class="op-modal-actions"><button type="button" class="btn btn-primary btn-sm" data-setup-go="start">Start</button>' +
         '<button type="button" class="btn btn-secondary btn-sm" data-setup-go="save">Save without starting</button>' +

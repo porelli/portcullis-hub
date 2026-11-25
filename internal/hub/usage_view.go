@@ -41,14 +41,15 @@ type UsageEngine struct {
 // (the engine's /info) and its host-wide figures from procfs (§6 "Host
 // figures"); every figure nil when not measured, Why the reason.
 type UsageHost struct {
-	Name         string   `json:"name"`
-	CPUs         *int     `json:"cpus"`
-	MemoryBytes  *int64   `json:"memory_bytes"`
-	CPUUsedCores *float64 `json:"cpu_used_cores"`
-	MemUsedBytes *int64   `json:"mem_used_bytes"`
-	BlkReadBps   *float64 `json:"blk_read_bps"`
-	BlkWriteBps  *float64 `json:"blk_write_bps"`
-	Why          string   `json:"why,omitempty"`
+	Name          string   `json:"name"`
+	CPUs          *int     `json:"cpus"`
+	MemoryBytes   *int64   `json:"memory_bytes"`
+	DiskFreeBytes *int64   `json:"disk_free_bytes"`
+	CPUUsedCores  *float64 `json:"cpu_used_cores"`
+	MemUsedBytes  *int64   `json:"mem_used_bytes"`
+	BlkReadBps    *float64 `json:"blk_read_bps"`
+	BlkWriteBps   *float64 `json:"blk_write_bps"`
+	Why           string   `json:"why,omitempty"`
 }
 
 // UsageGroup is one app instance, core, or an unknown project.
@@ -153,9 +154,11 @@ func (h *Hub) UsageOverview(window string) UsageView {
 		v.SampledAt = &t
 	}
 	v.Stale = s.lastSuccess.IsZero() || s.now().Sub(s.lastSuccess) >= 2*usage.Interval
-	v.Hosts = map[string]UsageHost{servers.PrimaryID: s.primaryHostLocked(v.Engine.Runtime, since)}
+	primaryDiskFree := h.cachedDiskFreeBytes("")
+	v.Hosts = map[string]UsageHost{servers.PrimaryID: s.primaryHostLocked(v.Engine.Runtime, since, primaryDiskFree)}
 	for id, w := range s.workers {
-		v.Hosts[id] = w.hostLocked(since)
+		workerDiskFree := h.cachedDiskFreeBytes(id)
+		v.Hosts[id] = w.hostLocked(since, workerDiskFree)
 	}
 	// byGroup: "<server>\x00<group>\x00<kind>" (the primary's server "").
 	byGroup := map[string][]*usageCont{}
@@ -229,7 +232,7 @@ func (s *usageState) appGroupLocked(inst usageInst, cs []*usageCont, since time.
 // /v1/info) and the newest host point (since: the mean of the points at
 // or after it); every figure nil with the reason when not measured.
 // Caller holds s.mu (read).
-func (w *usageWorker) hostLocked(since time.Time) UsageHost {
+func (w *usageWorker) hostLocked(since time.Time, diskFree int64) UsageHost {
 	h := UsageHost{Name: w.name}
 	if w.hostWhy != "" {
 		h.Why = w.hostWhy
@@ -242,6 +245,10 @@ func (w *usageWorker) hostLocked(since time.Time) UsageHost {
 	if w.mem > 0 {
 		m := w.mem
 		h.MemoryBytes = &m
+	}
+	// DiskFreeBytes: from the cached docker_data disk's free bytes.
+	if diskFree >= 0 {
+		h.DiskFreeBytes = &diskFree
 	}
 	var hs usage.HostSample
 	if since.IsZero() {
@@ -272,7 +279,7 @@ func hostNullWhy(h UsageHost, ring *usage.HostRing, unread string) string {
 // memory and the newest host point (since non-zero: the mean of the
 // points at or after it, nil points skipped). On Kubernetes every figure
 // is nil. Caller holds s.mu (read).
-func (s *usageState) primaryHostLocked(runtimeKind string, since time.Time) UsageHost {
+func (s *usageState) primaryHostLocked(runtimeKind string, since time.Time, diskFree int64) UsageHost {
 	h := UsageHost{Name: primaryServerName}
 	if runtimeKind == string(runtime.KindKubernetes) {
 		h.Why = usageHostNotMeasuredKube
@@ -285,6 +292,10 @@ func (s *usageState) primaryHostLocked(runtimeKind string, since time.Time) Usag
 	if s.mem > 0 {
 		m := s.mem
 		h.MemoryBytes = &m
+	}
+	// DiskFreeBytes: from the cached docker_data disk's free bytes.
+	if diskFree >= 0 {
+		h.DiskFreeBytes = &diskFree
 	}
 	if s.hostRing != nil {
 		var hs usage.HostSample
@@ -607,4 +618,19 @@ type StorageItem struct {
 	MeasuredAt *time.Time `json:"measured_at"`
 	DurationMS int64      `json:"duration_ms"`
 	Error      string     `json:"error,omitempty"`
+}
+
+// cachedDiskFreeBytes is the docker_data disk's free bytes from the
+// cached storage, for server ("" = the primary). It returns -1 when no
+// docker_data disk is cached.
+func (h *Hub) cachedDiskFreeBytes(server string) int64 {
+	sf := h.storageSnapshot()
+	for _, e := range sf.Entries {
+		// A cached volume entry with matching server and Free > 0 is the
+		// docker_data disk (the engine's data root).
+		if e.Kind == "volume" && e.Server == server && e.Free > 0 {
+			return int64(e.Free)
+		}
+	}
+	return -1
 }
