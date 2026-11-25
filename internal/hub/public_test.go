@@ -489,3 +489,28 @@ func guardPathsOf(e policy.PublicEntry) string {
 	}
 	return strings.Join(out, ",")
 }
+
+// A mixed host (gated and open routers) with an ACTIVE public exception stays
+// default tier (the public exception doesn't weaken it).
+func TestPublicMixedHostStaysDefault(t *testing.T) {
+	f := newCloudFixture(t)
+	ableAdmin(f.h)
+	enableTemplate(t, f, "yubikey-and-certificate")
+	if err := saveApp(t, f, "cloud", SettingsUpdate{SignInTemplate: pickTemplate("yubikey-and-certificate")}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The cloud host has gated routers and an open router (cloud-login), plus
+	// the public exception is ACTIVE (enabled by default). Check its tier.
+	tiers, inst := routerTiers(t, f, "cloud")
+	if inst != policy.TierProtected {
+		t.Fatalf("instance tier = %s, want protected@file", inst)
+	}
+	// All routers on the mixed host get the same tier (default, downgraded from
+	// protected because of the open router).
+	for _, r := range []string{"cloud", "cloud-login"} {
+		if tiers[r] != policy.TierDefault {
+			t.Errorf("router %s: tier %q, want %q (downgraded from instance tier)", r, tiers[r], policy.TierDefault)
+		}
+	}
+}

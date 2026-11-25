@@ -228,3 +228,83 @@ func TestPerHostTierOnKubernetes(t *testing.T) {
 		}
 	}
 }
+
+// A router spanning two hosts pins the host grouping (both hosts get the same
+// tier, the instance tier).
+func TestTierTwoHostRouter(t *testing.T) {
+	f := newBypassFixture(t)
+	ableAdmin(f.h)
+	enableTemplate(t, f, "yubikey-and-certificate")
+	const manifest = `name: Test
+category: productivity
+ai: {unsupported: "test"}
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_test
+`
+	const compose = `services:
+  web:
+    image: x
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.test-web.rule: Host(` + "`web-a.${PORTCULLIS_DOMAIN:-portcullis.local}`) || Host(`web-b.${PORTCULLIS_DOMAIN:-portcullis.local}`)" + `
+      traefik.http.routers.test-web.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.services.test-web.loadbalancer.server.port: "8000"
+`
+	writeFile(t, filepath.Join(f.src, "test", "manifest.yaml"), manifest)
+	writeFile(t, filepath.Join(f.src, "test", "compose.yml"), compose)
+	f.h.Discover()
+	if err := saveApp(t, f, "test", SettingsUpdate{SignInTemplate: pickTemplate("yubikey-and-certificate")}); err != nil {
+		t.Fatal(err)
+	}
+
+	tiers, inst := routerTiers(t, f, "test")
+	if inst != policy.TierProtected {
+		t.Fatalf("instance tier = %s, want protected@file", inst)
+	}
+	// Both hosts get the instance tier.
+	if tiers["test-web"] != policy.TierProtected {
+		t.Errorf("router test-web: tier %q, want %q (the instance tier)", tiers["test-web"], policy.TierProtected)
+	}
+}
+
+// A router gated only through a template chain middleware keeps the instance tier.
+func TestTierChainMiddleware(t *testing.T) {
+	f := newBypassFixture(t)
+	ableAdmin(f.h)
+	enableTemplate(t, f, "yubikey-and-certificate")
+	const manifest = `name: Test
+category: productivity
+ai: {unsupported: "test"}
+auth:
+  method: forward-auth
+  group_access: true
+  access_group: users_test
+`
+	const compose = `services:
+  web:
+    image: x
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.test-web.rule: Host(` + "`web.${PORTCULLIS_DOMAIN:-portcullis.local}`)" + `
+      traefik.http.routers.test-web.middlewares: test-chain@docker
+      traefik.http.middlewares.test-chain.chain.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.services.test-web.loadbalancer.server.port: "8000"
+`
+	writeFile(t, filepath.Join(f.src, "test", "manifest.yaml"), manifest)
+	writeFile(t, filepath.Join(f.src, "test", "compose.yml"), compose)
+	f.h.Discover()
+	if err := saveApp(t, f, "test", SettingsUpdate{SignInTemplate: pickTemplate("yubikey-and-certificate")}); err != nil {
+		t.Fatal(err)
+	}
+
+	tiers, inst := routerTiers(t, f, "test")
+	if inst != policy.TierProtected {
+		t.Fatalf("instance tier = %s, want protected@file", inst)
+	}
+	// The router is gated through a chain middleware, so it keeps the instance tier.
+	if tiers["test-web"] != policy.TierProtected {
+		t.Errorf("router test-web: tier %q, want %q (the instance tier)", tiers["test-web"], policy.TierProtected)
+	}
+}

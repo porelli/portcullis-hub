@@ -228,8 +228,9 @@ type PublicAccessView struct {
 	Published         []string               `json:"published"`
 	Method            string                 `json:"method"`
 	Subdomains        []string               `json:"subdomains"`
-	// PolicyTier is the TLS tier the sign-in template alone gives; TierWhenActive
-	// what all of the app's routers get while the public router exists.
+	// PolicyTier is the instance tier: the TLS tier the sign-in template alone
+	// gives; TierWhenActive is the instance tier: what all of the app's routers
+	// get while the public router exists.
 	PolicyTier     string `json:"policy_tier"`
 	TierWhenActive string `json:"tier_when_active"`
 	// UngatedRouters have no group-gate: with the tier downgraded, nothing
