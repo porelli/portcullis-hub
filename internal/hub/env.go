@@ -74,7 +74,13 @@ func (h *Hub) generateAppEnvLocked(t *templates.Template, m *directory.Membershi
 	for k, v := range h.aiEnvLocked(t) {
 		vars[k] = v
 	}
-	// The mail sender variables (§19.14): derived, never kept.
+	// The mail sender variables (§19.14): derived, never kept (none at
+	// all without mail_sender or on Kubernetes).
+	for k := range vars {
+		if strings.HasPrefix(k, templates.VarMailSenderPrefix) {
+			delete(vars, k)
+		}
+	}
 	sendEnv := h.senderEnvForLocked(t)
 	for k, v := range sendEnv {
 		vars[k] = v
@@ -669,10 +675,6 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 			delete(want, k)
 		}
 	}
-	// The mail sender variables (§19.14), single-quoted like the options.
-	for k, v := range h.senderEnvForLocked(t) {
-		opts[k] = v
-	}
 	for k, v := range opts {
 		if c, ok := cur[k]; ok && strings.TrimPrefix(envLine(k, v, true), k+"=") == c {
 			delete(opts, k)
@@ -682,6 +684,11 @@ func (h *Hub) refreshInstanceEnvLocked(t *templates.Template, m *directory.Membe
 		return err
 	}
 	if err := setEnvVars(path, opts, true); err != nil {
+		return err
+	}
+	// The mail sender variables (§19.14): exactly senderEnvForLocked's
+	// (single-quoted); every other PORTCULLIS_MAIL_SENDER_* line dropped.
+	if err := rewriteEnvPrefix(path, templates.VarMailSenderPrefix, h.senderEnvForLocked(t)); err != nil {
 		return err
 	}
 	// The model provider variables of the instance's own selection (a

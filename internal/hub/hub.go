@@ -466,6 +466,9 @@ type Hub struct {
 	mailPollEvery time.Duration
 	// mailVoidKick wakes RunMailVoidRetry (kickMailVoid).
 	mailVoidKick chan struct{}
+	// mailSenderSig: the enabled mail_sender instances at the last
+	// rebuild (kickMailSendersLocked).
+	mailSenderSig string
 	// hubMailDial: SendHubMail's dialer (tests; nil = the default).
 	hubMailDial hubMailDialer
 	// mailSlotOp serialises every mail wire, unwire, switch and

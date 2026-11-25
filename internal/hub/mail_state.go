@@ -22,6 +22,10 @@ const MailUsersGroup = "mail_users"
 // service account isn't in the Membership at all).
 const mailNeverAccount = "admin"
 
+// mailSenderUserPrefix starts every mail sender's username (§19.14):
+// never a person's mailbox.
+const mailSenderUserPrefix = "portcullis-"
+
 // localPartRe: a group name usable as a list's local part.
 var localPartRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$`)
 
@@ -167,6 +171,10 @@ func BuildMailState(in MailBuildInput) (*mailprovider.MailState, []string) {
 			continue
 		case reserved(u) || !lldap.ValidUsername(u):
 			note("mail: the username %s is reserved for mail: left out of mail", u)
+			continue
+		case strings.HasPrefix(u, mailSenderUserPrefix):
+			// portcullis-* are the mail senders' (§19.14): a sender wins.
+			note("mail: the username %s is reserved for the mail senders: left out of mail", u)
 			continue
 		}
 		addrs := []string{u + "@" + primary}

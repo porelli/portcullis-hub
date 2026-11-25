@@ -24,23 +24,24 @@ const MailSenderLabelMax = 64
 // The five variables the Hub writes into a sender instance's .env
 // (§19.14): all empty while no provider is wired or mail is off.
 const (
-	varMailSenderPrefix   = "PORTCULLIS_MAIL_SENDER_"
-	VarMailSenderHost     = varMailSenderPrefix + "HOST"
-	VarMailSenderPort     = varMailSenderPrefix + "PORT"
-	VarMailSenderUser     = varMailSenderPrefix + "USER"
-	VarMailSenderPassword = varMailSenderPrefix + "PASSWORD"
-	VarMailSenderFrom     = varMailSenderPrefix + "FROM"
+	VarMailSenderPrefix   = "PORTCULLIS_MAIL_SENDER_"
+	VarMailSenderHost     = VarMailSenderPrefix + "HOST"
+	VarMailSenderPort     = VarMailSenderPrefix + "PORT"
+	VarMailSenderUser     = VarMailSenderPrefix + "USER"
+	VarMailSenderPassword = VarMailSenderPrefix + "PASSWORD"
+	VarMailSenderFrom     = VarMailSenderPrefix + "FROM"
 )
 
 // MailSenderVars are the five, in the contract's order.
 var MailSenderVars = []string{VarMailSenderHost, VarMailSenderPort, VarMailSenderUser, VarMailSenderPassword, VarMailSenderFrom}
 
 // MailSenderLabelProblem is why label can't be a sender label ("" = it
-// can).
+// can): one line of 1–64 characters without ' or \ (FROM is
+// single-quoted in the .env, and an RFC 5322 name-addr escapes \).
 func MailSenderLabelProblem(label string) string {
 	n := utf8.RuneCountInString(label)
-	if n < 1 || n > MailSenderLabelMax || HasHiddenText(label) || strings.ContainsAny(label, "\r\n\t") {
-		return fmt.Sprintf("mail_sender.label must be one line of 1–%d characters", MailSenderLabelMax)
+	if n < 1 || n > MailSenderLabelMax || HasHiddenText(label) || strings.ContainsAny(label, "\r\n\t'\\") {
+		return fmt.Sprintf("mail_sender.label must be one line of 1–%d characters without ' or \\", MailSenderLabelMax)
 	}
 	return ""
 }

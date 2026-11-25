@@ -107,7 +107,7 @@ func ReservedVar(k string) bool {
 		return true
 	}
 	return strings.HasPrefix(k, varHostPrefix) || strings.HasPrefix(k, varClientIDPrefix) || strings.HasPrefix(k, varFolderPrefix) ||
-		strings.HasPrefix(k, varAIPrefix) || strings.HasPrefix(k, varMailSenderPrefix)
+		strings.HasPrefix(k, varAIPrefix) || strings.HasPrefix(k, VarMailSenderPrefix)
 }
 
 // domainUseRe matches a {{DOMAIN}} with the host characters before it

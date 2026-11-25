@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	netmail "net/mail"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"github.com/portcullis/hub/internal/doctor"
 	"github.com/portcullis/hub/internal/mailprovider"
 	"github.com/portcullis/hub/internal/mailprovider/mailprovidertest"
+	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -155,7 +157,7 @@ func TestSenderEnvWired(t *testing.T) {
 		templates.VarMailSenderPort:     "587",
 		templates.VarMailSenderUser:     "portcullis-app-fxapp@example.org",
 		templates.VarMailSenderPassword: secret,
-		templates.VarMailSenderFrom:     "Firefox accounts <portcullis-app-fxapp@example.org>",
+		templates.VarMailSenderFrom:     `"Firefox accounts" <portcullis-app-fxapp@example.org>`,
 	}
 	for k, v := range want {
 		if env[k] != v || v == "" {
@@ -368,8 +370,8 @@ func TestSenderNoMailboxLeak(t *testing.T) {
 	if rows := f.h.MailPasswords("portcullis-app-fxapp", senderEntry(f, "fxapp").UUID); len(rows) != 0 {
 		t.Fatalf("a sender has mail password rows: %+v", rows)
 	}
-	// A person whose username is a sender's keeps their mailbox; the
-	// sender is left out (the provider would refuse the document).
+	// portcullis-* usernames are the senders': a person created with one
+	// (straight in LLDAP) gets no mailbox, and the sender stays.
 	in := mailInput(mailMembership())
 	in.Membership.Users["portcullis-hub-mail"] = map[string]int{"mail_users": 1}
 	g := in.Membership.Groups["mail_users"]
@@ -379,8 +381,18 @@ func TestSenderNoMailboxLeak(t *testing.T) {
 	in.Senders = []mailprovider.Sender{{Username: "portcullis-hub-mail", UUID: "1a2b3c4d-5e6f-4a7b-9c0d-1e2f3a4b5c6d"},
 		{Username: "portcullis-app-x", UUID: "12345678-2222-4333-8444-555555555555"}}
 	d, _ := BuildMailState(in)
-	if d == nil || d.Senders == nil || len(*d.Senders) != 0 {
-		t.Fatalf("colliding senders sent: %+v", d.Senders)
+	if d == nil || d.Senders == nil || len(*d.Senders) != 2 || (*d.Senders)[0].Username != "portcullis-hub-mail" {
+		t.Fatalf("senders %+v", d.Senders)
+	}
+	for _, a := range d.Accounts {
+		if a.Username == "portcullis-hub-mail" {
+			t.Fatal("a person named portcullis-hub-mail got a mailbox")
+		}
+	}
+	// A sender colliding with a person's uuid is still left out.
+	in.Senders = []mailprovider.Sender{{Username: "portcullis-app-y", UUID: uuidAlice}}
+	if d, _ = BuildMailState(in); len(*d.Senders) != 0 {
+		t.Fatalf("a sender on alice's uuid: %+v", *d.Senders)
 	}
 	// No sender at all: present and empty, never null.
 	in = mailInput(mailMembership())
@@ -459,5 +471,132 @@ func TestSenderHubKeyNotAnApp(t *testing.T) {
 		if strings.Contains(string(b), hub.Password) {
 			t.Fatalf("%s holds the Hub sender's password", e.Name())
 		}
+	}
+}
+
+// Fix round 1: no sender variable without mail_sender (a template update
+// dropping it removes all five), FROM is an RFC 5322 name-addr, the
+// sender set kicks the mail sync, nothing unwired on Kubernetes, the
+// Hub's own sender only while mail is on.
+func TestSenderEnvDroppedWithMailSender(t *testing.T) {
+	f := newSenderFixture(t)
+	f.sync(t)
+	if senderDotEnv(t, f, "fxapp")[templates.VarMailSenderPassword] == "" {
+		t.Fatal("no password first")
+	}
+	select {
+	case <-f.h.mailKick:
+	default:
+	}
+	writeFile(t, filepath.Join(f.src, "fxapp", "manifest.yaml"), strings.Replace(senderAppManifest, "mail_sender:\n  label: Firefox accounts\n", "", 1))
+	f.h.Discover()
+	if f.h.Template("fxapp").Manifest.MailSender != nil {
+		t.Fatal("the template still has mail_sender")
+	}
+	select {
+	case <-f.h.mailKick:
+	default:
+		t.Fatal("dropping mail_sender didn't kick the mail sync")
+	}
+	f.h.mu.Lock()
+	tp := f.h.findLocked("fxapp")
+	err := f.h.refreshInstanceEnvLocked(tp, nil)
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(f.h.envPath("fxapp"))
+	if strings.Contains(string(b), templates.VarMailSenderPrefix) {
+		t.Fatalf("refresh kept sender variables:\n%s", b)
+	}
+	// A full write keeps none either (an old line put back by hand).
+	f.h.mu.Lock()
+	setEnvVar(f.h.envPath("fxapp"), templates.VarMailSenderPassword, "stale")
+	err = f.h.generateAppEnvLocked(f.h.findLocked("fxapp"), nil)
+	f.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(f.h.envPath("fxapp"))
+	if strings.Contains(string(b), templates.VarMailSenderPrefix) {
+		t.Fatalf("generate kept sender variables:\n%s", b)
+	}
+	// The next document drops the sender.
+	f.sync(t)
+	for _, s := range *f.mc.Last().Senders {
+		if s.Username == "portcullis-app-fxapp" {
+			t.Fatal("the sender stays after mail_sender went")
+		}
+	}
+}
+
+func TestSenderFromNameAddr(t *testing.T) {
+	s := &storedSender{Address: "portcullis-app-x@example.org", Password: "pw"}
+	mc := mailCoreEnv{On: true, Hostname: "mail.example.org"}
+	for _, label := range []string{"Firefox, accounts", `The "best" <app>`, "Café"} {
+		if p := templates.MailSenderLabelProblem(label); p != "" {
+			t.Fatalf("%q refused: %s", label, p)
+		}
+		from := senderEnv("x", s, mc, label)[templates.VarMailSenderFrom]
+		var dec netmail.AddressParser
+		as, err := dec.ParseList(from)
+		if err != nil || len(as) != 1 || as[0].Address != s.Address || as[0].Name != label {
+			t.Errorf("%q: FROM %q parses as %+v (%v)", label, from, as, err)
+		}
+		if _, err := envQuote(from); err != nil {
+			t.Errorf("%q: FROM %q can't be written to an .env: %v", label, from, err)
+		}
+	}
+	for _, label := range []string{"it's", `back\slash`} {
+		if templates.MailSenderLabelProblem(label) == "" {
+			t.Errorf("%q accepted", label)
+		}
+	}
+}
+
+func TestSenderKicksAndGates(t *testing.T) {
+	f := newSenderFixture(t)
+	drain := func() bool {
+		select {
+		case <-f.h.mailKick:
+			return true
+		default:
+			return false
+		}
+	}
+	drain()
+	if err := f.h.Enable("fxoff"); err != nil {
+		t.Fatal(err)
+	}
+	if !drain() {
+		t.Fatal("enabling a sender instance didn't kick the mail sync")
+	}
+	f.h.mu.Lock()
+	f.h.rebuildLocked()
+	f.h.mu.Unlock()
+	if drain() {
+		t.Fatal("an unchanged rebuild kicked the mail sync")
+	}
+	if err := f.h.Disable("fxoff"); err != nil {
+		t.Fatal(err)
+	}
+	if !drain() {
+		t.Fatal("disabling a sender instance didn't kick the mail sync")
+	}
+	// The Hub's own sender only while mail is on.
+	setCoreMail(t, f.fixture, false)
+	f.h.mu.RLock()
+	_, hub := f.h.senderWantedLocked()[state.MailSenderHub]
+	f.h.mu.RUnlock()
+	if hub {
+		t.Fatal("the Hub's sender is wanted with mail off")
+	}
+	// Kubernetes: mail can't be wired, mail_sender_unwired never fires.
+	f.setRuntime(runtime.KindKubernetes)
+	f.h.mu.RLock()
+	got := f.h.mailSendersUnwiredLocked(false)
+	f.h.mu.RUnlock()
+	if len(got) != 0 {
+		t.Fatalf("unwired on Kubernetes: %v", got)
 	}
 }

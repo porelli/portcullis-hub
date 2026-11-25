@@ -27,6 +27,7 @@ func TestSenderLabelValidation(t *testing.T) {
 		"too long":    "mail_sender:\n  label: " + strings.Repeat("é", MailSenderLabelMax+1) + "\n",
 		"newline":     "mail_sender:\n  label: \"two\\nlines\"\n",
 		"tab":         "mail_sender:\n  label: \"a\\tb\"\n",
+		"quote":       "mail_sender:\n  label: \"it's\"\n",
 		"unknown key": "mail_sender:\n  label: X\n  from: x@example.org\n",
 		"not a map":   "mail_sender: yes\n",
 		"null":        "mail_sender: null\n",

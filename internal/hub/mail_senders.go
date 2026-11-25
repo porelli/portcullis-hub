@@ -2,16 +2,18 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
-	"os"
+	netmail "net/mail"
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -81,7 +83,10 @@ func (h *Hub) senderWantedLocked() map[string]string {
 	if h.st.Mail.Provider == nil {
 		return out
 	}
-	out[state.MailSenderHub] = senderHubLabel
+	// The Hub's own sender only while mail is on (§19.14).
+	if h.mailCore().On {
+		out[state.MailSenderHub] = senderHubLabel
+	}
 	for _, id := range h.st.Enabled {
 		t := h.findLocked(id)
 		if t == nil || t.Manifest.MailSender == nil || h.kubeOn() || !appSenderKey(id) {
@@ -93,6 +98,24 @@ func (h *Hub) senderWantedLocked() map[string]string {
 		out[id] = t.Manifest.MailSender.Label
 	}
 	return out
+}
+
+// kickMailSendersLocked triggers a mail sync when the enabled
+// mail_sender instances (or their labels) changed since the last rebuild
+// (an enable, a disable, a delete, a template update adding or dropping
+// mail_sender): their senders are created and removed promptly. Caller
+// holds mu (write).
+func (h *Hub) kickMailSendersLocked() {
+	var b strings.Builder
+	for _, id := range h.st.Enabled {
+		if t := h.findLocked(id); t != nil && t.Manifest.MailSender != nil {
+			b.WriteString(id + "\x00" + t.Manifest.MailSender.Label + "\x00")
+		}
+	}
+	if sig := b.String(); sig != h.mailSenderSig {
+		h.mailSenderSig = sig
+		h.TriggerMailSync()
+	}
 }
 
 // senderLabelLocked is key's label ("" = not a wanted sender).
@@ -285,8 +308,19 @@ func senderEnv(key string, s *storedSender, mc mailCoreEnv, label string) map[st
 	out[templates.VarMailSenderPort] = fmt.Sprint(senderPort)
 	out[templates.VarMailSenderUser] = s.Address
 	out[templates.VarMailSenderPassword] = s.Password
-	out[templates.VarMailSenderFrom] = label + " <" + s.Address + ">"
+	out[templates.VarMailSenderFrom] = senderFrom(label, s.Address)
 	return out
+}
+
+// senderFrom is FROM: an RFC 5322 name-addr, the label quoted (or RFC
+// 2047-encoded) as needed. A label with " would be quoted with \, which
+// the single-quoted .env can't carry: it is RFC 2047-encoded instead
+// (base64), so the value never holds a backslash or a quote.
+func senderFrom(label, addr string) string {
+	if strings.ContainsAny(label, `"\`) {
+		return "=?utf-8?b?" + base64.StdEncoding.EncodeToString([]byte(label)) + "?= <" + addr + ">"
+	}
+	return (&netmail.Address{Name: label, Address: addr}).String()
 }
 
 // senderEnvForLocked is t's five variables (nil: t has no mail_sender,
@@ -307,14 +341,7 @@ func (h *Hub) senderEnvForLocked(t *templates.Template) map[string]string {
 // (single-quoted; a missing .env: nothing, enable writes it whole).
 func (h *Hub) writeSenderEnvLocked(t *templates.Template) error {
 	vars := h.senderEnvForLocked(t)
-	if vars == nil {
-		return nil
-	}
-	path := h.envPath(t.ID)
-	if _, err := os.Stat(path); err != nil {
-		return nil
-	}
-	return setEnvVars(path, vars, true)
+	return rewriteEnvPrefix(h.envPath(t.ID), templates.VarMailSenderPrefix, vars)
 }
 
 // ── credentials ────────────────────────────────────────
@@ -499,7 +526,8 @@ func (h *Hub) mailEnsureSenders(ctx context.Context, api MailAPI, todo []string)
 // mail_sender while no provider is wired or mail is off (doctor
 // mail_sender_unwired), sorted. Caller holds mu.
 func (h *Hub) mailSendersUnwiredLocked(mailOn bool) []string {
-	if mailOn && h.st.Mail.Provider != nil {
+	// Mail can't be wired on Kubernetes (§19.12): nothing to fix there.
+	if (mailOn && h.st.Mail.Provider != nil) || h.kubeOn() {
 		return nil
 	}
 	var out []string
