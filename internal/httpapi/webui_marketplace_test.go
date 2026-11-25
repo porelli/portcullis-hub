@@ -333,7 +333,7 @@ func TestMarketplaceDrawerNode(t *testing.T) {
 		`class="md"><p>The <em>long</em> one.</p>`, "Sign-in notes", `class="md"><p>Sign in <b>with</b> Portcullis.</p>`,
 		"2 settings", "Required: Admin email",
 		"Single sign-on", "Multi-instance", "Runs on the primary server only (is marked placement: primary_only; &lt;b&gt;x&lt;/b&gt;)",
-		"needs ≥ 2 GiB RAM", "more than this server has", "needs ≥ 10 GiB disk",
+		"needs ≥ 2 GiB RAM", "more than this server has", "needs ≥ 10 GiB free disk",
 		"<li>needs a privileged port</li>", "<li>uses host networking</li>", "Rootless: not available",
 		`src="/api/catalog/nextcloud/screenshots/0" alt="The files view"`, "The files view",
 		`data-install="nextcloud"`, `disabled=""`, "Can&#39;t run under rootless Podman", "Install…",
