@@ -468,7 +468,8 @@ func userOps(s *directory.Service, c *directory.Caller, target string) map[strin
 			until := time.Now().Add(time.Hour)
 			return s.SetMemberExpiry(ctx, c, "users_app", target, &until)
 		},
-		"SetDetails": func() error { return s.SetDetails(ctx, c, target, map[string][]string{}) },
+		"SetDetails":        func() error { return s.SetDetails(ctx, c, target, map[string][]string{}) },
+		"MarkEmailVerified": func() error { return s.MarkEmailVerified(ctx, c, target) },
 	}
 }
 
@@ -499,6 +500,10 @@ var nonUserOps = map[string]bool{"Overview": true, "Membership": true, "Privileg
 	// (permSelf); the protected and reserved accounts are refused there
 	// (TestOwnPassword).
 	"SetOwnPassword": true, "RemoveOwnPassword": true,
+	// Verified emails by code (§9.8): the caller's own account only
+	// (permSelf); OwnEmail reads. Both refuse the protected accounts
+	// (checkTarget; TestVerifyOwnEmail).
+	"OwnEmail": true, "VerifyOwnEmail": true,
 	// SSH access (contract §18.12): a group check, read only.
 	"CheckSSHGrantGroup": true}
 

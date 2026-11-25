@@ -94,11 +94,12 @@ func (e *peopleEnv) setup(t *testing.T) {
 }
 
 // peopleAppRoutes are the only app routes of the people listener
-// (contract §5.1, G12): exactly twenty-two, all caller-only — the five My
+// (contract §5.1, G12): exactly twenty-seven, all caller-only — the five My
 // apps and credential routes, the two confirmation routes (Task 14), Task
 // 21's two AI routes, the Sign-in page's ten (sign-in part 2, D25; the
 // passkey rename, polish 1; the authenticator rename, authenticator codes) and
-// the impersonating browser's three (sign-in part 3, D43).
+// the impersonating browser's three (sign-in part 3, D43), the three mail
+// password routes and the two email-verification routes (§9.8).
 var peopleAppRoutes = []string{
 	"GET /api/me/apps",
 	"PUT /api/me/apps/{instance}/values/{key}",
@@ -125,6 +126,8 @@ var peopleAppRoutes = []string{
 	"GET /api/me/mail",
 	"POST /api/me/mail/passwords",
 	"DELETE /api/me/mail/passwords/{id}",
+	"POST /api/me/email/verify",
+	"POST /api/me/email/verify/confirm",
 }
 
 // peopleVPNRoutes are the VPN page's seven routes under /vpn/ and People
@@ -145,8 +148,8 @@ var peopleVPNRoutes = []string{
 // directory API, peopleAppRoutes, /healthz, the page and its assets —
 // compared as sets of the patterns PeopleHandler registers.
 func TestPeopleListenerHasNoAppRoutes(t *testing.T) {
-	if len(peopleAppRoutes) != 25 {
-		t.Errorf("peopleAppRoutes has %d routes, the contract (§5.1) twenty-five", len(peopleAppRoutes))
+	if len(peopleAppRoutes) != 27 {
+		t.Errorf("peopleAppRoutes has %d routes, the contract (§5.1) twenty-seven", len(peopleAppRoutes))
 	}
 	e := newPeopleEnv(t)
 	dir := &recordingMux{ServeMux: http.NewServeMux()}
@@ -347,7 +350,7 @@ func assertNonAdminKeys(t *testing.T, body string) {
 		want string
 	}{
 		{"top", json.RawMessage(body), "admin,available,cycles,fields,groups,invites_available,me,permissions,perms,service_user,users"},
-		{"users[bob] (self)", pick(top.Users, "username", "bob"), "attrs,created,display_name,email,groups,memberships,self,username"},
+		{"users[bob] (self)", pick(top.Users, "username", "bob"), "attrs,created,display_name,email,email_verified,groups,memberships,self,username"},
 		{"groups[eng]", pick(top.Groups, "name", "eng"), "created,exceptions,expiry,members,name,rule,rule_allowed,used_by"},
 		{"fields[0] (department)", pick(top.Fields, "name", "department"), "admin_only,kind,label,multi,name,share_with_apps,values"},
 	} {

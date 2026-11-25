@@ -692,6 +692,11 @@ var peopleNoToolRoutes = func() map[string]string {
 	for _, r := range []string{"GET /api/directory/users/{username}/mail", "PUT /api/directory/users/{username}/mail", "DELETE /api/directory/users/{username}/mail/passwords/{id}"} {
 		m[r] = mailNoToolRoutes[r]
 	}
+	for _, l := range []map[string]string{emailNoToolRoutes, myEmailNoToolRoutes} {
+		for r, why := range l {
+			m[r] = why
+		}
+	}
 	m["POST /api/directory/users/{username}/impersonation/stop"] = "administrators only (403 here for everyone else): the admin MCP has stop_impersonation"
 	// SSH access (contract §15.10, spec §9.12): a person's card and the
 	// delegated grants are the people page's; my_ssh_access and

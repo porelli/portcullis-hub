@@ -322,12 +322,14 @@ type StaleRecord struct {
 
 // UserView is one row of the users table.
 type UserView struct {
-	Username    string        `json:"username"`
-	Email       string        `json:"email"`
-	DisplayName string        `json:"display_name"`
-	Created     string        `json:"created"`
-	Groups      []string      `json:"groups"`
-	Keycloak    *KeycloakView `json:"keycloak,omitempty"` // nil: Keycloak unreachable (or not an admin's view)
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	// EmailVerified: Email is verified (contract §9.8).
+	EmailVerified bool          `json:"email_verified"`
+	DisplayName   string        `json:"display_name"`
+	Created       string        `json:"created"`
+	Groups        []string      `json:"groups"`
+	Keycloak      *KeycloakView `json:"keycloak,omitempty"` // nil: Keycloak unreachable (or not an admin's view)
 	// Protected: "service" (the Hub's account) or "core-admin" (the
 	// bootstrap admin): both read-only here. "" otherwise.
 	Protected string `json:"protected,omitempty"`
@@ -642,6 +644,7 @@ func (s *Service) overview(ctx context.Context, me string, c *Caller) (*Overview
 		}
 		v := UserView{Username: u.ID, Email: u.Email, DisplayName: u.DisplayName, Created: u.CreationDate, Groups: []string{},
 			Protected: s.protection(u.ID), Self: me != "" && strings.EqualFold(me, u.ID), Attrs: map[string][]string{}, Memberships: []UserMembership{}}
+		_, v.EmailVerified = verifiedEmail(cfg, u.UUID, u.Email)
 		for _, g := range u.Groups {
 			v.Groups = append(v.Groups, g.DisplayName)
 			v.Admin = v.Admin || admins[g.DisplayName]
@@ -1486,6 +1489,23 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 				s.auditAlso(c, "group.exception", name, exceptionDetail(handAdds[i]))
 			}
 		}
+		// Set by someone with edit_details: stored verified (§9.8), once
+		// nothing can delete the new user again.
+		if cfg != nil && setsVerified(c, req.Username) {
+			uuid := passwordUUID
+			if uuid == "" {
+				uuid = s.uuidOf(ctx, req.Username)
+			}
+			var err error = &Error{Status: http.StatusServiceUnavailable, Msg: "LLDAP gave no account id"}
+			if uuid != "" {
+				// The run's own cfg: it may be saved again below.
+				setVerified(cfg, uuid, req.Email, "admin:"+c.User)
+				err = s.saveConfig(cfg)
+			}
+			if err != nil {
+				res.Warnings = append(res.Warnings, "recording the email as verified failed (mark it verified on the person's page): "+err.Error())
+			}
+		}
 		graceCleared := false
 		for i, id := range groupIDs {
 			if err := s.LLDAP.AddUserToGroup(ctx, req.Username, id); err != nil {
@@ -1626,7 +1646,15 @@ func (s *Service) UpdateUser(ctx context.Context, c *Caller, username string, em
 				return refuse("email %s is already used by %s", *email, other)
 			}
 		}
-		return s.LLDAP.UpdateUser(ctx, u.ID, email, displayName)
+		if err := s.LLDAP.UpdateUser(ctx, u.ID, email, displayName); err != nil {
+			return err
+		}
+		// Only a change of the email touches its verification (§9.8):
+		// saving the same email never verifies it.
+		if email != nil && normEmail(*email) != normEmail(u.Email) {
+			s.emailChanged(c, u.ID, u.UUID, *email)
+		}
+		return nil
 	})
 }
 

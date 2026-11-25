@@ -35,6 +35,8 @@ func (s *Server) registerDirectory(mux routeMux) {
 	mux.HandleFunc("POST /api/directory/users/{username}/clear-actions", s.handleClearActions)
 	mux.HandleFunc("POST /api/directory/users/{username}/remove-passkeys", s.handleRemovePasskeys)
 	mux.HandleFunc("POST /api/directory/users/{username}/remove-authenticators", s.handleRemoveAuthenticators)
+	// Verified emails: an admin's re-confirmation (§9.8).
+	mux.HandleFunc("POST /api/directory/users/{username}/email/verified", s.handleMarkEmailVerified)
 	// The person's Sign-in routes (§9.7, D32).
 	s.registerSignInHelp(mux)
 	// Signing in as someone else: start and Stop (§9.7, part 3).

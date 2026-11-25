@@ -44,14 +44,16 @@
   async function finish(res) {
     const text = await res.text();
     if (!res.ok) {
-      let msg = text.trim(), column;
+      let msg = text.trim(), column, attemptsLeft;
       try {
         const j = JSON.parse(text);
         if (j && typeof j.error === 'string') { msg = j.error; column = j.column; }
+        if (j && typeof j.attempts_left === 'number') { attemptsLeft = j.attempts_left; msg = 'wrong code'; }
       } catch (_) { /* plain text */ }
       const err = new Error(msg || ('HTTP ' + res.status));
       err.status = res.status;
       err.column = column;
+      err.attemptsLeft = attemptsLeft;
       throw err;
     }
     return text ? JSON.parse(text) : {};
@@ -512,6 +514,7 @@
   let groupPage = null;      // the group whose page is shown (#groups/<name>), or null: the list
   let personPage = null;     // the person whose page is shown (#people/<name>), or null: the People list
   let personNote = null;     // {user, text}: what the invite that created them answered (not applied, warnings)
+  let emailVerify = null;    // {user, sent, expires_at, note}: your own email's code form (§9.8)
   let pendingOpen = null;    // {name, action}: an old #users/<name>[?…] link on people.<domain>, opened after the load
   let gsearch = '';          // the groups list's search
   let pick = { group: null, users: [], reason: '', until: '' }; // a group page's Add people form
@@ -798,6 +801,7 @@
       // (protected 'service': defence in depth, the overview leaves it out)
       if (u.admin && u.protected !== 'service') h += ' <span class="pd-pill info" title="Member of an administrator group">admin</span>';
       if (u.display_name) h += '<div class="pd-muted">' + esc(u.display_name) + '</div>';
+      if (u.email) h += '<div class="pd-muted pd-small">' + esc(u.email) + ' ' + emailBadge(u) + '</div>';
       h += '</td>';
       for (const f of fs) h += '<td>' + (attrText(u, f) ? esc(attrText(u, f)) : '<span class="pd-muted">—</span>') + '</td>';
       h += '<td>' + membershipPills(u) + '</td>';
@@ -882,6 +886,86 @@
     dialogBody().querySelector('#pu-email').focus();
   }
 
+  // ── verified emails (contract §9.8) ─────────────────────
+  // emailBadge: whether u's email is verified ('' without an email).
+  function emailBadge(u) {
+    if (!u || !u.email) return '';
+    return u.email_verified
+      ? '<span class="pd-pill ok" data-email-state="verified" title="Proved with a code sent to it, or set by an administrator">Verified</span>'
+      : '<span class="pd-pill warn" data-email-state="unverified" title="Nobody has proved this address yet">Not verified</span>';
+  }
+  // canMarkVerified: may the caller mark u's email verified (someone
+  // else's, with edit_details; a hint: the API re-checks)?
+  function canMarkVerified(u) {
+    return !!u && !!u.email && !u.email_verified && !u.self && canEdit(u);
+  }
+  // emailVerifyHtml: the person page's email line: the address, its
+  // badge, and on your own unverified email "Verify email" (send) → the
+  // code field (st: emailVerify); "Mark verified" for an editor.
+  function emailVerifyHtml(u, st) {
+    if (!u || !u.email) return '';
+    let h = '<span class="pd-muted">Email</span> <span class="pd-mono">' + esc(u.email) + '</span> ' + emailBadge(u);
+    st = st && st.user === u.username ? st : null;
+    if (u.self && !u.email_verified) {
+      if (st && st.sent) {
+        h += '<div class="pd-inline pd-email-code"><label for="pd-email-code">Code from the email</label>' +
+          '<input type="text" id="pd-email-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}">' +
+          '<button type="button" class="pd-btn primary xs" data-act="email-verify-confirm" data-user="' + esc(u.username) + '">Confirm</button>' +
+          '<button type="button" class="pd-btn secondary xs" data-act="email-verify-send" data-user="' + esc(u.username) + '">Send a new code</button></div>';
+      } else {
+        h += ' <button type="button" class="pd-btn secondary xs" data-act="email-verify-send" data-user="' + esc(u.username) + '">Verify email</button>';
+      }
+      const note = st ? (st.note || (st.sent ? 'We sent a code to ' + u.email + '. It expires at ' + fmtTime(st.expires_at) + '.' : '')) : '';
+      if (note) h += '<div class="pd-muted pd-small" role="status">' + esc(note) + '</div>';
+    }
+    if (canMarkVerified(u)) {
+      h += ' <button type="button" class="pd-btn secondary xs" data-act="email-mark-verified" data-user="' + esc(u.username) + '" title="You have confirmed this address with them">Mark verified</button>';
+    }
+    return h;
+  }
+  // emailCodeOutcome: the code form's state after a failed send or
+  // confirm (prev: the form before).
+  function emailCodeOutcome(prev, user, err) {
+    const sent = !!(prev && prev.user === user && prev.sent);
+    const base = { user, sent, expires_at: prev && prev.expires_at };
+    if (err && err.status === 400 && typeof err.attemptsLeft === 'number') {
+      return err.attemptsLeft > 0
+        ? Object.assign(base, { note: 'Wrong code: ' + err.attemptsLeft + (err.attemptsLeft === 1 ? ' try' : ' tries') + ' left.' })
+        : Object.assign(base, { sent: false, note: 'Wrong code again: this code is used up. Ask for a new one.' });
+    }
+    if (err && err.status === 410) return Object.assign(base, { sent: false, note: errText(err) });
+    return Object.assign(base, { note: errText(err) });
+  }
+  function redrawEmail() {
+    const box = root && root.querySelector('[data-pp-email]');
+    if (box) box.innerHTML = emailVerifyHtml(userByName(box.dataset.ppEmail), emailVerify);
+  }
+  async function sendEmailCode(user) {
+    try {
+      const r = await api('POST', '/api/me/email/verify', {});
+      emailVerify = { user, sent: true, expires_at: r.expires_at, note: '' };
+    } catch (err) {
+      emailVerify = emailCodeOutcome(emailVerify, user, err);
+    }
+    redrawEmail();
+    const el = root.querySelector('#pd-email-code');
+    if (el) el.focus();
+  }
+  async function confirmEmailCode(user) {
+    const el = root.querySelector('#pd-email-code');
+    const code = el ? el.value.trim() : '';
+    if (!/^[0-9]{8}$/.test(code)) { toast('Enter the 8 digits from the email.', 'error'); return; }
+    try {
+      await api('POST', '/api/me/email/verify/confirm', { code });
+      emailVerify = null;
+      toast('Email verified', 'success');
+      await load();
+    } catch (err) {
+      emailVerify = emailCodeOutcome(emailVerify, user, err);
+      redrawEmail();
+    }
+  }
+
   // ── a person's page (#people/<name>) ────────────────────
   // Header (details, Edit details), Groups (each with the group page's
   // row state, linking to it; Add to group… opens a group's page with
@@ -961,7 +1045,7 @@
     // every group refuses it, so it can't use any app.
     if (u.protected === 'core-admin') h += '<div class="pd-warn pd-core-admin" role="note">' + esc(CORE_ADMIN_NOTE) + '</div>';
     h += '<div class="pd-gp-head"><h2 class="pd-gp-name">' + esc(u.display_name || u.username) + '</h2><span class="pd-muted">' +
-      esc(u.username) + (u.email ? ' · ' + esc(u.email) : '') + '</span>';
+      esc(u.username) + '</span>';
     if (u.self) h += '<span class="pd-pill info">you</span>';
     // Defence in depth: the overview never lists the service account
     // (directory hideServiceAccount); kept should one ever reach the page.
@@ -976,6 +1060,7 @@
     if (canEdit(u)) h += ' <button type="button" class="pd-btn secondary xs" data-act="edit-details" data-user="' + esc(u.username) + '">Edit details</button>';
     else if (can('edit_details') && !u.protected) h += ' <span class="pd-muted pd-small">Only an admin can change ' + esc(u.username) + '.</span>';
     h += '</div>';
+    if (u.email) h += '<div class="pd-pp-email" data-pp-email="' + esc(u.username) + '">' + emailVerifyHtml(u, emailVerify) + '</div>';
     if (u.created) h += '<p class="pd-muted pd-small">Since ' + esc(fmtDate(u.created)) + (u.created_by ? ' · account created by ' + esc(u.created_by) : '') + '</p>';
     if (personNote && personNote.user === u.username) h += '<div class="pd-warn" role="status">' + esc(personNote.text) + '</div>';
 
@@ -3166,6 +3251,12 @@
       case 'open-user': return openPerson(user);
       case 'people-list': return userSelectTab('people', true);
       case 'edit-details': return openDetails(user);
+      case 'email-verify-send': return sendEmailCode(user);
+      case 'email-verify-confirm': return confirmEmailCode(user);
+      case 'email-mark-verified': {
+        if (!confirm('Mark ' + user + '\'s email as verified? Apps may trust it to recognise them. Only do this if you have confirmed the address with them.')) return;
+        return act(() => api('POST', '/api/directory/users/' + enc(user) + '/email/verified', {}), user + '\'s email is marked verified');
+      }
       case 'add-to-group': return openAddToGroup(user);
       case 'add-to-group-go': {
         const el = dialogBody().querySelector('#pa-group');

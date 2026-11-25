@@ -42,6 +42,20 @@ var confirmationRoutes = map[string]string{
 // tool (or a noToolRoutes reason) in the change that adds it.
 var pendingToolRoutes = map[string]string{}
 
+// emailNoToolRoutes are the verified-email routes (contract §9.8) with no
+// tool: verifying an email is what email-keyed apps trust, so it stays a
+// person's own act (a code from their mailbox) or an administrator's in
+// the browser, never the AI's.
+var emailNoToolRoutes = map[string]string{
+	"POST /api/directory/users/{username}/email/verified": "marking a person's email verified: on the people page only (apps trust it)",
+}
+
+// myEmailNoToolRoutes are the person's own code routes (people listener).
+var myEmailNoToolRoutes = map[string]string{
+	"POST /api/me/email/verify":         "a code to the person's mailbox: on the people page only",
+	"POST /api/me/email/verify/confirm": "the code from the person's mailbox: never through the AI",
+}
+
 // helpNoToolRoutes are the person's Sign-in routes (both listeners) with
 // no tool (contract §15.10, D33): person_sign_in carries the last 20
 // history entries.
@@ -314,7 +328,8 @@ func TestToolParity(t *testing.T) {
 		_, usageNo := usageNoToolRoutes[r]
 		_, serverNo := serverNoToolRoutes[r]
 		_, catalogNo := catalogNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo || catalogNo
+		_, emailNo := emailNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo || catalogNo || emailNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {
@@ -345,7 +360,7 @@ func TestToolParity(t *testing.T) {
 			t.Errorf("noToolRoutes %s: missing or no reason", r)
 		}
 	}
-	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes, catalogNoToolRoutes} {
+	for _, m := range []map[string]string{noToolRoutes, confirmationRoutes, pendingToolRoutes, helpNoToolRoutes, impersonationPartialTwins, vpnNoToolRoutes, fieldGuardNoToolRoutes, mailNoToolRoutes, sshNoToolRoutes, usageNoToolRoutes, catalogNoToolRoutes, emailNoToolRoutes} {
 		for r := range m {
 			if !routeSet[r] {
 				t.Errorf("listed route %s isn't a Hub-listener route", r)

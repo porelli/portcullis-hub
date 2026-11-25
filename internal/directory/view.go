@@ -38,17 +38,19 @@ type PeopleOverview struct {
 
 // PeopleUser is a user without Keycloak state or recovery commands.
 type PeopleUser struct {
-	Username    string              `json:"username"`
-	Email       string              `json:"email"`
-	DisplayName string              `json:"display_name"`
-	Created     string              `json:"created"`
-	Groups      []string            `json:"groups"`
-	Memberships []UserMembership    `json:"memberships"`
-	CreatedBy   string              `json:"created_by,omitempty"`
-	Protected   string              `json:"protected,omitempty"`
-	Self        bool                `json:"self,omitempty"`
-	Admin       bool                `json:"admin,omitempty"`
-	Attrs       map[string][]string `json:"attrs"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	// EmailVerified: contract §9.8.
+	EmailVerified bool                `json:"email_verified"`
+	DisplayName   string              `json:"display_name"`
+	Created       string              `json:"created"`
+	Groups        []string            `json:"groups"`
+	Memberships   []UserMembership    `json:"memberships"`
+	CreatedBy     string              `json:"created_by,omitempty"`
+	Protected     string              `json:"protected,omitempty"`
+	Self          bool                `json:"self,omitempty"`
+	Admin         bool                `json:"admin,omitempty"`
+	Attrs         map[string][]string `json:"attrs"`
 }
 
 // PeopleGroup is a group as non-admins see it.
@@ -115,7 +117,7 @@ func PeopleViewOf(ov *Overview) *PeopleOverview {
 		if attrs == nil {
 			attrs = map[string][]string{}
 		}
-		out.Users = append(out.Users, PeopleUser{Username: u.Username, Email: u.Email, DisplayName: u.DisplayName, Created: u.Created,
+		out.Users = append(out.Users, PeopleUser{Username: u.Username, Email: u.Email, EmailVerified: u.EmailVerified, DisplayName: u.DisplayName, Created: u.Created,
 			Groups: u.Groups, Memberships: u.Memberships, CreatedBy: u.CreatedBy, Protected: u.Protected, Self: u.Self, Admin: u.Admin, Attrs: attrs})
 	}
 	for _, g := range ov.Groups {

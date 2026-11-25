@@ -561,6 +561,7 @@ func main() {
 		h.SetNodeSigner(nodes)
 	}
 	h.SetOwnPasswords(dir)
+	h.SetEmailVerifier(dir)
 	h.SetSignInHelp(dir)
 	dir.UserDeleted = h.PersonDeleted
 	// Mail (contract §19.5): an admin's removals from mail_users may

@@ -48,6 +48,9 @@ type Membership struct {
 	// excluded; "" = none). Only the gate file's people (identity_headers,
 	// contract §15.4) uses it: identity is the username, never the email.
 	Emails map[string]string
+	// VerifiedEmails: lowercase user → their verified email (contract
+	// §9.8), only while it is their current LLDAP email.
+	VerifiedEmails map[string]string
 	// DisplayNames: lowercase user → LLDAP display name (the service
 	// account excluded; "" = none). Mail's account display names only.
 	DisplayNames map[string]string
@@ -116,7 +119,7 @@ func (s *Service) Membership(ctx context.Context, now time.Time) (*Membership, e
 func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Membership {
 	svc := strings.ToLower(s.serviceUser())
 	m := &Membership{Users: map[string]map[string]int{}, Groups: map[string]MemberGroup{}, Expired: map[string]map[string]bool{}, Privilege: map[string]string{}, UUIDs: map[string]string{},
-		Emails: map[string]string{}, DisplayNames: map[string]string{}, Pending: map[string]map[string]time.Time{},
+		Emails: map[string]string{}, VerifiedEmails: map[string]string{}, DisplayNames: map[string]string{}, Pending: map[string]map[string]time.Time{},
 		Guarding: s.guardingGroups(cfg), GuardedFields: s.guardedFields(cfg), Administrators: map[string]bool{}}
 	for g := range s.adminGroups() {
 		for _, u := range sn.groups[g].Members() {
@@ -130,6 +133,9 @@ func (s *Service) membershipOf(cfg *Config, sn *snapshot, now time.Time) *Member
 			m.Users[id] = map[string]int{}
 			m.UUIDs[id] = u.UUID
 			m.Emails[id] = u.Email
+			if v, ok := verifiedEmail(cfg, u.UUID, u.Email); ok {
+				m.VerifiedEmails[id] = v
+			}
 			m.DisplayNames[id] = u.DisplayName
 		}
 	}

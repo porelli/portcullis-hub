@@ -591,6 +591,12 @@ type Hub struct {
 	// ownPasswords sets and removes a person's own password
 	// (SetOwnPasswords; nil: 503). Guarded by mu.
 	ownPasswords OwnPasswords
+	// emailVerifier is the directory's side of verifying your own email
+	// by code (SetEmailVerifier; nil: 503). Guarded by mu.
+	emailVerifier EmailVerifier
+	// emailCodes: the pending codes and send counts (emailverify.go; its
+	// own leaf lock).
+	emailCodes emailCodes
 	// signInHelp decides who may act on another person's sign-in
 	// (SetSignInHelp; nil: those routes are 503). Guarded by mu.
 	signInHelp SignInHelp

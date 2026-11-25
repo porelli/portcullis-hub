@@ -70,6 +70,9 @@ type Config struct {
 	// token issued before the removal can't use them. Dropped when Until
 	// passes or the membership is granted again.
 	Grace []GraceEntry `yaml:"grace,omitempty"`
+	// EmailVerified: LLDAP uuid → the person's verified email (contract
+	// §9.8; verifiedEmail decides whether it still holds).
+	EmailVerified map[string]EmailVerification `yaml:"email_verified,omitempty"`
 }
 
 // GraceEntry is one removed-on-expiry membership still published.
@@ -157,6 +160,8 @@ func (s *Store) Load() (*Config, error) {
 		CreatedBy   map[string]string          `yaml:"created_by"`
 		Deleted     map[string]time.Time       `yaml:"deleted,omitempty"`
 		Grace       []GraceEntry               `yaml:"grace,omitempty"`
+		// EmailVerified: contract §9.8.
+		EmailVerified map[string]EmailVerification `yaml:"email_verified,omitempty"`
 	}
 
 	var raw rawConfig
@@ -192,6 +197,7 @@ func (s *Store) Load() (*Config, error) {
 	}
 	cfg.Deleted = normDeleted(raw.Deleted)
 	cfg.Grace = normGrace(raw.Grace)
+	cfg.EmailVerified = normVerified(raw.EmailVerified)
 
 	// Parse rules and normalize times
 	for groupName, rawGC := range raw.Groups {
@@ -252,16 +258,19 @@ func (s *Store) Save(cfg *Config) error {
 		CreatedBy   map[string]string          `yaml:"created_by"`
 		Deleted     map[string]time.Time       `yaml:"deleted,omitempty"`
 		Grace       []GraceEntry               `yaml:"grace,omitempty"`
+		// EmailVerified: contract §9.8.
+		EmailVerified map[string]EmailVerification `yaml:"email_verified,omitempty"`
 	}
 
 	raw := rawConfig{
-		Version:     cfg.Version,
-		Fields:      cfg.Fields,
-		Groups:      make(map[string]*rawGroupConfig),
-		Permissions: cfg.Permissions,
-		CreatedBy:   cfg.CreatedBy,
-		Deleted:     normDeleted(cfg.Deleted),
-		Grace:       normGrace(cfg.Grace),
+		Version:       cfg.Version,
+		Fields:        cfg.Fields,
+		Groups:        make(map[string]*rawGroupConfig),
+		Permissions:   cfg.Permissions,
+		CreatedBy:     cfg.CreatedBy,
+		Deleted:       normDeleted(cfg.Deleted),
+		Grace:         normGrace(cfg.Grace),
+		EmailVerified: normVerified(cfg.EmailVerified),
 	}
 
 	// Convert groups and normalize times
@@ -334,6 +343,20 @@ func normDeleted(in map[string]time.Time) map[string]time.Time {
 	out := make(map[string]time.Time, len(in))
 	for user, at := range in {
 		out[strings.ToLower(user)] = at.UTC()
+	}
+	return out
+}
+
+// normVerified returns the verified emails with UTC times (nil when
+// empty, so the key is left out).
+func normVerified(in map[string]EmailVerification) map[string]EmailVerification {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]EmailVerification, len(in))
+	for uuid, v := range in {
+		v.At = v.At.UTC()
+		out[uuid] = v
 	}
 	return out
 }
