@@ -816,7 +816,7 @@ ports:
     service: web
 `
 
-const grafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\n      X: ${CORE_VAR}\n      GF_THEME: ${GF_THEME:-dark}\n    labels:\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-x}`)\n      traefik.http.routers.grafana.entrypoints: websecure\n"
+const grafanaCompose = "services:\n  web:\n    image: grafana\n    environment:\n      X: ${CORE_VAR}\n      GF_THEME: ${GF_THEME:-dark}\n    labels:\n      traefik.http.routers.grafana.rule: Host(`grafana.${PORTCULLIS_DOMAIN:-x}`)\n      traefik.http.routers.grafana.entrypoints: websecure\n      traefik.http.routers.grafana.middlewares: portcullis-auth@docker,portcullis-groups@docker\n"
 
 const otherManifest = `name: Other
 category: misc

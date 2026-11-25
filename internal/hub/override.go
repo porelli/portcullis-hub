@@ -208,7 +208,7 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 	if err != nil {
 		return "", err
 	}
-	serviceRouters, plan, tier, publicLines := rl.routes.Routers, rl.plan, rl.tier, rl.public
+	serviceRouters, plan, publicLines := rl.routes.Routers, rl.plan, rl.public
 
 	// Instances other than the default one replace each labelled service's
 	// labels (compose's !override): the template's, with every Traefik
@@ -423,7 +423,7 @@ func (h *Hub) renderOverrideIn(rv renderView, t *templates.Template, s state.Ins
 		if len(routers) > 0 || public || signIn || mcp || vpnL || mailL {
 			b.WriteString("    labels:\n")
 			for _, r := range routers {
-				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, tier)
+				fmt.Fprintf(&b, "      traefik.http.routers.%s.tls.options: %s\n", r, rl.tierOf(r))
 				if ep, ok := rl.entrypoints[r]; ok {
 					fmt.Fprintf(&b, "      traefik.http.routers.%s.entrypoints: %s\n", r, ep)
 				}
@@ -549,7 +549,7 @@ func hubLabels(rl *routeLabels) (map[string]map[string]string, error) {
 	for svc, routers := range rl.routes.Routers {
 		m := map[string]string{}
 		for _, r := range routers {
-			m["traefik.http.routers."+r+".tls.options"] = rl.tier
+			m["traefik.http.routers."+r+".tls.options"] = rl.tierOf(r)
 			if ep, ok := rl.entrypoints[r]; ok {
 				m["traefik.http.routers."+r+".entrypoints"] = ep
 			}
@@ -637,8 +637,11 @@ func (h *Hub) instanceLabelsLocked(t *templates.Template, rl *routeLabels) (map[
 type routeLabels struct {
 	routes *templates.Routes
 	plan   *templates.PublicPlan // nil without public_access
-	tier   string                // TLS options of every router of the app
-	public []string              // public router + strip middleware lines ("key: value"), on plan.Service
+	tier   string                // the instance's TLS option (policy.Tier; weak_tls, the public and VPN friendly routers)
+	// routerTier: each template router's TLS option, per host
+	// (routerTiersLocked, contract §5 "TLS option per host").
+	routerTier map[string]string
+	public     []string // public router + strip middleware lines ("key: value"), on plan.Service
 	// middlewares are the routers' middleware chains the Hub sets (apps
 	// with auth.native_login only); a router without an entry keeps the
 	// template's. Routers on extra-domain hosts get the template's (or
@@ -708,6 +711,8 @@ func (h *Hub) routeLabelsLocked(t *templates.Template) (*routeLabels, error) {
 			}
 		}
 	}
+	// Before the extra-domain swap (portcullis-auth-ext signs in too).
+	rl.routerTier = h.routerTiersLocked(t, rl)
 	if err := h.extraSignInLocked(t, rl); err != nil {
 		return nil, err
 	}
@@ -835,7 +840,7 @@ func (h *Hub) extraSignInLocked(t *templates.Template, rl *routeLabels) error {
 		k := "traefik.http.routers." + SignInRouterName(t.ID, r) + "."
 		rl.signInLabels[k+"rule"] = rule + " && PathPrefix(`/oauth2/`)"
 		rl.signInLabels[k+"entrypoints"] = EntrypointsBoth
-		rl.signInLabels[k+"tls.options"] = rl.tier
+		rl.signInLabels[k+"tls.options"] = rl.tierOf(r)
 		rl.signInLabels[k+"priority"] = prio
 		rl.signInLabels[k+"service"] = "forward-auth-ext@docker"
 	}
@@ -1020,7 +1025,7 @@ func (h *Hub) mcpRoutersLocked(t *templates.Template, rl *routeLabels) error {
 		k := "traefik.http.routers." + templates.MCPAlias(t.ID, c.Name) + "."
 		rl.mcpLabels[k+"rule"] = "Host(`" + host + "`) && (Path(`" + pp + "`) || Path(`/.well-known/oauth-protected-resource" + pp + "`))"
 		rl.mcpLabels[k+"entrypoints"] = EntrypointsBoth
-		rl.mcpLabels[k+"tls.options"] = rl.tier
+		rl.mcpLabels[k+"tls.options"] = rl.tierOf(c.Router)
 		rl.mcpLabels[k+"priority"] = prio
 		rl.mcpLabels[k+"service"] = "mcp-gate@docker"
 		rl.mcpLabels[k+"middlewares"] = "rate-limit@file,security-headers@file"

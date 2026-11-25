@@ -56,6 +56,19 @@ func newCloudFixture(t *testing.T) *fixture {
 	return f
 }
 
+// newGatedCloudFixture: cloud with its login router signed in too, so
+// its one host keeps the instance tier (contract §5 "TLS option per
+// host": a host with an open router is default whatever the exception).
+func newGatedCloudFixture(t *testing.T) *fixture {
+	t.Helper()
+	f := newCloudFixture(t)
+	gated := strings.Replace(cloudCompose, "cloud-login.priority: \"100\"\n",
+		"cloud-login.priority: \"100\"\n      traefik.http.routers.cloud-login.middlewares: portcullis-auth@docker,portcullis-groups@docker\n", 1)
+	writeFile(t, filepath.Join(f.src, "cloud", "compose.yml"), gated)
+	f.h.Discover()
+	return f
+}
+
 func readOverride(t *testing.T, f *fixture, id string) string {
 	t.Helper()
 	ov, _ := os.ReadFile(filepath.Join(f.data, "overrides", id+".override.yml"))
@@ -77,7 +90,7 @@ func save(t *testing.T, f *fixture, u SettingsUpdate) {
 var priorityRe = regexp.MustCompile(`portcullis-public-cloud\.priority: "(\d+)"`)
 
 func TestPublicListedNoTokensNoRouter(t *testing.T) {
-	f := newCloudFixture(t)
+	f := newGatedCloudFixture(t)
 	enableTemplate(t, f, certOnlyTemplate)
 	save(t, f, SettingsUpdate{SignInTemplate: pickTemplate(certOnlyTemplate)})
 	if err := f.h.Enable("cloud"); err != nil {
@@ -99,7 +112,7 @@ func TestPublicListedNoTokensNoRouter(t *testing.T) {
 }
 
 func TestPublicListedTokens(t *testing.T) {
-	f := newCloudFixture(t)
+	f := newGatedCloudFixture(t)
 	if err := f.h.Enable("cloud"); err != nil {
 		t.Fatal(err)
 	}

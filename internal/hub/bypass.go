@@ -139,7 +139,7 @@ func (h *Hub) bypassLocked(t *templates.Template) []Bypass {
 			if chainSignsIn(chains, mws) {
 				continue
 			}
-			b := Bypass{Kind: BypassOpenRouter, Router: name, Hosts: hostsOf(name), Paths: []BypassPath{}, Tier: rl.tier, VPNOnly: vpnRouter(name),
+			b := Bypass{Kind: BypassOpenRouter, Router: name, Hosts: hostsOf(name), Paths: []BypassPath{}, Tier: rl.tierOf(name), VPNOnly: vpnRouter(name),
 				Reason: "The template's router " + name + " has no Portcullis sign-in in its middlewares.", Note: templateNote(t)}
 			for _, p := range ri.Paths {
 				m := "exact"
