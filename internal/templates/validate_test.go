@@ -160,3 +160,50 @@ func TestKeycloakClientEmailVerifiedClaim(t *testing.T) {
 		}
 	}
 }
+
+func TestHostReasonsValidation(t *testing.T) {
+	base := `name: Test
+category: productivity
+ai: {unsupported: "test"}
+auth:
+  method: custom
+  notes: "Test app"
+hosts:
+  reasons:
+`
+
+	// Valid: a router with a one-line reason ≤ 200 runes.
+	// (Whether the router name is valid is checked later during discovery.)
+	goodReason := "Firefox calls the accounts API in the background, without cookies."
+	doc := base + "    firefox-sync-api: \"" + goodReason + "\"\n"
+	var m Manifest
+	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+		t.Fatalf("valid reason refused: %v", err)
+	}
+	if err := ValidateManifest(&m); err != nil {
+		t.Errorf("valid reason refused by ValidateManifest: %v", err)
+	}
+
+	// Invalid: reason contains newline.
+	doc = base + "    firefox-sync-api: \"Line one\\nLine two\"\n"
+	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if err := ValidateManifest(&m); err == nil {
+		t.Errorf("newline in reason accepted")
+	} else if !strings.Contains(err.Error(), "control") {
+		t.Errorf("wrong error for newline: %v", err)
+	}
+
+	// Invalid: reason over 200 runes.
+	longReason := strings.Repeat("x", 201)
+	doc = base + "    firefox-sync-api: \"" + longReason + "\"\n"
+	if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if err := ValidateManifest(&m); err == nil {
+		t.Errorf("201-rune reason accepted")
+	} else if !strings.Contains(err.Error(), "200") {
+		t.Errorf("wrong error for long reason: %v", err)
+	}
+}

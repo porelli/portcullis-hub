@@ -73,6 +73,17 @@ func templateNote(t *templates.Template) string {
 	return ""
 }
 
+// hostReason returns the per-host reason for router from the template's
+// hosts.reasons map (contract §3), or falls back to templateNote when no
+// reason is set for that router. The reason is rendered escaped in the UI:
+// it comes from the template manifest (trusted input).
+func hostReason(t *templates.Template, router string) string {
+	if reason, ok := t.Manifest.GetReasons()[router]; ok && reason != "" {
+		return reason
+	}
+	return templateNote(t)
+}
+
 // baselineTierLocked is the TLS option the server's default sign-in
 // template gives an app (no public exception): the norm a weak_tls badge
 // compares with. A default that can't be compiled counts as the strictest.
@@ -140,7 +151,7 @@ func (h *Hub) bypassLocked(t *templates.Template) []Bypass {
 				continue
 			}
 			b := Bypass{Kind: BypassOpenRouter, Router: name, Hosts: hostsOf(name), Paths: []BypassPath{}, Tier: rl.tierOf(name), VPNOnly: vpnRouter(name),
-				Reason: "The template's router " + name + " has no Portcullis sign-in in its middlewares.", Note: templateNote(t)}
+				Reason: "The template's router " + name + " has no Portcullis sign-in in its middlewares.", Note: hostReason(t, name)}
 			for _, p := range ri.Paths {
 				m := "exact"
 				if p.Prefix {

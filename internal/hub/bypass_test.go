@@ -202,3 +202,202 @@ func TestPortalUsesAccessGroupWithoutGroupAccess(t *testing.T) {
 		t.Errorf("plex (own login) portal access_group = %q", p.AccessGroup)
 	}
 }
+
+// A router with hosts.reasons shows that reason on its badge.
+func TestBypassHostReason(t *testing.T) {
+	f := newAccessFixture(t)
+	const manifest = `name: Firefox Sync
+category: productivity
+ai: {unsupported: "test"}
+auth:
+  method: forward-auth
+  sso: true
+  group_access: true
+  access_group: users_firefox-sync
+  notes: |
+    First paragraph of notes.
+
+    Second paragraph.
+hosts:
+  reasons:
+    firefox-sync-api: "Firefox calls the accounts API in the background, without cookies."
+`
+	const compose = `services:
+  api:
+    image: x
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.firefox-sync-api.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC_API:-api.portcullis.local}`)" + `
+      traefik.http.routers.firefox-sync-api.tls.options: public@file
+      traefik.http.services.firefox-sync-api.loadbalancer.server.port: "8000"
+  web:
+    image: y
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.firefox-sync-web.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC_WEB:-web.portcullis.local}`)" + `
+      traefik.http.routers.firefox-sync-web.tls.options: public@file
+      traefik.http.services.firefox-sync-web.loadbalancer.server.port: "9000"
+`
+	writeFile(t, filepath.Join(f.src, "firefox-sync", "manifest.yaml"), manifest)
+	writeFile(t, filepath.Join(f.src, "firefox-sync", "compose.yml"), compose)
+	f.h.Discover()
+
+	if err := f.h.Enable("firefox-sync"); err != nil {
+		t.Fatal(err)
+	}
+	bs := bypassOf(t, f, "firefox-sync")
+	if len(bs) != 2 {
+		t.Fatalf("want 2 open_router badges, got %d: %+v", len(bs), bs)
+	}
+
+	// Two routers: api and web. The api router has a reason, web doesn't.
+	var apiNote, webNote string
+	for i := range bs {
+		if bs[i].Kind != BypassOpenRouter {
+			t.Errorf("badge %d: kind = %s, want %s", i, bs[i].Kind, BypassOpenRouter)
+			continue
+		}
+		if bs[i].Router == "firefox-sync-api" {
+			apiNote = bs[i].Note
+		} else if bs[i].Router == "firefox-sync-web" {
+			webNote = bs[i].Note
+		}
+	}
+
+	// The api router has a reason: its badge Note is exactly that.
+	expectedAPIReason := "Firefox calls the accounts API in the background, without cookies."
+	if apiNote != expectedAPIReason {
+		t.Errorf("api router Note = %q, want %q", apiNote, expectedAPIReason)
+	}
+
+	// The web router has no reason: falls back to templateNote(t).
+	if webNote != "First paragraph of notes." {
+		t.Errorf("web router Note = %q, want %q", webNote, "First paragraph of notes.")
+	}
+}
+
+// The Firefox Sync-like fixture: 4 whole-host open routers with reasons, 1 accounts host with specific paths.
+func TestBypassBadgesFxaShape(t *testing.T) {
+	f := newAccessFixture(t)
+	const manifest = `name: Firefox Sync
+category: productivity
+ai: {unsupported: "test"}
+auth:
+  method: forward-auth
+  sso: true
+  group_access: true
+  access_group: users_firefox-sync
+  admin_group: admin_firefox-sync
+  notes: |
+    A Firefox Sync server.
+hosts:
+  reasons:
+    firefox-sync: "The Sync endpoint is called by the browser in the background, without cookies."
+    firefox-sync-api: "Firefox calls the accounts API in the background, without cookies."
+    firefox-sync-profile: "The profile service is called by the browser."
+    firefox-sync-pairing: "The pairing service is called by the browser."
+`
+	const compose = `services:
+  sync:
+    image: sync
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.firefox-sync.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC:-sync.portcullis.local}`)" + `
+      traefik.http.routers.firefox-sync.tls.options: public@file
+      traefik.http.services.firefox-sync.loadbalancer.server.port: "8000"
+  api:
+    image: api
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.firefox-sync-api.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC_API:-api.portcullis.local}`)" + `
+      traefik.http.routers.firefox-sync-api.tls.options: public@file
+      traefik.http.services.firefox-sync-api.loadbalancer.server.port: "8001"
+  profile:
+    image: profile
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.firefox-sync-profile.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC_PROFILE:-profile.portcullis.local}`)" + `
+      traefik.http.routers.firefox-sync-profile.tls.options: public@file
+      traefik.http.services.firefox-sync-profile.loadbalancer.server.port: "8002"
+  pairing:
+    image: pairing
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.firefox-sync-pairing.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC_PAIRING:-pairing.portcullis.local}`)" + `
+      traefik.http.routers.firefox-sync-pairing.tls.options: public@file
+      traefik.http.services.firefox-sync-pairing.loadbalancer.server.port: "8003"
+  accounts:
+    image: accounts
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.firefox-sync-accounts.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC_ACCOUNTS:-accounts.portcullis.local}`)" + `
+      traefik.http.routers.firefox-sync-accounts.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.routers.firefox-sync-accounts-open.rule: Host(` + "`${PORTCULLIS_HOST_FIREFOX_SYNC_ACCOUNTS:-accounts.portcullis.local}`)" + ` && (Path(` + "`/.well-known/fxa-client-configuration`) || Path(`/__heartbeat__`) || Path(`/__lbheartbeat__`))" + `
+      traefik.http.routers.firefox-sync-accounts-open.tls.options: public@file
+      traefik.http.routers.firefox-sync-accounts-open.service: firefox-sync-accounts
+      traefik.http.services.firefox-sync-accounts.loadbalancer.server.port: "9000"
+`
+	writeFile(t, filepath.Join(f.src, "firefox-sync", "manifest.yaml"), manifest)
+	writeFile(t, filepath.Join(f.src, "firefox-sync", "compose.yml"), compose)
+	f.h.Discover()
+
+	if err := f.h.Enable("firefox-sync"); err != nil {
+		t.Fatal(err)
+	}
+	bs := bypassOf(t, f, "firefox-sync")
+
+	// The shape: 4 whole-host open_router badges (Tier public@file, Note = their reasons),
+	// plus 1 open_router for the accounts badge with the 4 exact paths, Tier default.
+	openRouters := 0
+	var accountsBadge *Bypass
+	for i := range bs {
+		if bs[i].Kind == BypassOpenRouter {
+			openRouters++
+			if strings.Contains(strings.Join(bs[i].Hosts, ","), "accounts") && len(bs[i].Paths) > 0 {
+				accountsBadge = &bs[i]
+			}
+		}
+	}
+
+	if openRouters != 5 {
+		t.Fatalf("got %d open_router badges, want 5; badges: %+v", openRouters, bs)
+	}
+
+	// Check the accounts badge has the 4 exact paths and Tier default.
+	if accountsBadge == nil {
+		t.Fatal("no accounts badge with paths")
+	}
+	if accountsBadge.Tier != policy.TierDefault {
+		t.Errorf("accounts badge Tier = %q, want %q", accountsBadge.Tier, policy.TierDefault)
+	}
+	if len(accountsBadge.Paths) != 3 {
+		t.Fatalf("accounts badge has %d paths, want 3: %+v", len(accountsBadge.Paths), accountsBadge.Paths)
+	}
+
+	// The 4 whole-host badges have Tier public@file and their reasons.
+	hostReasons := map[string]string{
+		"sync":    "The Sync endpoint is called by the browser in the background, without cookies.",
+		"api":     "Firefox calls the accounts API in the background, without cookies.",
+		"profile": "The profile service is called by the browser.",
+		"pairing": "The pairing service is called by the browser.",
+	}
+	foundHosts := make(map[string]bool)
+	for i := range bs {
+		if bs[i].Kind == BypassOpenRouter && len(bs[i].Paths) == 0 {
+			for host := range hostReasons {
+				if strings.Contains(strings.Join(bs[i].Hosts, ","), host) {
+					foundHosts[host] = true
+					if bs[i].Tier != policy.TierPublic {
+						t.Errorf("%s badge Tier = %q, want %q", host, bs[i].Tier, policy.TierPublic)
+					}
+					if !strings.Contains(bs[i].Note, hostReasons[host]) {
+						t.Errorf("%s badge Note = %q, want to contain %q", host, bs[i].Note, hostReasons[host])
+					}
+				}
+			}
+		}
+	}
+	if len(foundHosts) != 4 {
+		t.Errorf("found %d whole-host badges, want 4; found: %v", len(foundHosts), foundHosts)
+	}
+}

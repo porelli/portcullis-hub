@@ -259,6 +259,11 @@ type HostsSpec struct {
 	// with (e.g. Synapse's server_name, part of every user and room id):
 	// SetHosts refuses to change it.
 	Immutable []string `yaml:"immutable" json:"immutable,omitempty"`
+	// Reasons maps host router names to per-host reasons for open routers
+	// (§11.7 bypass badges, contract §3). Each value is one line, ≤ 200
+	// runes. For an open_router bypass badge on that host, Note = the
+	// reason. It falls back to the first paragraph of auth.notes.
+	Reasons map[string]string `yaml:"reasons,omitempty" json:"reasons,omitempty"`
 }
 
 // ImmutableHost reports whether host router r's hostname may never change.
@@ -272,6 +277,14 @@ func (m *Manifest) ImmutableHost(r string) bool {
 		}
 	}
 	return false
+}
+
+// GetReasons returns the hosts.reasons map, or an empty map if Hosts is nil.
+func (m *Manifest) GetReasons() map[string]string {
+	if m.Hosts == nil || m.Hosts.Reasons == nil {
+		return map[string]string{}
+	}
+	return m.Hosts.Reasons
 }
 
 // AccessRoleEnforced reports whether the Hub enforces the access group in

@@ -449,6 +449,11 @@ func checkInstanceRules(m *Manifest, r *Routes) error {
 				return fmt.Errorf("hosts.immutable: %s is not a host router", h)
 			}
 		}
+		for router := range m.Hosts.Reasons {
+			if _, ok := r.HostRouters[router]; !ok {
+				return fmt.Errorf("hosts.reasons: %s is not a host router", router)
+			}
+		}
 	}
 	for _, c := range m.Clients {
 		if m.Multi() && strings.Contains(c.BackchannelLogoutURL, "{{DOMAIN}}") {

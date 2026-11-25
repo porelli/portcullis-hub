@@ -175,8 +175,20 @@ func ValidateManifest(m *Manifest) error {
 			return fmt.Errorf("client %s: backchannel_logout_url %q must be https://{{HOST_<ROUTER>}}/<path> (or https://<sub>.{{DOMAIN}}/<path>)", c.ClientID, u)
 		}
 	}
-	if m.Hosts != nil && len(m.Hosts.Immutable) == 0 {
-		return fmt.Errorf("hosts.immutable: list at least one host router (or omit hosts)")
+	if m.Hosts != nil && len(m.Hosts.Immutable) == 0 && len(m.Hosts.Reasons) == 0 {
+		return fmt.Errorf("hosts: list at least one immutable router or one reason (or omit hosts)")
+	}
+	// Validate hosts.reasons values: one line, ≤ 200 runes, no control chars.
+	for router, reason := range m.GetReasons() {
+		if reason == "" {
+			return fmt.Errorf("hosts.reasons[%s]: reason is empty", router)
+		}
+		if utf8.RuneCountInString(reason) > 200 {
+			return fmt.Errorf("hosts.reasons[%s]: reason is %d runes, at most 200 allowed", router, utf8.RuneCountInString(reason))
+		}
+		if HasControlChars(reason) {
+			return fmt.Errorf("hosts.reasons[%s]: reason has a control character (newlines are not allowed)", router)
+		}
 	}
 	if len(a.AdminPaths) > 0 && a.AdminGroup == "" {
 		return fmt.Errorf("auth.admin_paths requires auth.admin_group")
