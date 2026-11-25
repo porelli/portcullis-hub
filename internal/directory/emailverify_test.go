@@ -261,3 +261,65 @@ func TestVerifyOwnEmail(t *testing.T) {
 		}
 	}
 }
+
+// TestAIEmailNotVerified (security review): a change through the AI —
+// create, invite, update, an admin's included — stores the email
+// unverified and clears an earlier verification; the AI can't mark one.
+func TestAIEmailNotVerified(t *testing.T) {
+	e := storeEnv(t)
+	ai := &directory.Caller{User: "root", Admin: true, Via: directory.ViaAI, Client: "portcullis-ai-claude"}
+	if err := e.svc.MarkEmailVerified(ctx, asRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.UpdateUser(ctx, ai, "alice", strptr("alice.ai@example.org"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := verifiedRecord(t, e, "alice"); ok {
+		t.Errorf("an AI change left a record: %+v", v)
+	}
+	if _, err := e.svc.CreateUser(ctx, ai, directory.CreateRequest{Username: "zoe", Email: "zoe@example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := verifiedRecord(t, e, "zoe"); ok {
+		t.Errorf("an AI create verified: %+v", v)
+	}
+	if err := e.svc.MarkEmailVerified(ctx, ai, "zoe"); status(err) != 403 {
+		t.Errorf("AI mark = %v", err)
+	}
+	if _, ok := verifiedRecord(t, e, "zoe"); ok {
+		t.Error("the AI marked an email verified")
+	}
+}
+
+// TestStalePermissionNotVerified (security review): edit_details is
+// re-checked when the verification is recorded, never taken from a
+// Caller resolved earlier.
+func TestStalePermissionNotVerified(t *testing.T) {
+	e := delegateEnv(t)
+	// ivy invites; her Caller claims edit_details she doesn't hold (as a
+	// Caller resolved before her removal from hr_editors would).
+	stale := &directory.Caller{User: "ivy", Perms: map[string]bool{directory.PermInvite: true, directory.PermEditDetails: true}}
+	if _, err := e.svc.CreateUser(ctx, stale, directory.CreateRequest{Username: "sam", Email: "sam@example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := verifiedRecord(t, e, "sam"); ok {
+		t.Errorf("a stale edit_details verified: %+v", v)
+	}
+	// eddie resolved as an editor, then removed from hr_editors: his
+	// update is refused (the gate) and nothing is recorded.
+	eddie := callerFor(t, e, "eddie")
+	e.ll.RemoveMember("hr_editors", "eddie")
+	if err := e.svc.UpdateUser(ctx, eddie, "bob", strptr("bob2@example.org"), nil); status(err) != 403 {
+		t.Errorf("stale eddie = %v", err)
+	}
+	if _, ok := verifiedRecord(t, e, "bob"); ok {
+		t.Error("a stale editor verified")
+	}
+	// hera still holds it: verified.
+	if _, err := e.svc.CreateUser(ctx, callerFor(t, e, "hera"), directory.CreateRequest{Username: "tom", Email: "tom@example.org"}); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := verifiedRecord(t, e, "tom"); !ok || v.By != "admin:hera" {
+		t.Errorf("hera: %+v %v", v, ok)
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/portcullis/hub/internal/lldap"
 )
 
 // Verified emails (contract §9.8). directory.yaml email_verified.<LLDAP
@@ -44,10 +46,28 @@ func verifiedEmail(cfg *Config, uuid, current string) (string, bool) {
 	return strings.TrimSpace(current), true
 }
 
-// setsVerified: c's change of someone else's email stores it verified
-// (an admin, or a delegate holding edit_details; contract §9.8 case 2).
-func setsVerified(c *Caller, target string) bool {
-	return c != nil && !strings.EqualFold(strings.TrimSpace(c.User), strings.TrimSpace(target)) && (c.Admin || c.Perms[PermEditDetails])
+// mayVerify: c's change of target's email stores it verified (contract
+// §9.8 case 2): someone else, never through the AI (an email the AI sets
+// stays unverified), and an admin or a delegate who still holds
+// edit_details on target in this snapshot — re-checked here, at the
+// moment of recording, never taken from the Caller resolved before the
+// lock. sn and cfg are the run's reads (cfg nil: no delegate verifies).
+// Caller holds s.mu.
+func (s *Service) mayVerify(c *Caller, target string, sn *snapshot, cfg *Config) bool {
+	if c == nil || c.Via == ViaAI || strings.EqualFold(strings.TrimSpace(c.User), strings.TrimSpace(target)) {
+		return false
+	}
+	if c.Admin {
+		return memberOf(sn.groups[lldap.AdminGroup], c.User)
+	}
+	if cfg == nil || !c.Perms[PermEditDetails] {
+		return false
+	}
+	g, ok := sn.groups[cfg.Permissions[PermEditDetails]]
+	if !ok || !memberOf(g, c.User) {
+		return false
+	}
+	return s.authorize(c, PermEditDetails, target, sn, cfg) == nil
 }
 
 // putVerified records email as uuid's verified email, by by, and saves.
@@ -93,17 +113,19 @@ func (s *Service) dropVerified(uuid string) error {
 }
 
 // emailChanged records what an email change does to the verification
-// (UpdateUser, after LLDAP took it): someone else with edit_details sets
-// it verified; your own change, or an emptied email, clears it. A failed
+// (UpdateUser, after LLDAP took it): someone else who may verify it
+// (mayVerify: edit_details re-checked on sn, never through the AI) sets
+// it verified; any other change — your own, the AI's, an emptied email —
+// clears it. A failed
 // write only logs: the record no longer matching the new email already
 // makes it unverified, and an admin's change left unrecorded stays
 // unverified (fail closed). Caller holds s.mu.
-func (s *Service) emailChanged(c *Caller, user, uuid, email string) {
+func (s *Service) emailChanged(c *Caller, sn *snapshot, user, uuid, email string) {
 	if s.Store == nil {
 		return
 	}
-	var err error
-	if setsVerified(c, user) && normEmail(email) != "" {
+	cfg, err := s.loadConfig()
+	if err == nil && s.mayVerify(c, user, sn, cfg) && normEmail(email) != "" {
 		err = s.putVerified(uuid, email, "admin:"+c.User)
 	} else {
 		err = s.dropVerified(uuid)
@@ -122,6 +144,10 @@ func (s *Service) MarkEmailVerified(ctx context.Context, c *Caller, username str
 	return s.run(ctx, c, PermEditDetails, "user.email_verified", username, &detail, func() error {
 		if err := s.checkTarget(username); err != nil {
 			return err
+		}
+		if c.Via == ViaAI {
+			// Apps trust a verified email: only a person, in the browser.
+			return forbidden("not allowed through the AI: mark an email verified on the people page")
 		}
 		if strings.EqualFold(strings.TrimSpace(c.User), strings.TrimSpace(username)) {
 			return forbidden("not allowed: verify your own email with a code")

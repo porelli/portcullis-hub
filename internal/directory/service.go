@@ -1491,7 +1491,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		}
 		// Set by someone with edit_details: stored verified (§9.8), once
 		// nothing can delete the new user again.
-		if cfg != nil && setsVerified(c, req.Username) {
+		if cfg != nil && s.mayVerify(c, req.Username, sn, cfg) {
 			uuid := passwordUUID
 			if uuid == "" {
 				uuid = s.uuidOf(ctx, req.Username)
@@ -1652,7 +1652,7 @@ func (s *Service) UpdateUser(ctx context.Context, c *Caller, username string, em
 		// Only a change of the email touches its verification (§9.8):
 		// saving the same email never verifies it.
 		if email != nil && normEmail(*email) != normEmail(u.Email) {
-			s.emailChanged(c, u.ID, u.UUID, *email)
+			s.emailChanged(c, sn, u.ID, u.UUID, *email)
 		}
 		return nil
 	})
