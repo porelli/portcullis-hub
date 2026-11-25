@@ -406,3 +406,41 @@ func TestFailedVerificationClearFails(t *testing.T) {
 		t.Errorf("failed clear = %v", err)
 	}
 }
+
+// TestVerifiedEmailChangeNotifies (Task 4): every verification, and a
+// record the evaluator drops, marks the directory changed (OnChange), so
+// the Hub's membership delivery rewrites the verified_email data files.
+func TestVerifiedEmailChangeNotifies(t *testing.T) {
+	e := storeEnv(t)
+	var n int
+	e.svc.OnChange = func() { n++ }
+	step := func(what string, want int, fn func() error) {
+		t.Helper()
+		before := n
+		if err := fn(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if got := n - before; got != want {
+			t.Errorf("%s: OnChange called %d times, want %d", what, got, want)
+		}
+	}
+	now := time.Now().UTC()
+	evaluate := func() error { _, err := e.svc.Evaluate(ctx, now); return err }
+	if err := evaluate(); err != nil {
+		t.Fatal(err)
+	}
+	step("nothing to prune", 0, evaluate)
+	uuid, email, err := e.svc.OwnEmail(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step("verified by code", 1, func() error { return e.svc.VerifyOwnEmail(ctx, directory.Human("alice"), uuid, email) })
+	b := "alice.b@example.org"
+	step("changed in LLDAP", 0, func() error { return e.svc.LLDAP.UpdateUser(ctx, "alice", &b, nil) })
+	step("pruned by the evaluator", 1, evaluate)
+	if _, ok := verifiedRecord(t, e, "alice"); ok {
+		t.Fatal("the record survived the prune")
+	}
+	step("nothing left to prune", 0, evaluate)
+	step("marked verified by an admin", 1, func() error { return e.svc.MarkEmailVerified(ctx, asRoot, "alice") })
+}

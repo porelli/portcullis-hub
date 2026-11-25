@@ -57,10 +57,13 @@ type PrivilegedGroupChoice struct {
 }
 
 // PopulationView is who per-person values reach: how many people, or
-// why nobody.
+// why nobody. NoVerifiedEmail (templates with a verified_email option
+// only): the members without a verified email, who are left out of its
+// data files (§13.2) — usernames, never an address.
 type PopulationView struct {
-	Count int    `json:"count"`
-	Why   string `json:"why,omitempty"`
+	Count           int      `json:"count"`
+	Why             string   `json:"why,omitempty"`
+	NoVerifiedEmail []string `json:"no_verified_email,omitempty"`
 }
 
 // EntryRow is one stored person-entered value (spec call 32): the
@@ -313,7 +316,7 @@ func (h *Hub) SettingsPanel(ctx context.Context, id string) (*SettingsPanel, err
 	switch {
 	case m != nil:
 		pop := h.populationLocked(t, m)
-		p.Population = PopulationView{Count: len(pop.People), Why: pop.Why}
+		p.Population = PopulationView{Count: len(pop.People), Why: pop.Why, NoVerifiedEmail: h.noVerifiedEmailLocked(t, m)}
 		why = pop.Why
 	case merr != nil && why == "":
 		p.Population.Why = "Users & Groups unavailable: " + merr.Error()

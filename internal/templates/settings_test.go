@@ -173,7 +173,7 @@ func TestReservedTypesRefused(t *testing.T) {
 			t.Errorf("builtin %s is reserved: %q", typ, f)
 		}
 	}
-	if len(BuiltinTypes) != 17 || BuiltinTypes[TypeFolder] || !BuiltinTypes[TypePersonSecret] || !BuiltinTypes[TypePersonID] {
+	if len(BuiltinTypes) != 18 || BuiltinTypes[TypeFolder] || !BuiltinTypes[TypePersonSecret] || !BuiltinTypes[TypePersonID] || !BuiltinTypes[TypeVerifiedEmail] {
 		t.Errorf("BuiltinTypes = %v", BuiltinTypes)
 	}
 	// A Hub whose registry knows the type still refuses a reserved one

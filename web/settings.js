@@ -165,6 +165,7 @@
     };
     for (const o of panel.options || []) {
       st.opts[o.key] = o;
+      if (o.type === 'verified_email') continue; // set by the Hub: no admin value
       const sc = scopeOf(o);
       if (sc === 'instance' && o.type !== 'secret') {
         st.values[o.key] = o.key in (panel.instance || {}) ? panel.instance[o.key] : null;
@@ -381,6 +382,7 @@
   }
 
   function optionInner(st, o, sc) {
+    if (o.type === 'verified_email') return verifiedEmailHtml(st, o);
     let h = '<div class="ps-opt-head"><span class="ps-opt-label">' + esc(o.label || o.key) + '</span>';
     if (sc === 'person') h += '<span class="ps-scope">per person</span>';
     if (sc === 'group') h += '<span class="ps-scope">per group</span>';
@@ -908,6 +910,26 @@
     } catch (e) { /* keep the old lists */ }
     es.busy = false;
     redrawOption(st, key);
+  }
+
+  // verifiedEmailHtml: a verified_email option (contract §13.2) has no
+  // admin value — the Hub delivers each member's verified email — so it
+  // shows only who has none and can't have an account (usernames).
+  function verifiedEmailHtml(st, o) {
+    let h = '<div class="ps-opt-head"><span class="ps-opt-label">' + esc(o.label || o.key) + '</span><span class="ps-scope">per person, set by the Hub</span></div>';
+    if (o.description) h += '<div class="ps-desc">' + esc(o.description) + '</div>';
+    const pop = st.panel.population || {};
+    const none = pop.no_verified_email || [];
+    if (pop.why) h += '<div class="ps-hint">' + esc(pop.why) + '</div>';
+    else if (!none.length) h += '<div class="ps-hint">Everyone with access has a verified email.</div>';
+    else {
+      h += '<div class="ps-warn">' + esc(plural(none.length, 'member', 'members') + ' ' + (none.length === 1 ? 'has' : 'have') + " no verified email and can't have an account.") + '</div>';
+      h += '<details class="ps-no-email"><summary>Show</summary><ul class="ps-who-rows">';
+      for (const u of none) h += '<li><span class="ps-user">' + esc(u) + '</span></li>';
+      h += '</ul></details>';
+    }
+    for (const w of o.warnings || []) h += '<div class="ps-warn">⚠ ' + esc(w) + '</div>';
+    return h;
   }
 
   // ── who gets what ──────────────────────────────────────────────────

@@ -1,0 +1,35 @@
+name: Verified Email Fixture
+category: tools
+instances: multi
+ai: {unsupported: "test fixture"}
+auth:
+  method: header-auth
+  group_access: true
+  access_group: users_veapp
+  admin_group: admin_veapp
+urls:
+  - label: Web
+    url: "https://{{HOST_VEAPP}}"
+files:
+  - {name: access, service: app, mount: /portcullis, on_membership_change: none}
+  - {name: roster, service: app, mount: /roster, on_membership_change: none}
+settings:
+  options:
+    - key: email
+      label: Account email
+      type: verified_email
+      self_visible: false
+      delivery: [{file: {name: access, field: email}}]
+    - key: greeting
+      label: Greeting
+      type: string
+      max_len: 200
+      default: hello
+      delivery: [{file: {name: access}}]
+    - key: seats
+      label: Seats
+      type: int
+      scope: person
+      default: 1
+      resolve: max
+      delivery: [{file: {name: roster}}, {file: {name: access}}]

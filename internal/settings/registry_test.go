@@ -31,7 +31,7 @@ func TestRegistryReserved(t *testing.T) {
 		t.Error("Known(folder)")
 	}
 	// File sharing landed: both types are built-in kinds (F4).
-	for _, typ := range []string{"person_secret", "person_id"} {
+	for _, typ := range []string{"person_secret", "person_id", "verified_email"} {
 		if k, err := r.Kind(typ); err != nil || k.Name() != typ || !r.Known(typ) {
 			t.Errorf("Kind(%s) = %v, %v", typ, k, err)
 		}
@@ -61,7 +61,7 @@ func TestRegistryReserved(t *testing.T) {
 // person_id displays as the number (F4).
 func TestPersonKindsSetByTheHub(t *testing.T) {
 	r := NewRegistry()
-	for _, typ := range []string{"person_secret", "person_id"} {
+	for _, typ := range []string{"person_secret", "person_id", "verified_email"} {
 		o := &templates.Option{Key: "k", Type: typ}
 		for _, raw := range []any{"x", int64(20000), 20000, true, []any{"a"}} {
 			if _, err := r.Parse(o, raw); err == nil || !strings.Contains(err.Error(), "set by the Hub") {
@@ -74,6 +74,24 @@ func TestPersonKindsSetByTheHub(t *testing.T) {
 		if got := r.Display(id, v); got != "20000" {
 			t.Errorf("Display(person_id, %v) = %q", v, got)
 		}
+	}
+}
+
+// TestVerifiedEmailNotParsedFromAdmin: no admin input (an email
+// included) is ever a verified_email value; it displays as the address.
+func TestVerifiedEmailNotParsedFromAdmin(t *testing.T) {
+	r := NewRegistry()
+	o := &templates.Option{Key: "email", Type: templates.TypeVerifiedEmail}
+	for _, raw := range []any{"alice@example.org", "", map[string]any{"email": "a@example.org"}} {
+		if v, err := r.Parse(o, raw); err == nil || v != nil || !strings.Contains(err.Error(), "set by the Hub") {
+			t.Errorf("Parse(%v) = %v, %v", raw, v, err)
+		}
+	}
+	if got := r.Display(o, "alice@example.org"); got != "alice@example.org" {
+		t.Errorf("Display = %q", got)
+	}
+	if err := r.CheckOption(&templates.Option{Key: "email", Type: templates.TypeVerifiedEmail, Pattern: "^x$"}); err == nil {
+		t.Error("CheckOption accepted a pattern")
 	}
 }
 

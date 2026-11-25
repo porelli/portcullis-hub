@@ -1,0 +1,8 @@
+services:
+  app:
+    image: veapp
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.veapp.rule: Host(`${PORTCULLIS_HOST_VEAPP:-veapp.portcullis.local}`)
+      traefik.http.routers.veapp.entrypoints: websecure
+      traefik.http.services.veapp.loadbalancer.server.port: "8080"

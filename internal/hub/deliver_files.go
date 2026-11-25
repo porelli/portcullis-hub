@@ -288,12 +288,17 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 	opts := t.Manifest.Options()
 	var entryPop *Population // the person-entered population, once
 	// The members the document carries (F9: with person_id options, only
-	// those holding their ids), once.
+	// those holding their ids; with a verified_email option delivered
+	// into it, only those with a verified email, §13.7), once.
+	emailOnly := targetCarriesVerifiedEmail(t, target)
 	var members []string
 	var inFile map[string]bool
 	carried := func() ([]string, map[string]bool) {
 		if inFile == nil && m != nil {
 			members, _ = h.fileMembersLocked(t, m)
+			if emailOnly {
+				members = withVerifiedEmail(members, m)
+			}
 			inFile = map[string]bool{}
 			for _, u := range members {
 				inFile[u] = true
@@ -301,7 +306,9 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 		}
 		return members, inFile
 	}
-	idOpts := len(personIDOptions(t)) > 0
+	// Some members are left out of the document (no id, no verified
+	// email).
+	filtered := len(personIDOptions(t)) > 0 || emailOnly
 	for i := range opts {
 		o := &opts[i]
 		ds := target.deliveries(o)
@@ -386,10 +393,32 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 				}
 				continue
 			}
+			if o.Type == templates.TypeVerifiedEmail {
+				// The member's verified email at this snapshot (never
+				// an admin value); a member without one isn't carried.
+				users, _ := carried()
+				for _, user := range users {
+					email := m.VerifiedEmails[user]
+					if email == "" {
+						continue
+					}
+					for _, d := range ds {
+						field := target.field(&d)
+						if field == "" {
+							field = o.Key
+						}
+						if doc.People[user] == nil {
+							doc.People[user] = map[string]any{}
+						}
+						doc.People[user][field] = email
+					}
+				}
+				continue
+			}
 			_, in := carried()
 			for _, user := range sortedUsers(people) {
-				if idOpts && !in[user] {
-					continue // no id: left out of the file (F9)
+				if filtered && !in[user] {
+					continue // no id or no verified email: left out of the file (F9, §13.7)
 				}
 				res, ok := people[user][o.Key]
 				if !ok || res.Value == nil {
@@ -442,6 +471,9 @@ func (h *Hub) renderDocLocked(t *templates.Template, target docTarget, m *direct
 			for _, d := range ds {
 				list := make([]settings.EntryOut, 0, len(entries))
 				for _, e := range entries {
+					if emailOnly && m.VerifiedEmails[e.User] == "" {
+						continue // no verified email: left out of the file (§13.7)
+					}
 					r, err := settings.RenderDelivery(o, e.Value, &d)
 					if err != nil {
 						log.Printf("settings: %s: %s: the value of %s doesn't render (%v): omitted", t.ID, o.Key, e.User, err)

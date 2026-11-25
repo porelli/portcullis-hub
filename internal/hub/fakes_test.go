@@ -1395,9 +1395,12 @@ type fakePeople struct {
 	// file's people and expiring, plan 4 T11).
 	emails  map[string]string
 	pending map[string]map[string]time.Time
-	err     error
-	nextID  int
-	calls   int
+	// verified: Membership.VerifiedEmails (contract §9.8; a user not in
+	// the directory is dropped, as the directory does).
+	verified map[string]string
+	err      error
+	nextID   int
+	calls    int
 	// onMembership, if set, runs once after the next snapshot is taken
 	// (without p.mu): something changing between snapshot and use.
 	onMembership func()
@@ -1514,7 +1517,12 @@ func (p *fakePeople) Membership(ctx context.Context, now time.Time) (*directory.
 			m.Privilege[g] = why
 		}
 	}
-	m.Emails, m.Pending = map[string]string{}, map[string]map[string]time.Time{}
+	m.Emails, m.Pending, m.VerifiedEmails = map[string]string{}, map[string]map[string]time.Time{}, map[string]string{}
+	for u, e := range p.verified {
+		if _, ok := m.Users[u]; ok {
+			m.VerifiedEmails[u] = e
+		}
+	}
 	for u, e := range p.emails {
 		if _, ok := m.Users[u]; ok {
 			m.Emails[u] = e

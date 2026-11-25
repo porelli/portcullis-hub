@@ -209,3 +209,39 @@ console.log(JSON.stringify({ err, applied }));
 		t.Errorf("onHash #people/Carol: err %v, applied %v", got.Err, got.Applied)
 	}
 }
+
+// TestVerifiedEmailPanelJS: a verified_email option shows only who has
+// no verified email (the count, then the usernames under Show), escaped;
+// never an editor.
+func TestVerifiedEmailPanelJS(t *testing.T) {
+	js := webAsset(t, "settings.js")
+	fn := jsBlock(t, js, "  function verifiedEmailHtml(st, o) {", "\n  }\n")
+	script := nodeEsc + "const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);\n" + fn + `
+const o = { key: 'email', label: 'Account email', type: 'verified_email' };
+const at = pop => verifiedEmailHtml({ panel: { population: pop } }, o);
+console.log(JSON.stringify([
+  at({ count: 3, no_verified_email: ['bob', '<carol>'] }),
+  at({ count: 3, no_verified_email: ['bob'] }),
+  at({ count: 3 }),
+]));
+`
+	var got []string
+	nodeJSON(t, script, &got)
+	if len(got) != 3 {
+		t.Fatalf("got %v", got)
+	}
+	for _, want := range []string{"2 members have no verified email and can&#39;t have an account.", "<summary>Show</summary>", "<span class=\"ps-user\">bob</span>", "&lt;carol&gt;", "set by the Hub"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("two missing: no %q in %s", want, got[0])
+		}
+	}
+	if strings.Contains(got[0], "<input") || strings.Contains(got[0], "<carol>") {
+		t.Errorf("two missing: %s", got[0])
+	}
+	if !strings.Contains(got[1], "1 member has no verified email and can&#39;t have an account.") {
+		t.Errorf("one missing: %s", got[1])
+	}
+	if !strings.Contains(got[2], "Everyone with access has a verified email.") || strings.Contains(got[2], "Show") {
+		t.Errorf("none missing: %s", got[2])
+	}
+}

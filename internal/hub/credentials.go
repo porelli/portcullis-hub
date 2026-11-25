@@ -128,11 +128,12 @@ type CredentialsView struct {
 var errNoCredential = &StatusError{Status: http.StatusNotFound, Err: errors.New("not found: no such app or password for this account")}
 
 // hubSetOption: o's per-person values are computed by the Hub
-// (person_secret, person_id): no admin value lives anywhere — SaveSettings
-// refuses the key, the panel, the seed, the per-person resolution, the
-// env and My apps' values skip it, the prune drops a stored one (F5).
+// (person_secret, person_id, verified_email): no admin value lives
+// anywhere — SaveSettings refuses the key, the panel, the seed, the
+// per-person resolution, the env and My apps' values skip it, the prune
+// drops a stored one (F5).
 func hubSetOption(o *templates.Option) bool {
-	return o != nil && (o.Type == templates.TypePersonSecret || o.Type == templates.TypePersonID)
+	return o != nil && (o.Type == templates.TypePersonSecret || o.Type == templates.TypePersonID || o.Type == templates.TypeVerifiedEmail)
 }
 
 // personSecretOption is t's person_secret option key (nil: none).

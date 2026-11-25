@@ -8,10 +8,12 @@ import (
 	"github.com/portcullis/hub/internal/templates"
 )
 
-// The file-sharing kinds (contract §13.2, §13.16; preflight F4): ordinary
-// built-in kinds whose values only the Hub computes. No admin input is
-// ever a value of either (the settings panel and PUT …/settings never
-// address them); their structural rules are templates.ValidateSettingsSpec's.
+// The Hub-set kinds — file sharing's person_secret and person_id
+// (contract §13.2, §13.16; preflight F4) and verified_email (§13.2,
+// §9.8): ordinary built-in kinds whose values only the Hub computes. No
+// admin input is ever a value of any of them (the settings panel and PUT
+// …/settings never address them); their structural rules are
+// templates.ValidateSettingsSpec's.
 
 // errSetByTheHub refuses any admin input for these kinds.
 var errSetByTheHub = errors.New("set by the Hub (one value per person): not an admin setting")
@@ -71,3 +73,23 @@ func (personIDKind) Compare(_ *templates.Option, a, b Value) (int, bool) {
 	}
 	return 0, true
 }
+
+// verifiedEmailKind is a person's verified email (§9.8), read from the
+// directory at delivery time; never parsed from an admin.
+type verifiedEmailKind struct{}
+
+func (verifiedEmailKind) Name() string { return templates.TypeVerifiedEmail }
+
+func (verifiedEmailKind) CheckOption(o *templates.Option) error { return onlyFields(o) }
+
+func (verifiedEmailKind) Parse(*templates.Option, any) (Value, error) { return nil, errSetByTheHub }
+
+// Display is the address.
+func (verifiedEmailKind) Display(_ *templates.Option, v Value) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func (verifiedEmailKind) Compare(*templates.Option, Value, Value) (int, bool) { return 0, false }

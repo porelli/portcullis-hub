@@ -461,6 +461,9 @@ const (
 	TypeFolder       = "folder"        // reserved: shared folders are path values (§13.15)
 	TypePersonSecret = "person_secret" // file sharing (§13.2, §13.16)
 	TypePersonID     = "person_id"     // file sharing (§13.2, §13.16)
+	// TypeVerifiedEmail is the person's verified email (§9.8, §13.2),
+	// set by the Hub, delivered only into data files.
+	TypeVerifiedEmail = "verified_email"
 )
 
 // BuiltinTypes are the types this Hub implements (not the reserved ones).
@@ -469,7 +472,7 @@ var BuiltinTypes = map[string]bool{
 	TypeString: true, TypeInt: true, TypeSize: true, TypeDuration: true, TypeBool: true,
 	TypeEnum: true, TypeMultiEnum: true, TypeList: true, TypeTable: true, TypePath: true,
 	TypeSecret: true, TypeGroup: true, TypeGroups: true, TypeUser: true, TypeUsers: true,
-	TypePersonSecret: true, TypePersonID: true,
+	TypePersonSecret: true, TypePersonID: true, TypeVerifiedEmail: true,
 }
 
 // oldTypes are the contract v2 types, refused with their replacement.
@@ -607,10 +610,10 @@ const (
 const FolderTypeRefusal = "type folder is reserved: a shared folder is a type: path option with a folder block (§13.15)"
 
 // EffectiveScope returns o.Scope, or ScopeInstance when unset; always
-// ScopePerson for person_secret and person_id (one value per person, set
-// by the Hub; their scope field is refused).
+// ScopePerson for person_secret, person_id and verified_email (one value
+// per person, set by the Hub; their scope field is refused).
 func (o *Option) EffectiveScope() string {
-	if o.Type == TypePersonSecret || o.Type == TypePersonID {
+	if o.Type == TypePersonSecret || o.Type == TypePersonID || o.Type == TypeVerifiedEmail {
 		return ScopePerson
 	}
 	if o.Scope == "" {
@@ -1173,7 +1176,7 @@ func (v *specCheck) envNames() error {
 	}
 	for i := range v.m.Settings.Options {
 		o := &v.m.Settings.Options[i]
-		if o.Type == TypePersonSecret || o.Type == TypePersonID {
+		if o.Type == TypePersonSecret || o.Type == TypePersonID || o.Type == TypeVerifiedEmail {
 			continue // no env: their own checks refuse an env delivery
 		}
 		var names []string
@@ -1297,6 +1300,8 @@ func (v *specCheck) option(o *Option) error {
 		return v.personSecret(o)
 	case TypePersonID:
 		return v.personID(o)
+	case TypeVerifiedEmail:
+		return v.verifiedEmail(o)
 	}
 	scope := o.EffectiveScope()
 	switch scope {
