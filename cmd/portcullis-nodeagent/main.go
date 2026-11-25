@@ -9,7 +9,8 @@
 //	nodeagent mesh-up          bring pcmesh up with the stored plan (the unit's ExecStartPre)
 //	nodeagent serve --probes-only --root <dir>
 //	                           CI only (core's e2e-ha-k3d, a test DaemonSet on k3d
-//	                           nodes): the API and the public ingress probes alone,
+//	                           nodes): the public ingress probes and only the
+//	                           health and probe routes (every other route 404),
 //	                           from the state under <dir> (state.json, ca.crt,
 //	                           node.pem, targets.json at their host paths); no
 //	                           pcmesh, RTT, renewal or host change
@@ -207,9 +208,10 @@ func join(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, log *s
 }
 
 // probesOnly is `serve --probes-only --root <dir>`: the agent's state read
-// under <dir> (Config.Root), then the API (mTLS as always) and the probe
-// rounds only. It never touches the host: no pcmesh, no RTT echo, no
-// certificate renewal, no k3s. Core's e2e-ha-k3d runs it as a test
+// under <dir> (Config.Root), then the probe rounds and only the health
+// and probe routes of the API (host.ProbesOnlyHandler, mTLS as always;
+// every other route 404). It never touches the host: no pcmesh, no RTT
+// echo, no certificate renewal, no k3s, no upgrade. Core's e2e-ha-k3d runs it as a test
 // DaemonSet on k3d nodes, where there is no mesh to bring up.
 func probesOnly(ctx context.Context, args []string, stderr io.Writer, log *slog.Logger) int {
 	root := ""
@@ -231,7 +233,7 @@ func probesOnly(ctx context.Context, args []string, stderr io.Writer, log *slog.
 		fmt.Fprintln(stderr, "nodeagent: the API listener:", err)
 		return 1
 	}
-	srv := &http.Server{Handler: a.Handler(ctx), TLSConfig: a.TLSConfig(), ReadHeaderTimeout: 10 * time.Second,
+	srv := &http.Server{Handler: a.ProbesOnlyHandler(ctx), TLSConfig: a.TLSConfig(), ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second,
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug)}
 	go a.RunProbes(ctx)

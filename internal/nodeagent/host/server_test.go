@@ -1,8 +1,12 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
@@ -166,5 +170,79 @@ func TestNodeagentCallVectors(t *testing.T) {
 	}
 	if sup.calls != 1 {
 		t.Errorf("supervisor calls %d", sup.calls)
+	}
+}
+
+// TestProbesOnlyHandler: `serve --probes-only` answers the health, the
+// probe rounds and their targets, and 404 for every other route of the
+// table (each method, each client, nothing run on the host), plus the
+// paths the full API already 404s.
+func TestProbesOnlyHandler(t *testing.T) {
+	if !slices.Equal(ProbesOnlyRoutes, []string{"GET /v1/health", "GET /v1/probes", "PUT /v1/probes/targets"}) {
+		t.Fatalf("ProbesOnlyRoutes %v", ProbesOnlyRoutes)
+	}
+	for _, x := range ProbesOnlyRoutes {
+		if !slices.ContainsFunc(Routes, func(rt Route) bool { return rt.Method+" "+rt.Path == x }) {
+			t.Errorf("%s is not a route", x)
+		}
+	}
+	r := newRig(t, "server")
+	s := httptest.NewUnstartedServer(r.a.ProbesOnlyHandler(context.Background()))
+	s.TLS = r.a.TLSConfig()
+	s.Config.ErrorLog = log.New(io.Discard, "", 0)
+	s.StartTLS()
+	t.Cleanup(s.Close)
+	cns := []string{na.CNHub, na.CNFrontdoor, na.CNNodeadm, "link.control", "n3.cluster.portcullis.internal"}
+	methods := []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}
+	r.run.mu.Lock()
+	before := len(r.run.cmds)
+	r.run.mu.Unlock()
+	blocked := 0
+	for _, rt := range Routes {
+		if slices.Contains(ProbesOnlyRoutes, rt.Method+" "+rt.Path) {
+			continue
+		}
+		blocked++
+		for _, cn := range cns {
+			for _, m := range methods {
+				if code, body := do(t, r.client(r.ca, cn), m, s.URL+rt.Path, "{}"); code != 404 {
+					t.Errorf("probes-only %s %s as %s: %d %s, want 404", m, rt.Path, cn, code, body)
+				}
+			}
+		}
+	}
+	if blocked != len(Routes)-len(ProbesOnlyRoutes) || blocked == 0 {
+		t.Errorf("%d routes blocked of %d", blocked, len(Routes))
+	}
+	r.run.mu.Lock()
+	if len(r.run.cmds) != before {
+		t.Errorf("probes-only ran on the host: %v", r.run.cmds[before:])
+	}
+	r.run.mu.Unlock()
+	hub := r.client(r.ca, na.CNHub)
+	for _, x := range [][2]string{{"GET", "/"}, {"GET", "/v1"}, {"POST", "/v1/health"}, {"GET", "/v1/probes/targets"},
+		{"GET", "/v1/health?x=1"}, {"GET", "/v1/health/"}} {
+		if code, _ := do(t, hub, x[0], s.URL+x[1], ""); code != 404 {
+			t.Errorf("probes-only %s %s: %d, want 404", x[0], x[1], code)
+		}
+	}
+	// The allowed routes answer, for their clients only.
+	code, body := do(t, hub, "GET", s.URL+"/v1/health", "")
+	var h na.Health
+	if code != 200 || json.Unmarshal([]byte(body), &h) != nil || h.ID != "n2" {
+		t.Errorf("probes-only health %d %s", code, body)
+	}
+	if code, body := do(t, r.client(r.ca, na.CNFrontdoor), "GET", s.URL+"/v1/probes", ""); code != 200 || !strings.Contains(body, `"rounds":[]`) {
+		t.Errorf("probes-only GET /v1/probes: %d %s", code, body)
+	}
+	tg := `{"domain":"example.org","targets":[{"node":"n1","site":"main","address":"198.51.100.1"}],"egress_host":""}`
+	if code, body := do(t, r.client(r.ca, na.CNNodeadm), "PUT", s.URL+"/v1/probes/targets", tg); code != 204 {
+		t.Errorf("probes-only PUT /v1/probes/targets: %d %s", code, body)
+	}
+	if code, _ := do(t, r.client(r.ca, na.CNFrontdoor), "PUT", s.URL+"/v1/probes/targets", tg); code != 403 {
+		t.Errorf("probes-only PUT /v1/probes/targets as the front door: %d, want 403", code)
+	}
+	if code, _ := do(t, r.client(r.ca, na.CNFrontdoor), "GET", s.URL+"/v1/health", ""); code != 403 {
+		t.Errorf("probes-only GET /v1/health as the front door: %d, want 403", code)
 	}
 }

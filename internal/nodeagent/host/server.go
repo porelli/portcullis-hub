@@ -119,15 +119,43 @@ func writeErr(w http.ResponseWriter, err error) {
 	writeJSON(w, code, apiErr{msg, kind})
 }
 
+// ProbesOnlyRoutes are the only operations `serve --probes-only` answers
+// (core's e2e-ha-k3d test DaemonSet): the health, the probe rounds and
+// their targets. Every other route of Routes, the ones that change the
+// host (the mesh, k3s, etcd, the agent's upgrade) and the host checks,
+// is 404 there.
+var ProbesOnlyRoutes = []string{
+	http.MethodGet + " /v1/health",
+	http.MethodGet + " /v1/probes",
+	http.MethodPut + " /v1/probes/targets",
+}
+
 // Handler is the API.
 func (a *Agent) Handler(ctx context.Context) http.Handler {
+	return a.handler(ctx, Routes)
+}
+
+// ProbesOnlyHandler is the API of `serve --probes-only`: Routes filtered
+// to ProbesOnlyRoutes (allowlisted: a route added to Routes later is 404
+// here until it's named), with the same mTLS and per-route clients.
+func (a *Agent) ProbesOnlyHandler(ctx context.Context) http.Handler {
+	var routes []Route
+	for _, rt := range Routes {
+		if slices.Contains(ProbesOnlyRoutes, rt.Method+" "+rt.Path) {
+			routes = append(routes, rt)
+		}
+	}
+	return a.handler(ctx, routes)
+}
+
+func (a *Agent) handler(ctx context.Context, routes []Route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		i := slices.IndexFunc(Routes, func(rt Route) bool { return rt.Method == r.Method && rt.Path == r.URL.Path })
+		i := slices.IndexFunc(routes, func(rt Route) bool { return rt.Method == r.Method && rt.Path == r.URL.Path })
 		if i < 0 || r.URL.RawQuery != "" {
 			writeJSON(w, http.StatusNotFound, apiErr{Error: "not found"})
 			return
 		}
-		rt := Routes[i]
+		rt := routes[i]
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 			writeJSON(w, http.StatusForbidden, apiErr{Error: "a client certificate is required"})
 			return
