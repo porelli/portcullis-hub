@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -28,7 +29,8 @@ const (
 	EmailCodeTTL = 15 * time.Minute
 	// EmailCodeTries is how many wrong entries a code allows.
 	EmailCodeTries = 5
-	// emailSendsPerHour and emailSendsPerDay limit the sends per person.
+	// emailSendsPerHour and emailSendsPerDay limit the sends per person
+	// and per recipient address.
 	emailSendsPerHour = 3
 	emailSendsPerDay  = 10
 
@@ -81,7 +83,6 @@ type emailCodes struct {
 	mu      sync.Mutex
 	key     []byte
 	pending map[string]*pendingCode // lowercase user
-	sends   map[string][]time.Time  // lowercase user → send times (last 24 h)
 	now     func() time.Time        // nil: time.Now
 	send    func(ctx context.Context, to, subject, body string) error
 }
@@ -126,38 +127,105 @@ func (ec *emailCodes) macLocked(uuid, email, code string) ([]byte, error) {
 	return m.Sum(nil), nil
 }
 
-// reserveLocked counts a send for user at now, or reports false when the
-// limits (3 per hour, 10 per day) are reached. Caller holds ec.mu.
-func (ec *emailCodes) reserveLocked(user string, now time.Time) bool {
-	if ec.sends == nil {
-		ec.sends = map[string][]time.Time{}
+// The send limits (3 per hour, 10 per day) hold per person and per
+// recipient address, and survive a restart: state.yaml email_code_sends
+// keeps, for the last 24 h, the send times under "user:<lowercase user>"
+// and "addr:<hex HMAC-SHA256 of the normalised address, keyed by
+// email_code_salt>" — never an address in plain text.
+
+// sendKeys are user's and email's keys in EmailCodeSends. Caller holds mu
+// (write: it may create the salt).
+func (h *Hub) sendKeysLocked(user, email string) ([2]string, error) {
+	if h.st.EmailCodeSalt == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return [2]string{}, err
+		}
+		h.st.EmailCodeSalt = hex.EncodeToString(b)
 	}
-	kept := ec.sends[user][:0:0]
-	hour := 0
-	for _, t := range ec.sends[user] {
-		if now.Sub(t) < 24*time.Hour {
-			kept = append(kept, t)
+	m := hmac.New(sha256.New, []byte(h.st.EmailCodeSalt))
+	m.Write([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return [2]string{"user:" + user, "addr:" + hex.EncodeToString(m.Sum(nil))}, nil
+}
+
+// reserveSend counts a send to email for user at now (both keys) and
+// saves state.yaml, or answers 429 when either key is at a limit. A state
+// that can't be saved refuses the send (the count must survive a
+// restart). Never under ec.mu.
+func (h *Hub) reserveSend(user, email string, now time.Time) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys, err := h.sendKeysLocked(user, email)
+	if err != nil {
+		return statusErr(http.StatusInternalServerError, "generating a code failed")
+	}
+	if h.st.EmailCodeSends == nil {
+		h.st.EmailCodeSends = map[string][]time.Time{}
+	}
+	// Prune every key's sends older than a day (no stale addresses kept).
+	for k, l := range h.st.EmailCodeSends {
+		kept := l[:0:0]
+		for _, t := range l {
+			if now.Sub(t) < 24*time.Hour {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(h.st.EmailCodeSends, k)
+		} else {
+			h.st.EmailCodeSends[k] = kept
+		}
+	}
+	for _, k := range keys {
+		hour := 0
+		for _, t := range h.st.EmailCodeSends[k] {
 			if now.Sub(t) < time.Hour {
 				hour++
 			}
 		}
+		if hour >= emailSendsPerHour || len(h.st.EmailCodeSends[k]) >= emailSendsPerDay {
+			return errTooManyCodes
+		}
 	}
-	ec.sends[user] = kept
-	if hour >= emailSendsPerHour || len(kept) >= emailSendsPerDay {
-		return false
+	for _, k := range keys {
+		h.st.EmailCodeSends[k] = append(h.st.EmailCodeSends[k], now)
 	}
-	ec.sends[user] = append(kept, now)
-	return true
+	if err := h.saveStateLocked(); err != nil {
+		for _, k := range keys {
+			h.dropSendLocked(k, now)
+		}
+		return errCodeSendFail
+	}
+	return nil
 }
 
-// releaseLocked drops the send counted at at (nothing was sent).
-func (ec *emailCodes) releaseLocked(user string, at time.Time) {
-	l := ec.sends[user]
+// releaseSend drops the send reserved at at (nothing went out) and saves.
+func (h *Hub) releaseSend(user, email string, at time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys, err := h.sendKeysLocked(user, email)
+	if err != nil {
+		return
+	}
+	for _, k := range keys {
+		h.dropSendLocked(k, at)
+	}
+	h.saveLocked()
+}
+
+// dropSendLocked removes one send at at under k. Caller holds mu (write).
+func (h *Hub) dropSendLocked(k string, at time.Time) {
+	l := h.st.EmailCodeSends[k]
 	for i := len(l) - 1; i >= 0; i-- {
 		if l[i].Equal(at) {
-			ec.sends[user] = append(l[:i:i], l[i+1:]...)
-			return
+			l = append(l[:i:i], l[i+1:]...)
+			break
 		}
+	}
+	if len(l) == 0 {
+		delete(h.st.EmailCodeSends, k)
+	} else {
+		h.st.EmailCodeSends[k] = l
 	}
 }
 
@@ -203,28 +271,23 @@ func (h *Hub) StartEmailVerification(ctx context.Context, user string) (expires 
 	ec := &h.emailCodes
 	ec.mu.Lock()
 	now := ec.nowLocked()
-	if !ec.reserveLocked(user, now) {
-		ec.mu.Unlock()
-		return time.Time{}, errTooManyCodes
-	}
 	send := ec.send
 	ec.mu.Unlock()
 	if send == nil {
 		send = h.SendHubMail
 	}
+	if err := h.reserveSend(user, email, now); err != nil {
+		return time.Time{}, err
+	}
 	code, err := newEmailCode()
 	if err != nil {
-		ec.mu.Lock()
-		ec.releaseLocked(user, now)
-		ec.mu.Unlock()
+		h.releaseSend(user, email, now)
 		return time.Time{}, statusErr(http.StatusInternalServerError, "generating a code failed")
 	}
 	if serr := send(ctx, email, emailCodeSubject, emailCodeBody(code)); serr != nil {
 		if errors.Is(serr, ErrNoHubSender) {
 			// Nothing went out: not counted.
-			ec.mu.Lock()
-			ec.releaseLocked(user, now)
-			ec.mu.Unlock()
+			h.releaseSend(user, email, now)
 			return time.Time{}, errEmailNoSender
 		}
 		// It may have gone out: still counted. The cause is logged
@@ -274,11 +337,16 @@ func (h *Hub) ConfirmEmailVerification(ctx context.Context, user, code string) (
 	if merr != nil || !hmac.Equal(mac, p.mac) {
 		p.wrong++
 		left := EmailCodeTries - p.wrong
-		if left <= 0 {
+		exhausted := left <= 0
+		if exhausted {
 			delete(ec.pending, user)
 			left = 0
 		}
 		ec.mu.Unlock()
+		if exhausted {
+			// Used up by wrong entries (never the code or the entries).
+			h.auditOp(directory.Human(user), "user.email_code_exhausted", user, "to="+p.email, nil)
+		}
 		return left, ErrWrongCode
 	}
 	delete(ec.pending, user) // used, whatever the directory answers

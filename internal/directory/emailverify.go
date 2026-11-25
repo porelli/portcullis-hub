@@ -116,23 +116,49 @@ func (s *Service) dropVerified(uuid string) error {
 // (UpdateUser, after LLDAP took it): someone else who may verify it
 // (mayVerify: edit_details re-checked on sn, never through the AI) sets
 // it verified; any other change — your own, the AI's, an emptied email —
-// clears it. A failed
-// write only logs: the record no longer matching the new email already
-// makes it unverified, and an admin's change left unrecorded stays
-// unverified (fail closed). Caller holds s.mu.
-func (s *Service) emailChanged(c *Caller, sn *snapshot, user, uuid, email string) {
+// clears it. A failed clear fails the operation (the email changed, but a
+// record could still name an old address that may come back); a failed
+// verified write only logs: the change stays unverified (fail closed).
+// Caller holds s.mu.
+func (s *Service) emailChanged(c *Caller, sn *snapshot, user, uuid, email string) error {
 	if s.Store == nil {
-		return
+		return nil
 	}
 	cfg, err := s.loadConfig()
 	if err == nil && s.mayVerify(c, user, sn, cfg) && normEmail(email) != "" {
-		err = s.putVerified(uuid, email, "admin:"+c.User)
-	} else {
-		err = s.dropVerified(uuid)
+		if err := s.putVerified(uuid, email, "admin:"+c.User); err != nil {
+			log.Printf("directory: recording %s's email as verified: %v", user, err)
+		}
+		return nil
 	}
-	if err != nil {
-		log.Printf("directory: recording %s's email verification: %v", user, err)
+	if err := s.dropVerified(uuid); err != nil {
+		return &Error{Status: http.StatusServiceUnavailable, Msg: "the email was changed, but clearing its verification failed (" + err.Error() + "): save it again"}
 	}
+	return nil
+}
+
+// pruneVerified drops every record whose account is gone or whose email
+// is no longer the account's LLDAP email (§9.8); reports whether any
+// went. The evaluator runs it every minute under s.mu, so an email
+// changed in LLDAP's own UI and changed back later doesn't count as
+// verified again once a run has seen the change.
+func pruneVerified(cfg *Config, sn *snapshot) bool {
+	if len(cfg.EmailVerified) == 0 {
+		return false
+	}
+	current := make(map[string]string, len(sn.users))
+	for _, u := range sn.users {
+		current[u.UUID] = u.Email
+	}
+	dropped := false
+	for uuid, v := range cfg.EmailVerified {
+		email, ok := current[uuid]
+		if !ok || normEmail(email) == "" || normEmail(email) != normEmail(v.Email) {
+			delete(cfg.EmailVerified, uuid)
+			dropped = true
+		}
+	}
+	return dropped
 }
 
 // MarkEmailVerified is POST /api/directory/users/{u}/email/verified

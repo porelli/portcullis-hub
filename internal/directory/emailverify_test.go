@@ -323,3 +323,86 @@ func TestStalePermissionNotVerified(t *testing.T) {
 		t.Errorf("hera: %+v %v", v, ok)
 	}
 }
+
+// TestVerificationPrunedBySync (fix round 1): the evaluator's run drops a
+// record LLDAP no longer holds — an email changed in LLDAP's own UI, an
+// account deleted outside the Hub — so changing the email back later
+// (A→B→A) doesn't make it verified again.
+func TestVerificationPrunedBySync(t *testing.T) {
+	e := storeEnv(t)
+	e.ll.AddUser("bob", "bob@example.org", "Bob", "")
+	for _, u := range []string{"alice", "bob"} {
+		if err := e.svc.MarkEmailVerified(ctx, asRoot, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := "alice.b@example.org"
+	if err := e.svc.LLDAP.UpdateUser(ctx, "alice", &b, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.LLDAP.DeleteUser(ctx, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Evaluate(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := verifiedRecord(t, e, "alice"); ok {
+		t.Errorf("alice's record survived the LLDAP change: %+v", v)
+	}
+	cfg, _ := e.svc.Store.Load()
+	if len(cfg.EmailVerified) != 0 {
+		t.Errorf("records left: %+v", cfg.EmailVerified)
+	}
+	// A→B→A: back to the address that was verified.
+	a := "alice@example.org"
+	if err := e.svc.LLDAP.UpdateUser(ctx, "alice", &a, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := verifiedEmails(t, e)["alice"]; ok {
+		t.Error("A→B→A: alice's old address counts as verified again")
+	}
+	// A record that still holds is kept.
+	if err := e.svc.MarkEmailVerified(ctx, asRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Evaluate(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := verifiedRecord(t, e, "alice"); !ok {
+		t.Error("a current record was pruned")
+	}
+}
+
+func TestDeleteUserDropsVerification(t *testing.T) {
+	e := storeEnv(t)
+	e.ll.AddUser("bob", "bob@example.org", "Bob", "")
+	if err := e.svc.MarkEmailVerified(ctx, asRoot, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	uuid := e.ll.UUIDOf("bob")
+	if _, err := e.svc.DeleteUser(ctx, asRoot, "bob", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := e.svc.Store.Load()
+	if _, ok := cfg.EmailVerified[uuid]; ok {
+		t.Error("the deleted account's record is kept")
+	}
+}
+
+// TestFailedVerificationClearFails (fix round 1): your own email change
+// whose clearing can't be written fails the operation (never only logged).
+func TestFailedVerificationClearFails(t *testing.T) {
+	e := storeEnv(t)
+	e.ll.AddUser("rita", "rita@example.org", "Rita", "", "lldap_admin")
+	if err := e.svc.MarkEmailVerified(ctx, &directory.Caller{User: "rita", Admin: true}, "root"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(e.svc.Store.Path)
+	os.Chmod(e.svc.Store.Path, 0o400)
+	os.Chmod(dir, 0o500)
+	t.Cleanup(func() { os.Chmod(dir, 0o700); os.Chmod(e.svc.Store.Path, 0o600) })
+	err := e.svc.UpdateUser(ctx, asRoot, "root", strptr("root.new@example.org"), nil)
+	if status(err) != 503 || !strings.Contains(err.Error(), "clearing its verification failed") {
+		t.Errorf("failed clear = %v", err)
+	}
+}

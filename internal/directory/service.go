@@ -1491,7 +1491,7 @@ func (s *Service) CreateUser(ctx context.Context, c *Caller, req CreateRequest) 
 		}
 		// Set by someone with edit_details: stored verified (§9.8), once
 		// nothing can delete the new user again.
-		if cfg != nil && s.mayVerify(c, req.Username, sn, cfg) {
+		if cfg != nil && req.Email != "" && s.mayVerify(c, req.Username, sn, cfg) {
 			uuid := passwordUUID
 			if uuid == "" {
 				uuid = s.uuidOf(ctx, req.Username)
@@ -1652,7 +1652,7 @@ func (s *Service) UpdateUser(ctx context.Context, c *Caller, username string, em
 		// Only a change of the email touches its verification (§9.8):
 		// saving the same email never verifies it.
 		if email != nil && normEmail(*email) != normEmail(u.Email) {
-			s.emailChanged(c, sn, u.ID, u.UUID, *email)
+			return s.emailChanged(c, sn, u.ID, u.UUID, *email)
 		}
 		return nil
 	})
@@ -1746,7 +1746,9 @@ func (s *Service) DeleteUser(ctx context.Context, c *Caller, username, confirm s
 				if refs := referencesTo(cfg, sn, u.ID); len(refs) > 0 {
 					res.Warnings = append(res.Warnings, fmt.Sprintf("%s is still named in: %s — update these", u.ID, strings.Join(refs, ", ")))
 				}
-				if len(purgeUser(cfg, u.ID)) > 0 {
+				_, verified := cfg.EmailVerified[u.UUID]
+				delete(cfg.EmailVerified, u.UUID) // §9.8: the account is gone
+				if len(purgeUser(cfg, u.ID)) > 0 || verified {
 					err = s.Store.Save(cfg)
 				}
 			}

@@ -317,6 +317,13 @@ type AppState struct {
 	// §19.14), keyed by instance id or MailSenderHub. Never a password
 	// (those are on hub_secrets).
 	MailSenders map[string]MailSender `json:"mail_senders,omitempty" yaml:"mail_senders,omitempty"`
+	// EmailCodeSends: the email-verification code sends of the last 24 h
+	// (contract §9.8 send limits, kept across restarts): "user:<lowercase
+	// user>" and "addr:<hex HMAC-SHA256 of the normalised address, keyed
+	// by EmailCodeSalt>" → send times (UTC). Never an address or a code.
+	EmailCodeSends map[string][]time.Time `json:"email_code_sends,omitempty" yaml:"email_code_sends,omitempty"`
+	// EmailCodeSalt keys the address hashes above (hex, made on first use).
+	EmailCodeSalt string `json:"email_code_salt,omitempty" yaml:"email_code_salt,omitempty"`
 	// SSH is Hub → SSH access (contract §18.12; off by default).
 	SSH SSHState `json:"ssh" yaml:"ssh"`
 

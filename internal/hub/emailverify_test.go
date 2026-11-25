@@ -22,12 +22,16 @@ type fakeVerifier struct {
 	mu       sync.Mutex
 	uuid     string
 	email    string
-	recorded []string // "uuid email"
+	recorded []string          // "uuid email"
+	others   map[string]string // more people: user → email
 }
 
 func (v *fakeVerifier) OwnEmail(_ context.Context, user string) (string, string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if e, ok := v.others[user]; ok {
+		return "uuid-" + user, e, nil
+	}
 	if user != "alice" {
 		return "", "", &directory.Error{Status: 404, Msg: "no such user"}
 	}
@@ -53,6 +57,7 @@ func (v *fakeVerifier) setEmail(e string) {
 type sentMail struct{ to, subject, body string }
 
 type codeFixture struct {
+	f     *fixture
 	h     *Hub
 	v     *fakeVerifier
 	audit *fakeAudit
@@ -65,7 +70,7 @@ type codeFixture struct {
 func newCodeFixture(t *testing.T) *codeFixture {
 	t.Helper()
 	f := newFixture(t)
-	c := &codeFixture{h: f.h, v: &fakeVerifier{uuid: "uuid-alice", email: "alice@example.org"}, audit: &fakeAudit{}, now: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
+	c := &codeFixture{f: f, h: f.h, v: &fakeVerifier{uuid: "uuid-alice", email: "alice@example.org"}, audit: &fakeAudit{}, now: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
 	c.h.SetAudit(c.audit)
 	c.h.SetEmailVerifier(c.v)
 	c.h.SetEmailCodeClockForTest(func() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now })
@@ -345,5 +350,82 @@ func TestCodeNeverStoredOrAudited(t *testing.T) {
 	}
 	if bytes.Contains(p.mac, []byte(code)) {
 		t.Error("the code in memory")
+	}
+}
+
+// TestSendLimitsPerAddress (fix round 1): the limits hold per recipient
+// address too (normalised), whoever asks; they survive a Hub restart, and
+// state.yaml keeps no address in plain text.
+func TestSendLimitsPerAddress(t *testing.T) {
+	c := newCodeFixture(t)
+	ctx := context.Background()
+	c.v.others = map[string]string{"bob": " ALICE@Example.org ", "carol": "carol@example.org"}
+	for i := 0; i < 3; i++ {
+		if _, err := c.h.StartEmailVerification(ctx, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// bob's (stale) copy of alice's address: the address's limit.
+	if _, err := c.h.StartEmailVerification(ctx, "bob"); statusOf(err) != 429 {
+		t.Fatalf("same address, another person = %v", err)
+	}
+	if _, err := c.h.StartEmailVerification(ctx, "carol"); err != nil {
+		t.Fatalf("another address = %v", err)
+	}
+	raw, err := os.ReadFile(c.h.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "example.org") || !strings.Contains(string(raw), "email_code_sends:") || !strings.Contains(string(raw), "addr:") {
+		t.Errorf("state.yaml:\n%s", raw)
+	}
+	// A restart keeps the counts (per person and per address).
+	h2 := restart(t, c.f, "", c.audit, nil)
+	h2.SetEmailVerifier(c.v)
+	h2.SetEmailCodeClockForTest(func() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now })
+	h2.SetHubMailSenderForTest(func(context.Context, string, string, string) error { return nil })
+	if _, err := h2.StartEmailVerification(ctx, "alice"); statusOf(err) != 429 {
+		t.Errorf("alice after a restart = %v", err)
+	}
+	c.v.setEmail("alice.new@example.org")
+	if _, err := h2.StartEmailVerification(ctx, "alice"); statusOf(err) != 429 {
+		t.Errorf("alice's person limit after a restart = %v", err)
+	}
+	c.advance(time.Hour + time.Second)
+	if _, err := h2.StartEmailVerification(ctx, "bob"); err != nil {
+		t.Errorf("an hour later = %v", err)
+	}
+	// Past a day nothing is kept.
+	c.advance(25 * time.Hour)
+	if _, err := h2.StartEmailVerification(ctx, "carol"); err != nil {
+		t.Fatal(err)
+	}
+	h2.mu.RLock()
+	n := len(h2.st.EmailCodeSends)
+	h2.mu.RUnlock()
+	if n != 2 {
+		t.Errorf("%d keys kept a day later, want carol's 2", n)
+	}
+}
+
+// TestCodeExhaustedAudited (fix round 1): the fifth wrong entry is
+// audited user.email_code_exhausted, never with the code.
+func TestCodeExhaustedAudited(t *testing.T) {
+	c := newCodeFixture(t)
+	if _, err := c.h.StartEmailVerification(context.Background(), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	code := c.lastCode(t)
+	for i := 0; i < 5; i++ {
+		c.h.ConfirmEmailVerification(context.Background(), "alice", wrong(code))
+	}
+	e := c.audit.last()
+	if e.Action != "user.email_code_exhausted" || e.Actor != "alice" || e.Target != "alice" || e.Result != "ok" {
+		t.Errorf("audit %+v", e)
+	}
+	for _, x := range c.audit.entries {
+		if strings.Contains(x.Detail+x.Error, code) || strings.Contains(x.Detail+x.Error, wrong(code)) {
+			t.Errorf("a code in the audit: %+v", x)
+		}
 	}
 }

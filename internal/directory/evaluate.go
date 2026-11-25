@@ -394,6 +394,9 @@ func (s *Service) evaluateLocked(ctx context.Context, now time.Time) (*EvalRepor
 	guarding := s.guardingGroups(cfg)
 	newState := map[string]map[string]bool{} // replaces s.ruleState: only current rule groups
 	dirty := cfg.dropEndedGrace(now)
+	// Verified emails no longer held (§9.8): an LLDAP-side change or a
+	// deleted account drops the record at the next run.
+	dirty = pruneVerified(cfg, sn) || dirty
 
 	names := make([]string, 0, len(cfg.Groups))
 	for name := range cfg.Groups {
