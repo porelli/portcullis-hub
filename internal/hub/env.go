@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
+	"github.com/portcullis/hub/internal/keycloak"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -753,4 +755,125 @@ func (h *Hub) gateIP() string {
 		}
 	}
 	return ip.String()
+}
+
+// adoptTemplateEnvAdditions brings a template update to an instance whose
+// .env already exists (contract §2, "Template updates"): every manifest
+// env entry the file lacks is written (a generate: random one with a
+// fresh value; nothing existing changes), and every Keycloak client whose
+// secret_env is among them — a client the template added — is registered
+// (the AI page's ai_client through its own path) and its access role
+// ensured before anything starts, so the app never runs with a secret
+// Keycloak doesn't know. A failed registration takes the new variables
+// out again (the next start retries from scratch) and refuses the start:
+// 409 for a client someone else owns, else 502. Without Keycloak the
+// variables are written, as an enable without Keycloak does. Outside mu
+// (it takes it); the caller holds the instance's app lock.
+func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Template) error {
+	h.mu.Lock()
+	live := t
+	if l := h.findLocked(t.ID); l != nil {
+		c := *l
+		live = &c
+	}
+	path := h.envPath(live.ID)
+	if _, err := os.Stat(path); err != nil {
+		h.mu.Unlock()
+		return nil // not generated yet: enable writes it whole
+	}
+	cur := readEnvRaw(path)
+	added := map[string]string{}
+	for _, v := range live.Manifest.Env {
+		if _, ok := cur[v.Key]; ok {
+			continue
+		}
+		val := ""
+		if v.Generate == "random" {
+			s, err := randomSecret()
+			if err != nil {
+				h.mu.Unlock()
+				return err
+			}
+			val = s
+		}
+		added[v.Key] = val
+	}
+	if len(added) == 0 {
+		h.mu.Unlock()
+		return nil
+	}
+	if err := setEnvVars(path, added, false); err != nil {
+		h.mu.Unlock()
+		return statusErr(500, "writing the variables the template added: %v", err)
+	}
+	h.mu.Unlock()
+	keys := slices.Sorted(maps.Keys(added))
+	var regs []templates.KeycloakClient
+	for _, c := range live.Manifest.Clients {
+		if c.SecretEnv != "" {
+			if _, ok := added[c.SecretEnv]; ok {
+				regs = append(regs, c)
+			}
+		}
+	}
+	if len(regs) == 0 || h.idp == nil {
+		log.Printf("instance %s: the template added %s: written to its .env", live.ID, strings.Join(keys, ", "))
+		return nil
+	}
+	undo := func(cause error) error {
+		h.mu.Lock()
+		rerr := removeEnvKeys(path, keys)
+		h.mu.Unlock()
+		if rerr != nil {
+			log.Printf("instance %s: taking out the variables the template added failed: %v", live.ID, rerr)
+		}
+		return cause
+	}
+	var names []string
+	for _, c := range regs {
+		var err error
+		if c.AIClient {
+			_, err = h.ensureInstanceAIClient(ctx, live)
+		} else {
+			_, err = h.idp.RegisterClient(ctx, h.clientSpec(live, c))
+		}
+		var conflict *keycloak.ConflictError
+		switch {
+		case errors.As(err, &conflict):
+			return undo(&StatusError{Status: 409, Err: fmt.Errorf("%s was not started: the template added Keycloak client %s, which isn't this instance's: %w", live.ID, c.ClientID, err)})
+		case err != nil:
+			return undo(&StatusError{Status: 502, Err: fmt.Errorf("%s was not started: the template added Keycloak client %s and registering it failed (the new variables were not kept; starting again retries): %v", live.ID, c.ClientID, err)})
+		}
+		names = append(names, c.ClientID)
+	}
+	if err := h.ensureAccess(ctx, live); err != nil {
+		return undo(&StatusError{Status: 502, Err: fmt.Errorf("%s was not started: the access role of the Keycloak clients the template added: %v", live.ID, err)})
+	}
+	log.Printf("instance %s: the template added %s: written to its .env; Keycloak clients %s registered", live.ID, strings.Join(keys, ", "), strings.Join(names, ", "))
+	return nil
+}
+
+// removeEnvKeys drops every line of keys from envFile (the env overrides'
+// block untouched).
+func removeEnvKeys(envFile string, keys []string) error {
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		return err
+	}
+	drop := map[string]bool{}
+	for _, k := range keys {
+		drop[k] = true
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	lines, block := splitEnvOverrides(lines)
+	out := make([]string, 0, len(lines)+len(block))
+	for _, line := range lines {
+		k, _, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok && drop[k] {
+			continue
+		}
+		out = append(out, line)
+	}
+	out = append(out, block...)
+	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(out, "\n")+"\n"), 0600)
 }

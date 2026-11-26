@@ -192,6 +192,12 @@ func (h *Hub) prepareUpCtx(ctx context.Context, t *templates.Template) (*templat
 		}
 		return nil, statusErr(500, "override generation failed: %v", err)
 	}
+	// A template update's new variables and Keycloak clients (contract
+	// §2 "Template updates"): written and registered before anything
+	// starts; a failed registration refuses the start.
+	if err := h.adoptTemplateEnvAdditions(ctx, live); err != nil {
+		return nil, err
+	}
 	if server != "" {
 		// Every image pinned by digest, overrides included (§11.7):
 		// refused before the relays or the worker see anything.
