@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/portcullis/hub/internal/hub"
 )
 
 // TestAIDeleteAlwaysBacksUp (user ruling 2026-11-26): the AI channel
@@ -46,5 +50,50 @@ func TestAIDeleteAlwaysBacksUp(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestAIRetryOfNoBackupDeleteRefused (review I1): an administrator's
+// no-backup delete that stopped part-way can't be finished through the
+// AI channel: delete_instance (after its confirmation) is refused with a
+// message that an administrator must finish it in the Hub; nothing
+// changes; the route with "backup": false finishes it.
+func TestAIRetryOfNoBackupDeleteRefused(t *testing.T) {
+	e := newToolEnv(t, nil, nil)
+	// The files step fails: a non-empty directory where a file is removed.
+	block := filepath.Join(e.data, "ops", "secretapp.hosts.json")
+	if err := os.MkdirAll(filepath.Join(block, "x"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := e.do(t, "root", "DELETE", "/api/instances/secretapp", `{"confirm":"secretapp","backup":false}`); code != 202 {
+		t.Fatalf("delete = %d %s", code, b)
+	}
+	waitIdle(t, e.s.Hub, "secretapp")
+	if r := e.s.Hub.LastOp("secretapp"); r == nil || r.OK {
+		t.Fatalf("the delete didn't fail part-way: %+v", r)
+	}
+	v, ok := e.s.Hub.InstanceView("secretapp")
+	if !ok || v.State != hub.StateDeleting {
+		t.Fatalf("instance = %+v %v", v, ok)
+	}
+	os.RemoveAll(block)
+	txt, isErr, _ := e.tool(t, "delete_instance", map[string]any{"id": "secretapp"})
+	if !isErr || !strings.Contains(txt, "409") || !strings.Contains(txt, "started without a backup by an administrator") {
+		t.Fatalf("delete_instance = %q %v, want the 409 refusal", txt, isErr)
+	}
+	waitIdle(t, e.s.Hub, "secretapp")
+	if v, ok := e.s.Hub.InstanceView("secretapp"); !ok || v.State != hub.StateDeleting {
+		t.Errorf("the refused AI retry changed the instance: %+v %v", v, ok)
+	}
+	if list, _ := e.s.Hub.ListBackups(""); len(list) != 0 {
+		t.Errorf("archives = %+v", list)
+	}
+	// An administrator finishes it, saying "no backup" again.
+	if code, b := e.do(t, "root", "DELETE", "/api/instances/secretapp", `{"confirm":"secretapp","backup":false}`); code != 202 {
+		t.Fatalf("admin retry = %d %s", code, b)
+	}
+	waitIdle(t, e.s.Hub, "secretapp")
+	if r := e.s.Hub.LastOp("secretapp"); r == nil || !r.OK || r.Result["no_backup"] != "true" {
+		t.Fatalf("admin retry = %+v", r)
 	}
 }

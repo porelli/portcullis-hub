@@ -109,6 +109,11 @@ type Instance struct {
 	// it from (state InstanceRestoring, no pre-restore backup): an
 	// interrupted one is removed again at the next start.
 	RestoreAs string `json:"restore_as,omitempty" yaml:"restore_as,omitempty"`
+	// DeleteNoBackup: the guarded delete in progress (InstanceDeleting)
+	// was started without a backup, by an administrator's explicit
+	// choice (contract §11.4): a retry must say so again (any other is
+	// refused, the AI channel's included).
+	DeleteNoBackup bool `json:"delete_no_backup,omitempty" yaml:"delete_no_backup,omitempty"`
 	// PreRestorePick is the sign-in template pick before a same-instance
 	// restore (InstanceRestoring): a rollback puts it back, so it counts
 	// as a use of its template until the restore ends.

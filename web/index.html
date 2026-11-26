@@ -4824,8 +4824,9 @@
         '<div class="inst-form" style="margin-top:0.75rem"><label class="block" for="inst-del-confirm">Type <code>' + escapeHtml(id) + '</code> to confirm</label>' +
         '<input type="text" id="inst-del-confirm" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(id) + '"></div>' +
         // Delete without a backup (§11.4): an explicit, opt-in choice; off by default.
-        (retry ? '' : '<div class="inst-form" style="margin-top:0.5rem"><label><input type="checkbox" data-inst-del-nobackup> Delete without a backup</label>' +
-          '<div class="public-danger" data-inst-del-nobackup-warn hidden>No backup will be taken: the data of <code>' + escapeHtml(id) + '</code> is gone for good and can\'t be restored.</div></div>') +
+        '<div class="inst-form" style="margin-top:0.5rem"><label><input type="checkbox" data-inst-del-nobackup> ' + (retry ? 'Continue without a backup' : 'Delete without a backup') + '</label>' +
+          (retry ? '<div class="settings-empty">Tick it only to finish a delete an administrator started without a backup: the Hub refuses that retry otherwise. A delete that took a backup continues with it.</div>' : '') +
+          '<div class="public-danger" data-inst-del-nobackup-warn hidden>No backup will be taken: the data of <code>' + escapeHtml(id) + '</code> is gone for good and can\'t be restored.</div></div>' +
         '<div id="inst-del-result"></div>' +
         '<div class="inst-row"><button type="button" class="btn btn-danger btn-sm" data-inst-delete="1" disabled style="background:#ef4444;color:#fff">' + deleteButtonText(id, false) + '</button></div></div>';
       pane.innerHTML = h;
@@ -4962,8 +4963,10 @@
       return '<div class="inst-panel inst-form"><strong>Delete the backup <code>' + escapeHtml(archive) + '</code> for good?</strong>' +
         '<ul><li>The archive is removed from the Hub\'s backups directory: it can\'t be restored afterwards.</li>' +
         (exists ? '' : '<li class="public-danger"><code>' + escapeHtml(inst) + '</code> was deleted: this may be the only copy of its data.</li>') +
-        '<li>Copies already shipped offsite by <code>./portcullis backup</code> are not touched.</li></ul>' +
-        '<div class="inst-row"><button type="button" class="btn btn-danger btn-sm" data-bk-go-delete="' + escapeHtml(archive) + '">Delete this backup</button>' +
+        '<li>Copies already in core backups (<code>./portcullis backup</code>, <code>--offsite</code>) are not touched.</li></ul>' +
+        '<label class="block">Type <code>' + escapeHtml(archive) + '</code> to confirm</label>' +
+        '<input type="text" data-bk-del-confirm="' + escapeHtml(archive) + '" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(archive) + '">' +
+        '<div class="inst-row"><button type="button" class="btn btn-danger btn-sm" data-bk-go-delete="' + escapeHtml(archive) + '" disabled>Delete this backup</button>' +
         '<button type="button" class="btn btn-secondary btn-sm" data-bk-cancel="1">Cancel</button></div>' +
         '<div class="inst-restore-result"></div></div>';
     }
@@ -4971,11 +4974,13 @@
       const archive = btn.dataset.bkGoDelete;
       const panel = btn.closest('.inst-panel');
       const out = panel.querySelector('.inst-restore-result');
+      const typed = panel.querySelector('[data-bk-del-confirm]').value.trim();
+      if (typed !== archive) { out.innerHTML = errorBox(new Error('type the archive name (' + archive + ') to confirm')); return; }
       const pane = btn.closest('[data-ipane]');
       panel.querySelectorAll('button').forEach(b => b.disabled = true);
       out.innerHTML = '';
       try {
-        await apiCall('/api/backups/' + archive.split('/').map(encodeURIComponent).join('/'), 'DELETE', { confirm: archive });
+        await apiCall('/api/backups/' + archive.split('/').map(encodeURIComponent).join('/'), 'DELETE', { confirm: typed });
         showToast('Backup ' + archive + ' deleted', 'success');
         if (pane) await loadBackups(pane, pane.closest('#inst-modal-box') ? '' : (pageCtx ? pageCtx.id : ''));
       } catch (err) {
@@ -5112,6 +5117,11 @@
     }
     document.addEventListener('input', e => {
       const t = e.target;
+      if (t.matches && t.matches('[data-bk-del-confirm]')) {
+        const btn = t.closest('.inst-panel').querySelector('[data-bk-go-delete]');
+        if (btn) btn.disabled = t.value.trim() !== t.dataset.bkDelConfirm;
+        return;
+      }
       if (t.id === 'inst-del-confirm') {
         const btn = document.querySelector('#instance-page [data-inst-delete]');
         if (btn && pageCtx) btn.disabled = t.value.trim() !== pageCtx.id;

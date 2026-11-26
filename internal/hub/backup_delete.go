@@ -80,6 +80,15 @@ func (h *Hub) DeleteBackup(archive, confirm string, actor directory.Actor) (err 
 	if confirm != archive {
 		return statusErr(400, "type the archive name (%s) to confirm the delete", archive)
 	}
+	// The archive's instance's app lock (review I3): no delete, move,
+	// backup or restore of it runs meanwhile — the window between one
+	// writing its archive and recording it in state is covered, and no
+	// starting backup loses its directory. Busy: 409, nothing removed.
+	unlock, lerr := h.lockApp(mm[1])
+	if lerr != nil {
+		return statusErr(409, "%s is busy (an operation on it is running): delete %s when it has finished", mm[1], archive)
+	}
+	defer unlock()
 	// Only what the list shows (a regular file, its manifest readable and
 	// naming its directory's instance).
 	list, err := h.ListBackups(mm[1])

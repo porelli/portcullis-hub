@@ -80,6 +80,12 @@ func (h *Hub) DeleteInstanceWith(id, confirm string, actor directory.Actor, o De
 	return res, err
 }
 
+// noBackupRetryRefusal is the 409 a plain retry of a no-backup delete
+// gets: the AI channel can't finish it, an administrator can.
+func noBackupRetryRefusal(id string) string {
+	return "the delete of " + id + " was started without a backup by an administrator and stopped part-way: only an administrator can finish it, in the Hub (the instance's Delete tab, with \"Delete without a backup\" ticked); nothing was changed"
+}
+
 // deleteCtx carries o into the delete.
 func deleteCtx(ctx context.Context, o DeleteOptions) context.Context {
 	if o.NoBackup {
@@ -162,7 +168,7 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	res = &DeleteResult{}
 	defer func() {
 		detail := "backup=" + res.Backup
-		if res.NoBackup {
+		if res.NoBackup || (res.Backup == "" && skippingBackup(ctx)) {
 			// The admin's choice is on the record (§11.4): no archive.
 			detail = "backup=none no_backup=true"
 		}
@@ -219,6 +225,13 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 		if !still {
 			return res, statusErr(409, "%s isn't orphaned any more (its server is back or it was restored elsewhere): nothing was forgotten", id)
 		}
+	}
+	// A delete an administrator started without a backup is finished only
+	// by one who says so again (review I1): a retry that asks for the
+	// default (the browser's plain retry, the MCP's delete_instance) never
+	// silently completes it without one.
+	if tg.entry.State == state.InstanceDeleting && tg.entry.DeleteNoBackup && !skippingBackup(ctx) && !forgetting(ctx) {
+		return res, statusErr(409, "%s", noBackupRetryRefusal(id))
 	}
 	// A model provider pointing at it (a litellm provider's instance,
 	// §15.12) would point nowhere: refused until it is deleted or
@@ -303,7 +316,7 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		h.mu.Unlock()
 	} else if tg.entry.State == state.InstanceDeleting {
 		res.Backup = tg.entry.Backup
-		res.NoBackup = tg.entry.Backup == ""
+		res.NoBackup = tg.entry.DeleteNoBackup
 	} else {
 		p.Start(StepBackup)
 		archive := ""
@@ -349,7 +362,7 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		if e.ID == "" {
 			e = state.Instance{ID: id, Template: tg.templateID}
 		}
-		e.State, e.Backup = state.InstanceDeleting, archive
+		e.State, e.Backup, e.DeleteNoBackup = state.InstanceDeleting, archive, archive == ""
 		h.st.Instances[id] = e
 		// Disabled with it (the backup left it stopped): nothing may
 		// start it again, drift included.
@@ -513,8 +526,11 @@ func (h *Hub) DeletePlan(id string) ([]string, error) {
 	lines := []string{"Takes a backup, then permanently removes its " + what + "."}
 	if d.tg.entry.State == state.InstanceDeleting {
 		kept := "its backup " + d.tg.entry.Backup + " is kept"
-		if d.tg.entry.Backup == "" {
-			kept = "it was started without a backup"
+		switch {
+		case d.tg.entry.DeleteNoBackup:
+			kept = "an administrator started it without a backup: only an administrator can finish it, in the Hub"
+		case d.tg.entry.Backup == "":
+			kept = "it has no backup"
 		}
 		lines[0] = "Continues an unfinished delete (" + kept + "), permanently removing its " + what + "."
 	}

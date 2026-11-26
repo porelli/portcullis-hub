@@ -52,8 +52,10 @@ renderInstDelete(pane);`,
 	if strings.Contains(first, "checked") {
 		t.Error("the no-backup checkbox is checked by default")
 	}
-	if strings.Contains(m["retry"].(string), "data-inst-del-nobackup") {
-		t.Error("a retry offers the no-backup choice")
+	// A retry offers it as "Continue without a backup" (review I1: a plain
+	// retry of a no-backup delete is refused), unchecked.
+	if retry := m["retry"].(string); !strings.Contains(retry, "Continue without a backup") || !strings.Contains(retry, `<input type="checkbox" data-inst-del-nobackup>`) || strings.Contains(retry, "checked") {
+		t.Errorf("the retry pane's choice:\n%s", retry)
 	}
 	if m["on"] != "Delete grafana without a backup" || m["off"] != "Back up and delete grafana" || m["esc"] != "Delete &lt;b&gt; without a backup" {
 		t.Errorf("button texts = %v / %v / %v", m["on"], m["off"], m["esc"])
@@ -69,17 +71,19 @@ renderInstDelete(pane);`,
 	}
 }
 
-// TestHubDeleteBackupUI (§11.5): each backup row has a Delete… button;
-// its panel asks before deleting, warns when the instance is gone (the
-// only copy), escapes the names, and the route call carries the typed
-// confirmation; no inline handlers anywhere.
+// TestHubDeleteBackupUI (§11.5, review I2): each backup row has a
+// Delete… button; its panel asks for the archive name typed (the button
+// starts disabled, the input enables it only on an exact match, the call
+// sends what was typed), warns when the instance is gone (the only
+// copy) and escapes the names; no inline handlers anywhere.
 func TestHubDeleteBackupUI(t *testing.T) {
 	got := deleteJS(t, ``, `{gone: deleteBackupPanelHtml('grafana-b/20261126T025030Z.tar', 'grafana-b', false),
   live: deleteBackupPanelHtml('grafana-b/20261126T025030Z.tar', 'grafana-b', true),
   esc: deleteBackupPanelHtml('<x>/y', '<x>', false)}`)
 	m := got.(map[string]any)
 	gone, live := m["gone"].(string), m["live"].(string)
-	for _, want := range []string{`data-bk-go-delete="grafana-b/20261126T025030Z.tar"`, `data-bk-cancel="1"`, "for good", "only copy of its data"} {
+	for _, want := range []string{`data-bk-go-delete="grafana-b/20261126T025030Z.tar" disabled>Delete this backup</button>`, `data-bk-cancel="1"`, "for good", "only copy of its data",
+		`<input type="text" data-bk-del-confirm="grafana-b/20261126T025030Z.tar"`, "Type <code>grafana-b/20261126T025030Z.tar</code> to confirm"} {
 		if !strings.Contains(gone, want) {
 			t.Errorf("the panel lacks %q:\n%s", want, gone)
 		}
@@ -96,12 +100,59 @@ func TestHubDeleteBackupUI(t *testing.T) {
 		t.Error("the backups table has no Delete… button")
 	}
 	run := hubFunc(t, page, "runDeleteBackup")
-	if !strings.Contains(run, "'/api/backups/' + archive.split('/').map(encodeURIComponent).join('/'), 'DELETE', { confirm: archive }") {
+	if !strings.Contains(run, "'/api/backups/' + archive.split('/').map(encodeURIComponent).join('/'), 'DELETE', { confirm: typed }") ||
+		!strings.Contains(run, "if (typed !== archive)") {
 		t.Errorf("runDeleteBackup's call:\n%s", run)
 	}
 	for _, fn := range []string{"renderInstDelete", "deleteBackupPanelHtml", "loadBackups"} {
 		if strings.Contains(hubFunc(t, page, fn), " onclick=") || strings.Contains(hubFunc(t, page, fn), " onchange=") {
 			t.Errorf("%s generates inline handlers", fn)
 		}
+	}
+}
+
+// TestHubDeleteBackupTypedRun (review I2): runDeleteBackup sends nothing
+// while the typed name differs from the archive (an error instead), and
+// sends exactly the typed name when it matches.
+func TestHubDeleteBackupTypedRun(t *testing.T) {
+	page := hubIndex(t)
+	src := `const calls = [];
+async function apiCall(url, method, body) { calls.push({url, method, body}); return {}; }
+function errorBox(e) { return 'ERR:' + e.message; }
+function showToast() {}
+async function loadBackups() {}
+let pageCtx = null;
+function panelWith(typed) {
+  const out = {innerHTML: ''};
+  const input = {value: typed};
+  const buttons = [{disabled: false}];
+  const panel = {querySelector: s => s === '.inst-restore-result' ? out : input, querySelectorAll: () => buttons};
+  return {btn: {dataset: {bkGoDelete: 'grafana-b/20261126T025030Z.tar'}, closest: s => s === '.inst-panel' ? panel : null}, out};
+}
+` + hubFunc(t, page, "runDeleteBackup") + `
+(async () => {
+  const a = panelWith('grafana-b/20261126T025030Z'), b = panelWith(' grafana-b/20261126T025030Z.tar ');
+  await runDeleteBackup(a.btn);
+  const before = calls.length;
+  await runDeleteBackup(b.btn);
+  process.stdout.write(JSON.stringify({before, err: a.out.innerHTML, calls}));
+})();
+`
+	var got struct {
+		Before int
+		Err    string
+		Calls  []struct {
+			URL, Method string
+			Body        map[string]string
+		}
+	}
+	if err := json.Unmarshal([]byte(runNode(t, src)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Before != 0 || !strings.Contains(got.Err, "type the archive name") {
+		t.Errorf("a wrong name was sent: before=%d err=%q", got.Before, got.Err)
+	}
+	if len(got.Calls) != 1 || got.Calls[0].URL != "/api/backups/grafana-b/20261126T025030Z.tar" || got.Calls[0].Method != "DELETE" || got.Calls[0].Body["confirm"] != "grafana-b/20261126T025030Z.tar" {
+		t.Errorf("calls = %+v", got.Calls)
 	}
 }

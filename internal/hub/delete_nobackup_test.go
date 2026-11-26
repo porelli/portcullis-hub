@@ -70,9 +70,11 @@ func TestDeleteDefaultStillBacksUp(t *testing.T) {
 	}
 }
 
-// TestDeleteNoBackupRetry: a no-backup delete that fails part-way stays
-// "deleting" with no archive; its retry (any options) takes none and
-// still records no_backup.
+// TestDeleteNoBackupRetry (review I1): a no-backup delete that fails
+// part-way stays "deleting" with no archive and DeleteNoBackup set. A
+// plain retry (the MCP's delete_instance, the browser's retry without the
+// choice) is refused 409 before anything changes; only a retry that says
+// "no backup" again finishes it, still without an archive.
 func TestDeleteNoBackupRetry(t *testing.T) {
 	f, audit, groups := grafanaB(t)
 	groups.delErr = errors.New("lldap down")
@@ -84,14 +86,31 @@ func TestDeleteNoBackupRetry(t *testing.T) {
 	f.h.mu.RLock()
 	e := f.h.st.Instances["grafana-b"]
 	f.h.mu.RUnlock()
-	if e.State != state.InstanceDeleting || e.Backup != "" {
+	if e.State != state.InstanceDeleting || e.Backup != "" || !e.DeleteNoBackup {
 		t.Fatalf("entry = %+v", e)
 	}
-	if lines, _ := f.h.DeletePlan("grafana-b"); len(lines) == 0 || !strings.Contains(lines[0], "started without a backup") {
+	if st, _ := state.Load(f.h.statePath()); !st.Instances["grafana-b"].DeleteNoBackup {
+		t.Error("delete_no_backup not persisted")
+	}
+	if lines, _ := f.h.DeletePlan("grafana-b"); len(lines) == 0 || !strings.Contains(lines[0], "without a backup") {
 		t.Errorf("plan = %v", lines)
 	}
 	groups.delErr = nil
-	res, err := f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("root"))
+	n := len(groups.Calls())
+	_, err = f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("root"))
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "only an administrator can finish it") {
+		t.Fatalf("plain retry = %v, want 409", err)
+	}
+	f.h.mu.RLock()
+	e2 := f.h.st.Instances["grafana-b"]
+	f.h.mu.RUnlock()
+	if e2.State != state.InstanceDeleting || len(groups.Calls()) != n {
+		t.Errorf("a refused retry changed something: %+v %v", e2, groups.Calls()[n:])
+	}
+	if a := audit.lastOf("instance.delete"); a.Result != "refused" {
+		t.Errorf("audit of the refused retry = %+v", a)
+	}
+	res, err := f.h.DeleteInstanceWith("grafana-b", "grafana-b", directory.Human("root"), DeleteOptions{NoBackup: true})
 	if err != nil || res.Backup != "" || !res.NoBackup {
 		t.Fatalf("retry = %+v %v", res, err)
 	}
@@ -99,6 +118,33 @@ func TestDeleteNoBackupRetry(t *testing.T) {
 		t.Errorf("archives = %+v", l)
 	}
 	if a := audit.lastOf("instance.delete"); a.Result != "ok" || a.Detail != "backup=none no_backup=true" {
+		t.Errorf("audit = %+v", a)
+	}
+}
+
+// TestDeleteRetryOfBackedUpDeleteUnchanged: a retry of a delete that took
+// a backup needs no option (and the no-backup option changes nothing).
+func TestDeleteRetryOfBackedUpDeleteUnchanged(t *testing.T) {
+	f, _, groups := grafanaB(t)
+	groups.delErr = errors.New("lldap down")
+	if _, err := f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("root")); err == nil {
+		t.Fatal("delete did not fail")
+	}
+	groups.delErr = nil
+	res, err := f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("root"))
+	if err != nil || res.Backup == "" || res.NoBackup {
+		t.Fatalf("retry = %+v %v", res, err)
+	}
+}
+
+// TestRefusedNoBackupDeleteAudited (review M2): a no-backup delete refused
+// early still records the choice in its audit detail.
+func TestRefusedNoBackupDeleteAudited(t *testing.T) {
+	f, audit, _ := grafanaB(t)
+	if _, err := f.h.DeleteInstanceWith("grafana-b", "wrong", directory.Human("root"), DeleteOptions{NoBackup: true}); statusOf(err) != 400 {
+		t.Fatalf("delete = %v", err)
+	}
+	if a := audit.lastOf("instance.delete"); a.Result != "refused" || a.Detail != "backup=none no_backup=true" {
 		t.Errorf("audit = %+v", a)
 	}
 }

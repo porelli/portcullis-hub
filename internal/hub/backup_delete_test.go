@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
+	"github.com/portcullis/hub/internal/state"
 )
 
 // TestDeleteBackup (user ruling 2026-11-26, contract §11.5 "Deleting a
@@ -108,8 +109,8 @@ func TestDeleteBackupRefusedWhileRestoring(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-reached
-	if err := f.h.DeleteBackup(entry.Archive, entry.Archive, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "restore") {
-		t.Errorf("delete during the restore = %v, want 409", err)
+	if err := f.h.DeleteBackup(entry.Archive, entry.Archive, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "busy") {
+		t.Errorf("delete during the restore = %v, want 409 busy", err)
 	}
 	var pre string
 	for _, b := range mustList(t, f) {
@@ -120,7 +121,7 @@ func TestDeleteBackupRefusedWhileRestoring(t *testing.T) {
 	if pre == "" {
 		t.Fatal("no pre-restore backup")
 	}
-	if err := f.h.DeleteBackup(pre, pre, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "pre-restore") {
+	if err := f.h.DeleteBackup(pre, pre, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "busy") {
 		t.Errorf("delete of the pre-restore backup during the restore = %v, want 409", err)
 	}
 	close(release)
@@ -193,5 +194,82 @@ func TestDeleteBackupRefusedWhileRestoringAs(t *testing.T) {
 	}
 	if err := f.h.DeleteBackup(entry.Archive, entry.Archive, directory.Human("root")); err != nil {
 		t.Errorf("delete after the restore = %v", err)
+	}
+}
+
+// TestDeleteBackupRacesDelete (review I3): between a delete writing its
+// backup and recording it in state ("deleting", e.Backup), the archive is
+// listed but nothing in state names it yet. DeleteBackup takes the
+// instance's app lock, so it is refused 409 (busy) there and the delete
+// finishes with its archive in place.
+func TestDeleteBackupRacesDelete(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	var archive string
+	var refused error
+	f.h.testHookDeleteBackedUp = func(id string) {
+		l, _ := f.h.ListBackups(id)
+		if len(l) != 1 {
+			t.Errorf("backups at the hook = %+v", l)
+			return
+		}
+		archive = l[0].Archive
+		refused = f.h.DeleteBackup(archive, archive, directory.Human("root"))
+	}
+	res, err := f.h.DeleteInstance("grafana-b", "grafana-b", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusOf(refused) != 409 || !strings.Contains(refused.Error(), "busy") {
+		t.Errorf("DeleteBackup in the window = %v, want 409 busy", refused)
+	}
+	if res.Backup != archive {
+		t.Errorf("result backup %q, archive %q", res.Backup, archive)
+	}
+	if _, err := os.Stat(archivePath(f, archive)); err != nil {
+		t.Errorf("the delete's archive is gone: %v", err)
+	}
+}
+
+// TestDeleteBackupRefusedWhenNeeded (review M3): an archive state still
+// names is 409 even with no operation running — an interrupted restore's
+// pre-restore backup, a restore into a new id's source, a move's archive
+// — and so is the one a pending core restore names.
+func TestDeleteBackupRefusedWhenNeeded(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := entry.Archive
+	set := func(fn func(e *state.Instance)) {
+		f.h.mu.Lock()
+		e := f.h.st.Instances["grafana-b"]
+		fn(&e)
+		f.h.st.Instances["grafana-b"] = e
+		f.h.mu.Unlock()
+	}
+	for _, c := range []struct {
+		name string
+		fn   func(e *state.Instance)
+		want string
+	}{
+		{"interrupted restore", func(e *state.Instance) { e.State, e.Backup = state.InstanceRestoring, a }, "rollback"},
+		{"restore into a new id", func(e *state.Instance) { e.State, e.Backup, e.RestoreAs = state.InstanceRestoring, "", a }, "unfinished restore into"},
+		{"move", func(e *state.Instance) {
+			e.State, e.RestoreAs, e.Move = state.InstanceMoving, "", &state.Move{Archive: a}
+		}, "move of"},
+	} {
+		saved := f.h.st.Instances["grafana-b"]
+		set(c.fn)
+		if err := f.h.DeleteBackup(a, a, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want 409 %q", c.name, err, c.want)
+		}
+		set(func(e *state.Instance) { *e = saved })
+	}
+	if _, err := os.Stat(archivePath(f, a)); err != nil {
+		t.Fatalf("archive removed: %v", err)
+	}
+	if err := f.h.DeleteBackup(a, a, directory.Human("root")); err != nil {
+		t.Errorf("delete once nothing needs it = %v", err)
 	}
 }

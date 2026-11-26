@@ -229,7 +229,7 @@ func (h *Hub) undoDelete(id string, p *Progress) error {
 			if b[beforeHadEntry] == "false" && len(e.Hosts) == 0 && !e.HoldsIdentity() {
 				delete(h.st.Instances, id)
 			} else {
-				e.State, e.Backup, e.RestoreAs = b[beforeState], b[beforeStateBackup], b[beforeRestoreAs]
+				e.State, e.Backup, e.RestoreAs, e.DeleteNoBackup = b[beforeState], b[beforeStateBackup], b[beforeRestoreAs], false
 				h.st.Instances[id] = e
 			}
 			h.rebuildLocked()

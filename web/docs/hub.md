@@ -637,8 +637,10 @@ The **Delete** tab shows:
 - For bound instances (groups mode "existing"), a note that the groups won't be deleted
 - A typed confirmation field (type the instance id to confirm)
 - **Delete without a backup**, an unchecked choice: ticked, no backup is
-  taken and the data is gone for good (audited `backup=none no_backup=true`;
-  not offered when continuing an unfinished delete)
+  taken and the data is gone for good (audited `backup=none no_backup=true`).
+  Continuing an unfinished delete shows it as **Continue without a backup**:
+  tick it only to finish a delete an administrator started without one (the
+  Hub refuses that retry otherwise, the AI's included)
 - **Back up and delete** button (**Delete … without a backup** when ticked)
 
 See [Deleting an instance](#deleting-an-instance).
@@ -1380,10 +1382,10 @@ A running instance is **stopped** (`docker compose down`) during the backup for
 database consistency, then started again. The backup is listed with its timestamp,
 size and result. A failed backup shows the error.
 
-**To delete a backup**: **Delete…** on its row, then **Delete this backup**
+**To delete a backup**: **Delete…** on its row, type the archive name, then **Delete this backup**
 (`DELETE /api/backups/<instance-id>/<timestamp>.tar`, audited
-`instance.backup_delete`). It is refused while a restore from it or of its
-instance runs, and while the Hub still needs it (an unfinished delete's or
+`instance.backup_delete`). It is refused while any operation of its instance
+or a restore from it runs, and while the Hub still needs it (an unfinished delete's or
 restore's archive, a move's, a pending core restore's). See
 [Backups](backups.md#deleting-without-a-backup-and-deleting-a-backup).
 

@@ -69,12 +69,14 @@ are kept until you delete them.
   gone for good and nothing can restore it. The audit log records the choice
   (`instance.delete`, detail `backup=none no_backup=true`). Only an
   administrator in the browser can do this: an AI's `delete_instance` always
-  takes a backup first.
+  takes a backup first. If such a delete stops part-way, only an
+  administrator can finish it: tick **Continue without a backup** on the
+  Delete tab (a plain retry, and the AI's `delete_instance`, are refused).
 - **Delete a backup.** In a **Backups** list (an instance's tab, or Apps →
-  All backups), **Delete…** on an archive, then **Delete this backup**,
-  removes that archive from `<hub data>/backups/` for good (audited
-  `instance.backup_delete`). The Hub refuses while a restore from it, or of
-  its instance, is running, and while it is still needed: the backup of an
+  All backups), **Delete…** on an archive, type the archive name, then
+  **Delete this backup**: that removes the archive from `<hub data>/backups/` for good (audited
+  `instance.backup_delete`). The Hub refuses while any operation of its
+  instance or a restore from it is running, and while it is still needed: the backup of an
   unfinished delete, the pre-restore backup of an unfinished restore, a
   running move's archive, or the one a pending core restore names. Copies
   already in core backups (and `--offsite`) are not touched. Archives of a

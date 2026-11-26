@@ -38,6 +38,22 @@ func TestDeletedDefaultInstanceNotListed(t *testing.T) {
 	if tier != 0 {
 		t.Errorf("claim tier of a deleted default instance = %d, want 0", tier)
 	}
+	// Only a finished, successful delete's record is ignored (review M4):
+	// a failed, stopped or running delete's keeps it listed.
+	for name, r := range map[string]OpRecord{
+		"failed":  {Op: OpDelete, OK: false, Error: "boom"},
+		"running": {Op: OpDelete, OK: true, Running: true},
+		"stopped": {Op: OpDelete, OK: false, Error: "stopped", Status: 409},
+	} {
+		f.h.recordOp("grafana", r)
+		listed := false
+		for _, v := range f.h.Instances() {
+			listed = listed || v.ID == "grafana"
+		}
+		if !listed {
+			t.Errorf("a %s delete's record hides the default instance", name)
+		}
+	}
 	// A failed operation on the (implicit) default instance afterwards is
 	// listed again: only a finished delete's record is ignored.
 	f.h.recordOp("grafana", OpRecord{Op: OpEnable, OK: false, Error: "boom"})
