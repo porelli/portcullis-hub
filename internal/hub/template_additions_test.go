@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
 )
 
@@ -115,7 +116,7 @@ func TestTemplateUpdateClientRegistrationFails(t *testing.T) {
 	if _, ok := env["CHAT_PLAIN"]; ok {
 		t.Error("the new variable was written to the .env before the registration")
 	}
-	kept := readEnvFile(f.h.pendingEnvPath("chat-b"))["CHAT_EXTRA_SECRET"]
+	kept := readPendingEnv(f.h.pendingEnvPath("chat-b")).Values["CHAT_EXTRA_SECRET"]
 	if len(kept) != 32 {
 		t.Fatalf("pending value = %q", kept)
 	}
@@ -187,18 +188,53 @@ func TestTemplateUpdateCrashAfterRegister(t *testing.T) {
 	}
 }
 
-// TestTemplateUpdateRenamedSecretRefused (review N2): a client that
-// already exists in Keycloak getting a new secret variable is refused 409
-// before anything is registered or written (its secret would change under
-// the running app); disable and enable apply it.
-func TestTemplateUpdateRenamedSecretRefused(t *testing.T) {
-	f := chatB(t)
-	renamed := strings.Replace(v2ChatManifest, "secret_env: CHAT_SECRET", "secret_env: CHAT_SECRET2", 1) + "  - key: CHAT_SECRET2\n    generate: random\n"
-	writeFile(t, f.src+"/chat/manifest.yaml", renamed)
+// renamedChat is v2ChatManifest with client chat's secret_env renamed
+// to a new generated variable.
+var renamedChat = strings.Replace(v2ChatManifest, "secret_env: CHAT_SECRET", "secret_env: CHAT_SECRET2", 1) + "  - key: CHAT_SECRET2\n    generate: random\n"
+
+// chatBRunning is chatB with compose simulated (containers run) and the
+// template renaming chat's secret_env.
+func chatBRunning(t *testing.T) *fixture {
+	t.Helper()
+	f := newInstanceFixture(t, nil)
+	f.h.SetAudit(&fakeAudit{})
+	simulateCompose(f, 0)
+	if err := f.h.CreateInstance("chat", "chat-b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.Enable("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	if running, _ := f.h.projectRunning(context.Background(), "chat-b"); !running {
+		t.Fatal("chat-b doesn't run")
+	}
+	writeFile(t, f.src+"/chat/manifest.yaml", renamedChat)
 	f.h.Discover()
+	return f
+}
+
+// chatSecretOf is the last secret client id was registered with.
+func chatSecretOf(f *fixture, id string) string {
+	f.idp.mu.Lock()
+	defer f.idp.mu.Unlock()
+	s := ""
+	for _, sp := range f.idp.specs {
+		if sp.ClientID == id {
+			s = sp.Secret
+		}
+	}
+	return s
+}
+
+// TestTemplateUpdateRenamedSecretRefused (review N2, R1): a client that
+// already exists getting a new secret variable is refused 409 while the
+// app's containers run (a restart prepares before it stops anything):
+// nothing is registered or written. Disable and enable apply it.
+func TestTemplateUpdateRenamedSecretRefused(t *testing.T) {
+	f := chatBRunning(t)
 	n := len(f.idp.specs)
 	err := f.h.RestartApp("chat-b")
-	if statusOf(err) != 409 || !strings.Contains(err.Error(), "disable and enable") {
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "still uses the old one") {
 		t.Fatalf("restart = %v, want 409", err)
 	}
 	if len(f.idp.specs) != n {
@@ -206,6 +242,9 @@ func TestTemplateUpdateRenamedSecretRefused(t *testing.T) {
 	}
 	if _, ok := readEnvFile(f.h.envPath("chat-b"))["CHAT_SECRET2"]; ok {
 		t.Error("the renamed variable was written")
+	}
+	if running, _ := f.h.projectRunning(context.Background(), "chat-b"); !running {
+		t.Error("the refused restart took the app down")
 	}
 	if err := f.h.Disable("chat-b"); err != nil {
 		t.Fatal(err)
@@ -215,6 +254,85 @@ func TestTemplateUpdateRenamedSecretRefused(t *testing.T) {
 	}
 	if v := readEnvFile(f.h.envPath("chat-b"))["CHAT_SECRET2"]; v == "" {
 		t.Error("enable didn't write the renamed variable")
+	}
+}
+
+// TestTemplateUpdateRenamedSecretRotatesWhenStopped (review R1): a backup
+// stops the app and starts it again; with its containers down the renamed
+// client's secret is rotated (registered first, then written) and the app
+// comes back — the nightly backup never leaves it down.
+func TestTemplateUpdateRenamedSecretRotatesWhenStopped(t *testing.T) {
+	f := chatBRunning(t)
+	if _, err := f.h.BackupInstance("chat-b", directory.Human("root")); err != nil {
+		t.Fatalf("backup = %v", err)
+	}
+	v := readEnvFile(f.h.envPath("chat-b"))["CHAT_SECRET2"]
+	if len(v) != 32 {
+		t.Fatalf("CHAT_SECRET2 = %q", v)
+	}
+	if got := chatSecretOf(f, "chat-b"); got != v {
+		t.Errorf("chat-b registered with %q, env %q", got, v)
+	}
+	if running, _ := f.h.projectRunning(context.Background(), "chat-b"); !running {
+		t.Error("the app didn't come back after the backup")
+	}
+}
+
+// TestTemplateUpdateRenamedSecretStartOfStoppedApp (review R1): a start
+// of an enabled app whose containers are down (drift "start") rotates.
+func TestTemplateUpdateRenamedSecretStartOfStoppedApp(t *testing.T) {
+	f := chatBRunning(t)
+	if err := f.h.downByName(context.Background(), "chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.ResolveDrift("chat-b", ActionStart); err != nil {
+		t.Fatalf("start = %v", err)
+	}
+	if v := readEnvFile(f.h.envPath("chat-b"))["CHAT_SECRET2"]; v == "" || chatSecretOf(f, "chat-b") != v {
+		t.Errorf("not rotated: env %q, registered %q", v, chatSecretOf(f, "chat-b"))
+	}
+}
+
+// TestTemplateUpdateRenamedSecretUnknownRunning (review R1): when the
+// engine can't say whether the containers run, they count as running.
+func TestTemplateUpdateRenamedSecretUnknownRunning(t *testing.T) {
+	f := chatBRunning(t)
+	f.engine.mu.Lock()
+	f.engine.listErr = errors.New("engine down")
+	f.engine.mu.Unlock()
+	f.h.mu.RLock()
+	live := *f.h.findLocked("chat-b")
+	f.h.mu.RUnlock()
+	if err := f.h.adoptTemplateEnvAdditions(context.Background(), &live); statusOf(err) != 409 {
+		t.Errorf("adopt = %v, want 409", err)
+	}
+}
+
+// TestTemplateUpdateStalePendingNotOurs (review R2): a kept value for the
+// same variable name but another client doesn't make a live client's
+// rotation "ours": still 409 while it runs.
+func TestTemplateUpdateStalePendingNotOurs(t *testing.T) {
+	f := chatBRunning(t)
+	if err := writePendingEnv(f.h.pendingEnvPath("chat-b"), pendingEnv{Values: map[string]string{"CHAT_SECRET2": "x"}, Clients: map[string]string{"CHAT_SECRET2": "chat-b-gone"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.RestartApp("chat-b"); statusOf(err) != 409 {
+		t.Errorf("restart = %v, want 409", err)
+	}
+}
+
+// TestTemplateUpdateRenamedForeignClient (review R5): a client with that
+// id that another owner holds isn't refused with "disable and enable":
+// RegisterClient's conflict answers (409, not this instance's).
+func TestTemplateUpdateRenamedForeignClient(t *testing.T) {
+	f := chatBRunning(t)
+	f.idp.mu.Lock()
+	f.idp.owners = map[string]string{"chat-b": "someone"}
+	f.idp.registerFail = map[string]error{"chat-b": &keycloak.ConflictError{ClientID: "chat-b", Owner: "someone"}}
+	f.idp.mu.Unlock()
+	err := f.h.RestartApp("chat-b")
+	if statusOf(err) != 409 || !strings.Contains(err.Error(), "isn't this instance's") || strings.Contains(err.Error(), "disable and enable") {
+		t.Errorf("restart = %v", err)
 	}
 }
 
@@ -327,5 +445,58 @@ func TestTemplateUpdateDriftApply(t *testing.T) {
 	}
 	if env := readEnvFile(f.h.envPath("chat-b")); len(env["CHAT_EXTRA_SECRET"]) != 32 {
 		t.Errorf("CHAT_EXTRA_SECRET = %q", env["CHAT_EXTRA_SECRET"])
+	}
+}
+
+// dropEnvKey removes key's lines from id's .env (as if the template had
+// just declared it).
+func dropEnvKey(t *testing.T, f *fixture, id, key string) {
+	t.Helper()
+	var keep []string
+	for _, l := range strings.Split(readFile(t, f.h.envPath(id)), "\n") {
+		if !strings.HasPrefix(l, key+"=") {
+			keep = append(keep, l)
+		}
+	}
+	writeFile(t, f.h.envPath(id), strings.Join(keep, "\n"))
+}
+
+// TestTemplateUpdateAIClient (review R3, N7): an AI page's ai_client
+// whose generated secret variable is new is ensured through the AI path
+// with exactly the new value before it is written (Keycloak's client
+// then has the .env's secret); an ai_client ensure failure refuses the
+// start (502) with nothing written.
+func TestTemplateUpdateAIClient(t *testing.T) {
+	kc, c := hubAIRealm(t)
+	a := chatFixture23(t, nil)
+	a.h.SetAIKeycloak(c)
+	a.selectProviders(t, "ai-chat", "ollama-gpu")
+	a.enable(t, "ai-chat")
+	old := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_SECRET"]
+	if old == "" || kc.ClientByClientID(chatMCPID) == nil {
+		t.Fatal("no ai_client after enable")
+	}
+	dropEnvKey(t, a.fixture, "ai-chat", "CHAT_MCP_SECRET")
+	if err := a.h.RestartApp("ai-chat"); err != nil {
+		t.Fatal(err)
+	}
+	now := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_SECRET"]
+	if len(now) != 32 || now == old {
+		t.Fatalf("CHAT_MCP_SECRET = %q (old %q)", now, old)
+	}
+	if got := kc.ClientByClientID(chatMCPID).Secret; got != now {
+		t.Errorf("Keycloak's ai_client secret %q, .env %q", got, now)
+	}
+
+	// A failing ai_client ensure: 502, nothing written.
+	fk := newFakeAIKC()
+	fk.setFailClient(chatMCPID, errors.New("ai boom"))
+	a.h.SetAIKeycloak(fk)
+	dropEnvKey(t, a.fixture, "ai-chat", "CHAT_MCP_SECRET")
+	if err := a.h.RestartApp("ai-chat"); statusOf(err) != 502 || !strings.Contains(err.Error(), chatMCPID) {
+		t.Errorf("restart with a failing ai_client = %v, want 502", err)
+	}
+	if _, ok := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_SECRET"]; ok {
+		t.Error("the ai_client's secret was written after a failed ensure")
 	}
 }

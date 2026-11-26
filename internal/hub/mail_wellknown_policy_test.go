@@ -67,9 +67,10 @@ func TestPolicyKeepsMailWellknownHosts(t *testing.T) {
 	}
 }
 
-// TestPolicyDeniesOtherWellknownRoutes (review N8): a well-known host on
-// any other router, on another service's copy of the Hub's router name,
-// in another project, or in void mode keeps its deny entry.
+// TestPolicyDeniesOtherWellknownRoutes (review N8, R4): a well-known host
+// on any other router, on another service's copy of the Hub's router
+// name, in another project, or in void mode keeps its deny entry, and so
+// does a host that isn't a mail well-known name on the Hub's own rule.
 func TestPolicyDeniesOtherWellknownRoutes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -87,6 +88,11 @@ func TestPolicyDeniesOtherWellknownRoutes(t *testing.T) {
 			setRoutes(f, map[string][]string{"other": wkHosts},
 				map[string]mailWKRoutes{"other": {byService: map[string][]string{svc: wkHosts}, other: map[string]bool{}}})
 		}},
+		{"a non-well-known host on the Hub's router", func(f *fixture, svc string) {
+			hosts := append(append([]string{}, wkHosts...), "rogue.example.org")
+			setRoutes(f, map[string][]string{mailProviderID: hosts},
+				map[string]mailWKRoutes{mailProviderID: {byService: map[string][]string{svc: {"rogue.example.org"}}, other: map[string]bool{}}})
+		}},
 		{"void mode", func(f *fixture, svc string) {
 			setRoutes(f, map[string][]string{mailProviderID: wkHosts},
 				map[string]mailWKRoutes{mailProviderID: {byService: map[string][]string{svc: wkHosts}, other: map[string]bool{}}})
@@ -102,7 +108,13 @@ func TestPolicyDeniesOtherWellknownRoutes(t *testing.T) {
 			f := mailOverrideFixture(t)
 			c.set(f, wkService(t, f))
 			g := policyGroups(t, f)
-			for _, h := range wkHosts {
+			check := wkHosts
+			if c.name == "a non-well-known host on the Hub's router" {
+				// Review R4: only mailWellknownHostsLocked's names are
+				// exempt, even on the Hub's own rule.
+				check = []string{"rogue.example.org"}
+			}
+			for _, h := range check {
 				if g[h] != policy.DenyGroup {
 					t.Errorf("%s = %q, want denied", h, g[h])
 				}

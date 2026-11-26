@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -758,10 +759,41 @@ func (h *Hub) gateIP() string {
 }
 
 // clientFinder is the IdP's optional client lookup (keycloak.Client): does
-// a client with that clientId exist? adoptTemplateEnvAdditions uses it
-// to never rotate a live client's secret before a start (review N2).
+// a client with that clientId exist, and whose is it (its owner tag, ""
+// untagged)? adoptTemplateEnvAdditions uses it to never rotate a client's
+// secret under the app's running containers (review N2, R1, R5).
 type clientFinder interface {
-	ClientExists(ctx context.Context, clientID string) (bool, error)
+	ClientOwner(ctx context.Context, clientID string) (exists bool, owner string, err error)
+}
+
+// pendingEnv is the pending file (JSON, 0600): the values a template
+// update added, and for each one the client id it was kept for (review
+// R2: a kept value is "ours" only for that same client).
+type pendingEnv struct {
+	Values  map[string]string `json:"values"`
+	Clients map[string]string `json:"clients,omitempty"`
+}
+
+// readPendingEnv reads path (missing or unreadable: none; a bad file is
+// logged and ignored — the values are generated again).
+func readPendingEnv(path string) pendingEnv {
+	p := pendingEnv{Values: map[string]string{}, Clients: map[string]string{}}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return p
+	}
+	var got pendingEnv
+	if err := json.Unmarshal(b, &got); err != nil {
+		log.Printf("env: %s is unreadable, ignored: %v", path, err)
+		return p
+	}
+	for k, v := range got.Values {
+		p.Values[k] = v
+	}
+	for k, v := range got.Clients {
+		p.Clients[k] = v
+	}
+	return p
 }
 
 // pendingEnvPath is where a start keeps the values a template update
@@ -810,7 +842,8 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 		return nil // not generated yet: enable writes it whole
 	}
 	cur := readEnvRaw(path)
-	kept := readEnvRaw(pend)
+	pk := readPendingEnv(pend)
+	kept := pk.Values
 	added := map[string]string{}
 	for _, v := range live.Manifest.Env {
 		if _, ok := cur[v.Key]; ok {
@@ -855,22 +888,50 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 		return nil
 	}
 	h.mu.Unlock()
-	// A live client whose secret would change (N2): refused before
-	// anything is registered or written.
+	// An existing client of this instance whose secret would change (its
+	// secret_env renamed; N2, R1): rotated only while none of the app's
+	// containers runs — the engine says so (an unknown answer counts as
+	// running: fail closed) —, else refused before anything is registered
+	// or written. A stop-then-start (a backup, a move, a delete's undo, a
+	// folder reassign, a mail void or resume) or a start of a stopped app
+	// rotates it; a restart or a drift apply over running containers is
+	// refused. Another owner's client (R5): RegisterClient's conflict
+	// answers.
 	if f, ok := h.idp.(clientFinder); ok {
+		var running *bool
 		for _, c := range regs {
-			exists, err := f.ClientExists(ctx, c.ClientID)
+			exists, owner, err := f.ClientOwner(ctx, c.ClientID)
 			if err != nil {
 				return &StatusError{Status: 502, Err: fmt.Errorf("%s was not started: looking up Keycloak client %s, which the template gives a new secret variable: %w", live.ID, c.ClientID, err)}
 			}
-			if _, ours := kept[c.SecretEnv]; exists && !ours {
-				return statusErr(409, "%s was not started: the template gives its existing Keycloak client %s a new secret variable %s; registering it now would change the client's secret in Keycloak while the running app still uses the old one — disable and enable %s to apply the change", live.ID, c.ClientID, c.SecretEnv, live.ID)
+			if !exists || owner != live.ID || pk.Clients[c.SecretEnv] == c.ClientID {
+				continue
 			}
+			if running == nil {
+				r, rerr := h.projectRunning(ctx, live.ID)
+				if rerr != nil {
+					if cerr := ctx.Err(); cerr != nil {
+						return fmt.Errorf("checking whether %s runs: %w", live.ID, cerr)
+					}
+					log.Printf("instance %s: can't tell whether its containers run (%v): treated as running", live.ID, rerr)
+					r = true
+				}
+				running = &r
+			}
+			if *running {
+				return statusErr(409, "%s was not started: the template gives its existing Keycloak client %s a new secret variable %s; registering it now would change the client's secret in Keycloak while the running app still uses the old one — stop the app (or disable and enable %s) to apply the change", live.ID, c.ClientID, c.SecretEnv, live.ID)
+			}
+			log.Printf("instance %s: the template gives Keycloak client %s a new secret variable %s: its containers are down, so it is rotated before the start", live.ID, c.ClientID, c.SecretEnv)
 		}
 	}
-	// The values survive a crash from here on (reused at the next start).
+	// The values survive a crash from here on (reused at the next start),
+	// each one marked with the client it is for.
+	pk = pendingEnv{Values: added, Clients: map[string]string{}}
+	for _, c := range regs {
+		pk.Clients[c.SecretEnv] = c.ClientID
+	}
 	h.mu.Lock()
-	err := writeEnvFile(pend, added)
+	err := writePendingEnv(pend, pk)
 	h.mu.Unlock()
 	if err != nil {
 		return statusErr(500, "keeping the variables the template added: %v", err)
@@ -879,6 +940,13 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 	for _, c := range regs {
 		secret := added[c.SecretEnv]
 		if c.AIClient {
+			if secret == "" {
+				// A confidential ai_client needs a secret (R3): without a
+				// generated one it is left as an enable leaves it,
+				// unhealthy until its variable has a value.
+				log.Printf("instance %s: the template added ai_client %s with %s, which has no generated value: not registered (unhealthy until it has one)", live.ID, c.ClientID, c.SecretEnv)
+				continue
+			}
 			_, err = h.ensureInstanceAIClientSecret(ctx, live, secret)
 		} else {
 			spec := h.clientSpec(live, c)
@@ -923,11 +991,11 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 	return nil
 }
 
-// writeEnvFile writes vars as a whole env file (0600, sorted).
-func writeEnvFile(path string, vars map[string]string) error {
-	lines := make([]string, 0, len(vars))
-	for _, k := range slices.Sorted(maps.Keys(vars)) {
-		lines = append(lines, envLine(k, vars[k], false))
+// writePendingEnv writes the pending file (JSON, 0600, atomic).
+func writePendingEnv(path string, p pendingEnv) error {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return err
 	}
-	return fsutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")+"\n"), 0600)
+	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0600)
 }

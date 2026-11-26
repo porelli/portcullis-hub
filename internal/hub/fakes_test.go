@@ -489,6 +489,10 @@ type fakeIdP struct {
 	// ClientExists fails with it.
 	registerFail map[string]error
 	findErr      error
+	// owners: clients someone else made (ClientOwner answers them);
+	// regOwner: the owner each RegisterClient tagged.
+	owners   map[string]string
+	regOwner map[string]string
 	// registerHook, if set, runs at the end of RegisterClient (the
 	// client made), without f.mu.
 	registerHook func(clientID string)
@@ -741,14 +745,18 @@ func (f *fakeIdP) accessCalls() []string {
 	return append([]string(nil), f.access...)
 }
 
-// ClientExists: the client is in clients (clientFinder).
-func (f *fakeIdP) ClientExists(ctx context.Context, clientID string) (bool, error) {
+// ClientOwner: the client is in clients, its owner the TemplateID it was
+// registered with, else owners' (clientFinder).
+func (f *fakeIdP) ClientOwner(ctx context.Context, clientID string) (bool, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.findErr != nil {
-		return false, f.findErr
+		return false, "", f.findErr
 	}
-	return f.clients[clientID], nil
+	if o, ok := f.owners[clientID]; ok {
+		return true, o, nil
+	}
+	return f.clients[clientID], f.regOwner[clientID], nil
 }
 
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) (bool, error) {
@@ -767,6 +775,10 @@ func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) (bo
 	}
 	created := !f.clients[s.ClientID]
 	f.clients[s.ClientID] = true
+	if f.regOwner == nil {
+		f.regOwner = map[string]string{}
+	}
+	f.regOwner[s.ClientID] = s.TemplateID
 	if hook := f.registerHook; hook != nil {
 		f.mu.Unlock()
 		hook(s.ClientID)
