@@ -74,12 +74,27 @@ func templateNote(t *templates.Template) string {
 }
 
 // hostReason returns the per-host reason for router from the template's
-// hosts.reasons map (contract §3), or falls back to templateNote when no
-// reason is set for that router. The reason is rendered escaped in the UI:
-// it comes from the template manifest (trusted input).
-func hostReason(t *templates.Template, router string) string {
-	if reason, ok := t.Manifest.GetReasons()[router]; ok && reason != "" {
+// hosts.reasons map (contract §3: keyed by host router, a reason per
+// host): the router's own entry when it is a host router, else — a path
+// router — the entry of the host router of the one hostname its rule
+// routes (by its hostname variable). A router routing several hostnames,
+// or a hostname without a reason, falls back to templateNote. The reason
+// is rendered escaped in the UI: it comes from the template manifest
+// (trusted input).
+func hostReason(t *templates.Template, router string, ri *templates.RouterInfo) string {
+	reasons := t.Manifest.GetReasons()
+	if reason := reasons[router]; reason != "" {
 		return reason
+	}
+	if ri != nil && len(ri.HostVars) == 1 && ri.HostVars[0] != "" {
+		for hr, v := range t.HostVars {
+			if v == ri.HostVars[0] {
+				if reason := reasons[hr]; reason != "" {
+					return reason
+				}
+				break
+			}
+		}
 	}
 	return templateNote(t)
 }
@@ -151,7 +166,7 @@ func (h *Hub) bypassLocked(t *templates.Template) []Bypass {
 				continue
 			}
 			b := Bypass{Kind: BypassOpenRouter, Router: name, Hosts: hostsOf(name), Paths: []BypassPath{}, Tier: rl.tierOf(name), VPNOnly: vpnRouter(name),
-				Reason: "The template's router " + name + " has no Portcullis sign-in in its middlewares.", Note: hostReason(t, name)}
+				Reason: "The template's router " + name + " has no Portcullis sign-in in its middlewares.", Note: hostReason(t, name, ri)}
 			for _, p := range ri.Paths {
 				m := "exact"
 				if p.Prefix {

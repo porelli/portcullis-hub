@@ -401,3 +401,84 @@ hosts:
 		t.Errorf("found %d whole-host badges, want 4; found: %v", len(foundHosts), foundHosts)
 	}
 }
+
+// A path router's badge carries the reason of the host it routes
+// (contract §3: hosts.reasons is keyed by host router, one reason per
+// host), not the auth.notes fallback: firefox-sync-fxa's accounts paths,
+// its sign-up and its token routers. A host without a reason still falls
+// back to the first paragraph of auth.notes.
+func TestBypassPathRouterHostReason(t *testing.T) {
+	f := newAccessFixture(t)
+	const manifest = `name: Firefox Sync FxA
+category: productivity
+ai: {unsupported: "test"}
+auth:
+  method: forward-auth
+  sso: true
+  group_access: true
+  access_group: users_fxs
+  admin_group: admin_fxs
+  notes: |
+    The notes' first paragraph.
+hosts:
+  reasons:
+    fxs-api: "The API reason."
+    fxs-accounts: "The accounts reason."
+`
+	h := func(v, sub string) string { return "Host(`${" + v + ":-" + sub + ".portcullis.local}`)" }
+	compose := `services:
+  gate:
+    image: gate
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.fxs-api.rule: ` + h("PORTCULLIS_HOST_FXS_API", "fxs-api") + `
+      traefik.http.routers.fxs-api.tls.options: public@file
+      traefik.http.routers.fxs-api.service: fxs
+      traefik.http.routers.fxs-api-signup.rule: ` + h("PORTCULLIS_HOST_FXS_API", "fxs-api") + " && Path(`/v1/account/create`)" + `
+      traefik.http.routers.fxs-api-signup.priority: "990"
+      traefik.http.routers.fxs-api-signup.service: fxs
+      traefik.http.routers.fxs-accounts.rule: ` + h("PORTCULLIS_HOST_FXS_ACCOUNTS", "fxs-accounts") + `
+      traefik.http.routers.fxs-accounts.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.routers.fxs-accounts.service: fxs
+      traefik.http.routers.fxs-accounts-root.rule: ` + h("PORTCULLIS_HOST_FXS_ACCOUNTS", "fxs-accounts") + " && Path(`/`)" + `
+      traefik.http.routers.fxs-accounts-root.priority: "990"
+      traefik.http.routers.fxs-accounts-root.service: fxs
+      traefik.http.routers.fxs-sync.rule: ` + h("PORTCULLIS_HOST_FXS_SYNC", "fxs-sync") + `
+      traefik.http.routers.fxs-sync.middlewares: portcullis-auth@docker,portcullis-groups@docker
+      traefik.http.routers.fxs-sync.service: fxs
+      traefik.http.routers.fxs-sync-token.rule: ` + h("PORTCULLIS_HOST_FXS_SYNC", "fxs-sync") + " && PathPrefix(`/1.0/`)" + `
+      traefik.http.routers.fxs-sync-token.priority: "990"
+      traefik.http.routers.fxs-sync-token.service: fxs
+      traefik.http.services.fxs.loadbalancer.server.port: "8080"
+`
+	writeFile(t, filepath.Join(f.src, "fxs", "manifest.yaml"), manifest)
+	writeFile(t, filepath.Join(f.src, "fxs", "compose.yml"), compose)
+	f.h.Discover()
+	if f.h.Template("fxs") == nil {
+		t.Fatal("the template didn't load (see the log)")
+	}
+	if err := f.h.Enable("fxs"); err != nil {
+		t.Fatal(err)
+	}
+	notes := map[string]string{}
+	for _, b := range bypassOf(t, f, "fxs") {
+		if b.Kind == BypassOpenRouter {
+			notes[b.Router] = b.Note
+		}
+	}
+	want := map[string]string{
+		"fxs-api":           "The API reason.",
+		"fxs-api-signup":    "The API reason.",
+		"fxs-accounts-root": "The accounts reason.",
+		// The Sync host has no reason: its path router falls back.
+		"fxs-sync-token": "The notes' first paragraph.",
+	}
+	if len(notes) != len(want) {
+		t.Fatalf("open routers %v, want %v", notes, want)
+	}
+	for r, w := range want {
+		if notes[r] != w {
+			t.Errorf("%s: Note %q, want %q", r, notes[r], w)
+		}
+	}
+}
