@@ -1557,7 +1557,20 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// also enabled ones whose containers still route hosts outside their
 	// config — old hostnames after a SetHosts whose restart failed, hosts
 	// outside a missing template's snapshot. Build skips claimed hosts.
+	// The wired mail provider's mail well-known hosts are the Hub's own
+	// router's (portcullis-mail-wellknown, contract §5: core-owned, no
+	// group-gate): known config, never denied as unknown.
+	var wellknown map[string]bool
+	if mp := h.st.Mail.Provider; mp != nil {
+		wellknown = map[string]bool{}
+		for _, x := range h.mailWellknownHostsLocked() {
+			wellknown[strings.ToLower(x)] = true
+		}
+	}
 	for id, rh := range runtime {
+		if mp := h.st.Mail.Provider; mp != nil && mp.Instance == id {
+			rh = slices.DeleteFunc(slices.Clone(rh), func(x string) bool { return wellknown[strings.ToLower(x)] })
+		}
 		if hosts := hostSet(rh, coreHosts); len(hosts) > 0 {
 			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})
 		}
