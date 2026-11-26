@@ -61,6 +61,26 @@ hold app secrets in clear: protect them like the rest of the backup. Only
 [scheduled](#scheduled-instance-backups) archives are ever pruned; the others
 are kept until you delete them.
 
+### Deleting without a backup, and deleting a backup
+
+- **Delete without a backup.** On an instance's **Delete** tab, tick
+  **Delete without a backup** (off by default) before typing the instance id.
+  No archive is written: once the delete has removed the volumes, the data is
+  gone for good and nothing can restore it. The audit log records the choice
+  (`instance.delete`, detail `backup=none no_backup=true`). Only an
+  administrator in the browser can do this: an AI's `delete_instance` always
+  takes a backup first.
+- **Delete a backup.** In a **Backups** list (an instance's tab, or Apps →
+  All backups), **Delete…** on an archive, then **Delete this backup**,
+  removes that archive from `<hub data>/backups/` for good (audited
+  `instance.backup_delete`). The Hub refuses while a restore from it, or of
+  its instance, is running, and while it is still needed: the backup of an
+  unfinished delete, the pre-restore backup of an unfinished restore, a
+  running move's archive, or the one a pending core restore names. Copies
+  already in core backups (and `--offsite`) are not touched. Archives of a
+  deleted instance may be the only copy of its data: the list marks them
+  **deleted**. The AI channel has no tool for this.
+
 An instance backup can be restored into the same instance (replacing its data)
 or into a **new instance id** (creating a copy). See [integration contracts
 §11.5](../guides/integration-contracts.md#115-backups).

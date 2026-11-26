@@ -309,8 +309,14 @@ func (h *Hub) StartRestoreAs(archive, newID string, actor directory.Actor, hosts
 // id typed: checked at once); the result holds "backup". Steps backup,
 // stop, volumes (the point of no return), keycloak, groups, files.
 func (h *Hub) StartDelete(id, confirm string, actor directory.Actor) (*AsyncOp, error) {
+	return h.StartDeleteWith(id, confirm, actor, DeleteOptions{})
+}
+
+// StartDeleteWith is StartDelete with the admin's options (o.NoBackup:
+// no backup step, §11.4; the result holds no_backup "true" then).
+func (h *Hub) StartDeleteWith(id, confirm string, actor directory.Actor, o DeleteOptions) (*AsyncOp, error) {
 	return h.startAsync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
-		return deleteResult(h.deleteInstance(ctx, id, confirm, actor, ready))
+		return deleteResult(h.deleteInstance(deleteCtx(ctx, o), id, confirm, actor, ready))
 	})
 }
 
@@ -322,6 +328,8 @@ func deleteResult(res *DeleteResult, err error) (map[string]string, []string, er
 	var result map[string]string
 	if res.Backup != "" {
 		result = map[string]string{"backup": res.Backup}
+	} else if res.NoBackup {
+		result = map[string]string{"no_backup": "true"}
 	}
 	return result, res.Warnings, err
 }

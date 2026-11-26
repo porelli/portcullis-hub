@@ -21,10 +21,28 @@ import (
 
 // DeleteResult is what a (completed) guarded delete reports.
 type DeleteResult struct {
-	// Backup is the archive the delete took (relative to <data>/backups).
-	Backup   string   `json:"backup"`
+	// Backup is the archive the delete took (relative to <data>/backups);
+	// "" when the admin chose no backup (NoBackup).
+	Backup string `json:"backup"`
+	// NoBackup: the admin chose to delete without a backup (§11.4,
+	// DeleteOptions): the data is gone for good.
+	NoBackup bool     `json:"no_backup,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
 }
+
+// DeleteOptions are an admin's explicit choices for a guarded delete
+// (DELETE /api/instances/{id} only; the Portcullis MCP's delete_instance
+// never passes any: an AI-run delete always takes a backup).
+type DeleteOptions struct {
+	// NoBackup skips step 1 (§11.4): no archive is written, the data is
+	// gone for good once the volumes step ran. Default false: back up.
+	NoBackup bool
+}
+
+// noBackupKey marks a delete whose admin chose no backup (DeleteOptions).
+type noBackupKey struct{}
+
+func skippingBackup(ctx context.Context) bool { b, _ := ctx.Value(noBackupKey{}).(bool); return b }
 
 // SetGroups wires the Users & Groups side of instance groups (delete,
 // restore into a new id). Without it those steps are warnings.
@@ -47,13 +65,27 @@ func (h *Hub) SetGroups(g Groups) {
 // "deleting") the same call continues where it stopped, keeping the
 // first backup. Audited as instance.delete.
 func (h *Hub) DeleteInstance(id, confirm string, actor directory.Actor) (res *DeleteResult, err error) {
+	return h.DeleteInstanceWith(id, confirm, actor, DeleteOptions{})
+}
+
+// DeleteInstanceWith is DeleteInstance with the admin's options (o.NoBackup:
+// no backup is taken, §11.4).
+func (h *Hub) DeleteInstanceWith(id, confirm string, actor directory.Actor, o DeleteOptions) (res *DeleteResult, err error) {
 	res = &DeleteResult{}
 	_, _, err = h.runOpSync(id, OpDelete, actor, []Step{}, func(ctx context.Context, ready func()) (map[string]string, []string, error) {
 		var derr error
-		res, derr = h.deleteInstance(ctx, id, confirm, actor, ready)
+		res, derr = h.deleteInstance(deleteCtx(ctx, o), id, confirm, actor, ready)
 		return deleteResult(res, derr)
 	})
 	return res, err
+}
+
+// deleteCtx carries o into the delete.
+func deleteCtx(ctx context.Context, o DeleteOptions) context.Context {
+	if o.NoBackup {
+		return context.WithValue(ctx, noBackupKey{}, true)
+	}
+	return ctx
 }
 
 // forgetKey marks a delete as a forget (Task 10): an orphaned instance's
@@ -130,6 +162,10 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	res = &DeleteResult{}
 	defer func() {
 		detail := "backup=" + res.Backup
+		if res.NoBackup {
+			// The admin's choice is on the record (§11.4): no archive.
+			detail = "backup=none no_backup=true"
+		}
 		if len(res.Warnings) > 0 {
 			detail += fmt.Sprintf(" warnings=%d", len(res.Warnings))
 		}
@@ -215,7 +251,16 @@ func (h *Hub) deleteInstance(ctx context.Context, id, confirm string, actor dire
 	}
 	p := progressFrom(ctx)
 	retry := tg.entry.State == state.InstanceDeleting || forgetting(ctx)
-	if !retry {
+	if skippingBackup(ctx) && forgetting(ctx) {
+		return res, statusErr(400, "a forget never takes a backup: leave out backup")
+	}
+	switch {
+	case retry:
+	case skippingBackup(ctx):
+		// The step still records the commit (the deleting record): a
+		// Stop before the volumes step undoes it like a backed-up one.
+		p.AddStep(StepBackup, "No backup (skipped as asked)")
+	default:
 		p.AddStep(StepBackup, "Backing up")
 	}
 	p.AddStep(StepStop, "Stopping the app")
@@ -258,16 +303,25 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		h.mu.Unlock()
 	} else if tg.entry.State == state.InstanceDeleting {
 		res.Backup = tg.entry.Backup
+		res.NoBackup = tg.entry.Backup == ""
 	} else {
 		p.Start(StepBackup)
-		entry, berr := h.backupCtx(ctx, id, BackupDelete, true)
-		if berr != nil {
-			if cerr := ctx.Err(); cerr != nil {
-				return fmt.Errorf("%v: %w", berr, cerr) // the Stop's undo starts it again
+		archive := ""
+		if skippingBackup(ctx) {
+			// The admin's explicit choice (§11.4): no archive; the project
+			// keeps running until the stop step.
+			res.NoBackup = true
+		} else {
+			entry, berr := h.backupCtx(ctx, id, BackupDelete, true)
+			if berr != nil {
+				if cerr := ctx.Err(); cerr != nil {
+					return fmt.Errorf("%v: %w", berr, cerr) // the Stop's undo starts it again
+				}
+				return prefixOpError(OpDelete, "the backup before the delete failed — nothing was deleted: ", berr)
 			}
-			return prefixOpError(OpDelete, "the backup before the delete failed — nothing was deleted: ", berr)
+			archive = entry.Archive
+			res.Backup = archive
 		}
-		res.Backup = entry.Archive
 		if h.testHookDeleteBackedUp != nil {
 			h.testHookDeleteBackedUp(id)
 		}
@@ -278,8 +332,13 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		// runs again as it did (the backup is kept).
 		if pointing := h.providersAtInstanceLocked(id); len(pointing) > 0 {
 			h.mu.Unlock()
-			err := statusErr(409, "model provider %s uses instance %s: delete it or point it at another instance in Settings → AI first (the backup %s was kept)", strings.Join(pointing, ", "), id, entry.Archive)
-			if tg.enabled && tg.view != nil {
+			kept := "no backup was taken"
+			if archive != "" {
+				kept = "the backup " + archive + " was kept"
+			}
+			err := statusErr(409, "model provider %s uses instance %s: delete it or point it at another instance in Settings → AI first (%s)", strings.Join(pointing, ", "), id, kept)
+			// Only a backup stopped it.
+			if archive != "" && tg.enabled && tg.view != nil {
 				if serr := h.startAgain(tg.view); serr != nil {
 					return fmt.Errorf("%w — and starting %s again failed: %v", err, id, serr)
 				}
@@ -290,7 +349,7 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		if e.ID == "" {
 			e = state.Instance{ID: id, Template: tg.templateID}
 		}
-		e.State, e.Backup = state.InstanceDeleting, entry.Archive
+		e.State, e.Backup = state.InstanceDeleting, archive
 		h.st.Instances[id] = e
 		// Disabled with it (the backup left it stopped): nothing may
 		// start it again, drift included.
@@ -300,8 +359,13 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		h.saveLocked()
 		h.mu.Unlock()
 		h.writePolicyLogged()
-		log.Printf("instance %s: deleting (backup %s)", id, entry.Archive)
-		p.Detail(StepBackup, entry.Archive)
+		if archive == "" {
+			log.Printf("instance %s: deleting (no backup: the admin chose none)", id)
+			p.Detail(StepBackup, "skipped: no backup taken")
+		} else {
+			log.Printf("instance %s: deleting (backup %s)", id, archive)
+			p.Detail(StepBackup, archive)
+		}
 		p.Done(StepBackup)
 		if err := ctx.Err(); err != nil {
 			return err
@@ -311,10 +375,18 @@ func (h *Hub) deleteRun(ctx context.Context, p *Progress, id string, actor direc
 		if isStopErr(err) && p.Stopping() {
 			return err // stopped before the point of no return: undoDelete
 		}
-		err = withSecrets(fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, the backup %s is kept): %w", id, res.Backup, err), extra)
+		kept := "the backup " + res.Backup + " is kept"
+		if res.Backup == "" {
+			kept = "no backup was taken"
+		}
+		err = withSecrets(fmt.Errorf("delete of %s stopped part-way (it stays \"deleting\"; delete again to continue, %s): %w", id, kept, err), extra)
 		return &OpError{Record: h.opRecordOf(id, OpDelete, err, false), Err: err}
 	}
-	log.Printf("instance %s deleted (backup %s)", id, res.Backup)
+	if res.Backup == "" && !forgetting(ctx) {
+		log.Printf("instance %s deleted (no backup)", id)
+	} else {
+		log.Printf("instance %s deleted (backup %s)", id, res.Backup)
+	}
 	return nil
 }
 
@@ -440,7 +512,11 @@ func (h *Hub) DeletePlan(id string) ([]string, error) {
 	}
 	lines := []string{"Takes a backup, then permanently removes its " + what + "."}
 	if d.tg.entry.State == state.InstanceDeleting {
-		lines[0] = "Continues an unfinished delete (its backup " + d.tg.entry.Backup + " is kept), permanently removing its " + what + "."
+		kept := "its backup " + d.tg.entry.Backup + " is kept"
+		if d.tg.entry.Backup == "" {
+			kept = "it was started without a backup"
+		}
+		lines[0] = "Continues an unfinished delete (" + kept + "), permanently removing its " + what + "."
 	}
 	return append(lines, kept...), nil
 }

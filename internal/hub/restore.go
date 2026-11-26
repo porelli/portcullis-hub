@@ -275,6 +275,8 @@ func (h *Hub) restoreInstance(ctx context.Context, id, archive string, actor dir
 	if err != nil {
 		return res, err
 	}
+	// In use until the restore ends: DeleteBackup refuses it meanwhile.
+	defer h.leaseArchive(archive)()
 	if err := h.archiveExists(archive); err != nil {
 		return res, err
 	}
@@ -1125,6 +1127,8 @@ func (h *Hub) restoreInstanceAs(ctx context.Context, archive, newID string, acto
 	if exists {
 		return res, statusErr(409, "instance %s already exists", newID)
 	}
+	// In use until the restore ends: DeleteBackup refuses it meanwhile.
+	defer h.leaseArchive(archive)()
 	if err := h.archiveExists(archive); err != nil {
 		return res, err
 	}

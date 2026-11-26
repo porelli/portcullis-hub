@@ -28,6 +28,8 @@ func (s *Server) registerInstances(mux routeMux) {
 	mux.HandleFunc("DELETE /api/instances/{id}/env/{name}", s.handleClearEnvOverride)
 	mux.HandleFunc("DELETE /api/instances/{id}", s.handleDeleteInstance)
 	mux.HandleFunc("GET /api/backups", s.handleBackups)
+	// Deleting a backup (§11.5): Hub listener, admins, no MCP tool.
+	mux.HandleFunc("DELETE /api/backups/{id}/{name}", s.handleDeleteBackup)
 	mux.HandleFunc("GET /api/instances/{id}/backups", s.handleBackups)
 	mux.HandleFunc("POST /api/instances/{id}/backups", s.handleBackupInstance)
 	mux.HandleFunc("POST /api/instances/{id}/restore", s.handleRestoreInstance)
@@ -448,14 +450,23 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	var b struct {
 		Confirm string `json:"confirm"`
+		// Backup: false = the admin's explicit choice to delete without a
+		// backup (§11.4); omitted or true = back up first. Only this
+		// route takes it: the MCP's delete_instance always backs up.
+		Backup *bool `json:"backup"`
 	}
-	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>"}`) {
+	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>", "backup"?: false}`) {
 		return
 	}
+	noBackup := b.Backup != nil && !*b.Backup
 	if q, asked := r.URL.Query()["forget"]; asked {
 		// Forget an orphaned instance (contract §11, multiple servers).
 		if len(q) != 1 || q[0] != "1" {
 			http.Error(w, "forget must be 1", http.StatusBadRequest)
+			return
+		}
+		if b.Backup != nil {
+			http.Error(w, "a forget never takes a backup: leave out backup", http.StatusBadRequest)
 			return
 		}
 		s.rec("StartForget", id, b.Confirm)
@@ -468,7 +479,15 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 		writeAccepted(w, op)
 		return
 	}
-	op, err := s.startDelete(requestActor(r), id, b.Confirm)
+	var op *hub.AsyncOp
+	var err error
+	if noBackup {
+		s.rec("StartDeleteNoBackup", id, b.Confirm)
+		op, err = s.Hub.StartDeleteWith(id, b.Confirm, requestActor(r), hub.DeleteOptions{NoBackup: true})
+		err = defaultStatus(err, http.StatusBadGateway)
+	} else {
+		op, err = s.startDelete(requestActor(r), id, b.Confirm)
+	}
 	noStore(w)
 	if err != nil {
 		writeErr(w, err, http.StatusBadGateway)
@@ -483,6 +502,30 @@ func (s *Server) startDelete(a directory.Actor, id, confirm string) (*hub.AsyncO
 	s.rec("StartDelete", id, confirm)
 	op, err := s.Hub.StartDelete(id, confirm, a)
 	return op, defaultStatus(err, http.StatusBadGateway)
+}
+
+// handleDeleteBackup removes one archive for good (§11.5 "Deleting a
+// backup"): DELETE /api/backups/{id}/{name} with {"confirm":
+// "<id>/<name>"}, admins only; 204. Audited instance.backup_delete by
+// the Hub. No MCP tool: the AI channel never deletes a backup.
+func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if !s.adminOnly(w, r) {
+		return
+	}
+	var b struct {
+		Confirm string `json:"confirm"`
+	}
+	if !decodeStrict(w, r, &b, `{"confirm": "<instance-id>/<YYYYMMDDTHHMMSSZ>.tar"}`) {
+		return
+	}
+	archive := r.PathValue("id") + "/" + r.PathValue("name")
+	s.rec("DeleteBackup", archive, b.Confirm)
+	if err := s.Hub.DeleteBackup(archive, b.Confirm, requestActor(r)); err != nil {
+		writeErr(w, defaultStatus(err, http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {

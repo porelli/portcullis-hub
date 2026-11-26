@@ -289,6 +289,12 @@ type Hub struct {
 	// undo is running on it (folderassign.go; pendingLocked answers 409,
 	// ruling 6). Guarded by mu.
 	folderApplying map[string]string
+	// archiveMu guards archiveLeases: per backup archive (relative name),
+	// how many restores are using it (leaseArchive); DeleteBackup holds
+	// it while it checks and removes, so a restore and a delete of the
+	// same archive never overlap.
+	archiveMu     sync.Mutex
+	archiveLeases map[string]int
 	// startedAt: when each instance last started cleanly (startUp, under
 	// mu): runtime gids read before it are not judged (H11 M6).
 	startedAt map[string]time.Time

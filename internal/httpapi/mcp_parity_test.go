@@ -26,6 +26,13 @@ var noToolRoutes = map[string]string{
 	importReviewPath:        "the multipart CSV upload; import_review takes the CSV as JSON instead",
 }
 
+// backupNoToolRoutes (user ruling 2026-11-26, contract §11.5 "Deleting a
+// backup"): backups are the undo of a delete or a restore; only an
+// administrator in the browser removes one, never the AI channel.
+var backupNoToolRoutes = map[string]string{
+	"DELETE /api/backups/{id}/{name}": "deletes a backup archive for good: administrators in the browser only, the AI channel never removes a backup",
+}
+
 // confirmationRoutes are the Hub listener's confirmation page and its
 // decision (§15.6): a confirmation is given only by the person in a
 // browser with a fresh passkey touch, never by a tool — they can't be in
@@ -329,7 +336,8 @@ func TestToolParity(t *testing.T) {
 		_, serverNo := serverNoToolRoutes[r]
 		_, catalogNo := catalogNoToolRoutes[r]
 		_, emailNo := emailNoToolRoutes[r]
-		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo || catalogNo || emailNo
+		_, backupNo := backupNoToolRoutes[r]
+		conf = conf || help || imp || vpnNo || guardNo || mailNo || sshNo || usageNo || serverNo || catalogNo || emailNo || backupNo
 		task, pending := pendingToolRoutes[r]
 		n := 0
 		for _, b := range []bool{len(twins[r]) > 0, none, conf, pending} {

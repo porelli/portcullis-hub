@@ -636,7 +636,10 @@ The **Delete** tab shows:
 - A warning about what will be deleted (volumes, groups, Keycloak clients)
 - For bound instances (groups mode "existing"), a note that the groups won't be deleted
 - A typed confirmation field (type the instance id to confirm)
-- **Delete** button
+- **Delete without a backup**, an unchecked choice: ticked, no backup is
+  taken and the data is gone for good (audited `backup=none no_backup=true`;
+  not offered when continuing an unfinished delete)
+- **Back up and delete** button (**Delete … without a backup** when ticked)
 
 See [Deleting an instance](#deleting-an-instance).
 
@@ -1377,6 +1380,13 @@ A running instance is **stopped** (`docker compose down`) during the backup for
 database consistency, then started again. The backup is listed with its timestamp,
 size and result. A failed backup shows the error.
 
+**To delete a backup**: **Delete…** on its row, then **Delete this backup**
+(`DELETE /api/backups/<instance-id>/<timestamp>.tar`, audited
+`instance.backup_delete`). It is refused while a restore from it or of its
+instance runs, and while the Hub still needs it (an unfinished delete's or
+restore's archive, a move's, a pending core restore's). See
+[Backups](backups.md#deleting-without-a-backup-and-deleting-a-backup).
+
 Backups, restores and deletes run in the background with a
 [progress panel](#progress-and-stop): the Hub accepts the request at once and
 the panel follows the operation step by step until it finishes, then shows its
@@ -1467,7 +1477,9 @@ the archive path.
 
 **Admin-only, guarded.** Deleting an instance:
 
-1. Takes an automatic backup (stored in `backups/<id>/`)
+1. Takes an automatic backup (stored in `backups/<id>/`), unless you ticked
+   **Delete without a backup** (then nothing is archived and the data can't
+   be restored; the AI's `delete_instance` always backs up)
 2. Marks the instance `deleting` (other operations refused with HTTP 409)
 3. Runs `docker compose down`, then removes the per-person passwords, the AI
    credentials and the volumes. The first volume removal is the **point of no
@@ -1500,7 +1512,8 @@ some groups were kept because they're shared, or if no IdP is configured so
 client deletion was skipped).
 
 Deleting the default instance deletes the template's deployment, just like
-disabling it did before instances existed.
+disabling it did before instances existed. The app leaves **Apps** (it stays
+in the Marketplace); installing it again starts a fresh instance.
 ## Settings { #server-settings }
 
 **Settings** has eight sections, each a subtab with its own address
@@ -2633,7 +2646,8 @@ people (admins see all of it; others the parts their permissions allow).
 - **Header**: display name, username, email, custom fields (a person field
   links to that person's page), "since … · account created by …", and
   **Edit details** (admins; delegates with `edit_details` for the accounts
-  they may edit).
+  they may edit). **NEW (Firefox own accounts):** the email shows **Verified**
+  or **Not verified** ([contracts §9.8](../guides/integration-contracts.md#98-verified-emails-new-firefox-own-accounts)).
 - **Groups**: one row per group, linking to the group's page, with how they
   are in it: matches the rule, added by hand · until … · "reason", kept out ·
   "reason", member · until. **Add to group…** (admins) picks a group (rule-based

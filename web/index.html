@@ -4811,8 +4811,9 @@
       const inst = pageCtx.inst, id = inst.id;
       const bound = inst.groups_mode === 'existing';
       let h = '<div class="inst-section inst-danger"><h4>Delete this instance</h4>';
-      if (inst.state === 'deleting') h += '<div class="public-warn">A previous delete stopped part-way: deleting again continues where it stopped (the first backup is kept).</div>';
-      h += '<p>Deleting <code>' + escapeHtml(id) + '</code> (' + escapeHtml(instName(inst)) + ') is permanent. The Hub first takes a backup (kept under Backups, restorable into a new instance), then removes:</p>' +
+      const retry = inst.state === 'deleting';
+      if (retry) h += '<div class="public-warn">A previous delete stopped part-way: deleting again continues where it stopped (its first backup, if it took one, is kept).</div>';
+      h += '<p>Deleting <code>' + escapeHtml(id) + '</code> (' + escapeHtml(instName(inst)) + ') is permanent. The Hub first takes a backup (kept under Backups, restorable into a new instance), unless you choose below to delete without one, then removes:</p>' +
         '<ul class="policy-notes" style="margin-bottom:0.75rem"><li>its containers and volumes (all its data)</li><li>its Keycloak clients and access role</li>' +
         '<li>its generated secrets, settings, policies and share links</li>' +
         (bound ? '<li>not its groups' + (inst.access_group ? ' ' + PortcullisPeople.groupLink(inst.access_group, true, true) : '') +
@@ -4822,9 +4823,26 @@
         (inst.default ? '<p class="settings-empty">Its app stays in the Marketplace; installing it again starts a fresh instance.</p>' : '') +
         '<div class="inst-form" style="margin-top:0.75rem"><label class="block" for="inst-del-confirm">Type <code>' + escapeHtml(id) + '</code> to confirm</label>' +
         '<input type="text" id="inst-del-confirm" spellcheck="false" autocomplete="off" placeholder="' + escapeHtml(id) + '"></div>' +
+        // Delete without a backup (§11.4): an explicit, opt-in choice; off by default.
+        (retry ? '' : '<div class="inst-form" style="margin-top:0.5rem"><label><input type="checkbox" data-inst-del-nobackup> Delete without a backup</label>' +
+          '<div class="public-danger" data-inst-del-nobackup-warn hidden>No backup will be taken: the data of <code>' + escapeHtml(id) + '</code> is gone for good and can\'t be restored.</div></div>') +
         '<div id="inst-del-result"></div>' +
-        '<div class="inst-row"><button type="button" class="btn btn-danger btn-sm" data-inst-delete="1" disabled style="background:#ef4444;color:#fff">Back up and delete ' + escapeHtml(id) + '</button></div></div>';
+        '<div class="inst-row"><button type="button" class="btn btn-danger btn-sm" data-inst-delete="1" disabled style="background:#ef4444;color:#fff">' + deleteButtonText(id, false) + '</button></div></div>';
       pane.innerHTML = h;
+    }
+    // deleteButtonText: the delete button's words (escaped), with or without a backup.
+    function deleteButtonText(id, noBackup) {
+      return (noBackup ? 'Delete ' + escapeHtml(id) + ' without a backup' : 'Back up and delete ' + escapeHtml(id));
+    }
+    // deleteBody: the DELETE /api/instances/{id} body (backup: false only when chosen).
+    function deleteBody(confirmVal, noBackup) {
+      return noBackup ? { confirm: confirmVal, backup: false } : { confirm: confirmVal };
+    }
+    // deletedBackupLine: what the delete's outcome says about its backup.
+    function deletedBackupLine(op) {
+      const r = (op && op.result) || {};
+      if (r.no_backup === 'true') return '<p class="public-danger">No backup was taken (as you chose): its data is gone for good.</p>';
+      return '<p>Automatic backup: <code>' + escapeHtml(r.backup || '') + '</code> — listed under All backups on Apps; it can be restored into a new instance.</p>';
     }
 
     async function deleteInstance(btn) {
@@ -4832,16 +4850,18 @@
       const confirmVal = document.getElementById('inst-del-confirm').value.trim();
       const out = document.getElementById('inst-del-result');
       if (confirmVal !== id) { out.innerHTML = errorBox(new Error('type the instance id (' + id + ') to confirm')); return; }
+      const nb = document.querySelector('#instance-page [data-inst-del-nobackup]');
+      const noBackup = !!(nb && nb.checked);
       btn.disabled = true;
       out.innerHTML = '';
       try {
-        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id), 'DELETE', { confirm: confirmVal }, id);
+        const op = await runInstanceOp('/api/instances/' + encodeURIComponent(id), 'DELETE', deleteBody(confirmVal, noBackup), id);
         showToast(id + ' deleted', 'success');
         if (pageCtx && pageCtx.id === id) {
           pageCtx.inst = null;
           document.getElementById('instance-page').innerHTML = '<div class="page-crumbs"><a href="#apps" data-goto-tab="apps">Apps</a> ›</div>' +
             '<div class="inst-section"><div class="inst-ok">Deleted ' + escapeHtml(instName(inst)) + ' (<code>' + escapeHtml(id) + '</code>).</div>' +
-            '<p>Automatic backup: <code>' + escapeHtml(op.result.backup || '') + '</code> — listed under All backups on Apps; it can be restored into a new instance.</p>' +
+            deletedBackupLine(op) +
             ((op.warnings || []).length ? '<h4 style="margin-top:0.75rem">Warnings</h4>' + warningsList(op.warnings) : '') +
             '<div class="inst-row"><button type="button" class="btn btn-secondary btn-sm" data-goto-tab="apps">Back to Apps</button></div></div>';
         }
@@ -4883,7 +4903,8 @@
             '<td>' + escapeHtml(b.reason) + '</td><td style="white-space:nowrap">' + escapeHtml(fmtSize(b.size)) + '</td><td><code>' + escapeHtml(b.archive) + '</code></td>' +
             '<td style="white-space:nowrap;text-align:right">' +
             (b.instance_exists ? '<button type="button" class="btn btn-secondary btn-sm" data-bk-restore="' + escapeHtml(b.archive) + '" data-bk-instance="' + escapeHtml(b.instance) + '">Restore here</button> ' : '') +
-            '<button type="button" class="btn btn-secondary btn-sm" data-bk-restore-as="' + escapeHtml(b.archive) + '" data-bk-template="' + escapeHtml(b.template) + '">Restore as new…</button></td></tr>' +
+            '<button type="button" class="btn btn-secondary btn-sm" data-bk-restore-as="' + escapeHtml(b.archive) + '" data-bk-template="' + escapeHtml(b.template) + '">Restore as new…</button> ' +
+            '<button type="button" class="btn btn-danger btn-sm" data-bk-delete="' + escapeHtml(b.archive) + '" data-bk-instance="' + escapeHtml(b.instance) + '" data-bk-exists="' + (b.instance_exists ? '1' : '') + '">Delete…</button></td></tr>' +
             '<tr data-bk-panel="' + escapeHtml(b.archive) + '" hidden><td colspan="' + (id ? 5 : 6) + '"></td></tr>';
         }
         h += '</tbody></table>';
@@ -4924,6 +4945,43 @@
       row.hidden = false;
       const inp = row.querySelector('#inst-restore-id');
       if (inp) inp.focus();
+    }
+
+    // Deleting a backup (§11.5): a confirmation panel in the archive's row,
+    // then DELETE /api/backups/<archive> {confirm: archive}.
+    function deleteBackupPanel(btn) {
+      const archive = btn.dataset.bkDelete;
+      const row = btn.closest('tbody').querySelector('[data-bk-panel="' + CSS.escape(archive) + '"]');
+      btn.closest('tbody').querySelectorAll('[data-bk-panel]').forEach(r => { if (r !== row) { r.hidden = true; r.firstElementChild.innerHTML = ''; } });
+      if (!row.hidden && row.dataset.mode === 'delete') { row.hidden = true; row.firstElementChild.innerHTML = ''; return; }
+      row.dataset.mode = 'delete';
+      row.firstElementChild.innerHTML = deleteBackupPanelHtml(archive, btn.dataset.bkInstance, !!btn.dataset.bkExists);
+      row.hidden = false;
+    }
+    function deleteBackupPanelHtml(archive, inst, exists) {
+      return '<div class="inst-panel inst-form"><strong>Delete the backup <code>' + escapeHtml(archive) + '</code> for good?</strong>' +
+        '<ul><li>The archive is removed from the Hub\'s backups directory: it can\'t be restored afterwards.</li>' +
+        (exists ? '' : '<li class="public-danger"><code>' + escapeHtml(inst) + '</code> was deleted: this may be the only copy of its data.</li>') +
+        '<li>Copies already shipped offsite by <code>./portcullis backup</code> are not touched.</li></ul>' +
+        '<div class="inst-row"><button type="button" class="btn btn-danger btn-sm" data-bk-go-delete="' + escapeHtml(archive) + '">Delete this backup</button>' +
+        '<button type="button" class="btn btn-secondary btn-sm" data-bk-cancel="1">Cancel</button></div>' +
+        '<div class="inst-restore-result"></div></div>';
+    }
+    async function runDeleteBackup(btn) {
+      const archive = btn.dataset.bkGoDelete;
+      const panel = btn.closest('.inst-panel');
+      const out = panel.querySelector('.inst-restore-result');
+      const pane = btn.closest('[data-ipane]');
+      panel.querySelectorAll('button').forEach(b => b.disabled = true);
+      out.innerHTML = '';
+      try {
+        await apiCall('/api/backups/' + archive.split('/').map(encodeURIComponent).join('/'), 'DELETE', { confirm: archive });
+        showToast('Backup ' + archive + ' deleted', 'success');
+        if (pane) await loadBackups(pane, pane.closest('#inst-modal-box') ? '' : (pageCtx ? pageCtx.id : ''));
+      } catch (err) {
+        out.innerHTML = errorBox(err);
+        panel.querySelectorAll('button').forEach(b => b.disabled = false);
+      }
     }
 
     async function runRestore(btn, asNew) {
@@ -5013,6 +5071,8 @@
       if ((el = t.closest('[data-bk-restore-as]'))) { restorePanel(el, true); return; }
       if ((el = t.closest('[data-bk-go-same]'))) { runRestore(el, false); return; }
       if ((el = t.closest('[data-bk-go-new]'))) { runRestore(el, true); return; }
+      if ((el = t.closest('[data-bk-delete]'))) { deleteBackupPanel(el); return; }
+      if ((el = t.closest('[data-bk-go-delete]'))) { runDeleteBackup(el); return; }
       if ((el = t.closest('[data-bk-cancel]'))) { const row = el.closest('[data-bk-panel]'); row.hidden = true; row.firstElementChild.innerHTML = ''; return; }
       if (t.closest('#instance-page')) { pageClick(t); return; }
       if (!t.closest('#inst-modal')) return;
@@ -5069,6 +5129,11 @@
       }
       if (t.matches('#setup-form [data-part="bool"]')) { t.parentElement.lastChild.textContent = t.checked ? ' on' : ' off'; return; }
       if (t.matches('[data-signin-toggle]')) { toggleSignIn(t); return; }
+      if (t.matches('#instance-page [data-inst-del-nobackup]') && pageCtx) {
+        document.querySelector('#instance-page [data-inst-del-nobackup-warn]').hidden = !t.checked;
+        document.querySelector('#instance-page [data-inst-delete]').innerHTML = deleteButtonText(pageCtx.id, t.checked);
+        return;
+      }
       const pane = t.closest('#instance-page [data-ipane="logs"]');
       if (pane && pageCtx && (t.matches('[data-log-service-pick]') || t.matches('[data-log-lines-pick]'))) {
         if (t.matches('[data-log-service-pick]')) pane.dataset.logService = t.value;
