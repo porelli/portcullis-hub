@@ -232,8 +232,8 @@ func TestDeleteBackupRacesDelete(t *testing.T) {
 
 // TestDeleteBackupRefusedWhenNeeded (review M3): an archive state still
 // names is 409 even with no operation running — an interrupted restore's
-// pre-restore backup, a restore into a new id's source, a move's archive
-// — and so is the one a pending core restore names.
+// pre-restore backup, a restore into a new id's source, a move's archive.
+// (The pending core mail restore: TestDeleteBackupRefusedForPendingCoreRestore.)
 func TestDeleteBackupRefusedWhenNeeded(t *testing.T) {
 	f, _, _ := grafanaB(t)
 	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
@@ -271,5 +271,31 @@ func TestDeleteBackupRefusedWhenNeeded(t *testing.T) {
 	}
 	if err := f.h.DeleteBackup(a, a, directory.Human("root")); err != nil {
 		t.Errorf("delete once nothing needs it = %v", err)
+	}
+}
+
+// TestDeleteBackupRefusedForPendingCoreRestore (review M3): the archive a
+// pending core mail restore names is 409, and while its pending file
+// can't be read no backup is deleted at all.
+func TestDeleteBackupRefusedForPendingCoreRestore(t *testing.T) {
+	f, _, _ := grafanaB(t)
+	entry, err := f.h.BackupInstance("grafana-b", directory.Human("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := entry.Archive
+	pending := filepath.Join(f.data, mailRestorePendingFile)
+	os.MkdirAll(filepath.Dir(pending), 0700)
+	writeFile(t, pending, a+"\n")
+	if err := f.h.DeleteBackup(a, a, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "pending core restore") {
+		t.Errorf("named by the pending restore: %v, want 409", err)
+	}
+	writeFile(t, pending, "garbage")
+	if err := f.h.DeleteBackup(a, a, directory.Human("root")); statusOf(err) != 409 || !strings.Contains(err.Error(), "can't be read") {
+		t.Errorf("unreadable pending file: %v, want 409", err)
+	}
+	os.Remove(pending)
+	if err := f.h.DeleteBackup(a, a, directory.Human("root")); err != nil {
+		t.Errorf("no pending restore: %v", err)
 	}
 }

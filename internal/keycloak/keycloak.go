@@ -212,6 +212,22 @@ func (c *Client) findClient(ctx context.Context, token, clientID string) (*goclo
 	return nil, fmt.Errorf("client %s: %w", clientID, ErrClientNotFound)
 }
 
+// ClientExists reports whether a client with clientId exists (any owner).
+func (c *Client) ClientExists(ctx context.Context, clientID string) (bool, error) {
+	tok, err := c.token(ctx)
+	if err != nil {
+		return false, err
+	}
+	_, err = c.findClient(ctx, tok, clientID)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrClientNotFound):
+		return false, nil
+	}
+	return false, err
+}
+
 // ClientIDsOwnedBy are the clientIds of every client tagged with owner
 // (OwnerAttr): an instance's clients when nothing else records them.
 func (c *Client) ClientIDsOwnedBy(ctx context.Context, owner string) ([]string, error) {

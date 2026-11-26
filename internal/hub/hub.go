@@ -295,6 +295,10 @@ type Hub struct {
 	// same archive never overlap.
 	archiveMu     sync.Mutex
 	archiveLeases map[string]int
+	// testHookAdoptRegistered, if set, runs in adoptTemplateEnvAdditions
+	// after the registrations, before the .env write; an error ends it
+	// there (a simulated crash).
+	testHookAdoptRegistered func(id string) error
 	// startedAt: when each instance last started cleanly (startUp, under
 	// mu): runtime gids read before it are not judged (H11 M6).
 	startedAt map[string]time.Time
@@ -624,9 +628,12 @@ type Hub struct {
 	// project's containers (from their Traefik labels), as last seen by
 	// Reconcile.
 	runtimeHosts map[string][]string
-	driftKey     map[string]string
-	kick         chan struct{}
-	bindRoots    []string // validated OverrideBindRoots
+	// runtimeMailWK: per app project, what the Hub's own mail well-known
+	// router routes (mailWKRoutes; review N8), as last seen by Reconcile.
+	runtimeMailWK map[string]mailWKRoutes
+	driftKey      map[string]string
+	kick          chan struct{}
+	bindRoots     []string // validated OverrideBindRoots
 
 	// ops: each app's last lifecycle operation (mirrors <data>/ops).
 	opsMu sync.Mutex
@@ -1463,6 +1470,7 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	for id, hosts := range h.runtimeHosts {
 		runtime[id] = hosts
 	}
+	mailWK := maps.Clone(h.runtimeMailWK)
 	h.driftMu.Unlock()
 
 	h.mu.RLock()
@@ -1557,19 +1565,13 @@ func (h *Hub) writePolicy() (attrsWritten bool, retErr error) {
 	// also enabled ones whose containers still route hosts outside their
 	// config — old hostnames after a SetHosts whose restart failed, hosts
 	// outside a missing template's snapshot. Build skips claimed hosts.
-	// The wired mail provider's mail well-known hosts are the Hub's own
-	// router's (portcullis-mail-wellknown, contract §5: core-owned, no
-	// group-gate): known config, never denied as unknown.
-	var wellknown map[string]bool
-	if mp := h.st.Mail.Provider; mp != nil {
-		wellknown = map[string]bool{}
-		for _, x := range h.mailWellknownHostsLocked() {
-			wellknown[strings.ToLower(x)] = true
-		}
-	}
+	// The Hub's own mail well-known router (portcullis-mail-wellknown,
+	// contract §5: core-owned, no group-gate) is known config, never
+	// denied as unknown — exactly its hosts (mailWellknownExemptLocked).
+	exempt := h.mailWellknownExemptLocked(mailWK)
 	for id, rh := range runtime {
-		if mp := h.st.Mail.Provider; mp != nil && mp.Instance == id {
-			rh = slices.DeleteFunc(slices.Clone(rh), func(x string) bool { return wellknown[strings.ToLower(x)] })
+		if ex := exempt[id]; len(ex) > 0 {
+			rh = slices.DeleteFunc(slices.Clone(rh), func(x string) bool { return ex[strings.ToLower(x)] })
 		}
 		if hosts := hostSet(rh, coreHosts); len(hosts) > 0 {
 			apps = append(apps, policy.App{ID: id, Enabled: true, Deny: true, Hosts: hosts})

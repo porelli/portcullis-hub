@@ -749,7 +749,7 @@ func (h *Hub) deleteSteps(stopCtx context.Context, p *Progress, id string, actor
 
 	// 6. Files, ops record, state; policy and portal.
 	p.Start(StepFiles)
-	for _, p := range []string{h.envPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id), h.relayEnvPath(id), h.relayComposePath(id)} {
+	for _, p := range []string{h.envPath(id), h.pendingEnvPath(id), h.overridePath(id), h.userOverridePath(id), h.opPath(id), h.hostsOpPath(id), h.relayEnvPath(id), h.relayComposePath(id)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("removing %s: %w", p, err)
 		}

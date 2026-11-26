@@ -757,18 +757,46 @@ func (h *Hub) gateIP() string {
 	return ip.String()
 }
 
+// clientFinder is the IdP's optional client lookup (keycloak.Client): does
+// a client with that clientId exist? adoptTemplateEnvAdditions uses it
+// to never rotate a live client's secret before a start (review N2).
+type clientFinder interface {
+	ClientExists(ctx context.Context, clientID string) (bool, error)
+}
+
+// pendingEnvPath is where a start keeps the values a template update
+// added while it registers their Keycloak clients (0600, like the .env):
+// a start that dies before the .env write reuses them, so a client it
+// registered is reconciled with the same secret (review N1).
+func (h *Hub) pendingEnvPath(id string) string { return h.envPath(id) + ".pending" }
+
 // adoptTemplateEnvAdditions brings a template update to an instance whose
-// .env already exists (contract §2, "Template updates"): every manifest
-// env entry the file lacks is written (a generate: random one with a
-// fresh value; nothing existing changes), and every Keycloak client whose
-// secret_env is among them — a client the template added — is registered
-// (the AI page's ai_client through its own path) and its access role
-// ensured before anything starts, so the app never runs with a secret
-// Keycloak doesn't know. A failed registration takes the new variables
-// out again (the next start retries from scratch) and refuses the start:
-// 409 for a client someone else owns, else 502. Without Keycloak the
-// variables are written, as an enable without Keycloak does. Outside mu
-// (it takes it); the caller holds the instance's app lock.
+// .env already exists (contract §2, "Template updates"), before anything
+// starts:
+//
+//  1. every manifest env entry the .env lacks gets a value in memory (a
+//     generate: random one a fresh one — or the one an unfinished
+//     earlier start kept in the pending file —, any other "");
+//  2. each Keycloak client whose secret_env is one of them is registered
+//     with exactly that value (the AI page's ai_client through its own
+//     path) and the instance's access role ensured;
+//  3. only then are the values written to the .env (and the pending file
+//     removed).
+//
+// The values are kept in the pending file (0600) between 1 and 3, so a
+// crash after a registration and before the write reuses them at the
+// next start: the registration is repeated with the same secret
+// (idempotent). The .env never holds a secret Keycloak wasn't given, and
+// no failure needs an undo: the start is refused (409 a client someone
+// else owns or one whose secret would change under the running app, 502
+// otherwise; a Stop stays a Stop) and the next one retries with the same
+// values. A client that already exists in Keycloak and isn't one an
+// unfinished earlier start registered (its secret_env renamed by the
+// update) is refused 409 before anything is registered or written: its
+// secret would change in Keycloak while the running app still uses the
+// old one (review N2; disable and enable to apply it). Without Keycloak
+// the values are written, as at enable. Outside mu (it takes it); the
+// caller holds the instance's app lock.
 func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Template) error {
 	h.mu.Lock()
 	live := t
@@ -776,19 +804,20 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 		c := *l
 		live = &c
 	}
-	path := h.envPath(live.ID)
+	path, pend := h.envPath(live.ID), h.pendingEnvPath(live.ID)
 	if _, err := os.Stat(path); err != nil {
 		h.mu.Unlock()
 		return nil // not generated yet: enable writes it whole
 	}
 	cur := readEnvRaw(path)
+	kept := readEnvRaw(pend)
 	added := map[string]string{}
 	for _, v := range live.Manifest.Env {
 		if _, ok := cur[v.Key]; ok {
 			continue
 		}
-		val := ""
-		if v.Generate == "random" {
+		val, ok := kept[v.Key]
+		if !ok && v.Generate == "random" {
 			s, err := randomSecret()
 			if err != nil {
 				h.mu.Unlock()
@@ -799,14 +828,11 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 		added[v.Key] = val
 	}
 	if len(added) == 0 {
+		// Written by an earlier start that died before removing its file.
+		os.Remove(pend)
 		h.mu.Unlock()
 		return nil
 	}
-	if err := setEnvVars(path, added, false); err != nil {
-		h.mu.Unlock()
-		return statusErr(500, "writing the variables the template added: %v", err)
-	}
-	h.mu.Unlock()
 	keys := slices.Sorted(maps.Keys(added))
 	var regs []templates.KeycloakClient
 	for _, c := range live.Manifest.Clients {
@@ -817,63 +843,91 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 		}
 	}
 	if len(regs) == 0 || h.idp == nil {
+		err := setEnvVars(path, added, false)
+		if err == nil {
+			os.Remove(pend)
+		}
+		h.mu.Unlock()
+		if err != nil {
+			return statusErr(500, "writing the variables the template added: %v", err)
+		}
 		log.Printf("instance %s: the template added %s: written to its .env", live.ID, strings.Join(keys, ", "))
 		return nil
 	}
-	undo := func(cause error) error {
-		h.mu.Lock()
-		rerr := removeEnvKeys(path, keys)
-		h.mu.Unlock()
-		if rerr != nil {
-			log.Printf("instance %s: taking out the variables the template added failed: %v", live.ID, rerr)
+	h.mu.Unlock()
+	// A live client whose secret would change (N2): refused before
+	// anything is registered or written.
+	if f, ok := h.idp.(clientFinder); ok {
+		for _, c := range regs {
+			exists, err := f.ClientExists(ctx, c.ClientID)
+			if err != nil {
+				return &StatusError{Status: 502, Err: fmt.Errorf("%s was not started: looking up Keycloak client %s, which the template gives a new secret variable: %w", live.ID, c.ClientID, err)}
+			}
+			if _, ours := kept[c.SecretEnv]; exists && !ours {
+				return statusErr(409, "%s was not started: the template gives its existing Keycloak client %s a new secret variable %s; registering it now would change the client's secret in Keycloak while the running app still uses the old one — disable and enable %s to apply the change", live.ID, c.ClientID, c.SecretEnv, live.ID)
+			}
 		}
-		return cause
+	}
+	// The values survive a crash from here on (reused at the next start).
+	h.mu.Lock()
+	err := writeEnvFile(pend, added)
+	h.mu.Unlock()
+	if err != nil {
+		return statusErr(500, "keeping the variables the template added: %v", err)
 	}
 	var names []string
 	for _, c := range regs {
-		var err error
+		secret := added[c.SecretEnv]
 		if c.AIClient {
-			_, err = h.ensureInstanceAIClient(ctx, live)
+			_, err = h.ensureInstanceAIClientSecret(ctx, live, secret)
 		} else {
-			_, err = h.idp.RegisterClient(ctx, h.clientSpec(live, c))
+			spec := h.clientSpec(live, c)
+			spec.Secret = secret
+			_, err = h.idp.RegisterClient(ctx, spec)
 		}
 		var conflict *keycloak.ConflictError
 		switch {
 		case errors.As(err, &conflict):
-			return undo(&StatusError{Status: 409, Err: fmt.Errorf("%s was not started: the template added Keycloak client %s, which isn't this instance's: %w", live.ID, c.ClientID, err)})
+			return &StatusError{Status: 409, Err: fmt.Errorf("%s was not started: the template added Keycloak client %s, which isn't this instance's: %w", live.ID, c.ClientID, err)}
 		case err != nil:
-			return undo(&StatusError{Status: 502, Err: fmt.Errorf("%s was not started: the template added Keycloak client %s and registering it failed (the new variables were not kept; starting again retries): %v", live.ID, c.ClientID, err)})
+			return &StatusError{Status: 502, Err: fmt.Errorf("%s was not started: the template added Keycloak client %s and registering it failed (starting again retries with the same values): %w", live.ID, c.ClientID, err)}
 		}
 		names = append(names, c.ClientID)
 	}
 	if err := h.ensureAccess(ctx, live); err != nil {
-		return undo(&StatusError{Status: 502, Err: fmt.Errorf("%s was not started: the access role of the Keycloak clients the template added: %v", live.ID, err)})
+		return &StatusError{Status: 502, Err: fmt.Errorf("%s was not started: the access role of the Keycloak clients the template added: %w", live.ID, err)}
 	}
-	log.Printf("instance %s: the template added %s: written to its .env; Keycloak clients %s registered", live.ID, strings.Join(keys, ", "), strings.Join(names, ", "))
+	if h.testHookAdoptRegistered != nil {
+		if err := h.testHookAdoptRegistered(live.ID); err != nil {
+			return err // a simulated crash: registered, not written
+		}
+	}
+	h.mu.Lock()
+	// Only what is still missing (nothing else writes these keys, but a
+	// value already there always wins).
+	now := readEnvRaw(path)
+	for k := range added {
+		if _, ok := now[k]; ok {
+			delete(added, k)
+		}
+	}
+	err = setEnvVars(path, added, false)
+	if err == nil {
+		os.Remove(pend)
+	}
+	h.mu.Unlock()
+	if err != nil {
+		return statusErr(500, "writing the variables the template added (their clients are registered; starting again finishes it): %v", err)
+	}
+	log.Printf("instance %s: the template added %s: Keycloak clients %s registered, then written to its .env", live.ID, strings.Join(keys, ", "), strings.Join(names, ", "))
 	return nil
 }
 
-// removeEnvKeys drops every line of keys from envFile (the env overrides'
-// block untouched).
-func removeEnvKeys(envFile string, keys []string) error {
-	data, err := os.ReadFile(envFile)
-	if err != nil {
-		return err
+// writeEnvFile writes vars as a whole env file (0600, sorted).
+func writeEnvFile(path string, vars map[string]string) error {
+	lines := make([]string, 0, len(vars))
+	for _, k := range slices.Sorted(maps.Keys(vars)) {
+		lines = append(lines, envLine(k, vars[k], false))
 	}
-	drop := map[string]bool{}
-	for _, k := range keys {
-		drop[k] = true
-	}
-	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-	lines, block := splitEnvOverrides(lines)
-	out := make([]string, 0, len(lines)+len(block))
-	for _, line := range lines {
-		k, _, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if ok && drop[k] {
-			continue
-		}
-		out = append(out, line)
-	}
-	out = append(out, block...)
-	return fsutil.WriteFileAtomic(envFile, []byte(strings.Join(out, "\n")+"\n"), 0600)
+	return fsutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")+"\n"), 0600)
 }

@@ -289,6 +289,7 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	counts := map[string]projectCount{}
 	servicesSeen := map[string]map[string]bool{} // instance id → service name → seen
 	routed := map[string]map[string]bool{}
+	mailWK := map[string]mailWKRoutes{}
 	havePublic := map[string]bool{}
 	type running struct {
 		id, service string
@@ -323,13 +324,28 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 		for k, v := range c.Labels {
 			// Folded like Traefik's decoder (case-insensitive, ſ → s): a
 			// container's rule is a rule whatever the key's case.
-			if fk := templates.FoldKey(k); !strings.HasPrefix(fk, "traefik.http.routers.") || !strings.HasSuffix(fk, ".rule") {
+			fk := templates.FoldKey(k)
+			if !strings.HasPrefix(fk, "traefik.http.routers.") || !strings.HasSuffix(fk, ".rule") {
 				continue
 			}
 			hosts, unparsed := templates.RuntimeHosts(v)
 			for _, host := range hosts {
 				routed[id][host] = true
 			}
+			// The Hub's mail well-known router apart (review N8).
+			r := mailWK[id]
+			if r.byService == nil {
+				r = mailWKRoutes{byService: map[string][]string{}, other: map[string]bool{}}
+			}
+			if fk == "traefik.http.routers."+MailWellknownRouter+".rule" {
+				svc := c.Labels[docker.LabelService]
+				r.byService[svc] = append(r.byService[svc], hosts...)
+			} else {
+				for _, host := range hosts {
+					r.other[strings.ToLower(host)] = true
+				}
+			}
+			mailWK[id] = r
 			if len(unparsed) > 0 {
 				log.Printf("reconcile: %s: %s: cannot derive hostnames from %v — denying only the hosts found (%v)", id, k, unparsed, hosts)
 			}
@@ -633,7 +649,9 @@ func (h *Hub) Reconcile(ctx context.Context) DriftReport {
 	}
 	h.driftMu.Lock()
 	routesChanged := !reflect.DeepEqual(runtime, h.runtimeHosts) && !(len(runtime) == 0 && len(h.runtimeHosts) == 0)
+	routesChanged = routesChanged || !reflect.DeepEqual(mailWK, h.runtimeMailWK) && !(len(mailWK) == 0 && len(h.runtimeMailWK) == 0)
 	h.runtimeHosts = runtime
+	h.runtimeMailWK = mailWK
 	h.driftMu.Unlock()
 	if routesChanged {
 		h.writePolicyLogged()

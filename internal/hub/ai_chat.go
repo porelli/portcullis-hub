@@ -660,6 +660,13 @@ func (h *Hub) instanceAIClientSpec(t *templates.Template, c templates.KeycloakCl
 // Never under mu. created: this call created the client in Keycloak (an
 // enable writes it to its Created ledger).
 func (h *Hub) ensureInstanceAIClient(ctx context.Context, t *templates.Template) (created bool, err error) {
+	return h.ensureInstanceAIClientSecret(ctx, t, "")
+}
+
+// ensureInstanceAIClientSecret is ensureInstanceAIClient with the client's
+// secret given (a template update's new value, not yet in the .env); ""
+// = the .env's.
+func (h *Hub) ensureInstanceAIClientSecret(ctx context.Context, t *templates.Template, secret string) (created bool, err error) {
 	c := instanceAIClient(t)
 	if c == nil {
 		return false, nil
@@ -673,6 +680,9 @@ func (h *Hub) ensureInstanceAIClient(ctx context.Context, t *templates.Template)
 		err = errors.New("Keycloak: the AI client calls are not configured")
 	} else {
 		spec := h.instanceAIClientSpec(t, *c, a)
+		if secret != "" {
+			spec.Secret = secret
+		}
 		h.aiKCMu.Lock()
 		if err = kc.EnsureMCPScope(ctx, all); err != nil {
 			err = fmt.Errorf("Keycloak: client scope %s: %w", all.Name, err)

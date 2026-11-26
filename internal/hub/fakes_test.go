@@ -485,6 +485,10 @@ type fakeIdP struct {
 	// clients: the clients Keycloak has (RegisterClient adds, DeleteClient
 	// removes); RegisterClient reports created for one not listed.
 	clients map[string]bool
+	// registerFail: per client id, RegisterClient fails with it; findErr:
+	// ClientExists fails with it.
+	registerFail map[string]error
+	findErr      error
 	// registerHook, if set, runs at the end of RegisterClient (the
 	// client made), without f.mu.
 	registerHook func(clientID string)
@@ -737,11 +741,24 @@ func (f *fakeIdP) accessCalls() []string {
 	return append([]string(nil), f.access...)
 }
 
+// ClientExists: the client is in clients (clientFinder).
+func (f *fakeIdP) ClientExists(ctx context.Context, clientID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.findErr != nil {
+		return false, f.findErr
+	}
+	return f.clients[clientID], nil
+}
+
 func (f *fakeIdP) RegisterClient(ctx context.Context, s keycloak.ClientSpec) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.registerErr != nil {
 		return false, f.registerErr
+	}
+	if err := f.registerFail[s.ClientID]; err != nil {
+		return false, err
 	}
 	f.specs = append(f.specs, s)
 	f.registered = append(f.registered, fmt.Sprintf("%s:%s:%s:%s", s.ClientID, s.TemplateID, s.Secret, strings.Join(s.AllowedHosts, ",")))

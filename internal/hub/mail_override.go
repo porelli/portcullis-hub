@@ -777,3 +777,48 @@ func (h *Hub) mailPersistUpMode(id string, mode mailMode, ok bool) {
 		h.saveLocked()
 	}
 }
+
+// mailWKRoutes is what one app project's containers route through the
+// Hub's mail well-known router (review N8): byService, each compose
+// service's hosts on the label
+// traefik.http.routers.portcullis-mail-wellknown.rule; other, every host
+// any other router of the project routes (lowercase).
+type mailWKRoutes struct {
+	byService map[string][]string
+	other     map[string]bool
+}
+
+// mailWellknownExemptLocked is, per instance, the routed hosts the policy
+// file never denies as unknown config: only for the wired mail provider,
+// only in normal mode (the router exists only there), only the hosts the
+// portcullis-mail-wellknown rule of its manifest's mail.wellknown.service
+// container routes, only those mailWellknownHostsLocked names, and none
+// another router of the project also routes. Caller holds mu (read).
+func (h *Hub) mailWellknownExemptLocked(routes map[string]mailWKRoutes) map[string]map[string]bool {
+	p := h.st.Mail.Provider
+	if p == nil || h.mailModeLocked(p.Instance) != mailNormal {
+		return nil
+	}
+	t := h.findLocked(p.Instance)
+	if t == nil || t.Manifest.Mail == nil || t.Manifest.Mail.Wellknown.Service == "" {
+		return nil
+	}
+	r, ok := routes[p.Instance]
+	if !ok {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, x := range h.mailWellknownHostsLocked() {
+		want[strings.ToLower(x)] = true
+	}
+	ex := map[string]bool{}
+	for _, x := range r.byService[t.Manifest.Mail.Wellknown.Service] {
+		if x = strings.ToLower(x); want[x] && !r.other[x] {
+			ex[x] = true
+		}
+	}
+	if len(ex) == 0 {
+		return nil
+	}
+	return map[string]map[string]bool{p.Instance: ex}
+}
