@@ -3,11 +3,16 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/runtime"
 )
 
 // chatWithAdditions is v2ChatManifest after a template update: a new
@@ -498,5 +503,145 @@ func TestTemplateUpdateAIClient(t *testing.T) {
 	}
 	if _, ok := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_SECRET"]; ok {
 		t.Error("the ai_client's secret was written after a failed ensure")
+	}
+}
+
+// TestProjectMayRun (review S2): only exited and dead — and created for a
+// Docker or Podman container that never started — count as down; a
+// Kubernetes "created" (a starting pod), Podman's "stopping" and any
+// unknown state count as running; no container is down.
+func TestProjectMayRun(t *testing.T) {
+	f := newInstanceFixture(t, nil)
+	set := func(states ...string) {
+		f.engine.mu.Lock()
+		f.engine.containers = nil
+		for i, st := range states {
+			f.engine.containers = append(f.engine.containers, container(fmt.Sprintf("c%d", i), "portcullis-grafana", "web", st))
+		}
+		f.engine.mu.Unlock()
+	}
+	for _, c := range []struct {
+		runtime runtime.Kind
+		states  []string
+		want    bool
+	}{
+		{"", nil, false},
+		{"", []string{"exited", "dead"}, false},
+		{"", []string{"created", "exited"}, false},
+		{runtime.KindPodman, []string{"created"}, false},
+		{runtime.KindKubernetes, []string{"created"}, true},
+		{runtime.KindKubernetes, []string{"exited"}, false},
+		{runtime.KindPodman, []string{"stopping"}, true},
+		{"", []string{"exited", "removing"}, true},
+		{"", []string{"something-new"}, true},
+		{"", []string{"running"}, true},
+		{"", []string{"paused"}, true},
+	} {
+		f.h.cfg.Runtime = c.runtime
+		set(c.states...)
+		got, err := f.h.projectMayRun(context.Background(), "grafana")
+		if err != nil || got != c.want {
+			t.Errorf("%s %v: projectMayRun = %v %v, want %v", c.runtime, c.states, got, err, c.want)
+		}
+	}
+	f.h.cfg.Runtime = ""
+}
+
+// TestTemplateUpdateRenamedSecretStoppingRefused (review S2): a
+// container in a state that isn't clearly down (Podman's "stopping")
+// counts as running: the rename is refused 409.
+func TestTemplateUpdateRenamedSecretStoppingRefused(t *testing.T) {
+	f := chatBRunning(t)
+	f.engine.mu.Lock()
+	for i := range f.engine.containers {
+		if f.engine.containers[i].Project() == "portcullis-chat-b" {
+			f.engine.containers[i].State = "stopping"
+		}
+	}
+	f.engine.mu.Unlock()
+	f.h.mu.RLock()
+	live := *f.h.findLocked("chat-b")
+	f.h.mu.RUnlock()
+	if err := f.h.adoptTemplateEnvAdditions(context.Background(), &live); statusOf(err) != 409 {
+		t.Errorf("adopt over a stopping container = %v, want 409", err)
+	}
+}
+
+// TestTemplateUpdateRenamedUntaggedClient (review S1): an untagged
+// existing client (one RegisterClient would adopt) is checked like this
+// instance's: 409 while the app runs, never a silent rotation.
+func TestTemplateUpdateRenamedUntaggedClient(t *testing.T) {
+	f := chatBRunning(t)
+	f.idp.mu.Lock()
+	f.idp.owners = map[string]string{"chat-b": ""}
+	f.idp.mu.Unlock()
+	n := len(f.idp.specs)
+	if err := f.h.RestartApp("chat-b"); statusOf(err) != 409 || !strings.Contains(err.Error(), "still uses the old one") {
+		t.Errorf("restart = %v, want the 409", err)
+	}
+	if len(f.idp.specs) != n {
+		t.Error("an untagged client was rotated under the running app")
+	}
+}
+
+// TestTemplateUpdateGarbagePendingFile (review S4): an unreadable pending
+// file is ignored: the values are generated again and no client counts
+// as kept-for, so a renamed live client is still refused while it runs,
+// and a new client still gets registered and written.
+func TestTemplateUpdateGarbagePendingFile(t *testing.T) {
+	f := chatBRunning(t)
+	writeFile(t, f.h.pendingEnvPath("chat-b"), "CHAT_SECRET2=kept\nnot json")
+	if err := f.h.RestartApp("chat-b"); statusOf(err) != 409 {
+		t.Errorf("restart = %v, want 409", err)
+	}
+	g := chatB(t)
+	writeFile(t, g.src+"/chat/manifest.yaml", chatWithAdditions)
+	g.h.Discover()
+	writeFile(t, g.h.pendingEnvPath("chat-b"), "{garbage")
+	if err := g.h.RestartApp("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	if v := readEnvFile(g.h.envPath("chat-b"))["CHAT_EXTRA_SECRET"]; len(v) != 32 || extraSecret(g) != v {
+		t.Errorf("env %q, registered %q", v, extraSecret(g))
+	}
+}
+
+// TestTemplateUpdateAIClientNoGeneratedValue (review R3, S4): an
+// existing ai_client whose secret_env the update renames to a variable
+// with no generated value is skipped — no running check, no 409 over the
+// running app, nothing ensured, no rotation logged — and the start goes
+// on with the variable written empty (unhealthy, as at enable).
+func TestTemplateUpdateAIClientNoGeneratedValue(t *testing.T) {
+	_, c := hubAIRealm(t)
+	a := chatFixture23(t, nil)
+	a.h.SetAIKeycloak(c)
+	a.selectProviders(t, "ai-chat", "ollama-gpu")
+	a.enable(t, "ai-chat")
+	simulateCompose(a.fixture, 0)
+	if err := a.h.RestartApp("ai-chat"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := a.h.projectRunning(context.Background(), "ai-chat"); !r {
+		t.Fatal("ai-chat doesn't run")
+	}
+	p := filepath.Join(a.src, "ai-chat", "manifest.yaml")
+	m := strings.Replace(readFile(t, p), "    secret_env: CHAT_MCP_SECRET\n", "    secret_env: CHAT_MCP_PLAIN\n", 1)
+	m = strings.Replace(m, "  - key: CHAT_MCP_SECRET\n    generate: random\n", "  - key: CHAT_MCP_SECRET\n    generate: random\n  - key: CHAT_MCP_PLAIN\n", 1)
+	writeFile(t, p, m)
+	a.h.Discover()
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	if err := a.h.RestartApp("ai-chat"); err != nil {
+		t.Fatalf("restart = %v (a skipped ai_client must not refuse the start)", err)
+	}
+	if v, ok := readEnvFile(a.h.envPath("ai-chat"))["CHAT_MCP_PLAIN"]; !ok || v != "" {
+		t.Errorf("CHAT_MCP_PLAIN = %q %v, want written empty", v, ok)
+	}
+	if strings.Contains(logs.String(), "rotated before the start") {
+		t.Errorf("a skipped ai_client was logged as rotated:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "no generated value: not registered") {
+		t.Errorf("the skip isn't logged:\n%s", logs.String())
 	}
 }

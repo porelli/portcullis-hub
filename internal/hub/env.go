@@ -20,6 +20,7 @@ import (
 	"github.com/portcullis/hub/internal/directory"
 	"github.com/portcullis/hub/internal/fsutil"
 	"github.com/portcullis/hub/internal/keycloak"
+	"github.com/portcullis/hub/internal/runtime"
 	"github.com/portcullis/hub/internal/settings"
 	"github.com/portcullis/hub/internal/state"
 	"github.com/portcullis/hub/internal/templates"
@@ -808,25 +809,33 @@ func (h *Hub) pendingEnvPath(id string) string { return h.envPath(id) + ".pendin
 //
 //  1. every manifest env entry the .env lacks gets a value in memory (a
 //     generate: random one a fresh one — or the one an unfinished
-//     earlier start kept in the pending file —, any other "");
+//     earlier start kept in the pending file for the same client —, any
+//     other "");
 //  2. each Keycloak client whose secret_env is one of them is registered
 //     with exactly that value (the AI page's ai_client through its own
-//     path) and the instance's access role ensured;
+//     path; one with no generated value is skipped, unhealthy as at
+//     enable) and the instance's access role ensured;
 //  3. only then are the values written to the .env (and the pending file
 //     removed).
 //
-// The values are kept in the pending file (0600) between 1 and 3, so a
-// crash after a registration and before the write reuses them at the
-// next start: the registration is repeated with the same secret
-// (idempotent). The .env never holds a secret Keycloak wasn't given, and
-// no failure needs an undo: the start is refused (409 a client someone
-// else owns or one whose secret would change under the running app, 502
+// Between 1 and 3 the values are kept in the pending file (JSON, 0600:
+// each value with the client id it is for), so a crash after a
+// registration and before the write reuses them at the next start: the
+// registration is repeated with the same secret (idempotent). The .env
+// never holds a secret Keycloak wasn't given, and no failure needs an
+// undo: the start is refused (409 a client another owner holds, 502
 // otherwise; a Stop stays a Stop) and the next one retries with the same
-// values. A client that already exists in Keycloak and isn't one an
-// unfinished earlier start registered (its secret_env renamed by the
-// update) is refused 409 before anything is registered or written: its
-// secret would change in Keycloak while the running app still uses the
-// old one (review N2; disable and enable to apply it). Without Keycloak
+// values.
+//
+// A client that already exists in Keycloak, tagged with this instance or
+// untagged (what RegisterClient would reconcile), and that no unfinished
+// earlier start kept a value for (its secret_env renamed by the update)
+// is rotated only when none of the app's containers may run
+// (projectMayRun: only exited / dead — and created outside Kubernetes —
+// count as down; any other or unknown state, or an engine that can't
+// answer, counts as running): a stop-then-start or a start of a stopped
+// app rotates it, a restart or drift apply over running containers is
+// refused 409 before anything is registered or written. Without Keycloak
 // the values are written, as at enable. Outside mu (it takes it); the
 // caller holds the instance's app lock.
 func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Template) error {
@@ -900,15 +909,22 @@ func (h *Hub) adoptTemplateEnvAdditions(ctx context.Context, t *templates.Templa
 	if f, ok := h.idp.(clientFinder); ok {
 		var running *bool
 		for _, c := range regs {
+			if c.AIClient && added[c.SecretEnv] == "" {
+				continue // never registered here (S4): nothing would rotate
+			}
 			exists, owner, err := f.ClientOwner(ctx, c.ClientID)
 			if err != nil {
 				return &StatusError{Status: 502, Err: fmt.Errorf("%s was not started: looking up Keycloak client %s, which the template gives a new secret variable: %w", live.ID, c.ClientID, err)}
 			}
-			if !exists || owner != live.ID || pk.Clients[c.SecretEnv] == c.ClientID {
+			if !exists || (owner != live.ID && owner != "") || pk.Clients[c.SecretEnv] == c.ClientID {
+				// Missing (a new client), another owner's (RegisterClient's
+				// conflict answers, R5) or one this update already kept a
+				// value for. An untagged one is what RegisterClient would
+				// adopt and reconcile: checked like ours (S1).
 				continue
 			}
 			if running == nil {
-				r, rerr := h.projectRunning(ctx, live.ID)
+				r, rerr := h.projectMayRun(ctx, live.ID)
 				if rerr != nil {
 					if cerr := ctx.Err(); cerr != nil {
 						return fmt.Errorf("checking whether %s runs: %w", live.ID, cerr)
@@ -998,4 +1014,34 @@ func writePendingEnv(path string, p pendingEnv) error {
 		return err
 	}
 	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0600)
+}
+
+// projectMayRun reports whether any container of id's project may be
+// running (the rename rotation's check, review S2): only "exited" and
+// "dead" — and "created" for a Docker or Podman container that never
+// started — count as down; every other or unknown state counts as
+// running (Kubernetes' "created" is a starting pod; a placed instance's
+// worker runtime isn't known here, so its "created" counts too). A pod or
+// container that is gone isn't listed.
+func (h *Hub) projectMayRun(ctx context.Context, id string) (bool, error) {
+	cs, err := h.rtOf(id).List(ctx, runtime.Filter{Instance: id})
+	if err != nil {
+		return false, err
+	}
+	createdIsDown := !h.kubeOn() && h.serverOf(id) == ""
+	for _, c := range cs {
+		if c.Project != projectName(id) {
+			continue
+		}
+		switch c.State {
+		case "exited", "dead":
+			continue
+		case "created":
+			if createdIsDown {
+				continue
+			}
+		}
+		return true, nil
+	}
+	return false, nil
 }
