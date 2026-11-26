@@ -40,6 +40,16 @@ func senderAppCompose(id string) string {
 // (enabled) and fxoff (never enabled).
 func newSenderFixture(t *testing.T) *mailFixture {
 	t.Helper()
+	f := newSenderFixtureOff(t)
+	if err := f.h.Enable("fxapp"); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// newSenderFixtureOff: newSenderFixture with neither instance enabled.
+func newSenderFixtureOff(t *testing.T) *mailFixture {
+	t.Helper()
 	apps := map[string]map[string]string{}
 	for _, id := range []string{"fxapp", "fxoff"} {
 		apps[id] = map[string]string{"manifest.yaml": senderAppManifest, "compose.yml": senderAppCompose(id)}
@@ -49,9 +59,6 @@ func newSenderFixture(t *testing.T) *mailFixture {
 		t.Fatal("the sender template didn't load (see the log)")
 	}
 	f.h.SetAudit(&fakeAudit{})
-	if err := f.h.Enable("fxapp"); err != nil {
-		t.Fatal(err)
-	}
 	return f
 }
 
@@ -168,8 +175,10 @@ func TestSenderEnvWired(t *testing.T) {
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf(".env mode %v (%v)", fi.Mode(), err)
 	}
-	if owedOf(f, "fxapp") != settings.EffectRestart {
-		t.Fatalf("no restart owed after the new password: %q", owedOf(f, "fxapp"))
+	// Made by the enable before the first start (enableSender): that
+	// start had it, so no restart is owed for it.
+	if owedOf(f, "fxapp") != "" {
+		t.Fatalf("a restart owed for the password the first start already had: %q", owedOf(f, "fxapp"))
 	}
 	// The password is masked like a secret and redacted from records.
 	if !SecretEnvNames(f.h.Template("fxapp"))[templates.VarMailSenderPassword] {
@@ -403,11 +412,14 @@ func TestSenderNoMailboxLeak(t *testing.T) {
 }
 
 func TestSendHubMailUnwired(t *testing.T) {
-	f := newSenderFixture(t)
+	f := newSenderFixtureOff(t)
 	if err := f.h.SendHubMail(context.Background(), "alice@example.org", "x", "y"); err != ErrNoHubSender {
 		t.Fatalf("no credential yet: %v", err)
 	}
 	f.sync(t)
+	if err := f.h.Enable("fxapp"); err != nil {
+		t.Fatal(err)
+	}
 	setCoreMail(t, f.fixture, false)
 	if err := f.h.SendHubMail(context.Background(), "alice@example.org", "x", "y"); err != ErrNoHubSender {
 		t.Fatalf("mail off: %v", err)
@@ -598,5 +610,85 @@ func TestSenderKicksAndGates(t *testing.T) {
 	f.h.mu.RUnlock()
 	if len(got) != 0 {
 		t.Fatalf("unwired on Kubernetes: %v", got)
+	}
+}
+
+// The first start of a mail_sender instance already has its sender
+// (§19.14, enableSender): an app that refuses to start without the five
+// PORTCULLIS_MAIL_SENDER_* values (firefox-sync-fxa's fxa-mail-check)
+// could otherwise never be enabled, since senders exist only for enabled
+// instances. Mail off: nothing is waited for (the app decides). A
+// provider that gives no password: the enable fails before any start and
+// the instance stays disabled, with no sender wanted.
+func TestSenderReadyAtFirstStart(t *testing.T) {
+	f := newSenderFixtureOff(t)
+	atUp := map[string]map[string]string{}
+	up := f.runner.upHook
+	f.runner.upHook = func(p string) {
+		id := strings.TrimPrefix(p, ProjectPrefix)
+		if _, seen := atUp[id]; !seen {
+			atUp[id] = readEnvFile(f.h.envPath(id))
+		}
+		if up != nil {
+			up(p)
+		}
+	}
+	if err := f.h.Enable("fxapp"); err != nil {
+		t.Fatal(err)
+	}
+	env := atUp["fxapp"]
+	if env == nil {
+		t.Fatal("fxapp never started")
+	}
+	if env[templates.VarMailSenderHost] != "mail.example.org" || env[templates.VarMailSenderUser] != "portcullis-app-fxapp@example.org" ||
+		env[templates.VarMailSenderPassword] == "" || env[templates.VarMailSenderPassword] != lastSecret(f, "portcullis-app-fxapp") {
+		t.Fatalf("the first start's sender values: host %q user %q password set %v", env[templates.VarMailSenderHost],
+			env[templates.VarMailSenderUser], env[templates.VarMailSenderPassword] != "")
+	}
+	if !f.h.IsEnabled("fxapp") || owedOf(f, "fxapp") != "" {
+		t.Fatalf("enabled %v, owed %q", f.h.IsEnabled("fxapp"), owedOf(f, "fxapp"))
+	}
+	f.h.mu.RLock()
+	pending := len(f.h.senderEnabling)
+	f.h.mu.RUnlock()
+	if pending != 0 {
+		t.Fatalf("senderEnabling kept %d entries", pending)
+	}
+	// Kept as an enabled instance's sender.
+	f.sync(t)
+	if got := f.mc.Creds("portcullis-app-fxapp"); len(got) != 1 {
+		t.Fatalf("after the next pass: %+v", got)
+	}
+
+	// Mail off: started at once with the five empty.
+	setCoreMail(t, f.fixture, false)
+	if err := f.h.Enable("fxoff"); err != nil {
+		t.Fatal(err)
+	}
+	if env := atUp["fxoff"]; env == nil || env[templates.VarMailSenderPassword] != "" || env[templates.VarMailSenderHost] != "" {
+		t.Fatalf("fxoff with mail off: %v", env)
+	}
+}
+
+func TestSenderNotReadyRefusesEnable(t *testing.T) {
+	defer func(w, p time.Duration) { senderEnableWait, senderEnablePoll = w, p }(senderEnableWait, senderEnablePoll)
+	senderEnableWait, senderEnablePoll = 300*time.Millisecond, 20*time.Millisecond
+	f := newSenderFixtureOff(t)
+	started := false
+	f.runner.upHook = func(p string) { started = started || p == ProjectPrefix+"fxapp" }
+	f.mc.Close() // the provider answers nothing
+	err := f.h.Enable("fxapp")
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != 503 || !strings.Contains(err.Error(), "portcullis-app-fxapp") {
+		t.Fatalf("enable with no sender password: %v", err)
+	}
+	if started || f.h.IsEnabled("fxapp") {
+		t.Fatalf("started %v, enabled %v", started, f.h.IsEnabled("fxapp"))
+	}
+	f.h.mu.RLock()
+	_, wanted := f.h.senderWantedLocked()["fxapp"]
+	f.h.mu.RUnlock()
+	if wanted {
+		t.Fatal("the failed enable's sender is still wanted")
 	}
 }

@@ -689,6 +689,14 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 			return false, err
 		}
 	}
+	// An app sending through the mail provider gets its sender before
+	// its first start (§19.14): its .env (written below) then carries the
+	// five PORTCULLIS_MAIL_SENDER_* values.
+	senderDone, err := h.enableSender(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	defer senderDone()
 	members := h.groupSnapshot(id)
 	h.mu.Lock()
 	t := h.findLocked(id)

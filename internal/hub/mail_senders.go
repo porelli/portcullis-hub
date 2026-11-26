@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -87,7 +88,11 @@ func (h *Hub) senderWantedLocked() map[string]string {
 	if h.mailCore().On {
 		out[state.MailSenderHub] = senderHubLabel
 	}
-	for _, id := range h.st.Enabled {
+	ids := slices.Clone(h.st.Enabled)
+	for id := range h.senderEnabling {
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
 		t := h.findLocked(id)
 		if t == nil || t.Manifest.MailSender == nil || h.kubeOn() || !appSenderKey(id) {
 			continue
@@ -98,6 +103,83 @@ func (h *Hub) senderWantedLocked() map[string]string {
 		out[id] = t.Manifest.MailSender.Label
 	}
 	return out
+}
+
+// senderEnableWait bounds how long an enable waits for its instance's
+// sender (enableSender); senderEnablePoll is the pause between two of its
+// passes (variables for the tests).
+var (
+	senderEnableWait = 3 * time.Minute
+	senderEnablePoll = 2 * time.Second
+)
+
+// enableSender prepares the sender of instance id before its first start
+// (contract §19.14): an app that sends its mail through the provider may
+// refuse to start without the five PORTCULLIS_MAIL_SENDER_* values
+// (firefox-sync-fxa's fxa-mail-check), and senders exist only for
+// enabled instances, so the first start would always fail and the
+// instance never become enabled. While a provider is wired and mail is
+// on, the instance's sender is wanted from now on (senderEnabling) and
+// mail passes run here until it has a password (written into its .env
+// by ensureSenderCredentialWith), within senderEnableWait. done ends
+// that (the enable's commit makes the instance wanted as enabled; a
+// failed enable drops the sender at the next pass). Nothing to do (no
+// mail_sender, mail off or unwired, Kubernetes, already enabled): done
+// is a no-op and the start goes on as before (the app decides).
+func (h *Hub) enableSender(ctx context.Context, id string) (done func(), err error) {
+	h.mu.Lock()
+	t := h.findLocked(id)
+	if t == nil || t.Manifest.MailSender == nil || h.kubeOn() || !appSenderKey(id) ||
+		!senderUsernameRe.MatchString(senderUsername(id)) || h.st.Mail.Provider == nil ||
+		h.st.IsEnabled(id) || !h.mailCore().On {
+		h.mu.Unlock()
+		return func() {}, nil
+	}
+	if h.senderEnabling == nil {
+		h.senderEnabling = map[string]bool{}
+	}
+	h.senderEnabling[id] = true
+	ready := h.storedSenderLocked(id) != nil
+	h.mu.Unlock()
+	done = func() {
+		h.mu.Lock()
+		delete(h.senderEnabling, id)
+		enabled := h.st.IsEnabled(id)
+		h.mu.Unlock()
+		if !enabled {
+			// Not started after all: its sender goes at the next pass.
+			h.TriggerMailSync()
+		}
+	}
+	deadline := time.Now().Add(senderEnableWait)
+	for !ready {
+		pctx, cancel := context.WithTimeout(ctx, mailSyncTimeout)
+		h.mailSyncOnce(pctx)
+		cancel()
+		h.mu.RLock()
+		ready = h.storedSenderLocked(id) != nil
+		h.mu.RUnlock()
+		if ready {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			done()
+			return func() {}, err
+		}
+		if time.Now().After(deadline) {
+			done()
+			return func() {}, statusErr(http.StatusServiceUnavailable,
+				"%s sends its mail through the mail provider, which gave its mail sender (%s) no password within %s: not started (see Settings → Mail and the doctor)",
+				id, senderUsername(id), senderEnableWait)
+		}
+		select {
+		case <-ctx.Done():
+			done()
+			return func() {}, ctx.Err()
+		case <-time.After(senderEnablePoll):
+		}
+	}
+	return done, nil
 }
 
 // kickMailSendersLocked triggers a mail sync when the enabled
