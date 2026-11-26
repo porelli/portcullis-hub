@@ -1271,8 +1271,8 @@ func (h *Hub) Discover() {
 }
 
 // claimTierLocked ranks a template's default instance for Discover's
-// claims: 2 enabled, 1 any other state in state.yaml or an ops record, 0
-// none (a newcomer). Caller must hold mu.
+// claims: 2 enabled, 1 any other state in state.yaml or an ops record
+// (not a finished delete's), 0 none (a newcomer). Caller must hold mu.
 func (h *Hub) claimTierLocked(id string) int {
 	if h.st.IsEnabled(id) {
 		return 2
@@ -1285,8 +1285,10 @@ func (h *Hub) claimTierLocked(id string) int {
 	_, g := h.st.SignInMode[id]
 	_, i := h.st.Instances[id]
 	h.opsMu.Lock()
-	_, o := h.ops[id]
+	r, o := h.ops[id]
 	h.opsMu.Unlock()
+	// A finished delete's record is no state: the instance is gone.
+	o = o && !deletedRecord(r)
 	if a || c || d || e || f || g || i || o {
 		return 1
 	}

@@ -243,9 +243,22 @@ func (h *Hub) instanceTemplateLocked(id string) string {
 	return ""
 }
 
+// keepsListed: ops holds a record for id that keeps a default instance
+// with no state entry listed — any but a finished, successful delete's.
+// That record outlives the instance (§11.7: its outcome stays readable)
+// but the instance is gone (§11.4: the template stays in the catalog,
+// nothing is installed).
+func keepsListed(ops map[string]OpRecord, id string) bool {
+	r, ok := ops[id]
+	return ok && !deletedRecord(r)
+}
+
+// deletedRecord: r is a finished, successful delete's (or forget's) record.
+func deletedRecord(r OpRecord) bool { return r.Op == OpDelete && r.OK && !r.Running }
+
 // Instances lists every instance, sorted by id: the default instance of
-// each template that is enabled or has a lifecycle record, and every
-// instance in state.
+// each template that is enabled or has a lifecycle record (not a
+// finished delete's: keepsListed), and every instance in state.
 func (h *Hub) Instances() []InstanceView {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -259,8 +272,7 @@ func (h *Hub) Instances() []InstanceView {
 	for i := range h.instances {
 		t := &h.instances[i]
 		e, inState := h.st.Instances[t.ID]
-		_, hasOp := ops[t.ID]
-		if t.IsDefault() && !t.Enabled && !hasOp && !inState {
+		if t.IsDefault() && !t.Enabled && !inState && !keepsListed(ops, t.ID) {
 			continue
 		}
 		v := h.instanceViewLocked(t)
