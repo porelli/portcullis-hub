@@ -176,6 +176,23 @@ func (f fsys) writeInPlace(path string, data []byte) error {
 	return nil
 }
 
+// magicClose opens a watchdog device, writes the magic close character and
+// closes it: the kernel stops a watchdog that allows it (nowayout 0).
+func (f fsys) magicClose(path string) error {
+	fh, err := os.OpenFile(f.p(path), os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", path, unwrapPath(err))
+	}
+	_, err = fh.Write([]byte("V"))
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", path, unwrapPath(err))
+	}
+	return nil
+}
+
 func (f fsys) remove(path string) error {
 	err := os.Remove(f.p(path))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

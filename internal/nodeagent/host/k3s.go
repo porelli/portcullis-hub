@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -613,6 +614,7 @@ func (a *Agent) Uninstall(ctx context.Context) {
 				}
 			}
 		}
+		a.disarmWatchdogs(ctx)
 		a.probe.stop()
 		a.removeMesh(ctx)
 		for _, p := range []string{MeshKeyFile, "/etc/wireguard/pcmesh.conf", "/etc/systemd/system/k3s.service.d/10-pcmesh.conf",
@@ -633,3 +635,48 @@ func (a *Agent) Uninstall(ctx context.Context) {
 }
 
 func defaultExit() { os.Exit(0) }
+
+// disarmWatchdogs: the uninstall script kills every container, SNR's agent
+// with them, and SNR's agent holds the node's watchdog armed: killed, it
+// never writes the magic close, so the kernel reset the machine one
+// timeout later (e2e-ha-vm run 10: "watchdog did not stop!", vm4 reset
+// 60 s after its removal). Each watchdog sysfs says active and nowayout 0
+// is opened once nothing holds it (a few tries while the killed holder
+// goes), given the magic close ('V') and closed, which stops it. An idle
+// one is never opened (opening arms it); a nowayout one can't be stopped
+// and is only named. Best effort: the removal is done either way.
+func (a *Agent) disarmWatchdogs(ctx context.Context) {
+	dirs, _ := filepath.Glob(a.fs.p("/sys/class/watchdog/watchdog*"))
+	for _, d := range dirs {
+		name := filepath.Base(d)
+		sys := "/sys/class/watchdog/" + name
+		if a.fs.readTrim(sys+"/state") != "active" {
+			continue
+		}
+		if nw := a.fs.readTrim(sys + "/nowayout"); nw != "0" {
+			a.log.Warn("a watchdog stays armed (nowayout): this machine resets when it expires", "watchdog", name,
+				"timeout_s", a.fs.readTrim(sys+"/timeout"))
+			continue
+		}
+		var err error
+		for try := 0; try < watchdogTries; try++ {
+			if err = a.fs.magicClose("/dev/" + name); err == nil || !errors.Is(err, syscall.EBUSY) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(watchdogRetry):
+			}
+		}
+		if err != nil {
+			a.log.Warn("a watchdog couldn't be stopped: this machine resets when it expires", "watchdog", name, "err", err.Error())
+			continue
+		}
+		a.log.Info("the watchdog SNR's agent left armed is stopped", "watchdog", name)
+	}
+}
+
+var (
+	watchdogTries = 10
+	watchdogRetry = time.Second
+)

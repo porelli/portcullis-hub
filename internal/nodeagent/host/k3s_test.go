@@ -286,6 +286,43 @@ func TestUninstall(t *testing.T) {
 	}
 }
 
+// TestUninstallDisarmsWatchdog (e2e-ha-vm run 10: the removed node reset
+// 60 s after its removal, SNR's agent killed with its watchdog armed): an
+// active, nowayout-0 watchdog gets the magic close; an idle one is never
+// opened (opening arms it); a nowayout one is left alone.
+func TestUninstallDisarmsWatchdog(t *testing.T) {
+	r := newRig(t, "agent")
+	writeFile(t, r.root, "/usr/local/bin/k3s-agent-uninstall.sh", "#!/bin/sh\n", 0o755)
+	for name, st := range map[string][2]string{"watchdog0": {"active", "0"}, "watchdog1": {"inactive", "0"}, "watchdog2": {"active", "1"}} {
+		writeFile(t, r.root, "/sys/class/watchdog/"+name+"/state", st[0]+"\n", 0o444)
+		writeFile(t, r.root, "/sys/class/watchdog/"+name+"/nowayout", st[1]+"\n", 0o444)
+		writeFile(t, r.root, "/sys/class/watchdog/"+name+"/timeout", "60\n", 0o444)
+		writeFile(t, r.root, "/dev/"+name, "", 0o600)
+	}
+	r.a.cfg.Exit = func() {}
+	r.a.Uninstall(context.Background())
+	for name, want := range map[string]string{"watchdog0": "V", "watchdog1": "", "watchdog2": ""} {
+		b, err := os.ReadFile(filepath.Join(r.root, "/dev/"+name))
+		if err != nil || string(b) != want {
+			t.Errorf("%s: %q (%v), want %q", name, b, err, want)
+		}
+	}
+}
+
+// TestDisarmWatchdogNoDevice: an active watchdog whose device can't be
+// opened is only logged; the uninstall still finishes.
+func TestDisarmWatchdogNoDevice(t *testing.T) {
+	r := newRig(t, "agent")
+	writeFile(t, r.root, "/sys/class/watchdog/watchdog0/state", "active\n", 0o444)
+	writeFile(t, r.root, "/sys/class/watchdog/watchdog0/nowayout", "0\n", 0o444)
+	exited := false
+	r.a.cfg.Exit = func() { exited = true }
+	r.a.Uninstall(context.Background())
+	if !exited {
+		t.Error("the uninstall didn't finish")
+	}
+}
+
 // TestEtcdGatewayPort (found live): the JSON gateway is k3s's HTTP
 // listener 127.0.0.1:2382, never 2379 (gRPC only under k3s v1.37.2).
 func TestEtcdGatewayPort(t *testing.T) {
