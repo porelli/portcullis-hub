@@ -213,11 +213,15 @@ type Snapshot struct {
 	TakenAt   string      `json:"taken_at"`
 	Nodes     []Node      `json:"nodes"`
 	Enrolling []Enrolling `json:"enrolling"`
-	Pods      []Pod       `json:"pods"`
-	Quorum    Quorum      `json:"quorum"`
-	Postgres  Postgres    `json:"postgres"`
-	Volumes   []Volume    `json:"volumes"`
-	Errors    []string    `json:"errors"`
+	// ReservedMeshIPs: the mesh addresses of removed nodes nodeadm still
+	// holds (until the admission params let them go): its code issue
+	// refuses them, so the allocator skips them.
+	ReservedMeshIPs []string `json:"reserved_mesh_ips"`
+	Pods            []Pod    `json:"pods"`
+	Quorum          Quorum   `json:"quorum"`
+	Postgres        Postgres `json:"postgres"`
+	Volumes         []Volume `json:"volumes"`
+	Errors          []string `json:"errors"`
 }
 
 // Node is the snapshot's node name (nil: none).

@@ -89,7 +89,7 @@ func TestNodeadmClientDropsDeadConnection(t *testing.T) {
 	var h2 atomic.Bool
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h2.Store(r.ProtoMajor == 2)
-		io.WriteString(w, `{"v":1,"taken_at":"t","nodes":[],"enrolling":[],"pods":[],"quorum":{"etcd":{"voters":1,"healthy":1},"vault":{"voters":1,"healthy":1},"sentinel":{"voters":1,"healthy":1}},"postgres":{"instances":1,"sync_standbys":0,"primary":null},"volumes":[],"errors":[]}`)
+		io.WriteString(w, `{"v":1,"taken_at":"t","nodes":[],"enrolling":[],"reserved_mesh_ips":[],"pods":[],"quorum":{"etcd":{"voters":1,"healthy":1},"vault":{"voters":1,"healthy":1},"sentinel":{"voters":1,"healthy":1}},"postgres":{"instances":1,"sync_standbys":0,"primary":null},"volumes":[],"errors":[]}`)
 	}))
 	srv.EnableHTTP2 = true
 	srv.StartTLS()

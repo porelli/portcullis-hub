@@ -1015,3 +1015,31 @@ func TestRevokeOutlivesItsCaller(t *testing.T) {
 		t.Errorf("audit %v", a)
 	}
 }
+
+// TestAllocMeshIPSkipsReserved (Task 33 part B, VM run 6): a removed
+// node's mesh address that nodeadm still holds (its snapshot's
+// reserved_mesh_ips, until the admission params let it go) is never
+// offered to the next node: nodeadm's code issue would refuse it ("mesh
+// ip … is used by …"; seen: node add right after node remove got the
+// removed node's address and a 409).
+func TestAllocMeshIPSkipsReserved(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true))
+	snap := nodeadm.Snapshot{V: 1, Nodes: []nodeadm.Node{serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true)},
+		ReservedMeshIPs: []string{"10.215.0.3", "10.215.0.5"}}
+	cf.h.mu.Lock()
+	got, err := cf.h.allocMeshIPLocked(snap)
+	cf.h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "10.215.0.4" {
+		t.Fatalf("allocated %s, want 10.215.0.4 (.1 and .2 nodes, .3 reserved by a removed node)", got)
+	}
+	snap.ReservedMeshIPs = nil
+	cf.h.mu.Lock()
+	got, err = cf.h.allocMeshIPLocked(snap)
+	cf.h.mu.Unlock()
+	if err != nil || got != "10.215.0.3" {
+		t.Fatalf("with nothing reserved: allocated %s (%v), want 10.215.0.3", got, err)
+	}
+}

@@ -373,7 +373,9 @@ func (h *Hub) clusterSuggestInputLocked(snap nodeadm.Snapshot) []servers.Cluster
 }
 
 // allocMeshIP: the lowest free host address of 10.215.0.0/24 (.1–.254)
-// that no node, enrolling node or listed server holds. Caller holds mu.
+// that no node, enrolling node or listed server holds, nor a removed node
+// whose record nodeadm still keeps (its code issue refuses that address
+// until the admission params let it go). Caller holds mu.
 func (h *Hub) allocMeshIPLocked(snap nodeadm.Snapshot) (string, error) {
 	used := map[string]bool{}
 	for _, n := range snap.Nodes {
@@ -381,6 +383,9 @@ func (h *Hub) allocMeshIPLocked(snap nodeadm.Snapshot) (string, error) {
 	}
 	for _, e := range snap.Enrolling {
 		used[e.MeshIP] = true
+	}
+	for _, a := range snap.ReservedMeshIPs {
+		used[a] = true
 	}
 	for _, s := range h.st.Servers {
 		if s.MeshIP != "" {

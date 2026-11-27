@@ -173,7 +173,7 @@ func TestNodeadmClientFenced(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if r.Method == http.MethodGet {
-			w.Write([]byte(`{"v":1,"taken_at":"t","nodes":[],"enrolling":[],"pods":[],"quorum":{"etcd":{"voters":1,"healthy":1},"vault":{"voters":1,"healthy":1},"sentinel":{"voters":1,"healthy":1}},"postgres":{"instances":1,"sync_standbys":0,"primary":null},"volumes":[],"errors":[]}`))
+			w.Write([]byte(`{"v":1,"taken_at":"t","nodes":[],"enrolling":[],"reserved_mesh_ips":[],"pods":[],"quorum":{"etcd":{"voters":1,"healthy":1},"vault":{"voters":1,"healthy":1},"sentinel":{"voters":1,"healthy":1}},"postgres":{"instances":1,"sync_standbys":0,"primary":null},"volumes":[],"errors":[]}`))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
