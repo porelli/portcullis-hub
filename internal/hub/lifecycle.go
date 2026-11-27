@@ -692,7 +692,26 @@ func (h *Hub) enableInner(ctx context.Context, id string, restoring bool) (rolle
 	// An app sending through the mail provider gets its sender before
 	// its first start (§19.14): its .env (written below) then carries the
 	// five PORTCULLIS_MAIL_SENDER_* values.
-	senderDone, err := h.enableSender(ctx, id)
+	senderDone, err := h.enableSender(ctx, id, func() error {
+		// The enable's own refusals below, before any sender is made.
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		t := h.findLocked(id)
+		if t == nil {
+			return statusErr(400, "app instance not found: %s", id)
+		}
+		tmpl := *t
+		if err := h.pendingLocked(id); err != nil && !restoring {
+			return err
+		}
+		if err := h.checkPortCollisionsLocked(&tmpl); err != nil {
+			return err
+		}
+		if err := h.checkSubdomainCollisionsLocked(&tmpl); err != nil {
+			return err
+		}
+		return h.fixedChoicesErrLocked(&tmpl)
+	})
 	if err != nil {
 		return false, err
 	}

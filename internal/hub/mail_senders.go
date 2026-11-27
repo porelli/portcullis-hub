@@ -106,11 +106,12 @@ func (h *Hub) senderWantedLocked() map[string]string {
 }
 
 // senderEnableWait bounds how long an enable waits for its instance's
-// sender (enableSender); senderEnablePoll is the pause between two of its
-// passes (variables for the tests).
+// sender (enableSender); its passes are senderEnablePoll apart at first,
+// doubling up to senderEnablePollMax (variables for the tests).
 var (
-	senderEnableWait = 3 * time.Minute
-	senderEnablePoll = 2 * time.Second
+	senderEnableWait    = 3 * time.Minute
+	senderEnablePoll    = 2 * time.Second
+	senderEnablePollMax = 30 * time.Second
 )
 
 // enableSender prepares the sender of instance id before its first start
@@ -119,22 +120,36 @@ var (
 // (firefox-sync-fxa's fxa-mail-check), and senders exist only for
 // enabled instances, so the first start would always fail and the
 // instance never become enabled. While a provider is wired and mail is
-// on, the instance's sender is wanted from now on (senderEnabling) and
-// mail passes run here until it has a password (written into its .env
-// by ensureSenderCredentialWith), within senderEnableWait. done ends
-// that (the enable's commit makes the instance wanted as enabled; a
-// failed enable drops the sender at the next pass). Nothing to do (no
-// mail_sender, mail off or unwired, Kubernetes, already enabled): done
-// is a no-op and the start goes on as before (the app decides).
-func (h *Hub) enableSender(ctx context.Context, id string) (done func(), err error) {
+// on, precheck (the enable's own refusals, so a 409 comes back at once
+// and no sender is made for it) runs first; then the instance's sender
+// is wanted from now on (senderEnabling) and mail passes run here until
+// it has a password (written into its .env by
+// ensureSenderCredentialWith), within senderEnableWait, backing off
+// between passes. A pass carries everyone's pending changes (a removal
+// and its restart, §19.5), so it runs to its end whatever the enable's
+// ctx says (mail_wire.go's rule): a Stop ends the wait between passes.
+// done ends it all (the enable's commit makes the instance wanted as
+// enabled; a failed enable drops the sender at the next pass). Nothing
+// to do (no mail_sender, mail off or unwired, Kubernetes, already
+// enabled): done is a no-op and the start goes on as before (the app
+// decides).
+func (h *Hub) enableSender(ctx context.Context, id string, precheck func() error) (done func(), err error) {
+	noop := func() {}
 	h.mu.Lock()
 	t := h.findLocked(id)
 	if t == nil || t.Manifest.MailSender == nil || h.kubeOn() || !appSenderKey(id) ||
 		!senderUsernameRe.MatchString(senderUsername(id)) || h.st.Mail.Provider == nil ||
 		h.st.IsEnabled(id) || !h.mailCore().On {
 		h.mu.Unlock()
-		return func() {}, nil
+		return noop, nil
 	}
+	h.mu.Unlock()
+	if precheck != nil {
+		if err := precheck(); err != nil {
+			return noop, err
+		}
+	}
+	h.mu.Lock()
 	if h.senderEnabling == nil {
 		h.senderEnabling = map[string]bool{}
 	}
@@ -151,9 +166,14 @@ func (h *Hub) enableSender(ctx context.Context, id string) (done func(), err err
 			h.TriggerMailSync()
 		}
 	}
+	stopped := func() (func(), error) {
+		done()
+		return noop, fmt.Errorf("stopped while waiting for the mail sender %s: %w", senderUsername(id), ctx.Err())
+	}
 	deadline := time.Now().Add(senderEnableWait)
+	poll := senderEnablePoll
 	for !ready {
-		pctx, cancel := context.WithTimeout(ctx, mailSyncTimeout)
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mailSyncTimeout)
 		h.mailSyncOnce(pctx)
 		cancel()
 		h.mu.RLock()
@@ -162,22 +182,26 @@ func (h *Hub) enableSender(ctx context.Context, id string) (done func(), err err
 		if ready {
 			break
 		}
-		if err := ctx.Err(); err != nil {
-			done()
-			return func() {}, err
+		if ctx.Err() != nil {
+			return stopped()
 		}
-		if time.Now().After(deadline) {
+		left := time.Until(deadline)
+		if left <= 0 {
 			done()
-			return func() {}, statusErr(http.StatusServiceUnavailable,
-				"%s sends its mail through the mail provider, which gave its mail sender (%s) no password within %s: not started (see Settings → Mail and the doctor)",
-				id, senderUsername(id), senderEnableWait)
+			why := ""
+			if b := h.MailSyncBlocked(); b != "" {
+				why = "; mail's sync is held: " + b
+			}
+			return noop, statusErr(http.StatusServiceUnavailable,
+				"%s sends its mail through the mail provider, which gave its mail sender (%s) no password within %s%s: not started (see Settings → Mail and the doctor)",
+				id, senderUsername(id), senderEnableWait, why)
 		}
 		select {
 		case <-ctx.Done():
-			done()
-			return func() {}, ctx.Err()
-		case <-time.After(senderEnablePoll):
+			return stopped()
+		case <-time.After(min(poll, left)):
 		}
+		poll = min(2*poll, senderEnablePollMax)
 	}
 	return done, nil
 }

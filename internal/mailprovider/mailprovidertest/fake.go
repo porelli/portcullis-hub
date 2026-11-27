@@ -66,6 +66,9 @@ type Server struct {
 	Created []string
 	// RevokeStatus: DELETE /v1/credentials answers it instead (0: 204).
 	RevokeStatus int
+	// CreateStatus: POST /v1/credentials answers it instead (0: the
+	// normal answer).
+	CreateStatus int
 	// Deletes: every DELETE /v1/credentials ("<uuid> <id>").
 	Deletes []string
 	// OmitRemoved: the mass-removal 409 carries no "removed" list.
@@ -738,6 +741,10 @@ func (s *Server) createCred(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := strict(r, &body); err != nil {
 		errJSON(w, 400, "bad body")
+		return
+	}
+	if s.CreateStatus != 0 {
+		errJSON(w, s.CreateStatus, "refused (test)")
 		return
 	}
 	now := s.Now()

@@ -671,8 +671,8 @@ func TestSenderReadyAtFirstStart(t *testing.T) {
 }
 
 func TestSenderNotReadyRefusesEnable(t *testing.T) {
-	defer func(w, p time.Duration) { senderEnableWait, senderEnablePoll = w, p }(senderEnableWait, senderEnablePoll)
-	senderEnableWait, senderEnablePoll = 300*time.Millisecond, 20*time.Millisecond
+	defer func(w, p, m time.Duration) { senderEnableWait, senderEnablePoll, senderEnablePollMax = w, p, m }(senderEnableWait, senderEnablePoll, senderEnablePollMax)
+	senderEnableWait, senderEnablePoll, senderEnablePollMax = 300*time.Millisecond, 20*time.Millisecond, 80*time.Millisecond
 	f := newSenderFixtureOff(t)
 	started := false
 	f.runner.upHook = func(p string) { started = started || p == ProjectPrefix+"fxapp" }
@@ -690,5 +690,66 @@ func TestSenderNotReadyRefusesEnable(t *testing.T) {
 	f.h.mu.RUnlock()
 	if wanted {
 		t.Fatal("the failed enable's sender is still wanted")
+	}
+}
+
+// A Stop during the enable's sender wait never cuts the mail pass it
+// runs: that pass carries everyone's pending changes. Here bob leaves
+// mail_users while the enable waits; the provider takes its time to
+// apply; the Stop comes mid-pass. The pass still waits for the apply (as
+// long as any pass) and restarts mail after the removal (§19.5), with
+// an ok op record, and only then does the enable return "stopped".
+func TestSenderWaitStopKeepsPass(t *testing.T) {
+	f := newSenderFixtureOff(t)
+	f.sync(t)
+	f.h.mailState.applyWait = 800 * time.Millisecond
+	// No sender password ever comes (the wait goes on until the Stop).
+	f.mc.Lock(func(s *mailprovidertest.Server) { s.HoldApply, s.CreateStatus = true, 503 })
+	f.people.setMembers(MailUsersGroup, "alice", "root")
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	start := time.Now()
+	done, err := f.h.enableSender(ctx, "fxapp", nil)
+	done()
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("enableSender after a Stop: %v", err)
+	}
+	if el := time.Since(start); el < 700*time.Millisecond {
+		t.Fatalf("returned after %s: the pass was cut short", el)
+	}
+	f.h.mailState.reconWG.Wait()
+	if r := f.engine.Restarts(); len(r) != 1 {
+		t.Fatalf("restarts after the removal: %v", r)
+	}
+	if lo := f.h.LastOp(opKeyMail); lo == nil || !lo.OK || lo.Op != OpMailRestart {
+		t.Fatalf("mail's op record: %+v", lo)
+	}
+	if d := f.mc.Last(); d == nil || len(d.Accounts) != 2 {
+		t.Fatalf("the removal wasn't sent: %+v", d)
+	}
+	f.h.mu.RLock()
+	pending := len(f.h.senderEnabling)
+	f.h.mu.RUnlock()
+	if pending != 0 {
+		t.Fatal("senderEnabling kept the stopped enable")
+	}
+}
+
+// The enable's own refusals come first (precheck): an enable that will
+// be refused gets its 409 at once, and no sender is made or wanted.
+func TestSenderPrecheckFirst(t *testing.T) {
+	f := newSenderFixtureOff(t)
+	f.sync(t)
+	puts := f.mc.Puts()
+	refused := statusErr(409, "port 8080 is taken")
+	_, err := f.h.enableSender(context.Background(), "fxapp", func() error { return refused })
+	if err != refused {
+		t.Fatalf("enableSender with a refusing precheck: %v", err)
+	}
+	f.h.mu.RLock()
+	_, wanted := f.h.senderWantedLocked()["fxapp"]
+	f.h.mu.RUnlock()
+	if wanted || f.mc.Puts() != puts || len(f.mc.Creds("portcullis-app-fxapp")) != 0 {
+		t.Fatalf("wanted %v, puts %d → %d, creds %v", wanted, puts, f.mc.Puts(), f.mc.Creds("portcullis-app-fxapp"))
 	}
 }
