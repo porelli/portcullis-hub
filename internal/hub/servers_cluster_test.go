@@ -1047,6 +1047,38 @@ func TestRevokeRecordedBeforeNodeadm(t *testing.T) {
 	}
 }
 
+// TestRevokeCutoffPendingIsParked (core Task 33b security review):
+// nodeadm's 409 cutoff_pending (the server not yet proven cut off) is
+// accepted, parked and never confirmed; the list says why and the way
+// out; once nodeadm finishes, the next pass confirms it.
+func TestRevokeCutoffPendingIsParked(t *testing.T) {
+	const text = "waiting for n3 to be cut off: its Node is Ready; power the machine off (or cut its network) and nodeadm finishes the revoke (retried: ./portcullis node revoke n3)"
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	cf.na.setRefuse("remove:n3:revoke", &nodeadm.APIError{Status: 409, Kind: nodeadm.KindCutoffPending, Text: text})
+	_, parked, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke)
+	if err != nil || parked != text {
+		t.Fatalf("%q %v", parked, err)
+	}
+	s, _ := cf.h.serverEntry("n3")
+	if s.State != ServerRevoked || s.RevokeConfirmed || !s.RevokeWatch {
+		t.Fatalf("entry %+v: want revoked, watched, unconfirmed", s)
+	}
+	var view ServerView
+	for _, v := range cf.h.Servers(context.Background()) {
+		if v.ID == "n3" {
+			view = v
+		}
+	}
+	if view.Error != "revoked; "+text || view.RevokeConfirmed {
+		t.Errorf("view %+v", view)
+	}
+	cf.na.setRefuse("remove:n3:revoke", nil)
+	cf.h.settleClusterNodes(context.Background())
+	if s, _ := cf.h.serverEntry("n3"); !s.RevokeConfirmed || s.RevokeParked != "" {
+		t.Fatalf("after nodeadm finished: %+v", s)
+	}
+}
+
 // TestRevokeFinishedAfterHubDied: the Hub's call to nodeadm dies (the Hub
 // with it) after the record, and the mesh peer's removal was lost; the
 // next pass asks nodeadm again, puts the peer out and confirms.

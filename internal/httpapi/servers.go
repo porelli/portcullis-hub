@@ -578,5 +578,5 @@ func writeRevoked(w http.ResponseWriter, id, parked string) {
 		return
 	}
 	writeJSONStatus(w, http.StatusAccepted, map[string]any{"status": "revoked", "server": id, "parked": true, "warning": parked,
-		"detail": hub.ParkedRevokeText})
+		"detail": hub.ParkedLine(parked)})
 }

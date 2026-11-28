@@ -933,6 +933,17 @@ func (h *Hub) RemoveClusterNode(ctx context.Context, actor directory.Actor, id, 
 // ParkedRevokeText is a parked revocation's line in the list (I1).
 const ParkedRevokeText = "revoked; waiting for quorum to remove its etcd member"
 
+// ParkedLine is the list's line for a parked revocation with nodeadm's
+// text parked: a server not yet proven cut off says so with nodeadm's
+// reasons and the way out (core Task 33b security review), any other the
+// quorum line.
+func ParkedLine(parked string) string {
+	if strings.HasPrefix(parked, "waiting for ") && strings.Contains(parked, " to be cut off") {
+		return "revoked; " + clipRunes(parked, 400)
+	}
+	return ParkedRevokeText
+}
+
 // keepClusterNode puts node id in state st (an init node, listed only by
 // the snapshot, gets its entry from n); parked is a parked revocation's
 // nodeadm text.
@@ -1173,6 +1184,10 @@ func revokeAnswer(err error) (parked string, confirmed bool, _ error) {
 		return "", false, nil // no proof it finished: asked again
 	case errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == nodeadm.KindQuorumMinimum:
 		return ae.Text, true, nil // parked: its security steps are done
+	case errors.As(err, &ae) && ae.Status == http.StatusConflict && ae.Kind == nodeadm.KindCutoffPending:
+		// Its security steps done, the Node kept until nodeadm proves the
+		// machine cut off: accepted, never confirmed (asked again each tick).
+		return ae.Text, false, nil
 	case errors.As(err, &ae) && ae.Status == http.StatusServiceUnavailable && strings.Contains(ae.Text, "goes on in the background"):
 		return ae.Text, false, nil
 	}
@@ -1413,7 +1428,7 @@ func clusterViewFields(v *ServerView, s state.Server) {
 	case s.State == ServerRevoked && s.RevokeVoidOnly:
 		v.Error = VoidedText
 	case s.State == ServerRevoked && s.RevokeParked != "":
-		v.Error = ParkedRevokeText
+		v.Error = ParkedLine(s.RevokeParked)
 	}
 }
 

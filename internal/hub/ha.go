@@ -788,7 +788,7 @@ func (h *Hub) parkedRevokes() []string {
 	var out []string
 	for id, s := range h.st.Servers {
 		if s.ClusterNode() && s.State == ServerRevoked && s.RevokeParked != "" {
-			out = append(out, "node "+id+": "+ParkedRevokeText)
+			out = append(out, "node "+id+": "+ParkedLine(s.RevokeParked))
 		}
 	}
 	sort.Strings(out)

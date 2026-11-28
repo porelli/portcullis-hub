@@ -49,6 +49,10 @@ var (
 // The error kinds callers branch on (§20.2).
 const (
 	KindQuorumMinimum    = "quorum_minimum"
+	// KindCutoffPending: a server's revoke waits until nodeadm has proven
+	// it cut off (NotReady, its Node lease stale, out of every mesh plan)
+	// before it puts the Node out of service (core Task 33b security review).
+	KindCutoffPending = "cutoff_pending"
 	KindReplicaMinimum   = "replica_minimum"
 	KindUnknownNode      = "unknown_node"
 	KindProofInvalid     = "proof_invalid"
