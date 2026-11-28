@@ -602,7 +602,9 @@ func TestRevokeParkedIsAccepted(t *testing.T) {
 		if err != nil || parked != refusal.Text {
 			t.Fatalf("%d: %q %v", refusal.Status, parked, err)
 		}
-		if !slices.Equal(meshGone, []string{"n3"}) {
+		// Removed before nodeadm is asked (recorded first, Task 33b VM run
+		// 15) and again after its answer (idempotent).
+		if !slices.Equal(meshGone, []string{"n3", "n3"}) {
 			t.Errorf("mesh peer removed %v", meshGone)
 		}
 		if s, ok := cf.serverEntry("n3"); !ok || s.State != ServerRevoked {
@@ -1014,6 +1016,79 @@ func TestRevokeOutlivesItsCaller(t *testing.T) {
 	if a := cf.actions(); !slices.Equal(a, []string{"server.revoked:ok"}) {
 		t.Errorf("audit %v", a)
 	}
+}
+
+// TestRevokeRecordedBeforeNodeadm (Task 33b VM run 15, controller
+// ruling): the revoke is recorded durably — the entry revoked and
+// watched, unconfirmed, its mesh peer out — before nodeadm is asked, so a
+// Hub that dies during the call (it ran on the node being revoked) still
+// finishes it.
+func TestRevokeRecordedBeforeNodeadm(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	var at state.Server
+	var meshOut bool
+	cf.na.mu.Lock()
+	cf.na.removeHook = func(ctx context.Context) error {
+		at, _ = cf.h.serverEntry("n3")
+		cf.h.mu.RLock()
+		meshOut = cf.h.st.Mesh["n3"].Removed
+		cf.h.mu.RUnlock()
+		return nil
+	}
+	cf.na.mu.Unlock()
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err != nil {
+		t.Fatal(err)
+	}
+	if at.State != ServerRevoked || !at.RevokeWatch || at.RevokeConfirmed || !meshOut {
+		t.Fatalf("when nodeadm was asked: entry %+v, mesh peer out %v; want revoked, watched, unconfirmed, the peer out", at, meshOut)
+	}
+	if s, _ := cf.h.serverEntry("n3"); !s.RevokeConfirmed {
+		t.Fatalf("not confirmed after nodeadm's answer: %+v", s)
+	}
+}
+
+// TestRevokeFinishedAfterHubDied: the Hub's call to nodeadm dies (the Hub
+// with it) after the record, and the mesh peer's removal was lost; the
+// next pass asks nodeadm again, puts the peer out and confirms.
+func TestRevokeFinishedAfterHubDied(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	cf.na.setRefuse("remove:n3:revoke", &nodeadm.APIError{Status: 502, Text: "connection reset"})
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err == nil {
+		t.Fatal("the failed call answered ok")
+	}
+	s, ok := cf.h.serverEntry("n3")
+	if !ok || s.State != ServerRevoked || !s.RevokeWatch || s.RevokeConfirmed {
+		t.Fatalf("after the failed call: %+v %v; want revoked, watched, unconfirmed", s, ok)
+	}
+	// The peer's removal lost with the Hub.
+	cf.h.mu.Lock()
+	r := cf.h.st.Mesh["n3"]
+	r.Removed = false
+	cf.h.st.Mesh["n3"] = r
+	cf.h.mu.Unlock()
+	cf.na.setRefuse("remove:n3:revoke", nil)
+	cf.h.settleClusterNodes(context.Background())
+	if s, _ := cf.h.serverEntry("n3"); !s.RevokeConfirmed || s.State != ServerRevoked {
+		t.Fatalf("the next pass didn't finish the revoke: %+v", s)
+	}
+	cf.h.mu.RLock()
+	out := cf.h.st.Mesh["n3"].Removed
+	cf.h.mu.RUnlock()
+	if !out {
+		t.Fatal("the next pass left the revoked node's mesh peer in")
+	}
+	if c := cf.na.Calls(); len(slices.DeleteFunc(slices.Clone(c), func(x string) bool { return x != "remove:n3:revoke" })) != 2 {
+		t.Errorf("calls %v: want the revoke asked twice", c)
+	}
+	cf.na.mu.Lock()
+	for id, p := range cf.na.mesh {
+		for _, peer := range p.Peers {
+			if peer.ID == "n3" && id != "n3" {
+				t.Errorf("%s's mesh plan still names n3: %+v", id, p)
+			}
+		}
+	}
+	cf.na.mu.Unlock()
 }
 
 // TestAllocMeshIPSkipsReserved (Task 33 part B, VM run 6): a removed
